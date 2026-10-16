@@ -34,9 +34,8 @@
   sprite, its "flat ui layer" 30 s lines and refusal counters. The holograms
   family is not taken (only one of its seven pairs has camera rows in flat;
   the 13:51 loading-screen ghost): it stays in the frame as before the port.
-- **Removed:** the flat UI census (flat_ui_census.{h,cpp}), a temporary
-  instrument; its target-class and family rules live on in
-  flat_ui_layer_math.h.
+- **Removed:** the flat UI census (flat_ui_census.{h,cpp}); its target-class
+  and family rules live on in flat_ui_layer_math.h.
 - **Known leftovers:**
   - the holograms stay in the frame, through the anti-aliasing (six of seven pairs
     carry no camera rows flat reads: 9B34C331902DC1ED, DF3503CD07F9B10C,
@@ -53,7 +52,8 @@
   (flat only; asked while GuiFocus 6, 7 or 8 is open, on the HDR target) go into the
   flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
   The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
-- **Temporary config keys:** none.
+- **Temporary:** no keys. The back-off trail log lines (10-15, camera-suite
+  HUD loop) go once the loop is fixed.
 - **Next locally:** no repeat flight needed for capture cleanup. The installed
   4b7bfec4 rendering path is verified; cleanup 02f50bd7 is pushed and compiled.
   Keep codex/xess-flat separate pending the user's Windows full build/testing.
@@ -817,3 +817,48 @@ write float targets, so none of them can pass.
 **Flight check.** An EDHM-chained cockpit: `tone-by-shape` above 0, then
 `composites` and `holo-panels ... taken` above 0, and the admitted pair named
 once.
+
+## 2026-10-15: after the camera suite the HDR HUD path backs off forever
+
+**The report.** The same RC1 flat user, with EDHM switched off in its own tool
+(the tone was the named E894, and the layer worked): "once I switch out of
+camera-mode, my HUD becomes smeary". Log edvr_gfx_20261015_140119 (v0.20.0-rc.1,
+flat, FSR, ui_quality 125).
+
+**What the log shows.**
+- 14:03-14:08: the layer took the HUD every frame (3,586 composites in a 30 s
+  window, no refusals).
+- 14:08:49-14:09:20: the camera suite, visible as six `camera-cut=1` resolve
+  resets. At 14:08:53 a cut frame had no tone pass (`no-known-tone-pass` x4),
+  so the taken HUD never reached a tonemap and the HDR HUD path backed off for
+  30 s. That back-off was correct.
+- Every re-arm after that (14:09:23, 14:09:53, 14:10:23, 14:10:53, 14:11:23)
+  backed off again within 15 ms, about two frames, with the same "taken but
+  never came back". The window lines read `state=off`, `copies=1`, 11 HUD asks,
+  to the end of the log. Temporal AA itself treated every frame with valid
+  history throughout.
+- The re-arm frame is healthy: its tone candidate line reads E894, the HUD
+  target at t1 and proof for the next frame. The next frame, whose HUD is taken,
+  logs no tone candidate, no `crisp hud: tonemap re-issue declined` and no
+  unknown-pair probe.
+- The same immediate failures appeared at 14:04:10-14:04:24 while the user
+  switched AA modes, and cleared on their own at 14:04:57.
+
+**Candidates, not yet separated.** In the first frame with a taken HUD, one of:
+- the tone draw fails `sourceTonePhysicalShape` (for example the direct-HUD
+  identity, if it reads a copy of H);
+- it passes, but `uiLayerCrispAdmitFlat` refuses it;
+- the re-issue declines;
+- the HUD is taken from a target no tone reads;
+- the tone draw never reaches the flat runtime's UI block.
+
+**The instrument (branch claude/flat-ui-backoff-trail, log only, temporary).**
+At each back-off of the HDR HUD path it prints two `flat ui layer: back-off
+trail` lines, one for the previous frame and one for the current frame. Each
+gives the HUD asks, takes and refusals, and every tone-shaped draw: its branch,
+the first physical check that failed, the t1 identity, proof, admission and the
+re-issue outcome. At most 12 a session. Remove it once the loop is fixed.
+
+**Flight.** Steam flat, FSR3: about a minute in the cockpit, then the camera
+suite, cycling the interior cameras, then exit and another minute in the
+cockpit.

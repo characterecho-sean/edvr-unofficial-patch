@@ -385,7 +385,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireRenderBoundary ^
     --extra-export edvrAcquireNativeGraphics ^
     --extra-export edvr_selftest_graphics_bridge ^
-    --extra-export edvrFssHealLeft ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrTemporalAaNoteHead ^
@@ -395,7 +394,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
-    --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
@@ -604,7 +602,6 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
-    "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
@@ -635,7 +632,6 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -920,9 +916,25 @@ echo [edvr] === smoke.exe ===
 if not exist "%OBJ%\smoke" mkdir "%OBJ%\smoke"
 %CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\smoke\\" /Fe"%BUILD%\smoke.exe" ^
-    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO kernel32.lib
+    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\smoke.exe
+REM The focused modes run here; until 2026-10-16 this rig only compiled smoke.exe and nothing ran any mode, which is how
+REM advanced.d3d11_fixes = 0 crashed on the first Present for three releases with every gate green. --fixes-off-device presents
+REM frames through a swap chain with the fixes off. All three load build\d3d11.dll, so they run one after another in this
+REM rig (each clears the sentinel it uses first), under this rig's own EDVR_LOG_DIR.
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --fixes-off-device || (
+    echo [edvr] ERROR: smoke --fixes-off-device failed: with the fixes off the proxy must still survive a Present
+    exit /b 1
+)
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --recovery-device || (
+    echo [edvr] ERROR: smoke --recovery-device failed
+    exit /b 1
+)
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --foreign-device || (
+    echo [edvr] ERROR: smoke --foreign-device failed
+    exit /b 1
+)
 exit /b 0
 
 :rig_fakechain
@@ -996,30 +1008,19 @@ if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & e
 "%BUILD%\native_frame_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_native_fss_test
-echo [edvr] === native_fss_test.exe ===
-if not exist "%OBJ%\native_fss" mkdir "%OBJ%\native_fss"
+:rig_fss_reveal_test
+echo [edvr] === fss_reveal_test.exe ===
+REM The FSS reveal fix (src\d3d11\fss_reveal_core.h, fss_reveal_replay.h, fss_reveal.cpp): the pure decisions (a hash-only match on another target is declined, no replay without a recorded downsample,
+REM flat never replays, only the first composite of a frame decides), the real state capture and replay on a WARP device with the debug layer (the state after equals the state before, the constants are
+REM read from a private copy), and source pins on the hook. No DLL, no game, no window.
+if not exist "%OBJ%\fssreveal" mkdir "%OBJ%\fssreveal"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
-    /Fo"%OBJ%\native_fss\\" /Fe"%BUILD%\native_fss_test.exe" ^
-    "tools\native_fss_test\native_fss_test.cpp" "src\d3d11\native_fss.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
-if errorlevel 1 ( echo [edvr] ERROR: native FSS provider test build failed & exit /b 1 )
-"%BUILD%\native_fss_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_fss_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_native_fss_gpu_test
-echo [edvr] === native_fss_gpu_test.exe ===
-if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
-%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
-    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
-    "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
-"%BUILD%\native_fss_gpu_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\fssreveal\\" ^
+    /Fe"%BUILD%\fss_reveal_test.exe" "tools\fss_reveal_test\fss_reveal_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: fss reveal test build failed & exit /b 1 )
+"%BUILD%\fss_reveal_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_reveal_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_native_trim_test
@@ -3571,6 +3572,42 @@ exit /b 0
  "%OBJ%\flatmapbounce\flat_map_bounce_test.exe" --self-test "%ROOT%" || exit /b 1
  python "tools\flat_map_bounce_test\mutants.py" --self-test || exit /b 1
  exit /b 0
+
+:rig_particle_capture_test
+echo [edvr] === particle_capture_test.exe ===
+REM The particle billboards' constants capture and the Unmap readers probe (docs\particle-billboards.md, 2026-10-16), pure halves compiled alone:
+REM src\d3d11\particle_capture_core.h (the shadow keeps rows 270..279 of the mapped scene block, 160 bytes, not 5376; the target's retirement
+REM after 300 frames without a plume or flare, and its re-arm) and src\d3d11\unmap_read_probe.h (calls, bytes, sampled microseconds, "not
+REM exercised"). A counting memcpy shim prices the copy before (the legacy whole-block copy) and after, over every mapped size, with the
+REM rows the fix reads checked byte for byte; the source pins from the repo root hold the wiring (each reader timed once, the boundary
+REM called once). Pure C++: no D3D.
+if not exist "%OBJ%\particlecapture" mkdir "%OBJ%\particlecapture"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" /Fo"%OBJ%\particlecapture"\ ^
+    /Fe"%OBJ%\particlecapture\particle_capture_test.exe" "tools\particle_capture_test\particle_capture_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: particle capture test build failed & exit /b 1 )
+"%OBJ%\particlecapture\particle_capture_test.exe" --dry-run || exit /b 1
+"%OBJ%\particlecapture\particle_capture_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_billboard_rollfree_test
+echo [edvr] === billboard_rollfree_test.exe ===
+REM The roll-free scene block for the camera-facing billboards (src\d3d11\billboard_rollfree.h; docs\billboard-root-cause-2026-10-16.md) on a WARP
+REM device with the D3D debug layer: the basis for any roll (levelled right, the game's lengths and handedness, refused near straight up), the copy
+REM route (CopyResource, a 32-byte UpdateSubresource of a patch buffer, a partial CopySubresourceRegion into the constant-buffer copy) clean under
+REM the debug layer, every byte but rows 277/278 the game's, a real draw whose vertex stage reads the roll-free rows while the pixel stage still reads
+REM the game's block, the unchanged path (the old code) showing the roll, state restored, one copy per write however many draws follow, stock doing
+REM nothing, several blocks, and the source pins from the repo root. Output under obj\ and System32's d3d11 (no d3d11.dll beside the exe).
+if not exist "%OBJ%\billboardrollfree" mkdir "%OBJ%\billboardrollfree"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\billboardrollfree\\" /Fe"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" ^
+    "tools\billboard_rollfree_test\billboard_rollfree_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: billboard rollfree test build failed & exit /b 1 )
+"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --dry-run || exit /b 1
+"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
 
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===

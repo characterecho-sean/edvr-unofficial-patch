@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 namespace edvr {
 
@@ -261,6 +262,217 @@ inline const char* flatUiRefuseName(FlatUiRefuse r) {
     case FlatUiRefuse::kAfterTone: return "after-tone";
     default: return "?";
     }
+}
+
+// The back-off trail (flat profile; log only). flat_ui_layer.cpp keeps one and logs it at each back-off of the HDR HUD path: what the
+// HUD asked in a frame, and what each tone-shaped draw of that frame did (its branch, its physical check, its admission, its
+// re-issue), so the frame before a back-off can be read. Two frames are kept, the current and the one before. Pure: no D3D, no Log.
+enum class FlatUiTrailBranch : uint8_t { kNone = 0, kRegistry, kMap, kNamed, kShape, kCopy, kUnknown, kHudAsk, kCount };
+// sourceTonePhysicalShape's first failing test, in its own order; kPass when every test passed, kNotRun when no test ran.
+enum class FlatUiTrailPhys : uint8_t { kNotRun = 0, kPass, kNoHud, kHash, kStructure, kSlot, kRtv, kShape, kIdentity, kCount };
+enum class FlatUiTrailReissue : uint8_t { kNotArmed = 0, kBegun, kDeclined, kPublished, kCount };
+inline const char* flatUiTrailBranchName(FlatUiTrailBranch b) {
+    switch (b) {
+    case FlatUiTrailBranch::kRegistry: return "registry";
+    case FlatUiTrailBranch::kMap: return "map";
+    case FlatUiTrailBranch::kNamed: return "named";
+    case FlatUiTrailBranch::kShape: return "shape";
+    case FlatUiTrailBranch::kCopy: return "copy";
+    case FlatUiTrailBranch::kUnknown: return "unknown";
+    case FlatUiTrailBranch::kHudAsk: return "hud-ask";
+    default: return "none";
+    }
+}
+inline const char* flatUiTrailPhysName(FlatUiTrailPhys p) {
+    switch (p) {
+    case FlatUiTrailPhys::kPass: return "pass";
+    case FlatUiTrailPhys::kNoHud: return "no-hud";
+    case FlatUiTrailPhys::kHash: return "hash";
+    case FlatUiTrailPhys::kStructure: return "structure";
+    case FlatUiTrailPhys::kSlot: return "slot";
+    case FlatUiTrailPhys::kRtv: return "rtv";
+    case FlatUiTrailPhys::kShape: return "shape";
+    case FlatUiTrailPhys::kIdentity: return "identity";
+    default: return "not-run";
+    }
+}
+// ui_layer.cpp's CrispToneDecline kinds by index, short (its crispToneDeclineName has the full sentences).
+inline const char* flatUiTrailDeclineName(uint8_t d) {
+    static const char* const names[] = {"no-hdr-slot", "no-content", "layer-busy", "second-tonemap", "size", "state-drift", "uav", "layer-failed"};
+    return d < sizeof(names) / sizeof(names[0]) ? names[d] : "?";
+}
+// FlatUiRefuse's codes by index: ow other-work, nht not-hdr-target, nu not-upstream, ncr no-camera-rows, os other-shift,
+// tu tone-unproven, at after-tone.
+inline const char* flatUiTrailRefuseCode(size_t r) {
+    static const char* const codes[] = {"ow", "nht", "nu", "ncr", "os", "tu", "at"};
+    static_assert(sizeof(codes) / sizeof(codes[0]) == static_cast<size_t>(FlatUiRefuse::kCount), "one code per FlatUiRefuse");
+    return r < sizeof(codes) / sizeof(codes[0]) ? codes[r] : "?";
+}
+// One tone-shaped draw: what the flat runtime's chain did with it, and what the tone candidate, its physical check and its re-issue
+// found. The frame prints the t1 input against the frame's first HUD target: none, actual (its physical RTV), shadow, or other.
+struct FlatUiTrailTone {
+    uint64_t vs = 0, ps = 0;
+    char kind = 0;
+    uint32_t count = 0;
+    bool uiEntered = false;   // flatUiLayerOn() at the draw: the layer's chain ran for it
+    bool hdrTrigger = false;  // the HDR route's trigger draw
+    bool hdrTreated = false;  // the frame's HDR route had treated when the draw came
+    FlatUiTrailBranch branch = FlatUiTrailBranch::kNone;
+    FlatUiTrailPhys phys = FlatUiTrailPhys::kNotRun;
+    const void* t1 = nullptr;         // the physical check's t1 input
+    const void* hudShadow = nullptr;  // the frame's first HUD target: its binding shadow
+    const void* hudActual = nullptr;  // and the physical RTV it was bound as
+    bool proven = false;
+    char admission[49] = {};          // the admission text, truncated to 48 characters
+    FlatUiTrailReissue reissue = FlatUiTrailReissue::kNotArmed;
+    uint8_t declined = 0;             // CrispToneDecline's index, when declined
+    uint64_t seq = 0;                 // the frame a re-issue published
+};
+struct FlatUiTrailFrame {
+    static constexpr uint32_t kToneSlots = 4;
+    uint64_t frame = 0;
+    uint32_t asked = 0, taken = 0;
+    uint32_t refused[static_cast<size_t>(FlatUiRefuse::kCount)] = {};
+    const void* hud = nullptr;   // the first HUD target asked this frame
+    uint32_t tones = 0;          // tone-shaped draws noted; the first kToneSlots are stored
+    uint32_t toneOverflow = 0;   // the rest, counted only
+    int last = -1;               // the stored draw the branch, physical and proof notes belong to (-1: none)
+    int reissueAt = -1;          // the stored draw a re-issue outcome belongs to: the last proven one, else the last
+    FlatUiTrailTone draw[kToneSlots];
+};
+struct FlatUiTrail {
+    static constexpr uint32_t kReports = 12;   // trails logged a session; the last one says so
+    FlatUiTrailFrame cur, prev;
+    uint32_t reports = 0;
+    // The current record for `frame`: a new frame number rolls the current record into the previous one and clears it.
+    FlatUiTrailFrame& frameFor(uint64_t frame) {
+        if (cur.frame != frame) {
+            prev = cur;
+            cur = FlatUiTrailFrame{};
+            cur.frame = frame;
+        }
+        return cur;
+    }
+    // The kept record for `frame` (the current one or the previous one), or null: a note for an older frame lands nowhere.
+    FlatUiTrailFrame* find(uint64_t frame) {
+        if (cur.frame == frame) return &cur;
+        if (prev.frame == frame) return &prev;
+        return nullptr;
+    }
+    void noteAsk(uint64_t frame, const void* hud) {
+        FlatUiTrailFrame& f = frameFor(frame);
+        ++f.asked;
+        if (!f.hud) f.hud = hud;
+    }
+    void noteTake(uint64_t frame) { ++frameFor(frame).taken; }
+    void noteRefuse(uint64_t frame, FlatUiRefuse r) { ++frameFor(frame).refused[static_cast<size_t>(r)]; }
+    void noteDraw(uint64_t frame, uint64_t vs, uint64_t ps, char kind, uint32_t count, bool uiEntered, bool hdrTrigger,
+                  bool hdrTreated) {
+        FlatUiTrailFrame& f = frameFor(frame);
+        const uint32_t n = f.tones++;
+        if (n >= FlatUiTrailFrame::kToneSlots) {
+            ++f.toneOverflow;
+            f.last = -1;
+            return;
+        }
+        FlatUiTrailTone& t = f.draw[n];
+        t.vs = vs;
+        t.ps = ps;
+        t.kind = kind;
+        t.count = count;
+        t.uiEntered = uiEntered;
+        t.hdrTrigger = hdrTrigger;
+        t.hdrTreated = hdrTreated;
+        f.last = static_cast<int>(n);
+    }
+    FlatUiTrailTone* lastDraw(uint64_t frame) {
+        FlatUiTrailFrame* f = find(frame);
+        return f && f->last >= 0 ? &f->draw[f->last] : nullptr;
+    }
+    void noteBranch(uint64_t frame, FlatUiTrailBranch b) {
+        if (FlatUiTrailTone* t = lastDraw(frame)) t->branch = b;
+    }
+    void notePhys(uint64_t frame, FlatUiTrailPhys p, const void* t1, const void* hudShadow, const void* hudActual) {
+        if (FlatUiTrailTone* t = lastDraw(frame)) {
+            t->phys = p;
+            t->t1 = t1;
+            t->hudShadow = hudShadow;
+            t->hudActual = hudActual;
+        }
+    }
+    void noteProven(uint64_t frame, bool proven) {
+        FlatUiTrailFrame* f = find(frame);
+        if (!f || f->last < 0) return;
+        f->draw[f->last].proven = proven;
+        if (proven) f->reissueAt = f->last;
+    }
+    void noteAdmission(uint64_t frame, const char* text) {
+        if (FlatUiTrailTone* t = lastDraw(frame)) std::snprintf(t->admission, sizeof t->admission, "%s", text ? text : "");
+    }
+    void noteReissue(uint64_t frame, FlatUiTrailReissue r, uint8_t declined, uint64_t seq) {
+        FlatUiTrailFrame* f = find(frame);
+        if (!f) return;
+        const int at = f->reissueAt >= 0 ? f->reissueAt : f->last;
+        if (at < 0) return;
+        FlatUiTrailTone& t = f->draw[at];
+        t.reissue = r;
+        t.declined = declined;
+        t.seq = seq;
+    }
+    // This trail's number (1 to kReports), counted; 0 once the session's trails are spent.
+    uint32_t claimReport() { return reports < kReports ? ++reports : 0; }
+};
+// A count as the body prints it: clamped at 99999, which reads as "at least" (a frame's counts are far smaller).
+inline uint32_t flatUiTrailCount(uint32_t v) { return v > 99999u ? 99999u : v; }
+// One frame's body, at most n - 1 characters: the HUD's asks, takes and refusals (by code), the tone-shaped draws and their overflow,
+// then each stored draw. Four stored draws at 20-digit proof numbers and 5-digit counts stay under 900 characters.
+inline size_t flatUiTrailBody(const FlatUiTrailFrame& f, char* out, size_t n) {
+    if (!n) return 0;
+    char refused[96] = "";
+    size_t r = 0;
+    for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i) {
+        if (!f.refused[i]) continue;
+        const int w = std::snprintf(refused + r, sizeof refused - r, "%s%s:%u", r ? "," : "", flatUiTrailRefuseCode(i),
+                                    flatUiTrailCount(f.refused[i]));
+        if (w > 0) r += static_cast<size_t>(w) < sizeof refused - r ? static_cast<size_t>(w) : sizeof refused - r - 1;
+    }
+    if (!r) std::snprintf(refused, sizeof refused, "-");
+    char head[160];
+    std::snprintf(head, sizeof head, "asked=%u taken=%u refused=%s tones=%u over=%u", flatUiTrailCount(f.asked),
+                  flatUiTrailCount(f.taken), refused, flatUiTrailCount(f.tones), flatUiTrailCount(f.toneOverflow));
+    const int h = std::snprintf(out, n, "%s", head);
+    size_t at = h < 0 ? 0 : (static_cast<size_t>(h) < n ? static_cast<size_t>(h) : n - 1);
+    for (uint32_t i = 0; i < FlatUiTrailFrame::kToneSlots && i < f.tones; ++i) {
+        const FlatUiTrailTone& t = f.draw[i];
+        const char* where = !t.t1 ? "none" : t.t1 == t.hudActual ? "actual" : t.t1 == t.hudShadow ? "shadow" : "other";
+        char re[48] = "-";
+        if (t.reissue == FlatUiTrailReissue::kBegun) std::snprintf(re, sizeof re, "begun");
+        else if (t.reissue == FlatUiTrailReissue::kDeclined)
+            std::snprintf(re, sizeof re, "declined(%s)", flatUiTrailDeclineName(t.declined));
+        else if (t.reissue == FlatUiTrailReissue::kPublished)
+            std::snprintf(re, sizeof re, "published(%llu)", static_cast<unsigned long long>(t.seq));
+        char entry[256];
+        std::snprintf(entry, sizeof entry,
+                      " {vs=%016llX ps=%016llX %c%u ui=%d hdr=%d%d by=%s phys=%s t1=%s pr=%d adm=\"%s\" re=%s}",
+                      static_cast<unsigned long long>(t.vs), static_cast<unsigned long long>(t.ps), t.kind ? t.kind : '?',
+                      flatUiTrailCount(t.count), t.uiEntered ? 1 : 0, t.hdrTrigger ? 1 : 0, t.hdrTreated ? 1 : 0,
+                      flatUiTrailBranchName(t.branch), flatUiTrailPhysName(t.phys), where, t.proven ? 1 : 0,
+                      t.admission[0] ? t.admission : "-", re);
+        if (at + 1 >= n) break;
+        const int w = std::snprintf(out + at, n - at, "%s", entry);
+        if (w < 0) break;
+        at = static_cast<size_t>(w) < n - at ? at + static_cast<size_t>(w) : n - 1;
+    }
+    return at;
+}
+// One report line: the trail's number, the previous or this frame, and the body. At most n - 1 characters.
+inline size_t flatUiTrailLine(char* out, size_t n, uint32_t trail, bool previous, const FlatUiTrailFrame& f) {
+    char body[900];
+    flatUiTrailBody(f, body, sizeof body);
+    const int w = std::snprintf(out, n, "flat ui layer: back-off trail (%u of %u%s) -- %s frame %llu: %s", trail,
+                                FlatUiTrail::kReports, trail == FlatUiTrail::kReports ? ", the last" : "",
+                                previous ? "previous" : "this", static_cast<unsigned long long>(f.frame), body);
+    return w < 0 ? 0 : (static_cast<size_t>(w) < n ? static_cast<size_t>(w) : n - 1);
 }
 
 // The jitter a draw's camera rows carry. The rows' measured shift (flat_camera_phase.h, flatCameraMeasureRowShift: NDC,

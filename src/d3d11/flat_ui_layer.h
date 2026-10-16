@@ -29,6 +29,8 @@
 
 #include <cstdint>
 
+#include "flat_ui_layer_math.h"  // the back-off trail's types (the hooks below are the layer's own)
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
@@ -87,6 +89,19 @@ bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, ui
 bool flatUiLayerShapeToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                                    uint64_t vs, uint64_t ps, const void* cachedOutput, uint32_t outW, uint32_t outH,
                                    uint32_t startInstance, const char* route, bool& admitted);
+// The back-off trail (log only; flat_ui_layer_math.h's FlatUiTrail). The flat runtime and the layer note each step, a few loads
+// that change no decision. flatUiTrailReport logs the previous and this frame at a back-off of the HDR HUD path, twelve a session.
+void flatUiTrailNoteAsk(uint64_t frame, const void* hud);
+void flatUiTrailNoteTake(uint64_t frame);
+void flatUiTrailNoteRefuse(uint64_t frame, FlatUiRefuse r);
+void flatUiTrailNoteDraw(uint64_t frame, uint64_t vs, uint64_t ps, char kind, uint32_t count, bool uiEntered, bool hdrTrigger,
+                         bool hdrTreated);
+void flatUiTrailNoteBranch(uint64_t frame, FlatUiTrailBranch b);
+void flatUiTrailNotePhys(uint64_t frame, FlatUiTrailPhys p, const void* t1, const void* hudShadow, const void* hudActual);
+void flatUiTrailNoteProven(uint64_t frame, bool proven);
+void flatUiTrailNoteAdmission(uint64_t frame, const char* text);
+void flatUiTrailNoteReissue(uint64_t frame, FlatUiTrailReissue r, uint8_t declined, uint64_t seq);
+void flatUiTrailReport();
 // Diagnostic only, the near-miss report: log each unknown pair once (up to a process-lifetime cap) that passes the diagnostic
 // shape, the bloom binding and the exact fullscreen draw, but not flatUiLayerShapeToneCandidate's strict admission. It never proves.
 void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,

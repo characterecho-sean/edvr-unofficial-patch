@@ -127,7 +127,7 @@ Q_CUT = "                    while (cut > 0 && (static_cast<unsigned char>(utf8[
 Q_TERM = "                name[cut] = 0;\n"
 Q_CLEAR = "    if (name && nameSize) name[0] = 0;\n"
 H_BEAT = "    stallWatchBeat(presentT1, g_state->frameCounter);\n"
-H_TICK = "    vramWatchTick(presentT1, g_state->device);\n"
+H_TICK = "    vramWatchTick(presentT1, dev);\n"
 G_DUE = "    if (!g_watcher.due(qpc)) return;\n"
 G_BUDGET = "    guardedBudget(g_budget, [&] {\n"
 B_LIST = "\"src\\d3d11\\stall_watch.cpp\" \"src\\d3d11\\vram_tick.cpp\" ^\n"
@@ -209,7 +209,7 @@ MUTANTS = [
     # ---- V11: the glue -----------------------------------------------------------------------------------------------------------
     M("glue-hook-no-tick", "V11", "hook", [(H_TICK, "")], "hookedPresent never ticks the watch"),
     M("glue-hook-before-the-beat", "V11", "hook", [(H_TICK, ""), (H_BEAT, H_TICK + H_BEAT)], "the watch is ticked before the stall sampler's beat"),
-    M("glue-hook-vr-only", "V11", "hook", [(H_TICK, "    if (!runtimeFlatProfile()) vramWatchTick(presentT1, g_state->device);\n")], "the flat profile does not get the watch"),
+    M("glue-hook-vr-only", "V11", "hook", [(H_TICK, "    if (!runtimeFlatProfile()) vramWatchTick(presentT1, dev);\n")], "the flat profile does not get the watch"),
     M("glue-hook-twice", "V11", "hook", [(H_TICK, H_TICK + H_TICK)], "the watch is ticked twice a frame"),
     M("glue-no-cheap-question", "V11", "glue", [(G_DUE, "")], "the glue enters the fault guard on every frame"),
     M("glue-no-fault-budget", "V11", "glue", [(G_BUDGET, "    [&] {\n")], "the sample runs outside the fault budget"),

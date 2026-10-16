@@ -16,6 +16,8 @@
 #include "../../src/common/hotkey.h"
 #include "../../src/common/log.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/d3d11/flat_notice_queue.h"
+#include "../rig_graphics_mode.h"
 
 using namespace edvr;
 using namespace edvr::aacmp;
@@ -157,12 +159,53 @@ static void clashCells() {
     check(!keysClash(0, 0, 0, 0), "an unbound key clashes with nothing");
 }
 
+// Config::init decides the runtime profile from the 3D mode in Elite's Settings.xml under %LOCALAPPDATA% (runtime_profile.h), and mirrors the settings under
+// %LOCALAPPDATA%\EDVR. The rig never reads the machine's own: it points LOCALAPPDATA at a fixture tree holding a Settings.xml of the mode it wants
+// (tools\rig_graphics_mode.h; mode 0 is flat, 4 is VR). Before this, a machine whose Settings.xml said flat failed "the file's AA is read".
+static bool pinGraphicsMode(const std::wstring& root, int mode) { return edvr::rig::pinRigGraphicsMode(root, mode); }
+
+static void removeTree(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            const std::wstring full = dir + L"\\" + name;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) removeTree(full);
+            else DeleteFileW(full.c_str());
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+// The same file under a flat Settings.xml (3D mode 0): the profile is flat, the allow-list gates generic reads, and the AA mode is still answered
+// around it by requestedTemporalMode, which is what the flat adapter calls. The override rides the same way.
+static void flatProfileCells(const std::wstring& dir) {
+    const std::wstring ini = dir + L"\\edvr.ini";
+    check(writeFile(ini, "[fix]\ntemporal_aa = dlss\nui_quality = 100\n"), "flat: the fixture ini is written");
+    check(pinGraphicsMode(dir + L"\\flat_localappdata", 0), "flat: the fixture Settings.xml (3D mode 0) is in place");
+    Config& cfg = Config::get();
+    cfg.init(dir);
+    check(runtimeFlatProfile() && !runtimeVrProfile(), "flat: the fixture's mode 0 makes the profile flat, whatever the machine's own Settings.xml says");
+    check(cfg.requestedTemporalMode() == "dlss" && cfg.configuredTemporalMode() == "dlss", "flat: the file's AA is read through the mode reader");
+    check(cfg.getString("fix.black_void", "x") == "off", "flat: the allow-list refuses what it refuses");
+    check(cfg.getString("hotkey.compare_aa", "F7") == "F7", "flat: the comparison key passes the gate");
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    check(cfg.requestedTemporalMode() == "off" && cfg.configuredTemporalMode() == "dlss", "flat: the override is what the flat adapter reads, the file's mode untouched");
+    cfg.clearRuntimeOverride("fix.temporal_aa");
+    check(cfg.requestedTemporalMode() == "dlss", "flat: clearing returns to the file's mode");
+}
+
 static void configCells(const std::wstring& dir) {
+    check(pinGraphicsMode(dir + L"\\vr_localappdata", 4), "the fixture Settings.xml (3D mode 4) is in place");
     const std::wstring ini = dir + L"\\edvr.ini";
     const std::string original = "[fix]\ntemporal_aa = dlss\nui_quality = 100\n";
     check(writeFile(ini, original), "the fixture ini is written");
     Config& cfg = Config::get();
     cfg.init(dir);
+    check(runtimeVrProfile() && !runtimeFlatProfile(), "the fixture's mode 4 makes the profile VR, whatever the machine's own Settings.xml says");
     check(cfg.getString("fix.temporal_aa", "off") == "dlss" && cfg.requestedTemporalMode() == "dlss", "the file's AA is read");
     check(cfg.configuredTemporalMode() == "dlss" && !cfg.hasRuntimeOverride("fix.temporal_aa"), "no override to begin with");
     check(!cfg.reloadIfChanged(), "an untouched file reports no change");
@@ -209,6 +252,63 @@ static void configCells(const std::wstring& dir) {
     check(slurp(std::string(ini.begin(), ini.end())).find("temporal_aa = fsr") != std::string::npos, "the file still says what the player wrote");
 }
 
+// The flat F8 panel is the notice's surface, so a notice raised with the menu open (F7 pressed while F8 is up) waits for it to close
+// (review of main 9fe5b257, finding 4: menuTick cleared the due flag every tick and started the notice only with the menu closed).
+// FlatNoticeQueue is the production decision menuTick calls; the cells drive it with the real notice words.
+static void flatNoticeCells() {
+    // F7 with the menu open: AA goes off (the comparison), the notice is queued; menuTick runs a few times with the menu open.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.due(), "the off notice is queued");
+        check(q.take(true) == nullptr && q.take(true) == nullptr && q.take(true) == nullptr,
+              "ticks with the menu open do not start the notice");
+        check(q.due(), "...and do not discard it");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA off (comparison), press F7 to restore", "the menu closes: the off notice starts, word for word");
+        check(!q.due() && q.take(false) == nullptr, "...once");
+    }
+    // Restoring AA with the menu open: same.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr && q.due(), "the restore notice is kept while the menu is open");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS", "...and starts when the menu closes");
+    }
+    // Off then restore while the menu stays open: the newer notice replaces the older, the player sees where AA stands now.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr, "off, menu open");
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr, "restored, menu open");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS" && q.take(false) == nullptr, "only the newest starts when the menu closes");
+    }
+    // A profile switch with a notice pending (review follow-up of main 4bd06f12, F3): F7 with the menu open queues "AA off", the mode watcher then commits a
+    // switch to VR, which closes the menu and clears the AA override. Back in flat the old notice must not appear.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr && q.due(), "profile switch: the AA-off notice is waiting behind the open menu");
+        q.clear();   // menuProfileSwitch
+        check(!q.due() && q.take(false) == nullptr && q.take(true) == nullptr, "profile switch: the cleared queue starts nothing when the menu is closed, and keeps nothing");
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS", "profile switch: a notice raised after the switch is shown, and is not mixed with the old text");
+    }
+    // Menu closed when the notice is raised: it starts on the next tick, as before.
+    {
+        FlatNoticeQueue q;
+        q.show("AA off (comparison), press F7 to restore");
+        check(q.take(false) != nullptr && !q.due(), "with the menu closed the notice starts at once");
+        q.show("");
+        q.show(nullptr);
+        check(!q.due() && q.take(false) == nullptr, "an empty notice queues nothing");
+    }
+}
+
 static bool has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 
 static void sourcePins(const std::string& root) {
@@ -228,6 +328,15 @@ static void sourcePins(const std::string& root) {
           "the toggle asks for the config poll through the menu's own request, which the frame boundary already honours");
     check(has(menu, "aaCompareNoteMenuEdit();") && has(menu, "\"fix.temporal_aa\""), "an F8 write of fix.temporal_aa tells the comparison");
     check(has(menu, "void menuShowNotice(") && has(menu, "void menuNoteOwnChange("), "the menu has the notice and the own-change calls");
+    check(has(menu, "s.flatNotice.show(text);") && has(menu, "s.flatNotice.take(s.open)"),
+          "the flat menu raises and starts its notice through the queue, which holds it while the menu is open");
+    {
+        const size_t at = menu.find("void menuProfileSwitch() {");
+        const size_t end = at == std::string::npos ? at : menu.find("\n}\n", at);
+        const std::string body = end == std::string::npos ? std::string() : menu.substr(at, end - at);
+        check(!body.empty() && has(body.c_str(), "s.flatNotice.clear();") && has(body.c_str(), "s.flatNoticeUp = false;") && has(body.c_str(), "s.flatNoticeShown = false;"),
+              "a profile switch clears the outgoing profile's queued and displayed flat notice (menuProfileSwitch)");
+    }
     check(has(ini, "compare_aa = F7"), "edvr.ini ships the key bound to F7");
     check(std::string(kDefaultKey) == "F7", "and the code's default is the same F7");
     check(has(ini, "# ui: AA comparison key (empty = off) | hotkey | live"), "the F8 Hotkeys page has the row");
@@ -253,11 +362,14 @@ int main(int argc, char** argv) {
     machineCells();
     wordsCells();
     clashCells();
+    flatNoticeCells();
+    const std::wstring previous = edvr::rig::currentRigLocalAppData();
     configCells(dir);
+    flatProfileCells(dir);
+    edvr::rig::restoreRigLocalAppData(previous);
     sourcePins(argv[1]);
 
-    DeleteFileW((dir + L"\\edvr.ini").c_str());
-    RemoveDirectoryW(dir.c_str());
+    removeTree(dir);
     std::printf("aa_compare_test: %u checks, 0 failures\n", g_checks);
     return 0;
 }

@@ -503,8 +503,6 @@ static void testShippedIni(const std::wstring& root) {
         "[fix]\r\n"
         "fss_panel_distance = 1.0\r\n"
         "fss_res = 1\r\n"
-        "fss_eye_heal = 1\r\n"        // the pre-0.11 pair, both of which
-        "fss_reveal_sync = on\r\n"    // now merge into ONE new key
         "fss_eye_glue = stock\r\n"   // a key that never existed: carried, not eaten
         // The field-of-view trims (2026-09-29) were [fix] keys with menu rows
         // and are ini-only [experimental] keys now: a per-headset list tuned
@@ -522,8 +520,6 @@ static void testShippedIni(const std::wstring& root) {
              "the full-res body follows the section move");
     expectEq(iniValue(migrated, "fix.fss_panel_distance"), "",
              "nothing is left under the old name for the reader to shadow");
-    expectEq(iniValue(migrated, "fix.fss_eye_sync"), "on",
-             "the retired pair of keys lands merged on the one new key");
     expectEq(iniValue(migrated, "advanced.transition_flash_units"), "1500",
              "an unmoved tuned value still lands in its own section");
     check(iniValue(migrated, "fix.fss_eye_glue") == "stock",
@@ -1391,7 +1387,7 @@ static void testScannerBodyRetiredKey(const std::wstring& root) {
     check(shipped.find("\nscanner_body =") == std::string::npos && shipped.find("\n#scanner_body =") == std::string::npos,
           "the shipped ini defines no scanner_body, live or as a template");
     const std::string eol = shipped.find("\r\n") != std::string::npos ? "\r\n" : "\n";
-    const std::string anchor = "\nfss_eye_sync = on" + eol;
+    const std::string anchor = "\nnight_vision_stability = 1" + eol;
     const size_t at = shipped.find(anchor);
     check(at != std::string::npos, "the shipped ini has the line the scanned-body fixture anchors on");
     if (at == std::string::npos) return;

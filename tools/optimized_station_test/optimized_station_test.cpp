@@ -8,6 +8,7 @@
 #include "../../src/d3d11/station_gather_core.h"
 #include "../../src/d3d11/station_lockfree_core.h"
 #include "../../src/d3d11/station_pass_core.h"
+#include "../../src/d3d11/station_seal_trace.h"
 #include "../../src/common/flat_profile_keys.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/view_source.h"
@@ -23,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace se = edvr::sealed;
@@ -64,6 +66,26 @@ uint64_t firstEngage(se::SealState* st, se::SealInputs in, uint64_t t0, uint64_t
         if (se::sealStep(in, st, &why) == se::SealAction::kRequestEngage) return t;
     }
     return 0;
+}
+
+// The seal trace's emitter for the rig: every line, in order.
+void captureLine(void* ctx, const char* line) {
+    static_cast<std::vector<std::string>*>(ctx)->push_back(line);
+}
+
+// A docked, held tick with the own pad present in an informative pass and the held cell refreshed: quiet by every trigger. The rig changes one field.
+se::TickRecord heldTick(uint32_t frame, uint64_t nowMs) {
+    se::TickRecord r;
+    r.frame = frame;
+    r.nowMs = nowMs;
+    r.docked = true;
+    r.held = true;
+    r.verdict = se::TraceVerdict::kInformative;
+    r.ownSet = true;
+    r.ownInPass = true;
+    r.refresh = se::HeldRefresh::kRefreshed;
+    r.camValid = true;
+    return r;
 }
 
 }  // namespace
@@ -2523,6 +2545,383 @@ int main(int argc, char** argv) {
         const float away[3] = {flat.origin[0] + 300.0f, flat.origin[1], flat.origin[2]};
         se::boxCoordsOf(cell, away, x);
         check(!(std::fabs(x[0]) <= cell.boxHalf[0] + se::kCameraLeaveM), "v14.34 flat camera: 300 m along the box is outside it (the camera rule releases)");
+    }
+
+    // ---- Built 2026-10-15: the transition hold. An origin shift (a boarding or disembark) releases the seal or holds the re-seal; a Lift release holds its pose-back
+    // re-seal. The hold gates the request only: the camera and pose runs go on, and the r1 edge re-seal is not held (the v14.24 edge check above) -----------------
+    {
+        // (a) a held seal, the origin shifts while Status still reads aboard: released for the transition, and the hold starts
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition: the setup seal");
+        in.held = true;
+        in.originShifted = true;
+        in.nowMs = 100;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRelease && w == se::ReleaseWhy::kOriginShift,
+              "transition (a): a held seal released by the origin shift while the seat still reads aboard");
+        check(st.holdUntilMs == 100 + se::kTransitionHoldMs && !st.requested && st.reseal == 0 && !st.mechanism,
+              "transition (a): the release starts the hold (now + kTransitionHoldMs) and asks for no edge");
+    }
+    {
+        // (b) a Lift release, then the poses come back within the hold: the pose count runs, the request waits for the hold's end
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        se::sealStep(in, &st, &w);
+        in.held = true;
+        in.mechanismMoved = true;
+        in.poseBack = false;
+        in.nowMs = 100;
+        se::sealStep(in, &st, &w);
+        in.held = false;
+        in.mechanismMoved = false;
+        in.poseBack = true;
+        uint64_t first = 0;
+        bool blockedInside = false;
+        for (uint64_t t = 110; t <= 3000 && first == 0; t += 10) {   // 30 frames of poses back inside the first 400 ms
+            in.nowMs = t;
+            if (se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage) first = t;
+            else if (st.holdBlocked) blockedInside = true;
+        }
+        check(blockedInside && first == 2600, "transition (b): a Lift back at its pose within the hold re-seals at the hold's end (2600 ms), not at 30 frames");
+        check(!st.holdBlocked && st.reseal == 0 && st.requested, "transition (b): the request that passes the hold clears the blocked flag");
+    }
+    {
+        // (c) an origin shift while docked and aboard with nothing held: no request for kTransitionHoldMs, then the request
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(100);
+        in.originShifted = true;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdBlocked && st.holdUntilMs == 100 + se::kTransitionHoldMs,
+              "transition (c): an origin shift while docked and aboard sets the hold and asks for no seal");
+        in.originShifted = false;
+        check(firstEngage(&st, in, 200, 4000) == 2600, "transition (c): the seal comes back at the hold's end (2600 ms), not sooner");
+    }
+    {
+        // (d) during the hold the seat leaves and comes back: the on-foot tick changes nothing else, and no request comes inside the hold
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(100);
+        in.originShifted = true;
+        se::sealStep(in, &st, &w);
+        in.originShifted = false;
+        in.aboard = false;
+        in.nowMs = 200;
+        const se::SealState before = st;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone, "transition (d): on foot inside the hold: no request");
+        check(st.holdUntilMs == before.holdUntilMs && st.requested == before.requested && st.reseal == before.reseal && st.mechanism == before.mechanism &&
+                  st.poseRun == before.poseRun && st.camInRun == before.camInRun && st.camOutRun == before.camOutRun && st.padAddr == before.padAddr,
+              "transition (d): the on-foot tick inside the hold changes no other state");
+        in.aboard = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdBlocked, "transition (d): back aboard inside the hold is still held back");
+        check(firstEngage(&st, in, 400, 4000) == 2600, "transition (d): the request comes at the hold's end");
+    }
+    {
+        // (e) an undock clears the hold, so the next dock seals at once
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(100);
+        in.originShifted = true;
+        se::sealStep(in, &st, &w);
+        in.originShifted = false;
+        in.docked = false;
+        in.nowMs = 200;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdUntilMs == 0, "transition (e): an undock clears the hold");
+        in.docked = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (e): the next dock seals at once (300 ms, inside the old hold's span)");
+    }
+    {
+        // (f) a setting toggle resets the hold with the rest of the state
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(100);
+        in.originShifted = true;
+        se::sealStep(in, &st, &w);
+        in.originShifted = false;
+        in.setting = false;
+        in.nowMs = 200;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdUntilMs == 0 && !st.holdBlocked, "transition (f): the setting off resets the hold");
+        in.setting = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (f): the setting on again seals at once");
+    }
+    {
+        // (g) no shift and no release: the seal is as before, requests at once, and the hold never starts
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage && st.holdUntilMs == 0 && !st.holdBlocked,
+              "transition (g): no shift and no release: the seal requests at once and no hold starts");
+    }
+    {
+        // (h) the r1 out-then-in edge after a Lift release is not held: it re-seals at once, inside the hold (the v14.24 edge check pins the same)
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        se::sealStep(in, &st, &w);
+        in.held = true;
+        in.mechanismMoved = true;
+        in.nowMs = 100;
+        se::sealStep(in, &st, &w);
+        in.held = false;
+        in.mechanismMoved = false;
+        in.inHangar = false;
+        in.nowMs = 200;
+        se::sealStep(in, &st, &w);
+        in.inHangar = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (h): the r1 out-then-in edge after a Lift release re-seals at once, inside the hold");
+    }
+    {
+        // (i) review follow-up of main 4bd06f12, F2 (scratch repro repro_transition.cpp): a Lift release, r1 out, THEN an origin shift while unsealed, then r1 back in.
+        // The edge exemption belongs to the Lift hold; the later origin-shift hold (a boarding or a disembark whose Status.json seat still reads aboard) must still apply.
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        se::sealStep(in, &st, &w);
+        in.held = true;
+        in.mechanismMoved = true;
+        in.nowMs = 100;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRelease && w == se::ReleaseWhy::kMechanism, "transition (i): the Lift release");
+        in.held = false;
+        in.mechanismMoved = false;
+        in.inHangar = false;
+        in.nowMs = 200;
+        se::sealStep(in, &st, &w);
+        check(st.reseal == 2, "transition (i): r1 out leaves the edge pending");
+        in.originShifted = true;
+        in.nowMs = 210;
+        se::sealStep(in, &st, &w);
+        check(st.holdUntilMs == 210 + se::kTransitionHoldMs, "transition (i): the origin shift starts a new hold");
+        in.originShifted = false;
+        in.inHangar = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdBlocked && !st.requested,
+              "transition (i): r1 back in inside the origin-shift hold does NOT re-seal on the old edge");
+        in.nowMs = 210 + se::kTransitionHoldMs - 1;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone, "transition (i): still held a millisecond before the hold ends");
+        in.nowMs = 210 + se::kTransitionHoldMs;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (i): the seal is requested when the origin-shift hold ends");
+    }
+
+
+    // ---- Built 2026-10-15: the anomaly-armed seal trace (station_seal_trace.h): the ring, the four triggers, the dump's shape, the cap and spacing, the bound ----
+    {
+        // the ring holds docked ticks only, oldest first across the wrap; a quiet docked stream that is not held writes nothing
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        for (uint32_t i = 0; i < 10; ++i) {
+            se::TickRecord r;
+            r.frame = 900 + i;
+            r.nowMs = 100ull * i;
+            r.docked = false;
+            tr.step(r, captureLine, &out);
+        }
+        for (uint32_t i = 0; i < 70; ++i) {
+            se::TickRecord r;
+            r.frame = i;
+            r.nowMs = 1000 + 100ull * i;
+            r.docked = true;
+            tr.step(r, captureLine, &out);
+        }
+        check(tr.count == se::kTraceRing && tr.at(0).frame == 6 && tr.at(63).frame == 69 && tr.at(30).frame == 36,
+              "trace ring: docked ticks only, the last 64 kept, oldest first across the wrap");
+        check(out.empty(), "trace: a quiet docked stream that is not held writes nothing");
+    }
+    {
+        // T1: a held cell kept stale. Quiet ticks (refreshed or unmoved) before it write nothing.
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        for (uint32_t i = 0; i < 300; ++i) {
+            se::TickRecord r = heldTick(i, 100ull * i);
+            if (i % 2 == 1) r.refresh = se::HeldRefresh::kNoChange;
+            tr.step(r, captureLine, &out);
+        }
+        check(out.empty(), "trace: 300 quiet held ticks (refreshed and unmoved) write nothing");
+        se::TickRecord bad = heldTick(300, 30000);
+        bad.refresh = se::HeldRefresh::kKeptStale;
+        tr.step(bad, captureLine, &out);
+        check(!out.empty() && out[0].find("trigger T1 at frame 300") != std::string::npos, "trace T1: a held cell kept stale (its pose unreadable) fires");
+    }
+    {
+        // T2: the centre moved more than 2 m from the previous tick's; a logged origin shift does not excuse it. 0.5 m a tick does not.
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        for (uint32_t i = 0; i < 20; ++i) {
+            se::TickRecord r = heldTick(i, 100ull * i);
+            r.centre[0] = 0.5f * static_cast<float>(i);
+            tr.step(r, captureLine, &out);
+        }
+        check(out.empty(), "trace T2: a centre moving 0.5 m a tick does not fire");
+        se::TickRecord jump = heldTick(20, 2000);
+        jump.centre[0] = 0.5f * 19.0f + 2.5f;
+        jump.originShift = true;
+        tr.step(jump, captureLine, &out);
+        check(!out.empty() && out[0].find("trigger T2 at frame 20") != std::string::npos,
+              "trace T2: a centre moved 2.5 m from the previous tick fires, with the origin shift logged or not");
+    }
+    {
+        // No T3 (removed, log 165224): a cull and rig-veto spike mid-seal, after a steady stream of 40 held ticks, writes no dump
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        uint64_t culled = 0;
+        uint64_t rig = 0;
+        for (uint32_t i = 0; i < 40; ++i) {
+            se::TickRecord r = heldTick(i, 100ull * i);
+            culled += 2;
+            rig += 1;
+            r.culled = culled;
+            r.rigVetoes = rig;
+            tr.step(r, captureLine, &out);
+        }
+        se::TickRecord spike = heldTick(40, 4000);
+        culled += 500;
+        rig += 300;
+        spike.culled = culled;
+        spike.rigVetoes = rig;
+        tr.step(spike, captureLine, &out);
+        check(out.empty(), "trace (T3 removed): a cull and rig-veto spike mid-seal writes no dump");
+    }
+    {
+        // No T3 (removed, log 165224): a cull and rig-veto spike two ticks into a seal, with no held history, writes no dump
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        tr.step(heldTick(0, 0), captureLine, &out);
+        se::TickRecord b = heldTick(1, 22);
+        b.culled = 500;
+        b.rigVetoes = 300;
+        tr.step(b, captureLine, &out);
+        se::TickRecord c = heldTick(2, 45);
+        c.culled = 1000;
+        c.rigVetoes = 600;
+        tr.step(c, captureLine, &out);
+        check(out.empty() && tr.count == 3 && tr.at(0).sealedNow, "trace (T3 removed): a cull and rig-veto spike at seal onset writes no dump");
+    }
+    {
+        // T4: the own pad missing from three informative passes in a row; an empty pass is no evidence; the pad back in a pass starts the run again
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        se::TickRecord r = heldTick(0, 0);
+        r.ownInPass = false;
+        tr.step(r, captureLine, &out);
+        r.frame = 1;
+        r.nowMs = 100;
+        tr.step(r, captureLine, &out);
+        r.frame = 2;
+        r.nowMs = 200;
+        r.verdict = se::TraceVerdict::kEmpty;
+        tr.step(r, captureLine, &out);
+        check(out.empty(), "trace T4: two absent informative passes and an empty one: nothing yet");
+        r.frame = 3;
+        r.nowMs = 300;
+        r.verdict = se::TraceVerdict::kInformative;
+        tr.step(r, captureLine, &out);
+        check(!out.empty() && out[0].find("trigger T4 at frame 3") != std::string::npos, "trace T4: the own pad absent from three informative passes in a row fires");
+    }
+    {
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        const bool pattern[] = {false, false, true, false, false};   // ownInPass per pass: the pad back in the third resets the run
+        for (uint32_t i = 0; i < 5; ++i) {
+            se::TickRecord r = heldTick(i, 100ull * i);
+            r.ownInPass = pattern[i];
+            tr.step(r, captureLine, &out);
+        }
+        check(out.empty(), "trace T4: the pad back in a pass starts the run again (two absent, one present, two absent: quiet)");
+    }
+    {
+        // the dump: 64 records before the trigger (its own among them), the header, 64 after, the end line: 130 lines
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        for (uint32_t i = 0; i < 100; ++i) tr.step(heldTick(i, 100ull * i), captureLine, &out);
+        se::TickRecord bad = heldTick(100, 10000);
+        bad.refresh = se::HeldRefresh::kKeptStale;
+        tr.step(bad, captureLine, &out);
+        for (uint32_t i = 101; i <= 170; ++i) tr.step(heldTick(i, 100ull * i), captureLine, &out);
+        check(out.size() == 130, "trace dump: the header, 64 records before the trigger, 64 after and the end line (130 lines)");
+        check(out.size() == 130 && out[0].rfind("optimized station trace (dump 1 of 4, trigger T1 at frame 100)", 0) == 0,
+              "trace dump: the header names the dump, the trigger and its frame");
+        check(out.size() == 130 && out[1].rfind("f=37 ", 0) == 0 && out[64].rfind("f=100 ", 0) == 0 && out[65].rfind("f=101 ", 0) == 0 &&
+                  out[128].rfind("f=164 ", 0) == 0,
+              "trace dump: the first pre line is frame 37, the trigger's own record is the last pre line, the post lines follow it");
+        check(out.size() == 130 && out[129].rfind("optimized station trace end (dump 1 of 4: 64 records before the trigger, 64 after)", 0) == 0,
+              "trace dump: the end line closes the dump after the 64th record after the trigger");
+    }
+    {
+        // the cap and the spacing: a trigger on every tick at 100 ms for 200 s writes four dumps, at 0 s, 30 s, 60 s and 90 s; the fourth says it is the last
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        for (uint32_t i = 0; i <= 2000; ++i) {
+            se::TickRecord r = heldTick(i, 100ull * i);
+            r.refresh = se::HeldRefresh::kKeptStale;
+            tr.step(r, captureLine, &out);
+        }
+        std::vector<std::string> headers;
+        for (const std::string& l : out)
+            if (l.rfind("optimized station trace (dump ", 0) == 0) headers.push_back(l);
+        check(headers.size() == 4, "trace cap: four dumps a session, however long the trigger holds");
+        check(headers.size() == 4 && headers[1].find("at frame 300") != std::string::npos && headers[2].find("at frame 600") != std::string::npos &&
+                  headers[3].find("at frame 900") != std::string::npos,
+              "trace spacing: the dumps follow their triggers at least 30 s apart (frames 300, 600, 900 at 100 ms)");
+        check(headers.size() == 4 && headers[3].find("dump 4 of 4") != std::string::npos && headers[3].find("the last dump this session") != std::string::npos &&
+                  headers[2].find("last") == std::string::npos,
+              "trace cap: the fourth header says it is the last, the earlier ones do not");
+    }
+    {
+        // the line bound: every integer at 20 digits and the floats at their limits stays under 300 characters, with the event words all set
+        se::TickRecord r;
+        r.frame = 0xFFFFFFFFu;
+        r.nowMs = ~0ull;
+        r.docked = true;
+        r.held = true;
+        r.verdict = se::TraceVerdict::kUnfinished;
+        r.thin = true;
+        r.passCalls = ~0ull;
+        r.ownSet = true;
+        r.ownInPass = true;
+        r.ownUnseen = 0xFFFFFFFFu;
+        r.refresh = se::HeldRefresh::kKeptStale;
+        r.centre[0] = 1e9f;
+        r.centre[1] = -1e9f;
+        r.centre[2] = static_cast<float>(std::nan(""));
+        r.frameShiftM = 3.4e38f;
+        r.camValid = true;
+        r.cam[0] = -3.4e38f;
+        r.cameraOutside = true;
+        r.rigVetoes = ~0ull;
+        r.producerVetoes = ~0ull;
+        r.culled = ~0ull;
+        r.released = true;
+        r.why = se::ReleaseWhy::kMechanism;
+        r.originShift = true;
+        r.holdStarted = true;
+        r.ms = ~0ull;
+        r.sealedNow = true;
+        r.shiftM = 1e9f;
+        r.camJumpM = -1e9f;
+        r.rigDelta = ~0ull;
+        r.producerDelta = ~0ull;
+        r.cullDelta = ~0ull;
+        r.trigger = se::TraceTrigger::kOwnAbsent;
+        char line[320] = {};
+        const int n = se::formatTickLine(r, line, sizeof(line));
+        check(n > 0 && n < 300 && std::strlen(line) < 300, "trace line: under 300 characters with every integer at 20 digits and the floats at their limits");
+        check(std::string(line).rfind("f=4294967295 t=18446744073709551615 h=1 v=U th=1 pc=18446744073709551615 op=1 un=4294967295 rf=k ", 0) == 0 &&
+                  std::strstr(line, "hc=99999.0,-99999.0,nan hs=99999.00 fs=99999.00 cv=1 cj=-99999.00 co=1 ") != nullptr &&
+                  std::strstr(line, "ev=seal+rel:mechanism+origin+hold+T4") != nullptr,
+              "trace line: the keys in order, the floats clamped to 99999, the event words joined");
+    }
+    {
+        // the time since the seal: from the seal's rising edge
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        tr.step(heldTick(0, 1000), captureLine, &out);
+        tr.step(heldTick(1, 1500), captureLine, &out);
+        check(tr.count == 2 && tr.at(0).sealedNow && !tr.at(1).sealedNow && tr.at(1).ms == 500,
+              "trace: the seal is marked on its rising edge and the time since the seal counts from it");
     }
 
     std::printf("optimized_station_test: %d checks, %d failures\n", g_checks, g_failures);

@@ -649,6 +649,7 @@ void recorderEndToEnd() {
     check(!f.measured, "recorder: the priming frame reports nothing");
     check(!rec.floor().measured, "recorder: no floor yet at the first frame: it is measured as a window closes");
     check((g_gate.load() & 0xFFFFFFFFull) == GetCurrentThreadId(), "recorder: the gate names the thread that cut as the render thread");
+    check(g_renderThreadId.load() == GetCurrentThreadId(), "recorder: the render thread's id is published apart from the gate (the lock instrument asks it, not the gate)");
 
     WindowReport report;
     bool closed = false;

@@ -495,6 +495,7 @@ public:
             lastTick_ = windowStart_ = nowTicks;
             samplingOk_ = currentThreadId() == static_cast<uint32_t>(GetCurrentThreadId());
             renderTid_ = static_cast<uint32_t>(GetCurrentThreadId());
+            emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);
             FrameCut prime;
             cutFrame(prime);   // baselines: nothing before the census opened is the first frame's
             emcpu::FrameCut emPrime;
@@ -557,6 +558,7 @@ public:
         primed_ = false;
         g_gate.store(0, std::memory_order_relaxed);
         emcpu::g_gate.store(0, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(0, std::memory_order_relaxed);
         resetWindow();
     }
     bool running() const noexcept { return primed_; }
@@ -630,6 +632,7 @@ private:
         const uint64_t gate = makeGate(sampledNow_, renderNow_ || sampledNow_ ? renderTid_ : kNoThread);
         g_gate.store(gate, std::memory_order_relaxed);
         emcpu::g_gate.store(gate, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);   // the gate names it on 1 frame in 16 only
     }
     void resetWindow() noexcept {
         frames_ = paused_ = sampled_ = renderClocked_ = 0;
@@ -873,6 +876,16 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
     tk.add("; ", "the clocks cost the render thread about %.3f ms a frame on average (%.3f ms on a clocked frame, %.0f scopes; "
                  "the gate checks on the other frames are not counted) and put about %.3f ms of the per-clocked-frame total above into it",
            price.costMs, price.clockedMs, price.scopesPerFrame, price.recordedMs);
+    // The render thread's engine motion hooks again, one token a part: the fold into "engine motion hooks" above hides which
+    // one is expensive. Last, so the lines above keep their layout. kEmNames is exactly the folded, clocked parts; the names
+    // drop the "engine " they carry on the other threads' list, so a search for "engine copier" finds one figure.
+    if (anyClocked)
+        for (unsigned i = 0; i < kEmNameCount; ++i) {
+            const unsigned p = kEmNames[i].part;
+            callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / clocked);
+            tk.add(i ? ", " : "; ", "%s%s %.3f ms (calls %s)", i ? "" : "engine motion hooks by part (render thread, per clocked frame): ",
+                   kEmNames[i].name + (sizeof("engine ") - 1), r.emRenderMs[p] / clocked, calls);
+        }
     packLines(tk, out);
 }
 

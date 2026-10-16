@@ -149,6 +149,10 @@ bool glitchFrameWantsBuffer(uint32_t bytes) {
     return s && s->observing && bytes == kBufferBytes;
 }
 
+bool glitchFrameWindowOpen() {
+    return g_engineWindowOpen.load(std::memory_order_relaxed);
+}
+
 void glitchFrameObserve(const void* data, uint32_t bytes, const void* /*resource*/) {
     State* s = g_state;
     if (!s || !s->observing) return;

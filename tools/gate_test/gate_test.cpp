@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "../rig_graphics_mode.h"
 #include "../../src/common/config.h"
 #include "../../src/common/guard.h"
 #include "../../src/common/periodic_work.h"
@@ -1633,6 +1634,13 @@ int main(int argc, char** argv) {
     // against the numbers that ship rather than against numbers this file made
     // up.
     const std::string dir = argc > 1 ? argv[1] : ".";
+    // Config::init takes the profile from the machine's Settings.xml unless LOCALAPPDATA is pointed elsewhere: under a flat one this rig hung (tools\rig_graphics_mode.h).
+    const std::wstring fixtureRoot = edvr::rig::rigFixtureRoot(L"gate");
+    const std::wstring savedLocalAppData = edvr::rig::currentRigLocalAppData();
+    if (!edvr::rig::pinRigGraphicsMode(fixtureRoot, 4)) {
+        printf("  FAIL  the fixture Settings.xml could not be written\n");
+        return 1;
+    }
     Config::get().init(std::wstring(dir.begin(), dir.end()));
 
     printf("edvr gate_test -- timing, journal, periodic work, logged notes, boundary ticks\n");
@@ -1650,6 +1658,8 @@ int main(int argc, char** argv) {
     // and leaves it off, which the fixtures above never see.
     g_bad += journalWorkerChecks();
 
+    edvr::rig::restoreRigLocalAppData(savedLocalAppData);
+    edvr::rig::removeRigTree(fixtureRoot);
     if (g_bad) {
         printf("\nGATE TEST FAILED (%d)\n", g_bad);
         return 1;

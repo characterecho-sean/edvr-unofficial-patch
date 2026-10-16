@@ -36,7 +36,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/format_query_log.h"     // formatHooksInstalledLine: the one line that says the hooks went on
 #include "../common/temporal_mode.h"
 #include "../common/runtime_profile.h"
-#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "hmd_reset_press.h"   // hmdResetPressFrame: the players HMD recentre key, watched for the seat memory
 #include "../common/seat_context.h"   // seatContextPublish: the seat memory's word for the runtime
@@ -284,13 +283,8 @@ struct State {
     // bindings; they give the FSS mode latch its frame-exact edges.
     Hotkey fssEnterKey;
     Hotkey fssQuitKey;
-    Hotkey fssZoomStepKey;
-    Hotkey fssZoomKey;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
-    XinputBinding fssZoomStepPad;
-    XinputBinding fssZoomPad;
-    bool fssZoomPressPending = false;
     bool     fssModeLatchWanted = false;
     bool     fssModeLatch = false;
     bool     fssLatchByKey = false;
@@ -1433,17 +1427,6 @@ void tickFssModeLatch() {
             g_state->fssQuitMs = stampMs();
             byKey = true;
         }
-        // The zoom press: the earliest arrival marker there is --
-        // ahead of the camera jump, ahead of any render signal. The
-        // squares appear the frame the zoom begins (the field's own
-        // timing), so the reveal's window must open no later.
-        bool zoomPressed = g_state->fssZoomStepKey.pressed();
-        if (g_state->fssZoomKey.pressed()) zoomPressed = true;
-        if (xinputPressed(g_state->fssZoomStepPad)) zoomPressed = true;
-        if (xinputPressed(g_state->fssZoomPad)) zoomPressed = true;
-        if (zoomPressed && g_state->fssModeLatch) {
-            g_state->fssZoomPressPending = true;
-        }
         if (journalFssFocus()) {
             const bool quitRecent =
                 g_state->fssQuitMs != 0 &&
@@ -1689,8 +1672,7 @@ void presentFrameBoundary() {
             terrainCullCoverPoll(stampMs());
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
-            g_state->fssModeLatchWanted =
-                eyeSyncFromConfig(Config::get()).any();
+            g_state->fssModeLatchWanted = true;
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
@@ -1763,6 +1745,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // THE DEVICE, READ ONCE, AND MAYBE NULL. advanced.d3d11_fixes = 0 keeps this Present hook (the frame boundary the
+    // openvr half runs on) but hookDevice returns before it records the device, so g_state->device is null for the whole
+    // session. Every use of it below that dereferences it is behind `dev`; the callees that only compare or test it
+    // (nativeTimingPresentBegin / NotePresent, renderBoundaryNoteOwnedPresent / Present, vramAdapterOf) are null-safe
+    // and are not skipped. v0.17.0 .. v0.19.1 dereferenced it unguarded here: first Present, 0xC0000005.
+    ID3D11Device* const dev = g_state->device;
     vrSsaaGateNotePresent();  // log only: the first Present's place in the order of the Supersampling lines
     // The frame-tick chain starts here (frame_ticks.h): what follows, to this
     // hook's return, is EDVR's or the driver's; what came before it is the game's.
@@ -1785,9 +1773,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (routeCrumbs) hdrCrumbWrite("present", "begin");
     // The frame's GPU work span ends here (2026-10-14, gpu_census.cpp): EDVR's door work is done and the real Present is next, on
     // the game's own context. Before this call, so the pair is still inside the census scope that the boundary after the Present closes.
-    if (gpuCensusFrameWorkOpen()) {
+    if (dev && gpuCensusFrameWorkOpen()) {
         ID3D11DeviceContext* workContext = nullptr;
-        g_state->device->GetImmediateContext(&workContext);
+        dev->GetImmediateContext(&workContext);
         if (workContext) {
             gpuCensusFrameWorkEnd(workContext);
             workContext->Release();
@@ -1803,10 +1791,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The graphics memory watch (vram_watch.h): this process's GPU memory against the OS's budget for it, a line
     // on a clock, under pressure and at each crossing. One compare of two integers per frame; the OS is asked once
     // a second. Here because this is the one hook the VR and the flat profile share.
-    vramWatchTick(presentT1, g_state->device);
+    vramWatchTick(presentT1, dev);
     if (routeCrumbs)
         hdrCrumbWrite("present", "end", "hr=0x%08X removed=0x%08X", static_cast<unsigned>(hr),
-                      static_cast<unsigned>(g_state->device->GetDeviceRemovedReason()));
+                      static_cast<unsigned>(dev ? dev->GetDeviceRemovedReason() : S_OK));
     // The hook's own work before the real call is a tick; the real call is not
     // EDVR's, so it is timed apart and kept out of the slowest three.
     g_frameTicks.markAt("present_pre", presentT0);
@@ -1821,9 +1809,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // Bind the first successful owned, non-TEST Present thread even before
     // the paired consumer registers. Exclude registration from Present timing.
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
-        renderBoundaryNoteOwnedPresent(g_state->device);
+        renderBoundaryNoteOwnedPresent(dev);
     ID3D11DeviceContext* timingContext = nullptr;
-    g_state->device->GetImmediateContext(&timingContext);
+    if (dev) dev->GetImmediateContext(&timingContext);
     if (timingContext) {
         gpuFramePresent(timingContext, g_state->frameCounter + 1);
         timingContext->Release();
@@ -1877,14 +1865,14 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     }
     const uint64_t traceBodyEnd = edvrNativeTraceNowUs();
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
-        renderBoundaryPresent(g_state->device);
+        renderBoundaryPresent(dev);
     // The callback's end is the trace's end and the last tick's edge: one read.
     const int64_t callbackEnd = qpcNow();
     g_frameTicks.markAt("render_callback", callbackEnd);
     const EdvrNativePresentSpan trace{traceBegan, edvrNativeTraceUs(presentT0),
         edvrNativeTraceUs(presentT1), traceBodyEnd, edvrNativeTraceUs(callbackEnd),
         GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};
-    nativeTimingNotePresent(g_state->device, traceToken, trace);
+    nativeTimingNotePresent(dev, traceToken, trace);
     frameTick("timing_note");
     return hr;
 }
@@ -2149,17 +2137,6 @@ State& ensureState() {
                 Log::get().note("hotkey: the FSS quit key adopted from "
                                 "your Elite bindings: %s", b);
             }
-            if (eliteBindsLookup("ExplorationFSSMiniZoomIn", b,
-                                 sizeof(b))) {
-                g_state->fssZoomStepKey.setBinding(b);
-                Log::get().note("hotkey: the FSS stepped-zoom key adopted "
-                                "from your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("ExplorationFSSZoomIn", b, sizeof(b))) {
-                g_state->fssZoomKey.setBinding(b);
-                Log::get().note("hotkey: the FSS zoom key adopted from "
-                                "your Elite bindings: %s", b);
-            }
             {
                 char pk[40];
                 g_state->fssEnterPad = XinputBinding{};
@@ -2176,20 +2153,6 @@ State& ensureState() {
                     Log::get().note("hotkey: the FSS quit key is also on "
                                     "your gamepad: %s.", pk);
                 }
-                g_state->fssZoomStepPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSMiniZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomStepPad)) {
-                    Log::get().note("hotkey: the FSS stepped zoom is also "
-                                    "on your gamepad: %s.", pk);
-                }
-                g_state->fssZoomPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomPad)) {
-                    Log::get().note("hotkey: the FSS zoom is also on your "
-                                    "gamepad: %s.", pk);
-                }
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
@@ -2200,8 +2163,7 @@ State& ensureState() {
         // key and the menu's own keys, which the rules check against.
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
-        g_state->fssModeLatchWanted =
-            eyeSyncFromConfig(Config::get()).any();
+        g_state->fssModeLatchWanted = true;
         // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
@@ -3180,12 +3142,6 @@ void hookFactoryForDevice(ID3D11Device* device) {
 
 bool deviceHookFssModeLatch() {
     return g_state != nullptr && g_state->fssModeLatch;
-}
-
-bool deviceHookTakeFssZoomPress() {
-    if (!g_state || !g_state->fssZoomPressPending) return false;
-    g_state->fssZoomPressPending = false;
-    return true;
 }
 
 void deviceHookRequestConfigRefresh() {

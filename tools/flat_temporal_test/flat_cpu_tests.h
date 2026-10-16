@@ -403,6 +403,29 @@ inline int flatCpuTests() {
         expect(has(text, "engine motion hooks 0.020 ms (calls 1.0)"),
                "the render thread's engine motion hooks are the tees alone: the draw side, apply and patch are not counted twice");
         expect(has(text, "EDVR per frame total 0.020 ms"), "and the total is the same 0.020 ms, no draw side in it");
+        expect(has(text, "engine motion hooks by part (render thread, per clocked frame): emit 0.000 ms (calls 0.0)") && has(text, "tees 0.020 ms (calls 1.0)"),
+               "the render thread's hooks are also printed a part at a time: the tees hold the 0.020 ms, the first token names the list");
+        {   // The by-part tokens cover exactly the parts the hooks total folds, so they add up to it.
+            double folded = 0, listed = 0;
+            for (unsigned p = 0; p < emcpu::kParts; ++p)
+                if (flatcpu::emFolded(p) && emcpu::kInfo[p].clocked) folded += r.emRenderMs[p];
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) listed += r.emRenderMs[flatcpu::kEmNames[i].part];
+            expect(nearly(folded, listed), "the by-part tokens cover exactly the parts the hooks total folds");
+            // Every name carries the "engine " the by-part tokens drop, and every part has its own token, in order, with its own figures
+            // (the other threads' list holds the same names behind "engine ", so each is looked for behind the separator that only this list uses).
+            bool prefixes = true, tokens = true;
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) {
+                prefixes = prefixes && std::strncmp(flatcpu::kEmNames[i].name, "engine ", 7) == 0;
+                const unsigned p = flatcpu::kEmNames[i].part;
+                char ms[32], calls[32];
+                std::snprintf(ms, sizeof(ms), "%.3f", r.emRenderMs[p] / 20.0);
+                flatcpu::callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / 20.0);
+                const std::string token = std::string(i ? ", " : "engine motion hooks by part (render thread, per clocked frame): ") +
+                                          (flatcpu::kEmNames[i].name + 7) + " " + ms + " ms (calls " + calls + ")";
+                tokens = tokens && has(text, token);
+            }
+            expect(prefixes && tokens, "all eight by-part tokens are there, in order, each with its own figures");
+        }
         expect(has(text, "engine emit 0.030 ms (calls 1.0)") && has(text, "engine copier 0.010 ms (calls 1.0)") &&
                has(text, "engine merge 0.006 ms (calls 1.0)") && has(text, "engine clear 0.004 ms (calls 1.0)"),
                "the emit, copier, merge and clear callbacks are on the other threads' line, per sampled frame");
@@ -506,6 +529,7 @@ inline int flatCpuTests() {
         run.census->idle();
         expect(!run.census->running(), "idle stops it");
         expect(flatcpu::g_gate.load() == 0 && emcpu::g_gate.load() == 0, "both gates are closed");
+        expect(emcpu::g_renderThreadId.load() == 0, "and the render thread's id is withdrawn with them");
         const flatcpu::Slot* s = flatcpu::t_ctx.slot;
         const uint64_t callsBefore = s ? s->cell[flatcpu::kReduce].calls.load() : 0;
         { flatcpu::Scope one(flatcpu::kReduce); t_now += 5; }
@@ -721,11 +745,13 @@ inline int flatCpuTests() {
         Run run;
         const uint64_t tid = GetCurrentThreadId();
         unsigned unclocked = 0, clockedOnly = 0, sampled = 0;
-        bool gatesAgree = true, gateWords = true;
+        bool gatesAgree = true, gateWords = true, tidEveryFrame = true;
         int64_t unclockedReads = 0, clockedReads = 0;
         for (int i = 0; i < 320; ++i) {
             run.frame(15625, false, [&] {
                 const uint64_t gate = flatcpu::g_gate.load();
+                // The render thread's id does not depend on the gate: it is there on the 300 frames whose gate names nobody.
+                tidEveryFrame = tidEveryFrame && emcpu::g_renderThreadId.load() == tid;
                 gatesAgree = gatesAgree && gate == emcpu::g_gate.load();
                 const int64_t before = t_reads;
                 for (int s = 0; s < 40; ++s) { flatcpu::Scope one(flatcpu::kReduce); }
@@ -739,6 +765,7 @@ inline int flatCpuTests() {
         }
         expect(gateWords, "the gate is one of three words: nobody, the render thread, everybody");
         expect(gatesAgree, "and engine motion's gate is the same word");
+        expect(tidEveryFrame, "and the render thread's id is published on every frame, the unclocked ones (gate = nobody) too");
         expect(unclocked == 300 && clockedOnly == 10 && sampled == 10,
                "320 frames: 300 clock no one, 10 clock the render thread, 10 clock every thread (and the render thread with it)");
         expect(unclockedReads == 0, "a scope on a frame that clocks no one reads the clock not once, in this instrument or engine motion's");

@@ -6,7 +6,7 @@
 // seven campaign artifacts: the movie's size, lock and upscale; the menu
 // backdrop; the loading wash, the loading panel and the splash dim. No
 // user wants half of any of these, so the surface is now the function
-// (per the fss_eye_sync precedent, src/common/eye_sync.h):
+// (one key that names the function, not the mechanisms):
 //
 //   fix.intro_video = screen | stock | skip
 //     screen  the movie plays on the splash's own screen -- world-anchored,

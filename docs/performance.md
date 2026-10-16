@@ -16,14 +16,7 @@ below and is not new evidence; update it whenever this doc changes.*
   `dlaaMotionProbe`, `dlaaCropProbe` and `edvrDlaaCostProbe`, which the smoke
   harness ran and the Feature 6 entries below cite, are deleted with
   tools/smoke's trained-pass block. The fovea geometry they exercised stays.
-- **State (older entries):** A pre-implementation design doc, mostly
-  historical (the older State bullet and the 2026-09-23 entry: Status detail
-  below). Feature 1's sharpening shipped in 0.14.0 as `render_sharpness`;
-  feature 2 flown six times, shipped OFF, now retired; feature 3's centre
-  gone (2026-09-23; `experimental.foveation_centre` retired 2026-09-24, the
-  distance defaults to 0); feature 4 superseded by settings-menu.md; feature
-  6's fixed-centre fovea built and flown, its eye-tracked crop dropped
-  2026-09-05.
+- **State (older entries):** moved to Status detail below (2026-10-15), unchanged.
 - **Open:**
   - Feature 6's seam blend-band width: "a headset-on judgement" not yet
     made (under "What must be measured first").
@@ -35,8 +28,15 @@ below and is not new evidence; update it whenever this doc changes.*
   detail below: feature 2 (VRS) as a performance lever ("Flight 6"); DLSS
   history smear as the menu-blockiness cause; feature 6's eye-tracked crop;
   feature 3's eye-tracked centre on the Pimax Crystal Super.
-- **Next flight:** None named as still pending; the two Open items above
-  are desk/headset judgements this file has not yet scheduled.
+- **State (2026-10-16): baseline FLOWN; F1-F4 and F6 ruled out** (entry
+  "2026-10-16 results" at the end). The probe is on claude/perf-baseline-probe
+  at 8f50e8ad, UNMERGED on purpose (temporary, no config key). F5 not priced
+  (needs fix.temporal_aa off in the ini; low priority); F7 not exercised.
+- **Ruled out (2026-10-16 baseline):** F1 flat direct-input resolve, F2 flat
+  in-place UI composite, F3 VR copy-through, F4 UI timing machinery, F6 per-eye
+  submit merge; one line each, with the numbers, in the results entry.
+- **Next flight:** none named. Leads (a)-(e) in the results entry, if wanted:
+  flat on-foot EDVR CPU, the ~10.6 s camera-cut reset, the VR HDR HUD seed.
 - **Environment:** D3D11 VRS (feature 2) needs NVIDIA Turing or newer via
   NVAPI — no AMD/Intel D3D11 path. Measurements here are from an RTX 5090
   (nvapi64.dll 32.0.16.1664) and a Pimax Crystal Super at HMD Quality 1.0
@@ -62,6 +62,14 @@ Nothing here is implemented yet.*
 
 ## Status detail (moved out of Status 2026-09-29)
 
+- **Older State entries (moved out of Status 2026-10-15):** A pre-implementation design doc, mostly
+  historical (the older State bullet and the 2026-09-23 entry: Status detail
+  below). Feature 1's sharpening shipped in 0.14.0 as `render_sharpness`;
+  feature 2 flown six times, shipped OFF, now retired; feature 3's centre
+  gone (2026-09-23; `experimental.foveation_centre` retired 2026-09-24, the
+  distance defaults to 0); feature 4 superseded by settings-menu.md; feature
+  6's fixed-centre fovea built and flown, its eye-tracked crop dropped
+  2026-09-05.
 - **2026-09-23:** feature 3's eye-tracked centre is gone from
   foveation.cpp (frame_flag v34): its gaze came from the legacy openvr
   half, and nothing has published one since that proxy was deleted, so the
@@ -1657,3 +1665,146 @@ posture exactly), foveation adds calls into NVIDIA's driver, and the menu
 and monitor draw only on EDVR's own copies and watch keys they never
 take. A player who wants none of it leaves the settings at their defaults
 and runs a build identical in behaviour to today's.
+
+## Baseline probe: pricing the flat/VR performance review (2026-10-15)
+
+Branch `claude/perf-baseline-probe` at `8f50e8ad` (cut from main `dbb1a262`,
+merged with `4436d57b`); the instrument lives there and is NOT merged to main.
+Results: the "2026-10-16 results" entry below. Source: `reviews/performance-flat-vr-2026-10-15.md` (static review;
+no frame cost established). This entry is the instrument, not a result. No behaviour change: no early return, no skipped work, no config key.
+`src/d3d11/perf_baseline.h` is header-only (so every rig that compiles a probed
+source links it) and holds the pure predicates, the owner-thread counters (plain
+increments) and the line formatters. `gpu_census.cpp` prints the lines from its
+30 s window close, beside the GPU cost report.
+
+**What already existed (reused) and what was added**
+
+| Item | Existed | Added |
+|---|---|---|
+| F1 flat input copy | the resolve's whole-call GPU pair (`flat cpu 5s` GPU resolve figure); `flatcpu::kBackend` | counters at both copy sites (resolve, spatial fallback); `classifyDirectInput`; GPU interval on the copy alone (census section `FrameProbeFlatInputCopy`, via hooks) |
+| F2 flat UI composite | `DoorUiLayerComposite` GPU section; `compositesInPlace` in the UI layer's own 30 s line | per-profile composite counters, `classifyInPlace` blockers (ownership excluded), out-of-place bytes, the flat adapter's picture evidence |
+| F3 VR copy-through | `DoorUiResolve`; eye-run staging | per-eye counters by actual dlSubmit format, returnable count, GPU interval on the copy (`FrameProbeVrCopyThrough`) |
+| F4 UI timing machinery | the route's own 30 s price lines (GPU side) | begin/end/poll counts, entries scanned, pending peak, CPU self-time on 1 frame in 8 with p50/p95/p99 |
+| F5 VR X draws | `DrawClock` (monitor sampling), `drawFastPathTaken` | owner-draw counts by kind, fast-path counts, X refusal reasons, hook self-time 1 draw in 64 per kind; monitor sampling unchanged |
+| F6 native submit | `native_submit_phases` (`xr_draw_submit`, `separate=`), `native_owner_invoke` | `xr_submit_eye0/1` phases (nested in `xr_draw_submit`), `owned_immediate=`, `render_executor=` |
+| F7 XeSS bridge | `xess: slot=N bridge timing ...` (30 s, copy-in / wait / execute / copy-out / total, cpu eval / alloc-wait / submit) | nothing: no phase is missing |
+
+**Log lines** (one per window; all begin `perf baseline`; a path that never ran
+says `not exercised (...)` in words):
+
+- `perf baseline F1 flat input copy: N copies (resolve R, spatial fallback S; slot 0 A, other slots B), direct-input eligible E (P%), refused: hdr .., overlay .., aliased .., format .., srgb view typeless .., srgb view typed .., unstable lifetime ..; X MB per copy over F frames; gpu G ms per copy (n timed), M ms/frame`
+- `perf baseline F2 ui composite over F frames: flat N composites (in place .., out of place .., via copy ..; owned-frame calls ..; would run in place if owned ..; blocked by shader .. / region .. / uav-bind .. / typed-load ..; out-of-place wrote X MB per composite); vr ...; flat picture: treated .., untreated .., uav-bindable .., whole region .. (evidence, not an ownership proof); gpu ...`
+- `perf baseline F3 vr trained output over F frames: left N eye-frames at WxH (dlOut fmt a -> dlSubmit fmt b): ui resolve wrote .., copy-through .. [UNORM .., TYPELESS .., SRGB .., other ..], returnable as dlOut .., X MB per copy; right ...; gpu ...`
+- `perf baseline F4 ui timing machinery over F frames: timer pairs begun .. (../frame, max ../frame), untimed .., ended ..; polls .. (../frame, max ../frame) read .. timers; pending entries scanned .. (../frame), pending peak N of 1024; self cpu over C clocked frames (1 in 8): begin .. us, end .. us, poll .. us per frame, frame total p50/p95/p99 a/b/c us`
+- `perf baseline F5 vr draw hooks over F frames: D n draws (../frame, fast path ..), hook self p50/p95 a/b us (c clocked); I ...; N ...; X ...; X draws with AA off and unclaimed (drawPathFast would take) E of T (P%), not eligible: aa on .., claimed by a fix .., subscriber gate .., engine velocity .., vr world route ..`
+- F6, in the runtime log: `native_submit_phases,...,separate=S,owned_immediate=O,render_executor=R,...,xr_draw_submit=p50/p95/p99/max,...,xr_submit_eye0=...,xr_submit_eye1=...` (wall ms; the eye phases are nested in `xr_draw_submit`; the rest of the draw block is recording).
+- F7: `xess: slot=N bridge timing over E evals, ms median/p95: copy-in, wait, d3d12 execute, copy-out, d3d11 total ...; cpu ms median/p95: eval, alloc-wait (blocked a of b), submit`. Absent XeSS: no such line.
+
+**Reading them.** F1-F3 eligibility is a bound, not a proof. F1's "unstable
+lifetime" compares raw resource pointers on consecutive frames and never takes a
+reference. F1 "aliased" is what the resolver can see (a texture it owns, or the
+depth or clean input); the game's final-copy destination is not visible there.
+F2's `would run in place if owned` counts composites where only ownership is
+missing; whether a flat picture is disposable and fully rewritten needs the
+AA mode: EDVR's TAA output is its own history and never qualifies, an SDK's
+final scratch may. Run TAA and DLSS in separate scenes so the line is
+attributable. F3 `dlOut fmt`/`dlSubmit fmt` are DXGI enum values (28 UNORM, 27
+TYPELESS, 29 UNORM_SRGB); `returnable` is typed UNORM both sides with no UI
+resolve. F4's self-time is exclusive of nothing: begin/end/poll are timed whole
+and a poll's scan is inside it. F5's `would take` is the pure draw-fast-path
+predicate; the X thunk's post-draw consumers (weapon motion, scene recognition)
+are not evaluated, so a shortcut must still run them. GPU sections are sampled
+round-robin by the census (one section per frame, K-capped) and have no turn
+until called, so a probe section's `n timed` can be small in a short scene.
+
+**Flight plan** (one version-verified baseline per runtime; check
+`python tools\edvr_log.py --target <t> --expect-build HEAD --version`, then read
+the last two windows of each scene; discard the window an eye run or a loading
+screen fell in):
+
+1. Pimax OpenXR VR (EDVR's native runtime, Quest 3 as the second headset if
+   available): hangar idle 2 min; supercruise 2 min; a station concourse with the
+   HUD up 2 min. Settings, one scene set each: AA off; TAA; DLSS (or DLAA); UI
+   100 and UI 125 (`fix.ui_quality`); sharpness off and on
+   (`fix.render_sharpness`). F3 needs the trained path (DLSS/DLAA); F5 wants AA
+   off for its eligible count and AA on for the contrast; F6 needs
+   `native_submit_phases` (runtime log), record `separate=` and `owned_immediate=`.
+2. SteamVR VR (the aapvr driver): the same scenes and settings. Attribute the run
+   from the runtime log's headset_key line.
+3. Steam flat: on foot in a settlement 2 min; in a ship cockpit with the HUD up
+   2 min; the galaxy map 1 min. Settings: AA off; TAA; DLSS and, if the machine
+   has one, XeSS or FSR; UI 100 and UI 125; sharpness off and on. F1 and F2 come
+   from this runtime; F7 only with XeSS selected.
+4. For each: record runtime, headset and refresh, GPU and driver, R render / E
+   evaluation / D output sizes, UI percent, AA preset, SDK versions. Compare F4's
+   `self cpu` and the census main line's frame time between UI 100 and 125. Then
+   decide F1-F6 on the numbers, one change at a time.
+
+**Tests.** `gpu_census_test` (predicates for F1, F2, F3 and F5, the stability
+tracker, each line's text with seeded counters, "not exercised" for an idle
+window, worst-case line length, the sections' idle turns, and source pins that
+every site is noted once and every line is written once), `aa_off_test` (a model
+of the X thunk against `drawFastPathTaken`), `flat_mono_resolve_test` (both copy
+sites note themselves), `openxr_native_test` (per-eye phases and their
+validation), `openxr_stereo_test` (the per-eye brackets sit inside the draw
+bracket).
+
+## 2026-10-16 results: the baseline flights
+
+Instrument: `claude/perf-baseline-probe` at `8f50e8ad` (DLL `v0.20.0-rc.2-12-g8f50e8ad`),
+unmerged. VR: SteamVR, aapvr headset, RTX 5090, 2016x2016 rendered and DLSS'd
+to 4032x4032, 90 Hz paced. Flat: Steam, 2496x1404 rendered to 3840x2160, DLSS
+preset K and TAA. UI 125% throughout. Logs: Frontier
+`edvr_gfx_20261016_022808.log` with `edvr_openxr_20261016_022810_203_38476.log`;
+Steam `edvr_gfx_20261016_023749.log`. Each figure is a measured bound from the
+`perf baseline F1..F5` lines and `native_submit_phases`; none is a frame-time
+proof beyond the percentages given.
+
+ruled out: F1 flat direct-input resolve, because 100% of flat copies were
+eligible but each copy costs 0.010-0.016 ms GPU (14 MB, 108 samples), about
+0.1% of an 11.1 ms frame. In VR every copy was refused for "hdr".
+
+ruled out: F2 flat in-place UI composite, because the out-of-place composite
+costs 0.054-0.065 ms GPU per frame at 3840x2160, TAA output never qualifies
+(it is its own history), and the realistic DLSS saving is 0.01-0.03 ms. In VR
+every composite already ran in place.
+
+ruled out: F3 VR copy-through, because 0 were eligible: the UI resolve wrote
+every eye-frame, and Elite submits R8G8B8A8_TYPELESS, which the rule keeps.
+
+ruled out: F4 UI timing machinery, because it costs about 0.07 ms CPU per frame
+in VR (42-49 timer pairs) and 0.03 ms in flat, on a render thread with 5-7 ms
+of slack.
+
+ruled out: F6 per-eye submit merge, because the second eye's flush p50 is about
+0.02 ms (separate device, owned immediate context).
+
+F5 VR AA-off X shortcut: not priced. With AA off by the F7 hotkey, 0 of 2.7M X
+draws were eligible: 99.4% were held by the subscriber gate, because
+`fix.temporal_aa` stayed on in the ini. Pricing it needs `fix.temporal_aa` off in
+the ini; low priority.
+
+F7 XeSS: not exercised (DLSS and TAA only).
+
+### Leads the baseline found (not in the review)
+
+Hypotheses and observations from the same logs; none is a built fix.
+
+(a) Flat heavy on-foot scene: EDVR CPU 3.6-7.6 ms per frame at 62-77 fps. The
+biggest parts are "other" 2.95 ms, the engine motion draw wrapper 0.99, the
+engine motion hooks 1.0, coverage 0.7, copy checks 0.6 and contract reduction
+0.55 (the `flat cpu 5s` families).
+
+(b) Flat cockpit: `flat resolve reset event ... camera-cut=1` every ~953 frames
+(about 10.6 s) in DLSS and TAA, with the now and previous camera positions about
+5 km apart, so a periodic history reset.
+
+(c) VR AA-on: the HDR HUD depth-stencil seed costs 0.29-0.33 ms GPU per
+eye-frame, 0.8-0.9 ms per frame, the largest in-frame EDVR GPU item.
+
+(d) VR draw-hook CPU is 0.69-0.76 ms per frame with AA on against 0.15-0.17 with
+AA off. About 0.06 ms is attributable to engine motion; the rest is
+unattributed (hypothesis: about 90 UI-layer reissued draws per frame).
+
+(e) `journal_reglob` takes 3-4.5 ms every 12 s on the journal thread (2489
+files). That is off the render thread and minor.

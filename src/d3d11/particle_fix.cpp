@@ -18,6 +18,9 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"   // bindingShaderHash: the bound vertex shader's hash, set with the shader
 #include "exposure_fix.h"   // lookupShaderHash
+#include "particle_capture_core.h"
+#include "billboard_rollfree.h"   // the roll-free copy of the scene block, and the table of watched blocks
+#include "gpu_interval.h"         // sampled GPU time of that copy
 #include "supercruise_lines.h"   // kUiVsSpaceDust, kUiPsSpaceDust: the dust's shader pair
 // flare_vs.h is compiled by the build shader generator.
 // particle_vs.h is compiled by the build shader generator.
@@ -38,6 +41,11 @@ bool g_particleHideStars = false;
 // spaceDustHidden() (particle_fix.h).
 bool g_supercruiseDustHidden = false;
 bool g_normalSpaceDustHidden = false;
+// The roll-free rebind (billboard_rollfree.h): this draw's pending flag, whether a rebind is on the context, and the
+// identities of the watched scene blocks for the Map tee's inline compare.
+bool g_rollFreePending = false;
+bool g_rollFreeEngaged = false;
+const void* g_watchedBlocks[4] = {};
 }  // namespace detail
 using detail::g_supercruiseDustHidden;   // the configure and skip code below reads them by their plain names
 using detail::g_normalSpaceDustHidden;
@@ -173,12 +181,34 @@ uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
     return h;
 }
 
-int billboardVariantFor(ID3D11DeviceContext* ctx) {
-    const uint64_t h = boundVsHashFast(ctx);
-    if (!h) return -1;
-    for (int i = 0; i < kVariantCount; ++i) {
-        if (h == kVariants[i].hash) return i;
-    }
+// THE ROLL-FREE FAMILIES (docs/billboard-root-cause-2026-10-16.md). Camera-facing billboard vertex shaders that
+// have no transcription: their quads are spanned on cb1[277]/[278] (right/up) and roll with the head. They are
+// matched by hash, like the two transcriptions, and given a copy of the scene block with those two rows
+// roll-free at VERTEX slot 1 for the draw (billboard_rollfree.h). Each hash below was disassembled and its only
+// uses of cb1[277]/[278] are the quad span: the cross(cb1[278], cb1[279]) form (right = normalize of the cross),
+// the direct form (position += cb1[277] * x + cb1[278] * y), or the fallback up of a shader that takes a supplied
+// axis when it has one (1FBA99C4911D7ACF, DB113566B6A59C5B: movc axis, cb3[1], cb1[278]). None uses either row
+// for a lighting or view-space vector. cb1[279] and everything else are left as the game wrote them.
+constexpr int kRollFreeCount = 16;
+constexpr uint64_t kRollFreeVs[kRollFreeCount] = {
+    0x9AEC596A2B036EA6ull,   // the witchspace starfield (skipped while fix.witchspace_stars = off)
+    0xAFBCD3ADB9092F78ull, 0xBBAD1CA808E1E292ull, 0x1B285CBC9F185D4Dull, 0x4BDE4DBF88C2BA27ull,
+    0x78F5F08D02EE38CCull,   // explosion suspect
+    0x9F4BBCFCD3B68BC9ull,   // explosion suspect (no alignment cascade at all)
+    0x1FBA99C4911D7ACFull, 0x2BF557356A28AA0Dull, 0xDB113566B6A59C5Bull,
+    0x68DDDEF04D9894AFull,   // the stretched sky billboard (direct span)
+    0xF7A6E916F14A3B1Aull,   // direct span
+    0x12382D2EA45E9632ull, 0x94EA991C3A03DBD9ull, 0xC31238331D8AC3D4ull, 0xF1502353BE051A2Dull};   // pool-record sprites (direct span)
+constexpr bool rollFreeTableAgrees() {
+    for (int i = 0; i < kRollFreeCount; ++i)
+        if (kRollFreeVs[i] != detail::kBillboardVs[2 + i]) return false;
+    return true;
+}
+static_assert(rollFreeTableAgrees(), "particle_fix.h's kBillboardVs must list the two transcriptions and then kRollFreeVs in order");
+
+int rollFreeIndexOf(uint64_t h) {
+    for (int i = 0; i < kRollFreeCount; ++i)
+        if (h == kRollFreeVs[i]) return i;
     return -1;
 }
 
@@ -187,11 +217,39 @@ int billboardVariantFor(ID3D11DeviceContext* ctx) {
 // dynamic buffer the GPU owns is write-only from here -- so the only way
 // to substitute is to watch the game write it, which is the mechanism the
 // panel distance fix has used since 0.3.
-constexpr uint32_t kMaxShadow = 8192;
-void*    g_target = nullptr;
-uint8_t  g_shadow[kMaxShadow];
-uint32_t g_shadowBytes = 0;
-bool     g_shadowValid = false;
+//
+// The shadow keeps only rows 270..279 of the block (particle_capture_core.h says why and what reads
+// them), laid out at the block's own offsets; `size` is the mapped size the readers gate on.
+//
+// Since 2026-10-16 there can be more than one scene block (each eye's, any view): billboard_rollfree.h's table
+// holds up to four, each with its own shadow, write counter and roll-free copy. g_cur is the shadow of the block
+// the draw being matched has bound at VS slot 1, which solveCamera and shapeOk read.
+rollfree::Blocks     g_blocks;
+particlecap::Shadow* g_cur = nullptr;
+particlecap::Tracker g_track;
+uint32_t g_retireNotes = 0;
+
+// The roll-free rebind's state for the draw in flight, and its census for the 10 s line.
+int      g_rfSlot = -1;
+int      g_rfIndex = -1;
+uint64_t g_rfSeen[kRollFreeCount] = {};
+uint64_t g_rfBound[kRollFreeCount] = {};
+bool     g_rfNoted[kRollFreeCount] = {};
+uint64_t g_rfFrames = 0;
+uint64_t g_rfNoteMs = 0;
+rollfree::Counters g_rfAtNote;
+GpuIntervals<8> g_copyGpu;               // the lazy copy's GPU time, one copy in 16, polled once a frame
+ID3D11DeviceContext* g_copyGpuCtx = nullptr;
+uint64_t g_copySeq = 0;
+uint64_t g_cpuSampled = 0, g_cpuTicks = 0, g_rfBindCalls = 0;   // Begin's own CPU time, one in 8
+unsigned g_gpuSamplesAtNote = 0;
+double   g_gpuMsAtNote = 0.0;
+FaultBudget g_rfBudget("particle.rollFree", 5);
+
+void publishWatched() {
+    const void* const* w = g_blocks.watched();
+    for (int i = 0; i < 4; ++i) detail::g_watchedBlocks[i] = w[i];
+}
 uint64_t g_applied = 0;
 uint64_t g_appliedAtNote = 0;
 uint64_t g_noteMs = 0;
@@ -258,8 +316,8 @@ bool  g_camOk = false;
 
 void solveCamera() {
     g_camOk = false;
-    if (!g_shadowValid || g_shadowBytes < 274 * 16) return;
-    const float* f = reinterpret_cast<const float*>(g_shadow);
+    if (!g_cur || !g_cur->valid || g_cur->size < 274 * 16) return;
+    const float* f = reinterpret_cast<const float*>(g_cur->bytes);
     const float* c0 = f + 270 * 4;   // the x contribution
     const float* c1 = f + 271 * 4;   // y
     const float* c2 = f + 272 * 4;   // z
@@ -383,28 +441,128 @@ bool spaceDustSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     return true;
 }
 
-void* particleTarget() {
-    return detail::g_particleMode == Mode::kSteady ? g_target : nullptr;
+uint32_t particleCapture(const void* res, const void* data, uint32_t bytes) {
+    return g_blocks.capture(res, detail::g_particleMode == Mode::kSteady, data, bytes,
+                            [](void* dst, const void* src, size_t n) { memcpy(dst, src, n); });
 }
 
-void particleCapture(const void* data, uint32_t bytes) {
-    if (detail::g_particleMode != Mode::kSteady || !data || bytes < 64 || bytes > kMaxShadow) {
-        g_shadowValid = false;
-        return;
+namespace {
+bool anyBlockWatched() {
+    for (int i = 0; i < 4; ++i)
+        if (detail::g_watchedBlocks[i]) return true;
+    return false;
+}
+
+// Every 10 s while steady is on: which billboard hashes drew, how many were given a roll-free block, the lazy
+// copy's rate and cost. "not exercised" when none of the sixteen drew in the window.
+void rollFreeReport(uint64_t now) {
+    if (g_rfNoteMs == 0) { g_rfNoteMs = now ? now : 1; return; }
+    if (now - g_rfNoteMs < 10000) return;
+    g_rfNoteMs = now;
+    char line[1024];
+    size_t n = 0;
+    auto put = [&](const char* fmt, auto... a) {
+        if (n >= sizeof line) return;
+        const int k = std::snprintf(line + n, sizeof line - n, fmt, a...);
+        if (k > 0) n += static_cast<size_t>(k) < sizeof line - n ? static_cast<size_t>(k) : sizeof line - n - 1;
+    };
+    const rollfree::Counters& c = g_blocks.counters;
+    const uint64_t copies = c.copies - g_rfAtNote.copies, binds = c.binds - g_rfAtNote.binds;
+    const uint64_t noBasis = c.noBasis - g_rfAtNote.noBasis, fails = c.failures - g_rfAtNote.failures;
+    bool any = false;
+    for (int i = 0; i < kRollFreeCount; ++i) any |= g_rfSeen[i] != 0;
+    if (!any) {
+        put("billboard roll-free (%llu frame(s)): not exercised, none of the %d vertex shaders drew; %s",
+            static_cast<unsigned long long>(g_rfFrames), kRollFreeCount,
+            anyBlockWatched() ? "a scene block is watched" : "no scene block is watched");
+    } else {
+        put("billboard roll-free (%llu frame(s)), rebound/seen by vertex shader:", static_cast<unsigned long long>(g_rfFrames));
+        for (int i = 0; i < kRollFreeCount; ++i) {
+            if (!g_rfSeen[i]) continue;
+            put(" %016llX %llu/%llu;", static_cast<unsigned long long>(kRollFreeVs[i]),
+                static_cast<unsigned long long>(g_rfBound[i]), static_cast<unsigned long long>(g_rfSeen[i]));
+        }
+        put(" block copies %.2f/frame for %llu rebound draw(s)", g_rfFrames ? static_cast<double>(copies) / static_cast<double>(g_rfFrames) : 0.0,
+            static_cast<unsigned long long>(binds));
+        if (noBasis) put(", %llu kept the game's block (looking within a degree of straight up)", static_cast<unsigned long long>(noBasis));
+        if (fails) put(", %llu FAILED (copy or buffer creation)", static_cast<unsigned long long>(fails));
+        if (g_cpuSampled) {
+            put("; cpu %.2f us/draw (%llu timed)",
+                1e6 * static_cast<double>(g_cpuTicks) / static_cast<double>(qpcFrequency()) / static_cast<double>(g_cpuSampled),
+                static_cast<unsigned long long>(g_cpuSampled));
+        } else {
+            put("; cpu not timed");
+        }
+        const unsigned gs = g_copyGpu.totals.samples - g_gpuSamplesAtNote;
+        if (gs) put("; gpu copy %.4f ms (%u timed)", (g_copyGpu.totals.ms - g_gpuMsAtNote) / gs, gs);
+        else put("; gpu copy not timed (one copy in 16 is sampled)");
     }
-    memcpy(g_shadow, data, bytes);
-    g_shadowBytes = bytes;
-    g_shadowValid = true;
+    Log::get().note("%s", line);
+    for (int i = 0; i < kRollFreeCount; ++i) { g_rfSeen[i] = 0; g_rfBound[i] = 0; }
+    g_rfFrames = 0;
+    g_rfAtNote = c;
+    g_cpuSampled = 0;
+    g_cpuTicks = 0;
+    g_gpuSamplesAtNote = g_copyGpu.totals.samples;
+    g_gpuMsAtNote = g_copyGpu.totals.ms;
+}
+}  // namespace
+
+// Once a frame, from vScreenFrameBoundary (the owner thread). When no plume, flare or other billboard of the
+// family has drawn for kRetireFrames frames, every watched block is let go: the Map tee stops remembering the
+// buffers' pointers and the Unmap tee stops reading them. The next matched draw learns its block again
+// (particleOnDraw), and the first write after that is what the substitution is built from, exactly as at the
+// first learn of a session.
+void particleFrameBoundary() {
+    if (detail::g_particleMode != Mode::kSteady) return;
+    ++g_rfFrames;
+    if (g_copyGpuCtx) g_copyGpu.poll(g_copyGpuCtx);
+    rollFreeReport(nowMs());
+    if (!g_track.frameBoundary(anyBlockWatched())) return;
+    g_blocks.clear();
+    publishWatched();
+    g_cur = nullptr;
+    detail::g_rollFreePending = false;
+    if (g_retireNotes < 4) {
+        ++g_retireNotes;
+        Log::get().note(
+            "particle billboard: no plume, flare or other billboard drawn for %u frames; the scene constants at slot 1 are "
+            "no longer watched until one is drawn again (retired %llu time(s) this session).",
+            particlecap::kRetireFrames, static_cast<unsigned long long>(g_track.retired));
+    }
+}
+
+void particleDescribeTarget(char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    const char* state = detail::g_particleMode != Mode::kSteady ? "off (stock)"
+                        : anyBlockWatched() ? "armed" : (g_track.retired ? "retired" : "not learned");
+    std::snprintf(out, cap, "particle target %s, retired %llu, re-armed %llu", state,
+                  static_cast<unsigned long long>(g_track.retired), static_cast<unsigned long long>(g_track.rearmed));
 }
 
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t instances) {
     if (detail::g_particleMode != Mode::kSteady || !ctx) return false;
-    if (kind != 'X' && kind != 'N') return false;
-    if (instances == 0 || count < 6) return false;
-    const int variant = billboardVariantFor(ctx);
-    if (variant < 0) return false;
-    g_activeVariant = variant;
+    const uint64_t h = boundVsHashFast(ctx);
+    int variant = -1;
+    int rf = -1;
+    if (h == kVariants[0].hash) variant = 0;
+    else if (h == kVariants[1].hash) variant = 1;
+    else rf = rollFreeIndexOf(h);
+    if (variant >= 0) {
+        // The two transcriptions keep their rule: instanced geometry of at least a quad.
+        if (kind != 'X' && kind != 'N') return false;
+        if (instances == 0 || count < 6) return false;
+        g_activeVariant = variant;
+    } else if (rf >= 0) {
+        if (count < 3) return false;
+        // fix.witchspace_stars = off withholds this draw further down the ladder; do not rebind a draw that is not made.
+        if (h == kWitchspaceStarsVs && g_hideWitchspaceStars) return false;
+        ++g_rfSeen[rf];
+    } else {
+        return false;
+    }
+    g_track.noteMatch();
 
     // Follow the buffer the game binds for these draws. Learning it here
     // rather than assuming means a build that moves the block simply never
@@ -412,29 +570,82 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     ID3D11Buffer* cb = nullptr;
     ctx->VSGetConstantBuffers(1, 1, &cb);
     if (!cb) return false;
-    if (cb != g_target) {
-        g_target = cb;
-        g_shadowValid = false;
-        if (!g_learnNoted) {
-            g_learnNoted = true;
-            Log::get().note(
-                "particle billboard: watching the plume shader's constants "
-                "at slot 1. The next write the game makes there is what the "
-                "substitution is built from; until then these draws go "
-                "through untouched.");
+    int slot = g_blocks.find(cb);
+    if (slot < 0) {
+        slot = g_blocks.learn(cb);
+        publishWatched();
+        if (slot >= 0) {
+            if (g_track.noteLearned() && g_retireNotes < 4) {
+                ++g_retireNotes;
+                Log::get().note(
+                    "particle billboard: a billboard is drawn again; watching the constants at slot 1 once "
+                    "more (re-armed %llu time(s) after a retirement).",
+                    static_cast<unsigned long long>(g_track.rearmed));
+            }
+            if (!g_learnNoted) {
+                g_learnNoted = true;
+                Log::get().note(
+                    "particle billboard: watching the scene constants at slot 1. The next write the game makes "
+                    "there is what the substitution is built from; until then these draws go "
+                    "through untouched.");
+            }
         }
         cb->Release();
         return false;
     }
     cb->Release();
+    particlecap::Shadow* sh = &g_blocks.at(slot)->shadow;
+    g_cur = sh;
+    if (!sh->valid) return false;
+    if (variant >= 0) return shapeOk(reinterpret_cast<const float*>(sh->bytes), sh->size / 4);
 
-    if (!g_shadowValid) return false;
-    return shapeOk(reinterpret_cast<const float*>(g_shadow), g_shadowBytes / 4);
+    // A roll-free family: arm the rebind for forwardWithVerdict and leave the draw in the ladder as the game made it.
+    if (sh->size < particlecap::kRangeEnd) return false;
+    g_rfSlot = slot;
+    g_rfIndex = rf;
+    detail::g_rollFreePending = true;
+    g_copyGpuCtx = ctx;
+    return false;
+}
+
+void particleRollFreeBegin(ID3D11DeviceContext* ctx) {
+    detail::g_rollFreePending = false;
+    if (!ctx || detail::g_particleMode != Mode::kSteady || g_rfSlot < 0 || g_rfIndex < 0) return;
+    guardedBudget(g_rfBudget, [&] {
+        const bool timed = ((++g_rfBindCalls) & 7u) == 0;
+        const int64_t t0 = timed ? qpcNow() : 0;
+        ID3D11Buffer* cb = nullptr;
+        ctx->VSGetConstantBuffers(1, 1, &cb);
+        if (!cb) return;
+        bool gpuOpen = false;
+        if (g_blocks.needsCopy(g_rfSlot) && ((++g_copySeq) & 15u) == 0) gpuOpen = g_copyGpu.begin(ctx);
+        ID3D11Buffer* ours = g_blocks.prepare(ctx, g_rfSlot, cb);
+        if (gpuOpen) g_copyGpu.end(ctx);
+        cb->Release();
+        if (ours && g_blocks.bind(ctx, ours)) {
+            detail::g_rollFreeEngaged = true;
+            ++g_rfBound[g_rfIndex];
+            if (!g_rfNoted[g_rfIndex]) {
+                g_rfNoted[g_rfIndex] = true;
+                Log::get().note(
+                    "particle billboard: roll-free scene block first bound for vs %016llX (rows 277 and 278 at vertex "
+                    "slot 1 only; the pixel stage keeps the game's block).",
+                    static_cast<unsigned long long>(kRollFreeVs[g_rfIndex]));
+            }
+        }
+        if (timed) { g_cpuTicks += static_cast<uint64_t>(qpcNow() - t0); ++g_cpuSampled; }
+    });
+}
+
+void particleRollFreeEnd(ID3D11DeviceContext* ctx) {
+    if (!detail::g_rollFreeEngaged) return;
+    detail::g_rollFreeEngaged = false;
+    g_blocks.restore(ctx);
 }
 
 void particleBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!ctx || !g_shadowValid) return;
+    if (!ctx || !g_cur || !g_cur->valid) return;
     const int variant = g_activeVariant;
     if (variant < 0 || variant >= kVariantCount) return;
     guardedBudget(g_subBudget, [&] {
@@ -623,15 +834,21 @@ void particleConfigure(Config& cfg) {
     if (detail::g_particleMode != wasMode) {
         if (detail::g_particleMode == Mode::kSteady) {
             g_learnNoted = false;
+            g_blocks.enabled = true;
             Log::get().note(
                 "particle billboard: STEADY -- smoke and steam quads are "
                 "built against world up instead of the view's up, so they "
                 "face you without rolling when you tilt your head or swing "
-                "the camera. Read from the game's own shader: "
+                "the camera; the other camera-facing billboards (explosions "
+                "among them) are given a roll-free camera basis at vertex "
+                "slot 1. Read from the game's own shader: "
                 "docs/particle-billboards.md.");
         } else {
-            g_target = nullptr;
-            g_shadowValid = false;
+            g_blocks.enabled = false;
+            g_blocks.clear();
+            publishWatched();
+            g_cur = nullptr;
+            detail::g_rollFreePending = false;
             Log::get().note("particle billboard: stock.");
         }
     }
@@ -664,8 +881,13 @@ void particleShutdown() {
         g_savedCb3 = nullptr;
     }
     g_engaged = false;
-    g_target = nullptr;
-    g_shadowValid = false;
+    if (detail::g_rollFreeEngaged && g_copyGpuCtx) particleRollFreeEnd(g_copyGpuCtx);
+    detail::g_rollFreePending = false;
+    g_blocks.shutdown();
+    publishWatched();
+    g_cur = nullptr;
+    g_copyGpuCtx = nullptr;
+    g_copyGpu.reset();
 }
 
 }  // namespace edvr

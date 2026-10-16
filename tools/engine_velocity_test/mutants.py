@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Mutation proof for the remember-cap line (src\\d3d11\\engine_velocity.cpp, tools\\engine_velocity_test\\remember_cap_tests.h).
+"""Mutation proof for the remember-cap line (src\\d3d11\\engine_velocity.cpp, tools\\engine_velocity_test\\remember_cap_tests.h)
+and for the overlay guard's remembered verification (GuardVerified, cases G1-G3 in flat_lazy_tests.h: every such check's text starts
+"guard G<n>").
 
 A full remember table used to drop a keyed shader object without a word. It now writes one line per kind (vertex, pixel)
 on the first drop. remember_cap_tests.h holds the rules (cases R1-R5; every check's text starts "cap R<n>"). A rig that
@@ -29,6 +31,7 @@ ROOT = HERE.parents[1]
 SOURCE = ROOT / "src" / "d3d11" / "engine_velocity.cpp"
 RIG = HERE / "engine_velocity_test.cpp"
 CASES = HERE / "remember_cap_tests.h"
+GUARD_CASES = HERE / "flat_lazy_tests.h"
 GEN = ROOT / "build" / "gen"
 # (name, anchor, replacement, case): the rig must fail on a check whose text starts with the case.
 MUTATIONS = [
@@ -44,6 +47,15 @@ MUTATIONS = [
      "if (g_vs.size() >= kRememberCap || g_vs.count(shader)) {", "cap R2"),
     ("ps-line-on-reoffer", "if (g_ps.count(shader)) return;\n    if (g_ps.size() >= kRememberCap) {",
      "if (g_ps.size() >= kRememberCap || g_ps.count(shader)) {", "cap R2"),
+    # The overlay guard's remembered verification (GuardVerified): each input of the key is removed in turn, and the remembering itself.
+    # G1: the game rebinds t3 between two guarded draws and its next state must be what the restore writes back, t3 included.
+    # G2: a verification is not reused once RTV0, DSV0 or the private SRV's identity moved, and is reused while none did (the shape of the
+    #     D3D calls a guarded draw makes in the sequence). G3: the pixels of the sequence do not change (the control of the whole).
+    ("guard-ignores-t3-generation", "g_guardVerified.srv3Gen == bindingGeneration(BindSlot::PsSrv3) &&",
+     "true &&", "guard G1"),
+    ("guard-ignores-rtv-generation", "g_guardVerified.rtvGen == bindingGeneration(BindSlot::Rtv0) &&", "true &&", "guard G2"),
+    ("guard-ignores-dsv-generation", "g_guardVerified.dsvGen == bindingGeneration(BindSlot::Dsv0);", "true;", "guard G2"),
+    ("guard-never-trusts", "return !g_guardTrustOff && g_guardVerified.valid", "return false && g_guardVerified.valid", "guard G2"),
 ]
 CL_FLAGS = ["/nologo", "/O2", "/MT", "/std:c++17", "/EHsc", "/W4", "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS", "/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG",
@@ -62,7 +74,7 @@ def self_test():
     for name, anchor, replacement, case in MUTATIONS:
         assert source.count(anchor) == 1, name + ": anchor found " + str(source.count(anchor)) + " times, want 1"
         assert anchor != replacement, name + ": no edit"
-        assert case + ":" in cases, name + ": the rig has no check '" + case + ":'"
+        assert case + ":" in cases + read(GUARD_CASES), name + ": the rig has no check '" + case + ":'"
     # The two log fragments the rig looks for are the ones the source writes.
     for kind in ("vertex", "pixel"):
         fragment = kind + " shader remember cap reached"
@@ -125,6 +137,7 @@ def run(only, jobs):
     with tempfile.TemporaryDirectory(prefix="edvr-engine-velocity-mutants-") as directory:
         temp = Path(directory)
         shared = [compile_obj(tc, RIG, temp, "rig"),
+                  compile_obj(tc, ROOT / "src" / "d3d11" / "skin_join_gpu.cpp", temp, "skin_join_gpu"),   # (build.bat links it; --run did not, since F2)
                   compile_obj(tc, ROOT / "src" / "d3d11" / "gpu_timing.cpp", temp, "gpu_timing"),
                   compile_obj(tc, ROOT / "src" / "d3d11" / "gpu_span_d3d11.cpp", temp, "gpu_span")]
 
@@ -145,7 +158,7 @@ def run(only, jobs):
         failures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             for name, case, result in pool.map(one, selected):
-                labels = re.findall(r"^FAIL: (cap R\d+):", result.stderr, re.M)
+                labels = re.findall(r"^FAIL: ((?:cap R|guard G)\d+):", result.stderr, re.M)
                 if result.returncode != 1 or case not in labels:
                     failures.append(name + ": survived or failed the wrong check (exit " + str(result.returncode) + ", wanted " + case
                                     + ")\n" + result.stdout + result.stderr)

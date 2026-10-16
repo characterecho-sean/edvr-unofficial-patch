@@ -176,8 +176,8 @@ namespace {
 // "# moved-from: fix.exposure_damping" above a key, in the NEW file: where this
 // setting used to live. Read as a map from the old dotted name to the new one.
 // Annotations STACK: several old names may precede one key, which is how two
-// settings merge into a single new one (fss_eye_heal + fss_reveal_sync ->
-// fss_eye_sync); each old name maps to the same target, and when more than one
+// settings merge into a single new one (two old names above one new key);
+// each old name maps to the same target, and when more than one
 // old value is present in a user's file the last one in file order lands (they
 // agree in every configuration that was ever a default).
 struct MovedTarget {

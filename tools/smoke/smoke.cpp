@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "../../src/common/temporal_math.h"
+#include "../openxr_native_test/present_device.h"
 #include <cmath>
 #include <cstring>
 
@@ -191,6 +192,44 @@ bool expectRefused(void* result, const char* label) {
     return true;
 }
 
+// --fixes-off-device runs against its own copy of the proxy with its own edvr.ini beside it, because the proxy reads the ini
+// from its module directory first. Nothing the caller left in build\ (an edvr.ini, a flat profile marker) can then decide
+// whether this mode tests anything. The copy lives beside smoke.exe and is overwritten each run.
+bool stageFixesOffProxy(const char* proxy, char* staged, size_t stagedSize) {
+    char dir[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, dir, MAX_PATH)) return false;
+    char* slash = strrchr(dir, '\\');
+    if (!slash) return false;
+    *slash = '\0';
+    strncat_s(dir, "\\smoke_fixes_off", _TRUNCATE);
+    CreateDirectoryA(dir, nullptr);
+    char ini[MAX_PATH];
+    strcpy_s(ini, dir);
+    strncat_s(ini, "\\edvr.ini", _TRUNCATE);
+    HANDLE f = CreateFileA(ini, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const char text[] = "[advanced]\r\nd3d11_fixes = 0\r\n";
+    DWORD wrote = 0;
+    const BOOL ok = WriteFile(f, text, sizeof(text) - 1, &wrote, nullptr);
+    CloseHandle(f);
+    if (!ok || wrote != sizeof(text) - 1) return false;
+    strncat_s(dir, "\\d3d11.dll", _TRUNCATE);
+    if (!CopyFileA(proxy, dir, FALSE)) return false;
+    strcpy_s(staged, stagedSize, dir);
+    return true;
+}
+
+// Whether IDXGISwapChain::Present (vtable slot 8) now lives in the module `mod`: the proxy's Present hook is on. The Present
+// checks below prove nothing about the hook without it.
+bool presentIsHookedBy(IDXGISwapChain* swapchain, HMODULE mod) {
+    void** vtable = *reinterpret_cast<void***>(swapchain);
+    HMODULE owner = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(vtable[8]), &owner))
+        return false;
+    return owner == mod;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -223,7 +262,19 @@ int main(int argc, char** argv) {
         if (!GetModuleFileNameA(nullptr, armed, MAX_PATH)) return fail("executable path");
         if (char* slash = strrchr(armed, '\\')) {
             *slash = '\0';
-            strncat_s(armed, "\\edvr_logs\\d3d11_hooks.armed", _TRUNCATE);
+            // build.bat's rig runner moves every process's log directory (EDVR_LOG_DIR, limited to this exe's directory by
+            // EDVR_LOG_DIR_FOR; src\common\config.cpp), and the proxy arms its sentinel there.
+            char moved[MAX_PATH], only[MAX_PATH];
+            const DWORD movedLen = GetEnvironmentVariableA("EDVR_LOG_DIR", moved, MAX_PATH);
+            const DWORD onlyLen = GetEnvironmentVariableA("EDVR_LOG_DIR_FOR", only, MAX_PATH);
+            const bool useMoved = movedLen && movedLen < MAX_PATH &&
+                                  (!onlyLen || (onlyLen < MAX_PATH && _stricmp(only, armed) == 0));
+            if (useMoved) {
+                strncat_s(moved, "\\d3d11_hooks.armed", _TRUNCATE);
+                strcpy_s(armed, moved);
+            } else {
+                strncat_s(armed, "\\edvr_logs\\d3d11_hooks.armed", _TRUNCATE);
+            }
             DeleteFileA(armed);
             if (recoveryCheck) {
                 char dir[MAX_PATH];
@@ -236,6 +287,13 @@ int main(int argc, char** argv) {
                 CloseHandle(marker);
             }
         }
+    }
+
+    if (offCheck) {
+        char staged[MAX_PATH];
+        if (!stageFixesOffProxy(full, staged, sizeof(staged))) return fail("could not stage the fixes-off proxy and its ini");
+        strcpy_s(full, staged);
+        printf("  ok    staged a copy of the proxy with advanced.d3d11_fixes = 0 beside it\n");
     }
 
     HMODULE mod = LoadLibraryA(full);
@@ -304,6 +362,37 @@ int main(int argc, char** argv) {
                    aaOff && sharpenOff ? "ok  " : "FAIL",
                    aaOff, sharpenOff);
             pass &= aaOff && sharpenOff;
+
+            // THE FRAME BOUNDARY STAYS HOOKED WITH THE FIXES OFF (device_hook.cpp, hookDevice: "What is still hooked is the
+            // swapchain's Present and the DXGI factory"), and the device is never recorded. Until 2026-10-16 hookedPresent
+            // dereferenced that device on the first frame, so this setting -- the documented escape hatch for a rig that
+            // crashes every launch -- crashed every launch (0xC0000005 in the proxy, the report this mode now pins). Elite
+            // reaches the same hook through CreateSwapChain on the device's factory; D3D11CreateDeviceAndSwapChain reaches it
+            // through hookSwapChain directly, and both end in hookedPresent.
+            edvr::openxr::PresentDevice presenting;
+            const HRESULT made = presenting.initialize(mod, D3D_DRIVER_TYPE_WARP);
+            if (FAILED(made)) {
+                printf("  FAIL  swap chain through the proxy: hr=0x%08X\n", static_cast<unsigned>(made));
+                pass = false;
+            } else {
+                const bool hooked = presentIsHookedBy(presenting.swapchain(), mod);
+                printf("  %s  the proxy's Present hook is on the swap chain with the fixes off\n", hooked ? "ok  " : "FAIL");
+                pass &= hooked;
+                bool presented = true;
+                for (int frame = 0; frame < 5; ++frame) presented &= SUCCEEDED(presenting.present(0));
+                printf("  %s  5 Presents through the hook with no recorded device\n", presented ? "ok  " : "FAIL");
+                pass &= presented;
+                // ResizeBuffers is hooked only by the flat profile; this is the VR profile, so the call must simply pass
+                // through. It is here so a hook that comes to need the device is caught the same way.
+                const HRESULT resized = presenting.swapchain()->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+                printf("  %s  ResizeBuffers passes through: hr=0x%08X\n", SUCCEEDED(resized) ? "ok  " : "FAIL",
+                       static_cast<unsigned>(resized));
+                pass &= SUCCEEDED(resized);
+                bool again = true;
+                for (int frame = 0; frame < 2; ++frame) again &= SUCCEEDED(presenting.present(0));
+                printf("  %s  2 more Presents after the resize\n", again ? "ok  " : "FAIL");
+                pass &= again;
+            }
         }
         if (foreignCheck) {
             pass &= checkResolved(device,ctx,treat(a),"original device remains usable",64,64,

@@ -67,6 +67,7 @@ uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the la
 FlatUiToneProof g_proof;
 bool g_sourceToneFirstNoted = false;
 FlatUiUnknownSourceToneLog g_unknownSourceToneLog;
+FlatUiTrail g_trail;   // the back-off trail (log only): what the HUD asked per frame, and each tone-shaped draw of it
 FlatUiShapeToneLog g_shapeToneLog;   // the unknown pairs admitted by their physical shape, once each (process-lifetime, like the above)
 // First physical RTV for each distinct, HDR-qualified HUD target in the current frame. The E894 and EDHM 0D43 UI-only tone guard
 // requires this independent binding check before it may establish proof; references release at Present/device/resize.
@@ -99,14 +100,21 @@ void observeHudPhysical(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
 // unknown pairs. The caller must hold FlatComputeInternalScope.
 bool sourceTonePhysicalShape(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                              uint64_t vs, uint64_t ps, const void* cachedOutput,
-                             uint32_t outW, uint32_t outH, bool unknownDiagnostic, ToneAdmit& shape) {
-    if (!ctx || g_hudPhysicalFrame != frame || !g_hudPhysicalCount) return false;
+                             uint32_t outW, uint32_t outH, bool unknownDiagnostic, ToneAdmit& shape, uint8_t* failed = nullptr) {
+    // The first failing test is named for the back-off trail (flat_ui_layer_math.h's FlatUiTrailPhys); failed stays kNotRun when no test ran.
+    const auto fail = [&](FlatUiTrailPhys p) {
+        if (failed) *failed = static_cast<uint8_t>(p);
+        return false;
+    };
+    if (!ctx || g_hudPhysicalFrame != frame || !g_hudPhysicalCount) return fail(FlatUiTrailPhys::kNoHud);
     Ptr<ID3D11VertexShader> actualVs;
     Ptr<ID3D11PixelShader> actualPs;
     ctx->VSGetShader(&actualVs, nullptr, nullptr);
     ctx->PSGetShader(&actualPs, nullptr, nullptr);
-    if (lookupShaderHash(actualVs.Get()) != vs || lookupShaderHash(actualPs.Get()) != ps) return false;
-    if (!tonemapAdmitStructure(ctx, ps, shape) || shape.hdrSlotRead != 1 || shape.rtvRes != cachedOutput) return false;
+    if (lookupShaderHash(actualVs.Get()) != vs || lookupShaderHash(actualPs.Get()) != ps) return fail(FlatUiTrailPhys::kHash);
+    if (!tonemapAdmitStructure(ctx, ps, shape)) return fail(FlatUiTrailPhys::kStructure);
+    if (shape.hdrSlotRead != 1) return fail(FlatUiTrailPhys::kSlot);
+    if (shape.rtvRes != cachedOutput) return fail(FlatUiTrailPhys::kRtv);
     D3D11_VIEWPORT viewport[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetViewports(&viewportCount, viewport);
@@ -117,11 +125,13 @@ bool sourceTonePhysicalShape(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t 
     if (!shapeMatches(renderW, renderH, outW, outH, shape.rtvW, shape.rtvH,
                                static_cast<uint32_t>(shape.rtvFmt), shape.hdrW, shape.hdrH,
                                static_cast<uint32_t>(shape.hdrFmt), shape.psT0Is3D && shape.psT0Res != nullptr,
-                               shape.hdr2D, fullViewport)) return false;
+                               shape.hdr2D, fullViewport)) return fail(FlatUiTrailPhys::kShape);
     for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
-        if (flatUiSourceToneDirectHud(g_hudPhysical[i].shadow, g_hudPhysical[i].actual.Get(), shape.hdrRes))
+        if (flatUiSourceToneDirectHud(g_hudPhysical[i].shadow, g_hudPhysical[i].actual.Get(), shape.hdrRes)) {
+            if (failed) *failed = static_cast<uint8_t>(FlatUiTrailPhys::kPass);
             return true;
-    return false;
+        }
+    return fail(FlatUiTrailPhys::kIdentity);
 }
 // The bloom input an unknown draw must bind at PS t2: a bound 2D view with a resource, or null. The probe's near-miss report and
 // the shape admission both read it here, so the two cannot disagree on what the binding is. A 2D resource proves the binding
@@ -225,9 +235,11 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
         ++g_mapAsksFrame;
     }
     ++g_w.asked[fi];
+    flatUiTrailNoteAsk(d.frame, d.color);
     g_lastAsk = FlatUiLayerAsk::kRefused;
     const auto refuse = [&](FlatUiRefuse r) {
         ++g_w.refused[static_cast<size_t>(r)];
+        flatUiTrailNoteRefuse(d.frame, r);
         if (ms >= 0) ++g_w.mapRefused[ms][static_cast<size_t>(r)];
         return g_lastAsk;
     };
@@ -285,6 +297,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
         g_takenFrame = d.frame;
         g_takenTarget = d.color;
     }
+    flatUiTrailNoteTake(d.frame);
     g_lastAsk = FlatUiLayerAsk::kDecided;
     return g_lastAsk;
 }
@@ -348,13 +361,49 @@ void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output)
     if (flatUiLayerOn()) flatUiToneProofCopy(g_proof, frame, source, output);
 }
 
+// The back-off trail's hooks (flat_ui_layer.h): the record is g_trail, and each hook is a few loads.
+void flatUiTrailNoteAsk(uint64_t frame, const void* hud) { g_trail.noteAsk(frame, hud); }
+void flatUiTrailNoteTake(uint64_t frame) { g_trail.noteTake(frame); }
+void flatUiTrailNoteRefuse(uint64_t frame, FlatUiRefuse r) { g_trail.noteRefuse(frame, r); }
+void flatUiTrailNoteDraw(uint64_t frame, uint64_t vs, uint64_t ps, char kind, uint32_t count, bool uiEntered, bool hdrTrigger,
+                         bool hdrTreated) {
+    g_trail.noteDraw(frame, vs, ps, kind, count, uiEntered, hdrTrigger, hdrTreated);
+}
+void flatUiTrailNoteBranch(uint64_t frame, FlatUiTrailBranch b) { g_trail.noteBranch(frame, b); }
+void flatUiTrailNotePhys(uint64_t frame, FlatUiTrailPhys p, const void* t1, const void* hudShadow, const void* hudActual) {
+    g_trail.notePhys(frame, p, t1, hudShadow, hudActual);
+}
+void flatUiTrailNoteProven(uint64_t frame, bool proven) { g_trail.noteProven(frame, proven); }
+void flatUiTrailNoteAdmission(uint64_t frame, const char* text) { g_trail.noteAdmission(frame, text); }
+void flatUiTrailNoteReissue(uint64_t frame, FlatUiTrailReissue r, uint8_t declined, uint64_t seq) {
+    g_trail.noteReissue(frame, r, declined, seq);
+}
+// Logs the previous and this frame of the back-off trail while the session has trails left: twelve, and the twelfth says it is the last.
+void flatUiTrailReport() {
+    const uint32_t trail = g_trail.claimReport();
+    if (!trail) return;
+    char line[1000];   // one trail line: its prefix and body (at most 899 characters), inside the logger's line cut
+    flatUiTrailLine(line, sizeof line, trail, true, g_trail.prev);
+    Log::get().note("%s", line);
+    flatUiTrailLine(line, sizeof line, trail, false, g_trail.cur);
+    Log::get().note("%s", line);
+}
+// The physical check's result for the trail: its t1 input, and the frame's first HUD target (its binding shadow and physical RTV).
+void noteTrailPhysical(uint64_t frame, uint8_t failed, const ToneAdmit& shape) {
+    const void* shadow = g_hudPhysicalCount ? g_hudPhysical[0].shadow : nullptr;
+    const void* actual = g_hudPhysicalCount ? g_hudPhysical[0].actual.Get() : nullptr;
+    flatUiTrailNotePhys(frame, static_cast<FlatUiTrailPhys>(failed), shape.hdrRes, shadow, actual);
+}
 bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                                     uint64_t vs, uint64_t ps, const void* cachedOutput,
                                     uint32_t outW, uint32_t outH, const char* route) {
     if (!ctx || !flatUiLayerOn() || !flatUiSourceTonePair(vs, ps) || g_hudPhysicalFrame != frame) return false;
     FlatComputeInternalScope internal;
     ToneAdmit shape{};
-    if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, false, shape))
+    uint8_t failed = 0;
+    const bool physical = sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, false, shape, &failed);
+    noteTrailPhysical(frame, failed, shape);
+    if (!physical)
         return false;  // no proof from a cached shadow or an unverified alias
     if (!g_sourceToneFirstNoted) {
         g_sourceToneFirstNoted = true;
@@ -377,7 +426,11 @@ bool flatUiLayerShapeToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uin
         !flatUiShapeToneVs(vs) || flatUiSourceTonePair(vs, ps)) return false;   // a named pair has its own path
     FlatComputeInternalScope internal;
     ToneAdmit shape{};
-    if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, /*unknownDiagnostic=*/false, shape))
+    uint8_t failed = 0;
+    const bool physical = sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH,
+                                                  /*unknownDiagnostic=*/false, shape, &failed);
+    noteTrailPhysical(frame, failed, shape);
+    if (!physical)
         return false;  // no proof from a cached shadow, an unverified alias or a shape off the strict format
     if (!toneBloomInput(ctx)) return false;
     ++g_w.toneByShape;
@@ -452,6 +505,7 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
     for (uint32_t i = 0; i < g_proof.count; ++i)
         if (g_takenFrame == frame && g_proof.hud[i] == g_takenTarget) takenAlias = g_proof.alias[i];
     const bool proven = flatUiToneProofTone(g_proof, frame, input) != nullptr;
+    flatUiTrailNoteProven(frame, proven);
     if (proven) ++g_w.toneProven;
     // The map tonemap's candidates (flatUiMapToneSlotOf), counted every time, and the first one said once, proved or not, with
     // the pointer it compared and the targets recorded this frame: a null input, no recorded target or a pointer mismatch
@@ -484,6 +538,7 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
         admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, takenAlias, vs, ps, why, sizeof(why)) == 1;
     }
     if (admitted) ++g_w.toneAdmitted;
+    flatUiTrailNoteAdmission(frame, why);
     if (g_candidateLines < 8) {
         ++g_candidateLines;
         Log::get().note("flat ui layer: tone candidate %u: frame %llu vs %016llX ps %016llX, HDR slot t%d reads %p, output %ux%u, "

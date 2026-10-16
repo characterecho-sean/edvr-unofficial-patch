@@ -743,12 +743,12 @@ inline Result serve(Cache& c, uint8_t* ctx, const CallInputs& in, Fwd&& fwd, Clo
     if (!buildKey(in, key)) { forwardWhole(kUnbuildable); return res; }
     const uint64_t extra = in.extraNearBits;
 
-    const double t0 = now();
-    if (std::memcmp(ctxState, key, kKeyBytes) == 0) {   // the game's own memo hits
+    if (std::memcmp(ctxState, key, kKeyBytes) == 0) {   // the game's own memo hits: nothing here is timed, so the clock is not read
         ++st.gameMemo;
         fwd();
         return res;
     }
+    const double t0 = now();   // starts the lookup, which a hit's time and a miss's overhead measure
     int hit = c.find(g, key, extra);
     bool verify = false;
     if (hit >= 0) {

@@ -36,7 +36,7 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
 // in a line means the diag.sky_ring dispatch never ran in the window (key off).
 constexpr const char* kDoorBreakdownNames[] = {
     "upscaler", "motion prep", "hologram resolve", "hologram depth copy", "hologram near-light", "hologram resolve draw",
-    "UI resolve", "sharpen", "menu", "UI layer composite", "FSS heal", "sky ring"
+    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring"
 };
 constexpr size_t kDoorBreakdownCount = sizeof(kDoorBreakdownNames) / sizeof(kDoorBreakdownNames[0]);
 // The three hologram sub-sections sit right after the umbrella (index DoorHologramResolve); the umbrella's line item carries them in brackets.
@@ -50,7 +50,8 @@ constexpr const char* kFrameBreakdownNames[] = {
     "hologram passes", "UI depth coverage", "planet",
     "screen motion", "weapon motion", "engine velocity",
     "UI layer reissues", "HDR HUD depth-stencil seed",
-    "world resolve", "world mips", "world layer"
+    "world resolve", "world mips", "world layer",
+    "FSS reveal replay"
 };
 constexpr size_t kFrameSections = sizeof(kFrameBreakdownNames) / sizeof(kFrameBreakdownNames[0]);
 // Elite's own draws that EDVR alters (gpu_census.h): the game's draws timed whole, so they are
@@ -70,7 +71,7 @@ constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 // The fix names, in AlteredFix's order: fixed strings, never built from a draw.
 constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "panel distance", "RemLok overlay", "loading hologram", "target indicator", "night vision", "intro panel",
-    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
+    "sun glare clamp", "sun glare steady", "particles", "FSS panel",
     "loading scrim", "menu backdrop", "unnamed fix"
 };
 static_assert(kAlteredClassSections == 3, "one name for each altered-draw class");
@@ -79,6 +80,9 @@ static_assert(kAlteredClassSections == 3, "one name for each altered-draw class"
 // before they existed.
 constexpr size_t kWorldFirst = static_cast<size_t>(GpuCensusSection::FrameWorldResolve);
 constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWorldLayer) - kWorldFirst + 1;
+// The FSS reveal fix's one section (gpu_census.h) follows the world route's three; it is a top-level in-frame item (last in kFrameBreakdownNames, in the total) and, like
+// theirs, has no turn until called this window.
+constexpr size_t kFssFirst = static_cast<size_t>(GpuCensusSection::FrameFssReveal);
 // The second skin's five items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
 // span, so none is in kFrameBreakdownNames or in any total: they are priced on a line of their own (logAndResetWindow), and, like the world route's, have no turn
 // in the rotation until called this window.
@@ -88,9 +92,9 @@ constexpr const char* kSkinNames[] = {
     "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
 };
 static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
-static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 &&
-                  kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
-              "the seed is followed by the three world-route sections and the second skin's five, which are the last in-frame ones");
+static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
+                  kWorldSections == 3 && kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections, the FSS reveal's one and the second skin's five, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -217,11 +221,11 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
     for (size_t i = 0; i < static_cast<size_t>(kAlteredFixCount); ++i) total += g_section[kAlteredFixFirst + i].occurrences;
     return total;
 }
-// A world-route or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
+// A world-route, FSS reveal or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
 }
-// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route or second-skin
+// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
 // section has none until it has been called this window.
 int nextTurnOwner(int current) noexcept {
     int next = current;
@@ -321,8 +325,8 @@ void logAndResetWindow(uint64_t now) {
     const double seconds = static_cast<double>(now - g_windowStartMs) / 1000.0;
 
     // "door D" is the wrapped whole temporalInner (both eyes) plus the
-    // other TOP-LEVEL door passes -- sharpen, menu, UI layer composite,
-    // FSS heal -- never the sum of the parenthetical breakdown: upscaler,
+    // other TOP-LEVEL door passes -- sharpen, menu, UI layer composite
+    // -- never the sum of the parenthetical breakdown: upscaler,
     // motion prep, hologram resolve and UI resolve all run INSIDE
     // temporalInner, so DoorTemporalWhole's own ms already include them.
     // Adding those four again would double their cost. The same
@@ -343,7 +347,7 @@ void logAndResetWindow(uint64_t now) {
         const Snapshot s = snapshotOf(g_section[1 + i], frames);
         appendItem(doorItems, kDoorBreakdownNames[i], s);
         if (section == GpuCensusSection::DoorSharpen || section == GpuCensusSection::DoorMenu ||
-            section == GpuCensusSection::DoorUiLayerComposite || section == GpuCensusSection::DoorFssHeal) {
+            section == GpuCensusSection::DoorUiLayerComposite) {
             doorTotal += s.msPerFrame;
         }
     }

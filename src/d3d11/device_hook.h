@@ -129,13 +129,8 @@ bool deviceHookFxcfgMultipliers(float* mult, float* ssaa, char* fileOut, size_t 
 // The FSS mode latch: true while the player is (believed to be) in the Full
 // System Scanner -- keyed by their own FSS bindings for frame-exact edges,
 // reconciled against the game's GuiFocus. Read by the panel rect's chrome
-// skip, the reveal's jump window and the exposure pair sync.
+// skip and the reveal fix's scanner-on-show test.
 bool deviceHookFssModeLatch();
-
-// A zoom press was seen since the last take (stepped or held, keyboard
-// or pad, only while the mode latch is open): the arrival window's
-// earliest marker. Consumed on read.
-bool deviceHookTakeFssZoomPress();
 
 // Called at a profile switch, render thread, frame boundary: the config-poll block runs its sweep on the next frame boundary
 // whatever its timer says (vScreenForceRefreshConfig), then clears the request. Safe before any state exists: it sets a flag.

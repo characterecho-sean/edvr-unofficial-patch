@@ -20,7 +20,6 @@
 #include <cstring>
 
 #include "../common/config.h"
-#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -89,6 +88,7 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
+#include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
 #include <intrin.h>
@@ -464,14 +464,6 @@ struct State {
     uint32_t fssBodyFrame = 0;
     // The chrome tracker's stamp and the arrival-mono frame count.
     uint32_t fssChromeFrame = 0;
-    int      fssHealOn = 0;
-    int      censusFssJump = 0;
-    uint32_t fssJumpFrame = 0;  // the zoom-start camera jump, for the
-                                 // reveal's arrival window
-    bool     fssArrivalOpen = false;
-    uint32_t fssArrivalRecogs = 0;
-    uint32_t fssArrivalWindows = 0;
-    uint32_t fssArrivalNotes = 0;
     uint32_t fssChromeSkipFrame = 0;
     uint32_t fssChromeSkipCount = 0;
     bool     fssChromeSkipNoted = false;
@@ -984,6 +976,60 @@ FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and 
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
+FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
+
+// One-off and log only (docs/particle-billboards.md, 2026-10-16): is the mapped memory of a dynamic constant
+// buffer write-combined, and what does reading all of it cost? Runs at the first Map of up to three distinct
+// buffers, each once. The protection flags are the cheap reliable half; a driver can map write-combined
+// without saying so here, so the three timed reads (the first is cold) against the same copy from ordinary
+// memory are the evidence. The read is of a freshly mapped WRITE_DISCARD block: its contents are undefined
+// and unused, the same pointer the Unmap tee reads from.
+//
+// Each line names its buffer: the resource pointer, its ByteWidth and Usage, and who asked (the camera tee or the
+// plume tee), so the up to three lines of a session can be told apart. `res` is a buffer: both callers have
+// just had a nonzero ByteWidth from mapBufferDesc, which asks GetType first.
+static void mappedReadProbeOnce(ID3D11Resource* res, const char* what, const void* mapped, uint32_t bytes) {
+    static const void* seen[3] = {};
+    static int seenCount = 0;
+    if (!res || !mapped || bytes == 0 || bytes > 8192) return;
+    for (int i = 0; i < seenCount; ++i) if (seen[i] == res) return;
+    if (seenCount >= 3) return;
+    seen[seenCount++] = res;
+    guardedBudget(g_mappedReadProbeBudget, [&] {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const bool known = VirtualQuery(mapped, &mbi, sizeof mbi) == sizeof mbi;
+        static uint8_t sink[8192];
+        static uint8_t ordinary[8192] = {1};
+        double us[3] = {};
+        const double perUs = 1e6 / static_cast<double>(unmapprobe::clockFrequency());
+        for (int i = 0; i < 3; ++i) {
+            const int64_t t0 = unmapprobe::clockNow();
+            memcpy(sink, mapped, bytes);
+            us[i] = static_cast<double>(unmapprobe::clockNow() - t0) * perUs;
+        }
+        double ord = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const int64_t t0 = unmapprobe::clockNow();
+            memcpy(sink, ordinary, bytes);
+            const double d = static_cast<double>(unmapprobe::clockNow() - t0) * perUs;
+            if (i == 0 || d < ord) ord = d;
+        }
+        const volatile uint8_t keep = sink[bytes - 1];
+        (void)keep;
+        D3D11_BUFFER_DESC bd{};
+        static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+        const char* usage = bd.Usage == D3D11_USAGE_DYNAMIC ? "DYNAMIC" : bd.Usage == D3D11_USAGE_STAGING ? "STAGING"
+                            : bd.Usage == D3D11_USAGE_DEFAULT ? "DEFAULT" : "IMMUTABLE";
+        Log::get().note(
+            "mapped read probe: %s, resource %p, %u bytes, usage %s, mapped at %p, VirtualQuery protect 0x%lx (%s). "
+            "Reading all of it took %.1f, %.1f and %.1f us (the first is cold); the same copy from ordinary memory "
+            "took %.1f us. A mapping that costs several times the ordinary copy is uncached for CPU reads; the "
+            "Unmap readers line says what the tee's own reads of it cost a frame.",
+            what, static_cast<const void*>(res), bytes, usage, mapped, known ? static_cast<unsigned long>(mbi.Protect) : 0ul,
+            !known ? "VirtualQuery failed" : (mbi.Protect & PAGE_WRITECOMBINE) ? "write-combined" : "no write-combine flag",
+            us[0], us[1], us[2], ord);
+    });
+}
 
 // Is this target the shape of the on-foot panel rather than of an eye?
 //
@@ -1508,10 +1554,6 @@ enum class DrawVerdict {
     // The FSS panel composite pair (fss_panel.h): forwarded through the
     // replacement vertex shaders, wrapped in fssPanelBegin/End.
     kFssPanel,
-    // The body composite pair evaluated at one dissolve moment
-    // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
-    // in fssRevealBegin/End.
-    kFssReveal,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1544,7 +1586,6 @@ const char* drawVerdictName(DrawVerdict v) {
         case DrawVerdict::kGlareSteady: return "glare-steady";
         case DrawVerdict::kParticle: return "particle";
         case DrawVerdict::kFssPanel: return "fss-panel";
-        case DrawVerdict::kFssReveal: return "fss-reveal";
         case DrawVerdict::kQuadSkip: return "quad-skip";
         case DrawVerdict::kLoaderPanel: return "loader-panel";
         case DrawVerdict::kScrim: return "scrim";
@@ -1692,7 +1733,7 @@ bool drawGateSubscribed(State* s) {
         s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0 ||
         s->quadSkipArmed ||
         s->censusAutoW != 0 || fssResActive() ||
-        fssPanelWantsDraws() || fssRevealWantsDraws() ||
+        fssPanelWantsDraws() ||
         remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
         uiDepthWantsDraws() ||
         sunglareWantsDraws() ||
@@ -1822,6 +1863,9 @@ inline bool drawPathFast(DrawVerdict v) {
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                UINT instances, const DrawArgs& args) {
     State* s = g_state;
+    // The roll-free billboard block's pending rebind belongs to ONE draw: forwardWithVerdict consumes it, and a draw that
+    // never gets there (the AA-off fast path, a foreign context) must not leave it for the next (particle_fix.h).
+    particleRollFreeClear();
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
@@ -1839,9 +1883,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // free. The temporal pass asks too (temporalPassWantsFssChrome): the
     // scanner's interface takes the head's path while the screen is up,
     // and the stamp this tracker bumps is how the pass knows it is.
-    if ((s->fssHealOn || s->censusFssJump ||
-         temporalPassWantsFssChrome()) &&
-        kind == 'X' && count == 6) {
+    if (kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
             const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
@@ -1893,8 +1935,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // scenery (the neon frame) and their ordinals land in a skip
         // mask. Until a derivation publishes, nothing is skipped and the
         // centred band crops -- both fail-safe.
-        if (chromeMatched && s->fssHealOn &&
-            deviceHookFssModeLatch()) {
+        if (chromeMatched && deviceHookFssModeLatch()) {
             if (s->fssChromeSkipFrame != s->frameNo) {
                 s->fssChromeSkipFrame = s->frameNo;
                 s->fssChromeSkipCount = 0;
@@ -2286,7 +2327,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssPanelWantsDraws() || fssRevealWantsDraws()) {
+        if (fssPanelWantsDraws()) {
             if (s->fssBodyLayerGen != rtvGen) {
                 s->fssBodyLayerGen = rtvGen;
                 s->fssBodyLayerBound = false;
@@ -2544,25 +2585,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssPanelOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssPanel;
-    }
-
-    // The reveal sync. Same gate, same recognition shape.
-    // The reveal's gate covers the ARRIVAL as well as the void: the
-    // 2026-08-27 lockstep flight engaged byte-identical and the squares
-    // survived -- because the body gate opens at the arrival's END, and
-    // the squares live in the ~10 frames before it. The mode latch keeps
-    // the widened window inside the scanner (the loading screen draws
-    // none of this), and the zoom-start jump bounds it.
-    // The jump window before the mode latch: deviceHookFssModeLatch is a
-    // cross-TU call (device_hook.cpp) and a pure read, and it was being made
-    // for every eye draw outside the scanner. Same three terms, same answer.
-    if (fssRevealWantsDraws() &&
-        ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-         (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-          deviceHookFssModeLatch())) &&
-        fssRevealOnEyeDraw(self, kind, count, instances)) {
-        if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
-        return DrawVerdict::kFssReveal;
     }
 
     // The sun-glare element train: off skips it, first:K clamps it, and the
@@ -3297,10 +3319,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (mapData && drawCensusArmed()) {
         drawCensusCbNoteMap(res, mapped->pData);
     }
-    // The reveal sync's shadow of the scene block, same tee, its own gate.
-    if (mapData && fssRevealWantsDraws()) {
-        fssRevealNoteMap(res, mapped->pData);
-    }
     // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
     // without a GPU copy at the draw. celestialMotionAnyWatched() is the callee's own first test, inline: with no
     // buffer watched (the module off, or no planet patch drawn yet) no resource can match.
@@ -3362,6 +3380,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camResource = res;
             s->camData = mapped->pData;
             s->camBytes = mm.byteWidth;
+            mappedReadProbeOnce(res, "scene camera block", mapped->pData, mm.byteWidth);
         }
     }
     // Engine-record velocity's watch on an open eye-frame's pool and scene
@@ -3382,11 +3401,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // The particle billboards' constants, same discipline again: the
     // basis vectors cannot be read at the draw, so the write is watched.
-    if (mapSub0 && res == particleTarget()) {
+    if (mapSub0 && particleBlockWatched(res)) {
         s->partResource = res;
         s->partData = mapped->pData;
         s->partBytes = 0;
         mapBufferDesc(res, &s->partBytes);
+        mappedReadProbeOnce(res, "plume constants block", mapped->pData, s->partBytes);
     }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
@@ -3432,36 +3452,56 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         flatRuntimeUnmap(res);
     }
     if (flatTemporalCapturing()) flatTemporalUnmap(res);
-    if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
         guardedBudget(g_panelCbBudget, [&] {
-            memcpy(s->shadow, s->mappedData, s->mappedBytes);
+            unmapprobe::g_probe.timed(unmapprobe::kPanel, [&]() -> uint64_t {
+                memcpy(s->shadow, s->mappedData, s->mappedBytes);
+                return s->mappedBytes;
+            });
             s->shadowBytes = s->mappedBytes;
         });
         s->mappedResource = nullptr;
         s->mappedData = nullptr;
         s->mappedBytes = 0;
     }
+    bool camBlockReadThisUnmap = false;   // the plume block below is the camera block when this is set
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real
         // Unmap the memory is no longer ours to look at.
         //
         // Four readers of one block, each on a budget of its own and each run
         // whatever the ones before it did (g_glitchCameraBudget says why).
+        //
+        // Each is counted and timed by unmap_read_probe.h only on a call that will read the mapped block
+        // (the reader's own first early-outs, asked here), so "not exercised" means it never read.
+        camBlockReadThisUnmap = true;
+        const bool camHasRows = s->camBytes >= 944 * 4;
         guardedBudget(g_glitchCameraBudget, [&] {
-            glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+            unmapprobe::g_probe.timedIf(glitchFrameWindowOpen(), unmapprobe::kCamGlitch,
+                                        [&]() -> uint64_t {
+                glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+                return 12;
+            });
         });
         guardedBudget(g_sunglareRowsBudget, [&] {
             // And the live feed: the true view matrix at offset 932 of
             // the same block, named by the two-shot dump.
-            sunglareSceneRows(s->camData, s->camBytes);
+            unmapprobe::g_probe.timedIf(sunglareWorldActive() && camHasRows, unmapprobe::kCamSunglare,
+                                        [&]() -> uint64_t {
+                sunglareSceneRows(s->camData, s->camBytes);
+                return 48;
+            });
         });
         guardedBudget(g_temporalCameraBudget, [&] {
             // The same rows, kept pending for the temporal pass's camera
             // motion source until the frame's first eye draw claims them.
-            temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
+            unmapprobe::g_probe.timedIf(temporalPassWantsFssChrome() && camHasRows, unmapprobe::kCamTemporal,
+                                        [&]() -> uint64_t {
+                temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
+                return 56;
+            });
         });
         s->camResource = nullptr;
         s->camData = nullptr;
@@ -3469,22 +3509,36 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     }
     if (res == s->sceneCbResource && s->sceneCbData) {
         guardedBudget(g_sunglareRowsBudget, [&] {
-            sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+            unmapprobe::g_probe.timedIf(sunglareWorldActive() && s->sceneCbBytes >= 944 * 4, unmapprobe::kSceneCb,
+                                        [&]() -> uint64_t {
+                sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+                return 48;
+            });
         });
         s->sceneCbResource = nullptr;
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
     }
     if (res == s->partResource && s->partData) {
-        guardedBudget(g_particleCaptureBudget,
-                      [&] { particleCapture(s->partData, s->partBytes); });
+        // The shadow keeps the 160 bytes the fix reads, not the whole block (particle_capture_core.h); the probe
+        // counts the bytes actually read from the mapped pointer.
+        unmapprobe::g_probe.noteParticleCapture(camBlockReadThisUnmap);
+        guardedBudget(g_particleCaptureBudget, [&] {
+            unmapprobe::g_probe.timed(unmapprobe::kParticle, [&]() -> uint64_t {
+                return particleCapture(res, s->partData, s->partBytes);
+            });
+        });
         s->partResource = nullptr;
         s->partData = nullptr;
         s->partBytes = 0;
     }
     if (res == s->bbResource && s->bbData) {
-        guardedBudget(g_billboardCaptureBudget,
-                      [&] { billboardCapture(s->bbData, s->bbBytes); });
+        guardedBudget(g_billboardCaptureBudget, [&] {
+            unmapprobe::g_probe.timed(unmapprobe::kBillboard, [&]() -> uint64_t {
+                billboardCapture(s->bbData, s->bbBytes);
+                return s->bbBytes < 512 ? s->bbBytes : 512;
+            });
+        });
         s->bbResource = nullptr;
         s->bbData = nullptr;
         s->bbBytes = 0;
@@ -3610,7 +3664,6 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     switch (v) {
     case DrawVerdict::kRemlok:       remlokScissorBegin(self); break;
     case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
     case DrawVerdict::kNightVision:  nightVisionBegin(self); break;
@@ -3630,7 +3683,6 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kTargetSharp:  targetSharpEnd(self); break;
     case DrawVerdict::kNightVision:  nightVisionEnd(self); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
     case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
     case DrawVerdict::kRemlok:       remlokScissorEnd(self); break;
     default: break;   // kBackdrop: issued inline, before the splash re-issue
@@ -3657,7 +3709,6 @@ constexpr AlteredFix alteredFixOf(DrawVerdict v) noexcept {
     case DrawVerdict::kGlareSteady:  return AlteredFix::GlareSteady;
     case DrawVerdict::kParticle:     return AlteredFix::Particle;
     case DrawVerdict::kFssPanel:     return AlteredFix::FssPanel;
-    case DrawVerdict::kFssReveal:    return AlteredFix::FssReveal;
     case DrawVerdict::kScrim:        return AlteredFix::Scrim;
     case DrawVerdict::kBackdrop:     return AlteredFix::Backdrop;
     case DrawVerdict::kNone:
@@ -3673,7 +3724,7 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
                   alteredFixOf(DrawVerdict::kNightVision) == AlteredFix::NightVision &&
                   alteredFixOf(DrawVerdict::kIntroPanel) == AlteredFix::IntroPanel && alteredFixOf(DrawVerdict::kGlareClamp) == AlteredFix::GlareClamp &&
                   alteredFixOf(DrawVerdict::kGlareSteady) == AlteredFix::GlareSteady && alteredFixOf(DrawVerdict::kParticle) == AlteredFix::Particle &&
-                  alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel && alteredFixOf(DrawVerdict::kFssReveal) == AlteredFix::FssReveal &&
+                  alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel &&
                   alteredFixOf(DrawVerdict::kScrim) == AlteredFix::Scrim && alteredFixOf(DrawVerdict::kBackdrop) == AlteredFix::Backdrop,
               "each verdict that can reach the altered-draw site names its own census row");
 
@@ -3966,6 +4017,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // nothing armed to clean up.
         }
     } uiDepthScope(self);
+    // The roll-free billboard block (particle_fix.h, billboard_rollfree.h): a camera-facing billboard whose vertex shader is
+    // not transcribed gets a copy of the scene block with the roll taken out of rows 277/278 at VERTEX slot 1 for this draw
+    // and every re-issue of it below; put back on every way out. Owner context only. Never a verdict of its own: the draw
+    // goes through the whole ladder as the game made it.
+    struct RollFreeScope {
+        ID3D11DeviceContext* ctx;
+        ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
+    } rollFreeScope{self};
+    if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -4585,9 +4645,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         // Owner-context only: the watch shadows the owner's buffers.
         if (!foreignContext(self)) drawCensusCbNoteUpdate(dst, data, 0);
     }
-    if (fssRevealWantsDraws() && !foreignContext(self)) {
-        fssRevealNoteUpdate(dst, data);
-    }
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::UpdateSubresource,
@@ -4880,6 +4937,22 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    // The FSS reveal fix (fss_reveal.h; VR profile only, one bool when the scanner is not on show): at the first reveal composite of a frame the frame's first downsample of the ring layer is
+    // replayed from the finished layer. First in the thunk and through the game's own un-hooked entry points, so nothing that tracks state sees the replay.
+    if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {
+        FssRealCalls rc;
+        rc.vsSetCb = reinterpret_cast<void*>(g_state->realVSSetConstantBuffers);
+        rc.psSetCb = reinterpret_cast<void*>(g_state->realPSSetConstantBuffers);
+        rc.psSetSrv = reinterpret_cast<void*>(g_state->realPSSetShaderResources);
+        rc.vsSetSrv = reinterpret_cast<void*>(g_state->realVSSetShaderResources);
+        rc.vsSetShader = reinterpret_cast<void*>(g_state->realVSSetShader);
+        rc.psSetShader = reinterpret_cast<void*>(g_state->realPSSetShader);
+        rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);
+        rc.omSetBlend = reinterpret_cast<void*>(g_state->realOMSetBlendState);
+        rc.rsSetViewports = reinterpret_cast<void*>(g_state->realRSSetViewports);
+        rc.drawInstanced = reinterpret_cast<void*>(g_state->realDrawInstanced);
+        fssRevealOnDrawSlow(self, rc, perInstance, instances, startVertex, startInstance);
+    }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
@@ -4979,9 +5052,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
-    if (g_state->fssHealOn) {
-        fssPanelRectDrawArgs(baseVertex, startInstance);
-    }
+    fssPanelRectDrawArgs(baseVertex, startInstance);
     // The sub-draw probe re-issues this draw from the verdict path, which
     // never sees these arguments. Stashed only while armed.
     if (g_state->quadSkipArmed || quadProbeWants() || loaderPanelWants()) {
@@ -5698,7 +5769,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    fssRevealConfigure(runtimeFlatProfile());
     // The transition-flash engine fix (transition_flash_eye_base.cpp), always on.
     // The first call in a VR profile installs its consumer hook and reports
     // Armed or Lost to the camera-buffer tap; later calls do nothing.
@@ -5707,23 +5778,6 @@ static void vScreenRefreshConfigBody(bool forced) {
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
     menuNoteConfigReloaded();
-    {
-        s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        // Defaulted to 1 because the key moved to [experimental] and now ships
-        // commented out: this default is what everybody runs. Moving a setting out
-        // of [fix] is a decision about where it is configured, not a decision to
-        // turn the fix off.
-        const int n = eyeSyncFromConfig(cfg).healMode;
-        if (s->fssHealOn != n) {
-            s->fssHealOn = n;
-            Log::get().note(
-                n ? "fss eye heal: armed -- while the scanner is up, the "
-                    "left eye's hard-black pixels are filled from the "
-                    "right eye's image at the infinity shift, per pixel, "
-                    "stereo untouched."
-                  : "fss eye heal: off.");
-        }
-    }
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
@@ -5894,7 +5948,6 @@ EDVR_BOUNDARY_TICK(tkIntroSkip, "intro_skip");
 EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
-EDVR_BOUNDARY_TICK(tkFssPacing, "fss_pacing");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
 // (Explorer Cam's frame tick and its probe's are device_hook.cpp's: they must run whatever this file's options say, and when vScreen installs transport-only
 // there is no State here and no vScreenFrameBoundary to carry them. tools\gate_test pins that.)
@@ -6012,113 +6065,16 @@ void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
 
-    // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
-    // while the scanner's chrome is up is a zoom's first frame, and the
-    // window where the left eye's reveal-gated blacks live -- the frames
-    // every body-target-triggered census starts too late to see. One
-    // census per latch, the standard auto-arm machinery.
-    if (takeWorldJump()) {
-        // The zoom-start marker, consumed once and shared -- and taken
-        // ONLY on the game's own word that the scanner is open (round
-        // 48d): world jumps fire on supercruise drops and hyperspace
-        // too, and a stale marker plus an ignored FSS keypress opened
-        // the window in the COCKPIT, where hard-black is everywhere --
-        // the field's flicker.
-        if (journalFssFocus()) s->fssJumpFrame = s->frameNo;
-        if (s->censusFssJump && s->fssChromeFrame != 0 &&
-            s->frameNo - s->fssChromeFrame <= 5) {
-            drawCensusAutoRequest();
-        }
-    }
-    if (deviceHookTakeFssZoomPress()) {
-        // Earlier than the jump: the player's own zoom button.
-        s->fssJumpFrame = s->frameNo;
-        if (s->fssArrivalNotes < 4) {
-            ++s->fssArrivalNotes;
-            Log::get().note(
-                "fss arrival: zoom press at frame %u -- the reveal's "
-                "window is open. Said at most 4 times.", s->frameNo);
-        }
-
-    }
-    // The arrival window's receipt: when it closes, say how many
-    // composite recognitions it carried. Zero while squares showed would
-    // prove the arriving content flows through a different draw.
-    {
-        // 600 frames, not 30 (round 48c): the zoom TRANSIT takes ~3
-        // seconds and the squares appear at its ARRIVAL -- a 30-frame
-        // window covered the departure and expired mid-flight, so every
-        // window-scoped intervention ran before the squares existed. A
-        // long window is free: the heal's hard-black fill is a no-op
-        // over the void it mostly sees.
-        const bool open =
-            s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-            journalFssFocus();
-        if (open) bumpFssArrivalStamp();
-        if (open && !s->fssArrivalOpen) {
-            s->fssArrivalRecogs = 0;
-        } else if (!open && s->fssArrivalOpen &&
-                   s->fssArrivalWindows < 4) {
-            ++s->fssArrivalWindows;
-            Log::get().note(
-                "fss arrival: window closed -- %u composite "
-                "recognition(s) inside it. Said at most 4 times.",
-                s->fssArrivalRecogs);
-        }
-        s->fssArrivalOpen = open;
-    }
-
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
     gpuPassProfileFrameBoundary(g_state->ownerCtx, s->frameNo, s->eyeW, s->eyeH);
-    tkFssReveal.run([&] { fssRevealFrameBoundary(); });
-
-    // FSS frame pacing (round 31): the left-only squares are now measured
-    // to be runtime-side (both submitted images carry the flicker equally),
-    // and every vendor's frame-synthesis system -- ASW, motion
-    // reprojection, smart smoothing -- engages only when the app misses
-    // refresh. Whether the BUILD misses refresh is therefore the theory's
-    // premise, and this measures it from our own clock: frame-to-frame
-    // deltas while the body-frame gate is warm, one summary line when the
-    // scanner goes quiet. Log-only, no keys.
-    tkFssPacing.run([&] {
-        static LARGE_INTEGER lastQpc = {};
-        static uint32_t frames = 0, slow = 0;
-        static double sumMs = 0.0, maxMs = 0.0;
-        const bool inFss =
-            s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2;
-        LARGE_INTEGER now, freq;
-        QueryPerformanceCounter(&now);
-        QueryPerformanceFrequency(&freq);
-        if (inFss) {
-            if (lastQpc.QuadPart) {
-                const double ms = (now.QuadPart - lastQpc.QuadPart) * 1000.0 /
-                                  static_cast<double>(freq.QuadPart);
-                if (ms < 500.0) {   // ignore pauses/loads
-                    ++frames;
-                    sumMs += ms;
-                    if (ms > maxMs) maxMs = ms;
-                    if (ms > 13.0) ++slow;   // ~90Hz budget with margin
-                }
-            }
-            lastQpc = now;
-        } else {
-            if (frames >= 30) {
-                Log::get().note(
-                    "fss pacing: %u frames, avg %.2f ms, max %.2f ms, %u "
-                    "frames over 13 ms (%.0f%%). A frame-synthesis system "
-                    "engages exactly when frames run long.",
-                    frames, sumMs / frames, maxMs, slow,
-                    100.0 * slow / frames);
-            }
-            frames = 0;
-            slow = 0;
-            sumMs = 0.0;
-            maxMs = 0.0;
-            lastQpc.QuadPart = 0;
-        }
+    tkFssReveal.run([&] {
+        // The scanner is on show while the FSS mode latch is open or its chrome matched within the last five frames. Flat never arms the reveal fix.
+        const bool onShow = deviceHookFssModeLatch() || (s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5);
+        fssRevealFrameBoundary(onShow, runtimeFlatProfile(), s->frameNo);
     });
+
     tkRemlok.run([&] { remlokFrameBoundary(); });
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
@@ -6763,6 +6719,17 @@ void vScreenFrameBoundary() {
     // The camera-buffer tap's frame counter, which the engine fix's window
     // tests count in.
     glitchFrameBoundary();
+    // The particle billboards' target: let go of it when no plume or flare has been drawn for a while, so a
+    // session without smoke does not copy the scene constants on every write (particle_capture_core.h).
+    particleFrameBoundary();
+    // The Unmap tee's reads of the game's mapped pointers, counted and timed: one line every 30 s, a reader
+    // that never read among them as "not exercised" (unmap_read_probe.h). Log only.
+    {
+        char line[1024];
+        if (unmapprobe::frameTick(unmapprobe::g_probe, nowMs(), line, sizeof line,
+                                  [](char* out, size_t cap) { particleDescribeTarget(out, cap); }))
+            Log::get().note("%s", line);
+    }
     // The engine fix's per-frame service: publishes the frame number its
     // consumer hook reads (that hook can run on a scheduler job thread), logs
     // a held frame, closes its event window, and owes the temporal pass its
@@ -6859,23 +6826,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    fssRevealConfigure(runtimeFlatProfile());
     // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseInstall();
-    {
-        g_state->censusFssJump =
-            cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        const int n = eyeSyncFromConfig(cfg).healMode;
-        if (g_state->fssHealOn != n) {
-            g_state->fssHealOn = n;
-            Log::get().note(
-                n ? "fss eye heal: armed -- while the scanner is up, the "
-                    "left eye's hard-black pixels are filled from the "
-                    "right eye's image at the infinity shift, per pixel, "
-                    "stereo untouched."
-                  : "fss eye heal: off.");
-        }
-    }
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);

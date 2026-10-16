@@ -63,6 +63,7 @@ std::atomic<bool> live{false};
 DrawCache cache;
 uint64_t familyDraws[kMaxFamilies] = {};
 uint64_t g_stateCalls = 0;
+bool g_guardTrustOff = false;   // rig only: true runs the overlay guard's verification Gets on every draw, as before 2026-10-16
 // The flat census drains the two counts once a frame (engineVelocityTakeWrapperCounts): what was
 // already handed over, and the draws the 30 s summary zeroed out of familyDraws before it could.
 uint64_t g_stateCallsTaken = 0, g_substitutedBase = 0, g_substitutedTaken = 0;
@@ -907,14 +908,40 @@ ID3D11BlendState* derivedBlendFor(ID3D11DeviceContext* ctx, ID3D11BlendState* ga
     return entry.derived.Get();
 }
 
+// The overlay guard's verification, remembered. The guard binds a private SRV over the game's t3 for one draw and used to read t3 back
+// twice to prove it: the game's SRV before the set, and the private one after it (and a third read before the restore). Those answers are
+// a function of what the shadow can see: the generations of PS t3 (the game's own sets), of RTV0 and of DSV0 (a texture bound for output
+// cannot be bound to read), and the identity of the private SRV. EDVR's own set runs under FlatComputeInternalScope, which the shadow does
+// not hear, so it moves none of them. While all five are unchanged since the last draw that read the context, the reads are not made:
+// the game's SRV is the one remembered, the private one is known bound. Anything that moves one of the five reads the context again.
+// Forgotten at the frame's end, on an abandon and on shutdown, so no view of the game's outlives the frame on this account.
+struct GuardVerified {
+    bool valid = false;
+    uint32_t srv3Gen = 0, rtvGen = 0, dsvGen = 0;   // the shadow's generations when the context was read
+    const void* base = nullptr;                     // the private SRV that read back as bound (identity only)
+    Ptr<ID3D11ShaderResourceView> game;             // the game's t3 as the context returned it then
+};
+GuardVerified g_guardVerified;
+inline void guardForget() noexcept { g_guardVerified = GuardVerified{}; }
+inline bool guardTrusted(const void* base) noexcept {
+    return !g_guardTrustOff && g_guardVerified.valid && g_guardVerified.base == base && base &&
+           g_guardVerified.srv3Gen == bindingGeneration(BindSlot::PsSrv3) &&
+           g_guardVerified.rtvGen == bindingGeneration(BindSlot::Rtv0) &&
+           g_guardVerified.dsvGen == bindingGeneration(BindSlot::Dsv0);
+}
+
 // Put the game's own state back where EDVR's is still bound (the game has not
 // rebound since: the generation says so).
 void restore(ID3D11DeviceContext* ctx) {
     if (g_bound.guardSrv3 && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
-        Ptr<ID3D11ShaderResourceView> actual;
-        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
-        engineVelocityNoteStateCalls(1);
-        if (actual.Get() == g_bound.guardSrv3.Get()) {
+        bool still = guardTrusted(g_bound.guardSrv3.Get());
+        if (!still) {
+            Ptr<ID3D11ShaderResourceView> actual;
+            ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+            engineVelocityNoteStateCalls(1);
+            still = actual.Get() == g_bound.guardSrv3.Get();
+        }
+        if (still) {
             ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
             FlatComputeInternalScope internal;
             ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
@@ -1937,17 +1964,20 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.settersIssued; }
     }
     if (guardOverlay) {
-        Ptr<ID3D11ShaderResourceView> gameSrv;
-        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &gameSrv);
         ID3D11ShaderResourceView* privateSrv = e.overlayBaseSrv.Get();
+        const bool trusted = guardTrusted(privateSrv);   // nothing the two reads depend on has moved since they were last made
+        Ptr<ID3D11ShaderResourceView> gameSrv;
+        if (trusted) gameSrv = g_guardVerified.game;
+        else { ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &gameSrv); engineVelocityNoteStateCalls(1); }
         {
             FlatComputeInternalScope internal;
             ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &privateSrv);
         }
+        engineVelocityNoteStateCalls(1);
         Ptr<ID3D11ShaderResourceView> actual;
-        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
-        engineVelocityNoteStateCalls(3);
-        if (actual.Get() != privateSrv) {
+        if (!trusted) { ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual); engineVelocityNoteStateCalls(1); }
+        if (!trusted && actual.Get() != privateSrv) {
+            guardForget();
             e.overlayGroup = false;
             ++g_draw.overlayDeclinedCreate;
             ID3D11ShaderResourceView* original = gameSrv.Get();
@@ -1962,6 +1992,14 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             g_bound.gameSrv3 = gameSrv;
             g_bound.guardSrv3 = e.overlayBaseSrv;
             g_bound.srv3Gen = bindingGeneration(BindSlot::PsSrv3);
+            if (!trusted && !g_guardTrustOff) {
+                g_guardVerified.valid = true;
+                g_guardVerified.srv3Gen = g_bound.srv3Gen;
+                g_guardVerified.rtvGen = bindingGeneration(BindSlot::Rtv0);
+                g_guardVerified.dsvGen = bindingGeneration(BindSlot::Dsv0);
+                g_guardVerified.base = privateSrv;
+                g_guardVerified.game = gameSrv;
+            }
             if (++g_draw.overlayGuardedDraws == 1)
                 Log::get().note("engine motion: flat overlay guard active at frame %u: exact BBE/DB3E, %ux%u base, "
                                 "private PS t3, original depth/stencil state retained.", frame, e.width, e.height);
@@ -2165,10 +2203,27 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
     Log::get().note("engine motion: primary copy observer work cumulative: clear calls %llu, no-claim skips %llu, "
                     "nodes walked %llu; merge calls %llu, started without claims %llu, nodes walked %llu; "
                     "active source claims %llu, detached plans %llu. Skips do not inspect native dictionaries; "
-                    "clear failures describe attempted observer work, not skipped calls. Merge walks are retained for clear/unwind safety.",
+                    "clear failures describe attempted observer work, not skipped calls. A merge or clear with no live claim is counted "
+                    "without a lock or a walk of the native lists, so nodes walked count only calls that had claims to protect.",
                     u(copyStats.clearCalls),u(copyStats.clearNoClaims),u(copyStats.clearNodes),
                     u(copyStats.mergeCalls),u(copyStats.mergeWithoutClaims),u(copyStats.mergeNodes),
                     u(copyStats.activeClaims),u(copyStats.activePlans));
+    {   // How many of those calls never took the mutex (the lock-free exits), so a flight can read the share.
+        char exitLine[400];   // primaryCopy::kExitLineBytes
+        static_assert(sizeof(exitLine) == primaryCopy::kExitLineBytes, "the exit line buffer is the formatter's");
+        primaryCopy::formatExitLine(copyStats, exitLine);
+        Log::get().note("%s", exitLine);
+    }
+    {   // Who waited for primaryCopy's mutex and who held it, this window (engine_velocity_primary_copy.h, the lock instrument).
+        // All zeros while the counters above grow means the instrument did not run.
+        const auto lockWindow = primaryCopy::takeLockWindow();
+        char lockLine[1160];   // primaryCopy::kLockLineBytes
+        static_assert(sizeof(lockLine) == primaryCopy::kLockLineBytes, "the lock line buffer is the formatter's");
+        for (unsigned half = 0; half < 2; ++half) {
+            primaryCopy::formatLockLine(lockWindow, half, freq / 1e6, seconds, lockLine);
+            Log::get().note("%s", lockLine);
+        }
+    }
     Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "
@@ -2557,6 +2612,7 @@ void engineVelocityDiagnostics(bool on) { g_diagnosticsWanted.store(on, std::mem
 void engineVelocityShutdown() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const bool was = live.exchange(false, std::memory_order_acq_rel);
+    guardForget();
     kinematicEvalSetEmitObserver(nullptr);
     kinematicEvalSetPrimaryEmitObserver(nullptr);
     kinematicEvalSetPoolCopyObserver(nullptr);
@@ -2831,6 +2887,7 @@ void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause 
 // The frame ends (the runtime's Present, after the flush): what the bracket kept for the frame -- the game's render-target
 // set, its blend state, the accepted binding -- goes with it, so no view or state the game replaces stays alive on our account.
 void engineVelocityFlatFrameEnd() noexcept {
+    guardForget();   // the overlay guard's remembered answers (the game's t3 among them) do not outlive the frame
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_flatPending.load(std::memory_order_relaxed)) return;   // still bound: the flush is owed first, and does this
     g_flatGame = FlatGame{};
@@ -2839,6 +2896,7 @@ void engineVelocityFlatFrameEnd() noexcept {
 }
 
 void engineVelocityFlatAbandon() noexcept {
+    guardForget();
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_bound = Bound{};   // the context lost every binding: nothing of EDVR's is left to put back
     g_anyBound.store(false, std::memory_order_release);
@@ -3096,11 +3154,14 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     // once-a-frame generation bump would otherwise hide whether it still is.
     if (ctx && (g_bound.patchedPs || g_bound.patchedVs || g_bound.derivedBlend)) {
         if (g_bound.guardSrv3) {
-            Ptr<ID3D11ShaderResourceView> actual;
-            ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
-            engineVelocityNoteStateCalls(1);
-            if (actual.Get() == g_bound.guardSrv3.Get() &&
-                bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
+            bool still = guardTrusted(g_bound.guardSrv3.Get());
+            if (!still) {
+                Ptr<ID3D11ShaderResourceView> actual;
+                ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+                engineVelocityNoteStateCalls(1);
+                still = actual.Get() == g_bound.guardSrv3.Get();
+            }
+            if (still && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
                 ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
                 FlatComputeInternalScope internal;
                 ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);

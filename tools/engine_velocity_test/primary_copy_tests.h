@@ -61,27 +61,26 @@ inline void runObservers(ID3D11Device* device,void (*check)(bool,const char*)) {
     uintptr_t destination[2]={reinterpret_cast<uintptr_t>(destination),reinterpret_cast<uintptr_t>(destination)};
     copy::reset();rig_allocations::start();
     for(unsigned i=0;i<repeats;++i)copy::invalidateDictionaryImpl<false>(dictionary.ptr());
-    const auto clearBefore=rig_allocations::stop();const auto clearOld=copy::stats();
+    const auto clearWalk=rig_allocations::stop();const auto clearOld=copy::stats();
     copy::reset();rig_allocations::start();
     for(unsigned i=0;i<repeats;++i)copy::invalidateDictionary(dictionary.ptr());
     const auto clearAfter=rig_allocations::stop();const auto clearNew=copy::stats();
-    check(clearBefore>0 && clearAfter==0 && clearOld.clearNodes==repeats && clearNew.clearNodes==0 &&
+    // The full walk of a one-node dictionary no longer allocates either (small-buffer address sets); what the
+    // no-claim exit still saves is the traversal and the mutex.
+    check(clearWalk==0 && clearAfter==0 && clearOld.clearNodes==repeats && clearNew.clearNodes==0 &&
           clearNew.clearCalls==repeats && clearNew.clearNoClaims==repeats,
-          "primary observer: no-claim clear bypass avoids measured heap allocations and native traversal");
-    copy::reset();rig_allocations::start();
-    for(unsigned i=0;i<repeats;++i)copy::endMergeOpaque(copy::beginMergeOpaque(reinterpret_cast<uintptr_t>(destination),dictionary.anchor(),frame),true);
-    const auto mergeBefore=rig_allocations::stop();const auto mergeOld=copy::stats();
+          "primary observer: no-claim clear bypass avoids the native traversal; neither it nor the full one-node walk allocates");
     copy::reset();rig_allocations::start();
     for(unsigned i=0;i<repeats;++i)copy::endMergeOpaque(copy::beginMergeOpaque(reinterpret_cast<uintptr_t>(destination),dictionary.anchor(),frame),true);
     const auto mergeAfter=rig_allocations::stop();const auto mergeNew=copy::stats();
-    check(mergeBefore>0 && mergeAfter==mergeBefore && mergeOld.mergeNodes==repeats && mergeNew.mergeNodes==repeats &&
-          mergeNew.mergeCalls==repeats && mergeNew.mergeWithoutClaims==repeats && mergeNew.mergePlans==repeats,
-          "primary observer: empty native merge plan allocation/traversal remains unchanged for unwind safety");
-    std::printf("primary observer no-claim production work / %u calls: clear allocations %llu -> %llu, nodes %llu -> %llu; merge allocations %llu -> %llu, nodes %llu -> %llu\n",
-                repeats,static_cast<unsigned long long>(clearBefore),static_cast<unsigned long long>(clearAfter),
+    check(mergeAfter==0 && mergeNew.mergeNodes==0 && mergeNew.mergePlans==0 && copy::g_mergePlans.empty() &&
+          mergeNew.mergeCalls==repeats && mergeNew.mergeWithoutClaims==repeats,
+          "primary observer: no-claim native merge gets the fixed token: no allocation, no traversal, no plan (unwind safety is the token's)");
+    std::printf("primary observer no-claim production work / %u calls: clear full-walk allocations %llu, bypass allocations %llu, nodes %llu -> %llu; merge allocations %llu, nodes %llu, plans %llu\n",
+                repeats,static_cast<unsigned long long>(clearWalk),static_cast<unsigned long long>(clearAfter),
                 static_cast<unsigned long long>(clearOld.clearNodes),static_cast<unsigned long long>(clearNew.clearNodes),
-                static_cast<unsigned long long>(mergeBefore),static_cast<unsigned long long>(mergeAfter),
-                static_cast<unsigned long long>(mergeOld.mergeNodes),static_cast<unsigned long long>(mergeNew.mergeNodes));
+                static_cast<unsigned long long>(mergeAfter),static_cast<unsigned long long>(mergeNew.mergeNodes),
+                static_cast<unsigned long long>(mergeNew.mergePlans));
     D3D11_BUFFER_DESC d{};d.ByteWidth=672;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     ComPtr<ID3D11Buffer> buffer;check(SUCCEEDED(device->CreateBuffer(&d,nullptr,&buffer)),"primary observer: retained pool fixture");
     auto exercise=[&](bool bypass){
@@ -116,14 +115,17 @@ inline void runObservers(ID3D11Device* device,void (*check)(bool,const char*)) {
         copy::invalidateEmission(reinterpret_cast<uintptr_t>(&source.item(0)));
         emptyPlan=begin();claim(source.item(0),frame);const auto beforeUnwind=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
         check(copy::g_emissions.empty() && copy::g_emissionEpoch!=beforeUnwind,"primary observer: unsuccessful empty-plan unwind revokes late claims");
+        // CHANGED with the fixed no-claim token: it keeps no plan for a clear to mark invalid and no epoch to find
+        // stale, so its unwind always revokes what was registered since (the safe direction). The full-plan
+        // counterparts of both cases, which keep their precision, are in primary_copy_observer_tests.h.
         emptyPlan=begin();claim(source.item(0),frame);clear();claim(other,frame);
         const auto clearedEpoch=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
-        check(copy::g_emissions.count(reinterpret_cast<uintptr_t>(&other))==1 && copy::g_emissionEpoch==clearedEpoch,
-              "primary observer: clear-invalidated empty-plan unwind preserves unrelated later owners");
+        check(copy::g_emissions.empty() && copy::g_emissionEpoch!=clearedEpoch,
+              "primary observer: unwind of a no-claim merge token revokes every later owner, even after an intervening clear");
         copy::invalidateEmission(reinterpret_cast<uintptr_t>(&other));emptyPlan=begin();claim(other,frame+1);
         const auto futureEpoch=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
-        check(copy::g_emissions.count(reinterpret_cast<uintptr_t>(&other))==1 && copy::g_emissionEpoch==futureEpoch,
-              "primary observer: stale empty-plan unwind preserves owners registered in a newer epoch");
+        check(copy::g_emissions.empty() && copy::g_emissionEpoch!=futureEpoch,
+              "primary observer: unwind of a no-claim merge token revokes owners registered in a newer epoch too");
         copy::invalidateEmission(reinterpret_cast<uintptr_t>(&other));
         claim(source.item(0),frame+1);
         const auto retained=copy::patches(buffer.Get(),frame);

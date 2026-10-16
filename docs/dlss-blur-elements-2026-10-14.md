@@ -2,6 +2,14 @@
 
 ## Status
 
+- **Shield-strike smear (2026-10-16): DESIGN ONLY, nothing built.** The shield's pool meshes (5C1D, 820E) are unkeyed, and they write no
+  depth, so the engine path's ownership test rejects them. The design ranks a coverage replay that writes private depth plus the slot first.
+  See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
+  with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
+  OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
+  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
+- **Weapons fire (2026-10-16): DESIGN ONLY:** the HDR-layer route (the space dust's) for 1F17, 939D and 5C1D; 820E stays. Evidence W1-W5
+  offline first. See "Design, 2026-10-16: weapons fire after the upscale".
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -150,3 +158,133 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   motion dispatch (and releases the 65 MB decision texture once no eye run or capture wants it); ui_depth.cpp `uiDepthDrawProbe` and
   ui_layer.cpp `uiLayerDecisionCount` expose per-draw state read-only. The full build is green with the rig in its gate; nothing was
   installed or flown. The probe is VR only; a flat press is refused with a reason.
+
+## Design, 2026-10-16: engine motion for the shield strike
+
+Read-only design; no code. Evidence: Frontier `edvr_gfx_20261016_070029.log` (139a6ff2), eye runs 070301 (beam on a shield) and
+070559. `tools\eye_decisions.py` on the shield regions gives world 100%, no valid depth, engine "unavailable", 2.5-6.6 px. The hull beside
+them is 87% engine "joined" and 13% `stale_slot`.
+
+**How the engine path works today.** Keyed pool families (`engine_velocity_families.h` `kFamilies`) are substituted at the draw:
+- Their PS is patched (`dxbc_engine_velocity.h`) to export MRT6 = (2·slot+1, SV_Position.z), under a derived blend with target 6
+  unblended RG (`engine_velocity_state.h`).
+- The UV-only family 5B4D/4375 also gets a patched VS that exports `EDVRPOOLSLOT`. That patch is BC3E/BA58 in the census.
+- The temporal pass's `enginePixelZ` (`temporal_shader_source.h:551-608`) owns a pixel only when the scene depth `zr` equals ES.y bit for
+  bit. It then reprojects the point at `zr` through the record's current and previous pose. A marked pixel that doesn't own the depth
+  returns code 4 (`stale_slot`); an unmarked pixel takes the camera path.
+
+**Why the shield gets nothing.** Two reasons, each enough on its own:
+1. 5C1D/C49F and 820E/6EAA are not in `kFamilies`, so they are never patched.
+2. Even if keyed, they write no depth (`17wZ`), so ES.y ≠ `zr` and the consumer rejects them.
+
+Corollary, hypothesis H-clobber: a keyed translucent draw (the 5B4D family's alpha draws, BC3E/BA58, in 070301/070559 only) overwrites
+the hull's valid ES with its own non-owning depth. That would explain the hull's 13% `stale_slot`.
+
+**Options, ranked.**
+1. **(b) Coverage replay with depth and slot.** This is the `ui_depth.cpp` pattern used for the drive smoke (`kSmokeVs`, `kSmokeDepthHlsl`)
+   and the reticle (`kHoloWorldMarkers`).
+   - Hook: `ui_depth`'s coverage pass, after each 5C1D/820E draw.
+   - The replay draw uses EDVR's PS: a transcription of the effect PS's alpha (C49F999F, 6EAA86EF), which discards below a floor and
+     writes the pass's private depth plus ES (slot from v0.x, depth = the same z). Ownership then holds with the consumer unchanged.
+   - Over the hull, the shield's record motion replaces the hull's. Both ride the ship, which E1 must confirm.
+   - Over the sky, stars inside the covered core take the ship's motion. The floor bounds that.
+   - Cost: one replay per shield draw (a few 2880-index draws), about 0.01-0.03 ms GPU; CPU one draw each. Shader work: two alpha
+     transcriptions plus a slot-exporting VS, which the patcher already makes for 5B4D.
+2. **(a) A translucent-owner channel.** Patch the effect PSs as pool producers that write the slot and their own z to a new target
+   (MRT4/5 if free; MRT6 would clobber the hull, see H-clobber). The consumer reconstructs at that z, not `zr`, when it lies nearer than
+   `zr`.
+   - More general (any keyed translucent family), but it changes `enginePixelZ` and the bind validation, and needs the corpus identity
+     harness for each PS.
+   - It has no coverage floor unless the PS computes one, so faint additive fringes would claim pixels. Over sky that ghosts the stars.
+   - Cost: one extra Load per pixel for each eye, about 0.03 ms.
+3. **(c) Composite the effect after DLSS (UI layer).** Crisp, but it loses AA and jitter on a 2880-triangle mesh, and costs a re-render at
+   output resolution. Better kept for beams and tracers (1F17, 939D), which have no record.
+
+**DLSS preset K.** It ignores the reactive mask (Finding 1), so correct motion is the only in-DLSS lever. With the target's motion, K
+keeps the effect's history instead of rejecting or ghosting it. The see-through background remains a translucency limit no motion fixes.
+
+**Impact puffs and sparks** (AFBC/9F4B/BBAD, 9AEC). They come from a CPU particle stream with no t33 record, so this mechanism cannot
+give them object motion. They need coverage depth (the camera path at their own depth, the smoke pattern), and object motion only if E2
+shows they ride the ship. Their VS is already EDVR's (the facing transcriptions), so a replay can reuse it.
+
+**VR and flat.** This design targets the VR temporal pass and `ui_depth`, which is VR-only. Flat consumes engine slots through its own
+ownership path (`flat_foreground_ownership.h`, OwnerDepth == ConsumerDepth), which has the same equality, so the same replay applies there.
+That is a separate change, and needs a flat combat capture.
+
+**Evidence before building.**
+- **E1.** Do the shield draws' t33 slots name records whose pose delta matches the hull's, and are those records "joined"? Run
+  `tools\eye_run_ledger.py` on run 070301's pool, draw and record files. It needs no flight.
+- **E2.** Do the impact puffs ride the ship? Track their screen offset from the hull across P00-P02 of 070301.
+- **E3.** H-clobber: map 070301's `stale_slot` hull pixels (D00) against the translucent 5B4D coverage. If confirmed, (b) must also keep a
+  translucent keyed draw from writing ES over an owned pixel.
+- **Rig.** `tools\engine_velocity_test` on WARP: an opaque hull record, plus the shield replay over the hull and over the sky. Assert
+  per-pixel ownership, a camera path below the floor, and an unchanged hull ES where nothing is replayed.
+**Evidence, 2026-10-16 (run 070301, offline).** E1: the shield slots 157/162 (5C1D) and 119/124 (820E) share the ship's root pose with
+hull records 200/220/241: identical position and per-frame change, 0.903°. They are NOT joined (marker 447BFA77, previous pose =
+current), and the hull records are; so option (b) must also join the shield records (key them as producers, or have the replay register
+its records for the join). Pointing the replay at the co-located joined hull slot instead is the ruled-out "pool slot as identity".
+E2: inconclusive (the effects grow, so centroids are biased); needs a stride-92 vertex-buffer snapshot in the eye-run ledger.
+E3: 0 of D00's 13,258 `stale_slot` pixels carry a 5B4D slot. They are slot 238 (cockpit, 10,775) and slot 220 (target hull, 2,483),
+where the recorded depth is nearer than the scene's by 5e-7 to 1e-5, never farther. Open hypothesis H-bias: a depth bias missing
+from the exported z, or a later non-GEQUAL depth pass; test by logging the rasterizer DepthBias/SlopeScaledDepthBias and depth function
+of the keyed draws for slots 220 and 238.
+- ruled out: translucent keyed 5B4D draws overwriting the hull's slot (H-clobber), because no non-owning pixel carries a 5B4D slot.
+**Build attempt stopped, 2026-10-16 (before any code).** Two design premises were false:
+- ruled out: keying 5C1D/820E as PS producers as the join, because the join is a CPU emission from the hooked rigid producers
+  (engine_velocity_emit.h observe/observePrimary into the pool-clone sink) and a PS patch writes no previous pose.
+- ruled out: a replay-registered join, because the only pose source the replay can reach is the co-located hull record (pose-match identity).
+- finding: the shield records pass every structural test but never reach the hooked primary producer 42B4130 (relay 1215, joined 1212,
+  declined 0), so an UNHOOKED producer builds them. The real join needs that producer identified in Elite's exe and hooked into the
+  existing emission sink.
+- finding: 6EAA writes constant alpha 1.0 and is a refraction pass (samples the eye HDR copy at screen UV plus a normal-map ripple),
+  so there is no alpha to transcribe; coverage for 820E would have to be displacement-based, and object motion for refracted content
+  is unproven. 5C1D/C49F is ONE+ONE with constant alpha 1.0, so its coverage floor is on HDR intensity (alpha*colour*cb1[90].y).
+**Producer hunt, 2026-10-16 (offline: decompiles, capstone on PE 1788384820, run 070301).** In frame 15468, 162 slots are drawn: all 85
+joined records carry the model+0x478 block at record +0x20..+0x9F, and 70 of the 77 unjoined have it zeroed. The rigid producers (42B4130,
+42B4420 inline, 369C9C0) copy that block; FUN_14434D470 (matrix to packed quaternion, scale at +0x50) does not, and appends through
+FUN_14434D120 (bucket, model key, record, node key), which nothing in EDVR hooks or counts. The four shield slots and the target-anchored
+records 118 (E508) and 156 (1989) share the stack-leftover +0x120 word 0x447BF39C: one producer call. Candidate producer:
+FUN_14434D470/434D120 (prologue 48895C2408 48896C2410 4889742418 57 4883EC20). Not yet excluded: the other initializer callers
+1431FA800, 143C8F8C0, 143DA1DE0, 143E7AF20, 1443ED820. Next: a count-and-tag hook on 434D120 (calls, buckets, threads, overlap with the
+rigid producers' buckets, appended addresses mapped to pool slots in an eye run) before any emission. "139 of 2048 joined" counts pool
+capacity, not a miss rate.
+- ruled out: FUN_14369C9C0 as the shield's producer, because it made 0 calls this session and it copies the model block.
+## Design, 2026-10-16: weapons fire after the upscale (the HDR layer route)
+
+Read-only design; no code. The route already exists: the space dust (vs 9BFC7FD2 / ps DBF17257) is an additive, GEQUAL, no-write world
+effect in the lit HDR target, taken into the per-eye HDR layer since 2026-10-07 (docs/ui-layer-2026-09-23.md, FLOWN OK b4d9d6ab).
+Weapons fire has the same shape.
+
+**What the route does.** The game's own draw goes into an R16G16B16A16F layer per eye at the DLSS output size times the `fix.ui_quality`
+target (4032² at 100 from a 2016² render); the viewport is remapped, NDC and the VS unchanged. Jitter is cancelled by a viewport offset
+(`uiLayerJitterCancel`), valid because the VR jitter goes in at GetProjectionRaw. Depth is tested with the game's own function against a
+nearest-sample, jitter-cancelled seed of the render-res depth (`ui_layer_seed.h`). The game's tonemap draw is re-issued with the layer as
+its HDR source (game exposure and LUT), and the result composited onto the RCAS output per eye before the menu and the submit. DLSS never
+sees the effect.
+
+**Proposed families.** The exact pairs 1F17BF54/A75C1DB6 (beams, bolts), 939D01F2/C5DF9CC9 (multicannon rounds) and 5C1D8EF5/C49F999F
+(shield-strike additive part), as one family `weapons fire` on the HDR branch of `uiLayerFamilyFor` and in `uiLayerFamilyTakesHdr`, exempt
+from the density rule. SRC_ALPHA,ONE and ONE,ONE both convert exactly.
+
+**What looks different, ranked.** (1) No bloom halo if bloom reads the HDR target after these draws (bloom BELIEVED baked in before the
+tonemap, never hashed). (2) Additive after the tonemap: T(F)+T(L) != T(F+L); exact over black space, brighter or clipped over a planet or a
+star (dust p90 6/255, p99 69). (3) Draw order: a later depth writer over beam pixels would be a defect; a later alpha layer no longer dims
+the beams. (4) A one-render-pixel occlusion step at hull silhouettes. (5) Planetary fog skipped. (6) 820E's refracted copy no longer holds
+the beams.
+
+**Alternatives.** A coverage mask with pinned or own motion: no motion source, and K ignores the mask. Drawing twice and subtracting:
+ghosts, additive light counts twice. A private-depth replica: camera motion at the effect's own depth, not its own motion. Kept for stage
+2: feed only the bloom chain from a private HDR copy, if the halo is missed.
+
+**Evidence before building (offline, runs 070301 and 070422, log 070029).** W1: no depth writer over the weapon pixels after the weapon
+draws and before the tonemap. W2: the first reader of the lit HDR target after them (the bloom chain), and the halo energy. W3: 1F17's
+CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 carry the eye jitter. W4: tone-order parity over the beam pixels. W5: the RTV is the lit HDR
+eye target, the DSV is seedable, and the stencil state.
+
+**Flight (after the build).** Frontier VR, DLSS K, `fix.ui_quality` 100. Fire beams and multicannon over space, a planet and near a star,
+head still then moving; hit a shield; eye dump during a burst. Pass: the 30 s `weapons fire` line at 2 or more a frame while firing with 0
+left in the scene; no trails; beams cut by hulls and never over the cockpit; the dump's tonemap input without the beams. Then Sean judges
+the halo.
+
+- ruled out: 820E/6EAA in the layer, because it samples the pre-DLSS eye HDR copy at the screen UV; it stays in the scene.
+- ruled out: drawing the effects at render size and upscaling the layer, because it is the blur DLSS already gives, without DLSS.

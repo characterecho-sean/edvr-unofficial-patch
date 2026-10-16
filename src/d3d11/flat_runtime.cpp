@@ -44,6 +44,7 @@
 #include "flat_standdown.h"
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
+#include "flat_pair_facts.h"   // what a draw's shader pair alone says, remembered per pair
 #include "flat_camera_table.h"
 #include "flat_hdr_projection_capture.h"
 #include "flat_deferred_camera.h"
@@ -614,6 +615,7 @@ struct State {
     // backend call. A timer is owned until its sample is read; with none free the
     // frame is skipped and counted.
     flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()};
+    FlatPairFactsMemo pairFacts;                  // what a draw's shader pair alone says (flat_pair_facts.h), owner thread
     static constexpr int kGpuFrameTimers = 4, kGpuResolveTimers = 2;
     GpuTimer gpuFrameTimer[kGpuFrameTimers];
     GpuTimer gpuResolveTimer[kGpuResolveTimers];
@@ -4468,7 +4470,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
             static_cast<unsigned long long>(s.resetExtentWindow), static_cast<unsigned long long>(s.presentNotOkWindow));
         const auto renderer = flatMonoResolveStats();
-        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu",
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f fast-travel-steps-kept=%llu",
             static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
             static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
             static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
@@ -4478,7 +4480,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(renderer.formatChanges), static_cast<unsigned long long>(renderer.cameraCuts),
             static_cast<unsigned long long>(renderer.backendFailures), static_cast<unsigned long long>(renderer.currentContinueRun),
             static_cast<unsigned long long>(renderer.longestContinueRun), static_cast<unsigned long long>(renderer.hdrResolves),
-            static_cast<unsigned long long>(renderer.hdrSpatial));
+            static_cast<unsigned long long>(renderer.hdrSpatial),
+            static_cast<unsigned long long>(renderer.originRebases), renderer.lastOriginRebaseM,
+            static_cast<unsigned long long>(renderer.travelSteps));
         s.refusedWindow.clear(); s.acceptedResetWindow = s.acceptedHistoryWindow = 0;
         s.resetMissingWindow = s.resetGapWindow = s.resetDepthWindow = s.resetColorWindow = s.resetExtentWindow = 0;
         s.presentNotOkWindow = 0;
@@ -5306,17 +5310,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 (unsigned long long)s.prefix.frame,s.prefix.sequence+1,(unsigned long long)k.vs,(unsigned long long)k.ps,priority?1u:0u,representative);
         }
     }
-    d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
+    // Everything the shader pair alone says, remembered per pair (flat_pair_facts.h: the key is (vs, ps, flat profile) and nothing else).
+    const FlatPairFacts& pairFact = s.pairFacts.get(k.vs, k.ps, runtimeFlatProfile());
+    d.supported = pairFact.supported; d.instances = instances;
     // A pool family's vertex shader left stock (an unkeyed pixel shader), drawn into the scene's depth: it moves with no motion source, so a
     // scene holding one is never source-free (design section 104; the selector's unsupportedFamilyDraws).
-    d.poolFamilyVs = !d.supported && k.depth && engineVelocityPoolFamilyVs(k.vs) &&
+    d.poolFamilyVs = !d.supported && k.depth && pairFact.familyVs &&
         flatContractKind(false, k.depth, k.depth, k.depthWidth, k.depthHeight, 26, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
     // everything EDVR reads of the context for it below.
     if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     k.kind = flatContractKind(d.supported, k.color, k.depth, k.width, k.height, k.format, s.prefix.width, s.prefix.height, k.color == s.prefix.output);
-    const bool tone = flat_mono_detail::toneHdrSlot(k.vs, k.ps) != ~0u;
-    const bool copy = k.vs == flat_mono_detail::kCopyVs && k.ps == flat_mono_detail::kCopyPs && k.color == s.prefix.output;
+    const bool tone = pairFact.toneSlot != ~0u;
+    const bool copy = pairFact.copyPair && k.color == s.prefix.output;
     if(!copy && s.drawCapture.active()) {
         FlatComputeInternalScope guard;
         // This repeats the later source predicate only while F10 is armed, so
@@ -5332,7 +5338,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The map tonemap (flatUiMapToneSlotOf, the UI layer's own table) reads the scene in slot 0 like a registry tone: its slots are
     // captured for the UI layer's candidate. Its readers (flat_runtime_model.h copy-pair branches, flat_copy_structure.h, the
     // mono selector's registry-keyed tone) gate on their own pairs, so none of them sees this draw as a copy or a tone.
-    if (tone || copy || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u) for (uint32_t slot = 0; slot < 2; ++slot) {
+    if (tone || copy || pairFact.mapToneSlot != ~0u) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
@@ -5998,6 +6004,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // the game's tonemap re-issued over it, and at the output copy the door and the composite. Every decision is made
     // here, after the scope has planned everything else it does with this draw (a draw it does anything else with is
     // refused, and stays in H as stock).
+    // The back-off trail (log only; flat_ui_layer_math.h's FlatUiTrail): each tone-shaped draw of the frame, with the layer on or off,
+    // and the branch the chain below takes for it.
+    const bool trailDraw = (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) || tone ||
+                           pairFact.sourceTone || pairFact.mapToneSlot != ~0u;
+    if (trailDraw) flatUiTrailNoteDraw(s.prefix.frame, k.vs, k.ps, kind, count, flatUiLayerOn(), hdrTrigger, s.hdrTreated);
     if (flatUiLayerOn()) {
         FlatUiLayerAsk ask = FlatUiLayerAsk::kNotAsked;
         if (copy) {
@@ -6005,6 +6016,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         } else {
             uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
             flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
+            // A pair the family rule cannot name for any (map open, HDR target) is never asked: flatUiLayerDecide would return kNotAsked at its
+            // family test, before any counter or log (flat_pair_facts.h; pinned by the wiring scan), so its inputs are not gathered for it.
+            if (pairFact.uiMayAsk) {
             FlatUiLayerDraw ui;
             ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
             ui.format = k.format;
@@ -6019,6 +6033,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            }
             // The route so far, for the tone branches below: the HDR route once it treated this frame, else the resolve plan's
             // (trained-native, trained-upscale, ...), or none yet. Computed only when a tone branch runs, as before.
             const auto routeSoFar = [&]() -> const char* {
@@ -6027,21 +6042,23 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
             };
-            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
-            else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
+            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
+            else if (ask == FlatUiLayerAsk::kRefused) { if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
             // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
             // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
-            else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
+            else if (tone || pairFact.mapToneSlot != ~0u || pairFact.sourceTone) {
                 const char* route = routeSoFar();
-                if (flatUiSourceTonePair(k.vs, k.ps)) {
+                if (pairFact.sourceTone) {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kNamed);
                     // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
                         uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                                                                 k.color, k.width, k.height, route);
                 } else {
-                    const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, tone ? FlatUiTrailBranch::kRegistry : FlatUiTrailBranch::kMap);
+                    const uint32_t slot = tone ? pairFact.toneSlot : pairFact.mapToneSlot;
                     uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
                                                       slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
                 }
@@ -6050,6 +6067,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // Its source is read from the context, not the binding shadow: when this copy is the HDR route's trigger, the
             // resolve ran inside this scope (treatHdr) and the shadow no longer names the draw's bindings (13:23 flight).
             else if (k.ps == flat_mono_detail::kCopyPs) {
+                if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kCopy);
                 FlatComputeInternalScope readGuard;
                 Ptr<ID3D11ShaderResourceView> copySrv;
                 ctx->PSGetShaderResources(0, 1, &copySrv);
@@ -6063,9 +6081,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {
                 bool shapeAdmitted = false;
                 if (flatUiLayerShapeToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps, k.color, k.width, k.height,
-                                                  startInstance, routeSoFar(), shapeAdmitted))
+                                                  startInstance, routeSoFar(), shapeAdmitted)) {
                     uiTone = shapeAdmitted;
-                else {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kShape);
+                } else {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kUnknown);
                     flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                         k.color, k.width, k.height, kind, count, instances, startInstance);
                     uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);

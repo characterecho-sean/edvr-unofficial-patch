@@ -1276,6 +1276,107 @@ void testFlatLayerRules() {
                   log.record(16, 2) == FlatUiShapeToneLog::Result::Known,
               "shape tone log: a recorded pair stays Known after capacity");
     }
+    // The back-off trail (log only): the record rolls per frame; asks, takes and refusals count per frame; the fifth tone-shaped draw is
+    // overflow; branch, physical check, proof and re-issue attach to the draw and print in the body; a worst-case body fits; twelve trails.
+    {
+        static int kHudA = 0, kHudB = 0, kT1 = 0;
+        FlatUiTrail trail;
+        trail.noteAsk(5, nullptr);
+        trail.noteAsk(5, &kHudA);
+        trail.noteTake(5);
+        trail.noteRefuse(5, FlatUiRefuse::kToneUnproven);
+        trail.noteAsk(6, &kHudB);
+        check(trail.prev.frame == 5 && trail.prev.asked == 2 && trail.prev.taken == 1 &&
+                  trail.prev.refused[static_cast<size_t>(FlatUiRefuse::kToneUnproven)] == 1 && trail.prev.hud == &kHudA &&
+                  trail.cur.frame == 6 && trail.cur.asked == 1 && trail.cur.taken == 0 && trail.cur.hud == &kHudB,
+              "back-off trail: a new frame rolls the current record into the previous one; asks, takes and refusals count per frame");
+        for (uint32_t i = 0; i < 5; ++i) trail.noteDraw(6, 0x100 + i, 0x200, 'D', 3, true, false, true);
+        check(trail.cur.tones == 5 && trail.cur.toneOverflow == 1 && trail.cur.draw[3].vs == 0x103 && trail.cur.last == -1,
+              "back-off trail: the fifth tone-shaped draw is counted as overflow and not stored");
+        trail.noteDraw(7, 0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull, 'D', 3, true, true, false);
+        trail.noteBranch(7, FlatUiTrailBranch::kNamed);
+        trail.notePhys(7, FlatUiTrailPhys::kIdentity, &kT1, &kHudA, &kHudB);
+        trail.noteProven(7, true);
+        trail.noteAdmission(7, "admitted by the named pair");
+        trail.noteReissue(7, FlatUiTrailReissue::kDeclined, 2, 0);
+        char body[900];
+        flatUiTrailBody(trail.cur, body, sizeof body);
+        check(std::strstr(body, "by=named") && std::strstr(body, "phys=identity") && std::strstr(body, "t1=other") &&
+                  std::strstr(body, "pr=1") && std::strstr(body, "adm=\"admitted by the named pair\"") &&
+                  std::strstr(body, "re=declined(layer-busy)") && std::strstr(body, "ui=1") && std::strstr(body, "hdr=10"),
+              "back-off trail: the body names the draw's branch, physical failure, proof, admission and re-issue outcome");
+        trail.noteDraw(8, 0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull, 'D', 3, true, false, true);
+        trail.noteProven(8, true);
+        trail.noteReissue(8, FlatUiTrailReissue::kPublished, 0, 1234);
+        flatUiTrailBody(trail.cur, body, sizeof body);
+        check(trail.prev.frame == 7 && trail.prev.draw[0].branch == FlatUiTrailBranch::kNamed &&
+                  std::strstr(body, "re=published(1234)") && std::strstr(body, "t1=none") && std::strstr(body, "pr=1"),
+              "back-off trail: the previous frame keeps its own draw; a published re-issue names its seq; no t1 reads none");
+    }
+    {
+        FlatUiTrail worst;
+        static int kShadow = 0;
+        FlatUiTrailFrame& w = worst.frameFor(0xFFFFFFFFFFFFFFFFull);
+        w.asked = w.taken = w.tones = w.toneOverflow = 4294967295u;
+        for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i) w.refused[i] = 4294967295u;
+        for (uint32_t i = 0; i < FlatUiTrailFrame::kToneSlots; ++i) {
+            FlatUiTrailTone& t = w.draw[i];
+            t.vs = t.ps = 0xFFFFFFFFFFFFFFFFull;
+            t.kind = 'D';
+            t.count = 4294967295u;
+            t.uiEntered = t.hdrTrigger = t.hdrTreated = true;
+            t.branch = FlatUiTrailBranch::kHudAsk;
+            t.phys = FlatUiTrailPhys::kStructure;
+            t.t1 = &kShadow;
+            t.hudShadow = &kShadow;
+            t.proven = true;
+            std::memset(t.admission, 'x', 48);
+            t.admission[48] = '\0';
+            t.reissue = FlatUiTrailReissue::kPublished;
+            t.seq = 0xFFFFFFFFFFFFFFFFull;
+        }
+        w.last = 3;
+        char body[900];
+        flatUiTrailBody(w, body, sizeof body);
+        check(std::strlen(body) < 900 && std::strstr(body, "tones=99999") && std::strstr(body, "refused=ow:99999,") &&
+                  std::strstr(body, "phys=structure") && std::strstr(body, "re=published(18446744073709551615)"),
+              "back-off trail: a worst-case body (20-digit proof numbers, clamped counts, four draws, every refusal) stays under 900 characters");
+        char line[1000];
+        const size_t lineLen = flatUiTrailLine(line, sizeof line, 12, false, w);
+        check(lineLen < 1000 && std::strstr(line, "(12 of 12, the last) -- this frame 18446744073709551615: asked=99999") != nullptr,
+              "back-off trail: the twelfth line says it is the last, names this frame, and fits the report's buffer");
+    }
+    {
+        FlatUiTrail cap;
+        bool numbered = true;
+        for (uint32_t i = 1; i <= FlatUiTrail::kReports; ++i) numbered = numbered && cap.claimReport() == i;
+        check(numbered && cap.claimReport() == 0 && cap.claimReport() == 0,
+              "back-off trail: twelve trails are numbered 1 to 12, and the session is silent after the twelfth");
+        FlatUiTrailFrame plain;
+        plain.frame = 42;
+        char plainLine[1000];
+        flatUiTrailLine(plainLine, sizeof plainLine, 3, true, plain);
+        check(std::strstr(plainLine, "flat ui layer: back-off trail (3 of 12) -- previous frame 42: asked=0 taken=0 refused=- tones=0 over=0") != nullptr,
+              "back-off trail: an ordinary trail names its number and the previous frame, with the empty counts");
+        // The example the report prints, filled from this fixture: the previous frame's named draw, then this frame's ask and refusal.
+        FlatUiTrail example;
+        static int kEx1 = 0, kEx2 = 0;
+        example.noteAsk(41, &kEx1);
+        example.noteTake(41);
+        example.noteDraw(41, 0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull, 'D', 3, true, false, true);
+        example.noteBranch(41, FlatUiTrailBranch::kNamed);
+        example.notePhys(41, FlatUiTrailPhys::kPass, &kEx1, &kEx1, &kEx2);
+        example.noteProven(41, true);
+        example.noteAdmission(41, "admitted by the named pair");
+        example.noteReissue(41, FlatUiTrailReissue::kPublished, 0, 40);
+        example.noteAsk(42, &kEx2);
+        example.noteRefuse(42, FlatUiRefuse::kToneUnproven);
+        char examplePrev[1000], exampleThis[1000];
+        flatUiTrailLine(examplePrev, sizeof examplePrev, 2, true, example.prev);
+        flatUiTrailLine(exampleThis, sizeof exampleThis, 2, false, example.cur);
+        std::printf("  back-off trail example (the report's two lines, from this rig's fixture):\n    %s\n    %s\n", examplePrev,
+                    exampleThis);
+    }
     {
         FlatUiUnknownSourceToneLog log;
         check(log.shouldInspect(1, 2) &&
@@ -1562,7 +1663,7 @@ void testFlatLayerRules() {
         const size_t structure = physical.find("tonemapAdmitStructure(ctx, ps, shape)");
         const size_t directHud = physical.find("flatUiSourceToneDirectHud(");
         const size_t pairGate = source.find("flatUiSourceTonePair(vs, ps)");
-        const size_t physicalCall = source.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, false, shape)");
+        const size_t physicalCall = source.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, false, shape, &failed)");
         const size_t proofCall = source.find("return flatUiLayerToneCandidate(");
         check(!physical.empty() && !source.empty() && structure != std::string::npos &&
                   directHud != std::string::npos && structure < directHud &&
@@ -1610,7 +1711,7 @@ void testFlatLayerRules() {
         const size_t shapeEnd = shapeAt == std::string::npos ? std::string::npos
             : adapter.find("void flatUiLayerProbeUnknownSourceTone(", shapeAt);
         const std::string shapeBody = shapeEnd != std::string::npos ? adapter.substr(shapeAt, shapeEnd - shapeAt) : "";
-        check(!shapeBody.empty() && shapeBody.find("outW, outH, /*unknownDiagnostic=*/false, shape)") != std::string::npos &&
+        check(!shapeBody.empty() && shapeBody.find("/*unknownDiagnostic=*/false, shape, &failed)") != std::string::npos &&
                   shapeBody.find("flatUiLayerToneCandidate(ctx, frame, renderW, renderH, 1, vs, ps,") != std::string::npos,
               "wiring: the shape admission takes the strict physical shape (unknownDiagnostic false) and proves with slot 1");
         check(shapeBody.find("!flatUiShapeToneVs(vs) || flatUiSourceTonePair(vs, ps)) return false;") != std::string::npos,
@@ -1626,6 +1727,33 @@ void testFlatLayerRules() {
                   runtime.substr(shapeCall, probeCall - shapeCall).find("else {") != std::string::npos &&
                   runtime.find("startInstance, routeSoFar(), shapeAdmitted))") != std::string::npos,
               "wiring: the unknown pair's shape admission runs first; the probe and VR's structural admission are its else branch");
+        const std::string trailDrawNote = "if (trailDraw) flatUiTrailNoteDraw(s.prefix.frame, k.vs, k.ps, kind, count, flatUiLayerOn(), hdrTrigger, s.hdrTreated);";
+        const size_t noteAt = runtime.find(trailDrawNote);
+        const size_t gateAt = runtime.find("if (flatUiLayerOn()) {");
+        check(noteAt != std::string::npos && gateAt != std::string::npos && noteAt < gateAt &&
+                  runtime.substr(noteAt + trailDrawNote.size(), gateAt - noteAt - trailDrawNote.size()).find_first_not_of(" \n\t") == std::string::npos,
+              "wiring: the flat draw note sits immediately before if (flatUiLayerOn()) { in the flat runtime, with nothing between");
+        const size_t backOffAt = layer.find("void flatBackOff(");
+        const size_t standDownAt = layer.find("void crispStandDown(", backOffAt);
+        const std::string backOffBody = backOffAt != std::string::npos && standDownAt != std::string::npos
+            ? layer.substr(backOffAt, standDownAt - backOffAt) : "";
+        check(backOffBody.find("if (runtimeFlatProfile() && std::strcmp(what, \"the HDR HUD path\") == 0) flatUiTrailReport();") != std::string::npos,
+              "wiring: flatBackOff reports the back-off trail under the flat profile, for the HDR HUD path only");
+        const size_t endAt = layer.find("void uiLayerCrispToneEnd(");
+        const size_t storeAt = layer.find("e.hdrToneSeq = seq;", endAt);
+        const size_t publishAt = layer.find("if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);", endAt);
+        check(endAt != std::string::npos && storeAt != std::string::npos && publishAt != std::string::npos && storeAt < publishAt,
+              "wiring: uiLayerCrispToneEnd notes the published seq, flat only, beside its store into hdrToneSeq");
+        check(adapter.find("bool unknownDiagnostic, ToneAdmit& shape, uint8_t* failed = nullptr) {") != std::string::npos,
+              "wiring: sourceTonePhysicalShape reports its first failing test through an optional out parameter (default null)");
+        check(shapeBody.find("noteTrailPhysical(frame, failed, shape);") != std::string::npos &&
+                  shapeBody.find("noteTrailPhysical(frame, failed, shape);") < shapeBody.find("toneBloomInput(ctx)"),
+              "wiring: the shape admission notes its physical result before the t2 bloom test");
+        const size_t toneAt = adapter.find("bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame");
+        const size_t admitAt = adapter.find("admitted = uiLayerCrispAdmitFlat(", toneAt);
+        const size_t provenAt = adapter.find("flatUiTrailNoteProven(frame, proven);", toneAt);
+        check(toneAt != std::string::npos && admitAt != std::string::npos && provenAt != std::string::npos && provenAt < admitAt,
+              "wiring: the tone candidate notes its proof before the admission, so a decline attaches to the proven draw");
     }
 }
 

@@ -10,7 +10,7 @@
 #include <atomic>
 
 // Private timing-table fixture exported by the test EXE, alongside
-// treatment_cases.h's fss/temporal/sharpen/menu ones: the actual host
+// treatment_cases.h's temporal/sharpen/menu ones: the actual host
 // dispatcher and NativeTimingClient::acquire's module-ownership validation,
 // without a real D3D11 timing provider. Mirrors native_timing.cpp's own
 // gate closely enough to observe frame_end_overlap's ordering: c->published
@@ -216,7 +216,7 @@ template<class Check> void runFrameEndOverlapCases(Check check) {
   h.frameContentViews[0]=h.frameViews[0];h.frameContentViews[1]=h.frameViews[1];
   h.startupOptions.separateDevice=true;h.externalDevice=producer.Get();h.frameEndOverlapEnabled=true;
   const auto provider=GetModuleHandleW(nullptr);
-  check(h.fss.acquire(provider,producer.Get(),1)==S_OK&&h.temporal.acquire(provider,producer.Get(),1)==S_OK&&
+  check(h.temporal.acquire(provider,producer.Get(),1)==S_OK&&
     h.sharpen.acquire(provider,producer.Get(),1)==S_OK&&h.menu.acquire(provider,producer.Get(),1)==S_OK&&
     h.timing.acquire(provider,producer.Get(),1)==S_OK,"frame_end_overlap validated provider tables");
   bool initialized=false;
@@ -493,7 +493,7 @@ template<class Check> void runFrameEndOverlapCases(Check check) {
   check(!h.consumeOverlappedPresent(),"shutdown clears an unconsumed Present token");
   check(presentBinding.close()==S_OK&&presentBinding.release()==S_OK,"actual Present binding retires after owner shutdown");
   f.route.present=nullptr;binding_fixture::state.device=nullptr;binding_fixture::state.context=nullptr;
-  h.fss.close();h.temporal.close();h.sharpen.close();h.menu.close();h.timing.close();
+  h.temporal.close();h.sharpen.close();h.menu.close();h.timing.close();
 
   // Also cancel the deferred finish BEFORE it starts. Hold the active second
   // Submit at CPU publication, after finish was queued, and stop the service.

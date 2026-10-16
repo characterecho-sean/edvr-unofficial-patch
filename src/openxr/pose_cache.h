@@ -149,15 +149,21 @@ struct PoseCacheReport {
   double ageP50Ms = 0, ageP95Ms = 0, targetP50Ms = 0, targetP95Ms = 0, angleP50Deg = 0, angleP95Deg = 0;
 };
 
-class PoseCache final {
+// BasicPoseCache is the one implementation; PoseCache is the production instance. The mutex type is a parameter only so a rig can count what happens
+// while the answer lock is held (tools\openxr_native_test\pose_cache_lock_cases.h); nothing else ever instantiates it.
+template <class Mutex>
+class BasicPoseCache final {
  public:
   using Clock = uint64_t (*)();
   static constexpr unsigned kSeenCapacity = 16;
   static constexpr size_t kSampleCapacity = 4096;
 
-  // The sample vectors are filled to capacity before they are ever allocated again, so answer() and publish() never allocate under the lock.
-  PoseCache() {
+  // Two sets of sample vectors, each reserved to capacity here and never grown: push() stops at capacity, and takeWindow() swaps the sets and
+  // clears the one it took (clear keeps the capacity). So nothing allocates under mutex_ -- not answer(), publish() or takeWindow() -- and
+  // after construction nothing allocates at all.
+  BasicPoseCache() {
     ageUs_.reserve(kSampleCapacity); targetDeltaNs_.reserve(kSampleCapacity); angleDeg_.reserve(kSampleCapacity);
+    takenAge_.reserve(kSampleCapacity); takenTargetNs_.reserve(kSampleCapacity); takenAngle_.reserve(kSampleCapacity);
   }
 
   // The cache clock, in microseconds, monotonic. Set before the owner starts (the host sets the real one; a rig substitutes its own).
@@ -167,7 +173,7 @@ class PoseCache final {
   // Caller thread. True when the call is answered from the publication. Otherwise `why` names what sends it to the owner hop, and the
   // call is counted. A caller from an RVA the cache has not seen yet goes to the hop once, so the owner's pose-sighting line still names it.
   bool answer(uint64_t geometry, uint64_t origin, uint32_t rva, PoseCacheAnswer& out, PoseCacheMiss& why) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<Mutex> lock(mutex_);
     const uint64_t nowUs = clock_();
     why = PoseCacheMiss::Unpublished;
     if (!rec_.valid) return missLocked(why);
@@ -198,7 +204,7 @@ class PoseCache final {
 
   // Owner, waitPoses entry: a call made from now until the next publish is answered from `next`.
   void beginWait() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<Mutex> lock(mutex_);
     if (rec_.valid) rec_.waiting = true;
   }
 
@@ -206,19 +212,19 @@ class PoseCache final {
   // counted under `why`; one already withdrawn is not (nothing stale was left to serve, and a reset that follows another drop is not a
   // second withdrawal).
   void invalidate(PoseInvalidation why = PoseInvalidation::Other) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<Mutex> lock(mutex_);
     if (rec_.valid) { ++invalidations_[unsigned(why)]; ++invalidationsTotal_; }
     rec_ = PoseCacheRecord{};
   }
   bool live() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<Mutex> lock(mutex_);
     return rec_.valid;
   }
 
   // Owner, after a successful wait. Replaces the publication. The previous publication's `next` is compared with this frame's `now`
   // (the in-wait error, as the hop would have answered it), when both were made under the same keys.
   void publish(const PoseCacheRecord& fresh, uint64_t publishedUs) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<Mutex> lock(mutex_);
     if (rec_.valid && rec_.next.valid && fresh.now.valid && rec_.keys == fresh.keys) {
       push(targetDeltaNs_, int64_t(rec_.next.target - fresh.now.target));
       push(angleDeg_, quaternionAngleDegrees(rec_.next.orientation, fresh.now.orientation));
@@ -230,14 +236,14 @@ class PoseCache final {
     ++publishes_;
   }
 
-  // Takes the window's counters and clears them. The lock covers only the swap: the percentile sorts run on the taker's copies, so a
-  // publish or an answer never waits behind them.
+  // Takes the window's counters and clears them. The lock covers only counter extraction and three vector swaps (no allocation, no sort): the
+  // taker's spare set is already reserved, so a publish or an answer never waits behind a heap call or a percentile sort. takeMutex_ serialises
+  // takers over the spare set; answer, publish and beginWait never touch it.
   void takeWindow(PoseCacheReport& r) {
-    std::vector<int64_t> age, target;
-    std::vector<double> angle;
+    std::lock_guard<std::mutex> taker(takeMutex_);
     r = PoseCacheReport{};
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<Mutex> lock(mutex_);
       r.hits = hits_; r.hitsInWait = hitsInWait_; r.publishes = publishes_;
       for (unsigned i = 0; i < unsigned(PoseCacheMiss::Count); ++i) { r.reasons[i] = reasons_[i]; r.misses += reasons_[i]; }
       for (unsigned i = 0; i < unsigned(PoseInvalidation::Count); ++i) r.invalidations[i] = invalidations_[i];
@@ -245,21 +251,22 @@ class PoseCache final {
       hits_ = hitsInWait_ = publishes_ = 0;
       for (auto& c : reasons_) c = 0;
       for (auto& c : invalidations_) c = 0;
-      age.swap(ageUs_); target.swap(targetDeltaNs_); angle.swap(angleDeg_);
-      ageUs_.reserve(kSampleCapacity); targetDeltaNs_.reserve(kSampleCapacity); angleDeg_.reserve(kSampleCapacity);
+      ageUs_.swap(takenAge_); targetDeltaNs_.swap(takenTargetNs_); angleDeg_.swap(takenAngle_);
     }
-    if (!age.empty()) {
+    // takenX_ now holds the window's samples and the live vectors are the empty, still-reserved ones the previous take left behind.
+    if (!takenAge_.empty()) {
       r.ageValid = true;
-      r.ageP50Ms = pick(age, 50) / 1000.0; r.ageP95Ms = pick(age, 95) / 1000.0;
+      r.ageP50Ms = pick(takenAge_, 50) / 1000.0; r.ageP95Ms = pick(takenAge_, 95) / 1000.0;
     }
-    if (!target.empty()) {
+    if (!takenTargetNs_.empty()) {
       r.targetValid = true;
-      r.targetP50Ms = pick(target, 50) / 1e6; r.targetP95Ms = pick(target, 95) / 1e6;
+      r.targetP50Ms = pick(takenTargetNs_, 50) / 1e6; r.targetP95Ms = pick(takenTargetNs_, 95) / 1e6;
     }
-    if (!angle.empty()) {
+    if (!takenAngle_.empty()) {
       r.angleValid = true;
-      r.angleP50Deg = pick(angle, 50); r.angleP95Deg = pick(angle, 95);
+      r.angleP50Deg = pick(takenAngle_, 50); r.angleP95Deg = pick(takenAngle_, 95);
     }
+    takenAge_.clear(); takenTargetNs_.clear(); takenAngle_.clear();     // capacity stays: this set is the next window's live one
   }
 
  private:
@@ -286,7 +293,7 @@ class PoseCache final {
   // Every field below is read and written under mutex_. The owner holds it for a struct copy or a counter bump (never across an OpenXR call),
   // the caller for the same, so the job thread's wait for it is bounded by a copy of PoseCacheRecord: this is the cross-thread publication,
   // and there is no unlocked read of rec_ anywhere.
-  mutable std::mutex mutex_;
+  mutable Mutex mutex_;
   Clock clock_ = nullptr;
   PoseCacheRecord rec_;
   uint32_t seen_[kSeenCapacity]{};
@@ -297,7 +304,12 @@ class PoseCache final {
   uint64_t invalidationsTotal_ = 0;
   std::vector<int64_t> ageUs_, targetDeltaNs_;
   std::vector<double> angleDeg_;
+  // The set takeWindow swaps in (guarded by takeMutex_, not mutex_): empty and reserved between takes, the window's samples during one.
+  std::mutex takeMutex_;
+  std::vector<int64_t> takenAge_, takenTargetNs_;
+  std::vector<double> takenAngle_;
 };
+using PoseCache = BasicPoseCache<std::mutex>;
 
 // native_pose_cache,window=N,hits=H,hits_in_wait=W,misses=M,miss_reasons=unpublished:a/keys:b/stale:c/slot:d/new_caller:e,
 //   age_p50/p95=x/y,target_delta_p50/p95=x/y,angle_delta_p50/p95=x/y,publishes=P,events_local=L,events_dropped=D

@@ -116,6 +116,7 @@ extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
 extern uint64_t g_stateCalls;                  // owner thread only: the draw wrapper's D3D context calls (see below)
+extern bool g_guardTrustOff;                   // rig only: the overlay guard reads the context on every draw, as before 2026-10-16
 // The resources an open eye-frame's snapshot came from (eye0 pool, eye0
 // scene, eye1 pool, eye1 scene, then the on-foot source's pool and scene).
 // Identities only, never dereferenced here.

@@ -60,6 +60,16 @@
 - **Next flight:** Proton qualification of main's cache, comparing `auto`, `on`
   and `off` after restarting; collect decisions, counters and frame timings.
 
+## Update 2026-10-16: native AMD is now a suspected case (VR side)
+
+A user on an RX 9070 XT (native D3D11, Quest 3, 80 Hz) lost more than 10 fps with
+`fix.particle_billboard = steady`. Its Unmap tee copied the whole 5376-byte scene block out of the game's
+mapped pointer on every write (60+ a frame). The copy is cut to the 160 bytes the fix reads, and an
+`unmap readers` line and a one-off `mapped read probe` line price every Unmap-tee reader of mapped memory on
+native drivers. The camera readers read 12-56 bytes and are untouched; section 2's VR notes still stand.
+Entry and flight plan: `particle-billboards.md`, "2026-10-16". Branch `claude/particle-cb-copy`, not merged,
+not flown.
+
 ## Contribution and attribution (2026-10-02)
 
 [arturbac][arturbac] identified the expensive constant-buffer shadow copies in

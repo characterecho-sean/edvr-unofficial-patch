@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include "flat_temporal_model.h"
+#include "flat_owner_gate.h"
 #include "flat_compute_readback.h"
 
 namespace edvr {
@@ -23,10 +24,8 @@ inline bool flatTemporalCapturing() {
     // for the frames it does not watch; a probe frame runs them.
     if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;
     if (g_flatComputeInternal) return false;
-    const DWORD owner = detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire);
-    if (flatCaptureThreadEligible(true, owner, GetCurrentThreadId())) return true;
-    detail::g_flatTemporalForeignCalls.fetch_add(1, std::memory_order_relaxed);
-    return false;
+    return flatObserveAsOwner(detail::g_flatTemporalOwnerThread,
+                              detail::g_flatTemporalForeignCalls, GetCurrentThreadId());
 }
 
 void flatTemporalStart(ID3D11Device* device);

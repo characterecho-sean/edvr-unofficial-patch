@@ -55,8 +55,9 @@ Options (before the compiler):
   --keep NAME    with --prune, leave NAME alone (e.g. an ml64-made thunks.obj).
   --dry-run      print hit/miss decisions; write nothing, run no compiler.
   --off          pass straight through (also env EDVR_NO_COMPILE_CACHE=1).
-                 With --prune this still deletes every *.obj in the /Fo dir,
-                 which is what `del /q obj\\x\\*.obj` did.
+                 With --prune this still deletes every *.obj in the /Fo dir
+                 except the --keep names, which is what `del /q obj\\x\\*.obj`
+                 did minus the assembler output the compiler cannot recreate.
   --self-test    fast tests with a fake compiler; no real compiler needed.
 """
 
@@ -495,7 +496,7 @@ def prune_directory(ctx, p, listed, keep, everything):
         base = low[:-4] if low.endswith(".ccm") else low
         if not base.endswith(".obj"):
             continue
-        if not everything and (base in listed or base in keep_set):
+        if base in keep_set or (not everything and base in listed):
             continue
         removed.append(entry)
     for entry in removed:
@@ -624,7 +625,7 @@ def execute(argv, environ, runner, out=say, dry_run=False, off=False, prune=Fals
         if p.uncacheable and not off:
             out("[edvr] compile_cache: passthrough, uncached: %s" % p.uncacheable)
         if prune and p.compile_only:
-            prune_directory(ctx, p, set(), (), everything=True)
+            prune_directory(ctx, p, set(), keep, everything=True)
         if dry_run:
             out("[edvr] compile_cache: dry-run: passthrough, nothing run")
             return 0
@@ -950,6 +951,30 @@ def _self_test_body():
     run([], env=inc2, off=True, prune=True)
     expect(not os.path.exists("obj/stale2.obj"), "off with prune still empties stale objects like del *.obj did")
     run([], env=inc2)
+
+    # --keep holds in every bypass path.  build.bat assembles thunks.obj just before the
+    # compile; the bypass prune used to delete it (review 2026-10-15 finding 1), and the
+    # compiler cannot recreate it, so the link failed with unresolved thunk exports.
+    for label, extra, kwargs, env in (
+            ("--off", [], {"off": True}, inc2),
+            ("EDVR_NO_COMPILE_CACHE", [], {}, dict(inc2, EDVR_NO_COMPILE_CACHE="1")),
+            ("an uncacheable line", ["/Zi"], {}, inc2)):
+        _write("obj/thunks.obj", "ml64")
+        _write("obj/stale3.obj", "old")
+        _write("obj/stale3.obj.ccm", "{}")
+        rc, compiled, calls = run(extra, env=env, prune=True, keep=["thunks.obj"], **kwargs)
+        expect(rc == 0 and calls == 1, "%s with prune and keep still compiles" % label)
+        expect(os.path.exists("obj/thunks.obj"), "%s with prune honours --keep" % label)
+        expect(not os.path.exists("obj/stale3.obj") and not os.path.exists("obj/stale3.obj.ccm"),
+               "%s with prune still removes an unkept object" % label)
+        run([], env=inc2)
+    # dry-run in bypass mode deletes nothing, kept or not
+    _write("obj/stale3.obj", "old")
+    with forbid_writes():
+        run([], env=inc2, off=True, dry_run=True, prune=True, keep=["thunks.obj"])
+    expect(os.path.exists("obj/thunks.obj") and os.path.exists("obj/stale3.obj"), "bypass dry-run prunes nothing")
+    os.remove("obj/stale3.obj")
+    os.remove("obj/thunks.obj")
 
     # uncacheable lines pass through
     rc, compiled, calls = run(["/Zi"], env=inc2)

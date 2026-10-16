@@ -49,6 +49,7 @@
 #include <thread>
 #include <vector>
 
+#include "../rig_graphics_mode.h"
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/common/native_render_settings.h"
@@ -259,6 +260,11 @@ int run() {
     GetTempPathW(MAX_PATH, temp);
     g_dir = std::wstring(temp) + L"edvr_fp_glue_" + std::to_wstring(GetCurrentProcessId());
     CreateDirectoryW(g_dir.c_str(), nullptr);
+    // Config::init takes the profile from the machine's Settings.xml unless LOCALAPPDATA is pointed elsewhere (tools\rig_graphics_mode.h): a fixture at mode 4 (VR).
+    if (!edvr::rig::pinRigGraphicsMode(g_dir + L"\\localappdata", 4)) {
+        std::printf("  FAIL  the fixture Settings.xml could not be written\n");
+        return 1;
+    }
     if (GetFileAttributesA("tools\\edvr_log.py") == INVALID_FILE_ATTRIBUTES) {
         std::printf("  FAIL  tools\\edvr_log.py is not here: run this from the repo root\n");
         return 1;

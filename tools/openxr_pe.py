@@ -28,7 +28,7 @@ GRAPHICS_PROVIDER_EXPORTS = frozenset({
     'D3D11CreateDevice', 'D3D11CreateDeviceAndSwapChain',
     'edvrAcquireNativeGraphics', 'edvrAcquireNativeMenu',
     'edvrAcquireNativeTemporal', 'edvrAcquireNativeSharpen',
-    'edvrAcquireNativeFrame', 'edvrAcquireNativeFss',
+    'edvrAcquireNativeFrame',
     'edvrAcquireNativeTiming',
     'edvrAcquireGraphicsBridge', 'edvrAcquireRenderBoundary',
     'edvrQueryNativeRenderSettings',

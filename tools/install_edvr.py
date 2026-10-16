@@ -78,6 +78,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import types
 from pathlib import Path
 
 GAME_EXE = "EliteDangerous64.exe"
@@ -137,6 +139,153 @@ def native_paths(root, target):
     }
 
 
+GAME_PROBE_ATTEMPTS = 4
+GAME_PROBE_PAUSE = 0.4
+_LAST_PROBE_REASON = ""
+
+
+def probe_reason():
+    """Why the last strict_game_running() could not prove the state, as a
+    ready-to-append suffix (empty when it proved it or has not run)."""
+    return " [probe: %s]" % _LAST_PROBE_REASON if _LAST_PROBE_REASON else ""
+
+
+class _ProbeError(Exception):
+    """The process list could not be read reliably; the message says why."""
+
+
+def parse_tasklist_csv(text):
+    """PIDs of every GAME_EXE row in `tasklist /FO CSV /NH` output.
+
+    A row that is not the five-field shape is ignored unless it could be the
+    game: a blank line, a localised INFO line or a different process cannot
+    hide a game, but a row naming the game or cut short inside the image name
+    can, and that raises. A game row must carry a usable PID. Output with no
+    well-formed process row at all raises: that is a failed listing, not an
+    empty machine.
+    """
+    game = GAME_EXE.lower()
+    pids, good = [], 0
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows = list(csv.reader([line]))
+        except csv.Error:
+            rows = []
+        row = rows[0] if rows else []
+        if len(row) == 5 and row[0].strip():
+            good += 1
+            if row[0].strip().lower() != game:
+                continue
+            pid = row[1].strip()
+            if not pid.isdigit():
+                raise _ProbeError("game row with bad pid: %r" % line[:80])
+            pids.append(int(pid))
+            continue
+        first = (row[0] if row else line).strip().strip('"').lower()
+        if game in line.lower() or game.startswith(first):
+            raise _ProbeError("malformed row that could be the game "
+                              "(%d fields): %r" % (len(row), line[:80]))
+    if not good:
+        raise _ProbeError("tasklist listed no process rows")
+    return pids
+
+
+def _game_pids_tasklist():
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=20,
+                             check=False,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW",
+                                                    0x08000000))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _ProbeError("tasklist did not run: %s" % exc)
+    if out.returncode != 0:
+        raise _ProbeError("tasklist rc=%d: %s" % (
+            out.returncode, (out.stderr or out.stdout or "").strip()[:80]))
+    return parse_tasklist_csv(out.stdout)
+
+
+def _game_pids_toolhelp(exe=None):
+    """PIDs of GAME_EXE from a Toolhelp32 snapshot: no text to parse, and a
+    process that exits mid-walk is simply absent. `exe` overrides the image
+    name looked for (the self-test uses it)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Process32FirstW.argtypes = k32.Process32NextW.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32FirstW.restype = k32.Process32NextW.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+    if snap is None or snap == ctypes.c_void_p(-1).value:
+        raise _ProbeError("CreateToolhelp32Snapshot failed, error %d"
+                          % ctypes.get_last_error())
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        pids, seen = [], 0
+        ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            seen += 1
+            if entry.szExeFile.lower() == (exe or GAME_EXE).lower():
+                pids.append(int(entry.th32ProcessID))
+            ctypes.set_last_error(0)
+            ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        err = ctypes.get_last_error()
+        if not seen or err not in (0, 18):  # 18 = ERROR_NO_MORE_FILES
+            raise _ProbeError("Toolhelp32 walk ended after %d rows, error %d"
+                              % (seen, err))
+        return pids
+    finally:
+        k32.CloseHandle(snap)
+
+
+def _game_pids():
+    """Game PIDs by the first method that reads the list; both failing raises
+    with both reasons."""
+    reasons = []
+    for name, probe in (("toolhelp", _game_pids_toolhelp),
+                        ("tasklist", _game_pids_tasklist)):
+        try:
+            return probe()
+        except _ProbeError as exc:
+            reasons.append("%s: %s" % (name, exc))
+        except (OSError, AttributeError, ValueError) as exc:
+            reasons.append("%s: %s: %s" % (name, type(exc).__name__, exc))
+    raise _ProbeError("; ".join(reasons))
+
+
+def _probe_game_once(target):
+    """One look: (known, running, reason); reason says why known is False."""
+    try:
+        pids = _game_pids()
+    except _ProbeError as exc:
+        return False, False, str(exc)
+    if target is None:
+        return True, bool(pids), ""
+    images = [_process_image_path(pid) for pid in pids]
+    known, running = game_running_in(target, images)
+    if not known:
+        lost = [str(pid) for pid, img in zip(pids, images) if img is None]
+        return False, False, ("image path of %s pid %s could not be resolved"
+                              % (GAME_EXE, ",".join(lost)))
+    return known, running, ""
+
+
 def strict_game_running(target=None):
     """Return (known, running); native staging fails closed on probe errors.
 
@@ -144,35 +293,24 @@ def strict_game_running(target=None):
     directory counts: another install's game cannot hold this install's files
     open. A running game process whose image path cannot be resolved keeps
     the conservative refusal.
+
+    A look that cannot prove the state is repeated: the usual cause is a
+    process starting or exiting under the listing, which a moment settles. A
+    proven answer returns at once, so a game that is running is still refused
+    without delay. When every look fails, (False, False) is returned and
+    probe_reason() names the last reason.
     """
-    try:
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=20,
-                             check=False,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW",
-                                                    0x08000000))
-    except (OSError, subprocess.SubprocessError):
-        return False, False
-    if out.returncode != 0 or not (out.stdout or "").strip():
-        return False, False
-    rows = list(csv.reader((out.stdout or "").splitlines()))
-    if not rows:
-        return False, False
-    pids = []
-    for row in rows:
-        if len(row) != 5 or not row[0].strip() or not row[3].isdigit():
-            return False, False
-        try:
-            pid = int(row[1].strip())
-        except (TypeError, ValueError):
-            return False, False
-        if pid < 0:
-            return False, False
-        if row[0].strip().lower() == GAME_EXE.lower():
-            pids.append(pid)
-    if target is None:
-        return True, bool(pids)
-    return game_running_in(target, [_process_image_path(pid) for pid in pids])
+    global _LAST_PROBE_REASON
+    reason = ""
+    for attempt in range(GAME_PROBE_ATTEMPTS):
+        if attempt:
+            time.sleep(GAME_PROBE_PAUSE)
+        known, running, reason = _probe_game_once(target)
+        if known:
+            _LAST_PROBE_REASON = ""
+            return known, running
+    _LAST_PROBE_REASON = "%s (%d attempts)" % (reason, GAME_PROBE_ATTEMPTS)
+    return False, False
 
 
 def _process_image_path(pid):
@@ -386,7 +524,7 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
     if not dry_run and (not known or running):
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; native "
-                  "staging fails closed." % GAME_EXE)
+                  "staging fails closed.%s" % (GAME_EXE, probe_reason()))
         else:
             print("[edvr] ERROR: %s is running. Close it before native staging."
                   % GAME_EXE)
@@ -634,7 +772,7 @@ def restore_native(receipt_path, dry_run=False):
         known, running = strict_game_running(target)
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; restore "
-                  "fails closed." % GAME_EXE)
+                  "fails closed.%s" % (GAME_EXE, probe_reason()))
             return 1
         if running:
             print("[edvr] ERROR: %s is running; native restore refused." % GAME_EXE)
@@ -814,7 +952,8 @@ def restore_native_v2(receipt_path, dry_run=False):
             return 0
         known, running = strict_game_running(receipt["target"])
         if not known or running:
-            raise ValueError("native restore requires a proven stopped game")
+            raise ValueError("native restore requires a proven stopped game%s"
+                             % probe_reason())
         snapshots, changed = [], []
         try:
             for entry in receipt["files"]:
@@ -1169,8 +1308,8 @@ def native_direct(root, target, loader, runtime, dry_run=False):
     paths, config, lib = _native_direct_plan(root, target, loader, runtime)
     known, running = strict_game_running(target)
     if not known or running:
-        if not dry_run: print("[edvr] ERROR: direct native route requires a proven stopped game")
-        elif not known: print("[edvr] direct native dry run: process state unavailable")
+        if not dry_run: print("[edvr] ERROR: direct native route requires a proven stopped game%s" % probe_reason())
+        elif not known: print("[edvr] direct native dry run: process state unavailable%s" % probe_reason())
         if not dry_run: return 1
     print("[edvr] direct native plan%s" % (" (DRY RUN)" if dry_run else ""))
     config_path = os.path.join(target, "Openvr", "win64", "edvr_openxr.ini")
@@ -1546,7 +1685,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             raise SystemExit("[edvr] Use edvr-installer.exe to preserve and chain the existing d3d11.dll: %s" % exc)
     known, running = strict_game_running(target)
     if not dry_run and (not known or running):
-        print("[edvr] ERROR: native staging requires a proven stopped game")
+        print("[edvr] ERROR: native staging requires a proven stopped game%s" % probe_reason())
         return 1
     stamp = datetime.datetime.now()
     receipt = os.path.join(target, "edvr_native_receipt.json" if native else "edvr_flat_receipt.json")
@@ -1730,7 +1869,7 @@ def suspend_resume(target, resume=False, dry_run=False):
         print("[edvr] dry run: wrote nothing."); return 0
     known, running = strict_game_running(target)
     if not known or running:
-        print("[edvr] ERROR: %s requires a proven stopped game" % verb)
+        print("[edvr] ERROR: %s requires a proven stopped game%s" % (verb, probe_reason()))
         return 1
     try:
         os.rename(src, dst)
@@ -2575,8 +2714,123 @@ def _xess_opt_in_self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _game_probe_self_test():
+    """strict_game_running must prove the state or say why it could not, ride
+    out a transient failure, and still refuse a game running from the target."""
+    ok = True
+    def check(cond, what):
+        nonlocal ok
+        if not cond: print("game probe self-test: %s" % what); ok = False
+
+    def row(name, pid="4242", sess="1", mem="12,345 K"):
+        return '"%s","%s","Console","%s","%s"' % (name, pid, sess, mem)
+    base = [row("System Idle Process", "0", "0"), row("explorer.exe")]
+    def parse(*lines):
+        try: return parse_tasklist_csv("\r\n".join(lines) + "\r\n")
+        except _ProbeError as exc: return "raise:%s" % exc
+    for lines, want in (
+            (base, []),
+            (base + [row(GAME_EXE, "77")], [77]),
+            (base + [row(GAME_EXE.upper(), "78")], [78]),
+            (base + [""] + [row(GAME_EXE, "79")], [79]),                  # blank line
+            (base + [row("other.exe", "5", "N/A", "n/a")], []),           # odd session / memory
+            (base + [row("a,b.exe", "6")], []),                           # comma in a name
+            (base + ['"explorer.exe","12'], []),                          # truncated, not the game
+            (base + ["INFO: localised notice"], []),
+            (base + ['"four","fields","here","x"'], [])):
+        got = parse(*lines)
+        check(got == want, "tasklist rows %r gave %r, want %r" % (lines[-1], got, want))
+    for lines, what in (
+            ([], "empty output"),
+            (["INFO: No tasks are running which match the specified criteria."], "info only"),
+            (base + ['"EliteDange'], "cut inside the game name"),
+            (base + ['"EliteDangerous64.exe","12'], "game row cut after the name"),
+            (base + ['"EliteDangerous64.exe","x","Console","1","1 K"'], "game row with a bad pid"),
+            (base + ['"EliteDangerous64.exe","9"'], "game row short of fields")):
+        got = parse(*lines)
+        check(isinstance(got, str) and got.startswith("raise:"), "%s did not raise: %r" % (what, got))
+
+    # The real tasklist runner: a non-zero rc and a missing exe name their reason.
+    saved_run = subprocess.run
+    try:
+        for rc, out, want in ((1, "", "rc=1"), (0, "", "no process rows")):
+            subprocess.run = lambda *a, **k: types.SimpleNamespace(
+                returncode=rc, stdout=out, stderr="")
+            try: _game_pids_tasklist(); check(False, "tasklist rc=%d did not raise" % rc)
+            except _ProbeError as exc: check(want in str(exc), "tasklist rc=%d reason %r" % (rc, str(exc)))
+        def missing(*a, **k): raise FileNotFoundError("tasklist")
+        subprocess.run = missing
+        try: _game_pids_tasklist(); check(False, "missing tasklist did not raise")
+        except _ProbeError as exc: check("did not run" in str(exc), "missing tasklist reason %r" % str(exc))
+    finally:
+        subprocess.run = saved_run
+
+    # Toolhelp32 reads the live process list and finds this process.
+    try:
+        found = _game_pids_toolhelp(os.path.basename(sys.executable))
+        check(os.getpid() in found, "Toolhelp32 did not find this process (%r)" % (found,))
+        check(isinstance(_game_pids_toolhelp(), list), "Toolhelp32 game probe not a list")
+    except (_ProbeError, OSError) as exc:
+        check(False, "Toolhelp32 failed on a live system: %s" % exc)
+
+    # strict_game_running: retries, reasons, and the refusal that must stay.
+    tmp = tempfile.mkdtemp(prefix="edvr_gameprobe_test_")
+    saved = {n: globals()[n] for n in ("_game_pids_toolhelp", "_game_pids_tasklist",
+                                       "_process_image_path", "GAME_PROBE_PAUSE")}
+    try:
+        mine = os.path.join(tmp, "mine"); other = os.path.join(tmp, "other")
+        os.makedirs(mine); os.makedirs(other)
+        globals()["GAME_PROBE_PAUSE"] = 0
+        calls = []
+        def script(results):
+            """A pid-lister answering from a list; the last result repeats."""
+            def probe(exe=None):
+                calls.append(1)
+                r = results[min(len(calls) - 1, len(results) - 1)]
+                if isinstance(r, Exception): raise r
+                return r
+            return probe
+        def fail(reason):
+            def probe(exe=None): raise _ProbeError(reason)
+            return probe
+        def run(results, images=None, tasklist=None, target=mine):
+            calls.clear()
+            globals()["_game_pids_toolhelp"] = script(results)
+            globals()["_game_pids_tasklist"] = tasklist or fail("tasklist down")
+            seq = list(images or [])
+            globals()["_process_image_path"] = lambda pid: (
+                seq.pop(0) if len(seq) > 1 else (seq[0] if seq else None))
+            return strict_game_running(target)
+        here = os.path.join(mine, GAME_EXE)
+        flaky = _ProbeError("listing torn")
+        check(run([[]]) == (True, False) and len(calls) == 1, "idle machine not proven on the first look")
+        check(probe_reason() == "", "reason set after a proven look")
+        check(run([flaky, flaky, []]) == (True, False) and len(calls) == 3,
+              "transient failure not ridden out")
+        check(run([flaky]) == (False, False), "persistent failure did not fail closed")
+        check("toolhelp: listing torn" in probe_reason() and "tasklist: tasklist down" in probe_reason()
+              and "%d attempts" % GAME_PROBE_ATTEMPTS in probe_reason(),
+              "refusal reason missing a method or the attempt count: %r" % probe_reason())
+        check(run([flaky], tasklist=lambda exe=None: []) == (True, False),
+              "tasklist fallback unused when toolhelp fails")
+        check(run([[10]], images=[here]) == (True, True) and len(calls) == 1,
+              "game in the target not refused on the first look")
+        check(run([[10]], images=[os.path.join(other, GAME_EXE)]) == (True, False),
+              "game in another directory blocked this one")
+        check(run([[10]], images=[None, here]) == (True, True) and len(calls) == 2,
+              "unresolved path not retried to a proof")
+        check(run([[10]], images=[None]) == (False, False), "unresolved game did not fail closed")
+        check("pid 10" in probe_reason(), "unresolved reason missing the pid: %r" % probe_reason())
+        check(run([[10]], images=[here], target=None) == (True, True), "targetless probe missed the game")
+    finally:
+        globals().update(saved)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def self_test():
     ok = True
+    if not _game_probe_self_test(): ok = False
     if not _xess_opt_in_self_test(): ok = False
 
     # The path-aware game probe: only a game running from the install target

@@ -140,10 +140,21 @@ bool writeFile(const std::wstring& path, const std::string& bytes) {
 }
 // A rewrite the reader sees whole or not at all (a temporary file moved over the old one): for the worker's test, where the file is read at
 // any moment. The monitor's test writes in place on purpose, which is what the game does.
+//
+// The move over an existing file is refused (ERROR_ACCESS_DENIED / sharing violation) while any other process holds a handle on either file
+// without FILE_SHARE_DELETE, and the usual holder is a real-time scanner that opened the temp file the instant it was closed. That refusal is
+// transient, and the old content staying in place is not a state the worker can be asked to notice: the case would then wait out its ten
+// seconds for a change that was never made. So the whole write-and-move is retried until it lands, and it returns false only when it never
+// does in kReplaceMs (the callers check that, so the failure names the step and does not look like a worker that missed a change).
 bool replaceFile(const std::wstring& path, const std::string& bytes) {
     const std::wstring temp = path + L".tmp";
-    if (!writeFile(temp, bytes)) return false;
-    return MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    constexpr DWORD kReplaceMs = 10000;
+    const DWORD start = GetTickCount();
+    for (;;) {
+        if (writeFile(temp, bytes) && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+        if (GetTickCount() - start > kReplaceMs) return false;
+        Sleep(2);
+    }
 }
 std::string slurp(const std::wstring& path) {
     std::ifstream in(path.c_str(), std::ios::binary);
@@ -852,20 +863,20 @@ void caseT5() {
         check(!edvr::terrainCheckerboardOn(), "T5c: the live predicate is false in the flat profile even with ON published (flat never shows it)");
         edvr::g_runtimeProfile = RuntimeProfile::Vr;
         const std::wstring custom = fx.folder + L"\\Custom.4.4.fxcfg";
-        replaceFile(custom, customXml("false"));
+        check(replaceFile(custom, customXml("false")), "T5c: the rewrite to false landed (the fixture, not the worker)");
         check(waitFor([&] { observe(); return v == 2; }) && s == tcn::State::Off && !edvr::terrainCheckerboardOn() && toasts == 1,
               "T5c: the file says false: OFF at version 2, the notice ends, no toast");
-        replaceFile(custom, customXml("true"));
+        check(replaceFile(custom, customXml("true")), "T5c: the rewrite to true landed (the fixture, not the worker)");
         check(waitFor([&] { observe(); return v == 3; }) && s == tcn::State::On && toasts == 2, "T5c: the file says true again: ON at version 3, and the toast is said again (a second raise)");
-        replaceFile(custom, "");
+        check(replaceFile(custom, ""), "T5c: the rewrite to an empty preset landed (the fixture, not the worker)");
         check(waitFor([&] { observe(); return v == 4; }) && s == tcn::State::Unknown && toasts == 2, "T5c: an unreadable preset: Unknown at version 4 after two reads, no toast");
-        replaceFile(custom, customXml("true"));
+        check(replaceFile(custom, customXml("true")), "T5c: the second rewrite to true landed (the fixture, not the worker)");
         check(waitFor([&] { observe(); return v == 5; }) && s == tcn::State::On && toasts == 3, "T5c: readable again: ON at version 5, a third raise");
         for (int i = 0; i < 5; ++i) edvr::terrainCheckerboardTick();
         edvr::terrainCheckerboardTick();
         edvr::terrainCheckerboardShutdown();
         check(waitFor([] { return !edvr::terrainCheckerboardTestWorkerRunning(); }, 5000), "T5c: the stop flag and the wake event end the worker");
-        replaceFile(custom, customXml("false"));
+        check(replaceFile(custom, customXml("false")), "T5c: the rewrite to false after the stop landed (the fixture, not the worker)");
         Sleep(150);
         observe();
         check(s == tcn::State::On && v == 5 && toasts == 3, "T5c: a stopped worker publishes nothing more");

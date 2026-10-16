@@ -1,441 +1,204 @@
 #include "fss_reveal.h"
 
-#include <cstring>
-
 #include <windows.h>
 
-#include <d3d11.h>
+#include <d3d11_1.h>
 
-#include <string>
+#include <cstdarg>
+#include <cstdio>
 
-#include "../common/config.h"
-#include "../common/eye_sync.h"
 #include "../common/guard.h"
 #include "../common/log.h"
-#include "exposure_fix.h"   // lookupShaderHash
+#include "binding_shadow.h"
+#include "fss_reveal_core.h"
+#include "fss_reveal_replay.h"
+
+// See fss_reveal.h and fss_reveal_core.h for the story. What this file adds is the log, in three layers, so that a flight log says which of "the code never ran", "it ran and had nothing to do"
+// and "it ran and replayed" happened:
+//   1. once a process, "fss reveal fix: armed" (or "not armed: flat profile");
+//   2. once a scanner session, the summary: DrawInstanced calls checked, draws of the reveal shaders seen, composites, replays, declines by reason, the state read-back result, and a verdict;
+//   3. a few lines per session for the first replays and the first oddities.
 
 namespace edvr {
 
-// fssRevealWantsDraws reads these from the header with no call: asked per
-// eye draw and from the Map/Unmap tees, and the build has no /GL to fold a
-// cross-TU getter.
 namespace detail {
-bool g_fssRevealSteady = false;
-bool g_fssRevealLockstep = false;
+bool g_fssRevealWatch = false;
 }  // namespace detail
 
 namespace {
 
-constexpr uint64_t kCompositeHash = 0x953C8123AD8DC13Bull;
+using namespace fssreveal;
 
-// The scene block the composite's pixel stage reads. The shader DECLARES
-// 333 vectors (5,328 bytes) -- but D3D binds any buffer at least that
-// big, and the game's is 5,376 (the 336-vector buffer the transition
-// flash detector has watched since it was built). The first field flight
-// stood down on an equality test against the declaration and said
-// nothing, which cost the whole look: accept the range, shadow the real
-// size, and SAY every refusal.
-constexpr uint32_t kSceneBlockMin = 333 * 16;
-constexpr uint32_t kSceneBlockMax = 8192;
+constexpr uint32_t kSessionGapFrames = 30;   // frames off show before a session is over
+constexpr uint32_t kMaxDetailLines = 6;      // per-event lines in one session
+constexpr uint32_t kStateChecks = 8;         // replays whose context state is read back and compared
 
-// ---- The lockstep copies: occurrence 1's four content textures, frozen
-// at its draw so occurrence 2 reads the same bytes. Recreated whenever a
-// source's description changes (fss_res remakes the body layer per
-// zoom). A slot the copy machinery cannot serve stands the whole
-// substitution down for the frame -- half a lockstep is a new split.
-ID3D11Texture2D*          g_lsTex[4] = {};
-ID3D11ShaderResourceView* g_lsView[4] = {};
-D3D11_TEXTURE2D_DESC      g_lsDesc[4] = {};
-bool                      g_lsHave[4] = {};
-ID3D11ShaderResourceView* g_lsDisplaced[4] = {};
-bool     g_lsBound = false;
-bool     g_lsNoted = false;
-bool     g_lsFailNoted = false;
+struct State {
+    FaultBudget   budget{"fssReveal", 5};
+    RevealReplay  rep;
+    DrawState     rec[RevealReplay::kRec];
+    CbPool        pool[RevealReplay::kRec];
+    ID3D11DeviceContext1* ctx1 = nullptr;
+    bool          ctx1Tried = false;
+    bool          armedNoted = false;
+    bool          flat = false;
+    // the scanner session
+    bool          inSession = false;
+    uint32_t      sessionNo = 0, sessionStart = 0, offFrames = 0;
+    uint32_t      drawsChecked = 0, drawsOfShaders = 0, detailLines = 0;
+};
 
-void lsRelease() {
-    for (int i = 0; i < 4; ++i) {
-        if (g_lsView[i]) { g_lsView[i]->Release(); g_lsView[i] = nullptr; }
-        if (g_lsTex[i]) { g_lsTex[i]->Release(); g_lsTex[i] = nullptr; }
-        g_lsHave[i] = false;
+State g;
+
+void ensureCtx1(ID3D11DeviceContext* ctx) {
+    if (!g.ctx1 && !g.ctx1Tried) {
+        g.ctx1Tried = true;
+        ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g.ctx1));
     }
 }
 
-// The PS b1 buffer object, learned at the first matched draw, and the
-// live shadow of its contents fed by the Map/Unmap and UpdateSubresource
-// tees. mapped is the pData between Map and Unmap, the census tee's
-// bargain exactly.
-void*    g_sceneCb = nullptr;
-uint32_t g_sceneCbBytes = 0;
-void*    g_mapped = nullptr;
-uint8_t  g_shadow[kSceneBlockMax];
-bool     g_shadowValid = false;
+void releaseResources() {
+    for (auto& r : g.rec) r.release();
+    for (auto& p : g.pool) p.release();
+    if (g.ctx1) { g.ctx1->Release(); g.ctx1 = nullptr; }
+    g.ctx1Tried = false;
+}
 
-// Occurrence 1's snapshot, applied at occurrence 2.
-uint8_t  g_snapshot[kSceneBlockMax];
-bool     g_snapshotValid = false;
-uint8_t  g_occurrence = 0;
+void noteDetail(const char* fmt, ...) {
+    if (g.detailLines >= kMaxDetailLines) return;
+    ++g.detailLines;
+    char buf[600];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Log::get().note("%s", buf);
+}
 
-// The receipts a silent stand-down owes: refusals said once, and a note
-// when composites keep matching while no write has ever been seen.
-bool     g_sizeRefusedNoted = false;
-uint32_t g_matchedNoShadow = 0;
-bool     g_noShadowNoted = false;
-
-// EDVR's own buffer for the substitution, sized to the game's.
-ID3D11Buffer* g_ourCb = nullptr;
-uint32_t      g_ourCbBytes = 0;
-bool          g_createFailedNoted = false;
-
-bool          g_engaged = false;
-ID3D11Buffer* g_displaced = nullptr;
-
-uint64_t g_applied = 0;
-bool     g_engagedNoted = false;
-
-FaultBudget g_budget("fssReveal", 8);
+void endSession(uint32_t frameNo) {
+    if (!g.inSession) return;
+    g.inSession = false;
+    const RevealReplay& r = g.rep;
+    Log::get().note("fss reveal fix: scanner session %u (frames %u-%u) -- DrawInstanced calls checked %u, draws of the reveal shaders %u; frames with a reveal composite %u, with a replay %u (%u replay(s), %u failed); "
+                    "state read back after the first replays: %u equal, %u DIFFERENT; downsamples recorded %u (%u dropped, %u failed); composites declined, in frames: no downsample recorded %u, recorded for another "
+                    "texture than t1 (hash-only match) %u, t1 unresolved %u, flat %u. %s.",
+                    g.sessionNo, g.sessionStart, frameNo, g.drawsChecked, g.drawsOfShaders, r.framesWithComposite, r.framesReplayed, r.replays, r.replayFailures, r.verifiedOk, r.verifiedBad, r.records,
+                    r.recordDrops, r.recordFailures, r.framesDeclined[RevealReplay::DeclNoRecord], r.framesDeclined[RevealReplay::DeclOtherTarget], r.framesDeclined[RevealReplay::DeclT1],
+                    r.framesDeclined[RevealReplay::DeclFlat], sessionVerdict(r, g.drawsChecked));
+}
 
 }  // namespace
 
-void fssRevealConfigure(Config& cfg) {
-    const bool wasSteady = detail::g_fssRevealSteady;
-    // ONE key for the whole black-squares fix (src/common/eye_sync.h);
-    // this module serves its composite half.
-    const EyeSync es = eyeSyncFromConfig(cfg);
-    if (!es.recognised) {
-        static bool s_badValueNoted = false;
-        if (!s_badValueNoted) {
-            s_badValueNoted = true;
-            Log::get().note(
-                "fss_eye_sync \"%s\" is not on, off or a developer value "
-                "(heal, mirror, sync, steady); running on. Said once.",
-                cfg.getString("fix.fss_eye_sync", "on").c_str());
-        }
-    }
-    detail::g_fssRevealSteady = es.steady;
-    detail::g_fssRevealLockstep = es.lockstep;
-    static bool s_wasLockstep = false;
-    const bool lockFlip = s_wasLockstep != detail::g_fssRevealLockstep;
-    s_wasLockstep = detail::g_fssRevealLockstep;
-    if (wasSteady != detail::g_fssRevealSteady || lockFlip) {
-        Log::get().note(
-            detail::g_fssRevealLockstep
-                ? "fss reveal: ON (the lockstep mechanism). The second "
-                  "eye's composite reads "
-                  "byte-identical copies of the first eye's textures and "
-                  "scene constants -- the two panels cannot differ, and "
-                  "both show the resolve animation the flat screen shows, "
-                  "binocularly fused."
-            : detail::g_fssRevealSteady
-                ? "fss reveal: steady. Both eyes' composites are drawn with "
-                  "ONE snapshot of the scene constants, so the dissolve is "
-                  "evaluated at the same moment for both -- the per-eye "
-                  "square split cannot survive it if the stepping progress "
-                  "is its cause."
-                : "fss reveal: off; each eye's composite reads the scene "
-                  "constants as the game last wrote them.");
-        // A mode flip invalidates learned state; relearn from scratch.
-        g_sceneCb = nullptr;
-        g_shadowValid = false;
-        g_snapshotValid = false;
-        lsRelease();
-    }
+void fssRevealConfigure(bool flat) {
+    g.flat = flat;
+    if (g.armedNoted) return;
+    g.armedNoted = true;
+    if (flat) Log::get().note("fss reveal fix: not armed (the flat profile has one camera; the black cells there are the game's own scan art).");
+    else Log::get().note("fss reveal fix: armed. While the scanner is on show, the first downsample of the ring layer each frame is replayed before the first reveal composite; a summary is written per scanner session.");
 }
 
-void fssRevealNoteMap(void* resource, void* data) {
-    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb) return;
-    g_mapped = data;
-}
-
-void fssRevealNoteUnmap(void* resource) {
-    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb || !g_mapped) {
-        return;
-    }
-    void* src = g_mapped;
-    g_mapped = nullptr;
-    if (!g_sceneCbBytes) return;
-    guardedBudget(g_budget, [&] {
-        memcpy(g_shadow, src, g_sceneCbBytes);
-        g_shadowValid = true;
-    });
-}
-
-void fssRevealNoteUpdate(void* resource, const void* data) {
-    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb || !data ||
-        !g_sceneCbBytes) {
-        return;
-    }
-    guardedBudget(g_budget, [&] {
-        memcpy(g_shadow, data, g_sceneCbBytes);
-        g_shadowValid = true;
-    });
-}
-
-bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                        uint32_t instances) {
-    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || kind != 'N' ||
-        count != 6 || instances != 1 || !ctx) {
-        return false;
-    }
-    uint64_t h = 0;
-    guardedBudget(g_budget, [&] {
-        ID3D11VertexShader* vs = nullptr;
-        ctx->VSGetShader(&vs, nullptr, nullptr);
-        h = lookupShaderHash(vs);
-        if (vs) vs->Release();
-    });
-    return h == kCompositeHash;
-}
-
-void fssRevealBegin(ID3D11DeviceContext* ctx) {
-    g_engaged = false;
-    g_lsBound = false;
-    if (!ctx || (!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep)) return;
-    guardedBudget(g_budget, [&] {
-        ++g_occurrence;
-
-        if (g_occurrence == 1) {
-            // Learn (or confirm) the scene block: the buffer at PS b1 of
-            // exactly this draw, accepted at any size covering the
-            // shader's declaration. A relearn after the game recreates it
-            // costs one frame of stock, the ourCb lifecycle's bargain.
-            ID3D11Buffer* b1 = nullptr;
-            ctx->PSGetConstantBuffers(1, 1, &b1);
-            if (b1 != g_sceneCb) {
-                g_sceneCb = b1;
-                g_sceneCbBytes = 0;
-                g_shadowValid = false;
-                if (b1) {
-                    D3D11_BUFFER_DESC d{};
-                    b1->GetDesc(&d);
-                    if (d.ByteWidth >= kSceneBlockMin &&
-                        d.ByteWidth <= kSceneBlockMax) {
-                        g_sceneCbBytes = d.ByteWidth;
-                    } else {
-                        g_sceneCb = nullptr;
-                        if (!g_sizeRefusedNoted) {
-                            g_sizeRefusedNoted = true;
-                            Log::get().note(
-                                "fss reveal: the buffer at the composite's "
-                                "PS b1 is %u bytes, outside the %u-%u this "
-                                "fix accepts; standing down. Said once.",
-                                d.ByteWidth, kSceneBlockMin, kSceneBlockMax);
-                        }
-                    }
-                }
+void fssRevealOnDrawSlow(ID3D11DeviceContext* ctx, const FssRealCalls& rc, uint32_t perInstance, uint32_t instances, uint32_t startVertex, uint32_t startInstance) {
+    guardedBudget(g.budget, [&] {
+        ++g.drawsChecked;
+        const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+        if (vs != kCompVs && vs != kDownVs) return;
+        const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+        if (vs == kDownVs && ps == kDownPs) {
+            // a downsample: keep the state it is issued with (constant buffers by copy), keyed by its render target
+            ++g.drawsOfShaders;
+            ResourceInfo ri;
+            void* rtv = bindingGet(BindSlot::Rtv0);
+            const void* rt = (rtv && bindingResolveProbe(rtv, &ri)) ? ri.resource : nullptr;
+            const int idx = g.rep.record(rt);
+            if (idx < 0) return;
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            ensureCtx1(ctx);
+            bool ok = false;
+            if (dev) {
+                ok = captureState(dev, ctx, g.ctx1, &g.pool[idx], g.rec[idx]);
+                dev->Release();
             }
-            if (b1) b1->Release();
-            // The snapshot eye B will read: the bytes eye A is reading
-            // NOW, as the tees last saw them written.
-            if (g_shadowValid) {
-                memcpy(g_snapshot, g_shadow, g_sceneCbBytes);
-                g_snapshotValid = true;
-                g_matchedNoShadow = 0;
+            if (ok) {
+                g.rec[idx].perInstance = perInstance;
+                g.rec[idx].instances = instances;
+                g.rec[idx].startVertex = startVertex;
+                g.rec[idx].startInstance = startInstance;
             } else {
-                g_snapshotValid = false;
-                // A fix that keeps matching while its shadow never fills
-                // is being starved by an unhooked write path, and the log
-                // is where that has to be visible.
-                if (g_sceneCb && ++g_matchedNoShadow == 300 &&
-                    !g_noShadowNoted) {
-                    g_noShadowNoted = true;
-                    Log::get().note(
-                        "fss reveal: 300 composites matched but no write "
-                        "to the scene block has been seen -- it is being "
-                        "written by a path the tees do not cover, and the "
-                        "sync cannot engage. Said once.");
-                }
+                g.rep.recordFailed(idx);
+                noteDetail("fss reveal fix: the state of a downsample draw could not be kept; it will not be replayed.");
             }
-            if (detail::g_fssRevealLockstep) {
-                // Freeze THIS draw's four content textures. All four or
-                // none: a partial freeze is a new per-eye split.
-                ID3D11ShaderResourceView* srv[4] = {};
-                ctx->PSGetShaderResources(0, 4, srv);
-                ID3D11Device* dev = nullptr;
-                ctx->GetDevice(&dev);
-                bool all = dev != nullptr;
-                for (int i = 0; i < 4 && all; ++i) {
-                    g_lsHave[i] = false;
-                    if (!srv[i]) continue;   // an unbound slot stays unbound
-                    ID3D11Resource* res = nullptr;
-                    srv[i]->GetResource(&res);
-                    ID3D11Texture2D* tex = nullptr;
-                    if (res) {
-                        res->QueryInterface(__uuidof(ID3D11Texture2D),
-                                            reinterpret_cast<void**>(&tex));
-                        res->Release();
-                    }
-                    if (!tex) { all = false; break; }
-                    D3D11_TEXTURE2D_DESC d{};
-                    tex->GetDesc(&d);
-                    if (d.SampleDesc.Count != 1) {
-                        tex->Release();
-                        all = false;
-                        break;
-                    }
-                    if (!g_lsTex[i] ||
-                        memcmp(&d, &g_lsDesc[i], sizeof(d)) != 0) {
-                        if (g_lsView[i]) {
-                            g_lsView[i]->Release();
-                            g_lsView[i] = nullptr;
-                        }
-                        if (g_lsTex[i]) {
-                            g_lsTex[i]->Release();
-                            g_lsTex[i] = nullptr;
-                        }
-                        D3D11_TEXTURE2D_DESC cd = d;
-                        cd.Usage = D3D11_USAGE_DEFAULT;
-                        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                        cd.CPUAccessFlags = 0;
-                        cd.MiscFlags = 0;
-                        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-                        srv[i]->GetDesc(&vd);
-                        if (FAILED(dev->CreateTexture2D(&cd, nullptr,
-                                                        &g_lsTex[i])) ||
-                            FAILED(dev->CreateShaderResourceView(
-                                g_lsTex[i], &vd, &g_lsView[i]))) {
-                            if (g_lsTex[i]) {
-                                g_lsTex[i]->Release();
-                                g_lsTex[i] = nullptr;
-                            }
-                            g_lsView[i] = nullptr;
-                            tex->Release();
-                            all = false;
-                            break;
-                        }
-                        g_lsDesc[i] = d;
-                    }
-                    ctx->CopyResource(g_lsTex[i], tex);
-                    tex->Release();
-                    g_lsHave[i] = true;
-                }
-                if (dev) dev->Release();
-                for (int i = 0; i < 4; ++i) {
-                    if (srv[i]) srv[i]->Release();
-                }
-                if (!all) {
-                    for (int i = 0; i < 4; ++i) g_lsHave[i] = false;
-                    if (!g_lsFailNoted) {
-                        g_lsFailNoted = true;
-                        Log::get().note(
-                            "fss reveal: a lockstep input could not be "
-                            "copied (unbindable or multisampled); the "
-                            "second eye draws stock. Said once.");
-                    }
-                }
-            }
-            return;   // eye A draws stock, always
+            return;
         }
-
-        if (g_occurrence != 2) return;
-
-        if (detail::g_fssRevealLockstep) {
-            // The frozen inputs, if occurrence 1 produced a full set. The
-            // b1 substitution below completes the byte-identical read.
-            bool any = false;
-            for (int i = 0; i < 4; ++i) {
-                if (g_lsHave[i]) { any = true; break; }
-            }
-            if (any) {
-                ctx->PSGetShaderResources(0, 4, g_lsDisplaced);
-                ID3D11ShaderResourceView* set[4] = {
-                    g_lsHave[0] ? g_lsView[0] : g_lsDisplaced[0],
-                    g_lsHave[1] ? g_lsView[1] : g_lsDisplaced[1],
-                    g_lsHave[2] ? g_lsView[2] : g_lsDisplaced[2],
-                    g_lsHave[3] ? g_lsView[3] : g_lsDisplaced[3],
-                };
-                ctx->PSSetShaderResources(0, 4, set);
-                g_lsBound = true;
-                if (!g_lsNoted) {
-                    g_lsNoted = true;
-                    Log::get().note(
-                        "fss reveal: lockstep engaged -- the second eye's "
-                        "composite reads byte-identical copies of the "
-                        "first eye's four inputs and its scene constants. "
-                        "The two panels cannot differ.");
-                }
-            }
-        }
-
-        if (!g_snapshotValid || !g_sceneCbBytes) return;
-
-        if (!g_ourCb || g_ourCbBytes != g_sceneCbBytes) {
-            if (g_ourCb) {
-                g_ourCb->Release();
-                g_ourCb = nullptr;
+        if (vs == kCompVs && ps == kCompPs) {
+            if (g.rep.compSeen) return;   // only the first composite of the frame decides
+            ++g.drawsOfShaders;
+            ResourceInfo ri;
+            void* v = bindingGet(BindSlot::PsSrv1);
+            const void* t1 = (v && bindingResolveProbe(v, &ri)) ? ri.resource : nullptr;
+            int idx = -1;
+            const RevealReplay::Decision d = g.rep.composite(g.flat, t1, &idx);
+            if (d != RevealReplay::Replay) {
+                if (d != RevealReplay::DeclDone) noteDetail("fss reveal fix: the first reveal composite of a frame was %s.", decisionText(d));
+                return;
             }
             ID3D11Device* dev = nullptr;
             ctx->GetDevice(&dev);
-            if (!dev) return;
-            D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = g_sceneCbBytes;
-            bd.Usage = D3D11_USAGE_DYNAMIC;
-            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            dev->CreateBuffer(&bd, nullptr, &g_ourCb);
-            dev->Release();
-            if (!g_ourCb) {
-                if (!g_createFailedNoted) {
-                    g_createFailedNoted = true;
-                    Log::get().note("fss reveal: could not create the %u-byte "
-                                    "buffer; the composite draws stock.",
-                                    g_sceneCbBytes);
-                }
-                return;
+            ensureCtx1(ctx);
+            ReplayCalls calls;
+            calls.vsSetCb = reinterpret_cast<decltype(calls.vsSetCb)>(rc.vsSetCb);
+            calls.psSetCb = reinterpret_cast<decltype(calls.psSetCb)>(rc.psSetCb);
+            calls.psSetSrv = reinterpret_cast<decltype(calls.psSetSrv)>(rc.psSetSrv);
+            calls.vsSetSrv = reinterpret_cast<decltype(calls.vsSetSrv)>(rc.vsSetSrv);
+            calls.vsSetShader = reinterpret_cast<decltype(calls.vsSetShader)>(rc.vsSetShader);
+            calls.psSetShader = reinterpret_cast<decltype(calls.psSetShader)>(rc.psSetShader);
+            calls.omSetRts = reinterpret_cast<decltype(calls.omSetRts)>(rc.omSetRts);
+            calls.omSetBlend = reinterpret_cast<decltype(calls.omSetBlend)>(rc.omSetBlend);
+            calls.rsSetViewports = reinterpret_cast<decltype(calls.rsSetViewports)>(rc.rsSetViewports);
+            calls.drawInstanced = reinterpret_cast<decltype(calls.drawInstanced)>(rc.drawInstanced);
+            bool verified = false;
+            const bool check = g.rep.replays < kStateChecks;   // the first replays of a session read the whole state back and compare it with what was bound before
+            const bool done = dev && replayDraw(dev, ctx, g.ctx1, calls, g.rec[idx], check ? &verified : nullptr);
+            if (dev) dev->Release();
+            if (done) {
+                ++g.rep.replays;
+                if (check) { if (verified) ++g.rep.verifiedOk; else ++g.rep.verifiedBad; }
+                noteDetail("fss reveal fix: the frame's first downsample into the composite's t1 (%ux%u fmt%u) was re-run before the first reveal composite; %s.", ri.a, ri.b, ri.fmt,
+                       check ? (verified ? "the context state read back afterwards equals the state before" : "THE CONTEXT STATE READ BACK AFTERWARDS DIFFERS FROM THE STATE BEFORE") : "state check not repeated");
+            } else {
+                ++g.rep.replayFailures;
+                noteDetail("fss reveal fix: the replay could not be done (no device or no state); nothing was drawn.");
             }
-            g_ourCbBytes = g_sceneCbBytes;
-        }
-
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (FAILED(ctx->Map(g_ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
-            !m.pData) {
-            return;
-        }
-        memcpy(m.pData, g_snapshot, g_sceneCbBytes);
-        ctx->Unmap(g_ourCb, 0);
-
-        ctx->PSGetConstantBuffers(1, 1, &g_displaced);
-        ID3D11Buffer* ours = g_ourCb;
-        ctx->PSSetConstantBuffers(1, 1, &ours);
-        g_engaged = true;
-        ++g_applied;
-        if (!g_engagedNoted) {
-            g_engagedNoted = true;
-            Log::get().note(
-                "fss reveal: steady engaged -- the second eye's composite "
-                "reads the first eye's scene constants, restored after "
-                "every draw. Both eyes now dissolve at one moment.");
         }
     });
 }
 
-void fssRevealEnd(ID3D11DeviceContext* ctx) {
-    if (g_lsBound && ctx) {
-        g_lsBound = false;
-        ctx->PSSetShaderResources(0, 4, g_lsDisplaced);
-        for (int i = 0; i < 4; ++i) {
-            if (g_lsDisplaced[i]) {
-                g_lsDisplaced[i]->Release();
-                g_lsDisplaced[i] = nullptr;
-            }
+void fssRevealFrameBoundary(bool onShow, bool flat, uint32_t frameNo) {
+    g.flat = flat;
+    // the frame that just ended
+    g.rep.endFrame();
+    for (auto& r : g.rec) r.release();
+    const bool watch = onShow && !flat;
+    if (watch) {
+        if (!g.inSession) {
+            g.inSession = true;
+            ++g.sessionNo;
+            g.sessionStart = frameNo;
+            g.rep.resetTotals();
+            g.drawsChecked = g.drawsOfShaders = g.detailLines = 0;
         }
+        g.offFrames = 0;
+    } else if (g.inSession && ++g.offFrames >= kSessionGapFrames) {
+        endSession(frameNo);
+        releaseResources();   // the private constant-buffer copies and the context interface are rebuilt on demand
     }
-    if (!g_engaged || !ctx) return;
-    g_engaged = false;
-    ctx->PSSetConstantBuffers(1, 1, &g_displaced);
-    if (g_displaced) {
-        g_displaced->Release();
-        g_displaced = nullptr;
-    }
+    detail::g_fssRevealWatch = watch;
 }
 
-void fssRevealFrameBoundary() { g_occurrence = 0; }
-
 void fssRevealShutdown() {
-    if (g_ourCb) {
-        g_ourCb->Release();
-        g_ourCb = nullptr;
-    }
-    lsRelease();
+    endSession(0);
+    detail::g_fssRevealWatch = false;
+    releaseResources();
 }
 
 }  // namespace edvr

@@ -340,6 +340,33 @@ inline void temporalWorldFromRows(const float prev[12], const float now[12],
     tv[2] = -tv[2];
 }
 
+// A camera translation of at least this many metres in one frame is the
+// floating origin moving, not the camera: Elite re-anchors its world about
+// every 5 km of travel. The VR gate below and the flat resolver share it.
+constexpr double kTemporalOriginJumpM = 50.0;
+inline bool temporalOriginJump(double moveM) { return moveM >= kTemporalOriginJumpM; }
+
+// A floating-origin re-anchor, as the flat resolver tells it from a real cut:
+// the translation jumped AND the rows (the camera's orientation) did not move.
+// Fast travel reaches a rows delta of 0.0088 over a 100 m step, a rebase
+// 0.0003-0.0008, the 43:07 event of the 2026-10-16 flat log 0.058, and a
+// different camera about 2; the tolerance sits between travel and the first
+// real cut (docs/design-flat-temporal-aa-2026-09-23.md).
+constexpr double kTemporalRebaseRowsTol = 0.02;
+inline bool temporalOriginRebase(double moveM, double rowsDelta) {
+    return temporalOriginJump(moveM) && rowsDelta < kTemporalRebaseRowsTol;
+}
+
+// Of such a jump (rows unmoved, history kept), the ones that are the origin being re-anchored, whose translation is a coordinate change
+// and not the camera's motion: the origin landed near the camera, closer to it than it was and closer than the step it took. Fast
+// travel keeps moving away from where the origin is (the origin trails the camera, so |now| grows with every step), and its step IS the
+// camera's motion. Every re-anchor in the 2026-10-16 flat logs lands 15.9-27.4 m out from 184-5042 m (step 196-5021 m); the travel
+// steps beside them have |now| above |prev| (81.8 from 20.0, 2870 from 2812). Flat only: the VR gate (temporalCameraGateStep) keeps
+// dropping the translation of every jump of 50 m or more.
+inline bool temporalOriginReanchor(double stepM, double nowLenM, double prevLenM) {
+    return nowLenM < prevLenM && nowLenM < stepM;
+}
+
 // The world path's gate on that delta, per frame (the plausibility test of
 // src/d3d11/temporal_pass.cpp, here so tools/temporal_test can walk it).
 // The rows' delta is the head's plus the ship's turn, and no ship turns 270
@@ -424,7 +451,7 @@ inline TemporalCameraStep temporalCameraGateStep(TemporalCameraGate& g, const fl
                                                  const float now[12], double move,
                                                  float diffDeg, float W[9], float tv[3]) {
     TemporalCameraStep s;
-    s.jump = move >= 50.0;
+    s.jump = temporalOriginJump(move);
     if (s.jump) {
         for (int i = 0; i < 3; ++i) tv[i] = 0.0f;
     }
@@ -444,7 +471,7 @@ inline TemporalCameraStep temporalCameraGateStep(TemporalCameraGate& g, const fl
             const double carried = std::sqrt(static_cast<double>(tv[0]) * tv[0] +
                                              static_cast<double>(tv[1]) * tv[1] +
                                              static_cast<double>(tv[2]) * tv[2]);
-            s.carriedJump = carried >= 50.0;
+            s.carriedJump = temporalOriginJump(carried);
         } else {
             s.valid = false;
         }

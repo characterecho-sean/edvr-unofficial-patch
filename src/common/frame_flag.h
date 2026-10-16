@@ -54,14 +54,6 @@ bool glitchFrameMarked();
 // single hold would suppress every frame that followed.
 void clearGlitchFrame();
 
-// The submitted eye textures, one slot per eye (0 left, 1 right), raw
-// ID3D11Texture2D pointers valid within this process. Written by
-// openvr_api.dll at each Submit; read by d3d11.dll's FSS series at the
-// frame boundary. Null means nobody has published (no openvr proxy, or a
-// mismatched pair), and readers fall back exactly as if unhooked.
-void publishSubmitTexture(int eye, void* texture);
-void* submittedTexture(int eye);
-
 // The game's own ID3D11Device, published by d3d11.dll the moment the game
 // creates it. A raw pointer valid within this process, like submitTex above.
 //
@@ -95,7 +87,7 @@ void* gameDevice();
 
 // The scanner-chrome stamp: bumped by d3d11 on every frame the scanner's
 // screen is drawn; the openvr half judges staleness against its own frame
-// count. The eye heal's gate.
+// count.
 void bumpFssChromeStamp();
 long fssChromeStampValue();
 
@@ -105,12 +97,6 @@ long fssChromeStampValue();
 // through a square-to-quad homography: the content arrives level and
 // fully framed whatever the screen's tilt or the head's pose at engage.
 void publishFssPanelRect(const float* corners16);   // both eyes, L then R
-bool readFssPanelRect(float* out16);
-
-// The zoom-press arrival window, one bump per open frame: the squares'
-// ~10 frames, and the only frames the window-scoped heal touches.
-void bumpFssArrivalStamp();
-long fssArrivalStampValue();
 
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the transition-flash engine fix notes every held frame; the

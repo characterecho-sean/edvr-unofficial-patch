@@ -11,6 +11,8 @@
 //                 bit-identically to the stock pair (corpus_identity.h). Local
 //                 only: the game's shaders are not in the repository.
 //   --verbose     also print the log lines the linked engine_velocity.cpp wrote
+//   --bench       opt-in micro-benchmark of the job-thread merge/clear/copier
+//                 observers (primary_copy_observer_tests.h); runs nothing else
 //
 // What it covers: the DXBC patcher end to end and the slot target's blend
 // states (shader_tests.h), the emit bracket's history rules against a fake
@@ -50,6 +52,7 @@
 #include "consumer_tests.h"
 #include "capture_tests.h"
 #include "primary_copy_tests.h"
+#include "primary_copy_observer_tests.h"
 #include "panel_tests.h"
 #include "corpus_identity.h"
 #include "actual_vs_link_test.h"
@@ -286,11 +289,13 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
 
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false;
+    bool bench = false;
     std::wstring corpusRoot;
     std::wstring realLinkRoot;
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
+        else if (a == L"--bench") bench = true;
         else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
         else if (a == L"--partial") g_partial = true;
@@ -300,13 +305,19 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         }
     }
-    if (!selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
+    if (!bench && !selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
         std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir> [--partial]] [--real-link <edvr_logs dir>]\n");
         return 2;
     }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL level{};
+    if (bench) {
+        // Opt-in micro-benchmark of the job-thread observers (primary_copy_observer_tests.h); never part of the gate.
+        D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
+        primary_copy_observer_tests::bench::run(device.Get());
+        return 0;
+    }
     check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device,
                                       &level, &context)), "D3D11CreateDevice WARP");
     check(level >= D3D_FEATURE_LEVEL_11_0, "feature level 11");
@@ -412,6 +423,7 @@ int wmain(int argc, wchar_t** argv) {
         consumer_tests::run({device.Get(), context.Get(), &check},primary.data(),101);
     capture_tests::run(device.Get(),context.Get(),&check);
     primary_copy_tests::run(device.Get(),context.Get(),&check);
+    primary_copy_observer_tests::run(device.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     flat_lazy_tests::run({device.Get(), context.Get(), &check});

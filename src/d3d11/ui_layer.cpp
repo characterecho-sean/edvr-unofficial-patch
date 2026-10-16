@@ -15,6 +15,7 @@
 #include "ui_layer.h"
 
 #include "ui_layer_math.h"
+#include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
 #include "ui_scene_composites.h"  // the census of the interface composites left in the scene, and its line
 #include "ui_maps_math.h"   // the on-foot maps gate: the key, the step, the door's predicate, the lines
 #include "ui_holo_remap.h"
@@ -152,6 +153,7 @@ void flatBackOff(const char* what, const char* why) {
     Log::get().note("ui quality: flat layer: %s backs off for %llu s (back-off %u this session) -- %s. The cockpit HUD is "
                     "drawn as it always was until it re-arms.",
                     what, static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
+    if (runtimeFlatProfile() && std::strcmp(what, "the HDR HUD path") == 0) flatUiTrailReport();
 }
 
 void crispStandDown(const char* why) {
@@ -3826,6 +3828,7 @@ bool crispToneSeenBefore(uint8_t reason, uint64_t vs, uint64_t ps) {
 
 void crispToneDecline(CrispToneDecline d, uint64_t vs, uint64_t ps) {
     ++g_win.hdrDeclined[static_cast<size_t>(d)];
+    if (runtimeFlatProfile()) flatUiTrailNoteReissue(g_draw.seq, FlatUiTrailReissue::kDeclined, static_cast<uint8_t>(d), 0);
     if (crispToneSeenBefore(static_cast<uint8_t>(d), vs, ps)) return;
     Log::get().note("crisp hud: tonemap re-issue declined (vs %016llX ps %016llX): %s. The game's "
                     "own draw ran untouched.",
@@ -4181,6 +4184,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
         g_crispSave.active = true;
         ok = true;
+        if (runtimeFlatProfile()) flatUiTrailNoteReissue(p.seq, FlatUiTrailReissue::kBegun, 0, 0);
     });
     if (!ran) {
         // A fault mid-bind: put back whatever was saved, and stand the HDR
@@ -4282,6 +4286,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     e.target = rtvRes;  // the RGBA8 eye the game's tonemap wrote: the FIRST link of the identity
     e.chainOpen = true;
     e.hdrToneSeq = seq;
+    if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);
     e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
