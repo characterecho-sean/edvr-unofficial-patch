@@ -2066,6 +2066,83 @@ int wmain(int argc, wchar_t** argv) {
                     check(p.map.yawCarried == 0.0 && p.map.pitchSeat == 0.0 && p.map.yawInFlight() == 0.0 && p.map.pitchInFlight() == 0.0,
                           "F68a: dropSeated returns the carried yaw, the seated pitch and the in-flight account to zero");
                 }
+                // F69i: the press's snap rides the same ask as the head's step (AdsAimMap::centre): a 19.2 deg error (yaw +9, pitch -17, seat convention) injected over
+                // 0.2 s into the plant that takes 0.85 of every ask (the gain is measured after the first lands); the cancel keeps the view the head's.
+                {
+                    AimPlant p;
+                    p.delay = 1;
+                    const double e0Y = 9.0 * kR, e0P = -17.0 * kR;
+                    p.map.beginCentre(e0Y, e0P);
+                    const double dur = p.map.centre.dur;
+                    int convergedAt = -1;
+                    double errAt20 = 99.0;
+                    for (int i = 0; i < 30; ++i) {
+                        p.frame(0.0, 0.0, true, false);
+                        const double err = std::sqrt((e0Y - p.aimY) * (e0Y - p.aimY) + (e0P - p.aimP) * (e0P - p.aimP));
+                        if (i == 20) errAt20 = err;   // 21 frames, 0.233 s
+                        if (convergedAt < 0 && err < 0.3 * kR) convergedAt = i;
+                    }
+                    check(std::fabs(dur - 0.2) < 1e-12 && convergedAt >= 17 && convergedAt <= 20 && errAt20 < 0.3 * kR && !p.map.centre.active &&
+                              p.viewErrMax < 1.5 * kR && std::fabs(p.viewY() - p.headY) < 1e-9 && std::fabs(p.viewP() - p.headP) < 1e-9 &&
+                              std::fabs(p.map.yawCarried - e0Y) < 0.3 * kR && std::fabs(p.map.pitchSeat - e0P) < 0.3 * kR,
+                          "F69i: a 19.2 deg snap injected over 0.2 s converges (within 0.3 deg of the error at 0.23 s), the view stays the head's under the cancel (within "
+                          "1.5 deg while the aim moves at 96 deg/s, exactly once it stops) and the map carries the snap");
+                    // The release unwinds the snap: the look base returns to zero and the aim to where it was before the press.
+                    p.map.beginRelease();
+                    bool done = false;
+                    for (int i = 0; i < 90 * 3 && !done; ++i) {
+                        p.frame(0.0, 0.0, false, true);
+                        done = p.map.releaseDone();
+                    }
+                    for (int i = 0; i < 6; ++i) p.frame(0.0, 0.0, false, true);
+                    check(done && std::fabs(p.map.yawCarried) < 0.1 * kR && std::fabs(p.map.pitchSeat) < 0.1 * kR && std::fabs(p.aimY) < 0.2 * kR && std::fabs(p.aimP) < 0.2 * kR &&
+                              std::fabs(p.viewY() - p.headY) < 1e-9,
+                          "F69i: the release unwinds the snap with the rest (the carried yaw and pitch return to zero, the aim to its pre-press direction) and the view never leaves "
+                          "the head's");
+                    // A swing over 20 deg runs at 100 deg/s at most; the plan's shares add up exactly; a game that drops ADS during the snap stops it (the release unwinds the part
+                    // injected so far).
+                    nf::AdsCentre big, line;
+                    big.begin(60.0 * kR, 0.0);
+                    line.begin(0.1, -0.05);
+                    double sy = 0.0, sp = 0.0;
+                    int ticks = 0;
+                    while (line.active && ticks < 100) {
+                        double y, pp;
+                        line.step(1.0 / 90.0, &y, &pp);
+                        sy += y;
+                        sp += pp;
+                        ++ticks;
+                    }
+                    AimPlant q;
+                    q.delay = 1;
+                    q.map.beginCentre(15.0 * kR, 0.0);
+                    for (int i = 0; i < 5; ++i) q.frame(0.0, 0.0, true, false);
+                    const bool activeBefore = q.map.centre.active;
+                    q.map.beginRelease();
+                    q.frame(0.0, 0.0, false, true);
+                    const bool activeAfter = q.map.centre.active;
+                    bool qdone = false;
+                    for (int i = 0; i < 90 * 3 && !qdone; ++i) {
+                        q.frame(0.0, 0.0, false, true);
+                        qdone = q.map.releaseDone();
+                    }
+                    for (int i = 0; i < 6; ++i) q.frame(0.0, 0.0, false, true);
+                    check(std::fabs(big.dur - 0.6) < 1e-9 && std::fabs(sy - 0.1) < 1e-12 && std::fabs(sp + 0.05) < 1e-12 && ticks >= 18 && ticks <= 19 && activeBefore && !activeAfter &&
+                              qdone && std::fabs(q.map.yawCarried) < 0.1 * kR && std::fabs(q.aimY) < 0.2 * kR && std::fabs(q.viewY() - q.headY) < 1e-9,
+                          "F69i: a 60 deg swing takes 0.6 s (100 deg/s at most), the 0.2 s plan injects exactly its yaw and pitch, and an ADS that ends during the snap stops it "
+                          "while the release unwinds what was injected");
+                    bool b1 = false, b2 = false, b3 = false, b4 = false, b5 = false;
+                    const double r1 = nf::adsCentreYawBounded(30.0, 9.0, &b1), r2 = nf::adsCentreYawBounded(-30.0, -9.0, &b2), r3 = nf::adsCentreYawBounded(0.0, 9.0, &b3),
+                                 r4 = nf::adsCentreYawBounded(38.0, 5.0, &b4), r5 = nf::adsCentreYawBounded(38.0, -5.0, &b5);
+                    const double rt[3] = {1.0, 0.0, 0.0}, up3[3] = {0.0, 1.0, 0.0}, fw[3] = {0.0, 0.0, 1.0};
+                    const double left10[3] = {-std::sin(10.0 * kR), 0.0, std::cos(10.0 * kR)}, up5[3] = {0.0, std::sin(5.0 * kR), std::cos(5.0 * kR)};
+                    double ey = 0.0, ep = 0.0, ey2 = 0.0, ep2 = 0.0;
+                    const bool e1 = nf::adsCentreError(fw, rt, up3, left10, &ey, &ep), e2 = nf::adsCentreError(fw, rt, up3, up5, &ey2, &ep2);
+                    check(std::fabs(r1 - 7.0) < 1e-12 && b1 && std::fabs(r2 + 7.0) < 1e-12 && b2 && r3 == 9.0 && !b3 && r4 == 0.0 && b4 && r5 == -5.0 && !b5 && e1 && e2 &&
+                              std::fabs(ey - 10.0) < 1e-9 && std::fabs(ep) < 1e-9 && std::fabs(ey2) < 1e-9 && std::fabs(ep2 - 5.0) < 1e-9,
+                          "F69i: the snap's yaw is bounded by the cone (the weapon keeps 3 deg off 40: 30 deg off the body and asked +9 gets +7; at 38 asked outward gets 0; inward "
+                          "passes whole), and the error reads in the guard's convention (a target 10 deg to the left is yaw +10, 5 deg up is pitch +5)");
+                }
                 // (6) The guard reads the right eye's rows through AdsResidual. A plant whose camera takes the aim never trips it over 60 s; a camera that does
                 // NOT take the aim (the cancel alone turns the view: the F66 reading) trips it 0.5 s after the residual passes the floor; stale rows never trip it.
                 {
@@ -2522,9 +2599,8 @@ int wmain(int argc, wchar_t** argv) {
                           jp.liftM > 0.30 && std::fabs(nf::ikLen(jE) - l1a) < 1e-9 && std::fabs(nf::ikLen(jF) - l2a) < 1e-9 && std::fabs(js.reachAfter - 0.995) < 1e-9,
                       "F67c: the leg solve puts the carried foot on the planted target (a hip moved in three axes: under 0.001 mm; a 40 cm lift: the foot lifted to "
                       "reach 0.995) and keeps both bones' lengths");
-                check(nf::pinState(0.1, 0.0, false) == 0 && nf::pinState(1.2, 0.0, false) == 1 && nf::pinState(4.0, 0.2, false) == 2 && nf::pinState(1.0, 1.1, false) == 3 &&
-                          nf::pinState(0.0, 0.0, true) == 3 && nf::pinState(4.0, -1.0, false) == 3,
-                      "F67c: the state bins: standing (under 0.35 m/s), walking, running (3 m/s), jumping (vertical speed over 0.8 m/s or both feet high)");
+                check(nf::pinState(0.1, 0.0) == 0 && nf::pinState(1.2, 0.0) == 1 && nf::pinState(4.0, 0.2) == 2 && nf::pinState(1.0, 1.1) == 3 && nf::pinState(4.0, -1.0) == 3,
+                      "F67c: the state bins: standing (under 0.35 m/s), walking, running (3 m/s), jumping (vertical speed over 0.8 m/s; F69d: alone)");
             }
             // F68g: the armed-move trace's gate: armed and over 1 m/s starts a 40-call event; at most 5 events a minute, at least a second apart.
             {
@@ -2595,18 +2671,20 @@ int wmain(int argc, wchar_t** argv) {
                     ++fallFrames;
                 }
                 check(fallFrames >= 25 && fallFrames <= 28, "F68d: the weight falls to 0 over 0.3 s once the signal ends (no snap of the arms)");
-                // (4) The veto: hands up with the fists, counted from the hands going up. Held still 2 s: armed for 1.5 s, then not armed, the weight falling over 0.3 s.
+                // (4) The veto: hands up with the fists, counted from the hands going up (F69f: 3.0 s; it was 1.5). The hand sways a little (a hand held perfectly
+                // still would be recaptured as the unarmed rest at the same moment); armed to 3.0 s, then not armed, the weight falling over 0.3 s.
                 nf::FpHandsUp v;
                 for (int i = 0; i < 45; ++i) v.step(dtF, true, rest, true);
                 int firstVeto = -1;
                 nf::FpHandsUp::Out ov;
-                for (int i = 0; i < 180; ++i) {
-                    ov = v.step(dtF, true, raised, true);
+                for (int i = 0; i < 300; ++i) {
+                    double swayed[3] = {raised[0] + 0.02 * std::sin(i * 0.3), raised[1], raised[2]};
+                    ov = v.step(dtF, true, swayed, true);
                     if (ov.vetoed && firstVeto < 0) firstVeto = i;
                     if (i == 100) check(ov.signal && !ov.vetoed && ov.w == 1.0, "F68d: hands up with the fists for 1.1 s are still armed");
                 }
-                check(firstVeto >= 134 && firstVeto <= 137 && !ov.signal && ov.vetoed && ov.w < 1.0,
-                      "F68d: hands up with Status.json on fists for more than 1.5 s are not armed (an emote or a tool pose): vetoed at frame 136");
+                check(firstVeto >= 269 && firstVeto <= 272 && !ov.signal && ov.vetoed && ov.w < 1.0,
+                      "F68d: hands up with Status.json on fists for more than 3 s are not armed (an emote or a tool pose): vetoed at frame 270");
                 // (5) Status.json flips to armed 0.8 s after the hands went up: no veto, ever, and the weapon holds.
                 nf::FpHandsUp w;
                 for (int i = 0; i < 45; ++i) w.step(dtF, true, rest, true);
@@ -2693,10 +2771,10 @@ int wmain(int argc, wchar_t** argv) {
                 bool done = false;
                 for (int i = 0; i < 45; ++i) {
                     double p[3] = {p44s[0] + 0.001 * ((i % 3) - 1), p44s[1], p44s[2]};   // a millimetre of sway
-                    done = cal.add(true, p, rowsId, n0s);
+                    done = cal.add(true, p, rowsId, n0s, 1.60 + 0.002 * ((i % 3) - 1));   // the eye 1.60 m up, 2 mm of sway
                 }
                 check(done && cal.have && cal.n == 45 && cal.axes.fAxis == 2 && cal.axes.uAxis == 1 && cal.axes.fSign > 0.0 && std::fabs(cal.e[1] - 0.025) < 2e-3 &&
-                          std::fabs(cal.e[2] - 0.06) < 2e-3 && std::fabs(cal.headY - 1.58) < 1e-9,
+                          std::fabs(cal.e[2] - 0.06) < 2e-3 && std::fabs(cal.headY - 1.58) < 1e-9 && std::fabs(cal.eyeY - 1.60) < 1e-3,
                       "F68e: 45 consecutive standing frames capture the eye point in the head joint's frame (2.5 cm up, 6 cm ahead of the head joint here) and "
                       "find the head's forward and up rows");
                 // (1) Standing reproduces the rest offset: the eye 1.6 m up, its heading 0 and 30 deg to the head's.
@@ -2712,28 +2790,32 @@ int wmain(int argc, wchar_t** argv) {
                 check(pa0.anim && pa30.anim && !pa0.clamped && dist(T0, R0) < 0.01 && dist(T30, R30) < 0.01 && dist(T0, R0) < 0.002,
                       "F68e: standing, the target from the animated head equals the F67c rest offset (0, -0.155, -0.09) along the eye's heading within 1 cm, "
                       "with the eye's heading 0 or 30 deg off the head's (the yaw comes from the eye)");
-                // (2) A 40 deg lean of the chest and head (a crouch's torso): the neck-to-eye vector rotates with the pose; the neck target moves back.
+                // (2) A 40 deg lean of the chest and head (a crouch's torso), the camera 60 cm down (F69a: w_c = 1, the animated vector in full): the neck-to-eye vector
+                // rotates with the pose; the neck target moves back.
+                const double eyeC[3] = {0.1, 1.00, 0.2};
+                double R0c[3];
+                nf::pinNeckTarget(eyeC, fwd0, R0c);
                 double n40[3], p40[3], r40[3][3];
                 lean(40.0, rowsId, n40, p40, r40);
                 double T40[3];
                 nf::PinAnimTarget pa40;
-                nf::pinNeckTargetAnim(eyeP, fwd0, p40, r40, n40, cal, T40, &pa40);
+                nf::pinNeckTargetAnim(eyeC, fwd0, p40, r40, n40, cal, T40, &pa40);
                 const double fwdExp = 0.155 * std::sin(40.0 * kR) + 0.09 * std::cos(40.0 * kR), upExp = 0.155 * std::cos(40.0 * kR) - 0.09 * std::sin(40.0 * kR);
-                const double backShift = (R0[2] - T40[2]);   // how much further behind the standing target the crouch target sits (along +z)
+                const double backShift = (R0c[2] - T40[2]);   // how much further behind the standing target the crouch target sits (along +z)
                 check(pa40.anim && std::fabs(pa40.vUsed[2] - fwdExp) < 1e-3 && std::fabs(pa40.vUsed[1] - upExp) < 1e-3 && std::fabs(backShift - (fwdExp - 0.09)) < 1e-3 &&
                           backShift > 0.07,
                       "F68e: a 40 deg chest pitch moves the neck target back by 7.9 cm (the neck-to-eye vector is 16.9 cm ahead and 6.1 cm up, against 9.0 and 15.5 "
                       "standing) and the eye's heading carries it: a 90 deg yaw puts the same 16.9 cm along the new heading");
                 double T40y[3], eyeFwd90[3] = {1.0, 0.0, 0.0};
                 nf::PinAnimTarget pa40y;
-                nf::pinNeckTargetAnim(eyeP, eyeFwd90, p40, r40, n40, cal, T40y, &pa40y);
-                check(std::fabs((eyeP[0] - T40y[0]) - fwdExp) < 1e-3 && std::fabs(eyeP[2] - T40y[2]) < 1e-3, "F68e: with the eye turned 90 deg the animated 16.9 cm forward offset lies along the eye's heading (x)");
+                nf::pinNeckTargetAnim(eyeC, eyeFwd90, p40, r40, n40, cal, T40y, &pa40y);
+                check(std::fabs((eyeC[0] - T40y[0]) - fwdExp) < 1e-3 && std::fabs(eyeC[2] - T40y[2]) < 1e-3, "F68e: with the eye turned 90 deg the animated 16.9 cm forward offset lies along the eye's heading (x)");
                 // (3) The head pitched past 70 deg (looking down): the heading comes from the up vector, no NaN, still 15.5 cm ahead of the neck's vertical.
                 double n90[3], p90[3], r90[3][3];
                 lean(90.0, rowsId, n90, p90, r90);
                 double T90[3];
                 nf::PinAnimTarget pa90;
-                nf::pinNeckTargetAnim(eyeP, fwd0, p90, r90, n90, cal, T90, &pa90);
+                nf::pinNeckTargetAnim(eyeC, fwd0, p90, r90, n90, cal, T90, &pa90);
                 check(pa90.anim && std::isfinite(T90[0]) && std::isfinite(T90[1]) && std::isfinite(T90[2]) && std::fabs(pa90.vUsed[2] - 0.155) < 2e-3 &&
                           std::fabs(pa90.vUsed[1] + 0.09) < 2e-3 && std::fabs(pa90.hHead[2] - 1.0) < 1e-9,
                       "F68e: looking straight down (the head pitched 90 deg) the head's heading is read from its up vector and the neck sits 15.5 cm behind and 9 cm "
@@ -2741,24 +2823,24 @@ int wmain(int argc, wchar_t** argv) {
                 // (4) Another frame convention (a bone-aligned head joint: local x forward, y up, z right) finds its axes and gives the same targets.
                 double rowsB[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
                 nf::PinEyeCal calB;
-                for (int i = 0; i < 45; ++i) calB.add(true, p44s, rowsB, n0s);
+                for (int i = 0; i < 45; ++i) calB.add(true, p44s, rowsB, n0s, 1.60);
                 double nB[3], pB[3], rB[3][3], TB[3];
                 lean(40.0, rowsB, nB, pB, rB);
                 nf::PinAnimTarget paB;
-                nf::pinNeckTargetAnim(eyeP, fwd0, pB, rB, nB, calB, TB, &paB);
+                nf::pinNeckTargetAnim(eyeC, fwd0, pB, rB, nB, calB, TB, &paB);
                 check(calB.have && calB.axes.fAxis == 0 && calB.axes.uAxis == 1 && paB.anim && dist(TB, T40) < 1e-6,
                       "F68e: a head joint whose local x is the forward (and y the up) is found by the calibration and gives the same 40 deg target");
                 // (5) The calibration needs 45 CONSECUTIVE standing frames: an armed, moving, high-or-low or pitched frame starts the run again; no calibration, no
                 // animated target (the F67c rest offset).
                 nf::PinEyeCal broken;
                 bool any = false;
-                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
-                broken.add(false, p44s, rowsId, n0s);   // a frame that is not standing
-                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s, 1.60) || any;
+                broken.add(false, p44s, rowsId, n0s, 1.60);   // a frame that is not standing
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s, 1.60) || any;
                 double pLean[3], nLean[3], rLean[3][3];
                 lean(50.0, rowsId, nLean, pLean, rLean);
-                broken.add(true, pLean, rLean, nLean);   // a pitched head (a crouch before the calibration) is no standing frame
-                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
+                broken.add(true, pLean, rLean, nLean, 1.60);   // a pitched head (a crouch before the calibration) is no standing frame
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s, 1.60) || any;
                 const bool still = !broken.have && !any;
                 double Tn[3];
                 nf::PinAnimTarget paN;
@@ -2770,17 +2852,376 @@ int wmain(int argc, wchar_t** argv) {
                 // (6) A glitched pose (the animated vector 1 m away) is clamped to 35 cm from the rest offset.
                 double pFar[3] = {p44s[0], p44s[1] + 1.0, p44s[2]}, Tc[3];
                 nf::PinAnimTarget paC;
-                nf::pinNeckTargetAnim(eyeP, fwd0, pFar, rowsId, n0s, cal, Tc, &paC);
+                nf::pinNeckTargetAnim(eyeC, fwd0, pFar, rowsId, n0s, cal, Tc, &paC);
                 const double devC = std::sqrt((paC.vUsed[0] - 0.0) * (paC.vUsed[0] - 0.0) + (paC.vUsed[1] - 0.155) * (paC.vUsed[1] - 0.155) +
                                               (paC.vUsed[2] - 0.09) * (paC.vUsed[2] - 0.09));
                 check(paC.anim && paC.clamped && std::fabs(devC - nf::kPinAnimOffsetClampM) < 1e-9, "F68e: a neck-to-eye vector 1 m from the rest offset is clamped to 35 cm from it (a 90 deg lean moves it 25 cm)");
-                // (7) The state split: a crouch is the animated legs bent (reach under 0.80), after jumping and before running.
-                check(nf::pinCrouched(0.62) && !nf::pinCrouched(0.9) && !nf::pinCrouched(0.97) && !nf::pinCrouched(0.0) &&
-                          !nf::pinCrouched(std::numeric_limits<double>::quiet_NaN()) && nf::pinState(0.1, 0.0, false, true) == 4 &&
-                          nf::pinState(4.0, 0.0, false, true) == 4 && nf::pinState(0.1, 1.2, false, true) == 3 && nf::pinState(0.1, 0.0, true, true) == 3 &&
-                          nf::pinState(0.1, 0.0, false, false) == 0 && nf::pinState(4.0, 0.0, false, false) == 2,
-                      "F68e: the pin's state split names a crouch (animated legs' reach under 0.80, standing 0.94-1.0, the armed stance about 0.9) as its own state "
-                      "(4), after jumping and before running");
+            }
+            // F69a to F69d (core parts): the camera's crouch, the clearance bins, the weapon's yaw, the bend's target.
+            {
+                const double kR = nf::kIkPi / 180.0;
+                const auto dist = [](const double a[3], const double c[3]) { return std::sqrt((a[0] - c[0]) * (a[0] - c[0]) + (a[1] - c[1]) * (a[1] - c[1]) + (a[2] - c[2]) * (a[2] - c[2])); };
+                // ---- F69a: the neck target follows the camera's crouch, not the stance's head.
+                const double n0s[3] = {0.0, 1.45, 0.0}, p44s[3] = {0.0, 1.58, 0.03};
+                double rowsId[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                const double fwd0[3] = {0.0, 0.0, 1.0};
+                nf::PinEyeCal cal;
+                for (int i = 0; i < 45; ++i) cal.add(true, p44s, rowsId, n0s, 1.62);
+                // The rifle stance's head: the animated neck-to-eye vector (5.3, 6.6, 15.4) cm, the camera 4 cm down (F68 log 152023, dump 152258).
+                const double pStance[3] = {p44s[0] + 0.053, p44s[1] + (0.066 - 0.155), p44s[2] + (0.154 - 0.09)};
+                const double eyeStance[3] = {0.0, 1.62 - 0.04, 0.0};
+                double Ts[3], Rs[3];
+                nf::PinAnimTarget ps;
+                nf::pinNeckTargetAnim(eyeStance, fwd0, pStance, rowsId, n0s, cal, Ts, &ps);
+                nf::pinNeckTarget(eyeStance, fwd0, Rs);
+                check(cal.have && std::fabs(cal.eyeY - 1.62) < 1e-9 && ps.anim && std::fabs(ps.vAnim[0] - 0.053) < 1e-6 && std::fabs(ps.vAnim[1] - 0.066) < 1e-6 &&
+                          std::fabs(ps.vAnim[2] - 0.154) < 1e-6 && ps.wc == 0.0 && dist(Ts, Rs) < 1e-3 && std::fabs(ps.dEyeY + 0.04) < 1e-9,
+                      "F69a: the rifle stance's head ((5.3, 6.6, 15.4) cm neck to eye) with the camera 4 cm down gives the REST offset within 1 mm (w_c 0), while the "
+                      "animated vector is still computed");
+                const double eyeLow[3] = {0.0, 1.62 - 0.60, 0.0};
+                double Tl[3];
+                nf::PinAnimTarget pl;
+                nf::pinNeckTargetAnim(eyeLow, fwd0, pStance, rowsId, n0s, cal, Tl, &pl);
+                check(pl.wc == 1.0 && dist(pl.vUsed, pl.vAnim) < 1e-12 && std::fabs(Tl[2] - (0.0 - 0.154)) < 1e-6 && std::fabs(Tl[1] - (1.02 - 0.066)) < 1e-6,
+                      "F69a: the camera 60 cm down (the F67 crouch) gives the animated vector exactly (w_c 1)");
+                bool mono = true, atRest = true;
+                double prevWc = -1.0, prevZ = -1.0;
+                for (int cm = -30; cm <= 70; ++cm) {   // the camera from 30 cm up (a jump) to 70 cm down
+                    const double e[3] = {0.0, 1.62 - 0.01 * cm, 0.0};
+                    double T[3];
+                    nf::PinAnimTarget p;
+                    nf::pinNeckTargetAnim(e, fwd0, pStance, rowsId, n0s, cal, T, &p);
+                    mono = mono && p.wc >= prevWc - 1e-12 && p.vUsed[2] >= prevZ - 1e-12;
+                    if (cm <= 20) atRest = atRest && p.wc == 0.0 && std::fabs(p.vUsed[2] - 0.09) < 1e-12 && std::fabs(p.vUsed[1] - 0.155) < 1e-12;
+                    prevWc = p.wc;
+                    prevZ = p.vUsed[2];
+                }
+                check(mono && atRest && std::fabs(nf::pinCrouchWeight(true, 1.62, 1.62 - 0.325) - 0.5) < 1e-12 && nf::pinCrouchWeight(true, 1.62, 1.62 - 0.45) == 1.0 &&
+                          nf::pinCrouchWeight(true, 1.62, 1.62 - 0.20) == 0.0 && nf::pinCrouchWeight(true, 1.62, 1.62 + 0.30) == 0.0 && !nf::pinCrouchedWc(0.49) &&
+                          nf::pinCrouchedWc(0.5) && nf::pinCrouchedWc(1.0) && !nf::pinCrouchedWc(std::numeric_limits<double>::quiet_NaN()),
+                      "F69a: the blend is monotonic from the camera 30 cm up to 70 cm down, exactly the rest offset within 20 cm of the standing height (and in a jump), "
+                      "one half at 32.5 cm, whole from 45 cm; a crouch is w_c of 0.5 or more");
+                nf::PinEyeCal none, nanCal;
+                for (int i = 0; i < 60; ++i) nanCal.add(true, p44s, rowsId, n0s, std::numeric_limits<double>::quiet_NaN());
+                double Tn[3], Rl[3];
+                nf::PinAnimTarget pn;
+                nf::pinNeckTargetAnim(eyeLow, fwd0, pStance, rowsId, n0s, none, Tn, &pn);
+                nf::pinNeckTarget(eyeLow, fwd0, Rl);
+                check(!pn.anim && pn.wc == 0.0 && dist(Tn, Rl) < 1e-12 && !nanCal.have,
+                      "F69a: without a calibration the target is the rest offset whatever the camera does (a non-finite eye height is no standing frame)");
+                // ---- F69d: the bins: jumping from the vertical speed alone, crouching from w_c; the clearance's inside test and axes.
+                check(nf::pinState(0.1, 0.0) == 0 && nf::pinState(1.2, 0.0) == 1 && nf::pinState(4.0, 0.2) == 2 && nf::pinState(1.0, 1.1) == 3 && nf::pinState(4.0, -1.0) == 3 &&
+                          nf::pinState(0.1, 0.0, true) == 4 && nf::pinState(4.0, 0.0, true) == 4 && nf::pinState(0.1, 1.2, true) == 3,
+                      "F69d: the state bins: jumping is the vertical speed alone (over 0.8 m/s, either way), then crouching (the camera's w_c), running, walking, standing");
+                check(nf::headInside(0.054, 0.05) && !nf::headInside(0.19, 0.20) && nf::headInside(0.079, 0.119) && !nf::headInside(0.081, 0.05) && !nf::headInside(0.02, 0.121) &&
+                          !nf::headInside(0.155, 0.12),
+                      "F69d: 'inside' is the eye under the clavicle line + 8 cm AND under 12 cm ahead of the chest 24 (F68's dump: eye 2.4 cm over the neck: inside; standing: not)");
+                const double h1[3] = {0.0, 0.0, 1.0}, h2[3] = {1.0, 0.0, 0.0}, v3[3] = {1.0, 2.0, 3.0};
+                double hx1[3], hx2[3];
+                nf::headingAxes(h1, v3, hx1);
+                nf::headingAxes(h2, v3, hx2);
+                check(hx1[0] == 1.0 && hx1[1] == 2.0 && hx1[2] == 3.0 && hx2[0] == -3.0 && hx2[1] == 2.0 && hx2[2] == 1.0,
+                      "F69d: the clearance's axes: right, up, forward of the eye's heading (heading +x puts the old forward on the left)");
+                // ---- F69b: the armed square-up turns the torso by the weapon's yaw, not the shoulders'.
+                int ax = -1;
+                double sg = 0.0;
+                const double aim[3] = {0.0, 0.0, 1.0}, upV[3] = {0.0, 1.0, 0.0};
+                double rperm[3][3] = {{0, 0, -1}, {1, 0, 0}, {0, 1, 0}}, rflip[3][3] = {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+                const double aimDiag[3] = {0.57735, 0.57735, 0.57735};   // all three rows 54.7 deg off: no row within 45 deg
+                const bool okId = nf::barrelRow(rowsId, aim, &ax, &sg) && ax == 2 && sg == 1.0;
+                int ax2 = -1, ax3 = -1, ax4 = -1;
+                double sg2 = 0.0, sg3 = 0.0, sg4 = 0.0;
+                const bool bPerm = nf::barrelRow(rperm, aim, &ax2, &sg2), bFlip = nf::barrelRow(rflip, aim, &ax3, &sg3);
+                check(okId && bPerm && ax2 == 0 && sg2 == -1.0 && bFlip && ax3 == 1 && sg3 == -1.0 && !nf::barrelRow(rowsId, aimDiag, &ax4, &sg4),
+                      "F69b: the barrel axis is the signed row most aligned with the aim (permuted and flipped attach rows pick the right one; an aim 54.7 deg from every row "
+                      "gives none)");
+                nf::BarrelAxes bax;
+                nf::BarrelDirs bd0;
+                int latchedAt = -1;
+                for (int i = 0; i < 12; ++i) {
+                    bd0 = bax.step(rflip, rperm, aim);
+                    if (bd0.latched && latchedAt < 0) latchedAt = i;
+                }
+                const nf::BarrelDirs bdHeld = bax.step(rowsId, rperm, aim);   // other rows now: the latched picks stand
+                bax.reset();
+                const nf::BarrelDirs bdNew = bax.step(rowsId, rperm, aim);
+                check(latchedAt == static_cast<int>(nf::kBarrelLatchFrames) - 1 && bd0.ok && bd0.a3 == 1 && bd0.s3 == -1.0 && bd0.aF == 0 && bd0.sF == -1.0 &&
+                          std::fabs(bd0.b3[2] - 1.0) < 1e-12 && std::fabs(bd0.bF[2] - 1.0) < 1e-12 && bdHeld.latched && bdHeld.a3 == 1 && !bdNew.latched && bdNew.a3 == 2,
+                      "F69b: the pick latches after 10 consecutive armed calls with the same rows in both rigs, holds when the rows change, and drops on reset (an item "
+                      "change or the end of arming)");
+                // A stance bladed 38 deg (the upper body turned, the weapon on the aim): the shoulders' phi is -38, the weapon's 0, and U*'s left shoulder sits 11 cm further forward.
+                const double blade = 38.0 * kR, pivot[3] = {0.0, 1.4, 0.0};
+                const double uL[3] = {-0.18 * std::cos(blade), 1.4, 0.18 * std::sin(blade)}, uR[3] = {0.18 * std::cos(blade), 1.4, -0.18 * std::sin(blade)};
+                nf::BarrelAxes bax2;
+                nf::BarrelDirs bd1;
+                for (int i = 0; i < 12; ++i) bd1 = bax2.step(rowsId, rowsId, aim);
+                const nf::SquareYaw sqW = nf::squareYaw(true, bd1, uL, uR, aim), sqS = nf::squareYaw(false, bd1, uL, uR, aim);
+                double uStarW[3], uStarS[3];
+                nf::turnAboutVertical(uL, pivot, sqW.phi, uStarW);
+                nf::turnAboutVertical(uL, pivot, sqS.phi, uStarS);
+                double phiDirect = 0.0;
+                nf::ikSquareToForward(uL, uR, aim, &phiDirect);
+                check(sqW.ok && sqW.src == nf::kSquareWeapon && std::fabs(sqW.phiW) < 1e-9 && std::fabs(sqW.phiSh + 38.0 * kR) < 1e-9 && sqW.phi == sqW.phiW &&
+                          sqS.src == nf::kSquareShoulders && sqS.phi == phiDirect && std::fabs(uStarW[2] - uStarS[2] - 0.18 * std::sin(blade)) < 1e-9 &&
+                          uStarW[2] - uStarS[2] > 0.08 && uStarW[2] - uStarS[2] < 0.115,
+                      "F69b: a stance bladed 38 deg with the weapon on the aim gives phi 0 (the shoulders' would be -38) and U*'s left shoulder 11 cm further forward; "
+                      "unarmed it is ikSquareToForward unchanged, bit for bit");
+                // A 3P body 30 deg off the FP aim (the aim-lag case): phi = -30, and the turn lands the barrel on the aim.
+                nf::BarrelDirs bdLag = bd1;
+                bdLag.b3[0] = std::sin(30.0 * kR);
+                bdLag.b3[1] = 0.0;
+                bdLag.b3[2] = std::cos(30.0 * kR);
+                const nf::SquareYaw sqLag = nf::squareYaw(true, bdLag, uL, uR, aim);
+                double Rt[9];
+                nf::ikRotAxis(upV, sqLag.phi, Rt);
+                const double turned[3] = {bdLag.b3[0] * Rt[0] + bdLag.b3[1] * Rt[3] + bdLag.b3[2] * Rt[6], bdLag.b3[0] * Rt[1] + bdLag.b3[1] * Rt[4] + bdLag.b3[2] * Rt[7],
+                                          bdLag.b3[0] * Rt[2] + bdLag.b3[1] * Rt[5] + bdLag.b3[2] * Rt[8]};
+                nf::BarrelDirs bdUp = bd1;
+                bdUp.b3[0] = 0.1;
+                bdUp.b3[1] = 0.99;
+                bdUp.b3[2] = 0.0;
+                const nf::SquareYaw sqUp = nf::squareYaw(true, bdUp, uL, uR, aim), sqNone = nf::squareYaw(true, nf::BarrelDirs{}, uL, uR, aim);
+                check(std::fabs(sqLag.phi + 30.0 * kR) < 1e-9 && std::fabs(turned[0]) < 1e-9 && std::fabs(turned[2] - 1.0) < 1e-9 && sqUp.src == nf::kSquareShoulders &&
+                          sqUp.phi == phiDirect && sqNone.src == nf::kSquareShoulders && sqNone.phi == phiDirect,
+                      "F69b: a 3P body 30 deg off the aim gives phi -30 and turning by it puts the barrel on the aim; a barrel pointing up (no yaw) or no barrel falls back "
+                      "to the shoulders");
+                // ---- F69c: the bend never undoes the reach rule.
+                {
+                    const double P[3] = {0.0, 1.05, 0.0}, T[3] = {0.0, 1.45, 0.02}, reach[3] = {0.0, 0.0, 0.20};
+                    const double Npin[3] = {T[0] + reach[0], T[1] + reach[1], T[2] + reach[2]};    // the pin has slid the neck by the reach correction
+                    const double Tbend[3] = {T[0] + reach[0], T[1] + reach[1], T[2] + reach[2]};   // F69c's target
+                    double pitchNew = 0.0, rollNew = 0.0, pitchOld = 0.0, rollOld = 0.0;
+                    const bool okNew = nf::bendSolve(P, Npin, Tbend, &pitchNew, &rollNew), okOld = nf::bendSolve(P, Npin, T, &pitchOld, &rollOld);
+                    double lf = 0.0, lb = 0.0, lr = 0.0;
+                    nf::bendLimitsArmed(1.0, &lf, &lb, &lr);
+                    nf::BendClamp clNew, clOld;
+                    const double pNewC = nf::bendClampPitchLim(pitchNew, lf, lb, &clNew), pOldC = nf::bendClampPitchLim(pitchOld, lf, lb, &clOld);
+                    double Rn[9], Ro[9], vN[3], vO[3];
+                    const double v[3] = {Npin[0] - P[0], Npin[1] - P[1], Npin[2] - P[2]};
+                    nf::bendRot(pNewC, 0.0, 1.0, Rn);
+                    nf::bendRot(pOldC, 0.0, 1.0, Ro);
+                    nf::bendApply(v, Rn, vN);
+                    nf::bendApply(v, Ro, vO);
+                    check(okNew && okOld && std::fabs(pitchNew) < 1e-9 && std::fabs(rollNew) < 1e-9 && !clNew.fwd && !clNew.back && !clNew.roll &&
+                              std::fabs(vN[1] - v[1]) < 1e-9 && clOld.back && vO[1] - v[1] > 0.02,
+                          "F69c: with the target T plus a 20 cm reach correction the bend wants 0, hits no clamp and leaves the neck's height alone; aimed at T alone (F68) "
+                          "it pitched back against the armed limit and lifted the neck over 2 cm");
+                }
+            }
+            // F69e to F69h (core parts): the reticle's tag, the veto's margin, the grip frames, the off hand.
+            {
+                const double kR = nf::kIkPi / 180.0;
+                // ---- F69e: F18's exact zeros take a tag.
+                float rz[3] = {0.0f, 0.0f, 5.0f};
+                const uint32_t sentinelRz = edvr::drawtag::sentinel(10, 1234);
+                const uint32_t seeded = edvr::drawtag::seedZeros(rz);
+                const bool encoded = edvr::drawtag::encode(rz, sentinelRz);
+                const uint32_t decoded = edvr::drawtag::decode(rz);
+                float nz[3] = {-0.0f, 0.0f, 5.0f};
+                edvr::drawtag::seedZeros(nz);
+                float nn[3] = {0.5f, -2.0f, 5.0f};
+                const uint32_t seededNone = edvr::drawtag::seedZeros(nn);
+                float badC[3] = {0.0f, std::numeric_limits<float>::quiet_NaN(), 5.0f};
+                edvr::drawtag::seedZeros(badC);
+                float den[3] = {1e-40f, 1.0f, 1.0f};
+                edvr::drawtag::seedZeros(den);
+                check(seeded == 2 && encoded && decoded == sentinelRz && std::fabs(rz[0]) < 1e-29f && std::fabs(rz[1]) < 1e-29f && rz[0] > 0.0f && rz[2] > 4.99f && rz[2] < 5.01f &&
+                          std::signbit(nz[0]) && !std::signbit(nz[1]) && seededNone == 0 && nn[0] == 0.5f && nn[1] == -2.0f &&
+                          !edvr::drawtag::encode(badC, sentinelRz) && !edvr::drawtag::encode(den, sentinelRz),
+                      "F69e: key 10's (0, 0, 5) takes a tag after the zeros become 2^-100 m (it decodes its sentinel, moves under 1e-29 m, keeps a zero's sign); a NaN or "
+                      "a denormal component still refuses and a nonzero position is untouched");
+                // ---- F69f: Status.json 2.0 s late arms with no gap, and the veto holds to 3 s (F68's margin was 0.4 s).
+                {
+                    const double dtF = 1.0 / 90.0;
+                    const double restP[3] = {0.25, -0.10, 0.30}, raised[3] = {0.40, 0.10, 0.55};
+                    nf::FpHandsUp w;
+                    for (int i = 0; i < 45; ++i) w.step(dtF, true, restP, true);
+                    bool everVetoed = false, allSignal = true;
+                    for (int i = 0; i < 450; ++i) {
+                        const bool fists = i < 180;   // Status.json arrives 2.0 s after the hands rise
+                        const nf::FpHandsUp::Out ow = w.step(dtF, fists, raised, true);
+                        everVetoed = everVetoed || ow.vetoed;
+                        allSignal = allSignal && ow.signal;
+                    }
+                    nf::FpHandsUp v;
+                    for (int i = 0; i < 45; ++i) v.step(dtF, true, restP, true);
+                    int firstVeto = -1;
+                    bool at28 = false;
+                    for (int i = 0; i < 400; ++i) {
+                        double p[3] = {raised[0] + 0.02 * std::sin(i * 0.3), raised[1], raised[2]};   // a sway: the hand is never still, so no recapture hides the veto
+                        const nf::FpHandsUp::Out ov = v.step(dtF, true, p, true);
+                        if (ov.vetoed && firstVeto < 0) firstVeto = i;
+                        if (i == 251) at28 = ov.signal && !ov.vetoed;   // 2.8 s
+                    }
+                    check(!everVetoed && allSignal && nf::kHandsVetoSec == 3.0 && at28 && firstVeto >= 269 && firstVeto <= 272,
+                          "F69f: Status.json arriving 2.0 s after the hands rise arms with no gap and no veto; hands up with the fists are still armed at 2.8 s and vetoed "
+                          "from 3.0 s (frame 270)");
+                }
+                // ---- F69g: the grip frames: synthetic hands with a known Gamma give the reported delta within 0.1 deg and 0.1 mm.
+                {
+                    // Double-precision references, row-vector 4x4: attach frame A = Gamma x H (an attach in the hand's axes, then the hand in the model).
+                    struct M4 { double m[16]; };
+                    const auto fromAA = [](const double axis[3], double angDeg, const double t[3]) {
+                        double R[9];
+                        double n[3] = {axis[0], axis[1], axis[2]};
+                        const double l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                        for (double& c : n) c /= l;
+                        nf::ikRotAxis(n, angDeg * nf::kIkPi / 180.0, R);
+                        M4 o{};
+                        for (int r = 0; r < 3; ++r)
+                            for (int c = 0; c < 3; ++c) o.m[r * 4 + c] = R[r * 3 + c];
+                        o.m[12] = t[0];
+                        o.m[13] = t[1];
+                        o.m[14] = t[2];
+                        o.m[15] = 1.0;
+                        return o;
+                    };
+                    const auto mul = [](const M4& a, const M4& b) {
+                        M4 o{};
+                        for (int i = 0; i < 4; ++i)
+                            for (int j = 0; j < 4; ++j)
+                                for (int k = 0; k < 4; ++k) o.m[i * 4 + j] += a.m[i * 4 + k] * b.m[k * 4 + j];
+                        return o;
+                    };
+                    const auto toF = [](const M4& a, float out[16]) {
+                        for (int i = 0; i < 16; ++i) out[i] = static_cast<float>(a.m[i]);
+                    };
+                    const double aH[3] = {1, 2, 3}, aG1[3] = {0.3, -1, 0.5}, aG2[3] = {-1, 0.4, 0.8}, aH2[3] = {0, 1, 1};
+                    const double tH[3] = {0.31, 1.22, -0.44}, tG1[3] = {0.012, -0.020, 0.031}, tG2[3] = {-0.008, 0.015, 0.044}, tH2[3] = {-0.2, 1.1, 0.35};
+                    const M4 Hfp = fromAA(aH, 33.0, tH), Gfp = fromAA(aG1, 25.0, tG1), H3 = fromAA(aH2, 71.0, tH2), G3 = fromAA(aG2, 80.0, tG2);
+                    const M4 Afp = mul(Gfp, Hfp), A3 = mul(G3, H3);
+                    float fH[16], fA[16], fH3[16], fA3[16], gF[16], g3[16], dl[16];
+                    toF(Hfp, fH);
+                    toF(Afp, fA);
+                    toF(H3, fH3);
+                    toF(A3, fA3);
+                    const bool okF = nf::gripFrame(fA, fH, gF), ok3 = nf::gripFrame(fA3, fH3, g3), okD = nf::gripDelta(g3, gF, dl);
+                    // Expected: rotation R3 R_fp^T (angle by the trace), translation (t3 - t_fp) R_fp^T.
+                    double tr = 0.0;
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j) tr += G3.m[i * 4 + j] * Gfp.m[i * 4 + j];
+                    const double angExp = std::acos(std::max(-1.0, std::min(1.0, (tr - 1.0) * 0.5))) * 180.0 / nf::kIkPi;
+                    const double dt[3] = {G3.m[12] - Gfp.m[12], G3.m[13] - Gfp.m[13], G3.m[14] - Gfp.m[14]};
+                    double tExp[3];
+                    for (int c = 0; c < 3; ++c) tExp[c] = dt[0] * Gfp.m[c * 4 + 0] + dt[1] * Gfp.m[c * 4 + 1] + dt[2] * Gfp.m[c * 4 + 2];   // (t3 - t_fp) R_fp^T
+                    double axG[3], axD[3], angG1 = 0.0, angG3 = 0.0, angD = 0.0;
+                    nf::frameAxisAngle(gF, axG, &angG1);
+                    nf::frameAxisAngle(g3, axG, &angG3);
+                    nf::frameAxisAngle(dl, axD, &angD);
+                    double maxGErr = 0.0;
+                    for (int i = 0; i < 16; ++i) maxGErr = std::max(maxGErr, std::fabs(static_cast<double>(gF[i]) - Gfp.m[i]));
+                    double tErr = 0.0;
+                    for (int c = 0; c < 3; ++c) tErr = std::max(tErr, std::fabs(static_cast<double>(dl[12 + c]) - tExp[c]));
+                    check(okF && ok3 && okD && maxGErr < 1e-5 && std::fabs(angG1 - 25.0) < 0.05 && std::fabs(angG3 - 80.0) < 0.05 && std::fabs(angD - angExp) < 0.1 && tErr < 1e-4,
+                          "F69g: hands with a known Gamma (25 and 80 deg, centimetres of offset, other hand poses) are recovered from A x inv(H) (under 1e-5), and the "
+                          "reported delta is within 0.1 deg and 0.1 mm of the independent product");
+                    // The wrist: a rotation about the hinge normal is flexion, about eT x n1 deviation, about the forearm axis twist; mixed they add up per axis.
+                    const double eT[3] = {0.0, 0.0, 1.0}, n1[3] = {1.0, 0.0, 0.0}, dv[3] = {0.0, -1.0, 0.0};   // eT x n1 = (0, 1, 0)
+                    double dAxis[3];
+                    nf::ikCross(eT, n1, dAxis);
+                    double Xf[9], Xd[9], Xt[9];
+                    nf::ikRotAxis(n1, 30.0 * kR, Xf);
+                    nf::ikRotAxis(dAxis, 20.0 * kR, Xd);
+                    nf::ikRotAxis(eT, 40.0 * kR, Xt);
+                    const nf::WristAngles wf = nf::wristAngles(Xf, eT, n1), wd = nf::wristAngles(Xd, eT, n1), wt = nf::wristAngles(Xt, eT, n1);
+                    // twist then flex: X = twist 40 about eT, then flex 30 about n1 (row-vector: apply the twist first)
+                    double Xm[9];
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) Xm[r * 3 + c] = Xt[r * 3] * Xf[c] + Xt[r * 3 + 1] * Xf[3 + c] + Xt[r * 3 + 2] * Xf[6 + c];
+                    const nf::WristAngles wm = nf::wristAngles(Xm, eT, n1);
+                    (void)dv;
+                    check(wf.ok && std::fabs(wf.flexDeg - 30.0) < 1e-6 && std::fabs(wf.devDeg) < 1e-6 && std::fabs(wf.twistDeg) < 1e-6 && wd.ok && std::fabs(wd.devDeg - 20.0) < 1e-6 &&
+                              std::fabs(wd.flexDeg) < 1e-6 && wt.ok && std::fabs(wt.twistDeg - 40.0) < 1e-6 && std::fabs(wt.swingDeg) < 1e-6 && wm.ok &&
+                              std::fabs(wm.swingDeg - 30.0) < 1e-6 && std::fabs(wm.twistDeg - 40.0) < 1e-6 && std::fabs(wm.flexDeg - 30.0) < 1e-6,
+                          "F69g: the wrist after the solve splits into flexion (about the elbow's hinge normal), deviation (about eT x n1) and twist (about the forearm "
+                          "axis); a pure twist has no swing and a 40 deg twist plus a 30 deg flexion has a 30 deg swing");
+                    // The steady window: 0.5 s of a still attach (the first sample has no previous), once; a moving attach never completes; an item change starts again.
+                    nf::GripSteady gs;
+                    const double dtG = 1.0 / 90.0, at[3] = {0.2, -0.1, 0.4};
+                    int completedAt = -1, completions = 0;
+                    double meanAtDone = 0.0, sdAtDone = -1.0;
+                    for (int i = 0; i < 200; ++i) {
+                        const double sep = 0.326 + 0.005 * ((i % 2) ? 1.0 : -1.0);
+                        if (gs.step(7, true, dtG, at, sep)) {
+                            ++completions;
+                            if (completedAt < 0) {
+                                completedAt = i;
+                                meanAtDone = gs.sepMean();
+                                sdAtDone = gs.sepSd();
+                            }
+                        }
+                    }
+                    nf::GripSteady moving;
+                    int movingDone = 0;
+                    for (int i = 0; i < 400; ++i) {
+                        const double p[3] = {0.2 + 0.0030 * i, -0.1, 0.4};   // 0.27 m/s
+                        movingDone += moving.step(7, true, dtG, p, 0.326) ? 1 : 0;
+                    }
+                    nf::GripSteady jerk;
+                    int jerkAt = -1;
+                    for (int i = 0; i < 200; ++i) {
+                        const double p[3] = {0.2 + (i == 20 ? 0.05 : 0.0), -0.1, 0.4};   // one 5 cm jump (4.5 m/s) at frame 20
+                        if (jerk.step(7, true, dtG, p, 0.326) && jerkAt < 0) jerkAt = i;
+                    }
+                    const bool againOnNewItem = gs.step(8, true, dtG, at, 0.326) == false && gs.item == 8 && !gs.done;
+                    check(completedAt == 45 && completions == 1 && std::fabs(meanAtDone - 0.326) < 0.0005 && std::fabs(sdAtDone - 0.005) < 0.0005 && movingDone == 0 && jerkAt >= 65 && jerkAt <= 67 && againOnNewItem,
+                          "F69g: the grip line is due once, after 0.5 s of a still attach (frame 45, the separation's mean and sd over that window); a moving attach never "
+                          "completes it, a jerk restarts the window, and a new item starts again");
+                }
+                // ---- F69h: the off hand follows the FP rig: within 40 cm of the right attach and steady over 10 frames, else it follows the animation.
+                {
+                    const double dtF = 1.0 / 90.0;
+                    const auto mk = [&](double yawDeg, double x, double y, double z, float m[16]) {
+                        const double a = yawDeg * kR, c = std::cos(a), s = std::sin(a);
+                        const float r[16] = {static_cast<float>(c), 0, static_cast<float>(-s), 0, 0, 1, 0, 0, static_cast<float>(s), 0, static_cast<float>(c), 0,
+                                             static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), 1};
+                        std::memcpy(m, r, sizeof(r));
+                    };
+                    float a51[16], a52[16];
+                    mk(10.0, 0.25, -0.10, 0.30, a51);
+                    mk(40.0, 0.25 - 0.326, -0.10, 0.30, a52);   // the rifle's pair: 32.6 cm apart
+                    nf::OffHand rifle;
+                    int firstTwo = -1, firstFull = -1;
+                    double wAt10 = -1.0;
+                    for (int i = 0; i < 40; ++i) {
+                        const nf::OffHand::Out o = rifle.step(dtF, true, true, a51, a52);
+                        if (o.two && firstTwo < 0) firstTwo = i;
+                        if (o.w >= 1.0 && firstFull < 0) firstFull = i;
+                        if (i == 9) wAt10 = o.w;
+                    }
+                    check(firstTwo == 10 && wAt10 == 0.0 && firstFull >= 23 && firstFull <= 25,
+                          "F69h: a rifle's pair (32.6 cm apart, a steady relative orientation) is two-handed once 10 steady frames have been seen (frame 10), the off arm's "
+                          "weight then ramps to 1 in 0.15 s");
+                    // The pistol: the left attach far from the right (55 cm): one-handed, weight 0, and a rifle's weight falls to 0 in 0.15 s when the hand leaves.
+                    float far52[16];
+                    mk(40.0, 0.25 - 0.55, -0.10, 0.30, far52);
+                    nf::OffHand pistol;
+                    bool anyTwo = false;
+                    for (int i = 0; i < 60; ++i) anyTwo = anyTwo || pistol.step(dtF, true, true, a51, far52).two;
+                    int zeroAt = -1;
+                    nf::OffHand::Out oLeave;
+                    for (int i = 0; i < 20; ++i) {
+                        oLeave = rifle.step(dtF, true, true, a51, far52);
+                        if (oLeave.w == 0.0 && zeroAt < 0) zeroAt = i;
+                    }
+                    check(!anyTwo && pistol.w == 0.0 && zeroAt >= 12 && zeroAt <= 14 && !oLeave.two,
+                          "F69h: a left attach 55 cm from the right (the pistol, the tools) is never two-handed and its weight stays 0; when a rifle's left hand leaves, the "
+                          "weight falls to 0 over 0.15 s");
+                    // An orientation that is not steady (2 deg a frame) is one-handed even within 40 cm; unarmed forgets everything; an unreadable frame decides one-handed.
+                    nf::OffHand turning;
+                    bool turningTwo = false;
+                    for (int i = 0; i < 60; ++i) {
+                        float t52[16];
+                        mk(40.0 + 2.0 * i, 0.25 - 0.326, -0.10, 0.30, t52);
+                        turningTwo = turningTwo || turning.step(dtF, true, true, a51, t52).two;
+                    }
+                    rifle.step(dtF, true, true, a51, a52);
+                    const nf::OffHand::Out gone = rifle.step(dtF, false, true, a51, a52);
+                    const nf::OffHand::Out blind = rifle.step(dtF, true, false, a51, a52);
+                    check(!turningTwo && !gone.two && gone.w == 0.0 && rifle.have == 0 && !blind.ok && !blind.two,
+                          "F69h: a left attach turning 2 deg a frame is one-handed within 40 cm (not steady under 5 deg over 10 frames); unarmed forgets the history; a frame "
+                          "whose attaches cannot be read decides one-handed");
+                }
             }
             // F67e: the aim-jump trigger: the FP root's yaw rate over 30 deg/s while armed (the yaw step wrapped across the +-180 seam).
             {

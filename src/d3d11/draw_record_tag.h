@@ -60,6 +60,19 @@ inline bool encode(float v[3], uint32_t s) noexcept {
     for (int i = 0; i < 3; ++i) v[i] = floatOf((bitsOf(v[i]) & ~0xFFu) | ((s >> (8 * i)) & 0xFFu));
     return true;
 }
+// F69e: an exact zero cannot carry the tag (no exponent to hide the sentinel under), and F18 centres the aim reticle (key 10) on x = y = 0 EXACTLY, so in
+// the F68 flight key 10 was posted 3616 times and tagged 0 times. An exact +-0 becomes a signed 2^-100 (7.9e-31, a normal float) before encode: the
+// instance moves by under 1e-29 m, which nothing can see. Only an exact zero is touched; returns how many components were seeded.
+inline float zeroSeed() noexcept { return std::ldexp(1.0f, -100); }
+inline uint32_t seedZeros(float v[3]) noexcept {
+    uint32_t n = 0;
+    for (int i = 0; i < 3; ++i)
+        if (v[i] == 0.0f) {
+            v[i] = std::signbit(v[i]) ? -zeroSeed() : zeroSeed();
+            ++n;
+        }
+    return n;
+}
 inline uint32_t decodeWords(const uint32_t w[3]) noexcept {
     return (w[0] & 0xFFu) | ((w[1] & 0xFFu) << 8) | ((w[2] & 0xFFu) << 16);
 }

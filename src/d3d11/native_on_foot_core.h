@@ -2463,6 +2463,72 @@ struct AdsResidualGrowth {
 // cancel doubled it); about -1 the view does not take the aim there (the cancel alone turned it).
 inline double adsResidualRatio(double residual, double head) noexcept { return std::fabs(head) > 1e-9 ? residual / head : 0.0; }
 
+// ---- F69i: ADS centres the sight on the press ------------------------------------------------------------------------------------------------
+// F68 (log 152023, dumps 152230 rifle, 152353 pistol): the right eye is ON the sight line (0.3 / 0.0 cm), but the sight sits 18-20 deg off the right eye's lens
+// axis (yaw about -9, pitch +16..19), set by the game at the press and constant after it: F68a keeps that offset for the whole press, only the mouse moves it, and
+// Sean looks through the sight by turning his eyes up-left. Sean (F69 questions): yes, bring the aim onto the head's forward at the press. On each engage the sight
+// forward (the FP root's, P14's) is measured against the HEAD's forward (the mean of the two eyes' forwards: on a canted-display headset each eye's own forward
+// is the lens axis, Pimax 10.75 deg off the head's), once, and the difference in yaw and pitch is injected as look input through F68a's own path over
+// kAdsCentreSec (longer only for a swing over 20 deg: at most kAdsCentreMaxRate, so the frame the cancel runs behind stays near 1 deg). The map's in-flight
+// account and cancel see it like any other ask, so the view stays the headset's, and the carried yaw and pitch include it: the release unwinds it.
+// Bounded by the game's cone (the weapon's yaw against the body at most 40 deg; the snap keeps 3 deg off it): a game that drops ADS is not argued with.
+constexpr double kAdsCentreSec = 0.2;
+constexpr double kAdsCentreMaxRate = 100.0 * kAdsDeg;   // rad/s
+constexpr double kAdsConeDeg = 40.0, kAdsConeMarginDeg = 3.0;
+constexpr double kAdsCentreMinDeg = 0.5;                // an error under this is already centred: no snap
+struct AdsCentre {
+    bool active = false;
+    double yaw = 0.0, pitch = 0.0;            // the plan, radians (seat convention)
+    double dur = kAdsCentreSec, t = 0.0;
+    double doneYaw = 0.0, donePitch = 0.0;    // injected so far
+    // yaw, pitch (radians): the turn that carries the sight onto the head's forward. The duration is kAdsCentreSec, longer for a large swing.
+    void begin(double y, double p) noexcept {
+        active = std::isfinite(y) && std::isfinite(p) && (std::fabs(y) > 0.0 || std::fabs(p) > 0.0);
+        yaw = active ? y : 0.0;
+        pitch = active ? p : 0.0;
+        const double mag = std::sqrt(yaw * yaw + pitch * pitch), need = mag / kAdsCentreMaxRate;
+        dur = need > kAdsCentreSec ? need : kAdsCentreSec;
+        t = 0.0;
+        doneYaw = donePitch = 0.0;
+    }
+    void cancel() noexcept { active = false; }
+    // The share to inject this tick (dt seconds): linear in time; the last tick takes the remainder exactly.
+    void step(double dt, double* y, double* p) noexcept {
+        *y = *p = 0.0;
+        if (!active) return;
+        t += dt > 0.0 ? dt : 0.0;
+        const double u = t >= dur ? 1.0 : t / dur;
+        *y = yaw * u - doneYaw;
+        *p = pitch * u - donePitch;
+        doneYaw += *y;
+        donePitch += *p;
+        if (u >= 1.0) active = false;
+    }
+};
+// The snap's yaw (degrees) bounded by the cone: the weapon's yaw offset from the body (offYawDeg, + left, as adsAimStep measures it) after the snap stays within
+// kAdsConeDeg - kAdsConeMarginDeg. *bounded says the cone cut it.
+inline double adsCentreYawBounded(double offYawDeg, double wantDeg, bool* bounded) noexcept {
+    const double lim = kAdsConeDeg - kAdsConeMarginDeg;
+    double after = offYawDeg + wantDeg;
+    if (bounded) *bounded = false;
+    if (after > lim) after = lim;
+    else if (after < -lim) after = -lim;
+    else return wantDeg;
+    // Already outside the allowed band and asked to go further out: no snap in that direction.
+    double r = after - offYawDeg;
+    if ((wantDeg > 0.0 && r < 0.0) || (wantDeg < 0.0 && r > 0.0)) r = 0.0;
+    if (bounded) *bounded = true;
+    return r;
+}
+// The turn (degrees; yaw + left, pitch + up, in the sight's own axes) that carries the sight forward onto the target forward; the screen axes (right, up) of the
+// view the angles are read in (the cyclopean view's). Same convention as the guard's (rotFrameDelta), so the injection and the measurement agree.
+inline bool adsCentreError(const double sightFwd[3], const double viewRight[3], const double viewUp[3], const double targetFwd[3], double* yawDeg, double* pitchDeg) noexcept {
+    RotFrameSum b, a;
+    b.add(viewRight, viewUp, sightFwd);
+    a.add(viewRight, viewUp, targetFwd);
+    return rotFrameDelta(b, a, yawDeg, pitchDeg);
+}
+
 // The asks the game has not answered yet, per axis: one slot per tick for the last kAdsFlightFrames ticks. The turn the game applies is taken off the
 // oldest asks first (the game answers in order), so what is in flight stays exact while the answers come within the window; an ask the game never
 // answers (a cone, a refusal, a gain error) is forgotten when its slot is that old.
@@ -2505,6 +2571,9 @@ struct AdsAimMap {
     double pitchInFlight() const noexcept { return flightPitch.sum(); }
     double relT = 0.0, relY0 = 0.0, relP0 = 0.0, relYDur = kAdsUnwindSec, relPDur = kAdsUnwindSec, relDur = kAdsUnwindSec;
     uint32_t clampHits = 0;
+    AdsCentre centre;   // F69i: the press's snap, asked through the same path as the head's step
+    void beginCentre(double yawRad, double pitchRad) noexcept { centre.begin(yawRad, pitchRad); }
+    void cancelCentre() noexcept { centre.cancel(); }
     struct Out {
         double injYaw = 0.0, injPitch = 0.0;         // asked of the game this tick (seat radians; the caller converts to input)
         double cancelYaw = 0.0, cancelPitch = 0.0;   // cancelled in the seated space this tick (the clamp can cut the pitch)
@@ -2528,6 +2597,7 @@ struct AdsAimMap {
     void dropSeated() noexcept {
         yawCarried = pitchSeat = 0.0;
         clearInFlight();
+        centre.cancel();
     }
     Out step(bool engaged, bool releasing, double dt, double w, bool headStep, double dYaw, double dPitch, double appliedYaw, double appliedPitch,
              bool yawOn, bool pitchOn) noexcept {
@@ -2556,6 +2626,7 @@ struct AdsAimMap {
             inY = wt * dYaw;
             inP = adsPitchLimit(pitchSeat + pOut, wt * dPitch);
         } else if (releasing) {
+            centre.cancel();   // F69i: a snap in progress stops; the release unwinds what was injected
             const double tPrev = relT;
             relT += t;
             if (tPrev < relDur) {
@@ -2565,6 +2636,12 @@ struct AdsAimMap {
                 if (std::fabs(yawCarried + yOut) > kAdsUnwindDoneRad) inY = -(yawCarried + yOut);
                 if (std::fabs(pitchSeat + pOut) > kAdsUnwindDoneRad) inP = -(pitchSeat + pOut);
             }
+        }
+        if (engaged) {   // F69i: the press's snap rides the same ask (its pitch inside the same clamp)
+            double cy = 0.0, cp = 0.0;
+            centre.step(t, &cy, &cp);
+            inY += cy;
+            if (cp != 0.0) inP += adsPitchLimit(pitchSeat + pOut + inP, cp);
         }
         if (!yawOn || !(inY == inY)) inY = 0.0;
         if (!pitchOn || !(inP == inP)) inP = 0.0;
@@ -2855,20 +2932,22 @@ inline LegPlant legPlant(const double hip1[3], const double foot0[3], double l1,
     return o;
 }
 // The state bin of a pin sample: 0 standing, 1 walking, 2 running, 3 jumping (airborne), 4 crouching (F68e). speed: the AMC's horizontal speed (m/s),
-// vy its vertical speed, feetHigh whether the animated feet are both well above the ground, crouched whether the animated legs are bent (below).
+// vy its vertical speed, crouched whether the camera is down (pinCrouchedWc: F69d).
 // Priority: jumping, crouching, running, walking, standing. (Armed is counted beside, not instead.)
+// F69d: jumping is the vertical speed ALONE. F68 read "both animated feet high" after the pin had lifted them 8-16 cm, so every rifle and pistol second
+// filed as jumping; the pre-pin feet test is kept as a counter in the head-clearance line (not a bin input).
 constexpr double kPinWalkMps = 0.35, kPinRunMps = 3.0, kPinAirMps = 0.8, kPinFeetHighM = 0.12;
-inline int pinState(double speed, double vy, bool feetHigh, bool crouched = false) noexcept {
-    if (std::fabs(vy) > kPinAirMps || feetHigh) return 3;
+inline int pinState(double speed, double vy, bool crouched = false) noexcept {
+    if (std::fabs(vy) > kPinAirMps) return 3;
     if (crouched) return 4;
     if (speed >= kPinRunMps) return 2;
     if (speed >= kPinWalkMps) return 1;
     return 0;
 }
-// F68e: a crouch is the animated legs bent: hip to foot over (thigh + calf) averaged over both legs, below this. Standing is 0.94-1.0, the armed stance
-// (head 21 cm lower, F66) about 0.9; a crouch that drops the head 40 cm is 0.6-0.7. The 1 s line prints the mean per state, so the next flight can move it.
-constexpr double kPinCrouchReach = 0.80;
-inline bool pinCrouched(double meanLegReach) noexcept { return meanLegReach == meanLegReach && meanLegReach > 0.0 && meanLegReach < kPinCrouchReach; }
+// F69d: a crouch is the CAMERA down (F69a's w_c, from the cyclopean eye's model height against its standing mean), not the animated legs' reach (F68e: the
+// rifle stance reads 0.70-0.89 standing, the old threshold 0.80). w_c >= 0.5 is half way up the smoothstep, 32.5 cm down.
+constexpr double kPinCrouchWc = 0.5;
+inline bool pinCrouchedWc(double wc) noexcept { return wc == wc && wc >= kPinCrouchWc; }
 
 // ---- F68d: the arms follow the FP hands ---------------------------------------------------------------------------------------------------------
 // The F67 flight (log 132256): Status.json's SelectedWeapon arrives after the game has drawn the weapon (polled every 100 ms, then the 0.3 s armed ramp),
@@ -2876,10 +2955,11 @@ inline bool pinCrouched(double meanLegReach) noexcept { return meanLegReach == m
 // flip. The signal is read per frame from the FP Animate snapshot: the FP right hand attach (joint 51, in the FP model space) more than 12 cm from its
 // unarmed rest pose, which is captured while Status.json says fists and the hand is still. Up takes the arm IK's full armed weight from that frame
 // (no ramp at the onset; the weight falls over 0.3 s when it ends). Status.json stays the authority: its armed flag arms as before, and hands up with
-// Status.json still saying fists for over 1.5 s (counted from the hands going up) are not armed (an emote or a tool pose).
+// Status.json still saying fists for over kHandsVetoSec (counted from the hands going up) are not armed (an emote or a tool pose). F69f: the veto was
+// 1.5 s; the F68 flight (log 152023) had Status.json arriving 1.085 s after the hands rose, 0.4 s inside the old margin, so it is 3.0 s.
 constexpr double kHandsUpM = 0.12, kHandsDownM = 0.09;   // the hysteresis: up past 12 cm, down again under 9 cm from the rest pose
 constexpr double kHandsStillMps = 0.10, kHandsStillSec = 0.4;   // "still": under 10 cm/s for 0.4 s
-constexpr double kHandsVetoSec = 1.5;                    // hands up with the fists this long (counted from the hands going up): not armed
+constexpr double kHandsVetoSec = 3.0;                    // hands up with the fists this long (counted from the hands going up): not armed (F69f: was 1.5; Status.json led by 1.085 s in the F68 flight)
 constexpr double kHandsRecaptureSec = 3.0;               // a vetoed pose held this still this long is the new unarmed rest
 constexpr double kHandsRestTauSec = 1.0;                 // the rest follows a slow drift of the unarmed pose while it is near (time constant)
 constexpr double kHandsDropSec = 0.3;                    // the weight's fall when the signal ends
@@ -3095,17 +3175,21 @@ struct PinEyeCal {
     bool have = false;
     uint32_t n = 0;
     double sum[3] = {}, e[3] = {}, headYSum = 0.0, headY = 0.0;
+    double eyeYSum = 0.0, eyeY = 0.0;   // F69a: the cyclopean eye's model height over the same frames (h_stand), the crouch signal
     PinHeadAxes axes, runAxes;
     void reset() noexcept { *this = PinEyeCal{}; }
     void restart() noexcept {
         n = 0;
         sum[0] = sum[1] = sum[2] = 0.0;
         headYSum = 0.0;
+        eyeYSum = 0.0;
         runAxes = PinHeadAxes{};
     }
-    // One frame: standing says whether this frame may calibrate (the caller's gate); returns true on the frame the calibration completes.
-    bool add(bool standing, const double p44[3], const double rows[3][3], const double n0[3]) noexcept {
+    // One frame: standing says whether this frame may calibrate (the caller's gate); eyeY the cyclopean eye's height in the 3P model space this frame
+    // (F69a); returns true on the frame the calibration completes. A non-finite eyeY is no standing frame.
+    bool add(bool standing, const double p44[3], const double rows[3][3], const double n0[3], double eyeYNow) noexcept {
         if (have) return false;
+        if (!std::isfinite(eyeYNow)) standing = false;
         PinHeadAxes ax;
         double eh[3];
         bool ok = standing && pinRowsRigid(rows) && pinFindHeadAxes(rows, &ax);
@@ -3123,9 +3207,11 @@ struct PinEyeCal {
         runAxes = ax;
         for (int i = 0; i < 3; ++i) sum[i] += eh[i];
         headYSum += p44[1];
+        eyeYSum += eyeYNow;
         if (++n < kPinEyeCalFrames) return false;
         for (int i = 0; i < 3; ++i) e[i] = sum[i] / static_cast<double>(n);
         headY = headYSum / static_cast<double>(n);
+        eyeY = eyeYSum / static_cast<double>(n);
         axes = runAxes;
         have = true;
         return true;
@@ -3135,14 +3221,29 @@ struct PinEyeCal {
 inline bool pinCalStanding(double speed, bool armed, bool ads, double headY) noexcept {
     return !armed && !ads && speed < kPinWalkMps && headY >= kPinStandHeadMinM && headY <= kPinStandHeadMaxM;
 }
+// ---- F69a: the neck target follows the camera's crouch, not the stance's head -----------------------------------------------------------------------
+// F68 (log 152023, dump 152258): the animated neck-to-eye vector of the armed rifle stance is (5.3, 6.6, 15.4) cm, not the rest (0, 15.5, 9.0): the
+// stance leans the head 63 deg from the neck (the cheek weld), so the F68e target put the neck 8.9 cm up toward the eye and 6.4 cm back and the eye sat
+// at the neck joint. The animated vector is for a CROUCH (the F67 dump: the chest pitched forward, the eye 70 cm down). The signal that tells them apart is
+// the camera itself: the cyclopean eye's height in the 3P model space against its mean over the calibration's 45 standing frames (h_stand). The stance
+// lowers the game's camera by under 4 cm (rifle 1.58-1.61 m against 1.63 m); a crouch by 70 cm. v = lerp(rest, v_anim, w_c), w_c = smoothstep(0.20, 0.45,
+// h_stand - E_y): 0 within 20 cm, 1 from 45 cm down. Exogenous (the game's camera and a calibration), no switch, no memory.
+constexpr double kPinCrouchLoM = 0.20, kPinCrouchHiM = 0.45;
+inline double pinCrouchWeight(bool have, double hStand, double eyeY) noexcept {
+    if (!have || !std::isfinite(hStand) || !std::isfinite(eyeY)) return 0.0;
+    return smoothstep3(kPinCrouchLoM, kPinCrouchHiM, hStand - eyeY);
+}
 struct PinAnimTarget {
-    bool anim = false;        // the animated vector was used (else the F67c rest offset)
+    bool anim = false;        // the animated vector was computed (a calibration and a readable head); the vector used is the blend below
     bool clamped = false;
+    double wc = 0.0;          // F69a: the animated vector's weight (the camera's crouch)
+    double dEyeY = 0.0;       // F69a: E_y - h_stand (m, negative when down); 0 without a calibration
     double vUsed[3] = {};     // neck -> eye as used (model axes)
+    double vAnim[3] = {};     // F69a: the animated vector (after the clamp), whether or not it was used
     double hEye[3] = {}, hHead[3] = {};
 };
-// The neck target: E - v, v the animated neck-to-eye vector turned from the head's heading to the eye's. eyeFwd: the eye's forward in model axes (its
-// heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
+// The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
+// model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
                               const PinEyeCal& cal, double out[3], PinAnimTarget* info) noexcept {
     PinAnimTarget local;
@@ -3150,7 +3251,9 @@ inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const
     pa = PinAnimTarget{};
     pinHeading(eyeFwd, pa.hEye);
     const double rest[3] = {kPinRestBackM * pa.hEye[0], kPinRestUpM, kPinRestBackM * pa.hEye[2]};
-    for (int i = 0; i < 3; ++i) pa.vUsed[i] = rest[i];
+    for (int i = 0; i < 3; ++i) pa.vUsed[i] = pa.vAnim[i] = rest[i];
+    pa.wc = pinCrouchWeight(cal.have, cal.eyeY, eye[1]);
+    pa.dEyeY = cal.have && std::isfinite(cal.eyeY) && std::isfinite(eye[1]) ? eye[1] - cal.eyeY : 0.0;
     if (cal.have && pinRowsRigid(rows)) {
         double f[3], u[3];
         cal.axes.fwd(rows, f);
@@ -3167,13 +3270,15 @@ inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const
         double dev[3] = {vt[0] - rest[0], vt[1] - rest[1], vt[2] - rest[2]};
         const double dn = std::sqrt(dev[0] * dev[0] + dev[1] * dev[1] + dev[2] * dev[2]);
         if (dn == dn && dn <= kPinAnimOffsetClampM) {
-            for (int i = 0; i < 3; ++i) pa.vUsed[i] = vt[i];
+            for (int i = 0; i < 3; ++i) pa.vAnim[i] = vt[i];
             pa.anim = true;
         } else if (dn == dn) {
-            for (int i = 0; i < 3; ++i) pa.vUsed[i] = rest[i] + dev[i] * kPinAnimOffsetClampM / dn;
+            for (int i = 0; i < 3; ++i) pa.vAnim[i] = rest[i] + dev[i] * kPinAnimOffsetClampM / dn;
             pa.anim = true;
             pa.clamped = true;
         }
+        if (pa.anim)
+            for (int i = 0; i < 3; ++i) pa.vUsed[i] = rest[i] + pa.wc * (pa.vAnim[i] - rest[i]);
     }
     for (int i = 0; i < 3; ++i) out[i] = eye[i] - pa.vUsed[i];
 }
@@ -3269,6 +3374,358 @@ struct P1FramePairing {
         published = true;
         ++pairs;
         return true;
+    }
+};
+
+// ---- F69b: the armed square-up turns the torso by the weapon's yaw, not the shoulders' ----------------------------------------------------------
+// F68 (log 152023, section 4 of the review): the rifle stance blades the upper body 35-40 deg while the weapon points down the aim. The square-up turned the
+// SHOULDER LINE square to the aim, which de-bladed the stance, ran the left (foregrip) arm out of reach (1.03) and made the reach rule slide the whole body
+// 16-23 cm forward. Armed, phi is now the yaw that carries the 3P animated right attach's barrel (joint 66) onto the FP right attach's (51, through G):
+// the stance keeps its blade, the weapon sits on the aim. The barrel axis of each rig is the signed row of its attach matrix most aligned with the aim
+// (G's forward), found as pinFindHeadAxes finds the head's: it is picked per item at the draw (the same pick for kBarrelLatchFrames consecutive armed calls
+// latches it; an item change or the end of arming drops it). ONE function, squareYaw, serves the reach rule's U* (stage 0), the stage-1 angle and the
+// written turn; unarmed it is ikSquareToForward unchanged, and so is any armed call without a readable barrel (the shoulders' phi is always computed
+// beside, for the log).
+constexpr double kBarrelMinDot = 0.7;           // a row within 45 deg of the aim can be the barrel
+constexpr double kBarrelMinXz = 0.25;           // the barrel's horizontal part under this (a weapon pointing up or down) has no yaw to turn the torso by
+constexpr uint32_t kBarrelLatchFrames = 10;     // consecutive armed calls with the same pick in both rigs
+// The signed row of a rigid matrix's three axis rows most aligned with `aim` (|dot| largest, rows and aim taken as directions); false under kBarrelMinDot.
+inline bool barrelRow(const double rows[3][3], const double aim[3], int* axis, double* sign) noexcept {
+    double au[3];
+    if (!ikUnit(aim, au)) return false;
+    int best = -1;
+    double bd = 0.0, bs = 1.0;
+    for (int i = 0; i < 3; ++i) {
+        double ru[3];
+        if (!ikUnit(rows[i], ru)) return false;
+        const double d = ikDot(ru, au);
+        if (std::fabs(d) > bd) {
+            bd = std::fabs(d);
+            best = i;
+            bs = d < 0.0 ? -1.0 : 1.0;
+        }
+    }
+    if (best < 0 || !(bd >= kBarrelMinDot)) return false;
+    *axis = best;
+    *sign = bs;
+    return true;
+}
+struct BarrelDirs {
+    bool ok = false;        // both barrels are known this call (latched, or picked now)
+    bool latched = false;
+    double b3[3] = {}, bF[3] = {};   // the 3P animated attach's barrel and the FP attach's through G (3P model space, unit)
+    int a3 = -1, aF = -1;
+    double s3 = 1.0, sF = 1.0;
+};
+struct BarrelAxes {
+    bool have = false;
+    int a3 = -1, aF = -1;
+    double s3 = 1.0, sF = 1.0;
+    int runA3 = -1, runAF = -1;
+    double runS3 = 1.0, runSF = 1.0;
+    uint32_t run = 0;
+    void reset() noexcept { *this = BarrelAxes{}; }
+    // One armed call: rows3p = the 3P attach's rotation rows in the 3P model space, rowsFp = the FP attach's through G (same space), aim = G's forward.
+    BarrelDirs step(const double rows3p[3][3], const double rowsFp[3][3], const double aim[3]) noexcept {
+        BarrelDirs o;
+        int p3 = -1, pF = -1;
+        double q3 = 1.0, qF = 1.0;
+        const bool got3 = barrelRow(rows3p, aim, &p3, &q3), gotF = barrelRow(rowsFp, aim, &pF, &qF);
+        if (!have) {
+            if (got3 && gotF) {
+                if (run > 0 && p3 == runA3 && pF == runAF && q3 == runS3 && qF == runSF) {
+                    ++run;
+                } else {
+                    runA3 = p3;
+                    runAF = pF;
+                    runS3 = q3;
+                    runSF = qF;
+                    run = 1;
+                }
+                if (run >= kBarrelLatchFrames) {
+                    have = true;
+                    a3 = p3;
+                    aF = pF;
+                    s3 = q3;
+                    sF = qF;
+                }
+                o.a3 = p3;
+                o.aF = pF;
+                o.s3 = q3;
+                o.sF = qF;
+                o.ok = true;
+            } else {
+                run = 0;
+            }
+        }
+        if (have) {
+            o.a3 = a3;
+            o.aF = aF;
+            o.s3 = s3;
+            o.sF = sF;
+            o.ok = true;
+            o.latched = true;
+        }
+        if (o.ok) {
+            double v3[3], vF[3];
+            for (int i = 0; i < 3; ++i) {
+                v3[i] = o.s3 * rows3p[o.a3][i];
+                vF[i] = o.sF * rowsFp[o.aF][i];
+            }
+            if (!ikUnit(v3, o.b3) || !ikUnit(vF, o.bF)) o.ok = false;
+        }
+        return o;
+    }
+};
+enum SquareSrc : int { kSquareShoulders = 0, kSquareWeapon = 1 };
+struct SquareYaw {
+    bool ok = false;               // phi is available
+    bool haveSh = false, haveW = false;
+    double phi = 0.0;              // radians: the one the callers apply
+    double phiSh = 0.0, phiW = 0.0;   // both, for the log
+    int src = kSquareShoulders;
+};
+// The yaw (ikYawFromTo's sense) that squares the upper body: armed with both barrels known and each with a horizontal part, the barrel's; otherwise the
+// upper-arm line's onto the aim's right. uL, uR the upper-arm joints (3P model space), fwd G's forward.
+inline SquareYaw squareYaw(bool armed, const BarrelDirs& bd, const double uL[3], const double uR[3], const double fwd[3]) noexcept {
+    SquareYaw o;
+    o.haveSh = ikSquareToForward(uL, uR, fwd, &o.phiSh);
+    if (bd.ok) {
+        const double a[3] = {bd.b3[0], 0.0, bd.b3[2]}, b[3] = {bd.bF[0], 0.0, bd.bF[2]};
+        if (ikLen(a) >= kBarrelMinXz && ikLen(b) >= kBarrelMinXz) {
+            o.phiW = ikYawFromTo(a, b);
+            o.haveW = std::isfinite(o.phiW);
+        }
+    }
+    if (armed && o.haveW) {
+        o.phi = o.phiW;
+        o.src = kSquareWeapon;
+        o.ok = true;
+    } else if (o.haveSh) {
+        o.phi = o.phiSh;
+        o.ok = true;
+    }
+    return o;
+}
+// The unit rows of a row-vector matrix's upper 3x3 (false when a row is degenerate).
+inline bool matRowsUnit(const float m[16], double rows[3][3]) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        const double v[3] = {m[4 * i], m[4 * i + 1], m[4 * i + 2]};
+        if (!ikUnit(v, rows[i])) return false;
+    }
+    return true;
+}
+
+// ---- F69d: the head-clearance instrument ------------------------------------------------------------------------------------------------------
+// F68: the eye sat at the neck joint with the rifle drawn; the chest 24 and the clavicles 35/36 were never logged. The eye against each, in the eye's
+// heading axes (right, up, forward), as finally written; "inside" = the eye under the clavicle line + 8 cm AND less than 12 cm ahead of the chest 24.
+constexpr double kInsideBelowClavM = 0.08, kInsideAheadChestM = 0.12;
+inline bool headInside(double eyeMinusClavUp, double eyeMinusChestFwd) noexcept {
+    return eyeMinusClavUp < kInsideBelowClavM && eyeMinusChestFwd < kInsideAheadChestM;
+}
+// v (model axes) in the heading h's axes: right = (h.z, 0, -h.x), up, forward = h (h a horizontal unit).
+inline void headingAxes(const double h[3], const double v[3], double out[3]) noexcept {
+    out[0] = v[0] * h[2] - v[2] * h[0];
+    out[1] = v[1];
+    out[2] = v[0] * h[0] + v[2] * h[2];
+}
+
+// ---- F69g: the grip frames (D1) --------------------------------------------------------------------------------------------------------------
+// Γ = A x inv(H): the attach joint's frame in the HAND's own axes (a point in attach axes times Γ lands in hand axes). The FP rig's (51/52 in 44/37, the
+// FP snapshot) against the 3P animation's (L_A = M0[A] x inv(M0[H]), 66/67 in 59/58). The hand is put on the grip by T_H = inv(L_A) x T_A, which is right only
+// if both Γ are the same item frame; ΔΓ = Γ_3p x inv(Γ_fp) says by how much they differ (identity: the same frame).
+inline bool gripFrame(const float A[16], const float H[16], float G[16]) noexcept {
+    float invH[16];
+    if (!pfzAffineInverse(H, invH)) return false;
+    pfzMul(A, invH, G);
+    return true;
+}
+inline bool gripDelta(const float g3p[16], const float gfp[16], float d[16]) noexcept {
+    float inv[16];
+    if (!pfzAffineInverse(gfp, inv)) return false;
+    pfzMul(g3p, inv, d);
+    return true;
+}
+// A frame's rotation as its axis (unit, in the axes the frame is expressed in; right-handed) and angle (degrees, 0..180). The rows are normalised first.
+// An angle under 1e-4 deg has no axis (zeros).
+inline bool frameAxisAngle(const float m[16], double axis[3], double* deg) noexcept {
+    double rows[3][3], R[9], q[4];
+    axis[0] = axis[1] = axis[2] = 0.0;
+    *deg = 0.0;
+    if (!matRowsUnit(m, rows)) return false;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) R[r * 3 + c] = rows[r][c];
+    ikQuat(R, q);
+    const double s = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+    *deg = 2.0 * std::atan2(s, q[3]) * 180.0 / kIkPi;
+    if (s > 1e-9 && *deg > 1e-4)
+        for (int i = 0; i < 3; ++i) axis[i] = q[i] / s;
+    return std::isfinite(*deg);
+}
+// The wrist after a solve: X (3x3, row-vector) is the hand's rotation beyond the forearm that carried it; swing-twist about the forearm axis eT (unit), the
+// swing split along the elbow's hinge normal n1 (flexion) and eT x n1 (deviation). All degrees; a rotation about a bone's own axis is twist.
+struct WristAngles {
+    bool ok = false;
+    double flexDeg = 0.0, devDeg = 0.0, twistDeg = 0.0, swingDeg = 0.0;
+};
+inline WristAngles wristAngles(const double X[9], const double eT[3], const double n1[3]) noexcept {
+    WristAngles w;
+    double q[4], a[3], f[3], d[3];
+    if (!ikUnit(eT, a) || !ikUnit(n1, f)) return w;
+    ikCross(a, f, d);
+    if (!ikUnit(d, d)) return w;
+    ikQuat(X, q);
+    const double proj = q[0] * a[0] + q[1] * a[1] + q[2] * a[2];
+    const double tq[4] = {proj * a[0], proj * a[1], proj * a[2], q[3]};   // the twist (unnormalised): its xyz along a
+    const double tl = std::sqrt(tq[0] * tq[0] + tq[1] * tq[1] + tq[2] * tq[2] + tq[3] * tq[3]);
+    if (!(tl > 1e-12)) return w;
+    const double t[4] = {tq[0] / tl, tq[1] / tl, tq[2] / tl, tq[3] / tl};
+    // swing = q x conj(t) (Hamilton product, xyzw)
+    const double c[4] = {-t[0], -t[1], -t[2], t[3]};
+    const double sw[4] = {q[3] * c[0] + q[0] * c[3] + q[1] * c[2] - q[2] * c[1], q[3] * c[1] + q[1] * c[3] + q[2] * c[0] - q[0] * c[2],
+                          q[3] * c[2] + q[2] * c[3] + q[0] * c[1] - q[1] * c[0], q[3] * c[3] - q[0] * c[0] - q[1] * c[1] - q[2] * c[2]};
+    const double ss = std::sqrt(sw[0] * sw[0] + sw[1] * sw[1] + sw[2] * sw[2]);
+    const double swing = 2.0 * std::atan2(ss, sw[3] < 0.0 ? -sw[3] : sw[3]);   // 0..pi
+    const double sg = sw[3] < 0.0 ? -1.0 : 1.0;
+    const double kDeg = 180.0 / kIkPi;
+    w.twistDeg = ikWrapPi(2.0 * std::atan2(proj, q[3])) * kDeg;
+    w.swingDeg = swing * kDeg;
+    if (ss > 1e-9) {
+        const double sa[3] = {sg * sw[0] / ss, sg * sw[1] / ss, sg * sw[2] / ss};
+        w.flexDeg = swing * ikDot(sa, f) * kDeg;
+        w.devDeg = swing * ikDot(sa, d) * kDeg;
+    }
+    w.ok = std::isfinite(w.twistDeg) && std::isfinite(w.swingDeg);
+    return w;
+}
+// The grip instrument's steady window, one per item (the held item's serial) and side: the FP attach (FP root frame, metres) still (under
+// kHandsStillMps) for kGripStillSec, the separation between the two FP attaches collected over that window. step() is true once, on the sample that
+// completes the window.
+constexpr double kGripStillSec = 0.5;
+struct GripSteady {
+    bool done = false;
+    uint32_t item = 0;
+    bool havePrev = false;
+    double prev[3] = {};
+    double stillSec = 0.0, lastSpeed = -1.0;   // lastSpeed: the FP attach's speed at the last sample (m/s; -1 none yet)
+    uint32_t n = 0;
+    double sepSum = 0.0, sepSq = 0.0;
+    void reset(uint32_t itemSerial) noexcept {
+        *this = GripSteady{};
+        item = itemSerial;
+    }
+    void clearWindow() noexcept {
+        stillSec = 0.0;
+        n = 0;
+        sepSum = sepSq = 0.0;
+    }
+    bool step(uint32_t itemSerial, bool ok, double dt, const double attach[3], double sep) noexcept {
+        if (itemSerial != item) reset(itemSerial);
+        if (done) return false;
+        if (!ok) {
+            havePrev = false;
+            clearWindow();
+            return false;
+        }
+        const double d = !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
+        double speed = 1e9;
+        if (havePrev && d > 1e-4) {
+            const double v[3] = {attach[0] - prev[0], attach[1] - prev[1], attach[2] - prev[2]};
+            speed = ikLen(v) / d;
+        }
+        for (int i = 0; i < 3; ++i) prev[i] = attach[i];
+        havePrev = true;
+        lastSpeed = speed < 1e8 ? speed : -1.0;
+        if (!(speed < kHandsStillMps)) {
+            clearWindow();
+            return false;
+        }
+        stillSec += d;
+        ++n;
+        sepSum += sep;
+        sepSq += sep * sep;
+        if (stillSec >= kGripStillSec - 1e-9) {
+            done = true;
+            return true;
+        }
+        return false;
+    }
+    double sepMean() const noexcept { return n ? sepSum / static_cast<double>(n) : 0.0; }
+    double sepSd() const noexcept {
+        if (n < 2) return 0.0;
+        const double m = sepSum / static_cast<double>(n), v = sepSq / static_cast<double>(n) - m * m;
+        return v > 0.0 ? std::sqrt(v) : 0.0;
+    }
+};
+
+// ---- F69h: the off hand on one-handed items follows the game's animation ----------------------------------------------------------------------
+// F67f locked BOTH hands to the grips while armed. F68's flight (dumps 152353 to 152442): the pistol's left hand is open, holding nothing; the Energylink's
+// left twist is 171.9 deg raw (clamped at +-90 on 82 of 82 calls) with the hand hovering off the handle; the Arc Cutter's left hand rings empty space; the
+// Profile Analyser's left fist is crossed under the right arm. The FP rig's left hand is not on those items, so there is no grip to lock to. Sean: the
+// 3P off hand follows the game's own 3P animation. The decision is made per frame from the FP rig, not from a name list: the FP left handAttach (52)
+// within kOffHandMaxM (40 cm; the rifle's pair is 32.6 cm) of the right one (51), and its orientation relative to 51 steady over the last
+// kOffHandSteadyFrames frames (under kOffHandSteadyDeg of change). The off arm's IK weight follows the decision over kOffHandRampSec either way.
+constexpr double kOffHandMaxM = 0.40, kOffHandSteadyDeg = 5.0, kOffHandRampSec = 0.15;
+constexpr uint32_t kOffHandSteadyFrames = 10;
+constexpr double kOffReachRelaxM = 1.0;   // the reach rule's radius for a free off hand's shoulder grows by (1 - weight) x this: at weight 0 it binds nothing
+struct OffHand {
+    double hist[kOffHandSteadyFrames + 1][9] = {};   // the last frames' 52-relative-to-51 rotations (row-vector 3x3), newest at pos
+    uint32_t have = 0, pos = 0;
+    double w = 0.0;
+    struct Out {
+        bool two = false, ok = false;
+        double w = 0.0, dist = 0.0, changeDeg = 0.0;
+    };
+    // The angle (degrees) between two row-vector rotations a, b (3x3): acos((tr(a b^T) - 1) / 2).
+    static double angleDeg(const double a[9], const double b[9]) noexcept {
+        double tr = 0.0;
+        for (int i = 0; i < 9; ++i) tr += a[i] * b[i];
+        double c = (tr - 1.0) * 0.5;
+        c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+        return std::acos(c) * 180.0 / kIkPi;
+    }
+    // One hook call: dt seconds since the last (capped at 0.1), armed (the arms are on the grips' business at all), ok (both FP attaches readable this call),
+    // a51 and a52 the FP attach matrices (row-vector, the FP root's frame). Unarmed: everything forgotten.
+    Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16]) noexcept {
+        Out o;
+        if (!armed) {
+            *this = OffHand{};
+            return o;
+        }
+        const double d = !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
+        bool steadyNow = false, closeEnough = false;
+        if (ok) {
+            double r51[3][3], r52[3][3];
+            if (matRowsUnit(a51, r51) && matRowsUnit(a52, r52)) {
+                // R_rel = R52 x R51^T (row-vector): the left attach's orientation in the right attach's axes.
+                double rel[9];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) rel[r * 3 + c] = r52[r][0] * r51[c][0] + r52[r][1] * r51[c][1] + r52[r][2] * r51[c][2];
+                pos = (pos + 1) % (kOffHandSteadyFrames + 1);
+                for (int i = 0; i < 9; ++i) hist[pos][i] = rel[i];
+                if (have < kOffHandSteadyFrames + 1) ++have;
+                const double dx[3] = {static_cast<double>(a52[12]) - a51[12], static_cast<double>(a52[13]) - a51[13], static_cast<double>(a52[14]) - a51[14]};
+                o.dist = ikLen(dx);
+                o.ok = std::isfinite(o.dist);
+                double mx = 0.0;
+                if (have >= kOffHandSteadyFrames + 1) {
+                    for (uint32_t k = 1; k <= kOffHandSteadyFrames; ++k) {
+                        const uint32_t i = (pos + kOffHandSteadyFrames + 1 - k) % (kOffHandSteadyFrames + 1);
+                        const double a = angleDeg(rel, hist[i]);
+                        mx = a > mx ? a : mx;
+                    }
+                    steadyNow = true;
+                }
+                o.changeDeg = mx;
+                steadyNow = steadyNow && mx < kOffHandSteadyDeg;
+                closeEnough = o.ok && o.dist <= kOffHandMaxM;
+            }
+        }
+        o.two = ok && o.ok && closeEnough && steadyNow;
+        const double target = o.two ? 1.0 : 0.0, step = d / kOffHandRampSec;
+        w = w < target ? (w + step > target ? target : w + step) : (w - step < target ? target : w - step);
+        o.w = w;
+        return o;
     }
 };
 }  // namespace nofoot
