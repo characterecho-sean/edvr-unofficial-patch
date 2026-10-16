@@ -372,11 +372,6 @@ size_t PluginManager::activePluginCount() {
     return count;
 }
 
-const std::vector<CandidatePlugin>& PluginManager::candidates() {
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    return m_candidates;
-}
-
 std::vector<CandidatePlugin> PluginManager::candidatesSnapshot() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_candidates;

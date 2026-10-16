@@ -50,9 +50,8 @@ public:
     size_t activePluginCount();
 
     // Candidacy and approval (Trust-On-First-Use)
-    const std::vector<CandidatePlugin>& candidates();
-    // A copy of the candidates taken under the manager's lock. The menu uses this one: the reference above
-    // outlives the lock, and the copy lets the menu take the manager lock before its own (see m_mutex).
+    // A copy of the candidates taken under the manager's lock. It can be held after the lock is released,
+    // and lets the menu take the manager lock before its own (see m_mutex).
     std::vector<CandidatePlugin> candidatesSnapshot();
     bool approvePlugin(const std::string& stem, const std::string& sha256);
     // Approves by the id a menu row holds. A stale id, or a candidate already approved, does nothing.

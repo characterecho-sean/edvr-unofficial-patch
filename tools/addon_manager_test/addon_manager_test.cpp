@@ -5,6 +5,7 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
 #include "../../include/edvr_plugin_api.h"
 #include "../../src/plugins/plugin_manager.h"
@@ -105,11 +106,12 @@ size_t fakeSettingsOwnedBy(const char* owner) {
     return n;
 }
 
-const edvr::plugins::CandidatePlugin* findCandidate(edvr::plugins::PluginManager& pm, const char* stem) {
-    for (const auto& c : pm.candidates()) {
-        if (c.stem == stem) return &c;
+// A copy of the named candidate as of this call; re-call it to see later changes.
+std::optional<edvr::plugins::CandidatePlugin> findCandidate(edvr::plugins::PluginManager& pm, const char* stem) {
+    for (const auto& c : pm.candidatesSnapshot()) {
+        if (c.stem == stem) return c;
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 } // namespace
@@ -158,7 +160,7 @@ int main(int argc, char** argv) {
     bool initOk = pm.initialize(sandbox.wstring());
     check(initOk, "PluginManager::initialize succeeds on sandbox");
 
-    const auto& cands = pm.candidates();
+    const auto cands = pm.candidatesSnapshot();
     check(cands.size() == 1, "PluginManager discovers candidate DLL in plugins/ directory");
     if (!cands.empty()) {
         check(cands[0].stem == "test_addon", "Candidate stem matches file name");
@@ -225,8 +227,8 @@ int main(int argc, char** argv) {
         dropFixture(sb, L"regfault", L"reg_fault.dll");
         dropFixture(sb, L"", L"healthy.dll");
         pm.initialize(sb.wstring());
-        auto* bad = findCandidate(pm, "reg_fault");
-        auto* good = findCandidate(pm, "healthy");
+        auto bad = findCandidate(pm, "reg_fault");
+        auto good =findCandidate(pm, "healthy");
         check(bad && good, "regfault: both candidates discovered");
         if (bad && good) {
             bool badLoaded = pm.approvePlugin("reg_fault", bad->sha256);
@@ -247,8 +249,8 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"swap");
         dropFixture(sb, L"", L"swap.dll");
         pm.initialize(sb.wstring());
-        auto* cand = findCandidate(pm, "swap");
-        check(cand != nullptr, "swap: candidate discovered");
+        auto cand = findCandidate(pm, "swap");
+        check(cand.has_value(), "swap: candidate discovered");
         std::string shaA = cand ? cand->sha256 : "";
         // Replace the file after discovery, before the user approves the hash they were shown.
         dropFixture(sb, L"b", L"swap.dll");
@@ -259,7 +261,7 @@ int main(int argc, char** argv) {
         check(!loaded, "swap: approval of the old hash does not load the replaced file");
         check(GetModuleHandleW(L"swap.dll") == nullptr, "swap: the replacement DLL was never loaded");
         check(pm.activePluginCount() == 0, "swap: nothing active after the refused load");
-        auto* after = findCandidate(pm, "swap");
+        auto after =findCandidate(pm, "swap");
         check(after && after->sha256 == shaB && !after->approved,
               "swap: the changed file is resurfaced as an unapproved candidate under its new hash");
 
@@ -283,9 +285,9 @@ int main(int argc, char** argv) {
         pm.initialize(sb.wstring());
         g_fakeSettings.clear();
         g_fakeRegisteredEver = 0;
-        auto* keeper = findCandidate(pm, "keeper");
-        auto* fails = findCandidate(pm, "fails");
-        auto* faults = findCandidate(pm, "faults");
+        auto keeper = findCandidate(pm, "keeper");
+        auto fails = findCandidate(pm, "fails");
+        auto faults =findCandidate(pm, "faults");
         check(keeper && fails && faults, "settings: all three candidates discovered");
         if (keeper && fails && faults) {
             check(pm.approvePlugin("keeper", keeper->sha256), "settings: the healthy settings addon loads");
@@ -311,8 +313,8 @@ int main(int argc, char** argv) {
         dropFixture(sb, L"renderfault", L"rfaults.dll");
         pm.initialize(sb.wstring());
         g_fakeSettings.clear();
-        auto* keeper = findCandidate(pm, "keeper");
-        auto* rfaults = findCandidate(pm, "rfaults");
+        auto keeper = findCandidate(pm, "keeper");
+        auto rfaults =findCandidate(pm, "rfaults");
         check(keeper && rfaults, "runtimefault: both candidates discovered");
         if (keeper && rfaults) {
             check(pm.approvePlugin("keeper", keeper->sha256), "runtimefault: the healthy settings addon loads");
@@ -352,8 +354,8 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"twice");
         dropFixture(sb, L"", L"plain.dll");
         pm.initialize(sb.wstring());
-        auto* cand = findCandidate(pm, "plain");
-        check(cand != nullptr, "twice: candidate discovered");
+        auto cand = findCandidate(pm, "plain");
+        check(cand.has_value(), "twice: candidate discovered");
         std::string sha = cand ? cand->sha256 : "";
         check(pm.approvePlugin("plain", sha), "twice: first approval loads the addon");
         pm.approvePlugin("plain", sha);
@@ -376,7 +378,7 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"byid");
         dropFixture(sb, L"", L"plain.dll");
         pm.initialize(sb.wstring());
-        auto* cand = findCandidate(pm, "plain");
+        auto cand = findCandidate(pm, "plain");
         uint32_t id = cand ? cand->id : 0;
         std::string sha = cand ? cand->sha256 : "";
         edvr::plugins::ApprovalResult first = pm.approveCandidate(id);
@@ -429,7 +431,7 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"inputfault");
         dropFixture(sb, L"", L"owner.dll");
         pm.initialize(sb.wstring());
-        auto* cand = findCandidate(pm, "owner");
+        auto cand = findCandidate(pm, "owner");
         check(cand && pm.approvePlugin("owner", cand->sha256), "inputfault: the owning addon loads");
         HMODULE h = GetModuleHandleW(L"owner.dll");
         auto crash = h ? reinterpret_cast<PFN_SetCrashMode>(GetProcAddress(h, "fixtureSetCrashMode")) : nullptr;
@@ -452,7 +454,7 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"inputshutdown");
         dropFixture(sb, L"", L"owner.dll");
         pm.initialize(sb.wstring());
-        auto* cand = findCandidate(pm, "owner");
+        auto cand = findCandidate(pm, "owner");
         check(cand && pm.approvePlugin("owner", cand->sha256), "inputshutdown: the owning addon loads");
         check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "inputshutdown: the addon takes input");
         pm.shutdown();
@@ -468,7 +470,7 @@ int main(int argc, char** argv) {
         dropFixture(sb, L"", L"filtering.dll");
         pm.initialize(sb.wstring());
         const int before = g_gateInstalls;
-        auto* cand = findCandidate(pm, "filtering");
+        auto cand = findCandidate(pm, "filtering");
         check(g_gateInstalls == before, "installdoors: an unapproved candidate installs nothing");
         check(cand && pm.approvePlugin("filtering", cand->sha256), "installdoors: the filtering addon loads");
         check(g_gateInstalls == before + 1, "installdoors: loading an addon with an input filter installs the user32 doors");
@@ -488,7 +490,7 @@ int main(int argc, char** argv) {
         g_fakeRegisteredEver = 0;
         edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
         pm.initialize(sb.wstring());
-        check(pm.candidates().empty(), "flatscope: a flat session discovers no candidates");
+        check(pm.candidatesSnapshot().empty(), "flatscope: a flat session discovers no candidates");
         check(!pm.approvePlugin("flatkeeper", sha), "flatscope: nothing can be approved into a flat session");
         check(GetModuleHandleW(L"flatkeeper.dll") == nullptr, "flatscope: no addon DLL is loaded in a flat session");
         check(!pm.hasActivePlugins(), "flatscope: no addon is active in a flat session");
@@ -500,7 +502,7 @@ int main(int argc, char** argv) {
 
         edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
         pm.initialize(sb.wstring());
-        check(findCandidate(pm, "flatkeeper") != nullptr, "flatscope: the same install discovers its addon in a VR session");
+        check(findCandidate(pm, "flatkeeper").has_value(), "flatscope: the same install discovers its addon in a VR session");
         check(pm.approvePlugin("flatkeeper", sha) && pm.hasActivePlugins(), "flatscope: a VR session loads the approved addon");
         check(fakeSettingsOwnedBy("flatkeeper") == 2, "flatscope: a VR session registers the addon's settings");
         pm.shutdown();
