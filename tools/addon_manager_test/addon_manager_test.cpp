@@ -8,6 +8,7 @@
 
 #include "../../include/edvr_plugin_api.h"
 #include "../../src/plugins/plugin_manager.h"
+#include "../../src/plugins/plugin_setting_restore.h"
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
 
@@ -334,6 +335,39 @@ int main(int argc, char** argv) {
         pm.shutdown();
         std::error_code ec11;
         std::filesystem::remove_all(sb, ec11);
+    }
+
+    // Case 12 (PR #92 review): a saved float is applied when its setting registers.
+    {
+        auto sb = makeSandbox(L"float");
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");
+            iniOut << "[addon.float_header]\nsaved = 0.75\n";
+        }
+        edvr::Config::get().init(sb.wstring());
+
+        auto encode = [](float f) { int64_t v = 0; memcpy(&v, &f, sizeof(float)); return v; };
+        auto decode = [](int64_t v) { float f = 0.0f; memcpy(&f, &v, sizeof(float)); return f; };
+
+        EdvrPluginSettingDef def{};
+        def.structSize = sizeof(def);
+        def.header = "Float Header";
+        def.type = EDVR_PLUGIN_SETTING_FLOAT;
+        def.defaultValue = encode(0.25f);
+
+        def.key = "saved";
+        std::string savedKey = edvr::plugins::pluginSettingIniKey(def.header, def.key);
+        check(savedKey == "addon.float_header.saved", "float: the ini key is addon.<header>.<key>");
+        check(decode(edvr::plugins::restoredPluginSettingValue(def, savedKey)) == 0.75f,
+              "float: the saved value (0.75) is applied over the default (0.25)");
+
+        def.key = "unsaved";
+        std::string unsavedKey = edvr::plugins::pluginSettingIniKey(def.header, def.key);
+        check(decode(edvr::plugins::restoredPluginSettingValue(def, unsavedKey)) == 0.25f,
+              "float: with nothing saved the default is applied");
+
+        std::error_code ec12;
+        std::filesystem::remove_all(sb, ec12);
     }
 
     // Cleanup sandbox

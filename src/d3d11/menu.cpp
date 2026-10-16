@@ -60,6 +60,7 @@
 #include "xinput_watch.h"   // the Hotkeys page's capture reads the pad
 #include "../../include/edvr_plugin_api.h"
 #include "../plugins/plugin_manager.h"
+#include "../plugins/plugin_setting_restore.h"
 #include <map>
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
@@ -5079,28 +5080,8 @@ int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* s
     std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
     std::string keyStr = setting->key ? setting->key : "";
 
-    std::string safeHeader = headerStr;
-    for (char& c : safeHeader) {
-        if (c == ' ' || c == '-' || c == '.') c = '_';
-        else c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    }
-    std::string iniKey = "addon." + safeHeader + "." + keyStr;
-    int64_t initialVal = setting->defaultValue;
-    if (setting->type == EDVR_PLUGIN_SETTING_BOOL) {
-        initialVal = Config::get().getBool(iniKey.c_str(), setting->defaultValue != 0) ? 1 : 0;
-    } else if (setting->type == EDVR_PLUGIN_SETTING_INT) {
-        initialVal = Config::get().getInt(iniKey.c_str(), static_cast<int>(setting->defaultValue));
-    } else if (setting->type == EDVR_PLUGIN_SETTING_CHOICE) {
-        std::string chosen = Config::get().getString(iniKey.c_str(), "");
-        if (!chosen.empty() && setting->choiceOptions && setting->choiceCount > 0) {
-            for (uint32_t i = 0; i < setting->choiceCount; ++i) {
-                if (setting->choiceOptions[i] && _stricmp(chosen.c_str(), setting->choiceOptions[i]) == 0) {
-                    initialVal = i;
-                    break;
-                }
-            }
-        }
-    }
+    std::string iniKey = plugins::pluginSettingIniKey(headerStr, keyStr);
+    int64_t initialVal = plugins::restoredPluginSettingValue(*setting, iniKey);
 
     for (auto& existing : g_pluginSettings) {
         if (existing.header == headerStr && existing.key == keyStr) {
