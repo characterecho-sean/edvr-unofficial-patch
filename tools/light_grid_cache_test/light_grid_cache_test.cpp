@@ -210,7 +210,8 @@ lg::CallInputs mk(int eye, int phase, int variant = 0) {
 
 struct Clock {
     double t = 0;
-    double operator()() { return t += 0.001; }
+    uint64_t reads = 0;   // how many times the cache asked for the time
+    double operator()() { ++reads; return t += 0.001; }
 };
 
 // One call through the cache onto one fake context.
@@ -728,6 +729,47 @@ void testForwardReasons() {
     check(r.cache.stats.byReason[lg::kFirst] == firsts + 1 && r.cache.slotsMatchable() == 0, "a context whose first-call flag is set again starts over: its kept states can no longer be served");
 }
 
+// The clock is read only for what is timed. The game's own memo times nothing, so it reads no clock; a hit reads it twice (before the lookup, after the swap); a miss three times
+// (before the lookup, either side of the game's build). The figures mean what they did: a hit is the swap alone (0.001 ms on this clock), a miss's overhead is the lookup and
+// swap before the build, a miss is the build.
+void testClockReads() {
+    Rig r;
+    Ctx c;
+    r.call(c, mk(0, 0));   // first call, forwarded whole
+    uint64_t memos = 0, hits = 0, misses = 0;
+    double hitMs = 0, missMs = 0, overheadMs = 0;
+    for (int round = 0; round < 3; ++round) {
+        for (int i = 1; i < 8; ++i) {
+            for (int again = 0; again < 2; ++again) {   // the second call of a pair has the first's key: the game's memo
+                const lg::Stats before = r.cache.stats;
+                const uint64_t readsBefore = r.clock.reads;
+                r.call(c, mk(0, i));
+                const lg::Stats& s = r.cache.stats;
+                const uint64_t used = r.clock.reads - readsBefore;
+                if (s.gameMemo != before.gameMemo) {
+                    ++memos;
+                    check(used == 0, "a call the game's own memo answers reads the clock zero times");
+                    check(s.hitMs == before.hitMs && s.missMs == before.missMs && s.missOverheadMs == before.missOverheadMs, "a memo call adds nothing to the hit or miss timings");
+                } else if (s.hits != before.hits) {
+                    ++hits;
+                    check(used == 2, "a hit reads the clock twice");
+                    hitMs += s.hitMs - before.hitMs;
+                    check(std::fabs((s.hitMs - before.hitMs) - 0.001) < 1e-9, "a hit's time is the swap alone, as before");
+                } else if (s.misses != before.misses) {
+                    ++misses;
+                    check(used == 3, "a miss reads the clock three times");
+                    missMs += s.missMs - before.missMs;
+                    overheadMs += s.missOverheadMs - before.missOverheadMs;
+                    check(std::fabs((s.missMs - before.missMs) - 0.301) < 1e-9, "a miss's time is the game's build, as before");
+                    check(std::fabs((s.missOverheadMs - before.missOverheadMs) - 0.001) < 1e-9, "a miss's overhead is the lookup before the build, as before");
+                }
+            }
+        }
+    }
+    check(memos >= 20 && hits >= 1 && misses >= 1, "the run covered the game's memo, hits and misses");
+    check(r.cache.stats.gameMemo == memos, "every memo call is counted once");
+}
+
 // A reset (a new renderer, a reborn context) used to clear every parked slot, losing the pointers of the states in them: the blocks stayed allocated and nothing could free them.
 // Now the slots are kept as stale ones (never matched, recycled first) and the game's rebuild over a recycled slot reuses and releases them.
 void testResetsLoseNothing() {
@@ -1240,6 +1282,7 @@ int main(int argc, char** argv) {
     testCapacityMissAndThrash();
     testTwoContexts();
     testForwardReasons();
+    testClockReads();
     testResetsLoseNothing();
     testExtraNear();
     testAlreadyBuilt();

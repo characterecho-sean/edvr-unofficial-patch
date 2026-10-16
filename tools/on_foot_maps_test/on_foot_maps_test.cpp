@@ -395,7 +395,7 @@ void pins() {
     check(gate.find("Log::get()") != std::string::npos && gate.find("Log::get()") > gate.find(squeeze("const bool smLive = screenMotionLive();")),
           "P1b: no line is logged before that early return");
     const std::string tick = functionBody(layer, "void onFootGateTick() {");
-    check(inOrder(tick, {"const uint64_t gateFrame = detail::g_uiLayerGateFrame++;", "if (!detail::g_uiLayerLive) {", "mapsLayerNotLive(gateFrame);", "return;",
+    check(inOrder(tick, {"const uint64_t gateFrame = detail::g_uiLayerGateFrame++;", "if (!detail::g_uiQualityLive) {", "mapsLayerNotLive(gateFrame);", "return;",
                          "const bool byJournal = uiLayerOnFootStep(g_onFoot, known, onFoot, now);", "const bool byDepth = uiLayerWorldScreenStep(g_world, counted, draws);",
                          "mapsGate(now, gateFrame, byJournal || byDepth, known, onFoot, &decidedByNaming)", "if (g_screenHeld == before || decidedByNaming) return;"}),
           "P1c: the gate's tick still steps the journal and the depth every frame, hands today's verdict to mapsGate and keeps its own flip lines for the frames mapsGate does not decide");

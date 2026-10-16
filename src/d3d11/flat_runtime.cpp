@@ -44,6 +44,8 @@
 #include "flat_standdown.h"
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
+#include "flat_pair_facts.h"   // what a draw's shader pair alone says, remembered per pair
+#include "flat_offscreen_fast.h"   // the offscreen fast path: a repeat of a verified class-4 draw skips the draw scope's constructor
 #include "flat_camera_table.h"
 #include "flat_hdr_projection_capture.h"
 #include "flat_deferred_camera.h"
@@ -315,6 +317,8 @@ struct State {
     // advanced.flat_refusal_view: paint the prep's classes into the resolved image. Read once a Present; refusalViewRead makes the first read
     // say its value, so a refused key shows in the log as "off" rather than as silence.
     bool refusalView = false, refusalViewRead = false;
+    // advanced.flat_cpu_timing: the census's clocks. Read once a Present; cpuTimingRead makes the first read say its state in the log.
+    bool cpuTimingRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -613,7 +617,10 @@ struct State {
     // the whole frame, first game draw to Present, and the resolver's dispatches plus
     // backend call. A timer is owned until its sample is read; with none free the
     // frame is skipped and counted.
-    flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()};
+    flatcpu::Census census{flatcpu::kRenderPeriod, false};   // off until advanced.flat_cpu_timing (or EDVR_FLAT_CPU_CLOCKS=1) says otherwise
+    FlatPairFactsMemo pairFacts;                  // what a draw's shader pair alone says (flat_pair_facts.h), owner thread
+    FlatOffscreenMemo offscreen;                  // the previous verified class-4 draw of the frame (flat_offscreen_fast.h), owner thread
+    FlatOffscreenCounts offscreenCounts;          // what the fast path did since the last Present drained it, owner thread
     static constexpr int kGpuFrameTimers = 4, kGpuResolveTimers = 2;
     GpuTimer gpuFrameTimer[kGpuFrameTimers];
     GpuTimer gpuResolveTimer[kGpuResolveTimers];
@@ -3857,12 +3864,28 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     {
         static const int64_t censusFreq = flatcpu::qpcFrequency();
         const int64_t censusNow = EDVR_FLATCPU_NOW();
+        // The CPU timing switch (advanced.flat_cpu_timing, F8 > Debug), live; the environment variable wins when set. One log line per change
+        // and one for the state a session starts in, so a log says whether its flat cpu lines are timed.
+        {
+            const bool timingKey = Config::get().getBool("advanced.flat_cpu_timing", false);
+            const char* timingEnv = flatcpu::clocksEnv();
+            const bool timingWanted = flatcpu::clocksPolicy(timingKey, timingEnv);
+            const bool timingChanged = s.census.setClocks(timingWanted, censusNow);
+            if (timingChanged || !s.cpuTimingRead) {
+                s.cpuTimingRead = true;
+                Log::get().note("flat runtime: CPU timing in the log %s (advanced.flat_cpu_timing = %s%s)", timingWanted ? "on" : "off",
+                                timingKey ? "on" : "off", timingEnv ? "; EDVR_FLAT_CPU_CLOCKS decides it" : "");
+            }
+        }
         const bool censusWasRunning = s.census.running();
         s.census.onFrame(censusNow, censusFreq, endedPaused);
         // Always drained, so the priming frame (or a census that was stopped) leaves no backlog to
         // be read as the first window's.
         const EngineVelocityWrapperCounts wrapper = engineVelocityTakeWrapperCounts();
         if (censusWasRunning) s.census.noteWrapper(wrapper.stateCalls, wrapper.substitutedDraws);
+        // The offscreen fast path's counts, always drained (a counter, not a clock), so a census that was stopped leaves no backlog.
+        if (censusWasRunning) s.census.noteOffscreen(s.offscreenCounts);
+        s.offscreenCounts = FlatOffscreenCounts{};
         // The questions the runtime answered from what it already knew (flat_query_cut.h): drained with the wrapper's counts,
         // and the frame that starts now says whether it is one of the checked ones (one in 64).
         const FlatQueryCounts queries = flatQueryCut().take();
@@ -4468,7 +4491,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
             static_cast<unsigned long long>(s.resetExtentWindow), static_cast<unsigned long long>(s.presentNotOkWindow));
         const auto renderer = flatMonoResolveStats();
-        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu",
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f fast-travel-steps-kept=%llu",
             static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
             static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
             static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
@@ -4478,7 +4501,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(renderer.formatChanges), static_cast<unsigned long long>(renderer.cameraCuts),
             static_cast<unsigned long long>(renderer.backendFailures), static_cast<unsigned long long>(renderer.currentContinueRun),
             static_cast<unsigned long long>(renderer.longestContinueRun), static_cast<unsigned long long>(renderer.hdrResolves),
-            static_cast<unsigned long long>(renderer.hdrSpatial));
+            static_cast<unsigned long long>(renderer.hdrSpatial),
+            static_cast<unsigned long long>(renderer.originRebases), renderer.lastOriginRebaseM,
+            static_cast<unsigned long long>(renderer.travelSteps));
         s.refusedWindow.clear(); s.acceptedResetWindow = s.acceptedHistoryWindow = 0;
         s.resetMissingWindow = s.resetGapWindow = s.resetDepthWindow = s.resetColorWindow = s.resetExtentWindow = 0;
         s.presentNotOkWindow = 0;
@@ -5128,6 +5153,96 @@ void fetchCelestialRecords(ID3D11DeviceContext* ctx, FlatMonoResolveFrame& f) {
 }
 }  // namespace
 
+// ---- the offscreen fast path (flat_offscreen_fast.h) ------------------------------------------------------------------------------
+// A draw that repeats the previous verified class-4 draw (a shadow map, a depth-only pass, a small intermediate) skips the constructor's blocks
+// that do nothing for it and does what it needs: the pair-facts store (s.drawVs/s.drawPs), engine motion's restore, the reducer, the HDR
+// detector, the trace record and the UI layer's scene-draw note. The pins in tools\flat_temporal_test\flat_offscreen_tests.h hold this
+// function to the list in flat_offscreen_fast.h; the live fields are filled here from the state each one names.
+namespace {
+FlatOffscreenLive flatOffscreenLiveOf(State& s, bool auditing, const FlatContractObservation& k) {
+    FlatOffscreenLive live;
+    live.workFull = s.work == FlatWork::Full;
+    live.gpuFrameOpened = s.gpuFrameTried;
+    live.foregroundFrameReady = s.engine == FlatMonoResolveMode::Taa || s.foregroundDomainFrame == s.prefix.frame;
+    live.auditing = auditing;
+    live.diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
+    live.foreignWork = foreignWork.load(std::memory_order_acquire);
+    live.overlayOpen = overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire);
+    live.projectionAudit = s.projectionFrames != 0;
+    live.weaponFootprint = s.weaponFootprint.active();
+    live.foregroundTouchesDepth = s.foreground.active() && k.depth != nullptr;
+    live.hdrCouldConsume = flatHdrCouldConsume(s.hdr, k);
+    return live;
+}
+// The key of the draw that starts now, from the binding shadow: the bindings, shaders, viewport and camera rows the verified draw ran under. The
+// colour, depth, extents and formats are the verified draw's own when its RTV and DSV are the same bindings (same pointer, same generation: a
+// view bound is a view alive, and a view's resource and format do not change). False when the camera table must be asked afresh.
+bool flatOffscreenKeyNow(State& s, const FlatOffscreenKey& verified, FlatOffscreenKey& now, const FlatCameraRows*& rows) {
+    now = verified;
+    now.rtv = bindingGet(BindSlot::Rtv0); now.dsv = bindingGet(BindSlot::Dsv0);
+    now.rtvGen = bindingGeneration(BindSlot::Rtv0); now.dsvGen = bindingGeneration(BindSlot::Dsv0);
+    now.vs = bindingShaderHash(BindSlot::Vs); now.ps = bindingShaderHash(BindSlot::Ps);
+    now.b1 = bindingGet(BindSlot::VsCb1);
+    now.viewportCount = s.viewportCount;
+    static_assert(sizeof(now.viewport) == sizeof(D3D11_VIEWPORT), "viewport layout");
+    std::memcpy(now.viewport, &s.viewport, sizeof(now.viewport));
+    rows = s.cameras.probe(now.b1, bindingGeneration(BindSlot::VsCb1), s.prefix.frame);
+    if (!rows) return false;
+    now.hasCamera = rows->have;
+    now.cameraHash = rows->have ? rows->hash : 0; now.writeEpoch = rows->have ? rows->epoch : 0; now.writeSeq = rows->have ? rows->sequence : 0;
+    return true;
+}
+// True when the draw was served: the caller returns with ctx null, as it does for a Paused frame, and the destructor does nothing.
+bool flatOffscreenTry(State& s, ID3D11DeviceContext* context, const FlatOffscreenArgs& a, bool auditing) {
+    auto& memo = s.offscreen;
+    if (!memo.valid() || memo.frame() != s.prefix.frame || flatOffscreenFullscreenTriangle(a)) return false;   // not a repeat: not counted
+    FlatOffscreenKey now;
+    const FlatCameraRows* rows = nullptr;
+    if (!flatOffscreenKeyNow(s, memo.key(), now, rows) || memo.lookup(s.prefix.frame, now) != FlatOffscreenNo::None) return false;
+    const FlatOffscreenNo no = flatOffscreenLiveVerdict(flatOffscreenLiveOf(s, auditing, memo.held().key));
+    if (no != FlatOffscreenNo::None) { ++s.offscreenCounts.declined[static_cast<unsigned>(no)]; return false; }
+    ++s.offscreenCounts.fast;
+    flatcpu::Scope fast(flatcpu::kOffscreenFast);   // its own family: the reducer, detector and trace below carve out theirs, as in the slow path
+    FlatRuntimeDraw& d = memo.use(a.instances);
+    const auto& k = d.key;
+    s.drawVs = k.vs; s.drawPs = k.ps;
+    engineVelocityFlatLazy(true);   // no diagnostic is armed (the live verdict): the lazy form, as the slow path sets it
+    // A draw that is not a pool-family producer sees the game's state (the constructor's `!d.supported` call).
+    flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
+    const auto oldTargets = s.prefix.targetsUsed;
+    {
+        flatcpu::Scope reduce(flatcpu::kReduce);   // the reducer: the count, q and the target's record
+        flatRuntimeObserve(s.prefix, d);
+    }
+    {
+        flatcpu::Scope hdrScope(flatcpu::kHdrRoute);   // could-consume was false: the detector may count a candidate draw but cannot fire
+        flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, nullptr, false);
+    }
+    {
+        flatcpu::Scope trace(flatcpu::kTrace);
+        flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), nullptr, s.prefix.sequence);
+    }
+    if (s.prefix.targetsUsed > oldTargets) {   // the reducer registered a target (the constructor's bookkeeping, without the menu-copy case)
+        s.colors[oldTargets] = static_cast<ID3D11Resource*>(const_cast<void*>(k.color));
+        s.depths[oldTargets] = static_cast<ID3D11Resource*>(const_cast<void*>(k.depth));
+    }
+    if (flatUiLayerOn()) flatUiLayerNoteSceneDraw(context, a.count, a.instances, a.kind);
+    return true;
+}
+// After the slow path's last skipped block: remember the draw if it was a class-4 draw that did nothing more than the fast path does.
+void flatOffscreenRecord(State& s, const FlatRuntimeDraw& d, const FlatPairFacts& pair, const FlatOffscreenArgs& a, bool auditing, bool plain,
+                         uint32_t oldTargets, bool uncertainBefore) {
+    if (!plain || s.prefix.targetsUsed != oldTargets || s.prefix.uncertain != uncertainBefore) return;
+    const auto& k = d.key;
+    if (flatOffscreenShapeVerdict(k, pair, s.prefix.width, s.prefix.height, s.prefix.output, a) != FlatOffscreenNo::None) return;
+    if (flatOffscreenLiveVerdict(flatOffscreenLiveOf(s, auditing, k)) != FlatOffscreenNo::None) return;
+    const FlatOffscreenKey key = flatOffscreenKeyOf(k, bindingGeneration(BindSlot::Rtv0), bindingGeneration(BindSlot::Dsv0));
+    if (s.offscreen.valid() && s.offscreen.frame() == s.prefix.frame && s.offscreen.key().same(key)) return;   // already held
+    s.offscreen.record(s.prefix.frame, key, d);
+    ++s.offscreenCounts.recorded;
+}
+}  // namespace
+
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
@@ -5200,6 +5315,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         ingress.paused.fetch_add(1, std::memory_order_relaxed);
     if (s.work == FlatWork::Paused) return;
     if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
+    // A repeat of the verified class-4 draw (a shadow map, a depth-only pass) is served without the blocks below; ctx stays null, so every later
+    // call on the scope and the destructor return at once, as on a Paused frame (flat_offscreen_fast.h).
+    const FlatOffscreenArgs offscreenArgs = {kind, count, instances, startInstance};
+    if (flatOffscreenTry(s, context, offscreenArgs, auditing)) return;
+    const uint32_t offscreenTargetsBefore = s.prefix.targetsUsed;
+    const bool offscreenUncertainBefore = s.prefix.uncertain;
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
     ctx = context;
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
@@ -5306,17 +5427,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 (unsigned long long)s.prefix.frame,s.prefix.sequence+1,(unsigned long long)k.vs,(unsigned long long)k.ps,priority?1u:0u,representative);
         }
     }
-    d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
+    // Everything the shader pair alone says, remembered per pair (flat_pair_facts.h: the key is (vs, ps, flat profile) and nothing else).
+    const FlatPairFacts& pairFact = s.pairFacts.get(k.vs, k.ps, runtimeFlatProfile());
+    d.supported = pairFact.supported; d.instances = instances;
     // A pool family's vertex shader left stock (an unkeyed pixel shader), drawn into the scene's depth: it moves with no motion source, so a
     // scene holding one is never source-free (design section 104; the selector's unsupportedFamilyDraws).
-    d.poolFamilyVs = !d.supported && k.depth && engineVelocityPoolFamilyVs(k.vs) &&
+    d.poolFamilyVs = !d.supported && k.depth && pairFact.familyVs &&
         flatContractKind(false, k.depth, k.depth, k.depthWidth, k.depthHeight, 26, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
     // everything EDVR reads of the context for it below.
     if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     k.kind = flatContractKind(d.supported, k.color, k.depth, k.width, k.height, k.format, s.prefix.width, s.prefix.height, k.color == s.prefix.output);
-    const bool tone = flat_mono_detail::toneHdrSlot(k.vs, k.ps) != ~0u;
-    const bool copy = k.vs == flat_mono_detail::kCopyVs && k.ps == flat_mono_detail::kCopyPs && k.color == s.prefix.output;
+    const bool tone = pairFact.toneSlot != ~0u;
+    const bool copy = pairFact.copyPair && k.color == s.prefix.output;
     if(!copy && s.drawCapture.active()) {
         FlatComputeInternalScope guard;
         // This repeats the later source predicate only while F10 is armed, so
@@ -5332,7 +5455,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The map tonemap (flatUiMapToneSlotOf, the UI layer's own table) reads the scene in slot 0 like a registry tone: its slots are
     // captured for the UI layer's candidate. Its readers (flat_runtime_model.h copy-pair branches, flat_copy_structure.h, the
     // mono selector's registry-keyed tone) gate on their own pairs, so none of them sees this draw as a copy or a tone.
-    if (tone || copy || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u) for (uint32_t slot = 0; slot < 2; ++slot) {
+    if (tone || copy || pairFact.mapToneSlot != ~0u) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
@@ -6001,7 +6124,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The back-off trail (log only; flat_ui_layer_math.h's FlatUiTrail): each tone-shaped draw of the frame, with the layer on or off,
     // and the branch the chain below takes for it.
     const bool trailDraw = (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) || tone ||
-                           flatUiSourceTonePair(k.vs, k.ps) || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u;
+                           pairFact.sourceTone || pairFact.mapToneSlot != ~0u;
     if (trailDraw) flatUiTrailNoteDraw(s.prefix.frame, k.vs, k.ps, kind, count, flatUiLayerOn(), hdrTrigger, s.hdrTreated);
     if (flatUiLayerOn()) {
         FlatUiLayerAsk ask = FlatUiLayerAsk::kNotAsked;
@@ -6010,6 +6133,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         } else {
             uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
             flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
+            // A pair the family rule cannot name for any (map open, HDR target) is never asked: flatUiLayerDecide would return kNotAsked at its
+            // family test, before any counter or log (flat_pair_facts.h; pinned by the wiring scan), so its inputs are not gathered for it.
+            if (pairFact.uiMayAsk) {
             FlatUiLayerDraw ui;
             ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
             ui.format = k.format;
@@ -6024,6 +6150,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            }
             // The route so far, for the tone branches below: the HDR route once it treated this frame, else the resolve plan's
             // (trained-native, trained-upscale, ...), or none yet. Computed only when a tone branch runs, as before.
             const auto routeSoFar = [&]() -> const char* {
@@ -6038,9 +6165,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
             // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
             // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
-            else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
+            else if (tone || pairFact.mapToneSlot != ~0u || pairFact.sourceTone) {
                 const char* route = routeSoFar();
-                if (flatUiSourceTonePair(k.vs, k.ps)) {
+                if (pairFact.sourceTone) {
                     if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kNamed);
                     // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
@@ -6048,7 +6175,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                                 k.color, k.width, k.height, route);
                 } else {
                     if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, tone ? FlatUiTrailBranch::kRegistry : FlatUiTrailBranch::kMap);
-                    const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
+                    const uint32_t slot = tone ? pairFact.toneSlot : pairFact.mapToneSlot;
                     uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
                                                       slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
                 }
@@ -6085,7 +6212,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.
         if (!uiTake && !copy) flatUiLayerNoteSceneDraw(ctx, count, instances, kind);
     }
-    if (!copy) return;
+    if (!copy) {
+        // The draw did nothing but what the offscreen fast path does when none of the blocks above planned, started or changed anything of its own.
+        const bool plain = !tone && !producer && !projection && !projectionPlan && !deferredPlan && !drawCaptureStarted && !drawPacket &&
+            !weaponFootprintStarted && !overlayPlanned && !d.overlayProtected && !d.alternateHdr && !d.firstPersonCohort && !foregroundPlanned &&
+            !untrustedPlanned && !domainPlanned && !uiTake && !uiTone && !uiComposite && !replaced && !hdrTrigger && cameraProbeAttempt == 0;
+        flatOffscreenRecord(s, d, pairFact, offscreenArgs, auditing, plain, offscreenTargetsBefore, offscreenUncertainBefore);
+        return;
+    }
     if (s.hdrTreated) {
         // The frame was treated before the post chain, so nothing here resolves again (the contract observation above
         // still ran for the trace). fix.render_sharpness stays at the copy, on the game's own LDR image, and only where

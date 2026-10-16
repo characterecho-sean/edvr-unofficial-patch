@@ -73,6 +73,9 @@ void glitchFrameEngineWindow(bool open);
 // does not depend on the engine fix being armed.
 bool glitchFrameWantsBuffer(uint32_t bytes);
 void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
+// Is an engine-fix event window open? glitchFrameObserve reads the mapped block only then; the Unmap
+// readers probe (unmap_read_probe.h) asks so that it counts reads, not early returns.
+bool glitchFrameWindowOpen();
 
 // glitchFrameIsSceneDraw is a pure classifier of five rigid-scene vertex shader
 // hashes, defined here inline: the draw lambda asks it for every eye geometry

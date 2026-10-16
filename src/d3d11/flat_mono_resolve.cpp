@@ -133,6 +133,14 @@ FlatMonoResolveStats& stats=*new FlatMonoResolveStats;
 // visible even if ordinary requested resets use their budget first.
 uint32_t resetEventsLogged=0, cameraCutEventsLogged=0;
 constexpr uint32_t kResetEventLogCap=32;
+// The floating origin (row 5 of the camera rows): Elite re-anchors it about every 5 km of travel, and the camera rows do not move with it
+// (docs/design-flat-temporal-aa-2026-09-23.md, the 2026-10-16 entry). A jump of that kind is absorbed, not cut -- unless the frame was a
+// hitch: the one jump on record that was a real world change (460 m, a loading frame) took 153 ms, and a rebase or a travel step never
+// has, so a frame this slow keeps the cut.
+constexpr float kFlatOriginRebaseMaxFrameMs=100.f;
+constexpr uint32_t kOriginRebaseLogCap=8;
+uint32_t originRebaseLogged=0,travelStepLogged=0;
+double lastCameraStepM=0;   // the preceding frame's row-5 step, for the reset event line
 // The first-person inputs' two log lines (FlatMonoResolveFrame::firstPersonMotion): each said once a session, like the
 // budgets above. The refusal's reason is also kept in stats.firstPersonRefusal, so a later, different one is not lost.
 bool firstPersonBoundLogged=false, firstPersonRefusedLogged=false;
@@ -911,10 +919,36 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     const bool coverageTransition=g.history && untrusted!=g.untrustedCoverageLast;
     const bool invalidPreviousCamera=!cameraValid(f.previousCamera);
     const bool formatChange=g.inputFormat!=colorDesc.Format;
-    bool cameraCut=false;
-    if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange)
-        for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)cameraCut=true;
+    // THE FLOATING ORIGIN. Row 5 is the world-rebase origin (cb1[275]); Elite re-anchors it about every 5 km of travel and the camera's
+    // orientation rows do not move with it. stepM is row 5's step this frame (metres), rotDelta the largest element change over rows 0-3.
+    double stepM=0,rotDelta=0,nowLen=0,prevLen=0;
+    if(!invalidPreviousCamera) {
+        double sq=0,nl=0,pl=0;
+        for(unsigned i=0;i<3;++i) {
+            const double d=static_cast<double>(f.camera[5][i])-f.previousCamera[5][i];
+            sq+=d*d;nl+=static_cast<double>(f.camera[5][i])*f.camera[5][i];pl+=static_cast<double>(f.previousCamera[5][i])*f.previousCamera[5][i];
+        }
+        stepM=std::sqrt(sq);nowLen=std::sqrt(nl);prevLen=std::sqrt(pl);
+        for(unsigned row=0;row<4;++row)for(unsigned col=0;col<4;++col) {
+            const double d=std::abs(static_cast<double>(f.camera[row][col])-f.previousCamera[row][col]);
+            if(d>rotDelta)rotDelta=d;
+        }
+    }
+    const double precedingStepM=lastCameraStepM;lastCameraStepM=stepM;
+    bool cameraCut=false,originRebase=false;
+    if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange) {
+        bool axisJump=false;   // the long-standing test: any axis of row 5 moved more than 50 m
+        for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)axisJump=true;
+        // A jump with the rows unmoved keeps its history: the camera did not turn, and the step is either the origin moving or fast travel.
+        // Only a jump the axis test would have cut is handled here, so no frame that kept its history before changes. Rotated rows, or a
+        // hitch frame, still cut. Which of the two it is decides the camera translation (below): a re-anchor's is a coordinate change and
+        // is dropped, as the VR gate drops any jump's; travel's is the camera's real motion and the shader needs it.
+        originRebase=axisJump && temporalOriginRebase(stepM,rotDelta) && f.deltaMs<kFlatOriginRebaseMaxFrameMs;
+        cameraCut=axisJump && !originRebase;
+    }
     const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut || coverageTransition;
+    const bool jumpKept=originRebase && !reset;
+    const bool rebaseAbsorbed=jumpKept && temporalOriginReanchor(stepM,nowLen,prevLen);   // the origin was re-anchored: zero translation
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
     if(!reset && !engine)return fail(reason,"flat-resolve-engine-source-views-unavailable");
@@ -996,7 +1030,12 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
-    std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
+    // A re-anchor (jumpKept, and the origin landed near the camera: temporalOriginReanchor) reprojects from the previous rows with their
+    // origin moved to this frame's: zero camera translation, orientation change only. Fast travel (a kept jump that is not a re-anchor)
+    // keeps now[5]-old[5], the camera's real motion: 80 m lateral past a surface 1 km away is 99.84 px at 2496 wide, not zero.
+    float previousRows[6][4];std::memcpy(previousRows,f.previousCamera,sizeof(previousRows));
+    if(rebaseAbsorbed)std::memcpy(previousRows[5],f.camera[5],sizeof(previousRows[5]));
+    std::memcpy(constants.previous,reset?f.camera:previousRows,sizeof(previousRows));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=evalW;constants.size[3]=evalH;
     constants.flags[0]=reset;constants.flags[1]=engine;constants.flags[2]=taa;constants.flags[3]=f.staticScene?1u:(depthCheck?2u:0u);
     constants.route[0]=hdr?1u:0u;constants.route[1]=(hdr&&taa)?1u:0u;
@@ -1162,7 +1201,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
                 "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
                 "origin-delta=(%.9g,%.9g,%.9g) max-matrix-delta=%.9g "
-                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u sdk-depth-transition=%u",
+                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u sdk-depth-transition=%u "
+                "prev-step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
                 static_cast<unsigned long long>(f.frame),modeName,f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,
                 requestedReset?1u:0u,lostHistory?1u:0u,frameGap?1u:0u,invalidPreviousCamera?1u:0u,
                 formatChange?1u:0u,cameraCut?1u:0u,f.deltaMs,
@@ -1171,9 +1211,26 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 f.camera[5][0]-f.previousCamera[5][0],
                 f.camera[5][1]-f.previousCamera[5][1],
                 f.camera[5][2]-f.previousCamera[5][2],maxMatrixDelta,
-                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap,depthConventionTransition?1u:0u);
+                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap,depthConventionTransition?1u:0u,
+                precedingStepM,rotDelta,nowLen,prevLen);
         }
     } else {
+        if(rebaseAbsorbed) {
+            ++stats.originRebases;stats.lastOriginRebaseM=stepM;
+            if(originRebaseLogged<kOriginRebaseLogCap) {
+                ++originRebaseLogged;
+                Log::get().note("flat resolve origin rebase absorbed: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
+                    stepM,rotDelta,nowLen,prevLen);
+            }
+        } else if(jumpKept) {
+            // Fast travel: history kept, the real translation stays in the camera term.
+            ++stats.travelSteps;
+            if(travelStepLogged<kOriginRebaseLogCap) {
+                ++travelStepLogged;
+                Log::get().note("flat resolve fast-travel step kept: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
+                    stepM,rotDelta,nowLen,prevLen);
+            }
+        }
         ++stats.acceptedContinues;
         if(++stats.currentContinueRun>stats.longestContinueRun)stats.longestContinueRun=stats.currentContinueRun;
     }

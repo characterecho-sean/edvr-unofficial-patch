@@ -237,6 +237,7 @@ int main(int argc, char** argv) {
     check(SUCCEEDED(ha) && SUCCEEDED(hb) && devA.Get() != devB.Get(), "two independent WARP devices");
     if (FAILED(ha) || FAILED(hb)) return 1;
     detail::g_uiLayerLive = true;
+    detail::g_uiQualityLive = true;
     detail::g_uiLayerCrispOn = true;
 
     frameRound(devA.Get(), ctxA.Get(), 10, 64, 64, "device A");
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
 
     uiLayerDeviceReset();  // the production device-change reset (flat_ui_layer.cpp flatUiLayerNoteDevice)
     detail::g_uiLayerLive = true;
+    detail::g_uiQualityLive = true;
     detail::g_uiLayerCrispOn = true;
     frameRound(devB.Get(), ctxB.Get(), 20, 64, 64, "device B");
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B: every retained device child (blend, coverage shaders and context, seeder "

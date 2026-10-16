@@ -241,7 +241,10 @@ void appendItem(std::string& out, const char* name, const Snapshot& s) {
     if (!s.occurred) {
         std::snprintf(buf, sizeof(buf), "%s -", name);
     } else {
-        std::snprintf(buf, sizeof(buf), "%s %.3f (%.2f/frame)", name, s.msPerFrame, s.perFrame);
+        if (s.issuedPerFrame > s.perFrame)   // a RUN section (gpu_census.h): its occurrences are runs and its issued calls the draws they held
+            std::snprintf(buf, sizeof(buf), "%s %.3f (%.2f draws in %.2f runs/frame)", name, s.msPerFrame, s.issuedPerFrame, s.perFrame);
+        else
+            std::snprintf(buf, sizeof(buf), "%s %.3f (%.2f/frame)", name, s.msPerFrame, s.perFrame);
     }
     out += buf;
 }

@@ -118,6 +118,8 @@ void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output)
 bool flatUiLayerToneAdmit(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, char kind,
                           uint32_t count, uint32_t instances, uint32_t startInstance);
 bool flatUiLayerToneBegin(ID3D11DeviceContext* ctx);
+// Between the issues of one tone bracket (fix.sharp_weapons): the weapons' steps are more issues of the same draw. True: the next step's source and blend are bound, issue the draw again.
+bool flatUiLayerToneNext(ID3D11DeviceContext* ctx);
 void flatUiLayerToneEnd(ID3D11DeviceContext* ctx);
 
 // A game draw the layer did not take, while the layer watches this frame: a write of a seeded depth buffer.

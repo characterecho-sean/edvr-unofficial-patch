@@ -2,6 +2,7 @@
 // real GPU inputs and deliberately clobber state; SDK image quality is separate.
 #include "../../src/d3d11/flat_mono_resolve.h"
 #include "../../src/d3d11/flat_projection_math.h"
+#include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/dlaa.h"
 #include "../../src/d3d11/fsr3_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
@@ -51,6 +52,7 @@ std::vector<uint64_t> motionHashLog; // one entry per backend call, in call orde
 std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
+std::vector<std::string> rebaseLines,travelLines;   // "flat resolve origin rebase absorbed:" (the floating origin moved, history kept)
 std::vector<std::string> resolveInputLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
@@ -202,6 +204,8 @@ void Log::note(const char* fmt,...) {
     if(std::strncmp(line,prefix,sizeof(prefix)-1)==0)resetEvents.emplace_back(line);
     else if(std::strncmp(line,firstPersonPrefix,sizeof(firstPersonPrefix)-1)==0)firstPersonLines.emplace_back(line);
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
+    else if(std::strncmp(line,"flat resolve origin rebase absorbed:",36)==0)rebaseLines.emplace_back(line);
+    else if(std::strncmp(line,"flat resolve fast-travel step kept:",35)==0)travelLines.emplace_back(line);
     else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve inputs:",20)==0)resolveInputLines.emplace_back(line);
 }
@@ -527,14 +531,114 @@ int main(int argc,char** argv) {
     f.mode=edvr::FlatMonoResolveMode::Dlss;f.color=colorView.Get();++f.frame;run(true);
     f.frame+=2;run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.frameGaps>=1 && stats.currentContinueRun==0,"frame gap produces a counted reset");
+    // THE FLOATING ORIGIN (2026-10-16 flat log: Elite re-anchors row 5 about every 5 km and the camera's rows do not move). A jump of 50 m
+    // or more with the rows unmoved keeps the history and sends the backend no reset. Of those, a RE-ANCHOR (the origin landed near the
+    // camera: temporalOriginReanchor) also drops the frame's camera translation; FAST TRAVEL keeps it, because now[5]-old[5] is the
+    // camera's real motion there (review 49f28838 F1: 80 m lateral past a surface 1 km away is 99.84 px at 2496 wide, not zero).
+    // The key-off goldens below are the motion hashes of the backend calls in order, so these cases' calls are taken back out of that log
+    // (hashMark) before the camera cut the goldens were recorded with.
+    const size_t hashMark=motionHashLog.size();
+    const auto cutsAtStart=stats.cameraCuts;
+    // The classifier on every absorbed line of the 2026-10-16 flat logs (edvr_gfx_..._033508 and ..._045608: step, now-len, prev-len as
+    // logged) and on the pre-fix cut events of ..._023749 (computed from their now/previous). Re-anchors land 12-27 m out from 184-7518 m;
+    // travel steps are the ones whose |now| exceeds |prev|.
+    {const struct{double step,now,prev;bool reanchor;} logged[]={
+        {196.477459,15.9053814,184.159536,true},{4995.50933,27.3671985,5022.01086,true},{5000.61242,25.5873709,5025.77806,true},
+        {4999.26258,25.9619125,5024.80865,true},{4996.21713,20.9132741,5016.50717,true},{5021.01963,19.9982624,5040.35158,true},
+        {62.2720272,81.7624001,19.9982624,false},{58.3926404,2870.37802,2811.98548,false},
+        {51.3474071,2486.07504,2434.72771,false},{66.945784,4230.7959,4163.85015,false},{61.4035952,4831.68095,4770.27738,false},
+        {55.8067989,4954.16697,4898.36019,false},{75.433471,5183.20547,5107.77203,false},{58.6138896,5307.99439,5249.38052,false},
+        {82.9222714,5448.55097,5365.62872,false},{62.5672518,5926.4926,5863.92536,false},
+        {4997.9,24.4,5021.9,true},{3088.7,18.3,3106.3,true},{7497.5,20.7,7517.7,true},{4999.0,19.4,4990.2,true},
+        {103.9,3191.0,3087.1,false},{62.2,3253.2,3191.0,false},{78.5,3794.2,3715.7,false},{80.5,3874.7,3794.2,false},
+        {98.7,3973.4,3874.7,false},{64.1,6037.3,5973.2,false},{53.5,7413.9,7360.4,false},{77.8,98.1,20.7,false}};
+     bool all=true;for(const auto& l:logged)all=all&&(edvr::temporalOriginReanchor(l.step,l.now,l.prev)==l.reanchor);
+     check(all,"the re-anchor rule classifies every logged re-anchor and every logged travel step as the flight logs show");}
+    // A 51 m step away from the origin (previous at zero) is travel: history kept, no cut, no rebase.
     ++f.frame;f.camera[5][0]=51;run(true);stats=edvr::flatMonoResolveStats();
-    check(backendReset && stats.cameraCuts==1,"camera cut produces a counted reset");
+    check(!backendReset && stats.cameraCuts==cutsAtStart && stats.originRebases==0 && stats.travelSteps==1,
+          "a 51 m step away from the origin with the rows unmoved keeps history and is counted as travel, not a re-anchor");
+    check(travelLines.size()==1 && travelLines.back().find("step=51 rot-delta=0 now-len=51 prev-len=0")!=std::string::npos,
+          "the first kept travel step logs its step, rows delta and both origin lengths");
+    // 5 km snap: previous 5 km out, now within 25 m of zero (the shape of every periodic event in the log), rows unmoved.
+    f.previousCamera[5][0]=2529.28516f;f.previousCamera[5][1]=4289.83105f;f.previousCamera[5][2]=-647.607849f;
+    f.camera[5][0]=14.3940916f;f.camera[5][1]=19.6849442f;f.camera[5][2]=.466696352f;
+    ++f.frame;const auto beforeSnap=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(!backendReset && stats.cameraCuts==beforeSnap.cameraCuts && stats.originRebases==beforeSnap.originRebases+1 &&
+          stats.travelSteps==beforeSnap.travelSteps &&
+          stats.acceptedContinues==beforeSnap.acceptedContinues+1 && stats.acceptedResets==beforeSnap.acceptedResets &&
+          std::abs(observedMotion)<.001 && std::abs(stats.lastOriginRebaseM-4997.9)<1 &&
+          rebaseLines.size()==1 && rebaseLines.back().find("now-len=24.")!=std::string::npos,
+          "a 5 km origin snap (now under 25 m from zero, rows unmoved) keeps history with zero camera translation");
+    // 10 frames of fast travel at 80 m a frame: nothing cuts, and every step is travel.
+    const auto beforeTravel=edvr::flatMonoResolveStats();bool travelReset=false;
+    camera(f.camera);camera(f.previousCamera);
+    for(unsigned i=0;i<10;++i){f.previousCamera[5][0]=80.f*i;f.camera[5][0]=80.f*(i+1);++f.frame;run(true);travelReset=travelReset||backendReset;}
+    stats=edvr::flatMonoResolveStats();
+    check(!travelReset && stats.cameraCuts==beforeTravel.cameraCuts && stats.originRebases==beforeTravel.originRebases &&
+          stats.travelSteps==beforeTravel.travelSteps+10 &&
+          stats.acceptedResets==beforeTravel.acceptedResets,"10 frames at 80 m a frame do not cut and are all travel");
+    // THE MOTION VECTOR (review 49f28838 F1). The fixture is 16 wide with a 90-degree projection, so a camera translation t past a surface
+    // at z gives t/z*(16/2) px; the review's case, 80 m lateral at 1000 m on a 2496-wide frame, is t/z=.08, i.e. .64 px here and 99.84 px
+    // at 2496. The surface is put at 1000 m (raw depth near/z = .025/1000), the history kept, and the SDK's motion vector read back.
+    {std::vector<float> distant(w*h,2.5e-5f);context->UpdateSubresource(depth.Get(),0,nullptr,distant.data(),w*4,0);
+     // No pixel owns an engine slot at that depth (the joined-record cases above left one at (8,8), stale against the new depth).
+     const std::vector<float> savedSlots=slots;for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=2.5e-5f;}
+     context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+     camera(f.camera);camera(f.previousCamera);f.previousCamera[5][0]=400;f.camera[5][0]=480;   // 80 m lateral, away from the origin: travel
+     ++f.frame;const auto beforeMotion=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+     check(!backendReset && stats.cameraCuts==beforeMotion.cameraCuts && stats.travelSteps==beforeMotion.travelSteps+1 &&
+           stats.originRebases==beforeMotion.originRebases,"80 m lateral travel keeps history and is travel");
+     if(std::abs(observedMotion*(2496.f/w)-99.84f)>=1.f)std::printf("info: 80 m travel at 1000 m motion %g px at width %u = %g px at 2496 (reject %u, depth %g)\n",observedMotion,w,observedMotion*(2496.f/w),observedReject,observedDepth);
+     check(std::abs(observedMotion*(2496.f/w)-99.84f)<1.f && std::abs(observedMotionY)<.001f,
+           "80 m lateral travel past a surface at 1000 m carries the real camera motion: 99.84 px at 2496 wide");
+     // The same geometry as a re-anchor: previous 5 km out, now 15 m: zero translation, history kept.
+     camera(f.camera);camera(f.previousCamera);f.previousCamera[5][0]=5000;f.camera[5][0]=15;
+     ++f.frame;const auto beforeAnchor=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+     check(!backendReset && stats.cameraCuts==beforeAnchor.cameraCuts && stats.originRebases==beforeAnchor.originRebases+1 &&
+           std::abs(observedMotion)<.001f && std::abs(observedMotionY)<.001f,
+           "a re-anchor at the same geometry carries zero camera translation and no reset");
+     context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);slots=savedSlots;
+     context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);}
+    // A move of 30 m is travel, not a jump: the camera term stays, nothing is counted either way.
+    camera(f.camera);camera(f.previousCamera);f.camera[5][0]=30;
+    ++f.frame;const auto beforeThirty=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(!backendReset && stats.cameraCuts==beforeThirty.cameraCuts && stats.originRebases==beforeThirty.originRebases,
+          "a 30 m move is neither a cut nor a rebase");
+    // A diagonal step over 50 m with no axis over 50 m never cut and keeps its camera term: only a jump the axis test cut can be absorbed.
+    camera(f.camera);camera(f.previousCamera);f.camera[5][0]=f.camera[5][1]=f.camera[5][2]=35;
+    ++f.frame;const auto beforeDiagonal=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(!backendReset && stats.cameraCuts==beforeDiagonal.cameraCuts && stats.originRebases==beforeDiagonal.originRebases,
+          "a 60 m diagonal step with every axis under 50 m is unchanged");
+    // The rows tolerance (0.02): a jump with the rows 0.019 off is a rebase, 0.021 off is another camera.
+    camera(f.camera);camera(f.previousCamera);f.previousCamera[5][0]=5020;f.camera[5][0]=20;f.camera[0][1]=.019f;
+    ++f.frame;const auto beforeNear=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(!backendReset && stats.cameraCuts==beforeNear.cameraCuts && stats.originRebases==beforeNear.originRebases+1,
+          "a 5 km jump with the rows 0.019 off is absorbed");
+    f.camera[0][1]=.021f;++f.frame;const auto beforeFar=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(backendReset && stats.cameraCuts==beforeFar.cameraCuts+1 && stats.originRebases==beforeFar.originRebases,
+          "a 5 km jump with the rows 0.021 off cuts");
+    // A hitch frame keeps the cut: the one real world change on record (460 m) took 153 ms, a rebase never has.
+    camera(f.camera);camera(f.previousCamera);f.camera[5][0]=460;f.deltaMs=153;
+    ++f.frame;const auto beforeHitch=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(backendReset && stats.cameraCuts==beforeHitch.cameraCuts+1 && stats.originRebases==beforeHitch.originRebases,
+          "the same unmoved-rows jump on a 153 ms frame still cuts");
+    f.deltaMs=16;motionHashLog.resize(hashMark);
+    // The same 51 m jump with the rows turned is another camera: it cuts, as before.
+    camera(f.camera);camera(f.previousCamera);f.camera[5][0]=51;f.camera[0][1]=.5f;
+    ++f.frame;const auto beforeRotated=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
+    check(backendReset && stats.cameraCuts==beforeRotated.cameraCuts+1 && stats.originRebases==beforeRotated.originRebases,
+          "a 51 m jump with the rows turned is a counted camera cut");
     check(!resetEvents.empty() && resetEvents.back().find("camera-cut=1")!=std::string::npos &&
           resetEvents.back().find("requested=0")!=std::string::npos &&
           resetEvents.back().find("now=(51,0,0) previous=(0,0,0) origin-delta=(51,0,0)")!=std::string::npos &&
-          resetEvents.back().find("max-matrix-delta=0")!=std::string::npos,
-          "accepted camera cut logs raw origins and separates it from a view-matrix change");
-    f.camera[0][0]=0;run(false);check(backendCalls==callsBefore+3,"singular camera declines before backend");
+          resetEvents.back().find("max-matrix-delta=0.5")!=std::string::npos &&
+          resetEvents.back().find("prev-step=460 rot-delta=0.5 now-len=51 prev-len=0")!=std::string::npos,
+          "accepted camera cut logs raw origins, the rows delta and the preceding step, and separates it from a view-matrix change");
+    unsigned cutsLogged=0;for(const auto& event:resetEvents)if(event.find("camera-cut=1")!=std::string::npos)++cutsLogged;
+    camera(f.camera);camera(f.previousCamera);
+    const int callsAtCut=backendCalls;
+    f.camera[0][0]=0;run(false);check(backendCalls==callsAtCut,"singular camera declines before backend");
     f.camera[0][0]=1;
     std::vector<uint32_t> step(w*h,0xff000000);
     for(UINT y=0;y<h;++y)for(UINT x=9;x<w;++x)step[y*w+x]=0xff0000ff;
@@ -573,11 +677,11 @@ int main(int argc,char** argv) {
     unsigned ordinaryLogs=0,cameraLogs=0;
     for(const auto& event:resetEvents)
         if(event.find("camera-cut=1")!=std::string::npos)++cameraLogs;else ++ordinaryLogs;
-    check(ordinaryLogs==32 && cameraLogs==1,"ordinary reset events stop at their 32-line session cap");
-    f.reset=false;++f.frame;f.camera[5][0]=51;run(true);
+    check(ordinaryLogs==32 && cameraLogs==cutsLogged,"ordinary reset events stop at their 32-line session cap");
+    f.reset=false;++f.frame;f.camera[5][0]=51;f.camera[0][1]=.5f;run(true);f.camera[0][1]=0;
     unsigned cameraLogsAfter=0;
     for(const auto& event:resetEvents)if(event.find("camera-cut=1")!=std::string::npos)++cameraLogsAfter;
-    check(ordinaryLogs==32 && cameraLogsAfter==2 && resetEvents.size()==34,
+    check(ordinaryLogs==32 && cameraLogsAfter==cutsLogged+1 && resetEvents.size()==32+cutsLogged+1,
           "camera cut still logs after ordinary reset event cap is exhausted");
     f.jitterX=std::nanf("");
     bindOriginal();ComPtr<ID3D11ShaderResourceView> badJitter;

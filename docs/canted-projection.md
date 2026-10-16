@@ -22,17 +22,13 @@ code is touched at any point.
 
 ## Status
 
-**State (2026-10-10): the handedness fix is SHIPPED and FLOWN on a real canted
-headset; the parallel-projection notice is BUILT on `claude/canted-pp-notice`,
-NOT FLOWN.** Offline disassembly of Elite build 332841
-(`analysis\decomp\verify_20261009_cant_*`) found the eye rotation is **not**
-dropped: the wrapper (slots 16 and 26) multiplies the eye matrix, taken raw, with
-a head pose first converted into the game's z-negated space (`S*H*S`,
-S = diag(1,1,-1)). The correct eye matrix is `S*E*S`; raw E inverts the cant's
-yaw and pitch (2 theta per eye), which is invisible on parallel panels, where
-the rotation is identity and tz = 0. The 2026-09-12 closure assumed a dropped
-rotation and the field symptoms fit an inverted one equally well; the fold
-experiment and the remap arithmetic below still stand.
+**State (2026-10-10): handedness fix SHIPPED and FLOWN; parallel-projection
+notice BUILT on `claude/canted-pp-notice`, NOT FLOWN.** Offline disassembly of
+Elite build 332841 found its wrapper (slots 16 and 26) composes raw eye matrix
+`E` with game-space head pose `S*H*S`, where `S=diag(1,1,-1)`. The correct eye
+matrix is `S*E*S`; raw `E` reverses canted-eye yaw/pitch by 2 theta per eye,
+invisible on parallel panels. The 2026-09-12 closure assumed dropped rotation;
+field symptoms fit either, and the fold/remap arithmetic below still stands.
 
 **H-inv CONFIRMED 2026-10-09** by the synthetic-cant flight (Pimax Crystal Super
 via Pimax OpenXR, v0.18.3-90-gbbca39a6, simulated 10° outward cant): with
@@ -69,16 +65,19 @@ per-app path, no extension. Pimax Play's own runtime reads neither (disassembly 
 PiOpenXR_64.dll, unverified) and looks to apply PP to every canted headset.
 - **Ruled out:** EDVR undoing PP itself, because under PP the native cant and
   vertical FOV are not exposed, and both overrides change every other game.
-- **Notice BUILT, NOT FLOWN** (`parallel_projection_notice.h`; behaviour, no key):
-  a canted Pimax model (system name: 8K X, 8K Plus, 8K, 5K Super, 5K Plus, 5K XR,
-  Artisan) whose located eyes are under 0.5° apart. The openxr log says so once a
-  session (`canted eyes: parallel projection is on: ...`; `... is off: ...` is the
-  good state, so a silent log means the feature never ran). On PimaxXR, which
-  honours the toggle, a toast and the Status page's hint say it too; on any other
-  runtime the log line says the toggle is unverified and the user is told nothing.
-  The README says it in the headset setup. To fly: one PP-on and one PP-off session.
-- **Next:** ask Houndmux which runtime his other canted games run on; find out
-  whether Pimax Play's runtime honours the toggle (if so, it gets the notice too).
+- **Notice BUILT, NOT FLOWN** (`parallel_projection_notice.h`; no key): for
+  listed canted Pimax models whose located eyes are under 0.5° apart. OpenXR
+  logs PP on/off once per session. PimaxXR users also see a toast and Status
+  hint; other runtimes get no notice when toggle support is unverified. The
+  README includes setup. To fly: one PP-on and one PP-off session.
+- **Next:** check whether Pimax Play honours PP; ask about other canted runtimes.
+- **2026-10-16, star dimming:** screenshots show left faint stars dim on pitch
+  with PP off; report says DLSS/FSR/XeSS reproduce it, AA-off/TAA is fine. The
+  log shows DLSS K only. Star matching found 267 still and 198 pitch pairs
+  (median position residuals 1.29/1.58 px). Right/left flux shifts from
+  0.945 still (95% CI 0.885–1.005) to 3.996 pitching (3.30–4.77). The eye basis
+  remains unproven; no code fix. First seek an existing eye dump, then request
+  a capture session if needed.
 
 ## What OpenVR says about a canted headset
 
@@ -507,3 +506,38 @@ checkerboard hints, each of the three taking its turn). Rig:
 0/0.4/0.49/0.51/0.6/20 degrees, invalid input, the verdict table, the words, the hint
 slot, the host on a fixture, the wiring as source pins) and `native_menu_test` (the
 eye-pose accessor).
+
+## 2026-10-16 — reported left-eye faint-star dimming on pitch
+
+Screenshots show left faint-star dimming during pitch; the report says
+DLSS/FSR/XeSS reproduce it while AA-off/TAA is fine. Log time is close, but no
+frame-to-image link exists. Its clean `v0.20.0-rc.2` tag resolves to
+`f2b99bdf27d5227f2fb43df765575e1a76016f65`; `6AD165AB` is the PE link
+timestamp. Rig: Pimax 8K X/PimaxXR, PP off, 20° between eyes, RTX 4090, 90 Hz,
+1869x1580 input and 3738x3160 output. DLSS K active; DLSS runtime version unknown.
+
+Projection matching (measured asymmetric intrinsics, 20° cant) found 267 still
+stars, median residual 1.29 px, and 198 pitching pairs, 1.58 px. Background-
+subtracted aperture flux ratio (right/left): 0.945 still (95% CI 0.885–1.005),
+3.996 pitching (3.30–4.77); 99 bright both-eye pairs give 3.46. This confirms
+asymmetry, not its cause.
+
+**H-basis hypothesis:** rc.2 builds shared world-camera `worldDelta`; reusing
+right-eye basis for left could explain pitch/roll; yaw is weaker because it may
+commute with cant. Native per-eye `eyeDelta` is correct, but selected basis and
+star rows are unknown. Alternatives: raw star/depth asymmetry or temporal
+history rejection. At 20:58:44.875 camera `changed_picks=0`; at 20:58:05.552
+there were 10,620 history gaps, 9,739 in burst frames, and motion-pixel counts
+were unavailable. Sky ring did not run. Exposure sharing had zero 30-second
+fallbacks at 20:58:22 and :52; this does not rule out every exposure effect.
+
+First seek screenshot-session `edvr_logs\eyes\eye_*_motion.csv` and its capture
+folder; the normal zip omits them. If absent, request one PP-off, DLSS K capture:
+hold a space scene still, then pitch. Set `diag.sky_ring=on`; Pause
+(`hotkey.dump_camera`) records TCAM history/sky buckets. During pitch, “Dump both
+eyes as seen” (`hotkey.dump_eyes` if configured) saves `motion.csv` and
+raw/treated frames. Collect both logs and the emitted eye folder/pool. Compare
+same-eye TCAM D deltas with `cameraR` and per-eye `headR`, then raw/treated stars.
+SKY is sparse; per-frame rows follow detected events only. Support H-basis only
+if mismatch tracks the dark left eye; reject if `cameraR` agrees in both eyes
+during pitch and raw left stars are dim. No new key or build is needed.

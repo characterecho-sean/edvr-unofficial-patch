@@ -166,6 +166,15 @@ public:
         case 0xB12F7A618E1BDE98ull:
         case 0x203DF51758AADC4Dull:
         case 0xC7FA0C0F5DD49180ull: // six 8194-vertex instances beside the bodies
+        // The weapons fire (weapons_fire.h; fix.sharp_weapons, docs/dlss-blur-elements-2026-10-14.md W3/A1): an eye dump holds each pair's VS
+        // b0/b1/b2, so 1F17's CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 can be compared with the jittered scene camera's matrix of the
+        // SAME frame (done 2026-10-16: all three carry the jitter; the jitter-cancel table says cancel for each).
+        case 0x1F17BF54DB6EE407ull: // beams and bolts
+        case 0x939D01F28D1FEEA8ull: // multicannon rounds
+        case 0x5C1D8EF529324A22ull: // the shield strike's additive part
+        // The shield-strike refraction (shield_ripple.h, R1): VS b0/b1/b2 here; the pixel shader's b1 row 90 (the gain) and s0's filter are
+        // read at run time on the first draw and logged. PS b1 is the same buffer as VS b1 when the log's first-draw line says so.
+        case 0x820E5C131B99361Dull: // the shield's refracting bubble
         case 0xA47A3315FFF5E2E4ull: // the supercruise bars' line list (supercruise_lines.h); identity is evidence, proved by the aux vertex capture
         case 0x9BFC7FD232328391ull: // the supercruise space dust's 300 ribbon quads (supercruise_lines.h): its b0/b1/b2 here, its vertices in the aux capture
             return true;

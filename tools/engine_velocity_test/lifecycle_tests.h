@@ -89,6 +89,9 @@ const edvr::skinjoin::Snapshot* g_hookSnap = nullptr;
 // The GPU census stub (below) records every Begin per section: the F16 census slots (gpu_census.h, FrameSkin*) are read from here, to see which the engine path
 // fills and which stay empty.
 unsigned g_censusBegins[static_cast<unsigned>(edvr::GpuCensusSection::Count)] = {};
+unsigned g_censusEnds[static_cast<unsigned>(edvr::GpuCensusSection::Count)] = {};     // the stub's Ends and NoteIssued calls (the run-span case)
+unsigned g_censusIssued[static_cast<unsigned>(edvr::GpuCensusSection::Count)] = {};
+bool g_censusTimeEveryCall = false;   // true: every Begin answers "this one is timed", so the rig can count the spans an End closes
 }  // namespace lifecycle_fake
 
 // --- The stubs engine_velocity.cpp links against -------------------------------
@@ -183,9 +186,14 @@ int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); retur
 // (tools/gpu_census_test covers those), so it is stubbed out -- except that it counts the Begins per section.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection section) noexcept {
     if (section < GpuCensusSection::Count) ++lifecycle_fake::g_censusBegins[static_cast<unsigned>(section)];
-    return false;
+    return lifecycle_fake::g_censusTimeEveryCall;   // false: no span is ever open, as before; the run-span case turns it on
 }
-void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection section) noexcept {
+    if (section < GpuCensusSection::Count) ++lifecycle_fake::g_censusEnds[static_cast<unsigned>(section)];
+}
+void gpuCensusNoteIssued(GpuCensusSection section) noexcept {
+    if (section < GpuCensusSection::Count) ++lifecycle_fake::g_censusIssued[static_cast<unsigned>(section)];
+}
 }  // namespace edvr
 
 namespace lifecycle_tests {
@@ -1499,6 +1507,7 @@ inline void run(const Harness& h) {
         overlay();
         g.endFrame(true);
         const std::string summary = lastLine("engine motion: flat overlay guard:", overlayMark);
+        if (number(summary, "copies ") != 3 || number(summary, "guarded draws ") != 4) std::printf("  flat overlay lifecycle: the summary line is: %s\n", summary.c_str());
         h.check(number(summary, "copies ") == 3 && number(summary, "guarded draws ") == 4,
                 "flat overlay lifecycle: one base copy per group, refreshed after other producer and next frame");
         h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&

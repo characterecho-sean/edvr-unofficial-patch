@@ -162,7 +162,9 @@ struct FlatRuntimeDrawScope {
     template <class Issue> void uiReissue(Issue issue) {
         if (!ctx) return;
         if (uiTaken && flatUiLayerWriteBackBegin(ctx)) { issue(); flatUiLayerWriteBackEnd(ctx); }
-        if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); flatUiLayerToneEnd(ctx); }
+        // The weapons' light is re-issued through the same draw before the HUD's (fix.sharp_weapons: the layer binds each step's source and blend and says when
+        // none is left); with only the HUD in the layer the plan is one step and the loop never runs.
+        if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); while (flatUiLayerToneNext(ctx)) issue(); flatUiLayerToneEnd(ctx); }
     }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;

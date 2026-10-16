@@ -228,6 +228,9 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     // The map families first (only with a map open, on the HDR target); otherwise the shared family rule, as it always was.
     const UiLayerFamily family = flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget);
     if (!flatUiLayerTakesFamily(family)) return g_lastAsk;
+    // The half of the shared layer that governs this family must be live: with fix.ui_quality off and fix.sharp_weapons on, the layer runs for the weapons alone
+    // and the HUD stays in the game's frame (not asked, so not counted); the converse for the weapons.
+    if (!flatUiFamilyLive(family, uiLayerQualityLive(), uiLayerWeaponsLive(), uiLayerRippleLive())) return g_lastAsk;
     const size_t fi = static_cast<size_t>(family);
     const int ms = mapSlot(family);
     if (ms >= 0) {  // the map asks this frame, counted as they come (the first map-tone candidate reports how many came before it)
@@ -558,6 +561,11 @@ bool flatUiLayerToneBegin(ID3D11DeviceContext* ctx) {
     return ok;
 }
 
+bool flatUiLayerToneNext(ID3D11DeviceContext* ctx) {
+    FlatComputeInternalScope internal;
+    return uiLayerCrispToneNext(ctx);
+}
+
 void flatUiLayerToneEnd(ID3D11DeviceContext* ctx) {
     FlatComputeInternalScope internal;
     uiLayerCrispToneEnd(ctx);
@@ -600,7 +608,8 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
     // The composite: this frame's HUD over the picture the copy reads (the resolve's, or the game's own after a refusal).
     const uint32_t region[4] = {0, 0, td.Width, td.Height};
     const float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-    ID3D11Texture2D* out = uiLayerComposite(frame, 0, picture.Get(), region, uv);
+    // `treated`: the picture is the one EDVR's resolve made (unjittered), which the shield ripple reads at D minus the jitter; the game's own is left alone.
+    ID3D11Texture2D* out = uiLayerComposite(frame, 0, picture.Get(), region, uv, false, treated);
     if (!out) {
         ++g_w.compositeNone;
         return;
@@ -725,6 +734,22 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     const size_t f0 = static_cast<size_t>(families[0]), f1 = static_cast<size_t>(families[1]),
                  f2 = static_cast<size_t>(families[2]), f3 = static_cast<size_t>(families[3]);
     const size_t fc = static_cast<size_t>(UiLayerFamily::kMapCanvas), fs = static_cast<size_t>(UiLayerFamily::kMapSprite);
+    // fix.sharp_weapons in flat (2026-10-16): the weapons fire and the shield ripple, each asked/decided/taken/refused-at-issue. Zeros print, and a window in which
+    // neither pair reached the adapter says so.
+    {
+        const size_t fw = static_cast<size_t>(UiLayerFamily::kWeaponsFire), fr = static_cast<size_t>(UiLayerFamily::kShieldRipple);
+        if (!w.asked[fw] && !w.asked[fr]) {
+            Log::get().note("flat ui layer weapons: not exercised in this window (no weapons-fire or shield-refraction draw was asked; fix.sharp_weapons %s).",
+                            uiLayerWeaponsLive() ? "is live" : "is not live: off, or flat anti-aliasing off, or stood down");
+        } else {
+            Log::get().note(
+                "flat ui layer weapons: weapons-fire asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; shield-ripple asked=%llu decided=%llu taken=%llu "
+                "refused-at-issue=%llu",
+                static_cast<unsigned long long>(w.asked[fw]), static_cast<unsigned long long>(w.decided[fw]), static_cast<unsigned long long>(w.taken[fw]),
+                static_cast<unsigned long long>(w.atIssue[fw]), static_cast<unsigned long long>(w.asked[fr]), static_cast<unsigned long long>(w.decided[fr]),
+                static_cast<unsigned long long>(w.taken[fr]), static_cast<unsigned long long>(w.atIssue[fr]));
+        }
+    }
     Log::get().note(
         "flat ui layer families: holo-panels asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; flight-hud "
         "asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; target-sprite asked=%llu decided=%llu taken=%llu "

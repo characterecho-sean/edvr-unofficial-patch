@@ -229,6 +229,10 @@ struct FlatUiMapAaTally {
 // is open). The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the space dust)
 // are not asked: they are scene geometry, upscaled with the world in flat as they always were.
 //
+// The ship's weapons fire and the shield strike's refraction ride fix.sharp_weapons, in flat as in VR (2026-10-16): the weapons fire (1F17, 939D, 5C1D) is
+// additive light, so a pair left in the scene for want of camera rows only stays as smeared as it was, and the layer sums with it; the refraction (820E) is one
+// draw. Neither is asked unless its own half of the shared layer is live (flatUiFamilyLive), so fix.ui_quality off leaves the weapons taken and the HUD alone.
+//
 // NOR THE HOLOGRAMS (2026-10-09 13:51 flight, the loading screen's ghost). A hologram is several pairs drawn together;
 // in flat only one of them (94D5C556DFD6D705 / 912477AEF6958379) carries camera rows the jitter can be read from, the
 // other six stay in the frame (no-camera-rows). Taking the one split one picture: that part unjittered over the
@@ -236,7 +240,12 @@ struct FlatUiMapAaTally {
 // refused each frame. A family is taken whole or not at all, so the holograms stay in the game's frame, as before the port.
 inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
-           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite;
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
+}
+// Whether the half of the shared layer that governs the family is live: the weapons fire (fix.sharp_weapons, a flat AA mode on) for kWeaponsFire, the ripple's
+// own half for kShieldRipple, fix.ui_quality's for every other. The three are independent, as in ui_layer_math.h's uiLayerFamilyEnabled.
+inline bool flatUiFamilyLive(UiLayerFamily f, bool qualityLive, bool weaponsLive, bool rippleLive) {
+    return f == UiLayerFamily::kWeaponsFire ? weaponsLive : f == UiLayerFamily::kShieldRipple ? rippleLive : qualityLive;
 }
 
 // The adapter's own refusals, before the shared decision is asked. Each leaves the draw in the game's frame as stock.

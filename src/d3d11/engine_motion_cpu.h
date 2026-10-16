@@ -155,6 +155,11 @@ static_assert(orderIsPermutation(), "every part is reported exactly once");
 constexpr uint64_t kSampledBit = uint64_t(1) << 63;
 inline std::atomic<uint64_t> g_gate{0};
 static_assert(std::atomic<uint64_t>::is_always_lock_free, "the gate and the counters are plain moves on x64");
+// The render thread's id, apart from the gate. The gate names it only on a frame that clocks it (flat's census writes
+// kNoThread into the gate's low bits on the other 15 frames in 16, and 0 on a stand-down), so a reader that asks "is this the
+// render thread" must not ask the gate. Written every frame by whichever census is primed (this recorder in VR, flat_cpu.h's
+// Census in flat) and cleared to 0 when the flat census goes idle; no thread has id 0.
+inline std::atomic<uint32_t> g_renderThreadId{0};
 
 // The calling thread's id: the TEB's ClientId.UniqueThread, what GetCurrentThreadId
 // reads, without the call. (Recorder checks it against GetCurrentThreadId once and
@@ -443,6 +448,7 @@ inline void resetForTest() noexcept {
     g_epoch.store(1);
     g_renderSlot.store(nullptr);
     g_gate.store(kSampledBit);
+    g_renderThreadId.store(0);
     t_ctx.slot = nullptr;
     t_ctx.child = 0;
 }
@@ -796,6 +802,7 @@ private:
     void decideNextFrame() noexcept {
         sampledNow_ = samplingOk_ ? schedule_.next() : true;
         g_gate.store(makeGate(sampledNow_, static_cast<uint32_t>(GetCurrentThreadId())), std::memory_order_relaxed);
+        g_renderThreadId.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
     }
 
     SampleSchedule schedule_;

@@ -271,8 +271,8 @@ void testWiringLayer() {
     const std::string boundary = bodyOf(text, "void uiLayerFrameBoundary(ID3D11DeviceContext* ctx)", "uiLayerFrameBoundary");
     check(has(boundary, "worldReissueReset();"), "the frame boundary drops a pending re-issue");
     // The accessors the route reads.
-    check(has(all, "booluiLayerWorldScreenHeld(){returng_screenHeld==1;}") && has(all, "booluiLayerLiveForWorldRoute(){returndetail::g_uiLayerLive;}") &&
-              has(all, "detail::g_uiLayerLive=uiLayerLiveFor(g_target,g_temporal,g_jitterAsShipped,g_stoodDown);"),
+    check(has(all, "booluiLayerWorldScreenHeld(){returng_screenHeld==1;}") && has(all, "booluiLayerLiveForWorldRoute(){returndetail::g_uiQualityLive;}") &&
+              has(all, "constboolquality=uiLayerLiveFor(g_target,g_temporal,g_jitterAsShipped,g_stoodDown);"),
           "the route's accessors read the gate and the layer's liveness, and the layer's liveness is uiLayerLiveFor's");
     // What the curved route changed in the layer (held by testCurvedControls).
     for (const WirePin& p : layerCurvedPins(text)) check(p.ok, p.what);

@@ -673,7 +673,7 @@ void sourcePins(const std::string& root) {
     if (hook.empty() || glue.empty() || bat.empty()) return;
     const size_t none = std::string::npos;
     const size_t beat = at(hook, "    stallWatchBeat(presentT1, g_state->frameCounter);\n");
-    const size_t tick = at(hook, "    vramWatchTick(presentT1, g_state->device);\n");
+    const size_t tick = at(hook, "    vramWatchTick(presentT1, dev);\n");
     const size_t ticks = at(hook, "g_frameTicks.markAt(\"present_pre\", presentT0);");
     check(beat != none && tick != none && ticks != none && beat < tick && tick < ticks,
           "V11.hook: hookedPresent ticks the watch right after the stall sampler's beat, before the frame ticks");

@@ -56,6 +56,7 @@
 #include <cstring>
 
 #include "engine_motion_cpu.h"
+#include "flat_offscreen_counts.h"   // what the offscreen fast path did, by reason
 #include "flat_query_cut.h"   // the counts of the questions answered from what the runtime tracks
 
 #ifndef EDVR_FLATCPU_NOW
@@ -108,6 +109,7 @@ enum Family : unsigned {
     kHdrRoute,      // the HDR route's trigger detector (flat_hdr_route.h) on every draw, observe-only with the key off
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
+    kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
     kFamilies
 };
 struct FamilyInfo {
@@ -133,6 +135,7 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"hdr route", false},
     {"foreground capture", false},
     {"camera inject", true},
+    {"offscreen fast path", false},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
 constexpr unsigned kCells = kFamilies + 1;
@@ -421,6 +424,8 @@ struct WindowReport {
     // The engine-motion draw wrapper's D3D immediate-context calls in the window (state gets and
     // sets, clears and copies), and the draws it substituted, which they belong to.
     uint64_t stateCalls = 0, substitutedDraws = 0;
+    // The offscreen fast path's counts in the window (flat_offscreen_fast.h): counters, no clock, so they print whether or not the timing is on.
+    FlatOffscreenCounts offscreen;
     // The questions the flat path answered from what the runtime already tracks instead of asking the D3D
     // context (flat_query_cut.h): how many, how many were also put to the context and compared, how many of
     // those comparisons were wrong, and which states ask the context again.
@@ -433,7 +438,7 @@ struct WindowReport {
     double gpuFrameP50 = 0, gpuFrameP95 = 0, gpuResolveP50 = 0, gpuResolveP95 = 0;
     uint64_t gpuSkipped = 0, gpuInvalid = 0;
     bool standingDown = false;   // the work is stood down as the window closes
-    bool clocksOff = false;      // the census was built with its clocks off (clocksWanted())
+    bool clocksOff = false;      // the census's clocks were off as the window closed (advanced.flat_cpu_timing, the default)
     Floor floor;
     emcpu::Floor emFloor;
 };
@@ -452,26 +457,22 @@ inline void percentiles(float* a, unsigned n, double* p50, double* p95) noexcept
     *p50 = static_cast<double>(a[i50]);
 }
 
-// Whether the census clocks anything. Under Proton an on-foot frame makes about 200,000 scopes,
-// and clocking one costs that frame about 21 ms (2026-10-02): a hitch at a random frame in every
-// block of kRenderPeriod, p95 present 37 ms against 16.7 ms at 60 Hz. The policy: on under Windows,
-// as it always was; off under Wine (Proton), the only place the hitch is measured. ntdll exporting
-// wine_get_version is how Wine is told apart. EDVR_FLAT_CPU_CLOCKS=1 or =0 decides it either way.
-// With the clocks off the line still prints the present and GPU figures.
-inline bool clocksPolicy(bool underWine, const char* env) noexcept {
+// Whether the census clocks anything. OFF unless the user turns it on (2026-10-16): clocking one frame in 16 costs a
+// settlement frame 7-10 ms (a hitch at a random frame in every block of kRenderPeriod, p95 present about 22 ms against a p50
+// of 13) and about 0.27 ms a frame on average, and under Proton an on-foot frame makes about 200,000 scopes and costs 21 ms
+// (2026-10-02). The key is advanced.flat_cpu_timing (F8 > Debug > CPU timing in the log), read live once a Present;
+// EDVR_FLAT_CPU_CLOCKS=1 forces it on and =0 forces it off whatever the key says (the environment wins, as it always did).
+// With the clocks off the line still prints the present and GPU figures, and says the timing is off and how to turn it on.
+inline bool clocksPolicy(bool configOn, const char* env) noexcept {
     if (env && env[0] == '1') return true;
     if (env && env[0] == '0') return false;
-    return !underWine;
+    return configOn;
 }
-inline bool clocksWanted() noexcept {
-    static const bool on = [] {
-        char v[4] = {};
-        const bool set = GetEnvironmentVariableA("EDVR_FLAT_CPU_CLOCKS", v, sizeof v) > 0;
-        const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-        const bool underWine = ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
-        return clocksPolicy(underWine, set ? v : nullptr);
-    }();
-    return on;
+// EDVR_FLAT_CPU_CLOCKS as the process started (null when unset): one read.
+inline const char* clocksEnv() noexcept {
+    static char v[4] = {};
+    static const bool set = GetEnvironmentVariableA("EDVR_FLAT_CPU_CLOCKS", v, sizeof v) > 0;
+    return set ? v : nullptr;
 }
 
 class Census {
@@ -480,7 +481,8 @@ public:
 
     // `renderPeriod` 1 clocks the render thread on every frame, as the census did until 2026-09-30:
     // what the rig compares a sampled window with.
-    // `clocks` false: no thread is clocked on any frame (clocksWanted()).
+    // `clocks` false: no thread is clocked on any frame (the flat runtime builds it so and follows advanced.flat_cpu_timing
+    // with setClocks()).
     explicit Census(unsigned renderPeriod = kRenderPeriod, bool clocks = true) noexcept
         : renderPeriod_(renderPeriod ? renderPeriod : 1u), schedule_(renderPeriod ? renderPeriod : 1u, kSamplePeriod),
           clocks_(clocks) {}
@@ -495,6 +497,7 @@ public:
             lastTick_ = windowStart_ = nowTicks;
             samplingOk_ = currentThreadId() == static_cast<uint32_t>(GetCurrentThreadId());
             renderTid_ = static_cast<uint32_t>(GetCurrentThreadId());
+            emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);
             FrameCut prime;
             cutFrame(prime);   // baselines: nothing before the census opened is the first frame's
             emcpu::FrameCut emPrime;
@@ -532,6 +535,8 @@ public:
     void noteGpuResolve(double ms) noexcept { if (gpuResolve_ < kMaxSamples) gpuResolveMs_[gpuResolve_++] = static_cast<float>(ms); }
     void noteGpuSkipped() noexcept { ++gpuSkipped_; }
     void noteGpuInvalid() noexcept { ++gpuInvalid_; }
+    // The offscreen fast path's counts for the frame that just ended, drained with the wrapper's.
+    void noteOffscreen(const FlatOffscreenCounts& c) noexcept { offscreen_.add(c); }
     // Engine motion's draw wrapper, drained once a frame: the D3D calls it issued and the draws
     // it substituted (engine_velocity.h, engineVelocityTakeWrapperCounts).
     void noteWrapper(uint64_t stateCalls, uint64_t substitutedDraws) noexcept {
@@ -557,9 +562,27 @@ public:
         primed_ = false;
         g_gate.store(0, std::memory_order_relaxed);
         emcpu::g_gate.store(0, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(0, std::memory_order_relaxed);
         resetWindow();
     }
     bool running() const noexcept { return primed_; }
+    // The timing switch, live. A change starts a fresh window (a window that was part clocked and part not would print per-clocked-frame
+    // figures from a mix). Off closes the gates at once; on opens them with the next frame. Turning it
+    // on calibrates the clock floors at the end of the first window it is on for (take()), in the CPU state the flight is in. Returns
+    // whether the state changed.
+    bool setClocks(bool on, int64_t nowTicks) noexcept {
+        if (on == clocks_) return false;
+        clocks_ = on;
+        if (primed_) {
+            resetWindow();
+            windowStart_ = nowTicks;
+            // Off closes the gates now. On waits for the next onFrame: the frame in progress was gated off, and counting it as clocked would
+            // put a frame with no figures into the new window's average.
+            if (!on) decideNextFrame();
+        }
+        return true;
+    }
+    bool clocks() const noexcept { return clocks_; }
 
     // The window, when kWindowMs have passed: folded into out and emptied. False before that.
     bool take(int64_t nowTicks, bool standingDown, WindowReport& out) noexcept {
@@ -596,6 +619,7 @@ public:
         }
         out.stateCalls = stateCalls_;
         out.substitutedDraws = substitutedDraws_;
+        out.offscreen = offscreen_;
         out.queries = queries_;
         percentiles(interval_, (std::min)(frames_, kMaxSamples), &out.presentP50Ms, &out.presentP95Ms);
         out.gpuFrameSamples = gpuFrame_;
@@ -630,6 +654,7 @@ private:
         const uint64_t gate = makeGate(sampledNow_, renderNow_ || sampledNow_ ? renderTid_ : kNoThread);
         g_gate.store(gate, std::memory_order_relaxed);
         emcpu::g_gate.store(gate, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);   // the gate names it on 1 frame in 16 only
     }
     void resetWindow() noexcept {
         frames_ = paused_ = sampled_ = renderClocked_ = 0;
@@ -642,6 +667,7 @@ private:
         std::memset(emOtherTicks_, 0, sizeof(emOtherTicks_));
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
         stateCalls_ = substitutedDraws_ = 0;
+        offscreen_ = FlatOffscreenCounts{};
         queries_ = FlatQueryCounts{};
         gpuFrame_ = gpuResolve_ = 0;
         gpuSkipped_ = gpuInvalid_ = 0;
@@ -660,6 +686,7 @@ private:
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
     uint64_t stateCalls_ = 0, substitutedDraws_ = 0, gpuSkipped_ = 0, gpuInvalid_ = 0;
+    FlatOffscreenCounts offscreen_;
     FlatQueryCounts queries_;
     float interval_[kMaxSamples];
     float gpuFrameMs_[kMaxSamples];
@@ -780,7 +807,7 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
     char total[32] = "-";
     if (anyClocked) std::snprintf(total, sizeof(total), "%.3f ms", totalMs / clocked);
     if (r.clocksOff)
-        tk.add("", "flat cpu 5s: frames=%u (stood down %u%s) present p50 %.2f ms (p95 %.2f); clocks off, no thread clocked",
+        tk.add("", "flat cpu 5s: frames=%u (stood down %u%s) present p50 %.2f ms (p95 %.2f); CPU timing is off; turn it on in F8 > Debug > CPU timing in the log",
                r.frames, r.pausedFrames, r.standingDown ? ", stood down now" : "", r.presentP50Ms, r.presentP95Ms);
     else
         tk.add("", "flat cpu 5s: frames=%u (stood down %u%s) present p50 %.2f ms (p95 %.2f); render thread clocked on %u of %u frames, "
@@ -796,7 +823,7 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
         tk.add(" + ", "engine motion hooks %.3f ms (calls %s)", emRenderMs / clocked, calls);
     } else {
         if (r.clocksOff)
-            tk.add(" = ", "render thread: clocks off (EDVR_FLAT_CPU_CLOCKS=1 turns them on)");
+            tk.add(" = ", "render thread: CPU timing is off, no thread clocked (EDVR_FLAT_CPU_CLOCKS=1 also turns it on)");
         else
             tk.add(" = ", "render thread: not clocked in this window (one frame in %u is, and none was)", r.renderPeriod);
     }
@@ -804,7 +831,7 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
     // The game's other threads: per SAMPLED frame, thread-ms summed, because the rest of the
     // window they were not clocked. "-" is a window with no sampled frame, never a zero.
     if (r.clocksOff) {
-        tk.add("; ", "other threads: clocks off");
+        tk.add("; ", "other threads: CPU timing is off");
     } else if (!r.sampledFrames) {
         tk.add("; ", "other threads: not clocked in this window (one frame in %u is, and none was)", r.samplePeriod);
     } else {
@@ -873,6 +900,22 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
     tk.add("; ", "the clocks cost the render thread about %.3f ms a frame on average (%.3f ms on a clocked frame, %.0f scopes; "
                  "the gate checks on the other frames are not counted) and put about %.3f ms of the per-clocked-frame total above into it",
            price.costMs, price.clockedMs, price.scopesPerFrame, price.recordedMs);
+    // The render thread's engine motion hooks again, one token a part: the fold into "engine motion hooks" above hides which
+    // one is expensive. Last, so the lines above keep their layout. kEmNames is exactly the folded, clocked parts; the names
+    // drop the "engine " they carry on the other threads' list, so a search for "engine copier" finds one figure.
+    if (anyClocked)
+        for (unsigned i = 0; i < kEmNameCount; ++i) {
+            const unsigned p = kEmNames[i].part;
+            callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / clocked);
+            tk.add(i ? ", " : "; ", "%s%s %.3f ms (calls %s)", i ? "" : "engine motion hooks by part (render thread, per clocked frame): ",
+                   kEmNames[i].name + (sizeof("engine ") - 1), r.emRenderMs[p] / clocked, calls);
+        }
+    // The offscreen fast path (flat_offscreen_fast.h): a counter, so it prints with the timing off too. Last, so the lines above keep their layout.
+    {
+        char offscreenText[320];
+        flatOffscreenFormat(offscreenText, sizeof(offscreenText), r.offscreen, frames);
+        tk.add("; ", "%s", offscreenText);
+    }
     packLines(tk, out);
 }
 

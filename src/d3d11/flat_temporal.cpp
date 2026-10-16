@@ -900,9 +900,9 @@ void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags)
     flatcpu::Scope timed(flatcpu::kDiscovery);   // the census (flat_cpu.h): every passive discovery observer below is this family
     if (flatComputeReadbackPending() && !flatComputeCandidate() && detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire) == GetCurrentThreadId())
         flatComputePoll(frame);
-    if (g_waitingForPresent.exchange(false, std::memory_order_acq_rel)) {
-        const DWORD thread = GetCurrentThreadId();
-        detail::g_flatTemporalOwnerThread.store(thread, std::memory_order_release);
+    const DWORD thread = GetCurrentThreadId();
+    static_assert(kFlatPresentTestFlag == DXGI_PRESENT_TEST, "flat_owner_gate.h names the DXGI test flag");
+    if (flatOwnerClaimOnPresent(g_waitingForPresent, detail::g_flatTemporalOwnerThread, thread, flags)) {
         g.startedMs = nowMs();
         g.nextReportMs = g.startedMs + kReportMs;
         Log::get().note("flat temporal: first owned Present on thread %lu; warmup draws before this boundary were not observed; discovery now active limit=%llu-ms/%u-useful-frames",
@@ -911,8 +911,7 @@ void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags)
     }
     // The deadline closes even a paused/no-draw window. The ordinary observer
     // gate below would otherwise leave the collection armed indefinitely.
-    if (detail::g_flatTemporalCapturing.load(std::memory_order_acquire) &&
-        detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
+    if (flatOwnerMayExpire(detail::g_flatTemporalCapturing, detail::g_flatTemporalOwnerThread, thread) &&
         flatCaptureExpired(g.startedMs, nowMs(), g.usefulFrames,
                            g.captureBudget.milliseconds, g.captureBudget.usefulFrames)) {
         finishDiscovery(frame);

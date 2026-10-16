@@ -90,6 +90,7 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
+#include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
 #include <intrin.h>
@@ -977,6 +978,60 @@ FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and 
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
+FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
+
+// One-off and log only (docs/particle-billboards.md, 2026-10-16): is the mapped memory of a dynamic constant
+// buffer write-combined, and what does reading all of it cost? Runs at the first Map of up to three distinct
+// buffers, each once. The protection flags are the cheap reliable half; a driver can map write-combined
+// without saying so here, so the three timed reads (the first is cold) against the same copy from ordinary
+// memory are the evidence. The read is of a freshly mapped WRITE_DISCARD block: its contents are undefined
+// and unused, the same pointer the Unmap tee reads from.
+//
+// Each line names its buffer: the resource pointer, its ByteWidth and Usage, and who asked (the camera tee or the
+// plume tee), so the up to three lines of a session can be told apart. `res` is a buffer: both callers have
+// just had a nonzero ByteWidth from mapBufferDesc, which asks GetType first.
+static void mappedReadProbeOnce(ID3D11Resource* res, const char* what, const void* mapped, uint32_t bytes) {
+    static const void* seen[3] = {};
+    static int seenCount = 0;
+    if (!res || !mapped || bytes == 0 || bytes > 8192) return;
+    for (int i = 0; i < seenCount; ++i) if (seen[i] == res) return;
+    if (seenCount >= 3) return;
+    seen[seenCount++] = res;
+    guardedBudget(g_mappedReadProbeBudget, [&] {
+        MEMORY_BASIC_INFORMATION mbi{};
+        const bool known = VirtualQuery(mapped, &mbi, sizeof mbi) == sizeof mbi;
+        static uint8_t sink[8192];
+        static uint8_t ordinary[8192] = {1};
+        double us[3] = {};
+        const double perUs = 1e6 / static_cast<double>(unmapprobe::clockFrequency());
+        for (int i = 0; i < 3; ++i) {
+            const int64_t t0 = unmapprobe::clockNow();
+            memcpy(sink, mapped, bytes);
+            us[i] = static_cast<double>(unmapprobe::clockNow() - t0) * perUs;
+        }
+        double ord = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const int64_t t0 = unmapprobe::clockNow();
+            memcpy(sink, ordinary, bytes);
+            const double d = static_cast<double>(unmapprobe::clockNow() - t0) * perUs;
+            if (i == 0 || d < ord) ord = d;
+        }
+        const volatile uint8_t keep = sink[bytes - 1];
+        (void)keep;
+        D3D11_BUFFER_DESC bd{};
+        static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+        const char* usage = bd.Usage == D3D11_USAGE_DYNAMIC ? "DYNAMIC" : bd.Usage == D3D11_USAGE_STAGING ? "STAGING"
+                            : bd.Usage == D3D11_USAGE_DEFAULT ? "DEFAULT" : "IMMUTABLE";
+        Log::get().note(
+            "mapped read probe: %s, resource %p, %u bytes, usage %s, mapped at %p, VirtualQuery protect 0x%lx (%s). "
+            "Reading all of it took %.1f, %.1f and %.1f us (the first is cold); the same copy from ordinary memory "
+            "took %.1f us. A mapping that costs several times the ordinary copy is uncached for CPU reads; the "
+            "Unmap readers line says what the tee's own reads of it cost a frame.",
+            what, static_cast<const void*>(res), bytes, usage, mapped, known ? static_cast<unsigned long>(mbi.Protect) : 0ul,
+            !known ? "VirtualQuery failed" : (mbi.Protect & PAGE_WRITECOMBINE) ? "write-combined" : "no write-combine flag",
+            us[0], us[1], us[2], ord);
+    });
+}
 
 // Is this target the shape of the on-foot panel rather than of an eye?
 //
@@ -1814,6 +1869,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // seen; the EDVR-internal reissues return before this call. One shader-hash load and two compares, the rest only on a match.
     nativeOnFootHudProbe(bindingShaderHash(BindSlot::Vs));
     State* s = g_state;
+    // The roll-free billboard block's pending rebind belongs to ONE draw: forwardWithVerdict consumes it, and a draw that
+    // never gets there (the AA-off fast path, a foreign context) must not leave it for the next (particle_fix.h).
+    particleRollFreeClear();
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
@@ -3329,6 +3387,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camResource = res;
             s->camData = mapped->pData;
             s->camBytes = mm.byteWidth;
+            mappedReadProbeOnce(res, "scene camera block", mapped->pData, mm.byteWidth);
         }
     }
     // Engine-record velocity's watch on an open eye-frame's pool and scene
@@ -3351,11 +3410,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // The particle billboards' constants, same discipline again: the
     // basis vectors cannot be read at the draw, so the write is watched.
-    if (mapSub0 && res == particleTarget()) {
+    if (mapSub0 && particleBlockWatched(res)) {
         s->partResource = res;
         s->partData = mapped->pData;
         s->partBytes = 0;
         mapBufferDesc(res, &s->partBytes);
+        mappedReadProbeOnce(res, "plume constants block", mapped->pData, s->partBytes);
     }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
@@ -3407,31 +3467,52 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
         guardedBudget(g_panelCbBudget, [&] {
-            memcpy(s->shadow, s->mappedData, s->mappedBytes);
+            unmapprobe::g_probe.timed(unmapprobe::kPanel, [&]() -> uint64_t {
+                memcpy(s->shadow, s->mappedData, s->mappedBytes);
+                return s->mappedBytes;
+            });
             s->shadowBytes = s->mappedBytes;
         });
         s->mappedResource = nullptr;
         s->mappedData = nullptr;
         s->mappedBytes = 0;
     }
+    bool camBlockReadThisUnmap = false;   // the plume block below is the camera block when this is set
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real
         // Unmap the memory is no longer ours to look at.
         //
         // Four readers of one block, each on a budget of its own and each run
         // whatever the ones before it did (g_glitchCameraBudget says why).
+        //
+        // Each is counted and timed by unmap_read_probe.h only on a call that will read the mapped block
+        // (the reader's own first early-outs, asked here), so "not exercised" means it never read.
+        camBlockReadThisUnmap = true;
+        const bool camHasRows = s->camBytes >= 944 * 4;
         guardedBudget(g_glitchCameraBudget, [&] {
-            glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+            unmapprobe::g_probe.timedIf(glitchFrameWindowOpen(), unmapprobe::kCamGlitch,
+                                        [&]() -> uint64_t {
+                glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+                return 12;
+            });
         });
         guardedBudget(g_sunglareRowsBudget, [&] {
             // And the live feed: the true view matrix at offset 932 of
             // the same block, named by the two-shot dump.
-            sunglareSceneRows(s->camData, s->camBytes);
+            unmapprobe::g_probe.timedIf(sunglareWorldActive() && camHasRows, unmapprobe::kCamSunglare,
+                                        [&]() -> uint64_t {
+                sunglareSceneRows(s->camData, s->camBytes);
+                return 48;
+            });
         });
         guardedBudget(g_temporalCameraBudget, [&] {
             // The same rows, kept pending for the temporal pass's camera
             // motion source until the frame's first eye draw claims them.
-            temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
+            unmapprobe::g_probe.timedIf(temporalPassWantsFssChrome() && camHasRows, unmapprobe::kCamTemporal,
+                                        [&]() -> uint64_t {
+                temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
+                return 56;
+            });
         });
         s->camResource = nullptr;
         s->camData = nullptr;
@@ -3439,22 +3520,36 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     }
     if (res == s->sceneCbResource && s->sceneCbData) {
         guardedBudget(g_sunglareRowsBudget, [&] {
-            sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+            unmapprobe::g_probe.timedIf(sunglareWorldActive() && s->sceneCbBytes >= 944 * 4, unmapprobe::kSceneCb,
+                                        [&]() -> uint64_t {
+                sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+                return 48;
+            });
         });
         s->sceneCbResource = nullptr;
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
     }
     if (res == s->partResource && s->partData) {
-        guardedBudget(g_particleCaptureBudget,
-                      [&] { particleCapture(s->partData, s->partBytes); });
+        // The shadow keeps the 160 bytes the fix reads, not the whole block (particle_capture_core.h); the probe
+        // counts the bytes actually read from the mapped pointer.
+        unmapprobe::g_probe.noteParticleCapture(camBlockReadThisUnmap);
+        guardedBudget(g_particleCaptureBudget, [&] {
+            unmapprobe::g_probe.timed(unmapprobe::kParticle, [&]() -> uint64_t {
+                return particleCapture(res, s->partData, s->partBytes);
+            });
+        });
         s->partResource = nullptr;
         s->partData = nullptr;
         s->partBytes = 0;
     }
     if (res == s->bbResource && s->bbData) {
-        guardedBudget(g_billboardCaptureBudget,
-                      [&] { billboardCapture(s->bbData, s->bbBytes); });
+        guardedBudget(g_billboardCaptureBudget, [&] {
+            unmapprobe::g_probe.timed(unmapprobe::kBillboard, [&]() -> uint64_t {
+                billboardCapture(s->bbData, s->bbBytes);
+                return s->bbBytes < 512 ? s->bbBytes : 512;
+            });
+        });
         s->bbResource = nullptr;
         s->bbData = nullptr;
         s->bbBytes = 0;
@@ -3718,6 +3813,9 @@ __declspec(noinline) void crispHudTonemapReissue(ID3D11DeviceContext* self, char
         GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
         census.markIssued();   // the tonemap re-issue: its scope opens only when the begin admitted the draw
         pureDrawReissue(self, kind, count, instances, args);
+        // fix.sharp_weapons: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
+        // then the scene with the light); the layer binds each step's HDR source and blend, and says when no step is left.
+        while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);
         uiLayerCrispToneEnd(self);
     }
 }
@@ -3817,6 +3915,9 @@ __declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawV
 __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
+    // fix.ui_quality off with fix.sharp_weapons on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
+    // (kind 1). The post-tonemap target's interface rules (and their facts, probes and census) belong to fix.ui_quality.
+    if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;
     f.vs = bindingShaderHash(BindSlot::Vs);
     f.nativeOnFoot = nativeOnFootSharpHudWanted();   // F26: the on-foot HUD family is named only while the sharp on-foot HUD is on, on foot
     // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
@@ -3825,7 +3926,9 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
     // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
-    if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
+    else if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
+        f.ps = bindingShaderHash(BindSlot::Ps);
+    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -3937,6 +4040,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // nothing armed to clean up.
         }
     } uiDepthScope(self);
+    // The roll-free billboard block (particle_fix.h, billboard_rollfree.h): a camera-facing billboard whose vertex shader is
+    // not transcribed gets a copy of the scene block with the roll taken out of rows 277/278 at VERTEX slot 1 for this draw
+    // and every re-issue of it below; put back on every way out. Owner context only. Never a verdict of its own: the draw
+    // goes through the whole ladder as the game made it.
+    struct RollFreeScope {
+        ID3D11DeviceContext* ctx;
+        ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
+    } rollFreeScope{self};
+    if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -4011,7 +4123,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionLive() && screenMotionRecognize())
                 uiLayerMapsNoteRecognised();
         }
-    } else if (owner && uiLayerLive() && v != DrawVerdict::kQuadSkip) {
+    } else if (owner && uiLayerQualityLive() && v != DrawVerdict::kQuadSkip) {
         // The two composites into a target vScreen does not call an eye's:
         // counted for the family census (one hash load a draw while live).
         const uint64_t vs = bindingShaderHash(BindSlot::Vs);
@@ -6658,6 +6770,17 @@ void vScreenFrameBoundary() {
     // The camera-buffer tap's frame counter, which the engine fix's window
     // tests count in.
     glitchFrameBoundary();
+    // The particle billboards' target: let go of it when no plume or flare has been drawn for a while, so a
+    // session without smoke does not copy the scene constants on every write (particle_capture_core.h).
+    particleFrameBoundary();
+    // The Unmap tee's reads of the game's mapped pointers, counted and timed: one line every 30 s, a reader
+    // that never read among them as "not exercised" (unmap_read_probe.h). Log only.
+    {
+        char line[1024];
+        if (unmapprobe::frameTick(unmapprobe::g_probe, nowMs(), line, sizeof line,
+                                  [](char* out, size_t cap) { particleDescribeTarget(out, cap); }))
+            Log::get().note("%s", line);
+    }
     // The engine fix's per-frame service: publishes the frame number its
     // consumer hook reads (that hook can run on a scheduler job thread), logs
     // a held frame, closes its event window, and owes the temporal pass its

@@ -765,8 +765,8 @@ void pins() {
                               "\"ui quality: families: %s.\""}) &&
                has(whole, "UiSceneCompositeWindow scene;") && has(whole, "void uiLayerNoteCompositeTaken() { g_win.scene.noteTaken(); }") &&
                has(whole, "void uiLayerNoteCompositeLeft(uint64_t vs, uint64_t ps, int family) { g_win.scene.noteLeft(vs, ps, family); }") &&
-               countOf(whole, "++g_win.scene.framesLive;") == 1 && has(whole, "if (detail::g_uiLayerLive) ++g_win.scene.framesLive;") &&
-               inOrder(whole, {"++g_win.frames;", "if (detail::g_uiLayerLive) ++g_win.scene.framesLive;", "g_frameTakenDraws = 0;"}) &&
+               countOf(whole, "++g_win.scene.framesLive;") == 1 && has(whole, "if (detail::g_uiQualityLive) ++g_win.scene.framesLive;") &&
+               inOrder(whole, {"++g_win.frames;", "if (detail::g_uiQualityLive) ++g_win.scene.framesLive;", "g_frameTakenDraws = 0;"}) &&
                countOf(whole, "g_win=Window{};") == 1;
     };
     check(!logTot.empty() && layerPlaces(logTot, layerAll),
@@ -776,7 +776,7 @@ void pins() {
         std::string twice = layerAll, wrongState = logTot, noLive = layerAll, notMember = layerAll, outOfOrder = logTot;
         twice += squeeze("uiSceneCompositeFormat(composites, sizeof(composites), g_win.scene, g_win.frames, true);");
         wrongState = edited(wrongState, "uiDepthWantsDraws());", "true);");
-        noLive = edited(noLive, "if (detail::g_uiLayerLive) ++g_win.scene.framesLive;", "++g_win.scene.framesLive;");
+        noLive = edited(noLive, "if (detail::g_uiQualityLive) ++g_win.scene.framesLive;", "++g_win.scene.framesLive;");
         notMember = edited(notMember, "UiSceneCompositeWindow scene;", "");
         outOfOrder = edited(outOfOrder, "\"ui quality: families: %s.\"", "\"ui quality: families moved: %s.\"");
         check(!layerPlaces(logTot, twice) && !layerPlaces(wrongState, layerAll) && !layerPlaces(logTot, noLive) && !layerPlaces(logTot, notMember) && !layerPlaces(outOfOrder, layerAll),

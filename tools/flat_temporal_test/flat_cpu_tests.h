@@ -228,7 +228,8 @@ inline int flatCpuTests() {
             "coverage 0.000 ms (calls 0.0) + projection readiness 0.000 ms (calls 0.0) + cb shadows 0.000 ms (calls 0.0) + "
             "camera witness 0.030 ms (calls 3.0) + engine motion draw wrapper 0.000 ms (calls 0.0) + resolve 0.000 ms (calls 0.0) + "
             "backend 0.000 ms (calls 0.0) + discovery 0.000 ms (calls 0.0) + state trackers 0.000 ms (calls 0.0) + "
-            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
+            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + offscreen fast path 0.000 ms (calls 0.0) + "
+            "engine motion hooks 0.000 ms (calls 0.0)";
         expect(std::string(lines.line[0]).compare(0, promised.size(), promised) == 0,
                "the first line has the promised shape, in the promised order, with the figures the frames spent");
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),
@@ -403,6 +404,29 @@ inline int flatCpuTests() {
         expect(has(text, "engine motion hooks 0.020 ms (calls 1.0)"),
                "the render thread's engine motion hooks are the tees alone: the draw side, apply and patch are not counted twice");
         expect(has(text, "EDVR per frame total 0.020 ms"), "and the total is the same 0.020 ms, no draw side in it");
+        expect(has(text, "engine motion hooks by part (render thread, per clocked frame): emit 0.000 ms (calls 0.0)") && has(text, "tees 0.020 ms (calls 1.0)"),
+               "the render thread's hooks are also printed a part at a time: the tees hold the 0.020 ms, the first token names the list");
+        {   // The by-part tokens cover exactly the parts the hooks total folds, so they add up to it.
+            double folded = 0, listed = 0;
+            for (unsigned p = 0; p < emcpu::kParts; ++p)
+                if (flatcpu::emFolded(p) && emcpu::kInfo[p].clocked) folded += r.emRenderMs[p];
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) listed += r.emRenderMs[flatcpu::kEmNames[i].part];
+            expect(nearly(folded, listed), "the by-part tokens cover exactly the parts the hooks total folds");
+            // Every name carries the "engine " the by-part tokens drop, and every part has its own token, in order, with its own figures
+            // (the other threads' list holds the same names behind "engine ", so each is looked for behind the separator that only this list uses).
+            bool prefixes = true, tokens = true;
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) {
+                prefixes = prefixes && std::strncmp(flatcpu::kEmNames[i].name, "engine ", 7) == 0;
+                const unsigned p = flatcpu::kEmNames[i].part;
+                char ms[32], calls[32];
+                std::snprintf(ms, sizeof(ms), "%.3f", r.emRenderMs[p] / 20.0);
+                flatcpu::callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / 20.0);
+                const std::string token = std::string(i ? ", " : "engine motion hooks by part (render thread, per clocked frame): ") +
+                                          (flatcpu::kEmNames[i].name + 7) + " " + ms + " ms (calls " + calls + ")";
+                tokens = tokens && has(text, token);
+            }
+            expect(prefixes && tokens, "all eight by-part tokens are there, in order, each with its own figures");
+        }
         expect(has(text, "engine emit 0.030 ms (calls 1.0)") && has(text, "engine copier 0.010 ms (calls 1.0)") &&
                has(text, "engine merge 0.006 ms (calls 1.0)") && has(text, "engine clear 0.004 ms (calls 1.0)"),
                "the emit, copier, merge and clear callbacks are on the other threads' line, per sampled frame");
@@ -506,6 +530,7 @@ inline int flatCpuTests() {
         run.census->idle();
         expect(!run.census->running(), "idle stops it");
         expect(flatcpu::g_gate.load() == 0 && emcpu::g_gate.load() == 0, "both gates are closed");
+        expect(emcpu::g_renderThreadId.load() == 0, "and the render thread's id is withdrawn with them");
         const flatcpu::Slot* s = flatcpu::t_ctx.slot;
         const uint64_t callsBefore = s ? s->cell[flatcpu::kReduce].calls.load() : 0;
         { flatcpu::Scope one(flatcpu::kReduce); t_now += 5; }
@@ -721,11 +746,13 @@ inline int flatCpuTests() {
         Run run;
         const uint64_t tid = GetCurrentThreadId();
         unsigned unclocked = 0, clockedOnly = 0, sampled = 0;
-        bool gatesAgree = true, gateWords = true;
+        bool gatesAgree = true, gateWords = true, tidEveryFrame = true;
         int64_t unclockedReads = 0, clockedReads = 0;
         for (int i = 0; i < 320; ++i) {
             run.frame(15625, false, [&] {
                 const uint64_t gate = flatcpu::g_gate.load();
+                // The render thread's id does not depend on the gate: it is there on the 300 frames whose gate names nobody.
+                tidEveryFrame = tidEveryFrame && emcpu::g_renderThreadId.load() == tid;
                 gatesAgree = gatesAgree && gate == emcpu::g_gate.load();
                 const int64_t before = t_reads;
                 for (int s = 0; s < 40; ++s) { flatcpu::Scope one(flatcpu::kReduce); }
@@ -739,6 +766,7 @@ inline int flatCpuTests() {
         }
         expect(gateWords, "the gate is one of three words: nobody, the render thread, everybody");
         expect(gatesAgree, "and engine motion's gate is the same word");
+        expect(tidEveryFrame, "and the render thread's id is published on every frame, the unclocked ones (gate = nobody) too");
         expect(unclocked == 300 && clockedOnly == 10 && sampled == 10,
                "320 frames: 300 clock no one, 10 clock the render thread, 10 clock every thread (and the render thread with it)");
         expect(unclockedReads == 0, "a scope on a frame that clocks no one reads the clock not once, in this instrument or engine motion's");
@@ -879,15 +907,69 @@ inline int flatCpuTests() {
         expect(r.renderCalls[flatcpu::kInject] == 0 && r.otherCalls[flatcpu::kInject] == 0, "and no call is counted");
         flatcpu::Lines lines;
         flatcpu::formatWindow(r, &lines);
-        expect(has(joined(lines), "render thread: clocks off (EDVR_FLAT_CPU_CLOCKS=1 turns them on)"), "the line says the clocks are off");
+        expect(has(joined(lines), "render thread: CPU timing is off, no thread clocked (EDVR_FLAT_CPU_CLOCKS=1 also turns it on)"), "the line says the timing is off");
+        expect(has(joined(lines), "CPU timing is off; turn it on in F8 > Debug > CPU timing in the log"),
+               "and how to turn it on: the first line leads with it, after the present figures that stay");
+        expect(has(joined(lines), "present p50 ") && has(joined(lines), "GPU frame ") && has(joined(lines), "engine motion wrapper D3D calls") &&
+                   has(joined(lines), "query shortcuts"),
+               "the cheap part of the line stays: present p50/p95, the GPU spans, the wrapper's D3D calls and the query counts");
         expect(!r.floor.measured && !r.emFloor.measured, "the first window's close calibrates no floor: nothing clocked needs one");
         expect(!has(joined(lines), "one in ") && !has(joined(lines), "one frame in 16") && !has(joined(lines), "one frame in 32"),
                "and the line claims no clocking schedule");
-        expect(has(joined(lines), "other threads: clocks off"), "the other threads' part says so too");
-        // The policy: on under Windows, off under Wine, the variable deciding it either way.
-        expect(flatcpu::clocksPolicy(false, nullptr) && !flatcpu::clocksPolicy(true, nullptr), "on under Windows, off under Wine");
-        expect(flatcpu::clocksPolicy(true, "1") && !flatcpu::clocksPolicy(false, "0"), "EDVR_FLAT_CPU_CLOCKS=1/0 overrides both");
-        expect(flatcpu::clocksPolicy(false, "x") && !flatcpu::clocksPolicy(true, "x"), "any other value leaves the default");
+        expect(has(joined(lines), "other threads: CPU timing is off"), "the other threads' part says so too");
+        // The policy: the key decides (off by default), the variable decides it either way.
+        expect(!flatcpu::clocksPolicy(false, nullptr) && flatcpu::clocksPolicy(true, nullptr), "off unless advanced.flat_cpu_timing is on");
+        expect(flatcpu::clocksPolicy(false, "1") && !flatcpu::clocksPolicy(true, "0"), "EDVR_FLAT_CPU_CLOCKS=1/0 overrides the key either way");
+        expect(!flatcpu::clocksPolicy(false, "x") && flatcpu::clocksPolicy(true, "x"), "any other value leaves the key's say");
+    }
+
+    // ---- 19: the timing switch (advanced.flat_cpu_timing), live ------------------------------------------------------------------------
+    // Off: no scope on the render thread reads a clock, for a window and its close. Turning it on clocks from the next frame and calibrates at the close
+    // of its first window; turning it off closes the gates at once and starts a fresh window.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run;
+        run.census.reset(new flatcpu::Census(flatcpu::kRenderPeriod, false));
+        auto work = [] {
+            flatcpu::Scope outer(flatcpu::kOther);
+            { flatcpu::Scope one(flatcpu::kReduce); t_now += 5; }
+            { flatcpu::Scope two(flatcpu::kTrace); t_now += 5; }
+            { emcpu::Scope hook(emcpu::kEmit); t_now += 5; }
+            { emcpu::Scope draw(emcpu::kDraw); t_now += 5; }
+        };
+        for (int i = 0; i < 320; ++i) run.frame(15625, false, work);
+        flatcpu::WindowReport r;
+        expect(run.census->take(run.now, false, r) && r.clocksOff && r.renderClockedFrames == 0, "timing off: the window closes unclocked");
+        expect(t_reads == 0, "timing off: not one clock read in 320 frames of scopes, engine motion's included, nor at the window's close");
+        for (unsigned f = 0; f < flatcpu::kFamilies; ++f)
+            if (r.renderCalls[f] != 0 || r.renderMs[f] != 0.0) { expect(false, "timing off: a family has a count or a time"); break; }
+        expect(!r.floor.measured, "timing off: no floor was calibrated");
+
+        // On, live.
+        const bool changed = run.census->setClocks(true, run.now);
+        expect(changed && run.census->clocks() && !run.census->setClocks(true, run.now), "turning it on is a change, and turning it on again is not");
+        for (int i = 0; i < 320; ++i) run.frame(15625, false, work);
+        flatcpu::WindowReport on;
+        expect(run.census->take(run.now, false, on) && !on.clocksOff, "on: the next window knows its clocks were on");
+        expect(on.renderClockedFrames == 20 && on.renderCalls[flatcpu::kReduce] == 20, "on: one frame in 16 is clocked from the next frame (20 of 320)");
+        expect(on.floor.measured && t_reads > 0, "on: the floor is calibrated at the close of the first window");
+        flatcpu::Lines onLines;
+        flatcpu::formatWindow(on, &onLines);
+        expect(!has(joined(onLines), "CPU timing is off") && has(joined(onLines), "render thread clocked on 20 of 320 frames"),
+               "on: the line carries the timing and no 'off' notice");
+
+        // Off again: the gates close at once, mid-window; a scope after the change reads no clock; the window starts afresh.
+        for (int i = 0; i < 40; ++i) run.frame(15625, false, work);
+        const int64_t readsBefore = t_reads;
+        expect(run.census->setClocks(false, run.now), "turning it off is a change");
+        work();
+        expect(t_reads == readsBefore, "off: a scope straight after the switch reads no clock");
+        for (int i = 0; i < 320; ++i) run.frame(15625, false, work);
+        flatcpu::WindowReport off;
+        expect(run.census->take(run.now, false, off) && off.clocksOff && off.renderClockedFrames == 0 && off.frames == 320,
+               "off: the window after the switch holds only the frames after it, none clocked");
+        expect(t_reads == readsBefore, "off: and not one clock read since the switch");
     }
 
     fake(0);

@@ -110,12 +110,16 @@ struct DrawCache {
     bool eye = false;
     int family = -1;   // the family whose substituted shaders are bound, -1 none
     bool skin = false; // F2: the substituted draw is a skinned family's with target 7 bound (its instance-stream entries are listed: noteSkinDrawSlow)
+    bool guarded = false;   // the overlay guard's private t3 is bound for the draws of this run (kept bound lazily, 2026-10-16 round 4)
+    uint32_t srv3 = 0;      // the shadow's generation of PS t3 when it was bound: a game set of t3 over the private one takes the slow half
 };
 constexpr int kMaxFamilies = 16;   // kFamilies must fit: the static_assert in engine_velocity.cpp
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
 extern uint64_t g_stateCalls;                  // owner thread only: the draw wrapper's D3D context calls (see below)
+extern uint64_t g_guardedFast;                 // owner thread only: guarded overlay draws that took the cache's fast path (the lazy guard keeps its t3 bound)
+extern bool g_guardTrustOff;                   // rig only: the overlay guard reads the context on every draw, as before 2026-10-16
 // The resources an open eye-frame's snapshot came from (eye0 pool, eye0
 // scene, eye1 pool, eye1 scene, then the on-foot source's pool and scene).
 // Identities only, never dereferenced here.
@@ -159,11 +163,14 @@ inline bool engineVelocityLiveNow() {
 inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     using namespace engine_velocity_detail;
     if (!live.load(std::memory_order_relaxed)) return;
+    bool slow = false;
     if (cache.vs != bindingGeneration(BindSlot::Vs) || cache.ps != bindingGeneration(BindSlot::Ps) ||
         cache.rtv != bindingGeneration(BindSlot::Rtv0) || cache.dsv != bindingGeneration(BindSlot::Dsv0) ||
         cache.blend != bindingGeneration(BindSlot::Blend) || cache.pool != bindingGet(BindSlot::VsSrv33) ||
-        cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye) {
+        cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye ||
+        (cache.guarded && cache.srv3 != bindingGeneration(BindSlot::PsSrv3))) {
         beforeDrawSlow(ctx, rtv0Eye);
+        slow = true;
     } else if (((++g_psShadowProbeN) & 63u) == 0u &&
                (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
                 engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps)))) {
@@ -176,6 +183,7 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         psShadowProbe(ctx);
     }
     if (cache.family >= 0) ++familyDraws[cache.family];
+    if (cache.guarded && !slow) ++g_guardedFast;   // a guarded draw the cache let through: the slow half counts its own
 }
 
 // F2: the instanced draws' arguments, told right after engineVelocityBeforeDraw (vscreen's DrawInstanced and DrawIndexedInstanced thunks). A skinned
