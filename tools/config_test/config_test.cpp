@@ -312,7 +312,11 @@ static void noteCases(const std::wstring& scratch) {
         "rangebad = twelve\r\n"     // getIntInRange, not a number
         "[fix]\r\n"
         "zeta = 7\r\n"              // a moved key: the audit says so
-        "mystery2 = 9\r\n";         // a key nothing reads: the audit says so
+        "mystery2 = 9\r\n"          // a key nothing reads: the audit says so
+        "[addons]\r\n"
+        "x = abc123\r\n"            // an addon approval: dynamic, never in the static table
+        "[addon.x.h]\r\n"
+        "k = 3\r\n";                // an addon setting: likewise
     const std::string second = first + "# written again, same values\r\n";
     const std::string valid =
         "[once]\r\n"
@@ -396,7 +400,10 @@ static void noteCases(const std::wstring& scratch) {
         {"fix.zeta has moved to experimental.zeta", 1,
          "an audit finding raised before the log opened is written once, and not "
          "again by a reload"},
-        {"does not read: fix.mystery2", 1, "...and so is the audit's dead-line note"},
+        {"1 line(s) name settings this build does not read: fix.mystery2", 1,
+         "...and so is the audit's dead-line note, naming only the misspelling"},
+        {"addons.x", 0, "an addon approval is not reported as a setting this build does not read"},
+        {"addon.x.h.k", 0, "...nor is an addon's own setting"},
     };
     for (const auto& n : kNeeds) {
         const int got = countOf(body, n.needle);
