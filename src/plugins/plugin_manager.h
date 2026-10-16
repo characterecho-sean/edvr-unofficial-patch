@@ -48,15 +48,16 @@ public:
 
     // Discovers plugins in <rootDir>\plugins\ without loading unapproved DLLs.
     // Loads only approved plugins whose SHA-256 matches [addons] in config.
-    // Plugins are VR-only. Launched in a flat session this only remembers rootDir: discovery, approval and loading
-    // wait for the first switch into VR (onProfileSwitched).
+    // Plugins are VR-only: they run in the Vr and LegacyVr profiles, and every other profile (Flat, Passthrough) is
+    // dormant. Launched in a dormant profile this only remembers rootDir: discovery, approval and loading wait for
+    // the first switch into VR (onProfileSwitched).
     bool initialize(const std::wstring& rootDir);
     void shutdown();
 
     // The runtime profile just changed (called from the mode watch once the new profile is in effect). Switching to
-    // flat suspends the addons: no callback is made, their input ownership is released and their F8 rows are hidden.
-    // Switching to VR resumes them, running the deferred discovery first when the session began flat. Nothing is
-    // unloaded at a switch, so an addon's state and settings survive a trip through a flat session.
+    // a dormant profile (Flat, Passthrough) suspends the addons: no callback is made, their input ownership is
+    // released and their F8 rows are hidden. Switching to VR resumes them, running the deferred discovery first when
+    // the session began dormant. Nothing is unloaded at a switch, so an addon's state and settings survive the trip.
     void onProfileSwitched();
 
     bool hasActivePlugins();
@@ -86,7 +87,7 @@ private:
     void unloadAll();
     // Finds the candidates, evaluates approval and loads the approved ones. Once per initialize, in a VR profile.
     void discoverAndLoad();
-    // True when no callback may be made and nothing may load: suspended, or the profile has just turned flat.
+    // True when no callback may be made and nothing may load: suspended, or the profile has just left VR.
     bool dormantLocked() const;
 
     // Lock order, global: this mutex is taken BEFORE the menu's plugin-settings mutex, never after it.
@@ -96,7 +97,7 @@ private:
     std::recursive_mutex m_mutex;
     bool m_initialized = false;
     bool m_discovered = false;   // discoverAndLoad has run since initialize
-    bool m_dormant = false;      // suspended for a flat session: loaded addons stay loaded, but nothing calls them
+    bool m_dormant = false;      // suspended outside VR (Flat, Passthrough): loaded addons stay loaded, but nothing calls them
     std::wstring m_rootDir;
     std::vector<CandidatePlugin> m_candidates;
     uint32_t m_nextCandidateId = 1;   // never reset, so an id from before a re-initialise cannot name a new candidate
