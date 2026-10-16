@@ -181,6 +181,28 @@ inline XrPosef xrFromSeatPose(const SeatPose& s) {
   p.orientation={0.0f,float(std::sin(s.yaw*0.5)),0.0f,float(std::cos(s.yaw*0.5))};
   return p;
 }
+// F61 (TEMPORARY, the rotation calibration): v rotated by the unit quaternion q (x, y, z, w).
+inline void seatQuatApply(const double q[4],const double v[3],double out[3]) {
+  const double t[3]={2*(q[1]*v[2]-q[2]*v[1]),2*(q[2]*v[0]-q[0]*v[2]),2*(q[0]*v[1]-q[1]*v[0])};
+  out[0]=v[0]+q[3]*t[0]+(q[1]*t[2]-q[2]*t[1]);
+  out[1]=v[1]+q[3]*t[1]+(q[2]*t[0]-q[0]*t[2]);
+  out[2]=v[2]+q[3]*t[2]+(q[0]*t[1]-q[1]*t[0]);
+}
+// F61: the pose p (a space's pose in LOCAL) turned by `angle` radians about the unit `axis` through `pivot` (both LOCAL; right-hand rule).
+// A seated space turned so about the head's right axis turns the head's reported pitch by -angle and leaves the head where it was. Zero is p.
+inline XrPosef seatPosePitched(const XrPosef& p,const double pivot[3],const double axis[3],double angle) {
+  if(angle==0.0) return p;
+  XrPosef out=p;
+  const double sh=std::sin(0.5*angle);
+  const double q[4]={axis[0]*sh,axis[1]*sh,axis[2]*sh,std::cos(0.5*angle)};
+  const double v[3]={p.position.x-pivot[0],p.position.y-pivot[1],p.position.z-pivot[2]};
+  double rv[3];seatQuatApply(q,v,rv);
+  out.position={float(pivot[0]+rv[0]),float(pivot[1]+rv[1]),float(pivot[2]+rv[2])};
+  const double b[4]={p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w};   // q * b
+  out.orientation={float(q[3]*b[0]+q[0]*b[3]+q[1]*b[2]-q[2]*b[1]),float(q[3]*b[1]-q[0]*b[2]+q[1]*b[3]+q[2]*b[0]),
+                   float(q[3]*b[2]+q[0]*b[1]-q[1]*b[0]+q[2]*b[3]),float(q[3]*b[3]-q[0]*b[0]-q[1]*b[1]-q[2]*b[2])};
+  return out;
+}
 inline std::string seatUtf8(const std::wstring& w) {
   if(w.empty())return std::string();
   const int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);
@@ -375,6 +397,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
   double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
   uint64_t eyeApplies=0,eyeRefusals=0,eyeLineMs=0;const char* eyeWhy="";bool eyeFirstSeen=false;
+  // F61 (TEMPORARY, the rotation calibration, fix.native_on_foot_rot_calibrate): the seated yaw and pitch (radians) the provider wants the
+  // seated origin turned by about the head (version 9 output's reservedOffset[0..1]), and what it carries now. The yaw turns lookSeated about
+  // the head as lookPoll does (eyeApplied folded the same way). The pitch, which a SeatPose cannot carry, is an overlay about the head's right
+  // axis (rotAxis through rotPivot, both LOCAL, captured when the rotation leaves zero) composed onto lookSeated at every replace
+  // (seatedPoseFor). Both zero (the key off): every replace is exactly xrFromSeatPose(lookSeated), as before F61.
+  double rotWanted[2]={0,0},rotApplied[2]={0,0},rotPivot[3]={0,0,0},rotAxis[3]={1,0,0};
+  uint64_t rotApplies=0,rotRefusals=0,rotLineMs=0;const char* rotWhy="";
   unsigned seatResetCount=0,seatContextLines=0;
   SeatContext lastTracedContext{};
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
@@ -1472,6 +1501,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       eyeProviderSeen=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_8;
       for(int i=0;i<3;++i)eyeWanted[i]=double(featureFrame.eyeAlign[i]);
       eyeSerialSeen=featureFrame.eyeAlignSerial;
+      // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (a version 9 answer only; anything not finite or over 0.5 rad reads 0).
+      for(int i=0;i<2;++i){const double a=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_9?double(featureFrame.reservedOffset[i]):0.0;
+        rotWanted[i]=(a==a&&std::fabs(a)<=0.5)?a:0.0;}
       if(eyeProviderSeen&&!eyeFirstSeen) {
         eyeFirstSeen=true;
         nativeTracePrintf("eye_align_runtime: first version 8 output (wanted_m=(%.4f,%.4f,%.4f), serial %u)\n",eyeWanted[0],eyeWanted[1],eyeWanted[2],unsigned(eyeSerialSeen));
@@ -3015,7 +3047,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
     lookWanted=lookBase;lookComp=0;
     eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;   // F33: the new origin carries no body-align translation either
+    rotApplied[0]=rotApplied[1]=0;                 // F61: nor the calibration rotation (rotPoll applies the wanted value again)
   }
+  // F61: the seated space's pose for the origin s with the calibration pitch overlay (seatPosePitched about rotAxis through rotPivot). Zero
+  // pitch is exactly xrFromSeatPose(s).
+  XrPosef seatedPoseFor(const SeatPose& s,double pitch) const {return seatPosePitched(xrFromSeatPose(s),rotPivot,rotAxis,pitch);}
   // F22: WaitGetPoses, no frame open. Turns the seated space about the HEAD by the change in the compensation the origin should carry. The head keeps
   // its place in the seated space and its reported yaw falls by the body turn the game made for our look input, so the world holds still. Never
   // gives up the frame. A refusal is traced and the origin is left as it was.
@@ -3052,7 +3088,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         const double c=std::cos(delta),s=std::sin(delta);
         const SeatPose next{hx+c*dx+s*dz,lookSeated.y,hz-s*dx+c*dz,lookSeated.yaw+delta};
         double yawBefore=0.0;const bool haveBefore=lookSeatedHeadYaw(&yawBefore);
-        const XrResult r=seated.replace(xrFromSeatPose(next));
+        const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1]));   // F61: zero pitch (the key off) is xrFromSeatPose(next)
         if(r!=XR_SUCCESS) {
           ++lookRefusals;lookWhy="seated space replace refused";
         } else {
@@ -3093,7 +3129,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       delta[0]=eyeWanted[0]-eyeApplied[0];delta[1]=eyeWanted[1]-eyeApplied[1];delta[2]=eyeWanted[2]-eyeApplied[2];   // lookRebase zeroes eyeApplied
       SeatPose next=lookSeated;
       next.x+=delta[0];next.y+=delta[1];next.z+=delta[2];
-      const XrResult r=seated.replace(xrFromSeatPose(next));
+      const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1]));   // F61: zero pitch (the key off) is xrFromSeatPose(next)
       if(r!=XR_SUCCESS) {
         ++eyeRefusals;eyeWhy="seated space replace refused";
       } else {
@@ -3109,6 +3145,75 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s\n",
           eyeWanted[0],eyeWanted[1],eyeWanted[2],eyeApplied[0],eyeApplied[1],eyeApplied[2],
           (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy);
+    }
+  }
+  // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.
+  bool rotSeatedHeadYawPitch(double* yawDeg,double* pitchDeg) {
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
+    const double q[4]={h.pose.orientation.x,h.pose.orientation.y,h.pose.orientation.z,h.pose.orientation.w},back[3]={0,0,-1};
+    double fwd[3];seatQuatApply(q,back,fwd);
+    *yawDeg=seatRadToDeg(seatPoseYawOf(h.pose).yaw);
+    *pitchDeg=seatRadToDeg(std::asin(std::fmax(-1.0,std::fmin(1.0,fwd[1]))));
+    return true;
+  }
+  // F61 (TEMPORARY): WaitGetPoses, no frame open. Turns the seated origin to the calibration rotation the provider wants: the yaw about the
+  // vertical through the head (lookPoll's turn), the pitch about the head's right axis (the seatedPoseFor overlay). The pivot and the axis are
+  // the head's when the rotation leaves zero, and are kept until it is zero again, so the return is the exact inverse. Each apply is traced
+  // (the rotation applied and the head's seated yaw and pitch before and after); a refusal at most every 5 s. Nothing runs while both the
+  // wanted and the applied rotation are zero (the key off).
+  void rotPoll() {
+    if(!features.acquired()||!seated.space()||!changes.active()) return;
+    const uint64_t now=GetTickCount64();
+    if((std::fabs(rotWanted[0]-rotApplied[0])>1e-6||std::fabs(rotWanted[1]-rotApplied[1])>1e-6)&&!state.frameOpen()) {
+      if(!lookSeatedKnown) lookRebase();   // lookRebase zeroes rotApplied
+      const double dyaw=rotWanted[0]-rotApplied[0];
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime rotTime=0;
+      const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&rotTime,counterNow,nullptr,boundary.estimateNow());
+      if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)||!(head.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        ++rotRefusals;rotWhy="head pose not located";
+      } else {
+        const bool fromZero=rotApplied[0]==0.0&&rotApplied[1]==0.0;
+        double pivot[3]={rotPivot[0],rotPivot[1],rotPivot[2]},axis[3]={rotAxis[0],rotAxis[1],rotAxis[2]};
+        if(fromZero) {
+          pivot[0]=head.pose.position.x;pivot[1]=head.pose.position.y;pivot[2]=head.pose.position.z;
+          const double q[4]={head.pose.orientation.x,head.pose.orientation.y,head.pose.orientation.z,head.pose.orientation.w},right[3]={1,0,0};
+          seatQuatApply(q,right,axis);
+        }
+        SeatPose next=lookSeated;
+        if(std::fabs(dyaw)>1e-9) {
+          const double c=std::cos(dyaw),s=std::sin(dyaw),dx=lookSeated.x-pivot[0],dz=lookSeated.z-pivot[2];
+          next=SeatPose{pivot[0]+c*dx+s*dz,lookSeated.y,pivot[2]-s*dx+c*dz,lookSeated.yaw+dyaw};
+        }
+        double yawBefore=0.0,pitchBefore=0.0;const bool haveBefore=rotSeatedHeadYawPitch(&yawBefore,&pitchBefore);
+        const double keepPivot[3]={rotPivot[0],rotPivot[1],rotPivot[2]},keepAxis[3]={rotAxis[0],rotAxis[1],rotAxis[2]};
+        for(int i=0;i<3;++i){rotPivot[i]=pivot[i];rotAxis[i]=axis[i];}
+        const XrResult r=seated.replace(seatedPoseFor(next,rotWanted[1]));
+        if(r!=XR_SUCCESS) {
+          for(int i=0;i<3;++i){rotPivot[i]=keepPivot[i];rotAxis[i]=keepAxis[i];}
+          ++rotRefusals;rotWhy="seated space replace refused";
+        } else {
+          lookSeated=next;
+          {const double ce=std::cos(dyaw),se=std::sin(dyaw);const double ex=eyeApplied[0],ez=eyeApplied[2];   // lookPoll's fold
+           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
+          rotApplied[0]=rotWanted[0];rotApplied[1]=rotWanted[1];
+          dropPoseFrame(PoseInvalidation::Other);
+          fillPollRing();
+          ++rotApplies;rotWhy="";
+          double yawAfter=0.0,pitchAfter=0.0;const bool haveAfter=rotSeatedHeadYawPitch(&yawAfter,&pitchAfter);
+          nativeTracePrintf("rot_calibrate_runtime,applied_yaw_deg=%.3f,applied_pitch_deg=%.3f,head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,"
+              "head_seated_pitch_before_deg=%.3f,head_seated_pitch_after_deg=%.3f,head_known=%u,pivot=%.3f/%.3f/%.3f,axis=%.3f/%.3f/%.3f,applies=%llu,refusals=%llu\n",
+              seatRadToDeg(rotApplied[0]),seatRadToDeg(rotApplied[1]),yawBefore,yawAfter,pitchBefore,pitchAfter,unsigned(haveBefore&&haveAfter),
+              rotPivot[0],rotPivot[1],rotPivot[2],rotAxis[0],rotAxis[1],rotAxis[2],(unsigned long long)rotApplies,(unsigned long long)rotRefusals);
+        }
+      }
+    }
+    if(rotWhy[0]&&now-rotLineMs>=5000) {
+      rotLineMs=now;
+      nativeTracePrintf("rot_calibrate_runtime,wanted_deg=(%.3f,%.3f),applied_deg=(%.3f,%.3f),applies=%llu,refusals=%llu,why=%s\n",
+          seatRadToDeg(rotWanted[0]),seatRadToDeg(rotWanted[1]),seatRadToDeg(rotApplied[0]),seatRadToDeg(rotApplied[1]),
+          (unsigned long long)rotApplies,(unsigned long long)rotRefusals,rotWhy);
     }
   }
   // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
@@ -3154,6 +3259,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     lookPoll();   // F22: the look's compensation, applied with no frame open (never gives up the frame)
     eyePoll();    // F33: the body-align translation, applied the same way
+    rotPoll();    // F61 (TEMPORARY): the rotation calibration, applied the same way (nothing while its key is off)
     return moved;
   }
   enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};

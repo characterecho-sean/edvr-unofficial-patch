@@ -424,6 +424,10 @@ uint64_t engineVelocitySourceFreeFrames();
 // depth is another, or the rows were not seen. Pure reads under the module's own lock: no GPU work, no allocation.
 bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth);
 bool engineVelocitySourceCameraRows(float (&rows)[6][4]);
+// F61 (TEMPORARY, the native on-foot rotation calibration): the same rows without the this-frame test, with the present frame they were named
+// in and the present frame now (the native on-foot frame boundary runs after the present frame has moved on, so it reads them one frame late).
+// False when nothing was named yet or the rows were not seen. A pure read under the module's lock: no GPU work, no allocation.
+bool engineVelocityLastSourceCameraRows(float (&rows)[6][4], uint32_t* frame, uint32_t* frameNow);
 // F45 (TEMPORARY, the native on-foot marker probe): rows 270..275 of `scene` (a scene constants buffer read from constant 0) as the watch last
 // saw them written at an Unmap, when a scene watch slot follows that buffer and its rows are known. False otherwise. A pure read under the
 // module's lock: no GPU work, nothing staged.

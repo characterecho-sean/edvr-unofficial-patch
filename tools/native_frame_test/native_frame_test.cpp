@@ -1646,6 +1646,97 @@ int wmain(int argc, wchar_t** argv) {
                           nf::fitWeaponClamp(-1.0) == 0.0,
                       "F60: k_reach 0.82, the 0.10 m drop, the 0.59 m arm fallback (outside 0.2..1.5 m), the slider's 0.7 default and its 0..1 clamp");
             }
+            // F61 (TEMPORARY): the rotation calibration. The schedule (yaw, rest, pitch, rest at 1 s each, repeating), the three sources'
+            // deltas (yaw + = turned left, pitch + = up, each in its own axes), the head subtraction and the verdict rule.
+            {
+                double y[4], p[4];
+                for (int k = 0; k < 4; ++k) nf::rotCalCommandDeg(k, &y[k], &p[k]);
+                check(nf::rotCalStep(0) == 0 && nf::rotCalStep(999) == 0 && nf::rotCalStep(1000) == 1 && nf::rotCalStep(2000) == 2 &&
+                          nf::rotCalStep(3999) == 3 && nf::rotCalStep(4000) == 0 && nf::rotCalStep(6500) == 2 && y[0] == 5.0 && p[0] == 0.0 &&
+                          y[1] == 0.0 && p[1] == 0.0 && y[2] == 0.0 && p[2] == 5.0 && y[3] == 0.0 && p[3] == 0.0,
+                      "F61: the schedule is yaw +5 deg, rest, pitch +5 deg, rest, 1 s each, repeating every 4 s");
+                const double kR = 3.14159265358979323846 / 180.0;
+                const auto sumOf = [](const double r[3], const double u[3], const double f[3]) {
+                    nf::RotFrameSum s;
+                    s.add(r, u, f);
+                    return s;
+                };
+                double dy = 0.0, dp = 0.0, r[3], u[3], f[3];
+                // The render head (OpenXR, right-handed, -z forward): the seat's +10 deg yaw (about +y) is a left turn; +10 deg about +x is up.
+                const auto headAt = [&](double yawDeg, double pitchDeg, float m[12]) {
+                    const double cy = std::cos(yawDeg * kR), sy = std::sin(yawDeg * kR), cp = std::cos(pitchDeg * kR), sp = std::sin(pitchDeg * kR);
+                    const double R[3][3] = {{cy, sy * sp, sy * cp}, {0.0, cp, -sp}, {-sy, cy * sp, cy * cp}};   // Ry(yaw) Rx(pitch)
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) m[4 * i + j] = static_cast<float>(R[i][j]);
+                        m[4 * i + 3] = 0.0f;
+                    }
+                };
+                float h0[12], h1[12], h2[12];
+                headAt(0.0, 0.0, h0);
+                headAt(10.0, 0.0, h1);
+                headAt(0.0, 10.0, h2);
+                nf::rotAxesFromHead(h0, r, u, f);
+                const nf::RotFrameSum headBase = sumOf(r, u, f);
+                nf::rotAxesFromHead(h1, r, u, f);
+                const bool headYaw = nf::rotFrameDelta(headBase, sumOf(r, u, f), &dy, &dp) && std::fabs(dy - 10.0) < 1e-4 && std::fabs(dp) < 1e-4;
+                nf::rotAxesFromHead(h2, r, u, f);
+                const bool headPitch = nf::rotFrameDelta(headBase, sumOf(r, u, f), &dy, &dp) && std::fabs(dy) < 1e-4 && std::fabs(dp - 10.0) < 1e-4;
+                // The list-B camera C (rows right, up, forward; here a left-handed world: x right, y up, z forward): a left turn moves forward
+                // toward -x.
+                const float c0[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                const float cs = static_cast<float>(std::sin(10.0 * kR)), cc = static_cast<float>(std::cos(10.0 * kR));
+                const float c1[16] = {cc, 0, cs, 0, 0, 1, 0, 0, -cs, 0, cc, 0, 0, 0, 0, 1};
+                nf::rotAxesFromC(c0, r, u, f);
+                const nf::RotFrameSum cb = sumOf(r, u, f);
+                nf::rotAxesFromC(c1, r, u, f);
+                const bool cYaw = nf::rotFrameDelta(cb, sumOf(r, u, f), &dy, &dp) && std::fabs(dy - 10.0) < 1e-4 && std::fabs(dp) < 1e-4;
+                // cb1 270..273 (worldClip's layout): clip x = 1.2 right, clip y = 1.5 up + 0.1 forward (an off-centre projection), clip w =
+                // forward. The same left turn, then a 10 deg rise of forward toward up.
+                const auto clipOf = [](const double rt[3], const double up[3], const double fw[3], float rows[16]) {
+                    for (int i = 0; i < 3; ++i) {
+                        rows[4 * i + 0] = static_cast<float>(1.2 * rt[i]);
+                        rows[4 * i + 1] = static_cast<float>(1.5 * up[i] + 0.1 * fw[i]);
+                        rows[4 * i + 2] = static_cast<float>(0.01 * fw[i]);
+                        rows[4 * i + 3] = static_cast<float>(fw[i]);
+                    }
+                    for (int j = 0; j < 4; ++j) rows[12 + j] = 0.0f;
+                };
+                const double rt0[3] = {1, 0, 0}, up0[3] = {0, 1, 0}, fw0[3] = {0, 0, 1};
+                const double rt1[3] = {cc, 0, cs}, fw1[3] = {-cs, 0, cc};
+                const double up2[3] = {0, cc, -cs}, fw2[3] = {0, cs, cc};
+                float w0[16], w1[16], w2[16];
+                clipOf(rt0, up0, fw0, w0);
+                clipOf(rt1, up0, fw1, w1);
+                clipOf(rt0, up2, fw2, w2);
+                nf::rotAxesFromClip(w0, r, u, f);
+                const nf::RotFrameSum wb = sumOf(r, u, f);
+                nf::rotAxesFromClip(w1, r, u, f);
+                const bool wYaw = nf::rotFrameDelta(wb, sumOf(r, u, f), &dy, &dp) && std::fabs(dy - 10.0) < 1e-3 && std::fabs(dp) < 1e-3;
+                nf::rotAxesFromClip(w2, r, u, f);
+                const bool wPitch = nf::rotFrameDelta(wb, sumOf(r, u, f), &dy, &dp) && std::fabs(dy) < 1e-3 && std::fabs(dp - 10.0) < 1e-3;
+                const nf::RotFrameSum empty;
+                const bool emptyFalse = !nf::rotFrameDelta(empty, wb, &dy, &dp) && dy == 0.0 && dp == 0.0;
+                check(headYaw && headPitch && cYaw && wYaw && wPitch && emptyFalse,
+                      "F61: the render head, C and the cb1 rows all read a left turn as yaw +10 deg and a rise as pitch +10 deg (an empty window: none)");
+                // The verdict. A camera that follows the render pose: render -5 for a +5 command (head still) gives residual -5: yes, gain 1, sign -.
+                const nf::RotVerdict follow = nf::rotCalVerdict(-5.0, -5.0, 5.0);
+                // The head turned left 3 deg during the step (render -5 + 3 = -2): a following camera still reads gain 1, sign - (head subtracted).
+                const nf::RotVerdict moving = nf::rotCalVerdict(-2.0, -2.0, 5.0);
+                // A camera that follows only the head's own motion (+3) and not the seated rotation: residual 0: no.
+                const nf::RotVerdict physical = nf::rotCalVerdict(3.0, -2.0, 5.0);
+                // With the head still (render -5 for +5): a residual of 0.9 deg reads no, 1 deg reads yes (gain 0.2, sign -), and a camera
+                // turning the other way by 2.5 deg reads yes, gain 0.5, sign +.
+                const nf::RotVerdict underOne = nf::rotCalVerdict(0.9, -5.0, 5.0);
+                const nf::RotVerdict atOne = nf::rotCalVerdict(-1.0, -5.0, 5.0);
+                const nf::RotVerdict halfway = nf::rotCalVerdict(2.5, -5.0, 5.0);
+                check(follow.reaches && std::fabs(follow.gain - 1.0) < 1e-12 && follow.sign == -1 && follow.headDeg == 0.0 && moving.reaches &&
+                          std::fabs(moving.headDeg - 3.0) < 1e-12 && std::fabs(moving.gain - 1.0) < 1e-12 && moving.sign == -1 && !physical.reaches &&
+                          std::fabs(physical.residualDeg) < 1e-12 && !underOne.reaches && std::fabs(underOne.residualDeg - 0.9) < 1e-12 && atOne.reaches &&
+                          std::fabs(atOne.gain - 0.2) < 1e-12 && atOne.sign == -1 && halfway.reaches && std::fabs(halfway.gain - 0.5) < 1e-12 &&
+                          halfway.sign == 1 && nf::kRotCalReachDeg == 1.0,
+                      "F61: the verdict subtracts the head's own motion (render + command), reads no under 1 deg, gain |residual / command|, sign "
+                      "of residual / command");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

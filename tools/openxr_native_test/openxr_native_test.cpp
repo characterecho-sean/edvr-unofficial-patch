@@ -23,6 +23,7 @@
 #include "pose_cache_cases.h"
 #include "pose_cache_invalidation_cases.h"
 #include "pose_cache_lock_cases.h"
+#include "rot_calibrate_cases.h"   // F61 (TEMPORARY): the rotation calibration's pitch overlay
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -698,6 +699,7 @@ int selfTest() {
   edvr::openxr::test::runPoseCacheCases(check);
   edvr::openxr::test::runPoseCacheInvalidationCases(check);
   edvr::openxr::test::runPoseCacheLockCases(check);
+  edvr::openxr::test::runRotCalibrateCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");

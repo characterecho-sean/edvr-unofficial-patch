@@ -59,6 +59,7 @@ uint32_t g_lookReset = 0;   // F25: the reset serial
 float g_eyeAlign[3] = {};
 uint32_t g_eyeAlignSerial = 0;
 std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 render, 2 render_locked), carried in version 9 output
+float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
 // F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
 float g_renderHead[12] = {};
 float g_nowHeadPose[12] = {};
@@ -339,8 +340,12 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         result.eyeAlignSerial = g_eyeAlignSerial;
     }
     // F40: the now-pose choice (version 9 only; every older shape never learns of it).
-    if (wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_9)
+    if (wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_9) {
         result.nowPoseRender = g_nowPoseMode.load(std::memory_order_relaxed);
+        // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch in the retired offset slots (zero while its key is off).
+        result.reservedOffset[0] = g_rotCal[0];
+        result.reservedOffset[1] = g_rotCal[1];
+    }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
@@ -584,6 +589,12 @@ void nativeFrameSetEyeAlign(const float o[3], uint32_t serial) {
     std::lock_guard<std::mutex> lock(g_mutex);
     for (int i = 0; i < 3; ++i) g_eyeAlign[i] = o[i];
     g_eyeAlignSerial = serial;
+}
+// F61 (TEMPORARY): the rotation calibration's seated yaw and pitch the next version 9 beginFrame hands the runtime.
+void nativeFrameSetRotCalibrate(float yawRad, float pitchRad) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_rotCal[0] = yawRad == yawRad ? yawRad : 0.0f;
+    g_rotCal[1] = pitchRad == pitchRad ? pitchRad : 0.0f;
 }
 
 // F31: the latest frame's render head and "now" head (the d3d11 half's world markers).

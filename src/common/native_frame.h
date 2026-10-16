@@ -99,6 +99,10 @@ struct EdvrNativeFrameOutput {
     // reads nothing. The slots stay so the struct, and the four versions that
     // name its prefixes, keep their layout -- the two DLLs are copied apart by
     // hand, and a runtime from before the change then reads "offset off".
+    // F61 (TEMPORARY, the rotation calibration, fix.native_on_foot_rot_calibrate): in a version 9 answer only, reservedOffset[0] and [1] carry
+    // the seated rotation the runtime turns its seated origin by about the head: [0] the yaw about the vertical (radians, the seat's yaw sign),
+    // [1] the pitch about the head's right axis (radians). Zero when the key is off. reservedOffsetEnabled stays 0, so a runtime from before
+    // 2026-10-07 still reads "offset off"; a runtime older than F61 reads nothing here.
     float reservedOffset[3];
     float reservedYaw;
     uint32_t reservedOffsetEnabled, reservedOffsetGamePoses;
@@ -228,6 +232,9 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
 // frame thread takes a new value. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetEyeAlign(const float offsetSeated[3], uint32_t serial);
 void nativeFrameSetNowPose(uint32_t mode);   // F40/F42: the live now-pose mode (0 next, 1 render, 2 render_locked), carried in version 9 output
+// F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians, about the head), carried in version 9 output's reservedOffset[0..1].
+// Zero when fix.native_on_foot_rot_calibrate is off. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
+void nativeFrameSetRotCalibrate(float yawRad, float pitchRad);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 

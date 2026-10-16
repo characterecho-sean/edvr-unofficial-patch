@@ -1647,5 +1647,112 @@ inline void fitBlend(const double dHead[3], const double dW[3], double fit, bool
     for (int i = 0; i < 3; ++i) out[i] = dHead[i] + (dW[i] - dHead[i]) * w;
     if (horizontalOnly) out[1] = h1;
 }
+
+// ---- F61 (TEMPORARY instrument, fix.native_on_foot_rot_calibrate): does a seated rotation reach the game camera's orientation? -----------
+// The schedule: four 1 s steps, repeating: a seated yaw of +5 deg about the head, rest, a pitch of +5 deg about the head's right axis, rest.
+// No loop and no guard: the rotation is scheduled, never driven by an error. The rest is zero rotation.
+constexpr double kRotCalDeg = 5.0;
+constexpr uint64_t kRotCalStepMs = 1000;
+constexpr int kRotCalSteps = 4;
+constexpr double kRotCalReachDeg = 1.0;   // a residual under this reads "no"
+inline int rotCalStep(uint64_t elapsedMs) noexcept { return static_cast<int>((elapsedMs / kRotCalStepMs) % static_cast<uint64_t>(kRotCalSteps)); }
+// The commanded seated rotation for a step, degrees: yaw (the seat's sign: about the vertical, counter-clockwise from above) and pitch (about
+// the head's right axis, nose up positive).
+inline void rotCalCommandDeg(int step, double* yawDeg, double* pitchDeg) noexcept {
+    *yawDeg = step == 0 ? kRotCalDeg : 0.0;
+    *pitchDeg = step == 2 ? kRotCalDeg : 0.0;
+}
+inline const char* rotCalStepName(int step) noexcept {
+    return step == 0 ? "yaw +5 deg" : step == 2 ? "pitch +5 deg" : step == 1 ? "rest (after yaw)" : "rest (after pitch)";
+}
+// An orientation as three axes (right, up, forward) in one source's own coordinates, summed over a window. Every source is read so that
+// right is screen right, up screen up and forward the view direction, so a delta means the same thing whatever the source's handedness.
+struct RotFrameSum {
+    double r[3] = {}, u[3] = {}, f[3] = {};
+    uint32_t n = 0;
+    void add(const double rr[3], const double uu[3], const double ff[3]) noexcept {
+        for (int i = 0; i < 3; ++i) {
+            r[i] += rr[i];
+            u[i] += uu[i];
+            f[i] += ff[i];
+        }
+        ++n;
+    }
+};
+inline double rotDot(const double a[3], const double b[3]) noexcept { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+inline bool rotUnit(const double a[3], double out[3]) noexcept {
+    const double l = std::sqrt(rotDot(a, a));
+    if (!(l > 1e-9)) return false;
+    for (int i = 0; i < 3; ++i) out[i] = a[i] / l;
+    return true;
+}
+// a less its part along the unit f, made unit.
+inline bool rotOrtho(const double a[3], const double f[3], double out[3]) noexcept {
+    const double d = rotDot(a, f);
+    const double v[3] = {a[0] - d * f[0], a[1] - d * f[1], a[2] - d * f[2]};
+    return rotUnit(v, out);
+}
+// The rotation from window b's mean orientation to window a's, in b's own axes, degrees: yaw positive = the view turned LEFT (about up,
+// counter-clockwise seen from above: the seat's yaw sign), pitch positive = the view turned UP (about right). False when a window is empty or
+// its axes degenerate.
+inline bool rotFrameDelta(const RotFrameSum& b, const RotFrameSum& a, double* dYawDeg, double* dPitchDeg) noexcept {
+    *dYawDeg = *dPitchDeg = 0.0;
+    if (b.n == 0 || a.n == 0) return false;
+    double fb[3], rb[3], ub[3], fa[3];
+    if (!rotUnit(b.f, fb) || !rotOrtho(b.r, fb, rb) || !rotOrtho(b.u, fb, ub) || !rotUnit(a.f, fa)) return false;
+    const double x = rotDot(fa, rb), y = rotDot(fa, ub), z = rotDot(fa, fb);
+    const double kDeg = 180.0 / 3.14159265358979323846;
+    *dYawDeg = std::atan2(-x, z) * kDeg;
+    *dPitchDeg = std::atan2(y, std::sqrt(x * x + z * z)) * kDeg;
+    return true;
+}
+// The three sources' axes. The list-B camera C (4x4 row-major, view to world): rows 0, 1 and 2 read as right, up and forward (F24: +row 2
+// is forward). False when an axis is degenerate.
+inline bool rotAxesFromC(const float C[16], double r[3], double u[3], double f[3]) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        r[i] = C[i];
+        u[i] = C[4 + i];
+        f[i] = C[8 + i];
+    }
+    double t[3];
+    return rotUnit(r, t) && rotUnit(u, t) && rotUnit(f, t);
+}
+// The scene rows cb1 270..273 (worldClip's layout: clip_j = x rows[j] + y rows[4 + j] + z rows[8 + j] + rows[12 + j]). Forward is the clip w
+// column; right and up are the clip x and y columns less their part along forward (screen right and up by definition of clip space).
+inline bool rotAxesFromClip(const float rows[16], double r[3], double u[3], double f[3]) noexcept {
+    const double cx[3] = {rows[0], rows[4], rows[8]}, cy[3] = {rows[1], rows[5], rows[9]}, cw[3] = {rows[3], rows[7], rows[11]};
+    return rotUnit(cw, f) && rotOrtho(cx, f, r) && rotOrtho(cy, f, u);
+}
+// The runtime's render head (3x4 row-major rigid, seated space, OpenXR axes): x right, y up, -z forward (the rotation's columns).
+inline bool rotAxesFromHead(const float m[12], double r[3], double u[3], double f[3]) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        r[i] = m[4 * i + 0];
+        u[i] = m[4 * i + 1];
+        f[i] = -m[4 * i + 2];
+    }
+    double t[3];
+    return rotUnit(r, t) && rotUnit(u, t) && rotUnit(f, t);
+}
+// THE VERDICT. A seated rotation of +cmd turns the reported (render) head by -cmd (the seat moves, the head stays: lookPoll's rule, F22), so
+// the head's own motion over the step is render + cmd. The residual is the camera's change less the head's own motion; it reaches the camera
+// when the residual is 1 deg or more. gain = |residual / cmd|; sign = the sign of residual / cmd (-1: the camera turned with the reported head,
+// against the seated rotation, as a camera that follows the render pose would).
+struct RotVerdict {
+    bool reaches = false;
+    double headDeg = 0.0, residualDeg = 0.0, gain = 0.0;
+    int sign = 0;
+};
+inline RotVerdict rotCalVerdict(double camDeg, double renderDeg, double cmdDeg) noexcept {
+    RotVerdict v;
+    v.headDeg = renderDeg + cmdDeg;
+    v.residualDeg = camDeg - v.headDeg;
+    v.reaches = std::fabs(v.residualDeg) >= kRotCalReachDeg && std::fabs(cmdDeg) > 1e-9;
+    if (std::fabs(cmdDeg) > 1e-9) {
+        const double ratio = v.residualDeg / cmdDeg;
+        v.gain = std::fabs(ratio);
+        v.sign = ratio > 0.0 ? 1 : ratio < 0.0 ? -1 : 0;
+    }
+    return v;
+}
 }  // namespace nofoot
 }  // namespace edvr

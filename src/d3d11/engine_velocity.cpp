@@ -3424,6 +3424,17 @@ bool engineVelocitySourceCameraRows(float (&rows)[6][4]) {
     std::memcpy(rows, c.rows, sizeof(rows));
     return true;
 }
+bool engineVelocityLastSourceCameraRows(float (&rows)[6][4], uint32_t* frame, uint32_t* frameNowOut) {
+    static_assert(sizeof(rows) == kRowsBytes, "the resolver's camera rows are the watch's rows 270..275");
+    if (!frame || !frameNowOut || !live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const SourceCamera& c = g_sourceCamera;
+    if (!c.scene || !c.rowsKnown) return false;
+    std::memcpy(rows, c.rows, sizeof(rows));
+    *frame = c.frame;
+    *frameNowOut = frameNow();
+    return true;
+}
 bool engineVelocityShadowSceneRows(const ID3D11Buffer* scene, float (&rows)[6][4]) {
     static_assert(sizeof(rows) == kRowsBytes, "the shadow's rows are the watch's rows 270..275");
     if (!scene || !live.load(std::memory_order_acquire)) return false;

@@ -94,6 +94,7 @@ std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_fo
 std::atomic<bool> g_raiseFpKey{false};      // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: F53 default off; on raises the FP rig and the view in body mode
 std::atomic<double> g_raiseCm{nofoot::kRaiseDefaultCm};   // F53 (TEMPORARY): fix.native_on_foot_body_raise_cm, the constant raise while raise_fp is on
 std::atomic<double> g_dropCm{0.0};   // F55 (TEMPORARY): fix.native_on_foot_fp_shoulder_drop_cm, 0..20 (0, the default, drops nothing); body mode only
+std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_rot_calibrate: off (the default) rotates nothing; on runs rotCalTick's schedule
 // F57 (TEMPORARY sliders): the arm IK's swivel trim (radians), square-up amount (0..1) and elbow-out distance (m), read by the Animate hook;
 // the key reader's last values (frame thread only) for its change line.
 std::atomic<float> g_ikSwivelTrimRad{0.0f}, g_ikSquareAmount{static_cast<float>(nofoot::kIkSquareAmountDefault)},
@@ -640,6 +641,17 @@ void readKey() {
                             "first world pool draw's b1 rows 270..273" : "temporal -- the temporal pass's camera rows for the eye (at the world rows' "
                             "projection and eye) while it has them, else world_first");
         g_nativeOnFootMarkerRefKey.store(ref, std::memory_order_relaxed);
+    }
+    // F61 (TEMPORARY, live): the rotation calibration. on: while native stereo is on foot the runtime turns the seated origin about the head on
+    // rotCalTick's schedule and each step is measured; off (the default): no seated rotation, and one already applied is turned back.
+    {
+        const bool rc = cfg.getString("fix.native_on_foot_rot_calibrate", "off") == "on";
+        if (first || rc != g_rotCalKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot rot calibrate (F61, TEMPORARY): fix.native_on_foot_rot_calibrate is %s", rc ? "on -- while native stereo "
+                            "is on foot the runtime turns the seated origin about the head: yaw +5 deg for 1 s, rest 1 s, pitch +5 deg (about the "
+                            "head's right axis) for 1 s, rest 1 s, repeating; no loop, no guard; each step is measured"
+                                                                                                    : "off -- no seated rotation (the default)");
+        g_rotCalKey.store(rc, std::memory_order_relaxed);
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
@@ -6405,6 +6417,180 @@ void f59bFromMatrix(const EyeSample& last, EyeSample& s) noexcept {
         std::memcpy(o.extFpM, s.extFpM, sizeof(o.extFpM));
     }
     s = o;
+}
+
+// ---- F61 (TEMPORARY): the rotation calibration (fix.native_on_foot_rot_calibrate) ------------------------------------------------------
+// While the key is on and native stereo is on foot, the runtime turns its seated origin about the head on nofoot::rotCalStep's schedule (yaw
+// +5 deg 1 s, rest 1 s, pitch +5 deg about the head's right axis 1 s, rest 1 s, repeating); otherwise zero is published, so the runtime turns
+// the origin back. At each step's start the step that just ended is measured as F40's calibrate is: each source's mean orientation over the
+// step's last 0.5 s against the 0.5 s before it began. The sources: the camera C (the list-B view the P2 hook samples, g_worldC: F7/F31's
+// read; rows 0..2 as right, up, forward), the scene rows cb1 270..273 (the engine-motion source camera's, as the watch last saw them written),
+// and the runtime's render head (seated). No game memory is read here: every input is a copy EDVR's hooks already took under their guards.
+struct RotCalSample {
+    uint64_t t = 0;
+    bool haveC = false, haveW = false, haveH = false;
+    float c[9] = {}, w[9] = {}, h[9] = {};   // right, up, forward
+};
+constexpr uint32_t kRotCalRing = 512;
+RotCalSample g_rcRing[kRotCalRing];
+uint32_t g_rcHead = 0, g_rcCount = 0;
+uint64_t g_rcT0 = 0;
+int g_rcStep = -1;
+bool g_rcPublished = false;
+uint64_t g_rcFrames = 0, g_rcMissC = 0, g_rcMissW = 0, g_rcMissH = 0;
+
+void rcPut(float dst[9], const double r[3], const double u[3], const double f[3]) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        dst[i] = static_cast<float>(r[i]);
+        dst[3 + i] = static_cast<float>(u[i]);
+        dst[6 + i] = static_cast<float>(f[i]);
+    }
+}
+void rcAdd(nofoot::RotFrameSum& s, const float v[9]) noexcept {
+    const double r[3] = {v[0], v[1], v[2]}, u[3] = {v[3], v[4], v[5]}, f[3] = {v[6], v[7], v[8]};
+    s.add(r, u, f);
+}
+// Each source's orientation summed over the samples taken in [from, to).
+void rcWindow(uint64_t from, uint64_t to, nofoot::RotFrameSum& c, nofoot::RotFrameSum& w, nofoot::RotFrameSum& h) noexcept {
+    for (uint32_t k = 0; k < g_rcCount; ++k) {
+        const RotCalSample& s = g_rcRing[(g_rcHead + kRotCalRing - 1 - k) % kRotCalRing];
+        if (s.t < from || s.t >= to) continue;
+        if (s.haveC) rcAdd(c, s.c);
+        if (s.haveW) rcAdd(w, s.w);
+        if (s.haveH) rcAdd(h, s.h);
+    }
+}
+void rcReset() noexcept {
+    g_rcT0 = 0;
+    g_rcStep = -1;
+    g_rcHead = g_rcCount = 0;
+    g_rcFrames = g_rcMissC = g_rcMissW = g_rcMissH = 0;
+}
+
+// The step that just ended (it began 1000 ms ago): its last 0.5 s against the 0.5 s before it began.
+void rotCalMeasure(int step, uint64_t now) noexcept {
+    nofoot::RotFrameSum cb, ca, wb, wa, hb, ha;
+    rcWindow(now - 1500, now - 1000, cb, wb, hb);
+    rcWindow(now - 500, now, ca, wa, ha);
+    double cmdY = 0.0, cmdP = 0.0, prevY = 0.0, prevP = 0.0;
+    nofoot::rotCalCommandDeg(step, &cmdY, &cmdP);
+    nofoot::rotCalCommandDeg((step + nofoot::kRotCalSteps - 1) % nofoot::kRotCalSteps, &prevY, &prevP);
+    const auto delta = [](const nofoot::RotFrameSum& b, const nofoot::RotFrameSum& a, double* y, double* p) {
+        return b.n >= 5 && a.n >= 5 && nofoot::rotFrameDelta(b, a, y, p);
+    };
+    double cy = 0.0, cp = 0.0, wy = 0.0, wp = 0.0, hy = 0.0, hp = 0.0;
+    const bool okC = delta(cb, ca, &cy, &cp), okW = delta(wb, wa, &wy, &wp), okH = delta(hb, ha, &hy, &hp);
+    char cTxt[96], wTxt[96], hTxt[96];
+    const auto fmt = [](char* out, size_t cap, bool ok, double y, double p, uint32_t nb, uint32_t na) {
+        if (ok) _snprintf_s(out, cap, _TRUNCATE, "dyaw %+.2f dpitch %+.2f deg (%u and %u samples)", y, p, nb, na);
+        else _snprintf_s(out, cap, _TRUNCATE, "not measured (%u and %u samples)", nb, na);
+    };
+    fmt(cTxt, sizeof(cTxt), okC, cy, cp, cb.n, ca.n);
+    fmt(wTxt, sizeof(wTxt), okW, wy, wp, wb.n, wa.n);
+    fmt(hTxt, sizeof(hTxt), okH, hy, hp, hb.n, ha.n);
+    Log::get().note("native on foot rot calibrate (F61): step %s (commanded seated yaw %.1f -> %.1f, pitch %.1f -> %.1f deg): camera C %s; cb1 270..273 %s; "
+                    "render head %s; head's own motion (render + the command's change) dyaw %+.2f dpitch %+.2f deg; frames %llu, missing C %llu, "
+                    "cb1 %llu, render %llu (the runtime's applies and head yaw: its rot_calibrate_runtime trace lines)",
+                    nofoot::rotCalStepName(step), prevY, cmdY, prevP, cmdP, cTxt, wTxt, hTxt, hy + (cmdY - prevY), hp + (cmdP - prevP),
+                    static_cast<unsigned long long>(g_rcFrames), static_cast<unsigned long long>(g_rcMissC),
+                    static_cast<unsigned long long>(g_rcMissW), static_cast<unsigned long long>(g_rcMissH));
+    if (step != 0 && step != 2) return;
+    const bool yaw = step == 0;
+    const double cmd = yaw ? cmdY - prevY : cmdP - prevP;
+    const char* what = yaw ? "yaw" : "pitch";
+    if (!(okW || okC) || !okH) {
+        Log::get().note("native on foot rot calibrate (F61): %s step: rotation reaches the game camera: not measured (%s)", what,
+                        !okH ? "no render head in a window" : "no camera sample in a window");
+        return;
+    }
+    const double cam = okW ? (yaw ? wy : wp) : (yaw ? cy : cp);
+    const nofoot::RotVerdict v = nofoot::rotCalVerdict(cam, yaw ? hy : hp, cmd);
+    char cAlt[48] = "";
+    if (okW && okC) _snprintf_s(cAlt, sizeof(cAlt), _TRUNCATE, "; C %+.2f deg", yaw ? cy : cp);
+    Log::get().note("native on foot rot calibrate (F61): %s step: rotation reaches the game camera: %s; gain %.2f; sign %s (camera from %s %+.2f deg%s, "
+                    "render head %+.2f deg, head's own motion %+.2f deg, residual %+.2f deg, commanded %+.1f deg; sign -: the camera turned with the "
+                    "reported head, against the seated rotation)",
+                    what, v.reaches ? "yes" : "no", v.gain, v.sign > 0 ? "+" : v.sign < 0 ? "-" : "0", okW ? "cb1 270..273" : "C", cam, cAlt,
+                    yaw ? hy : hp, v.headDeg, v.residualDeg, cmd);
+}
+
+void rotCalTick(uint64_t now) noexcept {
+    const bool key = g_rotCalKey.load(std::memory_order_relaxed);
+    const bool run = key && nativeOnFootActive();
+    if (!run) {
+        if (g_rcPublished) {
+            nativeFrameSetRotCalibrate(0.0f, 0.0f);   // the runtime turns the seated origin back to no calibration rotation
+            g_rcPublished = false;
+        }
+        if (g_rcT0 != 0) {
+            Log::get().note("native on foot rot calibrate (F61): stopped (%s); zero rotation published", key ? "native stereo on foot ended" : "the key is off");
+            rcReset();
+        }
+        return;
+    }
+    if (g_rcT0 == 0) {
+        rcReset();
+        g_rcT0 = now;
+        Log::get().note("native on foot rot calibrate (F61): started: steps of 1 s: yaw +5 deg (the seat's yaw: about the vertical, counter-clockwise "
+                        "from above), rest, pitch +5 deg (about the head's right axis, nose up), rest. Deltas: yaw + = the view turned left, pitch + = "
+                        "up, each source in its own axes; a seated rotation of +a turns the reported head by -a");
+    }
+    const int step = nofoot::rotCalStep(now - g_rcT0);
+    // This frame's sample: C (fresh within 500 ms), cb1 rows 270..273 (named this or the last two present frames), the render head.
+    RotCalSample& s = g_rcRing[g_rcHead];
+    s = RotCalSample{};
+    s.t = now;
+    double r[3], u[3], f[3];
+    {
+        float C[16] = {};
+        bool haveC = false;
+        {
+            F9Lock lock;
+            if (g_worldC.valid && now - g_worldCMs < 500) {
+                std::memcpy(C, g_worldC.C, sizeof(C));
+                haveC = true;
+            }
+        }
+        if (haveC && nofoot::rotAxesFromC(C, r, u, f)) {
+            rcPut(s.c, r, u, f);
+            s.haveC = true;
+        }
+    }
+    {
+        float rows6[6][4] = {};
+        uint32_t named = 0, presentNow = 0;
+        if (engineVelocityLastSourceCameraRows(rows6, &named, &presentNow) && static_cast<uint32_t>(presentNow - named) <= 2u) {
+            float rows[16];
+            std::memcpy(rows, rows6, sizeof(rows));
+            if (nofoot::rotAxesFromClip(rows, r, u, f)) {
+                rcPut(s.w, r, u, f);
+                s.haveW = true;
+            }
+        }
+    }
+    {
+        EdvrNativeNowPose np{};
+        if (nativeFrameNowPose(np) && np.renderValid && nofoot::rotAxesFromHead(np.render, r, u, f)) {
+            rcPut(s.h, r, u, f);
+            s.haveH = true;
+        }
+    }
+    g_rcHead = (g_rcHead + 1) % kRotCalRing;
+    if (g_rcCount < kRotCalRing) ++g_rcCount;
+    if (step != g_rcStep) {
+        if (g_rcStep >= 0) rotCalMeasure(g_rcStep, now);   // its windows end before this sample (t < now)
+        g_rcStep = step;
+        g_rcFrames = g_rcMissC = g_rcMissW = g_rcMissH = 0;
+    }
+    ++g_rcFrames;   // this step's frames and the inputs missing in them (printed with the step's measurement)
+    if (!s.haveC) ++g_rcMissC;
+    if (!s.haveW) ++g_rcMissW;
+    if (!s.haveH) ++g_rcMissH;
+    double yawDeg = 0.0, pitchDeg = 0.0;
+    nofoot::rotCalCommandDeg(step, &yawDeg, &pitchDeg);
+    const double kRad = 3.14159265358979323846 / 180.0;
+    nativeFrameSetRotCalibrate(static_cast<float>(yawDeg * kRad), static_cast<float>(pitchDeg * kRad));
+    g_rcPublished = true;
 }
 
 void alignTick(uint64_t now) noexcept {
@@ -13484,9 +13670,11 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
+    rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
 }
 
 void nativeOnFootShutdown() {
+    nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
     gateByteTick(false, "the game is shutting down");
     hudOverrideTick(false, "the game is shutting down");
     codePatchTick(g_panelPatch, false, "the game is shutting down");
