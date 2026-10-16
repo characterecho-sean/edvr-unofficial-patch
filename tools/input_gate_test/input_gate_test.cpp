@@ -429,6 +429,37 @@ static void pluginReleaseScanCases(Device& keyboard) {
         check(g_pluginBlock.load(), "a renewed lease is not released by a tick that saw it spent");
         inputGateSetPluginBlock(false);
         check(!g_pluginBlock.load(), "(and an explicit clear still releases it)");
+
+        // PR #92 review: a Present-thread refresh paused mid-scan must not publish its stale result over a newer
+        // capture. The tail holds B (now released); the refresh scans past A and pauses on B; the owner thread
+        // captures the physically held A and clears the plugin block; the refresh resumes.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['B'] = true;
+            physical['A'] = false;
+            captureReleaseTail(&physicalKey);   // tail = {B}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread refresher([&] { refreshReleaseTail(&pausingKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 10000) == WAIT_OBJECT_0;
+            check(entered, "stale refresh: the refresh reached its scan of B");
+            physical['B'] = false;   // the refresh will see B up and conclude the tail is empty
+            physical['A'] = true;
+            inputGateSetPluginBlock(true);
+            inputGateSetPluginBlock(false);   // captures A, clears the block
+            SetEvent(g_scanMayContinue);
+            refresher.join();
+            check(releaseTailVk('A'), "stale refresh: the tail still covers A after the paused refresh publishes");
+            check(hookGetAsyncKeyState('A') == 0, "stale refresh: the game still reads the held A as up");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
 }
 
 static void releaseLogCases();

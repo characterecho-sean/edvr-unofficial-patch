@@ -184,7 +184,16 @@ std::atomic<bool> g_heldDik[256]{};
 // Where the tail reads physical keys. The real GetAsyncKeyState; the rig points it at a fake.
 PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
 
+// Every writer of the tail (a capture, a refresh's publish, the menu re-arming) holds g_tailLock, and every write that
+// supersedes the tail bumps g_tailGeneration. A refresh scans with no lock held, from a snapshot taken at generation N,
+// and publishes only if the generation is still N: a refresh paused mid-scan can never overwrite a capture that landed
+// meanwhile with its stale result (PR #92 review). The Present thread takes the lock only for the short publish.
+SRWLOCK g_tailLock = SRWLOCK_INIT;
+std::atomic<uint32_t> g_tailGeneration{0};
+
 void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
+    AcquireSRWLockExclusive(&g_tailLock);
+    g_tailGeneration.fetch_add(1);
     for (int k = 0; k < 256; ++k) g_heldDik[k].store(false);
     bool any = false;
     for (int vk = 0; vk < 256; ++vk) {
@@ -197,24 +206,39 @@ void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
         }
     }
     g_releaseTail.store(any);
+    ReleaseSRWLockExclusive(&g_tailLock);
+}
+
+// The menu taking the keys back: the tail is void. Ordered against a refresh's publish like a capture.
+void cancelReleaseTail() {
+    AcquireSRWLockExclusive(&g_tailLock);
+    g_tailGeneration.fetch_add(1);
+    g_releaseTail.store(false);
+    ReleaseSRWLockExclusive(&g_tailLock);
 }
 
 void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
     if (!g_releaseTail.load()) return;
+    const uint32_t startGeneration = g_tailGeneration.load();
+    bool heldVk[256]{};
     bool any = false;
     for (int vk = 0; vk < 256; ++vk) {
         if (!g_heldVk[vk].load()) continue;
-        if (readKey(vk) & 0x8000) { any = true; continue; }
-        g_heldVk[vk].store(false);
+        if (readKey(vk) & 0x8000) { heldVk[vk] = true; any = true; }
     }
     // Rebuild after releases: generic/left/right modifier VKs can share a DIK.
     bool held[256]{};
-    for (int vk = 0; vk < 256; ++vk) if (g_heldVk[vk].load()) {
+    for (int vk = 0; vk < 256; ++vk) if (heldVk[vk]) {
         const uint8_t dik = inputGateDikOf(vk);
         if (dik) held[dik] = true;
     }
-    for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
-    g_releaseTail.store(any);
+    AcquireSRWLockExclusive(&g_tailLock);
+    if (g_tailGeneration.load() == startGeneration) {
+        for (int vk = 0; vk < 256; ++vk) g_heldVk[vk].store(heldVk[vk]);
+        for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
+        g_releaseTail.store(any);
+    }   // else a capture or a cancel superseded this scan; the next refresh starts from the new tail
+    ReleaseSRWLockExclusive(&g_tailLock);
 }
 
 bool releaseTailVk(int vk) {
@@ -1607,7 +1631,7 @@ void inputGateConfigure(Config& cfg) {
     g_summon.store(packed);
     if (!g_privateWanted) {
         g_private.store(0);
-        g_releaseTail.store(false);
+        cancelReleaseTail();
     }
 }
 
@@ -1679,7 +1703,7 @@ void inputGateSetPrivate(bool priv) {
             guarded("inputGate/captureReleaseTail",
                     [&] { captureReleaseTail(g_tailReader); });
         } else {
-            g_releaseTail.store(false);
+            cancelReleaseTail();
         }
         g_private.store(want);
     } else if (!want) {
@@ -1891,7 +1915,7 @@ void inputGateShutdown() {
     }
     g_userDoorsInstalled = false;
     g_summon.store(0);
-    g_releaseTail.store(false);
+    cancelReleaseTail();
     iatHookUninstall(&g_createImport);
     iatHookUninstall(&g_user.peek);
     iatHookUninstall(&g_user.keyboardState);
