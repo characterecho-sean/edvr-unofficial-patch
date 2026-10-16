@@ -1571,7 +1571,7 @@ int wmain(int argc, wchar_t** argv) {
                 const double eye[3] = {0.05, 1.70, 0.30}, dd[3] = {0.01, 0.0, -0.02}, N1[3] = {0.03, 1.52, 0.10};
                 double T[3], split[3], viaHook[3], direct[3], neckD[3];
                 for (int i = 0; i < 3; ++i) {
-                    T[i] = eye[i] - dd[i] + nf::kNeckRestOffset[i];
+                    T[i] = eye[i] - dd[i] + nf::kNeckRestOffsetFull3P[i];   // F62a: the bend's (full-3P) rest offset
                     neckD[i] = N1[i] + dd[i];
                 }
                 nf::bendResidualSplit(T, N1, split);
@@ -1584,9 +1584,9 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(rnorm - std::sqrt(0.02 * 0.02 + 0.155 * 0.155 + 0.161 * 0.161)) < 1e-9 && std::fabs(q[0] - 13.0f) < 1e-5f &&
                           std::fabs(q[1] - 2.0f) < 1e-5f && std::fabs(q[2] - 4.0f) < 1e-5f && std::fabs(viaHook[0] - direct[0]) < 1e-12 &&
                           std::fabs(viaHook[1] - direct[1]) < 1e-12 && std::fabs(viaHook[2] - direct[2]) < 1e-12 && std::fabs(hn - dn) < 1e-12 &&
-                          atRest[0] == 0.0 && std::fabs(atRest[1] - 15.5) < 1e-9 && std::fabs(atRest[2] - 16.1) < 1e-9,
+                          atRest[0] == 0.0 && std::fabs(atRest[1] - 15.5) < 1e-9 && std::fabs(atRest[2] - 9.0) < 1e-9,
                       "F59b: the residual is rows . (eye - neck) in body axes (right, up, forward); a joint carried between AMC frames keeps its body "
-                      "coordinates; the hook's (T - N1) less the rest offset equals eye - (N1 + d)");
+                      "coordinates; the hook's (T - N1) less the rest offset (F62a: full 3P, 0.155 up, 0.09 forward) equals eye - (N1 + d)");
             }
             // F60: the body fitted to the weapon: Sd from the grips and the FP forward (k_reach 0.82 of the arm behind, 0.10 m below; ADS raise
             // and forward push), d_w = dB + (Sd - Umid) and its independence of the d it was measured at, the blend, the 0.3 s ramp.
@@ -1598,14 +1598,15 @@ int wmain(int argc, wchar_t** argv) {
                              fwdUp[3] = {0.0, 1.0, 0.05};
                 const double back = 0.82 * 0.59;
                 double sd[3], sdYaw[3], sdAds[3], sdBad[3];
-                const bool okSd = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.0, 0.0, sd);
-                const bool okYaw = nf::fitShoulderTarget(gL, gR, fwdYaw, 0.59, 0.0, 0.0, sdYaw);
-                const bool okAds = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.03, 0.05, sdAds);
-                const bool okBad = nf::fitShoulderTarget(gL, gR, fwdUp, 0.59, 0.0, 0.0, sdBad);
+                const bool okSd = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.0, nf::kFitReach, sd);
+                const bool okYaw = nf::fitShoulderTarget(gL, gR, fwdYaw, 0.59, 0.0, nf::kFitReach, sdYaw);
+                // F62a: in ADS k_reach is 1.0 (fitReachK at weight 1) and the forward push no longer enters Sd.
+                const bool okAds = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.03, nf::fitReachK(1.0), sdAds);
+                const bool okBad = nf::fitShoulderTarget(gL, gR, fwdUp, 0.59, 0.0, nf::kFitReach, sdBad);
                 check(okSd && near3(sd, 0.0, 1.20, 0.50 - back) && okYaw && near3(sdYaw, -back, 1.20, 0.50) && okAds &&
-                          near3(sdAds, 0.0, 1.23, 0.50 - back + 0.05) && !okBad && near3(sdBad, 0.0, 0.0, 0.0),
-                      "F60: Sd = the grip midpoint less the FP forward (xz, unit) x 0.82 (l1 + l2) and 0.10 m down; ADS adds the raise and the "
-                      "forward push; a vertical forward refuses");
+                          near3(sdAds, 0.0, 1.23, 0.50 - 0.59) && !okBad && near3(sdBad, 0.0, 0.0, 0.0),
+                      "F60: Sd = the grip midpoint less the FP forward (xz, unit) x k_reach (l1 + l2) and 0.10 m down; ADS adds the raise, with "
+                      "k_reach 1.0 and no forward push (F62a); a vertical forward refuses");
                 const double umid[3] = {0.0, 1.35, -0.05}, dB[3] = {0.02, 0.0, 0.01};
                 double dw[3];
                 nf::fitBodyTarget(dB, sd, umid, dw);
@@ -1613,7 +1614,7 @@ int wmain(int argc, wchar_t** argv) {
                 const double delta[3] = {0.10, 0.0, 0.05}, gL2[3] = {gL[0] - 0.10, gL[1], gL[2] - 0.05}, gR2[3] = {gR[0] - 0.10, gR[1], gR[2] - 0.05};
                 const double dB2[3] = {dB[0] + delta[0], dB[1] + delta[1], dB[2] + delta[2]};
                 double sd2[3], dw2[3];
-                nf::fitShoulderTarget(gL2, gR2, fwdPitched, 0.59, 0.0, 0.0, sd2);
+                nf::fitShoulderTarget(gL2, gR2, fwdPitched, 0.59, 0.0, nf::kFitReach, sd2);
                 nf::fitBodyTarget(dB2, sd2, umid, dw2);
                 check(near3(dw, 0.02, -0.15, 0.01 + (0.50 - back) + 0.05) && near3(dw2, dw[0], dw[1], dw[2]),
                       "F60: d_w = G's d + (Sd - Umid) in body axes, and it does not depend on the d it was measured at (open loop, no integral)");
@@ -1645,6 +1646,87 @@ int wmain(int argc, wchar_t** argv) {
                           nf::fitWeaponClamp(std::numeric_limits<double>::quiet_NaN()) == 0.7 && nf::fitWeaponClamp(1.5) == 1.0 &&
                           nf::fitWeaponClamp(-1.0) == 0.0,
                       "F60: k_reach 0.82, the 0.10 m drop, the 0.59 m arm fallback (outside 0.2..1.5 m), the slider's 0.7 default and its 0..1 clamp");
+            }
+            // F62a (TEMPORARY): the fit gated by raised-ness and disengaged by a head excursion, the lateral weight and the 12 cm pull clamp,
+            // the trims on the final d (once), the ADS lateral blend, the bend's limits while the fit is engaged and its suspension, the
+            // full-3P eye-to-neck rest and the ADS defaults.
+            {
+                const auto near3 = [](const double* a, double x, double y, double z) {
+                    return std::fabs(a[0] - x) < 1e-9 && std::fabs(a[1] - y) < 1e-9 && std::fabs(a[2] - z) < 1e-9;
+                };
+                const double qNan = std::numeric_limits<double>::quiet_NaN();
+                const double kDeg = nf::kIkPi / 180.0;
+                check(nf::fitRaised(0.5) == 0.0 && nf::fitRaised(1.0) == 1.0 && std::fabs(nf::fitRaised(0.75) - 0.5) < 1e-12 && nf::fitRaised(0.2) == 0.0 &&
+                          nf::fitRaised(0.0) == 0.0 && nf::fitRaised(qNan) == 0.0 && nf::fitRaised(0.6) > 0.0 && nf::fitRaised(0.9) < 1.0,
+                      "F62a: the raised factor is smoothstep(0.5, 1.0, grip gate): 0 at 0.5 and below (the hands hanging, gate 0.0..0.2), 1 at 1.0");
+                check(nf::fitDisengage(0.15) == 1.0 && nf::fitDisengage(0.35) == 0.0 && std::fabs(nf::fitDisengage(0.25) - 0.5) < 1e-12 &&
+                          nf::fitDisengage(0.05) == 1.0 && nf::fitDisengage(0.6) == 0.0,
+                      "F62a: the fit disengages as the horizontal |d_w - d_head| goes from 0.15 m (full) to 0.35 m (none), half at 0.25 m");
+                const double zero3[3] = {0.0, 0.0, 0.0};
+                // The lateral weight: forward 1.0, lateral 0.25, e (0.08, 0, -0.08) is inside 0.15 m: the pull is (0.02, 0, -0.08).
+                const double dWl[3] = {0.08, 0.0, -0.08};
+                double oL[3];
+                nf::FitApplied aL;
+                nf::fitApply(zero3, dWl, zero3, 1.0, 0.25, true, oL, &aL);
+                // The clamp: both weights 1, e (0.09, 0, -0.12) (0.15 m, disengage 1): the pull 0.15 m is clamped to 0.12 m along it.
+                const double dWc[3] = {0.09, 0.0, -0.12};
+                double oC[3];
+                nf::FitApplied aC;
+                nf::fitApply(zero3, dWc, zero3, 1.0, 1.0, true, oC, &aC);
+                // Disengaged: e 0.4 m horizontal pulls nothing.
+                const double dWd[3] = {0.0, 0.0, -0.40};
+                double oD[3];
+                nf::FitApplied aD;
+                nf::fitApply(zero3, dWd, zero3, 1.0, 1.0, true, oD, &aD);
+                check(near3(oL, 0.02, 0.0, -0.08) && std::fabs(aL.wFwd - 1.0) < 1e-12 && std::fabs(aL.wLat - 0.25) < 1e-12 && !aL.clamped &&
+                          near3(oC, 0.072, 0.0, -0.096) && aC.clamped &&
+                          std::fabs(std::sqrt(aC.pull[0] * aC.pull[0] + aC.pull[2] * aC.pull[2]) - nf::kFitPullMaxM) < 1e-12 &&
+                          near3(oD, 0.0, 0.0, 0.0) && aD.disengage == 0.0 && nf::kFitPullMaxM == 0.12,
+                      "F62a: the lateral pull has its own weight (0.25 of the right offset, the forward 1.0), the horizontal pull is clamped to "
+                      "0.12 m along its direction, and a 0.4 m excursion pulls nothing");
+                // The trims on the final d: with no fit the target is d_head - trim; at full fit it is d_head + pull - trim, the trim once.
+                const double dHead[3] = {0.04, 0.02, -0.03}, dW[3] = {0.10, -0.50, 0.05}, trim[3] = {0.03, 0.0, 0.05};
+                double t0[3], t1[3], tV[3];
+                nf::FitApplied a1, aV;
+                nf::fitApply(dHead, dW, trim, 0.0, 0.0, true, t0, nullptr);
+                nf::fitApply(dHead, dW, trim, 1.0, 1.0, true, t1, &a1);
+                nf::fitApply(dHead, dW, trim, 1.0, 1.0, false, tV, &aV);
+                check(near3(t0, 0.01, 0.02, -0.08) && near3(t1, 0.07, 0.02, 0.0) &&
+                          near3(t1, t0[0] + a1.pull[0], t0[1] + a1.pull[1], t0[2] + a1.pull[2]) && near3(tV, 0.07, -0.50, 0.0),
+                      "F62a: the trims are subtracted once from the final d (no fit: d_head - trim; full fit: d_head + pull - trim, so the trim "
+                      "reaches the body in full); the up is pulled only with the vertical on");
+                // The ADS lateral blend: the first call is live; the flag's change outputs the last output; half at 0.15 s; live at 0.3 s.
+                nf::FitAdsLat lb;
+                const double l0 = lb.step(false, 0.30, 0.011);
+                const double lEdge = lb.step(true, 0.00, 0.011);
+                const double lHalf = lb.step(true, 0.00, 0.15);
+                const double lFull = lb.step(true, 0.00, 0.15);
+                const double lAfter = lb.step(true, 0.05, 0.011);
+                check(l0 == 0.30 && lEdge == 0.30 && std::fabs(lHalf - 0.15) < 1e-12 && lFull == 0.0 && lAfter == 0.05 && !lb.blending &&
+                          nf::kFitAdsLatSec == 0.3,
+                      "F62a: d_w's lateral is blended over 0.3 s at a change of the ADS flag (no jump on the change, half at 0.15 s)");
+                // The bend: the fit's limits (forward and back 8, roll 6) against F58's (45, 15, 20); the suspension above 0.35 m.
+                double fF = 0.0, fB = 0.0, fR = 0.0, nF = 0.0, nB = 0.0, nR = 0.0;
+                nf::bendLimits(true, &fF, &fB, &fR);
+                nf::bendLimits(false, &nF, &nB, &nR);
+                nf::BendClamp c1, c2, c3, c4, c5;
+                const double p20 = nf::bendClampPitchLim(20.0 * kDeg, fF, fB, &c1), pM20 = nf::bendClampPitchLim(-20.0 * kDeg, fF, fB, &c2),
+                             r10 = nf::bendClampRollLim(10.0 * kDeg, fR, &c3), rM173 = nf::bendClampRollLim(-173.0 * kDeg, fR, &c4),
+                             r5 = nf::bendClampRollLim(5.0 * kDeg, fR, &c5);
+                const double Nb[3] = {0.0, 1.5, 0.1}, Tin[3] = {0.0, 1.5, 0.1 + 0.34}, Tout[3] = {0.0, 1.5, 0.1 + 0.36}, Tnan[3] = {qNan, 1.5, 0.1};
+                check(fF == 8.0 && fB == 8.0 && fR == 6.0 && nF == 45.0 && nB == 15.0 && nR == 20.0 && std::fabs(p20 - 8.0 * kDeg) < 1e-12 &&
+                          c1.fwd && std::fabs(pM20 + 8.0 * kDeg) < 1e-12 && c2.back && std::fabs(r10 - 6.0 * kDeg) < 1e-12 && c3.roll &&
+                          std::fabs(rM173 + 6.0 * kDeg) < 1e-12 && c4.roll && std::fabs(r5 - 5.0 * kDeg) < 1e-12 && !c5.roll &&
+                          !nf::bendSuspend(Tin, Nb) && nf::bendSuspend(Tout, Nb) && nf::bendSuspend(Tnan, Nb) && nf::kBendSuspendResM == 0.35,
+                      "F62a: while the fit is engaged the bend is held to pitch +-8 and roll +-6 deg (F58's 45, 15, 20 otherwise; a -173 deg roll "
+                      "clamps to -6); it is suspended above a 0.35 m residual before it");
+                check(nf::kNeckRestOffsetFull3P[0] == 0.0 && nf::kNeckRestOffsetFull3P[1] == -0.155 && nf::kNeckRestOffsetFull3P[2] == -0.09 &&
+                          nf::kNeckRestOffset[2] == -0.161 && nf::kIkAdsForwardCmDefault == 0.0 && nf::fitReachK(0.0) == 0.82 &&
+                          nf::fitReachK(1.0) == 1.0 && std::fabs(nf::fitReachK(0.5) - 0.91) < 1e-12 && nf::fitReachK(qNan) == 0.82 &&
+                          nf::kFitLateralDefault == 0.25 && nf::fitLateralClamp(qNan) == 0.25 && nf::fitLateralClamp(2.0) == 1.0 &&
+                          nf::fitLateralClamp(-1.0) == 0.0,
+                      "F62a: the full-3P neck rests 0.155 m below and 0.09 m behind the eye (0.161 kept outside full 3P); the ADS shoulder forward "
+                      "defaults to 0; k_reach goes 0.82 to 1.0 with the ADS weight; Body fit sideways defaults to 0.25, clamped to 0..1");
             }
             // F61 (TEMPORARY): the rotation calibration. The schedule (yaw, rest, pitch, rest at 1 s each, repeating), the three sources'
             // deltas (yaw + = turned left, pitch + = up, each in its own axes), the head subtraction and the verdict rule.

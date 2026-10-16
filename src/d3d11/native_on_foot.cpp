@@ -111,6 +111,13 @@ double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDe
 // F60 (TEMPORARY slider): fix.native_on_foot_body_fit_weapon (0..1), read by the frame thread's weapon fit; the key reader's last value.
 std::atomic<float> g_fitWeaponKey{static_cast<float>(nofoot::kFitWeaponDefault)};
 double g_fitWeaponKeyLast = nofoot::kFitWeaponDefault;
+// F62a (TEMPORARY slider): fix.native_on_foot_body_fit_lateral (0..1), the fit's own weight along the body's right axis (the forward keeps
+// fix.native_on_foot_body_fit_weapon); the key reader's last value. g_fitBendW: the fit's applied weight this tick (the larger of the forward
+// and lateral weights after the disengage factor; 0 when the fit is not applied), published by the frame thread for the Animate hook's bend
+// limits (forward and back 8, roll 6 deg while it is above 0).
+std::atomic<float> g_fitLateralKey{static_cast<float>(nofoot::kFitLateralDefault)};
+double g_fitLateralKeyLast = nofoot::kFitLateralDefault;
+std::atomic<float> g_fitBendW{0.0f};
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
 // Animate hook. The eye target (the job camera less d, body axes = the 3P model space) and the pov joint's index, through a seqlock.
@@ -778,6 +785,17 @@ void readKey() {
                                 "full-3P body mode with fix.native_on_foot_arm_ik = on only; the view is never moved", fit, fit);
             g_fitWeaponKeyLast = fit;
             g_fitWeaponKey.store(static_cast<float>(fit), std::memory_order_relaxed);
+            // F62a (TEMPORARY, live, the Native on foot page's slider): Body fit sideways (0..1, default 0.25): the fit's weight along the
+            // body's right axis; the forward keeps Body fit to weapon. The pull is clamped to 12 cm.
+            const double lat = nofoot::fitLateralClamp(
+                static_cast<double>(cfg.getFloat("fix.native_on_foot_body_fit_lateral", static_cast<float>(nofoot::kFitLateralDefault))));
+            if (first || lat != g_fitLateralKeyLast)
+                Log::get().note("native on foot weapon fit (F62a, TEMPORARY slider): fix.native_on_foot_body_fit_lateral = %.2f -- the fit's weight "
+                                "along the body's right axis (the forward weight is fix.native_on_foot_body_fit_weapon, %.2f); both times the "
+                                "ramp, the raised factor smoothstep(0.5, 1.0, grip gate) and the disengage factor (|d_w - d_head| horizontal 0.15 "
+                                "to 0.35 m); the horizontal pull at most 12 cm", lat, fit);
+            g_fitLateralKeyLast = lat;
+            g_fitLateralKey.store(static_cast<float>(lat), std::memory_order_relaxed);
         }
         // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
         // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
@@ -5654,6 +5672,10 @@ struct FitPub {
     double dw[3] = {}, sd[3] = {}, umid[3] = {}, dB[3] = {};
     double gateMin = 0.0, armLen = 0.0, adsW = 0.0;
     uint64_t ms = 0;
+    // F62a: the k_reach used (fitReachK of the ADS weight), and per arm (L, R) this call's reach after the clavicle assist and the elbow's
+    // interior angle (deg), with whether the arm was solved.
+    double reachK = 0.0, reachA[2] = {}, elbowDeg[2] = {};
+    bool solved[2] = {};
 };
 std::atomic<uint32_t> g_fitSeq{0};
 FitPub g_fitPub;
@@ -6382,6 +6404,21 @@ uint64_t g_f60LineMs = 0, g_f60PubLast = 0;
 uint32_t g_f60N = 0, g_f60ErrN = 0, g_f60WeaponN = 0, g_f60HaveN = 0;
 double g_f60FitSum = 0.0, g_f60HeadSum[3] = {}, g_f60DwSum[3] = {}, g_f60OutSum[3] = {}, g_f60DSum[3] = {};
 double g_f60ErrSum = 0.0, g_f60ErrMax = 0.0, g_f60ErrHSum = 0.0, g_f60ErrUpSum = 0.0;
+// F62a (frame thread): this tick's raised factor and lateral weight (slider x ramp x raised), the last application (the disengage factor, the
+// weights after it, the pull and its clamp), the lateral target's ADS blend, and the 1 s line's sums: the weights and factors, d_w - d_head
+// and the pull (right, forward), the shoulder-mid residual Sd - Umid (right, forward), per arm in ADS the reach after the assist and the
+// elbow's interior angle; the bend counters of the last F58 second.
+double g_f60Raised = 0.0, g_f60FitLat = 0.0;
+float g_f62BendWNext = 0.0f;   // the weight applied this tick, stored to g_fitBendW at the next tick's f60FitStep
+nofoot::FitApplied g_f62Apply;
+nofoot::FitAdsLat g_f62AdsLat;
+uint32_t g_f62N = 0, g_f62ApplyN = 0, g_f62ClampN = 0, g_f62LatBlendN = 0, g_f62ResN = 0, g_f62AdsN[2] = {};
+double g_f62WFwdSum = 0.0, g_f62WLatSum = 0.0, g_f62RaisedSum = 0.0, g_f62DisSum = 0.0, g_f62GateSum = 0.0;
+double g_f62ESum[2] = {}, g_f62PullSum[2] = {}, g_f62PullMax = 0.0, g_f62ResSum[2] = {};
+double g_f62AdsReachSum[2] = {}, g_f62AdsReachMax[2] = {}, g_f62AdsElbowSum[2] = {}, g_f62AdsElbowMin[2] = {};
+uint64_t g_f62BendCalls = 0, g_f62BendN = 0, g_f62BendFitLim = 0, g_f62BendSusp = 0;
+uint32_t g_f62BendClamp[3] = {}, g_f62BendFitClamp[3] = {};
+double g_f62BendRes0Max = 0.0;
 void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept;
 void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept;
 // F59b: the AMC matrix source: this fresh sample's matrix, job camera and root, with the 3P joints of the last good frame carried into this
@@ -6859,8 +6896,10 @@ void alignTick(uint64_t now) noexcept {
                 // F53: the neck with the rest geometry (nofoot::neckRestSource): the neck placed where the pov is at rest, so d converges on
                 // the neck at the FP side plus (0, -0.155, -0.161) m. F42/F46's offset captured over the entry's first second carried the
                 // stance and the twist; it is logged, not applied. Without the neck: the low-passed head (as before).
+                // F62a: in full 3P the neck sits 0.155 m below and 0.09 m behind the eye (kNeckRestOffsetFull3P; 0.161 m behind put the 3P
+                // head too far back); outside full 3P the F53 offset is kept.
                 for (size_t i = 0; i < 3; ++i) anchorB[i] = camB[i];
-                if (s.neckOk) nofoot::neckRestSource(neckB, srcB);
+                if (s.neckOk) nofoot::neckRestSource(neckB, f58Full3P ? nofoot::kNeckRestOffsetFull3P : nofoot::kNeckRestOffset, srcB);
                 else
                     for (size_t i = 0; i < 3; ++i) srcB[i] = povEqB[i];
             }
@@ -6951,15 +6990,30 @@ void alignTick(uint64_t now) noexcept {
                 g_f41PovLp[i] += aPov * (srcB[i] - g_f41PovLp[i]);
                 g_f41TgtB[i] = (g_f41CamLp[i] - g_f41PovLp[i]) - trimB[i];
             }
-            // F60: the body fitted to the weapon: d = lerp(d_head, d_w, fit) in body axes (d_w from the hook's last publication, no trims);
-            // horizontal only with the vertical off (the feet stay on the ground; the up is the bend's). fit is 0 outside full-3P body mode
-            // with the arm IK on, so nothing changes there.
-            for (size_t i = 0; i < 3; ++i) g_f60Head[i] = g_f60Out[i] = g_f41TgtB[i];
+            // F60: the body fitted to the weapon, in body axes (d_w from the hook's last publication, no trims); horizontal only with the
+            // vertical off (the feet stay on the ground; the up is the bend's). The fit is 0 outside full-3P body mode with the arm IK on, so
+            // nothing changes there. F62a: the trims on the FINAL d: the head's target is kept UNTRIMMED (g_f60Head), the fit's pull is added
+            // and the trims are subtracted once after it (F60 blended the trimmed head toward the untrimmed d_w, so the trims reached the body
+            // only 1 - fit of the way). The pull (nofoot::fitApply): the forward weight Body fit to weapon x ramp x raised, the lateral weight
+            // Body fit sideways x ramp x raised, both times the disengage factor (|d_w - d_head| horizontal 0.15..0.35 m: a head excursion
+            // drags the body), the horizontal pull clamped to 12 cm; d_w's lateral is blended over 0.3 s at each change of the ADS flag. With
+            // no fit the target is the trimmed head's, exactly as before. The applied weight goes to the hook for the bend's limits.
+            for (size_t i = 0; i < 3; ++i) {
+                g_f60Head[i] = g_f41CamLp[i] - g_f41PovLp[i];
+                g_f60Out[i] = g_f41TgtB[i];
+            }
             g_f60Applied = false;
-            if (g_f60Fit > 0.0 && g_f60Have) {
-                nofoot::fitBlend(g_f60Head, g_f60Pub.dw, g_f60Fit, !vertical, g_f60Out);
+            g_f62Apply = nofoot::FitApplied{};
+            if ((g_f60Fit > 0.0 || g_f60FitLat > 0.0) && g_f60Have) {
+                double dw[3] = {g_f60Pub.dw[0], g_f60Pub.dw[1], g_f60Pub.dw[2]};
+                dw[0] = g_f62AdsLat.step(ads, dw[0], dt);
+                if (g_f62AdsLat.blending) ++g_f62LatBlendN;
+                nofoot::fitApply(g_f60Head, dw, trimB, g_f60Fit, g_f60FitLat, !vertical, g_f60Out, &g_f62Apply);
                 for (size_t i = 0; i < 3; ++i) g_f41TgtB[i] = g_f60Out[i];
                 g_f60Applied = true;
+                g_f62BendWNext = static_cast<float>(std::max(g_f62Apply.wFwd, g_f62Apply.wLat));   // published at the next tick's f60FitStep
+            } else {
+                g_f62AdsLat = nofoot::FitAdsLat{};
             }
             for (size_t j = 0; j < 3; ++j) {
                 err[j] = 0.0;
@@ -8220,6 +8274,10 @@ struct BendStats {
     double solvedPitchSum = 0.0, solvedRollSum = 0.0;                    // the solve before the clamps, degrees
     double wSum = 0.0;                                                   // the weight times the amount
     double leanSum = 0.0, adsWSum = 0.0;                                 // F59: the ADS lean added to the pitch (deg) and the ADS weight
+    // F62a: calls at the fit's limits (forward and back 8, roll 6 deg: the weapon fit engaged) and the clamp hits among them; calls suspended
+    // (|T - N| before the bend above 0.35 m: the want is 0, the applied angles return at their cap).
+    uint64_t fitLimited = 0, suspended = 0;
+    uint32_t fitClampFwd = 0, fitClampBack = 0, fitClampRoll = 0;
 };
 std::atomic<uint32_t> g_bendStatSeq{0};
 BendStats g_bendStats;
@@ -8387,7 +8445,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // on M0, so the square-up and the arm solve run on the bent pose. Written with the spine list below.
     // F59: N is the neck joint (34, under the chest 24) and T its target (the eye target less the neck's rest offset); the frame thread
     // publishes both. In ADS a forward lean (the slider, times the ADS weight) is added to the solved pitch before the clamps.
-    bool bendHave = false, bendWrite = false;
+    // F62a: while the weapon fit is engaged (the frame thread's g_fitBendW above 0) the limits are forward and back 8, roll 6 deg; with |T - N|
+    // before the bend above 0.35 m the bend is suspended: its want is 0 and the applied angles return at their 5 cm cap (no snap).
+    bool bendHave = false, bendWrite = false, bendFitLim = false, bendSusp = false;
     nofoot::BendClamp bendCl;
     double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0, bendLean = 0.0;
     uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
@@ -8418,11 +8478,15 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 bendSolved[1] = roll;
                 bendLean = adsW * static_cast<double>(g_ikAdsLeanRad.load(std::memory_order_relaxed));
                 pitch += bendLean;
-                pitch = nofoot::bendClampPitch(pitch, &bendCl);
-                roll = nofoot::bendClampRoll(roll, &bendCl);
+                double limFwd = 0.0, limBack = 0.0, limRoll = 0.0;
+                bendFitLim = g_fitBendW.load(std::memory_order_relaxed) > 0.0f;
+                nofoot::bendLimits(bendFitLim, &limFwd, &limBack, &limRoll);
+                pitch = nofoot::bendClampPitchLim(pitch, limFwd, limBack, &bendCl);
+                roll = nofoot::bendClampRollLim(roll, limRoll, &bendCl);
+                bendSusp = nofoot::bendSuspend(T, N);
                 bendW = static_cast<double>(g_bendWeight.load(std::memory_order_relaxed)) *
                         static_cast<double>(g_bendAmount.load(std::memory_order_relaxed));
-                const double want[2] = {pitch * bendW, roll * bendW};
+                const double want[2] = {bendSusp ? 0.0 : pitch * bendW, bendSusp ? 0.0 : roll * bendW};
                 if (now - g_bendAppliedMs > 200) g_bendApplied[0] = g_bendApplied[1] = 0.0;
                 const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]};
                 nofoot::bendCapToward(g_bendApplied, want, nofoot::ikLen(v));
@@ -8848,13 +8912,20 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
     }
     // F60: the weapon fit's measurement (every mode but nudge; both arms with their grips): Sd from the grips, the FP forward (G's z row on xz)
-    // and the arm length, plus the ADS raise and forward push; d_w = G's d (body axes) + (Sd - Umid). Published for the frame thread, which
-    // decides whether it is used (arm IK on, full 3P, the gates open). Nothing is written here.
+    // and the arm length, plus the ADS raise; d_w = G's d (body axes) + (Sd - Umid). Published for the frame thread, which decides whether it
+    // is used (arm IK on, full 3P, the gates open). Nothing is written here. F62a: the ADS forward push no longer enters Sd, and k_reach goes
+    // from 0.82 to 1.0 with the ADS weight; the per-arm reach after the assist and the elbow's interior angle ride along for the 1 s line.
     if (armsOk && fitUmidOk && so[0].fitOk && so[1].fitOk) {
         const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
         FitPub fp;
         fp.armLen = nofoot::fitArmLen(0.5 * (so[0].armLen + so[1].armLen));
-        if (nofoot::fitShoulderTarget(so[0].tA, so[1].tA, fwd, fp.armLen, adsPush[1], adsPush[2], fp.sd)) {
+        fp.reachK = nofoot::fitReachK(adsW);
+        for (int side = 0; side < 2; ++side) {
+            fp.solved[side] = so[side].solved;
+            fp.reachA[side] = so[side].reachA;
+            fp.elbowDeg[side] = so[side].elbowDeg;
+        }
+        if (nofoot::fitShoulderTarget(so[0].tA, so[1].tA, fwd, fp.armLen, adsPush[1], fp.reachK, fp.sd)) {
             bool okD = true;
             for (int i = 0; i < 3; ++i) {
                 const double r[3] = {G.m3p[4 * i], G.m3p[4 * i + 1], G.m3p[4 * i + 2]};
@@ -8926,6 +8997,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (bendCl.fwd) ++b.clampFwd;
             if (bendCl.back) ++b.clampBack;
             if (bendCl.roll) ++b.clampRoll;
+            if (bendFitLim) {   // F62a: the fit's limits (8, 8, 6 deg)
+                ++b.fitLimited;
+                if (bendCl.fwd) ++b.fitClampFwd;
+                if (bendCl.back) ++b.fitClampBack;
+                if (bendCl.roll) ++b.fitClampRoll;
+            }
+            if (bendSusp) ++b.suspended;
             b.povLevel = bendLevel;
             b.pov = bendPov;
             if (bendWrite) ++b.wrote;
@@ -9608,7 +9686,8 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     const bool sFresh = s.valid && (now > s.stamp ? now - s.stamp : 0) <= static_cast<uint64_t>(align::kStaleMs);
     // F59: the bend turns the NECK joint (34, under the chest 24; F58's pov joint 15 hangs off the root 7, so every call was refused), gated
     // on the neck census's head sample, and stays on in ADS (the hook adds the ADS lean). Its target: the eye target less the neck's rest
-    // offset, T = (job camera - d) in body axes + kNeckRestOffset (0, -0.155, -0.161).
+    // offset, T = (job camera - d) in body axes + the rest offset; F62a: the full-3P offset kNeckRestOffsetFull3P (0, -0.155, -0.09; it was
+    // -0.161 forward), the same the head follow's neck source uses in full 3P.
     const bool want = key && full3P && active && sFresh && s.headOk;
     g_f58BendBlend.step(want, dt);
     if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
@@ -9618,7 +9697,7 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
         for (size_t i = 0; i < 3; ++i) {
             for (size_t j = 0; j < 3; ++j)
                 t[i] += (static_cast<double>(s.cam[j]) - s.origin[j] - g_alignBody.applied[j]) * static_cast<double>(s.rows[3 * i + j]);
-            t[i] += nofoot::kNeckRestOffset[i];
+            t[i] += nofoot::kNeckRestOffsetFull3P[i];
         }
         bendTargetPublish(t, nofoot::kBendNeckJoint, now);
     }
@@ -9672,19 +9751,33 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
                       : !sFresh ? "held: no fresh AMC sample" : !s.headOk ? "held: no head sample (neck census)" : ads ? "on (ADS: with the lean)" : "on";
     const double n = b.n ? static_cast<double>(b.n) : 1.0;
     Log::get().note("native on foot spine bend (F59): ADS lean added mean %.1f deg (slider %.1f), ADS weight mean %.2f; the bent joint is the neck "
-                    "(34) toward the eye target less the rest offset (0, -0.155, -0.161)", b.leanSum / n, g_ikAdsKeys[5], b.adsWSum / n);
+                    "(34) toward the eye target less the rest offset (0, -0.155, -0.09; F62a)", b.leanSum / n, g_ikAdsKeys[5], b.adsWSum / n);
+    // F62a: the bend's counters for the weapon fit's 1 s line (frame thread).
+    g_f62BendCalls = b.calls;
+    g_f62BendN = b.n;
+    g_f62BendFitLim = b.fitLimited;
+    g_f62BendSusp = b.suspended;
+    g_f62BendClamp[0] = b.clampFwd;
+    g_f62BendClamp[1] = b.clampBack;
+    g_f62BendClamp[2] = b.clampRoll;
+    g_f62BendFitClamp[0] = b.fitClampFwd;
+    g_f62BendFitClamp[1] = b.fitClampBack;
+    g_f62BendFitClamp[2] = b.fitClampRoll;
+    g_f62BendRes0Max = b.res0Max;
     Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
                     "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
                     "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
                     "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
-                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u; bent joint %u (spine level %u); refusals: "
-                    "plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
+                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u (F62a: forward and back 8, roll 6 "
+                    "while the weapon fit is engaged: %llu calls; suspended, |T - N| before above 35 cm: %llu); bent joint %u (spine level %u); "
+                    "refusals: plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
                     kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
                     static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),
                     static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), b.res0Sum / n, b.res0Max, b.res0B[0] / n,
                     b.res0B[1] / n, b.res0B[2] / n, b.res1Sum / n, b.res1Max, b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n, b.pitchSum / n,
                     b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.clampFwd,
-                    b.clampBack, b.clampRoll, b.pov, b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
+                    b.clampBack, b.clampRoll, static_cast<unsigned long long>(b.fitLimited), static_cast<unsigned long long>(b.suspended), b.pov,
+                    b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
                     static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
                     static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
                     static_cast<unsigned long long>(ref[kBendRefSingular]));
@@ -9716,7 +9809,7 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
             rr[2] = split[0];
             Log::get().note("native on foot head follow (F59b): eye - neck residual after the shift, the bend and the square-up (body axes right, up, "
                             "forward; eye = the job camera): from the hook's post-bend neck 34 plus d: %.1f %.1f %.1f cm, norm %.1f cm (of the means; "
-                            "%llu bend calls, %llu written); less the rest offset (0, 15.5, 16.1): %.1f %.1f %.1f cm, norm %.1f cm",
+                            "%llu bend calls, %llu written); less the rest offset (0, 15.5, 9.0; F62a): %.1f %.1f %.1f cm, norm %.1f cm",
                             hk[0], hk[1], hk[2], hn, static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), rr[0], rr[1],
                             rr[2], rn);
         } else {
@@ -9752,22 +9845,30 @@ void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
         g_f60Have = true;
     }
     const bool fresh = g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs;
-    g_f60Weapon = fresh && g_f60Pub.gateMin > 0.0;
+    // F62a: the raised factor smoothstep(0.5, 1.0, the smaller grip gate) replaces F60's gateMin > 0 test, so the fit is full only with both
+    // arms at the grips (unarmed, the gate sat at 0.0..0.2 with the hands hanging and F60's fit still ran at 0.7). It multiplies the ramp.
+    g_f60Raised = fresh ? nofoot::fitRaised(g_f60Pub.gateMin) : 0.0;
+    g_f60Weapon = fresh && g_f60Raised > 0.0;
     const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const double key = static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed));
+    const double keyLat = static_cast<double>(g_fitLateralKey.load(std::memory_order_relaxed));
     g_f60Why = !nativeOnFootActive() ? "not native stereo on foot"
              : mode != 2 ? "not body mode"
              : !full3P ? "not full 3P (hide_fp_body and body_unclip)"
              : ikMode != 3 ? "fix.native_on_foot_arm_ik is not on"
              : !(g_ikWeight.load(std::memory_order_relaxed) > 0.0f) ? "the arm IK's base weight is 0 (its gate)"
-             : !(key > 0.0) ? "the slider is 0"
+             : !(key > 0.0) && !(keyLat > 0.0) ? "both fit sliders are 0"
              : !g_f60Have ? "no weapon-fit measurement yet"
              : !fresh ? "no weapon: the grips are stale (over 100 ms) or an arm is not measured"
-             : !(g_f60Pub.gateMin > 0.0) ? "no weapon: a grip is gated out (its hand too far from the FP grip)"
              : nullptr;
     g_f60Blend.step(g_f60Why == nullptr, dt);
     if (mode != 2 || !full3P || ikMode != 3) g_f60Blend = nofoot::IkBlend{0.0f, nofoot::kFitRampSec};
-    g_f60Fit = key * static_cast<double>(g_f60Blend.w);
+    g_f60Fit = key * static_cast<double>(g_f60Blend.w) * g_f60Raised;
+    g_f60FitLat = keyLat * static_cast<double>(g_f60Blend.w) * g_f60Raised;
+    // F62a: the bend's limits follow the weight the body target applied last tick (0 when the target's block did not run or did not apply
+    // the fit), so a tick that waits never leaves the hook at the fit's limits.
+    g_fitBendW.store(g_f62BendWNext, std::memory_order_relaxed);
+    g_f62BendWNext = 0.0f;
 }
 // F60: the 1 s line (body mode, full 3P, the arm IK not off; called after the body filter): the fit weight, d_head, d_w, the fitted target
 // and the applied d (body axes right, up, forward), the shoulder-mid error |Sd - Umid| after the fit (cm; its up part is the vertical
@@ -9778,6 +9879,17 @@ void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double
         g_f60N = g_f60ErrN = g_f60WeaponN = g_f60HaveN = 0;
         g_f60FitSum = g_f60ErrSum = g_f60ErrMax = g_f60ErrHSum = g_f60ErrUpSum = 0.0;
         for (size_t i = 0; i < 3; ++i) g_f60HeadSum[i] = g_f60DwSum[i] = g_f60OutSum[i] = g_f60DSum[i] = 0.0;
+        // F62a
+        g_f62N = g_f62ApplyN = g_f62ClampN = g_f62LatBlendN = g_f62ResN = 0;
+        g_f62WFwdSum = g_f62WLatSum = g_f62RaisedSum = g_f62DisSum = g_f62GateSum = g_f62PullMax = 0.0;
+        for (size_t i = 0; i < 2; ++i) {
+            g_f62ESum[i] = g_f62PullSum[i] = g_f62ResSum[i] = 0.0;
+            g_f62AdsN[i] = 0;
+            g_f62AdsReachSum[i] = g_f62AdsReachMax[i] = g_f62AdsElbowSum[i] = g_f62AdsElbowMin[i] = 0.0;
+        }
+        g_f62BendCalls = g_f62BendN = g_f62BendFitLim = g_f62BendSusp = 0;
+        for (size_t i = 0; i < 3; ++i) g_f62BendClamp[i] = g_f62BendFitClamp[i] = 0;
+        g_f62BendRes0Max = 0.0;
     };
     if (mode != 2 || !full3P || ikMode == 0) {
         reset();
@@ -9799,6 +9911,21 @@ void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double
         for (size_t i = 0; i < 3; ++i) g_f60DwSum[i] += g_f60Pub.dw[i];
     }
     if (g_f60Weapon) ++g_f60WeaponN;
+    // F62a: the weights and factors, the application (d_w - d_head and the pull, right and forward), per arm in ADS the reach and the angle.
+    ++g_f62N;
+    g_f62WFwdSum += g_f62Apply.wFwd;
+    g_f62WLatSum += g_f62Apply.wLat;
+    g_f62RaisedSum += g_f60Raised;
+    if (g_f60Applied) {
+        ++g_f62ApplyN;
+        g_f62DisSum += g_f62Apply.disengage;
+        g_f62ESum[0] += g_f62Apply.e[0];
+        g_f62ESum[1] += g_f62Apply.e[2];
+        g_f62PullSum[0] += g_f62Apply.pull[0];
+        g_f62PullSum[1] += g_f62Apply.pull[2];
+        g_f62PullMax = std::max(g_f62PullMax, std::sqrt(g_f62Apply.pull[0] * g_f62Apply.pull[0] + g_f62Apply.pull[2] * g_f62Apply.pull[2]));
+        if (g_f62Apply.clamped) ++g_f62ClampN;
+    }
     if (g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs) {
         const double e[3] = {g_f60Pub.sd[0] - g_f60Pub.umid[0], g_f60Pub.sd[1] - g_f60Pub.umid[1], g_f60Pub.sd[2] - g_f60Pub.umid[2]};
         const double en = nofoot::ikLen(e) * 100.0;
@@ -9807,6 +9934,20 @@ void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double
         g_f60ErrHSum += std::sqrt(e[0] * e[0] + e[2] * e[2]) * 100.0;
         g_f60ErrUpSum += e[1] * 100.0;
         ++g_f60ErrN;
+        ++g_f62ResN;   // F62a
+        g_f62ResSum[0] += e[0];
+        g_f62ResSum[1] += e[2];
+        g_f62GateSum += g_f60Pub.gateMin;
+        if (g_f60Pub.adsW > 0.5)
+            for (int side = 0; side < 2; ++side) {
+                if (!g_f60Pub.solved[side]) continue;
+                const bool first = g_f62AdsN[side] == 0;
+                g_f62AdsReachSum[side] += g_f60Pub.reachA[side];
+                g_f62AdsReachMax[side] = first || g_f60Pub.reachA[side] > g_f62AdsReachMax[side] ? g_f60Pub.reachA[side] : g_f62AdsReachMax[side];
+                g_f62AdsElbowSum[side] += g_f60Pub.elbowDeg[side];
+                g_f62AdsElbowMin[side] = first || g_f60Pub.elbowDeg[side] < g_f62AdsElbowMin[side] ? g_f60Pub.elbowDeg[side] : g_f62AdsElbowMin[side];
+                ++g_f62AdsN[side];
+            }
     }
     if (g_f60LineMs == 0) g_f60LineMs = now;
     if (now - g_f60LineMs < 1000) return;
@@ -9815,20 +9956,46 @@ void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double
                  en = g_f60ErrN ? static_cast<double>(g_f60ErrN) : 1.0;
     const uint64_t pubs = g_fitPublishes.load(std::memory_order_relaxed);
     const FitPub& p = g_f60Pub;
-    Log::get().note("native on foot weapon fit (F60): fit weight mean %.2f (now %.2f = slider %.2f x ramp %.2f; %s%s); weapon held %u of %u "
-                    "frames; body axes right, up, forward (means, cm): d_head %.1f %.1f %.1f, d_w %.1f %.1f %.1f (%u frames), the fitted target "
+    {
+        const double fn = g_f62N ? static_cast<double>(g_f62N) : 1.0, an = g_f62ApplyN ? static_cast<double>(g_f62ApplyN) : 1.0,
+                     rn = g_f62ResN ? static_cast<double>(g_f62ResN) : 1.0;
+        const double aL = g_f62AdsN[0] ? static_cast<double>(g_f62AdsN[0]) : 1.0, aR = g_f62AdsN[1] ? static_cast<double>(g_f62AdsN[1]) : 1.0;
+        Log::get().note("native on foot weapon fit (F62a): weights (means) forward %.2f lateral %.2f (now: sliders %.2f, %.2f x ramp %.2f x raised "
+                        "%.2f, then x the disengage factor); raised factor smoothstep(0.5, 1.0, grip gate) mean %.2f (grip gate mean %.2f); "
+                        "applied %u of %u frames, disengage factor mean %.2f (|d_w - d_head| horizontal 0.15..0.35 m); residuals (body axes, "
+                        "means, cm): d_w - d_head (the head's untrimmed target) right %.1f forward %.1f, the pull right %.1f forward %.1f (max "
+                        "%.1f, clamped to 12 cm in %u frames), shoulder-mid Sd - Umid right %.1f forward %.1f (%u frames); the ADS lateral "
+                        "blend (0.3 s) ran %u frames",
+                        g_f62WFwdSum / fn, g_f62WLatSum / fn, static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_fitLateralKey.load(std::memory_order_relaxed)), static_cast<double>(g_f60Blend.w), g_f60Raised,
+                        g_f62RaisedSum / fn, g_f62GateSum / rn, g_f62ApplyN, g_f62N, g_f62DisSum / an, 100.0 * g_f62ESum[0] / an,
+                        100.0 * g_f62ESum[1] / an, 100.0 * g_f62PullSum[0] / an, 100.0 * g_f62PullSum[1] / an, 100.0 * g_f62PullMax, g_f62ClampN,
+                        100.0 * g_f62ResSum[0] / rn, 100.0 * g_f62ResSum[1] / rn, g_f62ResN, g_f62LatBlendN);
+        Log::get().note("native on foot weapon fit (F62a): bend (its last 1 s line): %llu calls, %llu bent, at the fit's limits %llu (hits forward 8 "
+                        "%u, back 8 %u, roll 6 %u), all hits forward %u back %u roll %u, suspended %llu (before residual max %.1f cm); ADS "
+                        "(weight over 0.5): arm L %u frames, reach after the assist mean %.2f max %.2f, interior angle mean %.1f min %.1f deg; "
+                        "arm R %u frames, reach mean %.2f max %.2f, interior angle mean %.1f min %.1f deg; k_reach %.2f",
+                        static_cast<unsigned long long>(g_f62BendCalls), static_cast<unsigned long long>(g_f62BendN),
+                        static_cast<unsigned long long>(g_f62BendFitLim), g_f62BendFitClamp[0], g_f62BendFitClamp[1], g_f62BendFitClamp[2],
+                        g_f62BendClamp[0], g_f62BendClamp[1], g_f62BendClamp[2], static_cast<unsigned long long>(g_f62BendSusp), g_f62BendRes0Max,
+                        g_f62AdsN[0], g_f62AdsReachSum[0] / aL, g_f62AdsReachMax[0], g_f62AdsElbowSum[0] / aL, g_f62AdsElbowMin[0], g_f62AdsN[1],
+                        g_f62AdsReachSum[1] / aR, g_f62AdsReachMax[1], g_f62AdsElbowSum[1] / aR, g_f62AdsElbowMin[1], p.reachK);
+    }
+    Log::get().note("native on foot weapon fit (F60): fit weight mean %.2f (now %.2f = slider %.2f x ramp %.2f x raised %.2f; %s%s); weapon held "
+                    "%u of %u frames; body axes right, up, forward (means, cm): d_head (untrimmed, F62a) %.1f %.1f %.1f, d_w %.1f %.1f %.1f (%u "
+                    "frames), the fitted target (trims on it, F62a) "
                     "%.1f %.1f %.1f, d applied %.1f %.1f %.1f (vertical %s); shoulder-mid error |Sd - Umid| after the fit mean %.1f max %.1f cm "
                     "(horizontal %.1f, up %.1f: the vertical remainder, left to the bend) over %u frames; last Sd %.3f %.3f %.3f, Umid %.3f %.3f "
                     "%.3f m (3P model), G's d %.1f %.1f %.1f cm, arm length %.1f cm x k_reach %.2f, grip gate min %.2f, ADS %.2f; hook "
                     "publications %llu",
                     g_f60FitSum / n, g_f60Fit, static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed)), static_cast<double>(g_f60Blend.w),
-                    g_f60Why ? "held: " : "fitting", g_f60Why ? g_f60Why : "", g_f60WeaponN, g_f60N, 100.0 * g_f60HeadSum[0] / n,
+                    g_f60Raised, g_f60Why ? "held: " : "fitting", g_f60Why ? g_f60Why : "", g_f60WeaponN, g_f60N, 100.0 * g_f60HeadSum[0] / n,
                     100.0 * g_f60HeadSum[1] / n, 100.0 * g_f60HeadSum[2] / n, 100.0 * g_f60DwSum[0] / hn, 100.0 * g_f60DwSum[1] / hn,
                     100.0 * g_f60DwSum[2] / hn, g_f60HaveN, 100.0 * g_f60OutSum[0] / n, 100.0 * g_f60OutSum[1] / n, 100.0 * g_f60OutSum[2] / n,
                     100.0 * g_f60DSum[0] / n, 100.0 * g_f60DSum[1] / n, 100.0 * g_f60DSum[2] / n,
                     vertical ? "on: d_w's up is blended" : "off: the horizontal only", g_f60ErrSum / en, g_f60ErrMax, g_f60ErrHSum / en,
                     g_f60ErrUpSum / en, g_f60ErrN, p.sd[0], p.sd[1], p.sd[2], p.umid[0], p.umid[1], p.umid[2], 100.0 * p.dB[0], 100.0 * p.dB[1],
-                    100.0 * p.dB[2], 100.0 * p.armLen, nofoot::kFitReach, p.gateMin, p.adsW,
+                    100.0 * p.dB[2], 100.0 * p.armLen, p.reachK, p.gateMin, p.adsW,
                     static_cast<unsigned long long>(pubs - g_f60PubLast));
     g_f60PubLast = pubs;
     reset();

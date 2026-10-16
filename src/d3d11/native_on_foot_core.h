@@ -434,8 +434,15 @@ inline double raiseConstM(bool on, double cm) noexcept {
 // (anchor - source) the neck is placed where the pov would be at rest: source = neck - kNeckRestOffset. With the body's height locked
 // (vertical off, the default) only x and z of the target take effect.
 constexpr double kNeckRestOffset[3] = {0.0, -0.155, -0.161};
+// F62a: the eye-to-neck rest offset in full-3P body mode (hide_fp_body and body_unclip on: the head follow's source, the spine bend's target
+// and the eye - neck residual): the neck sits 0.155 m below and 0.09 m behind the eye (0.161 m behind put the 3P head too far back). Outside
+// full 3P the neck anchor keeps kNeckRestOffset, so nothing changes there.
+constexpr double kNeckRestOffsetFull3P[3] = {0.0, -0.155, -0.09};
 inline void neckRestSource(const double neckB[3], double out[3]) noexcept {
     for (int i = 0; i < 3; ++i) out[i] = neckB[i] - kNeckRestOffset[i];
+}
+inline void neckRestSource(const double neckB[3], const double offset[3], double out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = neckB[i] - offset[i];
 }
 // The neck's target for an FP side (body axes): where the align puts the neck once d has converged.
 inline void neckRestTarget(const double fpB[3], double out[3]) noexcept {
@@ -1455,21 +1462,21 @@ inline double eyeNeckBody(const double eye[3], const double neck[3], const doubl
     return std::sqrt(n2);
 }
 // F59b: the hook's post-bend residual T - N1 (bendResidualSplit's order: forward, up, right) to eye - neck (right, up, forward). The bend's
-// target is T = (eye - d) + kNeckRestOffset in body axes, so eye - (N1 + d) = (T - N1) - kNeckRestOffset. Same units in and out (scale: 1
-// for metres, 100 for centimetres, applied to the rest offset).
+// target is T = (eye - d) + the rest offset in body axes, so eye - (N1 + d) = (T - N1) - the rest offset. Same units in and out (scale: 1
+// for metres, 100 for centimetres, applied to the rest offset). F62a: the bend runs in full 3P only, so its rest offset is kNeckRestOffsetFull3P.
 inline double eyeNeckFromBend(const double split[3], double scale, double out[3]) noexcept {
-    out[0] = split[2] - scale * kNeckRestOffset[0];
-    out[1] = split[1] - scale * kNeckRestOffset[1];
-    out[2] = split[0] - scale * kNeckRestOffset[2];
+    out[0] = split[2] - scale * kNeckRestOffsetFull3P[0];
+    out[1] = split[1] - scale * kNeckRestOffsetFull3P[1];
+    out[2] = split[0] - scale * kNeckRestOffsetFull3P[2];
     return std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
 }
 struct BendClamp {
     bool fwd = false, back = false, roll = false;
 };
-// The clamps (radians in and out; NaN is 0). The flags are set when a clamp bites (never cleared here).
-inline double bendClampPitch(double pitch, BendClamp* c) noexcept {
+// The clamps (radians in and out; NaN is 0) at the given limits (degrees). The flags are set when a clamp bites (never cleared here).
+inline double bendClampPitchLim(double pitch, double fwdDeg, double backDeg, BendClamp* c) noexcept {
     if (!(pitch == pitch)) return 0.0;
-    const double fwd = kBendFwdMaxDeg * kIkPi / 180.0, back = kBendBackMaxDeg * kIkPi / 180.0;
+    const double fwd = fwdDeg * kIkPi / 180.0, back = backDeg * kIkPi / 180.0;
     if (pitch > fwd) {
         if (c) c->fwd = true;
         return fwd;
@@ -1480,15 +1487,18 @@ inline double bendClampPitch(double pitch, BendClamp* c) noexcept {
     }
     return pitch;
 }
-inline double bendClampRoll(double roll, BendClamp* c) noexcept {
+inline double bendClampRollLim(double roll, double limDeg, BendClamp* c) noexcept {
     if (!(roll == roll)) return 0.0;
-    const double lim = kBendRollMaxDeg * kIkPi / 180.0;
+    const double lim = limDeg * kIkPi / 180.0;
     if (roll > lim || roll < -lim) {
         if (c) c->roll = true;
         return roll > 0.0 ? lim : -lim;
     }
     return roll;
 }
+// The F58 limits: forward 45, back 15, roll 20 deg.
+inline double bendClampPitch(double pitch, BendClamp* c) noexcept { return bendClampPitchLim(pitch, kBendFwdMaxDeg, kBendBackMaxDeg, c); }
+inline double bendClampRoll(double roll, BendClamp* c) noexcept { return bendClampRollLim(roll, kBendRollMaxDeg, c); }
 // The row-vector rotation of a level with share w: the pitch first (about +x by w pitch), then the roll (about +z by -w roll): R = Rx x Rz.
 inline void bendRot(double pitch, double roll, double w, double R[9]) noexcept {
     const double ex[3] = {1.0, 0.0, 0.0}, ez[3] = {0.0, 0.0, 1.0};
@@ -1541,8 +1551,9 @@ constexpr uint32_t kBendNeckJoint = 34;
 constexpr double kIkAssistReach = 0.97, kIkAssistMarginM = 0.03, kIkAssistMaxM = 0.10, kIkAssistMaxDeg = 25.0;
 constexpr double kIkAdsRampSec = 0.15;
 constexpr float kIkGateFullAdsM = 0.6f, kIkGateZeroAdsM = 1.2f;
+// F62a: the ADS shoulder-forward default is 0 (it was 5 cm: in ADS the right arm folded to the 40 deg limit).
 constexpr double kIkAdsSquareDefault = 1.0, kIkAdsElbowOutCmDefault = 6.0, kIkAdsTrimDegDefault = 0.0, kIkAdsRaiseCmDefault = 3.0,
-                 kIkAdsForwardCmDefault = 5.0, kIkAdsLeanDegDefault = 6.0;
+                 kIkAdsForwardCmDefault = 0.0, kIkAdsLeanDegDefault = 6.0;
 constexpr double kIkAdsElbowOutCmMax = 20.0, kIkAdsTrimDegMax = 60.0, kIkAdsShoulderCmMax = 10.0, kIkAdsLeanDegMax = 15.0;
 
 inline double ikLerp(double a, double b, double w) noexcept { return a + (b - a) * w; }
@@ -1618,15 +1629,16 @@ inline double fitWeaponClamp(double v) noexcept { return ikClampOr(v, 0.0, 1.0, 
 inline double fitArmLen(double measured) noexcept {
     return (measured == measured && measured >= 0.2 && measured <= 1.5) ? measured : kFitArmLenDefaultM;
 }
-// Sd from the two grips, the FP forward row and the arm length (fitArmLen'd), plus the ADS raise (up) and forward push (along f), metres.
-// False (Sd zero) when the forward's xz is under 0.1 or an input is not finite.
-inline bool fitShoulderTarget(const double gL[3], const double gR[3], const double fwdRow[3], double armLen, double raiseM, double forwardM,
+// Sd from the two grips, the FP forward row and the arm length (fitArmLen'd), plus the ADS raise (up), metres; reachK the k_reach in use
+// (F62a: kFitReach, lerped to 1.0 in ADS by fitReachK; the ADS forward push no longer enters Sd). False (Sd zero) when the forward's xz is
+// under 0.1 or an input is not finite.
+inline bool fitShoulderTarget(const double gL[3], const double gR[3], const double fwdRow[3], double armLen, double raiseM, double reachK,
                               double sd[3]) noexcept {
     sd[0] = sd[1] = sd[2] = 0.0;
     const double fxz[3] = {fwdRow[0], 0.0, fwdRow[2]};
     double f[3];
     if (!(ikLen(fxz) > 0.1) || !ikUnit(fxz, f)) return false;
-    const double back = kFitReach * fitArmLen(armLen) - forwardM;
+    const double back = reachK * fitArmLen(armLen);
     double out[3];
     for (int i = 0; i < 3; ++i) out[i] = 0.5 * (gL[i] + gR[i]) - f[i] * back;
     out[1] += raiseM - kFitDropM;
@@ -1646,6 +1658,128 @@ inline void fitBlend(const double dHead[3], const double dW[3], double fit, bool
     const double h1 = dHead[1];
     for (int i = 0; i < 3; ++i) out[i] = dHead[i] + (dW[i] - dHead[i]) * w;
     if (horizontalOnly) out[1] = h1;
+}
+
+// ---- F62a (TEMPORARY): the weapon fit gated by raised-ness, its own lateral weight and a pull clamp, the trims on the final d, the bend's
+// limits while the fit is engaged, k_reach 1.0 in ADS and the lateral target's ADS blend ------------------------------------------------------
+// The F60 flight (log 034818): unarmed, the grip gate sat at 0.0..0.2 with the hands hanging and the fit still ran at 0.7 (it needed only
+// gateMin > 0), pulling the body 18..25 cm back; the FP rifle sits about 30 cm right of the eye, so the midpoint rule moved the body right and
+// the bend rolled it about -20 deg; the trims reached the body only 35%; a -173 deg roll was solved in a degenerate case; in ADS the right arm
+// folded to the 40 deg limit. Body axes: right, up, forward.
+constexpr double kFitRaisedLo = 0.5, kFitRaisedHi = 1.0;              // the fit's raised factor: smoothstep of the smaller grip gate
+constexpr double kFitDisengageLoM = 0.15, kFitDisengageHiM = 0.35;    // horizontal |d_w - d_head|: full fit under 0.15 m, none from 0.35 m
+constexpr double kFitPullMaxM = 0.12;                                 // the fit's horizontal pull |w (d_w - d_head)| at most
+constexpr double kFitLateralDefault = 0.25;                           // fix.native_on_foot_body_fit_lateral's default
+constexpr double kFitReachAds = 1.0;                                  // k_reach in ADS (0.82 outside), lerped by the ADS weight
+constexpr double kFitAdsLatSec = 0.3;                                 // the lateral target's blend at each change of the ADS flag
+constexpr double kBendFitFwdMaxDeg = 8.0, kBendFitBackMaxDeg = 8.0, kBendFitRollMaxDeg = 6.0;   // the bend's limits while the fit is engaged
+constexpr double kBendSuspendResM = 0.35;                             // |T - N| before the bend above this suspends it (its want goes to 0)
+
+// 0 at or below e0, 1 at or above e1, 3t^2 - 2t^3 between (NaN: 0).
+inline double fitSmoothstep(double e0, double e1, double x) noexcept {
+    if (!(x == x)) return 0.0;
+    double t = (x - e0) / (e1 - e0);
+    t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+    return t * t * (3.0 - 2.0 * t);
+}
+// The raised factor: 0 at gateMin 0.5 and below, 1 at 1.0 (the arms at the grips).
+inline double fitRaised(double gateMin) noexcept { return fitSmoothstep(kFitRaisedLo, kFitRaisedHi, gateMin); }
+// The disengage factor: 1 at a horizontal |d_w - d_head| of 0.15 m and below, 0 at 0.35 m and above (a head excursion drags the body).
+inline double fitDisengage(double horizM) noexcept { return 1.0 - fitSmoothstep(kFitDisengageLoM, kFitDisengageHiM, horizM); }
+inline double fitLateralClamp(double v) noexcept { return ikClampOr(v, 0.0, 1.0, kFitLateralDefault); }
+// k_reach for the ADS weight (0..1): 0.82 out of ADS, 1.0 in it.
+inline double fitReachK(double adsW) noexcept {
+    const double w = !(adsW == adsW) ? 0.0 : adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
+    return kFitReach + (kFitReachAds - kFitReach) * w;
+}
+struct FitApplied {
+    double e[3] = {};          // d_w - d_head (body axes), m
+    double horiz = 0.0;        // its horizontal length, m
+    double disengage = 1.0;    // fitDisengage(horiz)
+    double wFwd = 0.0, wLat = 0.0;   // the weights after the disengage factor
+    double pull[3] = {};       // the pull added to d_head (after the clamp)
+    bool clamped = false;      // the horizontal pull was clamped to kFitPullMaxM
+};
+// The final d: d_head (UNTRIMMED) + the pull, less the trims once (the trims on the final d). The pull: right wLat e.x, forward wFwd e.z (w =
+// the base weight x the disengage factor), its horizontal length clamped to kFitPullMaxM; up wFwd e.y with the vertical on, 0 with it off (the
+// head's up kept). With both bases 0 the result is d_head - trim, the target with no fit. A non-finite e pulls nothing.
+inline void fitApply(const double dHead[3], const double dW[3], const double trim[3], double baseFwd, double baseLat, bool horizontalOnly,
+                     double out[3], FitApplied* a) noexcept {
+    FitApplied r;
+    bool finite = true;
+    for (int i = 0; i < 3; ++i) {
+        r.e[i] = dW[i] - dHead[i];
+        if (!std::isfinite(r.e[i])) finite = false;
+    }
+    const double bF = !(baseFwd == baseFwd) ? 0.0 : baseFwd < 0.0 ? 0.0 : baseFwd > 1.0 ? 1.0 : baseFwd;
+    const double bL = !(baseLat == baseLat) ? 0.0 : baseLat < 0.0 ? 0.0 : baseLat > 1.0 ? 1.0 : baseLat;
+    if (finite) {
+        r.horiz = std::sqrt(r.e[0] * r.e[0] + r.e[2] * r.e[2]);
+        r.disengage = fitDisengage(r.horiz);
+        r.wFwd = bF * r.disengage;
+        r.wLat = bL * r.disengage;
+        r.pull[0] = r.wLat * r.e[0];
+        r.pull[1] = horizontalOnly ? 0.0 : r.wFwd * r.e[1];
+        r.pull[2] = r.wFwd * r.e[2];
+        const double ph = std::sqrt(r.pull[0] * r.pull[0] + r.pull[2] * r.pull[2]);
+        if (ph > kFitPullMaxM) {
+            const double k = kFitPullMaxM / ph;
+            r.pull[0] *= k;
+            r.pull[2] *= k;
+            r.clamped = true;
+        }
+    } else {
+        for (int i = 0; i < 3; ++i) r.e[i] = 0.0;
+        r.disengage = 0.0;
+    }
+    for (int i = 0; i < 3; ++i) out[i] = dHead[i] + r.pull[i] - trim[i];
+    if (a) *a = r;
+}
+// The lateral target's blend on the ADS flag: at each change of the flag the lateral (right) component of d_w goes from the last output to the
+// live value over kFitAdsLatSec (linear; the change call outputs the last output exactly), so the FP weapon's move toward the eye in ADS does
+// not snap the body sideways. The first call (and the first after a reset) outputs the live value.
+struct FitAdsLat {
+    bool have = false, ads = false, blending = false;
+    double from = 0.0, out = 0.0, t = 1.0;
+    double step(bool adsNow, double live, double dt) noexcept {
+        if (!have) {
+            have = true;
+            ads = adsNow;
+            blending = false;
+            t = 1.0;
+            out = live;
+            return out;
+        }
+        if (adsNow != ads) {
+            ads = adsNow;
+            from = out;
+            t = 0.0;
+            blending = true;
+            return out;
+        }
+        if (blending) {
+            t += (dt > 0.0 ? dt : 0.0) / kFitAdsLatSec;
+            if (t >= 1.0) {
+                t = 1.0;
+                blending = false;
+            }
+        }
+        out = blending ? from + (live - from) * t : live;
+        return out;
+    }
+};
+// The bend's limits (degrees): F58's forward 45, back 15, roll 20; while the fit is engaged forward 8, back 8, roll 6.
+inline void bendLimits(bool fitEngaged, double* fwdDeg, double* backDeg, double* rollDeg) noexcept {
+    *fwdDeg = fitEngaged ? kBendFitFwdMaxDeg : kBendFwdMaxDeg;
+    *backDeg = fitEngaged ? kBendFitBackMaxDeg : kBendBackMaxDeg;
+    *rollDeg = fitEngaged ? kBendFitRollMaxDeg : kBendRollMaxDeg;
+}
+// The bend is suspended (its want goes to 0; the applied angles return at their cap) while |T - N| before it is above kBendSuspendResM, or
+// not finite.
+inline bool bendSuspend(const double T[3], const double N[3]) noexcept {
+    const double v[3] = {T[0] - N[0], T[1] - N[1], T[2] - N[2]};
+    const double r = ikLen(v);
+    return !(r <= kBendSuspendResM);
 }
 
 // ---- F61 (TEMPORARY instrument, fix.native_on_foot_rot_calibrate): does a seated rotation reach the game camera's orientation? -----------

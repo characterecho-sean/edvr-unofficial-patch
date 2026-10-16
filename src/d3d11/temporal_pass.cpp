@@ -1924,19 +1924,31 @@ void writeMarkerCrops(ID3D11DeviceContext* ctx, const std::wstring& dir) {
 // (temporalPassMarkerPre, native_sharpen.cpp), both crops about the same ndc. F53's single crop missed the marker. Files:
 // eye_<stamp>_mk_eye<e>_f<kk>.bmp, eye_<stamp>_mk_pre_eye<e>_f<kk>.bmp and eye_<stamp>_mk.csv (the centre's source and both ndc values per
 // crop). Copies only: nothing drawn, bound or submitted changes. Render thread only.
+// F62a: the marker dump series. The F60 flight (log 034818) did write all three of its runs (035139, 035256, 035828: 62 of 64 crops each),
+// but as eye_<stamp>_mk_*.bmp under a log line that said "waypoint dump", so a search for "marker" found only F53's single eye_<stamp>_L0_
+// marker.bmp. Each run lost the last frame's right eye (final and pre-composite) as "no fresh marker projection": the projection's age was
+// taken on the wall clock at the capture, and the eye run's own synchronous write (writeEyeRun, about 1.8 s) sits in that frame's right-eye
+// pass, so the projection read 1.6..1.8 s old. Now: files eye_<stamp>_marker_eye<e>_f<kk>.bmp, eye_<stamp>_marker_pre_eye<e>_f<kk>.bmp and
+// eye_<stamp>_marker.csv; the ages are taken at the frame's first capture (a stall inside the frame no longer ages it); the deadline is 10 s;
+// one line at the start and one at the end name the files, and when fewer than 32 final crops were written a line says why, per crop.
 constexpr int kMkFrames = 16;
+constexpr uint64_t kMkFreshMs = 500, kMkDeadlineMs = 10000;
+enum MkWhy : uint8_t { kMkOk = 0, kMkNotTried, kMkNoMarker, kMkStageFail, kMkStaged, kMkWriteFail };
 struct MkShot {
     ID3D11Texture2D* st = nullptr;
     bool tried = false, taken = false;
+    uint8_t why = kMkNotTried;   // F62a: the crop's outcome (MkWhy)
     uint32_t box[4] = {};     // the crop's left, top, width, height in the texture
     uint32_t eyeWH[2] = {};   // the eye's region size the ndc maps onto
+    uint64_t lateMs = 0;      // F62a: the capture's ms after the frame's first capture
 };
 struct MkFrame {
     uint64_t seq = 0;
+    uint64_t t0Ms = 0;                                // F62a: the frame's first capture (either eye, pre or final)
     bool centred[2] = {};
     int src[2] = {};                                  // 0 none (no fresh marker), 1 the drawn marker (ndc_marker), 2 P through the scene rows
     float ndc[2][2] = {}, ndcP[2][2] = {}, ndcDrawn[2][2] = {};
-    int64_t ageP[2] = {-1, -1}, ageDrawn[2] = {-1, -1};   // ms; -1 none
+    int64_t ageP[2] = {-1, -1}, ageDrawn[2] = {-1, -1};   // ms at the frame's first capture (F62a); -1 none
     MkShot post[2], pre[2];
 };
 MkFrame g_mk[kMkFrames];
@@ -1962,8 +1974,12 @@ void mkArm(const wchar_t* stamp) {
     g_mkArmMs = GetTickCount64();
     g_mkNoMarker = g_mkStageFail = 0;
     wcscpy_s(g_mkStamp, stamp);
-    Log::get().note("eye capture (F59): waypoint dump armed (run %ls): the next %d frames of both eyes, a %ux%u crop about the marker per frame "
-                    "and eye, after the interface layer and before its composite (pre_)", g_mkStamp, kMkFrames, kEyeMarkerCrop, kEyeMarkerCrop);
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    Log::get().note("eye capture (F62a): marker dump series armed (run %ls): the next %d consecutive frames of both eyes, per frame and eye a "
+                    "%ux%u crop centred on that frame's marker (the drawn marker when its read-back is under 500 ms old, else P through the "
+                    "eye's scene rows), after the interface layer and before its composite; files %ls\\eye_%ls_marker_eye{0,1}_f00..f15.bmp, "
+                    "eye_%ls_marker_pre_eye{0,1}_f00..f15.bmp, eye_%ls_marker.csv", g_mkStamp, kMkFrames, kEyeMarkerCrop, kEyeMarkerCrop,
+                    dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp);
 }
 void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
     g_mkArmed = false;
@@ -1972,59 +1988,104 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
         g_eyeDumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    int wrote = 0, failed = 0, prePosts = 0;
+    int wrote = 0, failed = 0, prePosts = 0, finals = 0;
     for (int k = 0; k < g_mkCount; ++k)
         for (int e = 0; e < 2; ++e)
             for (int pre = 0; pre < 2; ++pre) {
                 MkShot& s = pre ? g_mk[k].pre[e] : g_mk[k].post[e];
                 if (!s.taken || !s.st || !ctx) continue;
                 wchar_t path[MAX_PATH];
-                _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_mk_%seye%d_f%02d.bmp", dir.c_str(), g_mkStamp, pre ? L"pre_" : L"", e, k);
+                _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_marker_%seye%d_f%02d.bmp", dir.c_str(), g_mkStamp, pre ? L"pre_" : L"", e, k);
                 D3D11_TEXTURE2D_DESC sd{};
                 s.st->GetDesc(&sd);
                 if (writeEyeBmp(ctx, s.st, sd, e, path)) {
                     ++wrote;
+                    s.why = kMkOk;
                     if (pre) ++prePosts;
+                    else ++finals;
                 } else {
                     s.taken = false;
+                    s.why = kMkWriteFail;
                     ++failed;
                 }
             }
     wchar_t csv[MAX_PATH];
-    _snwprintf_s(csv, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_mk.csv", dir.c_str(), g_mkStamp);
+    _snwprintf_s(csv, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_marker.csv", dir.c_str(), g_mkStamp);
     FILE* f = nullptr;
     _wfopen_s(&f, csv, L"wb");
     if (f) {
         fprintf(f, "frame,sequence,eye,image,written,centre_src,ndc_x,ndc_y,ndcP_x,ndcP_y,ageP_ms,ndc_marker_x,ndc_marker_y,ndc_marker_age_ms,"
-                   "box_left,box_top,box_w,box_h,eye_w,eye_h\n");
+                   "box_left,box_top,box_w,box_h,eye_w,eye_h,late_ms\n");
         for (int k = 0; k < g_mkCount; ++k)
             for (int e = 0; e < 2; ++e)
                 for (int pre = 0; pre < 2; ++pre) {
                     const MkFrame& m = g_mk[k];
                     const MkShot& s = pre ? m.pre[e] : m.post[e];
                     static const char* const kSrc[3] = {"none", "ndc_marker", "P"};
-                    fprintf(f, "%d,%llu,%d,%s,%d,%s,%.5f,%.5f,%.5f,%.5f,%lld,%.5f,%.5f,%lld,%u,%u,%u,%u,%u,%u\n", k,
+                    fprintf(f, "%d,%llu,%d,%s,%d,%s,%.5f,%.5f,%.5f,%.5f,%lld,%.5f,%.5f,%lld,%u,%u,%u,%u,%u,%u,%llu\n", k,
                             static_cast<unsigned long long>(m.seq), e, pre ? "pre" : "post", s.taken ? 1 : 0, kSrc[m.src[e] >= 0 && m.src[e] < 3 ? m.src[e] : 0],
                             static_cast<double>(m.ndc[e][0]), static_cast<double>(m.ndc[e][1]), static_cast<double>(m.ndcP[e][0]),
                             static_cast<double>(m.ndcP[e][1]), static_cast<long long>(m.ageP[e]), static_cast<double>(m.ndcDrawn[e][0]),
                             static_cast<double>(m.ndcDrawn[e][1]), static_cast<long long>(m.ageDrawn[e]), s.box[0], s.box[1], s.box[2], s.box[3],
-                            s.eyeWH[0], s.eyeWH[1]);
+                            s.eyeWH[0], s.eyeWH[1], static_cast<unsigned long long>(s.lateMs));
                 }
         fclose(f);
     }
-    Log::get().note("eye capture (F59): waypoint dump %ls (%s): %d frames, %d crops written (%d before the interface layer, pre_), %d failed; "
-                    "%u crops skipped with no fresh marker projection, %u staging failures; eye_%ls_mk.csv %s",
-                    g_mkStamp, why, g_mkCount, wrote, prePosts, failed, g_mkNoMarker, g_mkStageFail, g_mkStamp, f ? "written" : "NOT written");
+    // Consecutive frames: every slot's sequence one past the one before it.
+    int gaps = 0;
+    for (int k = 1; k < g_mkCount; ++k)
+        if (g_mk[k].seq != g_mk[k - 1].seq + 1) ++gaps;
+    const unsigned long long seq0 = g_mkCount ? static_cast<unsigned long long>(g_mk[0].seq) : 0ull,
+                             seq1 = g_mkCount ? static_cast<unsigned long long>(g_mk[g_mkCount - 1].seq) : 0ull;
+    Log::get().note("eye capture (F62a): marker dump series %ls (%s): %d frames (sequences %llu..%llu, %s), %d of %d final crops and %d of %d "
+                    "pre-composite crops written, %d write failures; files %ls\\eye_%ls_marker_eye{0,1}_fNN.bmp, eye_%ls_marker_pre_eye{0,1}_fNN.bmp; "
+                    "eye_%ls_marker.csv %s", g_mkStamp, why, g_mkCount, seq0, seq1, gaps ? "NOT consecutive" : "consecutive", finals,
+                    2 * kMkFrames, prePosts, 2 * kMkFrames, failed, dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp, f ? "written" : "NOT written");
+    // The self-check: fewer than 32 final crops says why, per reason, and names the first missing ones.
+    if (finals < 2 * kMkFrames) {
+        int notReached = 2 * (kMkFrames - g_mkCount), notTried = 0, noMarker = 0, stageFail = 0, writeFail = 0;
+        char list[480] = "";
+        size_t used = 0;
+        int listed = 0;
+        for (int k = 0; k < g_mkCount; ++k)
+            for (int e = 0; e < 2; ++e) {
+                const MkFrame& m = g_mk[k];
+                const MkShot& s = m.post[e];
+                if (s.why == kMkOk) continue;
+                const char* r = "not tried (the frame's final eye never arrived)";
+                switch (s.why) {
+                    case kMkNoMarker: ++noMarker; r = "no fresh marker projection"; break;
+                    case kMkStageFail: ++stageFail; r = "staging failed"; break;
+                    case kMkStaged: ++writeFail; r = "staged, not written"; break;
+                    case kMkWriteFail: ++writeFail; r = "write failed"; break;
+                    default: ++notTried; break;
+                }
+                if (listed < 6 && used < sizeof(list) - 1) {
+                    const int w = std::snprintf(list + used, sizeof(list) - used, "%sf%02d eye%d: %s (P %lld ms, drawn %lld ms old at the frame's "
+                                                "first capture; %llu ms after it)", listed ? "; " : "", k, e, r,
+                                                static_cast<long long>(m.ageP[e]), static_cast<long long>(m.ageDrawn[e]),
+                                                static_cast<unsigned long long>(s.lateMs));
+                    if (w > 0) used = std::min(sizeof(list) - 1, used + static_cast<size_t>(w));
+                    ++listed;
+                }
+            }
+        Log::get().note("eye capture (F62a): marker dump series %ls self-check: %d of %d final crops written; missing: %d not reached (the series "
+                        "ended %s after %d frames), %d not tried, %d with no fresh marker projection (over %llu ms at the frame's first capture, "
+                        "or none), %d staging failures, %d write failures; first: %s", g_mkStamp, finals, 2 * kMkFrames, notReached, why,
+                        g_mkCount, notTried, noMarker, static_cast<unsigned long long>(kMkFreshMs), stageFail, writeFail, list[0] ? list : "none");
+    }
     mkRelease();
 }
 // One capture (pre: before the interface layer's composite; else the final eye). The frame's slot by its sequence; the eye's centre chosen
 // at its first capture this frame and kept for the other. Writes the run when the last frame's final right eye was tried, when a 17th
-// sequence arrives, or 3 s after arming.
+// sequence arrives, or 10 s after arming (F62a; it was 3 s, and the eye run's own write takes about 1.8 s inside the series).
+// F62a: the projection's age is taken at the frame's first capture (m.t0Ms), not at this capture: a projection updated after that moment is
+// this frame's (age 0). A stall between the two eyes of one frame (the eye run's write) no longer reads the frame's projection as stale.
 void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Texture2D* tex, const uint32_t region[4], bool flipU, bool flipV,
                bool pre) {
     if (!g_mkArmed || !ctx || !tex || !region || eye > 1) return;
     const uint64_t now = GetTickCount64();
-    if (now - g_mkArmMs > 3000) return mkWrite(ctx, "3 s after arming");
+    if (now - g_mkArmMs > kMkDeadlineMs) return mkWrite(ctx, "10 s after arming");
     int k = -1;
     for (int i = 0; i < g_mkCount; ++i)
         if (g_mk[i].seq == seq) k = i;
@@ -2032,26 +2093,28 @@ void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Textu
         if (g_mkCount >= kMkFrames) return mkWrite(ctx, "the frames are taken");
         k = g_mkCount++;
         g_mk[k].seq = seq;
+        g_mk[k].t0Ms = now;
     }
     MkFrame& m = g_mk[k];
     MkShot& s = pre ? m.pre[eye] : m.post[eye];
     if (s.tried) return;
     s.tried = true;
+    s.lateMs = now >= m.t0Ms ? now - m.t0Ms : 0;
     if (!m.centred[eye]) {
         m.centred[eye] = true;
         const MarkerCropNdc& c = g_markerCropNdc[eye];
-        const uint64_t pMs = c.pMs.load(std::memory_order_relaxed), dMs = c.drawnMs.load(std::memory_order_relaxed);
-        m.ageP[eye] = pMs && now >= pMs ? static_cast<int64_t>(now - pMs) : -1;
-        m.ageDrawn[eye] = dMs && now >= dMs ? static_cast<int64_t>(now - dMs) : -1;
+        const uint64_t pMs = c.pMs.load(std::memory_order_relaxed), dMs = c.drawnMs.load(std::memory_order_relaxed), ref = m.t0Ms;
+        m.ageP[eye] = pMs ? (pMs >= ref ? 0 : static_cast<int64_t>(ref - pMs)) : -1;
+        m.ageDrawn[eye] = dMs ? (dMs >= ref ? 0 : static_cast<int64_t>(ref - dMs)) : -1;
         m.ndcP[eye][0] = c.p[0].load(std::memory_order_relaxed);
         m.ndcP[eye][1] = c.p[1].load(std::memory_order_relaxed);
         m.ndcDrawn[eye][0] = c.drawn[0].load(std::memory_order_relaxed);
         m.ndcDrawn[eye][1] = c.drawn[1].load(std::memory_order_relaxed);
-        if (m.ageDrawn[eye] >= 0 && m.ageDrawn[eye] <= 500) {
+        if (m.ageDrawn[eye] >= 0 && m.ageDrawn[eye] <= static_cast<int64_t>(kMkFreshMs)) {
             m.src[eye] = 1;
             m.ndc[eye][0] = m.ndcDrawn[eye][0];
             m.ndc[eye][1] = m.ndcDrawn[eye][1];
-        } else if (m.ageP[eye] >= 0 && m.ageP[eye] <= 500) {
+        } else if (m.ageP[eye] >= 0 && m.ageP[eye] <= static_cast<int64_t>(kMkFreshMs)) {
             m.src[eye] = 2;
             m.ndc[eye][0] = m.ndcP[eye][0];
             m.ndc[eye][1] = m.ndcP[eye][1];
@@ -2059,6 +2122,7 @@ void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Textu
     }
     if (m.src[eye] == 0) {
         ++g_mkNoMarker;
+        s.why = kMkNoMarker;
     } else {
         const uint32_t w = region[2] - region[0], h = region[3] - region[1];
         const double nx = static_cast<double>(m.ndc[eye][0]), ny = static_cast<double>(m.ndc[eye][1]);
@@ -2066,6 +2130,7 @@ void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Textu
         uint32_t cw = 0, ch = 0, bx = 0, by = 0;
         if (stageEyeCrop(ctx, tex, &s.st, &cw, &ch, region, kEyeMarkerCrop, kEyeMarkerCrop, &bx, &by, centre)) {
             s.taken = true;
+            s.why = kMkStaged;   // kMkOk once mkWrite has written it
             s.box[0] = bx;
             s.box[1] = by;
             s.box[2] = cw;
@@ -2074,6 +2139,7 @@ void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Textu
             s.eyeWH[1] = h;
         } else {
             ++g_mkStageFail;
+            s.why = kMkStageFail;
         }
     }
     if (!pre && eye == 1 && k == kMkFrames - 1) mkWrite(ctx, "complete");
