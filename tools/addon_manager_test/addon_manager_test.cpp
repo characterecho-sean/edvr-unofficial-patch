@@ -405,7 +405,7 @@ int main(int argc, char** argv) {
         auto sb = makeSandbox(L"float");
         {
             std::ofstream iniOut(sb / L"edvr.ini");
-            iniOut << "[addon.float_header]\nsaved = 0.75\n";
+            iniOut << "[addon.float_owner.float_header]\nsaved = 0.75\n";
         }
         edvr::Config::get().init(sb.wstring());
 
@@ -419,13 +419,13 @@ int main(int argc, char** argv) {
         def.defaultValue = encode(0.25f);
 
         def.key = "saved";
-        std::string savedKey = edvr::plugins::pluginSettingIniKey(def.header, def.key);
-        check(savedKey == "addon.float_header.saved", "float: the ini key is addon.<header>.<key>");
+        std::string savedKey = edvr::plugins::pluginSettingIniKey("float_owner", def.header, def.key);
+        check(savedKey == "addon.float_owner.float_header.saved", "float: the ini key is addon.<stem>.<header>.<key>");
         check(decode(edvr::plugins::restoredPluginSettingValue(def, savedKey)) == 0.75f,
               "float: the saved value (0.75) is applied over the default (0.25)");
 
         def.key = "unsaved";
-        std::string unsavedKey = edvr::plugins::pluginSettingIniKey(def.header, def.key);
+        std::string unsavedKey = edvr::plugins::pluginSettingIniKey("float_owner", def.header, def.key);
         check(decode(edvr::plugins::restoredPluginSettingValue(def, unsavedKey)) == 0.25f,
               "float: with nothing saved the default is applied");
 
@@ -649,6 +649,55 @@ int main(int argc, char** argv) {
         }
         reg.postHidden(false);
         check(reg.drain() && !reg.hidden(), "hide: the menu thread shows them again");
+    }
+
+    // Case 19 (PR #92 review): addon identity is the DLL file stem. Two addons registering the same header and key get separate
+    // rows and separate saved values, and one failing takes only its own row.
+    {
+        edvr::plugins::PluginRowRegistry reg;
+        auto addRow = [&](const char* owner, int64_t value) {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            auto& r = reg.upsertLocked(owner, "Tools", "enabled");
+            r.cachedValue = value;
+            r.getter = reinterpret_cast<EdvrPluginSettingGetter>(&GetCurrentThreadId);   // only its nullness matters
+        };
+        addRow("tool_a", 11);
+        addRow("tool_b", 22);
+        addRow("tool_a", 33);   // the same addon registering again refreshes its own row
+        {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            check(reg.rows().size() == 2, "identity: two owners with the same header and key have separate rows");
+            check(reg.rows()[0].cachedValue == 33 && reg.rows()[1].cachedValue == 22,
+                  "identity: re-registering overwrites only the owner's own row");
+        }
+        check(edvr::plugins::pluginSettingIniKey("tool_a", "Tools", "enabled") == "addon.tool_a.tools.enabled" &&
+              edvr::plugins::pluginSettingIniKey("tool_b", "Tools", "enabled") == "addon.tool_b.tools.enabled",
+              "identity: the saved key is addon.<stem>.<header>.<key>, one per owner");
+        reg.retire("tool_b");   // addon B fails
+        reg.drain();
+        std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+        check(reg.rows().size() == 1 && reg.rows()[0].owner == "tool_a" && reg.rows()[0].cachedValue == 33 && reg.rows()[0].getter,
+              "identity: B failing removes B's row; A's row and its value survive");
+    }
+    {
+        // Persisted values do not cross owners either.
+        auto sb = makeSandbox(L"identity");
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");
+            iniOut << "[addon.tool_a.tools]" << std::endl << "enabled = on" << std::endl;
+        }
+        edvr::Config::get().init(sb.wstring());
+        EdvrPluginSettingDef def{};
+        def.structSize = sizeof(def);
+        def.header = "Tools";
+        def.key = "enabled";
+        def.type = EDVR_PLUGIN_SETTING_BOOL;
+        check(edvr::plugins::restoredPluginSettingValue(def, edvr::plugins::pluginSettingIniKey("tool_a", def.header, def.key)) == 1,
+              "identity: the owner's saved value is applied");
+        check(edvr::plugins::restoredPluginSettingValue(def, edvr::plugins::pluginSettingIniKey("tool_b", def.header, def.key)) == 0,
+              "identity: another owner's same header and key reads its own default, not A's saved value");
+        std::error_code ec19;
+        std::filesystem::remove_all(sb, ec19);
     }
 
     // Cleanup sandbox

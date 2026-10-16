@@ -1,6 +1,6 @@
 #pragma once
 // What an addon's setting reads as when it is registered: the value saved in the ini under
-// addon.<header>.<key>, else the addon's own default. Kept out of menu.cpp so the rig that drives
+// addon.<stem>.<header>.<key>, else the addon's own default. Kept out of menu.cpp so the rig that drives
 // the plugin manager can check it.
 
 #include "../../include/edvr_plugin_api.h"
@@ -13,14 +13,17 @@
 
 namespace edvr::plugins {
 
-// The ini key for a setting, as the edit path (stepPluginSetting) writes it.
-inline std::string pluginSettingIniKey(const std::string& header, const std::string& key) {
+// The ini key for a setting, as the edit path (stepPluginSetting) writes it. The addon's identity (its DLL file stem, the same
+// one that tags its rows and keys its approval in [addons]) is part of the key, so two addons that both register
+// Tools / enabled keep separate saved values. A setting registered with no owner (the bare edvrRegisterPluginSetting export)
+// is saved under "unowned".
+inline std::string pluginSettingIniKey(const std::string& owner, const std::string& header, const std::string& key) {
     std::string safeHeader = header;
     for (char& c : safeHeader) {
         if (c == ' ' || c == '-' || c == '.') c = '_';
         else c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     }
-    return "addon." + safeHeader + "." + key;
+    return "addon." + (owner.empty() ? std::string("unowned") : owner) + "." + safeHeader + "." + key;
 }
 
 inline int64_t restoredPluginSettingValue(const EdvrPluginSettingDef& setting, const std::string& iniKey) {

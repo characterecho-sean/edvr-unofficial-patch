@@ -49,7 +49,7 @@ public:
     std::vector<PluginSettingRow>& rows() { return m_rows; }
 
     // Adds a row for (owner, header, key), or refreshes the owner's own live row with that identity. A row of
-    // another owner with the same header and key is a different row. The caller holds mutex().
+    // another owner with the same header and key is a different row, as is its saved value (pluginSettingIniKey). The caller holds mutex().
     PluginSettingRow& upsertLocked(const std::string& owner, const std::string& header, const std::string& key) {
         for (auto& existing : m_rows) {
             if (!existing.retired && existing.owner == owner && existing.header == header && existing.key == key) return existing;

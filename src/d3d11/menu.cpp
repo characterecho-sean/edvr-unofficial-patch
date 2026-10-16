@@ -1496,14 +1496,9 @@ void stepPluginSetting(int psIdx, int dir) {
         callSettingSetterSafely(ps.setter, ps.key.c_str(), val, ps.userData);
     }
 
-    std::string safeHeader = ps.header;
-    for (char& c : safeHeader) {
-        if (c == ' ' || c == '-' || c == '.') c = '_';
-        else c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    }
     WriteJob job;
     job.def = -1;
-    job.dotted = "addon." + safeHeader + "." + ps.key;
+    job.dotted = plugins::pluginSettingIniKey(ps.owner, ps.header, ps.key);   // the key registration reads the value back from
     if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
         job.value = (val != 0) ? "on" : "off";
     } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
@@ -5089,10 +5084,11 @@ static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSett
     std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
     std::string keyStr = setting->key ? setting->key : "";
 
-    std::string iniKey = plugins::pluginSettingIniKey(headerStr, keyStr);
+    const std::string owner = ownerId ? ownerId : "";
+    std::string iniKey = plugins::pluginSettingIniKey(owner, headerStr, keyStr);
     int64_t initialVal = plugins::restoredPluginSettingValue(*setting, iniKey);
 
-    plugins::PluginSettingRow& row = g_pluginRows.upsertLocked(ownerId ? ownerId : "", headerStr, keyStr);
+    plugins::PluginSettingRow& row = g_pluginRows.upsertLocked(owner, headerStr, keyStr);
     row.label = setting->label ? setting->label : keyStr;
     row.hint = setting->hint ? setting->hint : "";
     row.type = setting->type;

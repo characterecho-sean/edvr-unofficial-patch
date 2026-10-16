@@ -434,7 +434,7 @@ Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/
   - **In-Headset Approval:** Unapproved add-ons are displayed in the F8 menu "Plugins" tab with an `[Approve]` action button that immediately approves, writes to `edvr.ini`, and loads the plugin into memory.
   - **SEH Fault Containment:** Non-destructor C wrapper functions isolate all external plugin invocations (`onInitialize`, `onShutdown`, `onUpdate`, `onRenderEye`, `onFilterInput`). Any unhandled access violation is trapped, logged, and disables the offending plugin for the session without crashing the game.
   - **DirectInput Input Gate Filtering:** Resolves MFD-001 by restoring `rgdwPOV` to `0xFFFFFFFFu` when clearing joystick state and allowing plugins to swallow directional and button events cleanly.
-  - **Menu Setting Persistence:** Resolves MFD-005 by enqueuing writes to `[addon.<header>]` in `edvr.ini` whenever settings change.
+  - **Menu Setting Persistence:** Resolves MFD-005 by enqueuing writes to `addon.<stem>.<header>.<key>` (section `[addon.<stem>.<header>]`) in `edvr.ini` whenever settings change. `<stem>` is the add-on's DLL file stem, the same identity that tags its rows and keys its approval in `[addons]`, so two add-ons that register the same header and key keep separate rows and separate saved values; a row is only ever removed by its own owner.
   - **Decoupled OpenXR Render Callbacks:** `openvr_api.dll` dynamically acquires bridge exports from `d3d11.dll` at runtime without static link coupling or duplicating the extension manager instance.
   - **Test Rig (`addon_manager_test`):** Automated test suite verifying hash verification, unapproved DLL rejection, live approval, input filtering, and SEH containment.
 
