@@ -809,6 +809,31 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec22);
     }
 
+    // Case 23 (PR #92 review): the persisted name is folded to lowercase, as Config::parse folds every stored name, so a key an addon spells
+    // "Enabled" is restored after a save. The menu writes the dotted name into [section] key = value; the ini is then parsed afresh.
+    {
+        auto sb = makeSandbox(L"keycase");
+        EdvrPluginSettingDef def{};
+        def.structSize = sizeof(def);
+        def.header = "Tools";
+        def.key = "Enabled";
+        def.type = EDVR_PLUGIN_SETTING_BOOL;
+        def.defaultValue = 0;
+        const std::string dotted = edvr::plugins::pluginSettingIniKey("tool_a", def.header, def.key);
+        check(dotted == "addon.tool_a.tools.enabled", "keycase: the persisted key is lowercase though the addon spells it Enabled");
+        check(std::string(def.key) == "Enabled", "keycase: the addon's own key string is untouched");
+        const size_t lastDot = dotted.find_last_of('.');
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");   // what the menu's write leaves: the section and key of the dotted name
+            iniOut << "[general]\nmode = vr\n[" << dotted.substr(0, lastDot) << "]\n" << dotted.substr(lastDot + 1) << " = on\n";
+        }
+        edvr::Config::get().init(sb.wstring());   // the next initialisation parses the saved file
+        check(edvr::plugins::restoredPluginSettingValue(def, dotted) == 1,
+              "keycase: the non-default value saved for 'Enabled' is restored on the next initialisation");
+        std::error_code ec23;
+        std::filesystem::remove_all(sb, ec23);
+    }
+
     // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
     // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
     {

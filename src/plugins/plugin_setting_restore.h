@@ -17,13 +17,19 @@ namespace edvr::plugins {
 // one that tags its rows and keys its approval in [addons]) is part of the key, so two addons that both register
 // Tools / enabled keep separate saved values. A setting registered with no owner (the bare edvrRegisterPluginSetting export)
 // is saved under "unowned".
+//
+// The whole key is lowercased, as Config::parse lowercases every stored name (section + "." + key) and Config::set does: a key the
+// SDK lets an addon spell "Enabled" is saved, found and restored as "enabled". Config's getters look a name up exactly, so write and
+// restore must both go through here. The addon sees and displays its own spelling; only the persisted name is folded. (Two keys of one
+// header that differ only in case therefore share a saved value.)
 inline std::string pluginSettingIniKey(const std::string& owner, const std::string& header, const std::string& key) {
     std::string safeHeader = header;
     for (char& c : safeHeader) {
         if (c == ' ' || c == '-' || c == '.') c = '_';
-        else c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     }
-    return "addon." + (owner.empty() ? std::string("unowned") : owner) + "." + safeHeader + "." + key;
+    std::string name = "addon." + (owner.empty() ? std::string("unowned") : owner) + "." + safeHeader + "." + key;
+    for (char& c : name) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return name;
 }
 
 inline int64_t restoredPluginSettingValue(const EdvrPluginSettingDef& setting, const std::string& iniKey) {
