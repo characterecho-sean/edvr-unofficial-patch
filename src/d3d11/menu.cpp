@@ -2249,7 +2249,7 @@ void buildContent(MenuContent& c) {
                     strncpy(l.right, "approve", sizeof(l.right) - 1);
                     l.style = hi ? kMenuRowHi : kMenuRow;
                     if (hi) {
-                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve and save to %s (requires restart).",
+                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve it, save the approval to %s and load it now.",
                                  cand.sha256.c_str(), Config::get().iniName());
                     }
                 } else {
