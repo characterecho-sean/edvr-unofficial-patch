@@ -222,11 +222,19 @@ SHORT WINAPI physicalKey(int vk) { return vk >= 0 && vk < 256 && physical[vk] ? 
 HANDLE g_scanEntered = nullptr;
 HANDLE g_scanMayContinue = nullptr;
 bool g_pauseArmed = false;
+// The pause itself. Both handles are copied before signalling entry: once the rig sees the entry it may point the
+// globals at the next worker's events, and a worker that read g_scanMayContinue after that would wait on the wrong
+// event and fall through on the timeout instead of in the order the case sets (PR #92 review).
+void pauseInScan() {
+    const HANDLE entered = g_scanEntered;
+    const HANDLE mayContinue = g_scanMayContinue;
+    SetEvent(entered);
+    WaitForSingleObject(mayContinue, 10000);
+}
 SHORT WINAPI pausingKey(int vk) {
     if (g_pauseArmed) {
         g_pauseArmed = false;
-        SetEvent(g_scanEntered);
-        WaitForSingleObject(g_scanMayContinue, 10000);
+        pauseInScan();
     }
     return physicalKey(vk);
 }
@@ -241,8 +249,7 @@ SHORT WINAPI sampleThenPauseKey(int vk) {
     const SHORT sample = physicalKey(vk);
     if (g_pauseArmed) {
         g_pauseArmed = false;
-        SetEvent(g_scanEntered);
-        WaitForSingleObject(g_scanMayContinue, 10000);
+        pauseInScan();
     }
     return sample;
 }
@@ -570,8 +577,12 @@ static void pluginReleaseScanCases(Device& keyboard) {
             std::thread second([&] { refreshReleaseTail(&sampleThenPauseKey); });
             const bool in2 = WaitForSingleObject(entered2, 5000) == WAIT_OBJECT_0;
             check(in2, "stale publishes first: refresh 2 reached its scan of A");
+            const ULONGLONG resumed1 = GetTickCount64();
             SetEvent(go1);
             first.join();                        // publishes its stale sample of A held
+            // Refresh 1 must finish on go1, not on its reader's 10 s timeout: a timeout would mean it waited on the
+            // wrong event and the publish order this case sets was never enforced.
+            check(GetTickCount64() - resumed1 < 5000, "stale publishes first: refresh 1 resumed on its own event");
             SetEvent(go2);
             second.join();                       // publishes the observed release
             check(!releaseTailVk('A'), "stale publishes first: the observed release retired the tail");
