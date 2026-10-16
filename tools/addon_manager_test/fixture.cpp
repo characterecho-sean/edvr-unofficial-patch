@@ -25,6 +25,7 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetRenderCount() {
 //   FIXTURE_VARIANT_initfail registers two settings, then onInitialize returns an error
 //   FIXTURE_VARIANT_initfault registers two settings, then onInitialize access-violates
 //   FIXTURE_VARIANT_settings registers two settings and initialises cleanly
+//   FIXTURE_VARIANT_renderfault registers two settings, initialises cleanly, then access-violates in onRenderEye
 #if defined(FIXTURE_VARIANT_b)
 #define FIXTURE_ID 2
 #else
@@ -35,11 +36,13 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetVariant() {
     return FIXTURE_ID;
 }
 
-#if defined(FIXTURE_VARIANT_initfail) || defined(FIXTURE_VARIANT_initfault) || defined(FIXTURE_VARIANT_settings)
+#if defined(FIXTURE_VARIANT_initfail) || defined(FIXTURE_VARIANT_initfault) || defined(FIXTURE_VARIANT_settings) || defined(FIXTURE_VARIANT_renderfault)
 #if defined(FIXTURE_VARIANT_initfail)
 #define FIXTURE_HEADER "FixtureFail"
 #elif defined(FIXTURE_VARIANT_initfault)
 #define FIXTURE_HEADER "FixtureFault"
+#elif defined(FIXTURE_VARIANT_renderfault)
+#define FIXTURE_HEADER "FixtureRender"
 #else
 #define FIXTURE_HEADER "FixtureSettings"
 #endif
@@ -66,7 +69,7 @@ static int EDVR_API pluginOnInitialize(const EdvrHostServices* host) {
 #if defined(FIXTURE_VARIANT_initfail)
     registerTwoSettings(host);
     return -2;
-#elif defined(FIXTURE_VARIANT_settings)
+#elif defined(FIXTURE_VARIANT_settings) || defined(FIXTURE_VARIANT_renderfault)
     registerTwoSettings(host);
 #elif defined(FIXTURE_VARIANT_initfault)
     registerTwoSettings(host);
@@ -89,6 +92,9 @@ static void EDVR_API pluginOnUpdate(const EdvrPosef* headPose, float dtSeconds) 
 
 static void EDVR_API pluginOnRenderEye(const EdvrEyeRenderContext* eyeCtx) {
     (void)eyeCtx;
+#if defined(FIXTURE_VARIANT_renderfault)
+    *reinterpret_cast<volatile int*>(nullptr) = 42; // deliberate fault, every call
+#endif
     if (g_crashMode.load() == 2) {
         *reinterpret_cast<volatile int*>(nullptr) = 42; // deliberate fault
     }

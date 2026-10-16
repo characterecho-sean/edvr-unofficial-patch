@@ -304,6 +304,31 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec9);
     }
 
+    // Case 9b (PR #92 review follow-up): an addon that faults at run time retires its settings like one that fails init.
+    {
+        auto sb = makeSandbox(L"renderfault");
+        dropFixture(sb, L"settings", L"keeper.dll");
+        dropFixture(sb, L"renderfault", L"rfaults.dll");
+        pm.initialize(sb.wstring());
+        g_fakeSettings.clear();
+        auto* keeper = findCandidate(pm, "keeper");
+        auto* rfaults = findCandidate(pm, "rfaults");
+        check(keeper && rfaults, "runtimefault: both candidates discovered");
+        if (keeper && rfaults) {
+            check(pm.approvePlugin("keeper", keeper->sha256), "runtimefault: the healthy settings addon loads");
+            check(pm.approvePlugin("rfaults", rfaults->sha256), "runtimefault: the render-faulting addon loads (init is clean)");
+            check(fakeSettingsOwnedBy("rfaults") == 2, "runtimefault: its settings are registered before it faults");
+            EdvrEyeRenderContext rctx{};
+            rctx.structSize = sizeof(rctx);
+            pm.onRenderEye(rctx);
+            check(fakeSettingsOwnedBy("rfaults") == 0, "runtimefault: its settings are gone after it faults in onRenderEye");
+            check(fakeSettingsOwnedBy("keeper") == 2, "runtimefault: the healthy addon's settings survive");
+        }
+        pm.shutdown();
+        std::error_code ec9b;
+        std::filesystem::remove_all(sb, ec9b);
+    }
+
     // Case 10 (PR #92 review): approving the same candidate twice is a no-op the second time.
     {
         auto sb = makeSandbox(L"twice");
