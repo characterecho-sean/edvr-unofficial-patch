@@ -421,8 +421,8 @@ when ReShade was removed). The rules:
 ## 11. Third-party add-on tier implementation (2026-10-13)
 
 Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/edvr_plugin_api.h` synchronized with `edvr-mfd`):
-- **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat session
-  calls no add-on in a flat session. The profile can switch live (`mode_watch.cpp` `commitPosted()`), so the manager follows it with a dormant state and
+- **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat
+  session calls no add-on. "Flat" below means any non-VR profile: only `Vr` and `LegacyVr` run add-ons, and `Passthrough` is dormant like `Flat`. The profile can switch live (`mode_watch.cpp` `commitPosted()`), so the manager follows it with a dormant state and
   no change to the add-on ABI: a switch to flat suspends (no update, render or input callback; input ownership released through the normal release path;
   the add-ons' F8 rows hidden, not deleted, through the menu-thread queue; log `plugin_manager: profile switched to flat, N addon(s) suspended ...`), a
   switch back to VR resumes (callbacks again, rows shown; log `plugin_manager: profile switched to VR, N addon(s) active`). Nothing is unloaded at a
@@ -442,7 +442,10 @@ Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/
   - Approval: an unapproved add-on first appears in F8 at that switch, and approving it loads it on the menu thread mid-session.
   - Settings: rows registered at the switch read their saved values from the VR profile's file, which depends on `onProfileSwitched()` running after
     `Config::switchProfile()`; keep that order.
-  - Passthrough and LegacyVr count as VR (`runtimeFlatProfile()` is false), so add-ons run in both; decide whether Passthrough should suspend them.
+  - Decided (PR #92 review): add-ons are active only when the runtime profile is `Vr` or `LegacyVr`. Every other profile (`Flat`, `Passthrough`, `Invalid`)
+    is dormant, by one predicate (`!runtimeVrProfile()`, `addonsDormantProfile()` in `plugin_manager.cpp`) used for startup, dispatch, approval, loading
+    and transitions. Passthrough is a VR-only install whose game is in flat mode: no scene pass runs and the `addons.*` approvals are unreadable in it
+    (`runtimeProfileAllowsKey`), so a launch there defers discovery and VR to Passthrough suspends. Covered by `addon_manager_test` case 22.
 - **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
 - **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
   - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.

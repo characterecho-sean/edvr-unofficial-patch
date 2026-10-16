@@ -89,11 +89,18 @@ std::string sanitizeStem(const std::wstring& ws) {
     return s;
 }
 
-// True in a flat session, where plugins are dormant (VR-only: docs/design-plugin-architecture-2026-09-30.md). The line is the log's proof
-// that the gate, not a missing plugins directory, is why nothing loaded.
+// The one predicate for whether addons may run: only the Vr and LegacyVr profiles. Flat, Passthrough (a VR-only install in a flat game
+// mode) and anything else is dormant (docs/design-plugin-architecture-2026-09-30.md, section 11). Startup, dispatch, approval, loading and
+// profile transitions all ask this and nothing else.
+bool addonsDormantProfile() {
+    return !runtimeVrProfile();
+}
+
+// True outside a VR session, where plugins are dormant. The line is the log's proof that the gate, not a missing plugins directory, is
+// why nothing loaded.
 bool vrOnlyBlocked(const char* what) {
-    if (!runtimeFlatProfile()) return false;
-    Log::get().note("plugin_manager: %s skipped, plugins are VR-only and this is a flat session", what);
+    if (!addonsDormantProfile()) return false;
+    Log::get().note("plugin_manager: %s skipped, plugins are VR-only and this is a %s session", what, runtimeProfileName());
     return true;
 }
 
@@ -176,7 +183,7 @@ std::string PluginManager::calculateSha256(const std::wstring& path) {
 }
 
 bool PluginManager::dormantLocked() const {
-    return m_dormant || runtimeFlatProfile();
+    return m_dormant || addonsDormantProfile();
 }
 
 bool PluginManager::initialize(const std::wstring& rootDir) {
@@ -185,13 +192,15 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
     m_initialized = true;
     m_discovered = false;
     m_rootDir = rootDir;
-    // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat session does not run. A session that
-    // begins flat therefore discovers nothing, initialises nothing and registers no settings yet; onProfileSwitched does all of that on the first
-    // switch into VR. Elite offers no flat-to-VR switch after a flat launch today, so in practice a flat launch loads no add-on at all; the deferral
-    // keeps the path correct if that switch ever arrives (design doc section 11, "Flat to VR").
-    if (runtimeFlatProfile()) {
+    // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat or passthrough session does not
+    // run, and the [addons] approvals are not even readable there (runtimeProfileAllowsKey). A session that begins in any non-VR profile therefore
+    // discovers nothing, initialises nothing and registers no settings yet; onProfileSwitched does all of that on the first switch into VR. Elite
+    // offers no flat-to-VR switch after a flat launch today, so in practice a flat launch loads no add-on at all; the deferral keeps the path
+    // correct if that switch ever arrives (design doc section 11, "Flat to VR").
+    if (addonsDormantProfile()) {
         m_dormant = true;
-        Log::get().note("plugin_manager: flat session, no addon loaded (plugins are VR-only); discovery waits for a switch into VR");
+        Log::get().note("plugin_manager: %s session, no addon loaded (plugins are VR-only); discovery waits for a switch into VR",
+                        runtimeProfileName());
         return true;
     }
     m_dormant = false;
@@ -202,15 +211,15 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 void PluginManager::onProfileSwitched() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_initialized) return;
-    const bool flat = runtimeFlatProfile();
-    if (flat == m_dormant) return;
-    if (flat) {
+    const bool dormant = addonsDormantProfile();
+    if (dormant == m_dormant) return;
+    if (dormant) {
         m_dormant = true;
         // The normal release path, so the release tail applies: a key the addon was holding stays up until it is let go.
         inputGateSetPluginBlock(false);
         edvr::menuSetPluginRowsHidden(true);
-        Log::get().note("plugin_manager: profile switched to flat, %zu addon(s) suspended (rows hidden, no callbacks, input released)",
-                        m_plugins.size());
+        Log::get().note("plugin_manager: profile switched to %s, %zu addon(s) suspended (rows hidden, no callbacks, input released)",
+                        runtimeProfileName(), m_plugins.size());
         return;
     }
     m_dormant = false;

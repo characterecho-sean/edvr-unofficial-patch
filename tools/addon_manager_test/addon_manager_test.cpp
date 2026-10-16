@@ -763,6 +763,52 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec20);
     }
 
+    // Case 22 (PR #92 review): addons are active only in the Vr and LegacyVr profiles. Passthrough (a VR-only install whose game is in flat mode) is
+    // as dormant as Flat: VR to Passthrough suspends and releases input, and a launch in Passthrough defers discovery (the [addons] approvals
+    // are unreadable there) so the later switch into VR loads the previously approved addon.
+    {
+        auto sb = makeSandbox(L"passthrough");
+        dropFixture(sb, L"settings", L"pass.dll");
+        const std::string psha = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"pass.dll").wstring());
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");
+            iniOut << "[general]\nmode = vr\n[addons]\npass = " << psha << "\n";
+        }
+        edvr::Config::get().init(sb.wstring());
+        const edvr::RuntimeProfile savedProfile = edvr::runtimeProfileValue();
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        g_fakeRowsHidden = false;
+
+        // (b) start in Passthrough
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Passthrough);
+        pm.initialize(sb.wstring());
+        check(pm.candidatesSnapshot().empty() && !pm.hasActivePlugins() && g_fakeRegisteredEver == 0 &&
+              GetModuleHandleW(L"pass.dll") == nullptr,
+              "passthrough: launched in Passthrough, initialize discovers and loads nothing");
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
+        pm.onProfileSwitched();
+        auto pc = findCandidate(pm, "pass");
+        check(pc.has_value() && pc->approved, "passthrough: the switch into VR discovers the addon and reads its approval");
+        check(pm.hasActivePlugins() && pm.activePluginCount() == 1 && GetModuleHandleW(L"pass.dll") != nullptr,
+              "passthrough: ...and loads the previously approved addon automatically");
+
+        // (a) VR to Passthrough
+        check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "passthrough: in VR the addon takes input");
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Passthrough);
+        pm.onProfileSwitched();
+        check(!g_gateBlocked, "passthrough: the switch to Passthrough releases the addon's input ownership");
+        check(g_fakeRowsHidden && !pm.hasActivePlugins(), "passthrough: ...hides its rows and suspends it");
+        check(!pm.onFilterInput(1, nullptr), "passthrough: no input filter is called while suspended");
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::LegacyVr);
+        pm.onProfileSwitched();
+        check(!g_fakeRowsHidden && pm.hasActivePlugins(), "passthrough: LegacyVr counts as VR and resumes the addon");
+        pm.shutdown();
+        edvr::runtimeProfileSet(savedProfile);
+        std::error_code ec22;
+        std::filesystem::remove_all(sb, ec22);
+    }
+
     // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
     // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
     {
