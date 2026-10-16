@@ -15,6 +15,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/common/runtime_profile.h"
+#include "../rig_graphics_mode.h"
 
 // Stubs for d3d11 and input gate functions required by plugin_manager
 extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
@@ -151,6 +152,15 @@ int main(int argc, char** argv) {
     }
 
     printf("[addon_manager_test] running test cases...\n");
+
+    // Config::init takes the profile from the machine's Elite Settings.xml and mirrors settings under %LOCALAPPDATA%\EDVR. Run by hand on
+    // a machine last flown flat, this rig went dormant and wrote the real mirror: pin a VR fixture first (tools\rig_graphics_mode.h).
+    static const std::wstring s_fixtureRoot = edvr::rig::rigFixtureRoot(L"addon_manager");
+    if (!edvr::rig::pinRigGraphicsMode(s_fixtureRoot, 4)) {
+        printf("  FAIL  could not pin the rig's graphics mode fixture\n");
+        return 1;
+    }
+    atexit([] { edvr::rig::removeRigTree(s_fixtureRoot); });
 
     wchar_t tempPath[MAX_PATH]{};
     GetTempPathW(MAX_PATH, tempPath);
