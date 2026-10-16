@@ -38,8 +38,13 @@
 #define EDVR_NATIVE_FRAME_VERSION_8 8u
 // Version 9 (F40, live A/B of the runtime's answer to Elite's "now" pose request, fix.now_pose) is version 8 with one word after it: nowPoseRender.
 #define EDVR_NATIVE_FRAME_VERSION_9 9u
+// Version 10 (F62b, the ADS head-aim, fix.native_on_foot_ads_head_aim) is a ladder step like 7: the runtime sends EdvrNativeFrameInput version 3
+// (the head in natural LOCAL below) with the version 9 output shape, and a version 10 answer carries the ADS head-aim's seated pitch in the
+// retired slot reservedYaw. A provider that refuses 10 steps the runtime down to 9 (input version 2, no ADS pitch). Same hand-copied-DLLs rule.
+#define EDVR_NATIVE_FRAME_VERSION_10 10u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_1 1u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_2 2u
+#define EDVR_NATIVE_FRAME_INPUT_VERSION_3 3u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -69,11 +74,20 @@ struct EdvrNativeFrameInput {
     uint64_t ringQpc[8];
     uint32_t ringNewest;
     uint32_t ringCount;
+    // Version 3 and later (F62b). The render head located in the runtime's natural LOCAL space at the frame's display time (the same 3x4 row-major
+    // rigid transform as physicalHead), so it carries none of the seated origin's turns or offsets: the d3d11 half reads the headset's own
+    // motion from it while the seated space is being turned under it. localValid is 1 when it was located. localReserved is zero.
+    float localHead[12];
+    uint32_t localValid;
+    uint32_t localReserved;
 };
 
 // The size of the version 1 input: the words through valid, which is what a version 1 caller's struct is.
 #define EDVR_NATIVE_FRAME_INPUT_SIZE_1 \
     ((uint32_t)offsetof(EdvrNativeFrameInput, nowHead))
+// F62b: the size of the version 2 input: the words through ringCount, which is what a version 2 caller's struct is (the LOCAL head follows it).
+#define EDVR_NATIVE_FRAME_INPUT_SIZE_2 \
+    ((uint32_t)offsetof(EdvrNativeFrameInput, localHead))
 
 // F31: the render head and the "now" head the d3d11 half saw at its last beginFrame (nativeFrameNowPose). The frame sequence is the geometry
 // sequence of that frame; nowSequence counts the runtime's "now" answers.
@@ -89,6 +103,8 @@ struct EdvrNativeNowPose {
     uint64_t ringSequence[8];
     uint64_t ringQpc[8];
     uint32_t ringNewest, ringCount;
+    float local[12];                // F62b: the render head in natural LOCAL (version 3 input), when localValid
+    bool localValid;
 };
 
 struct EdvrNativeFrameOutput {
@@ -103,6 +119,9 @@ struct EdvrNativeFrameOutput {
     // the seated rotation the runtime turns its seated origin by about the head: [0] the yaw about the vertical (radians, the seat's yaw sign),
     // [1] the pitch about the head's right axis (radians). Zero when the key is off. reservedOffsetEnabled stays 0, so a runtime from before
     // 2026-10-07 still reads "offset off"; a runtime older than F61 reads nothing here.
+    // F62b (TEMPORARY, the ADS head-aim): in a version 10 answer only, reservedYaw carries the seated pitch (radians, nose up positive, at
+    // most 60 deg either way) the runtime turns its seated origin by about the seat's right axis through the head. Zero when the feature is
+    // off; a version 9 or older answer never writes it.
     float reservedOffset[3];
     float reservedYaw;
     uint32_t reservedOffsetEnabled, reservedOffsetGamePoses;
@@ -235,6 +254,9 @@ void nativeFrameSetNowPose(uint32_t mode);   // F40/F42: the live now-pose mode 
 // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians, about the head), carried in version 9 output's reservedOffset[0..1].
 // Zero when fix.native_on_foot_rot_calibrate is off. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetRotCalibrate(float yawRad, float pitchRad);
+// F62b (TEMPORARY): the ADS head-aim's seated pitch (radians, nose up positive), carried in version 10 output's reservedYaw. Zero when
+// fix.native_on_foot_ads_head_aim is off or not engaged. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
+void nativeFrameSetAdsPitch(float pitchRad);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 

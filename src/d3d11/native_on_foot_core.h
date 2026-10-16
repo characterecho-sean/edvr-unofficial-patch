@@ -1888,5 +1888,175 @@ inline RotVerdict rotCalVerdict(double camDeg, double renderDeg, double cmdDeg) 
     }
     return v;
 }
+
+// ---- F62b (TEMPORARY, fix.native_on_foot_ads_head_aim): the ADS head-aim ---------------------------------------------------------------
+// Conventions (radians unless a name says Deg):
+//  - The seat convention: yaw + = turned LEFT (about up, counter-clockwise seen from above: the seat's yaw sign), pitch + = nose UP.
+//  - F61 (measured: gain 1.00, sign -): a seated rotation of +a moves the game camera by -a. So a seated +a cancels an aim turn of +a.
+//  - The game's yaw delta (comp+0x5F4) is positive for a turn to the RIGHT when the yaw sign is +1 (the default, ASSUMED: the mouse's +x);
+//    its pitch delta (comp+0x5F8) is positive UP when the pitch sign is +1 (the default, ASSUMED). A sign of 0 turns that axis off.
+//  - The camera's net turn = the aim's turn + the head's own turn - the seated rotation. With the cancel equal to the aim's applied turn the
+//    view follows the headset exactly, whatever share of the head's turn the aim was given (the ramp's weight).
+constexpr double kAdsPi = 3.14159265358979323846;
+constexpr double kAdsDeg = kAdsPi / 180.0;
+constexpr double kAdsRampInSec = 0.15, kAdsRampOutSec = 0.3;   // the weight's ramp into ADS and out of it
+constexpr double kAdsUnwindSec = 0.3;                          // the release's pitch unwind
+constexpr double kAdsCatchUpSec = 0.2;                         // after the unwind, the most time the remainder is chased before it is dropped
+constexpr double kAdsPitchClampRad = 60.0 * kAdsDeg;          // the seated pitch is held to +-60 deg
+constexpr double kAdsGuardTurnRad = 270.0 * kAdsDeg;          // the runaway guard: more seated yaw than this in kAdsGuardWindowMs trips it
+constexpr uint64_t kAdsGuardWindowMs = 3000;
+constexpr double kAdsResFloorDeg = 8.0;      // the residual guard: |camera - head| at least this, ...
+constexpr double kAdsResRatio = 0.5;         // ... at least this share of the head's own turn since the base, ...
+constexpr double kAdsResGrowDeg = 4.0;       // ... grown by at least this ...
+constexpr uint64_t kAdsResGrowMs = 500;      // ... over this long without falling 1 deg below its peak
+constexpr double kAdsHeadJumpRad = 30.0 * kAdsDeg;   // a head sample this far from the last is a discontinuity (a LOCAL recentre), not motion
+constexpr double kAdsHeadJumpM = 0.5;
+constexpr double kAdsGainMin = 1e-3, kAdsGainMax = 1e3;   // a measured gain outside this (or not finite) reads as the fallback 1.0
+constexpr double kAdsPendingMaxRad = 20.0 * kAdsDeg;      // the input queued for the game's next look update, at most this much turn
+
+inline double adsWrap(double a) noexcept {
+    if (!(a == a)) return 0.0;
+    while (a > kAdsPi) a -= 2.0 * kAdsPi;
+    while (a < -kAdsPi) a += 2.0 * kAdsPi;
+    return a;
+}
+// The weight: up to 1 over kAdsRampInSec while on, down to 0 over kAdsRampOutSec while off.
+struct AdsRamp {
+    double w = 0.0;
+    void step(bool on, double dt) noexcept {
+        const double t = dt > 0.0 ? dt : 0.0;
+        w += on ? t / kAdsRampInSec : -t / kAdsRampOutSec;
+        w = w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
+    }
+};
+// The head's heading (the seat's yaw sign) and elevation (nose up +) from a 3x4 row-major rigid transform in OpenXR axes (x right, y up,
+// -z forward; the forward is minus the rotation's third column). False when degenerate or within 11 deg of vertical (no heading there).
+inline bool adsHeadAngles(const float m[12], double* yaw, double* pitch) noexcept {
+    const double f[3] = {-static_cast<double>(m[2]), -static_cast<double>(m[6]), -static_cast<double>(m[10])};
+    const double l = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (!(l > 1e-6)) return false;
+    const double fy = f[1] / l;
+    if (std::fabs(fy) > 0.98) return false;
+    *yaw = std::atan2(-f[0], -f[2]);
+    *pitch = std::asin(fy);
+    return true;
+}
+// The head's turn from prev to now (seat convention, the yaw wrapped). False when either is unusable or the step is a discontinuity.
+inline bool adsHeadDelta(const float prev[12], const float now[12], double* dYaw, double* dPitch) noexcept {
+    double y0 = 0.0, p0 = 0.0, y1 = 0.0, p1 = 0.0;
+    *dYaw = *dPitch = 0.0;
+    if (!adsHeadAngles(prev, &y0, &p0) || !adsHeadAngles(now, &y1, &p1)) return false;
+    const double dy = adsWrap(y1 - y0), dp = p1 - p0;
+    const double dx = static_cast<double>(now[3]) - prev[3], dyy = static_cast<double>(now[7]) - prev[7], dz = static_cast<double>(now[11]) - prev[11];
+    if (std::fabs(dy) > kAdsHeadJumpRad || std::fabs(dp) > kAdsHeadJumpRad || std::sqrt(dx * dx + dyy * dyy + dz * dz) > kAdsHeadJumpM) return false;
+    *dYaw = dy;
+    *dPitch = dp;
+    return true;
+}
+// Seat convention <-> the game's deltas. Yaw: the game's + is right for sign +1, the seat's + is left, so each is minus sign times the other.
+// Pitch: both + up for sign +1. A sign of 0 is the axis off (0 both ways).
+inline double adsGameFromSeatYaw(double seat, int sign) noexcept { return sign == 0 ? 0.0 : -static_cast<double>(sign > 0 ? 1 : -1) * seat; }
+inline double adsSeatFromGameYaw(double game, int sign) noexcept { return sign == 0 ? 0.0 : -static_cast<double>(sign > 0 ? 1 : -1) * game; }
+inline double adsGameFromSeatPitch(double seat, int sign) noexcept { return sign == 0 ? 0.0 : static_cast<double>(sign > 0 ? 1 : -1) * seat; }
+inline double adsSeatFromGamePitch(double game, int sign) noexcept { return sign == 0 ? 0.0 : static_cast<double>(sign > 0 ? 1 : -1) * game; }
+// The gain in use: the measured one (the game's delta over the input, sign included) when it is finite and within kAdsGainMin..Max in size,
+// else 1.0 (the fallback).
+inline double adsGain(double measured) noexcept {
+    const double a = std::fabs(measured);
+    return (measured == measured && a >= kAdsGainMin && a <= kAdsGainMax) ? measured : 1.0;
+}
+// The look input that asks the game for a delta of wantGame (radians, the game's sign).
+inline double adsInput(double wantGame, double measuredGain) noexcept { return wantGame / adsGain(measuredGain); }
+// The share of a seated pitch step that keeps the pitch inside +-60 deg (a step back toward zero always passes whole).
+inline double adsPitchLimit(double accum, double delta) noexcept {
+    const double next = accum + delta;
+    if (next > kAdsPitchClampRad) return delta > 0.0 ? (accum < kAdsPitchClampRad ? kAdsPitchClampRad - accum : 0.0) : delta;
+    if (next < -kAdsPitchClampRad) return delta < 0.0 ? (accum > -kAdsPitchClampRad ? -kAdsPitchClampRad - accum : 0.0) : delta;
+    return delta;
+}
+inline double adsClampPitch(double p) noexcept {
+    return !(p == p) ? 0.0 : p > kAdsPitchClampRad ? kAdsPitchClampRad : p < -kAdsPitchClampRad ? -kAdsPitchClampRad : p;
+}
+// The release's pitch target: p0 at the release, falling linearly to 0 over kAdsUnwindSec.
+inline double adsUnwindTarget(double p0, double elapsedSec) noexcept {
+    double u = (elapsedSec > 0.0 ? elapsedSec : 0.0) / kAdsUnwindSec;
+    u = u > 1.0 ? 1.0 : u;
+    return p0 * (1.0 - u);
+}
+// The position lock: the seated offset that holds the eye where it was at entry, w (h - hEntry), h the head in natural LOCAL. The seated origin
+// moves with the head, so the reported head (and the game's camera) stays put. In F40's body-axes terms at psi 0 this is D (-e_body), D =
+// diag(-1, -1, +1), e_body = diag(1, 1, -1) dH the eye's body motion: the camera's net body motion e_body + D s is zero (adsCamBodyMotion).
+inline void adsLockOffset(const double h[3], const double hEntry[3], double w, double out[3]) noexcept {
+    const double k = !(w == w) ? 0.0 : w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
+    for (int i = 0; i < 3; ++i) out[i] = k * (h[i] - hEntry[i]);
+}
+// The body in the ADS head-aim: the head's target ignored with weight w. The target goes from the fit's output (F62a's fitApply) toward d_w less
+// the trims (past the disengage and the 12 cm clamp); with horizontalOnly (the body's vertical off) the up stays the fit output's. out may be
+// fitOut.
+inline void adsFitDetach(const double fitOut[3], const double dW[3], const double trim[3], bool horizontalOnly, double w, double out[3]) noexcept {
+    const double k = !(w == w) ? 0.0 : w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
+    const double up = fitOut[1];
+    for (int i = 0; i < 3; ++i) {
+        const double target = dW[i] - trim[i];
+        out[i] = std::isfinite(target) ? fitOut[i] + (target - fitOut[i]) * k : fitOut[i];
+    }
+    if (horizontalOnly) out[1] = up;
+}
+// F40's map: the camera's body-axes motion for the head's seated motion dH and a seated offset s: diag(1, 1, -1) dH + D s.
+inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3]) noexcept {
+    out[0] = dH[0] - s[0];
+    out[1] = dH[1] - s[1];
+    out[2] = -dH[2] + s[2];
+}
+// The runaway guard's turn window: the seated yaw's absolute steps in 50 ms buckets over the last 3 s.
+struct AdsTurnWindow {
+    static constexpr int kN = 60;
+    static constexpr uint64_t kBucketMs = kAdsGuardWindowMs / 60;
+    double sum[kN] = {};
+    uint64_t id[kN] = {};
+    void add(uint64_t ms, double a) noexcept {
+        const uint64_t b = ms / kBucketMs;
+        const int k = static_cast<int>(b % kN);
+        if (id[k] != b) {
+            id[k] = b;
+            sum[k] = 0.0;
+        }
+        sum[k] += std::fabs(a == a ? a : 0.0);
+    }
+    double total(uint64_t ms) const noexcept {
+        const uint64_t b = ms / kBucketMs;
+        double t = 0.0;
+        for (int k = 0; k < kN; ++k)
+            if (id[k] <= b && id[k] + kN > b) t += sum[k];
+        return t;
+    }
+    bool over(uint64_t ms) const noexcept { return total(ms) > kAdsGuardTurnRad; }
+};
+// The residual guard: true once |camera - head| (deg) has stayed at or above the floor and kAdsResRatio x the head's own turn since the base
+// (deg), grown by kAdsResGrowDeg from where the run started, for kAdsResGrowMs, never falling 1 deg below its peak (a fall restarts the run).
+struct AdsResidualGrowth {
+    bool growing = false;
+    uint64_t startMs = 0;
+    double startAbs = 0.0, peak = 0.0;
+    bool step(uint64_t ms, double absResDeg, double absHeadDeg) noexcept {
+        const bool over = absResDeg == absResDeg && absResDeg >= kAdsResFloorDeg && absResDeg >= kAdsResRatio * absHeadDeg;
+        if (!over) {
+            growing = false;
+            return false;
+        }
+        if (!growing || absResDeg < peak - 1.0) {
+            growing = true;
+            startMs = ms;
+            startAbs = peak = absResDeg;
+            return false;
+        }
+        if (absResDeg > peak) peak = absResDeg;
+        return ms >= startMs + kAdsResGrowMs && absResDeg - startAbs >= kAdsResGrowDeg;
+    }
+    uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
+};
+// The residual's reading per axis: about 0 the view follows the head; about -2 that axis's sign is inverted (the aim turned against the head
+// and the cancel doubled it); about -1 the camera does not take the aim on that axis (the cancel alone turned the view).
+inline double adsResidualRatio(double residual, double head) noexcept { return std::fabs(head) > 1e-9 ? residual / head : 0.0; }
 }  // namespace nofoot
 }  // namespace edvr

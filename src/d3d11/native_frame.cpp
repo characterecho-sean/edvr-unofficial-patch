@@ -60,6 +60,10 @@ float g_eyeAlign[3] = {};
 uint32_t g_eyeAlignSerial = 0;
 std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 render, 2 render_locked), carried in version 9 output
 float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
+float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians), version 10 output only (guarded by g_mutex)
+// F62b: the latest version 3 input's head in natural LOCAL (guarded by g_mutex).
+float g_localHead[12] = {};
+bool g_localHeadValid = false;
 // F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
 float g_renderHead[12] = {};
 float g_nowHeadPose[12] = {};
@@ -268,8 +272,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // about, and whatever it cannot carry stays out of its struct entirely.
     // F22: version 6 is the struct through the look's three words (after the fade); version 5 is the struct through the fade, which a version 5 caller has.
     // F33: version 8 is the whole struct (the eye alignment after the look); version 6 is now the struct through lookYawReset.
+    // F62b: version 10 is the version 9 shape (a ladder step: input version 3, and the ADS pitch in reservedYaw).
     const bool wantsEyeAlign = output &&
-        (output->version == EDVR_NATIVE_FRAME_VERSION_8 || output->version == EDVR_NATIVE_FRAME_VERSION_9) &&
+        (output->version == EDVR_NATIVE_FRAME_VERSION_8 || output->version == EDVR_NATIVE_FRAME_VERSION_9 ||
+         output->version == EDVR_NATIVE_FRAME_VERSION_10) &&
         output->size == sizeof(*output);
     const bool wantsLook = output && !wantsEyeAlign &&
         output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
@@ -291,19 +297,34 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     // F31: input version 1 is the words through valid (its size is that prefix; the full size is accepted too, as the rigs send it). Version 2 is
     // the full struct with the "now" head. Nothing past the version 1 words is read for a version 1 input.
+    // F62b: version 3 is the full struct with the head in LOCAL; version 2 is the struct through ringCount (EDVR_NATIVE_FRAME_INPUT_SIZE_2, what
+    // a version 2 runtime sends). A version 1 or 2 input of a larger size (the rigs send the full struct) is read for its own words only.
     const bool inputV1 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_1 &&
-        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == sizeof(*input));
-    const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && input->size == sizeof(*input);
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
+    const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 &&
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
+    const bool inputV3 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_3 && input->size == sizeof(*input);
     if (input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && !inputV2) {   // F32: the one way a version 2 input is refused
         static bool noted = false;
         if (!noted) {
             noted = true;
             edvr::Log::get().note("now head: frame input version 2 REFUSED: size %u, this build's version 2 size is %u (the runtime steps down to version 1)",
+                                  static_cast<unsigned>(input->size), static_cast<unsigned>(EDVR_NATIVE_FRAME_INPUT_SIZE_2));
+        }
+    }
+    if (input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_3 && !inputV3) {   // F62b: the one way a version 3 input is refused
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("local head (F62b): frame input version 3 REFUSED: size %u, this build's version 3 size is %u (the runtime steps down)",
                                   static_cast<unsigned>(input->size), static_cast<unsigned>(sizeof(*input)));
         }
     }
+    // F62b: a version 3 input rides only the version 10 ask (and a version 10 ask only a version 3 input), so a mismatched pair is refused and
+    // the runtime steps down to 9 (input version 2).
+    const bool v10Pair = output && output->version == EDVR_NATIVE_FRAME_VERSION_10;
     if (!state || state != g_current || !state->active || !input || !output ||
-        (!inputV1 && !inputV2) ||
+        (!inputV1 && !inputV2 && !inputV3) || (v10Pair != inputV3) ||
         (!wantsEyeAlign && !wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
@@ -317,7 +338,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8)
+    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10
+                                      : output->version == EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8)
                     : wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
@@ -340,11 +362,13 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         result.eyeAlignSerial = g_eyeAlignSerial;
     }
     // F40: the now-pose choice (version 9 only; every older shape never learns of it).
-    if (wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_9) {
+    if (wantsEyeAlign && output->version >= EDVR_NATIVE_FRAME_VERSION_9) {
         result.nowPoseRender = g_nowPoseMode.load(std::memory_order_relaxed);
         // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch in the retired offset slots (zero while its key is off).
         result.reservedOffset[0] = g_rotCal[0];
         result.reservedOffset[1] = g_rotCal[1];
+        // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -357,8 +381,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     if (physicalValid) std::memcpy(g_renderHead, input->physicalHead, sizeof(g_renderHead));
     // F32: an optional head that is not usable is dropped for this frame, never a refusal of the frame (a refusal steps the runtime's ladder
     // down for the session). It is logged once.
-    const bool nowUsable = inputV2 && input->nowValid == 1 && rigidPose(input->nowHead);
-    if (inputV2 && input->nowValid != 0 && !nowUsable) {
+    const bool ringInput = inputV2 || inputV3;   // F62b: version 3 carries every version 2 word
+    const bool nowUsable = ringInput && input->nowValid == 1 && rigidPose(input->nowHead);
+    if (ringInput && input->nowValid != 0 && !nowUsable) {
         static bool noted = false;
         if (!noted) {
             noted = true;
@@ -369,7 +394,18 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     g_inputVersion = input->version;
     g_referenceGeneration = input->referenceGeneration;
     g_ringCount = 0;
-    if (inputV2 && input->ringNewest < 8 && input->ringCount <= 8) {
+    // F62b: the head in LOCAL (version 3 only). An unusable one is dropped for this frame, never a refusal (the F32 rule).
+    g_localHeadValid = inputV3 && input->localValid == 1 && rigidPose(input->localHead);
+    if (g_localHeadValid) std::memcpy(g_localHead, input->localHead, sizeof(g_localHead));
+    if (inputV3) {
+        static bool accepted = false;
+        if (!accepted) {
+            accepted = true;
+            edvr::Log::get().note("local head (F62b): frame input version 3 accepted (localValid %u, geometry #%llu)", static_cast<unsigned>(input->localValid),
+                                  static_cast<unsigned long long>(input->sequence));
+        }
+    }
+    if (ringInput && input->ringNewest < 8 && input->ringCount <= 8) {
         std::memcpy(g_ringHead, input->ringHead, sizeof(g_ringHead));
         std::memcpy(g_ringSequence, input->ringSequence, sizeof(g_ringSequence));
         std::memcpy(g_ringQpc, input->ringQpc, sizeof(g_ringQpc));
@@ -596,6 +632,11 @@ void nativeFrameSetRotCalibrate(float yawRad, float pitchRad) {
     g_rotCal[0] = yawRad == yawRad ? yawRad : 0.0f;
     g_rotCal[1] = pitchRad == pitchRad ? pitchRad : 0.0f;
 }
+// F62b (TEMPORARY): the ADS head-aim's seated pitch the next version 10 beginFrame hands the runtime (NaN reads 0).
+void nativeFrameSetAdsPitch(float pitchRad) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_adsPitch = pitchRad == pitchRad ? pitchRad : 0.0f;
+}
 
 // F31: the latest frame's render head and "now" head (the d3d11 half's world markers).
 bool nativeFrameNowPose(EdvrNativeNowPose& out) {
@@ -614,6 +655,8 @@ bool nativeFrameNowPose(EdvrNativeNowPose& out) {
     std::memcpy(out.ringQpc, g_ringQpc, sizeof(out.ringQpc));
     out.ringNewest = g_ringNewest;
     out.ringCount = g_ringCount;
+    std::memcpy(out.local, g_localHead, sizeof(out.local));   // F62b
+    out.localValid = g_localHeadValid;
     return true;
 }
 

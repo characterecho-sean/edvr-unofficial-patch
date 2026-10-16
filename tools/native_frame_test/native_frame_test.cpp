@@ -1819,6 +1819,171 @@ int wmain(int argc, wchar_t** argv) {
                       "F61: the verdict subtracts the head's own motion (render + command), reads no under 1 deg, gain |residual / command|, sign "
                       "of residual / command");
             }
+            // F62b (TEMPORARY): the ADS head-aim. The convention verified here: the seat convention is yaw + = LEFT, pitch + = UP; the game's
+            // yaw delta is + RIGHT and its pitch delta + UP for signs +1; F61: a seated +a moves the camera by -a (gain 1, sign -). A head
+            // yaw of +theta (left) asks the game for -theta (its sign); the game applies it (gain g, the input divided by g); the cancel is a
+            // seated yaw of +theta; the camera's net turn = aim (+theta) + head (+theta) - seated (+theta) = +theta: the view follows the head.
+            {
+                const double kR = nf::kAdsDeg;
+                // A frame-by-frame plant: the game's real yaw sign and gain against the keys' sign and the measured gain (fallback 1.0).
+                struct Plant {
+                    int realSign = 1;
+                    double realGain = 1.0, measured = 0.0;
+                    double aim = 0.0, head = 0.0, seat = 0.0;   // seat convention, radians
+                    double input = 0.0;
+                    void frame(double dHead, int keySign) {
+                        head += dHead;
+                        input = nf::adsInput(nf::adsGameFromSeatYaw(dHead, keySign), measured);
+                        const double d = realGain * input;                       // the processor's delta (the game's sign)
+                        measured = input != 0.0 ? d / input : measured;          // the gain the hook measures
+                        aim += nf::adsSeatFromGameYaw(d, realSign);              // the aim's true turn (seat convention)
+                        seat += nf::adsSeatFromGameYaw(d, keySign);              // the cancel, as the keys read the delta
+                    }
+                    double camera() const { return aim + head - seat; }         // F61: the seated +a moves the camera by -a
+                };
+                Plant p;
+                p.frame(10.0 * kR, 1);
+                const bool oneStep = std::fabs(p.input + 10.0 * kR) < 1e-12 && std::fabs(p.seat - 10.0 * kR) < 1e-12 &&
+                                     std::fabs(p.aim - 10.0 * kR) < 1e-12 && std::fabs(p.camera() - p.head) < 1e-12;
+                Plant halfGain;
+                halfGain.realGain = 0.5;
+                halfGain.frame(10.0 * kR, 1);   // the first frame uses the fallback gain 1.0: the aim takes half, the view still follows the head
+                const bool firstHalf = std::fabs(halfGain.aim - 5.0 * kR) < 1e-12 && std::fabs(halfGain.camera() - halfGain.head) < 1e-12 && std::fabs(halfGain.measured - 0.5) < 1e-12;
+                halfGain.frame(10.0 * kR, 1);   // the second uses the measured 0.5: input -20 deg, the aim takes the whole 10
+                const bool secondHalf = std::fabs(halfGain.input + 20.0 * kR) < 1e-12 && std::fabs(halfGain.aim - 15.0 * kR) < 1e-12 &&
+                                        std::fabs(halfGain.camera() - halfGain.head) < 1e-12;
+                Plant wrong;
+                wrong.realSign = -1;
+                wrong.frame(10.0 * kR, 1);   // the key's sign is wrong: the aim turns away, the cancel doubles it: residual -2 x the head
+                const bool inverted = std::fabs(wrong.aim + 10.0 * kR) < 1e-12 &&
+                                      std::fabs(nf::adsResidualRatio(wrong.camera() - wrong.head, wrong.head) + 2.0) < 1e-12;
+                check(oneStep && firstHalf && secondHalf && inverted,
+                      "F62b: a head yaw of +10 deg (left, the seat's sign) asks the game for -10 deg (its sign, + right) at gain 1, the cancel is a "
+                      "seated yaw of +10 deg and the camera's net turn equals the head's (+10); the measured gain (0.5) doubles the input from the "
+                      "second frame; an inverted sign reads a residual of -2 x the head");
+                check(nf::adsGain(0.0) == 1.0 && nf::adsGain(std::numeric_limits<double>::quiet_NaN()) == 1.0 && nf::adsGain(5e3) == 1.0 &&
+                          nf::adsGain(-0.5) == -0.5 && nf::adsGain(0.02) == 0.02 && nf::adsGameFromSeatPitch(0.1, 1) == 0.1 &&
+                          nf::adsSeatFromGamePitch(0.1, -1) == -0.1 && nf::adsGameFromSeatYaw(0.1, 0) == 0.0 && nf::adsSeatFromGamePitch(0.1, 0) == 0.0 &&
+                          nf::adsGameFromSeatYaw(0.1, -1) == 0.1,
+                      "F62b: the gain falls back to 1.0 when none is measured (0, NaN, out of range) and keeps its sign; pitch + up both ways for "
+                      "sign 1; sign 0 is that axis off");
+                // The head's own turn from the LOCAL head (OpenXR axes): a left turn reads yaw +, a rise pitch +, across the +-180 seam too.
+                const auto headAt = [&](double yawDeg, double pitchDeg, float tx, float m[12]) {
+                    const double cy = std::cos(yawDeg * kR), sy = std::sin(yawDeg * kR), cp = std::cos(pitchDeg * kR), sp = std::sin(pitchDeg * kR);
+                    const double R[3][3] = {{cy, sy * sp, sy * cp}, {0.0, cp, -sp}, {-sy, cy * sp, cy * cp}};   // Ry(yaw) Rx(pitch)
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j) m[4 * i + j] = static_cast<float>(R[i][j]);
+                    m[3] = tx;
+                    m[7] = 1.6f;
+                    m[11] = 0.0f;
+                };
+                float a[12], b[12], c[12], e[12], g[12], movedHead[12];
+                headAt(0.0, 0.0, 0.0f, a);
+                headAt(10.0, 0.0, 0.0f, b);
+                headAt(0.0, 5.0, 0.0f, c);
+                headAt(175.0, 0.0, 0.0f, e);
+                headAt(-175.0, 0.0, 0.0f, g);
+                headAt(0.0, 0.0, 0.8f, movedHead);
+                double dy = 0.0, dp = 0.0, dy2 = 0.0, dp2 = 0.0, dy3 = 0.0, dp3 = 0.0;
+                const bool leftOk = nf::adsHeadDelta(a, b, &dy, &dp) && std::fabs(dy - 10.0 * kR) < 1e-5 && std::fabs(dp) < 1e-5;
+                const bool upOk = nf::adsHeadDelta(a, c, &dy2, &dp2) && std::fabs(dy2) < 1e-5 && std::fabs(dp2 - 5.0 * kR) < 1e-5;
+                const bool seam = nf::adsHeadDelta(e, g, &dy3, &dp3) && std::fabs(dy3 - 10.0 * kR) < 1e-5;
+                const bool jumpRefused = !nf::adsHeadDelta(a, movedHead, &dy, &dp) && !nf::adsHeadDelta(a, e, &dy, &dp);
+                check(leftOk && upOk && seam && jumpRefused,
+                      "F62b: the LOCAL head's turn reads a left turn as yaw +10 deg and a rise as pitch +5 deg (175 to -175 is +10, not -350); a 0.8 m or "
+                      "175 deg step is a discontinuity, not a turn");
+                // The runaway guard: 270 deg of seated yaw within 3 s trips; the same turn spread over 4 s does not.
+                nf::AdsTurnWindow fast, slow;
+                bool fastOver = false, slowOver = false;
+                for (int i = 0; i < 100; ++i) {   // 280 deg in 1 s
+                    fast.add(10000 + 10 * static_cast<uint64_t>(i), 2.8 * kR);
+                    fastOver = fastOver || fast.over(10000 + 10 * static_cast<uint64_t>(i));
+                }
+                for (int i = 0; i < 400; ++i) {   // 280 deg over 4 s (70 deg/s): at most 210 deg in any 3 s
+                    slow.add(10000 + 10 * static_cast<uint64_t>(i), 0.7 * kR);
+                    slowOver = slowOver || slow.over(10000 + 10 * static_cast<uint64_t>(i));
+                }
+                nf::AdsTurnWindow aged;
+                aged.add(10000, 280.0 * kR);
+                const bool agedOut = aged.over(10000) && !aged.over(13100);
+                check(fastOver && !slowOver && agedOut && std::fabs(nf::kAdsGuardTurnRad - 270.0 * kR) < 1e-12 && nf::kAdsGuardWindowMs == 3000,
+                      "F62b: the runaway guard trips on 280 deg of seated yaw in 1 s, not on 280 deg over 4 s; a burst ages out after 3 s");
+                // The residual guard: growing for 0.5 s above the floor and half the head's turn trips it; a steady lag residual does not.
+                nf::AdsResidualGrowth grow, steady, tiny;
+                bool growTrip = false, steadyTrip = false, smallTrip = false;
+                uint64_t tripAt = 0;
+                for (int i = 0; i <= 100; ++i) {
+                    const uint64_t ms = 1000 + 10 * static_cast<uint64_t>(i);
+                    const double head = 0.1 * i;                          // the head turns 10 deg over 1 s
+                    if (!growTrip && grow.step(ms, 2.0 * head, head)) {   // an inverted sign: the residual is twice the head's turn
+                        growTrip = true;
+                        tripAt = ms;
+                    }
+                    steadyTrip = steadyTrip || steady.step(ms, 9.0, 40.0);   // a 9 deg lag residual against a 40 deg turn: under half of it
+                    smallTrip = smallTrip || tiny.step(ms, 0.06 * i, 0.0);  // under the 8 deg floor all along (6 deg at the end)
+                }
+                check(growTrip && tripAt >= 1000 + 400 + 500 && tripAt <= 1000 + 400 + 510 && !steadyTrip && !smallTrip,
+                      "F62b: the residual guard trips 0.5 s after the residual (twice the head's turn) passes the 8 deg floor, never on a steady "
+                      "residual under half the head's turn or on one under the floor");
+                // The pitch clamp: the seated pitch is held to +-60 deg; a step back toward zero passes whole.
+                check(std::fabs(nf::adsPitchLimit(55.0 * kR, 10.0 * kR) - 5.0 * kR) < 1e-12 && nf::adsPitchLimit(60.0 * kR, 1.0 * kR) == 0.0 &&
+                          std::fabs(nf::adsPitchLimit(60.0 * kR, -5.0 * kR) + 5.0 * kR) < 1e-12 &&
+                          std::fabs(nf::adsPitchLimit(-58.0 * kR, -5.0 * kR) + 2.0 * kR) < 1e-12 &&
+                          std::fabs(nf::adsClampPitch(70.0 * kR) - 60.0 * kR) < 1e-12 && std::fabs(nf::adsClampPitch(-61.0 * kR) + 60.0 * kR) < 1e-12 &&
+                          nf::adsClampPitch(std::numeric_limits<double>::quiet_NaN()) == 0.0,
+                      "F62b: the seated pitch is clamped to +-60 deg (55 + 10 passes 5; at 60 nothing more; back toward zero whole; NaN 0)");
+                // The ramp: 0.15 s in, 0.3 s out.
+                nf::AdsRamp r;
+                r.step(true, 0.075);
+                const double in1 = r.w;
+                r.step(true, 0.075);
+                const double in2 = r.w;
+                r.step(true, 0.5);
+                r.step(false, 0.15);
+                const double out1 = r.w;
+                r.step(false, 0.15);
+                const double out2 = r.w;
+                check(std::fabs(in1 - 0.5) < 1e-12 && std::fabs(in2 - 1.0) < 1e-12 && std::fabs(out1 - 0.5) < 1e-12 && out2 == 0.0,
+                      "F62b: the weight ramps in over 0.15 s (0.5 at 75 ms) and out over 0.3 s (0.5 at 150 ms)");
+                // The release: the pitch unwinds over 0.3 s by injecting the opposite; with the cancel following what the game applies the
+                // seated pitch reaches 0 at 0.3 s and the view never moves (frames of 1/90 s, the game's gain 1, one frame of latency).
+                double seatP = 20.0 * kR, aimP = 20.0 * kR, queued = 0.0, t = 0.0, viewMax = 0.0;
+                const double p0 = seatP, view0 = aimP - seatP;
+                for (int i = 0; i < 40; ++i) {
+                    const double applied = queued;   // last frame's input lands now
+                    aimP += applied;
+                    seatP += applied;
+                    const double tPrev = t;
+                    t += 1.0 / 90.0;
+                    queued = tPrev < nf::kAdsUnwindSec ? nf::adsUnwindTarget(p0, t) - nf::adsUnwindTarget(p0, tPrev) : 0.0;
+                    viewMax = std::max(viewMax, std::fabs((aimP - seatP) - view0));
+                }
+                check(std::fabs(nf::adsUnwindTarget(p0, 0.0) - p0) < 1e-12 && std::fabs(nf::adsUnwindTarget(p0, 0.15) - 0.5 * p0) < 1e-12 &&
+                          nf::adsUnwindTarget(p0, 0.3) == 0.0 && nf::adsUnwindTarget(p0, 0.5) == 0.0 && std::fabs(seatP) < 1e-9 && std::fabs(aimP) < 1e-9 &&
+                          viewMax < 1e-12,
+                      "F62b: the release unwinds the seated pitch from 20 deg to 0 over 0.3 s (half at 0.15 s) while the game's pitch goes back the "
+                      "same way: the view does not move");
+                // The position lock: the seated offset is the head's LOCAL motion times the weight; F40's map then leaves the camera still.
+                const double h0[3] = {0.1, 1.6, -0.2}, h1[3] = {0.15, 1.58, -0.12};
+                double lock[3], lockHalf[3], cam[3];
+                nf::adsLockOffset(h1, h0, 1.0, lock);
+                nf::adsLockOffset(h1, h0, 0.5, lockHalf);
+                const double dH[3] = {h1[0] - h0[0], h1[1] - h0[1], h1[2] - h0[2]};
+                nf::adsCamBodyMotion(dH, lock, cam);
+                check(std::fabs(lock[0] - 0.05) < 1e-12 && std::fabs(lock[2] - 0.08) < 1e-12 && std::fabs(lockHalf[1] + 0.01) < 1e-12 &&
+                          std::fabs(cam[0]) < 1e-12 && std::fabs(cam[1]) < 1e-12 && std::fabs(cam[2]) < 1e-12,
+                      "F62b: the lock is w (h - h_entry) in LOCAL, and through F40's map (diag(1, 1, -1) dH + D s, D = diag(-1, -1, +1)) the camera "
+                      "does not move");
+                // The body: the head's target ignored (d_w less the trims) by the weight; the up kept with the vertical off.
+                const double fitOut[3] = {0.02, 0.01, -0.05}, dW[3] = {0.30, 0.2, -0.40}, trim[3] = {0.01, 0.0, 0.02};
+                double det[3], detHalf[3], det0[3];
+                nf::adsFitDetach(fitOut, dW, trim, true, 1.0, det);
+                nf::adsFitDetach(fitOut, dW, trim, true, 0.5, detHalf);
+                nf::adsFitDetach(fitOut, dW, trim, false, 0.0, det0);
+                check(std::fabs(det[0] - 0.29) < 1e-12 && std::fabs(det[2] + 0.42) < 1e-12 && det[1] == 0.01 && std::fabs(detHalf[0] - 0.155) < 1e-12 &&
+                          det0[0] == 0.02 && det0[1] == 0.01 && det0[2] == -0.05,
+                      "F62b: in ADS the body's target goes to d_w less the trims by the weight (half way at 0.5), the up kept with the vertical off");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
@@ -1897,6 +2062,48 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &v9NextFrame, &v9Next) == S_OK && v9Next.version == EDVR_NATIVE_FRAME_VERSION_9 &&
               v9Next.nowPoseRender == 0,
           "F40: a version 9 answer carries the now-pose flag clear (next, the default)");
+    // F62b: version 10 is a ladder step: input version 3 (the head in LOCAL) with the version 9 shape; the answer carries the ADS pitch in
+    // reservedYaw. A version 9 answer never does; a version 2 input of its own (smaller) size is still read; a mismatched pair is refused.
+    {
+        edvr::nativeFrameSetAdsPitch(0.25f);
+        const auto v3Input = [](uint64_t seq, float tx) {
+            EdvrNativeFrameInput f = input(41, 7, seq);
+            f.version = EDVR_NATIVE_FRAME_INPUT_VERSION_3;
+            const float local[12] = {1, 0, 0, tx, 0, 1, 0, 1.6f, 0, 0, 1, -0.2f};
+            std::memcpy(f.localHead, local, sizeof(local));
+            f.localValid = 1;
+            return f;
+        };
+        EdvrNativeFrameOutput v10{sizeof(v10), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput v10Frame = v3Input(27, 0.3f);
+        EdvrNativeNowPose np{};
+        const bool v10Ok = table.beginFrame(table.context, &v10Frame, &v10) == S_OK && v10.version == EDVR_NATIVE_FRAME_VERSION_10 &&
+                           v10.size == sizeof(v10) && v10.reservedYaw == 0.25f && edvr::nativeFrameNowPose(np) && np.localValid &&
+                           np.local[3] == 0.3f && np.local[7] == 1.6f;
+        check(v10Ok, "F62b: a version 10 ask with a version 3 input is answered as 10, carries the ADS pitch in reservedYaw and keeps the LOCAL head");
+        EdvrNativeFrameOutput v9Ads{sizeof(v9Ads), EDVR_NATIVE_FRAME_VERSION_9};
+        EdvrNativeFrameInput v9AdsFrame = input(41, 7, 28);
+        v9AdsFrame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        v9AdsFrame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        check(table.beginFrame(table.context, &v9AdsFrame, &v9Ads) == S_OK && v9Ads.version == EDVR_NATIVE_FRAME_VERSION_9 && v9Ads.reservedYaw == 0.0f &&
+                  edvr::nativeFrameNowPose(np) && !np.localValid,
+              "F62b: a version 9 ask with a version 2 input of the version 2 size (an older runtime) is answered without the ADS pitch or a LOCAL head");
+        EdvrNativeFrameOutput v10Old{sizeof(v10Old), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput v10OldFrame = input(41, 7, 29);
+        v10OldFrame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        v10OldFrame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        EdvrNativeFrameOutput v9New{sizeof(v9New), EDVR_NATIVE_FRAME_VERSION_9};
+        EdvrNativeFrameInput v9NewFrame = v3Input(30, 0.1f);
+        EdvrNativeFrameOutput v10Short{sizeof(v10Short), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput v10ShortFrame = v3Input(31, 0.1f);
+        v10ShortFrame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        check(table.beginFrame(table.context, &v10OldFrame, &v10Old) == E_INVALIDARG && table.beginFrame(table.context, &v9NewFrame, &v9New) == E_INVALIDARG &&
+                  table.beginFrame(table.context, &v10ShortFrame, &v10Short) == E_INVALIDARG,
+              "F62b: version 10 with a version 2 input, version 9 with a version 3 input, and a version 3 input of the version 2 size are refused");
+        check(EDVR_NATIVE_FRAME_INPUT_SIZE_2 + 14u * 4u == sizeof(EdvrNativeFrameInput) && EDVR_NATIVE_FRAME_INPUT_SIZE_1 < EDVR_NATIVE_FRAME_INPUT_SIZE_2,
+              "F62b: the version 3 input is the version 2 words plus the LOCAL head (12 floats), its flag and a reserved word");
+        edvr::nativeFrameSetAdsPitch(0.0f);
+    }
     edvr::g_nativeOnFootActive.store(false);
     g_journalActive = g_onFootKnown = g_onFoot = false;
 

@@ -58,5 +58,30 @@ template<class Check> void runRotCalibrateCases(Check&& check) {
                   std::fabs(back.orientation.y-base.orientation.y)<1e-6f&&std::fabs(back.orientation.z-base.orientation.z)<1e-6f&&
                   std::fabs(back.orientation.w-base.orientation.w)<1e-6f;
   check(same,"F61: +5 deg then -5 deg about the same pivot and axis is the seated pose again (the return is exact)");
+  // F62b (TEMPORARY): the ADS head-aim's pitch overlay turns about the SEAT's right axis (seatRightAxis of the seat's yaw) through the head.
+  // After a seat yaw of 90 deg (the head turned with it) it is still a pitch of the reported head, never a roll; the head keeps its place.
+  {
+    double ax0[3];seatRightAxis(0.0,ax0);
+    const double q90[4]={0,std::sin(kPi/4),0,std::cos(kPi/4)},x[3]={1,0,0};double r90[3];seatQuatApply(q90,x,r90);
+    double ax90[3];seatRightAxis(kPi/2,ax90);
+    check(std::fabs(ax0[0]-1.0)<1e-12&&std::fabs(ax0[2])<1e-12&&std::fabs(ax90[0]-r90[0])<1e-9&&std::fabs(ax90[2]-r90[2])<1e-9&&std::fabs(ax90[1])<1e-12,
+          "F62b: the seat's right axis is +x at yaw 0 and +x turned by the seat's yaw (xrFromSeatPose's turn) at 90 deg");
+    const SeatPose seat90{0.3,0.0,-0.1,kPi/2};
+    const XrPosef b90=xrFromSeatPose(seat90);
+    const double hy[4]={0,std::sin(kPi/4),0,std::cos(kPi/4)};   // the head yawed 90 deg in LOCAL: straight ahead in the seat
+    double pa[3],qa[4],pb[3],qb[4];
+    f::inSpace(b90,h,hy,pa,qa);
+    const XrPosef pitched=seatPosePitched(b90,h,ax90,8.0*kPi/180.0);
+    f::inSpace(pitched,h,hy,pb,qb);
+    const double mv=std::sqrt((pb[0]-pa[0])*(pb[0]-pa[0])+(pb[1]-pa[1])*(pb[1]-pa[1])+(pb[2]-pa[2])*(pb[2]-pa[2]));
+    const double right[3]={1,0,0};double ra[3],rb[3];
+    seatQuatApply(qa,right,ra);seatQuatApply(qb,right,rb);
+    const double rollA=std::asin(ra[1])*180.0/kPi,rollB=std::asin(rb[1])*180.0/kPi;   // the right axis's rise: roll
+    check(mv<1e-5&&std::fabs((f::pitchDeg(qb)-f::pitchDeg(qa))+8.0)<1e-3&&std::fabs(rollB-rollA)<1e-3&&std::fabs(f::yawDeg(qb)-f::yawDeg(qa))<1e-3,
+          "F62b: after a seat yaw of 90 deg a seated pitch of +8 deg about the seat's right axis turns the reported head's pitch by -8 deg (no roll), "
+          "the head keeping its place");
+    const XrPosef zeroAds=seatPosePitched(b90,h,ax90,0.0);
+    check(std::memcmp(&zeroAds,&b90,sizeof(b90))==0,"F62b: a zero ADS pitch is the pose itself (the feature off changes nothing)");
+  }
 }
 }  // namespace edvr::openxr::test

@@ -21,13 +21,17 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
-  HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out) {
+  // F62b: the version the client asks first (10 until a provider refuses it): the host locates the LOCAL head only for a version 10 ask.
+  uint32_t askedVersion()const{return providerVersion_;}
+  // F62b: localHead (optional, 12 floats, row-major 3x4 rigid in natural LOCAL) rides the version 3 input of a version 10 ask.
+  HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out,const float* localHead=nullptr) {
     out=ask(providerVersion_);
     if(!acquired())return S_FALSE;
-    EdvrNativeFrameInput in{sizeof(in),EDVR_NATIVE_FRAME_INPUT_VERSION_2};
+    EdvrNativeFrameInput in{sizeof(in),EDVR_NATIVE_FRAME_INPUT_VERSION_3};
+    if(localHead){std::memcpy(in.localHead,localHead,sizeof(in.localHead));in.localValid=1;}
     in.generation=generation_;in.referenceGeneration=reference;in.sequence=geometry.sequence;
     GeometrySnapshot snapshot{};in.valid=makeGeometrySnapshot(geometry,snapshot)?1u:0u;
     if(in.valid)std::memcpy(in.physicalHead,snapshot.headToLocal.m,sizeof(in.physicalHead));
@@ -50,8 +54,10 @@ class NativeFrameClient final {
     const uint32_t askedBefore=providerVersion_;
     const HRESULT result=beginLadder([&](EdvrNativeFrameOutput& o,uint32_t version){
       // A provider that refuses version 2 is sent the version 1 words, exactly as before (size = the version 1 prefix).
+      // F62b: a provider that refuses version 10 is sent the version 2 words (size = the version 2 prefix), exactly as before.
       EdvrNativeFrameInput sent=in;
       if(version<EDVR_NATIVE_FRAME_VERSION_7){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_1;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_1;}
+      else if(version<EDVR_NATIVE_FRAME_VERSION_10){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_2;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_2;}
       return table_.beginFrame(table_.context,&sent,&o);
     },providerVersion_,out);
     // F40: the live now-pose flag from the provider's answer (version 9 only; a version 8 answer carries none, so the default holds).
@@ -92,6 +98,8 @@ class NativeFrameClient final {
     }
     // F40: the now-pose flag is off unless a version 9 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_9) out.nowPoseRender=0;
+    // F62b: the ADS head-aim's pitch (reservedYaw) is zero unless a version 10 answer carried it.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10||!(out.reservedYaw==out.reservedYaw)) out.reservedYaw=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
@@ -99,7 +107,7 @@ class NativeFrameClient final {
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;}return r;}
   // F40/F42: the runtime's now-pose mode (0 next, 1 render, 2 render_locked), from the provider's answer; logged at the first value and at each change.
   static void applyNowPose(uint32_t mode) {
     static bool logged = false;
@@ -114,7 +122,8 @@ class NativeFrameClient final {
   }
   static EdvrNativeFrameOutput ask(uint32_t version) {
     if(version>=EDVR_NATIVE_FRAME_VERSION_8)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),version>=EDVR_NATIVE_FRAME_VERSION_9?EDVR_NATIVE_FRAME_VERSION_9:EDVR_NATIVE_FRAME_VERSION_8};
+      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),version>=EDVR_NATIVE_FRAME_VERSION_10?EDVR_NATIVE_FRAME_VERSION_10:
+                                   version>=EDVR_NATIVE_FRAME_VERSION_9?EDVR_NATIVE_FRAME_VERSION_9:EDVR_NATIVE_FRAME_VERSION_8};
     if(version>=EDVR_NATIVE_FRAME_VERSION_6)
       return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,EDVR_NATIVE_FRAME_VERSION_6};
     if(version==EDVR_NATIVE_FRAME_VERSION_5)
@@ -136,7 +145,7 @@ class NativeFrameClient final {
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
   // The shape (5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;   // F33: starts at 8 (the eye alignment; F31's input version 2 rides with it); a refusal steps down
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;   // F62b: starts at 10 (input version 3, the LOCAL head; F31's input version 2 below it); a refusal steps down
   uint32_t loggedVersion_=0;   // F32: the version last logged as negotiated
   float ring_[8][12]{};uint64_t ringSeq_[8]{},ringQpc_[8]{};uint32_t ringNewest_=0,ringCount_=0;   // F37: the render head ring
 };

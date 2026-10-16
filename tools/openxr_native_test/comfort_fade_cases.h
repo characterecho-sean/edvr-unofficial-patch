@@ -16,13 +16,14 @@ struct Provider {
     ++calls;
     if(fail!=S_OK)return fail;
     if(o.version>maxVersion||o.version<EDVR_NATIVE_FRAME_VERSION_1)return E_INVALIDARG;
-    const uint32_t want=o.version==8?uint32_t(sizeof(o)):o.version==6?EDVR_NATIVE_FRAME_OUTPUT_SIZE_6:o.version==5?EDVR_NATIVE_FRAME_OUTPUT_SIZE_5:o.version==4?EDVR_NATIVE_FRAME_OUTPUT_SIZE_4:o.version==3?EDVR_NATIVE_FRAME_OUTPUT_SIZE_3:
+    const uint32_t want=o.version>=8?uint32_t(sizeof(o)):o.version==6?EDVR_NATIVE_FRAME_OUTPUT_SIZE_6:o.version==5?EDVR_NATIVE_FRAME_OUTPUT_SIZE_5:o.version==4?EDVR_NATIVE_FRAME_OUTPUT_SIZE_4:o.version==3?EDVR_NATIVE_FRAME_OUTPUT_SIZE_3:
       o.version==2?EDVR_NATIVE_FRAME_OUTPUT_SIZE_2:EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if(o.size!=want)return E_INVALIDARG;
     o.sceneReady=1;
     if(o.version>=5||scribble)o.fadeAlpha=fade;
     if(o.version>=6) {o.lookYawTotal=0.25f;o.lookYawGameFrame=7;}   // F22: the look's total rides the version 6 shape only
     if(o.version>=8) {o.eyeAlign[0]=0.1f;o.eyeAlign[1]=0.2f;o.eyeAlign[2]=-0.3f;o.eyeAlignSerial=5;}   // F33: the body-align translation rides the version 8 shape only
+    if(o.version>=10||scribble)o.reservedYaw=0.4f;   // F62b: the ADS head-aim's pitch rides a version 10 answer only
     return S_OK;
   }
 };
@@ -85,5 +86,13 @@ template<class Check> void runComfortFadeCases(Check&& check) {
         Client::ask(4).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_4&&Client::ask(4).version==4&&Client::ask(9).version==9&&Client::ask(9).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(0).version==1,
         "the shapes the client asks for: 6 stops before the eye alignment, 5 stops before the look's words, 4 stops before the fade slot, 8 is 8, 9 and above is 9 (F40), 0 is 1");
   check(Client::ask(6).fadeAlpha==0.0f&&Client::ask(6).lookYawTotal==0.0f,"a fresh ask carries fade 0 and look total 0 (no fade, no compensation) until a provider says otherwise");
+  {   // F62b: version 10 (input version 3) carries the ADS head-aim's pitch; a version 9 d3d11.dll refuses 10 and the client reads no pitch
+    Provider p;p.maxVersion=10;uint32_t v=10;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==10&&v==10&&p.calls==1&&out.reservedYaw==0.4f&&Client::ask(10).version==10&&Client::ask(10).size==sizeof(EdvrNativeFrameOutput)&&
+          Client::ask(11).version==10,"F62b: a version 10 d3d11.dll: one call, the ADS pitch arrives; 10 and above asks 10, the whole struct");
+    Provider old;old.maxVersion=9;old.scribble=true;uint32_t v9=10;EdvrNativeFrameOutput out9{};
+    check(ladder(old,v9,out9)==S_OK&&out9.version==9&&v9==9&&old.calls==2&&out9.reservedYaw==0.0f&&out9.eyeAlign[0]==0.1f,
+          "F62b: a version 9 d3d11.dll: the 10 ask is refused, 9 is answered, and a pitch it scribbles into reservedYaw is not believed");
+  }
 }
 } // namespace edvr::openxr::test
