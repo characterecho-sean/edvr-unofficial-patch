@@ -51,6 +51,9 @@ public:
 
     // Candidacy and approval (Trust-On-First-Use)
     const std::vector<CandidatePlugin>& candidates();
+    // A copy of the candidates taken under the manager's lock. The menu uses this one: the reference above
+    // outlives the lock, and the copy lets the menu take the manager lock before its own (see m_mutex).
+    std::vector<CandidatePlugin> candidatesSnapshot();
     bool approvePlugin(const std::string& stem, const std::string& sha256);
     // Approves by the id a menu row holds. A stale id, or a candidate already approved, does nothing.
     ApprovalResult approveCandidate(uint32_t id);
@@ -70,6 +73,10 @@ private:
     bool loadPlugin(CandidatePlugin& cand, const std::string& approvedSha);
     void unloadAll();
 
+    // Lock order, global: this mutex is taken BEFORE the menu's plugin-settings mutex, never after it.
+    // loadPlugin (registration during onInitialize) and the fault paths (menuRemovePluginSettings) take the
+    // settings mutex while holding this one; so the menu must not call into the manager while it holds
+    // the settings mutex (it snapshots candidates first, and rebuilds pages after releasing it).
     std::recursive_mutex m_mutex;
     bool m_initialized = false;
     std::wstring m_rootDir;

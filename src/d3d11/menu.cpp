@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -1559,6 +1560,14 @@ void approveAddonCandidate(uint32_t id) {
 }
 
 void buildPluginsPage(Page& p) {
+    // Lock order: the manager's mutex comes before g_pluginSettingsMutex (approving an addon registers its
+    // settings while the manager holds its lock). So the candidates are copied here, before the settings
+    // lock is taken; nothing below calls into the manager with the settings lock held.
+    std::vector<plugins::CandidatePlugin> unapproved = plugins::PluginManager::instance().candidatesSnapshot();
+    unapproved.erase(std::remove_if(unapproved.begin(), unapproved.end(),
+                                    [](const plugins::CandidatePlugin& c) { return c.approved; }),
+                     unapproved.end());
+
     std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
     std::map<std::string, std::vector<int>> groups;
     for (size_t i = 0; i < g_pluginSettings.size(); ++i) {
@@ -1578,12 +1587,6 @@ void buildPluginsPage(Page& p) {
             e.pluginSetting = idx;
             p.entries.push_back(e);
         }
-    }
-
-    const auto& cands = plugins::PluginManager::instance().candidates();
-    std::vector<plugins::CandidatePlugin> unapproved;
-    for (const auto& c : cands) {
-        if (!c.approved) unapproved.push_back(c);
     }
 
     if (!unapproved.empty()) {
@@ -5069,14 +5072,28 @@ void menuRemovePluginSettings(const char* ownerId) {
                 removed = true;
             }
         }
-        if (removed && g_s.configured) buildPages();
     }
+    // After the settings lock is released: the rebuild reads the manager's candidates, and the manager's
+    // lock comes first in the global order (see PluginManager::m_mutex).
+    if (removed && g_s.configured) buildPages();
 }
+
+static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting);
 
 int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
     if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
-    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+    int rc;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+        rc = registerPluginSettingLocked(ownerId, setting);
+    }
+    // Rebuild once the settings lock is released, for the same lock-order reason as menuRemovePluginSettings.
+    if (rc == 0 && g_s.configured) buildPages();
+    return rc;
+}
 
+// Caller holds g_pluginSettingsMutex and rebuilds the pages afterwards.
+static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting) {
     std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
     std::string keyStr = setting->key ? setting->key : "";
 
@@ -5106,7 +5123,6 @@ int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* s
             if (setting->setter) {
                 callSettingSetterSafely(setting->setter, keyStr.c_str(), initialVal, setting->userData);
             }
-            if (g_s.configured) buildPages();
             return 0;
         }
     }
@@ -5135,7 +5151,6 @@ int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* s
         callSettingSetterSafely(setting->setter, keyStr.c_str(), initialVal, setting->userData);
     }
     g_pluginSettings.push_back(std::move(row));
-    if (g_s.configured) buildPages();
     return 0;
 }
 

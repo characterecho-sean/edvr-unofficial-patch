@@ -377,6 +377,11 @@ const std::vector<CandidatePlugin>& PluginManager::candidates() {
     return m_candidates;
 }
 
+std::vector<CandidatePlugin> PluginManager::candidatesSnapshot() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    return m_candidates;
+}
+
 bool PluginManager::approvePlugin(const std::string& stem, const std::string& sha256) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     for (auto& cand : m_candidates) {

@@ -329,6 +329,24 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec9b);
     }
 
+    // Case 9c (PR #92 review follow-up): the menu's candidate list is a copy, so it can be held and walked
+    // after the manager's lock is released (the lock-order fix depends on that); later approvals do not change it.
+    {
+        auto sb = makeSandbox(L"snapshot");
+        dropFixture(sb, L"", L"snap.dll");
+        pm.initialize(sb.wstring());
+        std::vector<edvr::plugins::CandidatePlugin> snap = pm.candidatesSnapshot();
+        check(snap.size() == 1 && !snap[0].approved, "snapshot: one unapproved candidate is copied out");
+        if (snap.size() == 1) {
+            pm.approveCandidate(snap[0].id);
+            check(!snap[0].approved, "snapshot: the copy does not change when the candidate is approved afterwards");
+            check(pm.candidatesSnapshot().size() == 1 && pm.candidatesSnapshot()[0].approved, "snapshot: a fresh copy shows the approval");
+        }
+        pm.shutdown();
+        std::error_code ec9c;
+        std::filesystem::remove_all(sb, ec9c);
+    }
+
     // Case 10 (PR #92 review): approving the same candidate twice is a no-op the second time.
     {
         auto sb = makeSandbox(L"twice");
