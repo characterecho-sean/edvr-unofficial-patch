@@ -1555,6 +1555,7 @@ void buildPluginsPage(Page& p) {
     std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
     std::map<std::string, std::vector<int>> groups;
     for (size_t i = 0; i < g_pluginRows.rows().size() && !hidden; ++i) {
+        if (g_pluginRows.rows()[i].retired) continue;   // inert, awaiting erase on the next drain: not drawn meanwhile
         groups[g_pluginRows.rows()[i].header].push_back(static_cast<int>(i));
     }
 
