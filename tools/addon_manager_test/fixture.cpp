@@ -26,6 +26,8 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetRenderCount() {
 //   FIXTURE_VARIANT_initfault registers two settings, then onInitialize access-violates
 //   FIXTURE_VARIANT_settings registers two settings and initialises cleanly
 //   FIXTURE_VARIANT_renderfault registers two settings, initialises cleanly, then access-violates in onRenderEye
+//   FIXTURE_VARIANT_threadreg   keeps the host's registerSetting and calls it from a worker thread during onInitialize
+//                               (fixtureGetThreadRegResult), and again on request later (fixtureCallRegister)
 #if defined(FIXTURE_VARIANT_b)
 #define FIXTURE_ID 2
 #else
@@ -64,8 +66,46 @@ static void registerTwoSettings(const EdvrHostServices* host) {
 }
 #endif
 
+#if defined(FIXTURE_VARIANT_threadreg)
+static int (EDVR_API *g_retainedRegister)(const EdvrPluginSettingDef*) = nullptr;
+static std::atomic<int> g_threadRegResult{12345};
+
+static int registerOne() {
+    EdvrPluginSettingDef d{};
+    d.structSize = sizeof(d);
+    d.header = "FixtureThread";
+    d.key = "fromworker";
+    d.label = "fromworker";
+    d.type = EDVR_PLUGIN_SETTING_BOOL;
+    d.maxValue = 1;
+    return g_retainedRegister ? g_retainedRegister(&d) : -99;
+}
+
+static DWORD WINAPI workerRegister(LPVOID) {
+    g_threadRegResult.store(registerOne());
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int WINAPI fixtureGetThreadRegResult() {
+    return g_threadRegResult.load();
+}
+
+extern "C" __declspec(dllexport) int WINAPI fixtureCallRegister() {
+    return registerOne();
+}
+#endif
+
 static int EDVR_API pluginOnInitialize(const EdvrHostServices* host) {
     if (!host || host->structSize < sizeof(EdvrHostServices)) return -1;
+#if defined(FIXTURE_VARIANT_threadreg)
+    g_retainedRegister = host->registerSetting;
+    HANDLE worker = CreateThread(nullptr, 0, &workerRegister, nullptr, 0, nullptr);
+    if (worker) {
+        WaitForSingleObject(worker, 10000);
+        CloseHandle(worker);
+    }
+    return 0;
+#endif
 #if defined(FIXTURE_VARIANT_initfail)
     registerTwoSettings(host);
     return -2;

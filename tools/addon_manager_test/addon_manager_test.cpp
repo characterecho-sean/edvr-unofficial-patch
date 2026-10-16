@@ -700,6 +700,43 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec19);
     }
 
+    // Case 20 (PR #92 review): registration context belongs to the initialising thread. An addon's worker thread calling the host's
+    // registerSetting during that addon's own onInitialize, and a callback the addon kept and calls once initialisation is over,
+    // are refused and enter no registry. (Per-thread, so they are refused however they overlap another addon's initialise.)
+    {
+        auto sb = makeSandbox(L"threadreg");
+        dropFixture(sb, L"threadreg", L"worker_a.dll");
+        dropFixture(sb, L"settings", L"keeper_b.dll");
+        pm.initialize(sb.wstring());
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        auto wa = findCandidate(pm, "worker_a");
+        auto kb = findCandidate(pm, "keeper_b");
+        check(wa && kb, "threadreg: both candidates discovered");
+        if (wa && kb) {
+            check(pm.approvePlugin("worker_a", wa->sha256), "threadreg: the addon whose worker registers loads");
+            HMODULE hw = GetModuleHandleW(L"worker_a.dll");
+            typedef int (WINAPI *PFN_Int)();
+            auto fromWorker = hw ? reinterpret_cast<PFN_Int>(GetProcAddress(hw, "fixtureGetThreadRegResult")) : nullptr;
+            auto callLater = hw ? reinterpret_cast<PFN_Int>(GetProcAddress(hw, "fixtureCallRegister")) : nullptr;
+            check(fromWorker && callLater, "threadreg: fixture helpers resolved");
+            check(fromWorker && fromWorker() == -1, "threadreg: registerSetting from the addon's worker thread during its onInitialize returns -1");
+            check(g_fakeRegisteredEver == 0 && fakeSettingsOwnedBy("worker_a") == 0, "threadreg: ...and nothing entered the registry");
+            check(callLater && callLater() == -1, "threadreg: a kept registerSetting called later returns -1");
+            int fromOtherThread = 12345;
+            if (callLater) {
+                std::thread t([&] { fromOtherThread = callLater(); });
+                t.join();
+            }
+            check(fromOtherThread == -1 && g_fakeRegisteredEver == 0, "threadreg: ...from another thread too, and still nothing registered");
+            check(pm.approvePlugin("keeper_b", kb->sha256) && fakeSettingsOwnedBy("keeper_b") == 2 && fakeSettingsOwnedBy("worker_a") == 0,
+                  "threadreg: another addon's own initialise still registers, tagged with itself");
+        }
+        pm.shutdown();
+        std::error_code ec20;
+        std::filesystem::remove_all(sb, ec20);
+    }
+
     // Cleanup sandbox
     std::error_code ec;
     std::filesystem::remove_all(sandbox, ec);

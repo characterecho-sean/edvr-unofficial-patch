@@ -57,13 +57,21 @@ void callFilterInputSafely(void (EDVR_API *fn)(EdvrInputContext*), EdvrInputCont
     } __except (*outFault = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// The addon whose onInitialize is running. Settings may be registered only then, so every one has an
-// owner that can be removed with it. Guarded by PluginManager::m_mutex (loadPlugin holds it).
-const char* g_registeringOwner = nullptr;
+// The addon whose onInitialize is running ON THIS THREAD. Settings may be registered only then, so every one has an
+// owner that can be removed with it. It is per thread: a worker thread of an addon, or a host callback an addon kept
+// and calls later, has no context on its own thread and is refused, however it overlaps another addon's initialise.
+thread_local const char* t_registeringOwner = nullptr;
 
 int EDVR_API hostRegisterSetting(const EdvrPluginSettingDef* setting) {
-    if (!g_registeringOwner) return -1;
-    return edvr::menuRegisterPluginSetting(g_registeringOwner, setting);
+    if (!t_registeringOwner) {
+        static std::atomic<bool> noted{false};
+        if (!noted.exchange(true)) {
+            Log::get().note("plugin_manager: an addon called registerSetting outside its own onInitialize (another thread, or after it "
+                            "returned); refused. Further refusals are not logged.");
+        }
+        return -1;
+    }
+    return edvr::menuRegisterPluginSetting(t_registeringOwner, setting);
 }
 
 void EDVR_API hostLogNote(const char* msg) {
@@ -346,9 +354,10 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
         host.registerSetting = hostRegisterSetting;
         host.logNote = hostLogNote;
 
-        g_registeringOwner = cand.stem.c_str();
+        const char* const outerOwner = t_registeringOwner;
+        t_registeringOwner = cand.stem.c_str();
         int initResult = callInitSafely(lp.callbacks.onInitialize, &host, &fault);
-        g_registeringOwner = nullptr;
+        t_registeringOwner = outerOwner;
         if (fault != 0 || initResult != 0) {
             Log::get().note("plugin_manager: addon %s onInitialize failed (code=%d fault=0x%08X)",
                             cand.stem.c_str(), initResult, fault);
