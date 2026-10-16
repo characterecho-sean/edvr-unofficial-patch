@@ -10,7 +10,9 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
+#include <thread>
 
 #include "../../src/d3d11/loaded_module_match.h"
 
@@ -215,6 +217,19 @@ bool released(const BYTE (&bytes)[256]) {
 }
 bool physical[256]{};
 SHORT WINAPI physicalKey(int vk) { return vk >= 0 && vk < 256 && physical[vk] ? SHORT(-32768) : 0; }
+// A tail reader that stops inside the release scan until the rig lets it go, so another thread can poll the doors
+// while the scan is in progress (PR #92 review).
+HANDLE g_scanEntered = nullptr;
+HANDLE g_scanMayContinue = nullptr;
+bool g_pauseArmed = false;
+SHORT WINAPI pausingKey(int vk) {
+    if (g_pauseArmed) {
+        g_pauseArmed = false;
+        SetEvent(g_scanEntered);
+        WaitForSingleObject(g_scanMayContinue, 10000);
+    }
+    return physicalKey(vk);
+}
 BOOL WINAPI physicalState(PBYTE out) {
     for (int vk = 0; vk < 256; ++vk) out[vk] = physical[vk] ? 0x80 : 0;
     return TRUE;
@@ -357,6 +372,64 @@ void loadedModuleMatchCases() {
 // The executable's own import of XInputGetState from xinput9_1_0.dll, which the controller door patches in the real game. Taking the
 // address keeps the linker from dropping the import.
 DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
+
+static void pluginReleaseScanCases(Device& keyboard) {
+    // PR #92 review: there is no moment during a plugin's release when a key it was holding reads down. The tail is
+    // captured while the block is still up and the block cleared last. Another thread polls GetAsyncKeyState and the
+    // DirectInput state while the release's key scan is paused inside the tail reader; every release path is checked.
+        const PFN_GetAsyncKeyState savedReader = g_tailReader;
+        auto releaseWhilePolling = [&](const char* path, const std::function<void()>& release) {
+            physical['A'] = true;
+            keyboard.keys[DIK_A] = 0x80;
+            refreshReleaseTail(&physicalKey);
+            inputGateSetPluginBlock(true);
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_tailReader = &pausingKey;
+            g_pauseArmed = true;
+            SHORT duringScan = 1;
+            BYTE duringKeys[256]{};
+            bool polledDuringScan = false;
+            std::thread poller([&] {
+                if (WaitForSingleObject(g_scanEntered, 10000) == WAIT_OBJECT_0) {
+                    polledDuringScan = true;
+                    duringScan = hookGetAsyncKeyState('A');
+                    readState(keyboard, duringKeys);
+                }
+                SetEvent(g_scanMayContinue);
+            });
+            release();
+            poller.join();
+            char name[160];
+            snprintf(name, sizeof(name), "%s: the poll that lands during the release's key scan was made", path);
+            check(polledDuringScan, name);
+            snprintf(name, sizeof(name), "%s: a key the plugin held reads up in GetAsyncKeyState during the scan", path);
+            check(duringScan == 0, name);
+            snprintf(name, sizeof(name), "%s: ...and in DirectInput state", path);
+            check(duringKeys[DIK_A] == 0, name);
+            snprintf(name, sizeof(name), "%s: ...and still up once the release is done", path);
+            check(!g_pluginBlock.load() && hookGetAsyncKeyState('A') == 0, name);
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            keyboard.keys[DIK_A] = 0;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = savedReader;
+        };
+        releaseWhilePolling("explicit clear (a fault or a profile switch)", [&] { inputGateSetPluginBlock(false); });
+        releaseWhilePolling("lease expiry", [&] {
+            g_pluginLease.store(1);
+            inputGatePluginLeaseTick();
+        });
+        // A renewal that lands between the tick spending the lease and the release keeps the block.
+        inputGateSetPluginBlock(true);
+        g_pluginLease.store(kPluginLeaseFrames);
+        releasePluginBlock("lease expired", true);
+        check(g_pluginBlock.load(), "a renewed lease is not released by a tick that saw it spent");
+        inputGateSetPluginBlock(false);
+        check(!g_pluginBlock.load(), "(and an explicit clear still releases it)");
+}
 
 static void releaseLogCases();
 
@@ -522,6 +595,8 @@ int main() {
         refreshReleaseTail(&physicalKey);
         g_tailReader = savedReader;
     }
+
+    pluginReleaseScanCases(keyboard);
 
     // PR #92 review: while a plugin owns input a buffered hat event is dropped unless it re-centres the hat, in
     // both representations of centred (0xFFFFFFFF, or a low word of 0xFFFF). Buttons: presses dropped, releases pass.

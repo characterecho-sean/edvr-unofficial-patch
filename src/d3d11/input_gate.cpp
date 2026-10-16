@@ -111,6 +111,9 @@ std::atomic<bool> g_pluginBlock{false};
 // profile, a fault -- loses the block instead of stranding the player's keyboard.
 std::atomic<int> g_pluginLease{0};
 constexpr int kPluginLeaseFrames = 30;
+// Serialises every change of plugin ownership: taking or renewing it, and the three ways it ends (an explicit clear,
+// which is also what a fault or a profile switch calls; the lease running out). The doors never take it.
+SRWLOCK g_pluginLeaseLock = SRWLOCK_INIT;
 
 // The summon key, packed so a live rebind cannot tear it: bits 0-7 the
 // virtual key, 8-15 the DirectInput scan code, 16-18 the modifier bits,
@@ -1692,14 +1695,31 @@ bool inputGatePrivate() { return g_private.load() != 0; }
 static std::atomic<unsigned> g_pluginReleases{0};   // true->false transitions this session; reset when the gate shuts down
 static constexpr unsigned kPluginReleaseLogCap = 5;
 
-// The one place plugin ownership ends: an explicit clear, a fault or shutdown that
-// clears it for the plugin, and the lease running out all arrive here.
-static void releasePluginBlock(const char* why) {
-    g_pluginLease.store(0, std::memory_order_relaxed);
-    if (!g_pluginBlock.exchange(false, std::memory_order_relaxed)) return;
-    // Keys still held now were the plugin's, not the game's: they wait for release like the menu's
-    // closing keys do (captureReleaseTail), so clearing the block does not turn them into game input.
-    guarded("inputGate/captureReleaseTail-plugin", [&] { captureReleaseTail(g_tailReader); });
+// The one place plugin ownership ends: an explicit clear (which a fault, a profile switch and shutdown also call) and
+// the lease running out all arrive here.
+//
+// The release tail is captured and published FIRST, while the block is still up, and the block is cleared last. A
+// door that runs during the scan (any thread: the game's poll, the OpenXR owner thread) therefore always sees one of
+// the two: the block, or the tail that holds every key the plugin was holding. Clearing the block before the scan
+// left a window in which a held key read down. Done under the lease lock so a renewal cannot interleave with it.
+//
+// fromLeaseTick: a lease that has been renewed since the tick spent it is not expired, and stays.
+static void releasePluginBlock(const char* why, bool fromLeaseTick = false) {
+    bool released = false;
+    AcquireSRWLockExclusive(&g_pluginLeaseLock);
+    if (g_pluginBlock.load(std::memory_order_relaxed) &&
+        !(fromLeaseTick && g_pluginLease.load(std::memory_order_relaxed) > 0)) {
+        // Keys still held now were the plugin's, not the game's: they wait for release like the menu's
+        // closing keys do (captureReleaseTail), so clearing the block does not turn them into game input.
+        guarded("inputGate/captureReleaseTail-plugin", [&] { captureReleaseTail(g_tailReader); });
+        g_pluginLease.store(0, std::memory_order_relaxed);
+        g_pluginBlock.store(false, std::memory_order_relaxed);
+        released = true;
+    } else if (!fromLeaseTick) {
+        g_pluginLease.store(0, std::memory_order_relaxed);
+    }
+    ReleaseSRWLockExclusive(&g_pluginLeaseLock);
+    if (!released) return;
     // An addon that takes and drops input every few frames would write a line per release for the whole session:
     // the first few say why, the rest are counted and summarised at shutdown.
     const unsigned n = g_pluginReleases.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1708,8 +1728,10 @@ static void releasePluginBlock(const char* why) {
 
 void inputGateSetPluginBlock(bool block) {
     if (block) {
+        AcquireSRWLockExclusive(&g_pluginLeaseLock);
         g_pluginLease.store(kPluginLeaseFrames, std::memory_order_relaxed);   // every call is a renewal
         g_pluginBlock.store(true, std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&g_pluginLeaseLock);
     } else {
         releasePluginBlock("cleared");
     }
@@ -1719,7 +1741,7 @@ void inputGatePluginLeaseTick() {
     // The tail a plugin release leaves is retired here too: with no menu configured, no one else ticks it.
     guarded("inputGate/refreshReleaseTail-plugin", [&] { refreshReleaseTail(g_tailReader); });
     if (!g_pluginBlock.load(std::memory_order_relaxed)) return;
-    if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired");
+    if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired", true);
 }
 
 extern "C" __declspec(dllexport) void WINAPI edvrSetPluginInputBlock(int block) {
