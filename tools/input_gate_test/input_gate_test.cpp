@@ -875,6 +875,30 @@ int main() {
         check(differs == 0 && stick.refs == 1 && ansi.refs == 1 && bad.refs == 1 && kb3.refs == 1,
               "shutdown restores the joystick tables and gives back the references it held");
     }
+    // PR #92 review: an input-filtering plugin gets the user32 doors without the menu ever opening; with no
+    // plugin they stay out until it does.
+    {
+        inputGateInstallEarly();
+        check(!g_user.asyncKey.applied && !g_installTried,
+              "with no input-filtering plugin and F8 never opened the user32 doors are not installed");
+        inputGateInstallForPlugin();   // what the plugin manager calls when an addon with a filter initialises
+        check(g_user.asyncKey.applied && !g_installTried,
+              "an input-filtering plugin installs the user32 doors with the menu still never opened");
+        void* const asyncOriginal = g_user.asyncKey.original;
+        inputGateInstallForPlugin();
+        check(g_user.asyncKey.original == asyncOriginal, "...and a second plugin does not install them again");
+        g_user.origAsync = &physicalKey;
+        physical[VK_F9] = true;
+        check((GetAsyncKeyState(VK_F9) & 0x8000) != 0, "(the installed door passes a held key while no plugin owns input)");
+        const uint32_t before = g_user.asyncCalls.load();
+        inputGateSetPluginBlock(true);
+        check(GetAsyncKeyState(VK_F9) == 0 && g_user.asyncCalls.load() == before + 1,
+              "the executable's own GetAsyncKeyState call reaches the door and reads a held key up while a plugin owns input");
+        inputGateSetPluginBlock(false);
+        physical[VK_F9] = false;
+        inputGateShutdown();
+        check(!g_user.asyncKey.applied, "(shutdown takes the plugin-installed doors out)");
+    }
     // Review finding 7, through the real setup order: the loader attach, the VR menu's first inputGateInstall, then the flat menu's. The
     // controller door is the executable's real XINPUT9_1_0 import (the rig links it for this), so "installed" is observable.
     {

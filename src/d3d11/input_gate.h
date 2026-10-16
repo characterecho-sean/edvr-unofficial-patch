@@ -82,6 +82,12 @@ void inputGateConfigure(Config& cfg);
 // early factory capture above is already installed before game startup.
 void inputGateInstall();
 
+// Install the user32 doors (GetAsyncKeyState, GetKeyState, GetKeyboardState,
+// PeekMessageA) when the first plugin with an input filter initialises, so its
+// block holds on a launch where the menu was never opened. Idempotent, and the
+// menu's own install does not repeat it. No input-filtering plugin: never called.
+void inputGateInstallForPlugin();
+
 // The flag. True while the menu is drawn AND menu.keyboard = private. The
 // menu calls this every frame with its current answer, the heartbeat
 // discipline: a caller that stops calling leaves the flag wherever it was,

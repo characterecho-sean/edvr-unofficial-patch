@@ -302,6 +302,9 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
         }
     }
 
+    // An addon that filters input needs the user32 doors whether or not the player ever opens F8.
+    if (lp.callbacks.onFilterInput) edvr::inputGateInstallForPlugin();
+
     const char* name = lp.callbacks.pluginName ? lp.callbacks.pluginName : cand.stem.c_str();
     const char* ver = lp.callbacks.pluginVersion ? lp.callbacks.pluginVersion : "unknown";
     Log::get().note("plugin_manager: loaded addon [%s v%s] from %ls", name, ver, cand.path.c_str());

@@ -26,6 +26,7 @@ static int g_fakeRegisteredEver = 0;
 // What the input gate is told: the last answer, and how many times it was told to clear.
 static bool g_gateBlocked = false;
 static int g_gateClears = 0;
+static int g_gateInstalls = 0;   // times a loading addon asked for the user32 doors
 
 namespace edvr {
 int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
@@ -40,6 +41,10 @@ void menuRemovePluginSettings(const char* ownerId) {
     for (size_t i = g_fakeSettings.size(); i-- > 0;) {
         if (g_fakeSettings[i].owner == o) g_fakeSettings.erase(g_fakeSettings.begin() + static_cast<ptrdiff_t>(i));
     }
+}
+
+void inputGateInstallForPlugin() {
+    ++g_gateInstalls;
 }
 
 void inputGateSetPluginBlock(bool block) {
@@ -410,6 +415,22 @@ int main(int argc, char** argv) {
         check(!g_gateBlocked, "inputshutdown: the gate is clear after shutdown");
         std::error_code ec14;
         std::filesystem::remove_all(sb, ec14);
+    }
+
+    // Case 15 (PR #92 review): loading an addon with an input filter installs the user32 doors. (Every fixture filters
+    // input, so the side that installs nothing is the discovered-but-unapproved candidate.)
+    {
+        auto sb = makeSandbox(L"installdoors");
+        dropFixture(sb, L"", L"filtering.dll");
+        pm.initialize(sb.wstring());
+        const int before = g_gateInstalls;
+        auto* cand = findCandidate(pm, "filtering");
+        check(g_gateInstalls == before, "installdoors: an unapproved candidate installs nothing");
+        check(cand && pm.approvePlugin("filtering", cand->sha256), "installdoors: the filtering addon loads");
+        check(g_gateInstalls == before + 1, "installdoors: loading an addon with an input filter installs the user32 doors");
+        pm.shutdown();
+        std::error_code ec15;
+        std::filesystem::remove_all(sb, ec15);
     }
 
     // Cleanup sandbox

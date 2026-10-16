@@ -1441,7 +1441,11 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
         name, modState, modData, d.tableModule);
 }
 
+bool g_userDoorsInstalled = false;   // the trio and the pump: installed once, by the menu's first open or by the first input-filtering plugin
+
 void installUserDoors() {
+    if (g_userDoorsInstalled) return;
+    g_userDoorsInstalled = true;
     char mod[64];
     if (iatHookInstall("user32.dll", "GetAsyncKeyState",
                        reinterpret_cast<void*>(&hookGetAsyncKeyState), &g_user.asyncKey)) {
@@ -1648,6 +1652,23 @@ void inputGateInstall() {
     }
 }
 
+void inputGateInstallForPlugin() {
+    if (g_userDoorsInstalled) return;
+    if (!Config::get().getBool("advanced.input_gate", true)) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            Log::get().note("keyboard gate: advanced.input_gate is off; an input-filtering addon's block "
+                            "does not reach the game's user32 key polls.");
+        }
+        return;
+    }
+    guarded("inputGate/installForPlugin", [&] {
+        Log::get().note("keyboard gate: an addon with an input filter initialised; installing the user32 doors.");
+        installUserDoors();
+    });
+}
+
 void inputGateSetPrivate(bool priv) {
     const int want = (priv && g_privateWanted) ? 1 : 0;
     if (g_private.load() != want) {
@@ -1837,6 +1858,7 @@ void inputGateShutdown() {
     g_private.store(0);
     g_pluginBlock.store(false);
     g_pluginLease.store(0);
+    g_userDoorsInstalled = false;
     g_summon.store(0);
     g_releaseTail.store(false);
     iatHookUninstall(&g_createImport);
