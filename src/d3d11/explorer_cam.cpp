@@ -2249,9 +2249,35 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
                    pfz::HandRig* out) noexcept {
     if (!out) return false;
     out->why = 1;
-    if (!locals || !parents || !names || hand >= joints || attach >= joints || joints > nofoot::kPfzMaxJoints) return false;
+    // Census-worker only: fdCensusStep and armBuildPlan reach this routine
+    // serially from the avatar census callback. Keep failure and success records
+    // separate so a transient refusal cannot hide later usable landmarks.
+    static uint64_t f74Failed[8] = {}, f74Succeeded[8] = {};
+    static uint32_t f74FailedCount = 0, f74SucceededCount = 0;
+    const bool f74IdentityReadable = locals && parents && names && hand < joints && attach < joints && joints <= nofoot::kPfzMaxJoints;
+    const uint64_t f74Key = (static_cast<uint64_t>(joints) << 32) ^ (static_cast<uint64_t>(hand) << 16) ^
+                            (static_cast<uint64_t>(attach) << 1) ^ static_cast<uint64_t>(side & 1) ^
+                            (static_cast<uint64_t>(f74IdentityReadable ? names[hand] : 0) << 48);
+    const auto f74First = [&](bool success) noexcept {
+        uint64_t* seen = success ? f74Succeeded : f74Failed;
+        uint32_t& count = success ? f74SucceededCount : f74FailedCount;
+        for (uint32_t i = 0; i < count; ++i) if (seen[i] == f74Key) return false;
+        if (count >= 8) return false;
+        seen[count++] = f74Key;
+        return true;
+    };
+    if (!f74IdentityReadable) {
+        if (f74First(false)) Log::get().note("native on foot hand landmarks (F74): rig hand %u side %s: data unavailable (invalid arrays or indices)",
+                                       static_cast<unsigned>(hand), side ? "R" : "L");
+        return false;
+    }
     pfz::HandRig r{};
-    const auto refuse = [&](uint8_t why) noexcept { r.why = why; *out = r; return false; };
+    const auto refuse = [&](uint8_t why) noexcept {
+        r.why = why; *out = r;
+        if (f74First(false)) Log::get().note("native on foot hand landmarks (F74): rig hand %u side %s joints %u: data unavailable (%s)",
+                                       static_cast<unsigned>(hand), side ? "R" : "L", static_cast<unsigned>(joints), handRigWhy(why));
+        return false;
+    };
     r.hand = static_cast<uint16_t>(hand); r.attach = static_cast<uint16_t>(attach);
     r.joint[0] = static_cast<uint16_t>(hand); r.name[0] = names[hand]; r.parentSlot[0] = 0xFFFFu; r.count = 1;
     if (!names[hand]) return refuse(3);
@@ -2291,10 +2317,10 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
         else if (lengths[b] == 4) ++longN;
     }
     if (thumb == 5 || longN != 4) return refuse(2);
-    double W[3] = {M[hand][12], M[hand][13], M[hand][14]}, T[3] = {}, K[3] = {};
+    double W[3] = {M[hand][12], M[hand][13], M[hand][14]}, T[3] = {}, K[3] = {}, K2[3] = {};
     for (int c = 0; c < 3; ++c) T[c] = M[branches[thumb][0]][12 + c];
     for (uint32_t b = 0; b < 5; ++b) if (b != thumb)
-        for (int c = 0; c < 3; ++c) K[c] += M[branches[b][0]][12 + c] * 0.25;
+        for (int c = 0; c < 3; ++c) { K[c] += M[branches[b][0]][12 + c] * 0.25; K2[c] += M[branches[b][1]][12 + c] * 0.25; }
     double distal[3] = {K[0] - W[0], K[1] - W[1], K[2] - W[2]}, radial[3] = {T[0] - K[0], T[1] - K[1], T[2] - K[2]};
     if (!nofoot::ikUnit(distal, distal)) return refuse(4);
     const double along = nofoot::ikDot(radial, distal);
@@ -2326,6 +2352,15 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
     r.width = static_cast<float>(hi - lo);
     const double palmLength[3] = {K[0]-W[0], K[1]-W[1], K[2]-W[2]};
     r.length = static_cast<float>(nofoot::ikLen(palmLength));
+    const double secondLengthVec[3] = {K2[0]-W[0], K2[1]-W[1], K2[2]-W[2]};
+    const double secondLength = nofoot::ikLen(secondLengthVec);
+    double secondLo = std::numeric_limits<double>::infinity(), secondHi = -secondLo;
+    for (uint32_t b = 0; b < 5; ++b) if (b != thumb) {
+        const double p[3] = {M[branches[b][1]][12] - K[0], M[branches[b][1]][13] - K[1], M[branches[b][1]][14] - K[2]};
+        const double coord = nofoot::ikDot(p, radial);
+        secondLo = std::min(secondLo, coord); secondHi = std::max(secondHi, coord);
+    }
+    const double secondWidth = secondHi - secondLo;
     r.skinRadius = static_cast<float>(spacing[1] * 0.5);
     if (!(r.width > 0.015f && r.width < 0.20f && r.length > 0.015f && r.length < 0.25f && r.skinRadius > 0.001f && r.skinRadius < 0.04f)) return refuse(4);
     float invPalmLocal[16];
@@ -2363,6 +2398,34 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
     r.count = static_cast<uint8_t>(at);
     r.why = 0;
     *out = r;
+    if (f74First(true)) {
+        const auto wristLocal = [&](const double p[3], double q[3]) noexcept {
+            for (int c = 0; c < 3; ++c) q[c] = invHand[12 + c] + invHand[c] * p[0] + invHand[4 + c] * p[1] + invHand[8 + c] * p[2];
+        };
+        double kLocal[3], k2Local[3]; wristLocal(K, kLocal); wristLocal(K2, k2Local);
+        Log::get().note("native on foot hand landmarks (F74): rig hand %u/%u side %s; wrist %u/%u@0,0,0; wrist-local K1=%.1f,%.1f,%.1f K2=%.1f,%.1f,%.1f cm; candidates K1 %.1fx%.1f K2 %.1fx%.1f cm",
+                        static_cast<unsigned>(hand), static_cast<unsigned>(names[hand]), side ? "R" : "L", static_cast<unsigned>(hand), static_cast<unsigned>(names[hand]),
+                        100.0 * kLocal[0], 100.0 * kLocal[1], 100.0 * kLocal[2], 100.0 * k2Local[0], 100.0 * k2Local[1], 100.0 * k2Local[2],
+                        100.0 * r.width, 100.0 * r.length, 100.0 * secondWidth, 100.0 * secondLength);
+        for (uint32_t start = 0; start < 5; start += 3) {
+            char line[320] = {};
+            size_t at = 0;
+            for (uint32_t b = start; b < std::min(start + 3, 5u); ++b) {
+                double first[3], second[3];
+                const double firstModel[3] = {M[branches[b][0]][12], M[branches[b][0]][13], M[branches[b][0]][14]};
+                const double secondModel[3] = {M[branches[b][1]][12], M[branches[b][1]][13], M[branches[b][1]][14]};
+                wristLocal(firstModel, first); wristLocal(secondModel, second);
+                const int n = std::snprintf(line + at, sizeof(line) - at, "%sb%u%c %u/%u@%.1f,%.1f,%.1f>%u/%u@%.1f,%.1f,%.1f",
+                                            at ? " | " : "", static_cast<unsigned>(b), b == thumb ? 'T' : '-', static_cast<unsigned>(branches[b][0]), static_cast<unsigned>(names[branches[b][0]]),
+                                            100.0 * first[0], 100.0 * first[1], 100.0 * first[2], static_cast<unsigned>(branches[b][1]), static_cast<unsigned>(names[branches[b][1]]),
+                                            100.0 * second[0], 100.0 * second[1], 100.0 * second[2]);
+                if (n <= 0 || static_cast<size_t>(n) >= sizeof(line) - at) break;
+                at += static_cast<size_t>(n);
+            }
+            Log::get().note("native on foot hand landmarks (F74): rig hand %u/%u side %s thumb b%u; %s",
+                            static_cast<unsigned>(hand), static_cast<unsigned>(names[hand]), side ? "R" : "L", static_cast<unsigned>(thumb), line);
+        }
+    }
     return true;
 }
 bool armBuildPlan(uint64_t x) noexcept {

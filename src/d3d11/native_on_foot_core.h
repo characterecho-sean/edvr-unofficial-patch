@@ -304,6 +304,43 @@ inline void seatedFromBody(const double body[3], double psi, double out[3]) noex
     out[1] = -r[1];
     out[2] = r[2];
 }
+// F74: eye alignment translates the seated origin directly in natural LOCAL, so the camera moves opposite the requested local HMD-right vector.
+// `rightM` is a signed distance in metres; exact zero writes exact zeros without requiring a valid basis.
+inline bool weaponViewOffsetSeated(double rightM, const double localRight[3], double out[3]) noexcept {
+    if (!std::isfinite(rightM)) return false;
+    if (rightM == 0.0) { out[0] = out[1] = out[2] = 0.0; return true; }
+    const double n2 = localRight[0] * localRight[0] + localRight[1] * localRight[1] + localRight[2] * localRight[2];
+    if (!(n2 > 1e-12) || !std::isfinite(n2)) return false;
+    const double inv = 1.0 / std::sqrt(n2);
+    const double r[3] = {localRight[0] * inv, localRight[1] * inv, localRight[2] * inv};
+    for (int i = 0; i < 3; ++i) out[i] = -rightM * r[i];
+    return true;
+}
+inline bool weaponViewOffsetActive(bool bodyPinScope, bool equipped, double rightM) noexcept {
+    return bodyPinScope && equipped && std::isfinite(rightM) && rightM != 0.0;
+}
+// F74: the same signed offset in the game-world camera basis. Scene right is taken from the solved cyclopean eye separation.
+inline bool weaponViewOffsetWorld(double rightM, const double sceneRight[3], double out[3]) noexcept {
+    if (!std::isfinite(rightM)) return false;
+    if (rightM == 0.0) { out[0] = out[1] = out[2] = 0.0; return true; }
+    const double n2 = sceneRight[0] * sceneRight[0] + sceneRight[1] * sceneRight[1] + sceneRight[2] * sceneRight[2];
+    if (!(n2 > 1e-12) || !std::isfinite(n2)) return false;
+    const double inv = 1.0 / std::sqrt(n2);
+    const double r[3] = {sceneRight[0] * inv, sceneRight[1] * inv, sceneRight[2] * inv};
+    for (int i = 0; i < 3; ++i) out[i] = rightM * r[i];
+    return true;
+}
+// F74: convert a world displacement into model axes with the inverse AMC matrix's linear part; translation is intentionally ignored.
+inline void ikVectorXform(const double v[3], const float M[16], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c) out[c] = v[0] * M[c] + v[1] * M[4 + c] + v[2] * M[8 + c];
+}
+inline void weaponViewOffsetTarget(double target[3], const double modelShift[3]) noexcept {
+    if (modelShift[0] == 0.0 && modelShift[1] == 0.0 && modelShift[2] == 0.0) return;
+    for (int i = 0; i < 3; ++i) target[i] += modelShift[i];
+}
+inline void weaponViewOffsetTargetPoint(const double point[3], const double worldShift[3], double out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = point[i] + worldShift[i];
+}
 // F40: the head's seated translation, in body axes: Ry(psi)^-1 . diag(1, 1, -1) . tS (OpenXR +z is back, body +z is forward).
 inline void hmdInBody(const double ts[3], double psi, double out[3]) noexcept {
     const double v[3] = {ts[0], ts[1], -ts[2]};
@@ -4047,8 +4084,17 @@ inline SupportItem supportItem(const char* name) noexcept {
     if (!name || !*name) return kSupportNone;
     constexpr char pistol[] = "$wpn_s_pistol_";
     if (std::strncmp(name, pistol, sizeof(pistol) - 1) == 0) return kSupportPistol;
-    if (std::strcmp(name, "$humanoid_repairtool_name;") == 0) return kSupportTool;
+    // Arc Cutter keeps the game's authored left-hand handle grasp; the support-cup target is for pistols only.
     return kSupportNone;
+}
+// F74: the armed-ramp is the acquisition envelope. Once a requested cup target is valid it is selected in full;
+// a still-valid target that is being released retains the existing short blend-out, while invalid geometry clears immediately.
+inline double supportCupBlendStep(double current, bool requested, bool targetValid, double step) noexcept {
+    if (!targetValid || !std::isfinite(current)) return 0.0;
+    if (requested) return 1.0;
+    const double s = std::isfinite(step) && step > 0.0 ? step : 0.0;
+    const double w = current - s;
+    return w > 0.0 ? w : 0.0;
 }
 inline bool gameAuthoredLeftArm(const char* name) noexcept {
     return name && (std::strcmp(name, "$humanoid_rechargetool_name;") == 0 || std::strcmp(name, "$humanoid_companalyser_name;") == 0);

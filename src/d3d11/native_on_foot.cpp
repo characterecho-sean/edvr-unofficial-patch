@@ -98,6 +98,7 @@ std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_r
 // the game's sign, one writer: the game thread) split into ours and the player's, and the gain it measured. Atomics only: no locks in the hooks.
 std::atomic<bool> g_adsAimKey{true};                          // the key as the frame thread last read it (default on)
 std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
+std::atomic<float> g_weaponViewOffsetCm{0.0f};                // F74: fix.native_on_foot_weapon_view_offset_cm (left/right, -10..10 cm, default 0), live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
@@ -707,6 +708,14 @@ void readKey() {
                             "%.0f cm in all)", cm, cm, cm, 100.0 * nofoot::kAdsSightClampM);
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
+    }
+    // F74: the user's live left/right view offset relative to an equipped weapon or tool. Zero preserves the existing view exactly.
+    {
+        const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", 0.0f);
+        const float cm = std::isfinite(rawCm) ? std::clamp(rawCm, -10.0f, 10.0f) : 0.0f;
+        if (first || cm != g_weaponViewOffsetCm.load(std::memory_order_relaxed))
+            Log::get().note("native on foot weapon view offset (F74): fix.native_on_foot_weapon_view_offset_cm = %+.1f cm -- positive shifts the view and body right relative to the fixed equipped weapon or tool; negative shifts left; 0 keeps the existing alignment", cm);
+        g_weaponViewOffsetCm.store(cm, std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
     {
@@ -6947,6 +6956,7 @@ void bodyShiftApply(uint64_t amc) noexcept {
 struct PinIn {
     float cam[3] = {}, m3p[16] = {};
     float camRaw[3] = {};   // F70: the job camera as read; cam is it less the ADS shift (the unlocked head)
+    float weaponViewWorld[3] = {}; // F74: one published current-view-right world displacement, shared by the eye lock and body pin
     uint64_t qpc = 0, ms = 0;
     uint32_t p1 = 0;   // g_f66gP1Seq at the publication: the game-frame index (its low bit is the parity the lines split by)
     float localPitchRad = 0.0f;
@@ -6959,9 +6969,10 @@ PinIn g_pinIn;
 std::atomic<bool> g_pinScope{false};   // the frame thread: the pin is on (key, full-3P body mode, the arm IK on, native stereo on foot)
 std::atomic<bool> g_armedNow{false};   // the game's armed flag (g_armed, F66a), for the Animate hook
 std::atomic<uint32_t> g_heldItemSerial{0};   // F69b: bumped by the frame thread at every change of the held item (Status.json SelectedWeapon): the hook's per-item latches drop
+std::atomic<uint64_t> g_heldItemChangedMs{0}; // F74: item-selection epoch for bounded first-target onset evidence
 std::atomic<uint8_t> g_supportCupMode{nofoot::kSupportNone};
 std::atomic<bool> g_gameAuthoredLeftArm{false};   // Energy Link and Profile Analyser: preserve the game's relaxed left-arm pose
-void pinInPublish(const float cam[3], const float camRaw[3], const float m3p[16], uint64_t nowMs) noexcept {
+void pinInPublish(const float cam[3], const float camRaw[3], const float weaponViewWorld[3], const float m3p[16], uint64_t nowMs) noexcept {
     double localPitchRad = 0.0;
     bool localPitchValid = false;
     uint32_t localPoseGeneration = 0;
@@ -6980,6 +6991,7 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float m3p[16]
     g_pinInSeq.fetch_add(1, std::memory_order_acq_rel);
     std::memcpy(g_pinIn.cam, cam, sizeof(g_pinIn.cam));
     std::memcpy(g_pinIn.camRaw, camRaw, sizeof(g_pinIn.camRaw));
+    std::memcpy(g_pinIn.weaponViewWorld, weaponViewWorld, sizeof(g_pinIn.weaponViewWorld));
     std::memcpy(g_pinIn.m3p, m3p, sizeof(g_pinIn.m3p));
     g_pinIn.qpc = f30Qpc();
     g_pinIn.ms = nowMs;
@@ -7001,31 +7013,109 @@ bool pinInRead(PinIn* out) noexcept {
     }
     return false;
 }
-// F70: the ADS shift S = g_adsLock + g_adsSight.applied (seated metres), published by alignTick every tick (a seqlock; the readers never wait). The camera the
+// F70: the ADS shift S = g_adsLock + g_adsSight.applied (seated metres), published by alignTick every tick (a seqlock; the readers never wait). F74 adds its
+// independently transported world displacement in the same publication. The camera the
 // game reports moves by (-S0, -S1, +S2) in body axes with it (F40's plant), so the body consumers take the camera less that: the body stays pinned to the
 // unlocked head and does not slide forward with the ADS eye.
 std::atomic<uint32_t> g_adsShiftSeq{0};
 double g_adsShiftS[3] = {};
-void adsShiftPublish(const double s[3]) noexcept {
+double g_weaponViewWorldShift[3] = {};
+void adsShiftPublish(const double s[3], const double weaponViewWorld[3]) noexcept {
     g_adsShiftSeq.fetch_add(1, std::memory_order_acq_rel);
     for (int i = 0; i < 3; ++i) g_adsShiftS[i] = s[i];
+    for (int i = 0; i < 3; ++i) g_weaponViewWorldShift[i] = weaponViewWorld[i];
     g_adsShiftSeq.fetch_add(1, std::memory_order_release);
 }
-bool adsShiftRead(double s[3]) noexcept {
+bool adsShiftRead(double s[3], double weaponViewWorld[3]) noexcept {
     for (int tries = 0; tries < 3; ++tries) {
         const uint32_t s1 = g_adsShiftSeq.load(std::memory_order_acquire);
         if (s1 & 1u) continue;
         for (int i = 0; i < 3; ++i) s[i] = g_adsShiftS[i];
+        for (int i = 0; i < 3; ++i) weaponViewWorld[i] = g_weaponViewWorldShift[i];
         std::atomic_thread_fence(std::memory_order_acquire);
         if (g_adsShiftSeq.load(std::memory_order_relaxed) == s1) return true;
     }
     s[0] = s[1] = s[2] = 0.0;
+    weaponViewWorld[0] = weaponViewWorld[1] = weaponViewWorld[2] = 0.0;
     return false;
+}
+enum WeaponViewBasisState : uint32_t { kWeaponViewOff = 0, kWeaponViewReady, kWeaponViewNoLocal, kWeaponViewNoScene, kWeaponViewBadAxes };
+struct WeaponViewBias {
+    double seated[3] = {}, world[3] = {};
+    uint32_t state = kWeaponViewOff, localGeneration = 0, localFrame = 0, sceneFrame = 0;
+    uint32_t localAgeMs = 0;
+};
+bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc = nullptr) noexcept;
+WeaponViewBias weaponViewBiasForTick(double rightCm, uint64_t now) noexcept {
+    WeaponViewBias out;
+    if (rightCm == 0.0) return out;   // preserve the established path bit-for-bit at the default
+    const double rightM = rightCm / 100.0;
+    EdvrNativeNowPose np{};
+    if (!nativeFrameNowPose(np)) {
+        out.state = kWeaponViewNoLocal;
+        return out;
+    }
+    const uint64_t qpcNow = f30Qpc();
+    if (np.inputVersion < 3 || !np.localValid || np.ringCount == 0 || np.ringNewest >= 8 ||
+        np.ringSequence[np.ringNewest] != np.frameSequence || np.ringQpc[np.ringNewest] == 0 || np.ringQpc[np.ringNewest] > qpcNow) {
+        out.state = kWeaponViewNoLocal;
+        return out;
+    }
+    const uint64_t localAgeUs = f30QpcUs(qpcNow - np.ringQpc[np.ringNewest]);
+    double localRight[3], localUp[3], localForward[3];
+    if (localAgeUs > 500000ull || !nofoot::rotAxesFromHead(np.local, localRight, localUp, localForward)) {
+        out.state = kWeaponViewNoLocal;
+        return out;
+    }
+    (void)localUp;
+    (void)localForward;
+    out.localGeneration = np.referenceGeneration;
+    out.localFrame = np.frameSequence;
+    out.localAgeMs = static_cast<uint32_t>(localAgeUs / 1000u);
+    static bool haveReferenceGeneration = false;
+    static uint32_t lastReferenceGeneration = 0;
+    static uint64_t generationStartQpc = 0;
+    if (!haveReferenceGeneration || lastReferenceGeneration != np.referenceGeneration) {
+        haveReferenceGeneration = true;
+        lastReferenceGeneration = np.referenceGeneration;
+        generationStartQpc = np.ringQpc[np.ringNewest];
+        out.state = kWeaponViewNoScene;
+        return out;
+    }
+
+    const uint32_t current = g_f44Frame.load(std::memory_order_relaxed);
+    float rows[2][16] = {}, origins[2][4] = {};
+    uint32_t frames[2] = {~0u, ~0u};
+    uint64_t sceneQpc[2] = {};
+    double eyes[2][3] = {};
+    for (int e = 0; e < 2; ++e) {
+        if (!eyeRowsRead(e, &frames[e], rows[e], origins[e], &sceneQpc[e]) || sceneQpc[e] < generationStartQpc || sceneQpc[e] == 0 || sceneQpc[e] > qpcNow ||
+            f30QpcUs(qpcNow - sceneQpc[e]) > 500000ull) { out.state = kWeaponViewNoScene; return out; }
+        const int32_t age = static_cast<int32_t>(current - frames[e]);
+        const double origin[3] = {origins[e][0], origins[e][1], origins[e][2]};
+        if (age < 0 || age > 1 || !nofoot::eyeFromRows(rows[e], origin, eyes[e])) { out.state = kWeaponViewNoScene; return out; }
+    }
+    if (frames[0] != frames[1]) { out.state = kWeaponViewNoScene; return out; }
+    const double solvedRight[3] = {eyes[1][0] - eyes[0][0], eyes[1][1] - eyes[0][1], eyes[1][2] - eyes[0][2]};
+    const double ipd = nofoot::ikLen(solvedRight);
+    if (!(ipd >= 0.05 && ipd <= 0.08)) { out.state = kWeaponViewBadAxes; return out; }
+    if (!nofoot::weaponViewOffsetSeated(rightM, localRight, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
+        out.state = kWeaponViewBadAxes;
+        out.seated[0] = out.seated[1] = out.seated[2] = 0.0;
+        out.world[0] = out.world[1] = out.world[2] = 0.0;
+        return out;
+    }
+    out.state = kWeaponViewReady;
+    out.sceneFrame = frames[0];
+    return out;
 }
 // The job camera of a frame-thread sample less the ADS shift (the sample's AMC rows, row-major right, up, forward).
 void camUnlockedFrom(const EyeSample& smp, float out[3]) noexcept {
-    double S[3];
-    if (adsShiftRead(S)) nofoot::adsUnlockedCam(smp.cam, S, smp.rows, out);
+    double S[3], weaponViewWorld[3];
+    if (adsShiftRead(S, weaponViewWorld)) {
+        nofoot::adsUnlockedCam(smp.cam, S, smp.rows, out);
+        for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(static_cast<double>(out[i]) - weaponViewWorld[i]);
+    }
     else
         for (int i = 0; i < 3; ++i) out[i] = smp.cam[i];
 }
@@ -7092,12 +7182,14 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
         if (guardedRead(reinterpret_cast<uintptr_t>(jobPtr), cam, sizeof(cam))) {
             // F70: the pin takes the camera less the ADS shift: the unlocked head.
             float camU[3] = {cam[0], cam[1], cam[2]};
-            double S[3];
-            if (adsShiftRead(S)) {
+            double S[3], weaponViewWorld[3] = {};
+            if (adsShiftRead(S, weaponViewWorld)) {
                 const float rows[9] = {m3p[0], m3p[1], m3p[2], m3p[4], m3p[5], m3p[6], m3p[8], m3p[9], m3p[10]};
                 nofoot::adsUnlockedCam(cam, S, rows, camU);
             }
-            pinInPublish(camU, cam, m3p, now);
+            for (int i = 0; i < 3; ++i) camU[i] = static_cast<float>(static_cast<double>(camU[i]) - weaponViewWorld[i]);
+            const float weaponWorldFloat[3] = {static_cast<float>(weaponViewWorld[0]), static_cast<float>(weaponViewWorld[1]), static_cast<float>(weaponViewWorld[2])};
+            pinInPublish(camU, cam, weaponWorldFloat, m3p, now);
         }
     }
     FpRootSnap fp{};
@@ -7249,7 +7341,7 @@ void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4
     std::memcpy(q.o, o, sizeof(q.o));
     q.seq.fetch_add(1, std::memory_order_release);
 }
-bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc = nullptr) noexcept {
+bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept {
     if (e < 0 || e > 1) return false;
     EyeRowsPub& q = g_eyeRowsPub[e];
     for (int tries = 0; tries < 2; ++tries) {
@@ -7306,7 +7398,7 @@ std::atomic<uint32_t> g_adsOpticCaptureRequest{0}, g_adsOpticCaptureRequestFrame
 std::atomic<uint64_t> g_adsOpticGood{0}, g_adsOpticNoFp{0}, g_adsOpticNoRoot{0}, g_adsOpticNoSample{0}, g_adsOpticNoEye{0}, g_adsOpticBadBasis{0};
 uint32_t g_adsOpticCaptureSeen = 0;
 
-void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
+void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weaponViewWorld[3]) noexcept {
     const uint32_t captureRequest = g_adsOpticCaptureRequest.load(std::memory_order_acquire);
     const bool captureOpticNow = captureRequest != g_adsOpticCaptureSeen;
     const uint32_t captureFrame = g_adsOpticCaptureRequestFrame.load(std::memory_order_relaxed);
@@ -7376,6 +7468,9 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             for (int c = 0; c < 3; ++c) opticModelP14[c] = p14m[c];
             double p14w[3];
             nofoot::ikXform(p14m, G.froot, p14w);
+            // F74: keep optic diagnostics on the actual weapon point; only the solver/guard target follows the intentional camera displacement.
+            double p14Lock[3];
+            nofoot::weaponViewOffsetTargetPoint(p14w, weaponViewWorld, p14Lock);
             const double f[3] = {G.froot[8], G.froot[9], G.froot[10]}, row0[3] = {G.froot[0], G.froot[1], G.froot[2]};
             std::memcpy(opticRootForward, f, sizeof(opticRootForward));
             std::memcpy(opticWorldP14, p14w, sizeof(opticWorldP14));
@@ -7499,10 +7594,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             bool lockOk = false;
             bool usedSolved = false;
             const double modelEye[3] = {cam[0] + g_adsSightHalfIpd * rHat[0], cam[1] + g_adsSightHalfIpd * rHat[1], cam[2] + g_adsSightHalfIpd * rHat[2]};
-            if (eyeOk[1] && nofoot::adsSightErrorEyeK(p14w, eyeW[1], f, rows, eyeCap.kM, E)) {   // F70: onto P14w + k f (the perpendicular AND the along part)
+            if (eyeOk[1] && nofoot::adsSightErrorEyeK(p14Lock, eyeW[1], f, rows, eyeCap.kM, E)) {   // F70/F74: the target plus the user's view bias
                 lockOk = true;
                 usedSolved = true;
-            } else if (modelOk && nofoot::adsSightErrorEyeK(p14w, modelEye, f, rows, eyeCap.kM, E)) {
+            } else if (modelOk && nofoot::adsSightErrorEyeK(p14Lock, modelEye, f, rows, eyeCap.kM, E)) {
                 lockOk = true;
             }
             if (lockOk) {
@@ -7617,8 +7712,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     if (now - g_adsSightLineMs < 1000) return;
     g_adsSightLineMs = now;
     const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
-    Log::get().note("native on foot ADS sight lock (F63): P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
-                    "e perpendicular (the right eye to the sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
+    Log::get().note("native on foot ADS sight lock (F63/F74): P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
+                    "e perpendicular (the right eye to the intended eye line, including the user's view offset) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
                     "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
                     "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
                     "flipped to the body's right %u, held off by the guard %u%s",
@@ -7628,8 +7723,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
                     w.driving ? "" : " (no frame drove the lock this second)");
-    // F70: the ADS eye point. Proof: the along error to the target 0 +-0.5 cm and the perpendicular error under 0.5 cm; the pin input camera is the job camera less
-    // the shift (-S through the AMC rows); the 3P root stays put (under 1 cm over a press); the sight's NDC equal at the three distances.
+    // F70/F74: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
+    // (under 1 cm over a press); the sight's NDC equal at the three distances from the actual weapon P14.
     {
         PinIn pi;
         const bool pinOk = pinInRead(&pi);
@@ -7639,7 +7734,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             nofoot::adsCamShiftWorld(S, rows9, want);
             for (int i = 0; i < 3; ++i) {
                 got[i] = static_cast<double>(pi.cam[i]) - pi.camRaw[i];   // the pin input minus the job camera
-                want[i] = -want[i];
+                want[i] = -want[i] - pi.weaponViewWorld[i];
             }
         }
         const double dn = w.driving ? static_cast<double>(w.driving) : 1.0;
@@ -7650,10 +7745,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                           w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
         else
             std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
-        Log::get().note("native on foot ADS eye point (F70): k %.1f cm asked, %.1f cm after the clearance cap (%s); the eye to the target eye point (P14w + k f) after the lock: "
+        Log::get().note("native on foot ADS eye point (F70/F74): k %.1f cm asked, %.1f cm after the clearance cap (%s); the eye to the intended eye point (P14w + view offset + k f) after the lock: "
                         "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
-                        "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against -S through the AMC rows "
-                        "%+.1f %+.1f %+.1f (difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
+                        "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against total expected %+.1f %+.1f %+.1f "
+                        "(difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
                         "now %.2f cm, largest %.2f cm (max 1; a walk counts); the sight in the right eye ahead of the target eye point: %s (equal when the eye is on the line)",
                         100.0 * w.kWantedSum / dn, 100.0 * w.kEffSum / dn,
                         w.capped ? "a readable FP weapon point on the sight line cut it" : w.readableMax ? "points on the line, none close enough to cut it"
@@ -8801,12 +8896,13 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
         Log::get().note("native on foot armed (F66a): SelectedWeapon \"%s\" -> %s%s (Status.json samples read %u; the armed ramp is 0.3 s)",
                         kind == kHeldUnknown ? "(not in Status.json)" : name, g_armed ? "armed" : "unarmed",
                         kind == kHeldUnknown ? " [unknown: treated as unarmed, the game's arms]" : kind == kHeldNone ? " [fists]" : "", journalStatusSamples());
-        g_heldItemSerial.fetch_add(1, std::memory_order_relaxed);   // F69b: a new item (or none): the hook's per-item latches drop
         g_supportCupMode.store(static_cast<uint8_t>(nofoot::supportItem(name)), std::memory_order_relaxed);
         g_gameAuthoredLeftArm.store(nofoot::gameAuthoredLeftArm(name), std::memory_order_relaxed);
         if (g_f66aKindLast >= 0) f68dFlip(now, static_cast<int>(kind), name);   // F68d: the onset window (not for the first reading)
         g_f66aKindLast = static_cast<int>(kind);
         std::memcpy(g_f66aNameLast, name, sizeof(g_f66aNameLast));
+        g_heldItemChangedMs.store(now, std::memory_order_relaxed);
+        g_heldItemSerial.fetch_add(1, std::memory_order_release);   // F69b/F74: publish the new item only after its profile and onset time
     }
     if (active) f68dTick(now);
     if (!active) return;
@@ -8928,6 +9024,23 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     if (!s.valid || (now >= s.stamp && now - s.stamp > 1500)) g_f55Loco = nofoot::PfzLocoRest{};
     const bool f55Moving = !g_f55Loco.resting;
     const bool pin = f67cPinTick(now, mode, f58Full3P);   // F67c: the pin's scope for the hook (and for the body offset below: zero in scope); its 1 s line
+    const double weaponViewCm = static_cast<double>(g_weaponViewOffsetCm.load(std::memory_order_relaxed));
+    const bool weaponViewActive = nofoot::weaponViewOffsetActive(pin, g_armed, weaponViewCm);
+    const WeaponViewBias weaponView = weaponViewActive ? weaponViewBiasForTick(weaponViewCm, now) : WeaponViewBias{};
+    if (weaponViewCm != 0.0) {
+        static uint64_t lastWeaponViewLineMs = 0;
+        static uint32_t lastWeaponViewState = ~0u;
+        if (lastWeaponViewState != weaponView.state || now - lastWeaponViewLineMs >= 1000) {
+            lastWeaponViewLineMs = now;
+            lastWeaponViewState = weaponView.state;
+            const char* state = weaponView.state == kWeaponViewReady ? "active" : weaponView.state == kWeaponViewNoLocal ? "paused: fresh LOCAL head unavailable" :
+                                weaponView.state == kWeaponViewNoScene ? "paused: fresh stereo scene basis unavailable" : weaponView.state == kWeaponViewBadAxes ?
+                                "paused: view basis degenerate" : !pin ? "waiting: full-3P body pin inactive" : "waiting: no equipped item";
+            Log::get().note("native on foot weapon view offset (F74): requested %+.1f cm; %s; local generation/frame %u/%u age %u ms, scene frame %u; eye seated bias %+.3f %+.3f %+.3f m; world/body shift %+.3f %+.3f %+.3f m",
+                            weaponViewCm, state, weaponView.localGeneration, weaponView.localFrame, weaponView.localAgeMs, weaponView.sceneFrame,
+                            weaponView.seated[0], weaponView.seated[1], weaponView.seated[2], weaponView.world[0], weaponView.world[1], weaponView.world[2]);
+        }
+    }
     const char* wait = nullptr;
     if (!on) wait = "key off";
     else if (!nativeOnFootActive()) wait = "not native stereo on foot";
@@ -9533,7 +9646,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         if (mode != 2) bodyOffsetPublish(other.applied);
     }
 
-    adsSightTick(now, dt, sIn);   // F63: the ADS sight lock (the right eye onto the sight line; zero outside ADS)
+    adsSightTick(now, dt, sIn, weaponView.world);   // F63/F74: the ADS lock follows the intentional view shift without moving the weapon
     adsAimStep(now, dt, sIn);     // F68a: the ADS guard (the right eye's rows against the head); F67b: the three forwards
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
@@ -9543,12 +9656,12 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         double eye[3] = {}, eyeChange = 0.0;
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
-            eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i];
+            eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
             const double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]};
-            adsShiftPublish(sShift);
+            adsShiftPublish(sShift, weaponView.world);
         }
         if (eyeChange > 1e-6) {
             for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
@@ -10827,6 +10940,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         const double detachW = static_cast<double>(g_bodyDetachW.load(std::memory_order_relaxed));
         pc.detachW = detachW < 0.0 ? 0.0 : detachW > 1.0 ? 1.0 : detachW;
         pc.targetFromAuthoredM = nofoot::pinDetachTarget(T, N0, pc.detachW, T);
+        // F74: move the detached body target by the same world-space camera offset, converted through this call's actual inverse AMC.
+        // The held FP weapon/root and grip targets are never written by this path.
+        if (armed && (in.weaponViewWorld[0] != 0.0f || in.weaponViewWorld[1] != 0.0f || in.weaponViewWorld[2] != 0.0f)) {
+            const double worldShift[3] = {in.weaponViewWorld[0], in.weaponViewWorld[1], in.weaponViewWorld[2]};
+            double modelShift[3];
+            nofoot::ikVectorXform(worldShift, invM, modelShift);
+            nofoot::weaponViewOffsetTarget(T, modelShift);
+            pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
+        }
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
         if (pl.legOk) {
             double sum = 0.0;
@@ -11346,26 +11468,32 @@ std::atomic<bool> g_ikGateOk{false};   // the frame thread's gate for the arm IK
 // (it differs per item): the 3P hand must be placed on the FP hand's frame, with the fingers copied (F70).
 struct GripSample {
     std::atomic<uint32_t> seq{0};
-    uint64_t qpc = 0;
+    uint64_t qpc = 0, sampleMs = 0, itemChangedMs = 0;
     uint32_t p1 = 0, itemSerial = 0, fpFrame = 0, fpGeneration = 0, fpAgeMs = 0, gFrame = 0, gAgeMs = 0;
-    bool armedFull = false, offTwo = false;
+    bool armedFull = false, offTwo = false, authoredLeft = false, supportValid = false, cupDiagOk = false, blendedTargetDiagOk = false;
     bool sideOk[2] = {false, false}, wristOk[2] = {false, false}, palmDiagOk[2] = {false, false}, attachDiagOk[2] = {false, false}, poseWritten[2] = {false, false};
     float gFp[2][16] = {}, g3p[2][16] = {}, fpAt[2][3] = {}, wrist[2][4] = {}, wristImprovement[2] = {};
     float palmDeltaMm[2][3] = {}, palmAngleDeg[2] = {}, attachDeltaMm[2][3] = {}, attachAngleDeg[2] = {};
+    float cupCentreMm[3] = {}, cupAxisDot[3] = {}, cupAngleDeg = 0.0f, cupDimsMm[4] = {}, cupGapMm = 0.0f, blendedTargetDeltaMm[3] = {}, blendedTargetAngleDeg = 0.0f;
     uint8_t targetMode[2] = {}, supportMode = 0, anatomyMapped = 0, mapWhy[2] = {};
     uint32_t mapGeneration = 0;
-    float sep = 0.0f, offW = 0.0f, supportGap = -1.0f;   // separation (m); off arm weight; anatomical proxy gap (m)
+    float sep = 0.0f, offW = 0.0f, armedW = 0.0f, supportBlend = 0.0f, supportGap = -1.0f;   // separation (m); weights; commanded proxy gap (m)
 };
 GripSample g_gripSample;
 void gripPost(const GripSample& r) noexcept {
     GripSample& d = g_gripSample;
     d.seq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
     d.qpc = r.qpc;
+    d.sampleMs = r.sampleMs; d.itemChangedMs = r.itemChangedMs;
     d.p1 = r.p1; d.itemSerial = r.itemSerial; d.fpFrame = r.fpFrame; d.fpGeneration = r.fpGeneration; d.fpAgeMs = r.fpAgeMs; d.gFrame = r.gFrame; d.gAgeMs = r.gAgeMs;
     d.armedFull = r.armedFull;
-    d.offTwo = r.offTwo;
+    d.offTwo = r.offTwo; d.authoredLeft = r.authoredLeft; d.supportValid = r.supportValid; d.cupDiagOk = r.cupDiagOk; d.blendedTargetDiagOk = r.blendedTargetDiagOk;
     d.sep = r.sep;
     d.offW = r.offW;
+    d.armedW = r.armedW; d.supportBlend = r.supportBlend;
+    std::memcpy(d.cupCentreMm, r.cupCentreMm, sizeof(d.cupCentreMm)); std::memcpy(d.cupAxisDot, r.cupAxisDot, sizeof(d.cupAxisDot));
+    d.cupAngleDeg = r.cupAngleDeg; std::memcpy(d.cupDimsMm, r.cupDimsMm, sizeof(d.cupDimsMm)); d.cupGapMm = r.cupGapMm;
+    std::memcpy(d.blendedTargetDeltaMm, r.blendedTargetDeltaMm, sizeof(d.blendedTargetDeltaMm)); d.blendedTargetAngleDeg = r.blendedTargetAngleDeg;
     d.supportMode = r.supportMode; d.anatomyMapped = r.anatomyMapped; d.supportGap = r.supportGap; d.mapGeneration = r.mapGeneration;
     std::memcpy(d.mapWhy, r.mapWhy, sizeof(d.mapWhy));
     for (int k = 0; k < 2; ++k) {
@@ -11389,11 +11517,16 @@ bool gripCopy(GripSample* out) noexcept {
         const uint32_t s1 = s.seq.load(std::memory_order_acquire);
         if (s1 & 1u || s1 == 0) continue;
         out->qpc = s.qpc;
+        out->sampleMs = s.sampleMs; out->itemChangedMs = s.itemChangedMs;
         out->p1 = s.p1; out->itemSerial = s.itemSerial; out->fpFrame = s.fpFrame; out->fpGeneration = s.fpGeneration; out->fpAgeMs = s.fpAgeMs; out->gFrame = s.gFrame; out->gAgeMs = s.gAgeMs;
         out->armedFull = s.armedFull;
-        out->offTwo = s.offTwo;
+        out->offTwo = s.offTwo; out->authoredLeft = s.authoredLeft; out->supportValid = s.supportValid; out->cupDiagOk = s.cupDiagOk; out->blendedTargetDiagOk = s.blendedTargetDiagOk;
         out->sep = s.sep;
         out->offW = s.offW;
+        out->armedW = s.armedW; out->supportBlend = s.supportBlend;
+        std::memcpy(out->cupCentreMm, s.cupCentreMm, sizeof(out->cupCentreMm)); std::memcpy(out->cupAxisDot, s.cupAxisDot, sizeof(out->cupAxisDot));
+        out->cupAngleDeg = s.cupAngleDeg; std::memcpy(out->cupDimsMm, s.cupDimsMm, sizeof(out->cupDimsMm)); out->cupGapMm = s.cupGapMm;
+        std::memcpy(out->blendedTargetDeltaMm, s.blendedTargetDeltaMm, sizeof(out->blendedTargetDeltaMm)); out->blendedTargetAngleDeg = s.blendedTargetAngleDeg;
         out->supportMode = s.supportMode; out->anatomyMapped = s.anatomyMapped; out->supportGap = s.supportGap; out->mapGeneration = s.mapGeneration;
         std::memcpy(out->mapWhy, s.mapWhy, sizeof(out->mapWhy));
         for (int k = 0; k < 2; ++k) {
@@ -11586,6 +11719,11 @@ void armMoveDrain() noexcept {
 }
 
 void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
+    // Snapshot item identity and its profile before selecting any grip target; discard this sample if Status changes mid-hook.
+    const uint32_t itemSerialForCall = g_heldItemSerial.load(std::memory_order_acquire);
+    const uint64_t itemChangedMsForCall = g_heldItemChangedMs.load(std::memory_order_relaxed);
+    const nofoot::SupportItem supportKindForCall = static_cast<nofoot::SupportItem>(g_supportCupMode.load(std::memory_order_relaxed));
+    const bool authoredLeftForCall = g_gameAuthoredLeftArm.load(std::memory_order_relaxed);
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const bool bendRun = g_bendRun.load(std::memory_order_relaxed);   // F58: the spine bend rides this path (its plan and its writes)
     if (mode == 0 && !bendRun) return;
@@ -11768,7 +11906,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     static nofoot::OffHand s_off;
     static uint64_t s_offQpc = 0;
     static bool s_offTwoPrev = false;
-    const bool relaxLeftArmForItem = g_gameAuthoredLeftArm.load(std::memory_order_relaxed);
+    const bool relaxLeftArmForItem = authoredLeftForCall;
     nofoot::OffHand::Out offOut;
     {
         const uint64_t q = f30Qpc();
@@ -11780,7 +11918,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     double offW = armedNow ? offOut.w : 1.0;
     const bool offFlip = armedNow && offOut.ok && offOut.two != s_offTwoPrev;
     if (armedNow && offOut.ok) s_offTwoPrev = offOut.two;
-    const nofoot::SupportItem supportKind = static_cast<nofoot::SupportItem>(g_supportCupMode.load(std::memory_order_relaxed));
+    const nofoot::SupportItem supportKind = supportKindForCall;
     const bool supportRequested = armedNow && supportKind != nofoot::kSupportNone;
     static nofoot::SupportItem s_blendKind = nofoot::kSupportNone;
     static double s_supportBlend = 0.0;
@@ -11792,7 +11930,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const double supportDt = std::min(0.05, supportDtRaw);
     s_supportQpc = supportQpc;
     const double supportStep = supportDt > 0.0 ? supportDt / 0.15 : 0.0;
-    const uint32_t supportItem = g_heldItemSerial.load(std::memory_order_relaxed);
+    const uint32_t supportItem = itemSerialForCall;
     if (s_support3Gen != pl.generation || s_supportFpGen != fpHands.generation || s_supportItem != supportItem || s_supportArmed != armedNow) {
         s_support3Gen = pl.generation; s_supportFpGen = fpHands.generation; s_supportItem = supportItem; s_supportArmed = armedNow;
         s_supportBlend = 0.0; s_blendKind = nofoot::kSupportNone;
@@ -11801,7 +11939,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const nofoot::SupportItem supportTargetKind = supportRequested ? supportKind : s_blendKind;
     bool supportCup = supportTargetKind != nofoot::kSupportNone && (supportRequested || s_supportBlend > 0.0);
     double supportGap = -1.0;
+    double supportCupGap = -1.0;
     bool supportTargetValid = false;
+    float supportCupTarget[16] = {}, supportCupRightPalm[16] = {};
+    bool supportCupCommandValid = false;
     float effectiveHand[2][16] = {};
     bool anatomyMapOk = false, handSideMapOk[2] = {false, false}, effectiveHandOk[2] = {false, false};
     uint8_t targetMode[2] = {};
@@ -11879,8 +12020,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 if (basisOk) {
                     float cupTarget[16], blendedTarget[16];
                     const bool cupTargetOk = nofoot::handRetarget(pl.hand[0].palm, I, leftPalm, I, cupTarget) && ikMatrixSane(cupTarget);
+                        if (cupTargetOk) {
+                            std::memcpy(supportCupTarget, leftPalm, sizeof(supportCupTarget));
+                            std::memcpy(supportCupRightPalm, rightPalm, sizeof(supportCupRightPalm));
+                            supportCupCommandValid = true;
+                            supportCupGap = contact.gap;
+                        }
                     if (cupTargetOk) {
-                        s_supportBlend = supportRequested ? std::min(1.0, s_supportBlend + supportStep) : std::max(0.0, s_supportBlend - supportStep);
+                        s_supportBlend = nofoot::supportCupBlendStep(s_supportBlend, supportRequested, cupTargetOk, supportStep);
                         if (s_supportBlend <= 0.0 && !supportRequested) s_blendKind = nofoot::kSupportNone;
                     }
                     if (cupTargetOk && nofoot::handBlendRigid(effectiveHand[0], cupTarget, s_supportBlend, blendedTarget) && ikMatrixSane(blendedTarget)) {
@@ -12625,6 +12772,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     float basePose[16], blended[16];
                     if (baseSourceSlot != 0xFFFFu && correctedLocal(0, baseSourceSlot, dstSlot, basePose) &&
                         nofoot::handBlendRigid(basePose, desired, s_supportBlend, blended)) std::memcpy(desired, blended, sizeof(desired));
+                    // The borrowed cup curl follows the same arm solve envelope as the wrist; do not curl fingers before the armed hand arrives.
+                    if (wSolve < 1.0) {
+                        float armBlended[16];
+                        if (nofoot::handBlendRigid(local3, desired, wSolve, armBlended)) std::memcpy(desired, armBlended, sizeof(desired));
+                    }
                 }
                 for (int c = 0; c < 3; ++c) desired[12 + c] = local3[12 + c];  // preserve target-rig segment lengths
                 nofoot::pfzMul(desired, g_ikOut[dstParent], g_ikOut[dstJoint]);
@@ -13193,8 +13345,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     if (armedNow && armsOk) {
         GripSample& r = gripSample;
         r.qpc = f30Qpc();
+        r.sampleMs = GetTickCount64();
         r.p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
-        r.itemSerial = g_heldItemSerial.load(std::memory_order_relaxed);
+        r.itemSerial = itemSerialForCall;
+        r.itemChangedMs = itemChangedMsForCall;
         r.fpFrame = s_fpMeta.frame;
         r.fpGeneration = s_fpMeta.seq >> 1;
         r.fpAgeMs = static_cast<uint32_t>(std::min<uint64_t>(fpAge, std::numeric_limits<uint32_t>::max()));
@@ -13203,6 +13357,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.armedFull = armedFull;
         r.offTwo = offOut.two;
         r.offW = static_cast<float>(offOut.w);
+        r.armedW = g_armedW.load(std::memory_order_relaxed);
+        r.authoredLeft = authoredLeftForCall;
+        r.supportValid = supportTargetValid;
+        r.supportBlend = static_cast<float>(s_supportBlend);
         const double sepV[3] = {static_cast<double>(fpm[1][12]) - fpm[0][12], static_cast<double>(fpm[1][13]) - fpm[0][13], static_cast<double>(fpm[1][14]) - fpm[0][14]};
         r.sep = static_cast<float>(nofoot::ikLen(sepV));
         for (int side = 0; side < 2; ++side) {
@@ -13228,6 +13386,16 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             const float* fpAttach = side == 0 ? fpm[1] : fpm[0];
             nofoot::pfzMul(fpAttach, G.g, attachFp);
             if (!ikMatrixSane(palmFp) || !ikMatrixSane(palm3p) || !ikMatrixSane(attachFp)) continue;
+            if (side == 0 && supportTargetValid && ikMatrixSane(effectiveHand[0])) {
+                float blendedPalm[16];
+                nofoot::pfzMul(pl.hand[0].palm, effectiveHand[0], blendedPalm);
+                if (ikMatrixSane(blendedPalm)) {
+                    for (int axis = 0; axis < 3; ++axis)
+                        r.blendedTargetDeltaMm[axis] = 1000.0f * (palm3p[12 + axis] - blendedPalm[12 + axis]);
+                    r.blendedTargetAngleDeg = static_cast<float>(nofoot::ikRotAngleDeg(palm3p, blendedPalm));
+                    r.blendedTargetDiagOk = true;
+                }
+            }
             const double palmDelta[3] = {palm3p[12] - palmFp[12], palm3p[13] - palmFp[13], palm3p[14] - palmFp[14]};
             const double attachDelta[3] = {aFinal[12] - attachFp[12], aFinal[13] - attachFp[13], aFinal[14] - attachFp[14]};
             for (int axis = 0; axis < 3; ++axis) {
@@ -13245,6 +13413,21 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.mapGeneration = fpHands.generation;
         r.mapWhy[0] = static_cast<uint8_t>(mapWhy[0]); r.mapWhy[1] = static_cast<uint8_t>(mapWhy[1]);
         r.supportGap = static_cast<float>(supportGap);
+        if (supportCupCommandValid && supportTargetValid) {
+            const double centreDelta[3] = {supportCupTarget[12] - supportCupRightPalm[12], supportCupTarget[13] - supportCupRightPalm[13], supportCupTarget[14] - supportCupRightPalm[14]};
+            for (int axis = 0; axis < 3; ++axis) {
+                const float* rightAxis = &supportCupRightPalm[axis * 4];
+                r.cupCentreMm[axis] = static_cast<float>(1000.0 * (centreDelta[0] * rightAxis[0] + centreDelta[1] * rightAxis[1] + centreDelta[2] * rightAxis[2]));
+                r.cupAxisDot[axis] = supportCupTarget[axis * 4] * rightAxis[0] + supportCupTarget[axis * 4 + 1] * rightAxis[1] + supportCupTarget[axis * 4 + 2] * rightAxis[2];
+            }
+            r.cupAngleDeg = static_cast<float>(nofoot::ikRotAngleDeg(supportCupTarget, supportCupRightPalm));
+            r.cupDimsMm[0] = static_cast<float>(pl.hand[1].width * 1000.0);
+            r.cupDimsMm[1] = static_cast<float>(pl.hand[1].length * 1000.0);
+            r.cupDimsMm[2] = static_cast<float>(pl.hand[1].skinRadius * 1000.0);
+            r.cupDimsMm[3] = static_cast<float>(pl.hand[0].skinRadius * 1000.0);
+            r.cupGapMm = static_cast<float>(supportCupGap * 1000.0);
+            r.cupDiagOk = true;
+        }
         gripPending = true;
     }
     // The writes, all matrices computed above: the solve's from g_ikOut (mark 4), the squared torso's from g_ikM0.
@@ -13255,7 +13438,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             return ikRefuse(kIkRefWrite);
         }
     }
-    if (gripPending) gripPost(gripSample);
+    if (gripPending && g_heldItemSerial.load(std::memory_order_acquire) == itemSerialForCall) gripPost(gripSample);
 }
 
 // The local X's post-hook: the shared span, then the pose freeze (its X and key), then the arm IK (its X and key) on the same span.
@@ -14081,9 +14264,20 @@ void gripPrint(int side, const nofoot::GripSteady& gs, const GripSample& r) noex
                       static_cast<double>(r.attachAngleDeg[side]), r.poseWritten[side] ? "arm solve written" : "arm solve not written");
     else
         std::snprintf(attachDiag, sizeof(attachDiag), "unavailable (final attach or palm frame unreadable; arm solve %s)", r.poseWritten[side] ? "written" : "not written");
-    Log::get().note("native on foot hand target (F70b): item \"%s\", %s hand, target %s; anatomy %s, generation %u; support %s (right-hand proxy gap %.1f mm)",
+    Log::get().note("native on foot hand target (F70b): item \"%s\", %s hand, target %s; anatomy %s, generation %u; support %s (commanded proxy gap %.1f mm; not skin clearance)",
                     nm, side == 0 ? "left" : "right", target, nofoot::handMapWhyText(static_cast<nofoot::HandMapWhy>(r.mapWhy[side])), r.mapGeneration, support,
                     1000.0 * static_cast<double>(r.supportGap));
+    if (side == 0 && r.cupDiagOk) {
+        Log::get().note("native on foot cup geometry (F74): commanded centre from right palm in its axes %+0.1f/%+0.1f/%+0.1f mm; cup/right axis dots %.3f/%.3f/%.3f, frame angle %.1f deg; dimensions used right width/length/radius %.1f/%.1f/%.1f mm, left radius %.1f mm, commanded proxy gap %.1f mm (not measured skin clearance); support blend %.2f",
+                        static_cast<double>(r.cupCentreMm[0]), static_cast<double>(r.cupCentreMm[1]), static_cast<double>(r.cupCentreMm[2]), static_cast<double>(r.cupAxisDot[0]),
+                        static_cast<double>(r.cupAxisDot[1]), static_cast<double>(r.cupAxisDot[2]), static_cast<double>(r.cupAngleDeg), static_cast<double>(r.cupDimsMm[0]),
+                        static_cast<double>(r.cupDimsMm[1]), static_cast<double>(r.cupDimsMm[2]), static_cast<double>(r.cupDimsMm[3]), static_cast<double>(r.cupGapMm),
+                        static_cast<double>(r.supportBlend));
+        if (r.blendedTargetDiagOk)
+            Log::get().note("native on foot cup target residual (F74): final solved left palm minus actual blended target in model axes %+0.1f/%+0.1f/%+0.1f mm, rotation %.2f deg; pose %s",
+                            static_cast<double>(r.blendedTargetDeltaMm[0]), static_cast<double>(r.blendedTargetDeltaMm[1]), static_cast<double>(r.blendedTargetDeltaMm[2]),
+                            static_cast<double>(r.blendedTargetAngleDeg), r.poseWritten[0] ? "written" : "not written");
+    }
     Log::get().note("native on foot grip (F69g): item \"%s\", %s hand, after %.1f s steady (%u samples): FP grip frame "
                     "(the attach in the FP hand's axes) %s; 3P grip frame "
                     "(the animation's L_A) %s; difference 3P x inv(FP) %s (identity = the same item frame in both rigs; the same for every item = a rig convention); wrist "
@@ -14100,7 +14294,33 @@ void gripTick() noexcept {
     const double dt = g_gripLastQpc && r.qpc > g_gripLastQpc && freq ? static_cast<double>(r.qpc - g_gripLastQpc) / static_cast<double>(freq) : 0.0;
     g_gripLastQpc = r.qpc;
     const uint32_t item = g_heldItemSerial.load(std::memory_order_relaxed);
-    if (item != r.itemSerial) return;   // do not attribute a pre-switch hook sample to the newly selected item
+    static uint32_t onsetItem = 0xFFFFFFFFu;
+    static bool onsetPending[2] = {true, true}, fullWeightReported[2] = {false, false};
+    if (onsetItem != item) {
+        onsetItem = item;
+        onsetPending[0] = onsetPending[1] = true;
+        fullWeightReported[0] = fullWeightReported[1] = false;
+    }
+    if (item != r.itemSerial) return;   // discard an old post-write sample after a Status item switch
+    for (int side = 0; side < 2; ++side) {
+        const bool authoredSelected = side == 0 && r.authoredLeft && r.sideOk[side] && !r.poseWritten[side];
+        const bool writtenTarget = r.sideOk[side] && r.poseWritten[side];
+        if (onsetPending[side] && (authoredSelected || writtenTarget) && r.itemChangedMs != 0 && r.sampleMs >= r.itemChangedMs) {
+            const char* const mode = authoredSelected ? "game-authored left arm selected" : r.targetMode[side] == 2 ? "support-cup target written" :
+                                     r.targetMode[side] == 1 ? "anatomical palm target written" : "legacy attach target written";
+            Log::get().note("native on foot grip onset (F74): item serial %u, %s hand, %s %.0f ms after Status item change; armed weight %.2f, off-hand weight %.2f (%s); support target %s, blend %.2f",
+                            r.itemSerial, side == 0 ? "left" : "right", mode, static_cast<double>(r.sampleMs - r.itemChangedMs), static_cast<double>(r.armedW),
+                            static_cast<double>(r.offW), r.offTwo ? "two-handed" : "one-handed", r.supportValid ? "valid" : "unavailable", static_cast<double>(r.supportBlend));
+            onsetPending[side] = false;   // consume this item/side onset only after a matching post-write sample
+        }
+        if (!fullWeightReported[side] && writtenTarget && r.armedW >= 0.99f) {
+            Log::get().note("native on foot grip onset (F74): item serial %u, %s hand reached full armed envelope %.2f at %.0f ms after Status item change; target %s, off-hand weight %.2f",
+                            r.itemSerial, side == 0 ? "left" : "right", static_cast<double>(r.armedW),
+                            r.itemChangedMs != 0 && r.sampleMs >= r.itemChangedMs ? static_cast<double>(r.sampleMs - r.itemChangedMs) : -1.0,
+                            r.targetMode[side] == 2 ? "support-cup" : r.targetMode[side] == 1 ? "anatomical palm" : "legacy attach", static_cast<double>(r.offW));
+            fullWeightReported[side] = true;
+        }
+    }
     for (int side = 0; side < 2; ++side) {
         const double at[3] = {static_cast<double>(r.fpAt[side][0]), static_cast<double>(r.fpAt[side][1]), static_cast<double>(r.fpAt[side][2])};
         if (g_gripSteady[side].step(r.itemSerial, r.armedFull && r.sideOk[side], dt, at, static_cast<double>(r.sep))) gripPrint(side, g_gripSteady[side], r);
@@ -19572,6 +19792,12 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
 }
 
 void nativeOnFootShutdown() {
+    // F74: the next runtime session must never inherit a published live view offset.
+    const double zeroShift[3] = {};
+    adsShiftPublish(zeroShift, zeroShift);
+    g_eyeAlignPub[0] = g_eyeAlignPub[1] = g_eyeAlignPub[2] = 0.0;
+    const float zeroEyeAlign[3] = {};
+    nativeFrameSetEyeAlign(zeroEyeAlign, ++g_align.serial);
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
     nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
     g_adsHookOn.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown

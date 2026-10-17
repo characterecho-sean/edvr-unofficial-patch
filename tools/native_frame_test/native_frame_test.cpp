@@ -2573,6 +2573,65 @@ int wmain(int argc, wchar_t** argv) {
                                          nf::pinBodyBendWeight(0.0) == 1.0 && nf::pinBodyBendWeight(0.5) == 0.5 && nf::pinBodyBendWeight(1.0) == 0.0;
                 check(adsDetachOk,
                       "F73: ADS body detachment blends the pin target from the head target to the same-call authored neck, leaves non-ADS unchanged, preserves reach in the bend target, and restores smoothly through release and repress");
+                // F74: LOCAL eye transport, current-view world right, and inverse-AMC model transport are separate bases.
+                const double zeroAxis[3] = {}, localYawRight[3] = {0.0, 0.0, -1.0}, viewRight[3] = {1.0, 0.0, 0.0};
+                double seatZero[3], seatYaw[3], worldRight[3], modelRight[3];
+                const bool zeroOffset = nf::weaponViewOffsetSeated(0.0, zeroAxis, seatZero);
+                const bool seatedYawOk = nf::weaponViewOffsetSeated(0.05, localYawRight, seatYaw);
+                const bool worldRightOk = nf::weaponViewOffsetWorld(0.05, viewRight, worldRight);
+                const float invAmcYaw[16] = {0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, -4, 7, 1};
+                nf::ikVectorXform(worldRight, invAmcYaw, modelRight);
+                double targetFromHead[3] = {0.10, 1.40, -0.20};
+                nf::weaponViewOffsetTarget(targetFromHead, modelRight);
+                const bool separateBasisOk = zeroOffset && seatZero[0] == 0.0 && seatZero[1] == 0.0 && seatZero[2] == 0.0 && seatedYawOk && worldRightOk &&
+                                             std::fabs(seatYaw[0]) < 1e-12 && std::fabs(seatYaw[1]) < 1e-12 && std::fabs(seatYaw[2] - 0.05) < 1e-12 &&
+                                             std::fabs(worldRight[0] - 0.05) < 1e-12 && std::fabs(worldRight[1]) < 1e-12 && std::fabs(worldRight[2]) < 1e-12 &&
+                                             std::fabs(modelRight[0]) < 1e-12 && std::fabs(modelRight[1]) < 1e-12 && std::fabs(modelRight[2] - 0.05) < 1e-12 &&
+                                             std::fabs(targetFromHead[0] - 0.10) < 1e-12 && std::fabs(targetFromHead[2] + 0.15) < 1e-12;
+                check(separateBasisOk, "F74: positive view offset uses LOCAL head-right for eye-origin motion, current stereo scene-right for world shift, and the inverse AMC's linear part for body axes; AMC translation is ignored");
+                const double opticP14[3] = {0.20, 0.0, 2.0}, sightForward[3] = {0.0, 0.0, 1.0}, identityRows[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                const double worldBias[3] = {0.05, 0.0, 0.0};
+                const double baselineEye[3] = {0.20, 0.0, 2.15}, shiftedEye[3] = {0.25, 0.0, 2.15};
+                double shiftedP14[3];
+                nf::weaponViewOffsetTargetPoint(opticP14, worldBias, shiftedP14);
+                nf::AdsSightErr baseEyeErr, shiftedEyeErr;
+                const bool adsBiasOk = nf::adsSightErrorEyeK(opticP14, baselineEye, sightForward, identityRows, 0.15, baseEyeErr) &&
+                                       nf::adsSightErrorEyeK(shiftedP14, shiftedEye, sightForward, identityRows, 0.15, shiftedEyeErr);
+                check(adsBiasOk && shiftedP14[0] == 0.25 && std::fabs(baseEyeErr.seatedFull[0] - shiftedEyeErr.seatedFull[0]) < 1e-12 &&
+                          std::fabs(baseEyeErr.seatedFull[1] - shiftedEyeErr.seatedFull[1]) < 1e-12 && std::fabs(baseEyeErr.seatedFull[2] - shiftedEyeErr.seatedFull[2]) < 1e-12,
+                      "F74: ADS feedback preserves its residual when eye and intended sight target carry the same deliberate world offset");
+                const double authored[3] = {-0.02, 1.48, 0.02};
+                const double detach[3] = {0.0, 0.5, 1.0};
+                bool detachOffsetOk = true;
+                for (double w : detach) {
+                    double target[3];
+                    nf::pinDetachTarget(headTarget, authored, w, target);
+                    nf::weaponViewOffsetTarget(target, modelRight);
+                    const double expectedX = headTarget[0] + (authored[0] - headTarget[0]) * w;
+                    const double expectedZ = headTarget[2] + (authored[2] - headTarget[2]) * w + 0.05;
+                    const nf::PinMove move = nf::pinMove(authored, target);
+                    const double landedX = authored[0] + move.th[0], landedZ = authored[2] + move.th[2];
+                    detachOffsetOk = detachOffsetOk && std::fabs(target[0] - expectedX) < 1e-12 && std::fabs(target[2] - expectedZ) < 1e-12 &&
+                                     std::fabs(landedX - expectedX) < 1e-12 && std::fabs(landedZ - expectedZ) < 1e-12;
+                }
+                check(detachOffsetOk, "F74: body pin keeps the same world-right offset before, during, and after ADS detachment");
+                // Repeated camera feedback: removing the published world bias before pinning keeps the requested offset from accumulating.
+                const double cameraBase[3] = {0.10, 1.40, -0.20};
+                double closedLoopBody[3] = {authored[0], authored[1], authored[2]};
+                bool closedLoopOk = true;
+                for (int frame = 0; frame < 4; ++frame) {
+                    const double cameraWithBias[3] = {cameraBase[0] + worldRight[0], cameraBase[1] + worldRight[1], cameraBase[2] + worldRight[2]};
+                    double unlocked[3] = {cameraWithBias[0] - worldRight[0], cameraWithBias[1] - worldRight[1], cameraWithBias[2] - worldRight[2]};
+                    double bodyTarget[3] = {authored[0] + modelRight[0], authored[1] + modelRight[1], authored[2] + modelRight[2]};
+                    const nf::PinMove move = nf::pinMove(closedLoopBody, bodyTarget);
+                    closedLoopBody[0] += move.th[0]; closedLoopBody[1] += move.delta; closedLoopBody[2] += move.th[2];
+                    closedLoopOk = closedLoopOk && std::fabs(unlocked[0] - cameraBase[0]) < 1e-12 && std::fabs(unlocked[1] - cameraBase[1]) < 1e-12 &&
+                                   std::fabs(unlocked[2] - cameraBase[2]) < 1e-12 && std::fabs(closedLoopBody[2] - (authored[2] + 0.05)) < 1e-12;
+                }
+                check(closedLoopOk, "F74: repeated camera feedback removes the published offset before body pinning, so the body reaches and holds one offset without accumulating it");
+                check(nf::weaponViewOffsetActive(true, true, 0.05) && !nf::weaponViewOffsetActive(true, false, 0.05) &&
+                          !nf::weaponViewOffsetActive(false, true, 0.05) && !nf::weaponViewOffsetActive(true, true, 0.0),
+                      "F74: view offset requires a nonzero setting, native body-pin scope, and an equipped item");
                 // (3) The legs. A leg with l1 = l2 = 0.45 m (the knee at 30 deg folds the hip -> foot to 0.233 m, 0.995 x 0.9 = 0.8955 m is the longest asked).
                 const double l1 = 0.45, l2 = 0.45, fb[3] = {0.0, 0.0, 1.0};
                 check(std::fabs(nf::legMinReach(l1, l2) - 2.0 * 0.45 * std::sin(15.0 * nf::kIkPi / 180.0)) < 1e-12, "F67c: the knee folds the leg to 2 l sin(15 deg) at the 30 deg interior angle");
@@ -3416,13 +3475,42 @@ int wmain(int argc, wchar_t** argv) {
                     check(nf::supportItem("$wpn_s_pistol_name;") == nf::kSupportPistol &&
                           nf::supportItem("$humanoid_rechargetool_name;") == nf::kSupportNone &&
                           nf::supportItem("$humanoid_companalyser_name;") == nf::kSupportNone &&
-                          nf::supportItem("$humanoid_repairtool_name;") == nf::kSupportTool &&
+                          nf::supportItem("$humanoid_repairtool_name;") == nf::kSupportNone &&
                           nf::supportItem("$wpn_rifle_name;") == nf::kSupportNone &&
                           nf::gameAuthoredLeftArm("$humanoid_rechargetool_name;") &&
                           nf::gameAuthoredLeftArm("$humanoid_companalyser_name;") &&
                           !nf::gameAuthoredLeftArm("$humanoid_repairtool_name;") &&
                           !nf::gameAuthoredLeftArm("$wpn_s_pistol_name;"),
-                          "F73: item classification relaxes Energy Link and Profile Analyser while preserving pistol, rifle and Arc Cutter behavior");
+                          "F73/F74: item classification relaxes Energy Link and Profile Analyser, keeps the pistol support cup, and leaves Arc Cutter on its authored left-handle pose");
+                    const double firstValidCup = nf::supportCupBlendStep(0.0, true, true, 1.0 / 30.0);
+                    const double invalidCup = nf::supportCupBlendStep(0.8, true, false, 1.0 / 30.0);
+                    const double releasedCup = nf::supportCupBlendStep(0.8, false, true, 0.05 / 0.15);
+                    check(firstValidCup == 1.0 && invalidCup == 0.0 && std::fabs(releasedCup - (0.8 - 0.05 / 0.15)) < 1e-12,
+                          "F74: a valid requested pistol cup is selected on its first sample, invalid geometry clears immediately, and a still-valid release keeps its existing 0.15 s fade");
+                    bool armEnvelopeOk = true;
+                    for (double armedWeight : {0.0, 0.5, 1.0}) {
+                        const double finalArmWeight = nf::ikArmedSolveWeight(true, armedWeight, 1.0) * firstValidCup;
+                        armEnvelopeOk = armEnvelopeOk && std::fabs(finalArmWeight - armedWeight) < 1e-12;
+                    }
+                    check(armEnvelopeOk,
+                          "F74: immediate cup selection leaves the existing whole-arm draw envelope at zero, mid-ramp, and full weight");
+                    float fingerBase[16], fingerCurl[16], fingerAt[16];
+                    nf::pfzIdentity(fingerBase);
+                    nf::pfzIdentity(fingerCurl);
+                    fingerCurl[0] = 0.0f; fingerCurl[1] = 1.0f; fingerCurl[4] = -1.0f; fingerCurl[5] = 0.0f;
+                    const auto maxRotationDelta = [](const float a[16], const float b[16]) {
+                        float delta = 0.0f;
+                        for (int r = 0; r < 3; ++r)
+                            for (int c = 0; c < 3; ++c) delta = std::max(delta, std::fabs(a[r * 4 + c] - b[r * 4 + c]));
+                        return delta;
+                    };
+                    const bool fingerZeroOk = nf::handBlendRigid(fingerBase, fingerCurl, 0.0, fingerAt) && maxRotationDelta(fingerAt, fingerBase) < 2e-7f;
+                    check(fingerZeroOk, "F74: cup-only borrowed finger curl preserves the authored pose at zero armed solve weight");
+                    const bool fingerHalfOk = nf::handBlendRigid(fingerBase, fingerCurl, 0.5, fingerAt) && fingerAt[1] > 0.0f &&
+                                              std::fabs(nf::ikRotAngleDeg(fingerAt, fingerBase) - 45.0) < 1e-4;
+                    check(fingerHalfOk, "F74: cup-only borrowed finger curl follows the positive 45-degree midpoint at half armed solve weight");
+                    const bool fingerFullOk = nf::handBlendRigid(fingerBase, fingerCurl, 1.0, fingerAt) && maxRotationDelta(fingerAt, fingerCurl) < 2e-7f;
+                    check(fingerFullOk, "F74: cup-only borrowed finger curl reaches the requested full pose within float matrix precision");
                 }
             }
             // F70: the ADS eye point (core parts): the target P14w + k f, the clearance cap, the feed-forward ramp, the body pinned to the unlocked head.
