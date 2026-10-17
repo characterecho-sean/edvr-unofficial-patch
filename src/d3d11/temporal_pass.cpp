@@ -1291,10 +1291,11 @@ struct EyeDecisionFrame {
 EyeDecisionFrame g_eyeDecisions[kEyeRun] = {};
 struct EyeMotionTrace {
     uint32_t frame, eye, flags, outputWidth, outputHeight;
-    bool rowsOk, jumped, dlHistory;
+    bool rowsOk, rowsValid, jumped, dlHistory;
     bool rowsBound;
     int rowsFollow;
     uint32_t sceneDraws;
+    uint64_t rowsQpc;
     float prevRows[12], nowRows[12];
     PassParams params;
     // The nearest body's planet-patch record (celestial_motion.h): records bound, bodies and patches the eye drew, patches matched to
@@ -1304,6 +1305,17 @@ struct EyeMotionTrace {
 };
 EyeMotionTrace g_eyeMotionTrace[kEyeRun * 4] = {};
 uint32_t g_eyeMotionTraceCount = 0;
+bool eyeMotionTraceFind(uint32_t sceneFrame, uint32_t eye, EyeMotionTrace* out) noexcept {
+    if (!out || eye > 1) return false;
+    const uint32_t count = g_eyeMotionTraceCount < kEyeRun * 4 ? g_eyeMotionTraceCount : kEyeRun * 4;
+    for (uint32_t i = count; i > 0; --i) {
+        const EyeMotionTrace& row = g_eyeMotionTrace[i - 1];
+        if (row.frame != sceneFrame || row.eye != eye) continue;
+        *out = row;
+        return true;
+    }
+    return false;
+}
 void writeEyeMotionTrace(const std::wstring& dir) {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_motion.csv", dir.c_str(), g_eyeRunStamp);
@@ -3994,8 +4006,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 t = {};
                 t.frame = g_rowsFrame; t.eye = eye; t.flags = flags;
                 t.outputWidth = outW ? outW : w; t.outputHeight = outH ? outH : h;
-                t.rowsOk = g_rowsDeltaOwn; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
+                t.rowsOk = g_rowsDeltaOwn; t.rowsValid = g_curValid; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
                 t.rowsBound = g_curRowsBound; t.rowsFollow = g_rowsFollow; t.sceneDraws = sceneDraws;
+                LARGE_INTEGER rowsQpc{};
+                QueryPerformanceCounter(&rowsQpc);
+                t.rowsQpc = static_cast<uint64_t>(rowsQpc.QuadPart);
                 t.celestialRecords = celestial.records; t.celestialBodies = celestial.bodies; t.celestialPatches = celestial.patches;
                 t.celestialMatched = celestial.matched; t.celestialRotDeg = static_cast<float>(celestial.rotationDeg);
                 t.celestialDistance = static_cast<float>(celestial.distance);
@@ -5140,17 +5155,26 @@ void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D*
     // An unmatched callback is evidence of a door/scene mismatch, not permission
     // to capture a different frame into the queued temporal slot.
     if(index<0){++g_eyeFinalRun.unmatched;return;}
+    auto sampleNativeOptic = [&](const char* status) {
+        float sceneRows[12] = {};
+        EyeMotionTrace sceneEye{};
+        const bool rowsRead = eyeMotionTraceFind(g_eyeFinalRun.rows[index].scene, 1, &sceneEye);
+        if (rowsRead) memcpy(sceneRows, sceneEye.nowRows, sizeof(sceneRows));
+        nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index), g_eyeFinalRun.rows[index].scene, g_eyeFinalRun.rows[index].renderFrame,
+                                       epoch, sequence, status, rowsRead, rowsRead && sceneEye.rowsValid, rowsRead && sceneEye.rowsOk,
+                                       rowsRead && sceneEye.rowsBound, rowsRead ? sceneEye.rowsFollow : -1,
+                                       rowsRead ? sceneEye.frame : ~uint32_t(0), rowsRead ? sceneEye.rowsQpc : 0, sceneRows);
+    };
     ID3D11Device* device=nullptr;ID3D11DeviceContext* ctx=nullptr;
     const bool ran=guarded("eye capture/final crisp",[&]{
         if(texture){texture->GetDevice(&device);if(device)device->GetImmediateContext(&ctx);}
         g_eyeFinalRun.capture(epoch,sequence,eye,ctx,texture,region,composite,flipU,flipV);
-        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,g_eyeFinalRun.rows[index].renderFrame,epoch,sequence,
-                                                  g_eyeFinalRun.rows[index].eye[eye].status);
+        if(eye==1)sampleNativeOptic(g_eyeFinalRun.rows[index].eye[eye].status);
         if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
     });
     if(!ran&&g_eyeFinalRun.armed){
         auto& image=g_eyeFinalRun.rows[index].eye[eye];image.sequence=sequence;image.status="capture_fault";
-        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,g_eyeFinalRun.rows[index].renderFrame,epoch,sequence,image.status);
+        if(eye==1)sampleNativeOptic(image.status);
     }
     if(g_eyeFinalRun.pendingOwner)guarded("eye capture/final pending owner release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingOwner);});
     if(g_eyeFinalRun.pendingDevice)guarded("eye capture/final pending device release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingDevice);});

@@ -1110,7 +1110,8 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
     return t;
 }
 // The swivel clamp: the elbow at least kIkElbowOutM out on the arm's side (out = +1 or -1: the sign of the clavicle's model x) and not above
-// the shoulder (E.y <= S.y). theta when it holds; else the nearest angle (5 degree steps) that holds; else the one with the least violation.
+// the shoulder (E.y <= S.y). Valid authored pistol support uses a separate body-down pole for the left elbow; the slider sets its starting
+// lateral angle and swivel trim is added. Other policies retain this clamp and its nearest-angle/least-violation fallback.
 // F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm). F59: measured from the arm's OWN shoulder,
 // out x (E.x - S.x) >= elbowOutM (default 6 cm), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
 inline double ikElbowOutOf(const double E[3], const double S[3], double out) noexcept { return out * (E[0] - S[0]); }
@@ -1284,6 +1285,92 @@ inline IkStableSwivel ikStableSwivel(const IkTwoBone& t, const IkPhysicalPole& p
     return result;
 }
 
+// F81: the authored left pistol elbow stays below the shoulder and points down/out in the 3P body frame.
+// This intentionally replaces only the old model-X half-space for that policy. The lateral basis is
+// axis x up: with the documented body axes (+Z forward, +Y up, -X left), it points left for a forward arm
+// and rotates continuously with the arm axis. `previousRadial` is consulted only when down projects to
+// a singular circle direction; head orientation never changes the non-singular preference.
+struct IkPistolDownSwivel {
+    bool ok = false, usedFallback = false, belowFeasible = false;
+    double theta = 0.0, violation = 0.0, axis[3] = {}, reference[3] = {}, radial[3] = {};
+};
+inline IkPistolDownSwivel ikPistolDownSwivel(const IkTwoBone& t, const double previousRadial[3], const double upIn[3],
+                                              double elbowOutM, double trimRad) noexcept {
+    IkPistolDownSwivel out;
+    if (!t.ok || !(t.h > 1e-6) || !std::isfinite(t.h) || !std::isfinite(t.a) || !std::isfinite(elbowOutM) ||
+        elbowOutM < 0.0 || !std::isfinite(trimRad)) return out;
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(t.S[i]) || !std::isfinite(t.dir[i]) || !std::isfinite(t.u[i]) || !std::isfinite(t.v[i])) return out;
+    double up[3];
+    if (!upIn || !std::isfinite(upIn[0]) || !std::isfinite(upIn[1]) || !std::isfinite(upIn[2]) || !ikUnit(upIn, up)) return out;
+    double down[3];
+    const double along = ikDot(up, t.dir);
+    for (int i = 0; i < 3; ++i) down[i] = -up[i] + along * t.dir[i];
+    const bool singularDown = !ikUnit(down, down);
+    if (singularDown) {
+        out.usedFallback = true;
+        bool havePrevious = false;
+        if (previousRadial) {
+            double p[3];
+            const double pa = ikDot(previousRadial, t.dir);
+            for (int i = 0; i < 3; ++i) p[i] = previousRadial[i] - pa * t.dir[i];
+            havePrevious = ikUnit(p, p);
+            if (havePrevious) std::memcpy(down, p, sizeof(down));
+        }
+        if (!havePrevious) {
+            // Deterministic body-left fallback for a vertical shoulder-to-hand axis.
+            const double left[3] = {-1.0, 0.0, 0.0};
+            const double la = ikDot(left, t.dir);
+            for (int i = 0; i < 3; ++i) down[i] = left[i] - la * t.dir[i];
+            if (!ikUnit(down, down)) return out;
+        }
+    }
+    double lateral[3] = {};
+    if (singularDown) {
+        // At singularity the previous radial is already the physical continuity choice. Do not
+        // reapply trim on every call, which would rotate a stationary elbow indefinitely.
+        if (previousRadial && ikDot(previousRadial, previousRadial) > 1e-12) {
+            double p[3];
+            const double pa = ikDot(previousRadial, t.dir);
+            for (int i = 0; i < 3; ++i) p[i] = previousRadial[i] - pa * t.dir[i];
+            if (ikUnit(p, p)) std::memcpy(down, p, sizeof(down));
+        }
+    } else {
+        ikCross(t.dir, up, lateral); // fixed + chirality in the documented body basis.
+        if (!ikUnit(lateral, lateral)) return out;
+    }
+    double beta = std::asin(std::max(0.0, std::min(1.0, elbowOutM / t.h))) + trimRad;
+    beta = std::max(-0.5 * kIkPi, std::min(0.5 * kIkPi, beta));
+    const double center[3] = {t.S[0] + t.dir[0] * t.a, t.S[1] + t.dir[1] * t.a, t.S[2] + t.dir[2] * t.a};
+    const double centerUp = ikDot(center, up) - ikDot(t.S, up);
+    const double downUp = ikDot(down, up);
+    if (!singularDown && centerUp > 0.0) {
+        if (downUp < -1e-9) {
+            const double ratio = centerUp / (-t.h * downUp);
+            if (ratio <= 1.0) {
+                const double betaMax = std::acos(std::max(0.0, std::min(1.0, ratio)));
+                beta = std::max(-betaMax, std::min(betaMax, beta));
+                out.belowFeasible = true;
+            } else {
+                beta = 0.0; // no down-facing radial can clear the shoulder; minimize height without inventing reach.
+            }
+        } else {
+            beta = 0.0;
+        }
+    } else if (!singularDown) out.belowFeasible = true;
+    if (singularDown) std::memcpy(out.radial, down, sizeof(out.radial));
+    else for (int i = 0; i < 3; ++i) out.radial[i] = std::cos(beta) * down[i] + std::sin(beta) * lateral[i];
+    if (!ikUnit(out.radial, out.radial)) return IkPistolDownSwivel{};
+    double elbow[3];
+    for (int i = 0; i < 3; ++i) elbow[i] = center[i] + t.h * out.radial[i];
+    out.theta = t.angleOf(out.radial);
+    out.violation = std::max(0.0, ikDot(elbow, up) - ikDot(t.S, up));
+    out.belowFeasible = out.violation <= 1e-9;
+    std::memcpy(out.axis, t.dir, sizeof(out.axis));
+    std::memcpy(out.reference, out.radial, sizeof(out.reference));
+    out.ok = std::isfinite(out.theta) && std::isfinite(out.violation);
+    return out;
+}
+
 // F76 diagnostic-only bounded capture. Its thresholds select log samples and never feed pose behavior.
 constexpr double kIkPoseDeviationAngleDeg = 20.0;
 constexpr double kIkPoseDeviationPositionM = 0.05;
@@ -1301,7 +1388,7 @@ struct IkPoseDeviationSample {
     bool offDuplicate = false, offGapReset = false, offIdentityReset = false, offReversed = false;
     bool leftWrote = false, rightWrote = false, leftStablePolicy = false, authoredPistolSupport = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
     uint8_t targetMode[2] = {}, leftReason = 0, offHistorySamples = 0;
-    bool valid[2] = {}, radialValid[2] = {};
+    bool valid[2] = {}, radialValid[2] = {}, outwardWaived[2] = {};
     double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
     double preferred[2][3] = {}, axis[2][3] = {}, radial[2][3] = {};
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};

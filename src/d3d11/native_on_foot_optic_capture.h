@@ -11,6 +11,33 @@ namespace edvr::nofoot::optic_capture {
 constexpr uint32_t kCount = 16;
 
 enum class SourceState : uint8_t { Unsampled, Matched, Inactive, Missing, Stale, Future, Invalid, Unmatched };
+enum class PoseState : uint8_t { Unrequested, Matched, Missing, Stale, Future, IdentityMismatch, FrameMismatch, NoWrite, Invalid };
+enum class SceneEyeState : uint8_t { Unrequested, Matched, NotOwn, Missing, Stale, Future, Invalid };
+constexpr uint32_t kUiRowsPerEye = 16;
+inline bool uiTraceMatches(uint32_t rowRenderFrame, uint32_t rowItemSerial, bool itemRead,
+                           uint32_t expectedRenderFrame, uint32_t expectedItemSerial) noexcept {
+    return itemRead && expectedRenderFrame != 0 && expectedItemSerial != 0 && rowRenderFrame == expectedRenderFrame && rowItemSerial == expectedItemSerial;
+}
+
+struct PoseKey {
+    uint32_t renderFrame = ~uint32_t(0), hookRenderFrame = ~uint32_t(0), rootReadFrame = ~uint32_t(0), fpSequence = 0, gGameFrame = ~uint32_t(0), itemSerial = 0, rigGeneration = 0;
+    uint64_t rig = 0, qpc = 0;
+};
+
+inline PoseState poseJoinState(bool found, const PoseKey& pose, const PoseKey& source, uint32_t expectedRenderFrame,
+                               uint64_t sampleQpc, uint64_t maxAgeQpc, bool wrote, bool finite) noexcept {
+    if (!found) return PoseState::Missing;
+    if (pose.renderFrame != expectedRenderFrame || pose.hookRenderFrame != expectedRenderFrame || pose.rootReadFrame != expectedRenderFrame || source.rootReadFrame != expectedRenderFrame ||
+        pose.fpSequence != source.fpSequence || pose.gGameFrame != source.gGameFrame)
+        return PoseState::FrameMismatch;
+    if (pose.itemSerial != source.itemSerial || pose.rig != source.rig || pose.rigGeneration != source.rigGeneration)
+        return PoseState::IdentityMismatch;
+    if (!pose.qpc || !sampleQpc) return PoseState::Invalid;
+    if (pose.qpc > sampleQpc) return PoseState::Future;
+    if (sampleQpc - pose.qpc > maxAgeQpc) return PoseState::Stale;
+    if (!wrote) return PoseState::NoWrite;
+    return finite ? PoseState::Matched : PoseState::Invalid;
+}
 
 struct RowDescriptor {
     bool scheduled = false;
@@ -44,6 +71,42 @@ struct Record {
     char itemName[64] = "";
     float p14Model[3] = {}, p14World[3] = {}, p14Basis[9] = {}, rootForward[3] = {};
     float eyeRows[16] = {}, eyeOrigin[4] = {};
+    SceneEyeState sceneEyeState = SceneEyeState::Unrequested;
+    bool sceneEyeRowsRead = false, sceneEyeRowsOk = false, sceneEyeRowsOwn = false, sceneEyeRowsBound = false;
+    uint32_t sceneEyeFrame = ~0u;
+    int32_t sceneEyeFollow = -1;
+    uint64_t sceneEyeQpc = 0;
+    float sceneEyeRows[12] = {};
+    PoseState poseState = PoseState::Unrequested;
+    PoseKey poseKey{}, poseSourceKey{};
+    uint32_t posePlanGeneration = 0, poseWriteMask = 0;
+    uint64_t poseQpc = 0, poseFpQpc = 0, poseGQpc = 0;
+    bool posePinValid = false, poseEyeCalHave = false, poseEyeCalAxesValid = false, poseMatricesValid = false;
+    bool poseRawMatricesValid = false, posePinEyeCalValid = false, poseWriteFresh = false;
+    float poseArm[2][4][3] = {}; // actual shoulder, elbow, hand and target; model coordinates, metres.
+    float poseRawTorso[3][16] = {}; // input AMC joints 24 chest, 34 neck and 44 head.
+    float poseFinalTorso[4][16] = {}; // after-write joints 24 chest, 34 neck, 35/36 clavicles.
+    float poseRoot[16] = {}, poseM3p[16] = {}, poseFroot[16] = {}, poseBodyOffset[3] = {};
+    float posePinEyeTarget[3] = {}, posePinTarget[3] = {}, posePinNeckBefore[3] = {}, posePinEyeLocal[3] = {};
+    float poseEyeCalibration[3] = {};
+    float poseEyeAxes[4] = {}; // f axis/sign, up axis/sign from the standing PinEyeCal.
+    float poseCrouchWeight = 0.0f, posePinDetach = 0.0f, poseReachCandidate[3] = {}, poseReachApplied[3] = {};
+    float poseClearance[6][3] = {};
+    uint8_t poseClearanceHave = 0, poseClearanceInside = 0, poseReachFlags = 0;
+    uint32_t poseRigGeneration = 0;
+    uint64_t poseRig = 0, posePlanX = 0;
+    uint8_t uiCount = 0;
+    uint32_t uiDropped = 0;
+    struct UiSnapshot {
+        bool valid = false, itemRead = false, fresh = false, fieldsValid = false, instanceValid = false, distanceScale = false, cameraAvailable = false, attachmentAvailable = false;
+        uint32_t renderFrame = 0, itemSerial = 0;
+        uint64_t qpc = 0;
+        uint16_t nameId = 0;
+        uint8_t facing = 0;
+        int32_t space = 0;
+        float width = 0.0f, height = 0.0f, pixelOffset[2] = {}, anchor[2] = {}, baseScale = 0.0f, instanceScale = 0.0f;
+        float instance[16] = {};
+    } ui[kUiRowsPerEye] = {};
 };
 
 inline bool sourceFramesMatchRender(uint32_t renderFrame, uint32_t fpFrame, uint32_t rootReadFrame, uint32_t eyeFrame, uint32_t adsFrame) noexcept {

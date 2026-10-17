@@ -1801,8 +1801,65 @@ using F9Fn6 = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t, uint64_t, 
 using F9Fn3 = uint64_t(__fastcall*)(void*, void*, void*);
 
 // Weapon UI proof: the AR renderer is scoped only around its original call; submit callbacks copy scalars and never retain game pointers.
+uint64_t f30Qpc() noexcept;
+bool opticItemRead(uint32_t* serial, char name[64]) noexcept;
 thread_local uintptr_t g_weaponUiRendererTls = 0;
-struct WeaponUiPartSample { uint16_t nameId = 0; uint8_t facing = 0; int32_t space = 0; };
+using WeaponUiTraceRow = nofoot::optic_capture::Record::UiSnapshot;
+struct WeaponUiPartSample {
+    uint16_t nameId = 0; uint8_t facing = 0, distanceScale = 0; int32_t space = 0;
+    bool fieldsValid = false, instanceValid = false;
+    uint32_t renderFrame = 0, itemSerial = 0;
+    uint64_t qpc = 0;
+    float width = 0.0f, height = 0.0f, pixelOffset[2] = {}, anchor[2] = {}, baseScale = 0.0f, instanceScale = 0.0f;
+    float instance[16] = {};
+};
+struct WeaponUiTraceSlot { std::atomic<uint32_t> seq{0}; uint32_t ordinal = ~0u; WeaponUiPartSample row{}; };
+constexpr uint32_t kWeaponUiTraceRows = 128;
+WeaponUiTraceSlot g_weaponUiTrace[kWeaponUiTraceRows];
+std::atomic<uint32_t> g_weaponUiTraceHead{0};
+void weaponUiTracePost(const WeaponUiPartSample& row) noexcept {
+    const uint32_t n = g_weaponUiTraceHead.fetch_add(1, std::memory_order_relaxed);
+    WeaponUiTraceSlot& slot = g_weaponUiTrace[n % kWeaponUiTraceRows];
+    slot.seq.fetch_add(1, std::memory_order_acq_rel);
+    slot.ordinal = n;
+    slot.row = row;
+    slot.seq.fetch_add(1, std::memory_order_release);
+}
+uint32_t weaponUiTraceRead(uint32_t renderFrame, uint32_t itemSerial, uint64_t nowQpc, uint64_t maxAgeQpc,
+                           WeaponUiTraceRow* out, uint32_t cap, uint32_t* dropped) noexcept {
+    if (!renderFrame || !itemSerial || !out || !cap) { if (dropped) *dropped = 0; return 0; }
+    const uint32_t head = g_weaponUiTraceHead.load(std::memory_order_acquire);
+    const uint32_t begin = head > kWeaponUiTraceRows ? head - kWeaponUiTraceRows : 0;
+    uint32_t count = 0, lost = 0;
+    for (uint32_t n = begin; n < head; ++n) {
+        const WeaponUiTraceSlot& slot = g_weaponUiTrace[n % kWeaponUiTraceRows];
+        const uint32_t s1 = slot.seq.load(std::memory_order_acquire);
+        if (!s1 || (s1 & 1u) || slot.ordinal != n) { ++lost; continue; }
+        const WeaponUiPartSample row = slot.row;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slot.seq.load(std::memory_order_relaxed) != s1 || slot.ordinal != n) { ++lost; continue; }
+        if (!nofoot::optic_capture::uiTraceMatches(row.renderFrame, row.itemSerial, row.itemSerial != 0, renderFrame, itemSerial)) continue;
+        if (count < cap) {
+            WeaponUiTraceRow& dst = out[count++];
+            dst.fresh = row.qpc && row.qpc <= nowQpc && nowQpc - row.qpc <= maxAgeQpc;
+            dst.fieldsValid = row.fieldsValid;
+            dst.instanceValid = row.instanceValid;
+            dst.valid = dst.fresh && dst.fieldsValid && dst.instanceValid;
+            dst.itemRead = true;
+            dst.distanceScale = row.distanceScale != 0;
+            dst.cameraAvailable = false; dst.attachmentAvailable = false;
+            dst.renderFrame = row.renderFrame; dst.itemSerial = row.itemSerial; dst.qpc = row.qpc;
+            dst.nameId = row.nameId; dst.facing = row.facing; dst.space = row.space;
+            dst.width = row.width; dst.height = row.height;
+            std::memcpy(dst.pixelOffset, row.pixelOffset, sizeof(dst.pixelOffset));
+            std::memcpy(dst.anchor, row.anchor, sizeof(dst.anchor));
+            dst.baseScale = row.baseScale; dst.instanceScale = row.instanceScale;
+            std::memcpy(dst.instance, row.instance, sizeof(dst.instance));
+        } else ++lost;
+    }
+    if (dropped) *dropped = lost;
+    return count;
+}
 enum WeaponUiPartRead : int { kWeaponUiPartRefused = -1, kWeaponUiPartUnmatched = 0, kWeaponUiPartMatched = 1 };
 std::atomic<uint64_t> g_weaponUiFlag0{0}, g_weaponUiFlag1{0}, g_weaponUiUnmatched{0}, g_weaponUiNoTls{0}, g_weaponUiRefused{0};
 std::atomic<uint64_t> g_weaponUiPatchActiveEvents{0}, g_weaponUiPatchRestoreEvents{0};
@@ -1846,8 +1903,22 @@ WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPa
         if (!guardedRead(entry + 0xD8, &cachedInst, sizeof(cachedInst))) return kWeaponUiPartRefused;
         if (cachedInst != inst) continue;
         if (!guardedRead(entry, &out.nameId, sizeof(out.nameId)) || !guardedRead(entry + 0x38, &out.facing, sizeof(out.facing)) ||
-            !guardedRead(entry + 0xE0, &out.space, sizeof(out.space))) return kWeaponUiPartRefused;
-        if (out.facing > 1) return kWeaponUiPartRefused;
+            !guardedRead(entry + 0x39, &out.distanceScale, sizeof(out.distanceScale)) || !guardedRead(entry + 0xE0, &out.space, sizeof(out.space)) ||
+            !weaponUiReadAt(entry, 0x44, &out.width, sizeof(out.width)) || !weaponUiReadAt(entry, 0x48, &out.height, sizeof(out.height)) ||
+            !weaponUiReadAt(entry, 0x2C, &out.pixelOffset[0], sizeof(out.pixelOffset[0])) || !weaponUiReadAt(entry, 0x30, &out.pixelOffset[1], sizeof(out.pixelOffset[1])) ||
+            !weaponUiReadAt(entry, 0x4C, &out.anchor[0], sizeof(out.anchor[0])) || !weaponUiReadAt(entry, 0x50, &out.anchor[1], sizeof(out.anchor[1])) ||
+            !weaponUiReadAt(entry, 0x54, &out.baseScale, sizeof(out.baseScale))) return kWeaponUiPartRefused;
+        if (out.facing > 1 || out.distanceScale > 1) return kWeaponUiPartRefused;
+        out.fieldsValid = std::isfinite(out.width) && std::isfinite(out.height) && std::isfinite(out.pixelOffset[0]) && std::isfinite(out.pixelOffset[1]) &&
+                          std::isfinite(out.anchor[0]) && std::isfinite(out.anchor[1]) && std::isfinite(out.baseScale);
+        out.instanceValid = weaponUiReadAt(inst, 0x10, out.instance, sizeof(out.instance)) && weaponUiReadAt(inst, 0x50, &out.instanceScale, sizeof(out.instanceScale)) &&
+                            std::isfinite(out.instanceScale);
+        for (float v : out.instance) out.instanceValid = out.instanceValid && std::isfinite(v);
+        out.renderFrame = nativeOnFootRenderFrame();
+        out.qpc = f30Qpc();
+        char itemName[64] = {};
+        const bool itemOk = opticItemRead(&out.itemSerial, itemName);
+        if (!itemOk) out.itemSerial = 0;
         return kWeaponUiPartMatched;
     }
     return kWeaponUiPartUnmatched;
@@ -1863,6 +1934,7 @@ void weaponUiObserveSubmit(uintptr_t inst, uint32_t callerRva) noexcept {
     if (result == kWeaponUiPartRefused) { g_weaponUiRefused.fetch_add(1, std::memory_order_relaxed); return; }
     if (sample.facing) g_weaponUiFlag1.fetch_add(1, std::memory_order_relaxed);
     else g_weaponUiFlag0.fetch_add(1, std::memory_order_relaxed);
+    weaponUiTracePost(sample);
     while (g_weaponUiRowsLock.test_and_set(std::memory_order_acquire)) _mm_pause();
     WeaponUiCounterRow* free = nullptr;
     for (auto& row : g_weaponUiRows) {
@@ -10778,6 +10850,8 @@ struct PinCall {
     bool feetHighPre = false, clrOk = false, clrInside = false;
     double clr[6][3] = {};
     bool clrHave[6] = {};
+    bool inputJointsValid = false;
+    float inputJoints[3][16] = {}; // incoming model matrices at pin entry: chest 24, neck 34, head 44.
 };
 alignas(16) float g_pinOut[nofoot::kPfzMaxJoints][16];
 // The speed state of the AMC, from successive P1 inputs (the hook's; one writer): a 0.15 s low-pass of the horizontal speed, the vertical speed.
@@ -10801,6 +10875,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                const float (*handTarget)[16], double wSqRamp, double sqAmount, const nofoot::BarrelDirs& bd, bool sqArmed, double offW, PinCall& pc) noexcept {
     const uint32_t count = sp.count;
     if (count <= 44 || count <= nofoot::kIkSquarePivot) return true;
+    pc.inputJointsValid = guardedRead(static_cast<uintptr_t>(sp.buf + 24u * 64u), pc.inputJoints[0], sizeof(pc.inputJoints[0])) &&
+                          guardedRead(static_cast<uintptr_t>(sp.buf + 34u * 64u), pc.inputJoints[1], sizeof(pc.inputJoints[1])) &&
+                          guardedRead(static_cast<uintptr_t>(sp.buf + 44u * 64u), pc.inputJoints[2], sizeof(pc.inputJoints[2]));
+    if (pc.inputJointsValid) for (const auto& matrix : pc.inputJoints) pc.inputJointsValid = ikMatrixSane(matrix) && pc.inputJointsValid;
     PinIn in;
     uint32_t refusal = kPinRefKinds;
     float invM[16] = {};
@@ -11750,6 +11828,58 @@ bool poseDeviationCopy(uint32_t index, nofoot::IkPoseDeviationRecord* out) noexc
     }
     return false;
 }
+// F81: independent after-write snapshots for exact synchronized optic epochs. This ring is not subject to pose-event caps.
+struct F81PoseCaptureSlot { std::atomic<uint32_t> seq{0}; uint32_t ordinal = ~0u; nofoot::optic_capture::Record row{}; };
+constexpr uint32_t kF81PoseCaptureRows = 64;
+F81PoseCaptureSlot g_f81PoseCapture[kF81PoseCaptureRows];
+std::atomic<uint32_t> g_f81PoseCaptureHead{0};
+void f81PoseCapturePost(const nofoot::optic_capture::Record& row) noexcept {
+    const uint32_t n = g_f81PoseCaptureHead.fetch_add(1, std::memory_order_relaxed);
+    F81PoseCaptureSlot& slot = g_f81PoseCapture[n % kF81PoseCaptureRows];
+    slot.seq.fetch_add(1, std::memory_order_acq_rel);
+    slot.ordinal = n;
+    slot.row = row;
+    slot.seq.fetch_add(1, std::memory_order_release);
+}
+bool f81PoseCaptureCopy(uint32_t n, nofoot::optic_capture::Record* out) noexcept {
+    const F81PoseCaptureSlot& slot = g_f81PoseCapture[n % kF81PoseCaptureRows];
+    const uint32_t s1 = slot.seq.load(std::memory_order_acquire);
+    if (!s1 || (s1 & 1u) || slot.ordinal != n) return false;
+    *out = slot.row;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return slot.seq.load(std::memory_order_relaxed) == s1 && slot.ordinal == n;
+}
+bool f81PoseCaptureFind(const nofoot::optic_capture::PoseKey& source, uint32_t expectedRender,
+                        uint64_t sampleQpc, uint64_t maxAgeQpc, nofoot::optic_capture::Record* out,
+                        nofoot::optic_capture::PoseState* state) noexcept {
+    using namespace nofoot::optic_capture;
+    if (!out || !state || !source.fpSequence || source.gGameFrame == ~uint32_t(0)) { if (state) *state = PoseState::Missing; return false; }
+    const uint32_t head = g_f81PoseCaptureHead.load(std::memory_order_acquire);
+    const uint32_t begin = head > kF81PoseCaptureRows ? head - kF81PoseCaptureRows : 0;
+    bool found = false;
+    Record candidate{};
+    for (uint32_t n = head; n > begin; ) {
+        --n;
+        Record row;
+        if (!f81PoseCaptureCopy(n, &row)) continue;
+        if (row.poseKey.fpSequence != source.fpSequence || row.poseKey.gGameFrame != source.gGameFrame) continue;
+        candidate = row;
+        found = true;
+        break;
+    }
+    if (!found) { *state = PoseState::Missing; return false; }
+    *out = candidate;
+    const bool wrote = candidate.poseWriteMask != 0;
+    const bool finite = candidate.poseMatricesValid && candidate.poseRawMatricesValid;
+    *state = poseJoinState(true, candidate.poseKey, source, expectedRender, sampleQpc, maxAgeQpc, wrote && candidate.poseWriteFresh, finite);
+    const uint64_t sourceStamps[] = {candidate.poseFpQpc, candidate.poseGQpc};
+    for (uint64_t stamp : sourceStamps) {
+        if (!stamp || !candidate.poseQpc) { *state = PoseState::Invalid; break; }
+        if (stamp > candidate.poseQpc || candidate.poseQpc > sampleQpc) { *state = PoseState::Future; break; }
+        if (candidate.poseQpc - stamp > maxAgeQpc || sampleQpc - candidate.poseQpc > maxAgeQpc) { *state = PoseState::Stale; break; }
+    }
+    return true;
+}
 void poseDeviationDrain() noexcept {
     static uint32_t printed = 0, lastEvent = 0;
     static uint64_t lastSummaryMs = 0;
@@ -11780,10 +11910,11 @@ void poseDeviationDrain() noexcept {
                 }
                 const double* S = r.sample.shoulder[side]; const double* E = r.sample.elbow[side]; const double* H = r.sample.hand[side]; const double* T = r.sample.target[side];
                 const double* P = r.sample.preferred[side]; const double* A = r.sample.axis[side]; const double* R = r.sample.radial[side];
-                Log::get().note("armed pose deviation (F76) event %u offset %+d frame %u %s%s: S %.3f/%.3f/%.3f E %.3f/%.3f/%.3f H %.3f/%.3f/%.3f target %.3f/%.3f/%.3f; pole %.3f/%.3f/%.3f axis %.3f/%.3f/%.3f radial %s%.3f/%.3f/%.3f; weight %.3f constraint %.2f cm; outSign %.0f actual/required %.2f/%.2f cm; dt %.1f ms FP/G ages %u/%u item %u rig %u",
+                Log::get().note("armed pose deviation (F76) event %u offset %+d frame %u %s%s: S %.3f/%.3f/%.3f E %.3f/%.3f/%.3f H %.3f/%.3f/%.3f target %.3f/%.3f/%.3f; pole %.3f/%.3f/%.3f axis %.3f/%.3f/%.3f radial %s%.3f/%.3f/%.3f; weight %.3f constraint %.2f cm; outSign %.0f actual/required %.2f/%.2f cm; model-X %s; dt %.1f ms FP/G ages %u/%u item %u rig %u",
                                 r.event, static_cast<int>(r.offset), r.sample.frame, label, r.invalid ? " invalid-gap/reset" : "", S[0], S[1], S[2], E[0], E[1], E[2], H[0], H[1], H[2], T[0], T[1], T[2],
                                 P[0], P[1], P[2], A[0], A[1], A[2], r.sample.radialValid[side] ? "" : "unavailable ", R[0], R[1], R[2], r.sample.weight[side],
                                 r.sample.violationM[side] * 100.0, r.sample.outSign[side], r.sample.actualOutM[side] * 100.0, r.sample.requiredOutM[side] * 100.0,
+                                r.sample.outwardWaived[side] ? "waived by pistol-down policy" : "enforced",
                                 static_cast<double>(r.sample.dtMs), r.sample.fpAgeMs, r.sample.gAgeMs, r.sample.item, r.sample.generation);
             }
             Log::get().note("armed pose policy (F80) event %u offset %+d frame %u item %u rig %u FP rig %llX/%u: offhand input %s close %s steady %s history %u raw-qualified %s attachment %s raw-stable %s authored-pistol %s selected-stable %s allowed %s distance %.1f cm change %.2f deg raw/effective/left weight %.3f/%.3f/%.3f; frame duplicate/gap/identity/reversed %s/%s/%s/%s; left wrote %s reason %s right wrote %s final shoulder %+.3f/%+.3f/%+.3f m; support requested/valid/blend %s/%s/%.3f targets %u/%u; reach measured/active/infeasible/rejected %s/%s/%s/%s radii L/R %.1f/%.1f cm candidate R/U/F %.1f/%.1f/%.1f cm applied R/U/F %.1f/%.1f/%.1f cm",
@@ -12044,7 +12175,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         double wristImprovement = 0.0;
         bool swivelDiagnostic = false, swivelHadPrevious = false, swivelFallback = false, swivelMinViolation = false;
         double swivelChosenDeg = 0.0, swivelReferenceDeg = 0.0, swivelWristSwingDeg = 0.0, swivelViolationCm = 0.0;
-        bool physicalPoleStable = false, poseRadialValid = false;
+        bool physicalPoleStable = false, poseRadialValid = false, poseOutWaived = false;
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -12725,21 +12856,40 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 std::memcpy(seed.axis, tb.dir, sizeof(seed.axis));
                 seed.valid = true;
             }
-            const nofoot::IkStableSwivel stable = nofoot::ikStableSwivel(tb, seed, outSign, elbowOutM);
-            if (!stable.ok) {
-                nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
-                ikRefuse(kIkRefSingular);
-                continue;
+            if (side == 0 && authoredPistolSupport) {
+                const double bodyUp[3] = {0.0, 1.0, 0.0};
+                const nofoot::IkPistolDownSwivel stable = nofoot::ikPistolDownSwivel(tb, seed.valid ? seed.previous : nullptr, bodyUp, elbowOutM, trimRad);
+                if (!stable.ok) {
+                    nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+                    ikRefuse(kIkRefSingular);
+                    continue;
+                }
+                stablePoleFallback = stable.usedFallback;
+                o.physicalPoleStable = true;
+                o.poseOutWaived = true;
+                theta = wSolve * nofoot::ikWrapPi(stable.theta);
+                stablePoleReferenceTheta = tb.angleOf(stable.reference);
+                physicalPoleCommit[side] = seed;
+                std::memcpy(physicalPoleCommit[side].axis, stable.axis, sizeof(stable.axis));
+                std::memcpy(physicalPoleCommit[side].reference, stable.reference, sizeof(stable.reference));
+                physicalPoleCommitValid[side] = nofoot::ikElbowRadial(tb, theta, physicalPoleCommit[side].previous);
+            } else {
+                const nofoot::IkStableSwivel stable = nofoot::ikStableSwivel(tb, seed, outSign, elbowOutM);
+                if (!stable.ok) {
+                    nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+                    ikRefuse(kIkRefSingular);
+                    continue;
+                }
+                stablePoleFallback = stable.usedFallback;
+                o.physicalPoleStable = true;
+                // Keep the authored-pose acquisition ramp; at weight 1 this is the transported physical pole's exact solution.
+                theta = wSolve * nofoot::ikWrapPi(stable.theta);
+                if (stable.transportedReference) stablePoleReferenceTheta = tb.angleOf(stable.reference);
+                physicalPoleCommit[side] = seed;
+                std::memcpy(physicalPoleCommit[side].axis, stable.axis, sizeof(stable.axis));
+                std::memcpy(physicalPoleCommit[side].reference, stable.reference, sizeof(stable.reference));
+                physicalPoleCommitValid[side] = nofoot::ikElbowRadial(tb, theta, physicalPoleCommit[side].previous);
             }
-            stablePoleFallback = stable.usedFallback;
-            o.physicalPoleStable = true;
-            // Keep the authored-pose acquisition ramp; at weight 1 this is the transported physical pole's exact solution.
-            theta = wSolve * nofoot::ikWrapPi(stable.theta);
-            if (stable.transportedReference) stablePoleReferenceTheta = tb.angleOf(stable.reference);
-            physicalPoleCommit[side] = seed;
-            std::memcpy(physicalPoleCommit[side].axis, stable.axis, sizeof(stable.axis));
-            std::memcpy(physicalPoleCommit[side].reference, stable.reference, sizeof(stable.reference));
-            physicalPoleCommitValid[side] = nofoot::ikElbowRadial(tb, theta, physicalPoleCommit[side].previous);
         }
         double E[3];
         tb.elbowAt(theta, E);
@@ -12843,7 +12993,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 bestTheta = theta;
                 std::memcpy(bestE, E, sizeof(bestE));
                 bestHs = hs;
-                bestViolation = std::max(0.0, elbowOutM - nofoot::ikElbowOutOf(E, tb.S, outSign)) + std::max(0.0, E[1] - tb.S[1]);
+                bestViolation = (o.poseOutWaived ? 0.0 : std::max(0.0, elbowOutM - nofoot::ikElbowOutOf(E, tb.S, outSign))) +
+                                std::max(0.0, E[1] - tb.S[1]);
                 bestSwing = -1.0;  // Wrist-angle diagnostics do not authorize or veto the physical elbow choice.
             } else {
                 for (int k = -12; k <= 12; ++k) consider(theta + k * (5.0 * nofoot::kIkPi / 180.0));
@@ -13826,12 +13977,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample.radial[side][axis] = radialOk ? actualRadial[axis] : o.poseRadial[axis];
             }
             sample.weight[side] = o.poseWeight;
+            sample.outwardWaived[side] = o.poseOutWaived;
             sample.outSign[side] = o.poseOutSign;
             sample.requiredOutM[side] = o.poseElbowOutM;
             if (actual) {
                 const double actualOut = o.poseOutSign * (actualE[0] - actualS[0]);
                 sample.actualOutM[side] = actualOut;
-                sample.violationM[side] = std::max(0.0, o.poseElbowOutM - actualOut) + std::max(0.0, actualE[1] - actualS[1]);
+                sample.violationM[side] = (o.poseOutWaived ? 0.0 : std::max(0.0, o.poseElbowOutM - actualOut)) + std::max(0.0, actualE[1] - actualS[1]);
                 so[side].poseActualValid = axisOk && radialOk;
                 if (so[side].poseActualValid && o.physicalPoleStable) {
                     std::memcpy(physicalPoleCommit[side].axis, actualAxis, sizeof(actualAxis));
@@ -13842,6 +13994,78 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     std::memcpy(sample.preferred[side], physicalPoleCommit[side].reference, sizeof(actualAxis));
                 } else physicalPoleCommitValid[side] = false;
             } else sample.violationM[side] = o.poseViolationM;
+        }
+        {
+            using namespace nofoot::optic_capture;
+            Record capture{};
+            capture.poseKey.renderFrame = s_fpMeta.frame;
+            capture.poseKey.hookRenderFrame = g_f44Frame.load(std::memory_order_relaxed);
+            capture.poseKey.rootReadFrame = armsOk ? G.rootReadRenderFrame : ~uint32_t(0);
+            capture.poseKey.fpSequence = s_fpMeta.seq >> 1;
+            capture.poseKey.gGameFrame = armsOk ? G.frame : ~uint32_t(0);
+            capture.poseKey.itemSerial = itemSerialForCall;
+            capture.poseKey.rig = fpHands.x;
+            capture.poseKey.rigGeneration = fpHands.generation;
+            capture.poseKey.qpc = sample.qpc;
+            capture.posePlanGeneration = pl.generation;
+            capture.poseWriteFresh = sample.fresh;
+            capture.poseQpc = sample.qpc;
+            capture.poseFpQpc = s_fpMeta.qpc;
+            capture.poseGQpc = armsOk ? G.rootReadQpc : 0;
+            capture.poseRig = fpHands.x;
+            capture.poseRigGeneration = fpHands.generation;
+            capture.posePlanX = pl.x;
+            capture.posePinValid = pinCall.valid;
+            capture.poseCrouchWeight = static_cast<float>(pinCall.wc);
+            capture.posePinDetach = static_cast<float>(pinCall.detachW);
+            capture.poseReachFlags = static_cast<uint8_t>((pinCall.reachMeasured ? 1u : 0u) | (pinCall.reachActive ? 2u : 0u) |
+                                                           (pinCall.reachInfeasible ? 4u : 0u) | (pinCall.reachRejected ? 8u : 0u));
+            capture.poseEyeCalHave = g_pinEyeCal.have;
+            capture.posePinEyeCalValid = g_pinEyeCal.have && g_pinEyeCal.n > 0;
+            capture.poseEyeCalAxesValid = g_pinEyeCal.axes.fAxis < 3 && g_pinEyeCal.axes.uAxis < 3;
+            for (int c = 0; c < 3; ++c) {
+                capture.posePinEyeTarget[c] = static_cast<float>(pinCall.E[c]);
+                capture.posePinTarget[c] = static_cast<float>(pinCall.T[c]);
+                capture.posePinNeckBefore[c] = static_cast<float>(pinCall.N0[c]);
+                capture.posePinEyeLocal[c] = static_cast<float>(g_pinEyeCal.e[c]);
+                capture.poseEyeCalibration[c] = static_cast<float>(g_pinEyeCal.e[c]);
+                capture.poseReachCandidate[c] = static_cast<float>(pinCall.reachCandidate[c]);
+                capture.poseReachApplied[c] = static_cast<float>(pinCall.reach[c]);
+                capture.poseBodyOffset[c] = armsOk ? G.d[c] : 0.0f;
+            }
+            capture.poseEyeAxes[0] = static_cast<float>(g_pinEyeCal.axes.fAxis);
+            capture.poseEyeAxes[1] = static_cast<float>(g_pinEyeCal.axes.fSign);
+            capture.poseEyeAxes[2] = static_cast<float>(g_pinEyeCal.axes.uAxis);
+            capture.poseEyeAxes[3] = static_cast<float>(g_pinEyeCal.axes.uSign);
+            capture.poseRawMatricesValid = pinCall.inputJointsValid;
+            if (pinCall.inputJointsValid) std::memcpy(capture.poseRawTorso, pinCall.inputJoints, sizeof(capture.poseRawTorso));
+            capture.poseMatricesValid = true;
+            const uint32_t finalTorsoJoints[4] = {24, 34, 35, 36};
+            for (int j = 0; j < 4; ++j) capture.poseMatricesValid = finalMatrixAt(finalTorsoJoints[j], capture.poseFinalTorso[j]) && capture.poseMatricesValid;
+            if (armsOk) {
+                std::memcpy(capture.poseRoot, G.g, sizeof(capture.poseRoot));
+                std::memcpy(capture.poseM3p, G.m3p, sizeof(capture.poseM3p));
+                std::memcpy(capture.poseFroot, G.froot, sizeof(capture.poseFroot));
+            } else capture.poseMatricesValid = false;
+            for (auto& matrix : capture.poseRawTorso) for (float v : matrix) capture.poseRawMatricesValid = capture.poseRawMatricesValid && std::isfinite(v);
+            for (auto& matrix : capture.poseFinalTorso) for (float v : matrix) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+            if (armsOk) {
+                for (float v : capture.poseRoot) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+                for (float v : capture.poseM3p) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+                for (float v : capture.poseFroot) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+            }
+            for (const auto& side : capture.poseArm) for (const auto& point : side) for (float v : point) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+            for (int side = 0; side < 2; ++side) {
+                if (so[side].wrote) capture.poseWriteMask |= 1u << side;
+                for (int k = 0; k < 4; ++k) for (int c = 0; c < 3; ++c)
+                    capture.poseArm[side][k][c] = static_cast<float>(k == 0 ? sample.shoulder[side][c] : k == 1 ? sample.elbow[side][c] : k == 2 ? sample.hand[side][c] : sample.target[side][c]);
+            }
+            for (int k = 0; k < 6; ++k) {
+                if (pinCall.clrHave[k]) capture.poseClearanceHave |= static_cast<uint8_t>(1u << k);
+                if (pinCall.clrInside) capture.poseClearanceInside |= static_cast<uint8_t>(1u << k);
+                for (int c = 0; c < 3; ++c) capture.poseClearance[k][c] = static_cast<float>(pinCall.clr[k][c]);
+            }
+            f81PoseCapturePost(capture);
         }
         if (sample.fresh) {
             g_poseDeviationSamples.fetch_add(1, std::memory_order_relaxed);
@@ -15638,6 +15862,32 @@ const char* opticStateName(nofoot::optic_capture::SourceState state) noexcept {
     default: return "unsampled";
     }
 }
+const char* opticPoseStateName(nofoot::optic_capture::PoseState state) noexcept {
+    using S = nofoot::optic_capture::PoseState;
+    switch (state) {
+    case S::Matched: return "matched";
+    case S::Missing: return "missing";
+    case S::Stale: return "stale";
+    case S::Future: return "future";
+    case S::IdentityMismatch: return "identity_mismatch";
+    case S::FrameMismatch: return "frame_mismatch";
+    case S::NoWrite: return "no_write";
+    case S::Invalid: return "invalid";
+    default: return "unrequested";
+    }
+}
+const char* opticSceneEyeStateName(nofoot::optic_capture::SceneEyeState state) noexcept {
+    using S = nofoot::optic_capture::SceneEyeState;
+    switch (state) {
+    case S::Matched: return "matched";
+    case S::NotOwn: return "not_own_or_carried";
+    case S::Missing: return "missing";
+    case S::Stale: return "stale";
+    case S::Future: return "future";
+    case S::Invalid: return "invalid";
+    default: return "unrequested";
+    }
+}
 
 bool opticAdsRead(bool* active, uint32_t* frame, uint64_t* qpc) noexcept {
     for (int tries = 0; tries < 2; ++tries) {
@@ -15685,6 +15935,11 @@ void opticWriteVec(FILE* f, const float* v, unsigned n) {
     }
     fputc(']', f);
 }
+void opticWriteFloat(FILE* f, float value) {
+    char number[48];
+    nofoot::optic_capture::formatJsonNumber(number, sizeof(number), value);
+    fputs(number, f);
+}
 
 bool opticVecFinite(const float* v, unsigned n) noexcept {
     for (unsigned i = 0; i < n; ++i) if (!std::isfinite(v[i])) return false;
@@ -15699,7 +15954,9 @@ void nativeOnFootOpticCaptureBegin(const wchar_t* stamp) {
     Log::get().note("native on foot ADS optic capture (F76): armed synchronized FinalCrisp run %ls for 16 right-eye callbacks", g_opticCaptureStamp);
 }
 
-void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus) {
+void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus,
+                                    bool sceneRowsRead, bool sceneRowsOk, bool sceneRowsOwn, bool sceneRowsBound, int32_t sceneRowsFollow,
+                                    uint32_t sceneRowsFrame, uint64_t sceneRowsQpc, const float sceneRows[12]) {
     using namespace nofoot::optic_capture;
     if (!g_opticCaptureLedger.armed || index >= kCount) return;
     Record r;
@@ -15710,6 +15967,14 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
     r.sequence = sequence;
     r.sampleQpc = f30Qpc();
     strncpy_s(r.imageStatus, imageStatus ? imageStatus : "unknown", _TRUNCATE);
+    r.sceneEyeRowsRead = sceneRowsRead;
+    r.sceneEyeRowsOk = sceneRowsOk;
+    r.sceneEyeRowsOwn = sceneRowsOwn;
+    r.sceneEyeRowsBound = sceneRowsBound;
+    r.sceneEyeFrame = sceneRowsFrame;
+    r.sceneEyeFollow = sceneRowsFollow;
+    r.sceneEyeQpc = sceneRowsQpc;
+    if (sceneRowsRead && sceneRows) std::memcpy(r.sceneEyeRows, sceneRows, sizeof(r.sceneEyeRows));
 
     float fp[nofoot::kIkFpSlots][16] = {};
     uint64_t fpMs = 0;
@@ -15718,7 +15983,8 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
     bool adsActive = false;
     uint32_t adsFrame = ~0u;
     uint64_t adsQpc = 0;
-    r.fpRead = ikFpRead(fp, &fpMs, nullptr, &fpMeta);
+    IkFpHands fpHands{};
+    r.fpRead = ikFpRead(fp, &fpMs, &fpHands, &fpMeta);
     r.gRead = ikGRead(&g);
     const bool adsRead = opticAdsRead(&adsActive, &adsFrame, &adsQpc);
     r.itemRead = opticItemRead(&r.itemSerial, r.itemName);
@@ -15760,8 +16026,69 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
     r.adsFrame = adsFrame;
     r.adsQpc = adsQpc;
 
+    r.poseSourceKey.renderFrame = r.fpRead ? fpMeta.frame : ~uint32_t(0);
+    r.poseSourceKey.hookRenderFrame = renderFrame;
+    r.poseSourceKey.rootReadFrame = r.gRead ? g.rootReadRenderFrame : ~uint32_t(0);
+    r.poseSourceKey.fpSequence = r.fpRead ? (fpMeta.seq >> 1) : 0;
+    r.poseSourceKey.gGameFrame = r.gRead ? g.frame : ~uint32_t(0);
+    r.poseSourceKey.itemSerial = r.itemRead ? r.itemSerial : 0;
+    r.poseSourceKey.rig = r.fpRead ? fpHands.x : 0;
+    r.poseSourceKey.rigGeneration = r.fpRead ? fpHands.generation : 0;
+    r.poseSourceKey.qpc = r.sampleQpc;
+    Record poseRow{};
+    const uint64_t poseMaxAge = f66QpcFreq() / 10;
+    f81PoseCaptureFind(r.poseSourceKey, renderFrame, r.sampleQpc, poseMaxAge, &poseRow, &r.poseState);
+    if (r.poseState != PoseState::Missing && r.poseState != PoseState::Unrequested) {
+        r.poseKey = poseRow.poseKey;
+        r.posePlanGeneration = poseRow.posePlanGeneration;
+        r.poseWriteMask = poseRow.poseWriteMask;
+        r.poseQpc = poseRow.poseQpc;
+        r.poseFpQpc = poseRow.poseFpQpc;
+        r.poseGQpc = poseRow.poseGQpc;
+        r.posePinValid = poseRow.posePinValid;
+        r.poseEyeCalHave = poseRow.poseEyeCalHave;
+        r.poseEyeCalAxesValid = poseRow.poseEyeCalAxesValid;
+        r.poseMatricesValid = poseRow.poseMatricesValid;
+        r.poseRawMatricesValid = poseRow.poseRawMatricesValid;
+        r.posePinEyeCalValid = poseRow.posePinEyeCalValid;
+        r.poseWriteFresh = poseRow.poseWriteFresh;
+        r.poseRig = poseRow.poseRig;
+        r.posePlanX = poseRow.posePlanX;
+        r.poseRigGeneration = poseRow.poseRigGeneration;
+        std::memcpy(r.poseArm, poseRow.poseArm, sizeof(r.poseArm));
+        std::memcpy(r.poseRawTorso, poseRow.poseRawTorso, sizeof(r.poseRawTorso));
+        std::memcpy(r.poseFinalTorso, poseRow.poseFinalTorso, sizeof(r.poseFinalTorso));
+        std::memcpy(r.poseRoot, poseRow.poseRoot, sizeof(r.poseRoot));
+        std::memcpy(r.poseM3p, poseRow.poseM3p, sizeof(r.poseM3p));
+        std::memcpy(r.poseFroot, poseRow.poseFroot, sizeof(r.poseFroot));
+        std::memcpy(r.poseBodyOffset, poseRow.poseBodyOffset, sizeof(r.poseBodyOffset));
+        std::memcpy(r.posePinEyeTarget, poseRow.posePinEyeTarget, sizeof(r.posePinEyeTarget));
+        std::memcpy(r.posePinTarget, poseRow.posePinTarget, sizeof(r.posePinTarget));
+        std::memcpy(r.posePinNeckBefore, poseRow.posePinNeckBefore, sizeof(r.posePinNeckBefore));
+        std::memcpy(r.posePinEyeLocal, poseRow.posePinEyeLocal, sizeof(r.posePinEyeLocal));
+        std::memcpy(r.poseEyeCalibration, poseRow.poseEyeCalibration, sizeof(r.poseEyeCalibration));
+        std::memcpy(r.poseEyeAxes, poseRow.poseEyeAxes, sizeof(r.poseEyeAxes));
+        r.poseCrouchWeight = poseRow.poseCrouchWeight;
+        r.posePinDetach = poseRow.posePinDetach;
+        std::memcpy(r.poseReachCandidate, poseRow.poseReachCandidate, sizeof(r.poseReachCandidate));
+        std::memcpy(r.poseReachApplied, poseRow.poseReachApplied, sizeof(r.poseReachApplied));
+        std::memcpy(r.poseClearance, poseRow.poseClearance, sizeof(r.poseClearance));
+        r.poseClearanceHave = poseRow.poseClearanceHave;
+        r.poseClearanceInside = poseRow.poseClearanceInside;
+        r.poseReachFlags = poseRow.poseReachFlags;
+    }
+    r.uiCount = static_cast<uint8_t>(weaponUiTraceRead(renderFrame, r.itemRead ? r.itemSerial : 0, r.sampleQpc, poseMaxAge,
+                                                        r.ui, kUiRowsPerEye, &r.uiDropped));
+
     const uint64_t freq = f66QpcFreq();
     const uint64_t maxAge = freq / 10; // 100 ms, same bounded freshness window as the source snapshots.
+    if (!sceneRowsRead || !sceneRowsQpc) r.sceneEyeState = SceneEyeState::Missing;
+    else if (sceneRowsQpc > r.sampleQpc) r.sceneEyeState = SceneEyeState::Future;
+    else if (r.sampleQpc - sceneRowsQpc > maxAge) r.sceneEyeState = SceneEyeState::Stale;
+    else if (sceneRowsFrame != sceneFrame || !sceneRows || !opticVecFinite(r.sceneEyeRows, 12)) r.sceneEyeState = SceneEyeState::Invalid;
+    else if (!sceneRowsOk) r.sceneEyeState = SceneEyeState::Invalid;
+    else if (!sceneRowsOwn) r.sceneEyeState = SceneEyeState::NotOwn;
+    else r.sceneEyeState = SceneEyeState::Matched;
     bool future = false, stale = false;
     const uint64_t stamps[] = {r.adsQpc, r.fpQpc, r.gQpc, r.rootReadQpc, r.eyeQpc};
     const bool have[] = {adsRead, r.fpRead, r.gRead, r.gRead, r.eyeRead};
@@ -15787,12 +16114,19 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
     if (!g_opticCaptureLedger.armed) return;
     g_opticCaptureLedger.end(rows, rowCount);
     uint32_t counts[9] = {};
+    uint32_t poseCounts[9] = {}, sceneEyeCounts[7] = {}, uiRows = 0, uiDropped = 0;
     unsigned callbacks = 0;
     for (uint32_t i = 0; i < kCount; ++i) {
         const Record& r = g_opticCaptureLedger.rows[i];
         const unsigned stateIx = r.sampled ? static_cast<unsigned>(r.state) : (g_opticCaptureLedger.requested[i].scheduled ? 8u : 0u);
         ++counts[stateIx];
         callbacks += r.sampled ? 1u : 0u;
+        if (r.sampled) {
+            ++poseCounts[static_cast<unsigned>(r.poseState) < 9 ? static_cast<unsigned>(r.poseState) : 8u];
+            ++sceneEyeCounts[static_cast<unsigned>(r.sceneEyeState) < 7 ? static_cast<unsigned>(r.sceneEyeState) : 6u];
+            uiRows += r.uiCount;
+            uiDropped += r.uiDropped;
+        }
     }
     const std::wstring dir = Log::get().dir() + L"\\eyes";
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -15828,7 +16162,58 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     (r.eyeRead && opticVecFinite(r.eyeRows, 16)) ? "true" : "false", (r.eyeRead && opticVecFinite(r.eyeOrigin, 4)) ? "true" : "false");
             opticWriteVec(f, r.p14Model, 3); fputs(",\"p14_world\":", f); opticWriteVec(f, r.p14World, 3);
             fputs(",\"p14_basis\":", f); opticWriteVec(f, r.p14Basis, 9); fputs(",\"root_forward\":", f); opticWriteVec(f, r.rootForward, 3);
-            fputs(",\"right_eye_rows\":", f); opticWriteVec(f, r.eyeRows, 16); fputs(",\"right_eye_origin\":", f); opticWriteVec(f, r.eyeOrigin, 4); fputc('}', f);
+            fputs(",\"right_eye_rows\":", f); opticWriteVec(f, r.eyeRows, 16); fputs(",\"right_eye_origin\":", f); opticWriteVec(f, r.eyeOrigin, 4);
+            fprintf(f, ",\"scene_eye_state\":\"%s\",\"scene_eye_rows_read\":%s,\"scene_eye_rows_ok\":%s,\"scene_eye_rows_own\":%s,\"scene_eye_rows_bound\":%s,\"scene_eye_follow\":%d,\"scene_eye_frame\":%u,\"scene_eye_qpc\":%llu,\"scene_eye_rows\":",
+                    opticSceneEyeStateName(r.sceneEyeState), r.sceneEyeRowsRead ? "true" : "false", r.sceneEyeRowsOk ? "true" : "false",
+                    r.sceneEyeRowsOwn ? "true" : "false", r.sceneEyeRowsBound ? "true" : "false", r.sceneEyeFollow, r.sceneEyeFrame,
+                    static_cast<unsigned long long>(r.sceneEyeQpc));
+            opticWriteVec(f, r.sceneEyeRows, 12);
+            fprintf(f, ",\"pose_state\":\"%s\",\"pose_fp_render_frame\":%u,\"pose_hook_render_frame\":%u,\"pose_root_read_frame\":%u,\"pose_fp_sequence\":%u,\"pose_g_game_frame\":%u,\"pose_item_serial\":%u,\"pose_fp_rig\":%llu,\"pose_fp_rig_generation\":%u,\"pose_source_fp_render_frame\":%u,\"pose_source_hook_render_frame\":%u,\"pose_source_root_read_frame\":%u,\"pose_source_fp_sequence\":%u,\"pose_source_g_game_frame\":%u,\"pose_source_item_serial\":%u,\"pose_source_fp_rig\":%llu,\"pose_source_fp_rig_generation\":%u,\"pose_plan_x\":%llu,\"pose_plan_generation\":%u,\"pose_qpc\":%llu,\"pose_fp_qpc\":%llu,\"pose_g_root_read_qpc\":%llu,\"pose_write_mask\":%u,\"pose_write_fresh\":%s,\"pose_matrices_valid\":%s,\"pose_raw_matrices_valid\":%s,\"pose_pin_valid\":%s,\"pose_eye_cal_have\":%s,\"pose_eye_cal_axes_valid\":%s,\"pose_pin_eye_cal_valid\":%s,\"pose_arm\":[",
+                    opticPoseStateName(r.poseState), r.poseKey.renderFrame, r.poseKey.hookRenderFrame, r.poseKey.rootReadFrame, r.poseKey.fpSequence, r.poseKey.gGameFrame, r.poseKey.itemSerial,
+                    static_cast<unsigned long long>(r.poseKey.rig), r.poseKey.rigGeneration,
+                    r.poseSourceKey.renderFrame, r.poseSourceKey.hookRenderFrame, r.poseSourceKey.rootReadFrame, r.poseSourceKey.fpSequence, r.poseSourceKey.gGameFrame, r.poseSourceKey.itemSerial,
+                    static_cast<unsigned long long>(r.poseSourceKey.rig), r.poseSourceKey.rigGeneration,
+                    static_cast<unsigned long long>(r.posePlanX), r.posePlanGeneration,
+                    static_cast<unsigned long long>(r.poseQpc), static_cast<unsigned long long>(r.poseFpQpc), static_cast<unsigned long long>(r.poseGQpc),
+                    r.poseWriteMask, r.poseWriteFresh ? "true" : "false", r.poseMatricesValid ? "true" : "false", r.poseRawMatricesValid ? "true" : "false",
+                    r.posePinValid ? "true" : "false", r.poseEyeCalHave ? "true" : "false", r.poseEyeCalAxesValid ? "true" : "false", r.posePinEyeCalValid ? "true" : "false");
+            for (int side = 0; side < 2; ++side) {
+                if (side) fputc(',', f);
+                fputc('[', f);
+                for (int point = 0; point < 4; ++point) { if (point) fputc(',', f); opticWriteVec(f, r.poseArm[side][point], 3); }
+                fputc(']', f);
+            }
+            fputs("],\"input_chest24_neck34_head44\":[", f);
+            for (int j = 0; j < 3; ++j) { if (j) fputc(',', f); opticWriteVec(f, r.poseRawTorso[j], 16); }
+            fputs("],\"after_write_chest24_neck34_clavicle35_36\":[", f);
+            for (int j = 0; j < 4; ++j) { if (j) fputc(',', f); opticWriteVec(f, r.poseFinalTorso[j], 16); }
+            fputs("],\"G\":", f); opticWriteVec(f, r.poseRoot, 16);
+            fputs(",\"M3P\":", f); opticWriteVec(f, r.poseM3p, 16);
+            fputs(",\"Froot\":", f); opticWriteVec(f, r.poseFroot, 16);
+            fputs(",\"body_offset_model\":", f); opticWriteVec(f, r.poseBodyOffset, 3);
+            fputs(",\"pin_eye_target\":", f); opticWriteVec(f, r.posePinEyeTarget, 3);
+            fputs(",\"pin_target\":", f); opticWriteVec(f, r.posePinTarget, 3);
+            fputs(",\"pin_neck_before\":", f); opticWriteVec(f, r.posePinNeckBefore, 3);
+            fputs(",\"pin_eye_local\":", f); opticWriteVec(f, r.posePinEyeLocal, 3);
+            fputs(",\"pin_eye_calibration\":", f); opticWriteVec(f, r.poseEyeCalibration, 3);
+            fputs(",\"pin_eye_axes\":", f); opticWriteVec(f, r.poseEyeAxes, 4);
+            fputs(",\"crouch_weight\":", f); opticWriteFloat(f, r.poseCrouchWeight); fputs(",\"pin_detach\":", f); opticWriteFloat(f, r.posePinDetach);
+            fprintf(f, ",\"reach_flags\":%u,\"reach_candidate\":", r.poseReachFlags);
+            opticWriteVec(f, r.poseReachCandidate, 3); fputs(",\"reach_applied\":", f); opticWriteVec(f, r.poseReachApplied, 3);
+            fprintf(f, ",\"clearance_have\":%u,\"clearance_inside\":%u,\"clearance\":[", r.poseClearanceHave, r.poseClearanceInside);
+            for (int j = 0; j < 6; ++j) { if (j) fputc(',', f); opticWriteVec(f, r.poseClearance[j], 3); }
+            fprintf(f, "],\"ui_count\":%u,\"ui_dropped\":%u,\"ui_camera_attachment_available\":false,\"ui\":[", r.uiCount, r.uiDropped);
+            for (unsigned j = 0; j < r.uiCount && j < kUiRowsPerEye; ++j) {
+                const auto& u = r.ui[j]; if (j) fputc(',', f);
+                fprintf(f, "{\"valid\":%s,\"item_read\":%s,\"fresh\":%s,\"fields_valid\":%s,\"instance_valid\":%s,\"eye\":\"unknown_at_submit\",\"render_frame\":%u,\"item_serial\":%u,\"qpc\":%llu,\"name_id\":%u,\"facing\":%u,\"space\":%d,\"distance_scale\":%s,\"width\":",
+                        u.valid ? "true" : "false", u.itemRead ? "true" : "false", u.fresh ? "true" : "false", u.fieldsValid ? "true" : "false", u.instanceValid ? "true" : "false",
+                        u.renderFrame, u.itemSerial, static_cast<unsigned long long>(u.qpc), u.nameId, u.facing, u.space,
+                        u.distanceScale ? "true" : "false");
+                opticWriteFloat(f, u.width); fputs(",\"height\":", f); opticWriteFloat(f, u.height); fputs(",\"pixel_offset\":", f); opticWriteVec(f, u.pixelOffset, 2);
+                fputs(",\"anchor\":", f); opticWriteVec(f, u.anchor, 2); fputs(",\"base_scale\":", f); opticWriteFloat(f, u.baseScale); fputs(",\"instance_scale\":", f); opticWriteFloat(f, u.instanceScale); fputs(",\"instance_matrix\":", f);
+                opticWriteVec(f, u.instance, 16); fputs(",\"camera_available\":false,\"attachment_available\":false}", f);
+            }
+            fputs("]}", f);
         }
         fputs("\n]}\n", f);
         const bool clean = !ferror(f);
@@ -15841,6 +16226,16 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     counts[static_cast<unsigned>(SourceState::Stale)], counts[static_cast<unsigned>(SourceState::Future)],
                     counts[static_cast<unsigned>(SourceState::Invalid)], counts[static_cast<unsigned>(SourceState::Unmatched)], counts[8],
                     unmatchedCallbacks, g_opticCaptureLedger.duplicates, manifest ? "written" : "write failed");
+    Log::get().note("F81 synchronized coverage: pose matched/missing/stale/future/identity-mismatch/frame-mismatch/no-write/invalid/unrequested %u/%u/%u/%u/%u/%u/%u/%u/%u; scene-eye matched/not-own/missing/stale/future/invalid/unrequested %u/%u/%u/%u/%u/%u/%u; submit rows %u, submit rows dropped %u; camera and raw attachment were not available at existing submit hook",
+                    poseCounts[static_cast<unsigned>(PoseState::Matched)], poseCounts[static_cast<unsigned>(PoseState::Missing)],
+                    poseCounts[static_cast<unsigned>(PoseState::Stale)], poseCounts[static_cast<unsigned>(PoseState::Future)],
+                    poseCounts[static_cast<unsigned>(PoseState::IdentityMismatch)], poseCounts[static_cast<unsigned>(PoseState::FrameMismatch)],
+                    poseCounts[static_cast<unsigned>(PoseState::NoWrite)], poseCounts[static_cast<unsigned>(PoseState::Invalid)],
+                    poseCounts[static_cast<unsigned>(PoseState::Unrequested)],
+                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Matched)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::NotOwn)],
+                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Missing)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Stale)],
+                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Future)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Invalid)],
+                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Unrequested)], uiRows, uiDropped);
 }
 
 // F18 (declared in native_on_foot.h): the DrawIndexedInstanced thunk calls this only when nativeOnFootBodyCullWanted() and on the owner

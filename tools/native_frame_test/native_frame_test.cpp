@@ -1629,6 +1629,91 @@ int wmain(int argc, wchar_t** argv) {
                           nf::ikPhysicalPoleSideEligible(0, false, true) && nf::ikPhysicalPoleSideEligible(1, false, false),
                       "F76: a valid pistol support-cup target enables the left stable solve without the raw two-hand detector; free one-hand left remains unchanged");
 
+                // F81: the authored pistol left elbow follows body-down and lateral, not animated wrist/head orientation.
+                const double pistolS[3] = {0.0, 0.0, 0.0}, pistolT[3] = {0.0, -0.05, 0.40};
+                const double bodyUp[3] = {0.0, 1.0, 0.0}, arbitraryPrevious[3] = {0.0, 1.0, 0.0};
+                const auto pistolTb = nf::ikTwoBoneFrame(pistolS, pistolT, 0.34, 0.30, arbitraryPrevious);
+                const auto pistolDown = nf::ikPistolDownSwivel(pistolTb, nullptr, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                const auto pistolOtherWrist = nf::ikPistolDownSwivel(pistolTb, arbitraryPrevious, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                double pistolElbow[3] = {}, pistolExpected[3] = {};
+                if (pistolDown.ok) pistolTb.elbowAt(pistolDown.theta, pistolElbow);
+                const double beta = std::asin(0.06 / pistolTb.h) + 6.0 * nf::kIkPi / 180.0;
+                const double center[3] = {pistolTb.S[0] + pistolTb.a * pistolTb.dir[0], pistolTb.S[1] + pistolTb.a * pistolTb.dir[1], pistolTb.S[2] + pistolTb.a * pistolTb.dir[2]};
+                for (int i = 0; i < 3; ++i) pistolExpected[i] = center[i] + pistolTb.h * pistolDown.radial[i];
+                const double downTargetDelta[3] = {pistolElbow[0] - pistolExpected[0], pistolElbow[1] - pistolExpected[1], pistolElbow[2] - pistolExpected[2]};
+                const double alongAxis = nf::ikDot(pistolDown.radial, pistolTb.dir);
+                const double upper[3] = {pistolElbow[0] - pistolTb.S[0], pistolElbow[1] - pistolTb.S[1], pistolElbow[2] - pistolTb.S[2]};
+                const double forearm[3] = {pistolElbow[0] - pistolTb.hand[0], pistolElbow[1] - pistolTb.hand[1], pistolElbow[2] - pistolTb.hand[2]};
+                const bool pistolLengths = std::fabs(nf::ikLen(upper) - 0.34) < 1e-8 && std::fabs(nf::ikLen(forearm) - 0.30) < 1e-8;
+                double lateralBasis[3]; nf::ikCross(pistolTb.dir, bodyUp, lateralBasis); nf::ikUnit(lateralBasis, lateralBasis);
+                const bool downChoiceOk = pistolDown.ok && pistolOtherWrist.ok && !pistolDown.usedFallback && pistolDown.belowFeasible &&
+                    std::fabs(alongAxis) < 1e-9 && pistolDown.radial[1] < 0.0 && pistolDown.radial[0] < 0.0 &&
+                    nf::ikLen(downTargetDelta) < 1e-8 && pistolLengths && std::fabs(pistolDown.violation) < 1e-9 &&
+                    std::fabs(nf::ikWrapPi(pistolDown.theta - pistolOtherWrist.theta)) < 1e-10 &&
+                    std::fabs(nf::ikDot(pistolDown.radial, lateralBasis) - std::sin(beta)) < 1e-8;
+                const double yawAxis[3] = {0.31, 0.47, -0.72};
+                double yawUnit[3], yawRotation[9], yawS[3], yawT[3], yawUp[3];
+                nf::ikUnit(yawAxis, yawUnit);
+                nf::ikRotAxis(yawUnit, 0.73, yawRotation);
+                const auto rotateVector = [&](const double in[3], double out[3]) {
+                    for (int c = 0; c < 3; ++c) out[c] = in[0] * yawRotation[c] + in[1] * yawRotation[3 + c] + in[2] * yawRotation[6 + c];
+                };
+                rotateVector(pistolS, yawS); rotateVector(pistolT, yawT); rotateVector(bodyUp, yawUp);
+                const double rotatedHint[3] = {-0.2, -0.9, 0.1};
+                double yawHint[3]; rotateVector(rotatedHint, yawHint);
+                const auto yawTb = nf::ikTwoBoneFrame(yawS, yawT, 0.34, 0.30, yawHint);
+                const auto yawDown = nf::ikPistolDownSwivel(yawTb, nullptr, yawUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                double yawElbow[3] = {}, expectedYawElbow[3];
+                if (yawDown.ok) yawTb.elbowAt(yawDown.theta, yawElbow);
+                rotateVector(pistolElbow, expectedYawElbow);
+                const double yawDelta[3] = {yawElbow[0] - expectedYawElbow[0], yawElbow[1] - expectedYawElbow[1], yawElbow[2] - expectedYawElbow[2]};
+                const double verticalS[3] = {0.0, 0.0, 0.0}, verticalT[3] = {0.0, 0.54, 0.0}, prior[3] = {-1.0, 0.0, 0.0};
+                const auto verticalTb = nf::ikTwoBoneFrame(verticalS, verticalT, 0.34, 0.30, prior);
+                auto vertical = nf::ikPistolDownSwivel(verticalTb, prior, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                const double held[3] = {vertical.radial[0], vertical.radial[1], vertical.radial[2]};
+                bool singularHold = vertical.ok && vertical.usedFallback && !vertical.belowFeasible && vertical.violation > 0.0;
+                for (int i = 0; i < 100 && singularHold; ++i) {
+                    const auto next = nf::ikPistolDownSwivel(verticalTb, vertical.radial, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                    const double holdDelta[3] = {next.radial[0] - held[0], next.radial[1] - held[1], next.radial[2] - held[2]};
+                    singularHold = next.ok && next.usedFallback && nf::ikLen(holdDelta) < 1e-10;
+                    vertical = next;
+                }
+                bool yawSweepOk = true;
+                const double yawShoulder[3] = {0.0, 1.0, 0.0};
+                for (int direction : {1, -1}) {
+                    double previousElbow[3] = {};
+                    bool havePrevious = false;
+                    for (int step = 0; step <= 40; ++step) {
+                        const int signedStep = direction > 0 ? step : 40 - step;
+                        const double yaw = (-100.0 + 5.0 * signedStep) * nf::kIkPi / 180.0;
+                        const double target[3] = {0.40 * std::sin(yaw), 0.95, 0.40 * std::cos(yaw)};
+                        const auto yawFrame = nf::ikTwoBoneFrame(yawShoulder, target, 0.34, 0.30, arbitraryPrevious);
+                        const auto yawResult = nf::ikPistolDownSwivel(yawFrame, nullptr, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                        double expectedLateral[3]; nf::ikCross(yawFrame.dir, bodyUp, expectedLateral); nf::ikUnit(expectedLateral, expectedLateral);
+                        double elbow[3] = {};
+                        if (yawResult.ok) yawFrame.elbowAt(yawResult.theta, elbow);
+                        double delta[3] = {elbow[0] - previousElbow[0], elbow[1] - previousElbow[1], elbow[2] - previousElbow[2]};
+                        yawSweepOk = yawSweepOk && yawResult.ok && yawResult.radial[1] < 0.0 && nf::ikDot(yawResult.radial, expectedLateral) > 0.0 &&
+                                     (!havePrevious || nf::ikLen(delta) < 0.04);
+                        std::memcpy(previousElbow, elbow, sizeof(elbow));
+                        havePrevious = yawResult.ok;
+                    }
+                }
+                const double capturedS[3] = {-0.188, 1.077, 0.357}, capturedT[3] = {0.006, 1.046, 0.802};
+                const auto capturedFrame = nf::ikTwoBoneFrame(capturedS, capturedT, 0.3045619805556827, 0.2879583303188154, arbitraryPrevious);
+                const auto capturedDown = nf::ikPistolDownSwivel(capturedFrame, nullptr, bodyUp, 0.06, 6.0 * nf::kIkPi / 180.0);
+                double capturedElbow[3] = {}, capturedUpper[3] = {}, capturedForearm[3] = {};
+                if (capturedDown.ok) capturedFrame.elbowAt(capturedDown.theta, capturedElbow);
+                for (int i = 0; i < 3; ++i) { capturedUpper[i] = capturedElbow[i] - capturedS[i]; capturedForearm[i] = capturedElbow[i] - capturedFrame.hand[i]; }
+                const bool capturedRegression = capturedDown.ok && capturedDown.radial[1] < 0.0 &&
+                    capturedS[1] - capturedElbow[1] > 0.15 &&
+                    std::fabs(nf::ikLen(capturedUpper) - 0.3045619805556827) < 1e-8 &&
+                    std::fabs(nf::ikLen(capturedForearm) - 0.2879583303188154) < 1e-8;
+                const double infiniteUp[3] = {0.0, std::numeric_limits<double>::infinity(), 0.0};
+                const auto invalidPistol = nf::ikPistolDownSwivel(pistolTb, nullptr, infiniteUp, 0.06, 0.0);
+                check(downChoiceOk && yawDown.ok && nf::ikLen(yawDelta) < 1e-8 && singularHold && yawSweepOk && capturedRegression && !invalidPistol.ok,
+                      "F81: pistol-left elbow points down/out with exact arm lengths, is rigid-yaw and wrist-hint invariant, sweeps both directions through body yaw ±100 deg, reproduces captured frame 7977, holds impossible vertical fallback, and rejects nonfinite axes");
+
                 nf::IkPoseDeviationTracker detector;
                 nf::IkPoseDeviationSample pose;
                 pose.fresh = true; pose.item = 4; pose.generation = 9; pose.fpAgeMs = 12; pose.gAgeMs = 16;
@@ -1785,6 +1870,36 @@ int wmain(int argc, wchar_t** argv) {
                     !edvr::nofoot::optic_capture::sourceFramesMatchRender(4567, 100, 4567, 4567, 4567) &&
                     !edvr::nofoot::optic_capture::sourceFramesMatchRender(0, 0, 0, 0, 0) &&
                     !edvr::nofoot::optic_capture::sourceFramesMatchRender(~uint32_t(0), ~uint32_t(0), ~uint32_t(0), ~uint32_t(0), ~uint32_t(0));
+                const bool exactWeaponUiJoin = edvr::nofoot::optic_capture::uiTraceMatches(4567, 92, true, 4567, 92) &&
+                    !edvr::nofoot::optic_capture::uiTraceMatches(4566, 92, true, 4567, 92) &&
+                    !edvr::nofoot::optic_capture::uiTraceMatches(4567, 91, true, 4567, 92) &&
+                    !edvr::nofoot::optic_capture::uiTraceMatches(4567, 92, false, 4567, 92) &&
+                    !edvr::nofoot::optic_capture::uiTraceMatches(0, 92, true, 0, 92);
+                using PoseState = edvr::nofoot::optic_capture::PoseState;
+                using PoseKey = edvr::nofoot::optic_capture::PoseKey;
+                PoseKey poseKey; poseKey.renderFrame = 4567; poseKey.hookRenderFrame = 4567; poseKey.rootReadFrame = 4567; poseKey.fpSequence = 101; poseKey.gGameFrame = 500; poseKey.itemSerial = 42;
+                poseKey.rigGeneration = 7; poseKey.rig = 99; poseKey.qpc = 900;
+                PoseKey sourceKey = poseKey; sourceKey.qpc = 0;
+                const bool poseJoinCases =
+                    edvr::nofoot::optic_capture::poseJoinState(true, poseKey, sourceKey, 4567, 1000, 100, true, true) == PoseState::Matched &&
+                    edvr::nofoot::optic_capture::poseJoinState(false, poseKey, sourceKey, 4567, 1000, 100, true, true) == PoseState::Missing &&
+                    edvr::nofoot::optic_capture::poseJoinState(true, poseKey, sourceKey, 4568, 1000, 100, true, true) == PoseState::FrameMismatch &&
+                    [] (PoseKey p, PoseKey s) { ++p.itemSerial; return edvr::nofoot::optic_capture::poseJoinState(true, p, s, 4567, 1000, 100, true, true) == PoseState::IdentityMismatch; }(poseKey, sourceKey) &&
+                    [] (PoseKey p, PoseKey s) { p.qpc = 1001; return edvr::nofoot::optic_capture::poseJoinState(true, p, s, 4567, 1000, 100, true, true) == PoseState::Future; }(poseKey, sourceKey) &&
+                    [] (PoseKey p, PoseKey s) { p.qpc = 800; return edvr::nofoot::optic_capture::poseJoinState(true, p, s, 4567, 1000, 100, true, true) == PoseState::Stale; }(poseKey, sourceKey) &&
+                    edvr::nofoot::optic_capture::poseJoinState(true, poseKey, sourceKey, 4567, 1000, 100, false, true) == PoseState::NoWrite &&
+                    edvr::nofoot::optic_capture::poseJoinState(true, poseKey, sourceKey, 4567, 1000, 100, true, false) == PoseState::Invalid &&
+                    [] (PoseKey p, PoseKey s) { p.rootReadFrame = 4566; return edvr::nofoot::optic_capture::poseJoinState(true, p, s, 4567, 1000, 100, true, true) == PoseState::FrameMismatch; }(poseKey, sourceKey);
+                OpticRecord sceneEye; sceneEye.sceneEyeState = edvr::nofoot::optic_capture::SceneEyeState::Matched;
+                sceneEye.sceneEyeRowsRead = sceneEye.sceneEyeRowsOk = sceneEye.sceneEyeRowsOwn = true;
+                sceneEye.sceneEyeFrame = 100; sceneEye.sceneEyeQpc = 950;
+                for (int i = 0; i < 12; ++i) sceneEye.sceneEyeRows[i] = static_cast<float>(i) * 0.25f;
+                edvr::nofoot::optic_capture::Ledger sceneEyeLedger; sceneEyeLedger.begin(3);
+                const bool sceneEyeRetained = sceneEyeLedger.sample(0, sceneEye) && sceneEyeLedger.rows[0].sceneEyeState == edvr::nofoot::optic_capture::SceneEyeState::Matched &&
+                    sceneEyeLedger.rows[0].sceneEyeFrame == 100 && sceneEyeLedger.rows[0].sceneEyeQpc == 950 && sceneEyeLedger.rows[0].sceneEyeRows[11] == 2.75f;
+                check(poseJoinCases && exactWeaponUiJoin,
+                      "F81: exact after-write pose joins distinguish missing, stale, future, frame/identity mismatch, no-write and invalid; UI rows require exact render/item identity");
+                check(sceneEyeRetained, "F81: exact scene-eye rows are retained independently from engine eye matrices");
                 OpticRecord invalidBasis; invalidBasis.p14BasisValid = false; invalidBasis.state = edvr::nofoot::optic_capture::SourceState::Invalid;
                 const bool invalidBasisVisible = opticLedger.sample(6, invalidBasis) && opticLedger.rows[6].state == edvr::nofoot::optic_capture::SourceState::Invalid;
                 bool fullCoverage = allSixteen;

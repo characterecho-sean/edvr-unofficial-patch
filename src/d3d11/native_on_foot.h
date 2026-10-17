@@ -311,7 +311,9 @@ bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]);
 // F76 synchronized rifle-optic diagnostic, called only by the FinalCrisp run lifecycle.
 namespace nofoot::optic_capture { struct RowDescriptor; }
 void nativeOnFootOpticCaptureBegin(const wchar_t* stamp);
-void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus);
+void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus,
+                                    bool sceneRowsRead, bool sceneRowsOk, bool sceneRowsOwn, bool sceneRowsBound, int32_t sceneRowsFollow,
+                                    uint32_t sceneRowsFrame, uint64_t sceneRowsQpc, const float sceneRows[12]);
 void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture::RowDescriptor* rows, uint32_t rowCount, uint32_t unmatchedCallbacks);
 
 }  // namespace edvr
