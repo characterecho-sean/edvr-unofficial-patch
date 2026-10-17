@@ -6,6 +6,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
 #include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
+#include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -1475,6 +1476,289 @@ int wmain(int argc, wchar_t** argv) {
                 check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::ikElbowOutClampCm(45.0) == 30.0 && nf::ikElbowOutClampCm(-1.0) == 0.0 &&
                           nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == 1.0,
                       "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
+            }
+            // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.
+            {
+                const double S3[3] = {0.0, 1.0, 0.0}, T3[3] = {0.16, 0.84, 0.43};
+                const double hintA[3] = {0.0, -1.0, 0.0}, hintB[3] = {0.8, 0.2, -0.3};
+                const auto ta = nf::ikTwoBoneFrame(S3, T3, 0.32, 0.28, hintA);
+                const auto tb = nf::ikTwoBoneFrame(S3, T3, 0.32, 0.28, hintB);
+                nf::IkPhysicalPole pole;
+                pole.valid = ta.ok && nf::ikElbowRadial(ta, 0.41, pole.reference);
+                std::memcpy(pole.axis, ta.dir, sizeof(pole.axis));
+                std::memcpy(pole.previous, pole.reference, sizeof(pole.previous));
+                const auto chosenA = nf::ikStableSwivel(ta, pole, 1.0, 0.06);
+                const auto chosenB = nf::ikStableSwivel(tb, pole, 1.0, 0.06);
+                double EA[3] = {}, EB[3] = {};
+                if (chosenA.ok) ta.elbowAt(chosenA.theta, EA);
+                if (chosenB.ok) tb.elbowAt(chosenB.theta, EB);
+                const double basisDelta[3] = {EA[0] - EB[0], EA[1] - EB[1], EA[2] - EB[2]};
+                check(chosenA.ok && chosenB.ok && chosenA.transportedReference && chosenB.transportedReference && nf::ikLen(basisDelta) < 1e-7 &&
+                          nf::ikLen(chosenA.radial) > 0.999999,
+                      "F76: changing the animated pole/reference basis cannot move the elbow when the physical axis and transported pole are unchanged");
+
+                // Dense independent oracle: sample the actual elbow circle, then compare feasibility and nearest-pole/minimum-violation ordering.
+                const auto denseOracle = [&](const nf::IkTwoBone& t, const double preferred[3], double outSign, double elbowOutM, double* bestDistance) {
+                    const double N = 72000.0;
+                    double pref[3];
+                    const double along = nf::ikDot(preferred, t.dir);
+                    for (int i = 0; i < 3; ++i) pref[i] = preferred[i] - along * t.dir[i];
+                    if (!nf::ikUnit(pref, pref)) return std::numeric_limits<double>::infinity();
+                    const double prefTheta = t.angleOf(pref);
+                    bool haveFeasible = false;
+                    double bestV = std::numeric_limits<double>::infinity(), bestD = std::numeric_limits<double>::infinity();
+                    for (int n = 0; n < static_cast<int>(N); ++n) {
+                        const double theta = -nf::kIkPi + 2.0 * nf::kIkPi * static_cast<double>(n) / N;
+                        double E[3]; t.elbowAt(theta, E);
+                        const double violation = std::max(0.0, elbowOutM - nf::ikElbowOutOf(E, t.S, outSign)) + std::max(0.0, E[1] - t.S[1]);
+                        const bool feasible = violation <= 1e-7;
+                        const double d = std::fabs(nf::ikWrapPi(theta - prefTheta));
+                        if ((feasible && !haveFeasible) || (feasible == haveFeasible &&
+                            (feasible ? d < bestD : (violation < bestV - 1e-12 || (std::fabs(violation - bestV) <= 1e-12 && d < bestD))))) {
+                            haveFeasible = feasible; bestV = violation; bestD = d;
+                        }
+                    }
+                    *bestDistance = bestD;
+                    return haveFeasible ? 0.0 : bestV;
+                };
+                double oracleDistance = 0.0;
+                const double oracleViolation = denseOracle(ta, pole.reference, 1.0, 0.06, &oracleDistance);
+                check(chosenA.ok && chosenA.violation < 1e-8 && oracleViolation == 0.0 && std::fabs(std::fabs(nf::ikWrapPi(chosenA.theta - ta.angleOf(pole.reference))) - oracleDistance) < 0.002,
+                      "F76: analytic outward/below intersections select the nearest feasible physical pole against an independent dense-circle oracle");
+
+                const double S4[3] = {0.0, 0.0, 0.0}, T4[3] = {0.0, 0.50, 0.0};
+                const auto impossible = nf::ikTwoBoneFrame(S4, T4, 0.30, 0.30, hintA);
+                nf::IkPhysicalPole impossiblePole;
+                impossiblePole.valid = impossible.ok && nf::ikElbowRadial(impossible, 0.0, impossiblePole.reference);
+                std::memcpy(impossiblePole.axis, impossible.dir, sizeof(impossiblePole.axis));
+                std::memcpy(impossiblePole.previous, impossiblePole.reference, sizeof(impossiblePole.previous));
+                const auto leastViolation = nf::ikStableSwivel(impossible, impossiblePole, 1.0, 0.06);
+                const double oracleImpossible = denseOracle(impossible, impossiblePole.reference, 1.0, 0.06, &oracleDistance);
+                check(leastViolation.ok && leastViolation.violation > 0.0 && std::fabs(leastViolation.violation - oracleImpossible) < 2e-5,
+                      "F76: when outward and below constraints cannot both hold, analytic active-set minima match the independent dense-circle minimum");
+
+                // Movement follows the transported direction through the old fixed-reference projection singularity.
+                nf::IkPhysicalPole moving;
+                const double startT[3] = {0.0, 1.0, 0.48};
+                const auto first = nf::ikTwoBoneFrame(S3, startT, 0.32, 0.28, hintA);
+                moving.valid = first.ok && nf::ikElbowRadial(first, 0.0, moving.reference);
+                std::memcpy(moving.axis, first.dir, sizeof(moving.axis));
+                std::memcpy(moving.previous, moving.reference, sizeof(moving.previous));
+                const nf::IkPhysicalPole startPole = moving;
+                double lastE[3] = {}, maxPoseStepBeforeConstraintTangent = 0.0, maxReferenceStep = 0.0, maxAnalyticReferenceError = 0.0;
+                if (first.ok) first.elbowAt(0.0, lastE);
+                bool trajectoryOk = moving.valid, crossingOracleOk = true;
+                for (int n = 1; n <= 180; ++n) {
+                    const double a = static_cast<double>(n) * nf::kIkPi / 180.0;
+                    const double Tm[3] = {0.0, 1.0 - 0.48 * std::sin(a), 0.48 * std::cos(a)};
+                    const auto tm = nf::ikTwoBoneFrame(S3, Tm, 0.32, 0.28, hintB);
+                    const nf::IkPhysicalPole previousPole = moving;
+                    const auto cm = nf::ikStableSwivel(tm, moving, 1.0, 0.0);
+                    if (!cm.ok || !cm.transportedReference) { trajectoryOk = false; break; }
+                    const double expectedReference[3] = {0.0, -std::cos(a), -std::sin(a)};
+                    const double referenceDelta[3] = {cm.reference[0] - previousPole.reference[0], cm.reference[1] - previousPole.reference[1], cm.reference[2] - previousPole.reference[2]};
+                    const double referenceError[3] = {cm.reference[0] - expectedReference[0], cm.reference[1] - expectedReference[1], cm.reference[2] - expectedReference[2]};
+                    maxReferenceStep = std::max(maxReferenceStep, nf::ikLen(referenceDelta));
+                    maxAnalyticReferenceError = std::max(maxAnalyticReferenceError, nf::ikLen(referenceError));
+                    double E[3]; tm.elbowAt(cm.theta, E);
+                    const double step[3] = {E[0] - lastE[0], E[1] - lastE[1], E[2] - lastE[2]};
+                    if (n <= 100) maxPoseStepBeforeConstraintTangent = std::max(maxPoseStepBeforeConstraintTangent, nf::ikLen(step));
+                    if (n == 147) {
+                        double crossingOracleDistance = 0.0;
+                        const double crossingOracleViolation = denseOracle(tm, cm.reference, 1.0, 0.0, &crossingOracleDistance);
+                        const double selectedDistance = std::fabs(nf::ikWrapPi(cm.theta - tm.angleOf(cm.reference)));
+                        crossingOracleOk = std::fabs(cm.violation - crossingOracleViolation) < 2e-5 && std::fabs(selectedDistance - crossingOracleDistance) < 0.002;
+                    }
+                    std::memcpy(moving.axis, cm.axis, sizeof(cm.axis));
+                    std::memcpy(moving.reference, cm.reference, sizeof(cm.reference));
+                    std::memcpy(moving.previous, cm.radial, sizeof(cm.radial));
+                    moving.valid = true;
+                    std::memcpy(lastE, E, sizeof(E));
+                }
+                const double antiT[3] = {0.0, 1.0, -0.48};
+                const auto anti = nf::ikTwoBoneFrame(S3, antiT, 0.32, 0.28, hintA);
+                const auto antiChoice = nf::ikStableSwivel(anti, startPole, 1.0, 0.0);
+                check(trajectoryOk && maxPoseStepBeforeConstraintTangent < 0.03 && maxReferenceStep < 0.018 && maxAnalyticReferenceError < 1e-8 && crossingOracleOk &&
+                          antiChoice.ok && nf::ikDot(antiChoice.reference, startPole.reference) > 0.99,
+                      "F76: transported pole stays continuous through the original reference-parallel crossing, tracks the full antipodal sweep, and keeps the constraint-tangent branch oracle-correct");
+
+                nf::IkPhysicalPole fallbackPole = pole;
+                fallbackPole.reference[0] = fallbackPole.reference[1] = fallbackPole.reference[2] = 0.0;
+                const double nearT[3] = {0.01, 0.84, 0.43};
+                const auto nearFrame = nf::ikTwoBoneFrame(S3, nearT, 0.32, 0.28, hintB);
+                const auto recovered = nf::ikStableSwivel(nearFrame, fallbackPole, 1.0, 0.06);
+                nf::IkPhysicalPole recoveredState;
+                recoveredState.valid = recovered.ok;
+                std::memcpy(recoveredState.axis, recovered.axis, sizeof(recoveredState.axis));
+                std::memcpy(recoveredState.reference, recovered.reference, sizeof(recoveredState.reference));
+                std::memcpy(recoveredState.previous, recovered.radial, sizeof(recoveredState.previous));
+                const double nextT[3] = {0.02, 0.84, 0.43};
+                const auto nextFrame = nf::ikTwoBoneFrame(S3, nextT, 0.32, 0.28, hintA);
+                const auto afterRecovery = nf::ikStableSwivel(nextFrame, recoveredState, 1.0, 0.06);
+                check(recovered.ok && recovered.usedFallback && !recovered.transportedReference && afterRecovery.ok && afterRecovery.transportedReference &&
+                          std::fabs(nf::ikDot(recovered.reference, recovered.axis)) < 1e-8 &&
+                          std::fabs(nf::ikDot(afterRecovery.reference, afterRecovery.axis)) < 1e-8,
+                      "F76: previous solved radial recovers a singular anatomical reference, and the recovered reference transports on the next frame");
+
+                // A temporary constraint changes only the solved radial, never the transported anatomical reference.
+                const auto constrained = nf::ikStableSwivel(ta, pole, 1.0, 0.20);
+                nf::IkPhysicalPole constrainedState = pole;
+                std::memcpy(constrainedState.axis, constrained.axis, sizeof(constrained.axis));
+                std::memcpy(constrainedState.reference, constrained.reference, sizeof(constrained.reference));
+                std::memcpy(constrainedState.previous, constrained.radial, sizeof(constrained.radial));
+                const auto restored = nf::ikStableSwivel(ta, constrainedState, 1.0, 0.06);
+                check(constrained.ok && restored.ok && nf::ikDot(constrained.reference, restored.reference) > 0.999999 &&
+                          std::fabs(nf::ikWrapPi(restored.theta - chosenA.theta)) < 1e-9,
+                      "F76: a temporary outward constraint does not ratchet the transported anatomical pole");
+
+                nf::IkPhysicalPoleSet set;
+                check(nf::ikPhysicalPoleBegin(set, 7, 11, true) && !set.side[1].valid,
+                      "F76: first armed grip generation starts with empty physical-pole state");
+                set.side[1] = pole;
+                const bool sameKept = !nf::ikPhysicalPoleBegin(set, 7, 11, true) && set.side[1].valid;
+                const bool itemReset = nf::ikPhysicalPoleBegin(set, 7, 12, true) && !set.side[1].valid;
+                set.side[1] = pole;
+                const bool rigReset = nf::ikPhysicalPoleBegin(set, 8, 12, true) && !set.side[1].valid;
+                set.side[1] = pole;
+                const bool inactiveReset = nf::ikPhysicalPoleBegin(set, 8, 12, false) && !set.active && !set.side[1].valid;
+                check(sameKept && itemReset && rigReset && inactiveReset,
+                      "F76: item, rig generation, and armed/write-gate loss reset physical-pole history; unchanged identity retains it");
+                check(nf::ikPhysicalPoleSideEligible(0, true, false) && !nf::ikPhysicalPoleSideEligible(0, false, false) &&
+                          nf::ikPhysicalPoleSideEligible(0, false, true) && nf::ikPhysicalPoleSideEligible(1, false, false),
+                      "F76: a valid pistol support-cup target enables the left stable solve without the raw two-hand detector; free one-hand left remains unchanged");
+
+                nf::IkPoseDeviationTracker detector;
+                nf::IkPoseDeviationSample pose;
+                pose.fresh = true; pose.item = 4; pose.generation = 9; pose.fpAgeMs = 12; pose.gAgeMs = 16;
+                pose.valid[0] = pose.valid[1] = true; pose.radialValid[0] = pose.radialValid[1] = true;
+                pose.axis[0][2] = pose.axis[1][2] = 1.0;
+                pose.radial[0][0] = pose.radial[1][0] = 1.0;
+                nf::IkPoseDeviationRecord events[nf::kIkPoseDeviationHistory + 1 + nf::kIkPoseDeviationPost];
+                int eventRows = 0;
+                for (uint32_t frame = 1; frame <= 8; ++frame) {
+                    pose.frame = frame; pose.qpc = frame * 10;
+                    eventRows += detector.step(pose, 1000, events);
+                }
+                pose.frame = 9; pose.qpc = 90; pose.elbow[0][0] = 0.05;
+                eventRows = detector.step(pose, 1000, events);
+                const bool hasEightPre = eventRows == 9 && events[0].offset == -8 && events[7].offset == -1 && events[8].offset == 0 && events[8].event == 1;
+                pose.frame = 10; pose.qpc = 100; pose.elbow[0][0] = 0.0;
+                const int firstPostRows = detector.step(pose, 1000, events);
+                const bool postStartsAtOne = firstPostRows == 1 && events[0].offset == 1;
+                pose.frame = 11; pose.qpc = 110; pose.elbow[0][0] = 0.06;
+                detector.step(pose, 1000, events);
+                const bool coalesced = detector.coalesced == 2;
+                int lastPostRows = 0;
+                for (uint32_t i = 0; i < 6; ++i) { ++pose.frame; pose.qpc += 10; pose.elbow[0][0] = 0.06; lastPostRows = detector.step(pose, 1000, events); }
+                const bool postEndsAtEight = lastPostRows == 1 && events[0].offset == 8 && detector.postRemaining == 0;
+                nf::IkPoseDeviationTracker angleDetector;
+                pose = {}; pose.fresh = true; pose.item = 4; pose.generation = 9; pose.fpAgeMs = 12; pose.gAgeMs = 16;
+                pose.valid[1] = true; pose.radialValid[1] = true; pose.axis[1][2] = 1.0; pose.radial[1][0] = 1.0;
+                for (uint32_t frame = 1; frame <= 8; ++frame) { pose.frame = frame; pose.qpc = frame * 10; angleDetector.step(pose, 1000, events); }
+                pose.frame = 9; pose.qpc = 90; pose.radial[1][0] = std::cos(20.1 * nf::kIkPi / 180.0); pose.radial[1][1] = std::sin(20.1 * nf::kIkPi / 180.0);
+                const int angleRows = angleDetector.step(pose, 1000, events);
+                check(hasEightPre && postStartsAtOne && coalesced && postEndsAtEight && angleRows == 9 && events[8].offset == 0,
+                      "F76: deviation events include up to eight pre-samples, trigger, eight post-samples, and coalesce active retriggers; radial angle is side-local");
+
+                nf::IkPoseDeviationTracker resetDetector;
+                pose = {}; pose.fresh = true; pose.item = 1; pose.generation = 2; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                pose.frame = 1; pose.qpc = 10; resetDetector.step(pose, 1000, events);
+                pose.frame = 2; pose.qpc = 20; pose.fpAgeMs = 101; pose.elbow[0][0] = 0.2;
+                const int staleRows = resetDetector.step(pose, 1000, events);
+                pose.frame = 3; pose.qpc = 30; pose.fpAgeMs = 10;
+                const int noFalseJump = resetDetector.step(pose, 1000, events);
+                check(staleRows == 0 && noFalseJump == 0 && resetDetector.haveLast && resetDetector.historyCount == 1,
+                      "F76: stale inputs and unsolved gaps reset the comparator without generating a false movement event");
+
+                nf::IkPoseDeviationTracker missedFrameDetector;
+                pose = {}; pose.fresh = true; pose.item = 6; pose.generation = 2; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                pose.frame = 1; pose.qpc = 10; missedFrameDetector.step(pose, 1000, events);
+                pose.frame = 3; pose.qpc = 30; pose.elbow[0][0] = 0.20;
+                const int afterMissedWrite = missedFrameDetector.step(pose, 1000, events);
+                check(afterMissedWrite == 0 && missedFrameDetector.gaps == 1 && missedFrameDetector.historyCount == 1,
+                      "F76: a skipped frame after an unsuccessful write breaks continuity and becomes a fresh baseline");
+
+                nf::IkPoseDeviationTracker activeGapDetector;
+                pose = {}; pose.fresh = true; pose.item = 8; pose.generation = 2; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                for (uint32_t frame = 1; frame <= 8; ++frame) { pose.frame = frame; pose.qpc = frame * 10; activeGapDetector.step(pose, 1000, events); }
+                pose.frame = 9; pose.qpc = 90; pose.elbow[0][0] = 0.05; activeGapDetector.step(pose, 1000, events);
+                pose.frame = 11; pose.qpc = 110; pose.elbow[0][0] = 0.20;
+                const int invalidPost = activeGapDetector.step(pose, 1000, events);
+                check(invalidPost == 1 && events[0].invalid && events[0].offset == 1 && activeGapDetector.gaps == 1,
+                      "F76: a missing written frame during capture emits an explicitly invalid post row and closes the event");
+
+                nf::IkPoseDeviationTracker duplicateDetector;
+                pose = {}; pose.fresh = true; pose.item = 2; pose.generation = 3; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                pose.frame = 1; pose.qpc = 10; duplicateDetector.step(pose, 1000, events);
+                pose.qpc = 20; pose.elbow[0][0] = 0.20;
+                const int duplicateRows = duplicateDetector.step(pose, 1000, events);
+                const bool duplicateKeptHistory = duplicateRows == 0 && duplicateDetector.duplicates == 1 && duplicateDetector.last.elbow[0][0] == 0.0;
+                pose.frame = 2; pose.qpc = 30; pose.elbow[0][0] = 0.05;
+                const int afterDuplicateRows = duplicateDetector.step(pose, 1000, events);
+                check(duplicateKeptHistory && afterDuplicateRows == 2 && events[1].offset == 0,
+                      "F76: repeated P1 frames are ignored without destroying the prior comparison sample");
+
+                nf::IkPoseDeviationTracker capDetector;
+                pose = {}; pose.fresh = true; pose.item = 1; pose.generation = 1; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                uint32_t frame = 0; uint64_t qpc = 0;
+                for (; frame < 8; ++frame) { pose.frame = frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events); }
+                for (uint32_t pulse = 0; pulse < 18; ++pulse) {
+                    pose.elbow[0][0] = (pulse % 2 == 0) ? 0.06 : 0.0;
+                    pose.frame = ++frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events);
+                    for (int n = 0; n < 9; ++n) { pose.frame = ++frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events); }
+                }
+                pose.elbow[0][0] = 0.0;
+                for (int n = 0; n < 8; ++n) { pose.frame = ++frame; pose.qpc = qpc = 59920 + static_cast<uint64_t>(n) * 10; capDetector.step(pose, 1000, events); }
+                pose.frame = ++frame; pose.qpc = 60000; pose.elbow[0][0] = 0.06;
+                capDetector.step(pose, 1000, events);
+                check(capDetector.eventsInMinute == 1 && capDetector.suppressed >= 1,
+                      "F76: event capture is capped at eight per minute and reopens on the next minute bucket");
+
+                edvr::nofoot::optic_capture::Ledger opticLedger;
+                opticLedger.begin(1);
+                using OpticRecord = edvr::nofoot::optic_capture::Record;
+                using OpticRow = edvr::nofoot::optic_capture::RowDescriptor;
+                OpticRow requested[edvr::nofoot::optic_capture::kCount]{};
+                bool allSixteen = true;
+                for (uint32_t i = 0; i < edvr::nofoot::optic_capture::kCount; ++i) {
+                    requested[i].scheduled = true; requested[i].sceneFrame = 100 + i; requested[i].epoch = 4;
+                    requested[i].sequence = 1000 + i; std::strcpy(requested[i].imageStatus, "copied");
+                    if (i == 5 || i == 6) continue;
+                    OpticRecord row; row.sceneFrame = requested[i].sceneFrame; row.epoch = requested[i].epoch; row.sequence = requested[i].sequence;
+                    allSixteen = opticLedger.sample(i, row) && allSixteen;
+                }
+                OpticRecord duplicateOptic; duplicateOptic.sceneFrame = 888;
+                const bool duplicateRejected = !opticLedger.sample(4, duplicateOptic) && opticLedger.duplicates == 1 && opticLedger.rows[4].sceneFrame == 104;
+                OpticRecord delayedG; delayedG.sceneFrame = 77; delayedG.fpFrame = 77; delayedG.eyeFrame = 77; delayedG.adsFrame = 77;
+                delayedG.rootReadFrame = 77; delayedG.gGameFrame = 500; delayedG.state = edvr::nofoot::optic_capture::SourceState::Unmatched;
+                const bool mismatchRetained = opticLedger.sample(5, delayedG) && opticLedger.rows[5].state == edvr::nofoot::optic_capture::SourceState::Unmatched &&
+                    opticLedger.rows[5].sceneFrame == 77 && opticLedger.rows[5].gGameFrame == 500 && opticLedger.rows[5].rootReadFrame == 77;
+                OpticRecord invalidBasis; invalidBasis.p14BasisValid = false; invalidBasis.state = edvr::nofoot::optic_capture::SourceState::Invalid;
+                const bool invalidBasisVisible = opticLedger.sample(6, invalidBasis) && opticLedger.rows[6].state == edvr::nofoot::optic_capture::SourceState::Invalid;
+                bool fullCoverage = allSixteen;
+                for (uint32_t i = 0; i < edvr::nofoot::optic_capture::kCount; ++i) fullCoverage = fullCoverage && opticLedger.rows[i].sampled;
+                const bool boundsChecked = !opticLedger.sample(edvr::nofoot::optic_capture::kCount, OpticRecord{});
+                opticLedger.end(requested, edvr::nofoot::optic_capture::kCount);
+                const bool disarmed = !opticLedger.armed && !opticLedger.sample(0, OpticRecord{});
+                const bool requestedMetadata = opticLedger.requested[15].scheduled && opticLedger.requested[15].sceneFrame == 115 && opticLedger.requested[15].sequence == 1015;
+                opticLedger.begin(2);
+                const bool rearmed = opticLedger.armed && opticLedger.duplicates == 0 && !opticLedger.rows[4].sampled;
+                OpticRow missingRows[edvr::nofoot::optic_capture::kCount]{};
+                missingRows[3].scheduled = true; missingRows[3].sceneFrame = 203; missingRows[3].epoch = 9;
+                missingRows[3].sequence = 909; std::strcpy(missingRows[3].imageStatus, "source_missing");
+                opticLedger.end(missingRows, edvr::nofoot::optic_capture::kCount);
+                const bool missingCallbackVisible = !opticLedger.rows[3].sampled && opticLedger.requested[3].scheduled &&
+                    opticLedger.requested[3].sceneFrame == 203 && opticLedger.requested[3].epoch == 9 && opticLedger.requested[3].sequence == 909 &&
+                    std::strcmp(opticLedger.requested[3].imageStatus, "source_missing") == 0;
+                char finiteJson[48], nanJson[48], infJson[48];
+                const bool jsonNumbers = edvr::nofoot::optic_capture::formatJsonNumber(finiteJson, sizeof(finiteJson), 3.25f) && std::strcmp(finiteJson, "3.25") == 0 &&
+                    !edvr::nofoot::optic_capture::formatJsonNumber(nanJson, sizeof(nanJson), std::numeric_limits<float>::quiet_NaN()) && std::strcmp(nanJson, "null") == 0 &&
+                    !edvr::nofoot::optic_capture::formatJsonNumber(infJson, sizeof(infJson), std::numeric_limits<float>::infinity()) && std::strcmp(infJson, "null") == 0;
+                opticLedger.begin(3);
+                const bool cleanRearm = opticLedger.armed && opticLedger.duplicates == 0 && !opticLedger.rows[3].sampled && !opticLedger.requested[3].scheduled;
+                opticLedger.end(nullptr, 0);
+                check(fullCoverage && duplicateRejected && mismatchRetained && invalidBasisVisible && boundsChecked && disarmed && requestedMetadata && missingCallbackVisible && jsonNumbers && rearmed && cleanRearm,
+                      "F76: synchronized optic capture covers 16 rows, keeps first-wins duplicates and mismatched source values, records missing callbacks, and emits JSON-safe nonfinite numbers");
             }
             // F58: the spine bend's pure half: the residual split, the solve, the clamps, the 1/3, 2/3, 1 split, the 0.2 s ramp and the cap.
             {
@@ -5236,13 +5520,18 @@ int wmain(int argc, wchar_t** argv) {
         const double wristWorld[3] = {rootG[12] + wristR[0] * rootG[0] + wristR[1] * rootG[4] + wristR[2] * rootG[8],
                                       rootG[13] + wristR[0] * rootG[1] + wristR[1] * rootG[5] + wristR[2] * rootG[9],
                                       rootG[14] + wristR[0] * rootG[2] + wristR[1] * rootG[6] + wristR[2] * rootG[10]};
-        const double heelDelta[3] = {worldContactR[12] - distalWorld[0] * k2Right.length * 0.5 - worldContactR[4] * k2Right.width * 0.5 - wristWorld[0],
-                                     worldContactR[13] - distalWorld[1] * k2Right.length * 0.5 - worldContactR[5] * k2Right.width * 0.5 - wristWorld[1],
-                                     worldContactR[14] - distalWorld[2] * k2Right.length * 0.5 - worldContactR[6] * k2Right.width * 0.5 - wristWorld[2]};
-        const double heelBehindWrist = edvr::nofoot::ikDot(heelDelta, distalWorld);
+        double meanK2R[3] = {}, meanK2World[3] = {};
+        for (int j = 0; j < 4; ++j) for (int c = 0; c < 3; ++c) meanK2R[c] += k2R[j][c] * 0.25;
+        for (int c = 0; c < 3; ++c) meanK2World[c] = rootG[12 + c] + meanK2R[0] * rootG[c] + meanK2R[1] * rootG[4 + c] + meanK2R[2] * rootG[8 + c];
+        const double radialWorld[3] = {worldContactR[4], worldContactR[5], worldContactR[6]};
+        const double k2EdgeDelta[3] = {worldContactR[12] + distalWorld[0] * k2Right.length * 0.5 - worldContactR[4] * k2Right.width * 0.5 - meanK2World[0],
+                                       worldContactR[13] + distalWorld[1] * k2Right.length * 0.5 - worldContactR[5] * k2Right.width * 0.5 - meanK2World[1],
+                                       worldContactR[14] + distalWorld[2] * k2Right.length * 0.5 - worldContactR[6] * k2Right.width * 0.5 - meanK2World[2]};
+        const double k2PlaneError = edvr::nofoot::ikDot(k2EdgeDelta, distalWorld);
+        const double k2UlnarEdge = edvr::nofoot::ikDot(k2EdgeDelta, radialWorld);
         edvr::nofoot::PalmPatch k2Patch;
         for (int c = 0; c < 3; ++c) {
-            k2Patch.heel[c] = worldContactR[12 + c] - distalWorld[c] * k2Right.length * 0.5 - worldContactR[4 + c] * k2Right.width * 0.5;
+            k2Patch.heel[c] = worldContactR[12 + c] + distalWorld[c] * k2Right.length * 0.5 - worldContactR[4 + c] * k2Right.width * 0.5;
             k2Patch.thumb[c] = worldContactR[4 + c]; k2Patch.normal[c] = worldContactR[4 + c];
         }
         k2Patch.halfThickness = k2Right.radius; k2Patch.ok = true;
@@ -5269,8 +5558,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         bool fullContactMatches = true;
         for (int i = 0; i < 16; ++i) fullContactMatches = fullContactMatches && std::fabs(expectedContactR[i] - worldContactR[i]) < 2e-5f;
-        check(contactLocalOk && fullContactMatches && std::fabs(heelBehindWrist) < 2e-5 && k2Cup.ok && k2Cup.gap >= 0.002 && leftConverges && worldPoseMatches,
-              "F75: nonidentity wrist and root transforms carry the K2 frame consistently; the cup heel reaches the anatomical wrist plane, the left contact converges, and old palm retargeting still matches");
+        check(contactLocalOk && fullContactMatches && std::fabs(k2PlaneError) < 2e-5 && std::fabs(k2UlnarEdge + k2Right.width * 0.5) < 2e-5 && k2Cup.ok && k2Cup.gap >= 0.002 && leftConverges && worldPoseMatches,
+              "F76: nonidentity wrist and root transforms carry the support anchor to the mean-K2 plane and preserve its ulnar edge, gap, left contact solve, and old palm retargeting");
 
         float Qsrc[16], QsrcParent[16], Qdst[16], QdstParent[16], D[16], invSrcParent[16], finger[16], desired[16];
         rot(Qsrc, 0, 0.27f); rot(QsrcParent, 2, -0.31f); rot(Qdst, 1, 0.52f); rot(QdstParent, 0, -0.14f); rot(D, 2, 0.42f);

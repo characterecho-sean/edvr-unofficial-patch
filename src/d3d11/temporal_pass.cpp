@@ -48,6 +48,7 @@
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
 #include "scheduler_stack_probe.h"
 #include "native_on_foot.h"  // the F0 gate counters (log only)
+#include "native_on_foot_optic_capture.h"
 #include "draw_record_tag.h"   // F62c: the waypoint series' crop rule (markerCropPick, markerCropCentre, cropOrigin)
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
@@ -2332,6 +2333,13 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
 // treated T00..) and the first treated frame whole.
 void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     if(!g_eyeFinalRun.armed)return;
+    nofoot::optic_capture::RowDescriptor opticRows[eye_final_capture::Count]{};
+    for(unsigned i=0;i<eye_final_capture::Count;++i){
+        const auto& row=g_eyeFinalRun.rows[i];const auto& image=row.eye[1];auto& out=opticRows[i];
+        out.scheduled=row.scheduled;out.sceneFrame=row.scene;out.epoch=row.epoch;out.sequence=image.sequence;
+        strncpy_s(out.imageStatus,image.status?image.status:"unknown",_TRUNCATE);
+    }
+    nativeOnFootOpticCaptureEnd(reason, opticRows, eye_final_capture::Count, g_eyeFinalRun.unmatched);
     ID3D11DeviceContext* ownedContext=nullptr;
     if(g_eyeFinalRun.captureDevice){const bool ran=guarded("eye capture/final flush context",[&]{g_eyeFinalRun.captureDevice->GetImmediateContext(&ownedContext);});ctx=ran?ownedContext:nullptr;}
     const std::wstring dir=Log::get().dir()+L"\\eyes";
@@ -5136,10 +5144,13 @@ void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D*
     const bool ran=guarded("eye capture/final crisp",[&]{
         if(texture){texture->GetDevice(&device);if(device)device->GetImmediateContext(&ctx);}
         g_eyeFinalRun.capture(epoch,sequence,eye,ctx,texture,region,composite,flipU,flipV);
+        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,epoch,sequence,
+                                                  g_eyeFinalRun.rows[index].eye[eye].status);
         if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
     });
     if(!ran&&g_eyeFinalRun.armed){
         auto& image=g_eyeFinalRun.rows[index].eye[eye];image.sequence=sequence;image.status="capture_fault";
+        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,epoch,sequence,image.status);
     }
     if(g_eyeFinalRun.pendingOwner)guarded("eye capture/final pending owner release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingOwner);});
     if(g_eyeFinalRun.pendingDevice)guarded("eye capture/final pending device release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingDevice);});
@@ -6412,7 +6423,6 @@ static void beginEyeRun() {
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
-    nativeOnFootEyeDumpRequest();   // F70c: record optic and source provenance at the next eye-frame tick.
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
     // census starts here and can begin with its following frame.
@@ -6423,6 +6433,7 @@ static void beginEyeRun() {
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
     g_eyeFinalRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
+    nativeOnFootOpticCaptureBegin(g_eyeFinalStamp);
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
     applyEngineMotionDiagnostics();   // the census runs for the run

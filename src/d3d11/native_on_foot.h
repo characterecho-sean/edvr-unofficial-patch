@@ -306,7 +306,10 @@ uint32_t nativeOnFootMarkerFrameNow();
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).
 bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]);
-// Called at the existing eye-dump request boundary; ADS records the next bounded optic/source tuple.
-void nativeOnFootEyeDumpRequest();
+// F76 synchronized rifle-optic diagnostic, called only by the FinalCrisp run lifecycle.
+namespace nofoot::optic_capture { struct RowDescriptor; }
+void nativeOnFootOpticCaptureBegin(const wchar_t* stamp);
+void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus);
+void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture::RowDescriptor* rows, uint32_t rowCount, uint32_t unmatchedCallbacks);
 
 }  // namespace edvr

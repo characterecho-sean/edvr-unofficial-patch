@@ -1141,6 +1141,245 @@ inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* 
     return ikWrapPi(best);
 }
 
+// F76: a physical elbow pole in 3P model/body axes. `reference` is the anatomical direction transported between successful shoulder->hand axes;
+// `previous` is the last solved radial, used only when transporting the anatomical direction fails numerically.
+struct IkPhysicalPole {
+    bool valid = false;
+    double axis[3] = {}, reference[3] = {}, previous[3] = {};
+};
+struct IkPhysicalPoleSet {
+    uint32_t generation = 0xFFFFFFFFu, item = 0;
+    bool active = false;
+    IkPhysicalPole side[2]{};
+};
+inline void ikPhysicalPoleReset(IkPhysicalPoleSet& set) noexcept {
+    set.active = false;
+    set.side[0] = {};
+    set.side[1] = {};
+}
+inline void ikPhysicalPoleResetSide(IkPhysicalPoleSet& set, int side) noexcept {
+    if (side >= 0 && side < 2) set.side[side] = {};
+}
+inline bool ikPhysicalPoleBegin(IkPhysicalPoleSet& set, uint32_t generation, uint32_t item, bool active) noexcept {
+    const bool reset = !active || !set.active || set.generation != generation || set.item != item;
+    if (reset) ikPhysicalPoleReset(set);
+    set.generation = generation;
+    set.item = item;
+    set.active = active;
+    return reset;
+}
+inline bool ikPhysicalPoleSideEligible(int side, bool supportCupTargetValid, bool offHandTwoHanded) noexcept {
+    return side == 1 || (side == 0 && (supportCupTargetValid || offHandTwoHanded));
+}
+struct IkStableSwivel {
+    bool ok = false, usedFallback = false, transportedReference = false;
+    double theta = 0.0, violation = 0.0, axis[3] = {}, reference[3] = {}, radial[3] = {};
+};
+inline void ikRotAxis(const double n[3], double ang, double R[9]) noexcept;
+inline bool ikElbowRadial(const IkTwoBone& t, double theta, double out[3]) noexcept {
+    if (!t.ok || !(t.h > 1e-6) || !std::isfinite(theta)) return false;
+    const double c = std::cos(theta), s = std::sin(theta);
+    for (int i = 0; i < 3; ++i) out[i] = c * t.u[i] + s * t.v[i];
+    return ikUnit(out, out);
+}
+inline IkStableSwivel ikStableSwivel(const IkTwoBone& t, const IkPhysicalPole& pole, double outSign, double elbowOutM = kIkElbowOutM) noexcept {
+    IkStableSwivel result;
+    if (!t.ok || !(t.h > 1e-6) || !(outSign == 1.0 || outSign == -1.0) || !std::isfinite(elbowOutM)) return result;
+    const auto transport = [&](const double source[3], double transported[3]) noexcept {
+        double from[3], to[3];
+        if (!ikUnit(pole.axis, from) || !ikUnit(t.dir, to)) return false;
+        const double d = std::max(-1.0, std::min(1.0, ikDot(from, to)));
+        double cross[3];
+        ikCross(from, to, cross);
+        const double sine = ikLen(cross);
+        if (sine < 1e-9) {
+            // At an exact antipode, rotating about the transported pole itself preserves the pole and maps the axis to its negative.
+            if (d < 0.0) {
+                if (!ikUnit(source, transported)) return false;
+            } else {
+                std::memcpy(transported, source, sizeof(double) * 3);
+            }
+        } else {
+            double R[9];
+            const double axis[3] = {cross[0] / sine, cross[1] / sine, cross[2] / sine};
+            ikRotAxis(axis, std::atan2(sine, d), R);
+            for (int c = 0; c < 3; ++c) transported[c] = source[0] * R[c] + source[1] * R[3 + c] + source[2] * R[6 + c];
+        }
+        const double along = ikDot(transported, to);
+        for (int i = 0; i < 3; ++i) transported[i] -= along * to[i];
+        return ikUnit(transported, transported);
+    };
+    double preferred[3] = {};
+    if (pole.valid && transport(pole.reference, preferred)) {
+        result.transportedReference = true;
+    } else {
+        result.usedFallback = true;
+        if (!(pole.valid && transport(pole.previous, preferred))) {
+            const double downOut[3] = {outSign, -1.0, 0.0};
+            const double d = ikDot(downOut, t.dir);
+            for (int i = 0; i < 3; ++i) preferred[i] = downOut[i] - d * t.dir[i];
+            if (ikLen(preferred) < 1e-9 || !ikUnit(preferred, preferred)) {
+                const double forward[3] = {0.0, 0.0, 1.0};
+                const double fd = ikDot(forward, t.dir);
+                for (int i = 0; i < 3; ++i) preferred[i] = forward[i] - fd * t.dir[i];
+                if (!ikUnit(preferred, preferred)) return result;
+            }
+        }
+    }
+    std::memcpy(result.axis, t.dir, sizeof(result.axis));
+    std::memcpy(result.reference, preferred, sizeof(result.reference));
+    const double preferredTheta = t.angleOf(preferred);
+
+    // Deficits are nonpositive exactly when each physical constraint holds. Both are linear in cos(theta), sin(theta).
+    const double cDef[2] = {elbowOutM - outSign * t.dir[0] * t.a, t.dir[1] * t.a};
+    const double aDef[2] = {-t.h * outSign * t.u[0], t.h * t.u[1]};
+    const double bDef[2] = {-t.h * outSign * t.v[0], t.h * t.v[1]};
+    double candidate[20] = {};
+    int count = 0;
+    const auto add = [&](double theta) noexcept {
+        if (!std::isfinite(theta) || count >= static_cast<int>(sizeof(candidate) / sizeof(candidate[0]))) return;
+        candidate[count++] = ikWrapPi(theta);
+    };
+    add(preferredTheta);
+    for (int k = 0; k < 2; ++k) {
+        const double radius = std::hypot(aDef[k], bDef[k]);
+        if (radius > 1e-12 && std::fabs(cDef[k]) <= radius + 1e-12) {
+            const double phase = std::atan2(bDef[k], aDef[k]);
+            const double offset = std::acos(std::max(-1.0, std::min(1.0, -cDef[k] / radius)));
+            add(phase + offset);
+            add(phase - offset);
+        }
+    }
+    // The minimum of the sum of any active subset of the two deficits is a candidate for the global minimum of max(0,d0)+max(0,d1).
+    for (int mask = 1; mask < 4; ++mask) {
+        double aa = 0.0, bb = 0.0;
+        for (int k = 0; k < 2; ++k) if (mask & (1 << k)) { aa += aDef[k]; bb += bDef[k]; }
+        if (std::hypot(aa, bb) > 1e-12) add(std::atan2(bb, aa) + kIkPi);
+    }
+
+    double bestDistance = std::numeric_limits<double>::infinity();
+    bool bestFeasible = false;
+    for (int i = 0; i < count; ++i) {
+        const double theta = candidate[i];
+        double E[3];
+        t.elbowAt(theta, E);
+        const double violation = std::max(0.0, elbowOutM - ikElbowOutOf(E, t.S, outSign)) + std::max(0.0, E[1] - t.S[1]);
+        const bool feasible = violation <= 1e-9;
+        const double distance = std::fabs(ikWrapPi(theta - preferredTheta));
+        const bool better = (feasible && !bestFeasible) || (feasible == bestFeasible &&
+            (feasible ? distance < bestDistance - 1e-10 :
+                (violation < result.violation - 1e-10 || (std::fabs(violation - result.violation) <= 1e-10 && distance < bestDistance - 1e-10))));
+        if (!result.ok || better) {
+            result.ok = true;
+            result.theta = theta;
+            result.violation = violation;
+            bestFeasible = feasible;
+            bestDistance = distance;
+            if (!ikElbowRadial(t, theta, result.radial)) result.ok = false;
+        }
+    }
+    return result;
+}
+
+// F76 diagnostic-only bounded capture. Its thresholds select log samples and never feed pose behavior.
+constexpr double kIkPoseDeviationAngleDeg = 20.0;
+constexpr double kIkPoseDeviationPositionM = 0.05;
+constexpr uint64_t kIkPoseDeviationMaxGapMs = 100;
+constexpr uint32_t kIkPoseDeviationEventsPerMinute = 8;
+constexpr uint32_t kIkPoseDeviationHistory = 8;
+constexpr uint32_t kIkPoseDeviationPost = 8;
+struct IkPoseDeviationSample {
+    uint64_t qpc = 0;
+    float dtMs = 0.0f;
+    uint32_t frame = 0, item = 0, generation = 0, fpAgeMs = 0, gAgeMs = 0;
+    bool fresh = false;
+    bool valid[2] = {}, radialValid[2] = {};
+    double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
+    double preferred[2][3] = {}, axis[2][3] = {}, radial[2][3] = {};
+    double weight[2] = {}, violationM[2] = {};
+};
+struct IkPoseDeviationRecord {
+    IkPoseDeviationSample sample{};
+    uint32_t event = 0;
+    int8_t offset = 0;
+    bool invalid = false;
+};
+struct IkPoseDeviationTracker {
+    IkPoseDeviationSample history[kIkPoseDeviationHistory]{};
+    IkPoseDeviationSample last{};
+    uint32_t historyHead = 0, historyCount = 0, event = 0, minuteBucket = 0xFFFFFFFFu, eventsInMinute = 0;
+    uint32_t coalesced = 0, suppressed = 0, gaps = 0, invalid = 0, duplicates = 0;
+    uint8_t postRemaining = 0;
+    bool haveLast = false;
+
+    void resetHistory() noexcept { historyHead = 0; historyCount = 0; haveLast = false; }
+    int step(const IkPoseDeviationSample& sample, uint64_t qpcFrequency, IkPoseDeviationRecord out[kIkPoseDeviationHistory + 1 + kIkPoseDeviationPost]) noexcept {
+        int nOut = 0;
+        const bool sampleFresh = sample.fresh && sample.fpAgeMs <= kIkPoseDeviationMaxGapMs && sample.gAgeMs <= kIkPoseDeviationMaxGapMs;
+        const bool wasCapturing = postRemaining != 0;
+        if (haveLast && sampleFresh && sample.item == last.item && sample.generation == last.generation && sample.frame == last.frame) {
+            ++duplicates;
+            return 0;
+        }
+        bool contiguous = false;
+        if (haveLast && sampleFresh && last.fresh && sample.item == last.item && sample.generation == last.generation && sample.frame - last.frame == 1 &&
+            sample.qpc > last.qpc && qpcFrequency && (sample.qpc - last.qpc) <= qpcFrequency / 10) contiguous = true;
+
+        if (!sampleFresh || (haveLast && !contiguous)) {
+            if (postRemaining) {
+                out[nOut++] = {sample, event, static_cast<int8_t>(1 + (kIkPoseDeviationPost - postRemaining)), true};
+                postRemaining = 0;
+                ++invalid;
+            }
+            if (haveLast) ++gaps;
+            resetHistory();
+        } else if (postRemaining) {
+            out[nOut++] = {sample, event, static_cast<int8_t>(1 + (kIkPoseDeviationPost - postRemaining)), false};
+            --postRemaining;
+        }
+
+        bool triggered = false;
+        if (sampleFresh && contiguous) {
+            for (int side = 0; side < 2 && !triggered; ++side) {
+                if (!sample.valid[side] || !last.valid[side]) continue;
+                const double nowDelta[3] = {sample.elbow[side][0] - sample.shoulder[side][0], sample.elbow[side][1] - sample.shoulder[side][1], sample.elbow[side][2] - sample.shoulder[side][2]};
+                const double oldDelta[3] = {last.elbow[side][0] - last.shoulder[side][0], last.elbow[side][1] - last.shoulder[side][1], last.elbow[side][2] - last.shoulder[side][2]};
+                const double moved[3] = {nowDelta[0] - oldDelta[0], nowDelta[1] - oldDelta[1], nowDelta[2] - oldDelta[2]};
+                if (ikLen(moved) >= kIkPoseDeviationPositionM) { triggered = true; break; }
+                if (sample.radialValid[side] && last.radialValid[side]) {
+                    double a[3], b[3];
+                    if (ikUnit(sample.radial[side], a) && ikUnit(last.radial[side], b)) {
+                        const double cosine = std::max(-1.0, std::min(1.0, ikDot(a, b)));
+                        if (std::acos(cosine) * 180.0 / kIkPi >= kIkPoseDeviationAngleDeg) triggered = true;
+                    }
+                }
+            }
+        }
+        if (triggered) {
+            const uint32_t bucket = qpcFrequency ? static_cast<uint32_t>(sample.qpc / (qpcFrequency * 60u)) : 0;
+            if (bucket != minuteBucket) { minuteBucket = bucket; eventsInMinute = 0; }
+            if (wasCapturing) ++coalesced;
+            else if (eventsInMinute >= kIkPoseDeviationEventsPerMinute) ++suppressed;
+            else {
+                ++eventsInMinute;
+                ++event;
+                const uint32_t oldest = (historyHead + kIkPoseDeviationHistory - historyCount) % kIkPoseDeviationHistory;
+                for (uint32_t i = 0; i < historyCount; ++i) out[nOut++] = {history[(oldest + i) % kIkPoseDeviationHistory], event, static_cast<int8_t>(-static_cast<int>(historyCount) + static_cast<int>(i)), false};
+                out[nOut++] = {sample, event, 0, false};
+                postRemaining = kIkPoseDeviationPost;
+            }
+        }
+        if (sampleFresh) {
+            history[historyHead] = sample;
+            historyHead = (historyHead + 1) % kIkPoseDeviationHistory;
+            if (historyCount < kIkPoseDeviationHistory) ++historyCount;
+            last = sample;
+            haveLast = true;
+        }
+        return nOut;
+    }
+};
+
 // Row-vector rotations: R about the unit axis n by ang (right-handed in the column sense: v x R = Rc v). The shortest arc from unit a to unit b.
 inline void ikRotAxis(const double n[3], double ang, double R[9]) noexcept {
     const double c = std::cos(ang), s = std::sin(ang), k = 1.0 - c;
