@@ -28,6 +28,9 @@ Worktree builds, read from tools\\build_lock.py and tools\\compile_cache.py:
     the worktree's own build\\ directory, so nothing is shared with the main
     checkout and nothing can be corrupted across trees.  The cost is that a
     worktree's first build is a full compile.
+  * Keep the path SHORT (C:\\wt99, not a deep scratch folder).  The installer
+    test rig builds fixtures under the tree and fails on MAX_PATH when the
+    worktree path is ~190 characters; at C:\\wt99 the same build passes.
   * The dependency folders are shared through the junctions, read only by the
     build.  Do not run a fetch_*.py tool with a worktree's third_party as the
     destination: it would modify the main checkout's copy.
@@ -43,6 +46,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from build_receipt import DEPENDENCY_ROOTS  # noqa: E402  (the one list of ignored dependency folders)
+
+
+MAX_BUILD_PATH = 100  # 190 failed the installer test rig, 10 passed; warn well short of the limit
 
 
 class WorktreeError(Exception):
@@ -109,6 +115,9 @@ def add(repo, path, branch=None, commitish=None, dry_run=False, roots=DEPENDENCY
         out("junction %s -> %s" % (link, target))
     for w in warnings:
         out("warning: " + w)
+    if len(str(path)) > MAX_BUILD_PATH:
+        out("warning: %d-character path; the installer test rig fails on MAX_PATH in a deep worktree, use a short one"
+            % len(str(path)))
     if dry_run:
         out("dry run: nothing written")
         return
