@@ -55,7 +55,7 @@ session averaged 427k tokens per call and never compacted.
 
 ## The sanctioned tools
 
-These five operations go through `tools\`, and **only** through `tools\`.
+These operations go through `tools\`, and **only** through `tools\`.
 Each was an ad-hoc one-liner retyped once a session for a month; the
 evidence is the dozens of backups in both game directories named six
 different ways, and a live `edvr.ini` a stray PowerShell anchor once
