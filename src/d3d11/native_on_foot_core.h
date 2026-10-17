@@ -338,9 +338,6 @@ inline void weaponViewOffsetTarget(double target[3], const double modelShift[3])
     if (modelShift[0] == 0.0 && modelShift[1] == 0.0 && modelShift[2] == 0.0) return;
     for (int i = 0; i < 3; ++i) target[i] += modelShift[i];
 }
-inline void weaponViewOffsetTargetPoint(const double point[3], const double worldShift[3], double out[3]) noexcept {
-    for (int i = 0; i < 3; ++i) out[i] = point[i] + worldShift[i];
-}
 // F40: the head's seated translation, in body axes: Ry(psi)^-1 . diag(1, 1, -1) . tS (OpenXR +z is back, body +z is forward).
 inline void hmdInBody(const double ts[3], double psi, double out[3]) noexcept {
     const double v[3] = {ts[0], ts[1], -ts[2]};
@@ -3706,15 +3703,14 @@ struct P1FramePairing {
     }
 };
 
-// ---- F69b: the armed square-up turns the torso by the weapon's yaw, not the shoulders' ----------------------------------------------------------
+// ---- F75: the armed torso keeps its authored stance; barrel and shoulder yaw are measurements only -----------------------------------------------
 // F68 (log 152023, section 4 of the review): the rifle stance blades the upper body 35-40 deg while the weapon points down the aim. The square-up turned the
 // SHOULDER LINE square to the aim, which de-bladed the stance, ran the left (foregrip) arm out of reach (1.03) and made the reach rule slide the whole body
-// 16-23 cm forward. Armed, phi is now the yaw that carries the 3P animated right attach's barrel (joint 66) onto the FP right attach's (51, through G):
-// the stance keeps its blade, the weapon sits on the aim. The barrel axis of each rig is the signed row of its attach matrix most aligned with the aim
+// 16-23 cm forward. Armed, the body keeps the game's authored stance because the animated barrel and wrist are overwritten by arm IK; their yaw is logged only.
+// The barrel axis of each rig is the signed row of its attach matrix most aligned with the aim
 // (G's forward), found as pinFindHeadAxes finds the head's: it is picked per item at the draw (the same pick for kBarrelLatchFrames consecutive armed calls
 // latches it; an item change or the end of arming drops it). ONE function, squareYaw, serves the reach rule's U* (stage 0), the stage-1 angle and the
-// written turn; unarmed it is ikSquareToForward unchanged. An armed call without a usable barrel preserves the authored stance (the shoulders' phi is still
-// measured for diagnostics, never applied).
+// written turn; unarmed it is ikSquareToForward unchanged. The armed angle is always zero; shoulder and barrel candidates are diagnostic measurements.
 constexpr double kBarrelMinDot = 0.7;           // a row within 45 deg of the aim can be the barrel
 constexpr double kBarrelMinXz = 0.25;           // the barrel's horizontal part under this (a weapon pointing up or down) has no yaw to turn the torso by
 constexpr uint32_t kBarrelLatchFrames = 10;     // consecutive armed calls with the same pick in both rigs
@@ -3818,9 +3814,8 @@ struct SquareYaw {
     int weaponWhy = kSquareWeaponNoAxes;
     double b3Xz = 0.0, bFXz = 0.0;  // selected latched barrel rows' horizontal lengths, to explain an unavailable yaw
 };
-// The yaw (ikYawFromTo's sense) that squares the upper body: armed with both barrels known and each with a horizontal part, the barrel's; when unarmed, the
-// upper-arm line's onto the aim's right. Armed with no usable weapon yaw, preserve the animation's authored stance: the shoulder fallback de-bladed the F70
-// rifle by about 42 degrees and caused a 21.4 cm reach correction. uL, uR the upper-arm joints (3P model space), fwd G's forward.
+// The yaw (ikYawFromTo's sense) that squares the upper body: armed poses preserve the game's authored stance; barrel and shoulder angles are measurements
+// only because the pre-solve weapon pose is overwritten by arm IK. Unarmed, keep the upper-arm line's existing square-up to the aim's right.
 inline SquareYaw squareYaw(bool armed, const BarrelDirs& bd, const double uL[3], const double uR[3], const double fwd[3]) noexcept {
     SquareYaw o;
     o.haveSh = ikSquareToForward(uL, uR, fwd, &o.phiSh);
@@ -3844,13 +3839,8 @@ inline SquareYaw squareYaw(bool armed, const BarrelDirs& bd, const double uL[3],
         }
     }
     if (armed) {
-        if (o.haveW) {
-            o.phi = o.phiW;
-            o.src = kSquareWeapon;
-        } else {
-            o.phi = 0.0;
-            o.src = kSquarePreservePose;
-        }
+        o.phi = 0.0;
+        o.src = kSquarePreservePose;
         o.ok = true;
     } else if (o.haveSh) {
         o.phi = o.phiSh;
@@ -4219,6 +4209,56 @@ struct SupportPalmTarget {
     double gap = 0.0;
     bool ok = false;
 };
+// F75: the anatomical contact proxy uses the second finger joints (K2), independently of the palm frame used by hand retargeting.
+struct SupportContactGeometry {
+    double centre[3] = {}, distal[3] = {}, radial[3] = {}, normal[3] = {};
+    double width = 0.0, length = 0.0, radius = 0.0;
+    bool ok = false;
+};
+inline SupportContactGeometry supportContactFromK2(const double wrist[3], const double thumbRoot[3], const double k2[4][3]) noexcept {
+    SupportContactGeometry o;
+    double mean[3] = {};
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(k2[j][i])) return o;
+            mean[i] += k2[j][i] * 0.25;
+        }
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(wrist[i]) || !std::isfinite(thumbRoot[i])) return o;
+    double d[3] = {mean[0] - wrist[0], mean[1] - wrist[1], mean[2] - wrist[2]};
+    double r[3] = {thumbRoot[0] - mean[0], thumbRoot[1] - mean[1], thumbRoot[2] - mean[2]};
+    if (!ikUnit(d, d)) return o;
+    const double along = ikDot(r, d);
+    for (int i = 0; i < 3; ++i) r[i] -= along * d[i];
+    if (!ikUnit(r, r)) return o;
+    double n[3];
+    ikCross(d, r, n);
+    if (!ikUnit(n, n)) return o;
+    double coord[4];
+    double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+    for (int j = 0; j < 4; ++j) {
+        const double v[3] = {k2[j][0] - mean[0], k2[j][1] - mean[1], k2[j][2] - mean[2]};
+        coord[j] = ikDot(v, r);
+        lo = std::min(lo, coord[j]);
+        hi = std::max(hi, coord[j]);
+    }
+    std::sort(coord, coord + 4);
+    double spacing[3] = {coord[1] - coord[0], coord[2] - coord[1], coord[3] - coord[2]};
+    std::sort(spacing, spacing + 3);
+    o.width = hi - lo;
+    const double wristToK2[3] = {mean[0] - wrist[0], mean[1] - wrist[1], mean[2] - wrist[2]};
+    o.length = ikLen(wristToK2);
+    o.radius = spacing[1] * 0.5;
+    for (int i = 0; i < 3; ++i) {
+        o.centre[i] = (wrist[i] + mean[i]) * 0.5;
+        o.distal[i] = d[i];
+        o.radial[i] = r[i];
+        o.normal[i] = n[i];
+    }
+    o.ok = std::isfinite(o.width) && std::isfinite(o.length) && std::isfinite(o.radius) && o.width > 0.015 && o.width < 0.20 &&
+           o.length > 0.015 && o.length < 0.25 && o.radius > 0.001 && o.radius < 0.04;
+    return o;
+}
 // `normal` is the right hand's thumbward radial direction. The underside is
 // its negative; place the left palm below the heel and outside the proxy.
 // gap is explicit so callers and logs can verify non-penetration.

@@ -714,7 +714,7 @@ void readKey() {
         const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", 0.0f);
         const float cm = std::isfinite(rawCm) ? std::clamp(rawCm, -10.0f, 10.0f) : 0.0f;
         if (first || cm != g_weaponViewOffsetCm.load(std::memory_order_relaxed))
-            Log::get().note("native on foot weapon view offset (F74): fix.native_on_foot_weapon_view_offset_cm = %+.1f cm -- positive shifts the view and body right relative to the fixed equipped weapon or tool; negative shifts left; 0 keeps the existing alignment", cm);
+            Log::get().note("native on foot weapon view offset (F75): fix.native_on_foot_weapon_view_offset_cm = %+.1f cm -- positive shifts the view and body right relative to the fixed equipped weapon or tool; while ADS the eye aligns independently to the actual sight and the body keeps this offset", cm);
         g_weaponViewOffsetCm.store(cm, std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
@@ -6956,7 +6956,7 @@ void bodyShiftApply(uint64_t amc) noexcept {
 struct PinIn {
     float cam[3] = {}, m3p[16] = {};
     float camRaw[3] = {};   // F70: the job camera as read; cam is it less the ADS shift (the unlocked head)
-    float weaponViewWorld[3] = {}; // F74: one published current-view-right world displacement, shared by the eye lock and body pin
+    float weaponViewWorld[3] = {}; // F74: current-view-right world displacement kept for body pinning; the ADS eye lock targets actual P14
     uint64_t qpc = 0, ms = 0;
     uint32_t p1 = 0;   // g_f66gP1Seq at the publication: the game-frame index (its low bit is the parity the lines split by)
     float localPitchRad = 0.0f;
@@ -7014,7 +7014,7 @@ bool pinInRead(PinIn* out) noexcept {
     return false;
 }
 // F70: the ADS shift S = g_adsLock + g_adsSight.applied (seated metres), published by alignTick every tick (a seqlock; the readers never wait). F74 adds its
-// independently transported world displacement in the same publication. The camera the
+// independently transported manual world displacement for pin consumers. The camera the
 // game reports moves by (-S0, -S1, +S2) in body axes with it (F40's plant), so the body consumers take the camera less that: the body stays pinned to the
 // unlocked head and does not slide forward with the ADS eye.
 std::atomic<uint32_t> g_adsShiftSeq{0};
@@ -7398,7 +7398,7 @@ std::atomic<uint32_t> g_adsOpticCaptureRequest{0}, g_adsOpticCaptureRequestFrame
 std::atomic<uint64_t> g_adsOpticGood{0}, g_adsOpticNoFp{0}, g_adsOpticNoRoot{0}, g_adsOpticNoSample{0}, g_adsOpticNoEye{0}, g_adsOpticBadBasis{0};
 uint32_t g_adsOpticCaptureSeen = 0;
 
-void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weaponViewWorld[3]) noexcept {
+void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     const uint32_t captureRequest = g_adsOpticCaptureRequest.load(std::memory_order_acquire);
     const bool captureOpticNow = captureRequest != g_adsOpticCaptureSeen;
     const uint32_t captureFrame = g_adsOpticCaptureRequestFrame.load(std::memory_order_relaxed);
@@ -7468,9 +7468,6 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weap
             for (int c = 0; c < 3; ++c) opticModelP14[c] = p14m[c];
             double p14w[3];
             nofoot::ikXform(p14m, G.froot, p14w);
-            // F74: keep optic diagnostics on the actual weapon point; only the solver/guard target follows the intentional camera displacement.
-            double p14Lock[3];
-            nofoot::weaponViewOffsetTargetPoint(p14w, weaponViewWorld, p14Lock);
             const double f[3] = {G.froot[8], G.froot[9], G.froot[10]}, row0[3] = {G.froot[0], G.froot[1], G.froot[2]};
             std::memcpy(opticRootForward, f, sizeof(opticRootForward));
             std::memcpy(opticWorldP14, p14w, sizeof(opticWorldP14));
@@ -7594,10 +7591,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weap
             bool lockOk = false;
             bool usedSolved = false;
             const double modelEye[3] = {cam[0] + g_adsSightHalfIpd * rHat[0], cam[1] + g_adsSightHalfIpd * rHat[1], cam[2] + g_adsSightHalfIpd * rHat[2]};
-            if (eyeOk[1] && nofoot::adsSightErrorEyeK(p14Lock, eyeW[1], f, rows, eyeCap.kM, E)) {   // F70/F74: the target plus the user's view bias
+            if (eyeOk[1] && nofoot::adsSightErrorEyeK(p14w, eyeW[1], f, rows, eyeCap.kM, E)) {
                 lockOk = true;
                 usedSolved = true;
-            } else if (modelOk && nofoot::adsSightErrorEyeK(p14Lock, modelEye, f, rows, eyeCap.kM, E)) {
+            } else if (modelOk && nofoot::adsSightErrorEyeK(p14w, modelEye, f, rows, eyeCap.kM, E)) {
                 lockOk = true;
             }
             if (lockOk) {
@@ -7712,8 +7709,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weap
     if (now - g_adsSightLineMs < 1000) return;
     g_adsSightLineMs = now;
     const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
-    Log::get().note("native on foot ADS sight lock (F63/F74): P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
-                    "e perpendicular (the right eye to the intended eye line, including the user's view offset) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
+    Log::get().note("native on foot ADS sight lock (F63/F75): actual P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
+                    "e perpendicular (the right eye to the actual P14 sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
                     "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
                     "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
                     "flipped to the body's right %u, held off by the guard %u%s",
@@ -7723,7 +7720,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weap
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
                     w.driving ? "" : " (no frame drove the lock this second)");
-    // F70/F74: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
+    // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
     // (under 1 cm over a press); the sight's NDC equal at the three distances from the actual weapon P14.
     {
         PinIn pi;
@@ -7745,7 +7742,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s, const double weap
                           w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
         else
             std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
-        Log::get().note("native on foot ADS eye point (F70/F74): k %.1f cm asked, %.1f cm after the clearance cap (%s); the eye to the intended eye point (P14w + view offset + k f) after the lock: "
+        Log::get().note("native on foot ADS eye point (F70/F75): k %.1f cm asked, %.1f cm after the clearance cap (%s); the eye to the actual sight eye point (P14w + k f) after the lock: "
                         "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
                         "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against total expected %+.1f %+.1f %+.1f "
                         "(difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
@@ -9646,7 +9643,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         if (mode != 2) bodyOffsetPublish(other.applied);
     }
 
-    adsSightTick(now, dt, sIn, weaponView.world);   // F63/F74: the ADS lock follows the intentional view shift without moving the weapon
+    adsSightTick(now, dt, sIn);   // F63/F75: the ADS lock follows the actual weapon sight line; manual view bias remains a camera shift
     adsAimStep(now, dt, sIn);     // F68a: the ADS guard (the right eye's rows against the head); F67b: the three forwards
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
@@ -10673,12 +10670,12 @@ struct PinBin {
 struct PinStats {
     uint64_t calls = 0, pinned = 0, refused[kPinRefKinds] = {};
     PinBin bin[6];   // standing, walking, running, jumping, crouching (F68e), and armed (counted beside the movement bin)
-    // F69b: the square-up's angle as the reach rule formed it: calls, with the weapon's yaw readable (and chosen), the weapon's and the shoulders' phi (deg:
-    // sum and largest |value|), the axes of the barrels last seen (3P row and sign, FP row and sign; latched or not), and the reach correction in the calls
-    // the weapon's yaw was used (cm: sum, largest). F70a: when armed yaw is unavailable, the authored pose is preserved; count why and the selected rows' horizontal lengths.
-    uint64_t sqN = 0, sqHaveW = 0, sqHaveSh = 0, sqUsedW = 0, sqLatched = 0, sqPosePreserved = 0;
+    // F69b/F75: bounded measurements of weapon and shoulder yaw, selected armed torso angle, and its largest shoulder displacement; the torso keeps the
+    // authored stance while armed. Keep the measured barrel rows and horizontal lengths to identify pre-solve animation motion.
+    uint64_t sqN = 0, sqHaveW = 0, sqHaveSh = 0, sqLatched = 0, sqPosePreserved = 0;
     uint64_t sqWhy[6] = {};
-    double sqPhiWSum = 0.0, sqPhiWAbs = 0.0, sqPhiShSum = 0.0, sqPhiShAbs = 0.0, sqUsedReachSum = 0.0, sqUsedReachMax = 0.0;
+    double sqPhiWSum = 0.0, sqPhiWAbs = 0.0, sqPhiShSum = 0.0, sqPhiShAbs = 0.0, sqChosenPhiSum = 0.0, sqChosenPhiAbs = 0.0;
+    double sqShoulderMoveSumCm = 0.0, sqShoulderMoveMaxCm = 0.0;
     uint64_t sqBarrelNormN = 0;
     double sqB3XzSum = 0.0, sqBFXzSum = 0.0;
     int sqA3 = -1, sqAF = -1;
@@ -10985,6 +10982,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     double reachCorr = 0.0;
     bool sqEval = false;   // F69b: the square-up's angle was formed here (the reach rule ran)
     nofoot::SquareYaw sqRes;
+    double sqShoulderMoveMaxCm = 0.0;
     if (refusal == kPinRefKinds && armedW > 0.0 && G && fpm && pl.ok[0] && pl.ok[1] && pl.sqOk && pl.side[0].U < count && pl.side[1].U < count &&
         pl.side[0].F < count && pl.side[1].F < count && pl.side[0].H < count && pl.side[1].H < count) {
         double uPos[2][3], tA[2][3], armLen[2];
@@ -11017,7 +11015,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pivot[2] = pm[14];
         }
         const double fwdG[3] = {G->g[8], G->g[9], G->g[10]};
-        // F69b: the square-up's angle from the one function (armed: the weapon's yaw; else the shoulders'), the same as the stage-1 angle and the written turn.
+        // F75: the same authored-stance angle feeds reach and the written turn; barrel and shoulder yaw remain diagnostic measurements.
         const nofoot::SquareYaw sqy = nofoot::squareYaw(sqArmed, bd, uPos[0], uPos[1], fwdG);
         const double phi = sqy.phi;
         const bool sqOk = sqy.ok;
@@ -11033,6 +11031,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                     if (pl.sq.j[k] == pl.side[side].U) share = nofoot::kIkSpineWeight[pl.sq.level[k] < 3 ? pl.sq.level[k] : 2];
                 double us[3];
                 nofoot::turnAboutVertical(uPos[side], pivot, sqApplied * share, us);
+                const double torsoMove[3] = {us[0] - uPos[side][0], us[1] - uPos[side][1], us[2] - uPos[side][2]};
+                sqShoulderMoveMaxCm = std::max(sqShoulderMoveMaxCm, 100.0 * nofoot::ikLen(torsoMove));
                 v[side][0] = us[0] + d0[0] - tA[side][0];
                 v[side][1] = us[1] + mv.delta - tA[side][1];
                 v[side][2] = us[2] + d0[2] - tA[side][2];
@@ -11281,11 +11281,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 st.sqPhiShSum += sqRes.phiSh * kDeg;
                 st.sqPhiShAbs = std::max(st.sqPhiShAbs, std::fabs(sqRes.phiSh * kDeg));
             }
-            if (sqRes.src == nofoot::kSquareWeapon) {
-                ++st.sqUsedW;
-                st.sqUsedReachSum += 100.0 * reachCorr;
-                st.sqUsedReachMax = std::max(st.sqUsedReachMax, 100.0 * reachCorr);
-            }
+            st.sqChosenPhiSum += sqRes.phi * kDeg;
+            st.sqChosenPhiAbs = std::max(st.sqChosenPhiAbs, std::fabs(sqRes.phi * kDeg));
+            st.sqShoulderMoveSumCm += sqShoulderMoveMaxCm;
+            st.sqShoulderMoveMaxCm = std::max(st.sqShoulderMoveMaxCm, sqShoulderMoveMaxCm);
             if (sqRes.src == nofoot::kSquarePreservePose) {
                 ++st.sqPosePreserved;
                 const int why = sqRes.weaponWhy;
@@ -11431,7 +11430,7 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
 // (the log's "held: the FP snapshot is older than 100 ms" on every stall and aim move), the hand target and the clavicle assist moved at most 5 cm a
 // call, and the torso square-up was clamped to +-50 deg through a 0.3 s ramp: each lets the game's animated hand show, or the solved hand trail. The
 // armed path now: the FP snapshot is a record in the FP root's frame, valid at any age (30 s), with this frame's G (the FP root and the AMC; at most
-// 1 s old); the solve weight is 1 once the armed ramp is; no per-call cap on the hand or the assist; the square-up angle is phi itself. Only a
+// 1 s old); the solve weight is 1 once the armed ramp is; no per-call cap on the hand or the assist; the authored torso stance is preserved. Only a
 // missing plan or a fault skips the solve, and the second's line says which. This window counts the invariants (written by the hook under the
 // sequence counter, read once a second by the frame thread).
 enum F67fWhy : int { kF67fPlan = 0, kF67fNoWrite, kF67fRefused, kF67fInputs, kF67fWeight, kF67fOther, kF67fOffHand, kF67fWhyKinds };
@@ -11471,7 +11470,8 @@ struct GripSample {
     uint64_t qpc = 0, sampleMs = 0, itemChangedMs = 0;
     uint32_t p1 = 0, itemSerial = 0, fpFrame = 0, fpGeneration = 0, fpAgeMs = 0, gFrame = 0, gAgeMs = 0;
     bool armedFull = false, offTwo = false, authoredLeft = false, supportValid = false, cupDiagOk = false, blendedTargetDiagOk = false;
-    bool sideOk[2] = {false, false}, wristOk[2] = {false, false}, palmDiagOk[2] = {false, false}, attachDiagOk[2] = {false, false}, poseWritten[2] = {false, false};
+    bool sideOk[2] = {false, false}, wristOk[2] = {false, false}, palmDiagOk[2] = {false, false}, attachDiagOk[2] = {false, false}, poseWritten[2] = {false, false},
+         supportContactValid[2] = {false, false};
     float gFp[2][16] = {}, g3p[2][16] = {}, fpAt[2][3] = {}, wrist[2][4] = {}, wristImprovement[2] = {};
     float palmDeltaMm[2][3] = {}, palmAngleDeg[2] = {}, attachDeltaMm[2][3] = {}, attachAngleDeg[2] = {};
     float cupCentreMm[3] = {}, cupAxisDot[3] = {}, cupAngleDeg = 0.0f, cupDimsMm[4] = {}, cupGapMm = 0.0f, blendedTargetDeltaMm[3] = {}, blendedTargetAngleDeg = 0.0f;
@@ -11500,6 +11500,7 @@ void gripPost(const GripSample& r) noexcept {
         d.sideOk[k] = r.sideOk[k];
         d.wristOk[k] = r.wristOk[k];
         d.palmDiagOk[k] = r.palmDiagOk[k]; d.attachDiagOk[k] = r.attachDiagOk[k]; d.poseWritten[k] = r.poseWritten[k];
+        d.supportContactValid[k] = r.supportContactValid[k];
         std::memcpy(d.gFp[k], r.gFp[k], sizeof(d.gFp[k]));
         std::memcpy(d.g3p[k], r.g3p[k], sizeof(d.g3p[k]));
         std::memcpy(d.fpAt[k], r.fpAt[k], sizeof(d.fpAt[k]));
@@ -11533,6 +11534,7 @@ bool gripCopy(GripSample* out) noexcept {
             out->sideOk[k] = s.sideOk[k];
             out->wristOk[k] = s.wristOk[k];
             out->palmDiagOk[k] = s.palmDiagOk[k]; out->attachDiagOk[k] = s.attachDiagOk[k]; out->poseWritten[k] = s.poseWritten[k];
+            out->supportContactValid[k] = s.supportContactValid[k];
             std::memcpy(out->gFp[k], s.gFp[k], sizeof(out->gFp[k]));
             std::memcpy(out->g3p[k], s.g3p[k], sizeof(out->g3p[k]));
             std::memcpy(out->fpAt[k], s.fpAt[k], sizeof(out->fpAt[k]));
@@ -11621,11 +11623,12 @@ bool aimCopy(uint32_t idx, AimRec* out) noexcept {
 // pin's vertical or the reach rule), or timing. Trigger: armed and the AMC over 1 m/s. 40 frames per event, at most 5 events a minute, at least a second
 // apart. Per frame, in body axes (right, up, forward; cm) relative to the eye unless it says otherwise: the P1 frame index and the game dt; the pin's vertical
 // delta and horizontal move; the neck 34, both upper arms (the shoulders) as finally written, both grips (T_A), the FP root; G's age in frames (0 with
-// F68c's pairing); the reach correction. The hook posts, the frame thread prints (`armed move (F68g)`).
+// F68c's pairing); the reach correction and elbow optimizer's chosen/reference swivel, wrist swing and constraint violation. The hook posts, the frame thread prints
+// (`armed move (F68g)`).
 struct ArmMoveRec {
     std::atomic<uint32_t> seq{0};
     uint32_t ev = 0, idx = 0, p1 = 0, gAge = 0;
-    float dtMs = 0.0f, delta = 0.0f, th[2] = {}, neck[3] = {}, sh[2][3] = {}, grip[2][3] = {}, fpRoot[3] = {}, reach[3] = {};
+    float dtMs = 0.0f, delta = 0.0f, th[2] = {}, neck[3] = {}, sh[2][3] = {}, grip[2][3] = {}, fpRoot[3] = {}, reach[3] = {}, swivel[2][5] = {};
     uint8_t flags = 0;   // 1 left grip measured, 2 right grip measured, 4 G read, 8 left shoulder read, 16 right shoulder read
 };
 constexpr uint32_t kArmMoveRing = 256;
@@ -11651,6 +11654,7 @@ void armMovePost(const ArmMoveRec& r) noexcept {
             d.grip[s][k] = r.grip[s][k];
         }
     }
+    for (int s = 0; s < 2; ++s) for (int k = 0; k < 5; ++k) d.swivel[s][k] = r.swivel[s][k];
     d.flags = r.flags;
     d.seq.fetch_add(1, std::memory_order_release);
 }
@@ -11675,6 +11679,7 @@ bool armMoveCopy(uint32_t idx, ArmMoveRec* out) noexcept {
                 out->grip[q][k] = s.grip[q][k];
             }
         }
+        for (int q = 0; q < 2; ++q) for (int k = 0; k < 5; ++k) out->swivel[q][k] = s.swivel[q][k];
         out->flags = s.flags;
         std::atomic_thread_fence(std::memory_order_acquire);
         if (s.seq.load(std::memory_order_relaxed) == s1) return true;
@@ -11689,6 +11694,8 @@ bool armMoveGate(bool armed, double speedMps, uint32_t* ev, uint32_t* idx) noexc
 // Frame thread, every tick: prints the records posted since the last call (one line per frame; a header per event).
 void armMoveDrain() noexcept {
     static uint32_t printed = 0, lastEv = 0;
+    static bool previousShoulderValid[2] = {};
+    static float previousShoulder[2][3] = {};
     const uint32_t head = g_amHead.load(std::memory_order_relaxed);
     if (head == printed) return;
     uint32_t from = printed;
@@ -11699,22 +11706,45 @@ void armMoveDrain() noexcept {
         if (!armMoveCopy(i, &r)) continue;
         if (r.ev != lastEv) {
             lastEv = r.ev;
+            previousShoulderValid[0] = previousShoulderValid[1] = false;
             Log::get().note("armed move (F68g): event %u starts (armed, the AMC over 1 m/s): 40 frames, one line each; all positions in body axes (right, up, forward) in "
                             "cm, relative to the cyclopean eye unless it says otherwise; shoulders = the upper arm joints as finally written, grips = T_A, G age = "
-                            "game frames since the pair G was built from",
+                            "game frames since the pair G was built from; elbow optimizer fields are degrees/cm and do not alter its policy",
                             r.ev);
         }
+        double shoulderDelta[2][3] = {};
+        bool shoulderDeltaValid[2] = {};
+        for (int side = 0; side < 2; ++side) {
+            const uint8_t shoulderFlag = side == 0 ? 8u : 16u;
+            if ((r.flags & shoulderFlag) && previousShoulderValid[side]) {
+                shoulderDeltaValid[side] = true;
+                for (int axis = 0; axis < 3; ++axis) shoulderDelta[side][axis] = r.sh[side][axis] - previousShoulder[side][axis];
+            }
+            if (r.flags & shoulderFlag) {
+                for (int axis = 0; axis < 3; ++axis) previousShoulder[side][axis] = r.sh[side][axis];
+                previousShoulderValid[side] = true;
+            } else previousShoulderValid[side] = false;
+        }
         Log::get().note("armed move (F68g) ev %u +%02u P1 frame %u dt %.1f ms: pin up %+.2f cm, d (right %+.2f, fwd %+.2f); neck %+.1f %+.1f %+.1f; shoulder L %s%+.1f %+.1f "
-                        "%+.1f R %s%+.1f %+.1f %+.1f; grip L %s%+.1f %+.1f %+.1f R %s%+.1f %+.1f %+.1f; FP root %s%+.1f %+.1f %+.1f; G age %u frames; reach "
-                        "correction (right %+.2f, up %+.2f, fwd %+.2f) cm",
+                        "%+.1f R %s%+.1f %+.1f %+.1f; shoulder frame delta from prior sample L %s%+.2f/%+.2f/%+.2f R %s%+.2f/%+.2f/%+.2f cm (eye-relative); "
+                        "grip L %s%+.1f %+.1f %+.1f R %s%+.1f %+.1f %+.1f; FP root %s%+.1f %+.1f %+.1f; G age %u frames; reach "
+                        "correction (right %+.2f, up %+.2f, fwd %+.2f) cm; elbow swivel L %s chosen/ref %.1f/%.1f deg, wrist swing %.1f deg, constraint %.2f cm (prior %s); "
+                        "R %s chosen/ref %.1f/%.1f deg, wrist swing %.1f deg, constraint %.2f cm (prior %s)",
                         r.ev, r.idx, r.p1, static_cast<double>(r.dtMs), static_cast<double>(r.delta), static_cast<double>(r.th[0]), static_cast<double>(r.th[1]),
                         static_cast<double>(r.neck[0]), static_cast<double>(r.neck[1]), static_cast<double>(r.neck[2]), (r.flags & 8u) ? "" : "(unread) ",
                         static_cast<double>(r.sh[0][0]), static_cast<double>(r.sh[0][1]), static_cast<double>(r.sh[0][2]), (r.flags & 16u) ? "" : "(unread) ",
-                        static_cast<double>(r.sh[1][0]), static_cast<double>(r.sh[1][1]), static_cast<double>(r.sh[1][2]), (r.flags & 1u) ? "" : "(unread) ",
+                        static_cast<double>(r.sh[1][0]), static_cast<double>(r.sh[1][1]), static_cast<double>(r.sh[1][2]),
+                        shoulderDeltaValid[0] ? "" : "(unavailable) ", static_cast<double>(shoulderDelta[0][0]), static_cast<double>(shoulderDelta[0][1]),
+                        static_cast<double>(shoulderDelta[0][2]), shoulderDeltaValid[1] ? "" : "(unavailable) ", static_cast<double>(shoulderDelta[1][0]),
+                        static_cast<double>(shoulderDelta[1][1]), static_cast<double>(shoulderDelta[1][2]), (r.flags & 1u) ? "" : "(unread) ",
                         static_cast<double>(r.grip[0][0]), static_cast<double>(r.grip[0][1]), static_cast<double>(r.grip[0][2]), (r.flags & 2u) ? "" : "(unread) ",
                         static_cast<double>(r.grip[1][0]), static_cast<double>(r.grip[1][1]), static_cast<double>(r.grip[1][2]), (r.flags & 4u) ? "" : "(unread) ",
                         static_cast<double>(r.fpRoot[0]), static_cast<double>(r.fpRoot[1]), static_cast<double>(r.fpRoot[2]), r.gAge,
-                        static_cast<double>(r.reach[0]), static_cast<double>(r.reach[1]), static_cast<double>(r.reach[2]));
+                        static_cast<double>(r.reach[0]), static_cast<double>(r.reach[1]), static_cast<double>(r.reach[2]),
+                        (r.flags & 32u) ? "measured" : "unavailable", static_cast<double>(r.swivel[0][0]), static_cast<double>(r.swivel[0][1]),
+                        static_cast<double>(r.swivel[0][2]), static_cast<double>(r.swivel[0][3]), r.swivel[0][4] > 0.5f ? "yes" : "no",
+                        (r.flags & 64u) ? "measured" : "unavailable", static_cast<double>(r.swivel[1][0]), static_cast<double>(r.swivel[1][1]),
+                        static_cast<double>(r.swivel[1][2]), static_cast<double>(r.swivel[1][3]), r.swivel[1][4] > 0.5f ? "yes" : "no");
     }
 }
 
@@ -11857,6 +11887,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         int hSource = 0;
         double hOldErr = 0.0, hPlane = 0.0, hFlexAnim = 0.0, hFlexSolved = 0.0, hTwistRaw = 0.0, hTwistApplied = 0.0;
         double wristImprovement = 0.0;
+        bool swivelDiagnostic = false, swivelHadPrevious = false;
+        double swivelChosenDeg = 0.0, swivelReferenceDeg = 0.0, swivelWristSwingDeg = 0.0, swivelViolationCm = 0.0;
         bool gripWritten = false;
         uint32_t uJ = 0xFFFFu;
         // F69g: the grip frames (the attach in the hand's axes): the FP rig's and the 3P animation's, the FP attach's place (FP root frame), and the wrist after
@@ -11998,34 +12030,35 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (!haveTarget) haveTarget = nofoot::handRetarget(LA, I, TA, I, effectiveHand[side]);
             effectiveHandOk[side] = haveTarget && ikMatrixSane(effectiveHand[side]);
         }
-        if (supportCup && anatomyMapOk && effectiveHandOk[0] && effectiveHandOk[1] && pl.hand[0].why == 0 && fpHands.rig[1].why == 0) {
-            // Build the right-hand proxy in the target frame; it represents skin geometry, not gun collision.
-            float rightPalm[16], temp[16];
-            nofoot::pfzMul(fpHands.rig[1].palm, fpHands.model[1][0], temp);
-            nofoot::pfzMul(temp, G.g, rightPalm);
-            double radial[3] = {rightPalm[4], rightPalm[5], rightPalm[6]}, distal[3] = {rightPalm[0], rightPalm[1], rightPalm[2]};
+        if (supportCup && anatomyMapOk && effectiveHandOk[0] && effectiveHandOk[1] && pl.hand[0].why == 0 && fpHands.rig[1].why == 0 &&
+            pl.hand[0].supportContactValid && fpHands.rig[1].supportContactValid) {
+            // The support contact uses K2 geometry; ordinary hand retargeting keeps its anatomical palm frame and finger data.
+            float rightContact[16], temp[16];
+            nofoot::pfzMul(fpHands.rig[1].supportContactLocal, fpHands.model[1][0], temp);
+            nofoot::pfzMul(temp, G.g, rightContact);
+            double radial[3] = {rightContact[4], rightContact[5], rightContact[6]}, distal[3] = {rightContact[0], rightContact[1], rightContact[2]};
             if (nofoot::ikUnit(radial, radial) && nofoot::ikUnit(distal, distal)) {
                 nofoot::PalmPatch rightPatch;
                 for (int c = 0; c < 3; ++c) {
-                    rightPatch.heel[c] = rightPalm[12 + c] - distal[c] * pl.hand[1].length * 0.5 - radial[c] * pl.hand[1].width * 0.5;
+                    rightPatch.heel[c] = rightContact[12 + c] - distal[c] * fpHands.rig[1].supportLength * 0.5 - radial[c] * fpHands.rig[1].supportWidth * 0.5;
                     rightPatch.thumb[c] = radial[c]; rightPatch.normal[c] = radial[c];
                 }
-                rightPatch.halfThickness = pl.hand[1].skinRadius;
+                rightPatch.halfThickness = fpHands.rig[1].supportRadius;
                 rightPatch.ok = true;
-                const nofoot::SupportPalmTarget contact = nofoot::cupUnderHeel(rightPatch, pl.hand[0].skinRadius, 0.002);
-                float leftPalm[16];
+                const nofoot::SupportPalmTarget contact = nofoot::cupUnderHeel(rightPatch, pl.hand[0].supportRadius, 0.002);
+                float leftContact[16];
                 const int rightSign = fpHands.rig[1].palmarSign == 0 ? 1 : fpHands.rig[1].palmarSign;
                 const int leftSign = pl.hand[0].palmarSign == 0 ? -1 : pl.hand[0].palmarSign;
-                const bool basisOk = nofoot::supportPalmFrame(rightPalm, rightSign, leftSign, contact, leftPalm);
+                const bool basisOk = nofoot::supportPalmFrame(rightContact, rightSign, leftSign, contact, leftContact);
                 if (basisOk) {
                     float cupTarget[16], blendedTarget[16];
-                    const bool cupTargetOk = nofoot::handRetarget(pl.hand[0].palm, I, leftPalm, I, cupTarget) && ikMatrixSane(cupTarget);
-                        if (cupTargetOk) {
-                            std::memcpy(supportCupTarget, leftPalm, sizeof(supportCupTarget));
-                            std::memcpy(supportCupRightPalm, rightPalm, sizeof(supportCupRightPalm));
-                            supportCupCommandValid = true;
-                            supportCupGap = contact.gap;
-                        }
+                    const bool cupTargetOk = nofoot::handRetarget(pl.hand[0].supportContactLocal, I, leftContact, I, cupTarget) && ikMatrixSane(cupTarget);
+                    if (cupTargetOk) {
+                        std::memcpy(supportCupTarget, leftContact, sizeof(supportCupTarget));
+                        std::memcpy(supportCupRightPalm, rightContact, sizeof(supportCupRightPalm));
+                        supportCupCommandValid = true;
+                        supportCupGap = contact.gap;
+                    }
                     if (cupTargetOk) {
                         s_supportBlend = nofoot::supportCupBlendStep(s_supportBlend, supportRequested, cupTargetOk, supportStep);
                         if (s_supportBlend <= 0.0 && !supportRequested) s_blendKind = nofoot::kSupportNone;
@@ -12049,9 +12082,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (!supportRequested) s_blendKind = nofoot::kSupportNone;
         supportCup = false;
     }
-    // F69b: the barrels of the 3P animated right attach (66) and the FP right attach (51) through G, formed ONCE here from the animated pose and the FP
-    // snapshot (the pin only translates, so neither moves), for the one square-up function that the reach rule (stage 0), the stage-1 angle and the written
-    // turn all call. Armed with a readable pair of attach frames: the signed rows most aligned with the aim, latched per item; else none (the shoulders').
+    // F75: measure the barrels of the 3P animated right attach (66) and the FP right attach (51) through G once from the animated pose and FP snapshot.
+    // Armed torso yaw remains zero; the barrel rows and shoulder angle are diagnostics only, and the unarmed square-up still uses shoulders.
     // The latch drops when the arms stand down or the held item changes.
     const bool sqArmed = armedNow && mode == 3 && writeOk;   // the written turn's own condition (armedSq below)
     nofoot::BarrelDirs barrelDirs;
@@ -12122,12 +12154,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
     }
     // F66c stage 1 (before the bend): the upper-arm joints U (L, R) as stage 0 left them, and the square-up's angle from them and the FP forward
-    // (G's z row on xz): both exogenous (the game's animation, the stand's raise, the FP rig). The bend then moves the shoulders, the square-up
-    // turns them; the reach constraint reads U*, these points turned by the square-up's rotation, and never the bent shoulders.
+    // (G's z row on xz): both exogenous (the game's animation, the stand's raise, the FP rig). The bend then moves the shoulders; unarmed square-up
+    // may turn them, while armed keeps the authored stance. The reach constraint reads U*, these points turned by any selected square-up, never bent shoulders.
     const bool uaPlan = pl.ok[0] && pl.ok[1] && pl.side[0].U < count && pl.side[1].U < count;
     bool uPreOk = false, sqPre = false;
     double uPre[2][3] = {}, sqPivotPre[3] = {}, sqPhi0 = 0.0;
-    nofoot::SquareYaw sqY;   // F69b: the stage-1 angle with its two candidates (for the log)
+    nofoot::SquareYaw sqY;   // F75: the shared authored-stance angle and diagnostic candidates
     if (armsOk && uaPlan && nofoot::kIkSquarePivot < count) {
         ikPos(g_ikM0[pl.side[0].U], uPre[0]);
         ikPos(g_ikM0[pl.side[1].U], uPre[1]);
@@ -12135,7 +12167,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         uPreOk = true;
         if (pl.sqOk && mode != 2 && nofoot::kIkClavR < count) {
             const double fwdPre[3] = {G.g[8], G.g[9], G.g[10]};
-            // F69b: the same function the reach rule called (armed: the weapon's yaw), with the same barrels.
+            // F75: the same authored-stance angle the reach rule uses; measured barrel yaw has no authority while armed.
             sqY = nofoot::squareYaw(sqArmed, barrelDirs, uPre[0], uPre[1], fwdPre);
             sqPre = sqY.ok;
             sqPhi0 = sqY.phi;
@@ -12260,7 +12292,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             sqTheta = -phi;                                     // theta = yaw(U line) - 90 deg relative to the FP forward
             nofoot::ikSquareClampRad(phi, &sqClamped);          // the old limit's verdict; the unarmed path still clamps
             const double sqW = (mode == 3 && writeOk) ? wSqRamp : 1.0;
-            // F67f: armed (and writing), the torso turns with the weapon at once: phi itself, no clamp, no ramp, no amount.
+            // F75: the armed torso keeps its authored stance; this shared angle is zero, with no hidden turn in the write path.
             const bool armedSq = sqArmed;   // armedNow && mode == 3 && writeOk, the same flag the angle's source was chosen by
             sqApplied = nofoot::squareApplied(phi, armedSq, sqAmount, sqW, &sqOverOld);
             if (armedSq) sqClamped = false;
@@ -12283,16 +12315,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         ikPos(g_ikM0[pl.side[0].U], uL);
         ikPos(g_ikM0[pl.side[1].U], uR);
         double phiAfter = 0.0;
-        if (sqHave && sqY.src == nofoot::kSquareWeapon && barrelDirs.ok) {
-            // F69b: the yaw left is the barrel's: the 3P barrel turned by the applied angle (the arm joints sit under the chest 24: the full share), against the FP's.
-            const double up[3] = {0.0, 1.0, 0.0};
-            double Rt[9];
-            nofoot::ikRotAxis(up, sqApplied, Rt);
-            const double b3[3] = {barrelDirs.b3[0] * Rt[0] + barrelDirs.b3[1] * Rt[3] + barrelDirs.b3[2] * Rt[6], 0.0,
-                                  barrelDirs.b3[0] * Rt[2] + barrelDirs.b3[1] * Rt[5] + barrelDirs.b3[2] * Rt[8]};
-            const double bF[3] = {barrelDirs.bF[0], 0.0, barrelDirs.bF[2]};
-            sqAfter = -nofoot::ikYawFromTo(b3, bF);
-        } else if (sqHave && nofoot::ikSquareToForward(uL, uR, fwd, &phiAfter)) {
+        if (sqHave && nofoot::ikSquareToForward(uL, uR, fwd, &phiAfter)) {
             sqAfter = -phiAfter;
         }
         const double shoulderDelta[3] = {uR[0] - uL[0], uR[1] - uL[1], uR[2] - uL[2]};
@@ -12547,7 +12570,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 s_swivelItem = swivelItem;
                 s_swivelHave[0] = s_swivelHave[1] = false;
             }
-            const double prev = s_swivelHave[side] ? s_swivelPrevious[side] : theta;
+            const bool havePrevious = s_swivelHave[side];
+            const double prev = havePrevious ? s_swivelPrevious[side] : theta;
             double bestTheta = theta, bestViolation = std::numeric_limits<double>::infinity(), bestSwing = std::numeric_limits<double>::infinity();
             double bestContinuity = std::numeric_limits<double>::infinity();
             double baseSwing = std::numeric_limits<double>::infinity();
@@ -12603,6 +12627,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             for (int k = -5; k <= 5; ++k) consider(coarse + k * (1.0 * nofoot::kIkPi / 180.0));
             theta = bestTheta;
             o.clamped = bestViolation > 1e-6;
+            o.swivelDiagnostic = true;
+            o.swivelHadPrevious = havePrevious;
+            o.swivelChosenDeg = theta * 180.0 / nofoot::kIkPi;
+            o.swivelReferenceDeg = prev * 180.0 / nofoot::kIkPi;
+            o.swivelWristSwingDeg = bestSwing;
+            o.swivelViolationCm = bestViolation * 100.0;
             std::memcpy(E, bestE, sizeof(E));
             hs = bestHs;
             for (int i = 0; i < 3; ++i) { se[i] = E[i] - S[i]; ht[i] = tb.hand[i] - E[i]; }
@@ -13328,6 +13358,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     rel(so[side].tA, r.grip[side]);
                     r.flags |= side == 0 ? 1u : 2u;
                 }
+                if (so[side].swivelDiagnostic) {
+                    r.swivel[side][0] = static_cast<float>(so[side].swivelChosenDeg);
+                    r.swivel[side][1] = static_cast<float>(so[side].swivelReferenceDeg);
+                    r.swivel[side][2] = static_cast<float>(so[side].swivelWristSwingDeg);
+                    r.swivel[side][3] = static_cast<float>(so[side].swivelViolationCm);
+                    r.swivel[side][4] = so[side].swivelHadPrevious ? 1.0f : 0.0f;
+                    r.flags |= side == 0 ? 32u : 64u;
+                }
             }
             if (armsOk) {
                 const double fr[3] = {G.g[12], G.g[13], G.g[14]};
@@ -13361,6 +13399,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.authoredLeft = authoredLeftForCall;
         r.supportValid = supportTargetValid;
         r.supportBlend = static_cast<float>(s_supportBlend);
+        r.supportContactValid[0] = pl.hand[0].supportContactValid;
+        r.supportContactValid[1] = fpHands.rig[1].supportContactValid;
         const double sepV[3] = {static_cast<double>(fpm[1][12]) - fpm[0][12], static_cast<double>(fpm[1][13]) - fpm[0][13], static_cast<double>(fpm[1][14]) - fpm[0][14]};
         r.sep = static_cast<float>(nofoot::ikLen(sepV));
         for (int side = 0; side < 2; ++side) {
@@ -13387,12 +13427,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             nofoot::pfzMul(fpAttach, G.g, attachFp);
             if (!ikMatrixSane(palmFp) || !ikMatrixSane(palm3p) || !ikMatrixSane(attachFp)) continue;
             if (side == 0 && supportTargetValid && ikMatrixSane(effectiveHand[0])) {
-                float blendedPalm[16];
-                nofoot::pfzMul(pl.hand[0].palm, effectiveHand[0], blendedPalm);
-                if (ikMatrixSane(blendedPalm)) {
+                float solvedContact[16], blendedContact[16];
+                nofoot::pfzMul(pl.hand[0].supportContactLocal, hFinal, solvedContact);
+                nofoot::pfzMul(pl.hand[0].supportContactLocal, effectiveHand[0], blendedContact);
+                if (ikMatrixSane(solvedContact) && ikMatrixSane(blendedContact)) {
                     for (int axis = 0; axis < 3; ++axis)
-                        r.blendedTargetDeltaMm[axis] = 1000.0f * (palm3p[12 + axis] - blendedPalm[12 + axis]);
-                    r.blendedTargetAngleDeg = static_cast<float>(nofoot::ikRotAngleDeg(palm3p, blendedPalm));
+                        r.blendedTargetDeltaMm[axis] = 1000.0f * (solvedContact[12 + axis] - blendedContact[12 + axis]);
+                    r.blendedTargetAngleDeg = static_cast<float>(nofoot::ikRotAngleDeg(solvedContact, blendedContact));
                     r.blendedTargetDiagOk = true;
                 }
             }
@@ -13421,10 +13462,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 r.cupAxisDot[axis] = supportCupTarget[axis * 4] * rightAxis[0] + supportCupTarget[axis * 4 + 1] * rightAxis[1] + supportCupTarget[axis * 4 + 2] * rightAxis[2];
             }
             r.cupAngleDeg = static_cast<float>(nofoot::ikRotAngleDeg(supportCupTarget, supportCupRightPalm));
-            r.cupDimsMm[0] = static_cast<float>(pl.hand[1].width * 1000.0);
-            r.cupDimsMm[1] = static_cast<float>(pl.hand[1].length * 1000.0);
-            r.cupDimsMm[2] = static_cast<float>(pl.hand[1].skinRadius * 1000.0);
-            r.cupDimsMm[3] = static_cast<float>(pl.hand[0].skinRadius * 1000.0);
+            r.cupDimsMm[0] = static_cast<float>(fpHands.rig[1].supportWidth * 1000.0);
+            r.cupDimsMm[1] = static_cast<float>(fpHands.rig[1].supportLength * 1000.0);
+            r.cupDimsMm[2] = static_cast<float>(fpHands.rig[1].supportRadius * 1000.0);
+            r.cupDimsMm[3] = static_cast<float>(pl.hand[0].supportRadius * 1000.0);
             r.cupGapMm = static_cast<float>(supportCupGap * 1000.0);
             r.cupDiagOk = true;
         }
@@ -14264,17 +14305,18 @@ void gripPrint(int side, const nofoot::GripSteady& gs, const GripSample& r) noex
                       static_cast<double>(r.attachAngleDeg[side]), r.poseWritten[side] ? "arm solve written" : "arm solve not written");
     else
         std::snprintf(attachDiag, sizeof(attachDiag), "unavailable (final attach or palm frame unreadable; arm solve %s)", r.poseWritten[side] ? "written" : "not written");
-    Log::get().note("native on foot hand target (F70b): item \"%s\", %s hand, target %s; anatomy %s, generation %u; support %s (commanded proxy gap %.1f mm; not skin clearance)",
-                    nm, side == 0 ? "left" : "right", target, nofoot::handMapWhyText(static_cast<nofoot::HandMapWhy>(r.mapWhy[side])), r.mapGeneration, support,
+    Log::get().note("native on foot hand target (F70b/F75): item \"%s\", %s hand, target %s; anatomy %s, generation %u; K2 contact left/right %s/%s; support %s (commanded proxy gap %.1f mm; not skin clearance)",
+                    nm, side == 0 ? "left" : "right", target, nofoot::handMapWhyText(static_cast<nofoot::HandMapWhy>(r.mapWhy[side])), r.mapGeneration,
+                    r.supportContactValid[0] ? "valid" : "unavailable", r.supportContactValid[1] ? "valid" : "unavailable", support,
                     1000.0 * static_cast<double>(r.supportGap));
     if (side == 0 && r.cupDiagOk) {
-        Log::get().note("native on foot cup geometry (F74): commanded centre from right palm in its axes %+0.1f/%+0.1f/%+0.1f mm; cup/right axis dots %.3f/%.3f/%.3f, frame angle %.1f deg; dimensions used right width/length/radius %.1f/%.1f/%.1f mm, left radius %.1f mm, commanded proxy gap %.1f mm (not measured skin clearance); support blend %.2f",
+            Log::get().note("native on foot cup geometry (F75): commanded centre from right K2 contact frame in its axes %+0.1f/%+0.1f/%+0.1f mm; cup/contact axis dots %.3f/%.3f/%.3f, frame angle %.1f deg; dimensions used right width/length/radius %.1f/%.1f/%.1f mm, left radius %.1f mm, commanded proxy gap %.1f mm (not measured skin clearance); support blend %.2f",
                         static_cast<double>(r.cupCentreMm[0]), static_cast<double>(r.cupCentreMm[1]), static_cast<double>(r.cupCentreMm[2]), static_cast<double>(r.cupAxisDot[0]),
                         static_cast<double>(r.cupAxisDot[1]), static_cast<double>(r.cupAxisDot[2]), static_cast<double>(r.cupAngleDeg), static_cast<double>(r.cupDimsMm[0]),
                         static_cast<double>(r.cupDimsMm[1]), static_cast<double>(r.cupDimsMm[2]), static_cast<double>(r.cupDimsMm[3]), static_cast<double>(r.cupGapMm),
                         static_cast<double>(r.supportBlend));
         if (r.blendedTargetDiagOk)
-            Log::get().note("native on foot cup target residual (F74): final solved left palm minus actual blended target in model axes %+0.1f/%+0.1f/%+0.1f mm, rotation %.2f deg; pose %s",
+            Log::get().note("native on foot cup target residual (F75): final solved left K2 contact minus actual blended target in model axes %+0.1f/%+0.1f/%+0.1f mm, rotation %.2f deg; pose %s",
                             static_cast<double>(r.blendedTargetDeltaMm[0]), static_cast<double>(r.blendedTargetDeltaMm[1]), static_cast<double>(r.blendedTargetDeltaMm[2]),
                             static_cast<double>(r.blendedTargetAngleDeg), r.poseWritten[0] ? "written" : "not written");
     }
@@ -14840,28 +14882,27 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
         }
     }
     if (st.sqN) {
-        // F69b: the square-up's angle. Proof: the rifle's phi (weapon) within +-10 deg; the reach correction under 5 cm (F68: 16.5 cm mean).
+        // F75: summarize the selected armed angle and its measured inputs and effect.
         char nm[64] = {};
         journalHeldItemName(nm, sizeof(nm));
-        Log::get().note("native on foot square-up (F69b/F70a): item \"%s\": %llu reach-rule calls; the weapon's yaw readable in %llu (used %llu; barrels latched in %llu); "
-                        "armed stance preserved in %llu calls (no axes %llu, 3P row too vertical %llu, FP row too vertical %llu, both too vertical %llu, bad yaw %llu); "
-                        "selected row horizontal lengths mean 3P %.3f, FP %.3f (usable at %.2f); "
-                        "phi (weapon) mean %+.1f largest %.1f deg; the shoulders' phi (F59) readable in %llu: mean %+.1f largest %.1f deg; barrel rows: 3P attach "
-                        "%s%d, FP attach %s%d; reach correction while the weapon's yaw was used: mean %.1f max %.1f cm (the proof: phi within 10 deg, correction "
-                        "under 5 cm)",
-                        nm, static_cast<unsigned long long>(st.sqN), static_cast<unsigned long long>(st.sqHaveW), static_cast<unsigned long long>(st.sqUsedW),
-                        static_cast<unsigned long long>(st.sqLatched), static_cast<unsigned long long>(st.sqPosePreserved),
+        Log::get().note("native on foot square-up (F75): item \"%s\": %llu armed reach-rule calls; authored stance selected in %llu; torso phi mean %+.2f largest %.2f deg; "
+                        "resulting shoulder displacement mean %.2f max %.2f cm; measured weapon yaw readable in %llu (latched %llu), phi mean %+.1f largest %.1f deg; "
+                        "measured shoulder phi readable in %llu: mean %+.1f largest %.1f deg; barrel rows: 3P attach %s%d, FP attach %s%d; "
+                        "selected row horizontal lengths mean 3P %.3f, FP %.3f (usable at %.2f); weapon yaw availability: no axes %llu, 3P vertical %llu, FP vertical %llu, both vertical %llu, bad yaw %llu",
+                        nm, static_cast<unsigned long long>(st.sqN), static_cast<unsigned long long>(st.sqPosePreserved),
+                        st.sqN ? st.sqChosenPhiSum / static_cast<double>(st.sqN) : 0.0, st.sqChosenPhiAbs,
+                        st.sqN ? st.sqShoulderMoveSumCm / static_cast<double>(st.sqN) : 0.0, st.sqShoulderMoveMaxCm,
+                        static_cast<unsigned long long>(st.sqHaveW), static_cast<unsigned long long>(st.sqLatched),
+                        st.sqHaveW ? st.sqPhiWSum / static_cast<double>(st.sqHaveW) : 0.0, st.sqPhiWAbs,
+                        static_cast<unsigned long long>(st.sqHaveSh), st.sqHaveSh ? st.sqPhiShSum / static_cast<double>(st.sqHaveSh) : 0.0, st.sqPhiShAbs,
+                        st.sqS3 < 0.0 ? "-row " : "+row ", st.sqA3, st.sqSF < 0.0 ? "-row " : "+row ", st.sqAF,
+                        st.sqBarrelNormN ? st.sqB3XzSum / static_cast<double>(st.sqBarrelNormN) : 0.0,
+                        st.sqBarrelNormN ? st.sqBFXzSum / static_cast<double>(st.sqBarrelNormN) : 0.0, nofoot::kBarrelMinXz,
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponNoAxes]),
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeapon3pVertical]),
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponFpVertical]),
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponBothVertical]),
-                        static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponBadYaw]),
-                        st.sqBarrelNormN ? st.sqB3XzSum / static_cast<double>(st.sqBarrelNormN) : 0.0,
-                        st.sqBarrelNormN ? st.sqBFXzSum / static_cast<double>(st.sqBarrelNormN) : 0.0, nofoot::kBarrelMinXz,
-                        st.sqHaveW ? st.sqPhiWSum / static_cast<double>(st.sqHaveW) : 0.0, st.sqPhiWAbs,
-                        static_cast<unsigned long long>(st.sqHaveSh), st.sqHaveSh ? st.sqPhiShSum / static_cast<double>(st.sqHaveSh) : 0.0, st.sqPhiShAbs,
-                        st.sqS3 < 0.0 ? "-row " : "+row ", st.sqA3, st.sqSF < 0.0 ? "-row " : "+row ", st.sqAF,
-                        st.sqUsedW ? st.sqUsedReachSum / static_cast<double>(st.sqUsedW) : 0.0, st.sqUsedReachMax);
+                        static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponBadYaw]));
     }
     if (g_pinEyeCalDone.exchange(0, std::memory_order_relaxed) > 0 && g_pinEyeCal.have)
         Log::get().note("native on foot body pin (F68e): the eye point in the head joint's frame is captured: e_h = (%.4f, %.4f, %.4f) m (head axes: forward = "

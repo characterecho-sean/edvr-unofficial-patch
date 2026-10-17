@@ -2589,17 +2589,121 @@ int wmain(int argc, wchar_t** argv) {
                                              std::fabs(modelRight[0]) < 1e-12 && std::fabs(modelRight[1]) < 1e-12 && std::fabs(modelRight[2] - 0.05) < 1e-12 &&
                                              std::fabs(targetFromHead[0] - 0.10) < 1e-12 && std::fabs(targetFromHead[2] + 0.15) < 1e-12;
                 check(separateBasisOk, "F74: positive view offset uses LOCAL head-right for eye-origin motion, current stereo scene-right for world shift, and the inverse AMC's linear part for body axes; AMC translation is ignored");
-                const double opticP14[3] = {0.20, 0.0, 2.0}, sightForward[3] = {0.0, 0.0, 1.0}, identityRows[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-                const double worldBias[3] = {0.05, 0.0, 0.0};
-                const double baselineEye[3] = {0.20, 0.0, 2.15}, shiftedEye[3] = {0.25, 0.0, 2.15};
-                double shiftedP14[3];
-                nf::weaponViewOffsetTargetPoint(opticP14, worldBias, shiftedP14);
-                nf::AdsSightErr baseEyeErr, shiftedEyeErr;
-                const bool adsBiasOk = nf::adsSightErrorEyeK(opticP14, baselineEye, sightForward, identityRows, 0.15, baseEyeErr) &&
-                                       nf::adsSightErrorEyeK(shiftedP14, shiftedEye, sightForward, identityRows, 0.15, shiftedEyeErr);
-                check(adsBiasOk && shiftedP14[0] == 0.25 && std::fabs(baseEyeErr.seatedFull[0] - shiftedEyeErr.seatedFull[0]) < 1e-12 &&
-                          std::fabs(baseEyeErr.seatedFull[1] - shiftedEyeErr.seatedFull[1]) < 1e-12 && std::fabs(baseEyeErr.seatedFull[2] - shiftedEyeErr.seatedFull[2]) < 1e-12,
-                      "F74: ADS feedback preserves its residual when eye and intended sight target carry the same deliberate world offset");
+                const double opticP14[3] = {0.20, 0.0, 2.0}, sightForward[3] = {0.0, 0.0, 1.0};
+                const double localRight[3] = {0.6, 0.0, 0.8}, sceneRight[3] = {0.8, 0.2, -0.56};
+                const double yaw = 0.61, cy = std::cos(yaw), sy = std::sin(yaw);
+                const float amcRows[9] = {static_cast<float>(cy), 0.0f, static_cast<float>(-sy), 0.0f, 1.0f, 0.0f, static_cast<float>(sy), 0.0f,
+                                          static_cast<float>(cy)};
+                const double amcRowsD[9] = {cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy};
+                const float affineAmc[16] = {amcRows[0], amcRows[1], amcRows[2], 0, amcRows[3], amcRows[4], amcRows[5], 0,
+                                             amcRows[6], amcRows[7], amcRows[8], 0, 0, 0, 0, 1};
+                const float inverseAmcRows[16] = {amcRows[0], amcRows[3], amcRows[6], 0, amcRows[1], amcRows[4], amcRows[7], 0,
+                                                   amcRows[2], amcRows[5], amcRows[8], 0, 0, 0, 0, 1};
+                const double offsetCasesM[4] = {0.0, 0.025, 0.10, -0.10};
+                const double adsEyeBase[3] = {opticP14[0], opticP14[1], opticP14[2] + 0.15};
+                const double dt = 1.0 / 90.0;
+                bool adsActualP14Ok = true, adsBodyBiasOk = true;
+                for (double offsetM : offsetCasesM) {
+                    double seatedBias[3], worldBias[3];
+                    adsActualP14Ok = adsActualP14Ok && nf::weaponViewOffsetSeated(offsetM, localRight, seatedBias) &&
+                                     nf::weaponViewOffsetWorld(offsetM, sceneRight, worldBias);
+                    const double biasNorm = nf::ikLen(worldBias);
+                    adsActualP14Ok = adsActualP14Ok && std::fabs(biasNorm - std::fabs(offsetM)) < 1e-12 &&
+                                     std::fabs(nf::ikLen(seatedBias) - std::fabs(offsetM)) < 1e-12;
+                    double adsPos[3] = {}, adsVel[3] = {}, adsTarget[3] = {};
+                    for (int step = 0; step < 180; ++step) {
+                        double adsWorld[3];
+                        nf::adsCamShiftWorld(adsPos, amcRows, adsWorld);
+                        const double eyeNow[3] = {adsEyeBase[0] + adsWorld[0] + worldBias[0], adsEyeBase[1] + adsWorld[1] + worldBias[1],
+                                                  adsEyeBase[2] + adsWorld[2] + worldBias[2]};
+                        nf::AdsSightErr err;
+                        adsActualP14Ok = adsActualP14Ok && nf::adsSightErrorEyeK(opticP14, eyeNow, sightForward, amcRowsD, 0.15, err);
+                        nf::adsEyeStep(adsPos, adsVel, adsTarget, err.seatedFull, true, true, false, dt);
+                    }
+                    double adsWorld[3];
+                    nf::adsCamShiftWorld(adsPos, amcRows, adsWorld);
+                    const double finalEye[3] = {adsEyeBase[0] + adsWorld[0] + worldBias[0], adsEyeBase[1] + adsWorld[1] + worldBias[1],
+                                                adsEyeBase[2] + adsWorld[2] + worldBias[2]};
+                    const double eyeMiss[3] = {finalEye[0] - adsEyeBase[0], finalEye[1] - adsEyeBase[1], finalEye[2] - adsEyeBase[2]};
+                    adsActualP14Ok = adsActualP14Ok && nf::ikLen(eyeMiss) < 0.001;
+
+                    // The frame-thread pin removes the full ADS camera shift and the independent manual world bias.
+                    const double adsShift[3] = {adsPos[0], adsPos[1], adsPos[2]};
+                    double adsWorldAtPin[3];
+                    nf::adsCamShiftWorld(adsShift, amcRows, adsWorldAtPin);
+                    const double jobCam[3] = {0.4, 1.2, -0.7};
+                    const float biasedCamera[3] = {static_cast<float>(jobCam[0] + adsWorldAtPin[0] + worldBias[0]),
+                                                   static_cast<float>(jobCam[1] + adsWorldAtPin[1] + worldBias[1]),
+                                                   static_cast<float>(jobCam[2] + adsWorldAtPin[2] + worldBias[2])};
+                    float unlockedCam[3];
+                    nf::adsUnlockedCam(biasedCamera, adsShift, amcRows, unlockedCam);
+                    for (int i = 0; i < 3; ++i) unlockedCam[i] = static_cast<float>(static_cast<double>(unlockedCam[i]) - worldBias[i]);
+                    const double pinMiss[3] = {static_cast<double>(unlockedCam[0]) - jobCam[0], static_cast<double>(unlockedCam[1]) - jobCam[1],
+                                               static_cast<double>(unlockedCam[2]) - jobCam[2]};
+                    adsBodyBiasOk = adsBodyBiasOk && nf::ikLen(pinMiss) < 1e-6;
+
+                    double modelBias[3], worldRoundTrip[3];
+                    nf::ikVectorXform(worldBias, inverseAmcRows, modelBias);
+                    nf::ikVectorXform(modelBias, affineAmc, worldRoundTrip);
+                    adsBodyBiasOk = adsBodyBiasOk && std::fabs(worldRoundTrip[0] - worldBias[0]) < 1e-7 &&
+                                    std::fabs(worldRoundTrip[1] - worldBias[1]) < 1e-7 && std::fabs(worldRoundTrip[2] - worldBias[2]) < 1e-7;
+                    const double authored[3] = {-0.02, 1.48, 0.02};
+                    const double headTarget[3] = {0.12, 1.32, -0.08};
+                    for (double detachW : {0.0, 0.5, 1.0}) {
+                        double bodyTarget[3], landedWorld[3];
+                        nf::pinDetachTarget(headTarget, authored, detachW, bodyTarget);
+                        nf::weaponViewOffsetTarget(bodyTarget, modelBias);
+                        nf::ikVectorXform(bodyTarget, affineAmc, landedWorld);
+                        const double expectedModel[3] = {headTarget[0] + (authored[0] - headTarget[0]) * detachW,
+                                                         headTarget[1] + (authored[1] - headTarget[1]) * detachW,
+                                                         headTarget[2] + (authored[2] - headTarget[2]) * detachW};
+                        double expectedWorld[3];
+                        nf::ikVectorXform(expectedModel, affineAmc, expectedWorld);
+                        adsBodyBiasOk = adsBodyBiasOk && std::fabs((landedWorld[0] - expectedWorld[0]) - worldBias[0]) < 1e-7 &&
+                                        std::fabs((landedWorld[1] - expectedWorld[1]) - worldBias[1]) < 1e-7 &&
+                                        std::fabs((landedWorld[2] - expectedWorld[2]) - worldBias[2]) < 1e-7;
+                    }
+                }
+                check(adsActualP14Ok,
+                      "F75: the ADS filter always targets actual P14 plus k-forward; with zero, +2.5 cm, and both +/-10 cm manual offsets it cancels camera bias through a rotated AMC and nonparallel LOCAL/world right axes");
+                check(adsBodyBiasOk,
+                      "F75: pin input removes ADS and manual camera shifts back to baseline, while the full world body bias survives ADS detach at weights 0, 0.5 and 1 through a rotated AMC");
+                // A live setting change while ADS is held is corrected by the existing eye filter; release clears only that correction, and repress reacquires it.
+                {
+                    double livePos[3] = {}, liveVel[3] = {}, liveTarget[3] = {};
+                    const double baseBiasM = 0.025, nextBiasM = -0.10;
+                    double biasA[3], biasB[3];
+                    nf::weaponViewOffsetWorld(baseBiasM, sceneRight, biasA);
+                    nf::weaponViewOffsetWorld(nextBiasM, sceneRight, biasB);
+                    auto runAdsSteps = [&](const double bias[3], bool active, int count) {
+                        for (int step = 0; step < count; ++step) {
+                            double adsWorld[3];
+                            nf::adsCamShiftWorld(livePos, amcRows, adsWorld);
+                            const double eyeNow[3] = {adsEyeBase[0] + adsWorld[0] + bias[0], adsEyeBase[1] + adsWorld[1] + bias[1],
+                                                      adsEyeBase[2] + adsWorld[2] + bias[2]};
+                            nf::AdsSightErr err;
+                            nf::adsSightErrorEyeK(opticP14, eyeNow, sightForward, amcRowsD, 0.15, err);
+                            nf::adsEyeStep(livePos, liveVel, liveTarget, err.seatedFull, true, active, false, dt);
+                        }
+                    };
+                    runAdsSteps(biasA, true, 180);
+                    runAdsSteps(biasB, true, 180);
+                    double correctedWorld[3];
+                    nf::adsCamShiftWorld(livePos, amcRows, correctedWorld);
+                    const double correctedEyeMiss[3] = {adsEyeBase[0] + correctedWorld[0] + biasB[0] - adsEyeBase[0],
+                                                        adsEyeBase[1] + correctedWorld[1] + biasB[1] - adsEyeBase[1],
+                                                        adsEyeBase[2] + correctedWorld[2] + biasB[2] - adsEyeBase[2]};
+                    runAdsSteps(biasB, false, 180);
+                    const bool releaseClears = nf::ikLen(livePos) < 0.001;
+                    runAdsSteps(biasA, true, 180);
+                    double repressedWorld[3];
+                    nf::adsCamShiftWorld(livePos, amcRows, repressedWorld);
+                    const double repressedMiss[3] = {adsEyeBase[0] + repressedWorld[0] + biasA[0] - adsEyeBase[0],
+                                                     adsEyeBase[1] + repressedWorld[1] + biasA[1] - adsEyeBase[1],
+                                                     adsEyeBase[2] + repressedWorld[2] + biasA[2] - adsEyeBase[2]};
+                    check(nf::ikLen(correctedEyeMiss) < 0.001 && releaseClears && nf::ikLen(repressedMiss) < 0.001,
+                          "F75: a live view-offset change is reacquired during ADS, release returns only the ADS correction to zero, and repress restores actual-P14 alignment");
+                }
                 const double authored[3] = {-0.02, 1.48, 0.02};
                 const double detach[3] = {0.0, 0.5, 1.0};
                 bool detachOffsetOk = true;
@@ -3169,21 +3273,94 @@ int wmain(int argc, wchar_t** argv) {
                 nf::turnAboutVertical(uL, pivot, sqS.phi, uStarS);
                 double phiDirect = 0.0;
                 nf::ikSquareToForward(uL, uR, aim, &phiDirect);
-                check(sqW.ok && sqW.src == nf::kSquareWeapon && std::fabs(sqW.phiW) < 1e-9 && std::fabs(sqW.phiSh + 38.0 * kR) < 1e-9 && sqW.phi == sqW.phiW &&
-                          sqS.src == nf::kSquareShoulders && sqS.phi == phiDirect && std::fabs(uStarW[2] - uStarS[2] - 0.18 * std::sin(blade)) < 1e-9 &&
-                          uStarW[2] - uStarS[2] > 0.08 && uStarW[2] - uStarS[2] < 0.115,
-                      "F69b: a stance bladed 38 deg with the weapon on the aim gives phi 0 (the shoulders' would be -38) and U*'s left shoulder 11 cm further forward; "
-                      "unarmed it is ikSquareToForward unchanged, bit for bit");
-                // A 3P body 30 deg off the FP aim (the aim-lag case): phi = -30, and the turn lands the barrel on the aim.
+                check(sqW.ok && sqW.src == nf::kSquarePreservePose && std::fabs(sqW.phiW) < 1e-9 && std::fabs(sqW.phiSh + 38.0 * kR) < 1e-9 && sqW.phi == 0.0 &&
+                          sqS.src == nf::kSquareShoulders && sqS.phi == phiDirect && std::fabs(uStarW[2] - uL[2]) < 1e-9 &&
+                          std::fabs(uStarS[2] - uL[2] + 0.18 * std::sin(blade)) < 1e-9,
+                      "F75: the armed 38 deg authored stance keeps torso phi 0 despite shoulder phi -38 and an aim-aligned pre-solve barrel; unarmed square-up remains unchanged");
+                // The weapon's animated wrist can lead or lag by 30 deg before arm IK overwrites it; fixed shoulders, root and hand targets must not turn the chest.
                 nf::BarrelDirs bdLag = bd1;
-                bdLag.b3[0] = std::sin(30.0 * kR);
-                bdLag.b3[1] = 0.0;
-                bdLag.b3[2] = std::cos(30.0 * kR);
-                const nf::SquareYaw sqLag = nf::squareYaw(true, bdLag, uL, uR, aim);
-                double Rt[9];
-                nf::ikRotAxis(upV, sqLag.phi, Rt);
-                const double turned[3] = {bdLag.b3[0] * Rt[0] + bdLag.b3[1] * Rt[3] + bdLag.b3[2] * Rt[6], bdLag.b3[0] * Rt[1] + bdLag.b3[1] * Rt[4] + bdLag.b3[2] * Rt[7],
-                                          bdLag.b3[0] * Rt[2] + bdLag.b3[1] * Rt[5] + bdLag.b3[2] * Rt[8]};
+                const double fixedHandL[3] = {-0.25, 1.2, 0.55}, fixedHandR[3] = {0.25, 1.2, 0.55};
+                double fixedShoulderL[3], fixedShoulderR[3];
+                nf::turnAboutVertical(uL, pivot, 0.0, fixedShoulderL);
+                nf::turnAboutVertical(uR, pivot, 0.0, fixedShoulderR);
+                const double handBeforeL[3] = {fixedHandL[0] - uL[0], fixedHandL[1] - uL[1], fixedHandL[2] - uL[2]};
+                const double handBeforeR[3] = {fixedHandR[0] - uR[0], fixedHandR[1] - uR[1], fixedHandR[2] - uR[2]};
+                bool wristInvariant = true;
+                double wristMeasuredPhi[2] = {};
+                for (int i = 0; i < 2; ++i) {
+                    const double wristYaw = (i == 0 ? -30.0 : 30.0) * kR;
+                    bdLag.b3[0] = std::sin(wristYaw); bdLag.b3[1] = 0.0; bdLag.b3[2] = std::cos(wristYaw);
+                    const nf::SquareYaw sqLag = nf::squareYaw(true, bdLag, uL, uR, aim);
+                    wristMeasuredPhi[i] = sqLag.phiW;
+                    double shoulderL[3], shoulderR[3];
+                    nf::turnAboutVertical(uL, pivot, sqLag.phi, shoulderL);
+                    nf::turnAboutVertical(uR, pivot, sqLag.phi, shoulderR);
+                    const double handAfterL[3] = {fixedHandL[0] - shoulderL[0], fixedHandL[1] - shoulderL[1], fixedHandL[2] - shoulderL[2]};
+                    const double handAfterR[3] = {fixedHandR[0] - shoulderR[0], fixedHandR[1] - shoulderR[1], fixedHandR[2] - shoulderR[2]};
+                    wristInvariant = wristInvariant && sqLag.src == nf::kSquarePreservePose && sqLag.phi == 0.0 &&
+                                     std::fabs(shoulderL[0] - fixedShoulderL[0]) < 1e-12 && std::fabs(shoulderL[2] - fixedShoulderL[2]) < 1e-12 &&
+                                     std::fabs(shoulderR[0] - fixedShoulderR[0]) < 1e-12 && std::fabs(shoulderR[2] - fixedShoulderR[2]) < 1e-12 &&
+                                     std::fabs(nf::ikLen(handAfterL) - nf::ikLen(handBeforeL)) < 1e-12 &&
+                                     std::fabs(nf::ikLen(handAfterR) - nf::ikLen(handBeforeR)) < 1e-12;
+                }
+                check(wristInvariant && std::fabs(wristMeasuredPhi[0] - 30.0 * kR) < 1e-9 && std::fabs(wristMeasuredPhi[1] + 30.0 * kR) < 1e-9,
+                      "F75: with fixed shoulders, root and hand targets, animated wrist/barrel yaw at -30/+30 deg is measured but cannot rotate the armed chest or move either shoulder");
+                bool rootYawOk = true;
+                const double origin[3] = {}, forwardLocal[3] = {0.0, 0.0, 1.0};
+                const bool oneArm[2] = {true, false};
+                const double reachRadius[2] = {0.5, 0.0};
+                const double reachableV[2][3] = {{0.3, 0.0, 0.2}, {0.0, 0.0, 0.0}};
+                const double unreachableV[2][3] = {{0.8, 0.0, 0.6}, {0.0, 0.0, 0.0}};
+                const auto setYawMatrix = [](float m[16], double a) noexcept {
+                    nf::pfzIdentity(m);
+                    const float c = static_cast<float>(std::cos(a)), s = static_cast<float>(std::sin(a));
+                    m[0] = c; m[2] = -s; m[8] = s; m[10] = c;
+                };
+                for (double rootYawDeg : {30.0, 60.0}) {
+                    const double rootYaw = rootYawDeg * kR;
+                    double aimRoot[3], uLRoot[3], uRRoot[3], b3Root[3], bFRoot[3];
+                    nf::turnAboutVertical(forwardLocal, origin, rootYaw, aimRoot);
+                    nf::turnAboutVertical(uL, origin, rootYaw, uLRoot);
+                    nf::turnAboutVertical(uR, origin, rootYaw, uRRoot);
+                    nf::turnAboutVertical(bd1.b3, origin, rootYaw, b3Root);
+                    nf::turnAboutVertical(bd1.bF, origin, rootYaw, bFRoot);
+                    nf::BarrelDirs rootedBarrels = bd1;
+                    for (int c = 0; c < 3; ++c) { rootedBarrels.b3[c] = b3Root[c]; rootedBarrels.bF[c] = bFRoot[c]; }
+                    const nf::SquareYaw rooted = nf::squareYaw(true, rootedBarrels, uLRoot, uRRoot, aimRoot);
+                    double handRoot[3]; nf::turnAboutVertical(fixedHandL, origin, rootYaw, handRoot);
+                    const double baseReach[3] = {fixedHandL[0] - uL[0], fixedHandL[1] - uL[1], fixedHandL[2] - uL[2]};
+                    const double rotatedReach[3] = {handRoot[0] - uLRoot[0], handRoot[1] - uLRoot[1], handRoot[2] - uLRoot[2]};
+                    double inV[2][3] = {}, outV[2][3] = {}, inDelta[3] = {}, outDelta[3] = {};
+                    nf::turnAboutVertical(reachableV[0], origin, rootYaw, inV[0]);
+                    nf::turnAboutVertical(unreachableV[0], origin, rootYaw, outV[0]);
+                    bool inFeasible = false, outFeasible = false;
+                    const bool inActive = nf::reachLimitDelta(inV, reachRadius, oneArm, inDelta, &inFeasible);
+                    const bool outActive = nf::reachLimitDelta(outV, reachRadius, oneArm, outDelta, &outFeasible);
+                    const double outAfter[3] = {outV[0][0] + outDelta[0], outV[0][1] + outDelta[1], outV[0][2] + outDelta[2]};
+                    float m3pBase[16], frootBase[16], globalYaw[16], m3pYaw[16], frootYaw[16], invM3pBase[16], invM3p[16], Gbefore[16], Gafter[16];
+                    setYawMatrix(m3pBase, 0.17); m3pBase[12] = -0.4f; m3pBase[13] = 0.2f; m3pBase[14] = 0.1f;
+                    setYawMatrix(frootBase, -0.11); frootBase[12] = 0.3f; frootBase[13] = 1.4f; frootBase[14] = -0.2f;
+                    setYawMatrix(globalYaw, rootYaw);
+                    nf::pfzMul(m3pBase, globalYaw, m3pYaw); nf::pfzMul(frootBase, globalYaw, frootYaw);
+                    const bool mapBaseOk = nf::pfzAffineInverse(m3pBase, invM3pBase), mapOk = nf::pfzAffineInverse(m3pYaw, invM3p);
+                    nf::pfzMul(frootBase, invM3pBase, Gbefore); nf::pfzMul(frootYaw, invM3p, Gafter);
+                    float yawPalm3p[16], yawPalmFp[16], wristYaw[16], fpWorld[16], threePWorld[16], modelWrist[16], handTarget[16], expectedWorld[16];
+                    setYawMatrix(yawPalm3p, -0.23); yawPalm3p[12] = -0.12f; yawPalm3p[13] = 0.9f; yawPalm3p[14] = 0.08f;
+                    setYawMatrix(yawPalmFp, 0.31); yawPalmFp[12] = 0.03f; yawPalmFp[13] = 1.0f; yawPalmFp[14] = 0.04f;
+                    setYawMatrix(wristYaw, 0.21); wristYaw[12] = 0.04f; wristYaw[13] = -0.03f; wristYaw[14] = 0.02f;
+                    nf::pfzMul(yawPalmFp, wristYaw, fpWorld); nf::pfzMul(fpWorld, frootYaw, expectedWorld);
+                    const bool mapped = mapOk && nf::handRetarget(yawPalm3p, yawPalmFp, wristYaw, Gafter, handTarget);
+                    nf::pfzMul(yawPalm3p, handTarget, modelWrist); nf::pfzMul(modelWrist, m3pYaw, threePWorld);
+                    bool mappingEquivariant = mapped;
+                    for (int c = 0; c < 16; ++c) mappingEquivariant = mappingEquivariant && std::fabs(threePWorld[c] - expectedWorld[c]) < 3e-5f;
+                    bool GGlobalInvariant = true;
+                    for (int c = 0; c < 16; ++c) GGlobalInvariant = GGlobalInvariant && std::fabs(Gbefore[c] - Gafter[c]) < 3e-5f;
+                    rootYawOk = rootYawOk && rooted.ok && rooted.src == nf::kSquarePreservePose && rooted.phi == 0.0 &&
+                                 std::fabs(nf::ikLen(baseReach) - nf::ikLen(rotatedReach)) < 1e-9 && !inActive && inFeasible && outActive && outFeasible &&
+                                 std::fabs(nf::ikLen(outAfter) - reachRadius[0]) < 1e-9 && mapBaseOk && mappingEquivariant && GGlobalInvariant;
+                }
+                check(rootYawOk,
+                      "F75: at genuine 30 and 60 deg root yaw the armed torso remains authored, shoulder-to-hand reach is world-equivariant, and reachable/unreachable targets retain their reach guards");
                 nf::BarrelDirs bdUp = bd1;
                 bdUp.b3[0] = 0.1;
                 bdUp.b3[1] = 0.99;
@@ -3191,12 +3368,10 @@ int wmain(int argc, wchar_t** argv) {
                 const nf::SquareYaw sqUp = nf::squareYaw(true, bdUp, uL, uR, aim), sqNone = nf::squareYaw(true, nf::BarrelDirs{}, uL, uR, aim);
                 double keptL[3];
                 nf::turnAboutVertical(uL, pivot, sqUp.phi, keptL);
-                check(std::fabs(sqLag.phi + 30.0 * kR) < 1e-9 && std::fabs(turned[0]) < 1e-9 && std::fabs(turned[2] - 1.0) < 1e-9 &&
-                          sqUp.src == nf::kSquarePreservePose && sqUp.phi == 0.0 && sqUp.weaponWhy == nf::kSquareWeapon3pVertical && sqUp.b3Xz == 0.1 &&
+                check(sqUp.src == nf::kSquarePreservePose && sqUp.phi == 0.0 && sqUp.weaponWhy == nf::kSquareWeapon3pVertical && sqUp.b3Xz == 0.1 &&
                           sqUp.bFXz == 1.0 && keptL[0] == uL[0] && keptL[2] == uL[2] && sqNone.src == nf::kSquarePreservePose && sqNone.phi == 0.0 &&
                           sqNone.weaponWhy == nf::kSquareWeaponNoAxes && sqS.src == nf::kSquareShoulders && sqS.phi == phiDirect,
-                      "F70a: when armed weapon yaw is unavailable (latched 3P row nearly vertical or no axes), preserve the authored stance with phi 0; the old shoulder fallback "
-                      "would de-blade this 38 deg pose. Unarmed square-up remains the shoulder rule");
+                      "F75: armed stance stays authored with phi 0 whether measured weapon yaw is vertical or unavailable; unarmed square-up remains the shoulder rule");
                 // F70a's measured failure shape: a latched selected row can remain valid in 3D yet have no usable horizontal yaw. The F70 rifle's shoulder fallback was
                 // -42.5 deg and caused a 21.4 cm reach correction. The helper's returned armed angle must preserve the authored pose in this case.
                 nf::BarrelDirs rifleLatched = bd1;
@@ -4985,6 +5160,16 @@ int wmain(int argc, wchar_t** argv) {
         bool worldPoseMatches = retarget;
         for (int i = 0; i < 16; ++i) worldPoseMatches = worldPoseMatches && std::fabs(worldA[i] - t1[i]) < 2e-5f;
         check(worldPoseMatches, "F70b: noncommuting palm bases and root transform preserve the full world hand pose through rigid retargeting");
+        edvr::pfz::HandRig contactFallbackRig{};
+        contactFallbackRig.why = 0;
+        std::memcpy(contactFallbackRig.palm, B3, sizeof(B3));
+        contactFallbackRig.supportContactValid = false;
+        float fallbackTarget[16];
+        const bool fallbackTargetOk = contactFallbackRig.why == 0 && !contactFallbackRig.supportContactValid &&
+                                      edvr::nofoot::handRetarget(contactFallbackRig.palm, Bfp, Hfp, G, fallbackTarget);
+        bool fallbackStillMaps = fallbackTargetOk;
+        for (int i = 0; i < 16; ++i) fallbackStillMaps = fallbackStillMaps && std::fabs(fallbackTarget[i] - got[i]) < 2e-5f;
+        check(fallbackStillMaps, "F75: an unavailable K2 contact leaves a valid shared palm map available for the authored anatomical fallback");
         edvr::nofoot::PalmPatch right;
         right.heel[0] = 0.10; right.heel[1] = 1.0; right.heel[2] = 0.2;
         right.thumb[0] = 1.0; right.normal[1] = 1.0; right.halfThickness = 0.018; right.ok = true;
@@ -5006,6 +5191,86 @@ int wmain(int argc, wchar_t** argv) {
             leftPalm[2] * (leftPalm[4]*leftPalm[9] - leftPalm[5]*leftPalm[8]) : 0.0;
         check(supportFrameOk && leftRig.palmarSign == -1 && leftPhysicalNormalX > 0.99 && std::fabs(det - 1.0) < 1e-5,
               "F70b: signed left HandRig palm sign survives storage and produces a proper gripping-hand basis");
+
+        // Landmark-scale fixture: the F74 hand census measured K1 about 2.4 x 1.7 cm, while K2 candidates span about 4.9 x 7.0 cm.
+        const double k1WidthMeasured = 0.024, k1LengthMeasured = 0.017;
+        const double wristR[3] = {0.0, 1.0, 0.0}, thumbR[3] = {0.055, 1.0, 0.070};
+        const double k2R[4][3] = {{-0.0245, 1.0, 0.060}, {-0.0081666666667, 1.0, 0.070}, {0.0081666666667, 1.0, 0.070}, {0.0245, 1.0, 0.080}};
+        const auto k2Right = edvr::nofoot::supportContactFromK2(wristR, thumbR, k2R);
+        const double wristL[3] = {-wristR[0], wristR[1], wristR[2]}, thumbL[3] = {-thumbR[0], thumbR[1], thumbR[2]};
+        double k2L[4][3] = {};
+        for (int j = 0; j < 4; ++j) for (int c = 0; c < 3; ++c) k2L[j][c] = c == 0 ? -k2R[j][c] : k2R[j][c];
+        const auto k2Left = edvr::nofoot::supportContactFromK2(wristL, thumbL, k2L);
+        const double badK2[4][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+        const auto invalidK2 = edvr::nofoot::supportContactFromK2(wristR, thumbR, badK2);
+        check(k2Right.ok && k2Left.ok && std::fabs(k2Right.length - 0.070) < 1e-9 && std::fabs(k2Right.width - 0.049) < 1e-9 &&
+                  std::fabs(k2Right.radius - 0.00816666666665) < 1e-9 && k2Right.width > k1WidthMeasured && k2Right.length > k1LengthMeasured &&
+                  std::fabs(k2Left.length - k2Right.length) < 1e-9 &&
+                  std::fabs(k2Left.width - k2Right.width) < 1e-9 && std::fabs(k2Left.radius - k2Right.radius) < 1e-9 && !invalidK2.ok &&
+                  k2Right.centre[2] > wristR[2] && std::fabs(k2Right.distal[0]) < 1e-9 && k2Right.distal[2] > 0.99 &&
+                  k2Right.radial[0] > 0.99 && k2Left.radial[0] < -0.99,
+              "F75: separate support contact uses the K2 centre, length, width and median-spacing radius; mirrored hands keep dimensions and reverse radial; degenerate K2 rejects only contact");
+        const double measuredW[3] = {0.0, 0.0, 0.0}, measuredTR[3] = {-0.013, -0.015, -0.023}, measuredTL[3] = {-0.013, -0.015, 0.023};
+        const double measuredK2R[4][3] = {{-0.072, 0.000, -0.034}, {-0.079, 0.009, -0.013}, {-0.070, 0.008, 0.007}, {-0.062, 0.004, 0.023}};
+        const double measuredK2L[4][3] = {{-0.072, 0.000, 0.034}, {-0.074, 0.008, 0.013}, {-0.070, 0.008, -0.007}, {-0.062, 0.004, -0.023}};
+        const auto measuredContactR = edvr::nofoot::supportContactFromK2(measuredW, measuredTR, measuredK2R);
+        const auto measuredContactL = edvr::nofoot::supportContactFromK2(measuredW, measuredTL, measuredK2L);
+        check(measuredContactR.ok && measuredContactL.ok && measuredContactR.length > 0.060 && measuredContactR.length < 0.080 &&
+                  measuredContactL.length > 0.060 && measuredContactL.length < 0.080 && measuredContactR.width > 0.010 && measuredContactR.width < 0.080 &&
+                  measuredContactL.width > 0.010 && measuredContactL.width < 0.080 && measuredContactR.radius > 0.001 && measuredContactR.radius < 0.04 &&
+                  measuredContactL.radius > 0.001 && measuredContactL.radius < 0.04,
+              "F75: measured left and right F74 K2 landmarks form plausible distinct contact frames on both hands");
+        float contactModelR[16], wristModelR[16], contactLocalR[16], invWristR[16], rootG[16], tmpR[16], worldContactR[16];
+        edvr::nofoot::pfzIdentity(contactModelR); edvr::nofoot::pfzIdentity(wristModelR); edvr::nofoot::pfzIdentity(rootG);
+        for (int c = 0; c < 3; ++c) {
+            contactModelR[c] = static_cast<float>(k2Right.distal[c]); contactModelR[4 + c] = static_cast<float>(k2Right.radial[c]);
+            contactModelR[8 + c] = static_cast<float>(k2Right.normal[c]); contactModelR[12 + c] = static_cast<float>(k2Right.centre[c]);
+        }
+        rot(wristModelR, 1, 0.37f); wristModelR[12] = 0.20f; wristModelR[13] = 0.94f; wristModelR[14] = -0.08f;
+        rot(rootG, 2, -0.29f); rootG[12] = 0.31f; rootG[13] = -0.02f; rootG[14] = 0.17f;
+        const bool contactLocalOk = edvr::nofoot::pfzAffineInverse(wristModelR, invWristR);
+        edvr::nofoot::pfzMul(contactModelR, invWristR, contactLocalR);
+        edvr::nofoot::pfzMul(contactLocalR, wristModelR, tmpR); edvr::nofoot::pfzMul(tmpR, rootG, worldContactR);
+        float expectedContactR[16]; edvr::nofoot::pfzMul(contactModelR, rootG, expectedContactR);
+        const double distalWorld[3] = {worldContactR[0], worldContactR[1], worldContactR[2]};
+        const double wristWorld[3] = {rootG[12] + wristR[0] * rootG[0] + wristR[1] * rootG[4] + wristR[2] * rootG[8],
+                                      rootG[13] + wristR[0] * rootG[1] + wristR[1] * rootG[5] + wristR[2] * rootG[9],
+                                      rootG[14] + wristR[0] * rootG[2] + wristR[1] * rootG[6] + wristR[2] * rootG[10]};
+        const double heelDelta[3] = {worldContactR[12] - distalWorld[0] * k2Right.length * 0.5 - worldContactR[4] * k2Right.width * 0.5 - wristWorld[0],
+                                     worldContactR[13] - distalWorld[1] * k2Right.length * 0.5 - worldContactR[5] * k2Right.width * 0.5 - wristWorld[1],
+                                     worldContactR[14] - distalWorld[2] * k2Right.length * 0.5 - worldContactR[6] * k2Right.width * 0.5 - wristWorld[2]};
+        const double heelBehindWrist = edvr::nofoot::ikDot(heelDelta, distalWorld);
+        edvr::nofoot::PalmPatch k2Patch;
+        for (int c = 0; c < 3; ++c) {
+            k2Patch.heel[c] = worldContactR[12 + c] - distalWorld[c] * k2Right.length * 0.5 - worldContactR[4 + c] * k2Right.width * 0.5;
+            k2Patch.thumb[c] = worldContactR[4 + c]; k2Patch.normal[c] = worldContactR[4 + c];
+        }
+        k2Patch.halfThickness = k2Right.radius; k2Patch.ok = true;
+        const auto k2Cup = edvr::nofoot::cupUnderHeel(k2Patch, k2Left.radius, 0.002);
+        float leftContactTarget[16], leftContactLocal[16], leftContactModel[16], leftWrist[16], leftWristInv[16], leftRecovered[16], identity[16];
+        edvr::nofoot::pfzIdentity(identity);
+        edvr::nofoot::pfzIdentity(leftContactLocal); edvr::nofoot::pfzIdentity(leftWrist);
+        edvr::nofoot::pfzIdentity(leftContactModel);
+        for (int c = 0; c < 3; ++c) {
+            leftContactModel[c] = static_cast<float>(k2Left.distal[c]); leftContactModel[4 + c] = static_cast<float>(k2Left.radial[c]);
+            leftContactModel[8 + c] = static_cast<float>(k2Left.normal[c]); leftContactModel[12 + c] = static_cast<float>(k2Left.centre[c]);
+        }
+        rot(leftWrist, 0, -0.22f); leftWrist[12] = -0.18f; leftWrist[13] = 0.92f; leftWrist[14] = -0.06f;
+        bool leftConverges = contactLocalOk && k2Cup.ok && edvr::nofoot::supportPalmFrame(worldContactR, 1, -1, k2Cup, leftContactTarget) &&
+                             edvr::nofoot::pfzAffineInverse(leftWrist, leftWristInv);
+        if (leftConverges) {
+            edvr::nofoot::pfzMul(leftContactModel, leftWristInv, leftContactLocal);
+            float wristTarget[16];
+            leftConverges = edvr::nofoot::handRetarget(leftContactLocal, identity, leftContactTarget, identity, wristTarget);
+            if (leftConverges) {
+                edvr::nofoot::pfzMul(leftContactLocal, wristTarget, leftRecovered);
+                for (int i = 0; i < 16; ++i) leftConverges = leftConverges && std::fabs(leftRecovered[i] - leftContactTarget[i]) < 2e-5f;
+            }
+        }
+        bool fullContactMatches = true;
+        for (int i = 0; i < 16; ++i) fullContactMatches = fullContactMatches && std::fabs(expectedContactR[i] - worldContactR[i]) < 2e-5f;
+        check(contactLocalOk && fullContactMatches && std::fabs(heelBehindWrist) < 2e-5 && k2Cup.ok && k2Cup.gap >= 0.002 && leftConverges && worldPoseMatches,
+              "F75: nonidentity wrist and root transforms carry the K2 frame consistently; the cup heel reaches the anatomical wrist plane, the left contact converges, and old palm retargeting still matches");
 
         float Qsrc[16], QsrcParent[16], Qdst[16], QdstParent[16], D[16], invSrcParent[16], finger[16], desired[16];
         rot(Qsrc, 0, 0.27f); rot(QsrcParent, 2, -0.31f); rot(Qdst, 1, 0.52f); rot(QdstParent, 0, -0.14f); rot(D, 2, 0.42f);

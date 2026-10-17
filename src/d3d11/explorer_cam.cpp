@@ -2368,6 +2368,40 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
     float palmLocal[16];
     nofoot::pfzMul(palmModel, invHand, palmLocal);
     std::memcpy(r.palm, palmLocal, sizeof(r.palm));
+    // F75: keep the retargeting palm above intact; the support cup gets a distinct contact frame at K2.
+    {
+        double k2Points[4][3] = {};
+        uint32_t k2At = 0;
+        for (uint32_t b = 0; b < 5 && k2At < 4; ++b) if (b != thumb) {
+            for (int c = 0; c < 3; ++c) k2Points[k2At][c] = M[branches[b][1]][12 + c];
+            ++k2At;
+        }
+        // The four non-thumb branches are all four joints long by the topology check above.
+        if (k2At == 4) {
+            const double wrist[3] = {W[0], W[1], W[2]}, thumbRoot[3] = {T[0], T[1], T[2]};
+            const nofoot::SupportContactGeometry contact = nofoot::supportContactFromK2(wrist, thumbRoot, k2Points);
+            if (contact.ok) {
+                float contactModel[16], contactLocal[16], inverseContact[16];
+                nofoot::pfzIdentity(contactModel);
+                for (int c = 0; c < 3; ++c) {
+                    contactModel[c] = static_cast<float>(contact.distal[c]);
+                    contactModel[4 + c] = static_cast<float>(contact.radial[c]);
+                    contactModel[8 + c] = static_cast<float>(contact.normal[c]);
+                    contactModel[12 + c] = static_cast<float>(contact.centre[c]);
+                }
+                nofoot::pfzMul(contactModel, invHand, contactLocal);
+                bool finite = true;
+                for (float v : contactLocal) finite = finite && std::isfinite(v);
+                if (finite && nofoot::pfzAffineInverse(contactLocal, inverseContact)) {
+                    std::memcpy(r.supportContactLocal, contactLocal, sizeof(r.supportContactLocal));
+                    r.supportWidth = static_cast<float>(contact.width);
+                    r.supportLength = static_cast<float>(contact.length);
+                    r.supportRadius = static_cast<float>(contact.radius);
+                    r.supportContactValid = true;
+                }
+            }
+        }
+    }
     if (!nofoot::pfzAffineInverse(r.palm, invPalmLocal)) return refuse(4);
     uint8_t slotOf[nofoot::kPfzMaxJoints]; std::memset(slotOf, 0xFF, sizeof(slotOf));
     nofoot::pfzIdentity(r.restLocal[0]);

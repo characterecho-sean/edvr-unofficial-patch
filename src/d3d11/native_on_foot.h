@@ -145,6 +145,10 @@ struct HandRig {
     uint16_t joint[24] = {}, parentSlot[24] = {};
     uint16_t name[24] = {};
     float restLocal[24][16] = {}, boneToPalm[24][16] = {}, palm[16] = {};
+    // F75: separate grip-contact geometry derived from K2. The anatomical palm and its finger retarget data remain unchanged.
+    float supportContactLocal[16] = {};
+    float supportWidth = 0.0f, supportLength = 0.0f, supportRadius = 0.0f;
+    bool supportContactValid = false;
     float width = 0.0f, length = 0.0f, skinRadius = 0.0f;
 };
 inline int8_t handPalmarSign(int side) noexcept { return side == 0 ? int8_t(-1) : int8_t(1); }
