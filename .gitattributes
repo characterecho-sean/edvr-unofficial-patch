@@ -13,6 +13,9 @@
 *.h text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
+# edvr.ini too: sharp_weapons_test (and any rig that pins its comments) reads it
+# as binary and searches for "\nsharp_weapons = on\n" (#94).
+*.ini text eol=lf
 
 # Test fixtures are split on "\n" and merged line by line by the self-tests, so
 # a CRLF checkout leaves stray \r mid-line (issue 64).
