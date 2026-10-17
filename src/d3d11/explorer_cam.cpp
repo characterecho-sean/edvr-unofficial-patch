@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 #include <vector>
 #include <mutex>   // F33: the rest pov offset's lock
 // Explorer Cam: the glue (explorer_cam.h says what it is; explorer_cam_core.h holds every decision, every byte of the relays and the
@@ -2133,12 +2134,20 @@ struct FdCensus {
 };
 FdCensus g_fdCensus;
 uint16_t g_fdMembers[nofoot::kPfzMaxF];
-void fdPublish(uint64_t x, uint32_t joints, uint32_t count) noexcept {
+bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, const float* locals, const uint16_t* parents, const uint16_t* names,
+                   pfz::HandRig* out) noexcept;
+const char* handRigWhy(uint8_t why) noexcept;
+void fdPublish(uint64_t x, uint32_t joints, uint32_t count, const pfz::HandRig* hands = nullptr, uint8_t handCount = 0) noexcept {
     pfz::g_fdX.store(0, std::memory_order_release);
+    const uint32_t generation = pfz::g_fdSeq.load(std::memory_order_relaxed) + 2u;
     pfz::g_fdSeq.fetch_add(1, std::memory_order_acq_rel);
     pfz::g_fdPlan.x = x;
+    pfz::g_fdPlan.generation = generation;
     pfz::g_fdPlan.joints = joints;
     pfz::g_fdPlan.count = count;
+    pfz::g_fdPlan.handCount = handCount;
+    if (hands && handCount == 2) std::memcpy(pfz::g_fdPlan.hand, hands, sizeof(pfz::g_fdPlan.hand));
+    else std::memset(pfz::g_fdPlan.hand, 0, sizeof(pfz::g_fdPlan.hand));
     for (uint32_t k = 0; k < count && k < nofoot::kPfzMaxF; ++k) pfz::g_fdPlan.member[k] = g_fdMembers[k];
     pfz::g_fdSeq.fetch_add(1, std::memory_order_release);
     pfz::g_fdX.store(count > 0 ? x : 0, std::memory_order_release);
@@ -2172,6 +2181,16 @@ void fdCensusStep(uint64_t iface, uint64_t x) noexcept {
         return;
     }
     const uint32_t count = nofoot::dropSubtree(g_pfzParents, joints, nofoot::kDropClavL, nofoot::kDropClavR, g_fdMembers, nofoot::kPfzMaxF);
+    uint64_t nameTable = 0;
+    uint16_t names[nofoot::kPfzMaxJoints] = {};
+    bool namesOk = sehReadU64At(static_cast<uintptr_t>(pose) + 0x18u, &nameTable) && plausibleUserPointer(nameTable);
+    for (uint32_t j = 0; j < joints && namesOk; ++j) namesOk = sehReadU16At(static_cast<uintptr_t>(nameTable) + 2u * j, &names[j]);
+    pfz::HandRig hands[2]{};
+    bool handL = false, handR = false;
+    if (namesOk) {
+        handL = deriveHandRig(joints, nofoot::kDropHandL, nofoot::kIkFpJoints[1], 0, g_pfzLocals, g_pfzParents, names, &hands[0]);
+        handR = deriveHandRig(joints, nofoot::kDropHandR, nofoot::kIkFpJoints[0], 1, g_pfzLocals, g_pfzParents, names, &hands[1]);
+    } else { hands[0].why = hands[1].why = 3; }
     bool has37 = false, has44 = false;
     char list[1024] = {};
     size_t at = 0;
@@ -2188,7 +2207,11 @@ void fdCensusStep(uint64_t iface, uint64_t x) noexcept {
                     static_cast<unsigned>(joints), static_cast<unsigned>(g_pfzParents[nofoot::kDropClavL]),
                     static_cast<unsigned>(g_pfzParents[nofoot::kDropClavR]), count, has37 ? "in" : "NOT in", has44 ? "in" : "NOT in",
                     static_cast<unsigned>(g_shProbeFP.l), static_cast<unsigned>(g_shProbeFP.r), at ? list : "none");
-    if (count > 0) fdPublish(x, joints, count);
+    if (count > 0) fdPublish(x, joints, count, hands, 2);
+    if (say) Log::get().note("native on foot hand anatomy (F70b): FP X %016llX: name IDs %s; left %s (%s, %u joints, %.1f x %.1f cm, radius %.1f mm), right %s (%s, %u joints, %.1f x %.1f cm, radius %.1f mm); optional plan, legacy 11 matrices remain available",
+                             static_cast<unsigned long long>(x), namesOk ? "read" : "unreadable",
+                             handL ? "ok" : "refused", handRigWhy(hands[0].why), hands[0].count, 100.0 * hands[0].width, 100.0 * hands[0].length, 1000.0 * hands[0].skinRadius,
+                             handR ? "ok" : "refused", handRigWhy(hands[1].why), hands[1].count, 100.0 * hands[1].width, 100.0 * hands[1].length, 1000.0 * hands[1].skinRadius);
 }
 
 // F56 (TEMPORARY): the arm IK's plan, once per local 3P X: P = [X+8], its parents; per side the chain C (the joint probe's clavicle), U, F, H
@@ -2202,6 +2225,145 @@ void armAppend(char* buf, size_t cap, size_t* at, const char* fmt, ...) noexcept
     const int w = std::vsnprintf(buf + *at, cap - *at, fmt, ap);
     va_end(ap);
     if (w > 0) *at = std::min(cap - 1, *at + static_cast<size_t>(w));
+}
+bool handAncestor(const uint16_t* parents, uint32_t n, uint32_t j, uint32_t ancestor) noexcept {
+    for (uint32_t k = 0; k < n && j < n; ++k) {
+        if (j == ancestor) return true;
+        const uint16_t p = parents[j];
+        if (p == 0xFFFFu) return false;
+        j = p;
+    }
+    return false;
+}
+const char* handRigWhy(uint8_t why) noexcept {
+    switch (why) {
+        case 0: return "ok";
+        case 1: return "bad plan or unreadable rest transform";
+        case 2: return "missing, extra, forked, or inconsistent finger branch";
+        case 3: return "missing interned joint name";
+        case 4: return "degenerate palm geometry, dimensions, or inverse";
+        default: return "unknown refusal";
+    }
+}
+bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, const float* locals, const uint16_t* parents, const uint16_t* names,
+                   pfz::HandRig* out) noexcept {
+    if (!out) return false;
+    out->why = 1;
+    if (!locals || !parents || !names || hand >= joints || attach >= joints || joints > nofoot::kPfzMaxJoints) return false;
+    pfz::HandRig r{};
+    const auto refuse = [&](uint8_t why) noexcept { r.why = why; *out = r; return false; };
+    r.hand = static_cast<uint16_t>(hand); r.attach = static_cast<uint16_t>(attach);
+    r.joint[0] = static_cast<uint16_t>(hand); r.name[0] = names[hand]; r.parentSlot[0] = 0xFFFFu; r.count = 1;
+    if (!names[hand]) return refuse(3);
+    alignas(16) float M[nofoot::kPfzMaxJoints][16] = {};
+    for (uint32_t j = 0; j < joints; ++j)
+        if (!nofoot::pfzRestModel(locals, parents, joints, j, M[j])) return refuse(1);
+    uint16_t branches[5][4] = {};
+    uint8_t lengths[5] = {};
+    uint32_t branchN = 0;
+    for (uint32_t root = 0; root < joints; ++root) {
+        if (parents[root] != hand || root == attach || handAncestor(parents, joints, root, attach)) continue;
+        uint16_t candidate[4] = {};
+        uint32_t cur = root, len = 0;
+        bool chainOk = true;
+        while (len < 4) {
+            candidate[len++] = static_cast<uint16_t>(cur);
+            uint32_t child = joints, children = 0;
+            for (uint32_t q = 0; q < joints; ++q)
+                if (parents[q] == cur && q != attach && !handAncestor(parents, joints, q, attach)) { child = q; ++children; }
+            if (!children) break;
+            if (children != 1) { chainOk = false; break; }
+            cur = child;
+        }
+        if (chainOk && len == 4) {
+            for (uint32_t q = 0; q < joints; ++q)
+                if (parents[q] == cur && q != attach && !handAncestor(parents, joints, q, attach)) chainOk = false;
+        }
+        if (!chainOk || (len != 3 && len != 4)) continue;
+        if (branchN >= 5) return refuse(2);
+        std::memcpy(branches[branchN], candidate, sizeof(candidate));
+        lengths[branchN++] = static_cast<uint8_t>(len);
+    }
+    if (branchN != 5) return refuse(2);
+    uint32_t thumb = 5, longN = 0;
+    for (uint32_t b = 0; b < 5; ++b) {
+        if (lengths[b] == 3) { if (thumb != 5) return refuse(2); thumb = b; }
+        else if (lengths[b] == 4) ++longN;
+    }
+    if (thumb == 5 || longN != 4) return refuse(2);
+    double W[3] = {M[hand][12], M[hand][13], M[hand][14]}, T[3] = {}, K[3] = {};
+    for (int c = 0; c < 3; ++c) T[c] = M[branches[thumb][0]][12 + c];
+    for (uint32_t b = 0; b < 5; ++b) if (b != thumb)
+        for (int c = 0; c < 3; ++c) K[c] += M[branches[b][0]][12 + c] * 0.25;
+    double distal[3] = {K[0] - W[0], K[1] - W[1], K[2] - W[2]}, radial[3] = {T[0] - K[0], T[1] - K[1], T[2] - K[2]};
+    if (!nofoot::ikUnit(distal, distal)) return refuse(4);
+    const double along = nofoot::ikDot(radial, distal);
+    for (int c = 0; c < 3; ++c) radial[c] -= along * distal[c];
+    if (!nofoot::ikUnit(radial, radial)) return refuse(4);
+    double normal[3]; nofoot::ikCross(distal, radial, normal);
+    if (!nofoot::ikUnit(normal, normal)) return refuse(4);
+    r.palmarSign = side == 0 ? -1 : 1;   // physical palm-facing side; the stored basis remains proper in both rigs
+    float palmModel[16], invHand[16];
+    nofoot::pfzIdentity(palmModel);
+    for (int c = 0; c < 3; ++c) { palmModel[c] = static_cast<float>(distal[c]); palmModel[4 + c] = static_cast<float>(radial[c]); palmModel[8 + c] = static_cast<float>(normal[c]);
+                                  palmModel[12 + c] = static_cast<float>((W[c] + K[c]) * 0.5); }
+    double lo = std::numeric_limits<double>::infinity(), hi = -lo, rootCoord[4] = {};
+    uint32_t branchOrder[5] = {thumb, 0, 0, 0, 0};
+    uint32_t bi = 0;
+    for (uint32_t b = 0; b < 5; ++b) if (b != thumb) {
+        const double p[3] = {M[branches[b][0]][12] - K[0], M[branches[b][0]][13] - K[1], M[branches[b][0]][14] - K[2]};
+        rootCoord[bi] = nofoot::ikDot(p, radial); branchOrder[bi + 1] = b; lo = std::min(lo, rootCoord[bi]); hi = std::max(hi, rootCoord[bi]); ++bi;
+    }
+    for (uint32_t i = 1; i < 5; ++i)
+        for (uint32_t j = i + 1; j < 5; ++j) {
+            const double a[3] = {M[branches[branchOrder[i]][0]][12] - K[0], M[branches[branchOrder[i]][0]][13] - K[1], M[branches[branchOrder[i]][0]][14] - K[2]};
+            const double b[3] = {M[branches[branchOrder[j]][0]][12] - K[0], M[branches[branchOrder[j]][0]][13] - K[1], M[branches[branchOrder[j]][0]][14] - K[2]};
+            if (nofoot::ikDot(a, radial) > nofoot::ikDot(b, radial)) std::swap(branchOrder[i], branchOrder[j]);
+        }
+    std::sort(rootCoord, rootCoord + 4);
+    double spacing[3] = {rootCoord[1]-rootCoord[0], rootCoord[2]-rootCoord[1], rootCoord[3]-rootCoord[2]};
+    std::sort(spacing, spacing + 3);
+    r.width = static_cast<float>(hi - lo);
+    const double palmLength[3] = {K[0]-W[0], K[1]-W[1], K[2]-W[2]};
+    r.length = static_cast<float>(nofoot::ikLen(palmLength));
+    r.skinRadius = static_cast<float>(spacing[1] * 0.5);
+    if (!(r.width > 0.015f && r.width < 0.20f && r.length > 0.015f && r.length < 0.25f && r.skinRadius > 0.001f && r.skinRadius < 0.04f)) return refuse(4);
+    float invPalmLocal[16];
+    if (!nofoot::pfzAffineInverse(M[hand], invHand)) return refuse(4);
+    float palmLocal[16];
+    nofoot::pfzMul(palmModel, invHand, palmLocal);
+    std::memcpy(r.palm, palmLocal, sizeof(r.palm));
+    if (!nofoot::pfzAffineInverse(r.palm, invPalmLocal)) return refuse(4);
+    uint8_t slotOf[nofoot::kPfzMaxJoints]; std::memset(slotOf, 0xFF, sizeof(slotOf));
+    nofoot::pfzIdentity(r.restLocal[0]);
+    std::memcpy(r.boneToPalm[0], invPalmLocal, sizeof(invPalmLocal));
+    r.boneToPalm[0][12] = r.boneToPalm[0][13] = r.boneToPalm[0][14] = 0.0f; r.boneToPalm[0][15] = 1.0f;
+    uint32_t at = 1;
+    for (uint32_t oi = 0; oi < 5; ++oi) { const uint32_t b = branchOrder[oi]; for (uint32_t d = 0; d < lengths[b]; ++d) {
+        const uint32_t j = branches[b][d];
+        if (!names[j]) return refuse(3);
+        if (at >= 24) return refuse(2);
+        r.joint[at] = static_cast<uint16_t>(j); r.name[at] = names[j];
+        const uint16_t p = parents[j];
+        if (p == hand) r.parentSlot[at] = 0;
+        else {
+            if (p >= joints || slotOf[p] == 0xFFu) return refuse(2);
+            r.parentSlot[at] = slotOf[p];
+        }
+        slotOf[j] = static_cast<uint8_t>(at);
+        nofoot::pfzLocalMatrix(locals + j * ecm::kJointFloats, r.restLocal[at]);
+        float localHand[16], boneToPalm[16];
+        nofoot::pfzMul(M[j], invHand, localHand);
+        nofoot::pfzMul(localHand, invPalmLocal, boneToPalm);
+        boneToPalm[12] = boneToPalm[13] = boneToPalm[14] = 0.0f; boneToPalm[15] = 1.0f;
+        std::memcpy(r.boneToPalm[at], boneToPalm, sizeof(boneToPalm));
+        ++at;
+        r.count = static_cast<uint8_t>(at);
+    }}
+    r.count = static_cast<uint8_t>(at);
+    r.why = 0;
+    *out = r;
+    return true;
 }
 bool armBuildPlan(uint64_t x) noexcept {
     pfz::g_armX.store(0, std::memory_order_release);
@@ -2217,6 +2379,16 @@ bool armBuildPlan(uint64_t x) noexcept {
     plan.x = x;
     plan.joints = joints;
     const uint32_t cs[2] = {g_shProbe3P.l, g_shProbe3P.r}, hs[2] = {g_shProbe3P.hl, g_shProbe3P.hr}, as[2] = {g_shProbe3P.al, g_shProbe3P.ar};
+    uint64_t nameTable = 0;
+    uint16_t names[nofoot::kPfzMaxJoints] = {};
+    bool namesOk = sehReadU64At(static_cast<uintptr_t>(pose) + 0x18u, &nameTable) && plausibleUserPointer(nameTable);
+    for (uint32_t j = 0; j < joints && namesOk; ++j) namesOk = sehReadU16At(static_cast<uintptr_t>(nameTable) + 2u * j, &names[j]);
+    bool handL = false, handR = false;
+    if (namesOk) {
+        handL = deriveHandRig(joints, hs[0], as[0], 0, g_pfzLocals, g_pfzParents, names, &plan.hand[0]);
+        handR = deriveHandRig(joints, hs[1], as[1], 1, g_pfzLocals, g_pfzParents, names, &plan.hand[1]);
+    } else { plan.hand[0].why = plan.hand[1].why = 3; }
+    plan.handCount = 2;  // optional per-side anatomy failures retain their reason and do not suppress the other side
     for (int side = 0; side < 2; ++side) {
         const char* name = side ? "R" : "L";
         const nofoot::IkArm arm = nofoot::ikArmChain(g_pfzParents, joints, cs[side], hs[side], as[side]);
@@ -2276,6 +2448,11 @@ bool armBuildPlan(uint64_t x) noexcept {
                         arm.depthC, arm.depthH, arm.depthH - arm.depthC, l1 * 100.0, l2 * 100.0, groups, kids);
     }
     if (!plan.ok[0] && !plan.ok[1]) return false;
+    Log::get().note("native on foot hand anatomy (F70b): 3P X %016llX: name IDs %s; left %s (%s, %u joints, %.1f x %.1f cm, radius %.1f mm), right %s (%s, %u joints, %.1f x %.1f cm, radius %.1f mm); optional plan, legacy arm plan remains available",
+                    static_cast<unsigned long long>(x), namesOk ? "read" : "unreadable", handL ? "ok" : "refused", handRigWhy(plan.hand[0].why), plan.hand[0].count,
+                    100.0 * plan.hand[0].width, 100.0 * plan.hand[0].length, 1000.0 * plan.hand[0].skinRadius,
+                    handR ? "ok" : "refused", handRigWhy(plan.hand[1].why), plan.hand[1].count,
+                    100.0 * plan.hand[1].width, 100.0 * plan.hand[1].length, 1000.0 * plan.hand[1].skinRadius);
     // F57: the torso square-up's plan: the chest root (the clavicles' parent) and the spine 16 subtree by level (16, 21, 24 exclusive).
     plan.sq = nofoot::ikSquarePlan(g_pfzParents, joints);
     plan.sqOk = plan.sq.why == 0;
@@ -2319,6 +2496,7 @@ bool armBuildPlan(uint64_t x) noexcept {
                         static_cast<unsigned>(plan.ubN));
     }
     pfz::g_armSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: the plan is being written
+    plan.generation = pfz::g_armSeq.load(std::memory_order_relaxed) + 1u;
     pfz::g_armPlan = plan;
     pfz::g_armSeq.fetch_add(1, std::memory_order_release);   // even again
     return true;

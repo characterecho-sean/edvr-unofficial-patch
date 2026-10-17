@@ -48,6 +48,10 @@ public:
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
     static constexpr uint64_t kNight=0xFCF7BD2896751D96ull,kNightPs=0xF786D34B5E118D5Eull;
+    // Exact rifle bolt pair from the armed eye dump. Retain its existing
+    // draw-time streams only; this is visual shader geometry, not collision.
+    static constexpr uint64_t kBoltVs=0x1F17BF54DB6EE407ull,kBoltPs=0xA75C1DB6562B8CA7ull;
+    static bool fireGeometry(uint64_t vs,uint64_t ps) noexcept { return vs==kBoltVs && ps==kBoltPs; }
     // Census unknown-A/B settlement prop batches, 2026-09-21. PS hashes are
     // listed explicitly: PS bytecode is only retained when a creation-time
     // gate names the hash (device_hook hookedCreatePS), unlike VS which
@@ -108,7 +112,7 @@ public:
         return false;
     }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
-        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight && vs!=kSprite &&
+        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight && vs!=kSprite && vs!=kBoltVs &&
             !poolLayout(e,n)) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
@@ -231,6 +235,7 @@ public:
     std::vector<Surface> surfaces;
     uint32_t dropped = 0, failures = 0, textureBytes = 0;
     uint32_t firstFrame=0,vertexBytes=0,vertexDraws=0,vertexDeclined=0;
+    uint32_t fireGeometrySeen=0,fireGeometryCaptured=0,fireGeometryMissingLayout=0,fireGeometryRefusedBytes=0;
     Texture sourceDepth;
     DXGI_FORMAT sourceDepthFormat=DXGI_FORMAT_UNKNOWN;
     uint32_t sourceFrame=0;
@@ -317,6 +322,7 @@ public:
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
         firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
+        fireGeometrySeen=fireGeometryCaptured=fireGeometryMissingLayout=fireGeometryRefusedBytes=0;
         effectImages.clear();effectImageBytes=effectImageDeclined=0;pendingEffectImage=UINT32_MAX;
         spriteDiagnostics.clear();spriteImageBytes=spriteDepthBytes=spriteImageDeclined=0;pendingSpriteDiagnostic=UINT32_MAX;
         spriteDepthScratch.Reset();spriteDepthScratchWidth=spriteDepthScratchHeight=spriteDepthScratchFormat=0;
@@ -670,7 +676,9 @@ public:
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
                  uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false,bool eyeMesh=false) {
-        if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))))) return;
+        const bool fireGeometryPair=fireGeometry(vs,ps);
+        if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))) && !fireGeometryPair)) return;
+        if(fireGeometryPair && fireGeometrySeen<kMaxDraws)++fireGeometrySeen;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
         d.frame = frame; d.ordinal = ordinal; d.vs = vs; d.ps = ps;
@@ -716,13 +724,14 @@ public:
         const bool sprite=vs==kSprite && ps==kSpritePs;
         const bool night=vs==kNight && ps==kNightPs;
         const bool planet=planetSurface(vs),solar=solarDraw(vs);
-        const bool unpacked=effect || night || planet || solar;
-        if(unpacked || sprite || mesh) {
+        const bool unpacked=effect || night || planet || solar || fireGeometryPair;
+        if(unpacked || sprite || mesh || fireGeometryPair) {
             Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
             Layout elements[32];UINT bytes=sizeof(elements);
             if(layout && SUCCEEDED(layout->GetPrivateData(effectLayoutKey(),&bytes,elements)) && bytes &&
                 bytes<=sizeof(elements) && bytes%sizeof(Layout)==0)d.layout.assign(elements,elements+bytes/sizeof(Layout));
         }
+        if(fireGeometryPair && d.layout.empty() && fireGeometryMissingLayout<kMaxDraws)++fireGeometryMissingLayout;
         if(mesh) {
             ++meshDraws;
             for(unsigned i=0;i<2;++i) {
@@ -754,7 +763,7 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect || fireGeometryPair) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;
@@ -808,13 +817,21 @@ public:
                     if(elements && elements*s.stride<bytes)bytes=static_cast<UINT>(elements*s.stride);
                 }
                 if(!bytes)continue;
-                if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;continue;}
+                if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;if(fireGeometryPair)fireGeometryRefusedBytes=bytes>UINT32_MAX-fireGeometryRefusedBytes?UINT32_MAX:fireGeometryRefusedBytes+bytes;continue;}
                 bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-                if(FAILED(dev->CreateBuffer(&bd,nullptr,&s.stage))){++failures;continue;}
+                if(FAILED(dev->CreateBuffer(&bd,nullptr,&s.stage))){++failures;if(fireGeometryPair)fireGeometryRefusedBytes=bytes>UINT32_MAX-fireGeometryRefusedBytes?UINT32_MAX:fireGeometryRefusedBytes+bytes;continue;}
                 D3D11_BOX box{s.captureOffset,0,0,s.captureOffset+bytes,1,1};ctx->CopySubresourceRegion(s.stage.Get(),0,0,0,0,src.Get(),0,&box);
                 s.copied=bytes;vertexBytes+=bytes;copied=true;
             }
             vertexDraws+=copied?1u:0u;
+            if(fireGeometryPair) {
+                bool position0=false,position1=false;
+                for(const auto& e:d.layout)if(std::strcmp(e.semantic,"POSITION")==0 && e.slot<2) {
+                    if(e.index==0 && d.streams[e.slot].copied)position0=true;
+                    if(e.index==1 && d.streams[e.slot].copied)position1=true;
+                }
+                if(position0 && position1 && fireGeometryCaptured<kMaxDraws)++fireGeometryCaptured;
+            }
         }
         if(sprite && frame==firstFrame && rt) {
             pendingSpriteDiagnostic=captureSpriteDiagnostic(ctx,dev.Get(),d,rt.Get());

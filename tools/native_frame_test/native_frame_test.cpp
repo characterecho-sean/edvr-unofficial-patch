@@ -2981,10 +2981,39 @@ int wmain(int argc, wchar_t** argv) {
                 bdUp.b3[1] = 0.99;
                 bdUp.b3[2] = 0.0;
                 const nf::SquareYaw sqUp = nf::squareYaw(true, bdUp, uL, uR, aim), sqNone = nf::squareYaw(true, nf::BarrelDirs{}, uL, uR, aim);
-                check(std::fabs(sqLag.phi + 30.0 * kR) < 1e-9 && std::fabs(turned[0]) < 1e-9 && std::fabs(turned[2] - 1.0) < 1e-9 && sqUp.src == nf::kSquareShoulders &&
-                          sqUp.phi == phiDirect && sqNone.src == nf::kSquareShoulders && sqNone.phi == phiDirect,
-                      "F69b: a 3P body 30 deg off the aim gives phi -30 and turning by it puts the barrel on the aim; a barrel pointing up (no yaw) or no barrel falls back "
-                      "to the shoulders");
+                double keptL[3];
+                nf::turnAboutVertical(uL, pivot, sqUp.phi, keptL);
+                check(std::fabs(sqLag.phi + 30.0 * kR) < 1e-9 && std::fabs(turned[0]) < 1e-9 && std::fabs(turned[2] - 1.0) < 1e-9 &&
+                          sqUp.src == nf::kSquarePreservePose && sqUp.phi == 0.0 && sqUp.weaponWhy == nf::kSquareWeapon3pVertical && sqUp.b3Xz == 0.1 &&
+                          sqUp.bFXz == 1.0 && keptL[0] == uL[0] && keptL[2] == uL[2] && sqNone.src == nf::kSquarePreservePose && sqNone.phi == 0.0 &&
+                          sqNone.weaponWhy == nf::kSquareWeaponNoAxes && sqS.src == nf::kSquareShoulders && sqS.phi == phiDirect,
+                      "F70a: when armed weapon yaw is unavailable (latched 3P row nearly vertical or no axes), preserve the authored stance with phi 0; the old shoulder fallback "
+                      "would de-blade this 38 deg pose. Unarmed square-up remains the shoulder rule");
+                // F70a's measured failure shape: a latched selected row can remain valid in 3D yet have no usable horizontal yaw. The F70 rifle's shoulder fallback was
+                // -42.5 deg and caused a 21.4 cm reach correction. The helper's returned armed angle must preserve the authored pose in this case.
+                nf::BarrelDirs rifleLatched = bd1;
+                rifleLatched.latched = true;
+                rifleLatched.b3[0] = 0.05;
+                rifleLatched.b3[1] = 0.995;
+                rifleLatched.b3[2] = 0.05;
+                rifleLatched.bF[0] = 0.0;
+                rifleLatched.bF[1] = 0.0;
+                rifleLatched.bF[2] = 1.0;
+                const double bladeRifle = 42.5 * kR;
+                const double uLR[3] = {-0.18 * std::cos(bladeRifle), 1.4, 0.18 * std::sin(bladeRifle)};
+                const double uRR[3] = {0.18 * std::cos(bladeRifle), 1.4, -0.18 * std::sin(bladeRifle)};
+                const nf::SquareYaw sqRifleBad = nf::squareYaw(true, rifleLatched, uLR, uRR, aim);
+                double uPreserved[3], uOldShoulder[3];
+                bool preservedOver = false;
+                const double preservedApplied = nf::squareApplied(sqRifleBad.phi, true, 1.0, 1.0, &preservedOver);
+                const double oldShoulderApplied = nf::squareApplied(sqRifleBad.phiSh, true, 1.0, 1.0, nullptr);
+                nf::turnAboutVertical(uLR, pivot, preservedApplied, uPreserved);
+                nf::turnAboutVertical(uLR, pivot, oldShoulderApplied, uOldShoulder);
+                check(sqRifleBad.src == nf::kSquarePreservePose && sqRifleBad.weaponWhy == nf::kSquareWeapon3pVertical && sqRifleBad.b3Xz < nf::kBarrelMinXz &&
+                          sqRifleBad.bFXz == 1.0 && std::fabs(sqRifleBad.phi) < 1e-12 && std::fabs(sqRifleBad.phiSh + 42.5 * kR) < 1e-9 &&
+                          preservedApplied == 0.0 && !preservedOver && std::fabs(oldShoulderApplied + 42.5 * kR) < 1e-9 &&
+                          uPreserved[0] == uLR[0] && uPreserved[2] == uLR[2] && std::fabs(uOldShoulder[2] - uLR[2]) > 0.10,
+                      "F70a: the F70 rifle failure shape (latched vertical row, shoulder phi -42.5 deg) returns zero and preserves the authored pose; the old shoulder turn moved U* over 10 cm");
                 // ---- F69c: the bend never undoes the reach rule.
                 {
                     const double P[3] = {0.0, 1.05, 0.0}, T[3] = {0.0, 1.45, 0.02}, reach[3] = {0.0, 0.0, 0.20};
@@ -3271,61 +3300,185 @@ int wmain(int argc, wchar_t** argv) {
                           c4.capped && c4.kM == 0.0 && !c5.capped && c5.readable == 0 && c5.kM == 0.15 && !c6.capped && c6.readable == 1 && c6.kM == 0.10,
                       "F70: k is capped so the eye stays 6 cm behind a readable FP weapon point on the sight line (20 cm ahead: k at most 14), ignores points off the line or "
                       "behind P14, and with none readable stands as set");
-                // The ramp: the plant is the rendered eye (the error measured on it = the target less the applied shift two frames ago, in the seated axes), w = the ADS
-                // weight (0.15 s in, 0.3 s out). Converges to the full error with no overshoot past 5%, then goes back out on release.
+                const nf::AdsInputChoice freshOn = nf::adsInputChoice(true, true, false, true, true, 2000, false);
+                const nf::AdsInputChoice freshOff = nf::adsInputChoice(true, true, true, true, false, 2000, false);
+                const nf::AdsInputChoice stale = nf::adsInputChoice(true, true, false, true, true, nf::kAdsActionFreshUs + 1, false);
+                const nf::AdsInputChoice absent = nf::adsInputChoice(true, false, false, false, false, 0, false);
+                const nf::AdsInputChoice inactive = nf::adsInputChoice(false, true, true, true, false, 100, false);
+                check(freshOn.ads && freshOn.source == nf::kAdsInputAction && freshOff.source == nf::kAdsInputAction && !freshOff.ads &&
+                          !stale.ads && stale.source == nf::kAdsInputJournal && !absent.ads && absent.source == nf::kAdsInputNone &&
+                          inactive.ads && inactive.source == nf::kAdsInputJournal,
+                      "F70b: a fresh bound HumanoidZoom action wins both press and release; stale or absent action falls back to journal, and ineligible action uses journal");
+                // P14's rotated local forward is composed with F_root rotation only; changing either translation cannot change the basis.
+                const float p14Rot[16] = {0.8660254f, 0, -0.5f, 0, 0, 1, 0, 0, 0.5f, 0, 0.8660254f, 0, 0.2f, -0.1f, 0.4f, 1};
+                const float rootRot[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 4, 2, -3, 1};
+                nf::AdsOpticBasis opticRot;
+                const bool opticOk = nf::adsOpticBasis(p14Rot, rootRot, opticRot);
+                const float p14Moved[16] = {0.8660254f, 0, -0.5f, 0, 0, 1, 0, 0, 0.5f, 0, 0.8660254f, 0, -20, 30, 40, 1};
+                const float rootMoved[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, -400, 200, 300, 1};
+                nf::AdsOpticBasis opticMoved;
+                const bool opticTranslationInvariant = nf::adsOpticBasis(p14Moved, rootMoved, opticMoved) &&
+                                                       std::fabs(opticMoved.forward[0] - opticRot.forward[0]) < 1e-6 &&
+                                                       std::fabs(opticMoved.forward[2] - opticRot.forward[2]) < 1e-6;
+                float p14Bad[16];
+                std::memcpy(p14Bad, p14Rot, sizeof(p14Bad));
+                p14Bad[8] = p14Bad[9] = p14Bad[10] = 0.0f;
+                nf::AdsOpticBasis opticBad;
+                const bool opticDegenerateRefused = !nf::adsOpticBasis(p14Bad, rootRot, opticBad);
+                const bool freshLifecycle = nf::adsActionSampleFresh(true, true, 1200, 1500, 1100, 100);
+                const bool oldLifecycle = nf::adsActionSampleFresh(true, true, 1000, 1500, 1100, 100);
+                const bool futureStamp = nf::adsActionSampleFresh(true, true, 1600, 1500, 1100, 0);
+                const bool inactiveSample = nf::adsActionSampleFresh(false, true, 1200, 1500, 1100, 100);
+                // Exercise the runtime pipeline: prevalidated freshness is passed into the chooser. Age zero alone cannot revive a bad lifecycle/QPC sample.
+                const nf::AdsInputChoice oldLifecycleChoice = nf::adsInputChoice(true, true, true, oldLifecycle, false, 0, false);
+                const nf::AdsInputChoice futureStampChoice = nf::adsInputChoice(true, true, false, futureStamp, true, 0, false);
+                check(freshLifecycle && !oldLifecycle && !futureStamp && !inactiveSample && oldLifecycleChoice.ads && oldLifecycleChoice.source == nf::kAdsInputJournal &&
+                          !futureStampChoice.ads && futureStampChoice.source == nf::kAdsInputJournal,
+                      "F70b: only a valid, non-future action sample from the current eligible lifecycle can override journal state");
+                nf::AdsActionReject reject;
+                const bool earlyReject = nf::adsActionRejectStep(reject, true, 1000, true, false, 7);
+                const bool oldJournal = nf::adsActionRejectStep(reject, true, 2600, true, false, 7);
+                const bool freshJournal = nf::adsActionRejectStep(reject, true, 2600, true, false, 8);
+                const nf::AdsInputChoice veto = nf::adsInputChoice(true, true, true, true, true, 100, freshJournal);
+                const bool heldLatch = nf::adsActionRejectStep(reject, true, 4000, true, true, 9);
+                const nf::AdsInputChoice latched = nf::adsInputChoice(true, true, true, true, true, 100, heldLatch);
+                const bool staleLatchHeld = reject.latched; // runtime skips reject-step on stale samples and carries this latch into the chooser
+                const nf::AdsInputChoice staleLatched = nf::adsInputChoice(true, true, true, false, true, nf::kAdsActionFreshUs + 1, staleLatchHeld);
+                const bool releasedLatch = nf::adsActionRejectStep(reject, false, 4001, true, false, 9);
+                check(!earlyReject && !oldJournal && freshJournal && veto.journalVeto && !veto.ads &&
+                          !latched.ads && latched.journalVeto && staleLatchHeld && !staleLatched.ads && staleLatched.journalVeto && !releasedLatch && !reject.latched,
+                      "F70b: a post-action journal sample after the 1.5 s grace vetoes a rejected held action until logical release");
+                check(opticOk && opticTranslationInvariant && opticDegenerateRefused && std::fabs(opticRot.yawDeg - 30.0) < 1e-4,
+                      "F70c: joint 14's full rigid basis composes with root rotation, root translation cannot alter directions, and degenerate basis is refused");
+                {
+                    namespace nf = edvr::nofoot;
+                    uint8_t site[nf::kWeaponUiVerifyLen];
+                    std::memcpy(site, nf::kWeaponUiBranchBefore, sizeof(site));
+                    const bool nativeGate = nf::weaponUiPatchWanted(true, true) && !nf::weaponUiPatchWanted(true, false) &&
+                                            !nf::weaponUiPatchWanted(false, true) && !nf::weaponUiPatchWanted(false, false);
+                    const bool originalIdentity = nf::patchBytesMatch(site, nf::kWeaponUiBranchBefore, nf::kWeaponUiVerifyLen);
+                    site[nf::kWeaponUiBranchByteOff] = 0xEB;
+                    const bool patchedIdentity = nf::patchBytesMatch(site, nf::kWeaponUiBranchAfter, nf::kWeaponUiVerifyLen);
+                    const bool branchDelta = nf::kWeaponUiBranchBefore[nf::kWeaponUiBranchByteOff] == 0x74 &&
+                                             nf::kWeaponUiBranchAfter[nf::kWeaponUiBranchByteOff] == 0xEB;
+                    site[0] ^= 1;
+                    const bool foreignChangeRefused = !nf::patchBytesMatch(site, nf::kWeaponUiBranchAfter, nf::kWeaponUiVerifyLen) &&
+                                                      !nf::patchBytesMatch(site, nf::kWeaponUiBranchBefore, nf::kWeaponUiVerifyLen);
+                    check(nativeGate && originalIdentity && patchedIdentity && branchDelta && foreignChangeRefused,
+                          "F70d: weapon UI patch is wanted only for native-on-foot sessions, verifies the full original/patched byte identity, changes only the proven branch byte, and refuses foreign bytes on restore");
+                }
+                // F70a: actual ADS state selects one absolute target. The rendered-eye plant is two frames late; the first valid sample must start the eye
+                // correction immediately, and one critically damped state follows the target independently of the head-aim ramp.
                 {
                     const double target[3] = {0.07, -0.04, 0.20};
-                    double pos[3] = {}, vel[3] = {}, hist[8][3] = {};
-                    nf::AdsRamp ramp;
+                    double pos[3] = {}, vel[3] = {}, eyeTarget[3] = {}, hist[8][3] = {};
                     const double dt = 1.0 / 90.0;
-                    double errAt20 = 99.0, errAt35 = 99.0, posAt25 = 0.0, overshoot = 0.0, maxNorm = 0.0;
-                    int step = 0;
-                    auto frame = [&](bool engaged) {
-                        ramp.step(engaged, dt);
-                        double meas[3];
-                        // the measured error: the target less the shift the rendered eye shows (as of two frames ago); the target stays while the weight falls
-                        for (int i = 0; i < 3; ++i) meas[i] = target[i] - hist[(step + 8 - 2) % 8][i];
-                        nf::adsEyeStep(pos, vel, meas, true, ramp.w, dt);
-                        for (int i = 0; i < 3; ++i) hist[step % 8][i] = pos[i];
-                        ++step;
-                    };
-                    for (int i = 0; i < 90; ++i) {   // one second engaged
-                        frame(true);
-                        const double err = std::sqrt((target[0] - pos[0]) * (target[0] - pos[0]) + (target[1] - pos[1]) * (target[1] - pos[1]) + (target[2] - pos[2]) * (target[2] - pos[2]));
-                        if (i == 17) errAt20 = err;   // 0.2 s
-                        if (i == 22) posAt25 = std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
-                        if (i == 31) errAt35 = err;   // 0.35 s
+                    double t90 = -1.0, t95 = -1.0, overshoot = 0.0, maxNorm = 0.0;
+                    int firstMove = -1;
+                    for (int i = 0; i < 90; ++i) {
+                        const bool have = i >= 2; // two rendered frames arrive before the first usable eye sample
+                        double meas[3] = {};
+                        if (have)
+                            for (int c = 0; c < 3; ++c) meas[c] = target[c] - hist[(i + 6) % 8][c];
+                        const double before[3] = {pos[0], pos[1], pos[2]};
+                        nf::adsEyeStep(pos, vel, eyeTarget, meas, have, true, false, dt);
+                        if (have && firstMove < 0 && std::hypot(pos[0] - before[0], pos[1] - before[1], pos[2] - before[2]) > 1e-6) firstMove = i;
+                        for (int c = 0; c < 3; ++c) hist[i % 8][c] = pos[c];
+                        const double err = std::hypot(target[0] - pos[0], target[1] - pos[1], target[2] - pos[2]);
+                        const double tn = std::hypot(target[0], target[1], target[2]);
+                        if (t90 < 0.0 && err <= 0.10 * tn) t90 = i * dt;
+                        if (t95 < 0.0 && err <= 0.05 * tn) t95 = i * dt;
                         for (int c = 0; c < 3; ++c) overshoot = std::max(overshoot, (pos[c] - target[c]) * (target[c] >= 0 ? 1.0 : -1.0));
-                        maxNorm = std::max(maxNorm, std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]));
+                        maxNorm = std::max(maxNorm, std::hypot(pos[0], pos[1], pos[2]));
                     }
                     const double tn = std::sqrt(target[0] * target[0] + target[1] * target[1] + target[2] * target[2]);
                     const double errAt1s = std::sqrt((target[0] - pos[0]) * (target[0] - pos[0]) + (target[1] - pos[1]) * (target[1] - pos[1]) + (target[2] - pos[2]) * (target[2] - pos[2]));
-                    // Release: the weight falls over 0.3 s; the shift returns to zero.
+                    // Release selects a zero target and leaves position and velocity continuous.
                     double backAt05 = 99.0, backAt1 = 99.0;
                     for (int i = 0; i < 90; ++i) {
-                        frame(false);
-                        const double n = std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+                        nf::adsEyeStep(pos, vel, eyeTarget, target, false, false, false, dt);
+                        const double n = std::hypot(pos[0], pos[1], pos[2]);
                         if (i == 44) backAt05 = n;
                         if (i == 89) backAt1 = n;
                     }
-                    check(errAt20 < 0.30 * tn && errAt35 < 0.05 * tn && errAt1s < 0.005 && overshoot < 0.05 * tn && posAt25 > 0.7 * tn && maxNorm < nf::kAdsSightClampM &&
+                    check(firstMove == 2 && t90 >= 0.0 && t90 <= 0.22 && t95 >= 0.0 && t95 <= 0.28 && errAt1s < 0.005 && overshoot < 0.05 * tn && maxNorm < nf::kAdsSightClampM &&
                               backAt05 < 0.03 && backAt1 < 0.002,
-                          "F70: the feed-forward lock takes the eye to the target (a 23 cm shift) with a 2-frame-late measurement: within 30% at 0.2 s (90% by 0.25 s), 5% at 0.35 s, under 5 mm at "
-                          "1 s, no overshoot past 5%; on release (the weight falling over 0.3 s) the shift is under 3 cm at 0.5 s and zero at 1 s");
-                    // The clamp: a 60 cm error never takes the shift past 40 cm; w 0 returns it to zero.
-                    double pc[3] = {}, vc[3] = {};
+                          "F70a: the first valid eye sample moves on that tick despite a two-frame delayed plant; one fixed-target filter reaches 90% by 0.22 s and 95% by 0.28 s without material overshoot; release smoothly returns to zero");
+                    // A missing active-state measurement holds the last absolute target, while a release selects zero.
+                    double ph[3] = {}, vh[3] = {}, th[3] = {};
+                    const double eHold[3] = {0.10, 0.0, 0.0};
+                    nf::adsEyeStep(ph, vh, th, eHold, true, true, false, dt);
+                    const double heldTarget[3] = {th[0], th[1], th[2]};
+                    for (int i = 0; i < 30; ++i) nf::adsEyeStep(ph, vh, th, eHold, false, true, false, dt);
+                    const bool targetHeld = th[0] == heldTarget[0] && th[1] == heldTarget[1] && th[2] == heldTarget[2] && ph[0] > 0.0;
+                    const double movingVelocity = vh[0];
+                    nf::adsEyeStep(ph, vh, th, eHold, false, false, false, dt);
+                    const bool releaseContinuous = ph[0] > 0.0 && vh[0] != 0.0 && movingVelocity != 0.0 && th[0] == 0.0;
+                    nf::adsEyeStep(ph, vh, th, eHold, true, true, false, dt); // repress from release keeps the same position/velocity state
+                    const bool repressContinuous = vh[0] != 0.0 && ph[0] > 0.0;
+                    // The clamp: a 60 cm error never takes the shift past 40 cm; any inactive state returns it to zero.
+                    double pc[3] = {}, vc[3] = {}, tc[3] = {};
                     const double big[3] = {0.6, 0.0, 0.0};
                     double worstN = 0.0;
                     for (int i = 0; i < 180; ++i) {
-                        nf::adsEyeStep(pc, vc, big, true, 1.0, dt);
+                        nf::adsEyeStep(pc, vc, tc, big, true, true, false, dt);
                         worstN = std::max(worstN, std::fabs(pc[0]));
                     }
-                    for (int i = 0; i < 90; ++i) nf::adsEyeStep(pc, vc, big, true, 0.0, dt);
-                    // No measurement this frame holds the shift at w x applied (it does not decay as the F63 integrator did on every missing frame).
-                    double ph[3] = {0.1, 0.0, 0.0}, vh[3] = {};
-                    for (int i = 0; i < 30; ++i) nf::adsEyeStep(ph, vh, big, false, 1.0, dt);
-                    check(worstN <= nf::kAdsSightClampM + 1e-12 && worstN > 0.39 && std::fabs(pc[0]) < 1e-3 && std::fabs(ph[0] - 0.1) < 1e-6,
-                          "F70: the shift is clamped to 40 cm, goes back to zero at weight 0, and holds when a frame has no measurement");
+                    for (int i = 0; i < 90; ++i) nf::adsEyeStep(pc, vc, tc, big, true, false, false, dt);
+                    check(targetHeld && releaseContinuous && repressContinuous && worstN <= nf::kAdsSightClampM + 1e-12 && worstN > 0.39 && std::fabs(pc[0]) < 1e-3,
+                          "F70a: active missing samples hold the absolute target; release and repress preserve the filter state; a 60 cm error clamps to 40 cm and inactive state returns it to zero");
+                }
+                // The align clock caps ADS dt at 50 ms, equal to this filter's tau. Exercise the exact
+                // ADS step at ordinary headset rates and when one 50/100 ms hitch is delivered as the
+                // clock's capped 50 ms step; verify the 8 cm move cap and release/repress continuity.
+                {
+                    const double rates[] = {45.0, 60.0, 90.0, 120.0};
+                    const double targetX[3] = {0.20, 0.0, 0.0};
+                    bool ratesStable = true;
+                    double worstT90 = 0.0, worstT95 = 0.0;
+                    for (double hz : rates) {
+                        const double dt = 1.0 / hz;
+                        double pos[3] = {}, vel[3] = {}, target[3] = {}, error[3] = {targetX[0], 0.0, 0.0};
+                        double t90 = -1.0, t95 = -1.0, previous = 0.0;
+                        for (int i = 0; i < static_cast<int>(hz * 1.0); ++i) {
+                            nf::adsEyeStep(pos, vel, target, error, i == 0, true, false, dt);
+                            const double elapsed = (i + 1) * dt;
+                            if (t90 < 0.0 && pos[0] >= 0.90 * targetX[0]) t90 = elapsed;
+                            if (t95 < 0.0 && pos[0] >= 0.95 * targetX[0]) t95 = elapsed;
+                            const double move = std::fabs(pos[0] - previous);
+                            if (!(std::isfinite(pos[0]) && std::isfinite(vel[0]) && pos[0] <= targetX[0] + 1e-9 && move <= nf::kAdsEyeCapPerFrameM + 1e-12)) ratesStable = false;
+                            previous = pos[0];
+                        }
+                        if (t90 < 0.0 || t95 < 0.0) ratesStable = false;
+                        else { worstT90 = std::max(worstT90, t90); worstT95 = std::max(worstT95, t95); }
+                    }
+                    bool hitchesStable = true;
+                    for (double hitchMs : {50.0, 100.0}) {
+                        double pos[3] = {}, vel[3] = {}, target[3] = {}, error[3] = {targetX[0], 0.0, 0.0};
+                        nf::adsEyeStep(pos, vel, target, error, true, true, false, 1.0 / 90.0);
+                        const double before = pos[0];
+                        const double cappedDt = std::min(hitchMs / 1000.0, 0.05); // qpcDtSec(…, 0.05)
+                        nf::adsEyeStep(pos, vel, target, error, false, true, false, cappedDt);
+                        if (!std::isfinite(pos[0]) || !std::isfinite(vel[0]) || pos[0] < before || pos[0] > targetX[0] ||
+                            pos[0] - before > nf::kAdsEyeCapPerFrameM + 1e-12) hitchesStable = false;
+                        const double releasePos = pos[0], releaseVel = vel[0];
+                        double expectedReleasePos = releasePos, expectedReleaseVel = releaseVel;
+                        nf::adsEyeCdStep(expectedReleasePos, expectedReleaseVel, 0.0, nf::kAdsEyeTauSec, cappedDt, nf::kAdsEyeCapPerFrameM);
+                        nf::adsEyeStep(pos, vel, target, error, false, false, false, cappedDt);
+                        if (!(std::isfinite(pos[0]) && std::isfinite(vel[0]) && pos[0] > 0.0 && vel[0] != 0.0 && releaseVel != 0.0 &&
+                              std::fabs(pos[0] - releasePos) <= nf::kAdsEyeCapPerFrameM + 1e-12 && std::fabs(pos[0] - expectedReleasePos) < 1e-12 &&
+                              std::fabs(vel[0] - expectedReleaseVel) < 1e-12)) hitchesStable = false;
+                        const double repressPos = pos[0], repressVel = vel[0];
+                        error[0] = targetX[0] - pos[0]; // fresh sample re-engages the same absolute correction
+                        double expectedRepressPos = repressPos, expectedRepressVel = repressVel;
+                        nf::adsEyeCdStep(expectedRepressPos, expectedRepressVel, targetX[0], nf::kAdsEyeTauSec, 1.0 / 90.0, nf::kAdsEyeCapPerFrameM);
+                        nf::adsEyeStep(pos, vel, target, error, true, true, false, 1.0 / 90.0);
+                        if (!(std::isfinite(pos[0]) && std::isfinite(vel[0]) && vel[0] != 0.0 && repressVel != 0.0 &&
+                              std::fabs(pos[0] - repressPos) <= nf::kAdsEyeCapPerFrameM + 1e-12 && std::fabs(pos[0] - expectedRepressPos) < 1e-12 &&
+                              std::fabs(vel[0] - expectedRepressVel) < 1e-12)) hitchesStable = false;
+                    }
+                    check(ratesStable && hitchesStable && worstT90 <= 0.22 && worstT95 <= 0.28,
+                          "F70a: exact ADS damping is stable at 45/60/90/120 Hz and 50/100 ms hitch caps, respects 8 cm/frame, reaches 90/95% within 0.22/0.28 s, and preserves release/repress motion");
                 }
                 // The body is pinned to the unlocked head: the camera the game reports moves by the shift (-S0, -S1, +S2 in body axes, F40's plant); the pin input is the camera
                 // less that. A 90 deg turned AMC; S = (4, 2, 18) cm seated.
@@ -3353,7 +3506,7 @@ int wmain(int argc, wchar_t** argv) {
                 {
                     for (int which = 0; which < 2; ++which) {
                         const double k = which == 0 ? 0.0 : 0.15;
-                        double pos[3] = {}, vel[3] = {}, hist[8][3] = {};
+                        double pos[3] = {}, vel[3] = {}, eyeTarget[3] = {}, hist[8][3] = {};
                         const double dt = 1.0 / 90.0;
                         double eyeNow[3];
                         for (int step = 0; step < 180; ++step) {
@@ -3363,7 +3516,7 @@ int wmain(int argc, wchar_t** argv) {
                             for (int i = 0; i < 3; ++i) eyeNow[i] = eye[i] + shiftWorld[i];
                             nf::AdsSightErr er;
                             nf::adsSightErrorEyeK(p14, eyeNow, f, rowsA, k, er);
-                            nf::adsEyeStep(pos, vel, er.seatedFull, true, 1.0, dt);
+                            nf::adsEyeStep(pos, vel, eyeTarget, er.seatedFull, true, true, false, dt);
                             for (int i = 0; i < 3; ++i) hist[step % 8][i] = pos[i];
                         }
                         const double want[3] = {p14[0] + k * f[0], p14[1] + k * f[1], p14[2] + k * f[2]};
@@ -4533,6 +4686,95 @@ int wmain(int argc, wchar_t** argv) {
         check(edvr::frameFlagPeerMismatch() == 33, "a found v33 half is latched");
     }
 
+    {
+        const uint16_t srcName[4] = {10, 11, 12, 13}, srcParent[4] = {0xFFFFu, 0, 1, 1};
+        const uint16_t dstName[4] = {10, 13, 11, 20}, dstParent[4] = {0xFFFFu, 2, 0, 2};
+        // IDs 10 and 11 are the common wrist/palm ancestry; 12 has no match.
+        const auto map = edvr::nofoot::matchHandJoints(srcName, srcParent, 4, dstName, dstParent, 4);
+        check(map.why == edvr::nofoot::kHandMapNoMatches && !map.ok(),
+              "F70b: incomplete finger-name coverage refuses the anatomy map");
+        const uint16_t completeName[4] = {10, 11, 13, 14}, completeParent[4] = {0xFFFFu, 0, 1, 1};
+        const uint16_t completeDst[4] = {10, 13, 11, 14}, completeDstParent[4] = {0xFFFFu, 2, 0, 2};
+        const auto complete = edvr::nofoot::matchHandJoints(completeName, completeParent, 4, completeDst, completeDstParent, 4);
+        check(complete.ok() && complete.count == 4 && complete.dst[0] == 0 && complete.dst[1] == 2 && complete.dst[2] == 1 && complete.dst[3] == 3,
+              "F70b: hand joints map by unique interned IDs and parent topology, including reordered fingers");
+        const uint16_t dupDst[4] = {10, 10, 11, 14};
+        const auto dup = edvr::nofoot::matchHandJoints(completeName, completeParent, 4, dupDst, completeDstParent, 4);
+        const uint16_t wrongParent[4] = {0xFFFFu, 0, 0, 2};
+        const auto topo = edvr::nofoot::matchHandJoints(completeName, completeParent, 4, completeDst, wrongParent, 4);
+        check(dup.why == edvr::nofoot::kHandMapDuplicate && !dup.ok() && topo.why == edvr::nofoot::kHandMapTopology && !topo.ok(),
+              "F70b: duplicate joint names and inconsistent parent chains refuse the anatomy map");
+        const auto rot = [](float m[16], int axis, float angle) noexcept {
+            edvr::nofoot::pfzIdentity(m);
+            const float c = std::cos(angle), s = std::sin(angle);
+            if (axis == 0) { m[5] = c; m[6] = s; m[9] = -s; m[10] = c; }
+            else if (axis == 1) { m[0] = c; m[2] = -s; m[8] = s; m[10] = c; }
+            else { m[0] = c; m[1] = s; m[4] = -s; m[5] = c; }
+        };
+        float B3[16], Bfp[16], Hfp[16], G[16], worldA[16], got[16];
+        rot(B3, 2, 0.31f); rot(Bfp, 1, -0.47f); rot(Hfp, 0, 0.63f); rot(G, 2, -0.28f);
+        B3[12] = 0.20f; B3[13] = 1.10f; B3[14] = -0.10f;   // unequal palm centres and rotated destination basis
+        Bfp[12] = -0.08f; Bfp[13] = 0.95f; Bfp[14] = 0.15f;
+        Hfp[12] = 0.12f; Hfp[13] = 1.00f; Hfp[14] = 0.30f;
+        G[12] = 0.40f; G[13] = -0.05f; G[14] = 0.20f;       // nontrivial model-root transform
+        float t0[16], t1[16];
+        edvr::nofoot::pfzMul(Bfp, Hfp, t0); edvr::nofoot::pfzMul(t0, G, t1);
+        const bool retarget = edvr::nofoot::handRetarget(B3, Bfp, Hfp, G, got);
+        edvr::nofoot::pfzMul(B3, got, worldA);
+        bool worldPoseMatches = retarget;
+        for (int i = 0; i < 16; ++i) worldPoseMatches = worldPoseMatches && std::fabs(worldA[i] - t1[i]) < 2e-5f;
+        check(worldPoseMatches, "F70b: noncommuting palm bases and root transform preserve the full world hand pose through rigid retargeting");
+        edvr::nofoot::PalmPatch right;
+        right.heel[0] = 0.10; right.heel[1] = 1.0; right.heel[2] = 0.2;
+        right.thumb[0] = 1.0; right.normal[1] = 1.0; right.halfThickness = 0.018; right.ok = true;
+        const auto cup = edvr::nofoot::cupUnderHeel(right, 0.012, 0.003);
+        check(cup.ok && std::fabs(cup.centre[1] - (right.heel[1] - 0.033)) < 1e-9 && cup.gap >= 0.003 && cup.facing[0] > 0.99,
+              "F70b: support palm sits beneath the right heel with a non-penetrating proxy gap and faces thumbward");
+        float rightPalm[16], leftPalm[16]; edvr::nofoot::pfzIdentity(rightPalm);
+        rightPalm[0] = 0.0f; rightPalm[1] = 1.0f;    // distal is +Y
+        rightPalm[4] = 1.0f; rightPalm[5] = 0.0f;    // thumbward is +X
+        rightPalm[10] = -1.0f;                       // proper right-hand palm normal is -Z
+        const bool supportFrameOk = edvr::nofoot::supportPalmFrame(rightPalm, 1, -1, cup, leftPalm);
+        const double leftPhysicalNormalX = supportFrameOk ? -leftPalm[8] : 0.0;
+        const double det = supportFrameOk ?
+            leftPalm[0] * (leftPalm[5]*leftPalm[10] - leftPalm[6]*leftPalm[9]) -
+            leftPalm[1] * (leftPalm[4]*leftPalm[10] - leftPalm[6]*leftPalm[8]) +
+            leftPalm[2] * (leftPalm[4]*leftPalm[9] - leftPalm[5]*leftPalm[8]) : 0.0;
+        check(supportFrameOk && leftPhysicalNormalX > 0.99 && std::fabs(det - 1.0) < 1e-5,
+              "F70b: support palm faces the gripping hand with a proper rigid basis");
+
+        float Qsrc[16], QsrcParent[16], Qdst[16], QdstParent[16], D[16], invSrcParent[16], finger[16], desired[16];
+        rot(Qsrc, 0, 0.27f); rot(QsrcParent, 2, -0.31f); rot(Qdst, 1, 0.52f); rot(QdstParent, 0, -0.14f); rot(D, 2, 0.42f);
+        edvr::nofoot::pfzAffineInverse(QsrcParent, invSrcParent);
+        float t2[16]; edvr::nofoot::pfzMul(Qsrc, D, t2); edvr::nofoot::pfzMul(t2, invSrcParent, finger);
+        const float preserved[3] = {0.013f, -0.021f, 0.034f};
+        const bool reflectedOk = edvr::nofoot::handFingerLocalRetarget(Qsrc, finger, QsrcParent, Qdst, QdstParent, preserved, true, desired);
+        const double reflectedDet = reflectedOk ?
+            desired[0] * (desired[5]*desired[10] - desired[6]*desired[9]) -
+            desired[1] * (desired[4]*desired[10] - desired[6]*desired[8]) +
+            desired[2] * (desired[4]*desired[9] - desired[5]*desired[8]) : 0.0;
+        float invDst[16], invDstParent[16], recovered[16], F[16], t3[16], reflectedExpected[16];
+        edvr::nofoot::pfzAffineInverse(Qdst, invDst); edvr::nofoot::pfzAffineInverse(QdstParent, invDstParent);
+        edvr::nofoot::pfzMul(invDst, desired, t2); edvr::nofoot::pfzMul(t2, QdstParent, recovered);
+        edvr::nofoot::pfzIdentity(F); F[10] = -1.0f;
+        edvr::nofoot::pfzMul(F, D, t3); edvr::nofoot::pfzMul(t3, F, reflectedExpected);
+        bool reflectedDeltaMatches = true;
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c)
+            reflectedDeltaMatches = reflectedDeltaMatches && std::fabs(recovered[r * 4 + c] - reflectedExpected[r * 4 + c]) < 2e-5f;
+        check(reflectedOk && reflectedDeltaMatches && std::fabs(reflectedDet - 1.0) < 1e-5 &&
+              std::fabs(desired[12] - preserved[0]) < 1e-6f && std::fabs(desired[13] - preserved[1]) < 1e-6f && std::fabs(desired[14] - preserved[2]) < 1e-6f,
+              "F70b: rotated cross-hand frames preserve the reflected palm-space curl, proper rotation, and 3P segment translation");
+        const bool sameSideOk = edvr::nofoot::handFingerLocalRetarget(Qsrc, finger, QsrcParent, Qdst, QdstParent, preserved, false, desired);
+        float C[16], Cp[16], invCp[16], sameRecovered[16];
+        edvr::nofoot::pfzMul(Qsrc, invDst, C); edvr::nofoot::pfzMul(QsrcParent, invDstParent, Cp);
+        edvr::nofoot::pfzAffineInverse(Cp, invCp);
+        edvr::nofoot::pfzMul(C, desired, t2); edvr::nofoot::pfzMul(t2, invCp, sameRecovered);
+        bool sameDeltaMatches = true;
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c)
+            sameDeltaMatches = sameDeltaMatches && std::fabs(sameRecovered[r * 4 + c] - finger[r * 4 + c]) < 2e-5f;
+        check(sameSideOk && sameDeltaMatches && std::fabs(desired[12] - preserved[0]) < 1e-6f && std::fabs(desired[13] - preserved[1]) < 1e-6f && std::fabs(desired[14] - preserved[2]) < 1e-6f,
+              "F70b: noncommuting same-side palm frames recover the original anatomical finger delta and preserve 3P segment translation");
+    }
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

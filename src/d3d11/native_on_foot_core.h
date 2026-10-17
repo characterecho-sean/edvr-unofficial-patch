@@ -144,6 +144,20 @@ constexpr uintptr_t kMeshSite2Rva = 0x1A149A6;
 constexpr uint8_t kMeshSite2Expect[6] = {0xFF, 0x90, 0x80, 0x00, 0x00, 0x00};
 constexpr uint8_t kMeshSite2Patched[6] = {0xFF, 0x90, 0x78, 0x00, 0x00, 0x00};
 constexpr size_t kMeshSite2ByteOff = 2;
+// Weapon UI attachment orientation branch. Preserve the authored attachment basis while native on-foot VR is active.
+constexpr uintptr_t kWeaponUiBranchRva = 0x1AAF129;
+constexpr uintptr_t kWeaponUiVerifyRva = 0x1AAF120;
+constexpr size_t kWeaponUiVerifyLen = 25, kWeaponUiBranchByteOff = 9;
+constexpr uint8_t kWeaponUiBranchBefore[kWeaponUiVerifyLen] = {
+    0xE8, 0xEB, 0x50, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0x74, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
+constexpr uint8_t kWeaponUiBranchAfter[kWeaponUiVerifyLen] = {
+    0xE8, 0xEB, 0x50, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0xEB, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
+inline bool weaponUiPatchWanted(bool nativeOnFoot, bool session) noexcept { return nativeOnFoot && session; }
+inline bool patchBytesMatch(const uint8_t* actual, const uint8_t* expected, size_t len) noexcept {
+    if (!actual || !expected || !len || len > 32) return false;
+    for (size_t i = 0; i < len; ++i) if (actual[i] != expected[i]) return false;
+    return true;
+}
 // Probes. P1: panel submit (rcx = set, rdx = view, r8b = flag); P2: the HRC submit (six arguments; rcx = HRC); P3: the per-instance submit.
 constexpr size_t kF9ProbeCount = 3;
 constexpr size_t kF9Hrc = 3;
@@ -165,6 +179,12 @@ constexpr size_t kInstSubmitPrologueBytes = 32;
 constexpr uint8_t kInstSubmitPrologue[kInstSubmitPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
     0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xF9, 0x41, 0x8B, 0xD8, 0x48, 0x8B, 0x89, 0x50, 0x01, 0x00};
+// The renderer scope provides the verified per-part table while the two AR callers submit instances.
+constexpr uintptr_t kHumanoidArRenderRva = 0x1A14320;
+constexpr size_t kHumanoidArRenderStolen = 5, kHumanoidArRenderPrologueBytes = 32;
+constexpr uint8_t kHumanoidArRenderPrologue[kHumanoidArRenderPrologueBytes] = {
+    0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x49, 0x8D, 0xAB, 0x68, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x88,
+    0x02, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x2E, 0x26, 0x49, 0x04, 0x48, 0x33, 0xC4, 0x48, 0x89, 0x85};
 // The fields. HRC: byte [+0x291], [+0x470], [+0x4C0]; qwords [+0x418], [+0x420], [+0x428] (the three mesh instances); dep = qword [+0x1D0].
 // View (the instance submit's rdx): dword [+0x8E8] (the view id); floats [+0x50], [+0x54], [+0x58] (the camera position).
 constexpr uint32_t kF9HrcG291Off = 0x291, kF9HrcG470Off = 0x470, kF9HrcG4C0Off = 0x4C0, kF9HrcInst0Off = 0x418, kF9HrcDepOff = 0x1D0,
@@ -521,6 +541,11 @@ constexpr uint32_t kPfzMaxJoints = 0xC0;     // the Animate output's joint cap (
 static_assert(kPfzMaxF >= kPfzMaxJoints, "F53: F can hold every joint the Animate output has (the member cap is never the refusal)");
 constexpr double kPfzBlendSec = 0.3;         // the entry and exit blend
 
+// Set an affine row-major transform to identity.
+inline void pfzIdentity(float out[16]) noexcept {
+    for (int i = 0; i < 16; ++i) out[i] = 0.0f;
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+}
 // The rest local matrix of a pose record (pos vec4 at +0, quaternion at +0x10).
 inline void pfzLocalMatrix(const float rec[8], float out[16]) noexcept {
     float r[9];
@@ -2195,13 +2220,30 @@ struct AdsSightGrowth {
 // rear sight) ahead of P14; the flat game narrows the FOV to make them look bigger, which VR cannot do, so "closer" is the eye moving forward along the sight line:
 // the target eye point is P14w + k f, k the user's setting (0..30 cm, default 15: the rifle eye about 18 cm behind the lens ring, the pistol's about 26 cm behind
 // the rear sight), never closer than kAdsEyeClearanceM to any FP weapon point readable on the line.
-// The lock's step is feed-forward: the target shift is w x (the applied shift + the error measured on the rendered eye), followed by a critically damped filter
-// (tau kAdsEyeTauSec): the 0.02-a-frame integrator it replaces took seconds. w is the ADS weight (0.15 s in, 0.3 s out).
+// The lock's target is absolute: on an active ADS tick with a valid rendered-eye measurement, target = applied + measured error. One critically damped filter
+// (tau kAdsEyeTauSec) follows that target; a missing measurement holds the last target. The actual ADS state gates the target, independently of the head-aim ramp.
 constexpr double kAdsEyeDistDefaultCm = 15.0, kAdsEyeDistMaxCm = 30.0;
 constexpr double kAdsEyeClearanceM = 0.06;      // the eye stays this far behind any readable FP weapon point on the sight line
 constexpr double kAdsEyeOnLineM = 0.06;         // "on the line": a point within this of the sight line, ahead of P14
 constexpr double kAdsEyeTauSec = 0.05;          // 95% in about 0.25 s (tau 0.07 would take 0.33 s)
 constexpr double kAdsEyeCapPerFrameM = 0.08;    // the shift moves at most this much a frame
+// ADS can receive the align clock's full 50 ms stall cap (dt/tau = 1), where the shared semi-implicit
+// cdStep is unstable. Keep the exact critically damped update local to this filter; retain its explicit
+// per-axis displacement cap and carry the analytic velocity through a clipped move.
+inline void adsEyeCdStep(double& pos, double& vel, double target, double tau, double dt, double cap) noexcept {
+    if (dt <= 0.0) return;
+    const double omega = 1.0 / tau;
+    const double x = pos - target;
+    const double c = vel + omega * x;
+    const double decay = std::exp(-omega * dt);
+    const double nextX = (x + c * dt) * decay;
+    const double nextVel = (vel - omega * c * dt) * decay;
+    double move = (target + nextX) - pos;
+    if (move > cap) move = cap;
+    if (move < -cap) move = -cap;
+    pos += move;
+    vel = nextVel;
+}
 inline double adsEyeDistanceClampCm(double cm) noexcept {
     if (!(cm == cm)) return kAdsEyeDistDefaultCm;
     return cm < 0.0 ? 0.0 : cm > kAdsEyeDistMaxCm ? kAdsEyeDistMaxCm : cm;
@@ -2235,15 +2277,66 @@ inline AdsEyeCap adsEyeDistanceCap(double kWantedM, const double p14w[3], const 
     }
     return c;
 }
-// One step of the lock's shift (seated, metres): the target w x (pos + e) (e: the error measured on the rendered eye, zero when it could not be measured this
-// frame), clamped to kAdsSightClampM, followed by one critically damped step at most kAdsEyeCapPerFrameM a frame. w 0 decays the shift to zero.
-inline void adsEyeStep(double pos[3], double vel[3], const double e[3], bool have, double w, double dt) noexcept {
-    const double ww = unit01(w);
-    double target[3];
-    for (int i = 0; i < 3; ++i) target[i] = ww * (pos[i] + (have ? e[i] : 0.0));
-    clampNorm3(target, kAdsSightClampM);
-    for (int i = 0; i < 3; ++i) cdStep(pos[i], vel[i], target[i], kAdsEyeTauSec, dt, kAdsEyeCapPerFrameM);
+// One eye-shift step (seated, metres). Active ADS uses the full absolute correction from the latest valid rendered-eye measurement; missing data holds that
+// absolute target. Release, a guard trip, or any non-active state selects zero while preserving the filter's position and velocity.
+inline void adsEyeStep(double pos[3], double vel[3], double target[3], const double e[3], bool have, bool active, bool tripped, double dt) noexcept {
+    if (active && !tripped && have) {
+        for (int i = 0; i < 3; ++i) target[i] = pos[i] + e[i];
+        clampNorm3(target, kAdsSightClampM);
+    } else if (!active || tripped) {
+        target[0] = target[1] = target[2] = 0.0;
+    }
+    for (int i = 0; i < 3; ++i) adsEyeCdStep(pos[i], vel[i], target[i], kAdsEyeTauSec, dt, kAdsEyeCapPerFrameM);
     clampNorm3(pos, kAdsSightClampM);
+}
+constexpr uint64_t kAdsActionFreshUs = 100000;
+constexpr uint64_t kAdsActionRejectGraceMs = 1500;
+inline bool adsActionSampleFresh(bool eligible, bool valid, uint64_t stampQpc, uint64_t nowQpc, uint64_t eligibleSinceQpc, uint64_t ageUs) noexcept {
+    return eligible && valid && stampQpc && nowQpc >= stampQpc && stampQpc >= eligibleSinceQpc && ageUs <= kAdsActionFreshUs;
+}
+enum AdsInputSource : int { kAdsInputNone = 0, kAdsInputJournal = 1, kAdsInputAction = 2 };
+struct AdsInputChoice {
+    bool ads = false, actionFresh = false, journalVeto = false;
+    int source = kAdsInputNone;
+};
+struct AdsActionReject {
+    bool latched = false;
+    uint64_t edgeMs = 0;
+    uint32_t statusSamplesAtEdge = 0;
+};
+// A game-status veto must come from a Status.json sample observed after the bound action turned on and survive a 1.5 s acceptance grace. Once rejected, the held
+// action stays off until its actual logical value becomes false; stale journal state cannot repeatedly re-engage it.
+inline bool adsActionRejectStep(AdsActionReject& s, bool actionAds, uint64_t nowMs, bool journalKnown, bool journalAds, uint32_t statusSamples) noexcept {
+    if (!actionAds) {
+        s = AdsActionReject{};
+        return false;
+    }
+    if (s.latched) return true;
+    if (!s.edgeMs) {
+        s.edgeMs = nowMs ? nowMs : 1;
+        s.statusSamplesAtEdge = statusSamples;
+        return false;
+    }
+    if (journalKnown && !journalAds && statusSamples > s.statusSamplesAtEdge && nowMs >= s.edgeMs && nowMs - s.edgeMs >= kAdsActionRejectGraceMs) s.latched = true;
+    return s.latched;
+}
+// The bound logical action is the prompt request; the journal is fallback when the action sample is absent/stale. `eligible` is restricted by the caller to an
+// active session/on-foot context. A veto latch holds ADS off until the logical action is actually released.
+inline AdsInputChoice adsInputChoice(bool eligible, bool journalKnown, bool journalAds, bool actionValid, bool actionAds, uint64_t actionAgeUs, bool journalVeto) noexcept {
+    AdsInputChoice c;
+    c.actionFresh = eligible && actionValid && actionAgeUs <= kAdsActionFreshUs;
+    c.journalVeto = journalVeto;
+    if (c.journalVeto) {
+        c.ads = false;
+        c.source = kAdsInputJournal;
+    } else if (c.actionFresh) {
+        c.ads = actionAds;
+        c.source = kAdsInputAction;
+    } else if (journalKnown) {
+        c.ads = journalAds;
+        c.source = kAdsInputJournal;
+    }
+    return c;
 }
 // The camera's body-axes motion for a seated shift S (F40's plant at psi 0): (-S0, -S1, +S2). The body pin and the head-follow take the camera MINUS this,
 // mapped back to the world through the AMC rows (right, up, forward; row-major), so the body stays pinned to the unlocked head and does not slide with the ADS
@@ -2842,6 +2935,58 @@ inline double dirAngleDeg(const double a[3], const double b[3]) noexcept {
     double c = ikDot(ua, ub);
     c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
     return std::acos(c) * 180.0 / kIkPi;
+}
+// Transport joint 14's complete rigid basis through F_root. Rows are directions in row-vector convention;
+// translation is intentionally excluded. A malformed local or root basis is refused instead of treated as an optic axis.
+struct AdsOpticBasis {
+    bool valid = false;
+    double det = 0.0, maxRowError = 0.0, maxDotError = 0.0;
+    double right[3] = {}, up[3] = {}, forward[3] = {};
+    double yawDeg = 0.0, pitchDeg = 0.0;
+};
+inline bool adsOpticBasis(const float p14[16], const float froot[16], AdsOpticBasis& out) noexcept {
+    out = AdsOpticBasis{};
+    double root[3][3], local[3][3], world[3][3];
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) {
+        root[r][c] = froot[r * 4 + c];
+        local[r][c] = p14[r * 4 + c];
+        if (!std::isfinite(root[r][c]) || !std::isfinite(local[r][c])) return false;
+    }
+    const auto determinant = [](const double m[3][3]) noexcept {
+        return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+               m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    };
+    const auto rigid = [](const double m[3][3], double& rowErr, double& dotErr) noexcept {
+        rowErr = dotErr = 0.0;
+        for (int r = 0; r < 3; ++r) {
+            const double d = m[r][0] * m[r][0] + m[r][1] * m[r][1] + m[r][2] * m[r][2];
+            rowErr = std::max(rowErr, std::fabs(std::sqrt(d) - 1.0));
+            for (int q = 0; q < r; ++q) {
+                const double v = m[r][0] * m[q][0] + m[r][1] * m[q][1] + m[r][2] * m[q][2];
+                dotErr = std::max(dotErr, std::fabs(v));
+            }
+        }
+        return rowErr <= 0.02 && dotErr <= 0.02;
+    };
+    double rootRow = 0.0, rootDot = 0.0, localRow = 0.0, localDot = 0.0;
+    const double rootDet = determinant(root), localDet = determinant(local);
+    if (!rigid(root, rootRow, rootDot) || !rigid(local, localRow, localDot) || !(rootDet > 0.95 && rootDet < 1.05) || !(localDet > 0.95 && localDet < 1.05)) return false;
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) {
+        world[r][c] = 0.0;
+        for (int k = 0; k < 3; ++k) world[r][c] += local[r][k] * root[k][c];
+    }
+    double worldRow = 0.0, worldDot = 0.0;
+    out.det = determinant(world);
+    if (!rigid(world, worldRow, worldDot) || !(out.det > 0.95 && out.det < 1.05)) return false;
+    out.maxRowError = std::max(std::max(rootRow, localRow), worldRow);
+    out.maxDotError = std::max(std::max(rootDot, localDot), worldDot);
+    for (int c = 0; c < 3; ++c) { out.right[c] = world[0][c]; out.up[c] = world[1][c]; out.forward[c] = world[2][c]; }
+    const double rootRight[3] = {root[0][0], root[0][1], root[0][2]}, rootForward[3] = {root[2][0], root[2][1], root[2][2]};
+    out.yawDeg = std::atan2(ikDot(out.forward, rootRight), ikDot(out.forward, rootForward)) * 180.0 / kIkPi;
+    const double upDot = std::max(-1.0, std::min(1.0, ikDot(out.forward, root[1])));
+    out.pitchDeg = std::asin(upDot) * 180.0 / kIkPi;
+    out.valid = std::isfinite(out.yawDeg) && std::isfinite(out.pitchDeg);
+    return out.valid;
 }
 // The NDC of the point p + dist * (the unit of f) in an eye's scene rows (row-vector form, clip = (p - o) . rows[0..11] + rows[12..15]). False when
 // the point is behind the eye or f is degenerate. P14 itself sits behind the right eye (F66: w < 0), so the sight is sampled in front of it.
@@ -3477,8 +3622,8 @@ struct P1FramePairing {
 // the stance keeps its blade, the weapon sits on the aim. The barrel axis of each rig is the signed row of its attach matrix most aligned with the aim
 // (G's forward), found as pinFindHeadAxes finds the head's: it is picked per item at the draw (the same pick for kBarrelLatchFrames consecutive armed calls
 // latches it; an item change or the end of arming drops it). ONE function, squareYaw, serves the reach rule's U* (stage 0), the stage-1 angle and the
-// written turn; unarmed it is ikSquareToForward unchanged, and so is any armed call without a readable barrel (the shoulders' phi is always computed
-// beside, for the log).
+// written turn; unarmed it is ikSquareToForward unchanged. An armed call without a usable barrel preserves the authored stance (the shoulders' phi is still
+// measured for diagnostics, never applied).
 constexpr double kBarrelMinDot = 0.7;           // a row within 45 deg of the aim can be the barrel
 constexpr double kBarrelMinXz = 0.25;           // the barrel's horizontal part under this (a weapon pointing up or down) has no yaw to turn the torso by
 constexpr uint32_t kBarrelLatchFrames = 10;     // consecutive armed calls with the same pick in both rigs
@@ -3570,29 +3715,51 @@ struct BarrelAxes {
         return o;
     }
 };
-enum SquareSrc : int { kSquareShoulders = 0, kSquareWeapon = 1 };
+enum SquareSrc : int { kSquareShoulders = 0, kSquareWeapon = 1, kSquarePreservePose = 2 };
+enum SquareWeaponWhy : int { kSquareWeaponReady = 0, kSquareWeaponNoAxes = 1, kSquareWeapon3pVertical = 2, kSquareWeaponFpVertical = 3, kSquareWeaponBothVertical = 4,
+                             kSquareWeaponBadYaw = 5 };
 struct SquareYaw {
     bool ok = false;               // phi is available
     bool haveSh = false, haveW = false;
     double phi = 0.0;              // radians: the one the callers apply
     double phiSh = 0.0, phiW = 0.0;   // both, for the log
     int src = kSquareShoulders;
+    int weaponWhy = kSquareWeaponNoAxes;
+    double b3Xz = 0.0, bFXz = 0.0;  // selected latched barrel rows' horizontal lengths, to explain an unavailable yaw
 };
-// The yaw (ikYawFromTo's sense) that squares the upper body: armed with both barrels known and each with a horizontal part, the barrel's; otherwise the
-// upper-arm line's onto the aim's right. uL, uR the upper-arm joints (3P model space), fwd G's forward.
+// The yaw (ikYawFromTo's sense) that squares the upper body: armed with both barrels known and each with a horizontal part, the barrel's; when unarmed, the
+// upper-arm line's onto the aim's right. Armed with no usable weapon yaw, preserve the animation's authored stance: the shoulder fallback de-bladed the F70
+// rifle by about 42 degrees and caused a 21.4 cm reach correction. uL, uR the upper-arm joints (3P model space), fwd G's forward.
 inline SquareYaw squareYaw(bool armed, const BarrelDirs& bd, const double uL[3], const double uR[3], const double fwd[3]) noexcept {
     SquareYaw o;
     o.haveSh = ikSquareToForward(uL, uR, fwd, &o.phiSh);
     if (bd.ok) {
         const double a[3] = {bd.b3[0], 0.0, bd.b3[2]}, b[3] = {bd.bF[0], 0.0, bd.bF[2]};
-        if (ikLen(a) >= kBarrelMinXz && ikLen(b) >= kBarrelMinXz) {
+        o.b3Xz = ikLen(a);
+        o.bFXz = ikLen(b);
+        if (!std::isfinite(o.b3Xz) || !std::isfinite(o.bFXz)) {
+            o.weaponWhy = kSquareWeaponBadYaw;
+        } else if (o.b3Xz >= kBarrelMinXz && o.bFXz >= kBarrelMinXz) {
             o.phiW = ikYawFromTo(a, b);
             o.haveW = std::isfinite(o.phiW);
+            if (!o.haveW) o.weaponWhy = kSquareWeaponBadYaw;
+            else o.weaponWhy = kSquareWeaponReady;
+        } else if (o.b3Xz < kBarrelMinXz && o.bFXz < kBarrelMinXz) {
+            o.weaponWhy = kSquareWeaponBothVertical;
+        } else if (o.b3Xz < kBarrelMinXz) {
+            o.weaponWhy = kSquareWeapon3pVertical;
+        } else {
+            o.weaponWhy = kSquareWeaponFpVertical;
         }
     }
-    if (armed && o.haveW) {
-        o.phi = o.phiW;
-        o.src = kSquareWeapon;
+    if (armed) {
+        if (o.haveW) {
+            o.phi = o.phiW;
+            o.src = kSquareWeapon;
+        } else {
+            o.phi = 0.0;
+            o.src = kSquarePreservePose;
+        }
         o.ok = true;
     } else if (o.haveSh) {
         o.phi = o.phiSh;
@@ -3821,5 +3988,173 @@ struct OffHand {
         return o;
     }
 };
+enum SupportItem : uint8_t { kSupportNone = 0, kSupportPistol = 1, kSupportTool = 2 };
+inline SupportItem supportItem(const char* name) noexcept {
+    if (!name || !*name) return kSupportNone;
+    constexpr char pistol[] = "$wpn_s_pistol_";
+    if (std::strncmp(name, pistol, sizeof(pistol) - 1) == 0) return kSupportPistol;
+    if (std::strcmp(name, "$humanoid_rechargetool_name;") == 0 || std::strcmp(name, "$humanoid_repairtool_name;") == 0 ||
+        std::strcmp(name, "$humanoid_companalyser_name;") == 0) return kSupportTool;
+    return kSupportNone;
+}
+
+// Anatomical hand transfer primitives. IDs are interned joint names from the
+// two rigs; a match is accepted only when it is unique and its parent also
+// maps to the same named joint. This deliberately refuses ambiguous fingers.
+enum HandMapWhy : uint8_t { kHandMapOk = 0, kHandMapBadInput, kHandMapDuplicate, kHandMapNoMatches, kHandMapTopology, kHandMapPlan, kHandMapSnapshot };
+inline const char* handMapWhyText(HandMapWhy why) noexcept {
+    switch (why) {
+        case kHandMapOk: return "mapped";
+        case kHandMapBadInput: return "bad input";
+        case kHandMapDuplicate: return "duplicate name IDs";
+        case kHandMapNoMatches: return "missing name IDs";
+        case kHandMapTopology: return "parent mismatch";
+        case kHandMapPlan: return "anatomy plan refused";
+        case kHandMapSnapshot: return "optional FP finger snapshot unreadable";
+        default: return "unknown refusal";
+    }
+}
+struct HandJointMap {
+    HandMapWhy why = kHandMapBadInput;
+    uint16_t count = 0;
+    uint16_t dst[kPfzMaxJoints] = {};
+    bool ok() const noexcept { return why == kHandMapOk && count != 0; }
+};
+inline HandJointMap matchHandJoints(const uint16_t* srcName, const uint16_t* srcParent, uint32_t srcN, const uint16_t* dstName, const uint16_t* dstParent,
+                                    uint32_t dstN) noexcept {
+    HandJointMap o;
+    if (!srcName || !srcParent || !dstName || !dstParent || srcN == 0 || dstN == 0 || srcN > kPfzMaxJoints || dstN > kPfzMaxJoints) return o;
+    o.why = kHandMapNoMatches;
+    for (uint32_t i = 0; i < srcN; ++i) {
+        o.dst[i] = 0xFFFFu;
+        if (srcName[i] == 0) continue;
+        uint32_t sc = 0, dc = 0, di = 0;
+        for (uint32_t j = 0; j < srcN; ++j) sc += srcName[j] == srcName[i] ? 1u : 0u;
+        for (uint32_t j = 0; j < dstN; ++j) if (dstName[j] == srcName[i]) { ++dc; di = j; }
+        if (sc > 1 || dc > 1) { o.why = kHandMapDuplicate; o.count = 0; return o; }
+        if (dc != 1) continue;
+        const uint16_t sp = srcParent[i], dp = dstParent[di];
+        if (sp == 0xFFFFu || dp == 0xFFFFu) {
+            if (sp != dp) { o.why = kHandMapTopology; o.count = 0; return o; }
+        } else if (sp >= srcN || dp >= dstN || srcName[sp] == 0 || srcName[sp] != dstName[dp]) {
+            o.why = kHandMapTopology; o.count = 0; return o;
+        }
+        o.dst[i] = static_cast<uint16_t>(di);
+        ++o.count;
+    }
+    if (o.count == srcN) o.why = kHandMapOk;
+    else if (o.count) { o.why = kHandMapNoMatches; o.count = 0; }
+    return o;
+}
+// Transfer the pose through each rig's palm basis. All matrices use the
+// project's row-vector convention: inv(B3) * Bfp * Hfp * G.
+inline bool handRetarget(const float B3[16], const float Bfp[16], const float Hfp[16], const float G[16], float out[16]) noexcept {
+    if (!B3 || !Bfp || !Hfp || !G || !out) return false;
+    float invB3[16], t0[16], t1[16], t2[16];
+    if (!pfzAffineInverse(B3, invB3)) return false;
+    pfzMul(invB3, Bfp, t0);
+    pfzMul(t0, Hfp, t1);
+    pfzMul(t1, G, t2);
+    if (!ikOrthonormalise(t2)) return false;
+    std::memcpy(out, t2, sizeof(t2));
+    return true;
+}
+inline bool handBlendRigid(const float from[16], const float to[16], double weight, float out[16]) noexcept {
+    if (!from || !to || !out || !std::isfinite(weight)) return false;
+    const float w = static_cast<float>(weight < 0.0 ? 0.0 : weight > 1.0 ? 1.0 : weight);
+    float qa[4], qb[4], q[4], rows[9];
+    pfzQuatFromMatrix(from, qa); pfzQuatFromMatrix(to, qb);
+    const float dot = qa[0]*qb[0] + qa[1]*qb[1] + qa[2]*qb[2] + qa[3]*qb[3];
+    const float sign = dot < 0.0f ? -1.0f : 1.0f;
+    float norm = 0.0f;
+    for (int i = 0; i < 4; ++i) { q[i] = (1.0f-w)*qa[i] + w*sign*qb[i]; norm += q[i]*q[i]; }
+    if (!(norm > 1e-12f) || !std::isfinite(norm)) return false;
+    norm = 1.0f / std::sqrt(norm);
+    for (int i = 0; i < 4; ++i) q[i] *= norm;
+    ecm::quatRows(q, rows);
+    pfzIdentity(out);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) out[r*4+c] = rows[r*3+c];
+    for (int c = 0; c < 3; ++c) out[12+c] = static_cast<float>((1.0-w)*from[12+c] + w*to[12+c]);
+    return ikOrthonormalise(out);
+}
+inline bool handFingerLocalRetarget(const float Qsrc[16], const float Lsrc[16], const float QsrcParent[16], const float Qdst[16], const float QdstParent[16],
+                                    const float targetTranslation[3], bool mirrorPalmNormal, float out[16]) noexcept {
+    if (!Qsrc || !Lsrc || !QsrcParent || !Qdst || !QdstParent || !targetTranslation || !out) return false;
+    float invQdstParent[16], t0[16], delta[16];
+    if (!pfzAffineInverse(QdstParent, invQdstParent)) return false;
+    if (mirrorPalmNormal) {
+        float invQsrc[16], F[16], t1[16], reflected[16];
+        if (!pfzAffineInverse(Qsrc, invQsrc)) return false;
+        pfzMul(invQsrc, Lsrc, t0);
+        pfzMul(t0, QsrcParent, delta);
+        pfzIdentity(F); F[10] = -1.0f;   // F D F reflects curl into the opposite physical palm hemisphere
+        pfzMul(F, delta, t1);
+        pfzMul(t1, F, reflected);
+        std::memcpy(delta, reflected, sizeof(delta));
+        pfzMul(Qdst, delta, t0);
+        pfzMul(t0, invQdstParent, out);
+    } else {
+        float C[16], invC[16], Cp[16], invQdstP[16], t1[16];
+        if (!pfzAffineInverse(Qdst, invQdstP)) return false;
+        pfzMul(Qsrc, invQdstP, C);
+        if (!pfzAffineInverse(C, invC)) return false;
+        pfzMul(QsrcParent, invQdstParent, Cp);
+        pfzMul(invC, Lsrc, t1);
+        pfzMul(t1, Cp, out);
+    }
+    for (int c = 0; c < 3; ++c) out[12 + c] = targetTranslation[c];
+    return ikOrthonormalise(out);
+}
+
+struct PalmPatch {
+    double heel[3] = {}, thumb[3] = {}, normal[3] = {};
+    double halfWidth = 0.0, halfLength = 0.0, halfThickness = 0.0;
+    bool ok = false;
+};
+struct SupportPalmTarget {
+    double centre[3] = {}, facing[3] = {};
+    double gap = 0.0;
+    bool ok = false;
+};
+// `normal` is the right hand's thumbward radial direction. The underside is
+// its negative; place the left palm below the heel and outside the proxy.
+// gap is explicit so callers and logs can verify non-penetration.
+inline SupportPalmTarget cupUnderHeel(const PalmPatch& right, const double leftHalfThickness, const double gap) noexcept {
+    SupportPalmTarget o;
+    if (!right.ok || !(leftHalfThickness >= 0.0) || !(gap >= 0.0) || !std::isfinite(leftHalfThickness) || !std::isfinite(gap)) return o;
+    double n[3] = {right.normal[0], right.normal[1], right.normal[2]};
+    if (!ikUnit(n, n)) return o;
+    const double sep = right.halfThickness + leftHalfThickness + gap;
+    if (!(right.halfThickness >= 0.0) || !std::isfinite(sep)) return o;
+    for (int i = 0; i < 3; ++i) {
+        o.centre[i] = right.heel[i] - n[i] * sep;
+        o.facing[i] = right.thumb[i];
+    }
+    if (!ikUnit(o.facing, o.facing)) return SupportPalmTarget{};
+    o.gap = gap;
+    o.ok = true;
+    return o;
+}
+inline bool supportPalmFrame(const float rightPalm[16], int rightPalmarSign, int leftPalmarSign, const SupportPalmTarget& contact, float out[16]) noexcept {
+    if (!rightPalm || !out || !contact.ok || (rightPalmarSign != -1 && rightPalmarSign != 1) || (leftPalmarSign != -1 && leftPalmarSign != 1)) return false;
+    double radial[3] = {rightPalm[4], rightPalm[5], rightPalm[6]}, physicalNormal[3] = {};
+    if (!ikUnit(radial, radial)) return false;
+    for (int i = 0; i < 3; ++i) physicalNormal[i] = rightPalmarSign * static_cast<double>(rightPalm[8 + i]);
+    double distal[3] = {-physicalNormal[0], -physicalNormal[1], -physicalNormal[2]};
+    const double radialPart = ikDot(distal, radial);
+    for (int i = 0; i < 3; ++i) distal[i] -= radialPart * radial[i];
+    if (!ikUnit(distal, distal)) return false;
+    double normal[3] = {leftPalmarSign * radial[0], leftPalmarSign * radial[1], leftPalmarSign * radial[2]}, side[3];
+    ikCross(normal, distal, side);
+    if (!ikUnit(side, side)) return false;
+    pfzIdentity(out);
+    for (int i = 0; i < 3; ++i) {
+        out[i] = static_cast<float>(distal[i]); out[4 + i] = static_cast<float>(side[i]); out[8 + i] = static_cast<float>(normal[i]);
+        out[12 + i] = static_cast<float>(contact.centre[i]);
+    }
+    return ikOrthonormalise(out);
+}
+
 }  // namespace nofoot
 }  // namespace edvr

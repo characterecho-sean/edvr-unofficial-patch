@@ -137,11 +137,23 @@ inline Candidates g_cand[2];
 // kind's X) publishes the FP X, its joint count and the subtree of the clavicles 19 and 20 under g_fdSeq; the Animate post-hook snapshots joints 19,
 // 20, 37 and 44 for that X (and the arm IK's FP joints). F66: the shoulder drop that lowered the subtree (fix.native_on_foot_fp_shoulder_drop_cm) is
 // gone; the arm IK key keeps the hook and the FP candidates running when the pose freeze key is off.
+struct HandRig {
+    uint8_t why = 1;    // 0 valid; 1 bad plan/rest; 2 finger branch topology; 3 missing joint name; 4 degenerate geometry/transform
+    uint8_t count = 0, palmarSign = 1;
+    uint16_t hand = 0xFFFFu, attach = 0xFFFFu;
+    uint16_t joint[24] = {}, parentSlot[24] = {};
+    uint16_t name[24] = {};
+    float restLocal[24][16] = {}, boneToPalm[24][16] = {}, palm[16] = {};
+    float width = 0.0f, length = 0.0f, skinRadius = 0.0f;
+};
 struct FpDropPlan {
     uint64_t x = 0;
+    uint32_t generation = 0;
     uint32_t joints = 0;
     uint32_t count = 0;
     uint16_t member[nofoot::kPfzMaxF] = {};
+    uint8_t handCount = 0;
+    HandRig hand[2];
 };
 inline std::atomic<uint32_t> g_fdSeq{0};
 inline FpDropPlan g_fdPlan;
@@ -157,6 +169,7 @@ inline std::atomic<uint64_t> g_fdX{0};               // the plan's X (0: none), 
 // anchor less both thigh subtrees) that the raise moves.
 struct ArmPlan {
     uint64_t x = 0;
+    uint32_t generation = 0;
     uint32_t joints = 0;
     bool ok[2] = {false, false};
     nofoot::IkArm side[2];
@@ -167,6 +180,8 @@ struct ArmPlan {
     nofoot::IkArm leg[2];
     uint16_t ubN = 0;
     uint16_t ub[nofoot::kPfzMaxJoints] = {};
+    uint8_t handCount = 0;
+    HandRig hand[2];
 };
 inline std::atomic<uint32_t> g_armSeq{0};
 inline ArmPlan g_armPlan;
@@ -285,5 +300,7 @@ uint32_t nativeOnFootMarkerFrameNow();
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).
 bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]);
+// Called at the existing eye-dump request boundary; ADS records the next bounded optic/source tuple.
+void nativeOnFootEyeDumpRequest();
 
 }  // namespace edvr

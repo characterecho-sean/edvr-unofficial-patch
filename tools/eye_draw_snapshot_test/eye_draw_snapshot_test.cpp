@@ -236,6 +236,71 @@ int wmain(int argc, wchar_t** argv) {
     effects.vertexBytes=32*1024*1024;
     effects.captureSourceMesh(ctx.Get(),119,0x9AEC596A2B036EA6ull,0,'X',6,1,0,0,0);
     check(effects.vertexDeclined>0 && effects.draws.size()==5,"effect vertex budget declines explicitly but retains constants");
+
+    // The exact rifle bolt pair reads two endpoint positions plus a stepped
+    // per-instance record. Preserve its original binding origins and draw
+    // window in the existing bounded geometry capture.
+    const char* boltCode="struct I{float3 a:POSITION0;float3 b:POSITION1;float4 p:TEXCOORD0;};float4 main(I i):SV_Position{return float4(i.a+i.b+i.p.xyz*0.001,1);}";
+    ComPtr<ID3DBlob> boltBlob;hr(D3DCompile(boltCode,strlen(boltCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&boltBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC boltElements[3]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"POSITION",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,4,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+    ComPtr<ID3D11InputLayout> boltLayout;hr(dev->CreateInputLayout(boltElements,3,boltBlob->GetBufferPointer(),boltBlob->GetBufferSize(),&boltLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(boltLayout.Get(),boltElements,3,edvr::EyeDrawSnapshot::kBoltVs);
+    bd.ByteWidth=128;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;bd.CPUAccessFlags=bd.MiscFlags=bd.StructureByteStride=0;
+    ComPtr<ID3D11Buffer> boltVertices,boltInstances;hr(dev->CreateBuffer(&bd,nullptr,&boltVertices));hr(dev->CreateBuffer(&bd,nullptr,&boltInstances));
+    uint8_t boltVertexBytes[128],boltInstanceBytes[128];for(UINT i=0;i<128;++i){boltVertexBytes[i]=static_cast<uint8_t>(0x20+i);boltInstanceBytes[i]=static_cast<uint8_t>(0x80+i);}
+    ctx->UpdateSubresource(boltVertices.Get(),0,nullptr,boltVertexBytes,0,0);ctx->UpdateSubresource(boltInstances.Get(),0,nullptr,boltInstanceBytes,0,0);
+    D3D11_BUFFER_DESC boltIndexDesc{};boltIndexDesc.ByteWidth=64;boltIndexDesc.Usage=D3D11_USAGE_DEFAULT;boltIndexDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+    ComPtr<ID3D11Buffer> boltIndices;hr(dev->CreateBuffer(&boltIndexDesc,nullptr,&boltIndices));
+    UINT boltStrides[2]={24,16},boltOffsets[2]={12,8};ID3D11Buffer* boltBindings[2]={boltVertices.Get(),boltInstances.Get()};
+    ctx->IASetVertexBuffers(0,2,boltBindings,boltStrides,boltOffsets);ctx->IASetIndexBuffer(boltIndices.Get(),DXGI_FORMAT_R16_UINT,4);
+    ctx->IASetInputLayout(boltLayout.Get());ID3D11Buffer* boltCb=cb.Get();ctx->VSSetConstantBuffers(1,1,&boltCb);
+    float boltCbData[48];for(UINT i=0;i<48;++i)boltCbData[i]=static_cast<float>(i)+0.25f;ctx->UpdateSubresource(cb.Get(),0,nullptr,boltCbData,0,0);
+    edvr::EyeDrawSnapshot boltSnap;
+    boltSnap.capture(ctx.Get(),500,0,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    const auto& boltDraw=boltSnap.draws.back();
+    check(edvr::EyeDrawSnapshot::watches(edvr::EyeDrawSnapshot::kBoltVs) && boltDraw.layout.size()==3 &&
+              std::strcmp(boltDraw.layout[0].semantic,"POSITION")==0 && boltDraw.layout[0].index==0 &&
+              std::strcmp(boltDraw.layout[1].semantic,"POSITION")==0 && boltDraw.layout[1].index==1 &&
+              boltDraw.streams[0].offset==12 && boltDraw.streams[0].captureOffset==12 && boltDraw.streams[0].copied==116 &&
+              boltDraw.streams[1].offset==8 && boltDraw.streams[1].captureOffset==8 && boltDraw.streams[1].copied==80 &&
+              boltDraw.streams[2].captureOffset==10 && boltDraw.streams[2].copied==8,
+          "exact bolt pair captures the indexed VB0 tail and stepped instance window from nonzero bindings");
+    // Indexed VB0 is retained from its binding offset to the stream cap: the
+    // current reader does not decode indices to infer the maximum vertex.
+    uint8_t boltVertexExpected[116];std::memcpy(boltVertexExpected,boltVertexBytes+12,sizeof(boltVertexExpected));
+    uint8_t boltInstanceExpected[80];std::memcpy(boltInstanceExpected,boltInstanceBytes+8,sizeof(boltInstanceExpected));
+    float boltCbLater[48];for(float& v:boltCbLater)v=-17.f;ctx->UpdateSubresource(cb.Get(),0,nullptr,boltCbLater,0,0);
+    std::memset(boltVertexBytes,0,sizeof(boltVertexBytes));std::memset(boltInstanceBytes,0,sizeof(boltInstanceBytes));
+    ctx->UpdateSubresource(boltVertices.Get(),0,nullptr,boltVertexBytes,0,0);ctx->UpdateSubresource(boltInstances.Get(),0,nullptr,boltInstanceBytes,0,0);wait_gpu(ctx.Get(),dev.Get());
+    D3D11_MAPPED_SUBRESOURCE boltMapped{};hr(ctx->Map(boltDraw.streams[0].stage.Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltVertexSnapshot=std::memcmp(boltMapped.pData,boltVertexExpected,sizeof(boltVertexExpected))==0;ctx->Unmap(boltDraw.streams[0].stage.Get(),0);
+    hr(ctx->Map(boltDraw.streams[1].stage.Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltInstanceSnapshot=std::memcmp(boltMapped.pData,boltInstanceExpected,sizeof(boltInstanceExpected))==0;ctx->Unmap(boltDraw.streams[1].stage.Get(),0);
+    hr(ctx->Map(boltDraw.stage[1].Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltConstantSnapshot=boltDraw.copied[1]==sizeof(boltCbData) && std::memcmp(boltMapped.pData,boltCbData,sizeof(boltCbData))==0;ctx->Unmap(boltDraw.stage[1].Get(),0);
+    ComPtr<ID3D11InputLayout> boltLayoutBound;ctx->IAGetInputLayout(&boltLayoutBound);
+    ID3D11Buffer* boltVbAfter[2]{};UINT boltStrideAfter[2]{},boltOffsetAfter[2]{};ctx->IAGetVertexBuffers(0,2,boltVbAfter,boltStrideAfter,boltOffsetAfter);
+    ID3D11Buffer* boltIbAfter=nullptr;DXGI_FORMAT boltFmtAfter{};UINT boltIbOffsetAfter=0;ctx->IAGetIndexBuffer(&boltIbAfter,&boltFmtAfter,&boltIbOffsetAfter);
+    ID3D11Buffer* boltCbAfter=nullptr;ctx->VSGetConstantBuffers(1,1,&boltCbAfter);
+    check(boltVertexSnapshot && boltInstanceSnapshot && boltConstantSnapshot && boltLayoutBound.Get()==boltLayout.Get() && boltVbAfter[0]==boltVertices.Get() && boltVbAfter[1]==boltInstances.Get() &&
+              boltStrideAfter[0]==24 && boltStrideAfter[1]==16 && boltOffsetAfter[0]==12 && boltOffsetAfter[1]==8 && boltIbAfter==boltIndices.Get() &&
+              boltFmtAfter==DXGI_FORMAT_R16_UINT && boltIbOffsetAfter==4 && boltCbAfter==cb.Get(),
+          "bolt stream and constant copies retain draw-time data without changing pipeline bindings");
+    if(boltVbAfter[0])boltVbAfter[0]->Release();if(boltVbAfter[1])boltVbAfter[1]->Release();if(boltIbAfter)boltIbAfter->Release();if(boltCbAfter)boltCbAfter->Release();
+    boltSnap.capture(ctx.Get(),501,1,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==2 && boltSnap.fireGeometryCaptured==2,
+          "bolt geometry remains captured after the eye dump's first frame");
+    boltSnap.capture(ctx.Get(),501,2,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs^1ull,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==2 && boltSnap.draws.back().layout.empty() && !boltSnap.draws.back().streams[0].copied,
+          "a neighboring pixel shader does not activate bolt geometry capture");
+    ctx->IASetInputLayout(nullptr);boltSnap.capture(ctx.Get(),502,3,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    ctx->IASetInputLayout(boltLayout.Get());
+    boltSnap.vertexBytes=32*1024*1024;boltSnap.capture(ctx.Get(),503,4,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==4 && boltSnap.fireGeometryCaptured==2 && boltSnap.fireGeometryMissingLayout==1 && boltSnap.fireGeometryRefusedBytes>0,
+          "bounded bolt summary distinguishes observed draws, captured geometry, missing layouts, and refused bytes");
+
     // A real HDR target changed between the two capture boundaries. The
     // Python fixture checks exact packed pixels after subsequent overwrites.
     edvr::EyeDrawSnapshot cropSnap;

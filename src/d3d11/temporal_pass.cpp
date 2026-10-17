@@ -6412,6 +6412,7 @@ static void beginEyeRun() {
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
+    nativeOnFootEyeDumpRequest();   // F70c: record optic and source provenance at the next eye-frame tick.
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
     // census starts here and can begin with its following frame.

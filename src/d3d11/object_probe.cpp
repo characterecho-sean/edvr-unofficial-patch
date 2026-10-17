@@ -1194,6 +1194,9 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI/solar first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    Log::get().note("object probe: exact rifle bolt geometry (%016llX/%016llX): %u draws seen, %u with both POSITION endpoints captured, %u missing input layouts, %u refused bytes; existing 256 KiB per stream and 32 MiB per run. This is rendered visual geometry, not a collision ray.",
+                    static_cast<unsigned long long>(EyeDrawSnapshot::kBoltVs),static_cast<unsigned long long>(EyeDrawSnapshot::kBoltPs),g_drawSnapshot.fireGeometrySeen,
+                    g_drawSnapshot.fireGeometryCaptured,g_drawSnapshot.fireGeometryMissingLayout,g_drawSnapshot.fireGeometryRefusedBytes);
     uint32_t solarDraws=0,solarConstants=0,solarGeometry=0;
     for(const auto& d:g_drawSnapshot.draws)if(EyeDrawSnapshot::solarDraw(d.vs)) {
         ++solarDraws;solarConstants+=d.copied[0]>=128 && d.copied[1]>0;
