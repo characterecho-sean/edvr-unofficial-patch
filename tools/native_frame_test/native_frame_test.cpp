@@ -2635,8 +2635,7 @@ int wmain(int argc, wchar_t** argv) {
                       "F68g: the trace starts only when armed and over 1 m/s, runs exactly 40 calls (0..39), starts at most 5 events in a minute (200 calls) and the "
                       "sixth once the first has aged out");
             }
-            // F68d: the arms follow the FP hands. The detector on recorded rest and raised poses (the FP right attach in the FP model space), no ramp at the
-            // onset, and Status.json as the authority with the 1.5 s veto.
+            // F68d: diagnostic-only FP hand-motion detector on recorded rest and raised poses. Its signal/weight must not select weapon authority.
             {
                 const double dtF = 1.0 / 90.0;
                 const double rest[3] = {0.25, -0.10, 0.30}, raised[3] = {0.25 + 0.15, -0.10 + 0.20, 0.30 + 0.25};   // 35.4 cm apart
@@ -2650,10 +2649,10 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 check(capturedAt >= 36 && capturedAt <= 38 && a.haveRest && std::fabs(a.rest[0] - rest[0]) < 1e-12 && !o.up && !o.signal && o.w == 0.0 && o.dist == 0.0,
                       "F68d: the unarmed rest pose is captured once Status.json says fists and the hand has been still for 0.4 s (frame 37)");
-                // (2) The hand rises 35 cm with Status.json still saying fists: the very first frame is up and the weight is 1 (no ramp).
+                // (2) The detector reports a raised hand immediately; production weapon authority is tested separately below.
                 o = a.step(dtF, true, raised, true);
                 check(o.up && o.signal && !o.vetoed && o.w == 1.0 && std::fabs(o.dist - std::sqrt(0.125)) < 1e-9,
-                      "F68d: the FP hand 35 cm from its rest pose is up on its first frame and takes the arms' full weight at once (no ramp), Status.json still on fists");
+                      "F68d: the diagnostic detects the FP hand 35 cm from rest on its first frame while Status.json still says fists");
                 // (3) The hysteresis (up past 12 cm, down under 9 cm) and the weight's 0.3 s fall.
                 nf::FpHandsUp h;
                 for (int i = 0; i < 45; ++i) h.step(dtF, true, rest, true);
@@ -2670,9 +2669,8 @@ int wmain(int argc, wchar_t** argv) {
                     fall = hAt(0.0);
                     ++fallFrames;
                 }
-                check(fallFrames >= 25 && fallFrames <= 28, "F68d: the weight falls to 0 over 0.3 s once the signal ends (no snap of the arms)");
-                // (4) The veto: hands up with the fists, counted from the hands going up (F69f: 3.0 s; it was 1.5). The hand sways a little (a hand held perfectly
-                // still would be recaptured as the unarmed rest at the same moment); armed to 3.0 s, then not armed, the weight falling over 0.3 s.
+                check(fallFrames >= 25 && fallFrames <= 28, "F68d: the diagnostic weight falls to 0 over 0.3 s once its signal ends");
+                // (4) The diagnostic veto: hands up with the fists, counted from the hands going up (F69f: 3.0 s). The hand sways so rest recapture cannot hide it.
                 nf::FpHandsUp v;
                 for (int i = 0; i < 45; ++i) v.step(dtF, true, rest, true);
                 int firstVeto = -1;
@@ -2681,11 +2679,11 @@ int wmain(int argc, wchar_t** argv) {
                     double swayed[3] = {raised[0] + 0.02 * std::sin(i * 0.3), raised[1], raised[2]};
                     ov = v.step(dtF, true, swayed, true);
                     if (ov.vetoed && firstVeto < 0) firstVeto = i;
-                    if (i == 100) check(ov.signal && !ov.vetoed && ov.w == 1.0, "F68d: hands up with the fists for 1.1 s are still armed");
+                    if (i == 100) check(ov.signal && !ov.vetoed && ov.w == 1.0, "F68d: the diagnostic signal remains up after 1.1 s");
                 }
                 check(firstVeto >= 269 && firstVeto <= 272 && !ov.signal && ov.vetoed && ov.w < 1.0,
-                      "F68d: hands up with Status.json on fists for more than 3 s are not armed (an emote or a tool pose): vetoed at frame 270");
-                // (5) Status.json flips to armed 0.8 s after the hands went up: no veto, ever, and the weapon holds.
+                      "F68d: the diagnostic vetoes a fists-up pose after 3 s (an emote or tool pose), at frame 270");
+                // (5) A SelectedWeapon transition clears the diagnostic fists timer; the independent authority/ramp behavior is tested below.
                 nf::FpHandsUp w;
                 for (int i = 0; i < 45; ++i) w.step(dtF, true, rest, true);
                 bool everVetoed = false, allSignal = true;
@@ -2695,12 +2693,12 @@ int wmain(int argc, wchar_t** argv) {
                     everVetoed = everVetoed || ow.vetoed;
                     allSignal = allSignal && ow.signal;
                 }
-                check(!everVetoed && allSignal, "F68d: Status.json flipping to armed 0.8 s after the hands rise keeps the signal and never vetoes (5 s checked)");
-                // (6) A long unarmed spell does not veto the next draw: the 1.5 s counts from the hands going up, not from the fists.
+                check(!everVetoed && allSignal, "F68d: the diagnostic has no veto after Status.json stops reporting fists (5 s checked)");
+                // (6) A long fists interval leaves no stale diagnostic veto when the hand first rises.
                 nf::FpHandsUp l;
                 for (int i = 0; i < 90 * 60; ++i) l.step(dtF, true, rest, true);   // a minute of fists
                 const nf::FpHandsUp::Out first = l.step(dtF, true, raised, true);
-                check(first.signal && !first.vetoed && first.w == 1.0, "F68d: after a minute of fists the first frame of a draw is armed at once (the veto counts from the hands going up)");
+                check(first.signal && !first.vetoed && first.w == 1.0, "F68d: after a minute on fists the diagnostic reports a raised hand without an old veto");
                 // (7) The unarmed pose swaying by 5 cm while walking is never up; a hand moving too fast to be still never captures a rest.
                 nf::FpHandsUp s;
                 for (int i = 0; i < 45; ++i) s.step(dtF, true, rest, true);
@@ -2730,12 +2728,80 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 check(recaptured && !o2.up && !o2.signal && std::fabs(r2.rest[0] - raised[0]) < 1e-9,
                       "F68d: after the veto, the same pose held still for 3 s becomes the new unarmed rest and the hands read down");
-                // (9) A frame without the snapshot changes nothing but the weight's fall.
+                // (9) A frame without the snapshot keeps the last diagnostic state.
                 nf::FpHandsUp g;
                 for (int i = 0; i < 45; ++i) g.step(dtF, true, rest, true);
                 g.step(dtF, true, raised, true);
                 const nf::FpHandsUp::Out miss = g.step(dtF, true, rest, false);
                 check(miss.up && miss.signal && miss.w == 1.0 && g.havePrev, "F68d: a frame whose snapshot could not be read keeps the last state");
+            }
+            // F72: only SelectedWeapon can arm or weight the solve. Repeated FP hand-up hysteresis during fists
+            // must stay diagnostic; a real equip and holster still use the existing 0.3 s ramp.
+            {
+                const double dtF = 1.0 / 90.0;
+                const double rest[3] = {0.25, -0.10, 0.30};
+                const double raised[3] = {rest[0] + 0.13, rest[1], rest[2]};
+                const double lowered[3] = {rest[0] + 0.085, rest[1], rest[2]};
+                nf::FpHandsUp gesture;
+                for (int i = 0; i < 45; ++i) gesture.step(dtF, true, rest, true);
+                nf::IkBlend selectedRamp{0.0f, nf::kArmedRampSec};
+                bool sawDiagnosticSignal = false, fistsStayedUnarmed = true;
+                uint32_t diagnosticPulses = 0;
+                bool prevSignal = false;
+                for (int i = 0; i < 180; ++i) {
+                    const bool upPose = (i % 30) < 15;
+                    const auto d = gesture.step(dtF, true, upPose ? raised : lowered, true);
+                    selectedRamp.step(false, dtF);
+                    const auto state = nf::ikArmedAuthority(false, selectedRamp.w);
+                    sawDiagnosticSignal = sawDiagnosticSignal || d.signal;
+                    if (d.signal && !prevSignal) ++diagnosticPulses;
+                    prevSignal = d.signal;
+                    fistsStayedUnarmed = fistsStayedUnarmed && !state.armed && state.ramp == 0.0 &&
+                                         nf::ikArmedSolveWeight(state.armed, state.ramp, 1.0) == 0.0;
+                }
+                check(sawDiagnosticSignal && diagnosticPulses > 1 && fistsStayedUnarmed,
+                      "F72: repeated 12/9 cm FP hand-up gait pulses during fists never arm or weight the production solve");
+
+                double equipStart = -1.0, equipEnd = -1.0;
+                bool equipStatusArmed = true;
+                for (int i = 0; i < 27; ++i) {
+                    gesture.step(dtF, false, raised, true);
+                    selectedRamp.step(true, dtF);
+                    const auto state = nf::ikArmedAuthority(true, selectedRamp.w);
+                    equipStatusArmed = equipStatusArmed && state.armed;
+                    if (i == 0) equipStart = state.ramp;
+                    if (i == 26) equipEnd = state.ramp;
+                }
+                const double fullEquipWeight = nf::ikArmedSolveWeight(true, equipEnd, 1.0);
+                check(equipStatusArmed && equipStart > 0.0 && equipStart < 0.1 && equipEnd > 0.999 && fullEquipWeight > 0.99999,
+                      "F72: a real SelectedWeapon equip arms immediately and preserves the existing 0.3 s ramp to full weight");
+
+                double holsterStart = -1.0, holsterEnd = -1.0, lastHolsterWeight = 2.0;
+                bool holsterStatusDown = true, holsterFades = true;
+                for (int i = 0; i < 27; ++i) {
+                    const auto d = gesture.step(dtF, true, raised, true);  // the diagnostic can stay raised after holster
+                    selectedRamp.step(false, dtF);
+                    const auto state = nf::ikArmedAuthority(false, selectedRamp.w);
+                    const double weight = nf::ikArmedSolveWeight(state.armed, state.ramp, 1.0);
+                    if (i == 0) holsterStart = state.ramp;
+                    if (i == 26) holsterEnd = state.ramp;
+                    holsterStatusDown = holsterStatusDown && !state.armed;
+                    holsterFades = holsterFades && d.signal && weight <= selectedRamp.w && weight <= lastHolsterWeight + 1e-9;
+                    lastHolsterWeight = weight;
+                }
+                bool postHolsterGaitUnarmed = holsterEnd < 1e-5, postHolsterSawSignal = false;
+                for (int i = 0; i < 180; ++i) {
+                    const bool upPose = (i % 30) < 15;
+                    const auto d = gesture.step(dtF, true, upPose ? raised : lowered, true);
+                    selectedRamp.step(false, dtF);
+                    const auto state = nf::ikArmedAuthority(false, selectedRamp.w);
+                    postHolsterSawSignal = postHolsterSawSignal || d.signal;
+                    if (d.signal) postHolsterGaitUnarmed = postHolsterGaitUnarmed && !state.armed && state.ramp == 0.0 &&
+                                                           nf::ikArmedSolveWeight(state.armed, state.ramp, 1.0) == 0.0;
+                }
+                check(holsterStart < 1.0 && holsterStart > 0.9 && holsterEnd < 1e-5 && holsterStatusDown && holsterFades &&
+                          postHolsterSawSignal && postHolsterGaitUnarmed,
+                      "F72: holstering drops item authority immediately, fades the existing ramp, and later fist gait cannot rearm it");
             }
             // F68e: the neck target from the animated head, and the crouch in the pin's state split.
             {
@@ -3059,7 +3125,7 @@ int wmain(int argc, wchar_t** argv) {
                           !edvr::drawtag::encode(badC, sentinelRz) && !edvr::drawtag::encode(den, sentinelRz),
                       "F69e: key 10's (0, 0, 5) takes a tag after the zeros become 2^-100 m (it decodes its sentinel, moves under 1e-29 m, keeps a zero's sign); a NaN or "
                       "a denormal component still refuses and a nonzero position is untouched");
-                // ---- F69f: Status.json 2.0 s late arms with no gap, and the veto holds to 3 s (F68's margin was 0.4 s).
+                // ---- F69f: the diagnostic signal leads Status.json by 2.0 s and its fists-up veto holds to 3 s.
                 {
                     const double dtF = 1.0 / 90.0;
                     const double restP[3] = {0.25, -0.10, 0.30}, raised[3] = {0.40, 0.10, 0.55};
@@ -3083,8 +3149,7 @@ int wmain(int argc, wchar_t** argv) {
                         if (i == 251) at28 = ov.signal && !ov.vetoed;   // 2.8 s
                     }
                     check(!everVetoed && allSignal && nf::kHandsVetoSec == 3.0 && at28 && firstVeto >= 269 && firstVeto <= 272,
-                          "F69f: Status.json arriving 2.0 s after the hands rise arms with no gap and no veto; hands up with the fists are still armed at 2.8 s and vetoed "
-                          "from 3.0 s (frame 270)");
+                          "F69f: the diagnostic stays unvetoed when Status.json arrives 2.0 s after the hand rises, then vetoes a fists-up pose from 3.0 s (frame 270)");
                 }
                 // ---- F69g: the grip frames: synthetic hands with a known Gamma give the reported delta within 0.1 deg and 0.1 mm.
                 {

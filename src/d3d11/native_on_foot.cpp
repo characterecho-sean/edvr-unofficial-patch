@@ -8583,10 +8583,9 @@ void f66bNote(uint64_t nowMs, double dtQpc) noexcept {
 }
 
 // ---- F68d: the FP hands-up record (the hook writes one per call; the frame thread prints) ------------------------------------------------------
-// The hook posts, per Animate call: the attach's distance from its unarmed rest pose, the detector's state, the FP AMC's part count, the P1 frame index
-// and whether Status.json says fists. The frame thread, at each Status.json change of the held item, waits a second and prints the two seconds around
-// it, one line per frame, and a summary: when the hands first went up, when the weapon's part appeared, against the flip (expect the hands first by
-// 0.3-1 s). Beside that it logs each change of the detector's state (up, vetoed, rest captured) as it happens. At most 5 events a minute.
+// Diagnostic telemetry only. The hook posts per Animate call: the attach's distance from its unarmed rest pose, the detector's state, the FP AMC's
+// part count, the P1 frame index and whether Status.json says fists. The frame thread prints the two seconds around selected-item changes to compare
+// detector timing with weapon-part timing. These observations never arm, weight, or gate the solve. At most 5 events a minute.
 std::atomic<bool> g_f68dFists{true};   // frame thread: Status.json is not showing an item (fists, or the field unknown)
 struct F68dRec {
     std::atomic<uint32_t> seq{0};
@@ -8666,8 +8665,8 @@ void f68dTick(uint64_t nowMs) noexcept {
         if (f68dCopy(head - 1, &nw) && nw.qpc + f66QpcFreq() * 2 > f30Qpc()) {
             const uint8_t watched = static_cast<uint8_t>(nw.flags & (1u | 4u | 64u));
             if (prevHave && watched != static_cast<uint8_t>(prevFlags & (1u | 4u | 64u)))
-                Log::get().note("native on foot hands (F68d): %s%s%s (the FP right attach %.1f cm from its unarmed rest, Status.json %s, weight %.2f)",
-                                (nw.flags & 1u) ? "hands UP" : "hands down", (nw.flags & 4u) ? ", VETOED (up with fists for over 3 s: not armed)" : "",
+                Log::get().note("native on foot hands (F68d diagnostic): %s%s%s (the FP right attach %.1f cm from its unarmed rest, Status.json %s, diagnostic weight %.2f)",
+                                (nw.flags & 1u) ? "hands UP" : "hands down", (nw.flags & 4u) ? ", diagnostic veto (up with fists for over 3 s)" : "",
                                 ((nw.flags & 64u) && !(prevFlags & 64u)) ? ", unarmed rest captured" : "", static_cast<double>(nw.dist) * 100.0,
                                 (nw.flags & 16u) ? "armed" : (nw.flags & 8u) ? "fists" : "?", static_cast<double>(nw.w));
             prevFlags = nw.flags;
@@ -8705,9 +8704,9 @@ void f68dTick(uint64_t nowMs) noexcept {
         partsLast = r.parts;
         const bool flipHere = !marked && t >= 0.0;
         if (flipHere) marked = true;
-        Log::get().note("native on foot hands (F68d) onset t=%+.3f s frame %u: attach %.1f cm from rest%s, parts %u, hands %s%s, weight %.2f, Status.json %s%s", t,
+        Log::get().note("native on foot hands (F68d diagnostic) onset t=%+.3f s frame %u: attach %.1f cm from rest%s, parts %u, hands %s%s, diagnostic weight %.2f, Status.json %s%s", t,
                         r.p1, static_cast<double>(r.dist) * 100.0, (r.flags & 64u) ? "" : " (no rest yet)", r.parts, (r.flags & 1u) ? "UP" : "down",
-                        (r.flags & 4u) ? " (vetoed)" : (r.flags & 2u) ? " (armed signal)" : "", static_cast<double>(r.w),
+                        (r.flags & 4u) ? " (vetoed)" : (r.flags & 2u) ? " (diagnostic signal)" : "", static_cast<double>(r.w),
                         (r.flags & 16u) ? "armed" : (r.flags & 8u) ? "fists" : "?", flipHere ? "   <-- first frame at or after the Status.json flip" : "");
     }
     char up[96], sg[96], pt[120];
@@ -8718,7 +8717,7 @@ void f68dTick(uint64_t nowMs) noexcept {
     if (firstParts < 1e8) std::snprintf(pt, sizeof(pt), "%+.3f s (%u -> %u)", firstParts, partsFirst, partsLast);
     else std::snprintf(pt, sizeof(pt), "unchanged (%u)", partsFirst);
     Log::get().note("native on foot hands (F68d) onset summary: Status.json flipped to \"%s\" (%s) at t=0 (P1 frame %u); the hands first went up (past 12 cm) at %s, "
-                    "the armed signal first held at %s, the FP part count first changed at %s; largest attach distance %.1f cm over %u frames (expect the hands "
+                    "the diagnostic signal first held at %s, the FP part count first changed at %s; largest attach distance %.1f cm over %u frames (expect the hands "
                     "first by 0.3-1 s)",
                     g_f68dEv.name, f68dKindText(g_f68dEv.kind), g_f68dEv.flipP1, up, sg, pt, maxDist, frames);
 }
@@ -11501,9 +11500,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     static bool s_fpHave = false, s_gHave = false;
     static IkFpHands s_fpHands;
     static IkGData s_G;
-    // F68d: the FP hands-up signal, read per call from the FP Animate snapshot: the right hand attach (51) more than 12 cm from its unarmed rest pose takes
-    // the arms' full armed weight from that frame (no ramp), with Status.json as the authority (its flag arms as before; hands up with the fists for over
-    // 3 s (F69f; was 1.5) are not armed). The weight falls over 0.3 s when the signal ends.
+    // F68d: record FP right-hand motion against SelectedWeapon timing as diagnostic telemetry. It does not arm, weight, or gate the solve.
     static nofoot::FpHandsUp s_hu;
     static uint64_t s_huQpc = 0;
     nofoot::FpHandsUp::Out hu;
@@ -11525,7 +11522,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                                                    (hu.restCaptured ? 32u : 0u) | (s_hu.haveRest ? 64u : 0u));
         f68dPost(g_f66gP1Seq.load(std::memory_order_relaxed), g_fpPartsN.load(std::memory_order_relaxed), static_cast<float>(hu.dist), static_cast<float>(hu.w), flags);
     }
-    const bool armedNow = statusArmed || hu.w > 0.0;
+    const nofoot::IkArmedAuthority weaponState = nofoot::ikArmedAuthority(statusArmed, static_cast<double>(g_armedW.load(std::memory_order_relaxed)));
+    const bool armedNow = weaponState.armed;
     const bool pinWanted = mode == 3 && g_pinScope.load(std::memory_order_relaxed);
     float fpm[nofoot::kIkFpSlots][16] = {};
     uint64_t fpAge = 0, gAge = 0;
@@ -11569,8 +11567,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const float zero3[3] = {};
         f66gPost('A', armsOk ? G.d : zero3, sp.buf);
     }
-    // F66a: the game's armed flag, ramped over 0.3 s (the frame thread); F68d: or the FP hands-up signal, which holds the weight at 1 from its first frame.
-    const float armedW = std::max(g_armedW.load(std::memory_order_relaxed), static_cast<float>(hu.w));
+    // The SelectedWeapon decision and its frame-thread ramp are the sole solve authority.
+    // Keep the ramp while statusArmed is false so holstering retains its existing 0.3 s fade.
+    const float armedW = static_cast<float>(weaponState.ramp);
     const bool armedFull = armedNow && armedW >= 1.0f;               // F67f: the ramp is complete: every armed path solves at weight 1
     // F67f: the base weight is the frame thread's blend (0 until the key is on and the gate holds, ramped over 0.2 s at the start); once armed it does
     // not matter how that blend stands, only whether the gate (keys, plan, writes) is open.

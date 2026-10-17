@@ -1741,6 +1741,15 @@ inline double smoothstep3(double e0, double e1, double x) noexcept {
 // 91 of 90 frames unarmed (the 3P animated hand within about 0.58 m of the FP hand), armed the reach limit and blocked the stand capture.
 constexpr double kArmedRampSec = 0.3;
 inline float ikArmWeight(float armedRamp) noexcept { return static_cast<float>(unit01(static_cast<double>(armedRamp))); }
+struct IkArmedAuthority {
+    bool armed = false;
+    double ramp = 0.0;
+};
+// Runtime weapon state comes only from the selected-item decision and its existing ramp.
+// Gesture detector data is not an input.
+inline IkArmedAuthority ikArmedAuthority(bool selectedItemArmed, double selectedItemRamp) noexcept {
+    return {selectedItemArmed, unit01(selectedItemRamp)};
+}
 // The old reading of "held" (smoothstep(0.5, 1.0, the smaller grip gate) above 0), kept as a logged measure of how often it was wrong.
 inline bool distanceGateHeld(double gateMin) noexcept { return gateMin == gateMin && gateMin > 0.5; }
 
@@ -3187,17 +3196,15 @@ inline int pinState(double speed, double vy, bool crouched = false) noexcept {
 constexpr double kPinCrouchWc = 0.5;
 inline bool pinCrouchedWc(double wc) noexcept { return wc == wc && wc >= kPinCrouchWc; }
 
-// ---- F68d: the arms follow the FP hands ---------------------------------------------------------------------------------------------------------
-// The F67 flight (log 132256): Status.json's SelectedWeapon arrives after the game has drawn the weapon (polled every 100 ms, then the 0.3 s armed ramp),
-// so the 3P arms lagged the drawn weapon. The FP hands rise before the flag: the old distance gate moved 0.29 -> 0.80 m in the second before one
-// flip. The signal is read per frame from the FP Animate snapshot: the FP right hand attach (joint 51, in the FP model space) more than 12 cm from its
-// unarmed rest pose, which is captured while Status.json says fists and the hand is still. Up takes the arm IK's full armed weight from that frame
-// (no ramp at the onset; the weight falls over 0.3 s when it ends). Status.json stays the authority: its armed flag arms as before, and hands up with
-// Status.json still saying fists for over kHandsVetoSec (counted from the hands going up) are not armed (an emote or a tool pose). F69f: the veto was
-// 1.5 s; the F68 flight (log 152023) had Status.json arriving 1.085 s after the hands rose, 0.4 s inside the old margin, so it is 3.0 s.
+// ---- F68d: diagnostic FP hands-up telemetry ----------------------------------------------------------------------------------------------------
+// The F67 flight found Status.json's SelectedWeapon can arrive after the game has drawn the weapon, so hand motion was measured as a possible earlier
+// signal. The FP right attach (joint 51, in the FP model space) is "up" more than 12 cm from its unarmed rest pose, captured while Status.json says
+// fists and the hand is still. This detector's signal and weight are telemetry only. Weapon/equip authority remains the SelectedWeapon decision and
+// its 0.3 s ramp. A long fists-up interval is vetoed for the diagnostic (an emote or tool pose); it never arms the solve. F69f kept that diagnostic
+// veto at 3.0 s after Status.json lagged the hand rise by 1.085 s in the F68 flight.
 constexpr double kHandsUpM = 0.12, kHandsDownM = 0.09;   // the hysteresis: up past 12 cm, down again under 9 cm from the rest pose
 constexpr double kHandsStillMps = 0.10, kHandsStillSec = 0.4;   // "still": under 10 cm/s for 0.4 s
-constexpr double kHandsVetoSec = 3.0;                    // hands up with the fists this long (counted from the hands going up): not armed (F69f: was 1.5; Status.json led by 1.085 s in the F68 flight)
+constexpr double kHandsVetoSec = 3.0;                    // diagnostic signal veto after hands-up with the fists (F69f: Status.json lagged the hand rise by 1.085 s)
 constexpr double kHandsRecaptureSec = 3.0;               // a vetoed pose held this still this long is the new unarmed rest
 constexpr double kHandsRestTauSec = 1.0;                 // the rest follows a slow drift of the unarmed pose while it is near (time constant)
 constexpr double kHandsDropSec = 0.3;                    // the weight's fall when the signal ends
