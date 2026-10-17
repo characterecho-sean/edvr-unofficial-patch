@@ -25,6 +25,22 @@ void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 int wmain(int argc, wchar_t** argv) {
     check(argc == 2, "output path required");
+    check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77HeldCandidateVs,0),
+          "bounded held family admits only the allowlisted VS");
+    check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
+          !edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,0x1234ull) &&
+          !edvr::EyeDrawSnapshot::f77Candidate(0x1234ull,edvr::EyeDrawSnapshot::kF77OpticPs),
+          "optic family requires exact VS and PS pair");
+    check(edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,100) &&
+          edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,102) &&
+          !edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,103) &&
+          !edvr::EyeDrawSnapshot::f77RenderFrameEligible(0,100),
+          "candidate capture is limited to first three nonzero render frames");
+    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==192 &&
+          edvr::EyeDrawSnapshot::kCandidateMeshBudget==64*1024*1024 &&
+          edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==32*1024*1024 &&
+          edvr::EyeDrawSnapshot::kCandidateMaxOpticDraws==2,
+          "candidate evidence reserves stay within approved independent bounds");
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                          D3D11_SDK_VERSION, &dev, nullptr, &ctx));
@@ -898,6 +914,63 @@ int wmain(int argc, wchar_t** argv) {
     check(spriteSnap.write(ctx.Get(),(std::wstring(argv[1])+L".sprite").c_str()),"sprite boundary diagnostic writes complete");
     check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
     check(night.write(ctx.Get(),(std::wstring(argv[1])+L".night").c_str()) && night.failures==0,"night-vision draw-time data writes without missing copies");
+    // A nonempty v10 candidate record pins the C++ writer to the Python reader:
+    // exact optic identity, shifted VB/IB windows, material bytes, s0, and a
+    // draw-issued before/after ROI pair all share the same draw id.
+    edvr::EyeDrawSnapshot candidateFixture;
+    auto stageBufferWindow=[&](const void* bytes,UINT whole,UINT begin,UINT length,ComPtr<ID3D11Buffer>& stage) {
+        D3D11_BUFFER_DESC sourceDesc{};sourceDesc.ByteWidth=whole;sourceDesc.Usage=D3D11_USAGE_DEFAULT;
+        ComPtr<ID3D11Buffer> source;hr(dev->CreateBuffer(&sourceDesc,nullptr,&source));
+        ctx->UpdateSubresource(source.Get(),0,nullptr,bytes,0,0);
+        D3D11_BUFFER_DESC stageDesc{};stageDesc.ByteWidth=length;stageDesc.Usage=D3D11_USAGE_STAGING;stageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        hr(dev->CreateBuffer(&stageDesc,nullptr,&stage));D3D11_BOX box{begin,0,0,begin+length,1,1};
+        ctx->CopySubresourceRegion(stage.Get(),0,0,0,0,source.Get(),0,&box);
+    };
+    edvr::EyeDrawSnapshot::Draw candidateDraw{};
+    candidateDraw.vs=edvr::EyeDrawSnapshot::kF77OpticVs;candidateDraw.ps=edvr::EyeDrawSnapshot::kF77OpticPs;
+    candidateDraw.frame=101;candidateDraw.ordinal=17;candidateDraw.kind='I';candidateDraw.count=2;candidateDraw.instances=1;
+    candidateDraw.start=1;candidateDraw.base=2;
+    uint8_t candidateVertices[192];for(UINT i=0;i<sizeof(candidateVertices);++i)candidateVertices[i]=static_cast<uint8_t>(i);
+    ComPtr<ID3D11Buffer> candidateVertexStage;
+    stageBufferWindow(candidateVertices,sizeof(candidateVertices),96,96,candidateVertexStage);
+    candidateDraw.streams[1].offset=0;candidateDraw.streams[1].stride=48;candidateDraw.streams[1].whole=sizeof(candidateVertices);
+    candidateDraw.streams[1].captureOffset=96;candidateDraw.streams[1].copied=96;candidateDraw.streams[1].stage=candidateVertexStage;
+    const uint16_t candidateIndices[8]={7,7,0,1,7,7,7,7};ComPtr<ID3D11Buffer> candidateIndexStage;
+    stageBufferWindow(candidateIndices,sizeof(candidateIndices),4,4,candidateIndexStage);
+    candidateDraw.streams[2].offset=2;candidateDraw.streams[2].stride=2;candidateDraw.streams[2].whole=sizeof(candidateIndices);
+    candidateDraw.streams[2].captureOffset=4;candidateDraw.streams[2].copied=4;candidateDraw.streams[2].stage=candidateIndexStage;
+    edvr::EyeDrawSnapshot::Layout candidateLayout0{},candidateLayout1{};
+    std::strcpy(candidateLayout0.semantic,"PACKEDVERTEXDATAA");candidateLayout0.format=DXGI_FORMAT_R32G32B32A32_UINT;candidateLayout0.slot=1;candidateLayout0.offset=0;
+    std::strcpy(candidateLayout1.semantic,"PACKEDVERTEXDATAC");candidateLayout1.format=DXGI_FORMAT_R32G32_UINT;candidateLayout1.slot=1;candidateLayout1.offset=16;
+    candidateDraw.layout={candidateLayout0,candidateLayout1};
+    candidateFixture.draws.push_back(std::move(candidateDraw));
+    edvr::EyeDrawSnapshot::CandidateFrame candidateFrame{};candidateFrame.draw=0;candidateFrame.ledgerFrame=101;candidateFrame.renderFrame=501;
+    candidateFrame.eye=1;candidateFrame.issued=1;candidateFrame.roiCaptured=1;candidateFrame.roiComplete=1;
+    candidateFixture.candidateFrames.push_back(candidateFrame);candidateFixture.candidateOpticDraws=1;candidateFixture.candidateRoiDraw=0;
+    edvr::EyeDrawSnapshot::CandidateInput candidateMaterial{};candidateMaterial.draw=0;candidateMaterial.slot=1;candidateMaterial.kind=0;
+    candidateMaterial.viewDimension=D3D11_SRV_DIMENSION_BUFFER;candidateMaterial.bytes=96;candidateMaterial.width=96;
+    candidateMaterial.sourceWidth=96;candidateMaterial.elements=24;candidateMaterial.stride=4;
+    uint8_t materialBytes[96];std::memset(materialBytes,0x5a,sizeof(materialBytes));
+    stageBufferWindow(materialBytes,sizeof(materialBytes),0,sizeof(materialBytes),candidateMaterial.bufferStage);
+    candidateFixture.candidateInputs.push_back(std::move(candidateMaterial));candidateFixture.candidateInputBytes=sizeof(materialBytes);
+    edvr::EyeDrawSnapshot::CandidateSampler candidateSampler{};candidateSampler.draw=0;candidateSampler.present=1;
+    candidateSampler.desc.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;candidateSampler.desc.AddressU=D3D11_TEXTURE_ADDRESS_WRAP;
+    candidateSampler.desc.AddressV=D3D11_TEXTURE_ADDRESS_WRAP;candidateSampler.desc.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+    candidateSampler.desc.MaxLOD=D3D11_FLOAT32_MAX;candidateFixture.candidateSamplers.push_back(candidateSampler);
+    D3D11_TEXTURE2D_DESC roiDesc{};roiDesc.Width=roiDesc.Height=512;roiDesc.MipLevels=roiDesc.ArraySize=roiDesc.SampleDesc.Count=1;
+    roiDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;roiDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> roiSource;ComPtr<ID3D11RenderTargetView> roiRtv;hr(dev->CreateTexture2D(&roiDesc,nullptr,&roiSource));
+    hr(dev->CreateRenderTargetView(roiSource.Get(),nullptr,&roiRtv));D3D11_TEXTURE2D_DESC roiStageDesc=roiDesc;
+    roiStageDesc.Usage=D3D11_USAGE_STAGING;roiStageDesc.BindFlags=0;roiStageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    for(uint32_t phase=0;phase<2;++phase) {
+        const FLOAT colour[4]={phase?0.7f:0.1f,0.2f,phase?0.1f:0.3f,1.f};ctx->ClearRenderTargetView(roiRtv.Get(),colour);
+        edvr::EyeDrawSnapshot::EffectImage image{};image.source=roiSource;image.draw=0;image.after=phase;
+        image.width=image.height=image.sourceWidth=image.sourceHeight=512;image.format=DXGI_FORMAT_R8G8B8A8_UNORM;image.bytes=512*512*4;
+        hr(dev->CreateTexture2D(&roiStageDesc,nullptr,&image.stage));ctx->CopyResource(image.stage.Get(),roiSource.Get());
+        candidateFixture.effectImages.push_back(std::move(image));candidateFixture.effectImageBytes+=512*512*4;
+    }
+    wait_gpu(ctx.Get(),dev.Get());
+    check(candidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".candidate").c_str()),"nonempty candidate snapshot write");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));

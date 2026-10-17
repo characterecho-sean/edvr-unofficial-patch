@@ -1114,6 +1114,9 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
 // F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm). F59: measured from the arm's OWN shoulder,
 // out x (E.x - S.x) >= elbowOutM (default 6 cm), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
 inline double ikElbowOutOf(const double E[3], const double S[3], double out) noexcept { return out * (E[0] - S[0]); }
+// Preserve the existing 3P model-X half-space convention by anatomical rig side. The rig is translated
+// during pinStage0, so a joint's current absolute X is not a stable indicator of which arm it belongs to.
+inline double ikArmOutSign(int side) noexcept { return side == 0 ? -1.0 : side == 1 ? 1.0 : 0.0; }
 inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* clamped, double elbowOutM = kIkElbowOutM) noexcept {
     if (clamped) *clamped = false;
     if (!t.ok || !(t.h > 1e-6)) return theta;
@@ -1285,7 +1288,8 @@ inline IkStableSwivel ikStableSwivel(const IkTwoBone& t, const IkPhysicalPole& p
 constexpr double kIkPoseDeviationAngleDeg = 20.0;
 constexpr double kIkPoseDeviationPositionM = 0.05;
 constexpr uint64_t kIkPoseDeviationMaxGapMs = 100;
-constexpr uint32_t kIkPoseDeviationEventsPerMinute = 8;
+constexpr uint32_t kIkPoseDeviationEventsPerItemMinute = 8;
+constexpr uint32_t kIkPoseDeviationEventsGlobalPerMinute = 32;
 constexpr uint32_t kIkPoseDeviationHistory = 8;
 constexpr uint32_t kIkPoseDeviationPost = 8;
 struct IkPoseDeviationSample {
@@ -1296,7 +1300,7 @@ struct IkPoseDeviationSample {
     bool valid[2] = {}, radialValid[2] = {};
     double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
     double preferred[2][3] = {}, axis[2][3] = {}, radial[2][3] = {};
-    double weight[2] = {}, violationM[2] = {};
+    double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};
@@ -1308,9 +1312,10 @@ struct IkPoseDeviationTracker {
     IkPoseDeviationSample history[kIkPoseDeviationHistory]{};
     IkPoseDeviationSample last{};
     uint32_t historyHead = 0, historyCount = 0, event = 0, minuteBucket = 0xFFFFFFFFu, eventsInMinute = 0;
+    uint32_t activeItemSerial = 0, itemEventsInMinute = 0, itemSuppressed = 0, globalSuppressed = 0;
     uint32_t coalesced = 0, suppressed = 0, gaps = 0, invalid = 0, duplicates = 0;
     uint8_t postRemaining = 0;
-    bool haveLast = false;
+    bool haveLast = false, haveActiveItem = false;
 
     void resetHistory() noexcept { historyHead = 0; historyCount = 0; haveLast = false; }
     int step(const IkPoseDeviationSample& sample, uint64_t qpcFrequency, IkPoseDeviationRecord out[kIkPoseDeviationHistory + 1 + kIkPoseDeviationPost]) noexcept {
@@ -1357,11 +1362,18 @@ struct IkPoseDeviationTracker {
         }
         if (triggered) {
             const uint32_t bucket = qpcFrequency ? static_cast<uint32_t>(sample.qpc / (qpcFrequency * 60u)) : 0;
-            if (bucket != minuteBucket) { minuteBucket = bucket; eventsInMinute = 0; }
+            if (bucket != minuteBucket) { minuteBucket = bucket; eventsInMinute = 0; itemEventsInMinute = 0; haveActiveItem = false; }
+            if (!haveActiveItem || activeItemSerial != sample.item) {
+                activeItemSerial = sample.item;
+                itemEventsInMinute = 0;
+                haveActiveItem = true;
+            }
             if (wasCapturing) ++coalesced;
-            else if (eventsInMinute >= kIkPoseDeviationEventsPerMinute) ++suppressed;
+            else if (eventsInMinute >= kIkPoseDeviationEventsGlobalPerMinute) { ++suppressed; ++globalSuppressed; }
+            else if (itemEventsInMinute >= kIkPoseDeviationEventsPerItemMinute) { ++suppressed; ++itemSuppressed; }
             else {
                 ++eventsInMinute;
+                ++itemEventsInMinute;
                 ++event;
                 const uint32_t oldest = (historyHead + kIkPoseDeviationHistory - historyCount) % kIkPoseDeviationHistory;
                 for (uint32_t i = 0; i < historyCount; ++i) out[nOut++] = {history[(oldest + i) % kIkPoseDeviationHistory], event, static_cast<int8_t>(-static_cast<int>(historyCount) + static_cast<int>(i)), false};

@@ -11672,7 +11672,8 @@ constexpr uint32_t kPoseDeviationRing = 256;
 PoseDeviationSlot g_poseDeviationRing[kPoseDeviationRing];
 std::atomic<uint32_t> g_poseDeviationHead{0};
 std::atomic<uint32_t> g_poseDeviationSamples{0}, g_poseDeviationWrittenLeft{0}, g_poseDeviationWrittenRight{0}, g_poseDeviationEvents{0};
-std::atomic<uint32_t> g_poseDeviationSuppressed{0}, g_poseDeviationCoalesced{0}, g_poseDeviationGaps{0}, g_poseDeviationInvalid{0}, g_poseDeviationDuplicates{0}, g_poseDeviationDropped{0};
+std::atomic<uint32_t> g_poseDeviationSuppressed{0}, g_poseDeviationItemSuppressed{0}, g_poseDeviationGlobalSuppressed{0}, g_poseDeviationCoalesced{0},
+    g_poseDeviationGaps{0}, g_poseDeviationInvalid{0}, g_poseDeviationDuplicates{0}, g_poseDeviationDropped{0};
 nofoot::IkPoseDeviationTracker g_poseDeviationTracker;
 uint32_t g_poseDeviationEventsSeen = 0;
 void poseDeviationPost(const nofoot::IkPoseDeviationRecord& record) noexcept {
@@ -11726,10 +11727,11 @@ void poseDeviationDrain() noexcept {
                 }
                 const double* S = r.sample.shoulder[side]; const double* E = r.sample.elbow[side]; const double* H = r.sample.hand[side]; const double* T = r.sample.target[side];
                 const double* P = r.sample.preferred[side]; const double* A = r.sample.axis[side]; const double* R = r.sample.radial[side];
-                Log::get().note("armed pose deviation (F76) event %u offset %+d frame %u %s%s: S %.3f/%.3f/%.3f E %.3f/%.3f/%.3f H %.3f/%.3f/%.3f target %.3f/%.3f/%.3f; pole %.3f/%.3f/%.3f axis %.3f/%.3f/%.3f radial %s%.3f/%.3f/%.3f; weight %.3f constraint %.2f cm; dt %.1f ms FP/G ages %u/%u item %u rig %u",
+                Log::get().note("armed pose deviation (F76) event %u offset %+d frame %u %s%s: S %.3f/%.3f/%.3f E %.3f/%.3f/%.3f H %.3f/%.3f/%.3f target %.3f/%.3f/%.3f; pole %.3f/%.3f/%.3f axis %.3f/%.3f/%.3f radial %s%.3f/%.3f/%.3f; weight %.3f constraint %.2f cm; outSign %.0f actual/required %.2f/%.2f cm; dt %.1f ms FP/G ages %u/%u item %u rig %u",
                                 r.event, static_cast<int>(r.offset), r.sample.frame, label, r.invalid ? " invalid-gap/reset" : "", S[0], S[1], S[2], E[0], E[1], E[2], H[0], H[1], H[2], T[0], T[1], T[2],
                                 P[0], P[1], P[2], A[0], A[1], A[2], r.sample.radialValid[side] ? "" : "unavailable ", R[0], R[1], R[2], r.sample.weight[side],
-                                r.sample.violationM[side] * 100.0, static_cast<double>(r.sample.dtMs), r.sample.fpAgeMs, r.sample.gAgeMs, r.sample.item, r.sample.generation);
+                                r.sample.violationM[side] * 100.0, r.sample.outSign[side], r.sample.actualOutM[side] * 100.0, r.sample.requiredOutM[side] * 100.0,
+                                static_cast<double>(r.sample.dtMs), r.sample.fpAgeMs, r.sample.gAgeMs, r.sample.item, r.sample.generation);
             }
         }
     }
@@ -11743,14 +11745,16 @@ void poseDeviationDrain() noexcept {
         const uint32_t writtenRight = g_poseDeviationWrittenRight.exchange(0, std::memory_order_relaxed);
         const uint32_t events = g_poseDeviationEvents.exchange(0, std::memory_order_relaxed);
         const uint32_t suppressed = g_poseDeviationSuppressed.exchange(0, std::memory_order_relaxed);
+        const uint32_t itemSuppressed = g_poseDeviationItemSuppressed.exchange(0, std::memory_order_relaxed);
+        const uint32_t globalSuppressed = g_poseDeviationGlobalSuppressed.exchange(0, std::memory_order_relaxed);
         const uint32_t coalesced = g_poseDeviationCoalesced.exchange(0, std::memory_order_relaxed);
         const uint32_t gaps = g_poseDeviationGaps.exchange(0, std::memory_order_relaxed);
         const uint32_t invalid = g_poseDeviationInvalid.exchange(0, std::memory_order_relaxed);
         const uint32_t duplicates = g_poseDeviationDuplicates.exchange(0, std::memory_order_relaxed);
         const uint32_t dropped = g_poseDeviationDropped.exchange(0, std::memory_order_relaxed);
         if (armed)
-            Log::get().note("armed pose deviation (F76) one-minute coverage: fresh samples %u, written valid left/right %u/%u, events started %u, cap-suppressed %u, coalesced %u, duplicate frames ignored %u, continuity resets %u, invalid post rows %u, ring rows dropped %u",
-                            samples, writtenLeft, writtenRight, events, suppressed, coalesced, duplicates, gaps, invalid, dropped);
+            Log::get().note("armed pose deviation (F76) one-minute coverage: fresh samples %u, written valid left/right %u/%u, events started %u, cap-suppressed total/item/global %u/%u/%u, coalesced %u, duplicate frames ignored %u, continuity resets %u, invalid post rows %u, ring rows dropped %u",
+                            samples, writtenLeft, writtenRight, events, suppressed, itemSuppressed, globalSuppressed, coalesced, duplicates, gaps, invalid, dropped);
     }
 }
 // The hook's event control (one writer): true when this call should post a record, with the event number and the frame within it.
@@ -12475,7 +12479,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         ikPos(TA, tA);
         double uf[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, fh[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
         const double l1 = nofoot::ikLen(uf), l2 = nofoot::ikLen(fh);
-        const double outSign = g_pfzAnim[C][12] >= 0.0f ? 1.0 : -1.0;
+        const double outSign = nofoot::ikArmOutSign(side);
         SideOut& o = so[side];
         o.poseOutSign = outSign;
         o.poseElbowOutM = elbowOutM;
@@ -13694,8 +13698,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample.radial[side][axis] = radialOk ? actualRadial[axis] : o.poseRadial[axis];
             }
             sample.weight[side] = o.poseWeight;
+            sample.outSign[side] = o.poseOutSign;
+            sample.requiredOutM[side] = o.poseElbowOutM;
             if (actual) {
                 const double actualOut = o.poseOutSign * (actualE[0] - actualS[0]);
+                sample.actualOutM[side] = actualOut;
                 sample.violationM[side] = std::max(0.0, o.poseElbowOutM - actualOut) + std::max(0.0, actualE[1] - actualS[1]);
                 so[side].poseActualValid = axisOk && radialOk;
                 if (so[side].poseActualValid) {
@@ -13711,11 +13718,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (sample.fresh) g_poseDeviationSamples.fetch_add(1, std::memory_order_relaxed);
         if (sample.valid[0]) g_poseDeviationWrittenLeft.fetch_add(1, std::memory_order_relaxed);
         if (sample.valid[1]) g_poseDeviationWrittenRight.fetch_add(1, std::memory_order_relaxed);
-        const uint32_t oldSuppressed = g_poseDeviationTracker.suppressed, oldCoalesced = g_poseDeviationTracker.coalesced;
+        const uint32_t oldSuppressed = g_poseDeviationTracker.suppressed, oldItemSuppressed = g_poseDeviationTracker.itemSuppressed;
+        const uint32_t oldGlobalSuppressed = g_poseDeviationTracker.globalSuppressed, oldCoalesced = g_poseDeviationTracker.coalesced;
         const uint32_t oldGaps = g_poseDeviationTracker.gaps, oldInvalid = g_poseDeviationTracker.invalid, oldDuplicates = g_poseDeviationTracker.duplicates;
         nofoot::IkPoseDeviationRecord emitted[nofoot::kIkPoseDeviationHistory + 1 + nofoot::kIkPoseDeviationPost];
         const int emittedN = g_poseDeviationTracker.step(sample, freq, emitted);
         g_poseDeviationSuppressed.fetch_add(g_poseDeviationTracker.suppressed - oldSuppressed, std::memory_order_relaxed);
+        g_poseDeviationItemSuppressed.fetch_add(g_poseDeviationTracker.itemSuppressed - oldItemSuppressed, std::memory_order_relaxed);
+        g_poseDeviationGlobalSuppressed.fetch_add(g_poseDeviationTracker.globalSuppressed - oldGlobalSuppressed, std::memory_order_relaxed);
         g_poseDeviationCoalesced.fetch_add(g_poseDeviationTracker.coalesced - oldCoalesced, std::memory_order_relaxed);
         g_poseDeviationGaps.fetch_add(g_poseDeviationTracker.gaps - oldGaps, std::memory_order_relaxed);
         g_poseDeviationInvalid.fetch_add(g_poseDeviationTracker.invalid - oldInvalid, std::memory_order_relaxed);
@@ -15555,12 +15565,13 @@ void nativeOnFootOpticCaptureBegin(const wchar_t* stamp) {
     Log::get().note("native on foot ADS optic capture (F76): armed synchronized FinalCrisp run %ls for 16 right-eye callbacks", g_opticCaptureStamp);
 }
 
-void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus) {
+void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus) {
     using namespace nofoot::optic_capture;
     if (!g_opticCaptureLedger.armed || index >= kCount) return;
     Record r;
     r.index = index;
     r.sceneFrame = sceneFrame;
+    r.renderFrame = renderFrame;
     r.epoch = epoch;
     r.sequence = sequence;
     r.sampleQpc = f30Qpc();
@@ -15629,7 +15640,7 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
         r.state = SourceState::Missing;
     else if (future) r.state = SourceState::Future;
     else if (stale) r.state = SourceState::Stale;
-    else if (sceneFrame != r.fpFrame || sceneFrame != r.rootReadFrame || sceneFrame != r.eyeFrame || sceneFrame != r.adsFrame)
+    else if (!sourceFramesMatchRender(renderFrame, r.fpFrame, r.rootReadFrame, r.eyeFrame, r.adsFrame))
         r.state = SourceState::Unmatched;
     else if (!r.p14BasisValid || !r.p14PositionValid) r.state = SourceState::Invalid;
     else if (!r.adsActive) r.state = SourceState::Inactive;
@@ -15665,9 +15676,9 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
             const Record& r = g_opticCaptureLedger.rows[i];
             const RowDescriptor& meta = g_opticCaptureLedger.requested[i];
             const char* state = r.sampled ? opticStateName(r.state) : (meta.scheduled ? "no_right_callback" : "unscheduled");
-            fprintf(f, "%s{\"index\":%u,\"scheduled\":%s,\"sampled\":%s,\"source_state\":\"%s\",\"scene_frame\":%u,\"capture_epoch\":%u,\"capture_sequence\":%llu,\"image_status\":",
+            fprintf(f, "%s{\"index\":%u,\"scheduled\":%s,\"sampled\":%s,\"source_state\":\"%s\",\"scene_frame\":%u,\"render_frame\":%u,\"capture_epoch\":%u,\"capture_sequence\":%llu,\"image_status\":",
                     i ? ",\n" : "", i, meta.scheduled ? "true" : "false", r.sampled ? "true" : "false", state,
-                    r.sampled ? r.sceneFrame : meta.sceneFrame, r.sampled ? r.epoch : meta.epoch,
+                    r.sampled ? r.sceneFrame : meta.sceneFrame, r.sampled ? r.renderFrame : meta.renderFrame, r.sampled ? r.epoch : meta.epoch,
                     static_cast<unsigned long long>(r.sampled ? r.sequence : meta.sequence));
             opticWriteJsonString(f, r.sampled ? r.imageStatus : meta.imageStatus);
             fprintf(f, ",\"ads_active\":%s,\"ads_frame\":%u,\"ads_qpc\":%llu,\"item_read\":%s,\"item_serial\":%u,\"item_name\":",
@@ -19911,6 +19922,10 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
 }
 
 uint32_t nativeOnFootMarkerFrameNow() {
+    return g_f44Frame.load(std::memory_order_relaxed);
+}
+
+uint32_t nativeOnFootRenderFrame() {
     return g_f44Frame.load(std::memory_order_relaxed);
 }
 

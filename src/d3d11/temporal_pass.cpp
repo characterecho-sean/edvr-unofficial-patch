@@ -2336,7 +2336,7 @@ void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     nofoot::optic_capture::RowDescriptor opticRows[eye_final_capture::Count]{};
     for(unsigned i=0;i<eye_final_capture::Count;++i){
         const auto& row=g_eyeFinalRun.rows[i];const auto& image=row.eye[1];auto& out=opticRows[i];
-        out.scheduled=row.scheduled;out.sceneFrame=row.scene;out.epoch=row.epoch;out.sequence=image.sequence;
+        out.scheduled=row.scheduled;out.sceneFrame=row.scene;out.renderFrame=row.renderFrame;out.epoch=row.epoch;out.sequence=image.sequence;
         strncpy_s(out.imageStatus,image.status?image.status:"unknown",_TRUNCATE);
     }
     nativeOnFootOpticCaptureEnd(reason, opticRows, eye_final_capture::Count, g_eyeFinalRun.unmatched);
@@ -2367,7 +2367,7 @@ void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
         bool first=true;
         auto record=[&](const eye_final_capture::Image& image,int index,unsigned eye,uint32_t scene,const wchar_t* suffix){
             const unsigned k=index<0?0u:unsigned(index);const EyeDecisionFrame& temporal=g_eyeDecisions[k];
-            fprintf(f,"%s{\"index\":%d,\"scheduled\":%s,\"eye\":%u,\"frame\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"format\":%u,\"crop\":[%u,%u,%u,%u],\"composite_applied\":%s,\"flip_u\":%s,\"flip_v\":%s,\"status\":\"%s\",\"file\":",first?"":",\n",index,(index<0?g_eyeFinalRun.rows[0].scheduled:g_eyeFinalRun.rows[index].scheduled)?"true":"false",eye,scene,(unsigned long long)image.sequence,image.width,image.height,image.format,image.crop[0],image.crop[1],image.crop[2],image.crop[3],image.composite?"true":"false",image.flipU?"true":"false",image.flipV?"true":"false",image.status);
+            fprintf(f,"%s{\"index\":%d,\"scheduled\":%s,\"eye\":%u,\"frame\":%u,\"render_frame\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"format\":%u,\"crop\":[%u,%u,%u,%u],\"composite_applied\":%s,\"flip_u\":%s,\"flip_v\":%s,\"status\":\"%s\",\"file\":",first?"":",\n",index,(index<0?g_eyeFinalRun.rows[0].scheduled:g_eyeFinalRun.rows[index].scheduled)?"true":"false",eye,scene,g_eyeFinalRun.rows[k].renderFrame,(unsigned long long)image.sequence,image.width,image.height,image.format,image.crop[0],image.crop[1],image.crop[2],image.crop[3],image.composite?"true":"false",image.flipU?"true":"false",image.flipV?"true":"false",image.status);
             if(!strcmp(image.status,"written"))fprintf(f,"\"eye_%ls_FinalCrisp_%ls.bmp\"",g_eyeFinalStamp,suffix);else fputs("null",f);
             fprintf(f,",\"capture_epoch\":%u,\"submit_region\":[%u,%u,%u,%u],\"temporal_input_size\":[%u,%u],\"temporal_output_size\":[%u,%u],\"temporal_output_crop\":[%u,%u,%u,%u],\"temporal_reference_eye\":0,\"temporal_mapping\":\"temporal_xy=(native_xy-submit_region_xy0)*temporal_output_size/submit_region_size; P/T_local_xy=temporal_xy-temporal_output_crop_xy; unflipped\"}",g_eyeFinalRun.rows[k].epoch,image.submitRegion[0],image.submitRegion[1],image.submitRegion[2],image.submitRegion[3],temporal.inputW,temporal.inputH,temporal.outputW,temporal.outputH,temporal.outputCrop[0],temporal.outputCrop[1],temporal.outputCrop[2],temporal.outputCrop[3]);first=false;
         };
@@ -2463,7 +2463,7 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
     tex->GetDevice(&dev);if(!dev)return;dev->GetImmediateContext(&ctx);dev->Release();if(!ctx)return;
     g_eyeRunUntreated=true;
     if(eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
-        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
     const uint32_t w=region[2]-region[0],h=region[3]-region[1];uint32_t cw=0,ch=0;
     if(!g_eyeOverviewTaken[eye]){
         g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
@@ -2474,7 +2474,7 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
         if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
             g_eyeRawTaken[k]=true;g_eyeRawInputW[k]=w;g_eyeRawInputH[k]=h;
             g_eyeRunFrames[k]=g_rowsFrame;objectProbeLedgerMark(k);
-            g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame);
+            g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
             ++g_eyeRunTaken;--g_eyeRunLeft;
             if(g_eyeRunLeft==0){g_eyeRunReady=true;g_eyeRunWidth=cw;g_eyeRunHeight=ch;}
         }
@@ -2487,7 +2487,7 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
 // compositor receives it, and the sixteen treated crops beside the raw ones.
 void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
     const int k = g_eyeRunTaken;
-    if(k>=0&&k<kEyeRun)g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_eyeCaptureFrame);
+    if(k>=0&&k<kEyeRun)g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_eyeCaptureFrame,nativeOnFootRenderFrame());
     if (!tex || k < 0 || k >= kEyeRun) {
         if (k >= 0 && k < kEyeRun) ++g_eyeRunTaken;
         g_eyeRunLeft = 0; g_eyeRunReady = g_eyeRunTaken > 0; return;
@@ -5094,7 +5094,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         captureEyeRun(ctx, static_cast<ID3D11Texture2D*>(result));
     }
     if(result&&ctx&&eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
-        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
     if(eye==1 && ctx && g_eyeRunReady) {
         writeEyeRun(ctx,g_eyeRunWidth,g_eyeRunHeight);g_eyeRunReady=false;
     }
@@ -5144,13 +5144,13 @@ void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D*
     const bool ran=guarded("eye capture/final crisp",[&]{
         if(texture){texture->GetDevice(&device);if(device)device->GetImmediateContext(&ctx);}
         g_eyeFinalRun.capture(epoch,sequence,eye,ctx,texture,region,composite,flipU,flipV);
-        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,epoch,sequence,
+        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,g_eyeFinalRun.rows[index].renderFrame,epoch,sequence,
                                                   g_eyeFinalRun.rows[index].eye[eye].status);
         if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
     });
     if(!ran&&g_eyeFinalRun.armed){
         auto& image=g_eyeFinalRun.rows[index].eye[eye];image.sequence=sequence;image.status="capture_fault";
-        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,epoch,sequence,image.status);
+        if(eye==1)nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index),g_eyeFinalRun.rows[index].scene,g_eyeFinalRun.rows[index].renderFrame,epoch,sequence,image.status);
     }
     if(g_eyeFinalRun.pendingOwner)guarded("eye capture/final pending owner release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingOwner);});
     if(g_eyeFinalRun.pendingDevice)guarded("eye capture/final pending device release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingDevice);});

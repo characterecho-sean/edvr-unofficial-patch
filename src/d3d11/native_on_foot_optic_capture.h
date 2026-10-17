@@ -14,7 +14,7 @@ enum class SourceState : uint8_t { Unsampled, Matched, Inactive, Missing, Stale,
 
 struct RowDescriptor {
     bool scheduled = false;
-    uint32_t sceneFrame = 0, epoch = 0;
+    uint32_t sceneFrame = 0, renderFrame = 0, epoch = 0;
     uint64_t sequence = 0;
     char imageStatus[32] = "unscheduled";
 };
@@ -30,7 +30,7 @@ inline bool formatJsonNumber(char* out, size_t capacity, float value) noexcept {
 
 struct Record {
     bool sampled = false;
-    uint32_t index = 0, sceneFrame = 0, epoch = 0;
+    uint32_t index = 0, sceneFrame = 0, renderFrame = 0, epoch = 0;
     uint64_t sequence = 0;
     char imageStatus[32] = "unscheduled";
     SourceState state = SourceState::Unsampled;
@@ -45,6 +45,10 @@ struct Record {
     float p14Model[3] = {}, p14World[3] = {}, p14Basis[9] = {}, rootForward[3] = {};
     float eyeRows[16] = {}, eyeOrigin[4] = {};
 };
+
+inline bool sourceFramesMatchRender(uint32_t renderFrame, uint32_t fpFrame, uint32_t rootReadFrame, uint32_t eyeFrame, uint32_t adsFrame) noexcept {
+    return renderFrame != 0 && renderFrame != ~uint32_t(0) && renderFrame == fpFrame && renderFrame == rootReadFrame && renderFrame == eyeFrame && renderFrame == adsFrame;
+}
 
 struct Ledger {
     bool armed = false;

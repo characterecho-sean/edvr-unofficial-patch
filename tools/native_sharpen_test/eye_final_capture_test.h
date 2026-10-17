@@ -36,8 +36,8 @@ inline void runFinalCaptureTests(Device& device,Device& foreign) {
   Run run;auto source=device.texture();const uint32_t region[4]={4,3,28,20};
   run.capture(100,1000,0,nullptr,nullptr,nullptr,false,false,false);
   check(!run.count&&!run.bytes&&!run.unmatched,"unarmed final capture touches no context or texture");
-  run.arm();run.schedule(0,100);run.schedule(0,100);
-  check(run.count==1&&run.duplicates==1,"duplicate schedule preserves original slot");
+  run.arm();run.schedule(0,100,100,4567);run.schedule(0,100,100,9999);
+  check(run.count==1&&run.duplicates==1&&run.rows[0].scene==100&&run.rows[0].renderFrame==4567,"duplicate schedule preserves independent scene/render identities in the first slot");
   run.capture(99,999,0,nullptr,nullptr,nullptr,false,false,false);
   check(run.unmatched==1&&!run.rows[0].eye[0].sequence,"wrong scene never fills pending frame");
   std::vector<uint32_t> pixels(32*24);

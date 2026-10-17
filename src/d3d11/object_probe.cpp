@@ -30,6 +30,7 @@
 #include "exposure_fix.h"   // lookupShaderHash: the compute dispatch's shader, for the skin ledger
 #include "gpu_census.h"     // gpuCensusNoteEyeRun: the census window an eye run falls in says so
 #include "skin_ledger.h"
+#include "native_on_foot.h"
 
 namespace edvr {
 
@@ -196,6 +197,7 @@ struct PanelCaptureArgs {
 } g_panelCaptureArgs;
 uint32_t g_panelSkipped = 0;
 EyeDrawSnapshot g_eyeMeshSnapshot;
+EyeDrawSnapshot g_f77CandidateSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 
 // The cull gate probe (advanced.cull_gate_capture) rides the eye run like
@@ -765,7 +767,9 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     // intern id is both stable across the run and joinable to census lines.
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
-    ctx->OMGetRenderTargets(1, &rtv, g_eyeDepthCapture.enabled() ? &dsv : nullptr);
+    ctx->OMGetRenderTargets(1, &rtv, &dsv);
+    int candidateEye=-1;
+    if(dsv)depthProbeSceneEyeOf(dsv,&candidateEye,nullptr);
     d.rt = drawCensusIntern(rtv);
     if (rtv) rtv->Release();
     if (g_panelCaptureArgs.ctx) {
@@ -787,6 +791,8 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     }
     g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
                                    d.vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,startInstance,start,base);
+    g_f77CandidateSnapshot.captureF77Candidate(ctx,frame,nativeOnFootRenderFrame(),candidateEye,
+        static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base);
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -828,7 +834,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     if (dsv) {
         int eye = -1;
         depthProbeSceneEyeOf(dsv, &eye, nullptr);
-        g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
+        if(g_eyeDepthCapture.enabled())g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
         dsv->Release();
     }
     // The cull gate probe's occluder inventory (EDVRDRW1 version 9): every
@@ -1257,6 +1263,26 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     path,g_eyeMeshSnapshot.meshDraws,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
                     g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
                     eyeMeshOk?"written":"WRITE FAILED",g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\candidates_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    const bool candidateOk=g_f77CandidateSnapshot.write(ctx,path);
+    const uint32_t candidateMissingShaders=g_f77CandidateSnapshot.writeShaders(dir.c_str());
+    uint32_t candidateIssued=0,candidateNotIssued=0,candidateIssueUnknown=0,candidateRoiPairs=0;
+    for(const auto& c:g_f77CandidateSnapshot.candidateFrames) {
+        candidateIssued+=c.issued==1;candidateNotIssued+=c.issued==0;candidateIssueUnknown+=c.issued==2;
+        candidateRoiPairs+=c.roiCaptured!=0;
+    }
+    Log::get().note("F77 targeted candidate snapshots %ls: %u matching draws (%u capped), %u missing render-frame mappings, %u outside first-three-frame window; %u total optic-pair matches (%u evidence attempts), %u issued/%u not issued/%u issue unknown; %u pool buffers/%u bytes (%u declines), %u stream bytes (%u declines), %u PS inputs/%u bytes (%u declines, %u mip levels omitted); %u reserved ROI pairs (%u complete, %u incomplete, %u ROI declines, %u bytes), %u copy failures, %u missing shader files; %s. VS 154FB5A453F3D2E9 is an unproven candidate family. Bounds: 192 draws, 64 MiB pool, 32 MiB streams, 24 MiB PS inputs plus 8 MiB centered ROI; at most two optic draws receive inputs/ROI. Ledger and native render frames are separate fields.",
+                    path,unsigned(g_f77CandidateSnapshot.candidateFrames.size()),g_f77CandidateSnapshot.candidateDropped,
+                    g_f77CandidateSnapshot.candidateMissingRenderFrame,g_f77CandidateSnapshot.candidateOutsideFrameWindow,
+                    g_f77CandidateSnapshot.candidateOpticDraws,(std::min)(g_f77CandidateSnapshot.candidateOpticDraws,EyeDrawSnapshot::kCandidateMaxOpticDraws),
+                    candidateIssued,candidateNotIssued,candidateIssueUnknown,
+                    unsigned(g_f77CandidateSnapshot.meshBuffers.size()),g_f77CandidateSnapshot.meshBytes,g_f77CandidateSnapshot.meshDeclined,
+                    g_f77CandidateSnapshot.vertexBytes,g_f77CandidateSnapshot.vertexDeclined,
+                    unsigned(g_f77CandidateSnapshot.candidateInputs.size()),g_f77CandidateSnapshot.candidateInputBytes,
+                    g_f77CandidateSnapshot.candidateInputDeclined,g_f77CandidateSnapshot.candidateMipDeclined,
+                    candidateRoiPairs,candidateRoiPairs-g_f77CandidateSnapshot.candidateRoiIncomplete,g_f77CandidateSnapshot.candidateRoiIncomplete,
+                    g_f77CandidateSnapshot.effectImageDeclined,g_f77CandidateSnapshot.effectImageBytes,
+                    g_f77CandidateSnapshot.failures,candidateMissingShaders,candidateOk?"written":"WRITE FAILED");
     uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
         ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();
@@ -1355,7 +1381,12 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
     }
     if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
+    g_f77CandidateSnapshot.candidateDrawEnd();
     g_tonemapSnapshot.end(ctx);
+}
+
+void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
+    if(detail::g_objectProbeLedgerOn && ctx)g_f77CandidateSnapshot.candidateDrawIssued(ctx,issued);
 }
 
 void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
@@ -1624,6 +1655,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     }
     g_ledgerSkipped = 0;
     ledgerRelease();
+    g_f77CandidateSnapshot.armF77Candidates();
     detail::g_objectProbeLedgerOn = true;
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).

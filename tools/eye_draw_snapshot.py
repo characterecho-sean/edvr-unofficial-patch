@@ -68,7 +68,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -156,6 +156,7 @@ def read(path):
         for _ in range(ni):
             e = dict(zip(('draw', 'after', 'x', 'y', 'width', 'height', 'source_width', 'source_height', 'format', 'size'), unpack('<10I')))
             night = e['draw'] < nd and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0xFCF7BD2896751D96, 0xF786D34B5E118D5E)
+            optic = version >= 10 and e['draw'] < nd and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0x025B4B9FF54622ED, 0x46F92DC71BF8DFA5)
             inputs = version >= 7 and night and 2 <= e['after'] <= 6
             bc4 = inputs and e['format'] == 80
             formats = {10: 8, 26: 4, 28: 4, 29: 4}
@@ -165,11 +166,14 @@ def read(path):
             expected = ((e['width']+3)//4)*((e['height']+3)//4)*8 if bc4 else e['width']*e['height']*bpp
             total += expected
             x, y = (e['source_width']-e['width'])//2, (e['source_height']-e['height'])//3
+            if optic:
+                y = (e['source_height']-e['height'])//2
             if bc4:
                 x, y = x & ~3, y & ~3
-            origin = ((e['x'],e['y']) == (x,y) if night else
+            origin = ((e['x'],e['y']) == (x,y) if night or optic else
                       (e['x']+e['width'],e['y']+e['height']) == (e['source_width'],e['source_height']))
-            if (e['draw'] >= nd or (not night and draws[e['draw']]['ordinal'] != 0xfffffffd) or (e['after'] > 1 and not inputs) or
+            if (e['draw'] >= nd or (not night and not optic and draws[e['draw']]['ordinal'] != 0xfffffffd) or
+                    (optic and e['after'] > 1) or (e['after'] > 1 and not inputs) or
                     not 0 < e['width'] <= 1024 or not 0 < e['height'] <= 1024 or
                     not origin or e['x']+e['width']>e['source_width'] or e['y']+e['height']>e['source_height'] or
                     (not bpp and not bc4) or total > 64*1024*1024 or e['size'] not in (0, expected)):
@@ -304,13 +308,175 @@ def read(path):
                 depth_desc=depth, raster=raster, layout=layout,
                 before=before_data, after=after_data, depth=depth_data, ps_b1_data=ps_b1_data))
     geometry = read_geometry(unpack, take) if version >= 9 else empty_geometry()
+    candidate = empty_candidates()
+    if version >= 10:
+        candidate = read_candidates(unpack,take,draws,effect_images)
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
                 mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
                 effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling,
-                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry)
+                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry,
+                candidates=candidate)
+
+
+def empty_candidates():
+    return dict(dropped=0,missing_render_frame=0,outside_frame_window=0,input_declined=0,mip_declined=0,input_bytes=0,
+                optic_draws=0,roi_incomplete=0,roi_draw=0xffffffff,frames=[],inputs=[],samplers=[])
+
+
+def read_candidates(unpack,take,draws,effect_images):
+    dropped,missing,outside,input_declined,mip_declined,input_bytes,optic_draws,roi_incomplete,roi_draw=unpack('<9I')
+    nf,=unpack('<I')
+    if nf>192 or input_bytes>24*1024*1024 or (roi_draw!=0xffffffff and roi_draw>=len(draws)):
+        raise ValueError('Invalid targeted candidate header')
+    frames=[];seen=set()
+    for _ in range(nf):
+        draw,ledger_frame,render_frame=unpack('<3I');eye,issued,roi_captured,roi_complete=unpack('<i3I')
+        if (draw>=len(draws) or draw in seen or not render_frame or draws[draw]['frame']!=ledger_frame or
+                eye not in (-1,0,1) or issued not in (0,1,2) or roi_captured not in (0,1) or roi_complete not in (0,1) or
+                roi_complete and (issued!=1 or roi_captured!=1) or
+                (draws[draw]['vs']!=0x154FB5A453F3D2E9 and
+                 (draws[draw]['vs'],draws[draw]['ps'])!=(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5))):
+            raise ValueError('Invalid targeted candidate frame association')
+        seen.add(draw);frames.append(dict(draw=draw,ledger_frame=ledger_frame,render_frame=render_frame,eye=eye,
+                                          issued=issued,roi_captured=roi_captured,roi_complete=roi_complete))
+    ni,=unpack('<I')
+    if ni>6:
+        raise ValueError('Invalid targeted candidate input count')
+    inputs=[];total=0
+    for _ in range(ni):
+        fields=unpack('<22I')
+        names=('draw','slot','kind','view_dimension','format','width','height','source_width','source_height',
+               'source_mip_levels','source_array_size','mip','mip_levels','requested_mip_levels','first_slice',
+               'slices','first_element','elements','stride','row_bytes','rows','bytes')
+        item=dict(zip(names,fields))
+        if (item['draw'] not in seen or draws[item['draw']]['vs']!=0x025B4B9FF54622ED or
+                draws[item['draw']]['ps']!=0x46F92DC71BF8DFA5 or item['slot'] not in (1,2,3) or
+                item['kind'] not in (0,1) or item['bytes']>24*1024*1024):
+            raise ValueError('Invalid targeted PS input descriptor')
+        expected=item['bytes']
+        total+=expected
+        if total>24*1024*1024:
+            raise ValueError('Targeted input budget exceeded')
+        if item['kind']==0:
+            if item['view_dimension'] not in (1,11):
+                raise ValueError('Invalid targeted buffer view')
+            size,=unpack('<I')
+            if size not in (0,expected):
+                raise ValueError('Invalid targeted buffer payload')
+            item['data']=take(size)
+        else:
+            if item['view_dimension'] not in (4,5):
+                raise ValueError('Invalid targeted texture view')
+            if (not item['width'] or not item['height'] or not item['source_width'] or not item['source_height'] or
+                    not item['source_mip_levels'] or not item['source_array_size'] or not item['slices'] or
+                    not item['mip_levels'] or item['mip_levels']>item['requested_mip_levels'] or
+                    item['mip']+item['requested_mip_levels']>item['source_mip_levels'] or
+                    item['first_slice']+item['slices']>item['source_array_size'] or
+                    item['width']!=max(1,item['source_width']>>item['mip']) or
+                    item['height']!=max(1,item['source_height']>>item['mip'])):
+                raise ValueError('Invalid targeted texture dimensions')
+            subresources=[];actual=0
+            for mip in range(item['mip_levels']):
+                w=max(1,item['width']>>mip);h=max(1,item['height']>>mip)
+                row_bytes,rows=_candidate_texture_layout(item['format'],w,h)
+                if not row_bytes:
+                    raise ValueError('Unsupported targeted texture format')
+                for _ in range(item['slices']):
+                    size,=unpack('<I');sub_bytes=row_bytes*rows
+                    if size not in (0,sub_bytes):
+                        raise ValueError('Invalid targeted texture mip payload')
+                    subresources.append(take(size));actual+=sub_bytes
+            if actual!=expected or item['row_bytes']*item['rows']>expected:
+                raise ValueError('Targeted texture byte count mismatch')
+            item['data_subresources']=subresources
+        inputs.append(item)
+    sampler_count,=unpack('<I')
+    if sampler_count>2:
+        raise ValueError('Invalid targeted sampler count')
+    samplers=[]
+    for _ in range(sampler_count):
+        draw,present=unpack('<2I');size,=unpack('<I')
+        if draw not in seen or draws[draw]['vs']!=0x025B4B9FF54622ED or draws[draw]['ps']!=0x46F92DC71BF8DFA5 or present>1 or size!=52:
+            raise ValueError('Invalid targeted sampler descriptor')
+        samplers.append(dict(draw=draw,present=present,descriptor=take(size)))
+    optic_rows=[f for f in frames if (draws[f['draw']]['vs'],draws[f['draw']]['ps'])==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5)]
+    if optic_draws!=len(optic_rows):
+        raise ValueError('Targeted optic draw count mismatch')
+    index_missing=0
+    for frame in optic_rows:
+        frame['index_status']=_validate_candidate_indices(draws[frame['draw']])
+        index_missing+=frame['index_status']!='validated'
+    roi_bytes=0
+    roi_payload_missing=0
+    for frame in optic_rows:
+        if not frame['roi_captured']:
+            continue
+        roi=[e for e in effect_images if e['draw']==frame['draw'] and e['after']<=1]
+        if len(roi)!=2 or {e['after'] for e in roi}!={0,1} or sum(e['width']*e['height']*({10:8,26:4,28:4,29:4}.get(e['format'],0)) for e in roi)>8*1024*1024:
+            raise ValueError('Invalid targeted before/after ROI pair')
+        for e in roi:
+            if (e['width']>512 or e['height']>512 or e['x']!=(e['source_width']-e['width'])//2 or
+                    e['y']!=(e['source_height']-e['height'])//2):
+                raise ValueError('Targeted ROI is not centered or exceeds its bound')
+            roi_bytes+=e['width']*e['height']*({10:8,26:4,28:4,29:4}.get(e['format'],0))
+        if frame['roi_complete'] and not next(e for e in roi if e['after']==1)['data']:
+            roi_payload_missing+=1
+    matched_roi=[e for e in effect_images if e['after']<=1 and (draws[e['draw']]['vs'],draws[e['draw']]['ps'])==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5)]
+    if any(e['draw'] not in {f['draw'] for f in optic_rows if f['roi_captured']} for e in matched_roi) or roi_bytes>8*1024*1024:
+        raise ValueError('Unassociated targeted ROI image or budget exceeded')
+    if roi_draw!=0xffffffff and not any(f['draw']==roi_draw and f['roi_captured'] for f in optic_rows):
+        raise ValueError('Targeted ROI summary draw missing from candidate ledger')
+    return dict(dropped=dropped,missing_render_frame=missing,outside_frame_window=outside,
+                input_declined=input_declined,mip_declined=mip_declined,input_bytes=input_bytes,optic_draws=optic_draws,
+                roi_incomplete=roi_incomplete,roi_payload_missing=roi_payload_missing,index_missing=index_missing,
+                roi_draw=roi_draw,frames=frames,inputs=inputs,samplers=samplers)
+
+
+def _candidate_texture_layout(fmt,width,height):
+    bpp={61:1,65:1,49:2,54:2,56:2,28:4,29:4,87:4,91:4,34:4,35:4,41:4,24:4,26:4,10:8,11:8,16:8,2:16}.get(fmt)
+    if bpp:
+        return width*bpp,height
+    if fmt in (71,72,80):
+        return ((width+3)//4)*8,(height+3)//4
+    if fmt in (74,75,77,78,83,95,98,99):
+        return ((width+3)//4)*16,(height+3)//4
+    return 0,0
+
+
+def _validate_candidate_indices(draw):
+    index=draw['streams'][2]
+    if draw['kind'] not in (ord('X'),ord('I')) or index['stride'] not in (2,4) or draw['count']<1:
+        raise ValueError('Targeted optic draw has no bounded indexed window')
+    index_begin=index['offset']+draw['start']*index['stride']-index['capture_offset']
+    needed=draw['count']*index['stride']
+    if index_begin<0 or index_begin+needed>len(index['data']):
+        if not index['data']:
+            return 'index_readback_missing'
+        raise ValueError('Targeted optic index window does not cover the draw range')
+    if not index['data']:
+        return 'index_readback_missing'
+    code='H' if index['stride']==2 else 'I'
+    indices=struct.unpack('<'+code*draw['count'],index['data'][index_begin:index_begin+needed])
+    per_vertex=[e for e in draw['layout'] if e['classification']==0]
+    if not per_vertex:
+        return 'vertex_layout_missing'
+    missing=False
+    for element in per_vertex:
+        stream=draw['streams'][element['slot']]
+        if not stream['data'] or not stream['stride']:
+            missing=True;continue
+        element_bytes={2:16,3:16,6:12,10:8,16:8,17:8,24:4,28:4,34:4,41:4,49:2,54:2,56:2}.get(element['format'])
+        if not element_bytes:
+            raise ValueError('Unsupported targeted optic vertex format')
+        for value in indices:
+            vertex=value+draw['base']
+            offset=stream['offset']+vertex*stream['stride']+element['offset']-stream['capture_offset']
+            if vertex<0 or offset<0 or offset+element_bytes>len(stream['data']):
+                raise ValueError('Targeted optic index escapes retained vertex window')
+    return 'vertex_readback_missing' if missing else 'validated'
 
 
 def empty_geometry():
@@ -508,7 +674,7 @@ def verify_fixture(capture):
 
 
 def verify_sprite_fixture(capture):
-    assert capture['version'] == 9 and capture['failures'] == 0
+    assert capture['version'] == 10 and capture['failures'] == 0
     assert len(capture['sprite_diagnostics']) == 1 and capture['sprite_declined'] >= 2
     d = capture['sprite_diagnostics'][0]
     assert d['draw'] == 2 and (d['width'], d['height']) == (1400, 1400)
@@ -526,7 +692,51 @@ def verify_sprite_fixture(capture):
     assert d['ps_b1_data'] == struct.pack('<f', 31.0) * 48
 
 
+def verify_candidate_fixture(capture):
+    c=capture['candidates']
+    assert capture['version']==10 and capture['failures']==0
+    assert c['optic_draws']==1 and len(c['frames'])==1
+    frame=c['frames'][0]
+    assert (frame['draw'],frame['ledger_frame'],frame['render_frame'],frame['eye'])==(0,101,501,1)
+    assert (frame['issued'],frame['roi_captured'],frame['roi_complete'],frame['index_status'])==(1,1,1,'validated')
+    assert len(c['inputs'])==1 and c['inputs'][0]['slot']==1 and c['inputs'][0]['data']==bytes([0x5a])*96
+    assert len(c['samplers'])==1 and c['samplers'][0]['present']==1 and len(c['samplers'][0]['descriptor'])==52
+    roi=[e for e in capture['effect_images'] if e['draw']==0 and e['after']<=1]
+    assert len(roi)==2 and {e['after'] for e in roi}=={0,1}
+    assert all((e['x'],e['y'],e['width'],e['height'],e['source_width'],e['source_height'])==(0,0,512,512,512,512) for e in roi)
+    assert len(roi[0]['data'])==len(roi[1]['data'])==512*512*4 and roi[0]['data']!=roi[1]['data']
+
+
 def self_test():
+    def candidate_reader(blob):
+        stream=io.BytesIO(blob)
+        def take(n):
+            value=stream.read(n)
+            if len(value)!=n:raise ValueError('Truncated draw snapshot')
+            return value
+        def unpack(fmt):return struct.unpack(fmt,take(struct.calcsize(fmt)))
+        return read_candidates(unpack,take,[],[])
+    empty_candidate=struct.pack('<8I',0,0,0,0,0,0,0,0)+struct.pack('<I',0xffffffff)+struct.pack('<3I',0,0,0)
+    assert candidate_reader(empty_candidate)['frames']==[]
+    try:
+        malformed_candidate=struct.pack('<8I',0,0,0,0,0,0,1,0)+struct.pack('<I',0xffffffff)+struct.pack('<3I',0,0,0)
+        candidate_reader(malformed_candidate)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Optic draw count without candidate rows accepted')
+    optic_fixture=dict(kind=ord('I'),count=2,start=3,base=4,layout=[
+        dict(classification=0,slot=1,format=3,offset=0),dict(classification=0,slot=1,format=17,offset=16)],
+        streams=[{},dict(offset=16,stride=48,capture_offset=208,data=bytes(144)),
+                 dict(offset=8,stride=2,capture_offset=14,data=struct.pack('<2H',0,2))])
+    assert _validate_candidate_indices(optic_fixture)=='validated', 'Packed optic formats and shifted capture windows'
+    optic_fixture['streams'][1]['capture_offset']=400
+    try:
+        _validate_candidate_indices(optic_fixture)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Index outside retained vertex window accepted')
     head = b'EDVRDRW1' + struct.pack('<4I', 1, 0, 0, 0)
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)/'sample.bin'
@@ -690,8 +900,11 @@ def main():
         sprite_path = Path(str(a.path) + '.sprite')
         assert sprite_path.exists(), 'sprite diagnostic fixture is required'
         verify_sprite_fixture(read(sprite_path))
+        candidate_path=Path(str(a.path)+'.candidate')
+        assert candidate_path.exists(),'nonempty targeted-candidate fixture is required'
+        verify_candidate_fixture(read(candidate_path))
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 9 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 10 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
             assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
@@ -739,7 +952,7 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 9 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 10 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
@@ -758,7 +971,7 @@ def main():
                     path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
                     assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 9 and night['failures'] == 0 and len(night['draws']) == 3
+        assert night['version'] == 10 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E

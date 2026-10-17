@@ -4314,6 +4314,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);
     const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
+    objectProbeCandidateDrawIssued(self,originalIssued);
     if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks
     if (barsBound) supercruiseBarsEnd(self);  // the game's geometry stage, its constant slot and its rasterizer state back, before the layer's restore
     if (layered) {

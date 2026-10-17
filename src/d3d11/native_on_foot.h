@@ -302,6 +302,8 @@ struct MarkerCropNdc {
 inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
 // F62c: the marker probe's frame now (the frame the draws and the submits between two Presents share; the series' age-0 test).
 uint32_t nativeOnFootMarkerFrameNow();
+// The Present-boundary render/Animate frame identity for joining captures across frame domains.
+uint32_t nativeOnFootRenderFrame();
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).
@@ -309,7 +311,7 @@ bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]);
 // F76 synchronized rifle-optic diagnostic, called only by the FinalCrisp run lifecycle.
 namespace nofoot::optic_capture { struct RowDescriptor; }
 void nativeOnFootOpticCaptureBegin(const wchar_t* stamp);
-void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus);
+void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_t renderFrame, uint32_t epoch, uint64_t sequence, const char* imageStatus);
 void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture::RowDescriptor* rows, uint32_t rowCount, uint32_t unmatchedCallbacks);
 
 }  // namespace edvr

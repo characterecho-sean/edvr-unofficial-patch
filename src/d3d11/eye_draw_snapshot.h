@@ -51,6 +51,13 @@ public:
     // Exact rifle bolt pair from the armed eye dump. Retain its existing
     // draw-time streams only; this is visual shader geometry, not collision.
     static constexpr uint64_t kBoltVs=0x1F17BF54DB6EE407ull,kBoltPs=0xA75C1DB6562B8CA7ull;
+    // F77 bounded candidate capture: these are observed shader families,
+    // not proven weapon identity. Keep the optic pair exact.
+    static constexpr uint64_t kF77HeldCandidateVs=0x154FB5A453F3D2E9ull;
+    static constexpr uint64_t kF77OpticVs=0x025B4B9FF54622EDull,kF77OpticPs=0x46F92DC71BF8DFA5ull;
+    static bool f77Candidate(uint64_t vs,uint64_t ps) noexcept {
+        return vs==kF77HeldCandidateVs || (vs==kF77OpticVs && ps==kF77OpticPs);
+    }
     static bool fireGeometry(uint64_t vs,uint64_t ps) noexcept { return vs==kBoltVs && ps==kBoltPs; }
     // Census unknown-A/B settlement prop batches, 2026-09-21. PS hashes are
     // listed explicitly: PS bytecode is only retained when a creation-time
@@ -227,6 +234,7 @@ public:
     std::vector<MeshBuffer> meshBuffers;
     uint32_t meshBytes=0,meshDeclined=0,meshDraws=0;
     static constexpr uint32_t kMeshBudget=256*1024*1024;
+    uint32_t meshBudgetLimit=kMeshBudget;
     struct Surface {
         Texture source, stage;
         uint32_t frame = 0, width = 0, height = 0, format = 0, bytes = 0;
@@ -247,6 +255,27 @@ public:
     std::vector<EffectImage> effectImages;
     uint32_t effectImageBytes=0,effectImageDeclined=0,pendingEffectImage=UINT32_MAX;
     static constexpr uint32_t kEffectImageBudget=64*1024*1024;
+    uint32_t effectImageBudgetLimit=kEffectImageBudget;
+    struct CandidateFrame {uint32_t draw=0,ledgerFrame=0,renderFrame=0;int32_t eye=-1;uint32_t issued=2,roiCaptured=0,roiComplete=0;};
+    std::vector<CandidateFrame> candidateFrames;
+    struct CandidateInput {
+        Buffer bufferStage;
+        Texture textureStage;
+        uint32_t draw=0,slot=0,kind=0,viewDimension=0,format=0;
+        uint32_t width=0,height=0,mip=0,mipLevels=0,requestedMipLevels=0,sourceWidth=0,sourceHeight=0,sourceMipLevels=0,sourceArraySize=0;
+        uint32_t firstSlice=0,slices=0;
+        uint32_t firstElement=0,elements=0,stride=0,rowBytes=0,rows=0,bytes=0;
+    };
+    std::vector<CandidateInput> candidateInputs;
+    struct CandidateSampler {uint32_t draw=0,present=0;D3D11_SAMPLER_DESC desc{};};
+    std::vector<CandidateSampler> candidateSamplers;
+    uint32_t candidateDropped=0,candidateMissingRenderFrame=0,candidateOutsideFrameWindow=0,candidateInputDeclined=0,candidateMipDeclined=0,candidateRoiIncomplete=0;
+    uint32_t candidateInputBytes=0,candidateOpticDraws=0;
+    static constexpr uint32_t kCandidateMaxDraws=192,kCandidateMaxOpticDraws=2;
+    static constexpr uint32_t kCandidateMeshBudget=64*1024*1024,kCandidateInputBudget=24*1024*1024;
+    static constexpr uint32_t kCandidateRoiBudget=8*1024*1024;
+    static constexpr uint32_t kCandidateRoiEdge=512;
+    uint32_t candidateRenderFirstFrame=0,candidateRoiDraw=UINT32_MAX,pendingCandidateRoi=UINT32_MAX,pendingCandidateDraw=UINT32_MAX;
     std::vector<SpriteDiagnostic> spriteDiagnostics;
     uint32_t spriteImageBytes=0,spriteDepthBytes=0,spriteImageDeclined=0,pendingSpriteDiagnostic=UINT32_MAX;
     Texture spriteDepthScratch;
@@ -280,7 +309,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs && hash!=kUnknownAPs && hash!=kUnknownBPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kF77HeldCandidateVs && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs && hash!=kUnknownAPs && hash!=kUnknownBPs && hash!=kF77OpticPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -293,7 +322,7 @@ public:
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
-            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:((d.vs==kUnknownA || d.vs==kUnknownB)?d.ps:(solarDraw(d.vs)?d.ps:0))));
+            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:((d.vs==kUnknownA || d.vs==kUnknownB || (d.vs==kF77OpticVs && d.ps==kF77OpticPs))?d.ps:(solarDraw(d.vs)?d.ps:0))));
             if(pixel && seen.emplace(pixel,true).second) {
                 const auto ps=shaders.find(pixel);
                 if(ps==shaders.end())++missing;
@@ -327,7 +356,10 @@ public:
         spriteDiagnostics.clear();spriteImageBytes=spriteDepthBytes=spriteImageDeclined=0;pendingSpriteDiagnostic=UINT32_MAX;
         spriteDepthScratch.Reset();spriteDepthScratchWidth=spriteDepthScratchHeight=spriteDepthScratchFormat=0;
         nightSampling.clear();
-        meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;
+        meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;meshBudgetLimit=kMeshBudget;
+        candidateFrames.clear();candidateInputs.clear();candidateSamplers.clear();candidateDropped=candidateMissingRenderFrame=candidateOutsideFrameWindow=candidateInputDeclined=candidateMipDeclined=candidateRoiIncomplete=0;
+        candidateInputBytes=candidateOpticDraws=candidateRenderFirstFrame=0;candidateRoiDraw=pendingCandidateRoi=pendingCandidateDraw=UINT32_MAX;
+        effectImageBudgetLimit=kEffectImageBudget;
         sourceDepth.Reset();sourceDepthFormat=DXGI_FORMAT_UNKNOWN;sourceFrame=0;
         armGeometry(0);
     }
@@ -341,7 +373,7 @@ public:
         // Full palette, not the older ledger's first MiB: the weapon may
         // address bones beyond that prefix. Record the first draw that saw
         // each resource this frame; deduplication is explicitly visible.
-        if(!bd.ByteWidth || bd.ByteWidth>16*1024*1024 || bd.ByteWidth>kMeshBudget-meshBytes){++meshDeclined;return UINT32_MAX;}
+        if(!bd.ByteWidth || bd.ByteWidth>16*1024*1024 || bd.ByteWidth>meshBudgetLimit-meshBytes){++meshDeclined;return UINT32_MAX;}
         MeshBuffer b;b.source=src;b.frame=frame;b.firstDraw=uint32_t(draws.size());b.bytes=bd.ByteWidth;b.stride=stride;b.scope=scope;
         bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&b.stage))){++failures;return UINT32_MAX;}
@@ -369,6 +401,48 @@ public:
                         char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
         if(!sourceMesh(vs) || (firstFrame && (frame<firstFrame || frame-firstFrame>=3)))return;
         capture(ctx,frame,ordinal,vs,ps,kind,count,instances,startInstance,start,base,true,true);
+    }
+
+    void armF77Candidates() {
+        reset();meshBudgetLimit=kCandidateMeshBudget;effectImageBudgetLimit=kCandidateRoiBudget;
+    }
+    static bool f77RenderFrameEligible(uint32_t first,uint32_t frame) noexcept {
+        return first && frame>=first && frame-first<3;
+    }
+    void captureF77Candidate(ID3D11DeviceContext* ctx,uint32_t ledgerFrame,uint32_t renderFrame,int32_t eye,uint32_t ordinal,
+                             uint64_t vs,uint64_t ps,char kind,uint32_t count,uint32_t instances,
+                             uint32_t startInstance,uint32_t start,int32_t base) {
+        if(!ctx || !f77Candidate(vs,ps))return;
+        if(!renderFrame){++candidateMissingRenderFrame;return;}
+        if(!candidateRenderFirstFrame)candidateRenderFirstFrame=renderFrame;
+        if(!f77RenderFrameEligible(candidateRenderFirstFrame,renderFrame)){++candidateOutsideFrameWindow;return;}
+        if(candidateFrames.size()>=kCandidateMaxDraws){++candidateDropped;return;}
+        const uint32_t before=uint32_t(draws.size());
+        capture(ctx,ledgerFrame,ordinal,vs,ps,kind,count,instances,startInstance,start,base,true,true,true,renderFrame);
+        if(draws.size()==before)++candidateDropped;
+        else candidateFrames.back().eye=eye;
+    }
+    void candidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
+        if(pendingCandidateDraw>=candidateFrames.size())return;
+        CandidateFrame& c=candidateFrames[pendingCandidateDraw];c.issued=issued?1u:0u;
+        if(pendingCandidateRoi!=UINT32_MAX && pendingCandidateDraw==c.draw) {
+            if(ctx && issued && pendingCandidateRoi<effectImages.size()) {
+                auto& after=effectImages[pendingCandidateRoi];
+                D3D11_BOX box{after.x,after.y,0,after.x+after.width,after.y+after.height,1};
+                ctx->CopySubresourceRegion(after.stage.Get(),0,0,0,0,after.source.Get(),0,&box);
+                c.roiComplete=1;
+            } else ++candidateRoiIncomplete;
+            pendingCandidateRoi=UINT32_MAX;
+        }
+        pendingCandidateDraw=UINT32_MAX;
+    }
+    void candidateDrawEnd() {
+        if(pendingCandidateDraw>=candidateFrames.size())return;
+        CandidateFrame& c=candidateFrames[pendingCandidateDraw];c.issued=2;
+        if(pendingCandidateRoi!=UINT32_MAX && pendingCandidateDraw==c.draw) {
+            ++candidateRoiIncomplete;pendingCandidateRoi=UINT32_MAX;
+        }
+        pendingCandidateDraw=UINT32_MAX;
     }
 
     // --- Version 9: one armed frame's pool-draw geometry -------------------
@@ -675,9 +749,12 @@ public:
 
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
-                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false,bool eyeMesh=false) {
+                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false,bool eyeMesh=false,
+                 bool f77CandidateDraw=false,uint32_t renderFrame=0) {
         const bool fireGeometryPair=fireGeometry(vs,ps);
         if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))) && !fireGeometryPair)) return;
+        const bool candidateOptic=f77CandidateDraw && vs==kF77OpticVs && ps==kF77OpticPs;
+        const bool captureOpticEvidence=candidateOptic && candidateOpticDraws<kCandidateMaxOpticDraws;
         if(fireGeometryPair && fireGeometrySeen<kMaxDraws)++fireGeometrySeen;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
@@ -724,15 +801,15 @@ public:
         const bool sprite=vs==kSprite && ps==kSpritePs;
         const bool night=vs==kNight && ps==kNightPs;
         const bool planet=planetSurface(vs),solar=solarDraw(vs);
-        const bool unpacked=effect || night || planet || solar || fireGeometryPair;
-        if(unpacked || sprite || mesh || fireGeometryPair) {
+        const bool unpacked=effect || night || planet || solar || fireGeometryPair || f77CandidateDraw;
+        if(unpacked || sprite || mesh || fireGeometryPair || f77CandidateDraw) {
             Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);
             Layout elements[32];UINT bytes=sizeof(elements);
             if(layout && SUCCEEDED(layout->GetPrivateData(effectLayoutKey(),&bytes,elements)) && bytes &&
                 bytes<=sizeof(elements) && bytes%sizeof(Layout)==0)d.layout.assign(elements,elements+bytes/sizeof(Layout));
         }
         if(fireGeometryPair && d.layout.empty() && fireGeometryMissingLayout<kMaxDraws)++fireGeometryMissingLayout;
-        if(mesh) {
+        if(mesh || f77CandidateDraw) {
             ++meshDraws;
             for(unsigned i=0;i<2;++i) {
                 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;ctx->VSGetShaderResources(i?38:33,1,&srv);
@@ -763,7 +840,8 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || ((mesh || night || planet) && frame==firstFrame) || effect || fireGeometryPair) {
+        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || f77CandidateDraw ||
+           ((mesh || night || planet) && (f77CandidateDraw || frame==firstFrame)) || effect || fireGeometryPair) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;
@@ -836,7 +914,24 @@ public:
         if(sprite && frame==firstFrame && rt) {
             pendingSpriteDiagnostic=captureSpriteDiagnostic(ctx,dev.Get(),d,rt.Get());
         }
+        const uint32_t candidateDrawIndex=uint32_t(draws.size());
+        if(candidateOptic)++candidateOpticDraws;
+        uint32_t candidateRoiAfter=UINT32_MAX;
+        if(captureOpticEvidence) {
+            captureCandidateSampler(ctx,candidateDrawIndex);
+            captureCandidateInputs(ctx,dev.Get(),candidateDrawIndex);
+            if(rt)candidateRoiAfter=captureCandidateRoiPair(ctx,dev.Get(),rt.Get(),candidateDrawIndex);
+            if(candidateRoiAfter!=UINT32_MAX) {
+                pendingCandidateRoi=candidateRoiAfter;
+                if(candidateRoiDraw==UINT32_MAX)candidateRoiDraw=candidateDrawIndex;
+            }
+        }
         draws.push_back(std::move(d));
+        if(f77CandidateDraw) {
+            CandidateFrame c;c.draw=candidateDrawIndex;c.ledgerFrame=frame;c.renderFrame=renderFrame;
+            c.roiCaptured=candidateRoiAfter!=UINT32_MAX?1u:0u;
+            candidateFrames.push_back(c);pendingCandidateDraw=uint32_t(candidateFrames.size()-1);
+        }
         if(((effect && effectImage(vs)) || night) && frame==firstFrame && rt) {
             Microsoft::WRL::ComPtr<ID3D11Resource> res;rt->GetResource(&res);Texture tex;
             D3D11_RENDER_TARGET_VIEW_DESC rd{};rt->GetDesc(&rd);
@@ -855,7 +950,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(9); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(10); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -957,12 +1052,126 @@ public:
         for(const auto& g:geoDraws) {
             u32(g.frame);u32(g.ordinal);u32(g.mesh);u32(g.state);u64(g.vs);u64(g.ps);u32(g.instances);u32(g.startInstance);
         }
+        u32(candidateDropped);u32(candidateMissingRenderFrame);u32(candidateOutsideFrameWindow);u32(candidateInputDeclined);u32(candidateMipDeclined);u32(candidateInputBytes);
+        u32(candidateOpticDraws);u32(candidateRoiIncomplete);u32(candidateRoiDraw);
+        u32(uint32_t(candidateFrames.size()));
+        for(const auto& c:candidateFrames){u32(c.draw);u32(c.ledgerFrame);u32(c.renderFrame);u32(static_cast<uint32_t>(c.eye));u32(c.issued);u32(c.roiCaptured);u32(c.roiComplete);}
+        u32(uint32_t(candidateInputs.size()));
+        for(auto& c:candidateInputs) {
+            u32(c.draw);u32(c.slot);u32(c.kind);u32(c.viewDimension);u32(c.format);
+            u32(c.width);u32(c.height);u32(c.sourceWidth);u32(c.sourceHeight);u32(c.sourceMipLevels);u32(c.sourceArraySize);
+            u32(c.mip);u32(c.mipLevels);u32(c.requestedMipLevels);u32(c.firstSlice);u32(c.slices);
+            u32(c.firstElement);u32(c.elements);u32(c.stride);u32(c.rowBytes);u32(c.rows);u32(c.bytes);
+            if(c.kind==0)payload(c.bufferStage.Get(),c.bytes,0,0);
+            else for(uint32_t mip=0;mip<c.mipLevels;++mip)for(uint32_t slice=0;slice<c.slices;++slice) {
+                const uint32_t sub=D3D11CalcSubresource(mip,slice,c.mipLevels);
+                D3D11_MAPPED_SUBRESOURCE m{};
+                const bool mapped=c.textureStage && SUCCEEDED(ctx->Map(c.textureStage.Get(),sub,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m));
+                uint32_t rowBytes=0,rows=0;const uint32_t width=c.width>>mip?c.width>>mip:1,height=c.height>>mip?c.height>>mip:1;
+                const bool layout=candidateTextureLayout(static_cast<DXGI_FORMAT>(c.format),width,height,rowBytes,rows);
+                const bool valid=mapped && m.pData && layout && m.RowPitch>=rowBytes;
+                const uint32_t subBytes=layout?rowBytes*rows:0;u32(valid?subBytes:0);
+                if(valid)for(uint32_t row=0;row<rows;++row)
+                    ok=fwrite(static_cast<const uint8_t*>(m.pData)+size_t(row)*m.RowPitch,1,rowBytes,f)==rowBytes&&ok;
+                else if(subBytes)++failures;
+                if(mapped)ctx->Unmap(c.textureStage.Get(),sub);
+            }
+        }
+        u32(uint32_t(candidateSamplers.size()));
+        for(const auto& c:candidateSamplers){u32(c.draw);u32(c.present);blob(&c.desc,sizeof(c.desc));}
         u32(failures);
         ok = !ferror(f) && ok;
         return fclose(f) == 0 && ok;
     }
 
 private:
+    static bool candidateTextureLayout(DXGI_FORMAT f,uint32_t w,uint32_t h,uint32_t& rowBytes,uint32_t& rows) {
+        uint32_t bpp=0;
+        switch(f) {
+        case DXGI_FORMAT_R8_UNORM:case DXGI_FORMAT_A8_UNORM:bpp=1;break;
+        case DXGI_FORMAT_R8G8_UNORM:case DXGI_FORMAT_R16_FLOAT:case DXGI_FORMAT_R16_UNORM:bpp=2;break;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R16G16_UNORM:
+        case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R10G10B10A2_UNORM:case DXGI_FORMAT_R11G11B10_FLOAT:bpp=4;break;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:case DXGI_FORMAT_R16G16B16A16_UNORM:case DXGI_FORMAT_R32G32_FLOAT:bpp=8;break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:bpp=16;break;
+        default:break;
+        }
+        if(bpp){rowBytes=w*bpp;rows=h;return w&&h;}
+        switch(f) {
+        case DXGI_FORMAT_BC1_UNORM:case DXGI_FORMAT_BC1_UNORM_SRGB:case DXGI_FORMAT_BC4_UNORM:
+            rowBytes=((w+3)/4)*8;rows=(h+3)/4;return w&&h;
+        case DXGI_FORMAT_BC2_UNORM:case DXGI_FORMAT_BC2_UNORM_SRGB:case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:case DXGI_FORMAT_BC5_UNORM:case DXGI_FORMAT_BC6H_UF16:
+        case DXGI_FORMAT_BC7_UNORM:case DXGI_FORMAT_BC7_UNORM_SRGB:
+            rowBytes=((w+3)/4)*16;rows=(h+3)/4;return w&&h;
+        default:return false;
+        }
+    }
+    void captureCandidateInputs(ID3D11DeviceContext* ctx,ID3D11Device* dev,uint32_t draw) {
+        const UINT slots[3]={3,1,2}; // t3 alpha array first, then packed material t1, then t2 colour.
+        for(UINT slotIndex=0;slotIndex<3;++slotIndex) {
+            const UINT slot=slots[slotIndex];
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;ctx->PSGetShaderResources(slot,1,&srv);
+            if(!srv){++candidateInputDeclined;continue;}
+            CandidateInput input;input.draw=draw;input.slot=slot;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};srv->GetDesc(&sd);input.viewDimension=sd.ViewDimension;input.format=sd.Format;
+            Microsoft::WRL::ComPtr<ID3D11Resource> resource;srv->GetResource(&resource);
+            if(!resource){++candidateInputDeclined;continue;}
+            if(sd.ViewDimension==D3D11_SRV_DIMENSION_BUFFER || sd.ViewDimension==D3D11_SRV_DIMENSION_BUFFEREX) {
+                Microsoft::WRL::ComPtr<ID3D11Buffer> source;if(FAILED(resource.As(&source))){++candidateInputDeclined;continue;}
+                D3D11_BUFFER_DESC bd{};source->GetDesc(&bd);input.kind=0;input.width=bd.ByteWidth;input.sourceWidth=bd.ByteWidth;
+                if(sd.ViewDimension==D3D11_SRV_DIMENSION_BUFFER){input.firstElement=sd.Buffer.FirstElement;input.elements=sd.Buffer.NumElements;}
+                else {input.firstElement=sd.BufferEx.FirstElement;input.elements=sd.BufferEx.NumElements;}
+                input.stride=bd.StructureByteStride;input.bytes=bd.ByteWidth;
+                if(!input.bytes || input.bytes>1024*1024 || input.bytes>kCandidateInputBudget-candidateInputBytes) {++candidateInputDeclined;continue;}
+                D3D11_BUFFER_DESC stage=bd;stage.Usage=D3D11_USAGE_STAGING;stage.BindFlags=stage.MiscFlags=stage.StructureByteStride=0;stage.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(dev->CreateBuffer(&stage,nullptr,&input.bufferStage))){++failures;++candidateInputDeclined;continue;}
+                ctx->CopyResource(input.bufferStage.Get(),source.Get());
+            } else if(sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D || sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+                Texture source;if(FAILED(resource.As(&source))){++candidateInputDeclined;continue;}
+                D3D11_TEXTURE2D_DESC td{};source->GetDesc(&td);input.kind=1;
+                input.mip=sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?sd.Texture2D.MostDetailedMip:sd.Texture2DArray.MostDetailedMip;
+                const uint32_t viewMips=sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?sd.Texture2D.MipLevels:sd.Texture2DArray.MipLevels;
+                input.firstSlice=sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?0:sd.Texture2DArray.FirstArraySlice;
+                input.slices=sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?1:(slot==3?1:sd.Texture2DArray.ArraySize);
+                if(input.mip>=td.MipLevels || !input.slices || input.firstSlice+input.slices>td.ArraySize || td.SampleDesc.Count!=1) {++candidateInputDeclined;continue;}
+                input.sourceWidth=td.Width;input.sourceHeight=td.Height;input.sourceMipLevels=td.MipLevels;input.sourceArraySize=td.ArraySize;
+                const uint32_t remainingMips=td.MipLevels-input.mip;
+                input.requestedMipLevels=(!viewMips || viewMips==UINT_MAX || viewMips>remainingMips)?remainingMips:viewMips;
+                input.width=td.Width>>input.mip;if(!input.width)input.width=1;
+                input.height=td.Height>>input.mip;if(!input.height)input.height=1;
+                if(!candidateTextureLayout(static_cast<DXGI_FORMAT>(sd.Format),input.width,input.height,input.rowBytes,input.rows)) {++candidateInputDeclined;continue;}
+                uint64_t bytes=0;
+                for(uint32_t mip=0;mip<input.requestedMipLevels;++mip) {
+                    uint32_t rowBytes=0,rows=0;
+                    if(!candidateTextureLayout(static_cast<DXGI_FORMAT>(sd.Format),input.width>>mip?input.width>>mip:1,
+                                               input.height>>mip?input.height>>mip:1,rowBytes,rows)){break;}
+                    const uint64_t mipBytes=uint64_t(rowBytes)*rows*input.slices;
+                    if(!mipBytes || mipBytes>kCandidateInputBudget-candidateInputBytes-bytes)break;
+                    bytes+=mipBytes;++input.mipLevels;
+                }
+                candidateMipDeclined+=input.requestedMipLevels-input.mipLevels;
+                if(!bytes || bytes>UINT32_MAX) {++candidateInputDeclined;continue;}
+                input.bytes=static_cast<uint32_t>(bytes);
+                D3D11_TEXTURE2D_DESC stage{};stage.Width=input.width;stage.Height=input.height;stage.MipLevels=input.mipLevels;stage.ArraySize=input.slices;
+                stage.Format=static_cast<DXGI_FORMAT>(sd.Format);stage.SampleDesc.Count=1;stage.Usage=D3D11_USAGE_STAGING;stage.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(dev->CreateTexture2D(&stage,nullptr,&input.textureStage))){++failures;++candidateInputDeclined;continue;}
+                for(uint32_t mip=0;mip<input.mipLevels;++mip)for(uint32_t slice=0;slice<input.slices;++slice) {
+                    const uint32_t srcSub=D3D11CalcSubresource(input.mip+mip,input.firstSlice+slice,td.MipLevels);
+                    const uint32_t dstSub=D3D11CalcSubresource(mip,slice,input.mipLevels);
+                    ctx->CopySubresourceRegion(input.textureStage.Get(),dstSub,0,0,0,source.Get(),srcSub,nullptr);
+                }
+            } else {++candidateInputDeclined;continue;}
+            candidateInputBytes+=input.bytes;candidateInputs.push_back(std::move(input));
+        }
+    }
+    void captureCandidateSampler(ID3D11DeviceContext* ctx,uint32_t draw) {
+        CandidateSampler record;record.draw=draw;
+        Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;ctx->PSGetSamplers(0,1,&sampler);
+        if(sampler){record.present=1;sampler->GetDesc(&record.desc);}
+        candidateSamplers.push_back(record);
+    }
     void captureNightSampling(ID3D11DeviceContext* ctx,uint32_t draw) {
         if(nightSampling.size()>=8){++effectImageDeclined;return;}
         NightSampling n;n.draw=draw;
@@ -1002,12 +1211,13 @@ private:
         e.x=td.Width-e.width;e.y=td.Height-e.height;e.bytes=e.width*e.height*bpp;
         // Night vision is a stereo scene pass. Its terrain is near the
         // centre of the view; keep the rifle's lower-right crop unchanged.
-        if(draw<draws.size() && draws[draw].vs==kNight) {
+        if(draw<draws.size() && (draws[draw].vs==kNight ||
+           (draws[draw].vs==kF77OpticVs && draws[draw].ps==kF77OpticPs))) {
             e.x=(td.Width-e.width)/2;e.y=(td.Height-e.height)/3;
         }
         if(bc4){e.x&=~3u;e.y&=~3u;e.bytes=((e.width+3)/4)*((e.height+3)/4)*8;}
         if((!bpp && !bc4) || !e.bytes || td.SampleDesc.Count!=1 || td.ArraySize!=1 ||
-           effectImages.size()>=32 || e.bytes>kEffectImageBudget-effectImageBytes) {
+           effectImages.size()>=32 || e.bytes>effectImageBudgetLimit-effectImageBytes) {
             ++effectImageDeclined;return UINT32_MAX;
         }
         td.Width=e.width;td.Height=e.height;td.MipLevels=1;td.Usage=D3D11_USAGE_STAGING;
@@ -1018,6 +1228,38 @@ private:
         D3D11_BOX box{e.x,e.y,0,e.x+e.width,e.y+e.height,1};
         ctx->CopySubresourceRegion(e.stage.Get(),0,0,0,0,tex,0,&box);
         effectImageBytes+=e.bytes;effectImages.push_back(std::move(e));return uint32_t(effectImages.size()-1);
+    }
+    uint32_t captureCandidateRoiPair(ID3D11DeviceContext* ctx,ID3D11Device* dev,ID3D11RenderTargetView* rtv,uint32_t draw) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;rtv->GetResource(&resource);Texture source;
+        D3D11_RENDER_TARGET_VIEW_DESC rd{};rtv->GetDesc(&rd);
+        if(rd.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D || rd.Texture2D.MipSlice!=0 || !resource || FAILED(resource.As(&source))) {
+            ++effectImageDeclined;return UINT32_MAX;
+        }
+        D3D11_TEXTURE2D_DESC td{};source->GetDesc(&td);
+        const DXGI_FORMAT format=rd.Format;
+        const uint32_t bpp=format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:
+            (format==DXGI_FORMAT_R8G8B8A8_UNORM || format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format==DXGI_FORMAT_R11G11B10_FLOAT)?4u:0u;
+        const uint32_t width=td.Width<kCandidateRoiEdge?td.Width:kCandidateRoiEdge;
+        const uint32_t height=td.Height<kCandidateRoiEdge?td.Height:kCandidateRoiEdge;
+        const uint32_t bytes=width*height*bpp;
+        if(!bpp || !width || !height || td.ArraySize!=1 || td.SampleDesc.Count!=1 ||
+           effectImages.size()+2>32 || uint64_t(bytes)*2>effectImageBudgetLimit-effectImageBytes) {
+            ++effectImageDeclined;return UINT32_MAX;
+        }
+        D3D11_TEXTURE2D_DESC stageDesc=td;stageDesc.Width=width;stageDesc.Height=height;stageDesc.MipLevels=1;
+        stageDesc.Usage=D3D11_USAGE_STAGING;stageDesc.BindFlags=stageDesc.MiscFlags=0;stageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        EffectImage before,after;before.source=after.source=source;before.draw=after.draw=draw;
+        before.after=0;after.after=1;before.x=after.x=(td.Width-width)/2;before.y=after.y=(td.Height-height)/2;
+        before.width=after.width=width;before.height=after.height=height;
+        before.sourceWidth=after.sourceWidth=td.Width;before.sourceHeight=after.sourceHeight=td.Height;
+        before.format=after.format=format;before.bytes=after.bytes=bytes;
+        if(FAILED(dev->CreateTexture2D(&stageDesc,nullptr,&before.stage)) || FAILED(dev->CreateTexture2D(&stageDesc,nullptr,&after.stage))) {
+            ++failures;return UINT32_MAX;
+        }
+        D3D11_BOX box{before.x,before.y,0,before.x+width,before.y+height,1};
+        ctx->CopySubresourceRegion(before.stage.Get(),0,0,0,0,source.Get(),0,&box);
+        effectImages.push_back(std::move(before));effectImages.push_back(std::move(after));effectImageBytes+=bytes*2;
+        return uint32_t(effectImages.size()-1);
     }
     static std::mutex& shaderMutex() { static std::mutex m; return m; }
     static std::map<uint64_t, std::vector<uint8_t>>& shaderBytes() {

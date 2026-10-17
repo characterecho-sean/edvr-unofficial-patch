@@ -1699,20 +1699,35 @@ int wmain(int argc, wchar_t** argv) {
                       "F76: repeated P1 frames are ignored without destroying the prior comparison sample");
 
                 nf::IkPoseDeviationTracker capDetector;
-                pose = {}; pose.fresh = true; pose.item = 1; pose.generation = 1; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
-                uint32_t frame = 0; uint64_t qpc = 0;
-                for (; frame < 8; ++frame) { pose.frame = frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events); }
-                for (uint32_t pulse = 0; pulse < 18; ++pulse) {
-                    pose.elbow[0][0] = (pulse % 2 == 0) ? 0.06 : 0.0;
-                    pose.frame = ++frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events);
-                    for (int n = 0; n < 9; ++n) { pose.frame = ++frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events); }
-                }
-                pose.elbow[0][0] = 0.0;
-                for (int n = 0; n < 8; ++n) { pose.frame = ++frame; pose.qpc = qpc = 59920 + static_cast<uint64_t>(n) * 10; capDetector.step(pose, 1000, events); }
-                pose.frame = ++frame; pose.qpc = 60000; pose.elbow[0][0] = 0.06;
-                capDetector.step(pose, 1000, events);
-                check(capDetector.eventsInMinute == 1 && capDetector.suppressed >= 1,
-                      "F76: event capture is capped at eight per minute and reopens on the next minute bucket");
+                pose = {}; pose.fresh = true; pose.generation = 1; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
+                uint32_t frame = 0; uint64_t qpc = 0; bool started = false;
+                const auto stepPose = [&]() noexcept { pose.frame = ++frame; pose.qpc = qpc += 10; capDetector.step(pose, 1000, events); };
+                const auto emitItemEvents = [&](uint32_t item, uint32_t count) noexcept {
+                    if (!started || pose.item != item) { pose.item = item; pose.elbow[0][0] = 0.0; stepPose(); started = true; }
+                    for (uint32_t n = 0; n < count; ++n) {
+                        pose.elbow[0][0] = pose.elbow[0][0] == 0.0 ? 0.06 : 0.0;
+                        stepPose();
+                        for (int post = 0; post < 8; ++post) stepPose();
+                    }
+                };
+                emitItemEvents(1, nf::kIkPoseDeviationEventsPerItemMinute);
+                const bool firstItemBounded = capDetector.eventsInMinute == 8 && capDetector.itemEventsInMinute == 8 && capDetector.itemSuppressed == 0;
+                emitItemEvents(1, 1);
+                const bool sameItemCapped = capDetector.eventsInMinute == 8 && capDetector.itemEventsInMinute == 8 && capDetector.itemSuppressed == 1;
+                emitItemEvents(2, 1);  // a later held item receives its own first-event budget in the same minute
+                const bool secondItemCaptured = capDetector.eventsInMinute == 9 && capDetector.activeItemSerial == 2 && capDetector.itemEventsInMinute == 1;
+                emitItemEvents(2, 7);
+                emitItemEvents(3, 8);
+                emitItemEvents(4, 8);
+                const bool globalBounded = capDetector.eventsInMinute == nf::kIkPoseDeviationEventsGlobalPerMinute;
+                emitItemEvents(5, 1);
+                const bool globalSuppressed = capDetector.globalSuppressed > 0 && capDetector.eventsInMinute == nf::kIkPoseDeviationEventsGlobalPerMinute;
+                const uint32_t suppressedBeforeRollover = capDetector.suppressed;
+                qpc = 59980; pose.elbow[0][0] = 0.0; stepPose();
+                pose.elbow[0][0] = 0.06; stepPose();
+                check(firstItemBounded && sameItemCapped && secondItemCaptured && globalBounded && globalSuppressed && capDetector.eventsInMinute == 1 &&
+                          capDetector.itemEventsInMinute == 1 && capDetector.activeItemSerial == 5 && capDetector.suppressed == suppressedBeforeRollover,
+                      "F77: per-item event budgets preserve later-item coverage, a global cap stops item cycling, and both budgets reopen by minute");
 
                 edvr::nofoot::optic_capture::Ledger opticLedger;
                 opticLedger.begin(1);
@@ -1721,18 +1736,22 @@ int wmain(int argc, wchar_t** argv) {
                 OpticRow requested[edvr::nofoot::optic_capture::kCount]{};
                 bool allSixteen = true;
                 for (uint32_t i = 0; i < edvr::nofoot::optic_capture::kCount; ++i) {
-                    requested[i].scheduled = true; requested[i].sceneFrame = 100 + i; requested[i].epoch = 4;
+                    requested[i].scheduled = true; requested[i].sceneFrame = 100 + i; requested[i].renderFrame = 4567 + i; requested[i].epoch = 4;
                     requested[i].sequence = 1000 + i; std::strcpy(requested[i].imageStatus, "copied");
                     if (i == 5 || i == 6) continue;
-                    OpticRecord row; row.sceneFrame = requested[i].sceneFrame; row.epoch = requested[i].epoch; row.sequence = requested[i].sequence;
+                    OpticRecord row; row.sceneFrame = requested[i].sceneFrame; row.renderFrame = requested[i].renderFrame; row.epoch = requested[i].epoch; row.sequence = requested[i].sequence;
                     allSixteen = opticLedger.sample(i, row) && allSixteen;
                 }
                 OpticRecord duplicateOptic; duplicateOptic.sceneFrame = 888;
                 const bool duplicateRejected = !opticLedger.sample(4, duplicateOptic) && opticLedger.duplicates == 1 && opticLedger.rows[4].sceneFrame == 104;
-                OpticRecord delayedG; delayedG.sceneFrame = 77; delayedG.fpFrame = 77; delayedG.eyeFrame = 77; delayedG.adsFrame = 77;
-                delayedG.rootReadFrame = 77; delayedG.gGameFrame = 500; delayedG.state = edvr::nofoot::optic_capture::SourceState::Unmatched;
+                OpticRecord delayedG; delayedG.sceneFrame = 100; delayedG.renderFrame = 4567; delayedG.fpFrame = 4567; delayedG.eyeFrame = 4567; delayedG.adsFrame = 4567;
+                delayedG.rootReadFrame = 4567; delayedG.gGameFrame = 500; delayedG.state = edvr::nofoot::optic_capture::SourceState::Unmatched;
                 const bool mismatchRetained = opticLedger.sample(5, delayedG) && opticLedger.rows[5].state == edvr::nofoot::optic_capture::SourceState::Unmatched &&
-                    opticLedger.rows[5].sceneFrame == 77 && opticLedger.rows[5].gGameFrame == 500 && opticLedger.rows[5].rootReadFrame == 77;
+                    opticLedger.rows[5].sceneFrame == 100 && opticLedger.rows[5].renderFrame == 4567 && opticLedger.rows[5].gGameFrame == 500 && opticLedger.rows[5].rootReadFrame == 4567;
+                const bool independentFrameDomains = edvr::nofoot::optic_capture::sourceFramesMatchRender(4567, 4567, 4567, 4567, 4567) &&
+                    !edvr::nofoot::optic_capture::sourceFramesMatchRender(4567, 100, 4567, 4567, 4567) &&
+                    !edvr::nofoot::optic_capture::sourceFramesMatchRender(0, 0, 0, 0, 0) &&
+                    !edvr::nofoot::optic_capture::sourceFramesMatchRender(~uint32_t(0), ~uint32_t(0), ~uint32_t(0), ~uint32_t(0), ~uint32_t(0));
                 OpticRecord invalidBasis; invalidBasis.p14BasisValid = false; invalidBasis.state = edvr::nofoot::optic_capture::SourceState::Invalid;
                 const bool invalidBasisVisible = opticLedger.sample(6, invalidBasis) && opticLedger.rows[6].state == edvr::nofoot::optic_capture::SourceState::Invalid;
                 bool fullCoverage = allSixteen;
@@ -1740,15 +1759,15 @@ int wmain(int argc, wchar_t** argv) {
                 const bool boundsChecked = !opticLedger.sample(edvr::nofoot::optic_capture::kCount, OpticRecord{});
                 opticLedger.end(requested, edvr::nofoot::optic_capture::kCount);
                 const bool disarmed = !opticLedger.armed && !opticLedger.sample(0, OpticRecord{});
-                const bool requestedMetadata = opticLedger.requested[15].scheduled && opticLedger.requested[15].sceneFrame == 115 && opticLedger.requested[15].sequence == 1015;
+                const bool requestedMetadata = opticLedger.requested[15].scheduled && opticLedger.requested[15].sceneFrame == 115 && opticLedger.requested[15].renderFrame == 4582 && opticLedger.requested[15].sequence == 1015;
                 opticLedger.begin(2);
                 const bool rearmed = opticLedger.armed && opticLedger.duplicates == 0 && !opticLedger.rows[4].sampled;
                 OpticRow missingRows[edvr::nofoot::optic_capture::kCount]{};
-                missingRows[3].scheduled = true; missingRows[3].sceneFrame = 203; missingRows[3].epoch = 9;
+                missingRows[3].scheduled = true; missingRows[3].sceneFrame = 203; missingRows[3].renderFrame = 9090; missingRows[3].epoch = 9;
                 missingRows[3].sequence = 909; std::strcpy(missingRows[3].imageStatus, "source_missing");
                 opticLedger.end(missingRows, edvr::nofoot::optic_capture::kCount);
                 const bool missingCallbackVisible = !opticLedger.rows[3].sampled && opticLedger.requested[3].scheduled &&
-                    opticLedger.requested[3].sceneFrame == 203 && opticLedger.requested[3].epoch == 9 && opticLedger.requested[3].sequence == 909 &&
+                    opticLedger.requested[3].sceneFrame == 203 && opticLedger.requested[3].renderFrame == 9090 && opticLedger.requested[3].epoch == 9 && opticLedger.requested[3].sequence == 909 &&
                     std::strcmp(opticLedger.requested[3].imageStatus, "source_missing") == 0;
                 char finiteJson[48], nanJson[48], infJson[48];
                 const bool jsonNumbers = edvr::nofoot::optic_capture::formatJsonNumber(finiteJson, sizeof(finiteJson), 3.25f) && std::strcmp(finiteJson, "3.25") == 0 &&
@@ -1757,8 +1776,8 @@ int wmain(int argc, wchar_t** argv) {
                 opticLedger.begin(3);
                 const bool cleanRearm = opticLedger.armed && opticLedger.duplicates == 0 && !opticLedger.rows[3].sampled && !opticLedger.requested[3].scheduled;
                 opticLedger.end(nullptr, 0);
-                check(fullCoverage && duplicateRejected && mismatchRetained && invalidBasisVisible && boundsChecked && disarmed && requestedMetadata && missingCallbackVisible && jsonNumbers && rearmed && cleanRearm,
-                      "F76: synchronized optic capture covers 16 rows, keeps first-wins duplicates and mismatched source values, records missing callbacks, and emits JSON-safe nonfinite numbers");
+                check(fullCoverage && duplicateRejected && mismatchRetained && independentFrameDomains && invalidBasisVisible && boundsChecked && disarmed && requestedMetadata && missingCallbackVisible && jsonNumbers && rearmed && cleanRearm,
+                      "F77: synchronized optic capture keeps scene/render frame domains distinct, retains mismatched source values and missing callbacks, and emits JSON-safe nonfinite numbers");
             }
             // F58: the spine bend's pure half: the residual split, the solve, the clamps, the 1/3, 2/3, 1 split, the 0.2 s ramp and the cap.
             {
@@ -1916,6 +1935,43 @@ int wmain(int argc, wchar_t** argv) {
                           nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCmDefault == 6.0,
                       "F59: the elbow-out clamp measures from the arm's own shoulder (an inboard elbow the midline passed is clamped to S.x + 6 cm, "
                       "both sides); the default is 6 cm");
+                // F77: the arm's anatomical model-X half-space is tied to its rig side, not its translated clavicle position.
+                bool translationInvariant = nf::ikArmOutSign(0) == -1.0 && nf::ikArmOutSign(1) == 1.0 && nf::ikArmOutSign(2) == 0.0;
+                const double shifts[] = {-0.8, -0.4, 0.0, 0.4, 0.8};
+                for (int side = 0; side < 2 && translationInvariant; ++side) {
+                    const double out = nf::ikArmOutSign(side);
+                    const double baseS[3] = {out * 0.3, 1.4, 0.0}, baseT[3] = {out * 0.3, 1.4, 0.4};
+                    const double hint[3] = {out, -0.2, 0.0};
+                    const nf::IkTwoBone base = nf::ikTwoBoneFrame(baseS, baseT, lU, lF, hint);
+                    nf::IkPhysicalPole preferred;
+                    preferred.valid = base.ok && nf::ikElbowRadial(base, 0.0, preferred.reference);
+                    if (!preferred.valid) { translationInvariant = false; break; }
+                    std::memcpy(preferred.axis, base.dir, sizeof(preferred.axis));
+                    std::memcpy(preferred.previous, preferred.reference, sizeof(preferred.previous));
+                    const auto firstChoice = nf::ikStableSwivel(base, preferred, out, 0.06);
+                    double firstE[3] = {};
+                    if (!firstChoice.ok || firstChoice.violation > 1e-8) { translationInvariant = false; break; }
+                    base.elbowAt(firstChoice.theta, firstE);
+                    bool oldAbsoluteRuleFlipped = false;
+                    for (double shift : shifts) {
+                        double S[3] = {baseS[0] + shift, baseS[1], baseS[2]}, T[3] = {baseT[0] + shift, baseT[1], baseT[2]};
+                        const double translatedClavicleX = out * 0.3 + shift;
+                        oldAbsoluteRuleFlipped = oldAbsoluteRuleFlipped || ((translatedClavicleX >= 0.0 ? 1.0 : -1.0) != out);
+                        const nf::IkTwoBone translated = nf::ikTwoBoneFrame(S, T, lU, lF, hint);
+                        const auto choice = nf::ikStableSwivel(translated, preferred, out, 0.06);
+                        double E[3] = {};
+                        if (!choice.ok || choice.violation > 1e-8) { translationInvariant = false; break; }
+                        translated.elbowAt(choice.theta, E);
+                        const double dx = E[0] - S[0] - (firstE[0] - baseS[0]);
+                        const double dy = E[1] - S[1] - (firstE[1] - baseS[1]);
+                        const double dz = E[2] - S[2] - (firstE[2] - baseS[2]);
+                        if (std::sqrt(dx * dx + dy * dy + dz * dz) > 1e-8 || nf::ikElbowOutOf(E, S, out) < 0.06 - 1e-9 || E[1] > S[1] + 1e-9)
+                            translationInvariant = false;
+                    }
+                    translationInvariant = translationInvariant && oldAbsoluteRuleFlipped;
+                }
+                check(translationInvariant,
+                      "F77: translating either arm through model X zero preserves its side, feasible elbow pose, and outward/below constraints");
                 // The ADS blend: 0.15 s in (14 frames at 90 Hz, half at 0.075 s) and out; the gate relaxes from 0.35..0.8 m to 0.6..1.2 m;
                 // the sliders lerp; a NaN slider takes its default.
                 nf::IkBlend ab{0.0f, nf::kIkAdsRampSec};

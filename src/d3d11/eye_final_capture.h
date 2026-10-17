@@ -24,7 +24,7 @@ struct Image {
     const char* status="not_reached";
     bool writable()const{return staging&&!strcmp(status,"copied");}
 };
-struct Row { uint32_t scene=0,epoch=0; bool scheduled=false; Image eye[2]; };
+struct Row { uint32_t scene=0,renderFrame=0,epoch=0; bool scheduled=false; Image eye[2]; };
 inline unsigned pixelBytes(DXGI_FORMAT f) {
     switch(f) {
     case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
@@ -56,12 +56,13 @@ struct Run {
         *this=Run{};
     }
     void arm(){reset();armed=true;}
-    void schedule(unsigned index,uint32_t epoch,uint32_t scene) {
+    void schedule(unsigned index,uint32_t epoch,uint32_t scene,uint32_t renderFrame) {
         if(!armed||index>=Count)return;
         if(rows[index].scheduled){++duplicates;return;}
-        rows[index].scheduled=true;rows[index].scene=scene;rows[index].epoch=epoch;
+        rows[index].scheduled=true;rows[index].scene=scene;rows[index].renderFrame=renderFrame;rows[index].epoch=epoch;
         count=(std::max)(count,index+1);
     }
+    void schedule(unsigned index,uint32_t epoch,uint32_t scene){schedule(index,epoch,scene,scene);}
     void schedule(unsigned index,uint32_t scene){schedule(index,scene,scene);}
     int find(uint32_t epoch) const {
         if(!armed)return -1;
