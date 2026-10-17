@@ -1299,14 +1299,14 @@ struct IkPoseDeviationSample {
     uint32_t frame = 0, item = 0, generation = 0, fpGeneration = 0, fpAgeMs = 0, gAgeMs = 0;
     bool fresh = false, offInputValid = false, offWithinDistance = false, offSteady = false, offQualified = false, offAllowed = false, offTwo = false;
     bool offDuplicate = false, offGapReset = false, offIdentityReset = false, offReversed = false;
-    bool leftWrote = false, rightWrote = false, leftStablePolicy = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false;
+    bool leftWrote = false, rightWrote = false, leftStablePolicy = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
     uint8_t targetMode[2] = {}, leftReason = 0, offHistorySamples = 0;
     bool valid[2] = {}, radialValid[2] = {};
     double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
     double preferred[2][3] = {}, axis[2][3] = {}, radial[2][3] = {};
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
     double offDistanceM = 0.0, offChangeDeg = 0.0, offRawWeight = 0.0, offEffectiveWeight = 0.0, leftSolveWeight = 0.0, supportBlend = 0.0;
-    double reachRadiusM[2] = {}, pinReach[3] = {};
+    double reachRadiusM[2] = {}, reachCandidate[3] = {}, pinReach[3] = {};
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};
@@ -1357,7 +1357,7 @@ struct IkPoseDeviationTracker {
         if (sampleFresh && contiguous) {
             triggered = triggered || sample.offTwo != last.offTwo || sample.leftStablePolicy != last.leftStablePolicy ||
                         sample.leftWrote != last.leftWrote || sample.supportRequested != last.supportRequested || sample.supportValid != last.supportValid || sample.targetMode[0] != last.targetMode[0] ||
-                        sample.targetMode[1] != last.targetMode[1] || sample.reachActive != last.reachActive;
+                        sample.targetMode[1] != last.targetMode[1] || sample.reachActive != last.reachActive || sample.reachRejected != last.reachRejected;
             for (int side = 0; side < 2 && !triggered; ++side) {
                 if (!sample.valid[side] || !last.valid[side]) continue;
                 const double shoulderDelta[3] = {sample.shoulder[side][0] - last.shoulder[side][0], sample.shoulder[side][1] - last.shoulder[side][1],
@@ -1572,6 +1572,10 @@ inline double ikElbowOutClampCm(double v) noexcept {
 inline void ikXform(const float p[3], const float M[16], double out[3]) noexcept {
     for (int c = 0; c < 3; ++c)
         out[c] = static_cast<double>(p[0]) * M[c] + static_cast<double>(p[1]) * M[4 + c] + static_cast<double>(p[2]) * M[8 + c] + M[12 + c];
+}
+inline void ikXform(const double p[3], const float M[16], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c)
+        out[c] = p[0] * M[c] + p[1] * M[4 + c] + p[2] * M[8 + c] + M[12 + c];
 }
 // (1) The FP pole: true and `pole` the unit part of unit(E - S) across the axis T - S when that part is at least kIkPoleMinPerp; false (pole
 // untouched) for a nearly straight arm or a degenerate input.
@@ -2781,6 +2785,13 @@ inline bool reachLimitDelta(const double v[2][3], const double R[2], const bool 
     delta[2] = best[1];
     return delta[0] != 0.0 || delta[2] != 0.0;
 }
+// The midpoint returned by reachLimitDelta when arm disks do not intersect is a diagnostic compromise, not a shared body pose that satisfies both
+// constraints. Preserve it for reporting, but apply no shared body shift unless the common set is feasible.
+inline bool reachLimitDeltaFeasibleOnly(const double v[2][3], const double R[2], const bool have[2], double candidate[3], double applied[3], bool* feasible) noexcept {
+    const bool active = reachLimitDelta(v, R, have, candidate, feasible);
+    for (int i = 0; i < 3; ++i) applied[i] = *feasible ? candidate[i] : 0.0;
+    return active;
+}
 
 // ---- F66e: ADS, the rendered eyes --------------------------------------------------------------------------------------------------------
 // The F65 flight (log 092626): the lock's model of the right eye, E_R = the job camera + 0.0303 m along the FP root's right, closes on itself:
@@ -3298,6 +3309,74 @@ inline bool adsOpticBasis(const float p14[16], const float froot[16], AdsOpticBa
     out.pitchDeg = std::asin(upDot) * 180.0 / kIkPi;
     out.valid = std::isfinite(out.yawDeg) && std::isfinite(out.pitchDeg);
     return out.valid;
+}
+// F79: measured rendered-optic anchor for the laser assault rifle only. It is the mean of 43 fresh joint-51 samples;
+// the transverse-shift plausibility envelope is half the measured optic quad width and rejects all captured pistol rows.
+// This is not proof of the clear-glass aperture or every unseen weapon transition.
+constexpr double kAdsRifleAnchor51[3] = {0.00361396145, 0.13115042061, 0.07047338225};
+constexpr double kAdsRifleAnchorQuadHalfWidthM = 0.02217773348093033;
+constexpr char kAdsRifleOpticItemName[] = "$wpn_m_assaultrifle_laser_fauto_name;";
+inline bool adsRifleOpticItemMatches(const char* name) noexcept { return name && std::strcmp(name, kAdsRifleOpticItemName) == 0; }
+inline bool adsRifleOpticItemSnapshotMatches(bool readOk, uint32_t snapshotSerial, uint32_t currentSerial, const char* name) noexcept {
+    return readOk && snapshotSerial == currentSerial && adsRifleOpticItemMatches(name);
+}
+enum AdsRifleAnchorRefusal : uint8_t { kAdsRifleAnchorNone = 0, kAdsRifleAnchorItem, kAdsRifleAnchorFrame, kAdsRifleAnchorMatrix, kAdsRifleAnchorGeometry };
+struct AdsRifleAnchorResult {
+    bool applied = false;
+    AdsRifleAnchorRefusal refusal = kAdsRifleAnchorItem;
+    double rawOrigin[3] = {}, origin[3] = {}, anchorWorld[3] = {}, shift[3] = {}, spanM = 0.0, transverseResidualM = 0.0;
+};
+inline AdsRifleAnchorResult adsRifleOpticOrigin(bool coherentRifleItem, bool sameRenderFrame, const float p14[16], const float joint51[16],
+                                                const float joint52[16], const float froot[16]) noexcept {
+    AdsRifleAnchorResult out;
+    if (!coherentRifleItem) { out.refusal = kAdsRifleAnchorItem; return out; }
+    if (!sameRenderFrame) { out.refusal = kAdsRifleAnchorFrame; return out; }
+    AdsOpticBasis basis;
+    if (!adsOpticBasis(p14, froot, basis) || !adsOpticBasis(joint51, froot, basis) || !adsOpticBasis(joint52, froot, basis)) {
+        out.refusal = kAdsRifleAnchorMatrix;
+        return out;
+    }
+    const double p14Local[3] = {p14[12], p14[13], p14[14]};
+    const double joint51Local[3] = {joint51[12], joint51[13], joint51[14]};
+    double p14World[3], joint51World[3], f[3] = {froot[8], froot[9], froot[10]};
+    ikXform(p14Local, froot, p14World);
+    ikXform(joint51Local, froot, joint51World);
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(p14World[i]) || !std::isfinite(joint51World[i]) || !std::isfinite(joint52[12 + i])) {
+            out.refusal = kAdsRifleAnchorMatrix;
+            return out;
+        }
+        out.rawOrigin[i] = p14World[i];
+        out.origin[i] = p14World[i];
+    }
+    const double attachDelta[3] = {static_cast<double>(joint51[12]) - joint52[12], static_cast<double>(joint51[13]) - joint52[13],
+                                   static_cast<double>(joint51[14]) - joint52[14]};
+    out.spanM = ikLen(attachDelta);
+    if (!std::isfinite(out.spanM)) { out.refusal = kAdsRifleAnchorMatrix; return out; }
+    if (!ikUnit(f, f)) { out.refusal = kAdsRifleAnchorMatrix; return out; }
+    double anchorModel[3];
+    ikXform(kAdsRifleAnchor51, joint51, anchorModel);
+    ikXform(anchorModel, froot, out.anchorWorld);
+    if (!std::isfinite(p14World[0]) || !std::isfinite(p14World[1]) || !std::isfinite(p14World[2]) || !std::isfinite(out.anchorWorld[0]) ||
+        !std::isfinite(out.anchorWorld[1]) || !std::isfinite(out.anchorWorld[2])) {
+        out.refusal = kAdsRifleAnchorMatrix;
+        return out;
+    }
+    const double delta[3] = {out.anchorWorld[0] - p14World[0], out.anchorWorld[1] - p14World[1], out.anchorWorld[2] - p14World[2]};
+    const double along = ikDot(delta, f);
+    for (int i = 0; i < 3; ++i) {
+        out.shift[i] = delta[i] - f[i] * along;
+        out.origin[i] = p14World[i] + out.shift[i];
+    }
+    out.transverseResidualM = ikLen(out.shift);
+    if (!std::isfinite(out.transverseResidualM) || out.transverseResidualM > kAdsRifleAnchorQuadHalfWidthM) {
+        out.origin[0] = p14World[0]; out.origin[1] = p14World[1]; out.origin[2] = p14World[2];
+        out.refusal = kAdsRifleAnchorGeometry;
+        return out;
+    }
+    out.applied = true;
+    out.refusal = kAdsRifleAnchorNone;
+    return out;
 }
 // The NDC of the point p + dist * (the unit of f) in an eye's scene rows (row-vector form, clip = (p - o) . rows[0..11] + rows[12..15]). False when
 // the point is behind the eye or f is degenerate. P14 itself sits behind the right eye (F66: w < 0), so the sight is sampled in front of it.
@@ -4627,6 +4706,59 @@ inline bool supportPalmFrame(const float rightPalm[16], int rightPalmarSign, int
     for (int i = 0; i < 3; ++i) distal[i] -= radialPart * radial[i];
     if (!ikUnit(distal, distal)) return false;
     double normal[3] = {leftPalmarSign * radial[0], leftPalmarSign * radial[1], leftPalmarSign * radial[2]}, side[3];
+    ikCross(normal, distal, side);
+    if (!ikUnit(side, side)) return false;
+    pfzIdentity(out);
+    for (int i = 0; i < 3; ++i) {
+        out[i] = static_cast<float>(distal[i]); out[4 + i] = static_cast<float>(side[i]); out[8 + i] = static_cast<float>(normal[i]);
+        out[12 + i] = static_cast<float>(contact.centre[i]);
+    }
+    return ikOrthonormalise(out);
+}
+// Select the measured weapon-side edge of the two-hand support contact. The right attachment identifies which radial side faces the weapon;
+// this keeps the contact side stable across model/weapon basis conventions and rigid transforms.
+inline bool supportWeaponSideContact(const float rightContact[16], const float rightAttach[16], double length, double width, double rightRadius,
+                                    double leftRadius, double gap, int* radialSide, SupportPalmTarget& contact, double* attachSideM = nullptr) noexcept {
+    contact = SupportPalmTarget{};
+    if (!rightContact || !rightAttach || !radialSide || !(length > 0.0) || !(width > 0.0) || !(rightRadius >= 0.0) || !(leftRadius >= 0.0) ||
+        !(gap >= 0.0) || !std::isfinite(length) || !std::isfinite(width) || !std::isfinite(rightRadius) || !std::isfinite(leftRadius) || !std::isfinite(gap)) return false;
+    double radial[3] = {rightContact[4], rightContact[5], rightContact[6]};
+    double distal[3] = {rightContact[0], rightContact[1], rightContact[2]};
+    if (!ikUnit(radial, radial) || !ikUnit(distal, distal)) return false;
+    const double k2[3] = {rightContact[12] + distal[0] * length * 0.5, rightContact[13] + distal[1] * length * 0.5,
+                          rightContact[14] + distal[2] * length * 0.5};
+    const double attachFromK2[3] = {rightAttach[12] - k2[0], rightAttach[13] - k2[1], rightAttach[14] - k2[2]};
+    const double signedSide = ikDot(attachFromK2, radial);
+    if (!std::isfinite(signedSide) || std::fabs(signedSide) < 1e-6) return false;
+    const int side = signedSide > 0.0 ? 1 : -1;
+    PalmPatch patch;
+    for (int i = 0; i < 3; ++i) {
+        patch.heel[i] = k2[i] + side * radial[i] * width * 0.5;
+        patch.thumb[i] = -side * radial[i];
+        patch.normal[i] = -side * radial[i]; // cupUnderHeel subtracts this; negative normal moves the palm toward the weapon-side edge.
+    }
+    patch.halfThickness = rightRadius;
+    patch.ok = true;
+    contact = cupUnderHeel(patch, leftRadius, gap);
+    if (!contact.ok) return false;
+    *radialSide = side;
+    if (attachSideM) *attachSideM = signedSide;
+    return true;
+}
+inline bool supportPalmFrame(const float rightPalm[16], int rightPalmarSign, int leftPalmarSign, int radialSide, const SupportPalmTarget& contact,
+                             float out[16]) noexcept {
+    if (!rightPalm || !out || !contact.ok || (rightPalmarSign != -1 && rightPalmarSign != 1) || (leftPalmarSign != -1 && leftPalmarSign != 1) ||
+        (radialSide != -1 && radialSide != 1)) return false;
+    double radial[3] = {radialSide * static_cast<double>(rightPalm[4]), radialSide * static_cast<double>(rightPalm[5]),
+                        radialSide * static_cast<double>(rightPalm[6])};
+    double physicalNormal[3] = {rightPalmarSign * static_cast<double>(rightPalm[8]), rightPalmarSign * static_cast<double>(rightPalm[9]),
+                                rightPalmarSign * static_cast<double>(rightPalm[10])};
+    if (!ikUnit(radial, radial) || !ikUnit(physicalNormal, physicalNormal)) return false;
+    double distal[3] = {-physicalNormal[0], -physicalNormal[1], -physicalNormal[2]};
+    const double radialPart = ikDot(distal, radial);
+    for (int i = 0; i < 3; ++i) distal[i] -= radialPart * radial[i];
+    if (!ikUnit(distal, distal)) return false;
+    double normal[3] = {-leftPalmarSign * radial[0], -leftPalmarSign * radial[1], -leftPalmarSign * radial[2]}, side[3];
     ikCross(normal, distal, side);
     if (!ikUnit(side, side)) return false;
     pfzIdentity(out);

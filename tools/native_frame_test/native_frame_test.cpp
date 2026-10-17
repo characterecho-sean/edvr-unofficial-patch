@@ -1721,6 +1721,14 @@ int wmain(int argc, wchar_t** argv) {
                 check(policyEdgeCaptured && duplicateIgnoredAuthority && qualificationOnlyRows == 0 && identityRows == 1 && events[0].offset == 0 && events[0].sample.offIdentityReset && identityDetector.gaps == 1,
                       "F78: policy edges capture write/authority fields, raw qualification changes alone do not consume events, duplicate P1 samples cannot replace them, and FP rig identity changes reset continuity");
 
+                nf::IkPoseDeviationTracker reachRejectDetector;
+                pose = {}; pose.fresh = true; pose.item = 7; pose.generation = 3; pose.fpAgeMs = 10; pose.gAgeMs = 10;
+                pose.frame = 1; pose.qpc = 10; reachRejectDetector.step(pose, 1000, events);
+                pose.frame = 2; pose.qpc = 20; pose.reachMeasured = true; pose.reachActive = true; pose.reachInfeasible = true; pose.reachRejected = true;
+                const int reachRejectRows = reachRejectDetector.step(pose, 1000, events);
+                check(reachRejectRows == 2 && events[1].offset == 0 && events[1].sample.reachMeasured && events[1].sample.reachRejected,
+                      "F79: the first infeasible-correction rejection creates a bounded policy event with measured/rejected status");
+
                 nf::IkPoseDeviationTracker capDetector;
                 pose = {}; pose.fresh = true; pose.generation = 1; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
                 uint32_t frame = 0; uint64_t qpc = 0; bool started = false;
@@ -2839,6 +2847,54 @@ int wmain(int argc, wchar_t** argv) {
                 check(actBoth && feasBoth && len3(bL) <= R[0] + 1e-9 && len3(bR) <= R[1] + 1e-9 && dBoth[1] == 0.0 && feasOne &&
                           std::fabs(len3(oL) - R[0]) < 1e-6,
                       "F65a: with both shoulders out of reach the correction satisfies both; with one arm measured, its own disk");
+            }
+            // F79: the infeasible midpoint is useful evidence but cannot make contradictory arm targets reachable. Keep the body pin fixed
+            // and let each two-bone solve clamp its own hand target; feasible one- and two-arm corrections still apply unchanged.
+            {
+                const auto closeTo = [](double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= eps; };
+                const auto zero3 = [&](const double v[3]) { return closeTo(v[0], 0.0) && closeTo(v[1], 0.0) && closeTo(v[2], 0.0); };
+                const double syntheticConflict[2][3] = {{0.0, 0.0, 0.693}, {0.0, 0.0, -1.307}};
+                const double syntheticR[2] = {0.949, 0.573};
+                const bool both[2] = {true, true};
+                double rejectedCandidate[3] = {}, rejectedApplied[3] = {};
+                bool rejectedFeasible = true;
+                const bool rejectedActive = nf::reachLimitDeltaFeasibleOnly(syntheticConflict, syntheticR, both, rejectedCandidate, rejectedApplied, &rejectedFeasible);
+                check(rejectedActive && !rejectedFeasible && closeTo(rejectedCandidate[0], 0.0) && closeTo(rejectedCandidate[1], 0.0) &&
+                          closeTo(rejectedCandidate[2], 0.495) && zero3(rejectedApplied),
+                      "F79: synthetic disjoint disks using captured radii produce the logged 49.5 cm midpoint candidate, which is reported and rejected");
+
+                const double verticalImpossible[2][3] = {{0.2, 0.8, 0.0}, {0.0, 0.0, 0.0}};
+                const double shortR[2] = {0.5, 0.5};
+                const bool leftOnly[2] = {true, false};
+                double verticalCandidate[3] = {}, verticalApplied[3] = {};
+                bool verticalFeasible = true;
+                const bool verticalActive = nf::reachLimitDeltaFeasibleOnly(verticalImpossible, shortR, leftOnly, verticalCandidate, verticalApplied, &verticalFeasible);
+                check(verticalActive && !verticalFeasible && closeTo(verticalCandidate[0], -0.2) && zero3(verticalApplied),
+                      "F79: an arm whose vertical gap alone exceeds reach reports its futile horizontal candidate but applies no body shift");
+
+                const double singleV[2][3] = {{0.7, 0.0, 0.0}, {-0.7, 0.0, 0.0}};
+                const double singleR[2] = {0.6, 0.6};
+                double leftCandidate[3] = {}, leftApplied[3] = {}, rightCandidate[3] = {}, rightApplied[3] = {};
+                bool leftFeasible = false, rightFeasible = false;
+                const bool rightOnly[2] = {false, true};
+                const bool leftActive = nf::reachLimitDeltaFeasibleOnly(singleV, singleR, leftOnly, leftCandidate, leftApplied, &leftFeasible);
+                const bool rightActive = nf::reachLimitDeltaFeasibleOnly(singleV, singleR, rightOnly, rightCandidate, rightApplied, &rightFeasible);
+                check(leftActive && leftFeasible && closeTo(leftCandidate[0], -0.1) && closeTo(leftApplied[0], -0.1) &&
+                          rightActive && rightFeasible && closeTo(rightCandidate[0], 0.1) && closeTo(rightApplied[0], 0.1),
+                      "F79: feasible one-arm reach corrections apply for either anatomical side");
+
+                const double overlap[2][3] = {{0.7, 0.0, 0.0}, {-0.4, 0.0, 0.0}};
+                double overlapCandidate[3] = {}, overlapApplied[3] = {};
+                bool overlapFeasible = false;
+                const bool overlapActive = nf::reachLimitDeltaFeasibleOnly(overlap, singleR, both, overlapCandidate, overlapApplied, &overlapFeasible);
+                const double rotated[2][3] = {{0.0, 0.0, 0.7}, {0.0, 0.0, -0.4}};
+                double rotatedCandidate[3] = {}, rotatedApplied[3] = {};
+                bool rotatedFeasible = false;
+                const bool rotatedActive = nf::reachLimitDeltaFeasibleOnly(rotated, singleR, both, rotatedCandidate, rotatedApplied, &rotatedFeasible);
+                check(overlapActive && overlapFeasible && closeTo(overlapCandidate[0], -0.1) && closeTo(overlapApplied[0], -0.1) &&
+                          rotatedActive && rotatedFeasible && closeTo(rotatedCandidate[0], 0.0) && closeTo(rotatedCandidate[2], -0.1) &&
+                          closeTo(rotatedApplied[2], -0.1),
+                      "F79: feasible common reach preserves the correction under a 90-degree body-axis rotation");
             }
             // F65b (F67c: the stand height and its cap are gone): the legs' chains on the real 3P parents (the F64 log), the upper body, the leg solve.
             {
@@ -4219,6 +4275,75 @@ int wmain(int argc, wchar_t** argv) {
                       "F70b: a post-action journal sample after the 1.5 s grace vetoes a rejected held action until logical release");
                 check(opticOk && opticTranslationInvariant && opticDegenerateRefused && std::fabs(opticRot.yawDeg - 30.0) < 1e-4,
                       "F70c: joint 14's full rigid basis composes with root rotation, root translation cannot alter directions, and degenerate basis is refused");
+                {
+                    const float rifle51[16] = {1.000000119f, -0.000128559768f, 0.000163342338f, 0, 0.000128652901f, 0.999999821f, 0.000350989401f, 0,
+                                               -0.000163567252f, -0.000351212918f, 1.000000238f, 0, -0.000151023269f, -0.134648457f, 0.260953605f, 1};
+                    const float rifleRoot[16] = {-0.508981764f, 0.487074763f, 0.709715366f, 0, 0.571072876f, -0.425843567f, 0.701807201f, 0,
+                                                 0.644060254f, 0.762506127f, -0.0614085943f, 0, -18.481029388f, 48.807460657f, 45.268551693f, 1};
+                    const double rifleP14World[3] = {-18.4810581, 48.8074646, 45.268589};
+                    const double rifleAnchorWorld[3] = {-18.271319295488418, 49.063396517151745, 45.24818181448366};
+                    const auto makeP14AtWorld = [](const float root[16], const double world[3], float p14[16]) {
+                        float invRoot[16], worldPoint[3] = {static_cast<float>(world[0]), static_cast<float>(world[1]), static_cast<float>(world[2])};
+                        if (!nf::pfzAffineInverse(root, invRoot)) return false;
+                        double local[3]; nf::ikXform(worldPoint, invRoot, local);
+                        nf::pfzIdentity(p14);
+                        for (int i = 0; i < 3; ++i) p14[12 + i] = static_cast<float>(local[i]);
+                        return true;
+                    };
+                    float rifleP14[16], rifle52[16];
+                    const bool rifleP14Built = makeP14AtWorld(rifleRoot, rifleP14World, rifleP14);
+                    std::memcpy(rifle52, rifle51, sizeof(rifle52)); rifle52[12] += 0.345f;
+                    const bool rifleNameAndSerial = nf::adsRifleOpticItemSnapshotMatches(true, 42, 42, nf::kAdsRifleOpticItemName) &&
+                                                    !nf::adsRifleOpticItemSnapshotMatches(false, 42, 42, nf::kAdsRifleOpticItemName) &&
+                                                    !nf::adsRifleOpticItemSnapshotMatches(true, 42, 43, nf::kAdsRifleOpticItemName) &&
+                                                    !nf::adsRifleOpticItemSnapshotMatches(true, 42, 42, "$wpn_m_pistol_name;");
+                    const auto rifleAnchor = nf::adsRifleOpticOrigin(rifleNameAndSerial, true, rifleP14, rifle51, rifle52, rifleRoot);
+                    const double expectedAnchorErr[3] = {rifleAnchor.anchorWorld[0] - rifleAnchorWorld[0], rifleAnchor.anchorWorld[1] - rifleAnchorWorld[1],
+                                                         rifleAnchor.anchorWorld[2] - rifleAnchorWorld[2]};
+                    const double rifleForward[3] = {rifleRoot[8], rifleRoot[9], rifleRoot[10]};
+                    const bool capturedAnchorMatches = rifleP14Built && rifleAnchor.applied && nf::ikLen(expectedAnchorErr) < 0.00002 &&
+                                                       std::fabs(nf::ikDot(rifleAnchor.shift, rifleForward)) < 1e-6 && rifleAnchor.spanM > 0.20;
+                    float rootXform[16], rifleRootMoved[16]; nf::pfzIdentity(rootXform);
+                    rootXform[0] = 0; rootXform[2] = 1; rootXform[8] = -1; rootXform[10] = 0;
+                    rootXform[12] = 3.4f; rootXform[13] = -1.7f; rootXform[14] = 2.2f;
+                    nf::pfzMul(rifleRoot, rootXform, rifleRootMoved);
+                    const auto movedAnchor = nf::adsRifleOpticOrigin(true, true, rifleP14, rifle51, rifle52, rifleRootMoved);
+                    double expectedMovedOrigin[3]; nf::ikXform(rifleAnchor.origin, rootXform, expectedMovedOrigin);
+                    const double covarianceError[3] = {movedAnchor.origin[0] - expectedMovedOrigin[0], movedAnchor.origin[1] - expectedMovedOrigin[1],
+                                                       movedAnchor.origin[2] - expectedMovedOrigin[2]};
+                    const double k = 0.15;
+                    const double targetWithK[3] = {rifleAnchor.origin[0] + k * rifleForward[0], rifleAnchor.origin[1] + k * rifleForward[1],
+                                                   rifleAnchor.origin[2] + k * rifleForward[2]};
+                    const double originToTarget[3] = {targetWithK[0] - rifleAnchor.rawOrigin[0], targetWithK[1] - rifleAnchor.rawOrigin[1],
+                                                       targetWithK[2] - rifleAnchor.rawOrigin[2]};
+                    const auto staleFrame = nf::adsRifleOpticOrigin(true, false, rifleP14, rifle51, rifle52, rifleRoot);
+                    const auto wrongItem = nf::adsRifleOpticOrigin(false, true, rifleP14, rifle51, rifle52, rifleRoot);
+                    float badJoint[16]; std::memcpy(badJoint, rifle51, sizeof(badJoint)); badJoint[8] = badJoint[9] = badJoint[10] = 0.0f;
+                    const auto invalidMatrix = nf::adsRifleOpticOrigin(true, true, rifleP14, badJoint, rifle52, rifleRoot);
+                    rifle52[12] += 0.7f;
+                    const bool wideSpanStillAccepted = nf::adsRifleOpticOrigin(true, true, rifleP14, rifle51, rifle52, rifleRoot).applied;
+                    check(rifleNameAndSerial && capturedAnchorMatches && movedAnchor.applied && nf::ikLen(covarianceError) < 2e-5 &&
+                              std::fabs(nf::ikDot(originToTarget, rifleForward) - k) < 1e-6 && staleFrame.refusal == nf::kAdsRifleAnchorFrame &&
+                              wrongItem.refusal == nf::kAdsRifleAnchorItem && invalidMatrix.refusal == nf::kAdsRifleAnchorMatrix && wideSpanStillAccepted,
+                          "F79: coherent laser-rifle identity applies the captured joint-51 anchor immediately, preserves sight depth, is rigid-transform covariant, and fails closed on stale frames or invalid matrices without a narrow span gate");
+
+                    const float pistol51[16] = {0.999991655f, 0.00251052529f, 0.00333291292f, 0, -0.00246676058f, 0.999912620f, -0.0130088180f, 0,
+                                                -0.00336523354f, 0.0130006373f, 0.999910057f, 0, 0.0538398959f, -0.132316306f, 0.399246603f, 1};
+                    const float pistolRoot[16] = {-0.524331033f, 0.470017195f, 0.710042834f, 0, 0.553824186f, -0.445155174f, 0.703644633f, 0,
+                                                  0.646804333f, 0.762181639f, -0.0268982630f, 0, -18.433284755f, 48.871660081f, 45.263665859f, 1};
+                    const double pistolP14World[3] = {-18.4332886, 48.8716583, 45.2636642};
+                    float pistolP14[16], pistol52[16];
+                    const bool pistolP14Built = makeP14AtWorld(pistolRoot, pistolP14World, pistolP14);
+                    std::memcpy(pistol52, pistol51, sizeof(pistol52)); pistol52[12] += 0.056f;
+                    const auto wrongRifleProfile = nf::adsRifleOpticOrigin(true, true, pistolP14, pistol51, pistol52, pistolRoot);
+                    const double pistolFallbackDelta[3] = {wrongRifleProfile.origin[0] - wrongRifleProfile.rawOrigin[0],
+                                                           wrongRifleProfile.origin[1] - wrongRifleProfile.rawOrigin[1],
+                                                           wrongRifleProfile.origin[2] - wrongRifleProfile.rawOrigin[2]};
+                    check(pistolP14Built && !wrongRifleProfile.applied && wrongRifleProfile.refusal == nf::kAdsRifleAnchorGeometry &&
+                              wrongRifleProfile.transverseResidualM > nf::kAdsRifleAnchorQuadHalfWidthM &&
+                              std::fabs(wrongRifleProfile.transverseResidualM - 0.05689369838677318) < 0.0002 && nf::ikLen(pistolFallbackDelta) < 1e-6,
+                          "F79: the captured pistol pose rejects the rifle anchor by measured quad-half-width plausibility and falls back to raw P14 on the first frame");
+                }
                 {
                     namespace nf = edvr::nofoot;
                     uint8_t site[nf::kWeaponUiVerifyLen];
@@ -5709,6 +5834,79 @@ int wmain(int argc, wchar_t** argv) {
         for (int i = 0; i < 16; ++i) fullContactMatches = fullContactMatches && std::fabs(expectedContactR[i] - worldContactR[i]) < 2e-5f;
         check(contactLocalOk && fullContactMatches && std::fabs(k2PlaneError) < 2e-5 && std::fabs(k2UlnarEdge + k2Right.width * 0.5) < 2e-5 && k2Cup.ok && k2Cup.gap >= 0.002 && leftConverges && worldPoseMatches,
               "F76: nonidentity wrist and root transforms carry the support anchor to the mean-K2 plane and preserve its ulnar edge, gap, left contact solve, and old palm retargeting");
+
+        // F79 pistol capture 101251/render 23174: choose the radial edge that faces the right attach, then reverse the left palm's stored normal
+        // with the selected side. Expected full matrix is copied from the captured contact reconstruction, independent of the production helper.
+        {
+            const float capturedRightContact[16] = {0.170649183f, 0.219062936f, 0.960671816f, 0, -0.681663757f, 0.730253798f, -0.0454330051f, 0,
+                                                    -0.711486985f, -0.647101931f, 0.273944394f, 0, 0.0900023537f, 1.402742294f, 0.764211908f, 1};
+            const float capturedRightAttach[16] = {0.999762566f, 0.00240998559f, -0.0216761521f, 0, -0.00205116228f, 0.999861000f, 0.0165578879f, 0,
+                                                   0.0217130158f, -0.0165095561f, 0.999628046f, 0, 0.0637362108f, 1.4501829999f, 0.8186944430f, 1};
+            const float expectedLeftTarget[16] = {0.711486985f, 0.647101931f, -0.273944394f, 0, -0.170649183f, -0.219062936f, -0.960671816f, 0,
+                                                  -0.681663757f, 0.730253798f, -0.0454330051f, 0, 0.0680081356f, 1.440526773f, 0.796341832f, 1};
+            const double length = 0.07078039101358251, width = 0.047782718970184795, rightRad = 0.007623633225238461, leftRad = 0.007610159949712035;
+            int radialSide = 0; double attachSide = 0.0; edvr::nofoot::SupportPalmTarget weaponSideContact;
+            const bool selected = edvr::nofoot::supportWeaponSideContact(capturedRightContact, capturedRightAttach, length, width, rightRad, leftRad,
+                                                                         0.002, &radialSide, weaponSideContact, &attachSide);
+            float capturedLeftTarget[16];
+            const bool basis = selected && edvr::nofoot::supportPalmFrame(capturedRightContact, 1, -1, radialSide, weaponSideContact, capturedLeftTarget);
+            bool targetMatches = basis;
+            for (int i = 0; i < 16; ++i) targetMatches = targetMatches && std::fabs(capturedLeftTarget[i] - expectedLeftTarget[i]) < 2e-5f;
+            const double expectedSideMm[3] = {35.3901955068, 41.12515266, 0.0};
+            const double targetDelta[3] = {weaponSideContact.centre[0] - capturedRightContact[12], weaponSideContact.centre[1] - capturedRightContact[13],
+                                           weaponSideContact.centre[2] - capturedRightContact[14]};
+            double targetLocalErr[3] = {};
+            for (int axis = 0; axis < 3; ++axis)
+                targetLocalErr[axis] = 1000.0 * (targetDelta[0] * capturedRightContact[axis * 4] + targetDelta[1] * capturedRightContact[axis * 4 + 1] +
+                                                 targetDelta[2] * capturedRightContact[axis * 4 + 2]) - expectedSideMm[axis];
+
+            float worldTurn[16], turnedRightContact[16], turnedRightAttach[16], turnedExpected[16], turnedActual[16];
+            edvr::nofoot::pfzIdentity(worldTurn); worldTurn[0] = 0; worldTurn[2] = 1; worldTurn[8] = -1; worldTurn[10] = 0;
+            worldTurn[12] = -2.1f; worldTurn[13] = 0.8f; worldTurn[14] = 1.6f;
+            edvr::nofoot::pfzMul(capturedRightContact, worldTurn, turnedRightContact);
+            edvr::nofoot::pfzMul(capturedRightAttach, worldTurn, turnedRightAttach);
+            edvr::nofoot::pfzMul(expectedLeftTarget, worldTurn, turnedExpected);
+            int turnedSide = 0; double turnedAttachSide = 0.0; edvr::nofoot::SupportPalmTarget turnedContact;
+            const bool turnedOk = edvr::nofoot::supportWeaponSideContact(turnedRightContact, turnedRightAttach, length, width, rightRad, leftRad,
+                                                                        0.002, &turnedSide, turnedContact, &turnedAttachSide) &&
+                                  edvr::nofoot::supportPalmFrame(turnedRightContact, 1, -1, turnedSide, turnedContact, turnedActual);
+            bool turnedMatches = turnedOk && turnedSide == radialSide && std::fabs(turnedAttachSide - attachSide) < 2e-5;
+            for (int i = 0; i < 16; ++i) turnedMatches = turnedMatches && std::fabs(turnedActual[i] - turnedExpected[i]) < 3e-5f;
+
+            float oppositeAttach[16]; std::memcpy(oppositeAttach, capturedRightAttach, sizeof(oppositeAttach));
+            const double k2[3] = {capturedRightContact[12] + capturedRightContact[0] * length * 0.5,
+                                  capturedRightContact[13] + capturedRightContact[1] * length * 0.5,
+                                  capturedRightContact[14] + capturedRightContact[2] * length * 0.5};
+            for (int i = 0; i < 3; ++i) oppositeAttach[12 + i] = static_cast<float>(k2[i] - 0.1 * capturedRightContact[4 + i]);
+            int oppositeSide = 0; edvr::nofoot::SupportPalmTarget oppositeContact; float oppositeTarget[16] = {};
+            const bool oppositeOk = edvr::nofoot::supportWeaponSideContact(capturedRightContact, oppositeAttach, length, width, rightRad, leftRad,
+                                                                          0.002, &oppositeSide, oppositeContact) && oppositeSide == -1 &&
+                                    edvr::nofoot::supportPalmFrame(capturedRightContact, 1, -1, oppositeSide, oppositeContact, oppositeTarget);
+            const double oppositeExpectedMm[3] = {35.3901955068, -41.12515266, 0.0};
+            const double oppositeDelta[3] = {oppositeContact.centre[0] - capturedRightContact[12], oppositeContact.centre[1] - capturedRightContact[13],
+                                             oppositeContact.centre[2] - capturedRightContact[14]};
+            double oppositeLocalErr[3] = {};
+            for (int axis = 0; axis < 3; ++axis)
+                oppositeLocalErr[axis] = 1000.0 * (oppositeDelta[0] * capturedRightContact[axis * 4] + oppositeDelta[1] * capturedRightContact[axis * 4 + 1] +
+                                                   oppositeDelta[2] * capturedRightContact[axis * 4 + 2]) - oppositeExpectedMm[axis];
+            bool oppositeBasis = oppositeOk;
+            for (int i = 0; i < 3; ++i) {
+                oppositeBasis = oppositeBasis && std::fabs(oppositeTarget[i] + capturedRightContact[8 + i]) < 3e-5f &&
+                                std::fabs(oppositeTarget[4 + i] - capturedRightContact[i]) < 3e-5f &&
+                                std::fabs(oppositeTarget[8 + i] + capturedRightContact[4 + i]) < 3e-5f;
+            }
+            float tangentAttach[16]; std::memcpy(tangentAttach, capturedRightAttach, sizeof(tangentAttach));
+            for (int i = 0; i < 3; ++i) tangentAttach[12 + i] = static_cast<float>(k2[i] + 0.2 * capturedRightContact[i]);
+            int invalidSide = 0; edvr::nofoot::SupportPalmTarget invalidContact;
+            const bool tangentRejected = !edvr::nofoot::supportWeaponSideContact(capturedRightContact, tangentAttach, length, width, rightRad, leftRad,
+                                                                                 0.002, &invalidSide, invalidContact);
+            tangentAttach[12] = std::numeric_limits<float>::quiet_NaN();
+            const bool nonfiniteRejected = !edvr::nofoot::supportWeaponSideContact(capturedRightContact, tangentAttach, length, width, rightRad, leftRad,
+                                                                                   0.002, &invalidSide, invalidContact);
+            check(selected && radialSide == 1 && attachSide > 0.050 && attachSide < 0.051 && targetMatches && edvr::nofoot::ikLen(targetLocalErr) < 0.03 &&
+                      turnedMatches && oppositeBasis && edvr::nofoot::ikLen(oppositeLocalErr) < 0.03 && tangentRejected && nonfiniteRejected,
+                  "F79: captured pistol attach selects the measured weapon-side K2 edge and palm-normal sign, rigid transforms preserve the target, opposite side remains symmetric, and tangential/invalid attach data fail closed");
+        }
 
         float Qsrc[16], QsrcParent[16], Qdst[16], QdstParent[16], D[16], invSrcParent[16], finger[16], desired[16];
         rot(Qsrc, 0, 0.27f); rot(QsrcParent, 2, -0.31f); rot(Qdst, 1, 0.52f); rot(QdstParent, 0, -0.14f); rot(D, 2, 0.42f);
