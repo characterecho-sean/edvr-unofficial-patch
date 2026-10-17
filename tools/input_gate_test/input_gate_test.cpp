@@ -1,4 +1,4 @@
-// Exercise the production hooks with distinct overlay-style COM tables,
+﻿// Exercise the production hooks with distinct overlay-style COM tables,
 // then the executable's real DirectInput import. No keys are injected.
 #include <windows.h>
 static HWND testPadForeground = nullptr;
@@ -11,7 +11,9 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <string>
+#include <vector>
 #include <thread>
 
 #include "../../src/d3d11/loaded_module_match.h"
@@ -644,10 +646,440 @@ static void pluginReleaseScanCases(Device& keyboard) {
         }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Exhaustive interleavings of the release tail's writers (issue #95). PR #92 took five review rounds, each finding one
+// more ordering of the same four writers; the hand-written blocks above pin those repros, and this enumerates the whole
+// space so the next ordering is found here and not in review.
+//
+// Model. Four writers, each on its own pooled thread, parked at deterministic yield points and advanced one step at a
+// time by a scheduler (this thread), so exactly one thread runs at any moment:
+//     C   the plugin release: inputGateSetPluginBlock(false), i.e. the production capture of the tail, then the block
+//         cleared. Steps: C.0 begins the release and runs to its sample of the yield key (inside the tail lock);
+//         C.1 resumes to the end.
+//     X   the menu's cancel: cancelReleaseTail(). One step.
+//     R1, R2  two refreshes from the Present thread and the lease tick. R1.0 runs to the entry of the refresh (the
+//         one test seam in production code, g_tailRefreshEntry: the point before the lock where a real thread can be
+//         preempted); every refresh then takes its snapshot and runs to its sample of the yield key, and finishes the
+//         scan and publishes in its last step. A refresh whose snapshot lacks the yield key has no middle step. R2 has no
+//         entry step: it may not start before R1.0 (the two are symmetric, so that halves the space, loses nothing).
+// Physical key events are schedulable too: release A and release B (A and B both start held; the tail starts as {B},
+// the earlier menu close; A is the key the plugin was holding). The tail reader the writers use is the existing seam
+// (g_tailReader / the readKey parameter), which parks the calling writer after sampling the yield key. The scenario
+// runs once with the yield key A (with the refresh-entry step) and once with B (without it, to bound the space).
+//
+// A writer blocked on the tail lock is a real state. The scheduler cannot tell from outside whether resuming a writer
+// will block (an older revision of the file does not lock the same things), so it probes: a step taken while C holds the
+// lock that does not arrive within a few milliseconds is blocked, remembered by (writer, step, C step), and the writer
+// is not scheduled again until C finishes, when it is awaited. At most one writer is blocked at a time (a second one
+// would queue behind it; the other order is covered by resuming it first). A step that never arrives otherwise is a
+// deadlock and fails the run.
+//
+// Invariants, checked in every state reached, with the game's own reads (hookGetAsyncKeyState):
+//   1 no retired key is resurrected: a refresh or cancel step never raises the cover of a key, and a key a refresh
+//     retired is not covered again before the next capture.
+//   2 an observed release is not lost: a refresh that sampled a key released and was not superseded by a capture or a
+//     cancel since its snapshot leaves that key uncovered once it has published.
+//   3 a key held at capture and still held stays covered: the game reads it up from the start of the release (block)
+//     through the end of it (the tail), until it is physically released.
+//   4 after a cancel that follows the capture, nothing is covered.
+//   5 once every key is released a refresh leaves nothing covered (the tail cannot strand).
+namespace tailsched {
+constexpr int kKeys = 2;
+constexpr int kKeyVk[kKeys] = {'A', 'B'};
+constexpr int kProbeMs = 15;
+constexpr int kLongWaitMs = 5000;
+enum { kC = 0, kX = 1, kR1 = 2, kR2 = 3, kWriters = 4, kRelA = 4, kRelB = 5 };
+const char* const kWriterName[kWriters] = {"release", "cancel", "refresh1", "refresh2"};
+
+struct Worker {
+    int id = 0;
+    HANDLE go = nullptr;
+    HANDLE arrived = nullptr;
+    std::thread thread;
+    std::atomic<bool> quit{false};
+    std::atomic<bool> bodyDone{false};
+    std::function<void()> body;
+    // scheduler-owned
+    bool started = false, blocked = false, finished = false;
+    int step = 0;
+    bool entryYield = false;   // park at the refresh's entry (the test seam g_tailRefreshEntry)
+    bool snapped = false;      // the refresh has taken its snapshot: it has begun sampling keys
+    bool sampledUp[256]{};
+    unsigned superseded = 0;   // captures begun plus cancels done, as of the snapshot
+};
+thread_local Worker* tlWorker = nullptr;
+const unsigned* g_superCount = nullptr;
+int g_yieldVk = 'A';
+std::atomic<bool> g_deadlock{false};
+
+SHORT WINAPI schedKey(int vk) {
+    const bool down = vk >= 0 && vk < 256 && physical[vk];
+    if (Worker* w = tlWorker) {
+        if (!w->snapped) { w->snapped = true; w->superseded = *g_superCount; }   // the first sample follows the snapshot
+        if (!down && vk >= 0 && vk < 256) w->sampledUp[vk] = true;
+        if (vk == g_yieldVk) {
+            SetEvent(w->arrived);
+            if (WaitForSingleObject(w->go, kLongWaitMs) != WAIT_OBJECT_0) g_deadlock = true;
+        }
+    }
+    return down ? SHORT(-32768) : 0;
+}
+
+void tailEntryYield() {
+    if (Worker* w = tlWorker) {
+        if (!w->entryYield) return;
+        SetEvent(w->arrived);
+        if (WaitForSingleObject(w->go, kLongWaitMs) != WAIT_OBJECT_0) g_deadlock = true;
+    }
+}
+
+void workerMain(Worker* w) {
+    tlWorker = w;
+    for (;;) {
+        if (WaitForSingleObject(w->go, INFINITE) != WAIT_OBJECT_0 || w->quit.load()) return;
+        w->body();
+        w->bodyDone = true;
+        SetEvent(w->arrived);
+    }
+}
+
+struct Node {
+    std::vector<int> enabled;
+    size_t pick = 0;
+};
+
+struct Violation {
+    int count = 0;
+    std::string first;
+};
+
+struct Enumeration {
+    Worker W[kWriters];
+    std::map<int, bool> blockedMemo;   // (writer, step, C step) -> the step blocked behind C's lock
+    bool fired[kKeys]{};
+    int lastMove = -1;
+    char lastCX = 0;                   // 'C' or 'X': which of the capture and the cancel landed last
+    unsigned superCount = 0;           // captures begun plus cancels done
+    bool retired[kKeys]{};
+    bool cover[kKeys]{};
+    std::vector<std::string> log;
+    unsigned leafMask = 0;
+    Violation viol[6];
+    long long leaves = 0, steps = 0, blockedSteps = 0;
+    bool aborted = false;
+
+    std::string schedule() const {
+        std::string s;
+        for (const std::string& m : log) { if (!s.empty()) s += " > "; s += m; }
+        return s;
+    }
+    void violate(int inv, const std::string& what) {
+        leafMask |= 1u << inv;
+        ++viol[inv].count;
+        if (viol[inv].first.empty()) viol[inv].first = what + " [" + schedule() + "]";
+    }
+    bool covered(int k) const { return releaseTailVk(kKeyVk[k]); }
+    void abort(const char* why) {
+        if (aborted) return;
+        aborted = true;
+        check(false, why);
+    }
+    // A writer known to block still runs for a moment before it reaches the lock (a refresh of an older revision reads
+    // its tail and its keys first). Wait until it is queued on the tail lock, so it is parked and not racing the steps
+    // that follow. An SRWLOCK with a waiter has its Waiting bit (0x2) set in the lock word: stable since Windows 7, read
+    // here with no call into the kernel.
+    void settleBlocked(Worker& w) {
+        const ULONGLONG start = GetTickCount64();
+        for (;;) {
+            if ((reinterpret_cast<const volatile ULONG_PTR&>(g_tailLock) & 2) != 0) return;
+            if (WaitForSingleObject(w.arrived, 0) == WAIT_OBJECT_0) {   // it arrived after all
+                abort("interleavings: a writer judged blocked on the tail lock was not");
+                return;
+            }
+            if (GetTickCount64() - start > kLongWaitMs) {
+                abort("interleavings: a writer judged blocked on the tail lock never queued on it");
+                return;
+            }
+            YieldProcessor();
+        }
+    }
+    bool waitArrived(Worker& w) {
+        if (WaitForSingleObject(w.arrived, kLongWaitMs) == WAIT_OBJECT_0 && !g_deadlock.load()) return true;
+        abort("interleavings: a writer neither yielded nor finished within the bound (deadlock)");
+        return false;
+    }
+
+    void resetLeaf() {
+        physical['A'] = false;
+        physical['B'] = true;
+        g_tailReader = &physicalKey;
+        cancelReleaseTail();
+        captureReleaseTail(&physicalKey);   // the earlier menu close: tail = {B}
+        physical['A'] = true;               // the plugin was holding A
+        g_tailReader = &schedKey;
+        g_tailRefreshEntry = &tailEntryYield;
+        g_superCount = &superCount;
+        inputGateSetPluginBlock(true);
+        for (int i = 0; i < kWriters; ++i) {
+            Worker& w = W[i];
+            w.started = w.blocked = w.finished = false;
+            w.step = 0;
+            w.superseded = 0;
+            w.snapped = false;
+            w.entryYield = (i == kR1) && g_yieldVk == 'A';   // the second pass skips the entry step: the space is large
+            memset(w.sampledUp, 0, sizeof(w.sampledUp));
+            w.bodyDone = false;
+        }
+        for (int k = 0; k < kKeys; ++k) fired[k] = retired[k] = false;
+        lastMove = -1;
+        lastCX = 0;
+        superCount = 0;
+        leafMask = 0;
+        log.clear();
+    }
+
+    std::vector<int> enabled() const {
+        std::vector<int> v;
+        bool anyBlocked = false;
+        for (const Worker& w : W) anyBlocked = anyBlocked || w.blocked;
+        if (!W[kC].finished) v.push_back(kC);
+        if (!anyBlocked) {
+            if (!W[kX].finished) v.push_back(kX);
+            if (!W[kR1].finished) v.push_back(kR1);
+            if (!W[kR2].finished && W[kR1].started) v.push_back(kR2);
+        }
+        if (!fired[0] && lastMove != kRelB) v.push_back(kRelA);   // A before B when adjacent: the two commute
+        if (!fired[1]) v.push_back(kRelB);
+        return v;
+    }
+
+    void afterArrival(Worker& w, const bool (&covBefore)[kKeys], bool combined) {
+        w.started = true;
+        ++w.step;
+        if (w.bodyDone.load()) w.finished = true;
+        const int id = w.id;
+        if (id == kX && w.finished) { ++superCount; lastCX = 'X'; }
+        if (id == kC && w.finished) {
+            lastCX = 'C';
+            for (int k = 0; k < kKeys; ++k) retired[k] = false;
+        }
+        if (!combined && (id == kX || id >= kR1)) {
+            for (int k = 0; k < kKeys; ++k) {
+                const bool after = covered(k);
+                if (!covBefore[k] && after) {
+                    violate(1, std::string(kWriterName[id]) + " raised the cover of " + char(kKeyVk[k]));
+                }
+                if (id >= kR1 && covBefore[k] && !after) retired[k] = true;
+            }
+        }
+        if (id >= kR1 && w.finished && w.superseded == superCount) {
+            for (int k = 0; k < kKeys; ++k) {
+                if (w.sampledUp[kKeyVk[k]] && covered(k)) {
+                    violate(2, std::string(kWriterName[id]) + " observed " + char(kKeyVk[k]) +
+                                   " released but it is still covered after the publish");
+                }
+            }
+        }
+        if (id == kC && w.finished) {
+            for (Worker& o : W) {
+                if (!o.blocked) continue;
+                if (!waitArrived(o)) return;
+                o.blocked = false;
+                log.back() += "(" + std::string(kWriterName[o.id]) + " unblocks)";
+                afterArrival(o, covBefore, true);
+            }
+        }
+    }
+
+    void exec(int move) {
+        ++steps;
+        char nm[64];
+        if (move >= kWriters) {
+            const int k = move - kRelA;
+            physical[kKeyVk[k]] = false;
+            fired[k] = true;
+            snprintf(nm, sizeof(nm), "release-%c", kKeyVk[k]);
+            log.push_back(nm);
+            lastMove = move;
+            checkState();
+            return;
+        }
+        Worker& w = W[move];
+        snprintf(nm, sizeof(nm), "%s.%d", kWriterName[move], w.step);
+        log.push_back(nm);
+        lastMove = move;
+        const bool inFlight = W[kC].started && !W[kC].finished;
+        if (move == kC && !w.started) {
+            w.started = true;
+            ++superCount;
+            for (int k = 0; k < kKeys; ++k) retired[k] = false;
+        }
+        bool covBefore[kKeys];
+        for (int k = 0; k < kKeys; ++k) covBefore[k] = covered(k);
+        for (Worker& o : W) {
+            // A writer taken for blocked that has in fact arrived was misjudged (a probe that ran slow): fail loudly.
+            if (o.blocked && WaitForSingleObject(o.arrived, 0) == WAIT_OBJECT_0) {
+                abort("interleavings: a writer judged blocked on the tail lock was not (probe too short)");
+                return;
+            }
+        }
+        SetEvent(w.go);
+        bool blocked = false;
+        if (inFlight && move != kC) {
+            // What the step does depends on what it finds: a refresh whose snapshot lacks the yield key never yields,
+            // and one that finds no tail returns before it takes the lock at all (in some revisions).
+            const int key = move * 1000 + w.step * 100 + W[kC].step * 10 + (g_releaseTail.load() ? 4 : 0) +
+                            (g_heldVk[g_yieldVk].load() ? 2 : 0) + (g_heldVk[g_yieldVk == 'A' ? 'B' : 'A'].load() ? 1 : 0);
+            auto it = blockedMemo.find(key);
+            if (it == blockedMemo.end()) {
+                blocked = WaitForSingleObject(w.arrived, kProbeMs) == WAIT_TIMEOUT;
+                blockedMemo[key] = blocked;
+            } else if (it->second) {
+                blocked = true;
+                settleBlocked(w);
+            } else if (!waitArrived(w)) {
+                return;
+            }
+        } else if (!waitArrived(w)) {
+            return;
+        }
+        if (blocked) {
+            w.blocked = true;
+            w.started = true;
+            ++blockedSteps;
+            log.back() += "(blocked on the tail lock)";
+        } else {
+            afterArrival(w, covBefore, false);
+        }
+        checkState();
+    }
+
+    void checkState() {
+        for (int k = 0; k < kKeys; ++k) {
+            const int vk = kKeyVk[k];
+            const bool held = physical[vk];
+            // 3: held at capture and still held: the block, then the tail, hide it until it is physically released.
+            if (held && (!W[kC].finished || lastCX == 'C') && hookGetAsyncKeyState(vk) != 0) {
+                violate(3, std::string("the game reads the still-held ") + char(vk) + " as down");
+            }
+            // 4: a cancel that landed after the capture leaves nothing covered.
+            if (lastCX == 'X' && covered(k)) violate(4, std::string("the cancelled tail covers ") + char(vk));
+            // 1: a key a refresh retired is not covered again before the next capture.
+            if (retired[k] && covered(k)) violate(1, std::string("the retired ") + char(vk) + " is covered again");
+        }
+    }
+
+    bool runLeaf(std::vector<Node>& stack) {
+        resetLeaf();
+        W[kC].body = [] { inputGateSetPluginBlock(false); };
+        W[kX].body = [] { cancelReleaseTail(); };
+        W[kR1].body = W[kR2].body = [] { refreshReleaseTail(&schedKey); };
+        size_t depth = 0;
+        for (;;) {
+            const std::vector<int> en = enabled();
+            if (en.empty()) {
+                if (!fired[0] || !fired[1]) { stack.resize(depth); return false; }   // pruned: B-then-A was left pending
+                break;
+            }
+            if (depth < stack.size()) {
+                if (stack[depth].enabled != en) {
+                    std::string was, now;
+                    for (int m : stack[depth].enabled) was += std::to_string(m) + " ";
+                    for (int m : en) now += std::to_string(m) + " ";
+                    const std::string msg = "interleavings: a schedule did not replay identically (enabled " + was + "then, " + now +
+                                            "now) after " + schedule();
+                    abort(msg.c_str());
+                    return false;
+                }
+            } else {
+                stack.push_back(Node{en, 0});
+            }
+            exec(stack[depth].enabled[stack[depth].pick]);
+            ++depth;
+            if (aborted) return false;
+        }
+        stack.resize(depth);
+        for (const Worker& w : W) {
+            if (!w.finished) { abort("interleavings: the schedule ended with a writer unfinished"); return false; }
+        }
+        // 5: once everything is released one more refresh leaves no key covered.
+        refreshReleaseTail(&physicalKey);
+        for (int k = 0; k < kKeys; ++k) {
+            if (covered(k)) violate(5, std::string("after every key is released ") + char(kKeyVk[k]) + " is still covered");
+        }
+        return true;
+    }
+
+    void run(int yieldVk) {
+        g_yieldVk = yieldVk;
+        blockedMemo.clear();
+        std::vector<Node> stack;
+        for (;;) {
+            if (runLeaf(stack)) ++leaves;
+            if (aborted) return;
+            while (!stack.empty()) {
+                Node& n = stack.back();
+                if (n.pick + 1 < n.enabled.size()) { ++n.pick; break; }
+                stack.pop_back();
+            }
+            if (stack.empty()) return;
+        }
+    }
+};
+}   // namespace tailsched
+
+static void releaseTailInterleavingCases() {
+    using namespace tailsched;
+    auto* e = new Enumeration();
+    for (int i = 0; i < kWriters; ++i) {
+        Worker& w = e->W[i];
+        w.id = i;
+        w.go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        w.arrived = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        w.thread = std::thread(workerMain, &w);
+    }
+    const PFN_GetAsyncKeyState savedReader = g_tailReader;
+    const ULONGLONG t0 = GetTickCount64();
+    for (int yieldVk : {'A', 'B'}) {
+        e->run(yieldVk);
+        if (e->aborted) break;
+    }
+    const ULONGLONG ms = GetTickCount64() - t0;
+    for (Worker& w : e->W) {
+        w.quit = true;
+        SetEvent(w.go);
+        if (e->aborted) w.thread.detach(); else w.thread.join();
+    }
+    physical['A'] = physical['B'] = false;
+    g_tailReader = savedReader;
+    g_tailRefreshEntry = nullptr;
+    cancelReleaseTail();
+    inputGateSetPluginBlock(false);
+    printf("  release tail interleavings: %lld schedules (%lld steps, %lld blocked on the lock) in %llu ms\n",
+           e->leaves, e->steps, e->blockedSteps, static_cast<unsigned long long>(ms));
+    static const char* const kNames[6] = {"", "no retired key is resurrected", "an observed release is not lost",
+                                          "a key held at capture stays covered", "a cancelled tail stays cancelled",
+                                          "the tail cannot strand"};
+    for (int inv = 1; inv <= 5; ++inv) {
+        char name[160];
+        snprintf(name, sizeof(name), "interleavings: %s (%d violations)", kNames[inv], e->viol[inv].count);
+        check(e->viol[inv].count == 0, name);
+        if (e->viol[inv].count) printf("      first: %s\n", e->viol[inv].first.c_str());
+    }
+    if (!e->aborted) delete e;   // an aborted run leaves detached workers pointing into it
+}
+
 static void releaseLogCases();
 
-int main() {
+int main(int argc, char** argv) {
     (void)keepPadImport;
+    if (argc > 1 && strcmp(argv[1], "--interleave-only") == 0) {
+        g_user.origAsync = &physicalKey;
+        g_user.origKeyState = &physicalKey;
+        releaseTailInterleavingCases();
+        printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
+        return failures ? 1 : 0;
+    }
     padHookCases();
     loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
@@ -810,6 +1242,7 @@ int main() {
     }
 
     pluginReleaseScanCases(keyboard);
+    releaseTailInterleavingCases();
 
     // PR #92 review: while a plugin owns input a buffered hat event is dropped unless it re-centres the hat, in
     // both representations of centred (0xFFFFFFFF, or a low word of 0xFFFF). Buttons: presses dropped, releases pass.
