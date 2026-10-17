@@ -36,6 +36,11 @@ int wmain(int argc, wchar_t** argv) {
           !edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,103) &&
           !edvr::EyeDrawSnapshot::f77RenderFrameEligible(0,100),
           "candidate capture is limited to first three nonzero render frames");
+    check(edvr::eyeMeshVb0BindingStatus(false,0,0)==0 &&
+          edvr::eyeMeshVb0BindingStatus(true,16,0)==4 &&
+          edvr::eyeMeshVb0BindingStatus(true,8,16)==3 &&
+          edvr::eyeMeshVb0BindingStatus(true,8,0)==1,
+          "VB0 capture distinguishes absent binding, unsupported stride and offset, and a supported binding");
     check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==192 &&
           edvr::EyeDrawSnapshot::kCandidateMeshBudget==64*1024*1024 &&
           edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==32*1024*1024 &&
@@ -587,18 +592,37 @@ int wmain(int argc, wchar_t** argv) {
     gui.capture(ctx.Get(),201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
     ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
     edvr::EyeDrawSnapshot meshSnap;
-    ComPtr<ID3D11Buffer> meshPool,meshBones,meshIds;
+    ComPtr<ID3D11Buffer> meshPool,meshBones,meshOtherPalette,meshIds;
     ComPtr<ID3D11ShaderResourceView> meshPoolView,meshBoneView;
     bd={};bd.ByteWidth=672;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.StructureByteStride=336;
     hr(dev->CreateBuffer(&bd,nullptr,&meshPool));hr(dev->CreateShaderResourceView(meshPool.Get(),nullptr,&meshPoolView));
     bd.ByteWidth=48*24000;bd.StructureByteStride=48; // palette extends past the old 1 MiB cap
     hr(dev->CreateBuffer(&bd,nullptr,&meshBones));hr(dev->CreateShaderResourceView(meshBones.Get(),nullptr,&meshBoneView));
+    hr(dev->CreateBuffer(&bd,nullptr,&meshOtherPalette));
     bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;bd.MiscFlags=bd.StructureByteStride=0;
     hr(dev->CreateBuffer(&bd,nullptr,&meshIds));
     ctx->VSSetShaderResources(33,1,meshPoolView.GetAddressOf());ctx->VSSetShaderResources(38,1,meshBoneView.GetAddressOf());
     UINT meshStride=8;ctx->IASetVertexBuffers(0,1,meshIds.GetAddressOf(),&meshStride,&zero);
     constexpr uint64_t meshVs=0x7B0DC42D383F694Cull;
+    constexpr uint64_t meshPs=0x0DF03E64DF9DBEF1ull;
+    check(edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,37080) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(0x9D800F45B12A6AACull,0x194DD6A677084A74ull,21,13260) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,20,37080) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,6) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,0x1234,21,37080),
+          "body capture selector requires the measured VS/PS, draw count, and stencil ref");
+    ID3D11Buffer* paletteSet[4]={meshBones.Get(),meshOtherPalette.Get(),meshPool.Get(),meshIds.Get()};
+    ID3D11Buffer* duplicatePalette[2]={meshBones.Get(),meshBones.Get()};
+    check(edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(0,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(1,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshBones.Get())==1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshOtherPalette.Get())==0 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshPool.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(3,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(4,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,duplicatePalette,meshBones.Get())==-1,
+          "other-palette identity is available only for exactly two tracked palettes and an exact bound match");
     for(unsigned i=0;i<2;++i) {
         std::vector<uint8_t> pool(672,uint8_t(21+i)),bones(48*24000,uint8_t(31+i)),ids(32,uint8_t(41+i));
         ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
@@ -607,7 +631,7 @@ int wmain(int argc, wchar_t** argv) {
         meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,2,0,0);
         meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,3,0,0);
     }
-    check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"source buffer deduplication is per frame");
+    check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"ordinary source snapshots retain their existing per-frame deduplication");
     ComPtr<ID3D11ShaderResourceView> checkPool;ctx->VSGetShaderResources(33,1,&checkPool);
     check(checkPool.Get()==meshPoolView.Get(),"source capture changed SRV binding");
     edvr::EyeDrawSnapshot eyeMesh;
@@ -618,28 +642,63 @@ int wmain(int argc, wchar_t** argv) {
     eyeDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;eyeDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> otherEye;ComPtr<ID3D11RenderTargetView> otherEyeRtv;
     hr(dev->CreateTexture2D(&eyeDesc,nullptr,&otherEye));hr(dev->CreateRenderTargetView(otherEye.Get(),nullptr,&otherEyeRtv));
-    eyeMesh.captureEyeMesh(ctx.Get(),699,0,edvr::EyeDrawSnapshot::kHud,0,'X',6,1,0,0,0);
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,edvr::EyeDrawSnapshot::kHud,0,0,nullptr,'X',6,1,0,0,0);
     check(eyeMesh.draws.empty() && !eyeMesh.firstFrame,"non-mesh does not start eye mesh window");
-    for(unsigned frame=700;frame<703;++frame)for(unsigned eye=0;eye<2;++eye) {
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,meshVs,meshPs,21,nullptr,'X',6,1,0,0,0);
+    check(eyeMesh.draws.empty() && eyeMesh.meshNonBodyDraws==1,"body-family draw with nonmatching count is aggregated, not retained");
+    for(unsigned frame=700;frame<716;++frame)for(unsigned eye=0;eye<2;++eye) {
         ID3D11RenderTargetView* target=eye?otherEyeRtv.Get():rtv.Get();ctx->OMSetRenderTargets(1,&target,nullptr);
         const uint8_t value=uint8_t(51+(frame-700)*2+eye);
-        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),ids(32,uint8_t(value+20));
+        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),otherBones(48*24000,uint8_t(value+30)),ids(32,uint8_t(value+20));
         ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
         ctx->UpdateSubresource(meshBones.Get(),0,nullptr,bones.data(),0,0);
+        ctx->UpdateSubresource(meshOtherPalette.Get(),0,nullptr,otherBones.data(),0,0);
         ctx->UpdateSubresource(meshIds.Get(),0,nullptr,ids.data(),0,0);
         for(unsigned draw=0;draw<2;++draw) {
             float constants[48];for(float& v:constants)v=float(frame*10+eye*2+draw);
             ctx->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);
-            eyeMesh.captureEyeMesh(ctx.Get(),frame,eye*100+draw,meshVs,0,'X',6,1,2+draw,150000,8000);
+            std::vector<uint8_t> drawPool(672,uint8_t(value+draw)),drawBones(48*24000,uint8_t(value+10+draw)),drawOtherBones(48*24000,uint8_t(value+30+draw)),drawIds(32,uint8_t(value+20+draw));
+            ctx->UpdateSubresource(meshPool.Get(),0,nullptr,drawPool.data(),0,0);
+            ctx->UpdateSubresource(meshBones.Get(),0,nullptr,drawBones.data(),0,0);
+            ctx->UpdateSubresource(meshOtherPalette.Get(),0,nullptr,drawOtherBones.data(),0,0);
+            ctx->UpdateSubresource(meshIds.Get(),0,nullptr,drawIds.data(),0,0);
+            edvr::EyeMeshJoinStamp join{};join.sceneFrame=1200+(frame-700);join.epoch=44;
+            join.scheduledIndex=draw;join.scheduledRenderFrame=900+(frame-700);
+            join.fpFrame=frame;join.fpSequence=7000+frame;join.gGameFrame=8000+frame;join.itemSerial=eye+1;
+            join.rig=0x12340000ull+eye;join.rigGeneration=9;join.poseQpc=100000+frame;join.drawQpc=200000+frame;
+            join.armJoints[0][0]=24;join.armJoints[0][1]=34;join.armJoints[0][2]=35;
+            join.armJoints[1][0]=36;join.armJoints[1][1]=37;join.armJoints[1][2]=38;
+            join.validFlags=(1u<<0)|(1u<<1)|(1u<<2)|(1u<<3)|(1u<<4)|(1u<<5)|(1u<<7);
+            eyeMesh.captureEyeMesh(ctx.Get(),frame,900+(frame-700),int32_t(eye),join,eye*100+draw,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,2+draw,150000,8000);
         }
         ctx->OMGetRenderTargets(1,&boundRt,nullptr);check(boundRt.Get()==target,"eye capture preserves target binding");
     }
-    check(eyeMesh.draws.size()==12 && eyeMesh.meshBuffers.size()==18 && !eyeMesh.meshDeclined,
-          "eye pools deduplicate within a frame and target, never across eyes");
-    for(const auto& d:eyeMesh.draws)check(d.layout.size()==1,"eye mesh input layout retained");
+    check(eyeMesh.draws.size()==64 && eyeMesh.meshBuffers.size()==128 && eyeMesh.meshCaptureSnapshots==32 && !eyeMesh.meshDeclined,
+          "sixteen frames retain every eye draw and one body plus other-palette snapshot per eye and frame");
+    check(eyeMesh.draws.front().frame==700 && eyeMesh.draws.front().renderFrame==900 && eyeMesh.draws.front().eye==0 &&
+          eyeMesh.draws.back().frame==715 && eyeMesh.draws.back().renderFrame==915 && eyeMesh.draws.back().eye==1,
+          "ledger and native render frames remain separate and each row carries its eye");
+    for(size_t i=0;i<eyeMesh.draws.size();++i) {
+        check(eyeMesh.draws[i].layout.size()==1,"eye mesh input layout retained");
+        check(eyeMesh.draws[i].meshSelected==1,"body selector retained on every actual draw row");
+        if(i%2==0)check(eyeMesh.draws[i].mesh[3]!=UINT32_MAX,"first body draw carries other palette candidate");
+        else check(eyeMesh.draws[i].mesh[3]==UINT32_MAX && eyeMesh.draws[i].meshStatus[3]==7,"later body draw records explicit quota status");
+    }
     const auto eyeBytes=eyeMesh.meshBytes;
-    for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
-    check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    eyeMesh.captureEyeMesh(ctx.Get(),716,916,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    check(eyeMesh.draws.size()==64 && eyeMesh.meshBytes==eyeBytes && eyeMesh.meshCaptureDeclined==2,
+          "pre-window and post-sixteen-frame attempts are explicit declines");
+    edvr::EyeDrawSnapshot unknownEyeMesh;
+    unknownEyeMesh.captureEyeMesh(ctx.Get(),800,0,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    check(unknownEyeMesh.draws.size()==1 && unknownEyeMesh.meshCaptureSnapshots==0 &&
+          unknownEyeMesh.draws[0].meshStatus[0]==10 && unknownEyeMesh.draws[0].eye==-1,
+          "unknown-eye body metadata is retained without consuming a snapshot quota");
+    unknownEyeMesh.captureEyeMesh(ctx.Get(),800,0,0,{},1,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,0,0,0);
+    check(unknownEyeMesh.meshCaptureSnapshots==1 && unknownEyeMesh.draws[1].mesh[0]!=UINT32_MAX,
+          "known eye can still receive a full snapshot after unknown-eye metadata");
+    std::vector<uint8_t> geometryVertices(32,76);
+    ctx->UpdateSubresource(meshIds.Get(),0,nullptr,geometryVertices.data(),0,0);
     // Version 9: the cull gate probe's armed-frame geometry. Every pool draw
     // of the armed frame gets a map row; a mesh drawn twice is copied once;
     // a second blend state is a second state row; other frames are ignored.

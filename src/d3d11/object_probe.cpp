@@ -31,6 +31,7 @@
 #include "gpu_census.h"     // gpuCensusNoteEyeRun: the census window an eye run falls in says so
 #include "skin_ledger.h"
 #include "native_on_foot.h"
+#include "temporal_pass.h"
 
 namespace edvr {
 
@@ -789,9 +790,56 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
                                d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
     }
-    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
-                                   d.vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,startInstance,start,base);
-    g_f77CandidateSnapshot.captureF77Candidate(ctx,frame,nativeOnFootRenderFrame(),candidateEye,
+    const uint32_t nativeFrame=nativeOnFootRenderFrame();
+    const uint64_t eyeMeshPs=bindingShaderHash(BindSlot::Ps);
+    uint32_t eyeMeshStencilRef=0;
+    if(EyeDrawSnapshot::sourceMesh(d.vs)) {
+        ID3D11DepthStencilState* eyeMeshDepth=nullptr;
+        ctx->OMGetDepthStencilState(&eyeMeshDepth,&eyeMeshStencilRef);
+        if(eyeMeshDepth)eyeMeshDepth->Release();
+    }
+    const bool selectedBodyMesh=EyeDrawSnapshot::bodyMeshSelector(d.vs,eyeMeshPs,eyeMeshStencilRef,count);
+    Microsoft::WRL::ComPtr<ID3D11Buffer> otherPaletteCandidate;
+    if(selectedBodyMesh) {
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> t38View;
+        ctx->VSGetShaderResources(38,1,&t38View);
+        Microsoft::WRL::ComPtr<ID3D11Resource> t38Resource;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> boundT38;
+        if(t38View) {
+            t38View->GetResource(&t38Resource);
+            t38Resource.As(&boundT38);
+        }
+        const int otherIndex=EyeDrawSnapshot::otherTrackedPaletteIndex(static_cast<uint32_t>(g_paletteCount),g_palette,boundT38.Get());
+        if(otherIndex>=0)otherPaletteCandidate=g_palette[otherIndex];
+    }
+    EyeMeshJoinStamp eyeJoin{};
+    if(g_eyeMeshSnapshot.wantsEyeMeshCapture(frame,d.vs,eyeMeshPs,eyeMeshStencilRef,count)) {
+        TemporalDrawStamp temporalStamp{};
+        if(temporalPassDrawStamp(&temporalStamp)) {
+            eyeJoin.sceneFrame=temporalStamp.sceneFrame;eyeJoin.epoch=temporalStamp.epoch;
+            eyeJoin.scheduledIndex=temporalStamp.scheduledIndex;eyeJoin.scheduledRenderFrame=temporalStamp.scheduledRenderFrame;
+            if(temporalStamp.sceneFrameValid)eyeJoin.validFlags|=1u<<0;
+            if(temporalStamp.epochValid)eyeJoin.validFlags|=1u<<1;
+            if(temporalStamp.scheduledIndexValid)eyeJoin.validFlags|=1u<<2;
+        }
+        NativeOnFootPoseStamp poseStamp{};
+        const bool poseFound=nativeOnFootPoseStamp(nativeFrame,&poseStamp);
+        if(poseFound) {
+            eyeJoin.fpFrame=poseStamp.fpFrame;eyeJoin.fpSequence=poseStamp.fpSequence;eyeJoin.gGameFrame=poseStamp.gGameFrame;
+            eyeJoin.itemSerial=poseStamp.itemSerial;eyeJoin.rig=poseStamp.rig;eyeJoin.rigGeneration=poseStamp.rigGeneration;eyeJoin.poseQpc=poseStamp.qpc;
+            std::memcpy(eyeJoin.armJoints,poseStamp.armJoints,sizeof(eyeJoin.armJoints));
+            eyeJoin.validFlags|=1u<<3;
+            if(poseStamp.valid)eyeJoin.validFlags|=1u<<4;
+        }
+        LARGE_INTEGER drawQpc{};
+        if(QueryPerformanceCounter(&drawQpc)){eyeJoin.drawQpc=static_cast<uint64_t>(drawQpc.QuadPart);eyeJoin.validFlags|=1u<<5;}
+        if(nativeFrame)eyeJoin.validFlags|=1u<<7;
+    }
+    // FinalCrisp assigns its capture sequence at submit; no draw-time sequence exists.
+    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,nativeFrame,candidateEye,eyeJoin,
+                                   static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+                                   d.vs,eyeMeshPs,eyeMeshStencilRef,otherPaletteCandidate.Get(),kind,count,instances,startInstance,start,base);
+    g_f77CandidateSnapshot.captureF77Candidate(ctx,frame,nativeFrame,candidateEye,
         static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base);
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
@@ -1255,14 +1303,17 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<unsigned long long>(ownership.ancestorTraces),
                     static_cast<unsigned long long>(ownership.ancestorTraceOverflow));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
-    Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
-                    "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
-                    "First three matching eye frames; original draw ordinal, cameras, input layout, full t33/t38 and VB0 "
-                    "at first use per frame/target. Geometry first frame, %u vertex bytes, %u vertex declines. "
-                    "Separate 4096-draw/256-MiB pool/32-MiB vertex caps; no rendering changes.",
-                    path,g_eyeMeshSnapshot.meshDraws,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
+    Log::get().note("object probe: eye body snapshots %ls: %u selected draws, %u exact body snapshots, %u other source draws rejected, "
+                    "%u draws outside window, %u frame/target-local buffers, %u bytes, %u buffer declines, %u capped draws, "
+                    "%u failed copies, %u missing shaders; %s. First %u ledger frames; selector is the recorded body VS/PS, "
+                    "draw count and stencil ref 21. Each selected draw records ledger/native render frame, eye, ordinal, arguments, "
+                    "camera, t33 instance record, t38 current palette, VB0 IDs and a tracked other-palette candidate when unambiguous. "
+                    "Candidate relationship remains unknown until exact offline join; native frame is not GPU completion. "
+                    "Geometry first frame, %u vertex bytes, %u vertex declines. Bounded 4096 rows, 24 MiB per selected eye/frame and 768 MiB total, plus 32 MiB vertex pool; no rendering changes.",
+                    path,g_eyeMeshSnapshot.meshDraws,g_eyeMeshSnapshot.meshCaptureSnapshots,g_eyeMeshSnapshot.meshNonBodyDraws,
+                    g_eyeMeshSnapshot.meshCaptureDeclined,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
                     g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
-                    eyeMeshOk?"written":"WRITE FAILED",g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
+                    eyeMeshOk?"written":"WRITE FAILED",EyeDrawSnapshot::kEyeMeshFrames,g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\candidates_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool candidateOk=g_f77CandidateSnapshot.write(ctx,path);
     const uint32_t candidateMissingShaders=g_f77CandidateSnapshot.writeShaders(dir.c_str());

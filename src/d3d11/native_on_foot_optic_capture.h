@@ -83,6 +83,7 @@ struct Record {
     uint64_t poseQpc = 0, poseFpQpc = 0, poseGQpc = 0;
     bool posePinValid = false, poseEyeCalHave = false, poseEyeCalAxesValid = false, poseMatricesValid = false;
     bool poseRawMatricesValid = false, posePinEyeCalValid = false, poseWriteFresh = false;
+    bool poseM3pAffineValid = false, poseM3pPaddingFinite = false, poseM3pPaddingCanonicalized = false;
     float poseArm[2][4][3] = {}; // actual shoulder, elbow, hand and target; model coordinates, metres.
     float poseRawTorso[3][16] = {}; // input AMC joints 24 chest, 34 neck and 44 head.
     float poseFinalTorso[4][16] = {}; // after-write joints 24 chest, 34 neck, 35/36 clavicles.
@@ -92,20 +93,23 @@ struct Record {
     float poseEyeAxes[4] = {}; // f axis/sign, up axis/sign from the standing PinEyeCal.
     float poseCrouchWeight = 0.0f, posePinDetach = 0.0f, poseReachCandidate[3] = {}, poseReachApplied[3] = {};
     float poseClearance[6][3] = {};
+    uint16_t poseArmJoints[2][3] = {}; // U/F/H per side, copied from the exact after-write ArmPlan.
     uint8_t poseClearanceHave = 0, poseClearanceInside = 0, poseReachFlags = 0;
     uint32_t poseRigGeneration = 0;
     uint64_t poseRig = 0, posePlanX = 0;
     uint8_t uiCount = 0;
     uint32_t uiDropped = 0;
     struct UiSnapshot {
-        bool valid = false, itemRead = false, fresh = false, fieldsValid = false, instanceValid = false, distanceScale = false, cameraAvailable = false, attachmentAvailable = false;
+        bool valid = false, itemRead = false, fresh = false, fieldsValid = false, instanceValid = false, distanceScale = false;
+        bool cameraAvailable = false, cameraValid = false, attachmentAvailable = false, attachmentValid = false, joinedGetter = false;
         uint32_t renderFrame = 0, itemSerial = 0;
         uint64_t qpc = 0;
+        uint64_t rendererIdentity = 0, partIdentity = 0, instanceIdentity = 0, cameraPointer = 0, getterQpc = 0;
         uint16_t nameId = 0;
         uint8_t facing = 0;
         int32_t space = 0;
         float width = 0.0f, height = 0.0f, pixelOffset[2] = {}, anchor[2] = {}, baseScale = 0.0f, instanceScale = 0.0f;
-        float instance[16] = {};
+        float instance[16] = {}, camera[16] = {}, attachment[16] = {};
     } ui[kUiRowsPerEye] = {};
 };
 

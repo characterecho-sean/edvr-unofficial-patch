@@ -154,10 +154,40 @@ constexpr uint8_t kWeaponUiBranchBefore[kWeaponUiVerifyLen] = {
 constexpr uint8_t kWeaponUiBranchAfter[kWeaponUiVerifyLen] = {
     0xE8, 0xEB, 0x50, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0xEB, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
 inline bool weaponUiPatchWanted(bool nativeOnFoot, bool session) noexcept { return nativeOnFoot && session; }
+inline bool weaponUiBuildGetterCall(const uint8_t original[8], uintptr_t callAddress, uintptr_t target, uint8_t patched[8]) noexcept {
+    if (!original || !patched || original[0] != 0xE8 || !callAddress || !target || callAddress > UINTPTR_MAX - 5) return false;
+    const uintptr_t next = callAddress + 5;
+    int32_t rel = 0;
+    if (target >= next) {
+        const uintptr_t distance = target - next;
+        if (distance > static_cast<uintptr_t>(INT32_MAX)) return false;
+        rel = static_cast<int32_t>(distance);
+    } else {
+        const uintptr_t distance = next - target;
+        if (distance > static_cast<uintptr_t>(0x80000000ull)) return false;
+        rel = distance == static_cast<uintptr_t>(0x80000000ull) ? INT32_MIN : -static_cast<int32_t>(distance);
+    }
+    for (int i = 0; i < 8; ++i) patched[i] = original[i];
+    std::memcpy(patched + 1, &rel, sizeof(rel));
+    return true;
+}
 inline bool patchBytesMatch(const uint8_t* actual, const uint8_t* expected, size_t len) noexcept {
     if (!actual || !expected || !len || len > 32) return false;
     for (size_t i = 0; i < len; ++i) if (actual[i] != expected[i]) return false;
     return true;
+}
+inline bool weaponUiGetterCallOwned(const uint8_t current[8], const uint8_t patched[8]) noexcept {
+    return patchBytesMatch(current, patched, 8);
+}
+
+inline bool weaponUiGetterJoinMatches(uint32_t rowRenderFrame, uint32_t rowItemSerial, uint64_t rowRenderer, uint64_t rowPart, uint64_t rowInstance,
+                                      uint64_t getterQpc, uint64_t submitQpc, uint32_t expectedRenderFrame, uint32_t expectedItemSerial,
+                                      uint64_t expectedRenderer, uint64_t expectedPart, uint64_t expectedInstance,
+                                      bool itemRead, bool fresh) noexcept {
+    return itemRead && fresh && rowRenderFrame != 0 && rowItemSerial != 0 && rowRenderer != 0 && rowPart != 0 && rowInstance != 0 &&
+           getterQpc != 0 && submitQpc != 0 && getterQpc <= submitQpc &&
+           rowRenderFrame == expectedRenderFrame && rowItemSerial == expectedItemSerial &&
+           rowRenderer == expectedRenderer && rowPart == expectedPart && rowInstance == expectedInstance;
 }
 // Probes. P1: panel submit (rcx = set, rdx = view, r8b = flag); P2: the HRC submit (six arguments; rcx = HRC); P3: the per-instance submit.
 constexpr size_t kF9ProbeCount = 3;
@@ -606,6 +636,25 @@ inline void pfzMul(const float a[16], const float b[16], float out[16]) noexcept
         }
 }
 // The inverse of an affine row-vector matrix (rotation and scale in the upper 3x3, position in row 3). False when the 3x3 is singular.
+// Validate only the 12 values used by affine point/vector transforms. The remaining
+// four elements are non-semantic padding and may be uninitialized by the game.
+inline bool pfzAffineElementsFinite(const float m[16]) noexcept {
+    if (!m) return false;
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) if (!std::isfinite(m[r * 4 + c])) return false;
+    for (int c = 0; c < 3; ++c) if (!std::isfinite(m[12 + c])) return false;
+    return true;
+}
+inline bool pfzCanonicalizeAffineMatrix(const float m[16], float out[16], bool* paddingFinite = nullptr) noexcept {
+    if (paddingFinite) *paddingFinite = false;
+    if (!m || !out || !pfzAffineElementsFinite(m)) return false;
+    bool finitePadding = true;
+    for (int r = 0; r < 4; ++r) if (!std::isfinite(m[r * 4 + 3])) finitePadding = false;
+    if (paddingFinite) *paddingFinite = finitePadding;
+    for (int i = 0; i < 16; ++i) out[i] = m[i];
+    out[3] = out[7] = out[11] = 0.0f;
+    out[15] = 1.0f;
+    return true;
+}
 inline bool pfzAffineInverse(const float m[16], float out[16]) noexcept {
     const double a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
     const double A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
@@ -3669,6 +3718,188 @@ inline LegPlant legPlant(const double hip1[3], const double foot0[3], double l1,
     }
     return o;
 }
+// F82: a laser-rifle reach correction can leave the hands outside the hard elbow range after the current clavicle assist.
+// Test a torso yaw about the selected neck target. Rotating the chest subtree about chest 24 and then translating it back to
+// the neck target gives the same point transform as this yaw about N. The assist is predicted here and is still
+// applied exactly once by the normal arm solve later in the pass.
+struct CrouchNeckArm {
+    bool active = true;
+    double clavicle[3] = {}, shoulder[3] = {}, hand[3] = {}, target[3] = {}, l1 = 0.0, l2 = 0.0, wSolve = 1.0;
+};
+struct CrouchNeckLeg {
+    double hip[3] = {}, knee[3] = {}, foot[3] = {};
+};
+struct CrouchNeckYaw {
+    bool feasible = false;
+    double yawRad = 0.0, maxShortfallM = 0.0;
+    double rootDelta[3] = {};
+    double clavicle[2][3] = {}, shoulder[2][3] = {};
+};
+inline bool crouchNeckYawFeasible(const double neck[3], const double chestPivot[3], const CrouchNeckArm arm[2], const CrouchNeckLeg leg[2], double legVertical,
+                                  double yawRad, const double adsPush[3],
+                                  CrouchNeckYaw* out) noexcept {
+    CrouchNeckYaw result;
+    if (!std::isfinite(yawRad)) return false;
+    if (!std::isfinite(legVertical)) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(neck[i]) || !std::isfinite(chestPivot[i]) || !std::isfinite(adsPush[i])) return false;
+    result.yawRad = yawRad;
+    double turnedNeck[3];
+    turnAboutVertical(neck, chestPivot, yawRad, turnedNeck);
+    for (int i = 0; i < 3; ++i) result.rootDelta[i] = neck[i] - turnedNeck[i];
+    result.rootDelta[1] = 0.0;
+    bool armChecked = false;
+    for (int side = 0; side < 2; ++side) {
+        if (!arm[side].active) continue;
+        armChecked = true;
+        const double w = arm[side].wSolve;
+        if (!std::isfinite(w) || w < 0.0 || w > 1.0) return false;
+        if (!(std::isfinite(arm[side].l1) && std::isfinite(arm[side].l2) && arm[side].l1 > 1e-4 && arm[side].l2 > 1e-4)) return false;
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(arm[side].clavicle[i]) || !std::isfinite(arm[side].shoulder[i]) || !std::isfinite(arm[side].hand[i]) ||
+                !std::isfinite(arm[side].target[i])) return false;
+        turnAboutVertical(arm[side].clavicle, neck, yawRad, result.clavicle[side]);
+        turnAboutVertical(arm[side].shoulder, neck, yawRad, result.shoulder[side]);
+        double hand[3];
+        turnAboutVertical(arm[side].hand, neck, yawRad, hand);
+        const double target[3] = {hand[0] + w * (arm[side].target[0] - hand[0]), hand[1] + w * (arm[side].target[1] - hand[1]),
+                                  hand[2] + w * (arm[side].target[2] - hand[2])};
+        const double d[3] = {target[0] - result.shoulder[side][0], target[1] - result.shoulder[side][1], target[2] - result.shoulder[side][2]};
+        const double preAssistArm[3] = {hand[0] - result.shoulder[side][0], hand[1] - result.shoulder[side][1], hand[2] - result.shoulder[side][2]};
+        const double dist = ikLen(d);
+        double excess = 0.0;
+        double disp[3] = {};
+        const double move = ikAssistReachMove(dist, arm[side].l1, arm[side].l2, &excess);
+        for (int i = 0; i < 3; ++i) disp[i] = (dist > 1e-9 ? move * d[i] / dist : 0.0) + adsPush[i];
+        for (int i = 0; i < 3; ++i) disp[i] *= w;
+        double R[9], angle = 0.0;
+        bool capped = false;
+        if (ikAssistRot(result.clavicle[side], result.shoulder[side], disp, R, &angle, &capped)) {
+            const double cs[3] = {result.shoulder[side][0] - result.clavicle[side][0], result.shoulder[side][1] - result.clavicle[side][1],
+                                  result.shoulder[side][2] - result.clavicle[side][2]};
+            double turned[3];
+            ikRowRotate(cs, R, turned);
+            for (int i = 0; i < 3; ++i) result.shoulder[side][i] = result.clavicle[side][i] + turned[i];
+        }
+        const double after[3] = {target[0] - result.shoulder[side][0], target[1] - result.shoulder[side][1], target[2] - result.shoulder[side][2]};
+        const double afterDist = ikLen(after);
+        double dLo = 0.0, dHi = 0.0;
+        ikElbowDRange(arm[side].l1, arm[side].l2, kIkElbowMinDeg, kIkElbowMaxDeg, &dLo, &dHi);
+        double fLo = 0.0, fHi = 0.0;
+        ikElbowDRange(arm[side].l1, arm[side].l2, 0.0, 180.0, &fLo, &fHi);
+        const double animDist = ikLen(preAssistArm);
+        if (animDist < dLo) dLo -= (1.0 - w) * (dLo - animDist);
+        if (animDist > dHi) dHi += (1.0 - w) * (animDist - dHi);
+        dLo = std::max(dLo, fLo);
+        dHi = std::min(dHi, fHi);
+        if (dHi < dLo) dHi = dLo;
+        if (!(std::isfinite(afterDist) && dHi >= dLo)) return false;
+        const double shortfall = afterDist > dHi ? afterDist - dHi : dLo - afterDist;
+        if (shortfall > 1e-6) return false;
+        result.maxShortfallM = std::max(result.maxShortfallM, std::max(0.0, shortfall));
+    }
+    if (!armChecked) return false;
+    for (int side = 0; side < 2; ++side) {
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(leg[side].hip[i]) || !std::isfinite(leg[side].knee[i]) || !std::isfinite(leg[side].foot[i])) return false;
+        const double hip1[3] = {leg[side].hip[0] + result.rootDelta[0], leg[side].hip[1] + result.rootDelta[1] + legVertical,
+                                leg[side].hip[2] + result.rootDelta[2]};
+        const double hk[3] = {leg[side].knee[0] - leg[side].hip[0], leg[side].knee[1] - leg[side].hip[1], leg[side].knee[2] - leg[side].hip[2]};
+        const double kf[3] = {leg[side].foot[0] - leg[side].knee[0], leg[side].foot[1] - leg[side].knee[1], leg[side].foot[2] - leg[side].knee[2]};
+        const double hf[3] = {leg[side].foot[0] - leg[side].hip[0], leg[side].foot[1] - leg[side].hip[1], leg[side].foot[2] - leg[side].hip[2]};
+        double fb[3] = {hk[0], 0.0, hk[2]};
+        if (!ikUnit(fb, fb)) { fb[0] = 0.0; fb[1] = 0.0; fb[2] = 1.0; }
+        double heldFoot[3] = {leg[side].foot[0], leg[side].foot[1], leg[side].foot[2]};
+        if (std::fabs(yawRad) <= 1e-12) {
+            const LegPlant plant = legPlant(hip1, leg[side].foot, ikLen(hk), ikLen(kf), fb, ikLen(hf));
+            if (!plant.closed) return false;
+            for (int i = 0; i < 3; ++i) heldFoot[i] = plant.foot[i];
+        }
+        const LegSolve solved = legSolveTo(leg[side].hip, leg[side].knee, leg[side].foot, hip1, heldFoot);
+        if (!solved.ok || (std::fabs(yawRad) > 1e-12 && (solved.limited || solved.footErrM > 1e-4))) return false;
+    }
+    result.feasible = true;
+    if (out) *out = result;
+    return true;
+}
+inline double crouchNeckYawArmShortfall(const double neck[3], const CrouchNeckArm arm[2], double yawRad, const double adsPush[3]) noexcept {
+    if (!std::isfinite(yawRad)) return std::numeric_limits<double>::infinity();
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(neck[i]) || !std::isfinite(adsPush[i])) return std::numeric_limits<double>::infinity();
+    double shortfallMax = 0.0;
+    bool active = false;
+    for (int side = 0; side < 2; ++side) {
+        if (!arm[side].active) continue;
+        active = true;
+        const double w = arm[side].wSolve;
+        if (!std::isfinite(w) || w < 0.0 || w > 1.0 || !(arm[side].l1 > 1e-4 && arm[side].l2 > 1e-4))
+            return std::numeric_limits<double>::infinity();
+        double C[3], S[3], H[3];
+        turnAboutVertical(arm[side].clavicle, neck, yawRad, C);
+        turnAboutVertical(arm[side].shoulder, neck, yawRad, S);
+        turnAboutVertical(arm[side].hand, neck, yawRad, H);
+        const double target[3] = {H[0] + w * (arm[side].target[0] - H[0]), H[1] + w * (arm[side].target[1] - H[1]),
+                                  H[2] + w * (arm[side].target[2] - H[2])};
+        const double d[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
+        const double preAssistArm[3] = {H[0] - S[0], H[1] - S[1], H[2] - S[2]};
+        const double dist = ikLen(d);
+        double excess = 0.0, R[9], angle = 0.0;
+        bool capped = false;
+        const double reach = ikAssistReachMove(dist, arm[side].l1, arm[side].l2, &excess);
+        double disp[3];
+        for (int i = 0; i < 3; ++i) disp[i] = ((dist > 1e-9 ? reach * d[i] / dist : 0.0) + adsPush[i]) * w;
+        if (ikAssistRot(C, S, disp, R, &angle, &capped)) {
+            const double cs[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]};
+            double turned[3];
+            ikRowRotate(cs, R, turned);
+            for (int i = 0; i < 3; ++i) S[i] = C[i] + turned[i];
+        }
+        const double after[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
+        const double afterDist = ikLen(after);
+        double lo = 0.0, hi = 0.0, fLo = 0.0, fHi = 0.0;
+        ikElbowDRange(arm[side].l1, arm[side].l2, kIkElbowMinDeg, kIkElbowMaxDeg, &lo, &hi);
+        ikElbowDRange(arm[side].l1, arm[side].l2, 0.0, 180.0, &fLo, &fHi);
+        const double animDist = ikLen(preAssistArm);
+        if (animDist < lo) lo -= (1.0 - w) * (lo - animDist);
+        if (animDist > hi) hi += (1.0 - w) * (animDist - hi);
+        lo = std::max(lo, fLo);
+        hi = std::min(hi, fHi);
+        if (hi < lo) hi = lo;
+        shortfallMax = std::max(shortfallMax, std::max(0.0, std::max(afterDist - hi, lo - afterDist)));
+    }
+    return active ? shortfallMax : std::numeric_limits<double>::infinity();
+}
+inline CrouchNeckYaw crouchNeckYawSelect(const double neck[3], const double chestPivot[3], const CrouchNeckArm arm[2], const CrouchNeckLeg leg[2],
+                                         double legVertical, const double adsPush[3],
+                                         double maxYawDeg = 50.0, double stepDeg = 0.25) noexcept {
+    CrouchNeckYaw best;
+    if (!(maxYawDeg >= 0.0) || !(stepDeg > 0.0) || !std::isfinite(maxYawDeg) || !std::isfinite(stepDeg)) return best;
+    const int steps = static_cast<int>(std::ceil(maxYawDeg / stepDeg));
+    for (int radius = 0; radius <= steps; ++radius) {
+        for (int signIndex = 0; signIndex < (radius == 0 ? 1 : 2); ++signIndex) {
+            const double sign = signIndex == 0 ? 1.0 : -1.0;
+            const double deg = std::min(maxYawDeg, radius * stepDeg) * sign;
+            CrouchNeckYaw candidate;
+            if (!crouchNeckYawFeasible(neck, chestPivot, arm, leg, legVertical, deg * kIkPi / 180.0, adsPush, &candidate)) continue;
+            if (radius == 0) return candidate;
+            // The coarse radial search finds the first feasible side. Refine that boundary so a one-frame
+            // arm-weight or ADS change moves the authored yaw smoothly instead of by a 0.25 degree step.
+            double lo = std::max(0.0, std::min(maxYawDeg, (radius - 1) * stepDeg));
+            double hi = std::fabs(deg);
+            CrouchNeckYaw refinedBest = candidate;
+            for (int refine = 0; refine < 24 && hi - lo > 1e-5; ++refine) {
+                const double mid = 0.5 * (lo + hi);
+                CrouchNeckYaw refined;
+                if (crouchNeckYawFeasible(neck, chestPivot, arm, leg, legVertical, sign * mid * kIkPi / 180.0, adsPush, &refined)) {
+                    refinedBest = refined;
+                    hi = mid;
+                } else lo = mid;
+            }
+            return refinedBest;
+        }
+    }
+    return best;
+}
+
 // The state bin of a pin sample: 0 standing, 1 walking, 2 running, 3 jumping (airborne), 4 crouching (F68e). speed: the AMC's horizontal speed (m/s),
 // vy its vertical speed, crouched whether the camera is down (pinCrouchedWc: F69d).
 // Priority: jumping, crouching, running, walking, standing. (Armed is counted beside, not instead.)

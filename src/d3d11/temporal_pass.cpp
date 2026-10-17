@@ -5122,6 +5122,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
 }  // namespace
 
+bool temporalPassDrawStamp(TemporalDrawStamp* out) {
+    if(!out)return false;
+    *out={};
+    out->sceneFrame=g_rowsFrame;out->sceneFrameValid=(g_rowsFrame!=0);
+    if(g_eyeFinalRun.armed) {
+        out->epoch=g_eyeFinalClock.epoch;out->epochValid=true;
+        const int index=g_eyeFinalRun.find(out->epoch);
+        if(index>=0 && g_eyeFinalRun.rows[index].scheduled) {
+            out->scheduledIndex=static_cast<uint32_t>(index);
+            out->scheduledRenderFrame=g_eyeFinalRun.rows[index].renderFrame;
+            out->scheduledIndexValid=true;
+        }
+    }
+    return true;
+}
+
 // F59: the waypoint dump's pre-composite crop (native_sharpen.cpp, before the interface layer's composite). Copies only.
 void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV) {
     if (!g_mkArmed || !texture || eye > 1) return;

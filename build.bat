@@ -576,8 +576,10 @@ if defined EDVR_DLL_ONLY (
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
+ml64.exe /nologo /c /Fo"%OBJ%\d3d11\weapon_ui_getter_probe.obj" "src\d3d11\weapon_ui_getter_probe.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: ml64 failed on weapon UI getter probe & exit /b 1 )
 
-python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
+python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_probe.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
@@ -989,10 +991,15 @@ exit /b 0
 :rig_native_frame_test
 echo [edvr] === native_frame_test.exe ===
 if not exist "%OBJ%\native_frame" mkdir "%OBJ%\native_frame"
+ml64.exe /nologo /c /Fo"%OBJ%\native_frame\weapon_ui_getter_probe.obj" "src\d3d11\weapon_ui_getter_probe.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe assembly build failed & exit /b 1 )
+ml64.exe /nologo /c /Fo"%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" "tools\native_frame_test\weapon_ui_getter_probe_test.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe fixture assembly build failed & exit /b 1 )
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
+    "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^
     "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib

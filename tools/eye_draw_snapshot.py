@@ -68,14 +68,25 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
     for _ in range(nd):
         d = dict(zip(('vs', 'ps', 'target'), unpack('<3Q')))
-        d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance',
-                      'width', 'height', 'texture'), unpack('<9I')))
+        d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance'), unpack('<6I')))
+        if version >= 12:
+            d['render_frame'], eye_bits, d['mesh_selected'] = unpack('<3I')
+            d['eye'] = struct.unpack('<i', struct.pack('<I', eye_bits))[0]
+            join = dict(zip(('scene_frame','epoch','scheduled_index','scheduled_render_frame','fp_frame','fp_sequence',
+                             'g_game_frame','item_serial','rig_generation'),unpack('<9I')))
+            join['arm_joints']=unpack('<6H')
+            join['rig'],join['pose_qpc'],join['draw_qpc'],join['capture_sequence']=unpack('<4Q')
+            join['valid_flags'],=unpack('<I')
+            join['source_job_lookup_status'],=unpack('<I')
+            join['source_job_lookup']='offline_t33_palette_base_join' if join['source_job_lookup_status']==1 else 'unknown'
+            d['join']=join
+        d.update(zip(('width', 'height', 'texture'), unpack('<3I')))
         if d['texture'] != 0xffffffff and d['texture'] >= ns:
             raise ValueError('Invalid surface index')
         d['buffers'] = []
@@ -97,7 +108,16 @@ def read(path):
                 if vertex_bytes > 32*1024*1024:
                     raise ValueError('Vertex payload budget exceeded')
                 d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
-        d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
+        if version >= 12:
+            d['mesh'], d['mesh_sources'], d['mesh_views'], d['mesh_range'] = [], [], [], []
+            d['mesh_status'] = []
+            for _ in range(4):
+                ref, identity, view, start, count, status = unpack('<IQQIII')
+                d['mesh'].append(ref);d['mesh_sources'].append(identity);d['mesh_views'].append(view);d['mesh_range'].append((start,count));d['mesh_status'].append(status)
+            d['mesh_role_names']=['t33_instance_record','t38_current_palette','vb0_instance_ids','other_palette_candidate']
+            d['other_palette_relation']='unknown' if d['mesh_sources'][3] else 'unavailable'
+        else:
+            d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
         d['layout'] = []
         if version >= 5:
             elements, = unpack('<I')
@@ -128,16 +148,32 @@ def read(path):
     mesh_buffers, mesh_declined = [], 0
     if version >= 4:
         nb, mesh_declined = unpack('<2I')
-        if nb > nd*3:
+        if nb > nd*4:
             raise ValueError('Invalid source buffer count')
         total = 0
         for _ in range(nb):
-            b = dict(zip(('frame', 'first_draw', 'whole', 'stride', 'size'), unpack('<5I')))
+            if version >= 12:
+                b = dict(zip(('frame', 'first_draw', 'whole', 'stride'), unpack('<4I')))
+                b['identity'], b['scope'] = unpack('<2Q')
+                b['size'], = unpack('<I')
+            else:
+                b = dict(zip(('frame', 'first_draw', 'whole', 'stride', 'size'), unpack('<5I')))
             total += b['whole']
-            if not 0 < b['whole'] <= 16*1024*1024 or total > 256*1024*1024 or b['size'] not in (0,b['whole']) or b['first_draw'] >= nd or b['stride'] not in (8,48,336):
+            mesh_budget=768*1024*1024 if version>=12 else 256*1024*1024
+            if not 0 < b['whole'] <= 16*1024*1024 or total > mesh_budget or b['size'] not in (0,b['whole']) or b['first_draw'] >= nd or b['stride'] not in (8,48,336):
                 raise ValueError('Invalid source buffer descriptor')
             b['data'] = take(b['size'])
+            if version >= 12:
+                b['readback_status'], = unpack('<I')
             mesh_buffers.append(b)
+        mesh_capture = dict(first_frame=0, frames=0, declined=0, snapshots=0, rejected_source_draws=0)
+        if version >= 12:
+            (mesh_capture['first_frame'], mesh_capture['frames'], mesh_capture['declined'],
+             mesh_capture['snapshots'],mesh_capture['rejected_source_draws']) = unpack('<5I')
+            expected=set(range(mesh_capture['first_frame'],mesh_capture['first_frame']+mesh_capture['frames']))
+            observed={d['frame'] for d in draws if d.get('mesh_selected',0)}
+            mesh_capture['missing_ledger_frames']=sorted(expected-observed)
+            mesh_capture['missing_body_ledger_frames']=sorted(expected-observed)
         for i,d in enumerate(draws):
             for role,ref in enumerate(d['mesh']):
                 if ref == 0xffffffff:
@@ -145,8 +181,10 @@ def read(path):
                 if ref >= nb:
                     raise ValueError('Invalid source buffer reference')
                 b = mesh_buffers[ref]
-                if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8)[role]:
+                if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8,48)[role]:
                     raise ValueError('Source buffer belongs to a different frame, role, or later draw')
+    else:
+        mesh_capture = dict(first_frame=0, frames=0, declined=0, snapshots=0, rejected_source_draws=0)
     effect_images, effect_image_declined = [], 0
     if version >= 6:
         ni, effect_image_declined = unpack('<2I')
@@ -315,7 +353,7 @@ def read(path):
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
-                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
+                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined, mesh_capture=mesh_capture,
                 effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling,
                 sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry,
                 candidates=candidate)
@@ -703,7 +741,7 @@ def verify_fixture(capture):
 
 
 def verify_sprite_fixture(capture):
-    assert capture['version'] == 11 and capture['failures'] == 0
+    assert capture['version'] == 12 and capture['failures'] == 0
     assert len(capture['sprite_diagnostics']) == 1 and capture['sprite_declined'] >= 2
     d = capture['sprite_diagnostics'][0]
     assert d['draw'] == 2 and (d['width'], d['height']) == (1400, 1400)
@@ -723,7 +761,7 @@ def verify_sprite_fixture(capture):
 
 def verify_candidate_fixture(capture):
     c=capture['candidates']
-    assert capture['version']==11 and capture['failures']==0
+    assert capture['version']==12 and capture['failures']==0
     assert c['optic_draws']==1 and len(c['frames'])==1
     frame=c['frames'][0]
     assert (frame['draw'],frame['ledger_frame'],frame['render_frame'],frame['eye'])==(0,101,501,1)
@@ -949,36 +987,55 @@ def main():
                                    i['requested_mip_levels'],i['source_array_size'],i['slices'])==(2,1,0,10,11,8,8) for i in t2)
         assert t2[0]['bytes']==t2[1]['bytes'] and sum(i['bytes'] for i in t2)<=24*1024*1024
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 11 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 12 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
-            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
+            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*4
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
             assert bool(d['streams'][0]['data']) == (i < 4) and bool(d['streams'][1]['data']) == (i < 4)
         mesh = read(str(a.path)+'.mesh')
         assert mesh['failures'] == mesh['mesh_declined'] == 0 and len(mesh['draws']) == 4 and len(mesh['mesh_buffers']) == 6
         for i,d in enumerate(mesh['draws']):
-            assert d['ordinal'] == 0xfffffffe and d['mesh'] == [i//2*3+j for j in range(3)]
-            for role,ref in enumerate(d['mesh']):
+            assert d['ordinal'] == 0xfffffffe and d['mesh'] == [i//2*3+j for j in range(3)]+[0xffffffff]
+            for role,ref in enumerate(d['mesh'][:3]):
                 b = mesh['mesh_buffers'][ref]
                 assert b['first_draw'] == i//2*2 and b['frame'] == 300+i//2
                 assert b['data'] == bytes([21+role*10+i//2])*b['whole'], 'Source buffer copied after reuse or truncated'
         assert mesh['mesh_buffers'][1]['whole'] > 1024*1024, 'High bone indices lost'
         eye_mesh = read(str(a.path)+'.eyemesh')
         assert eye_mesh['failures'] == eye_mesh['mesh_declined'] == eye_mesh['dropped'] == 0
-        assert len(eye_mesh['draws']) == 12 and len(eye_mesh['mesh_buffers']) == 18
+        assert len(eye_mesh['draws']) == 64 and len(eye_mesh['mesh_buffers']) == 128
+        assert eye_mesh['mesh_capture']['first_frame'] == 700 and eye_mesh['mesh_capture']['frames'] == 16
+        assert eye_mesh['mesh_capture']['declined'] == 2 and eye_mesh['mesh_capture']['snapshots'] == 32
+        assert eye_mesh['mesh_capture']['rejected_source_draws'] == 1
+        assert eye_mesh['mesh_capture']['missing_body_ledger_frames'] == []
         for i, d in enumerate(eye_mesh['draws']):
             group, draw = divmod(i, 2)
             frame, eye = divmod(group, 2)
-            assert d['frame'] == 700+frame and d['ordinal'] == eye*100+draw
+            assert d['frame'] == 700+frame and d['render_frame'] == 900+frame and d['eye'] == eye and d['ordinal'] == eye*100+draw
+            assert d['mesh_selected'] == 1
+            j=d['join']
+            assert (j['scene_frame'],j['epoch'],j['scheduled_index'],j['scheduled_render_frame'])==(1200+frame,44,draw,900+frame)
+            assert (j['fp_frame'],j['fp_sequence'],j['g_game_frame'],j['item_serial'],j['rig_generation'])==(d['frame'],7000+d['frame'],8000+d['frame'],eye+1,9)
+            assert j['arm_joints'] == (24,34,35,36,37,38)
+            assert (j['rig'],j['pose_qpc'],j['draw_qpc'],j['capture_sequence'],j['valid_flags'])==(0x12340000+eye,100000+d['frame'],200000+d['frame'],0,0xBF)
+            assert j['source_job_lookup_status'] == 1 and j['source_job_lookup'] == 'offline_t33_palette_base_join'
+            if draw==0:
+                assert d['mesh_status'] == [1,1,1,1] and d['mesh'] == [i//2*4+j for j in range(4)]
+            else:
+                assert d['mesh_status'] == [7,7,7,7] and d['mesh'] == [0xffffffff]*4
+            assert d['mesh_range'] == [(0,2),(0,24000),(0,32),(0,24000)]
+            assert d['mesh_role_names'][3] == 'other_palette_candidate' and d['other_palette_relation'] == 'unknown'
+            assert d['mesh_views'][0] and d['mesh_views'][1] and not d['mesh_views'][2] and not d['mesh_views'][3]
             assert len(d['layout']) == 1 and d['layout'][0]['semantic'] == 'POSITION'
             assert d['start'] == 150000 and d['base'] == 8000 and d['start_instance'] == 2+draw
             constants = struct.unpack('<48f', d['buffers'][0]['data'])
             assert all(v == (700+frame)*10+eye*2+draw for v in constants), 'Eye draw camera copied after reuse'
-            assert d['mesh'] == [group*3+j for j in range(3)]
-            for role, ref in enumerate(d['mesh']):
-                b = eye_mesh['mesh_buffers'][ref]
-                assert b['first_draw'] == group*2 and b['frame'] == d['frame']
-                assert b['data'] == bytes([51+group+role*10])*b['whole'], 'Eye pool copy came from the other eye/frame'
+            if draw==0:
+                for role, ref in enumerate(d['mesh']):
+                    b = eye_mesh['mesh_buffers'][ref]
+                    assert b['first_draw'] == i and b['frame'] == d['frame'] and b['identity'] == d['mesh_sources'][role] and b['readback_status'] == 1
+                    value=51+frame*2+eye+(30 if role==3 else role*10)
+                    assert b['data'] == bytes([value])*b['whole'], 'Selected body draw snapshot was not exact'
         assert len({d['target'] for d in eye_mesh['draws']}) == 2
         # Version 9 geometry (the rig's armed frame 710): two meshes, two states, three map rows.
         geo = eye_mesh['geometry']
@@ -997,7 +1054,7 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 11 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 12 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
@@ -1016,7 +1073,7 @@ def main():
                     path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
                     assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 11 and night['failures'] == 0 and len(night['draws']) == 3
+        assert night['version'] == 12 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E

@@ -49,6 +49,14 @@ struct ID3D11Texture2D;
 
 namespace edvr {
 
+// Draw-time domain stamps for the bounded EDVR eye-mesh diagnostic. The
+// scheduled capture index and submit sequence may not exist yet at draw time.
+struct TemporalDrawStamp {
+    uint32_t sceneFrame=0,epoch=0,scheduledIndex=UINT32_MAX,scheduledRenderFrame=0;
+    bool sceneFrameValid=false,epochValid=false,scheduledIndexValid=false;
+};
+bool temporalPassDrawStamp(TemporalDrawStamp* out);
+
 class Config;
 
 // Reads fix.temporal_aa (the warm compile and the camera capture want to

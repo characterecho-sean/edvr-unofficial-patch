@@ -38,6 +38,10 @@
 
 namespace edvr {
 
+extern "C" uintptr_t g_weaponUiGetterTarget = 0;
+extern "C" void weaponUiGetterCallStub();
+extern "C" void weaponUiGetterObserved(const WeaponUiGetterObservation*) noexcept;
+
 namespace {
 
 using SetterFn = void(__fastcall*)(void*, uint32_t);
@@ -1586,6 +1590,16 @@ bool storeCodeBytes(uintptr_t address, uint16_t value, size_t len) noexcept {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(address), len);
     return ok;
 }
+bool storeCodeQword(uintptr_t address, uint64_t value) noexcept {
+    if (!address || (address & 7u)) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), sizeof(value), PAGE_EXECUTE_READWRITE, &old)) return false;
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(address), static_cast<LONG64>(value));
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(address), sizeof(value), old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(address), sizeof(value));
+    return true;
+}
 
 void refusePatch(CodePatch& p, const std::string& why) {
     if (why == p.refusal) return;   // the same reason: already said
@@ -1807,20 +1821,37 @@ thread_local uintptr_t g_weaponUiRendererTls = 0;
 using WeaponUiTraceRow = nofoot::optic_capture::Record::UiSnapshot;
 struct WeaponUiPartSample {
     uint16_t nameId = 0; uint8_t facing = 0, distanceScale = 0; int32_t space = 0;
+    bool itemRead = false;
     bool fieldsValid = false, instanceValid = false;
     uint32_t renderFrame = 0, itemSerial = 0;
     uint64_t qpc = 0;
+    uint64_t rendererIdentity = 0, partIdentity = 0, instanceIdentity = 0, cameraPointer = 0;
     float width = 0.0f, height = 0.0f, pixelOffset[2] = {}, anchor[2] = {}, baseScale = 0.0f, instanceScale = 0.0f;
-    float instance[16] = {};
+    bool cameraAvailable = false, cameraValid = false, attachmentAvailable = false, attachmentValid = false;
+    uint64_t getterQpc = 0;
+    float instance[16] = {}, camera[16] = {}, attachment[16] = {};
 };
-struct WeaponUiTraceSlot { std::atomic<uint32_t> seq{0}; uint32_t ordinal = ~0u; WeaponUiPartSample row{}; };
+struct WeaponUiTraceSlot { std::atomic<uint32_t> seq{0}; std::atomic<uint32_t> joinedToSubmit{~0u}; uint32_t ordinal = ~0u; WeaponUiPartSample row{}; };
 constexpr uint32_t kWeaponUiTraceRows = 128;
 WeaponUiTraceSlot g_weaponUiTrace[kWeaponUiTraceRows];
 std::atomic<uint32_t> g_weaponUiTraceHead{0};
+WeaponUiTraceSlot g_weaponUiGetterTrace[kWeaponUiTraceRows];
+std::atomic<uint32_t> g_weaponUiGetterTraceHead{0};
+std::atomic<uint64_t> g_weaponUiGetterJoined{0};
 void weaponUiTracePost(const WeaponUiPartSample& row) noexcept {
     const uint32_t n = g_weaponUiTraceHead.fetch_add(1, std::memory_order_relaxed);
     WeaponUiTraceSlot& slot = g_weaponUiTrace[n % kWeaponUiTraceRows];
     slot.seq.fetch_add(1, std::memory_order_acq_rel);
+    slot.joinedToSubmit.store(~0u, std::memory_order_relaxed);
+    slot.ordinal = n;
+    slot.row = row;
+    slot.seq.fetch_add(1, std::memory_order_release);
+}
+void weaponUiGetterTracePost(const WeaponUiPartSample& row) noexcept {
+    const uint32_t n = g_weaponUiGetterTraceHead.fetch_add(1, std::memory_order_relaxed);
+    WeaponUiTraceSlot& slot = g_weaponUiGetterTrace[n % kWeaponUiTraceRows];
+    slot.seq.fetch_add(1, std::memory_order_acq_rel);
+    slot.joinedToSubmit.store(~0u, std::memory_order_relaxed);
     slot.ordinal = n;
     slot.row = row;
     slot.seq.fetch_add(1, std::memory_order_release);
@@ -1844,8 +1875,8 @@ uint32_t weaponUiTraceRead(uint32_t renderFrame, uint32_t itemSerial, uint64_t n
             dst.fresh = row.qpc && row.qpc <= nowQpc && nowQpc - row.qpc <= maxAgeQpc;
             dst.fieldsValid = row.fieldsValid;
             dst.instanceValid = row.instanceValid;
-            dst.valid = dst.fresh && dst.fieldsValid && dst.instanceValid;
-            dst.itemRead = true;
+            dst.valid = dst.fresh && dst.fieldsValid && dst.instanceValid && row.itemRead;
+            dst.itemRead = row.itemRead;
             dst.distanceScale = row.distanceScale != 0;
             dst.cameraAvailable = false; dst.attachmentAvailable = false;
             dst.renderFrame = row.renderFrame; dst.itemSerial = row.itemSerial; dst.qpc = row.qpc;
@@ -1855,6 +1886,33 @@ uint32_t weaponUiTraceRead(uint32_t renderFrame, uint32_t itemSerial, uint64_t n
             std::memcpy(dst.anchor, row.anchor, sizeof(dst.anchor));
             dst.baseScale = row.baseScale; dst.instanceScale = row.instanceScale;
             std::memcpy(dst.instance, row.instance, sizeof(dst.instance));
+            dst.rendererIdentity = row.rendererIdentity; dst.partIdentity = row.partIdentity; dst.instanceIdentity = row.instanceIdentity;
+            const uint32_t getterHead = g_weaponUiGetterTraceHead.load(std::memory_order_acquire);
+            const uint32_t getterBegin = getterHead > kWeaponUiTraceRows ? getterHead - kWeaponUiTraceRows : 0;
+            for (uint32_t gi = getterHead; gi > getterBegin;) {
+                --gi;
+                WeaponUiTraceSlot& gs = g_weaponUiGetterTrace[gi % kWeaponUiTraceRows];
+                const uint32_t gseq = gs.seq.load(std::memory_order_acquire);
+                if (!gseq || (gseq & 1u) || gs.ordinal != gi) continue;
+                const WeaponUiPartSample captured = gs.row;
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if (gs.seq.load(std::memory_order_relaxed) != gseq || gs.ordinal != gi) continue;
+                const bool getterFresh = captured.qpc && captured.qpc <= nowQpc && nowQpc - captured.qpc <= maxAgeQpc;
+                if (!nofoot::weaponUiGetterJoinMatches(captured.renderFrame, captured.itemSerial, captured.rendererIdentity,
+                        captured.partIdentity, captured.instanceIdentity, captured.getterQpc, row.qpc, row.renderFrame, row.itemSerial,
+                        row.rendererIdentity, row.partIdentity, row.instanceIdentity, captured.itemRead, getterFresh)) continue;
+                dst.joinedGetter = true;
+                dst.getterQpc = captured.getterQpc;
+                dst.cameraPointer = captured.cameraPointer;
+                dst.cameraAvailable = captured.cameraAvailable; dst.cameraValid = captured.cameraValid;
+                dst.attachmentAvailable = captured.attachmentAvailable; dst.attachmentValid = captured.attachmentValid;
+                std::memcpy(dst.camera, captured.camera, sizeof(dst.camera));
+                std::memcpy(dst.attachment, captured.attachment, sizeof(dst.attachment));
+                uint32_t unjoined = ~0u;
+                if (gs.joinedToSubmit.compare_exchange_strong(unjoined, n, std::memory_order_relaxed))
+                    g_weaponUiGetterJoined.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
         } else ++lost;
     }
     if (dropped) *dropped = lost;
@@ -1863,7 +1921,110 @@ uint32_t weaponUiTraceRead(uint32_t renderFrame, uint32_t itemSerial, uint64_t n
 enum WeaponUiPartRead : int { kWeaponUiPartRefused = -1, kWeaponUiPartUnmatched = 0, kWeaponUiPartMatched = 1 };
 std::atomic<uint64_t> g_weaponUiFlag0{0}, g_weaponUiFlag1{0}, g_weaponUiUnmatched{0}, g_weaponUiNoTls{0}, g_weaponUiRefused{0};
 std::atomic<uint64_t> g_weaponUiPatchActiveEvents{0}, g_weaponUiPatchRestoreEvents{0};
+std::atomic<uint64_t> g_weaponUiGetterEntered{0}, g_weaponUiGetterCaptured{0}, g_weaponUiGetterRefused{0};
+std::atomic<uint64_t> g_weaponUiGetterMissingMatrix{0}, g_weaponUiGetterMissingCamera{0};
 std::atomic<bool> g_weaponUiSubmitGate{false};
+struct WeaponUiGetterPatch {
+    bool tried = false, applied = false, refusalNoted = false;
+    std::string refusal;
+    uint8_t original[8] = {}, patched[8] = {};
+};
+WeaponUiGetterPatch g_weaponUiGetterPatch;
+uint8_t* g_weaponUiGetterRelay = nullptr; // near the game call; a leaf absolute jump to the MASM observer stub.
+std::atomic<int> g_weaponUiGetterPatchState{0}; // 0 untried, 1 installed, 2 refused/unavailable, 3 restored
+
+uint8_t* weaponUiGetterRelay(uintptr_t callAddress, uintptr_t stubAddress) noexcept {
+    if (!g_weaponUiGetterRelay) {
+        uint8_t* page = allocateRelay(callAddress);
+        if (!page) return nullptr;
+        const uint8_t jump[] = {0xFF, 0x25, 0, 0, 0, 0};
+        std::memcpy(page, jump, sizeof(jump));
+        std::memcpy(page + sizeof(jump), &stubAddress, sizeof(stubAddress));
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
+            !FlushInstructionCache(GetCurrentProcess(), page, sizeof(jump) + sizeof(stubAddress))) {
+            VirtualFree(page, 0, MEM_RELEASE);
+            return nullptr;
+        }
+        g_weaponUiGetterRelay = page;
+    }
+    return g_weaponUiGetterRelay;
+}
+
+bool weaponUiGetterPatchStore(const uint8_t bytes[8]) noexcept {
+    uint64_t value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return storeCodeQword(g_base + nofoot::kWeaponUiVerifyRva, value);
+}
+void weaponUiGetterPatchRefuse(const char* reason) {
+    g_weaponUiGetterPatchState.store(2, std::memory_order_relaxed);
+    if (g_weaponUiGetterPatch.refusal == reason) return;
+    g_weaponUiGetterPatch.refusal = reason;
+    Log::get().note("native on foot weapon UI getter probe: NOT installed -- %s; the game call is left unchanged", reason);
+}
+void weaponUiGetterCallTick(bool want) {
+    WeaponUiGetterPatch& p = g_weaponUiGetterPatch;
+    const uintptr_t address = g_base + nofoot::kWeaponUiVerifyRva;
+    if (!want) {
+        if (!p.applied) return;
+        uint8_t current[8] = {};
+        if (!guardedRead(address, current, sizeof(current))) return;
+        if (!nofoot::weaponUiGetterCallOwned(current, p.patched)) {
+            weaponUiGetterPatchRefuse("the getter-call bytes changed after installation; restore refused");
+            p.applied = false;
+            return;
+        }
+        if (!weaponUiGetterPatchStore(p.original)) return;
+        p.applied = false;
+        g_weaponUiGetterPatchState.store(3, std::memory_order_relaxed);
+        Log::get().note("native on foot weapon UI getter probe: restored the original call at EliteDangerous64.exe+0x%llX",
+                        static_cast<unsigned long long>(nofoot::kWeaponUiVerifyRva));
+        return;
+    }
+    if (p.applied) return;
+    p.tried = true;
+    if (!g_weaponUiPatch.applied || g_install != InstallState::Armed || !g_base) {
+        weaponUiGetterPatchRefuse("the authored-basis branch patch is not active");
+        return;
+    }
+    const char* identityWhy = nullptr;
+    if (!checkIdentity(g_base, &identityWhy)) {
+        weaponUiGetterPatchRefuse(identityWhy ? identityWhy : "the PE identity check failed");
+        return;
+    }
+    uint8_t site[nofoot::kWeaponUiVerifyLen] = {};
+    if (!guardedRead(g_base + nofoot::kWeaponUiVerifyRva, site, sizeof(site)) ||
+        !nofoot::patchBytesMatch(site, nofoot::kWeaponUiBranchAfter, sizeof(site))) {
+        weaponUiGetterPatchRefuse("the exact authored-basis call site is not in its verified patched state");
+        return;
+    }
+    std::memcpy(p.original, site, sizeof(p.original));
+    const uintptr_t stub = reinterpret_cast<uintptr_t>(&weaponUiGetterCallStub);
+    const uint8_t* relay = weaponUiGetterRelay(address, stub);
+    if (!relay) {
+        weaponUiGetterPatchRefuse("no executable relay page could be allocated near the verified game call");
+        return;
+    }
+    if (!nofoot::weaponUiBuildGetterCall(p.original, address, reinterpret_cast<uintptr_t>(relay), p.patched)) {
+        weaponUiGetterPatchRefuse("the relay is outside rel32 range or the verified call is not E8");
+        return;
+    }
+    g_weaponUiGetterTarget = g_base + 0x3174210;
+    uint8_t current[8] = {};
+    if (!guardedRead(address, current, sizeof(current)) || !nofoot::patchBytesMatch(current, p.original, sizeof(current))) {
+        weaponUiGetterPatchRefuse("the call bytes changed before installation");
+        return;
+    }
+    if (!weaponUiGetterPatchStore(p.patched)) {
+        weaponUiGetterPatchRefuse("the aligned call qword is not writable");
+        return;
+    }
+    p.applied = true;
+    p.refusal.clear();
+    g_weaponUiGetterPatchState.store(1, std::memory_order_relaxed);
+    Log::get().note("native on foot weapon UI getter probe: installed the verified one-call capture at EliteDangerous64.exe+0x%llX; original getter is called once",
+                    static_cast<unsigned long long>(nofoot::kWeaponUiVerifyRva));
+}
 F9Probe g_weaponUiRenderProbe;
 bool g_weaponUiRenderProbeArmed = false; // frame thread only
 uint64_t g_weaponUiLastNoteMs = 0;         // frame thread only
@@ -1879,7 +2040,7 @@ bool weaponUiReadAt(uintptr_t object, size_t offset, void* out, size_t bytes) no
     const uintptr_t address = object + offset;
     return address <= max - bytes && guardedRead(address, out, bytes);
 }
-WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPartSample& out) noexcept {
+WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPartSample& out, uintptr_t expectedPart = 0) noexcept {
     uintptr_t base = g_base, rendererVt = 0, provider = 0, providerVt = 0, storage = 0;
     uint64_t count = 0, capacity = 0;
     const uintptr_t max = (std::numeric_limits<uintptr_t>::max)();
@@ -1902,6 +2063,7 @@ WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPa
         uintptr_t cachedInst = 0;
         if (!guardedRead(entry + 0xD8, &cachedInst, sizeof(cachedInst))) return kWeaponUiPartRefused;
         if (cachedInst != inst) continue;
+        if (expectedPart && entry + 0x10 != expectedPart) continue;
         if (!guardedRead(entry, &out.nameId, sizeof(out.nameId)) || !guardedRead(entry + 0x38, &out.facing, sizeof(out.facing)) ||
             !guardedRead(entry + 0x39, &out.distanceScale, sizeof(out.distanceScale)) || !guardedRead(entry + 0xE0, &out.space, sizeof(out.space)) ||
             !weaponUiReadAt(entry, 0x44, &out.width, sizeof(out.width)) || !weaponUiReadAt(entry, 0x48, &out.height, sizeof(out.height)) ||
@@ -1916,12 +2078,46 @@ WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPa
         for (float v : out.instance) out.instanceValid = out.instanceValid && std::isfinite(v);
         out.renderFrame = nativeOnFootRenderFrame();
         out.qpc = f30Qpc();
+        out.rendererIdentity = renderer;
+        out.partIdentity = entry + 0x10;
+        out.instanceIdentity = inst;
         char itemName[64] = {};
-        const bool itemOk = opticItemRead(&out.itemSerial, itemName);
-        if (!itemOk) out.itemSerial = 0;
+        out.itemRead = opticItemRead(&out.itemSerial, itemName);
+        if (!out.itemRead) out.itemSerial = 0;
         return kWeaponUiPartMatched;
     }
     return kWeaponUiPartUnmatched;
+}
+void weaponUiGetterObserve(const WeaponUiGetterObservation* observation) noexcept {
+    g_weaponUiGetterEntered.fetch_add(1, std::memory_order_relaxed);
+    if (!observation || !observation->renderer || !observation->part || !g_weaponUiSubmitGate.load(std::memory_order_relaxed) ||
+        !g_weaponUiPatchLive.load(std::memory_order_relaxed)) {
+        g_weaponUiGetterRefused.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    uintptr_t instance = 0;
+    if (!weaponUiReadAt(observation->part, 0xC8, &instance, sizeof(instance)) || instance < 0x10000) {
+        g_weaponUiGetterRefused.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    WeaponUiPartSample sample{};
+    const WeaponUiPartRead found = weaponUiFindPart(observation->renderer, instance, sample, observation->part);
+    if (found != kWeaponUiPartMatched) {
+        g_weaponUiGetterRefused.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    sample.attachmentAvailable = true;
+    std::memcpy(sample.attachment, observation->attachment, sizeof(sample.attachment));
+    sample.attachmentValid = nofoot::pfzAffineElementsFinite(sample.attachment);
+    if (!sample.attachmentValid) g_weaponUiGetterMissingMatrix.fetch_add(1, std::memory_order_relaxed);
+    sample.cameraAvailable = observation->cameraPointer >= 0x10000 &&
+                             guardedRead(observation->cameraPointer, sample.camera, sizeof(sample.camera));
+    sample.cameraPointer = observation->cameraPointer;
+    sample.cameraValid = sample.cameraAvailable && nofoot::pfzAffineElementsFinite(sample.camera);
+    if (!sample.cameraValid) g_weaponUiGetterMissingCamera.fetch_add(1, std::memory_order_relaxed);
+    sample.getterQpc = f30Qpc();
+    weaponUiGetterTracePost(sample);
+    g_weaponUiGetterCaptured.fetch_add(1, std::memory_order_relaxed);
 }
 void weaponUiObserveSubmit(uintptr_t inst, uint32_t callerRva) noexcept {
     if (!g_weaponUiSubmitGate.load(std::memory_order_relaxed) || (callerRva != 0x1A1485D && callerRva != 0x1A148CD) || !nativeOnFootActive() ||
@@ -10767,6 +10963,8 @@ struct PinStats {
     double reachBeforeMax[2] = {}, reachAfterMax[2] = {}, footErrMaxMm = 0.0;
     uint32_t reachWant = 0, reachActive = 0, reachInfeasible = 0;
     double reachCorrSum = 0.0, reachCorrMax = 0.0, d0Sum[2] = {}, dSum[2] = {};   // the horizontal move before and after the reach correction (right, forward), cm
+    uint32_t neckYawCalls = 0, neckYawFeasible = 0, neckYawNoCandidate = 0, neckYawRefused = 0;
+    double neckYawDegSum = 0.0, neckYawDegMax = 0.0, neckErrorMaxCm = 0.0, neckFootErrorMaxMm = 0.0, neckShortfallMaxCm = 0.0;
     // The input: its age at the Animate call (ms, QPC), and by the P1 frame index's parity whether the input was a new publication since the last
     // call (refresh) or the same one again (repeat). The bend's old judder was a target refreshed at the wrong moment.
     uint32_t ageN = 0, fresh[2] = {}, repeat[2] = {};
@@ -10837,6 +11035,9 @@ struct PinCall {
     double reachCandidate[3] = {};   // F79: unweighted reach proposal; nonzero infeasible proposals are rejected, not applied to the body pin.
     double reachRadiusM[2] = {};
     bool reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
+    // F82: crouched-rifle neck reach policy and next-flight evidence.
+    bool neckYawScope = false, neckYawFeasible = false, neckYawRefused = false;
+    double neckYawRad = 0.0, neckYawShortfallM = 0.0, neckYawDelta[3] = {}, neckYawTarget[3] = {}, neckYawFootErrorM = 0.0;
     // F69a: the camera's crouch (w_c, the animated vector's weight) and the cyclopean eye's height less its standing mean; calHave: the calibration exists.
     double wc = 0.0, dEyeY = 0.0;
     bool calHave = false;
@@ -10872,7 +11073,8 @@ bool g_pinEyeCalRefGenHave = false;
 std::atomic<uint32_t> g_pinEyeCalDone{0};   // the frame thread logs the calibration once per completion
 // Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
 bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now, const IkGData* G, const float (*fpm)[16], bool armed, double armedW,
-               const float (*handTarget)[16], double wSqRamp, double sqAmount, const nofoot::BarrelDirs& bd, bool sqArmed, double offW, PinCall& pc) noexcept {
+               uint32_t itemSerialForCall, const double adsPush[3], double wBase, bool solveWrite, const float (*handTarget)[16], double wSqRamp, double sqAmount,
+               const nofoot::BarrelDirs& bd, bool sqArmed, double offW, PinCall& pc) noexcept {
     const uint32_t count = sp.count;
     if (count <= 44 || count <= nofoot::kIkSquarePivot) return true;
     pc.inputJointsValid = guardedRead(static_cast<uintptr_t>(sp.buf + 24u * 64u), pc.inputJoints[0], sizeof(pc.inputJoints[0])) &&
@@ -10900,6 +11102,13 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     }
     nofoot::PinMove mv;
     double E[3] = {}, T[3] = {}, N0[3] = {}, d0[3] = {};
+    uint32_t heldSerial = 0;
+    char heldName[64] = {};
+    bool heldRifle = false, neckYawEligible = false, neckYawInputsHave = false;
+    nofoot::PinMove neckYawBaseMove;
+    double neckYawNeck[3] = {}, neckYawChestPivot[3] = {};
+    nofoot::CrouchNeckArm neckYawArms[2];
+    nofoot::CrouchNeckLeg neckYawLegs[2];
     int cycSrc = kCycNone;
     double speed = g_pinMotion.speed, vy = g_pinMotion.vy;
     const uint32_t parity = in.p1 & 1u;
@@ -11065,6 +11274,71 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         mv = nofoot::pinMove(N0, T);
         for (int i = 0; i < 3; ++i) d0[i] = mv.th[i];
+        // F82: protect the laser-rifle head target by turning the chest subtree around its own pivot and
+        // translating the body back onto the neck. Stage 2 still applies its existing assist exactly once.
+        heldRifle = opticItemRead(&heldSerial, heldName) &&
+                    heldSerial == itemSerialForCall && heldSerial == g_heldItemSerial.load(std::memory_order_relaxed) &&
+                    nofoot::adsRifleOpticItemMatches(heldName);
+        neckYawEligible = armed && heldRifle && pc.detachW < 1.0 && solveWrite;
+        pc.neckYawScope = neckYawEligible;
+        if (neckYawEligible && pl.legOk && pl.sqOk && G && fpm && handTarget && pl.ok[0] && pl.ok[1] && armedW > 0.0) {
+            const auto pos = [&](uint32_t j, double out[3]) noexcept {
+                const float* m = froze && j < count && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
+                for (int i = 0; i < 3; ++i) out[i] = static_cast<double>(m[12 + i]);
+            };
+            const double base[3] = {mv.th[0], mv.delta, mv.th[2]};
+            double neck[3] = {N0[0] + base[0], N0[1] + base[1], N0[2] + base[2]}, chestPivot[3];
+            pos(nofoot::kIkSpine[2], chestPivot);
+            for (int i = 0; i < 3; ++i) chestPivot[i] += base[i];
+            nofoot::CrouchNeckArm arms[2];
+            nofoot::CrouchNeckLeg legs[2];
+            bool inputsOk = true;
+            for (int side = 0; side < 2; ++side) {
+                const nofoot::IkArm& a = pl.side[side];
+                if (a.C >= count || a.U >= count || a.F >= count || a.H >= count) { inputsOk = false; continue; }
+                double f[3], h[3];
+                pos(a.C, arms[side].clavicle);
+                pos(a.U, arms[side].shoulder);
+                pos(a.F, f);
+                pos(a.H, h);
+                for (int i = 0; i < 3; ++i) {
+                    arms[side].clavicle[i] += base[i];
+                    arms[side].shoulder[i] += base[i];
+                    arms[side].hand[i] = h[i] + base[i];
+                    arms[side].target[i] = static_cast<double>(handTarget[side][12 + i]);
+                }
+                const double upper[3] = {f[0] - (arms[side].shoulder[0] - base[0]), f[1] - (arms[side].shoulder[1] - base[1]),
+                                         f[2] - (arms[side].shoulder[2] - base[2])};
+                const double fore[3] = {h[0] - f[0], h[1] - f[1], h[2] - f[2]};
+                arms[side].l1 = nofoot::ikLen(upper);
+                arms[side].l2 = nofoot::ikLen(fore);
+                const double wArm = nofoot::ikArmedSolveWeight(armed, armedW, wBase) * (side == 0 ? offW : 1.0);
+                arms[side].active = solveWrite && wArm > 0.0;
+                arms[side].wSolve = arms[side].active ? wArm : 1.0;
+                inputsOk = inputsOk && a.C < count && a.U < count && a.F < count && a.H < count && ikMatrixSane(handTarget[side]);
+            }
+            for (int side = 0; side < 2; ++side) {
+                const nofoot::IkArm& a = pl.leg[side];
+                if (a.U >= count || a.F >= count || a.H >= count) { inputsOk = false; continue; }
+                pos(a.U, legs[side].hip);
+                pos(a.F, legs[side].knee);
+                pos(a.H, legs[side].foot);
+                for (int i = 0; i < 3; ++i) {
+                    legs[side].hip[i] += mv.th[i == 1 ? 1 : i];
+                    legs[side].knee[i] += i == 0 ? mv.th[0] : i == 2 ? mv.th[2] : 0.0;
+                    legs[side].foot[i] += i == 0 ? mv.th[0] : i == 2 ? mv.th[2] : 0.0;
+                }
+                inputsOk = inputsOk && a.U < count && a.F < count && a.H < count;
+            }
+            if (inputsOk) {
+                neckYawInputsHave = true;
+                neckYawBaseMove = mv;
+                std::memcpy(neckYawNeck, neck, sizeof(neckYawNeck));
+                std::memcpy(neckYawChestPivot, chestPivot, sizeof(neckYawChestPivot));
+                std::memcpy(neckYawArms, arms, sizeof(neckYawArms));
+                std::memcpy(neckYawLegs, legs, sizeof(neckYawLegs));
+            }
+        }
     }
     // 3. The reach limit (armed): each shoulder U* (the unbent pose turned by the square-up) within l1 + l2 - 2 cm of its grip, the horizontal move
     // corrected by the armed ramp. T_A = the FP handAttach through G (at d = 0: the pose is pinned in the model space, G does not carry the move).
@@ -11147,6 +11421,59 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             reachCorr = w * std::sqrt(full[0] * full[0] + full[2] * full[2]);
         }
     }
+    // F82: compute the legacy reach proposal first, then use its exact detached endpoint. At full detachment the
+    // original body path above remains byte-for-byte in control; before that endpoint the new solve targets
+    // N*=T+detachW*legacyReachApplied and finds a feasible torso yaw around that neck point.
+    if (neckYawEligible && pc.detachW < 1.0) {
+        const double legacyReach[3] = {pc.reach[0], pc.reach[1], pc.reach[2]};
+        double desiredNeck[3];
+        for (int i = 0; i < 3; ++i) {
+            desiredNeck[i] = T[i] + pc.detachW * legacyReach[i];
+            pc.reach[i] = pc.detachW * legacyReach[i];
+        }
+        mv = nofoot::pinMove(N0, desiredNeck);
+        if (neckYawInputsHave) {
+            const double shift[3] = {mv.th[0] - neckYawBaseMove.th[0], mv.delta - neckYawBaseMove.delta,
+                                     mv.th[2] - neckYawBaseMove.th[2]};
+            for (int i = 0; i < 3; ++i) {
+                neckYawNeck[i] += shift[i];
+                neckYawChestPivot[i] += shift[i];
+                for (int side = 0; side < 2; ++side) {
+                    neckYawArms[side].clavicle[i] += shift[i];
+                    neckYawArms[side].shoulder[i] += shift[i];
+                    neckYawArms[side].hand[i] += shift[i];
+                    if (i != 1) {
+                        neckYawLegs[side].hip[i] += shift[i];
+                        neckYawLegs[side].knee[i] += shift[i];
+                        neckYawLegs[side].foot[i] += shift[i];
+                    }
+                }
+            }
+        }
+        pc.neckYawScope = true;
+        if (neckYawInputsHave) {
+            const nofoot::CrouchNeckYaw yaw = nofoot::crouchNeckYawSelect(neckYawNeck, neckYawChestPivot, neckYawArms, neckYawLegs, mv.delta,
+                                                                           adsPush, 50.0, 0.25);
+            pc.neckYawFeasible = yaw.feasible;
+            pc.neckYawRad = yaw.feasible ? yaw.yawRad : 0.0;
+            if (yaw.feasible) {
+                double turnedNeck[3];
+                nofoot::turnAboutVertical(neckYawNeck, neckYawChestPivot, pc.neckYawRad, turnedNeck);
+                for (int i = 0; i < 3; ++i) pc.neckYawDelta[i] = neckYawNeck[i] - turnedNeck[i];
+                pc.neckYawDelta[1] = 0.0;
+            } else {
+                pc.neckYawShortfallM = nofoot::crouchNeckYawArmShortfall(neckYawNeck, neckYawArms, 0.0, adsPush);
+            }
+        } else {
+            pc.neckYawRefused = true;
+            pc.neckYawShortfallM = -1.0;   // inputs unavailable; the neck still uses the detached target and does not regain the old shove
+        }
+    } else {
+        pc.neckYawScope = false;   // full ADS detachment retains the legacy endpoint exactly
+        pc.neckYawFeasible = false;
+        pc.neckYawRad = 0.0;
+    }
+    for (int i = 0; i < 3; ++i) pc.neckYawTarget[i] = T[i] + pc.reach[i];
     // 2. Apply: the horizontal move to every joint, then the vertical move and the legs.
     bool writeFault = false;
     nofoot::LegSolve ls[2];
@@ -11167,6 +11494,69 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 }
             }
         }
+        if (pc.neckYawScope && pc.neckYawFeasible && pc.neckYawRad != 0.0) {
+            const float* chest = froze && g_ikFzSlot[nofoot::kIkSpine[2]] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[nofoot::kIkSpine[2]]]
+                                                                                   : g_pfzAnim[nofoot::kIkSpine[2]];
+            const double pivot[3] = {chest[12], static_cast<double>(chest[13]) + mv.delta, chest[14]};
+            const double up[3] = {0.0, 1.0, 0.0};
+            double R[9];
+            nofoot::ikRotAxis(up, pc.neckYawRad, R);
+            for (uint32_t k = 0; k < pl.sq.n; ++k) {
+                if (pl.sq.level[k] != 2) continue;   // joint 24 and its complete chest subtree
+                const uint32_t j = pl.sq.j[k];
+                if (j >= count) continue;
+                float tmp[16];
+                std::memcpy(tmp, g_pfzAnim[j], sizeof(tmp));
+                nofoot::ikPivot(tmp, R, pivot, g_pfzAnim[j]);
+                if (froze && g_ikFzSlot[j] != 0xFFFFu) {
+                    std::memcpy(tmp, g_pfzChain[g_ikFzSlot[j]], sizeof(tmp));
+                    nofoot::ikPivot(tmp, R, pivot, g_pfzChain[g_ikFzSlot[j]]);
+                }
+            }
+        }
+        if (pc.neckYawScope && pc.neckYawFeasible) {
+            for (uint32_t j = 0; j < count; ++j) {
+                g_pfzAnim[j][12] = static_cast<float>(static_cast<double>(g_pfzAnim[j][12]) + pc.neckYawDelta[0]);
+                g_pfzAnim[j][14] = static_cast<float>(static_cast<double>(g_pfzAnim[j][14]) + pc.neckYawDelta[2]);
+            }
+            if (froze) {
+                const pfz::Plan& fpl = g_pfzPlanCopy;
+                for (uint32_t k = 0; k < fpl.count && k < nofoot::kPfzMaxF; ++k) {
+                    g_pfzChain[k][12] = static_cast<float>(static_cast<double>(g_pfzChain[k][12]) + pc.neckYawDelta[0]);
+                    g_pfzChain[k][14] = static_cast<float>(static_cast<double>(g_pfzChain[k][14]) + pc.neckYawDelta[2]);
+                }
+            }
+        }
+        const auto undoNeckYaw = [&]() noexcept {
+            for (uint32_t j = 0; j < count; ++j) {
+                g_pfzAnim[j][12] = static_cast<float>(static_cast<double>(g_pfzAnim[j][12]) - pc.neckYawDelta[0]);
+                g_pfzAnim[j][14] = static_cast<float>(static_cast<double>(g_pfzAnim[j][14]) - pc.neckYawDelta[2]);
+            }
+            if (froze) {
+                const pfz::Plan& fpl = g_pfzPlanCopy;
+                for (uint32_t k = 0; k < fpl.count && k < nofoot::kPfzMaxF; ++k) {
+                    g_pfzChain[k][12] = static_cast<float>(static_cast<double>(g_pfzChain[k][12]) - pc.neckYawDelta[0]);
+                    g_pfzChain[k][14] = static_cast<float>(static_cast<double>(g_pfzChain[k][14]) - pc.neckYawDelta[2]);
+                }
+            }
+            if (pc.neckYawRad != 0.0) {
+                const double up[3] = {0.0, 1.0, 0.0};
+                double R[9];
+                nofoot::ikRotAxis(up, -pc.neckYawRad, R);
+                for (uint32_t k = 0; k < pl.sq.n; ++k) {
+                    if (pl.sq.level[k] != 2) continue;
+                    const uint32_t j = pl.sq.j[k];
+                    if (j >= count) continue;
+                    float tmp[16];
+                    std::memcpy(tmp, g_pfzAnim[j], sizeof(tmp));
+                    nofoot::ikPivot(tmp, R, neckYawChestPivot, g_pfzAnim[j]);
+                    if (froze && g_ikFzSlot[j] != 0xFFFFu) {
+                        std::memcpy(tmp, g_pfzChain[g_ikFzSlot[j]], sizeof(tmp));
+                        nofoot::ikPivot(tmp, R, neckYawChestPivot, g_pfzChain[g_ikFzSlot[j]]);
+                    }
+                }
+            }
+        };
         double delta = mv.delta;
         if (!pl.legOk) {
             refusal = kPinRefNoLegs;
@@ -11187,7 +11577,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                     knee0[i] = g_pfzAnim[g.F][12 + i];
                     foot0[i] = g_pfzAnim[g.H][12 + i];
                 }
-                const double hip1[3] = {hip0[0], hip0[1] + delta, hip0[2]};
+                const double footCurrent[3] = {foot0[0], foot0[1], foot0[2]};
+                const bool holdFeet = pc.neckYawScope && pc.neckYawFeasible && std::fabs(pc.neckYawRad) > 1e-12;
+                if (holdFeet) {
+                    for (int i = 0; i < 3; ++i) {
+                        hip0[i] -= pc.neckYawDelta[i];
+                        knee0[i] -= pc.neckYawDelta[i];
+                        foot0[i] -= pc.neckYawDelta[i];
+                    }
+                }
+                const double hip1[3] = {hip0[0] + (holdFeet ? pc.neckYawDelta[0] : 0.0), hip0[1] + delta,
+                                        hip0[2] + (holdFeet ? pc.neckYawDelta[2] : 0.0)};
                 const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]};
                 const double kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]};
                 double fb[3] = {hk[0], 0.0, hk[2]};
@@ -11197,19 +11597,42 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                     fb[2] = 1.0;
                 }
                 const double hf0[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
-                lp[k] = nofoot::legPlant(hip1, foot0, nofoot::ikLen(hk), nofoot::ikLen(kf), fb, nofoot::ikLen(hf0));
+                if (holdFeet) {
+                    lp[k].foot[0] = foot0[0];
+                    lp[k].foot[1] = foot0[1];
+                    lp[k].foot[2] = foot0[2];
+                    lp[k].reachBefore = nofoot::ikLen(hf0) / (nofoot::ikLen(hk) + nofoot::ikLen(kf));
+                    const double heldHip[3] = {lp[k].foot[0] - hip1[0], lp[k].foot[1] - hip1[1], lp[k].foot[2] - hip1[2]};
+                    const double legSpan = nofoot::ikLen(hk) + nofoot::ikLen(kf);
+                    lp[k].reachAfter = legSpan > 1e-9 ? nofoot::ikLen(heldHip) / legSpan : 0.0;
+                } else {
+                    lp[k] = nofoot::legPlant(hip1, foot0, nofoot::ikLen(hk), nofoot::ikLen(kf), fb, nofoot::ikLen(hf0));
+                }
                 ls[k] = nofoot::legSolveTo(hip0, knee0, foot0, hip1, lp[k].foot);
-                if (!ls[k].ok) legsSolved = false;
-                for (int i = 0; i < 3; ++i) footMoved[k][i] = lp[k].foot[i] - foot0[i];
+                if (holdFeet) pc.neckYawFootErrorM = std::max(pc.neckYawFootErrorM, ls[k].footErrM);
+                if (!ls[k].ok || (holdFeet && (ls[k].limited || ls[k].footErrM > 1e-4))) legsSolved = false;
+                for (int i = 0; i < 3; ++i) footMoved[k][i] = lp[k].foot[i] - (holdFeet ? footCurrent[i] : foot0[i]);
             }
             if (legsSolved) break;
+            if (attempt == 0 && pc.neckYawScope && pc.neckYawFeasible && std::fabs(pc.neckYawRad) > 1e-12) {
+                undoNeckYaw();
+                pc.neckYawRefused = true;
+                pc.neckYawFeasible = false;
+                pc.neckYawRad = 0.0;
+                pc.neckYawDelta[0] = pc.neckYawDelta[1] = pc.neckYawDelta[2] = 0.0;
+                pc.neckYawShortfallM = nofoot::crouchNeckYawArmShortfall(neckYawNeck, neckYawArms, 0.0, adsPush);
+                refusal = kPinRefKinds;
+                continue;   // retry the ordinary zero-yaw plant at N*, without leaving the rejected pose in the animated matrices
+            }
             if (attempt == 0 && delta != 0.0) {
                 delta = 0.0;   // try again without the vertical move
                 refusal = kPinRefLeg;
+                if (pc.neckYawScope) pc.neckYawRefused = true;
                 continue;
             }
             break;
         }
+        if (!legsSolved && pc.neckYawScope && pc.neckYawFeasible && std::fabs(pc.neckYawRad) > 1e-12) pc.neckYawRefused = true;
         if (!legsSolved && refusal == kPinRefKinds && pl.legOk) refusal = kPinRefLeg;
         if (!legsSolved) delta = 0.0;
         mv.delta = delta;
@@ -11291,6 +11714,20 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 for (uint32_t m = 0; m < g.nH && legsSolved; ++m) legsSolved = ikMatrixSane(g_pinOut[g.gH[m]]);
             }
             if (!legsSolved && refusal == kPinRefKinds) refusal = kPinRefLeg;
+        }
+        // A late matrix-construction failure can happen after both analytic leg solves passed. Before any leg
+        // output is committed, undo a still-applied protected yaw/repin and publish the ordinary safe pose with
+        // an explicit refusal. This is a per-frame refusal, not a write fault that disables the IK session.
+        if (pc.neckYawScope && !legsSolved) {
+            if (pc.neckYawFeasible && std::fabs(pc.neckYawRad) > 1e-12) undoNeckYaw();
+            pc.neckYawRefused = true;
+            pc.neckYawFeasible = false;
+            pc.neckYawRad = 0.0;
+            pc.neckYawDelta[0] = pc.neckYawDelta[1] = pc.neckYawDelta[2] = 0.0;
+            if (neckYawInputsHave) pc.neckYawShortfallM = nofoot::crouchNeckYawArmShortfall(neckYawNeck, neckYawArms, 0.0, adsPush);
+            refusal = kPinRefLeg;
+            delta = 0.0;
+            mv.delta = 0.0;
         }
         if (legsSolved) {
             // The upper body moved by delta (the freeze's chain too), the legs' groups replaced by the solved matrices.
@@ -11436,6 +11873,23 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
     if (!pc.valid) return;
     g_pinStatSeq.fetch_add(1, std::memory_order_acq_rel);
     PinStats& st = g_pinStats;
+    if (pc.neckYawScope) {
+        ++st.neckYawCalls;
+        const double yawDeg = pc.neckYawRad * 180.0 / nofoot::kIkPi;
+        st.neckYawDegSum += yawDeg;
+        st.neckYawDegMax = std::max(st.neckYawDegMax, std::fabs(yawDeg));
+        if (pc.neckYawFeasible) ++st.neckYawFeasible;
+        else ++st.neckYawNoCandidate;
+        if (pc.neckYawRefused) ++st.neckYawRefused;
+        double err2 = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const double e = resFinal[i] + (pc.neckYawTarget[i] - pc.T[i]);
+            err2 += e * e;
+        }
+        st.neckErrorMaxCm = std::max(st.neckErrorMaxCm, 100.0 * std::sqrt(err2));
+        st.neckFootErrorMaxMm = std::max(st.neckFootErrorMaxMm, pc.neckYawFootErrorM * 1000.0);
+        st.neckShortfallMaxCm = std::max(st.neckShortfallMaxCm, pc.neckYawShortfallM * 100.0);
+    }
     const double rest[3] = {pc.E[0] - pc.T[0], pc.E[1] - pc.T[1], pc.E[2] - pc.T[2]};
     for (int pass = 0; pass < 2; ++pass) {
         if (pass == 1 && !pc.armed) break;
@@ -12416,8 +12870,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     }
     PinCall pinCall;
     if (pinWanted && !g_ikWriteDown.load(std::memory_order_relaxed) &&
-        !pinStage0(pl, sp, froze, now, armsOk ? &G : nullptr, armsOk ? fpm : nullptr, armedNow, static_cast<double>(armedW), armsOk ? effectiveHand : nullptr, wSqRamp, sqAmount, barrelDirs, sqArmed,
-                   offW, pinCall)) {
+        !pinStage0(pl, sp, froze, now, armsOk ? &G : nullptr, armsOk ? fpm : nullptr, armedNow, static_cast<double>(armedW), itemSerialForCall, adsPush,
+                   static_cast<double>(wBase), writeOk, armsOk ? effectiveHand : nullptr, wSqRamp, sqAmount, barrelDirs, sqArmed, offW, pinCall)) {
         resetPhysicalPole();
         g_ikWriteDown.store(true, std::memory_order_relaxed);
         return ikRefuse(kIkRefWrite);
@@ -12499,7 +12953,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     nofoot::BendClamp bendCl;
     double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0, bendLean = 0.0;
     uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
-    if (bendRun) {
+    const bool neckProtected = pinCall.neckYawScope;
+    if (neckProtected) {
+        // The protected neck already sits on the pin target. Clear any angle retained from the prior pose so it
+        // cannot pull the neck away; keeping the timestamp current makes release start from zero.
+        g_bendApplied[0] = g_bendApplied[1] = 0.0;
+        g_bendAppliedMs = now;
+    }
+    if (bendRun && !neckProtected) {
         BendTarget bt;
         // F67c: in the pin's scope the target is this frame's neck target (the pin's T), from P1's camera of the same game frame, not the frame
         // thread's republication of a sample that is 0..2 game frames old at a 90 Hz tick against a 61 Hz game (the F66 judder).
@@ -14015,6 +14476,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             capture.poseRig = fpHands.x;
             capture.poseRigGeneration = fpHands.generation;
             capture.posePlanX = pl.x;
+            for (int side = 0; side < 2; ++side) {
+                capture.poseArmJoints[side][0] = pl.side[side].U;
+                capture.poseArmJoints[side][1] = pl.side[side].F;
+                capture.poseArmJoints[side][2] = pl.side[side].H;
+            }
             capture.posePinValid = pinCall.valid;
             capture.poseCrouchWeight = static_cast<float>(pinCall.wc);
             capture.posePinDetach = static_cast<float>(pinCall.detachW);
@@ -14044,14 +14510,15 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             for (int j = 0; j < 4; ++j) capture.poseMatricesValid = finalMatrixAt(finalTorsoJoints[j], capture.poseFinalTorso[j]) && capture.poseMatricesValid;
             if (armsOk) {
                 std::memcpy(capture.poseRoot, G.g, sizeof(capture.poseRoot));
-                std::memcpy(capture.poseM3p, G.m3p, sizeof(capture.poseM3p));
+                capture.poseM3pAffineValid = nofoot::pfzCanonicalizeAffineMatrix(G.m3p, capture.poseM3p, &capture.poseM3pPaddingFinite);
+                capture.poseM3pPaddingCanonicalized = capture.poseM3pAffineValid;
                 std::memcpy(capture.poseFroot, G.froot, sizeof(capture.poseFroot));
             } else capture.poseMatricesValid = false;
             for (auto& matrix : capture.poseRawTorso) for (float v : matrix) capture.poseRawMatricesValid = capture.poseRawMatricesValid && std::isfinite(v);
             for (auto& matrix : capture.poseFinalTorso) for (float v : matrix) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
             if (armsOk) {
                 for (float v : capture.poseRoot) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
-                for (float v : capture.poseM3p) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
+                capture.poseMatricesValid = capture.poseMatricesValid && capture.poseM3pAffineValid;
                 for (float v : capture.poseFroot) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
             }
             for (const auto& side : capture.poseArm) for (const auto& point : side) for (float v : point) capture.poseMatricesValid = capture.poseMatricesValid && std::isfinite(v);
@@ -15569,6 +16036,12 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         st.reachWant, static_cast<unsigned long long>(st.pinned), st.reachActive, st.reachInfeasible, st.reachCorrSum / n, st.reachCorrMax,
                         st.d0Sum[0] / n, st.d0Sum[1] / n, st.dSum[0] / n, st.dSum[1] / n);
     }
+    if (st.neckYawCalls) {
+        Log::get().note("native on foot body pin (F82 laser rifle): %u protected frames; feasible %u, no candidate %u, runtime leg refusal %u; selected yaw mean %+.2f max %.2f deg; actual error vs T+detach*legacy-reach max %.2f cm; held-foot error max %.2f mm; no-candidate elbow shortfall max %.2f cm",
+                        st.neckYawCalls, st.neckYawFeasible, st.neckYawNoCandidate, st.neckYawRefused,
+                        st.neckYawDegSum / static_cast<double>(st.neckYawCalls), st.neckYawDegMax, st.neckErrorMaxCm,
+                        st.neckFootErrorMaxMm, st.neckShortfallMaxCm);
+    }
 }
 
 void installEyeProbeOnce() {
@@ -15713,14 +16186,26 @@ void weaponUiTelemetryTick(uint64_t nowMs) {
     const uint64_t activated = g_weaponUiPatchActiveEvents.exchange(0, std::memory_order_relaxed);
     const uint64_t restored = g_weaponUiPatchRestoreEvents.exchange(0, std::memory_order_relaxed);
     const uint64_t overflow = g_weaponUiRowsOverflow.exchange(0, std::memory_order_relaxed);
+    const uint64_t getterEntered = g_weaponUiGetterEntered.load(std::memory_order_relaxed);
+    const uint64_t getterCaptured = g_weaponUiGetterCaptured.load(std::memory_order_relaxed);
+    const uint64_t getterJoined = g_weaponUiGetterJoined.load(std::memory_order_relaxed);
+    const uint64_t getterRefused = g_weaponUiGetterRefused.load(std::memory_order_relaxed);
+    const uint64_t getterNoMatrix = g_weaponUiGetterMissingMatrix.load(std::memory_order_relaxed);
+    const uint64_t getterNoCamera = g_weaponUiGetterMissingCamera.load(std::memory_order_relaxed);
+    const int getterState = g_weaponUiGetterPatchState.load(std::memory_order_relaxed);
     const bool patchActive = g_weaponUiPatchLive.load(std::memory_order_relaxed);
-    if (!patchActive && !activated && !restored && !flag0 && !flag1 && !unmatched && !noTls && !refused && !overflow) return;
-    Log::get().note("native on foot weapon UI: branch=%s activated=%llu restored=%llu submit-original-facing0=%llu facing1=%llu unmatched=%llu no-TLS=%llu refused=%llu row-overflow=%llu submit-hook=%s",
+    if (!patchActive && getterState != 1 && !activated && !restored && !flag0 && !flag1 && !unmatched && !noTls && !refused && !overflow &&
+        !getterEntered && !getterCaptured && !getterJoined && !getterRefused && !getterNoMatrix && !getterNoCamera) return;
+    const char* getterStateName = getterState == 1 ? "installed" : getterState == 2 ? "refused" : getterState == 3 ? "restored" : "untried";
+    Log::get().note("native on foot weapon UI: branch=%s activated=%llu restored=%llu submit-original-facing0=%llu facing1=%llu unmatched=%llu no-TLS=%llu refused=%llu row-overflow=%llu submit-hook=%s; getter=%s entered=%llu captured=%llu joined=%llu refused=%llu missing-attachment=%llu missing-camera=%llu",
                     patchActive ? "active" : "inactive",
                     static_cast<unsigned long long>(activated), static_cast<unsigned long long>(restored),
                     static_cast<unsigned long long>(flag0), static_cast<unsigned long long>(flag1),
                     static_cast<unsigned long long>(unmatched), static_cast<unsigned long long>(noTls), static_cast<unsigned long long>(refused),
-                    static_cast<unsigned long long>(overflow), g_weaponUiRenderProbeArmed ? "armed" : "unavailable");
+                    static_cast<unsigned long long>(overflow), g_weaponUiRenderProbeArmed ? "armed" : "unavailable", getterStateName,
+                    static_cast<unsigned long long>(getterEntered), static_cast<unsigned long long>(getterCaptured),
+                    static_cast<unsigned long long>(getterJoined), static_cast<unsigned long long>(getterRefused),
+                    static_cast<unsigned long long>(getterNoMatrix), static_cast<unsigned long long>(getterNoCamera));
     for (const auto& row : rows) {
         if (!row.used || !row.count) continue;
         Log::get().note("native on foot weapon UI part: name-id=%u original-facing=%u space=%d submits=%llu",
@@ -16050,6 +16535,9 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
         r.poseEyeCalAxesValid = poseRow.poseEyeCalAxesValid;
         r.poseMatricesValid = poseRow.poseMatricesValid;
         r.poseRawMatricesValid = poseRow.poseRawMatricesValid;
+        r.poseM3pAffineValid = poseRow.poseM3pAffineValid;
+        r.poseM3pPaddingFinite = poseRow.poseM3pPaddingFinite;
+        r.poseM3pPaddingCanonicalized = poseRow.poseM3pPaddingCanonicalized;
         r.posePinEyeCalValid = poseRow.posePinEyeCalValid;
         r.poseWriteFresh = poseRow.poseWriteFresh;
         r.poseRig = poseRow.poseRig;
@@ -16114,7 +16602,7 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
     if (!g_opticCaptureLedger.armed) return;
     g_opticCaptureLedger.end(rows, rowCount);
     uint32_t counts[9] = {};
-    uint32_t poseCounts[9] = {}, sceneEyeCounts[7] = {}, uiRows = 0, uiDropped = 0;
+    uint32_t poseCounts[9] = {}, sceneEyeCounts[7] = {}, uiRows = 0, uiDropped = 0, uiGetterJoined = 0, uiCameraValid = 0, uiAttachmentValid = 0;
     unsigned callbacks = 0;
     for (uint32_t i = 0; i < kCount; ++i) {
         const Record& r = g_opticCaptureLedger.rows[i];
@@ -16126,6 +16614,11 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
             ++sceneEyeCounts[static_cast<unsigned>(r.sceneEyeState) < 7 ? static_cast<unsigned>(r.sceneEyeState) : 6u];
             uiRows += r.uiCount;
             uiDropped += r.uiDropped;
+            for (unsigned u = 0; u < r.uiCount && u < kUiRowsPerEye; ++u) {
+                uiGetterJoined += r.ui[u].joinedGetter ? 1u : 0u;
+                uiCameraValid += r.ui[u].cameraValid ? 1u : 0u;
+                uiAttachmentValid += r.ui[u].attachmentValid ? 1u : 0u;
+            }
         }
     }
     const std::wstring dir = Log::get().dir() + L"\\eyes";
@@ -16168,7 +16661,7 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     r.sceneEyeRowsOwn ? "true" : "false", r.sceneEyeRowsBound ? "true" : "false", r.sceneEyeFollow, r.sceneEyeFrame,
                     static_cast<unsigned long long>(r.sceneEyeQpc));
             opticWriteVec(f, r.sceneEyeRows, 12);
-            fprintf(f, ",\"pose_state\":\"%s\",\"pose_fp_render_frame\":%u,\"pose_hook_render_frame\":%u,\"pose_root_read_frame\":%u,\"pose_fp_sequence\":%u,\"pose_g_game_frame\":%u,\"pose_item_serial\":%u,\"pose_fp_rig\":%llu,\"pose_fp_rig_generation\":%u,\"pose_source_fp_render_frame\":%u,\"pose_source_hook_render_frame\":%u,\"pose_source_root_read_frame\":%u,\"pose_source_fp_sequence\":%u,\"pose_source_g_game_frame\":%u,\"pose_source_item_serial\":%u,\"pose_source_fp_rig\":%llu,\"pose_source_fp_rig_generation\":%u,\"pose_plan_x\":%llu,\"pose_plan_generation\":%u,\"pose_qpc\":%llu,\"pose_fp_qpc\":%llu,\"pose_g_root_read_qpc\":%llu,\"pose_write_mask\":%u,\"pose_write_fresh\":%s,\"pose_matrices_valid\":%s,\"pose_raw_matrices_valid\":%s,\"pose_pin_valid\":%s,\"pose_eye_cal_have\":%s,\"pose_eye_cal_axes_valid\":%s,\"pose_pin_eye_cal_valid\":%s,\"pose_arm\":[",
+            fprintf(f, ",\"pose_state\":\"%s\",\"pose_fp_render_frame\":%u,\"pose_hook_render_frame\":%u,\"pose_root_read_frame\":%u,\"pose_fp_sequence\":%u,\"pose_g_game_frame\":%u,\"pose_item_serial\":%u,\"pose_fp_rig\":%llu,\"pose_fp_rig_generation\":%u,\"pose_source_fp_render_frame\":%u,\"pose_source_hook_render_frame\":%u,\"pose_source_root_read_frame\":%u,\"pose_source_fp_sequence\":%u,\"pose_source_g_game_frame\":%u,\"pose_source_item_serial\":%u,\"pose_source_fp_rig\":%llu,\"pose_source_fp_rig_generation\":%u,\"pose_plan_x\":%llu,\"pose_plan_generation\":%u,\"pose_qpc\":%llu,\"pose_fp_qpc\":%llu,\"pose_g_root_read_qpc\":%llu,\"pose_write_mask\":%u,\"pose_write_fresh\":%s,\"pose_matrices_valid\":%s,\"pose_raw_matrices_valid\":%s,\"pose_m3p_affine_valid\":%s,\"pose_m3p_padding_finite\":%s,\"pose_m3p_padding_canonicalized\":%s,\"pose_pin_valid\":%s,\"pose_eye_cal_have\":%s,\"pose_eye_cal_axes_valid\":%s,\"pose_pin_eye_cal_valid\":%s,\"pose_arm\":[",
                     opticPoseStateName(r.poseState), r.poseKey.renderFrame, r.poseKey.hookRenderFrame, r.poseKey.rootReadFrame, r.poseKey.fpSequence, r.poseKey.gGameFrame, r.poseKey.itemSerial,
                     static_cast<unsigned long long>(r.poseKey.rig), r.poseKey.rigGeneration,
                     r.poseSourceKey.renderFrame, r.poseSourceKey.hookRenderFrame, r.poseSourceKey.rootReadFrame, r.poseSourceKey.fpSequence, r.poseSourceKey.gGameFrame, r.poseSourceKey.itemSerial,
@@ -16176,6 +16669,7 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     static_cast<unsigned long long>(r.posePlanX), r.posePlanGeneration,
                     static_cast<unsigned long long>(r.poseQpc), static_cast<unsigned long long>(r.poseFpQpc), static_cast<unsigned long long>(r.poseGQpc),
                     r.poseWriteMask, r.poseWriteFresh ? "true" : "false", r.poseMatricesValid ? "true" : "false", r.poseRawMatricesValid ? "true" : "false",
+                    r.poseM3pAffineValid ? "true" : "false", r.poseM3pPaddingFinite ? "true" : "false", r.poseM3pPaddingCanonicalized ? "true" : "false",
                     r.posePinValid ? "true" : "false", r.poseEyeCalHave ? "true" : "false", r.poseEyeCalAxesValid ? "true" : "false", r.posePinEyeCalValid ? "true" : "false");
             for (int side = 0; side < 2; ++side) {
                 if (side) fputc(',', f);
@@ -16202,16 +16696,24 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
             opticWriteVec(f, r.poseReachCandidate, 3); fputs(",\"reach_applied\":", f); opticWriteVec(f, r.poseReachApplied, 3);
             fprintf(f, ",\"clearance_have\":%u,\"clearance_inside\":%u,\"clearance\":[", r.poseClearanceHave, r.poseClearanceInside);
             for (int j = 0; j < 6; ++j) { if (j) fputc(',', f); opticWriteVec(f, r.poseClearance[j], 3); }
-            fprintf(f, "],\"ui_count\":%u,\"ui_dropped\":%u,\"ui_camera_attachment_available\":false,\"ui\":[", r.uiCount, r.uiDropped);
+            fprintf(f, "],\"ui_count\":%u,\"ui_dropped\":%u,\"ui\":[", r.uiCount, r.uiDropped);
             for (unsigned j = 0; j < r.uiCount && j < kUiRowsPerEye; ++j) {
                 const auto& u = r.ui[j]; if (j) fputc(',', f);
-                fprintf(f, "{\"valid\":%s,\"item_read\":%s,\"fresh\":%s,\"fields_valid\":%s,\"instance_valid\":%s,\"eye\":\"unknown_at_submit\",\"render_frame\":%u,\"item_serial\":%u,\"qpc\":%llu,\"name_id\":%u,\"facing\":%u,\"space\":%d,\"distance_scale\":%s,\"width\":",
+                fprintf(f, "{\"valid\":%s,\"item_read\":%s,\"fresh\":%s,\"fields_valid\":%s,\"instance_valid\":%s,\"eye\":\"unknown_at_submit\",\"render_frame\":%u,\"item_serial\":%u,\"qpc\":%llu,\"renderer_id\":\"%llX\",\"part_id\":\"%llX\",\"instance_id\":\"%llX\",\"name_id\":%u,\"facing\":%u,\"space\":%d,\"distance_scale\":%s,\"width\":",
                         u.valid ? "true" : "false", u.itemRead ? "true" : "false", u.fresh ? "true" : "false", u.fieldsValid ? "true" : "false", u.instanceValid ? "true" : "false",
-                        u.renderFrame, u.itemSerial, static_cast<unsigned long long>(u.qpc), u.nameId, u.facing, u.space,
+                        u.renderFrame, u.itemSerial, static_cast<unsigned long long>(u.qpc), static_cast<unsigned long long>(u.rendererIdentity),
+                        static_cast<unsigned long long>(u.partIdentity), static_cast<unsigned long long>(u.instanceIdentity), u.nameId, u.facing, u.space,
                         u.distanceScale ? "true" : "false");
                 opticWriteFloat(f, u.width); fputs(",\"height\":", f); opticWriteFloat(f, u.height); fputs(",\"pixel_offset\":", f); opticWriteVec(f, u.pixelOffset, 2);
                 fputs(",\"anchor\":", f); opticWriteVec(f, u.anchor, 2); fputs(",\"base_scale\":", f); opticWriteFloat(f, u.baseScale); fputs(",\"instance_scale\":", f); opticWriteFloat(f, u.instanceScale); fputs(",\"instance_matrix\":", f);
-                opticWriteVec(f, u.instance, 16); fputs(",\"camera_available\":false,\"attachment_available\":false}", f);
+                opticWriteVec(f, u.instance, 16);
+                fprintf(f, ",\"getter_joined\":%s,\"getter_qpc\":%llu,\"camera_pointer\":\"%llX\",\"camera_available\":%s,\"camera_valid\":%s,\"camera\":",
+                        u.joinedGetter ? "true" : "false", static_cast<unsigned long long>(u.getterQpc), static_cast<unsigned long long>(u.cameraPointer),
+                        u.cameraAvailable ? "true" : "false", u.cameraValid ? "true" : "false");
+                opticWriteVec(f, u.camera, 16);
+                fprintf(f, ",\"attachment_available\":%s,\"attachment_valid\":%s,\"attachment\":",
+                        u.attachmentAvailable ? "true" : "false", u.attachmentValid ? "true" : "false");
+                opticWriteVec(f, u.attachment, 16); fputc('}', f);
             }
             fputs("]}", f);
         }
@@ -16226,7 +16728,7 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     counts[static_cast<unsigned>(SourceState::Stale)], counts[static_cast<unsigned>(SourceState::Future)],
                     counts[static_cast<unsigned>(SourceState::Invalid)], counts[static_cast<unsigned>(SourceState::Unmatched)], counts[8],
                     unmatchedCallbacks, g_opticCaptureLedger.duplicates, manifest ? "written" : "write failed");
-    Log::get().note("F81 synchronized coverage: pose matched/missing/stale/future/identity-mismatch/frame-mismatch/no-write/invalid/unrequested %u/%u/%u/%u/%u/%u/%u/%u/%u; scene-eye matched/not-own/missing/stale/future/invalid/unrequested %u/%u/%u/%u/%u/%u/%u; submit rows %u, submit rows dropped %u; camera and raw attachment were not available at existing submit hook",
+    Log::get().note("F82 synchronized coverage: pose matched/missing/stale/future/identity-mismatch/frame-mismatch/no-write/invalid/unrequested %u/%u/%u/%u/%u/%u/%u/%u/%u; scene-eye matched/not-own/missing/stale/future/invalid/unrequested %u/%u/%u/%u/%u/%u/%u; UI submit rows %u (dropped %u), exact getter joins %u, valid camera %u, valid attachment %u",
                     poseCounts[static_cast<unsigned>(PoseState::Matched)], poseCounts[static_cast<unsigned>(PoseState::Missing)],
                     poseCounts[static_cast<unsigned>(PoseState::Stale)], poseCounts[static_cast<unsigned>(PoseState::Future)],
                     poseCounts[static_cast<unsigned>(PoseState::IdentityMismatch)], poseCounts[static_cast<unsigned>(PoseState::FrameMismatch)],
@@ -16235,7 +16737,7 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                     sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Matched)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::NotOwn)],
                     sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Missing)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Stale)],
                     sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Future)], sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Invalid)],
-                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Unrequested)], uiRows, uiDropped);
+                    sceneEyeCounts[static_cast<unsigned>(SceneEyeState::Unrequested)], uiRows, uiDropped, uiGetterJoined, uiCameraValid, uiAttachmentValid);
 }
 
 // F18 (declared in native_on_foot.h): the DrawIndexedInstanced thunk calls this only when nativeOnFootBodyCullWanted() and on the owner
@@ -20458,6 +20960,46 @@ uint32_t nativeOnFootRenderFrame() {
     return g_f44Frame.load(std::memory_order_relaxed);
 }
 
+bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out) {
+    if (!out) return false;
+    *out = NativeOnFootPoseStamp{};
+    if (!renderFrame || renderFrame == ~uint32_t(0)) return false;
+    const uint32_t head = g_f81PoseCaptureHead.load(std::memory_order_acquire);
+    const uint32_t begin = head > kF81PoseCaptureRows ? head - kF81PoseCaptureRows : 0;
+    for (uint32_t n = head; n > begin;) {
+        nofoot::optic_capture::Record row{};
+        --n;
+        if (!f81PoseCaptureCopy(n, &row) || row.poseKey.hookRenderFrame != renderFrame) continue;
+        out->renderFrame = row.poseKey.hookRenderFrame;
+        out->fpFrame = row.poseKey.renderFrame;
+        out->fpSequence = row.poseKey.fpSequence;
+        out->gGameFrame = row.poseKey.gGameFrame;
+        out->itemSerial = row.poseKey.itemSerial;
+        out->rig = row.poseKey.rig;
+        out->rigGeneration = row.poseKey.rigGeneration;
+        out->qpc = row.poseQpc;
+        std::memcpy(out->armJoints, row.poseArmJoints, sizeof(out->armJoints));
+        out->writePresent = row.poseWriteMask != 0;
+        out->matricesValid = row.poseMatricesValid && row.poseRawMatricesValid;
+        out->sourceFresh = row.poseWriteFresh;
+        LARGE_INTEGER frequency{};
+        const uint64_t nowQpc = f30Qpc();
+        const uint64_t maxAgeQpc = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0
+            ? static_cast<uint64_t>(frequency.QuadPart / 10) : 0;
+        const auto fresh = [&](uint64_t stamp) {
+            return stamp && nowQpc && stamp <= nowQpc && maxAgeQpc && nowQpc - stamp <= maxAgeQpc;
+        };
+        const bool frameIdentity = row.poseKey.renderFrame == renderFrame && row.poseKey.rootReadFrame == renderFrame &&
+                                   row.poseKey.hookRenderFrame == renderFrame && row.poseKey.fpSequence &&
+                                   row.poseKey.gGameFrame != ~uint32_t(0) && row.poseKey.itemSerial && row.poseKey.rig &&
+                                   row.poseKey.rigGeneration;
+        out->valid = frameIdentity && out->writePresent && out->matricesValid && out->sourceFresh &&
+                     fresh(row.poseKey.qpc) && fresh(row.poseFpQpc) && fresh(row.poseGQpc) && fresh(row.poseQpc);
+        return true;
+    }
+    return false;
+}
+
 bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]) {
     if ((eye != 0 && eye != 1) || frame == ~0u) return false;
     const f44::ResCell& c = f44::g_resRing[eye][frame % f44::kResRing];
@@ -20555,6 +21097,10 @@ bool ensurePrivate(ID3D11DeviceContext* ctx, ID3D11Buffer* cb0) {
 }
 }  // namespace f44
 }  // namespace
+
+extern "C" void weaponUiGetterObserved(const WeaponUiGetterObservation* observation) noexcept {
+    weaponUiGetterObserve(observation);
+}
 
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     using namespace f44;
@@ -20732,8 +21278,10 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const bool weaponUiWasApplied = g_weaponUiPatch.applied;
     const uint64_t weaponUiRestoreSerial = g_weaponUiPatch.restoreSerial;
     const bool weaponUiWant = nofoot::weaponUiPatchWanted(nativeOnFootActive(), session);
+    if (!weaponUiWant) weaponUiGetterCallTick(false); // restore the call before the overlapping 25-byte MeshSite check
     meshSiteTick(g_weaponUiPatch, weaponUiWant,
                  !nativeOnFootActive() ? "native stereo on foot ended" : !session ? "the game session ended" : "the requested mode ended");
+    if (weaponUiWant && g_weaponUiPatch.applied) weaponUiGetterCallTick(true);
     g_weaponUiPatchLive.store(g_weaponUiPatch.applied, std::memory_order_relaxed);
     g_weaponUiSubmitGate.store(g_weaponUiRenderProbeArmed && weaponUiWant && g_weaponUiPatch.applied, std::memory_order_relaxed);
     if (!weaponUiWasApplied && g_weaponUiPatch.applied) g_weaponUiPatchActiveEvents.fetch_add(1, std::memory_order_relaxed);
@@ -20879,6 +21427,7 @@ void nativeOnFootShutdown() {
     hudOverrideTick(false, "the game is shutting down");
     codePatchTick(g_panelPatch, false, "the game is shutting down");
     meshSiteTick(g_meshCreate, false, "the game is shutting down");
+    weaponUiGetterCallTick(false);
     meshSiteTick(g_weaponUiPatch, false, "the game is shutting down");
     g_weaponUiPatchLive.store(g_weaponUiPatch.applied, std::memory_order_relaxed);
 

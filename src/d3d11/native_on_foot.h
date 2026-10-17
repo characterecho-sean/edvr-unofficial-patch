@@ -304,6 +304,18 @@ inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
 uint32_t nativeOnFootMarkerFrameNow();
 // The Present-boundary render/Animate frame identity for joining captures across frame domains.
 uint32_t nativeOnFootRenderFrame();
+struct NativeOnFootPoseStamp {
+    bool valid = false, writePresent = false, matricesValid = false, sourceFresh = false;
+    uint32_t renderFrame = 0, fpFrame = 0, fpSequence = 0, gGameFrame = 0, itemSerial = 0, rigGeneration = 0;
+    uint64_t rig = 0, qpc = 0;
+    uint16_t armJoints[2][3] = {}; // U/F/H indices for left and right.
+};
+struct WeaponUiGetterObservation {
+    uintptr_t renderer = 0, part = 0, cameraPointer = 0;
+    float attachment[16] = {};
+};
+// Copy the newest completed after-write pose stamp for this exact native render frame.
+bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out);
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).

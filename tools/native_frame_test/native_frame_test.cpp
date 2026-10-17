@@ -9,6 +9,7 @@
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 
 #include <d3d11.h>
+#include <immintrin.h>
 #include <wrl/client.h>
 #include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
 
@@ -31,6 +32,26 @@ bool journalOnFoot() { return g_onFoot; }
 }
 
 using Microsoft::WRL::ComPtr;
+
+extern "C" uintptr_t g_weaponUiGetterTarget = 0;
+extern "C" uint64_t g_weaponUiProbeCalls = 0;
+extern "C" uint64_t g_weaponUiProbeArgs[2] = {};
+extern "C" void weaponUiProbeFakeGetter();
+extern "C" void weaponUiGetterCallStub();
+extern "C" uint64_t weaponUiProbeTestInvoke(void* result, uintptr_t renderer, uintptr_t part, uintptr_t camera);
+struct WeaponUiProbeResult {
+    uint64_t rax = 0, rcx = 0, rdx = 0, r8 = 0, r9 = 0, r10 = 0, r11 = 0, flags = 0;
+    float xmm[6][4] = {};
+    uint32_t mxcsr = 0;
+};
+static edvr::WeaponUiGetterObservation g_weaponUiProbeObserved{};
+static bool g_weaponUiProbeObservedValid = false;
+extern "C" void weaponUiProbeRecordObservation(const edvr::WeaponUiGetterObservation* observation) {
+    if (observation) {
+        g_weaponUiProbeObserved = *observation;
+        g_weaponUiProbeObservedValid = true;
+    }
+}
 
 static EdvrNativeFrameInput input(uint64_t generation, uint64_t reference,
                                   uint64_t sequence, bool valid = true) {
@@ -1900,6 +1921,19 @@ int wmain(int argc, wchar_t** argv) {
                 check(poseJoinCases && exactWeaponUiJoin,
                       "F81: exact after-write pose joins distinguish missing, stale, future, frame/identity mismatch, no-write and invalid; UI rows require exact render/item identity");
                 check(sceneEyeRetained, "F81: exact scene-eye rows are retained independently from engine eye matrices");
+                float rawAffine[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1};
+                rawAffine[15] = std::numeric_limits<float>::quiet_NaN();
+                float serializedAffine[16] = {};
+                bool rawPaddingFinite = true;
+                const bool paddedAffineValid = nf::pfzCanonicalizeAffineMatrix(rawAffine, serializedAffine, &rawPaddingFinite);
+                const bool canonicalPadding = paddedAffineValid && !rawPaddingFinite && serializedAffine[3] == 0.0f && serializedAffine[7] == 0.0f &&
+                    serializedAffine[11] == 0.0f && serializedAffine[15] == 1.0f && serializedAffine[12] == 2.0f && serializedAffine[13] == 3.0f && serializedAffine[14] == 4.0f;
+                rawAffine[5] = std::numeric_limits<float>::quiet_NaN();
+                const bool badBasisRejected = !nf::pfzCanonicalizeAffineMatrix(rawAffine, serializedAffine);
+                rawAffine[5] = 1.0f; rawAffine[13] = std::numeric_limits<float>::infinity();
+                const bool badTranslationRejected = !nf::pfzCanonicalizeAffineMatrix(rawAffine, serializedAffine);
+                check(canonicalPadding && badBasisRejected && badTranslationRejected,
+                      "F82: affine snapshot accepts nonsemantic NaN padding, canonicalizes serialized padding with an explicit validity signal, and rejects nonfinite basis or translation");
                 OpticRecord invalidBasis; invalidBasis.p14BasisValid = false; invalidBasis.state = edvr::nofoot::optic_capture::SourceState::Invalid;
                 const bool invalidBasisVisible = opticLedger.sample(6, invalidBasis) && opticLedger.rows[6].state == edvr::nofoot::optic_capture::SourceState::Invalid;
                 bool fullCoverage = allSixteen;
@@ -4491,8 +4525,62 @@ int wmain(int argc, wchar_t** argv) {
                     site[0] ^= 1;
                     const bool foreignChangeRefused = !nf::patchBytesMatch(site, nf::kWeaponUiBranchAfter, nf::kWeaponUiVerifyLen) &&
                                                       !nf::patchBytesMatch(site, nf::kWeaponUiBranchBefore, nf::kWeaponUiVerifyLen);
-                    check(nativeGate && originalIdentity && patchedIdentity && branchDelta && foreignChangeRefused,
+                    const uint8_t originalCall[8] = {0xE8,0xEB,0x50,0x6C,0x01,0x80,0x7F,0x28};
+                    uint8_t hookedCall[8] = {};
+                    const uintptr_t callAddress = 0x1AAF120u;
+                    const uintptr_t stubAddress = callAddress + 5 + 0x123456;
+                    const bool callBuild = nf::weaponUiBuildGetterCall(originalCall, callAddress, stubAddress, hookedCall);
+                    uint8_t foreignCall[8]; std::memcpy(foreignCall, hookedCall, sizeof(foreignCall)); foreignCall[2] ^= 1;
+                    uint8_t refusedCall[8]; std::memcpy(refusedCall, originalCall, sizeof(refusedCall)); refusedCall[0] = 0x90;
+                    const bool callOwnership = callBuild && nf::weaponUiGetterCallOwned(hookedCall, hookedCall) &&
+                                               !nf::weaponUiGetterCallOwned(foreignCall, hookedCall) &&
+                                               hookedCall[5] == originalCall[5] && hookedCall[6] == originalCall[6] && hookedCall[7] == originalCall[7];
+                    const bool callRefusal = !nf::weaponUiBuildGetterCall(refusedCall, callAddress, stubAddress, hookedCall) &&
+                                             !nf::weaponUiBuildGetterCall(originalCall, callAddress, UINTPTR_MAX - 8, hookedCall) &&
+                                             !nf::weaponUiBuildGetterCall(originalCall, callAddress, 0xFFFFFFFFF0000000ull, hookedCall);
+                    const bool exactGetterJoin = nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                               55, 9, 0x1010, 0x1110, 0x2220, true, true);
+                    const bool getterJoinRefusals = !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                                   55, 9, 0x1010, 0x1110, 0x2220, false, true) &&
+                                                    !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                                   56, 9, 0x1010, 0x1110, 0x2220, true, true) &&
+                                                    !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                                   55, 9, 0x3030, 0x1110, 0x2220, true, true) &&
+                                                    !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                                   55, 9, 0x1010, 0x3330, 0x2220, true, true) &&
+                                                    !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 102, 101,
+                                                                                   55, 9, 0x1010, 0x1110, 0x2220, true, true) &&
+                                                    !nf::weaponUiGetterJoinMatches(55, 9, 0x1010, 0x1110, 0x2220, 100, 101,
+                                                                                   55, 9, 0x1010, 0x1110, 0x2220, true, false);
+                    check(nativeGate && originalIdentity && patchedIdentity && branchDelta && foreignChangeRefused && callOwnership && callRefusal &&
+                              exactGetterJoin && getterJoinRefusals,
                           "F70d: weapon UI patch is wanted only for native-on-foot sessions, verifies the full original/patched byte identity, changes only the proven branch byte, and refuses foreign bytes on restore");
+                }
+                {
+                    g_weaponUiGetterTarget = reinterpret_cast<uintptr_t>(&weaponUiProbeFakeGetter);
+                    g_weaponUiProbeCalls = 0;
+                    g_weaponUiProbeArgs[0] = g_weaponUiProbeArgs[1] = 0;
+                    g_weaponUiProbeObserved = edvr::WeaponUiGetterObservation{};
+                    g_weaponUiProbeObservedValid = false;
+                    WeaponUiProbeResult got{};
+                    const unsigned int savedMxcsr = _mm_getcsr();
+                    const uint64_t returned = weaponUiProbeTestInvoke(&got, 0x1111, 0x2222, 0x3333);
+                    const float expectedXmm[24] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24};
+                    const float expectedMatrix[16] = {101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116};
+                    bool xmmOk = true, matrixOk = true;
+                    for (int i = 0; i < 24; ++i) xmmOk = xmmOk && got.xmm[i / 4][i % 4] == expectedXmm[i];
+                    for (int i = 0; i < 16; ++i) matrixOk = matrixOk && g_weaponUiProbeObserved.attachment[i] == expectedMatrix[i];
+                    DWORD64 unwindBase = 0;
+                    const bool unwindable = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(&weaponUiGetterCallStub), &unwindBase, nullptr) != nullptr;
+                    const bool abiOk = returned == got.rax && got.rax == g_weaponUiProbeArgs[1] && got.rcx == 0xC1 && got.rdx == 0xD2 &&
+                                       got.r8 == 0xE8 && got.r9 == 0xE9 && got.r10 == 0xEA && got.r11 == 0xEB &&
+                                       (got.flags & 0x41u) == 0x40u && got.mxcsr == 0x3F80u;
+                    const bool observed = g_weaponUiProbeObservedValid && g_weaponUiProbeObserved.renderer == 0x1111 &&
+                                          g_weaponUiProbeObserved.part == 0x2222 && g_weaponUiProbeObserved.cameraPointer == 0x3333 && matrixOk;
+                    _mm_setcsr(savedMxcsr);
+                    check(unwindable && g_weaponUiProbeCalls == 1 && g_weaponUiProbeArgs[0] == 0x11 && abiOk && xmmOk && observed,
+                          "F82: the executable MASM getter probe calls once, captures the exact output matrix and context, preserves volatile GPR/flags/FP state, and has unwind metadata");
+                    g_weaponUiGetterTarget = 0;
                 }
                 // F70a: actual ADS state selects one absolute target. The rendered-eye plant is two frames late; the first valid sample must start the eye
                 // correction immediately, and one critically damped state follows the target independently of the head-aim ramp.
@@ -6122,6 +6210,181 @@ int wmain(int argc, wchar_t** argv) {
             sameDeltaMatches = sameDeltaMatches && std::fabs(sameRecovered[r * 4 + c] - finger[r * 4 + c]) < 2e-5f;
         check(sameSideOk && sameDeltaMatches && std::fabs(desired[12] - preserved[0]) < 1e-6f && std::fabs(desired[13] - preserved[1]) < 1e-6f && std::fabs(desired[14] - preserved[2]) < 1e-6f,
               "F70b: noncommuting same-side palm frames recover the original anatomical finger delta and preserve 3P segment translation");
+    }
+    // F82: captured crouched laser-rifle geometry. The arm inputs are the raw pose before the old shared reach
+    // translation; the leg points are the matching captured pose before the new neck-repin translation.
+    {
+        namespace nf = edvr::nofoot;
+        // Captured 121940 crouched-rifle geometry. F81 logs cover the capture burst and show zero clavicle assists in both arms
+        // (12:19:43.109, 0/374), so subtracting the old reach translation recovers the pre-assist source pose for this case.
+        const double neck[3] = {-0.00392988604, 0.863943338, 0.242602438};
+        const double fixtureYaw = 29.15 * nf::kIkPi / 180.0;
+        const double fixtureDelta[3] = {-0.07315508090785006, 0.0, 0.0908812342081006};
+        const double a = 1.0 - std::cos(fixtureYaw), sinYaw = std::sin(fixtureYaw), det = a * a + sinYaw * sinYaw;
+        const double dn[3] = {(a * fixtureDelta[0] + sinYaw * fixtureDelta[2]) / det,
+                              0.0,
+                              (-sinYaw * fixtureDelta[0] + a * fixtureDelta[2]) / det};
+        const double pivot[3] = {neck[0] - dn[0], neck[1], neck[2] - dn[2]};
+        nf::CrouchNeckArm arms[2] = {};
+        const double c[2][3] = {{-0.04288652815, 0.808530688, 0.245437518}, {-0.0026513971, 0.800691903, 0.218321339}};
+        const double shoulders[2][3] = {{-0.1547683251, 0.856413126, 0.330814436}, {0.1190077289, 0.812418938, 0.133715481}};
+        const double t[2][3] = {{0.0583111346, 0.724505126, 0.974367321}, {0.132951856, 0.795943439, 0.638907075}};
+        const double lengths[2][2] = {{0.3043116672249186, 0.2876242376548462}, {0.3043115430820347, 0.2876240501790341}};
+        for (int side = 0; side < 2; ++side) {
+            std::memcpy(arms[side].clavicle, c[side], sizeof(c[side]));
+            std::memcpy(arms[side].shoulder, shoulders[side], sizeof(shoulders[side]));
+            std::memcpy(arms[side].hand, t[side], sizeof(t[side]));
+            std::memcpy(arms[side].target, t[side], sizeof(t[side]));
+            arms[side].l1 = lengths[side][0];
+            arms[side].l2 = lengths[side][1];
+            arms[side].wSolve = 1.0;
+        }
+        nf::CrouchNeckLeg legs[2] = {
+            {{-0.3482999726780945, 0.567868709564209, -0.017969742156478882}, {-0.14478827264395294, 0.2606489956378937, 0.24276362385609435},
+             {-0.28322757032003937, 0.10816249251365662, -0.11296097861594272}},
+            {{-0.17616086449709473, 0.5412819385528564, -0.11689105021758688}, {0.09629824016007843, 0.5372578501701355, 0.24301548328259276},
+             {-0.038498747011206425, 0.14983943104743958, 0.21666245188572691}}};
+        const double noAdsPush[3] = {};
+        const nf::CrouchNeckYaw picked = nf::crouchNeckYawSelect(neck, pivot, arms, legs, 0.0, noAdsPush);
+        double turnedNeck[3], repinned[3];
+        nf::turnAboutVertical(neck, pivot, picked.yawRad, turnedNeck);
+        for (int i = 0; i < 3; ++i) repinned[i] = turnedNeck[i] + picked.rootDelta[i];
+        const double neckErrV[3] = {repinned[0] - neck[0], repinned[1] - neck[1], repinned[2] - neck[2]};
+        bool feetClose = picked.feasible;
+        for (int side = 0; side < 2 && feetClose; ++side) {
+            const double hip1[3] = {legs[side].hip[0] + picked.rootDelta[0], legs[side].hip[1], legs[side].hip[2] + picked.rootDelta[2]};
+            const nf::LegSolve solved = nf::legSolveTo(legs[side].hip, legs[side].knee, legs[side].foot, hip1, legs[side].foot);
+            feetClose = solved.ok && !solved.limited && solved.footErrM < 1e-4;
+        }
+        bool transformedSubtreeMatches = picked.feasible;
+        double transformed[4][3] = {};
+        const double points[4][3] = {{neck[0], neck[1], neck[2]}, {arms[0].clavicle[0], arms[0].clavicle[1], arms[0].clavicle[2]},
+                                     {arms[0].shoulder[0], arms[0].shoulder[1], arms[0].shoulder[2]}, {arms[0].hand[0], arms[0].hand[1], arms[0].hand[2]}};
+        const double up[3] = {0.0, 1.0, 0.0};
+        double matrixYaw[9]; nf::ikRotAxis(up, picked.yawRad, matrixYaw);
+        for (int point = 0; point < 4; ++point) {
+            float source[16] = {};
+            source[0] = source[5] = source[10] = source[15] = 1.0f;
+            for (int axis = 0; axis < 3; ++axis) source[12 + axis] = static_cast<float>(points[point][axis]);
+            float result[16];
+            nf::ikPivot(source, matrixYaw, pivot, result);
+            result[12] += static_cast<float>(picked.rootDelta[0]);
+            result[14] += static_cast<float>(picked.rootDelta[2]);
+            for (int axis = 0; axis < 3; ++axis) transformed[point][axis] = result[12 + axis];
+            double expected[3]; nf::turnAboutVertical(points[point], neck, picked.yawRad, expected);
+            for (int axis = 0; axis < 3; ++axis) transformedSubtreeMatches = transformedSubtreeMatches && std::fabs(transformed[point][axis] - expected[axis]) < 2e-6;
+        }
+        const double beforeUpper[3] = {points[2][0] - points[1][0], points[2][1] - points[1][1], points[2][2] - points[1][2]};
+        const double beforeFore[3] = {points[3][0] - points[2][0], points[3][1] - points[2][1], points[3][2] - points[2][2]};
+        const double afterUpper[3] = {transformed[2][0] - transformed[1][0], transformed[2][1] - transformed[1][1], transformed[2][2] - transformed[1][2]};
+        const double afterFore[3] = {transformed[3][0] - transformed[2][0], transformed[3][1] - transformed[2][1], transformed[3][2] - transformed[2][2]};
+        transformedSubtreeMatches = transformedSubtreeMatches && std::fabs(nf::ikLen(beforeUpper) - nf::ikLen(afterUpper)) < 2e-6 &&
+                                   std::fabs(nf::ikLen(beforeFore) - nf::ikLen(afterFore)) < 2e-6;
+        double yawDegrees = picked.yawRad * 180.0 / nf::kIkPi;
+        check(picked.feasible && yawDegrees > 28.5 && yawDegrees < 29.75 && nf::ikLen(neckErrV) < 1e-9 &&
+                  feetClose && std::fabs(picked.rootDelta[0] - fixtureDelta[0]) < 0.003 && std::fabs(picked.rootDelta[2] - fixtureDelta[2]) < 0.003,
+              "F82: captured crouched-rifle arms select the nearest feasible positive yaw, repin the neck, and close both held-foot leg solves");
+        check(transformedSubtreeMatches, "F82: chest-subtree matrix rotation plus neck repin preserves upper-arm and forearm lengths");
+
+        // A partial offhand solve must predict the same interpolated wrist and ADS displacement as stage 2.
+        // The candidate hand is already the net chest-yaw + neck-repin point, so adding rootDelta again would
+        // shift this target by (1-w)*rootDelta and fail the exact shoulder replay below.
+        nf::CrouchNeckArm partial[2] = {arms[0], arms[1]};
+        partial[0].active = false;
+        partial[1].wSolve = 0.5;
+        const double adsPush[3] = {0.0, 0.006, 0.012};
+        nf::CrouchNeckYaw partialPick;
+        bool partialFeasible = nf::crouchNeckYawFeasible(neck, pivot, partial, legs, 0.0, picked.yawRad, adsPush, &partialPick);
+        if (partialFeasible) {
+            const int side = 1;
+            double hand[3], clavicle[3], shoulder[3];
+            nf::turnAboutVertical(partial[side].hand, neck, partialPick.yawRad, hand);
+            nf::turnAboutVertical(partial[side].clavicle, neck, partialPick.yawRad, clavicle);
+            nf::turnAboutVertical(partial[side].shoulder, neck, partialPick.yawRad, shoulder);
+            const double target[3] = {hand[0] + 0.5 * (partial[side].target[0] - hand[0]),
+                                      hand[1] + 0.5 * (partial[side].target[1] - hand[1]),
+                                      hand[2] + 0.5 * (partial[side].target[2] - hand[2])};
+            const double before[3] = {target[0] - shoulder[0], target[1] - shoulder[1], target[2] - shoulder[2]};
+            const double d = nf::ikLen(before);
+            double excess = 0.0, disp[3], R[9], angle = 0.0;
+            bool capped = false;
+            const double move = nf::ikAssistReachMove(d, partial[side].l1, partial[side].l2, &excess);
+            for (int i = 0; i < 3; ++i) disp[i] = ((d > 1e-9 ? move * before[i] / d : 0.0) + adsPush[i]) * 0.5;
+            if (nf::ikAssistRot(clavicle, shoulder, disp, R, &angle, &capped)) {
+                const double cs[3] = {shoulder[0] - clavicle[0], shoulder[1] - clavicle[1], shoulder[2] - clavicle[2]};
+                double turned[3]; nf::ikRowRotate(cs, R, turned);
+                for (int i = 0; i < 3; ++i) shoulder[i] = clavicle[i] + turned[i];
+            }
+            bool sameShoulder = true;
+            for (int i = 0; i < 3; ++i) sameShoulder = sameShoulder && std::fabs(shoulder[i] - partialPick.shoulder[side][i]) < 1e-10;
+            check(sameShoulder && (std::fabs(partialPick.rootDelta[0]) > 1e-4 || std::fabs(partialPick.rootDelta[2]) > 1e-4),
+                  "F82: partial offhand plus ADS push predicts the single net-transformed hand without a second root translation");
+        } else {
+            check(false, "F82: partial offhand plus ADS push has a feasible yaw for exact shoulder replay");
+        }
+
+        // At detach=0 the hard endpoint is T; at detach=1 the historical endpoint is T+legacyReach.
+        // Intermediate samples rebuild their target from geometry and do not blend the selected yaw.
+        const double originalTarget[3] = {neck[0], neck[1], neck[2]};
+        const double legacyReach[3] = {0.0381563231, 0.0, 0.115241572};
+        double endpoint0[3], endpoint1[3];
+        for (int i = 0; i < 3; ++i) {
+            endpoint0[i] = originalTarget[i] + 0.0 * legacyReach[i];
+            endpoint1[i] = originalTarget[i] + 1.0 * legacyReach[i];
+        }
+        const double endpoint0Error[3] = {endpoint0[0] - originalTarget[0], endpoint0[1] - originalTarget[1], endpoint0[2] - originalTarget[2]};
+        check(nf::ikLen(endpoint0Error) < 1e-12 &&
+                  std::fabs(endpoint1[0] - (originalTarget[0] + legacyReach[0])) < 1e-12 &&
+                  std::fabs(endpoint1[2] - (originalTarget[2] + legacyReach[2])) < 1e-12,
+              "F82: detach endpoints hard-pin at zero and exactly retain legacy reach at full ADS");
+
+        // Standing and jumping snapshots use the same policy math. Their captured assist counters were zero
+        // in the overlapping F81 windows (121946: 0/234 at 12:19:49.314; 122002: 0/289 at 12:20:05.126).
+        const double noPush[3] = {};
+        nf::CrouchNeckArm standing[2] = {};
+        const double standingC[2][3] = {{-0.0046476675, 1.44254315, 0.2802694587}, {0.0477911625, 1.42908692, 0.2677651797}};
+        const double standingS[2][3] = {{-0.0996752959, 1.4402653, 0.3945066187}, {0.1597479378, 1.47354472, 0.1743333637}};
+        const double standingH[2][3] = {{0.0987435058, 1.33760488, 0.97542572}, {0.179897711, 1.40038717, 0.639815092}};
+        const double standingL1[2] = {0.30447058085612155, 0.30084669078547716};
+        const double standingL2[2] = {0.28771826270806267, 0.28771810607719445};
+        for (int side = 0; side < 2; ++side) {
+            std::memcpy(standing[side].clavicle, standingC[side], sizeof(standingC[side]));
+            std::memcpy(standing[side].shoulder, standingS[side], sizeof(standingS[side]));
+            std::memcpy(standing[side].hand, standingH[side], sizeof(standingH[side]));
+            std::memcpy(standing[side].target, standingH[side], sizeof(standingH[side]));
+            standing[side].l1 = standingL1[side]; standing[side].l2 = standingL2[side];
+        }
+        const double standingNeck[3] = {0.017552387, 1.45759428, 0.27065137};
+        check(nf::crouchNeckYawArmShortfall(standingNeck, standing, 0.0, noPush) < 1e-6,
+              "F82: captured standing rifle frame remains feasible at zero added torso yaw");
+
+        nf::CrouchNeckArm jumping[2] = {};
+        const double jumpingC[2][3] = {{-0.0101276077, 1.42232835, 0.2752242307}, {0.0378539395, 1.41979563, 0.2769488017}};
+        const double jumpingS[2][3] = {{-0.1251686532, 1.40318608, 0.3603162097}, {0.1864594279, 1.43744755, 0.2546252827}};
+        const double jumpingH[2][3] = {{0.0945935249, 1.37097204, 0.974208474}, {0.179626346, 1.42758512, 0.63838768}};
+        const double jumpingL1[2] = {0.30453304264453884, 0.30453312896514284};
+        const double jumpingL2[2] = {0.28783756567098734, 0.2878378363962739};
+        for (int side = 0; side < 2; ++side) {
+            std::memcpy(jumping[side].clavicle, jumpingC[side], sizeof(jumpingC[side]));
+            std::memcpy(jumping[side].shoulder, jumpingS[side], sizeof(jumpingS[side]));
+            std::memcpy(jumping[side].hand, jumpingH[side], sizeof(jumpingH[side]));
+            std::memcpy(jumping[side].target, jumpingH[side], sizeof(jumpingH[side]));
+            jumping[side].l1 = jumpingL1[side]; jumping[side].l2 = jumpingL2[side];
+        }
+        const double jumpingNeck[3] = {0.0126081882, 1.47378385, 0.250033289};
+        check(nf::crouchNeckYawArmShortfall(jumpingNeck, jumping, 0.0, noPush) > 0.008 &&
+                  nf::crouchNeckYawArmShortfall(jumpingNeck, jumping, 9.0 * nf::kIkPi / 180.0, noPush) < 1e-6,
+              "F82: captured jumping rifle frame rejects zero yaw and clears its shoulder shortfall with the selected torso turn");
+        nf::CrouchNeckArm unreachable[2] = {arms[0], arms[1]};
+        unreachable[1].target[2] += 10.0;
+        const nf::CrouchNeckArm unreachableBefore[2] = {unreachable[0], unreachable[1]};
+        const nf::CrouchNeckYaw refused = nf::crouchNeckYawSelect(neck, pivot, unreachable, legs, 0.0, noAdsPush);
+        check(!refused.feasible && std::memcmp(unreachable, unreachableBefore, sizeof(unreachable)) == 0,
+              "F82: infeasible geometry refuses without mutating the pose inputs");
+        nf::CrouchNeckArm noActiveArms[2] = {arms[0], arms[1]};
+        noActiveArms[0].active = noActiveArms[1].active = false;
+        const nf::CrouchNeckYaw noActive = nf::crouchNeckYawSelect(neck, pivot, noActiveArms, legs, 0.0, noAdsPush);
+        check(!noActive.feasible, "F82: probe-only arms cannot authorize a protected neck turn");
     }
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
