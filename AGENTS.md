@@ -16,7 +16,9 @@ session and a log. Everything below exists to spend fewer of them.
 Use the **PowerShell tool**, not Bash. Windows PowerShell 5.1: no `&&` or
 `||` (use `;` and `if ($?)`), no ternary, no `??`. Don't redirect a native
 exe's stderr with `2>&1` — 5.1 wraps each line in an ErrorRecord and sets
-`$?` false on a clean exit.
+`$?` false on a clean exit. Send a file-writing tool's output to `*> $null`
+or a log file and read that: `| Select-Object -First N` stops the pipeline
+and kills the tool mid-write (an install died that way, #100).
 
 `build.bat` must be launched **by absolute path**; a `cmd` invocation that
 never ran the batch still exits 0, which has read as a successful build.
@@ -203,6 +205,19 @@ minutes after a flight finally reproduced the effect being chased.
   in the same turn.
 - Do the work asked for. If something adjacent is worth fixing, say so;
   don't fold it in.
+
+## Tracking work
+
+- **Work is tracked in GitHub issues** on
+  `characterecho-sean/edvr-unofficial-patch` (`gh issue list`). A finding
+  to act on later — a review follow-up, a retro item, a bug noticed in
+  passing — becomes an issue. Commits and PRs name it (`(#97)`,
+  `Closes #97`).
+- `docs\` holds the evidence: an investigation doc carries an arc's
+  journal, and its `## Status` block links the arc's issues.
+- **Re-fetch a PR's reviews and comments right before posting** replies
+  or a summary to it. A review that landed while you worked otherwise
+  goes unanswered (PR #92, twice).
 
 ## Git
 

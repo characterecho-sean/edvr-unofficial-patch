@@ -279,6 +279,7 @@ import datetime
 import math
 import os
 import re
+import shutil
 import statistics
 import sys
 import tempfile
@@ -4311,6 +4312,30 @@ def _products_under(root):
     return found
 
 
+def _steam_products(steam):
+    """Every Elite product dir in the Steam root's library and in each
+    library its steamapps\\libraryfolders.vdf lists (#97)."""
+    libs = [steam]
+    vdf = os.path.join(steam, "steamapps", "libraryfolders.vdf")
+    try:
+        with open(vdf, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split('"')
+                if len(parts) >= 5 and parts[1] == "path":
+                    libs.append(parts[3].replace("\\\\", "\\"))
+    except OSError:
+        pass
+    found, seen = [], set()
+    for lib in libs:
+        for leaf in _products_under(os.path.join(lib, "steamapps", "common",
+                                                 "Elite Dangerous")):
+            key = os.path.normcase(leaf)
+            if key not in seen:
+                seen.add(key)
+                found.append(leaf)
+    return found
+
+
 def resolve_target(spec):
     if spec not in ("steam", "frontier"):
         p = os.path.abspath(spec)
@@ -4325,7 +4350,6 @@ def resolve_target(spec):
         found = _products_under(os.path.join(local, "Frontier_Developments")) \
             if local else []
     else:
-        found = []
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -4333,8 +4357,7 @@ def resolve_target(spec):
                 steam = winreg.QueryValueEx(k, "SteamPath")[0]
         except (ImportError, OSError):
             steam = r"C:\Steam"
-        found = _products_under(os.path.join(steam, "steamapps", "common",
-                                             "Elite Dangerous"))
+        found = _steam_products(steam)
     if not found:
         raise SystemExit("[edvr] no %s install found; pass a path to "
                          "--target." % spec)
@@ -10994,8 +11017,10 @@ def self_test():
         ok = False
     if not self_test_owner_invoke():
         ok = False
+    if not self_test_steam_libraries():
+        ok = False
 
-    print("self-test: %s" % ("ok" if ok else "FAILED"))
+    print("self-test:%s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
 
 
@@ -11026,6 +11051,36 @@ def _wl_pair(text):
     if len(parts) != 2:
         raise ValueError(text)
     return tuple(_wl_value(p) for p in parts)
+
+
+def self_test_steam_libraries():
+    """#97: a game in a secondary Steam library, named only by libraryfolders.vdf."""
+    ok = True
+    tmp = tempfile.mkdtemp(prefix="edvr_steamlib_selftest_")
+    try:
+        root = os.path.join(tmp, "Steam")
+        lib2 = os.path.join(tmp, "SteamLibrary")
+        leaf = os.path.join(lib2, "steamapps", "common", "Elite Dangerous", "Products", "elite-dangerous-odyssey-64")
+        os.makedirs(leaf)
+        os.makedirs(os.path.join(root, "steamapps"))
+        with open(os.path.join(leaf, GAME_EXE), "w") as f:
+            f.write("x")
+        # Two spellings of the path, as Steam writes it: doubled backslashes.
+        vdf = ('"libraryfolders"\n{\n\t"0"\n\t{\n\t\t"path"\t\t"%s"\n\t}\n\t"1"\n\t{\n\t\t"path"\t\t"%s"\n\t}\n}\n'
+               % (root.replace("\\", "\\\\"), lib2.replace("\\", "\\\\")))
+        with open(os.path.join(root, "steamapps", "libraryfolders.vdf"), "w") as f:
+            f.write(vdf)
+        got = _steam_products(root)
+        want = [os.path.normpath(os.path.join(leaf))]
+        if got != want:
+            print("steam libraries: secondary-library install -> %r, wanted %r" % (got, want))
+            ok = False
+        if _steam_products(os.path.join(tmp, "NoSteam")) != []:
+            print("steam libraries: a missing Steam root found something")
+            ok = False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 
 def self_test_owner_invoke():
