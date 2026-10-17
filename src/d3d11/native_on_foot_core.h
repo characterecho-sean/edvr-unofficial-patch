@@ -1299,7 +1299,7 @@ struct IkPoseDeviationSample {
     uint32_t frame = 0, item = 0, generation = 0, fpGeneration = 0, fpAgeMs = 0, gAgeMs = 0;
     bool fresh = false, offInputValid = false, offWithinDistance = false, offSteady = false, offQualified = false, offAllowed = false, offTwo = false;
     bool offDuplicate = false, offGapReset = false, offIdentityReset = false, offReversed = false;
-    bool leftWrote = false, rightWrote = false, leftStablePolicy = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
+    bool leftWrote = false, rightWrote = false, leftStablePolicy = false, authoredPistolSupport = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
     uint8_t targetMode[2] = {}, leftReason = 0, offHistorySamples = 0;
     bool valid[2] = {}, radialValid[2] = {};
     double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
@@ -1356,6 +1356,7 @@ struct IkPoseDeviationTracker {
         bool triggered = sampleFresh && (sample.offIdentityReset || sample.offGapReset || sample.offReversed);
         if (sampleFresh && contiguous) {
             triggered = triggered || sample.offTwo != last.offTwo || sample.leftStablePolicy != last.leftStablePolicy ||
+                        sample.authoredPistolSupport != last.authoredPistolSupport ||
                         sample.leftWrote != last.leftWrote || sample.supportRequested != last.supportRequested || sample.supportValid != last.supportValid || sample.targetMode[0] != last.targetMode[0] ||
                         sample.targetMode[1] != last.targetMode[1] || sample.reachActive != last.reachActive || sample.reachRejected != last.reachRejected;
             for (int side = 0; side < 2 && !triggered; ++side) {
@@ -1545,7 +1546,8 @@ constexpr uint32_t kIkSpine[3] = {16, 21, 24};       // the spine chain the squa
 constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
-constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSquareAmountDefault = 1.0, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
+constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSwivelTrimDefaultDeg = 6.0, kIkSquareAmountDefault = 0.75, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
+constexpr double kWeaponViewOffsetDefaultCm = 2.5;
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
 // def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
 constexpr uint32_t kIkFpJoints[11] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34, 14};
@@ -1961,7 +1963,7 @@ constexpr double kIkAssistReach = 0.97, kIkAssistMarginM = 0.03, kIkAssistMaxM =
 constexpr double kIkAdsRampSec = 0.15;
 constexpr float kIkGateFullAdsM = 0.6f, kIkGateZeroAdsM = 1.2f;
 // F62a: the ADS shoulder-forward default is 0 (it was 5 cm: in ADS the right arm folded to the 40 deg limit).
-constexpr double kIkAdsSquareDefault = 1.0, kIkAdsElbowOutCmDefault = 6.0, kIkAdsTrimDegDefault = 0.0, kIkAdsRaiseCmDefault = 3.0,
+constexpr double kIkAdsSquareDefault = 1.0, kIkAdsElbowOutCmDefault = 6.0, kIkAdsTrimDegDefault = 3.0, kIkAdsRaiseCmDefault = 5.5,
                  kIkAdsForwardCmDefault = 0.0, kIkAdsLeanDegDefault = 6.0;
 constexpr double kIkAdsElbowOutCmMax = 20.0, kIkAdsTrimDegMax = 60.0, kIkAdsShoulderCmMax = 10.0, kIkAdsLeanDegMax = 15.0;
 
@@ -2110,6 +2112,9 @@ inline double qpcDtSec(uint64_t prevTicks, uint64_t nowTicks, uint64_t freq, dou
 constexpr double kHingeMinSin = 0.05;
 constexpr double kHingeRowTolDeg = 10.0;
 constexpr double kHingeHintPerp = 0.2;   // a hint's part perpendicular to the upper arm must be at least this to be used
+inline bool ikUseHingeRow(bool haveRow, bool geo, double rowAngleDeg, bool stablePoleSide) noexcept {
+    return haveRow && (!geo || (!stablePoleSide && rowAngleDeg > kHingeRowTolDeg));
+}
 inline void ikRowRot(const double v[3], const double R[9], double out[3]) noexcept {
     for (int c = 0; c < 3; ++c) out[c] = v[0] * R[c] + v[1] * R[3 + c] + v[2] * R[6 + c];
 }
@@ -4488,6 +4493,12 @@ struct OffHand {
     }
 };
 enum SupportItem : uint8_t { kSupportNone = 0, kSupportPistol = 1, kSupportTool = 2 };
+inline bool authoredPistolSupportEligible(bool armed, SupportItem item, uint32_t itemSerial, uint32_t profileSerial,
+                                          bool profileIsPistol, bool attachPairValid, bool withinDistance,
+                                          bool anatomyMapped, bool leftTargetValid, uint8_t leftTargetMode) noexcept {
+    return armed && item == kSupportPistol && itemSerial == profileSerial && profileIsPistol && attachPairValid && withinDistance && anatomyMapped &&
+           leftTargetValid && leftTargetMode == 1;
+}
 inline SupportItem supportItem(const char* name) noexcept {
     if (!name || !*name) return kSupportNone;
     constexpr char pistol[] = "$wpn_s_pistol_";

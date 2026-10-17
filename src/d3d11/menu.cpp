@@ -1522,8 +1522,8 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
-        // Native on foot (2026-10-14): every native on-foot key, temporary test rows, next to Explorer Cam. The rows are the
-        // `menu native_on_foot` rows of edvr.ini, in the file's order; no group headings, the page is the group.
+        // Native on foot (2026-10-14): the explicitly selected native on-foot settings, next to Explorer Cam. The rows are the
+        // `menu native_on_foot` rows of edvr.ini, in file order; compatibility settings without that tag stay out of the page.
         Page p;
         p.name = "Native on foot";
         addSettingRows(p, MenuTier::Fix, "native_on_foot", false);

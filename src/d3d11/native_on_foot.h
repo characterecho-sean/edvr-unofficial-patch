@@ -166,8 +166,8 @@ inline FpDropPlan g_fdPlan;
 inline std::atomic<uint64_t> g_fdX{0};               // the plan's X (0: none), set after the plan is published; the hook's quick filter
 // F56 (TEMPORARY): the 3P arm IK's plan. The census (the local 3P skeleton, the pose freeze's X) derives each arm's chain and groups once per X
 // (nofoot::ikArmChain: [0] L, clavicle 35, hand 58, attach 67; [1] R, 36, 59, 66, from the joint probe) and publishes them under g_armSeq;
-// g_armX (set after the plan is published) is the hook's quick filter. g_ikMode is fix.native_on_foot_arm_ik: 0 off, 1 probe (the default),
-// 2 nudge, 3 on; g_ikWanted (the key not off) keeps the Animate hook and the FP census running when the pose freeze key is off.
+// g_armX (set after the plan is published) is the hook's quick filter. g_ikMode is fix.native_on_foot_arm_ik: 0 off, 1 probe,
+// 2 nudge, 3 on (the default); g_ikWanted (the key not off) keeps the Animate hook and the FP census running when the pose freeze key is off.
 // F57: plus the torso square-up's plan (nofoot::ikSquarePlan: the chest root, the parent of the clavicles 35 and 36, and the spine 16 subtree
 // with each member's level); sqOk false refuses the square-up alone.
 // F65b: plus the legs (stand armed): [0] L, [1] R by nofoot::ikLegChain from the joint probe's feet, legOk when nofoot::ikLegPairWhy passes
@@ -192,7 +192,7 @@ struct ArmPlan {
 inline std::atomic<uint32_t> g_armSeq{0};
 inline ArmPlan g_armPlan;
 inline std::atomic<uint64_t> g_armX{0};
-inline std::atomic<int> g_ikMode{1};
+inline std::atomic<int> g_ikMode{3};
 inline std::atomic<bool> g_ikWanted{true};
 }  // namespace pfz
 

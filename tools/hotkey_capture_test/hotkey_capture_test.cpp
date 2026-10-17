@@ -1859,6 +1859,28 @@ void testExplorerPage() {
         check(menuStepOf(ranged) == 0.05, "a 0..1 decimal row steps by a twentieth (the older rule)");
     }
 }
+void testLegacyOnFootRowsStayOutOfMenu() {
+    printf("legacy on-foot rows stay out of the menu\n");
+    constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    const char* const keys[] = {"native_on_foot_hide_fp_body", "native_on_foot_body_unclip", "native_on_foot_body_align",
+                                "native_on_foot_body_mode", "native_on_foot_body_cull", "native_on_foot_body_hybrid",
+                                "native_on_foot_look_to_aim_yaw_sign", "native_on_foot_look_to_aim_comp_delay",
+                                "native_on_foot_look_to_aim_comp_sign", "native_on_foot_body_align_trim_right_cm",
+                                "native_on_foot_body_align_trim_up_cm", "native_on_foot_body_align_trim_forward_cm"};
+    // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
+    // but cannot add rows back to this compiled table.
+    int nativePageRows = 0;
+    for (int i = 0; i < kCount; ++i)
+        if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
+    check(nativePageRows == 33, "the Native on foot page retains its other 33 settings");
+    for (const char* key : keys) {
+        bool found = false;
+        for (int i = 0; i < kCount; ++i)
+            if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, key) == 0) found = true;
+        checkf(!found, "%s remains a compatible setting but has no in-headset menu row", key);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 8. The generated rows: which are on the Hotkeys page, in which tier
 
@@ -1938,6 +1960,7 @@ int main(int argc, char** argv) {
     testEliteBinds(argc > 1 ? argv[1] : "");
     testRows();
     testExplorerPage();
+    testLegacyOnFootRowsStayOutOfMenu();
     if (failures) {
         printf("hotkey_capture_test: %d of %d checks FAILED\n", failures, checks);
         return 1;

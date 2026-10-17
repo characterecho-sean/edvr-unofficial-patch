@@ -1474,7 +1474,9 @@ int wmain(int argc, wchar_t** argv) {
                 double E2[3];
                 t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
                 check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::ikElbowOutClampCm(45.0) == 30.0 && nf::ikElbowOutClampCm(-1.0) == 0.0 &&
-                          nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == 1.0,
+                          nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == nf::kIkSquareAmountDefault &&
+                          nf::kIkSwivelTrimDefaultDeg == 6.0 && nf::kIkSquareAmountDefault == 0.75 && nf::kIkAdsTrimDegDefault == 3.0 &&
+                          nf::kIkAdsRaiseCmDefault == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.5,
                       "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
             }
             // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.
@@ -4145,7 +4147,23 @@ int wmain(int argc, wchar_t** argv) {
                           nf::gameAuthoredLeftArm("$humanoid_companalyser_name;") &&
                           !nf::gameAuthoredLeftArm("$humanoid_repairtool_name;") &&
                           !nf::gameAuthoredLeftArm("$wpn_s_pistol_name;"),
-                          "F73/F74: item classification relaxes Energy Link and Profile Analyser, keeps the pistol support cup, and leaves Arc Cutter on its authored left-handle pose");
+                           "F73/F80: explicit one-hand tools keep their authored policy; pistols use their own anatomical left hand and Arc Cutter keeps its authored handle pose");
+                    const bool pistolNaturalFirstDraw = nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, true, true, true, true, 1);
+                    const bool pistolNaturalAfterSerialChange = nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 11, 11, true, true, true, true, true, 1);
+                    const bool pistolRejected[9] = {
+                        !nf::authoredPistolSupportEligible(false, nf::kSupportPistol, 10, 10, true, true, true, true, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 9, true, true, true, true, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, false, true, true, true, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, false, true, true, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, true, false, true, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, true, true, false, true, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, true, true, true, false, 1),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportPistol, 10, 10, true, true, true, true, true, 0),
+                        !nf::authoredPistolSupportEligible(true, nf::kSupportNone, 10, 10, true, true, true, true, true, 1)};
+                    bool allPistolFailuresReject = true;
+                    for (bool rejects : pistolRejected) allPistolFailuresReject = allPistolFailuresReject && rejects;
+                    check(pistolNaturalFirstDraw && pistolNaturalAfterSerialChange && allPistolFailuresReject,
+                          "F80: a coherent, close mapped pistol uses its anatomical target immediately across serial changes; stale identity, invalid/distant attaches, bad mapping, or fallback target refuses it");
                     const double firstValidCup = nf::supportCupBlendStep(0.0, true, true, 1.0 / 30.0);
                     const double invalidCup = nf::supportCupBlendStep(0.8, true, false, 1.0 / 30.0);
                     const double releasedCup = nf::supportCupBlendStep(0.8, false, true, 0.05 / 0.15);
@@ -5092,6 +5110,56 @@ int wmain(int argc, wchar_t** argv) {
                     check(lands && straight.source == 2 && byRow.source == 3 && byLast.source == 1 && straight.flexAnimDeg < 1e-6,
                           "F66d: a nearly straight animated arm falls back to the shortest arc (source 2), the learned hinge row (3) or the last hinge (1), and "
                           "the hand still lands on the target");
+                }
+                // Armed stable-pole solves keep the animated geometric hinge when it is valid. A learned forearm row that is valid for a straight
+                // chain can be stale relative to a bent animated pose; using it here swings the arm into the wrong plane and misses the wrist target.
+                {
+                    const double Sx[3] = {0.1, 1.0, -0.2}, Fx[3] = {0.28, 1.25, -0.15}, Hx[3] = {0.43, 1.14, -0.05};
+                    const double upper[3] = {Fx[0] - Sx[0], Fx[1] - Sx[1], Fx[2] - Sx[2]};
+                    const double fore[3] = {Hx[0] - Fx[0], Hx[1] - Fx[1], Hx[2] - Fx[2]};
+                    const double upperLen = nf::ikLen(upper), foreLen = nf::ikLen(fore);
+                    double nGeo[3] = {}, u[3] = {}, row[3] = {}, Rrow[9] = {};
+                    const bool geoOk = nf::ikHingeAnimated(Sx, Fx, Hx, nGeo) && nf::ikUnit(upper, u);
+                    if (geoOk) {
+                        nf::ikRotAxis(u, 35.0 * nf::kIkPi / 180.0, Rrow);
+                        nf::ikRowRot(nGeo, Rrow, row);
+                    }
+                    const double Tx[3] = {0.40, 1.13, 0.07};
+                    const nf::IkTwoBone tbx = nf::ikTwoBoneFrame(Sx, Tx, upperLen, foreLen, upper);
+                    double Ex[3] = {};
+                    if (tbx.ok) tbx.elbowAt(tbx.angleOf(upper), Ex);
+                    const double rowAngle = nf::ikAxisAngleDeg(row, nGeo);
+                    const bool legacyUsesRow = nf::ikUseHingeRow(true, geoOk, rowAngle, false);
+                    const bool stableUsesRow = nf::ikUseHingeRow(true, geoOk, rowAngle, true);
+                    nf::HingeSwings geometric, learned;
+                    if (geoOk && tbx.ok && !tbx.limited) {
+                        geometric = nf::ikHingeSwings(Sx, Fx, Hx, Ex, tbx.hand, nullptr, nullptr);
+                        learned = nf::ikHingeSwings(Sx, Fx, Hx, Ex, tbx.hand, legacyUsesRow ? row : nullptr, nullptr);
+                    }
+                    const auto wristAfter = [&](const nf::HingeSwings& hs, double out[3]) {
+                        double shoulderHand[3] = {Hx[0] - Sx[0], Hx[1] - Sx[1], Hx[2] - Sx[2]}, swung[3], forearm[3], swungForearm[3];
+                        nf::ikRowRot(shoulderHand, hs.R1, swung);
+                        for (int i = 0; i < 3; ++i) forearm[i] = swung[i] + Sx[i] - Ex[i];
+                        nf::ikRowRot(forearm, hs.R2, swungForearm);
+                        for (int i = 0; i < 3; ++i) out[i] = Ex[i] + swungForearm[i];
+                    };
+                    const auto lengthError = [&](const nf::HingeSwings& hs) {
+                        double upperAfter[3], foreAfter[3], foreFinal[3];
+                        nf::ikRowRot(upper, hs.R1, upperAfter);
+                        nf::ikRowRot(fore, hs.R1, foreAfter);
+                        nf::ikRowRot(foreAfter, hs.R2, foreFinal);
+                        return std::max(std::fabs(nf::ikLen(upperAfter) - upperLen), std::fabs(nf::ikLen(foreFinal) - foreLen));
+                    };
+                    double wristGeo[3] = {}, wristRow[3] = {};
+                    if (geometric.ok) wristAfter(geometric, wristGeo);
+                    if (learned.ok) wristAfter(learned, wristRow);
+                    const double geoDelta[3] = {wristGeo[0] - tbx.hand[0], wristGeo[1] - tbx.hand[1], wristGeo[2] - tbx.hand[2]};
+                    const double rowDelta[3] = {wristRow[0] - tbx.hand[0], wristRow[1] - tbx.hand[1], wristRow[2] - tbx.hand[2]};
+                    const double geoError = nf::ikLen(geoDelta), rowError = nf::ikLen(rowDelta);
+                    check(geoOk && tbx.ok && !tbx.limited && rowAngle > nf::kHingeRowTolDeg && legacyUsesRow && !stableUsesRow &&
+                              nf::ikUseHingeRow(true, false, rowAngle, true) && geometric.ok && learned.ok && geometric.source == 0 && learned.source == 3 &&
+                              geoError < 1e-9 && rowError > 0.001 && lengthError(geometric) < 1e-9 && lengthError(learned) < 1e-9,
+                          "F80 armed stable-pole solving preserves the valid animated hinge: the stale learned row reproduces an off-plane wrist miss, while the geometric hinge reaches target; unarmed selection retains the learned-row behavior");
                 }
                 // The hand's twist folded into +-90 deg, continuous around the circle, through the real twist extraction.
                 {

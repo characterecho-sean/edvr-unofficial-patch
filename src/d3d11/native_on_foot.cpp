@@ -53,15 +53,15 @@ std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mes
 std::atomic<float> g_hudSpread{0.0f};                           // fix.native_on_foot_hud_spread, live (F14)
 float g_hudSpreadLast = -1.0f;                                  // frame thread only: as last logged (F14)
 bool g_reticleKeyLast = false;                                  // frame thread only (F14)
-std::atomic<bool> g_fpKeyOn{false};                             // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
+std::atomic<bool> g_fpKeyOn{true};                              // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
 bool g_fpKeyLast = false;                                       // frame thread only: as last logged (F15)
 uint8_t g_bodyCullKeyLast = 0;                                  // frame thread only: fix.native_on_foot_body_cull as last logged (F18, temporary)
-std::atomic<bool> g_unclipKeyOn{false};                         // fix.native_on_foot_body_unclip, as the frame thread last read it (F19, temporary)
+std::atomic<bool> g_unclipKeyOn{true};                          // fix.native_on_foot_body_unclip, as the frame thread last read it (F19, temporary)
 bool g_unclipKeyLast = false;                                   // frame thread only: as last logged (F19)
 
 
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
-std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
+std::atomic<bool> g_followHead{false};                          // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<int> g_followSmoothMs{nofoot::kHudSmoothDefault};   // fix.native_on_foot_hud_follow_smoothing_ms, live (F13)
 std::atomic<bool> g_visorUpSetting{true};                       // fix.native_on_foot_breathable_visor is up, as the frame thread last read it (F16)
 float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
@@ -88,8 +88,8 @@ std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_
 std::atomic<int> g_lookDelay{0};
 bool g_nativeEdgeLast = false;                // F26: frame thread only
 // F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
-std::atomic<bool> g_alignKeyOn{false};
-std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
+std::atomic<bool> g_alignKeyOn{true};
+std::atomic<int> g_alignMode{2};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_alignAnchorMode{0};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F53: the default, rest geometry), 1 clavicles (F43/F45), 2 pov
 std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
@@ -99,7 +99,7 @@ std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_r
 // the game's sign, one writer: the game thread) split into ours and the player's, and the gain it measured. Atomics only: no locks in the hooks.
 std::atomic<bool> g_adsAimKey{true};                          // the key as the frame thread last read it (default on)
 std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
-std::atomic<float> g_weaponViewOffsetCm{0.0f};                // F74: fix.native_on_foot_weapon_view_offset_cm (left/right, -10..10 cm, default 0), live
+std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
@@ -120,13 +120,15 @@ bool g_adsPendValid = false;                                  // game thread onl
 float g_adsPendY = 0.0f, g_adsPendP = 0.0f, g_adsPendSumY = 0.0f, g_adsPendSumP = 0.0f;   // game thread only: our input and the whole input
 // F57 (TEMPORARY sliders): the arm IK's swivel trim (radians), square-up amount (0..1) and elbow-out distance (m), read by the Animate hook;
 // the key reader's last values (frame thread only) for its change line.
-std::atomic<float> g_ikSwivelTrimRad{0.0f}, g_ikSquareAmount{static_cast<float>(nofoot::kIkSquareAmountDefault)},
+std::atomic<float> g_ikSwivelTrimRad{static_cast<float>(nofoot::kIkSwivelTrimDefaultDeg * nofoot::kIkPi / 180.0)},
+    g_ikSquareAmount{static_cast<float>(nofoot::kIkSquareAmountDefault)},
     g_ikElbowOutM{static_cast<float>(nofoot::kIkElbowOutCmDefault / 100.0)};
-double g_ikTrimDeg = 0.0, g_ikSqAmountKey = nofoot::kIkSquareAmountDefault, g_ikOutCm = nofoot::kIkElbowOutCmDefault;
+double g_ikTrimDeg = nofoot::kIkSwivelTrimDefaultDeg, g_ikSqAmountKey = nofoot::kIkSquareAmountDefault, g_ikOutCm = nofoot::kIkElbowOutCmDefault;
 // F59 (TEMPORARY sliders): the arm IK's ADS values (square-up amount, elbow out (m), swivel trim (rad), shoulder raise and forward push (m),
 // the bend's forward lean (rad)), read by the Animate hook and lerped by the frame thread's ADS weight (0.15 s on journalAds, g_ikAdsW).
 std::atomic<float> g_ikAdsSquare{static_cast<float>(nofoot::kIkAdsSquareDefault)},
-    g_ikAdsElbowOutM{static_cast<float>(nofoot::kIkAdsElbowOutCmDefault / 100.0)}, g_ikAdsTrimRad{0.0f},
+    g_ikAdsElbowOutM{static_cast<float>(nofoot::kIkAdsElbowOutCmDefault / 100.0)},
+    g_ikAdsTrimRad{static_cast<float>(nofoot::kIkAdsTrimDegDefault * nofoot::kIkPi / 180.0)},
     g_ikAdsRaiseM{static_cast<float>(nofoot::kIkAdsRaiseCmDefault / 100.0)}, g_ikAdsForwardM{static_cast<float>(nofoot::kIkAdsForwardCmDefault / 100.0)},
     g_ikAdsLeanRad{static_cast<float>(nofoot::kIkAdsLeanDegDefault * nofoot::kIkPi / 180.0)}, g_ikAdsW{0.0f};
 std::atomic<float> g_bodyDetachW{0.0f};   // F73: resolved ADS blends the body pin off while the independent ADS view/aim remains unchanged
@@ -202,7 +204,7 @@ std::atomic<bool> g_elemOverrideOn{false};                      // the element-s
 std::atomic<float> g_sGame{0.0f};                               // the game's own layout scale, [HRC+0x4C4], last read while the override was off; 0 = not known (F18)
 float g_roomLastR = -1.0f, g_roomLastK = -1.0f, g_roomLastS = -1.0f;   // frame thread only: as last logged (F18)
 float g_hudOffsetLast[nofoot::kHudGroupCount * 2] = {};         // frame thread only: the group offsets as last read (F16)
-float g_hudOffsetRead[nofoot::kHudGroupCount * 2] = {};         // written by the frame thread under g_f9Lock; the layout hook reads it (F16)
+float g_hudOffsetRead[nofoot::kHudGroupCount * 2] = {0.0f, 0.02f, 0.0f, -0.09f, -0.07f, 0.0f, 0.02f, 0.0f}; // frame-thread snapshot; layout hook reads it (F16)
 bool g_hudOffsetOn = false;                                     // under g_f9Lock: the offsets apply now, native stereo on foot (F16)
 uintptr_t g_layoutHrc = 0;                                      // under g_f9Lock: the HRC the layout hook last ran for (F16)
 std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
@@ -212,7 +214,7 @@ std::atomic<bool> g_meshCreateLive{false};         // the creation patch is appl
 bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
 bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
-std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
+std::atomic<bool> g_keyOn{true};                   // fix.native_on_foot, as the frame thread last read it
 std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
 uintptr_t g_base = 0;
@@ -561,7 +563,7 @@ void readKey() {
     const bool first = !g_cfgRead;
     g_cfgRead = true;
     g_cfgGeneration = generation;
-    const std::string value = cfg.getString("fix.native_on_foot", "off");
+    const std::string value = cfg.getString("fix.native_on_foot", "on");
     if (value != "on" && value != "off") {
         Log::get().note("native on foot: fix.native_on_foot = %s is not on or off; leaving it off.", value.c_str());
     }
@@ -614,7 +616,7 @@ void readKey() {
         Log::get().note("native on foot hud size: %.2f", static_cast<double>(size));
         g_hudSizeLast = size;
     }
-    const std::string follow = cfg.getString("fix.native_on_foot_hud_follow", "head");
+    const std::string follow = cfg.getString("fix.native_on_foot_hud_follow", "body");
     const bool followHead = follow != "body";
     g_followHead.store(followHead, std::memory_order_relaxed);
     if (first || followHead != g_followHeadLast) {
@@ -710,9 +712,9 @@ void readKey() {
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
     }
-    // F74: the user's live left/right view offset relative to an equipped weapon or tool. Zero preserves the existing view exactly.
+    // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default shifts view/body 2.5 cm right.
     {
-        const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", 0.0f);
+        const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm));
         const float cm = std::isfinite(rawCm) ? std::clamp(rawCm, -10.0f, 10.0f) : 0.0f;
         if (first || cm != g_weaponViewOffsetCm.load(std::memory_order_relaxed))
             Log::get().note("native on foot weapon view offset (F75): fix.native_on_foot_weapon_view_offset_cm = %+.1f cm -- positive shifts the view and body right relative to the fixed equipped weapon or tool; while ADS the eye aligns independently to the actual sight and the body keeps this offset", cm);
@@ -740,7 +742,7 @@ void readKey() {
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
-        const std::string alignMode = cfg.getString("fix.native_on_foot_body_align", "off");
+        const std::string alignMode = cfg.getString("fix.native_on_foot_body_align", "body");
         const int mode = alignMode == "body" ? 2 : alignMode == "calibrate" ? 3 : (alignMode == "view" || alignMode == "on") ? 1 : 0;   // the old "on" is view
         g_alignMode.store(mode, std::memory_order_relaxed);
         g_alignKeyOn.store(mode != 0, std::memory_order_relaxed);
@@ -760,14 +762,14 @@ void readKey() {
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
-        // F56 (TEMPORARY, live): the 3P arm IK: off, probe (the default: the hook measures and writes nothing), nudge (the left hand group up
-        // 25 cm: does the skin read the hook's writes?) or on (the two-bone solve onto the FP handAttach joints). Body mode only.
-        const std::string ik = cfg.getString("fix.native_on_foot_arm_ik", "probe");
+        // F56 (TEMPORARY, live): the 3P arm IK: on (the default two-bone solve onto FP handAttach joints), off, probe (measures without writing),
+        // or nudge (the left hand group up 25 cm: does the skin read the hook's writes?). Body mode only.
+        const std::string ik = cfg.getString("fix.native_on_foot_arm_ik", "on");
         const int ikMode = ik == "on" ? 3 : ik == "nudge" ? 2 : ik == "off" ? 0 : 1;
         if (first || ikMode != pfz::g_ikMode.load(std::memory_order_relaxed)) {
             static const char* const kIkModeText[4] = {"off -- nothing is hooked or measured for it",
                                                        "probe -- the Animate hook measures the arm chains against the FP handAttach targets every 5 s; "
-                                                       "nothing is written (the default)",
+                                                       "nothing is written",
                                                        "nudge -- in body mode the 3P left hand group rises 25 cm (model y), blended over 0.2 s: proves "
                                                        "whether the skin reads the hook's writes",
                                                        "on -- in body mode the 3P arms are solved onto the FP handAttach joints (two bones, pole hint, "
@@ -776,11 +778,11 @@ void readKey() {
         }
         pfz::g_ikMode.store(ikMode, std::memory_order_relaxed);
         pfz::g_ikWanted.store(ikMode != 0, std::memory_order_relaxed);
-        // F57 (TEMPORARY, live, the Native on foot page's sliders): the arm IK's elbow swivel trim (deg, -90..90, default 0), the torso
-        // square-up's amount (0..1, default 1) and the elbow-out clamp distance (cm, 0..30, default 6 since F59: from the arm's own shoulder).
+        // F57 (TEMPORARY, live, the Native on foot page's sliders): the arm IK's elbow swivel trim (deg, -90..90, default 6), the torso
+        // square-up's amount (0..1, default 0.75) and the elbow-out clamp distance (cm, 0..30, default 6 since F59: from the arm's own shoulder).
         // Body mode with the arm IK on only.
         {
-            const double trimDeg = nofoot::ikSwivelTrimClampDeg(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_elbow_swivel_trim_deg", 0.0f)));
+            const double trimDeg = nofoot::ikSwivelTrimClampDeg(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_elbow_swivel_trim_deg", static_cast<float>(nofoot::kIkSwivelTrimDefaultDeg))));
             const double sqAmount = nofoot::ikSquareAmountClamp(
                 static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_square_amount", static_cast<float>(nofoot::kIkSquareAmountDefault))));
             const double outCm = nofoot::ikElbowOutClampCm(
@@ -797,7 +799,7 @@ void readKey() {
             g_ikElbowOutM.store(static_cast<float>(outCm / 100.0), std::memory_order_relaxed);
         }
         // F59 (TEMPORARY, live, the Native on foot page's ADS sliders): the arm IK's values while aiming down sights (blended over 0.15 s):
-        // square-up amount (0..1, 1), elbow out (cm, 0..20, 6), swivel trim (deg, -60..60, 0), shoulder raise and forward push (cm, 0..10, 3
+        // square-up amount (0..1, 1), elbow out (cm, 0..20, 6), swivel trim (deg, -60..60, 3), shoulder raise and forward push (cm, 0..10, 5.5
         // and 5; through the clavicle assist) and the bend's forward lean (deg, 0..15, 6). Body mode with the arm IK on (the lean: the bend).
         {
             const double v[6] = {
@@ -870,7 +872,7 @@ void readKey() {
     g_nativeOnFootSharpHudKey.store(runtimeVrProfile(), std::memory_order_relaxed);   // F34: always on in native on foot (the key is gone)
     // F22: look to aim (user settings, live). The body turns to where the head looks while the reticle follows head; the runtime holds the world still.
     // The sign and the delay are TEMPORARY (the flight A/B); the smoothing is the setting. Each key is spelled out in its own call (the generator scans).
-    const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "on") == "on";
+    const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "off") == "on";
     g_lookKeyOn.store(lookOn, std::memory_order_relaxed);
     int lookSmooth = cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 150);
     if (lookSmooth < 0) lookSmooth = 0;
@@ -909,7 +911,7 @@ void readKey() {
         offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", -0.09f));
         offs[4] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_x", -0.07f));
         offs[5] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_y", 0.0f));
-        offs[6] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_x", 0.0f));
+        offs[6] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_x", 0.02f));
         offs[7] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_y", 0.0f));
         {
             F9Lock lock;
@@ -950,7 +952,7 @@ void readKey() {
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
     // F34: the reticle stub is the feature's (key 10 while native stereo is on foot); the probe key is gone.
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp, explorerCamFpBody).
-    const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "off") == "on";
+    const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "on") == "on";
     g_fpKeyOn.store(fpOn, std::memory_order_relaxed);
     if (first || fpOn != g_fpKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_hide_fp_body is %s (temporary)", fpOn ? "on" : "off");
@@ -973,7 +975,7 @@ void readKey() {
         g_bodyCullKeyLast = bodyCullMode;
     }
     // F19 (TEMPORARY): the body unclip, explorer_cam.cpp (explorerCamBodyClipTick, the fade hook's bodyClipStep). Written while native stereo is on foot.
-    const bool unclipOn = cfg.getString("fix.native_on_foot_body_unclip", "off") == "on";
+    const bool unclipOn = cfg.getString("fix.native_on_foot_body_unclip", "on") == "on";
     g_unclipKeyOn.store(unclipOn, std::memory_order_relaxed);
     if (first || unclipOn != g_unclipKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_body_unclip is %s (temporary)", unclipOn ? "on" : "off");
@@ -11484,7 +11486,7 @@ struct GripSample {
     std::atomic<uint32_t> seq{0};
     uint64_t qpc = 0, sampleMs = 0, itemChangedMs = 0;
     uint32_t p1 = 0, itemSerial = 0, fpFrame = 0, fpGeneration = 0, fpAgeMs = 0, gFrame = 0, gAgeMs = 0;
-    bool armedFull = false, offTwo = false, authoredLeft = false, supportValid = false, cupDiagOk = false, blendedTargetDiagOk = false;
+    bool armedFull = false, offTwo = false, authoredLeft = false, authoredPistolSupport = false, supportValid = false, cupDiagOk = false, blendedTargetDiagOk = false;
     bool sideOk[2] = {false, false}, wristOk[2] = {false, false}, palmDiagOk[2] = {false, false}, attachDiagOk[2] = {false, false}, poseWritten[2] = {false, false},
          supportContactValid[2] = {false, false};
     float gFp[2][16] = {}, g3p[2][16] = {}, fpAt[2][3] = {}, wrist[2][4] = {}, wristImprovement[2] = {};
@@ -11506,7 +11508,7 @@ void gripPost(const GripSample& r) noexcept {
     d.sampleMs = r.sampleMs; d.itemChangedMs = r.itemChangedMs;
     d.p1 = r.p1; d.itemSerial = r.itemSerial; d.fpFrame = r.fpFrame; d.fpGeneration = r.fpGeneration; d.fpAgeMs = r.fpAgeMs; d.gFrame = r.gFrame; d.gAgeMs = r.gAgeMs;
     d.armedFull = r.armedFull;
-    d.offTwo = r.offTwo; d.authoredLeft = r.authoredLeft; d.supportValid = r.supportValid; d.cupDiagOk = r.cupDiagOk; d.blendedTargetDiagOk = r.blendedTargetDiagOk;
+    d.offTwo = r.offTwo; d.authoredLeft = r.authoredLeft; d.authoredPistolSupport = r.authoredPistolSupport; d.supportValid = r.supportValid; d.cupDiagOk = r.cupDiagOk; d.blendedTargetDiagOk = r.blendedTargetDiagOk;
     d.sep = r.sep;
     d.offW = r.offW;
     d.armedW = r.armedW; d.supportBlend = r.supportBlend;
@@ -11544,7 +11546,7 @@ bool gripCopy(GripSample* out) noexcept {
         out->sampleMs = s.sampleMs; out->itemChangedMs = s.itemChangedMs;
         out->p1 = s.p1; out->itemSerial = s.itemSerial; out->fpFrame = s.fpFrame; out->fpGeneration = s.fpGeneration; out->fpAgeMs = s.fpAgeMs; out->gFrame = s.gFrame; out->gAgeMs = s.gAgeMs;
         out->armedFull = s.armedFull;
-        out->offTwo = s.offTwo; out->authoredLeft = s.authoredLeft; out->supportValid = s.supportValid; out->cupDiagOk = s.cupDiagOk; out->blendedTargetDiagOk = s.blendedTargetDiagOk;
+        out->offTwo = s.offTwo; out->authoredLeft = s.authoredLeft; out->authoredPistolSupport = s.authoredPistolSupport; out->supportValid = s.supportValid; out->cupDiagOk = s.cupDiagOk; out->blendedTargetDiagOk = s.blendedTargetDiagOk;
         out->sep = s.sep;
         out->offW = s.offW;
         out->armedW = s.armedW; out->supportBlend = s.supportBlend;
@@ -11784,11 +11786,13 @@ void poseDeviationDrain() noexcept {
                                 r.sample.violationM[side] * 100.0, r.sample.outSign[side], r.sample.actualOutM[side] * 100.0, r.sample.requiredOutM[side] * 100.0,
                                 static_cast<double>(r.sample.dtMs), r.sample.fpAgeMs, r.sample.gAgeMs, r.sample.item, r.sample.generation);
             }
-            Log::get().note("armed pose policy (F79) event %u offset %+d frame %u item %u rig %u FP rig %llX/%u: offhand input %s close %s steady %s history %u raw-qualified %s attachment %s stable-policy %s allowed %s distance %.1f cm change %.2f deg raw/effective/left weight %.3f/%.3f/%.3f; frame duplicate/gap/identity/reversed %s/%s/%s/%s; left wrote %s reason %s right wrote %s final shoulder %+.3f/%+.3f/%+.3f m; support requested/valid/blend %s/%s/%.3f targets %u/%u; reach measured/active/infeasible/rejected %s/%s/%s/%s radii L/R %.1f/%.1f cm candidate R/U/F %.1f/%.1f/%.1f cm applied R/U/F %.1f/%.1f/%.1f cm",
+            Log::get().note("armed pose policy (F80) event %u offset %+d frame %u item %u rig %u FP rig %llX/%u: offhand input %s close %s steady %s history %u raw-qualified %s attachment %s raw-stable %s authored-pistol %s selected-stable %s allowed %s distance %.1f cm change %.2f deg raw/effective/left weight %.3f/%.3f/%.3f; frame duplicate/gap/identity/reversed %s/%s/%s/%s; left wrote %s reason %s right wrote %s final shoulder %+.3f/%+.3f/%+.3f m; support requested/valid/blend %s/%s/%.3f targets %u/%u; reach measured/active/infeasible/rejected %s/%s/%s/%s radii L/R %.1f/%.1f cm candidate R/U/F %.1f/%.1f/%.1f cm applied R/U/F %.1f/%.1f/%.1f cm",
                             r.event, static_cast<int>(r.offset), r.sample.frame, r.sample.item, r.sample.generation,
                             static_cast<unsigned long long>(r.sample.fpRig), r.sample.fpGeneration,
                             r.sample.offInputValid ? "yes" : "no", r.sample.offWithinDistance ? "yes" : "no", r.sample.offSteady ? "yes" : "no", r.sample.offHistorySamples,
-                            r.sample.offQualified ? "yes" : "no", r.sample.offTwo ? "yes" : "no", r.sample.leftStablePolicy ? "yes" : "no", r.sample.offAllowed ? "yes" : "no", r.sample.offDistanceM * 100.0,
+                            r.sample.offQualified ? "yes" : "no", r.sample.offTwo ? "yes" : "no", r.sample.leftStablePolicy ? "yes" : "no",
+                            r.sample.authoredPistolSupport ? "yes" : "no", (r.sample.leftStablePolicy || r.sample.authoredPistolSupport) ? "yes" : "no",
+                            r.sample.offAllowed ? "yes" : "no", r.sample.offDistanceM * 100.0,
                             r.sample.offChangeDeg, r.sample.offRawWeight, r.sample.offEffectiveWeight, r.sample.leftSolveWeight,
                             r.sample.offDuplicate ? "yes" : "no", r.sample.offGapReset ? "yes" : "no", r.sample.offIdentityReset ? "yes" : "no", r.sample.offReversed ? "yes" : "no",
                             r.sample.leftWrote ? "yes" : "no", r.sample.leftReason > 0 && r.sample.leftReason <= kF67fWhyKinds ? kF67fWhyText[r.sample.leftReason - 1] : "none",
@@ -12130,7 +12134,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     if (supportRequested) s_blendKind = supportKind;
     const nofoot::SupportItem supportTargetKind = supportRequested ? supportKind : s_blendKind;
     bool supportCup = supportTargetKind != nofoot::kSupportNone && (supportRequested || s_supportBlend > 0.0);
-    if (physicalPoleActive && !(supportCup || (offOut.ok && offOut.stablePolicy))) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
+    if (supportKind == nofoot::kSupportPistol) supportCup = false;   // pistols retain their own anatomical target and finger pose (F80).
     double supportGap = -1.0;
     double supportCupGap = -1.0;
     bool supportTargetValid = false;
@@ -12173,6 +12177,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
         return joint < sp.count ? g_pfzAnim[joint] : nullptr;
     };
+    bool authoredPistolSupport = false;
     if (armsOk && G.g[15] != 0.0f) {
         float I[16]; nofoot::pfzIdentity(I);
         for (int side = 0; side < 2; ++side) {
@@ -12193,6 +12198,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (!haveTarget) haveTarget = nofoot::handRetarget(LA, I, TA, I, effectiveHand[side]);
             effectiveHandOk[side] = haveTarget && ikMatrixSane(effectiveHand[side]);
         }
+        uint32_t profileSerial = 0;
+        char profileName[64] = {};
+        const bool profileIsPistol = opticItemRead(&profileSerial, profileName) && nofoot::supportItem(profileName) == nofoot::kSupportPistol;
+        authoredPistolSupport = nofoot::authoredPistolSupportEligible(armedNow, supportKind, itemSerialForCall, profileSerial,
+                                                                       profileIsPistol, offOut.ok, offOut.withinDistance,
+                                                                       anatomyMapOk, effectiveHandOk[0], targetMode[0]);
+        if (authoredPistolSupport) offW = 1.0;
         if (supportCup && anatomyMapOk && effectiveHandOk[0] && effectiveHandOk[1] && pl.hand[0].why == 0 && fpHands.rig[1].why == 0 &&
             pl.hand[0].supportContactValid && fpHands.rig[1].supportContactValid) {
             // The support contact uses K2 geometry; ordinary hand retargeting keeps its anatomical palm frame and finger data.
@@ -12235,6 +12247,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             } else supportCup = false;
         } else if (supportCup) supportCup = false;
     }
+    if (physicalPoleActive && !(supportCup || authoredPistolSupport || (offOut.ok && offOut.stablePolicy)))
+        nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
     if (supportTargetKind != nofoot::kSupportNone && !supportTargetValid) {
         // A temporary anatomy/snapshot/contact loss restarts the cup blend from zero when it becomes valid again.
         s_supportBlend = 0.0;
@@ -12243,7 +12257,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     }
     if (physicalPoleActive) {
         physicalPoleAttempted[1] = true;
-        physicalPoleAttempted[0] = nofoot::ikPhysicalPoleSideEligible(0, supportCup && supportTargetValid, offOut.ok && offOut.stablePolicy);
+        physicalPoleAttempted[0] = nofoot::ikPhysicalPoleSideEligible(0, (supportCup && supportTargetValid) || authoredPistolSupport,
+                                                                      offOut.ok && offOut.stablePolicy);
         if (!physicalPoleAttempted[0]) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
     }
     // F75: measure the barrels of the 3P animated right attach (66) and the FP right attach (51) through G once from the animated pose and FP snapshot.
@@ -12690,7 +12705,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         for (int i = 0; i < 3; ++i) o.Efp[i] = static_cast<float>(fE[i]);
         const double baseTheta = nofoot::ikWrapPi(ikSwivel(tb, elbowDir, outSign, o.poleFp ? fpPole : nullptr, trimRad, elbowOutM, &o.clamped));
         double theta = wSolve * baseTheta;
-        const bool stablePoleSide = physicalPoleActive && doSolveWrite && nofoot::ikPhysicalPoleSideEligible(side, supportCup && supportTargetValid, offOut.ok && offOut.stablePolicy);
+        const bool stablePoleSide = physicalPoleActive && doSolveWrite &&
+                                    nofoot::ikPhysicalPoleSideEligible(side, (supportCup && supportTargetValid) || authoredPistolSupport,
+                                                                       offOut.ok && offOut.stablePolicy);
         bool stablePoleHadReference = false;
         bool stablePoleFallback = false;
         double stablePoleReferenceTheta = baseTheta;
@@ -12751,8 +12768,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
         double n0geo[3] = {};
         const bool geo = nofoot::ikHingeAnimated(S, F0, H0, n0geo);
-        // The row replaces the geometric cross when they differ by more than 10 deg, and stands in for it when the arm is straight.
-        const bool useRow = haveRow && (!geo || nofoot::ikAxisAngleDeg(rowN0, n0geo) > nofoot::kHingeRowTolDeg);
+        // The learned row can repair a nearly straight arm. In the armed stable-pole solve, a valid joint cross remains authoritative because
+        // substituting the rendered forearm row when bent can swing the elbow onto a different plane and leave the wrist off its target.
+        const bool useRow = nofoot::ikUseHingeRow(haveRow, geo, haveRow && geo ? nofoot::ikAxisAngleDeg(rowN0, n0geo) : 0.0, stablePoleSide);
         nofoot::HingeSwings hs = nofoot::ikHingeSwings(S, F0, H0, E, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);
         if (!hs.ok) {
             ikRefuse(kIkRefSingular);
@@ -13619,6 +13637,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         r.offW = static_cast<float>(offOut.w);
         r.armedW = g_armedW.load(std::memory_order_relaxed);
         r.authoredLeft = authoredLeftForCall;
+        r.authoredPistolSupport = authoredPistolSupport;
         r.supportValid = supportTargetValid;
         r.supportBlend = static_cast<float>(s_supportBlend);
         r.supportContactValid[0] = pl.hand[0].supportContactValid;
@@ -13760,6 +13779,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         sample.offRawWeight = offOut.w;
         sample.offEffectiveWeight = offW;
         sample.supportRequested = supportRequested;
+        sample.authoredPistolSupport = authoredPistolSupport;
         sample.supportValid = supportTargetValid;
         sample.supportBlend = s_supportBlend;
         sample.targetMode[0] = targetMode[0];
@@ -14680,10 +14700,10 @@ void gripPrint(int side, const nofoot::GripSteady& gs, const GripSample& r) noex
                       static_cast<double>(r.attachAngleDeg[side]), r.poseWritten[side] ? "arm solve written" : "arm solve not written");
     else
         std::snprintf(attachDiag, sizeof(attachDiag), "unavailable (final attach or palm frame unreadable; arm solve %s)", r.poseWritten[side] ? "written" : "not written");
-    Log::get().note("native on foot hand target (F70b/F75): item \"%s\", %s hand, target %s; anatomy %s, generation %u; K2 contact left/right %s/%s; support %s (commanded proxy gap %.1f mm; not skin clearance)",
+    Log::get().note("native on foot hand target (F70b/F80): item \"%s\", %s hand, target %s; anatomy %s, generation %u; K2 contact left/right %s/%s; support %s (commanded proxy gap %.1f mm; not skin clearance); authored pistol support %s",
                     nm, side == 0 ? "left" : "right", target, nofoot::handMapWhyText(static_cast<nofoot::HandMapWhy>(r.mapWhy[side])), r.mapGeneration,
                     r.supportContactValid[0] ? "valid" : "unavailable", r.supportContactValid[1] ? "valid" : "unavailable", support,
-                    1000.0 * static_cast<double>(r.supportGap));
+                    1000.0 * static_cast<double>(r.supportGap), r.authoredPistolSupport ? "active" : "inactive");
     if (side == 0 && r.cupDiagOk) {
             Log::get().note("native on foot cup geometry (F79): selected weapon-side radial sign %+d from right attach's signed projection %.2f mm from mean K2; commanded centre in right K2 axes %+0.1f/%+0.1f/%+0.1f mm; cup/contact axis dots %.3f/%.3f/%.3f, frame angle %.1f deg; dimensions used right width/length/radius %.1f/%.1f/%.1f mm, left radius %.1f mm, commanded proxy gap %.1f mm (not measured skin clearance); support blend %.2f",
                         static_cast<int>(r.cupRadialSide), static_cast<double>(r.cupAttachSideMm),

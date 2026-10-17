@@ -192,7 +192,7 @@ DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
 # Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
-# 'native_on_foot' is the Native on foot page (2026-10-14): every native on-foot key, temporary, in the order the file lists them.
+# 'native_on_foot' is the Native on foot page (2026-10-14): the native on-foot settings explicitly tagged for the page, in file order.
 # 'debug' is the flat panel's Debug tab (2026-10-16); VR's menu has no such page.
 MENU_PAGES = ('fixes', 'performance', 'explorer_cam', 'native_on_foot', 'debug')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
