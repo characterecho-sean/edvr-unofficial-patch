@@ -2550,6 +2550,29 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(big.delta - nf::kPinVertCapM) < 1e-12 && nm.th[0] == 0.0 && nm.delta == 0.0,
                       "F67c: the move puts the animated neck on the target (within 0.1 mm), the vertical part signed (lowering is negative), a camera past 1.5 m or 0.8 m "
                       "is clamped and flagged, a NaN target moves nothing");
+                const double headTarget[3] = {0.12, 1.32, -0.08}, authoredNeck[3] = {-0.01, 1.48, 0.03}, reachOffset[3] = {0.02, -0.01, 0.04};
+                double detached[3], halfDetached[3], unchanged[3];
+                const double fullGap = nf::pinDetachTarget(headTarget, authoredNeck, 0.0, unchanged);
+                const double halfGap = nf::pinDetachTarget(headTarget, authoredNeck, 0.5, halfDetached);
+                const double releasedGap = nf::pinDetachTarget(headTarget, authoredNeck, 1.0, detached);
+                float bendTarget[3];
+                nf::pinBendTargetWithReach(halfDetached, reachOffset, bendTarget);
+                nf::AdsRamp detachRamp;
+                detachRamp.step(true, nf::kAdsRampInSec);
+                const double engagedW = detachRamp.w;
+                detachRamp.step(false, nf::kAdsRampOutSec * 0.5);
+                const double halfReleaseW = detachRamp.w;
+                detachRamp.step(true, nf::kAdsRampInSec * 0.5);
+                const double reengagedW = detachRamp.w;
+                detachRamp.step(false, nf::kAdsRampOutSec);
+                const bool adsDetachOk = fullGap > 0.0 && std::fabs(unchanged[0] - headTarget[0]) < 1e-12 && std::fabs(halfGap - fullGap * 0.5) < 1e-12 &&
+                                         releasedGap < 1e-12 && std::fabs(detached[0] - authoredNeck[0]) < 1e-12 && std::fabs(detached[1] - authoredNeck[1]) < 1e-12 &&
+                                         std::fabs(detached[2] - authoredNeck[2]) < 1e-12 && engagedW == 1.0 && std::fabs(halfReleaseW - 0.5) < 1e-12 &&
+                                         std::fabs(reengagedW - 1.0) < 1e-12 && detachRamp.w == 0.0 && std::fabs(bendTarget[0] - (halfDetached[0] + reachOffset[0])) < 1e-7f &&
+                                         std::fabs(bendTarget[1] - (halfDetached[1] + reachOffset[1])) < 1e-7f && std::fabs(bendTarget[2] - (halfDetached[2] + reachOffset[2])) < 1e-7f &&
+                                         nf::pinBodyBendWeight(0.0) == 1.0 && nf::pinBodyBendWeight(0.5) == 0.5 && nf::pinBodyBendWeight(1.0) == 0.0;
+                check(adsDetachOk,
+                      "F73: ADS body detachment blends the pin target from the head target to the same-call authored neck, leaves non-ADS unchanged, preserves reach in the bend target, and restores smoothly through release and repress");
                 // (3) The legs. A leg with l1 = l2 = 0.45 m (the knee at 30 deg folds the hip -> foot to 0.233 m, 0.995 x 0.9 = 0.8955 m is the longest asked).
                 const double l1 = 0.45, l2 = 0.45, fb[3] = {0.0, 0.0, 1.0};
                 check(std::fabs(nf::legMinReach(l1, l2) - 2.0 * 0.45 * std::sin(15.0 * nf::kIkPi / 180.0)) < 1e-12, "F67c: the knee folds the leg to 2 l sin(15 deg) at the 30 deg interior angle");
@@ -2975,6 +2998,66 @@ int wmain(int argc, wchar_t** argv) {
                 nf::pinNeckTarget(eyeLow, fwd0, Rl);
                 check(!pn.anim && pn.wc == 0.0 && dist(Tn, Rl) < 1e-12 && !nanCal.have,
                       "F69a: without a calibration the target is the rest offset whatever the camera does (a non-finite eye height is no standing frame)");
+                // ---- F73: natural-LOCAL physical pitch rotates the standing neck-to-eye rest vector; the game-authored crouch vector stays unchanged.
+                bool orbitFixed = true, headingStable = true, crouchStable = true, pitchDecodeOk = true;
+                nf::PinEyeCal domainCal;
+                for (int i = 0; i < 45; ++i) domainCal.add(true, p44s, rowsId, n0s, 1.62, 1.40);
+                const double rawFallbackEye[3] = {0.0, 1.0, 0.0};
+                double TrawFallback[3];
+                nf::PinAnimTarget prawFallback;
+                nf::pinNeckTargetAnim(rawFallbackEye, fwd0, pStance, rowsId, n0s, domainCal, TrawFallback, &prawFallback, -0.5, false);
+                const bool domainFallback = domainCal.have && std::fabs(domainCal.eyeY - 1.62) < 1e-12 && std::fabs(domainCal.eyeYRaw - 1.40) < 1e-12 &&
+                                            std::fabs(prawFallback.wc - 0.896) < 1e-12;
+                const double yawList[] = {45.0, 90.0};
+                const double pitchList[] = {-60.0, -69.0, -70.0, -89.0, -90.0};
+                const double neckOrbit[3] = {0.0, 1.465, 0.0};
+                for (double yawDeg : yawList) {
+                    const double yaw = yawDeg * nf::kIkPi / 180.0;
+                    const double hx = std::sin(yaw), hz = std::cos(yaw);
+                    for (double pitchDeg : pitchList) {
+                        const double pitch = pitchDeg * nf::kIkPi / 180.0;
+                        const double cp = std::cos(pitch), sp = std::sin(pitch);
+                        float localPose[12] = {};
+                        localPose[6] = static_cast<float>(-sp);
+                        double decodedPitch = 0.0;
+                        pitchDecodeOk = pitchDecodeOk && nf::pinNaturalLocalPitch(localPose, &decodedPitch) && std::fabs(decodedPitch - pitch) < 5e-6;
+                        const double headFwd[3] = {hx * cp, sp, hz * cp};
+                        const double headUp[3] = {-hx * sp, cp, -hz * sp};
+                        const double vUp = nf::pinPitchRestUp(pitch, true);
+                        const double vForward = nf::kPinRestBackM * cp - nf::kPinRestUpM * sp;
+                        const double eyeOrbit[3] = {neckOrbit[0] + hx * vForward, neckOrbit[1] + vUp, neckOrbit[2] + hz * vForward};
+                        double To[3];
+                        nf::PinAnimTarget po;
+                        nf::pinNeckTargetAnim(eyeOrbit, headFwd, pStance, rowsId, n0s, cal, To, &po, decodedPitch, true, headUp);
+                        orbitFixed = orbitFixed && po.wc == 0.0 && dist(To, neckOrbit) < 1e-5 && std::fabs(po.eyeYSelected - cal.eyeY) < 1e-5 &&
+                                     std::fabs(po.hEye[0] - hx) < 1e-9 && std::fabs(po.hEye[2] - hz) < 1e-9;
+                        const double eyeCrouch[3] = {eyeOrbit[0], eyeOrbit[1] - 0.50, eyeOrbit[2]};
+                        double Tc[3];
+                        nf::PinAnimTarget pc;
+                        nf::pinNeckTargetAnim(eyeCrouch, headFwd, pStance, rowsId, n0s, cal, Tc, &pc, decodedPitch, true, headUp);
+                        double Tlegacy[3];
+                        nf::PinAnimTarget pLegacy;
+                        nf::pinNeckTargetAnim(eyeCrouch, headFwd, pStance, rowsId, n0s, cal, Tlegacy, &pLegacy, 0.0, false, headUp);
+                        crouchStable = crouchStable && pc.wc == 1.0 && dist(pc.vUsed, pc.vAnim) < 1e-12 && dist(pc.vAnim, pLegacy.vAnim) < 1e-12;
+                    }
+                }
+                // The scene camera can pitch under ADS/controller transforms; for a fixed natural-LOCAL pitch and heading it cannot change the correction.
+                const double testPitch = -30.0 * nf::kIkPi / 180.0, testYaw = 45.0 * nf::kIkPi / 180.0;
+                const double testEye[3] = {0.2, 1.55, -0.1};
+                const double scenePitchA = -60.0 * nf::kIkPi / 180.0, scenePitchB = 20.0 * nf::kIkPi / 180.0;
+                const double sceneFwdA[3] = {std::sin(testYaw) * std::cos(scenePitchA), std::sin(scenePitchA), std::cos(testYaw) * std::cos(scenePitchA)};
+                const double sceneUpA[3] = {-std::sin(testYaw) * std::sin(scenePitchA), std::cos(scenePitchA), -std::cos(testYaw) * std::sin(scenePitchA)};
+                const double sceneFwdB[3] = {std::sin(testYaw) * std::cos(scenePitchB), std::sin(scenePitchB), std::cos(testYaw) * std::cos(scenePitchB)};
+                const double sceneUpB[3] = {-std::sin(testYaw) * std::sin(scenePitchB), std::cos(scenePitchB), -std::cos(testYaw) * std::sin(scenePitchB)};
+                double Ta[3], Tb[3], Tf0[3], Tinvalid[3];
+                nf::PinAnimTarget pta, ptb, pt0, pti;
+                nf::pinNeckTargetAnim(testEye, sceneFwdA, pStance, rowsId, n0s, cal, Ta, &pta, testPitch, true, sceneUpA);
+                nf::pinNeckTargetAnim(testEye, sceneFwdB, pStance, rowsId, n0s, cal, Tb, &ptb, testPitch, true, sceneUpB);
+                nf::pinNeckTargetAnim(testEye, sceneFwdA, pStance, rowsId, n0s, cal, Tf0, &pt0, 0.0, true, sceneUpA);
+                nf::pinNeckTargetAnim(testEye, sceneFwdA, pStance, rowsId, n0s, cal, Tinvalid, &pti, testPitch, false, sceneUpA);
+                headingStable = dist(Ta, Tb) < 1e-12 && dist(Tf0, Tinvalid) < 1e-12 && std::fabs(pta.eyeYSelected - ptb.eyeYSelected) < 1e-12;
+                check(orbitFixed && headingStable && crouchStable && pitchDecodeOk && domainFallback,
+                      "F73: natural-LOCAL pitch decode and nonzero-yaw physical orbit keep the standing neck fixed through near-vertical gaze, preserve crouch classification and authored vector, and ignore scene pitch when local pitch is fixed; invalid local pose uses the raw-height calibration and yaw-only offset");
                 // ---- F69d: the bins: jumping from the vertical speed alone, crouching from w_c; the clearance's inside test and axes.
                 check(nf::pinState(0.1, 0.0) == 0 && nf::pinState(1.2, 0.0) == 1 && nf::pinState(4.0, 0.2) == 2 && nf::pinState(1.0, 1.1) == 3 && nf::pinState(4.0, -1.0) == 3 &&
                           nf::pinState(0.1, 0.0, true) == 4 && nf::pinState(4.0, 0.0, true) == 4 && nf::pinState(0.1, 1.2, true) == 3,
@@ -3315,6 +3398,31 @@ int wmain(int argc, wchar_t** argv) {
                     check(!turningTwo && !gone.two && gone.w == 0.0 && rifle.have == 0 && !blind.ok && !blind.two,
                           "F69h: a left attach turning 2 deg a frame is one-handed within 40 cm (not steady under 5 deg over 10 frames); unarmed forgets the history; a frame "
                           "whose attaches cannot be read decides one-handed");
+
+                    nf::OffHand relaxed;
+                    bool relaxedTwo = false;
+                    for (int i = 0; i < 60; ++i) relaxedTwo = relaxedTwo || relaxed.step(dtF, true, true, a51, a52, false).two;
+                    check(!relaxedTwo && relaxed.w == 0.0,
+                          "F73: a one-handed tool can force the authored off-arm pose even when its attach pair looks two-handed");
+                    nf::OffHand leavingRifle;
+                    for (int i = 0; i < 40; ++i) leavingRifle.step(dtF, true, true, a51, a52);
+                    int relaxedAt = -1;
+                    for (int i = 0; i < 20; ++i) {
+                        const auto o = leavingRifle.step(dtF, true, true, a51, a52, false);
+                        if (o.w == 0.0 && relaxedAt < 0) relaxedAt = i;
+                    }
+                    check(relaxedAt >= 12 && relaxedAt <= 14,
+                          "F73: changing from a supported two-handed item fades the off-arm solve to the authored pose in 0.15 s");
+                    check(nf::supportItem("$wpn_s_pistol_name;") == nf::kSupportPistol &&
+                          nf::supportItem("$humanoid_rechargetool_name;") == nf::kSupportNone &&
+                          nf::supportItem("$humanoid_companalyser_name;") == nf::kSupportNone &&
+                          nf::supportItem("$humanoid_repairtool_name;") == nf::kSupportTool &&
+                          nf::supportItem("$wpn_rifle_name;") == nf::kSupportNone &&
+                          nf::gameAuthoredLeftArm("$humanoid_rechargetool_name;") &&
+                          nf::gameAuthoredLeftArm("$humanoid_companalyser_name;") &&
+                          !nf::gameAuthoredLeftArm("$humanoid_repairtool_name;") &&
+                          !nf::gameAuthoredLeftArm("$wpn_s_pistol_name;"),
+                          "F73: item classification relaxes Energy Link and Profile Analyser while preserving pistol, rifle and Arc Cutter behavior");
                 }
             }
             // F70: the ADS eye point (core parts): the target P14w + k f, the clearance cap, the feed-forward ramp, the body pinned to the unlocked head.
@@ -4799,14 +4907,17 @@ int wmain(int argc, wchar_t** argv) {
         rightPalm[0] = 0.0f; rightPalm[1] = 1.0f;    // distal is +Y
         rightPalm[4] = 1.0f; rightPalm[5] = 0.0f;    // thumbward is +X
         rightPalm[10] = -1.0f;                       // proper right-hand palm normal is -Z
-        const bool supportFrameOk = edvr::nofoot::supportPalmFrame(rightPalm, 1, -1, cup, leftPalm);
+        edvr::pfz::HandRig leftRig{};
+        leftRig.palmarSign = edvr::pfz::handPalmarSign(0);   // production HandRig storage and derive-side assignment
+        const int leftPalmarSign = leftRig.palmarSign == 0 ? -1 : leftRig.palmarSign;
+        const bool supportFrameOk = edvr::nofoot::supportPalmFrame(rightPalm, 1, leftPalmarSign, cup, leftPalm);
         const double leftPhysicalNormalX = supportFrameOk ? -leftPalm[8] : 0.0;
         const double det = supportFrameOk ?
             leftPalm[0] * (leftPalm[5]*leftPalm[10] - leftPalm[6]*leftPalm[9]) -
             leftPalm[1] * (leftPalm[4]*leftPalm[10] - leftPalm[6]*leftPalm[8]) +
             leftPalm[2] * (leftPalm[4]*leftPalm[9] - leftPalm[5]*leftPalm[8]) : 0.0;
-        check(supportFrameOk && leftPhysicalNormalX > 0.99 && std::fabs(det - 1.0) < 1e-5,
-              "F70b: support palm faces the gripping hand with a proper rigid basis");
+        check(supportFrameOk && leftRig.palmarSign == -1 && leftPhysicalNormalX > 0.99 && std::fabs(det - 1.0) < 1e-5,
+              "F70b: signed left HandRig palm sign survives storage and produces a proper gripping-hand basis");
 
         float Qsrc[16], QsrcParent[16], Qdst[16], QdstParent[16], D[16], invSrcParent[16], finger[16], desired[16];
         rot(Qsrc, 0, 0.27f); rot(QsrcParent, 2, -0.31f); rot(Qdst, 1, 0.52f); rot(QdstParent, 0, -0.14f); rot(D, 2, 0.42f);

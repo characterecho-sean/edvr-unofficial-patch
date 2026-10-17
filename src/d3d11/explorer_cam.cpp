@@ -2302,7 +2302,7 @@ bool deriveHandRig(uint32_t joints, uint32_t hand, uint32_t attach, int side, co
     if (!nofoot::ikUnit(radial, radial)) return refuse(4);
     double normal[3]; nofoot::ikCross(distal, radial, normal);
     if (!nofoot::ikUnit(normal, normal)) return refuse(4);
-    r.palmarSign = side == 0 ? -1 : 1;   // physical palm-facing side; the stored basis remains proper in both rigs
+    r.palmarSign = pfz::handPalmarSign(side);   // physical palm-facing side; the stored basis remains proper in both rigs
     float palmModel[16], invHand[16];
     nofoot::pfzIdentity(palmModel);
     for (int c = 0; c < 3; ++c) { palmModel[c] = static_cast<float>(distal[c]); palmModel[4 + c] = static_cast<float>(radial[c]); palmModel[8 + c] = static_cast<float>(normal[c]);

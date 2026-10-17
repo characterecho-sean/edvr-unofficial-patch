@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: build 332841's PE identity, shared with the other build-keyed hooks
 #include "explorer_cam_follow_core.h"   // F49: ecm::quatRows, the pose's rotation rows (the pose freeze's rest locals)
@@ -3079,6 +3080,24 @@ struct PinMove {
     double delta = 0.0;  // the signed vertical move of the upper body
     bool hClamped = false, vClamped = false;
 };
+// F73 ADS body policy: release the head target toward the same-call authored neck while preserving the independent arm/reach solve.
+inline double pinDetachTarget(const double headTarget[3], const double authoredNeck[3], double detachW, double out[3]) noexcept {
+    const double w = std::isfinite(detachW) ? (detachW < 0.0 ? 0.0 : detachW > 1.0 ? 1.0 : detachW) : 0.0;
+    double d2 = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        out[i] = headTarget[i] + (authoredNeck[i] - headTarget[i]) * w;
+        const double d = out[i] - authoredNeck[i];
+        d2 += d * d;
+    }
+    return std::sqrt(d2);
+}
+inline double pinBodyBendWeight(double detachW) noexcept {
+    const double w = std::isfinite(detachW) ? (detachW < 0.0 ? 0.0 : detachW > 1.0 ? 1.0 : detachW) : 0.0;
+    return 1.0 - w;
+}
+inline void pinBendTargetWithReach(const double headTarget[3], const double reach[3], float out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(headTarget[i] + reach[i]);
+}
 inline PinMove pinMove(const double neck[3], const double target[3]) noexcept {
     PinMove m;
     double dx = target[0] - neck[0], dz = target[2] - neck[2], dy = target[1] - neck[1];
@@ -3420,7 +3439,7 @@ struct PinEyeCal {
     bool have = false;
     uint32_t n = 0;
     double sum[3] = {}, e[3] = {}, headYSum = 0.0, headY = 0.0;
-    double eyeYSum = 0.0, eyeY = 0.0;   // F69a: the cyclopean eye's model height over the same frames (h_stand), the crouch signal
+    double eyeYSum = 0.0, eyeY = 0.0, eyeYRawSum = 0.0, eyeYRaw = 0.0;   // F69a/F73: standing eye height normalized for LOCAL pitch, plus raw fallback
     PinHeadAxes axes, runAxes;
     void reset() noexcept { *this = PinEyeCal{}; }
     void restart() noexcept {
@@ -3428,13 +3447,17 @@ struct PinEyeCal {
         sum[0] = sum[1] = sum[2] = 0.0;
         headYSum = 0.0;
         eyeYSum = 0.0;
+        eyeYRawSum = 0.0;
         runAxes = PinHeadAxes{};
     }
-    // One frame: standing says whether this frame may calibrate (the caller's gate); eyeY the cyclopean eye's height in the 3P model space this frame
-    // (F69a); returns true on the frame the calibration completes. A non-finite eyeY is no standing frame.
-    bool add(bool standing, const double p44[3], const double rows[3][3], const double n0[3], double eyeYNow) noexcept {
+    // One frame: standing says whether this frame may calibrate (the caller's gate); eyeYNow is the LOCAL-pitch-normalized height and eyeYRawNow is
+    // the unmodified 3P model height for the invalid-LOCAL fallback (F73). Returns true on the frame the calibration completes.
+    bool add(bool standing, const double p44[3], const double rows[3][3], const double n0[3], double eyeYNow,
+             double eyeYRawNow = std::numeric_limits<double>::quiet_NaN()) noexcept {
         if (have) return false;
+        if (!std::isfinite(eyeYRawNow)) eyeYRawNow = eyeYNow;   // older callers and no-LOCAL fallback use one height domain
         if (!std::isfinite(eyeYNow)) standing = false;
+        if (!std::isfinite(eyeYRawNow)) standing = false;
         PinHeadAxes ax;
         double eh[3];
         bool ok = standing && pinRowsRigid(rows) && pinFindHeadAxes(rows, &ax);
@@ -3453,10 +3476,12 @@ struct PinEyeCal {
         for (int i = 0; i < 3; ++i) sum[i] += eh[i];
         headYSum += p44[1];
         eyeYSum += eyeYNow;
+        eyeYRawSum += eyeYRawNow;
         if (++n < kPinEyeCalFrames) return false;
         for (int i = 0; i < 3; ++i) e[i] = sum[i] / static_cast<double>(n);
         headY = headYSum / static_cast<double>(n);
         eyeY = eyeYSum / static_cast<double>(n);
+        eyeYRaw = eyeYRawSum / static_cast<double>(n);
         axes = runAxes;
         have = true;
         return true;
@@ -3478,6 +3503,19 @@ inline double pinCrouchWeight(bool have, double hStand, double eyeY) noexcept {
     if (!have || !std::isfinite(hStand) || !std::isfinite(eyeY)) return 0.0;
     return smoothstep3(kPinCrouchLoM, kPinCrouchHiM, hStand - eyeY);
 }
+inline double pinPitchRestUp(double localPitchRad, bool valid) noexcept {
+    if (!valid || !std::isfinite(localPitchRad)) return kPinRestUpM;
+    return kPinRestUpM * std::cos(localPitchRad) + kPinRestBackM * std::sin(localPitchRad);
+}
+inline bool pinNaturalLocalPitch(const float local[12], double* pitchRad) noexcept {
+    if (!local || !pitchRad || !std::isfinite(local[6])) return false;
+    const double s = std::max(-1.0, std::min(1.0, -static_cast<double>(local[6])));
+    *pitchRad = std::asin(s);
+    return std::isfinite(*pitchRad);
+}
+inline double pinEyeHeightNormalized(double eyeY, double localPitchRad, bool valid) noexcept {
+    return eyeY - (pinPitchRestUp(localPitchRad, valid) - kPinRestUpM);
+}
 struct PinAnimTarget {
     bool anim = false;        // the animated vector was computed (a calibration and a readable head); the vector used is the blend below
     bool clamped = false;
@@ -3486,19 +3524,28 @@ struct PinAnimTarget {
     double vUsed[3] = {};     // neck -> eye as used (model axes)
     double vAnim[3] = {};     // F69a: the animated vector (after the clamp), whether or not it was used
     double hEye[3] = {}, hHead[3] = {};
+    double eyeYSelected = 0.0;   // F73: normalized height when LOCAL pitch is valid; raw height on its yaw-only fallback
 };
 // The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
 // model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
-                              const PinEyeCal& cal, double out[3], PinAnimTarget* info) noexcept {
+                              const PinEyeCal& cal, double out[3], PinAnimTarget* info, double localPitchRad = 0.0, bool localPitchValid = false,
+                              const double* eyeUp = nullptr) noexcept {
     PinAnimTarget local;
     PinAnimTarget& pa = info ? *info : local;
     pa = PinAnimTarget{};
-    pinHeading(eyeFwd, pa.hEye);
-    const double rest[3] = {kPinRestBackM * pa.hEye[0], kPinRestUpM, kPinRestBackM * pa.hEye[2]};
+    if (!eyeUp || !pinHeadHeading(eyeFwd, eyeUp, pa.hEye)) pinHeading(eyeFwd, pa.hEye);
+    const double pitch = localPitchValid && std::isfinite(localPitchRad) ? localPitchRad : 0.0;
+    const double cp = std::cos(pitch), sp = std::sin(pitch);
+    const double restUp = kPinRestUpM * cp + kPinRestBackM * sp;
+    const double restForward = kPinRestBackM * cp - kPinRestUpM * sp;
+    const double rest[3] = {restForward * pa.hEye[0], restUp, restForward * pa.hEye[2]};
+    const double restAnimClamp[3] = {kPinRestBackM * pa.hEye[0], kPinRestUpM, kPinRestBackM * pa.hEye[2]};
+    pa.eyeYSelected = pinEyeHeightNormalized(eye[1], pitch, localPitchValid);
     for (int i = 0; i < 3; ++i) pa.vUsed[i] = pa.vAnim[i] = rest[i];
-    pa.wc = pinCrouchWeight(cal.have, cal.eyeY, eye[1]);
-    pa.dEyeY = cal.have && std::isfinite(cal.eyeY) && std::isfinite(eye[1]) ? eye[1] - cal.eyeY : 0.0;
+    const double hStand = localPitchValid && std::isfinite(localPitchRad) ? cal.eyeY : cal.eyeYRaw;
+    pa.wc = pinCrouchWeight(cal.have, hStand, pa.eyeYSelected);
+    pa.dEyeY = cal.have && std::isfinite(hStand) && std::isfinite(pa.eyeYSelected) ? pa.eyeYSelected - hStand : 0.0;
     if (cal.have && pinRowsRigid(rows)) {
         double f[3], u[3];
         cal.axes.fwd(rows, f);
@@ -3512,13 +3559,13 @@ inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const
         for (int i = 0; i < 3; ++i) v[i] = p44[i] + cal.e[0] * rows[0][i] + cal.e[1] * rows[1][i] + cal.e[2] * rows[2][i] - n0[i];
         double vt[3];
         pinTurnHeading(v, pa.hHead, pa.hEye, vt);
-        double dev[3] = {vt[0] - rest[0], vt[1] - rest[1], vt[2] - rest[2]};
+        double dev[3] = {vt[0] - restAnimClamp[0], vt[1] - restAnimClamp[1], vt[2] - restAnimClamp[2]};
         const double dn = std::sqrt(dev[0] * dev[0] + dev[1] * dev[1] + dev[2] * dev[2]);
         if (dn == dn && dn <= kPinAnimOffsetClampM) {
             for (int i = 0; i < 3; ++i) pa.vAnim[i] = vt[i];
             pa.anim = true;
         } else if (dn == dn) {
-            for (int i = 0; i < 3; ++i) pa.vAnim[i] = rest[i] + dev[i] * kPinAnimOffsetClampM / dn;
+            for (int i = 0; i < 3; ++i) pa.vAnim[i] = restAnimClamp[i] + dev[i] * kPinAnimOffsetClampM / dn;
             pa.anim = true;
             pa.clamped = true;
         }
@@ -3953,7 +4000,7 @@ struct OffHand {
     }
     // One hook call: dt seconds since the last (capped at 0.1), armed (the arms are on the grips' business at all), ok (both FP attaches readable this call),
     // a51 and a52 the FP attach matrices (row-vector, the FP root's frame). Unarmed: everything forgotten.
-    Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16]) noexcept {
+    Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true) noexcept {
         Out o;
         if (!armed) {
             *this = OffHand{};
@@ -3988,7 +4035,7 @@ struct OffHand {
                 closeEnough = o.ok && o.dist <= kOffHandMaxM;
             }
         }
-        o.two = ok && o.ok && closeEnough && steadyNow;
+        o.two = allowTwoHand && ok && o.ok && closeEnough && steadyNow;
         const double target = o.two ? 1.0 : 0.0, step = d / kOffHandRampSec;
         w = w < target ? (w + step > target ? target : w + step) : (w - step < target ? target : w - step);
         o.w = w;
@@ -4000,9 +4047,11 @@ inline SupportItem supportItem(const char* name) noexcept {
     if (!name || !*name) return kSupportNone;
     constexpr char pistol[] = "$wpn_s_pistol_";
     if (std::strncmp(name, pistol, sizeof(pistol) - 1) == 0) return kSupportPistol;
-    if (std::strcmp(name, "$humanoid_rechargetool_name;") == 0 || std::strcmp(name, "$humanoid_repairtool_name;") == 0 ||
-        std::strcmp(name, "$humanoid_companalyser_name;") == 0) return kSupportTool;
+    if (std::strcmp(name, "$humanoid_repairtool_name;") == 0) return kSupportTool;
     return kSupportNone;
+}
+inline bool gameAuthoredLeftArm(const char* name) noexcept {
+    return name && (std::strcmp(name, "$humanoid_rechargetool_name;") == 0 || std::strcmp(name, "$humanoid_companalyser_name;") == 0);
 }
 
 // Anatomical hand transfer primitives. IDs are interned joint names from the

@@ -139,13 +139,15 @@ inline Candidates g_cand[2];
 // gone; the arm IK key keeps the hook and the FP candidates running when the pose freeze key is off.
 struct HandRig {
     uint8_t why = 1;    // 0 valid; 1 bad plan/rest; 2 finger branch topology; 3 missing joint name; 4 degenerate geometry/transform
-    uint8_t count = 0, palmarSign = 1;
+    uint8_t count = 0;
+    int8_t palmarSign = 1;   // signed: the left physical palm faces opposite its proper stored basis
     uint16_t hand = 0xFFFFu, attach = 0xFFFFu;
     uint16_t joint[24] = {}, parentSlot[24] = {};
     uint16_t name[24] = {};
     float restLocal[24][16] = {}, boneToPalm[24][16] = {}, palm[16] = {};
     float width = 0.0f, length = 0.0f, skinRadius = 0.0f;
 };
+inline int8_t handPalmarSign(int side) noexcept { return side == 0 ? int8_t(-1) : int8_t(1); }
 struct FpDropPlan {
     uint64_t x = 0;
     uint32_t generation = 0;

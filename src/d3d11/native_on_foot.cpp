@@ -127,6 +127,8 @@ std::atomic<float> g_ikAdsSquare{static_cast<float>(nofoot::kIkAdsSquareDefault)
     g_ikAdsElbowOutM{static_cast<float>(nofoot::kIkAdsElbowOutCmDefault / 100.0)}, g_ikAdsTrimRad{0.0f},
     g_ikAdsRaiseM{static_cast<float>(nofoot::kIkAdsRaiseCmDefault / 100.0)}, g_ikAdsForwardM{static_cast<float>(nofoot::kIkAdsForwardCmDefault / 100.0)},
     g_ikAdsLeanRad{static_cast<float>(nofoot::kIkAdsLeanDegDefault * nofoot::kIkPi / 180.0)}, g_ikAdsW{0.0f};
+std::atomic<float> g_bodyDetachW{0.0f};   // F73: resolved ADS blends the body pin off while the independent ADS view/aim remains unchanged
+std::atomic<bool> g_bodyDetachAds{false}; // F73: immediate resolved ADS gate for pose-freeze release
 double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDefault, nofoot::kIkAdsTrimDegDefault,
                          nofoot::kIkAdsRaiseCmDefault, nofoot::kIkAdsForwardCmDefault, nofoot::kIkAdsLeanDegDefault};   // the key reader's last
 // F67c (TEMPORARY): fix.native_on_foot_stand_armed (the key F65b made: hidden, live, on by default) is now the BODY PIN's switch: in full-3P body
@@ -5922,6 +5924,18 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                                                          : actionEligible && g_adsActionReject.latched;
     const nofoot::AdsInputChoice adsChoice = nofoot::adsInputChoice(actionEligible, journalKnown, journalValue, actionFresh, action.value, actionAgeUs, actionVeto);
     const bool ads = adsChoice.ads;
+    // F73: body detachment follows the resolved ADS state independently of whether ADS head-aim is enabled or passes its own guard.
+    // Leaving the native full-3P lifecycle clears the published state immediately, so it cannot persist into menus or another mode.
+    static nofoot::AdsRamp bodyDetachRamp;
+    if (!actionEligible) {
+        bodyDetachRamp.w = 0.0;
+        g_bodyDetachAds.store(false, std::memory_order_relaxed);
+        g_bodyDetachW.store(0.0f, std::memory_order_relaxed);
+    } else {
+        bodyDetachRamp.step(ads, dt);
+        g_bodyDetachAds.store(ads, std::memory_order_relaxed);
+        g_bodyDetachW.store(static_cast<float>(bodyDetachRamp.w), std::memory_order_relaxed);
+    }
     if (adsChoice.source != g_adsActionSourceLast) {
         g_adsActionSourceLast = adsChoice.source;
         Log::get().note("native on foot ADS input (F70b): source %s, value %s; action sample %s, seq %u, age %llu us; journal %s%s; action hook reads %u, invalid %u",
@@ -6935,6 +6949,10 @@ struct PinIn {
     float camRaw[3] = {};   // F70: the job camera as read; cam is it less the ADS shift (the unlocked head)
     uint64_t qpc = 0, ms = 0;
     uint32_t p1 = 0;   // g_f66gP1Seq at the publication: the game-frame index (its low bit is the parity the lines split by)
+    float localPitchRad = 0.0f;
+    bool localPitchValid = false;
+    uint32_t localPoseGeneration = 0;
+    uint64_t localPoseFrame = 0, localPoseQpc = 0;
 };
 std::atomic<uint32_t> g_pinInSeq{0};
 PinIn g_pinIn;
@@ -6942,7 +6960,23 @@ std::atomic<bool> g_pinScope{false};   // the frame thread: the pin is on (key, 
 std::atomic<bool> g_armedNow{false};   // the game's armed flag (g_armed, F66a), for the Animate hook
 std::atomic<uint32_t> g_heldItemSerial{0};   // F69b: bumped by the frame thread at every change of the held item (Status.json SelectedWeapon): the hook's per-item latches drop
 std::atomic<uint8_t> g_supportCupMode{nofoot::kSupportNone};
+std::atomic<bool> g_gameAuthoredLeftArm{false};   // Energy Link and Profile Analyser: preserve the game's relaxed left-arm pose
 void pinInPublish(const float cam[3], const float camRaw[3], const float m3p[16], uint64_t nowMs) noexcept {
+    double localPitchRad = 0.0;
+    bool localPitchValid = false;
+    uint32_t localPoseGeneration = 0;
+    uint64_t localPoseFrame = 0, localPoseQpc = 0;
+    EdvrNativeNowPose np{};
+    const bool havePose = nativeFrameNowPose(np);
+    const uint64_t poseReadQpc = f30Qpc();
+    if (havePose && np.inputVersion >= 3 && np.localValid && np.ringCount > 0 && np.ringNewest < 8 &&
+        np.ringSequence[np.ringNewest] == np.frameSequence && np.ringQpc[np.ringNewest] != 0 && np.ringQpc[np.ringNewest] <= poseReadQpc &&
+        nofoot::pinNaturalLocalPitch(np.local, &localPitchRad)) {
+        localPitchValid = true;
+        localPoseGeneration = np.referenceGeneration;
+        localPoseFrame = np.frameSequence;
+        localPoseQpc = np.ringQpc[np.ringNewest];
+    }
     g_pinInSeq.fetch_add(1, std::memory_order_acq_rel);
     std::memcpy(g_pinIn.cam, cam, sizeof(g_pinIn.cam));
     std::memcpy(g_pinIn.camRaw, camRaw, sizeof(g_pinIn.camRaw));
@@ -6950,6 +6984,11 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float m3p[16]
     g_pinIn.qpc = f30Qpc();
     g_pinIn.ms = nowMs;
     g_pinIn.p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
+    g_pinIn.localPitchRad = static_cast<float>(localPitchRad);
+    g_pinIn.localPitchValid = localPitchValid;
+    g_pinIn.localPoseGeneration = localPoseGeneration;
+    g_pinIn.localPoseFrame = localPoseFrame;
+    g_pinIn.localPoseQpc = localPoseQpc;
     g_pinInSeq.fetch_add(1, std::memory_order_release);
 }
 bool pinInRead(PinIn* out) noexcept {
@@ -8754,6 +8793,7 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     journalHeldItemName(name, sizeof(name));
     if (!active) {
         g_supportCupMode.store(nofoot::kSupportNone, std::memory_order_relaxed);
+        g_gameAuthoredLeftArm.store(false, std::memory_order_relaxed);
         g_f66aKindLast = -1;
         g_f66aNameLast[0] = '\0';
         g_f66aLineMs = 0;
@@ -8763,6 +8803,7 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
                         kind == kHeldUnknown ? " [unknown: treated as unarmed, the game's arms]" : kind == kHeldNone ? " [fists]" : "", journalStatusSamples());
         g_heldItemSerial.fetch_add(1, std::memory_order_relaxed);   // F69b: a new item (or none): the hook's per-item latches drop
         g_supportCupMode.store(static_cast<uint8_t>(nofoot::supportItem(name)), std::memory_order_relaxed);
+        g_gameAuthoredLeftArm.store(nofoot::gameAuthoredLeftArm(name), std::memory_order_relaxed);
         if (g_f66aKindLast >= 0) f68dFlip(now, static_cast<int>(kind), name);   // F68d: the onset window (not for the first reading)
         g_f66aKindLast = static_cast<int>(kind);
         std::memcpy(g_f66aNameLast, name, sizeof(g_f66aNameLast));
@@ -10505,6 +10546,11 @@ struct PinBin {
     // eye's height less its standing mean (cm: mean, min, max).
     uint64_t wcHigh = 0, calN = 0;
     double wcSum = 0.0, wcMax = 0.0, dEyeSum = 0.0, dEyeMin = 0.0, dEyeMax = 0.0;
+    uint64_t localPitchN = 0, scenePitchN = 0;
+    double localPitchSum = 0.0, scenePitchSum = 0.0, rawEyeYSum = 0.0, eyeYSelectedSum = 0.0;
+    double detachWSum = 0.0, targetFromAuthoredSum = 0.0;   // F73: ADS head-release weight and post-blend target distance from authored neck
+    uint32_t localPoseGeneration = 0, localPoseAgeMs = 0;
+    uint64_t localPoseFrame = 0;
     // F69d: the pre-pin feet test (a counter, not a bin input), the eye against the finally written joints (cm, eye minus joint, right / up / forward: sum
     // and min per joint: 0 neck 34, 1 chest 24, 2 and 3 clavicles 35, 36, 4 and 5 upper arms L, R), and the frames "inside" (the eye under the clavicle line + 8 cm
     // and under 12 cm ahead of the chest).
@@ -10544,7 +10590,7 @@ std::atomic<bool> g_pinStatReset{false};
 // a millimetre).
 struct PinCyc {
     bool ok = false;
-    double off[3] = {}, fwd[3] = {};
+    double off[3] = {}, fwd[3] = {}, up[3] = {};
     uint64_t ms = 0;
 };
 PinCyc g_pinCyc;
@@ -10552,28 +10598,30 @@ enum PinCycSrc : int { kCycRows = 0, kCycCached = 1, kCycNone = 2 };
 int pinCycloUpdate(uint64_t now) noexcept {
     float rows[2][16] = {}, o[2][4] = {};
     uint32_t fr[2] = {~0u, ~0u};
-    double eye[2][3] = {}, fw[2][3] = {};
+    double eye[2][3] = {}, up[2][3] = {}, fw[2][3] = {};
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
     bool ok = true;
     for (int e = 0; e < 2 && ok; ++e) {
-        double r[3], u[3];
+        double r[3];
         ok = eyeRowsRead(e, &fr[e], rows[e], o[e]);
         if (ok) {
             const int32_t age = static_cast<int32_t>(cur - fr[e]);
             ok = age >= 0 && age <= 8;
         }
         const double od[3] = {o[e][0], o[e][1], o[e][2]};
-        ok = ok && nofoot::eyeFromRows(rows[e], od, eye[e]) && nofoot::rotAxesFromClip(rows[e], r, u, fw[e]);
+        ok = ok && nofoot::eyeFromRows(rows[e], od, eye[e]) && nofoot::rotAxesFromClip(rows[e], r, up[e], fw[e]);
     }
     if (ok) {
         const double d[3] = {eye[1][0] - eye[0][0], eye[1][1] - eye[0][1], eye[1][2] - eye[0][2]};
         const double ipd = nofoot::ikLen(d);
         const double mf[3] = {fw[0][0] + fw[1][0], fw[0][1] + fw[1][1], fw[0][2] + fw[1][2]};
-        double uf[3];
-        if (ipd > 0.05 && ipd < 0.08 && nofoot::ikUnit(mf, uf)) {
+        const double mu[3] = {up[0][0] + up[1][0], up[0][1] + up[1][1], up[0][2] + up[1][2]};
+        double uf[3], uu[3];
+        if (ipd > 0.05 && ipd < 0.08 && nofoot::ikUnit(mf, uf) && nofoot::ikUnit(mu, uu)) {
             for (int i = 0; i < 3; ++i) {
                 g_pinCyc.off[i] = 0.5 * d[i];
                 g_pinCyc.fwd[i] = uf[i];
+                g_pinCyc.up[i] = uu[i];
             }
             g_pinCyc.ok = true;
             g_pinCyc.ms = now;
@@ -10586,6 +10634,7 @@ int pinCycloUpdate(uint64_t now) noexcept {
 struct PinCall {
     bool valid = false;
     double E[3] = {}, T[3] = {}, N0[3] = {}, nPin[3] = {}, th[3] = {}, delta = 0.0;
+    double detachW = 0.0, targetFromAuthoredM = 0.0;
     uint32_t parity = 0;
     int state = 0;
     bool armed = false;
@@ -10597,6 +10646,10 @@ struct PinCall {
     // F69a: the camera's crouch (w_c, the animated vector's weight) and the cyclopean eye's height less its standing mean; calHave: the calibration exists.
     double wc = 0.0, dEyeY = 0.0;
     bool calHave = false;
+    bool localPitchValid = false, scenePitchValid = false;
+    double localPitchDeg = 0.0, scenePitchDeg = 0.0, rawEyeY = 0.0, eyeYSelected = 0.0;
+    uint32_t localPoseGeneration = 0, localPoseAgeMs = 0;
+    uint64_t localPoseFrame = 0;
     double hEye[2] = {};   // the eye's heading (x, z); F69d's axes
     // F69d: the pre-pin feet test (both animated feet over kPinFeetHighM), and the eye against the joints as finally written (eye minus joint, the eye's
     // heading axes: right, up, forward; metres): neck 34, chest 24, clavicles 35 and 36, upper arms (plan U of the left and right sides).
@@ -10618,6 +10671,8 @@ uint32_t g_pinLastP1 = 0xFFFFFFFFu;
 nofoot::PinEyeCal g_pinEyeCal;
 nofoot::BarrelAxes g_barrel;   // F69b: the barrel rows of the 3P attach and the FP attach, latched per item (the hook; one writer)
 uint64_t g_pinEyeCalX = ~0ull;
+uint32_t g_pinEyeCalRefGen = 0;
+bool g_pinEyeCalRefGenHave = false;
 std::atomic<uint32_t> g_pinEyeCalDone{0};   // the frame thread logs the calibration once per completion
 // Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
 bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now, const IkGData* G, const float (*fpm)[16], bool armed, double armedW,
@@ -10627,14 +10682,21 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     PinIn in;
     uint32_t refusal = kPinRefKinds;
     float invM[16] = {};
-    uint64_t ageUs = 0;
+    const uint64_t nowQ = f30Qpc();
+    uint64_t ageUs = 0, localPitchAgeUs = 0;
+    bool localPitchValid = false;
+    double localPitchRad = 0.0;
     if (!pinInRead(&in)) {
         refusal = kPinRefNoInput;
     } else {
-        const uint64_t q = f30Qpc();
-        ageUs = f30QpcUs(q > in.qpc ? q - in.qpc : 0);
+        ageUs = f30QpcUs(nowQ > in.qpc ? nowQ - in.qpc : 0);
         if (ageUs > 500000ull) refusal = kPinRefStaleInput;   // a stall: up to half a second the last camera is used (a pose that snaps back is worse)
         else if (!nofoot::pfzAffineInverse(in.m3p, invM)) refusal = kPinRefMatrix;
+        if (in.localPitchValid && in.localPoseQpc != 0 && nowQ >= in.localPoseQpc) {
+            localPitchAgeUs = f30QpcUs(nowQ - in.localPoseQpc);
+            localPitchValid = localPitchAgeUs <= 500000ull;
+            if (localPitchValid) localPitchRad = static_cast<double>(in.localPitchRad);
+        }
     }
     nofoot::PinMove mv;
     double E[3] = {}, T[3] = {}, N0[3] = {}, d0[3] = {};
@@ -10666,21 +10728,38 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // 1. The cyclopean eye and the neck target in the model space.
         cycSrc = pinCycloUpdate(now);
-        double eyeW[3] = {in.cam[0], in.cam[1], in.cam[2]}, fwdW[3] = {0.0, 0.0, 1.0};
+        double eyeW[3] = {in.cam[0], in.cam[1], in.cam[2]}, fwdW[3] = {0.0, 0.0, 1.0}, upW[3] = {0.0, 1.0, 0.0};
         if (cycSrc != kCycNone) {
             for (int i = 0; i < 3; ++i) {
                 eyeW[i] += g_pinCyc.off[i];
                 fwdW[i] = g_pinCyc.fwd[i];
+                upW[i] = g_pinCyc.up[i];
             }
         }
         const float ew[3] = {static_cast<float>(eyeW[0]), static_cast<float>(eyeW[1]), static_cast<float>(eyeW[2])};
         nofoot::ikXform(ew, invM, E);
-        double fwdM[3];
-        for (int i = 0; i < 3; ++i) fwdM[i] = fwdW[0] * invM[i] + fwdW[1] * invM[4 + i] + fwdW[2] * invM[8 + i];
+        double fwdM[3], upM[3];
+        for (int i = 0; i < 3; ++i) {
+            fwdM[i] = fwdW[0] * invM[i] + fwdW[1] * invM[4 + i] + fwdW[2] * invM[8 + i];
+            upM[i] = upW[0] * invM[i] + upW[1] * invM[4 + i] + upW[2] * invM[8 + i];
+        }
+        double upUnit[3];
+        const bool upMOk = cycSrc != kCycNone && nofoot::ikUnit(upM, upUnit);
         if (cycSrc == kCycNone) {
             fwdM[0] = 0.0;
             fwdM[1] = 0.0;
             fwdM[2] = 1.0;   // no eye rows: the body's own forward
+        }
+        pc.localPitchValid = localPitchValid;
+        pc.localPitchDeg = localPitchRad * 180.0 / nofoot::kIkPi;
+        pc.scenePitchDeg = std::atan2(fwdM[1], std::sqrt(fwdM[0] * fwdM[0] + fwdM[2] * fwdM[2])) * 180.0 / nofoot::kIkPi;
+        pc.scenePitchValid = cycSrc != kCycNone && std::isfinite(pc.scenePitchDeg);
+        pc.rawEyeY = E[1];
+        pc.eyeYSelected = nofoot::pinEyeHeightNormalized(E[1], localPitchRad, localPitchValid);
+        if (localPitchValid) {
+            pc.localPoseGeneration = in.localPoseGeneration;
+            pc.localPoseFrame = in.localPoseFrame;
+            pc.localPoseAgeMs = static_cast<uint32_t>(std::min<uint64_t>(localPitchAgeUs / 1000u, std::numeric_limits<uint32_t>::max()));
         }
         const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];
         for (int i = 0; i < 3; ++i) N0[i] = static_cast<double>(nk[12 + i]);
@@ -10698,11 +10777,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             g_pinEyeCal.reset();
             g_pinEyeCalX = pl.x;
         }
+        if (localPitchValid && (!g_pinEyeCalRefGenHave || in.localPoseGeneration != g_pinEyeCalRefGen)) {
+            g_pinEyeCal.reset();
+            g_pinEyeCalRefGen = in.localPoseGeneration;
+            g_pinEyeCalRefGenHave = true;
+        }
         if (headFinite) {
             const bool standing = nofoot::pinCalStanding(speed, armed, g_ikAdsW.load(std::memory_order_relaxed) > 0.05f, p44[1]);
-            if (g_pinEyeCal.add(standing, p44, rows44, N0, E[1])) g_pinEyeCalDone.fetch_add(1, std::memory_order_relaxed);
+            if ((localPitchValid || !g_pinEyeCalRefGenHave) && g_pinEyeCal.add(standing, p44, rows44, N0, pc.eyeYSelected, pc.rawEyeY))
+                g_pinEyeCalDone.fetch_add(1, std::memory_order_relaxed);
             nofoot::PinAnimTarget pa;
-            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, g_pinEyeCal, T, &pa);
+            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, g_pinEyeCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr);
             pc.animT = pa.anim;
             pc.clampedT = pa.clamped;
             pc.wc = pa.wc;   // F69a: the camera's crouch (the animated vector's weight) and the eye's height against its standing mean
@@ -10727,12 +10812,21 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             const double nh[3] = {p44[0] - N0[0], p44[1] - N0[1], p44[2] - N0[2]};
             pc.neckLean = std::atan2(nh[0] * hh[0] + nh[2] * hh[2], nh[1]) * 180.0 / nofoot::kIkPi;
         } else {
-            nofoot::pinNeckTarget(E, fwdM, T);
-            double hh[3];
-            nofoot::pinHeading(fwdM, hh);
-            pc.hEye[0] = hh[0];
-            pc.hEye[1] = hh[2];
+            nofoot::PinEyeCal noCal;
+            nofoot::PinAnimTarget pa;
+            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, noCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr);
+            pc.hEye[0] = pa.hEye[0];
+            pc.hEye[1] = pa.hEye[2];
+            pc.off[0] = pa.vUsed[0] * pa.hEye[2] - pa.vUsed[2] * pa.hEye[0];
+            pc.off[1] = pa.vUsed[1];
+            pc.off[2] = pa.vUsed[0] * pa.hEye[0] + pa.vUsed[2] * pa.hEye[2];
+            pc.wc = 0.0;
+            pc.dEyeY = 0.0;
         }
+        // ADS leaves the camera and weapon aim untouched, but releases the body toward the authored neck pose.
+        const double detachW = static_cast<double>(g_bodyDetachW.load(std::memory_order_relaxed));
+        pc.detachW = detachW < 0.0 ? 0.0 : detachW > 1.0 ? 1.0 : detachW;
+        pc.targetFromAuthoredM = nofoot::pinDetachTarget(T, N0, pc.detachW, T);
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
         if (pl.legOk) {
             double sum = 0.0;
@@ -11155,6 +11249,23 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
         b.wcSum += pc.wc;
         b.wcMax = std::max(b.wcMax, pc.wc);
         if (nofoot::pinCrouchedWc(pc.wc)) ++b.wcHigh;
+        if (pass == 0) {
+            b.detachWSum += pc.detachW;
+            b.targetFromAuthoredSum += 100.0 * pc.targetFromAuthoredM;
+            b.rawEyeYSum += pc.rawEyeY;
+            b.eyeYSelectedSum += pc.eyeYSelected;
+            if (pc.scenePitchValid) {
+                b.scenePitchSum += pc.scenePitchDeg;
+                ++b.scenePitchN;
+            }
+            if (pc.localPitchValid) {
+                b.localPitchSum += pc.localPitchDeg;
+                ++b.localPitchN;
+                b.localPoseGeneration = pc.localPoseGeneration;
+                b.localPoseFrame = pc.localPoseFrame;
+                b.localPoseAgeMs = pc.localPoseAgeMs;
+            }
+        }
         if (pc.feetHighPre) ++b.feetPre;   // F69d
         if (pc.clrOk) {
             ++b.clrN;
@@ -11229,16 +11340,18 @@ std::atomic<bool> g_ikGateOk{false};   // the frame thread's gate for the arm IK
 // ---- F69g (TEMPORARY instrument, no behaviour): the grip frames per item and side ---------------------------------------------------------------------
 // The hook posts, every armed call, the grip frame of each hand as the FP rig has it (Gamma_fp = A_fp x inv(H_fp): 51/52 in 44/37) and as the 3P animation has it
 // (Gamma_3p = L_A = M0[A] x inv(M0[H]): 66/67 in 59/58), the wrist after a written solve, the FP attach's place and the 51-52 separation, and the off hand's
-// decision; the frame thread (gripTick) waits for 0.5 s of a still attach per item and side and prints the line once. The question it answers (design doc, D1):
+// decision. It also measures the final palm and attach offsets in FP-palm axes with their sample frames and ages, and whether the arm solve was written. The frame
+// thread (gripTick) waits for 0.5 s of a still attach per item and side and prints the line once, after the span writes succeed. The question it answers (design doc, D1):
 // are the two rigs' attach joints the same item frame? Yes (the same difference for every item): the awkward grips are the wrist and the off hand; no
 // (it differs per item): the 3P hand must be placed on the FP hand's frame, with the fingers copied (F70).
 struct GripSample {
     std::atomic<uint32_t> seq{0};
     uint64_t qpc = 0;
-    uint32_t p1 = 0;
+    uint32_t p1 = 0, itemSerial = 0, fpFrame = 0, fpGeneration = 0, fpAgeMs = 0, gFrame = 0, gAgeMs = 0;
     bool armedFull = false, offTwo = false;
-    bool sideOk[2] = {false, false}, wristOk[2] = {false, false};
+    bool sideOk[2] = {false, false}, wristOk[2] = {false, false}, palmDiagOk[2] = {false, false}, attachDiagOk[2] = {false, false}, poseWritten[2] = {false, false};
     float gFp[2][16] = {}, g3p[2][16] = {}, fpAt[2][3] = {}, wrist[2][4] = {}, wristImprovement[2] = {};
+    float palmDeltaMm[2][3] = {}, palmAngleDeg[2] = {}, attachDeltaMm[2][3] = {}, attachAngleDeg[2] = {};
     uint8_t targetMode[2] = {}, supportMode = 0, anatomyMapped = 0, mapWhy[2] = {};
     uint32_t mapGeneration = 0;
     float sep = 0.0f, offW = 0.0f, supportGap = -1.0f;   // separation (m); off arm weight; anatomical proxy gap (m)
@@ -11248,7 +11361,7 @@ void gripPost(const GripSample& r) noexcept {
     GripSample& d = g_gripSample;
     d.seq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
     d.qpc = r.qpc;
-    d.p1 = r.p1;
+    d.p1 = r.p1; d.itemSerial = r.itemSerial; d.fpFrame = r.fpFrame; d.fpGeneration = r.fpGeneration; d.fpAgeMs = r.fpAgeMs; d.gFrame = r.gFrame; d.gAgeMs = r.gAgeMs;
     d.armedFull = r.armedFull;
     d.offTwo = r.offTwo;
     d.sep = r.sep;
@@ -11258,10 +11371,14 @@ void gripPost(const GripSample& r) noexcept {
     for (int k = 0; k < 2; ++k) {
         d.sideOk[k] = r.sideOk[k];
         d.wristOk[k] = r.wristOk[k];
+        d.palmDiagOk[k] = r.palmDiagOk[k]; d.attachDiagOk[k] = r.attachDiagOk[k]; d.poseWritten[k] = r.poseWritten[k];
         std::memcpy(d.gFp[k], r.gFp[k], sizeof(d.gFp[k]));
         std::memcpy(d.g3p[k], r.g3p[k], sizeof(d.g3p[k]));
         std::memcpy(d.fpAt[k], r.fpAt[k], sizeof(d.fpAt[k]));
         std::memcpy(d.wrist[k], r.wrist[k], sizeof(d.wrist[k]));
+        std::memcpy(d.palmDeltaMm[k], r.palmDeltaMm[k], sizeof(d.palmDeltaMm[k]));
+        std::memcpy(d.attachDeltaMm[k], r.attachDeltaMm[k], sizeof(d.attachDeltaMm[k]));
+        d.palmAngleDeg[k] = r.palmAngleDeg[k]; d.attachAngleDeg[k] = r.attachAngleDeg[k];
         d.targetMode[k] = r.targetMode[k]; d.wristImprovement[k] = r.wristImprovement[k];
     }
     d.seq.fetch_add(1, std::memory_order_release);
@@ -11272,7 +11389,7 @@ bool gripCopy(GripSample* out) noexcept {
         const uint32_t s1 = s.seq.load(std::memory_order_acquire);
         if (s1 & 1u || s1 == 0) continue;
         out->qpc = s.qpc;
-        out->p1 = s.p1;
+        out->p1 = s.p1; out->itemSerial = s.itemSerial; out->fpFrame = s.fpFrame; out->fpGeneration = s.fpGeneration; out->fpAgeMs = s.fpAgeMs; out->gFrame = s.gFrame; out->gAgeMs = s.gAgeMs;
         out->armedFull = s.armedFull;
         out->offTwo = s.offTwo;
         out->sep = s.sep;
@@ -11282,10 +11399,14 @@ bool gripCopy(GripSample* out) noexcept {
         for (int k = 0; k < 2; ++k) {
             out->sideOk[k] = s.sideOk[k];
             out->wristOk[k] = s.wristOk[k];
+            out->palmDiagOk[k] = s.palmDiagOk[k]; out->attachDiagOk[k] = s.attachDiagOk[k]; out->poseWritten[k] = s.poseWritten[k];
             std::memcpy(out->gFp[k], s.gFp[k], sizeof(out->gFp[k]));
             std::memcpy(out->g3p[k], s.g3p[k], sizeof(out->g3p[k]));
             std::memcpy(out->fpAt[k], s.fpAt[k], sizeof(out->fpAt[k]));
             std::memcpy(out->wrist[k], s.wrist[k], sizeof(out->wrist[k]));
+            std::memcpy(out->palmDeltaMm[k], s.palmDeltaMm[k], sizeof(out->palmDeltaMm[k]));
+            std::memcpy(out->attachDeltaMm[k], s.attachDeltaMm[k], sizeof(out->attachDeltaMm[k]));
+            out->palmAngleDeg[k] = s.palmAngleDeg[k]; out->attachAngleDeg[k] = s.attachAngleDeg[k];
             out->targetMode[k] = s.targetMode[k]; out->wristImprovement[k] = s.wristImprovement[k];
         }
         std::atomic_thread_fence(std::memory_order_acquire);
@@ -11499,6 +11620,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     static uint64_t s_fpMs = 0;
     static bool s_fpHave = false, s_gHave = false;
     static IkFpHands s_fpHands;
+    static IkFpMeta s_fpMeta;
     static IkGData s_G;
     // F68d: record FP right-hand motion against SelectedWeapon timing as diagnostic telemetry. It does not arm, weight, or gate the solve.
     static nofoot::FpHandsUp s_hu;
@@ -11536,9 +11658,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             float tmp[nofoot::kIkFpSlots][16];
             uint64_t tmpMs = 0;
             IkFpHands tmpHands;
-            if (ikFpRead(tmp, &tmpMs, &tmpHands)) {
+            IkFpMeta tmpMeta;
+            if (ikFpRead(tmp, &tmpMs, &tmpHands, &tmpMeta)) {
                 std::memcpy(s_fpm, tmp, sizeof(s_fpm));
                 s_fpHands = tmpHands;
+                s_fpMeta = tmpMeta;
                 s_fpMs = tmpMs;
                 s_fpHave = true;
             }
@@ -11644,12 +11768,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     static nofoot::OffHand s_off;
     static uint64_t s_offQpc = 0;
     static bool s_offTwoPrev = false;
+    const bool relaxLeftArmForItem = g_gameAuthoredLeftArm.load(std::memory_order_relaxed);
     nofoot::OffHand::Out offOut;
     {
         const uint64_t q = f30Qpc();
         const double dtOff = s_offQpc && q > s_offQpc ? static_cast<double>(q - s_offQpc) / static_cast<double>(f66QpcFreq()) : 0.0;
         s_offQpc = q;
-        offOut = s_off.step(dtOff, armedNow, armsOk, fpm[0], fpm[1]);
+        offOut = s_off.step(dtOff, armedNow, armsOk, fpm[0], fpm[1], !relaxLeftArmForItem);
         if (!armedNow) s_offTwoPrev = false;
     }
     double offW = armedNow ? offOut.w : 1.0;
@@ -11894,7 +12019,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             // body so each shoulder is within reach of its grip); a bend aimed at T alone read the correction as its own error (F68: 23.3 cm "before", the
             // pitch back against the armed limits, a 4.2 cm lift of the neck): two stages with opposing targets in one pass. The bend now closes only the
             // pin's caps' residual.
-            for (int i = 0; i < 3; ++i) bt.t[i] = static_cast<float>(pinCall.T[i] + pinCall.reach[i]);
+            nofoot::pinBendTargetWithReach(pinCall.T, pinCall.reach, bt.t);
             bt.pov = nofoot::kBendNeckJoint;
             bt.ms = now;
         }
@@ -11921,6 +12046,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             } else {
                 bendSolved[0] = pitch;
                 bendSolved[1] = roll;
+                const float detachF = pinT ? static_cast<float>(pinCall.detachW) : pinWanted ? g_bodyDetachW.load(std::memory_order_relaxed) : 0.0f;
+                const double bodyBendW = nofoot::pinBodyBendWeight(static_cast<double>(detachF));
                 bendLean = adsW * static_cast<double>(g_ikAdsLeanRad.load(std::memory_order_relaxed));
                 pitch += bendLean;
                 double limFwd = 0.0, limBack = 0.0, limRoll = 0.0;
@@ -11929,7 +12056,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 roll = nofoot::bendClampRollLim(roll, limRoll, &bendCl);
                 bendResW = nofoot::bendResidualWeight(T, N);
                 bendW = static_cast<double>(g_bendWeight.load(std::memory_order_relaxed)) *
-                        static_cast<double>(g_bendAmount.load(std::memory_order_relaxed));
+                        static_cast<double>(g_bendAmount.load(std::memory_order_relaxed)) * bodyBendW;
                 const double want[2] = {pitch * bendW * bendResW, roll * bendW * bendResW};
                 if (now - g_bendAppliedMs > 200) g_bendApplied[0] = g_bendApplied[1] = 0.0;
                 const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]};
@@ -12487,6 +12614,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // HandRig.count is uint8_t (capped by the 24-slot payload), so
                 // every loop slot is representable by the helper's slot type.
                 if (!correctedLocal(poseSource, static_cast<uint16_t>(slot), dstSlot, desired)) continue;
+                if (side == 0 && relaxLeftArmForItem && poseSource == side) {
+                    float blended[16];
+                    if (nofoot::handBlendRigid(local3, desired, offW, blended)) std::memcpy(desired, blended, sizeof(blended));
+                }
                 if (supportCup && side == 0 && poseSource == 1) {
                     uint16_t baseSourceSlot = 0xFFFFu;
                     for (uint16_t candidate = 1; candidate < fpHands.rig[0].count; ++candidate)
@@ -12864,6 +12995,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         out[2] = m[14];
         return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
     };
+    const auto finalMatrixAt = [&](uint32_t j, float out[16]) noexcept -> bool {
+        if (j >= count) return false;
+        const float* m = (g_ikMark[j] & 4u) ? g_ikOut[j] : (g_ikMark[j] & 2u) ? g_ikM0[j]
+                        : (froze && g_ikFzSlot[j] != 0xFFFFu) ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
+        if (!ikMatrixSane(m)) return false;
+        std::memcpy(out, m, sizeof(float) * 16);
+        return true;
+    };
     // F67c: the pin's call closes with the neck as finally written (after the bend): the target less the neck, right, up, forward (metres).
     if (pinCall.valid) {
         double res[3];
@@ -13048,11 +13187,19 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             armMovePost(r);
         }
     }
-    // F69g: the grip frames of this call (armed, with the FP snapshot and G): posted for the frame thread's steady window.
+    // F69g: the grip frames of this call (armed, with the FP snapshot and G): posted for the frame thread's steady window after span writes succeed.
+    GripSample gripSample;
+    bool gripPending = false;
     if (armedNow && armsOk) {
-        GripSample r;
+        GripSample& r = gripSample;
         r.qpc = f30Qpc();
         r.p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
+        r.itemSerial = g_heldItemSerial.load(std::memory_order_relaxed);
+        r.fpFrame = s_fpMeta.frame;
+        r.fpGeneration = s_fpMeta.seq >> 1;
+        r.fpAgeMs = static_cast<uint32_t>(std::min<uint64_t>(fpAge, std::numeric_limits<uint32_t>::max()));
+        r.gFrame = G.frame;
+        r.gAgeMs = static_cast<uint32_t>(std::min<uint64_t>(gAge, std::numeric_limits<uint32_t>::max()));
         r.armedFull = armedFull;
         r.offTwo = offOut.two;
         r.offW = static_cast<float>(offOut.w);
@@ -13071,13 +13218,34 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             r.wrist[side][3] = static_cast<float>(o.wrist.swingDeg);
             r.wristImprovement[side] = static_cast<float>(o.wristImprovement);
             r.targetMode[side] = targetMode[side];
+            r.poseWritten[side] = o.wrote;
+            if (!pl.ok[side] || !fpHands.valid[side] || fpHands.rig[side].why != 0 || pl.hand[side].why != 0) continue;
+            float hFinal[16], aFinal[16], palmTmp[16], palmFp[16], palm3p[16], attachFp[16];
+            if (!finalMatrixAt(pl.side[side].H, hFinal) || !finalMatrixAt(pl.side[side].A, aFinal)) continue;
+            nofoot::pfzMul(fpHands.rig[side].palm, fpHands.model[side][0], palmTmp);
+            nofoot::pfzMul(palmTmp, G.g, palmFp);
+            nofoot::pfzMul(pl.hand[side].palm, hFinal, palm3p);
+            const float* fpAttach = side == 0 ? fpm[1] : fpm[0];
+            nofoot::pfzMul(fpAttach, G.g, attachFp);
+            if (!ikMatrixSane(palmFp) || !ikMatrixSane(palm3p) || !ikMatrixSane(attachFp)) continue;
+            const double palmDelta[3] = {palm3p[12] - palmFp[12], palm3p[13] - palmFp[13], palm3p[14] - palmFp[14]};
+            const double attachDelta[3] = {aFinal[12] - attachFp[12], aFinal[13] - attachFp[13], aFinal[14] - attachFp[14]};
+            for (int axis = 0; axis < 3; ++axis) {
+                const float* row = &palmFp[axis * 4];
+                r.palmDeltaMm[side][axis] = static_cast<float>(1000.0 * (palmDelta[0] * row[0] + palmDelta[1] * row[1] + palmDelta[2] * row[2]));
+                r.attachDeltaMm[side][axis] = static_cast<float>(1000.0 * (attachDelta[0] * row[0] + attachDelta[1] * row[1] + attachDelta[2] * row[2]));
+            }
+            r.palmAngleDeg[side] = static_cast<float>(nofoot::ikRotAngleDeg(palm3p, palmFp));
+            r.attachAngleDeg[side] = static_cast<float>(nofoot::ikRotAngleDeg(aFinal, attachFp));
+            r.palmDiagOk[side] = true;
+            r.attachDiagOk[side] = true;
         }
         r.supportMode = supportCup ? static_cast<uint8_t>(supportTargetKind) : 0;
         r.anatomyMapped = anatomyMapOk ? 1 : 0;
         r.mapGeneration = fpHands.generation;
         r.mapWhy[0] = static_cast<uint8_t>(mapWhy[0]); r.mapWhy[1] = static_cast<uint8_t>(mapWhy[1]);
         r.supportGap = static_cast<float>(supportGap);
-        gripPost(r);
+        gripPending = true;
     }
     // The writes, all matrices computed above: the solve's from g_ikOut (mark 4), the squared torso's from g_ikM0.
     for (uint32_t k = 0; k < nList; ++k) {
@@ -13087,6 +13255,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             return ikRefuse(kIkRefWrite);
         }
     }
+    if (gripPending) gripPost(gripSample);
 }
 
 // The local X's post-hook: the shared span, then the pose freeze (its X and key), then the arm IK (its X and key) on the same span.
@@ -13372,7 +13541,7 @@ void pfzTick(uint64_t now) {
     static QpcDt pfzClock;   // F66b
     const double dt = pfzClock.step(0.1);
     g_pfzLastMs = now;
-    const bool ads = journalAds();
+    const bool ads = journalAds() || g_bodyDetachAds.load(std::memory_order_relaxed);   // F73: release freeze on the resolved ADS action before journal state catches up
     const uint64_t headMs = g_pfzHeadMs.load(std::memory_order_relaxed);
     const bool headFresh = headMs != 0 && now >= headMs && now - headMs < 500;
     if (headFresh) g_pfzRest.step(now, static_cast<double>(g_pfzHeadUp.load(std::memory_order_relaxed)), ads);   // F49's head test: logged only
@@ -13896,6 +14065,22 @@ void gripPrint(int side, const nofoot::GripSteady& gs, const GripSample& r) noex
         std::snprintf(wr, sizeof(wr), "not measured (this hand's solve is not written: a free off hand, F69h, or the arm IK not writing)");
     const char* target = r.targetMode[side] == 2 ? "support-cup target" : r.targetMode[side] == 1 ? "anatomical palm target" : "legacy attach fallback";
     const char* support = r.supportMode == nofoot::kSupportPistol ? "pistol" : r.supportMode == nofoot::kSupportTool ? "tool" : "off";
+    const char* palmMeasure = r.targetMode[side] == 2 ? "support-cup palm-frame offset from FP palm (intentional separation)" :
+                              r.targetMode[side] == 1 ? "anatomical palm-frame residual" : "fallback palm-frame offset from FP palm";
+    char palmDiag[320], attachDiag[320];
+    if (r.palmDiagOk[side])
+        std::snprintf(palmDiag, sizeof(palmDiag), "measured; %s in FP palm axes distal/thumb/normal %+0.1f/%+0.1f/%+0.1f mm, rotation %.2f deg (%s)",
+                      palmMeasure,
+                      static_cast<double>(r.palmDeltaMm[side][0]), static_cast<double>(r.palmDeltaMm[side][1]), static_cast<double>(r.palmDeltaMm[side][2]),
+                      static_cast<double>(r.palmAngleDeg[side]), r.poseWritten[side] ? "arm solve written" : "arm solve not written");
+    else
+        std::snprintf(palmDiag, sizeof(palmDiag), "unavailable (final hand or palm frame unreadable; arm solve %s)", r.poseWritten[side] ? "written" : "not written");
+    if (r.attachDiagOk[side])
+        std::snprintf(attachDiag, sizeof(attachDiag), "measured; final attach-frame offset from FP attach in FP palm axes distal/thumb/normal %+0.1f/%+0.1f/%+0.1f mm, rotation %.2f deg (%s)",
+                      static_cast<double>(r.attachDeltaMm[side][0]), static_cast<double>(r.attachDeltaMm[side][1]), static_cast<double>(r.attachDeltaMm[side][2]),
+                      static_cast<double>(r.attachAngleDeg[side]), r.poseWritten[side] ? "arm solve written" : "arm solve not written");
+    else
+        std::snprintf(attachDiag, sizeof(attachDiag), "unavailable (final attach or palm frame unreadable; arm solve %s)", r.poseWritten[side] ? "written" : "not written");
     Log::get().note("native on foot hand target (F70b): item \"%s\", %s hand, target %s; anatomy %s, generation %u; support %s (right-hand proxy gap %.1f mm)",
                     nm, side == 0 ? "left" : "right", target, nofoot::handMapWhyText(static_cast<nofoot::HandMapWhy>(r.mapWhy[side])), r.mapGeneration, support,
                     1000.0 * static_cast<double>(r.supportGap));
@@ -13905,6 +14090,8 @@ void gripPrint(int side, const nofoot::GripSteady& gs, const GripSample& r) noex
                     "after the solve: %s; FP attaches 51-52 apart mean %.1f cm sd %.2f cm over the window; off hand now %s (arm weight %.2f)",
                     nm, side == 0 ? "left" : "right", nofoot::kGripStillSec, gs.n, fp, t3, df, wr, 100.0 * gs.sepMean(), 100.0 * gs.sepSd(),
                     r.offTwo ? "two-handed" : "free (one-handed)", static_cast<double>(r.offW));
+    Log::get().note("native on foot palm-frame residual (F73): item \"%s\", %s hand; target %s; palm %s; attach %s; sample FP frame/gen/age %u/%u/%u ms, G frame/age %u/%u ms, animate P1 %u",
+                    nm, side == 0 ? "left" : "right", target, palmDiag, attachDiag, r.fpFrame, r.fpGeneration, r.fpAgeMs, r.gFrame, r.gAgeMs, r.p1);
 }
 void gripTick() noexcept {
     GripSample r;
@@ -13913,9 +14100,10 @@ void gripTick() noexcept {
     const double dt = g_gripLastQpc && r.qpc > g_gripLastQpc && freq ? static_cast<double>(r.qpc - g_gripLastQpc) / static_cast<double>(freq) : 0.0;
     g_gripLastQpc = r.qpc;
     const uint32_t item = g_heldItemSerial.load(std::memory_order_relaxed);
+    if (item != r.itemSerial) return;   // do not attribute a pre-switch hook sample to the newly selected item
     for (int side = 0; side < 2; ++side) {
         const double at[3] = {static_cast<double>(r.fpAt[side][0]), static_cast<double>(r.fpAt[side][1]), static_cast<double>(r.fpAt[side][2])};
-        if (g_gripSteady[side].step(item, r.armedFull && r.sideOk[side], dt, at, static_cast<double>(r.sep))) gripPrint(side, g_gripSteady[side], r);
+        if (g_gripSteady[side].step(r.itemSerial, r.armedFull && r.sideOk[side], dt, at, static_cast<double>(r.sep))) gripPrint(side, g_gripSteady[side], r);
     }
     // Without this, an instrument that never completes reads like one that never ran: every 5 s while armed and a side is still waiting, say how far it is.
     static uint64_t waitMs = 0;
@@ -14390,11 +14578,27 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
             std::snprintf(calBuf, sizeof(calBuf), "mean %+.1f min %+.1f max %+.1f", p.dEyeSum / static_cast<double>(p.calN), p.dEyeMin, p.dEyeMax);
         else
             std::snprintf(calBuf, sizeof(calBuf), "no calibration yet (w_c 0: the rest offset)");
-        Log::get().note("native on foot body pin (F69a): %s, %llu calls: w_c (the animated neck-to-eye vector's weight, smoothstep(%.2f, %.2f, h_stand - E_y)) "
-                        "mean %.2f max %.2f, %llu calls at %.1f or more (the bin 'crouching'); E_y - h_stand (the cyclopean eye's model height against its %u-frame "
-                        "standing mean, cm) %s; the vector used is the F68e line's",
+        char pitchBuf[360], sceneBuf[120];
+        if (p.scenePitchN)
+            std::snprintf(sceneBuf, sizeof(sceneBuf), "scene/model pitch mean %+.1f deg (%llu valid, %llu no cyclopean rows)", p.scenePitchSum / static_cast<double>(p.scenePitchN),
+                          static_cast<unsigned long long>(p.scenePitchN), static_cast<unsigned long long>(p.n - p.scenePitchN));
+        else
+            std::snprintf(sceneBuf, sizeof(sceneBuf), "scene/model pitch unavailable (0 valid, %llu no cyclopean rows)", static_cast<unsigned long long>(p.n));
+        if (p.localPitchN)
+            std::snprintf(pitchBuf, sizeof(pitchBuf), "local pitch mean %+.1f deg (%llu valid, %llu fallback; latest frame/gen/QPC-age %llu/%u/%u ms); %s; eye height raw/norm mean %.3f/%.3f m",
+                          p.localPitchSum / static_cast<double>(p.localPitchN), static_cast<unsigned long long>(p.localPitchN),
+                          static_cast<unsigned long long>(p.n - p.localPitchN), static_cast<unsigned long long>(p.localPoseFrame), p.localPoseGeneration,
+                          p.localPoseAgeMs, sceneBuf, p.rawEyeYSum / n, p.eyeYSelectedSum / n);
+        else
+            std::snprintf(pitchBuf, sizeof(pitchBuf), "local pitch unavailable (0 valid, %llu fallback); %s; eye height raw/norm mean %.3f/%.3f m",
+                          static_cast<unsigned long long>(p.n), sceneBuf, p.rawEyeYSum / n, p.eyeYSelectedSum / n);
+        Log::get().note("native on foot body pin (F69a): %s, %llu calls: w_c (the animated neck-to-eye vector's weight, smoothstep(%.2f, %.2f, h_stand - E_y_selected)) "
+                        "mean %.2f max %.2f, %llu calls at %.1f or more (the bin 'crouching'); E_y_selected - h_stand (the cyclopean eye's model height, normalized when LOCAL pitch is valid and raw on fallback, against its %u-frame "
+                        "standing mean, cm) %s; F73 pose source: %s; the vector used is the F68e line's",
                         kBinNames[b], static_cast<unsigned long long>(p.n), nofoot::kPinCrouchLoM, nofoot::kPinCrouchHiM, p.wcSum / n, p.wcMax,
-                        static_cast<unsigned long long>(p.wcHigh), nofoot::kPinCrouchWc, nofoot::kPinEyeCalFrames, calBuf);
+                        static_cast<unsigned long long>(p.wcHigh), nofoot::kPinCrouchWc, nofoot::kPinEyeCalFrames, calBuf, pitchBuf);
+        Log::get().note("native on foot body pin (F73 ADS detach): %s, %llu calls: detach weight mean %.2f; blended head target distance from same-call authored neck mean %.1f cm",
+                        kBinNames[b], static_cast<unsigned long long>(p.n), p.detachWSum / n, p.targetFromAuthoredSum / n);
         // F69d: the eye against the joints as finally written; proof: "inside" 0 in every state.
         if (p.clrN) {
             static const char* const kClrNames[6] = {"neck 34", "chest 24", "clavicle 35", "clavicle 36", "upper arm L", "upper arm R"};
@@ -14442,7 +14646,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     if (g_pinEyeCalDone.exchange(0, std::memory_order_relaxed) > 0 && g_pinEyeCal.have)
         Log::get().note("native on foot body pin (F68e): the eye point in the head joint's frame is captured: e_h = (%.4f, %.4f, %.4f) m (head axes: forward = "
                         "%sx[%d], up = %sx[%d]) from %u consecutive standing frames, the head joint %.3f m up; the standing target is the F67c rest offset "
-                        "(0, -0.155, -0.09) by construction, a crouch's animated head moves it back",
+                        "(0, -0.155, -0.09) by construction; eye height is normalized for natural-LOCAL pitch, a crouch's animated head moves it back",
                         g_pinEyeCal.e[0], g_pinEyeCal.e[1], g_pinEyeCal.e[2], g_pinEyeCal.axes.fSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.fAxis,
                         g_pinEyeCal.axes.uSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.uAxis, nofoot::kPinEyeCalFrames, g_pinEyeCal.headY);
     if (st.legSolves) {
