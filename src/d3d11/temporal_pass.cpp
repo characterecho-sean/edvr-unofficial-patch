@@ -6,6 +6,7 @@
 #include "eye_engine_capture.h"
 #include "eye_final_capture.h"
 #include "eye_jump_lattice.h"
+#include "eye_airborne_capture.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
 #include <atomic>     // F63: the eye offsets for the native on-foot sight lock
@@ -66,7 +67,8 @@
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
-static void beginEyeRun();
+static bool beginEyeRun(bool companion=false,const edvr::NativeOnFootAirborneSnapshot* trigger=nullptr,uint64_t triggerAgeQpc=0);
+static void pollAirborneCompanion();
 
 // temporalPassWantsFssChrome reads this from the header with no call:
 // asked by vscreen.cpp's beginPanelOverride, and the build has no /GL to
@@ -1255,11 +1257,34 @@ ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
+uint32_t g_eyeStampSerial=0;
 bool             g_eyeRunReady = false;
 eye_final_capture::Run g_eyeFinalRun;
 eye_final_capture::Clock g_eyeFinalClock; // boundary clock also advances with AA off
 eye_jump_lattice::Run g_eyeJumpLatticeRun;
 wchar_t g_eyeFinalStamp[16]=L"";
+struct AirborneCompanionRequest {
+    edvr::eye_airborne_capture::Request request;
+    wchar_t parentStamp[16]=L"";
+};
+AirborneCompanionRequest g_airborneCompanion;
+bool g_eyeRunCompanion=false;
+wchar_t g_eyeRunParentStamp[16]=L"";
+edvr::NativeOnFootAirborneSnapshot g_eyeRunTrigger{};
+uint64_t g_eyeRunTriggerAgeQpc=0;
+const char* airborneCompanionStateName(edvr::eye_airborne_capture::State state) {
+    switch(state){case edvr::eye_airborne_capture::State::Waiting:return "waiting";case edvr::eye_airborne_capture::State::Deferred:return "deferred_busy";
+        case edvr::eye_airborne_capture::State::Triggered:return "triggered";case edvr::eye_airborne_capture::State::Expired:return "expired";
+        case edvr::eye_airborne_capture::State::Cancelled:return "cancelled";default:return "idle";}
+}
+bool freshAirborneSnapshot(edvr::NativeOnFootAirborneSnapshot* snapshot,uint64_t* ageQpc=nullptr) {
+    if(!snapshot||!snapshot->valid||!snapshot->sampleQpc)return false;
+    LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+    if(frequency.QuadPart<=0||now.QuadPart<0||uint64_t(now.QuadPart)<snapshot->sampleQpc)return false;
+    const uint64_t age=uint64_t(now.QuadPart)-snapshot->sampleQpc;
+    if(ageQpc)*ageQpc=age;
+    return age<=uint64_t(frequency.QuadPart/10);
+}
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
 bool             g_eyeTreatedWritten[kEyeRun] = {};
@@ -2377,8 +2402,13 @@ void writeEyeJumpLattice(ID3D11DeviceContext* ctx,const std::wstring& dir,const 
               fwrite(&Budget,sizeof(Budget),1,bin)==1;
     }
     FILE* json=nullptr;_wfopen_s(&json,jsonPath,L"wb");bool manifestOk=json!=nullptr;
-    if(json)fprintf(json,"{\"schema\":1,\"stamp\":\"%ls\",\"reason\":\"%s\",\"data_file\":\"eye_%ls_JumpLattice.bin\",\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y), valid sampled points only\",\"sample_record_bytes\":20,\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"frames\":[\n",
-        g_eyeFinalStamp,reason,g_eyeFinalStamp,Stride,(unsigned long long)Budget,(unsigned long long)g_eyeJumpLatticeRun.bytes);
+    if(json)fprintf(json,"{\"schema\":2,\"stamp\":\"%ls\",\"capture_type\":\"%s\",\"parent_stamp\":\"%ls\",\"trigger_status\":\"%s\",\"trigger_generation\":%llu,\"trigger_source_frame\":%u,\"trigger_qpc\":%llu,\"trigger_age_qpc\":%llu,\"trigger_root\":[%.6f,%.6f,%.6f],\"trigger_raw_vy_mps\":%.6f,\"trigger_filtered_vy_mps\":%.6f,\"reason\":\"%s\",\"data_file\":\"eye_%ls_JumpLattice.bin\",\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y), valid sampled points only\",\"sample_record_bytes\":20,\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"frames\":[\n",
+        g_eyeFinalStamp,g_eyeRunCompanion?"airborne_companion":"manual",g_eyeRunParentStamp,
+        g_eyeRunTrigger.valid?(g_eyeRunCompanion?"airborne_companion_trigger":"airborne_at_manual_request"):
+            (g_eyeRunCompanion?"missing_trigger_snapshot":"manual_no_airborne_snapshot"),
+        (unsigned long long)g_eyeRunTrigger.generation,g_eyeRunTrigger.sourceFrame,(unsigned long long)g_eyeRunTrigger.sampleQpc,(unsigned long long)g_eyeRunTriggerAgeQpc,
+        g_eyeRunTrigger.root[0],g_eyeRunTrigger.root[1],g_eyeRunTrigger.root[2],g_eyeRunTrigger.rawVerticalVelocityMps,g_eyeRunTrigger.verticalVelocityMps,
+        reason,g_eyeFinalStamp,Stride,(unsigned long long)Budget,(unsigned long long)g_eyeJumpLatticeRun.bytes);
     unsigned staged=0,written=0,refused=0,notReached=0;bool first=true;
     struct PackedSample {uint32_t skin[2],motion,slots[2];};static_assert(sizeof(PackedSample)==20,"jump lattice sample layout");
     for(uint32_t i=0;i<Count;++i){
@@ -2467,7 +2497,13 @@ void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_FinalCrisp.json",dir.c_str(),g_eyeFinalStamp);
     FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool manifest=false;
     if(f){
-        fprintf(f,"{\"schema\":1,\"stage\":\"after_ui_layer_composite_before_runtime_menu\",\"stamp\":\"%ls\",\"reason\":\"%s\",\"requested\":16,\"crop_policy\":\"centre_1400_native_pixels_per_eye\",\"crop_coordinates\":\"unflipped_texture_x0_y0_x1_y1\",\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"blob_cap_bytes\":%llu,\"unmatched\":%u,\"duplicates\":%u,\"images\":[\n",g_eyeFinalStamp,reason,(unsigned long long)eye_final_capture::Budget,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::BlobCap,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates);
+        fprintf(f,"{\"schema\":2,\"stage\":\"after_ui_layer_composite_before_runtime_menu\",\"stamp\":\"%ls\",\"capture_type\":\"%s\",\"parent_stamp\":\"%ls\",\"companion_request_state\":\"%s\",\"trigger_status\":\"%s\",\"trigger_generation\":%llu,\"trigger_source_frame\":%u,\"trigger_qpc\":%llu,\"trigger_age_qpc\":%llu,\"trigger_root\":[%.6f,%.6f,%.6f],\"trigger_raw_vy_mps\":%.6f,\"trigger_filtered_vy_mps\":%.6f,\"reason\":\"%s\",\"requested\":16,\"crop_policy\":\"centre_1400_native_pixels_per_eye\",\"crop_coordinates\":\"unflipped_texture_x0_y0_x1_y1\",\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"blob_cap_bytes\":%llu,\"unmatched\":%u,\"duplicates\":%u,\"images\":[\n",
+            g_eyeFinalStamp,g_eyeRunCompanion?"airborne_companion":"manual",g_eyeRunParentStamp,airborneCompanionStateName(g_airborneCompanion.request.state),
+            g_eyeRunTrigger.valid?(g_eyeRunCompanion?"airborne_companion_trigger":"airborne_at_manual_request"):
+                (g_eyeRunCompanion?"missing_trigger_snapshot":"manual_no_airborne_snapshot"),
+            (unsigned long long)g_eyeRunTrigger.generation,g_eyeRunTrigger.sourceFrame,(unsigned long long)g_eyeRunTrigger.sampleQpc,(unsigned long long)g_eyeRunTriggerAgeQpc,
+            g_eyeRunTrigger.root[0],g_eyeRunTrigger.root[1],g_eyeRunTrigger.root[2],g_eyeRunTrigger.rawVerticalVelocityMps,g_eyeRunTrigger.verticalVelocityMps,
+            reason,(unsigned long long)eye_final_capture::Budget,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::BlobCap,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates);
         bool first=true;
         auto record=[&](const eye_final_capture::Image& image,int index,unsigned eye,uint32_t scene,const wchar_t* suffix){
             const unsigned k=index<0?0u:unsigned(index);const EyeDecisionFrame& temporal=g_eyeDecisions[k];
@@ -5788,6 +5824,7 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
+    pollAirborneCompanion();
     if(ctx&&g_eyeFinalRun.armed&&g_eyeFinalRun.ready&&g_eyeFinalRun.count&&
        g_eyeFinalClock.epoch>g_eyeFinalRun.rows[g_eyeFinalRun.count-1].epoch)writeFinalEyeRun(ctx,"next_boundary_missing_final");
     if (!ctx || (!detail::g_temporalPassWantedFssChrome && !g_eyeRunReady)) return;
@@ -6554,19 +6591,22 @@ bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
     return true;
 }
 
-static void beginEyeRun() {
-    if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot* trigger,uint64_t triggerAgeQpc) {
+    if (g_eyeRunLeft > 0 || g_eyeRunReady) return false;
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
     // census starts here and can begin with its following frame.
-    drawCensusAutoRequest();
-    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
-    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
-                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
+    const uint32_t serial=++g_eyeStampSerial;
+    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u%03u%03u", static_cast<unsigned>(stm.wHour),
+                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond),static_cast<unsigned>(stm.wMilliseconds),serial%1000);
+    drawCensusAutoRequestForCapture(g_eyeRunStamp);
+    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census capture_id=%ls; AA-independent, an already active census keeps its current coverage.",g_eyeRunStamp);
+    g_eyeRunCompanion=companion;g_eyeRunTrigger=trigger?*trigger:edvr::NativeOnFootAirborneSnapshot{};g_eyeRunTriggerAgeQpc=triggerAgeQpc;
+    if(companion)wcscpy_s(g_eyeRunParentStamp,g_airborneCompanion.parentStamp);else g_eyeRunParentStamp[0]=L'\0';
     g_eyeFinalRun.arm();g_eyeJumpLatticeRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
     nativeOnFootOpticCaptureBegin(g_eyeFinalStamp);
     g_eyeRunTaken = 0;
@@ -6603,9 +6643,61 @@ static void beginEyeRun() {
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
     mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
+    if(!companion) {
+        g_airborneCompanion=AirborneCompanionRequest{};
+        if(edvr::nativeOnFootActive()) {
+            edvr::NativeOnFootAirborneSnapshot snapshot{};uint64_t age=0;
+            const bool snapshotRead=edvr::nativeOnFootAirborneSnapshot(&snapshot);
+            if(freshAirborneSnapshot(&snapshot,&age)&&snapshot.airborne) {
+                g_eyeRunTrigger=snapshot;g_eyeRunTriggerAgeQpc=age;
+            Log::get().note("eye capture: manual run %ls already overlaps fresh native airborne state generation=%llu source_frame=%u vy=%.3f m/s age_qpc=%llu; no duplicate jump run armed.",g_eyeRunStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.verticalVelocityMps,(unsigned long long)age);
+            } else {
+                LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+                g_airborneCompanion.request.arm(now.QuadPart>0?uint64_t(now.QuadPart):0,snapshotRead?snapshot.generation:0);
+                wcscpy_s(g_airborneCompanion.parentStamp,g_eyeRunStamp);
+                Log::get().note("eye capture: armed one-shot airborne companion parent=%ls state=waiting timeout=30s baseline_generation=%llu snapshot=%s; manual dump remains immediate.",g_airborneCompanion.parentStamp,(unsigned long long)(snapshotRead?snapshot.generation:0),snapshotRead?(snapshot.valid?"grounded_or_stale":"not_yet_valid"):"unavailable");
+            }
+        } else {
+            Log::get().note("eye capture: airborne companion not armed because native on-foot mode is inactive; manual eye dump remains immediate.");
+        }
+    } else {
+        g_airborneCompanion=AirborneCompanionRequest{};
+    }
+    return true;
+}
+
+static void pollAirborneCompanion() {
+    using namespace edvr::eye_airborne_capture;
+    if(g_airborneCompanion.request.state==State::Idle)return;
+    LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+    edvr::NativeOnFootAirborneSnapshot snapshot{};uint64_t sampleAge=0;
+    const bool read=edvr::nativeOnFootAirborneSnapshot(&snapshot);
+    const bool fresh=read&&freshAirborneSnapshot(&snapshot,&sampleAge);
+    const bool busy=g_eyeRunLeft>0||g_eyeRunReady||g_eyeFinalRun.armed||g_eyeJumpLatticeRun.armed()||drawCensusArmed()||objectProbeLedgerActive();
+    const Decision decision=g_airborneCompanion.request.poll(now.QuadPart>0?uint64_t(now.QuadPart):0,
+        frequency.QuadPart>0?uint64_t(frequency.QuadPart):0,edvr::nativeOnFootActive(),read&&snapshot.valid,fresh,
+        snapshot.generation,snapshot.airborne,busy);
+    if(decision==Decision::Stale)Log::get().note("eye capture: airborne companion parent=%ls waiting; native sample generation=%llu source_frame=%u age_qpc=%llu is stale or unavailable (freshness limit 100ms).",g_airborneCompanion.parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,(unsigned long long)sampleAge);
+    if(decision==Decision::DeferredBusy)Log::get().note("eye capture: airborne companion parent=%ls deferred reason=active_capture_or_census generation=%llu source_frame=%u vy=%.3f m/s sample_age_qpc=%llu; waiting for a fresh airborne sample after the current run.",g_airborneCompanion.parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.verticalVelocityMps,(unsigned long long)sampleAge);
+    if(decision==Decision::Expired||decision==Decision::Cancelled) {
+        Log::get().note("eye capture: airborne companion parent=%ls %s state=%s; no companion files written",g_airborneCompanion.parentStamp,decision==Decision::Expired?"expired after 30s":"cancelled because native on-foot became inactive or QPC was unavailable",airborneCompanionStateName(g_airborneCompanion.request.state));
+        g_airborneCompanion=AirborneCompanionRequest{};return;
+    }
+    if(decision!=Decision::Trigger)return;
+    const uint64_t requestAge=now.QuadPart>0&&g_airborneCompanion.request.requestQpc?uint64_t(now.QuadPart)-g_airborneCompanion.request.requestQpc:0;
+    wchar_t parentStamp[16]{};wcscpy_s(parentStamp,g_airborneCompanion.parentStamp);
+    if(!beginEyeRun(true,&snapshot,sampleAge)) {
+        g_airborneCompanion.request.retryAfterStartRefusal(snapshot.generation);
+        Log::get().note("eye capture: airborne companion start refused parent=%ls generation=%llu source_frame=%u; request retained and waiting for a newer fresh airborne sample.",parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame);
+        return;
+    }
+    Log::get().note("eye capture: airborne companion start accepted parent=%ls request_age_qpc=%llu sample_age_qpc=%llu generation=%llu source_frame=%u raw_vy=%.3f filtered_vy=%.3f m/s root=[%.3f,%.3f,%.3f].",parentStamp,(unsigned long long)requestAge,(unsigned long long)sampleAge,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.rawVerticalVelocityMps,snapshot.verticalVelocityMps,snapshot.root[0],snapshot.root[1],snapshot.root[2]);
 }
 
 void temporalPassShutdown() {
+    if(g_airborneCompanion.request.state!=edvr::eye_airborne_capture::State::Idle)
+        Log::get().note("eye capture: airborne companion parent=%ls cancelled reason=shutdown state=%s",g_airborneCompanion.parentStamp,airborneCompanionStateName(g_airborneCompanion.request.state));
+    g_airborneCompanion=AirborneCompanionRequest{};
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"shutdown_missing_final");
     g_eyeJumpLatticeRun.reset();
     if(g_csEyeJumpLattice){g_csEyeJumpLattice->Release();g_csEyeJumpLattice=nullptr;}

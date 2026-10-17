@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read a paired eye run's per-frame DLSS decisions; never writes files.
 
-Pass eye_HHMMSS_decisions.json, optionally --roi X Y WIDTH HEIGHT in D-crop
+Pass eye_<stamp>_decisions.json, optionally --roi X Y WIDTH HEIGHT in D-crop
 pixels. D contains pre-hidden-rejection motion XY, predicted prior eye depth
 Z (zero when unavailable, including screen motion), and integer flags W. P is pre-UI, T is submitted
 colour; both use the identical output crop. Changes at a fixed raster pixel
@@ -159,7 +159,7 @@ def analyze(manifest_path, requested_roi=None):
             manifest.get('schema') != 1 or manifest.get('requested') != 16):
         raise ValueError('unsupported decision manifest schema/requested count')
     stamp = manifest.get('stamp')
-    if not isinstance(stamp, str) or len(stamp) != 6 or not stamp.isascii() or not stamp.isdigit():
+    if not isinstance(stamp, str) or len(stamp) not in (6, 12) or not stamp.isascii() or not stamp.isdigit():
         raise ValueError('invalid capture stamp')
     if manifest_path.name != f'eye_{stamp}_decisions.json':
         raise ValueError('manifest filename/stamp mismatch')
@@ -284,6 +284,18 @@ def self_test():
         assert first['physical_motion_rms_px'] == math.sqrt(25 / 3)
         assert first['post_ui_difference']['mean_abs_rgb_255'] == 2
         assert result['frames'][1]['fixed_raster_path_change_fraction'] == 0
+        long_stamp = '123456789012'
+        long_path = base / f'eye_{long_stamp}_decisions.json'
+        long_manifest = copy.deepcopy(manifest)
+        long_manifest['stamp'] = long_stamp
+        for frame in long_manifest['frames']:
+            for field, suffix in (('decision_file','D'),('raw_file','C'),('pre_ui_file','P'),('treated_file','T')):
+                old = base / frame[field]
+                new_name = f'eye_{long_stamp}_{suffix}{frame["index"]:02}.bin' if suffix=='D' else f'eye_{long_stamp}_{suffix}{frame["index"]:02}.bmp'
+                (base / new_name).write_bytes(old.read_bytes())
+                frame[field] = new_name
+        long_path.write_text(json.dumps(long_manifest), encoding='utf-8')
+        assert analyze(long_path)['complete'], 'millisecond/serial run stamps remain readable'
         first = run(roi=[0, 0, 1, 1])['frames'][0]
         assert first['output_roi'] == (0, 0, 2, 2)
         assert first['flag_fraction']['hidden_history'] == 1

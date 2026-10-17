@@ -3,6 +3,7 @@
 #include "../../src/d3d11/eye_depth_capture.h"
 #include "../../src/d3d11/eye_jump_lattice.h"
 #include "../../src/d3d11/eye_jump_lattice_shader.h"
+#include "../../src/d3d11/eye_airborne_capture.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <string>
 
 using Microsoft::WRL::ComPtr;
+namespace edvr { thread_local bool g_vrWorldInternal=false; thread_local bool g_flatComputeInternal=false; }
 void check(bool ok, const char* why) {
     if (!ok) { std::printf("FAIL: %s\n", why); std::exit(1); }
 }
@@ -45,14 +47,97 @@ int wmain(int argc, wchar_t** argv) {
           edvr::eyeMeshVb0BindingStatus(true,8,16)==3 &&
           edvr::eyeMeshVb0BindingStatus(true,8,0)==1,
           "VB0 capture distinguishes absent binding, unsupported stride and offset, and a supported binding");
-    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==384 && edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye==8 &&
+    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==1152 && edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye==16 &&
+          edvr::EyeDrawSnapshot::kCandidateUiReserve==16*3*16 && edvr::EyeDrawSnapshot::kCandidateNonUiMax==384 &&
           edvr::EyeDrawSnapshot::kCandidateMeshBudget==64*1024*1024 &&
-          edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==32*1024*1024 &&
+          edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==136*1024*1024 &&
           edvr::EyeDrawSnapshot::kCandidateMaxOpticDraws==2,
           "candidate evidence reserves stay within approved independent bounds");
+    {
+        using Capture=edvr::EyeDrawSnapshot;
+        uint32_t total=0,nonUi=0,ui[16][3]{};
+        for(uint32_t i=0;i<Capture::kCandidateNonUiMax;++i){
+            check(Capture::candidateCapacityAvailable(false,0,nonUi,total),"non-UI rows fit their isolated reservation");
+            ++total;++nonUi;
+        }
+        for(uint32_t frame=0;frame<16;++frame)for(uint32_t eye=0;eye<3;++eye)for(uint32_t n=0;n<Capture::kCandidateUiPerFrameEye;++n){
+            check(Capture::candidateCapacityAvailable(true,ui[frame][eye],nonUi,total),"each UI frame/eye bucket retains full capacity after non-UI saturation");
+            ++ui[frame][eye];++total;
+        }
+        check(total==Capture::kCandidateMaxDraws&&
+              !Capture::candidateCapacityAvailable(true,ui[0][0],nonUi,total)&&
+              !Capture::candidateCapacityAvailable(false,0,nonUi,total),
+              "bounded candidate window fills exactly all 384 non-UI plus 768 UI rows");
+        check(!Capture::candidateCapacityAvailable(true,Capture::kCandidateUiPerFrameEye,nonUi,0)&&
+              Capture::candidateCapacityAvailable(true,0,nonUi,0),
+              "an overfull early UI bucket cannot consume another frame/eye reservation");
+    }
+    {
+        using namespace edvr::eye_airborne_capture;
+        Request request;
+        check(request.poll(1000,1000,true,true,true,90,true,false)==Decision::None,
+              "manual already-airborne run does not arm an automatic duplicate");
+        request.arm(1000,90);
+        check(request.poll(1100,1000,true,false,false,0,false,false)==Decision::Stale&&
+              request.poll(1200,1000,true,false,false,0,false,false)==Decision::None,
+              "first invalid or stale snapshot is reported once and never triggers");
+        check(request.poll(1300,1000,true,true,true,90,false,false)==Decision::None&&
+              request.poll(1400,1000,true,true,true,90,true,false)==Decision::None,
+              "grounded and duplicate-generation samples cannot trigger");
+        check(request.poll(1500,1000,true,true,true,91,true,true)==Decision::DeferredBusy&&
+              request.state==State::Deferred,
+              "airborne edge during a run is explicitly deferred");
+        check(request.poll(1600,1000,true,true,true,92,false,false)==Decision::None&&
+              request.poll(1700,1000,true,true,true,93,true,false)==Decision::Trigger&&
+              request.poll(1800,1000,true,true,true,94,true,false)==Decision::None,
+              "busy jump that lands waits for the next fresh jump and triggers exactly once");
+        request.arm(1900,20);
+        check(request.poll(2000,1000,true,true,true,21,true,false)==Decision::Trigger,
+              "fresh airborne sample requests one companion start");
+        request.retryAfterStartRefusal(21);
+        check(request.state==State::Deferred&&
+              request.poll(2100,1000,true,true,true,21,true,false)==Decision::None&&
+              request.poll(2200,1000,true,true,true,22,true,false)==Decision::Trigger,
+              "begin refusal retains the request and requires a newer airborne sample");
+        request.arm(2000,10);
+        check(request.poll(32000,1000,true,true,true,11,true,false)==Decision::Expired&&request.state==State::Expired,
+              "airborne companion expires at its fixed 30-second bound");
+        request.arm(40000,10);
+        check(request.poll(40100,1000,false,true,true,11,true,false)==Decision::Cancelled&&request.state==State::Cancelled,
+              "native on-foot exit cancels the one-shot request");
+    }
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                          D3D11_SDK_VERSION, &dev, nullptr, &ctx));
+    {
+        constexpr UINT sw=1024,sh=768;
+        std::vector<uint8_t> grid(size_t(sw)*sh*4);
+        for(UINT y=0;y<sh;++y)for(UINT x=0;x<sw;++x){const size_t at=(size_t(y)*sw+x)*4;grid[at]=uint8_t(x);grid[at+1]=uint8_t(y);grid[at+2]=0xa5;grid[at+3]=0xff;}
+        D3D11_TEXTURE2D_DESC td{};td.Width=sw;td.Height=sh;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initial{grid.data(),sw*4,0};ComPtr<ID3D11Texture2D> source;hr(dev->CreateTexture2D(&td,&initial,&source));
+        ComPtr<ID3D11ShaderResourceView> sourceView;hr(dev->CreateShaderResourceView(source.Get(),nullptr,&sourceView));
+        D3D11_TEXTURE2D_DESC sentinelDesc=td;sentinelDesc.Width=sentinelDesc.Height=1;const uint8_t sentinelPixel[4]={9,8,7,6};D3D11_SUBRESOURCE_DATA sentinelInit{sentinelPixel,4,0};
+        ComPtr<ID3D11Texture2D> sentinelTexture;hr(dev->CreateTexture2D(&sentinelDesc,&sentinelInit,&sentinelTexture));ComPtr<ID3D11ShaderResourceView> sentinelSrv;hr(dev->CreateShaderResourceView(sentinelTexture.Get(),nullptr,&sentinelSrv));
+        const char* sentinelSource="[numthreads(1,1,1)]void main(){}";ComPtr<ID3DBlob> sentinelCode;hr(D3DCompile(sentinelSource,strlen(sentinelSource),nullptr,nullptr,nullptr,"main","cs_5_0",0,0,&sentinelCode,nullptr));
+        ComPtr<ID3D11ComputeShader> sentinelShader;hr(dev->CreateComputeShader(sentinelCode->GetBufferPointer(),sentinelCode->GetBufferSize(),nullptr,&sentinelShader));
+        D3D11_BUFFER_DESC counterDesc{};counterDesc.ByteWidth=16*4;counterDesc.Usage=D3D11_USAGE_DEFAULT;counterDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;counterDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;counterDesc.StructureByteStride=4;
+        ComPtr<ID3D11Buffer> counterBuffer;hr(dev->CreateBuffer(&counterDesc,nullptr,&counterBuffer));D3D11_UNORDERED_ACCESS_VIEW_DESC counterViewDesc{};counterViewDesc.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;counterViewDesc.Format=DXGI_FORMAT_UNKNOWN;counterViewDesc.Buffer.NumElements=16;counterViewDesc.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_APPEND;
+        ComPtr<ID3D11UnorderedAccessView> counterUav;hr(dev->CreateUnorderedAccessView(counterBuffer.Get(),&counterViewDesc,&counterUav));
+        ID3D11ShaderResourceView* oldSrv=sentinelSrv.Get();ID3D11UnorderedAccessView* oldUav=counterUav.Get();UINT initialCounter=7;
+        ctx->CSSetShader(sentinelShader.Get(),nullptr,0);ctx->CSSetShaderResources(0,1,&oldSrv);ctx->CSSetUnorderedAccessViews(0,1,&oldUav,&initialCounter);
+        ComPtr<ID3D11Texture2D> sampled;check(edvr::EyeDrawSnapshot::pointSampleUiTextureForTest(ctx.Get(),dev.Get(),sourceView.Get(),sw,sh,&sampled),"bounded full-image point sampler runs on WARP");wait_gpu(ctx.Get(),dev.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};hr(ctx->Map(sampled.Get(),0,D3D11_MAP_READ,0,&mapped));
+        auto pixel=[&](UINT x,UINT y){return static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+size_t(x)*4;};
+        bool gridMatches=true;for(const auto xy:{std::pair<UINT,UINT>{0,0},{127,91},{383,383}}){const UINT sx=((xy.first*2+1)*sw)/768,sy=((xy.second*2+1)*sh)/768;const uint8_t* got=pixel(xy.first,xy.second);gridMatches=gridMatches&&got[0]==uint8_t(sx)&&got[1]==uint8_t(sy)&&got[2]==0xa5&&got[3]==0xff;}
+        ctx->Unmap(sampled.Get(),0);check(gridMatches,"full-source center-point mapping preserves synthetic UV-grid coordinates");
+        ComPtr<ID3D11ComputeShader> restoredShader;ComPtr<ID3D11ShaderResourceView> restoredSrv;ComPtr<ID3D11UnorderedAccessView> restoredUav;
+        ctx->CSGetShader(&restoredShader,nullptr,nullptr);ctx->CSGetShaderResources(0,1,&restoredSrv);ctx->CSGetUnorderedAccessViews(0,1,&restoredUav);
+        check(restoredShader.Get()==sentinelShader.Get()&&restoredSrv.Get()==sentinelSrv.Get()&&restoredUav.Get()==counterUav.Get(),"point sampler restores compute shader/SRV/UAV bindings");
+        D3D11_BUFFER_DESC countDesc{};countDesc.ByteWidth=4;countDesc.Usage=D3D11_USAGE_STAGING;countDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Buffer> countStage;hr(dev->CreateBuffer(&countDesc,nullptr,&countStage));
+        ctx->CopyStructureCount(countStage.Get(),0,counterUav.Get());wait_gpu(ctx.Get(),dev.Get());D3D11_MAPPED_SUBRESOURCE countMap{};hr(ctx->Map(countStage.Get(),0,D3D11_MAP_READ,0,&countMap));const uint32_t preservedCounter=*static_cast<const uint32_t*>(countMap.pData);ctx->Unmap(countStage.Get(),0);
+        check(preservedCounter==7,"point sampler preserves the prebound UAV append counter");
+        check(!edvr::g_vrWorldInternal&&!edvr::g_flatComputeInternal,"point sampler leaves internal render scopes balanced");
+    }
     check(edvr::eye_jump_lattice::runFits(5,3) && !edvr::eye_jump_lattice::runFits(4032,3896),
           "jump lattice admits irregular input and refuses over-budget production dimensions");
     {
@@ -1124,7 +1209,7 @@ int wmain(int argc, wchar_t** argv) {
     candidateDraw.layout={candidateLayout0,candidateLayout1};
     candidateFixture.draws.push_back(std::move(candidateDraw));
     edvr::EyeDrawSnapshot::CandidateFrame candidateFrame{};candidateFrame.draw=0;candidateFrame.ledgerFrame=101;candidateFrame.renderFrame=501;
-    candidateFrame.eye=1;candidateFrame.issued=1;candidateFrame.roiCaptured=1;candidateFrame.roiComplete=1;
+    candidateFrame.eye=1;candidateFrame.issued=1;candidateFrame.roiCaptured=1;candidateFrame.roiComplete=1;candidateFrame.cameraCbSlot=1;
     candidateFixture.candidateFrames.push_back(candidateFrame);candidateFixture.candidateOpticDraws=1;candidateFixture.candidateRoiDraw=0;
     edvr::EyeDrawSnapshot::CandidateInput candidateMaterial{};candidateMaterial.draw=0;candidateMaterial.slot=1;candidateMaterial.kind=0;
     candidateMaterial.viewDimension=D3D11_SRV_DIMENSION_BUFFER;candidateMaterial.bytes=96;candidateMaterial.width=96;
@@ -1151,6 +1236,27 @@ int wmain(int argc, wchar_t** argv) {
     }
     wait_gpu(ctx.Get(),dev.Get());
     check(candidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".candidate").c_str()),"nonempty candidate snapshot write");
+    edvr::EyeDrawSnapshot capacityFixture;capacityFixture.candidateUiFirstLedgerFrame=100;
+    uint32_t capacityTotal=0,capacityNonUi=0,capacityUi[16][3]{};
+    auto appendCapacityDraw=[&](bool ui,uint32_t frame,uint32_t eye) {
+        check(edvr::EyeDrawSnapshot::candidateCapacityAvailable(ui,ui?capacityUi[frame-100][eye]:0,capacityNonUi,capacityTotal),
+              "candidate capture admission accepts reserved full-window row");
+        const uint32_t drawIndex=uint32_t(capacityFixture.draws.size());edvr::EyeDrawSnapshot::Draw d{};
+        d.vs=ui?edvr::EyeDrawSnapshot::kWeaponUiVs:edvr::EyeDrawSnapshot::kF77HeldCandidateVs;
+        d.ps=ui?edvr::EyeDrawSnapshot::kWeaponUiPs:0;d.frame=frame;d.ordinal=drawIndex;d.kind='I';d.count=3;d.instances=1;
+        capacityFixture.draws.push_back(std::move(d));edvr::EyeDrawSnapshot::CandidateFrame c{};
+        c.draw=drawIndex;c.ledgerFrame=frame;c.renderFrame=frame+1000;c.eye=ui?(eye==0?0:eye==1?1:-1):-1;
+        c.issued=2;c.cameraCbSlot=0;capacityFixture.candidateFrames.push_back(c);
+        if(ui){++capacityUi[frame-100][eye];++capacityFixture.candidateUiCounts[frame-100][eye];}
+        else {++capacityNonUi;++capacityFixture.candidateNonUiDraws;}
+        ++capacityTotal;
+    };
+    for(uint32_t n=0;n<edvr::EyeDrawSnapshot::kCandidateNonUiMax;++n)appendCapacityDraw(false,1,0);
+    for(uint32_t frame=100;frame<116;++frame)for(uint32_t eye=0;eye<3;++eye)
+        for(uint32_t n=0;n<edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye;++n)appendCapacityDraw(true,frame,eye);
+    check(capacityTotal==1152&&capacityNonUi==384&&capacityFixture.candidateFrames.size()==1152,
+          "candidate fixture fills every independently reserved row");
+    check(capacityFixture.write(ctx.Get(),(std::wstring(argv[1])+L".capacity").c_str()),"full-window candidate snapshot write");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));

@@ -80,11 +80,21 @@ struct Record {
     PoseState poseState = PoseState::Unrequested;
     PoseKey poseKey{}, poseSourceKey{};
     uint32_t posePlanGeneration = 0, poseWriteMask = 0;
-    uint64_t poseQpc = 0, poseFpQpc = 0, poseGQpc = 0;
+    uint64_t poseQpc = 0, poseFpQpc = 0, poseGQpc = 0, poseNativeEpoch = 0;
     bool posePinValid = false, poseEyeCalHave = false, poseEyeCalAxesValid = false, poseMatricesValid = false;
     bool poseRawMatricesValid = false, posePinEyeCalValid = false, poseWriteFresh = false;
     bool poseM3pAffineValid = false, poseM3pPaddingFinite = false, poseM3pPaddingCanonicalized = false;
     float poseArm[2][4][3] = {}; // actual shoulder, elbow, hand and target; model coordinates, metres.
+    bool poseRifleQualityValid = false, poseRifleQualityAccepted = false;
+    float poseRifleQualityWeight = 0.0f, poseRifleDetachWeight = 0.0f;
+    float poseRifleBaselineYawDeg = 0.0f, poseRifleSelectedYawDeg = 0.0f, poseRifleBaselineCost = 0.0f, poseRifleSelectedCost = 0.0f;
+    float poseRiflePreAssist[2][4][3] = {}; // clavicle, shoulder, elbow, hand before candidate assist; model metres.
+    float poseRifleTarget[2][3] = {}, poseRifleSolveWeight[2] = {}, poseRifleAssistDeg[2] = {};
+    float poseRifleLengths[2][2] = {}, poseRifleFpPole[2][3] = {}, poseRiflePoleSeed[2][3][3] = {};
+    bool poseRifleStableEligible[2] = {}, poseRifleFpPoleValid[2] = {}, poseRiflePoleSeedValid[2] = {};
+    float poseRifleElbowOutM = 0.0f, poseRifleTrimRad = 0.0f;
+    float poseRifleNeck[3] = {}, poseRifleChestPivot[3] = {}, poseRifleAdsPush[3] = {}, poseRifleLegVertical = 0.0f;
+    float poseRifleLeg[2][3][3] = {}; // hip, knee, held foot for exact candidate feasibility replay.
     float poseRawTorso[3][16] = {}; // input AMC joints 24 chest, 34 neck and 44 head.
     float poseFinalTorso[4][16] = {}; // after-write joints 24 chest, 34 neck, 35/36 clavicles.
     float poseRoot[16] = {}, poseM3p[16] = {}, poseFroot[16] = {}, poseBodyOffset[3] = {};

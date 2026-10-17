@@ -1193,6 +1193,23 @@ inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* 
     }
     return ikWrapPi(best);
 }
+// Shared F57 legacy swivel policy, used by the runtime and F84's candidate replay.
+inline double ikTrimSign(const IkTwoBone& t, double theta, double out) noexcept;
+inline double ikLegacySwivel(const IkTwoBone& tb, const double elbowDir[3], double out, const double* fpPole, double trimRad,
+                             double elbowOutM, bool* clamped) noexcept {
+    const double hint[3] = {0.6 * out, -0.8, -0.1};
+    double pole[3], pp[3];
+    for (int i = 0; i < 3; ++i) pole[i] = fpPole ? fpPole[i] : 0.5 * elbowDir[i] + 0.5 * hint[i];
+    double pd = ikDot(pole, tb.dir);
+    for (int i = 0; i < 3; ++i) pp[i] = pole[i] - tb.dir[i] * pd;
+    if (ikLen(pp) < 0.2) {
+        pd = ikDot(hint, tb.dir);
+        for (int i = 0; i < 3; ++i) pp[i] = hint[i] - tb.dir[i] * pd;
+    }
+    double th = tb.angleOf(pp);
+    if (trimRad != 0.0) th = ikWrapPi(th + ikTrimSign(tb, th, out) * trimRad);
+    return ikSwivelClamp(tb, th, out, clamped, elbowOutM);
+}
 
 // F76: a physical elbow pole in 3P model/body axes. `reference` is the anatomical direction transported between successful shoulder->hand axes;
 // `previous` is the last solved radial, used only when transporting the anatomical direction fails numerically.
@@ -1224,6 +1241,12 @@ inline bool ikPhysicalPoleBegin(IkPhysicalPoleSet& set, uint32_t generation, uin
 }
 inline bool ikPhysicalPoleSideEligible(int side, bool supportCupTargetValid, bool offHandTwoHanded) noexcept {
     return side == 1 || (side == 0 && (supportCupTargetValid || offHandTwoHanded));
+}
+// Keep the exact-rifle physical-pole reference alive while F84 releases its down-pole blend;
+// identity and full ADS remain hard boundaries so unrelated items never inherit the seed.
+inline bool ikRifleQualityKeepsPhysicalPole(bool exactRifle, double qualityWeight, double detachWeight, bool seedValid) noexcept {
+    return exactRifle && seedValid && std::isfinite(qualityWeight) && std::isfinite(detachWeight) &&
+           qualityWeight > 0.0 && detachWeight < 1.0;
 }
 struct IkStableSwivel {
     bool ok = false, usedFallback = false, transportedReference = false;
@@ -3942,17 +3965,59 @@ inline LegPlant legPlant(const double hip1[3], const double foot0[3], double l1,
 // applied exactly once by the normal arm solve later in the pass.
 struct CrouchNeckArm {
     bool active = true;
-    double clavicle[3] = {}, shoulder[3] = {}, hand[3] = {}, target[3] = {}, l1 = 0.0, l2 = 0.0, wSolve = 1.0;
+    double clavicle[3] = {}, shoulder[3] = {}, elbow[3] = {}, hand[3] = {}, target[3] = {}, l1 = 0.0, l2 = 0.0, wSolve = 1.0;
+    double fpPole[3] = {};
+    bool fpPoleValid = false, stableEligible = false;
+    IkPhysicalPole poleSeed{};
 };
 struct CrouchNeckLeg {
     double hip[3] = {}, knee[3] = {}, foot[3] = {};
 };
 struct CrouchNeckYaw {
-    bool feasible = false;
-    double yawRad = 0.0, maxShortfallM = 0.0;
+    bool feasible = false, qualityAccepted = false;
+    double yawRad = 0.0, maxShortfallM = 0.0, poseCost = 0.0, assistDeg[2] = {};
+    double baselineYawRad = 0.0, baselinePoseCost = 0.0;
     double rootDelta[3] = {};
     double clavicle[2][3] = {}, shoulder[2][3] = {};
 };
+inline double ikUnitDirectionCost(const double before[3], const double after[3]) noexcept {
+    double a[3], b[3];
+    if (!ikUnit(before, a) || !ikUnit(after, b)) return std::numeric_limits<double>::infinity();
+    const double d = std::max(-1.0, std::min(1.0, ikDot(a, b)));
+    return 2.0 * (1.0 - d);
+}
+struct CrouchNeckYawPoseMetrics {
+    bool valid = false;
+    double cost = std::numeric_limits<double>::infinity(), assistDeg[2] = {};
+    double leftElbowYFromShoulderL1 = 0.0, leftElbowInteriorDeg = 0.0;
+};
+// F84: evaluate rifle support geometry in the same body-down/lateral circle policy used by the runtime.
+// The legacy angle is the previous policy's output on this candidate circle; qualityWeight fades the
+// replacement in from the legacy pole and detachWeight returns it exactly to the legacy ADS endpoint.
+inline bool ikRifleSupportTheta(const IkTwoBone& t, double legacyTheta, double detachWeight, double qualityWeight,
+                                double elbowOutM, double trimRad, double* thetaOut, double* radialOut = nullptr) noexcept {
+    if (!t.ok || !std::isfinite(legacyTheta) || !std::isfinite(detachWeight) || !std::isfinite(qualityWeight) ||
+        !std::isfinite(elbowOutM) || !std::isfinite(trimRad)) return false;
+    const double detach = std::max(0.0, std::min(1.0, detachWeight));
+    const double quality = std::max(0.0, std::min(1.0, qualityWeight));
+    const double amount = quality * (1.0 - detach);
+    if (amount <= 0.0) {
+        *thetaOut = ikWrapPi(legacyTheta);
+        if (radialOut && !ikElbowRadial(t, *thetaOut, radialOut)) return false;
+        return true;
+    }
+    double legacyRadial[3];
+    if (!ikElbowRadial(t, legacyTheta, legacyRadial)) return false;
+    const double up[3] = {0.0, 1.0, 0.0};
+    const IkPistolDownSwivel down = ikPistolDownSwivel(t, legacyRadial, up, elbowOutM, trimRad);
+    if (!down.ok) return false;
+    const double delta = ikWrapPi(down.theta - legacyTheta);
+    const double theta = ikWrapPi(legacyTheta + amount * delta);
+    if (!std::isfinite(theta)) return false;
+    *thetaOut = theta;
+    if (radialOut && !ikElbowRadial(t, theta, radialOut)) return false;
+    return true;
+}
 inline bool crouchNeckYawFeasible(const double neck[3], const double chestPivot[3], const CrouchNeckArm arm[2], const CrouchNeckLeg leg[2], double legVertical,
                                   double yawRad, const double adsPush[3],
                                   CrouchNeckYaw* out) noexcept {
@@ -3974,7 +4039,7 @@ inline bool crouchNeckYawFeasible(const double neck[3], const double chestPivot[
         if (!std::isfinite(w) || w < 0.0 || w > 1.0) return false;
         if (!(std::isfinite(arm[side].l1) && std::isfinite(arm[side].l2) && arm[side].l1 > 1e-4 && arm[side].l2 > 1e-4)) return false;
         for (int i = 0; i < 3; ++i)
-            if (!std::isfinite(arm[side].clavicle[i]) || !std::isfinite(arm[side].shoulder[i]) || !std::isfinite(arm[side].hand[i]) ||
+            if (!std::isfinite(arm[side].clavicle[i]) || !std::isfinite(arm[side].shoulder[i]) || !std::isfinite(arm[side].elbow[i]) || !std::isfinite(arm[side].hand[i]) ||
                 !std::isfinite(arm[side].target[i])) return false;
         turnAboutVertical(arm[side].clavicle, neck, yawRad, result.clavicle[side]);
         turnAboutVertical(arm[side].shoulder, neck, yawRad, result.shoulder[side]);
@@ -3998,6 +4063,7 @@ inline bool crouchNeckYawFeasible(const double neck[3], const double chestPivot[
             double turned[3];
             ikRowRotate(cs, R, turned);
             for (int i = 0; i < 3; ++i) result.shoulder[side][i] = result.clavicle[side][i] + turned[i];
+            result.assistDeg[side] = angle * 180.0 / kIkPi;
         }
         const double after[3] = {target[0] - result.shoulder[side][0], target[1] - result.shoulder[side][1], target[2] - result.shoulder[side][2]};
         const double afterDist = ikLen(after);
@@ -4039,6 +4105,128 @@ inline bool crouchNeckYawFeasible(const double neck[3], const double chestPivot[
     result.feasible = true;
     if (out) *out = result;
     return true;
+}
+// F84: pose cost after the exact single clavicle assist and the selected support-elbow policy.
+// Costs are squared unit-direction differences, so long bones do not dominate just because of length.
+inline bool crouchNeckYawPoseEval(const double neck[3], const CrouchNeckArm arm[2], double yawRad, const double adsPush[3],
+                                  double detachWeight, double qualityWeight, double elbowOutM, double trimRad,
+                                  CrouchNeckYawPoseMetrics* metricsOut) noexcept {
+    if (metricsOut) *metricsOut = CrouchNeckYawPoseMetrics{};
+    if (!std::isfinite(yawRad) || !std::isfinite(detachWeight) || !std::isfinite(qualityWeight) || !std::isfinite(elbowOutM) ||
+        !std::isfinite(trimRad)) return false;
+    double total = 0.0;
+    bool checked = false;
+    for (int side = 0; side < 2; ++side) {
+        if (!arm[side].active) continue;
+        checked = true;
+        const auto& a = arm[side];
+        const double w = a.wSolve;
+        if (!std::isfinite(w) || w < 0.0 || w > 1.0 || !(a.l1 > 1e-4 && a.l2 > 1e-4)) return false;
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(a.clavicle[i]) || !std::isfinite(a.shoulder[i]) || !std::isfinite(a.elbow[i]) || !std::isfinite(a.hand[i]) ||
+                !std::isfinite(a.target[i]) || !std::isfinite(adsPush[i]) || !std::isfinite(neck[i])) return false;
+        double C[3], S[3], E[3], H[3];
+        turnAboutVertical(a.clavicle, neck, yawRad, C);
+        turnAboutVertical(a.shoulder, neck, yawRad, S);
+        turnAboutVertical(a.elbow, neck, yawRad, E);
+        turnAboutVertical(a.hand, neck, yawRad, H);
+        const double target[3] = {H[0] + w * (a.target[0] - H[0]), H[1] + w * (a.target[1] - H[1]), H[2] + w * (a.target[2] - H[2])};
+        const double toTarget[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
+        const double animArm[3] = {H[0] - S[0], H[1] - S[1], H[2] - S[2]};
+        const double dist = ikLen(toTarget);
+        const double animD = ikLen(animArm);
+        double excess = 0.0, R[9], angle = 0.0;
+        bool capped = false;
+        const double move = ikAssistReachMove(dist, a.l1, a.l2, &excess);
+        const double disp[3] = {(dist > 1e-9 ? move * toTarget[0] / dist : 0.0) * w + adsPush[0] * w,
+                                (dist > 1e-9 ? move * toTarget[1] / dist : 0.0) * w + adsPush[1] * w,
+                                (dist > 1e-9 ? move * toTarget[2] / dist : 0.0) * w + adsPush[2] * w};
+        if (ikAssistRot(C, S, disp, R, &angle, &capped)) {
+            const double cs[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]};
+            const double ce[3] = {E[0] - C[0], E[1] - C[1], E[2] - C[2]};
+            const double ch[3] = {H[0] - C[0], H[1] - C[1], H[2] - C[2]};
+            double turnedS[3], turnedE[3], turnedH[3];
+            ikRowRotate(cs, R, turnedS); ikRowRotate(ce, R, turnedE); ikRowRotate(ch, R, turnedH);
+            for (int i = 0; i < 3; ++i) { S[i] = C[i] + turnedS[i]; E[i] = C[i] + turnedE[i]; H[i] = C[i] + turnedH[i]; }
+        }
+        if (metricsOut) metricsOut->assistDeg[side] = angle * 180.0 / kIkPi;
+        // The hand target is fixed in body space while the assist rotates the source arm chain.
+        const double solvedTarget[3] = {target[0], target[1], target[2]};
+        double dLo = 0.0, dHi = 0.0, fLo = 0.0, fHi = 0.0;
+        ikElbowDRange(a.l1, a.l2, kIkElbowMinDeg, kIkElbowMaxDeg, &dLo, &dHi);
+        ikElbowDRange(a.l1, a.l2, 0.0, 180.0, &fLo, &fHi);
+        if (animD < dLo) dLo -= (1.0 - w) * (dLo - animD);
+        if (animD > dHi) dHi += (1.0 - w) * (animD - dHi);
+        dLo = std::max(dLo, fLo); dHi = std::min(dHi, fHi); if (dHi < dLo) dHi = dLo;
+        const double ref[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
+        const IkTwoBone tb = ikTwoBoneFrameD(S, solvedTarget, a.l1, a.l2, ref, dLo, dHi);
+        double elbowDir[3];
+        if (!tb.ok || tb.limited || !ikUnit(ref, elbowDir)) return false;
+        bool legacyClamped = false;
+        const double legacyTheta = ikLegacySwivel(tb, elbowDir, ikArmOutSign(side), a.fpPoleValid ? a.fpPole : nullptr, trimRad, elbowOutM,
+                                             &legacyClamped);
+        double theta = w * ikWrapPi(legacyTheta);
+        if (a.stableEligible) {
+            IkPhysicalPole seed = a.poleSeed;
+            if (!seed.valid) {
+                if (!ikElbowRadial(tb, legacyTheta, seed.reference)) return false;
+                std::memcpy(seed.previous, seed.reference, sizeof(seed.reference));
+                std::memcpy(seed.axis, tb.dir, sizeof(seed.axis));
+                seed.valid = true;
+            }
+            const IkStableSwivel stable = ikStableSwivel(tb, seed, ikArmOutSign(side), elbowOutM);
+            if (!stable.ok) return false;
+            theta = w * ikWrapPi(stable.theta);
+        }
+        if (side == 0 && qualityWeight > 0.0) {
+            if (!ikRifleSupportTheta(tb, theta, detachWeight, qualityWeight, elbowOutM, trimRad, &theta)) return false;
+        }
+        double finalE[3];
+        tb.elbowAt(theta, finalE);
+        if (side == 0 && metricsOut) {
+            metricsOut->leftElbowYFromShoulderL1 = (finalE[1] - S[1]) / a.l1;
+            metricsOut->leftElbowInteriorDeg = ikElbowInteriorDeg(a.l1, a.l2, tb.D);
+        }
+        const double rawCS[3] = {a.shoulder[0] - a.clavicle[0], a.shoulder[1] - a.clavicle[1], a.shoulder[2] - a.clavicle[2]};
+        const double rawSE[3] = {a.elbow[0] - a.shoulder[0], a.elbow[1] - a.shoulder[1], a.elbow[2] - a.shoulder[2]};
+        const double rawEH[3] = {a.hand[0] - a.elbow[0], a.hand[1] - a.elbow[1], a.hand[2] - a.elbow[2]};
+        const double up[3] = {0.0, 1.0, 0.0};
+        double yaw[9], refCS[3], refSE[3], refEH[3];
+        ikRotAxis(up, yawRad, yaw);
+        ikRowRotate(rawCS, yaw, refCS); ikRowRotate(rawSE, yaw, refSE); ikRowRotate(rawEH, yaw, refEH);
+        const double finalCS[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]};
+        const double finalSE[3] = {finalE[0] - S[0], finalE[1] - S[1], finalE[2] - S[2]};
+        const double finalEH[3] = {tb.hand[0] - finalE[0], tb.hand[1] - finalE[1], tb.hand[2] - finalE[2]};
+        const double c0 = ikUnitDirectionCost(refCS, finalCS), c1 = ikUnitDirectionCost(refSE, finalSE), c2 = ikUnitDirectionCost(refEH, finalEH);
+        if (!(std::isfinite(c0) && std::isfinite(c1) && std::isfinite(c2))) return false;
+        total += c0 + c1 + c2;
+    }
+    if (!checked || !std::isfinite(total)) return false;
+    if (metricsOut) { metricsOut->cost = total; metricsOut->valid = true; }
+    return true;
+}
+inline bool crouchNeckYawPoseCost(const double neck[3], const CrouchNeckArm arm[2], double yawRad, const double adsPush[3],
+                                  double detachWeight, double qualityWeight, double elbowOutM, double trimRad,
+                                  double* costOut) noexcept {
+    CrouchNeckYawPoseMetrics metrics;
+    if (!crouchNeckYawPoseEval(neck, arm, yawRad, adsPush, detachWeight, qualityWeight, elbowOutM, trimRad, &metrics)) return false;
+    if (costOut) *costOut = metrics.cost;
+    return true;
+}
+inline bool crouchNeckYawPoseNoWorse(const CrouchNeckYawPoseMetrics& candidate, const CrouchNeckYawPoseMetrics& baseline) noexcept {
+    if (!candidate.valid || !baseline.valid) return false;
+    constexpr double kAssistSlackDeg = 0.05, kBendSlackDeg = 0.1, kElbowHeightSlackL1 = 1e-4;
+    return candidate.assistDeg[0] <= baseline.assistDeg[0] + kAssistSlackDeg &&
+           candidate.assistDeg[1] <= baseline.assistDeg[1] + kAssistSlackDeg &&
+           candidate.leftElbowInteriorDeg <= baseline.leftElbowInteriorDeg + kBendSlackDeg &&
+           candidate.leftElbowYFromShoulderL1 <= baseline.leftElbowYFromShoulderL1 + kElbowHeightSlackL1;
+}
+inline bool crouchNeckYawPoseImproved(const CrouchNeckYawPoseMetrics& candidate, const CrouchNeckYawPoseMetrics& baseline) noexcept {
+    if (!candidate.valid || !baseline.valid) return false;
+    constexpr double kAssistImproveDeg = 0.05, kBendImproveDeg = 0.1, kElbowLowerL1 = 1e-4;
+    return candidate.leftElbowInteriorDeg < baseline.leftElbowInteriorDeg - kBendImproveDeg ||
+           candidate.leftElbowYFromShoulderL1 < baseline.leftElbowYFromShoulderL1 - kElbowLowerL1 ||
+           candidate.assistDeg[0] + candidate.assistDeg[1] < baseline.assistDeg[0] + baseline.assistDeg[1] - kAssistImproveDeg;
 }
 inline double crouchNeckYawArmShortfall(const double neck[3], const CrouchNeckArm arm[2], double yawRad, const double adsPush[3]) noexcept {
     if (!std::isfinite(yawRad)) return std::numeric_limits<double>::infinity();
@@ -4115,6 +4303,88 @@ inline CrouchNeckYaw crouchNeckYawSelect(const double neck[3], const double ches
             return refinedBest;
         }
     }
+    return best;
+}
+inline CrouchNeckYaw crouchNeckYawSelectQuality(const double neck[3], const double chestPivot[3], const CrouchNeckArm arm[2], const CrouchNeckLeg leg[2],
+                                                double legVertical, const double adsPush[3], double detachWeight, double qualityWeight,
+                                                double elbowOutM, double trimRad, double maxCorrectionDeg = 50.0,
+                                                double stepDeg = 0.5) noexcept {
+    const CrouchNeckYaw baseline = crouchNeckYawSelect(neck, chestPivot, arm, leg, legVertical, adsPush, 50.0, 0.25);
+    if (!baseline.feasible) return baseline;
+    CrouchNeckYaw out = baseline;
+    out.baselineYawRad = baseline.yawRad;
+    CrouchNeckYawPoseMetrics legacyMetrics;
+    if (!crouchNeckYawPoseEval(neck, arm, baseline.yawRad, adsPush, detachWeight, 0.0, elbowOutM, trimRad, &legacyMetrics)) return out;
+    out.baselinePoseCost = legacyMetrics.cost;
+    out.poseCost = legacyMetrics.cost;
+    if (!(qualityWeight > 0.0) || !(detachWeight < 1.0) || !(maxCorrectionDeg > 0.0) || !(stepDeg > 0.0)) return out;
+    const double blend = std::max(0.0, std::min(1.0, qualityWeight)) *
+                         (1.0 - std::max(0.0, std::min(1.0, detachWeight)));
+    if (blend < 1e-5) return out;
+    const double maxOffset = std::min(50.0, maxCorrectionDeg);
+    const double yawLow = std::max(-50.0, baseline.yawRad * 180.0 / kIkPi - maxOffset) * kIkPi / 180.0;
+    const double yawHigh = std::min(50.0, baseline.yawRad * 180.0 / kIkPi + maxOffset) * kIkPi / 180.0;
+    const int steps = static_cast<int>(std::ceil(maxOffset / stepDeg));
+    struct Candidate { double yaw = 0.0, cost = 0.0; bool tested = false; };
+    Candidate candidates[402]{};
+    int candidateCount = 0;
+    for (int i = -steps; i <= steps; ++i) {
+        const double offsetDeg = std::max(-maxOffset, std::min(maxOffset, static_cast<double>(i) * stepDeg));
+        const double endpointYaw = std::max(yawLow, std::min(yawHigh, baseline.yawRad + offsetDeg * kIkPi / 180.0));
+        CrouchNeckYawPoseMetrics candidateMetrics;
+        // Compare a full-support endpoint with the true legacy pose. Activation is applied only
+        // after selecting a physically safe endpoint, which prevents an acceptance threshold
+        // from making the pose jump partway through the contact ramp.
+        if (!crouchNeckYawPoseEval(neck, arm, endpointYaw, adsPush, 0.0, 1.0, elbowOutM, trimRad, &candidateMetrics) ||
+            !crouchNeckYawPoseNoWorse(candidateMetrics, legacyMetrics) || !crouchNeckYawPoseImproved(candidateMetrics, legacyMetrics)) continue;
+        if (candidateCount < static_cast<int>(sizeof(candidates) / sizeof(candidates[0])))
+            candidates[candidateCount++] = {endpointYaw, candidateMetrics.cost, false};
+    }
+    CrouchNeckYaw best = out;
+    for (int attempt = 0; attempt < candidateCount; ++attempt) {
+        int selected = -1;
+        for (int i = 0; i < candidateCount; ++i)
+            if (!candidates[i].tested && (selected < 0 || candidates[i].cost < candidates[selected].cost - 1e-10 ||
+                (std::fabs(candidates[i].cost - candidates[selected].cost) <= 1e-10 &&
+                 std::fabs(candidates[i].yaw - baseline.yawRad) < std::fabs(candidates[selected].yaw - baseline.yawRad)))) selected = i;
+        if (selected < 0) break;
+        candidates[selected].tested = true;
+        const double endpointYaw = candidates[selected].yaw;
+        // Evaluate only candidates in authored-cost order. Most fixtures accept the first; the
+        // complete path guard is paid only when a higher-ranked endpoint has a bad transition.
+        // The endpoint must be physically better than legacy. The transition itself must stay
+        // kinematically feasible; forcing every intermediate pose to beat the legacy comfort
+        // metrics can rule out a smooth route to a better endpoint.
+        bool pathValid = true;
+        constexpr int kPathSamples = 16;
+        for (int path = 0; path <= kPathSamples; ++path) {
+            const double t = static_cast<double>(path) / kPathSamples;
+            const double actualYaw = baseline.yawRad + t * (endpointYaw - baseline.yawRad);
+            CrouchNeckYaw checked;
+            CrouchNeckYawPoseMetrics pathMetrics;
+            if (!crouchNeckYawFeasible(neck, chestPivot, arm, leg, legVertical, actualYaw, adsPush, &checked) ||
+                !crouchNeckYawPoseEval(neck, arm, actualYaw, adsPush, 0.0, t, elbowOutM, trimRad, &pathMetrics)) {
+                pathValid = false;
+                break;
+            }
+        }
+        if (!pathValid) continue;
+        CrouchNeckYaw applied;
+        const double appliedYaw = baseline.yawRad + blend * (endpointYaw - baseline.yawRad);
+        CrouchNeckYawPoseMetrics appliedMetrics;
+        if (!crouchNeckYawFeasible(neck, chestPivot, arm, leg, legVertical, appliedYaw, adsPush, &applied) ||
+            !crouchNeckYawPoseEval(neck, arm, appliedYaw, adsPush, detachWeight, qualityWeight, elbowOutM, trimRad, &appliedMetrics)) continue;
+        best = applied;
+        best.yawRad = appliedYaw;
+        best.poseCost = appliedMetrics.cost;
+        best.baselineYawRad = baseline.yawRad;
+        best.baselinePoseCost = legacyMetrics.cost;
+        best.qualityAccepted = true;
+        break;
+    }
+    if (!best.qualityAccepted) return out;
+    best.baselineYawRad = baseline.yawRad;
+    best.baselinePoseCost = legacyMetrics.cost;
     return best;
 }
 
@@ -4919,6 +5189,43 @@ struct GripSteady {
 // across kOffHandSteadyFrames prior samples. Once acquired, valid same-identity attaches retain authority through orientation motion; the off-arm
 // IK weight ramps on release over kOffHandRampSec.
 constexpr double kOffHandMaxM = 0.40, kOffHandSteadyDeg = 5.0, kOffHandRampSec = 0.15;
+// F84's same-pass rifle quality activation. Identity/generation changes hard-reset;
+// loss of an otherwise known source releases smoothly. Repeated or old frames never
+// advance the ramp, so draw-follow handoff cannot pop even when contact was already set.
+struct RifleQualityRamp {
+    bool initialized = false, epochKnown = false;
+    uint32_t item = 0, planGeneration = 0, fpGeneration = 0, lastFrame = 0xFFFFFFFFu;
+    uint64_t epoch = 0;
+    double weight = 0.0;
+    void reset() noexcept { *this = RifleQualityRamp{}; }
+    double step(bool identityKnown, uint32_t itemSerial, bool nativeEpochKnown, uint64_t nativeEpoch,
+                uint32_t planGen, uint32_t fpGen, uint32_t frame, double dtSec, double target) noexcept {
+        if (!identityKnown) { reset(); return 0.0; }
+        const bool identityChanged = !initialized || item != itemSerial || planGeneration != planGen || fpGeneration != fpGen ||
+                                    (epochKnown && nativeEpochKnown && epoch != nativeEpoch);
+        if (identityChanged) {
+            weight = 0.0;
+            item = itemSerial;
+            planGeneration = planGen;
+            fpGeneration = fpGen;
+            epoch = nativeEpoch;
+            epochKnown = nativeEpochKnown;
+            lastFrame = frame;
+            initialized = true;
+            return weight;
+        }
+        if (!epochKnown && nativeEpochKnown) { epoch = nativeEpoch; epochKnown = true; }
+        if (frame == 0xFFFFFFFFu) return weight;
+        if (lastFrame == 0xFFFFFFFFu) { lastFrame = frame; return weight; }
+        const uint32_t frameDelta = frame - lastFrame;
+        if (frameDelta == 0 || frameDelta >= 0x80000000u) return weight;
+        lastFrame = frame;
+        if (!(dtSec > 0.0) || !std::isfinite(dtSec)) return weight;
+        const double amount = std::max(0.0, std::min(1.0, dtSec / kOffHandRampSec));
+        weight = ikLerp(weight, unit01(target), amount);
+        return weight;
+    }
+};
 constexpr uint32_t kOffHandSteadyFrames = 10;
 constexpr double kOffReachRelaxM = 1.0;   // the reach rule's radius for a free off hand's shoulder grows by (1 - weight) x this: at weight 0 it binds nothing
 inline double ikOffHandReachRadius(double armLength, double offHandWeight) noexcept {

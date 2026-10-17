@@ -36,6 +36,61 @@ struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
 
 namespace edvr {
 
+// Read-only movement snapshot published from unique, pre-pin third-person AMC root samples.
+// There is one writer: the unique-P1 branch of the serialized pfzAfterAnimate path.
+// Consumers should validate sampleQpc freshness before using it to trigger a capture.
+struct NativeOnFootAirborneSnapshot {
+    uint64_t generation = 0, sampleQpc = 0;
+    uint32_t sourceFrame = 0;
+    double root[3] = {}, verticalVelocityMps = 0.0, rawVerticalVelocityMps = 0.0;
+    bool valid = false, airborne = false, takeoffEdge = false;
+};
+namespace native_on_foot_airborne_detail {
+inline std::atomic<uint32_t> seq{0};
+inline std::atomic<uint64_t> generation{0}, sampleQpc{0};
+inline std::atomic<uint32_t> sourceFrame{0};
+inline std::atomic<double> root[3]{};
+inline std::atomic<double> verticalVelocityMps{0.0}, rawVerticalVelocityMps{0.0};
+inline std::atomic<bool> valid{false}, airborne{false}, takeoffEdge{false};
+}
+inline void nativeOnFootAirbornePublish(const NativeOnFootAirborneSnapshot& value) noexcept {
+    using namespace native_on_foot_airborne_detail;
+    const uint32_t version = seq.load(std::memory_order_relaxed);
+    seq.store(version + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    generation.store(value.generation, std::memory_order_relaxed);
+    sampleQpc.store(value.sampleQpc, std::memory_order_relaxed);
+    sourceFrame.store(value.sourceFrame, std::memory_order_relaxed);
+    for (int i = 0; i < 3; ++i) root[i].store(value.root[i], std::memory_order_relaxed);
+    verticalVelocityMps.store(value.verticalVelocityMps, std::memory_order_relaxed);
+    rawVerticalVelocityMps.store(value.rawVerticalVelocityMps, std::memory_order_relaxed);
+    valid.store(value.valid, std::memory_order_relaxed);
+    airborne.store(value.airborne, std::memory_order_relaxed);
+    takeoffEdge.store(value.takeoffEdge, std::memory_order_relaxed);
+    seq.store(version + 2, std::memory_order_release);
+}
+inline bool nativeOnFootAirborneSnapshot(NativeOnFootAirborneSnapshot* out) noexcept {
+    if (!out) return false;
+    using namespace native_on_foot_airborne_detail;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t before = seq.load(std::memory_order_acquire);
+        if (before & 1u) continue;
+        NativeOnFootAirborneSnapshot value;
+        value.generation = generation.load(std::memory_order_relaxed);
+        value.sampleQpc = sampleQpc.load(std::memory_order_relaxed);
+        value.sourceFrame = sourceFrame.load(std::memory_order_relaxed);
+        for (int i = 0; i < 3; ++i) value.root[i] = root[i].load(std::memory_order_relaxed);
+        value.verticalVelocityMps = verticalVelocityMps.load(std::memory_order_relaxed);
+        value.rawVerticalVelocityMps = rawVerticalVelocityMps.load(std::memory_order_relaxed);
+        value.valid = valid.load(std::memory_order_relaxed);
+        value.airborne = airborne.load(std::memory_order_relaxed);
+        value.takeoffEdge = takeoffEdge.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (seq.load(std::memory_order_relaxed) == before) { *out = value; return before != 0; }
+    }
+    return false;
+}
+
 enum class NativeOnFootGate : uint8_t {
     Frames = 0,       // frame boundaries while the flag is set
     WorldRoute,       // the VR world route owned the frame (native_temporal begin) or took an eye's screen draw (layer-only treat)

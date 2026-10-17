@@ -14,6 +14,7 @@
 #include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -6391,8 +6392,63 @@ int wmain(int argc, wchar_t** argv) {
     // translation; the leg points are the matching captured pose before the new neck-repin translation.
     {
         namespace nf = edvr::nofoot;
-        // Captured 121940 crouched-rifle geometry. F81 logs cover the capture burst and show zero clavicle assists in both arms
-        // (12:19:43.109, 0/374), so subtracting the old reach translation recovers the pre-assist source pose for this case.
+        nf::RifleQualityRamp qualityRamp;
+        const double rq0 = qualityRamp.step(true, 41, true, 9001, 7, 13, 100, 0.0, 1.0);
+        const double rq1 = qualityRamp.step(true, 41, true, 9001, 7, 13, 101, 0.075, 1.0);
+        const double rqDuplicate = qualityRamp.step(true, 41, true, 9001, 7, 13, 101, 0.075, 0.0);
+        const double rqOutOfOrder = qualityRamp.step(true, 41, true, 9001, 7, 13, 100, 0.075, 0.0);
+        const double rqDrawRelease = qualityRamp.step(true, 41, true, 9001, 7, 13, 102, 0.075, 0.0);
+        const double rqHandoff = qualityRamp.step(true, 41, true, 9001, 7, 13, 103, 0.075, 1.0);
+        const double rqSourceLoss = qualityRamp.step(true, 41, false, 0, 7, 13, 104, 0.075, 0.0);
+        const double rqOldItem = qualityRamp.step(true, 42, true, 9001, 7, 13, 105, 0.075, 1.0);
+        const double rqNewEpoch = qualityRamp.step(true, 42, true, 9002, 7, 13, 106, 0.075, 1.0);
+        check(rq0 == 0.0 && std::fabs(rq1 - 0.5) < 1e-12 && rqDuplicate == rq1 && rqOutOfOrder == rq1 &&
+                  std::fabs(rqDrawRelease - 0.25) < 1e-12 && std::fabs(rqHandoff - 0.625) < 1e-12 &&
+                  std::fabs(rqSourceLoss - 0.3125) < 1e-12 && rqOldItem == 0.0 && rqNewEpoch == 0.0,
+              "F84: quality weight ramps through draw handoff/source loss, ignores duplicate/old frames, and hard-resets on item/native-epoch changes");
+        const double syntheticS[3] = {0.0, 1.0, 0.0}, syntheticTarget[3] = {0.02, 0.92, 0.56};
+        const double syntheticRef[3] = {0.18, 0.10, 0.20};
+        double synLo = 0.0, synHi = 0.0;
+        nf::ikElbowDRange(0.34, 0.33, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg, &synLo, &synHi);
+        const auto syntheticTb = nf::ikTwoBoneFrameD(syntheticS, syntheticTarget, 0.34, 0.33, syntheticRef, synLo, synHi);
+        double syntheticUnit[3];
+        const bool syntheticUnitOk = nf::ikUnit(syntheticRef, syntheticUnit);
+        bool syntheticClamped = false;
+        const double syntheticLegacy = syntheticTb.ok && syntheticUnitOk ?
+            nf::ikLegacySwivel(syntheticTb, syntheticUnit, nf::ikArmOutSign(0), nullptr, 0.3, 0.06, &syntheticClamped) : 0.0;
+        double syntheticTheta = syntheticLegacy, syntheticRadial[3];
+        const bool syntheticSupportOk = nf::ikRifleSupportTheta(syntheticTb, syntheticLegacy, 0.0, 1.0, 0.06, 0.3,
+                                                                  &syntheticTheta, syntheticRadial);
+        double syntheticLegacyE[3], syntheticSupportE[3];
+        if (syntheticTb.ok) { syntheticTb.elbowAt(syntheticLegacy, syntheticLegacyE); syntheticTb.elbowAt(syntheticTheta, syntheticSupportE); }
+        bool syntheticDetachContinuous = syntheticSupportOk && std::fabs(nf::ikWrapPi(syntheticTheta - syntheticLegacy)) > 1e-4;
+        for (int i = 0; i <= 100 && syntheticDetachContinuous; ++i) {
+            const double detach = i / 100.0;
+            double theta = 0.0;
+            const bool ok = nf::ikRifleSupportTheta(syntheticTb, syntheticLegacy, detach, 1.0, 0.06, 0.3, &theta);
+            const double expected = (1.0 - detach) * nf::ikWrapPi(syntheticTheta - syntheticLegacy);
+            syntheticDetachContinuous = ok && std::fabs(nf::ikWrapPi(theta - syntheticLegacy) - expected) < 1e-8;
+        }
+        double endpointTheta = 0.0, zeroWeightTheta = 0.0;
+        const bool endpointOk = nf::ikRifleSupportTheta(syntheticTb, syntheticLegacy, 1.0, 1.0, 0.06, 0.3, &endpointTheta) &&
+                                nf::ikRifleSupportTheta(syntheticTb, syntheticLegacy, 0.0, 0.0, 0.06, 0.3, &zeroWeightTheta);
+        bool syntheticPartialAdsExact = true;
+        for (int qi = 0; qi <= 10; ++qi) for (int di = 0; di <= 10; ++di) {
+            const double q = qi / 10.0, detach = di / 10.0;
+            double actual = 0.0;
+            const double blend = q * (1.0 - detach);
+            const bool ok = nf::ikRifleSupportTheta(syntheticTb, syntheticLegacy, detach, q, 0.06, 0.3, &actual);
+            const double expected = nf::ikWrapPi(syntheticLegacy) + blend * nf::ikWrapPi(syntheticTheta - nf::ikWrapPi(syntheticLegacy));
+            syntheticPartialAdsExact = syntheticPartialAdsExact && ok && std::fabs(nf::ikWrapPi(actual - expected)) < 1e-8;
+        }
+        const double syntheticUp[3] = {0.0, 1.0, 0.0};
+        const double syntheticDown = nf::ikDot(syntheticSupportE, syntheticUp) - nf::ikDot(syntheticLegacyE, syntheticUp);
+        check(syntheticTb.ok && syntheticSupportOk && syntheticDown < -1e-4 && syntheticDetachContinuous && endpointOk && syntheticPartialAdsExact &&
+                  std::fabs(endpointTheta - nf::ikWrapPi(syntheticLegacy)) < 1e-12 &&
+                  std::fabs(zeroWeightTheta - nf::ikWrapPi(syntheticLegacy)) < 1e-12,
+              "F84: exact synthetic rifle support lowers the elbow on its fixed wrist circle and blends continuously back to the exact legacy ADS pole");
+        // Legacy F82 crouched-rifle regression geometry. This is intentionally kept separate from
+        // the current F83 flight: its zero-assist interval makes subtracting the old reach shift valid.
         const double neck[3] = {-0.00392988604, 0.863943338, 0.242602438};
         const double fixtureYaw = 29.15 * nf::kIkPi / 180.0;
         const double fixtureDelta[3] = {-0.07315508090785006, 0.0, 0.0908812342081006};
@@ -6448,8 +6504,95 @@ int wmain(int argc, wchar_t** argv) {
              {-0.3679353892803192, 0.18718966841697693, 0.38873347640037537}},
             {{-0.2146882861852646, 0.6331141591072083, -0.1554059237241745}, {0.02136782370507717, 0.26503095030784607, -0.04326692968606949},
              {-0.1507629007101059, 0.16926850378513336, -0.4040413200855255}}};
+        auto circleElbow = [](const double shoulder[3], const double hand[3], double l1, double l2, double elbow[3]) {
+            const double dvec[3] = {hand[0] - shoulder[0], hand[1] - shoulder[1], hand[2] - shoulder[2]};
+            const double d = nf::ikLen(dvec);
+            if (!(d > 1e-6) || d > l1 + l2 || d < std::fabs(l1 - l2)) return false;
+            double axis[3] = {dvec[0] / d, dvec[1] / d, dvec[2] / d};
+            const double along = (l1 * l1 + d * d - l2 * l2) / (2.0 * d);
+            const double radius2 = l1 * l1 - along * along;
+            if (radius2 < -1e-8) return false;
+            double down[3] = {0.0, -1.0, 0.0};
+            const double axial = nf::ikDot(down, axis);
+            for (int i = 0; i < 3; ++i) down[i] -= axial * axis[i];
+            if (!nf::ikUnit(down, down)) return false;
+            const double radius = std::sqrt(std::max(0.0, radius2));
+            for (int i = 0; i < 3; ++i) elbow[i] = shoulder[i] + along * axis[i] + radius * down[i];
+            return true;
+        };
+        auto measureApproxPose = [&](const double neckIn[3], const nf::CrouchNeckArm inArms[2], const nf::CrouchNeckLeg inLegs[2],
+                                     double legVertical, const double ads[3], double yawRad, double q,
+                                     double& elbowY, double& elbowAngle, double& assistL, double& wristLeft, double& wristRight, double& feetMax) {
+            nf::CrouchNeckYaw candidate;
+            if (!nf::crouchNeckYawFeasible(neckIn, f83Chest, inArms, inLegs, legVertical, yawRad, ads, &candidate)) return false;
+            elbowY = elbowAngle = assistL = wristLeft = wristRight = feetMax = 0.0;
+            for (int side = 0; side < 2; ++side) {
+                const auto& arm = inArms[side];
+                double C[3], S[3], E[3], H[3];
+                nf::turnAboutVertical(arm.clavicle, neckIn, yawRad, C);
+                nf::turnAboutVertical(arm.shoulder, neckIn, yawRad, S);
+                nf::turnAboutVertical(arm.elbow, neckIn, yawRad, E);
+                nf::turnAboutVertical(arm.hand, neckIn, yawRad, H);
+                double target[3];
+                for (int i = 0; i < 3; ++i) target[i] = H[i] + arm.wSolve * (arm.target[i] - H[i]);
+                const double toTarget[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
+                const double dist = nf::ikLen(toTarget);
+                double excess = 0.0, R[9], assistAngle = 0.0;
+                bool capped = false;
+                const double move = nf::ikAssistReachMove(dist, arm.l1, arm.l2, &excess);
+                double disp[3];
+                for (int i = 0; i < 3; ++i) disp[i] = ((dist > 1e-9 ? move * toTarget[i] / dist : 0.0) + ads[i]) * arm.wSolve;
+                if (nf::ikAssistRot(C, S, disp, R, &assistAngle, &capped)) {
+                    double cs[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]};
+                    double ce[3] = {E[0] - C[0], E[1] - C[1], E[2] - C[2]};
+                    double ch[3] = {H[0] - C[0], H[1] - C[1], H[2] - C[2]};
+                    double rs[3], re[3], rh[3];
+                    nf::ikRowRotate(cs, R, rs); nf::ikRowRotate(ce, R, re); nf::ikRowRotate(ch, R, rh);
+                    for (int i = 0; i < 3; ++i) { S[i] = C[i] + rs[i]; E[i] = C[i] + re[i]; H[i] = C[i] + rh[i]; }
+                }
+                if (side == 0) assistL = assistAngle * 180.0 / nf::kIkPi;
+                const double anim[3] = {H[0] - S[0], H[1] - S[1], H[2] - S[2]};
+                double dLo = 0.0, dHi = 0.0, fLo = 0.0, fHi = 0.0;
+                nf::ikElbowDRange(arm.l1, arm.l2, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg, &dLo, &dHi);
+                nf::ikElbowDRange(arm.l1, arm.l2, 0.0, 180.0, &fLo, &fHi);
+                const double animD = nf::ikLen(anim);
+                if (animD < dLo) dLo -= (1.0 - arm.wSolve) * (dLo - animD);
+                if (animD > dHi) dHi += (1.0 - arm.wSolve) * (animD - dHi);
+                dLo = std::max(dLo, fLo); dHi = std::min(dHi, fHi);
+                const double ref[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
+                const nf::IkTwoBone tb = nf::ikTwoBoneFrameD(S, target, arm.l1, arm.l2, ref, dLo, dHi);
+                double unitRef[3];
+                if (!tb.ok || !nf::ikUnit(ref, unitRef)) return false;
+                bool clamped = false;
+                double theta = arm.wSolve * nf::ikWrapPi(nf::ikLegacySwivel(tb, unitRef, nf::ikArmOutSign(side),
+                                                                              arm.fpPoleValid ? arm.fpPole : nullptr, 0.3, 0.06, &clamped));
+                if (side == 0 && !nf::ikRifleSupportTheta(tb, theta, 0.0, q, 0.06, 0.3, &theta)) return false;
+                double solvedElbow[3]; tb.elbowAt(theta, solvedElbow);
+                if (side == 0) { elbowY = solvedElbow[1]; elbowAngle = nf::ikElbowInteriorDeg(arm.l1, arm.l2, tb.D); }
+                const double wristErr = std::sqrt((tb.hand[0] - target[0]) * (tb.hand[0] - target[0]) +
+                                                  (tb.hand[1] - target[1]) * (tb.hand[1] - target[1]) +
+                                                  (tb.hand[2] - target[2]) * (tb.hand[2] - target[2]));
+                if (side == 0) wristLeft = wristErr; else wristRight = wristErr;
+            }
+            for (int side = 0; side < 2; ++side) {
+                const double hip1[3] = {inLegs[side].hip[0] + candidate.rootDelta[0], inLegs[side].hip[1] + legVertical,
+                                        inLegs[side].hip[2] + candidate.rootDelta[2]};
+                const auto leg = nf::legSolveTo(inLegs[side].hip, inLegs[side].knee, inLegs[side].foot, hip1, inLegs[side].foot);
+                if (!leg.ok || leg.limited) return false;
+                feetMax = std::max(feetMax, leg.footErrM);
+            }
+            return true;
+        };
         const auto oldRestSolve = nf::crouchNeckYawSelect(f83OldNeck, f83Chest, f83Arms, f83Legs, 0.0, noAdsPush, 50.0, 0.25);
         bool f83CapturedPitchSweep = !oldRestSolve.feasible;
+        bool f83ApproxQuality = false, f83AdsEndpoint = false;
+        double f83ApproxBaseYaw = 0.0, f83ApproxSelectedYaw = 0.0, f83ApproxBaseCost = 0.0, f83ApproxSelectedCost = 0.0;
+        double f83QualityAvgMs = 0.0, f82RampMaxYawStepDeg = 0.0;
+        bool f82QualityRampOk = false, f82AdsRampOk = false;
+        int f82QualityRampFailQ = -1;
+        double f83BaseElbowY = 0.0, f83SelectedElbowY = 0.0, f83BaseElbowAngle = 0.0, f83SelectedElbowAngle = 0.0;
+        double f83BaseAssist = 0.0, f83SelectedAssist = 0.0, f83BaseWristL = 0.0, f83BaseWristR = 0.0;
+        double f83SelectedWristL = 0.0, f83SelectedWristR = 0.0, f83BaseFeet = 0.0, f83SelectedFeet = 0.0;
         double centerYawDeg = 0.0;
         const double f83PitchSweep[] = {-24.0, -21.5, -19.0};
         for (double pitchDeg : f83PitchSweep) {
@@ -6474,12 +6617,348 @@ int wmain(int argc, wchar_t** argv) {
                     candidateLegs[side].foot[axis] += shift;
                 }
             }
+            // F83 did not retain preassist elbows. This explicitly approximate sensitivity rig
+            // reconstructs the lower point on each measured shoulder/wrist circle, then exercises
+            // the production selector with the captured pitch, targets, lengths, and held feet.
+            nf::CrouchNeckArm approxArms[2] = {candidateArms[0], candidateArms[1]};
+            bool approxElbows = true;
+            for (int side = 0; side < 2; ++side) {
+                double reach[3] = {approxArms[side].hand[0] - approxArms[side].shoulder[0],
+                                   approxArms[side].hand[1] - approxArms[side].shoulder[1],
+                                   approxArms[side].hand[2] - approxArms[side].shoulder[2]};
+                const double reachM = nf::ikLen(reach), plausibleRawReach = approxArms[side].l1 + approxArms[side].l2 - 0.015;
+                if (reachM > plausibleRawReach && reachM > 1e-8)
+                    for (int axis = 0; axis < 3; ++axis) approxArms[side].shoulder[axis] += reach[axis] * (reachM - plausibleRawReach) / reachM;
+                approxElbows = circleElbow(approxArms[side].shoulder, approxArms[side].hand,
+                                           approxArms[side].l1, approxArms[side].l2, approxArms[side].elbow) && approxElbows;
+            }
             const auto candidate = nf::crouchNeckYawSelect(candidateNeck, candidateChest, candidateArms, candidateLegs, delta[1], noAdsPush, 50.0, 0.25);
             f83CapturedPitchSweep = f83CapturedPitchSweep && targetOk && candidate.feasible;
+            if (std::fabs(pitchDeg + 21.5) < 1e-9 && approxElbows && candidate.feasible) {
+                const auto quality = nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                                     delta[1], noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 2.0);
+                f83ApproxQuality = quality.feasible && quality.poseCost <= quality.baselinePoseCost + 1e-9;
+                f83ApproxBaseYaw = quality.baselineYawRad * 180.0 / nf::kIkPi;
+                f83ApproxSelectedYaw = quality.yawRad * 180.0 / nf::kIkPi;
+                f83ApproxBaseCost = quality.baselinePoseCost;
+                f83ApproxSelectedCost = quality.poseCost;
+                f83ApproxQuality = quality.feasible && quality.poseCost < quality.baselinePoseCost - 1e-8;
+                const bool baseMetrics = measureApproxPose(candidateNeck, approxArms, candidateLegs, delta[1], noAdsPush,
+                                                            quality.baselineYawRad, 0.0, f83BaseElbowY, f83BaseElbowAngle,
+                                                            f83BaseAssist, f83BaseWristL, f83BaseWristR, f83BaseFeet);
+                const bool selectedMetrics = measureApproxPose(candidateNeck, approxArms, candidateLegs, delta[1], noAdsPush,
+                                                                quality.yawRad, 1.0, f83SelectedElbowY, f83SelectedElbowAngle,
+                                                                f83SelectedAssist, f83SelectedWristL, f83SelectedWristR, f83SelectedFeet);
+                f83ApproxQuality = f83ApproxQuality && baseMetrics && selectedMetrics && f83SelectedWristL < 1e-6 &&
+                    f83SelectedWristR < 1e-6 && f83SelectedFeet < 1e-4 && f83SelectedElbowY < f83BaseElbowY;
+                const auto adsEnd = nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                                    delta[1], noAdsPush, 1.0, 1.0, 0.06, 0.3, 50.0, 2.0);
+                f83AdsEndpoint = adsEnd.feasible && std::fabs(adsEnd.yawRad - quality.baselineYawRad) < 1e-10;
+                bool qualityRampContinuous = quality.qualityAccepted;
+                double priorRampYaw = quality.baselineYawRad;
+                for (int qi = 0; qi <= 100; ++qi) {
+                    const double q = qi / 100.0;
+                    const auto atQ = nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                                    delta[1], noAdsPush, 0.0, q, 0.06, 0.3, 50.0, 2.0);
+                    const double expected = quality.baselineYawRad + q * (quality.yawRad - quality.baselineYawRad);
+                    const double step = std::fabs((atQ.yawRad - priorRampYaw) * 180.0 / nf::kIkPi);
+                    f82RampMaxYawStepDeg = std::max(f82RampMaxYawStepDeg, step);
+                    qualityRampContinuous = qualityRampContinuous && atQ.feasible &&
+                        std::fabs(atQ.yawRad - expected) < 1e-7 && (q == 0.0 || atQ.qualityAccepted);
+                    if (!qualityRampContinuous && f82QualityRampFailQ < 0) f82QualityRampFailQ = qi;
+                    priorRampYaw = atQ.yawRad;
+                }
+                f82QualityRampOk = qualityRampContinuous;
+                bool adsRampContinuous = true;
+                priorRampYaw = adsEnd.yawRad;
+                for (int di = 1; di <= 100; ++di) {
+                    const double detach = di / 100.0;
+                    const auto atDetach = nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                                          delta[1], noAdsPush, detach, 1.0, 0.06, 0.3, 50.0, 2.0);
+                    const double expected = quality.baselineYawRad + (1.0 - detach) * (quality.yawRad - quality.baselineYawRad);
+                    adsRampContinuous = adsRampContinuous && atDetach.feasible && std::fabs(atDetach.yawRad - expected) < 1e-7;
+                    priorRampYaw = atDetach.yawRad;
+                }
+                f82AdsRampOk = adsRampContinuous;
+                const auto noQuality = nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                                       delta[1], noAdsPush, 0.0, 0.0, 0.06, 0.3, 50.0, 0.5);
+                f83ApproxQuality = f83ApproxQuality && qualityRampContinuous && adsRampContinuous && noQuality.feasible &&
+                    std::fabs(noQuality.yawRad - noQuality.baselineYawRad) < 1e-10;
+                const auto benchStart = std::chrono::steady_clock::now();
+                for (int repeat = 0; repeat < 3; ++repeat)
+                    (void)nf::crouchNeckYawSelectQuality(candidateNeck, candidateChest, approxArms, candidateLegs,
+                                                         delta[1], noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 0.5);
+                const auto benchEnd = std::chrono::steady_clock::now();
+                f83QualityAvgMs = std::chrono::duration<double, std::milli>(benchEnd - benchStart).count() / 3.0;
+            }
             if (std::fabs(pitchDeg + 21.5) < 1e-9) centerYawDeg = candidate.yawRad * 180.0 / nf::kIkPi;
         }
         check(f83CapturedPitchSweep && centerYawDeg > 13.0 && centerYawDeg < 16.0,
               "F83: actual captured F82 old target has no feasible solution, while physical rest plus the captured 2.5 cm model shift solves arms and held feet across the -24/-21.5/-19-degree pitch sweep; center yaw matches the corrected counterfactual range");
+        std::printf("native_frame_test: F82 reconstructed-rig yaw %.3f -> %.3f deg, Q %.6f -> %.6f, assist %.3f -> %.3f deg, left elbow y %.4f -> %.4f m / angle %.2f -> %.2f deg, wrists %.2g/%.2g m, feet %.2g m; ADS endpoint %s, quality/detach sweeps %s/%s, max ramp yaw step %.3f deg; selector avg %.3f ms at 0.5deg grid\n",
+                    f83ApproxBaseYaw, f83ApproxSelectedYaw, f83ApproxBaseCost, f83ApproxSelectedCost,
+                    f83BaseAssist, f83SelectedAssist, f83BaseElbowY, f83SelectedElbowY, f83BaseElbowAngle, f83SelectedElbowAngle,
+                    f83SelectedWristL, f83SelectedWristR, f83SelectedFeet, (f83AdsEndpoint && f83ApproxQuality) ? "exact" : "FAILED",
+                    f82QualityRampOk ? "pass" : "FAIL", f82AdsRampOk ? "pass" : "FAIL",
+                    f82RampMaxYawStepDeg, f83QualityAvgMs);
+        if (f82QualityRampFailQ >= 0) std::printf("native_frame_test: F82 quality ramp first failing q index %d/%d\n", f82QualityRampFailQ, 100);
+        check(f83ApproxQuality && f83AdsEndpoint,
+              "F84: legacy F82 sensitivity fixture stays feasible, endpoint-corrects through linear quality and detach sweeps, and has exact baseline behavior at zero quality/full ADS");
+        // Current F83 measured scene, with only the irrecoverable authored elbow geometry replaced
+        // by a documented downward-circle proxy. Neck, clavicles, wrists, targets, arm lengths and
+        // held legs come from the matched skin-ledger row; left raw shoulder reverses the interval
+        // mean 11.5-degree assist. This is a sensitivity fixture, not an exact flight replay.
+        {
+            const double currentNeck[3] = {0.0485228822, 1.50463188, 0.29424116};
+            const double currentChest[3] = {-0.0618555136, 1.32763124, 0.174117893};
+            const double currentClav[2][3] = {{0.0274200663, 1.4892962, 0.305541426}, {0.0786229521, 1.47642338, 0.288798928}};
+            const double currentShoulder[2][3] = {{-0.05813269706087754, 1.4857219681216527, 0.4270835642086465},
+                                                  {0.182984427, 1.52421355, 0.188274235}};
+            const double currentHand[2][3] = {{0.134705618, 1.33153927, 0.959317505}, {0.193426266, 1.40553296, 0.621308804}};
+            const double currentLengths[2][2] = {{0.3044716450163783, 0.28771730237209137}, {0.30084775350253423, 0.28771748089146887}};
+            const double currentLegData[2][3][3] = {
+                {{-0.2026449739933014, 1.0360705852508545, 0.19766086339950562}, {-0.18220143020153046, 0.5865395665168762, 0.23553290963172913}, {-0.2026449739933014, 0.17759989202022552, 0.19766086339950562}},
+                {{-0.08059034496545792, 1.0337415933609009, 0.03886361047625542}, {-0.04735258221626282, 0.5842105746269226, 0.06620372086763382}, {-0.08059035241603851, 0.17527088522911072, 0.03886361047625542}}};
+            nf::CrouchNeckArm currentArms[2] = {};
+            nf::CrouchNeckLeg currentLegs[2] = {};
+            bool currentProxyValid = true;
+            for (int side = 0; side < 2; ++side) {
+                std::memcpy(currentArms[side].clavicle, currentClav[side], sizeof(currentClav[side]));
+                std::memcpy(currentArms[side].shoulder, currentShoulder[side], sizeof(currentShoulder[side]));
+                std::memcpy(currentArms[side].hand, currentHand[side], sizeof(currentHand[side]));
+                std::memcpy(currentArms[side].target, currentHand[side], sizeof(currentHand[side]));
+                currentArms[side].l1 = currentLengths[side][0]; currentArms[side].l2 = currentLengths[side][1];
+                currentProxyValid = circleElbow(currentArms[side].shoulder, currentArms[side].hand,
+                                                 currentArms[side].l1, currentArms[side].l2, currentArms[side].elbow) && currentProxyValid;
+                {
+                    double unitRef[3], lo = 0.0, hi = 0.0;
+                    const double ref[3] = {currentArms[side].elbow[0] - currentArms[side].shoulder[0],
+                                           currentArms[side].elbow[1] - currentArms[side].shoulder[1],
+                                           currentArms[side].elbow[2] - currentArms[side].shoulder[2]};
+                    nf::ikElbowDRange(currentArms[side].l1, currentArms[side].l2, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg, &lo, &hi);
+                    const auto seedTb = nf::ikTwoBoneFrameD(currentArms[side].shoulder, currentArms[side].hand,
+                                                            currentArms[side].l1, currentArms[side].l2, ref, lo, hi);
+                    currentArms[side].fpPoleValid = seedTb.ok && nf::ikPoleFromFp(currentArms[side].shoulder, currentArms[side].elbow,
+                                                                                     currentArms[side].hand, currentArms[side].fpPole);
+                    currentProxyValid = seedTb.ok && nf::ikUnit(ref, unitRef) && currentProxyValid;
+                    if (seedTb.ok && nf::ikUnit(ref, unitRef)) {
+                        bool clamped = false;
+                        const double seedTheta = nf::ikLegacySwivel(seedTb, unitRef, nf::ikArmOutSign(side),
+                            currentArms[side].fpPoleValid ? currentArms[side].fpPole : nullptr, 0.3, 0.06, &clamped);
+                        auto& seed = currentArms[side].poleSeed;
+                        seed.valid = nf::ikElbowRadial(seedTb, seedTheta, seed.reference);
+                        std::memcpy(seed.previous, seed.reference, sizeof(seed.reference));
+                        std::memcpy(seed.axis, seedTb.dir, sizeof(seed.axis));
+                        currentArms[side].stableEligible = seed.valid;
+                    }
+                }
+                std::memcpy(currentLegs[side].hip, currentLegData[side][0], sizeof(currentLegData[side][0]));
+                std::memcpy(currentLegs[side].knee, currentLegData[side][1], sizeof(currentLegData[side][1]));
+                std::memcpy(currentLegs[side].foot, currentLegData[side][2], sizeof(currentLegData[side][2]));
+            }
+            const auto currentBase = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, currentArms, currentLegs,
+                                                                     0.0, noAdsPush, 0.0, 0.0, 0.06, 0.3, 50.0, 0.5);
+            const auto currentFull = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, currentArms, currentLegs,
+                                                                     0.0, noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 0.5);
+            nf::CrouchNeckYawPoseMetrics currentLegacyMetrics, currentEndpointMetrics;
+            const bool currentMetricRows = nf::crouchNeckYawPoseEval(currentNeck, currentArms, currentBase.yawRad, noAdsPush, 0.0, 0.0,
+                                                                       0.06, 0.3, &currentLegacyMetrics) &&
+                nf::crouchNeckYawPoseEval(currentNeck, currentArms, currentFull.yawRad, noAdsPush, 0.0, 1.0,
+                                          0.06, 0.3, &currentEndpointMetrics);
+            bool currentRampStable = currentBase.feasible && currentFull.feasible && currentMetricRows;
+            double maxCurrentYawStep = 0.0, previousCurrentYaw = currentBase.yawRad;
+            double maxTransientAssistDelta = 0.0, maxTransientLeftAngle = currentLegacyMetrics.leftElbowInteriorDeg;
+            double maxCurrentElbowStepL1 = 0.0, priorCurrentElbowY = currentLegacyMetrics.leftElbowYFromShoulderL1;
+            for (int qi = 1; qi <= 20; ++qi) {
+                const double q = qi / 20.0;
+                const auto atQ = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, currentArms, currentLegs,
+                                                                 0.0, noAdsPush, 0.0, q, 0.06, 0.3, 50.0, 0.5);
+                const double expected = currentBase.yawRad + q * (currentFull.yawRad - currentBase.yawRad);
+                maxCurrentYawStep = std::max(maxCurrentYawStep, std::fabs((atQ.yawRad - previousCurrentYaw) * 180.0 / nf::kIkPi));
+                currentRampStable = currentRampStable && atQ.feasible && atQ.qualityAccepted && std::fabs(atQ.yawRad - expected) < 1e-7;
+                nf::CrouchNeckYawPoseMetrics atMetrics;
+                currentRampStable = currentRampStable && nf::crouchNeckYawPoseEval(currentNeck, currentArms, atQ.yawRad, noAdsPush,
+                                                                                   0.0, q, 0.06, 0.3, &atMetrics);
+                if (atMetrics.valid) {
+                    maxCurrentElbowStepL1 = std::max(maxCurrentElbowStepL1,
+                        std::fabs(atMetrics.leftElbowYFromShoulderL1 - priorCurrentElbowY));
+                    priorCurrentElbowY = atMetrics.leftElbowYFromShoulderL1;
+                    maxTransientLeftAngle = std::max(maxTransientLeftAngle, atMetrics.leftElbowInteriorDeg);
+                    maxTransientAssistDelta = std::max(maxTransientAssistDelta,
+                        std::max(atMetrics.assistDeg[0] - currentLegacyMetrics.assistDeg[0], atMetrics.assistDeg[1] - currentLegacyMetrics.assistDeg[1]));
+                }
+                previousCurrentYaw = atQ.yawRad;
+            }
+            double maxTargetYawStepDeg = 0.0, maxTargetElbowStepL1 = 0.0;
+            double previousTargetYaw = 0.0, previousTargetElbow = 0.0;
+            bool havePreviousTarget = false, firstTargetAccepted = false;
+            int maxElbowStepIndex = -1;
+            double maxStepBefore = 0.0, maxStepAfter = 0.0;
+            bool targetMotionFeasible = true;
+            for (int ti = 0; ti <= 40; ++ti) {
+                const double dz = (ti - 20) * 0.0005;
+                nf::CrouchNeckArm movedArms[2] = {currentArms[0], currentArms[1]};
+                for (int side = 0; side < 2; ++side) { movedArms[side].hand[2] += dz; movedArms[side].target[2] += dz; }
+                const auto moved = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, movedArms, currentLegs,
+                                                                   0.0, noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 0.5);
+                nf::CrouchNeckYawPoseMetrics movedMetrics;
+                targetMotionFeasible = targetMotionFeasible && moved.feasible &&
+                    nf::crouchNeckYawPoseEval(currentNeck, movedArms, moved.yawRad, noAdsPush, 0.0,
+                                              moved.qualityAccepted ? 1.0 : 0.0, 0.06, 0.3, &movedMetrics);
+                if (!movedMetrics.valid) continue;
+                maxTargetYawStepDeg = std::max(maxTargetYawStepDeg, std::fabs((moved.yawRad - previousTargetYaw) * 180.0 / nf::kIkPi));
+                if (!havePreviousTarget) {
+                    previousTargetYaw = moved.yawRad;
+                    previousTargetElbow = movedMetrics.leftElbowYFromShoulderL1;
+                    firstTargetAccepted = moved.qualityAccepted;
+                    havePreviousTarget = true;
+                    continue;
+                }
+                const double elbowStep = std::fabs(movedMetrics.leftElbowYFromShoulderL1 - previousTargetElbow);
+                if (elbowStep > maxTargetElbowStepL1) {
+                    maxTargetElbowStepL1 = elbowStep;
+                    maxElbowStepIndex = ti;
+                    maxStepBefore = previousTargetElbow;
+                    maxStepAfter = movedMetrics.leftElbowYFromShoulderL1;
+                }
+                previousTargetYaw = moved.yawRad;
+                previousTargetElbow = movedMetrics.leftElbowYFromShoulderL1;
+                targetMotionFeasible = targetMotionFeasible && moved.qualityAccepted == firstTargetAccepted;
+            }
+            bool nonzeroYawCase = false;
+            bool nonzeroPathValid = false;
+            nf::CrouchNeckYawPoseMetrics nonzeroLegacyMetrics, nonzeroEndpointMetrics;
+            double nonzeroBaselineDeg = 0.0, nonzeroSelectedDeg = 0.0;
+            double nonzeroDx = 0.0, nonzeroDz = 0.0;
+            nf::CrouchNeckArm nonzeroArms[2] = {currentArms[0], currentArms[1]};
+            nf::CrouchNeckYaw nonzeroEndpoint;
+            for (int xi = -4; xi <= 4 && !nonzeroYawCase; ++xi) for (int zi = -4; zi <= 4 && !nonzeroYawCase; ++zi) {
+                const double dx = xi * 0.005, dz = zi * 0.005;
+                nf::CrouchNeckArm movedArms[2] = {currentArms[0], currentArms[1]};
+                for (int side = 0; side < 2; ++side) { movedArms[side].target[0] += dx; movedArms[side].target[2] += dz; }
+                const auto moved = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, movedArms, currentLegs,
+                                                                   0.0, noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 0.5);
+                if (moved.feasible && moved.qualityAccepted &&
+                    std::fabs((moved.yawRad - moved.baselineYawRad) * 180.0 / nf::kIkPi) > 0.1) {
+                    nonzeroYawCase = true;
+                    nonzeroDx = dx; nonzeroDz = dz;
+                    nonzeroArms[0] = movedArms[0]; nonzeroArms[1] = movedArms[1];
+                    nonzeroEndpoint = moved;
+                    nonzeroBaselineDeg = moved.baselineYawRad * 180.0 / nf::kIkPi;
+                    nonzeroSelectedDeg = moved.yawRad * 180.0 / nf::kIkPi;
+                    nf::CrouchNeckYaw nonzeroEndpointFeasible;
+                    nonzeroPathValid = nf::crouchNeckYawFeasible(currentNeck, currentChest, nonzeroArms, currentLegs, 0.0,
+                                                                  moved.yawRad, noAdsPush, &nonzeroEndpointFeasible) &&
+                        nf::crouchNeckYawPoseEval(currentNeck, nonzeroArms, moved.baselineYawRad, noAdsPush,
+                                                                  0.0, 0.0, 0.06, 0.3, &nonzeroLegacyMetrics) &&
+                        nf::crouchNeckYawPoseEval(currentNeck, nonzeroArms, moved.yawRad, noAdsPush,
+                                                  0.0, 1.0, 0.06, 0.3, &nonzeroEndpointMetrics) &&
+                        nf::crouchNeckYawPoseNoWorse(nonzeroEndpointMetrics, nonzeroLegacyMetrics) &&
+                        nf::crouchNeckYawPoseImproved(nonzeroEndpointMetrics, nonzeroLegacyMetrics);
+                    for (int path = 0; path <= 20 && nonzeroPathValid; ++path) {
+                        const double t = path / 20.0;
+                        const double yaw = moved.baselineYawRad + t * (moved.yawRad - moved.baselineYawRad);
+                        nf::CrouchNeckYaw feasible;
+                        nf::CrouchNeckYawPoseMetrics metrics;
+                        nonzeroPathValid = nf::crouchNeckYawFeasible(currentNeck, currentChest, movedArms, currentLegs, 0.0, yaw, noAdsPush, &feasible) &&
+                            nf::crouchNeckYawPoseEval(currentNeck, movedArms, yaw, noAdsPush, 0.0, t, 0.06, 0.3, &metrics);
+                    }
+                }
+            }
+            bool nonzeroRampExact = nonzeroYawCase;
+            double nonzeroMaxQYawStepDeg = 0.0, nonzeroPriorYaw = nonzeroEndpoint.baselineYawRad;
+            for (int qi = 0; qi <= 20 && nonzeroRampExact; ++qi) {
+                const double q = qi / 20.0;
+                const auto atQ = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, nonzeroArms, currentLegs,
+                                                                 0.0, noAdsPush, 0.0, q, 0.06, 0.3, 50.0, 0.5);
+                const double expected = nonzeroEndpoint.baselineYawRad + q * (nonzeroEndpoint.yawRad - nonzeroEndpoint.baselineYawRad);
+                nonzeroMaxQYawStepDeg = std::max(nonzeroMaxQYawStepDeg, std::fabs((atQ.yawRad - nonzeroPriorYaw) * 180.0 / nf::kIkPi));
+                nonzeroRampExact = atQ.feasible && (q == 0.0 || atQ.qualityAccepted) && std::fabs(atQ.yawRad - expected) < 1e-7;
+                nonzeroPriorYaw = atQ.yawRad;
+            }
+            for (int di = 0; di <= 20 && nonzeroRampExact; ++di) {
+                const double detach = di / 20.0;
+                const auto atDetach = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, nonzeroArms, currentLegs,
+                                                                      0.0, noAdsPush, detach, 1.0, 0.06, 0.3, 50.0, 0.5);
+                const double expected = nonzeroEndpoint.baselineYawRad + (1.0 - detach) *
+                    (nonzeroEndpoint.yawRad - nonzeroEndpoint.baselineYawRad);
+                nonzeroRampExact = atDetach.feasible && std::fabs(atDetach.yawRad - expected) < 1e-7;
+            }
+            const auto currentBenchStart = std::chrono::steady_clock::now();
+            volatile double currentBenchSink = 0.0;
+            constexpr int kBenchRepeats = 40;
+            for (int repeat = 0; repeat < kBenchRepeats; ++repeat) {
+                nf::CrouchNeckArm benchArms[2] = {currentArms[0], currentArms[1]};
+                const double perturb = ((repeat % 9) - 4) * 0.00025;
+                benchArms[0].target[2] += perturb;
+                benchArms[1].target[2] += perturb;
+                const auto benchResult = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, benchArms, currentLegs,
+                                                                         0.0, noAdsPush, 0.0, 1.0, 0.06, 0.3, 50.0, 0.5);
+                currentBenchSink += benchResult.yawRad + benchResult.poseCost;
+            }
+            const double currentBenchMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentBenchStart).count() / kBenchRepeats;
+            nf::RifleQualityRamp releaseRamp;
+            (void)releaseRamp.step(true, 71, true, 9010, 8, 14, 200, 0.0, 1.0);
+            const double releaseStart = releaseRamp.step(true, 71, true, 9010, 8, 14, 201, 0.15, 1.0);
+            double releasePreviousY = currentEndpointMetrics.leftElbowYFromShoulderL1, maxReleaseElbowStepL1 = 0.0;
+            bool releasePoseContinuous = std::fabs(releaseStart - 1.0) < 1e-12 &&
+                nf::ikRifleQualityKeepsPhysicalPole(true, releaseStart, 0.0, true) &&
+                !nf::ikRifleQualityKeepsPhysicalPole(false, releaseStart, 0.0, true) &&
+                !nf::ikRifleQualityKeepsPhysicalPole(true, releaseStart, 1.0, true) &&
+                !nf::ikRifleQualityKeepsPhysicalPole(true, releaseStart, 0.0, false);
+            for (int ri = 1; ri <= 10; ++ri) {
+                const double rq = releaseRamp.step(true, 71, true, 9010, 8, 14, 201u + static_cast<uint32_t>(ri), 1.0 / 60.0, 0.0);
+                // Match runtime eligibility: source loss drops stablePolicy, but the exact-rifle helper
+                // keeps the physical seed alive and therefore keeps the same stable solve through q decay.
+                const bool runtimePinWanted = true, runtimePhysicalPoleActive = true;
+                const bool keepSeed = runtimePinWanted && runtimePhysicalPoleActive &&
+                    nf::ikRifleQualityKeepsPhysicalPole(true, rq, 0.0, true);
+                nf::CrouchNeckArm releaseArms[2] = {currentArms[0], currentArms[1]};
+                releaseArms[0].stableEligible = runtimePhysicalPoleActive && releaseArms[0].active &&
+                    (nf::ikPhysicalPoleSideEligible(0, false, false) || keepSeed);
+                const auto atRelease = nf::crouchNeckYawSelectQuality(currentNeck, currentChest, releaseArms, currentLegs,
+                                                                      0.0, noAdsPush, 0.0, rq, 0.06, 0.3, 50.0, 0.5);
+                nf::CrouchNeckYawPoseMetrics releaseMetrics;
+                const bool metricOk = atRelease.feasible && keepSeed && atRelease.qualityAccepted &&
+                    releaseArms[0].stableEligible &&
+                    nf::crouchNeckYawPoseEval(currentNeck, releaseArms, atRelease.yawRad, noAdsPush, 0.0, rq,
+                                              0.06, 0.3, &releaseMetrics);
+                releasePoseContinuous = releasePoseContinuous && metricOk;
+                if (metricOk) {
+                    maxReleaseElbowStepL1 = std::max(maxReleaseElbowStepL1,
+                        std::fabs(releaseMetrics.leftElbowYFromShoulderL1 - releasePreviousY));
+                    releasePreviousY = releaseMetrics.leftElbowYFromShoulderL1;
+                }
+            }
+            std::printf("native_frame_test: current F83 measured-body/down-circle-proxy yaw %.3f -> %.3f deg, accepted %s, max q-step %.3f deg, q elbow step %.5f L1, left elbow y %.4f -> %.4f m and angle %.2f -> %.2f deg, max transient angle %.2f, assist increase %.3f deg, target sweep max %.3f deg / %.5f L1\n",
+                        currentBase.yawRad * 180.0 / nf::kIkPi, currentFull.yawRad * 180.0 / nf::kIkPi,
+                        currentFull.qualityAccepted ? "yes" : "no", maxCurrentYawStep,
+                        maxCurrentElbowStepL1,
+                        currentLegacyMetrics.leftElbowYFromShoulderL1, currentEndpointMetrics.leftElbowYFromShoulderL1,
+                        currentLegacyMetrics.leftElbowInteriorDeg, currentEndpointMetrics.leftElbowInteriorDeg,
+                        maxTransientLeftAngle, maxTransientAssistDelta, maxTargetYawStepDeg, maxTargetElbowStepL1);
+            if (maxElbowStepIndex >= 0) std::printf("native_frame_test: target sweep max elbow step index %d (%+.1f mm), normalized %.5f -> %.5f L1\n",
+                                                    maxElbowStepIndex, (maxStepAfter - maxStepBefore) * currentLengths[0][0] * 1000.0,
+                                                    maxStepBefore, maxStepAfter);
+            std::printf("native_frame_test: current F83 selector avg %.3f ms over %d varying inputs (checksum %.6f); nonzero accepted yaw fixture %s %.3f -> %.3f deg at target shift (%+.3f,%+.3f)m, endpoint assist L/R %.3f/%.3f -> %.3f/%.3f deg, left elbow %.4f -> %.4f L1 (%.2f -> %.2f deg), wrist/feet/neck hard-feasible; ramp %s max q-step %.3f deg\n",
+                        currentBenchMs, kBenchRepeats, static_cast<double>(currentBenchSink), nonzeroYawCase ? "found" : "not found", nonzeroBaselineDeg, nonzeroSelectedDeg,
+                        nonzeroDx, nonzeroDz,
+                        nonzeroLegacyMetrics.assistDeg[0], nonzeroLegacyMetrics.assistDeg[1],
+                        nonzeroEndpointMetrics.assistDeg[0], nonzeroEndpointMetrics.assistDeg[1],
+                        nonzeroLegacyMetrics.leftElbowYFromShoulderL1, nonzeroEndpointMetrics.leftElbowYFromShoulderL1,
+                        nonzeroLegacyMetrics.leftElbowInteriorDeg, nonzeroEndpointMetrics.leftElbowInteriorDeg,
+                        nonzeroRampExact ? "pass" : "FAIL", nonzeroMaxQYawStepDeg);
+            std::printf("native_frame_test: same-item source-loss release retains stable pole through q decay; max elbow step %.5f L1 in 10 frames\n",
+                        maxReleaseElbowStepL1);
+            (void)currentBenchSink;
+            check(currentProxyValid && currentBase.feasible && currentFull.feasible && currentRampStable &&
+                      nf::crouchNeckYawPoseNoWorse(currentEndpointMetrics, currentLegacyMetrics) &&
+                      nf::crouchNeckYawPoseImproved(currentEndpointMetrics, currentLegacyMetrics) && targetMotionFeasible &&
+                      maxTargetYawStepDeg < 5.0 && maxTargetElbowStepL1 < 0.03 && nonzeroYawCase && nonzeroPathValid && nonzeroRampExact,
+                  "F84: current F83 measured neck/wrist/feet with explicit authored-elbow proxy has a feasible, continuous full-support endpoint sweep");
+            check(releasePoseContinuous && maxReleaseElbowStepL1 < 0.02,
+                  "F84: same-item source loss retains the stable pole through quality release and hard-boundaries its seed at item/full-ADS changes");
+        }
         const nf::CrouchNeckYaw picked = nf::crouchNeckYawSelect(neck, pivot, arms, legs, 0.0, noAdsPush);
         bool restPitchSweepReach = true;
         const double physicalPitchDegs[] = {-24.0, -21.5, -19.0};

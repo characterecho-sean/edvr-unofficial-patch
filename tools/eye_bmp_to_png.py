@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn an eye dump (hotkey.dump_eyes: edvr_logs\\eyes\\eye_HHMMSS_L.bmp) into
+"""Turn an eye dump (hotkey.dump_eyes: edvr_logs\\eyes\\eye_<stamp>_L.bmp) into
 a PNG small enough to look at, optionally cropped.
 
     python tools/eye_bmp_to_png.py <eye.bmp> [out.png] [--scale 0.25]

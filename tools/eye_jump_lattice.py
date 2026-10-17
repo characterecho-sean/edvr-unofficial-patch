@@ -2,6 +2,7 @@
 """Validate an EDVR F83 stride-two SkinE/MV/EngineSlots point lattice."""
 import argparse
 import json
+import math
 from pathlib import Path
 import struct
 import tempfile
@@ -50,10 +51,36 @@ def read(path):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError('Missing or invalid lattice manifest') from exc
-    if (manifest.get('schema') != 1 or manifest.get('stride') != STRIDE or
+    schema = manifest.get('schema')
+    if (schema not in (1, 2) or manifest.get('stride') != STRIDE or
             manifest.get('sample_record_bytes') != SAMPLE_BYTES or manifest.get('budget_bytes') != budget or
             manifest.get('data_file') != path.name):
         raise ValueError('Manifest header does not match binary')
+    if schema == 2:
+        stamp = manifest.get('stamp')
+        kind = manifest.get('capture_type')
+        parent = manifest.get('parent_stamp')
+        trigger_status = manifest.get('trigger_status')
+        trigger_root = manifest.get('trigger_root')
+        trigger_values = (manifest.get('trigger_generation'), manifest.get('trigger_source_frame'),
+                          manifest.get('trigger_qpc'), manifest.get('trigger_age_qpc'),
+                          manifest.get('trigger_raw_vy_mps'), manifest.get('trigger_filtered_vy_mps'))
+        if (not isinstance(stamp, str) or len(stamp) != 12 or not stamp.isascii() or not stamp.isdigit() or
+                path.name != f'eye_{stamp}_JumpLattice.bin' or kind not in ('manual', 'airborne_companion') or
+                not isinstance(parent, str) or not isinstance(trigger_root, list) or len(trigger_root) != 3 or
+                any(type(v) is not int or v < 0 for v in trigger_values[:4]) or
+                any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in trigger_values[4:]) or
+                any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in trigger_root)):
+            raise ValueError('Invalid schema-2 airborne trigger metadata')
+        if kind == 'airborne_companion':
+            if (len(parent) != 12 or not parent.isascii() or not parent.isdigit() or
+                    trigger_status != 'airborne_companion_trigger' or not trigger_values[0] or
+                    not trigger_values[1] or not trigger_values[2] or trigger_values[3] > 100):
+                raise ValueError('Companion manifest lacks a fresh linked airborne trigger')
+        elif parent or trigger_status not in ('airborne_at_manual_request', 'manual_no_airborne_snapshot'):
+            raise ValueError('Invalid manual capture trigger association')
+        elif trigger_status == 'airborne_at_manual_request' and (not trigger_values[0] or not trigger_values[2]):
+            raise ValueError('Manual airborne overlap lacks a native sample identity')
     descriptors = manifest.get('frames')
     if not isinstance(descriptors, list) or len(descriptors) != COUNT:
         raise ValueError('Manifest must describe all scheduled indices')
@@ -133,6 +160,26 @@ def self_test():
         refused['frames'][0]['capture_sequence'] = 0
         meta.write_text(json.dumps(refused), encoding='utf-8')
         assert read(path)['rows'] == []
+        stamp = '123456789012'
+        companion_path = Path(td) / f'eye_{stamp}_JumpLattice.bin'
+        companion_manifest = dict(refused, schema=2, stamp=stamp, data_file=companion_path.name,
+                                  capture_type='airborne_companion', parent_stamp='123456789011',
+                                  trigger_status='airborne_companion_trigger', trigger_generation=44,
+                                  trigger_source_frame=81, trigger_qpc=1234567, trigger_age_qpc=42,
+                                  trigger_root=[1.0, 2.0, 3.0], trigger_raw_vy_mps=1.1,
+                                  trigger_filtered_vy_mps=0.9)
+        companion_path.write_bytes(header)
+        companion_path.with_suffix('.json').write_text(json.dumps(companion_manifest), encoding='utf-8')
+        assert read(companion_path)['manifest']['parent_stamp'] == '123456789011'
+        for bad in (dict(companion_manifest, parent_stamp=''), dict(companion_manifest, trigger_age_qpc=101),
+                    dict(companion_manifest, trigger_status='manual_no_airborne_snapshot')):
+            companion_path.with_suffix('.json').write_text(json.dumps(bad), encoding='utf-8')
+            try:
+                read(companion_path)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('invalid schema-2 airborne companion metadata accepted')
     print('eye jump lattice reader self-test passed')
 
 

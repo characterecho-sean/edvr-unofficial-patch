@@ -2,7 +2,7 @@
 """The eye run's ledger, read: which records each draw took from the pool, how far each turned
 between consecutive crops, and how the bones moved (object_probe.h, "THE EYE RUN'S LEDGER").
 
-python eye_run_ledger.py <edvr_logs\\pool> <HHMMSS> [--hub-radius 500] [--ring-radius 800]
+python eye_run_ledger.py <edvr_logs\\pool> <capture-stamp> [--hub-radius 500] [--ring-radius 800]
 
 Reads draws_<stamp>.bin (a 160-byte header: magic, version, frames, frame0, the instance
 stream's stride, the palette's stride, the pool's bytes, then 32 crop-to-frame entries; then per
@@ -73,6 +73,11 @@ def join_ui_record_record(record,native_frame,eye_draws,draws,pools,insts,inst_s
                                    target_identity=detail['target_identity'],viewport_count=detail['viewport_count']))
     return status,candidate_rows
 
+def attach_candidate_issues(eye):
+    """Attach issued-state records to their exact draw indices from the reader."""
+    issues={frame['draw']:frame['issue'] for frame in eye['candidates']['frames']}
+    return [dict(draw,issue=issues.get(index)) for index,draw in enumerate(eye['draws'])]
+
 def join_weapon_ui_records(writer_json,eye_drawstate,draws,pools,insts,inst_stride):
     import eye_draw_snapshot
     root=json.loads(open(writer_json,encoding='utf-8').read())
@@ -81,6 +86,7 @@ def join_weapon_ui_records(writer_json,eye_drawstate,draws,pools,insts,inst_stri
         raise ValueError('UI writer capture must use record_writers version 4')
     packed=open(os.path.join(os.path.dirname(writer_json),root['binary']),'rb').read()
     eye=eye_draw_snapshot.read(eye_drawstate)
+    eye_draws=attach_candidate_issues(eye)
     records=[]
     for rec in section.get('records',[]):
         ui=rec.get('ui_submit',{})
@@ -97,7 +103,7 @@ def join_weapon_ui_records(writer_json,eye_drawstate,draws,pools,insts,inst_stri
             records.append(dict(writer_id=rec.get('id'),identity=(ui.get('renderer'),ui.get('part'),ui.get('instance')),
                                 frame=None,ordinal=None,instance=ui.get('instance'),
                                 status='unmatched',candidates=[]));continue
-        status,candidate_rows=join_ui_record_record(record,native_frame,eye['draws'],draws,pools,insts,inst_stride)
+        status,candidate_rows=join_ui_record_record(record,native_frame,eye_draws,draws,pools,insts,inst_stride)
         records.append(dict(writer_id=rec.get('id'),identity=(ui.get('renderer'),ui.get('part'),ui.get('instance')),
                             frame=(candidate_rows[0]['frame'] if len(candidate_rows)==1 else None),
                             ordinal=(candidate_rows[0]['ordinal'] if len(candidate_rows)==1 else None),
@@ -197,6 +203,40 @@ def self_test():
     status,_=join_ui_record_record(payload,99,[two_candidate],{12:np.array([two_row])},
                                    {12:{'raw':duplicate}},{12:two_indices},8)
     assert status=='exact_many_draws'
+    # Read the v14 candidate block, then join its issued state through the
+    # exact snapshot draw index. A same-family draw at index 0 must not inherit it.
+    import eye_draw_snapshot
+    b0=bytes(range(16))
+    candidate_blob=struct.pack('<9I',0,0,0,0,0,0,0,0,0xffffffff)
+    candidate_blob+=struct.pack('<48I',*([0]*48))+struct.pack('<48I',*([0]*48))
+    candidate_blob+=struct.pack('<I',1)+struct.pack('<3I',1,12,99)+struct.pack('<i3I',0,1,0,0)
+    candidate_blob+=struct.pack('<I4Q6I',2,sample['vs'],sample['ps'],0x44,0x101,512,512,26,0,1,1)
+    candidate_blob+=struct.pack('<I',0)+struct.pack('<2I',0,0)
+    candidate_blob+=struct.pack('<2I',16,16)+b0
+    candidate_blob+=struct.pack('<I',0)+struct.pack('<I',0)+struct.pack('<I',0)
+    candidate_stream=__import__('io').BytesIO(candidate_blob)
+    def candidate_take(n):
+        value=candidate_stream.read(n)
+        if len(value)!=n:raise ValueError('Truncated draw snapshot')
+        return value
+    def candidate_unpack(fmt):return struct.unpack(fmt,candidate_take(struct.calcsize(fmt)))
+    parsed=eye_draw_snapshot.read_candidates(candidate_unpack,candidate_take,
+        [dict(frame=12,vs=sample['vs'],ps=sample['ps']),dict(frame=12,vs=sample['vs'],ps=sample['ps'])],[],14)
+    eye={'draws':[dict(render_frame=99,vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,
+                       start_instance=2,frame=12,ordinal=0,eye=0),
+                  dict(render_frame=99,vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,
+                       start_instance=2,frame=12,ordinal=0,eye=0)],'candidates':parsed}
+    integrated=attach_candidate_issues(eye)
+    assert integrated[0]['issue'] is None and integrated[1]['issue']['b0']==b0
+    # Select only index 1's matching record by requiring index 0's frame to differ.
+    integrated[0]['frame']=13
+    status,joined=join_ui_record_record(payload,99,integrated,{12:np.array([row])},
+                                        {12:{'raw':raw}},{12:stream},8)
+    assert status=='exact' and joined[0]['frame']==12 and joined[0]['record_index']==0
+    parsed_frame=dict(parsed['frames'][0],draw=0)
+    parsed['frames']=[parsed_frame]
+    shifted=attach_candidate_issues(eye)
+    assert shifted[0]['issue'] is not None and shifted[1]['issue'] is None
     def write(name, ver, rows):
         p = os.path.join(tmp, name)
         with open(p, 'wb') as f:
@@ -360,7 +400,7 @@ def main():
                                      'ledger flag decides, which only says t33 HELD the pool at the draw -- true of every draw after a '
                                      'pool draw, the game never unbinding it (the run of 2026-09-10 05:37)')
     ap.add_argument('--weapon-ui-writers', help='record-writer JSON from the same eye run; requires --eye-drawstate')
-    ap.add_argument('--eye-drawstate', help='candidates_HHMMSS.eyemesh.bin from the same run; required with --weapon-ui-writers')
+    ap.add_argument('--eye-drawstate', help='candidates_<stamp>.eyemesh.bin from the same run; required with --weapon-ui-writers')
     ap.add_argument('--self-test', action='store_true', help='write synthetic version 1 and 2 fixtures to a temp '
                                                            'directory and check the parser against them')
     a = ap.parse_args()
