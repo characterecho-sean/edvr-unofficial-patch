@@ -3,6 +3,7 @@
 // AtlasModel t33 upload.  The game-code hook supplies register state before
 // calling the original dictionary lookup; this class only records evidence.
 #include <windows.h>
+#include "native_on_foot.h"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -22,6 +23,8 @@ public:
     static constexpr uintptr_t kLookupRva=0x3696FA0u;
     static constexpr uint32_t kRecordBytes=0x150u;
     static constexpr uint32_t kRecordCap=65536u;
+    static constexpr uint32_t kUiRecordReserve=1024u;
+    static constexpr uint64_t kUiByteReserve=uint64_t(kUiRecordReserve)*kRecordBytes;
     static constexpr uint32_t kOwnershipCap=8192u;
     static constexpr uint32_t kOwnershipUnwindDepth=32u;
     static constexpr uint32_t kAncestorTraceCap=32u;
@@ -47,6 +50,9 @@ public:
         std::string writer,contextStatus="unavailable",lookupStatus="pending";
         std::string ownershipStatus="unsupported_writer";
         uint64_t owner=0,key=0,builder=0,object=0,entry=0;
+        std::string uiJoinStatus="not_candidate";
+        NativeWeaponUiSubmitIdentity uiSubmit{};
+        uint64_t uiCaptureQpc=0;
         uint32_t ownershipId=kNone;
         Snapshot record,keySnapshot,builderSnapshot,objectSnapshot,entrySnapshot;
     };
@@ -76,6 +82,7 @@ public:
         uint64_t recordOverflow=0,byteBudgetDeclines=0,readFaults=0;
         uint64_t contextFailures=0,unwindFailures=0,completionFailures=0;
         uint64_t declinedManagement=0,declinedUnknown=0;
+        uint64_t uiJoinAttempted=0,uiJoinMatched=0,uiJoinUnmatched=0,uiReserveOverflow=0;
     };
     struct OwnershipSummary {
         uint64_t attempted=0,linked=0,stored=0,deduplicated=0,unsupportedWriter=0;
@@ -103,6 +110,8 @@ public:
         uint64_t windowRva,const uint8_t* bytes,size_t byteCount) noexcept;
     bool executableOpcodesMatchAtBaseForTest(uintptr_t imageBase) noexcept;
     void setOwnershipOpcodesValidForTest(bool valid) noexcept;
+    void setSyntheticRecordCountForTest(uint32_t count) noexcept { syntheticRecordCountForTest_=count; }
+    void setRetainedBytesForTest(uint64_t bytes) noexcept { summary_.retainedBytes=bytes; }
     // Exercise the production unwind from a real fixture frame while applying
     // an explicitly nominated game-return recipe.  Test executable RVAs are
     // intentionally not accepted by beginLookup itself.
@@ -145,6 +154,9 @@ private:
     std::unordered_multimap<uint64_t,uint32_t> ownershipIndex_;
     std::vector<AncestorTrace> ancestorTraces_;
     bool ownershipOpcodesValid_=false;
+#ifdef EDVR_RECORD_WRITER_TEST
+    uint32_t syntheticRecordCountForTest_=0;
+#endif
 
     void clearLocked();
     bool validateExecutableLocked() noexcept;
@@ -165,7 +177,7 @@ private:
     void captureOwnershipLocked(Record& record,const OwnershipCandidate& candidate);
     void retainAncestorTraceLocked(const Record& record,const OwnershipCandidate& candidate);
     PointerIdentity identifyPointerLocked(uintptr_t address);
-    Snapshot captureLocked(uintptr_t address,size_t bytes,bool applicable,bool ownership=false);
+    Snapshot captureLocked(uintptr_t address,size_t bytes,bool applicable,bool ownership=false,bool uiRecord=false);
     void recountRetainedBytesLocked() noexcept;
     static bool guardedRead(uintptr_t address,void* output,size_t bytes) noexcept;
     static const char* hookStatusName(HookStatus status) noexcept;

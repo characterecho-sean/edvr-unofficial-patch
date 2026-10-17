@@ -5,6 +5,7 @@
 #include "draw_census.h"
 #include "eye_engine_capture.h"
 #include "eye_final_capture.h"
+#include "eye_jump_lattice.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
 #include <atomic>     // F63: the eye offsets for the native on-foot sight lock
@@ -1060,6 +1061,8 @@ ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
 ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
+ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
+bool                       g_csEyeJumpLatticeTried = false;
 
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     auto*& shader = diagnostics ? g_csMv : g_csMvFast;
@@ -1255,6 +1258,7 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 eye_final_capture::Run g_eyeFinalRun;
 eye_final_capture::Clock g_eyeFinalClock; // boundary clock also advances with AA off
+eye_jump_lattice::Run g_eyeJumpLatticeRun;
 wchar_t g_eyeFinalStamp[16]=L"";
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
@@ -1709,6 +1713,22 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
     g_eyeInputCaptureAttempted=true; // only after ownership and every other input attempted
+}
+void stageEyeJumpLattice(ID3D11DeviceContext* ctx,EyeState& e,bool engineBound,
+                         const EngineVelocityViews& engineViews,ID3D11ShaderResourceView* skinView) {
+    if(!g_eyeJumpLatticeRun.armed()||g_eyeRunLeft<=0||g_eyeRunTaken<0||g_eyeRunTaken>=int(eye_jump_lattice::Count))return;
+    const uint32_t index=static_cast<uint32_t>(g_eyeRunTaken),scene=g_rowsFrame;
+    const uint32_t render=nativeOnFootRenderFrame(),epoch=g_eyeFinalClock.epoch;
+    if(!nativeOnFootActive()){
+        g_eyeJumpLatticeRun.refuse(index,scene,render,epoch,eye_jump_lattice::NativeInactive);return;
+    }
+    if(!g_csEyeJumpLattice&&!g_csEyeJumpLatticeTried){
+        g_csEyeJumpLatticeTried=true;
+        g_csEyeJumpLattice=shaderSwapCreateCs(ctx,kEyeJumpLatticeBytecode,sizeof(kEyeJumpLatticeBytecode),
+            "eye_jump_lattice_cs","native on-foot jump trace");
+    }
+    g_eyeJumpLatticeRun.stage(ctx,g_csEyeJumpLattice,index,scene,render,epoch,engineBound,
+                              skinView,e.dlMvSrv,engineViews.slots);
 }
 ID3D11ComputeShader* motionTraceShader(ID3D11DeviceContext* ctx) {
     if (!g_csMvTrace && !g_csMvTraceTried) {
@@ -2343,6 +2363,77 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
 
 // The run's write after its last crop: the sixteen crops (raw C00.., or
 // treated T00..) and the first treated frame whole.
+void writeEyeJumpLattice(ID3D11DeviceContext* ctx,const std::wstring& dir,const char* reason) {
+    using namespace eye_jump_lattice;
+    if(!g_eyeJumpLatticeRun.armed())return;
+    wchar_t binPath[MAX_PATH],jsonPath[MAX_PATH];
+    _snwprintf_s(binPath,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_JumpLattice.bin",dir.c_str(),g_eyeFinalStamp);
+    _snwprintf_s(jsonPath,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_JumpLattice.json",dir.c_str(),g_eyeFinalStamp);
+    FILE* bin=nullptr;_wfopen_s(&bin,binPath,L"wb");
+    bool binOk=bin!=nullptr;
+    if(bin){
+        const char magic[8]={'E','D','V','R','J','M','P','1'};const uint32_t header[7]={1,Count,Stride,20,SkinFormat,MotionFormat,SlotFormat};
+        binOk=fwrite(magic,1,sizeof(magic),bin)==sizeof(magic)&&fwrite(header,sizeof(header),1,bin)==1&&
+              fwrite(&Budget,sizeof(Budget),1,bin)==1;
+    }
+    FILE* json=nullptr;_wfopen_s(&json,jsonPath,L"wb");bool manifestOk=json!=nullptr;
+    if(json)fprintf(json,"{\"schema\":1,\"stamp\":\"%ls\",\"reason\":\"%s\",\"data_file\":\"eye_%ls_JumpLattice.bin\",\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y), valid sampled points only\",\"sample_record_bytes\":20,\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"frames\":[\n",
+        g_eyeFinalStamp,reason,g_eyeFinalStamp,Stride,(unsigned long long)Budget,(unsigned long long)g_eyeJumpLatticeRun.bytes);
+    unsigned staged=0,written=0,refused=0,notReached=0;bool first=true;
+    struct PackedSample {uint32_t skin[2],motion,slots[2];};static_assert(sizeof(PackedSample)==20,"jump lattice sample layout");
+    for(uint32_t i=0;i<Count;++i){
+        Row& row=g_eyeJumpLatticeRun.rows[i];uint64_t sequence=0;
+        const auto& final=g_eyeFinalRun.rows[i];
+        if(row.status==NotReached&&final.scheduled){row.sceneFrame=final.scene;row.renderFrame=final.renderFrame;row.epoch=final.epoch;}
+        if(row.status==Staged){
+            if(!finalSequenceMatch(row,final.scheduled,final.scene,final.renderFrame,final.epoch,
+                                   final.eye[0].sequence,final.eye[1].sequence,sequence))
+                row.status=JoinMismatch;
+        }
+        std::vector<PackedSample> payload;
+        D3D11_MAPPED_SUBRESOURCE mapped[3]{};
+        if(row.status==Staged){
+            ++staged;
+            if(!binOk||!ctx)row.status=WriteFailed;
+            else {
+                ID3D11Texture2D* sources[3]={row.skin.Get(),row.motion.Get(),row.slots.Get()};unsigned maps=0;
+                for(;maps<3;++maps)if(FAILED(ctx->Map(sources[maps],0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped[maps])))break;
+                if(maps!=3){for(unsigned k=0;k<maps;++k)ctx->Unmap(sources[k],0);row.status=MapNotReady;}
+                else {
+                    payload.resize(size_t(row.sampleWidth)*row.sampleHeight);
+                    for(uint32_t y=0;y<row.sampleHeight;++y){
+                        const auto* skin=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[0].pData)+size_t(y)*mapped[0].RowPitch);
+                        const auto* motion=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[1].pData)+size_t(y)*mapped[1].RowPitch);
+                        const auto* slots=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[2].pData)+size_t(y)*mapped[2].RowPitch);
+                        for(uint32_t x=0;x<row.sampleWidth;++x){auto& out=payload[size_t(y)*row.sampleWidth+x];
+                            out.skin[0]=skin[x*2];out.skin[1]=skin[x*2+1];out.motion=motion[x];out.slots[0]=slots[x*2];out.slots[1]=slots[x*2+1];}
+                    }
+                    for(unsigned k=0;k<3;++k)ctx->Unmap(sources[k],0);
+                    const uint32_t rowHeader[9]={i,row.sceneFrame,row.renderFrame,row.epoch,row.width,row.height,row.sampleWidth,row.sampleHeight,Written};
+                    const uint64_t sampleCount=payload.size(),payloadBytes=sampleCount*sizeof(PackedSample);
+                    binOk=fwrite(rowHeader,sizeof(rowHeader),1,bin)==1&&fwrite(&sequence,sizeof(sequence),1,bin)==1&&
+                          fwrite(&payloadBytes,sizeof(payloadBytes),1,bin)==1&&
+                          fwrite(payload.data(),sizeof(PackedSample),payload.size(),bin)==payload.size();
+                    if(binOk){row.status=Written;++written;}else row.status=WriteFailed;
+                }
+            }
+        }
+        if(row.status==NotReached)++notReached;
+        else if(row.status!=Written)++refused;
+        if(json){
+            const uint64_t payloadBytes=row.status==Written?uint64_t(row.sampleWidth)*row.sampleHeight*sizeof(PackedSample):0;
+            fprintf(json,"%s{\"index\":%u,\"scheduled\":%s,\"scene_frame\":%u,\"render_frame\":%u,\"capture_epoch\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"sample_size\":[%u,%u],\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y)\",\"status\":\"%s\",\"payload_bytes\":%llu,\"binary_layout\":\"row_header_then_interleaved_skin_mv_slots\"}",
+                first?"":",\n",i,final.scheduled?"true":"false",row.sceneFrame,row.renderFrame,row.epoch,(unsigned long long)(row.status==Written?sequence:0),row.width,row.height,row.sampleWidth,row.sampleHeight,Stride,resultName(row.status),(unsigned long long)payloadBytes);
+            first=false;
+        }
+    }
+    if(bin){if(fclose(bin)!=0)binOk=false;}
+    if(json){fprintf(json,"\n],\"data_status\":\"%s\"}\n",binOk?"complete":"write_failed");const bool clean=!ferror(json);const int closed=fclose(json);if(!clean||closed!=0)manifestOk=false;}
+    Log::get().note("native on-foot jump lattice (F83): run %ls reason=%s stride=%u scheduled=%u staged=%u written=%u refused=%u not-reached=%u bytes=%llu/%llu; data=%s manifest=%s. Exact stride-two points sample SkinE/MV half values and preserve EngineSlots float bits; no per-frame CPU readback.",
+        g_eyeFinalStamp,reason,Stride,g_eyeJumpLatticeRun.count,staged,written,refused,notReached,
+        (unsigned long long)g_eyeJumpLatticeRun.bytes,(unsigned long long)Budget,binOk?"complete":"write_failed",manifestOk?"written":"write_failed");
+    g_eyeJumpLatticeRun.reset();
+}
 void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     if(!g_eyeFinalRun.armed)return;
     nofoot::optic_capture::RowDescriptor opticRows[eye_final_capture::Count]{};
@@ -2356,6 +2447,7 @@ void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     if(g_eyeFinalRun.captureDevice){const bool ran=guarded("eye capture/final flush context",[&]{g_eyeFinalRun.captureDevice->GetImmediateContext(&ownedContext);});ctx=ran?ownedContext:nullptr;}
     const std::wstring dir=Log::get().dir()+L"\\eyes";
     CreateDirectoryW(dir.c_str(),nullptr);
+    writeEyeJumpLattice(ctx,dir,reason);
     unsigned copied=0,written=0,missing=0;
     auto write=[&](eye_final_capture::Image& image,const wchar_t* suffix,int eye) {
         if(!image.sequence){++missing;return;}
@@ -4632,7 +4724,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
-                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews,engineSkinSrv.Get());
+                    if(eye==0){
+                        stageEyeJumpLattice(ctx,e,engineBound,engineViews,engineSkinSrv.Get());
+                        stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews,engineSkinSrv.Get());
+                    }
                     // What NVIDIA is handed: the interface's mask and engine-record
                     // velocity's masked pixels, else nothing.
                     ID3D11Texture2D* biasMask = ((uiTrack || engineBound) && e.dlMask) ? e.dlMask : nullptr;
@@ -6472,7 +6567,7 @@ static void beginEyeRun() {
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
-    g_eyeFinalRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
+    g_eyeFinalRun.arm();g_eyeJumpLatticeRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
     nativeOnFootOpticCaptureBegin(g_eyeFinalStamp);
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
@@ -6512,6 +6607,9 @@ static void beginEyeRun() {
 
 void temporalPassShutdown() {
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"shutdown_missing_final");
+    g_eyeJumpLatticeRun.reset();
+    if(g_csEyeJumpLattice){g_csEyeJumpLattice->Release();g_csEyeJumpLattice=nullptr;}
+    g_csEyeJumpLatticeTried=false;
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     skyRingShutdown();   // stops the dispatches and drops the waiting dumps; the ring itself is left to the process (sky_ring.cpp)
     dlaaShutdown();

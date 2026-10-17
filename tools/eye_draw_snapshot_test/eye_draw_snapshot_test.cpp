@@ -1,6 +1,8 @@
 #include "../../src/d3d11/eye_draw_snapshot.h"
 #include "../../src/d3d11/gui_draw_snapshot.h"
 #include "../../src/d3d11/eye_depth_capture.h"
+#include "../../src/d3d11/eye_jump_lattice.h"
+#include "../../src/d3d11/eye_jump_lattice_shader.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstdlib>
@@ -28,6 +30,8 @@ int wmain(int argc, wchar_t** argv) {
     check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77HeldCandidateVs,0),
           "bounded held family admits only the allowlisted VS");
     check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
+          edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kWeaponUiVs,edvr::EyeDrawSnapshot::kWeaponUiPs) &&
+          edvr::EyeDrawSnapshot::weaponUiCandidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
           !edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,0x1234ull) &&
           !edvr::EyeDrawSnapshot::f77Candidate(0x1234ull,edvr::EyeDrawSnapshot::kF77OpticPs),
           "optic family requires exact VS and PS pair");
@@ -41,7 +45,7 @@ int wmain(int argc, wchar_t** argv) {
           edvr::eyeMeshVb0BindingStatus(true,8,16)==3 &&
           edvr::eyeMeshVb0BindingStatus(true,8,0)==1,
           "VB0 capture distinguishes absent binding, unsupported stride and offset, and a supported binding");
-    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==192 &&
+    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==384 && edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye==8 &&
           edvr::EyeDrawSnapshot::kCandidateMeshBudget==64*1024*1024 &&
           edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==32*1024*1024 &&
           edvr::EyeDrawSnapshot::kCandidateMaxOpticDraws==2,
@@ -49,6 +53,51 @@ int wmain(int argc, wchar_t** argv) {
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                          D3D11_SDK_VERSION, &dev, nullptr, &ctx));
+    check(edvr::eye_jump_lattice::runFits(5,3) && !edvr::eye_jump_lattice::runFits(4032,3896),
+          "jump lattice admits irregular input and refuses over-budget production dimensions");
+    {
+        using namespace edvr::eye_jump_lattice;
+        Run refusal;refusal.arm();refusal.refuse(0,11,22,33,BudgetRefused);
+        check(refusal.rows[0].status==BudgetRefused&&refusal.bytes==0&&!refusal.rows[0].skin,
+              "budget refusal records status and allocates/writes no payload");
+        Row ready{};ready.status=Staged;ready.sceneFrame=11;ready.renderFrame=22;ready.epoch=33;
+        uint64_t sequence=0;
+        check(finalSequenceMatch(ready,true,11,22,33,71,71,sequence)&&sequence==71,
+              "lattice finalizes only after a matching two-eye sequence and schedule identity");
+        check(!finalSequenceMatch(ready,true,11,22,33,71,72,sequence)&&sequence==0&&
+              !finalSequenceMatch(ready,false,11,22,33,71,71,sequence)&&
+              !finalSequenceMatch(ready,true,11,22,34,71,71,sequence),
+              "sequence mismatch, absent schedule, and epoch mismatch remain unfinalized");
+    }
+    {
+        ComPtr<ID3DBlob> code,errors;hr(D3DCompile(edvr::kEyeJumpLatticeHlsl,sizeof(edvr::kEyeJumpLatticeHlsl)-1,
+            "eye_jump_lattice_test",nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&code,&errors));
+        ComPtr<ID3D11ComputeShader> shader;hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader));
+        auto source=[&](DXGI_FORMAT format,const void* data,UINT pitch,ComPtr<ID3D11ShaderResourceView>& view){
+            D3D11_TEXTURE2D_DESC desc{};desc.Width=5;desc.Height=3;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.Format=format;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA initial{data,pitch,0};ComPtr<ID3D11Texture2D> texture;hr(dev->CreateTexture2D(&desc,&initial,&texture));hr(dev->CreateShaderResourceView(texture.Get(),nullptr,&view));};
+        uint16_t skin[5*3*4],motion[5*3*2];float slots[5*3*2];
+        for(unsigned i=0;i<15;++i){skin[i*4]=0x3c00;skin[i*4+1]=0x4000;skin[i*4+2]=0x4200;skin[i*4+3]=0x3c00;motion[i*2]=0x3800;motion[i*2+1]=0xb800;slots[i*2]=float(i);slots[i*2+1]=float(i)+0.25f;}
+        skin[14*4]=0x4b40;skin[14*4+1]=0x4b80;motion[14*2]=0x4300;motion[14*2+1]=0xc700;
+        uint32_t slotBits[2]={0x7fc12345u,0x80000000u};std::memcpy(slots+((2*5+4)*2),slotBits,sizeof(slotBits));
+        ComPtr<ID3D11ShaderResourceView> skinView,motionView,slotView;source(DXGI_FORMAT_R16G16B16A16_FLOAT,skin,sizeof(uint16_t)*5*4,skinView);source(DXGI_FORMAT_R16G16_FLOAT,motion,sizeof(uint16_t)*5*2,motionView);source(DXGI_FORMAT_R32G32_FLOAT,slots,sizeof(float)*5*2,slotView);
+        edvr::eye_jump_lattice::Run run;run.arm();
+        ID3D11ShaderResourceView* originalSrv=slotView.Get();ctx->CSSetShaderResources(0,1,&originalSrv);ctx->CSSetShader(nullptr,nullptr,0);
+        bool allRows=true;for(uint32_t i=0;i<edvr::eye_jump_lattice::Count;++i)
+            allRows=run.stage(ctx.Get(),shader.Get(),i,11+i,22+i,33,true,skinView.Get(),motionView.Get(),slotView.Get())==edvr::eye_jump_lattice::Staged&&allRows;
+        check(allRows&&run.count==edvr::eye_jump_lattice::Count&&run.bytes==uint64_t(edvr::eye_jump_lattice::Count)*120,
+              "jump lattice stages sixteen consecutive rows while reusing scratch dimensions");wait_gpu(ctx.Get(),dev.Get());
+        ComPtr<ID3D11ShaderResourceView> restoredSrv;ctx->CSGetShaderResources(0,1,&restoredSrv);ComPtr<ID3D11ComputeShader> restoredShader;ctx->CSGetShader(&restoredShader,nullptr,nullptr);
+        check(restoredSrv.Get()==slotView.Get()&&!restoredShader,"jump lattice restores compute SRV and shader bindings");
+        const auto& row=run.rows[0];check(row.width==5&&row.height==3&&row.sampleWidth==3&&row.sampleHeight==2&&row.bytes==120,
+              "irregular odd dimensions use ceil-half sample shape");
+        D3D11_MAPPED_SUBRESOURCE a{},b{},c{};hr(ctx->Map(row.skin.Get(),0,D3D11_MAP_READ,0,&a));hr(ctx->Map(row.motion.Get(),0,D3D11_MAP_READ,0,&b));hr(ctx->Map(row.slots.Get(),0,D3D11_MAP_READ,0,&c));
+        const auto* es=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(a.pData)+a.RowPitch);const auto* ms=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(b.pData)+b.RowPitch);const auto* ss=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(c.pData)+c.RowPitch);
+        check(es[4]==0x4b804b40u && ms[2]==0xc7004300u && ss[4]==slotBits[0]&&ss[5]==slotBits[1],
+              "lattice includes last valid pixel and preserves slot NaN/sign bits");
+        ctx->Unmap(row.skin.Get(),0);ctx->Unmap(row.motion.Get(),0);ctx->Unmap(row.slots.Get(),0);
+        run.reset();
+    }
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth = 192; bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     ComPtr<ID3D11Buffer> cb; hr(dev->CreateBuffer(&bd, nullptr, &cb));
@@ -588,8 +637,8 @@ int wmain(int argc, wchar_t** argv) {
     edvr::GuiDrawSnapshot::rememberLayout(layout.Get(),&element,1,guiHash);ctx->IASetInputLayout(layout.Get());
     edvr::GuiDrawSnapshot::rememberShader(guiHash,code->GetBufferPointer(),code->GetBufferSize());edvr::GuiDrawSnapshot::rememberShader(guiPs,code->GetBufferPointer(),code->GetBufferSize());
     ctx->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,4);
-    for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,guiHash,guiPs,'X',6,1,150000,0,0);}
-    gui.capture(ctx.Get(),201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
+    for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,200,guiHash,guiPs,'X',6,1,150000,0,0);}
+    gui.capture(ctx.Get(),201,201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
     ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
     edvr::EyeDrawSnapshot meshSnap;
     ComPtr<ID3D11Buffer> meshPool,meshBones,meshOtherPalette,meshIds;
@@ -1079,6 +1128,7 @@ int wmain(int argc, wchar_t** argv) {
     candidateFixture.candidateFrames.push_back(candidateFrame);candidateFixture.candidateOpticDraws=1;candidateFixture.candidateRoiDraw=0;
     edvr::EyeDrawSnapshot::CandidateInput candidateMaterial{};candidateMaterial.draw=0;candidateMaterial.slot=1;candidateMaterial.kind=0;
     candidateMaterial.viewDimension=D3D11_SRV_DIMENSION_BUFFER;candidateMaterial.bytes=96;candidateMaterial.width=96;
+    candidateMaterial.sourceResource=0x12340000;candidateMaterial.sourceView=0x56780000;
     candidateMaterial.sourceWidth=96;candidateMaterial.elements=24;candidateMaterial.stride=4;
     uint8_t materialBytes[96];std::memset(materialBytes,0x5a,sizeof(materialBytes));
     stageBufferWindow(materialBytes,sizeof(materialBytes),0,sizeof(materialBytes),candidateMaterial.bufferStage);

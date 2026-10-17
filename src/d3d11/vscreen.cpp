@@ -4088,9 +4088,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // (gpu_census.h), so the thunk's real-draw call can be timed as that section. Every
     // other issue through `draw` below passes None and is timed by its own section.
     auto observedDraw = [&](AlteredDraw altered) {
-        if (owner && uiLayerIssueBlocked()) return false;
-        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was
+        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }
+        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place
         const bool issued = draw(altered);
+        objectProbeCandidateDrawIssued(self,issued); // observe effective issue state before any bracket restores
         if (seedOutcome.on) seedOutcome.original = seedOutcome.original || issued;
         return issued;
     };
@@ -4314,7 +4315,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);
     const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
-    objectProbeCandidateDrawIssued(self,originalIssued);
     if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks
     if (barsBound) supercruiseBarsEnd(self);  // the game's geometry stage, its constant slot and its rasterizer state back, before the layer's restore
     if (layered) {

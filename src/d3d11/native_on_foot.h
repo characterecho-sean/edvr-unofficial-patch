@@ -314,6 +314,15 @@ struct WeaponUiGetterObservation {
     uintptr_t renderer = 0, part = 0, cameraPointer = 0;
     float attachment[16] = {};
 };
+struct NativeWeaponUiSubmitIdentity {
+    uint32_t renderFrame = 0, itemSerial = 0, ordinal = ~0u, submitThread = 0;
+    uint64_t submitQpc = 0, renderer = 0, part = 0, instance = 0;
+    uint16_t nameId = 0;
+    uint8_t facing = 0;
+    int32_t space = 0;
+    bool itemRead = false, fieldsValid = false, instanceValid = false;
+};
+bool nativeOnFootWeaponUiCurrentSubmit(uintptr_t instance, NativeWeaponUiSubmitIdentity* out) noexcept;
 // Copy the newest completed after-write pose stamp for this exact native render frame.
 bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out);
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn

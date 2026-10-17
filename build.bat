@@ -2259,6 +2259,7 @@ python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fi
 python "tools\eye_depth_dump.py" --self-test || exit /b 1
 python "tools\eye_depth_dump.py" "%OBJ%\drawsnapshot" || exit /b 1
 python "tools\gui_draw_snapshot.py" --self-test || exit /b 1
+python "tools\eye_jump_lattice.py" --self-test || exit /b 1
 python "tools\eye_inputs.py" --self-test || exit /b 1
 python "tools\eye_decisions.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1

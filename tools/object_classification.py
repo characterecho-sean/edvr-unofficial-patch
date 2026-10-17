@@ -40,6 +40,7 @@ MAX_ITEMS = 1_000_000
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
 RECORD_WRITER_LIMITS = {"records": 65536, "bytes": 64 * 1024 * 1024}
+RECORD_WRITER_UI_LIMITS = {"ui_record_reserve": 1024, "ui_byte_reserve": 1024 * 0x150}
 RECORD_OWNERSHIP_LIMITS = {
     "ownership_records": 8192, "ownership_unwind_depth": 32,
     "ownership_traces": 32, "ownership_trace_frames": 32,
@@ -140,7 +141,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
         return None, [], [], [], [], packed_bytes
     diagnostic = _dict(diagnostic, "record_writers")
     version = _u32(diagnostic.get("version"), "record_writers.version")
-    if version not in {1, 2, 3}:
+    if version not in {1, 2, 3, 4}:
         raise CaptureError("record_writers.version is unsupported")
     # Version 2 added the KinematicRig ownership; version 3 keeps it and
     # drops the upload join.
@@ -160,12 +161,17 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
     limits = _dict(diagnostic.get("limits"), "record_writers.limits")
     limit_bounds = dict(RECORD_WRITER_LIMITS)
+    if version >= 4:
+        limit_bounds.update(RECORD_WRITER_UI_LIMITS)
     if ownership:
         limit_bounds.update(RECORD_OWNERSHIP_LIMITS)
     for field, maximum in limit_bounds.items():
         value = _uint(limits.get(field), "record_writers.limits.%s" % field)
         if not value or value > maximum:
             raise CaptureError("record_writers.limits.%s exceeds reader safety bound" % field)
+    if version >= 4 and (limits["ui_record_reserve"] != 1024 or
+                         limits["ui_byte_reserve"] != limits["ui_record_reserve"] * 0x150):
+        raise CaptureError("record_writers UI reserve does not match the packed record size")
     summary = _dict(diagnostic.get("summary"), "record_writers.summary")
     summary_fields = ("observed", "stored", "completed", "retained_bytes", "record_overflow",
                       "byte_budget_declines", "read_faults", "context_failures",
@@ -173,6 +179,9 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
                       "completion_failures")
     for field in summary_fields:
         _uint(summary.get(field), "record_writers.summary.%s" % field)
+    if version >= 4:
+        for field in ("ui_join_attempted", "ui_join_matched", "ui_join_unmatched", "ui_reserve_overflow"):
+            _uint(summary.get(field), "record_writers.summary.%s" % field)
 
     ownership_status = None
     ownership_summary = None
@@ -244,6 +253,37 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
             raise CaptureError("%s return RVA disagrees with writer" % label)
         _u32(record.get("thread_id"), label + ".thread_id")
         _u32(record.get("observed_frame"), label + ".observed_frame")
+        if version >= 4:
+            ui_status = _string(record.get("ui_join_status"), label + ".ui_join_status", 32)
+            if ui_status not in {"not_candidate", "matched_instance_tls", "unmatched_instance_tls"}:
+                raise CaptureError("%s UI join status is unknown" % label)
+            ui = _dict(record.get("ui_submit"), label + ".ui_submit")
+            _u32(ui.get("render_frame"), label + ".ui_submit.render_frame")
+            _u32(ui.get("item_serial"), label + ".ui_submit.item_serial")
+            ordinal = ui.get("ordinal")
+            if ordinal is not None:
+                _u32(ordinal, label + ".ui_submit.ordinal")
+            ui_thread = _u32(ui.get("thread_id"), label + ".ui_submit.thread_id")
+            submit_qpc = _uint(ui.get("submit_qpc"), label + ".ui_submit.submit_qpc")
+            capture_qpc = _uint(ui.get("capture_qpc"), label + ".ui_submit.capture_qpc")
+            renderer = _address(ui.get("renderer"), label + ".ui_submit.renderer")
+            part = _address(ui.get("part"), label + ".ui_submit.part")
+            instance = _address(ui.get("instance"), label + ".ui_submit.instance")
+            _u32(ui.get("name_id"), label + ".ui_submit.name_id")
+            _u32(ui.get("facing"), label + ".ui_submit.facing")
+            space = ui.get("space")
+            if type(space) is not int or space < -(1 << 31) or space > (1 << 31) - 1:
+                raise CaptureError("%s.ui_submit.space must be a signed 32-bit integer" % label)
+            for field in ("item_read", "fields_valid", "instance_valid"):
+                if not isinstance(ui.get(field), bool):
+                    raise CaptureError("%s.ui_submit.%s is not boolean" % (label, field))
+            if ui_status == "matched_instance_tls":
+                if (writer != "helper_434d149" or ordinal is None or not submit_qpc or capture_qpc < submit_qpc or
+                        ui_thread != record.get("thread_id") or instance != record.get("object") or
+                        renderer == "0x0" or part == "0x0"):
+                    raise CaptureError("%s claims an invalid exact UI submit join" % label)
+            elif ordinal is not None or submit_qpc or renderer != "0x0" or part != "0x0" or instance != "0x0":
+                raise CaptureError("%s has UI identity without a matched TLS join" % label)
         addresses = {}
         for field in ("owner", "key", "builder", "object", "entry"):
             addresses[field] = _address(record.get(field), label + "." + field)
@@ -607,7 +647,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
     if summary["completed"] != sum(record["lookup_status"] != "pending" for record in records):
         raise CaptureError("record_writers completed count disagrees with record lifecycle")
     retained_bytes = cursor - packed_bytes
-    if retained_bytes != summary["retained_bytes"] or retained_bytes > limits["bytes"]:
+    if retained_bytes != summary["retained_bytes"] or retained_bytes > limits["bytes"] + (limits.get("ui_byte_reserve", 0) if version >= 4 else 0):
         raise CaptureError("record_writers retained byte count is invalid")
     complete_capture = (bool(records) and summary["observed"] == summary["stored"] and
                         summary["completed"] == summary["stored"] and
@@ -1069,6 +1109,20 @@ def self_test():
             raise AssertionError("%s accepted" % what)
 
         capture = load(root)
+        v4 = copy.deepcopy(root)
+        v4section = v4["record_writers"]
+        v4section["version"] = 4
+        v4section["limits"].update(RECORD_WRITER_UI_LIMITS)
+        v4section["summary"].update(ui_join_attempted=0, ui_join_matched=0,
+                                     ui_join_unmatched=0, ui_reserve_overflow=0)
+        for record in v4section["records"]:
+            record.update(ui_join_status="not_candidate", ui_submit={
+                "render_frame": 0, "item_serial": 0, "ordinal": None, "thread_id": 0,
+                "submit_qpc": 0, "capture_qpc": 0, "renderer": "0x0", "part": "0x0",
+                "instance": "0x0", "name_id": 0, "facing": 0, "space": 0,
+                "item_read": False, "fields_valid": False, "instance_valid": False})
+        assert len(load(v4, binary)["writer_records"]) == 3
+        rejected("a malformed UI byte reserve", lambda value: value["record_writers"]["limits"].update(ui_byte_reserve=1), base=v4)
         report = analyse(capture, include_records=True)
         assert report["status"] == "draw_capture_retired"
         assert report["missing"] == [{"scope": "capture", "reason": "draw_capture_retired"}]
@@ -1149,7 +1203,7 @@ def self_test():
                      retained_bytes=value["record_writers"]["summary"]["retained_bytes"] + 1))
         rejected("a captured status beside an overflow counter",
                  lambda value: value["record_writers"]["summary"].update(record_overflow=1))
-        rejected("an unknown section version", lambda value: value["record_writers"].update(version=4))
+        rejected("an unknown section version", lambda value: value["record_writers"].update(version=5))
         rejected("a version 3 section carrying the retired uploads array",
                  lambda value: value["record_writers"].update(uploads=[]))
         rejected("a capture status that disagrees with its hook",

@@ -89,6 +89,13 @@ struct Record {
     float poseFinalTorso[4][16] = {}; // after-write joints 24 chest, 34 neck, 35/36 clavicles.
     float poseRoot[16] = {}, poseM3p[16] = {}, poseFroot[16] = {}, poseBodyOffset[3] = {};
     float posePinEyeTarget[3] = {}, posePinTarget[3] = {}, posePinNeckBefore[3] = {}, posePinEyeLocal[3] = {};
+    float poseNeckRestTarget[3] = {}, poseNeckRestBaseline[3] = {}, poseLocalPitchDeg = 0.0f, poseLocalPitchAgeUs = 0.0f;
+    uint64_t poseLocalPoseQpc = 0, poseLocalPoseFrame = 0;
+    uint32_t poseLocalPoseGeneration = 0;
+    uint8_t poseNeckRestFlags = 0; // requested, candidate valid, applied, refused, local pitch source valid, validated
+    uint8_t poseNeckGenerationState = 0; // 0 unavailable (validated sample policy), 1 current reference matches, 2 known mismatch/refused
+    uint8_t poseNeckEyeSource = 2; // 0 current scene-eye rows, 1 cached scene-eye rows, 2 unavailable
+    uint32_t poseNeckEyeAgeMs = 0, poseNeckCurrentGeneration = 0;
     float poseEyeCalibration[3] = {};
     float poseEyeAxes[4] = {}; // f axis/sign, up axis/sign from the standing PinEyeCal.
     float poseCrouchWeight = 0.0f, posePinDetach = 0.0f, poseReachCandidate[3] = {}, poseReachApplied[3] = {};

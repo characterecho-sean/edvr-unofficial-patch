@@ -1201,7 +1201,8 @@ struct IkPhysicalPole {
     double axis[3] = {}, reference[3] = {}, previous[3] = {};
 };
 struct IkPhysicalPoleSet {
-    uint32_t generation = 0xFFFFFFFFu, item = 0;
+    uint32_t generation = 0xFFFFFFFFu;
+    uint64_t item = 0;
     bool active = false;
     IkPhysicalPole side[2]{};
 };
@@ -1213,7 +1214,7 @@ inline void ikPhysicalPoleReset(IkPhysicalPoleSet& set) noexcept {
 inline void ikPhysicalPoleResetSide(IkPhysicalPoleSet& set, int side) noexcept {
     if (side >= 0 && side < 2) set.side[side] = {};
 }
-inline bool ikPhysicalPoleBegin(IkPhysicalPoleSet& set, uint32_t generation, uint32_t item, bool active) noexcept {
+inline bool ikPhysicalPoleBegin(IkPhysicalPoleSet& set, uint32_t generation, uint64_t item, bool active) noexcept {
     const bool reset = !active || !set.active || set.generation != generation || set.item != item;
     if (reset) ikPhysicalPoleReset(set);
     set.generation = generation;
@@ -2194,6 +2195,223 @@ struct IkArmedAuthority {
 inline IkArmedAuthority ikArmedAuthority(bool selectedItemArmed, double selectedItemRamp) noexcept {
     return {selectedItemArmed, unit01(selectedItemRamp)};
 }
+
+// F83: native primary-selection evidence. Journal item serials are deliberately absent: native sink selection,
+// sink/inventory identity, and usable source time define the acquisition epoch.
+struct NativePrimarySelectionInput {
+    bool activityValid = false, sinkRead = false, sinkSignatureValid = false, inventoryRead = false;
+    bool selectedRead = false, holsterRead = false, categoryCacheRead = false;
+    uintptr_t sink = 0, inventory = 0;
+    uint32_t selectedId = 0, holsterId = 0xFFFFFFFFu, categoryId[4] = {};
+    uint32_t renderFrame = 0;
+    uint64_t qpc = 0;
+    bool primaryIntent = false, secondaryIntent = false, toolIntent = false;
+};
+struct NativePrimarySelectionDecision {
+    bool readable = false, suspended = false, primary = false, identityChanged = false, terminate = false;
+    bool duplicate = false, reversed = false, frameGap = false, primaryIntent = false;
+    uint64_t epoch = 0;
+    uint32_t selectedId = 0;
+};
+class NativePrimarySelectionState {
+  public:
+    NativePrimarySelectionDecision observe(const NativePrimarySelectionInput& in) noexcept {
+        NativePrimarySelectionDecision out;
+        out.epoch = epoch_;
+        out.primaryIntent = in.primaryIntent;
+        const bool readable = in.activityValid && in.sinkRead && in.sinkSignatureValid && in.inventoryRead && in.selectedRead && in.holsterRead &&
+                              in.categoryCacheRead && in.sink != 0 && in.inventory != 0 && in.renderFrame != 0 && in.qpc != 0;
+        out.readable = readable;
+        if (!readable) {
+            out.suspended = have_;
+            out.terminate = in.sinkRead && !in.sinkSignatureValid && primary_;
+            if (out.terminate) primary_ = false;
+            out.primary = false;
+            out.selectedId = selected_;
+            return out;
+        }
+        const bool sameFrame = have_ && in.renderFrame == frame_ && in.qpc == qpc_;
+        if (sameFrame) {
+            out.duplicate = true;
+            out.primary = primary_;
+            out.selectedId = selected_;
+            return out;
+        }
+        if (have_ && (in.renderFrame < frame_ || in.qpc < qpc_)) {
+            out.reversed = true;
+            out.suspended = true;
+            out.primary = primary_;
+            out.selectedId = selected_;
+            return out;
+        }
+        out.frameGap = have_ && in.renderFrame > frame_ + 1u;
+        const bool uniquePrimary = in.selectedId != in.holsterId && in.categoryId[2] == in.selectedId && in.categoryId[0] != in.selectedId &&
+                                   in.categoryId[1] != in.selectedId && in.categoryId[3] != in.selectedId;
+        const bool keyChanged = have_ && (in.sink != sink_ || in.inventory != inventory_ || in.selectedId != selected_);
+        out.identityChanged = keyChanged;
+        // A readable transition between two accepted primaries retires the old epoch,
+        // but the new one is eligible to begin its own draw-follow phase.
+        out.terminate = primary_ && !uniquePrimary;
+        // The first readable selection can already be a primary (for example, the hook is installed
+        // while a rifle is equipped). Give that accepted selection its own epoch too.
+        if (!have_ || keyChanged) ++epoch_;
+        have_ = true;
+        primary_ = uniquePrimary;
+        sink_ = in.sink;
+        inventory_ = in.inventory;
+        selected_ = in.selectedId;
+        frame_ = in.renderFrame;
+        qpc_ = in.qpc;
+        out.primary = primary_;
+        out.selectedId = selected_;
+        out.epoch = epoch_;
+        return out;
+    }
+    void reset() noexcept {
+        have_ = primary_ = false;
+        sink_ = inventory_ = 0;
+        selected_ = frame_ = 0;
+        qpc_ = 0;
+        epoch_ = 0;
+    }
+
+  private:
+    bool have_ = false, primary_ = false;
+    uintptr_t sink_ = 0, inventory_ = 0;
+    uint32_t selected_ = 0, frame_ = 0;
+    uint64_t qpc_ = 0, epoch_ = 0;
+};
+struct NativePrimaryPublication { bool primary = false, followEligible = false; };
+inline NativePrimaryPublication nativePrimaryPublication(bool previousPrimary, bool previousEligible, bool hadReadable,
+                                                         const NativePrimarySelectionDecision& d) noexcept {
+    NativePrimaryPublication p{previousPrimary, previousEligible};
+    if (d.readable && d.primary && d.identityChanged) return {true, hadReadable};
+    if (d.terminate) return {};
+    if (d.suspended || !d.readable) return p;
+    p.primary = d.primary;
+    if (!d.primary) p.followEligible = false;
+    else if (!hadReadable) p.followEligible = false;
+    else if (d.identityChanged) p.followEligible = true;
+    return p;
+}
+inline bool primaryDrawSourcesCurrent(bool fpRead, bool gRead, uint64_t fpAgeMs, uint64_t gAgeMs, uint64_t fpQpc,
+                                      uint64_t gQpc, uint64_t epochQpc, uint64_t nowQpc, uint64_t qpcFreq) noexcept {
+    if (!fpRead || !gRead || fpAgeMs > kIkFreshMs || gAgeMs > kIkFreshMs || !fpQpc || !gQpc || !epochQpc || !qpcFreq ||
+        fpQpc <= epochQpc || gQpc <= epochQpc || nowQpc < fpQpc || nowQpc < gQpc) return false;
+    return nowQpc - fpQpc <= qpcFreq / 10u && nowQpc - gQpc <= qpcFreq / 10u;
+}
+inline bool nativeJournalPolicyHeld(bool currentEpoch, bool stalePolicyAtEpoch, bool startSerialKnown, uint32_t startSerial,
+                                   uint32_t currentSerial) noexcept {
+    return currentEpoch && stalePolicyAtEpoch && startSerialKnown && currentSerial == startSerial;
+}
+inline bool nativePrimaryEpochIdentityAvailable(bool sampleCopied, bool lastAcceptedPrimary, bool primary, bool eligible,
+                                                 uint64_t epoch) noexcept {
+    return (sampleCopied || lastAcceptedPrimary) && primary && eligible && epoch != 0;
+}
+
+struct PrimaryDrawFollowInput {
+    bool selectedPrimary = false, suspended = false, terminate = false;
+    bool freshFp = false, generationsMatch = false, gameStateValid = false, targetsValid = false;
+    bool contactQualified = false;
+    uint64_t nativeEpoch = 0, epochQpc = 0, fpQpc = 0;
+    uint32_t fpFrame = 0, fpGeneration = 0, threePGeneration = 0;
+    double armedWeight = 0.0, normalContactWeight = 0.0;
+};
+struct PrimaryDrawFollowDecision {
+    bool active = false, suspended = false, write = false, completed = false, refused = false;
+    double weight = 0.0;
+    uint64_t nativeEpoch = 0;
+    uint32_t fpFrame = 0;
+};
+// Draw-follow uses only a new native primary-selection epoch and a fresh same-call FP/G snapshot. It does not create attachment authority.
+class PrimaryDrawFollowState {
+  public:
+    PrimaryDrawFollowDecision step(const PrimaryDrawFollowInput& in) noexcept {
+        PrimaryDrawFollowDecision out;
+        out.nativeEpoch = in.nativeEpoch;
+        out.fpFrame = in.fpFrame;
+        if (in.terminate) {
+            active_ = false;
+            blockedEpoch_ = in.nativeEpoch;
+            appliedWeight_ = 0.0;
+            return out;
+        }
+        if (in.suspended) {
+            out.active = active_;
+            out.suspended = true;
+            // The phase survives an unreadable native poll, but its last transform does not.
+            // The caller must provide a currently validated FP/G target before any write.
+            return out;
+        }
+        if (!in.selectedPrimary) {
+            active_ = false;
+            blockedEpoch_ = in.nativeEpoch;
+            appliedWeight_ = 0.0;
+            return out;
+        }
+        if (in.nativeEpoch != 0 && in.nativeEpoch != seenEpoch_ && in.nativeEpoch != blockedEpoch_) {
+            active_ = true;
+            epoch_ = in.nativeEpoch;
+            seenEpoch_ = in.nativeEpoch;
+            appliedWeight_ = 0.0;
+            lastFpQpc_ = 0;
+            lastFpFrame_ = 0;
+            generationsLatched_ = false;
+        }
+        if (!active_ || in.nativeEpoch != epoch_ || in.nativeEpoch == blockedEpoch_) return out;
+        const bool orderedFresh = in.freshFp && in.fpFrame != 0 && in.epochQpc != 0 && in.fpQpc > in.epochQpc &&
+                                  in.fpQpc >= lastFpQpc_ && in.fpFrame >= lastFpFrame_;
+        if (!orderedFresh || !in.gameStateValid || !in.targetsValid) {
+            out.active = true;
+            out.refused = true;
+            return out;
+        }
+        if (generationsLatched_ && (!in.generationsMatch || in.fpGeneration != latchedFpGeneration_ || in.threePGeneration != latchedThreePGeneration_)) {
+            active_ = false;
+            blockedEpoch_ = in.nativeEpoch;
+            appliedWeight_ = 0.0;
+            out.active = false;
+            out.refused = true;
+            return out;
+        }
+        if (!generationsLatched_ && !in.generationsMatch) {
+            out.active = true;
+            out.refused = true;
+            return out;
+        }
+        if (!generationsLatched_) {
+            latchedFpGeneration_ = in.fpGeneration;
+            latchedThreePGeneration_ = in.threePGeneration;
+            generationsLatched_ = true;
+        }
+        lastFpQpc_ = in.fpQpc;
+        lastFpFrame_ = in.fpFrame;
+        const double armed = unit01(in.armedWeight), normal = unit01(in.normalContactWeight);
+        if (in.contactQualified && normal >= std::max(appliedWeight_, armed)) {
+            active_ = false;
+            out.completed = true;
+            return out;
+        }
+        appliedWeight_ = std::max(appliedWeight_, armed);
+        out.active = true;
+        out.write = appliedWeight_ > 0.0;
+        out.weight = appliedWeight_;
+        return out;
+    }
+    void reset() noexcept {
+        active_ = false;
+        generationsLatched_ = false;
+        epoch_ = blockedEpoch_ = seenEpoch_ = lastFpQpc_ = 0;
+        lastFpFrame_ = latchedFpGeneration_ = latchedThreePGeneration_ = 0;
+        appliedWeight_ = 0.0;
+    }
+
+  private:
+    bool active_ = false, generationsLatched_ = false;
+    uint64_t epoch_ = 0, blockedEpoch_ = 0, seenEpoch_ = 0, lastFpQpc_ = 0;
+    uint32_t lastFpFrame_ = 0, latchedFpGeneration_ = 0, latchedThreePGeneration_ = 0;
+    double appliedWeight_ = 0.0;
+};
 // The old reading of "held" (smoothstep(0.5, 1.0, the smaller grip gate) above 0), kept as a logged measure of how often it was wrong.
 inline bool distanceGateHeld(double gateMin) noexcept { return gateMin == gateMin && gateMin > 0.5; }
 
@@ -4229,6 +4447,30 @@ struct PinAnimTarget {
     double hEye[3] = {}, hHead[3] = {};
     double eyeYSelected = 0.0;   // F73: normalized height when LOCAL pitch is valid; raw height on its yaw-only fallback
 };
+// The weapon-independent rest target, rotated by physical LOCAL head pitch and scene-eye heading.
+// Callers must retain their existing target when the physical pitch is unavailable.
+inline bool pinNeckTargetPhysicalRest(const double eye[3], const double eyeFwd[3], const double* eyeUp, double localPitchRad,
+                                      bool localPitchValid, double out[3], double offset[3] = nullptr) noexcept {
+    if (!eye || !eyeFwd || !eyeUp || !out || !localPitchValid || !std::isfinite(localPitchRad)) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(eye[i]) || !std::isfinite(eyeFwd[i]) || (eyeUp && !std::isfinite(eyeUp[i]))) return false;
+    if (!(std::sqrt(eyeFwd[0] * eyeFwd[0] + eyeFwd[1] * eyeFwd[1] + eyeFwd[2] * eyeFwd[2]) > 1e-9)) return false;
+    if (!(std::sqrt(eyeUp[0] * eyeUp[0] + eyeUp[1] * eyeUp[1] + eyeUp[2] * eyeUp[2]) > 1e-9)) return false;
+    double hEye[3];
+    if (!pinHeadHeading(eyeFwd, eyeUp, hEye)) pinHeading(eyeFwd, hEye);
+    const double cp = std::cos(localPitchRad), sp = std::sin(localPitchRad);
+    const double restUp = kPinRestUpM * cp + kPinRestBackM * sp;
+    const double restForward = kPinRestBackM * cp - kPinRestUpM * sp;
+    const double v[3] = {restForward * hEye[0], restUp, restForward * hEye[2]};
+    for (int i = 0; i < 3; ++i) {
+        out[i] = eye[i] - v[i];
+        if (offset) offset[i] = v[i];
+    }
+    return true;
+}
+inline bool pinRestReferenceGenerationAllowed(bool currentAvailable, uint32_t sampleGeneration, uint32_t currentGeneration) noexcept {
+    return sampleGeneration != 0 && (!currentAvailable || sampleGeneration == currentGeneration);
+}
 // The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
 // model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
@@ -4688,7 +4930,7 @@ struct OffHand {
     uint32_t have = 0, pos = 0;
     double w = 0.0;
     uint32_t lastFrame = 0, item = 0, rigGeneration = 0, fpGeneration = 0, syntheticFrame = 0;
-    uint64_t fpRig = 0;
+    uint64_t fpRig = 0, nativeEpoch = 0;
     bool haveFrame = false, haveIdentity = false, attached = false, releasing = false, lastSteady = false, lastQualified = false;
     struct Out {
         bool two = false, ok = false, historyReady = false, withinDistance = false, steady = false, allowed = false, qualified = false;
@@ -4711,22 +4953,41 @@ struct OffHand {
     // The relative-angle test acquires a two-hand attachment. Once acquired, current readable attaches and separation keep it until the
     // explicit one-hand policy, separation limit, disarm or identity change releases it. History advances only on unique P1 frames.
     Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true,
-             uint32_t frame = 0xFFFFFFFFu, uint32_t itemId = 0, uint32_t rigGen = 0, uint64_t fpRigId = 0, uint32_t fpGen = 0) noexcept {
+             uint32_t frame = 0xFFFFFFFFu, uint32_t itemId = 0, uint32_t rigGen = 0, uint64_t fpRigId = 0, uint32_t fpGen = 0,
+             uint64_t acceptedNativeEpoch = 0, bool sourceSuspended = false) noexcept {
         Out o;
         if (!armed) {
+            if (sourceSuspended && acceptedNativeEpoch != 0 && haveIdentity && nativeEpoch == acceptedNativeEpoch &&
+                rigGeneration == rigGen && fpRig == fpRigId && fpGeneration == fpGen) {
+                o.two = attached;
+                o.w = w;
+                o.stablePolicy = attached || (releasing && w > 0.0);
+                o.historySamples = static_cast<uint8_t>(have);
+                return o;
+            }
             *this = OffHand{};
             return o;
         }
         bool keyedFrame = frame != 0xFFFFFFFFu;
         if (!keyedFrame) frame = ++syntheticFrame;
-        const bool identityChanged = haveIdentity && (item != itemId || rigGeneration != rigGen || fpRig != fpRigId || fpGeneration != fpGen);
+        const bool nativeIdentity = acceptedNativeEpoch != 0 || nativeEpoch != 0;
+        const bool identityChanged = haveIdentity && ((nativeIdentity ? nativeEpoch != acceptedNativeEpoch : item != itemId) || rigGeneration != rigGen || fpRig != fpRigId || fpGeneration != fpGen);
         if (!haveIdentity || identityChanged) {
             if (haveIdentity) o.identityReset = true;
             clearHistory();
             attached = releasing = false;
             w = 0.0;
             haveFrame = false;
-            item = itemId; rigGeneration = rigGen; fpRig = fpRigId; fpGeneration = fpGen; haveIdentity = true;
+            item = itemId; rigGeneration = rigGen; fpRig = fpRigId; fpGeneration = fpGen; nativeEpoch = acceptedNativeEpoch; haveIdentity = true;
+        }
+        item = itemId;
+        if (sourceSuspended) {
+            o.two = attached;
+            o.ok = false;
+            o.w = w;
+            o.stablePolicy = attached || (releasing && w > 0.0);
+            o.historySamples = static_cast<uint8_t>(have);
+            return o;
         }
         bool uniqueFrame = true;
         if (haveFrame) {

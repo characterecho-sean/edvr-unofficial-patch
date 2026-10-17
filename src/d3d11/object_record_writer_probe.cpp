@@ -133,9 +133,10 @@ void ObjectRecordWriterProbe::setFrame(uint32_t meshFrame) noexcept {frame_.stor
 bool ObjectRecordWriterProbe::ready() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return imageBase_&&hookStatus_==HookStatus::NotRun;}
 void* ObjectRecordWriterProbe::targetAddress() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return imageBase_?reinterpret_cast<void*>(imageBase_+kLookupRva):nullptr;}
 
-ObjectRecordWriterProbe::Snapshot ObjectRecordWriterProbe::captureLocked(uintptr_t address,size_t bytes,bool applicable,bool ownership) {
+ObjectRecordWriterProbe::Snapshot ObjectRecordWriterProbe::captureLocked(uintptr_t address,size_t bytes,bool applicable,bool ownership,bool uiRecord) {
     Snapshot out;if(!applicable){out.status="not_applicable";return out;}if(!address){out.status="null_pointer";return out;}
-    if(bytes>kByteCap-summary_.retainedBytes){out.status="byte_budget";if(ownership)++ownershipSummary_.byteBudgetDeclines;else ++summary_.byteBudgetDeclines;return out;}
+    const uint64_t cap=kByteCap+(uiRecord?kUiByteReserve:0);
+    if(summary_.retainedBytes>cap||bytes>cap-summary_.retainedBytes){out.status="byte_budget";if(ownership)++ownershipSummary_.byteBudgetDeclines;else ++summary_.byteBudgetDeclines;return out;}
     out.data.resize(bytes);if(!guardedRead(address,out.data.data(),bytes)){out.data.clear();out.status="read_fault";if(ownership)++ownershipSummary_.readFaults;else ++summary_.readFaults;return out;}
     out.status="available";summary_.retainedBytes+=bytes;return out;
 }
@@ -255,7 +256,17 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginRvaLocked(
     const OwnershipCandidate* ownership) {
     if(rva==kManagementReturn){++summary_.declinedManagement;return {};}
     bool known=false;for(auto value:kWriterReturns)known=known||rva==value;if(!known){++summary_.declinedUnknown;return {};}
-    ++summary_.observed;if(records_.size()>=kRecordCap){++summary_.recordOverflow;return {};}
+    ++summary_.observed;
+    NativeWeaponUiSubmitIdentity uiSubmit{};const bool uiCandidate=rva==0x434D149u;
+    const bool uiMatched=uiCandidate&&nativeOnFootWeaponUiCurrentSubmit(uintptr_t(c.Rdi),&uiSubmit);
+    if(uiCandidate){++summary_.uiJoinAttempted;if(uiMatched)++summary_.uiJoinMatched;else ++summary_.uiJoinUnmatched;}
+    const size_t genericLimit=kRecordCap-kUiRecordReserve;
+    size_t effectiveRecordCount=records_.size();
+#ifdef EDVR_RECORD_WRITER_TEST
+    effectiveRecordCount+=syntheticRecordCountForTest_;
+#endif
+    if((!uiMatched&&effectiveRecordCount>=genericLimit)||(uiMatched&&effectiveRecordCount>=kRecordCap)){
+        ++summary_.recordOverflow;if(uiMatched)++summary_.uiReserveOverflow;return {};}
     Record r;r.id=uint32_t(records_.size());r.sequence=++eventSequence_;r.returnRva=rva;r.threadId=GetCurrentThreadId();
     r.observedFrame=frame_.load(std::memory_order_relaxed);r.key=key;
     uintptr_t owner=0,record=0;bool contextOk=subtract(dictionary,0x260,owner);r.owner=owner;
@@ -273,10 +284,13 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginRvaLocked(
         objectBytes=kContextBytes;break;
     }
     case 0x43130AAu:r.writer="direct_43130aa";contextOk=add(callerRsp,0x60,record)&&contextOk;break;
-    case 0x434D149u:r.writer="helper_434d149";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;break;
+    case 0x434D149u:r.writer="helper_434d149";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;
+        r.uiJoinStatus=uiMatched?"matched_instance_tls":"unmatched_instance_tls";r.uiSubmit=uiSubmit;
+        {LARGE_INTEGER qpc{};if(QueryPerformanceCounter(&qpc))r.uiCaptureQpc=uint64_t(qpc.QuadPart);}
+        break;
     }
     if(!contextOk||!record){++summary_.contextFailures;r.contextStatus="unavailable";}
-    r.record=captureLocked(record,kRecordBytes,contextOk&&record);
+    r.record=captureLocked(record,kRecordBytes,contextOk&&record,false,uiMatched);
     r.keySnapshot=captureLocked(uintptr_t(r.key),0x20,contextOk);
     r.builderSnapshot=captureLocked(uintptr_t(r.builder),builderBytes,builderBytes!=0);
     r.objectSnapshot=captureLocked(uintptr_t(r.object),objectBytes,objectBytes!=0);
@@ -506,15 +520,16 @@ const char* ObjectRecordWriterProbe::ownershipTopStatus(const OwnershipSummary& 
     return "partial";
 }
 void ObjectRecordWriterProbe::writeJson(std::ostringstream& j) const {
-    std::lock_guard<std::mutex> lock(mutex_);j<<"  \"record_writers\":{\"version\":3,\"status\":\""<<topStatus(summary_,hookStatus_)<<"\",\"hook_status\":\""<<hookStatusName(hookStatus_)
-      <<"\",\"ownership_status\":\""<<ownershipTopStatus(ownershipSummary_,hookStatus_)<<"\",\"limits\":{\"records\":"<<kRecordCap<<",\"bytes\":"<<kByteCap
+    std::lock_guard<std::mutex> lock(mutex_);j<<"  \"record_writers\":{\"version\":4,\"status\":\""<<topStatus(summary_,hookStatus_)<<"\",\"hook_status\":\""<<hookStatusName(hookStatus_)
+      <<"\",\"ownership_status\":\""<<ownershipTopStatus(ownershipSummary_,hookStatus_)<<"\",\"limits\":{\"records\":"<<kRecordCap<<",\"bytes\":"<<kByteCap<<",\"ui_record_reserve\":"<<kUiRecordReserve<<",\"ui_byte_reserve\":"<<kUiByteReserve
       <<",\"ownership_records\":"<<kOwnershipCap<<",\"ownership_unwind_depth\":"<<kOwnershipUnwindDepth<<",\"ownership_traces\":"<<kAncestorTraceCap
       <<",\"ownership_trace_frames\":"<<kAncestorTraceFrameCap<<",\"ownership_outer_bytes\":"<<kOuterBytes<<",\"ownership_collection_bytes\":"<<kCollectionBytes
       <<",\"ownership_context_bytes\":"<<kContextBytes<<",\"ownership_record_tail_bytes\":"<<kRecordTailBytes<<",\"ownership_opaque_prefix_bytes\":"<<kOpaquePrefixBytes
       <<"},\"summary\":{\"observed\":"<<summary_.observed<<",\"stored\":"<<summary_.stored<<",\"completed\":"<<summary_.completed
       <<",\"retained_bytes\":"<<summary_.retainedBytes<<",\"record_overflow\":"<<summary_.recordOverflow<<",\"byte_budget_declines\":"<<summary_.byteBudgetDeclines
       <<",\"read_faults\":"<<summary_.readFaults<<",\"context_failures\":"<<summary_.contextFailures<<",\"unwind_failures\":"<<summary_.unwindFailures<<",\"completion_failures\":"<<summary_.completionFailures<<",\"declined_management\":"<<summary_.declinedManagement
-      <<",\"declined_unknown\":"<<summary_.declinedUnknown<<"},\"ownership_summary\":{\"attempted\":"<<ownershipSummary_.attempted<<",\"linked\":"<<ownershipSummary_.linked
+      <<",\"declined_unknown\":"<<summary_.declinedUnknown<<",\"ui_join_attempted\":"<<summary_.uiJoinAttempted<<",\"ui_join_matched\":"<<summary_.uiJoinMatched
+      <<",\"ui_join_unmatched\":"<<summary_.uiJoinUnmatched<<",\"ui_reserve_overflow\":"<<summary_.uiReserveOverflow<<"},\"ownership_summary\":{\"attempted\":"<<ownershipSummary_.attempted<<",\"linked\":"<<ownershipSummary_.linked
       <<",\"stored\":"<<ownershipSummary_.stored<<",\"deduplicated\":"<<ownershipSummary_.deduplicated<<",\"unsupported_writer\":"<<ownershipSummary_.unsupportedWriter
       <<",\"ancestor_missing\":"<<ownershipSummary_.ancestorMissing<<",\"unwind_failed\":"<<ownershipSummary_.unwindFailed<<",\"opcode_mismatch\":"<<ownershipSummary_.opcodeMismatch
       <<",\"tuple_read_fault\":"<<ownershipSummary_.tupleReadFault<<",\"tuple_mismatch\":"<<ownershipSummary_.tupleMismatch<<",\"registry_read_fault\":"<<ownershipSummary_.registryReadFault
@@ -524,6 +539,12 @@ void ObjectRecordWriterProbe::writeJson(std::ostringstream& j) const {
     auto snapshot=[&](const Snapshot& s){j<<"{\"status\":\""<<s.status<<"\",\"offset\":"<<s.offset<<",\"bytes\":"<<(s.status=="available"?s.data.size():0)<<'}';};
     for(size_t i=0;i<records_.size();++i){if(i)j<<',';const auto& r=records_[i];j<<"{\"id\":"<<r.id<<",\"sequence\":"<<r.sequence<<",\"writer\":\""<<r.writer<<"\",\"return_rva\":";jsonAddress(j,r.returnRva);
         j<<",\"thread_id\":"<<r.threadId<<",\"observed_frame\":"<<r.observedFrame<<",\"completion_sequence\":"<<r.completionSequence<<",\"lookup_status\":\""<<r.lookupStatus<<"\",\"owner\":";jsonAddress(j,r.owner);j<<",\"key\":";jsonAddress(j,r.key);j<<",\"builder\":";jsonAddress(j,r.builder);j<<",\"object\":";jsonAddress(j,r.object);j<<",\"entry\":";jsonAddress(j,r.entry);
+        j<<",\"ui_join_status\":\""<<r.uiJoinStatus<<"\",\"ui_submit\":{\"render_frame\":"<<r.uiSubmit.renderFrame<<",\"item_serial\":"<<r.uiSubmit.itemSerial<<",\"ordinal\":";
+        if(r.uiSubmit.ordinal==~0u)j<<"null";else j<<r.uiSubmit.ordinal;
+        j<<",\"thread_id\":"<<r.uiSubmit.submitThread<<",\"submit_qpc\":"<<r.uiSubmit.submitQpc<<",\"capture_qpc\":"<<r.uiCaptureQpc<<",\"renderer\":";
+        jsonAddress(j,r.uiSubmit.renderer);j<<",\"part\":";jsonAddress(j,r.uiSubmit.part);j<<",\"instance\":";jsonAddress(j,r.uiSubmit.instance);
+        j<<",\"name_id\":"<<r.uiSubmit.nameId<<",\"facing\":"<<unsigned(r.uiSubmit.facing)<<",\"space\":"<<r.uiSubmit.space
+         <<",\"item_read\":"<<(r.uiSubmit.itemRead?"true":"false")<<",\"fields_valid\":"<<(r.uiSubmit.fieldsValid?"true":"false")<<",\"instance_valid\":"<<(r.uiSubmit.instanceValid?"true":"false")<<'}';
         j<<",\"ownership_id\":";if(r.ownershipId==kNone)j<<"null";else j<<r.ownershipId;j<<",\"ownership_status\":\""<<r.ownershipStatus<<'\"';
         j<<",\"context_status\":\""<<r.contextStatus<<"\",\"record\":";snapshot(r.record);j<<",\"key_snapshot\":";snapshot(r.keySnapshot);j<<",\"builder_snapshot\":";snapshot(r.builderSnapshot);j<<",\"object_snapshot\":";snapshot(r.objectSnapshot);j<<",\"entry_snapshot\":";snapshot(r.entrySnapshot);j<<'}';}
     j<<"],\"ownerships\":[";

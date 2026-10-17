@@ -1,4 +1,5 @@
 #include "object_probe.h"
+#include "device_hook.h"
 
 #include <atomic>
 #include <cstdio>
@@ -1366,7 +1367,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
-    Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
+    Log::get().note("object probe: GUI source snapshot %ls: %u draws, eye route=%s (%u source-resource candidates; native part identity unmatched), %u route-cap refusals, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. GUI source targets matched against actual eye-draw PS resources; candidate eye comes from the scene DSV mapping when known.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.routeStatus(),unsigned(g_guiSnapshot.routeCount()),g_guiSnapshot.routeDeclines,g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     detail::g_objectProbeLedgerOn = false;
     g_skin.reset();   // its report went out above; a run that never reported is said at shutdown
     ledgerRelease();
@@ -1437,7 +1438,11 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
 }
 
 void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
-    if(detail::g_objectProbeLedgerOn && ctx)g_f77CandidateSnapshot.candidateDrawIssued(ctx,issued);
+    if(detail::g_objectProbeLedgerOn && ctx){
+        ID3D11VertexShader* vs=nullptr;ID3D11PixelShader* ps=nullptr;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+        const uint64_t vsHash=vs?lookupShaderHash(vs):0,psHash=ps?lookupShaderHash(ps):0;if(vs)vs->Release();if(ps)ps->Release();
+        g_f77CandidateSnapshot.candidateDrawIssued(ctx,issued,vsHash,psHash);
+    }
 }
 
 void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
@@ -1458,7 +1463,7 @@ void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t co
                                  uint32_t startInstance,uint32_t start,int32_t base) {
     if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);if(!GuiDrawSnapshot::gui(vs))return;
-    g_guiSnapshot.capture(ctx,g_frame+1,vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
+    g_guiSnapshot.capture(ctx,g_frame+1,nativeOnFootRenderFrame(),vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
 }
 
 namespace {
@@ -1503,6 +1508,25 @@ __declspec(noinline) void objectProbeNotePoolFirstSeen(ID3D11Buffer* buf) {
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                           uint32_t startInstance,uint32_t start,int32_t base) {
     if ((!detail::g_objectProbeOn && !detail::g_objectProbeLedgerOn) || !ctx) return;
+    const uint32_t routeFrame=g_frame+1;
+    if(detail::g_objectProbeLedgerOn && routeFrame>=g_ledgerFrame0 && routeFrame<=g_ledgerLastFrame && g_guiSnapshot.routeNeeded()) {
+        TemporalDrawStamp stamp{};LARGE_INTEGER drawQpc{};
+        if(temporalPassDrawStamp(&stamp) && stamp.sceneFrameValid && stamp.epochValid &&
+           QueryPerformanceCounter(&drawQpc)) {
+            const uint64_t vsHash=bindingShaderHash(BindSlot::Vs),psHash=bindingShaderHash(BindSlot::Ps);
+            const uint8_t* code=nullptr;size_t codeBytes=0;
+            if(g_guiSnapshot.sourceResourceBound(ctx)){
+                if(flatProbeShaderLookup('v',vsHash,&code,&codeBytes))g_guiSnapshot.rememberRouteShader(vsHash,code,codeBytes);
+                if(flatProbeShaderLookup('p',psHash,&code,&codeBytes))g_guiSnapshot.rememberRouteShader(psHash,code,codeBytes);
+            }
+            ID3D11DepthStencilView* routeDsv=nullptr;ctx->OMGetRenderTargets(0,nullptr,&routeDsv);
+            int routeEye=-1;if(routeDsv)depthProbeSceneEyeOf(routeDsv,&routeEye,nullptr);if(routeDsv)routeDsv->Release();
+            g_guiSnapshot.captureEyeCandidate(ctx,routeEye,kind,count,instances,start,base,startInstance,
+                vsHash,psHash,stamp.sceneFrame,nativeOnFootRenderFrame(),stamp.epoch,routeFrame-g_ledgerFrame0,
+                stamp.scheduledIndexValid?int(stamp.scheduledIndex):-1,
+                stamp.scheduledIndexValid?stamp.scheduledRenderFrame:0,uint64_t(drawQpc.QuadPart));
+        } else g_guiSnapshot.noteRouteRefusal();
+    }
     if (detail::g_objectProbeLedgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
     if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
@@ -1706,7 +1730,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     }
     g_ledgerSkipped = 0;
     ledgerRelease();
-    g_f77CandidateSnapshot.armF77Candidates();
+    g_f77CandidateSnapshot.armF77Candidates(g_ledgerFrame0);
     detail::g_objectProbeLedgerOn = true;
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).

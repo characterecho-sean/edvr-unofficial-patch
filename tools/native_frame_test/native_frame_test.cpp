@@ -3791,6 +3791,161 @@ int wmain(int argc, wchar_t** argv) {
                 headingStable = dist(Ta, Tb) < 1e-12 && dist(Tf0, Tinvalid) < 1e-12 && std::fabs(pta.eyeYSelected - ptb.eyeYSelected) < 1e-12;
                 check(orbitFixed && headingStable && crouchStable && pitchDecodeOk && domainFallback,
                       "F73: natural-LOCAL pitch decode and nonzero-yaw physical orbit keep the standing neck fixed through near-vertical gaze, preserve crouch classification and authored vector, and ignore scene pitch when local pitch is fixed; invalid local pose uses the raw-height calibration and yaw-only offset");
+                bool physicalRestFixed = true;
+                for (double yawDeg : yawList) {
+                    const double yaw = yawDeg * nf::kIkPi / 180.0;
+                    const double hx = std::sin(yaw), hz = std::cos(yaw);
+                    for (double pitchDeg : pitchList) {
+                        const double pitch = pitchDeg * nf::kIkPi / 180.0;
+                        const double cp = std::cos(pitch), sp = std::sin(pitch);
+                        const double headFwd[3] = {hx * cp, sp, hz * cp};
+                        const double headUp[3] = {-hx * sp, cp, -hz * sp};
+                        const double vUp = nf::kPinRestUpM * cp + nf::kPinRestBackM * sp;
+                        const double vForward = nf::kPinRestBackM * cp - nf::kPinRestUpM * sp;
+                        const double eye[3] = {neckOrbit[0] + hx * vForward, neckOrbit[1] + vUp, neckOrbit[2] + hz * vForward};
+                        double target[3] = {};
+                        physicalRestFixed = physicalRestFixed && nf::pinNeckTargetPhysicalRest(eye, headFwd, headUp, pitch, true, target) &&
+                                            dist(target, neckOrbit) < 1e-9;
+                    }
+                }
+                double invalidTarget[3] = {7.0, 8.0, 9.0};
+                const double noHeading[3] = {};
+                const double noUp[3] = {};
+                physicalRestFixed = physicalRestFixed && !nf::pinNeckTargetPhysicalRest(testEye, noHeading, sceneUpA, testPitch, true, invalidTarget) &&
+                                    invalidTarget[0] == 7.0 && invalidTarget[1] == 8.0 && invalidTarget[2] == 9.0 &&
+                                    !nf::pinNeckTargetPhysicalRest(testEye, sceneFwdA, noUp, testPitch, true, invalidTarget) && invalidTarget[0] == 7.0 &&
+                                    !nf::pinNeckTargetPhysicalRest(testEye, sceneFwdA, sceneUpA, testPitch, false, invalidTarget) && invalidTarget[0] == 7.0;
+                check(physicalRestFixed,
+                      "F83: physical-rest target exactly recovers the neck through the captured pitch/yaw sweep, while missing direction or LOCAL pitch refuses without changing the caller target");
+                check(nf::pinRestReferenceGenerationAllowed(false, 620u, 0u) && nf::pinRestReferenceGenerationAllowed(true, 620u, 620u) &&
+                          !nf::pinRestReferenceGenerationAllowed(true, 620u, 621u) && !nf::pinRestReferenceGenerationAllowed(true, 0u, 0u) &&
+                          !nf::pinRestReferenceGenerationAllowed(false, 0u, 0u),
+                      "F83: physical-rest candidate permits the existing validated sample only when current generation is unavailable and refuses known mismatch or zero generation");
+                nf::NativePrimarySelectionInput nativeSelection;
+                nativeSelection.activityValid = nativeSelection.sinkRead = nativeSelection.sinkSignatureValid = nativeSelection.inventoryRead = true;
+                nativeSelection.selectedRead = nativeSelection.holsterRead = nativeSelection.categoryCacheRead = true;
+                nativeSelection.sink = 0x1000; nativeSelection.inventory = 0x2000; nativeSelection.holsterId = 0xFFFFFFFFu;
+                nativeSelection.categoryId[0] = 10; nativeSelection.categoryId[1] = 11; nativeSelection.categoryId[2] = 12; nativeSelection.categoryId[3] = 13;
+                nativeSelection.selectedId = nativeSelection.holsterId; nativeSelection.renderFrame = 1; nativeSelection.qpc = 100;
+                nf::NativePrimarySelectionState alreadyPrimaryState;
+                auto alreadyPrimaryInput = nativeSelection;
+                alreadyPrimaryInput.selectedId = alreadyPrimaryInput.categoryId[2] = 77;
+                const auto alreadyPrimary = alreadyPrimaryState.observe(alreadyPrimaryInput);
+                alreadyPrimaryInput.renderFrame = 2; alreadyPrimaryInput.qpc = 200;
+                const auto alreadyPrimaryRepeat = alreadyPrimaryState.observe(alreadyPrimaryInput);
+                const auto baselinePublication = nf::nativePrimaryPublication(false, false, false, alreadyPrimary);
+                nf::NativePrimarySelectionDecision readablePrimaryTransition;
+                readablePrimaryTransition.readable = readablePrimaryTransition.primary = readablePrimaryTransition.identityChanged = readablePrimaryTransition.terminate = true;
+                const auto transitionWithOldTermination = nf::nativePrimaryPublication(true, true, true, readablePrimaryTransition);
+                nf::NativePrimarySelectionState nativeState;
+                const auto holstered = nativeState.observe(nativeSelection);
+                nativeSelection.selectedId = nativeSelection.categoryId[2] = 42; nativeSelection.renderFrame = 2; nativeSelection.qpc = 200;
+                const auto primary = nativeState.observe(nativeSelection);
+                const auto transitionPublication = nf::nativePrimaryPublication(false, false, true, primary);
+                const auto duplicate = nativeState.observe(nativeSelection);
+                nativeSelection.renderFrame = 1; nativeSelection.qpc = 150;
+                const auto reversed = nativeState.observe(nativeSelection);
+                nativeSelection.renderFrame = 5; nativeSelection.qpc = 500;
+                const auto gap = nativeState.observe(nativeSelection);
+                nativeSelection.primaryIntent = true; nativeSelection.renderFrame = 6; nativeSelection.qpc = 600;
+                const auto noIdKeyRepeat = nativeState.observe(nativeSelection);
+                nativeSelection.renderFrame = 7; nativeSelection.qpc = 700;
+                const auto secondary = nativeState.observe(nativeSelection);
+                nativeSelection.secondaryIntent = true; nativeSelection.renderFrame = 7; nativeSelection.qpc = 701;
+                const auto secondaryIntent = nativeState.observe(nativeSelection);
+                nativeSelection.secondaryIntent = false; nativeSelection.sink = 0x3000; nativeSelection.renderFrame = 8; nativeSelection.qpc = 800;
+                const auto sinkChange = nativeState.observe(nativeSelection);
+                nativeSelection.sink = 0x1000; nativeSelection.selectedId = nativeSelection.holsterId; nativeSelection.renderFrame = 9; nativeSelection.qpc = 900;
+                const auto holster = nativeState.observe(nativeSelection);
+                nativeSelection.selectedId = 42; nativeSelection.categoryId[2] = 42; nativeSelection.renderFrame = 10; nativeSelection.qpc = 1000;
+                const auto reselect = nativeState.observe(nativeSelection);
+                nativeSelection.activityValid = false; nativeSelection.renderFrame = 11; nativeSelection.qpc = 1100;
+                const auto transientRead = nativeState.observe(nativeSelection);
+                nativeSelection.activityValid = true; nativeSelection.renderFrame = 11; nativeSelection.qpc = 1101;
+                const auto afterTransient = nativeState.observe(nativeSelection);
+                nativeSelection.sinkSignatureValid = false; nativeSelection.renderFrame = 12; nativeSelection.qpc = 1200;
+                const auto invalidSignature = nativeState.observe(nativeSelection);
+                nativeSelection.sinkSignatureValid = true; nativeSelection.renderFrame = 13; nativeSelection.qpc = 1300;
+                const auto afterInvalid = nativeState.observe(nativeSelection);
+                nativeSelection.categoryId[1] = 42; nativeSelection.renderFrame = 14; nativeSelection.qpc = 1400;
+                const auto conflict = nativeState.observe(nativeSelection);
+                check(holstered.readable && !holstered.primary && primary.primary && primary.identityChanged && primary.epoch > holstered.epoch &&
+                          alreadyPrimary.primary && !alreadyPrimary.identityChanged && alreadyPrimary.epoch != 0 && alreadyPrimaryRepeat.primary &&
+                          !alreadyPrimaryRepeat.identityChanged && alreadyPrimaryRepeat.epoch == alreadyPrimary.epoch &&
+                          duplicate.duplicate && duplicate.epoch == primary.epoch && reversed.reversed && reversed.epoch == primary.epoch &&
+                          gap.frameGap && gap.epoch == primary.epoch && noIdKeyRepeat.primary && !noIdKeyRepeat.identityChanged &&
+                          secondary.primary && !secondary.terminate && secondaryIntent.primary && !secondaryIntent.terminate &&
+                          sinkChange.identityChanged && !sinkChange.terminate && sinkChange.epoch > secondaryIntent.epoch &&
+                          !baselinePublication.followEligible && transitionPublication.primary && transitionPublication.followEligible &&
+                          transitionWithOldTermination.primary && transitionWithOldTermination.followEligible &&
+                          !nf::nativePrimaryPublication(true, true, true, invalidSignature).primary &&
+                          !nf::nativePrimaryPublication(true, true, true, invalidSignature).followEligible &&
+                          !holster.primary && holster.terminate && reselect.primary && reselect.epoch > holster.epoch && !invalidSignature.readable && invalidSignature.terminate &&
+                          transientRead.suspended && !transientRead.terminate && afterTransient.primary && !afterTransient.identityChanged && afterTransient.epoch == reselect.epoch &&
+                          afterInvalid.primary && !afterInvalid.identityChanged && conflict.readable && !conflict.primary && conflict.terminate,
+                      "F83: native selection requires a unique category-2 ID; holster, cache conflict and bad signatures terminate, while transient reads suspend and preserve identity; same-frame updates, secondary intent, gaps and key repeats do not create epochs");
+                nf::PrimaryDrawFollowState drawFollow;
+                check(nf::primaryDrawSourcesCurrent(true, true, 20, 30, 120, 125, 100, 130, 1000) &&
+                          !nf::primaryDrawSourcesCurrent(true, true, 101, 20, 120, 125, 100, 130, 1000) &&
+                          !nf::primaryDrawSourcesCurrent(true, true, 20, 20, 99, 125, 100, 130, 1000) &&
+                          !nf::primaryDrawSourcesCurrent(true, false, 20, 20, 120, 125, 100, 130, 1000) &&
+                          !nf::primaryDrawSourcesCurrent(true, true, 20, 20, 120, 125, 100, 1200, 1000),
+                      "F83: draw targets require fresh FP and G reads after the native epoch within one current 100ms window");
+                check(nf::nativeJournalPolicyHeld(true, true, true, 7, 7) && !nf::nativeJournalPolicyHeld(true, true, true, 7, 8) &&
+                          !nf::nativeJournalPolicyHeld(true, false, true, 7, 7) && !nf::nativeJournalPolicyHeld(false, true, true, 7, 7),
+                      "F83: last proven epoch holds stale-tool/pistol policy through source expiry, releasing on serial catchup or confirmed identity loss");
+                check(nf::nativePrimaryEpochIdentityAvailable(false, true, true, true, 9) &&
+                          !nf::nativePrimaryEpochIdentityAvailable(false, false, true, true, 9) &&
+                          !nf::nativePrimaryEpochIdentityAvailable(true, false, false, false, 9),
+                      "F83: failed bounded sample copy retains only last accepted identity; confirmed terminal sample revokes it");
+                nf::PrimaryDrawFollowInput drawInput;
+                drawInput.selectedPrimary = true;
+                drawInput.generationsMatch = drawInput.gameStateValid = drawInput.targetsValid = true;
+                drawInput.nativeEpoch = 8; drawInput.epochQpc = 100; drawInput.fpGeneration = 4; drawInput.threePGeneration = 17;
+                drawInput.freshFp = true; drawInput.fpFrame = 20; drawInput.fpQpc = 90; drawInput.armedWeight = 0.8;
+                const auto beforeEpochFresh = drawFollow.step(drawInput);
+                drawInput.fpQpc = 120; drawInput.armedWeight = 0.8;
+                const auto firstFresh = drawFollow.step(drawInput);
+                drawInput.suspended = true; drawInput.selectedPrimary = false;
+                const auto suspended = drawFollow.step(drawInput);
+                drawInput.suspended = false; drawInput.selectedPrimary = true;
+                const auto reusedFpSnapshot = drawFollow.step(drawInput);
+                drawInput.fpFrame = 21; drawInput.fpQpc = 130; drawInput.armedWeight = 0.95; drawInput.contactQualified = true; drawInput.normalContactWeight = 0.074;
+                const auto handoverLow = drawFollow.step(drawInput);
+                drawInput.fpFrame = 22; drawInput.fpQpc = 140; drawInput.armedWeight = 0.2; drawInput.normalContactWeight = 0.8;
+                const auto handoverNear = drawFollow.step(drawInput);
+                drawInput.fpFrame = 23; drawInput.fpQpc = 150; drawInput.armedWeight = 0.99; drawInput.normalContactWeight = 0.97;
+                const auto armedStillGrowing = drawFollow.step(drawInput);
+                drawInput.fpFrame = 24; drawInput.fpQpc = 160; drawInput.armedWeight = 0.2; drawInput.normalContactWeight = 1.0;
+                const auto handoverDone = drawFollow.step(drawInput);
+                drawInput.fpFrame = 25; drawInput.fpQpc = 170;
+                const auto steadyRelease = drawFollow.step(drawInput);
+                nf::PrimaryDrawFollowState generationFollow;
+                drawInput.nativeEpoch = 9; drawInput.epochQpc = 200; drawInput.fpFrame = 26; drawInput.fpQpc = 210; drawInput.contactQualified = false;
+                drawInput.normalContactWeight = 0.0; drawInput.generationsMatch = false; drawInput.fpGeneration = 4; drawInput.threePGeneration = 5;
+                const auto pendingGeneration = generationFollow.step(drawInput);
+                drawInput.generationsMatch = true; drawInput.fpFrame = 27; drawInput.fpQpc = 220;
+                const auto independentGenerationDomains = generationFollow.step(drawInput);
+                drawInput.fpFrame = 28; drawInput.fpQpc = 230; drawInput.fpGeneration = 5;
+                const auto generationRefusal = generationFollow.step(drawInput);
+                drawInput.fpFrame = 29; drawInput.fpQpc = 240; drawInput.fpGeneration = 4;
+                const auto sameEpochCannotRestart = generationFollow.step(drawInput);
+                nf::PrimaryDrawFollowState effectiveWeightFollow;
+                nf::PrimaryDrawFollowInput effectiveWeightInput;
+                effectiveWeightInput.selectedPrimary = effectiveWeightInput.generationsMatch = effectiveWeightInput.gameStateValid = effectiveWeightInput.targetsValid = true;
+                effectiveWeightInput.freshFp = true; effectiveWeightInput.nativeEpoch = 44; effectiveWeightInput.epochQpc = 100;
+                effectiveWeightInput.fpQpc = 110; effectiveWeightInput.fpFrame = 1; effectiveWeightInput.fpGeneration = 1; effectiveWeightInput.threePGeneration = 1;
+                effectiveWeightInput.armedWeight = 0.5; effectiveWeightInput.normalContactWeight = 0.25; effectiveWeightInput.contactQualified = true;
+                const auto halfEnvelope = effectiveWeightFollow.step(effectiveWeightInput);
+                effectiveWeightInput.fpQpc = 120; effectiveWeightInput.fpFrame = 2; effectiveWeightInput.armedWeight = 0.5; effectiveWeightInput.normalContactWeight = 0.5;
+                const auto fullEnvelope = effectiveWeightFollow.step(effectiveWeightInput);
+                check(beforeEpochFresh.active && beforeEpochFresh.refused && !beforeEpochFresh.write && firstFresh.active && firstFresh.write && firstFresh.weight == 0.8 &&
+                          suspended.suspended && suspended.active && !suspended.write && reusedFpSnapshot.write && reusedFpSnapshot.weight == firstFresh.weight &&
+                          handoverLow.write && handoverLow.weight == 0.95 && handoverNear.write && handoverNear.weight == 0.95 && armedStillGrowing.write && armedStillGrowing.weight == 0.99 &&
+                          handoverDone.completed && !handoverDone.write && !steadyRelease.active && pendingGeneration.active && pendingGeneration.refused &&
+                          independentGenerationDomains.write && independentGenerationDomains.active && generationRefusal.refused && !generationRefusal.active && !sameEpochCannotRestart.active &&
+                          halfEnvelope.write && !halfEnvelope.completed && halfEnvelope.weight == 0.5 && fullEnvelope.completed && !fullEnvelope.write,
+                      "F83: draw waits for fresh post-epoch FP/G data, tolerates same-snapshot reuse and transient selection suspension, latches independent generations, holds armed weight until contact catches up, and cannot reopen after completion or generation change");
                 // ---- F69d: the bins: jumping from the vertical speed alone, crouching from w_c; the clearance's inside test and axes.
                 check(nf::pinState(0.1, 0.0) == 0 && nf::pinState(1.2, 0.0) == 1 && nf::pinState(4.0, 0.2) == 2 && nf::pinState(1.0, 1.1) == 3 && nf::pinState(4.0, -1.0) == 3 &&
                           nf::pinState(0.1, 0.0, true) == 4 && nf::pinState(4.0, 0.0, true) == 4 && nf::pinState(0.1, 1.2, true) == 3,
@@ -4287,6 +4442,27 @@ int wmain(int argc, wchar_t** argv) {
                     const bool invalidReleased = !invalid.ok && !invalid.two && discontinuity.have == 0;
                     check(gapRetained && reverseReleased && invalidReleased,
                           "F78: skipped P1 frames restart acquisition without dropping a valid retained grip; reversed or unreadable inputs release and cannot advance state");
+                    nf::OffHand nativeEpochContact;
+                    for (uint32_t frame = 1; frame <= 12; ++frame)
+                        nativeEpochContact.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7, 88);
+                    const uint32_t historyBeforeSuspend = nativeEpochContact.have;
+                    const double weightBeforeSuspend = nativeEpochContact.w;
+                    const auto nativeSuspend = nativeEpochContact.step(dtF, true, true, a51, a52, true, 13, 9, 4, 0xAAu, 7, 88, true);
+                    const auto journalCatchup = nativeEpochContact.step(dtF, true, true, a51, a52, true, 13, 9, 4, 0xAAu, 7, 88);
+                    const auto disarmedSuspend = nativeEpochContact.step(dtF, false, false, a51, a52, true, 13, 9, 4, 0xAAu, 7, 88, true);
+                    const auto realNativeChange = nativeEpochContact.step(dtF, true, true, a51, a52, true, 14, 9, 4, 0xAAu, 7, 89);
+                    check(nativeSuspend.historySamples == historyBeforeSuspend,
+                          "F83: transient source suspension freezes contact history");
+                    check(nativeSuspend.w == weightBeforeSuspend,
+                          "F83: transient source suspension freezes contact weight");
+                    check(!journalCatchup.identityReset,
+                          "F83: journal serial catchup preserves a native primary epoch");
+                    check(disarmedSuspend.historySamples == historyBeforeSuspend && disarmedSuspend.w == journalCatchup.w,
+                          "F83: a suspended epoch preserves classifier state even when the normal armed flag falls");
+                    check(journalCatchup.historySamples == historyBeforeSuspend,
+                          "F83: journal catchup keeps existing attachment history");
+                    check(realNativeChange.identityReset && !realNativeChange.two,
+                          "F83: a new native epoch resets contact state");
                     check(nf::supportItem("$wpn_s_pistol_name;") == nf::kSupportPistol &&
                           nf::supportItem("$humanoid_rechargetool_name;") == nf::kSupportNone &&
                           nf::supportItem("$humanoid_companalyser_name;") == nf::kSupportNone &&
@@ -6245,7 +6421,102 @@ int wmain(int argc, wchar_t** argv) {
             {{-0.17616086449709473, 0.5412819385528564, -0.11689105021758688}, {0.09629824016007843, 0.5372578501701355, 0.24301548328259276},
              {-0.038498747011206425, 0.14983943104743958, 0.21666245188572691}}};
         const double noAdsPush[3] = {};
+        // F83 fixture copied from build/F83-rifle-physical-rest-fixture.json. This is the captured final old-pin
+        // pose (not raw pre-leg animation); LOCAL pitch is the synchronized -21.5-degree sample, swept around it.
+        const double f83Eye[3] = {-0.000953410228, 0.973248422, 0.390921235};
+        const double f83Forward[3] = {-0.003402806651, 0.0, 0.999994210437}; // exact same-call heading recovered from clearance projections
+        const double f83Up[3] = {-0.036420859967736204, 0.9068033396301773, 0.41997780374269933};
+        const double f83OldNeck[3] = {-0.0482054353, 0.937080801, 0.229304209};
+        const double f83WeaponViewShift[3] = {0.0249811114985, 0.000848921839968, 0.000472385888137};
+        const double f83Chest[3] = {-0.182043061, 0.879276514, 0.0378262214};
+        nf::CrouchNeckArm f83Arms[2] = {};
+        const double f83Clavicles[2][3] = {{-0.0863803029, 0.881117284, 0.228592142}, {-0.045565486, 0.875224829, 0.201852158}};
+        const double f83Shoulders[2][3] = {{-0.20126635786820346, 0.9230817237471743, 0.31298763969288956},
+                                           {0.0771502256, 0.892467797, 0.119874969}};
+        const double f83Hands[2][3] = {{0.0395753048, 0.75500524, 0.892089069}, {0.140434176, 0.815658271, 0.633480906}};
+        const double f83Targets[2][3] = {{0.0675485879, 0.734645009, 0.96726352}, {0.140434176, 0.815658271, 0.633480906}};
+        const double f83Lengths[2][2] = {{0.30431136425469857, 0.2876238366066916}, {0.3043113455960454, 0.28762391210413996}};
+        for (int side = 0; side < 2; ++side) {
+            std::memcpy(f83Arms[side].clavicle, f83Clavicles[side], sizeof(f83Clavicles[side]));
+            std::memcpy(f83Arms[side].shoulder, f83Shoulders[side], sizeof(f83Shoulders[side]));
+            std::memcpy(f83Arms[side].hand, f83Hands[side], sizeof(f83Hands[side]));
+            std::memcpy(f83Arms[side].target, f83Targets[side], sizeof(f83Targets[side]));
+            f83Arms[side].l1 = f83Lengths[side][0]; f83Arms[side].l2 = f83Lengths[side][1]; f83Arms[side].wSolve = 1.0;
+        }
+        nf::CrouchNeckLeg f83Legs[2] = {
+            {{-0.3802296817302704, 0.6456410884857178, -0.043319929391145706}, {-0.27534249424934387, 0.5876571536064148, 0.39190322160720825},
+             {-0.3679353892803192, 0.18718966841697693, 0.38873347640037537}},
+            {{-0.2146882861852646, 0.6331141591072083, -0.1554059237241745}, {0.02136782370507717, 0.26503095030784607, -0.04326692968606949},
+             {-0.1507629007101059, 0.16926850378513336, -0.4040413200855255}}};
+        const auto oldRestSolve = nf::crouchNeckYawSelect(f83OldNeck, f83Chest, f83Arms, f83Legs, 0.0, noAdsPush, 50.0, 0.25);
+        bool f83CapturedPitchSweep = !oldRestSolve.feasible;
+        double centerYawDeg = 0.0;
+        const double f83PitchSweep[] = {-24.0, -21.5, -19.0};
+        for (double pitchDeg : f83PitchSweep) {
+            const double pitch = pitchDeg * nf::kIkPi / 180.0;
+            double restTarget[3];
+            const bool targetOk = nf::pinNeckTargetPhysicalRest(f83Eye, f83Forward, f83Up, pitch, true, restTarget);
+            nf::weaponViewOffsetTarget(restTarget, f83WeaponViewShift);
+            const nf::PinMove candidateMove = nf::pinMove(f83OldNeck, restTarget);
+            const double delta[3] = {candidateMove.th[0], candidateMove.delta, candidateMove.th[2]};
+            const double candidateNeck[3] = {f83OldNeck[0] + delta[0], f83OldNeck[1] + delta[1], f83OldNeck[2] + delta[2]};
+            const double candidateChest[3] = {f83Chest[0] + delta[0], f83Chest[1] + delta[1], f83Chest[2] + delta[2]};
+            nf::CrouchNeckArm candidateArms[2] = {f83Arms[0], f83Arms[1]};
+            nf::CrouchNeckLeg candidateLegs[2] = {f83Legs[0], f83Legs[1]};
+            for (int side = 0; side < 2; ++side) for (int axis = 0; axis < 3; ++axis) {
+                const double shift = delta[axis];
+                candidateArms[side].clavicle[axis] += shift;
+                candidateArms[side].shoulder[axis] += shift;
+                candidateArms[side].hand[axis] += shift;
+                if (axis != 1) {
+                    candidateLegs[side].hip[axis] += shift;
+                    candidateLegs[side].knee[axis] += shift;
+                    candidateLegs[side].foot[axis] += shift;
+                }
+            }
+            const auto candidate = nf::crouchNeckYawSelect(candidateNeck, candidateChest, candidateArms, candidateLegs, delta[1], noAdsPush, 50.0, 0.25);
+            f83CapturedPitchSweep = f83CapturedPitchSweep && targetOk && candidate.feasible;
+            if (std::fabs(pitchDeg + 21.5) < 1e-9) centerYawDeg = candidate.yawRad * 180.0 / nf::kIkPi;
+        }
+        check(f83CapturedPitchSweep && centerYawDeg > 13.0 && centerYawDeg < 16.0,
+              "F83: actual captured F82 old target has no feasible solution, while physical rest plus the captured 2.5 cm model shift solves arms and held feet across the -24/-21.5/-19-degree pitch sweep; center yaw matches the corrected counterfactual range");
         const nf::CrouchNeckYaw picked = nf::crouchNeckYawSelect(neck, pivot, arms, legs, 0.0, noAdsPush);
+        bool restPitchSweepReach = true;
+        const double physicalPitchDegs[] = {-24.0, -21.5, -19.0};
+        const double pitchBase = physicalPitchDegs[1] * nf::kIkPi / 180.0;
+        const double baseUp = nf::kPinRestUpM * std::cos(pitchBase) + nf::kPinRestBackM * std::sin(pitchBase);
+        const double baseForward = nf::kPinRestBackM * std::cos(pitchBase) - nf::kPinRestUpM * std::sin(pitchBase);
+        const double fixedEye[3] = {neck[0] + baseForward, neck[1] + baseUp, neck[2]};
+        for (double pitchDeg : physicalPitchDegs) {
+            const double pitch = pitchDeg * nf::kIkPi / 180.0;
+            const double fwd[3] = {std::cos(pitch), std::sin(pitch), 0.0};
+            const double up[3] = {-std::sin(pitch), std::cos(pitch), 0.0};
+            double restTarget[3];
+            const bool targetOk = nf::pinNeckTargetPhysicalRest(fixedEye, fwd, up, pitch, true, restTarget);
+            const nf::PinMove candidateMove = nf::pinMove(neck, restTarget);
+            double candidateNeck[3] = {neck[0] + candidateMove.th[0], neck[1] + candidateMove.delta, neck[2] + candidateMove.th[2]};
+            double candidatePivot[3] = {pivot[0] + candidateMove.th[0], pivot[1] + candidateMove.delta, pivot[2] + candidateMove.th[2]};
+            nf::CrouchNeckArm shiftedArms[2] = {arms[0], arms[1]};
+            nf::CrouchNeckLeg shiftedLegs[2] = {legs[0], legs[1]};
+            for (int side = 0; side < 2; ++side) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double shift = axis == 0 ? candidateMove.th[0] : axis == 1 ? candidateMove.delta : candidateMove.th[2];
+                    shiftedArms[side].clavicle[axis] += shift;
+                    shiftedArms[side].shoulder[axis] += shift;
+                    shiftedArms[side].hand[axis] += shift;
+                    if (axis != 1) {
+                        shiftedLegs[side].hip[axis] += shift;
+                        shiftedLegs[side].knee[axis] += shift;
+                        shiftedLegs[side].foot[axis] += shift;
+                    }
+                }
+            }
+            const nf::CrouchNeckYaw candidate = nf::crouchNeckYawSelect(candidateNeck, candidatePivot, shiftedArms, shiftedLegs,
+                                                                         candidateMove.delta, noAdsPush, 50.0, 0.25);
+            restPitchSweepReach = restPitchSweepReach && targetOk && candidate.feasible;
+        }
+        check(restPitchSweepReach,
+              "F83: synthetic rest-target pitch sweep remains feasible against the fixture geometry using the actual torso and foot selector");
         double turnedNeck[3], repinned[3];
         nf::turnAboutVertical(neck, pivot, picked.yawRad, turnedNeck);
         for (int i = 0; i < 3; ++i) repinned[i] = turnedNeck[i] + picked.rootDelta[i];
