@@ -494,18 +494,29 @@ def self_test():
             assert main(['--root', root, '--build', build, '--out', out,
                          '--version', '1.2.3', '--dry-run']) == 0 and not os.path.exists(out)
             os.remove(os.path.join(build, 'edvr_openxr_runtime.dll'))
-            assert main(['--root', root, '--build', build, '--out', out,
-                         '--version', '1.2.3']) == 1 and not os.path.exists(out)
+            import contextlib, io
+            missing = io.StringIO()  # the refusal under test, relabelled below
+            with contextlib.redirect_stdout(missing), contextlib.redirect_stderr(missing):
+                code = main(['--root', root, '--build', build, '--out', out,
+                             '--version', '1.2.3'])
+            assert code == 1 and not os.path.exists(out)
+            assert 'ERROR: native runtime' in missing.getvalue()
+            print('expected-error: ' + missing.getvalue().strip().replace('gen_installer_rc: ERROR: ', '', 1))
             # The flat edition is retired: --profile is no longer an option at all.
             with open(os.path.join(build, 'edvr_openxr_runtime.dll'), 'wb') as stream: stream.write(b'x')
             assert main(['--root', root, '--build', build, '--out', out,
                          '--version', '1.2.3', '--dry-run']) == 0
             assert not os.path.exists(out) and not os.path.exists(os.path.join(build, 'edvr-flat.ini'))
+            import contextlib, io
+            refusal = io.StringIO()  # argparse's usage text: expected, so not echoed raw
             try:
-                main(['--root', root, '--build', build, '--out', out,
-                      '--version', '1.2.3', '--profile', 'flat'])
+                with contextlib.redirect_stderr(refusal):
+                    main(['--root', root, '--build', build, '--out', out,
+                          '--version', '1.2.3', '--profile', 'flat'])
             except SystemExit as exc:
                 assert exc.code == 2
+                assert 'unrecognized arguments: --profile flat' in refusal.getvalue()
+                print('expected-error: argparse refused --profile flat (exit 2)')
             else:
                 raise AssertionError('--profile flat was accepted')
             for name in ('libxess.dll', 'INTEL-XESS-LICENSE.txt', 'INTEL-XESS-THIRD-PARTY.txt'):

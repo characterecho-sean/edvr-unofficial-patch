@@ -2281,7 +2281,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.self_test:
-        return self_test()
+        return _run_self_test_labelled()
 
     if args.profile is not None and args.scope is not None:
         ap.error("--profile is a deprecated alias for --scope; pass one or the other")
@@ -2826,6 +2826,63 @@ def _game_probe_self_test():
         globals().update(saved)
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
+
+
+class _ExpectedErrorLabel(object):
+    """A stdout wrapper for the self-test: the self-test provokes the refusals
+    and failures it asserts on, and the code under test prints each as
+    "[edvr] ERROR: ...". Those lines are expected, so they go out as
+    "expected-error: ..." and a green build log holds no "[edvr] ERROR" line
+    (issue #98). The self-test's own verdicts are untouched: each case still
+    asserts on the return code and state, and a failed case prints its own
+    message and makes the exit code nonzero."""
+    _OLD = "[edvr] ERROR"
+    _NEW = "expected-error"
+
+    def __init__(self, stream, label_all=False):
+        self._stream = stream
+        self._pending = ""
+        self._label_all = label_all   # stderr: argparse usage/error text is all expected
+
+    def write(self, text):
+        self._pending += text
+        out = []
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            out.append(self._label(line) + "\n")
+        if out:
+            self._stream.write("".join(out))
+        return len(text)
+
+    def _label(self, line):
+        if self._label_all:
+            return self._NEW + ": " + line if line.strip() else line
+        if line.startswith(self._OLD):
+            return self._NEW + line[len(self._OLD):]
+        return line
+
+    def flush(self):
+        if self._pending:
+            self._stream.write(self._label(self._pending))
+            self._pending = ""
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _run_self_test_labelled():
+    real_out, real_err = sys.stdout, sys.stderr
+    sys.stdout = _ExpectedErrorLabel(real_out)
+    sys.stderr = _ExpectedErrorLabel(real_err, label_all=True)
+    try:
+        return self_test()
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            sys.stdout, sys.stderr = real_out, real_err
 
 
 def self_test():

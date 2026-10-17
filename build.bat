@@ -132,6 +132,11 @@ set /p VSPATH=<"%TEMP%\edvr_vspath.txt"
 del "%TEMP%\edvr_vspath.txt" >nul 2>&1
 if not defined VSPATH goto no_vs
 echo [edvr] using %VSPATH%
+REM vcvars64 -> VsDevCmd runs a bare "vswhere.exe" and prints "'vswhere.exe' is not
+REM recognized" on every build when the Installer directory is not on PATH. It is
+REM harmless to the build but reads as a failure, so put the directory on PATH
+REM (already known to exist: %VSWHERE% was just run) before calling it.
+set "PATH=%PROGFILES86%\Microsoft Visual Studio\Installer;%PATH%"
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 ( echo [edvr] ERROR: vcvars64 failed & exit /b 1 )
 exit /b 0
