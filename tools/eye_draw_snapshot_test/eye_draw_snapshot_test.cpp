@@ -228,6 +228,77 @@ int wmain(int argc, wchar_t** argv) {
         check(captured.streams[1].offset==16&&captured.streams[2].offset==4,"binding offsets remain distinct from capture offsets");
     }
     const uint32_t capturedBytes=snap.vertexBytes;
+    // Exercise the production candidate capture branch with the observed
+    // multi-megabyte base vertex, nonzero IA offsets and a nonzero start index.
+    ComPtr<ID3D11InputLayout> savedOpticLayout;ctx->IAGetInputLayout(&savedOpticLayout);
+    ID3D11Buffer* savedVbRaw=nullptr;UINT savedStride=0,savedOffset=0;ctx->IAGetVertexBuffers(1,1,&savedVbRaw,&savedStride,&savedOffset);
+    ComPtr<ID3D11Buffer> savedVb;savedVb.Attach(savedVbRaw);
+    ID3D11Buffer* savedIbRaw=nullptr;DXGI_FORMAT savedIndexFormat{};UINT savedIndexOffset=0;ctx->IAGetIndexBuffer(&savedIbRaw,&savedIndexFormat,&savedIndexOffset);
+    ComPtr<ID3D11Buffer> savedIb;savedIb.Attach(savedIbRaw);
+    ID3D11ShaderResourceView* savedSrvs[3]{};ctx->PSGetShaderResources(1,3,savedSrvs);
+    ComPtr<ID3D11ShaderResourceView> savedSrv1,savedSrv2,savedSrv3;savedSrv1.Attach(savedSrvs[0]);savedSrv2.Attach(savedSrvs[1]);savedSrv3.Attach(savedSrvs[2]);
+    const char* opticCode="float4 main(uint4 a:PACKEDVERTEXDATAA,uint2 c:PACKEDVERTEXDATAC):SV_Position{return float4(asfloat(a.xy),0,1)+float4(asfloat(c),0,0);}";
+    ComPtr<ID3DBlob> opticBlob;hr(D3DCompile(opticCode,strlen(opticCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&opticBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC opticElements[2]={{"PACKEDVERTEXDATAA",0,DXGI_FORMAT_R32G32B32A32_UINT,1,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"PACKEDVERTEXDATAC",0,DXGI_FORMAT_R32G32_UINT,1,16,D3D11_INPUT_PER_VERTEX_DATA,0}};
+    ComPtr<ID3D11InputLayout> opticLayout;hr(dev->CreateInputLayout(opticElements,2,opticBlob->GetBufferPointer(),opticBlob->GetBufferSize(),&opticLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(opticLayout.Get(),opticElements,2,edvr::EyeDrawSnapshot::kF77OpticVs);
+    ctx->IASetInputLayout(opticLayout.Get());
+    const uint32_t opticBase=2'955'444,opticStride=40,opticBindingOffset=24;UINT opticStrideBinding=opticStride;
+    const uint64_t opticVertexBegin=uint64_t(opticBindingOffset)+uint64_t(opticBase+2)*opticStride;
+    const UINT opticVertexSize=static_cast<UINT>(opticVertexBegin+4*opticStride);
+    D3D11_BUFFER_DESC opticVbDesc{};opticVbDesc.ByteWidth=opticVertexSize;opticVbDesc.Usage=D3D11_USAGE_DEFAULT;opticVbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    ComPtr<ID3D11Buffer> opticVb;hr(dev->CreateBuffer(&opticVbDesc,nullptr,&opticVb));
+    uint8_t opticVertexBytes[4*opticStride];std::memset(opticVertexBytes,0xA7,sizeof(opticVertexBytes));
+    D3D11_BOX opticVbBox{static_cast<UINT>(opticVertexBegin),0,0,static_cast<UINT>(opticVertexBegin+sizeof(opticVertexBytes)),1,1};
+    ctx->UpdateSubresource(opticVb.Get(),0,&opticVbBox,opticVertexBytes,0,0);
+    const uint16_t opticIndexValues[18]={9,9,9,9,5,2,5,4,2,5,9,9,9,9,9,9,9,9};
+    D3D11_BUFFER_DESC opticIbDesc{};opticIbDesc.ByteWidth=sizeof(opticIndexValues);opticIbDesc.Usage=D3D11_USAGE_DEFAULT;opticIbDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+    ComPtr<ID3D11Buffer> opticIb;hr(dev->CreateBuffer(&opticIbDesc,nullptr,&opticIb));
+    ctx->UpdateSubresource(opticIb.Get(),0,nullptr,opticIndexValues,0,0);
+    UINT opticOffset=opticBindingOffset;ctx->IASetVertexBuffers(1,1,opticVb.GetAddressOf(),&opticStrideBinding,&opticOffset);
+    ctx->IASetIndexBuffer(opticIb.Get(),DXGI_FORMAT_R16_UINT,4);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    edvr::EyeDrawSnapshot opticCapture;
+    opticCapture.capture(ctx.Get(),91,7,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,700);
+    check(opticCapture.draws.size()==1 && opticCapture.draws[0].streams[1].captureOffset==opticVertexBegin &&
+          opticCapture.draws[0].streams[1].copied==4*opticStride && opticCapture.draws[0].streams[2].captureOffset==8 &&
+          opticCapture.draws[0].streams[2].copied==12,"production optic capture resolves indexed min/max vertex window from actual WARP buffers");
+    wait_gpu(ctx.Get(),dev.Get());D3D11_MAPPED_SUBRESOURCE opticMapped{};
+    hr(ctx->Map(opticCapture.draws[0].streams[1].stage.Get(),0,D3D11_MAP_READ,0,&opticMapped));
+    check(opticMapped.pData && static_cast<const uint8_t*>(opticMapped.pData)[0]==0xA7 &&
+          static_cast<const uint8_t*>(opticMapped.pData)[sizeof(opticVertexBytes)-1]==0xA7,"WARP indexed optic vertex bytes match the selected large-base window");
+    ctx->Unmap(opticCapture.draws[0].streams[1].stage.Get(),0);
+    const uint16_t negativeBaseIndices[18]={9,9,9,9,1,2,3,2,1,4,9,9,9,9,9,9,9,9};
+    ComPtr<ID3D11Buffer> negativeBaseIb;hr(dev->CreateBuffer(&opticIbDesc,nullptr,&negativeBaseIb));
+    ctx->UpdateSubresource(negativeBaseIb.Get(),0,nullptr,negativeBaseIndices,0,0);ctx->IASetIndexBuffer(negativeBaseIb.Get(),DXGI_FORMAT_R16_UINT,4);
+    edvr::EyeDrawSnapshot negativeBaseCapture;
+    negativeBaseCapture.capture(ctx.Get(),91,8,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,-1,false,false,true,700);
+    check(negativeBaseCapture.draws.size()==1 && negativeBaseCapture.draws[0].streams[1].captureOffset==opticBindingOffset &&
+          negativeBaseCapture.draws[0].streams[1].copied==4*opticStride,"negative base with positive indices resolves a valid WARP vertex window");
+    D3D11_TEXTURE2D_DESC opticMaterialDesc{};opticMaterialDesc.Width=opticMaterialDesc.Height=1024;opticMaterialDesc.MipLevels=0;
+    opticMaterialDesc.ArraySize=8;opticMaterialDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;opticMaterialDesc.SampleDesc.Count=1;
+    opticMaterialDesc.Usage=D3D11_USAGE_DEFAULT;opticMaterialDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> opticMaterial;hr(dev->CreateTexture2D(&opticMaterialDesc,nullptr,&opticMaterial));
+    ComPtr<ID3D11ShaderResourceView> opticMaterialSrv;hr(dev->CreateShaderResourceView(opticMaterial.Get(),nullptr,&opticMaterialSrv));
+    ID3D11ShaderResourceView* opticMaterialSrvRaw=opticMaterialSrv.Get();ctx->PSSetShaderResources(2,1,&opticMaterialSrvRaw);
+    ID3D11ShaderResourceView* noSrv=nullptr;ctx->PSSetShaderResources(1,1,&noSrv);ctx->PSSetShaderResources(3,1,&noSrv);
+    edvr::EyeDrawSnapshot opticMaterialCapture;
+    opticMaterialCapture.capture(ctx.Get(),91,7,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,700);
+    opticMaterialCapture.capture(ctx.Get(),92,9,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,701);
+    check(opticMaterialCapture.candidateInputs.size()==2 && opticMaterialCapture.candidateInputs[0].slot==2 && opticMaterialCapture.candidateInputs[1].slot==2 &&
+          opticMaterialCapture.candidateInputs[0].requestedMip==0 && opticMaterialCapture.candidateInputs[0].mip==1 &&
+          opticMaterialCapture.candidateInputs[0].sourceArraySize==8 && opticMaterialCapture.candidateInputs[0].slices==8 &&
+          opticMaterialCapture.candidateInputs[1].requestedMip==0 && opticMaterialCapture.candidateInputs[1].mip==1 &&
+          opticMaterialCapture.candidateInputs[1].sourceArraySize==8 && opticMaterialCapture.candidateInputs[1].slices==8 &&
+          opticMaterialCapture.candidateInputs[0].bytes<=edvr::EyeDrawSnapshot::kCandidateInputBudget/2 &&
+          opticMaterialCapture.candidateInputs[0].bytes==opticMaterialCapture.candidateInputs[1].bytes &&
+          opticMaterialCapture.candidateInputBytes<=edvr::EyeDrawSnapshot::kCandidateInputBudget,
+          "WARP t2 capture retains full view slices from the highest fitting mip chain within equal per optic budgets");
+    ctx->IASetInputLayout(savedOpticLayout.Get());ID3D11Buffer* restoreVb=savedVb.Get();
+    ctx->IASetVertexBuffers(1,1,&restoreVb,&savedStride,&savedOffset);ctx->IASetIndexBuffer(savedIb.Get(),savedIndexFormat,savedIndexOffset);
+    ID3D11ShaderResourceView* restoreSrvs[3]={savedSrv1.Get(),savedSrv2.Get(),savedSrv3.Get()};ctx->PSSetShaderResources(1,3,restoreSrvs);
+    wait_gpu(ctx.Get(),dev.Get());
+    check(opticMaterialCapture.write(ctx.Get(),(std::wstring(argv[1])+L".t2").c_str()),"bounded T2 mip fallback snapshot write");
     edvr::EyeDrawSnapshot effects;
     const char* effectCode="float4 main(float2 p:POSITION,float4 b:TEXCOORD):SV_Position{return float4(p,0,1)+b;}";
     ComPtr<ID3DBlob> effectBlob;hr(D3DCompile(effectCode,strlen(effectCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&effectBlob,nullptr));

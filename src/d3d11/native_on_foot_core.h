@@ -1295,12 +1295,18 @@ constexpr uint32_t kIkPoseDeviationPost = 8;
 struct IkPoseDeviationSample {
     uint64_t qpc = 0;
     float dtMs = 0.0f;
-    uint32_t frame = 0, item = 0, generation = 0, fpAgeMs = 0, gAgeMs = 0;
-    bool fresh = false;
+    uint64_t fpRig = 0;
+    uint32_t frame = 0, item = 0, generation = 0, fpGeneration = 0, fpAgeMs = 0, gAgeMs = 0;
+    bool fresh = false, offInputValid = false, offWithinDistance = false, offSteady = false, offQualified = false, offAllowed = false, offTwo = false;
+    bool offDuplicate = false, offGapReset = false, offIdentityReset = false, offReversed = false;
+    bool leftWrote = false, rightWrote = false, leftStablePolicy = false, supportRequested = false, supportValid = false, reachMeasured = false, reachActive = false, reachInfeasible = false;
+    uint8_t targetMode[2] = {}, leftReason = 0, offHistorySamples = 0;
     bool valid[2] = {}, radialValid[2] = {};
     double shoulder[2][3] = {}, elbow[2][3] = {}, hand[2][3] = {}, target[2][3] = {};
     double preferred[2][3] = {}, axis[2][3] = {}, radial[2][3] = {};
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
+    double offDistanceM = 0.0, offChangeDeg = 0.0, offRawWeight = 0.0, offEffectiveWeight = 0.0, leftSolveWeight = 0.0, supportBlend = 0.0;
+    double reachRadiusM[2] = {}, pinReach[3] = {};
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};
@@ -1317,17 +1323,21 @@ struct IkPoseDeviationTracker {
     uint8_t postRemaining = 0;
     bool haveLast = false, haveActiveItem = false;
 
+    static bool sameIdentity(const IkPoseDeviationSample& a, const IkPoseDeviationSample& b) noexcept {
+        return a.item == b.item && a.generation == b.generation && a.fpGeneration == b.fpGeneration && a.fpRig == b.fpRig;
+    }
+
     void resetHistory() noexcept { historyHead = 0; historyCount = 0; haveLast = false; }
     int step(const IkPoseDeviationSample& sample, uint64_t qpcFrequency, IkPoseDeviationRecord out[kIkPoseDeviationHistory + 1 + kIkPoseDeviationPost]) noexcept {
         int nOut = 0;
         const bool sampleFresh = sample.fresh && sample.fpAgeMs <= kIkPoseDeviationMaxGapMs && sample.gAgeMs <= kIkPoseDeviationMaxGapMs;
         const bool wasCapturing = postRemaining != 0;
-        if (haveLast && sampleFresh && sample.item == last.item && sample.generation == last.generation && sample.frame == last.frame) {
+        if (haveLast && sampleFresh && sameIdentity(sample, last) && sample.frame == last.frame) {
             ++duplicates;
             return 0;
         }
         bool contiguous = false;
-        if (haveLast && sampleFresh && last.fresh && sample.item == last.item && sample.generation == last.generation && sample.frame - last.frame == 1 &&
+        if (haveLast && sampleFresh && last.fresh && sameIdentity(sample, last) && sample.frame - last.frame == 1 &&
             sample.qpc > last.qpc && qpcFrequency && (sample.qpc - last.qpc) <= qpcFrequency / 10) contiguous = true;
 
         if (!sampleFresh || (haveLast && !contiguous)) {
@@ -1343,10 +1353,16 @@ struct IkPoseDeviationTracker {
             --postRemaining;
         }
 
-        bool triggered = false;
+        bool triggered = sampleFresh && (sample.offIdentityReset || sample.offGapReset || sample.offReversed);
         if (sampleFresh && contiguous) {
+            triggered = triggered || sample.offTwo != last.offTwo || sample.leftStablePolicy != last.leftStablePolicy ||
+                        sample.leftWrote != last.leftWrote || sample.supportRequested != last.supportRequested || sample.supportValid != last.supportValid || sample.targetMode[0] != last.targetMode[0] ||
+                        sample.targetMode[1] != last.targetMode[1] || sample.reachActive != last.reachActive;
             for (int side = 0; side < 2 && !triggered; ++side) {
                 if (!sample.valid[side] || !last.valid[side]) continue;
+                const double shoulderDelta[3] = {sample.shoulder[side][0] - last.shoulder[side][0], sample.shoulder[side][1] - last.shoulder[side][1],
+                                                  sample.shoulder[side][2] - last.shoulder[side][2]};
+                if (ikLen(shoulderDelta) >= kIkPoseDeviationPositionM) { triggered = true; break; }
                 const double nowDelta[3] = {sample.elbow[side][0] - sample.shoulder[side][0], sample.elbow[side][1] - sample.shoulder[side][1], sample.elbow[side][2] - sample.shoulder[side][2]};
                 const double oldDelta[3] = {last.elbow[side][0] - last.shoulder[side][0], last.elbow[side][1] - last.shoulder[side][1], last.elbow[side][2] - last.shoulder[side][2]};
                 const double moved[3] = {nowDelta[0] - oldDelta[0], nowDelta[1] - oldDelta[1], nowDelta[2] - oldDelta[2]};
@@ -4254,18 +4270,28 @@ struct GripSteady {
 // F67f locked BOTH hands to the grips while armed. F68's flight (dumps 152353 to 152442): the pistol's left hand is open, holding nothing; the Energylink's
 // left twist is 171.9 deg raw (clamped at +-90 on 82 of 82 calls) with the hand hovering off the handle; the Arc Cutter's left hand rings empty space; the
 // Profile Analyser's left fist is crossed under the right arm. The FP rig's left hand is not on those items, so there is no grip to lock to. Sean: the
-// 3P off hand follows the game's own 3P animation. The decision is made per frame from the FP rig, not from a name list: the FP left handAttach (52)
-// within kOffHandMaxM (40 cm; the rifle's pair is 32.6 cm) of the right one (51), and its orientation relative to 51 steady over the last
-// kOffHandSteadyFrames frames (under kOffHandSteadyDeg of change). The off arm's IK weight follows the decision over kOffHandRampSec either way.
+// 3P off hand follows the game's own 3P animation. Acquisition is measured from unique P1 frames: the FP left handAttach (52) stays within
+// kOffHandMaxM (40 cm; the rifle's pair is 32.6 cm) of the right one (51), and its orientation relative to 51 stays under kOffHandSteadyDeg
+// across kOffHandSteadyFrames prior samples. Once acquired, valid same-identity attaches retain authority through orientation motion; the off-arm
+// IK weight ramps on release over kOffHandRampSec.
 constexpr double kOffHandMaxM = 0.40, kOffHandSteadyDeg = 5.0, kOffHandRampSec = 0.15;
 constexpr uint32_t kOffHandSteadyFrames = 10;
 constexpr double kOffReachRelaxM = 1.0;   // the reach rule's radius for a free off hand's shoulder grows by (1 - weight) x this: at weight 0 it binds nothing
+inline double ikOffHandReachRadius(double armLength, double offHandWeight) noexcept {
+    const double w = std::isfinite(offHandWeight) ? std::max(0.0, std::min(1.0, offHandWeight)) : 0.0;
+    return armLength - kReachMarginM + (1.0 - w) * kOffReachRelaxM;
+}
 struct OffHand {
-    double hist[kOffHandSteadyFrames + 1][9] = {};   // the last frames' 52-relative-to-51 rotations (row-vector 3x3), newest at pos
+    double hist[kOffHandSteadyFrames + 1][9] = {};   // the last unique P1 frames' 52-relative-to-51 rotations (row-vector 3x3), newest at pos
     uint32_t have = 0, pos = 0;
     double w = 0.0;
+    uint32_t lastFrame = 0, item = 0, rigGeneration = 0, fpGeneration = 0, syntheticFrame = 0;
+    uint64_t fpRig = 0;
+    bool haveFrame = false, haveIdentity = false, attached = false, releasing = false, lastSteady = false, lastQualified = false;
     struct Out {
-        bool two = false, ok = false;
+        bool two = false, ok = false, historyReady = false, withinDistance = false, steady = false, allowed = false, qualified = false;
+        bool duplicate = false, gapReset = false, identityReset = false, reversed = false, stablePolicy = false;
+        uint8_t historySamples = 0;
         double w = 0.0, dist = 0.0, changeDeg = 0.0;
     };
     // The angle (degrees) between two row-vector rotations a, b (3x3): acos((tr(a b^T) - 1) / 2).
@@ -4276,15 +4302,52 @@ struct OffHand {
         c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
         return std::acos(c) * 180.0 / kIkPi;
     }
-    // One hook call: dt seconds since the last (capped at 0.1), armed (the arms are on the grips' business at all), ok (both FP attaches readable this call),
-    // a51 and a52 the FP attach matrices (row-vector, the FP root's frame). Unarmed: everything forgotten.
-    Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true) noexcept {
+    void clearHistory() noexcept {
+        have = pos = 0;
+        lastSteady = lastQualified = false;
+    }
+    // The relative-angle test acquires a two-hand attachment. Once acquired, current readable attaches and separation keep it until the
+    // explicit one-hand policy, separation limit, disarm or identity change releases it. History advances only on unique P1 frames.
+    Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true,
+             uint32_t frame = 0xFFFFFFFFu, uint32_t itemId = 0, uint32_t rigGen = 0, uint64_t fpRigId = 0, uint32_t fpGen = 0) noexcept {
         Out o;
         if (!armed) {
             *this = OffHand{};
             return o;
         }
-        const double d = !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
+        bool keyedFrame = frame != 0xFFFFFFFFu;
+        if (!keyedFrame) frame = ++syntheticFrame;
+        const bool identityChanged = haveIdentity && (item != itemId || rigGeneration != rigGen || fpRig != fpRigId || fpGeneration != fpGen);
+        if (!haveIdentity || identityChanged) {
+            if (haveIdentity) o.identityReset = true;
+            clearHistory();
+            attached = releasing = false;
+            w = 0.0;
+            haveFrame = false;
+            item = itemId; rigGeneration = rigGen; fpRig = fpRigId; fpGeneration = fpGen; haveIdentity = true;
+        }
+        bool uniqueFrame = true;
+        if (haveFrame) {
+            const uint32_t delta = frame - lastFrame;
+            if (delta == 0) {
+                uniqueFrame = false;
+                o.duplicate = true;
+            } else if (delta >= 0x80000000u) {
+                uniqueFrame = false;
+                o.reversed = true;
+                clearHistory();
+                if (attached) releasing = true;
+                attached = false;
+                haveFrame = false;
+            } else if (delta != 1) {
+                o.gapReset = true;
+                clearHistory();
+            }
+        }
+        if (uniqueFrame) { lastFrame = frame; haveFrame = true; }
+        const double d = !uniqueFrame || !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
+        if (!allowTwoHand || !ok) clearHistory();
+        o.allowed = allowTwoHand;
         bool steadyNow = false, closeEnough = false;
         if (ok) {
             double r51[3][3], r52[3][3];
@@ -4293,12 +4356,15 @@ struct OffHand {
                 double rel[9];
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c) rel[r * 3 + c] = r52[r][0] * r51[c][0] + r52[r][1] * r51[c][1] + r52[r][2] * r51[c][2];
-                pos = (pos + 1) % (kOffHandSteadyFrames + 1);
-                for (int i = 0; i < 9; ++i) hist[pos][i] = rel[i];
-                if (have < kOffHandSteadyFrames + 1) ++have;
                 const double dx[3] = {static_cast<double>(a52[12]) - a51[12], static_cast<double>(a52[13]) - a51[13], static_cast<double>(a52[14]) - a51[14]};
                 o.dist = ikLen(dx);
                 o.ok = std::isfinite(o.dist);
+                closeEnough = o.ok && o.dist <= kOffHandMaxM;
+                if (uniqueFrame && allowTwoHand && o.ok && closeEnough) {
+                    pos = (pos + 1) % (kOffHandSteadyFrames + 1);
+                    for (int i = 0; i < 9; ++i) hist[pos][i] = rel[i];
+                    if (have < kOffHandSteadyFrames + 1) ++have;
+                }
                 double mx = 0.0;
                 if (have >= kOffHandSteadyFrames + 1) {
                     for (uint32_t k = 1; k <= kOffHandSteadyFrames; ++k) {
@@ -4310,12 +4376,34 @@ struct OffHand {
                 }
                 o.changeDeg = mx;
                 steadyNow = steadyNow && mx < kOffHandSteadyDeg;
-                closeEnough = o.ok && o.dist <= kOffHandMaxM;
+                o.historyReady = have >= kOffHandSteadyFrames + 1;
+                o.withinDistance = closeEnough;
+                o.steady = steadyNow;
+                o.qualified = allowTwoHand && o.ok && closeEnough && uniqueFrame && steadyNow;
+                if (uniqueFrame) {
+                    lastSteady = steadyNow;
+                    lastQualified = o.qualified;
+                } else {
+                    o.steady = lastSteady;
+                    o.qualified = lastQualified;
+                }
             }
         }
-        o.two = allowTwoHand && ok && o.ok && closeEnough && steadyNow;
-        const double target = o.two ? 1.0 : 0.0, step = d / kOffHandRampSec;
+        // Invalid inputs, explicit free-hand policy and excess separation release and forget acquisition. The 5-degree check only decides acquisition.
+        if (!o.ok || !allowTwoHand || !closeEnough) {
+            if (attached) releasing = true;
+            attached = false;
+            clearHistory();
+        } else if (!attached && o.qualified) {
+            attached = true;
+            releasing = false;
+        }
+        o.two = attached;
+        const double target = attached ? 1.0 : 0.0, step = d / kOffHandRampSec;
         w = w < target ? (w + step > target ? target : w + step) : (w - step < target ? target : w - step);
+        if (!attached && w <= 0.0) releasing = false;
+        o.stablePolicy = attached || (releasing && w > 0.0);
+        o.historySamples = static_cast<uint8_t>(have);
         o.w = w;
         return o;
     }

@@ -1271,7 +1271,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
         candidateIssued+=c.issued==1;candidateNotIssued+=c.issued==0;candidateIssueUnknown+=c.issued==2;
         candidateRoiPairs+=c.roiCaptured!=0;
     }
-    Log::get().note("F77 targeted candidate snapshots %ls: %u matching draws (%u capped), %u missing render-frame mappings, %u outside first-three-frame window; %u total optic-pair matches (%u evidence attempts), %u issued/%u not issued/%u issue unknown; %u pool buffers/%u bytes (%u declines), %u stream bytes (%u declines), %u PS inputs/%u bytes (%u declines, %u mip levels omitted); %u reserved ROI pairs (%u complete, %u incomplete, %u ROI declines, %u bytes), %u copy failures, %u missing shader files; %s. VS 154FB5A453F3D2E9 is an unproven candidate family. Bounds: 192 draws, 64 MiB pool, 32 MiB streams, 24 MiB PS inputs plus 8 MiB centered ROI; at most two optic draws receive inputs/ROI. Ledger and native render frames are separate fields.",
+    Log::get().note("F77 targeted candidate snapshots %ls: %u matching draws (%u capped), %u missing render-frame mappings, %u outside first-three-frame window; %u total optic-pair matches (%u evidence attempts), %u issued/%u not issued/%u issue unknown; %u pool buffers/%u bytes (%u declines), %u stream bytes (%u declines), %u PS inputs/%u bytes (%u declines, %u refused descriptors, %u mip levels omitted); %u reserved ROI pairs (%u complete, %u incomplete, %u ROI declines, %u bytes), %u copy failures, %u missing shader files; %s. VS 154FB5A453F3D2E9 is an unproven candidate family. Bounds: 192 draws, 64 MiB pool, 32 MiB streams, 24 MiB PS inputs split into equal 12 MiB per-optic-attempt budgets plus 8 MiB centered ROI; full array slices are retained from the highest-resolution mip chain that fits, with source/requested mip metadata and refusal reasons in the snapshot. At most two optic draws receive inputs/ROI. Ledger and native render frames are separate fields.",
                     path,unsigned(g_f77CandidateSnapshot.candidateFrames.size()),g_f77CandidateSnapshot.candidateDropped,
                     g_f77CandidateSnapshot.candidateMissingRenderFrame,g_f77CandidateSnapshot.candidateOutsideFrameWindow,
                     g_f77CandidateSnapshot.candidateOpticDraws,(std::min)(g_f77CandidateSnapshot.candidateOpticDraws,EyeDrawSnapshot::kCandidateMaxOpticDraws),
@@ -1279,7 +1279,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     unsigned(g_f77CandidateSnapshot.meshBuffers.size()),g_f77CandidateSnapshot.meshBytes,g_f77CandidateSnapshot.meshDeclined,
                     g_f77CandidateSnapshot.vertexBytes,g_f77CandidateSnapshot.vertexDeclined,
                     unsigned(g_f77CandidateSnapshot.candidateInputs.size()),g_f77CandidateSnapshot.candidateInputBytes,
-                    g_f77CandidateSnapshot.candidateInputDeclined,g_f77CandidateSnapshot.candidateMipDeclined,
+                    g_f77CandidateSnapshot.candidateInputDeclined,unsigned(g_f77CandidateSnapshot.candidateRefusals.size()),g_f77CandidateSnapshot.candidateMipDeclined,
                     candidateRoiPairs,candidateRoiPairs-g_f77CandidateSnapshot.candidateRoiIncomplete,g_f77CandidateSnapshot.candidateRoiIncomplete,
                     g_f77CandidateSnapshot.effectImageDeclined,g_f77CandidateSnapshot.effectImageBytes,
                     g_f77CandidateSnapshot.failures,candidateMissingShaders,candidateOk?"written":"WRITE FAILED");

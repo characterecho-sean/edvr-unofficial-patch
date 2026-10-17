@@ -1698,6 +1698,29 @@ int wmain(int argc, wchar_t** argv) {
                 check(duplicateKeptHistory && afterDuplicateRows == 2 && events[1].offset == 0,
                       "F76: repeated P1 frames are ignored without destroying the prior comparison sample");
 
+                nf::IkPoseDeviationTracker policyDetector;
+                pose = {}; pose.fresh = true; pose.item = 3; pose.generation = 4; pose.fpRig = 0xAA; pose.fpGeneration = 5; pose.fpAgeMs = 12; pose.gAgeMs = 14;
+                pose.valid[1] = true; pose.leftWrote = true; pose.targetMode[0] = 1;
+                pose.frame = 1; pose.qpc = 10; policyDetector.step(pose, 1000, events);
+                pose.frame = 2; pose.qpc = 20; pose.offTwo = true; pose.offQualified = true; pose.leftStablePolicy = true;
+                const int policyEdgeRows = policyDetector.step(pose, 1000, events);
+                const bool policyEdgeCaptured = policyEdgeRows == 2 && events[1].offset == 0 && events[1].sample.offTwo && events[1].sample.leftStablePolicy;
+                pose.offTwo = false; pose.frame = 2; pose.qpc = 25;
+                const int policyDuplicateRows = policyDetector.step(pose, 1000, events);
+                const bool duplicateIgnoredAuthority = policyDuplicateRows == 0 && policyDetector.duplicates == 1 && policyDetector.last.offTwo;
+                nf::IkPoseDeviationTracker qualificationOnlyDetector;
+                pose = {}; pose.fresh = true; pose.item = 3; pose.generation = 4; pose.fpAgeMs = 12; pose.gAgeMs = 14;
+                pose.frame = 1; pose.qpc = 10; qualificationOnlyDetector.step(pose, 1000, events);
+                pose.frame = 2; pose.qpc = 20; pose.offQualified = true;
+                const int qualificationOnlyRows = qualificationOnlyDetector.step(pose, 1000, events);
+                nf::IkPoseDeviationTracker identityDetector;
+                pose = {}; pose.fresh = true; pose.item = 3; pose.generation = 4; pose.fpRig = 0xAA; pose.fpGeneration = 5; pose.fpAgeMs = 12; pose.gAgeMs = 14;
+                pose.frame = 1; pose.qpc = 10; identityDetector.step(pose, 1000, events);
+                pose.frame = 2; pose.qpc = 20; pose.fpRig = 0xBB; pose.fpGeneration = 6; pose.offIdentityReset = true;
+                const int identityRows = identityDetector.step(pose, 1000, events);
+                check(policyEdgeCaptured && duplicateIgnoredAuthority && qualificationOnlyRows == 0 && identityRows == 1 && events[0].offset == 0 && events[0].sample.offIdentityReset && identityDetector.gaps == 1,
+                      "F78: policy edges capture write/authority fields, raw qualification changes alone do not consume events, duplicate P1 samples cannot replace them, and FP rig identity changes reset continuity");
+
                 nf::IkPoseDeviationTracker capDetector;
                 pose = {}; pose.fresh = true; pose.generation = 1; pose.fpAgeMs = 10; pose.gAgeMs = 10; pose.valid[0] = true;
                 uint32_t frame = 0; uint64_t qpc = 0; bool started = false;
@@ -3987,6 +4010,76 @@ int wmain(int argc, wchar_t** argv) {
                     }
                     check(relaxedAt >= 12 && relaxedAt <= 14,
                           "F73: changing from a supported two-handed item fades the off-arm solve to the authored pose in 0.15 s");
+                    // F78: relative-angle steadiness acquires authority; it does not release a moving same-item grip. P1 identity controls history.
+                    nf::OffHand latched;
+                    int acquiredAt = -1;
+                    for (uint32_t frame = 1; frame <= 32; ++frame) {
+                        const double separation = 0.333 + 0.025 * (static_cast<double>(frame % 3) / 2.0);
+                        mk(0.0, 0.25 - separation, -0.10, 0.30, a52);
+                        const auto o = latched.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                        if (o.two && acquiredAt < 0) acquiredAt = static_cast<int>(frame);
+                    }
+                    nf::OffHand::Out movedGrip;
+                    for (uint32_t frame = 33; frame <= 40; ++frame) {
+                        const double t = static_cast<double>(frame - 33) / 7.0;
+                        const double angle = 5.3 * t;
+                        const double separation = 0.333 + 0.025 * t;
+                        mk(angle, 0.25 - separation, -0.10, 0.30, a52);
+                        movedGrip = latched.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                    }
+                    const bool retainedInMotion = movedGrip.two && !movedGrip.qualified && movedGrip.stablePolicy && movedGrip.w == 1.0;
+                    mk(0.0, 0.25 - 0.410, -0.10, 0.30, a52);
+                    const auto tooFar = latched.step(dtF, true, true, a51, a52, true, 41, 8, 4, 0xAAu, 7);
+                    const bool distanceReleaseRampsPolicy = !tooFar.two && tooFar.stablePolicy && tooFar.w > 0.0;
+                    int releaseStableCalls = 0;
+                    for (uint32_t frame = 42; frame < 68; ++frame) {
+                        mk(0.0, 0.25 - 0.410, -0.10, 0.30, a52);
+                        const auto o = latched.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                        if (o.stablePolicy && !o.two) ++releaseStableCalls;
+                    }
+                    int reacquiredAt = -1;
+                    for (uint32_t frame = 68; frame < 80; ++frame) {
+                        mk(0.0, 0.25 - 0.326, -0.10, 0.30, a52);
+                        const auto o = latched.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                        if (o.two && reacquiredAt < 0) reacquiredAt = static_cast<int>(frame);
+                    }
+                    const bool distanceReacquires = reacquiredAt == 78;
+                    const double radiusAt922 = nf::ikOffHandReachRadius(0.62, 0.922);
+                    const double radiusAt996 = nf::ikOffHandReachRadius(0.62, 0.996);
+                    check(acquiredAt == 11 && retainedInMotion && distanceReleaseRampsPolicy && releaseStableCalls > 0 && distanceReacquires &&
+                              std::fabs((radiusAt922 - radiusAt996) - 0.074) < 1e-12,
+                          "F78: steady unique frames acquire once; 5.3-degree motion at 33.3-35.8 cm keeps authority, >40 cm releases through the existing ramp, reacquires after 11 steady frames, and off-hand reach radius changes by the measured weight delta");
+
+                    nf::OffHand uniqueFrames;
+                    mk(0.0, 0.25 - 0.326, -0.10, 0.30, a52);
+                    for (uint32_t frame = 1; frame <= 10; ++frame) uniqueFrames.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                    const auto beforeDuplicate = uniqueFrames.step(dtF, true, true, a51, a52, true, 10, 8, 4, 0xAAu, 7);
+                    const auto duplicate = uniqueFrames.step(0.1, true, true, a51, a52, true, 10, 8, 4, 0xAAu, 7);
+                    const auto eleventh = uniqueFrames.step(dtF, true, true, a51, a52, true, 11, 8, 4, 0xAAu, 7);
+                    nf::OffHand identityChange;
+                    mk(0.0, 0.25 - 0.326, -0.10, 0.30, a52);
+                    for (uint32_t frame = 1; frame <= 12; ++frame) identityChange.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                    const auto newFpRig = identityChange.step(dtF, true, true, a51, a52, true, 13, 8, 4, 0xBBu, 8);
+                    const bool identityReleased = newFpRig.identityReset && !newFpRig.two && newFpRig.w == 0.0 && identityChange.have == 1;
+                    nf::OffHand releasedPolicy;
+                    mk(0.0, 0.25 - 0.326, -0.10, 0.30, a52);
+                    for (uint32_t frame = 1; frame <= 20; ++frame) releasedPolicy.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                    const auto explicitFree = releasedPolicy.step(dtF, true, true, a51, a52, false, 21, 8, 4, 0xAAu, 7);
+                    check(beforeDuplicate.w == 0.0 && duplicate.duplicate && duplicate.w == beforeDuplicate.w && !duplicate.two && eleventh.two &&
+                              identityReleased && !explicitFree.two && explicitFree.stablePolicy && explicitFree.w > 0.0,
+                          "F78: duplicate P1 calls do not advance acquisition or weight; item/FP/3P identity resets authority; explicit one-hand policy releases while stable solve follows the ramp");
+
+                    nf::OffHand discontinuity;
+                    mk(0.0, 0.25 - 0.326, -0.10, 0.30, a52);
+                    for (uint32_t frame = 1; frame <= 12; ++frame) discontinuity.step(dtF, true, true, a51, a52, true, frame, 8, 4, 0xAAu, 7);
+                    const auto p1Gap = discontinuity.step(dtF, true, true, a51, a52, true, 15, 8, 4, 0xAAu, 7);
+                    const bool gapRetained = p1Gap.gapReset && p1Gap.two && discontinuity.have == 1;
+                    const auto reverse = discontinuity.step(0.1, true, true, a51, a52, true, 14, 8, 4, 0xAAu, 7);
+                    const bool reverseReleased = reverse.reversed && !reverse.two && reverse.w == p1Gap.w && discontinuity.have == 0;
+                    const auto invalid = discontinuity.step(dtF, true, false, a51, a52, true, 16, 8, 4, 0xAAu, 7);
+                    const bool invalidReleased = !invalid.ok && !invalid.two && discontinuity.have == 0;
+                    check(gapRetained && reverseReleased && invalidReleased,
+                          "F78: skipped P1 frames restart acquisition without dropping a valid retained grip; reversed or unreadable inputs release and cannot advance state");
                     check(nf::supportItem("$wpn_s_pistol_name;") == nf::kSupportPistol &&
                           nf::supportItem("$humanoid_rechargetool_name;") == nf::kSupportNone &&
                           nf::supportItem("$humanoid_companalyser_name;") == nf::kSupportNone &&

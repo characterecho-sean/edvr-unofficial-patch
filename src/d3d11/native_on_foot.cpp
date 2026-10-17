@@ -10722,6 +10722,8 @@ struct PinCall {
     double off[3] = {}, lean = 0.0, neckLean = 0.0, legReach = 0.0, headY = 0.0;
     bool animT = false, clampedT = false, leanOk = false;
     double reach[3] = {};   // F68g: the reach rule's correction as applied (model axes: right, up, forward; metres)
+    double reachRadiusM[2] = {};
+    bool reachMeasured = false, reachActive = false, reachInfeasible = false;
     // F69a: the camera's crouch (w_c, the animated vector's weight) and the cyclopean eye's height less its standing mean; calHave: the calibration exists.
     double wc = 0.0, dEyeY = 0.0;
     bool calHave = false;
@@ -11005,14 +11007,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 v[side][0] = us[0] + d0[0] - tA[side][0];
                 v[side][1] = us[1] + mv.delta - tA[side][1];
                 v[side][2] = us[2] + d0[2] - tA[side][2];
-                R[side] = armLen[side] - nofoot::kReachMarginM;
-                if (side == 0) R[side] += (1.0 - (offW < 0.0 ? 0.0 : offW > 1.0 ? 1.0 : offW)) * nofoot::kOffReachRelaxM;   // F69h: a free off hand binds no reach
+                R[side] = side == 0 ? nofoot::ikOffHandReachRadius(armLen[side], offW) : armLen[side] - nofoot::kReachMarginM;
+                pc.reachRadiusM[side] = R[side];
             }
             bool feasible = true;
             const bool active = nofoot::reachLimitDelta(v, R, have, full, &feasible);
             reachWant = 1;
             if (active) reachActive = 1;
             if (!feasible) reachInfeasible = 1;
+            pc.reachMeasured = true;
+            pc.reachActive = active;
+            pc.reachInfeasible = !feasible;
             const double w = armedW > 1.0 ? 1.0 : armedW;
             for (int i = 0; i < 3; ++i) {
                 mv.th[i] += w * full[i];
@@ -11733,6 +11738,19 @@ void poseDeviationDrain() noexcept {
                                 r.sample.violationM[side] * 100.0, r.sample.outSign[side], r.sample.actualOutM[side] * 100.0, r.sample.requiredOutM[side] * 100.0,
                                 static_cast<double>(r.sample.dtMs), r.sample.fpAgeMs, r.sample.gAgeMs, r.sample.item, r.sample.generation);
             }
+            Log::get().note("armed pose policy (F78) event %u offset %+d frame %u item %u rig %u FP rig %llX/%u: offhand input %s close %s steady %s history %u raw-qualified %s attachment %s stable-policy %s allowed %s distance %.1f cm change %.2f deg raw/effective/left weight %.3f/%.3f/%.3f; frame duplicate/gap/identity/reversed %s/%s/%s/%s; left wrote %s reason %s right wrote %s final shoulder %+.3f/%+.3f/%+.3f m; support requested/valid/blend %s/%s/%.3f targets %u/%u; reach measured/active/infeasible %s/%s/%s radii L/R %.1f/%.1f cm applied right/up/forward %.1f/%.1f/%.1f cm",
+                            r.event, static_cast<int>(r.offset), r.sample.frame, r.sample.item, r.sample.generation,
+                            static_cast<unsigned long long>(r.sample.fpRig), r.sample.fpGeneration,
+                            r.sample.offInputValid ? "yes" : "no", r.sample.offWithinDistance ? "yes" : "no", r.sample.offSteady ? "yes" : "no", r.sample.offHistorySamples,
+                            r.sample.offQualified ? "yes" : "no", r.sample.offTwo ? "yes" : "no", r.sample.leftStablePolicy ? "yes" : "no", r.sample.offAllowed ? "yes" : "no", r.sample.offDistanceM * 100.0,
+                            r.sample.offChangeDeg, r.sample.offRawWeight, r.sample.offEffectiveWeight, r.sample.leftSolveWeight,
+                            r.sample.offDuplicate ? "yes" : "no", r.sample.offGapReset ? "yes" : "no", r.sample.offIdentityReset ? "yes" : "no", r.sample.offReversed ? "yes" : "no",
+                            r.sample.leftWrote ? "yes" : "no", r.sample.leftReason > 0 && r.sample.leftReason <= kF67fWhyKinds ? kF67fWhyText[r.sample.leftReason - 1] : "none",
+                            r.sample.rightWrote ? "yes" : "no", r.sample.shoulder[1][0], r.sample.shoulder[1][1], r.sample.shoulder[1][2],
+                            r.sample.supportRequested ? "yes" : "no", r.sample.supportValid ? "yes" : "no", r.sample.supportBlend,
+                            r.sample.targetMode[0], r.sample.targetMode[1], r.sample.reachMeasured ? "yes" : "no", r.sample.reachActive ? "yes" : "no",
+                            r.sample.reachInfeasible ? "yes" : "no", r.sample.reachRadiusM[0] * 100.0, r.sample.reachRadiusM[1] * 100.0,
+                            r.sample.pinReach[0] * 100.0, r.sample.pinReach[1] * 100.0, r.sample.pinReach[2] * 100.0);
         }
     }
     const uint64_t now = GetTickCount64();
@@ -12019,9 +12037,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     }
     // F67c stage 0: the body pin (the arm IK on, full-3P body mode): the animated pose moved so the neck sits under this frame's camera, in the animated
     // copy and the span, before M0 is built from it. G is at d = 0 (the frame thread's body offset is zero in the pin's scope).
-    // F69h: the off hand follows the FP rig. One decision per hook call from the FP attaches (52 within 40 cm of 51 and steady over 10 frames: two-handed),
-    // its weight ramped over 0.15 s; the left (off) arm's solve weight, and its shoulder's place in the reach rule, are scaled by it. Unarmed: weight 1 (the arms
-    // are the game's anyway). The detector forgets everything when the arms stand down.
+    // F78: unique P1 frames acquire offhand authority from the FP attach pair; orientation steadiness is not a continuous release gate. Current attach validity,
+    // item/rig identity and the 40 cm separation retain it; explicit free-hand policy, disarm, identity change or excess separation release through the same 0.15 s
+    // weight ramp. The effective weight controls both left-arm solve weight and the reach-radius relaxation.
     static nofoot::OffHand s_off;
     static uint64_t s_offQpc = 0;
     static bool s_offTwoPrev = false;
@@ -12031,7 +12049,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const uint64_t q = f30Qpc();
         const double dtOff = s_offQpc && q > s_offQpc ? static_cast<double>(q - s_offQpc) / static_cast<double>(f66QpcFreq()) : 0.0;
         s_offQpc = q;
-        offOut = s_off.step(dtOff, armedNow, armsOk, fpm[0], fpm[1], !relaxLeftArmForItem);
+        const uint32_t poseFrame = g_f66gP1Seq.load(std::memory_order_relaxed);
+        const bool offInputValid = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge <= nofoot::kIkPoseDeviationMaxGapMs;
+        offOut = s_off.step(dtOff, armedNow, offInputValid, fpm[0], fpm[1], !relaxLeftArmForItem, poseFrame,
+                            itemSerialForCall, pl.generation, fpHands.x, fpHands.generation);
         if (!armedNow) s_offTwoPrev = false;
     }
     const bool physicalPoleActive = armedNow && armsOk && mode == 3 && writeOk;
@@ -12059,7 +12080,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     if (supportRequested) s_blendKind = supportKind;
     const nofoot::SupportItem supportTargetKind = supportRequested ? supportKind : s_blendKind;
     bool supportCup = supportTargetKind != nofoot::kSupportNone && (supportRequested || s_supportBlend > 0.0);
-    if (physicalPoleActive && !(supportCup || (offOut.ok && offOut.two))) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
+    if (physicalPoleActive && !(supportCup || (offOut.ok && offOut.stablePolicy))) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
     double supportGap = -1.0;
     double supportCupGap = -1.0;
     bool supportTargetValid = false;
@@ -12175,7 +12196,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     }
     if (physicalPoleActive) {
         physicalPoleAttempted[1] = true;
-        physicalPoleAttempted[0] = nofoot::ikPhysicalPoleSideEligible(0, supportCup && supportTargetValid, offOut.ok && offOut.two);
+        physicalPoleAttempted[0] = nofoot::ikPhysicalPoleSideEligible(0, supportCup && supportTargetValid, offOut.ok && offOut.stablePolicy);
         if (!physicalPoleAttempted[0]) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
     }
     // F75: measure the barrels of the 3P animated right attach (66) and the FP right attach (51) through G once from the animated pose and FP snapshot.
@@ -12622,7 +12643,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         for (int i = 0; i < 3; ++i) o.Efp[i] = static_cast<float>(fE[i]);
         const double baseTheta = nofoot::ikWrapPi(ikSwivel(tb, elbowDir, outSign, o.poleFp ? fpPole : nullptr, trimRad, elbowOutM, &o.clamped));
         double theta = wSolve * baseTheta;
-        const bool stablePoleSide = physicalPoleActive && doSolveWrite && nofoot::ikPhysicalPoleSideEligible(side, supportCup && supportTargetValid, offOut.ok && offOut.two);
+        const bool stablePoleSide = physicalPoleActive && doSolveWrite && nofoot::ikPhysicalPoleSideEligible(side, supportCup && supportTargetValid, offOut.ok && offOut.stablePolicy);
         bool stablePoleHadReference = false;
         bool stablePoleFallback = false;
         double stablePoleReferenceTheta = baseTheta;
@@ -13668,10 +13689,46 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         sample.frame = g_f66gP1Seq.load(std::memory_order_relaxed);
         sample.item = itemSerialForCall;
         sample.generation = pl.generation;
+        sample.fpRig = fpHands.x;
+        sample.fpGeneration = fpHands.generation;
         sample.fpAgeMs = static_cast<uint32_t>(std::min<uint64_t>(fpAge, std::numeric_limits<uint32_t>::max()));
         sample.gAgeMs = static_cast<uint32_t>(std::min<uint64_t>(gAge, std::numeric_limits<uint32_t>::max()));
         const bool itemStillSame = g_heldItemSerial.load(std::memory_order_acquire) == itemSerialForCall;
         sample.fresh = armedNow && armsOk && mode == 3 && writeOk && itemStillSame && sample.fpAgeMs <= nofoot::kIkPoseDeviationMaxGapMs && sample.gAgeMs <= nofoot::kIkPoseDeviationMaxGapMs;
+        sample.offInputValid = offOut.ok;
+        sample.offHistorySamples = offOut.historySamples;
+        sample.offWithinDistance = offOut.withinDistance;
+        sample.offSteady = offOut.steady;
+        sample.offQualified = offOut.qualified;
+        sample.offAllowed = offOut.allowed;
+        sample.offTwo = offOut.two;
+        sample.offDuplicate = offOut.duplicate;
+        sample.offGapReset = offOut.gapReset;
+        sample.offIdentityReset = offOut.identityReset;
+        sample.offReversed = offOut.reversed;
+        sample.offDistanceM = offOut.dist;
+        sample.offChangeDeg = offOut.changeDeg;
+        sample.offRawWeight = offOut.w;
+        sample.offEffectiveWeight = offW;
+        sample.supportRequested = supportRequested;
+        sample.supportValid = supportTargetValid;
+        sample.supportBlend = s_supportBlend;
+        sample.targetMode[0] = targetMode[0];
+        sample.targetMode[1] = targetMode[1];
+        sample.leftWrote = so[0].wrote;
+        sample.rightWrote = so[1].wrote;
+        sample.leftStablePolicy = offOut.ok && offOut.stablePolicy;
+        sample.leftSolveWeight = so[0].wArm;
+        sample.reachMeasured = pinCall.reachMeasured;
+        sample.reachActive = pinCall.reachActive;
+        sample.reachInfeasible = pinCall.reachInfeasible;
+        std::memcpy(sample.reachRadiusM, pinCall.reachRadiusM, sizeof(sample.reachRadiusM));
+        std::memcpy(sample.pinReach, pinCall.reach, sizeof(sample.pinReach));
+        if (!so[0].wrote) {
+            const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
+                          : offW <= 0.0 ? kF67fOffHand : !so[0].solved ? kF67fRefused : !(so[0].wArm > 0.0) ? kF67fWeight : kF67fOther;
+            sample.leftReason = static_cast<uint8_t>(why + 1);
+        }
         const uint64_t freq = f66QpcFreq();
         if (g_poseDeviationTracker.haveLast && sample.qpc > g_poseDeviationTracker.last.qpc && freq)
             sample.dtMs = static_cast<float>(1000.0 * static_cast<double>(sample.qpc - g_poseDeviationTracker.last.qpc) / static_cast<double>(freq));
@@ -13679,7 +13736,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             const SideOut& o = so[side];
             const nofoot::IkArm& arm = pl.side[side];
             double actualS[3] = {}, actualE[3] = {}, actualH[3] = {};
-            const bool actual = o.wrote && o.physicalPoleStable && pl.ok[side] && finalAt(arm.U, actualS) && finalAt(arm.F, actualE) && finalAt(arm.H, actualH);
+            const bool actual = o.wrote && pl.ok[side] && finalAt(arm.U, actualS) && finalAt(arm.F, actualE) && finalAt(arm.H, actualH);
             sample.valid[side] = sample.fresh && actual;
             double actualAxis[3] = {actualH[0] - actualS[0], actualH[1] - actualS[1], actualH[2] - actualS[2]};
             const bool axisOk = actual && nofoot::ikUnit(actualAxis, actualAxis);
@@ -13705,7 +13762,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample.actualOutM[side] = actualOut;
                 sample.violationM[side] = std::max(0.0, o.poseElbowOutM - actualOut) + std::max(0.0, actualE[1] - actualS[1]);
                 so[side].poseActualValid = axisOk && radialOk;
-                if (so[side].poseActualValid) {
+                if (so[side].poseActualValid && o.physicalPoleStable) {
                     std::memcpy(physicalPoleCommit[side].axis, actualAxis, sizeof(actualAxis));
                     const double refAlong = nofoot::ikDot(physicalPoleCommit[side].reference, actualAxis);
                     for (int k = 0; k < 3; ++k) physicalPoleCommit[side].reference[k] -= refAlong * actualAxis[k];
@@ -14371,7 +14428,7 @@ void f66gLine(uint64_t now) noexcept {
 // the 3P root yaw, the square-up wanted and applied, the pin's horizontal move, and per arm the IK state, weight, reach ratio, the hand-to-grip error
 // before and after the solve, the shortfall and the animated hand's displacement since the previous call. No behaviour changes here.
 const char* aimArmState(const AimArm& a, char* buf, size_t cap) noexcept {
-    static const char* const kShort[kF67fWhyKinds] = {"plan", "nowrite", "refused", "inputs", "weight", "other"};
+    static const char* const kShort[kF67fWhyKinds] = {"plan", "nowrite", "refused", "inputs", "weight", "other", "offhand"};
     const char* why = a.reason > 0 && a.reason <= kF67fWhyKinds ? kShort[a.reason - 1] : "";
     if (a.state == 0) std::snprintf(buf, cap, "no side");
     else if (a.state == 1) std::snprintf(buf, cap, "solved w %.2f reach %.2f hand-grip %.1f -> %.1f cm short %.1f anim-hand %.1f", static_cast<double>(a.w), static_cast<double>(a.reach),
