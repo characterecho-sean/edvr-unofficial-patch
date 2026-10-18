@@ -1,5 +1,6 @@
 #pragma once
 #include "flat_pixel_capture_policy.h"
+#include "flat_capture_directory.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include <array>
@@ -42,7 +43,6 @@ class FlatPixelCapture {
     FlatPixelCapturePolicy policy_;
     std::deque<Sample> pending_;
     std::wstring directory_;
-    unsigned serial_=0;
     static constexpr const char* names_[6]={"color","depth","motion","rejection","raw","final"};
     static std::wstring wide(const std::string& s) { return std::wstring(s.begin(),s.end()); }
     void release() { pending_.clear(); }
@@ -86,13 +86,16 @@ public:
     void unsupported(const char* reason) { stop(reason); }
     void arm(uint64_t frame) {
         stop("rearmed");directory_.clear();policy_.arm(frame,GetTickCount64());
-        SYSTEMTIME now{};GetSystemTime(&now);wchar_t leaf[128]{};
-        _snwprintf_s(leaf,_TRUNCATE,L"%04u%02u%02u_%02u%02u%02u_%03u_%lu_%u",
-            now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,
-            GetCurrentProcessId(),++serial_);
+        SYSTEMTIME now{};GetSystemTime(&now);
         const auto root=Config::get().logDir()+L"\\flat_pixels";
-        directory_=root+L"\\"+leaf;
-        if(!ensureDirectory(Config::get().logDir()) || !ensureDirectory(root) || !ensureDirectory(directory_)) {
+        const auto leaf=[&](uint64_t id) {
+            wchar_t name[128]{};
+            _snwprintf_s(name,_TRUNCATE,L"%04u%02u%02u_%02u%02u%02u_%03u_%lu_%llu",
+                now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,
+                GetCurrentProcessId(),static_cast<unsigned long long>(id));
+            return std::wstring(name);
+        };
+        if(!ensureDirectory(Config::get().logDir()) || !ensureDirectory(root) || !createFreshCaptureDirectory(root,leaf,directory_)) {
             stop("failed-directory");return;
         }
         Log::get().note("flat pixels: armed frame=%llu samples=4 two adjacent live pairs separated by %u frames byte-cap=%llu timeout-frames=900 timeout-ms=30000 directory=%ls; native matched DLSS/DLAA textures, HDR ROI centered 2048x1152 max, no rendering changes; a reset frame is never a sample",
