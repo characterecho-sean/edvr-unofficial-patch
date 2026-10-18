@@ -258,6 +258,21 @@ static void runtimeAndLog(){
 int main(int argc,char** argv){
     if(argc==2&&std::strcmp(argv[1],"--dry-run")==0)return 0;
     if(argc!=2||std::strcmp(argv[1],"--self-test")!=0){std::fprintf(stderr,"usage: flat_world_witness_test --self-test|--dry-run\n");return 2;}
+    using namespace edvr;
+    check(!flatOriginCaptureEnabled(), "world capture starts off before initialization");
+    const float offNow[3]={20,0,0},offOld[3]={80,0,0};
+    flatWorldWitnessFrameBoundary(1,true,true,true);
+    check(!flatWorldWitnessSelect(1,1), "default off refuses before world record read");
+    flatWorldWitnessObserve(sample(1,1,0,0,0));
+    flatWorldWitnessReadFailure(1,1);
+    flatWorldWitnessEvent(1,offNow,offOld,16,true,true,false);
+    flatWorldWitnessUnavailable(1,offNow,offOld,16,"off-fixture");
+    flatWorldWitnessShutdown();
+    check(lines.empty() && !flat_world_witness_runtime::active.load() &&
+          !flat_world_witness_runtime::callbacks.load() && !flat_world_witness_runtime::core.events(),
+          "default off blocks every world entry and shutdown logs");
+    flatOriginCaptureInitialize(true);
+    check(flatOriginCaptureEnabled(), "world witness rig explicitly opts in");
     staticShiftAndInward();unchangedAndMissing();reuseAndSourceChange();quotasAndGaps();runtimeAndLog();sampledCoverage();stableFarIntersection();sparsePrefix();metadataRoundTrip();
     std::printf("flat_world_witness_test: 9 cases passed; maximum log line %zu bytes\n",maxLogBytes);return 0;
 }

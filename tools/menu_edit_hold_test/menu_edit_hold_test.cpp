@@ -24,6 +24,7 @@
 //   H11 the glue (menu.cpp) is wired: held steps, flushes, the reload that must not put a held value back, the worker that writes what was queued before a quit (read as text)
 //   H12 the refresh budget: a five-second hold is 12 to 22 writes at any frame rate, a third of the old cost or less
 //   H13 the config refresh window line: counts as counted, the closing sentence only for a window with nothing in it; the glue prints it through the formatter (read as text)
+//   H15 the production writer/completion path: addon save success/failure, no builtin access, invalid builtin indices and retained rollback/logging
 //   H14 a write that fails while a NEWER edit of the row exists (the 0.19.0 release review, "existing limitation"): the row keeps showing the newer value, the next repeat steps from
 //       it (the review's case ends at 6, not 1), the newer edit's own failure still rolls the row back, an older job never does, and the edit counters are per row
 #include <cstdio>
@@ -33,6 +34,7 @@
 
 #include "config_refresh_line.h"
 #include "menu_edit_hold.h"
+#include "menu_write.h"
 #include "menu_keys.h"
 
 using namespace edvr;
@@ -423,14 +425,181 @@ void caseLine() {
     check(!has(buf, "No refresh") && has(buf, "3 refreshes") && has(buf, "1.50 ms mean"), "H13.e ...nor a window with a refresh by hand and no menu edit");
 }
 
+// ---- H15: the production writer and completion path -------------------------------------------------------------------------------
+struct CompletionDef { int applies = 2; };
+struct CompletionRow {
+    EditGeneration edits;
+    std::string value = "live", snapshot = "start";
+    bool pending = false;
+};
+// Count every attempted builtin access, including an invalid one. Dynamic
+// completions must not even consult a definition or generation counter.
+template<class T>
+struct CompletionArray {
+    T items[2];
+    mutable unsigned accesses = 0, invalid = 0;
+    T& operator[](int index) {
+        ++accesses;
+        if (index < 0 || index >= 2) { ++invalid; return items[0]; }
+        return items[index];
+    }
+    const T& operator[](int index) const {
+        ++accesses;
+        if (index < 0 || index >= 2) { ++invalid; return items[0]; }
+        return items[index];
+    }
+};
+struct CompletionState {
+    bool pollRequest = false, contentDirty = false;
+    std::string lastWrite;
+};
+struct CompletionRig {
+    CompletionArray<CompletionDef> defs;
+    CompletionArray<CompletionRow> rows;
+    CompletionState state;
+    std::string file = "disk", log, attemptedKey, attemptedValue;
+    unsigned writes = 0;
+    WriteDone persist(const WriteJob& job, bool ok, const char* error = "injected replace failure") {
+        return runMenuWrite(job, [&](const WriteJob& attempted, std::string* err) {
+            ++writes;
+            attemptedKey = attempted.dotted;
+            attemptedValue = attempted.value;
+            if (ok) file = attempted.value;
+            else *err = error;
+            return ok;
+        });
+    }
+    void complete(const WriteDone& done) {
+        completeMenuWrite(done, state, defs, rows, 2,
+            [&](const CompletionDef&) { return file; },
+            [](const CompletionDef&, const std::string& value, const std::string& snapshot) { return value != snapshot; },
+            [&](const char* format, auto... args) {
+                char text[2048];
+                std::snprintf(text, sizeof(text), format, args...);
+                log = text;
+            }, "edvr.ini");
+    }
+};
+
+void caseWriterCompletion() {
+    for (WriteDestination destination : {WriteDestination::PluginSetting, WriteDestination::AddonApproval}) {
+        for (bool ok : {true, false}) {
+            CompletionRig r;
+            WriteJob job;
+            job.destination = destination;
+            job.dotted = destination == WriteDestination::PluginSetting ? "addon.demo.enabled" : "addons.demo";
+            job.value = destination == WriteDestination::PluginSetting ? "on" : "approved-sha256";
+            const WriteDone done = r.persist(job, ok);
+            check(r.writes == 1 && r.attemptedKey == job.dotted && r.attemptedValue == job.value && done.ok == ok,
+                  "H15.a setting and approval jobs reach the production writer with their real destination/key/value");
+            r.complete(done);
+            check(r.defs.accesses == 0 && r.rows.accesses == 0 && r.defs.invalid == 0 && r.rows.invalid == 0,
+                  "H15.b successful and failed addon completions never access builtin definitions or row state");
+            check(r.state.contentDirty && r.state.pollRequest == ok,
+                  "H15.c dynamic success requests reload and redraw; failure redraws without requesting a reload");
+            check(has(r.log, job.dotted.c_str()) && has(r.log, job.value.c_str()) && has(r.log, "active this session"),
+                  "H15.d every addon completion logs its key, value and already-active session policy");
+            if (ok) {
+                check(r.state.lastWrite == job.dotted + " = " + job.value && has(r.log, "written to edvr.ini") && r.file == job.value,
+                      "H15.e successful setting and approval saves produce the usual last-write status");
+            } else {
+                check(has(r.state.lastWrite, "FAILED:") && has(r.state.lastWrite, job.dotted.c_str()) &&
+                      has(r.state.lastWrite, "injected replace failure") && has(r.state.lastWrite, "active this session") &&
+                      has(r.state.lastWrite, "save not confirmed") && has(r.log, "injected replace failure") && r.file == "disk",
+                      "H15.f failed setting and approval saves report the key/error and explain unsaved session state");
+                if (destination == WriteDestination::AddonApproval)
+                    check(has(r.state.lastWrite, "approval may be needed next launch"), "H15.g unsaved approval explains the next-launch approval policy");
+                check(r.rows.items[0].value == "live" && r.rows.items[0].edits.latest == 0,
+                      "H15.h dynamic failure does not roll back an unrelated builtin value or edit generation");
+            }
+        }
+    }
+    {
+        CompletionRig r;
+        WriteJob job;
+        job.destination = WriteDestination::PluginSetting;
+        job.dotted = "addon.demo.enabled";
+        const WriteDone fault = r.persist(job, false, "");
+        r.complete(fault);
+        check(fault.err == "the write faulted" && has(r.state.lastWrite, "the write faulted"),
+              "H15.i a contained persistence fault still produces a useful failed completion");
+    }
+    {
+        CompletionRig r;
+        WriteJob job;
+        job.destination = WriteDestination::AddonApproval;
+        job.dotted = "addons.demo";
+        job.value = "approved-sha256";
+        const WriteDone afterReplaceFault = runMenuWrite(job, [&](const WriteJob& write, std::string*) {
+            r.file = write.value;   // atomic replacement landed before later mirror work faulted
+            return false;
+        });
+        r.complete(afterReplaceFault);
+        check(r.file == job.value && has(r.state.lastWrite, "save not confirmed") &&
+              !has(r.state.lastWrite, "not saved") && r.rows.accesses == 0 && r.defs.accesses == 0,
+              "H15.i2 a fault after replacement does not claim the file stayed unchanged or roll back active approval");
+    }
+    for (int index : {-1, 2}) {
+        for (bool ok : {true, false}) {
+            CompletionRig r;
+            WriteJob job;
+            job.def = index;
+            job.dotted = "fix.invalid";
+            r.complete(r.persist(job, ok));
+            check(r.defs.accesses == 0 && r.rows.accesses == 0 && r.state.contentDirty && !r.state.pollRequest &&
+                  has(r.state.lastWrite, "invalid built-in setting row"),
+                  "H15.j invalid builtin row completions are rejected before either array is accessed");
+        }
+    }
+    {
+        CompletionRig r;
+        WriteJob old;
+        old.def = 0;
+        old.dotted = "fix.width";
+        old.value = "4";
+        for (int i = 0; i < 4; ++i) old.gen = r.rows.items[0].edits.next();
+        const WriteDone failedOld = r.persist(old, false);
+        r.rows.items[0].value = "5";
+        r.rows.items[0].edits.next();
+        r.complete(failedOld);
+        check(r.rows.items[0].value == "5", "H15.k actual completion keeps the newer edit when the write of 4 fails");
+        WriteJob latest = old;
+        latest.value = "6";
+        latest.gen = r.rows.items[0].edits.next();
+        r.rows.items[0].value = latest.value;
+        check(latest.gen == 6, "H15.l the repeat after that failed completion takes edit 6");
+        r.complete(r.persist(latest, false));
+        check(r.rows.items[0].value == "disk" && r.rows.items[0].pending,
+              "H15.m the newer edit's own failure rolls back to disk and recomputes its pending badge");
+        r.complete(r.persist(latest, true));
+        check(r.state.pollRequest && r.state.lastWrite == "fix.width = 6" && has(r.log, "takes effect at the next launch"),
+              "H15.n builtin success retains reload, last-write and applies metadata");
+    }
+    {
+        CompletionRig r;
+        WriteJob job;
+        job.def = 0;
+        job.dotted = "fix.openxr_resolution";
+        job.value = "openxr/headset:2400";
+        job.headset = "openxr/headset";
+        job.fromValue = "2200";
+        job.toValue = "2400";
+        job.dropped = "bad token";
+        r.complete(r.persist(job, true));
+        check(r.state.lastWrite == "openxr/headset = 2400" && has(r.log, "2200 -> 2400") && has(r.log, "dropped malformed bad token"),
+              "H15.o actual completion retains per-headset status and change logging");
+    }
+}
+
 // ---- H11 and H13.p: the glue, read as text ------------------------------------------------------------------------------------------
 void caseGlue(const std::string& root) {
     if (root.empty()) return;
-    std::string menu, perf;
+    std::string menu, perf, writer;
     const bool readMenu = readText(root + "/src/d3d11/menu.cpp", &menu);
     const bool readPerf = readText(root + "/src/d3d11/perf_monitor.cpp", &perf);
-    check(readMenu && readPerf, "H11.p0 src/d3d11/menu.cpp and perf_monitor.cpp can be read under the repository root");
-    if (!readMenu || !readPerf) return;
+    const bool readWriter = readText(root + "/src/d3d11/menu_write.h", &writer);
+    check(readMenu && readPerf && readWriter, "H11.p0 menu.cpp, menu_write.h and perf_monitor.cpp can be read under the repository root");
+    if (!readMenu || !readPerf || !readWriter) return;
     check(occurrences(menu, "applyChange(defIndex, formatNumber(v, d.precision), true);") == 1, "H11.p1 a stepped Number row holds its step");
     check(occurrences(menu, "applyResolutionChange(defIndex, v, next, true);") == 1, "H11.p2 ...and so does the per-headset render width row");
     check(occurrences(menu, "if (!held) g_held.flush(EditFlush::Other);") == 1, "H11.p3 any change that is not a held step writes what is held first");
@@ -442,12 +611,18 @@ void caseGlue(const std::string& root) {
           "H11.p8 a shutdown writes what is held, before the writer stops");
     check(occurrences(menu, "if (g_writer.queue.empty()) return;") == 1 && !has(menu, "if (g_writer.quit) return;"), "H11.p9 the writer, told to quit, still writes what was queued before");
     check(occurrences(menu, "if (g_held.pending() && g_held.def() == i) continue;") == 1, "H11.p10 a reload of an earlier write does not put a held row back to the file's value");
-    check(occurrences(menu, "g_rows[w.job.def].value = rowValue(d);") == 1, "H11.p11 a failed write still puts the row back to what the file holds");
-    check(occurrences(menu, "job.gen = g_rows[job.def].edits.next();") == 1 && occurrences(menu, "EditGeneration edits;") == 1 && occurrences(menu, "uint32_t    gen = 0;") == 1,
+    check(occurrences(writer, "g_rows[w.job.def].value = rowValue(d);") == 1, "H11.p11 a failed write still puts the row back to what the file holds");
+    check(occurrences(menu, "job.gen = g_rows[job.def].edits.next();") == 1 && occurrences(menu, "EditGeneration edits;") == 1 && occurrences(writer, "uint32_t    gen = 0;") == 1,
           "H11.p13 every edit takes the row's next edit number, and the job carries it");
-    check(occurrences(menu, "if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {\n                g_rows[w.job.def].value = rowValue(d);") == 1,
+    check(occurrences(writer, "if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {\n            g_rows[w.job.def].value = rowValue(d);") == 1,
           "H11.p14 ...and a failed write puts the row back only if no newer edit of the row has been made since");
     check(occurrences(menu, "    pending.before = before;\n    pending.fromValue = fromValue;\n    pending.dropped = dropped;") == 1, "H11.p12 a burst keeps the first step's old value for the log");
+    check(occurrences(menu, "WriteDone d = runMenuWrite(job,") == 1 &&
+          occurrences(menu, "completeMenuWrite(w, s, kMenuRows, g_rows, kRowDefCount,") == 1,
+          "H15.p1 the menu worker and completion drain invoke the production helpers exercised here");
+    check(occurrences(menu, "job.destination = WriteDestination::PluginSetting;") == 1 &&
+          occurrences(menu, "job.destination = WriteDestination::AddonApproval;") == 1,
+          "H15.p2 both dynamic enqueuers explicitly name their destination");
     check(occurrences(perf, "formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);") == 1 && !has(perf, "All zero"),
           "H13.p1 the monitor prints the config refresh line through the formatter, with no sentence of its own");
 }
@@ -482,6 +657,7 @@ int main(int argc, char** argv) {
     caseMerge();
     caseBudget();
     caseLine();
+    caseWriterCompletion();
     caseGlue(root);
     if (g_failures) {
         std::printf("FAIL: menu edit hold: %u of %u checks failed\n", g_failures, g_checks);

@@ -2,9 +2,9 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-09-04 to 2026-09-07 (this
-file's own log) and its header redirect notices. It restates the journal
-below and is not new evidence; update it whenever this doc changes.*
+- **2026-10-17 flat scan:** isolated RTX 5090 query cost 97-138 ns/check; no
+  game FPS claim. Complete cache deferred pending full invalidation proof. P-B
+  early receipt discard verified; full build PASS, 170.6 s. Entry below.
 
 - **State: Feature 2 (variable-rate shading) retired 2026-09-29 (code removed,
   184eee7f).** foveation.cpp, `experimental.foveation` and the seven
@@ -1808,3 +1808,70 @@ unattributed (hypothesis: about 90 UI-layer reissued draws per frame).
 
 (e) `journal_reglob` takes 3-4.5 ms every 12 s on the journal thread (2489
 files). That is off the render thread and minor.
+
+## 2026-10-17 pre-RC3: flat output-scan cost and unused phase receipts
+
+Review P-A and the user's follow-up identify real per-draw output work in
+`forwardDrawWrites`. After active-Upstream and live-ledger gates, it runs
+before converter shader filtering, querying all eight RTVs, feature-level UAV
+slots and blend state, then examining writable resources. Existing partial
+bindings do not authorize omitting secondary RTVs or UAVs above slot seven.
+
+Sol measured the isolated query/resource-check pattern on this machine's NVIDIA
+GeForce RTX 5090, D3D11 feature level 11.1, 64 UAV slots. Each result uses five
+independent runs, each taking the median of five 100,000-check samples after
+1,000 warmups. Binding counts, blend identity and write masks were checked
+explicitly. Non-null all-write blend medians:
+
+| Bound outputs | Hardware CPU ms per 1,000 checks | WARP control |
+| --- | ---: | ---: |
+| One RTV, no UAV | 0.097417 | 0.093390 |
+| One RTV, one UAV | 0.114481 | 0.113060 |
+| Two RTVs, no UAV | 0.116329 | 0.115388 |
+| Two RTVs, one UAV | 0.138204 | 0.134641 |
+
+The simpler null-blend cases measure 49-90 ns/check but omit `GetDesc`, so they
+must not stand in for non-null game blend states. Zero RTV masks and
+independent-mask layouts were also verified, with UAV writes still considered.
+These measurements are isolated CPU API/resource-query work, not the complete
+production function, every output configuration, the game's mod chain, GPU
+completion time or an FPS comparison.
+
+The flight-tested `942cfeb3` log has sampled copy-check timing scopes. The
+source has two such scopes on the relevant slow-draw path; representative
+windows imply roughly 385-1,396 possible `forwardBefore` entries per clocked
+frame. Actual output scans can be skipped by the Upstream/ledger gates. The
+historical 1,592 substituted draws is not a measured current scan count.
+Applying the measured non-null cases to that sampled proxy gives an
+illustrative 0.037-0.193 ms of API work. This is not a direct per-frame
+measurement or a hard upper bound. Binding-change amortization and current
+full-function cost remain unmeasured.
+
+Keep the correct scan for RC3. The existing cache tracks only part of OM state;
+internal setters and raw RTV/blend calls bypass shadow updates. Resolver
+`SwapDeviceContextState` is unhooked and suppresses `ClearState` observation.
+Command lists, KEEP semantics and implicit resource unbinding also require
+effective-state knowledge. A future complete cache should query actual outputs
+after uncertainty, with proven invalidation across all these paths,
+context/device changes and retained-resource lifetime. Inferring the effective
+state solely from setter arguments is not justified. The benchmark quantifies
+an optimization opportunity without establishing a substantial game regression
+or the safety of a partial-cache shortcut. No P-A rendering change, new
+instrument, toggle or test flight is introduced.
+
+P-B has a smaller correction with a known discard condition. Successful
+nonzero-phase receipts now return before constructing the receipt, copying the
+camera and two constant blocks, or rerunning phase analysis. The existing
+frozen guard runs first. Zero bootstrap samples, all failures, selection and
+cohort behavior remain; legacy `eligibleSnapshots` and other counter values are
+retained. Production-predicate and ordering tests check the lazy boundary and
+selected zero-bootstrap-to-phase-failure pairing. No FPS gain is claimed. The
+focused temporal rig passed, including collector 103/0 and integration 101/0.
+The combined full build passed in 170.6 seconds, including production DLLs, all
+170 pooled and six serial jobs, installer checks and a matching full-build
+receipt. No additional flight was required.
+
+Local evidence is in the primary checkout's ignored
+`build/rc3-latest-review/forward_outputs_hardware_audit.txt`, its benchmark
+source and six raw result files. The audit starts with its current Status and
+records remaining cache contracts and fixture requirements.

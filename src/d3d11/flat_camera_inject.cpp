@@ -14,6 +14,7 @@
 #include "../common/runtime_profile.h"
 #include "flat_camera_ownership.h"
 #include "flat_camera_signature.h"
+#include "flat_stationary_camera_capture.h"
 #include "flat_camera_stubs.h"
 #include "flat_camera_vr.h"
 #include "flat_cpu.h"
@@ -622,6 +623,7 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
         if (g_inject.gameBase && sehReadU64(r0, &ret) && ret > g_inject.gameBase) callerRva = ret - g_inject.gameBase;
         g_inject.census.noteCaller(callerRva);
     }
+    flatStationaryCameraRefresh(camera, ctx, callNo, callerRva, readable ? kind : 0);
     // The phase, in RENDER pixels from the validated resolve plan (R5).
     float jx = 0, jy = 0;
     uint32_t rw = 0, rh = 0, applied = 0;

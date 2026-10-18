@@ -33,6 +33,7 @@ struct SuiteTimer{const char* name;std::chrono::steady_clock::time_point t0=std:
 template<class F> decltype(auto) timedSuite(const char* name,F&& f){SuiteTimer t(name);return f();}
 int failures=0,backendCalls=0;
 bool backendFail=false,backendReset=false,infiniteSeen=false;
+bool xessCaptureInputs=false; // opt-in for the real mask-less SDK argument fixture
 std::vector<std::string> resetEvents;
 // What the HDR route's breadcrumbs (flat_hdr_crumbs.h) were handed to breadcrumb(), in order: the lines edvr_breadcrumbs.txt would hold.
 std::vector<std::string> crumbLines;
@@ -52,7 +53,7 @@ std::vector<uint64_t> motionHashLog; // one entry per backend call, in call orde
 std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
-std::vector<std::string> rebaseLines,travelLines;   // "flat resolve origin rebase absorbed:" (the floating origin moved, history kept)
+std::vector<std::string> rebaseLines,travelLines;   // ambiguity resets and admitted travel, respectively
 std::vector<std::string> opticalLines;
 std::vector<std::string> worldLines;
 std::vector<std::string> resolveInputLines;
@@ -79,7 +80,7 @@ void check(bool ok,const char* text){if(!ok){if(mutationFailures){if(!*mutationF
 // skin 9200, flatPixelCapture 4200, flatWeaponFootprint 2500, taaHistoryDepth 2000, mapEasu 1800, each SDK foreground case 300-800.
 struct ShardUnit {const char* name;int group;};
 const ShardUnit kUnits[]={
-    {"projectionScopeTests",1},{"projectionRuntimeTests",1},
+    {"projectionScopeTests",1},{"projectionRuntimeTests",1},{"projectionSnapshotTests",1},
     {"resolver",2},
     {"flatPixelCaptureGpuTests",2},{"flatDrawCaptureGpuTests",2},{"flatDrawPacketGpuTests",2},
     {"flatWeaponFootprintGpuTests",2},{"flatOverlayLayerGpuTests",2},{"flatLoopOutputGpuTests",2},
@@ -142,10 +143,10 @@ bool backend(ID3D11DeviceContext* c,ID3D11Texture2D* depth,ID3D11Texture2D* mv,I
     check(jx==expectedJx && jy==expectedJy,"backend receives actual rendered phase");
     uint16_t motion[2]{};unsigned char reject=0;
     check(readPixel(c,mv,motion,sizeof(motion)) && readPixel(c,depth,&observedDepth,sizeof(float)) &&
-          readPixel(c,mask,&reject,1),"backend inputs readable");
+          (!mask || readPixel(c,mask,&reject,1)),"backend inputs readable");
     observedMotion=half(motion[0]);observedMotionY=half(motion[1]);observedReject=reject;
     {std::vector<unsigned char> all,maskAll,depthAll;D3D11_TEXTURE2D_DESC md{};mv->GetDesc(&md);
-     if(readWhole(c,mv,all,4) && readWhole(c,mask,maskAll,1) && readWhole(c,depth,depthAll,4)) {
+     if(readWhole(c,mv,all,4) && (!mask || readWhole(c,mask,maskAll,1)) && readWhole(c,depth,depthAll,4)) {
          // One hash over every byte the SDK was handed: motion, the reject mask and depth.
          observedMotionHash=fnv1a(depthAll.data(),depthAll.size(),fnv1a(maskAll.data(),maskAll.size(),fnv1a(all.data(),all.size())));
          observedMotionW=md.Width;observedMaskAll=maskAll;
@@ -207,7 +208,7 @@ void Log::note(const char* fmt,...) {
     if(std::strncmp(line,prefix,sizeof(prefix)-1)==0)resetEvents.emplace_back(line);
     else if(std::strncmp(line,firstPersonPrefix,sizeof(firstPersonPrefix)-1)==0)firstPersonLines.emplace_back(line);
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
-    else if(std::strncmp(line,"flat resolve origin rebase absorbed:",36)==0)rebaseLines.emplace_back(line);
+    else if(std::strncmp(line,"flat resolve origin ambiguity reset:",36)==0)rebaseLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve fast-travel step kept:",35)==0)travelLines.emplace_back(line);
     else if(std::strncmp(line,"flat origin optical",19)==0)opticalLines.emplace_back(line);
     else if(std::strncmp(line,"flat world witness",18)==0)worldLines.emplace_back(line);
@@ -216,7 +217,11 @@ void Log::note(const char* fmt,...) {
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
-bool ensureDirectory(const std::wstring& path) {return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;}
+bool flatDrawCaptureNoDirectoryWrites=false;
+bool ensureDirectory(const std::wstring& path) {
+    if(flatDrawCaptureNoDirectoryWrites)return true;
+    return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;
+}
 thread_local bool g_flatComputeInternal = false;
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* context,const void* bytecode,size_t size,
                                          const char*,const char*) {
@@ -232,8 +237,13 @@ bool xessAvailable(ID3D11Device*,const char**){return true;}
 void xessReleaseFeatures(){}
 void xessShutdown(){}
 bool xessBuiltIn(){return true;}
-bool xessEvaluate(ID3D11DeviceContext*,unsigned,ID3D11Texture2D*,ID3D11Texture2D*,ID3D11Texture2D*,
-                  ID3D11Texture2D*,uint32_t,uint32_t,uint32_t,uint32_t,float,float,bool,bool,const char**){return false;}
+// XeSS has no rejection-mask input. Observe its actual depth/motion/reset
+// arguments without fabricating a mask; the fixture checks final pixels too.
+bool xessEvaluate(ID3D11DeviceContext* c,unsigned,ID3D11Texture2D*,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
+                  ID3D11Texture2D* out,uint32_t,uint32_t,uint32_t,uint32_t,float jx,float jy,bool reset,bool,const char** why) {
+    if(!xessCaptureInputs)return false; // retain the legacy stub outside this fixture
+    return backend(c,depth,mv,nullptr,out,jx,jy,reset,why);
+}
 bool dlaaEvaluate(ID3D11DeviceContext* c,int slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
     ID3D11Texture2D* out,ID3D11Texture2D* mask,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,float,const char** why,bool hdr) {
     backendSlots.push_back(slot);
@@ -283,6 +293,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_copy_refusal_view_gpu_tests.h"
 #include "flat_copy_foreground_gpu_tests.h"
 #include "flat_celestial_gpu_tests.h"   // planet patch motion in the prep: the tangents, and the shipped prep with a planet record bound and not (2026-10-15)
+#include "flat_origin_ambiguity_gpu_tests.h"
 #include "flat_origin_optical_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
@@ -321,6 +332,7 @@ int main(int argc,char** argv) {
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
     if(shardRuns("projectionScopeTests"))timedSuite("projectionScopeTests",[&]{return projectionScopeTests(device.Get(), context.Get());});
     if(shardRuns("projectionRuntimeTests"))timedSuite("projectionRuntimeTests",[&]{return projectionRuntimeTests(device.Get(), context.Get());});
+    if(shardRuns("projectionSnapshotTests"))timedSuite("projectionSnapshotTests",[&]{return projectionSnapshotTests(device.Get(), context.Get());});
     // The suites that follow the resolver section and the checks that close main(), as lambdas: a shard without the resolver section
     // (whose locals its tail uses) runs them too, in the same order. Defined here, called after the section or in its place.
     auto runSuites=[&]{
@@ -538,17 +550,15 @@ int main(int argc,char** argv) {
     f.mode=edvr::FlatMonoResolveMode::Dlss;f.color=colorView.Get();++f.frame;run(true);
     f.frame+=2;run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.frameGaps>=1 && stats.currentContinueRun==0,"frame gap produces a counted reset");
-    // THE FLOATING ORIGIN (2026-10-16 flat log: Elite re-anchors row 5 about every 5 km and the camera's rows do not move). A jump of 50 m
-    // or more with the rows unmoved keeps the history and sends the backend no reset. Of those, a RE-ANCHOR (the origin landed near the
-    // camera: temporalOriginReanchor) also drops the frame's camera translation; FAST TRAVEL keeps it, because now[5]-old[5] is the
-    // camera's real motion there (review 49f28838 F1: 80 m lateral past a surface 1 km away is 99.84 px at 2496 wide, not zero).
+    // The established inward-origin rule identifies ambiguous input, not a
+    // proved coordinate change. Those cases reset; admitted travel retains
+    // the actual previous origin and its signed camera motion.
     // The key-off goldens below are the motion hashes of the backend calls in order, so these cases' calls are taken back out of that log
     // (hashMark) before the camera cut the goldens were recorded with.
     const size_t hashMark=motionHashLog.size();
     const auto cutsAtStart=stats.cameraCuts;
-    // The classifier on every absorbed line of the 2026-10-16 flat logs (edvr_gfx_..._033508 and ..._045608: step, now-len, prev-len as
-    // logged) and on the pre-fix cut events of ..._023749 (computed from their now/previous). Re-anchors land 12-27 m out from 184-7518 m;
-    // travel steps are the ones whose |now| exceeds |prev|.
+    // Recorded input shapes retain their rule classification. Historical log
+    // labels are not independent physical-motion or coordinate-frame evidence.
     {const struct{double step,now,prev;bool reanchor;} logged[]={
         {196.477459,15.9053814,184.159536,true},{4995.50933,27.3671985,5022.01086,true},{5000.61242,25.5873709,5025.77806,true},
         {4999.26258,25.9619125,5024.80865,true},{4996.21713,20.9132741,5016.50717,true},{5021.01963,19.9982624,5040.35158,true},
@@ -571,12 +581,12 @@ int main(int argc,char** argv) {
     f.previousCamera[5][0]=2529.28516f;f.previousCamera[5][1]=4289.83105f;f.previousCamera[5][2]=-647.607849f;
     f.camera[5][0]=14.3940916f;f.camera[5][1]=19.6849442f;f.camera[5][2]=.466696352f;
     ++f.frame;const auto beforeSnap=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
-    check(!backendReset && stats.cameraCuts==beforeSnap.cameraCuts && stats.originRebases==beforeSnap.originRebases+1 &&
+    check(backendReset && stats.cameraCuts==beforeSnap.cameraCuts && stats.originRebases==beforeSnap.originRebases+1 &&
           stats.travelSteps==beforeSnap.travelSteps &&
-          stats.acceptedContinues==beforeSnap.acceptedContinues+1 && stats.acceptedResets==beforeSnap.acceptedResets &&
-          std::abs(observedMotion)<.001 && std::abs(stats.lastOriginRebaseM-4997.9)<1 &&
+          stats.acceptedContinues==beforeSnap.acceptedContinues && stats.acceptedResets==beforeSnap.acceptedResets+1 &&
+          observedReject==255 && std::abs(observedMotion)<.001 && std::abs(stats.lastOriginRebaseM-4997.9)<1 &&
           rebaseLines.size()==1 && rebaseLines.back().find("now-len=24.")!=std::string::npos,
-          "a 5 km origin snap (now under 25 m from zero, rows unmoved) keeps history with zero camera translation");
+          "a 5 km inward-origin input resets and rejects history without claiming a coordinate change");
     // 10 frames of fast travel at 80 m a frame: nothing cuts, and every step is travel.
     const auto beforeTravel=edvr::flatMonoResolveStats();bool travelReset=false;
     camera(f.camera);camera(f.previousCamera);
@@ -599,12 +609,12 @@ int main(int argc,char** argv) {
      if(std::abs(observedMotion*(2496.f/w)-99.84f)>=1.f)std::printf("info: 80 m travel at 1000 m motion %g px at width %u = %g px at 2496 (reject %u, depth %g)\n",observedMotion,w,observedMotion*(2496.f/w),observedReject,observedDepth);
      check(std::abs(observedMotion*(2496.f/w)-99.84f)<1.f && std::abs(observedMotionY)<.001f,
            "80 m lateral travel past a surface at 1000 m carries the real camera motion: 99.84 px at 2496 wide");
-     // The same geometry as a re-anchor: previous 5 km out, now 15 m: zero translation, history kept.
+     // The same geometry with an ambiguous coordinate change: history is reset.
      camera(f.camera);camera(f.previousCamera);f.previousCamera[5][0]=5000;f.camera[5][0]=15;
      ++f.frame;const auto beforeAnchor=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
-     check(!backendReset && stats.cameraCuts==beforeAnchor.cameraCuts && stats.originRebases==beforeAnchor.originRebases+1 &&
-           std::abs(observedMotion)<.001f && std::abs(observedMotionY)<.001f,
-           "a re-anchor at the same geometry carries zero camera translation and no reset");
+     check(backendReset && stats.cameraCuts==beforeAnchor.cameraCuts && stats.originRebases==beforeAnchor.originRebases+1 &&
+           observedReject==255 && std::abs(observedMotion)<.001f && std::abs(observedMotionY)<.001f,
+           "an ambiguous re-anchor-shaped input sends backend reset and rejects history");
      context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);slots=savedSlots;
      context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);}
     // A move of 30 m is travel, not a jump: the camera term stays, nothing is counted either way.
@@ -612,20 +622,20 @@ int main(int argc,char** argv) {
     ++f.frame;const auto beforeThirty=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
     check(!backendReset && stats.cameraCuts==beforeThirty.cameraCuts && stats.originRebases==beforeThirty.originRebases,
           "a 30 m move is neither a cut nor a rebase");
-    // A diagonal step over 50 m with no axis over 50 m never cut and keeps its camera term: only a jump the axis test cut can be absorbed.
+    // A diagonal step with no axis over 50 m retains the existing admission.
     camera(f.camera);camera(f.previousCamera);f.camera[5][0]=f.camera[5][1]=f.camera[5][2]=35;
     ++f.frame;const auto beforeDiagonal=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
     check(!backendReset && stats.cameraCuts==beforeDiagonal.cameraCuts && stats.originRebases==beforeDiagonal.originRebases,
           "a 60 m diagonal step with every axis under 50 m is unchanged");
-    // The rows tolerance (0.02): a jump with the rows 0.019 off is a rebase, 0.021 off is another camera.
+    // Keep the row tolerance: 0.019 enters the ambiguity rule; 0.021 cuts.
     camera(f.camera);camera(f.previousCamera);f.previousCamera[5][0]=5020;f.camera[5][0]=20;f.camera[0][1]=.019f;
     ++f.frame;const auto beforeNear=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
-    check(!backendReset && stats.cameraCuts==beforeNear.cameraCuts && stats.originRebases==beforeNear.originRebases+1,
-          "a 5 km jump with the rows 0.019 off is absorbed");
+    check(backendReset && stats.cameraCuts==beforeNear.cameraCuts && stats.originRebases==beforeNear.originRebases+1,
+          "a 5 km jump with the rows 0.019 off resets as ambiguous");
     f.camera[0][1]=.021f;++f.frame;const auto beforeFar=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.cameraCuts==beforeFar.cameraCuts+1 && stats.originRebases==beforeFar.originRebases,
           "a 5 km jump with the rows 0.021 off cuts");
-    // A hitch frame keeps the cut: the one real world change on record (460 m) took 153 ms, a rebase never has.
+    // A hitch frame keeps the established cut regardless of the origin rule.
     camera(f.camera);camera(f.previousCamera);f.camera[5][0]=460;f.deltaMs=153;
     ++f.frame;const auto beforeHitch=edvr::flatMonoResolveStats();run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.cameraCuts==beforeHitch.cameraCuts+1 && stats.originRebases==beforeHitch.originRebases,

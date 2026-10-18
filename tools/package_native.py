@@ -667,11 +667,16 @@ def self_test():
             # and --profile is no longer an option. The VR archive carries both settings files.
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
                 assert "edvr-flat.ini" in set(archive.namelist()) and "edvr.ini" in set(archive.namelist())
+            import contextlib, io
+            refusal = io.StringIO()  # argparse's usage text: expected, so not echoed raw
             try:
-                main(["1.2.8", "--root", str(root), "--profile", "flat"])
+                with contextlib.redirect_stderr(refusal):
+                    main(["1.2.8", "--root", str(root), "--profile", "flat"])
                 raise AssertionError("--profile flat accepted")
             except SystemExit as error:
                 assert error.code == 2
+                assert "unrecognized arguments: --profile flat" in refusal.getvalue()
+                print("expected-error: argparse refused --profile flat (exit 2)")
             assert not (root / "dist" / "edvr-flat-1.2.8.zip").exists()
             # The installer's own copy of each settings file is checked against that
             # file, under its own name: edvr-flat.ini (111) is not edvr.ini (103).

@@ -8,6 +8,9 @@ namespace edvr {
 void flatComputeArm(ID3D11Device* device, uint64_t present);
 bool flatComputeCandidate() noexcept;
 bool flatComputeManual() noexcept;
+// Owner-thread read-only busy query for passive discovery rearm. An old Full
+// request's retained manual history does not count after its work finishes.
+bool flatComputeBusy() noexcept;
 void flatComputePoll(uint64_t present);
 void flatComputeBoundary(uint64_t present, uint64_t nextEpoch,
                          uint32_t outputWidth, uint32_t outputHeight);

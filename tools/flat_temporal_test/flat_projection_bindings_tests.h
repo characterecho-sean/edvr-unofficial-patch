@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/flat_projection_bindings.h"
+#include "../../src/d3d11/flat_projection_runtime.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -25,13 +26,25 @@ inline int flatProjectionBindingsTests() {
           !bank.registerBuffer(&overflow, 1, 16) &&
           !bank.registerBuffer(&first, 12, 65536) &&
           !bank.lookup(&first, 11, view), "bounded registration and no inferred bytes");
+    check(bank.lookupState(&first,11)==FlatProjectionShadowLookupState::Invalid &&
+          bank.lookupState(&first,12)==FlatProjectionShadowLookupState::GenerationMismatch &&
+          bank.lookupState(&overflow,1)==FlatProjectionShadowLookupState::Unregistered &&
+          flatProjectionCopyShadowFailure(bank.lookupState(&first,12))==
+              FlatProjectionCopyFailureKind::ShadowGenerationMismatch,
+          "failed lookup distinguishes missing publication from wrong generation and unregistered buffer");
     check(bank.captureFullWrite(&first, 11, source, sizeof(source)) &&
           bank.lookup(&first, 11, view) && view.width == sizeof(source) &&
           view.bytes[0] == 0x65 && view.bytes[65535] == 0xD7 &&
           view.writeGeneration == 1, "full 64 KiB write has complete provenance");
+    check(bank.lookupState(&first,11)==FlatProjectionShadowLookupState::Ready,
+          "successful shadow lookup remains ready without a failure receipt");
     const auto key0 = flatProjectionCacheKey(view, 3);
-    check(bank.matches(key0, 3) && !bank.matches(key0, 4) &&
-          bank.beginMap(&first, 11) && !bank.lookup(&first, 11, view) &&
+    const bool priorMatch=bank.matches(key0, 3) && !bank.matches(key0, 4);
+    const bool mapStarted=bank.beginMap(&first, 11);
+    check(mapStarted && bank.lookupState(&first,11)==FlatProjectionShadowLookupState::Mapping &&
+          flatProjectionCopyShadowFailure(bank.lookupState(&first,11))==FlatProjectionCopyFailureKind::ShadowMapping,
+          "mapped shadow names the precise failed lookup state");
+    check(priorMatch && mapStarted && !bank.lookup(&first, 11, view) &&
           !bank.matches(key0, 3) &&
           !bank.captureFullWrite(&first, 11, changed, sizeof(changed)),
           "in-progress map invalidates old bytes and short write fails");

@@ -2545,12 +2545,13 @@ int main(int argc, char** argv) {
         // without it the profile reads as the legacy VR one and edvr.ini wins.
         if (!writeIni(flatDir, descriptor, L"edvr_profile.ini") ||
             !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.9\r\n") ||
-            !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.4\r\n", flatLeaf)) {
+            !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.4\r\n[diag]\r\nflat_origin_capture = on\r\n", flatLeaf)) {
             fail("flat sharpening reload", "could not write the scratch inis");
         } else {
             pinGraphicsMode(flatDir + L"_localappdata", 0);
             Config::get().init(flatDir);
             if (!runtimeFlatProfile()) fail("flat sharpening reload", "the descriptor did not select flat");
+            expectBool("diag.flat_origin_capture", true, "flat profile permits explicit F1 diagnostic opt-in");
             expectFloat("fix.render_sharpness", 0.4f,
                         "the flat file is read first: its 0.4, not edvr.ini's 0.9");
             if (!rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0\r\n", flatLeaf) ||

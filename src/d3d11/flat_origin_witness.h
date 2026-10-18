@@ -1,6 +1,7 @@
 #pragma once
 // Diagnostic only: game-owned current rigid poses around a flat camera-origin jump.
 // The injected previous pose is deliberately absent: EDVR synthesizes it.
+#include "flat_origin_capture.h"
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
@@ -363,6 +364,7 @@ inline void finishPending(bool force,uint32_t frame) noexcept {
 
 inline void flatOriginWitnessObserve(uintptr_t record,uintptr_t node,uintptr_t owner,const uint32_t pose[5],
                                      uint32_t engineFrame,bool proven,bool primary) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_origin_witness_runtime;
     if(!active.load(std::memory_order_relaxed))return;
     callbacks.fetch_add(1,std::memory_order_relaxed);
@@ -380,6 +382,7 @@ inline void flatOriginWitnessObserve(uintptr_t record,uintptr_t node,uintptr_t o
     core.observe(record,node,owner,pose,engineFrame,proven,primary);
 }
 inline void flatOriginWitnessFrameBoundary(uint32_t engineFrame,bool flatProfile,bool emitHookLive) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_origin_witness_runtime;
     clock.store(engineFrame,std::memory_order_release);
     std::lock_guard<std::mutex> lock(mutex);
@@ -395,6 +398,7 @@ inline void flatOriginWitnessFrameBoundary(uint32_t engineFrame,bool flatProfile
 }
 inline void flatOriginWitnessEvent(uint64_t resolverFrame,const float now[3],const float previous[3],float deltaMs,
                                    bool jumpKept,bool classifiedReanchor,bool reset) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_origin_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     const uint32_t ef=clock.load(std::memory_order_acquire);
@@ -403,6 +407,7 @@ inline void flatOriginWitnessEvent(uint64_t resolverFrame,const float now[3],con
 }
 inline void flatOriginWitnessUnavailable(uint64_t resolverFrame,const float now[3],const float previous[3],
                                          float deltaMs,const char* reason) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_origin_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     const uint32_t ef=clock.load(std::memory_order_acquire);
@@ -410,6 +415,7 @@ inline void flatOriginWitnessUnavailable(uint64_t resolverFrame,const float now[
     core.event(resolverFrame,ef,now,previous,deltaMs,false,false,false,reason?reason:"unknown");
 }
 inline void flatOriginWitnessShutdown() noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_origin_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     if(!active.load(std::memory_order_relaxed))return;

@@ -1,0 +1,194 @@
+name: Native Windows release build
+
+on:
+  push:
+    branches:
+      - 'codex/release-*'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edvr-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Initialize diagnostics
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'edvr-workflow.txt'
+          $lines = @("ref=$env:GITHUB_REF", "sha=$env:GITHUB_SHA", "run=$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT")
+          [IO.File]::WriteAllLines($path, $lines, (New-Object Text.UTF8Encoding($false)))
+
+      - name: Check out complete tag history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tools/requirements.txt
+
+      - name: Install build tool requirements
+        run: |
+          python -m pip install -r tools\requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Python requirements install failed' }
+
+      - name: Select package version
+        run: |
+          $headCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checkout HEAD' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+            if ($tag -cnotmatch '^v([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)$') {
+              throw "Tag must be a semantic release version: $tag"
+            }
+            $version = $Matches[1]
+            $tagCommit = git rev-parse "refs/tags/$tag^{commit}"
+            if ($LASTEXITCODE -ne 0) { throw "Cannot resolve $tag" }
+            if ($tagCommit -ne $headCommit) { throw "Checkout is not at $tag" }
+            $kind = 'release-tag'
+          } else {
+            $exactTags = @(git tag --points-at HEAD)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot list tags at checkout HEAD' }
+            if ($exactTags.Count -gt 0) {
+              # An annotated tag wins over a new lightweight tag at this commit.
+              $tag = git describe --tags --exact-match HEAD
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot select exact tag at checkout HEAD' }
+              if ($tag -cnotmatch '^v([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)$') {
+                throw "Existing exact tag is not a supported release version: $tag"
+              }
+              $version = $Matches[1]
+              $kind = 'existing-tag-proof'
+            } else {
+              # This tag exists only in this checkout. It is never pushed or released.
+              $version = "0.0.0-ci.$env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT"
+              $tag = "v$version"
+              git tag $tag HEAD
+              if ($LASTEXITCODE -ne 0) { throw "Cannot make local proof tag $tag" }
+              $kind = 'runner-only-proof'
+            }
+          }
+          $stamp = git describe --tags --always --dirty
+          if ($LASTEXITCODE -ne 0 -or $stamp -cne $tag) {
+            throw "Expected exact build stamp $tag; git describe returned $stamp"
+          }
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "PACKAGE_VERSION=$version`n", (New-Object Text.UTF8Encoding($false)))
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "PACKAGE_KIND=$kind`n", (New-Object Text.UTF8Encoding($false)))
+          Write-Output "Packaging $tag ($kind) at $headCommit"
+
+      - name: Fetch pinned public dependencies
+        run: |
+          python tools\fetch_ngx.py --into third_party\ngx
+          if ($LASTEXITCODE -ne 0) { throw 'NVIDIA DLSS SDK fetch failed' }
+          python tools\fetch_ffx_dx11.py --dest third_party\ffx-dx11
+          if ($LASTEXITCODE -ne 0) { throw 'FidelityFX DX11 fetch/build failed' }
+          python tools\fetch_xess.py --dest third_party\xess
+          if ($LASTEXITCODE -ne 0) { throw 'Intel XeSS SDK fetch failed' }
+          python tools\fetch_openxr_loader.py
+          if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader fetch failed' }
+          python tools\fetch_ngx.py --verify third_party\ngx
+          if ($LASTEXITCODE -ne 0) { throw 'NVIDIA DLSS SDK verification failed' }
+          python tools\fetch_ffx_dx11.py --verify third_party\ffx-dx11
+          if ($LASTEXITCODE -ne 0) { throw 'FidelityFX DX11 verification failed' }
+          python tools\fetch_xess.py --verify third_party\xess
+          if ($LASTEXITCODE -ne 0) { throw 'Intel XeSS SDK verification failed' }
+          python tools\fetch_openxr_loader.py --verify
+          if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader verification failed' }
+
+      - name: Run full Windows validation build
+        run: |
+          $batch = Join-Path $env:GITHUB_WORKSPACE 'build.bat'
+          if (-not (Test-Path -LiteralPath $batch)) { throw "Missing $batch" }
+          $stdout = Join-Path $env:RUNNER_TEMP 'edvr-build.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'edvr-build.stderr.log'
+          $command = 'call "{0}" --wait-lock --jobs 4 > "{1}" 2> "{2}"' -f $batch, $stdout, $stderr
+          & $env:ComSpec /d /s /c $command
+          $code = $LASTEXITCODE
+          if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout -Tail 150 }
+          if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Tail 150 }
+          if ($code -ne 0) { throw "Full build failed with exit code $code" }
+          $receipt = Join-Path $env:GITHUB_WORKSPACE 'build\full_build_receipt.json'
+          if (-not (Test-Path -LiteralPath $receipt)) { throw 'Full build did not write its receipt' }
+
+      - name: Package the validated build
+        run: |
+          $batch = Join-Path $env:GITHUB_WORKSPACE 'package.bat'
+          $stdout = Join-Path $env:RUNNER_TEMP 'edvr-package.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'edvr-package.stderr.log'
+          $command = 'call "{0}" "{1}" > "{2}" 2> "{3}"' -f $batch, $env:PACKAGE_VERSION, $stdout, $stderr
+          & $env:ComSpec /d /s /c $command
+          $code = $LASTEXITCODE
+          if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout -Tail 100 }
+          if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Tail 100 }
+          if ($code -ne 0) { throw "Packaging failed with exit code $code" }
+          $names = @(
+            "edvr-$env:PACKAGE_VERSION.zip",
+            "edvr-installer-$env:PACKAGE_VERSION.zip",
+            "edvr-installer-linux-$env:PACKAGE_VERSION.zip"
+          )
+          $lines = @()
+          foreach ($name in $names) {
+            $path = Join-Path 'dist' $name
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing package $path" }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $lines += "$hash  $name"
+          }
+          [IO.File]::WriteAllLines((Join-Path 'dist' 'SHA256SUMS'), $lines, (New-Object Text.UTF8Encoding($false)))
+          Get-Content -LiteralPath 'dist\SHA256SUMS'
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: edvr-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/edvr-workflow.txt
+            ${{ runner.temp }}/edvr-build.stdout.log
+            ${{ runner.temp }}/edvr-build.stderr.log
+            ${{ runner.temp }}/edvr-package.stdout.log
+            ${{ runner.temp }}/edvr-package.stderr.log
+            build/phase_times.json
+            build/rig_times.json
+            build/obj/**/*.log
+            build/flat_mono_resolve_shard2_run/flat-pixel-fixture/**
+            build/sharp_weapons_test_run/**
+
+      - name: Upload validated build outputs
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: edvr-build-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            build/full_build_receipt.json
+            build/d3d11.dll
+            build/edvr_openxr_graphics.dll
+            build/openvr_api.dll
+            build/edvr_openxr_runtime.dll
+            build/openxr_loader.dll
+            build/edvr-installer.exe
+
+      - name: Upload release packages
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: edvr-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            dist/edvr-*.zip
+            dist/SHA256SUMS

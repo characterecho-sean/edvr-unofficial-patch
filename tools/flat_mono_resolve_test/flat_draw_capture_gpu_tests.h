@@ -8,12 +8,37 @@
 #include <vector>
 
 namespace edvr { inline bool captureFlatProbeShader(char,uint64_t){return true;} }
+// Force identical clock values only while exercising capture directory names.
+inline bool flatDrawCaptureFixedClock=false;
+inline void flatDrawCaptureGetSystemTime(SYSTEMTIME* time) {
+    ::GetSystemTime(time);
+    if(flatDrawCaptureFixedClock){
+        time->wYear=2026;time->wMonth=10;time->wDay=18;
+        time->wHour=12;time->wMinute=0;time->wSecond=0;time->wMilliseconds=123;
+    }
+}
+#define GetSystemTime flatDrawCaptureGetSystemTime
 #include "../../src/d3d11/flat_draw_capture.h"
+#undef GetSystemTime
+
+inline int flatDrawCaptureDirectoryTests() {
+    // Separate instances used to restart at serial 1 and could share a
+    // timestamp/PID leaf. No GPU or file writes are needed to test the name.
+    flatDrawCaptureFixedClock=true;
+    edvr::flatDrawCaptureNoDirectoryWrites=true;
+    edvr::FlatDrawCapture first,second;
+    first.arm(501);second.arm(701);
+    const bool unique=!first.directory().empty()&&first.directory()!=second.directory();
+    edvr::flatDrawCaptureNoDirectoryWrites=false;
+    flatDrawCaptureFixedClock=false;
+    if(!unique)std::puts("FAIL: independent flat draw captures share a directory at one timestamp");
+    return unique?0:1;
+}
 
 inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
     namespace fs=std::filesystem;
     using Microsoft::WRL::ComPtr;
-    int bad=0;auto ck=[&](bool ok,const char* why){if(!ok){std::printf("FAIL: flat draw capture %s\n",why);++bad;}};
+    int bad=flatDrawCaptureDirectoryTests();auto ck=[&](bool ok,const char* why){if(!ok){std::printf("FAIL: flat draw capture %s\n",why);++bad;}};
     // Exercise the exact production admission policy with a flight-sized
     // chronology. A late source candidate must still have reserved capacity.
     {

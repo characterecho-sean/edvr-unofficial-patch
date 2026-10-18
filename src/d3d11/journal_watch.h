@@ -99,6 +99,7 @@ bool journalFlatGuiFocus(uint32_t* focus);
 // guiKnown and gui are the last parsed sample's GuiFocus field.
 struct JournalRawStatus {
     bool active = false;
+    bool gameplay = false; // diagnostic, ungated by profile: LoadGame seen in this process
     uint32_t statusSamples = 0;
     bool guiKnown = false;
     uint32_t gui = 0;

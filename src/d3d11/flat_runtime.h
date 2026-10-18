@@ -4,6 +4,8 @@
 #include <dxgi.h>
 #include "flat_compute_readback.h"
 #include "flat_projection_scope.h"
+#include "flat_forward_light.h"
+#include "flat_phase_failure_capture.h"
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"
@@ -104,6 +106,9 @@ void flatRuntimeUnknown();
 void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
                                ID3D11UnorderedAccessView* const*);
 void flatRuntimeArmProjectionAudit(bool full = false);
+// Owner-thread query for the Ctrl+dump_draws passive discovery restart.
+// It observes other diagnostics without consuming or cancelling their work.
+bool flatRuntimePassiveRearmBusy();
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
 void flatRuntimeReplayQueryBegin(ID3D11DeviceContext*, ID3D11Asynchronous*);
@@ -125,6 +130,7 @@ struct FlatRuntimeDrawScope {
     ID3D11ShaderResourceView* original = nullptr;
     bool gameHadTarget6 = false;   // the game's own slot 6 was occupied under a substituted draw
     bool producer = false, replaced = false;
+    bool splitContinued = false;   // continuesRun, for the destructor shell's class
     bool drawCaptureStarted = false;
     void* drawPacket=nullptr;
     bool drawPacketExecuted=false;
@@ -153,7 +159,10 @@ struct FlatRuntimeDrawScope {
     unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
-    bool needsActualDraw() const { return drawPacket || domainPlanned || uiTake || uiComposite ||
+    forward_light::Issue forwardIssue{};
+    uint64_t lightPayloadToken=0;
+    const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's

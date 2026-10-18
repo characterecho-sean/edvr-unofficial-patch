@@ -288,9 +288,10 @@ struct FlatMonoResolveStats {
     uint64_t acceptedResets = 0, acceptedContinues = 0;
     uint64_t requestedResets = 0, lostHistory = 0, frameGaps = 0;
     uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;
-    // Floating-origin re-anchors the resolver took for what they are (row 5 jumped 50 m or more, the camera's rows did not
-    // move, and the origin landed near the camera): history kept, the frame's camera translation zero. The size of the last
-    // one, metres. travelSteps: the same jump that is not a re-anchor (fast travel): history kept, the real translation too.
+    // Compatibility field names: originRebases now counts ambiguous-origin
+    // history resets, not proved coordinate changes. lastOriginRebaseM is the
+    // last such input step. travelSteps counts admitted large steps whose
+    // history continues with the actual previous origin and translation.
     uint64_t originRebases = 0, travelSteps = 0;
     double lastOriginRebaseM = 0;
     uint64_t backendFailures = 0;

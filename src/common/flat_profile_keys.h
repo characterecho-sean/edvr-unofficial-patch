@@ -15,6 +15,7 @@ inline bool flatProfileReadsKey(const char* key) {
     return std::strcmp(key, "advanced.d3d11_fixes") == 0 ||
         std::strcmp(key, "advanced.input_gate") == 0 ||
         std::strcmp(key, "advanced.flat_camera_producer_probe") == 0 ||
+        std::strcmp(key, "diag.flat_origin_capture") == 0 ||
         // The refusal view (flat_runtime.cpp): paints the prep's per-pixel class over the resolved image. A flat panel row on the Debug tab.
         // Unlisted, getBool answers false here whatever the file says.
         std::strcmp(key, "advanced.flat_refusal_view") == 0 ||

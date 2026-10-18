@@ -21,6 +21,9 @@
 //     draws they belong to; a GPU span nobody timed prints "-", never 0.00
 //   - the census stops when asked (both gates close, nothing more is clocked) and starts afresh
 //   - the clock floor is measured once, at the end of the first window
+//   - the draw-shell split attributes the constructor shell and the copy-check residual by
+//     continuesRun, leaves a nested shell and a copy child out of those buckets, and the
+//     destructor shell uses the same class. An unclocked shell records nothing
 //   - a window with more to say than a log line holds goes out as continuation lines, none over
 //     the limit, none dropped, at the worst values the counters can hold
 //
@@ -61,6 +64,7 @@ inline int64_t now() {
 #define EDVR_FLATCPU_NOW() (::flat_cpu_rig::now())
 #define EDVR_EMCPU_NOW() (::flat_cpu_rig::now())
 #include "../../src/d3d11/flat_cpu.h"
+#include "../../src/d3d11/flat_forward_light.h"
 
 namespace flat_cpu_rig {
 
@@ -184,6 +188,38 @@ inline int flatCpuTests() {
                "the outer scope is its 100 ticks less the middle's whole 30: 70; the three add up to 100");
     }
 
+    // The two issue callbacks bracket the game's draw. Geometry child scopes
+    // are exclusive, and their sum with the residual recovers callback time.
+    {
+        flatcpu::resetForTest();fake(0);
+        { flatcpu::Scope begin(flatcpu::kIssueCallbacks);
+          t_now=10;
+          { flatcpu::Scope shader(flatcpu::kIssueShader);t_now=13; }
+          { flatcpu::Scope dsv(flatcpu::kIssueDsv);t_now=18; }
+          { flatcpu::Scope constants(flatcpu::kIssueConstants);t_now=25; }
+          { flatcpu::Scope foreground(flatcpu::kForegroundCapture);t_now=28; }
+          t_now=30;
+        }
+        t_now=130; // game's draw, outside either callback scope
+        { flatcpu::Scope end(flatcpu::kIssueCallbacks);t_now=138; }
+        const auto* slot=flatcpu::t_ctx.slot;
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].ticks.load()==20&&
+               slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&
+               slot->cell[flatcpu::kIssueShader].ticks.load()==3&&
+               slot->cell[flatcpu::kIssueDsv].ticks.load()==5&&
+               slot->cell[flatcpu::kIssueConstants].ticks.load()==7&&
+               slot->cell[flatcpu::kForegroundCapture].ticks.load()==3&&
+               20+3+5+7+3==38,
+               "issue residual plus children equals 30+8 callback ticks and excludes the 100-tick game draw");
+        flatcpu::g_gate.store(flatcpu::makeGate(false,flatcpu::kNoThread),std::memory_order_relaxed);
+        const auto reads=t_reads;
+        { flatcpu::Scope gated(flatcpu::kIssueCallbacks);
+          { flatcpu::Scope child(flatcpu::kIssueConstants);t_now+=50; } }
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&
+               slot->cell[flatcpu::kIssueConstants].calls.load()==1&&t_reads==reads,
+               "unclocked parent and child have no clock reads or recorded calls");
+    }
+
     // ---- 2: a frame's figures, in the census and in the words ---------------------------------
     // 300 frames of 16,667 ticks: the shell 50 own ticks, contract reduction 40, the witness 30
     // (three writes of 10), the trace ring 20, then 10 more of the shell's own.
@@ -226,15 +262,17 @@ inline int flatCpuTests() {
             "other 0.060 ms (calls 1.0) + contract reduction 0.040 ms (calls 1.0) + copy checks 0.000 ms (calls 0.0) + "
             "camera rows 0.000 ms (calls 0.0) + trace ring 0.020 ms (calls 1.0) + resource lookup 0.000 ms (calls 0.0) + "
             "coverage 0.000 ms (calls 0.0) + projection readiness 0.000 ms (calls 0.0) + cb shadows 0.000 ms (calls 0.0) + "
-            "camera witness 0.030 ms (calls 3.0) + engine motion draw wrapper 0.000 ms (calls 0.0) + resolve 0.000 ms (calls 0.0) + "
-            "backend 0.000 ms (calls 0.0) + discovery 0.000 ms (calls 0.0) + state trackers 0.000 ms (calls 0.0) + "
-            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + offscreen fast path 0.000 ms (calls 0.0) + "
-            "engine motion hooks 0.000 ms (calls 0.0)";
+            "camera witness 0.030 ms (calls 3.0)";
         expect(std::string(lines.line[0]).compare(0, promised.size(), promised) == 0,
                "the first line has the promised shape, in the promised order, with the figures the frames spent");
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),
                "the witness prints its cost per write, and how many writes it clocked");
         expect(has(text, "engine motion hooks 0.000 ms (calls 0.0)"), "engine motion's hooks print as zero when they never ran");
+        expect(has(text, "draw issue callbacks residual 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry shader 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry DSV 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry constants 0.000 ms (calls 0.0)"),
+               "inactive callback residual and three child families each report zero");
         expect(lines.count >= 1 && !lines.truncated, "a window fits the lines the log holds");
         expect(std::strncmp(lines.line[0], "flat cpu 5s:", 12) == 0, "the first line is the flat cpu 5s line");
         for (int i = 1; i < lines.count; ++i)
@@ -259,7 +297,8 @@ inline int flatCpuTests() {
             const bool got = run.census->take(run.now, false, r);
             flatcpu::Lines lines;
             flatcpu::formatWindow(r, &lines);
-            const std::string text = joined(lines);
+            flatcpu::Lines detail; flatcpu::formatCopyWindow(r,300,&detail);
+            const std::string text = joined(lines) + joined(detail);
             const std::string entry = std::string(flatcpu::kInfo[fam].name) + " 0.007 ms (calls 1.0)";
             expect(got && r.renderClockedFrames > 0 && nearly(r.renderMs[fam] / r.renderClockedFrames, 0.007) &&
                        r.renderCalls[fam] == r.renderClockedFrames,
@@ -283,7 +322,8 @@ inline int flatCpuTests() {
         const bool got = run.census->take(run.now, false, r);
         flatcpu::Lines lines;
         flatcpu::formatWindow(r, &lines);
-        const std::string text = joined(lines);
+        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,300,&detail);
+        const std::string text = joined(lines) + joined(detail);
         expect(got && lines.count >= 1, "an empty window still closes and prints");
         bool all = true;
         for (unsigned fam = 0; fam < flatcpu::kFamilies; ++fam)
@@ -492,10 +532,11 @@ inline int flatCpuTests() {
         const std::string text = joined(lines);
         expect(got && r.queries.served[depth] == 300ull * 1130 && r.queries.sampled[depth] == 20 && r.queries.sampled[blend] == 10,
                "the window sums the frames' query counts");
-        expect(has(text, "query shortcuts (answers a frame from what the runtime tracks; one frame in 64 also asks the context and compares): "
-                         "coverage depth view 1130.0 (checked 20, wrong 0), coverage shader identity 0.0 (checked 0, wrong 0), "
-                         "game blend state 40.0 (checked 10, wrong 0)"),
-               "the line says how many questions a frame were answered from what the runtime tracks, per state, and how many were checked");
+        expect(has(text, "query shortcuts (answers a frame from what the runtime tracks; one frame in 64 also asks the context and compares):")&&
+               has(text, "coverage depth view 1130.0 (checked 20, wrong 0)")&&
+               has(text, "coverage shader identity 0.0 (checked 0, wrong 0)")&&
+               has(text, "game blend state 40.0 (checked 10, wrong 0)"),
+               "each shortcut reports its answer and comparison count across continuation lines");
         expect(has(text, "no state asks the context again"), "and says that no state fell back");
         expect(!lines.truncated, "and the window still fits the lines");
         // A state that fell back is named, with how often it asks now.
@@ -612,8 +653,27 @@ inline int flatCpuTests() {
         expect(lines.count >= 2 && lines.count <= flatcpu::kMaxLines && !lines.truncated && within,
                "at the worst values the window is a few lines, none over the limit, nothing dropped");
         const std::string text = joined(lines);
+        expect(has(text,"draw issue callbacks residual")&&has(text,"issue geometry shader")&&
+               has(text,"issue geometry DSV")&&has(text,"issue geometry constants"),
+               "exclusive callback children and residual survive worst-width window formatting");
         bool named = true;
-        for (unsigned f = 0; f < flatcpu::kFamilies; ++f) named = named && has(text, flatcpu::kInfo[f].name);
+        for (auto& value : r.copy) value = ~uint64_t(0);
+        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,~uint64_t(0),&detail);
+        for (unsigned f = 0; f < flatcpu::kFamilies; ++f) named = named && has(text + joined(detail), flatcpu::kInfo[f].name);
+        bool detailFits=!detail.truncated;
+        for(int i=0;i<detail.count;++i)detailFits=detailFits&&std::strlen(detail.line[i])<=flatcpu::kLineLimit;
+        expect(detailFits,"worst-value copy partition and query counts fit bounded report lines");
+        const std::string copyText=joined(detail);
+        expect(has(copyText,"raw DSV OM Gets=18446744073709551615")&&
+               has(copyText,"raw DSV description hits=18446744073709551615")&&
+               has(copyText,"raw DSV description misses=18446744073709551615")&&
+               has(copyText,"raw depth-state OM Gets=18446744073709551615")&&
+               has(copyText,"raw depth-state description hits=18446744073709551615")&&
+               has(copyText,"raw depth-state description misses=18446744073709551615")&&
+                has(copyText,"raw depth-state defaults=18446744073709551615")&&
+                has(copyText,"issue geometry DSV Gets=18446744073709551615")&&
+                has(copyText,"issue light DSV Gets=18446744073709551615"),
+                "raw-binding and issue snapshot counters survive worst-width line packing");
         for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) named = named && has(text, flatcpu::kEmNames[i].name);
         named = named && has(text, "engine motion hooks") && has(text, "GPU frame") && has(text, "GPU resolve") &&
                 has(text, "clock floor") && has(text, "camera witness") && has(text, "engine motion wrapper D3D calls") &&
@@ -972,6 +1032,213 @@ inline int flatCpuTests() {
         expect(t_reads == readsBefore, "off: and not one clock read since the switch");
     }
 
+    // Copy-check partition: real nested scopes/counters and the actual window
+    // cut, rather than a report populated by hand. Legacy total and parent
+    // calls remain unchanged; the seven children never count twice.
+    {
+        flatcpu::resetForTest();fake(0);Run run;
+        for(unsigned i=0;i<320;++i)run.frame(15625,false,[] {
+            flatcpu::Scope shell(flatcpu::kOther);t_now+=3;
+            {
+                flatcpu::Scope parent(flatcpu::kCopyChecks);t_now+=10;
+                flatcpu::CopyCounter count;count.add(flatcpu::kCopyWatch);
+                {
+                    flatcpu::Scope output(flatcpu::kCopyOutputs);t_now+=12;
+                    flatcpu::Scope inactive(flatcpu::kCopyInactiveOutputs);t_now+=8;
+                    count.add(flatcpu::kCopyOmGet);count.add(flatcpu::kCopyRtvSlots,8);count.add(flatcpu::kCopyUavSlots,64);
+                    count.add(flatcpu::kCopyBlendGet);count.add(flatcpu::kCopyBlendDesc);
+                    count.add(flatcpu::kCopyRtvBound,2);count.add(flatcpu::kCopyUavBound);count.add(flatcpu::kCopyGetResource,3);
+                    count.add(flatcpu::kCopyShadowChecks);count.add(flatcpu::kCopyInactiveCandidate);
+                    count.add(flatcpu::kCopyGuardChecks);count.add(flatcpu::kCopyGuardFallback);
+                }
+                {flatcpu::Scope part(flatcpu::kCopyDomain);t_now+=30;}
+                {flatcpu::Scope part(flatcpu::kCopyConverter);t_now+=5;}
+                {flatcpu::Scope part(flatcpu::kCopyForward);t_now+=7;}
+                {flatcpu::Scope part(flatcpu::kCopyVerify);t_now+=11;}
+                {flatcpu::Scope part(flatcpu::kCopyCapture);t_now+=13;}
+                t_now+=4;
+            }
+            {flatcpu::Scope parent(flatcpu::kCopyChecks);flatcpu::Scope disabled(flatcpu::kCopyCapture,false);}
+            t_now+=3;
+        });
+        flatcpu::WindowReport r;expect(run.census->take(run.now,false,r),"partition window closes");
+        const auto n=r.renderClockedFrames;
+        expect(n==20&&nearly(flatcpu::copyCheckMs(r)/n,.100)&&nearly(r.renderMs[flatcpu::kCopyChecks]/n,.014),
+            "exclusive children plus residual reconcile to legacy copy-check elapsed time");
+        expect(r.renderCalls[flatcpu::kCopyChecks]==2*n&&r.renderCalls[flatcpu::kCopyCapture]==n,
+            "legacy parent calls preserved and disabled optional capture clocks nothing");
+        double total=0;for(double ms:r.renderMs)total+=ms;
+        expect(nearly(total/n,.106),"overall exclusive total counts no folded child twice");
+        expect(r.copy[flatcpu::kCopyWatch]==n&&r.copy[flatcpu::kCopyWatchSkip]==0&&r.copy[flatcpu::kCopyOmGet]==n&&
+            r.copy[flatcpu::kCopyRtvSlots]==8*n&&r.copy[flatcpu::kCopyUavSlots]==64*n&&
+            r.copy[flatcpu::kCopyBlendDesc]==n&&r.copy[flatcpu::kCopyGetResource]==3*n&&r.copy[flatcpu::kCopyInactiveCandidate]==n&&
+            r.copy[flatcpu::kCopyGuardChecks]==n&&r.copy[flatcpu::kCopyGuardFallback]==n&&r.copy[flatcpu::kCopyGuardSkipped]==0,
+            "actual sampled query calls, slot counts and bound-resource queries survive frame/window cut");
+        flatcpu::Lines old,detail;flatcpu::formatWindow(r,&old);flatcpu::formatCopyWindow(r,320,&detail);
+        expect(has(joined(old),"copy checks 0.100 ms (calls 2.0)")&&!has(joined(old),"raw domain"),
+            "legacy headline folds elapsed time while detail names stay separate");
+        expect(has(joined(detail),"frame-end=320 frames=320 clocked=20 one-in=16")&&
+            has(joined(detail),"residual 0.014 ms")&&has(joined(detail),"output scan 0.012 ms")&&
+            has(joined(detail),"output inactive-ledger 0.008 ms")&&has(joined(detail),"OM Get calls=20")&&
+            has(joined(detail),"UAV slots requested/scanned=1280"),"paired report labels same window and sampled exact counts");
+        r.floor.measured=true;r.floor.costNs=10;r.floor.recordedNs=3;r.emFloor.measured=false;
+        const auto price=flatcpu::instrumentCost(r);
+        expect(nearly(price.scopesPerFrame,10)&&nearly(price.clockedMs,.0001),
+            "scope calibration prices every new raw child once, not folded headline calls");
+        for(unsigned i=0;i<320;++i)run.frame(15625,false,{});
+        flatcpu::WindowReport empty;expect(run.census->take(run.now,false,empty)&&empty.copy[flatcpu::kCopyOmGet]==0,
+            "query sample totals reset with the shared timing window");
+        flatcpu::formatCopyWindow(empty,640,&detail);
+        expect(has(joined(detail),"OM Get calls=0")&&has(joined(detail),"zero calls means not run in sampled frames"),
+            "sampled not-run is distinct from missing clocks");
+    }
+    {
+        flatcpu::resetForTest();fake(0);flatcpu::g_gate.store(flatcpu::kNoThread);
+        unsigned predicateCalls=0;
+        for(unsigned i=0;i<100;++i){flatcpu::Scope parent(flatcpu::kCopyChecks);
+            flatcpu::CopyCounter count;count.add(flatcpu::kCopyWatch);count.add(flatcpu::kCopyOmGet);
+            if(count.active())++predicateCalls;
+            flatcpu::Scope output(flatcpu::kCopyOutputs);flatcpu::Scope optional(flatcpu::kCopyInactiveOutputs,false);
+        }
+        expect(t_reads==0&&predicateCalls==0&&flatcpu::slotCount()==0,
+            "off/unclocked profiler never reads QPC, registers slots or counts queries (functional guard is independent)");
+        flatcpu::WindowReport r;r.clocksOff=true;r.frames=100;
+        flatcpu::Lines detail;flatcpu::formatCopyWindow(r,100,&detail);
+        expect(has(joined(detail),"timing off; time/query counts unavailable, not zero")&&
+            !has(joined(detail),"OM Get calls=0"),"disabled query report never advertises observed zero");
+        r.clocksOff=false;flatcpu::formatCopyWindow(r,100,&detail);
+        expect(has(joined(detail),"no clocked frame"),"unsampled window is distinct from timing disabled");
+    }
+    // Functional demand is independent of the profiler gate. Count the
+    // actual skip/fallback distinction with the same production decision;
+    // only the simulated D3D query body changes, never the demand predicate.
+    {
+        using namespace forward_light;
+        flatcpu::resetForTest();fake(0);
+        Ledger ledger;ledger.reset(900);ledger.used=1;
+        ledger.domains[0].raw={17,1920,1080,0,0,1,1,true};
+        ledger.domains[0].failure=Reason::Ambiguous;
+        Authority authority[kPublications]{};
+        unsigned queries=0,guardCalls=0;
+        auto apply=[&](bool known) {
+            flatcpu::CopyCounter counter;
+            ++guardCalls;const auto d=outputWatch(ledger,authority,900,false,known,false);
+            counter.add(flatcpu::kCopyGuardChecks);
+            if(d.reason==OutputWatchReason::NoUsableState){counter.add(flatcpu::kCopyGuardSkipped);return;}
+            counter.add(flatcpu::kCopyGuardFallback);counter.add(flatcpu::kCopyOmGet);++queries;
+        };
+        apply(true);apply(false);
+        flatcpu::FrameCut cut;flatcpu::cutFrame(cut);
+        expect(queries==1&&cut.copy[flatcpu::kCopyGuardChecks]==2&&cut.copy[flatcpu::kCopyGuardSkipped]==1&&
+            cut.copy[flatcpu::kCopyGuardFallback]==1&&cut.copy[flatcpu::kCopyOmGet]==1,
+            "actual guard skip/fallback query counts reconcile on sampled frames");
+        flatcpu::g_gate.store(flatcpu::kNoThread);fake(0);queries=guardCalls=0;
+        apply(true);apply(false);
+        expect(guardCalls==2&&queries==1&&t_reads==0,
+            "functional NoUsableState guard and unknown fallback execute with CPU timing off and no clock reads");
+        flatcpu::cutFrame(cut);
+        expect(cut.copy[flatcpu::kCopyGuardChecks]==0&&cut.copy[flatcpu::kCopyOmGet]==0,
+            "functional execution with timing off never advertises sampled counts");
+    }
+    // The draw-shell split. Ticks are the fake clock: 1000 ticks is 1 ms at the census frequency.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run(1);
+        for (int i = 0; i < 60; ++i) {
+            const bool continued = i % 2 == 0;
+            run.frame(100000, false, [&] {
+                {
+                    flatcpu::DrawSplitCtor ctor;
+                    flatcpu::Scope shell(flatcpu::kOther);
+                    t_now += 1000;
+                    { flatcpu::Scope copy(flatcpu::kCopyChecks); t_now += 300; }
+                    t_now += 300;
+                    flatcpu::drawSplitSetContinued(continued);
+                }
+                {
+                    flatcpu::DrawSplitDtor dtor(continued);
+                    flatcpu::Scope shell(flatcpu::kOther);
+                    t_now += 50;
+                }
+            });
+        }
+        flatcpu::WindowReport r;
+        expect(run.census->take(run.now, false, r) && r.renderClockedFrames == 60,
+               "shell split: every frame of a period-1 window is clocked");
+        const double k = r.renderClockedFrames;
+        expect(nearly(r.splitMs[flatcpu::kSplitCtorContinued] / k, 0.650) &&
+               nearly(r.splitMs[flatcpu::kSplitCtorRest] / k, 0.650) &&
+               r.splitCalls[flatcpu::kSplitCtorContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitCtorRest] == 30,
+               "constructor shell: 1.300 ms on half the frames, so 0.650 ms a frame in each class");
+        expect(nearly(r.splitMs[flatcpu::kSplitCopyContinued] / k, 0.150) &&
+               nearly(r.splitMs[flatcpu::kSplitCopyRest] / k, 0.150) &&
+               r.splitCalls[flatcpu::kSplitCopyContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitCopyRest] == 30,
+               "copy-check residual follows the same class and excludes nothing it timed itself");
+        expect(nearly(r.splitMs[flatcpu::kSplitDtorContinued] / k, 0.025) &&
+               nearly(r.splitMs[flatcpu::kSplitDtorRest] / k, 0.025) &&
+               r.splitCalls[flatcpu::kSplitDtorContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitDtorRest] == 30,
+               "destructor shell uses the class the constructor recorded");
+        expect(nearly((r.splitMs[flatcpu::kSplitCtorContinued] + r.splitMs[flatcpu::kSplitCtorRest] +
+                       r.splitMs[flatcpu::kSplitDtorContinued] + r.splitMs[flatcpu::kSplitDtorRest]) / k,
+                      r.renderMs[flatcpu::kOther] / k),
+               "constructor plus destructor shells are the whole of other when no other shell ran");
+        char line[1100];
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "ctor-continued=0.650 ms/frame (calls 0.5)") &&
+               has(line, "copy-residual-rest=0.150 ms/frame (calls 0.5)") &&
+               has(line, "clocked=60 frames=60"),
+               "the split line is per clocked frame and names both classes");
+        r.clocksOff = true;
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "CPU timing is off"), "timing off is not a zero split");
+        r.clocksOff = false;
+        r.renderClockedFrames = 0;
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "no clocked frame, not a zero"), "no clocked frame is not a zero split");
+    }
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        t_now = 0;
+        {
+            flatcpu::DrawSplitCtor ctor;
+            flatcpu::Scope shell(flatcpu::kOther);
+            t_now = 100;
+            { flatcpu::Scope nested(flatcpu::kOther); t_now = 140; }
+            t_now = 180;
+            {
+                flatcpu::Scope copy(flatcpu::kCopyChecks);
+                t_now = 195;
+                { flatcpu::Scope domain(flatcpu::kCopyDomain); t_now = 220; }
+                t_now = 230;
+            }
+            t_now = 300;
+            flatcpu::drawSplitSetContinued(true);
+        }
+        const flatcpu::Slot* slot = flatcpu::t_ctx.slot;
+        expect(slot && slot->splitTicks[flatcpu::kSplitCtorContinued].load() == 210 &&
+               slot->splitCalls[flatcpu::kSplitCtorContinued].load() == 1 &&
+               slot->splitTicks[flatcpu::kSplitCopyContinued].load() == 25 &&
+               slot->splitCalls[flatcpu::kSplitCopyContinued].load() == 1 &&
+               slot->splitTicks[flatcpu::kSplitCtorRest].load() == 0 &&
+               slot->cell[flatcpu::kOther].ticks.load() == 250 &&
+               slot->cell[flatcpu::kCopyDomain].ticks.load() == 25,
+               "a nested shell and a copy child stay out of the constructor and residual buckets");
+        flatcpu::g_gate.store(flatcpu::kNoThread, std::memory_order_relaxed);
+        {
+            flatcpu::DrawSplitCtor ctor;
+            flatcpu::Scope shell(flatcpu::kOther);
+            t_now += 1000;
+            flatcpu::drawSplitSetContinued(true);
+        }
+        expect(slot && slot->splitCalls[flatcpu::kSplitCtorContinued].load() == 1 &&
+               flatcpu::t_drawSplit.phase == flatcpu::DrawSplitState::Idle,
+               "an unclocked shell adds nothing and leaves the split disarmed");
+    }
     fake(0);
     t_fake = false;
     return failures;

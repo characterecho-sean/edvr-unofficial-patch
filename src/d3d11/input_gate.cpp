@@ -184,6 +184,10 @@ std::atomic<bool> g_heldDik[256]{};
 // Where the tail reads physical keys. The real GetAsyncKeyState; the rig points it at a fake.
 PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
 
+// Test seam: called as a refresh begins, before it takes the tail lock, so a rig can park a refresh at the one point a real
+// thread can be preempted before the lock. nullptr in production, where it costs one load and a branch per refresh.
+void (*g_tailRefreshEntry)() = nullptr;
+
 // Every writer of the tail (a capture, a cancel, a refresh's publish) holds g_tailLock. Only a capture and a cancel
 // replace the tail, and each bumps g_tailGeneration; a refresh never does. A refresh takes its snapshot under the
 // SHARED lock (it re-checks g_releaseTail there, then reads generation N and a copy of the held keys), scans the
@@ -227,6 +231,7 @@ void cancelReleaseTail() {
 }
 
 void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
+    if (g_tailRefreshEntry) g_tailRefreshEntry();
     bool tail[256];
     AcquireSRWLockShared(&g_tailLock);
     if (!g_releaseTail.load()) {   // checked under the lock, so a cancel that just landed is seen

@@ -659,9 +659,11 @@ inline int flatHdrRouteTests() {
         expect(!noCam.select().selected() && noCam.select().reason == FlatMonoReason::NoHdrCamera,
                "H drawn with no camera at all: hdr-camera-not-observed");
         Stream uncertain; uncertain.sceneDraws(2, 2);
-        uncertain.prefix->uncertain = true;
+        flatRuntimeMarkUncertain(*uncertain.prefix,FlatRuntimeUncertainCause::UnknownContext);
         uncertain.toneTrigger();
-        expect(uncertain.select().reason == FlatMonoReason::Truncated, "an uncertain prefix (foreign work, ClearState) is truncated");
+        expect(uncertain.select().reason == FlatMonoReason::Truncated &&
+            uncertain.prefix->firstUncertain.cause==FlatRuntimeUncertainCause::UnknownContext,
+            "HDR trigger retains source uncertainty before the later output copy");
         Stream written; written.sceneDraws(2, 2);
         written.write(written.sc.h);                          // an explicit write into H after its draws: the model marks it bad
         written.toneTrigger();
@@ -1629,18 +1631,47 @@ inline int flatHdrRouteTests() {
         // THE DEPTH-VALIDATED STEADY DETAIL on foot (design doc section 82): always on, with no key (retired 2026-10-01). The flat runtime
         // hands the resolver steadyDetail = true at its two treatment call sites, right after the 3D menu's own blanket policy
         // (FlatMonoResolveFrame::staticScene, from the verified menu copy), which is not this rule's and whose lines are exactly what they
-        // were: four mentions of f.staticScene in the file, none of them an assignment of the steady detail. Nothing of the key that once
+        // were: four policy mentions of f.staticScene, none of them an assignment of the steady detail. The temporary stationary capture
+        // also reads that bool by value; exclude only its exact observer statement from the policy scan. Nothing of the key that once
         // chose it is left: no reader, no state field, no key-change line, no setting that starts with the route key's name.
         expect(count(runtime, "steadyReadKey") == 0 && count(runtime, "steadyKeyRead") == 0 && count(runtime, "s.steadyDetail") == 0 &&
                    count(runtime, "bool steadyDetail") == 0 && count(runtime, "flat runtime: steady-detail is") == 0 &&
                    count(runtime, "experimental.temporal_aa_on_foot_world_") == 0,
                "the steady-detail key is gone from the flat runtime: no reader (steadyReadKey), no state field, no key-change line, no setting that starts with the route key's name");
-        expect(count(runtime, "f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);\n    if(f.staticScene)++s.staticSceneFrames;\n"
-                              "    f.steadyDetail=true;") == 1 &&
-                   count(runtime, "f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);\n    if (f.staticScene) ++s.staticSceneFrames;\n"
-                                  "    f.steadyDetail = true;") == 1 &&
-                   count(runtime, "f.steadyDetail") == 2 && count(runtime, "f.staticScene") == 4,
+        const char* const passiveSceneRead =
+            "flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);";
+        const std::string stationaryHeader = slurpSource("src/d3d11/flat_stationary_camera_capture.h");
+        expect(count(runtime, passiveSceneRead) == 0 ||
+                   count(stationaryHeader, "bool reset, bool menuContract, const void* depth) noexcept;") == 1,
+               "the stationary observer receives staticScene by value, so the excluded read cannot write the policy flag");
+        const auto steadyWiring = [&](std::string text) {
+            size_t at = 0;
+            while ((at = text.find(passiveSceneRead, at)) != std::string::npos)
+                text.erase(at, std::strlen(passiveSceneRead));
+            return count(text, "f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);\n    if(f.staticScene)++s.staticSceneFrames;\n"
+                               "    f.steadyDetail=true;") == 1 &&
+                count(text, "f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);\n    if (f.staticScene) ++s.staticSceneFrames;\n"
+                            "    f.steadyDetail = true;") == 1 &&
+                count(text, "f.steadyDetail") == 2 && count(text, "f.staticScene") == 4;
+        };
+        expect(steadyWiring(runtime),
                "both treatment call sites (the copy route and the HDR route) hand the resolver steady detail unconditionally, right after the 3D menu's blanket policy, whose lines are unchanged");
+        expect(steadyWiring(runtime + "\n" + passiveSceneRead),
+               "steady wiring control: another by-value stationary observation does not change the rendering policy");
+        expect(!steadyWiring(runtime + "\nf.staticScene=false;\n"),
+               "steady wiring control: an extra policy assignment is still rejected");
+        std::string conditionalSteady = runtime;
+        const size_t steadyAt = conditionalSteady.find("f.steadyDetail=true;");
+        if (steadyAt != std::string::npos)
+            conditionalSteady.replace(steadyAt, std::strlen("f.steadyDetail=true;"), "f.steadyDetail=f.staticScene;");
+        expect(!steadyWiring(conditionalSteady),
+               "steady wiring control: coupling steady detail to the menu flag is still rejected");
+        std::string missingMenu = runtime;
+        const char* const menuAssignment = "f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);";
+        const size_t menuAt = missingMenu.find(menuAssignment);
+        if (menuAt != std::string::npos) missingMenu.erase(menuAt, std::strlen(menuAssignment));
+        expect(!steadyWiring(missingMenu),
+               "steady wiring control: removing a treatment site's menu policy is still rejected");
         expect(count(runtime, "flat steady detail 5s: steady-detail=on depth-check=%llu/%llu;") == 1 &&
                    count(runtime, "flat steady detail 5s: steady-detail=%s") == 0 &&
                    count(runtime, "flatMonoResolveTakeRefusalCensus()") == 1,

@@ -3,6 +3,7 @@
 // decoder steals (push rbp, push rbx, push rsi, push rdi: 2+1+1+1). The observer takes the store's five arguments:
 // four in registers and the record on the stack, which the relay leaves where the store's caller put it. The observer
 // returns whatever the original returns (RAX), so the caller sees the same value with or without the detour.
+#include "flat_origin_capture.h"
 #include "store_hook.h"
 
 #include <windows.h>
@@ -213,6 +214,7 @@ void storeHookGate() noexcept {
 }
 
 void storeHookSetFlatWorldProbe(bool active, uint32_t frame) noexcept {
+    active = active && flatOriginCaptureEnabled();
     // A transient refusal may be retried by the station's explicit
     // recompute or the next flat activation, never on every Present.
     if (flatWorldStorePublish(active,frame,g_flatWorldActive,g_flatWorldFrame)) {

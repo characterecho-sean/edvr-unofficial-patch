@@ -1,4 +1,5 @@
 #include "flat_projection_runtime.h"
+#include "flat_issue_epoch.h"
 #include "flat_compute_readback.h"
 #include <cstring>
 
@@ -177,6 +178,8 @@ void FlatProjectionRuntime::mutate(Tracked& entry) {
     entry.writeFrame = 0; entry.writeSequence = 0;
     if (entry.mutationSerial == UINT64_MAX) entry.mutationOverflow = true;
     else ++entry.mutationSerial;
+    // The certified camera buffer only. Other tracked buffers stay off this epoch.
+    flatIssueEpochNoteResource(entry.buffer.Get());
 }
 void FlatProjectionRuntime::clearCold(ColdReadback& item) {
     if (!item.used) return;
@@ -416,17 +419,47 @@ void FlatProjectionRuntime::invalidateAll() {
 }
 
 bool FlatProjectionRuntime::copyConstants(ID3D11Buffer* buffer, uint32_t offset,
-                                         uint32_t count, void* out) {
-    if (!owner() || !out || !count) return false;
+                                         uint32_t count, void* out,
+                                         FlatProjectionCopyFailure* failure) {
+    const auto fail = [&](FlatProjectionCopyFailureKind kind, const Tracked* tracked = nullptr) {
+        if (failure) {
+            *failure = {};
+            failure->kind = kind;
+            if (tracked) {
+                failure->trackedWidth = tracked->width;
+                failure->generation = tracked->generation;
+                failure->mutationSerial = tracked->mutationSerial;
+                failure->writeFrame = tracked->writeFrame;
+                failure->writeSequence = tracked->writeSequence;
+                failure->mapped = tracked->mapped;
+                failure->pending = tracked->pending;
+            }
+        }
+        return false;
+    };
+    if (!owner()) return fail(FlatProjectionCopyFailureKind::OwnerUnavailable);
+    if (!out || !count) return fail(FlatProjectionCopyFailureKind::InvalidRequest);
     Tracked* entry = find(buffer);
     if(!entry) {
         for(const auto& candidate:tracked_)
             if(candidate.privateBuffer.copyUploadedConstants(buffer,offset,count,out))return true;
-        return false;
+        if(failure)for(const auto& candidate:tracked_) {
+            uint32_t width=0;
+            const auto state=candidate.privateBuffer.copyState(buffer,offset,count,width);
+            if(state==FlatProjectionPrivateBuffer::CopyState::OtherBuffer)continue;
+            const auto kind=state==FlatProjectionPrivateBuffer::CopyState::Unready?
+                FlatProjectionCopyFailureKind::PrivateUnready:state==FlatProjectionPrivateBuffer::CopyState::Range?
+                FlatProjectionCopyFailureKind::PrivateRange:FlatProjectionCopyFailureKind::ShadowLookupInconsistent;
+            fail(kind,&candidate);failure->trackedWidth=width;return false;
+        }
+        return fail(FlatProjectionCopyFailureKind::UntrackedNoPrivateCopy);
     }
     FlatProjectionShadowView view{};
-    if (!entry || !shadows_.lookup(buffer, entry->generation, view) ||
-        offset > view.width || count > view.width - offset) return false;
+    if (!shadows_.lookup(buffer, entry->generation, view))
+        return fail(failure?flatProjectionCopyShadowFailure(shadows_.lookupState(buffer, entry->generation)):
+            FlatProjectionCopyFailureKind::ShadowInvalid, entry);
+    if (offset > view.width || count > view.width - offset)
+        return fail(FlatProjectionCopyFailureKind::TrackedRange, entry);
     std::memcpy(out, view.bytes + offset, count);
     return true;
 }
@@ -443,6 +476,31 @@ FlatProjectionShadowMetadata FlatProjectionRuntime::constantsMetadata(ID3D11Buff
     result.shadowPresent = shadows_.lookup(buffer, entry->generation, view);
     if (result.shadowPresent) {
         result.writeGeneration = view.writeGeneration; result.bankEpoch = view.bankEpoch;
+    }
+    return result;
+}
+FlatProjectionTrackedSnapshot FlatProjectionRuntime::snapshotTrackedConstants(
+    ID3D11Buffer* buffer, uint32_t offset, uint32_t count, void* out, bool eligible) {
+    FlatProjectionTrackedSnapshot result{};
+    if (!owner()) return result;
+    const Tracked* entry = find(buffer);
+    if (!entry) return result;
+    auto& metadata = result.metadata;
+    metadata.tracked = true; metadata.mapped = entry->mapped; metadata.pending = entry->pending;
+    metadata.width = entry->width; metadata.generation = entry->generation;
+    metadata.mutationSerial = entry->mutationSerial;
+    metadata.writeFrame = entry->writeFrame; metadata.writeSequence = entry->writeSequence;
+    FlatProjectionShadowView view{};
+    metadata.shadowPresent = shadows_.lookup(buffer, entry->generation, view);
+    if (metadata.shadowPresent) {
+        metadata.writeGeneration = view.writeGeneration; metadata.bankEpoch = view.bankEpoch;
+    }
+    // The tracked bank is serialized by this owner thread. No D3D call,
+    // callback or writer intervenes between the metadata and byte copy.
+    if (eligible && out && count && !metadata.mapped && !metadata.pending && metadata.shadowPresent &&
+        offset <= view.width && count <= view.width - offset) {
+        std::memcpy(out, view.bytes + offset, count);
+        result.copied = true;
     }
     return result;
 }

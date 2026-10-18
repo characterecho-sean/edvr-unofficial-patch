@@ -10044,6 +10044,257 @@ def print_switches(text):
     return 0
 
 
+def phase_receipt_hash(data, initial=2166136261):
+    h = initial
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xffffffff
+    return h
+
+
+def parse_phase_failure(text):
+    """Strict version1 log transport: no inferred missing bytes or association."""
+    def require(ok, why):
+        if not ok:
+            raise ValueError(why)
+    def fields(line):
+        import math
+        require(not any(token in line.lower() for token in ("[truncated]", "<truncated>", "line truncated")), "truncated log record")
+        pairs = re.findall(r"([A-Za-z][A-Za-z0-9-]*)=([^\s;]+)", line)
+        require(len({key for key, value in pairs}) == len(pairs), "duplicate field")
+        result = dict(pairs)
+        strings = {"role", "stage", "name", "originalReason", "diagnosticReason", "result"}
+        hexes = {"context", "device", "H", "DSV", "raw", "linear", "VS", "PS", "selectedH", "selectedRaw", "buffer", "source", "selectedSource", "hash", "hex"}
+        floats = {"pixelX", "pixelY", "ndcX", "ndcY", "previousX", "previousY", "fittedX", "fittedY", "scaleX", "scaleY", "dephasedScaleX", "dephasedScaleY", "lhs", "rhs", "residual", "bound"}
+        boolean = {"matched", "issued", "returned", "selected", "lastSelectedDomain", "upstream", "priorAccepted", "resolvedX", "resolvedY", "publicationIssued", "publicationReturned", "rawKnown", "linearKnown", "donorStampMatches"}
+        wide = {"epoch", "frame", "selectedFrame", "generation", "mutation", "writeGeneration", "bank", "writeFrame", "publication", "publicationFrame", "sourceGeneration", "sourceBank", "sourceWriteGeneration", "sourceWitnessFrame", "selectedGeneration", "selectedBank", "resets", "cancelled"}
+        float_syntax = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+        for key, value in pairs:
+            if key in strings:continue
+            if key == "viewport":
+                require(value.startswith("(") and value.endswith(")"), "viewport syntax")
+                values = value[1:-1].split(",");require(len(values) == 6 and all(re.fullmatch(float_syntax, v) is not None and math.isfinite(float(v)) for v in values), "viewport values")
+            elif key in hexes:
+                require(re.fullmatch(r"[0-9A-Fa-f]+", value) is not None and len(value) <= (256 if key == "hex" else 8 if key == "hash" else 16), "invalid hex field:" + key)
+                if key == "hash":require(len(value) == 8, "checksum syntax")
+            elif key in floats:
+                require(re.fullmatch(float_syntax, value) is not None and math.isfinite(float(value)), "invalid/nonfinite float:" + key)
+                if key == "bound":require(float(value) >= 0, "negative residual bound")
+            elif key in ("axis", "column"):
+                require(re.fullmatch(r"-?[0-9]+", value) is not None and -1 <= int(value) <= (1 if key == "axis" else 3), "axis/component syntax")
+            else:
+                require(re.fullmatch(r"[0-9]+", value) is not None and int(value) <= (2**64 - 1 if key in wide else 2**32 - 1), "integer syntax/range:" + key)
+            if key in boolean:require(value in ("0", "1"), "boolean field:" + key)
+        return result
+    rows = [line.split("flat phase receipt ", 1)[1] for line in text.splitlines()
+            if "flat phase receipt " in line and "flat phase receipt status:" not in line]
+    if not rows:
+        return {"state": "absent", "status": [line for line in text.splitlines()
+                if "flat phase receipt status:" in line][-1:]}
+    require(rows[0].startswith("manifest:"), "missing/late manifest")
+    manifest = fields(rows[0]);require(manifest.get("version") == "1" and manifest.get("generation") == "1", "unsupported manifest")
+    require(manifest.get("matched") in ("0", "1"), "manifest match state")
+    require(all(key in manifest for key in ("overflow", "resets", "cancelled")), "incomplete manifest")
+    roles = ["bootstrap", "failure"] if manifest["matched"] == "1" else ["failure"]
+    samples = {};active = None;ended = [];chunks = 0;combined = bytearray();complete = None
+    for line in rows[1:]:
+        kind = line.split(":", 1)[0];f = fields(line)
+        if kind == "COMPLETE":
+            require(complete is None and active is None and ended == roles, "early/duplicate completion")
+            complete = f;continue
+        require(complete is None, "records after completion")
+        role = f.get("role");require(role in roles, "unknown/missing role")
+        if kind == "sample":
+            require(active is None and role == roles[len(ended)] and role not in samples, "duplicate/out-of-order sample")
+            for key in ("epoch", "frame", "q", "context", "device", "H", "DSV", "raw", "linear", "width", "height", "VS", "PS", "originalReason", "diagnosticReason", "issued", "returned", "selected", "lastSelectedDomain", "selectedFrame", "selectedH", "selectedRaw", "recentCount"):
+                require(key in f, "missing sample field:" + key)
+            require(int(f["recentCount"]) <= 8, "requested-phase count out of bounds")
+            active = role;samples[role] = {"sample": f, "identity": {}, "requested": [], "payload": {}, "chunk_count": 0};continue
+        require(active == role, "record outside sample")
+        sample = samples[role]
+        order = ["phase", "fit", "lineage", "identity:donor", "identity:vs2", "identity:ps2"] + ["requested"] * int(sample["sample"]["recentCount"])
+        token = "identity:" + f.get("stage", "") if kind == "identity" else kind
+        if kind not in ("payload", "END"):
+            require(sample.get("metadata_count", 0) < len(order) and token == order[sample.get("metadata_count", 0)], "metadata ordering/duplicate")
+            sample["metadata_count"] = sample.get("metadata_count", 0) + 1
+        else:
+            require(sample.get("metadata_count", 0) == len(order), "payload before complete metadata")
+        if kind in ("phase", "fit", "lineage"):
+            require(kind not in sample, "duplicate metadata:" + kind)
+            required = {
+                "phase": ("pixelX", "pixelY", "ndcX", "ndcY", "phaseWidth", "phaseHeight", "upstream", "applied", "previousX", "previousY", "priorAccepted", "viewport"),
+                "fit": ("stage", "axis", "column", "fittedX", "fittedY", "scaleX", "scaleY", "dephasedScaleX", "dephasedScaleY", "resolvedX", "resolvedY", "lhs", "rhs", "residual", "bound"),
+                "lineage": ("publication", "publicationFrame", "publicationQ", "publicationIssued", "publicationReturned", "rawWidth", "rawHeight", "rawKnown", "linearWidth", "linearHeight", "linearKnown", "rawMip", "rawSlice", "rawSlices", "rawSamples", "linearMip", "linearSlice", "linearSlices", "linearSamples", "source", "sourceGeneration", "sourceBank", "sourceWriteGeneration", "sourceWitnessFrame", "sourceWitnessQ", "sourceFirst", "sourceCount", "domainVersions", "donorFlags", "donorStampMatches", "selectedSource", "selectedGeneration", "selectedBank", "selectedFirst", "selectedCount")}
+            require(all(key in f for key in required[kind]), "incomplete metadata:" + kind);sample[kind] = f
+        elif kind == "identity":
+            stage = f.get("stage");require(stage in ("donor", "vs2", "ps2") and stage not in sample["identity"], "duplicate/missing identity")
+            require(all(k in f for k in ("buffer", "generation", "mutation", "writeGeneration", "bank", "writeFrame", "writeQ", "first", "count", "width", "bytes", "hash")), "incomplete identity")
+            sample["identity"][stage] = f
+        elif kind == "requested":
+            require(all(key in f for key in ("index", "epoch", "frame", "pixelX", "pixelY", "width", "height")), "incomplete requested phase")
+            require(int(f["index"]) == len(sample["requested"]) < 8, "requested-phase ordering")
+            sample["requested"].append(f)
+        elif kind == "payload":
+            name = f.get("name");require(name in ("donor96", "vs2", "ps2"), "unknown payload")
+            expected = 96 if name == "donor96" else 752
+            require(int(f["total"]) == expected, "declared payload span")
+            block = sample["payload"].setdefault(name, {"data": bytearray(), "hash": f["hash"]})
+            require(block["hash"] == f["hash"] and int(f["offset"]) == len(block["data"]), "duplicate/gap/out-of-order payload")
+            n = int(f["bytes"]);require(0 < n <= 128 and len(block["data"]) + n <= expected, "chunk span")
+            require(len(f["hex"]) == n * 2 and re.fullmatch(r"[0-9a-fA-F]+", f["hex"]) is not None, "truncated/invalid hex")
+            block["data"].extend(bytes.fromhex(f["hex"]));sample["chunk_count"] += 1;chunks += 1
+        elif kind == "END":
+            require(set(sample["identity"]) == {"donor", "vs2", "ps2"} and all(k in sample for k in ("phase", "fit", "lineage")), "missing metadata")
+            require(len(sample["requested"]) == int(sample["sample"]["recentCount"]) <= 8, "missing requested-phase metadata")
+            require(set(sample["payload"]) == {"donor96", "vs2", "ps2"}, "missing payload")
+            payload = bytearray()
+            for name in ("donor96", "vs2", "ps2"):
+                block = sample["payload"][name];expected = 96 if name == "donor96" else 752
+                require(len(block["data"]) == expected and phase_receipt_hash(block["data"]) == int(block["hash"], 16), "payload checksum/byte count")
+                payload.extend(block["data"])
+            require(int(f["bytes"]) == len(payload) == 1600 and int(f["chunks"]) == sample["chunk_count"] and phase_receipt_hash(payload) == int(f["hash"], 16), "sample checksum/count")
+            combined.extend(payload);ended.append(role);active = None
+        else:
+            raise ValueError("unknown receipt record:" + kind)
+    require(complete is not None and active is None and ended == roles, "incomplete receipt/no final marker")
+    require(complete.get("version") == "1" and complete.get("generation") == "1" and int(complete["records"]) == len(roles) and int(complete["bytes"]) == len(combined) and int(complete["chunks"]) == chunks and int(complete["hash"], 16) == phase_receipt_hash(combined), "final checksum/count")
+    require(complete.get("result") == ("paired" if len(roles) == 2 else "missing-bootstrap"), "result mismatch")
+    # Verify the recorded cohort, not just the producer's matched bit. Payload
+    # checksum covers bytes only; mandatory metadata is checked independently.
+    failure = samples["failure"];fh = failure["sample"];fl = failure["lineage"]
+    require(fh["originalReason"] == "phase-mismatch" and all(fh[key] == "0" for key in ("issued", "returned", "selected")) and fh["lastSelectedDomain"] == "1", "failure is not pre-issue selected-domain refusal")
+    require(fh["VS"] == "8289669D93A18C1D" and fh["PS"] == "C6E6E419DA9F6FAD", "not exact primary recipe")
+    require(fh["H"] == fh["selectedH"] and fh["raw"] == fh["selectedRaw"] and int(fh["selectedFrame"]) < int(fh["frame"]), "last-selected domain mismatch")
+    for left, right in (("source", "selectedSource"), ("sourceGeneration", "selectedGeneration"), ("sourceBank", "selectedBank"), ("sourceFirst", "selectedFirst"), ("sourceCount", "selectedCount")):
+        require(fl[left] == fl[right], "last-selected source cohort mismatch:" + left)
+    for role, sample in samples.items():
+        h = sample["sample"];lineage = sample["lineage"]
+        require(all(lineage[key] == "1" for key in ("publicationIssued", "publicationReturned", "rawKnown", "linearKnown")), "unreturned/unknown resource association")
+        require(lineage["publicationFrame"] == h["frame"] and 0 < int(lineage["publicationQ"]) < int(h["q"]), "stale/unordered producer")
+        require(lineage["sourceWitnessFrame"] == h["frame"] and 0 < int(lineage["sourceWitnessQ"]) <= int(h["q"]), "stale/unordered source")
+        for key, actual in (("rawWidth", "width"), ("rawHeight", "height"), ("linearWidth", "width"), ("linearHeight", "height")):
+            require(lineage[key] == h[actual], "surface extent mismatch")
+        require(all(int(h[key], 16 if key in ("context", "device", "H", "DSV", "raw", "linear") else 10) > 0 for key in ("epoch", "context", "device", "H", "DSV", "raw", "linear", "width", "height")), "zero source/domain identity")
+        require(all(int(lineage[key]) > 0 for key in ("sourceGeneration", "sourceWriteGeneration", "sourceCount", "rawSlices", "rawSamples", "linearSlices", "linearSamples")) and int(lineage["source"], 16) > 0, "incomplete source/subresource identity")
+        donor = sample["identity"]["donor"]
+        for left, right in (("buffer", "source"), ("generation", "sourceGeneration"), ("bank", "sourceBank"), ("writeGeneration", "sourceWriteGeneration"), ("first", "sourceFirst"), ("count", "sourceCount")):
+            require(donor[left] == lineage[right], "donor observation/source mismatch:" + left)
+        require(lineage["donorFlags"] == "3" and lineage["donorStampMatches"] == "1" and donor["writeFrame"] == h["frame"] and 0 < int(donor["writeQ"]) <= int(lineage["sourceWitnessQ"]), "unvalidated donor observation")
+        require(int(donor["bytes"]) == 96 and int(donor["count"]) >= 276 and (int(donor["first"]) + 276) * 16 <= int(donor["width"]), "incomplete donor camera range")
+        for stage in ("vs2", "ps2"):
+            identity = sample["identity"][stage]
+            require(identity["writeFrame"] == h["frame"] and 0 < int(identity["writeQ"]) < int(h["q"]) and int(identity["bytes"]) == 752 and int(identity["count"]) >= 47 and int(identity["first"]) * 16 + 752 <= int(identity["width"]), "stale/incomplete original:" + stage)
+    if len(roles) == 2:
+        bootstrap = samples["bootstrap"];bh = bootstrap["sample"];bl = bootstrap["lineage"]
+        require(bh["originalReason"] == "accepted" and all(bh[key] == "1" for key in ("issued", "returned", "selected")), "bootstrap not issued/returned/selected")
+        require(float(bootstrap["phase"]["pixelX"]) == 0 and float(bootstrap["phase"]["pixelY"]) == 0 and int(bh["frame"]) <= int(fh["selectedFrame"]) < int(fh["frame"]), "bootstrap phase/frame mismatch")
+        for key in ("epoch", "context", "device", "H", "raw", "linear", "width", "height"):
+            require(bh[key] == fh[key] and int(bh[key], 16 if key in ("context", "device", "H", "raw", "linear") else 10) != 0, "paired cohort mismatch:" + key)
+        for key in ("rawWidth", "rawHeight", "rawMip", "rawSlice", "rawSlices", "rawSamples", "linearWidth", "linearHeight", "linearMip", "linearSlice", "linearSlices", "linearSamples", "source", "sourceGeneration", "sourceBank", "sourceFirst", "sourceCount"):
+            require(bl[key] == fl[key], "paired cohort mismatch:" + key)
+    return {"state": "complete", "matched": len(roles) == 2, "manifest": manifest, "samples": samples, "complete": complete}
+
+
+def print_phase_failure(text):
+    try:
+        result = parse_phase_failure(text)
+    except (ValueError, KeyError, IndexError) as exc:
+        print("[edvr] phase failure receipt INCOMPLETE: %s" % exc);return 1
+    if result["state"] == "absent":
+        print("[edvr] phase failure receipt absent (never called, not armed, or awaiting failure):")
+        for line in result["status"]:print(line)
+        return 3
+    print("[edvr] phase failure receipt VERIFIED: transport-complete=1 cohort-pair=%d result=%s; no GPU execution or unique phase-cause claim" % (result["matched"], result["complete"]["result"]))
+    import struct
+    for role, sample in result["samples"].items():
+        for kind in ("sample", "phase", "fit", "lineage"):
+            print(role + " " + kind + ": " + " ".join(k + "=" + v for k, v in sample[kind].items() if k != "role"))
+        for stage, identity in sample["identity"].items():print(role + " identity " + stage + ": " + " ".join(k + "=" + v for k, v in identity.items() if k not in ("role", "stage")))
+        for request in sample["requested"]:print(role + " requested: " + " ".join(k + "=" + v for k, v in request.items() if k != "role"))
+        for name in ("donor96", "vs2", "ps2"):
+            data = sample["payload"][name]["data"]
+            for row in (range(6) if name == "donor96" else (2, 3, 4, 10, 11, 12, 13)):
+                print("%s %s row%d: %s" % (role, name, row, " ".join("%.9g" % x for x in struct.unpack_from("<4f", data, row * 16))))
+    return 0 if result["matched"] else 1
+
+
+def self_test_phase_failure():
+    import contextlib, io, tempfile, shutil
+    def block(role, frame):
+        rows = ["flat phase receipt sample: role=%s epoch=1 frame=%d q=7 context=1 device=2 H=3 DSV=4 raw=5 linear=6 width=3840 height=2160 VS=8289669D93A18C1D PS=C6E6E419DA9F6FAD originalReason=phase-mismatch diagnosticReason=phase-mismatch issued=0 returned=0 selected=0 lastSelectedDomain=1 selectedFrame=1 selectedH=3 selectedRaw=5 recentCount=1" % (role, frame)]
+        required = {
+            "phase": "pixelX pixelY ndcX ndcY phaseWidth phaseHeight upstream applied previousX previousY priorAccepted viewport",
+            "fit": "stage axis column fittedX fittedY scaleX scaleY dephasedScaleX dephasedScaleY resolvedX resolvedY lhs rhs residual bound",
+            "lineage": "publication publicationFrame publicationQ publicationIssued publicationReturned rawWidth rawHeight rawKnown linearWidth linearHeight linearKnown rawMip rawSlice rawSlices rawSamples linearMip linearSlice linearSlices linearSamples source sourceGeneration sourceBank sourceWriteGeneration sourceWitnessFrame sourceWitnessQ sourceFirst sourceCount domainVersions donorFlags donorStampMatches selectedSource selectedGeneration selectedBank selectedFirst selectedCount"}
+        rows += ["flat phase receipt %s: role=%s " % (kind, role) + " ".join(key + "=1" for key in keys.split()) for kind, keys in required.items()]
+        rows += ["flat phase receipt requested: role=%s index=0 epoch=1 frame=1 pixelX=0 pixelY=0 width=3840 height=2160" % role]
+        rows[0] = rows[0].replace("originalReason=phase-mismatch", "originalReason=accepted" if role == "bootstrap" else "originalReason=phase-mismatch")
+        if role == "bootstrap":
+            rows[0] = rows[0].replace("issued=0 returned=0 selected=0", "issued=1 returned=1 selected=1")
+        for i, row in enumerate(rows):
+            if "phase:" in row:
+                row = row.replace("viewport=1", "viewport=(0,0,3840,2160,0,1)")
+                for key in ("pixelX", "pixelY"):row = row.replace(key + "=1", key + "=0")
+            if "fit:" in row:row = row.replace("stage=1", "stage=phase-residual")
+            if "lineage:" in row:
+                values = {"publicationFrame": str(frame), "sourceWitnessFrame": str(frame), "source": "7", "selectedSource": "7", "sourceFirst": "0", "selectedFirst": "0", "sourceCount": "4096", "selectedCount": "4096", "rawWidth": "3840", "linearWidth": "3840", "rawHeight": "2160", "linearHeight": "2160", "donorFlags": "3"}
+                for key, value in values.items():row = re.sub(r"\b" + key + r"=1\b", key + "=" + value, row)
+            rows[i] = row
+        rows += ["flat phase receipt identity: role=%s stage=%s buffer=7 generation=1 mutation=1 writeGeneration=1 bank=1 writeFrame=%d writeQ=1 first=0 count=47 width=752 bytes=752 hash=00000001" % (role, stage, frame) for stage in ("donor", "vs2", "ps2")]
+        rows = [row.replace("count=47 width=752 bytes=752", "count=4096 width=65536 bytes=96") if "stage=donor" in row else row for row in rows]
+        requested = [row for row in rows if "requested:" in row]
+        rows = [row for row in rows if "requested:" not in row] + requested
+        data = bytearray();chunks = 0
+        for name, count in (("donor96", 96), ("vs2", 752), ("ps2", 752)):
+            raw = bytes(i % 251 for i in range(count));data.extend(raw)
+            for at in range(0, count, 128):
+                piece = raw[at:at + 128];rows.append("flat phase receipt payload: role=%s name=%s offset=%d bytes=%d total=%d hash=%08X hex=%s" % (role, name, at, len(piece), count, phase_receipt_hash(raw), piece.hex()));chunks += 1
+        rows.append("flat phase receipt END: role=%s bytes=1600 chunks=%d hash=%08X" % (role, chunks, phase_receipt_hash(data)))
+        return rows, data, chunks
+    a, adata, ac = block("bootstrap", 1);b, bdata, bc = block("failure", 2)
+    rows = ["flat phase receipt manifest: version=1 generation=1 matched=1 overflow=0 resets=0 cancelled=0"] + a + b + ["flat phase receipt COMPLETE: version=1 generation=1 records=2 bytes=3200 chunks=%d hash=%08X result=paired" % (ac + bc, phase_receipt_hash(adata + bdata))]
+    text = "\n".join(rows);ok = parse_phase_failure(text)["matched"]
+    bad = [rows[1:], rows[:-1], rows[:2] + [rows[1]] + rows[2:], rows + [rows[-1]], [rows[0]] + b + a + [rows[-1]],
+           [line for line in rows if not ("payload:" in line and "name=donor96" in line and "role=failure" in line)],
+           [line[:-1] if "payload:" in line else line for line in rows],
+           [line.replace("offset=128", "offset=127") for line in rows],
+           [line.replace("hash=", "hash=F") if "payload:" in line else line for line in rows],
+           [line for line in rows if "fit:" not in line], [line for line in rows if "requested:" not in line],
+           [line.replace("fittedX=1", "removed=1") for line in rows],
+           rows[:3] + [rows[2]] + rows[3:],
+           [line.replace("bound=1", "bound=1e-") for line in rows],
+           [line.replace("bound=1", "bound=1_0") for line in rows],
+           [line.replace("bound=1", "bound=-1") for line in rows],
+           [line.replace("recentCount=1", "recentCount=4294967295") for line in rows],
+           [line.replace("axis=1", "axis=2") for line in rows],
+           [line.replace(" overflow=0", "") for line in rows],
+           [line.replace("hash=00000001", "hash=1") for line in rows],
+           [line.replace("sourceWitnessQ=1", "sourceWitnessQ=0") for line in rows],
+           [line.replace("donorFlags=3", "donorFlags=0") for line in rows],
+           [line.replace("stage=donor buffer=7", "stage=donor buffer=8") for line in rows],
+           [line.replace("q=7", "q=4294967296") for line in rows],
+           [line.replace("fittedX=1", "fittedX=nan") for line in rows],
+           [line + " q=7" if "sample:" in line else line for line in rows],
+           [line + " [truncated]" if "fit:" in line else line for line in rows],
+           [line.replace("selectedSource=7", "selectedSource=8") for line in rows],
+           [line.replace("returned=1 selected=1", "returned=0 selected=1") for line in rows]]
+    for altered in bad:
+        try:parse_phase_failure("\n".join(altered));ok = False
+        except (ValueError, KeyError, IndexError):pass
+    partial = ["flat phase receipt manifest: version=1 generation=1 matched=0 overflow=0 resets=0 cancelled=0"] + b + ["flat phase receipt COMPLETE: version=1 generation=1 records=1 bytes=1600 chunks=%d hash=%08X result=missing-bootstrap" % (bc, phase_receipt_hash(bdata))]
+    ok &= not parse_phase_failure("\n".join(partial))["matched"] and parse_phase_failure("flat phase receipt status: state=never-called")["state"] == "absent"
+    directory = tempfile.mkdtemp(prefix="edvr_phase_receipt_")
+    try:
+        path = os.path.join(directory, "edvr_gfx_20261017_120000.log")
+        with open(path, "wb") as stream:stream.write(("[00:00:00.001] version 0.20.0-1-gabcdef0 (build 12345678) -- test\n" + text).encode())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):rc = main(["--file", path, "--expect-build", "abcdef0", "--phase-failure"])
+        ok &= rc == 0 and "VERIFIED" in output.getvalue() and "donor96 row5" in output.getvalue()
+        with contextlib.redirect_stdout(io.StringIO()):rc = main(["--file", path, "--expect-build", "bad1234", "--phase-failure"])
+        ok &= rc == 2
+    finally:shutil.rmtree(directory)
+    print("phase failure receipt self-test: %s" % ("PASS" if ok else "FAIL"));return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Locate and read EDVR flight logs.")
@@ -10148,6 +10399,8 @@ def main(argv=None):
                          "verdict (strips drawn against eye takes, pending, stood-down, a stale "
                          "build, the OWNS sentence, a fault); exit 0 for PASS or WARN, 1 for "
                          "STOP, 3 when the log has no route line")
+    ap.add_argument("--phase-failure", action="store_true",
+                    help="verify/decode automatic flat phase-failure receipts; exit 3 absent, 1 incomplete/missing bootstrap, 2 wrong build")
     ap.add_argument("--map-bounce", action="store_true",
                     help="report issue 65's flat constant-buffer Map bounce: 5 s summaries, adaptive decision, verification and fail-safe trips; PASS / WARN / STOP, exit 3 when the instrument never ran")
     ap.add_argument("--freezes", action="store_true",
@@ -10311,6 +10564,8 @@ def main(argv=None):
         return print_maps_sharp(text)
     if args.route_curve:
         return print_route_curve(text, path)
+    if args.phase_failure:
+        return print_phase_failure(text)
     if args.map_bounce:
         return print_map_bounce(text, path)
     if args.switches:
@@ -10638,7 +10893,7 @@ def self_test_switches():
 
 
 def self_test():
-    ok = True
+    ok = self_test_phase_failure()
 
     for name, want in (("edvr_gfx_20260910_042313.log", "gfx"),
                        ("edvr_vr_20260910_042313.log", "vr"),

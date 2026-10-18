@@ -80,6 +80,7 @@ int main(int argc,char** argv) {
     if(argc==2&&std::strcmp(argv[1],"--dry-run")==0)return 0;
     if(argc!=2||std::strcmp(argv[1],"--self-test")!=0)return 2;
     using namespace edvr;
+    flatOriginCaptureInitialize(true); // this rig exercises the diagnostic store observer
     const uint8_t* pin=sealed::kStorePrologue;
     const uint32_t stamp=ecm::kExpectedTimestamp,size=ecm::kExpectedImageSize;
     check(sealed::storeInstallDecision(true,stamp,size,stamp,size,pin,pin,16)==sealed::StoreInstall::kInstall,
