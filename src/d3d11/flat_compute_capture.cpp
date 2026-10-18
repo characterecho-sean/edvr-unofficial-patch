@@ -93,7 +93,15 @@ struct State {
 };
 // Deliberately process-lifetime: DLL teardown may be under the loader lock.
 // Pending objects are retired only on the owning Present thread, never in Stop.
-State& state() { static State* s = new State; return *s; }
+std::atomic<State*> initializedState{nullptr};
+State& state() {
+    static State* s = [] {
+        State* result = new State;
+        initializedState.store(result, std::memory_order_release);
+        return result;
+    }();
+    return *s;
+}
 std::atomic<bool> active{false};
 Sample* current() {
     State& s = state(); const uint32_t n = flatComputeAttempt(s.attempts);
@@ -377,6 +385,13 @@ void snapshotBounds(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* view,Samp
 
 bool flatComputeCandidate() noexcept { return active.load(std::memory_order_relaxed); }
 bool flatComputeManual() noexcept { return state().manual; }
+bool flatComputeBusy() noexcept {
+    // Called only after the passive key has verified the Present owner. Do not
+    // instantiate the large sample bank merely to answer an idle query.
+    const State* s = initializedState.load(std::memory_order_acquire);
+    return active.load(std::memory_order_acquire) || flatComputeReadbackPending() ||
+           (s && (s->attempts.armed || s->attempts.frameOpen));
+}
 void flatComputeArm(ID3D11Device* device,uint64_t present) {
     if(!device)return; State& s=state(); active.store(false,std::memory_order_relaxed);
     flatComputeReadbackCancel(completed,nullptr);

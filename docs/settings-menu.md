@@ -2,9 +2,9 @@
 
 ## Status
 
-*Updated 2026-10-08 (previously 2026-09-29). Historical findings summarize
-the journal below; the current timing and overlay qualification is linked separately. Dated notes
-and the ruled-out list: "Status detail", straight after this block.*
+- **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
+  session state and report uncertain persistence. Focused checks 131/0,
+  mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
   - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
@@ -61,6 +61,44 @@ and the ruled-out list: "Status detail", straight after this block.*
   for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
 
 ## Status detail (moved out of Status 2026-09-29)
+
+**2026-10-17 pre-RC3 R1: add-on write completion correction.**
+
+The review at `3ffed14f` reproduced both successful and failed dynamic writes
+indexing built-in menu arrays with `def = -1`. Current main `7c456cf0` retains
+the defect. Add-on settings already invoke their setter before persistence;
+approvals already authorize and initialize the module. Both menu tick paths
+drain the shared writer queue, so their completion must not use built-in row
+definitions or edit state.
+
+`WriteDestination` explicitly separates built-in rows, plugin settings and
+add-on approvals. The production worker and drainer call the shared
+`runMenuWrite` and `completeMenuWrite` helpers. Dynamic completions branch
+before either built-in array; invalid built-in indices also refuse access.
+Confirmed saves retain reload and last-write reporting. A failed save keeps the
+effect already active in this session and reports the key, error and "save not
+confirmed"; approval may be needed at the next launch. There is no attempt to
+unload an initialized module or roll back unrelated rows. Existing setting
+edits remain available; no new retry UI, configuration key or manager policy is
+introduced.
+
+Persistence failure does not prove the file remained unchanged: a contained
+fault can occur after atomic replacement during later work. The failure status
+therefore reports uncertainty rather than claiming the bytes were not saved.
+Built-in latest-edit rollback, pending badges, headset logging and reload
+behavior are retained.
+
+Sol's focused production-helper rig compiled cleanly and passed 131 checks,
+including setting and approval save success, replacement failure, contained
+fault after replacement, counted array access, invalid row indices and actual
+stale/latest-generation completion. The isolated mutation proof caught all 42
+mutations by their intended cases. Its fixture roots were corrected to include
+the newly extracted header before the final passing run. The combined full
+build passed in 170.6 seconds: Python gates, production DLLs, 170 pooled test
+jobs, six serial jobs, installer checks and receipt. The same tree also passes
+the failed-worktree-removal tests and phase-receipt regression cases. No flight
+is needed to reproduce or verify this indexing defect. Add-on platform/runtime
+scope is unchanged.
 
 Moved verbatim out of the Status block (dated change notes, then the
 ruled-out list); the summary above points here.

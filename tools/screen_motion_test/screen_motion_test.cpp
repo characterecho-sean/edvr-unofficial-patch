@@ -16,7 +16,9 @@
 #include <fstream>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
-void check(bool b,const char* label){++checks;if(!b){std::printf("FAIL: %s\n",label);std::exit(1);}}
+// A mutant child (EDVR_SCREEN_MUTANT >= 1) is SUPPOSED to fail a check; its line is prefixed "expected-fail:" so a green build log holds no
+// line starting FAIL. The control (0) and the unmutated run keep "FAIL:", and the exit code (1) is the same either way.
+void check(bool b,const char* label){++checks;if(!b){const char* mut=std::getenv("EDVR_SCREEN_MUTANT");std::printf((mut&&std::atoi(mut)>0)?"expected-fail: %s\n":"FAIL: %s\n",label);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* profile,const char* entry="main"){
     ComPtr<ID3DBlob> c,e;HRESULT h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS,0,&c,&e);

@@ -59,6 +59,7 @@
 #include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
+#include "flat_discovery_lazy_tests.h"
 #include "flat_domain_tests.h"
 #include "source_free_tests.h"
 #include "pin_tests.h"
@@ -437,6 +438,7 @@ int wmain(int argc, wchar_t** argv) {
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
+    discovery_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
     source_free_tests::run({device.Get(), context.Get(), &check});
     pin_tests::run({device.Get(), context.Get(), &check});

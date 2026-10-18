@@ -1,6 +1,7 @@
 #pragma once
 // Passive, bounded observations of game-owned world-object admission records.
 // Names, owner pointers and distance are provenance clues, never proof of static geometry.
+#include "flat_origin_capture.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -390,6 +391,7 @@ inline void totals(const char* label,uint32_t frame) noexcept {
 } // namespace flat_world_witness_runtime
 
 inline bool flatWorldWitnessSelect(uintptr_t record,uint32_t frame) noexcept {
+    if (!flatOriginCaptureEnabled()) return false;
     using namespace flat_world_witness_runtime;
     if(!active.load(std::memory_order_acquire))return false;
     ++callbacks;
@@ -418,6 +420,7 @@ inline bool flatWorldWitnessSelect(uintptr_t record,uint32_t frame) noexcept {
     ++selected;if(seeded)++seedSelected;else ++tailSelected;return true;
 }
 inline void flatWorldWitnessObserve(const FlatWorldWitnessInput& in) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     if(!active.load(std::memory_order_acquire)||in.frame!=currentFrame.load(std::memory_order_acquire)){++observeStale;return;}
     if(!mutex.try_lock()){++lockSkipped;return;}
@@ -425,6 +428,7 @@ inline void flatWorldWitnessObserve(const FlatWorldWitnessInput& in) noexcept {
     core.observe(in);mutex.unlock();
 }
 inline void flatWorldWitnessReadFailure(uint32_t frame,uint8_t reason) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     ++readFailures;if(!active.load(std::memory_order_acquire)||frame!=currentFrame.load(std::memory_order_acquire)){++observeStale;return;}
     if(!mutex.try_lock()){++lockSkipped;return;}
@@ -432,6 +436,7 @@ inline void flatWorldWitnessReadFailure(uint32_t frame,uint8_t reason) noexcept 
     core.readFailure(frame,reason);mutex.unlock();
 }
 inline void flatWorldWitnessFrameBoundary(uint32_t frame,bool enabled,bool hookReady,bool gateOpen) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     const bool was=active.load(std::memory_order_relaxed);
@@ -450,18 +455,21 @@ inline void flatWorldWitnessFrameBoundary(uint32_t frame,bool enabled,bool hookR
 }
 inline void flatWorldWitnessEvent(uint64_t resolverFrame,const float now[3],const float previous[3],float deltaMs,
     bool plannedKept,bool reanchorRule,bool plannedReset) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     if(!active.load(std::memory_order_relaxed)){Log::get().note("flat world witness: candidate inactive resolver-frame=%llu engine-frame=%u",static_cast<unsigned long long>(resolverFrame),currentFrame.load());return;}
     core.event(resolverFrame,currentFrame.load(),now,previous,deltaMs,plannedKept,reanchorRule,plannedReset);
 }
 inline void flatWorldWitnessUnavailable(uint64_t resolverFrame,const float now[3],const float previous[3],float deltaMs,const char* reason) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     std::lock_guard<std::mutex> lock(mutex);
     if(!active.load(std::memory_order_relaxed)){Log::get().note("flat world witness: unavailable inactive resolver-frame=%llu engine-frame=%u reason=%s",static_cast<unsigned long long>(resolverFrame),currentFrame.load(),reason?reason:"unknown");return;}
     core.event(resolverFrame,currentFrame.load(),now,previous,deltaMs,false,false,false,reason?reason:"unknown");
 }
 inline void flatWorldWitnessShutdown() noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_world_witness_runtime;
     active.store(false,std::memory_order_release);
     std::lock_guard<std::mutex> lock(mutex);

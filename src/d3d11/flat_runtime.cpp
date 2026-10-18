@@ -1,3 +1,6 @@
+#include "flat_light_payload_capture.h"
+#include <sstream>
+#include "flat_origin_capture.h"
 #include "flat_runtime.h"
 #include "flat_sdk_bench_probe.h"
 #include "flat_capture_policy.h"
@@ -16,6 +19,8 @@
 #include "flat_projection_ownership.h"
 #include "flat_camera_probe.h"
 #include "flat_camera_inject.h"
+#include "flat_stationary_camera_capture.h"
+#include "flat_stationary_camera_core.h"
 #include "flat_camera_phase.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
@@ -44,11 +49,13 @@
 #include "flat_standdown.h"
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
+#include "flat_issue_epoch.h"
 #include "flat_pair_facts.h"   // what a draw's shader pair alone says, remembered per pair
 #include "flat_offscreen_fast.h"   // the offscreen fast path: a repeat of a verified class-4 draw skips the draw scope's constructor
 #include "flat_camera_table.h"
 #include "flat_hdr_projection_capture.h"
 #include "flat_deferred_camera.h"
+#include "flat_deferred_failure_witness.h"
 #include "flat_query_cut.h"
 #include "flat_query_reads.h"
 #include "gpu_timing.h"
@@ -203,7 +210,55 @@ struct View {
     void* identity = nullptr; uint32_t generation = 0; ResourceInfo info{};
     Ptr<IUnknown> held;
 };
+struct LightAuditState {
+    lightaudit::Collector collector;
+    uint64_t textureFrame=0;
+    lightaudit::Producer textures[32]{};
+    uint32_t textureCount=0,textureOverflow=0,writeNext=0,writeEvictions=0;
+    struct Write {const void* resource=nullptr;uint64_t frame=0;uint32_t sequence=0;} textureWrites[32]{};
+    std::wstring directory;std::vector<std::string> files;bool finalized=true;
+};
+struct ForwardPhaseHold {
+    Ptr<ID3D11Resource> hdr,raw,linear;
+    Ptr<ID3D11Buffer> source,original[2];
+};
+struct ForwardDsvDescription {
+    Ptr<ID3D11Resource> resource;
+    D3D11_DEPTH_STENCIL_VIEW_DESC view{};
+    forward_light::Surface surface{};
+    uint32_t format=0;
+};
+struct ForwardRuntime {
+    phase_failure::Collector phaseReceipt;
+    forward_light::ConstantIdentity phaseObservedDonor[forward_light::kDomains];
+    ForwardPhaseHold phasePending[phase_failure::kSlots],phaseCommitted[phase_failure::kSlots];
+    forward_light::Ledger ledger;
+    forward_light::ImmutableDescriptionCache<Ptr<ID3D11DepthStencilView>,ForwardDsvDescription> dsvDescription;
+    forward_light::ImmutableDescriptionCache<Ptr<ID3D11DepthStencilState>,D3D11_DEPTH_STENCIL_DESC> depthDescription;
+    forward_light::Authority authority[forward_light::kPublications];
+    Ptr<ID3D11Resource> authorityHdr[forward_light::kPublications];
+    bool ownerKnown=false,upstream=false;
+    struct DomainHold {Ptr<ID3D11Resource> raw;Ptr<ID3D11DepthStencilView> view;Ptr<ID3D11Buffer> buffer;};
+    DomainHold domainHolds[forward_light::kDomains];
+    struct PublicationHold {Ptr<ID3D11Resource> raw,linear;Ptr<ID3D11ShaderResourceView> input;Ptr<ID3D11RenderTargetView> target;};
+    PublicationHold publicationHolds[forward_light::kPublications];
+    uint64_t converters=0,checks=0,qualified=0,accepted=0,refused=0,lastLog=0;
+    uint64_t reasons[static_cast<unsigned>(forward_light::Reason::Count)]{};
+    forward_light::Reason last=forward_light::Reason::Never;
+};
+// The last continued producer draw this frame. The next draw with the same
+// bindings, camera and arguments reuses it instead of rebuilding the record.
+struct ProducerContinuation {
+    bool armed = false;
+    uint64_t frame = 0;
+    char kind = 0;
+    uint32_t count = 0, start = 0, instances = 0, startInstance = 0;
+    int32_t base = 0;
+    uint32_t rtvGen = 0, dsvGen = 0, vsGen = 0, psGen = 0, b1Gen = 0;
+    FlatRuntimeDraw draw{};
+};
 struct State {
+    ForwardRuntime forwardLight;
     FlatDrawCapture drawCapture;
     FlatDrawPacketCapture drawPackets;
     std::map<std::pair<uint64_t,uint64_t>,uint64_t> drawPacketRefusedPairs;
@@ -376,6 +431,7 @@ struct State {
     Ptr<ID3D11Resource> uavs[8];
     const void* namedDepth = nullptr, *namedConstants = nullptr;
     unsigned char namedCamera[kFlatCameraBytes]{};
+    ProducerContinuation producerRun{};
     // The draw that named the world this frame (its shaders), and how often the camera it named was not the one H selected (design
     // section 104, the grenade hold: a first-person camera that names the world makes every world draw after it a "foreign" draw).
     uint64_t namedVs = 0, namedPs = 0;
@@ -405,6 +461,9 @@ struct State {
     uint64_t presentNotOkWindow = 0;
     uint32_t presentNotOkLogged = 0;
     uint64_t streak = 0, longestStreak = 0;
+    FlatFailureReceiptWindow selectorReceipts, projectionLookupReceipts;
+    uint32_t selectorReceiptCauses[static_cast<unsigned>(FlatRuntimeUncertainCause::Count)]{};
+    uint32_t projectionLookupCauses[static_cast<unsigned>(FlatProjectionCopyFailureKind::Count)]{};
     std::map<std::string, uint64_t> refusedWindow;
     std::map<std::string, uint64_t> conflictWindow;
     uint32_t conflictDetails[static_cast<uint32_t>(FlatRuntimeConflict::Count)]{};
@@ -455,6 +514,8 @@ struct State {
     };
     LocalProjectionSample localSamples[2]{};
     FlatHdrProjectionCapture hdrProjectionCapture{};
+    std::unique_ptr<LightAuditState> lightAudit;
+    uint64_t lightAuditGeneration=0;
     struct HdrCaptureWrite { const void* resource = nullptr; uint64_t frame = 0; uint32_t sequence = 0; };
     HdrCaptureWrite hdrCaptureWrites[256]{};
     uint32_t hdrCaptureWriteNext = 0;
@@ -588,6 +649,7 @@ struct State {
     FlatHdrKey hdrKey = FlatHdrKey::Off;
     bool hdrKeyRead = false;
     FlatHdrFrame hdr{};              // this frame's detector state, reset at the Present that starts the frame
+    stationcam::SceneWitnesses passiveScene{}; // diagnostic H camera/layout census, independent of treatment
     FlatHdrWindow hdrWindow{};       // the 5 s window of the census token
     FlatHdrSteps hdrStepsSeen{};     // the resolver's cumulative step counts at the last window (the window prints the difference)
     FlatHdrLatch hdrLatch{};         // three treated frames with late writes turn the route off until the key flips
@@ -630,8 +692,57 @@ struct State {
     bool censusHooked = false;                    // the resolver's span hooks are installed
     bool crumbGateRead = false;                   // the HDR route's breadcrumbs gate has been set from the DXMT markers (once, first)
 };
+
+static void observePassiveSceneDraw(State& s, const FlatRuntimeDraw& d) {
+    if (!flatOriginCaptureEnabled()) return;
+    const auto& k = d.key;
+    if (!k.color) return;
+    const bool candidate = flatHdrFindCandidate(s.hdr, k.color) != nullptr;
+    if (!candidate && !flatHdrCandidateDraw(k, s.hdr.outputWidth, s.hdr.outputHeight)) return;
+    stationcam::SceneDraw sample;
+    sample.color = reinterpret_cast<uintptr_t>(k.color);
+    sample.rtv = reinterpret_cast<uintptr_t>(k.rtv);
+    sample.depth = reinterpret_cast<uintptr_t>(k.depth);
+    sample.dsv = reinterpret_cast<uintptr_t>(k.dsv);
+    sample.b1 = reinterpret_cast<uintptr_t>(k.b1);
+    sample.format = k.format; sample.width = k.width; sample.height = k.height;
+    sample.depthWidth = k.depthWidth; sample.depthHeight = k.depthHeight;
+    sample.depthFormat = k.depthFormat;
+    sample.cameraHash = k.cameraHash; sample.camera = k.camera ? d.camera : nullptr;
+    sample.viewport = flat_mono_detail::hdrViewport(k, k.width, k.height);
+    sample.cameraCurrent = !k.camera || flatRuntimeCameraCurrent(d, s.prefix.sequence, s.prefix.frame);
+    sample.overlayProtected = d.overlayProtected;
+    s.passiveScene.observe(sample, candidate);
+}
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
+void selectorTruncationReceipt(State& s, const char* route, uint32_t selectorQ,
+                               uint64_t vs, uint64_t ps, const void* color) {
+    auto& budget=s.selectorReceipts;
+    const auto& p=s.prefix;const auto& w=p.firstUncertain;
+    const auto cause=p.uncertain?(w.cause==FlatRuntimeUncertainCause::None?
+        FlatRuntimeUncertainCause::Unspecified:w.cause):p.copies!=1?
+        FlatRuntimeUncertainCause::MultipleCopies:FlatRuntimeUncertainCause::Unspecified;
+    ++s.selectorReceiptCauses[static_cast<unsigned>(cause)];
+    if(!budget.admit())return;
+    Log::get().note("flat selector truncation receipt: frame=%llu route=%s selector-q=%u selector-VS=%016llX selector-PS=%016llX cause=%s mark-prefix-q=%u first-resource=%p related=%p first-VS=%016llX first-PS=%016llX cause-detail=%u targets=%u/128 sources=%u/32 copies=%u uncertain=%u output=%p selector-color=%p detail-sample=%u/%u",
+        (unsigned long long)p.frame,route,selectorQ,(unsigned long long)vs,(unsigned long long)ps,
+        flatRuntimeUncertainName(cause),w.q,w.resource,w.related,(unsigned long long)w.vs,(unsigned long long)w.ps,w.detail,
+        p.targetsUsed,p.sourcesUsed,p.copies,p.uncertain?1u:0u,p.output,color,budget.emitted,FlatFailureReceiptWindow::kDetailLimit);
+}
+void foregroundProjectionLookupReceipt(State& s, uint64_t vs, uint64_t ps,
+                                        const FlatForegroundProjectionLookupFailure& failure) {
+    auto& budget=s.projectionLookupReceipts;
+    ++s.projectionLookupCauses[static_cast<unsigned>(failure.copy.kind)];
+    if(!budget.admit())return;
+    const auto& c=failure.copy;
+    Log::get().note("flat foreground projection lookup receipt: frame=%llu draw-q=%u VS=%016llX PS=%016llX cause=%s buffer=%p VS-slot=%u row=%u first=%u bound-count=%u byte-width=%u byte-offset=%u bytes=64 layout=%u generation=%llu mutation=%llu write=%llu/%u tracked-width=%u mapped=%u pending=%u detail-sample=%u/%u",
+        (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)vs,(unsigned long long)ps,
+        flatProjectionCopyFailureName(c.kind),failure.buffer,failure.slot,failure.row,failure.first,failure.count,
+        failure.byteWidth,failure.offset,static_cast<unsigned>(failure.layout),
+        (unsigned long long)c.generation,(unsigned long long)c.mutationSerial,(unsigned long long)c.writeFrame,c.writeSequence,
+        c.trackedWidth,c.mapped?1u:0u,c.pending?1u:0u,budget.emitted,FlatFailureReceiptWindow::kDetailLimit);
+}
 // THE MAP FOCUS (2026-10-10). Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. The flat runtime reads the
 // journal watcher's flat reader (journalFlatGuiFocus) ONCE per frame, at the frame boundary (flatRuntimeMapFocusFrame), and every answer
 // the frame gives comes from that read: temporal AA off while a map is open (flatUiMapTemporalOff) and the map families' gate
@@ -1532,6 +1643,7 @@ constexpr uint64_t kMenuCopyPs=0xDED8796049C7BB4Aull;
 bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kMenuCopyVs || k.ps!=kMenuCopyPs || k.format!=26)return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1564,6 +1676,7 @@ bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
 bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRuntimeDraw& draw) {
     const auto& k=draw.key;
     if(k.format!=9 || !flatRuntimeCameraIndependentImageSourcePair(k.vs,k.ps))return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1621,6 +1734,7 @@ void captureUnknownProjection(State& s,const FlatContractObservation& k) {
 bool verifyHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kHdrCopyVs || k.ps!=kHdrCopyPs || k.format!=26)return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1812,10 +1926,22 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
     return attempt;
 }
 void recordDeferredFailure(State& s,const FlatContractObservation& k,const char* reason,
-        bool actual,bool input,const FlatContractRecord* donor,bool firstWitness) {
-    ++s.deferredFailureCalls;
+        bool actual,bool input,const FlatContractRecord* donor,bool firstWitness,
+        const FlatDeferredFailureWitness* sameCall=nullptr) {
+    // Freeze the call's phase and donor before the pre-existing ownership
+    // queries/logging, which must not turn this into a later State sample.
+    FlatDeferredFailureWitness witness=sameCall?*sameCall:FlatDeferredFailureWitness{};
+    if(!sameCall){witness.frame=s.prefix.frame;witness.q=s.prefix.sequence+1;
+        witness.phaseX=s.phase.currentX;witness.phaseY=s.phase.currentY;witness.applied=s.phase.applied;}
+    witness.hdr=k.color;witness.depth=k.depth;witness.vs=k.vs;witness.ps=k.ps;
+    unsigned char donorCamera[kFlatCameraBytes]{};
+    if(donor){witness.donorColor=donor->key.color;witness.donorB1=donor->key.b1;
+        witness.donorWriteFrame=donor->lastWriteEpoch;witness.donorWriteQ=donor->lastWriteSeq;
+        witness.donorHash=donor->key.cameraHash;witness.donorFirst=donor->first;witness.donorLast=donor->last;
+        if(donor->key.camera){std::memcpy(donorCamera,donor->camera,sizeof(donorCamera));witness.donorCamera=donorCamera;}}
+    witness.calls=++s.deferredFailureCalls;
     const uint64_t now=GetTickCount64();
-    if(s.deferredFailureCalls==1 || now-s.deferredFailureLastLog>=5000) {
+    if(flatDeferredFailureWitnessDue(s.deferredFailureCalls,now,s.deferredFailureLastLog)) {
         Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
         FlatComputeInternalScope internal;
         if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(2,1,&buffer,&first,&count);
@@ -1830,6 +1956,11 @@ void recordDeferredFailure(State& s,const FlatContractObservation& k,const char*
             donor?donor->key.color:nullptr,donor?donor->key.b1:nullptr,donor?"qualified-pool":"unavailable",
             (unsigned long long)(donor?donor->key.cameraHash:0),firstWitness?1u:0u,s.phase.currentX,s.phase.currentY,
             (unsigned long long)s.deferredFailureCalls);
+        // Same existing first-call/5s detail budget. Verifier bytes precede
+        // failPhase and any private binding; no additional pipeline reads.
+        char lines[4][1000]{};
+        if(flatFormatDeferredFailureWitness(witness,lines))for(const auto& line:lines)Log::get().note("%.999s",line);
+        else Log::get().note("flat deferred failure witness: v=1 frame=%llu q=%u H=%p result=format-unavailable",(unsigned long long)witness.frame,witness.q,witness.hdr);
         s.deferredFailureLastLog=now;
     }
     if(s.deferredFailureCapture.request(s.prefix.frame)) {
@@ -1860,6 +1991,7 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
     // or invalidate scene history. Selected-H identity remains protected even
     // when its current depth, extent or donor proof is damaged.
     if(flatCameraInjectUpstreamOwns() && !flatDeferredVerifyInPhase(nonzero,phaseDomain))return nullptr;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     bool firstWitness=true;
     for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color && s.prefix.targets[i].writes.draws)firstWitness=false;
@@ -1911,6 +2043,22 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
         desc.ArraySize==1 && desc.SampleDesc.Count==1;
     const auto match=donor && copied?flatMatchDeferredCamera(donor->camera,raw):FlatDeferredCameraMatch::Unavailable;
     const bool qualified=actual && input && donor && copied && !foreignWork.load(std::memory_order_acquire);
+    const float requestedPhaseX=s.phase.currentX,requestedPhaseY=s.phase.currentY;
+    const uint64_t requestedApplied=s.phase.applied,requestedFrame=s.prefix.frame;
+    const uint32_t requestedQ=s.prefix.sequence+1;
+    const auto reportFailure=[&](const char* why) {
+        FlatDeferredFailureWitness witness;witness.contextAvailable=true;witness.relation=match;
+        witness.phaseX=requestedPhaseX;witness.phaseY=requestedPhaseY;witness.applied=requestedApplied;
+        witness.frame=requestedFrame;witness.q=requestedQ;
+        witness.buffer=buffer.Get();witness.first=first;witness.count=count;witness.width=metadata.width;
+        witness.generation=metadata.generation;witness.mutation=metadata.mutationSerial;
+        witness.writeGeneration=metadata.writeGeneration;witness.bank=metadata.bankEpoch;
+        witness.writeFrame=metadata.writeFrame;witness.writeQ=metadata.writeSequence;
+        witness.range=range;witness.tracked=metadata.tracked;witness.shadow=metadata.shadowPresent;
+        witness.mapped=metadata.mapped;witness.pending=metadata.pending;witness.current=current;witness.copied=copied;
+        witness.original=copied?raw:nullptr;
+        recordDeferredFailure(s,k,why,actual,input,donor,firstWitness,&witness);
+    };
     FlatProjectionJitter jitter{};unsigned char certified[kFlatDeferredCameraBytes]{};
     const bool missingPhase=qualified && flatCameraInjectUpstreamOwns() && nonzero &&
         flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,jitter) &&
@@ -1941,18 +2089,20 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
             if(!prepared)deferredPlan=nullptr;
         }
         if(missingPhase && !prepared) {
-            recordDeferredFailure(s,k,"deferred-inverse-preparation-failed",actual,input,donor,firstWitness);
+            reportFailure("deferred-inverse-preparation-failed");
             failPhase(s,"deferred-inverse-preparation-failed");
-            s.prefix.uncertain=true;flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
+            flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredPrepare,k.color,k.depth,k.vs,k.ps);
+            flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
         }
     }
     const bool executionCoherent=flatDeferredExecutionCoherent(qualified,match,prepared);
     // Later exact consumers cannot hide a changed/unavailable inverse behind
     // the first H witness. This consumer's execution must remain coherent too.
     if(flatCameraInjectUpstreamOwns() && nonzero && !executionCoherent && !missingPhase) {
-        recordDeferredFailure(s,k,"deferred-inverse-unproven",actual,input,donor,firstWitness);
+        reportFailure("deferred-inverse-unproven");
         failPhase(s,"deferred-inverse-unproven");
-        s.prefix.uncertain=true;flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
+        flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredExecution,k.color,k.depth,k.vs,k.ps);
+        flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
     }
     draw.deferredHdrVerified=firstWitness && executionCoherent;
     if(draw.deferredHdrVerified) {
@@ -2103,6 +2253,9 @@ void captureHdrProjectionDraw(State& s, const FlatRuntimeDraw& draw) {
         (unsigned long long)s.prefix.frame,c.writers,boundViews);
     if(complete)++c.payloads;
 }
+#include "flat_light_payload_runtime.inl"
+#include "flat_forward_light_runtime.inl"
+
 void captureHdrProjectionDispatch(State& s) {
     auto& c=s.hdrProjectionCapture;
     if(!s.projectionFrames || !c.armed || !c.target || c.closed || c.exhausted())return;
@@ -2589,7 +2742,10 @@ const Camera* camera(ID3D11Resource* resource, bool add) {
     D3D11_BUFFER_DESC d{}; buffer->GetDesc(&d);
     if (!(d.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || d.ByteWidth < kFlatCameraOffset + kFlatCameraBytes) return nullptr;
     const Camera* claimed = s.cameras.claim(std::move(buffer), d.ByteWidth, s.prefix.frame);
-    if (!claimed) { s.prefix.uncertain = true; flatTraceMark(s.traceRing, kFlatTraceEventMarkUncertain, nullptr); return nullptr; }
+    if (!claimed) {
+        flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::CameraCapacity,resource);
+        flatTraceMark(s.traceRing, kFlatTraceEventMarkUncertain, nullptr); return nullptr;
+    }
     return claimed;
 }
 void capture(const Camera& c, const void* bytes) {
@@ -2866,6 +3022,7 @@ void applyWork(State& s, FlatWork next) {
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
         for (auto& u : s.uavs) u.Reset();
     }
+    if(was!=next){forwardReset(s);finishLightAudit(s,"cancelled-work-tier");}
     if (was != next && was != FlatWork::Paused) {
         // Probe evidence must not survive Paused or become Full preparation
         // readiness. Every departing watched tier drops shadows and plans.
@@ -2971,7 +3128,7 @@ void flatRuntimeResize() {
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
     // reference) is forgotten without touching a context that may be gone.
     flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
-    auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop");
+    auto& s = state(); FlatComputeInternalScope guard; forwardReset(s); finishLightAudit(s,"cancelled-resize-or-stop"); s.drawCapture.cancel("resize-or-stop");
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
     s.foreground.reset();
@@ -3019,7 +3176,7 @@ void flatRuntimeResize() {
     s.observing = false; s.covFrameLocallyRefused = false;
     // The HDR route's per-frame detector state names resources of the old device; the key, the latch and the
     // census window are the session's and stay.
-    flatHdrBeginFrame(s.hdr, 0, 0); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, 0, 0); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     g_sceneSizes.store(0, std::memory_order_release);
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
@@ -3053,6 +3210,12 @@ void flatRuntimeNoteCameraApplied() { auto& s = state(); s.phase.noteApplied(); 
 bool flatRuntimeWorkFull() { return state().work==FlatWork::Full; }
 bool flatRuntimeLegacyPlanExists() { const auto& s=state(); return s.work==FlatWork::Full && s.projection!=nullptr; }
 void flatRuntimeArmProjectionAudit(bool full) { if(runtimeFlatProfile()) projectionAuditRequested.request(full); }
+bool flatRuntimePassiveRearmBusy() {
+    if (!owner()) return true;
+    const auto& s = state();
+    return projectionAuditRequested.pending() != FlatCaptureTier::None ||
+           s.projectionFrames != 0 || s.drawCapture.active() || s.drawPackets.armed();
+}
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
     if(owner() && state().projection) {
         flatcpu::Scope shadows(flatcpu::kShadows);
@@ -3458,7 +3621,72 @@ static bool nameSourceFree(State& s, const FlatMonoFrame& sel) {
     s.frameSourceFree=true;
     return true;
 }
+static void passiveSceneAtHdrTrigger(State& s) {
+    if (!flatOriginCaptureEnabled()) return;
+    using namespace flat_mono_detail;
+    const auto reject = [&](const char* reason) {
+        flatStationaryCameraSceneRejected(s.prefix.frame, reason);
+    };
+    if (!s.hdr.triggered || !s.hdr.trigger.srvKnown || s.hdr.trigger.srvSlot >= 4 ||
+        s.hdr.trigger.ambiguous || s.hdr.candidateOverflow || s.passiveScene.overflow ||
+        s.prefix.uncertain) { reject("passive-trigger-ambiguous-or-unknown"); return; }
+    const auto* candidate = flatHdrFindCandidate(s.hdr, s.hdr.trigger.hdr);
+    const auto* seen = s.passiveScene.find(reinterpret_cast<uintptr_t>(s.hdr.trigger.hdr));
+    if (!candidate || !seen || !seen->draws) { reject("passive-H-not-observed"); return; }
+    if (seen->bad) { reject(seen->reason); return; }
+    const FlatRuntimeTarget* target = nullptr;
+    for (uint32_t i = 0; i < s.prefix.targetsUsed; ++i)
+        if (s.prefix.targets[i].resource == s.hdr.trigger.hdr) { target = &s.prefix.targets[i]; break; }
+    if (!target || !target->writes.draws || !target->hdrCamera) {
+        reject("passive-H-no-current-camera-record"); return;
+    }
+    if (target->menuInherited || flatFrameThroughMenuCopy(s.prefix, target->resource)) {
+        reject("passive-H-menu-inherited"); return;
+    }
+    if (target->hdrLayoutChanged || (target->hdrBad &&
+        target->firstBad.cause != FlatRuntimeConflict::ImageCopySource)) {
+        reject("passive-H-nonimage-conflict"); return;
+    }
+    const auto& w = target->writes;
+    const auto& tone = target->tone;
+    if (w.key.format != 26 || !w.key.rtv || !w.key.depth || !w.key.dsv || !w.key.depthFormat ||
+        !ordered(w) || !ordered(tone) || w.last >= s.hdr.trigger.sequence ||
+        tone.last >= s.hdr.trigger.sequence || !cameraCurrent(tone, s.prefix.frame) ||
+        !tone.key.camera || tone.key.format != 26 ||
+        !w.key.width || !w.key.height || w.key.depthWidth != w.key.width ||
+        w.key.depthHeight != w.key.height || !hdrViewport(w.key, w.key.width, w.key.height)) {
+        reject("passive-H-stale-or-invalid-camera-layout"); return;
+    }
+    if (seen->rtv != reinterpret_cast<uintptr_t>(w.key.rtv) ||
+        seen->depth != reinterpret_cast<uintptr_t>(w.key.depth) ||
+        seen->dsv != reinterpret_cast<uintptr_t>(w.key.dsv) ||
+        seen->width != w.key.width || seen->height != w.key.height ||
+        seen->depthFormat != w.key.depthFormat ||
+        candidate->draws != seen->draws || candidate->lastSeq >= s.hdr.trigger.sequence) {
+        reject("passive-H-record-disagrees-with-draws"); return;
+    }
+    if (!s.prefix.width || !s.prefix.height ||
+        !flatUniformScale(w.key.width, w.key.height, s.prefix.width, s.prefix.height) ||
+        uint64_t(w.key.width) * 2 < s.prefix.width || uint64_t(w.key.height) * 2 < s.prefix.height ||
+        uint64_t(w.key.width) > uint64_t(s.prefix.width) * 2 ||
+        uint64_t(w.key.height) > uint64_t(s.prefix.height) * 2) {
+        reject("passive-H-extent-outside-scene-band"); return;
+    }
+    if (seen->cameraSeen && (seen->b1 != reinterpret_cast<uintptr_t>(cameraIdentity(tone)) ||
+        seen->cameraHash != tone.key.cameraHash ||
+        std::memcmp(seen->camera, tone.camera, sizeof(seen->camera)) != 0)) {
+        reject("passive-H-camera-disagrees-with-record"); return;
+    }
+    if (!seen->cameraSeen && !tone.deferredCamera) {
+        reject("passive-H-no-draw-camera"); return;
+    }
+    float camera[6][4]{};
+    if (!cameraShape(tone.camera, camera)) { reject("passive-H-camera-shape-invalid"); return; }
+    flatStationaryCameraSceneCandidate(s.prefix.frame, camera, w.key.depth);
+}
+
 static void hdrSelectAtTrigger(State& s) {
+    passiveSceneAtHdrTrigger(s);
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
     if(witnessEligible)++s.sourceWitnessEligibleWindow;
     const bool witnessSample=witnessEligible && flatHdrShouldSampleAmbiguousSource(
@@ -3467,6 +3695,8 @@ static void hdrSelectAtTrigger(State& s) {
         [](uint64_t, uint64_t) { return true; },
         witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
         qualifiedUntrustedSource,&s);
+    if(sel.reason==FlatMonoReason::Truncated)
+        selectorTruncationReceipt(s,"hdr",s.hdr.trigger.sequence,s.hdr.trigger.vs,s.hdr.trigger.ps,s.hdr.trigger.hdr);
     s.untrustedSupportedAlternate=sel.selected() && sel.mixedCamera;
     noteSourceFreeContent(s, sel);
     // The camera H selected is the world's: the reference for the frames after, whatever naming left (State::namingVetoedThisFrame).
@@ -3729,11 +3959,14 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // another frame. The next frame's preflight, with its resource creations, runs inside it.
     HdrCrumbFrameEnd routeFrameEnd(hr);
     s.thread = GetCurrentThreadId();
+    forwardReport(s); // ordinary production guard, independent of manual Full/probe
+    lightAuditFrameEnd(s,frame); // drain before AA/device/context early exits
     // The Present edge: the frame window the camera injector may inject in
     // closes here and reopens only once the next frame's phase is chosen, so a
     // Present that returns early below (mode off, no device, no swap buffer)
     // can never leave the previous frame's phase injecting.
     flatCameraInjectDisarm();
+    flatStationaryCameraFrame(frame);
     // The camera producer probe's per-Present cadence (config-gated inside).
     flatCameraProducerProbeFrame(frame);
     // Account for the completed frame before mode/resize changes or the next
@@ -3794,6 +4027,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize();
         const auto request=projectionAuditRequested.take();
         const bool manual=flatCaptureBulk(request);
+        if(manual)Log::get().note("flat light camera audit: event=arm-refused reason=AA-off-no-watched-camera-shadows pending=0 drained=1");
         if(request==FlatCaptureTier::General)Log::get().note("flat capture general: configured=%s AA=off; bounded desktop discovery only, bulk exporters not armed",mode.c_str());
         if(!manual&&!s.drawPackets.active())return;
         FlatComputeInternalScope internal;Ptr<ID3D11Device> dev;swap->GetDevice(IID_PPV_ARGS(&dev));
@@ -3897,6 +4131,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             flatcpu::Lines lines;
             flatcpu::formatWindow(window, &lines);
             for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
+            flatcpu::formatCopyWindow(window,frame,&lines);
+            for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
+            char splitLine[1100];
+            flatcpu::formatDrawSplit(window, splitLine, sizeof splitLine);
+            Log::get().note("%s", splitLine);
         }
         s.gpuFrameTried = false;
     }
@@ -3997,6 +4236,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.traceDumpFrame=0;
     }
     if(s.projectionFrames && --s.projectionFrames==0) {
+        finishLightAudit(s,"audit-expired");
         reportProjection(s,"complete");
     }
     if(!s.deferredFailureArmReported) {
@@ -4016,6 +4256,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         armDrawIngress();
         // A diagnostic asks for everything, refused frames included: the stand-down ends.
         endStandDown(s, frame, "an F10 audit asked for everything");
+        armLightAudit(s,frame);
         witnessRearm();   // the camera-write witness walks stacks again, bounded (flat_witness_bound.h)
         syncEngine();
         flatMonoResolveArmPixels(frame);
@@ -4091,7 +4332,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 0xCAB49794BB439D03ull,0xD56F859BE4781431ull,0x8085AE8DD1906CDCull,
                 0xC49F999F7D3C801Dull,0x6EAA86EFE135B2D4ull};
             for(uint32_t i=0;i<10;++i){captureFlatProbeShader('v',unknownVs[i]);captureFlatProbeShader('p',unknownPs[i]);}
-        } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
+        } else {finishLightAudit(s,"arm-refused-projection-unavailable");s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
             Log::get().note("flat HDR projection payload: event=unavailable result=arm-refused; allocation/context1/runtime unavailable, no forward payload captured");
             Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
     }
@@ -4237,7 +4478,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
-    flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
+    s.producerRun.armed = false;
+    flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
     foreignWork.store(false, std::memory_order_release);
@@ -4411,10 +4653,18 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         if(s.spatialFallbacks || s.spatialFallbackFailures)
             Log::get().note("flat runtime spatial fallback cumulative: recovered=%llu failed=%llu history=invalid-on-recovery",
                 (unsigned long long)s.spatialFallbacks,(unsigned long long)s.spatialFallbackFailures);
-        Log::get().note("flat runtime: treated=%llu refused=%llu last=%s render-source=game-SS jitter=(%.5g,%.5g) accepted-reset-5s=%llu accepted-history-5s=%llu treated-streak=%llu longest-treated-streak=%llu",
+        Log::get().note("flat runtime: treated=%llu refused=%llu last=%s render-source=game-SS jitter=(%.5g,%.5g) accepted-reset-5s=%llu accepted-history-5s=%llu treated-streak=%llu longest-treated-streak=%llu selector-receipts=%u selector-suppressed=%u projection-lookups=%u lookup-suppressed=%u",
             static_cast<unsigned long long>(s.accepted), static_cast<unsigned long long>(s.refused), s.reason,s.phase.currentX,s.phase.currentY,
             static_cast<unsigned long long>(s.acceptedResetWindow), static_cast<unsigned long long>(s.acceptedHistoryWindow),
-            static_cast<unsigned long long>(s.streak), static_cast<unsigned long long>(s.longestStreak));
+             static_cast<unsigned long long>(s.streak), static_cast<unsigned long long>(s.longestStreak),
+             s.selectorReceipts.seen,s.selectorReceipts.suppressed(),
+             s.projectionLookupReceipts.seen,s.projectionLookupReceipts.suppressed());
+        for(unsigned i=1;i<static_cast<unsigned>(FlatRuntimeUncertainCause::Count);++i)
+            if(s.selectorReceiptCauses[i])Log::get().note("flat selector truncation receipt 5s: cause=%s count=%u",
+                flatRuntimeUncertainName(static_cast<FlatRuntimeUncertainCause>(i)),s.selectorReceiptCauses[i]);
+        for(unsigned i=1;i<static_cast<unsigned>(FlatProjectionCopyFailureKind::Count);++i)
+            if(s.projectionLookupCauses[i])Log::get().note("flat foreground projection lookup receipt 5s: cause=%s count=%u",
+                flatProjectionCopyFailureName(static_cast<FlatProjectionCopyFailureKind>(i)),s.projectionLookupCauses[i]);
         for (const auto& entry : s.refusedWindow)
             Log::get().note("flat runtime refusal 5s: reason=%s count=%llu", entry.first.c_str(), static_cast<unsigned long long>(entry.second));
         // The HDR route's census token, every window while a temporal mode runs, zeros included: an absent line is what
@@ -4491,7 +4741,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
             static_cast<unsigned long long>(s.resetExtentWindow), static_cast<unsigned long long>(s.presentNotOkWindow));
         const auto renderer = flatMonoResolveStats();
-        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f fast-travel-steps-kept=%llu",
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-ambiguity-resets=%llu last-origin-ambiguity-reset-m=%.1f fast-travel-steps-kept=%llu",
             static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
             static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
             static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
@@ -4505,6 +4755,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(renderer.originRebases), renderer.lastOriginRebaseM,
             static_cast<unsigned long long>(renderer.travelSteps));
         s.refusedWindow.clear(); s.acceptedResetWindow = s.acceptedHistoryWindow = 0;
+        s.selectorReceipts.reset();s.projectionLookupReceipts.reset();
+        for(auto& count:s.selectorReceiptCauses)count=0;
+        for(auto& count:s.projectionLookupCauses)count=0;
         s.resetMissingWindow = s.resetGapWindow = s.resetDepthWindow = s.resetColorWindow = s.resetExtentWindow = 0;
         s.presentNotOkWindow = 0;
         s.conflictWindow.clear();
@@ -4611,7 +4864,8 @@ void flatRuntimeUnknown() {
     // else, so no trace mark and no prefix or shadow to invalidate.
     s.viewportCount = 0; for (auto& u : s.uavs) u.Reset();
     if (s.work == FlatWork::Paused) return;
-    flatTraceMark(s.traceRing, kFlatTraceEventMarkUncertain, nullptr); s.prefix.uncertain = true;
+    flatTraceMark(s.traceRing, kFlatTraceEventMarkUncertain, nullptr);
+    flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::UnknownContext);
     s.cameras.invalidateAll();
     if(s.projection) {s.projection->invalidateAll();failPhase(s,"unknown-context-state");}
 }
@@ -4671,6 +4925,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
         }
     }
     for (const auto& u : s.uavs) if (u) {
+        forwardMutation(s,reinterpret_cast<uintptr_t>(u.Get()));
         if(s.hdrProjectionCapture.target && u.Get()==s.hdrProjectionCapture.depth)
             s.hdrProjectionCapture.written(u.Get());
         if(s.engine!=FlatMonoResolveMode::Taa) {
@@ -4696,6 +4951,8 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
                             const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    forwardMutation(s,reinterpret_cast<uintptr_t>(res));
+    lightAuditMutation(s,res);
     if(s.projectionFrames && s.hdrProjectionCapture.armed && !s.hdrProjectionCapture.exhausted()) {
         s.hdrProjectionCapture.written(res);
         State::HdrCaptureWrite* write=nullptr;
@@ -4719,6 +4976,7 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
     }
     { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventWriteResource, res); }
     flatRuntimeWritten(s.prefix, res);
+    if (flatOriginCaptureEnabled()) s.passiveScene.explicitWrite(reinterpret_cast<uintptr_t>(res));
     flatHdrObserveExplicitWrite(s.hdr, res);   // a write into the HDR target after the route's trigger is counted
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }
@@ -5165,7 +5423,7 @@ FlatOffscreenLive flatOffscreenLiveOf(State& s, bool auditing, const FlatContrac
     live.gpuFrameOpened = s.gpuFrameTried;
     live.foregroundFrameReady = s.engine == FlatMonoResolveMode::Taa || s.foregroundDomainFrame == s.prefix.frame;
     live.auditing = auditing;
-    live.diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
+    live.diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();
     live.foreignWork = foreignWork.load(std::memory_order_acquire);
     live.overlayOpen = overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire);
     live.projectionAudit = s.projectionFrames != 0;
@@ -5217,6 +5475,7 @@ bool flatOffscreenTry(State& s, ID3D11DeviceContext* context, const FlatOffscree
     {
         flatcpu::Scope hdrScope(flatcpu::kHdrRoute);   // could-consume was false: the detector may count a candidate draw but cannot fire
         flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, nullptr, false);
+        observePassiveSceneDraw(s, d);
     }
     {
         flatcpu::Scope trace(flatcpu::kTrace);
@@ -5240,6 +5499,138 @@ void flatOffscreenRecord(State& s, const FlatRuntimeDraw& d, const FlatPairFacts
     if (s.offscreen.valid() && s.offscreen.frame() == s.prefix.frame && s.offscreen.key().same(key)) return;   // already held
     s.offscreen.record(s.prefix.frame, key, d);
     ++s.offscreenCounts.recorded;
+}
+// True when this draw is the same continued producer as the one just served. The caller then
+// skips the constructor body and does only what that draw still has to do.
+bool flatProducerRunAccepts(const State& s, const FlatRuntimeDraw& live, const FlatPairFacts& pair,
+                            char kind, uint32_t count, uint32_t instances, bool auditing) {
+    const auto& held = s.producerRun;
+    if (!held.armed || held.frame != s.prefix.frame || !held.draw.supported || !live.supported || !live.key.camera) return false;
+    if (pair.toneSlot != ~0u || pair.copyPair || pair.mapToneSlot != ~0u || pair.uiMayAsk || pair.sourceTone) return false;
+    if (!flatCameraInjectUpstreamOwns() || s.work != FlatWork::Full || s.projectionFrames != 0 || auditing) return false;
+    if (flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed()) return false;
+    if (foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain || s.weaponFootprint.active()) return false;
+    if (flatHdrCouldConsume(s.hdr, live.key)) return false;
+    if (overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire)) return false;
+    if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) return false;
+    if (s.namedDepth != live.key.depth || s.namedConstants != live.key.b1) return false;
+    // The run is many meshes on one pipeline. Draw arguments are not its identity.
+    if (held.rtvGen != bindingGeneration(BindSlot::Rtv0) || held.dsvGen != bindingGeneration(BindSlot::Dsv0) ||
+        held.vsGen != bindingGeneration(BindSlot::Vs) || held.psGen != bindingGeneration(BindSlot::Ps) ||
+        held.b1Gen != bindingGeneration(BindSlot::VsCb1)) return false;
+    const auto& a = held.draw.key;
+    const auto& b = live.key;
+    if (a.color != b.color || a.rtv != b.rtv || a.depth != b.depth || a.dsv != b.dsv || a.b1 != b.b1 ||
+        a.vs != b.vs || a.ps != b.ps || a.format != b.format || a.kind != b.kind ||
+        a.width != b.width || a.height != b.height || a.depthWidth != b.depthWidth ||
+        a.depthHeight != b.depthHeight || a.depthFormat != b.depthFormat || a.viewportCount != b.viewportCount ||
+        a.cameraHash != b.cameraHash || a.writeEpoch != b.writeEpoch || a.writeSeq != b.writeSeq) return false;
+    if (std::memcmp(a.viewport, b.viewport, sizeof(a.viewport)) != 0) return false;
+    if (std::memcmp(held.draw.camera, live.camera, kFlatCameraBytes) != 0) return false;
+    return true;
+}
+void flatProducerRunRemember(State& s, const FlatRuntimeDraw& d, char kind, uint32_t count, uint32_t start,
+                             int32_t base, uint32_t instances, uint32_t startInstance) {
+    auto& held = s.producerRun;
+    held.armed = true;
+    held.frame = s.prefix.frame;
+    held.kind = kind;
+    held.count = count;
+    held.start = start;
+    held.base = base;
+    held.instances = instances;
+    held.startInstance = startInstance;
+    held.rtvGen = bindingGeneration(BindSlot::Rtv0);
+    held.dsvGen = bindingGeneration(BindSlot::Dsv0);
+    held.vsGen = bindingGeneration(BindSlot::Vs);
+    held.psGen = bindingGeneration(BindSlot::Ps);
+    held.b1Gen = bindingGeneration(BindSlot::VsCb1);
+    held.draw = d;
+}
+// The forward observation, the reducer, the detector, the trace and the substitution for a draw
+// already known to be the same pipeline as the saved producer. `d` is that saved record.
+void flatProducerServe(State& s, ID3D11DeviceContext* context, FlatRuntimeDraw& d, const FlatPairFacts& pair,
+                       const FlatOffscreenArgs& offscreenArgs, bool auditing, uint32_t offscreenTargetsBefore,
+                       bool offscreenUncertainBefore, char kind, uint32_t count, uint32_t instances,
+                       bool& producer, bool& gameHadTarget6, forward_light::Issue& forwardIssue) {
+    const auto& k = d.key;
+    s.drawVs = k.vs;
+    s.drawPs = k.ps;
+    forwardFrame(s);
+    forwardDrawWrites(s, context);
+    if (k.color) forwardMutation(s, reinterpret_cast<uintptr_t>(k.color), false);
+    forwardIssue = forwardObserveDomain(s, d);
+    {
+        flatcpu::Scope reduce(flatcpu::kReduce);
+        flatRuntimeObserve(s.prefix, d);
+    }
+    {
+        flatcpu::Scope hdrScope(flatcpu::kHdrRoute);
+        flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, nullptr, false);
+        observePassiveSceneDraw(s, d);
+    }
+    {
+        flatcpu::Scope trace(flatcpu::kTrace);
+        flatTraceRecord(s.traceRing, d, false, nullptr, s.prefix.sequence);
+    }
+    if (s.engine != FlatMonoResolveMode::Taa && k.depth) ++s.foregroundCounts.worldUnmarked;
+    if (s.foreground.active())
+        s.foreground.worldSource(context, s.prefix.frame, s.prefix.sequence,
+            static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
+            static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)));
+    {
+        FlatComputeInternalScope guard;
+        flatcpu::Scope engine(flatcpu::kEngineDraw);
+        producer = engineVelocityFlatBeginDraw(context, &gameHadTarget6);
+    }
+    if (flatUiLayerOn()) flatUiLayerNoteSceneDraw(context, count, instances, kind);
+    flatOffscreenRecord(s, d, pair, offscreenArgs, auditing, false, offscreenTargetsBefore, offscreenUncertainBefore);
+}
+// Before the constructor shell. The binding shadow and the cached camera rows are enough to know
+// this mesh is the same pipeline as the saved producer, so the shell's rebuild does not run.
+bool flatProducerContinueEarly(State& s, ID3D11DeviceContext* context, const FlatOffscreenArgs& offscreenArgs,
+                               bool auditing, uint32_t offscreenTargetsBefore, bool offscreenUncertainBefore,
+                               char kind, uint32_t count, uint32_t instances, bool& producer, bool& gameHadTarget6,
+                               forward_light::Issue& forwardIssue) {
+    const auto& held = s.producerRun;
+    if (!held.armed || held.frame != s.prefix.frame) return false;
+    if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) return false;
+    if (!flatCameraInjectUpstreamOwns() || s.work != FlatWork::Full || s.projectionFrames != 0 || auditing) return false;
+    if (flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed()) return false;
+    if (foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain || s.weaponFootprint.active()) return false;
+    if (overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire)) return false;
+    const auto& a = held.draw.key;
+    if (held.rtvGen != bindingGeneration(BindSlot::Rtv0) || held.dsvGen != bindingGeneration(BindSlot::Dsv0) ||
+        held.vsGen != bindingGeneration(BindSlot::Vs) || held.psGen != bindingGeneration(BindSlot::Ps) ||
+        held.b1Gen != bindingGeneration(BindSlot::VsCb1)) return false;
+    if (bindingGet(BindSlot::Rtv0) != a.rtv || bindingGet(BindSlot::Dsv0) != a.dsv || bindingGet(BindSlot::VsCb1) != a.b1) return false;
+    if (bindingShaderHash(BindSlot::Vs) != a.vs || bindingShaderHash(BindSlot::Ps) != a.ps) return false;
+    if (s.viewportCount != a.viewportCount) return false;
+    if (std::memcmp(&s.viewport, a.viewport, sizeof(a.viewport)) != 0) return false;
+    const FlatCameraRows* rows = s.cameras.probe(a.b1, held.b1Gen, s.prefix.frame);
+    if (!rows || !rows->have || rows->hash != a.cameraHash || rows->epoch != a.writeEpoch || rows->sequence != a.writeSeq) return false;
+    if (s.namedDepth != a.depth || s.namedConstants != a.b1) return false;
+    if (flatHdrCouldConsume(s.hdr, a)) return false;
+    FlatRuntimeDraw d = held.draw;
+    d.instances = instances;
+    if (d.key.camera) d.key.camera = d.camera;
+    const FlatPairFacts& pair = s.pairFacts.get(a.vs, a.ps, runtimeFlatProfile());
+    flatProducerServe(s, context, d, pair, offscreenArgs, auditing, offscreenTargetsBefore, offscreenUncertainBefore,
+                      kind, count, instances, producer, gameHadTarget6, forwardIssue);
+    return true;
+}
+// Serves a repeated continued producer once the slow path has already rebuilt its record.
+bool flatProducerContinue(State& s, ID3D11DeviceContext* context, FlatRuntimeDraw& d, const FlatPairFacts& pair,
+                          const FlatOffscreenArgs& offscreenArgs, bool auditing, uint32_t offscreenTargetsBefore,
+                          bool offscreenUncertainBefore, char kind, uint32_t count, uint32_t instances,
+                          bool& producer, bool& gameHadTarget6, forward_light::Issue& forwardIssue) {
+    if (!flatProducerRunAccepts(s, d, pair, kind, count, instances, auditing)) return false;
+    d = s.producerRun.draw;
+    d.instances = instances;
+    if (d.key.camera) d.key.camera = d.camera;   // the saved pointer addressed the previous draw's stack array
+    flatProducerServe(s, context, d, pair, offscreenArgs, auditing, offscreenTargetsBefore, offscreenUncertainBefore,
+                      kind, count, instances, producer, gameHadTarget6, forwardIssue);
+    return true;
 }
 }  // namespace
 
@@ -5321,6 +5712,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (flatOffscreenTry(s, context, offscreenArgs, auditing)) return;
     const uint32_t offscreenTargetsBefore = s.prefix.targetsUsed;
     const bool offscreenUncertainBefore = s.prefix.uncertain;
+    if (flatProducerContinueEarly(s, context, offscreenArgs, auditing, offscreenTargetsBefore, offscreenUncertainBefore,
+                                  kind, count, instances, producer, gameHadTarget6, forwardIssue)) {
+        ctx = context;
+        splitContinued = true;
+        weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
+        weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
+        return;
+    }
+    flatcpu::DrawSplitCtor splitCtor;
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
     ctx = context;
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
@@ -5334,10 +5734,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
-    // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
-    // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
+    // one, and stays bound only while nothing that could see it runs. Automatic discovery reads the logical original
+    // shadow and CPU writes; explicit captures/compute candidates read the context and retain eager restoration.
+    // Their earlier discovery observer restores first too, covering a newly armed capture before this constructor.
     {
-        const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
+        const bool diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();
         engineVelocityFlatLazy(!diagnostics);
         if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     }
@@ -5396,6 +5797,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     s.drawVs = k.vs; s.drawPs = k.ps;
     k.b1 = bindingGet(BindSlot::VsCb1); k.viewportCount = s.viewportCount;
     static_assert(sizeof(k.viewport) == sizeof(D3D11_VIEWPORT), "viewport layout"); std::memcpy(k.viewport, &s.viewport, sizeof(k.viewport));
+    bool cameraKept = false;
     {
         // The camera rows the buffer bound at b1 holds for this frame. The table keeps its last answer and serves
         // it to every draw until the binding, the frame or the table changes (flat_camera_table.h: on foot about
@@ -5407,7 +5809,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if (!kept) {
             flatcpu::Scope rows(flatcpu::kCameraRows);   // camera table lookup, rows copy and hash: a fresh lookup
             kept = &s.cameras.refresh(k.b1, b1Binding, s.prefix.frame);
-        }
+        } else cameraKept = true;
         if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; d.cameraHashTrusted = true; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
     }
     if(s.drawPackets.armed()) {
@@ -5460,25 +5862,40 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
     if (foreignWork.load(std::memory_order_acquire)) {
-        s.prefix.uncertain = true;
+        flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::ForeignWork,k.color,k.depth,k.vs,k.ps);
         if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");
+    }
+    if (cameraKept && flatProducerContinue(s, context, d, pairFact, offscreenArgs, auditing, offscreenTargetsBefore,
+                                     offscreenUncertainBefore, kind, count, instances,
+                                     producer, gameHadTarget6, forwardIssue)) {
+        splitContinued = true;
+        flatcpu::drawSplitSetContinued(true);
+        return;
     }
     {
         // The exact-shader verifications: each returns at once unless this draw is the copy it
         // names, and then reads the pipeline back from the context (shader, targets, view, viewport).
         flatcpu::Scope checks(flatcpu::kCopyChecks);
+        forwardIssue=forwardBefore(s,context,d,kind,count,start,instances,startInstance);
+        const auto lightIssue=forwardQualify(s,d);
+        if(lightIssue.kind!=forward_light::Issue::None)forwardIssue=lightIssue;
         d.hdrCopyVerified=verifyHdrCopy(ctx,d);
         d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);
         d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
         deferredPlan=verifyDeferredHdrCamera(s,d);
-        captureCopyProvenance(s,ctx,d);
-        captureHdrProjectionDraw(s,d);
+        {
+            flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));
+            captureCopyProvenance(s,ctx,d);
+            lightPayloadToken=captureLightPayloadBefore(s,d,kind,count,start,base,instances,startInstance);
+            captureHdrProjectionDraw(s,d);
+        }
     }
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;
     const uint32_t oldMenuAccepted=s.prefix.menuCopiesAccepted,oldMenuRefused=s.prefix.menuCopiesRefused;
     const uint32_t cameraProbeAttempt=[&] {
         flatcpu::Scope checks(flatcpu::kCopyChecks);   // F10-only unless it is the camera-conflict draw
+        flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0);
         return captureCameraConflict(s,d);
     }();
     if(s.weaponFootprint.active() && k.vs==0x025B4B9FF54622EDull &&
@@ -5636,9 +6053,16 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             recordDeferredFailure(s,k,"deferred-inverse-binding-failed",true,true,flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1),d.deferredHdrVerified);
             d.deferredHdrVerified=false;d.deferredInverseRepaired=false;
             failPhase(s,"deferred-inverse-binding-failed");
-            s.prefix.uncertain=true;
+            flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredBinding,k.color,k.depth,k.vs,k.ps);
             flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
         }
+    }
+    // Typed light authority reaches the reducer only while its actual original
+    // bindings are still certified. Upstream owns phase: no new private bind.
+    if(forwardIssue.kind==forward_light::Issue::Light&&!forwardIssueValid(s,forwardIssue)) {
+        d.forwardHdrVerified=d.forwardUpstreamPhase=false;
+        forwardRefusal(s,forward_light::Reason::Issue,k.color);
+        forwardIssue={};
     }
     FlatMonoFrame selected = [&]() -> FlatMonoFrame {
         flatcpu::Scope reduce(flatcpu::kReduce);   // the reducer: the online prefix model and the selector
@@ -5646,6 +6070,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             ? flatRuntimeObserveContract(s.prefix, d, s.traceContract)
             : flatRuntimeObserve(s.prefix, d);
     }();
+    if(copy && selected.reason==FlatMonoReason::Truncated)
+        selectorTruncationReceipt(s,"copy",s.prefix.sequence,d.key.vs,d.key.ps,d.key.color);
+    if(forwardIssue.donated)forwardAttest(s,forwardIssue);
     if(d.overlayProtected && !s.overlayFailureNoted) {
         bool admitted=false;
         for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
@@ -5676,6 +6103,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             hdrSrvKnown = true;
         }
         hdrTrigger = flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, hdrSrvKnown ? hdrSrv : nullptr, hdrSrvKnown);
+        observePassiveSceneDraw(s, d);
     }
     {
         flatcpu::Scope trace(flatcpu::kTrace);
@@ -6006,6 +6434,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // (qualifyProjection reads the shaders, the viewport and the constant buffers, and is skipped under Upstream).
     const bool continuesRun = sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
         std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0;
+    splitContinued = continuesRun;
+    flatcpu::drawSplitSetContinued(continuesRun);
+    if (continuesRun && pairFact.toneSlot == ~0u && !pairFact.copyPair && pairFact.mapToneSlot == ~0u &&
+        !pairFact.uiMayAsk && !pairFact.sourceTone)
+        flatProducerRunRemember(s, d, kind, count, start, base, instances, startInstance);
     const bool coverageReads = s.projection && sceneExtent && k.color != s.prefix.output &&
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&
         (s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());
@@ -6109,6 +6542,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(projection->active()) {s.phase.noteApplied();++s.jitterDraws;}
         else refuseDraw(s,"draw-binding-refused");
     }
+    if(lightPayloadToken)lightPayloadPlan=projectionPlan?projectionPlan:deferredPlan;
     // Tripwire, structurally unreachable: a legacy application under Upstream.
     if(projection && projection->active() && flatCameraInjectUpstreamOwns())++s.rows.legacyAppliedUnderUpstream;
     // The HDR route treats at its trigger (key auto, the selection selected): the game's pass that reads H next sees the
@@ -6421,6 +6855,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.previousJitterY=f.reset?f.jitterY:s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
+    flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);
     // The phase the captured rows carry. Only the injector writes one into the
     // game's own upload, so only an Upstream frame in which an injection landed
     // has any; the resolver removes it from both frames' rows and from the
@@ -6527,6 +6962,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // after a refusal or for a view the pass cannot use this is the resolve's own view; never in place.
     ID3D11ShaderResourceView* replacement = flatSharpenView(ctx, outputView.Get()); ctx->PSSetShaderResources(0, 1, &replacement); replaced = true;
     s.previous = selected; s.previousColor = actualColor; s.havePrevious = s.treated = true; s.temporalAccepted=true;s.lastMs = now; ++s.accepted;
+    forwardPhaseSelected(s,selected);
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY; // the phase the rows now stored in s.previous carry
     s.drawCapture.qualify(s.prefix.frame,selected.depth,selected.hdr,selected.renderWidth,selected.renderHeight);
     s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
@@ -6749,6 +7185,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.previousJitterY = f.reset ? f.jitterY : s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
+    flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);
     const FlatCameraRoute cameraRoute = flatCameraInjectRoute();
     const FlatCameraRowsPhase rowsNow = flatCameraRowsPhase(cameraRoute, s.phase.applied, s.phase.currentX, s.phase.currentY);
     f.rowsJitterX = rowsNow.x; f.rowsJitterY = rowsNow.y;
@@ -6811,6 +7248,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     s.previous = selected; s.previousColor = hdrResource; s.havePrevious = s.treated = s.hdrTreated = s.temporalAccepted = true;
     s.lastMs = now; ++s.accepted; ++s.hdrWindow.treated; s.hdrWindow.lastVerdict = s.reason;
+    forwardPhaseSelected(s,selected);
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY;
     s.drawCapture.qualify(s.prefix.frame, selected.depth, selected.hdr, selected.renderWidth, selected.renderHeight);
     s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
@@ -6857,6 +7295,7 @@ static void __stdcall foregroundOriginalDraw(ID3D11DeviceContext* ctx,UINT count
 }
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
+    flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);
     if(drawPacketOnly){FlatComputeInternalScope internal;state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,"capture-only-AA-off-or-paused");return;}
     // fix.ui_quality's flat layer (flat_ui_layer.h), right before the game's issue: a taken HUD draw is bound into the
     // layer (false: it goes to H as always), and the output copy gets this frame's HUD composited over what it reads.
@@ -6980,11 +7419,16 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 "foreground-original-shader-unavailable":indirectArgs?"foreground-indirect-writer":"foreground-active-query");
         } else {
             const char* phaseReason=nullptr;
+            FlatForegroundProjectionLookupFailure lookupFailure{};
             const char* deferredCapture=nullptr;   // a capture refusal the owner mark below may turn into a per-pixel refusal
             const bool phaseKnown=flatForegroundBoundProjectionPhase(ctx,s.projection.get(),projection.projectionSlot,
                 projection.projectionRow,projection.projectionLayout,s.phase.currentX,s.phase.currentY,
-                domainWidth,domainHeight,domainCamera[3][2],&phaseReason);
-            if(!phaseKnown)failDomain("projection-phase",phaseReason);
+                domainWidth,domainHeight,domainCamera[3][2],&phaseReason,&lookupFailure);
+            if(!phaseKnown){
+                if(lookupFailure.copy.kind!=FlatProjectionCopyFailureKind::None)
+                    foregroundProjectionLookupReceipt(s,domainVs,domainPs,lookupFailure);
+                failDomain("projection-phase",phaseReason);
+            }
             if(domainForeign && domainPool && phaseKnown) {
                 FlatForegroundMotion::Inputs inputs{};std::memcpy(inputs.camera,domainCamera,sizeof(inputs.camera));
                 inputs.phaseX=s.phase.currentX;inputs.phaseY=s.phase.currentY;
@@ -7130,6 +7574,9 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
             state().jitterRefusals>drawPacketJitterBefore?state().jitterReason:
             drawPacketPriority?"observed-priority-pair":"representative-observation");
     }
+    if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardBeginIssue(state(),forwardIssue,indirectArgs!=nullptr);
+    if(lightPayloadToken&&ctx){FlatComputeInternalScope internal;
+        captureLightPreForward(state(),ctx,lightPayloadToken,lightPayloadPlan,indirectArgs!=nullptr);}
     if(!weaponFootprintStarted)return;
     const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
         static_cast<uint32_t>(weaponDrawBase):weaponDrawStart;
@@ -7139,6 +7586,9 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    flatcpu::Scope callbacks(flatcpu::kIssueCallbacks,ctx!=nullptr);
+    if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardReturn(state(),forwardIssue);
+    if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
@@ -7173,6 +7623,9 @@ void FlatRuntimeDrawScope::endActualDraw() {
     }
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
+    if(forwardIssue.kind!=forward_light::Issue::None)forwardAbandon(state(),forwardIssue);
+    if(lightPayloadToken&&state().lightAudit){auto& c=state().lightAudit->collector;
+        if(c.open&&c.generation==lightPayloadToken&&!c.sample.drawReturned)c.sample.abandoned=1;}
     if(drawPacketOnly){if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);return;}
     if(ctx && (state().jitterRefusals>drawPacketJitterBefore || state().overlayRefusedWindow>drawPacketOverlayBefore)) {
         auto& s=state();const auto pair=std::make_pair(drawPacketVs,drawPacketPs);
@@ -7193,6 +7646,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;
         if(auto* candidate=domainCandidate(state(),domainDepth))candidate->motion.fail("foreground-abandoned-writer");
     }
+    flatcpu::DrawSplitDtor splitDtor(splitContinued);
     flatcpu::Scope shell(flatcpu::kOther);
     if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}
     if(untrustedPlanned && !untrustedEnded)state().untrusted.abandon();

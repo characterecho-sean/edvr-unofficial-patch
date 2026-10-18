@@ -1067,6 +1067,7 @@ uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.st
 JournalRawStatus journalRawStatus() {
     JournalRawStatus r;
     r.active = g_v.active.load(std::memory_order_acquire);
+    r.gameplay = peek(g_v.gameplay);
     r.statusSamples = peek(g_v.statusSamples);
     r.guiKnown = peek(g_v.fssFocusKnown);
     r.gui = peek(g_v.guiFocus);

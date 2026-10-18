@@ -403,7 +403,7 @@ inline int flatOffscreenTests() {
                 {&liveBody, "live.gpuFrameOpened = s.gpuFrameTried;", 1, "gpuFrameOpened comes from the frame's GPU span flag"},
                 {&liveBody, "live.foregroundFrameReady = s.engine == FlatMonoResolveMode::Taa || s.foregroundDomainFrame == s.prefix.frame;", 1, "foregroundFrameReady comes from the domain's frame reset"},
                 {&liveBody, "live.auditing = auditing;", 1, "auditing is the constructor's ingress flag"},
-                {&liveBody, "live.diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();", 1, "diagnostics is the constructor's own definition"},
+                {&liveBody, "live.diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();", 1, "diagnostics is the constructor's own physical-state definition"},
                 {&liveBody, "live.foreignWork = foreignWork.load(std::memory_order_acquire);", 1, "foreignWork is the constructor's flag"},
                 {&liveBody, "live.overlayOpen = overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire);", 1, "overlayOpen is the model's open suffix or the active flag"},
                 {&liveBody, "live.projectionAudit = s.projectionFrames != 0;", 1, "projectionAudit is the F10 audit's frame count"},
@@ -536,7 +536,7 @@ inline int flatOffscreenTests() {
             expect(countOf(ctor, "if (!s.gpuFrameTried) gpuFrameOpen(s, context);") + countOf(runtime, "if (!s.gpuFrameTried) gpuFrameOpen(s, context);") >= 1,
                    "O5: gate: the frame's first draw opens the GPU span");
             expect(countOf(ctor, "s.foregroundDomainFrame!=s.prefix.frame") >= 1, "O5: gate: the foreground domain's once-a-frame reset is keyed on the frame");
-            expect(countOf(ctor, "const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();") == 1,
+            expect(countOf(ctor, "const bool diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();") == 1,
                    "O5: gate: the constructor's diagnostics definition is the one the live field repeats");
             expect(countOf(ctor, "if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);") == 1,
                    "O5: gate: a draw that is not supported sees the game's state");

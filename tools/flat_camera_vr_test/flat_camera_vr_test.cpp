@@ -1271,15 +1271,25 @@ void testSourcePins() {
     const std::string phase = slurp("src/d3d11/flat_camera_phase.h");
     const std::string censusCore = slurp("src/d3d11/vr_camera_census_core.h");
     check(!cpp.empty() && !inj.empty() && !vrh.empty() && !phase.empty() && !censusCore.empty(), "R11a", "the injector, its header, the pure VR header, the admission header and the census core are readable from the root");
+    // The temporary stationary observer reads only after the VR branch and owner-thread exit.
+    // Exclude exactly that statement from preFlat's geometry fingerprint, without changing its golden.
+    const std::string stationaryRead =
+        "    flatStationaryCameraRefresh(camera, ctx, callNo, callerRva, readable ? kind : 0);\n";
+    const auto withoutStationaryRead = [&](std::string text) {
+        const size_t at = text.find(stationaryRead);
+        if (at != std::string::npos) text.erase(at, stationaryRead.size());
+        return text;
+    };
 
     // ---- the flat profile and the census: byte-for-byte --------------------------------------------------------------------
     {
         std::string bad;
         for (const Golden& g : kInjectGolden) {
-            const std::string r = region(cpp, g.start, g.end);
+            std::string r = region(cpp, g.start, g.end);
+            if (std::strcmp(g.name, "preFlat") == 0) r = withoutStationaryRead(r);
             if (r.empty() || count(cpp, g.start) != 1 || fnv1a(r) != g.hash) { bad += g.name; bad += ' '; }
         }
-        check(bad.empty(), "R11b", "the flat profile's and the census's regions of the detour are byte-for-byte what they were before the VR mode: the observe-only call and its off-thread report, refreshPre from the census's switch on, refreshPost from its observe branch on, the flat frame step, pause, close, reset, arm and disarm, and the route accessors");
+        check(bad.empty(), "R11b", "apart from the exact stationary observer statement, the flat profile's and the census's regions retain their original geometry fingerprints: observe-only, refreshPre from the census switch on, refreshPost, frame, pause, close, reset, arm/disarm and route accessors");
         if (!bad.empty()) std::printf("  note  changed regions: %s\n", bad.c_str());
         std::string badPhase;
         for (const Golden& g : kPhaseGolden) {
@@ -1290,7 +1300,16 @@ void testSourcePins() {
         if (!badPhase.empty()) std::printf("  note  changed regions: %s\n", badPhase.c_str());
         // Control: the hash can fail (one byte of the region changed changes it).
         const Golden& g = kInjectGolden[3];
-        std::string r = region(cpp, g.start, g.end);
+        const std::string baseline = withoutStationaryRead(region(cpp, g.start, g.end));
+        check(!baseline.empty() && fnv1a(withoutStationaryRead(baseline + stationaryRead)) == g.hash,
+              "R11ba", "control: the exact passive observer statement is excluded while the original preFlat golden remains unchanged");
+        std::string changedProjection = baseline;
+        const size_t projectionAt = changedProjection.find("entryX + jx /");
+        if (projectionAt != std::string::npos)
+            changedProjection.replace(projectionAt, std::strlen("entryX + jx /"), "entryX - jx /");
+        check(projectionAt != std::string::npos && fnv1a(withoutStationaryRead(changedProjection)) != g.hash,
+              "R11bb", "control: reversing the projection phase still fails the unchanged golden after observer exclusion");
+        std::string r = baseline;
         if (!r.empty()) r[r.size() / 2] ^= 1;
         check(!r.empty() && fnv1a(r) != g.hash, "R11d", "control: a region with one byte changed no longer hashes to the golden value");
     }
@@ -1304,6 +1323,11 @@ void testSourcePins() {
               ordered(pre, {"g_refreshTls.vr = 0;\n", "const uint64_t callNo = ", "const FlatCameraGateVerdict gate = g_inject.gate.check(GetCurrentThreadId(), GetTickCount64());\n", branch,
                             "const bool observe = g_inject.observeOnly.load(std::memory_order_acquire);"}),
               "R11e", "refreshPre clears the VR flag with the others, and hands the call to refreshPreVr once the gate is known and before the flat code reads its observe-only switch: a non-zero mode word takes the VR path, zero takes the old one");
+        check(count(cpp, "flatStationaryCameraRefresh(") == 0 ||
+              (count(cpp, stationaryRead) == 1 && count(cpp, "flatStationaryCameraRefresh(") == 1 &&
+               ordered(pre, {branch, "    if (gate == FlatCameraGateVerdict::OffThread) {\n",
+                              "    const bool readable = camera && sehReadU32(camera + kCamKind, &kind);", stationaryRead.c_str()})),
+              "R11bc", "the excluded stationary observation occurs once in the flat owner-thread path after the VR return and off-thread exit");
         const size_t branchAt = pos(pre, branch);
         const std::string above = branchAt == std::string::npos ? std::string() : pre.substr(0, branchAt);
         check(!above.empty() && lacksAll(above, {"sehWrite", "flushCamera", "noteInjected", "flatRuntime", "observeCall(", "admission"}),

@@ -65,6 +65,47 @@ struct FlatProjectionShadowMetadata {
     uint64_t writeFrame = 0;
     uint32_t writeSequence = 0;
 };
+struct FlatProjectionTrackedSnapshot {
+    FlatProjectionShadowMetadata metadata{};
+    bool copied = false;
+};
+enum class FlatProjectionCopyFailureKind : uint8_t {
+    None, OwnerUnavailable, InvalidRequest, UntrackedNoPrivateCopy, PrivateUnready, PrivateRange,
+    ShadowUnregistered, ShadowGenerationMismatch, ShadowMapping,
+    ShadowInvalid, ShadowLookupInconsistent, TrackedRange, Count
+};
+inline const char* flatProjectionCopyFailureName(FlatProjectionCopyFailureKind kind) {
+    switch (kind) {
+    case FlatProjectionCopyFailureKind::OwnerUnavailable: return "owner-unavailable";
+    case FlatProjectionCopyFailureKind::InvalidRequest: return "invalid-request";
+    case FlatProjectionCopyFailureKind::UntrackedNoPrivateCopy: return "untracked-no-private-copy";
+    case FlatProjectionCopyFailureKind::PrivateUnready: return "private-copy-unready";
+    case FlatProjectionCopyFailureKind::PrivateRange: return "private-copy-range";
+    case FlatProjectionCopyFailureKind::ShadowUnregistered: return "shadow-unregistered";
+    case FlatProjectionCopyFailureKind::ShadowGenerationMismatch: return "shadow-generation-mismatch";
+    case FlatProjectionCopyFailureKind::ShadowMapping: return "shadow-mapping";
+    case FlatProjectionCopyFailureKind::ShadowInvalid: return "shadow-invalid";
+    case FlatProjectionCopyFailureKind::ShadowLookupInconsistent: return "shadow-lookup-inconsistent";
+    case FlatProjectionCopyFailureKind::TrackedRange: return "tracked-range";
+    default: return "none";
+    }
+}
+inline FlatProjectionCopyFailureKind flatProjectionCopyShadowFailure(FlatProjectionShadowLookupState state) {
+    switch (state) {
+    case FlatProjectionShadowLookupState::Unregistered: return FlatProjectionCopyFailureKind::ShadowUnregistered;
+    case FlatProjectionShadowLookupState::GenerationMismatch: return FlatProjectionCopyFailureKind::ShadowGenerationMismatch;
+    case FlatProjectionShadowLookupState::Mapping: return FlatProjectionCopyFailureKind::ShadowMapping;
+    case FlatProjectionShadowLookupState::Invalid: return FlatProjectionCopyFailureKind::ShadowInvalid;
+    default: return FlatProjectionCopyFailureKind::ShadowLookupInconsistent;
+    }
+}
+struct FlatProjectionCopyFailure {
+    FlatProjectionCopyFailureKind kind = FlatProjectionCopyFailureKind::None;
+    uint32_t trackedWidth = 0;
+    uint64_t generation = 0, mutationSerial = 0, writeFrame = 0;
+    uint32_t writeSequence = 0;
+    bool mapped = false, pending = false;
+};
 struct FlatProjectionBounceSource {
     uint32_t width = 0;
     const void* seed = nullptr;
@@ -101,9 +142,18 @@ public:
 
     // Owner-thread diagnostic copy from a current complete shadow. Never
     // exposes retained byte pointers; missing/stale/ranged data leaves out alone.
-    bool copyConstants(ID3D11Buffer*, uint32_t byteOffset, uint32_t byteCount, void* out);
+    // The optional failure object is written only on failure; initialize it
+    // before a call when the result needs inspection.
+    bool copyConstants(ID3D11Buffer*, uint32_t byteOffset, uint32_t byteCount, void* out,
+                       FlatProjectionCopyFailure* failure = nullptr);
     // Read-only owner-thread metadata; does not track, allocate or queue a readback.
     FlatProjectionShadowMetadata constantsMetadata(ID3D11Buffer*);
+    // Original tracked bytes for the forward Geometry camera proof. A single
+    // owner-thread lookup supplies metadata and an optional bounded copy;
+    // untracked/private buffers never qualify. The actual binding is acquired
+    // separately by the caller on each side of Draw.
+    FlatProjectionTrackedSnapshot snapshotTrackedConstants(ID3D11Buffer*, uint32_t byteOffset,
+        uint32_t byteCount, void* out, bool eligible);
 
     // Preflight is required before a nonzero raster phase. Warm calls may
     // allocate private buffers and a structural binding plan. With allocation

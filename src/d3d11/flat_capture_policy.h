@@ -4,6 +4,21 @@
 
 enum class FlatCaptureTier : unsigned { None, General, Full };
 
+enum class FlatDrawCaptureRoute : uint8_t { None, Vr, General, Full, Passive };
+
+// Shift retains the full diagnostic request. Ctrl adds a passive restart for
+// keyboard bindings that do not themselves require Ctrl; other bindings keep
+// their existing route.
+inline FlatDrawCaptureRoute flatDrawCaptureRoute(bool requested, bool flatProfile,
+                                                bool passiveKeyboardBinding, bool shiftHeld,
+                                                bool ctrlHeld) noexcept {
+    if (!requested) return FlatDrawCaptureRoute::None;
+    if (!flatProfile) return FlatDrawCaptureRoute::Vr;
+    if (shiftHeld) return FlatDrawCaptureRoute::Full;
+    if (ctrlHeld && passiveKeyboardBinding) return FlatDrawCaptureRoute::Passive;
+    return FlatDrawCaptureRoute::General;
+}
+
 // Key requests may overlap before Present consumes them. A general request
 // must never downgrade a pending explicit full capture.
 class FlatCaptureRequest {
@@ -17,6 +32,9 @@ public:
     }
     FlatCaptureTier take() {
         return static_cast<FlatCaptureTier>(pending_.exchange(0, std::memory_order_acq_rel));
+    }
+    FlatCaptureTier pending() const {
+        return static_cast<FlatCaptureTier>(pending_.load(std::memory_order_acquire));
     }
 };
 

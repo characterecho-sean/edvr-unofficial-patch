@@ -1559,6 +1559,116 @@ def _flat_vr_leftovers(target):
     return [path for path in candidates if os.path.exists(path)]
 
 
+def retire_stale_native_receipt(target, tag, dry_run=False):
+    """Archive only a native receipt superseded by a hash-proven GUI flat install."""
+    import configparser
+    target = os.path.abspath(target)
+    receipt = os.path.join(target, "edvr_native_receipt.json")
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag):
+            raise ValueError("unsafe backup tag")
+        state_path = os.path.join(target, "edvr_install", "state.ini")
+        if not _under(state_path, target) or not _under(receipt, target):
+            raise ValueError("install evidence escapes the game directory")
+        state_hash = sha256(state_path)
+        state = configparser.ConfigParser(interpolation=None)
+        with open(state_path, encoding="utf-8-sig") as stream:
+            state.read_file(stream)
+        get = lambda section, key: state.get(section, key, fallback="").strip()
+        if not get("edvr", "version") or any(get("edvr", key) != "flat" for key in ("scope", "profile")):
+            raise ValueError("GUI record does not prove a flat installation")
+        descriptor = os.path.join(target, PROFILE_FILE)
+        if Path(descriptor).read_bytes() != profile_bytes("flat") or \
+                get("edvr", "descriptor_sha256").upper() != sha256(descriptor):
+            raise ValueError("GUI flat descriptor hash does not match")
+        graphics = os.path.join(target, "d3d11.dll")
+        live_hash = sha256(graphics)
+        if not _is_edvr_graphics(graphics):
+            raise ValueError("live graphics DLL is not an EDVR build")
+        if not _valid_hash(get("d3d11", "sha256")) or any(
+                get(section, key).upper() != live_hash
+                for section, key in (("d3d11", "sha256"), ("native", "graphics_sha256"))):
+            raise ValueError("GUI graphics hashes do not match the live DLL")
+        if get("edvr", "openvr_dir") or any(get(section, key) for section, keys in (
+                ("openvr", ("sha256", "orig_name", "orig_sha256")),
+                ("native", ("runtime_sha256", "loader_sha256", "license_sha256", "config_sha256",
+                            "original_name", "original_sha256"))) for key in keys):
+            raise ValueError("GUI record still owns VR components")
+        leftovers = [p for p in _flat_vr_leftovers(target) if p != receipt]
+        if leftovers:
+            raise ValueError("VR components remain: " + ", ".join(leftovers))
+        with open(receipt, encoding="utf-8") as stream:
+            old = json.load(stream)
+        if not isinstance(old, dict) or old.get("version") != 2 or old.get("kind") != NATIVE_KIND or old.get("state") != "installed":
+            raise ValueError("not an installed v2 native receipt")
+        recorded_target, recorded_root = old.get("target"), old.get("root")
+        if not isinstance(recorded_target, str) or not os.path.isabs(recorded_target) or \
+                _real_path(recorded_target) != _real_path(target) or \
+                not isinstance(recorded_root, str) or not os.path.isabs(recorded_root):
+            raise ValueError("native receipt target/root is invalid or foreign")
+        paths = _standard_native_paths(recorded_root, target)
+        allowed = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice")}
+        allowed.update(config=paths["config"], profile=descriptor,
+                       ini=os.path.join(target, "edvr.ini"), ini_flat=os.path.join(target, "edvr-flat.ini"),
+                       dlss=os.path.join(target, "nvngx_dlss.dll"), xess=os.path.join(target, "libxess.dll"),
+                       xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
+                       xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
+        files = old.get("files")
+        if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
+            raise ValueError("malformed native receipt files")
+        keys = [e["key"] for e in files]
+        if len(set(keys)) != len(keys) or not {"runtime", "graphics", "loader", "notice", "config"}.issubset(keys):
+            raise ValueError("incomplete or duplicate native receipt files")
+        for entry in files:
+            want = allowed.get(entry["key"])
+            recorded = entry.get("target")
+            if want is None or not isinstance(recorded, str) or not os.path.isabs(recorded) or \
+                    _real_path(recorded) != _real_path(want) or not _under(recorded, target) or \
+                    not _valid_hash(entry.get("installed_sha256")):
+                raise ValueError("unsafe native receipt file")
+            backup, before = entry.get("backup"), entry.get("before_sha256")
+            if backup is None:
+                if before is not None:
+                    raise ValueError("native receipt has a prior hash without a backup")
+            elif not isinstance(backup, str) or not os.path.isabs(backup) or not _under(backup, target) or \
+                    not _valid_hash(before) or _real_path(os.path.dirname(backup)) != _real_path(os.path.dirname(want)) or \
+                    not BACKUP_FILE.fullmatch(os.path.basename(backup)) or \
+                    not os.path.basename(backup).lower().startswith(os.path.basename(want).lower() + ".pre-"):
+                raise ValueError("unsafe native receipt backup")
+        old_graphics = next(e for e in files if e["key"] == "graphics")
+        if old_graphics["installed_sha256"].upper() == live_hash:
+            raise ValueError("native receipt is not superseded by different graphics")
+        runtime = paths["runtime_target"]
+        if os.path.isfile(runtime):
+            import openxr_pe
+            names, _ = openxr_pe._exports(openxr_pe.Image(Path(runtime).read_bytes()))
+            old_runtime = next(e for e in files if e["key"] == "runtime")
+            if any(name.startswith("edvr") for name in names.values()) or sha256(runtime) == old_runtime["installed_sha256"].upper():
+                raise ValueError("EDVR VR runtime remains")
+        before_hash = sha256(receipt)
+        archive = _native_backup_name(receipt, tag, datetime.datetime.now())
+        print("[edvr] retire stale native receipt%s: %s -> %s (sha256 %s)" %
+              (" (DRY RUN -- nothing will be written)" if dry_run else "", receipt, archive, before_hash))
+        if dry_run:
+            print("[edvr] dry run: wrote nothing."); return 0
+        known, running = strict_game_running(target)
+        if not known or running:
+            raise ValueError("receipt retirement requires a proven stopped game" + probe_reason())
+        if sha256(receipt) != before_hash:
+            raise ValueError("native receipt changed during preflight")
+        if sha256(state_path) != state_hash or sha256(graphics) != live_hash or \
+                sha256(descriptor) != get("edvr", "descriptor_sha256").upper():
+            raise ValueError("GUI flat-install evidence changed during preflight")
+        os.rename(receipt, archive)
+        if sha256(archive) != before_hash or os.path.exists(receipt):
+            raise ValueError("receipt archive verification failed")
+        print("[edvr] stale native receipt archived and verified; its backup references are preserved.")
+        return 0
+    except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+        print("[edvr] receipt retirement refused: %s" % exc)
+        return 1
+
+
 def _equivalent_startup_config(actual, expected):
     """Accept the same startup config with LF or CRLF line endings only."""
     if actual == expected:
@@ -2211,6 +2321,79 @@ def _scope_self_test():
         code, text = run(args_for(g, "--scope", "vr", "--verify-only", tag="vrxess"))
         check(code == 1 and "ini selects XeSS" in text,
               "--scope vr verify did not warn for a VR ini selecting XeSS without its runtime")
+
+        def stale_native(name):
+            g = game("retire-" + name)
+            Path(g, "d3d11.dll").write_bytes(b"OLDER-GRAPHICS")
+            code, text = run(args_for(g, "--scope", "both", tag="old"))
+            check(code == 0, "retirement fixture install failed: " + text)
+            for rel in ("openvr_api.dll", "edvr_openxr.ini", "openxr_loader.dll", "OPENXR-LOADER-LICENSE.txt"):
+                Path(g, "Openvr", "win64", rel).unlink()
+            Path(g, "d3d11.dll").write_bytes(b"GUI-FLAT-GRAPHICS")
+            Path(g, PROFILE_FILE).write_bytes(profile_bytes("flat"))
+            Path(g, "edvr_install").mkdir()
+            state = ("[edvr]\nversion=rc3\nscope=flat\nprofile=flat\ndescriptor_sha256=%s\n"
+                     "[d3d11]\nsha256=%s\n[native]\ngraphics_sha256=%s\n" %
+                     (sha256(Path(g, PROFILE_FILE)), sha256(Path(g, "d3d11.dll")), sha256(Path(g, "d3d11.dll"))))
+            Path(g, "edvr_install", "state.ini").write_text(state, encoding="utf-8")
+            return g
+
+        def retire(g, *extra):
+            return run(["--target", g, "--retire-stale-native-receipt", "--tag", "retired"] + list(extra))
+
+        g = stale_native("valid")
+        # Renaming keeps the old receipt's mtime. Family selection must use
+        # the new archive name even when another sibling has a newer mtime.
+        os.utime(Path(g, "edvr_native_receipt.json"), (946684800, 946684800))
+        earlier = datetime.datetime.now() - datetime.timedelta(minutes=1)
+        sibling = Path(_native_backup_name(os.path.join(g, "edvr_native_receipt.json"), "newer-mtime", earlier))
+        sibling.write_text('{"files": []}', encoding="utf-8")
+        before = tree(g)
+        check(retire(g, "--dry-run")[0] == 0 and tree(g) == before,
+              "receipt retirement dry run changed the tree")
+        receipt_bytes = Path(g, "edvr_native_receipt.json").read_bytes()
+        check(retire(g)[0] == 0, "hash-proven superseded receipt was not retired")
+        archives = list(Path(g).glob("edvr_native_receipt.json.pre-retired-*.bak"))
+        check(len(archives) == 1 and archives[0].read_bytes() == receipt_bytes and
+              not Path(g, "edvr_native_receipt.json").exists(), "retirement did not preserve receipt bytes")
+        expected = dict(before); expected.pop("edvr_native_receipt.json")
+        expected[str(archives[0].relative_to(g))] = receipt_bytes
+        check(dict(tree(g)) == expected, "retirement changed files besides the receipt")
+        protected, readable = _protected_by_receipts(_current_receipts(g))
+        old_backups = [e["backup"] for e in json.loads(receipt_bytes)["files"] if e["backup"]]
+        check(_real_path(archives[0]) in {_real_path(p) for p in _current_receipts(g)} and
+              readable and all(_real_path(p) in protected for p in old_backups),
+              "retired receipt lost its referenced-backup protection")
+        code, text = run(args_for(g, "--scope", "flat", tag="after-retire"))
+        check(code == 0, "flat install after receipt retirement failed: " + text)
+        check(run(args_for(g, "--scope", "flat", "--verify-only"))[0] == 0,
+              "flat verification after receipt retirement failed")
+        for name in ("foreign", "malformed", "nonflat", "descriptor", "graphics", "native-owned", "vr-leftover", "vr-runtime", "current", "running"):
+            g = stale_native(name)
+            record = Path(g, "edvr_install", "state.ini")
+            legacy = Path(g, "edvr_native_receipt.json")
+            if name == "foreign":
+                value = json.loads(legacy.read_text(encoding="utf-8")); value["target"] = root
+                legacy.write_text(json.dumps(value), encoding="utf-8")
+            elif name == "malformed": legacy.write_text("{", encoding="utf-8")
+            elif name == "nonflat": record.write_text(record.read_text(encoding="utf-8").replace("scope=flat", "scope=both"), encoding="utf-8")
+            elif name == "descriptor": Path(g, PROFILE_FILE).write_bytes(profile_bytes("both"))
+            elif name == "graphics": Path(g, "d3d11.dll").write_bytes(b"CHANGED")
+            elif name == "native-owned": record.write_text(record.read_text(encoding="utf-8") + "runtime_sha256=" + "A" * 64 + "\n", encoding="utf-8")
+            elif name == "vr-leftover": Path(g, "Openvr", "win64", "edvr_openxr.ini").write_bytes(b"VR")
+            elif name == "vr-runtime": Path(g, "Openvr", "win64", "openvr_api.dll").write_bytes(b"RUNTIME")
+            elif name == "current":
+                value = json.loads(legacy.read_text(encoding="utf-8"))
+                next(e for e in value["files"] if e["key"] == "graphics")["installed_sha256"] = sha256(Path(g, "d3d11.dll"))
+                legacy.write_text(json.dumps(value), encoding="utf-8")
+            before = tree(g)
+            if name == "running": globals()["strict_game_running"] = lambda *args: (True, True)
+            code, text = retire(g)
+            globals()["strict_game_running"] = lambda *args: (True, False)
+            check(code == 1 and tree(g) == before, "unsafe receipt retirement accepted or changed files: " + name + " " + text)
+        before = tree(g)
+        check(retire(g, "--scope", "flat")[0] == "refused" and tree(g) == before,
+              "receipt retirement accepted install options")
     finally:
         (globals()["validate_elite_game"], globals()["strict_game_running"],
          _scope_pe.validate_native_pair, _scope_loader.verify, _scope_pe.Image, _scope_pe._exports) = saved
@@ -2255,6 +2438,8 @@ def main(argv=None):
     ap.add_argument("--native-runtime", default=None)
     ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
                     help="restore files recorded by a native or flat receipt")
+    ap.add_argument("--retire-stale-native-receipt", action="store_true",
+                    help="archive a superseded native receipt only when the GUI's current flat install is hash-proven")
     ap.add_argument("--suspend", action="store_true",
                     help="no-EDVR baseline: park the game directory's EDVR "
                          "d3d11.dll as d3d11.dll.edvr-suspended (one rename, "
@@ -2281,7 +2466,16 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.self_test:
-        return self_test()
+        return _run_self_test_labelled()
+
+    if args.retire_stale_native_receipt:
+        if any((args.scope, args.profile, args.root, args.native_openxr, args.native_receipt,
+                args.native_loader, args.native_runtime, args.restore_native, args.suspend,
+                args.resume, args.dll, args.openvr, args.dlss, args.xess, args.ini, args.all,
+                args.verify_only, args.force, args.no_backup)) or args.keep_backups != KEEP_BACKUPS:
+            ap.error("--retire-stale-native-receipt takes only --target, --tag and --dry-run")
+        return retire_stale_native_receipt(resolve_target(args.target),
+                                          args.tag or short_hash(repo_root()), args.dry_run)
 
     if args.profile is not None and args.scope is not None:
         ap.error("--profile is a deprecated alias for --scope; pass one or the other")
@@ -2826,6 +3020,63 @@ def _game_probe_self_test():
         globals().update(saved)
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
+
+
+class _ExpectedErrorLabel(object):
+    """A stdout wrapper for the self-test: the self-test provokes the refusals
+    and failures it asserts on, and the code under test prints each as
+    "[edvr] ERROR: ...". Those lines are expected, so they go out as
+    "expected-error: ..." and a green build log holds no "[edvr] ERROR" line
+    (issue #98). The self-test's own verdicts are untouched: each case still
+    asserts on the return code and state, and a failed case prints its own
+    message and makes the exit code nonzero."""
+    _OLD = "[edvr] ERROR"
+    _NEW = "expected-error"
+
+    def __init__(self, stream, label_all=False):
+        self._stream = stream
+        self._pending = ""
+        self._label_all = label_all   # stderr: argparse usage/error text is all expected
+
+    def write(self, text):
+        self._pending += text
+        out = []
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            out.append(self._label(line) + "\n")
+        if out:
+            self._stream.write("".join(out))
+        return len(text)
+
+    def _label(self, line):
+        if self._label_all:
+            return self._NEW + ": " + line if line.strip() else line
+        if line.startswith(self._OLD):
+            return self._NEW + line[len(self._OLD):]
+        return line
+
+    def flush(self):
+        if self._pending:
+            self._stream.write(self._label(self._pending))
+            self._pending = ""
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _run_self_test_labelled():
+    real_out, real_err = sys.stdout, sys.stderr
+    sys.stdout = _ExpectedErrorLabel(real_out)
+    sys.stderr = _ExpectedErrorLabel(real_err, label_all=True)
+    try:
+        return self_test()
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            sys.stdout, sys.stderr = real_out, real_err
 
 
 def self_test():

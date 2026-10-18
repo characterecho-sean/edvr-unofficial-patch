@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 104, 4th build a909f494: FLOWN OK 2026-10-08, settlement walk.
-  no-prior about 0, against 11-15M px a window; writes outside-span, genuine 0-4.
+- **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
+  Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -52,10 +52,10 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 F1 world-object probe, BUILT, NOT FLOWN:** final full build passed; passive admission-store records complement rig poses. Stationary provenance and F1 remain OPEN.
-  See "F1 passive world-object probe" below. Previous Steam `173557`: 31 kept travel steps, 19 classified re-anchors, three independent re-anchor controls.
-  No new key or classifier change. Next flight first qualifies world coverage and outward travel; no blind inward laps. VR's dropped 50 m+ translation remains open.
+- **10-17 RC3 scope fix PASS:** Steam flat `c7c14898`, probe off, main-menu and carrier on-foot F7 comparisons visibly fixed. Nonzero phases/history recover with zero stable phase/backend failures; user approved merge (last entry).
+- **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
+  normal-space ambiguity resets with clean history recovery. Temporary
+  `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3467,6 +3467,1832 @@ production DLLs, installer resource checks and a matching receipt. Its log is
 `build/rc3-review/f1-world-probe-final-full-build.log`. The new standalone
 gates passed nine witness cases and 33 store checks; worst-case reports stay
 within 861 bytes per line.
+
+**2026-10-17: F1 station departure and outward-supercruise coverage flight.**
+Steam `edvr_gfx_20261017_055636.log` matches clean `f184ae95`, flat via
+`/novr`, DLSS at 3840x2160. Sean held near the station, boosted away in normal
+space, then flew outward in supercruise for about a minute, reporting multiple
+c. The earlier Frontier/VR launch on `208ea3e8` is excluded as the wrong build.
+
+The store hook and flat gate ran. Through engine frame 78058 there were three
+completed events, zero dropped events, zero read failures, zero cap/claim
+suppression and no frame mismatch. Lock skips and collector collisions remain
+visible; this is a bounded, partial sample, not a census of every object. The
+events have matching resolver/native clocks:
+
+- Frame 49616: normal-space re-anchor rule, 4999.40 m camera step, 16 ms,
+  history kept. World median shift is (-3225.581, -3712.312, 927.850) m;
+  pose/store/raw alternatives all see the large coordinate change. There is no
+  pre-stable far intersection at this event. Camera minus world-median shift is
+  (2.017, 5.040, -1.138) m, about 5.55 m. Interpreting that as physical travel
+  requires the world-reference assumption; it is not measured ship speed.
+- Frame 50576: normal-space re-anchor rule, 4996.91 m camera step, 15 ms,
+  history kept. Two pre-stable far records exist before the event; one survives
+  its crossing edge. `DockPin1` has the same record/node/owner/validator across
+  all six offsets (`present=3F`), source 2, validity FA, admitted 1, constant
+  6.87016582 m selected radius, valid owner reads and view mask 0x300000002.
+  There is no source or metadata change. Its store center shifts (87.199,
+  -4754.488, 1552.316) m; neighboring edges move less than 0.05 m. Camera minus
+  that shift is (-0.381, 5.034, -1.740) m, norm 5.34 m. This supports a large
+  coordinate change with small relative camera travel. Only its store sphere is
+  valid (`source-valid=02`); pose/raw are absent. Its name, stable identity and
+  quiet neighboring edges do not independently establish stationary-world
+  provenance. The conditional relative speed is about 356 m/s if that reference
+  is stationary, not SC telemetry.
+- Frame 51142: rotated camera cut, 47 ms, history reset. World observations
+  fall from 57 on the preceding frame to 9 at the event; no matching world
+  crossing edge survives. `DockPin1` is present only before this transition.
+  This transition cannot discriminate origin shift from real travel.
+
+`Platform` offers store/raw pairs in the two normal-space events, but is not
+pre-stable; neither its moving centers nor agreement between those source
+fields certifies static geometry. Different shift vectors at successive
+re-anchors are expected and are not evidence against a coordinate change. The
+two normal-space controls corroborate that the new hook supplies useful object
+motion around re-anchors; they do not resolve real inward travel.
+
+- Ruled out: treating this multiple-c outward SC leg as a qualifying real >50
+  m-per-frame camera-travel control, because through frame 78058 the only three
+  candidates are the two normal-space re-anchors and the transition reset;
+  there are no kept fast-travel events or real inward candidates.
+- Open: how SC physical motion maps into this selected camera's translation,
+  and how to establish a stationary reference independently of a record name or
+  owner. No evidence here shows that more SC speed or SCO would produce the
+  missing discriminator. Stop repeated laps; choose the next control from the
+  camera/source path before another flight. No classifier change.
+
+**2026-10-17: F1 supercruise camera-source investigation, before another
+flight.** The missing >=50 m events are explained in the selected flat temporal
+camera. Supercruise physical speed does not appear as translation in its b1 row
+275. This was already established for flat in the 2026-10-15 journal of
+`docs/terrain-motion-dispatch-cost-2026-09-17.md`; prescribing the outward SC
+leg before consulting that evidence was a diagnosis error. More speed or SCO is
+not a justified next control.
+
+The new flight confirms the same behavior directly. In build-matched Steam
+`20261017_055636`, the five-second window ending 06:02:07 reports 451 camera
+frames, `step max=0.0002623` m per axis, 451 accepted history frames and zero
+accepted resets. The selected origin is near (-8.556, 11.197, 11.600) m.
+Subsequent steady windows are also below a millimetre per axis; the late steady
+track is near (-1.890, 12.126, -13.509) m. These are successful temporal
+frames, not a lack of draws. There are occasional 13.06 m and 26.16 m axis
+changes, still below the 50 m per-axis history test. The event probe uses the
+>=50 m vector length before the later classifier; this flight recorded only the
+two normal-space re-anchors and the SC-entry reset.
+
+The source path is current-frame-qualified throughout:
+
+1. `flat_temporal_model.h` copies the 96 bytes of VS b1 rows 270..275 from a
+   complete CPU write. `flat_camera_table.h` stamps the frame/write sequence,
+   invalidates an old frame and serves only a current capture.
+2. `flat_mono_frame.h` requires current write epoch, ordered write sequence and
+   matching hash/rows before copying the camera into the selected scene.
+3. `flat_runtime.cpp` copies selected rows into `f.camera`; on an ordinary
+   accepted frame `f.previousCamera` is the previous successful selection. Only
+   an explicit reset substitutes current rows for previous rows.
+   `noteCameraOrigin` records that comparison before `flatMonoResolve`.
+4. `OpticalCandidate` tests row-275 vector displacement before the history
+   classifier. Valid-frame early exits produce explicit unavailable events.
+   Optical scheduling limits are later and do not govern this candidate count.
+
+- Ruled out: resets, repeated resolver refusals or optical logging quotas
+  hiding physical SC movement in the observed non-reset windows, because the
+  camera-origin measurements remain sub-mm across about 450 successful history
+  frames per five seconds, with zero accepted resets and no rising refusals.
+- Ruled out: inferring SC physical velocity from the old `fast-travel kept`
+  label. It names a geometric branch, not measured flight mode or speed. In
+  `20261016_173557` (correct build `3c0516e3`), frames 164037-164039 have 56-73
+  m outward row steps immediately after a 7.5 km reset, but only near-camera
+  records and inconclusive optical fits. The adjacent celestial gate says
+  status unknown. Their physical cause and gameplay mode remain unverified.
+
+The existing planet-motion path explains where visible SC approach motion can
+come from without row 275 carrying ship travel: planet VS b2 constants carry
+camera-relative patch/body placement (`cb2[2]`, `cb2[12]`), with camera
+rotation in b0[9..11]. That shader dataflow and the captured 180540 fixture are
+documented in `terrain-motion-dispatch-cost-2026-09-17.md` and
+`celestial_math.h`. This is body-specific rendering evidence, not a universal
+world-origin reset signal.
+
+F1's arithmetic counterexample still stands: physical inward (80,0,0) to
+(20,0,0) can match the current re-anchor rule. The SC result changes the test
+plan; it does not prove that rule safe. A proper correction needs the actual
+coordinate-frame change, ideally tied to the selected camera's producer, so
+previous camera state can be transformed into the current frame while keeping
+real residual travel. Neither a static-name heuristic nor last-frame velocity
+is sufficient. Binary RE is checking the explicit game origin-change dispatch
+before any new instrument or flight is chosen.
+
+**Sol binary RE, read-only, same game build.** The installed Steam executable
+and analyzed binary have SHA-256
+`e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988`, PE
+timestamp 1788384820 and image size 104894464. Ghidra ran with `-noanalysis
+-readOnly`; Capstone independently confirmed the callback instructions.
+Artifacts: `analysis/decomp/f1_origin_20261017/`.
+
+- RVA 0x1091520 takes a FreeCameraActivity and a 16-float affine matrix. It
+  postmultiplies activity matrices +0x70, +0x370 and +0x440 by the supplied
+  matrix, including rotation and translation. +0x370 is a saved activity frame;
+  it is not established as the previous rendered camera. Return value is zero.
+- Thunk 0x102FC00 converts argument 2 into activity = arg2 - 0x168, passes
+  argument 3 as the matrix and tail-jumps to that callback. Its dispatch-table
+  cell is RVA 0x5185548. The activity constructor 0x1060190 initializes this
+  listener, requesting interface token at RVA 0x5F41DE4; resolver 0x529500
+  supplies the interface pointer at activity +0x178.
+- OnEnter 0x10996A0 subscribes via 0x9204C0, and destructor 0x1064800 removes
+  it via 0x2010A0. Registration resolves the dispatcher from listener[2]-0xB0
+  and the high word of listener[0]; 0x7E9C20 appends the listener under a lock,
+  using subscriber collection at RVA 0x5F54690.
+- Geometry/bucket worker constructor 0x430B2A0 requests the same interface
+  token, at worker +0x128, with its listener at +0x120. This establishes a
+  shared notification-interface lineage; it does not prove the same event
+  causes the selected ship camera's normal-space 5 km re-anchors. Token
+  initializer 0x93850 assigns a runtime type ID from counter RVA 0x5E63010;
+  that ID is not a world-origin epoch or a semantic event name.
+
+The next offline query is now specific: follow the worker +0x120 callback and
+that interface's emitter, including the embedded owner component +0x350
+(exposed with its +0xB0 interface by 0x3CAE750). Determine where the broadcast
+matrix comes from and join it to the selected ship-camera origin writer. Do not
+install a FreeCamera-only callback as if it were a universal rebase signal. If
+the join is proved, a passive observer can capture the actual coordinate
+transform. Offline reprojection cases must then keep inward 80-to-20 travel
+when no frame change occurred and preserve the approximately 5 m residual
+travel when a real re-anchor transform is applied. A subsequent normal-space
+calibration flight would verify that observer against the existing world
+records; it should not ask SC speed to produce camera translation. Until the
+emitter/ship-camera join is known, no further flight is justified. No product
+code, game file or analyzed program state was changed by this investigation.
+
+**2026-10-17: F1 coordinate-change emitter and proposed correction (Sol RE; no
+new flight).** Continued the previous entry on the same verified Steam
+executable. This is a fix proposal with explicit source-binding gates, not a
+shipped classifier change. Product code, live settings and the game
+installation are unchanged. The environment remains Windows x64/D3D11, Steam
+flat `/novr`, DLSS, 3840x2160 output; no headset/runtime dependency is
+established for this flat defect. VR's separate handling of large translation
+is still open.
+
+The emitter's input is an actual coordinate-frame conversion. At RVA 0x3CC0CE0,
+the owner obtains its frame context at +0x5D0 and calls 0x3D00A20 with the
+saved descriptor at context +0x1B0 and a new frame. The calculation goes
+through 0x3CE2640. For equal frame identity and variant, its 0x8C1970 branch
+computes, with row vectors:
+
+```text
+R_D = R_old * transpose(R_new)
+t_D = (t_old - t_new) * transpose(R_new)
+q_new = q_old * R_D + t_D
+```
+
+It then installs the new descriptor, invalidates its caches and broadcasts D
+through 0x3CB35C0. Thus D comes from old/new coordinate descriptors, not camera
+displacement or inferred velocity. The literal 5 km scheduling threshold has
+not been recovered; this proof does not depend on guessing it.
+
+The broadcaster converts double affine data to floats via 0x8B2BD0 and
+dispatches through collections at owner +0x1E0, +0x298, +0x350 and +0x408. The
++0x350 component exposes the notification interface at owner +0x400, token RVA
+0x5F41DE4. The float payload has a 3x3 basis and translation, with **all four W
+components zero**, including element 15. Decode it as affine data; a generic
+inverse of its stored 4x4 is singular. The worker callback 0x42DF410 ->
+0x432C880 multiplies its existing matrix by D, as the FreeCameraActivity
+callback 0x1091520 does for its current/saved poses.
+
+Dispatch 0x7EB5A0 -> 0x25E0B60 -> 0x25CA960 forwards the same matrix. A
+parallel subscriber path uses 0x7FB350 (`SubscriberCollectionJobHandler`) and
+waits through 0x5D6DF0 -> 0x5D6E40 before the broadcaster returns. Callbacks
+can run on workers, but all are complete on return. The stack payload must be
+copied, not retained by pointer. Another producer, 0x3CBBF00, splits large
+transforms into several broadcasts: compose every subevent in order, never
+deduplicate them by render frame. Its input provenance also needs
+qualification; an unproved producer invalidates the epoch association instead
+of being silently ignored or treated as the audited descriptor-change path.
+
+**Camera-source join and its limits.** The owner constructor 0x3CB06A0 resolves
+CameraStackRegister token RVA 0x5F02BF8 into owner +0x560. Each 0x3CC0B70
+update queries that register's slot 0x30 for literal `MainView`. Registry
+0x10881B0 invokes the provider pose getter, RootCameraStack slot 0x28 /
+0x108A9B0, returning selected child C +0xB0; its translation is C +0xE0.
+Function 0x3D00900 preserves this origin pointer and passes it to each frame
+node's slot 0x18.
+
+The normal mono renderer 0x281AC10 obtains provider state S through registry
+lookup and provider slot 0x20 / 0x108A980. This returns C +0x70. Writer
+0x2871D30 copies S +0x70, hence C +0xE0, verbatim into camera +0x50. Activity
+finalization 0x106F8E0 copies the selected activity state into C +0x70 through
+0x1066D80. This establishes a candidate shared origin accessor/layout for the
+frame driver and normal renderer. It does not yet prove that a particular
+cockpit source was transformed by D: actual registry instance, selected
+root/child and view key must match. The renderer key comes from runtime view
+configuration or an override, not a literal `MainView`. A common type token,
+matching float values or camera pointer reuse is insufficient.
+
+There is now an explicit input-domain contract. Registration 0x3CF4AE0 puts
+concrete nodes into the map traversed by 0x3D00900. Their methods 0x3D001F0 and
+0x3D004D0 convert the exact MainView origin p using q=p*K^-1. Cache builder
+0x3CFE640 derives K from the same current descriptor at context +0x1B0 that
+produces D. For the audited same-frame-ID case, no optional B and unchanged
+local node poses, K_new=K_old*D, so invariant local q requires p_new=p_old*D.
+This establishes the consumer's expected frame, beyond a shared pointer or raw
+distance comparison. It does not certify that a camera producer has actually
+transitioned before a particular capture: stale values can still be consumed.
+Producer mutation/order or a certified producer-update epoch is required. The
+optional-B/different-ID branches are not covered by this simple algebra.
+Details: `analysis/decomp/f1_ship_writer_20261017/node_domain.txt`.
+
+The base-state branch is a camera pipeline, not a world-frame descriptor.
+Constructor 0x10855E0 initializes private state at root +0x110 with identity
+poses/zero origins through 0x105EB70 and configures its projection. It links
+eleven children: C0 +0x40 points to root +0x110; C1 +0x40 points to C0 +0x70,
+through C10 +0x40 pointing to C9 +0x70 (0x1085780/0x1085783, advancing at
+0x108578E). An activity can therefore inherit a previous stage's world pose
+while changing only local offsets. The causal trace must identify the first
+world-pose writer and its frame domain, not label the inherited state by the
+last activity's name.
+
+- Ruled out: the HeadLook activity listener at +0x168 is the coordinate-change
+  consumer, because constructor 0x1060810 requests token 0x5F02ADC and callback
+  0x1030DA0 -> 0x107E0D0 takes frame time and updates local head offsets at
+  +0x250/+0x280, rather than consuming D or rewriting world pose +0x70.
+
+The actual Headlook pose task is also verified: OnEnter 0x109A280 registers
+activity +0x150 with descriptor 0x5F532F8. Initializer 0x9E580 puts callback
+cell 0x51856E0 at descriptor-8; wrapper 0x1030DE0 reaches 0x10735B0. That task
+copies [[activity+0x140]+0x40] into activity +0x30 using 0x1066D80, then
+applies local offset +0x250 to the inherited pose at +0x70. Its state getter
+0x5293E0 returns activity +0x30. This proves inheritance, not a new world-frame
+source. Named CameraDefault/ModuleCameraPositioner interfaces are configuration
+interfaces; their +0x28 is a setter, not this activity's state getter.
+
+- Ruled out: 0x1073830 is the Headlook/normal ship producer. Raw callback
+  initialization instead reaches 0x10735B0; the separate 0x1073830 writer is
+  HumanoidCamera (vtable 0x5189430). Do not use it as flat ship evidence.
+
+The sign is positive position. Initializer 0x57B990 binds named `gCameraPos` at
+0x57BA07 and stores its handle at view constants +0x20. Refresh 0x5921F0 calls
+0x598070 with camera +0x50; that setter copies XYZ verbatim. Its separate XOR
+with 0x80000000 constructs negative view translation at context
++0x8C/+0x9C/+0xAC. The historical camera-layout table's "stored negated" claim
+was therefore too broad. Original world shader D99AFDC250D19A3F independently
+subtracts cb1[275] from its object origin before projecting with cb1[270..273];
+this confirms positive-origin semantics in that family, not its identity as
+this flight's selected donor.
+
+Original shader reflection cannot supply the last name-to-register mapping: a
+scan of 2,291 existing blobs found 644 RDEF chunks, none naming `gCameraPos` or
+`gLightingToClipMatrixT`. A capture of the final HDR trigger shader alone does
+not identify the camera donor. Sol instead traced an exact storage-address
+association through the upload:
+
+1. The `gCameraPos` setter 0x598070 obtains its actual CPU destination through
+   0x4FC580, decoding handle +0x0A into an arena/offset. Tag that destination
+   only on a qualified write, together with the source and coordinate epoch.
+2. Uploader 0x501590 decodes the CPU source B from an effect constant-buffer
+   entry using the same arena/offset scheme, then passes B to 0x51B640. Require
+   the tagged origin address to equal B+4400, and the qualified
+   `gLightingToClipMatrixT` address to equal B+4320. This tests actual storage
+   identity at rows 275 and 270, without relying on original reflection names.
+3. Function 0x51B640 receives resource wrapper W. Through 0x51E190 -> 0x50F000
+   it maps actual resource *(W+0x140), subresource W+0x168, using the D3D
+   context reached through transfer.context+0x268. It then memcpy's the source
+   into the returned mapped pointer and unmaps through 0x523190. Match these
+   nested actual Map/Unmap calls to the existing ID3D11Buffer capture and
+   complete CPU write epoch/sequence, then require that buffer to be the
+   selected VS b1.
+
+This statically specifies a pointer-based bridge; it is not a record of runtime
+matches. Metadata must survive deferred upload by storage write generation, not
+refresh-thread TLS. Unknown write acquisition/overlap, arena reuse, stale
+generation, an untracked copy or missing deferred-command replay metadata must
+invalidate provenance. A cached/no-write setter can reuse only a proved live
+storage generation; it must not imply a fresh physical store. All writes that
+could replace the relevant storage must be covered or the association remains
+unknown. Deferred-context execution needs an explicit context/order-aware
+capture seam; finding the immediate Map/Unmap path does not validate replay.
+
+**Proposed correction.** Associate the emitted D with the selected source's
+coordinate epoch and the exact current/previous camera writes. With a verified
+unchanged coordinate epoch, use identity D and preserve travel represented by
+the selected rows; this does not recover SC ship travel absent from them.
+Across a verified D, reconstruct the old-frame point before projecting through
+the previous rows:
+
+```text
+q_new = q_old * R + t
+x_old = (x_now + O_now - t) * inverse3(R) - O_old
+
+// cameraBefore's reconstructed position is scaled by iz = depth / now[3].z:
+positionOld = (position + (O_now - t) * iz) * inverse3(R) - O_old * iz
+
+// For a translation-only D:
+cameraDelta = O_now - O_old - t
+```
+
+Replacing the previous origin with the current origin discards the residual and
+cannot be this correction. For two ordered events, compose R = R1*R2 and t =
+t1*R2+t2. Decode/validate D once per matched event; never invert the packed
+zero-W 4x4 or mutate the game's scene buffers.
+
+The static engine route needs the analogous treatment if its snapshots are
+proved to use D's coordinate domain. This flight's GPU-read EN[275]/EB[275]
+exactly equal selected current/previous camera origins at frames 49616 and
+50576, with adjacent scene stamps. The previous scene snapshot was not already
+rebased there. Correcting only the CPU cached camera would leave static engine
+reprojection using its raw approximately 5 km origin delta. Moved-object
+records have separate current/previous pose transforms and may already account
+for the basis change; celestial motion has its own camera-relative body data.
+Do not blanket-apply D to those routes. Skinned motion also needs its explicit
+coordinate convention checked before correction; an unproved route should
+reset/refuse its history rather than receive a guessed second shift.
+
+A production observer must bind emitter owner/context, registry/root/source,
+camera refresh and the complete CPU b1 write epoch/sequence. Hooking only
+Present or consulting a global "latest transform" cannot distinguish a refresh
+during dispatch, a deferred upload or another view. Reserve event order before
+dispatch; publish completion after the original broadcaster returns; any
+overlap, missing event, unsupported matrix, stale source or unarmed/refused
+hook must be distinguishable from a verified unchanged coordinate epoch.
+Existing `FlatCameraObserver` callbacks currently serve observe-only/VR paths,
+so normal flat provenance requires explicit wiring. Pin signatures to the
+verified executable and retain safe reset/refusal when the proof is
+unavailable. Keep the existing physical camera-cut and frame-gap checks. A
+first implementation can admit only verified translation events in an audited
+descriptor/domain case and reset on other frame changes until those routes are
+proved and tested; the general formula is not permission to accept an unrelated
+camera cut.
+
+Keep observation off the draw hot path: bounded provenance records, no hook
+I/O, and publication alongside existing camera captures. Report armed/seen,
+matched, unknown-write, overlap, overflow and refused counts so an observer
+that never ran cannot look like an unchanged epoch. Generic parameter hooks may
+be frequent; their CPU cost and mutation-path coverage must be measured before
+shipping the design.
+
+**Offline validation.** The independent point-projection prototype
+`reviews/flat_origin_affine_projection.py` (ignored local analysis) was
+executed successfully. It projects known old world points directly,
+independently maps them forward through D, then applies the proposed
+inverse-depth correction. At width 2496 and 90-degree horizontal FOV, a real
+synthetic inward 80->20 m camera move retains -74.88 px; a synthetic -5000 m
+frame shift with +5 m physical camera displacement retains +6.24 px. These are
+controlled fixtures, not a certification of the flight's approximately 5 m
+camera/world-record residual: that record's stationarity is still unproved. A
+90-degree affine case recovers the old point/projection, and ordered split
+transforms agree with their composed transform. These validate the algebra, not
+runtime domain matching or a production shader implementation.
+
+The remaining input is the actual normal cockpit pipeline selection. A minimal
+read-only capture while stationary can record the selected root/child, each
+predecessor stage's activity interface/vtable, weight, +0x28 target/returned
+state, and base-state pointer. Follow the chain to the first activity supplying
+the world pose, then finish its frame-domain and update-order RE. Capturing
+only the final Headlook stage or the menu would not resolve that producer. No
+takeoff, travel or re-anchor is needed for this identity capture; a passive
+capture still needs implementation and build validation.
+
+The correction above is supported by RE and projection math, conditional on
+that final producer/epoch proof. After it, implement/validate the guarded
+association and correction with independent reprojection tests, route checks
+and a full build before one normal-space calibration flight. No SC/SCO lap is
+justified. Evidence is in `analysis/decomp/f1_origin_20261017/` and
+`analysis/decomp/f1_ship_writer_20261017/`; the verified image identity is in
+the preceding entry. F1 stays OPEN until the binding and correction are
+validated.
+
+**2026-10-17: passive stationary-cockpit pipeline capture.** Temporary
+instrumentation to identify the first activity that supplies the normal ship
+camera's world pose. The earlier RE establishes the emitted coordinate
+conversion and its input-domain contract; the selected producer's frame
+adoption/order remains open. This capture collects the actual pipeline
+identities for the next targeted Sol RE pass. It does not apply the proposed
+correction or change history classification. No new config key.
+
+**RE correction before coding.** RVA 0x2871D30 receives owner O, source state S
+and helper H. It copies S+0x70 to H+0x30, but caller 0x281ACD4 supplies H as a
+stack-local helper (`RBP+0xB0`). Ruled out: interpreting H-0x20 as a persistent
+camera address, because H is stack storage. The historical S-to-camera wording
+in this journal skipped that distinction. Source/helper equality is evidence of
+this copy only; its downstream association to selected VS b1 remains unproved.
+
+The new observer hooks this verified void, three-pointer function entry and
+calls the original once. It checks the executable PE timestamp/image size and
+exact 15-byte prologue; the installed Steam executable's SHA-256 was
+independently rechecked as
+`e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988`.
+Observations use guarded reads of game memory. The hook does no logging,
+allocation or getter invocation and writes only EDVR's capture records. The
+existing camera-refresh hook can separately record camera/context addresses;
+their address/order join to the renderer source is explicitly UNPROVED.
+
+At the renderer source, C=S-0x70 is accepted only after verifying child
+vtables, C's owning provider B, membership among B's eleven stage pointers and
+terminal source identity. B+0x78 is terminal child[10], not a separate dynamic
+selection field. The provider's bounded name identifies `MainView`. The
+snapshot includes all predecessor stages, output/inherited poses, blend mode,
+activity interfaces/vtables/names, weight and state getter RVAs, and
+state/weight values only where their layouts are proven. Nested stacks retain
+their parent/inherited relationships. A known zero-weight nested activity
+retains its roster entry without spending recursive capture space; unknown
+weights remain explicit.
+
+The ordinary state getter 0x5293E0 is decoded as interface+0x10; weight getter
+0x8BE920 reads the known enabled byte. Nested activity vtable 0x51869B0 and
+getter 0x108A98C resolve through provider 0x5186938 to its terminal child
+state; 0x108ADE0 reads its configured weight. Other getters are logged as
+unknown and never called. Cycle, count, depth, capacity, inconsistent topology
+and unreadable memory produce explicit partial/refused results. A pose
+difference is a candidate introduction point, not proof of a world frame or
+physical movement.
+
+**Trigger and evidence.** The automatic arm requires 30 consecutive flat
+selected normal scene frames, a live gameplay journal, known docked/seated
+flags, GuiFocus 0, nonnull current depth, finite row 275 and two advancing
+Status sample counts. The existing profile-gated `journalGameplay()` is
+unchanged; an added diagnostic raw field supplies the flat capture's gameplay
+boundary. Status reads are watcher samples, not independent proof of a new
+pose. Menu/unknown/Station Services cases wait without consuming capture
+records. Qualification is checked again after arming; loss of the qualifying
+scene or a profile change invalidates the capture. Interframe origin motion,
+depth-resource identity and history reset are deliberately excluded from this
+identity gate: a docked source can move or rotate, and current-source validity
+does not depend on temporal history continuity.
+
+The log prefix is `flat stationary camera:`. It distinguishes waiting, armed,
+unavailable/refused, callbacks never seen, partial records and capture results.
+`flat stationary source`, `stage` and `activity` lines name the concrete
+renderer pipeline. `flat stationary refresh` records remain separate. A
+source-topology capture does not certify selected GPU donor identity or a new
+coordinate epoch. Bounds are 16 unique renderer sources, 32 refresh cameras, 96
+stages/source, 16 activities/stage, a 120-frame selected-scene timeout and 1024
+detail rows. Budgets and omissions are reported, including overflow; the
+collector drains only completed records. Success requires exactly one complete
+`MainView` renderer-source topology with separate refresh observations. This is
+one capture per game process, with no F10 dump or hardware write watch. The old
+`advanced.flat_camera_producer_probe` stays off.
+
+Validation: the full `build.bat --wait-lock` passed all Python gates,
+production DLL builds, 170 pooled jobs, six quiet jobs, installer checks and
+receipt generation in 168.0 seconds. The new stationary-camera rig passed.
+Existing HDR and VR geometry checks retain their original policy counts and
+geometry hashes after excluding only the exact passive observer statements;
+negative controls still reject policy and projection changes. No rendering
+correction is included in this capture build.
+
+**Capture procedure, Steam flat.** Launch with `/novr` and the current DLSS
+profile, load the commander and dock at a station/carrier if not already
+docked. Close Station Services and other menus to the normal cockpit, and
+remain docked/seated with no input for 30 seconds. No test takeoff, supercruise
+lap, boost, camera-suite switch or origin shift is needed. Report that the
+cockpit wait is complete; inspect the build-matched log before ending the
+session. A new game process re-arms the one-shot if a repeat becomes necessary.
+
+Environment: Windows x64/D3D11, Steam flat `/novr`, existing DLSS model M and
+3840x2160 output; no VR runtime/headset is involved. The same shared Steam
+package is updated through `tools/install_edvr.py --scope both`, because this
+existing installation already contains both profiles; normal flat-only
+preflight correctly refuses a silent conversion. Live `edvr-flat.ini` and
+`edvr.ini` are preserved. The post-commit DLL promotion and installed-file hash
+verification must pass before the capture instructions are handed over.
+
+Next: use `tools/edvr_log.py --target steam --expect-build <capture-commit>`
+first, then read the stationary capture lines and trace the first actual
+non-inherited pose producer with Sol. Stationary identity evidence cannot
+validate a shift that never occurred; producer completion versus emitted
+D/copy/upload still needs a proved ordering path or later guarded event
+observation. F1 remains OPEN.
+
+**2026-10-17, 08:20: stationary capture identifies Location/Placed.** Steam
+graphics log `edvr_gfx_20261017_081626.log` matches the clean installed
+`v0.20.0-rc.2-111-g387288ed`, flat `/novr`. At 08:20:22.609 the capture armed
+after 30 consecutive qualified scene frames and two fresh Status samples. At
+08:20:22.633 it reported `captured`, arm/selected frame 103311, report frame
+103312, `refusal=none`: one renderer call, one validated/consistent/complete
+source, one `MainView` root, 193 refresh calls covering two camera addresses,
+and 31/1024 detail rows. Source/refresh overflow and unknown state/weight
+getters were all zero. All 22 reported stages were readable. The capture is
+complete for its source-topology contract; F1 is still OPEN.
+
+The renderer caller is the expected `+0x281ACD9`. Source-before, source-after
+and the stack-local helper copy agree. Following the predecessor chain back
+through the nested `Location` pipeline reaches `Placed`: interface vtable
+`+0x5189EA8`, concrete vtable `+0x5189E38`, getter `+0x5293E0` (state at
+interface+0x10), weight one. Its mode-one stage supplies the first observed
+nonzero origin, `(-2.036564, 333.5496, 329.6747)`, from an inherited zero
+origin. Independent Sol review confirms that `+0x106F8E0` copies the sole
+positive-weight activity state via `+0x1066D80` before checking blend mode;
+mode one does not weaken that origin-supplier conclusion. The downstream active
+stages are `Inertial`, `HeadLook`, then `Shake` and `LocationOffset`, before
+`Location` feeds `MainView`. The captured output is `(-2.036568, 333.5497,
+329.6747)`.
+
+The selected GPU row 275 is `(-2.03656912, 333.549744, 329.674713)`. The first
+refresh camera is numerically close at the printed precision; the second is at
+`(20.13926, 417.3198, 515.5125)`. Matching numbers do not establish pointer
+identity, the selected GPU donor, a copy/upload ordering edge, or epoch
+adoption. The log explicitly leaves those joins UNPROVED. `consistent=1` checks
+the source/helper origin copies and topology guards; it does not make all
+sampled stage poses atomic or prove their producer-completion epoch. The
+printed origin and axis0 do not describe the complete matrix. No frame shift is
+established by this capture, so it cannot test real inward motion versus a
+re-anchor or validate the proposed affine correction.
+
+Ruled out: no active nonzero-origin source is reachable in this captured
+`MainView` chain, because `Location/Placed` supplies the nonzero world origin
+before the later local effects. No further flight is needed to identify that
+producer. The one-shot is already drained; the game may be closed.
+
+**Post-capture Sol RE: Placed's initial pose and unresolved final writer.** The
+constructor `+0x1083900` installs the observed vtables. Let `A` be the concrete
+Placed object (captured interface minus 0x20); its state begins at `A+0x30`,
+pose at `A+0x70`, and origin at `A+0xA0`. Activation `+0x109BFC0` registers
+task handle `A+0x150` against descriptor `+0x5F53C18`. The descriptor's wrapper
+`+0x10303D0` calls update `+0x1075FF0`. This task descriptor is separate from
+the previously traced frame-shift token `+0x5F41DE4`; the examined
+constructor/activation paths do not install that direct listener.
+
+Update refreshes target record `E=[A+0x1E8]` through `+0x3894B60`. That refresh
+computes cached world pose `E+0x60 = local(E+0x20) * parentPose`, with the
+parent obtained through `[E+0x10].vslot0x20` at `+0x3894BF6`. Placed then
+copies the seed into its pose at stores `+0x1076670..+0x1076684`. Target
+initializers `+0x38920A0` and `+0x3892710` resolve this parent interface from
+token `+0x5F02CFC`; the latter also computes local pose as world pose times
+inverse parent. Eight candidate provider vtables exist offline. The capture did
+not record the actual parent pointer/vtable, so none can be selected merely
+from its proximity to the known notification emitter.
+
+There is also a later possible writer. If `int32[A+0x188]==-1`,
+`[A+0x190]!=null`, `int32[[A+0x10]+0x14]!=0`, and the target reference is
+valid, call `+0x10768E5` invokes `[A+0x190].vslot0x70(A+0x30)`, allowing the
+entire state to change after the seed copy. That component's concrete identity
+and whether this branch ran were not captured. Thus the final Placed state is
+the observed downstream origin supplier; equality to `E+0x60` is unproved.
+
+If the actual parent adopts the already traced old-to-new conversion D,
+unchanged local pose gives `L * (P * D) = (L * P) * D`. This supports the
+conditional affine-correction design, but parent physical motion also changes
+P: its pose delta cannot itself identify a re-anchor. The missing evidence is
+the actual parent and optional override identities, their relation to emitted
+D, completion/epoch ordering, and the selected GPU donor/write generation. No
+C++ correction is justified by the current evidence, and no additional flight
+is requested. The next missing observation is those exact parent and override
+identities and branch state. More static candidate annotations cannot select
+the actual runtime provider, and a travel lap would not supply the unrecorded
+fields.
+
+**2026-10-17: passive Placed parent/override identity extension.** The
+successful `387288ed` capture identified Placed as the first observed nonzero
+origin supplier, but did not read its target's actual parent provider or its
+optional later override. This extension adds those read-only identities to the
+existing docked-cockpit one-shot. It adds no game hook, getter invocation,
+write watch, config key, or motion/history correction.
+
+Sol verified the layout against the pinned Steam executable. Only an activity
+with the known interface/concrete Placed vtables and state getter is followed.
+With `A=interface-0x20`, capture reads `E=[A+0x1E8]`, parent `P=[E+0x10]`, P's
+actual vtable and virtual slot 0x20, full local pose at `E+0x20`, cached world
+pose at `E+0x60`, and final Placed pose at `A+0x70`. It also reads the override
+handle `int32[A+0x188]`, pointer `Q=[A+0x190]`, Q's vtable and slot 0x70, and
+config flags at `[A+0x10]+0x14/+0x18`. E is a transform record, not a guessed
+vtable-bearing object.
+
+The target validators can be decoded passively: `R=[E+0x8]`, then signed
+`int32[R+0xC0]>=5` or `>=8`; null R gives false. No game validator, getter,
+reference-copy helper or refcount operation is invoked. The current override
+predicate is handle -1, nonnull Q, nonzero config+0x14 and valid8. Config+0x18
+belongs to a separate orientation branch. Unknown reads produce unknown
+eligibility unless a known false condition already excludes the predicate. Even
+an eligible snapshot does not prove that the optional call ran.
+
+Mutable identity and condition fields are checked again after observation;
+changed or unreadable fields are explicit. Unknown readable provider/override
+classes are retained as useful pointer/RVA evidence. Null/absent differs from
+failed reads. Full pose readability, finite values and byte stability are
+reported separately: a changing docked pose does not erase stable identities or
+establish a frame epoch. The old pipeline topology result is distinct from the
+added identity-capture result, and no-Placed/partial/overflow cases must not
+present the old roster alone as a successful extension.
+
+The extension bounds Placed records at 32 per renderer source. Each adds five
+detail rows: identity/target fields, override/pose metadata, and full 16-float
+local, cache and final matrices. These rows share the existing 1024-row report
+cap. Stable null E, null P or absent Q are complete identity observations, with
+dependent fields marked absent/not applicable; defaults after failed reads are
+UNKNOWN. A changing identity or condition field invalidates the stable
+eligibility classification as well as identity completeness.
+
+Three questions share this one capture: which of the eight known parent
+provider candidates (or a readable unknown implementation) supplies P; whether
+an override exists and the current raw predicate permits it; and whether the
+sampled local/cache/final poses match at the reported read times. No numerical
+pose comparison is treated as evidence of a re-anchor. Sol also confirmed that
+the cache refresh can leave the previous cached pose on an invalid-target early
+return, so cache refresh and parent-getter execution stay UNKNOWN. Override
+execution, D adoption, producer completion/epoch, and selected GPU donor/write
+generation remain unproved.
+
+Capture environment and procedure remain Steam flat `/novr`, existing DLSS
+settings, docked and seated at a station/carrier, menus closed to the normal
+cockpit for 30 seconds without input. The one-shot arms automatically; no F10
+or travel is needed. Report Done and leave the game running until the
+build-matched log and added identity rows have been checked. The shared Steam
+package is maintained through `install_edvr.py --scope both`; live
+`edvr-flat.ini` and `edvr.ini` are preserved.
+
+Validation: the full absolute-path `build.bat --wait-lock` retry passed all
+Python gates, production builds, 170 pooled jobs, six quiet jobs, installer
+checks and receipt generation in 142.7 seconds. The extended stationary-camera
+rig passed; independent Sol review found no remaining contract or safety issue.
+The first full attempt stopped in the unchanged `ui_layer_world_test` with a
+silent exit 1. That same cached executable passed 165 checks separately, and
+the normal full retry passed; the original native failure cause remains unknown
+and no UI test or production change was made for it.
+
+The clean commit's DLL promotion and installed-file hash verification are
+required before handing over the capture. F1 remains OPEN.
+
+**2026-10-17, 09:02: parent/override one-shot blocked before arming.** Steam
+log `edvr_gfx_20261017_090022.log` matches clean installed
+`v0.20.0-rc.2-113-gb195d65d`, flat `/novr`. The user docked and waited with
+menus closed. There are no arming, capture or Placed-detail records. At
+09:02:48 the waiting line has watcher/gameplay true, advancing Status sample
+1335, docked/seated known true, GuiFocus known zero, but `fresh=1` and
+`qualified-scene-consecutive=1`. The treatment counter is stuck at 10445 while
+`image-copy-source` conflicts reject approximately 1300 draws per five seconds.
+
+Ruled out: a stale DLL or missing parked Status caused this failed arm, because
+the build matches and the raw docked/seated/GuiFocus checks pass. The cause is
+the instrument's treatment-admission dependency: both
+`flatStationaryCameraSelected` calls are after admission, and only that
+callback steps `ParkGate`. The copy path can exit at `flat_runtime.cpp:6269`,
+and the HDR refusal never enters `treatHdr`. Fresh Status polls printed by
+Present do not advance the gate; its reason and counters are stale scene
+observations. Waiting longer cannot supply the missing callback in this
+refused-rendering regime. The renderer conflict itself is a separate issue.
+
+The logged image-copy witnesses have format 9/PS `FCFAD73924BF45B9` and format
+26/PS `DFCBA0EC70B03C9B`, both with no camera. They cannot establish an actual
+camera mismatch or a selected row-275 donor. A future passive scene-candidate
+observation before treatment admission must independently retain current
+camera, menu, depth and ambiguity checks; merely moving a callback or ignoring
+`hdrBad` would not prove that those checks hold in this run. No rendering
+policy or motion correction is changed here.
+
+**Guarded live inspection to avoid another launch.** Sol traced the exact
+RootCameraStack pool from constructor `+0x10855E0`: allocator at executable
+`+0x5F51BF0`, reserved pages at pool+0x30 and ordinary pages at pool+0x40. Both
+chains must be considered. A read-only metadata observation in PID 45044
+(executable base `0x7FF719020000`) found one reserved single-segment page at
+`0x22EBD648000`, total 0x2B00 bytes, 20 slots of stride 0x220 after its
+0x80-byte header, and no ordinary pages. Pool vtable, initialized flag, stride
+and page heads were stable on reread.
+
+The next bounded reader excludes free-list slots, checks Root's three exact
+vtables before names or child pointers, requires a unique MainView name,
+validates all eleven child vtables/backpointers/predecessor links, then follows
+only the known nested/Placed layouts. Pool, page, free-list, Root and Placed
+identities must be reread; changed graphs are partial/refused. This is typed
+pool enumeration, not a heap scan. It uses read-only process access without
+game calls, thread suspension, hooks, refcount operations or writes. A unique
+guarded allocation is still a typed MainView candidate, not an observed
+renderer selection or D/GPU epoch. The process exited normally before object
+inspection; only the pool headers were read. No parent/override identities were
+recovered from that process.
+
+The ignored research reader
+`analysis/decomp/f1_origin_20261017/live_placed_identity_snapshot.py` and its
+test companion are ready. Both Sol review and the root offline run passed all
+31 fake-memory cases, including both page chains, free/page cycles,
+type-before-payload checks, multiple MainViews, signed target-state boundaries,
+null/unknown predicates, changed graphs, nested associations and pose
+drift/readability. It validates the remote PE pin and uses only VM_READ plus
+QUERY_LIMITED_INFORMATION; it emits JSON to stdout. No live object read has yet
+been performed. A new session requires fresh process/module discovery and fresh
+pool metadata; none of PID 45044's object/page/base addresses can be reused.
+
+F1 remains OPEN. No additional flight is requested; inspect the current live
+candidate first, and correct the capture gate separately before relying on
+another automatic one-shot.
+
+**2026-10-17, 09:19 session: parent/provider and optional override recovered.**
+Steam log `edvr_gfx_20261017_091918.log` matches installed clean
+`v0.20.0-rc.2-113-gb195d65d`, flat `/novr`. The automatic instrument again
+produced no arming/capture/Placed records. The user relaunched into the docked
+cockpit and kept the process alive for the separate guarded live inspection.
+Fresh discovery found PID 38232 and executable base `0x7FF719020000`; the
+previous process's addresses were not reused. All requested live reads are
+finished and saved; the user was explicitly told the game could be closed.
+
+**Saved evidence.** The bounded reader completed with 645 reads / 5165 bytes,
+no issues, unchanged semantic identities and no sampled pose drift. It found
+one reserved page, 20 slots / 16 free, a unique typed MainView Root
+`0x16899484080`, two stacks and one enabled Placed activity. Read-only
+follow-ups also completed with stable before/after associations. The artifacts
+are ignored research files under `analysis/decomp/f1_origin_20261017/`:
+`live_placed_091918.json`, `live_parent_chain_091918.json` and
+`live_upstream_and_override_091918.json`. These preserve the full matrices,
+typed identities, predicates and explicit unknowns. No target function was
+called, no memory was written and no thread was suspended.
+
+The Placed concrete object is `A=0x168994CC080`, record `E=0x168999B9D70`. Its
+actual parent `P=[E+0x10]=0x16899E8D508` has vtable `+0x5355318`, getter
+`+0x30B9160`. This getter is a local-offset wrapper: it calls `U=[P+0x18]`
+through vslot 0x20, forms local times upstream, and returns its cache at
+P+0x98. The live U is `0x168F4631BD8`, vtable `+0x553A8D8`, getter
+`+0x3CB93F0`; its concrete base is B=U-0x58. This selects one actual provider
+family from the earlier candidate list.
+
+For the upstream getter, byte[U+0x410]=1 and config[+0x10]=1 select the U+0x188
+return branch at the snapshot. Both U+0x188 and U+0x278 were readable, finite
+and equal, with origin approximately (-0.0000416, 0.000000477, 0.0000224). P's
+local offset was approximately (-0.00432, 3.32734, 16.87980), and its cached
+origin (-3.32736, 0.00405, -16.87978). Placed's cached E+0x60 and final A+0x70
+matrices were byte-identical, origin approximately (-4.34272, -0.00397,
+-17.72711). Reading a return branch or equal caches does not establish
+execution or freshness.
+
+**Optional override.** Q=`0x168993EE0D8` is present, vtable `+0x5186FC0`, vslot
+0x70 `+0x108FC00`, internal gate vslot 0x68 `+0x108ED20`. Placed's outer
+snapshot predicates pass: handle -1, config14=1, config18=1 and target
+reference `0x168D953E128` has signed state 8. Q's mode at +0x80 is 1; its +0x60
+and +0x68 references both have state 8, and +0x68 is the same reference as
+Placed's target. The optional +0x70 reference is null. Internal virtual
+predicate execution and the actual call remain UNKNOWN. In particular, the
+cached/final equality does not prove that Q ran or was skipped.
+
+Sol's bounded callgraph audit narrows the earlier "override" label: Q's
+examined method populates an entity-keyed weight map in state+0x10, with
+weights in entry+0x8. Its direct accesses affect the header/map at state
++0x10/+0x18/+0x20/+0x28, not the primary pose at state+0x40..0x7F. Indirect
+header callbacks and aliases remain unaudited; this does not rule out all
+transitive effects or prove the runtime branch executed.
+
+**Notification-to-source connection established by RE.** Against the pinned
+game image (SHA256
+`E6BE8BBE04E6A7AE226D4318945AF7F367DE13DC5A007A261964D9BA8144E988`), both Sol
+agents independently verified the following join. Constructor `+0x3CAFC90`
+installs this U at B+0x58, initializes listener B+0x68 and a reference with
+token `+0x5F7B20C` at B+0x70; its resolved event-interface pointer is B+0x78.
+The success path of `+0x3CBADE0` registers B+0x68 via `+0x9204C0` with
+descriptor `+0x5FDD688`. Callback initializer `+0x119F70` stores table
+`+0x5539CC0` at descriptor-0x8. That table points to `+0x3CADCC0`: listener
+arrives in RDX, D in R8, and the wrapper calls `+0x3CB32B0` with
+B=listener-0x68 and D.
+
+`+0x3CB32B0` postmultiplies BOTH exact getter source poses, B+0x1E0=U+0x188 and
+B+0x2D0=U+0x278, by D. Translation follows `origin_new = origin_old * D.linear
++ D.translation`, without a sign flip or inverse in this writer. `+0x3CAE750`
+exposes this token at owner+0x290, the interface of collection owner+0x1E0.
+Broadcaster `+0x3CB35C0` sends the same converted float D to that collection,
+then collections +0x298, +0x350 and +0x408. FreeCam's earlier token
+`+0x5F41DE4` belongs to the third collection: the connection is shared D, not
+token equality. The previously traced same-descriptor-ID producer gives `D =
+Aold * inverse(Anew)`. These are affine matrices; zero W entries preclude a
+generic 4x4 inverse.
+
+This proves a coordinate-conversion writer for the actual observed provider
+type, beyond the earlier unrelated consumer examples. Arithmetic checks of the
+saved matrices support both local/upstream composition links (maximum absolute
+error below 1.4e-6), without proving execution. The live B+0x78 resolved
+interface and active B+0x68 subscription were not sampled: a particular
+broadcaster INSTANCE, the registration success path and any notification
+execution remain unproved. Collection callbacks complete before the broadcaster
+returns, but ordering against Placed refresh, Root copies and the selected GPU
+upload remains open. The compact RE report is
+`analysis/decomp/f1_origin_20261017/actual_placed_parent_notification_result_20261017.txt`.
+
+**Interpretation and next proof.** This is a stable typed MainView candidate,
+not a renderer-observed selection. The snapshot does not establish a selected
+GPU donor, a frame epoch, cache/getter execution or atomic lifetime. The
+automatic gate remains unrepaired. No further travel or stationary capture is
+requested on the basis of these reads. The RE-supported correction direction is
+to associate actual source callbacks and their composed D with downstream
+camera/upload epochs, convert history into the current coordinate domain, and
+retain physical travel as a residual. Ordinary inward travel with identity D
+must survive; a re-anchor plus travel must retain the travel. Unknown or mixed
+epochs cannot justify history reuse. Next prove downstream cache/copy ordering
+and renderer provenance, then repair the passive gate and instrument those
+remaining boundaries together. No motion correction is shipped here. F1 remains
+OPEN, including VR's dropped 50 m+ translation. The installed DLLs remain
+b195d65d; this evidence entry changes documentation only.
+
+**2026-10-17, offline ordering trace: camera tasks, renderer snapshots and
+upload identity.** The user requested tracing with Sol before another flight.
+The source tree is based on fbb391a2, and the pinned game image is unchanged.
+This is offline RE plus EDVR source inspection, with no new flight, game
+mutation, rendering correction, build or install. The saved 08:20 renderer
+capture and 09:19 typed-provider snapshot remain separate process observations;
+their pointers and epochs cannot be joined across sessions.
+
+**Verified camera-task order.** On the active camera-manager path, `+0x106C840`
+configures stage priorities and dispatches task collection `+0x5F2D710`.
+`+0x1093D00` gives activities a base priority, computes each stage span as
+max(1, max_activity_cost+1), schedules its finalizer at the last priority of
+that span, then advances the base for the next stage. Placed's cost getter
+returns 1 and priority setter `+0x1094250` sets its update handle A+0x150 to
+the base priority. Thus its update `+0x1075FF0` precedes the same stage's
+finalizer `+0x106F8E0` at least at base+1; later stages follow. The dispatcher
+visits priority groups in order and waits for each subgroup's jobs. This
+establishes conditional update/finalize/downstream order, not the placement of
+a re-anchor notification relative to this dispatch.
+
+**Conditional re-anchor-before-camera phase order.** The D broadcaster waits
+for its collection jobs before returning. The camera manager registers at fixed
+priority 1 in global collection `+0x5F021D0`; the deferred re-anchor callback
+`+0x3CAD960` uses token `+0x5F02B08` and emitter-config priority. For the
+concrete engine-event provider (getter `+0x1F27C0`, interface vtable
+`+0x4DDCAC0`, interface engine+0x1BA0), collection engine+0x1AF0 is dispatched
+by tick `+0x1EAFB0` at call `+0x1EB0F3`, before the later camera-manager
+collection at call `+0x1EB6AA`. Those synchronous phases establish deferred D
+completion before camera task dispatch in that tick, if the emitter resolves
+that exact engine interface and its callback is active. Its resolved event
+interface at owner+0x4F0 was not sampled, and other providers expose the same
+token. Configuration names or token equality cannot prove the actual instance.
+This is a conditional happens-before edge, not a universal same-frame adoption
+claim. Other D producer paths (`+0x3CB9D60`, `+0x3CBBF00`) still require their
+own path identity.
+
+**Normal overwrites and source basis.** The D callback is not the only writer
+of the actual U pose. `+0x3CB3B40` recomputes B+0x1E0 through `+0x3CE1AE0`;
+`+0x3CBE0A0` copies the primary descriptor/pose to the alternate, and further
+node-refresh/conversion paths exist. Descriptor B+0x140 is a 0xA0-byte
+ID/affine-pose/flag structure, not a monotonic basis epoch. The normal
+conversion uses node N=[B+0x470], ctx=[N+0x378] and a cache at
+[ctx+0x388]+0x180*uint32[N+0x384]. Depending on the descriptor flag it uses
+cache+0x80, and it always uses cache+0x100. These derive from the context
+descriptor that `+0x3D00A20` refreshes before broadcasting D. The actual node,
+context equality to the emitter, and coherent cache refresh remain unproved.
+Recording B+0x140 or a callback counter alone cannot certify the output basis.
+
+Within a successful Placed refresh, wrapper P, placement record E and activity
+A are updated sequentially before the stage-copy task. Invalid target-state
+branches can leave stale E+0x60 and must not acquire a new epoch. The observed
+Inertial task `+0x10741A0` copies the current predecessor state before applying
+its cached local offset, conditional on its base pointers being valid; a failed
+base guard can retain old state. This narrows one history concern without
+certifying every configuration of later HeadLook/Shake/LocationOffset stages.
+
+**Camera-manager to renderer preparation.** The camera-manager dispatch at
+`+0x1EB6AA` returns before `+0x1EB6B2` calls `+0x1F1B70`. That function
+initializes a private stack queue and synchronously dispatches global
+`+0x5EFDFF0`. Registration `+0x284B3B0` attaches the renderer listener to that
+same global with descriptor `+0x5F9B638`; initializer `+0xD3B20` installs table
+`+0x52E7028` at descriptor-0x8, leading to `+0x27BC060`. The wrapper's
+G=listener-0xC60 adjustment and the functor's forwarding of this exact queue in
+R8 are verified. Thus active registered callbacks on this engine path have
+camera-manager completion before one renderer source-copy invocation. This
+private queue is not either of `+0x1EA920`'s arenas: there is no `+0x2819D90`
+consumer in `+0x1F1B70`. This closes a preparation-phase edge, not a
+selected-render queue or GPU edge.
+
+**Verified renderer snapshot boundaries.** Callback `+0x27BC060` calls
+`+0x281AC10`, then `+0x34FB370`, then `+0x2889920` with the same output bundle,
+before `+0x281AA50`. The render path chooses among helper bundles; the ordinary
+helper and stereo/auxiliary alternatives must not be conflated. `+0x280F9C0`
+builds a submission packet and passes it to `+0x280F800`. The latter
+immediately copies helper bytes through `+0x59F1A0` into a queued record:
+K=queue+old_count*0x570. It does not retain the helper pointer as ownership of
+the pose. Consumer `+0x2819D90` walks this record layout, and `+0x2819F70`
+copies K into per-view descriptor R+0x240. Coordinator `+0x1EA920` constructs
+queue arenas and invokes that consumer; the producer job argument's exact
+association to those arenas was not established. Matching layouts do not prove
+the same queue instance or producer/consumer generation.
+
+The pass-camera pointer is also explicit. `+0x58F7E0` takes pass P, obtains
+layout=[P+0x108], T=[layout+0x60], and assigns C=[P+0x100] to T+0x158. It also
+assigns that C to T+0x250 when [P+0xD8]==0 or byte[P+0x250]!=0; otherwise that
+alternate pointer can be retained. `+0x58EF90` obtains the same T, then
+`+0x594D90` calls refresh `+0x5921F0` with one of those camera pointers. The
+camera composer uses that input to generate its staging rows. Pass setter
+`+0x598420` receives C and a layout separately; all four pass constructors were
+checked. Some allocate a separate 0x900-byte camera, and others accept an
+externally supplied camera. A copied R helper must not be assumed to be this
+configured C without the intervening association. The staging path resolves
+gCameraPos from C+0x50 without a sign change and composes its clip matrix from
+C+0x20/projection; cache/dirty guards remain part of that path.
+
+These are actual snapshot boundaries. A re-anchor event time, provider pointer,
+arm frame or numerically equal origin cannot by itself identify the coordinate
+state held by an already copied queue/view record. A complete provenance proof
+must follow the particular copied record selected for the scene through
+subsequent camera construction.
+
+**Verified CPU upload-observation endpoint.** In EDVR, `vscreen.cpp` observes
+camera bytes before forwarding Unmap or a full UpdateSubresource.
+`flat_runtime.cpp` records the exact buffer's rows 270..275 with
+`(prefix.frame, ++prefix.sequence)`. `FlatCameraTable` invalidates entries
+across frames, mutations and binding generations; draw observation reads the
+currently bound VS b1 and copies its rows, hash and upload ordinal. The
+selector's `cameraCurrent` / `sameCamera` checks retain current
+write-before-draw order, buffer identity and byte equality. Deferred-camera
+handling keeps the scene donor separately rather than equating it to the
+immediate HDR binding. The mapped-buffer bounce is flushed before the capture;
+its later lease release does not alter these bytes.
+
+These ordinals describe EDVR frame/write order, not engine re-anchor epochs or
+independently verified GPU consumption. The final `FlatMonoFrame` output
+retains buffer identity, rows and hash but drops the exact write ordinal.
+Moreover equal-byte uploads using the same buffer can merge into source records
+that keep only first/last write ordinals. The instrument must preserve per-draw
+write provenance, or prove that ALL contributing writes have the same source
+epoch; choosing an arbitrary endpoint ordinal is insufficient. Deferred donors
+and the immediate HDR write require their separate associations. The
+selected-camera instrument currently receives only frame/rows/reset/scene and
+depth, without the selected b1 or write ordinal. Its renderer snapshot uses
+armFrame as a capture-window guard; its refresh observer is a pre-hook.
+Consequently existing capture records cannot join a D adoption to the actual
+selected upload, even when row 275 matches. The source audit is saved in
+`analysis/decomp/f1_origin_20261017/selected_gpu_endpoint_order_20261017.txt`.
+
+The engine path `+0x4F8C10` calls `+0x501590` before `+0x500040` establishes
+pending constant-buffer bindings. `+0x501590` calls the existing probe's exact
+upload helper `+0x51B640` at `+0x501A3B`. It updates version-like bookkeeping
+after the call without checking its result, although the helper can fail Map.
+That bookkeeping is therefore not a successful-upload receipt; observed
+Map/Unmap or full Update evidence is still required. The bind stage/slot comes
+from compiled-pass metadata, not a universal literal VS b1. That dynamic
+mapping must be joined to the actual observed buffer/write, including auxiliary
+views and reuse, rather than guessed from a staging block's values.
+
+**Remaining proof.** F1 remains OPEN. A callback-only epoch is insufficient:
+normal provider updates can overwrite its cached poses, while renderer records
+retain copies made earlier. Source-basis identity, completion and copy
+generations must survive the actual queue/view/staging path and be attached to
+the selected buffer/write ordinal. Unknown, mixed or stale provenance must
+remain unknown. A same-frame label or a later global event counter cannot
+substitute for that association. No actual race or mixed-epoch flight was
+demonstrated by this offline trace.
+
+The minimal unresolved joins are the actual event-provider/broadcaster/node
+context identities, the source generation adopted by successful activity and
+stage copies, the particular renderer queue/consumer generation and copied R
+helper to configured C camera association, and all contributing selected buffer
+writes. The compact RE reports are
+`analysis/decomp/f1_origin_20261017/render_epoch_order_result_20261017.txt` and
+`analysis/decomp/f1_ship_writer_20261017/downstream_order_20261017.txt`.
+Independent source review accepted the conditional phase/priority/fence proof
+and the CPU endpoint limits; no universal actual-instance or GPU-consumption
+claim follows.
+
+No further flight is requested. The automatic passive gate also still depends
+on treatment admission; repair and end-to-end instrument review are required
+before using another automatic capture. This entry changes documentation only;
+the installed build remains b195d65d.
+
+**2026-10-17, Astra evidence review: conservative flat F1 correction without
+another flight.** The independent Astra 6 review distinguishes the existing
+destructive-translation defect from exact history-preserving re-anchor
+correction. Another flight is not necessary evidence for the first fix. The
+production arithmetic, shader and existing WARP fixtures already establish that
+old origin (80,0,0), new origin (20,0,0), unchanged rows and a short frame can
+keep history while replacing the old origin, erasing real 60 m travel. At width
+2496, 90-degree horizontal projection and 1000 m depth, this removes 74.88
+pixels of lateral motion.
+
+The same input pair permits D.translation=0 with -60 m physical travel,
+D.translation=-60 m with no physical travel, or D.translation=-65 m with +5 m
+physical travel. Camera positions alone cannot choose among them. The chosen
+correctness policy is to reset history in cases previously classified for
+origin absorption and retain the real camera translation on every frame that
+continues history. Accepted outward travel and the existing eligibility
+thresholds remain intact. A reset uses current-frame output and starts fresh
+history; it does not guess which physical interpretation occurred.
+
+Ruled out: the missing D/source/upload lineage prevents any F1 correction,
+because refusing uncertified history removes the arithmetic defect without
+classifying the discontinuity. That lineage remains necessary to keep history
+through a genuine re-anchor while retaining simultaneous physical travel. The
+conservative policy trades accumulation on ambiguous frames for correctness;
+repeated ambiguity can reduce temporal AA quality. It is not a universal
+re-anchor detector and does not promise uninterrupted inward history.
+
+**Scope.** This correction is for the flat resolver. The shared game-engine RE
+also helps VR, but VR has its own camera gate, canted-eye conversion, both-eye
+history and native/SDK reset paths. Its existing 50 m translation drop remains
+a separate integration problem. Neither this flat policy nor the flat passive
+capture certifies VR eye/upload provenance. The user was told that VR needs
+separate reset-propagation fixtures. No VR rendering change is included here.
+
+**Additional Sol RE.** Writer `+0x2871B50` resolves the configured pass and
+owned camera C, calls `+0x59F1A0(C+0x20,H)` at `+0x2871BB3`, then continues
+camera finalization. Constructor tracing confirms that pass's camera ownership.
+This closes the concrete H-to-C copy implementation; the live H's association
+with consumed R+0x240 remains unproved. The new hook contract is
+`analysis/decomp/f1_origin_20261017/passive_provenance_hook_contract_20261017.txt`.
+The complete provenance-probe design is saved separately. Broad hook
+implementation is deferred while the conservative correctness fix is validated.
+
+**Passive arming repair.** The existing one-shot now gets a separate scene
+witness before treatment admission. A bounded four-H census includes every
+relevant draw and explicit target write. The candidate must have a current
+camera and consistent bound RTV/depth/DSV, viewport, extent, trigger and menu
+facts. It can survive an image-copy-source treatment refusal, while actual
+camera ambiguity, layout/depth changes, stale/unknown data and overflow refuse
+it. A candidate remains diagnostic evidence; actual selected-donor metadata is
+reported separately and remains absent when no donor was admitted.
+
+The arm still needs 30 consecutive qualified scene frames and two progressing
+Status samples, plus the raw parked-cockpit conditions. Missing/rejected
+witnesses and post-arm loss have explicit reasons. Collector shutdown drains
+completed callbacks before the report. No current camera or callback means
+incomplete/refused, and waiting consumes no capture budget. Treatment admission
+and rendering policy are unchanged. This gate repair has no new config key;
+existing diagnostic keys and hook owners are preserved.
+
+Qualification is finalized at the completed Present boundary using current
+journal conditions. Rejection dominates every candidate in the same frame,
+including an invalid/null repeated candidate; a provisional callback cannot arm
+the capture. Missing/skipped observer frames clear both stability and
+fresh-Status credit. Repeated callbacks or Present calls cannot advance the
+gate twice. These are production-core regression cases, including loss during
+the capture frame. The first gate implementation failed this state-machine
+review and was corrected by the next Sol tier before validation.
+
+The Astra review is
+`analysis/decomp/f1_origin_20261017/f1_astra_evidence_review_20261017.txt`.
+The independent Astra source review approved the conservative policy and
+corrected passive gate. Full validation passed in 151.0 seconds: Python
+self-tests, production DLLs, 170 pooled jobs and six quiet jobs, self-contained
+installer/resource checks and the full-build receipt. The first attempt exposed
+two fixture setup errors, an unconditional-failure XeSS mock and unsupported
+HDR input format; both were repaired without changing production guards. The
+final fixtures observe the real mask-less XeSS interface, check complete
+current output images on resets and retain signed travel, boundary,
+engine-record, jitter/foreground and history-recovery assertions. The
+stationary gate regression rig also passed.
+
+F1's destructive translation replacement is closed for the flat resolver by
+refusing ambiguous history. Exact re-anchor history preservation and VR reset
+propagation remain separate work. No new flight is required before this
+correctness fix; a later flight would check visual compatibility or measure the
+separate history-preserving design. Clean-commit DLL promotion and verified
+Steam deployment use the standard build and install tools, preserving the
+existing settings.
+
+**2026-10-17, F1 capture under [diag], default off; main held for validation.**
+At the user's request, `diag.flat_origin_capture = off` now controls the
+temporary F1 captures together: stationary source/parent/override topology,
+origin and world witnesses, and optical comparisons. The startup choice is
+sampled once after the first owned Present commits mode, profile and config. An
+uninitialized choice is off; a non-flat startup latches off. Restart the game
+in flat mode after changing the key. Config reloads and later profile changes
+cannot enable it.
+
+With the key off, the capture entry points skip their allocation, renderer-hook
+installation, extra game-object reads, passive per-draw/write census, GPU
+dispatch/readback, capture counters and waiting/shutdown logs. Shared
+production camera/emit/store work and the conservative ambiguity reset retain
+their normal behavior. If capture was enabled at startup, leaving flat still
+follows the existing profile-loss refusal and relay cleanup.
+
+The key is temporary and is listed in Status while exact re-anchor history
+preservation remains open. The generated flat template includes the default-off
+setting. Existing Steam settings will be preserved; an absent key also means
+off. The earlier no-new-key statement records the first gate repair, before
+this user-requested control.
+
+Final independent Astra review approved the default-off isolation and confirmed
+that the production reset and shared motion/store work are independent of the
+capture flag. Full validation passed in 247.1 seconds: Python/tool gates,
+production DLLs, 170 pooled jobs and 6 quiet jobs, installer resource checks
+and the full-build receipt. The new flat-profile GPU fixtures compare reset,
+masks, vectors and complete final images with capture off and on. Existing
+source-wiring and fault-budget assertions remain strict.
+
+The first switch build found the startup config read outside a Present fault
+budget. It now has its own BoundaryTick after mode selection; a read fault
+leaves capture off and cannot retire mode selection. The next attempt found
+four prior-LF source files rewritten as CRLF, preventing binary source-wiring
+tests from delimiting functions. Restoring their original LF bytes fixed those
+failures without code or assertion changes. The focused 318-assertion gate test
+and stationary/temporal rigs passed before the final full retry. No flight was
+spent on either integration issue.
+
+The branch is ready for Steam flat validation with diagnostics off. Keep main
+unchanged until the user's validation; exact re-anchor history preservation and
+VR reset propagation remain separate work. Clean-commit DLL promotion and Steam
+installation use the standard tools and preserve existing settings.
+
+**2026-10-17, probe-off Steam validation stopped in the hangar before
+takeoff.** Steam `edvr_gfx_20261017_110505.log` matches installed `f121f723`,
+flat `/novr`, DLSS at 3840x2160. F7 logged AA OFF at 11:07:27.970 and restored
+to DLSS at 11:07:30.491. The hangar windows then had 450 frames, zero treated,
+zero admission/backend steps and `conflicting-hdr-target-or-camera`. Resolver
+calls stayed at 747. This scene did not exercise F1. The same image-copy-source
+refusal occurs in earlier Steam `b195d65d`; exact scene identity across runs is
+unproved.
+
+Ruled out: the AA comparison input failed, because both state changes reached
+the log. Ruled out: this untreated hangar baseline validates the F1 correction,
+because the selector refuses before the resolver. The full build still proves
+the arithmetic policy; visual validation remains blocked. The flight
+instructions should have been preceded by this admission check.
+
+The user requested one existing Full audit with Shift+NumLock while parked.
+`diag.flat_origin_capture` stayed off. The trace wrote three frames, 5132
+events and 2586688 bytes with zero overflow at 11:12:57.450. Both copy samples
+and the 900-frame projection audit completed at 11:13:07.492; the complete
+discovery pass ended at 11:14:57.234. The user was then released to quit
+normally. Full capture rearms existing runtime witnesses, so any treatment
+under the audit must be distinguished from ordinary production validation.
+
+Both copy samples show clean source/destination bad flags but no current
+destination H camera/tone record. That is a concrete failed `imageCopy`
+conjunct, not evidence for exempting a camera-independent source. Current H's
+first writer is VS `8289669D93A18C1D` / PS `C6E6E419DA9F6FAD`; the known
+deferred payload anchor never ran. Thirty-one earlier HDR image continuations
+were accepted, so H was not universally without provenance. HDR-chain replay
+reproduces the refusal on all three trace frames; the generic trace hash check
+mismatches and is not an identical-replay claim. Next: offline Sol RE of this
+producer and its camera/projection lineage before proposing a guarded
+correction. Main remains held; no further flight is requested.
+
+Offline Sol shader analysis narrows the admission gap. The actual first H
+writer is a point/spot light-volume path: VS `8289669D93A18C1D` declares
+CB2[47] and structured t0, using view rows 2..4 and forward clip rows 10..13.
+PS `C6E6E419DA9F6FAD` reconstructs view position from its interpolated ray and
+depth. Neither reads b1. The old fullscreen VS `7E38A6AA1269C901` consumes
+inverse rows 14..16; current donor promotion requires that exact old VS/PS pair
+and inverse recipe. The actual forward recipe is prepared 900 times and
+numerically matches the current primary-forward basis, but does not promote a
+current H camera record. Numeric agreement is not frame authorization.
+
+Ruled out: applying the old inverse-only anchor unchanged to this first writer,
+because its executed projection is the forward recipe. A bounded fix hypothesis
+is to qualify the actual lighting path against a current same-depth scene donor
+with complete CB2 range/binding/write identity and executed projection
+metadata. The saved FTR omits projection payload bytes, and the payload audit
+watches only the old anchor, which never ran. Existing evidence therefore
+diagnoses the missing donation path but does not certify that extension. The
+smallest next data collection is a targeted extension of the existing
+projection audit to capture the actual light CB2 payload and current donor
+association together while parked. No admission exception, source change to AA
+behavior or further flight has been made on this hypothesis.
+
+**2026-10-17, targeted camera-payload audit; regression baseline still open.**
+The same hangar refusal predates the latest F1 correction in the available
+Steam logs. This rules out attributing that refusal to the latest arithmetic
+change alone; it does not exclude an earlier regression or a scene/settings
+coverage difference. Astra traced the destination-camera predicate to 6e9bde74
+(September 24). The later camera-independent source exception retained it, and
+October 13's deferred donor support watches a different shader pair. The actual
+forward-light projection recipe also predates the F1 correction.
+
+Earlier notes record treated hangar frames on Intel B390/Proton with a
+different selected consumer. The available Steam catalog begins October 13; its
+older HDR-treated candidate also has a different consumer and does not
+establish the hangar scene. Neither supplies a known working baseline for this
+exact Steam shader path. The targeted manual capture must therefore establish
+camera ownership before any admission fix; it cannot, by itself, date a
+regression. No admission rule has been relaxed.
+
+The targeted diagnostic extends manual Full (Shift+NumLock), independently of
+`diag.flat_origin_capture = off`. At the actual light-volume VS/PS pair it
+saves each stage's original CB2 range and 752-byte payload with before/after
+CPU-shadow stamps, all retained same-frame donor versions,
+depth/view/subresource identities and observed input producers. A separate
+pre-forward snapshot records actual binding identities and known uploaded
+replacement bytes; expected plan bytes remain separate. Upstream ownership is
+recorded because original means before EDVR's private replacement, not
+necessarily before jitter.
+
+Collection is lazy and bounded: 64 donor versions, 128 HDR writers, 32 relevant
+producer observations, at most four attempts, 91-frame spacing, and an
+independent 900-frame deadline. Two verified record-complete saves may stop it
+early; unknown, stale, overflow and missing producer/range evidence remain
+partial. Rearm, resize, work-tier changes, initialization failure and expiry
+all drain explicitly. The terminal marker reports file completion, never camera
+authorization. Input contents and GPU execution remain uncaptured. Existing
+Full's 120-second discovery completion must also arrive before quitting.
+
+Astra approved the frozen source after checking provenance separation,
+actual-draw callbacks, read-only plan access, startup failure and drain paths.
+The existing test rig gains `--light-payload <file.lca>` for offline
+inspection, with core bounds/serialization/lifecycle, integration and
+binding-plan fixtures in the normal full-build gates. This changes diagnostics
+only; ordinary admission, VR and configuration behavior are unchanged. Any
+treatment during Full describes the audited frame and does not validate
+normal-play recovery or F1.
+
+Validation: the full build and all gates passed in 202.3 seconds, including 170
+pooled jobs, six quiet jobs, production DLLs, the self-contained installer and
+the matching receipt. The collector passed 65 checks. Earlier attempts exposed
+two new fixture defects: a local file-reader helper used outside its scope, and
+a PS2 lookup after the fixture replaced the plan with VS1 only. Astra corrected
+those without weakening the assertions; the focused binding-plan run passed
+before the complete gate. One unrelated runner timeout-classification self-test
+failed, then passed unchanged in isolation and in the final full build. No
+runner fix is included. Next is clean-version promotion, Steam package
+verification with settings preserved, and the stationary manual Full capture;
+main remains held.
+
+**2026-10-17, 12:26 Steam stationary light-camera audit captured.** The latest
+graphics log, `edvr_gfx_20261017_122417.log`, matches b025e8fd (6AD3B924), flat
+`/novr`, with DLSS selected at 3840x2160. The manual Full arm is 12:26:21.937.
+The payload audit drained at 12:26:25.278 with four verified files, no write
+failures and a verified manifest; separate Full discovery completed at
+12:28:21.944. The user was then explicitly released to quit normally. Further
+work uses saved files only.
+
+All four samples contain complete, stable and current original VS/PS CB2
+payloads, 752 bytes each, from the same 784-byte buffer. Each pre-forward
+observation retains the original binding and bytes; no private plan/clone is
+associated, upstream owner is recorded and phase is zero. Seventeen eligible
+current geometry-camera records pass the recorded range/depth checks. Sol finds
+one unique eligible camera basis/origin, numerically consistent with CB2
+view/inverse-view and projection rows to roughly 1.2e-6 metres. This is camera
+consistency evidence, not authorization by numeric match alone.
+
+The terminal result is `payload-only-or-partial`: later H writes are counted in
+all samples, producer metadata overflows in samples two through four, and
+sample three has seven donor overflow observations. Those limits do not turn
+the saved complete camera payloads into missing bytes. Ruled out: the actual
+light-camera CB2 could not be captured, because all four originals and
+pre-forward copies decoded complete/current/stable. The PS t0 resource has a
+recorded current producer, DEF19B035D5EDEDC/CB95394B50D737D6, and differs from
+the light draw's bound DSV. Its shader performs a depth conversion; the raw
+depth input and producer camera binding still need an identity/version join.
+Sol is exhausting this same Full trace and packet set before requesting any
+additional capture. No admission change or new flight is justified yet.
+
+Offline closure from the same Full capture: DC census frame 1 records depth
+conversion DEF19B035D5EDEDC/CB95394B50D737D6 at DCO1#684 reading @320 and
+writing @319, followed by the actual light pair at #693 reading @331 with DSV
+@97. Interned @320/@97 reference the same raw resource with SRV/DSV formats
+21/20; @319/@331 reference the same R32F linear resource. The sequence lies in
+the first completed-frame span, 12:26:21.969..12:26:22.040, containing sample
+one's 12:26:22.038 completion. That census has no overflow/truncation. It has
+no generation tags, so a runtime guard must reproduce the join with live
+resource/subresource/version checks instead of trusting saved pointer tokens.
+
+FTR5 `flat_trace_12925.bin` contains frames 12922..12924, confirming conversion
+q705/790/713 before light q715/800/723. Its projection/input fields are
+unobserved, so it cannot supply missing CB2 bytes. Existing general packets
+have unrelated CB2 buffers and cannot fill that gap. HDR-chain replay instead
+closes the partial-status question: each frame has a unique known-SRV final HDR
+consumer, no late H writes relative to that consumer and the same camera
+conflict. In sample one the last H writer q878 precedes the consumer q882. The
+audit's 110 later writes occur after the intermediate image copy q741 and
+before the real consumer; they are normal accumulation, not proof of a bad
+frozen light camera. Ruled out: record-complete zero alone invalidates the
+saved camera observations, because the complete current payloads were frozen
+before those later writes and the final-consumer replay has zero late writes.
+Whole-frame immutability is not established by this distinction.
+
+Astra independently reviewed the evidence and supports a conservative
+exact-pair H-camera donation guard without another pre-fix capture or flight.
+Camera proof must use the light shader's consumed view rows 2..4 and forward
+rows 10..13; the unused inverse-view origin is corroboration. Missing
+conversion coefficients do not force another capture if EDVR continues
+reconstructing from independently qualified raw DSV, rather than claiming
+metric equivalence with the linear texture. The runtime guard must verify exact
+shaders/target/depth/viewport, current stable original VS/PS CB2 ranges and
+used transforms, the live raw-depth-to-linear-to-light chain with no
+intervening relevant mutation, coherent current eligible same-depth donors, and
+consumer phase ownership. Ambiguity, unknowns and overflow fail closed.
+Existing admission/depth/write checks remain. These phase-zero manual samples
+justify implementation, not ordinary AA/history or F1 success. Nonzero support
+needs positive algebraic phase fixtures and mismatch/range/stale/origin/input
+negatives before ordinary stationary validation and then F1 travel validation.
+No rendering code changed during this capture analysis; main remains held.
+
+In the overflow-free first sample, solving the shader-used view as O =
+-inverse(R) * t gives (-3.762855775, 2.167933215, -17.727133731). Its maximum
+origin-axis residual against the geometry camera is 9.333184e-7 metres. The
+used forward transform's spatial part matches exactly, with translation
+residual at most 1.089867e-6. These checks use the consumed rows; the unused
+inverse-view fields provide independent corroboration. The bounded evidence
+report is
+`analysis/decomp/f1_ship_writer_20261017/light_payload_result_b025e8fd_20261017.txt`
+in the main checkout.
+
+**2026-10-17, guarded forward-light admission implementation.** The user
+authorized the guarded fix, a full build and Steam flat install, with the F1
+probe off and main held until validation. The supported new coverage is the
+captured Upstream camera path, flat 3840x2160 with installed DLSS
+FileVersion/ProductVersion 310,9,1,0. No VR runtime, headset or per-eye target
+participates in this flat test. Existing legacy/inverse-anchor behavior stays
+intact; the new forward adapter explicitly refuses unqualified ownership modes.
+The new path introduces no config key.
+
+The admission proof must come from shader-used view rows 2..4 and forward rows
+10..13, actual current original bindings, independently qualified geometry/raw
+depth, and a live exact conversion/output/light-input identity chain. Canonical
+world camera remains separate from the light draw's actual B1 binding.
+Converter and light evidence must survive only a known real issue, expire on
+mode/frame/mutation gaps, and invalidate authority if abandoned. Probe-off
+ordinary rendering must reach every new production hook without a manual Full
+arm.
+
+Existing upstream ownership is a mode flag, not a per-upload phase receipt. The
+new mathematical phase check removes the expected raster offset from the used
+forward rows and verifies the remainder against the independently used view
+axes, including translation. This restricts the new adapter to the centered
+underlying projection established in the saved capture. All four saved samples
+pass the phase-zero shape check without threshold changes. Algebraic positive
+plus/minus-phase fixtures and consistently-unphased-at-nonzero rejection are
+required before a full build; ordinary nonzero treatment still requires
+validation.
+
+Saved raw-DSV writer enumeration found 176 writes in 11 groups, including seven
+draws outside the old preferred pool. RE establishes narrow camera/depth roles
+for exact 989E043933A369AB/BD43EB1E0AAEFC7A and
+7B0DC42D383F694C/0DF03E64DF9DBEF1; these consume origin row 275 then canonical
+clip rows. Exact 84F6596FAF22CCFA with null PS uses canonical clip rows
+270..273 on camera-relative input. It can establish projection-domain
+consistency, never an independent absolute origin. These roles add no
+motion-source authority. Unknown relevant depth writers, incoherent cameras,
+stale data and capacity losses must refuse. Later known light consumers need
+their actual stage-specific ranges and depth slots checked; 24DE/1A53 reads
+linear depth at PS1 and declares 49 PS CB2 rows rather than the first pass's
+47. No guard may silently borrow the first pass's layout.
+
+Frozen implementation review: the new production adapter is independent of the
+F1 diagnostic latch and manual Full. It carries a separate typed original-CB2
+witness through the reducer/frame/trace, preserving the actual light B1
+identity and a separate qualified scene donor. The original inverse-anchor
+witness remains 112 bytes; the new forward witness requires its complete
+752-byte range. Later light consumers use their actual stage spans, including
+the 784-byte PS variant. Existing motion shader replacements are recognized
+only through held original/clone identities with owning-context and generation
+checks. No replacement is bound by this new admission adapter.
+
+The runtime keeps eight relevant depth-domain records and eight actual-returned
+converter associations, with sticky writer coherence and explicit cancellation.
+Saved trace census finds one eligible raw domain and one converter before first
+light in each of the three captured frames, so these bounds fit without
+widening them. Every actual selected-depth writer is covered by a supported or
+narrowly audited camera/depth role. Bound MRT/UAV writes, source mutations,
+observation gaps, ownership/phase changes and abandoned draws invalidate the
+relevant evidence. Post-donation raw/linear dependency changes revoke H
+authority through replay-visible uncertainty; normal subsequent H accumulation
+is preserved.
+
+The converter token means a CPU-returned exact-shader raw-input/linear-output
+association. It does not claim all texels refreshed, a GPU completion receipt
+or linear-depth metric equivalence. Saved packets do retain identical converter
+VB data across the interval: an oversized triangle with stride 20 and topology
+5, with no intervening tracked VB write or uncertainty. The converter's
+unsampled culling state is not inferred from neighboring packets. Supported
+conventional culling, solid raster, effective scissor/depth state, viewport,
+sample mask, predication and extra-stage restrictions are checked without
+forcing an unobserved NONE-only mode.
+
+Astra approved the final frozen source and independently compiled/ran the
+existing focused temporal rig: 166 core checks, 92 integration checks and the
+existing 65 light-capture checks passed, with the complete policy self-test
+green. Tests include independent algebraic positive/negative phase projection,
+captured float-bit matrices, unresolved float-phase/conditioning, proper
+rotation, typed roles, stale/range/lineage/mutation/cancellation, ownership and
+trace authority. One old capture callback assertion needed a function-bounded
+grammar repair; token removal and disabled-token mutants now verify that the
+assertion remains effective. All 15 changed source/test files preserve LF and
+no BOM. The full production build is running; no new DLL has been installed
+yet.
+
+The full production build passed all gates in 206.9 seconds: 170 pooled jobs,
+six quiet jobs, production DLLs, the self-contained installer and the final
+receipt. The full rig output confirms 166 core, 92 integration and 65
+light-capture checks with zero failures. The receipt matches the guarded-fix
+input tree. No further C++ change follows this gate; clean-version promotion
+and sanctioned Steam verification are next. Main received an unrelated
+documentation-only update, de9fb439, during this work; importing that into the
+feature branch preserves the validated compiled inputs and does not merge the
+guarded fix to main.
+
+Ordinary stationary validation must use a fresh Steam flat launch with DLSS and
+the same docked hangar view, probe off, menus closed and no manual Full arm.
+Wait 30 seconds, press F7 once for 10 seconds off, then press F7 once to
+restore DLSS and wait another 30 seconds. Report any change in fine edges,
+shimmer, blur or doubled edges, then leave the game running for log
+verification. Success needs normal `flat forward light camera`
+qualified/CPU-issued donations, stable AA/backend/history treatment under
+nonzero phase, and correct off/on transitions. A phase-zero capture or unit
+pass alone is not this validation. Main remains held; F1 travel validation is
+still separate.
+
+**2026-10-17 ordinary stationary validation: FAILED, retain merge hold.**
+
+Clean DLL promotion passed in 39.9 seconds. The sanctioned Steam installer and
+independent verify-only check confirmed `5afe9f4a`, version
+`v0.20.0-rc.2-126-g5afe9f4a`, schema-2 shared scope both, with both live INI
+hashes unchanged. The actual test was Steam flat `/novr`, DLSS 310.9.1.0 at
+3840x2160, centered Upstream, no VR runtime/headset/per-eye target. The probe
+remained absent/default off; manual Full was unused.
+
+The pinned `edvr_gfx_20261017_131933.log` matches that installed build. F7
+turned AA off at 13:22:09.340 and restored configured DLSS at 13:22:28.024. The
+user reported that some hangar areas became steadier while others shimmered
+more. The new guard runs and donates: at 13:24:28 its ordinary counter reports
+9,441 CPU-issued donations. This is partial progress, not normal AA validation.
+
+At 13:22:33.035 all 298 completed camera resolves were zero-phase, with zero
+nonzero-phase unjittered resolves, zero row pairs and 149 skipped pairs. The
+same pattern persists in later windows. At 13:24:23.035 the HDR route has 444
+frames, 296 treated and 148 refused as `relevant-observations-truncated`;
+jitter failure accounting identifies `phase-mismatch` in all 148 refused
+frames. The generic truncation reason does not establish a census-cap defect:
+the guard deliberately revokes camera authority on phase failure. The repeated
+cycle is two zero-phase resolves, then a nonzero-phase refusal and history
+recovery. Renderer backend failures, camera cuts, frame gaps and
+origin-ambiguity resets are zero; history is repeatedly lost. F7 switching
+worked, but sustained nonzero-jitter history did not.
+
+At 13:24:23.737 the guard's cumulative phase refusals are 4,560; forward,
+origin, view, stale-donor, ambiguous, original-missing/stale/changed,
+actual-issue and abandonment refusals are all zero. Earlier startup
+overflow/unknown-depth counters do not explain the ongoing phase-specific
+cycle. Both used forward and geometry camera matrices passed their mutual
+agreement, origin and view checks before the independent phase test failed.
+Global camera injection/applied counts cannot prove that these selected rows
+received the expected phase. The log alone does not distinguish unphased rows
+from a wrong sign/scale/frame of phase.
+
+- Ruled out: the guarded adapter is dormant or the test used a stale DLL,
+  because the verified new build records thousands of CPU-issued donations.
+- Ruled out: this stationary test validates ordinary jitter/history or F1
+  travel, because every completed resolve has zero phase and the next jittered
+  frames repeatedly refuse and recover history. No travel occurred.
+
+Sol traced projection builder `4F2FF0` and its alternate branch at
+camera+0x269, which can ignore the bounds updated by the kind-3 injector. A
+host-visible, read-only bounded memory check of PID 14824 used 42 reads and 178
+bytes, pinned to the expected game PE timestamp/image. Both logged kind-3
+candidates had stable vtable, kind, aspect, FOV and +0x269=0 through the
+reread. Their restored bounds were zero, which says nothing about earlier
+injections. The restricted query initially missed the running process; the host
+query corrected that. No game writes or calls occurred.
+
+- Ruled out: the bound-ignored alternate projection branch is active on either
+  sampled kind-3 camera at the live observation, because both stable +0x269
+  flags are zero. This read does not identify the selected camera or establish
+  the phase of an earlier GPU upload.
+
+The live read is complete and the user was explicitly released to quit. Next
+discriminate unphased, wrong-sign, wrong-scale and wrong-frame phase from the
+actual rejected draw's used camera bytes and expected phase; global injection
+counters cannot separate them. Keep those hypotheses in one bounded diagnostic
+if source RE cannot resolve them. Do not relax the phase guard or plan another
+flight without discriminating evidence. Keep main unmerged; F1 travel and VR
+propagation remain unqualified by this run.
+
+Sol's offline primary kind-3 algebra agrees with the existing sign/extent
+convention: the +0x269=0 builder forms P20=2*boundX and P21=2*boundY, while
+injection adds (jx/renderW,-jy/renderH). That is not proof of the active
+selected upload: the optional +0x2C0 post-adjust block was not sampled, and
+source-to-selected-camera identity is unproved.
+
+If a diagnostic is required, retain matching bootstrap and first rejected-frame
+receipts: frame/q, expected pixel/NDC phase, render extent, owner/applied
+count; full donor 96 bytes and current original source CB
+identity/range/generation/write stamp; stable original VS/PS CB2 used view rows
+2..4 and forward rows 10..13; selected HDR/raw/linear identities and converter
+publication q; failed axis/component, residual and float bound. Fit actual
+phase by projecting forward X/Y onto used view Z. Zero, negative expected,
+scaled expected or prior-frame expected phase distinguish
+unphased/sign/scale/epoch hypotheses; fitted expected phase with a failing
+residual instead points at the certificate. Only attach camera +0x269/+0x2C0
+mode fields when its actual source identity is proved. Do not use a generic
+last-call camera as the selected camera.
+
+**2026-10-17 targeted phase-failure capture, BUILT, NOT FLOWN.**
+
+Source history does not establish a regression since RC2. The RC2 tag
+`f2b99bdf` already includes `82dbf1b0` (October 13), which restricted inherited
+HDR cameras to the exact 7E38/7CEC inverse-light pair. The hangar's forward
+8289669D/C6E6E419 recipe existed since `ad8b586a` (September 24), but a
+projection recipe alone never supplied inherited HDR camera authority. The
+relevant admission, phase-math and ownership files are unchanged from RC2 to
+current main; the injector gained only a passive capture callback. `44a8ef1a`
+adds a separate forward-camera admission path and an independent phase
+certificate. It exposes the current selected-row failure. Earlier successful
+main-menu or B390/Proton records use different consumers or environments, so
+they do not establish a working RC2 baseline for this exact Steam hangar path.
+Do not date the phase failure from a newly added check.
+
+The authorized diagnostic leaves the production `forward_light::match`
+decision, order and tolerances unchanged. It automatically retains a bounded
+zero-phase snapshot only after its light draw is CPU-issued, returned and
+selected by a successful temporal resolve. The first exact-primary phase
+rejection for the last selected typed HDR/raw-depth/source cohort freezes one
+bootstrap/failure pair. It records a pre-issue rejected candidate; it does not
+claim that the rejected draw is a selected or GPU-executed upload.
+
+Each record retains the original donor96 and both original declared752B VS/PS
+CB2 spans, source/buffer generations, bank/range/write stamps, resource and
+converter association, expected pixel/NDC phase, extents, viewport,
+owner/applied counts, recent requested phases and the first diagnostic
+residual/bound. The independent used-view fit can distinguish several phase
+scenarios without changing qualification. A zero fit can overlap unphased and a
+previous-zero epoch; no unique heuristic diagnosis is claimed.
+
+The process budget is one pair, with eight bounded bootstrap cohorts. Ordinary
+frame resets preserve it. Device/context/work-tier changes invalidate matching
+and release held resources without rearming the budget; frozen receipts survive
+to reporting. Present emits bounded ordinary log chunks before its early exits,
+followed by a final completion marker. The existing sanctioned
+`tools/edvr_log.py --phase-failure` verifies the metadata, record order,
+payload lengths/counts and hashes before reporting a usable pair. Never-called,
+awaiting, cancelled, missing-bootstrap and incomplete output remain
+distinguishable. There is no GPU readback or new config key; the origin probe
+stays absent/default off and manual Full is independent.
+
+Stationary capture needs a fresh Steam flat `/novr` launch with configured
+DLSS, the same docked hangar, menus closed, ship and view still for 30 seconds.
+Do not toggle F7 or arm Shift+NumLock. Report Done and keep the game running
+until the log/optional live checks are explicitly complete. This captures the
+failure; it does not validate the guard, F1 travel or VR. Main stays unmerged.
+
+The protocol distinguishes `sourceWitnessFrame/Q` (retained camera-row witness)
+from the donor identity's observed shadow-write frame/Q, saved at geometry
+observation rather than queried later at the light. Independent review
+confirmed actual CPU-return plus successful temporal selection before bootstrap
+commit, exact last-selected source filtering, lifecycle invalidation without
+process-budget rearm, and completion-marker-before-finished ordering. The new
+capture core tests preserve the production match decision and input bytes,
+exercise independent phase algebra and cohort mismatches, and test
+cancellation, bounded history and lifecycle freeze. The decoder rejects
+missing/duplicate/truncated metadata, unsafe counts before allocation,
+malformed numeric fields, payload corruption, stale associations and cohort
+disagreement. All nine source/test files are LF without BOM. The first
+full-build attempt stopped before C++ on the previous journal Status being 61
+lines including its heading; that documentation block was shortened and its
+real gate passed before rerunning.
+
+The second build attempt compiled the production DLL but stopped at the new CPU
+fixture's `near` lambda, which Windows headers macro-expand. Astra changed only
+that helper and its uses to `phaseValueClose`, preserving
+assertions/tolerances, then compiled and ran the complete focused temporal rig
+successfully: phase algebra 68/0, phase collector 90/0, existing forward core
+166/0, integration 97/0 and light collector 65/0, with final policy PASS. The
+frozen source is undergoing the full build again; no diagnostic DLL is
+installed yet.
+
+User preference for subsequent work: Sol handles test work; consult Astra only
+on diagnostic/RE evidence. The fixture repair above preceded this instruction.
+Root orchestrates the full validation and installation.
+
+The final full build passed every gate in 141.5 seconds: 170 pooled jobs and
+six quiet jobs, production DLLs, test rigs, self-contained installer/resource
+checks and final receipt. Full-build receipt fingerprint:
+193662a4968867cc32a0d31f5b5e17ada97473e0bd6fcada7bdd4cc9aca02b3c. No C++ edit
+follows this successful gate. Commit the validated source, push only the
+feature branch, then run receipt-guarded clean DLL promotion and sanctioned
+Steam installation/verification while preserving both INI files. Main remains
+unmerged and the targeted stationary capture remains unflown.
+
+**2026-10-17 targeted phase capture VERIFIED: operation error missing from
+certificate.**
+
+The new Steam flat log `edvr_gfx_20261017_140333.log` matches installed
+`2d25730e` / `v0.20.0-rc.2-128-g2d25730e`. The user stayed in the hangar with
+menus closed for 30 seconds, without F7 or manual Full. The sanctioned
+`--phase-failure` decoder returned 0 and verified one manifest and COMPLETE at
+14:05:41.008: two records, 3,200 bytes, 26 chunks, combined hash 6557BA62,
+matched pair, no overflow or truncated/duplicate records. Actual environment is
+Steam `/novr`, DLSS 310.9.1.0, 3840x2160, centered Upstream. The origin probe
+remains absent/default off. This is CPU-candidate evidence, not GPU execution
+or history-success evidence.
+
+The bootstrap at frame 14352/q894 is zero phase, CPU-issued, returned and
+selected. The rejected candidate at frame 14353/q915 has the same
+context/device/H/raw/linear/source cohort, generation 4, bank 2 and range
+0/4096. It was observed before refusal and is correctly marked not issued,
+returned or selected. Original VS and PS used one current 784B buffer, captured
+as the declared 752B spans; their used matrices and donor agree. The first
+unrelated same-depth failure was skipped; this matching pair was not consumed
+by that source. Later status is emitted-pair, with zero evictions, two phase
+failures and one outside-last-selected refusal.
+
+Requested pixel phase is (0,-0.166666657), expected NDC Y 0.00015432098; the
+applied count is 39. Actual fitted Y is 0.0001543074601289187, against
+bootstrap fit 1.097870329526e-12. Jitter reached both original light stages and
+the donor with the correct sign. Axis 1/column 2 fails with residual
+1.3521952185775466e-8 against the old 4.5237755850943205e-10 bound. The phase
+difference is about 1.46e-5 pixel. Ordinary later windows still resolve only
+zero-phase frames and repeatedly lose history, with zero backend failures. The
+diagnostic worked; this does not qualify AA, F1 travel or VR.
+
+- Ruled out: missing jitter, sign-reversed jitter and reuse of the immediately
+  previous zero phase for this rejected candidate, because all three camera
+  payloads contain coherent nonzero phase matching the current request's sign.
+- Ruled out: the discrepancy needs a universal tolerance multiplier. The
+  engine's concrete float endpoint arithmetic supplies an omitted absolute
+  uncertainty before final matrix composition.
+
+Sol pinned the game PE and verified scalar operations in projection builder
+4F2FF0: ordinary centered perspective constructs h, shift=fl(2*h*b),
+lower=fl(-h-shift), upper=fl(h-shift), then center=fl(fl(upper+lower)/
+fl(lower-upper)). Near-cancellation of the two rounded endpoints introduces
+error of order float epsilon even when the resulting center is small. The
+existing guard budgets only final matrix arithmetic. Constants and the
+SUBSS/MULSS/ADDSS/DIVSS/store boundaries were checked; no approximate
+reciprocal or FMA is used in this path.
+
+Explicit float32 replay with one inferred half-height candidate, h bits
+0x3F05B180, gives native scale 1.9148296117782593 and center
+0.00015430746134370565. Using the captured used-view rows, it reproduces all
+four bootstrap and all four rejected CB2 row-11 components bit-for-bit. Eight
+neighboring half-height candidates do not reproduce both. The fitted scale
+1.914830066 differs because the stored view is approximately, rather than
+exactly, orthonormal. The half-height is a constructive explanation, not a
+live-read field; historical selected-camera +0x269/+0x2C0 flags were not
+captured and cannot be recovered from a generic last-call pointer.
+
+The proposed correction must derive and propagate the centered frustum
+coefficient error B through every spatial and translation component, including
+its contamination of the existing dot-product scale estimate. The same
+uncertainty must enter the nonzero-phase distinguishability check. Keep
+lineage, used-view/origin, ownership and absent/wrong-phase refusals. Handle
+normal/overflow/underflow and any supported optional crop explicitly; unproven
+alternate/off-center constructions remain unqualified. Do not choose a
+multiplier from this one sample or make fitted output its own authority.
+
+Evidence artifacts are in ignored
+`analysis/decomp/f1_ship_writer_20261017/phase_failure_2d25730e_20261017_decoded.txt`,
+`phase_projection_roundoff_2d25730e.py` and
+`phase_roundoff_result_2d25730e_20261017.txt` in the main checkout. Astra
+consulted only on diagnostic/RE evidence; no tests, fixture edits or production
+edits were performed for this result. Sol owns further test work. No useful
+live join remained; the user was explicitly released to quit. Next is a
+separately reviewed and tested operation-derived certificate correction; no
+additional capture or flight is needed before implementation. Main remains
+unmerged, and the phase-certificate onset since RC2 remains undated.
+
+For the reviewed ordinary centered branch, u=2^-24 and b=abs(input bound): ds=2*u*b; e=2*u*(1+2*b*(1+u)); dd=e+u*(2+e); B=(2*ds+e+2*b*dd+u*(4*b+2*ds+e))/(2-dd). This assumes finite normal intermediates, h>0, representable2h, |shift|<h/3 for the Sterbenz endpoint sum, and dd<2. The captured b gives B=5.965064809723348e-8 NDC, from the operation scales rather than the measured residual. Include any |2*b-expectedNDC| input-rounding difference. Because the current scale estimator uses dot(F-expected*W,Raxis), propagate phase uncertainty as B*(abs(W[c])+abs(Raxis[c])*sum_j(abs(W[j]*Raxis[j]))) for spatial j=0..2, alongside existing view/composition errors. Apply the same uncertainty to distinguish expected nonzero from zero. This is a proposed correction domain, not a universal bound for optional crop/alternate construction or an implemented policy.
+
+**2026-10-17 operation-derived forward-camera certificate correction.**
+
+The user authorized implementation, Sol RE and tests, and Astra evidence
+consultation only. The captured 2d25730e pair supplies the counterexample; no
+additional pre-fix flight was requested. This changes the exact centered
+Upstream forward-light admission certificate, not the injected phase or the
+temporal backend. The existing source/currentness, converter lineage,
+donor/consumer agreement, used-view, origin and ownership gates remain.
+
+The shared `forward_light::phaseAxis` helper budgets the engine's rounded
+frustum endpoints and center division before final matrix composition. It
+includes input division rounding and propagates the coefficient uncertainty
+through the fitted scale into all four matrix components, including
+translation. Nonzero-versus-zero distinguishability uses the same uncertainty.
+The phase-failure analyzer calls the same helper and reports its exact failed
+component and bound; it no longer carries a separate copy of that policy.
+
+The certificate derives a compatible native-scale interval from the stored view
+norm and composition uncertainty, then a half-height interval. It refuses
+unless the whole interval supports the relative-error model: finite normal
+intermediates, representable doubled half-height and shifted endpoints, a
+rounded-endpoint Sterbenz condition, and normal nonzero shift, canceled
+numerator and quotient. Exact zero has no added absolute phase tolerance.
+Unsupported extremes and phases erased by float rounding refuse. This checks
+the actual used net transform against supported centered arithmetic; it does
+not recover historical hidden camera/crop flags. Off-center effects outside the
+derived envelope refuse.
+
+Independent Sol fixtures use explicit float32 operations to reproduce all four
+bootstrap and all four rejected Y components bit-for-bit, then vary FOV,
+aspect, stored view rotation, origin, extent and both signed phase axes. They
+also challenge missing, reversed, doubled, single-axis and prior phases, stale
+lineage, component corruption and unsupported numeric regimes. Astra consults
+only on the disassembly and arithmetic/domain proof; it does not run or
+implement tests.
+
+Sol's focused CPU rig passed: 9,570 bound checks across 2,016 independent
+engine cameras, forward core 166/0, integration 100/0, phase algebra 68/0,
+collector 90/0 and the complete temporal policy rig. Root reviewed the
+arithmetic and changed regions. Review corrected the lower-normality checks to
+use a separate lower bound on injection magnitude; upper error/overflow bounds
+retain the upper magnitude. No new runtime reads, hooks or config keys.
+
+The full validation build passed in 170.3 seconds, including production DLLs,
+all test rigs, installer checks and the full-build receipt. Receipt identity:
+`e91b11e51dc8b1877b69760589f0c05443aac2ab8f41432375f6b08dc56b0fd0`. Commit the
+tested tree, push the feature branch, then promote the clean DLLs and install
+with the sanctioned tool. The planned Steam flat `/novr` environment is DLSS
+310.9.1.0 at 3840x2160. Preserve both live INIs, with
+`diag.flat_origin_capture` absent/default off. The next validation is
+stationary: DLSS for 30 seconds, F7 off for 10 seconds, F7 back on for 30
+seconds, menus closed and no manual Full. Keep the game running until the
+log/live checks finish. Main remains unmerged; AA, F1 travel and VR remain
+unqualified until their relevant validation.
+
+**2026-10-17 operation-derived bound: stationary Steam validation PASS.**
+
+Pinned log `edvr_gfx_20261017_142819.log` matches installed
+`v0.20.0-rc.2-130-g942cfeb3`, PE link 6AD3D9AB. The actual profile is Steam
+flat `/novr`, DLSS 310.9.1.0 at 3840x2160. The user completed the stationary
+hangar F7 comparison with menus closed. Origin probe remains absent/default
+off, main unmerged. Sol independently audited the sanctioned log output; no
+Astra tests or live memory read were needed.
+
+F7 turns AA off at 14:30:32.215 and restores configured DLSS at 14:30:42.339, a
+10.124-second interval. Before F7, the 14:30:09-29 windows already resolve
+449-450 nonzero phases each, with matching row pairs and zero
+skipped/mismatched pairs or accepted resets. After restoration, the first
+window includes the expected bootstrap: two zero-phase resolves, one skipped
+pair and one accepted reset. From 14:30:52 onward, stable windows again resolve
+nonzero phases with row pairs and zero accepted resets. At 14:32:07, the
+renderer has 9,435 calls, 9,432 accepted continuations and an unbroken
+6,502-frame continuation run. Cumulative accepted resets and lost-history
+remain three; frame-gap, invalid-previous-camera, format-change, camera-cut,
+backend-failure and origin-ambiguity resets are zero.
+
+At 14:32:24.751 the forward guard reports 10,868 qualified and CPU-issued
+donations. Phase, origin, view, issue and abandoned refusals remain zero. The
+automatic failure capture is live and awaiting its first phase refusal: 13,914
+primary entries, 10,868 eligible snapshots and zero phase failures. Existing
+startup ownership/overflow/unknown-depth refusals remain, and lineage checks
+continue to refuse other calls without blocking the selected route. No
+admission gate was bypassed. Completed row-resolve/backend/history counters
+provide evidence beyond the CPU-issued donation count.
+
+- Ruled out: the derived bound still produces the old zero-only resolve and
+  repeated rejection/reset loop in this stationary hangar, because nonzero
+  selected-row resolves and thousands of uninterrupted history continuations
+  now occur before and after F7.
+
+This qualifies stationary phase admission and history continuity for this Steam
+flat environment. The user reports edges steadier overall when DLSS is restored
+and says the issue appears fixed. This does not validate real inward travel
+versus re-anchor behavior or VR. No further stationary capture is needed for
+this arithmetic question. The user was explicitly released to quit normally
+after the log checks; no live read is pending. Keep the probe off and main
+unmerged while deciding the remaining validation.
+
+The user asks to resume the original F1 validation. Sol checked the live-policy
+predicates against the prior normal-space flight: roughly 5 km origin jumps
+were observed at 15-16 ms there, while multiple-c supercruise left this
+selected camera translation near zero. The phase-bound correction does not
+change that SC camera mapping. No new instrument or build is needed for the
+next control: same Steam flat build, DLSS on, origin probe off; normal-space
+straight travel to 20 km from the station, stopped 10 seconds, straight return
+to about 5 km, stopped another 10 seconds. Keep heading steady on each travel
+leg and assess smear, jumps and prolonged blur. The always-on origin-ambiguity
+event and cumulative counter must show a qualifying reset, followed by resumed
+nonzero phase and accepted history; loss of selected-route treatment makes it
+inconclusive. This is a reset/recovery compatibility test at coordinate jumps.
+At 550 m/s and 90 fps normal travel is about 6.1 m/frame, so it is not a true
+greater-than-50-m/frame travel control. Do not force a low frame rate. The
+synthetic signed inward-travel defect remains covered by the GPU fixtures;
+physical event classification and VR remain unqualified. Main stays held.
+
+**2026-10-17 conservative flat F1 reset/recovery validation PASS; merge
+authorized.**
+
+The user completed the normal-space 20 km departure and return to 5 km in the
+same Steam flat session, with DLSS on and the origin probe off. Pinned log
+`edvr_gfx_20261017_142819.log` still matches installed `942cfeb3` /
+`v0.20.0-rc.2-130-g942cfeb3`, `/novr`, DLSS 310.9.1.0, 3840x2160. The user
+reports no obvious smearing, sudden jumps or prolonged blur and then explicitly
+authorizes merging this fix to main. Sol independently audited the events and
+their surrounding selected-route windows. No new build, instrumentation or live
+memory read was required for this result.
+
+Seven events at 14:39:07.682, 14:39:16.740, 14:39:25.638, 14:39:36.530,
+14:40:09.920, 14:40:18.909 and 14:40:29.455 log `flat resolve origin ambiguity
+reset`. Camera steps are 4993.926-4998.983 m, with row deltas
+0.000158-0.001745. Origin length falls from 5017-5022 m to 21-25 m. Each event
+adds exactly one to accepted-reset and origin-ambiguity-reset totals; the
+latter runs from zero to seven. Immediate post-event continuation runs are 43,
+128, 227, 147, 291, 382 and 331, growing to 492, 578, 677, 565, 741, 831 and
+774 in the next windows. Enclosing HDR windows fully select, admit, finish the
+backend and restore all 450, 450, 447, 450, 444, 450 and 448 frames
+respectively, with zero declines. Nonzero row resolves retain matching pairs
+and zero skipped/mismatched pairs throughout the measured legs. This
+establishes treatment across the jumps, beyond CPU-issued donations.
+
+At 14:40:58.162, calls are 53,915, accepted continuations 53,808, accepted
+resets 107, origin-ambiguity resets seven, and the final continuation run
+2,499. Backend failure, frame gaps, invalid previous camera and format changes
+remain zero. Phase failures remain zero. The caller's `accepted-reset-5s` field
+is not the final internal reset decision: use the explicit event and renderer
+cumulative counters for ambiguity resets. The selected route may use the older
+anchor outside the hangar; this is not a claim that every jump uses the newly
+admitted forward-light donor.
+
+The 99 requested-reset and lost-history totals predate the measured jumps and
+stay at 99 throughout them; these overlapping counters are not additional F1
+events. Earlier at 14:33, a transient observation-truncation burst coincides
+with requested/lost-history churn, then recovers by 14:33:57. Its underlying
+cause remains unclassified and is a separate coverage/performance caveat. The
+existing camera-cut policy adds one distinct reset at 14:38:45.650, with row
+delta 1.084, before the seven measured ambiguity events. Do not label all 107
+resets as F1 or dismiss the earlier burst as a menu transition.
+
+- Ruled out: the conservative F1 ambiguity reset produces sustained history
+  loss at the measured normal-space origin jumps, because each of seven
+  isolated resets is followed immediately by growing nonzero-phase history,
+  with no visual problem reported.
+
+This validates the conservative flat fix's normal-space reset/recovery
+behavior. Continued history retains the actual camera translation, while
+ambiguous jumps reset rather than erase it. The greater-than-50-m/frame
+physical inward-travel counterexample remains covered by the automated GPU
+fixtures; this 550 m/s flight does not exercise that physical regime. Exact
+history-preserving re-anchor classification and VR reset propagation remain
+separate, unqualified work. The user was explicitly released to quit normally
+after log checks. Preserve `diag.flat_origin_capture` absent/default off. The
+previous main hold is revoked by the user's merge instruction.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
@@ -15437,3 +17263,535 @@ Next: ask the reporter to set `edvr-flat.ini` `[log] max_mb=128`, restart, and r
 Press NumLock while FSR has no visible effect inside the Operation, then again after
 leaving if it remains ineffective; note both times and bundle promptly. A normal-scene
 capture with FSR working would provide the comparison. Keep FSR selected for captures.
+
+## 2026-10-17 — crowded on-foot instance FSR report
+
+Archive `edvr_logs\reports\20261017-133430`; sender reports ~20 commanders in an
+instance and strange visuals mainly on foot; no confirmed FSR shutdown. Flat `/novr`,
+scope both/EDHM; rc.2 `6AD165AB`, RX 9070 XT, FSR3 3.1.2, native R=E=D=3440x1440;
+FSR init/history succeeded.
+
+At 12:43:22–12:43:37, four windows declined all HDR triggers as `blank-scene`
+(476–599/window; backend=0), recovering at 12:43:42. Another burst at 12:44:07–12:44:12
+declined 352 and 512, then recovered at 12:44:17. At 13:20:08 FSR treated
+188/195 HDR triggers (backend=188), with 7 spatial fallbacks; at 13:20:13
+FSR treated 202/218 (backend=202), with 16 spatial fallbacks.
+The route stayed `auto`/FSR, with no SDK shutdown or backend failure before the cap.
+
+The selector logged `relevant-observations-truncated` for 5,501
+frames across 37 five-second windows, mainly 12:45:17–12:47:52 (up to 200
+refusals/window), with short bursts through 13:04:22. Treatment resumed between
+bursts and remained active later. This selector reason covers a per-frame
+uncertain prefix or multiple output copies, as well as fixed tables of 128
+targets and 32 source records; it does not by itself prove capacity exhaustion.
+The prefix resets each watched frame. Fresh main retains the rc.2 truncation
+decision and those table bounds. Discriminate with the actual source/target
+counts, copy count and first uncertainty cause in an affected frame. The
+foreground-contract refusal below totals only 37 captured frames; its late
+cluster is separate from the larger earlier truncation burst.
+
+At 13:20:13 phase guard: `foreign phase missing bound projection publication` for VS
+`CFCA8FFC6B058630` / PS `8A08FF781272C5F6` (cap=4, overflow=0); known recipe: B0 row 4 ForwardDp4.
+`copyConstants=false`: no readable 64-byte projection CPU publication; bound range passed.
+The log cannot distinguish an untracked buffer from a missing/invalid generation.
+Unknown pairs: 40/64; no overflow.
+
+Fresh main includes `942cfeb3`'s forward-light-camera frustum-rounding fix for other
+exact VS/PS pairs, not CFCA. This guard is separate; the fix does not establish a cure.
+
+The graphics log capped at 13:20:13. The 13:34:27 vertex-resync close line and
+breadcrumbs show the process continued, leaving ~14 minutes without treatment data.
+The crowded on-foot cause remains unproven.
+
+Next: add and verify passive, failure-only receipts before requesting another
+diagnosis flight. NumLock general gives shader/state/routing and a two-frame
+draw census, but does not expose the selector's first `uncertain` cause and
+target/source/copy counts, or CFCA's bound VS b0 CPU-shadow/private-buffer
+lookup at the failing draw. Record those two witnesses, including actual
+binding/range and generation/shadow status, then confirm their failure paths
+emit them before flying. For that flight raise `edvr-flat.ini` `[log] max_mb=128`,
+keep FSR selected, and capture the visible interval. Saved DXBC alone cannot
+distinguish either failure.
+
+## 2026-10-17 — passive flat refusal receipts (built, not flown)
+
+For the rc.2 flat `/novr` RX 9070 XT report at native 3440x1440, we added
+failure-only receipts for the two observed refusal families. On a truncated
+HDR-trigger or output-copy selection, retain the prefix's first uncertainty
+at its source (cause, sequence point, resource and shader identities) and print
+it with the selector route/sequence and target/source/copy counts. On a failed bound projection
+publication lookup, print the actual VS binding, recipe row, buffer and byte
+range, plus whether it was an untracked buffer, an unready/ranged private
+upload, or a tracked shadow with missing/mismatched generation, map, invalid
+contents or range. Each family has its own three-detail-per-five-seconds
+budget; the existing runtime heartbeat shows totals and suppressed details,
+with per-cause counts emitted only for failures. No admission, backend or
+AA rendering decision changes. The full `build.bat --wait-lock` passed all
+gates on 2026-10-17; flight verification remains pending.
+
+The failure detail lines are `flat selector truncation receipt:` (HDR trigger
+or output copy) and `flat foreground projection lookup receipt:`; their
+five-second cause totals append `receipt 5s:`. The existing `flat runtime:`
+heartbeat has `selector-receipts`, `selector-suppressed`,
+`projection-lookups`, and `lookup-suppressed`, so zero activity and exhausted
+detail budgets remain distinguishable. On the next flight, raise
+`edvr-flat.ini` `[log] max_mb=128` and capture the affected interval.
+
+## 2026-10-17 — Steam RC3 main-menu AA report
+
+The user reported no visible AA effect on the main menu's 3D ship/hangar
+background, then confirmed AA appeared to work in the loaded station/hangar.
+The running Steam flat `/novr` log is `edvr_gfx_20261017_162438.log` under
+`C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\edvr_logs`.
+`edvr_log.py --expect-build HEAD --version` verifies `v0.20.0-rc.3`, build
+`6AD3EB57`. The origin probe remains off. No rendering change or install was
+made for this investigation.
+
+Earlier fully treated windows at 16:26:30–40 were TAA (`on`), following several
+live AA setting changes; they do not establish successful DLSS at that time.
+The setting returned to DLSS at 16:27:05.818. At 16:27:15, all 435 HDR frames
+were refused. The new selector receipts identify `forward-refusal`, detail 5
+(`unknown-depth-writer`), affecting both HDR and output-copy selection. Frame
+16010 records its first uncertainty at prefix q1394, before HDR q1668 and copy
+q1669. Targets 26/128 and sources 1/32 rule out literal table exhaustion for
+that receipt. First VS/PS are zero because the forward-refusal call does not
+pass shader identities. This is a real refusal interval; its exact alignment
+with the user's scene changes still needs a controlled menu sample.
+
+By 16:28:55, DLSS had treated 13,242 frames, with 5,150 consecutive treated
+frames and refusal count unchanged at 4,025. The HDR route was inapplicable at
+2496x1404 below output size, while the final-copy route continued treatment.
+Backend failures remained zero. The user's visible hangar result agrees with
+this recovery.
+
+Ruled out: recurrence of the prior nonzero-phase certificate rejection in
+these windows, because phase failures remained zero and camera row pairing
+succeeded. The RC3 P-B change only skips successful diagnostic receipt payload
+work; its observer does not change rendering qualification.
+
+Open: identify the unknown depth writer and establish whether steady main-menu
+rendering reproducibly refuses. Do not relax depth ownership or raise table
+bounds from this evidence. Next evidence should be a stationary main-menu
+draw/state capture with DLSS left selected; no flight is required.
+
+## 2026-10-17 — RC3 carrier on-foot capture and user bundles
+
+The user then reproduced no visible AA while on foot in the carrier hangar.
+The same Steam RC3 log verifies sustained refusal: at 16:31:20, all 449 frames
+were refused; at 16:31:30, all 450. Both selectors report forward refusal,
+detail 8 (`ambiguous-camera`), below target/source table limits. The guard's
+arithmetic `phase` counter stays zero. The general jitter failure census does
+report `ambiguous-camera` and `compute-source-invalidated`; those are not a
+recurrence of the operation-derived phase-bound rejection.
+
+The user armed Full with Shift+NumLock at 16:31:46. The saved
+`traces/flat_trace_40279.bin` contains three complete frames, 6,612 events,
+peak 2,234 events, no overflow. Six selected draw packets completed. The light
+audit saved four verified payload files and drained at 16:31:50.552, but its
+result is explicitly `payload-only-or-partial`, not record-complete. Discovery
+finished at 16:33:46.847; the user was released from the stationary hold.
+
+Initial causal trace review finds different camera bytes on raw depth
+`254A16228E0`: frame 40276, projection-only `84F6596FAF22CCFA/null` at q580,
+typed origin `7B0DC42D383F694C/0DF03E64DF9DBEF1` at q590, then supported
+`DE545DC8EE4FBB87/E46E3E4832B2FDB0` at q594. These share the same constant
+buffer generation/bank/range. This rules out buffer identity alone as the
+cause of the camera mismatch. The census records depth test enabled and
+write-all for the 7B0D/0DF0 pair (`ds=17wA`); the audit DSV has no read-only
+flag. FTR's depth-write bit is not populated for every draw, so its zeros
+must not be interpreted as proof of read-only depth. Actual GPU execution
+and the safe camera-ownership policy remain separate questions.
+
+The supplied `edvr-logs-20261017-152404.zip` also verifies RC3, AMD RX 9070 XT,
+flat `/novr`, measured native 3440x1440, with EDHM chained. At 15:13:50.310,
+frame 15992, the first causal receipt is unknown writer (detail 5), q2350
+before HDR q2458, targets 20/128 and sources 1/32. All 581 frames at 15:13:58
+and all 535 at 15:15:11 refuse before backend execution. The matching status
+reports docked/in-main-ship, not on foot. Later FSR 3.1.2 treatment succeeds,
+including 509/509 frames at 15:16:11 and a longest treated streak of 14,922.
+Thus this is intermittent admission failure, not a universal backend fault.
+
+The supplied `edvr-logs-20261018-012309.zip` verifies the same RC3 build on
+RTX 3050, flat DLSS, native 1920x1080. It contains only 17 resolves, with no
+backend, arithmetic-phase or origin-ambiguity failures. Unknown writer and
+forward ledger overflow dominate the initial refusal run; ambiguous camera
+is an additional later cause. The initial run precedes minimization, and
+later ambiguity occurs between client-size restoration and the next
+minimization. Zero-sized presents cannot explain away those failures. This
+bundle has no Full sidecars or precise scene marker.
+
+Open: determine whether the new forward-camera guard is refusing an optional
+candidate or revoking authority on which the current output actually depends,
+and identify a safe policy for the captured projection mixture. Do not admit
+mixed depth merely by relaxing equality. The bundles lack the unknown writer's
+shader identity, so they establish a refusal family, not the same offending
+draw. The current saved capture is being audited before another test or fix.
+
+## 2026-10-17 — rejected forward candidate poisons independent AA route
+
+The source audit identifies a narrower scope error than the genuine mixed
+projection refusal. `forwardRefusal` treats `H == phaseHdr` as current
+ownership. `phaseHdr` is a retained phase-planning resource, including after
+history invalidation; it does not prove that this frame donated forward
+camera authority. A rejected first candidate can therefore mark the entire
+prefix uncertain before an independent ordinary camera path is established.
+
+The saved frames contain that independent path. H's first forward-light CB2
+matches camera A's consumed projection fields exactly. Later ordinary H draws
+establish A at q1050/1045/1073. The sole B camera-bearing H draw is the existing
+special laser pair, whose ordinary contract already keeps its camera separate.
+The new forward donation can remain rejected without automatically rejecting
+this independently judged path.
+
+Sol replayed original `flat_trace_40279.bin` and a counterfactual with exactly
+one pre-first-light uncertainty mark removed per frame. No earlier forward
+attestation exists. Every draw, resource write, dispatch write, foreign flag
+and overlay event remains unchanged. Original frames 40276–40278 reject both
+selectors as truncated. All three variants select the final-copy candidate;
+HDR correctly remains inapplicable because 2496x1404 is below 3840x2160 output.
+The existing test executable performed the replay; helper and variant are in
+ignored `build/rc3_onfoot_pre_authority_replay.py` and adjacent outputs.
+
+This confirms selector recovery, not nonzero-phase GPU execution: the trace
+replay does not execute the phase machine. The implementation must keep
+candidate failure reasons and counters, raw-depth ambiguity/unknown-writer
+checks, and strict revocation after a current forward donation. Only the
+retained planning identity must stop acting as current camera ownership.
+No new toggle, shader role or numerical tolerance is justified.
+
+The narrow implementation uses the shared
+`flatRuntimeOwnsForwardCamera(prefix, H)` decision: the current target must
+have a forward-camera attestation stamped with this prefix's frame. It keeps
+the typed tone proof after revocation clears `hdrCamera` and sets `hdrBad`,
+so invalidating an actual donation still cancels the frame. Candidate counters
+remain unconditional. Focused compilation and the complete CPU temporal
+self-test pass, including 114 forward integration checks and the unchanged
+9,570 phase-bound checks. The absolute `build.bat --wait-lock` full build
+passed all gates in 155.5 seconds, including production DLLs, all CPU/GPU
+rigs, installer payload checks and receipt
+`96218cae9b22f989144746aee1a60308d8290d2c4a594d12316099ca1508f8e5`.
+Console: `build/rc3-aa-candidate-scope-full.log`. Live nonzero-phase/history
+and visible AA validation remain pending; main stays unmerged for that check.
+
+Clean commit `c7c14898` was promoted with `--dll-only --wait-lock` in 34.2
+seconds and installed/verified for Steam flat. Installed product version is
+`v0.20.0-rc.3-1-gc7c14898`; DLSS remains selected and the origin probe remains
+off. Use `edvr_log.py --target steam --expect-build c7c14898` for this test:
+the following Python-only installer maintenance does not change the renderer.
+
+Installation initially stopped on an obsolete October 10 native receipt even
+though the current GUI record and descriptor proved a flat install, with
+matching graphics hashes and no VR components. The install tool now has an
+explicit `--retire-stale-native-receipt` maintenance operation. It verifies
+those facts, validates the old receipt's target and backup paths, rejects an
+EDVR VR runtime, checks for changed evidence and a running game, and archives
+only that receipt with byte verification. Dry runs write nothing. The entire
+installer-tool self-test passed twice, including refusal, dry-run, backup
+reference preservation and subsequent install/verify cases. This Python-only
+maintenance was tested separately from the C7 full C++ build. The live receipt
+was archived with its SHA256 unchanged before ordinary flat installation.
+
+## 2026-10-17 — RC3 scope fix live validation PASS; merge approved
+
+Steam `edvr_gfx_20261017_164857.log` verifies rendering commit `c7c14898`,
+build `6AD3FA41`, flat `/novr`, DLSS selected and origin probe off. At measured
+2496x1404 render size and 3840x2160 output, the final-copy route treats the
+frame; HDR's below-output refusal remains expected.
+The adapter is RTX 5090; the installed DLSS DLL file version is 310.9.1.0.
+This is flat D3D11 validation, with no headset or VR runtime involved.
+
+The main-menu F7 comparison runs from 16:50:34.657 off to 16:50:35.189 restored.
+At 16:50:43.828, all 450 resolves have nonzero phase and paired camera rows,
+with 450 history continuations, no row mismatches, no selector receipts and
+no backend failures. The on-foot carrier comparisons restore DLSS at
+16:51:38.600 and 16:51:40.433. At 16:51:53.861, all 450 frames again have
+nonzero phase and history continuation; 449 follow at 16:51:58.859. The treated
+streak later reaches 6,242. The user reports that both scenes appear fixed.
+
+Additional short F7 comparisons also recover. Through 16:53:16, backend
+failures, frame gaps and camera cuts remain zero. The renderer's 17 resets
+comprise 12 requested/history restarts and five isolated origin-ambiguity
+resets with recovery, not a per-frame reset loop. Candidate-local forward
+refusals can still increment counters while independent AA treatment works;
+no sustained selector stand-down or phase-failure loop remains in the tested
+windows.
+
+This closes the observed Steam main-menu/on-foot AA regression. It does not
+certify every shader camera or the two reporters' other GPU/backend setups.
+The user explicitly approved merging the tested fix to main. No further
+flight, capture, setting change or reinstall is needed for that merge.
+
+The final whole-branch `build.bat --wait-lock` also passed all gates in
+143.9 seconds, including the Python installer maintenance and installer
+payload checks. Log: `build/rc3-aa-merge-full.log`; receipt:
+`6edfae70ab67d17b8e21e0095697a6ab07afebaa99d63f4bb7cd961aa9c77893`.
+
+
+## 2026-10-17: RC4 intermittent AA report, bundle 003450
+
+Archive `edvr-logs-20261018-003450.zip`, safely extracted under
+`build/user-aa-reports/edvr-logs-20261018-003450`, contains 11 log/config files.
+The sanctioned reader verifies `edvr_gfx_20261018_002615.log` as exact
+`v0.20.0-rc.4` (`735f495d`, PE `6AD40199`), Steam flat `/novr`, RTX 3070 Ti
+Laptop, DLSS model K, 1664x702 into 2560x1080. Driver/DLSS file versions are
+not recorded; VR/headset N/A. CPU timing stayed off. Actual Motion source view
+was on, toggled off at 00:28:16.763 and on at 00:28:24.687. The bundled
+`advanced.temporal_aa_debug=motion_source` was explicitly ignored as unknown;
+no F7 AA toggle was logged. Config text is evidence, not instructions.
+
+There are real temporal-admission failures, not just debug-color changes:
+
+| Recorded interval | DLSS treatments | Temporal refusals |
+|---|---:|---:|
+| 00:26:40-00:27:00 | 1443 | 0 |
+| 00:28:01-00:28:21 | 989 | 494 |
+| 00:28:46-00:29:21 | 2576 | 0 |
+| 00:29:26-00:29:46 | 963 | 454 |
+| 00:30:11-00:30:21 | 517 | 217 |
+
+End counters: 10,712 DLSS treatments, 1,594 truncated refusals and 1,597
+successful spatial recoveries; no backend/recovery failures. Repeated history
+resets accompany the dropouts. The last window still adds 132 DLSS treatments;
+the log establishes intermittent loss, not permanent cessation after landing.
+No position/speed/landing event joins those symptoms to exact frames. The
+process-exit breadcrumb and log tail show a completed session, not a proved
+log-size cap. Parsed evidence: `build/rc4_reporter_002615_summary.json` and
+sanctioned reader stdout with that prefix.
+
+The initiating failure is at 00:27:59.721, frame 6862, q770, H `...5F81060`:
+VS `7E38A6AA1269C901` / PS `7CECABDE34FFBE9E`, deferred relation
+`forward-mismatch`, accepted/missing-phase/prepared/warmed all zero.
+Actual/input/original/current flags pass, CB2 write 6862/769, donor last q754,
+requested phase `(0,-0.166666657)`. A later exact failing sample at
+00:30:14.716, frame 16651 q2389, has `inverse-mismatch`, a separate stage.
+
+The verifier's `deferred-inverse-unproven` marks prefix uncertainty as
+`deferred-execution`. The later dispatch's `compute-source-invalidated` merely
+repeats the existing uncertain prefix; it does not prove another resource or
+CB mutation. HDR and final-copy selectors then both report
+`relevant-observations-truncated` for the same first mark. At first failure,
+targets were 19/128, sources 1/32; later receipts show 14-15 targets and one
+source, copies=1. Observation-drop counters are zero. Counts 236 and 124 in
+the cause windows are twice 118 and 62 refused frames (HDR plus copy).
+
+Startup is separate: first trained route 00:26:36.334 (frame 1189), NGX
+initialization 958 ms, first resolve/reset 00:26:37.387 (frame 1191), 1.053 s
+after route discovery. Passive discovery finishes only at 00:28:15.797.
+There is no menu-arrival timestamp to verify the reported 4-5 s interval.
+The existing structural standdown/probe and preflight retry predate RC4.
+
+Ruled out: fixed-table exhaustion as the initiating failure, because the
+receipt names deferred execution with 19/128 targets and 1/32 sources.
+Ruled out: repeated DLSS initialization/backend failure causing these
+alternations, because initialization ran once and all backend failures stayed
+zero while temporal refusals and spatial recovery grew.
+Ruled out: the pending guarded-output-scan change causing this RC4 report,
+because `219d2bdb` is absent from the reporter's `735f495d` binary.
+Ruled out: a new generic movement requirement in the camera table, because its
+current-frame-write rule and header are unchanged since v0.19.1; rewriting
+identical bytes remains valid. A genuinely unwritten original is different.
+
+The new deferred matcher/repair path was not present in v0.19.1. Its forward
+and translation gamma8 and inverse gamma12 bounds use final-term magnitudes;
+they do not use the operation-derived centered-frustum envelope added to
+forward-light admission. A false rounding rejection is plausible, not proven.
+A real wrong projection/donor or different inverse construction remains open.
+The first forward mismatch cannot reach missing-inverse repair, which requires
+an initial Inverse result. Do not loosen bounds from these metadata flags.
+
+The automatic `flat_trace_6862.bin` (4 frames, 5411 events, 2,727,352 bytes,
+no overflow) was written but is absent from this ZIP. FTR carries sequencing
+and the 96-byte camera but explicitly clears projection byte pointers; it
+cannot restore the original 112-byte H CB2 or exact pre-failure phase. The
+bundler supports trace files; absence here does not prove intentional omission.
+
+Existing Shift+NumLock Full captures can log the paired original rows and
+donor before cloning, but stop after two complete projection samples or four
+attempts, spaced 91 frames. Two successful bootstrap phases can exhaust that
+budget before a failing nonzero phase. Writer phase is also logged after
+failPhase and can zero when no phase was applied. A generic successful Full
+capture is therefore not guaranteed to contain the numeric failure witness.
+
+The user report authorizes diagnostic work on `codex/rc4-aa-disengagement`,
+separate from the unmerged guarded-scan branch. Add a failure-only witness
+inside the existing first-call/5000-ms ownership budget, before failPhase:
+exact original 112 bytes, donor 96 bytes, requested phase bits, same-event
+frame/q/H, relation and source identities/stamps. Explicit unavailable flags
+must prevent reading missing/uninitialized arrays; successful draws incur no
+formatting, new clock or query. Four bounded lines repeat their event identity.
+
+Discriminate in one stationary capture: true projection/donor mismatch versus
+unphased original versus forward/inverse rounding rejection, using the actual
+paired bits and the precise failing stage. Existing acquisition metadata stays
+with the payload. No AA admission, arithmetic bounds, config or renderer policy
+change is authorized by the current evidence. Validate byte preservation,
+unavailable handling, line limits, budget and pre-refusal ordering, then run
+the full build before offering the diagnostic DLL. Keep Steam's installed
+`219d2bdb` guard validation build untouched.
+
+Implemented the passive witness in `flat_deferred_failure_witness.h` and the
+two verifier refusal paths. The phase, 64-bit applied count and event stamp
+freeze before repair/preparation; the donor freezes before existing ownership
+queries. A binding-only failure explicitly lacks verifier-original bytes.
+No successful-draw formatting, extra D3D query, new clock, policy/config change
+or admission-bound change was added. All four lines join on frame/q/H.
+
+Focused temporal rig passed, including 35 new payload checks: exact 112/96
+bytes including NaN/signed-zero bits, full-width counters, unavailable/poison
+pointer gates, valid zero payloads, bounded lines, old budget boundaries and
+limited source wiring for pre-refusal order. The full absolute-path locked
+build passed all gates in 158.5 seconds, including production DLLs, rigs and
+installer payload validation. Log: `build/rc4-deferred-witness-full.log`;
+receipt input identity:
+`eb6ef03233937503284d70b7a6eebac6f10ee4ab7172830720b1c4ae8ce6a6bc`.
+
+Next capture uses the clean diagnostic flat DLL, DLSS selected and origin
+probe off: remain stationary with menus closed in the reported failing landed
+scene for 30 seconds, then quit normally and bundle the log. No Full/F7 arm is
+needed. Expect `flat deferred failure witness: v=1` plus original stamp,
+original bytes and donor bytes when a refusal occurs; absent witness with
+zero new deferred failures is a non-reproduction, not proof the instrument
+ran. The observed pair and phase must reproduce the failing numerical check
+offline before proposing an admission fix. This diagnostic has not been flown.
+
+## 2026-10-17: Steam main-menu AA mode-switch delay
+
+Sean confirms the parked-ship main menu remains open throughout, and switching
+AA modes in F8 causes a visible delay before engagement. Sanctioned reader
+verifies `edvr_gfx_20261017_194338.log` as the installed guarded-scan build
+`v0.20.0-rc.4-5-g219d2bdb`, PE `6AD41F4B`, not diagnostic `c6e528ea`.
+Environment: Steam flat `/novr`, RTX 5090, DLSS model M/preset 13,
+2496x1404 into 3840x2160; driver/DLSS runtime versions unavailable, VR N/A.
+CPU timing is enabled. Main and the Steam installation remain unchanged.
+
+Startup has a separate one-time cost: no-scene standdown enters 19:43:45.117,
+resumes at 19:44:16.886, route trains at 16.919, NGX completes after 1025 ms
+at 17.944, and first resolve is 18.040. By 18.986 there are 73 treatments,
+two accepted resets and 71 continuations. This does not measure menu arrival.
+
+The repeatable failure follows F8 mode changes, without NGX reinitializing:
+19:44:20.623 TAA, 22.552 off, 23.040 TAA, 23.707 DLSS. Another sequence at
+19:45:36.393 TAA and 41.182 DLSS reproduces the refusals. After recovery, the
+unchanged scene sustains thousands of consecutive treatments. Conflict receipts
+name `selector-hdr-camera-provenance`, not deferred inverse propagation.
+At frame 13295 q409, the reference camera is invalid and current camera valid,
+but both hash to `63676EB4A55692F9`, with the same shaders, target, depth and
+dimensions. The copied reference retains a B1 identity and current write stamp;
+the selector's current scene-camera record has a null B1. Identical hashes
+alone do not establish current provenance.
+
+Discriminator from 19:44:23.985 to 29.010: qualified forward-light donations
+increase 76 to 263 (187); the selector-camera-provenance conflict window is
+exactly 187. Forward guard refusals increase by 253, and treatments also
+increase by 253. This joins the optional successful forward-camera path to the
+lost-copy proof, rather than a delay in DLSS initialization.
+
+Root cause reproduced offline: the verified `kMenuHdrCopyVs/kMenuHdrCopyPs`
+branch in `flat_runtime_model.h` creates a new destination tone and transfers
+`deferredCamera`, original projection, scene-camera identity/stamps and the
+camera bytes, but omits `forwardLightCamera`. Its source passes cameraCurrent
+with a 752-byte forward-light projection. The inherited destination loses the
+type bit, so cameraCurrent expects a 112-byte deferred projection and rejects
+the unchanged 752-byte witness. Before any production change, the regression
+fails exactly the retained-type and destination-currentness assertions; a
+test-only type-bit counterfactual restores currentness. Log:
+`build/flat_menu_proof_before_fix.log` (119 integration checks, two failures).
+
+Minimal correction: inherit `forwardLightCamera` alongside `deferredCamera`
+inside that already-verified menu copy. Do not loosen sizes, camera identity,
+write epochs, order, depth or source validation. Independent Sol review found
+the same bug and audited the adjacent image-copy path, which retains its
+existing destination tone instead of constructing another partial copy.
+The source/output phase-domain distinction and intermittent optional-forward
+qualification can explain different warmup/nonzero paths; the log does not
+prove every intermediate frame of the three-frame reset cycle.
+
+Ruled out: a new fixed four/five-second warmup timer, because the live-phase
+gate still needs two clean accepted frames, while the old 5 s standdown,
+1.5 s probes and 1 s preflight retry predate RC4. Ruled out: repeated NGX
+initialization causing the F8-switch delays, because it initializes once and
+the subsequent failures are exact selector camera-provenance refusals.
+Ruled out: using this menu type-loss fix as proof of the external reporter's
+forward/inverse mismatch, which is a different refusal stage and still needs
+the paired matrix capture above. No further flight is needed for menu
+reproduction; validation is a stationary F8 switch and clean history recovery.
+
+After the one-field fix, the same integration rig passes all 119 checks with
+destination forward=1, copied=752 and cameraCurrent=1. The full temporal rig
+also passes, including the 35 paired-payload checks and numerical bounds.
+Full `build.bat --wait-lock` passed all gates in 173.4 seconds; log:
+`build/flat-menu-camera-proof-full.log`; receipt input identity:
+`9fede1234c7b5b3371bb2652d1ca479ef69215fe620433d809e07d8b6085293d`.
+Sean requested Steam installation when ready. Preserve installed guard
+`219d2bdb` by integrating it on a separate Steam test branch and validating
+the combined tree before installation. Keep main unmerged pending in-game
+validation; do not overwrite settings or enable the origin probe.
+
+Combined tree on `codex/steam-flat-menu-camera-proof` retains `219d2bdb`
+without conflicts and passes the full locked build in 166.9 seconds, including
+the menu regression, paired failure payload, functional output guard and all
+production/installer gates. Log: `build/steam-flat-menu-integration-full.log`;
+receipt input identity:
+`5c1363fa92aec050c09c0027b9d4b4e359be257b633ac351879452d2ab2a5de1`.
+The clean DLL promotion, DLL-only ZIP and sanctioned Steam-flat install follow
+from this same tested source tree. In-game validation remains pending: leave
+the main-menu scene unchanged, switch DLSS to TAA in F8, wait 10 seconds,
+switch back to DLSS and close F8 for 15 seconds. Keep the origin probe off;
+neither F7 nor Full is needed. Compare engagement delay, selector-camera-
+provenance refusals and renderer history continuity across both transitions.
+
+## 2026-10-17: current validation and Astra RC3/RC4 causal audit
+
+Sean confirms the main menu is fixed and AA engages much faster after the
+Steam install. Exact build `v0.20.0-rc.4-8-ga4a4e751` is verified in
+`edvr_gfx_20261017_195802.log`; the subsequent carrier slow/fast/slow capture
+maintains DLSS/history, with no new stable phase/refusal/reset/backend failures.
+Guard functionality passes; FPS attribution remains unqualified. Exact
+performance groups and remaining raw-domain cost are in the last entry of
+`flat-cz-fps-2026-10-11.md`. No new C++ or install change follows this capture.
+
+At Sean's request, Astra reviewed git/source/diagnostic evidence only; Sol
+handled tests, log aggregation and RE. Astra ran no tests/builds/benchmarks
+and made no changes. Its conclusions distinguish these defects:
+
+- `44a8ef1a`, between RC2 and RC3, introduced forward-light admission and
+  treated retained `phaseHdr` planning identity as live ownership. Rejecting
+  an optional first candidate could invalidate an independent valid camera
+  route. Three recorded frames establish that removing the premature
+  uncertainty mark restores the valid route; `c7c14898` scopes that authority.
+- The same new typed path introduced the 752-byte forward discriminator.
+  The existing menu-copy branch omitted it when inheriting a camera record,
+  guaranteeing a 112-byte-type rejection of the copied 752-byte witness.
+  `d1673809` fixes the transfer; before/after reducer evidence and Sean's
+  successful main-menu validation support this result.
+- The external RC4 forward/inverse mismatch is a distinct unresolved stage.
+  Chronology matters: `82dbf1b0` predates RC2, and
+  `git diff v0.20.0-rc.2 HEAD -- src/d3d11/flat_deferred_camera.h` is empty.
+  Gamma8/gamma12 and missing-phase repair already existed in RC2. Changed
+  surrounding execution could expose them; neither a new bound nor onset
+  after RC2 is established. The earlier comparison with v0.19.1 remains true.
+- The F1 arithmetic model has separate positive evidence: exact engine
+  arithmetic reproduced omitted rounded-frustum construction, corrected in
+  `942cfeb3` before the RC3 tag; stationary recovery and the 20-km out/5-km return passed, with
+  seven bounded ambiguity resets. That qualification does not cover every
+  camera-transfer route.
+
+The common failure is proof composition across stages: optional rejection
+was granted too much authority, a partial record copy lost its proof type,
+and generic downstream refusal labels obscured the initiating stage. Individual
+helper/math tests and a successful steady scene did not cover every inheritance
+branch, mode-change reconstruction and failed optional candidate. The prior
+integration fixture exercised image continuation, not the separate menu-copy
+branch constructing a new destination. Full capture/FTR also lacked guaranteed
+paired numerical inputs for the actual RC4 failure; `c6e528ea` addresses that
+evidence gap without claiming a repair.
+
+Recommended offline release gates: every proof type through every constructing
+or inheriting branch (bytes, discriminator, identity, epoch and currentness);
+rejection before and after donation with an independent valid route; actual
+mode-reset/bootstrap/nonzero sequences; first-failure inputs captured before
+mutation and surviving bundle collection; representative draw/call counts for
+new broad observers. A coherent proof-transfer helper could prevent partial
+copy omissions, but no refactor is made here. These checks reuse existing
+captures rather than require a separate flight per hypothesis. Main remains
+unmerged pending Sean's decision; the external paired capture remains open.

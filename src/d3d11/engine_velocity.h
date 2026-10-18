@@ -300,6 +300,10 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext*, ID3D11Texture2D* de
 void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext*);
 bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceView** out);
 
+// Read-only actual-shader receipt for flat camera provenance. Accepts only
+// original shaders or the currently held exact motion/marker replacement;
+// binding generations/context must still name those original shaders.
+bool engineVelocityFlatSourceShaders(ID3D11DeviceContext*, uint64_t vs, uint64_t ps);
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);

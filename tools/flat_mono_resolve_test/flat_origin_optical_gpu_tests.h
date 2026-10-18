@@ -10,6 +10,11 @@
 // same source buffers it would without the sidecar.
 inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
     using namespace edvr;
+    check(!flatOriginCaptureEnabled(), "origin optical: capture defaults off in production resolver rig");
+    const size_t beforeOff=opticalLines.size();
+    originAmbiguityGpuTests(device,context,RuntimeProfile::Flat);
+    flatMonoResolvePollPixels(context,1);
+    check(opticalLines.size()==beforeOff, "origin optical: default-off reset/poll paths produce no probe output");
     check(flatOriginOpticalCategory(60.f,20,80,false)==0,
         "origin optical: 80 to 20 m inward travel has reserved short-inward quota");
     unsigned spent[5]{};
@@ -29,7 +34,7 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         "origin optical: only shared-support exclusive depth fits can favor zero translation");}
 
     const RuntimeProfile previousProfile=runtimeProfileValue();
-    struct Outcome {std::vector<unsigned char> mask,output;std::vector<float> motion;std::string input,signal;bool score=false;};
+    struct Outcome {std::vector<unsigned char> mask,output;std::vector<float> motion;std::string input,signal;bool score=false,reset=false;};
     auto run=[&](bool reanchor,bool probe,bool gap=false,bool steady=true,bool foreground=false,bool priorForeground=false)->Outcome {
         flatMonoResolveReset();
         runtimeProfileSet(probe?RuntimeProfile::Flat:RuntimeProfile::LegacyVr);
@@ -84,7 +89,7 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         const size_t firstLine=opticalLines.size();
         ComPtr<ID3D11ShaderResourceView> output;
         steadygpu::Seen event=r.run("origin optical: 60 m inward candidate",true,&output);
-        Outcome o{};o.mask=std::move(event.mask);o.motion=std::move(event.motion);
+        Outcome o{};o.reset=event.reset;o.mask=std::move(event.mask);o.motion=std::move(event.motion);
         if(output){ComPtr<ID3D11Resource> resource;ComPtr<ID3D11Texture2D> image;
             output->GetResource(resource.GetAddressOf());if(resource&&SUCCEEDED(resource.As(&image)))
                 check(readWhole(context,image.Get(),o.output,4),"origin optical: final output readable");}
@@ -98,7 +103,7 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
                     o.score=true;o.signal=opticalLines[i];break;
                 }
             }
-            if(o.score || !probe || gap || !steady || foreground || priorForeground)break;
+            if(o.score || !flatOriginCaptureEnabled() || !probe || gap || !steady || foreground || priorForeground)break;
             context->Flush();Sleep(2);
             r.run("origin optical: readback drain frame");
         }
@@ -119,6 +124,13 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         }
         return o;
     };
+
+    const size_t beforeDisabled=opticalLines.size();
+    const Outcome captureOff=run(true,true); // Flat profile, actual startup default remains off
+    check(captureOff.reset && !captureOff.score && opticalLines.size()==beforeDisabled,
+        "origin optical: 80 to 20 still resets with all F1 captures off");
+    flatOriginCaptureInitialize(true); // explicit startup opt-in for the remaining probe fixtures
+    check(flatOriginCaptureEnabled(), "origin optical: explicit opt-in reaches enabled probe");
 
     // Present-frame polling is the production drain/heartbeat path. Run its
     // bounded idle start far above the fixture's resolver frame numbers, then
@@ -148,11 +160,18 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         std::printf("origin optical inward diagnostic: score=%u %s\n",inward.score?1u:0u,inward.signal.c_str());
     check(inward.score && inward.signal.find("signal=raw-travel-depth-favored")!=std::string::npos,
         "origin optical: 80 to 20 m inward travel favors unmodified raw translation on shared static depth samples");
+    check(inward.input.find("planned-reset=1 origin-ambiguous=1")!=std::string::npos,
+        "origin optical: the passive input comparison stays alive on a planned ambiguity reset");
     check(inward.mask==inwardNoProbe.mask && inward.motion==inwardNoProbe.motion && inward.output==inwardNoProbe.output,
         "origin optical: passive sidecar changes neither SDK inputs nor final color");
     const Outcome reanchor=run(true,true),reanchorNoProbe=run(true,false);
+    check(reanchor.reset && captureOff.mask==reanchor.mask && captureOff.motion==reanchor.motion &&
+          captureOff.output==reanchor.output,
+        "origin optical: startup off/on produce identical reset, SDK inputs and displayed color");
     check(reanchor.score && reanchor.signal.find("signal=zero-translation-depth-favored")!=std::string::npos,
         "origin optical: same raw camera jump with reexpressed world favors zero translation");
+    check(reanchor.input.find("planned-reset=1 origin-ambiguous=1")!=std::string::npos,
+        "origin optical: identical camera inputs also report reset when depth favors a coordinate change");
     check(reanchor.mask==reanchorNoProbe.mask && reanchor.motion==reanchorNoProbe.motion && reanchor.output==reanchorNoProbe.output,
         "origin optical: reanchor probe leaves motion, mask, and final color unchanged");
     run(false,true,true);  // frame gap, previous depth no longer adjacent

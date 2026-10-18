@@ -54,6 +54,10 @@ def flat_ini_bytes():
             b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\nintro_video = screen\r\n\r\n'
             b'# compare_aa: F7 turns AA off to compare and back; runtime only, nothing is written.\r\n'
             b'[hotkey]\r\nmenu = F8\r\ncompare_aa = F7\r\ndump_draws = NUMLOCK\r\n\r\n'
+            b'[diag]\r\n'
+            b'# Temporary F1 origin/source/optical/world capture. Restart the game after changing this value.\r\n'
+            b'# Does not change the production origin-ambiguity reset. Flat startup only.\r\n'
+            b'flat_origin_capture = off\r\n\r\n'
             b'[log]\r\nenabled = 1\r\n\r\n'
             b'[advanced]\r\n'
             b'# The mod EDVR chains through (EDHM, ReShade) is set once, in edvr.ini, and applies to the flat profile too.\r\n'
@@ -494,18 +498,29 @@ def self_test():
             assert main(['--root', root, '--build', build, '--out', out,
                          '--version', '1.2.3', '--dry-run']) == 0 and not os.path.exists(out)
             os.remove(os.path.join(build, 'edvr_openxr_runtime.dll'))
-            assert main(['--root', root, '--build', build, '--out', out,
-                         '--version', '1.2.3']) == 1 and not os.path.exists(out)
+            import contextlib, io
+            missing = io.StringIO()  # the refusal under test, relabelled below
+            with contextlib.redirect_stdout(missing), contextlib.redirect_stderr(missing):
+                code = main(['--root', root, '--build', build, '--out', out,
+                             '--version', '1.2.3'])
+            assert code == 1 and not os.path.exists(out)
+            assert 'ERROR: native runtime' in missing.getvalue()
+            print('expected-error: ' + missing.getvalue().strip().replace('gen_installer_rc: ERROR: ', '', 1))
             # The flat edition is retired: --profile is no longer an option at all.
             with open(os.path.join(build, 'edvr_openxr_runtime.dll'), 'wb') as stream: stream.write(b'x')
             assert main(['--root', root, '--build', build, '--out', out,
                          '--version', '1.2.3', '--dry-run']) == 0
             assert not os.path.exists(out) and not os.path.exists(os.path.join(build, 'edvr-flat.ini'))
+            import contextlib, io
+            refusal = io.StringIO()  # argparse's usage text: expected, so not echoed raw
             try:
-                main(['--root', root, '--build', build, '--out', out,
-                      '--version', '1.2.3', '--profile', 'flat'])
+                with contextlib.redirect_stderr(refusal):
+                    main(['--root', root, '--build', build, '--out', out,
+                          '--version', '1.2.3', '--profile', 'flat'])
             except SystemExit as exc:
                 assert exc.code == 2
+                assert 'unrecognized arguments: --profile flat' in refusal.getvalue()
+                print('expected-error: argparse refused --profile flat (exit 2)')
             else:
                 raise AssertionError('--profile flat was accepted')
             for name in ('libxess.dll', 'INTEL-XESS-LICENSE.txt', 'INTEL-XESS-THIRD-PARTY.txt'):
@@ -524,6 +539,8 @@ def self_test():
                 flat_ini = stream.read()
                 assert flat_ini == flat_ini_bytes()
                 assert b'temporal_aa = off' in flat_ini
+                assert b'[diag]\r\n' in flat_ini and b'flat_origin_capture = off\r\n' in flat_ini
+                assert b'Restart the game after changing this value.' in flat_ini
                 assert b'fsr, xess. Game SS controls render scale.' in flat_ini
                 assert b'FSR3 / XeSS-SR' in flat_ini
                 assert b'XeSS-SR needs libxess.dll' in flat_ini

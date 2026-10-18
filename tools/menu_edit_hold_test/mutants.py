@@ -27,12 +27,13 @@ ROOT = HERE.parents[1]
 FILES = {
     "hold": ROOT / "src" / "d3d11" / "menu_edit_hold.h",
     "line": ROOT / "src" / "d3d11" / "config_refresh_line.h",
+    "writer": ROOT / "src" / "d3d11" / "menu_write.h",
     "menu": ROOT / "src" / "d3d11" / "menu.cpp",           # read by the rig as text (H11)
     "perf": ROOT / "src" / "d3d11" / "perf_monitor.cpp",   # ...and this one (H13.p)
 }
 TREE_EXTRA = [("src/d3d11/menu_keys.h", ROOT / "src" / "d3d11" / "menu_keys.h")]
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("hold", "line"), pin_keys=("menu", "perf"), rig=HERE / "menu_edit_hold_test.cpp",
+    here=__file__, files=FILES, header_keys=("hold", "line", "writer"), pin_keys=("menu", "perf", "writer"), rig=HERE / "menu_edit_hold_test.cpp",
     rig_label=":rig_menu_edit_hold_test", rig_source_in_bat="tools\\menu_edit_hold_test\\menu_edit_hold_test.cpp", rig_exe_in_bat="menu_edit_hold_test.exe",
     case_prefix="H", include_dirs=("src/d3d11",), min_mutants=30, run_timeout=120.0, tree_extra=TREE_EXTRA)
 
@@ -104,7 +105,7 @@ MUTANTS = [
       "the writer, told to quit, leaves what was queued before it unwritten"),
     M("reload-puts-the-held-row-back", "H11", "menu", [("        if (g_held.pending() && g_held.def() == i) continue;\n", "")],
       "the reload of an earlier write sets a held row back to the file's value: the hold loses its steps"),
-    M("failed-write-not-rolled-back", "H11", "menu", [("            g_rows[w.job.def].value = rowValue(d);", "            (void)d;")],
+    M("failed-write-not-rolled-back", ("H11", "H15"), "writer", [("            g_rows[w.job.def].value = rowValue(d);", "            (void)d;")],
       "a failed write leaves the row showing a value the file does not hold"),
     # ---- a failed write while a newer edit of the row exists (EditGeneration, the 0.19.0 review's "existing limitation") ----
     M("rollback-ignores-newer-edits", "H14", "hold", [("{ return jobGeneration == latest; }", "{ return true; }")],
@@ -117,10 +118,22 @@ MUTANTS = [
       "a job carries the number before the one the row now holds: no failed write is ever its row's latest"),
     M("job-not-stamped", "H11", "menu", [("    job.gen = g_rows[job.def].edits.next();\n", "")],
       "an edit does not take the row's next number: every job carries 0"),
-    M("rollback-unconditional", "H11", "menu", [("if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {", "if (true) {")],
+    M("rollback-unconditional", ("H11", "H15"), "writer", [("if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {", "if (true) {")],
       "the glue puts the row back whatever the row's edit counter says"),
     M("burst-forgets-its-first-value", "H11", "menu", [("    pending.before = before;\n", "")],
       "the log says N-1 -> N for a burst of many"),
+    M("dynamic-completion-treated-as-builtin", "H15", "writer",
+      [("if (w.job.destination != WriteDestination::BuiltinRow) {", "if (false) {")],
+      "dynamic completions fall through to builtin handling instead of their own status and reload path"),
+    M("invalid-builtin-completion-unguarded", "H15", "writer",
+      [("if (w.job.def < 0 || w.job.def >= rowCount) {", "if (false) {")],
+      "an invalid builtin completion can access the row arrays"),
+    M("plugin-setting-destination-omitted", "H15", "menu",
+      [("    job.destination = WriteDestination::PluginSetting;\n", "")],
+      "the plugin-setting enqueuer falls back to a builtin destination"),
+    M("addon-approval-destination-omitted", "H15", "menu",
+      [("        job.destination = WriteDestination::AddonApproval;\n", "")],
+      "the approval enqueuer falls back to a builtin destination"),
     M("monitor-line-has-its-own-sentence", "H13", "perf", [(FORMAT_CALL, FORMAT_CALL + ' std::strcat(refreshLine, " All zero: no refresh in the window.");')],
       "the monitor adds the closing sentence to the formatter's line, after counts that are not zero"),
 ]

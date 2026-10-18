@@ -57,6 +57,19 @@ static FlatOriginWitnessReport runCase(bool shift,bool outlier=false){
     return r;
 }
 static void selfTest(){
+    using namespace edvr;
+    check(!flatOriginCaptureEnabled(), "origin capture starts off before initialization");
+    const float offNow[3]={20,0,0},offOld[3]={80,0,0};const uint32_t offPose[5]{};
+    flatOriginWitnessFrameBoundary(1,true,true);
+    flatOriginWitnessObserve(1,2,3,offPose,1,true,true);
+    flatOriginWitnessEvent(1,offNow,offOld,16,true,true,false);
+    flatOriginWitnessUnavailable(1,offNow,offOld,16,"off-fixture");
+    flatOriginWitnessShutdown();
+    check(lines.empty() && !flat_origin_witness_runtime::active.load() &&
+          !flat_origin_witness_runtime::callbacks.load() && !flat_origin_witness_runtime::core.events(),
+          "default off blocks every origin entry without logs, reads or samples");
+    flatOriginCaptureInitialize(true);
+    check(flatOriginCaptureEnabled(), "origin witness rig explicitly opts in");
     auto inward=runCase(false);
     check(inward.verdict==FlatOriginWitnessReport::Verdict::UnchangedRecords,"80 to 20 inward camera with static game records");
     check(inward.worldEdgeValid && inward.cameraMinusWorldValid,"measured zero world edge remains valid");

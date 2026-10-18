@@ -42,6 +42,7 @@
 #include "input_gate.h"
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
+#include "menu_write.h"
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_pad.h"
@@ -1318,26 +1319,6 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
 // I/O, serialised, coalescing repeated changes to one key while a key is
 // held; and the frame thread drains the results, asking for the reload
 // that applies each landed write.
-struct WriteJob {
-    int         def;
-    std::string dotted;
-    std::string value;
-    std::string before;
-    // Per-headset rows only: the worn headset's key and the values either
-    // side, so the log and the last-write line name what changed rather than
-    // printing two lists; `dropped` names malformed tokens the merge left out
-    // of the list.
-    std::string headset;
-    std::string fromValue;
-    std::string toValue;
-    std::string dropped;
-    uint32_t    gen = 0;   // the row's edit number when this edit was made (EditGeneration): the rollback of a failed write asks whether a newer edit exists
-};
-struct WriteDone {
-    WriteJob    job;
-    bool        ok;
-    std::string err;
-};
 struct Writer {
     std::mutex              m;
     std::condition_variable cv;
@@ -1375,11 +1356,11 @@ void writerMain() {
             if (!later) last.push_back(jobs[i]);
         }
         for (const WriteJob& job : last) {
-            WriteDone d;
-            d.job = job;
-            d.ok = false;
-            guarded("menu/write", [&] { d.ok = menuIniWrite(job.dotted, job.value, &d.err); });
-            if (!d.ok && d.err.empty()) d.err = "the write faulted";
+            WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
+                bool ok = false;
+                guarded("menu/write", [&] { ok = menuIniWrite(write.dotted, write.value, err); });
+                return ok;
+            });
             std::lock_guard<std::mutex> lock(g_writer.m);
             g_writer.done.push_back(d);
         }
@@ -1511,7 +1492,7 @@ void stepPluginSetting(int psIdx, int dir) {
     }
 
     WriteJob job;
-    job.def = -1;
+    job.destination = WriteDestination::PluginSetting;
     job.dotted = plugins::pluginSettingIniKey(ps.owner, ps.header, ps.key);   // the key registration reads the value back from
     if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
         job.value = (val != 0) ? "on" : "off";
@@ -1543,11 +1524,11 @@ bool approveAddonCandidate(uint32_t id, std::string* reason = nullptr) {
     plugins::ApprovalResult r = plugins::PluginManager::instance().approveCandidate(id);
     if (r.applied) {
         WriteJob job;
-        job.def = -1;
+        job.destination = WriteDestination::AddonApproval;
         job.dotted = "addons." + r.stem;
         job.value = r.sha256;
         enqueueWrite(job);
-        Log::get().note("menu: approved addon '%s' (hash %s) to %s",
+        Log::get().note("menu: approved addon '%s' (hash %s); saving approval to %s",
                         r.stem.c_str(), r.sha256.c_str(), Config::get().iniName());
     }
     if (reason) *reason = r.reason;
@@ -2848,43 +2829,13 @@ void drainWrites() {
         done.swap(g_writer.done);
     }
     for (const WriteDone& w : done) {
-        const MenuRowDef& d = kMenuRows[w.job.def];
-        if (w.ok) {
-            s.pollRequest = true;
-            const char* when = d.applies == 2 ? "takes effect at the next launch"
-                             : d.applies == 1 ? "live"
-                                              : "when it applies is not documented";
-            if (!w.job.headset.empty()) {
-                // The per-headset row: the key and the values, then the
-                // list the file now holds.
-                s.lastWrite = w.job.headset + " = " + w.job.toValue;
-                Log::get().note("menu: %s %s %s -> %s (list now %s%s%s; written to %s; "
-                                "%s).",
-                                w.job.dotted.c_str(), w.job.headset.c_str(), w.job.fromValue.c_str(),
-                                w.job.toValue.c_str(), w.job.value.empty() ? "empty" : w.job.value.c_str(),
-                                w.job.dropped.empty() ? "" : "; dropped malformed ",
-                                w.job.dropped.c_str(), Config::get().iniName(), when);
-            } else {
-                s.lastWrite = w.job.dotted + " = " + w.job.value;
-                Log::get().note("menu: %s %s -> %s (written to %s; %s).", w.job.dotted.c_str(),
-                                w.job.before.empty() ? "(default)" : w.job.before.c_str(),
-                                w.job.value.c_str(), Config::get().iniName(), when);
-            }
-        } else {
-            s.lastWrite = "FAILED: " + w.err;
-            Log::get().note("menu: %s = %s could not be written: %s.", w.job.dotted.c_str(),
-                            w.job.value.c_str(), w.err.c_str());
-            // The row goes back to what the file holds only if this was its latest edit. A newer one (held, queued, or written already) is what the row shows now, and
-            // its own result decides: putting the file's value back here would drop the steps made since (menu_edit_hold.h, EditGeneration).
-            if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {
-                g_rows[w.job.def].value = rowValue(d);
-                if (d.applies == 2) {
-                    g_rows[w.job.def].pending = rowPending(d, g_rows[w.job.def].value,
-                                                           g_rows[w.job.def].snapshot);
-                }
-            }
-        }
-        s.contentDirty = true;
+        completeMenuWrite(w, s, kMenuRows, g_rows, kRowDefCount,
+                          [](const MenuRowDef& d) { return rowValue(d); },
+                          [](const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
+                              return rowPending(d, value, snapshot);
+                          },
+                          [](const char* format, auto... args) { Log::get().note(format, args...); },
+                          Config::get().iniName());
     }
 }
 

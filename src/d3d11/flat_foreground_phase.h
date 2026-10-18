@@ -43,6 +43,13 @@ inline bool flatForegroundProjectionRowsCarryPhase(const float (&projectionRows)
 
 // The shader recipe must establish that these are its actual four clip rows;
 // DP4 additionally needs homogeneous source.w == 1 for constant clip Z.
+struct FlatForegroundProjectionLookupFailure {
+    const void* buffer = nullptr;
+    UINT slot = 0, row = 0, first = 0, count = 0, byteWidth = 0;
+    uint32_t offset = 0;
+    FlatProjectionPatchLayout layout = FlatProjectionPatchLayout::ForwardColumns;
+    FlatProjectionCopyFailure copy{};
+};
 inline bool flatForegroundBoundProjectionPhase(ID3D11DeviceContext* ctx,
                                      FlatProjectionRuntime* projection,
                                      UINT slot, UINT row,
@@ -50,9 +57,11 @@ inline bool flatForegroundBoundProjectionPhase(ID3D11DeviceContext* ctx,
                                      float pixelX, float pixelY,
                                      uint32_t width, uint32_t height,
                                      float expectedNear,
-                                     const char** reason = nullptr) {
+                                      const char** reason = nullptr,
+                                      FlatForegroundProjectionLookupFailure* lookupFailure = nullptr) {
     auto refuse = [&](const char* why) { if (reason) *reason = why; return false; };
     if (reason) *reason = nullptr;
+    if (lookupFailure) lookupFailure->copy.kind = FlatProjectionCopyFailureKind::None;
     if (!ctx || !projection || slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT || row > 4092)
         return refuse("foreign phase missing CPU witness or recipe range");
     Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
@@ -67,8 +76,13 @@ inline bool flatForegroundBoundProjectionPhase(ID3D11DeviceContext* ctx,
     buffer->GetDesc(&desc);
     if (offset + 64 > desc.ByteWidth) return refuse("foreign phase projection range outside buffer");
     float rows[4][4]{};
-    if (!projection->copyConstants(buffer.Get(), uint32_t(offset), 64, rows))
+    FlatProjectionCopyFailure copyFailure{};
+    if (!projection->copyConstants(buffer.Get(), uint32_t(offset), 64, rows,
+                                   lookupFailure ? &copyFailure : nullptr)) {
+        if (lookupFailure) *lookupFailure = {buffer.Get(), slot, row, first, count,
+            desc.ByteWidth, uint32_t(offset), layout, copyFailure};
         return refuse("foreign phase missing bound projection publication");
+    }
     if (!flatForegroundProjectionRowsCarryPhase(rows, layout, pixelX, pixelY, width, height, expectedNear))
         return refuse("foreign phase or near differs from bound projection");
     return true;

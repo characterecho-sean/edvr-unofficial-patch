@@ -575,6 +575,12 @@ def run(capture_dir, output=None, dry_run=False):
     return report
 
 
+def require_consecutive_fixture_frames(report, expected, directory, label):
+    found = [frame["frame"] for frame in report["frames"]]
+    if found != expected or not report["consecutive"]:
+        raise CaptureError(f"{label} in {directory}: expected {expected}, found {found}")
+
+
 def verify_fixture(root):
     """Read both fresh WARP writer fixtures, never an older matching glob."""
     def pointed_directory(name):
@@ -620,8 +626,8 @@ def verify_fixture(root):
     motion_directory = pointed_directory("flat_draw_motion_current_fixture.txt")
     motion_report = run(motion_directory)
     motion_frames = motion_report["frames"]
-    if [f["frame"] for f in motion_frames] != [501, 502] or not motion_report["consecutive"]:
-        raise CaptureError("motion fixture lacks two consecutive WARP frames")
+    require_consecutive_fixture_frames(motion_report, [501, 502], motion_directory,
+                                       "motion fixture lacks two consecutive WARP frames")
     motion_counts = []
     for frame in motion_frames:
         if frame["status"] != "complete" or not frame["motion_complete"] or frame["motion_draws"] != 2:
@@ -859,6 +865,17 @@ def self_test():
             raise AssertionError("mismatched native depth layout accepted")
         except CaptureError:
             pass
+        # A collided capture directory can contain the two expected WARP
+        # frames plus another fixture's manifests. Report the actual IDs and
+        # directory so the CI log identifies the writer that shared it.
+        collision = {"frames": [{"frame": 501}, {"frame": 502}, {"frame": 701}],
+                     "consecutive": False}
+        try:
+            require_consecutive_fixture_frames(collision, [501, 502], second,
+                                               "motion fixture lacks two consecutive WARP frames")
+            raise AssertionError("collided motion fixture accepted")
+        except CaptureError as exc:
+            assert str(second) in str(exc) and "found [501, 502, 701]" in str(exc)
     print("flat_draw_pixels self-test passed")
 
 
