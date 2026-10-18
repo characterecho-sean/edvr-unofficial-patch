@@ -18,7 +18,10 @@ Use the **PowerShell tool**, not Bash. Windows PowerShell 5.1: no `&&` or
 exe's stderr with `2>&1` — 5.1 wraps each line in an ErrorRecord and sets
 `$?` false on a clean exit. Send a file-writing tool's output to `*> $null`
 or a log file and read that: `| Select-Object -First N` stops the pipeline
-and kills the tool mid-write (an install died that way, #100).
+and kills the tool mid-write (an install died that way, #100). Pass paths
+to a native exe as arguments: piping strings into one (`$files | git
+checkout --pathspec-from-file=-`) prepends a BOM to the first item, which
+then matches nothing.
 
 `build.bat` must be launched **by absolute path**; a `cmd` invocation that
 never ran the batch still exits 0, which has read as a successful build.
@@ -267,7 +270,9 @@ minutes after a flight finally reproduced the effect being chased.
   `characterecho-sean/edvr-unofficial-patch` (`gh issue list`). A finding
   to act on later — a review follow-up, a retro item, a bug noticed in
   passing — becomes an issue. Commits and PRs name it (`(#97)`,
-  `Closes #97`).
+  `Closes #97`). A plan or task list that only hands one session's work
+  to the next can stay a file; anything meant to outlive the session is
+  an issue.
 - `docs\` holds the evidence: an investigation doc carries an arc's
   journal, and its `## Status` block links the arc's issues.
 - **Re-fetch a PR's reviews and comments right before posting** replies
