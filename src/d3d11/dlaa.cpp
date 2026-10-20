@@ -826,10 +826,11 @@ void dlaaShutdown() {
         NVSDK_NGX_D3D11_DestroyParameters(g_caps);
         g_caps = nullptr;
     }
-    if (g_device) {
-        NVSDK_NGX_D3D11_Shutdown1(g_device);
-        g_device = nullptr;
-    }
+    // No NVSDK_NGX_D3D11_Shutdown1 here: the only caller is temporalPassShutdown, whose teardown can run under the loader
+    // lock (device_hook.cpp, shutdownDeviceHooks), and Shutdown1 can wait on NVIDIA's telemetry thread (EDPE's standalone
+    // probe, its docs/nvidia-dlaa-input-contract.md: over 20 s in 3 of 3 runs, inside NvTelemetryAPI64!UninitializeTelemetry).
+    // NGX is left initialised for the process, as the XeSS bridge is (temporal_pass.cpp, temporalPassShutdown).
+    g_device = nullptr;
 #endif
     if (g_evaluations > 0) {
         Log::get().note("dlaa: %u eye-frames evaluated this session (%u of them started "
