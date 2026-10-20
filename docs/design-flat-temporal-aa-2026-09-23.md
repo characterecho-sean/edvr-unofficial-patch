@@ -1,7 +1,6 @@
 # Shared temporal AA for VR and flat Elite
 
 ## Status
-
 - **State (2026-10-19 rc.5 flight):** `edvr_gfx_20261019_062037` (build 6AD4E0C0, RTX 3070 Ti Laptop, DLSS 1920×810 to 2560×1080) has 2,117 spatial fallbacks, 2,124 history resets and zero DLSS backend failures. All 35 complete deferred-camera captures are inverse-mismatch, and the strict matcher accepts them after the existing inverse-ray correction. The repair rejected them because its float reverse proof bounded the cancelled value. That proof now carries the reversed madd's pre-cancellation magnitude. Mouse timing and the delayed shipyard preview are not in this log. Confirmation flight of the Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed.
 - **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
   Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
