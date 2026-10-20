@@ -35,6 +35,8 @@ inline bool flatProfileReadsKey(const char* key) {
         // The AA comparison key (aa_compare.cpp): turns EDVR's temporal AA off for a side-by-side look and back, runtime only. Unlisted, a hotkey
         // key reads empty in flat, which is unbound.
         std::strcmp(key, "hotkey.compare_aa") == 0 ||
+        // TEMPORARY hangar bloom measurement (flat_bloom_probe.cpp). Unlisted, a hotkey key reads empty in flat and F6 never binds.
+        std::strcmp(key, "hotkey.bloom_probe") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
         std::strcmp(key, "fix.ui_quality") == 0 ||

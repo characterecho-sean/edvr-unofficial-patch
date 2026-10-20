@@ -2,30 +2,10 @@
 
 ## Status
 
+- **Hangar bloom measurement (TEMPORARY, 2026-10-19, not flown):** not a fix. Startup is jitter=on aa=on, main's image path. `hotkey.bloom_probe` (default F6) cycles four states in flight and does not write the ini. Once a second per state: p0 H before EDVR writes, p1 H after that write, p2 bloom downsample DFED8E1C9E191BEC/143AAE0597E2F7BF, p3 tonemap F9CFC798F21E9AEA/E8948389387DA083, p3f the copy-route upscaler output, and the six strip texels. Stats lines carry samples= and frame=. A tick `missed=` name was not submitted. No `bloom-probe:` line means the tick never ran. Trace: the 2026-10-19 journal entry. Cleanup when the arc closes: this switch and this instrument. If 88c6898's image changes ever reach main, also remove the TAA history ceiling, the XeSS LDR round trip in hdr_backend_flags.h, GameExposure at t19 and debug.w bit 16 in the TAA shader, FSR's gameExposure option, and the per-frame texel-0 copy and readback.
 - **State (2026-10-19 rc.5 flight):** `edvr_gfx_20261019_062037` (build 6AD4E0C0, RTX 3070 Ti Laptop, DLSS 1920×810 to 2560×1080) has 2,117 spatial fallbacks, 2,124 history resets and zero DLSS backend failures. All 35 complete deferred-camera captures are inverse-mismatch, and the strict matcher accepts them after the existing inverse-ray correction. The repair rejected them because its float reverse proof bounded the cancelled value. That proof now carries the reversed madd's pre-cancellation magnitude. Mouse timing and the delayed shipyard preview are not in this log. Confirmation flight of the Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed.
 - **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
   Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
-- Established or qualified: camera ownership/jitter (26-28); F8 and menu
-  treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
-  motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
-  and scoped admission (56-57); tone admission, FLOWN at the EDHM main menu
-  (63-64); one-raster-phase local refusal, FLOWN in 69 (streak 3349, DLSS,
-  zero unknown-pair captures); gate 1 contract and reducer (70, 73; 6/6 traces
-  replay byte-identical); gate 2 routing, retirement, negotiation (72, 74;
-  04:58 and 09:55 2026-09-27 flights FLOWN); six review fixes (77, no flight).
-- Open in the journal: section 75's confirming flight (13:00 storm-free; the
-  0.5x canopy flicker is a separate family, CLOSED 2026-09-27); section 76's
-  gate-2 matrix cells; section 78: nine of ten refusing ship pairs reciped
-  (census 46), vs_C7FA0C0F5DD49180 refused until its blob is captured; the
-  upstream camera hook is now design-flat-camera-integration.md.
-- **Priority (Sean):** performance over code sharing; honor configured backend.
-  Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where
-  cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
-  Defer broad core extraction until flat capture establishes the boundary.
-- **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
-- **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
-  plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
-  Map frames below native run SMAA 1x, then AMD's FSR1 EASU, in place of the bilinear tap (shipped for an A/B flight 2026-10-10; section below).
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -43,15 +23,6 @@
   87's native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses.
   Menu hangar-floor P1 open; VR tests, `d9f86b09`: main/openxr-perf-gaps.
-- **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
-  lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON.
-  10-01 BUILT, NOT FLOWN: the vscreen auto-fit (3504 on Sean's rig: m 0.70 on
-  the p10 floor), the curved route, and the cleanup (three experimental keys
-  retired, the route auto and the maps gate on by default; sections 82, 84).
-  83 (an rc.5 user, SS 0.85 on a 16:10 screen): flat R < D by structure, the
-  real cause in the messages, a VR Supersampling warning: BUILT 10-01
-  (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
-  changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-17 RC3 scope fix PASS:** Steam flat `c7c14898`, probe off, main-menu and carrier on-foot F7 comparisons visibly fixed. Nonzero phases/history recover with zero stable phase/backend failures; user approved merge (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
@@ -63,6 +34,13 @@
 
 ## Status detail (moved out of Status 2026-09-29)
 
+- **Moved out of Status 2026-10-19** to keep the hangar-bloom measurement arc inside the 60-line block:
+  - Established or qualified: camera ownership/jitter (26-28); F8 and menu treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91 motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera and scoped admission (56-57); tone admission, FLOWN at the EDHM main menu (63-64); one-raster-phase local refusal, FLOWN in 69 (streak 3349, DLSS, zero unknown-pair captures); gate 1 contract and reducer (70, 73; 6/6 traces replay byte-identical); gate 2 routing, retirement, negotiation (72, 74; 04:58 and 09:55 2026-09-27 flights FLOWN); six review fixes (77, no flight).
+  - Open in the journal: section 75's confirming flight (13:00 storm-free; the 0.5x canopy flicker is a separate family, CLOSED 2026-09-27); section 76's gate-2 matrix cells; section 78: nine of ten refusing ship pairs reciped (census 46), vs_C7FA0C0F5DD49180 refused until its blob is captured; the upstream camera hook is now design-flat-camera-integration.md.
+  - Priority (Sean): performance over code sharing; honor configured backend. Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where cheap; separate scheduling/capture when it saves copies/sync/per-draw work. Defer broad core extraction until flat capture establishes the boundary.
+  - Recommendation: two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
+  - 10-10 map arcs: temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The plane-motion and per-pixel star-choice work is REMOVED. Kept: the map UI families and their zero cancel. Map frames below native run SMAA 1x, then AMD's FSR1 EASU, in place of the bilinear tap (shipped for an A/B flight 2026-10-10).
+  - Field reports (79-83): users 1-2 refused every frame, 3 at 7-13 fps, 4 lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON. 10-01 BUILT, NOT FLOWN: the vscreen auto-fit (3504 on Sean's rig: m 0.70 on the p10 floor), the curved route, and the cleanup (three experimental keys retired, the route auto and the maps gate on by default; sections 82, 84). 83 (an rc.5 user, SS 0.85 on a 16:10 screen): flat R < D by structure, BUILT 10-01 (claude/flat-upscale), NOT FLOWN; its F8 text waits 2 s before it changes cause.
 - **Moved out of Status 2026-10-16:**
   - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
     brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
@@ -17826,3 +17804,33 @@ The repair has been in `flat_deferred_camera.h` since `82dbf1b0`, after
 v0.19.1 and present in rc.2. This flight does not time the mouse, and it does
 not show whether the delayed shipyard preview is the same refusal. The
 confirmation flight of Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed.
+
+## 2026-10-19: hangar bloom probe (measurement only, not flown)
+
+The hangar skylight becomes one white sheet with temporal AA on (XeSS, FSR, EDVR TAA) and keeps the dark frames between the panels with AA off. This entry records the instrument and the flights that already killed a cause. It does not change how the image is produced. Startup state is jitter=on aa=on, which is main's path. F6 (`hotkey.bloom_probe`) cycles four states in flight: jitter=on aa=on, jitter=on aa=off, jitter=off aa=on, jitter=off aa=off. "Jitter on, AA pass off" is the raw jittered image. "Jitter off, AA pass on" runs the backend at zero jitter and does not reset history every frame. The first resolve after the AA pass has been off drops history once, so the accumulation delay is visible when the pass returns. The phase machine keeps accepting a skipped frame, so jitter can stay on while the pass is off. Nothing is written into H and the copy SRV is not replaced on a skip.
+
+Ruled out by the 10-18/10-19 flights, before this probe. Do not propose them again:
+
+- ruled out: strip texel 0 as the backend's exposure scale, because `edvr_gfx_20261018_205824` (6AD58561) kept it pegged at 150, and up to 271 under brighter lights, while XeSS resolved and the skylight was one white sheet.
+- ruled out: dropping that scale, because `edvr_gfx_20261019_073958` (6AD61D32, XeSS flags 0x2, scale not applied) still blew the lights.
+- ruled out: the XeSS radiance round trip, because `edvr_gfx_20261019_075459` (6AD61FC5, flags 0x42) still clipped the skylight.
+- ruled out: the bilinear tap in the TAA clamp ceiling and in the pre-bloom unjitter, and the point texel in that ceiling, because the lights still blew and the point cap shimmered (`edvr_gfx_20261019_082411`, `edvr_gfx_20261019_180249` build 6AD62C3B, `edvr_gfx_20261019_191519` build 6AD6BF47).
+- ruled out: RCAS sharpening, because `edvr_gfx_20261019_191519` logged `flat sharpen: off (fix.render_sharpness is 0)` and the lights were unchanged.
+- ruled out: one mechanism for both routes, because the copy route also blows out (`edvr_gfx_20261019_051603`, 05:16-05:18) where the temporal pass runs after the tonemap and bloom never sees its output. Wide white frames are many pixels across. Jitter and filter taps move light by about a pixel.
+
+What the log shows if a probe never ran. Do not read a missing line as zero.
+
+- No `bloom-probe:` line at all: `bloomProbeTick` never ran.
+- `hotkey: ... bound nothing` and no `bloom-probe: state` line: the key is off. The image stays jitter=on aa=on.
+- `bloom-probe: tick ... missed=p0` and no `bloom-probe: p0 frame=` line: H was not submitted at the HDR trigger. On the copy route that is expected when the trigger does not see H.
+- A point absent from `missed=` with no stats line yet: it was submitted and the lagged readback has not mapped. `readback failed` means the sample was taken and the numbers are not zeros.
+- `missed=p1`: H was not submitted after the write point. AA off and the copy route submit p1 as the same H as p0, so a miss means that submit did not run.
+- `missed=p2`: bloom downsample VS DFED8E1C9E191BEC / PS 143AAE0597E2F7BF was not seen.
+- `missed=p3`: tonemap VS F9CFC798F21E9AEA / PS E8948389387DA083 was not seen, and the copy source was not submitted in its place.
+- `missed=p3f`: the copy route did not produce an upscaler output (AA off, or the HDR route).
+- `missed=strip`: compute shader F1FB2EEFB662F3AA did not run, or its u1 was not a 6-wide R32 texture.
+- `not taken`, `gpu resources failed`, `staging failed`, `target srv failed`, `slots full`, `compute shaders failed to create`: the point was reached and was not measured.
+
+A stats line is `bloom-probe: p0 frame=N region=full|centre samples=N mean= max= above=... thr=0.85,0.95,0.99,0.999,1,4,16,64`. The centre is the central half of the frame. The strip line is `bloom-probe: strip frame=N samples=6` and six floats. `samples=` is the pixel count or 6. A tick is `bloom-probe: tick frame=N state=jitter=on aa=on route=hdr|copy|unknown missed=none`. A state change is `bloom-probe: state jitter=on aa=off route=hdr frame=N`.
+
+Reading a flight, after `python tools/edvr_log.py --target steam --expect-build HEAD`: the first point that differs between states is the cause. p0 differs with jitter on against off, AA pass off: the game is reacting to the jittered camera. p1 exceeds p0 with the AA pass on: the AA pass adds energy; compare TAA with XeSS, and the delay. p2 differs while p1 matches: bloom reads something other than H. Only p3 or p3f differs: after the tonemap, or the copy-route upscale. Strip texels 1-5 differ: bloom or the tonemap uses more of the strip than texel 0. If this build does not reproduce the blowout, that is the finding: bisect the 10-18/10-19 changes. No clamp, tap, sharpening, threshold or exposure change until that flight names a cause.

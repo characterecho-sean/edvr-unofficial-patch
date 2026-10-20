@@ -618,7 +618,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
-    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\flat_bloom_probe.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^

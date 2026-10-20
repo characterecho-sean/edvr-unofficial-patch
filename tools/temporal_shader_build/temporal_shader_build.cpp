@@ -16,6 +16,7 @@
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/flat_origin_optical_shader.h"
+#include "../../src/d3d11/flat_bloom_probe_shader.h"   // TEMPORARY hangar bloom measurement
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
 #include "../../src/d3d11/xess_copy_shader.h"
 #include "../../src/d3d11/skin_join_shader.h"
@@ -452,7 +453,10 @@ static int generateTemporal(const Options& o) {
         // target, so the finish and the spatial recovery are draws: one triangle vertex shader and two pixel shaders.
         {"kFlatMonoHdrVsBytecode", "flat_mono_hdr_vs", "hdrVs", nullptr, {}, true, nullptr, "vs_5_0"},
         {"kFlatMonoFinishHdrBytecode", "flat_mono_finish_hdr_ps", "finishHdr", nullptr, {}, true, nullptr, "ps_5_0"},
-        {"kFlatMonoSpatialHdrBytecode", "flat_mono_spatial_hdr_ps", "spatialHdr", nullptr, {}, true, nullptr, "ps_5_0"}
+        {"kFlatMonoSpatialHdrBytecode", "flat_mono_spatial_hdr_ps", "spatialHdr", nullptr, {}, true, nullptr, "ps_5_0"},
+        // TEMPORARY hangar bloom measurement. Two entries, two sources: each binds t0/u0 for itself.
+        {"kFlatBloomProbeReduceBytecode", "flat_bloom_probe_reduce_cs", "reduceMain", nullptr, {}, false, edvr::kFlatBloomProbeReduceCs},
+        {"kFlatBloomProbeFinishBytecode", "flat_bloom_probe_finish_cs", "finishMain", nullptr, {}, false, edvr::kFlatBloomProbeFinishCs}
     };
     const std::string core = extractCore(edvr::kTemporalCsHlsl); // validate before fixed source assembly
     const auto fixed = fixedVariants(core);

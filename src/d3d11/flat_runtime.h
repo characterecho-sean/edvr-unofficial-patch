@@ -147,6 +147,7 @@ struct FlatRuntimeDrawScope {
     // (uiComposite).
     bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
     uint64_t uiVs=0,uiPs=0;
+    unsigned char bloomProbeAfter = 0xFF;   // TEMPORARY: flat_bloom_probe.h point sampled in the destructor, or 0xFF
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;

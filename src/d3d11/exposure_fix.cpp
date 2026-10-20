@@ -23,6 +23,7 @@
 #include "engine_velocity.h"  // F2: the palette chain's dispatch feeds the second skin's join
 #include "skin_join.h"        // kChainHash
 #include "flat_runtime.h"
+#include "flat_bloom_probe.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
 #include "object_probe.h"   // objectProbeNoteDispatch: the skin ledger's view of the palette chain (armed eye runs only)
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
@@ -730,6 +731,11 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, x, y, z);
         FlatRuntimeDispatchScope flatDispatch(self);
         g_state->realDispatch(self, x, y, z);
+        if (!g_flatComputeInternal && bloomProbeStripDue()) {
+            const uint64_t stripHash = hashOf(bindingGet(BindSlot::Cs));
+            if (bloomProbeIsStripShader(stripHash))
+                bloomProbeNoteStrip(self, static_cast<ID3D11UnorderedAccessView*>(g_state->uav[1]), bloomProbeFrame());
+        }
         return;
     }
     if (g_vrWorldInternal) { g_state->realDispatch(self, x, y, z); return; }   // the world route's own: not the game's exposure pass

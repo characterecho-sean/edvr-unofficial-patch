@@ -6,6 +6,7 @@
 #include "flat_capture_policy.h"
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
+#include "flat_bloom_probe.h"   // TEMPORARY hangar bloom measurement
 #include "flat_copy_structure.h"
 #include "flat_scene_log.h"   // TEMPORARY: the scene picker's candidates (docs/sky-flicker-2026-10-13.md)
 #include "flat_hdr_crumbs.h"
@@ -3928,6 +3929,7 @@ void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain* swap,UINT flags) {
 void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
+    bloomProbeTick(s.context.Get(), s.prefix.frame ? s.prefix.frame : frame);
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
@@ -4404,6 +4406,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     flatUiLayerMapAaFrame(temporalOff, phaseWanted);
     s.phase.beginFrame(phaseWanted && !temporalOff,
         compatible,s.phaseWidth,s.phaseHeight,flatCameraPhaseCount(phaseRoute,s.jitterPhases));
+    // TEMPORARY measurement. Zero only the offsets the camera and the resolve read. beginFrame
+    // itself still ran, so "jitter off, AA on" does not reset history every frame.
+    if (!bloomProbeJitter()) { s.phase.currentX = 0.0f; s.phase.currentY = 0.0f; }
     s.frameHadPhase=nonzeroPhase(s);
     flatCameraInjectArm(); // the phase is chosen: the injector's frame window opens
     s.frameCoverage=true;s.temporalAccepted=false;
@@ -4420,6 +4425,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};
     s.prefix.frame = frame + 1;
+    bloomProbeNoteFrame(s.prefix.frame);
     if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full) {
         s.foregroundDomainFrame=s.prefix.frame;s.foregroundSelectedDepth=nullptr;
         s.foregroundHRefusal=nullptr;
@@ -5634,6 +5640,15 @@ bool flatProducerContinue(State& s, ID3D11DeviceContext* context, FlatRuntimeDra
 }
 }  // namespace
 
+// TEMPORARY measurement. The AA pass is not run, and treated/hdrTreated stay false so neither route
+// writes the image. The phase machine still accepts the frame, so a jitter-on state keeps jittering.
+static void bloomProbeAcceptPhase(State& s, const FlatMonoFrame& selected, ID3D11Resource* color) {
+    s.temporalAccepted = true;
+    s.previous = selected;
+    s.havePrevious = true;
+    if (color) s.previousColor = color;
+    s.reason = "bloom-probe-aa-off";
+}
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
@@ -5748,6 +5763,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     k.color = rt.resource; k.rtv = bindingGet(BindSlot::Rtv0); k.width = rt.a; k.height = rt.b; k.format = rt.fmt;
     k.depth = ds.resource; k.dsv = bindingGet(BindSlot::Dsv0); k.depthWidth = ds.a; k.depthHeight = ds.b; k.depthFormat = ds.fmt;
     k.vs = bindingShaderHash(BindSlot::Vs); k.ps = bindingShaderHash(BindSlot::Ps);
+    if (bloomProbeDue(BloomProbePoint::Bloom) && bloomProbeIsBloomDraw(k.vs, k.ps))
+        bloomProbeAfter = static_cast<unsigned char>(BloomProbePoint::Bloom);
+    else if (bloomProbeDue(BloomProbePoint::Tone) && bloomProbeIsToneDraw(k.vs, k.ps))
+        bloomProbeAfter = static_cast<unsigned char>(BloomProbePoint::Tone);
     drawPacketVs=k.vs;drawPacketPs=k.ps;
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
     if (auditing) {
@@ -6663,6 +6682,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             ctx->PSGetShaderResources(0, 1, &original);
             Ptr<ID3D11Resource> actualColor; if (original) original->GetResource(&actualColor);
             if (actualColor.Get() == selected.color) {
+                bloomProbeSample(ctx, original, BloomProbePoint::Tone, s.prefix.frame);
                 ID3D11ShaderResourceView* sharpened = flatSharpenView(ctx, original);
                 if (sharpened && sharpened != original) { ctx->PSSetShaderResources(0, 1, &sharpened); replaced = true; }
             }
@@ -6938,6 +6958,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
         return;
     }
+    bloomProbeNoteRoute(false, s.prefix.frame);
+    bloomProbeSample(ctx, f.color, BloomProbePoint::Tone, s.prefix.frame);
+    if (!bloomProbeAaPass()) {
+        bloomProbeAcceptPhase(s, selected, actualColor.Get());
+        return;
+    }
+    if (bloomProbeTakeHistoryReset()) f.reset = true;
     fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason=s.reason;
@@ -6956,6 +6983,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
         return;
     }
+    bloomProbeSample(ctx, outputView.Get(), BloomProbePoint::Final, s.prefix.frame);
     s.reason = nonzeroPhase(s)?"treated-jittered":"treated-zero-jitter";
     // fix.render_sharpness: the resolve's output through the shared RCAS pass, before the game's own copy
     // samples it (flat_sharpen.h). The interface is drawn after that copy, so it is never sharpened. At 0,
@@ -7055,6 +7083,16 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     if (!flatHdrRouteEvaluatesAtRender(effectiveMode, selected.renderWidth, selected.renderHeight,
                                        selected.outputWidth, selected.outputHeight)) {
+        FlatComputeInternalScope probeScope;
+        Ptr<ID3D11ShaderResourceView> probeView;
+        ctx->PSGetShaderResources(srvSlot, 1, &probeView);
+        Ptr<ID3D11Resource> probeResource;
+        if (probeView) probeView->GetResource(&probeResource);
+        if (probeView && probeResource.Get() == selected.hdr) {
+            bloomProbeNoteRoute(false, s.prefix.frame);
+            bloomProbeSample(ctx, probeView.Get(), BloomProbePoint::HBefore, s.prefix.frame);
+            bloomProbeSample(ctx, probeView.Get(), BloomProbePoint::HAfter, s.prefix.frame);
+        }
         decline("route-does-not-evaluate-at-render-size"); return;
     }
     FlatComputeInternalScope guard;
@@ -7066,6 +7104,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         !depthView(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)))) {
         decline("actual-hdr-binding-or-depth-view-refused"); return;
     }
+    bloomProbeNoteRoute(true, s.prefix.frame);
+    bloomProbeSample(ctx, hdrView.Get(), BloomProbePoint::HBefore, s.prefix.frame);
     bool protectedOverlay=false;
     for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
         auto& target=s.prefix.targets[i];
@@ -7102,6 +7142,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         sf.jitterX = s.phase.currentX; sf.jitterY = s.phase.currentY;
         Ptr<ID3D11ShaderResourceView> none; const char* why = nullptr;
         if (flatMonoResolveSpatialFallback(s.device.Get(), ctx, sf, &none, &why)) {
+            bloomProbeSample(ctx, frame.color, BloomProbePoint::HAfter, s.prefix.frame);
             ++s.spatialFallbacks; s.treated = s.hdrTreated = true;
             s.hdrWindow.lastVerdict = "spatial-fallback";
             if (s.spatialFallbacks <= 8)
@@ -7231,6 +7272,12 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
             }
         }
     }
+    if (!bloomProbeAaPass()) {
+        bloomProbeSample(ctx, hdrView.Get(), BloomProbePoint::HAfter, s.prefix.frame);
+        bloomProbeAcceptPhase(s, selected, hdrResource.Get());
+        return;
+    }
+    if (bloomProbeTakeHistoryReset()) f.reset = true;
     reach("resolve");   // the frame is the resolver's from here
     fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
@@ -7240,6 +7287,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         else { reset(); decline(temporalReason ? temporalReason : "resolve-refused"); }
         return;
     }
+    bloomProbeSample(ctx, hdrView.Get(), BloomProbePoint::HAfter, s.prefix.frame);
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
     if(protectedOverlay) ++s.overlayIsolatedWindow;
     if(selected.mixedCamera) {
@@ -7639,6 +7687,13 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     }
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return;
+    if (bloomProbeAfter != 0xFF) {
+        FlatComputeInternalScope probe;
+        Ptr<ID3D11RenderTargetView> probeRt;
+        ctx->OMGetRenderTargets(1, &probeRt, nullptr);
+        bloomProbeSampleTarget(ctx, probeRt.Get(), static_cast<BloomProbePoint>(bloomProbeAfter), state().prefix.frame);
+        bloomProbeAfter = 0xFF;
+    }
     // A taken HUD draw whose End never ran (the hook did not reach endActualDraw): the game's state back from the layer.
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     FlatComputeInternalScope guard;
