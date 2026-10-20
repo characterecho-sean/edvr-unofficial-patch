@@ -182,15 +182,18 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
 // pass folds the interface's into it before calling here and hands the union.
 //
 // `hdr` (the flat HDR route, docs/design-flat-temporal-aa-2026-09-23.md section 81): the colour is HDR scene
-// radiance (R11G11B10F or fp16), the output R16G16B16A16_FLOAT, and the feature is created with IsHDR and
-// AutoExposure beside the LDR flags (hdr_backend_flags.h). The flags are creation-time, so the feature key carries
-// the bit: a flip remakes the feature and its history starts again. False is every other caller, unchanged.
+// radiance (R11G11B10F or fp16), the output R16G16B16A16_FLOAT, and the feature is created with the flags
+// hdr_backend_flags.h names. The flags are creation-time, so the feature key carries the bit: a flip remakes the
+// feature and its history starts again. False is every other caller, unchanged.
+// `exposure` is the flat HDR route's 1x1 R32_FLOAT copy of the tonemap strip's texel 0, or null. Only the flat
+// route (no AutoExposure) binds it. Null leaves NVIDIA's default of 1.0. The first frame it arrives resets history.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,
                   uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason, bool hdr = false);
+                  float frameMs, const char** reason, bool hdr = false,
+                  ID3D11Texture2D* exposure = nullptr);
 
 // The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
 // 11 = K, 10 = J, 12 = L, 13 = M, 0 = the driver's own choice per quality

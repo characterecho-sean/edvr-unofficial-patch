@@ -360,6 +360,9 @@ void flatMonoResolveSetSpanHooks(FlatMonoResolveSpanFn begin, FlatMonoResolveSpa
 // device or allocation failure by itself.
 bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                                     ID3D11ShaderResourceView** output, const char** reason);
+// Write the unjittered frame into H and nothing else. No history, no backend, and it does not touch the
+// resolver's history cache: the copy route still blends after the tonemap. Bloom then sees the frame AA off uses.
+bool flatMonoResolveUnjitterHdr(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&, const char** reason);
 // Whether the last spatial recovery ran AMD's EASU (the frame's easu flag) and not the bilinear tap. Read after the call.
 bool flatMonoResolveLastSpatialWasEasu();
 // Whether the last spatial recovery ran SMAA 1x ahead of EASU (the frame's smaa flag, below native). Read after the call. The flat runtime

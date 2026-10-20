@@ -10,6 +10,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs around the context's steps
 #include "perf_monitor.h"   // the context's creation is an event with a duration
 #include "gpu_timing.h"
@@ -167,9 +168,11 @@ struct EyeCtx {
     // part of the key below.
     bool diagnostics = false;
     bool infiniteDepth = false;
-    // The flat HDR route's input is HDR with automatic exposure (section 81, hdr_backend_flags.h). The flags are
-    // baked in at creation, so the bit is part of the key: a route flip remakes the context.
+    // The flat HDR route's input is HDR (hdr_backend_flags.h). The flags are baked in at creation, so the bit is
+    // part of the key: a route flip remakes the context. gameExposure is the same: the strip arriving drops
+    // ENABLE_AUTO_EXPOSURE and the dispatch binds the 1x1, which the context was not created to do.
     bool hdr = false;
+    bool gameExposure = false;
     uint32_t createFlags = 0;   // desc.flags as the context was made (fsr3TestContextFlags reads it, rigs only)
     // The create-failure latch (the same review, F5). A create that fails --
     // or, worse, one that throws out of AMD's port halfway -- used to be
@@ -185,6 +188,7 @@ struct EyeCtx {
     bool     failDiagnostics = false;
     bool     failInfiniteDepth = false;
     bool     failHdr = false;
+    bool     failGameExposure = false;
     char     failWhy[256] = {};
 };
 // One per upscaler slot (dlaa.h, kUpscalerSlots: the eyes' two, and the VR world
@@ -398,13 +402,15 @@ void releaseEyeSurfaces(EyeCtx& e) {
 // in the log even when the seam's own once-per-session refusal line has
 // already been spent on something else.
 void latchCreateFailure(EyeCtx& e, unsigned eye, uint32_t w, uint32_t h, uint32_t outW,
-                        uint32_t outH, bool diagnostics, bool infiniteDepth, bool hdr, const char* reason) {
+                        uint32_t outH, bool diagnostics, bool infiniteDepth, bool hdr, bool gameExposure,
+                        const char* reason) {
     e = EyeCtx{};
     e.failed = true;
     e.failW = w; e.failH = h; e.failOutW = outW; e.failOutH = outH;
     e.failDiagnostics = diagnostics;
     e.failInfiniteDepth = infiniteDepth;
     e.failHdr = hdr;
+    e.failGameExposure = gameExposure;
     snprintf(e.failWhy, sizeof(e.failWhy), "%s", reason ? reason : "no reason given");
     Log::get().note("fsr3: %s is stood down at %ux%u -> %ux%u for the rest of this session (a "
                     "different size, or a switch away and back, tries again): %s",
@@ -451,7 +457,8 @@ bool g_fovFallbackNoted = false;
 // what the warm-up makes on the loading screen is exactly what the first
 // evaluation would have made (mirrors dlaa.cpp's ensureFeature).
 bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
-                   const char** why, double* createMs, bool infiniteDepth, bool hdr = false) {
+                   const char** why, double* createMs, bool infiniteDepth, bool hdr = false,
+                   bool gameExposure = false) {
     if (createMs) *createMs = 0.0;
     if (eye >= kUpscalerSlots) {
         if (why) *why = "an upscaler slot out of range";
@@ -463,13 +470,15 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
 
     EyeCtx& e = g_ctx[eye];
     if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH &&
-        e.diagnostics == diagnostics && e.infiniteDepth == infiniteDepth && e.hdr == hdr) {
+        e.diagnostics == diagnostics && e.infiniteDepth == infiniteDepth && e.hdr == hdr &&
+        e.gameExposure == gameExposure) {
         return true;
     }
     // This key already failed: refuse with the stored reason, silently and
     // without touching AMD's port again (F5). Another key re-arms it.
     if (e.failed && e.failW == w && e.failH == h && e.failOutW == outW && e.failOutH == outH &&
-        e.failDiagnostics == diagnostics && e.failInfiniteDepth == infiniteDepth && e.failHdr == hdr) {
+        e.failDiagnostics == diagnostics && e.failInfiniteDepth == infiniteDepth && e.failHdr == hdr &&
+        e.failGameExposure == gameExposure) {
         if (why) *why = e.failWhy;
         return false;
     }
@@ -487,7 +496,8 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
             (e.w != w || e.h != h || e.outW != outW || e.outH != outH)
                 ? "the sizes moved"
                 : e.infiniteDepth != infiniteDepth ? "the depth projection changed"
-                : e.hdr != hdr ? "the flat HDR route flipped (its input is HDR with automatic exposure)"
+                : e.hdr != hdr ? "the flat HDR route flipped"
+                : e.gameExposure != gameExposure ? "the game exposure strip changed"
                 : "the context key changed",
             e.w, e.h, e.outW, e.outH, e.diagnostics ? "on" : "off", w, h, outW, outH,
             diagnostics ? "on" : "off");
@@ -499,9 +509,11 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
     e = EyeCtx{};
 
     FfxFsr3UpscalerContextDescription desc{};
-    // hdr_backend_flags.h: reversed-Z always, infinite depth and AMD's debug checking as before, and on the flat HDR
-    // route the HDR bit and automatic exposure (the exposure resource stays null and preExposure 1 at dispatch).
-    desc.flags = flatFsrCreateFlags(infiniteDepth, diagnostics, hdr);
+    // hdr_backend_flags.h: reversed-Z always, infinite depth and AMD's debug checking as before. The flat HDR
+    // route adds the HDR bit and not auto exposure: the tonemap divides by the strip after bloom, so this
+    // dispatch does not scale the scene. The VR world route keeps auto exposure.
+    const bool flatFixed = hdr && !gameExposure && runtimeFlatProfile();
+    desc.flags = flatFsrCreateFlags(infiniteDepth, diagnostics, hdr, gameExposure, flatFixed);
     desc.maxRenderSize = FfxDimensions2D{w, h};
     desc.maxUpscaleSize = FfxDimensions2D{outW, outH};
     desc.fpMessage = &FsrMessage;
@@ -554,7 +566,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         // fsr3Available). Bounded because the failure is latched below and
         // never retried at this key; released only by fsr3Shutdown, which
         // drops the whole backend and its scratch.
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, gameExposure, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -566,7 +578,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         // A clean FfxErrorCode: the port unwound its own create, so there is
         // nothing here to destroy. Latched all the same -- a create costs
         // tens of milliseconds and this one runs on every treated frame.
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, gameExposure, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -588,7 +600,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                  sr != FFX_OK ? "the port would not describe them" : "this device would not "
                                                                      "create one of them");
         g_reason = g_reasonBuf;
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, gameExposure, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -613,7 +625,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                      "port needs to register it",
                      s.name, upscalerSlotLabel(static_cast<int>(eye)), missing);
             g_reason = g_reasonBuf;
-            latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, g_reason);
+            latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, hdr, gameExposure, g_reason);
             if (why) *why = e.failWhy;
             return false;
         }
@@ -624,6 +636,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
     e.diagnostics = diagnostics;
     e.infiniteDepth = infiniteDepth;
     e.hdr = hdr;
+    e.gameExposure = gameExposure;
     e.createFlags = desc.flags;
     ++g_testCreations[eye];
 
@@ -640,9 +653,12 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         "surfaces take %.1f MB%s (the port's own history targets are not counted); the "
         "history starts here (made in %.0f ms).",
         upscalerSlotLabel(static_cast<int>(eye)), w, h, outW, outH,
-        hdr ? (diagnostics ? ", HDR input with automatic exposure (the flat HDR route), AMD's own debug checking on"
-                           : ", HDR input with automatic exposure (the flat HDR route)")
-            : (diagnostics ? ", AMD's own debug checking on" : ""),
+        !hdr ? (diagnostics ? ", AMD's own debug checking on" : "")
+             : gameExposure
+                 ? (diagnostics ? ", HDR input with the game's exposure (the flat HDR route), AMD's own debug checking on"
+                                : ", HDR input with the game's exposure (the flat HDR route)")
+                 : (diagnostics ? ", HDR input with automatic exposure (the flat HDR route), AMD's own debug checking on"
+                                : ", HDR input with automatic exposure (the flat HDR route)"),
         static_cast<double>(surfaceBytes) / (1024.0 * 1024.0),
         uncounted ? " plus surfaces of a format this build does not size" : "", ms);
     return true;
@@ -789,11 +805,12 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* reactive,
                   ID3D11Texture2D* out, uint32_t w, uint32_t h, uint32_t outW,
                   uint32_t outH, float jx, float jy, bool reset, float frameMs,
-                  float nearZ, float farZ, float fovY, const char** why, bool infiniteDepth, bool hdr) {
+                  float nearZ, float farZ, float fovY, const char** why, bool infiniteDepth, bool hdr,
+                  ID3D11Texture2D* exposure) {
 #if !EDVR_HAVE_FSR3
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)mv; (void)reactive; (void)out;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset; (void)frameMs;
-    (void)nearZ; (void)farZ; (void)fovY; (void)infiniteDepth; (void)hdr;
+    (void)nearZ; (void)farZ; (void)fovY; (void)infiniteDepth; (void)hdr; (void)exposure;
     if (why) *why = "this build was made without AMD's upscaler (EDVR_HAVE_FSR3)";
     return false;
 #else
@@ -809,12 +826,13 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     // foresaw -- this is the front stop for the one that is documented, and
     // it names the texture and the flag instead of a generic "it threw".
     if (!g_testSkipBindCheck) {
-        const struct { ID3D11Texture2D* tex; const char* name; bool uav; } inputs[5] = {
+        const struct { ID3D11Texture2D* tex; const char* name; bool uav; } inputs[6] = {
             {colour, "colour", false},
             {depth, "depth", false},
             {mv, "motion vector", false},
             {reactive, "reactive mask", false},
             {out, "output", true},
+            {exposure, "exposure", false},
         };
         for (const auto& in : inputs) {
             const char* missing = missingBindFlag(in.tex, in.uav);
@@ -836,7 +854,8 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     }
     // The context: found made (by the warm-up or a previous frame) or made
     // here, through the one block the warm-up shares (ensureContext).
-    if (!ensureContext(eye, w, h, outW, outH, why, nullptr, infiniteDepth, hdr)) return false;
+    const bool gameExposure = hdr && exposure != nullptr;
+    if (!ensureContext(eye, w, h, outW, outH, why, nullptr, infiniteDepth, hdr, gameExposure)) return false;
     EyeCtx& e = g_ctx[eye];
 
     // FSR's cameraNear/cameraFar, under DEPTH_INVERTED: the port's own
@@ -900,9 +919,13 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     dd.reconstructedPrevNearestDepth =
         ffxGetResourceDX11_Fsr31(e.prevNearestDepth, prevDepthDesc, L"EDVR_FSR_PrevNearestDepth",
                                  FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    // exposure and transparencyAndComposition stay zero-initialised (no
-    // resource): design doc 3.3 -- preExposure is the constant 1 instead,
-    // and EDVR has no transparency/composition mask.
+    // transparencyAndComposition stays zero-initialised (no resource): EDVR has no transparency mask.
+    // exposure stays null and preExposure stays 1. The flat HDR route does not bind the strip.
+    if (gameExposure) {
+        const FfxResourceDescription exposureDesc = GetFfxResourceDescriptionDX11(exposure);
+        dd.exposure = ffxGetResourceDX11_Fsr31(exposure, exposureDesc, L"EDVR_FSR_Exposure",
+                                               FFX_RESOURCE_STATE_COMPUTE_READ);
+    }
     dd.output = ffxGetResourceDX11_Fsr31(out, outDesc, L"EDVR_FSR_Output",
                                          FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     dd.jitterOffset = FfxFloatCoords2D{jx * kFsrJitterScaleX, jy * kFsrJitterScaleY};

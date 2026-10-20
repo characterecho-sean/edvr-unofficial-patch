@@ -29,7 +29,9 @@ inline int flatShaderCaptureTests() {
         check((attempted.fetch_or(bit) & bit) != 0, "duplicate refusal");
     }
     check(all == (uint32_t(1) << edvr::kFlatShaderCaptureCount) - 1u, "all exact targets");
-    check(edvr::kFlatShaderCaptureCount == 17, "four new on-foot shader stages included");
+    check(edvr::kFlatShaderCaptureCount == 19, "tonemap pair included");
+    check(edvr::flatShaderCaptureBit(true, 'v', 0x2D78DC3FD2C0C543ull) != 0, "tonemap VS");
+    check(edvr::flatShaderCaptureBit(true, 'p', 0x99C21CEB7A699821ull) != 0, "tonemap PS");
     check(edvr::flatShaderCaptureBit(true, 'v', 0x025B4B9FF54622EDull) != 0, "new material VS");
     check(edvr::flatShaderCaptureBit(true, 'p', 0x46F92DC71BF8DFA5ull) != 0, "new material PS");
     check(edvr::flatShaderCaptureBit(true, 'v', 0x9AEC596A2B036EA6ull) != 0, "new effect VS");

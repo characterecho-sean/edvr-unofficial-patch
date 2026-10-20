@@ -19,6 +19,7 @@
 #include "flat_context_state.h"
 #include "flat_cpu.h"
 #include "flat_hdr_crumbs.h"
+#include "flat_game_exposure.h"
 #include "flat_pixel_capture.h"
 #include "flat_resolve_input_capture.h"
 #include "flat_projection_math.h"
@@ -341,6 +342,10 @@ struct State {
     ComPtr<ID3D11RasterizerState> noCull;
     ComPtr<ID3D11RenderTargetView> hdrRtv;
     ID3D11Texture2D* hdrRtvTexture=nullptr;
+    // Scratch copy of H for the pre-bloom unjitter. Separate from g.color so the copy route's history cache
+    // (keyed on g.hdr) is not rebuilt or cleared when bloom asks for the unjittered frame.
+    Image hdrUnjitter;
+    uint32_t hdrUnjitterW=0, hdrUnjitterH=0;
     // The refusal census and view (FlatMonoResolveFrame::refusalCensus, refusalView; flat_mono_refusal.h), all made on first use by
     // a frame that asks, so a profile that never asks never pays: the counting pass, the prep's class texture (R8_UINT, render
     // size), the counter buffer the pass adds into, and the staging ring its sums are read back from a few frames later.
@@ -1295,6 +1300,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Planet patch motion (celestial_motion.h): the planet records the flat runtime fetched for this frame, bound at t18 with their tangents.
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
+    // The strip is read back for the log only. ps E8948389 divides by texel 0 after bloom, so it is not a
+    // scale for the resolve. Passing it to a backend multiplies H before bloom and clips the lights.
+    if (hdr) (void)flatGameExposurePrepare(context);
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     // Continued history always receives the actual previous origin. Ambiguous
     // inputs take the existing reset path, which seeds from the current rows.
@@ -1383,15 +1391,15 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     } else if(f.mode==FlatMonoResolveMode::Xess) {
         ok=xessEvaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),
             g.motion.texture.Get(),g.output[0].texture.Get(),f.renderWidth,f.renderHeight,
-            evalW,evalH,f.jitterX,f.jitterY,reset,hdr,reason);
+            evalW,evalH,f.jitterX,f.jitterY,reset,hdr,reason,nullptr);
     } else if(f.mode==FlatMonoResolveMode::Fsr) {
         const float sy=std::sqrt(f.camera[0][1]*f.camera[0][1]+f.camera[1][1]*f.camera[1][1]+f.camera[2][1]*f.camera[2][1]);
         ok=fsr3Evaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.rejection.texture.Get(),
             g.output[0].texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,
-            sdkNear,(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true,hdr);
+            sdkNear,(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true,hdr,nullptr);
     } else {
         ok=dlaaEvaluate(context,static_cast<int>(f.slot),g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.output[0].texture.Get(),
-            g.rejection.texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr);
+            g.rejection.texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr,nullptr);
     }
     }
     backendStep.result("ok=%u reason=%s",ok?1u:0u,(reason && *reason)?*reason:"none");
@@ -1601,6 +1609,35 @@ static bool ensureSmaa(ID3D11Device* device,uint32_t renderW,uint32_t renderH) {
     return true;
 }
 
+bool flatMonoResolveUnjitterHdr(ID3D11Device* device, ID3D11DeviceContext* context, const FlatMonoResolveFrame& f,
+                                const char** reason) {
+    if (reason) *reason = nullptr;
+    if (!device || !context || !f.color || !f.hdr || !f.renderWidth || !f.renderHeight || !jitterValid(f))
+        return fail(reason, "flat-unjitter-invalid-frame");
+    if (f.renderWidth < f.outputWidth || f.renderHeight < f.outputHeight)
+        return fail(reason, "flat-unjitter-requires-render-at-least-output");
+    if (!initialize(device, context, reason) || !initializeHdr(device, reason)) return false;
+    ComPtr<ID3D11Texture2D> color;
+    if (!inputTexture(f.color, f.renderWidth, f.renderHeight, true, color, true))
+        return fail(reason, "flat-unjitter-input-view-mismatch");
+    if (g.hdrUnjitterW != f.renderWidth || g.hdrUnjitterH != f.renderHeight || !g.hdrUnjitter.texture) {
+        g.hdrUnjitter = {};
+        if (!image(device, f.renderWidth, f.renderHeight, DXGI_FORMAT_R11G11B10_FLOAT, g.hdrUnjitter, false, "hdr-unjitter"))
+            return fail(reason, "flat-unjitter-scratch-failed");
+        g.hdrUnjitterW = f.renderWidth;
+        g.hdrUnjitterH = f.renderHeight;
+    }
+    if (!hdrTargetView(color.Get(), reason)) return false;
+    Isolate isolated(g.context.Get(), g.isolated.Get(), g.capture);
+    context->CopyResource(g.hdrUnjitter.texture.Get(), color.Get());
+    Constants hc{};
+    hc.size[0] = f.renderWidth; hc.size[1] = f.renderHeight; hc.size[2] = f.renderWidth; hc.size[3] = f.renderHeight;
+    hc.jitter[0] = f.jitterX; hc.jitter[1] = f.jitterY; hc.route[0] = 1;
+    context->UpdateSubresource(g.constants.Get(), 0, nullptr, &hc, 0, 0);
+    ID3D11ShaderResourceView* views[1] = {g.hdrUnjitter.srv.Get()};
+    drawHdrTarget(context, g.spatialHdr.Get(), f.renderWidth, f.renderHeight, views, 1);
+    return true;
+}
 bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
                                     ID3D11ShaderResourceView** output,const char** reason) {
     // The HDR route's spatial recovery writes the same crumbs as its resolve (flat_hdr_crumbs.h): capture-state, copy-h,

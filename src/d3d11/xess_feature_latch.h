@@ -10,10 +10,12 @@ namespace edvr {
 struct XessFeatureKey {
     uint32_t inW, inH, outW, outH;
     bool hdr;
+    bool gameExposure = false;   // the flat HDR route has the tonemap strip's 1x1; creation-time, so part of the key
 
     bool operator==(const XessFeatureKey& other) const {
         return inW == other.inW && inH == other.inH &&
-               outW == other.outW && outH == other.outH && hdr == other.hdr;
+               outW == other.outW && outH == other.outH && hdr == other.hdr &&
+               gameExposure == other.gameExposure;
     }
 };
 

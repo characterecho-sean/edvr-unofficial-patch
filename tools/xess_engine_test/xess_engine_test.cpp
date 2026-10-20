@@ -48,12 +48,13 @@ bool latchSelfTest() {
         {641, 360, 1280, 720, false}, {640, 361, 1280, 720, false},
         {640, 360, 1281, 720, false}, {640, 360, 1280, 721, false},
         {640, 360, 1280, 720, true},
+        {640, 360, 1280, 720, false, true},
     };
     for (const auto& changed : changes) {
         latch.record(original, "unavailable quality");
         latch.clearIfDifferent(changed);
         if (!check(!latch.matches(original) && !latch.matches(changed),
-                   "size or HDR change clears failed key")) return false;
+                   "size, HDR or exposure change clears failed key")) return false;
     }
     latch.record(original, "shared texture failed");
     latch.clear();

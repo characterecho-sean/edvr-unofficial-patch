@@ -384,6 +384,19 @@ inline int flatHdrRouteTests() {
             }
         expect(only, "FSR HDR adds exactly the HDR and auto-exposure bits to every LDR combination");
     }
+    expect(flatFsrCreateFlags(false, false, true, true) == (flatFsrCreateFlags(false, false, true) & ~kFsrFlagAutoExposure) &&
+           (flatFsrCreateFlags(true, true, true, true) & kFsrFlagAutoExposure) == 0 &&
+           (flatFsrCreateFlags(true, true, true, true) & kFsrFlagHighDynamicRange) != 0,
+           "FSR HDR with the game's exposure keeps the HDR bit and drops auto exposure");
+    expect(flatFsrCreateFlags(false, false, true, false, true) == (kFsrFlagDepthInverted | kFsrFlagHighDynamicRange) &&
+           (flatFsrCreateFlags(true, true, true, false, true) & kFsrFlagAutoExposure) == 0,
+           "flat HDR FSR is HDR with no auto exposure and no strip");
+    expect(flatXessInitFlags(false, false) == (kXessFlagInvertedDepth | kXessFlagLdr) &&
+           flatXessInitFlags(false, true) == (kXessFlagInvertedDepth | kXessFlagLdr) &&
+           flatXessInitFlags(true, false) == (kXessFlagInvertedDepth | kXessFlagAutoExposure) &&
+           flatXessInitFlags(true, true) == (kXessFlagInvertedDepth | kXessFlagExposureTexture) &&
+           flatXessInitFlags(true, false, true) == (kXessFlagInvertedDepth | kXessFlagLdr),
+           "XeSS LDR stays inverted depth plus LDR; flat HDR does not scale; VR HDR keeps auto exposure");
 
     // ---- the detector, on a canonical frame (the star with bloom on, in miniature) ------------------------
     {
@@ -1563,18 +1576,19 @@ inline int flatHdrRouteTests() {
         const std::string dlaa = slurpSource("src/d3d11/dlaa.cpp");
         expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));") == 1 &&
                    count(dlaa, "flatDlssCreateFlags(hdr") == 1 &&
-                   count(dlaa, "if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {") == 1 &&
-                   count(dlaa, "ep.pInExposureTexture = g_exposureOne;") == 1,
-               "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, in one place");
+                   count(dlaa, "if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) ep.pInExposureTexture = nullptr;") == 1 &&
+                   count(dlaa, "g_exposureOne") == 0,
+               "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, and does not bind an exposure texture");
         expect(count(dlaa, "f.presetGen != g_presetGen || f.hdr != hdr") == 1 && count(dlaa, "f.hdr = hdr;") == 1,
                "dlaa.cpp keys the feature on the route's bit and stores it when the feature is made, so a flip remakes it");
         expect(count(dlaa, "ensureFeature(ctx, eye, w, h, outW, outH, reason, nullptr, hdr)") == 1,
                "dlaaEvaluate hands the route's bit to the feature it asks for");
         // The resolver hands the frame's bit down to each engine, with no literal in its place.
         const std::string resolve = slurpSource("src/d3d11/flat_mono_resolve.cpp");
-        expect(count(resolve, "f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr);") == 1 &&
-                   count(resolve, "2*std::atan(1/sy),reason,true,hdr);") == 1,
-               "the resolver's backend calls pass the frame's hdr bit to the DLSS/DLAA evaluate and to the FSR evaluate");
+        expect(count(resolve, "f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr,nullptr);") == 1 &&
+                   count(resolve, "2*std::atan(1/sy),reason,true,hdr,nullptr);") == 1 &&
+                   count(resolve, "reset,hdr,reason,nullptr);") == 1,
+               "the resolver's backend calls pass the frame's hdr bit and no exposure texture");
     }
 
     // ---- the wiring no rig can run: the runtime's default, merge and publication, and the panel's use of them ---------

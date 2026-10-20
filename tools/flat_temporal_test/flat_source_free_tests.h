@@ -203,6 +203,25 @@ inline int flatSourceFreeWiringTests() {
                              "if(s.treated||selected.depth!=s.namedDepth"),
                     {"nameSourceFree(s,selected);", "if(s.treated||selected.depth!=s.namedDepth||selected.sceneConstants!=s.namedConstants){"}),
            "mutation control: a comparison made before the naming fails the wiring");
+    // A blank scene (empty depth, or only inert full-screen filters) is refused here, after the naming, before the
+    // source-free views are prepared. Section 104 geometry still reaches that prepare. Both routes count the frame once.
+    const std::string copyIdentity = compact("if(s.treated||selected.depth!=s.namedDepth||selected.sceneConstants!=s.namedConstants){");
+    const std::string copyBlank = compact(
+        "s.reason=\"blank-scene\";if(s.blankSceneCopyLines<4){++s.blankSceneCopyLines;"
+        "Log::get().note(\"flat copy route: blank scene, left untreated (no world draw on the scene depth); the game's image is shown\");}"
+        "if(s.phase.applied)recover(s.reason);noteBlankSceneDeclined(s);refuse(s);return;");
+    const std::string sourceFreePrepare = compact("if(selected.sourceFree){floatsourceFreeRows");
+    const size_t copyIdentityAt = runtime.find(copyIdentity);
+    const size_t copyBlankAt = runtime.find(copyBlank);
+    const size_t sourceFreePrepareAt = runtime.find(sourceFreePrepare);
+    expect(copyIdentityAt != std::string::npos && copyBlankAt != std::string::npos && sourceFreePrepareAt != std::string::npos &&
+               copyIdentityAt < copyBlankAt && copyBlankAt < sourceFreePrepareAt,
+           "the copy route refuses a blank scene after the identity check and before it prepares source-free views");
+    expect(count(without(runtime, copyBlank.c_str()), copyBlank) == 0,
+           "mutation control: a copy route that still resolves a blank scene fails the wiring");
+    expect(count(runtime, "noteBlankSceneDeclined(s);") == 2 &&
+               count(runtime, "if(s.blankSceneNotedFrame==s.prefix.frame)return;") == 1,
+           "both routes record a blank-scene decline, and a frame both see is counted once");
     expect(ordered(runtime, {"nameSourceFree(s,selected);",
                              "if(selected.depth!=s.namedDepth||selected.sceneConstants!=s.namedConstants){decline(\"producer-source-identity-mismatch\");"}),
            "the HDR route's treatment names a source-free world before it compares too");

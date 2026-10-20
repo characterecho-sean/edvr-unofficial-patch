@@ -96,8 +96,8 @@ struct EyeFeature {
     uint32_t          w = 0, h = 0;
     uint32_t          outW = 0, outH = 0;
     uint64_t          presetGen = 0;   // the preset generation the feature was created under
-    // The flat HDR route's input is HDR with automatic exposure (section 81). The flags are creation-time, so
-    // the feature key carries the bit: a route flip remakes the feature and its history starts again.
+    // The flat HDR route's input is HDR (hdr_backend_flags.h). The flags are creation-time, so the feature key
+    // carries the bit: a route flip remakes the feature and its history starts again.
     bool              hdr = false;
 };
 
@@ -126,9 +126,6 @@ static_assert(flatDlssCreateFlags(false, true) == static_cast<uint32_t>(NVSDK_NG
 // costs FIVE times K. So: K everywhere; never L or M under DLAA.
 unsigned g_preset = 11;        // the full frame's, every mode
 uint64_t g_presetGen = 1;
-// The flat HDR route's exposure input (section 106): NVIDIA's "1x1 texture containing the final exposure scale",
-// R32_FLOAT 1.0, made on the first such evaluation. H is pre-tonemap radiance the game's own tone pass exposes later.
-ID3D11Texture2D* g_exposureOne = nullptr;
 
 const char* presetName(unsigned p) {
     switch (p) {
@@ -423,7 +420,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         cp.Feature.InTargetWidth = outW;
         cp.Feature.InTargetHeight = outH;
         cp.Feature.InPerfQualityValue = quality;
-        // LDR colour (HDR on the HDR route: fixed exposure in flat, automatic in the VR world route; hdr_backend_flags.h);
+        // LDR colour (HDR on the HDR route: the game's exposure in flat, automatic in the VR world route; hdr_backend_flags.h);
         // motion vectors at the render size, unjittered (the pass computes them on the unjittered
         // grid); reversed-Z depth.
         cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));
@@ -464,7 +461,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
             Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input, exposure %s; the "
                             "history starts here.", upscalerSlotLabel(eye),
                             flatDlssFixedExposure(hdr, runtimeFlatProfile())
-                                ? "fixed at 1.0 (IsHDR with MVLowRes | DepthInverted, no AutoExposure; a 1x1 exposure texture)"
+                                ? "1.0, no texture (IsHDR with MVLowRes | DepthInverted, no AutoExposure)"
                                 : "automatic (IsHDR | AutoExposure with MVLowRes | DepthInverted)");
         // Build point 5, 2026-09-23: a create success resets the shared
         // reason, so a caller that reads it later (dlaaAvailable's *reason,
@@ -667,12 +664,12 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,
                   uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason, bool hdr) {
+                  float frameMs, const char** reason, bool hdr, ID3D11Texture2D* exposure) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
     (void)reactive;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
-    (void)frameMs; (void)hdr;
+    (void)frameMs; (void)hdr; (void)exposure;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
@@ -718,25 +715,10 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InMVScaleY = 1.0f;
     ep.InPreExposure = 1.0f;
     ep.InExposureScale = 1.0f;
-    if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {
-        if (!g_exposureOne) {
-            ID3D11Device* exposureDev = nullptr;
-            ctx->GetDevice(&exposureDev);
-            if (exposureDev) {
-                D3D11_TEXTURE2D_DESC td{};
-                td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R32_FLOAT;
-                td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                const float one = 1.0f;
-                D3D11_SUBRESOURCE_DATA init{&one, sizeof(one), 0};
-                const HRESULT hrExposure = exposureDev->CreateTexture2D(&td, &init, &g_exposureOne);
-                if (FAILED(hrExposure))
-                    Log::get().note("dlss: the fixed exposure texture (1x1 R32_FLOAT = 1.0) was refused (hr=0x%08X); "
-                                    "the evaluation runs without it", static_cast<unsigned>(hrExposure));
-                exposureDev->Release();
-            }
-        }
-        ep.pInExposureTexture = g_exposureOne;
-    }
+    // Flat HDR passes no exposure texture. NVIDIA then uses 1.0. The tonemap divides by strip texel 0
+    // after bloom, so binding that luminance here scaled H before bloom and clipped the lights.
+    if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) ep.pInExposureTexture = nullptr;
+    (void)exposure;
     // The frame delta the SDK asks for ("helps in determining the amount
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
@@ -816,7 +798,6 @@ bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs
 void dlaaShutdown() {
 #ifdef EDVR_HAVE_NGX
     releaseFeatures();
-    if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
     for (QuerySlot& q : g_qring) releaseQuerySlot(q);
     if (g_params) {
         NVSDK_NGX_D3D11_DestroyParameters(g_params);

@@ -19,6 +19,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "exposure_chain.h"  // the engine path: which of the second eye's dispatches are not forwarded (pure half)
+#include "flat_game_exposure.h"  // the flat HDR route's copy of the tonemap strip (u1 of F1FB2EEF)
 #include "gpu_pass_profile.h"  // TEMPORARY GPU pass profiler: a dispatch is a pass boundary
 #include "engine_velocity.h"  // F2: the palette chain's dispatch feeds the second skin's join
 #include "skin_join.h"        // kChainHash
@@ -723,11 +724,30 @@ bool skinChainBound() {
     return verdicts.bound(cs, shaderRegistryGeneration(), [](const void* shader) { return hashOf(const_cast<void*>(shader)); });
 }
 
+// Flat only, owner context: remember F1FB2EEF's strip when that shader is bound. The hash is cached by
+// shader object and registry generation, so a steady dispatch is a pointer compare.
+void noteFlatExposureDispatch() {
+    void* cs = bindingGet(BindSlot::Cs);
+    if (!cs) return;
+    static void* cached = nullptr;
+    static uint32_t cachedGen = 0;
+    static uint64_t cachedHash = 0;
+    const uint32_t gen = shaderRegistryGeneration();
+    if (cs != cached || gen != cachedGen) {
+        cached = cs;
+        cachedGen = gen;
+        cachedHash = hashOf(cs);
+    }
+    if (cachedHash == kFlatExposureShader)
+        flatGameExposureConsider(cachedHash, static_cast<ID3D11UnorderedAccessView*>(g_state->uav[1]));
+}
+
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDispatch(self, x, y, z);
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDispatch];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, x, y, z);
+        if (self == g_state->ownerCtx) noteFlatExposureDispatch();
         FlatRuntimeDispatchScope flatDispatch(self);
         g_state->realDispatch(self, x, y, z);
         return;

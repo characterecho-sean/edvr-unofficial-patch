@@ -231,10 +231,10 @@ void xessReleaseFeatures() {}
 void xessShutdown() {}
 bool xessBuiltIn() { return false; }
 bool xessEvaluate(ID3D11DeviceContext*,unsigned,ID3D11Texture2D*,ID3D11Texture2D*,ID3D11Texture2D*,
-                  ID3D11Texture2D*,uint32_t,uint32_t,uint32_t,uint32_t,float,float,bool,bool,const char**) { return false; }
+                  ID3D11Texture2D*,uint32_t,uint32_t,uint32_t,uint32_t,float,float,bool,bool,const char**,ID3D11Texture2D*) { return false; }
 bool dlaaEvaluate(ID3D11DeviceContext* c, int slot, ID3D11Texture2D* colour, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D* out,
                   ID3D11Texture2D*, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy, bool reset, float,
-                  const char**, bool hdr) {
+                  const char**, bool hdr, ID3D11Texture2D*) {
     ++g_backendCalls;
     g_inj.order.push_back(3);
     BackendCall b{};
@@ -255,7 +255,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* c, int slot, ID3D11Texture2D* colour, ID3
 }
 bool fsr3Evaluate(ID3D11DeviceContext*, unsigned, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D*,
                   ID3D11Texture2D*, uint32_t, uint32_t, uint32_t, uint32_t, float, float, bool, float, float, float, float,
-                  const char**, bool, bool) { return false; }
+                  const char**, bool, bool, ID3D11Texture2D*) { return false; }
 }  // namespace edvr
 
 namespace {

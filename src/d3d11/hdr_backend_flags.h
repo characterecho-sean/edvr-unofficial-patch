@@ -20,15 +20,16 @@ constexpr uint32_t kDlssFlagAutoExposure = 1u << 6;
 
 // DLSS: motion vectors at the render size and unjittered (the prep pass computes them on the unjittered grid),
 // reversed-Z depth. The HDR route adds IsHDR. MVJittered stays off in both: the vectors exclude the raster phase.
-// Exposure on the HDR route (docs/design-flat-temporal-aa-2026-09-23.md, section 106): the flat profile's input H is
-// pre-tonemap radiance the game's own tone pass exposes later, so it is evaluated with a fixed exposure of 1.0 (a 1x1
-// exposure texture, dlaa.cpp) and no AutoExposure; NVIDIA's automatic exposure dimmed the picture and lost stars (flown
-// 2026-10-09). The VR world route, the other caller with hdr true, keeps AutoExposure: flatProfile false.
+// Exposure on the HDR route (docs/design-flat-temporal-aa-2026-09-23.md, sections 81 and 106). The flat profile's
+// input H is pre-tonemap radiance. Bloom reads that radiance; the tonemap (ps E8948389) divides by strip texel 0
+// afterwards. Scaling H by that luminance before bloom clips the lights (hangar, 2026-10-19, texel 0 at 150–271).
+// NVIDIA's automatic exposure dimmed H and lost stars (flown 2026-10-09). The flat route stays off AutoExposure and
+// passes no exposure texture, which NVIDIA treats as 1.0. The VR world route keeps AutoExposure: flatProfile false.
 inline constexpr uint32_t flatDlssCreateFlags(bool hdr, bool flatProfile) {
     return kDlssFlagMvLowRes | kDlssFlagDepthInverted |
            (hdr ? (kDlssFlagIsHdr | (flatProfile ? 0u : kDlssFlagAutoExposure)) : 0u);
 }
-// Whether the HDR route's evaluation hands NVIDIA the fixed exposure texture: exactly when the feature lacks AutoExposure.
+// Whether the HDR route's evaluation may hand NVIDIA the game's exposure texture: exactly when the feature lacks AutoExposure.
 inline constexpr bool flatDlssFixedExposure(bool hdr, bool flatProfile) { return hdr && flatProfile; }
 
 // FfxFsr3UpscalerInitializationFlagBits (FidelityFX-SDK-DX11 fork, ffx_fsr3upscaler.h).
@@ -38,12 +39,32 @@ constexpr uint32_t kFsrFlagDepthInfinite = 1u << 4;
 constexpr uint32_t kFsrFlagAutoExposure = 1u << 5;
 constexpr uint32_t kFsrFlagDebugChecking = 1u << 8;
 
-// FSR: reversed-Z always; infinite depth and AMD's debug checking as before. The HDR route adds the HDR bit and
-// auto exposure, and keeps the exposure resource null and preExposure 1 at dispatch (auto exposure computes it).
-inline constexpr uint32_t flatFsrCreateFlags(bool infiniteDepth, bool diagnostics, bool hdr) {
+// FSR: reversed-Z always; infinite depth and AMD's debug checking as before. The HDR route adds the HDR bit.
+// Auto exposure is the VR world route. gameExposure drops it and the dispatch binds a 1x1 (no current caller).
+// flatFixedExposure is the flat HDR route: HDR, no auto exposure, no texture, preExposure 1.
+inline constexpr uint32_t flatFsrCreateFlags(bool infiniteDepth, bool diagnostics, bool hdr, bool gameExposure = false,
+                                            bool flatFixedExposure = false) {
+    const bool autoExposure = hdr && !gameExposure && !flatFixedExposure;
     return kFsrFlagDepthInverted | (infiniteDepth ? kFsrFlagDepthInfinite : 0u) |
            (diagnostics ? kFsrFlagDebugChecking : 0u) |
-           (hdr ? (kFsrFlagHighDynamicRange | kFsrFlagAutoExposure) : 0u);
+           (hdr ? kFsrFlagHighDynamicRange : 0u) | (autoExposure ? kFsrFlagAutoExposure : 0u);
+}
+
+// XeSS init flags (xess.h). Creation-time, so a change of gameExposure remakes the context. The constants are
+// static_asserted against the SDK in xess_engine.cpp. LDR is the copy route. HDR with gameExposure uses the
+// exposure-scale texture. flatFixedExposure is the flat HDR route: inverted depth only, so XeSS does not scale
+// the scene (its exposure-scale texture flag is exactly that scale). HDR otherwise keeps automatic exposure (VR).
+constexpr uint32_t kXessFlagInvertedDepth = 1u << 1;
+constexpr uint32_t kXessFlagExposureTexture = 1u << 2;
+constexpr uint32_t kXessFlagLdr = 1u << 6;
+constexpr uint32_t kXessFlagAutoExposure = 1u << 8;
+inline constexpr uint32_t flatXessInitFlags(bool hdr, bool gameExposure, bool flatFixedExposure = false) {
+    if (!hdr) return kXessFlagInvertedDepth | kXessFlagLdr;
+    if (gameExposure) return kXessFlagInvertedDepth | kXessFlagExposureTexture;
+    // Tonemap off (LDR flag). The flat route round-trips radiance around XeSS itself, because
+    // XeSS's own HDR tonemap at exposure 1 still blew the hangar lights (edvr_gfx_20261019_073958, flags 0x2).
+    if (flatFixedExposure) return kXessFlagInvertedDepth | kXessFlagLdr;
+    return kXessFlagInvertedDepth | kXessFlagAutoExposure;
 }
 
 }  // namespace edvr

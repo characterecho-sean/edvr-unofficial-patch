@@ -344,6 +344,8 @@ struct State {
     // those frames held nothing but hologram-family draws (the loading screen's hologram ghost, docs\design-flat-ui-quality-2026-10-05.md).
     FlatMonoSourceless sourceFreeLast;
     uint64_t sourceFreeLastFrame=0, sourceFreeSeenWindow=0, sourceFreeEmptyWindow=0, sourceFreeHoloOnlyWindow=0, sourceFreeOtherWindow=0, blankSceneDeclinedWindow=0;
+    uint64_t blankSceneNotedFrame=0;   // the frame blankSceneDeclinedWindow already counted (both routes can decline it)
+    uint32_t blankSceneCopyLines=0;    // "flat copy route: blank scene" lines this session
     bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
     uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
@@ -655,6 +657,8 @@ struct State {
     FlatHdrLatch hdrLatch{};         // three treated frames with late writes turn the route off until the key flips
     FlatMonoFrame hdrSelected{};     // the selection at this frame's trigger (kept here: the draw scope is built per draw)
     bool hdrTreated = false;         // this frame's treatment was the route's: the copy stage must not treat it again
+    bool hdrUnjittered = false;      // H holds the unjittered frame only; the copy route still blends, with no raster jitter
+    bool hdrUnjitterLogged = false;
     bool hdrFirstTriggerLogged = false, hdrLateLogged = false;
     uint32_t hdrFlightLines = 0;     // bounded per-session log lines about the route's own decisions
 
@@ -969,6 +973,12 @@ static bool blankScene(const FlatMonoFrame& sel) {
     for(uint32_t i=0;i<n.topCount;++i)
         if(n.top[i].pool || !flatProjectionDrawUnchanged(n.top[i].vs,n.top[i].ps)) return false;
     return true;
+}
+// Both routes can decline one frame. The 5 s line counts frames, so the second decline does not add another.
+static void noteBlankSceneDeclined(State& s) {
+    if(s.blankSceneNotedFrame==s.prefix.frame) return;
+    s.blankSceneNotedFrame=s.prefix.frame;
+    ++s.blankSceneDeclinedWindow;
 }
 static void noteSourceFreeContent(State& s, const FlatMonoFrame& sel) {
     if(!sel.selected() || !sel.sourceFree) return;
@@ -3176,7 +3186,7 @@ void flatRuntimeResize() {
     s.observing = false; s.covFrameLocallyRefused = false;
     // The HDR route's per-frame detector state names resources of the old device; the key, the latch and the
     // census window are the session's and stay.
-    flatHdrBeginFrame(s.hdr, 0, 0); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, 0, 0); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false; s.hdrUnjittered = false;
     g_sceneSizes.store(0, std::memory_order_release);
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
@@ -3857,6 +3867,7 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
     policy.structure = s.hdrKey == FlatHdrKey::Auto;
     policy.mode = s.engine;
     policy.routeLatched = s.hdrLatch.tripped;
+    policy.routeServes = !s.hdrUnjittered;
     FlatCopyDiag diag;
     const FlatMonoFrame out = flatCopyAdmit(s.prefix, s.hdr, d, whitelist, policy, &diag);
     if (whitelist.selected()) s.copyWindow.noteWhitelist(); else s.copyWindow.note(diag);
@@ -4479,7 +4490,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
     s.producerRun.armed = false;
-    flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false; s.hdrUnjittered = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
     foreignWork.store(false, std::memory_order_release);
@@ -6708,6 +6719,21 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(!s.treated && s.phase.applied)recover(s.reason);
         refuse(s); return;
     }
+    // A blank scene has no world draw on its depth, or only inert full-screen filters. The camera term is zero while the
+    // raster is jittered, so a temporal resolve smears a static highlight (the hangar ceiling, 2026-10-18) and ghosts a
+    // loading hologram. The HDR route declines the same frames. A phase already applied is taken back out, and the
+    // game's image is what the copy samples. A source-free scene that did draw geometry is not blank and is still treated.
+    if (blankScene(selected)) {
+        s.reason = "blank-scene";
+        if (s.blankSceneCopyLines < 4) {
+            ++s.blankSceneCopyLines;
+            Log::get().note("flat copy route: blank scene, left untreated (no world draw on the scene depth); the game's image is shown");
+        }
+        if (s.phase.applied) recover(s.reason);
+        noteBlankSceneDeclined(s);
+        refuse(s);
+        return;
+    }
     {
         // The weapon the model cannot see (an unsupported first-person pair: the plasma weapon) is known only to the domain, which planned
         // its draws into this frame's depth: either witness makes the frame mixed-camera, where the copy route judges the weapon.
@@ -6853,6 +6879,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.jitterX=s.phase.currentX;f.jitterY=s.phase.currentY;
     f.previousJitterX=f.reset?f.jitterX:s.phase.previousX;
     f.previousJitterY=f.reset?f.jitterY:s.phase.previousY;
+    // The scene target was resampled onto the unjittered grid before bloom. This colour is that image, so a
+    // second jitter offset would sample off it. Motion stays on the unjittered grid. The backend still runs.
+    if (s.hdrUnjittered) {
+        f.jitterX = 0.f; f.jitterY = 0.f;
+        f.previousJitterX = 0.f; f.previousJitterY = 0.f;
+    }
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
     flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);
@@ -7039,11 +7071,11 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (s.hdrLatch.tripped) { decline("latched-off"); return; }
     if (s.observing) { decline("returned-to-observation"); return; }
     if (s.treated) { decline("already-treated-this-frame"); return; }
-    // A scene with no world (a loading or menu screen: only full-screen filters on its depth) has nothing the camera term can move, so
-    // every pixel of its rotating hologram would reach the upscaler with zero motion and keep accumulating (the loading-screen ghost).
-    // The copy route's own verdict on such a frame is no-scene: untreated, as at supersampling below 1.
+    // A scene with no world (nothing on its depth, or only inert full-screen filters) has nothing the camera term can move,
+    // so a temporal resolve keeps accumulating (the loading-screen ghost; the hangar's smeared ceiling). The copy route
+    // refuses the same frames and shows the game's image. Ground and sky have geometry draws on that depth, so they stay treated.
     if (blankScene(selected)) {
-        ++s.blankSceneDeclinedWindow; decline("blank-scene"); return;
+        noteBlankSceneDeclined(s); decline("blank-scene"); return;
     }
     if (overlayOpen(s) && foreignWork.load(std::memory_order_acquire)) {
         overlayFail(s,"overlay-foreign-mutation",selected.hdr);
@@ -7183,6 +7215,27 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.jitterX = s.phase.currentX; f.jitterY = s.phase.currentY;
     f.previousJitterX = f.reset ? f.jitterX : s.phase.previousX;
     f.previousJitterY = f.reset ? f.jitterY : s.phase.previousY;
+    // Bloom reads H. Write the unjittered frame and no history, then leave. The copy route blends after the
+    // tonemap, so this is not a second temporal pass and it does not retire the frame's anti-aliasing.
+    {
+        const char* why = nullptr;
+        if (!flatMonoResolveUnjitterHdr(s.device.Get(), ctx, f, &why)) {
+            if (s.hdrFlightLines < 8)
+                Log::get().note("flat hdr route: unjitter failed (%s); this frame is left to the copy route", why ? why : "unknown");
+            ++s.hdrFlightLines;
+            decline(why ? why : "unjitter-failed");
+            return;
+        }
+        s.hdrUnjittered = true;
+        s.reason = "unjittered-for-bloom";
+        s.hdrWindow.lastVerdict = s.reason;
+        ++s.hdrWindow.treated;
+        if (!s.hdrUnjitterLogged) {
+            s.hdrUnjitterLogged = true;
+            Log::get().note("flat hdr route: the scene target is the unjittered frame, no history; temporal AA runs after the tonemap");
+        }
+        return;
+    }
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
     flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);

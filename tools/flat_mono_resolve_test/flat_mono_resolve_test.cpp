@@ -240,12 +240,14 @@ bool xessBuiltIn(){return true;}
 // XeSS has no rejection-mask input. Observe its actual depth/motion/reset
 // arguments without fabricating a mask; the fixture checks final pixels too.
 bool xessEvaluate(ID3D11DeviceContext* c,unsigned,ID3D11Texture2D*,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
-                  ID3D11Texture2D* out,uint32_t,uint32_t,uint32_t,uint32_t,float jx,float jy,bool reset,bool,const char** why) {
+                  ID3D11Texture2D* out,uint32_t,uint32_t,uint32_t,uint32_t,float jx,float jy,bool reset,bool,const char** why,
+                  ID3D11Texture2D*) {
     if(!xessCaptureInputs)return false; // retain the legacy stub outside this fixture
     return backend(c,depth,mv,nullptr,out,jx,jy,reset,why);
 }
 bool dlaaEvaluate(ID3D11DeviceContext* c,int slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
-    ID3D11Texture2D* out,ID3D11Texture2D* mask,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,float,const char** why,bool hdr) {
+    ID3D11Texture2D* out,ID3D11Texture2D* mask,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,float,const char** why,bool hdr,
+    ID3D11Texture2D*) {
     backendSlots.push_back(slot);
     observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
     observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;
@@ -256,7 +258,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* c,int slot,ID3D11Texture2D* colour,ID3D11
 }
 bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
     ID3D11Texture2D* mask,ID3D11Texture2D* out,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,float,
-    float nearZ,float,float fov,const char** why,bool infinite,bool hdr) {
+    float nearZ,float,float fov,const char** why,bool infinite,bool hdr,ID3D11Texture2D*) {
     backendSlots.push_back(static_cast<int>(slot));
     observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
     observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;

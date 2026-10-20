@@ -19,7 +19,8 @@ cbuffer Mono : register(b0) {
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
                  // the VR world route sets it, never the flat profile). Bit 3 (value 8): the flat profile's planet records are bound at
-                 // t18 and the celestial tangents below are set (celestialBefore; the VR world route never sets it). Zero leaves the old shader path unchanged.
+                 // t18 and the celestial tangents below are set (celestialBefore; the VR world route never sets it).
+                 // Bit 4 (value 16): flat HDR TAA, GameExposure at t19 is the game's exposure scale. Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
     float4 celestialTanNow; float4 celestialTanPrev; // the planet records' tangents (l, r, b, t) now and last frame: only read with debug.w bit 3
 };
@@ -47,6 +48,7 @@ Texture2D<float4> SkinE : register(t17);                // prep only, bound when
 // Planet patch motion, flat (celestial_motion.h): one record per body, the engine-motion core's CelestialRecord. Prep only, bound at t18 with
 // debug.w bit 3.
 StructuredBuffer<CelestialRecord> CelestialRecords : register(t18); // prep only, bound with debug.w bit 3
+Texture2D<float> GameExposure : register(t19);          // HDR TAA only, bound with debug.w bit 4: 1x1 R32_FLOAT, the tonemap strip's texel 0
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
 SamplerState LinearClamp : register(s0);
@@ -358,11 +360,12 @@ void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIn
     if(gi<25 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*25u+gi)*4u,gRefusal[gi]);
 }
 
-// The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot
-// particle in a linear 3x3 clamp would set the box and the blend alone and ring around every highlight. The history
-// stays linear fp16, so a route flip needs no conversion and the tone pass sees linear radiance again.
-float3 hdrCompress(float3 c) { c=max(c,0); return c/(1+max(c.r,max(c.g,c.b))); }
-float3 hdrExpand(float3 c) { float m=max(c.r,max(c.g,c.b)); return min(c/max(1-m,1.0/65504.0),65504); }
+// The HDR route accumulates in a bounded space and inverts it on output: a sun disc or a hot particle in a linear
+// 3x3 clamp would set the box and the blend alone and ring around every highlight. The scale is the game's exposure
+// when debug.w bit 4 is set, and 1 otherwise (the old c / (1 + max3(c))). Multiplying before the shoulder and dividing
+// back out leaves linear radiance for bloom. The history stays linear fp16, so a route flip needs no conversion.
+float3 hdrCompress(float3 c, float e) { c=max(c,0)*e; return c/(1+max(c.r,max(c.g,c.b))); }
+float3 hdrExpand(float3 c, float e) { float m=max(c.r,max(c.g,c.b)); return min(c/max(1-m,1.0/65504.0),65504)/e; }
 [numthreads(8,8,1)]
 void taa(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.zw))return;
@@ -399,8 +402,18 @@ void taa(uint3 id:SV_DispatchThreadID) {
     }
     if(weight==0) {OutColor[id.xy]=current;return;}
     bool hdr=route.x!=0;
-    float3 cur=hdr?hdrCompress(current.rgb):current.rgb;
-    float3 lo=cur,hi=cur;
+    float exposure=1;
+    if(hdr && (debug.w&16u)!=0) {
+        float e=GameExposure.Load(int3(0,0,0));
+        if(isfinite(e) && e>1e-6) exposure=e;
+    }
+    float3 cur=hdr?hdrCompress(current.rgb,exposure):current.rgb;
+    // The bilinear current already contains the neighbouring panel, and at history weight 0.9 the blend
+    // climbs up to it over a fraction of a second (the hangar lights, 2026-10-19). The ceiling is the one
+    // texel under the jittered sample. The floor is the neighbourhood, so a dark ghost is still rejected.
+    float3 texel=Color.Load(int3(q,0)).rgb;
+    float3 cap=hdr?hdrCompress(texel,exposure):texel;
+    float3 lo=cap;
     [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x) {
         int2 neighbor=clamp(q+int2(x,y),0,int2(size.xy)-1);
         if((debug.w&3)!=0) {
@@ -409,13 +422,13 @@ void taa(uint3 id:SV_DispatchThreadID) {
             if(UntrustedCameraCoverage.Load(int3(neighbor,0))>0)continue;
         }
         float3 value=Color.Load(int3(neighbor,0)).rgb;
-        if(hdr)value=hdrCompress(value);
-        lo=min(lo,value);hi=max(hi,value);
+        if(hdr)value=hdrCompress(value,exposure);
+        lo=min(lo,value);
     }
     float3 history=History.SampleLevel(LinearClamp,previous,0).rgb;
-    if(hdr)history=hdrCompress(history);
-    float3 mixed=lerp(cur,clamp(history,lo,hi),weight);
-    OutColor[id.xy]=float4(hdr?hdrExpand(mixed):mixed,current.a);
+    if(hdr)history=hdrCompress(history,exposure);
+    float3 mixed=min(lerp(cur,clamp(history,lo,cap),weight),cap);
+    OutColor[id.xy]=float4(hdr?hdrExpand(mixed,exposure):mixed,current.a);
 }
 // The refusal view (debug.y): the prep's class, painted in the eye path's colours
 // (temporal_shader_source.h, the motion_source view), by the HDR route's finish and by the copy route's. On the HDR route the
@@ -519,8 +532,12 @@ float4 finishHdr(float4 pos:SV_Position):SV_Target {
     return float4(hdrRepresentable(c),1);
 }
 float4 spatialHdr(float4 pos:SV_Position):SV_Target {
+    // One texel, not the bilinear tap. The 2x2 filter mixes a clipped light into the dark frame beside it,
+    // and bloom then spreads that mix (the hangar, RCAS off, 2026-10-19). AA off renders the texel itself.
     float2 uv=pos.xy/float2(size.zw);
-    return float4(hdrRepresentable(Color.SampleLevel(LinearClamp,uv+jitter.xy/float2(size.xy),0).rgb),1);
+    float2 raster=uv+jitter.xy/float2(size.xy);
+    int2 q=clamp(int2(raster*float2(size.xy)),0,int2(size.xy)-1);
+    return float4(hdrRepresentable(Color.Load(int3(q,0)).rgb),1);
 }
 )HLSL";
 } // namespace edvr

@@ -26,6 +26,10 @@ inline constexpr FlatShaderCaptureKey kFlatShaderCaptureKeys[] = {
     // pairs before considering any change to HDR camera admission.
     {'v', 0x025B4B9FF54622EDull}, {'p', 0x46F92DC71BF8DFA5ull},
     {'v', 0x9AEC596A2B036EA6ull}, {'p', 0x3789CA2062E196FBull},
+    // Tonemap pair: the vertex shader forwards the exposure strip, and the
+    // pixel shader is where that scalar meets the HDR image and the grading
+    // table. Captured so that arithmetic can be read.
+    {'v', 0x2D78DC3FD2C0C543ull}, {'p', 0x99C21CEB7A699821ull},
 };
 inline constexpr size_t kFlatShaderCaptureCount =
     sizeof(kFlatShaderCaptureKeys) / sizeof(kFlatShaderCaptureKeys[0]);
@@ -35,6 +39,6 @@ inline constexpr uint32_t flatShaderCaptureBit(bool flat, char stage, uint64_t h
             return uint32_t(1) << i;
     return 0;
 }
-static_assert(kFlatShaderCaptureCount == 17 && kFlatShaderCaptureCount <= 32,
+static_assert(kFlatShaderCaptureCount == 19 && kFlatShaderCaptureCount <= 32,
               "bounded capture mask must cover the exact missing shader set");
 } // namespace edvr

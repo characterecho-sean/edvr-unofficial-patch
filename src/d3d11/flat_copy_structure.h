@@ -135,6 +135,9 @@ struct FlatCopyPolicy {
     bool structure = false;              // admit by structure (the HDR route is on)
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
     bool routeLatched = false;           // the HDR route turned itself off this session (flat_hdr_route.h's latch)
+    // The HDR route temporally resolves this frame. False when it only wrote the unjittered frame for bloom:
+    // the copy route then has to anti-alias the tonemapped image, even though the mode evaluates at the render size.
+    bool routeServes = true;
 };
 enum class FlatCopyOutcome : uint8_t {
     Untouched,       // the whitelist selected, or refused for a reason this has nothing to say about
@@ -222,8 +225,9 @@ inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, 
         return out;
     }
     if (!policy.structure) { g.outcome = FlatCopyOutcome::Disabled; return whitelist; }
-    // Where the HDR route serves the frame it is the route's, byte for byte as before this existed.
-    if (!policy.routeLatched &&
+    // Where the HDR route temporally resolves the frame it is the route's, byte for byte as before this existed.
+    // A frame it only unjittered for bloom is not that: the copy route anti-aliases it after the tonemap.
+    if (policy.routeServes && !policy.routeLatched &&
         flatHdrRouteEvaluatesAtRender(policy.mode, scene.width, scene.height, p.width, p.height)) {
         g.outcome = FlatCopyOutcome::RouteServes;
         return whitelist;

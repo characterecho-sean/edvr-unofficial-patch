@@ -34,6 +34,7 @@
 #include "luma_probe.h"
 #include "dlaa.h"
 #include "fsr3_engine.h"
+#include "flat_game_exposure.h"
 #include "xess_engine.h"   // XeSS-SR: the VR eye pass's Intel engine (xessAvailable, xessEvaluate, xessSlotTotals)
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
@@ -6114,6 +6115,7 @@ void temporalPassShutdown() {
     skyRingShutdown();   // stops the dispatches and drops the waiting dumps; the ring itself is left to the process (sky_ring.cpp)
     dlaaShutdown();
     fsr3Shutdown();
+    flatGameExposureShutdown();
     // No xessShutdown here: it signals, flushes and waits on the GPU, and this teardown can run under the loader lock
     // (device_hook.cpp, shutdownDeviceHooks). The XeSS bridge is left for the process, as at exit (xess_engine.cpp, g_state).
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }

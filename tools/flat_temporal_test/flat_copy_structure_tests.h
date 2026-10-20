@@ -923,8 +923,9 @@ inline int flatCopyStructureTests() {
                "the reducer's answer is the draw scope's own variable the admission replaces, not a second one");
         expect(count(runtime, "policy.structure = s.hdrKey == FlatHdrKey::Auto;") == 1 && count(runtime, "policy.mode = s.engine;") == 1 &&
                    count(runtime, "policy.routeLatched = s.hdrLatch.tripped;") == 1 &&
+                   count(runtime, "policy.routeServes = !s.hdrUnjittered;") == 1 &&
                    count(runtime, "flatCopyAdmit(s.prefix, s.hdr, d, whitelist, policy, &diag)") == 1,
-               "the policy is the route's key, the mode and the latch; the admission reads the prefix and the detector as they stand");
+               "the policy is the route's key, the mode and the latch; an unjitter-only frame is not one the route temporally serves");
         expect(count(runtime, "if (whitelist.selected()) s.copyWindow.noteWhitelist(); else s.copyWindow.note(diag);") == 1,
                "every ruling is counted, the whitelist's frames apart");
         expect(count(runtime, "flatCopyFormatWindow(copyText, sizeof(copyText), s.hdrKey == FlatHdrKey::Auto, s.copyWindow);\n"

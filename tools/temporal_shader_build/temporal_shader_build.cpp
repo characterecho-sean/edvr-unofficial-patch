@@ -418,6 +418,8 @@ static int generateTemporal(const Options& o) {
     std::vector<Variant> variants = {
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
         {"kXessR11ToFp16Bytecode", "xess_r11_to_fp16_cs", "main", nullptr, {}, false, edvr::kXessR11ToFp16Cs},
+        {"kXessHdrCompressBytecode", "xess_hdr_compress_cs", "compressMain", nullptr, {}, false, edvr::kXessHdrCurveCs},
+        {"kXessHdrExpandBytecode", "xess_hdr_expand_cs", "expandMain", nullptr, {}, false, edvr::kXessHdrCurveCs},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
         {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinJoinClearBytecode", "skin_join_clear_cs", "joinClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},

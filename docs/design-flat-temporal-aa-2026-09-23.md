@@ -64,8 +64,9 @@
 ## Status detail (moved out of Status 2026-09-29)
 
 - **Moved out of Status 2026-10-16:**
-  - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
-    brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
+  - **106 (10-09, revised 10-18):** exposure 1.0 shipped on the flat HDR route, then
+    a bind of strip texel 0 was flown and ruled out (`edvr_gfx_20261018_205824`:
+    luminance 150–271 used as the scale while XeSS resolved the hangar). VR keeps auto.
   - **Jitter phases (section 84, 2026-10-01):** the phase-count switch is REMOVED (fixed eight phases, byte-identical; no
     visible change on the hills). ROOT CAUSE of the VR hills shimmer: Elite's terrain checkerboard rendering (halves distant
     terrain's horizontal samples; turning it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
@@ -16855,6 +16856,58 @@ fixed, against what Sean saw.
   feature-creation line names the exposure mode.
 - Temporary debt closed: `advanced.flat_dlss_exposure` and the
   `flat hdr luma:` probe (flat_hdr_luma.*, its shader and hooks) are removed.
+
+### 2026-10-18: strip texel 0 is not the backend's exposure scale
+
+Flight `edvr_gfx_20261018_205824`, build `6AD58561` (the compile that binds the
+tonemap strip's texel 0). Hangar, 1920x1200, XeSS, HDR route actually resolving
+(`last=treated-jittered-hdr`; trigger VS `20F383BB` PS `FDB74215`, the hangar DoF
+pass in front of bloom). The strip read 264–271, later the cap 150, and the log
+said backends scale by texel 0. AA off leaves H alone. AA on was visibly brighter.
+- ruled out: texel 0 as the multiply that keeps bloom at the AA-off brightness.
+  It is the adapted luminance the tonemap VS forwards (eye-brightness.md), and
+  this flight handed that luminance to XeSS while the route was resolving.
+- FSR and TAA were compared only after the render size fell to 1440x900, where
+  the HDR route declines and the copy route upscales. Those frames also sharpen
+  at `fix.render_sharpness` 0.75, which runs only while AA is on. No new scale
+  until a before/after measurement of H names one.
+- 2026-10-19, same build, log `edvr_gfx_20261019_051603`, 05:19: native XeSS
+  (`xess-native-aa`, flags 0x6, exposure texture bound) with texel 0 pegged at
+  150. Screenshots: AA on turns the hangar skylight into one white sheet; AA off
+  keeps the frames between the panels. The frames are many pixels wide, so this
+  is the highlight clip, not edge AA. Sharpening would have made those frames
+  stronger.
+- ruled out: not scaling by texel 0 restores the AA-off lights. Flight `edvr_gfx_20261019_073958`
+  (build `6AD61D32`) ran XeSS at flags `0x2`, logged the strip as not applied, resolved the hangar
+  (`treated-jittered-hdr`), and the lights still blew out with AA on. XeSS's own HDR tonemap is off
+  for the flat route now; radiance is round-tripped around it.
+- ruled out: that round-trip restores the lights. Flight `edvr_gfx_20261019_075459` (build `6AD61FC5`)
+  ran it (`flags=0x42`, `copy=R11-curve`) and the hangar skylight was still clipped with AA on. XeSS
+  changes the pixels bloom then reads; packing them into a shoulder and unpacking does not undo that.
+- TAA does it too, and the blowout arrives after a delay (`edvr_gfx_20261019_082411`, `taa-native`,
+  build `6AD61FC5`). The strip stayed pegged at 150 across the F7 toggles, so this is not the meter.
+  History weight is 0.9, and the clamp ceiling was a bilinear tap of the jittered colour, which already
+  contains the neighbouring panel. The ceiling is now the one texel under that sample.
+- Next: H gets only the spatial unjitter. The copy route still runs the temporal backend after the tonemap,
+  with the raster jitter cleared because the colour is already unjittered. One temporal pass, not two,
+  and the history cache is not rebuilt. Static subpixel samples are not fed to bloom.
+- Flight `edvr_gfx_20261019_185738` (build `6AD6BB87`): unjitter ran, the copy was admitted, TAA
+  treated, and AA is visible. Lights still blow out. `fix.render_sharpness` 0.75 now runs, because the
+  copy route treats; earlier HDR-only flights sharpened nothing. RCAS off did not change the lights.
+  The pre-bloom unjitter was a bilinear tap, so the dark frame already held the panel. It is now that one texel.
+- ruled out: the bilinear tap was the leak. Flight `edvr_gfx_20261019_191519` (build `6AD6BF47`)
+  point-sampled, sharpen off, unjitter plus post-tonemap TAA, and the lights still blew out.
+  AA on still jitters the raster, so the texel copied into the gap is often the light.
+- 2026-10-19 disassembly of the live hangar tonemap (`vs_F9CFC798`, `ps_E8948389`): the
+  vertex shader forwards strip texel 0, and the pixel shader divides by it after bloom has
+  been sampled. Binding that luminance as the backend's exposure scale is removed. Flat HDR
+  DLSS, FSR and XeSS keep HDR and use exposure 1 with no auto exposure. EDVR TAA's history
+  may not exceed the current sample, so a neighbouring highlight cannot fill a darker pixel.
+- The same flight's copy route blows the lights out with no exposure texture.
+  05:16–05:18 is TAA at 1440×900 up to 1920×1200 (`treated-jittered`, bloom tone
+  `E8948389`), source-free frames 0, camera-row error 1e-7, `render_sharpness`
+  0.75. AA off is the game's unjittered image. The strip multiply is not required
+  for the blowout.
 
 ### 2026-10-10: System Map smear under DLAA (code on branch, NOT built, NOT flown)
 

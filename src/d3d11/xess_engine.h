@@ -21,12 +21,16 @@ bool xessAvailable(ID3D11Device* device, const char** why);
 // On HDR frames colour is R11G11B10_FLOAT and output is R16G16B16A16_FLOAT;
 // XeSS receives matched R11 input/output and a precompiled compute copy widens
 // the result. LDR uses matched R8G8B8A8_UNORM directly.
+// exposure is the flat HDR route's 1x1 R32_FLOAT copy of the tonemap strip's texel 0, or null.
+// Null on an HDR frame keeps automatic exposure. A non-null texture selects the exposure-scale
+// init flag (the context is remade once) and is copied into the shared bridge texture.
 bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
                   ID3D11Texture2D* colour, ID3D11Texture2D* depth,
                   ID3D11Texture2D* motion, ID3D11Texture2D* output,
                   uint32_t width, uint32_t height, uint32_t outputWidth,
                   uint32_t outputHeight, float jitterX, float jitterY,
-                  bool reset, bool hdr, const char** why);
+                  bool reset, bool hdr, const char** why,
+                  ID3D11Texture2D* exposure = nullptr);
 
 // Releases every slot's feature (each with its bounded GPU wait); the library
 // and the D3D12 device stay loaded. Safe when XeSS never started.

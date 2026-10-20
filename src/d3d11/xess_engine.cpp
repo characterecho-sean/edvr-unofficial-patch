@@ -1,4 +1,5 @@
 #include "xess_engine.h"
+#include "hdr_backend_flags.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -8,6 +9,7 @@
 #include <cwchar>
 
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "dlaa.h"  // kUpscalerSlots: one XeSS feature per upscaler slot
 
 #ifndef EDVR_HAVE_XESS
@@ -27,6 +29,10 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <xess/xess_d3d12.h>
+static_assert(edvr::kXessFlagInvertedDepth == static_cast<uint32_t>(XESS_INIT_FLAG_INVERTED_DEPTH), "inverted depth");
+static_assert(edvr::kXessFlagExposureTexture == static_cast<uint32_t>(XESS_INIT_FLAG_EXPOSURE_SCALE_TEXTURE), "exposure texture");
+static_assert(edvr::kXessFlagLdr == static_cast<uint32_t>(XESS_INIT_FLAG_LDR_INPUT_COLOR), "ldr input");
+static_assert(edvr::kXessFlagAutoExposure == static_cast<uint32_t>(XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE), "auto exposure");
 #include "gpu_timing.h"
 #include "xess_feature_latch.h"
 #include "xess_runtime_version.h"
@@ -135,9 +141,13 @@ struct Feature {
     unsigned slot = 0;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
     bool hdr = false;
+    bool gameExposure = false;
+    bool flatCurve = false;   // Reinhard round-trip; XeSS tonemap is off
+    ComPtr<ID3D11UnorderedAccessView> colorUav;
+    ComPtr<ID3D11ComputeShader> compressShader;
     xess_quality_settings_t quality = XESS_QUALITY_SETTING_PERFORMANCE;
     xess_context_handle_t context = nullptr;
-    SharedTexture color, motion, depth, output;
+    SharedTexture color, motion, depth, output, exposure;
     ComPtr<ID3D11ShaderResourceView> outputSrv;
     ComPtr<ID3D11ComputeShader> wideningShader;
     std::array<CommandSlot, kCommandRing> commands;
@@ -615,11 +625,11 @@ void makeTiming(State& state, FeatureSlot& holder, CommandSlot& command) {
 }
 
 bool makeFeature(State& state, unsigned slot, uint32_t w, uint32_t h, uint32_t outW,
-                 uint32_t outH, bool hdr, const char** why) {
+                 uint32_t outH, bool hdr, bool gameExposure, const char** why) {
     auto feature = std::make_unique<Feature>();
     feature->slot = slot;
     feature->inW = w; feature->inH = h; feature->outW = outW;
-    feature->outH = outH; feature->hdr = hdr;
+    feature->outH = outH; feature->hdr = hdr; feature->gameExposure = gameExposure;
     const xess_result_t created = state.api.createContext(state.d12.Get(), &feature->context);
     if (created != XESS_RESULT_SUCCESS || !feature->context)
         return fail(why, "xessD3D12CreateContext returned %d", int(created));
@@ -637,9 +647,10 @@ bool makeFeature(State& state, unsigned slot, uint32_t w, uint32_t h, uint32_t o
     init.qualitySetting = feature->quality;
     // EDVR's depth is reversed infinite-Z and its RG16F motion is low-res,
     // current->previous in pixels. XeSS needs no NDC/JITTERED_MV/HIGH_RES_MV
-    // flags for these measured inputs. HDR has no external exposure image.
-    init.initFlags = XESS_INIT_FLAG_INVERTED_DEPTH |
-                     (hdr ? XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE : XESS_INIT_FLAG_LDR_INPUT_COLOR);
+    // flags for these measured inputs. The flat HDR route does not scale the scene: the tonemap divides
+    // by the strip after bloom. The VR world route keeps automatic exposure (hdr_backend_flags.h).
+    const bool flatFixed = hdr && !gameExposure && runtimeFlatProfile();
+    init.initFlags = static_cast<uint32_t>(flatXessInitFlags(hdr, gameExposure, flatFixed));
     const xess_result_t initialized = state.api.init(feature->context, &init);
     if (initialized != XESS_RESULT_SUCCESS) {
         fail(why, "xessD3D12Init returned %d", int(initialized));
@@ -651,11 +662,14 @@ bool makeFeature(State& state, unsigned slot, uint32_t w, uint32_t h, uint32_t o
     const xess_result_t intelRc = state.api.getIntelVersion(feature->context, &intel);
     Log::get().note("xess: slot=%u Intel XeFX query rc=%d version=%u.%u.%u.%u (diagnostic only)",
                     slot, int(intelRc), intel.major, intel.minor, intel.patch, intel.reserved);
+    const bool flatCurve = hdr && !gameExposure && runtimeFlatProfile();
+    feature->flatCurve = flatCurve;
     const DXGI_FORMAT colorFormat = hdr ? DXGI_FORMAT_R11G11B10_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-    if (!makeShared(state, slot, feature->color, "color", w, h, colorFormat, false, why) ||
+    if (!makeShared(state, slot, feature->color, "color", w, h, colorFormat, flatCurve, why) ||
         !makeShared(state, slot, feature->motion, "motion", w, h, DXGI_FORMAT_R16G16_FLOAT, false, why) ||
         !makeShared(state, slot, feature->depth, "depth", w, h, DXGI_FORMAT_R32_FLOAT, false, why) ||
-        !makeShared(state, slot, feature->output, "output", outW, outH, colorFormat, true, why))
+        !makeShared(state, slot, feature->output, "output", outW, outH, colorFormat, true, why) ||
+        (gameExposure && !makeShared(state, slot, feature->exposure, "exposure", 1, 1, DXGI_FORMAT_R32_FLOAT, false, why)))
         return abandon();
     if (hdr) {
         HRESULT hr = state.d11->CreateShaderResourceView(feature->output.d11.Get(), nullptr,
@@ -664,14 +678,32 @@ bool makeFeature(State& state, unsigned slot, uint32_t w, uint32_t h, uint32_t o
             fail(why, "R11 XeSS output SRV failed 0x%08X", unsigned(hr));
             return abandon();
         }
-        hr = state.d11->CreateComputeShader(kXessR11ToFp16Bytecode,
-                                             sizeof(kXessR11ToFp16Bytecode), nullptr,
-                                             feature->wideningShader.GetAddressOf());
+        if (feature->flatCurve) {
+            hr = state.d11->CreateUnorderedAccessView(feature->color.d11.Get(), nullptr,
+                                                      feature->colorUav.GetAddressOf());
+            if (FAILED(hr)) {
+                fail(why, "flat HDR colour UAV failed 0x%08X", unsigned(hr));
+                return abandon();
+            }
+            hr = state.d11->CreateComputeShader(kXessHdrCompressBytecode, sizeof(kXessHdrCompressBytecode),
+                                                 nullptr, feature->compressShader.GetAddressOf());
+            if (FAILED(hr)) {
+                fail(why, "flat HDR compress shader failed 0x%08X", unsigned(hr));
+                return abandon();
+            }
+            hr = state.d11->CreateComputeShader(kXessHdrExpandBytecode, sizeof(kXessHdrExpandBytecode),
+                                                 nullptr, feature->wideningShader.GetAddressOf());
+        } else {
+            hr = state.d11->CreateComputeShader(kXessR11ToFp16Bytecode,
+                                                 sizeof(kXessR11ToFp16Bytecode), nullptr,
+                                                 feature->wideningShader.GetAddressOf());
+        }
         if (FAILED(hr)) {
             fail(why, "precompiled R11->FP16 copy shader failed 0x%08X", unsigned(hr));
             return abandon();
         }
-        Log::get().note("xess: slot=%u HDR R11 matched SDK output -> FP16 target via precompiled copy shader", slot);
+        Log::get().note("xess: slot=%u HDR R11 matched SDK output -> FP16 target via %s",
+                        slot, feature->flatCurve ? "the radiance round-trip (XeSS tonemap off)" : "precompiled copy shader");
     }
     state.slots[slot].d12Note[0] = '\0';
     for (CommandSlot& command : feature->commands) {
@@ -722,6 +754,35 @@ bool validateTexture(ID3D11Texture2D* texture, uint32_t width, uint32_t height,
         return fail(why, "%s texture contract: got %ux%u format=%u samples=%u mips=%u, need %ux%u format=%u",
                     role, desc.Width, desc.Height, unsigned(desc.Format), desc.SampleDesc.Count,
                     desc.MipLevels, width, height, unsigned(format));
+    return true;
+}
+
+bool compressHdr(ID3D11DeviceContext* context, Feature& feature, ID3D11Texture2D* colour, const char** why) {
+    ComPtr<ID3D11Device> dev;
+    context->GetDevice(dev.GetAddressOf());
+    ComPtr<ID3D11ShaderResourceView> source;
+    const HRESULT hr = dev->CreateShaderResourceView(colour, nullptr, source.GetAddressOf());
+    if (FAILED(hr)) return fail(why, "flat HDR compress SRV failed 0x%08X", unsigned(hr));
+    ComPtr<ID3D11ComputeShader> oldShader;
+    ComPtr<ID3D11ShaderResourceView> oldSrv;
+    ComPtr<ID3D11UnorderedAccessView> oldUav;
+    ID3D11ComputeShader* prior = nullptr;
+    ID3D11ShaderResourceView* priorSrv = nullptr;
+    ID3D11UnorderedAccessView* priorUav = nullptr;
+    context->CSGetShader(&prior, nullptr, nullptr); oldShader.Attach(prior);
+    context->CSGetShaderResources(0, 1, &priorSrv); oldSrv.Attach(priorSrv);
+    context->CSGetUnorderedAccessViews(0, 1, &priorUav); oldUav.Attach(priorUav);
+    ID3D11ShaderResourceView* srv = source.Get();
+    ID3D11UnorderedAccessView* uav = feature.colorUav.Get();
+    context->CSSetShaderResources(0, 1, &srv);
+    context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    context->CSSetShader(feature.compressShader.Get(), nullptr, 0);
+    context->Dispatch((feature.inW + 7) / 8, (feature.inH + 7) / 8, 1);
+    ID3D11ShaderResourceView* restoreSrv = oldSrv.Get();
+    ID3D11UnorderedAccessView* restoreUav = oldUav.Get();
+    context->CSSetShader(oldShader.Get(), nullptr, 0);
+    context->CSSetShaderResources(0, 1, &restoreSrv);
+    context->CSSetUnorderedAccessViews(0, 1, &restoreUav, nullptr);
     return true;
 }
 
@@ -907,11 +968,11 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
                   ID3D11Texture2D* motion, ID3D11Texture2D* output,
                   uint32_t width, uint32_t height, uint32_t outputWidth,
                   uint32_t outputHeight, float jitterX, float jitterY,
-                  bool reset, bool hdr, const char** why) {
+                  bool reset, bool hdr, const char** why, ID3D11Texture2D* exposure) {
 #if !EDVR_HAVE_XESS
     (void)context; (void)slot; (void)colour; (void)depth; (void)motion; (void)output;
     (void)width; (void)height; (void)outputWidth; (void)outputHeight;
-    (void)jitterX; (void)jitterY; (void)reset; (void)hdr;
+    (void)jitterX; (void)jitterY; (void)reset; (void)hdr; (void)exposure;
     return fail(why, "this build has no XeSS SDK (EDVR_HAVE_XESS=0)");
 #else
     if (slot >= kUpscalerSlots)
@@ -955,19 +1016,20 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
         !validateTexture(output, outputWidth, outputHeight,
                          hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : colorFormat, "output", why))
         return false;
-    const XessFeatureKey key{width, height, outputWidth, outputHeight, hdr};
+    const bool gameExposure = hdr && exposure != nullptr;
+    const XessFeatureKey key{width, height, outputWidth, outputHeight, hdr, gameExposure};
     holder.failedFeature.clearIfDifferent(key);
     if (holder.failedFeature.matches(key)) return returnLatchedFailure(holder.failedFeature, why);
     if (!holder.feature || holder.feature->inW != width || holder.feature->inH != height ||
         holder.feature->outW != outputWidth || holder.feature->outH != outputHeight ||
-        holder.feature->hdr != hdr) {
+        holder.feature->hdr != hdr || holder.feature->gameExposure != gameExposure) {
         // A fence-drain refusal is transient; only a failed create is latched.
         if (!releaseSlot(state, slot, why)) return false;
         const char* createWhy = nullptr;
         bool created = false;
         {
             QuietFeatureFailure quiet;
-            created = makeFeature(state, slot, width, height, outputWidth, outputHeight, hdr, &createWhy);
+            created = makeFeature(state, slot, width, height, outputWidth, outputHeight, hdr, gameExposure, &createWhy);
         }
         if (!created) {
             holder.failedFeature.record(key, createWhy);
@@ -995,20 +1057,39 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     if (FAILED(hr)) return fail(why, "D3D12 command allocator reset failed 0x%08X", unsigned(hr));
     hr = command.list->Reset(command.allocator.Get(), nullptr);
     if (FAILED(hr)) return fail(why, "D3D12 command list reset failed 0x%08X", unsigned(hr));
-    SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth};
     const char* keyWhy = nullptr;
-    if (!takeKeys(inputs, &keyWhy, "D3D11 input copy")) {
+    auto copyInputs = [&](auto& inputs) {
+        if (!takeKeys(inputs, &keyWhy, "D3D11 input copy")) return false;
+        if (feature.flatCurve) {
+            if (!compressHdr(context, feature, colour, why)) return false;
+        } else {
+            context->CopyResource(feature.color.d11.Get(), colour);
+        }
+        context->CopyResource(feature.motion.d11.Get(), motion);
+        context->CopyResource(feature.depth.d11.Get(), depth);
+        if (feature.gameExposure) {
+            D3D11_BOX box{0, 0, 0, 1, 1, 1};
+            context->CopySubresourceRegion(feature.exposure.d11.Get(), 0, 0, 0, 0, exposure, 0, &box);
+        }
+        giveKeys(inputs);
+        return true;
+    };
+    // Bridge timing opens before the input copies: total, then copy-in. The guard cancels them on any failure below.
+    BridgeSet* bridge = beginBridge(holder, device.Get(), context);
+    BridgeGuard guard(bridge, context);
+    bool copied = false;
+    if (feature.gameExposure) {
+        SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth, &feature.exposure};
+        copied = copyInputs(inputs);
+    } else {
+        SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth};
+        copied = copyInputs(inputs);
+    }
+    if (!copied) {
         command.list->Close(); // Reset opened it; no D3D12 work was submitted.
         holder.failedFeature.record(key, keyWhy);
         return returnLatchedFailure(holder.failedFeature, why);
     }
-    // Bridge timing opens before the input copies: total, then copy-in. The guard cancels them on any failure below.
-    BridgeSet* bridge = beginBridge(holder, device.Get(), context);
-    BridgeGuard guard(bridge, context);
-    context->CopyResource(feature.color.d11.Get(), colour);
-    context->CopyResource(feature.motion.d11.Get(), motion);
-    context->CopyResource(feature.depth.d11.Get(), depth);
-    giveKeys(inputs);
     const uint64_t producer = ++state.nextFenceValue;
     hr = ctx4->Signal(state.fence11.Get(), producer);
     if (FAILED(hr)) {
@@ -1042,6 +1123,9 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     transition(list, feature.depth.d12.Get(), D3D12_RESOURCE_STATE_COMMON,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (feature.gameExposure)
+        transition(list, feature.exposure.d12.Get(), D3D12_RESOURCE_STATE_COMMON,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     transition(list, feature.output.d12.Get(), D3D12_RESOURCE_STATE_COMMON,
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     xess_d3d12_execute_params_t params{};
@@ -1055,6 +1139,7 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     params.jitterOffsetX = jitterX;
     params.jitterOffsetY = jitterY;
     params.exposureScale = 1.0f;
+    if (feature.gameExposure) params.pExposureScaleTexture = feature.exposure.d12.Get();
     params.resetHistory = reset ? 1u : 0u;
     params.inputWidth = width;
     params.inputHeight = height;
@@ -1083,6 +1168,9 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
                D3D12_RESOURCE_STATE_COMMON);
     transition(list, feature.depth.d12.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                D3D12_RESOURCE_STATE_COMMON);
+    if (feature.gameExposure)
+        transition(list, feature.exposure.d12.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_COMMON);
     transition(list, feature.output.d12.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                D3D12_RESOURCE_STATE_COMMON);
     hr = list->Close();
@@ -1164,7 +1252,8 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
                         hdr ? 1u : 0u, jitterX, jitterY, reset ? 1u : 0u,
                         static_cast<unsigned long long>(producer),
                         static_cast<unsigned long long>(done),
-                        static_cast<unsigned long long>(consumer), hdr ? "R11->FP16" : "RGBA8");
+                        static_cast<unsigned long long>(consumer),
+                        feature.flatCurve ? "R11-curve" : hdr ? "R11->FP16" : "RGBA8");
     if (why) *why = nullptr;
     return true;
 #endif

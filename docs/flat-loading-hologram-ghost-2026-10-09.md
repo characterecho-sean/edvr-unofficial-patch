@@ -22,9 +22,14 @@
 - ruled out: D (AutoExposure) as the main cause, because FSR3, with its own exposure path, ghosts worse than DLAA.
   Not excluded as a separate dimming cause (other session's branch).
 - Fix: a selected source-free scene whose depth holds only unchanged full-screen filters (or nothing) is blank;
-  treatHdr declines it ("blank-scene"), the copy route's no-scene verdict leaves it untreated, as at SS < 1.
-  Ground and sky have geometry draws on that depth, so they stay treated. Log: `flat source-free content 5s`
-  (filter-only, other-draws, blank-scene-declined).
+  treatHdr declines it ("blank-scene"). Ground and sky have geometry draws on that depth, so they stay treated.
+  Log: `flat source-free content 5s` (filter-only, other-draws, blank-scene-declined).
+- ruled out: the copy route already leaves a blank scene untreated via its no-scene verdict. NoScene is a frame
+  with no scene. A selected empty depth is blankScene, and flight 2026-10-18 (edvr_gfx_20261018_202858, hangar,
+  XeSS native) resolved those frames: `last=treated-jittered`, XeSS `hdr=0`. The jittered temporal blend smeared
+  the ceiling light grid. The copy route now refuses blankScene after the identity check, unjitters a phase
+  already applied, and shows the game's image. Both routes share one blank-scene-declined count per frame.
+  Section 104 geometry (other-draws) is still prepared and treated. Not flown.
 - Next flight: loading screen + Pilot's Handbook at SS 1.0 (FSR3, DLAA, DLSS): ghost gone? blank-scene-declined ~ frames?
   Also check a settlement / open-ground walk: source-free frames still treated (other-draws high, declined 0).
 - Ruled out: the flat UI layer (idle on these frames, docs\design-flat-ui-quality-2026-10-05.md).
@@ -33,3 +38,4 @@
 
 - 2026-10-09: log read, instrument added (flat_runtime.cpp noteSourceFreeContent, log only; flat only).
 - 2026-10-09: b0f4020c flown, ghost gone (Sean). Open: confirm source-free frames in a settlement/open ground are still treated (blank-scene-declined ~ 0 there).
+- 2026-10-18: hangar flight edvr_gfx_20261018_202858 refuted the copy-route half. Empty-depth frames were `treated-jittered` on XeSS (`hdr=0`) and the ceiling grid smeared. The copy route now refuses `blankScene` the same way `treatHdr` declines it. Not flown.
