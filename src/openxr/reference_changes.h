@@ -6,19 +6,23 @@
 
 namespace edvr::openxr {
 
-// A small, externally serialized policy for LOCAL reference-space changes.
+// A small, externally serialized policy for the selected reference-space changes.
 // The runtime applies natural-origin compensation; this object only orders notifications
 // and exposes the epoch at which cached pose history must be invalidated.
 class ReferenceChanges final {
  public:
-  bool begin(XrSession session) noexcept {
-    if (active_ || session == XR_NULL_HANDLE) return false;
-    clearState(); active_ = true; session_ = session; epoch_ = 1; return true;
+  bool begin(XrSession session,XrReferenceSpaceType type=XR_REFERENCE_SPACE_TYPE_LOCAL) noexcept {
+    if (active_ || session == XR_NULL_HANDLE ||
+        (type!=XR_REFERENCE_SPACE_TYPE_LOCAL&&type!=XR_REFERENCE_SPACE_TYPE_STAGE)) return false;
+    clearState(); active_ = true; session_ = session; type_=type; epoch_ = 1; return true;
   }
 
   bool note(const XrEventDataReferenceSpaceChangePending& event) noexcept {
     if (!active_) return false;
-    if (event.session != session_ || event.referenceSpaceType != XR_REFERENCE_SPACE_TYPE_LOCAL)
+    // A dashboard recenter can move LOCAL alone while STAGE stays fixed. In
+    // STAGE mode both events cut cached poses and can redefine the player seat.
+    if (event.session != session_ || (event.referenceSpaceType != type_ &&
+        !(type_==XR_REFERENCE_SPACE_TYPE_STAGE&&event.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL)))
       return true;
     if (event.type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING || event.next != nullptr ||
         (event.poseValid != XR_FALSE && event.poseValid != XR_TRUE)) { retire(); return false; }
@@ -63,11 +67,12 @@ class ReferenceChanges final {
   static constexpr unsigned kCapacity = 16;
   void clearState() noexcept {
     session_ = XR_NULL_HANDLE; count_ = 0; epoch_ = 0; lastTarget_ = 0;
-    advanced_ = false; active_ = false;
+    advanced_ = false; active_ = false;type_=XR_REFERENCE_SPACE_TYPE_LOCAL;
   }
   void retire() noexcept { clearState(); }
 
   XrSession session_ = XR_NULL_HANDLE;
+  XrReferenceSpaceType type_=XR_REFERENCE_SPACE_TYPE_LOCAL;
   Pending pending_[kCapacity]{};
   unsigned count_ = 0;
   uint64_t epoch_ = 0;

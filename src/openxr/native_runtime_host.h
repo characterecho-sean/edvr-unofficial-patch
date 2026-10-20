@@ -209,6 +209,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   BridgeCounts bridgeCounts=nullptr;
   RuntimeOptions startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
+  bool startupNaturalProbed=false;
   // VR_InitInternal's cost by step, wall ms, for the runtime_startup_steps
   // trace: open()'s stretches (instance/system, device, session, the stereo
   // renderer, everything after it) and start()'s loop (zero-layer frames,
@@ -237,7 +238,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   Lifecycle tracedLifecycle=Lifecycle::Uninitialized;
   OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
-  XrSpace local=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
+  XrSpace local=XR_NULL_HANDLE, xrLocal=XR_NULL_HANDLE, view=XR_NULL_HANDLE; XrSystemId system=XR_NULL_SYSTEM_ID;
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
   EyeCapture previousPair;
@@ -799,6 +800,34 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
       eye,(unsigned long long)revision,triangles,dropped,reason,stack.gameFrames,stack.rvas);
   }
+  // With the session running, a real zero-layer frame supplies the time for
+  // both pose probes. No seat has been loaded or published yet, so choosing
+  // LOCAL here cannot reinterpret a persisted STAGE seat or strand a frame.
+  XrResult probeStartupNaturalSpace(bool& ready) {
+    ready=true;
+    if(startupNaturalProbed||binding.naturalType()!=XR_REFERENCE_SPACE_TYPE_STAGE){startupNaturalProbed=true;return XR_SUCCESS;}
+    XrResult r=boundary.waitAndBegin();
+    if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
+    Frame frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
+    NaturalSpaceProbe choice=NaturalSpaceProbe::Pending;
+    r=probeNaturalSpace({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,choice);
+    const XrResult ended=boundary.clear();
+    if(ended!=XR_SUCCESS)return ended;
+    ++startupFrames;
+    if(r!=XR_SUCCESS)return r;
+    if(choice==NaturalSpaceProbe::Pending){ready=false;return XR_SUCCESS;}
+    if(choice==NaturalSpaceProbe::LocalFallback) {
+      r=seated.shutdown();if(r!=XR_SUCCESS)return r;
+      if(!binding.useLocalFallback())return XR_ERROR_CALL_ORDER_INVALID;
+      local=binding.naturalSpace();
+      changes.clear();
+      if(!seated.begin({api.createSpace,api.destroySpace},session,local,XR_REFERENCE_SPACE_TYPE_LOCAL)||
+         !changes.begin(session,XR_REFERENCE_SPACE_TYPE_LOCAL))return XR_ERROR_RUNTIME_FAILURE;
+      nativeTracePuts("natural_reference_space,type=LOCAL,reason=steamvr_stage_poses_unavailable");
+    } else nativeTracePuts("natural_reference_space,type=STAGE,reason=steamvr_stage_poses_valid");
+    startupNaturalProbed=true;return XR_SUCCESS;
+  }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
     // Constructed on the service thread with its thread-bound frame/device
@@ -833,6 +862,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         enablePerformanceMetrics();
       }
       if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
+      bool naturalReady=false;
+      r=probeStartupNaturalSpace(naturalReady);
+      if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+      if(!naturalReady){operation=RuntimeGate::Lease{};Sleep(10);continue;}
       operation=RuntimeGate::Lease{};
       CompositorRead initial{};
       if(waitPoses(compositorGeneration,initial)!=vr::VRCompositorError_None)return vr::VRInitError_Init_Internal;
@@ -2695,14 +2728,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(ok)seat.noteOrigin(false);
     return ok;
   }
-  // ---- Seat memory. What the player's real seat is, kept in natural LOCAL; see seat_memory.h for the decisions and the review for why.
+  // ---- Seat memory. What the player's real seat is, kept in the selected natural space; see seat_memory.h for the decisions.
   // Everything here is a log line first: a build whose seat code never ran writes no `seat_` line at all (seat_memory,init is the first).
   static const char* seatModeName(const SeatContext& c) {return !c.published?"unpublished":c.keep?"keep":"game";}
   void seatEnsureLoaded() {
     if(seatLoaded)return;
     seatLoaded=true;
-    seatKeyText=edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
-        edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel)));
+    seatKeyText=seatKeyForNaturalSpace(
+        edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+            edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel))),
+        seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE);
+    // Old SteamVR seats were recorded in LOCAL coordinates. STAGE can have a
+    // different height and orientation, so never apply an old LOCAL seat to it.
     const std::wstring dir=seatMirrorDir(false);
     if(!dir.empty())seatFile=dir+L"\\"+kSeatFileName;
     unsigned skipped=0;bool existed=false,readOk=true;
@@ -2870,7 +2907,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrTime t=0;
     XrSpaceLocation where{XR_TYPE_SPACE_LOCATION};
     XrResult r=HeadLocator{}.currentTime({api.convertTime,api.locateSpace},instance,counterNow,nullptr,boundary.estimateNow(),t);
-    if(r==XR_SUCCESS)r=api.locateSpace(stageSpace,local,t,&where);
+    if(r==XR_SUCCESS)r=api.locateSpace(stageSpace,binding.localSpace(),t,&where);
     if(r==XR_SUCCESS) {
       const SeatPose p=seatPoseYawOf(where.pose);
       nativeTracePrintf("stage_in_local,result=0,flags=%llu,position=%.3f/%.3f/%.3f,heading_deg=%.1f\n",
@@ -2936,10 +2973,28 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=store_as_manual,where=%s,window=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
           events,seatWhereName(seat.where()),unsigned(seat.inWindow(GetTickCount64())),s.x,s.y,s.z,seatRadToDeg(s.yaw));
     } else {
-      seat.storeAndApplyLater(SeatPose{});
+      SeatPose fallback{};
+      if(seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE) {
+        // A LOCAL-only dashboard recentre can leave STAGE unchanged. Its new
+        // origin, expressed in STAGE, is the player seat when the HMD itself
+        // is untracked. STAGE identity would instead move the seat to the
+        // playspace center. Do not overwrite the saved seat if the spaces
+        // cannot currently be related; the next poll retries this event.
+        XrSpaceLocation localOrigin{XR_TYPE_SPACE_LOCATION};XrPosef origin{};
+        const XrResult localResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,
+            xrLocal,local,0,localOrigin,nullptr,counterNow,nullptr,boundary.estimateNow());
+        if(localResult!=XR_SUCCESS||!seatedOriginFromHead(localOrigin.pose,localOrigin.locationFlags,origin)) {
+          nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=retry_local_in_stage,result=%d\n",
+              events,int(localResult));
+          return;
+        }
+        fallback=seatPoseFromXr(origin);
+      }
+      seat.storeAndApplyLater(fallback);
       seatSave("runtime_recentre_untracked");
-      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=store_as_manual,fallback=local_identity,where=%s,seat=0.000/0.000/0.000/0.0\n",
-          events,seatWhereName(seat.where()));
+      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=store_as_manual,fallback=%s,where=%s,seat=%.3f/%.3f/%.3f/%.1f\n",
+          events,seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE?"local_in_stage":"local_identity",
+          seatWhereName(seat.where()),fallback.x,fallback.y,fallback.z,seatRadToDeg(fallback.yaw));
     }
     localHandled=referenceChanges;
   }
@@ -3296,7 +3351,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     pacer.stop();
     const auto bindingResult=binding.shutdown();
     clean=result("destroy_binding",bindingResult)&&clean;bindingStage.end(bindingResult==XR_SUCCESS);
-    view=local=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
+    view=local=xrLocal=XR_NULL_HANDLE;session=XR_NULL_HANDLE;
     state.abandonAfterOwnerDestruction();
     ShutdownTrace graphicsStage("host_graphics_reset",tracing);
     graphics.reset();externalDevice=nullptr;graphicsStage.end(true);
@@ -3494,8 +3549,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!publishRenderSizing(true)) return result("native_render_sizing_publish",XR_ERROR_RUNTIME_FAILURE);
     startupSteps.device=stepMs(step);step=StepClock::now();
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
-    if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device())))return false;
-    session=binding.session();local=binding.localSpace();view=binding.viewSpace();
+    // SteamVR's LOCAL space can acquire a 180-degree roll while its STAGE
+    // space and OpenVR standing pose remain upright. This has been reproduced
+    // without the game or EDVR, including after switching from VDXR. Keep the
+    // seated recenter logic, but anchor it in SteamVR's STAGE reference space.
+    // STAGE is optional; systems that do not advertise it retain LOCAL.
+    const XrReferenceSpaceType requestedType=std::strcmp(ip.runtimeName,"SteamVR/OpenXR")==0
+        ?XR_REFERENCE_SPACE_TYPE_STAGE:XR_REFERENCE_SPACE_TYPE_LOCAL;
+    if(!result("bind_existing_device",binding.initialize(bindingApi,instance,system,graphics.device(),requestedType)))return false;
+    const XrReferenceSpaceType naturalType=binding.naturalType();
+    session=binding.session();local=binding.naturalSpace();xrLocal=binding.localSpace();view=binding.viewSpace();
+    nativeTracePrintf("natural_reference_space,type=%s,reason=%s\n",
+      naturalType==XR_REFERENCE_SPACE_TYPE_STAGE?"STAGE":"LOCAL",
+      naturalType==XR_REFERENCE_SPACE_TYPE_STAGE?"steamvr_local_roll":
+      requestedType==XR_REFERENCE_SPACE_TYPE_STAGE?"steamvr_stage_unavailable":"default");
     SystemRead metadata{};metadata.connected=true;
     for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=sizes[eye].recommendedImageRectWidth;metadata.recommendedHeight[eye]=sizes[eye].recommendedImageRectHeight;}
     std::memcpy(metadata.runtimeName,ip.runtimeName,sizeof(metadata.runtimeName));
@@ -3534,7 +3601,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     pacer.bind(api.frames.waitFrame,session);
-    if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
+    if(!seated.begin({api.createSpace,api.destroySpace},session,local,naturalType)||
+       !changes.begin(session,naturalType)||!resetEvents.begin(geometryGeneration))return false;
     state.setUnhandledEventSink(referenceEvent,this);
     state.setEventObserver(vendorEvent,this);
     runtimeGeneration=gate.beginGeneration();

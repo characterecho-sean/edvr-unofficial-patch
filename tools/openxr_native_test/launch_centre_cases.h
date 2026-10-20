@@ -16,6 +16,10 @@ struct Fake {
   // XR_FALSE exactly; frame_end_overlap_cases.h is the one that needs a
   // wait that actually admits pixels.
   bool shouldRender=false;
+  XrReferenceSpaceType naturalType=XR_REFERENCE_SPACE_TYPE_LOCAL;
+  XrSpace naturalSpace=reinterpret_cast<XrSpace>(3); // the default LOCAL fixture handle
+  XrPosef localOriginInStage{{0,0,0,1},{0,0,0}};
+  XrSpaceLocationFlags localOriginFlags=tracked;
   XrTime sampleTime=0,verifyTime=0;
   XrTime lastTime=0;   // the instant of the most recent locate, whichever space it was against (the pose-time cases)
   XrTime rejectTime=-1;XrResult rejectResult=XR_ERROR_TIME_INVALID;   // a locate at exactly this instant answers rejectResult (the pose-time cases)
@@ -25,6 +29,7 @@ inline Fake* active=nullptr;
 inline XrInstance instance(){return reinterpret_cast<XrInstance>(1);}
 inline XrSession session(){return reinterpret_cast<XrSession>(2);}
 inline XrSpace local(){return reinterpret_cast<XrSpace>(3);}
+inline XrSpace stage(){return reinterpret_cast<XrSpace>(100);}
 inline XrSpace view(){return reinterpret_cast<XrSpace>(4);}
 inline XrSpace owned(){return reinterpret_cast<XrSpace>(uintptr_t(4+active->creates));}
 inline XrQuaternionf product(XrQuaternionf a,XrQuaternionf b) {
@@ -50,7 +55,7 @@ inline XrResult XRAPI_PTR convert(XrInstance,const LARGE_INTEGER* qpc,XrTime* ti
 }
 inline XrResult XRAPI_PTR create(XrSession s,const XrReferenceSpaceCreateInfo* info,XrSpace* out) {
   ++active->creates;
-  active->argumentsValid&=s==session()&&info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL;
+  active->argumentsValid&=s==session()&&info->referenceSpaceType==active->naturalType;
   if(active->createResult!=XR_SUCCESS)return active->createResult;
   active->origin=info->poseInReferenceSpace;*out=owned();return XR_SUCCESS;
 }
@@ -58,11 +63,16 @@ inline XrResult XRAPI_PTR destroy(XrSpace space) {
   ++active->destroys;active->lastDestroyed=space;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR locate(XrSpace target,XrSpace base,XrTime time,XrSpaceLocation* out) {
-  ++active->locates;active->lastTime=time;active->argumentsValid&=target==view()&&(base==local()||base==owned());
+  if(target==local()&&base==stage()) {
+    ++active->locates;active->lastTime=time;
+    if(active->locateResult!=XR_SUCCESS)return active->locateResult;
+    out->locationFlags=active->localOriginFlags;out->pose=active->localOriginInStage;return XR_SUCCESS;
+  }
+  ++active->locates;active->lastTime=time;active->argumentsValid&=target==view()&&(base==active->naturalSpace||base==owned());
   if(time==active->rejectTime)return active->rejectResult;
   if(active->locateResult!=XR_SUCCESS)return active->locateResult;
   out->locationFlags=active->flags;out->pose=active->head;
-  if(base==local())active->sampleTime=time;
+  if(base==active->naturalSpace)active->sampleTime=time;
   else {
     active->verifyTime=time;
     const auto& q=active->origin.orientation;
@@ -98,15 +108,18 @@ struct Fixture {
   RenderRoute route{dispatcher};
   NativeRuntimeHost host{owner,dispatcher,route};
   bool initialized=false;
-  Fixture() {
-    active=&fake;host.instance=instance();host.session=session();host.local=local();host.view=view();
+  explicit Fixture(bool useStage=false) {
+    active=&fake;fake.naturalType=useStage?XR_REFERENCE_SPACE_TYPE_STAGE:XR_REFERENCE_SPACE_TYPE_LOCAL;
+    fake.naturalSpace=useStage?stage():local();
+    host.instance=instance();host.session=session();host.local=fake.naturalSpace;host.xrLocal=local();host.view=view();
     host.api.convertTime=convert;host.api.locateSpace=locate;
     const Dispatch dispatch{poll,beginSession,endSession,wait,beginFrame,endFrame};
     SystemRead metadata{};metadata.connected=true;
     for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=3072;metadata.recommendedHeight[eye]=3264;}
     host.geometryGeneration=host.geometry.begin(metadata);
     host.compositorGeneration=host.poses.begin();host.runtimeGeneration=host.gate.beginGeneration();
-    initialized=host.seated.begin({create,destroy},session(),local())&&host.changes.begin(session())&&
+    initialized=host.seated.begin({create,destroy},session(),fake.naturalSpace,fake.naturalType)&&
+      host.changes.begin(session(),fake.naturalType)&&
       host.resetEvents.begin(host.geometryGeneration)&&host.state.reset(dispatch,instance(),session(),XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==XR_SUCCESS&&
       host.state.pollEvents()==XR_SUCCESS&&host.state.startIfReady()==XR_SUCCESS;
     GeometryInput geometry{};geometry.generation=host.geometryGeneration;geometry.sequence=1;geometry.displayTime=100;
@@ -123,7 +136,7 @@ struct Fixture {
     host.boundary.clear();host.seated.shutdown();host.state.abandonAfterOwnerDestruction();
     host.gate.requestStop(host.runtimeGeneration);host.gate.finishGeneration(host.runtimeGeneration);
     host.runtimeGeneration=0;host.instance=XR_NULL_HANDLE;host.session=XR_NULL_HANDLE;
-    host.local=host.view=XR_NULL_HANDLE;host.api={};active=nullptr;
+    host.local=host.xrLocal=host.view=XR_NULL_HANDLE;host.api={};active=nullptr;
   }
 };
 } // namespace launch_fixture
