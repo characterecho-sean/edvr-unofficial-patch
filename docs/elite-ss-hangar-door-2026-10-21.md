@@ -2,11 +2,11 @@
 
 ## Status
 
-- **State (2026-10-21 13:00): the instrument flew once** (flight 1, log
+- **State (2026-10-21 13:30): flown twice** (one log,
   `edvr_gfx_20261021_123140`, v0.20.1-13-gdb52d367, compile-only, flat; see
-  "Flight 1"). H0 is confirmed. Sean's report from the flight points to a
-  load-time latch (H8), not to render-resolution LoD. The correction is on
-  hold.
+  "Flight 1" and "Flight 2"). H0 is confirmed. The latch test points to H8a:
+  one static mesh is not drawn after a reload and is drawn after an SS change.
+  The correction is on hold.
 - **Symptom, revised by Sean in flight 1:** "now when I reload from the menu
   (regardless of SS) its missing, changing SS then fixes it." The morning's
   report (SS 0.5 missing, SS 1.0 present, also with EDVR suspended) fits that
@@ -24,22 +24,28 @@
   12:51:42) the main view's A was 1.001648e-03, the same as after the SS
   toggles (12:50:26). If the pieces were missing after a reload and back after
   a toggle, the LoD tests saw the same pixel size in both states.
-- **Open hypotheses** (signatures under "Hypotheses"): **H8, a load-time
-  latch** (leading): H8a per-object CPU state (a cached LoD level or visibility
-  verdict), H8b GPU-side state sized at load. H1/H2 may still exist as a
-  separate, smaller effect. H6, H7.
-- **Census:** one capture (#1, 12:49:38, SS 1.0, after the reload). With no
-  capture in a known present state, it names nothing yet. Its query brackets
-  are event and timestamp only: no occlusion queries.
-- **Ruled out:** see "Ruled out"; seven lines.
+- **Open hypotheses** (signatures under "Hypotheses"): **H8a, a load-time latch
+  in per-object CPU state** (leading). H8b (GPU-only) is unlikely: a draw is
+  missing, not pixels. H1/H2 happen (two LoD swaps at SS 0.5) but do not
+  explain the symptom. H6, H7.
+- **Census result (flight 2):** #2 (SS 1.0, after a reload) against #3 (SS 0.5,
+  after the toggle), compared on shaders, index count and buffer offsets: the
+  one static main-view mesh drawn in #3 and in neither #1 nor #2 is vs
+  `AACFDCF2FB9AD809` / ps `CF534B32F491561A`, 1008 indices at start 1179100,
+  base vertex 1850073, one instance. Render-resolution LoD can only remove or
+  coarsen at 0.5, so it is the latch's mesh, and the door's if Sean saw the
+  pieces at step 2. #3 was step 2, not step 3: the log hit `log.max_mb` at
+  13:16:07.637.
+- **Ruled out:** see "Ruled out"; eight lines.
 - **4.4.2.0:** no code change on the LoD path (IDENTICAL or RELOC-ONLY from
   332841). A data change to the door cannot be checked offline.
 - **Correction:** built as the temporary key (factor 0.5000 applied at SS 0.5
   in flight 1). It addresses H1/H2 only. Do not ship it for this symptom unless
   the latch test leaves H1/H2 standing.
-- **Next flight:** "Flight plan" (the latch test, two censuses at one SS).
-  Temporary key: `advanced.detail_at_output_size` (off by default, flat only,
-  live; off for the latch test).
+- **Next flight:** "Flight plan": raise `log.max_mb` first; census at SS 1.0
+  after a reload and again at SS 1.0 after a round trip (the mesh should
+  appear). Ask Sean what he saw at each step. Temporary key
+  `advanced.detail_at_output_size` stays off.
 - **Next offline step:** an SS change runs the sizing pass `0x284F190` (whether
   a reload does is not known). Besides the sizes it calls `0x2833D40` (scene,
   3, 256, 256), clears byte +0x1D of `*(*(scene+0xA8)+0x48)`, and calls
@@ -164,7 +170,7 @@ back to the same SS (present). Same seat, head centred, no movement.
 | H6 | texture mips and alpha test at render size | B restores nothing; A and C hold the same door draws; a restart with `texture_lod_bias = -1` at SS 0.5 restores the pieces |
 | H7 | another SS-dependent path (e.g. the builder's visibility callback `0x288D280`) | B restores nothing; C holds door draws A lacks; the mip bias run restores nothing |
 | H8 | load-time latch: the door's visibility or LoD is decided at load and held until a render-size change | after a reload the pieces are missing at SS 1.0 as at 0.5, key off; an SS toggle either way brings them back; main-view A is the same in M and P (`lod view:`) |
-| H8a | the latch is per-object CPU state (a cached LoD level or visibility verdict) | P holds door draws M lacks (diff M→P names them; same shaders, the door's index counts) |
+| H8a | the latch is per-object CPU state (a cached LoD level or visibility verdict) | P holds door draws M lacks (diff M→P names them; same shaders, the door's index counts). **Flight 2: one mesh added after the SS change, against #2 at 1.0 (#3 was at 0.5)** |
 | H8b | the latch is GPU-side state sized or filled at load | M and P hold the same draws; the pieces' pixels differ only |
 
 H1 and H2 take the same correction; telling them apart answers only the
@@ -191,6 +197,11 @@ code-or-data question for this model.
 - ruled out: D3D11 occlusion queries as the latch, because census #1's query
   brackets are event, timestamp and timestamp-disjoint only (t=0, 2, 3) over
   its two frames (flight 1, 12:49:38).
+- ruled out: render-resolution LoD (H1/H2) as the cause of the reload symptom,
+  because at SS 1.0 the main view's A is the same after a reload (pieces
+  missing) as after an SS round trip (pieces back, Sean, flight 1), and the
+  mesh the SS change restores has no finer sibling drawn at 1.0 (flight 2,
+  census #2 against #3).
 
 ## Correction
 
@@ -275,22 +286,23 @@ material and Status block checks pass. The full build runs in CI.
 
 ## Flight plan
 
-The latch test (H8), replacing the first plan. Key off, `texture_lod_bias = 0`,
-the AA mode Sean uses (XeSS). The census key is Home (`hotkey.dump_draws`).
-Same seat in the hangar, head centred, looking at the door.
+Flight 3, the latch test again with a log that lasts. Before launch set
+`log.max_mb = 64` in `edvr-flat.ini` (the default, 16, stopped flight 2's log
+20 s after its first census; the key is read when the log opens). Key off,
+`texture_lod_bias = 0`, XeSS, census key Home. Same seat in the hangar, head
+centred, looking at the door. Note at each step whether the pieces are there.
 
-1. Reload from the main menu at SS 1.0. Pieces missing? Home (census M1);
-   screenshot.
-2. Switch to SS 0.5. Pieces present? Home (census 0.5); screenshot. Present
-   here, after a reload at 1.0, refutes H1/H2 for this symptom.
-3. Switch back to SS 1.0. Pieces present? Home (census P1); screenshot.
-4. Reload from the main menu at SS 0.5, and repeat 1-3 with 0.5 and 1.0
-   swapped, if time allows (the morning's order).
+1. Reload from the main menu at SS 1.0. Home (census M1).
+2. Switch to SS 0.5. Home.
+3. Switch back to SS 1.0, wait 3 s. Home (census P1).
+4. Reload from the main menu at SS 1.0 again. Home (census M2).
 
 Read: `python3 tools/edvr_log.py --target steam --expect-build <version>
---grep "lod view:|draw census"`; main-view A must match between M1 and P1. Then
-`tools/diff_draw_census.py` M1→P1: draws only in P1 are the door (H8a); no
-difference means H8b.
+--grep "lod view:|draw census"`; main-view A must match between M1, P1 and M2.
+Then compare M1 with P1 and P1 with M2. `tools/diff_draw_census.py` works here
+because the target sizes match. The mesh vs `AACFDCF2FB9AD809`, 1008 indices at
+`ia=1179100,1850073,...` should be in P1 and not in M1 or M2 (its offsets hold
+within one load; after a reload, match on shaders and index count).
 
 ## Flight 1 (2026-10-21 12:31-12:56)
 
@@ -324,3 +336,43 @@ about 12:56, while the log was still growing.
   clear and query lines, nothing dropped. Queries: event, timestamp and
   timestamp-disjoint only. Without a partner capture in a present state it
   cannot name the door's draws.
+
+## Flight 2 (2026-10-21 12:59-13:16, the latch test)
+
+Same session and log as flight 1. Key off from 12:59:34 (the next main-view
+line reads `key off factor 1.0000`).
+
+- Timeline: SS 0.5 → 1.0 at 13:14:23 (setter call 5; route native at
+  13:14:24.9); a reload at SS 1.0 (scene 32×32 at 13:14:55, in the hangar at
+  1920×1200 by 13:15:10); census #2 at 13:15:48; SS 1.0 → 0.5 at 13:16:01
+  (setter call 6; route `xess-upscale R=960x600` at 13:16:02.866); census #3 at
+  13:16:07.544; the log stops at 13:16:07.637 (`log size cap reached`).
+- Step mapping: #2 is step 1 (M1). #3 is step 2 (SS 0.5), not step 3. The
+  13:16:06.310 line `size=1920x1200 ... scene 960x600` is that entry's 5 s
+  report of 108 calls made before the switch; there is no setter call or route
+  change after 13:16:02.866. Steps 3 and 4, and Sean's step 4 remark ("the
+  whole hanger was culled briefly and then loaded in without the hanger door
+  detail"), are after the log's end.
+- `diff_draw_census.py --a 2 --b 3` floods (788 entries): its signature
+  includes the render target's size, and #2 and #3 render at 1920×1200 and
+  960×600. A one-off comparison on shaders, index count, start index and base
+  vertex (target sizes ignored; both captures follow the same load, so mesh
+  offsets hold): 824 meshes shared, 97 only in #3, 271 only in #2.
+- Main view (960×600 in #3, 1920×1200 in #2): 24 only in each. Of those:
+  dynamic geometry (start index and base vertex 0 or small ring offsets: HUD
+  and panels); four meshes relocated between the captures (same shaders and
+  index counts, +1656 indices and +1072 vertices: 46546443FD3C3F88 ×2 at 36,
+  D005EBB14A22EA0E at 288 and 1296); two LoD swaps with three instances each
+  (5B4D8E894EEDA8B4 84 → 48, AACFDCF2FB9AD809 144 → 48 at SS 0.5), which is
+  render-resolution LoD as the code predicts; and one unpaired static mesh, vs
+  `AACFDCF2FB9AD809` / ps `CF534B32F491561A`, n = 1008, `ia=1179100,1850073`,
+  one instance, drawn in #3's main view in both frames, in no shadow view, and
+  in neither #1 (12:49:38) nor #2, both taken at SS 1.0 after a reload.
+- Census text: the arm line says "armed by NumLock" with the key bound to Home
+  (cosmetic, `draw_census.cpp`).
+- Optimized stations stayed `waiting (... camera=no, cell=built)` from 12:59
+  with no seal, so the brief whole-hangar cull Sean saw at step 4 was not
+  EDVR's seal (the optimized-station session's reading).
+- Questions for Sean: at step 2 (SS 0.5) were the pieces there? At step 3 (back
+  to 1.0)? Did step 4 end with them missing?
+
