@@ -716,6 +716,17 @@ inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
     return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
 }
 
+// Whether a sphere overlaps the box: the distance from its centre (o, in box coordinates from boxCoords) to the centre's clamp into the box (half: the
+// half-extents) is at most the radius. A non-finite or negative radius never overlaps.
+inline bool sphereOverlapsBox(const float o[3], float radius, const float half[3]) noexcept {
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float over = std::fmax(std::fabs(o[k]) - half[k], 0.0f);
+        d2 += over * over;
+    }
+    return std::isfinite(radius) && radius >= 0.0f && d2 <= radius * radius;
+}
+
 // Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431DF21..0x431DF40). Kind 1: the byte
 // store [coll+0x629] = 0. Kind 2: the call of 0x4350A50 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B8420 with rcx = the
 // pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x4350A50: pipe+0x31C). Returns the number of steps written to kinds and args.
@@ -864,8 +875,9 @@ inline size_t pickExplicitSegment(const ExplicitObs* obs, size_t n, const float 
     return written;
 }
 
-// Why a record is kept in named mode.
-enum class KeepWhy : uint8_t { kNone = 0, kCell = 1, kExplicit = 2, kSphere = 3 };
+// Why a record is kept in named mode. kReach (built 2026-10-21): a box cell only; the centre lies outside the box but the sphere reaches into it (whether
+// or not it contains the camera).
+enum class KeepWhy : uint8_t { kNone = 0, kCell = 1, kExplicit = 2, kSphere = 3, kReach = 4 };
 
 struct NamedKeep {
     bool keep = false;
@@ -881,8 +893,13 @@ inline bool inAddrSet(const uintptr_t* set, size_t n, uintptr_t addr) noexcept {
 }
 
 // The named rule for one record (Built v8.3b). No own cell: the sphere rule for the frame. With one: kept when the record's centre lies within
-// the cell radius of the cell centre (why cell), or when it is an explicit part's nearest instance (why explicit). Otherwise culled, including a
-// record whose sphere contains the camera.
+// the cell radius of the cell centre (why cell), or when it is an explicit part's nearest instance (why explicit). Otherwise culled. Built 2026-10-21:
+// in box mode a record that those two would cull is also kept (why reach) when its sphere overlaps the box: a bay door's panels have their centres to
+// one side of the box and reach well into it (flight log, fleet carrier, large bay: DoorA0 to DoorA3, radius 72.5 m, centres up to 42 m outside,
+// culled by the centre rule). A sphere that contains the camera is kept too: the first form of this rule culled it as the station's enclosing
+// structure, but DoorA1 and DoorA2 (radius 72.5 m) contain the camera at the pad and were still culled, and at a station where the seal engaged
+// (box 446 x 148 x 556 m) a census of the culled records found none overlapping the box, so the exception protected nothing. The capsule and
+// sphere cells judge the centre alone.
 inline NamedKeep keepNamedCell(const float centre[3], float radius, const float camera[3], float R, const OwnCell& cell,
                                const uintptr_t* explicitSet, size_t explicitN, uintptr_t addr) noexcept {
     NamedKeep v;
@@ -905,6 +922,15 @@ inline NamedKeep keepNamedCell(const float centre[3], float radius, const float 
     if (inAddrSet(explicitSet, explicitN, addr)) {
         v.keep = true;
         v.why = KeepWhy::kExplicit;
+        return v;
+    }
+    if (cell.box) {
+        float o[3];
+        boxCoords(centre, cell, o);
+        if (sphereOverlapsBox(o, radius, cell.boxHalf)) {
+            v.keep = true;
+            v.why = KeepWhy::kReach;
+        }
     }
     return v;
 }

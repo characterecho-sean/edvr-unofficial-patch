@@ -64,7 +64,7 @@ RigTally g_rigTally;
 struct TlsCounters {
     uint32_t stamp = 0;   // the pass these counts belong to
     uint64_t callsStore = 0, callsProducer = 0, callsRig = 0;
-    uint64_t kept = 0, keptUnknown = 0, culled = 0, noCamera = 0;
+    uint64_t kept = 0, keptUnknown = 0, keptReach = 0, culled = 0, noCamera = 0;
     uint64_t worldSrc[5] = {};
     uint64_t producerVetoes = 0, rigVetoes = 0;
     uint64_t rigSeen = 0, rigVetoed = 0, rigMixed = 0, rigUnknown = 0, rigRefresh = 0;
@@ -222,6 +222,9 @@ uint64_t g_prodCalls = 0, g_prodVetoed = 0, g_prodKept = 0, g_prodStyle = 0, g_p
 sealed::NodeCache<kNodeCacheSlots> g_nodeCache;   // built v14.31: one entry per node and lifecycle generation (a node's name does not change while it lives)
 std::atomic<uint64_t> g_nodeNameReads{0}, g_nodeCacheFull{0}, g_nodeReuseCaught{0};
 std::atomic<uint64_t> g_winSunDrawsSkipped{0};   // built v14.34: sun-pair draws skipped in the window (the summary line)   // the window's name reads and uncached reads (the cost line)
+// Built 2026-10-21: the flat draw path's report of how it carried out those skips (optimizedStationNoteSunDraw); both stay 0 in the VR profile, which never issues the draw.
+std::atomic<uint64_t> g_winSunNotIssued{0}, g_winSunMasked{0};
+std::atomic<bool> g_flatProfile{false};   // set at install: the 30 s line splits the skips by path only where there is more than one
 std::atomic<uint32_t> g_classGen{0};   // moves at every lifecycle point (bumpRigEpoch): every node's class and name are read afresh
 
 bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
@@ -1259,6 +1262,7 @@ std::atomic<uint64_t> g_winRigVetoes{0};               // rig vetoes (before the
 std::atomic<uint64_t> g_winProducerVetoes{0};          // records the producer-B veto skipped in the window
 std::atomic<uint64_t> g_winCulled{0};                  // records culled after the store in the window
 std::atomic<uint64_t> g_winKeptUnknown{0};             // records kept because their centre could not be read, in the window
+std::atomic<uint64_t> g_winKeptReach{0};               // records the post-store judgement kept because their sphere reaches into the box (centre outside), in the window
 
 
 void tcFlush(TlsCounters& t) noexcept {
@@ -1268,6 +1272,7 @@ void tcFlush(TlsCounters& t) noexcept {
     g_kept.fetch_add(t.kept, std::memory_order_relaxed);
     g_keptUnknown.fetch_add(t.keptUnknown, std::memory_order_relaxed);
     g_winKeptUnknown.fetch_add(t.keptUnknown, std::memory_order_relaxed);
+    g_winKeptReach.fetch_add(t.keptReach, std::memory_order_relaxed);
     g_culled.fetch_add(t.culled, std::memory_order_relaxed);
     g_winCulled.fetch_add(t.culled, std::memory_order_relaxed);
     g_winNoCamera.fetch_add(t.noCamera, std::memory_order_relaxed);
@@ -1573,22 +1578,34 @@ void sealStatus(const sealed::OwnCell& cell, uint32_t frame) noexcept {
 void summaryLine(uint64_t now) noexcept {
     // Built v14.31: the lines are written for a window in which the commander was docked or sealed (a flight in space writes none); the window resets either way.
     const bool quiet = g_winDockedFrames == 0 && g_winSealedFrames == 0;
+    // Built 2026-10-21: read and reset here, outside the note, so a window that writes no line starts the next one at 0. In the flat profile the skips are split by
+    // how the draw path carried them out (a path that never ran reads 0; skipped above 0 with both at 0 means the report was never reached).
+    char sunText[96];
+    {
+        const unsigned long long skipped = g_winSunDrawsSkipped.exchange(0, std::memory_order_relaxed);
+        const unsigned long long notIssued = g_winSunNotIssued.exchange(0, std::memory_order_relaxed);
+        const unsigned long long masked = g_winSunMasked.exchange(0, std::memory_order_relaxed);
+        if (g_flatProfile.load(std::memory_order_relaxed))
+            std::snprintf(sunText, sizeof(sunText), "%llu (not issued %llu, masked %llu)", skipped, notIssued, masked);
+        else
+            std::snprintf(sunText, sizeof(sunText), "%llu", skipped);
+    }
 #define SUMMARY_NOTE(...) \
     do {                  \
         if (!quiet) Log::get().note(__VA_ARGS__); \
     } while (0)
     SUMMARY_NOTE("optimized station: last %llu s: sealed for %llu of %llu frames; rigs vetoed early %llu, records vetoed early %llu, "
-                    "records culled after the store %llu, records kept unread %llu, faults %llu (unreadable bucket %llu, cull read %llu, cull restored "
-                    "%llu, cull torn %llu, tick view %llu; callbacks before the first camera %llu, not faults); sun draws skipped %llu.",
+                    "records culled after the store %llu, records kept by reach %llu, records kept unread %llu, faults %llu (unreadable bucket %llu, cull read %llu, cull restored "
+                    "%llu, cull torn %llu, tick view %llu; callbacks before the first camera %llu, not faults); sun draws skipped %s.",
                     static_cast<unsigned long long>((now - g_summaryStartMs) / 1000), static_cast<unsigned long long>(g_winSealedFrames),
                     static_cast<unsigned long long>(g_winFrames), static_cast<unsigned long long>(g_winRigVetoes),
                     static_cast<unsigned long long>(g_winProducerVetoes), static_cast<unsigned long long>(g_winCulled),
-                    static_cast<unsigned long long>(g_winKeptUnknown), static_cast<unsigned long long>(g_winFaults.load()),
+                    static_cast<unsigned long long>(g_winKeptReach.load()), static_cast<unsigned long long>(g_winKeptUnknown), static_cast<unsigned long long>(g_winFaults.load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultBucket].load()), static_cast<unsigned long long>(g_winFaultBy[kFaultCullRead].load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultCullRestored].load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultCullTorn].load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultTickView].load()), static_cast<unsigned long long>(g_winNoCamera.load()),
-                    static_cast<unsigned long long>(g_winSunDrawsSkipped.exchange(0, std::memory_order_relaxed)));
+                    sunText);
     // Built v14.27: the passes the tick read, and what it did with them; the rig veto's lookups. A dead veto or a flapping pad shows here.
     {
         const sealed::PassGate& g = g_passGate;
@@ -1698,7 +1715,7 @@ void summaryLine(uint64_t now) noexcept {
     g_rigEpochs = 0;
     g_summaryStartMs = now;
     g_winFrames = g_winSealedFrames = g_winDockedFrames = g_winRigVetoes = g_winProducerVetoes = 0;
-    g_winCulled = g_winKeptUnknown = g_winFaults = 0;
+    g_winCulled = g_winKeptUnknown = g_winKeptReach = g_winFaults = 0;
     g_winNoCamera = 0;
     for (auto& f : g_winFaultBy) f = 0;
 }
@@ -2333,6 +2350,7 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
     const sealed::NamedKeep v = sealed::keepNamedCell(centre, radius, cam, kFallbackSphereM, s.cell, s.explicitPrev, s.explicitCount, record);
     bool keep = v.keep;
     const bool containing = v.containing;
+    if (v.why == sealed::KeepWhy::kReach) ++tc.keptReach;   // built 2026-10-21: counted here only (the producer path judges the same record by the same rule)
     // The bay: the own hangar's parts inside the bay volume, even where the box alone would cull them. The shaft is the cell's.
     if (!keep && s.cell.capsule) {
         float u[3] = {};
@@ -2364,6 +2382,7 @@ void optimizedStationInstall(bool flatProfile) {
     const bool on = text != "off";
     g_setting.store(on, std::memory_order_release);
     g_summaryStartMs = GetTickCount64();
+    g_flatProfile.store(flatProfile, std::memory_order_relaxed);
     if (on) applySetting(true, 0);
     Log::get().note("optimized station: fix.optimized_stations = %s (%s).", on ? "on" : "off",
                     flatProfile ? "flat profile" : "VR profile");
@@ -2378,6 +2397,10 @@ bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept {
     if (!g_sunOff.load(std::memory_order_acquire) || vs != kSunVs || ps != kSunPs) return false;   // the sun skip follows the pad, not the seal (built v14.13)
     g_winSunDrawsSkipped.fetch_add(1, std::memory_order_relaxed);   // built v14.34: the 30 s line says how many (a flat flight shows 0 if the flat hashes differ)
     return true;
+}
+
+void optimizedStationNoteSunDraw(SunDrawPath path) noexcept {
+    (path == SunDrawPath::kMasked ? g_winSunMasked : g_winSunNotIssued).fetch_add(1, std::memory_order_relaxed);
 }
 
 // The store calls this after it has written a record (bucket = the collection, record = its record). While sealed it judges the record; while

@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
+#include "station_draw_mask.h"   // the flat sun draw issued with every write masked (built 2026-10-21)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
@@ -4930,14 +4931,70 @@ static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count,
 
 // Built v14.34: the optimized station's sun skip in the flat profile. Flat draws never reach beginPanelOverride (VR's verdict makes the same call after its
 // foreign-context return), so the four draw kinds ask here, first, in their flat branch: owner context only, one atomic load while the sun is on.
+// Built 2026-10-21: the answer no longer ends the hook. The draw is the game's deferred lighting pass (kFlatDeferredHdrVs/Ps), which writes the scene HDR
+// target and gives it its camera; the flat runtime's model needs to see it. So the hook goes on to run the scope for it as for any draw and
+// FlatStationSunGate (below) decides what reaches the GPU.
 static inline bool flatStationSkipsDraw(ID3D11DeviceContext* self) {
     return self == g_state->ownerCtx && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
 }
 
+// The station's skipped sun draw, once the flat runtime's scope has observed it and (when it planned anything) begun. Every flat draw builds one of these
+// between beginActualDraw and the real call; for any draw but a skipped sun draw it does nothing (issues() is true, restore() is a no-op). What the
+// scope does depends on needsActualDraw():
+//  - false: the scope plans nothing around the game's issue (it only observed the draw: the model, the trace, the census), so the real draw call is
+//    not made. No GPU work; the scope destructs as for any draw.
+//  - true: some plan (a forward light or light payload capture, a draw packet, an overlay, the foreground or untrusted brackets, a HUD take) expects the
+//    draw between beginActualDraw and endActualDraw. The hook runs them around a real draw issued with every colour write and every depth and stencil
+//    write off (station_draw_mask.h); restore() puts the context's blend state, blend factor, sample mask, depth-stencil state and stencil reference
+//    back before endActualDraw. uiReissue is not called for a skipped draw: a second issue would put the sun back.
+// If the masking states cannot be made the draw is not issued and the plans still get their begin and end. Which way it went is counted (the station's
+// 30 s line); a path that never runs reads 0.
+static edvr::stationmask::Mask g_stationSunMask;
+// The two setters the mask uses are the game's own entry points, past the thunks (no binding shadow, issue epoch or blend generation moves: the state
+// is put back before anything else looks). A slot that was never hooked (realOMSetDepthStencilState stays null on a vtable too short for it) is the
+// context's own method.
+static void STDMETHODCALLTYPE stationMaskSetBlend(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const FLOAT factor[4], UINT sampleMask) {
+    if (g_state->realOMSetBlendState) g_state->realOMSetBlendState(ctx, state, factor, sampleMask);
+    else ctx->OMSetBlendState(state, factor, sampleMask);
+}
+static void STDMETHODCALLTYPE stationMaskSetDepth(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, UINT stencilRef) {
+    if (g_state->realOMSetDepthStencilState) g_state->realOMSetDepthStencilState(ctx, state, stencilRef);
+    else ctx->OMSetDepthStencilState(state, stencilRef);
+}
+class FlatStationSunGate {
+public:
+    FlatStationSunGate(ID3D11DeviceContext* self, const FlatRuntimeDrawScope& scope, bool stationSkip) : ctx_(self) {
+        if (!stationSkip) return;
+        if (!scope.needsActualDraw()) {
+            issue_ = false;
+            optimizedStationNoteSunDraw(SunDrawPath::kNotIssued);
+            return;
+        }
+        masked_ = g_stationSunMask.begin(self, &stationMaskSetBlend, &stationMaskSetDepth);
+        issue_ = masked_;
+        optimizedStationNoteSunDraw(masked_ ? SunDrawPath::kMasked : SunDrawPath::kNotIssued);
+    }
+    bool issues() const { return issue_; }
+    void restore() {
+        if (masked_) {
+            g_stationSunMask.end(ctx_);
+            masked_ = false;
+        }
+    }
+    ~FlatStationSunGate() { restore(); }   // an exception or an early return between the real call and the end call still puts the state back
+    FlatStationSunGate(const FlatStationSunGate&) = delete;
+    FlatStationSunGate& operator=(const FlatStationSunGate&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+    bool issue_ = true;
+    bool masked_ = false;
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDraw];
@@ -4951,9 +5008,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDraw(self, count, start);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);   // built 2026-10-21: only a skipped sun draw is changed (no real call, or a masked one)
+        if (sun.issues()) g_state->realDraw(self, count, start);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -5013,7 +5072,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
@@ -5025,9 +5084,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -5085,7 +5146,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5098,9 +5159,11 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -5153,7 +5216,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5167,10 +5230,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues())
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                              baseVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }

@@ -9,6 +9,7 @@
 #include "../../src/d3d11/station_lockfree_core.h"
 #include "../../src/d3d11/station_pass_core.h"
 #include "../../src/d3d11/station_seal_trace.h"
+#include "../../src/d3d11/station_draw_mask.h"   // d3d11.h types only: the rig links nothing of D3D
 #include "../../src/common/flat_profile_keys.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/view_source.h"
@@ -22,6 +23,7 @@
 #include <vector>   // the build-334473 PE identity constants (store hook gate)
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -2922,6 +2924,197 @@ int main(int argc, char** argv) {
         tr.step(heldTick(1, 1500), captureLine, &out);
         check(tr.count == 2 && tr.at(0).sealedNow && !tr.at(1).sealedNow && tr.at(1).ms == 500,
               "trace: the seal is marked on its rising edge and the time since the seal counts from it");
+    }
+
+    // ---- Built 2026-10-21: sphereOverlapsBox, the reach rule's own test. A record whose centre the box culls still draws into the bay when its sphere reaches
+    // the box ----------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        const float half[3] = {160.0f, 55.0f, 127.0f};
+        const float inside[3] = {10.0f, -20.0f, 100.0f};
+        check(se::sphereOverlapsBox(inside, 0.5f, half), "box overlap: a centre inside the box overlaps with any radius");
+        const float above[3] = {0.0f, 0.0f, 132.0f};   // 5 m past the top
+        check(!se::sphereOverlapsBox(above, 4.9f, half) && se::sphereOverlapsBox(above, 5.0f, half),
+              "box overlap: a centre 5 m past a face overlaps from a radius of 5 m (the sphere touches the box)");
+        const float corner[3] = {163.0f, 59.0f, 0.0f};   // 3 and 4 m past two faces: 5 m from the edge
+        check(!se::sphereOverlapsBox(corner, 4.9f, half) && se::sphereOverlapsBox(corner, 5.0f, half),
+              "box overlap: past two faces the distance is to the edge, not to either face (3, 4 -> 5 m)");
+        const float below[3] = {-165.0f, 0.0f, 0.0f};
+        check(se::sphereOverlapsBox(below, 6.0f, half) && !se::sphereOverlapsBox(below, 4.0f, half), "box overlap: the negative side is judged the same way");
+        const float distant[3] = {1000.0f, 0.0f, 0.0f};
+        check(!se::sphereOverlapsBox(distant, 800.0f, half) && se::sphereOverlapsBox(distant, 900.0f, half), "box overlap: a big far sphere (a deck or hull mesh) overlaps by its radius");
+        check(!se::sphereOverlapsBox(inside, std::nanf(""), half) && !se::sphereOverlapsBox(inside, INFINITY, half) && !se::sphereOverlapsBox(inside, -1.0f, half),
+              "box overlap: a non-finite or negative radius never overlaps");
+        // The chain the rule runs: world centre -> box coordinates -> overlap, in a box turned on its side and far from the origin.
+        se::OwnCell cell;
+        cell.has = true;
+        cell.box = true;
+        cell.boxCentre[0] = 1000.0f;
+        cell.boxCentre[1] = 2000.0f;
+        cell.boxCentre[2] = 3000.0f;
+        cell.boxU[1] = 1.0f;
+        cell.boxV[0] = -1.0f;
+        cell.boxW[2] = 1.0f;
+        cell.boxHalf[0] = 160.0f;
+        cell.boxHalf[1] = 55.0f;
+        cell.boxHalf[2] = 127.0f;
+        const float world[3] = {970.0f, 2170.0f, 3000.0f};   // U 170, V 30, W 0: 10 m past the length face
+        float o[3] = {};
+        se::boxCoords(world, cell, o);
+        check(o[0] == 170.0f && o[1] == 30.0f && o[2] == 0.0f, "box overlap chain: a world centre reads in box coordinates (U 170, 10 m past the length face)");
+        check(!se::sphereOverlapsBox(o, 9.9f, cell.boxHalf) && se::sphereOverlapsBox(o, 10.0f, cell.boxHalf), "box overlap chain: the overlap follows the box's own axes");
+    }
+    // ---- Built 2026-10-21: the reach rule. In box mode a record whose centre lies outside the box is kept (why reach) when its sphere overlaps the box,
+    // whether or not the sphere contains the camera (the carrier's DoorA1 and DoorA2 do). The box is the large carrier bay of the flight log (half-extents U 223, V 74, W 163.9), axis-aligned at the origin, so a box
+    // coordinate is a world coordinate; the door panels are the log's DoorA2 (centre -8.3,-88.6,-9.0, radius 72.5 m, outside the width face by 14.6 m) ----------
+    {
+        se::OwnCell box;
+        box.has = true;
+        box.box = true;
+        box.boxU[0] = 1.0f;
+        box.boxV[1] = 1.0f;
+        box.boxW[2] = 1.0f;
+        box.boxHalf[0] = 223.0f;
+        box.boxHalf[1] = 74.0f;
+        box.boxHalf[2] = 163.9f;
+        const float camera[3] = {0.0f, 0.0f, -100.0f};   // the commander in the cockpit, on the pad
+        const float door[3] = {-8.3f, -88.6f, -9.0f};
+        const uintptr_t none[1] = {0};
+        const float R = 80.0f;
+        se::NamedKeep v = se::keepNamedCell(door, 72.5f, camera, R, box, none, 0, 0x1000);
+        check(v.keep && v.why == se::KeepWhy::kReach && !v.containing,
+              "reach: a door whose centre is 14.6 m outside the width face and whose sphere (72.5 m) reaches in is kept, by reach");
+        const float cameraNearDoor[3] = {-8.3f, -60.0f, -9.0f};   // inside the box and inside the door's sphere (28.6 m from its centre)
+        v = se::keepNamedCell(door, 72.5f, cameraNearDoor, R, box, none, 0, 0x1000);
+        check(v.keep && v.why == se::KeepWhy::kReach && v.containing,
+              "reach: the same record is kept, by reach, when its sphere contains the camera (the carrier's DoorA1 and DoorA2 at the pad)");
+        const float deck[3] = {0.0f, -400.0f, 0.0f};   // a hull or deck mesh: centre missing outside, a radius that overlaps the box and holds the camera
+        v = se::keepNamedCell(deck, 450.0f, camera, R, box, none, 0, 0x2000);
+        check(v.keep && v.why == se::KeepWhy::kReach && v.containing, "reach: a big record that overlaps the box and contains the camera is kept, by reach");
+        v = se::keepNamedCell(deck, 340.0f, camera, R, box, none, 0, 0x2000);   // reaches 14 m into the box, 412 m from the camera
+        check(v.keep && v.why == se::KeepWhy::kReach && !v.containing,
+              "reach: a big record that overlaps the box and does not contain the camera is kept (the rule is the sphere's, not its size)");
+        const float missing[3] = {0.0f, -200.0f, 0.0f};   // outside the width face by 126 m
+        v = se::keepNamedCell(missing, 72.5f, camera, R, box, none, 0, 0x3000);
+        check(!v.keep && v.why == se::KeepWhy::kNone, "reach: a record whose sphere misses the box is culled");
+        const float touch[3] = {0.0f, -146.5f, 0.0f};   // 72.5 m past the width face: the sphere just touches it
+        check(se::keepNamedCell(touch, 72.5f, camera, R, box, none, 0, 0x3000).why == se::KeepWhy::kReach &&
+                  !se::keepNamedCell(touch, 72.4f, camera, R, box, none, 0, 0x3000).keep,
+              "reach: a sphere that just touches a face is kept, one that stops 0.1 m short is culled");
+        const float corner[3] = {223.0f + 3.0f, 74.0f + 4.0f, 0.0f};   // 5 m from the edge, past two faces
+        check(se::keepNamedCell(corner, 5.0f, camera, R, box, none, 0, 0x4000).why == se::KeepWhy::kReach &&
+                  !se::keepNamedCell(corner, 4.9f, camera, R, box, none, 0, 0x4000).keep,
+              "reach: past two faces the distance is to the edge");
+        const float inside[3] = {10.0f, 20.0f, 30.0f};
+        v = se::keepNamedCell(inside, 5.0f, camera, R, box, none, 0, 0x5000);
+        check(v.keep && v.why == se::KeepWhy::kCell, "reach: a centre inside the box is kept by the cell, as before");
+        const float insideBig[3] = {10.0f, 20.0f, -90.0f};   // centre in the box and a sphere that holds the camera: the centre rule keeps it
+        v = se::keepNamedCell(insideBig, 500.0f, camera, R, box, none, 0, 0x5000);
+        check(v.keep && v.why == se::KeepWhy::kCell && v.containing, "reach: a centre inside the box is kept even when the sphere contains the camera, as before");
+        const uintptr_t explicitSet[1] = {0x6000};
+        v = se::keepNamedCell(missing, 72.5f, camera, R, box, explicitSet, 1, 0x6000);
+        check(v.keep && v.why == se::KeepWhy::kExplicit, "reach: an explicit part's nearest instance is kept, as before");
+        v = se::keepNamedCell(door, 72.5f, camera, R, box, explicitSet, 1, 0x6000);
+        check(v.keep && v.why == se::KeepWhy::kExplicit, "reach: an explicit part that also reaches into the box keeps its explicit label (the reach count is the new keeps only)");
+        check(!se::keepNamedCell(missing, 72.5f, cameraNearDoor, R, box, explicitSet, 1, 0x7000).keep, "reach: another address is not the explicit part");
+        check(!se::keepNamedCell(door, std::nanf(""), camera, R, box, none, 0, 0x1000).keep && !se::keepNamedCell(door, INFINITY, camera, R, box, none, 0, 0x1000).keep,
+              "reach: a non-finite radius is never kept by reach");
+        // A box turned and moved: the rule follows the box's own axes. U along world y, V along world -x, W along world z, centre (1000, 2000, 3000).
+        se::OwnCell turned = box;
+        turned.boxU[0] = 0.0f;
+        turned.boxU[1] = 1.0f;
+        turned.boxV[0] = -1.0f;
+        turned.boxV[1] = 0.0f;
+        turned.boxCentre[0] = 1000.0f;
+        turned.boxCentre[1] = 2000.0f;
+        turned.boxCentre[2] = 3000.0f;
+        const float turnedDoor[3] = {1000.0f + 88.6f, 2000.0f - 8.3f, 3000.0f - 9.0f};   // box coordinates -8.3, -88.6, -9.0
+        const float turnedCamera[3] = {1000.0f, 2000.0f, 3000.0f - 100.0f};
+        v = se::keepNamedCell(turnedDoor, 72.5f, turnedCamera, R, turned, none, 0, 0x1000);
+        check(v.keep && v.why == se::KeepWhy::kReach, "reach: in a turned box the door's sphere is judged against the box's own axes");
+        const float wrongSide[3] = {1000.0f - 88.6f, 2000.0f - 8.3f, 3000.0f - 9.0f};   // 88.6 m the other way across the width: reaches in as well (the box is symmetric)
+        check(se::keepNamedCell(wrongSide, 72.5f, turnedCamera, R, turned, none, 0, 0x1000).why == se::KeepWhy::kReach,
+              "reach: the missing side of the width is judged the same way");
+        const float alongLength[3] = {1000.0f - 8.3f, 2000.0f + 223.0f + 80.0f, 3000.0f};   // 80 m past the length face
+        check(!se::keepNamedCell(alongLength, 72.5f, turnedCamera, R, turned, none, 0, 0x1000).keep, "reach: a sphere 80 m past the length face does not reach (72.5 m)");
+        // The other cells judge the centre alone: a sphere that overlaps a capsule or a pad sphere is not kept for it.
+        se::OwnCell sphereCell;
+        sphereCell.has = true;
+        sphereCell.radius = 50.0f;
+        const float nearSphere[3] = {60.0f, 0.0f, 0.0f};
+        v = se::keepNamedCell(nearSphere, 30.0f, camera, R, sphereCell, none, 0, 0x8000);
+        check(!v.keep && v.why == se::KeepWhy::kNone, "reach: a pad-sphere cell keeps by the centre alone (a sphere that overlaps it is culled)");
+        v = se::keepNamedCell(inside, 5.0f, camera, R, sphereCell, none, 0, 0x8000);
+        check(v.keep && v.why == se::KeepWhy::kCell, "reach: a pad-sphere cell keeps a centre inside it by the cell");
+        se::OwnCell capsuleCell;
+        capsuleCell.has = true;
+        capsuleCell.capsule = true;
+        capsuleCell.radius = 20.0f;
+        capsuleCell.capB[2] = 100.0f;
+        const float nearCapsule[3] = {30.0f, 0.0f, 50.0f};
+        v = se::keepNamedCell(nearCapsule, 30.0f, camera, R, capsuleCell, none, 0, 0x9000);
+        check(!v.keep && v.why == se::KeepWhy::kNone, "reach: a capsule cell keeps by the centre alone (a sphere that overlaps it is culled)");
+        // No cell: the sphere rule for the frame, unchanged.
+        se::OwnCell noCell;
+        v = se::keepNamedCell(door, 72.5f, camera, R, noCell, none, 0, 0x1000);
+        check(v.keep && v.why == se::KeepWhy::kSphere, "reach: with no cell the sphere rule decides (this door is 127 m from the camera, inside 72.5 + 80 m)");
+        v = se::keepNamedCell(missing, 72.5f, camera, R, noCell, none, 0, 0x3000);
+        check(!v.keep && v.why == se::KeepWhy::kNone, "reach: with no cell a record beyond the camera sphere is culled (224 m from the camera)");
+    }
+
+    // ---- Built 2026-10-21: the flat sun draw issued with every write masked (station_draw_mask.h; the states' descriptions: Mask itself needs a device) ------
+    {
+        namespace sm = edvr::stationmask;
+        const D3D11_BLEND_DESC b = sm::blendDesc();
+        bool allOff = true, noBlend = true;
+        for (UINT i = 0; i < sm::kTargets; ++i) {
+            allOff = allOff && b.RenderTarget[i].RenderTargetWriteMask == 0;
+            noBlend = noBlend && !b.RenderTarget[i].BlendEnable;
+        }
+        check(sm::kTargets == 8 && allOff && noBlend && b.IndependentBlendEnable && !b.AlphaToCoverageEnable,
+              "sun mask: the blend state writes no colour to any of the eight targets, each by its own entry, with no blending or alpha-to-coverage");
+        D3D11_DEPTH_STENCIL_DESC bound = {};
+        bound.DepthEnable = TRUE;
+        bound.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        bound.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+        bound.StencilEnable = TRUE;
+        bound.StencilReadMask = 0x0F;
+        bound.StencilWriteMask = 0xF0;
+        bound.FrontFace = {D3D11_STENCIL_OP_REPLACE, D3D11_STENCIL_OP_INCR, D3D11_STENCIL_OP_ZERO, D3D11_COMPARISON_EQUAL};
+        bound.BackFace = {D3D11_STENCIL_OP_DECR, D3D11_STENCIL_OP_INVERT, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_NOT_EQUAL};
+        const D3D11_DEPTH_STENCIL_DESC masked = sm::maskedDepthStencilDesc(bound);
+        D3D11_DEPTH_STENCIL_DESC restored = masked;   // put back the two writes the mask turns off: nothing else may differ from the bound state
+        restored.DepthWriteMask = bound.DepthWriteMask;
+        restored.StencilWriteMask = bound.StencilWriteMask;
+        check(masked.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO && masked.StencilWriteMask == 0 && sm::sameDepthStencilDesc(restored, bound) &&
+                  !sm::sameDepthStencilDesc(masked, bound),
+              "sun mask: the depth-stencil state is the bound one with the depth write and the stencil write mask off and nothing else changed");
+        check(masked.DepthEnable && masked.StencilEnable && masked.DepthFunc == bound.DepthFunc && masked.StencilReadMask == 0x0F,
+              "sun mask: the depth test and the stencil test still run (only the writes are off)");
+        check(sm::sameDepthStencilDesc(sm::maskedDepthStencilDesc(masked), masked), "sun mask: masking a masked state changes nothing (the cache key is stable)");
+        const D3D11_DEPTH_STENCIL_DESC dflt = sm::defaultDepthStencilDesc();
+        check(dflt.DepthEnable && dflt.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL && dflt.DepthFunc == D3D11_COMPARISON_LESS && !dflt.StencilEnable &&
+                  dflt.StencilReadMask == 0xFF && dflt.StencilWriteMask == 0xFF && dflt.FrontFace.StencilFunc == D3D11_COMPARISON_ALWAYS &&
+                  dflt.FrontFace.StencilPassOp == D3D11_STENCIL_OP_KEEP,
+              "sun mask: a context with no depth-stencil state bound (null) is D3D's default state: depth on, writes on, LESS, stencil off");
+        const D3D11_DEPTH_STENCIL_DESC maskedDefault = sm::maskedDepthStencilDesc(dflt);
+        check(maskedDefault.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO && maskedDefault.StencilWriteMask == 0 && maskedDefault.DepthEnable,
+              "sun mask: the default state is masked the same way");
+        // The comparison ignores the structure's padding (a desc read back from a state does not define it).
+        static_assert(offsetof(D3D11_DEPTH_STENCIL_DESC, FrontFace) == offsetof(D3D11_DEPTH_STENCIL_DESC, StencilWriteMask) + 3, "two padding bytes before FrontFace");
+        D3D11_DEPTH_STENCIL_DESC a, c;
+        a = bound;
+        c = bound;
+        std::memset(reinterpret_cast<unsigned char*>(&a) + offsetof(D3D11_DEPTH_STENCIL_DESC, StencilWriteMask) + 1, 0xAA, 2);   // the two bytes before FrontFace
+        std::memset(reinterpret_cast<unsigned char*>(&c) + offsetof(D3D11_DEPTH_STENCIL_DESC, StencilWriteMask) + 1, 0x55, 2);
+        check(sm::sameDepthStencilDesc(a, c), "sun mask: two descs that differ only in padding compare the same");
+        D3D11_DEPTH_STENCIL_DESC d2 = bound;
+        d2.BackFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+        check(!sm::sameDepthStencilDesc(d2, bound), "sun mask: a difference in a back-face stencil operation compares different");
+        // Mask holds nothing until a draw asks.
+        sm::Mask idle;
+        check(!idle.active() && !idle.begin(nullptr, nullptr, nullptr), "sun mask: without a context nothing is bound and begin() declines");
+        idle.end(nullptr);
+        check(!idle.active(), "sun mask: end() without a begin() does nothing");
     }
 
     std::printf("optimized_station_test: %d checks, %d failures\n", g_checks, g_failures);
