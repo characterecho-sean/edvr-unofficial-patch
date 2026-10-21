@@ -22,6 +22,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The CPU timing in the log (flat_runtime.cpp, flat_cpu.h Census::setClocks): the census's clocks, off unless this is on. A flat panel row
         // on the Debug tab. Unlisted, getBool answers false here whatever the file says, and the timing could never be turned on from the panel.
         std::strcmp(key, "advanced.flat_cpu_timing") == 0 ||
+        // TEMPORARY (Supersampling hangar door arc, 2026-10-21; lod_view_hook.cpp): LoD at the output's pixel size for views drawn at the
+        // render size. Developer tier, no flat panel row. Unlisted, getBool answers false here whatever the file says. Remove with the arc.
+        std::strcmp(key, "advanced.detail_at_output_size") == 0 ||
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||

@@ -94,6 +94,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
+#include "lod_view_hook.h"           // lodViewInstall at startup, lodViewPoll once a second: the TEMPORARY LoD view probe (flat; docs\elite-ss-hangar-door-2026-10-21.md)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -1694,6 +1695,7 @@ void presentFrameBoundary() {
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             lightGridCachePoll(stampMs());
+            lodViewPoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
             terrainCullCoverPoll(stampMs());
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
@@ -2955,6 +2957,9 @@ void hookDevice(ID3D11Device* device) {
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
             // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334473 is one log line.
             lightGridCacheInstall();
+            // The LoD view probe (TEMPORARY, lod_view_hook.cpp; docs\elite-ss-hangar-door-2026-10-21.md): a CodeHook on the game's scene-view builder, once, when the
+            // scope includes flat; it acts only while the flat profile is active. A build that is not 334473 is one log line and nothing patched.
+            if (runtimeScopeIncludesFlat()) lodViewInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
             // profile passes through per call). A build that is not 334473 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());

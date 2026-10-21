@@ -2,8 +2,10 @@
 
 ## Status
 
-- **State (2026-10-21): offline reverse engineering done; nothing built,
-  nothing flown.** Game build 334473 (4.4.2.0). Docs only.
+- **State (2026-10-21): offline reverse engineering done; the instrument is
+  BUILT, NOT FLOWN** (branch `claude/ss-lod-instrument`: `lod_view_hook.cpp`,
+  `lod_view_core.h`, rig `tools/lod_view_test`; see "Instrument"). Game build
+  334473 (4.4.2.0).
 - **Symptom:** flat, Steam on Proton, seated in a large Orbis hangar (MacLeod
   Market, 38 Lyncis, MarketID 3227880448) with the ship lowered: at SS 0.5
   several pieces at the bottom of the hangar door are not drawn; at SS 1.0 they
@@ -42,9 +44,10 @@
 - **Recommendation:** fly the instrument below (one flight, one restart at
   most) before building the fix. If H1 or H2 is confirmed, ship the correction
   as the behaviour of the flat upscaled route, with no key.
-- **Next flight:** "Flight plan". Temporary key it would add:
-  `advanced.detail_at_output_size` (instrument only; remove when the arc
-  closes).
+- **Next flight:** "Flight plan". Temporary key:
+  `advanced.detail_at_output_size` (off by default, flat only, live; remove
+  with the instrument when the arc closes, or replace both with the
+  correction).
 - **Not in scope, worth a look:** `advanced.texture_lod_bias = auto` derives
   the mip bias from HMDRenderTargetMultiplier in both profiles
   (device_hook.cpp), so in flat it ignores SS, the same render-size question
@@ -219,25 +222,57 @@ unmeasured; the census pair A/C prices it.
 - VR: EDVR holds SS at 1.0 (vr-supersampling-gate-2026-10-10.md), so the factor
   is 1. An eye-level analogue (render vs swapchain) is a separate question.
 
-## Instrument (designed, not built)
+## Instrument (built 2026-10-21, not flown)
 
-1. **`lod view:` lines.** The relay above, observe only: per distinct (caller
-   return address, W×H) the first time and then every 5 s, log slot index, W×H,
-   A, B, +0x26A flag, and EDVR's current R and E. The main-scene caller is
-   `0x200EC0` (return address in that function). If the relay never runs, no
-   `lod view:` line appears; a startup line names the relay's install result so
-   absence is unambiguous.
-2. **`advanced.detail_at_output_size = off | on`** (temporary, live, off by
-   default, flat only): applies the correction above. A change logs one line
-   with the factor.
-3. **No new capture code.** The flat draw census (NumLock) and
+`src/d3d11/lod_view_hook.cpp` (glue), `src/d3d11/lod_view_core.h` (pure:
+identity and pin, layout, factor, table, line text), rig `tools/lod_view_test`
+(in build.bat's gate). Installed at device creation when the scope includes
+flat; it acts only while the flat profile is active.
+
+1. **The hook.** A CodeHook through a near relay on `0x2811E40`, pinned by the
+   PE identity of 334473 and the sixteen prologue bytes (checked against the
+   installed exe). After the original returns it reads, under SEH, the count at
+   +0x15C00 (slot = count − 1), the descriptor's W×H and +0x26A byte, and the
+   slot's A and B, and records them per (caller RVA, W×H). The caller is the
+   return address the game's call pushed.
+2. **Log lines.**
+   - At install: `lod view: the scene-view builder (0x2811E40) is hooked,
+     flat profile only ...`, or one `lod view: refused: ...` line naming
+     why.
+   - At the first config tick and on every change:
+     `lod view: advanced.detail_at_output_size on|off [at start] (scene RxR
+     output OxO, factor now F; ...)`.
+   - Per (caller, size), when first seen and then every 5 s while called:
+     `lod view: first|every 5s caller=0x... size=WxH slot=N primary=0|1
+     A=... B=... calls=N | scene RxR output OxO key on|off factor F`. A and
+     B are the game's own values, before the factor; factor is what the key
+     applied to that view (1.0000 when nothing).
+   - If nothing is built through the hook within 60 s of the first config
+     tick: one `lod view: no scene view built ...` line. With more than 32
+     (caller, size) pairs: one overflow line.
+   - What would appear if the hook never ran: the install line and the key
+     line, then the 60 s line and no view lines. A refused install shows its
+     refusal and nothing else.
+3. **`advanced.detail_at_output_size = off | on`** (temporary, live within a
+   second, off by default, flat only, developer tier and hidden from the menu):
+   for a view whose W×H equals the flat runtime's measured scene size
+   (`flatRuntimeSceneSizes`), while that is below the swap chain's on both
+   axes, A and B are multiplied by render height / output height.
+4. **No new capture code.** The flat draw census (NumLock) and
    `tools/diff_draw_census.py` give A, B and C; the census lines' index counts
    and shaders separate H1 from H2.
 
+Checked before commit: the rig passes under g++ and under the pinned MSVC (run
+in Wine); `lod_view_hook.cpp` and `device_hook.cpp` compile clean at /W4 with
+that MSVC; config contract, settings schema, exit paths, install reads, agent
+material and Status block checks pass. The full build runs in CI.
+
 ## Flight plan
 
-Commit before compiling, then the compile-only path in AGENTS.md. Keep
-`texture_lod_bias = 0` and the AA mode Sean used (XeSS).
+Build from branch `claude/ss-lod-instrument`: its CI artifact, or the
+compile-only path in AGENTS.md from a checkout of that branch (the Linux
+toolchain compiles only the main checkout). Keep `texture_lod_bias = 0` and the
+AA mode Sean used (XeSS).
 
 1. Dock at MacLeod Market (or any large Orbis pad), lower into the hangar, look
    at the door with the head centred. SS 0.5, key off: confirm the pieces are
@@ -248,6 +283,5 @@ Commit before compiling, then the compile-only path in AGENTS.md. Keep
 4. Only if B restored nothing: quit, set `texture_lod_bias = -1`, relaunch,
    repeat step 1 (H6).
 
-Read: `python3 tools/edvr_log.py --target steam --expect-build HEAD
---grep "lod view:|detail_at_output"`, then the census diffs A→B, A→C and
-C→A. H0 first.
+Read: `python3 tools/edvr_log.py --target steam --expect-build HEAD --grep "lod
+view:"`, then the census diffs A→B, A→C and C→A. H0 first.

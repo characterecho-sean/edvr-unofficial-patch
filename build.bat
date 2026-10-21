@@ -640,7 +640,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" "src\d3d11\lod_view_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -2365,6 +2365,20 @@ if not exist "%OBJ%\lightgridcache" mkdir "%OBJ%\lightgridcache"
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: light grid cache test build failed & exit /b 1 )
 "%BUILD%\light_grid_cache_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_lod_view_test
+echo [edvr] === lod_view_test.exe ===
+REM The LoD view probe's pure half (src\d3d11\lod_view_core.h; TEMPORARY, docs\elite-ss-hangar-door-2026-10-21.md): the identity and prologue decision,
+REM the slot the scene-view builder wrote, the output-size factor, the per-view table's first and 5 s lines and its overflow, and the line text.
+REM No DLL and no game.
+if not exist "%OBJ%\lodview" mkdir "%OBJ%\lodview"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\lodview\\" ^
+    /Fe"%BUILD%\lod_view_test.exe" "tools\lod_view_test\lod_view_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: lod view test build failed & exit /b 1 )
+"%BUILD%\lod_view_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_pad_state_test
