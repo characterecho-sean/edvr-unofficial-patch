@@ -2060,8 +2060,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             // when the path works; a streak of kCrispHdrMissFrames says the
             // consumer is not coming, so stand down to stock rather than
             // lose the HUD every frame. The streak resets where a
-            // publication lands (uiLayerCrispToneEnd). This draw still
-            // completes into the layer; the NEXT HUD draw is stock.
+            // publication lands (uiLayerCrispToneEnd). This draw is issued
+            // stock too, because the stand-down happened before its bind.
             // The flat profile takes only behind a proven tonemap (flat_ui_layer.cpp), so one miss is already a broken
             // proof: it backs off at the first, losing one frame's HUD instead of thirty.
             const uint32_t missLimit = runtimeFlatProfile() ? 1u : kCrispHdrMissFrames;
@@ -2072,6 +2072,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                             "(the cockpit HUD was taken but never came back)",
                             missLimit);
                 crispStandDown(why);
+                // This draw was decided while the path was live, but the
+                // missing-consumer check just stood it down. Let it issue
+                // stock; taking it would poison the next re-arm as well.
+                e.hdrDraws = 0;
+                if (bs) bs->Release();
+                ++g_win.refusedAtIssue;
+                return false;
             }
         }
         const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
@@ -4838,16 +4845,21 @@ bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) 
     if (!blend) return false;
     const int timer = routeBegin(ctx, UiRouteStage::kHdrCoverage, eye, seq);
     bool ok = false;
+    const char* failure = nullptr;
     try {
         const UiCoverageBindings bindings{e.hdrSrv.Get(), e.rtv.Get(), g_covVs, g_covPs,
                                           blend, e.w, e.h};
-        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw);
+        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw, &failure);
     } catch (const std::exception&) {
         e.coverage.reset();
         ok = false;
+        failure = "command exception";
     }
     if (ok) routeEnd(ctx, timer);
-    else routeAbort(ctx, timer);
+    else {
+        routeAbort(ctx, timer);
+        if (failure) Log::get().note("crisp hud: coverage stage failed: %s", failure);
+    }
     return ok;
 }
 
@@ -5374,6 +5386,16 @@ bool uiLayerCrispToneNext(ID3D11DeviceContext* ctx) {
     return true;
 }
 
+void retireFailedCrispCoverage(Eye& e, uint64_t seq) {
+    // No publication took place. Count and retire only this failed frame's
+    // content, leaving hdrToneSeq untouched for the publication invariant.
+    if (e.hdrSeq == seq && e.hdrDraws) {
+        ++g_win.hdrLost;
+        e.hdrDraws = 0;
+        e.hdrMissStreak = 0;
+    }
+}
+
 void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     if (!g_crispSave.active) return;
     const int eye = g_crispSave.eye;
@@ -5428,6 +5450,12 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
         if (plan.coverage) ++g_win.hdrCoveragePasses;
     } else {
         vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        // The tonemap ran, but its alpha transfer did not. Retire this
+        // frame's unpublished HUD before a flat-profile re-arm; otherwise
+        // beginInner mistakes it for a new missed consumer and backs off
+        // again on the first draw, even though no new tonemap was missed.
+        // Do not stamp hdrToneSeq: no HUD was published to the eye.
+        retireFailedCrispCoverage(e, seq);
         if (!g_crispStoodDown) {
             Log::get().note("crisp hud: the coverage pass failed; the HUD misses this frame, and "
                             "the crisp-HUD half of fix.ui_quality stands down (the cockpit HUD is drawn as it always "
