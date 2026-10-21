@@ -10,7 +10,7 @@ fixes is under [What it fixes](#what-it-fixes), and
 If something is not working, [open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose).
 Bugs get fixed there because you can attach the log, and the log usually shows
-the cause. The [Discord](https://discord.gg/ynkdf6Gdua) is for setup questions,
+the cause. The [Discord](https://discord.gg/AWJ6djKKzr) is for setup questions,
 "is this normal", or just talking about it; chat loses attachments and threads,
 so bug reports belong in an issue.
 
