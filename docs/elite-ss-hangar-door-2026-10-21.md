@@ -2,56 +2,52 @@
 
 ## Status
 
-- **State (2026-10-21): offline reverse engineering done; the instrument is
-  BUILT, NOT FLOWN** (branch `claude/ss-lod-instrument`: `lod_view_hook.cpp`,
-  `lod_view_core.h`, rig `tools/lod_view_test`; see "Instrument"). Game build
-  334473 (4.4.2.0).
-- **Symptom:** flat, Steam on Proton, seated in a large Orbis hangar (MacLeod
-  Market, 38 Lyncis, MarketID 3227880448) with the ship lowered: at SS 0.5
-  several pieces at the bottom of the hangar door are not drawn; at SS 1.0 they
-  are. Reproduced with EDVR suspended, so it is Elite's.
-- **Mechanism (code, read in the 334473 Ghidra project):** every per-view LoD
-  and cull test multiplies distance by the view's pixel size A =
-  2·tan(fovy/2)/H, where H is the height of the view's target. The scene-view
-  builder `0x2811E40` writes A (+0x530) and the orthographic term B (+0x540);
-  `0x281C5B0` copies them to render view +0x550/+0x560. The part test
-  `0x42B6C80` then rejects a part when f = A·(d−r)·s > t0, the first float of
-  the model's LoD table, and picks its LoD level from the same f. The sizing
-  pass `0x284F190` writes the render size as trunc(display × SS) per axis.
-  Halving H doubles f, so at SS 0.5 every LoD switch and every table cull
-  happens at half the distance it does at SS 1.0. Details: "Mechanism".
-- **One link is inferred, not traced:** that the flat main view's H (camera
-  object +0x864, set by `0x2874820`) is the render height and not the display
-  height. Sean's SS repro supports it. The instrument's `lod view:` line
-  settles it in the first second of the flight.
-- **Code or data:** both. The resolution dependence is code. Which pieces
-  vanish, and whether they vanish (t0) or swap to a coarser mesh (level), is
-  per-model LoD table and mesh data.
-- **4.4.2.0:** no code change on this path; every function maps IDENTICAL or
-  RELOC-ONLY from 332841. A data change to the door's LoD tables cannot be
-  checked offline (see "Did 4.4.2.0 change it").
-- **Open hypotheses** (signatures under "Hypotheses"): H1 the door pieces fail
-  the table cull (f > t0) at render size; H2 they pass but take a coarser level
-  whose mesh lacks them; H6 texture mips and alpha test (GPU side, no LoD
-  involved); H7 another SS-dependent path outside these tests.
-- **Ruled out:** see "Ruled out"; five lines.
-- **Feasibility:** yes, and cheap. A post-call hook on `0x2811E40` that scales
-  A and B by render height / output height for views whose size is the render
-  size makes the LoD tests see the output resolution. It belongs with EDVR's
-  flat upscalers (XeSS, DLSS, FSR), whose render size is the game's SS ("game
-  SS controls render size", log 20261021_102110). Cost: the draws SS 1.0 would
-  issue for the same view. Risks under "Correction".
-- **Recommendation:** fly the instrument below (one flight, one restart at
-  most) before building the fix. If H1 or H2 is confirmed, ship the correction
-  as the behaviour of the flat upscaled route, with no key.
-- **Next flight:** "Flight plan". Temporary key:
-  `advanced.detail_at_output_size` (off by default, flat only, live; remove
-  with the instrument when the arc closes, or replace both with the
-  correction).
+- **State (2026-10-21 13:00): the instrument flew once** (flight 1, log
+  `edvr_gfx_20261021_123140`, v0.20.1-13-gdb52d367, compile-only, flat; see
+  "Flight 1"). H0 is confirmed. Sean's report from the flight points to a
+  load-time latch (H8), not to render-resolution LoD. The correction is on
+  hold.
+- **Symptom, revised by Sean in flight 1:** "now when I reload from the menu
+  (regardless of SS) its missing, changing SS then fixes it." The morning's
+  report (SS 0.5 missing, SS 1.0 present, also with EDVR suspended) fits that
+  too if the game was loaded at 0.5 and then switched to 1.0. Station: MacLeod
+  Market, 38 Lyncis (large Orbis hangar).
+- **Render-resolution LoD (code, 334473):** every per-view LoD and cull test
+  scales distance by the view's pixel size A = 2·tan(fovy/2)/H, H the view's
+  target height. `0x2811E40` writes A, `0x281C5B0` copies it to the render
+  views, and the part test `0x42B6C80` culls when A·(d−r)·s > t0. SS 0.5 halves
+  every LoD and cull distance. Details: "Mechanism".
+- **H0 measured:** the main view is slot 0 from caller `0x2010D0`, at the
+  render size: 960×600 with A = 2.003296e-03 at SS 0.5, 1920×1200 with A =
+  1.001648e-03 at SS 1.0 (cockpit), ratio 2.000.
+- **Against H1/H2 for this symptom:** after both reloads at SS 1.0 (12:49:05,
+  12:51:42) the main view's A was 1.001648e-03, the same as after the SS
+  toggles (12:50:26). If the pieces were missing after a reload and back after
+  a toggle, the LoD tests saw the same pixel size in both states.
+- **Open hypotheses** (signatures under "Hypotheses"): **H8, a load-time
+  latch** (leading): H8a per-object CPU state (a cached LoD level or visibility
+  verdict), H8b GPU-side state sized at load. H1/H2 may still exist as a
+  separate, smaller effect. H6, H7.
+- **Census:** one capture (#1, 12:49:38, SS 1.0, after the reload). With no
+  capture in a known present state, it names nothing yet. Its query brackets
+  are event and timestamp only: no occlusion queries.
+- **Ruled out:** see "Ruled out"; seven lines.
+- **4.4.2.0:** no code change on the LoD path (IDENTICAL or RELOC-ONLY from
+  332841). A data change to the door cannot be checked offline.
+- **Correction:** built as the temporary key (factor 0.5000 applied at SS 0.5
+  in flight 1). It addresses H1/H2 only. Do not ship it for this symptom unless
+  the latch test leaves H1/H2 standing.
+- **Next flight:** "Flight plan" (the latch test, two censuses at one SS).
+  Temporary key: `advanced.detail_at_output_size` (off by default, flat only,
+  live; off for the latch test).
+- **Next offline step:** an SS change runs the sizing pass `0x284F190` (whether
+  a reload does is not known). Besides the sizes it calls `0x2833D40` (scene,
+  3, 256, 256), clears byte +0x1D of `*(*(scene+0xA8)+0x48)`, and calls
+  `0x28AC2D0` and `0x28572D0`. Those, and the builder's visibility callback
+  `0x288D280`, are where to look for a latch.
 - **Not in scope, worth a look:** `advanced.texture_lod_bias = auto` derives
-  the mip bias from HMDRenderTargetMultiplier in both profiles
-  (device_hook.cpp), so in flat it ignores SS, the same render-size question
-  for textures.
+  the mip bias from HMDRenderTargetMultiplier in both profiles, so in flat it
+  ignores SS.
 
 ## Symptom and environment
 
@@ -155,17 +151,21 @@ coarser level omits the part loses it by substitution (H2).
 
 ## Hypotheses
 
-Census A = SS 0.5, key off; B = SS 0.5, key on; C = SS 1.0, key off. Same seat,
-head centred, no movement between them.
+The first plan's censuses: A = SS 0.5, key off; B = SS 0.5, key on; C = SS 1.0,
+key off. The latch test's: M = after a reload (missing), P = after an SS toggle
+back to the same SS (present). Same seat, head centred, no movement.
 
 | | Hypothesis | Signature |
 |---|---|---|
-| H0 | prerequisite: the main view's H is the render height | `lod view:` main slot H = 600 at SS 0.5, 1200 at 1.0, A ratio 2.000 ± 0.1%. If H = 1200 at both, H1/H2 are refuted together |
+| H0 | prerequisite: the main view's H is the render height | **Confirmed in flight 1:** slot 0, caller `0x2010D0`, 960×600 / 1920×1200, A ratio 2.000 |
 | H1 | door parts fail the table cull (f > t0) at render size | pieces return in B; diff(A→B) and diff(A→C) add the same door draws; A holds no door draws that C lacks |
 | H2 | door parts take a coarser level that lacks them | pieces return in B; A also holds door-model draws absent from B and C (the coarse meshes: same shaders, other index counts) |
 | H3 | screen-size term (sub-pixel parts) | restored draws are under 2 output px across; cannot be visible pieces (arithmetic above) |
 | H6 | texture mips and alpha test at render size | B restores nothing; A and C hold the same door draws; a restart with `texture_lod_bias = -1` at SS 0.5 restores the pieces |
 | H7 | another SS-dependent path (e.g. the builder's visibility callback `0x288D280`) | B restores nothing; C holds door draws A lacks; the mip bias run restores nothing |
+| H8 | load-time latch: the door's visibility or LoD is decided at load and held until a render-size change | after a reload the pieces are missing at SS 1.0 as at 0.5, key off; an SS toggle either way brings them back; main-view A is the same in M and P (`lod view:`) |
+| H8a | the latch is per-object CPU state (a cached LoD level or visibility verdict) | P holds door draws M lacks (diff M→P names them; same shaders, the door's index counts) |
+| H8b | the latch is GPU-side state sized or filled at load | M and P hold the same draws; the pieces' pixels differ only |
 
 H1 and H2 take the same correction; telling them apart answers only the
 code-or-data question for this model.
@@ -185,6 +185,12 @@ code-or-data question for this model.
 - ruled out: comparing the door's data across the update offline, because the
   asset names are not plain text in any data file and the old files were
   replaced.
+- ruled out: the main view's H latched at a loading size, because slot 0 read
+  the render size and the cockpit A within seconds of each reload (12:49:08,
+  12:51:42); the 32×32 and 512×512 loading views are separate slots (flight 1).
+- ruled out: D3D11 occlusion queries as the latch, because census #1's query
+  brackets are event, timestamp and timestamp-disjoint only (t=0, 2, 3) over
+  its two frames (flight 1, 12:49:38).
 
 ## Correction
 
@@ -222,7 +228,7 @@ unmeasured; the census pair A/C prices it.
 - VR: EDVR holds SS at 1.0 (vr-supersampling-gate-2026-10-10.md), so the factor
   is 1. An eye-level analogue (render vs swapchain) is a separate question.
 
-## Instrument (built 2026-10-21, not flown)
+## Instrument (built 2026-10-21, flown once)
 
 `src/d3d11/lod_view_hook.cpp` (glue), `src/d3d11/lod_view_core.h` (pure:
 identity and pin, layout, factor, table, line text), rig `tools/lod_view_test`
@@ -269,19 +275,52 @@ material and Status block checks pass. The full build runs in CI.
 
 ## Flight plan
 
-Build from branch `claude/ss-lod-instrument`: its CI artifact, or the
-compile-only path in AGENTS.md from a checkout of that branch (the Linux
-toolchain compiles only the main checkout). Keep `texture_lod_bias = 0` and the
-AA mode Sean used (XeSS).
+The latch test (H8), replacing the first plan. Key off, `texture_lod_bias = 0`,
+the AA mode Sean uses (XeSS). The census key is Home (`hotkey.dump_draws`).
+Same seat in the hangar, head centred, looking at the door.
 
-1. Dock at MacLeod Market (or any large Orbis pad), lower into the hangar, look
-   at the door with the head centred. SS 0.5, key off: confirm the pieces are
-   missing; NumLock (census A); screenshot.
-2. Set the key on in `edvr-flat.ini` (live); wait 2 s; NumLock (census B);
-   screenshot. Say whether the pieces came back.
-3. Key off, SS 1.0 in the menu, same seat: NumLock (census C); screenshot.
-4. Only if B restored nothing: quit, set `texture_lod_bias = -1`, relaunch,
-   repeat step 1 (H6).
+1. Reload from the main menu at SS 1.0. Pieces missing? Home (census M1);
+   screenshot.
+2. Switch to SS 0.5. Pieces present? Home (census 0.5); screenshot. Present
+   here, after a reload at 1.0, refutes H1/H2 for this symptom.
+3. Switch back to SS 1.0. Pieces present? Home (census P1); screenshot.
+4. Reload from the main menu at SS 0.5, and repeat 1-3 with 0.5 and 1.0
+   swapped, if time allows (the morning's order).
 
-Read: `python3 tools/edvr_log.py --target steam --expect-build HEAD --grep "lod
-view:"`, then the census diffs A→B, A→C and C→A. H0 first.
+Read: `python3 tools/edvr_log.py --target steam --expect-build <version>
+--grep "lod view:|draw census"`; main-view A must match between M1 and P1. Then
+`tools/diff_draw_census.py` M1→P1: draws only in P1 are the door (H8a); no
+difference means H8b.
+
+## Flight 1 (2026-10-21 12:31-12:56)
+
+Build v0.20.1-13-gdb52d367 (this branch with main merged), compile-only, flat,
+installed by the optimized-station session; log `edvr_gfx_20261021_123140.log`
+(`edvr_log.py --expect-build v0.20.1-13-gdb52d367` matches). Read 2026-10-21 at
+about 12:56, while the log was still growing.
+
+- Install: `lod view: the scene-view builder (0x2811E40) is hooked` at
+  12:31:40.682. Key off at start; on at 12:41:45.363 (factor 0.5000 at SS 0.5;
+  the 5 s lines show factor 0.5000 on slot 0 from 12:41:50).
+- Views: the main view is slot 0 from caller `0x2010D0` (the call in
+  `0x200EC0`), at the render size throughout: 960×600, A 2.003296e-03 at SS
+  0.5; 1920×1200, A 1.001648e-03 at SS 1.0 (cockpit; the menu camera reads
+  1.979630e-03 and 9.898148e-04). Caller `0x28121EB` builds a copy of it in
+  slot 1 and many small square views (96×96 to 109×109); the 32-entry table
+  overflowed at 12:34:57 on those. Loading adds 32×32 and 512×512 views (slot 1
+  from `0x2010D0`, slot 10 from `0x28121EB`), never in slot 0.
+- Timeline (log and journal): SS 0.5 from launch; LoadGame 12:34:27; SS → 1.0
+  at 12:48:30; to the menu 12:48:43, back in the hangar about 12:49:05 (from
+  the resolve resets: a 4 s gap at the menu camera, then a 17 s gap); census #1
+  at 12:49:38; SS → 0.5 at 12:50:12; SS → 1.0 at 12:50:25; to the menu 12:51:11
+  and back at 12:51:42 at SS 1.0. The census key became Home at 12:43:01 (a
+  live rebind; the capture's header still says "armed by NumLock").
+- Sean: "now when I reload from the menu (regardless of SS) its missing,
+  changing SS then fixes it." Whether the pieces came back when the key went on
+  at 12:41:45 is not recorded.
+- Main-view A after the reloads at SS 1.0 (12:49:08 on, 12:51:42 on):
+  1.001648e-03, the same as after the toggles (12:50:31 on).
+- Census #1: frame 57702, two frames, 2,136 offscreen draws, 116 copies, 123
+  clear and query lines, nothing dropped. Queries: event, timestamp and
+  timestamp-disjoint only. Without a partner capture in a present state it
+  cannot name the door's draws.
