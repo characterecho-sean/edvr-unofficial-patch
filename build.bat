@@ -215,6 +215,7 @@ python tools\run_jobs.py ^
     --gate "tools\worktree.py --self-test" ^
     --gate "tools\steam_library.py --self-test" ^
     --gate "tools\release_credits.py --self-test" ^
+    --gate "tools\pr_post.py --self-test" ^
     --gate "tools\flash_patch_residual.py --self-test" ^
     --gate "tools\check_status_blocks.py --self-test" ^
     --gate "tools\check_status_blocks.py" ^
