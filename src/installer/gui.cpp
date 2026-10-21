@@ -59,7 +59,7 @@ enum : int {
 const UINT kMsgFirstScan = WM_APP + 1;
 
 const wchar_t* kTipUrl = L"https://ko-fi.com/seancharacterecho";
-const wchar_t* kDiscordUrl = L"https://discord.gg/ynkdf6Gdua";
+const wchar_t* kDiscordUrl = L"https://discord.gg/AWJ6djKKzr";
 const wchar_t* kTipText = L"EDVR is free. If it makes your flight more enjoyable, you can";
 constexpr int kTipTop = 658;  // the tip line's top: the painted sentence and both links share it
 
