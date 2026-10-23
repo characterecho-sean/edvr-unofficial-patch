@@ -2195,6 +2195,100 @@ void testFamilyRule() {
     }
 }
 
+// The first-seen table behind ui_layer.cpp's noteFamily (ui_layer_math.h UiFamilySeenTable), whose wanted() gates the detail text of a
+// decision's line (the text is built only when the line will print). The reference is noteFamily's rule as it stood before the predicate
+// was split out: a structural decision, no entry for (family, decision, vs, ps), the table not full. wanted() must agree with what that
+// rule prints for every call of a sequence -- duplicates, the transient decisions, a pair under another decision, family or shader, and
+// more distinct pairs than the table holds -- and record() with what it emitted.
+template <uint32_t Cap>
+struct FamilyLineReference {
+    struct Seen {
+        uint8_t family, decision;
+        uint64_t vs, ps;
+    };
+    Seen seen[Cap];
+    uint32_t n = 0;
+    bool prints(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) {
+        if (!(d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate && d != UiLayerDecision::kNotUi)) return false;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (seen[i].family == uint8_t(f) && seen[i].decision == uint8_t(d) && seen[i].vs == vs && seen[i].ps == ps) return false;
+        }
+        if (n >= Cap) return false;
+        seen[n++] = {uint8_t(f), uint8_t(d), vs, ps};
+        return true;
+    }
+};
+
+template <uint32_t Cap>
+void checkFamilyLineSequence(const char* label) {
+    UiFamilySeenTable<Cap> table;
+    FamilyLineReference<Cap> ref;
+    const UiLayerFamily families[] = {UiLayerFamily::kScreen, UiLayerFamily::kPanel, UiLayerFamily::kHolo, UiLayerFamily::kFlightHud,
+                                      UiLayerFamily::kHoloGeneric, UiLayerFamily::kOrbitLines, UiLayerFamily::kAfterUi};
+    const UiLayerDecision decisions[] = {UiLayerDecision::kRedirect, UiLayerDecision::kBlendRefused, UiLayerDecision::kNotArmed,
+                                         UiLayerDecision::kMrt, UiLayerDecision::kLate, UiLayerDecision::kNotUi,
+                                         UiLayerDecision::kDepthStencilTest, UiLayerDecision::kLayerFailed};
+    const uint64_t vss[] = {0x11, 0x22, 0x33}, pss[] = {0xA1, 0xA2};
+    uint32_t calls = 0, mismatches = 0, printed = 0, wantedConst = 0;
+    // Two passes over every pair: the second is all duplicates, or (past the cap) all refusals; each call is also made twice in a row.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (UiLayerFamily f : families) {
+            for (UiLayerDecision d : decisions) {
+                for (uint64_t vs : vss) {
+                    for (uint64_t ps : pss) {
+                        for (int again = 0; again < 2; ++again) {
+                            const uint32_t before = table.count;
+                            const bool asked = table.wanted(f, d, vs, ps);
+                            wantedConst += table.count == before ? 1u : 0u;  // asking changes nothing
+                            const bool refPrints = ref.prints(f, d, vs, ps);
+                            const bool emitted = table.record(f, d, vs, ps);
+                            ++calls;
+                            if (asked != refPrints || emitted != refPrints || table.count != ref.n) ++mismatches;
+                            if (emitted) ++printed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    char msg[240];
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): wanted() and record() agree with the frozen rule over %u calls", Cap, label, calls);
+    check(mismatches == 0, msg);
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): wanted() never changes the table", Cap, label);
+    check(wantedConst == calls, msg);
+    // 7 families x 5 structural decisions x 3 x 2 = 210 distinct pairs: more than either table holds, so the cap is what stops the lines.
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): exactly the cap's worth of lines print, the first ones, once each", Cap, label);
+    check(printed == Cap && table.count == Cap && ref.n == Cap, msg);
+}
+
+void testFamilyLineTable() {
+    checkFamilyLineSequence<80>("the layer's table");
+    checkFamilyLineSequence<3>("a tiny table");
+    // The structural decisions are all but the three transient ones.
+    bool structuralOk = true;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(UiLayerDecision::kCount); ++i) {
+        const UiLayerDecision d = static_cast<UiLayerDecision>(i);
+        const bool transient = d == UiLayerDecision::kNotArmed || d == UiLayerDecision::kLate || d == UiLayerDecision::kNotUi;
+        structuralOk = structuralOk && uiLayerDecisionIsStructural(d) == !transient;
+    }
+    check(structuralOk, "family line table: every decision but not-armed, late and not-UI is structural");
+    // The cases a rewrite most often gets wrong, by hand.
+    UiFamilySeenTable<2> t;
+    check(!t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed, 1, 2) && !t.record(UiLayerFamily::kScreen, UiLayerDecision::kLate, 1, 2) &&
+              t.count == 0,
+          "family line table: a transient decision is never wanted and never taken in, on an empty table");
+    check(t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) && t.record(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) &&
+              !t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) && !t.record(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2),
+          "family line table: a pair prints once");
+    check(t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2) && t.wanted(UiLayerFamily::kPanel, UiLayerDecision::kRedirect, 1, 2) &&
+              t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 9, 2) && t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 9),
+          "family line table: the same pair under another decision, family, vertex shader or pixel shader is wanted");
+    check(t.record(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2) && t.count == 2 &&
+              !t.wanted(UiLayerFamily::kPanel, UiLayerDecision::kRedirect, 1, 2) && !t.record(UiLayerFamily::kHolo, UiLayerDecision::kMrt, 5, 6) &&
+              t.count == 2 && !t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2),
+          "family line table: a full table wants nothing new, and a pair in it is still not wanted");
+}
+
 // The orbit lines and the supercruise bars in the HDR layer (2026-10-07; docs/ui-layer-2026-09-23.md, "2026-10-07: orbit lines,
 // supercruise bars and space dust in the layer"; supercruise_lines.h): scene geometry the layer takes for DENSITY. Their two families are
 // named by a shader PAIR on the lit HDR target alone, are the crisp take's (uiLayerFamilyTakesHdr, the one list), are declined
@@ -3866,6 +3960,7 @@ int main(int argc, char** argv) {
     testGlowFeedFilter();
     testGate();
     testFamilyRule();
+    testFamilyLineTable();
     testSupercruiseLines();
     testAfterUi();
     afterui::testIdentity();

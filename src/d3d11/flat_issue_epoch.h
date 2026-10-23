@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "../common/runtime_profile.h"
+
 namespace edvr {
 
 struct FlatIssueEpochState {
@@ -46,10 +48,26 @@ inline void flatIssueEpochBump(std::atomic<uint64_t>* counter) noexcept {
     state.epoch.fetch_add(1, std::memory_order_acq_rel);
     if (counter) counter->fetch_add(1, std::memory_order_relaxed);
 }
-inline void flatIssueEpochBumpDepth() noexcept { flatIssueEpochBump(&flatIssueEpochState().depthSets); }
-inline void flatIssueEpochBumpStage() noexcept { flatIssueEpochBump(&flatIssueEpochState().stageSets); }
-inline void flatIssueEpochBumpRt() noexcept { flatIssueEpochBump(&flatIssueEpochState().rtSets); }
-inline void flatIssueEpochBumpCb() noexcept { flatIssueEpochBump(&flatIssueEpochState().cb1Sets); }
+// The setter-class bumps: the hooks on the owner context's state setters (vscreen.cpp) and EDVR's own Raw
+// setters. Only the flat Issue certificate reads the epoch they move, and that certificate is stamped only in
+// a flat draw scope and reused only at the epoch it was stamped at, so while the VR profile runs the two
+// locked read-modify-writes buy nothing and are skipped. Every other profile (Flat, Passthrough, Invalid)
+// still bumps. The test is runtimeVrProfile(), not "not flat": a profile that is neither stays as it was.
+//
+// A live switch stays correct because leaving Flat clears the certificate and revokes the epoch before the
+// profile flips (flatRuntimeResize -> forwardReset -> geometryCertClear -> flatIssueEpochRevoke, run by
+// mode_watch.cpp commitPosted ahead of runtimeProfileSet), and VR never stamps one: a setter skipped in
+// VR can never touch a certificate that is still reusable. Revoke and the NoteResource path below are not
+// gated: they cover ClearState, command lists, context swaps and writes of the certified buffer, not the
+// per-draw setters.
+inline bool flatIssueEpochSettersCounted() noexcept { return !runtimeVrProfile(); }
+inline void flatIssueEpochBumpSetter(std::atomic<uint64_t>* counter) noexcept {
+    if (flatIssueEpochSettersCounted()) flatIssueEpochBump(counter);
+}
+inline void flatIssueEpochBumpDepth() noexcept { flatIssueEpochBumpSetter(&flatIssueEpochState().depthSets); }
+inline void flatIssueEpochBumpStage() noexcept { flatIssueEpochBumpSetter(&flatIssueEpochState().stageSets); }
+inline void flatIssueEpochBumpRt() noexcept { flatIssueEpochBumpSetter(&flatIssueEpochState().rtSets); }
+inline void flatIssueEpochBumpCb() noexcept { flatIssueEpochBumpSetter(&flatIssueEpochState().cb1Sets); }
 // Frame changes, ClearState, command lists and context swaps. No setter counter:
 // a flight with fresh draws and quiet setters reads this instead.
 inline void flatIssueEpochRevoke() noexcept {

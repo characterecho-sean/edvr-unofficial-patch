@@ -294,6 +294,11 @@ UiLayerWorldStats uiLayerWorldStats();
 inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
 // The rigs' switch for the gate (it is on in production, always): the gate-off path is driven with it.
 void uiLayerSetMapsGateForTest(bool on);
+// The rigs' window onto the bound depth view's resolve memo (resolveBoundDsv, which seedWritersCheck asks): resolves `view` through
+// the memo, keyed by the Dsv0 binding's generation exactly as the draw path does, and reports the window's running hit and miss counts.
+// Returns the resolve's answer. Nothing in production calls it.
+struct ResourceInfo;
+bool uiLayerResolveBoundDsvForTest(void* view, ResourceInfo* info, uint64_t* hits, uint64_t* misses);
 // screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
 // scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
 // layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.

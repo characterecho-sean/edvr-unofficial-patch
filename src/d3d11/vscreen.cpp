@@ -3365,7 +3365,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (g_flatComputeInternal) {
         if (!foreignContext(self) && type != D3D11_MAP_READ) flatIssueEpochNoteResource(res);
         const HRESULT hr=g_state->realMap(self,res,sub,type,flags,mapped);
-        flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
         return hr;
     }
     // Necessary, not sufficient, for gpuFrameCommand to do anything but
@@ -3378,7 +3378,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (foreignContext(self)) {
         if(type!=D3D11_MAP_READ)engineVelocityResourceUnknown(res);
         const HRESULT hr=s->realMap(self, res, sub, type, flags, mapped);
-        flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
         if (type!=D3D11_MAP_READ && SUCCEEDED(hr) && flatRuntimeActive())
             flatRuntimeOverlayForeignMutation();
         return hr;
@@ -3419,7 +3419,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const bool mapData = mapOk && mapped->pData != nullptr;
     const bool mapSub0 = mapOk && sub == 0;
     const bool mapData0 = mapData && sub == 0;
-    flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
+    // The window's counters are read only by the flat profile's report (flat_runtime.cpp reportMapBounce), so the VR
+    // profile does not pay the three locked increments per Map, nor the call across to flat_runtime.cpp.
+    if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
     if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
     if (mapData0 && flatRuntimeActive()) {
         if (type != D3D11_MAP_READ) {
@@ -3449,7 +3451,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (mapSub0 && res == s->compositeCb) {
-        flatRuntimeMapBounceNoteKind(res,true);
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteKind(res,true);
         // GetType FIRST here too, for the reason spelled out in the branch below.
         //
         // This branch was the one that did not do it. compositeCb is a raw
@@ -3496,7 +3498,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             mm.byteWidth = 0;
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
         }
-        flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
         if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
             s->camResource = res;
             s->camData = mapped->pData;
@@ -4264,8 +4266,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // uiLayerFamilyOf reads it) and the held world-screen identity (the
         // 2D screen's panel-sized SRV, as uiLayerDecide's kWorldScreen reads
         // it) -- both lost when the kAfterUi family was taken on its own.
+        // The panel probe is asked only where its answer can matter: uiLayerAfterWritePreserved reads panelSized alone
+        // behind !excluded && the held world screen (uiLayerNoteOther passes g_screenHeld == 1, which is what
+        // uiLayerWorldScreenHeld() returns; it is written at the frame boundary only).
         const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
-        const bool afterPanelSized = srv0IsPanelSized(g_state, kind, count);
+        const bool afterPanelSized = !afterExcluded && uiLayerWorldScreenHeld() && srv0IsPanelSized(g_state, kind, count);
         uiLayer = uiLayerNoteOther(self, count, uiLayerVerdictForwards(v), g_state->curveThisDraw,
                                    afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
         // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
@@ -6879,6 +6884,26 @@ void vScreenFrameBoundary() {
                     "history %llu (each skipped, not read as zeros from a null view).",
                     static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(lacked[0]),
                     static_cast<unsigned long long>(lacked[1]), static_cast<unsigned long long>(lacked[2]));
+            }
+        }
+        // The motion prep's scene-depth layers, the same way: how often each
+        // of the smoke's depth and the private UI depth was absent, which
+        // zSceneAt then skips rather than fetches as zeros.
+        {
+            static uint64_t lastLayerDispatches = 0;
+            uint64_t byLayers[4] = {};
+            if (temporalPassMvDepthLayerTotals(byLayers)) {
+                const uint64_t dispatches = byLayers[0] + byLayers[1] + byLayers[2] + byLayers[3];
+                if (dispatches != lastLayerDispatches) {
+                    lastLayerDispatches = dispatches;
+                    Log::get().note(
+                        "motion prep depth layers: %llu mv dispatches this session; smoke and UI depth "
+                        "both bound %llu, smoke depth only %llu, UI depth only %llu, neither %llu (an "
+                        "absent layer is skipped, not read as zeros from a null view).",
+                        static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(byLayers[0]),
+                        static_cast<unsigned long long>(byLayers[1]), static_cast<unsigned long long>(byLayers[2]),
+                        static_cast<unsigned long long>(byLayers[3]));
+                }
             }
         }
         // The sharpening's, the same way. Worded for the profile (VR counts

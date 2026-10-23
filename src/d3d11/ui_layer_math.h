@@ -1185,6 +1185,40 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
     }
 }
 
+// The decisions that get a first-seen line of their own. The transient ones -- not armed yet, late this frame -- are counted on the
+// totals line and never get one.
+inline bool uiLayerDecisionIsStructural(UiLayerDecision d) {
+    return d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate && d != UiLayerDecision::kNotUi;
+}
+
+// The first-seen table behind ui_layer.cpp's noteFamily: one line per (family, decision, vertex shader, pixel shader), a structural
+// decision only, at most Cap lines. wanted() is the whole rule and record() is built on it, so a caller that formats a line's detail text
+// asks wanted() first and pays for the text only when the line will print (the decision of an ordinary draw is made ~100 times a frame and
+// the pair was seen long ago). record() answers whether the line is to be written, and takes the pair into the table when it is.
+template <uint32_t Cap>
+struct UiFamilySeenTable {
+    struct Entry {
+        uint8_t family, decision;
+        uint64_t vs, ps;
+    };
+    Entry entries[Cap];
+    uint32_t count = 0;
+
+    bool wanted(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) const {
+        if (!uiLayerDecisionIsStructural(d)) return false;
+        for (uint32_t i = 0; i < count; ++i) {
+            const Entry& s = entries[i];
+            if (s.family == uint8_t(f) && s.decision == uint8_t(d) && s.vs == vs && s.ps == ps) return false;
+        }
+        return count < Cap;
+    }
+    bool record(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) {
+        if (!wanted(f, d, vs, ps)) return false;
+        entries[count++] = {uint8_t(f), uint8_t(d), vs, ps};
+        return true;
+    }
+};
+
 // The flat HUD's bloom feed (ui_layer.h uiLayerGlowFeed; docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom"): what the
 // pass that makes H' = H + the HUD layer's light came to for one draw.
 enum class UiGlowFeed : uint8_t {

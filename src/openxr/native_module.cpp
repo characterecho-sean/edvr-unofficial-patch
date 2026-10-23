@@ -86,6 +86,8 @@ class ModuleBackend final : public RuntimeBackend {
       nativeTracePrintf("present_park,ms=%.1f,jobs=%llu,reason=runtime_start,result=%d,path=%s\n",
           park.ms,(unsigned long long)(generation->host?generation->host->graphicsCalls.calls:0),
           int(error),park.queued?"present_queue":"inline");
+    // The thread the flat owner-wait instrument calls the game's render thread (flat_owner_waits.h): the one module_startup prints below.
+    if(generation->host)generation->host->flatWaits->bindRenderThread(generation->binding.renderThread());
     update([&](auto& s) {
       s.renderThread=generation->binding.renderThread();
       s.ownerThread=generation->host?generation->host->ownerThread:0;

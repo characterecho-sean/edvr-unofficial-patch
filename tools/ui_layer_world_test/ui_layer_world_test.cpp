@@ -112,6 +112,9 @@ struct Stubs {
     uint32_t eyeDraws = 0;
     bool depthKnown = false;
     uint32_t depthDraws = 0;
+    // the binding shadow's resolver: how many times it was asked, and whether the next asks fail (a view that is no longer live)
+    unsigned resolveCalls = 0;
+    bool resolveFails = false;
     // raw entries: did any run with the route's internal scope up / down
     unsigned rawCalls = 0, rawInternal = 0;
 };
@@ -174,6 +177,8 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
 }
 // The binding shadow's resolver, from the views themselves.
 bool bindingResolve(void* view, ResourceInfo* out) {
+    ++g_stubs.resolveCalls;
+    if (g_stubs.resolveFails) return false;
     if (!view || !out) return false;
     ComPtr<ID3D11Resource> res;
     static_cast<ID3D11View*>(view)->GetResource(&res);
@@ -1608,6 +1613,108 @@ void testMapsTransitions(Rig& r) {
     }
 }
 
+// The bound depth view's resolve memo (resolveBoundDsv, 2026-10-23 review CPU-06), the production function through
+// uiLayerResolveBoundDsvForTest. A resolve is asked again only when the view or the Dsv0 binding's generation moved; a failed resolve
+// is never remembered. The rig has no binding_shadow.cpp, so the shadow's moves are written the way it writes them: bindingSet (a
+// rebind, to the same pointer too) and bindingFrameBoundary (every slot) each add one to the generation. tools\ui_quality_test pins
+// that seedWritersCheck goes through the memo and that a result is stored only after a successful resolve.
+void testDsvMemo(Rig& r) {
+    ComPtr<ID3D11Texture2D> depth2;
+    ComPtr<ID3D11DepthStencilView> dsv2;
+    D3D11_TEXTURE2D_DESC dd{};
+    dd.Width = kEyeW / 2;
+    dd.Height = kEyeH / 2;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.SampleDesc.Count = 1;
+    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    const bool made = SUCCEEDED(r.dev->CreateTexture2D(&dd, nullptr, &depth2)) &&
+                      SUCCEEDED(r.dev->CreateDepthStencilView(depth2.Get(), nullptr, &dsv2));
+    check(made, "dsv memo: a second depth view over a texture of another size");
+    if (!made) return;
+    auto& slot = detail::g_bindingSlots[static_cast<size_t>(BindSlot::Dsv0)];
+    auto rebind = [&](ID3D11DepthStencilView* v) { slot.ptr = v; ++slot.gen; };    // bindingSet
+    auto boundary = [&] { for (auto& s : detail::g_bindingSlots) ++s.gen; };       // bindingFrameBoundary
+    auto same = [](const ResourceInfo& x, const ResourceInfo& y) {
+        return x.isBuffer == y.isBuffer && x.isTexture2D == y.isTexture2D && x.a == y.a && x.b == y.b && x.fmt == y.fmt &&
+               x.resource == y.resource;
+    };
+    uint64_t hits = 0, misses = 0;
+    ResourceInfo info;
+    g_stubs.resolveFails = false;
+    rebind(r.dsv.Get());
+    const uint64_t baseline = [&] {   // the counts are the window's running ones: every case below is a difference from here
+        g_stubs.resolveFails = true;
+        uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses);
+        return misses;
+    }();
+    const uint64_t h0 = hits;
+    unsigned calls = g_stubs.resolveCalls;
+    // A failing resolve is never remembered: the next ask is a miss again and the resolver is charged again, as before the memo.
+    check(!uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 1 &&
+              misses == baseline + 1 && hits == h0,
+          "dsv memo: a resolve that fails is a miss and charges the resolver");
+    check(!uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 2 &&
+              misses == baseline + 2 && hits == h0,
+          "dsv memo: ... and asked again at the same view and generation it is a miss again, never a hit (a failure is not remembered)");
+    g_stubs.resolveFails = false;
+    ResourceInfo first;
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &first, &hits, &misses) && g_stubs.resolveCalls == calls + 3 &&
+              misses == baseline + 3 && hits == h0,
+          "dsv memo: the first successful resolve after those failures is a miss that resolves");
+    check(first.isTexture2D && first.resource == r.depth.Get() && first.a == kEyeW && first.b == kEyeH &&
+              first.fmt == static_cast<uint32_t>(DXGI_FORMAT_D32_FLOAT),
+          "dsv memo: ... and names the depth texture behind the view");
+    // The same view at the same generation: answered from the memo, the resolver not asked, the answer identical.
+    for (unsigned i = 1; i <= 2; ++i) {
+        info = ResourceInfo{};
+        check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 3 &&
+                  hits == h0 + i && misses == baseline + 3 && same(info, first),
+              "dsv memo: the same view at the same generation is a hit with the identical ResourceInfo and no resolve");
+    }
+    // The binding set again, to the same view: the generation moved, so it is a miss (an identical address after a rebind is not
+    // evidence of an identical object).
+    rebind(r.dsv.Get());
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 4 &&
+              hits == h0 + 2 && misses == baseline + 4 && same(info, first),
+          "dsv memo: bindingSet to the same view moves the generation: a miss, the resolver asked, the same answer");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 4 &&
+              hits == h0 + 3 && misses == baseline + 4,
+          "dsv memo: ... and the next ask at the new generation is a hit");
+    // Another view: a miss with that view's own texture, then a hit; the first view at that generation is a miss (the view is the key's
+    // other half), and its answer is its own.
+    rebind(dsv2.Get());
+    ResourceInfo second;
+    check(uiLayerResolveBoundDsvForTest(dsv2.Get(), &second, &hits, &misses) && g_stubs.resolveCalls == calls + 5 &&
+              hits == h0 + 3 && misses == baseline + 5 && second.resource == depth2.Get() && second.a == kEyeW / 2 &&
+              second.b == kEyeH / 2 && !same(second, first),
+          "dsv memo: a different view is a miss that resolves to its own texture");
+    check(uiLayerResolveBoundDsvForTest(dsv2.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 5 &&
+              hits == h0 + 4 && misses == baseline + 5 && same(info, second),
+          "dsv memo: ... and that view at that generation is then a hit");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 6 &&
+              hits == h0 + 4 && misses == baseline + 6 && same(info, first),
+          "dsv memo: the first view at the second view's generation is a miss (the memo holds one view, and the view is part of the key)");
+    // The frame boundary moves every generation: a miss on the next ask though the view did not change, then a hit.
+    boundary();
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 7 &&
+              hits == h0 + 4 && misses == baseline + 7 && same(info, first),
+          "dsv memo: bindingFrameBoundary moves the generation: a miss on the next ask though the view is the same");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 7 &&
+              hits == h0 + 5 && misses == baseline + 7,
+          "dsv memo: ... and the ask after it is a hit");
+    // A failure after a good memo at the same generation changes nothing the memo holds: the failing view is not stored.
+    g_stubs.resolveFails = true;
+    check(!uiLayerResolveBoundDsvForTest(dsv2.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 8 &&
+              misses == baseline + 8,
+          "dsv memo: another view whose resolve fails is a miss and answers false");
+    g_stubs.resolveFails = false;
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 8 &&
+              hits == h0 + 6 && same(info, first),
+          "dsv memo: ... and the remembered view is still a hit afterwards (a failure leaves the memo as it was)");
+    slot.ptr = nullptr;
+}
+
 // --bench (not part of the gate): what the on-foot maps gate costs the CPU, measured against the real boundary and the real door
 // predicate. The boundary's own work (the journal and depth steps, the layer's warm compile, the window bookkeeping) is the same in
 // every column, so the difference between the columns is the feature's.
@@ -1725,6 +1832,7 @@ int main(int argc, char** argv) {
     testAccessors(r);
     testMapsGate(r);
     testMapsTransitions(r);
+    testDsvMemo(r);
     uiLayerShutdown();
     std::printf("ui_layer_world_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

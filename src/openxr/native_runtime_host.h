@@ -223,6 +223,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){
     // Set before the first invoke: the owner reads the pointer while it runs requests (owner_service.h setInvokeStats).
     service.setInvokeStats(ownerInvoke,&NativeRuntimeHost::frameCycleUs);
+    service.setFlatWaits(flatWaits);
     poseCache.setClock(&NativeRuntimeHost::frameCycleUs);
   }
   OwnerService& service;
@@ -311,6 +312,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   FrameCycleStats frameCycles;
   // Caller-side wait of each OwnerService::invoke, split into queue and run (native_owner_invoke, owner_invoke_stats.h).
   std::shared_ptr<OwnerInvokeStats> ownerInvoke=std::make_shared<OwnerInvokeStats>();
+  // While the graphics half reads flat: what each owner job waited behind the owner's flat-clear frame (flat_owner_waits.h). Prints
+  // flat_owner_waits every 5 s and flat_owner_wait_caller for the worst waits; nothing in VR.
+  std::shared_ptr<FlatOwnerWaits> flatWaits=std::make_shared<FlatOwnerWaits>(flatOwnerHooks());
   std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   // Phase-0 timing (src/common/periodic_work.h) of the 30 s frame-cycle report: built by makeReport's sorts
@@ -1092,6 +1096,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!locked&&nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
     poseCache.publish(fresh,poseCache.clockUs());
   }
+  // Owner, flat profile: the head at the display time of the empty frame flatClearFrame just waited for, published through publishPoseCache so a
+  // locate on any thread reads it (locateHeadFor, flat route). publishPoseCache locates at the latest frame's display time plus one period, so
+  // the frame is recorded one period earlier: the "now" slot is then the frame's own predicted display time, which is also the instant the hop
+  // would locate at. One publication per headset frame (about 13 a second with the headset asleep, 90 awake). Nothing is recorded for the
+  // pose-gap instrument, which measures the game's frames.
+  static constexpr uint64_t kFlatPoseMaxAgeUs=1000000;
+  void publishFlatHead(XrTime displayTime,XrDuration period) {
+    if(GetCurrentThreadId()!=ownerThread||!poseCacheOn.load(std::memory_order_acquire))return;
+    if(displayTime<=period||period<=0){poseCache.invalidate();return;}
+    latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime-period;latestPoseFrame.period=period;
+    latestPoseFrame.orientationKnown=false;latestPoseFrame.speedKnown=false;latestPoseFrame.speedDegPerSec=0.0;
+    publishPoseCache();
+  }
   bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     if(HeadLocator{}.locateAt(dispatch,view,seated.space(),target,head)!=XR_SUCCESS)return false;
@@ -1216,6 +1233,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("flat_clear,start,quiet_ms=%llu,panel=%u\n",(unsigned long long)quiet,unsigned(flatPanelAvailable()));
     }
     if(step.run){
+      FlatOwnerWaits::ClearScope clearing(flatWaits.get());
       const XrResult r=flatClearFrame();
       if(r!=XR_SUCCESS){
         // Not publishFatalFailure: that is the runtime's quit path, and an empty frame is optional. A terminal session is pumpEvents'
@@ -1243,10 +1261,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // boundary failing (composeBackground hands over the rendered layer). clear() ends whatever begin opened on every path, so no frame
   // is left open on return.
   XrResult flatClearFrame() {
+    const uint64_t waitBegan=frameCycleUs();
     auto r=boundary.waitAndBegin();
+    flatWaits->noteClearWait(frameCycleUs()-waitBegan);
     if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
     auto frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
+    publishFlatHead(frame.predictedDisplayTime,frame.predictedDisplayPeriod);
     if(!flatPanelAvailable()||!frame.shouldRender)return boundary.clear();
     // The clock starts at the stretch's first panel frame. The text shows for ten seconds, the eye images are black for one more,
     // then the frames carry no layers: the compositor holds the last projection frame, so the black settles before it stops.
@@ -1693,7 +1714,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=setTrackingSpace(generation,origin);})&&result;}
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=setTrackingSpace(generation,origin);},OwnerCallKind::Other,OwnerJobSite::SetTrackingSpace)&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     // Standing/raw need their own supported runtime spaces and remain absent.
@@ -1775,7 +1796,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // pair's finish still outstanding.
     const bool eligible=published==vr::VRCompositorError_None&&pairReady&&
       separateGraphics()&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
-    const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();});
+    const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();},{},OwnerJobSite::FrameEndFinish);
     if(deferred){
       pendingFrameEndFinish=true;pendingFrameEndEye=eye;pendingFrameEndSequence=timingSequence;++frameEndOverlapCount;
       std::lock_guard<std::mutex> lock(overlapHandoffMutex);
@@ -1965,7 +1986,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool clearSubmitted(uint64_t generation) override {
     clearOverlapHandoff();
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);})&&result;}
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);},OwnerCallKind::Other,OwnerJobSite::ClearSubmitted)&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return false;
@@ -1996,7 +2017,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool clearSkybox(uint64_t generation) override {
     clearOverlapHandoff();
-    if(!service.isOwner()){bool result=false;return service.invoke([&]{result=clearSkybox(generation);})&&result;}
+    if(!service.isOwner()){bool result=false;return service.invoke([&]{result=clearSkybox(generation);},OwnerCallKind::Other,OwnerJobSite::ClearSkybox)&&result;}
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||!poses.read().connected)return false;
     skybox.clear();loading.overrideCleared();++skyboxClears;return true;
@@ -2017,7 +2038,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
               if(!handoff(generation))overlapHandoffInvalid.fetch_add(1,std::memory_order_relaxed);
             },[this](bool success){
               (success?overlapHandoffCompleted:overlapHandoffCancelledOrFailed).fetch_add(1,std::memory_order_relaxed);
-            });
+            },OwnerJobSite::HandoffAsync);
           } catch(...) {}
           (accepted?overlapHandoffAccepted:overlapHandoffRejected).fetch_add(1,std::memory_order_relaxed);
         }
@@ -2254,6 +2275,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   static uint64_t frameCycleUs() noexcept {
     return edvrNativeTraceNowUs();
+  }
+  static FlatOwnerWaits::Hooks flatOwnerHooks() {
+    FlatOwnerWaits::Hooks hooks;
+    hooks.nowUs=&NativeRuntimeHost::frameCycleUs;
+    hooks.flat=[]{return !vrProfileActive();};
+    hooks.thread=[]()->uint32_t{return GetCurrentThreadId();};
+    hooks.stack=[](FlatOwnerCallerStack& out){
+      const auto stack=edvr::captureGameCallStack();
+      out.captured=stack.captured;out.gameFrames=stack.gameFrames;
+      static_assert(sizeof out.rvas==sizeof stack.rvas,"caller stack text");
+      std::memcpy(out.rvas,stack.rvas,sizeof out.rvas);
+    };
+    hooks.print=[](const char* line){nativeTracePrintf("%s",line);};
+    return hooks;
   }
   // Caller-side owner hops, one native_owner_invoke line per kind at each frame-cycle window. frames is the window's valid cycles.
   void emitOwnerInvoke(uint64_t window,unsigned frames) {
@@ -2635,6 +2670,24 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // A display call under a live publication is answered from it, on this thread, with no owner hop (pose_cache.h). Any other call, and any
     // this cannot answer, takes the hop below unchanged. Not on the owner: the hop re-enters here on the owner thread, and that second
     // pass must locate, not answer from the publication it was sent to replace.
+    //
+    // While the graphics half reads flat the owner's idle pump holds the owner in xrWaitFrame for a whole headset frame (flat_clear_state.h;
+    // ~70 ms with the headset asleep), and a hop queues behind it: Elite's game thread called this once a frame and spent most of its time
+    // waiting. So in flat no head locate hops while a publication can answer: the owner publishes the head once per headset frame
+    // (publishFlatHead) and any caller reads it, whatever the call or the game's frame. A call it cannot answer (nothing published yet, other
+    // keys, older than kFlatPoseMaxAgeUs) takes the hop, counted. The hop mirrors a refused origin: the head is only located in the seated space.
+    if(poseCacheOn.load(std::memory_order_acquire)&&flatWaits->flatNow()&&!service.isOwner()) {
+      if(origin!=vr::TrackingUniverseSeated){flatWaits->noteFlatCacheRefused();return false;}
+      PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;uint64_t ageUs=0;
+      if(poseCache.answerFlat(generation,poses.read().originGeneration,kFlatPoseMaxAgeUs,answer,ageUs,why)) {
+        flatWaits->noteFlatCacheAnswer(ageUs);
+        out=answer.pose;return true;
+      }
+      flatWaits->noteFlatCacheFallback(why==PoseCacheMiss::Keys?FlatOwnerWaits::CacheFallback::Keys
+        :why==PoseCacheMiss::Unpublished?FlatOwnerWaits::CacheFallback::Unpublished:FlatOwnerWaits::CacheFallback::Stale);
+      bool result=false;
+      return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);},OwnerCallKind::LocateHead)&&result;
+    }
     if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
       PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
       // F40: with now_pose render the cache's display slots (one period ahead) are not used: every display call takes the owner path.
@@ -2646,6 +2699,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
         if(answer.speedKnown){sample.speedKnown=true;sample.speedDegPerSec=answer.speedDegPerSec;}
         poseGap.note(sample);
+        flatWaits->noteLocalPose();
         out=answer.pose;return true;
       }
     }
@@ -2750,7 +2804,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // in a menu or a load, or before the graphics half has spoken, it is honoured exactly as before; aboard or on foot (onFootIsSeated, seat_memory.h)
   // inside a transition window the stored seat replaces the head pose; outside a window it is the player's own recentre, honoured and remembered.
   bool resetSeatedFor(uint64_t generation,const HeadCall& call) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeatedFor(generation,call);})&&result;}
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeatedFor(generation,call);},OwnerCallKind::Other,OwnerJobSite::ResetSeated)&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
@@ -3517,7 +3571,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
-    if(poseCacheOn.load(std::memory_order_acquire))return pollEventLocal(generation,origin,event,pose);
+    if(poseCacheOn.load(std::memory_order_acquire)){flatWaits->noteLocalPoll();return pollEventLocal(generation,origin,event,pose);}
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);},OwnerCallKind::PollEvent)&&result;}
     if(generation!=geometryGeneration)return false;
     if(quitEventPending&&quitEventGeneration==generation) {
@@ -3532,7 +3586,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
   // The owner shares ownerInvoke (the constructor's setInvokeStats). Detach it once this host is gone, so the owner stops counting for a host
   // that no longer exists; an invoke already in flight keeps its own reference.
-  ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);}
+  ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);service.setFlatWaits({});}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     clearOverlapHandoff();

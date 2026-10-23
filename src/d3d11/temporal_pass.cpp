@@ -1106,6 +1106,11 @@ ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tole
 static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
 static bool                g_uiResolveUnboundNoted[8] = {};   // one line for each combination of unbound inputs the resolve has run with
 static uint64_t            g_uiResolveDispatches = 0, g_uiResolveLacked[3] = {};   // the full-frame path's dispatches, and how many lacked coverage / source edits / history
+// The motion prep's scene-depth layers (zSceneAt, temporal_shader_source.h): mv dispatches by which of t6 (the smoke's depth) and t7
+// (the private UI depth) were bound -- [0] both, [1] the smoke's only, [2] the UI's only, [3] neither.
+static uint64_t            g_mvDepthLayers[4] = {};
+// probe.w bits 64 and 256 (t6 / t7 not bound): depthLayersAbsentBits, temporal_pass.h. The rig's zscene_gate_test.h (cpuHalf)
+// holds it to the slots, and holds both dispatches below to reading it off the array they bind, before setParams.
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 // The refusal line, ONE PER ENGINE. It was a single session-lifetime flag,
@@ -4735,7 +4740,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // presets and FSR that read it (modern DLSS honours the
                     // history-invalidate vector the same pixel also gets).
                     if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
-                    setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[24] = {};
                     // t19..t23 are touched only while engine-record velocity is bound.
                     const UINT srvCountM = engineBound ? 24u : 19u;
@@ -4757,6 +4761,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr,
                                                           engineBound ? engineSkinSrv.Get() : nullptr};   // t23: target 7, the skinned characters' E (probe.w 16384)
+                    // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch). The constants are written
+                    // here, after the views are known, and before the dispatch.
+                    const uint32_t layersAbsentM = depthLayersAbsentBits(srvsM);
+                    p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | layersAbsentM);
+                    ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
+                    setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
@@ -5096,7 +5106,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // trained path was running without diagnostics.
         if (ran && !usedDlaa && !leanOwn && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
         if (ran && !usedDlaa) {
-            setParams(ctx, p);
             ID3D11ShaderResourceView* nullSrv[24] = {};
             const UINT srvCount = engineOwn ? 24u : 19u;
             ID3D11UnorderedAccessView* nullUav[7] = {};
@@ -5121,6 +5130,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                       engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                       engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr,
                                                       engineOwn ? engineSkinSrv.Get() : nullptr};   // t23: the second skin
+            // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch), then the constants.
+            p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | depthLayersAbsentBits(srvs));
+            setParams(ctx, p);
             ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav, nullptr,
                                                   nullptr, nullptr,
@@ -6627,6 +6639,13 @@ bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]) {
     return true;
 }
 
+bool temporalPassMvDepthLayerTotals(uint64_t byLayers[4]) {
+    const uint64_t dispatches = g_mvDepthLayers[0] + g_mvDepthLayers[1] + g_mvDepthLayers[2] + g_mvDepthLayers[3];
+    if (dispatches == 0) return false;
+    if (byLayers) for (int k = 0; k < 4; ++k) byLayers[k] = g_mvDepthLayers[k];
+    return true;
+}
+
 bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
                                const char** engineLabel, bool* amd) {
     // The CURRENT engine's price, not "whichever one has a count". Both
@@ -6815,6 +6834,7 @@ void temporalPassShutdown() {
     g_coronaHoldNoted=false;
     for (bool& noted : g_uiResolveUnboundNoted) noted=false;
     g_uiResolveDispatches=0; for (uint64_t& n : g_uiResolveLacked) n=0;
+    for (uint64_t& n : g_mvDepthLayers) n=0;
     // Stage 0 price report: any eye still waiting for its stereo twin at
     // shutdown is never going to get one -- drop it and count it (F2)
     // rather than price it alone, before the window it would have landed

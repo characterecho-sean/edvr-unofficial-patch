@@ -639,6 +639,8 @@ struct Window {
     uint64_t afterFollowed = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
     uint64_t depthOnlySeedPreservedWriters = 0;
+    // seedWritersCheck's resolve of the bound depth view: answered from the memo, or by the guarded resolve (a miss, a failure included).
+    uint64_t dsvMemoHits = 0, dsvMemoMisses = 0;
     uint64_t privateDepthPotentialBegins = 0;
     // the crisp-HUD half of fix.ui_quality: HUD draws taken into the HDR layer, tonemap re-issues,
     // coverage passes, HDR layers whose content never reached a tonemap, and
@@ -974,13 +976,8 @@ uint64_t g_sessionRedirected = 0;
 // nothing is written while fix.ui_quality is off and nothing was redirected.
 PeriodicWork g_workTotals{"ui_layer_totals", "samples"};
 
-// First-seen lines, deduplicated.
-struct FamilySeen {
-    uint8_t family, decision;
-    uint64_t vs, ps;
-};
-FamilySeen g_familySeen[kMaxFamilyLines];
-uint32_t g_familySeenCount = 0;
+// First-seen lines, deduplicated (ui_layer_math.h UiFamilySeenTable: the rule is its wanted()).
+UiFamilySeenTable<kMaxFamilyLines> g_familySeen;
 struct AfterSeen {
     char kind;
     uint64_t vs, ps;
@@ -989,25 +986,19 @@ AfterSeen g_afterSeen[kMaxAfterLines];
 uint32_t g_afterSeenCount = 0;
 bool g_engageNoted = false, g_compositeNoted = false;
 
-bool structuralDecision(UiLayerDecision d) {
-    // The transient ones -- not armed yet, late this frame -- are counted on
-    // the totals line and never get a first-seen line of their own.
-    return d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate &&
-           d != UiLayerDecision::kNotUi;
+// Will noteFamily print a line for this decision, the draw's own (vs, ps) being bound: a structural decision, the pair not seen yet, the
+// table not full. The detail text is built only when this is true -- noteFamily is called for every decided draw and the text is read
+// only by the line it prints. noteFamily's rule is this one (UiFamilySeenTable::record is built on wanted()), so the two cannot differ.
+bool familyLineWanted(UiLayerFamily f, UiLayerDecision d) {
+    return g_familySeen.wanted(f, d, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
 }
 
 // Once per (family, outcome, shader pair): what it is, where it draws, what
 // was decided -- with the blend or depth-stencil state that decided it, so a
 // refusal names the numbers rather than a category.
 void noteFamily(UiLayerFamily f, UiLayerDecision d, const char* detail) {
-    if (!structuralDecision(d)) return;
     const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
-    for (uint32_t i = 0; i < g_familySeenCount; ++i) {
-        const FamilySeen& s = g_familySeen[i];
-        if (s.family == uint8_t(f) && s.decision == uint8_t(d) && s.vs == vs && s.ps == ps) return;
-    }
-    if (g_familySeenCount >= kMaxFamilyLines) return;
-    g_familySeen[g_familySeenCount++] = {uint8_t(f), uint8_t(d), vs, ps};
+    if (!g_familySeen.record(f, d, vs, ps)) return;
     Log::get().note("ui quality: layer: %s (vs %016llX ps %016llX) into a %ux%u %s target: %s%s%s.",
                     uiLayerFamilyName(f), static_cast<unsigned long long>(vs),
                     static_cast<unsigned long long>(ps), g_tc.info.a, g_tc.info.b,
@@ -3244,6 +3235,17 @@ void logSharpWeapons() {
         static_cast<unsigned long long>(g_win.weaponsContentFrames), static_cast<unsigned long long>(g_win.weaponsLost), pairs.c_str());
 }
 
+// The bound depth view's resolve memo (resolveBoundDsv): how often seedWritersCheck's question was answered from it and how often it
+// was resolved (a miss, a failed resolve included). Its own 30 s line so the flat profile, which skips logTotals but runs
+// seedWritersCheck on every scene draw (flatUiLayerNoteSceneDraw), reports the counts too, before the window reset discards them.
+// All zeros means no draw reached the resolve in the window, which is not the same as this line missing.
+void logDsvMemo() {
+    Log::get().note(
+        "ui quality: depth view memo: the bound depth view's resource was answered from the Dsv0-generation memo %llu times "
+        "and resolved on a miss (a failed resolve included) %llu times in this window.",
+        static_cast<unsigned long long>(g_win.dsvMemoHits), static_cast<unsigned long long>(g_win.dsvMemoMisses));
+}
+
 void logTotals(double seconds) {
     // The frosted base's own count: the flight's answer to "did the station menu's base go through the
     // remapped program" -- admitted must climb with the panels, refused stay 0.
@@ -3319,6 +3321,7 @@ void logTotals(double seconds) {
         "across both eyes/layers (potential writes, including no private DSV or original read-only view).",
         static_cast<unsigned long long>(g_win.depthOnlySeedPreservedWriters),
         static_cast<unsigned long long>(g_win.privateDepthPotentialBegins));
+    logDsvMemo();
     Log::get().note(
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
         "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
@@ -3936,7 +3939,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
     char detail[320] = "";
-    if (d == UiLayerDecision::kNoDensityGain) {
+    // Every detail text below is read by noteFamily alone: it is built only when that line will print (familyLineWanted -- the
+    // decision is final here, and nothing between this and noteFamily binds a shader or writes the table).
+    if (d == UiLayerDecision::kNoDensityGain && familyLineWanted(family, d)) {
         _snprintf_s(detail, _TRUNCATE, "the layer would be %ux%u and the render is %ux%u: a line drawn there is no denser",
                     sceneLayerW, sceneLayerH, g_tc.info.a, g_tc.info.b);
     }
@@ -4020,8 +4025,10 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                 ++g_holoRefused; d = UiLayerDecision::kLayerFailed;
                 const int slot = ui_holo_remap::index(ps);
                 if (slot >= 0) ++g_holoRefusedBy[slot];
-                _snprintf_s(detail, _TRUNCATE, "%s PS bytecode/device preparation unavailable; stock complete draw retained",
-                            slot >= 0 ? ui_holo_remap::kindName(ui_holo_remap::kindOf(slot)) : "hologram");
+                if (familyLineWanted(family, d)) {
+                    _snprintf_s(detail, _TRUNCATE, "%s PS bytecode/device preparation unavailable; stock complete draw retained",
+                                slot >= 0 ? ui_holo_remap::kindName(ui_holo_remap::kindOf(slot)) : "hologram");
+                }
                 if (slot >= 0 && !g_holoRefusalNoted[slot]) {
                     Log::get().note("crisp holo remap: prepare refused PS %016llX before admission (verified bytecode, original identity, device or allocation unavailable); stock complete draw retained.",
                         static_cast<unsigned long long>(ps));
@@ -4038,30 +4045,33 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                 }
             }
         }
-        // What decided it, in the census's own numbers, for the first line.
-        char bl[64], ds[256];
-        describeBlend(game, bl, sizeof(bl));
-        describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
-        if (d == UiLayerDecision::kBlendRefused) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
-                        multiplyWrites ? " (a multiply that writes depth or stencil)"
-                        : hdrMultiply  ? " (a multiply has no transmittance route into the HDR layer)"
-                                       : "");
-        } else if (d == UiLayerDecision::kDepthStencilTest ||
-                   d == UiLayerDecision::kSubstitutedWrite) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
-        } else if (d == UiLayerDecision::kFamilyNotReady) {
-            _snprintf_s(detail, _TRUNCATE, "%s", familyWhy);
-        } else if (d == UiLayerDecision::kRedirect) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s%s%s", uiBlendShapeName(f.blend),
-                        f.ds.tests() ? "; tests against the layer's seeded copy of the game's "
-                                       "depth-stencil"
-                                     : "",
-                        f.ds.writes() ? "; its depth/stencil write kept in the game's buffer by a "
-                                        "colourless re-issue"
-                                      : "",
-                        (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
-                                                        : "");
+        // What decided it, in the census's own numbers, for the first line -- built only when that line will print (the decision is
+        // final here; see the kNoDensityGain text above).
+        if (familyLineWanted(family, d)) {
+            char bl[64], ds[256];
+            describeBlend(game, bl, sizeof(bl));
+            describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
+            if (d == UiLayerDecision::kBlendRefused) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
+                            multiplyWrites ? " (a multiply that writes depth or stencil)"
+                            : hdrMultiply  ? " (a multiply has no transmittance route into the HDR layer)"
+                                           : "");
+            } else if (d == UiLayerDecision::kDepthStencilTest ||
+                       d == UiLayerDecision::kSubstitutedWrite) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
+            } else if (d == UiLayerDecision::kFamilyNotReady) {
+                _snprintf_s(detail, _TRUNCATE, "%s", familyWhy);
+            } else if (d == UiLayerDecision::kRedirect) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s%s%s", uiBlendShapeName(f.blend),
+                            f.ds.tests() ? "; tests against the layer's seeded copy of the game's "
+                                           "depth-stencil"
+                                         : "",
+                            f.ds.writes() ? "; its depth/stencil write kept in the game's buffer by a "
+                                            "colourless re-issue"
+                                          : "",
+                            (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
+                                                            : "");
+            }
         }
         for (auto* r : rtvs)
             if (r) r->Release();
@@ -5980,6 +5990,35 @@ bool uiLayerDoorLayerOnly(uint32_t eye, uint64_t sequence) {
 }
 
 namespace {
+// The resource behind the bound depth view, remembered against the Dsv0 binding's generation. seedWritersCheck asks up to four times a
+// call (each eye, each layer depth target) and on every owner draw, and a resolve is a guarded GetResource, GetType, GetDesc and Release.
+// A view's resource cannot change for the view's life, and the binding shadow moves the generation on every rebind
+// (OMSetRenderTargets and the UAV form that sets targets, ClearState, a command list that leaves the context unknown) and once a frame
+// (bindingFrameBoundary), so a remembered answer cannot outlive the binding it describes -- the idiom engine_velocity.cpp and
+// temporal_pass.cpp use for the same slot. Only a successful resolve is remembered: a failure is asked again every time, exactly as before,
+// and its fault budget is charged as before.
+struct DsvResolveMemo {
+    void* view = nullptr;
+    uint32_t gen = 0;  // the shadow's generations start at 1, so a zero memo matches nothing
+    ResourceInfo info;
+};
+DsvResolveMemo g_dsvMemo;
+
+bool resolveBoundDsv(void* view, ResourceInfo* info) {
+    const uint32_t gen = bindingGeneration(BindSlot::Dsv0);
+    if (g_dsvMemo.view == view && g_dsvMemo.gen == gen) {
+        *info = g_dsvMemo.info;
+        ++g_win.dsvMemoHits;
+        return true;
+    }
+    ++g_win.dsvMemoMisses;
+    if (!bindingResolve(view, info)) return false;
+    g_dsvMemo.view = view;
+    g_dsvMemo.gen = gen;
+    g_dsvMemo.info = *info;
+    return true;
+}
+
 // A game draw that writes the depth target a seed copied, after the seed: the layer's copy is stale, and the next
 // tested draw seeds again. uiLayerNoteOther's first step, and the whole of uiLayerNoteSceneDraw (the flat profile).
 void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, uint32_t verdict, char drawKind) {
@@ -5993,7 +6032,7 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
             if (!freshCandidate && !diagnosticCandidate) continue;
             void* dsvView = bindingGet(BindSlot::Dsv0);
             ResourceInfo info;
-            if (!dsvView || !bindingResolve(dsvView, &info))
+            if (!dsvView || !resolveBoundDsv(dsvView, &info))
                 continue;
             const bool matchingFresh = freshCandidate && info.resource == l->source;
             const bool matchingDiagnostic = g_seedCensus.matches(eye, hdr, info.resource);
@@ -6024,6 +6063,13 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
 
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind) {
     if (ctx) seedWritersCheck(ctx, count, instances, 0, drawKind);
+}
+
+bool uiLayerResolveBoundDsvForTest(void* view, ResourceInfo* info, uint64_t* hits, uint64_t* misses) {
+    const bool ok = resolveBoundDsv(view, info);
+    if (hits) *hits = g_win.dsvMemoHits;
+    if (misses) *misses = g_win.dsvMemoMisses;
+    return ok;
 }
 
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
@@ -6102,14 +6148,27 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
         }
         return false;
     }
-    // kind == 'W'. Exclusion 2: a post pass that samples an eye-sized texture
+    // kind == 'W'.
+    if (kind == 'W') {
+        // rc-since-rc2 review F4: the retry preserves the original decision's
+        // two exclusions before attempting the take -- the shader exclusion
+        // and the held world-screen identity -- which the kAfterUi family
+        // alone never saw.
+        if (!uiLayerAfterWritePreserved(excluded, g_screenHeld == 1, panelSized)) {
+            // Left in the game's frame: lost while the VR world route owns this eye (the layer is the whole eye).
+            if (g_eye[takenEye].worldSeq == g_lastRedirectSeq) ++g_win.worldLeftDraws;
+            return false;
+        }
+    }
+    // Exclusion 2: a post pass that samples an eye-sized texture
     // at ANY bound PS SRV slot is left in the frame, never taken -- whole-frame
     // input, whatever the resource, is how a post pass differs from an
     // overlay (the field log's named draws sample 512x512 and 614x365, both
     // smaller than the eye). vScreenIsEyeSized is the same predicate
     // uiLayerTargetKind() already used to call this draw's OWN target an eye
     // target, so a match here means literally "as large as the thing being
-    // written," not a fresh tolerance.
+    // written," not a fresh tolerance. Scanned after the preserved-exclusion
+    // return above: a draw that return left in the frame never reads the result.
     bool eyeSizedInput = false;
     uint32_t srvW = 0, srvH = 0;
     static const BindSlot kPsSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2,
@@ -6123,17 +6182,6 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
             srvW = info.a;
             srvH = info.b;
             break;
-        }
-    }
-    if (kind == 'W') {
-        // rc-since-rc2 review F4: the retry preserves the original decision's
-        // two exclusions before attempting the take -- the shader exclusion
-        // and the held world-screen identity -- which the kAfterUi family
-        // alone never saw.
-        if (!uiLayerAfterWritePreserved(excluded, g_screenHeld == 1, panelSized)) {
-            // Left in the game's frame: lost while the VR world route owns this eye (the layer is the whole eye).
-            if (g_eye[takenEye].worldSeq == g_lastRedirectSeq) ++g_win.worldLeftDraws;
-            return false;
         }
     }
     if (uiLayerAfterWriteDecide(eyeSizedInput) == UiAfterWriteDecision::kPostPass) {
@@ -6485,8 +6533,13 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     const bool anything = g_win.redirected || g_win.composites || g_win.compositeRefused;
     if (runtimeFlatProfile()) {
         // The flat profile: this file's per-eye layer is never live there (fix.temporal_aa reads off through the flat
-        // gate), so its totals would only say so. The panel half's line is the key's 30 s account in flat.
+        // gate), so its totals would only say so. The panel half's line is the key's 30 s account in flat. The scene draws still run
+        // seedWritersCheck there, so the depth-view memo's counts are reported here, before g_win is cleared below. Only while the
+        // layer is live (or the window counted something before it stood down): flatUiLayerNoteSceneDraw returns early unless the
+        // layer took a draw this frame, so with the layer off nothing can reach the memo and the line would be zeros every 30 s. A
+        // live layer that nothing reached still logs its zeros.
         uiPanelScaleLog();
+        if (detail::g_uiLayerLive || g_win.dsvMemoHits || g_win.dsvMemoMisses) logDsvMemo();
     } else if (g_target > 0.0f || anything) {
         uint64_t samples = 0;  // what logTotals is about to sort
         for (const RouteStats& r : g_routeStats) samples += r.n;
@@ -6644,6 +6697,7 @@ void uiLayerDeviceReset() {
     uiLayerFlatRelease();  // the door, the target cache and the per-draw facts, as on a same-device resize
     g_draw = Draw{};
     g_crispSave = CrispToneSave{};
+    g_dsvMemo = DsvResolveMemo{};  // the old device's views are gone; nothing resolved through them is kept
     detail::g_uiLayerRedirecting = false;
     detail::g_uiLayerWatching = false;
 }
@@ -6656,6 +6710,7 @@ void uiLayerShutdown() {
     g_hdrSeedGpu.reset(); // release-only shutdown; the owner/device may already be gone
     g_hdrSeedActive = 0;
     g_seedCensus = UiSeedCensus{};
+    g_dsvMemo = DsvResolveMemo{};
     detail::g_uiSeedDiagnostics = false;
     if (g_draw.active) releaseSaved();
     g_draw = Draw{};

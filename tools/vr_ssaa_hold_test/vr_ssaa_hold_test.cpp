@@ -29,6 +29,13 @@ bool vrSsaaHoldReadSettings(int* mode, char* raw, size_t rawLen) {
     return true;
 }
 void vrSsaaHoldAfterCopy(uintptr_t) {}
+bool g_stubWindow = true;       // vrDisplayReadGameWindow: the swap chain's window is hooked
+bool vrDisplayReadGameWindow(unsigned long long* style, long* clientWidth, long* clientHeight) {
+    *style = 0x16CF0000ull;
+    *clientWidth = 3840;
+    *clientHeight = 2160;
+    return g_stubWindow;
+}
 
 // CodeHook::install: Prepare runs first; the entry is then "published", and the forward must already be set at that point. origOut is
 // assigned after the publish, as the real CodeHook does (code_hook.cpp).
@@ -208,6 +215,8 @@ void resetWindowState() {
     edvr::g_remembered.store(false);
     edvr::g_rewrites.store(0);
     edvr::g_noneLogged.store(false);
+    edvr::g_modeRequests.store(0);
+    edvr::g_lastLoggedAction.store(0xFF);
     edvr::g_stubLive = false;
     edvr::g_stubSavedMode = 3;
     edvr::g_readSettingsCalls = 0;
@@ -265,9 +274,10 @@ void windowFlatCases() {
     callRequest(buf);
     check(g_origKind == 2 && std::memcmp(g_origBlock, before, sizeof(before)) == 0,
           "flat: a non-windowed request passes unchanged");
-    bool kept = true;
-    for (int i = 0; i < 4; ++i) kept = kept && edvr::g_block[i].load() == remembered[i];
-    check(kept && edvr::g_rememberedKind.load() == 1, "flat: the remembered block is not replaced by a flat request");
+    bool taken = true;
+    for (int i = 0; i < 4; ++i) taken = taken && edvr::g_block[i].load() == nonWindowed[i];
+    check(taken && edvr::g_rememberedKind.load() == 2,
+          "flat, VR not live: a non-windowed request is remembered (the launch's own mode), while it still passes unchanged");
     reportGroup("flat profile", c0, f0);
 }
 
@@ -325,6 +335,145 @@ void windowVrCases() {
     reportGroup("VR profile", c0, f0);
 }
 
+// The mode request trace: the action each decision is logged as, the cap, and the two line formats. Logging changes no decision (the groups
+// above pin the forwarded block); here the action tag is pinned to the branch taken.
+const char* lastAction() {
+    const uint8_t a = edvr::g_lastLoggedAction.load();
+    return a == 0xFF ? "none" : edvr::modeActionName(static_cast<edvr::ModeAction>(a));
+}
+void modeRequestTraceCases() {
+    const int c0 = g_checks, f0 = g_fails;
+    const uint64_t remembered[4] = {0x1111, 0x2222, 0x3333, 1};
+    const uint64_t windowed[4] = {0x4444, 0x5555, 0x6666, 0};
+    const uint64_t nonWindowed[4] = {0xAAAA, 0xBBBB, 0xCCCC, 2};
+    uint8_t buf[0x28];
+
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    makeRequest(buf, windowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "passthrough_not_allowed") == 0 && edvr::g_modeRequests.load() == 1 && edvr::g_readSettingsCalls == 0,
+          "trace: a flat request is logged as passthrough_not_allowed, counted, and the saved mode is still not read");
+
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+    edvr::g_stubSavedMode = 0;
+    makeRequest(buf, nonWindowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "remembered") == 0 && edvr::g_remembered.load(), "trace: VR inactive, a non-windowed request: remembered");
+    makeRequest(buf, windowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "left_as_is_vr_inactive") == 0 && g_origKind == 0, "trace: VR inactive, a windowed request: left as is");
+
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+    edvr::g_stubLive = true;
+    makeRequest(buf, windowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "left_as_is_nothing_remembered") == 0, "trace: VR on, windowed, nothing remembered: left as is");
+    makeRequest(buf, nonWindowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "left_as_is_vr_on_non_windowed") == 0, "trace: VR on, a non-windowed request: left as is");
+    rememberBlock(remembered);
+    makeRequest(buf, windowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "rewritten") == 0 && g_origKind == 1 && forwardedBlockIs(remembered),
+          "trace: VR on, windowed, remembered: rewritten, and the forwarded block is the remembered one");
+
+    // The cap: calls past the 32nd are counted and not logged.
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    makeRequest(buf, windowed);
+    for (int i = 0; i < 32; ++i) callRequest(buf);
+    edvr::g_lastLoggedAction.store(0xFF);
+    callRequest(buf);
+    check(edvr::g_modeRequests.load() == 33 && std::strcmp(lastAction(), "none") == 0, "trace: the 33rd request is counted and not logged");
+
+    // The formats.
+    edvr::ModeRequestRecord r;
+    r.n = 3; r.frame = 1200; r.thread = 4242; r.sinceInstallMs = 15000;
+    r.haveKind = r.haveFlags = r.haveBlock = true;
+    r.kind = 0; r.flagsDword = 0x0201; r.q[0] = 0x4444; r.q[1] = 0x5555; r.q[2] = 0x6666; r.q[3] = 0x0000000200000000ull;
+    r.profile = "flat"; r.live = false; r.rememberedBefore = true; r.action = edvr::ModeAction::PassNotAllowed;
+    char line[640];
+    const int n = edvr::formatModeRequestLine(r, line, sizeof(line));
+    check(n > 0 && n < 640 && std::strstr(line, "mode request #3: frame 1200, +15000 ms since hook install, thread 4242, kind 0, flags +0x24 01 +0x25 02, "
+                                                "block +0x08 4444 +0x10 5555 +0x18 6666 +0x20 200000000, profile flat, vr_live 0, remembered_before 1, "
+                                                "action passthrough_not_allowed") != nullptr,
+          "trace: the request line carries frame, time, thread, kind, flags, the block, profile, live, remembered, action");
+    r.haveKind = r.haveFlags = r.haveBlock = false;
+    edvr::formatModeRequestLine(r, line, sizeof(line));
+    check(std::strstr(line, "kind ?, flags +0x24 ? +0x25 ?, block +0x08 ? +0x10 ? +0x18 ? +0x20 ?") != nullptr, "trace: a field that could not be read prints ?");
+    char tiny[32];
+    check(edvr::formatModeRequestLine(r, tiny, sizeof(tiny)) == 0, "trace: a buffer too small reports 0");
+    char ret[320];
+    check(edvr::formatModeReturnLine(r, true, 0x16CF0000ull, 3840, 2160, 1201, 15003, ret, sizeof(ret)) > 0 &&
+          std::strcmp(ret, "vr window: mode request #3 returned: game window style 0x16CF0000 client 3840x2160, frame 1201, +15003 ms since hook install") == 0,
+          "trace: the return line carries the window's style and client size");
+    check(edvr::formatModeReturnLine(r, false, 0, 0, 0, 0, 0, ret, sizeof(ret)) > 0 && std::strstr(ret, "game window not hooked yet") != nullptr,
+          "trace: the return line says when the window is not hooked yet");
+    reportGroup("mode request trace", c0, f0);
+}
+
+// The launch's own mode request is remembered whatever the profile, so the first live switch keeps it. The gate decides the rewrite only.
+void rememberAtLaunchCases() {
+    const int c0 = g_checks, f0 = g_fails;
+    const uint64_t launch[4] = {0, 0x19, 0, 0x1010000000002ull};   // flight 2026-10-23: kind 2, borderless 3840x2160
+    const uint64_t windowed[4] = {0x4444, 0x5555, 0x6666, 0};
+    const uint64_t vrChoice[4] = {0xAAAA, 0xBBBB, 0xCCCC, 3};
+    uint8_t buf[0x28], before[0x28];
+
+    // Flat launch: kind 2 at frame 1, VR not live, the gate closed. Remembered, logged as such, forwarded byte for byte.
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    makeRequest(buf, launch);
+    std::memcpy(before, buf, sizeof(buf));
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "remembered_gate_closed") == 0 && edvr::g_remembered.load() && edvr::g_rememberedKind.load() == 2 &&
+          g_origKind == 2 && std::memcmp(g_origBlock, before, sizeof(before)) == 0 && edvr::g_readSettingsCalls == 0,
+          "flat launch: the kind 2 request is remembered with the gate closed, logged remembered_gate_closed, and forwarded unchanged");
+
+    // 3D on: the windowed request, VR live, the gate open: rewritten to the launch's block.
+    edvr::g_stubLive = true;
+    makeRequest(buf, windowed);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "rewritten") == 0 && g_origKind == 2 && forwardedBlockIs(launch),
+          "3D on after a flat launch: the windowed request is rewritten to the remembered launch block");
+
+    // A request made while VR is live is not remembered, in any profile.
+    makeRequest(buf, vrChoice);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "left_as_is_vr_on_non_windowed") == 0 && edvr::g_rememberedKind.load() == 2 && edvr::g_block[1].load() == 0x19,
+          "a kind 3 request made while VR is live is not remembered; the launch block stays");
+    for (auto profile : {edvr::RuntimeProfile::Flat, edvr::RuntimeProfile::Vr, edvr::RuntimeProfile::Passthrough}) {
+        resetWindowState();
+        edvr::g_runtimeProfile = profile;
+        edvr::g_stubLive = true;
+        makeRequest(buf, vrChoice);
+        callRequest(buf);
+        check(!edvr::g_remembered.load(), "VR live: a non-windowed request is not remembered in this profile");
+    }
+
+    // A windowed request with nothing remembered is left as it was.
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    edvr::g_stubLive = true;
+    makeRequest(buf, windowed);
+    std::memcpy(before, buf, sizeof(buf));
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "left_as_is_nothing_remembered") == 0 && g_origKind == 0 && std::memcmp(g_origBlock, before, sizeof(before)) == 0,
+          "3D on with nothing remembered: the windowed request is left as the game made it");
+
+    // The VR profile remembers as it did: VR not live, kind 2, action remembered.
+    resetWindowState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+    edvr::g_stubSavedMode = 0;
+    makeRequest(buf, launch);
+    callRequest(buf);
+    check(std::strcmp(lastAction(), "remembered") == 0 && edvr::g_rememberedKind.load() == 2, "VR profile, VR not live: remembered, as before");
+    reportGroup("remember at launch", c0, f0);
+}
+
 // The install: the forward is published through Prepare before the entry is published, and cleared when CodeHook refuses.
 void installCases() {
     const int c0 = g_checks, f0 = g_fails;
@@ -369,6 +518,8 @@ int main(int argc, char** argv) {
     displayConfigCases();
     windowFlatCases();
     windowVrCases();
+    modeRequestTraceCases();
+    rememberAtLaunchCases();
     installCases();
     if (g_fails) {
         std::printf("vr_ssaa_hold_test: %d of %d checks FAILED\n", g_fails, g_checks);
