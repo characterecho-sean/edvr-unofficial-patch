@@ -1367,11 +1367,17 @@ private:
                 "uint w,h;src.GetDimensions(w,h);uint2 q=min(uint2(((p.x*2+1)*w)/768,((p.y*2+1)*h)/768),uint2(w-1,h-1));"
                 "dst[p.xy]=src.Load(int3(q,0));}";
             using CompileFn=HRESULT(WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob**,ID3DBlob**);
-            HMODULE compiler=LoadLibraryW(L"d3dcompiler_47.dll");if(!compiler)return false;
+            // d3dcompiler_47.dll is loaded once and never freed (gpu_pass_profile.cpp does the same). The ID3DBlob D3DCompile returns has its
+            // vtable inside that DLL: this code used to FreeLibrary right after the compile, and the next call on the blob (and its ComPtr
+            // destructor) ran in an unmapped image -- the eye-dump crash of 2026-10-23. It is held under `mutex`, so a failed load retries.
+            static HMODULE compiler=nullptr;
+            if(!compiler)compiler=LoadLibraryW(L"d3dcompiler_47.dll");if(!compiler)return false;
             auto compile=reinterpret_cast<CompileFn>(GetProcAddress(compiler,"D3DCompile"));
+            if(!compile)return false;
+            // The blobs live in this scope only: every one is released here, with the DLL certainly mapped, on success and on failure.
             Microsoft::WRL::ComPtr<ID3DBlob> code,errors;
-            const HRESULT compiled=compile?compile(sourceCode,sizeof(sourceCode)-1,"EDVR UI point sample",nullptr,nullptr,"main","cs_5_0",0,0,&code,&errors):E_FAIL;
-            FreeLibrary(compiler);if(FAILED(compiled)||!code)return false;
+            const HRESULT compiled=compile(sourceCode,sizeof(sourceCode)-1,"EDVR UI point sample",nullptr,nullptr,"main","cs_5_0",0,0,&code,&errors);
+            if(FAILED(compiled)||!code)return false;
             if(FAILED(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&kernel.shader)))return false;
         }
         D3D11_TEXTURE2D_DESC outDesc{};outDesc.Width=outDesc.Height=384;outDesc.MipLevels=outDesc.ArraySize=outDesc.SampleDesc.Count=1;

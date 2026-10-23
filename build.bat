@@ -2319,6 +2319,21 @@ python "tools\eye_decisions.py" --self-test || exit /b 1
 python "tools\gui_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin.gui" --verify-fixture || exit /b 1
 exit /b 0
 
+REM The UI point sampler's d3dcompiler_47.dll lifetime (the eye-dump crash of 2026-10-23: FreeLibrary while the D3DCompile blob was alive).
+REM Its own process, and d3d11.lib only: :rig_eye_draw_snapshot links d3dcompiler.lib and calls D3DCompile, which pins the DLL for the whole
+REM process, so it cannot see this. The exe asserts the DLL is absent before the sampler's first call.
+:rig_eye_draw_snapshot_unload
+echo [edvr] === eye draw snapshot compiler-unload regression ===
+if not exist "%OBJ%\drawsnapshotunload" mkdir "%OBJ%\drawsnapshotunload"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\drawsnapshotunload\\" /Fe"%OBJ%\drawsnapshotunload\eye_draw_snapshot_unload_test.exe" ^
+    "tools\eye_draw_snapshot_unload_test\eye_draw_snapshot_unload_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib
+if errorlevel 1 ( echo [edvr] ERROR: eye draw snapshot unload test build failed & exit /b 1 )
+"%OBJ%\drawsnapshotunload\eye_draw_snapshot_unload_test.exe" || exit /b 1
+exit /b 0
+
 :rig_eye_tonemap_snapshot
 echo [edvr] === eye tone-map snapshot regression ===
 if not exist "%OBJ%\tonemapsnapshot" mkdir "%OBJ%\tonemapsnapshot"
