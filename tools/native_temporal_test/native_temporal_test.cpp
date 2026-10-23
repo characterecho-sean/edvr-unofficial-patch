@@ -395,7 +395,8 @@ void run(){
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
   // FSR 4.1 is its own external engine: bit 1 (external) and bit 8 (FSR 4), never bit 6 (FSR 3.1) or 7 (XeSS); it upscales as fsr does.
-  auto fsr4=acquire(d,97,"fsr4");f=frame(97,1);begin(fsr4,f);check(treat(fsr4,1,0,source.Get())==S_OK,"FSR 4 call");c=calls.back();
+  // With generation 16 this rig takes all sixteen channels of native_temporal.cpp's pool, which channels are never returned to.
+  auto fsr4=acquire(d,16,"fsr4");f=frame(16,1);begin(fsr4,f);check(treat(fsr4,1,0,source.Get())==S_OK,"FSR 4 call");c=calls.back();
   check((c.flags&2)&&(c.flags&256)&&!(c.flags&64)&&!(c.flags&128)&&c.outW==480&&c.outH==360,"FSR 4 asks for an external engine under its own flag bit, at the recommended size");
   check(fsr4.close(fsr4.context)==S_OK,"FSR 4 close");
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;

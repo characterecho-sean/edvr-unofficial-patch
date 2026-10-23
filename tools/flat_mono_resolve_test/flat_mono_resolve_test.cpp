@@ -535,7 +535,9 @@ int main(int argc,char** argv) {
     check(pixel(taa.Get())==0xff0000ff,"TAA reset spatial upsample");f.reset=false;++f.frame;taa=run(true);
     check(pixel(taa.Get())==0xff0000ff,"TAA static color remains stable");
     f.mode=edvr::FlatMonoResolveMode::Fsr;++f.frame;run(true);check(infiniteSeen,"FSR receives explicit infinite-depth mode");
-    infiniteSeen=false;f.mode=edvr::FlatMonoResolveMode::Fsr4;++f.frame;run(true);
+    // FSR 4's call came after the key-off goldens were recorded, so its hash is taken back out of their log (as hashMark does below).
+    infiniteSeen=false;f.mode=edvr::FlatMonoResolveMode::Fsr4;++f.frame;
+    {const size_t fsr4Mark=motionHashLog.size();run(true);motionHashLog.resize(fsr4Mark);}
     check(infiniteSeen,"FSR 4 receives explicit infinite-depth mode");
     f.mode=edvr::FlatMonoResolveMode::Dlss;++f.frame;auto retained=run(true);
     auto beforeInvalidate=edvr::flatMonoResolveStats();
