@@ -1492,7 +1492,7 @@ constexpr uintptr_t kPartNameTableRva = 0x5E9F820;
 constexpr uint32_t kPartCount = 54;
 constexpr uint32_t kPartStride = 0x680, kPartVariants = 4;
 constexpr uint32_t kOffAmcParts = 0x11B0;          // the part entry: AMC + this + idx*stride (the instance and mask offsets below are inside it)
-constexpr uint32_t kOffPartClipMod = 0x610;        // F19: the entry's "pVertexClipAmount" modifier pointer (set by the item-apply function 0x3DD9EA0)
+constexpr uint32_t kOffPartClipMod = 0x610;        // F19: the entry's "pVertexClipAmount" modifier pointer (set by the item-apply function 0x3DDCAC0)
 constexpr uint32_t kClipModAmount = 0x8, kClipModEnable = 0xC, kClipModDirty = 0xD;   // the modifier's float amount, enable byte, dirty byte (F19)
 constexpr uint32_t kOffAmcInstances = 0x11C0;      // AMC + this + idx*stride + 8k: instance k of part idx (0 = none)
 constexpr uint32_t kOffAmcMasks = 0x17A0;          // ...the view mask of instance k

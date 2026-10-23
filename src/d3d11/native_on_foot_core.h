@@ -4,12 +4,12 @@
 // Pure decisions and bytes: no Windows, no game, no Config, so a rig could drive them. native_on_foot.cpp holds the hook, the key,
 // the journal reads and the log.
 //
-// THE SETTER. EliteDangerous64.exe build 332841 (the build Explorer Cam pins; PE stamp and image size are ecm::kExpectedTimestamp and
-// ecm::kExpectedImageSize) has a render-mode setter, a virtual function reached only through the vtable at image RVA 0x52E9608, slot 5
-// (byte offset 0x28), at function RVA 0x28723C0. Its signature is void(__fastcall*)(void* selector, uint32_t mode). It records the mode
+// THE SETTER. EliteDangerous64.exe build 334925 (retargeted from 332841; the build Explorer Cam pins; PE stamp and image size are ecm::kExpectedTimestamp and
+// ecm::kExpectedImageSize) has a render-mode setter, a virtual function reached only through the vtable at image RVA 0x52EC798, slot 5
+// (byte offset 0x28), at function RVA 0x2874920. Its signature is void(__fastcall*)(void* selector, uint32_t mode). It records the mode
 // it was asked for in selector+0x20 (the source mode); selector+0x58 is the renderer owner, and owner+0x60 points back at selector.
 // The modes come in pairs: each cinema mode (the flat screen shown in the headset) has an HMD partner (the headset's own stereo). The
-// setter's remap at 0x28873C0 uses the same pairs. Pair A is 5 (cinema) and 3 (HMD); pair B is 6 (cinema) and 4 (HMD). Flight F0 on
+// setter's remap at 0x2889940 uses the same pairs. Pair A is 5 (cinema) and 3 (HMD); pair B is 6 (cinema) and 4 (HMD). Flight F0 on
 // Epic (Pimax OpenXR) logged mode 6 at disembark, with the rig's HMD mode 4; the first build assumed only the A pair and never fired.
 //
 // THE SUBSTITUTION. An incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4), once, on the caller's thread, when every
@@ -23,14 +23,14 @@
 #include <cstring>
 #include <limits>
 
-#include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: build 332841's PE identity, shared with the other build-keyed hooks
+#include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: the PE identity of the build the addresses belong to, shared with the other build-keyed hooks
 #include "explorer_cam_follow_core.h"   // F49: ecm::quatRows, the pose's rotation rows (the pose freeze's rest locals)
 
 namespace edvr {
 namespace nofoot {
 
-constexpr uintptr_t kSetterRva = 0x28723C0;          // the render-mode setter's entry (EliteDangerous64.exe+0x28723C0)
-constexpr uintptr_t kSetterVtableRva = 0x52E9608;    // the vtable that holds the setter
+constexpr uintptr_t kSetterRva = 0x2874920;          // the render-mode setter's entry (EliteDangerous64.exe+0x2874920)
+constexpr uintptr_t kSetterVtableRva = 0x52EC798;    // the vtable that holds the setter
 constexpr size_t kSetterSlotOffset = 0x28;           // slot 5 of that vtable (5 * 8)
 constexpr uint32_t kModeHmdA = 3;                    // HMD stereo, pair A
 constexpr uint32_t kModeCinemaA = 5;                 // the flat cinema screen shown in the headset, pair A
@@ -41,7 +41,7 @@ constexpr size_t kOwnerOffset = 0x58;                // selector+0x58: the rende
 constexpr size_t kOwnerSelectorOffset = 0x60;        // the selector is EMBEDDED in its owner at +0x60: owner+0x60 IS the selector (address arithmetic;
                                                      // nothing is read there). The selector's own first qword is the setter's vtable.
 
-// The first 27 bytes of the setter, read from build 332841's executable: `mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov edi,edx;
+// The first 27 bytes of the setter, read from the executable (332841 and 334925 agree): `mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov edi,edx;
 // mov rbx,rcx; cmp [rcx+20h],edx; jne +0Dh; cmp dword [rcx+2B4h],0`. No rip-relative byte. CodeHook steals the first instruction
 // (5 bytes, `mov [rsp+10h],rbx`), and no branch lands inside those 5 bytes.
 constexpr size_t kPrologueBytes = 27;
@@ -103,7 +103,7 @@ inline bool selectorShapeOk(uintptr_t vtable, uintptr_t expectedVtable, uintptr_
     return owner + kOwnerSelectorOffset == selector;
 }
 
-// The identity check's answer for a PE stamp and image size: build 332841 or not.
+// The identity check's answer for a PE stamp and image size: the build the addresses belong to (334925) or not.
 inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) {
     return timestamp == ecm::kExpectedTimestamp && imageSize == ecm::kExpectedImageSize;
 }
@@ -119,40 +119,40 @@ inline int hudIssuerIndex(uint64_t vs) {
 constexpr uint64_t kMarkerCompositeVs = 0xB10B032BDFD46700ull, kMarkerCompositePs = 0xDB899F4BD577F2E5ull;
 
 // ---- F8: the first-person HUD override and its census (TEMPORARY; native_on_foot.cpp holds the code; approved by Sean 2026-10-13). ----
-// The override: int32 at EliteDangerous64.exe+0x5E82B48, -1 auto. The requester at 0x2887A15 reads it (sole reader; no writer in the image).
+// The override: int32 at EliteDangerous64.exe+0x5E85B94, -1 auto. The requester at 0x2889F95 reads it (sole reader; no writer in the image).
 // The census: owner = [sel+0x58]; settings = [owner+0x1180]; RC = [settings+0x18]; fov = float [RC+0x16C]; mode = dword [settings+0x3694];
 // selMode = dword [sel+0x20]; W = [settings+0x2CB8]; slot k at [W+0x90] (k = 0) or [W+0x98] (k = 1); F = [slot+0x2E0]; F70 = byte [F+0x70];
 // node = [F+0x30]; fp_on = byte [node+0x30]; pg = [F+0x38]; pg250 = byte [pg+0x250].
-constexpr uintptr_t kHudOverrideRva = 0x5E82B48;
+constexpr uintptr_t kHudOverrideRva = 0x5E85B94;
 constexpr uint32_t kCensusOwnerOff = 0x58, kCensusSettingsOff = 0x1180, kCensusRcOff = 0x18, kCensusFovOff = 0x16C, kCensusModeOff = 0x3694,
                    kCensusSelModeOff = 0x20, kCensusWOff = 0x2CB8, kCensusSlotA = 0x90, kCensusSlotB = 0x98, kCensusPassOff = 0x2E0,
                    kCensusF70Off = 0x70, kCensusNodeOff = 0x30, kCensusNodeOnOff = 0x30, kCensusPgOff = 0x38, kCensusPg250Off = 0x250;
 
 // ---- F9 (TEMPORARY; native_on_foot.cpp holds the code). Two game code patches (approved by Sean 2026-10-14) and three read-only probes. ----
-// Patch A (fix.native_on_foot_panels): 76 73 (jbe 0x19B15FC) -> 90 90, in the panel gate of HumanoidPanelComponent (0x19B14E0).
-constexpr uintptr_t kPanelPatchRva = 0x19B1587;
+// Patch A (fix.native_on_foot_panels): 76 73 (jbe 0x19B0DEC) -> 90 90, in the panel gate of HumanoidPanelComponent (0x19B0CD0).
+constexpr uintptr_t kPanelPatchRva = 0x19B0D77;
 constexpr size_t kPanelPatchLen = 2;
 constexpr uint8_t kPanelPatchFrom[2] = {0x76, 0x73};
 constexpr uint8_t kPanelPatchTo[2] = {0x90, 0x90};
 // Patch B (fix.native_on_foot_hud_mesh): 74 2A (jz +0x2A) -> EB 2A; the first byte only is written (the HRC camera-space placement branch).
-constexpr uintptr_t kMeshPatchRva = 0x1A36453;
+constexpr uintptr_t kMeshPatchRva = 0x1A38AD3;
 constexpr size_t kMeshPatchLen = 1;
 constexpr uint8_t kMeshPatchFrom[2] = {0x74, 0x2A};
 constexpr uint8_t kMeshPatchTo[2] = {0xEB, 0x2A};
-// Site 2 of the mesh unit (F10): the HRC's creation gate. The six bytes at +0x1A149A6 are the call qword ptr [rax+0x80] on dep = [HRC+0x1D0]
-// (the predicate in slot 0x1A8D190); the patch changes the call's displacement byte at +0x1A149A8 from 0x80 to 0x78 (the slot 0x78).
-constexpr uintptr_t kMeshSite2Rva = 0x1A149A6;
+// Site 2 of the mesh unit (F10): the HRC's creation gate. The six bytes at +0x1A16F46 are the call qword ptr [rax+0x80] on dep = [HRC+0x1D0]
+// (the predicate in slot 0x1A8F950); the patch changes the call's displacement byte at +0x1A16F48 from 0x80 to 0x78 (the slot 0x78).
+constexpr uintptr_t kMeshSite2Rva = 0x1A16F46;
 constexpr uint8_t kMeshSite2Expect[6] = {0xFF, 0x90, 0x80, 0x00, 0x00, 0x00};
 constexpr uint8_t kMeshSite2Patched[6] = {0xFF, 0x90, 0x78, 0x00, 0x00, 0x00};
 constexpr size_t kMeshSite2ByteOff = 2;
 // Weapon UI attachment orientation branch. Preserve the authored attachment basis while native on-foot VR is active.
-constexpr uintptr_t kWeaponUiBranchRva = 0x1AAF129;
-constexpr uintptr_t kWeaponUiVerifyRva = 0x1AAF120;
+constexpr uintptr_t kWeaponUiBranchRva = 0x1AB1969;
+constexpr uintptr_t kWeaponUiVerifyRva = 0x1AB1960;
 constexpr size_t kWeaponUiVerifyLen = 25, kWeaponUiBranchByteOff = 9;
 constexpr uint8_t kWeaponUiBranchBefore[kWeaponUiVerifyLen] = {
-    0xE8, 0xEB, 0x50, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0x74, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
+    0xE8, 0x6B, 0x55, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0x74, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
 constexpr uint8_t kWeaponUiBranchAfter[kWeaponUiVerifyLen] = {
-    0xE8, 0xEB, 0x50, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0xEB, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
+    0xE8, 0x6B, 0x55, 0x6C, 0x01, 0x80, 0x7F, 0x28, 0x00, 0xEB, 0x20, 0x45, 0x0F, 0x10, 0x0F, 0x45, 0x0F, 0x10, 0x57, 0x10, 0x45, 0x0F, 0x10, 0x5F, 0x20};
 inline bool weaponUiPatchWanted(bool nativeOnFoot, bool session) noexcept { return nativeOnFoot && session; }
 inline bool weaponUiBuildGetterCall(const uint8_t original[8], uintptr_t callAddress, uintptr_t target, uint8_t patched[8]) noexcept {
     if (!original || !patched || original[0] != 0xE8 || !callAddress || !target || callAddress > UINTPTR_MAX - 5) return false;
@@ -192,30 +192,30 @@ inline bool weaponUiGetterJoinMatches(uint32_t rowRenderFrame, uint32_t rowItemS
 // Probes. P1: panel submit (rcx = set, rdx = view, r8b = flag); P2: the HRC submit (six arguments; rcx = HRC); P3: the per-instance submit.
 constexpr size_t kF9ProbeCount = 3;
 constexpr size_t kF9Hrc = 3;
-constexpr uintptr_t kPanelSubmitRva = 0x4714FE0;
+constexpr uintptr_t kPanelSubmitRva = 0x4717A80;
 constexpr size_t kPanelSubmitStolen = 5;
 constexpr size_t kPanelSubmitPrologueBytes = 32;
 constexpr uint8_t kPanelSubmitPrologue[kPanelSubmitPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20,
     0x41, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x99, 0xB8, 0x01, 0x00};
-constexpr uintptr_t kHrcSubmitRva = 0x1A14970;
+constexpr uintptr_t kHrcSubmitRva = 0x1A16F10;
 constexpr size_t kHrcSubmitStolen = 5;   // push rbp (2), push rbx (1), push r12 (2); the rip-relative cookie load at +0x13 is NOT stolen
 constexpr size_t kHrcSubmitPrologueBytes = 26;
 constexpr uint8_t kHrcSubmitPrologue[kHrcSubmitPrologueBytes] = {
     0x40, 0x55, 0x53, 0x41, 0x54, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xC1, 0x48, 0x81, 0xEC, 0xA8,
-    0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xDE, 0x1F, 0x49, 0x04};
-constexpr uintptr_t kInstSubmitRva = 0x434D320;
+    0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x8E, 0x2A, 0x49, 0x04};
+constexpr uintptr_t kInstSubmitRva = 0x434FF80;
 constexpr size_t kInstSubmitStolen = 5;
 constexpr size_t kInstSubmitPrologueBytes = 32;
 constexpr uint8_t kInstSubmitPrologue[kInstSubmitPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
     0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xF9, 0x41, 0x8B, 0xD8, 0x48, 0x8B, 0x89, 0x50, 0x01, 0x00};
 // The renderer scope provides the verified per-part table while the two AR callers submit instances.
-constexpr uintptr_t kHumanoidArRenderRva = 0x1A14320;
+constexpr uintptr_t kHumanoidArRenderRva = 0x1A168C0;
 constexpr size_t kHumanoidArRenderStolen = 5, kHumanoidArRenderPrologueBytes = 32;
 constexpr uint8_t kHumanoidArRenderPrologue[kHumanoidArRenderPrologueBytes] = {
     0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x49, 0x8D, 0xAB, 0x68, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x88,
-    0x02, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x2E, 0x26, 0x49, 0x04, 0x48, 0x33, 0xC4, 0x48, 0x89, 0x85};
+    0x02, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xDE, 0x30, 0x49, 0x04, 0x48, 0x33, 0xC4, 0x48, 0x89, 0x85};
 // The fields. HRC: byte [+0x291], [+0x470], [+0x4C0]; qwords [+0x418], [+0x420], [+0x428] (the three mesh instances); dep = qword [+0x1D0].
 // View (the instance submit's rdx): dword [+0x8E8] (the view id); floats [+0x50], [+0x54], [+0x58] (the camera position).
 constexpr uint32_t kF9HrcG291Off = 0x291, kF9HrcG470Off = 0x470, kF9HrcG4C0Off = 0x4C0, kF9HrcInst0Off = 0x418, kF9HrcDepOff = 0x1D0,
@@ -258,12 +258,12 @@ inline int hudGroupOf(const char* name) {
         if (std::strcmp(name, e.name) == 0) return e.group;
     return -1;
 }
-constexpr uintptr_t kVisorOverrideRva = 0x5F741B7;   // byte: 1 = the visor override is active (the RE: visorDown = byte[B7] ? byte[B8] : vfunc)
-constexpr uintptr_t kVisorDownRva = 0x5F741B8;       // byte: the forced visor state while the override is active (0 = up)
-// F17: the HUD element scale (the layout routine 0x1AB32F0, branch at 0x1AB3351). The byte: non-zero means the layout scale S is the float below;
+constexpr uintptr_t kVisorOverrideRva = 0x5F772E2;   // byte: 1 = the visor override is active (the RE: visorDown = byte[B7] ? byte[B8] : vfunc)
+constexpr uintptr_t kVisorDownRva = 0x5F772E3;       // byte: the forced visor state while the override is active (0 = up)
+// F17: the HUD element scale (the layout routine 0x1AB5B30, branch at 0x1AB5B91). The byte: non-zero means the layout scale S is the float below;
 // zero means S = min(1, aspect / 1.7222), the game's own. The float: S itself (1.0 in the file). The user's setting is 0 (the game's own) or 0.30..2.00.
-constexpr uintptr_t kElemScaleModeRva = 0x5F741CA;   // byte
-constexpr uintptr_t kElemScaleRva = 0x5E7A760;       // float
+constexpr uintptr_t kElemScaleModeRva = 0x5F77202;   // byte
+constexpr uintptr_t kElemScaleRva = 0x5E7D5E4;       // float
 constexpr float kHudElemScaleMin = 0.30f, kHudElemScaleMax = 2.00f;
 // F38: the render head's own translation. The runtime folds the applied eye offset into the seated origin, so the render pose's translation is
 // the head less that offset: the head is render + applied. The F38 flight's 1 s line prints both to confirm the sign.
@@ -522,7 +522,7 @@ inline bool shiftIfAtOrigin(float pos[3], const float origin[3], const float d[3
     for (size_t i = 0; i < 3; ++i) pos[i] += d[i];
     return true;
 }
-// F54: the held weapon. The MotionGraphModelComponent submit job (0x43ED820) writes one record per object at obj+0x230, its position at
+// F54: the held weapon. The MotionGraphModelComponent submit job (0x43F0500) writes one record per object at obj+0x230, its position at
 // obj+0x240 and a copy at obj+0x354, rewritten from the instance's matrix every run (so an add after the job is not cumulative). The local
 // first-person weapon is an object with a non-zero view mask (obj+0x380), the viewmodel byte (obj+0x1C8) set, and its record, before any
 // shift, within kWeaponMatchM of either FP handAttach joint (51 R, 52 L; world, unshifted).
@@ -737,7 +737,7 @@ inline void pfzBlendRecord(const float animLocal[16], const float rest[8], float
     out[3] = 1.0f;
     for (int i = 0; i < 4; ++i) out[4 + i] = q[i] * n;
 }
-// The rest model matrix of joint idx: its rest local times every ancestor's (the uncached path 0xFDE0D0 computes). False on a bad index or a cycle.
+// The rest model matrix of joint idx: its rest local times every ancestor's (the uncached path 0xFDF170 computes). False on a bad index or a cycle.
 inline bool pfzRestModel(const float* locals, const uint16_t* parents, uint32_t joints, uint32_t idx, float out[16]) noexcept {
     if (idx >= joints) return false;
     pfzLocalMatrix(locals + idx * ecm::kJointFloats, out);
@@ -2732,8 +2732,8 @@ inline RotVerdict rotCalVerdict(double camDeg, double renderDeg, double cmdDeg) 
 // Conventions (radians unless a name says Deg):
 //  - The seat convention: yaw + = turned LEFT (about up, counter-clockwise seen from above: the seat's yaw sign), pitch + = nose UP.
 //  - F61 (measured: gain 1.00, sign -): a seated rotation of +a moves the game camera by -a. So a seated +a cancels an aim turn of +a.
-//  - The game's yaw delta (comp+0x5F4) is positive for a turn to the RIGHT when the yaw sign is +1 (the default, ASSUMED: the mouse's +x);
-//    its pitch delta (comp+0x5F8) is positive UP when the pitch sign is +1 (the default, ASSUMED). A sign of 0 turns that axis off.
+//  - The game's yaw delta (comp+0x624) is positive for a turn to the RIGHT when the yaw sign is +1 (the default, ASSUMED: the mouse's +x);
+//    its pitch delta (comp+0x628) is positive UP when the pitch sign is +1 (the default, ASSUMED). A sign of 0 turns that axis off.
 //  - F67a: nothing is cancelled in the seated space and no seated rotation is published. The view is the headset's whatever the aim does (the F66
 //    flight 113909: the game camera never takes the injected aim, so F62b's cancel was the only thing turning the view, and held it still).
 constexpr double kAdsPi = 3.14159265358979323846;

@@ -1,4 +1,4 @@
-# Build 332841 RVAs bound by the native on-foot paths (docs/native-onfoot-334473-retarget-2026-10-23.md).
+# Build 332841 RVAs bound by the native on-foot paths (docs/native-onfoot-retarget-334925-2026-10-23.md).
 # Format for tools/build_diff.py map --rvas-file: one RVA per line, optional name, # comments.
 # 99 values, sorted (code, then .rdata, then .data). "(c)" marks a comment-only mention.
 # Not listed: 0x2939677 is a rel32 displacement quoted in a comment (0x434ECC0 - (0x1A15644 + 5)), not an RVA.
@@ -6,10 +6,10 @@
 0x741520 frAnim Animate handler
 0x831A10 Deactivate
 0xFDDD10 AO helper (c)
-0xFDE0D0 rest model matrix leaf (main-mapped -> 0xFDF1D0)
+0xFDE0D0 rest model matrix leaf
 0x19973D0 look-to-aim update
 0x1997C51 ADS action read site
-0x19B1240 povCamera handler (main-mapped -> 0x19B4000)
+0x19B1240 povCamera handler
 0x19B14E0 HumanoidPanelComponent gate (c)
 0x19B1587 panel patch site (76 73)
 0x19B15FC panel gate jbe target (c)
@@ -59,9 +59,9 @@
 0x3C9B760 caller root (name table)
 0x3C9BF53 caller return (name table)
 0x3DA1DE0 AMC submit job (body shift)
-0x3DA2242 AMC return address (same unit as main-mapped 0x3DA20DE)
+0x3DA2242 AMC return address
 0x3DA2C80 avatar visibility job (eye probe)
-0x3DD61AF root getter call (main-mapped comment -> 0x3DD8E6F)
+0x3DD61AF root getter call
 0x3DD9EA0 item-apply (c)
 0x3E75DA0 caller root (name table)
 0x3E75F6D caller return (name table)

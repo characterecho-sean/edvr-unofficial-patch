@@ -4702,9 +4702,9 @@ int wmain(int argc, wchar_t** argv) {
                     site[0] ^= 1;
                     const bool foreignChangeRefused = !nf::patchBytesMatch(site, nf::kWeaponUiBranchAfter, nf::kWeaponUiVerifyLen) &&
                                                       !nf::patchBytesMatch(site, nf::kWeaponUiBranchBefore, nf::kWeaponUiVerifyLen);
-                    const uint8_t originalCall[8] = {0xE8,0xEB,0x50,0x6C,0x01,0x80,0x7F,0x28};
+                    const uint8_t originalCall[8] = {0xE8,0x6B,0x55,0x6C,0x01,0x80,0x7F,0x28};
                     uint8_t hookedCall[8] = {};
-                    const uintptr_t callAddress = 0x1AAF120u;
+                    const uintptr_t callAddress = 0x1AB1960u;
                     const uintptr_t stubAddress = callAddress + 5 + 0x123456;
                     const bool callBuild = nf::weaponUiBuildGetterCall(originalCall, callAddress, stubAddress, hookedCall);
                     uint8_t foreignCall[8]; std::memcpy(foreignCall, hookedCall, sizeof(foreignCall)); foreignCall[2] ^= 1;

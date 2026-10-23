@@ -310,7 +310,7 @@ SelectorProbe probeSelector(uintptr_t selector) noexcept {
     p.ownerReadOk = guardedRead(selector + nofoot::kOwnerOffset, &p.owner, sizeof(p.owner));
     return p;
 }
-// Valid iff the selector's vtable is the setter's (image base + 0x52E9608), its owner is non-null, and owner+0x60 is the selector.
+// Valid iff the selector's vtable is the setter's (image base + 0x52EC798), its owner is non-null, and owner+0x60 is the selector.
 bool selectorValid(uintptr_t selector, const SelectorProbe& p) noexcept {
     return nofoot::selectorShapeOk(p.vtReadOk ? p.vt : 0, g_base + nofoot::kSetterVtableRva, p.ownerReadOk ? p.owner : 0, selector);
 }
@@ -325,7 +325,7 @@ bool checkIdentity(uintptr_t base, const char** why) noexcept {
         return false;
     }
     if (!nofoot::identityMatches(timestamp, imageSize)) {
-        *why = "the PE timestamp or image size is not build 332841's";
+        *why = "the PE timestamp or image size is not build 334925's";
         return false;
     }
     return true;
@@ -484,19 +484,19 @@ void installOnce() {
     // The vtable slot must hold the setter before anything is patched: the same function the build's vtable calls.
     uintptr_t slot = 0;
     if (!guardedRead(base + nofoot::kSetterVtableRva + nofoot::kSetterSlotOffset, &slot, sizeof(slot))) {
-        refuse("slot mismatch: the vtable slot at EliteDangerous64.exe+0x52E9608 could not be read");
+        refuse("slot mismatch: the vtable slot at EliteDangerous64.exe+0x52EC798 could not be read");
         return;
     }
     if (slot != base + nofoot::kSetterRva) {
         char b[360];
-        std::snprintf(b, sizeof(b), "slot mismatch: slot 5 of the vtable at EliteDangerous64.exe+0x52E9608 holds 0x%llX, not the setter at +0x%llX",
+        std::snprintf(b, sizeof(b), "slot mismatch: slot 5 of the vtable at EliteDangerous64.exe+0x52EC798 holds 0x%llX, not the setter at +0x%llX",
                       static_cast<unsigned long long>(slot - base), static_cast<unsigned long long>(nofoot::kSetterRva));
         refuse(b);
         return;
     }
     if (!bytesMatch(base + nofoot::kSetterRva, nofoot::kPrologue, nofoot::kPrologueBytes)) {
         char b[256];
-        std::snprintf(b, sizeof(b), "prologue mismatch: the %zu bytes at EliteDangerous64.exe+0x%llX are not build 332841's setter prologue",
+        std::snprintf(b, sizeof(b), "prologue mismatch: the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's setter prologue",
                       nofoot::kPrologueBytes, static_cast<unsigned long long>(nofoot::kSetterRva));
         refuse(b);
         return;
@@ -523,7 +523,7 @@ void installOnce() {
     }
     g_gate.store(1, std::memory_order_seq_cst);
     g_install = InstallState::Armed;
-    Log::get().note("native on foot: installed -- the render-mode setter at EliteDangerous64.exe+0x%llX (vtable +0x%llX slot 5, build 332841), "
+    Log::get().note("native on foot: installed -- the render-mode setter at EliteDangerous64.exe+0x%llX (vtable +0x%llX slot 5, build 334925), "
                     "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX; every setter call is logged from here, whatever "
                     "fix.native_on_foot says.",
                     static_cast<unsigned long long>(nofoot::kSetterRva), static_cast<unsigned long long>(nofoot::kSetterVtableRva),
@@ -1098,11 +1098,11 @@ void drainEvents() {
 }
 
 // ---- the gate byte (F2, method gate; frame thread) ---------------------------------------------------------------------------------
-// The requester at 0x28873C0 keeps the cinema partner mode only while the byte at EliteDangerous64.exe+0x5E82B3E is non-zero (verified,
-// build 332841; the design doc). At 0 it falls back to the base HMD mode, so the game requests HMD itself and nothing is substituted in
+// The requester at 0x2889940 keeps the cinema partner mode only while the byte at EliteDangerous64.exe+0x5E85B8A is non-zero (verified,
+// builds 332841 and 334925; the design doc). At 0 it falls back to the base HMD mode, so the game requests HMD itself and nothing is substituted in
 // the setter. The byte is written only after the identity check passes and only when it reads 1, and it is put back to 1 when the want
 // ends. A refusal is logged once per reason.
-constexpr uintptr_t kGateByteRva = 0x5E82B3E;
+constexpr uintptr_t kGateByteRva = 0x5E85B8A;
 
 void refuseGate(const std::string& why) {
     if (why == g_gateRefusalText) return;   // the same reason: already said
@@ -1138,7 +1138,7 @@ void gateByteTick(bool wantByte, const char* restoreReason) {
         }
         g_gateWritten = true;
         g_gateRefusalText.clear();
-        Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 1 -> 0 (method gate)");
+        Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E85B8A 1 -> 0 (method gate)");
         return;
     }
     if (!g_gateWritten) {
@@ -1148,13 +1148,13 @@ void gateByteTick(bool wantByte, const char* restoreReason) {
     if (!writableByte(address) || !guardedWriteByte(address, 1)) {
         if (!g_gateRestoreFailedNoted) {
             g_gateRestoreFailedNoted = true;
-            Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E could not be put back to 1 (%s); retrying each frame.", restoreReason);
+            Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E85B8A could not be put back to 1 (%s); retrying each frame.", restoreReason);
         }
         return;
     }
     g_gateWritten = false;
     g_gateRestoreFailedNoted = false;
-    Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 0 -> 1 (restored: %s)", restoreReason);
+    Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E85B8A 0 -> 1 (restored: %s)", restoreReason);
 }
 
 // The avatar census (F1, log only): the local third-person avatar's parts and view masks, from Explorer Cam's head-hiding capture, read-only.
@@ -1397,8 +1397,8 @@ void avatarCensusLine(uint64_t nowMs) {
 }
 
 // ---- F8: the first-person HUD override (TEMPORARY; approved by Sean 2026-10-13) ----------------------------------------------------
-// While native stereo is on foot, fix.native_on_foot_hud is on, and the identity check passes, the int32 at EliteDangerous64.exe+0x5E82B48
-// is written from -1 (auto) to 1: the first-person HUD's enable input, which the requester at 0x2887A15 reads (the design doc). It is put
+// While native stereo is on foot, fix.native_on_foot_hud is on, and the identity check passes, the int32 at EliteDangerous64.exe+0x5E85B94
+// is written from -1 (auto) to 1: the first-person HUD's enable input, which the requester at 0x2889F95 reads (the design doc). It is put
 // back to -1 when any of those stops holding, at shutdown, or when a check fails. It is written only while it reads -1, and put back only
 // while it reads our 1; any other value is someone else's and is left alone. The write is four bytes (guardedWriteDword).
 bool g_hudOverrideHeld = false;                 // frame thread only: EDVR holds the override at 1 and owes the game a -1 back
@@ -1670,8 +1670,8 @@ void codePatchTick(CodePatch& p, bool want, const char* reason) {
 }
 
 // ---- F11: the two mesh patches (TEMPORARY; approved by Sean 2026-10-14) ------------------------------------------------------------
-// fix.native_on_foot_hud_mesh: the HRC creation gate, 80 -> 78 at +0x1A149A8 (verify FF 90 80 00 00 00 at +0x1A149A6).
-// F34: the world placement A/B (74 -> EB at +0x1A36453) is removed with its key.
+// fix.native_on_foot_hud_mesh: the HRC creation gate, 80 -> 78 at +0x1A16F48 (verify FF 90 80 00 00 00 at +0x1A16F46).
+// F34: the world placement A/B (74 -> EB at +0x1A38AD3) is removed with its key.
 // Each is applied only while native stereo is on foot and the first-person HUD override is held. Its bytes are verified before the write
 // (refused and logged otherwise), and the original byte is restored only while the verified bytes still read as this patch left them.
 struct MeshSite {
@@ -1689,7 +1689,7 @@ struct MeshSite {
     bool restoreNoted = false;
     uint64_t restoreSerial = 0; // frame thread only; advances only after our original byte was written back
 };
-MeshSite g_meshCreate{"hud mesh", 0x1A149A6, 6, nofoot::kMeshSite2Expect, nofoot::kMeshSite2Patched, 0x1A149A8,
+MeshSite g_meshCreate{"hud mesh", 0x1A16F46, 6, nofoot::kMeshSite2Expect, nofoot::kMeshSite2Patched, 0x1A16F48,
                       0x80, 0x78, "80 -> 78"};
 // F70d: the authored weapon UI attachment basis is kept while native on-foot VR is active, independent of the HUD override.
 MeshSite g_weaponUiPatch{"weapon UI attachment basis", nofoot::kWeaponUiVerifyRva, nofoot::kWeaponUiVerifyLen,
@@ -2014,7 +2014,7 @@ void weaponUiGetterCallTick(bool want) {
         weaponUiGetterPatchRefuse("the relay is outside rel32 range or the verified call is not E8");
         return;
     }
-    g_weaponUiGetterTarget = g_base + 0x3174210;
+    g_weaponUiGetterTarget = g_base + 0x3176ED0;
     uint8_t current[8] = {};
     if (!guardedRead(address, current, sizeof(current)) || !nofoot::patchBytesMatch(current, p.original, sizeof(current))) {
         weaponUiGetterPatchRefuse("the call bytes changed before installation");
@@ -2049,9 +2049,9 @@ WeaponUiPartRead weaponUiFindPart(uintptr_t renderer, uintptr_t inst, WeaponUiPa
     uintptr_t base = g_base, rendererVt = 0, provider = 0, providerVt = 0, storage = 0;
     uint64_t count = 0, capacity = 0;
     const uintptr_t max = (std::numeric_limits<uintptr_t>::max)();
-    if (!base || base > max - 0x51F8160 || !weaponUiReadAt(renderer, 0, &rendererVt, sizeof(rendererVt)) || rendererVt != base + 0x51F8160 ||
+    if (!base || base > max - 0x51FB300 || !weaponUiReadAt(renderer, 0, &rendererVt, sizeof(rendererVt)) || rendererVt != base + 0x51FB300 ||
         !weaponUiReadAt(renderer, 0x170, &provider, sizeof(provider)) || provider < 0x10000 ||
-        !weaponUiReadAt(provider, 0, &providerVt, sizeof(providerVt)) || base > max - 0x51F77D0 || providerVt != base + 0x51F77D0 ||
+        !weaponUiReadAt(provider, 0, &providerVt, sizeof(providerVt)) || base > max - 0x51FA970 || providerVt != base + 0x51FA970 ||
         !weaponUiReadAt(renderer, 0x1F0, &count, sizeof(count)) || !weaponUiReadAt(renderer, 0x1F8, &capacity, sizeof(capacity)) ||
         !weaponUiReadAt(renderer, 0x200, &storage, sizeof(storage))) return kWeaponUiPartRefused;
     if (!capacity || capacity > 256 || (capacity & (capacity - 1)) || count > capacity || storage < 0x10000) return kWeaponUiPartRefused;
@@ -2125,7 +2125,7 @@ void weaponUiGetterObserve(const WeaponUiGetterObservation* observation) noexcep
     g_weaponUiGetterCaptured.fetch_add(1, std::memory_order_relaxed);
 }
 void weaponUiObserveSubmit(uintptr_t inst, uint32_t callerRva) noexcept {
-    if (!g_weaponUiSubmitGate.load(std::memory_order_relaxed) || (callerRva != 0x1A1485D && callerRva != 0x1A148CD) || !nativeOnFootActive() ||
+    if (!g_weaponUiSubmitGate.load(std::memory_order_relaxed) || (callerRva != 0x1A16DFD && callerRva != 0x1A16E6D) || !nativeOnFootActive() ||
         !g_weaponUiPatchLive.load(std::memory_order_relaxed)) return;
     const uintptr_t renderer = g_weaponUiRendererTls;
     if (!renderer) { g_weaponUiNoTls.fetch_add(1, std::memory_order_relaxed); return; }
@@ -2741,9 +2741,9 @@ void f13FrameTick(uint64_t nowMs) {
 }
 
 // ---- F13: the visor override (TEMPORARY; the RemLok test; approved by Sean 2026-10-14) ------------------------------------------
-// While native stereo is on foot, breathable air holds (fix.native_on_foot_breathable_visor is up, F16), and the identity check passes: both bytes must read 0; +0x5F741B8 is
-// written 0 (the forced visor state, up) first, then +0x5F741B7 is written 1 (the override is active). The restore writes +0x5F741B7 back to
-// 0 only while it still reads our 1; +0x5F741B8 stays 0. A refusal is logged once per reason (as the gate byte).
+// While native stereo is on foot, breathable air holds (fix.native_on_foot_breathable_visor is up, F16), and the identity check passes: both bytes must read 0; +0x5F772E3 is
+// written 0 (the forced visor state, up) first, then +0x5F772E2 is written 1 (the override is active). The restore writes +0x5F772E2 back to
+// 0 only while it still reads our 1; +0x5F772E3 stays 0. A refusal is logged once per reason (as the gate byte).
 bool g_visorWritten = false;               // frame thread only: EDVR holds the override and owes the game a 0 back
 std::string g_visorRefusalText;            // frame thread only
 bool g_visorRestoreFailedNoted = false;    // frame thread only
@@ -2819,11 +2819,11 @@ void visorTick(bool want, const char* restoreReason) {
 }
 
 // ---- F14: the HUD spread (a user setting), the HUD layout probe (read only), and the reticle identification stub (TEMPORARY) --------------
-// SPREAD. While native stereo is on foot, the creation patch is in, and spread > 0, the game's HUD margins at +0x5E7A754 (x, game 0.027) and
-// +0x5E7A758 (y, game 0.06) are written 0.027 + spread and 0.06 + spread, clamped below 0.489. The game re-sends the HUD layout when the HRC's
+// SPREAD. While native stereo is on foot, the creation patch is in, and spread > 0, the game's HUD margins at +0x5E7D5D8 (x, game 0.027) and
+// +0x5E7D5DC (y, game 0.06) are written 0.027 + spread and 0.06 + spread, clamped below 0.489. The game re-sends the HUD layout when the HRC's
 // own copies differ from these globals, so nothing is forced. The current values must be the game's own or ours; otherwise nothing is written.
-constexpr uintptr_t kMarginXRva = 0x5E7A754;
-constexpr uintptr_t kMarginYRva = 0x5E7A758;
+constexpr uintptr_t kMarginXRva = 0x5E7D5D8;
+constexpr uintptr_t kMarginYRva = 0x5E7D5DC;
 constexpr float kMarginXGame = 0.027f;
 constexpr float kMarginYGame = 0.06f;
 constexpr float kMarginCap = 0.489f;
@@ -2917,7 +2917,7 @@ void spreadTick(bool want, float spread, const char* reason) {
 }
 
 // ---- F17: the HUD element scale (a user setting, live) ----------------------------------------------------------------------------------
-// RE (the layout routine 0x1AB32F0, branch at 0x1AB3351): when the byte at +0x5F741CA is non-zero, the layout scale S is the float at +0x5E7A760
+// RE (the layout routine 0x1AB5B30, branch at 0x1AB5B91): when the byte at +0x5F77202 is non-zero, the layout scale S is the float at +0x5E7D5E4
 // (1.0 in the file); when it is zero, S = min(1, aspect / 1.7222). S multiplies every part's scale and its spread around the centre. While the setting
 // is 0.30..2.00 (0 leaves the game's own scale: nothing is written), native stereo is on foot and the HUD mesh patch is in, the float is written k
 // first and the byte 1 second; the layout re-send (layoutResendTick) then applies it. Put back (the byte 0, then the float 1.0) when the setting goes
@@ -3011,7 +3011,7 @@ void elemScaleTick(bool want, float k, const char* reason) {
     Log::get().note("native on foot hud element scale: restored to the game's own (1.0, byte 0; %s)", reason);
 }
 
-// LAYOUT HOOK (F14 probe; F16 writer). EliteDangerous64.exe+0x1A0DCD0 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
+// LAYOUT HOOK (F14 probe; F16 writer). EliteDangerous64.exe+0x1A10210 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
 // once per HUD part per layout re-send. The prologue is verified (the first five bytes are mov [rsp+0x20],rbx: no rip-relative operand, no
 // branch). The original runs first; then the fields are read under SEH and one line is queued for the frame thread. Six arguments are forwarded.
 struct F14Line {
@@ -3198,7 +3198,7 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
 }
 
 // RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
-// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
+// EliteDangerous64.exe+0x1A17BE4 (the call to 0x4351920, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
 
 struct F14Key {
     bool used = false;
@@ -3861,13 +3861,13 @@ void __fastcall reticleWorldPost(void* node) noexcept {
 // The stub: push rdx; sub rsp,0x20; mov rdx,rsi; mov rax,probe; call rax; add rsp,0x20; pop rdx; mov rcx,[rsi+0x60]; call real; post; ret
 // (F25: the real call is now a call, so the post-call can write the instance; rax is kept across both.)
 // The probe gets rcx (the instance, as the game passed it) and rdx = rsi (the node); rdx is preserved for the real function.
-constexpr uintptr_t kReticleCallRva = 0x1A15644;      // the 5-byte call E8 rel32
-constexpr uintptr_t kReticleLoadRva = 0x1A15640;      // mov rcx,[rsi+0x60] (48 8B 4E 60), the 4 bytes before the call
-constexpr uintptr_t kReticleFnRva = 0x434ECC0;        // the real function the call targets
-const uint8_t kReticleExpect[9] = {0x48, 0x8B, 0x4E, 0x60, 0xE8, 0x77, 0x96, 0x93, 0x02};
+constexpr uintptr_t kReticleCallRva = 0x1A17BE4;      // the 5-byte call E8 rel32
+constexpr uintptr_t kReticleLoadRva = 0x1A17BE0;      // mov rcx,[rsi+0x60] (48 8B 4E 60), the 4 bytes before the call
+constexpr uintptr_t kReticleFnRva = 0x4351920;        // the real function the call targets
+const uint8_t kReticleExpect[9] = {0x48, 0x8B, 0x4E, 0x60, 0xE8, 0x37, 0x9D, 0x93, 0x02};
 uint8_t* g_reticleStub = nullptr;                     // frame thread only: the stub page (kept after a restore)
 bool g_reticleInstalled = false;                      // frame thread only: the call points at the stub
-int32_t g_reticleOrigRel = 0;                         // the original rel32 (0x02939677)
+int32_t g_reticleOrigRel = 0;                         // the original rel32 (0x02939D37)
 bool g_reticleRefusalNoted = false;                   // frame thread only
 
 __declspec(noinline) bool guardedStoreDword(uintptr_t address, uint32_t value) noexcept {
@@ -3878,7 +3878,7 @@ __declspec(noinline) bool guardedStoreDword(uintptr_t address, uint32_t value) n
         return false;
     }
 }
-// A single 4-byte store to the rel32 at call+1. The rel32 lies within one 64-byte cache line (its bytes are 0x1A15645..0x1A15648), so one
+// A single 4-byte store to the rel32 at call+1. The rel32 lies within one 64-byte cache line (its bytes are 0x1A17BE5..0x1A17BE8), so one
 // store is single-copy atomic on x86; the instruction is not torn for a thread that is executing it.
 bool storeRel32(uintptr_t address, int32_t rel) noexcept {
     DWORD old = 0;
@@ -3912,7 +3912,7 @@ void reticleTick(bool want, const char* reason) {
             return;
         }
         if (std::memcmp(cur, kReticleExpect, sizeof(cur)) != 0) {
-            refuseReticle("the bytes at +0x1A15640 are not mov rcx,[rsi+0x60] and call 0x434ECC0");
+            refuseReticle("the bytes at +0x1A17BE0 are not mov rcx,[rsi+0x60] and call 0x4351920");
             return;
         }
         int32_t origRel = 0;
@@ -3985,7 +3985,7 @@ void reticleTick(bool want, const char* reason) {
 }
 
 // F16: the game re-sends the HUD layout only when its own margins or [HRC+0x290] say so (RE: the byte is set to 1 again after the re-send, at
-// 0x1AB385B). When the on-state, a group offset or the spread changes, one re-send is asked for by writing 0 to [HRC+0x290] (guarded). The hook above
+// 0x1AB609B). When the on-state, a group offset or the spread changes, one re-send is asked for by writing 0 to [HRC+0x290] (guarded). The hook above
 // then applies the offsets, or their absence, to the new layout.
 struct LayoutStamp {
     bool on = false;
@@ -4137,7 +4137,7 @@ struct F9ProbeSpec {
 bool installF9ProbeInto(F9Probe& pr, const F9ProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
     const uintptr_t target = base + s.rva;
     if (!bytesMatch(target, s.prologue, s.prologueBytes)) {
-        *whyOut = "the prologue bytes are not build 332841's";
+        *whyOut = "the prologue bytes are not build 334925's";
         return false;
     }
     size_t covered = 0;
@@ -4234,20 +4234,23 @@ void installF9ProbesOnce() {
 
 // ---- F22: the training load wait (read only), camera rig probes A and B (read only), and look to aim -----------------------------------
 // Every hook here follows the F9 probe pattern: the prologue bytes are verified before any write, a near relay carries the callback, and an
-// install refusal is logged with its reason and leaves the game as it was. Addresses are build 332841's (Epic exe checked offline, 2026-10-14).
-constexpr uintptr_t kLoadWaitRva = 0x260D6B0;   // the load pipeline's wait condition: vtable slot 3 of +0x5298390; false = waiting on ReadyToAllocIDs
+// install refusal is logged with its reason and leaves the game as it was. Addresses are build 334925's (Steam exe checked offline, 2026-10-23; retargeted from 332841, Epic exe checked 2026-10-14).
+constexpr uintptr_t kLoadWaitRva = 0x260FC30;   // the load pipeline's wait condition: vtable slot 3 of +0x529B530; false = waiting on ReadyToAllocIDs
 const uint8_t kLoadWaitPrologue[10] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x20};
-constexpr uintptr_t kLookUpdateRva = 0x19973D0; // PlayerHumanoidControlActivity update: act in rcx; reads rotate-abs at [[act+0x190]+0x18]
+constexpr uintptr_t kLookUpdateRva = 0x1999190; // PlayerHumanoidControlActivity update: act in rcx; reads rotate-abs at [[act+0x190]+0x18]
 const uint8_t kLookUpdatePrologue[32] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x55,
                                          0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8, 0x08, 0xFF, 0xFF, 0xFF, 0x48};
-constexpr uintptr_t kAdsActionReadRva = 0x1997C51;
+constexpr uintptr_t kAdsActionReadRva = 0x1999A11;
 const uint8_t kAdsActionReadBytes[31] = {0x48, 0x8B, 0x8E, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x01, 0x4C, 0x8B, 0x80, 0x30, 0x01, 0x00,
                                          0x00, 0x48, 0x8B, 0x86, 0xC0, 0x01, 0x00, 0x00, 0x0F, 0xB6, 0x50, 0x24, 0x41, 0xFF, 0xD0};
-constexpr uintptr_t kLookProcRva = 0x1A9C370;  // the processor: comp in rcx, dt in xmm1; its yaw delta is stored at comp+0x5F4
+constexpr uintptr_t kLookProcRva = 0x1A9EB50;  // the processor: comp in rcx, dt in xmm1; its yaw delta is stored at comp+0x624
 const uint8_t kLookProcPrologue[5] = {0x48, 0x8B, 0xC4, 0x55, 0x56};
 constexpr uintptr_t kLookUpdPitchOff = 0x198, kLookUpdRotOff = 0x190, kLookActValueOff = 0x18;   // act+0x190 and +0x198 are the action pointers
-constexpr uintptr_t kCompYawDeltaOff = 0x5F4, kCompBasisOff = 0x5B0, kCompGainLoOff = 0x7D8, kCompGainHiOff = 0x7DC;
-constexpr uintptr_t kCompPitchDeltaOff = 0x5F8;   // F62b: the processor's pitch delta (F22's capstone read: stored beside the yaw's)
+// Build 334925: the processor's component grew 0x30 bytes ahead of +0x4A8, so every field the code reads here moved by +0x30 (332841: yaw
+// delta 0x5F4, pitch delta 0x5F8, basis 0x5B0, gains 0x7D8 / 0x7DC). The proof is the aligned processor: its one qword store of the yaw/pitch
+// pair is `movsd [rdi+0x5F4], xmm0` in 332841 and `movsd [rdi+0x624], xmm0` in 334473 and 334925.
+constexpr uintptr_t kCompYawDeltaOff = 0x624, kCompBasisOff = 0x5E0, kCompGainLoOff = 0x808, kCompGainHiOff = 0x80C;
+constexpr uintptr_t kCompPitchDeltaOff = 0x628;   // F62b: the processor's pitch delta (F22's capstone read: stored beside the yaw's)
 constexpr float kLookMaxTurnRad = 0.1745f;     // the most the controller asks the body to turn in one frame (10 degrees)
 constexpr uint64_t kLookHeadMaxAgeMs = 500;    // a head sample older than this does not steer
 
@@ -4282,12 +4285,12 @@ std::atomic<uint32_t> g_lookUpdCalls{0}, g_lookWrites{0}, g_lookRefusals{0}, g_l
 std::atomic<const char*> g_lookWhy{nullptr};   // the last refusal's reason (shown on the 5 s line)
 
 // ---- F23 (Part E, TEMPORARY, read only): the load pipeline's stage timers ("load stages:") ---------------------------------------------
-// The dispatcher (EliteDangerous64.exe+0x1CA6510, a virtual): rdx = pipeline node, obj = rdx - 0x20 (rdx 0 is skipped), rcx unused, xmm2 = dt,
+// The dispatcher (EliteDangerous64.exe+0x1CA8DD0, a virtual): rdx = pipeline node, obj = rdx - 0x20 (rdx 0 is skipped), rcx unused, xmm2 = dt,
 // returns al. Pre-hook only: the observation reads the state the previous call left, then the original runs and its result is returned unchanged.
 // The relay uses RAX only, so rdx and xmm2 reach the callback and the original intact (the same check as the processor hook).
-constexpr uintptr_t kStageDispatchRva = 0x1CA6510;
+constexpr uintptr_t kStageDispatchRva = 0x1CA8DD0;
 const uint8_t kStageDispatchPrologue[16] = {0x40, 0x55, 0x41, 0x54, 0x48, 0x83, 0xEC, 0x38, 0x45, 0x33, 0xE4, 0x0F, 0x29, 0x74, 0x24, 0x20};
-constexpr uintptr_t kStageTableRva = 0x5E7B460;   // 21 entries, stride 0x30; entry+0 is a char* into .rdata (the stage name)
+constexpr uintptr_t kStageTableRva = 0x5E7E480;   // 21 entries, stride 0x30; entry+0 is a char* into .rdata (the stage name)
 constexpr size_t kStageCount = 21, kStageEntryStride = 0x30, kStageNameMax = 48;
 constexpr uintptr_t kStageRecOff = 0x2B0, kStageRecStride = 0x18, kStageClockOff = 0x4C4, kStageNetOff = 0x4B8, kStageNetGateOff = 0xC0;
 constexpr uint32_t kStageGateOpen = 5;
@@ -4476,8 +4479,8 @@ void loadStagesFrameTick(uint64_t nowMs) {
 // the thunk makes, so the original sees what the game gave it. The shim's jump target is a slot written after the install (before the gate opens).
 // Prologues verified before writing (F9Probe install). Lines: "training connect:".
 namespace f28 {
-constexpr uintptr_t kRunRva = 0x1D15300, kStartRva = 0x1D818D0, kStopRva = 0x1D4A710, kDtorRva = 0x1D0FBA0, kCtorRva = 0x1CFBBE0,
-                    kStateRva = 0x1D7C8E0, kRirRva = 0x653C50, kDeactRva = 0x831A10, kSgmmRva = 0x1D1CDF0;
+constexpr uintptr_t kRunRva = 0x1D17B60, kStartRva = 0x1D84130, kStopRva = 0x1D4CF70, kDtorRva = 0x1D12400, kCtorRva = 0x1CFE440,
+                    kStateRva = 0x1D7F140, kRirRva = 0x653D50, kDeactRva = 0x831B10, kSgmmRva = 0x1D1F650;
 const uint8_t kRunB[8] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x56, 0x57};
 const uint8_t kStartB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xD9};
 const uint8_t kStopB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9};
@@ -4488,7 +4491,7 @@ const uint8_t kRirB[8] = {0x48, 0x81, 0x79, 0x18, 0x00, 0x10, 0x00, 0x00};
 const uint8_t kDeactB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9};
 const uint8_t kSgmmB[15] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20};
 // v2: ActivitySet (AM) ClearAll and Remove. Prologues read from the Epic exe: whole instructions, no calls or RIP-relative operands in the stolen bytes.
-constexpr uintptr_t kClearRva = 0x4C90C40, kRemoveRva = 0x4C8FAF0;
+constexpr uintptr_t kClearRva = 0x4C93700, kRemoveRva = 0x4C925B0;
 const uint8_t kClearB[20] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20};
 const uint8_t kRemoveB[19] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xF9, 0x48, 0x8B, 0xDA, 0x48, 0x8B, 0xCA};
 enum { kRun, kStart, kStop, kDtor, kCtor, kState, kRir, kDeact, kSgmm, kClear, kRemove, kCount };
@@ -4586,15 +4589,15 @@ void f28Untrack(uint64_t act) {
 // only when the destroyed CTSA had not reached sessions (state at the destroy not 10) and it came within 10 s of the destroy (f30DestroyNote,
 // the Deactivate hook); a cycle ends (g_f30Dead cleared) when it is recovered, declined, gives up, or 10 s pass with no Deactivate.
 // A (prevent, f30HoldSgmm): SGMM in state 2 (the pending StartTutorial) with a CTSA alive in states 1-9 has its body skipped for up to 10 s.
-//   The skipped body is the game's own not-ready exit (+0x1D1D1E2): for state 2 it returns al = (state == 0) = 0, which the hook returns.
+//   The skipped body is the game's own not-ready exit (+0x1D1FA42): for state 2 it returns al = (state == 0) = 0, which the hook returns.
 // B (recover, f30RecoverTick, from the owner AM's Update after the original returns): after a CTSA is destroyed and a load is pending (a Deactivate
-//   after the destroy), with the IDProvider link down, the owner AM gets a new CTSA the game's way (+0x4C8E500, +0x4C907A0, +0x4C8F960, +0x4C8EA60),
-//   and StartPending (+0x4C90B90) once if no Start follows within 1 s. Two attempts per pending load. The AM owns the objects: nothing here frees one.
+//   after the destroy), with the IDProvider link down, the owner AM gets a new CTSA the game's way (+0x4C90FC0, +0x4C93260, +0x4C92420, +0x4C91520),
+//   and StartPending (+0x4C93650) once if no Start follows within 1 s. Two attempts per pending load. The AM owns the objects: nothing here frees one.
 namespace f30 {
 constexpr uint64_t kFirstAttemptMs = 8000, kRecoverQuietMs = 10000, kStartWaitMs = 1000;
 constexpr uint32_t kAttempts = 2;
-constexpr uintptr_t kUpdateRva = 0x4C8EEA0, kSetInitRva = 0x4C8E500, kSetInsertRva = 0x4C907A0, kInstantiateRva = 0x4C8F960,
-                    kSetFreeRva = 0x4C8EA60, kStartPendingRva = 0x4C90B90, kTypeKeyRva = 0x5F7D7F8;
+constexpr uintptr_t kUpdateRva = 0x4C91960, kSetInitRva = 0x4C90FC0, kSetInsertRva = 0x4C93260, kInstantiateRva = 0x4C92420,
+                    kSetFreeRva = 0x4C91520, kStartPendingRva = 0x4C93650, kTypeKeyRva = 0x5F80938;
 const uint8_t kUpdateB[11] = {0x41, 0x56, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x89, 0x5C, 0x24, 0x70};
 const uint8_t kSetInitB[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
 const uint8_t kSetInsertB[8] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74};
@@ -4802,12 +4805,12 @@ uint64_t __fastcall f28RunHooked(void* act, float dt) {
     }
     return reinterpret_cast<F28ShimFn>(g_f28RunShim)(act, static_cast<uint8_t*>(act) + 0x20, dt);   // rdx = act+0x20 (the thunk's value)
 }
-// ---- F32 (probe v4, read only; behind fix.training_connect_probe). SGMM Run (+0x1D1CDF0) is no longer hooked: the F31 flight never called it.
+// ---- F32 (probe v4, read only; behind fix.training_connect_probe). SGMM Run (+0x1D1F650) is no longer hooked: the F31 flight never called it.
 namespace f32 {
-constexpr uintptr_t kStartedInsertRva = 0x4C8E020, kPhaseRva = 0x1D1D220;
+constexpr uintptr_t kStartedInsertRva = 0x4C90AE0, kPhaseRva = 0x1D1FA80;
 // The started-array insert: the 18 bytes end on an instruction boundary (sub rsp,0x40).
 const uint8_t kStartedInsertB[18] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40};
-// The +0x1D1D220 function: 16 bytes, whole instructions. The brief's 15 would split `lea rbp,[rsp-0x27]`.
+// The +0x1D1FA80 function: 16 bytes, whole instructions. The brief's 15 would split `lea rbp,[rsp-0x27]`.
 const uint8_t kPhaseB[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xD9};
 }  // namespace f32
 
@@ -4854,7 +4857,7 @@ uint64_t __fastcall f32StartedHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
     return original ? original(a1, a2, a3, a4, s5, s6, s7, s8) : 0;
 }
 
-// +0x1D1D220 (dt in xmm1, via the shim, as the SGMM shim was): the calls and [this+0x138] are logged each second by f32Second.
+// +0x1D1FA80 (dt in xmm1, via the shim, as the SGMM shim was): the calls and [this+0x138] are logged each second by f32Second.
 uint64_t __fastcall f32PhaseHooked(void* self, float dt) {
     g_f32PhaseCalls.fetch_add(1);
     g_f32PhaseTotal.fetch_add(1);
@@ -4890,7 +4893,7 @@ void f32CountUpdate(void* am) {
     ++g_f32AmOther;
 }
 
-// Frame thread, once a second: the +0x1D1D220 line, and for the 120 s after a Deactivate the top 8 AMs by Update calls this second.
+// Frame thread, once a second: the +0x1D1FA80 line, and for the 120 s after a Deactivate the top 8 AMs by Update calls this second.
 void f32Second(uint64_t nowMs) {
     if (!g_f32ProbeOn) return;
     if (g_f32Phase.original) {
@@ -4898,7 +4901,7 @@ void f32Second(uint64_t nowMs) {
         const uint64_t self = g_f32PhaseSelf.load();
         uint32_t st = 0;
         const bool okS = self && guardedRead(static_cast<uintptr_t>(self) + 0x138, &st, 4);
-        Log::get().note("training connect: +0x1D1D220: %llu calls this second (%llu in all), this %s, [this+0x138] %s",
+        Log::get().note("training connect: +0x1D1FA80: %llu calls this second (%llu in all), this %s, [this+0x138] %s",
                         static_cast<unsigned long long>(calls), static_cast<unsigned long long>(g_f32PhaseTotal.load()),
                         self ? f28Hex(self).c_str() : "none", okS ? f28State(st).c_str() : "unread");
     }
@@ -4943,7 +4946,7 @@ void f32Second(uint64_t nowMs) {
                     static_cast<unsigned long long>(total), used, static_cast<unsigned long long>(other), line.empty() ? "none" : line.c_str());
 }
 
-// Install (F32): the started insert and the +0x1D1D220 function. Each refusal is one line; the game is not touched by a refused one.
+// Install (F32): the started insert and the +0x1D1FA80 function. Each refusal is one line; the game is not touched by a refused one.
 void f32InstallProbes(uintptr_t base) {
     size_t got = 0;
     std::string why;
@@ -4960,10 +4963,10 @@ void f32InstallProbes(uintptr_t base) {
                          "training connect"};
     if (g_f32PhaseShim && installF9ProbeInto(g_f32Phase, s2, base, &got, &why)) {
         std::memcpy(g_f32PhaseShim + 9, &g_f32Phase.original, 8);
-        Log::get().note("training connect: +0x1D1D220 installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue 16 bytes verified (read only)",
+        Log::get().note("training connect: +0x1D1FA80 installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue 16 bytes verified (read only)",
                         static_cast<unsigned long long>(f32::kPhaseRva), got);
     } else {
-        Log::get().note("training connect: +0x1D1D220 NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+        Log::get().note("training connect: +0x1D1FA80 NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
                         static_cast<unsigned long long>(f32::kPhaseRva), why.c_str());
     }
 }
@@ -5089,7 +5092,7 @@ void f30RecoverTick(void* am, uint64_t ms) {
     if (!g_f30StartPendingDone && ms - g_f30AttemptMs >= f30::kStartWaitMs && g_f30StartSeq.load() == g_f30AttemptStart) {
         g_f30StartPendingDone = true;
         const bool ok = f30StartPendingSafe(g_f30Base, am);
-        Log::get().note("connection retry: no Start within 1 s of attempt %u: StartPending (+0x4C90B90) on the owner AM %s",
+        Log::get().note("connection retry: no Start within 1 s of attempt %u: StartPending (+0x4C93650) on the owner AM %s",
                         static_cast<unsigned>(g_f30Attempts), ok ? "returned" : "FAULTED (SEH)");
     }
     const bool timedOut = ms - g_f30AttemptMs >= f30::kRecoverQuietMs;
@@ -5219,7 +5222,7 @@ void installF28ProbesOnce(uintptr_t base) {
     if (g_f28RunShim && g_f28[f28::kRun].original) std::memcpy(g_f28RunShim + 9, &g_f28[f28::kRun].original, 8);
     g_f32ProbeOn = probeOn;
     f30InstallRecovery(base, probeOn);   // F30 part B and the F32 counts: the AM Update pre-hook and its callee checks
-    if (probeOn) f32InstallProbes(base);   // F32: the started insert and the +0x1D1D220 function (read only)
+    if (probeOn) f32InstallProbes(base);   // F32: the started insert and the +0x1D1FA80 function (read only)
     g_f28InstallMs = GetTickCount64();
 }
 
@@ -5229,7 +5232,7 @@ void f28FrameTick(uint64_t nowMs) {
     if (!g_f28Installed) return;
     if (g_f28LastSecMs && nowMs - g_f28LastSecMs < 1000) return;
     g_f28LastSecMs = nowMs;
-    f32Second(nowMs);   // F32: the +0x1D1D220 calls and the per-AM Update counts, each second
+    f32Second(nowMs);   // F32: the +0x1D1FA80 calls and the per-AM Update counts, each second
     uint64_t runN = 0, rirN = 0, ra[4] = {}, raN[4] = {}, runRcx = 0, runRa = 0, runTid = 0, rirRcx = 0;
     float runDt = 0.0f;
     uint64_t ctsa[4] = {};
@@ -5330,7 +5333,7 @@ bool __fastcall loadWaitHooked(void* self, void* a2, void* a3, void* a4) {
     return r;
 }
 
-// Probe B (read only), called from the P1 callback for each AMC. The root getter is the game's own call at 0x3DD61AF (rcx = [AMC+0x208], vt+0x20).
+// Probe B (read only), called from the P1 callback for each AMC. The root getter is the game's own call at 0x3DD8DCF (rcx = [AMC+0x208], vt+0x20).
 using F22RootFn = float* (__fastcall*)(void*);
 __declspec(noinline) bool callRootGetter(uintptr_t fn, uintptr_t obj, uintptr_t* outMatrix) noexcept {
     __try {
@@ -5372,7 +5375,7 @@ void rigProbeB(void* amc, uint64_t now) {
     else std::snprintf(by, sizeof(by), "unread");
     if (okRoot) {
         Log::get().note("native on foot rig probe B: AMC mode %u root row2 yaw %.2f pitch %.2f deg, origin (%.3f, %.3f, %.3f); headset (C) yaw %s deg; "
-                        "look basis (comp+0x5B0) row2 yaw %s deg (read only)",
+                        "look basis (comp+0x5E0) row2 yaw %s deg (read only)",
                         static_cast<unsigned>(mode), f13YawDeg(m), f13PitchDeg(m), static_cast<double>(m[12]), static_cast<double>(m[13]),
                         static_cast<double>(m[14]), hy, by);
     } else {
@@ -5382,7 +5385,7 @@ void rigProbeB(void* amc, uint64_t now) {
 }
 
 // ---- F24 Part F, F34: the marker entry (probes 1 to 3 are removed; the marker entry stays, always on in VR, for the same-call head read) ----
-constexpr uintptr_t kMarkerRva = 0x1A14D80;     // the marker render entry: rcx = this, rdx = list A, r8 = list B
+constexpr uintptr_t kMarkerRva = 0x1A17320;     // the marker render entry: rcx = this, rdx = list A, r8 = list B
 const uint8_t kMarkerPrologue[19] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
                                      0x48, 0x81, 0xEC, 0xF0, 0x02, 0x00, 0x00};
 F9Probe g_f24Marker;   // the marker entry's relay (the name is historical)
@@ -5584,8 +5587,8 @@ void f83ObserveNativeSelection(void* activity) noexcept {
     if (in.activityValid) in.sinkRead = guardedRead(a + 0x88, &sink, sizeof(sink)) && sink >= 0x10000 && sink <= UINTPTR_MAX - 0x1C0;
     in.sink = in.sinkRead ? sink : 0;
     bool codeOk = false;
-    if (in.sinkRead && g_base && guardedRead(sink, &vtable, sizeof(vtable)) && vtable == g_base + 0x51F9BD8 &&
-        guardedRead(vtable + 0x1B0, &getter, sizeof(getter)) && getter == g_base + 0x1A439F0) {
+    if (in.sinkRead && g_base && guardedRead(sink, &vtable, sizeof(vtable)) && vtable == g_base + 0x51FCD78 &&
+        guardedRead(vtable + 0x1B0, &getter, sizeof(getter)) && getter == g_base + 0x1A46170) {
         const uint8_t expected[7] = {0x8B, 0x81, 0x80, 0x01, 0x00, 0x00, 0xC3};
         uint8_t got[7] = {};
         codeOk = guardedRead(getter, got, sizeof(got)) && std::memcmp(got, expected, sizeof(got)) == 0;
@@ -5599,7 +5602,7 @@ void f83ObserveNativeSelection(void* activity) noexcept {
         in.categoryCacheRead = guardedRead(sink + 0x1B0, cache, sizeof(cache));
         if (in.categoryCacheRead) std::memcpy(in.categoryId, cache, sizeof(cache));
     }
-    in.holsterRead = g_base && guardedRead(g_base + 0x5E7A7B4, &in.holsterId, sizeof(in.holsterId));
+    in.holsterRead = g_base && guardedRead(g_base + 0x5E7D7D4, &in.holsterId, sizeof(in.holsterId));
     in.renderFrame = g_f44Frame.load(std::memory_order_relaxed);
     in.qpc = f30Qpc();
     const nofoot::NativePrimarySelectionDecision d = g_f83SelectionState.observe(in);
@@ -6027,7 +6030,7 @@ void lookToAimTick(uint64_t nowMs, bool session) {
         g_lookResN = 0;
         g_lookRatioN = 0;
     }
-    // F23: the full look basis (comp+0x5B0, three rows of four floats), once per 5 s. Log only; nothing is written.
+    // F23: the full look basis (comp+0x5E0, three rows of four floats), once per 5 s. Log only; nothing is written.
     float basisVals[12] = {};
     const bool okBasis = comp && guardedRead(comp + kCompBasisOff, basisVals, sizeof(basisVals));
     char basisText[200];
@@ -6099,7 +6102,7 @@ void lookPassiveTick(uint64_t nowMs) {
 // aim not engaged and the rotation calibration off. While ADS (journalAds), with the weight wA (0.15 s in, 0.3 s out):
 //  1. F68a (F62b's map, measured properly): the headset's turn since the last frame (the LOCAL head of frame input version 3: heading and elevation)
 //     times wA is queued as look input (yaw and pitch) for the game's next look update, through the measured gain (fallback 1.0) and the sign keys;
-//  2. the turn the game actually applied for it (the processor's comp+0x5F4 / +0x5F8, our part) is cancelled in the seated space, exactly, in the seat
+//  2. the turn the game actually applied for it (the processor's comp+0x624 / +0x628, our part) is cancelled in the seated space, exactly, in the seat
 //     convention: the yaw through the look's total (lookPublishTick adds g_adsMap.yawSeat), the pitch through version 10's pitch overlay (adsPoll). F61
 //     measured a seated +a moving the camera by -a, so the view follows the headset whatever share of the turn the game took, and the weapon follows
 //     the head (nofoot::AdsAimMap; the checks in native_frame_test.cpp run the real map against a plant whose camera takes the aim);
@@ -6652,13 +6655,13 @@ std::string f9HrcValues(const F9HrcState& s) {
 }
 
 // ---- F18 (TEMPORARY), probe P1: the eye against the body --------------------------------------------------------------------------------
-// EliteDangerous64.exe+0x3DA2C80 is the avatar visibility job: rcx = the AMC, rdx = the job context, whose floats [rdx+0..8] are the camera position
+// EliteDangerous64.exe+0x3DA58A0 is the avatar visibility job: rcx = the AMC, rdx = the job context, whose floats [rdx+0..8] are the camera position
 // the visibility code subtracts from the AMC origin. Read-only. The callback samples the local third-person AMC (amcLocal(), the same match as the
 // fade hook) once a second, under SEH, BEFORE it forwards to the game with its own arguments. The camera is read from [rdx]; the AMC's world matrix
 // comes from its transform call (origin at +0x30, rows 0-2 the basis); the body coordinates are (p - origin) dotted with each basis row. The head is
 // the neck census's head joint (avatar-root model space) taken through the same world matrix: that mapping is the assumption this probe tests.
 using F9Fn2 = uint64_t(__fastcall*)(void*, void*);
-constexpr uintptr_t kEyeProbeRva = 0x3DA2C80;
+constexpr uintptr_t kEyeProbeRva = 0x3DA58A0;
 constexpr size_t kEyeProbeStolen = 5;   // mov [rsp+0x10],rdx (48 89 54 24 10); the next instructions are push, push, push, sub: no relative operand
 const uint8_t kEyeProbePrologue[32] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00,
                                        0x80, 0xA1, 0x23, 0x03, 0x00, 0x00, 0xFB, 0x48, 0x8D, 0x81, 0xA8, 0x17, 0x00, 0x00, 0x48, 0x8B};
@@ -7212,7 +7215,7 @@ void bodyOffsetRead(float d[3]) noexcept {
 }
 std::atomic<uint64_t> g_bodyShifted{0}, g_bodySkipped{0}, g_bodyCalls{0};   // this second (the frame thread reads and resets them)
 
-// The third-person AMC's render records (F35, from the static RE of the submit job 0x3DA1DE0): 54 blocks of 0x680 bytes; each block holds four
+// The third-person AMC's render records (F35, from the static RE of the submit job 0x3DA4A00): 54 blocks of 0x680 bytes; each block holds four
 // 0x150-byte records, the masks right after them. The offsets are the RE's; the flight checks them (the skipped count and the eye dump).
 namespace bodyrec {
 constexpr uintptr_t kRecBase = 0x1260;      // record k of block idx: AMC + kRecBase + idx*kStride + k*kRecSize
@@ -7231,7 +7234,7 @@ static_assert(kRecBase - kInstBase == 0xA0, "the instance pointers sit 0xA0 befo
 
 // The submit job's prologue (the post-hook's steal is its first 8 bytes: mov rax,rsp; mov [rax+8],rcx; push rbx). The whole 32 bytes are
 // verified at install: a mismatch refuses the hook with a line.
-constexpr uintptr_t kBodyShiftRva = 0x3DA1DE0;
+constexpr uintptr_t kBodyShiftRva = 0x3DA4A00;
 const uint8_t kBodyShiftPrologue[31] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x48, 0x08, 0x53, 0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0xF6,
                                         0x81, 0x23, 0x03, 0x00, 0x00, 0x04, 0x48, 0x8B, 0xD9, 0x0F, 0x84, 0xCF, 0x04, 0x00, 0x00};
 F9Probe g_bodyShift;
@@ -10097,46 +10100,46 @@ void installBodyShiftOnce() {
     size_t stolen = 0;
     std::string why;
     if (installF9ProbeInto(g_bodyShift, spec, base, &stolen, &why))
-        Log::get().note("native on foot body shift: installed at EliteDangerous64.exe+0x3DA1DE0, stolen=%zu bytes, prologue %zu bytes verified (post-hook: "
+        Log::get().note("native on foot body shift: installed at EliteDangerous64.exe+0x3DA4A00, stolen=%zu bytes, prologue %zu bytes verified (post-hook: "
                         "the local third-person AMC's render records, only in body mode)", stolen, sizeof(kBodyShiftPrologue));
     else
-        Log::get().note("native on foot body shift: NOT installed at EliteDangerous64.exe+0x3DA1DE0 -- %s. The body mode is off; the game was not touched.",
+        Log::get().note("native on foot body shift: NOT installed at EliteDangerous64.exe+0x3DA4A00 -- %s. The body mode is off; the game was not touched.",
                         why.c_str());
 }
 
 // ---- F54 (TEMPORARY): the held weapon, the MotionGraphModelComponent records ----------------------------------------------------------
-// The static RE (build 332841): the held weapon is most likely a MotionGraphModelComponent (MGMC). Its submit job 0x43ED820 (reached only
-// through the thunk 0x43B796A; rcx = the MGMC) skips an object whose view mask [obj+0x380] is zero, else writes ONE 0x150-byte record at
+// The static RE (build 332841, the same code in 334925): the held weapon is most likely a MotionGraphModelComponent (MGMC). Its submit job 0x43F0500 (reached only
+// through the thunk 0x43BA64A; rcx = the MGMC) skips an object whose view mask [obj+0x380] is zero, else writes ONE 0x150-byte record at
 // obj+0x230, its position at obj+0x240..0x248 and a copy at obj+0x354..0x35C, rewritten from the instance's matrix every run (an add after
-// the job is not cumulative), and hands the record's pointer to 0x4C837B0, which the renderer reads later (deferred, as the AMC's 0x3DA1DE0).
+// the job is not cumulative), and hands the record's pointer to 0x4C86270, which the renderer reads later (deferred, as the AMC's 0x3DA4A00).
 // The viewmodel byte is obj+0x1C8. MEASURE (always on in VR, read only; lines once a second while native stereo is on foot): a post-hook on
 // the job tables each MGMC with a non-zero mask (pointer, the byte, the mask, the record position, its distance to the FP and 3P handAttach
-// joints); a pre-hook on 0x4C837B0 tallies its callers by return address (the AMC's excluded) with the record nearest an FP handAttach joint.
+// joints); a pre-hook on 0x4C86270 tallies its callers by return address (the AMC's excluded) with the record nearest an FP handAttach joint.
 // (F66: the shift of the local FP weapon with the FP raise, fix.native_on_foot_body_raise_fp, is gone: the hooks only measure.)
 // Inside both hooks: no allocation, logging or locks (one try-flag that skips, never waits); every read and write under SEH. The frame thread
 // publishes the joints (seqlock) and drains the counters and tables once a second.
 namespace f54 {
-constexpr uintptr_t kMgmcRva = 0x43ED820;
+constexpr uintptr_t kMgmcRva = 0x43F0500;
 const uint8_t kMgmcPrologue[35] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x70, 0x20, 0x57, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00, 0x48, 0x8D, 0xB1,
                                    0x80, 0x03, 0x00, 0x00, 0x48, 0x8B, 0xF9, 0x48, 0x83, 0x3E, 0x00, 0x0F, 0x84, 0xE9, 0x03, 0x00, 0x00};
 constexpr size_t kMgmcStolen = 8;   // mov rax,rsp; mov [rax+0x20],rsi; push rdi (no RIP-relative operand; the relay enters before they run)
-constexpr uintptr_t kRecRva = 0x4C837B0;
+constexpr uintptr_t kRecRva = 0x4C86270;
 const uint8_t kRecPrologue[24] = {0x4C, 0x8B, 0xDC, 0x4D, 0x89, 0x4B, 0x20, 0x4D, 0x89, 0x43, 0x18, 0x55,
                                   0x56, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x68};
 constexpr size_t kRecStolen = 7;    // mov r11,rsp; mov [r11+0x20],r9
 constexpr uintptr_t kOffViewFlag = 0x1C8, kOffPos = 0x240, kOffPosCopy = 0x354, kOffMask = 0x380;
-constexpr uintptr_t kRecPosInRecord = 0x10;   // a record's position (every 0x4C837B0 caller's records share the AMC layout)
-constexpr uint32_t kRetAmc = 0x3DA2242;
-constexpr uint32_t kRecScanCap = 256;           // records scanned per 0x4C837B0 call for the nearest to the FP hand
+constexpr uintptr_t kRecPosInRecord = 0x10;   // a record's position (every 0x4C86270 caller's records share the AMC layout)
+constexpr uint32_t kRetAmc = 0x3DA4E62;
+constexpr uint32_t kRecScanCap = 256;           // records scanned per 0x4C86270 call for the nearest to the FP hand
 constexpr uint32_t kNoBest = 0xFFFFFFFFu;
 struct KnownCaller {
     uint32_t ret;
     const char* name;
 };
-// The 0x4C837B0 call sites the RE found (E8 calls: the return address is the call plus 5).
-const KnownCaller kKnown[] = {{0x3DA2242, "AMC"},           {0x43EDC24, "MGMC"},           {0x434D8D5, "GUI mesh"},
-                              {0x23C72E9, "root 0x23C7100"}, {0x31EC020, "root 0x31EBE90"}, {0x372F491, "root 0x372EF80"},
-                              {0x3C9BF53, "root 0x3C9B760"}, {0x3E75F6D, "root 0x3E75DA0"}};
+// The 0x4C86270 call sites the RE found (E8 calls: the return address is the call plus 5).
+const KnownCaller kKnown[] = {{0x3DA4E62, "AMC"},           {0x43F0904, "MGMC"},           {0x4350535, "GUI mesh"},
+                              {0x23C9649, "root 0x23C9460"}, {0x31EECE0, "root 0x31EEB50"}, {0x37320F1, "root 0x3731BE0"},
+                              {0x3C9EB73, "root 0x3C9E380"}, {0x3E78B8D, "root 0x3E789C0"}};
 const char* knownName(uint32_t rva) noexcept {
     for (const KnownCaller& k : kKnown)
         if (k.ret == rva) return k.name;
@@ -10238,7 +10241,7 @@ void mgmcAfterSubmit(uint64_t obj) noexcept {
     s->calls.fetch_add(1, std::memory_order_relaxed);
 }
 
-// The 0x4C837B0 callers, by return address (image RVA; 0xFFFFFFFF outside the image). The nearest record's details are written under a try-flag.
+// The 0x4C86270 callers, by return address (image RVA; 0xFFFFFFFF outside the image). The nearest record's details are written under a try-flag.
 constexpr uint32_t kCallers = 32;
 struct CallerSlot {
     std::atomic<uint32_t> rva{0};   // 0 = free
@@ -10350,10 +10353,10 @@ void installOnce() noexcept {
                             reinterpret_cast<void*>(&mgmcSubmitHooked), "F54 MGMC submit"};
     if (installF9ProbeInto(g_mgmcHook, mspec, base, &stolen, &why)) {
         g_armedMgmc = true;
-        Log::get().note("native on foot weapon (F54): MGMC submit post-hook installed at EliteDangerous64.exe+0x43ED820, stolen=%zu bytes, prologue %zu "
+        Log::get().note("native on foot weapon (F54): MGMC submit post-hook installed at EliteDangerous64.exe+0x43F0500, stolen=%zu bytes, prologue %zu "
                         "bytes verified (measures every MGMC with a non-zero mask; read only)", stolen, sizeof(kMgmcPrologue));
     } else {
-        Log::get().note("native on foot weapon (F54): MGMC submit post-hook NOT installed at EliteDangerous64.exe+0x43ED820 -- %s. The weapon is "
+        Log::get().note("native on foot weapon (F54): MGMC submit post-hook NOT installed at EliteDangerous64.exe+0x43F0500 -- %s. The weapon is "
                         "not measured; the game was not touched.", why.c_str());
     }
     why.clear();
@@ -10362,10 +10365,10 @@ void installOnce() noexcept {
                             reinterpret_cast<void*>(&recSubmitHooked), "F54 record submit"};
     if (installF9ProbeInto(g_recHook, rspec, base, &stolen, &why)) {
         g_armedRec = true;
-        Log::get().note("native on foot weapon (F54): record submit pre-hook installed at EliteDangerous64.exe+0x4C837B0, stolen=%zu bytes, prologue %zu "
-                        "bytes verified (read only: its callers by return address, the AMC's +0x3DA2242 excluded)", stolen, sizeof(kRecPrologue));
+        Log::get().note("native on foot weapon (F54): record submit pre-hook installed at EliteDangerous64.exe+0x4C86270, stolen=%zu bytes, prologue %zu "
+                        "bytes verified (read only: its callers by return address, the AMC's +0x3DA4E62 excluded)", stolen, sizeof(kRecPrologue));
     } else {
-        Log::get().note("native on foot weapon (F54): record submit pre-hook NOT installed at EliteDangerous64.exe+0x4C837B0 -- %s. The game was not "
+        Log::get().note("native on foot weapon (F54): record submit pre-hook NOT installed at EliteDangerous64.exe+0x4C86270 -- %s. The game was not "
                         "touched.", why.c_str());
     }
 }
@@ -10577,7 +10580,7 @@ void tick(uint64_t now) noexcept {
     }
     if (nRows > kRowLines)
         Log::get().note("native on foot weapon (F54): %u more MGMCs with mask != 0 not listed (farther from the hands)", nRows - kRowLines);
-    Log::get().note("native on foot weapon (F54): 0x4C837B0 calls %llu this second: AMC (+0x3DA2242, excluded) %llu, %u other callers%s",
+    Log::get().note("native on foot weapon (F54): 0x4C86270 calls %llu this second: AMC (+0x3DA4E62, excluded) %llu, %u other callers%s",
                     static_cast<unsigned long long>(recCalls), static_cast<unsigned long long>(amcCalls), nCallers,
                     callerFull ? " (some calls lost: the caller table is full)" : "");
     for (uint32_t i = 0; i < nCallers; ++i) {
@@ -10597,13 +10600,13 @@ void tick(uint64_t now) noexcept {
 }  // namespace f54
 
 // ---- F49 (TEMPORARY): the pose freeze: the frAnim Animate post-hook---------------------------------------------------------------
-// The Animate handler 0x741520 (vtable 0x510E370 slot +8; rcx unused, rdx = the job; job[0] = the evaluator X) runs on frAnim worker threads.
+// The Animate handler 0x741620 (vtable 0x51113B0 slot +8; rcx unused, rdx = the job; job[0] = the evaluator X) runs on frAnim worker threads.
 // After the original returns, for the local avatar's X only (pfz::g_localX, the census's plan): the output span ([job+0x28] when [X+0x210] is 0,
-// else [[X+0x1F0]+0xA0] when count-1 < [[X+0x1F0]+0xE0]; 0x43FB740 is never called), the frozen set's rest chain anchored at the hips' animated
+// else [[X+0x1F0]+0xA0] when count-1 < [[X+0x1F0]+0xE0]; 0x43FE420 is never called), the frozen set's rest chain anchored at the hips' animated
 // matrix, the probe's statistics and the span snapshot; with the key on and the frame thread's weight above 0, the frozen set's matrices are
 // written (blended toward the rest chain). Inside the hook: no allocation, no logging, no locks (one try-flag that skips, never waits), every read
 // and write under SEH. The frame thread names each failure once and prints the statistics every 5 s.
-constexpr uintptr_t kPfzAnimateRva = 0x741520;
+constexpr uintptr_t kPfzAnimateRva = 0x741620;
 const uint8_t kPfzAnimatePrologue[15] = {0x48, 0x83, 0xEC, 0x38, 0x4C, 0x8B, 0xD2, 0x48, 0x83, 0xC2, 0x08, 0x49, 0x8B, 0x42, 0x38};
 constexpr size_t kPfzAnimateStolen = 7;   // sub rsp,0x38; mov r10,rdx (no RIP-relative operand)
 F9Probe g_pfzHook;
@@ -15204,11 +15207,11 @@ void pfzInstallOnce() {
     std::string why;
     if (installF9ProbeInto(g_pfzHook, spec, base, &stolen, &why)) {
         g_pfzArmed = true;
-        Log::get().note("native on foot pose freeze: Animate post-hook installed at EliteDangerous64.exe+0x741520, stolen=%zu bytes, prologue %zu bytes "
+        Log::get().note("native on foot pose freeze: Animate post-hook installed at EliteDangerous64.exe+0x741620, stolen=%zu bytes, prologue %zu bytes "
                         "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on or the arm IK; F55: the FP X's snapshot "
                         "for the arm IK)", stolen, sizeof(kPfzAnimatePrologue));
     } else {
-        Log::get().note("native on foot pose freeze: NOT installed at EliteDangerous64.exe+0x741520 -- %s. The game was not touched.", why.c_str());
+        Log::get().note("native on foot pose freeze: NOT installed at EliteDangerous64.exe+0x741620 -- %s. The game was not touched.", why.c_str());
     }
 }
 
@@ -16540,7 +16543,7 @@ void installEyeProbeOnce() {
     size_t stolen = 0;
     std::string why;
     if (installF9ProbeInto(g_eyeProbe, spec, base, &stolen, &why)) {
-        Log::get().note("native on foot eye vs body: hook installed at EliteDangerous64.exe+0x3DA2C80, stolen=%zu bytes, prologue 32 bytes verified "
+        Log::get().note("native on foot eye vs body: hook installed at EliteDangerous64.exe+0x3DA58A0, stolen=%zu bytes, prologue 32 bytes verified "
                         "(read only; temporary).", stolen);
     } else {
         Log::get().note("native on foot eye vs body: hook NOT installed -- %s. The game was not touched by it.", why.c_str());
@@ -16560,13 +16563,13 @@ void installF14ProbesOnce() {
     if (!g_base) g_base = base;
     static const uint8_t kLayoutPrologue[32] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x40, 0x48,
                                                0x8B, 0xF9, 0x0F, 0x29, 0x74, 0x24, 0x30, 0x48, 0x8B, 0x89, 0xB8, 0x01, 0x00, 0x00, 0x48, 0x8B};
-    const F9ProbeSpec spec{"native-on-foot-hud-layout", 0x1A0DCD0, kLayoutPrologue, 32, 5, reinterpret_cast<void*>(&layoutHooked),
+    const F9ProbeSpec spec{"native-on-foot-hud-layout", 0x1A10210, kLayoutPrologue, 32, 5, reinterpret_cast<void*>(&layoutHooked),
                            "P4 (HUD layout)"};
     size_t stolen = 0;
     std::string why;
     if (installF9ProbeInto(g_f14Layout, spec, base, &stolen, &why)) {
         g_f14LayoutArmed = true;
-        Log::get().note("native on foot hud layout: hook installed at EliteDangerous64.exe+0x1A0DCD0, stolen=%zu bytes, prologue 32 bytes verified "
+        Log::get().note("native on foot hud layout: hook installed at EliteDangerous64.exe+0x1A10210, stolen=%zu bytes, prologue 32 bytes verified "
                         "(read only; temporary).", stolen);
     } else {
         Log::get().note("native on foot hud layout: hook NOT installed -- %s. The game was not touched by it.", why.c_str());
@@ -17410,22 +17413,22 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 }
 
 // ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
-// HumanoidModelManager::SetMode (vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5200F90, build 332841) sets the model mode: 0 =
+// HumanoidModelManager::SetMode (vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5204168, build 334925) sets the model mode: 0 =
 // first-person models, 1 = third-person models (the first-person avatar hidden, the third-person body and its weapon shown). It does not touch
 // the camera type, so the first-person view, the HUD gate and isFirstPerson stay as they are. Two hooks, both relays (ecm::buildCallbackRelay):
 //   - a detour on SetMode: the game's requests for the local player are recorded and, while the body is wanted as third person, a request for
 //     0 (first-person models) is forwarded as 1, or as 0 while aiming down sights. EDVR's own calls go through the trampoline, never the detour.
-//   - an entry hook on the povCamera handler (EliteDangerous64.exe+0x19B1240, every humanoid, every frame): the original runs first, then the
+//   - an entry hook on the povCamera handler (EliteDangerous64.exe+0x19B3F40, every humanoid, every frame): the original runs first, then the
 //     local player's mode is held at the desired value through the SetMode trampoline.
 // The hook threads never log: they queue events, and the frame boundary writes them.
 namespace {
-constexpr uintptr_t kModeSetRva = 0x1A112B0;                 // HumanoidModelManager::SetMode
-constexpr uintptr_t kModeVtableRva = 0x5200F90;              // the manager's vtable; SetMode is its slot 0x30
+constexpr uintptr_t kModeSetRva = 0x1A13820;                 // HumanoidModelManager::SetMode
+constexpr uintptr_t kModeVtableRva = 0x5204168;              // the manager's vtable; SetMode is its slot 0x30
 constexpr uintptr_t kModeSetSlotOffset = 0x30;
 constexpr size_t kModeSetPrologueBytes = 22;
 constexpr uint8_t kModeSetPrologue[kModeSetPrologueBytes] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x39, 0x91,
                                                             0x30, 0x02, 0x00, 0x00, 0x75, 0x05, 0x45, 0x84, 0xC0, 0x74, 0x1F};
-constexpr uintptr_t kPovRva = 0x19B1240;                     // the povCamera joint handler, entered every frame for every humanoid
+constexpr uintptr_t kPovRva = 0x19B3F40;                     // the povCamera joint handler, entered every frame for every humanoid
 constexpr size_t kPovPrologueBytes = 32;
 constexpr uint8_t kPovPrologue[kPovPrologueBytes] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x85, 0xD2, 0x48, 0x89, 0x74, 0x24, 0x30,
                                                     0x48, 0x8D, 0xB2, 0xB0, 0x01, 0x00, 0x00, 0xB8, 0xA0, 0x02, 0x00, 0x00, 0x48, 0x0F,
@@ -17618,15 +17621,15 @@ void installModeHooks() {
     }
     uintptr_t slot = 0;
     if (!guardedRead(base + kModeVtableRva + kModeSetSlotOffset, &slot, sizeof(slot)) || slot != base + kModeSetRva) {
-        modeRefuse("vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5200F90 is not SetMode at +0x1A112B0");
+        modeRefuse("vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5204168 is not SetMode at +0x1A13820");
         return;
     }
     if (!bytesMatch(base + kModeSetRva, kModeSetPrologue, kModeSetPrologueBytes)) {
-        modeRefuse("the 22-byte prologue at EliteDangerous64.exe+0x1A112B0 is not build 332841's SetMode");
+        modeRefuse("the 22-byte prologue at EliteDangerous64.exe+0x1A13820 is not build 334925's SetMode");
         return;
     }
     if (!bytesMatch(base + kPovRva, kPovPrologue, kPovPrologueBytes)) {
-        modeRefuse("the 32-byte prologue at EliteDangerous64.exe+0x19B1240 is not build 332841's povCamera handler");
+        modeRefuse("the 32-byte prologue at EliteDangerous64.exe+0x19B3F40 is not build 334925's povCamera handler");
         return;
     }
     g_base = base;
@@ -17647,7 +17650,7 @@ void installModeHooks() {
         modeRefuse(b);
         return;
     }
-    Log::get().note("native on foot body mode: installed -- SetMode at EliteDangerous64.exe+0x1A112B0 (vtable slot 0x30 of the manager at +0x5200F90), "
+    Log::get().note("native on foot body mode: installed -- SetMode at EliteDangerous64.exe+0x1A13820 (vtable slot 0x30 of the manager at +0x5204168), "
                     "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX (thread %u)",
                     g_modeSetHook->stolenBytes(), kModeSetPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_modeSetRelay)),
                     static_cast<unsigned>(GetCurrentThreadId()));
@@ -17660,7 +17663,7 @@ void installModeHooks() {
         modeRefuse(b);
         return;
     }
-    Log::get().note("native on foot body mode: installed -- the per-frame hook at EliteDangerous64.exe+0x19B1240 (the povCamera handler), "
+    Log::get().note("native on foot body mode: installed -- the per-frame hook at EliteDangerous64.exe+0x19B3F40 (the povCamera handler), "
                     "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX (thread %u)",
                     g_povHook->stolenBytes(), kPovPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_povRelay)),
                     static_cast<unsigned>(GetCurrentThreadId()));

@@ -1,0 +1,106 @@
+# Native on-foot address table, Elite 332841 -> 334473 -> 334925 (RVAs, hex).
+# Every build-bound RVA literal on the branch's on-foot paths (99). Column 4 is the build_diff.py map status for each step:
+# IDENT identical bytes, RELOC only displacements differ, XREF data placed by following its code references (vtables: slots confirmed),
+# * = the tool did not place it (CHANGED, AMBIGUOUS, NOT-FOUND); I placed it from an instruction-stream comparison of the mapped
+# function (offset kept, 0 differing instructions) or from the code that references the data. Details: docs/native-onfoot-retarget-334925-2026-10-23.md.
+# "(c)" marks a comment-only mention. Input list for build_diff.py map: docs/native-onfoot-332841-rvas.txt.
+old 332841  -> 334473   -> 334925   (332841->334473 / 334473->334925)  what
+653C50    -> 653DB0    -> 653D50     IDENT / IDENT  Rir (cmp [rcx+18h],1000h)
+741520    -> 741680    -> 741620     IDENT / IDENT  frAnim Animate handler
+831A10    -> 831B70    -> 831B10     RELOC / RELOC  Deactivate
+FDDD10    -> FDEE10    -> FDEDB0     RELOC / RELOC  AO helper (c)
+FDE0D0    -> FDF1D0    -> FDF170     RELOC / RELOC  rest model matrix leaf
+19973D0   -> 1999250   -> 1999190    CHG*  / RELOC  look-to-aim update
+1997C51   -> 1999AD1   -> 1999A11    CHG*  / RELOC  ADS action read site
+19B1240   -> 19B4000   -> 19B3F40    IDENT / IDENT  povCamera handler
+19B14E0   -> 19B0D90   -> 19B0CD0    IDENT / IDENT  HumanoidPanelComponent gate (c)
+19B1587   -> 19B0E37   -> 19B0D77    IDENT / IDENT  panel patch site (76 73)
+19B15FC   -> 19B0EAC   -> 19B0DEC    NF*   / IDENT  panel gate jbe target (c)
+1A0DCD0   -> 1A102D0   -> 1A10210    RELOC / RELOC  HUD layout hook
+1A112B0   -> 1A138E0   -> 1A13820    RELOC / IDENT  HumanoidModelManager::SetMode
+1A14320   -> 1A16980   -> 1A168C0    RELOC / RELOC  humanoid AR render
+1A1485D   -> 1A16EBD   -> 1A16DFD    RELOC / RELOC  weapon UI submit caller (return address)
+1A148CD   -> 1A16F2D   -> 1A16E6D    RELOC / RELOC  weapon UI submit caller (return address)
+1A14970   -> 1A16FD0   -> 1A16F10    RELOC / RELOC  HRC submit
+1A149A6   -> 1A17006   -> 1A16F46    RELOC / RELOC  mesh site 2 (FF 90 80 00 00 00)
+1A149A8   -> 1A17008   -> 1A16F48    RELOC / RELOC  mesh site 2 patched byte
+1A14D80   -> 1A173E0   -> 1A17320    CHG*  / RELOC  marker render entry
+1A15640   -> 1A17CA0   -> 1A17BE0    CHG*  / RELOC  reticle load site (9 bytes)
+1A15644   -> 1A17CA4   -> 1A17BE4    CHG*  / RELOC  reticle call (c)
+1A15645   -> 1A17CA5   -> 1A17BE5    CHG*  / RELOC  reticle rel32 (c)
+1A15648   -> 1A17CA8   -> 1A17BE8    CHG*  / RELOC  reticle rel32 end (c)
+1A36453   -> 1A38B93   -> 1A38AD3    CHG*  / RELOC  mesh patch site (74 2A)
+1A439F0   -> 1A46230   -> 1A46170    IDENT / IDENT  sink getter slot target
+1A8D190   -> 1A8FA10   -> 1A8F950    IDENT / IDENT  mesh predicate slot (c)
+1A9C370   -> 1A9EC10   -> 1A9EB50    CHG*  / RELOC  look processor
+1AAF120   -> 1AB1A20   -> 1AB1960    RELOC / RELOC  weapon UI verify site (25 bytes)
+1AAF129   -> 1AB1A29   -> 1AB1969    RELOC / RELOC  weapon UI branch byte
+1AB32F0   -> 1AB5BF0   -> 1AB5B30    CHG*  / RELOC  HUD layout routine (c)
+1AB3351   -> 1AB5C51   -> 1AB5B91    CHG*  / RELOC  HUD layout branch (c)
+1AB385B   -> 1AB615B   -> 1AB609B    IDENT / IDENT  HUD layout re-send (c)
+1CA6510   -> 1CA8E90   -> 1CA8DD0    RELOC / RELOC  load stage dispatcher
+1CFBBE0   -> 1CFE500   -> 1CFE440    RELOC / RELOC  CTSA ctor
+1D0FBA0   -> 1D124C0   -> 1D12400    RELOC / RELOC  CTSA dtor
+1D15300   -> 1D17C20   -> 1D17B60    RELOC / RELOC  CTSA Run
+1D1CDF0   -> 1D1F710   -> 1D1F650    CHG*  / RELOC  SGMM Run
+1D1D1E2   -> 1D1FB02   -> 1D1FA42    CHG*  / RELOC  not-ready exit (c)
+1D1D220   -> 1D1FB40   -> 1D1FA80    RELOC / RELOC  phase
+1D4A710   -> 1D4D030   -> 1D4CF70    RELOC / RELOC  CTSA Stop
+1D7C8E0   -> 1D7F200   -> 1D7F140    RELOC / RELOC  CTSA state
+1D818D0   -> 1D841F0   -> 1D84130    RELOC / RELOC  CTSA Start
+23C7100   -> 23C9520   -> 23C9460    RELOC / RELOC  caller root (name table)
+23C72E9   -> 23C9709   -> 23C9649    RELOC / RELOC  caller return (name table)
+260D6B0   -> 260FCF0   -> 260FC30    RELOC / RELOC  load wait condition
+28723C0   -> 28749E0   -> 2874920    IDENT / IDENT  render-mode setter
+28873C0   -> 2889A00   -> 2889940    CHG*  / RELOC  requester (c)
+2887A15   -> 288A055   -> 2889F95    CHG*  / RELOC  requester HUD read (c)
+3174210   -> 3176F30   -> 3176ED0    IDENT / IDENT  weapon UI getter (call target)
+31EBE90   -> 31EEBB0   -> 31EEB50    IDENT / IDENT  caller root (name table)
+31EC020   -> 31EED40   -> 31EECE0    RELOC / RELOC  caller return (name table)
+372EF80   -> 3731C80   -> 3731BE0    IDENT / IDENT  caller root (name table)
+372F491   -> 3732191   -> 37320F1    RELOC / RELOC  caller return (name table)
+3C9B760   -> 3C9E420   -> 3C9E380    RELOC / RELOC  caller root (name table)
+3C9BF53   -> 3C9EC13   -> 3C9EB73    RELOC / RELOC  caller return (name table)
+3DA1DE0   -> 3DA4AA0   -> 3DA4A00    IDENT / IDENT  AMC submit job (body shift)
+3DA2242   -> 3DA4F02   -> 3DA4E62    RELOC / RELOC  AMC return address
+3DA2C80   -> 3DA5940   -> 3DA58A0    RELOC / RELOC  avatar visibility job (eye probe)
+3DD61AF   -> 3DD8E6F   -> 3DD8DCF    RELOC / RELOC  root getter call
+3DD9EA0   -> 3DDCB60   -> 3DDCAC0    RELOC / RELOC  item-apply (c)
+3E75DA0   -> 3E78A60   -> 3E789C0    RELOC / RELOC  caller root (name table)
+3E75F6D   -> 3E78C2D   -> 3E78B8D    RELOC / RELOC  caller return (name table)
+434D320   -> 4350020   -> 434FF80    RELOC / RELOC  instance submit
+434D8D5   -> 43505D5   -> 4350535    RELOC / RELOC  GUI mesh return address
+434ECC0   -> 43519C0   -> 4351920    IDENT / IDENT  reticle callee
+43B796A   -> 43BA6EA   -> 43BA64A    IDENT / IDENT  MGMC thunk (c)
+43ED820   -> 43F05A0   -> 43F0500    IDENT / IDENT  MGMC submit job
+43EDC24   -> 43F09A4   -> 43F0904    RELOC / RELOC  MGMC return address
+43FB740   -> 43FE4C0   -> 43FE420    IDENT / IDENT  AO helper (c)
+4714FE0   -> 4717B20   -> 4717A80    RELOC / RELOC  panel submit
+4C837B0   -> 4C86390   -> 4C86270    IDENT / IDENT  record writer
+4C8E020   -> 4C90C00   -> 4C90AE0    IDENT / IDENT  started-array insert
+4C8E500   -> 4C910E0   -> 4C90FC0    IDENT / IDENT  set init
+4C8EA60   -> 4C91640   -> 4C91520    RELOC / RELOC  set free
+4C8EEA0   -> 4C91A80   -> 4C91960    IDENT / IDENT  owner AM Update
+4C8F960   -> 4C92540   -> 4C92420    RELOC / RELOC  Instantiate
+4C8FAF0   -> 4C926D0   -> 4C925B0    RELOC / RELOC  ActivitySet Remove
+4C907A0   -> 4C93380   -> 4C93260    IDENT / IDENT  set insert
+4C90B90   -> 4C93770   -> 4C93650    IDENT / IDENT  StartPending
+4C90C40   -> 4C93820   -> 4C93700    RELOC / RELOC  ActivitySet ClearAll
+510E370   -> 51113B0   -> 51113B0    XREF  / XREF   frAnim vtable (c)
+51F77D0   -> 51FA9A0   -> 51FA970    XREF  / XREF   weapon UI provider vtable
+51F8160   -> 51FB330   -> 51FB300    XREF  / XREF   weapon UI renderer vtable
+51F9BD8   -> 51FCDA8   -> 51FCD78    XREF  / XREF   weapon UI sink vtable
+5200F90   -> 5204198   -> 5204168    XREF  / XREF   HumanoidModelManager vtable
+5298390   -> 529B560   -> 529B530    XREF  / XREF   load pipeline vtable (c)
+52E9608   -> 52EC7C8   -> 52EC798    XREF  / XREF   render-mode setter vtable
+5E7A754   -> 5E7D5D8   -> 5E7D5D8    AMB*  / XREF   HUD margin x
+5E7A758   -> 5E7D5DC   -> 5E7D5DC    AMB*  / XREF   HUD margin y
+5E7A760   -> 5E7D5E4   -> 5E7D5E4    AMB*  / XREF   HUD layout scale float
+5E7A7B4   -> 5E7D7D4   -> 5E7D7D4    XREF  / XREF   holster id (read)
+5E7B460   -> 5E7E480   -> 5E7E480    XREF  / XREF   load stage table
+5E82B3E   -> 5E85B8A   -> 5E85B8A    XREFb / XREF   requester gate byte
+5E82B48   -> 5E85B94   -> 5E85B94    XREFb / XREF   first-person HUD override int
+5F741B7   -> 5F772E2   -> 5F772E2    AMB*  / XREF   visor override byte
+5F741B8   -> 5F772E3   -> 5F772E3    AMB*  / XREF   visor down byte
+5F741CA   -> 5F77202   -> 5F77202    AMB*  / XREF   HUD layout scale mode byte
+5F7D7F8   -> 5F80938   -> 5F80938    XREF  / XREF   CTSA type key

@@ -1554,9 +1554,9 @@ void fpBodyStep(void* amcPtr) noexcept {
 }
 
 // ---- F19 (TEMPORARY): the body's clip modifiers (fix.native_on_foot_body_unclip) and their 5 s probe ----------------------------------
-// The item-apply function (EliteDangerous64.exe+0x3DD9EA0) gives each part of a mode-3 avatar a "pVertexClipAmount" modifier at part+0x610:
+// The item-apply function (EliteDangerous64.exe+0x3DDCAC0) gives each part of a mode-3 avatar a "pVertexClipAmount" modifier at part+0x610:
 // +8 the float amount, +0xC the enable byte, +0xD the dirty byte. The enable byte is [AMC+0x321] bit 3 for EVASuit_Torso, _Arms, _Hands and
-// Shoulder_Left/_Right (the bit-3 switch case, 0x3DD9EA0+0x3B1), and 1 for EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (the default case).
+// Shoulder_Left/_Right (the bit-3 switch case, 0x3DDCAC0+0x3B1), and 1 for EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (the default case).
 // The body shader discards a pixel whose clip value exceeds cb2[5].w, so an enable of 0 keeps those pixels. The unclip writes enable 0 and dirty 1
 // after the fade returns, on the same thread, for the local third-person AMC only (isLocalAmc, as headHideStep identifies it). Nothing is restored.
 // The probe reads the same bytes every 5 s (before that call's write), with the flags [AMC+0x321], [AMC+0x322], [AMC+0x378] once per AMC.
@@ -1928,11 +1928,11 @@ bool jointModelAt(uint64_t iface, const SkSlots& sl, uint32_t idx, float out[3])
 
 // ---- F49 (TEMPORARY): the pose freeze's census side ----------------------------------------------------------------------------
 // Census thread only (neckCensusStep holds g_busyNeck). Once per evaluator X (from the local third-person skeleton interface: RR *(iface+0x2B8),
-// AO *(iface+0x120), the readers' own choice, notes 0x43FB740 / 0xFDDD10): P = [X+8], its joint count, rest locals and parents; FindJoint
+// AO *(iface+0x120), the readers' own choice, notes 0x43FE420 / 0xFDEDB0): P = [X+8], its joint count, rest locals and parents; FindJoint
 // ("def_l_foot_joint"); the frozen set (nofoot::pfzFrozenSet); the plan published under pfz::g_planSeq; the rest chain checked against the game's
-// own 0xFDE0D0 (a leaf: it reads P's locals and parents and writes 64 bytes to its second argument). Every 5 s: GetModelMatrix(34) for the frame
+// own 0xFDF170 (a leaf: it reads P's locals and parents and writes 64 bytes to its second argument). Every 5 s: GetModelMatrix(34) for the frame
 // thread's cross-check against the hook's span. Reads and the game's own read-only calls only: nothing here writes game memory.
-constexpr uintptr_t kPfzRestModelRva = 0xFDE0D0;
+constexpr uintptr_t kPfzRestModelRva = 0xFDF170;
 const uint8_t kPfzRestModelPrologue[11] = {0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0x41, 0x48, 0x4D, 0x8B, 0xC8};
 constexpr uint32_t kPfzNeck = 34, kPfzHead = 44, kPfzClavL = 35, kPfzClavR = 36;
 using PfzRestModelFn = void(__fastcall*)(void* pose, float* out, uint64_t idx);
@@ -2026,7 +2026,7 @@ void pfzBuildPlan(uint64_t iface, uint64_t x, const SkSlots& sl) noexcept {
         const uintptr_t fn = g_followT.base ? g_followT.base + kPfzRestModelRva : 0;
         uint8_t bytes[sizeof(kPfzRestModelPrologue)] = {};
         if (!fn || !sehReadBytesAt(fn, bytes, sizeof(bytes)) || std::memcmp(bytes, kPfzRestModelPrologue, sizeof(bytes)) != 0) {
-            Log::get().note("native on foot pose freeze: rest chain cross-check: not available (0xFDE0D0's entry bytes are not build 332841's)");
+            Log::get().note("native on foot pose freeze: rest chain cross-check: not available (0xFDF170's entry bytes are not build 334925's)");
         } else {
             const uint32_t ids[2] = {kPfzNeck, kPfzHead};
             for (uint32_t id : ids) {
@@ -2040,7 +2040,7 @@ void pfzBuildPlan(uint64_t iface, uint64_t x, const SkSlots& sl) noexcept {
                 }
                 double maxElem = 0.0, posMm = 0.0;
                 pfzMatrixDiff(game, ours, &maxElem, &posMm);
-                Log::get().note("native on foot pose freeze: rest chain cross-check joint %u: 0xFDE0D0 pos (%.4f,%.4f,%.4f), ours (%.4f,%.4f,%.4f); "
+                Log::get().note("native on foot pose freeze: rest chain cross-check joint %u: 0xFDF170 pos (%.4f,%.4f,%.4f), ours (%.4f,%.4f,%.4f); "
                                 "max element difference %.6f, position %.3f mm (%s)", id, static_cast<double>(game[12]), static_cast<double>(game[13]),
                                 static_cast<double>(game[14]), static_cast<double>(ours[12]), static_cast<double>(ours[13]), static_cast<double>(ours[14]),
                                 maxElem, posMm, maxElem < 1e-3 ? "agree" : "DIFFER");
@@ -2715,7 +2715,7 @@ void neckCensusStep() noexcept {
                         for (size_t k = 0; k < 4; ++k) allRead = jointModelAt(iface, sl, ids[k], &s.ext3P[3 * k]) && allRead;
                         if (allRead) s.shState |= 4u;
                     }
-                    // F48: the 3P povCamera joint (the attach joint 0x19B1240 sets), the body anchor's 3P side.
+                    // F48: the 3P povCamera joint (the attach joint 0x19B3F40 sets), the body anchor's 3P side.
                     if (g_shProbe3P.pov != 0xFFFFu && jointModelAt(iface, sl, g_shProbe3P.pov, s.pov3P)) {
                         s.shState |= 0x10u;
                         s.povIndex = g_shProbe3P.pov;

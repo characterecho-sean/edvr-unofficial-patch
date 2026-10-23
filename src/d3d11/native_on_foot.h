@@ -1,7 +1,7 @@
 #pragma once
 // Native on-foot VR, flight F0 (docs\design-native-onfoot-vr-2026-10-13.md; the decisions are native_on_foot_core.h).
 //
-// THE HOOK (VR profile only). A CodeHook on the game's render-mode setter (EliteDangerous64.exe+0x28723C0, build 332841), installed
+// THE HOOK (VR profile only). A CodeHook on the game's render-mode setter (EliteDangerous64.exe+0x2874920, build 334925), installed
 // by the first frame boundary. It is installed whether or not fix.native_on_foot is on, so every natural mode request is logged. An
 // an incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4) when the key is on, the selector is the one frozen at the first valid call, and
 // the journal says a game session is live. Everything else is forwarded unchanged.
@@ -18,7 +18,7 @@
 // never substitutes under gate, so the flag is not set by it.
 //
 // THE METHOD (F2, TEMPORARY A/B). fix.native_on_foot_method, swap or gate, default gate, live. swap: the setter substitutes (F0). gate: no
-// substitution; while the key is on and a game session is live EDVR holds the byte at EliteDangerous64.exe+0x5E82B3E at 0, so the game's own
+// substitution; while the key is on and a game session is live EDVR holds the byte at EliteDangerous64.exe+0x5E85B8A at 0, so the game's own
 // requester asks for HMD. Goes away when the arc picks one.
 //
 // THE BODY (F2). While the flag is set, explorerCamNativeBody(...) runs Explorer Cam's fade and head-part code for the local avatar, once a
