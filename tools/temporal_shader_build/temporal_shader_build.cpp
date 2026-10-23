@@ -20,6 +20,7 @@
 #include "../../src/d3d11/xess_copy_shader.h"
 #include "../../src/d3d11/skin_join_shader.h"
 #include "../../src/d3d11/eye_jump_lattice_shader.h"
+#include "../../src/d3d11/reticle_depth_shader.h"   // F85c: the reticle's hit-depth march
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_domain_marker_shader.h"
@@ -421,6 +422,8 @@ static int generateTemporal(const Options& o) {
     const std::string mapSmaaBlend = mapSmaaSource(edvr::kMapSmaaBlendHlsl);
     std::vector<Variant> variants = {
         {"kEyeJumpLatticeBytecode", "eye_jump_lattice_cs", "main", nullptr, {}, false, edvr::kEyeJumpLatticeHlsl},
+        // F85c: the reticle's hit depth (reticle_depth_shader.h): one thread marches the aim line through an eye's scene depth. Its own source, entry "main".
+        {"kReticleDepthBytecode", "reticle_depth_cs", "main", nullptr, {}, false, edvr::kReticleDepthHlsl},
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
         {"kXessR11ToFp16Bytecode", "xess_r11_to_fp16_cs", "main", nullptr, {}, false, edvr::kXessR11ToFp16Cs},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
@@ -463,7 +466,7 @@ static int generateTemporal(const Options& o) {
     const auto fixed = fixedVariants(core);
     variants.insert(variants.end(), fixed.begin(), fixed.end());
     const std::string flat = core + edvr::kFlatMonoShaderSource;
-    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl + edvr::kEyeJumpLatticeHlsl;
+    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl + edvr::kEyeJumpLatticeHlsl + edvr::kReticleDepthHlsl;
     const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
     if (outputCurrent(o.output, key)) {
         std::printf("temporal shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.output.c_str());

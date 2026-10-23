@@ -2259,6 +2259,22 @@ if errorlevel 1 ( echo [edvr] ERROR: scene depth selection test build failed & e
 "%OBJ%\depthscenepick\depth_scene_pick_test.exe" --self-test || exit /b 1
 exit /b 0
 
+REM F85c: the reticle depth pass (src\d3d11\reticle_depth_shader.h). The production bytecode (kReticleDepthBytecode, from tools\temporal_shader_build) on a WARP device
+REM against nofoot::f85::marchCpu and the analytic answer: planes, a slanted wall, sky, a surface under the minimum, a line that never meets the screen. The device
+REM comes from System32 through src\common\system_d3d11.h; the exe is built outside %BUILD% like the other rigs that bind a device.
+:rig_reticle_depth
+echo [edvr] === reticle depth march (F85c) ===
+if not exist "%OBJ%\reticledepth" mkdir "%OBJ%\reticledepth"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\reticledepth\\" /Fe"%OBJ%\reticledepth\reticle_depth_test.exe" ^
+    "tools\reticle_depth_test\reticle_depth_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: reticle depth test build failed & exit /b 1 )
+"%OBJ%\reticledepth\reticle_depth_test.exe" --dry-run || exit /b 1
+"%OBJ%\reticledepth\reticle_depth_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_scrim_metadata_test
 echo [edvr] === scrim metadata cache regression ===
 if not exist "%OBJ%\scrimmetadata" mkdir "%OBJ%\scrimmetadata"

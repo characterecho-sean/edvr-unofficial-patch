@@ -12,6 +12,7 @@
 #include <immintrin.h>
 #include <wrl/client.h>
 #include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
+#include "f85_checks.h"   // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts, shared with a desk driver)
 
 #include <array>
 #include <chrono>
@@ -7136,6 +7137,8 @@ int wmain(int argc, wchar_t** argv) {
         const nf::CrouchNeckYaw noActive = nf::crouchNeckYawSelect(neck, pivot, noActiveArms, legs, 0.0, noAdsPush);
         check(!noActive.feasible, "F82: probe-only arms cannot authorize a protected neck turn");
     }
+    // F85: a, the pin-step tracker; b, the weapon UI pinned to the weapon; c, the reticle at the aim ray's hit depth.
+    f85test::run(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
