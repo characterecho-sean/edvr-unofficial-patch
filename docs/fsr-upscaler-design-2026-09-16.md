@@ -753,3 +753,26 @@ class of upscaler): that is route 2's go/no-go.
   this reason); ghosting or doubled edges point at the jitter or motion
   sign, which route 1 measured but route 2 has not; the 30 s bridge line
   gives the cost.
+- 2026-10-23 evening: route 2 built and installed for flight 5. Windows
+  workflow run 40031975573 green at 5dcc0608 (runs 40026994003 and
+  40029535701 failed on two rig checks the new case moved: the HDR route's
+  source count and the flat resolver's key-off golden order; both fixed in
+  the rigs, no golden re-recorded). On the runner's Microsoft Basic Render
+  adapter (vendor 0x1414) the rig made the D3D12 device, loaded AMD's
+  signed loader and got "FSR 3.1.5, 2.3.4" from the version query, so
+  `fsr4` refused as D7 says: the first evidence that the bridge's probe
+  works against AMD's real DLLs. In that log `ffxConfigure rc=2` is the
+  signed loader declining the context-less debug route; AMD's per-context
+  messages still reach the log through the create descriptor's
+  `fpMessage`, so the line's "routed" overstates it (fix its wording with
+  the next source change). Installed on the Strix Halo (Steam, flat scope,
+  `--fsr4`, tag ci-40031975573) from the run's `edvr-build` artifact plus
+  `fetch_fsr4.py`'s DLLs and a `build\edvr-flat.ini` written by
+  `gen_installer_rc.flat_ini_bytes()` (the artifact carries neither);
+  `--verify-only` clean; `edvr-flat.ini` set to `temporal_aa = fsr4` (one
+  line, diffed). Elite runs Proton Experimental 11.0-20261014, which ships
+  `contrib/amdxcffx64.dll` (FSR 4.1.1) and the `amdxc64` shim; the launch
+  option `FSR4_UPGRADE=1 %command%` is Sean's to set. CI branch builds are
+  stamped 0.0.0-ci, so the flight log's build check is `edvr_log.py
+  --expect-build 0.0.0-ci`, with the install receipt's hashes as the
+  stronger tie to this run.
