@@ -1,4 +1,4 @@
-// The admission store's detour (store_hook.h). A CodeHook on FUN_144314D00, pinned by its sixteen bytes in build 334473
+// The admission store's detour (store_hook.h). A CodeHook on FUN_144314C60, pinned by its sixteen bytes in build 334925
 // (concourse-culling doc, P11). The prologue's first five bytes are three pushes and a two-byte push, which the CodeHook
 // decoder steals (push rbp, push rbx, push rsi, push rdi: 2+1+1+1). The observer takes the store's five arguments:
 // four in registers and the record on the stack, which the relay leaves where the store's caller put it. The observer
@@ -23,7 +23,7 @@
 namespace edvr {
 namespace {
 
-constexpr uintptr_t kStoreRva = 0x4314D00u;
+constexpr uintptr_t kStoreRva = 0x4314C60u;
 constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
 
 using StoreFn = uintptr_t(__fastcall*)(uintptr_t bucket, uintptr_t mask, uintptr_t out, uintptr_t lod, uintptr_t record);
@@ -138,7 +138,7 @@ bool readIdentity(uintptr_t base, uint32_t* stamp, uint32_t* size) noexcept {
     }
 }
 
-// Installs the detour once: the PE identity must be build 334473's, the prologue must match the pin, and the CodeHook must accept it.
+// Installs the detour once: the PE identity must be build 334925's, the prologue must match the pin, and the CodeHook must accept it.
 // A refusal is final and logged once; with the detour refused nothing is written to the game (the observer that writes is never reached).
 void installLocked() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -162,16 +162,16 @@ void installLocked() noexcept {
     if (verdict != sealed::StoreInstall::kInstall) {
         g_store.refused.store(true, std::memory_order_release);
         if (verdict == sealed::StoreInstall::kWrongIdentity) {
-            g_store.status.store("not build 334473 (PE timestamp or image size)", std::memory_order_release);
-            Log::get().note("store hook: refused: not build 334473 (PE timestamp %u, image size %u); optimized station and flat world witness stand down.",
+            g_store.status.store("not build 334925 (PE timestamp or image size)", std::memory_order_release);
+            Log::get().note("store hook: refused: not build 334925 (PE timestamp %u, image size %u); optimized station and flat world witness stand down.",
                             static_cast<unsigned>(stamp), static_cast<unsigned>(size));
         } else if (verdict == sealed::StoreInstall::kUnreadable) {
             g_store.status.store("the executable's PE header or the store's prologue is unreadable", std::memory_order_release);
             Log::get().note("store hook: refused: the PE header or the admission store's prologue is unreadable; "
                             "optimized station and flat world witness stand down.");
         } else {
-            g_store.status.store("the store's prologue does not match build 334473", std::memory_order_release);
-            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 334473's; "
+            g_store.status.store("the store's prologue does not match build 334925", std::memory_order_release);
+            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 334925's; "
                             "optimized station and flat world witness stand down.");
         }
         return;
@@ -191,7 +191,7 @@ void installLocked() noexcept {
     }
     g_store.ready.store(true, std::memory_order_release);
     g_store.status.store("installed", std::memory_order_release);
-    Log::get().note("store hook: the admission store (0x4314D00) is detoured; the gate opens for station gathering or the passive flat world witness.");
+    Log::get().note("store hook: the admission store (0x4314C60) is detoured; the gate opens for station gathering or the passive flat world witness.");
 }
 
 void installOnce() noexcept {

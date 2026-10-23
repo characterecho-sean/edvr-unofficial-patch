@@ -8,23 +8,23 @@
 
 namespace edvr {
 namespace {
-constexpr uint64_t kManagementReturn=0x4351016u;
-constexpr uint64_t kWriterReturns[]={0x369FB91u,0x42B6FAFu,0x42B7B96u,0x4315D6Au,0x434FE49u};
-constexpr uint64_t kOwnershipDirectReturn=0x431DF12u;
-constexpr uint64_t kOwnershipVirtualReturn=0x431DF1Fu;
-constexpr uint64_t kOwnershipDirectTarget=0x4324640u;
-constexpr uint64_t kOwnershipOpcodeWindowRva=0x431DF00u;
+constexpr uint64_t kManagementReturn=0x4350F76u;
+constexpr uint64_t kWriterReturns[]={0x369FAF1u,0x42B6F0Fu,0x42B7AF6u,0x4315CCAu,0x434FDA9u};
+constexpr uint64_t kOwnershipDirectReturn=0x431DE72u;
+constexpr uint64_t kOwnershipVirtualReturn=0x431DE7Fu;
+constexpr uint64_t kOwnershipDirectTarget=0x43245A0u;
+constexpr uint64_t kOwnershipOpcodeWindowRva=0x431DE60u;
 constexpr size_t kOwnershipOpcodeWindowBytes=40;
 struct Callsite {uintptr_t call;uint8_t bytes[5];};
 constexpr Callsite kCalls[]={
-    {0x369FB8Cu,{0xE8,0x0F,0xA1,0xFF,0xFF}},
-    {0x42B6FAAu,{0xE8,0xF1,0x2C,0x3E,0xFF}},
-    {0x42B7B91u,{0xE8,0x0A,0x21,0x3E,0xFF}},
-    {0x4315D65u,{0xE8,0x36,0x3F,0x38,0xFF}},
-    {0x434FE44u,{0xE8,0x57,0x9E,0x34,0xFF}},
-    {0x4351011u,{0xE8,0x8A,0x8C,0x34,0xFF}},
-    // The outer 42B70E0 call preserves R12 for the primary writer recipe.
-    {0x42B7503u,{0xE8,0xE8,0xF8,0xFF,0xFF}},
+    {0x369FAECu,{0xE8,0x0F,0xA1,0xFF,0xFF}},
+    {0x42B6F0Au,{0xE8,0xF1,0x2C,0x3E,0xFF}},
+    {0x42B7AF1u,{0xE8,0x0A,0x21,0x3E,0xFF}},
+    {0x4315CC5u,{0xE8,0x36,0x3F,0x38,0xFF}},
+    {0x434FDA4u,{0xE8,0x57,0x9E,0x34,0xFF}},
+    {0x4350F71u,{0xE8,0x8A,0x8C,0x34,0xFF}},
+    // The outer 42B7040 call preserves R12 for the primary writer recipe.
+    {0x42B7463u,{0xE8,0xE8,0xF8,0xFF,0xFF}},
 };
 constexpr uint8_t kLookupPrologue[16]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x56,0x48,0x83};
 constexpr uint8_t kOwnershipVirtualCall[3]={0xFF,0x50,0x50};
@@ -48,7 +48,7 @@ bool add(uintptr_t value,uintptr_t amount,uintptr_t& out) noexcept {
 }
 void jsonAddress(std::ostringstream& j,uint64_t value){j<<"\"0x"<<std::hex<<value<<std::dec<<'\"';}
 bool ownershipWriter(uint64_t rva) noexcept {
-    return rva==0x42B6FAFu||rva==0x42B7B96u||rva==0x4315D6Au;
+    return rva==0x42B6F0Fu||rva==0x42B7AF6u||rva==0x4315CCAu;
 }
 }
 
@@ -257,7 +257,7 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginRvaLocked(
     if(rva==kManagementReturn){++summary_.declinedManagement;return {};}
     bool known=false;for(auto value:kWriterReturns)known=known||rva==value;if(!known){++summary_.declinedUnknown;return {};}
     ++summary_.observed;
-    NativeWeaponUiSubmitIdentity uiSubmit{};const bool uiCandidate=rva==0x434FE49u;
+    NativeWeaponUiSubmitIdentity uiSubmit{};const bool uiCandidate=rva==0x434FDA9u;
     const bool uiMatched=uiCandidate&&nativeOnFootWeaponUiCurrentSubmit(uintptr_t(c.Rdi),&uiSubmit);
     if(uiCandidate){++summary_.uiJoinAttempted;if(uiMatched)++summary_.uiJoinMatched;else ++summary_.uiJoinUnmatched;}
     const size_t genericLimit=kRecordCap-kUiRecordReserve;
@@ -272,19 +272,19 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginRvaLocked(
     uintptr_t owner=0,record=0;bool contextOk=subtract(dictionary,0x260,owner);r.owner=owner;
     size_t builderBytes=0,objectBytes=0;
     switch(rva) {
-    case 0x369FB91u:r.writer="direct_369fb91";contextOk=add(callerRsp,0x50,record)&&contextOk;break;
-    case 0x42B6FAFu: {
-        r.writer="primary_42b6faf";uintptr_t builder=0;
+    case 0x369FAF1u:r.writer="direct_369faf1";contextOk=add(callerRsp,0x50,record)&&contextOk;break;
+    case 0x42B6F0Fu: {
+        r.writer="primary_42b6f0f";uintptr_t builder=0;
         contextOk=add(callerRsp,0x30,record)&&subtract(key,0x40,builder)&&contextOk;
         r.builder=builder;r.object=uintptr_t(c.R12);builderBytes=0x60;objectBytes=kContextBytes;break;
     }
-    case 0x42B7B96u: {
-        r.writer="inline_42b7b96";contextOk=add(uintptr_t(c.Rbp),0x1C0,record)&&contextOk;uintptr_t objectAt=0;
+    case 0x42B7AF6u: {
+        r.writer="inline_42b7af6";contextOk=add(uintptr_t(c.Rbp),0x1C0,record)&&contextOk;uintptr_t objectAt=0;
         if(subtract(uintptr_t(c.Rbp),0x68,objectAt))contextOk=guardedRead(objectAt,&r.object,sizeof(r.object))&&contextOk;else contextOk=false;
         objectBytes=kContextBytes;break;
     }
-    case 0x4315D6Au:r.writer="direct_4315d6a";contextOk=add(callerRsp,0x60,record)&&contextOk;break;
-    case 0x434FE49u:r.writer="helper_434fe49";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;
+    case 0x4315CCAu:r.writer="direct_4315cca";contextOk=add(callerRsp,0x60,record)&&contextOk;break;
+    case 0x434FDA9u:r.writer="helper_434fda9";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;
         r.uiJoinStatus=uiMatched?"matched_instance_tls":"unmatched_instance_tls";r.uiSubmit=uiSubmit;
         {LARGE_INTEGER qpc{};if(QueryPerformanceCounter(&qpc))r.uiCaptureQpc=uint64_t(qpc.QuadPart);}
         break;
@@ -349,7 +349,7 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
     }
     Ownership o;o.firstSequence=r.sequence;o.observedFrame=r.observedFrame;o.threadId=r.threadId;
     o.unwindDepth=candidate.depth;o.ancestorReturnRva=candidate.returnRva;
-    if(candidate.returnRva==kOwnershipDirectReturn)o.branch="direct_4324640";
+    if(candidate.returnRva==kOwnershipDirectReturn)o.branch="direct_43245A0";
     else if(candidate.returnRva==kOwnershipVirtualReturn)o.branch="virtual_50";
     else {r.ownershipStatus="ancestor_missing";++ownershipSummary_.ancestorMissing;retainAncestorTraceLocked(r,candidate);return;}
     o.writerOwner=r.owner;o.outer=uintptr_t(candidate.context.Rdi);o.collectionOwner=uintptr_t(candidate.context.Rbx);
@@ -363,7 +363,7 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
         r.ownershipStatus="registry_read_fault";++ownershipSummary_.registryReadFault;return;
     }
     uintptr_t contextRegistryAt=0,contextRegistry=0;
-    if(r.returnRva==0x42B6FAFu||r.returnRva==0x42B7B96u) {
+    if(r.returnRva==0x42B6F0Fu||r.returnRva==0x42B7AF6u) {
         o.writerRelation="inline_registry_plus_78";o.context=r.object;
         uintptr_t expectedRegistry=0;
         if(!subtract(uintptr_t(r.owner),0x78,expectedRegistry)||!add(uintptr_t(o.context),0x30,contextRegistryAt)||
@@ -371,7 +371,7 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
             r.ownershipStatus="registry_read_fault";++ownershipSummary_.registryReadFault;return;
         }
         if(expectedRegistry!=o.registry||contextRegistry!=o.registry){r.ownershipStatus="registry_mismatch";++ownershipSummary_.registryMismatch;return;}
-    } else if(r.returnRva==0x4315D6Au) {
+    } else if(r.returnRva==0x4315CCAu) {
         o.writerRelation="direct_collection_plus_300";uintptr_t expectedCollection=0;
         if(!subtract(uintptr_t(r.owner),0x300,expectedCollection)||expectedCollection!=o.collectionOwner) {
             r.ownershipStatus="tuple_mismatch";++ownershipSummary_.tupleMismatch;return;

@@ -4,7 +4,7 @@
 // header comment names the artifacts:
 //
 //   view finalizer     FUN_1404f4a70  camera_cache_helpers.txt:550-618
-//   projection builder FUN_1404f3150  camera_cache_helpers.txt:255-493
+//   projection builder FUN_1404f30f0  camera_cache_helpers.txt:255-493
 //   VP finalizer       FUN_1404f4b50  camera_cache_helpers.txt:57-195
 //   scene CB composer  FUN_140596990  camera_producer.txt:23-124
 //   refresh ctx copy   FUN_140592350  camera_producer.txt:186-249

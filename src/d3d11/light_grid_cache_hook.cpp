@@ -21,7 +21,7 @@ constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
 
 // rcx the cluster context, rdx/r8/r9 pointers, then the target's width and height (32-bit stack arguments; the callee reads 32 bits). The return value is not read by the caller.
 using BuilderFn = uintptr_t(__fastcall*)(void* self, void* a2, void* a3, void* a4, uint32_t width, uint32_t height);
-using RefreshFn = void(__fastcall*)(void* view);   // 0x4F3150: recompute the view block's four rows and clear its dirty bit
+using RefreshFn = void(__fastcall*)(void* view);   // 0x4F30F0: recompute the view block's four rows and clear its dirty bit
 
 __declspec(noinline) uintptr_t __fastcall builderDetour(void* self, void* a2, void* a3, void* a4, uint32_t width, uint32_t height) noexcept;
 
@@ -39,8 +39,8 @@ struct Detour {
 Detour g_detour;
 
 uintptr_t g_base = 0;
-std::atomic<uintptr_t> g_refresh{0};      // 0x4F3150 when its prologue is the pinned one; 0: a dirty view block is forwarded whole
-std::atomic<uintptr_t> g_copy{0};         // 0x57A5C0 when its prologue is the pinned one; 0: the override path's rows cannot be derived (the call goes to the game whole)
+std::atomic<uintptr_t> g_refresh{0};      // 0x4F30F0 when its prologue is the pinned one; 0: a dirty view block is forwarded whole
+std::atomic<uintptr_t> g_copy{0};         // 0x57A560 when its prologue is the pinned one; 0: the override path's rows cannot be derived (the call goes to the game whole)
 lg::Cache g_cache;                        // the render thread's alone
 std::atomic<uint32_t> g_ownerThread{0};   // the first thread to call
 std::atomic<uint64_t> g_otherThreadCalls{0};
@@ -388,15 +388,15 @@ void installOnce() noexcept {
     const lg::Install verdict = lg::installDecision(identityRead, stamp, size, readOk ? got : nullptr, sizeof(got));
     if (verdict != lg::Install::kInstall) {
         if (verdict == lg::Install::kWrongIdentity) {
-            g_detour.status.store("not build 334473 (PE timestamp or image size)", std::memory_order_release);
-            Log::get().note("light grid cache: refused: not build 334473 (PE timestamp %u, image size %u); nothing patched.", static_cast<unsigned>(stamp),
+            g_detour.status.store("not build 334925 (PE timestamp or image size)", std::memory_order_release);
+            Log::get().note("light grid cache: refused: not build 334925 (PE timestamp %u, image size %u); nothing patched.", static_cast<unsigned>(stamp),
                             static_cast<unsigned>(size));
         } else if (verdict == lg::Install::kUnreadable) {
             g_detour.status.store("the executable's PE header or the builder's prologue is unreadable", std::memory_order_release);
             Log::get().note("light grid cache: refused: the PE header or the cluster builder's prologue is unreadable; nothing patched.");
         } else {
-            g_detour.status.store("the builder's prologue does not match build 334473", std::memory_order_release);
-            Log::get().note("light grid cache: refused: the cluster builder's sixteen prologue bytes are not build 334473's; nothing patched.");
+            g_detour.status.store("the builder's prologue does not match build 334925", std::memory_order_release);
+            Log::get().note("light grid cache: refused: the cluster builder's sixteen prologue bytes are not build 334925's; nothing patched.");
         }
         return;
     }
@@ -411,7 +411,7 @@ void installOnce() noexcept {
     if (refreshRead && lg::refreshPinMatches(refreshGot, sizeof(refreshGot))) {
         g_refresh.store(g_base + lg::kRefreshRva, std::memory_order_release);
     } else {
-        Log::get().note("light grid cache: the view-block refresh (0x4F3150) is not the pinned function; a dirty view block and the override path go to the game whole.");
+        Log::get().note("light grid cache: the view-block refresh (0x4F30F0) is not the pinned function; a dirty view block and the override path go to the game whole.");
     }
     uint8_t copyGot[lg::kPrologueBytes] = {};
     bool copyRead = false;
@@ -424,7 +424,7 @@ void installOnce() noexcept {
     if (copyRead && lg::copyPinMatches(copyGot, sizeof(copyGot))) {
         g_copy.store(g_base + lg::kCopyRva, std::memory_order_release);
     } else {
-        Log::get().note("light grid cache: the view-block copy constructor (0x57A5C0) is not the pinned function; the override path goes to the game whole.");
+        Log::get().note("light grid cache: the view-block copy constructor (0x57A560) is not the pinned function; the override path goes to the game whole.");
     }
     g_detour.relay = allocateRelay(g_base + lg::kBuilderRva);
     if (!g_detour.relay) {
@@ -443,7 +443,7 @@ void installOnce() noexcept {
     g_detour.status.store("installed", std::memory_order_release);
     g_installedMs.store(static_cast<uint64_t>(nowMs()), std::memory_order_release);
     g_gate.store(1, std::memory_order_release);
-    Log::get().note("light grid cache: the fragment-culling cluster builder (0x58B2B0) is detoured. Exact: a call whose inputs match a kept state bit for bit gets that state "
+    Log::get().note("light grid cache: the fragment-culling cluster builder (0x58B250) is detoured. Exact: a call whose inputs match a kept state bit for bit gets that state "
                     "swapped in; one hit in %llu is rebuilt by the game and compared byte for byte, and any difference turns the cache off. Up to %d states per context.",
                     static_cast<unsigned long long>(lg::kVerifyEvery), lg::kSlotsPerContext);
 }

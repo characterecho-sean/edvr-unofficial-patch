@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline "did the game's render-relevant code change between builds" detector.
 
-    python tools/build_diff.py capture --exe analysis/EliteDangerous64-334473.exe ^
+    python tools/build_diff.py capture --exe analysis/EliteDangerous64-334925.exe ^
         --out tools/build_diff_targets.json
     python tools/build_diff.py diff --exe "C:\\path\\to\\EliteDangerous64.exe"
 
@@ -24,7 +24,9 @@ pre-flight that says whether the next test flight is measuring the same
 engine the analysis docs describe.  No executable is launched or
 modified; only the --out file is written.
 
-Historical map example (332841 to 334473), with explicit old RVAs:
+Historical map example (332841 to 334473), with explicit old RVAs; the
+334473 to 334925 step ran the same way with --rvas-file and --seed
+(.agents/build-334925/):
 
     python tools/build_diff.py map --old analysis/EliteDangerous64.exe ^
         --new analysis/EliteDangerous64-334473.exe --rva 0x430EFE0 ^
@@ -32,11 +34,11 @@ Historical map example (332841 to 334473), with explicit old RVAs:
         [--all-functions OUT.csv] [--cache MAP.json]
 
 --seed maps the current baseline's targets (--targets, default
-tools/build_diff_targets.json, build 334473), so --old must be that build;
+tools/build_diff_targets.json, build 334925), so --old must be that build;
 map refuses --seed when --old's timestamp and image size differ.  For the
 next game update:
 
-    python tools/build_diff.py map --old analysis/EliteDangerous64-334473.exe ^
+    python tools/build_diff.py map --old analysis/EliteDangerous64-334925.exe ^
         --new <next exe> --seed
 
 diff cannot follow a target once sections move, which every update does.
@@ -99,42 +101,43 @@ BLOCK_SIZE = 4096
 
 # Render-pipeline map target list (docs/engine-render-pipeline.md), seeded
 # 2026-09-21 from the baseline at analysis/EliteDangerous64.exe; retargeted to
-# build 334473 on 2026-10-20 from analysis/EliteDangerous64-334473.exe.  Sizes are
+# build 334473 on 2026-10-20 from analysis/EliteDangerous64-334473.exe, and to
+# build 334925 on 2026-10-23 (every target maps RELOC-ONLY or IDENTICAL).  Sizes are
 # the Ghidra body sizes from analysis/decomp/decomp_*.txt headers; they may
 # include jump-table bytes, which is fine for fingerprinting.
 TARGET_SEED = [
     {"name": "kinematic-eval-fun_144311ca0", "stage": "kinematic-eval",
-     "rva": 0x4311CA0, "size": 1006},
+     "rva": 0x4311C00, "size": 1006},
     {"name": "lod-evaluator-fun_144334000", "stage": "cull-lod",
-     "rva": 0x4334000, "size": 64},
+     "rva": 0x4333F60, "size": 64},
     {"name": "worker-entry-fun_144324640", "stage": "frame-scheduler",
-     "rva": 0x4324640, "size": 503},
+     "rva": 0x43245A0, "size": 503},
     {"name": "worker-entry-fun_144323040", "stage": "frame-scheduler",
-     "rva": 0x4323040, "size": 565},
+     "rva": 0x4322FA0, "size": 565},
     {"name": "bucket-builder-fun_1442b70e0", "stage": "bucket-workers",
-     "rva": 0x42B70E0, "size": 3222},
+     "rva": 0x42B7040, "size": 3222},
     {"name": "rig-dispatch-fun_14431dce0", "stage": "kinematic-eval",
-     "rva": 0x431DCE0, "size": 699},
+     "rva": 0x431DC40, "size": 699},
     {"name": "bucket-traversal-fun_144314d00", "stage": "bucket-workers",
-     "rva": 0x4314D00, "size": 1597},
+     "rva": 0x4314C60, "size": 1597},
     {"name": "scheduler-reset-fun_1436a3c50", "stage": "frame-scheduler",
-     "rva": 0x36A3C50, "size": 687},
+     "rva": 0x36A3BB0, "size": 687},
     {"name": "merge-fun_144350f0e", "stage": "frame-scheduler",
-     "rva": 0x4350F0E, "size": 129},
+     "rva": 0x4350E6E, "size": 129},
     {"name": "merge-fun_144350f8f", "stage": "frame-scheduler",
-     "rva": 0x4350F8F, "size": 315},
+     "rva": 0x4350EEF, "size": 315},
     {"name": "enqueue-fun_144c81b50", "stage": "bucket-workers",
-     "rva": 0x4C81B50, "size": 632},
+     "rva": 0x4C81A30, "size": 632},
     {"name": "accumulator-fun_144c86390", "stage": "bucket-workers",
-     "rva": 0x4C86390, "size": 427},
+     "rva": 0x4C86270, "size": 427},
     {"name": "drainer-fun_144350490", "stage": "bucket-workers",
-     "rva": 0x4350490, "size": 64},
+     "rva": 0x43503F0, "size": 64},
     {"name": "rekey-wrapper-fun_1442b8330", "stage": "bucket-workers",
-     "rva": 0x42B8330, "size": 64},
+     "rva": 0x42B8290, "size": 64},
     {"name": "projection-wrapper-0x4e3050", "stage": "cull-lod",
-     "rva": 0x4E3050, "size": 64},
+     "rva": 0x4E2FF0, "size": 64},
     {"name": "projection-wrapper-0x4e2e30", "stage": "cull-lod",
-     "rva": 0x4E2E30, "size": 64},
+     "rva": 0x4E2DD0, "size": 64},
 ]
 
 

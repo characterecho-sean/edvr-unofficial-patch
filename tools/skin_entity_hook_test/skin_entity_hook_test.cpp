@@ -4,10 +4,10 @@
 //   --self-test  every check; the optional argument is the repository root (unused here)
 //
 // The production source carries the test (compiled in with EDVR_SKIN_HOOK_TEST, which also redirects the hook's target from the game's
-// EliteDangerous64.exe+0x4C56CC0 to a function built here: the real 28-byte prologue, a witness store, the epilogue). The real CodeHook patches
+// EliteDangerous64.exe+0x4C56BA0 to a function built here: the real 28-byte prologue, a witness store, the epilogue). The real CodeHook patches
 // it, the real relay runs, the real guarded reads walk a heap laid out the way the decompile says the game's list is. Cases:
 //   H1  before arming nothing exists: no state, no snapshot, the game's function untouched
-//   H2  a function whose prologue is not build 334473's stands the hook down with the reason, nothing patched
+//   H2  a function whose prologue is not build 334925's stands the hook down with the reason, nothing patched
 //   H3  the right prologue arms it (the line says READ ONLY and the byte counts); arming twice changes nothing
 //   H4  a call runs the original FIRST (the end row is read after it), then the list is read whole: addresses, bases, counts, thread, sequence
 //   H5  the first call is reported with its thread

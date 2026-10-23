@@ -2966,13 +2966,13 @@ void hookDevice(ID3D11Device* device) {
             if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
-            // cache is the game's, not VR's. A build that is not 334473 is one log line and nothing patched.
+            // cache is the game's, not VR's. A build that is not 334925 is one log line and nothing patched.
             vertexResyncInstall();
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
-            // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334473 is one log line.
+            // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334925 is one log line.
             lightGridCacheInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
-            // profile passes through per call). A build that is not 334473 is scanned for the call site; anything short of one match is one log line and nothing patched.
+            // profile passes through per call). A build that is not 334925 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());
             // The optimized station (optimized_station.cpp): reads fix.optimized_stations; its hooks attach while it is on (VR by default; flat off).
             optimizedStationInstall(runtimeFlatProfile());

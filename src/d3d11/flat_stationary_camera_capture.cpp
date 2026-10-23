@@ -19,11 +19,11 @@
 namespace edvr { namespace {
 
 // Temporary F1 source-topology capture for the verified Steam executable.
-// 2874350 is a normal three-argument, void Win64 function. The hook only
+// 2874290 is a normal three-argument, void Win64 function. The hook only
 // observes its source and stack-local helper, and calls the original once.
-constexpr uintptr_t kRendererRva = 0x2874350;
+constexpr uintptr_t kRendererRva = 0x2874290;
 constexpr uint8_t kPrologue[15] = {0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xEC,0x20};
-constexpr uint32_t kPeTimestamp = 1791840573u;
+constexpr uint32_t kPeTimestamp = 1792704584u;
 constexpr uint32_t kPeImageSize = 104906752u;
 constexpr unsigned kSourceSlots = 16, kRefreshSlots = 32;
 constexpr unsigned kReportRows = 1024;
@@ -235,10 +235,10 @@ void report(State& s, uint64_t frame) noexcept {
         if (slot.snapshot.validSource) ++sourceValid;
         if (slot.snapshot.complete && slot.snapshot.consistent) ++sourceComplete;
         if (slot.snapshot.complete && slot.snapshot.consistent && slot.snapshot.stageCount &&
-            slot.snapshot.stages[0].stackVtable == s.gameBase.load() + 0x51893B0 &&
+            slot.snapshot.stages[0].stackVtable == s.gameBase.load() + 0x5189370 &&
             slot.snapshot.stages[0].nameRead &&
             std::strcmp(slot.snapshot.stages[0].stackName, "MainView") == 0 &&
-            slot.snapshot.callerRva == 0x281D319) ++mainView;
+            slot.snapshot.callerRva == 0x281D259) ++mainView;
         if (slot.snapshot.stageCount && slot.snapshot.stages[0].nameRead &&
             std::strcmp(slot.snapshot.stages[0].stackName, "MainView") == 0) {
             mainPlaced += slot.snapshot.placedSeen;

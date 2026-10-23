@@ -764,7 +764,7 @@ def print_pose_tally(text):
 # --tally cover: the terrain cull cover (src/d3d11/terrain_cull_cover_core.h writes every line; tools\terrain_cover_test holds tools\terrain_cover_fixture.log, which this script's
 # --self-test reads, to exactly what the production hook writes; docs\terrain-culling.md). Always on in VR, no key. In the GRAPHICS log:
 #
-#   terrain cull cover: hook live at exe+0x4441580 (<how found>)        or    terrain cull cover: inert: <why>
+#   terrain cull cover: hook live at exe+0x44414E0 (<how found>)        or    terrain cull cover: inert: <why>
 #   terrain cull cover: first call: in aspect A vfov V deg -> out aspect A' vfov V' deg (widened|unchanged); T=t H=h      the first call that had the frusta
 #   terrain cull cover: armed; N of M calls widened in the last 10 min (last in aspect .. vfov .. deg -> out aspect .. vfov .. deg | no call yet)      every ten minutes, zeros included
 
@@ -967,7 +967,7 @@ CENSUS_PHASE_STOP = 1.0e-5
 CENSUS_PROJ_TOL = 1.0e-4   # relative: two calls whose scale and near agree to this carry one projection
 CENSUS_PROJ_SHOWN = 6
 # The kinds the design puts on the screen: the world is 3, the eyes 5 (design doc section 82, flight 1).
-CENSUS_KIND5_PER_FRAME = 6.0       # two eyes x the three call sites +0x594F73, +0x59500B, +0x595141
+CENSUS_KIND5_PER_FRAME = 6.0       # two eyes x the three call sites +0x594F13, +0x594FAB, +0x5950E1
 CENSUS_INJECTED_PER_FRAME = (54, 68)
 # The role test's field-of-view ratio (kFlatCameraVrFirstPersonFovRatio in src/d3d11/flat_camera_vr.h): a screen view whose fov is at
 # most this fraction of the frame's widest is the first-person camera. Flight 2's struct: 0.8203 against 0.9831 rad (ratio 0.834).
@@ -1072,7 +1072,7 @@ def _ckindmap(text):
 
 
 def _ccallers(text):
-    """An episode header's `callers=` (`+0x58DFD3:300,+0x594F73:130,+more:1`, `-` for none) -> ([(rva, n), ...], more); None when it is not one."""
+    """An episode header's `callers=` (`+0x58DF73:300,+0x594F13:130,+more:1`, `-` for none) -> ([(rva, n), ...], more); None when it is not one."""
     if text is None:
         return None
     if text == "-":
@@ -11534,7 +11534,7 @@ def self_test_cover():
         return False
     text = read_text(fixture)
     p = parse_cover(text)
-    if p["live"] != ("4441580", "PE stamp 1791840573 and image size 104906752 are build 334473's; the callee's head and the call site at exe+0x4458D5D verified") or p["inert"] is not None:
+    if p["live"] != ("44414E0", "PE stamp 1792704584 and image size 104906752 are build 334925's; the callee's head and the call site at exe+0x4458CBD verified") or p["inert"] is not None:
         fail("the hook-live line parsed to %r (inert %r)" % (p["live"], p["inert"]))
     if p["first"] != {"in": (1.0344, 91.65), "out": (1.2186, 91.65), "widened": True, "tanV": 1.0293, "tanH": 1.2543}:
         fail("the first-call line parsed to %r" % (p["first"],))
@@ -11570,7 +11570,7 @@ def self_test_cover():
         with open(name, "wb") as f:
             f.write((head + text).encode("utf-8"))
         rc, out = run(["--dir", logs, "--tally", "cover"])
-        for want in ("[edvr] terrain cull cover: hook live at exe+0x4441580 (PE stamp 1791840573 and image size 104906752 are build 334473's; the callee's head and the call site at exe+0x4458D5D verified)",
+        for want in ("[edvr] terrain cull cover: hook live at exe+0x44414E0 (PE stamp 1792704584 and image size 104906752 are build 334925's; the callee's head and the call site at exe+0x4458CBD verified)",
                      "[edvr] first call with the frusta known: in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg (widened); T=1.0293 H=1.2543",
                      "clock            widened     calls   share  last call, in -> out",
                      "10:10:03           60000     60001    100%  aspect 1.0344 vfov 91.65 -> aspect 1.2186 vfov 91.65",
@@ -11590,9 +11590,9 @@ def self_test_cover():
             fail("a log with the hook live and nothing else -> rc %d:\n%s" % (rc, out))
         # Inert: the reason is the report.
         with open(name, "wb") as f:
-            f.write((head + "[10:00:00.100] terrain cull cover: inert: the PE stamp 5 is not build 334473's and the signature scan of the 99 KB code section found no call site\n").encode("utf-8"))
+            f.write((head + "[10:00:00.100] terrain cull cover: inert: the PE stamp 5 is not build 334925's and the signature scan of the 99 KB code section found no call site\n").encode("utf-8"))
         rc, out = run(["--dir", logs, "--tally", "cover"])
-        if rc != 0 or "[edvr] terrain cull cover: inert: the PE stamp 5 is not build 334473's and the signature scan of the 99 KB code section found no call site" not in out \
+        if rc != 0 or "[edvr] terrain cull cover: inert: the PE stamp 5 is not build 334925's and the signature scan of the 99 KB code section found no call site" not in out \
                 or "no heartbeat yet" in out:
             fail("an inert log -> rc %d:\n%s" % (rc, out))
         # A covered first call is said so.
@@ -11882,7 +11882,7 @@ def self_test_flat_upscale():
         for needle in needles:
             if needle not in read_text(path):
                 fail("%s no longer writes the hold line %r; this reader does not parse it" % (os.path.basename(path), needle))
-    hold = ("[09:23:44.988] vr ssaa gate: hold installed at DLL load: loader wrapper 0x2864DA0 (slot 0x52EB528) and the Supersampling setter, build 334473 checked\n"
+    hold = ("[09:23:44.988] vr ssaa gate: hold installed at DLL load: loader wrapper 0x2864CE0 (slot 0x52EB4F8) and the Supersampling setter, build 334925 checked\n"
             "[09:23:44.990] vr ssaa gate: holding Supersampling at 1.0 (requested 0.5000, 3D mode 3, at startup); loader object 0x1234, field 0x1370\n"
             "[09:24:30.100] vr ssaa gate: holding Supersampling at 1.0 (requested 0.8500, VR live 1, at menu)\n"
             "[09:24:30.300] vr ssaa gate: notice queued as a toast (\"Supersampling 0.85 is held at 1.0 in VR: use HMD Image Quality to set resolution\")\n"
@@ -11893,7 +11893,7 @@ def self_test_flat_upscale():
         fail("the hold lines parsed as %r" % (hp,))
     want_statuses_vr(hold, {"HOLD": "PASS", "HOLD-NOTICE": "PASS", "HOLD-VR": "PASS"}, "a held menu change with its notice")
     want_statuses_vr(hold.replace(hold.splitlines(True)[3], ""), {"HOLD-NOTICE": "WARN"}, "a held value other than 1.0 with no notice")
-    want_statuses_vr("[09:23:44.990] vr ssaa gate: hold refused, nothing written: game build not checked (PE stamp 1, image 2, build 334473's are 3, 4); the game's Supersampling is not held\n",
+    want_statuses_vr("[09:23:44.990] vr ssaa gate: hold refused, nothing written: game build not checked (PE stamp 1, image 2, build 334925's are 3, 4); the game's Supersampling is not held\n",
                      {"HOLD": "WARN"}, "a refused hold")
     _, hout = statuses(hold, print_vr_supersampling)
     if "VR transition 09:25:00.000" not in hout or "vr supersampling verdict:" not in hout:
@@ -12733,7 +12733,7 @@ def self_test_camera_census():
              "other-thread entry" % ((len(c["windows"]), len(c["order"]), len(c["sequences"]), len(c["eyes"]),
                                       len(c["geometry"]), len(c["threads"])),))
     cam = c["cameras"].get(0x241DF6D0BB0)
-    if not cam or cam["kind"] != 5 or cam["caller"] != 0x594F73 or cam["tone"] != "after" or \
+    if not cam or cam["kind"] != 5 or cam["caller"] != 0x594F13 or cam["tone"] != "after" or \
             abs(cam["near"] - 0.025) > 1e-9 or cam["tan"] is not None or \
             cam["viewport"] != (0.0, 0.0) or cam["frame"] != 4 or cam["view"] != 0x241DD00E000 or \
             cam["vctx"] != 0x241DCE749F40:
@@ -12771,7 +12771,7 @@ def self_test_camera_census():
             route_tok(routes[1], "pair-checked") != "448" or route_hdr(routes) != (5040, 2835, "a `vr world route 5s:` line's hdr="):
         fail("the route's two lines parsed as %r" % (routes,))
     # A line with no stamp, one with, and a value the DLL printed as nan; and an older census's call line, which has no inj and no role.
-    n = parse_camera_census("vr camera census: call frame=9 n=1 camera=0x10 kind=3 caller=+0x594F73 draw=- tone=none "
+    n = parse_camera_census("vr camera census: call frame=9 n=1 camera=0x10 kind=3 caller=+0x594F13 draw=- tone=none "
                             "fl=0x1C>- rows=[1,nan,0,0,0,0,0,0,0,0,0,0,0,0,0,0]\n"
                             "[01:02:03.004] vr camera census: call frame=9 n=2 camera=0x10 kind=- caller=+0x1 draw=7 "
                             "tone=after inj=1 role=scene fl=0x0>0x0 rows=-\nsomething else entirely\n")
@@ -12825,7 +12825,7 @@ def self_test_camera_census():
         fail("census_phase_ndc is not flatProjectionJitter's rule (x = 2 px / W, y = -2 py / H)")
     # One object, two projections: grouped by scale and near, whichever way the head is turned.
     def row(n, rows):
-        return {"n": n, "kind": 3, "camera": 0x1, "caller": 0x594F73, "tone": "before", "view": 0x5, "frame": 7,
+        return {"n": n, "kind": 3, "camera": 0x1, "caller": 0x594F13, "tone": "before", "view": 0x5, "frame": 7,
                 "rows": rows, "geo": census_geometry(rows), "inj": None, "role": None}
     groups = census_projections([row(1, scene), row(2, first_person), row(3, scene), row(4, scene)])
     if [grp["count"] for grp in groups] != [3, 1] or groups[1]["near"] != 0.0675 or groups[0]["near"] != 0.025:
@@ -12840,8 +12840,8 @@ def self_test_camera_census():
         "frames with the tone drawn: 898; sampled (tone while the journal says on foot, or no journal; while the world route "
         "jitters, with a non-zero phase): 450; the journal said: no, yes",
         "world route: 2 5 s window(s); jitter: idle x1, on x1",
-        "0x241DC2E2960 5 +0x594F73 0.95 0.025 1.5708 50000 (0, 0) (0, 0) 0x241DD00E000 none 1 k3 x45 WORLD; 3 'changed:' line(s)",
-        "0x241DF6D0BB0 5 +0x594F73 0.95 0.025 1.5708 50000 (0, 0) (0, 0) 0x241DD00E000 after 4 k5 x9 EYE",
+        "0x241DC2E2960 5 +0x594F13 0.95 0.025 1.5708 50000 (0, 0) (0, 0) 0x241DD00E000 none 1 k3 x45 WORLD; 3 'changed:' line(s)",
+        "0x241DF6D0BB0 5 +0x594F13 0.95 0.025 1.5708 50000 (0, 0) (0, 0) 0x241DD00E000 after 4 k5 x9 EYE",
         "0x241DC2E2960 frame 4 moved: aspect 0.95->1.777778, bound (0,0)->(5e-05,4.444444e-05), fov 1.570796->1.0122, kind 5->3, "
         "viewport (0,0)->(5040,2835)",
         "camera 0x241DC2E2960 WORLD: k3 x45 over 3 logged frame(s) (15.0 a frame); kind-3 calls before the tone 45, after 0; "
@@ -12855,16 +12855,16 @@ def self_test_camera_census():
         "SEVERAL KINDS (frame 4: k5 x1, frame 5: k3 x1, frame 6: k3 x1)",
         "camera 0x241DF6D0BB0 EYE: k5 x9 over 3 logged frame(s) (3.0 a frame)",
         "frame 4 (sequence 1/3, journal foot=yes, phase (0.2520, -0.1260) px): 24 call(s), 24 recorded, 0 truncated",
-        "camera 0x241DC2E2960 k3: 15 call(s), callers +0x594F73 x7, +0x59500B x4, +0x595141 x4, view 0x241DD00A000, 0x241DD00A800, "
+        "camera 0x241DC2E2960 k3: 15 call(s), callers +0x594F13 x7, +0x594FAB x4, +0x5950E1 x4, view 0x241DD00A000, 0x241DD00A800, "
         "0x241DD00B000, tone before x15, draws 350..5047; injected 15 (fp 3, scene 12)",
-        "camera 0x241DE100200 k5: 1 call(s), callers +0x595141 x1, view 0x241DD00C800, tone after x1, draws 8209..8209",
-        "camera 0x241DE100200 k3: 1 call(s), callers +0x58DFD3 x1, view 0x241DD00C800, tone before x1, draws 5059..5059; injected 0 (aux 1)",
-        "k5 +0x595141 after x1 (calls 18..18) camera 0x241DE100200",
+        "camera 0x241DE100200 k5: 1 call(s), callers +0x5950E1 x1, view 0x241DD00C800, tone after x1, draws 8209..8209",
+        "camera 0x241DE100200 k3: 1 call(s), callers +0x58DF73 x1, view 0x241DD00C800, tone before x1, draws 5059..5059; injected 0 (aux 1)",
+        "k5 +0x5950E1 after x1 (calls 18..18) camera 0x241DE100200",
         "eye 0 frame 4 draw 8213 (journal foot=yes, phase (0.2520, -0.1260) px) b1 0x1EB2E751E20 first=0 bytes=5376",
-        "eye 0 frame 4 draw 8213: camera 0x241DF6D0BB0 (kind 5) caller +0x594F73, +0x59500B, +0x595141, 3 call(s) n=19/20/21, "
+        "eye 0 frame 4 draw 8213: camera 0x241DF6D0BB0 (kind 5) caller +0x594F13, +0x594FAB, +0x5950E1, 3 call(s) n=19/20/21, "
         "draw 8210/8211/8212, tone after",
-        "eye 1 frame 6 draw 8220: camera 0x241DF6D0FF0 (kind 5) caller +0x594F73, +0x59500B, +0x595141, 3 call(s) n=22/23/24",
-        "eye camera 0x241DF6D0BB0 signature: kind 5, caller +0x594F73, aspect 0.95, near 0.025, far 50000, fov 1.5708, bound (0, 0), "
+        "eye 1 frame 6 draw 8220: camera 0x241DF6D0FF0 (kind 5) caller +0x594F13, +0x594FAB, +0x5950E1, 3 call(s) n=22/23/24",
+        "eye camera 0x241DF6D0BB0 signature: kind 5, caller +0x594F13, aspect 0.95, near 0.025, far 50000, fov 1.5708, bound (0, 0), "
         "offcentre (0.263158, -0.1), viewport (0, 0), tangents -, view 0x241DD00E000",
         "eye 1 frame 7 draw 8220: frame 7's call sequence was not logged (only the first 3 on-foot frames are)",
         "eye camera(s): 0x241DF6D0BB0, 0x241DF6D0FF0; world camera: 0x241DC2E2960; other world-side kind-3 camera(s): 0x241DE100200",
@@ -12877,8 +12877,8 @@ def self_test_camera_census():
         "sequence(s)",
         "frame 4: world-side 15 call(s) [tone before x15; last draw 5047], eye 6 call(s) [tone after x6; first draw 8210]",
         "the tone flag separates the two sets",
-        "(D) caller: eye camera(s) call from +0x594F73, +0x59500B, +0x595141; the world camera from +0x594F73, +0x59500B, +0x595141; "
-        "shared: +0x594F73, +0x59500B, +0x595141 -- the caller alone does not separate them",
+        "(D) caller: eye camera(s) call from +0x594F13, +0x594FAB, +0x5950E1; the world camera from +0x594F13, +0x594FAB, +0x5950E1; "
+        "shared: +0x594F13, +0x594FAB, +0x5950E1 -- the caller alone does not separate them",
         "(F) view (the refresh's second argument, the pass object): eye camera(s) are refreshed with 0x241DD00E000, 0x241DD00F000; "
         "the world camera with 0x241DD00A000, 0x241DD00A800, 0x241DD00B000; no view is shared: the view separates them",
         "(E) tangents: not compared: the eye cameras' lines carry no tangents (tan=-",
@@ -12938,7 +12938,7 @@ def self_test_camera_census():
         fail("a log with no census lines reported exit %d:\n%s" % (rc, out))
     # The route never reported progress: a window with progress=no says so, and there is nothing to join.
     only = "[00:00:05.000] vr camera census 5s: frames=450 calls=1000 posts=1000 off-thread=0 stale=0 kinds=3:1000 " \
-           "callers=+0x594F73:1000 cameras-seen=1 cameras-total=1 tone=0/0/1000 on-foot-frames=0 eye-draws=900/0 " \
+           "callers=+0x594F13:1000 cameras-seen=1 cameras-total=1 tone=0/0/1000 on-foot-frames=0 eye-draws=900/0 " \
            "progress=no hook=installed windows=1 cam-overflow=0 thread-overflow=0\n"
     rc, out = report(only)
     if rc != 0 or "progress=no in every window" not in out or "No eye draw was read back" not in out or \
@@ -12946,7 +12946,7 @@ def self_test_camera_census():
         fail("a progress=no window was not called out:\n%s" % out)
     # The tone was drawn all session but the journal never said on foot (a ship, a menu): named, and nothing is joined.
     ship = "[00:00:05.000] vr camera census 5s: frames=450 calls=1000 posts=1000 off-thread=0 stale=0 kinds=3:1000 " \
-           "callers=+0x594F73:1000 cameras-seen=1 cameras-total=1 tone=500/500/0 tone-frames=450 on-foot-frames=0 foot=no " \
+           "callers=+0x594F13:1000 cameras-seen=1 cameras-total=1 tone=500/500/0 tone-frames=450 on-foot-frames=0 foot=no " \
            "eye-draws=900/0 progress=yes hook=installed windows=1 cam-overflow=0 thread-overflow=0\n"
     rc, out = report(ship)
     if rc != 0 or "the tone was drawn in 450 frame(s) but no frame was sampled" not in out or \
@@ -12967,7 +12967,7 @@ def self_test_camera_census():
             "== stage 2 verdict" not in out:
         fail("eye rows that join to no call did not say so (and still print the verdict):\n%s" % out)
     # Two cameras with the same rows are both named; a failed readback is named, not joined.
-    twice = text + "[12:00:09.000] vr camera census: call frame=4 n=22 camera=0x241DF6D0FF0 kind=5 caller=+0x595141 draw=8214 tone=after fl=0x1C>0x0 rows=-\n"
+    twice = text + "[12:00:09.000] vr camera census: call frame=4 n=22 camera=0x241DF6D0FF0 kind=5 caller=+0x5950E1 draw=8214 tone=after fl=0x1C>0x0 rows=-\n"
     rc, out = report(twice)
     if rc != 0:
         fail("a log with an extra call line failed to report")
@@ -13013,7 +13013,7 @@ def self_test_camera_census():
     if "world camera: 0x241DC2E2960" not in out or out.index("0x241DE100200") > out.index("0x241DC2E2960 "):
         fail("the world camera was chosen by its place in the camera table, not by its calls:\n%s" % out)
     def kind3_call(n, camera, tone):
-        return "vr camera census: call frame=1 n=%d camera=0x%X kind=3 caller=+0x594F73 draw=%d tone=%s fl=0x0>0x0 view=0x%X rows=-" % (
+        return "vr camera census: call frame=1 n=%d camera=0x%X kind=3 caller=+0x594F13 draw=%d tone=%s fl=0x0>0x0 view=0x%X rows=-" % (
             n, camera, n, tone, camera + 0x1000)
     tie = parse_camera_census("vr camera census: sequence frame=1 index=1/3 calls=20 recorded=20 truncated=0\n" + "\n".join(
         [kind3_call(n, 0xA0, "after") for n in range(1, 11)] + [kind3_call(n, 0xB0, "before") for n in range(11, 21)]) + "\n")
@@ -13181,10 +13181,10 @@ def self_test_camera_census():
     _, out = report(unreadable_census)
     if status(out, "iv") != "STOP" or "the census counted 4 call(s) whose kind could not be read" not in verdict_line(out, "iv"):
         fail("census unreadable kinds were not a STOP:\n%s" % verdict_line(out, "iv"))
-    thread_line = text + "[12:00:09.000] vr camera census: other-thread tid=4321 camera=0x241dc2e2960 kind=3 caller=+0x594F73 calls=57\n"
+    thread_line = text + "[12:00:09.000] vr camera census: other-thread tid=4321 camera=0x241dc2e2960 kind=3 caller=+0x594F13 calls=57\n"
     rc, out = report(thread_line.replace("off-thread=0 stale=0 inj-calls=6750", "off-thread=57 stale=0 inj-calls=6750"))
     if "57 refresh call(s) ran on a thread other than the render thread" not in out or "1 other-thread entry" not in out or \
-            "other-thread: tid 4321 camera 0x241DC2E2960 kind 3 caller 0x594F73 calls 57" not in out or status(out, "iv") != "STOP":
+            "other-thread: tid 4321 camera 0x241DC2E2960 kind 3 caller 0x594F13 calls 57" not in out or status(out, "iv") != "STOP":
         fail("an off-thread call was not reported, listed and a STOP:\n%s" % out)
     # (v) the roles: an auxiliary call injected is a STOP; calls refused a WARN.
     aux_injected = text.replace(" inj=0 role=aux ", " inj=1 role=aux ")
@@ -13234,10 +13234,10 @@ def self_test_camera_census():
         fail("the JITTERED line's size beat the route line's hdr=:\n%s" % verdict_line(out, "ii"))
     # The signatures the route excluded by role are quoted, so the roles that still need deciding are in the verdict.
     excluded = text + "[12:00:10.000] vr world route: camera call EXCLUDED, not a screen view: kind 3 aspect=1.0000 fov=1.5708 near=0.1000 far=50000.0 " \
-                      "caller=+0x58DFD3 (the screen's aspect is 1.7778; a screen view is within 4%): 6 call(s) so far, never injected\n"
+                      "caller=+0x58DF73 (the screen's aspect is 1.7778; a screen view is within 4%): 6 call(s) so far, never injected\n"
     _, out = report(excluded)
     if "the route excluded 1 kind-3 call signature(s) by role and never injected them" not in out or \
-            "aspect=1.0000 fov=1.5708 near=0.1000 far=50000.0 caller=+0x58DFD3 (6 call(s) so far)" not in out:
+            "aspect=1.0000 fov=1.5708 near=0.1000 far=50000.0 caller=+0x58DF73 (6 call(s) so far)" not in out:
         fail("the route's EXCLUDED line was not quoted as a note:\n%s" % out)
     fault = text.replace("jitter=on", "jitter=fault")
     _, out = report(fault)
@@ -13549,7 +13549,7 @@ def self_test_camera_census():
     if not _cequal(1.0, 1.00001) or _cequal(1.0, 1.001) or _cequal((0.0, 0.0), (0.0, 0.01)) or not _cequal((0.0, 1.0), (0.0, 1.0)) \
             or _cequal(float("nan"), float("nan")) or not _cequal(3, 3) or _cequal(3, 4) or not _cequal(None, None):
         fail("_cequal")
-    if _cf("nan") == _cf("nan") or _cf("-") == _cf("-") or _cf("1.5") != 1.5 or _chex("+0x594F73") != 0x594F73 or \
+    if _cf("nan") == _cf("nan") or _cf("-") == _cf("-") or _cf("1.5") != 1.5 or _chex("+0x594F13") != 0x594F13 or \
             _chex("0x241dc2e2960") != 0x241DC2E2960 or _chex("-") is not None or _ctuple("(1,2)") != (1.0, 2.0) or \
             _ctuple("-") is not None or _clist("[1,2,3]") != [1.0, 2.0, 3.0] or _clist("-") is not None:
         fail("the value parsers")
@@ -13572,20 +13572,20 @@ def self_test_camera_census():
     many = []
     for i in range(40):
         many.append("[00:00:00.%03d] vr camera census: call frame=8 n=%d camera=0x10 kind=3 caller=+0x%X draw=%d tone=before "
-                    "fl=0x1C>0x0 rows=-" % (i, i + 1, 0x594F73 + (i & 1), 100 + i))
+                    "fl=0x1C>0x0 rows=-" % (i, i + 1, 0x594F13 + (i & 1), 100 + i))
     many.insert(0, "[00:00:00.000] vr camera census: sequence frame=8 index=1/3 calls=40 recorded=40 truncated=0")
     rc, out = report("\n".join(many) + "\n")
     if "... 16 more run(s) ..." not in out or out.count("(calls ") != CENSUS_RUNS_SHOWN:
         fail("a 40-run frame did not show %d runs and name the 16 it left out:\n%s" % (CENSUS_RUNS_SHOWN, out))
     # No field separates, and the tone flag is unavailable: both are said, not guessed.
     same = "\n".join([
-        "vr camera census: camera=0x100 kind=3 caller=+0x594F73 thread=owner aspect=1 near=0.025 far=50000 fov=1 bound=(0,0) "
+        "vr camera census: camera=0x100 kind=3 caller=+0x594F13 thread=owner aspect=1 near=0.025 far=50000 fov=1 bound=(0,0) "
         "offcentre=(0,0) viewport=(100,100) tan=(-1,1,-1,1) first-call=1 draw=1 tone=none frame=1",
-        "vr camera census: camera=0x200 kind=3 caller=+0x594F73 thread=owner aspect=1 near=0.025 far=50000 fov=1 bound=(0,0) "
+        "vr camera census: camera=0x200 kind=3 caller=+0x594F13 thread=owner aspect=1 near=0.025 far=50000 fov=1 bound=(0,0) "
         "offcentre=(0,0) viewport=(100,100) tan=(-1,1,-1,1) first-call=2 draw=2 tone=none frame=1",
         "vr camera census: sequence frame=1 index=1/3 calls=2 recorded=2 truncated=0",
-        "vr camera census: call frame=1 n=1 camera=0x100 kind=3 caller=+0x594F73 draw=1 tone=none fl=0x1C>0x0 rows=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0.1,0]",
-        "vr camera census: call frame=1 n=2 camera=0x200 kind=3 caller=+0x594F73 draw=2 tone=none fl=0x1C>0x0 rows=[2,0,0,0,0,1,0,0,0,0,1,0,0,0,0.1,0]",
+        "vr camera census: call frame=1 n=1 camera=0x100 kind=3 caller=+0x594F13 draw=1 tone=none fl=0x1C>0x0 rows=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0.1,0]",
+        "vr camera census: call frame=1 n=2 camera=0x200 kind=3 caller=+0x594F13 draw=2 tone=none fl=0x1C>0x0 rows=[2,0,0,0,0,1,0,0,0,0,1,0,0,0,0.1,0]",
         "vr camera census: eye=0 frame=1 draw=2 b1=0x5 first=0 bytes=5376 rows=[2,0,0,0,0,1,0,0,0,0,1,0,0,0,0.1,0] meas=(0,0)",
         ""])
     rc, out = report(same)
@@ -13597,15 +13597,15 @@ def self_test_camera_census():
         fail("calls with tone=none were judged by a tone flag they do not have:\n%s" % out)
     if "(F) view" not in out or "not enough calls logged to say" not in out:
         fail("calls with no view were judged by one:\n%s" % out)
-    if "(D) caller: eye camera(s) call from +0x594F73; the world camera from +0x594F73; shared: +0x594F73" not in out:
+    if "(D) caller: eye camera(s) call from +0x594F13; the world camera from +0x594F13; shared: +0x594F13" not in out:
         fail("two cameras calling from one site were separated by the caller:\n%s" % out)
 
     # ---- the episodes (Phase 0): the value parsers, the parser, the report, and logs altered to take away each thing the section depends on ----
     if (_ckindmap("0:12,3:290,5:10"), _ckindmap("-"), _ckindmap("1:2,other:3,unreadable:4"), _ckindmap("x"), _ckindmap(None)) != \
             ({0: 12, 3: 290, 5: 10}, {}, {1: 2, "other": 3, "unreadable": 4}, None, None):
         fail("_ckindmap")
-    if (_ccallers("+0x58DFD3:300,+0x594F73:130,+more:2"), _ccallers("-"), _ccallers("+0x1:1,"), _ccallers(None)) != \
-            (([(0x58DFD3, 300), (0x594F73, 130)], 2), ([], 0), None, None):
+    if (_ccallers("+0x58DF73:300,+0x594F13:130,+more:2"), _ccallers("-"), _ccallers("+0x1:1,"), _ccallers(None)) != \
+            (([(0x58DF73, 300), (0x594F13, 130)], 2), ([], 0), None, None):
         fail("_ccallers")
     if (_ctrigger("key-on"), _ctrigger("gui:0>6"), _ctrigger("naming:unnamed>named"), _ctrigger("foot:no"), _ctrigger(""), _ctrigger("bogus:1>2"),
             _ctrigger("zzz"), _ctrigger("gui:>6"), _ctrigger(None)) != \
@@ -13632,7 +13632,7 @@ def self_test_camera_census():
             (e3["trigger"], e3["foot"], e3["gui"], e3["phase"], e3["named"]) != (("naming", "named", "unnamed"), "yes", None, (0.252, -0.126), False):
         fail("the episode headers parsed wrong: %r" % ([{k: v for k, v in e.items() if k not in ("rows", "joins", "pass")} for e in eps],))
     if (e1["calls"], e1["recorded"], e1["printed"], len(e1["rows"])) != (14, 14, 14, 14) or e1["kinds"] != {1: 2, 3: 6, 5: 6} or \
-            sorted(e1["callers"]) != [(0x58DFD3, 2), (0x594F73, 4), (0x59500B, 4), (0x595141, 4)] or e1["callers_more"] != 0 or \
+            sorted(e1["callers"]) != [(0x58DF73, 2), (0x594F13, 4), (0x594FAB, 4), (0x5950E1, 4)] or e1["callers_more"] != 0 or \
             [r["kind"] for r in e1["rows"]] != [1, 1] + [3] * 6 + [5] * 6 or any(r["frame"] != 31 for r in e1["rows"]) or \
             len(c["sequences"]) != 3:
         fail("an episode's call lines did not follow its header, or leaked into the first three sequences: %r" % ([r["kind"] for r in e1["rows"]],))
@@ -13685,19 +13685,19 @@ def self_test_camera_census():
         "== episodes (3 printed; the last `episodes` line: 3 taken of 10, 5 trigger(s), 2 skipped) ==",
         "2 trigger(s) arrived while an episode was armed (or after the session's ten): counted, never sampled",
         "episode 1/10: frame 31, trigger key-on (armed at frame 1); journal foot=no, GuiFocus 0, naming unnamed, the route was not jittering (phase=-)",
-        "14 call(s), 14 recorded, 14 printed; by kind: k1 x2, k3 x6, k5 x6; by caller: +0x594F73 x4, +0x59500B x4, +0x595141 x4, +0x58DFD3 x2",
-        "k5 +0x594F73 after x1 (calls 9..9) camera 0x241DF6D0BB0",
+        "14 call(s), 14 recorded, 14 printed; by kind: k1 x2, k3 x6, k5 x6; by caller: +0x594F13 x4, +0x594FAB x4, +0x5950E1 x4, +0x58DF73 x2",
+        "k5 +0x594F13 after x1 (calls 9..9) camera 0x241DF6D0BB0",
         "join: 3 signature(s); the per-draw hook was handed 3100 draw(s), 2925 of them into a screen- or eye-sized depth, 4 depth view(s) resolved (a signature is a depth, a vertex "
         "shader and a pixel shader; the first of each depth has its rows read back)",
         "join: 3 signature(s); the per-draw hook was handed 905 draw(s), 337 of them into a screen- or eye-sized depth, 5 depth view(s) resolved",
         "eye 0 2620x2533: first draw 8210 (1432 draw(s)), vs 0x5C36AF051B98B9F1 ps 0xCFE84157BC76E921, depth write yes, b1 0x1EB2E751E20 (5376 bytes, first constant 0)",
-        "rows 270..273 equal the composed rows of: camera 0x241DF6D0BB0 (kind 5) caller +0x594F73, +0x59500B, +0x595141, 3 call(s) n=9/10/11, view 0x241DD00E000, tone after",
+        "rows 270..273 equal the composed rows of: camera 0x241DF6D0BB0 (kind 5) caller +0x594F13, +0x594FAB, +0x5950E1, 3 call(s) n=9/10/11, view 0x241DD00E000, tone after",
         "depth write no, b1 0x1EB2E751E20 (5376 bytes, first constant 0); rows not read (skip)",
-        "the pass's chosen rows (bound block yes) equal the view axes (as they are) of: camera 0x241DF6D0BB0 (kind 5) caller +0x594F73, +0x59500B, +0x595141, 3 call(s) n=9/10/11",
+        "the pass's chosen rows (bound block yes) equal the view axes (as they are) of: camera 0x241DF6D0BB0 (kind 5) caller +0x594F13, +0x594FAB, +0x5950E1, 3 call(s) n=9/10/11",
         "-> the rows are an eye camera's (kind 5)",
         "episode 2/10: frame 1560, trigger gui 0>6 (armed at frame 1530); journal foot=no, GuiFocus 6, naming unnamed",
         "eye 0 2620x2533: first draw 8300 (900 draw(s)), vs 0x5C36AF051B98B9F1 ps 0xCFE84157BC76E921, depth write yes, b1 0x1EB2E751E20 (5376 bytes, first constant 0); rows not read (map)",
-        "the pass's chosen rows (bound block no) equal the view axes (transposed) of: camera 0x241DC2E2960 (kind 3) caller +0x594F73, +0x59500B, +0x595141, 5 call(s) n=5/6/7/8/9",
+        "the pass's chosen rows (bound block no) equal the view axes (transposed) of: camera 0x241DC2E2960 (kind 3) caller +0x594F13, +0x594FAB, +0x5950E1, 5 call(s) n=5/6/7/8/9",
         "-> the chooser STRAYS: the rows equal a kind 3 camera's axes, not an eye camera's (this frame has 6 kind-5 call(s))",
         "episode 3/10: frame 6120, trigger naming named>unnamed (armed at frame 6090); journal foot=yes, GuiFocus unknown, naming unnamed, phase (0.2520, -0.1260) px",
         "screen 5040x2835: first draw 41 (22 draw(s)), vs 0xDFED8E1C9E191BEC ps 0x143AAE0597E2F7BF, depth write yes, b1 0x1EB2E751E20 (5376 bytes, first constant 0)",

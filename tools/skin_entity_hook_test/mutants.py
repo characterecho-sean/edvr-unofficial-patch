@@ -48,7 +48,7 @@ MUTANTS = [
     M("state-before-arming", "H1", "hook", [("std::atomic<State*> g_state{nullptr};", "std::atomic<State*> g_state{new State};")],
       "a state exists before anything armed the hook"),
     M("prologue-unchecked", "H2", "hook", [("if (!checkBytes(target, kPrologue, kPrologueBytes)) {", "if (false) {")],
-      "a function whose prologue is not build 334473's is patched"),
+      "a function whose prologue is not build 334925's is patched"),
     M("not-read-only-in-the-line", "H3", "hook", [('"READ ONLY: the original runs first', '"the original runs first')], "the arm line does not say the hook only reads"),
     M("observe-before-original", "H4", "hook",
       [("    forward(node, b, c, d);\n    if (s->gate.load(std::memory_order_relaxed)) observe(*s, node);", "    if (s->gate.load(std::memory_order_relaxed)) observe(*s, node);\n    forward(node, b, c, d);")],

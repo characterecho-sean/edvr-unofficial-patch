@@ -1,5 +1,5 @@
 #pragma once
-// The pad-state probe (TEMPORARY, 2026-10-13): four detours on Elite's docking-state readers, build 334473. Installed when fix.optimized_station is
+// The pad-state probe (TEMPORARY, 2026-10-13): four detours on Elite's docking-state readers, build 334925. Installed when fix.optimized_station is
 // on (there is no key and no hotkey). Built v14.23: the probe is the station's trigger input: the game's pad state (the own pad's r0 and r1)
 // decides the seal. The detours still never call Elite and never log.
 #include <cstdint>

@@ -134,7 +134,7 @@ void breadcrumbInstallCrashHandler();
 // alone rather than having that one thrown away too.
 void breadcrumbRemoveCrashHandler();
 
-// Reads the host executable's FileVersion resource, e.g. "334473".
+// Reads the host executable's FileVersion resource, e.g. "334925".
 //
 // Everything edvr asserts about this game was established against one build.
 // Shader hashes in particular identify one compiled shader and will not survive
@@ -147,7 +147,7 @@ std::string gameBuildVersion();
 // actually been verified against.
 bool gameBuildIsVerified();
 
-// The builds gameBuildIsVerified() accepts, as "334473",
+// The builds gameBuildIsVerified() accepts, as "334925",
 // for log lines that want to name them.
 //
 // This is read from the list rather than written out by hand at each call

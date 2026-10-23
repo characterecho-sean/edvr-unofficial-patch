@@ -150,18 +150,18 @@ Bytes identityFixture(bool withImport) {
   put32(d, 0x98 + 108, 16); put32(d, 0x98 + 112 + 8, 0x4DB6000);
   put32(d, 0x98 + 112 + 12, 40);
   const std::size_t table = 0x98 + 240;
-  // Build 334473: .text raw size 0x4DB4C00 (floor in elite_oculus_profile.h); the
+  // Build 334925: .text raw size 0x4DB4A00 (floor in elite_oculus_profile.h); the
   // .rdata that follows starts at 0x4DB6000, where the import directory sits.
   const std::uint32_t starts[] = {0x1000, 0x4DB6000, 0x4DB7000, 0x4DB8000,
                                   0x4DBA000, 0x4DBC000, 0x4DBE000};
-  const std::uint32_t spans[] = {0x4DB4C00, 0x1000, 0x1000, 0x2000,
+  const std::uint32_t spans[] = {0x4DB4A00, 0x1000, 0x1000, 0x2000,
                                  0x1000, 0x1000, 0x1000};
   for (unsigned i = 0; i != 7; ++i) {
     put32(d, table + i * 40 + 8, spans[i]);
     put32(d, table + i * 40 + 12, starts[i]);
     put32(d, table + i * 40 + 36, i == 0 ? 0x60000020 : 0xC0000040);
   }
-  put32(d, 0x80 + 8, 0x6ACD513D);
+  put32(d, 0x80 + 8, 0x6ADA8048);
   if (withImport) {
     const std::uint32_t base = 0x4DB6000;
     put32(d, base, base + 0x100); put32(d, base + 12, base + 0x200);
@@ -263,7 +263,7 @@ int gameTest(const wchar_t* path) {
   edvr::OculusProfileMatch out{};
   check(edvr::eliteOculusProfileValidateMapped(mapped.data(), mapped.size(), &out),
         "mapped known Elite profile accepted");
-  check(out.loadLibrarySlot != nullptr && out.callerReturnRva == 0x4E71BC,
+  check(out.loadLibrarySlot != nullptr && out.callerReturnRva == 0x4E715C,
         "mapped profile returns slot and exact caller RVA");
   check(out.failureStage == 0, "successful profile has no failure diagnostic");
   if (failures) return 1;
@@ -276,9 +276,9 @@ int gameTest(const wchar_t* path) {
     check(!out.loadLibrarySlot && !out.callerReturnRva, "mutation rejection clears output");
     mapped[offset] ^= 1;
   };
-  for (const auto rva : {0x8D549Cu, 0x4E4BA0u, 0x4E4730u, 0x4E4970u,
-                         0x4E8630u, 0x4E71D0u, 0x4E6E40u, 0x4E0F60u,
-                         0x4E8330u, 0x4E5DA0u, 0x4E87B0u})
+  for (const auto rva : {0x8D543Cu, 0x4E4B40u, 0x4E46D0u, 0x4E4910u,
+                         0x4E85D0u, 0x4E7170u, 0x4E6DE0u, 0x4E0F00u,
+                         0x4E82D0u, 0x4E5D40u, 0x4E8750u})
     rejectsMutation(rva, "audited code-block mutation rejected");
   for (const auto rva : {0x4E27438u, 0x4E27440u, 0x4E27600u})
     rejectsMutation(rva, "vtable mutation rejected");
@@ -352,7 +352,7 @@ int secImageTest(const wchar_t* path) {
     accepted = eliteOculusProfileValidate(first, &match);
   }
   check(accepted, "SEC_IMAGE_NO_EXECUTE profile accepted without execution");
-  check(match.loadLibrarySlot != nullptr && match.callerReturnRva == 0x4E71BC,
+  check(match.loadLibrarySlot != nullptr && match.callerReturnRva == 0x4E715C,
         "SEC_IMAGE profile returns validated slot and caller RVA");
   std::printf("elite_oculus_test: SEC_IMAGE_NO_EXECUTE header_base=0x%llX mapped_base=0x%llX, %u checks, %u failures\n",
               static_cast<unsigned long long>(encodedBase),

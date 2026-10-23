@@ -91,13 +91,13 @@ __declspec(noinline) bool sehMatches(uintptr_t address, const uint8_t* expected,
 // the values a half-written structure holds.
 inline bool userPointer(uint64_t p) { return p >= 0x10000ull && p < 0x00007FFFFFFE0000ull; }
 
-// ---- Elite build 334473: the identity, the pins, the offsets -------------------------------------------------------------
+// ---- Elite build 334925: the identity, the pins, the offsets -------------------------------------------------------------
 //
-// EliteDangerous64.exe, SHA-256 6891f70a...; image base 0x140000000, every address below an RVA from it. The same pair the
+// EliteDangerous64.exe, SHA-256 ed5a8f8c...; image base 0x140000000, every address below an RVA from it. The same pair the
 // other build-bound hooks check (vertex_resync_core.h), then the bytes of the instructions that carry each displacement used
 // below: if the exe at these RVAs is not the one the offsets were read from, nothing is read.
 
-constexpr uint32_t kEliteStamp = 1791840573u;
+constexpr uint32_t kEliteStamp = 1792704584u;
 constexpr uint32_t kEliteImageSize = 104906752u;
 
 struct Pin {
@@ -106,36 +106,36 @@ struct Pin {
     uint8_t bytes[36];
 };
 
-// GPU resource accounting. The counter update (0x51FA70: add to [device + kind*8 + 0x1EE0], the sum's high water stored at
-// +0x1F40, the second set added at +0x1F48), the load of the renderer global and the device at +0x18 of it (0x51D740, the
-// "No device created as yet" report), and the heap loads of the game's own report (0x519160).
+// GPU resource accounting. The counter update (0x51FA10: add to [device + kind*8 + 0x1EE0], the sum's high water stored at
+// +0x1F40, the second set added at +0x1F48), the load of the renderer global and the device at +0x18 of it (0x51D6E0, the
+// "No device created as yet" report), and the heap loads of the game's own report (0x519100).
 const Pin kGpuPins[] = {
-    {0x51FB32, 8, {0x4C, 0x01, 0xB4, 0x2A, 0xE0, 0x1E, 0x00, 0x00}},         // add [rdx+rbp+0x1EE0], r14
-    {0x51FB9C, 7, {0x48, 0x89, 0x8D, 0x40, 0x1F, 0x00, 0x00}},               // mov [rbp+0x1F40], rcx
-    {0x51FBA9, 8, {0x4C, 0x01, 0xB4, 0x2A, 0x48, 0x1F, 0x00, 0x00}},         // add [rdx+rbp+0x1F48], r14
-    {0x51D746, 7, {0x48, 0x8B, 0x05, 0x5B, 0x05, 0xA0, 0x05}},               // mov rax, [rip+...] = [0x5F1DCA8]
-    {0x51D755, 4, {0x48, 0x8B, 0x48, 0x18}},                                 // mov rcx, [rax+0x18]
-    {0x519D52, 7, {0x48, 0x8B, 0x86, 0x00, 0x20, 0x00, 0x00}},               // mov rax, [rsi+0x2000]
-    {0x519D5C, 11, {0x4C, 0x8B, 0x3C, 0xC8, 0x49, 0x8B, 0x8F, 0xB0, 0x00, 0x00, 0x00}},   // heap = rax[rcx*8]; mov rcx, [heap+0xB0]
-    {0x519D88, 7, {0x49, 0x8B, 0x8F, 0xC8, 0x04, 0x00, 0x00}},               // mov rcx, [heap+0x4C8]
-    {0x519E0B, 7, {0x41, 0x8B, 0x87, 0x10, 0x05, 0x00, 0x00}},               // mov eax, [heap+0x510]
-    {0x51A0EB, 7, {0x48, 0x3B, 0x8E, 0xF8, 0x1F, 0x00, 0x00}},               // cmp rcx, [rsi+0x1FF8]
+    {0x51FAD2, 8, {0x4C, 0x01, 0xB4, 0x2A, 0xE0, 0x1E, 0x00, 0x00}},         // add [rdx+rbp+0x1EE0], r14
+    {0x51FB3C, 7, {0x48, 0x89, 0x8D, 0x40, 0x1F, 0x00, 0x00}},               // mov [rbp+0x1F40], rcx
+    {0x51FB49, 8, {0x4C, 0x01, 0xB4, 0x2A, 0x48, 0x1F, 0x00, 0x00}},         // add [rdx+rbp+0x1F48], r14
+    {0x51D6E6, 7, {0x48, 0x8B, 0x05, 0xBB, 0x05, 0xA0, 0x05}},               // mov rax, [rip+...] = [0x5F1DCA8]
+    {0x51D6F5, 4, {0x48, 0x8B, 0x48, 0x18}},                                 // mov rcx, [rax+0x18]
+    {0x519CF2, 7, {0x48, 0x8B, 0x86, 0x00, 0x20, 0x00, 0x00}},               // mov rax, [rsi+0x2000]
+    {0x519CFC, 11, {0x4C, 0x8B, 0x3C, 0xC8, 0x49, 0x8B, 0x8F, 0xB0, 0x00, 0x00, 0x00}},   // heap = rax[rcx*8]; mov rcx, [heap+0xB0]
+    {0x519D28, 7, {0x49, 0x8B, 0x8F, 0xC8, 0x04, 0x00, 0x00}},               // mov rcx, [heap+0x4C8]
+    {0x519DAB, 7, {0x41, 0x8B, 0x87, 0x10, 0x05, 0x00, 0x00}},               // mov eax, [heap+0x510]
+    {0x51A08B, 7, {0x48, 0x3B, 0x8E, 0xF8, 0x1F, 0x00, 0x00}},               // cmp rcx, [rsi+0x1FF8]
 };
 
-// CPU heap manager. The heap constructor's registration in the table (0x537320: the global, the count at +0x1510, the entry
-// at +0x1400 + 16*count as {heap, heap+0x10}), the default heap at +0x1500 (0x543F90), the byte count added at +0x50 of the
-// allocator that sits at heap+0x10 (0x553480), the statistics block loaded from +0x108 of the allocator state at heap+0xA0
-// and updated (count +0x20, current +0x10, peak +0x18) in 0x540370, and the two offsets that relate heap, allocator and state.
+// CPU heap manager. The heap constructor's registration in the table (0x5372C0: the global, the count at +0x1510, the entry
+// at +0x1400 + 16*count as {heap, heap+0x10}), the default heap at +0x1500 (0x543F30), the byte count added at +0x50 of the
+// allocator that sits at heap+0x10 (0x553420), the statistics block loaded from +0x108 of the allocator state at heap+0xA0
+// and updated (count +0x20, current +0x10, peak +0x18) in 0x540310, and the two offsets that relate heap, allocator and state.
 const Pin kCpuPins[] = {
-    {0x537385, 7, {0x48, 0x8B, 0x1D, 0xCC, 0x6A, 0x9E, 0x05}},               // mov rbx, [rip+...] = [0x5F1DE58]
-    {0x5373A0, 36, {0x48, 0x8B, 0x83, 0x10, 0x15, 0x00, 0x00, 0x48, 0x8D, 0x90, 0x40, 0x01, 0x00, 0x00, 0x48, 0x03, 0xD2, 0x48, 0xFF, 0xC0,
+    {0x537325, 7, {0x48, 0x8B, 0x1D, 0x2C, 0x6B, 0x9E, 0x05}},               // mov rbx, [rip+...] = [0x5F1DE58]
+    {0x537340, 36, {0x48, 0x8B, 0x83, 0x10, 0x15, 0x00, 0x00, 0x48, 0x8D, 0x90, 0x40, 0x01, 0x00, 0x00, 0x48, 0x03, 0xD2, 0x48, 0xFF, 0xC0,
                     0x48, 0x89, 0x83, 0x10, 0x15, 0x00, 0x00, 0x48, 0x89, 0x3C, 0xD3, 0x4C, 0x89, 0x74, 0xD3, 0x08}},   // the table entry
-    {0x543FED, 14, {0x48, 0x8B, 0x05, 0x64, 0x9E, 0x9D, 0x05, 0x48, 0x8B, 0x88, 0x00, 0x15, 0x00, 0x00}},               // [manager+0x1500]
-    {0x5536B3, 4, {0x48, 0x01, 0x5F, 0x50}},                                 // add [rdi+0x50], rbx
-    {0x5404AE, 10, {0x48, 0x8B, 0x87, 0x08, 0x01, 0x00, 0x00, 0xFF, 0x40, 0x20}},   // mov rax, [rdi+0x108]; inc dword [rax+0x20]
-    {0x5404D1, 21, {0x48, 0x01, 0x42, 0x10, 0x48, 0x8B, 0x4A, 0x10, 0x48, 0x39, 0x4A, 0x18, 0x48, 0x0F, 0x43, 0x4A, 0x18, 0x48, 0x89, 0x4A, 0x18}},
-    {0x54C9DF, 4, {0x48, 0x8D, 0x4B, 0x10}},                                 // lea rcx, [rbx+0x10]: heap -> allocator
-    {0x55B695, 7, {0x48, 0x8D, 0x8F, 0x90, 0x00, 0x00, 0x00}},               // lea rcx, [rdi+0x90]: allocator -> state
+    {0x543F8D, 14, {0x48, 0x8B, 0x05, 0xC4, 0x9E, 0x9D, 0x05, 0x48, 0x8B, 0x88, 0x00, 0x15, 0x00, 0x00}},               // [manager+0x1500]
+    {0x553653, 4, {0x48, 0x01, 0x5F, 0x50}},                                 // add [rdi+0x50], rbx
+    {0x54044E, 10, {0x48, 0x8B, 0x87, 0x08, 0x01, 0x00, 0x00, 0xFF, 0x40, 0x20}},   // mov rax, [rdi+0x108]; inc dword [rax+0x20]
+    {0x540471, 21, {0x48, 0x01, 0x42, 0x10, 0x48, 0x8B, 0x4A, 0x10, 0x48, 0x39, 0x4A, 0x18, 0x48, 0x0F, 0x43, 0x4A, 0x18, 0x48, 0x89, 0x4A, 0x18}},
+    {0x54C97F, 4, {0x48, 0x8D, 0x4B, 0x10}},                                 // lea rcx, [rbx+0x10]: heap -> allocator
+    {0x55B635, 7, {0x48, 0x8D, 0x8F, 0x90, 0x00, 0x00, 0x00}},               // lea rcx, [rdi+0x90]: allocator -> state
 };
 
 // Offsets (RVAs and displacements) the pins stand for.
@@ -156,7 +156,7 @@ constexpr uintptr_t kManagerObjectRva = 0x5F28120;
 constexpr uintptr_t kManagerTable = 0x1400;           // 16 entries of {heap, heap + 0x10}
 constexpr uintptr_t kManagerDefaultHeap = 0x1500;     // qword
 constexpr uintptr_t kManagerCount = 0x1510;           // u64
-constexpr uintptr_t kHeapBytesFromOs = 0x60;          // heap: u64, bytes its allocator took from the C runtime heap (0x553480 adds to it)
+constexpr uintptr_t kHeapBytesFromOs = 0x60;          // heap: u64, bytes its allocator took from the C runtime heap (0x553420 adds to it)
 constexpr uintptr_t kHeapStats = 0x1A8;               // heap: pointer to the allocator's statistics block
 constexpr uintptr_t kStatsParent = 0x08;              // u64, 0 for the block that accumulates
 constexpr uintptr_t kStatsCurrent = 0x10;             // u64, bytes handed out now
@@ -183,7 +183,7 @@ bool pinsHold(uintptr_t base, const Pin* pins, size_t count, uint32_t* failedRva
     return true;
 }
 
-// Once, at the armed sample: is this process Elite build 334473, and do the instructions behind each group's offsets read as
+// Once, at the armed sample: is this process Elite build 334925, and do the instructions behind each group's offsets read as
 // they did there.
 void probeElite(EliteGate* gate) {
     gate->probed = true;
@@ -198,7 +198,7 @@ void probeElite(EliteGate* gate) {
             !sehRead(base + peOffset + 0x50, &size, 4)) {
             why = "the PE header could not be read";
         } else if (stamp != kEliteStamp || size != kEliteImageSize) {
-            why = "this is not Elite build 334473 (PE timestamp or image size differs)";
+            why = "this is not Elite build 334925 (PE timestamp or image size differs)";
         }
     }
     if (why) {
@@ -208,9 +208,9 @@ void probeElite(EliteGate* gate) {
     }
     uint32_t failed = 0;
     if (pinsHold(base, kGpuPins, sizeof(kGpuPins) / sizeof(kGpuPins[0]), &failed)) gate->egpu = true;
-    else std::snprintf(gate->egpuWhy, sizeof(gate->egpuWhy), "the instructions at +0x%X are not those of build 334473", static_cast<unsigned>(failed));
+    else std::snprintf(gate->egpuWhy, sizeof(gate->egpuWhy), "the instructions at +0x%X are not those of build 334925", static_cast<unsigned>(failed));
     if (pinsHold(base, kCpuPins, sizeof(kCpuPins) / sizeof(kCpuPins[0]), &failed)) gate->eheap = true;
-    else std::snprintf(gate->eheapWhy, sizeof(gate->eheapWhy), "the instructions at +0x%X are not those of build 334473", static_cast<unsigned>(failed));
+    else std::snprintf(gate->eheapWhy, sizeof(gate->eheapWhy), "the instructions at +0x%X are not those of build 334925", static_cast<unsigned>(failed));
 }
 
 // ---- Elite's GPU resource accounting -----------------------------------------------------------------------------------

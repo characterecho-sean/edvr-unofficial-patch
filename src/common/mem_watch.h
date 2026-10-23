@@ -398,7 +398,7 @@ inline size_t formatMemArmed(char* buf, size_t cap, const MemFigures& f, const M
           "handle and thread counts (under Wine commit is anonymous resident memory plus swap, and handles are not counted, so "
           "left out). sys is the whole machine's commit charge against its limit, and the RAM still free. local is "
           "this process's video memory against the budget the OS gives it. egpu is Elite's own accounting of its GPU resources "
-          "by kind (rt ds texuav imm tex vb ib buf shader desc cmd unk), read only on build 334473: its heaps are counted in "
+          "by kind (rt ds texuav imm tex vb ib buf shader desc cmd unk), read only on build 334925: its heaps are counted in "
           "bytes, with descriptor heaps counted apart; egpu=unread is a game with no device yet and egpu=implausible values that "
           "failed their checks. eheap is a first reading of Elite's heap manager, not yet checked against the process figures: "
           "os is the bytes its heaps took from the C runtime, main the default allocator's current and peak bytes and the "

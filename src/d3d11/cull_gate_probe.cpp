@@ -28,7 +28,7 @@ bool rd(void* dst, uintptr_t src, size_t n) noexcept {
 template <typename T>
 bool rdv(T* dst, uintptr_t src) noexcept { return rd(dst, src, sizeof(T)); }
 
-// The engine's own FUN_1404F4F70, guarded: returns false on a fault.
+// The engine's own FUN_1404F4F10, guarded: returns false on a fault.
 bool frustumCall(CullGateProbe::FrustumFn fn, uintptr_t view, const float* point,
                  const float* interval, int32_t* out) noexcept {
     __try {
@@ -242,7 +242,7 @@ uint32_t CullGateProbe::noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mas
     b.pose = pose;
     b.ctx = ctx;
     b.activeMask = mask;
-    // Both callers (FUN_144323040:95, FUN_144324640:86) pass rec+0x210.
+    // Both callers (FUN_144322FA0:95, FUN_1443245A0:86) pass rec+0x210.
     const uintptr_t record = nibbles >= 0x210 ? nibbles - 0x210 : 0;
     b.record = record;
     uint64_t posePtr = 0;
@@ -345,7 +345,7 @@ void CullGateProbe::notePart(uintptr_t items, uintptr_t out, uintptr_t view, uin
         return;
     }
     partCalls_.fetch_add(1, std::memory_order_relaxed);
-    // The verdict FUN_1442B6C80 just wrote (decomp_42B3FC0.txt:106-112) and
+    // The verdict FUN_1442B6BE0 just wrote (decomp_42B3FC0.txt:106-112) and
     // param_1's six pointers: [0] centre, [1] sphere, [2] pose, [3] the
     // model's +0x40 cell, [4] the LOD table, [5] the render context.
     uint64_t block[6] = {};
@@ -491,7 +491,7 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
     u32(kVersion);
     u32(first_);
     u32(first_ + kFrames - 1);
-    // Flags: bit 0 the builder's plane test ran, bit 1 FUN_1442B6C80's patch
+    // Flags: bit 0 the builder's plane test ran, bit 1 FUN_1442B6BE0's patch
     // was live (no part rows with it clear is a stand-down, not a quiet run).
     u32((frustum_ ? 1u : 0u) | (partHooked_ ? 2u : 0u));
     u32(visGlobal_);

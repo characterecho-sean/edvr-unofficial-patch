@@ -16,7 +16,7 @@
 //
 // What it covers: the DXBC patcher end to end and the slot target's blend
 // states (shader_tests.h), the emit bracket's history rules against a fake
-// engine laid out as build 334473 (emit_tests.h), the compose's arithmetic
+// engine laid out as build 334925 (emit_tests.h), the compose's arithmetic
 // from the shipped HLSL text (math_tests.h), the production `mv` entry with
 // engine inputs bound -- joined exact, masked with no history, corrupt/stale/
 // cleared declined (consumer_tests.h), the on-foot path through the

@@ -5,7 +5,7 @@
 // Exact per-pixel motion for the game's rigid movers from the engine's own
 // kinematic records, with no estimation anywhere:
 //
-//  1. EMIT (job threads). FUN_144315AC0 builds each kinematic rig record's
+//  1. EMIT (job threads). FUN_144315A20 builds each kinematic rig record's
 //     0x150-byte pool record -- byte-for-byte the t33 record the vertex shader
 //     reads -- and appends it to the owner's node lists, from which the
 //     engine's copier fills the mapped pool. A bracket on that call (the
@@ -18,7 +18,7 @@
 //     validated pose, masked otherwise (engine_velocity_emit.h has the rules).
 //     The engine's own copy then carries it to the GPU: no slot map, no
 //     matching, no readback of write-combined memory.
-//     Primary rigid 42B6DF0 emissions use the same canonical history through
+//     Primary rigid 42B6D50 emissions use the same canonical history through
 //     an emission sink: native records stay unchanged. Verified CPU list
 //     relocation/upload joins certify only EDVR's private clone for patching.
 //  2. DRAW (render thread). The pool families' pixel shaders are substituted

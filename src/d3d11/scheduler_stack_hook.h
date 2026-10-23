@@ -3,9 +3,9 @@
 // so test rigs can link the probe with stub hook functions (the pattern set
 // by kinematic_eval_probe/hook).
 //
-// Targets 2/3 (per-record drain 0x42E2600, reset+repopulate 0x36A3C50)
+// Targets 2/3 (per-record drain 0x42E2560, reset+repopulate 0x36A3BB0)
 // carry this file's own CodeHooks. Targets 0/1 (the worker entries
-// 0x4324640/0x4323040) already carry the kinematic eval hook's patch --
+// 0x43245A0/0x4322FA0) already carry the kinematic eval hook's patch --
 // CodeHook refuses to patch a function whose first instruction is a jump --
 // so they are observed through that hook's job-0/1 relays instead; the
 // attach below holds the eval gate open via kinematicEvalSchedulerAttach()

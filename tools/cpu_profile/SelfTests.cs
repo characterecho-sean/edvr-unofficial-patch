@@ -366,60 +366,60 @@ internal static class SelfTests
     private static void RvaClassTable()
     {
         Check(RvaTable.Classes.Length == 15, "every RVA class is defined");
-        Check(RvaTable.Classes[ClassId("census_bracket")].Bound == 0x42B70E0 + 0x1000,
+        Check(RvaTable.Classes[ClassId("census_bracket")].Bound == 0x42B7040 + 0x1000,
               "the census bracket takes its assumed 0x1000 window");
         Check(!RvaTable.Classes[ClassId("census_bracket")].Pipeline,
               "the census bracket is matched but is not part of the pipeline");
         Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("census_bracket")]) ==
               "entry+0x1000 (assumed, no decompile)", "the assumed window is named as assumed");
-        Check(Matches("census_bracket", 0x42B71C0) && !Matches("census_bracket", 0x42B80E0),
+        Check(Matches("census_bracket", 0x42B7120) && !Matches("census_bracket", 0x42B8040),
               "census bracket window edges");
         // A function whose decompile note carries a size ends at entry+size; the
         // 0x2000 guess is only a fallback, and only table_ba0 still needs one.
-        Check(RvaTable.Classes[ClassId("update_render_data_job")].Bound == 0x4324640 + 503,
+        Check(RvaTable.Classes[ClassId("update_render_data_job")].Bound == 0x43245A0 + 503,
               "update_render_data_job ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("render_data_batch")].Bound == 0x4323040 + 565,
+        Check(RvaTable.Classes[ClassId("render_data_batch")].Bound == 0x4322FA0 + 565,
               "render_data_batch ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("update_physics_objects_job")].Bound == 0x432DFA0 + 62,
+        Check(RvaTable.Classes[ClassId("update_physics_objects_job")].Bound == 0x432DF00 + 62,
               "update_physics_objects_job ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("eval_4311ca0")].Bound == 0x4311CA0 + 1006,
+        Check(RvaTable.Classes[ClassId("eval_4311c00")].Bound == 0x4311C00 + 1006,
               "eval ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("reset_repopulate")].Bound == 0x36A3C50 + 687,
+        Check(RvaTable.Classes[ClassId("reset_repopulate")].Bound == 0x36A3BB0 + 687,
               "reset_repopulate ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("record_drain")].Bound == 0x42E2600 + 134,
+        Check(RvaTable.Classes[ClassId("record_drain")].Bound == 0x42E2560 + 134,
               "record_drain ends at its decompile size");
-        Check(RvaTable.Classes[ClassId("lod_evaluator_4334000")].Bound == 0x4334000 + 9,
+        Check(RvaTable.Classes[ClassId("lod_evaluator_4333F60")].Bound == 0x4333F60 + 9,
               "the LOD evaluator is a nine-byte jmp thunk");
-        Check(Matches("lod_evaluator_4334000", 0x4334008) && !Matches("lod_evaluator_4334000", 0x4334009),
+        Check(Matches("lod_evaluator_4333F60", 0x4333F68) && !Matches("lod_evaluator_4333F60", 0x4333F69),
               "the LOD thunk matches nine bytes and no more");
         Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("record_drain")]) == "decompile size (134 bytes)",
               "the decompile size is named in the bound rule");
-        Check(RvaTable.Classes[ClassId("table_ba0")].Bound == 0x4324640,
+        Check(RvaTable.Classes[ClassId("table_ba0")].Bound == 0x43245A0,
               "table_ba0 has no decompile and keeps the next known entry");
         Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("table_ba0")]) == "next known entry",
               "the fallback rule is named");
-        // record_drain's 134 bytes still cover the 0x42e2660 region the earlier
+        // record_drain's 134 bytes still cover the 0x42e25c0 region the earlier
         // hand count saw under EDVR's d3d11 frames.
-        Check(Matches("record_drain", 0x42E2660), "0x42e2660 is inside record_drain");
+        Check(Matches("record_drain", 0x42E25C0), "0x42e25c0 is inside record_drain");
         Check(!Matches("record_drain", 0x42E2686), "record_drain ends at 134 bytes");
-        Check(!Matches("thunk_42e2200", 0x42E2660), "0x42e2660 is not the earlier thunk");
-        Check(RvaTable.Classes[ClassId("thunk_42e2200")].Bound == 0x42E2210, "a thunk takes 16 bytes");
-        Check(Matches("thunk_42e2200", 0x42E220F) && !Matches("thunk_42e2200", 0x42E2210),
+        Check(!Matches("thunk_42e2160", 0x42E25C0), "0x42e25c0 is not the earlier thunk");
+        Check(RvaTable.Classes[ClassId("thunk_42e2160")].Bound == 0x42E2170, "a thunk takes 16 bytes");
+        Check(Matches("thunk_42e2160", 0x42E220F) && !Matches("thunk_42e2160", 0x42E2170),
               "thunk window edges");
-        Check(Matches("reset_repopulate", 0x36A3D00) && !Matches("reset_repopulate", 0x36A3EFF),
+        Check(Matches("reset_repopulate", 0x36A3C60) && !Matches("reset_repopulate", 0x36A3EFF),
               "reset_repopulate window edges");
         Check(!RvaTable.Classes[ClassId("reset_repopulate")].Pipeline,
               "reset_repopulate is matched but is not part of the pipeline");
         Check(RvaTable.Classes[ClassId("record_drain")].Pipeline, "record_drain is part of the pipeline");
-        Check(Matches("call_site_431df1f", 0x431DF1F) && Matches("call_site_431df1f", 0x431DF2E) &&
-              !Matches("call_site_431df1f", 0x431DF2F), "call site matches only the 16 bytes after it");
-        Check(Matches("scheduler_range", 0x5D6EDF) && Matches("scheduler_range", 0x5D6C80) &&
-              !Matches("scheduler_range", 0x5D6C1D) && !Matches("scheduler_range", 0x5D7260),
+        Check(Matches("call_site_431de7f", 0x431DE7F) && Matches("call_site_431de7f", 0x431DE8E) &&
+              !Matches("call_site_431de7f", 0x431DE8F), "call site matches only the 16 bytes after it");
+        Check(Matches("scheduler_range", 0x5D6E7F) && Matches("scheduler_range", 0x5D6C20) &&
+              !Matches("scheduler_range", 0x5D6BBD) && !Matches("scheduler_range", 0x5D7200),
               "scheduler range edges");
         Check(!RvaTable.Classes[ClassId("scheduler_range")].Pipeline, "the job scheduler is not the pipeline");
         Check(RvaTable.Classes.Count(item => item.Pipeline) == 12, "twelve classes make up the pipeline");
         foreach (var item in RvaTable.Classes) Check(item.Bound > item.Entry, $"{item.Name} has a positive window");
-        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("thunk_42e2200")]) == "entry+0x10 (thunk)",
+        Check(RvaTable.BoundRule(RvaTable.Classes[ClassId("thunk_42e2160")]) == "entry+0x10 (thunk)",
               "the thunk bound rule is reported");
     }
 
@@ -439,7 +439,7 @@ internal static class SelfTests
               "kernel-only stack");
         Check(StackStore.LabelFor(0, false, false, 0, false, false, false) == StackLabel.Empty, "empty stack");
         Check(CycleAnalyzer.LabelName(StackLabel.Pipeline) == "pipeline", "label name");
-        Check(Report.Site(new GameTop(0x5D6EDF, 0x5D42A1, 0x5D6906, 3)) == "0x5d6edf < 0x5d42a1 < 0x5d6906",
+        Check(Report.Site(new GameTop(0x5D6E7F, 0x5D4241, 0x5D68A6, 3)) == "0x5d6e7f < 0x5d4241 < 0x5d68a6",
               "blocking site text");
         Check(Report.Site(new GameTop(0, 0, 0, 0)) == "no_game_frame", "site without a game frame");
     }
@@ -573,22 +573,22 @@ internal static class SelfTests
         var pipeline = stacks.AddForTest(new StackInfo
         {
             ModuleIds = [exe, exe],
-            Addresses = [GameBase + 0x42E2660, GameBase + 0x431DF1F],
-            ClassIds = [ClassId("record_drain"), ClassId("call_site_431df1f")],
+            Addresses = [GameBase + 0x42E25C0, GameBase + 0x431DE7F],
+            ClassIds = [ClassId("record_drain"), ClassId("call_site_431de7f")],
             Label = StackLabel.Pipeline,
             Pipeline = true,
-            GameTops = new GameTop(0x42E2660, 0x431DF1F, 0, 2),
+            GameTops = new GameTop(0x42E25C0, 0x431DE7F, 0, 2),
             Depth = 2,
             TopModuleId = exe,
         });
         var scheduler = stacks.AddForTest(new StackInfo
         {
             ModuleIds = [exe, exe, exe],
-            Addresses = [GameBase + 0x5D6EDF, GameBase + 0x5D42A1, GameBase + 0x5D6906],
+            Addresses = [GameBase + 0x5D6E7F, GameBase + 0x5D4241, GameBase + 0x5D68A6],
             ClassIds = [ClassId("scheduler_range")],
             Label = StackLabel.Scheduler,
             Scheduler = true,
-            GameTops = new GameTop(0x5D6EDF, 0x5D42A1, 0x5D6906, 3),
+            GameTops = new GameTop(0x5D6E7F, 0x5D4241, 0x5D68A6, 3),
             Depth = 3,
             TopModuleId = exe,
         });
@@ -605,11 +605,11 @@ internal static class SelfTests
         var wakerReady = stacks.AddForTest(new StackInfo
         {
             ModuleIds = [exe],
-            Addresses = [GameBase + 0x5D6F2D],
+            Addresses = [GameBase + 0x5D6ECD],
             ClassIds = [ClassId("scheduler_range")],
             Label = StackLabel.Scheduler,
             Scheduler = true,
-            GameTops = new GameTop(0x5D6F2D, 0, 0, 1),
+            GameTops = new GameTop(0x5D6ECD, 0, 0, 1),
             Depth = 1,
             TopModuleId = exe,
         });
@@ -618,7 +618,7 @@ internal static class SelfTests
         var submit = stacks.AddForTest(new StackInfo
         {
             ModuleIds = [nvidia, -1, systemD3d11, edvrD3d11, exe],
-            Addresses = [0x7FF200001000, 0x66600000, 0x7FF100002000, 0x7FF000003000, GameBase + 0x42B71C0],
+            Addresses = [0x7FF200001000, 0x66600000, 0x7FF100002000, 0x7FF000003000, GameBase + 0x42B7120],
             ClassIds = [ClassId("census_bracket")],
             Label = StackLabel.OtherModule,
             Census = true,
@@ -626,13 +626,13 @@ internal static class SelfTests
             AnySystemD3d11 = true,
             AnyNvidiaUserMode = true,
             AnyUnresolved = true,
-            GameTops = new GameTop(0x42B71C0, 0, 0, 1),
+            GameTops = new GameTop(0x42B7120, 0, 0, 1),
             Depth = 5,
             TopModuleId = nvidia,
         });
-        Check(stacks.Signature(stacks[pipeline]) == "0x42e2660 < 0x431df1f", "a game stack signs as its RVAs");
+        Check(stacks.Signature(stacks[pipeline]) == "0x42e25c0 < 0x431de7f", "a game stack signs as its RVAs");
         Check(stacks.Signature(stacks[submit]) ==
-              "nvwgf2umx.dll < unresolved < d3d11.dll [system32] < d3d11.dll [edvr] < 0x42b71c0",
+              "nvwgf2umx.dll < unresolved < d3d11.dll [system32] < d3d11.dll [edvr] < 0x42b7120",
               "a mixed stack signs as modules and RVAs");
         Check(stacks.Signature(new StackInfo
         {
@@ -748,9 +748,9 @@ internal static class SelfTests
         var first = cycle.Waits[0];
         Near(first.LengthUs, 1000, "wait length");
         Check(first.EndedReady, "the wait ended at a ready event");
-        Check(Report.Site(first.BlockingTops) == "0x5d6edf < 0x5d42a1 < 0x5d6906", "blocking site");
+        Check(Report.Site(first.BlockingTops) == "0x5d6e7f < 0x5d4241 < 0x5d68a6", "blocking site");
         Check(first.WakerThread == Worker && first.WakerProcess == Pid, "waker identity");
-        Check(Report.Site(first.WakerReadyTops) == "0x5d6f2d", "waker ready-stack top");
+        Check(Report.Site(first.WakerReadyTops) == "0x5d6ecd", "waker ready-stack top");
         // The waker's ready stack is inside the scheduler, so only its last sample
         // can say what it had just finished.
         Check(first.WakerClass == "pipeline", "waker classified by its last sample");
@@ -807,7 +807,7 @@ internal static class SelfTests
         Check(caller.Samples == 3 && caller.PipelineSamples == 1, "caller samples");
         Check(worker.Samples == 2 && worker.PipelineSamples == 2, "worker samples");
         Check(caller.ClassSamples![ClassId("record_drain")] == 1, "per-class sample counts per thread");
-        Check(caller.ClassSamples![ClassId("call_site_431df1f")] == 1, "a stack counts in every class it hits");
+        Check(caller.ClassSamples![ClassId("call_site_431de7f")] == 1, "a stack counts in every class it hits");
         Near(cycle.CallerPipelineRunningUs, 1000, "caller pipeline running time");
         Near(cycle.ThreadPipelineRunningUs, 3000, "thread-summed pipeline running time");
         Near(cycle.CriticalPathShare, (1000.0 + 1000.0) / 3000.0, "critical path share");
@@ -867,7 +867,7 @@ internal static class SelfTests
               "the innermost EDVR frame is reported as an RVA of our own DLL");
         var chains = (Dictionary<string, object?>[])submit["edvrChains"]!;
         Check(chains.Length == 1 && ((string[])chains[0]["chain"]!)[0] == "0x3000" &&
-              (string)chains[0]["gameCallSite"]! == "0x42b71c0",
+              (string)chains[0]["gameCallSite"]! == "0x42b7120",
               "the EDVR chain carries the game call site that entered it");
         var stacksInRegion = (Dictionary<string, object?>[])submit["topStacks"]!;
         Check(stacksInRegion.Length == 2 && Convert.ToInt64(stacksInRegion[0]["count"]) == 1,
@@ -1050,7 +1050,7 @@ internal static class SelfTests
             Check(lines.Length == 2, "frames.jsonl carries one object per valid frame");
             Check(lines[0].Contains("\"firstSubmitEntryUs\":3000"), "frame detail carries derived timestamps");
             Check(lines[0].Contains("\"criticalPathShare\""), "frame detail carries the gate");
-            Check(lines[0].Contains("\"blockingSite\":\"0x5d6edf"), "frame detail carries the blocking site");
+            Check(lines[0].Contains("\"blockingSite\":\"0x5d6e7f"), "frame detail carries the blocking site");
             var gate = (Dictionary<string, object?>)report["gate"]!;
             Near(Convert.ToDouble(gate["callerPipelineRunningUs"]), 1000, "gate caller pipeline running");
             Near(Convert.ToDouble(gate["callerPipelineWaitUs"]), 1000, "gate pipeline wait");
@@ -1075,7 +1075,7 @@ internal static class SelfTests
                  "R1 has no wait in this fixture");
             var cross = (List<Dictionary<string, object?>>)attribution["byBlockingSiteAndWakerClass"]!;
             Check(cross.Count == 1, "one blocking site in this fixture");
-            Check((string)cross[0]["site"]! == "0x5d6edf < 0x5d42a1 < 0x5d6906", "the site is named by RVA");
+            Check((string)cross[0]["site"]! == "0x5d6e7f < 0x5d4241 < 0x5d68a6", "the site is named by RVA");
             Check(Convert.ToInt32(cross[0]["segments"]) == 2, "both waits share the site");
             var crossClasses = (Dictionary<string, object?>[])cross[0]["byClass"]!;
             Check(crossClasses.Length == 2, "the site splits by waker class");

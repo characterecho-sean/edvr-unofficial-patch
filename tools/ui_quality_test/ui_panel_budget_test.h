@@ -693,10 +693,10 @@ void testLivePick() {
 }
 
 // The thunk's model of what the game's setter will store, ui_panel_scale.cpp's setterBeforeImpl: x below the minimum is the minimum,
-// else the smaller of the maximum and x (FUN_142878E00).
+// else the smaller of the maximum and x (FUN_142878D40).
 float modelStored(float lo, float hi, float x) { return (lo > x) ? lo : ((hi < x) ? hi : x); }
 
-// THE GAME'S OWN BYTES, executed: the 38 bytes of FUN_142878E00 and the 13 of its sibling getter (the bytes the hook checks before it
+// THE GAME'S OWN BYTES, executed: the 38 bytes of FUN_142878D40 and the 13 of its sibling getter (the bytes the hook checks before it
 // writes anything), run on a fake interface object and context. The model above must say what they do, and the offsets the DLL reads
 // (this+0x18, ctx+0x3564 / 0x3568 / 0x356C / 0x359C) must be the ones they use.
 void testGameBytes() {
@@ -786,7 +786,7 @@ std::vector<Pin> pins(const std::string& scale, const std::string& surfaces, con
                    "a move of the Supersampling is written past the settle, and the plan is published for the setter thunk"});
     out.push_back({"hook-checks", has(install, "std::memcmp(got,want[i],len[i])!=0") && has(install, "value!=reinterpret_cast<uint64_t>(fn[i])") &&
                                       inOrder(apply, {"g_patch.store(kApplied,std::memory_order_release);", "installLiveHooks(base);"}),
-                   "the two slots are hooked only after the build is checked, and only when the functions' bytes and the slots' values are 334473's"});
+                   "the two slots are hooked only after the build is checked, and only when the functions' bytes and the slots' values are 334925's"});
     out.push_back({"thunk-forwards", inOrder(setterThunk, {"guardedRun(setterBeforeThunk,self,x);", "orig(self,x);", "guardedRun(setterAfterThunk,self,x);"}) &&
                                          has(getterThunk, "returng_origGetter.load(std::memory_order_acquire)(self);"),
                    "the setter thunk moves the factor, then runs the game's setter, then checks what it stored; the getter thunk returns the game's value"});

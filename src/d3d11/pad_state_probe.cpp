@@ -1,5 +1,5 @@
-// The pad-state probe (TEMPORARY, 2026-10-13). Four detours on the docking-state readers of build 334473 (0x12C4D60, 0x12CC0C0, 0x12CBF20,
-// 0x12CC460). Each reader takes its object (this) in rcx. The detour calls the ORIGINAL FIRST and keeps its return code, then makes plain reads
+// The pad-state probe (TEMPORARY, 2026-10-13). Four detours on the docking-state readers of build 334925 (0x12C4CC0, 0x12CC020, 0x12CBE80,
+// 0x12CC3C0). Each reader takes its object (this) in rcx. The detour calls the ORIGINAL FIRST and keeps its return code, then makes plain reads
 // of the object (this+0x3C8, [this-8] and its owner's +0x10, +0x2C, +0x2F) under __try. It calls no Elite function and logs nothing; the tick
 // (the station's frame, on the render thread) prints. The relays are the store hook's: a gate word, closed means the original runs alone.
 //
@@ -133,8 +133,8 @@ __declspec(noinline) uintptr_t __fastcall readerObserved(uintptr_t self) noexcep
 
 void* const kObservers[pad::kReaders] = {reinterpret_cast<void*>(&readerObserved<0>), reinterpret_cast<void*>(&readerObserved<1>),
                                          reinterpret_cast<void*>(&readerObserved<2>), reinterpret_cast<void*>(&readerObserved<3>)};
-const char* const kReaderNames[pad::kReaders] = {"state-reader-FUN_12C4D60", "state-reader-FUN_12CC0C0", "state-reader-FUN_12CBF20",
-                                                 "state-reader-FUN_12CC460"};
+const char* const kReaderNames[pad::kReaders] = {"state-reader-FUN_12C4CC0", "state-reader-FUN_12CC020", "state-reader-FUN_12CBE80",
+                                                 "state-reader-FUN_12CC3C0"};
 
 // ---- relays (the store hook's layout: mov rax,&gate; cmp qword ptr[rax],0; je original; jmp [callback]; original: jmp [trampoline]) ----------
 
@@ -198,9 +198,9 @@ void installReaders(uintptr_t base) {
         for (size_t i = 0; i < pad::kReaders; ++i) {
             g_readers[i].refused.store(true, std::memory_order_release);
             g_readers[i].name = kReaderNames[i];
-            g_readers[i].status = "not build 334473 (PE timestamp or image size)";
+            g_readers[i].status = "not build 334925 (PE timestamp or image size)";
         }
-        Log::get().note("pad state probe: refused: not build 334473 (PE timestamp %u, image size %u); the probe stands down.",
+        Log::get().note("pad state probe: refused: not build 334925 (PE timestamp %u, image size %u); the probe stands down.",
                         static_cast<unsigned>(stamp), static_cast<unsigned>(size));
         return;
     }
@@ -214,8 +214,8 @@ void installReaders(uintptr_t base) {
                                                                 readOk ? got : nullptr, pad::kReaderPin, sizeof(got));
         if (verdict != pad::PadInstall::kInstall) {
             r.refused.store(true, std::memory_order_release);
-            r.status = "prologue does not match build 334473";
-            Log::get().note("pad state probe: refused: reader %s prologue is not build 334473's; that reader is not observed.", r.name);
+            r.status = "prologue does not match build 334925";
+            Log::get().note("pad state probe: refused: reader %s prologue is not build 334925's; that reader is not observed.", r.name);
             continue;
         }
         r.relay = allocateRelay(target);

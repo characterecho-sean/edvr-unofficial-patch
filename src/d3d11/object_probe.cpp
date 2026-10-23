@@ -214,13 +214,13 @@ const char* g_gateHookStatus = "off";
 bool        g_gateBuilderHooked = false;
 bool        g_gateFrustumOk = false;
 uint8_t     g_gateVisGlobal = 0;
-const char* g_gatePartStatus = "off";    // FUN_1442B6C80's hook: "hooked" or why it stood down
+const char* g_gatePartStatus = "off";    // FUN_1442B6BE0's hook: "hooked" or why it stood down
 uint32_t    g_gateGeoFrame = 0;         // the frame armGateProbe armed the pool-draw geometry for (0: none)
 static_assert(CullGateProbe::kNoRow == kGateProbeNoRow,
               "the builder bracket's thread-local row and the probe's 'no row' must agree");
 
-// FUN_1404F4F70's first sixteen bytes in the hash-verified executable
-// (analysis EliteDangerous64.exe at RVA 0x4F4F70): movups xmm3,[r8];
+// FUN_1404F4F10's first sixteen bytes in the hash-verified executable
+// (analysis EliteDangerous64.exe at RVA 0x4F4F10): movups xmm3,[r8];
 // xor r9d,r9d; movups xmm2,[rdx]; movaps xmm0,xmm3; movzx r8d,word[rcx+44].
 constexpr uint8_t kFrustumPrologue[16] = {0x41,0x0F,0x10,0x18,0x45,0x33,0xC9,0x0F,
                                           0x10,0x12,0x0F,0x28,0xC3,0x44,0x0F,0xB7};
@@ -273,9 +273,9 @@ void armGateProbe() {
     g_eyeMeshSnapshot.armGeometry(first);
     g_gateGeoFrame = first;
     Log::get().note("cull gate probe: armed with eye run %ls for ledger frames %u..%u: engine hooks %s "
-                    "(the traversal's per-view gate FUN_144311CA0 through the evaluator relay; the "
-                    "draw-item builder FUN_1442B70E0 %s), the builder's plane test FUN_1404F4F70 %s, "
-                    "the builder's per-part test FUN_1442B6C80 %s, visibility global DAT_145ea63e9 = %u; "
+                    "(the traversal's per-view gate FUN_144311C00 through the evaluator relay; the "
+                    "draw-item builder FUN_1442B7040 %s), the builder's plane test FUN_1404F4F10 %s, "
+                    "the builder's per-part test FUN_1442B6BE0 %s, visibility global DAT_145ea63e9 = %u; "
                     "pool-draw geometry for frame %u in the eye mesh snapshot. No reject, nothing on screen "
                     "(advanced.cull_gate_capture).",
                     g_ledgerStamp, first, cullGateProbe.lastFrame(), g_gateHookStatus,
@@ -285,7 +285,7 @@ void armGateProbe() {
                                                : g_gatePartStatus,
                     static_cast<unsigned>(g_gateVisGlobal), first);
     if (g_gateHooked && !cullGateProbe.partHooked())
-        Log::get().note("cull gate probe: the per-part test FUN_1442B6C80 STOOD DOWN (%s): no part rows will be "
+        Log::get().note("cull gate probe: the per-part test FUN_1442B6BE0 STOOD DOWN (%s): no part rows will be "
                         "captured for eye run %ls; the gate and builder rows are unaffected "
                         "(advanced.cull_gate_capture).", g_gatePartStatus, g_ledgerStamp);
 }
@@ -1204,13 +1204,13 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                             static_cast<unsigned>(geo.geoMeshes.size()), static_cast<unsigned>(geo.geoStates.size()),
                             geo.geoDeclined, geo.geoDrawsDropped, g_ledgerStamp);
         }
-        // The per-part test (FUN_1442B6C80): its rows, or why there are none.
+        // The per-part test (FUN_1442B6BE0): its rows, or why there are none.
         if (g_gateHooked) {
             if (!cullGateProbe.partHooked())
-                Log::get().note("cull gate probe: per-part test FUN_1442B6C80 STOOD DOWN (%s): the gate file's part "
+                Log::get().note("cull gate probe: per-part test FUN_1442B6BE0 STOOD DOWN (%s): the gate file's part "
                                 "section is empty by construction for eye run %ls.", g_gatePartStatus, g_ledgerStamp);
             else
-                Log::get().note("cull gate probe: per-part test FUN_1442B6C80 for eye run %ls: %u calls in the window "
+                Log::get().note("cull gate probe: per-part test FUN_1442B6BE0 for eye run %ls: %u calls in the window "
                                 "(%u rows kept, %u dropped over the %u-row cap); of the kept rows %u with the builder's "
                                 "frame unverified (verdict kept, no part identity), %u from a caller other than the "
                                 "builder's sub-item loop, %u outside a kept builder call; %u distinct LOD tables "

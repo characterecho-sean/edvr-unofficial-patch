@@ -22,41 +22,41 @@ except ImportError:  # Allows a repository-root import in unit tests.
     from tools.openxr_pe import Image, PEError
 
 
-GAME_SHA256 = "6891f70a021fa9f3a0e00458c284f48d1226e68ae7fc02ad48081aed47857e93"
-PROFILE_ID = "elite-odyssey-6891f70a-libovr-r1"
+GAME_SHA256 = "ed5a8f8cd10f9a80d3bda5badd7ba1d4fcfc15996c8c7e018852cb170e264b63"
+PROFILE_ID = "elite-odyssey-ed5a8f8c-libovr-r1"
 IMAGE_BASE = 0x140000000
 LOAD_LIBRARY_IAT_RVA = 0x4DB62E0
-LOADER_CALL_RVA = 0x4E71B6
-LOADER_RETURN_RVA = 0x4E71BC
+LOADER_CALL_RVA = 0x4E7156
+LOADER_RETURN_RVA = 0x4E715C
 
 _BYTE_CHECKS = {
     # Selector writes its ordered backend kinds and exits on success.
-    0x8D546B: bytes.fromhex("c744242801000000"),
-    0x8D5478: bytes.fromhex("c744242c02000000"),
-    0x8D5480: bytes.fromhex("c744243003000000"),
-    0x8D5488: bytes.fromhex("84c07545"),
-    0x8D549C: bytes.fromhex("ffc74883c60483ff0372e1"),
+    0x8D540B: bytes.fromhex("c744242801000000"),
+    0x8D5418: bytes.fromhex("c744242c02000000"),
+    0x8D5420: bytes.fromhex("c744243003000000"),
+    0x8D5428: bytes.fromhex("84c07545"),
+    0x8D543C: bytes.fromhex("ffc74883c60483ff0372e1"),
     # Backend factory's virtual initialize call and the LibOVR failure path.
-    0x4E4E50: bytes.fromhex("ff5008"),
-    0x4E477C: bytes.fromhex("84c07431"),
-    0x4E47B1: bytes.fromhex("32c0"),
-    0x4E720E: bytes.fromhex("4885c0751db847f4ffff"),
-    0x4E8356: bytes.fromhex("c70347f4ffff"),
-    0x4E87BB: bytes.fromhex("4885c0740bffd0"),
+    0x4E4DF0: bytes.fromhex("ff5008"),
+    0x4E471C: bytes.fromhex("84c07431"),
+    0x4E4751: bytes.fromhex("32c0"),
+    0x4E71AE: bytes.fromhex("4885c0751db847f4ffff"),
+    0x4E82F6: bytes.fromhex("c70347f4ffff"),
+    0x4E875B: bytes.fromhex("4885c0740bffd0"),
 }
 
 _FINGERPRINTS = (
-    (0x8D5400, 0xF3, 0x17629A1FD3828894),
-    (0x4E4BA0, 0x2C7, 0x98376EDD435B9D9C),
-    (0x4E4730, 0x23C, 0x22A172BD9B250448),
-    (0x4E4970, 0x230, 0x21CB0709FCF55236),
-    (0x4E8630, 0x155, 0x2A9E2DBBAEDDE2BB),
-    (0x4E71D0, 0x984, 0x5D9DFCB146397878),
-    (0x4E6E40, 0x390, 0xC724029334737635),
-    (0x4E0F60, 0xC7, 0xFD358E07FA8A2868),
-    (0x4E8330, 0x3A, 0x46C9815E81B0DF4A),
-    (0x4E5DA0, 0x65, 0xA54979C6EB0CC47D),
-    (0x4E87B0, 0x20, 0x61126C9627CB6C61),
+    (0x8D53A0, 0xF3, 0xFF6BF29E3788FC3C),
+    (0x4E4B40, 0x2C7, 0x60262CD96F885F66),
+    (0x4E46D0, 0x23C, 0xE72D36967A10BFA8),
+    (0x4E4910, 0x230, 0x7B3B4C4070FB007A),
+    (0x4E85D0, 0x155, 0x1BEB5B69C7BF932E),
+    (0x4E7170, 0x984, 0x66B422313A80E9AE),
+    (0x4E6DE0, 0x390, 0xB9F0AF721320C54D),
+    (0x4E0F00, 0xC7, 0xAEE1539FB5BE2968),
+    (0x4E82D0, 0x3A, 0xB69AB25FEC7A1F6A),
+    (0x4E5D40, 0x65, 0x9F6C59F05E0A6390),
+    (0x4E8750, 0x20, 0x72BD38A6D3FB9681),
 )
 
 
@@ -68,8 +68,8 @@ class EliteOculusProfile:
     load_library_iat_rva: int
     loader_call_rva: int
     loader_return_rva: int
-    selector_rva: int = 0x8D5400
-    factory_rva: int = 0x4E4BA0
+    selector_rva: int = 0x8D53A0
+    factory_rva: int = 0x4E4B40
 
     def as_dict(self):
         return {
@@ -218,7 +218,7 @@ def _validate_image(im, digest, strict_identity=True):
     headers_size = int.from_bytes(im.data[optional + 60:optional + 64], "little")
     section_count = int.from_bytes(im.data[nt + 6:nt + 8], "little")
     if strict_identity and (machine, timestamp, image_size, headers_size, section_count) != (
-            0x8664, 0x6ACD513D, 0x640C000, 0x400, 7):
+            0x8664, 0x6ADA8048, 0x640C000, 0x400, 7):
         _fail("PE header identity differs from the qualified revision")
     image_base = int.from_bytes(im.data[optional + 24:optional + 32], "little")
     if image_base != IMAGE_BASE:
@@ -248,14 +248,14 @@ def _validate_image(im, digest, strict_identity=True):
         actual = _rva_bytes(im, rva, len(expected))
         if actual != expected:
             _fail("proof bytes differ at " + hex(rva))
-    _rel32_target(im, 0x8D5497, 0x4E4BA0, "selector factory call")
-    _rel32_target(im, 0x4E4766, 0x4E8630, "Oculus SDK init call")
-    _rel32_target(im, 0x4E870F, 0x4E71D0, "SDK shim init call")
-    _rel32_target(im, 0x4E7202, 0x4E6E40, "SDK search loader call")
-    _rel32_target(im, 0x4E5DF3, 0x4E87B0, "SDK cleanup call")
-    _relocated_pointer(im, 0x4E27438, 0x4E4730, "LibOVR vtable init")
-    _relocated_pointer(im, 0x4E27440, 0x4E5DA0, "LibOVR vtable shutdown")
-    _relocated_pointer(im, 0x4E27600, 0x4E4970, "OpenVR vtable init")
+    _rel32_target(im, 0x8D5437, 0x4E4B40, "selector factory call")
+    _rel32_target(im, 0x4E4706, 0x4E85D0, "Oculus SDK init call")
+    _rel32_target(im, 0x4E86AF, 0x4E7170, "SDK shim init call")
+    _rel32_target(im, 0x4E71A2, 0x4E6DE0, "SDK search loader call")
+    _rel32_target(im, 0x4E5D93, 0x4E8750, "SDK cleanup call")
+    _relocated_pointer(im, 0x4E27438, 0x4E46D0, "LibOVR vtable init")
+    _relocated_pointer(im, 0x4E27440, 0x4E5D40, "LibOVR vtable shutdown")
+    _relocated_pointer(im, 0x4E27600, 0x4E4910, "OpenVR vtable init")
     _indirect_iat_call(im, LOADER_CALL_RVA, LOAD_LIBRARY_IAT_RVA)
     if _rva_bytes(im, LOADER_CALL_RVA + 6, 6) != bytes.fromhex("488bcb488bf0"):
         _fail("SDK loader call has an unexpected caller continuation")
@@ -452,7 +452,7 @@ def _resource_table(vs_rva, vs_size):
 
 def _fixture(product_name="Elite Dangerous: Odyssey",
              file_description="Elite Dangerous: Odyssey Executable",
-             file_version="334473"):
+             file_version="334925"):
     """Small synthetic PE with the qualified proof points for parser tests."""
     # The real IAT RVA is high in the image.  Keep the fixture sparse in
     # meaning while giving the bounded parser the same address relationships.
@@ -507,12 +507,12 @@ def _fixture(product_name="Elite Dangerous: Odyssey",
     for rva, value in _BYTE_CHECKS.items():
         blob(rva, value)
     # selector factory direct call
-    blob(0x8D5497, b"\xE8" + struct.pack("<i", 0x4E4BA0 - (0x8D5497 + 5)))
-    for rva, target in ((0x4E4766, 0x4E8630), (0x4E870F, 0x4E71D0),
-                        (0x4E7202, 0x4E6E40), (0x4E5DF3, 0x4E87B0)):
+    blob(0x8D5437, b"\xE8" + struct.pack("<i", 0x4E4B40 - (0x8D5437 + 5)))
+    for rva, target in ((0x4E4706, 0x4E85D0), (0x4E86AF, 0x4E7170),
+                        (0x4E71A2, 0x4E6DE0), (0x4E5D93, 0x4E8750)):
         blob(rva, b"\xE8" + struct.pack("<i", target - (rva + 5)))
-    for rva, target in ((0x4E27438, 0x4E4730), (0x4E27440, 0x4E5DA0),
-                        (0x4E27600, 0x4E4970)):
+    for rva, target in ((0x4E27438, 0x4E46D0), (0x4E27440, 0x4E5D40),
+                        (0x4E27600, 0x4E4910)):
         rv(rva, IMAGE_BASE + target, 8)
     # SDK LoadLibraryW IAT call, followed by its exact return continuation.
     blob(LOADER_CALL_RVA, b"\xff\x15" + struct.pack("<i", LOAD_LIBRARY_IAT_RVA - (LOADER_CALL_RVA + 6)))
@@ -575,7 +575,7 @@ def self_test():
         return 0x200 + rva - 0x1000
 
     rejects(lambda d: d.__setitem__(at(d, LOADER_CALL_RVA), 0x90))
-    rejects(lambda d: d.__setitem__(at(d, 0x8D5497), 0x90))
+    rejects(lambda d: d.__setitem__(at(d, 0x8D5437), 0x90))
     rejects(lambda d: d.__setitem__(at(d, 0x3508), 1))
     rejects(lambda d: d.__setitem__(at(d, 0x4E27438), 0))
     rejects(lambda d: d.__setitem__(slice(0x84, 0x86), (0x14C).to_bytes(2, "little")))
@@ -596,7 +596,7 @@ def self_test():
         strings = version_strings(unknown)
         check(strings.get("ProductName") == "Elite Dangerous: Odyssey")
         check(strings.get("FileDescription") == "Elite Dangerous: Odyssey Executable")
-        check(strings.get("FileVersion") == "334473")
+        check(strings.get("FileVersion") == "334925")
         legacy = Path(td) / "legacy.exe"
         legacy.write_bytes(_fixture(product_name="Elite:Dangerous",
                                     file_description="Elite:Dangerous Executable",

@@ -54,12 +54,12 @@ uintptr_t writerOwnershipFixtureReturn=0;uint64_t writerOwnershipGameReturn=0;
 extern "C" __declspec(noinline) void recordWriterUnwindCapture(uintptr_t dictionary,uintptr_t key){
     CONTEXT context{};RtlCaptureContext(&context);
     writerUnwindPending=writerUnwindProbe->beginLookupUnwindRvaForTest(
-        reinterpret_cast<uintptr_t>(&recordWriterUnwindResume),0x369FB91,dictionary,key,context);
+        reinterpret_cast<uintptr_t>(&recordWriterUnwindResume),0x369FAF1,dictionary,key,context);
 }
 extern "C" __declspec(noinline) void recordWriterOwnershipUnwindCapture(uintptr_t dictionary,uintptr_t key){
     CONTEXT context{};RtlCaptureContext(&context);
     writerUnwindPending=writerUnwindProbe->beginLookupOwnershipUnwindRvaForTest(
-        reinterpret_cast<uintptr_t>(&recordWriterOwnershipUnwindResume),0x4315D6A,
+        reinterpret_cast<uintptr_t>(&recordWriterOwnershipUnwindResume),0x4315CCA,
         writerOwnershipFixtureReturn,writerOwnershipGameReturn,dictionary,key,context);
 }
 
@@ -96,14 +96,14 @@ void recordWriterTests(){
         0x00,0x00,0x01,0x48,0x85,0xC9,0x75,0x0C,0x48,0x8D,0x4C,0x24,0x20,0xE8,0x2E,0x67,
         0x00,0x00,0xEB,0x31,0x48,0x8B,0x01,0x48,0x8D,0x54,0x24,0x20,0xFF,0x50,0x50,0xEB,
         0x24,0x48,0x8D,0x8B,0x00,0x03,0x00,0x00};
-    check(edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DF00,ownershipWindow.data(),ownershipWindow.size()),"exact Elite ownership dispatch window passes production guard");
+    check(edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DE60,ownershipWindow.data(),ownershipWindow.size()),"exact Elite ownership dispatch window passes production guard");
     int32_t directDisplacement=0;memcpy(&directDisplacement,ownershipWindow.data()+14,sizeof(directDisplacement));
-    check(int64_t(0x431DF12)+directDisplacement==int64_t(0x4324640),"exact direct rel32 independently resolves to 4324640");
+    check(int64_t(0x431DE72)+directDisplacement==int64_t(0x43245A0),"exact direct rel32 independently resolves to 43245A0");
     auto wrongTarget=ownershipWindow;wrongTarget[15]=0xF7;
-    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DF00,wrongTarget.data(),wrongTarget.size()),"stale direct rel32 target is rejected");
-    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DEFF,ownershipWindow.data(),ownershipWindow.size()),"neighboring ownership instruction placement is rejected");
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DE60,wrongTarget.data(),wrongTarget.size()),"stale direct rel32 target is rejected");
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DE5F,ownershipWindow.data(),ownershipWindow.size()),"neighboring ownership instruction placement is rejected");
     auto wrongVirtual=ownershipWindow;wrongVirtual[30]=0x58;
-    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DF00,wrongVirtual.data(),wrongVirtual.size()),"wrong virtual slot is rejected");
+    check(!edvr::ObjectRecordWriterProbe::ownershipOpcodeWindowMatchesForTest(0x431DE60,wrongVirtual.data(),wrongVirtual.size()),"wrong virtual slot is rejected");
     edvr::ObjectRecordWriterProbe p;p.armForTest(77);
     std::vector<uint8_t> owner(0x300),keyBytes(0x60),stack(0x400),object(0x1A0),entry(0x38);
     for(size_t i=0;i<keyBytes.size();++i)keyBytes[i]=uint8_t(0x20+i);
@@ -117,64 +117,64 @@ void recordWriterTests(){
     check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&p.recordsForTest().back().record.data==unwindRecord,"real unwind stops at writer caller and captures its stack record");
     p.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
     fillRecord(stack.data()+0x50,1);
-    auto a=p.beginLookupRvaForTest(0x369FB91,reinterpret_cast<uintptr_t>(stack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    auto a=p.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(stack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     p.completeLookup(a,reinterpret_cast<uintptr_t>(entry.data()));
-    check(p.recordsForTest().back().writer=="direct_369fb91"&&p.recordsForTest().back().record.data[7]==uint8_t(1+7*3),"direct writer captures caller-stack record");
+    check(p.recordsForTest().back().writer=="direct_369faf1"&&p.recordsForTest().back().record.data[7]==uint8_t(1+7*3),"direct writer captures caller-stack record");
     std::vector<uint8_t> primaryStack(0x300),builder(0x60),pose(0xC0);fillRecord(primaryStack.data()+0x30,2);c.R12=reinterpret_cast<DWORD64>(pose.data());
-    auto b=p.beginLookupRvaForTest(0x42B6FAF,reinterpret_cast<uintptr_t>(primaryStack.data()),dictionary,reinterpret_cast<uintptr_t>(builder.data()+0x40),c);p.completeLookup(b,reinterpret_cast<uintptr_t>(entry.data()));
+    auto b=p.beginLookupRvaForTest(0x42B6F0F,reinterpret_cast<uintptr_t>(primaryStack.data()),dictionary,reinterpret_cast<uintptr_t>(builder.data()+0x40),c);p.completeLookup(b,reinterpret_cast<uintptr_t>(entry.data()));
     check(p.recordsForTest().back().builder==reinterpret_cast<uintptr_t>(builder.data())&&p.recordsForTest().back().builderSnapshot.data.size()==0x60&&p.recordsForTest().back().objectSnapshot.data.size()==0xC0,"primary writer retains builder and complete context allocation");
     std::vector<uint8_t> inlineFrame(0x400);uintptr_t rbp=reinterpret_cast<uintptr_t>(inlineFrame.data()+0x80);fillRecord(reinterpret_cast<uint8_t*>(rbp+0x1C0),3);put64(inlineFrame,0x18,reinterpret_cast<uintptr_t>(pose.data()));c.Rbp=rbp;
-    auto d=p.beginLookupRvaForTest(0x42B7B96,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(d,reinterpret_cast<uintptr_t>(entry.data()));
+    auto d=p.beginLookupRvaForTest(0x42B7AF6,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(d,reinterpret_cast<uintptr_t>(entry.data()));
     check(p.recordsForTest().back().object==reinterpret_cast<uintptr_t>(pose.data())&&p.recordsForTest().back().record.data[0]==3,"inline writer reads spilled outer input and RBP record");
     std::vector<uint8_t> directStack(0x300);fillRecord(directStack.data()+0x60,4);
-    auto e=p.beginLookupRvaForTest(0x4315D6A,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(e,reinterpret_cast<uintptr_t>(entry.data()));
+    auto e=p.beginLookupRvaForTest(0x4315CCA,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(e,reinterpret_cast<uintptr_t>(entry.data()));
     std::vector<uint8_t> helperRecord(0x150);fillRecord(helperRecord.data(),5);c.Rbx=reinterpret_cast<DWORD64>(helperRecord.data());c.Rdi=reinterpret_cast<DWORD64>(object.data());
     edvr::g_testUiSubmit={};edvr::g_testUiSubmit.renderFrame=99;edvr::g_testUiSubmit.itemSerial=4;edvr::g_testUiSubmit.ordinal=0;
     edvr::g_testUiSubmit.submitThread=GetCurrentThreadId();edvr::g_testUiSubmit.submitQpc=1;edvr::g_testUiSubmit.instance=reinterpret_cast<uintptr_t>(object.data());
     edvr::g_testUiSubmit.renderer=0x10000;edvr::g_testUiSubmit.part=0x20000;edvr::g_testUiSubmit.nameId=28879;edvr::g_testUiSubmitActive=true;
-    auto f=p.beginLookupRvaForTest(0x434FE49,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(f,reinterpret_cast<uintptr_t>(entry.data()));
+    auto f=p.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(f,reinterpret_cast<uintptr_t>(entry.data()));
     edvr::g_testUiSubmitActive=false;
     check(p.recordsForTest().back().uiJoinStatus=="matched_instance_tls"&&p.recordsForTest().back().uiSubmit.ordinal==0&&
           p.recordsForTest().back().uiSubmit.instance==uintptr_t(c.Rdi)&&p.summary().uiJoinMatched==1,
           "UI packed-record join retains exact active instance TLS including ordinal zero");
     check(p.recordsForTest().back().objectSnapshot.data.size()==0x1A0&&p.recordsForTest().back().lookupStatus=="complete","helper writer retains bounded input and completed entry");
     edvr::ObjectRecordWriterProbe reserved;reserved.armForTest(79);reserved.setSyntheticRecordCountForTest(edvr::ObjectRecordWriterProbe::kRecordCap-edvr::ObjectRecordWriterProbe::kUiRecordReserve);
-    reserved.beginLookupRvaForTest(0x369FB91,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    reserved.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     check(reserved.recordsForTest().empty()&&reserved.summary().recordOverflow==1,"generic record limit leaves the UI record slots reserved");
     edvr::g_testUiSubmitActive=true;
-    auto reservedUi=reserved.beginLookupRvaForTest(0x434FE49,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    auto reservedUi=reserved.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     check(reservedUi.record!=edvr::ObjectRecordWriterProbe::kNone&&reserved.recordsForTest().back().record.status=="available"&&
           reserved.summary().uiJoinMatched==1,"exact UI packed record survives generic slot saturation");reserved.finish();
     edvr::ObjectRecordWriterProbe fullUi;fullUi.armForTest(80);fullUi.setSyntheticRecordCountForTest(edvr::ObjectRecordWriterProbe::kRecordCap);
-    auto overflowUi=fullUi.beginLookupRvaForTest(0x434FE49,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    auto overflowUi=fullUi.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     check(overflowUi.record==edvr::ObjectRecordWriterProbe::kNone&&fullUi.summary().uiReserveOverflow==1,
           "exhausted UI reserve is explicit instead of silently dropping a matched record");fullUi.finish();
     edvr::ObjectRecordWriterProbe byteReserved;byteReserved.armForTest(81);byteReserved.setRetainedBytesForTest(edvr::ObjectRecordWriterProbe::kByteCap);
-    auto byteUi=byteReserved.beginLookupRvaForTest(0x434FE49,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    auto byteUi=byteReserved.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     check(byteUi.record!=edvr::ObjectRecordWriterProbe::kNone&&byteReserved.recordsForTest().back().record.status=="available"&&
           byteReserved.summary().byteBudgetDeclines>0,"matched UI packed record uses protected bytes after generic byte budget saturation");byteReserved.finish();
     edvr::g_testUiSubmitActive=false;
-    p.beginLookupRvaForTest(0x4351016,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.beginLookupRvaForTest(0x123456,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
-    std::vector<uint8_t> lateStack(0x200);fillRecord(lateStack.data()+0x50,8);auto late=p.beginLookupRvaForTest(0x369FB91,reinterpret_cast<uintptr_t>(lateStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(late,reinterpret_cast<uintptr_t>(entry.data()));
+    p.beginLookupRvaForTest(0x4350F76,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.beginLookupRvaForTest(0x123456,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    std::vector<uint8_t> lateStack(0x200);fillRecord(lateStack.data()+0x50,8);auto late=p.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(lateStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(late,reinterpret_cast<uintptr_t>(entry.data()));
     const auto s=p.summary();check(s.observed==7&&s.stored==7&&s.completed==7&&s.declinedManagement==1&&s.declinedUnknown==1,"all five writer recipes accepted and management/unknown callers declined");
-    std::vector<uint8_t> pendingStack(0x200);fillRecord(pendingStack.data()+0x50,9);auto pending=p.beginLookupRvaForTest(0x369FB91,reinterpret_cast<uintptr_t>(pendingStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    std::vector<uint8_t> pendingStack(0x200);fillRecord(pendingStack.data()+0x50,9);auto pending=p.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(pendingStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     p.finish();check(p.recordsForTest().back().lookupStatus=="pending"&&p.summary().completed+1==p.summary().stored,"finish preserves an explicit incomplete lookup");
     p.armForTest(78);p.completeLookup(pending,reinterpret_cast<uintptr_t>(entry.data()));check(p.summary().completionFailures==1&&p.summary().stored==0,"stale pending completion is rejected by epoch");p.finish();
 
     edvr::ObjectRecordWriterProbe ownershipProbe;ownershipProbe.armForTest(90);writerUnwindProbe=&ownershipProbe;
     KinematicFixture rig;std::vector<uint8_t> ownershipRecord(0x150);fillRecord(ownershipRecord.data(),0x51);
-    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DF12;
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DE72;
     kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&ownershipProbe.recordsForTest().back().ownershipStatus=="linked","real nested unwind restores direct ancestor RBX/RDI and links ownership");
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="direct_4324640"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DF12,"direct ancestor return identifies 4324640 branch");
-    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431DF1F;
+    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE72,"direct ancestor return identifies 43245A0 branch");
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431DE7F;
     kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DF1F,"virtual ancestor return identifies slot-50 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
 
     edvr::ObjectRecordWriterProbe refusedProbe;refusedProbe.armForTest(91);refusedProbe.setOwnershipOpcodesValidForTest(false);writerUnwindProbe=&refusedProbe;
-    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DF12;
+    writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DE72;
     kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     refusedProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
     const auto refusedSummary=refusedProbe.summary();const auto refusedOwnership=refusedProbe.ownershipSummary();
@@ -187,36 +187,36 @@ void recordWriterTests(){
     std::vector<uint8_t> ownedInlineFrame(0x400);uintptr_t ownedRbp=reinterpret_cast<uintptr_t>(ownedInlineFrame.data()+0x80);
     fillRecord(reinterpret_cast<uint8_t*>(ownedRbp+0x1C0),0x61);put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(rig.context.data()));
     CONTEXT inlineCaller{};inlineCaller.Rbp=ownedRbp;CONTEXT ownerContext{};ownerContext.Rdi=reinterpret_cast<DWORD64>(rig.outer.data());ownerContext.Rbx=reinterpret_cast<DWORD64>(rig.collection.data());
-    auto ownedInline=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    auto ownedInline=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     ownershipProbe.completeLookup(ownedInline,reinterpret_cast<uintptr_t>(entry.data()));const auto inlineOwnershipId=ownershipProbe.recordsForTest().back().ownershipId;
     check(ownershipProbe.recordsForTest().back().ownershipStatus=="linked"&&ownershipProbe.ownershipsForTest()[inlineOwnershipId].contextSnapshot.data.size()==0xC0,"inline ownership proves registry join and captures context tail");
-    auto duplicate=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    auto duplicate=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     check(ownershipProbe.recordsForTest().back().ownershipId==inlineOwnershipId&&ownershipProbe.ownershipSummary().deduplicated==1,"identical ownership provenance deduplicates");
     ownershipProbe.completeLookup(duplicate,reinterpret_cast<uintptr_t>(entry.data()));
     std::vector<uint8_t> secondContext(0xC0);put64(secondContext,0x30,rig.registry);put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(secondContext.data()));
-    auto distinct=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    auto distinct=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     check(ownershipProbe.recordsForTest().back().ownershipId!=inlineOwnershipId,"same owner and frame keeps distinct inline contexts");ownershipProbe.completeLookup(distinct,reinterpret_cast<uintptr_t>(entry.data()));
     put64(ownedInlineFrame,0x18,reinterpret_cast<uintptr_t>(rig.context.data()));
     std::vector<uint8_t> provider2(0x80);put64(provider2,0,reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))+0x1050);put64(rig.outer,0x180,reinterpret_cast<uintptr_t>(provider2.data()));
-    auto metadataChanged=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    auto metadataChanged=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     check(ownershipProbe.recordsForTest().back().ownershipId!=inlineOwnershipId,"changed outer metadata cannot reuse first ownership snapshot");ownershipProbe.completeLookup(metadataChanged,reinterpret_cast<uintptr_t>(entry.data()));
     put64(rig.outer,0x180,reinterpret_cast<uintptr_t>(rig.provider.data()));
-    put32(rig.outer,0x1B8,UINT32_MAX);put64(rig.outer,0x1C0,0);auto absent=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    put32(rig.outer,0x1B8,UINT32_MAX);put64(rig.outer,0x1C0,0);auto absent=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     check(ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId].parentStatus=="resolved_absent","resolved absent parent is explicit");ownershipProbe.completeLookup(absent,reinterpret_cast<uintptr_t>(entry.data()));
-    put32(rig.outer,0x1B8,7);put64(rig.outer,0x1C0,reinterpret_cast<uintptr_t>(rig.parent.data()));auto unresolved=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,3);
+    put32(rig.outer,0x1B8,7);put64(rig.outer,0x1C0,reinterpret_cast<uintptr_t>(rig.parent.data()));auto unresolved=ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,3);
     check(ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId].parentStatus=="unresolved","non-sentinel parent token is unresolved");ownershipProbe.completeLookup(unresolved,reinterpret_cast<uintptr_t>(entry.data()));
-    put64(rig.records,0x290,0);CONTEXT directCaller{};auto nullContext=ownershipProbe.beginLookupOwnershipRvaForTest(0x4315D6A,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431DF12,ownerContext,2);
+    put64(rig.records,0x290,0);CONTEXT directCaller{};auto nullContext=ownershipProbe.beginLookupOwnershipRvaForTest(0x4315CCA,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431DE72,ownerContext,2);
     const auto& nullOwner=ownershipProbe.ownershipsForTest()[ownershipProbe.recordsForTest().back().ownershipId];check(nullOwner.context==0&&nullOwner.contextSnapshot.status=="null_pointer","direct record without optional inline context retains outer ownership");ownershipProbe.completeLookup(nullContext,reinterpret_cast<uintptr_t>(entry.data()));
     put64(rig.records,0x290,reinterpret_cast<uintptr_t>(rig.context.data()));
     const auto beforeFault=ownershipProbe.ownershipSummary();CONTEXT badOwner=ownerContext;badOwner.Rdi=1;
-    ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,badOwner,1);
-    put64(rig.collection,0x280,reinterpret_cast<uintptr_t>(rig.records.data()+0x10));ownershipProbe.beginLookupOwnershipRvaForTest(0x4315D6A,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431DF12,ownerContext,2);
+    ownershipProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,badOwner,1);
+    put64(rig.collection,0x280,reinterpret_cast<uintptr_t>(rig.records.data()+0x10));ownershipProbe.beginLookupOwnershipRvaForTest(0x4315CCA,reinterpret_cast<uintptr_t>(directStack.data()),rig.directDictionary(),rig.directKey(),directCaller,0x431DE72,ownerContext,2);
     check(ownershipProbe.ownershipSummary().tupleReadFault==beforeFault.tupleReadFault+1&&ownershipProbe.ownershipSummary().recordRangeMismatch==beforeFault.recordRangeMismatch+1,"ownership faults and direct range refusal are explicit");
-    ownershipProbe.beginLookupRvaForTest(0x434FE49,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);check(ownershipProbe.recordsForTest().back().ownershipStatus=="unsupported_writer","unsupported ownership recipe preserves writer record");
+    ownershipProbe.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);check(ownershipProbe.recordsForTest().back().ownershipStatus=="unsupported_writer","unsupported ownership recipe preserves writer record");
     ownershipProbe.finish();writerUnwindProbe=nullptr;
 
     edvr::ObjectRecordWriterProbe capProbe;capProbe.armForTest(1);put64(rig.collection,0x280,reinterpret_cast<uintptr_t>(rig.records.data()));
-    for(uint32_t i=0;i<=edvr::ObjectRecordWriterProbe::kOwnershipCap;++i){capProbe.setFrame(i);capProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DF1F,ownerContext,1);}
+    for(uint32_t i=0;i<=edvr::ObjectRecordWriterProbe::kOwnershipCap;++i){capProbe.setFrame(i);capProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,rig.inlineDictionary(),rig.directKey(),inlineCaller,0x431DE7F,ownerContext,1);}
     check(capProbe.ownershipSummary().stored==edvr::ObjectRecordWriterProbe::kOwnershipCap&&capProbe.ownershipSummary().recordOverflow==1,"ownership record cap is explicit");capProbe.finish();
 }
 
@@ -230,11 +230,11 @@ void captureFixture(const wchar_t* directory){
     std::vector<uint8_t> source(336);for(size_t i=0;i<source.size();++i)source[i]=uint8_t(i*13+7);
     std::vector<uint8_t> writerStack(0x400),writerEntry(0x38);uintptr_t writerRbp=reinterpret_cast<uintptr_t>(writerStack.data()+0x80);memcpy(reinterpret_cast<void*>(writerRbp+0x1C0),source.data(),source.size());
     KinematicFixture writerRig;put64(writerStack,0x18,reinterpret_cast<uintptr_t>(writerRig.context.data()));CONTEXT writerContext{};writerContext.Rbp=writerRbp;CONTEXT writerOwner{};writerOwner.Rdi=reinterpret_cast<DWORD64>(writerRig.outer.data());writerOwner.Rbx=reinterpret_cast<DWORD64>(writerRig.collection.data());
-    auto writerPending=edvr::objectRecordWriterProbe.beginLookupOwnershipRvaForTest(0x42B7B96,0,writerRig.inlineDictionary(),writerRig.directKey(),writerContext,0x431DF1F,writerOwner,3);
+    auto writerPending=edvr::objectRecordWriterProbe.beginLookupOwnershipRvaForTest(0x42B7AF6,0,writerRig.inlineDictionary(),writerRig.directKey(),writerContext,0x431DE7F,writerOwner,3);
     edvr::objectRecordWriterProbe.completeLookup(writerPending,reinterpret_cast<uintptr_t>(writerEntry.data()));
     p.finish();p.useExpectedExecutableIdentityForTest();check(p.write(directory,L"fixture"),"write v3 classification fixture");
     const auto json=readFile(joined(directory,L"classification_fixture.json"));const std::string text(json.begin(),json.end());
-    check(text.find("edvr_object_classification_v3")!=std::string::npos&&text.find("inline_42b7b96")!=std::string::npos&&
+    check(text.find("edvr_object_classification_v3")!=std::string::npos&&text.find("inline_42b7af6")!=std::string::npos&&
           text.find("\"ownerships\":[{")!=std::string::npos&&text.find("\"ownership_status\":\"linked\"")!=std::string::npos,
           "v3 fixture publishes the record writer's linked ownership");
     check(text.find("\"draws\"")==std::string::npos&&text.find("\"source_owner\"")==std::string::npos&&text.find("\"resources\"")==std::string::npos,

@@ -50,14 +50,14 @@ constexpr uintptr_t kConfig = 0x33000000, kOverride = 0x34000000, kTarget = 0x35
 
 Memory fixture() {
     Memory m;
-    m.put(kC, kBase + 0x51890B0);
-    m.put(kC + 0x10, kBase + 0x51890B8);
+    m.put(kC, kBase + 0x5189070);
+    m.put(kC + 0x10, kBase + 0x5189078);
     m.put(kC + 0x30, kB);
     m.put(kC + 0x40, kB + 0xB8);
     m.put(kC + 0x58, uint64_t{1});
     m.put(kC + 0x60, kRoster);
     m.put(kC + 0x68, uint32_t{0});
-    m.put(kB, kBase + 0x51893B0);
+    m.put(kB, kBase + 0x5189370);
     m.put(kB + 0x20, kName);
     for (unsigned i = 0; i < 11; ++i) m.put(kB + 0x28 + 8*i, i == 10 ? kC : uintptr_t{0});
     m.put(kName, uint64_t{8});
@@ -70,8 +70,8 @@ Memory fixture() {
     m.putBytes(kC + 0x70 + 0x40, poseData, sizeof(poseData));
     m.put(kRoster, kActivity);
     m.put(kActivity, kVtable);
-    m.put(kVtable + 0x20, kBase + 0x8BEA80);
-    m.put(kVtable + 0x28, kBase + 0x529540);
+    m.put(kVtable + 0x20, kBase + 0x8BEA20);
+    m.put(kVtable + 0x28, kBase + 0x5294E0);
     m.put(kActivity - 4, uint8_t{1});
     m.put(kActivity + 8, kActivityName);
     m.put(kActivity - 0x20, kBase + 0x12345);
@@ -85,12 +85,12 @@ Memory nestedFixture(float weight) {
     Memory m = fixture();
     const uintptr_t nestedActivity = kNestedStack + 0x98;
     m.put(kRoster, nestedActivity);
-    m.put(nestedActivity, kBase + 0x5189AD0);
-    m.put(kBase + 0x5189AD0 + 0x20, kBase + 0x108BEE0);
-    m.put(kBase + 0x5189AD0 + 0x28, kBase + 0x108BA8C);
+    m.put(nestedActivity, kBase + 0x5189A90);
+    m.put(kBase + 0x5189A90 + 0x20, kBase + 0x108BE80);
+    m.put(kBase + 0x5189A90 + 0x28, kBase + 0x108BA2C);
     m.put(nestedActivity - 0xA0, kNestedConfig);
     m.put(kNestedConfig + 0x34, weight);
-    m.put(kNestedStack, kBase + 0x5189A58);
+    m.put(kNestedStack, kBase + 0x5189A18);
     m.put(kNestedStack + 0x20, kNestedName);
     m.put(kNestedStack + 0x1B8, kC);
     m.put(kNestedName, uint64_t{10});
@@ -101,8 +101,8 @@ Memory nestedFixture(float weight) {
     for (unsigned i = 0; i < 11; ++i) {
         const uintptr_t child = kNestedFirst + 0x1000 * i;
         m.put(kNestedStack + 0x28 + 8 * i, child);
-        m.put(child, kBase + 0x51890B0);
-        m.put(child + 0x10, kBase + 0x51890B8);
+        m.put(child, kBase + 0x5189070);
+        m.put(child + 0x10, kBase + 0x5189078);
         m.put(child + 0x30, kNestedStack);
         m.put(child + 0x40, i ? kNestedFirst + 0x1000 * (i - 1) + 0x70 : kB + 0xB8);
         m.put(child + 0x58, uint64_t{0});
@@ -117,24 +117,24 @@ Memory nestedFixture(float weight) {
 Memory placedFixture() {
     Memory m = fixture();
     const uintptr_t object = kActivity - 0x20;
-    const uintptr_t placedVtable = kBase + 0x518CFC8;
+    const uintptr_t placedVtable = kBase + 0x518CF88;
     m.put(kActivity, placedVtable);
-    m.put(object, kBase + 0x518CF58);
-    m.put(placedVtable + 0x20, kBase + 0x8BEA80);
-    m.put(placedVtable + 0x28, kBase + 0x529540);
+    m.put(object, kBase + 0x518CF18);
+    m.put(placedVtable + 0x20, kBase + 0x8BEA20);
+    m.put(placedVtable + 0x28, kBase + 0x5294E0);
     m.put(object + 0x1E8, kPlacedRecord);
     m.put(kPlacedRecord + 8, kTarget);
     m.put(kPlacedRecord + 0x10, kProvider);
-    m.put(kProvider, kBase + 0x530E530); // class is observed, semantics unknown
-    m.put(kBase + 0x530E530 + 0x20, kBase + 0x529540);
+    m.put(kProvider, kBase + 0x530E500); // class is observed, semantics unknown
+    m.put(kBase + 0x530E500 + 0x20, kBase + 0x5294E0);
     m.put(kTarget + 0xC0, int32_t{8});
     m.put(object + 0x10, kConfig);
     m.put(kConfig + 0x14, int32_t{1});
     m.put(kConfig + 0x18, int32_t{0});
     m.put(object + 0x188, int32_t{-1});
     m.put(object + 0x190, kOverride);
-    m.put(kOverride, kBase + 0x5358518);
-    m.put(kBase + 0x5358518 + 0x70, kBase + 0x123456);
+    m.put(kOverride, kBase + 0x53584E8);
+    m.put(kBase + 0x53584E8 + 0x70, kBase + 0x123456);
     float matrix[16]{};
     matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1.0f;
     matrix[12] = 10.0f;
@@ -419,7 +419,7 @@ bool testCapture() {
         activeResult->stages[0].inactiveNestedOmitted != 0) return false;
 
     Memory unknown = nestedFixture(1.0f);
-    unknown.put(kBase + 0x5189AD0 + 0x20, kBase + 0x123456);
+    unknown.put(kBase + 0x5189A90 + 0x20, kBase + 0x123456);
     auto unknownResult = std::make_unique<Snapshot>(); unknownResult->source = kC + 0x70;
     capture(&Memory::read, &unknown, kBase, *unknownResult);
     if (!unknownResult->complete || unknownResult->stageCount != 12 ||
@@ -434,8 +434,8 @@ bool testPlaced() {
     if (!s->complete || s->placedSeen != 1 || s->placedCount != 1 || s->placedOverflow) return false;
     const PlacedDetail& d = s->placed[0];
     if (!d.identityComplete || !d.providerPresent || !d.providerKnown || !d.overridePresent ||
-        d.provider != kProvider || d.providerVtable != kBase + 0x530E530 ||
-        d.providerFn != kBase + 0x529540 || d.overrideFn != kBase + 0x123456 ||
+        d.provider != kProvider || d.providerVtable != kBase + 0x530E500 ||
+        d.providerFn != kBase + 0x5294E0 || d.overrideFn != kBase + 0x123456 ||
         d.targetRef != kTarget || !d.targetStateRead || d.targetState != 8 ||
         !d.validatorKnown || !d.valid5 || !d.valid8 || !d.overrideEligible || !d.poseStable ||
         !d.localRead || !d.cacheRead || !d.finalRead ||

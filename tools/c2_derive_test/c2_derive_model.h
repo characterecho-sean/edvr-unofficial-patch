@@ -68,7 +68,7 @@ inline void finalizeViewRows(Cam& c) {
 inline float* projSlot(Cam& c, int i) { return &c.F(0x1B0 + 4 * i); }
 inline const float* projSlot(const Cam& c, int i) { return &c.F(0x1B0 + 4 * i); }
 
-// Projection builder: FUN_1404f3150 (camera_cache_helpers.txt:255-493).
+// Projection builder: FUN_1404f30f0 (camera_cache_helpers.txt:255-493).
 inline void buildProjection(Cam& c) {
     const float fVar19 = (c.F(0x23C) + 1.0f) * c.F(0x234); // (compoundNear+1)*near
     const uint32_t kind = c.U(0x244);

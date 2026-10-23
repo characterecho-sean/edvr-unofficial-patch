@@ -1,16 +1,16 @@
 // Explorer Cam's pure half (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
 //
 // Everything here is decisions, bytes and text, with no Windows, no game and no Config, so tools\explorer_cam_test drives the same
-// code the DLL compiles: the build-334473 identity, the eye keys' clamp, the sixteen floats written into the free camera's
+// code the DLL compiles: the build-334925 identity, the eye keys' clamp, the sixteen floats written into the free camera's
 // commander-local pose, the per-activity placement machine, the F5 sequencer that opens the camera and switches to the free
 // camera, the camera-UI hider, the F5 key's decision, the stale watch, the event rings the hook threads log through, every log
 // line's text, and the machine code of the two relays.
 //
 // WHAT THE FEATURE DOES (Sean's decision D1, 2026-10-07: these writes into game memory, nothing else):
-//   1. PLACE   Elite's own free camera (FreeCameraActivity, the update at EliteDangerous64.exe+0x1072A80) is put at the
+//   1. PLACE   Elite's own free camera (FreeCameraActivity, the update at EliteDangerous64.exe+0x1072A20) is put at the
 //              commander's head: its commander-local pose (+0x3B0) is written before every update while it runs, as the
 //              identity rotation and an origin (right, up, forward) in metres from the commander's feet.
-//   2. SKIP    the camera's two position edits (the collision step FUN 0x1092240 and the commander's box push FUN 0x10902B0,
+//   2. SKIP    the camera's two position edits (the collision step FUN 0x10921E0 and the commander's box push FUN 0x1090250,
 //              each called only by that update) are made to return 0 -- "no edit" -- for that one activity, by relays in
 //              machine code in front of the game's functions.
 //   3. PRESS   the game's own actions, each for exactly ONE update: the pressed-int of an action object is set to 1 before the
@@ -34,17 +34,17 @@
 namespace edvr {
 namespace ecm {
 
-// ---- identity: build 334473 ---------------------------------------------------------------------------------------------
-constexpr uintptr_t kFreeCameraRva = 0x1072A80;   // FreeCameraActivity's per-frame update, rcx = the activity
-constexpr uintptr_t kCollisionRva = 0x1092240;    // the camera's sweep/ray collision step, called only by that update
-constexpr uintptr_t kBoxPushRva = 0x10902B0;      // pushes the point out of the commander's box (+0.25); one caller, 0x10739B6
-constexpr uintptr_t kCameraUiRva = 0x47CA180;     // VanityCameraUIActivity's update (rcx = the object), reached by a job thunk
-constexpr uintptr_t kControllerRva = 0x2DF3F60;   // VesselCameraMountControl's update (rcx = the controller), vtable only
-constexpr uintptr_t kAvatarFadeRva = 0x3DD8D00;   // AvatarModelComponent's per-frame dither fade (rcx = the component, void): the head hiding's hook
+// ---- identity: build 334925 ---------------------------------------------------------------------------------------------
+constexpr uintptr_t kFreeCameraRva = 0x1072A20;   // FreeCameraActivity's per-frame update, rcx = the activity
+constexpr uintptr_t kCollisionRva = 0x10921E0;    // the camera's sweep/ray collision step, called only by that update
+constexpr uintptr_t kBoxPushRva = 0x1090250;      // pushes the point out of the commander's box (+0.25); one caller, 0x1073956
+constexpr uintptr_t kCameraUiRva = 0x47CA0E0;     // VanityCameraUIActivity's update (rcx = the object), reached by a job thunk
+constexpr uintptr_t kControllerRva = 0x2DF3EA0;   // VesselCameraMountControl's update (rcx = the controller), vtable only
+constexpr uintptr_t kAvatarFadeRva = 0x3DD8C60;   // AvatarModelComponent's per-frame dither fade (rcx = the component, void): the head hiding's hook
 constexpr uintptr_t kFadeModeRva = 0x5EA0C78;     // int, .data: the dither fade's mode, -1 = auto (the game's own); when not -1 every avatar gets
                                                   // enabled = (mode != 0) and amount = the float at kFadeAmountRva
 constexpr uintptr_t kFadeAmountRva = 0x60211F8;   // float, .data (zero-initialised, so 0)
-constexpr uint32_t kExpectedTimestamp = 1791840573u;   // the PE TimeDateStamp and SizeOfImage the other build-keyed hooks use
+constexpr uint32_t kExpectedTimestamp = 1792704584u;   // the PE TimeDateStamp and SizeOfImage the other build-keyed hooks use
 constexpr uint32_t kExpectedImageSize = 104906752u;
 
 constexpr size_t kFreeCameraPrologueBytes = 28;
@@ -90,15 +90,15 @@ inline constexpr uint8_t kAvatarFadePrologue[kAvatarFadePrologueBytes] = {
 // The skeleton interface's FindJoint(const char* name) -> u16 (0xFFFF = none), shared by RuntimeRigComponent and AnimatedObject (rcx = the
 // interface, rdx = the name): Explorer Cam hooks it (callback relay, original first) to learn which interfaces the game attaches the local
 // player's avatars to. `mov [rsp+8],rbx` is the first instruction, five bytes with no rip-relative displacement: CodeHook steals exactly five.
-constexpr uintptr_t kFindJointRva = 0xFDEC10;
+constexpr uintptr_t kFindJointRva = 0xFDEBB0;
 constexpr size_t kFindJointPrologueBytes = 16;
 inline constexpr uint8_t kFindJointPrologue[kFindJointPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
 
-// VanityCameraDofAndZoomControls' update (rcx = the activity; Camera job table slot 16, job thunk 0x1030CE0 sets rcx = rdx - 0x150 first): the zoom, aperture and focus
+// VanityCameraDofAndZoomControls' update (rcx = the activity; Camera job table slot 16, job thunk 0x1030C80 sets rcx = rdx - 0x150 first): the zoom, aperture and focus
 // keys. Isolation clears its seven action handles (+0x250..+0x280) before the original and puts them back after it. `push rbx` (REX 40 53); `sub rsp,60h`;
 // `mov rax,[rcx+210h]`; `mov rbx,rcx`. Boundaries 2, 6, 13, 16; no rip-relative byte, so CodeHook steals 6 (the first two instructions).
-constexpr uintptr_t kZoomDofRva = 0x1079A90;
+constexpr uintptr_t kZoomDofRva = 0x1079A30;
 constexpr size_t kZoomDofPrologueBytes = 16;
 inline constexpr uint8_t kZoomDofPrologue[kZoomDofPrologueBytes] = {
     0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x8B, 0x81, 0x10, 0x02, 0x00, 0x00, 0x48, 0x8B, 0xD9};
@@ -1485,8 +1485,8 @@ inline void worldToCommanderLocal(const CommanderFrame& c, const float point[3],
 // ---- Phase 2: hiding the head parts of the local third-person avatar ----------------------------------------------------------------
 // The avatar (AvatarModelComponent, "AMC") keeps 54 parts at AMC+0x11B0, 0x680 bytes each (the part enum is the index; the names are the table at
 // +0x5E9F820). A part has up to four instances (variants k = 0..3 at entry+0x10+8k) and, per instance, a VIEW MASK qword at entry+0x5F0+8k that the game's
-// visibility job zeroes and ORs every frame and the submit job (the one that calls the dither fade, 0x3DD8D00, at 0x3DA4AFB) reads right after the fade:
-// an instance whose mask is zero is skipped (cmp qword ptr [r14],0 at 0x3DA4D9E). So a zero written after the fade returns removes the instance from every
+// visibility job zeroes and ORs every frame and the submit job (the one that calls the dither fade, 0x3DD8C60, at 0x3DA4A5B) reads right after the fade:
+// an instance whose mask is zero is skipped (cmp qword ptr [r14],0 at 0x3DA4CFE). So a zero written after the fade returns removes the instance from every
 // view for that frame, race-free (the same thread), and nothing is restored: the game rewrites the masks next frame. (NOTES_p2.txt.)
 constexpr uintptr_t kPartNameTableRva = 0x5E9F820;
 constexpr uint32_t kPartCount = 54;
@@ -1537,14 +1537,14 @@ inline bool isLocalAmc(uint32_t avatarPoseId, uint64_t avatarPose, uint64_t skel
 }
 // Which FindJoint call is an avatar attach: the caller is one of the two attach sites AND the name is the povCamera literal. Trivial on purpose: the hook sees
 // every FindJoint call of every system. 0 = site 1, 1 = site 2, -1 = neither.
-constexpr uintptr_t kFindSite1Rva = 0x19B4095, kFindSite2Rva = 0x19B4119, kPovNameRva = 0x51FCB00;
+constexpr uintptr_t kFindSite1Rva = 0x19B3FD5, kFindSite2Rva = 0x19B4059, kPovNameRva = 0x51FCAD0;
 inline int findCaptureSite(uintptr_t returnAddress, uintptr_t name, uintptr_t site1, uintptr_t site2, uintptr_t povName) {
     if (povName == 0 || name != povName) return -1;
     if (returnAddress == site1) return 0;
     if (returnAddress == site2) return 1;
     return -1;
 }
-// Is a site-2 attach the second half of the same invocation as the thread's last site-1 attach? 0x19B4000 attaches ONE humanoid's avatars per call: index 1
+// Is a site-2 attach the second half of the same invocation as the thread's last site-1 attach? 0x19B3F40 attaches ONE humanoid's avatars per call: index 1
 // (third person) at site 1, then index 0 (first person) at site 2, both from one frame (no push between: the return-address slot is the same address), and only
 // the local player has a first-person avatar. A pair is the local avatar's when the site-1 attach is still pending on this thread, sits at the same stack slot,
 // and is a different interface. A lone site-1 attach is any humanoid's (an NPC's) and never latches.

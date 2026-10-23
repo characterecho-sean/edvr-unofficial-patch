@@ -272,7 +272,7 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
     edvr::transitionFlashEyeBaseArmForTest();
   }
   { // The install path reads no setting: the hold is always on in the VR profile. Run for real (the test process is not
-    // build 334473, so the identity check refuses and nothing is hooked; what is asserted is that install RAN).
+    // build 334925, so the identity check refuses and nothing is hooked; what is asserted is that install RAN).
     edvr::transitionFlashEyeBaseResetForTest();
     check(!edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: the reset leaves a process that never installed");
     edvr::Config::get().set("fix.transition_flash","0");

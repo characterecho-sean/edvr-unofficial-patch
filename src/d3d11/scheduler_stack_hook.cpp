@@ -22,11 +22,11 @@ alignas(8) std::atomic<SchedulerStackProbe*> observer{nullptr};
 static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 
-// The prologues, from the hash-verified exe (SHA-256 6891f70a...7857e93;
+// The prologues, from the hash-verified exe (SHA-256 ed5a8f8c...e264b63;
 // verified 2026-09-21 against analysis/EliteDangerous64.exe and against
-// tools/build_diff_targets.json's prologue_hex for 0x36A3C50):
-//   0x42E2600: mov [rsp+8],rbx; mov [rsp+10h],rsi; push rdi; sub rsp,28h
-//   0x36A3C50: mov [rsp+8],rcx; push rbx; push rsi; push rdi; sub rsp,28h
+// tools/build_diff_targets.json's prologue_hex for 0x36A3BB0):
+//   0x42E2560: mov [rsp+8],rbx; mov [rsp+10h],rsi; push rdi; sub rsp,28h
+//   0x36A3BB0: mov [rsp+8],rcx; push rbx; push rsi; push rdi; sub rsp,28h
 constexpr uint8_t kDrainPrologue[14]={
     0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xEC};
 constexpr uint8_t kResetPrologue[14]={
@@ -49,9 +49,9 @@ __declspec(noinline) uintptr_t __fastcall resetObserved(uintptr_t,uintptr_t,
                                                         uintptr_t,uintptr_t) noexcept;
 
 HookEntry g_entries[2]={
-    {"scheduler-drain-1442e2600",SchedulerStackProbe::kHookRvas[0],kDrainPrologue,
+    {"scheduler-drain-1442e2560",SchedulerStackProbe::kHookRvas[0],kDrainPrologue,
      reinterpret_cast<void*>(&drainObserved)},
-    {"scheduler-reset-1436a3c50",SchedulerStackProbe::kHookRvas[1],kResetPrologue,
+    {"scheduler-reset-1436a3bb0",SchedulerStackProbe::kHookRvas[1],kResetPrologue,
      reinterpret_cast<void*>(&resetObserved)},
 };
 

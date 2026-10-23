@@ -10,16 +10,16 @@
 //   camera UI's FreeCamToggleHUD, and the camera controller's PhotoCameraToggle and ToggleFreeCam.
 // explorer_cam_core.h holds the decisions; this file's .cpp holds the five hooks, the config, the F5 key and the log.
 //
-// THE HOOKS (build 334473 only; any PE or prologue mismatch stands the feature down with one line and patches nothing):
-//   +0x1072A80  the free camera's update. Placement runs BEFORE the original (the pose write and the lock press), the lock's
+// THE HOOKS (build 334925 only; any PE or prologue mismatch stands the feature down with one line and patches nothing):
+//   +0x1072A20  the free camera's update. Placement runs BEFORE the original (the pose write and the lock press), the lock's
 //               pressed-int is restored AFTER it returns.
-//   +0x1092240  the camera's collision sweep, only ever called by that update.     } relays in machine code: return 0
-//   +0x10902B0  the commander's box push, only ever called by that update.        } when rcx is the placed activity
-//   +0x47CA180  the camera UI's update: FreeCamToggleHUD pressed once per placement, and again to give the UI back.
-//   +0x2DF3F60  the camera controller's update (vtable only): F5's sequence of presses, and the mode byte.
-//   +0x3DD8D00  the avatar's dither fade (rcx = the AvatarModelComponent), inside the submit job: HEAD HIDING runs in its post-call, zeroing the view masks
+//   +0x10921E0  the camera's collision sweep, only ever called by that update.     } relays in machine code: return 0
+//   +0x1090250  the commander's box push, only ever called by that update.        } when rcx is the placed activity
+//   +0x47CA0E0  the camera UI's update: FreeCamToggleHUD pressed once per placement, and again to give the UI back.
+//   +0x2DF3EA0  the camera controller's update (vtable only): F5's sequence of presses, and the mode byte.
+//   +0x3DD8C60  the avatar's dither fade (rcx = the AvatarModelComponent), inside the submit job: HEAD HIDING runs in its post-call, zeroing the view masks
 //               of the local third-person avatar's head parts while a placement stands. Optional: a stand-down costs the hiding, never placement.
-//   +0xFDEC10  the skeleton interface's FindJoint (called by many systems): the capture of the skeletons the game attaches the local avatars to, which is
+//   +0xFDEBB0  the skeleton interface's FindJoint (called by many systems): the capture of the skeletons the game attaches the local avatars to, which is
 //               how the local third-person avatar is told from the others. Optional likewise.
 //
 // THREADS. The hooks run on whichever thread the game's job system calls the functions from. Each takes no lock (a try-flag keeps a
@@ -37,11 +37,11 @@ namespace edvr {
 // Render thread. Never call it from inside a game hook.
 void explorerCamFrameBoundary(uint32_t frameNo);
 
-// The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDEC10, called by many systems). Explorer Cam hooks it (the original first, its result
-// unchanged) to learn which skeleton interfaces the game attaches the local player's two avatars to: FUN 0x19B4000 calls FindJoint("def_c_povCamera_joint")
-// from two sites for EVERY humanoid (F6: the last site-1 attach is usually an NPC's). Site 1 (returning to +0x19B4095) is a humanoid's third-person avatar,
+// The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDEBB0, called by many systems). Explorer Cam hooks it (the original first, its result
+// unchanged) to learn which skeleton interfaces the game attaches the local player's two avatars to: FUN 0x19B3F40 calls FindJoint("def_c_povCamera_joint")
+// from two sites for EVERY humanoid (F6: the last site-1 attach is usually an NPC's). Site 1 (returning to +0x19B3FD5) is a humanoid's third-person avatar,
 // site 2 its first-person avatar, which only the local player has. So the hook LATCHES a pair only when one thread makes a site-1 attach and then a site-2
-// attach at the same stack location (one invocation of 0x19B4000 does both); sites 0 and 1 below are the latched local third-person and first-person
+// attach at the same stack location (one invocation of 0x19B3F40 does both); sites 0 and 1 below are the latched local third-person and first-person
 // skeletons. Head hiding and the head-joint eye use the latched pair only. The hook is installed when Explorer Cam is on.
 struct ExplorerCamSkeleton {
     uint64_t iface = 0;       // the LATCHED local avatar's skeleton for this site (0 = none latched yet)
@@ -59,7 +59,7 @@ bool explorerCamSessionActive();
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();
 
-// The game image base, when its PE identity (timestamp and size) is build 334473's; false, with a sentence in `why`, otherwise. The
+// The game image base, when its PE identity (timestamp and size) is build 334925's; false, with a sentence in `why`, otherwise. The
 // answer is cached for the session. The fade global and the follow's head-joint reads resolve their addresses from it.
 bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 

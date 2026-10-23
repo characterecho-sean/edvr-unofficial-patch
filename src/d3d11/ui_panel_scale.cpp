@@ -1,5 +1,5 @@
 // fix.ui_quality -- the engine-side panel sizing. ui_panel_scale.h says what
-// and why; ui_sizing_math.h holds the arithmetic and build 334473's bytes,
+// and why; ui_sizing_math.h holds the arithmetic and build 334925's bytes,
 // shared with tools/ui_quality_test.
 #include "ui_panel_scale.h"
 
@@ -156,7 +156,7 @@ void hexOf(const uint8_t* p, size_t n, char* out, size_t cap) {
     }
 }
 
-// Build 334473, exactly: the stamp and size, both sites' bytes and the
+// Build 334925, exactly: the stamp and size, both sites' bytes and the
 // constants they read, the two functions' prologues. False, with g_why,
 // on the first mismatch.
 bool checkBuild(const uint8_t* base) {
@@ -167,7 +167,7 @@ bool checkBuild(const uint8_t* base) {
     }
     if (stamp != kUiPanelStamp || size != kUiPanelImageSize) {
         std::snprintf(g_why, sizeof(g_why),
-                      "the game is not build 334473 (PE stamp %u, image %u bytes; 334473's are %u, %u)",
+                      "the game is not build 334925 (PE stamp %u, image %u bytes; 334925's are %u, %u)",
                       stamp, size, kUiPanelStamp, kUiPanelImageSize);
         return false;
     }
@@ -180,7 +180,7 @@ bool checkBuild(const uint8_t* base) {
         if (std::memcmp(got, kUiPanelSiteBytes[i], sizeof(got)) != 0) {
             char hex[120];
             hexOf(got, sizeof(got), hex, sizeof(hex));
-            std::snprintf(g_why, sizeof(g_why), "the bytes at 0x%X are not build 334473's: %s",
+            std::snprintf(g_why, sizeof(g_why), "the bytes at 0x%X are not build 334925's: %s",
                           kUiPanelSiteRva[i], hex);
             return false;
         }
@@ -195,7 +195,7 @@ bool checkBuild(const uint8_t* base) {
     if (!readGame(base + kUiPanelFuncRva[0], p0, sizeof(p0)) ||
         !readGame(base + kUiPanelFuncRva[1], p1, sizeof(p1)) ||
         std::memcmp(p0, kUiPanelProlog0, sizeof(p0)) != 0 || std::memcmp(p1, kUiPanelProlog1, sizeof(p1)) != 0) {
-        std::snprintf(g_why, sizeof(g_why), "the prologue of FUN_144573040 or FUN_144573CC0 differs");
+        std::snprintf(g_why, sizeof(g_why), "the prologue of FUN_144572FA0 or FUN_144573C20 differs");
         return false;
     }
     float aspect = 0.0f, d1080 = 0.0f, d1920 = 0.0f;
@@ -398,7 +398,7 @@ void setterBeforeImpl(void* self, float x) {
         return;
     float lo = 0.0f, hi = 0.0f;
     if (!readFloatAt(ctx + kUiSsOffMin, &lo) || !readFloatAt(ctx + kUiSsOffMax, &hi)) return;
-    // FUN_142878E00: x below the minimum is the minimum, else the smaller of the maximum and x.
+    // FUN_142878D40: x below the minimum is the minimum, else the smaller of the maximum and x.
     const float stored = (lo > x) ? lo : ((hi < x) ? hi : x);
     if (!uiLiveSupersamplingValid(stored, lo, hi, nullptr)) return;
     moveFactorTo(stored);
@@ -469,7 +469,7 @@ bool writeSlot(uint8_t* slot, uint64_t value) {
     return true;
 }
 
-// Called by apply() once the build is checked: both functions' bytes and both slots' values must be build 334473's.
+// Called by apply() once the build is checked: both functions' bytes and both slots' values must be build 334925's.
 void installLiveHooks(const uint8_t* base) {
     const uint8_t* const fn[2] = {base + kUiSsSetterRva, base + kUiSsGetterRva};
     const uint8_t* const want[2] = {kUiSsSetterBytes, kUiSsGetterBytes};
@@ -479,7 +479,7 @@ void installLiveHooks(const uint8_t* base) {
     for (int i = 0; i < 2; ++i) {
         uint8_t got[64] = {};
         if (!readGame(fn[i], got, len[i]) || std::memcmp(got, want[i], len[i]) != 0) {
-            std::snprintf(g_hookWhy, sizeof(g_hookWhy), "the Supersampling %s's bytes at 0x%X are not build 334473's",
+            std::snprintf(g_hookWhy, sizeof(g_hookWhy), "the Supersampling %s's bytes at 0x%X are not build 334925's",
                           name[i], i == 0 ? kUiSsSetterRva : kUiSsGetterRva);
             g_hookState = kHookRefused;
             return;
@@ -612,7 +612,7 @@ void apply() {
     g_patch.store(kApplied, std::memory_order_release);
     Log::get().note("ui quality: panels: the panel formula's four divisions (init 0x%X and 0x%X, view "
                     "change 0x%X and 0x%X) now read EDVR's floats at %p -- 1080 and 1920, the game's own, "
-                    "until the factor's inputs are known. Build 334473 checked: the stamp, both sites, "
+                    "until the factor's inputs are known. Build 334925 checked: the stamp, both sites, "
                     "the prologues and the constants. The original operands are put back when EDVR "
                     "unloads.",
                     kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,

@@ -15,16 +15,16 @@
 // nothing is allocated on the capture path (fixed arrays only), and the
 // whole probe no-ops when the executable's identity (PE timestamp + image
 // size + target prologues) does not match the hash-verified build
-// (SHA-256 6891f70a...7857e93).
+// (SHA-256 ed5a8f8c...e264b63).
 //
 // Targets (index: RVA, role):
-//   0: 0x4324640 worker entry (UpdateRenderDataJob)   -- observed through
-//   1: 0x4323040 worker entry, batch path              -- the kinematic
+//   0: 0x43245A0 worker entry (UpdateRenderDataJob)   -- observed through
+//   1: 0x4322FA0 worker entry, batch path              -- the kinematic
 //      eval hook's job-0/1 relays: those RVAs already carry that hook's
 //      patch and CodeHook refuses a second patch. The job wrappers run
 //      pre-forward exactly where a dedicated hook would sit.
-//   2: 0x42E2600 per-record drain
-//   3: 0x36A3C50 reset+repopulate
+//   2: 0x42E2560 per-record drain
+//   3: 0x36A3BB0 reset+repopulate
 // Targets 2/3 carry this probe's own CodeHooks (scheduler_stack_hook.cpp).
 #include <atomic>
 #include <cstdint>
@@ -35,7 +35,7 @@ namespace edvr {
 
 class SchedulerStackProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1791840573u;
+    static constexpr uint32_t kExpectedTimestamp=1792704584u;
     static constexpr uint32_t kExpectedImageSize=104906752u;
     static constexpr uint32_t kTargetCount=4u;
     static constexpr uint32_t kStackCap=24u;   // return addresses per signature
@@ -49,9 +49,9 @@ public:
     static constexpr uintptr_t kRangeHi=0x4DB6000u;
     // The two RVAs this probe hooks itself. Prologues verified against the
     // hash-checked binary at install (tools/build_diff_targets.json fields
-    // for 0x4324640/0x4323040/0x36A3C50; 0x42E2600 verified by hand from
+    // for 0x43245A0/0x4322FA0/0x36A3BB0; 0x42E2560 verified by hand from
     // analysis/EliteDangerous64.exe, 2026-09-21).
-    static constexpr uintptr_t kHookRvas[2]={0x42E2600u,0x36A3C50u};
+    static constexpr uintptr_t kHookRvas[2]={0x42E2560u,0x36A3BB0u};
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 

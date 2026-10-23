@@ -1,6 +1,6 @@
 #pragma once
-// Cost and behaviour of the two job-thread observers that watch Elite's list merge (FUN_144351440) and typed-dictionary
-// clear (FUN_1436846D0), plus the pool copier's mutex, against the in-process fake of the engine's dictionary/list memory.
+// Cost and behaviour of the two job-thread observers that watch Elite's list merge (FUN_1443513A0) and typed-dictionary
+// clear (FUN_143684630), plus the pool copier's mutex, against the in-process fake of the engine's dictionary/list memory.
 // docs\flat-cz-fps-2026-10-11.md. The benchmark (--bench) is opt-in: the normal rig run never executes it.
 #include "primary_copy_tests.h"
 #include <algorithm>
@@ -21,7 +21,7 @@ using primary_copy_tests::record;
 using primary_copy_tests::claim;
 
 // A fake typed-336 dictionary: one bucket chain of `entryCount` entries, each owning a doubly linked list of
-// `nodesPerEntry` full nodes. Every address the observers read lives in this object, laid out as build 334473 is
+// `nodesPerEntry` full nodes. Every address the observers read lives in this object, laid out as build 334925 is
 // (dictionary +0x10 buckets, +0x18 bucket count; entry +0 next, +0x28/+0x30 first/last node; node +0 next, +8 previous,
 // +0x18 count, records from +0x20).
 struct Tree {

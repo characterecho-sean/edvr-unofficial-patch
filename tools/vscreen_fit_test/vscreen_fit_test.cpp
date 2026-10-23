@@ -728,7 +728,7 @@ std::string fixtureText() {
     push("06:07:03.237", "version v0.18.0-rc.5-20-g1a2b3c4 (build 6ABE4701) -- this DLL was linked 2026-10-01 14:02:11 UTC");
     fit::formatRuleLine(line, sizeof(line), fit::decide(seedInputs(4032, 0.7)), 4032);
     push("06:07:03.620", line);
-    push("06:07:03.669", "vScreen resolution: 6 site(s) forcing 1920x1080, on game build 334473 -- NOT the build this was developed against.");
+    push("06:07:03.669", "vScreen resolution: 6 site(s) forcing 1920x1080, on game build 334925 -- NOT the build this was developed against.");
     push("06:07:03.669", "vScreen resolution: 1920x1080 -> 3504x1971 at 6 site(s). This writes to game CODE -- to 6 pairs of numbers and nothing else. It reverts when the game closes.");
     fit::formatArmedLine(line, sizeof(line));
     push("06:07:05.412", line);

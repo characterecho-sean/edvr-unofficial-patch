@@ -276,10 +276,10 @@ inline uintptr_t rva(uintptr_t address, uintptr_t base) noexcept {
 }
 inline bool knownPlacedProvider(uintptr_t base, uintptr_t vtable, uintptr_t fn) noexcept {
     constexpr uintptr_t known[][2] = {
-        {0x51275F8,0x489CA34}, {0x5127968,0x1F2410},
-        {0x530E530,0x529540}, {0x5358518,0x30BBC80},
-        {0x5375548,0xF83690}, {0x553B860,0x5CB350},
-        {0x553DAF8,0x3CBC0B0}, {0x553DF90,0xF8E100}
+        {0x51275F8,0x489C994}, {0x5127968,0x1F2410},
+        {0x530E500,0x5294E0}, {0x53584E8,0x30BBBC0},
+        {0x5375518,0xF83630}, {0x553B830,0x5CB2F0},
+        {0x553DAC8,0x3CBC010}, {0x553DF60,0xF8E0A0}
     };
     const uintptr_t vt = rva(vtable, base), code = rva(fn, base);
     for (const auto& item : known) if (vt == item[0] && code == item[1]) return true;
@@ -288,7 +288,7 @@ inline bool knownPlacedProvider(uintptr_t base, uintptr_t vtable, uintptr_t fn) 
 inline bool childGuard(Read read, void* context, uintptr_t base, uintptr_t child) noexcept {
     uintptr_t v0 = 0, v1 = 0;
     return child && get(read, context, child, v0) && get(read, context, child + 0x10, v1) &&
-        v0 == base + 0x51890B0 && v1 == base + 0x51890B8;
+        v0 == base + 0x5189070 && v1 == base + 0x5189078;
 }
 inline void fail(Snapshot& out, const char* why) noexcept {
     out.complete = false;
@@ -325,25 +325,25 @@ inline void activity(Read read, void* context, uintptr_t base, uintptr_t iface, 
         !get(read, context, out.vtable + 0x28, out.stateFn)) {
         fail(snapshot, "activity-vtable-read"); return;
     }
-    if (out.weightFn == base + 0x8BEA80) {
+    if (out.weightFn == base + 0x8BEA20) {
         uint8_t enabled = 0;
         if (iface < 4 || !get(read, context, iface - 4, enabled)) fail(snapshot, "leaf-weight-read");
         else { out.weightKnown = true; out.weight = enabled ? 1.0f : 0.0f; }
-    } else if (out.weightFn == base + 0x108BEE0) {
+    } else if (out.weightFn == base + 0x108BE80) {
         uintptr_t config = 0;
         if (iface < 0xA0 || !get(read, context, iface - 0xA0, config) ||
             !get(read, context, config + 0x34, out.weight) || !std::isfinite(out.weight))
             fail(snapshot, "nested-weight-read");
         else out.weightKnown = true;
     }
-    if (out.stateFn == base + 0x529540) {
+    if (out.stateFn == base + 0x5294E0) {
         out.state = iface + 0x10;
         out.stateKnown = true;
         uintptr_t name = 0;
         if (get(read, context, iface + 8, name)) out.nameRead = readCString(read, context, name, out.name);
         if (iface >= 0x20) get(read, context, iface - 0x20, out.concreteVtable);
-    } else if (out.stateFn == base + 0x108BA8C) {
-        if (out.vtable != base + 0x5189AD0) { fail(snapshot, "nested-activity-vtable"); return; }
+    } else if (out.stateFn == base + 0x108BA2C) {
+        if (out.vtable != base + 0x5189A90) { fail(snapshot, "nested-activity-vtable"); return; }
         uintptr_t nestedChild = 0;
         if (iface < 0x98 || !get(read, context, iface - 0x98 + 0x78, nestedChild) ||
             !childGuard(read, context, base, nestedChild)) fail(snapshot, "nested-state-read");
@@ -360,14 +360,14 @@ inline void activity(Read read, void* context, uintptr_t base, uintptr_t iface, 
 // own because a parked camera can still animate between the two reads.
 inline void placedDetail(Read read, void* context, uintptr_t base, const Activity& a,
                          unsigned stage, unsigned activityIndex, Snapshot& snapshot) noexcept {
-    if (a.vtable != base + 0x518CFC8) return;
+    if (a.vtable != base + 0x518CF88) return;
     ++snapshot.placedSeen;
     if (snapshot.placedCount == kPlacedDetails) { snapshot.placedOverflow = true; return; }
     PlacedDetail& d = snapshot.placed[snapshot.placedCount++];
     d.stage = stage; d.activity = activityIndex; d.iface = a.iface;
     if (a.iface < 0x20) { d.reason = "object-underflow"; return; }
     d.object = a.iface - 0x20;
-    if (a.concreteVtable != base + 0x518CF58 || a.stateFn != base + 0x529540) {
+    if (a.concreteVtable != base + 0x518CF18 || a.stateFn != base + 0x5294E0) {
         d.reason = "placed-root-guard-refused"; return;
     }
     if (!spanFits(d.object, 0x1E8, sizeof(uintptr_t)) ||
@@ -375,9 +375,9 @@ inline void placedDetail(Read read, void* context, uintptr_t base, const Activit
         d.reason = "address-overflow"; return;
     }
     uintptr_t objectVtable = 0, ifaceVtable = 0, stateFn = 0;
-    if (!get(read, context, d.object, objectVtable) || objectVtable != base + 0x518CF58 ||
-        !get(read, context, d.iface, ifaceVtable) || ifaceVtable != base + 0x518CFC8 ||
-        !get(read, context, ifaceVtable + 0x28, stateFn) || stateFn != base + 0x529540) {
+    if (!get(read, context, d.object, objectVtable) || objectVtable != base + 0x518CF18 ||
+        !get(read, context, d.iface, ifaceVtable) || ifaceVtable != base + 0x518CF88 ||
+        !get(read, context, ifaceVtable + 0x28, stateFn) || stateFn != base + 0x5294E0) {
         d.reason = "placed-guard-read"; return;
     }
     if (!get(read, context, d.object + 0x1E8, d.record)) {
@@ -502,7 +502,7 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
     uintptr_t terminal = 0;
     if (!get(read, context, child + 0x30, stage.stack) || !stage.stack ||
         !get(read, context, stage.stack, stage.stackVtable) ||
-        (stage.stackVtable != base + 0x51893B0 && stage.stackVtable != base + 0x5189A58) ||
+        (stage.stackVtable != base + 0x5189370 && stage.stackVtable != base + 0x5189A18) ||
         !get(read, context, stage.stack + 0x78, terminal) || !childGuard(read, context, base, terminal)) {
         fail(out, "stack-identity"); return;
     }
@@ -559,15 +559,15 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
     // that selected child, then the inherited predecessor edge below.
     for (unsigned j = 0; j < stage.activityCount; ++j) {
         const Activity& a = stage.activities[j];
-        if (a.stateFn == base + 0x108BA8C && a.stateKnown) {
+        if (a.stateFn == base + 0x108BA2C && a.stateKnown) {
             if (a.weightKnown && a.weight <= 0.0f) ++stage.inactiveNestedOmitted;
             else walk(read, context, base, a.state - 0x70, static_cast<int>(index), 'N', out);
         }
     }
-    if (stage.predecessor == stage.stack + 0xB8 && stage.stackVtable == base + 0x51893B0) return;
+    if (stage.predecessor == stage.stack + 0xB8 && stage.stackVtable == base + 0x5189370) return;
     if (stage.predecessor >= 0x70 && childGuard(read, context, base, stage.predecessor - 0x70))
         walk(read, context, base, stage.predecessor - 0x70, static_cast<int>(index), 'P', out);
-    else if (stage.stackVtable == base + 0x5189A58) {
+    else if (stage.stackVtable == base + 0x5189A18) {
         uintptr_t parentChild = 0, parentBase = 0;
         if (!get(read, context, stage.stack + 0x1B8, parentChild) ||
             !childGuard(read, context, base, parentChild) ||
@@ -578,7 +578,7 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
             uintptr_t parentStack = 0, parentStackVtable = 0;
             if (!get(read, context, parentChild + 0x30, parentStack) ||
                 !get(read, context, parentStack, parentStackVtable) ||
-                parentStackVtable != base + 0x51893B0 || parentBase != parentStack + 0xB8)
+                parentStackVtable != base + 0x5189370 || parentBase != parentStack + 0xB8)
                 fail(out, "nested-parent-baseline-unknown");
         }
     } else fail(out, "predecessor-unresolved");

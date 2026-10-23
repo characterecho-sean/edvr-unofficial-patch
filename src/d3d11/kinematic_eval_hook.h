@@ -30,7 +30,7 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 // were removed 2026-10-08.)
 
 // --- Engine-record velocity's emit feed (with fix.temporal_aa, phase 1) -----
-// FUN_144315AC0 (direct producer 0) appends each kinematic rig record's
+// FUN_144315A20 (direct producer 0) appends each kinematic rig record's
 // 0x150-byte pool records to its owner's node lists. The direct bracket calls
 // this observer AFTER the forward with the rig record (param_1), the owner
 // (param_2) and owner+0x2A4 read before and after -- the count of records the
@@ -66,7 +66,7 @@ const char* kinematicEvalClearStatus() noexcept;
 const char* kinematicEvalEmitAttach() noexcept;
 void kinematicEvalEmitDetach() noexcept;
 // Whether the observer above can be called at all: the hook set installed,
-// direct producer 0's relay (kinematic-build-144315ac0) installed on its
+// direct producer 0's relay (kinematic-build-144315a20) installed on its
 // own -- it stands down alone when CodeHook refuses it -- and the gate open.
 // False names the first missing piece in *why (a static string). Three
 // relaxed loads: engine-record velocity asks every frame, so that zero emit
@@ -92,8 +92,8 @@ const char* kinematicEvalSchedulerAttach() noexcept;
 void kinematicEvalSchedulerDetach() noexcept;
 
 // --- The cull gate probe's feed (advanced.cull_gate_capture) ----------------
-// FUN_144311CA0, this file's evaluator target, IS the traversal's per-(record,
-// view) gate, and FUN_1442B70E0, the bucket bracket's target, is the
+// FUN_144311C00, this file's evaluator target, IS the traversal's per-(record,
+// view) gate, and FUN_1442B7040, the bucket bracket's target, is the
 // draw-item builder with its own per-view frustum (design doc §9). The probe
 // observes both through the relays already here: the gate's verdict AFTER the
 // forward (gateCtx, out, view), the builder's inputs BEFORE it (pose, ctx,
@@ -103,9 +103,9 @@ void kinematicEvalSchedulerDetach() noexcept;
 // The builder observer returns the row it kept for the call (or
 // kGateProbeNoRow); the bracket holds it in a thread-local across the forward,
 // so every per-part test the builder makes inside that call reaches the part
-// observer with its enclosing row. FUN_1442B6C80 -- the builder's per-(sub-
+// observer with its enclosing row. FUN_1442B6BE0 -- the builder's per-(sub-
 // item, view) frustum + LOD test (decomp_42B3FC0.txt, called only from the
-// builder's sub-item loop at 0x1442B7851) -- is observed AFTER its forward:
+// builder's sub-item loop at 0x1442B77B1) -- is observed AFTER its forward:
 // items = its param_1 (the builder's rbp+0x70 block), out = param_2 {u32 LOD,
 // u8 passed}, view = param_3; fromBuilder = its return address is that call
 // site's. Read-only: the verdict is never written.
@@ -118,30 +118,30 @@ void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn
                                         GateProbePartFn part) noexcept;
 // Installs the shared kinematic hook set (validating the executable) and
 // holds the eval gate open for the probe's window. Same return vocabulary as
-// attachKinematicEvalHooks. It also installs, once, FUN_1442B6C80's own patch
+// attachKinematicEvalHooks. It also installs, once, FUN_1442B6BE0's own patch
 // -- for this probe only, never for the other consumers -- after a build-keyed
 // signature (PE timestamp and size, the prologue, the builder's frame and call
 // site the observer reads); its relay has a gate cell of its own, open only
 // while the probe is attached. A mismatch stands that hook down alone.
 const char* kinematicEvalGateProbeAttach() noexcept;
 void kinematicEvalGateProbeDetach() noexcept;
-// True while the builder bracket (FUN_1442B70E0) is installed: the probe's
+// True while the builder bracket (FUN_1442B7040) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;
-// FUN_1442B6C80's hook: "hooked", or why it stood down ("not requested",
-// "not build 334473 (PE timestamp/size)", "prologue mismatch at RVA 0x42B6C80",
+// FUN_1442B6BE0's hook: "hooked", or why it stood down ("not requested",
+// "not build 334925 (PE timestamp/size)", "prologue mismatch at RVA 0x42B6BE0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").
 const char* kinematicEvalPartTestStatus() noexcept;
 
 
-// The optimized station's producer-0 veto (FUN_144315AC0, the emit hook's bracket): called with the record (rcx) and the owner (rdx) before the
+// The optimized station's producer-0 veto (FUN_144315A20, the emit hook's bracket): called with the record (rcx) and the owner (rdx) before the
 // forward. True skips the forward and the emit observers after it: nothing is appended for the record. Producer 1 is never vetoed. Null = off.
 using DirectVetoFn = bool (*)(uintptr_t rec, uintptr_t owner) noexcept;
 void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept;
 // The veto's own want on the bracket (it installs the bracket with the shared install if needed). "installed" or why not.
 const char* kinematicEvalDirectVetoAttach() noexcept;
 void kinematicEvalDirectVetoDetach() noexcept;
-// The early rig veto (0x431DCE0's entry): the decision returns true to veto; the hook then performs Elite's off-screen branch for the rig and
+// The early rig veto (0x431DC40's entry): the decision returns true to veto; the hook then performs Elite's off-screen branch for the rig and
 // returns without the forward. Attach/detach hold the relay gate.
 using RigVetoFn = bool (*)(uintptr_t rig, uintptr_t ctx) noexcept;
 void kinematicEvalSetRigVeto(RigVetoFn fn) noexcept;

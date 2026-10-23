@@ -1,13 +1,13 @@
 #pragma once
 
-// F2: a READ-ONLY observer of the game's skinning job assembly (FUN_144c56cc0, EliteDangerous64.exe+0x4C56CC0, build 334473).
+// F2: a READ-ONLY observer of the game's skinning job assembly (FUN_144c56ba0, EliteDangerous64.exe+0x4C56BA0, build 334925).
 //
 // The game assigns every skinned entity ("entry") its rows in the palette by walking a list, once a frame. The D3D side can see
 // the jobs that result (the chain dispatch's t0 table) but not whose they are. This hook lets the original run, then reads the
 // list the original left: per entry its address, vtable, mesh data and assigned base (skin_entity_walk.h). It writes nothing in
 // game memory. It is gated: with the gate shut the relay jumps straight to the original and no C++ runs.
 //
-// It stands down, with one line saying why and the prefix join of the job table taking over, when: the game build is not 334473,
+// It stands down, with one line saying why and the prefix join of the job table taking over, when: the game build is not 334925,
 // the 28 prologue bytes are not the ones read from that build's executable, CodeHook refuses, the first 120 lists with something to read are all
 // unusable (a list of no entries is judged only when a chain dispatch with jobs finds it the newest: 120 of those), or a second processor node appears. A fault while reading is caught per call and flags that one snapshot; it never
 // reaches the game.

@@ -3,7 +3,7 @@
 
 #include "device_hook.h"     // deviceHookFxcfgMultipliers: the newest .fxcfg's two floats (device_hook.cpp's eliteHmdMultiplier)
 #include "ui_panel_scale.h"  // uiPanelScaleFactor, uiPanelScaleChosenSupersampling: lock-free
-#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 334473
+#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 334925
 #include "ui_surfaces.h"     // uiSurfacesHmdQuality: lock-free
 #include "vr_ssaa_hold.h"    // the hold's report, mode re-read and loader object (the hold changes values; this file only logs)
 #include "vr_display_observer.h"  // the game window's frame check (read-only)
@@ -28,7 +28,7 @@ namespace {
 constexpr uint32_t kSetterLinesFirst = 64;  // every setter call logs while the count is at or under this
 constexpr uint32_t kSetterLinesMax = 512;   // the hard cap on setter lines, change-only past the first 64
 
-std::atomic<bool> g_on{false};              // build 334473 checked; every entry point below is a no-op until then
+std::atomic<bool> g_on{false};              // build 334925 checked; every entry point below is a no-op until then
 std::atomic<bool> g_started{false};         // vrSsaaGateStartup has run
 std::atomic<uint32_t> g_presents{0};        // the game's Presents entered: the frame number the other lines carry
 std::atomic<bool> g_presentLogged{false};
@@ -58,7 +58,7 @@ double nowSeconds() {
     return freq.QuadPart ? static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart) : 0.0;
 }
 
-// The game's own PE header: build 334473's stamp and image size, the same gate ui_panel_scale.cpp applies. The guard
+// The game's own PE header: build 334925's stamp and image size, the same gate ui_panel_scale.cpp applies. The guard
 // holds no objects.
 bool gameBuildChecked() {
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));

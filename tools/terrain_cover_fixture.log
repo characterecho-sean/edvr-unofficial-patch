@@ -1,4 +1,4 @@
-[10:00:02.000] terrain cull cover: hook live at exe+0x4441580 (PE stamp 1791840573 and image size 104906752 are build 334473's; the callee's head and the call site at exe+0x4458D5D verified)
+[10:00:02.000] terrain cull cover: hook live at exe+0x44414E0 (PE stamp 1792704584 and image size 104906752 are build 334925's; the callee's head and the call site at exe+0x4458CBD verified)
 [10:00:04.000] terrain cull cover: first call: in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg (widened); T=1.0293 H=1.2543
 [10:10:03.000] terrain cull cover: armed; 60000 of 60001 calls widened in the last 10 min (last in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg)
 [10:20:03.000] terrain cull cover: armed; 0 of 0 calls widened in the last 10 min (last in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg)

@@ -6,7 +6,7 @@
 //     Quality (3070 x 0.65 = 1995 and the rest), the vertical field of view
 //     as the panel formula reads it, the interface surface's shape; the
 //     sizing chains' formatter and verdicts; the engine-side panel factor
-//     across the flights' states and the build-334473 bytes it patches.
+//     across the flights' states and the build-334925 bytes it patches.
 //   * the layer's arithmetic (src/d3d11/ui_layer_math.h): the key; the
 //     layer's size and memory at 1.0 and 1.25; the viewport and scissor map;
 //     the jitter cancel, both from pixels and from the tangent shift the
@@ -994,7 +994,7 @@ void testGate() {
 // 09-23.md section 8): a create's chain -- the game's frames, innermost
 // first -- read into a verdict, on synthetic chains.
 void testChains() {
-    const uintptr_t base = 0x140000000ull, size = 104906752ull;  // build 334473's image
+    const uintptr_t base = 0x140000000ull, size = 104906752ull;  // build 334925's image
     auto chainOf = [&](std::initializer_list<uint32_t> rvas, bool withForeign) {
         uintptr_t frames[40] = {};
         uint32_t n = 0;
@@ -1008,46 +1008,46 @@ void testChains() {
         return c;
     };
     // The chain section 8 expects, innermost first.
-    const UiChain initColour = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x2816EE9, 0x2833883, 0x45547BD,
-                                        0x4554336, 0x4573442, 0x456D910, 0x10},
+    const UiChain initColour = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816E29, 0x28337C3, 0x455471D,
+                                        0x4554296, 0x45733A2, 0x456D870, 0x10},
                                        true);
-    check(initColour.n == 10 && initColour.rva[0] == 0x51AF6B && initColour.rva[5] == 0x45547BD,
+    check(initColour.n == 10 && initColour.rva[0] == 0x51AF0B && initColour.rva[5] == 0x455471D,
           "a chain keeps the game's frames, innermost first, and skips EDVR's and the runtime's");
     UiChainVerdict v = uiChainVerdict(initColour);
     check(v.kind == UiChainKind::kRtt && v.init && !v.change && v.colour && !v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt init colour") == 0,
-          "0x45547BD and 0x4554336, through 0x4573442 and 0x2816EE9: rtt init colour");
+          "0x455471D and 0x4554296, through 0x45733A2 and 0x2816E29: rtt init colour");
     char text[320];
     uiChainVerdictText(v, text, sizeof(text));
-    check(std::strcmp(text, "rtt init colour (0x45547BD yes, 0x4554336 yes, 0x4573442 yes, 0x4570585 no, "
-                            "0x2816EE9 yes, 0x2816CC6 no, 0x30FCEA no, 0x312520 no)") == 0,
+    check(std::strcmp(text, "rtt init colour (0x455471D yes, 0x4554296 yes, 0x45733A2 yes, 0x45704E5 no, "
+                            "0x2816E29 yes, 0x2816C06 no, 0x30FCBA no, 0x3124F0 no)") == 0,
           "...and the verdict names every key's hit and miss");
     char rvas[160];
     uiChainFormat(initColour, rvas, sizeof(rvas));
-    check(std::strcmp(rvas, "0x51AF6B/0x50EC69/0x5185B3/0x2816EE9/0x2833883/0x45547BD/0x4554336/"
-                            "0x4573442/0x456D910/0x10") == 0,
+    check(std::strcmp(rvas, "0x51AF0B/0x50EC09/0x518553/0x2816E29/0x28337C3/0x455471D/0x4554296/"
+                            "0x45733A2/0x456D870/0x10") == 0,
           "the chain formatted innermost first");
-    const UiChain changeDepth = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x2816CC6, 0x28338B0, 0x45547BD,
-                                         0x4554336, 0x4570585},
+    const UiChain changeDepth = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816C06, 0x28337F0, 0x455471D,
+                                         0x4554296, 0x45704E5},
                                         false);
     v = uiChainVerdict(changeDepth);
     check(v.kind == UiChainKind::kRtt && v.change && v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt change depth") == 0,
-          "through 0x4570585 and 0x2816CC6: rtt change depth");
-    v = uiChainVerdict(chainOf({0x51AF6B, 0x45547BD, 0x4573442}, false));
+          "through 0x45704E5 and 0x2816C06: rtt change depth");
+    v = uiChainVerdict(chainOf({0x51AF0B, 0x455471D, 0x45733A2}, false));
     check(v.kind == UiChainKind::kOther && (v.hits & 1u) && !(v.hits & 2u),
-          "0x45547BD without 0x4554336 is other (a miss, and it says which)");
-    check(uiChainVerdict(chainOf({0x30C0AA, 0x30FCEA, 0x30F9E0}, true)).kind == UiChainKind::kGlyphCache &&
-              uiChainVerdict(chainOf({0x312520}, false)).kind == UiChainKind::kGlyphCache,
-          "the raster cache's texture maker, init 0x30FCEA or re-create 0x312520: glyph-cache");
+          "0x455471D without 0x4554296 is other (a miss, and it says which)");
+    check(uiChainVerdict(chainOf({0x30C07A, 0x30FCBA, 0x30F9B0}, true)).kind == UiChainKind::kGlyphCache &&
+              uiChainVerdict(chainOf({0x3124F0}, false)).kind == UiChainKind::kGlyphCache,
+          "the raster cache's texture maker, init 0x30FCBA or re-create 0x3124F0: glyph-cache");
     const UiChain none = chainOf({0x1000, 0x2000}, true);
     v = uiChainVerdict(none);
     uiChainVerdictText(v, text, sizeof(text));
     check(v.kind == UiChainKind::kOther && v.hits == 0 &&
-              std::strcmp(text, "other (0x45547BD no, 0x4554336 no, 0x4573442 no, 0x4570585 no, 0x2816EE9 no, "
-                                "0x2816CC6 no, 0x30FCEA no, 0x312520 no)") == 0,
+              std::strcmp(text, "other (0x455471D no, 0x4554296 no, 0x45733A2 no, 0x45704E5 no, 0x2816E29 no, "
+                                "0x2816C06 no, 0x30FCBA no, 0x3124F0 no)") == 0,
           "neither: other, every key a miss");
-    const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x45547BD, 0x4554336}, false);
+    const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x455471D, 0x4554296}, false);
     check(deep.n == 12 && deep.rva[11] == 12 && uiChainVerdict(deep).kind == UiChainKind::kOther,
           "twelve game frames kept: keys past the twelfth are not seen");
     UiChain empty;
@@ -1069,7 +1069,7 @@ void testChains() {
 
 // The engine-side panel sizing (ui_sizing_math.h, ui_panel_scale.h): the
 // factor across the flights' states, the cap and the floor, and the four
-// operand sites' bytes -- the embedded build-334473 patterns against the
+// operand sites' bytes -- the embedded build-334925 patterns against the
 // shape, a synthetic scan, the rel32 arithmetic, and, when the game is
 // installed at the usual place and is that build, the executable itself
 // (read-only; any other build is skipped, as the patch stands down on it).
@@ -1203,9 +1203,9 @@ void testPanelScale() {
               i == 0 ? "the init site's bytes are the shape, reading 16/9, 1080 and 1920"
                      : "the view-change site's bytes are the shape, reading 16/9, 1080 and 1920");
     }
-    check(kUiPanelSiteRva[0] + kUiPanel1080Disp == 0x4573247 && kUiPanelSiteRva[0] + kUiPanel1920Disp == 0x4573254 &&
-              kUiPanelSiteRva[1] + kUiPanel1080Disp == 0x4573D52 && kUiPanelSiteRva[1] + kUiPanel1920Disp == 0x4573D5F,
-          "the four operands are at 0x4573247, 0x4573254, 0x4573D52, 0x4573D5F (the trace's section 3)");
+    check(kUiPanelSiteRva[0] + kUiPanel1080Disp == 0x45731A7 && kUiPanelSiteRva[0] + kUiPanel1920Disp == 0x45731B4 &&
+              kUiPanelSiteRva[1] + kUiPanel1080Disp == 0x4573CB2 && kUiPanelSiteRva[1] + kUiPanel1920Disp == 0x4573CBF,
+          "the four operands are at 0x45731A7, 0x45731B4, 0x4573CB2, 0x4573CBF (the trace's section 3)");
     std::vector<uint8_t> text(4096, 0x90);
     std::memcpy(text.data() + 100, kUiPanelSiteBytes[0], 30);
     std::memcpy(text.data() + 2000, kUiPanelSiteBytes[1], 30);
@@ -1221,10 +1221,10 @@ void testPanelScale() {
               uiPanelDisp(0x140000000ull, 0x13FFF0000ull, &disp) && disp == -0x10000 &&
               !uiPanelDisp(0x140000000ull, 0x240000000ull, &disp),
           "rel32 to a page near the image, and refused out of range");
-    check(uiPanelDisp(0x14457324Bull, 0x144DE16A8ull, &disp) && disp == uiReadDisp(kUiPanelSiteBytes[0] + 13),
+    check(uiPanelDisp(0x1445731ABull, 0x144DE16A8ull, &disp) && disp == uiReadDisp(kUiPanelSiteBytes[0] + 13),
           "the game's own 1080 operand is exactly that arithmetic");
 
-    // The executable, when it is here and is build 334473.
+    // The executable, when it is here and is build 334925.
     static const char* kExe =
         "C:\\Users\\seanm\\AppData\\Local\\Frontier_Developments\\Products\\elite-dangerous-odyssey-64\\"
         "EliteDangerous64.exe";
@@ -1234,7 +1234,7 @@ void testPanelScale() {
         return;
     }
     if (pe.stamp != kUiPanelStamp || pe.imageSize != kUiPanelImageSize) {
-        std::printf("  (the installed game is not build 334473 -- stamp %u: the patch stands down on it)\n",
+        std::printf("  (the installed game is not build 334925 -- stamp %u: the patch stands down on it)\n",
                     pe.stamp);
         return;
     }
@@ -1247,7 +1247,7 @@ void testPanelScale() {
     const uint8_t* p1 = pe.at(kUiPanelFuncRva[1], sizeof(kUiPanelProlog1));
     check(sitesOk && p0 && p1 && std::memcmp(p0, kUiPanelProlog0, sizeof(kUiPanelProlog0)) == 0 &&
               std::memcmp(p1, kUiPanelProlog1, sizeof(kUiPanelProlog1)) == 0,
-          "build 334473 on disk: both sites' 30 bytes and both prologues are the embedded ones");
+          "build 334925 on disk: both sites' 30 bytes and both prologues are the embedded ones");
     float aspect = 0.0f, c1080 = 0.0f, c1920 = 0.0f;
     const uint8_t* a = pe.at(kUiPanelAspectRva, 4);
     const uint8_t* b = pe.at(kUiPanel1080Rva, 4);

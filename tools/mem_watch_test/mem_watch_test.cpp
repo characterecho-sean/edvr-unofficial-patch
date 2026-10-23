@@ -377,7 +377,7 @@ void armedCases() {
     check(a.rfind("mem: reason=armed commit_mb=9123 ", 0) == 0 && contains(a, "ovrserver_handles=3000"),
           "M6.armed: the armed line starts with its reason and carries the first sample's figures");
     check(contains(a, "commit is this process's private bytes") && contains(a, "egpu is Elite's own accounting") &&
-              contains(a, "read only on build 334473") && contains(a, "eheap is a first reading of Elite's heap manager, not yet checked against the process figures") &&
+              contains(a, "read only on build 334925") && contains(a, "eheap is a first reading of Elite's heap manager, not yet checked against the process figures") &&
               contains(a, "The runtime fields cover named VR runtime processes"),
           "M6.explain: each field group is explained once: commit, egpu (and the build it is read on), eheap (not yet checked), the runtimes");
     check(count(a, "commit is this process's") == 1 && count(a, "egpu is Elite's own accounting") == 1 && count(a, "eheap is a first reading") == 1 &&
@@ -396,13 +396,13 @@ void armedCases() {
     f.threadsValid = false;
     for (int i = 0; i < kMemRuntimes; ++i) f.runtime[i].running = false;
     MemUnavailable missing;
-    missing.why[static_cast<int>(MemGroup::Egpu)] = "this is not Elite build 334473 (PE timestamp or image size differs)";
-    missing.why[static_cast<int>(MemGroup::Eheap)] = "the instructions at +0x5373A0 are not those of build 334473";
+    missing.why[static_cast<int>(MemGroup::Egpu)] = "this is not Elite build 334925 (PE timestamp or image size differs)";
+    missing.why[static_cast<int>(MemGroup::Eheap)] = "the instructions at +0x537340 are not those of build 334925";
     missing.why[static_cast<int>(MemGroup::Vram)] = "IDXGIAdapter3 is not offered";
     missing.why[static_cast<int>(MemGroup::Scan)] = "ntdll does not export NtQuerySystemInformation";
     const std::string b = armed(f, missing);
     check(contains(b, "; unreadable, so left out of every line: local (IDXGIAdapter3 is not offered); processes (ntdll does not export NtQuerySystemInformation); "
-                      "egpu (this is not Elite build 334473 (PE timestamp or image size differs)); eheap (the instructions at +0x5373A0 are not those of build 334473); "),
+                      "egpu (this is not Elite build 334925 (PE timestamp or image size differs)); eheap (the instructions at +0x537340 are not those of build 334925); "),
           "M6.missing: every group that could not be read is named once with its reason, in group order, in the armed line");
     check(!contains(b, " egpu_") && !contains(b, " eheap_") && !contains(b, "local_used") && !contains(b, "threads="),
           "M6.missing: ...and none of their fields is written");
@@ -624,8 +624,8 @@ void sourcePins(const std::string& root) {
           "M11.glue: every line the glue writes is written through noteReserved, none through note");
     check(count(glue, "noteReserved(") >= 3 && at(glue, "Log::get().noteReserved(\"%s\", line)") != none,
           "M11.glue: the sample, the thread's failure and the start's failure are all written that way");
-    check(at(glue, "kEliteStamp = 1791840573u") != none && at(glue, "kEliteImageSize = 104906752u") != none,
-          "M11.glue: the build identity is the pair every build-bound hook here checks (timestamp 1791840573, image size 104906752)");
+    check(at(glue, "kEliteStamp = 1792704584u") != none && at(glue, "kEliteImageSize = 104906752u") != none,
+          "M11.glue: the build identity is the pair every build-bound hook here checks (timestamp 1792704584, image size 104906752)");
     check(at(glue, "__declspec(noinline) bool sehRead(") != none && at(glue, "__declspec(noinline) bool sehMatches(") != none,
           "M11.glue: the reads of the game's memory are noinline SEH helpers");
     // Every dereference of the game's memory goes through sehRead: no raw pointer cast of a game address in the file.
@@ -642,8 +642,8 @@ void sourcePins(const std::string& root) {
           "M11.glue: a process's name is compared with the four runtimes' and goes no further");
 
     // The pins: every one of the two groups' tables is there with the RVAs the offsets were read at.
-    const char* const rvas[] = {"0x51FB32", "0x51FB9C", "0x51FBA9", "0x51D746", "0x51D755", "0x519D52", "0x519D5C", "0x519D88", "0x519E0B", "0x51A0EB",
-                                "0x537385", "0x5373A0", "0x543FED", "0x5536B3", "0x5404AE", "0x5404D1", "0x54C9DF", "0x55B695"};
+    const char* const rvas[] = {"0x51FAD2", "0x51FB3C", "0x51FB49", "0x51D6E6", "0x51D6F5", "0x519CF2", "0x519CFC", "0x519D28", "0x519DAB", "0x51A08B",
+                                "0x537325", "0x537340", "0x543F8D", "0x553653", "0x54044E", "0x540471", "0x54C97F", "0x55B635"};
     bool allPins = true;
     for (const char* rva : rvas) allPins = allPins && count(glue, (std::string("{") + rva + ",").c_str()) == 1;
     check(allPins, "M11.pins: the eighteen byte pins of the two groups are each in the table once, at the RVA they were read at");

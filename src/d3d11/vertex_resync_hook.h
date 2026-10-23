@@ -1,9 +1,9 @@
 #pragma once
-// The vertex-buffer resync: a CodeHook at the entry of Frontier's input-assembler flush (EliteDangerous64.exe+0x522BB0, build 334473) that makes the applied
+// The vertex-buffer resync: a CodeHook at the entry of Frontier's input-assembler flush (EliteDangerous64.exe+0x522B50, build 334925) that makes the applied
 // vertex-buffer cache agree with the desired state before the flush binds it. The mechanism, the offsets and the evidence are in vertex_resync_core.h and
 // docs/scanner-body.md; the rig is tools\vertex_resync_test.
 //
-// Installed ONCE at startup in BOTH profiles (the cache bug is the game's, not VR's), and always on: there is no key. A build that is not 334473, a prologue that is not the one
+// Installed ONCE at startup in BOTH profiles (the cache bug is the game's, not VR's), and always on: there is no key. A build that is not 334925, a prologue that is not the one
 // read from the exe, or a CodeHook refusal is ONE log line and the hook stays out: never retried. While it is armed the log says so, every ten minutes and once when the
 // session ends, with the counts (zero included), so a hook that saw nothing stale can be told from one that was never reached.
 #include <cstddef>

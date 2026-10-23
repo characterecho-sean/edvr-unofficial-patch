@@ -727,9 +727,9 @@ inline bool sphereOverlapsBox(const float o[3], float radius, const float half[3
     return std::isfinite(radius) && radius >= 0.0f && d2 <= radius * radius;
 }
 
-// Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431DF21..0x431DF40). Kind 1: the byte
-// store [coll+0x629] = 0. Kind 2: the call of 0x4350A50 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B8420 with rcx = the
-// pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x4350A50: pipe+0x31C). Returns the number of steps written to kinds and args.
+// Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431DE81..0x431DEA0). Kind 1: the byte
+// store [coll+0x629] = 0. Kind 2: the call of 0x43509B0 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B8380 with rcx = the
+// pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x43509B0: pipe+0x31C). Returns the number of steps written to kinds and args.
 inline int offScreenSteps(uintptr_t coll, uintptr_t pipe, int* kinds, uintptr_t* args) noexcept {
     int n = 0;
     kinds[n] = 1;
@@ -1382,8 +1382,8 @@ inline uint64_t textKey(const char* s) noexcept {
     return h;
 }
 
-// Built v14.18 (2026-10-13, the store hook's identity gate): the admission store's sixteen prologue bytes in build 334473. store_hook.cpp detours
-// FUN_144314D00 by them, and the identity check comes first.
+// Built v14.18 (2026-10-13, the store hook's identity gate): the admission store's sixteen prologue bytes in build 334925. store_hook.cpp detours
+// FUN_144314C60 by them, and the identity check comes first.
 inline constexpr uint8_t kStorePrologue[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE, 0xFF};
 
 // The store hook's install decision (store_hook.cpp installOnce). The identity (the PE TimeDateStamp and SizeOfImage the other build-keyed hooks

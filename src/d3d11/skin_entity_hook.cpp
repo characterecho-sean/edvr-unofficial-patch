@@ -19,10 +19,10 @@ namespace {
 
 using namespace skinjoin;
 
-constexpr uintptr_t kSkinJobsRva = 0x4C56CC0;
+constexpr uintptr_t kSkinJobsRva = 0x4C56BA0;
 constexpr size_t kPrologueBytes = 28;
-// `mov rax,rsp; push rbp; push rbx; push r13; lea rbp,[rax-5Fh]; sub rsp,0C0h; mov r13,[rcx+0A8h]; mov rbx,rcx`, read from the build-334473
-// executable with the PE headers (timestamp 1791840573, image 104906752). No rip-relative byte; the boundaries are 3, 4, 5, 7, 11, 18, 25, 28,
+// `mov rax,rsp; push rbp; push rbx; push r13; lea rbp,[rax-5Fh]; sub rsp,0C0h; mov r13,[rcx+0A8h]; mov rbx,rcx`, read from the build-334925
+// executable with the PE headers (timestamp 1792704584, image 104906752). No rip-relative byte; the boundaries are 3, 4, 5, 7, 11, 18, 25, 28,
 // so CodeHook steals 5 (`mov rax,rsp`, `push rbp`, `push rbx`) and the trampoline re-runs them.
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x41, 0x55, 0x48, 0x8D, 0x68, 0xA1, 0x48, 0x81, 0xEC,
                                                0xC0, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0xA9, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9};
@@ -98,7 +98,7 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
         if (timestamp != ecm::kExpectedTimestamp || imageSize != ecm::kExpectedImageSize) {
-            *why = "the PE timestamp or image size is not build 334473's";
+            *why = "the PE timestamp or image size is not build 334925's";
             return false;
         }
         return true;
@@ -289,7 +289,7 @@ SkinHookState skinEntityHookArm(char* whyOut, size_t cap) {
     }
     if (!checkBytes(target, kPrologue, kPrologueBytes)) {
         char b[260];
-        std::snprintf(b, sizeof(b), "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334473's job-assembly prologue)", kPrologueBytes, static_cast<unsigned long long>(kSkinJobsRva));
+        std::snprintf(b, sizeof(b), "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's job-assembly prologue)", kPrologueBytes, static_cast<unsigned long long>(kSkinJobsRva));
         return stood(b);
     }
     s->target = target;
@@ -306,7 +306,7 @@ SkinHookState skinEntityHookArm(char* whyOut, size_t cap) {
     s->gate.store(1, std::memory_order_seq_cst);
     char b[400];
     std::snprintf(b, sizeof(b),
-                  "skin join: hook armed: EliteDangerous64.exe+0x%llX (the skinning job assembly, build 334473) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "
+                  "skin join: hook armed: EliteDangerous64.exe+0x%llX (the skinning job assembly, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "
                   "READ ONLY: the original runs first, then the entry list is read under SEH, nothing is written in game memory",
                   static_cast<unsigned long long>(kSkinJobsRva), static_cast<unsigned long long>(target), s->hook.stolenBytes(), kPrologueBytes, kPrologueBytes,
                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s->relay)));
@@ -461,7 +461,7 @@ unsigned skinEntityHookSelfTest(char* detail, size_t cap) {
     if (g_state.load() != nullptr) fail("H1.a", "a state exists before arming");
     skinjoin::Snapshot snap;
     if (skinEntityHookLatest(snap)) fail("H1.b", "a snapshot before arming");
-    // a build that is not 334473 stands down: the test target bypasses the PE check, so check the prologue refusal instead
+    // a build that is not 334925 stands down: the test target bypasses the PE check, so check the prologue refusal instead
     {
         auto* wrong = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         std::memcpy(wrong, kPrologue, kPrologueBytes);

@@ -32,7 +32,7 @@ namespace {
 // Builds this fix has actually been verified against.
 // Adding a build here is a claim that someone re-ran the capture and confirmed
 // the hashes, not that it probably still works.
-const char* const kVerifiedBuilds[] = {"334473"};
+const char* const kVerifiedBuilds[] = {"334925"};
 }  // namespace
 
 std::string gameBuildVersion() {

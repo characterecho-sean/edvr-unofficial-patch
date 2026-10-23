@@ -600,9 +600,9 @@ void testC11() {
     check(has(text, "flat camera census 5s:") && has(text, "cameras=0") && has(text, "top=[]"),
           "C11 an empty census still prints a line (cameras=0): an absent line means the code never ran");
     // A steady cockpit second: one main camera and a few auxiliaries, four callers.
-    for (int i = 0; i < 300; ++i) { census.noteKind(true, 3); census.note(0x210654F6CA0, 3, true); census.noteCaller(0x594F73); }
-    for (int i = 0; i < 300; ++i) { census.noteKind(true, 3); census.note(0x21065500000, 3, true); census.noteCaller(0x59500B); }
-    for (int i = 0; i < 90; ++i) { census.noteKind(true, 1); census.note(0x21065510000, 1, false); census.noteCaller(0x58DFD3); }
+    for (int i = 0; i < 300; ++i) { census.noteKind(true, 3); census.note(0x210654F6CA0, 3, true); census.noteCaller(0x594F13); }
+    for (int i = 0; i < 300; ++i) { census.noteKind(true, 3); census.note(0x21065500000, 3, true); census.noteCaller(0x594FAB); }
+    for (int i = 0; i < 90; ++i) { census.noteKind(true, 1); census.note(0x21065510000, 1, false); census.noteCaller(0x58DF73); }
     for (int i = 0; i < 10; ++i) { census.noteKind(true, 4); census.note(0x21065520000, 4, false); census.noteCaller(0x123456); }
     census.noteKind(false, 0);
     check(census.used() == 4 && census.kindCount(3) == 600 && census.kindCount(1) == 90 && census.kindCount(4) == 10 &&
@@ -611,7 +611,7 @@ void testC11() {
           "C11 the census keeps per-camera, per-kind and per-call-site counts");
     flatCameraFormatCensus(text, sizeof(text), census, 300, 600);
     check(has(text, "cameras=4") && has(text, "injected-per-frame=2.0") && has(text, "0x210654f6ca0:3:300:300") &&
-          has(text, "+0x594F73=300") && has(text, "+0x58DFD3=90") && has(text, "other=10") && std::strlen(text) < 1000,
+          has(text, "+0x594F13=300") && has(text, "+0x58DF73=90") && has(text, "other=10") && std::strlen(text) < 1000,
           "C11 the census line names the cameras (busiest first), the kinds and the call sites, and fits a log line");
     std::printf("  note  %s\n", text);
     for (uintptr_t i = 0; i < 40; ++i) census.note(0x900000 + i * 0x1000, 3, false);
@@ -958,14 +958,14 @@ void testC17() {
           std::fabs(num(50000.0f).value() - 50000.0) < 1e-6 && std::fabs(num(0.025f).value() - 0.025) < 1e-12,
           "C17 zero, a negative value and a non-finite value are all representable, and a bucket converts back to its value");
     {
-        const FlatCameraSignature scene = flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x594F73);
-        check(scene == flatCameraSignatureOf(1.7777f, 0.9804f, 0.0252f, 50100.0f, 0x594F73),
+        const FlatCameraSignature scene = flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x594F13);
+        check(scene == flatCameraSignatureOf(1.7777f, 0.9804f, 0.0252f, 50100.0f, 0x594F13),
               "C17 the same camera one frame later (a hair of aspect, fov, near, far) is the same signature");
-        check(!(scene == flatCameraSignatureOf(1.0f, 0.98f, 0.025f, 50000.0f, 0x594F73)) &&
-              !(scene == flatCameraSignatureOf(1.777778f, 0.82f, 0.025f, 50000.0f, 0x594F73)) &&
-              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.1f, 50000.0f, 0x594F73)) &&
-              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 1000.0f, 0x594F73)) &&
-              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x59500B)),
+        check(!(scene == flatCameraSignatureOf(1.0f, 0.98f, 0.025f, 50000.0f, 0x594F13)) &&
+              !(scene == flatCameraSignatureOf(1.777778f, 0.82f, 0.025f, 50000.0f, 0x594F13)) &&
+              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.1f, 50000.0f, 0x594F13)) &&
+              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 1000.0f, 0x594F13)) &&
+              !(scene == flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x594FAB)),
               "C17 a different aspect, fov, near, far or caller is a different signature");
         check(flatCameraSignatureOf(1.0f, 1.0f, 1.0f, 1.0f, 0x1FFFFFFFFull).callerRva == 0xFFFFFFFFu,
               "C17 a caller offset past 32 bits clamps instead of wrapping onto a real one");
@@ -983,11 +983,11 @@ void testC17() {
     check(table.kind3Calls() == 0 && table.sampled() == 0 && table.used() == 0 && table.overflow() == 0,
           "C17 a reset empties the window");
     for (int i = 0; i < 10; ++i) {
-        table.note(flatCameraSignatureOf(1.0f + i, 0.98f, 0.025f, 50000.0f, 0x594F73), (i % 2) == 0);
+        table.note(flatCameraSignatureOf(1.0f + i, 0.98f, 0.025f, 50000.0f, 0x594F13), (i % 2) == 0);
     }
     check(table.used() == 8 && table.overflow() == 2 && table.recorded() == 10,
           "C17 ten distinct signatures: the first eight are kept and the other two are counted as overflow");
-    const FlatCameraSignature first = flatCameraSignatureOf(1.0f, 0.98f, 0.025f, 50000.0f, 0x594F73);
+    const FlatCameraSignature first = flatCameraSignatureOf(1.0f, 0.98f, 0.025f, 50000.0f, 0x594F13);
     for (int i = 0; i < 5; ++i) table.note(first, true);
     table.note(first, false);
     check(table.at(0).sig == first && table.at(0).calls == 7 && table.at(0).injected == 6 && table.overflow() == 2 && table.recorded() == 16,
@@ -1023,15 +1023,15 @@ void testC17() {
     }
     {
         FlatCameraSignatureTable t;
-        for (int i = 0; i < 4; ++i) t.note(flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x594F73), true);
-        t.note(flatCameraSignatureOf(1.0f, 1.5708f, 0.025f, 50000.0f, 0x59500B), false);
+        for (int i = 0; i < 4; ++i) t.note(flatCameraSignatureOf(1.777778f, 0.98f, 0.025f, 50000.0f, 0x594F13), true);
+        t.note(flatCameraSignatureOf(1.0f, 1.5708f, 0.025f, 50000.0f, 0x594FAB), false);
         t.note(flatCameraSignatureOf(0.61f, 0.6607f, 0.025f, 1000.0f, 0), false);
-        t.note(flatCameraSignatureOf(NAN, NAN, NAN, NAN, 0x58DFD3), false);
+        t.note(flatCameraSignatureOf(NAN, NAN, NAN, NAN, 0x58DF73), false);
         flatCameraFormatSignatures(text, sizeof(text), t);
-        check(has(text, "distinct=4 overflow=0 sigs=[aspect=1.78 fov=0.98 near=0.025 far=50000 rva=+0x594F73 calls=4 injected=4 | ") &&
-              has(text, "aspect=1.00 fov=1.57 near=0.025 far=50000 rva=+0x59500B calls=1 injected=0") &&
+        check(has(text, "distinct=4 overflow=0 sigs=[aspect=1.78 fov=0.98 near=0.025 far=50000 rva=+0x594F13 calls=4 injected=4 | ") &&
+              has(text, "aspect=1.00 fov=1.57 near=0.025 far=50000 rva=+0x594FAB calls=1 injected=0") &&
               has(text, "aspect=0.61 fov=0.66 near=0.025 far=1000 rva=unknown calls=1 injected=0") &&
-              has(text, "aspect=nan fov=nan near=nan far=nan rva=+0x58DFD3 calls=1 injected=0"),
+              has(text, "aspect=nan fov=nan near=nan far=nan rva=+0x58DF73 calls=1 injected=0"),
               "C17 the line names each signature (aspect, fov, near, far, caller, sampled calls, injected) and marks an unread frustum nan");
         std::printf("  note  %s\n", text);
     }

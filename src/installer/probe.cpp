@@ -362,7 +362,7 @@ DllInfo probeDll(const std::wstring& path) {
 // Pinned profile digest from tools/elite_oculus.py. Hashing is read-only
 // and avoids executing an untrusted game image during installation.
 static const char kQualifiedEliteSha256[] =
-    "6891f70a021fa9f3a0e00458c284f48d1226e68ae7fc02ad48081aed47857e93";
+    "ed5a8f8cd10f9a80d3bda5badd7ba1d4fcfc15996c8c7e018852cb170e264b63";
 
 EliteExeKind classifyEliteExecutable(const std::wstring& path, std::wstring* fileVersion) {
     const std::string sha = sha256File(path);

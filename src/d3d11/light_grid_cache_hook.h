@@ -1,11 +1,11 @@
 #pragma once
 // The light grid cache (docs/light-grid-cache-2026-10-13.md; the logic and the evidence are in light_grid_cache_core.h, the rig is tools\light_grid_cache_test): a CodeHook
-// on the entry of Frontier's fragment-culling cluster builder (EliteDangerous64.exe+0x58B2B0, build 334473). The game keeps a one-slot memo of the last build and runs the
+// on the entry of Frontier's fragment-culling cluster builder (EliteDangerous64.exe+0x58B250, build 334925). The game keeps a one-slot memo of the last build and runs the
 // whole grid again whenever the key changes, which with two eyes and a jittered projection is nearly every call (about 0.29 ms, twice a frame). This keeps the last states
 // per context and, when a call's key matches one of them bit for bit, swaps that whole state back in instead of building.
 //
 // Always on, both profiles, no key: it is a pure optimisation and exact (see the core for why, and the verification below for how the flight proves it). Installed ONCE at
-// startup; a build whose PE stamp or whose entry's sixteen bytes are not 334473's is one log line and nothing patched, never retried. While it runs, one in 1024 cache hits is
+// startup; a build whose PE stamp or whose entry's sixteen bytes are not 334925's is one log line and nothing patched, never retried. While it runs, one in 1024 cache hits is
 // not served: the game rebuilds and the result is compared with the cached state byte for byte. A difference, or a stored key that is not the one built from the call's inputs,
 // turns the cache off for the session with a line saying why.
 #include <cstdint>

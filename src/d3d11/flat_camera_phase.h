@@ -551,7 +551,7 @@ struct FlatCameraCensusEntry {
     uint32_t kind = 0;
     uint64_t calls = 0, injected = 0;
 };
-constexpr uint32_t kFlatCameraKnownCallers[4] = {0x594F73, 0x59500B, 0x595141, 0x58DFD3};
+constexpr uint32_t kFlatCameraKnownCallers[4] = {0x594F13, 0x594FAB, 0x5950E1, 0x58DF73};
 
 class FlatCameraCensus {
 public:

@@ -20,7 +20,7 @@
 #include <memory>
 #include <random>
 #include <thread>
-#include <vector>   // the build-334473 PE identity constants (store hook gate)
+#include <vector>   // the build-334925 PE identity constants (store hook gate)
 
 #include <cmath>
 #include <cstddef>
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
         const uint8_t pin[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE, 0xFF};
         const uint32_t wantStamp = edvr::ecm::kExpectedTimestamp, wantSize = edvr::ecm::kExpectedImageSize;
         check(se::storeInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, pin, pin, 16) == se::StoreInstall::kInstall,
-              "v14.20 store hook: build 334473's identity and pin install the detour");
+              "v14.20 store hook: build 334925's identity and pin install the detour");
         check(se::storeInstallDecision(true, wantStamp + 1, wantSize, wantStamp, wantSize, pin, pin, 16) == se::StoreInstall::kWrongIdentity,
               "v14.20 store hook: another stamp is refused");
     }

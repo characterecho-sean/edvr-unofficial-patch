@@ -3,14 +3,14 @@
 // drives every case (tools\terrain_cover_test). terrain_cull_cover_hook.cpp is the glue that finds the function, patches it and calls this.
 //
 // WHAT IS READ (build 334473, EliteDangerous64.exe; analysis\decomp\verify_20261010_tiles_*; READ = a disassembled instruction):
-//   The planet draw-list builder 0x4462E80 calls 0x44587C0 (at 0x4463A83), which writes one record per render view. For a main (non-ortho) view it loads the view's eye camera
+//   The planet draw-list builder 0x4462DE0 calls 0x4458720 (at 0x44639E3), which writes one record per render view. For a main (non-ortho) view it loads the view's eye camera
 //   aspect and vertical fov and builds the four cull planes:
-//     4458D5D  movss xmm0,[r14+0x70]   aspect  (the recommended W/H, the fov getter's out[0])
+//     4458CBD  movss xmm0,[r14+0x70]   aspect  (the recommended W/H, the fov getter's out[0])
 //     4458D6A  movss xmm1,[r14+0x90]   vFOV    (atan|top| + atan|bottom|, out[1])
-//     4458D73  movss [rsp+0x28],xmm0 ; 4458D79  movss [rsp+0x20],xmm1 ; 4458D87  call 0x144441580   (rcx,rdx,r8,r9 = four output/scratch pointers)
-//   so at the callee's entry arg 5 = vFOV at [rsp+0x28] and arg 6 = aspect at [rsp+0x30]. 0x4441580 (prologue below) halves the vFOV (mulss by the 0.5 at 0x4DE28B8), takes
+//     4458D73  movss [rsp+0x28],xmm0 ; 4458D79  movss [rsp+0x20],xmm1 ; 4458CE7  call 0x1444414E0   (rcx,rdx,r8,r9 = four output/scratch pointers)
+//   so at the callee's entry arg 5 = vFOV at [rsp+0x28] and arg 6 = aspect at [rsp+0x30]. 0x44414E0 (prologue below) halves the vFOV (mulss by the 0.5 at 0x4DE28B8), takes
 //   a = vFOV/2, b = atan(aspect * tan a), and writes four planes through the eye: +-a about the camera's Z axis vertically, +-b horizontally. A CENTRED frustum, no margin. It is
-//   the ONLY direct caller (a .text scan finds exactly 0x4458D87). The per-(patch, view) test (0x445BA40 -> 0x445CF40) culls a patch box against these with no epsilon. The
+//   the ONLY direct caller (a .text scan finds exactly 0x4458CE7). The per-(patch, view) test (0x445B9A0 -> 0x445CEA0) culls a patch box against these with no epsilon. The
 //   rendered image uses the explicit kind-5 projection matrix, not these values.
 //
 // SO an eye whose frustum is asymmetric is under-covered on its wide sides: the cull reaches +-a vertically and +-b horizontally about the camera's axis, symmetric, while the
@@ -36,12 +36,12 @@
 namespace edvr {
 namespace tcover {
 
-// ---- identity: build 334473 (the pair every build-keyed hook here checks) -----------------------------------------------------------------------------------------
-constexpr uint32_t kExpectedTimestamp = 1791840573u;
+// ---- identity: build 334925 (the pair every build-keyed hook here checks) -----------------------------------------------------------------------------------------
+constexpr uint32_t kExpectedTimestamp = 1792704584u;
 constexpr uint32_t kExpectedImageSize = 104906752u;
-constexpr uint32_t kTargetRva = 0x4441580u;   // 0x144441580: the cull-plane builder
-constexpr uint32_t kCallRva = 0x4458D87u;     // the one call to it
-constexpr uint32_t kSiteRva = 0x4458D5Du;     // the first byte of the call-site signature below (fragment A)
+constexpr uint32_t kTargetRva = 0x44414E0u;   // 0x1444414E0: the cull-plane builder
+constexpr uint32_t kCallRva = 0x4458CE7u;     // the one call to it
+constexpr uint32_t kSiteRva = 0x4458CBDu;     // the first byte of the call-site signature below (fragment A)
 
 // The callee's first 32 bytes: mov rax,rsp / mov [rax+10h],rbx / mov [rax+18h],rbp / mov [rax+20h],rsi / push rdi / sub rsp,90h / movss xmm1,[rsp+0C0h] (= arg 5, the vFOV).
 // CodeHook steals the first two instructions (7 bytes, nothing rip-relative). The mulss that follows (F3 0F 59 0D rel32, by 0.5) is found in the next 16 bytes and its operand
@@ -169,17 +169,17 @@ inline bool locate(const uint8_t* base, size_t knownSize, Located* out) {
     if (out->stamp == kExpectedTimestamp && sizeOfImage == kExpectedImageSize) {
         uint32_t call = 0, target = 0;
         if (!calleeMatches(img, kTargetRva)) {
-            std::snprintf(out->why, sizeof(out->why), "the PE stamp %u and image size %u are build 334473's, but the head at exe+0x%X is not the cull-plane builder's", out->stamp, sizeOfImage, kTargetRva);
+            std::snprintf(out->why, sizeof(out->why), "the PE stamp %u and image size %u are build 334925's, but the head at exe+0x%X is not the cull-plane builder's", out->stamp, sizeOfImage, kTargetRva);
             return false;
         }
         if (!matchSite(img, kSiteRva, &call, &target) || call != kCallRva || target != kTargetRva) {
-            std::snprintf(out->why, sizeof(out->why), "the PE stamp %u and image size %u are build 334473's, but the call site at exe+0x%X is not the one read", out->stamp, sizeOfImage, kSiteRva);
+            std::snprintf(out->why, sizeof(out->why), "the PE stamp %u and image size %u are build 334925's, but the call site at exe+0x%X is not the one read", out->stamp, sizeOfImage, kSiteRva);
             return false;
         }
         out->targetRva = kTargetRva;
         out->callRva = call;
         out->byStamp = true;
-        std::snprintf(out->how, sizeof(out->how), "PE stamp %u and image size %u are build 334473's; the callee's head and the call site at exe+0x%X verified", out->stamp, sizeOfImage, kSiteRva);
+        std::snprintf(out->how, sizeof(out->how), "PE stamp %u and image size %u are build 334925's; the callee's head and the call site at exe+0x%X verified", out->stamp, sizeOfImage, kSiteRva);
         return true;
     }
 
@@ -201,24 +201,24 @@ inline bool locate(const uint8_t* base, size_t knownSize, Located* out) {
         }
     }
     if (!textSize || !img.has(textRva, textSize)) {
-        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334473's and no code section could be read for the signature scan", out->stamp);
+        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334925's and no code section could be read for the signature scan", out->stamp);
         return false;
     }
     SiteMatch found[4];
     const size_t count = scanSites(img, textRva, textSize, found, 4);
     if (count != 1) {
-        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334473's and the signature scan of the %u KB code section found %s", out->stamp, textSize / 1024u,
+        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334925's and the signature scan of the %u KB code section found %s", out->stamp, textSize / 1024u,
                       count == 0 ? "no call site" : "more than one call site (ambiguous)");
         return false;
     }
     if (!calleeMatches(img, found[0].targetRva)) {
-        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334473's; the one call site at exe+0x%X reaches exe+0x%X, whose head is not the cull-plane builder's", out->stamp,
+        std::snprintf(out->why, sizeof(out->why), "the PE stamp %u is not build 334925's; the one call site at exe+0x%X reaches exe+0x%X, whose head is not the cull-plane builder's", out->stamp,
                       found[0].callRva, found[0].targetRva);
         return false;
     }
     out->targetRva = found[0].targetRva;
     out->callRva = found[0].callRva;
-    std::snprintf(out->how, sizeof(out->how), "found by signature scan: the one call site at exe+0x%X reaches it; PE stamp %u is not build 334473's", found[0].callRva, out->stamp);
+    std::snprintf(out->how, sizeof(out->how), "found by signature scan: the one call site at exe+0x%X reaches it; PE stamp %u is not build 334925's", found[0].callRva, out->stamp);
     return true;
 }
 

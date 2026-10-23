@@ -1,6 +1,6 @@
 // Explorer Cam's rig (src/d3d11/explorer_cam_core.h, explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
 //
-// Part A drives the pure half the DLL compiles: the build-334473 identity and CodeHook's reading of all five prologues, the eye
+// Part A drives the pure half the DLL compiles: the build-334925 identity and CodeHook's reading of all five prologues, the eye
 // keys' clamp, the sixteen floats written into the free camera's commander-local pose, the placement machine on scripted state
 // sequences (entry, the pending first update, the lock pressed once, the user's own unlock, a detach and the return, the variant
 // state, a second activity, the session ending, a fault), the F5 sequencer on scripted mode sequences (enter from every mode,
@@ -148,17 +148,17 @@ void testIdentity() {
     check(sizeof(ecm::kCameraUiPrologue) == 19 && std::memcmp(ecm::kCameraUiPrologue, ui19, 19) == 0, "the camera-UI prologue is 40 55 41 56 48 8D AC 24 48 FF FF FF 48 81 EC B8 01 00 00");
     check(sizeof(ecm::kControllerPrologue) == 15 && std::memcmp(ecm::kControllerPrologue, ctl15, 15) == 0, "the controller prologue is 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18");
     const uint8_t fade16[16] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
-    check(sizeof(ecm::kAvatarFadePrologue) == 16 && std::memcmp(ecm::kAvatarFadePrologue, fade16, 16) == 0 && ecm::kAvatarFadeRva == 0x3DD8D00 && ecm::kAvatarFadeRva % 64 == 0,
-          "the avatar dither-fade prologue is 4C 8B DC 53 56 57 48 81 EC 10 01 00 00 48 8B 05 at +0x3DD8D00 (64-byte aligned; the first 5 bytes are whole instructions)");
+    check(sizeof(ecm::kAvatarFadePrologue) == 16 && std::memcmp(ecm::kAvatarFadePrologue, fade16, 16) == 0 && ecm::kAvatarFadeRva == 0x3DD8C60 && ecm::kAvatarFadeRva % 32 == 0,
+          "the avatar dither-fade prologue is 4C 8B DC 53 56 57 48 81 EC 10 01 00 00 48 8B 05 at +0x3DD8C60 (32-byte aligned; the first 5 bytes are whole instructions)");
     const uint8_t find16[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
-    check(sizeof(ecm::kFindJointPrologue) == 16 && std::memcmp(ecm::kFindJointPrologue, find16, 16) == 0 && ecm::kFindJointRva == 0xFDEC10 && ecm::kFindJointRva % 16 == 0,
-          "the skeleton FindJoint prologue is 48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B FA at +0xFDEC10 (16-byte aligned; the first 5 bytes are one whole instruction)");
+    check(sizeof(ecm::kFindJointPrologue) == 16 && std::memcmp(ecm::kFindJointPrologue, find16, 16) == 0 && ecm::kFindJointRva == 0xFDEBB0 && ecm::kFindJointRva % 16 == 0,
+          "the skeleton FindJoint prologue is 48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B FA at +0xFDEBB0 (16-byte aligned; the first 5 bytes are one whole instruction)");
     check(ecm::kFadeModeRva == 0x5EA0C78 && ecm::kFadeAmountRva == 0x60211F8 && ecm::kFadeAuto == -1 && ecm::kOffAvatarFadeBlock == 0x378 && ecm::kOffAvatarFadeEased == 0x380 &&
               ecm::kOffFadeBlockEnabled == 0x90 && ecm::kOffFadeBlockAmount == 0x120,
           "the fade global is +0x5EA0C78 (-1 = auto), the amount float +0x60211F8, the component's block pointer +0x378 and eased level +0x380, the block's enabled +0x90 and amount +0x120");
-    check(ecm::kFreeCameraRva == 0x1072A80 && ecm::kCollisionRva == 0x1092240 && ecm::kBoxPushRva == 0x10902B0 && ecm::kCameraUiRva == 0x47CA180 &&
-              ecm::kControllerRva == 0x2DF3F60,
-          "the targets are EliteDangerous64.exe+0x1072A80, +0x1092240, +0x10902B0, +0x47CA180 and +0x2DF3F60");
+    check(ecm::kFreeCameraRva == 0x1072A20 && ecm::kCollisionRva == 0x10921E0 && ecm::kBoxPushRva == 0x1090250 && ecm::kCameraUiRva == 0x47CA0E0 &&
+              ecm::kControllerRva == 0x2DF3EA0,
+          "the targets are EliteDangerous64.exe+0x1072A20, +0x10921E0, +0x1090250, +0x47CA0E0 and +0x2DF3EA0");
     check(ecm::kFreeCameraRva % 8 == 0 && ecm::kCollisionRva % 8 == 0 && ecm::kBoxPushRva % 8 == 0 && ecm::kCameraUiRva % 8 == 0 && ecm::kControllerRva % 8 == 0,
           "every target is 8-byte aligned, so CodeHook's aligned 8-byte store applies");
     check(ecm::kOffLocalPose == 0x3B0 && ecm::kOffRelative == 0x470 && ecm::kOffRotationLock == 0x471 && ecm::kOffPresetPending == 0x473 &&
@@ -3137,14 +3137,14 @@ void cimgThunk(size_t entryRva, size_t callRva) {   // `call r8` at callRva (ret
     p[n++] = 0x41; p[n++] = 0xFF; p[n++] = 0xD0;
     p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x28; p[n++] = 0xC3;
 }
-// FUN 0x19B4000 for ONE humanoid, in machine code at its real address: block 1 (third-person avatar) calls r8 (FindJoint) at +0x19B4092, returning to +0x19B4095
-// (site 1); block 2 (first-person avatar) calls it at +0x19B4116, returning to +0x19B4119 (site 2). One frame, no push between. rcx = the third-person interface
+// FUN 0x19B3F40 for ONE humanoid, in machine code at its real address: block 1 (third-person avatar) calls r8 (FindJoint) at +0x19B4092, returning to +0x19B3FD5
+// (site 1); block 2 (first-person avatar) calls it at +0x19B4116, returning to +0x19B4059 (site 2). One frame, no push between. rcx = the third-person interface
 // (0 skips block 1), rdx = the name, r8 = FindJoint, r9 = the first-person interface (0 skips block 2: an NPC has none).
 // g_cimgBetween, when set, is called between the two attaches of a local invocation (the rig's way to run another thread's attach INSIDE the invocation).
 void (*g_cimgBetween)() = nullptr;
 void cimgInvoke() {
-    cimgCommit(0x19B4000, 0x200);
-    uint8_t* const base = g_cimg + 0x19B4000;
+    cimgCommit(0x19B3F40, 0x200);
+    uint8_t* const base = g_cimg + 0x19B3F40;
     std::memset(base, 0x90, 0x200);
     size_t n = 0;
     auto put = [&](std::initializer_list<uint8_t> b) { for (uint8_t x : b) base[n++] = x; };
@@ -3155,7 +3155,7 @@ void cimgInvoke() {
     put({0x48, 0x85, 0xC9});                           // test rcx, rcx
     put({0x74, static_cast<uint8_t>(0x95 - (n + 2))}); // je block2
     n = 0x92;
-    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B4095)
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B3FD5)
     put({0x4C, 0x8B, 0x4C, 0x24, 0x30});               // block2: mov r9, [rsp+30h]
     put({0x4D, 0x85, 0xC9});                           // test r9, r9
     const size_t jeAt = n;
@@ -3175,12 +3175,12 @@ void cimgInvoke() {
     put({0x4C, 0x8B, 0x44, 0x24, 0x28});               // mov r8, [rsp+28h]
     base[jeAt + 1] = static_cast<uint8_t>(0x119 - (jeAt + 2));
     n = 0x116;
-    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B4119)
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B4059)
     put({0x48, 0x83, 0xC4, 0x48, 0xC3});               // end: add rsp, 48h; ret
 }
 // ---- the synthetic skeleton interfaces (Phase 3: the head-joint eye) -------------------------------------------------------------------------------
 // RR's and AO's vtables with the build's slots (+0x18 pose, +0x30 FindJoint, +0x48 world, +0x58 model) pointing at trampolines placed at the EXACT RVAs the build has,
-// to native stubs; FindJoint (+0xFDEC10) is the real hook target. A stub records how it was called; a fault can be injected in each.
+// to native stubs; FindJoint (+0xFDEBB0) is the real hook target. A stub records how it was called; a fault can be injected in each.
 struct CamRec {
     uint32_t headIdx = 12;
     uint32_t headJunk = 0;           // OR-ed into FindJoint(head)'s result: the part of eax above the u16 the game returns
@@ -3241,12 +3241,12 @@ void cimgTramp(size_t rva, const void* target) {
 }
 void cimgFollowInit() {
     g_cr = CamRec();
-    cimgTramp(0x43FE680, reinterpret_cast<const void*>(&crPose));    // RR +0x18
-    cimgTramp(0x43F9F00, reinterpret_cast<const void*>(&crWorld));   // RR +0x48
-    cimgTramp(0x43F9C30, reinterpret_cast<const void*>(&crModel));   // RR +0x58
-    cimgTramp(0xFDF410, reinterpret_cast<const void*>(&crPose));     // AO +0x18
-    cimgTramp(0xFDEFB0, reinterpret_cast<const void*>(&crWorld));    // AO +0x48
-    cimgTramp(0xFDEE10, reinterpret_cast<const void*>(&crModel));    // AO +0x58
+    cimgTramp(0x43FE5E0, reinterpret_cast<const void*>(&crPose));    // RR +0x18
+    cimgTramp(0x43F9E60, reinterpret_cast<const void*>(&crWorld));   // RR +0x48
+    cimgTramp(0x43F9B90, reinterpret_cast<const void*>(&crModel));   // RR +0x58
+    cimgTramp(0xFDF3B0, reinterpret_cast<const void*>(&crPose));     // AO +0x18
+    cimgTramp(0xFDEF50, reinterpret_cast<const void*>(&crWorld));    // AO +0x48
+    cimgTramp(0xFDEDB0, reinterpret_cast<const void*>(&crModel));    // AO +0x58
     cimgTramp(0x3000100, reinterpret_cast<const void*>(&crWorld));   // a function that is none of the slots'
     const uint64_t b = reinterpret_cast<uint64_t>(g_cimg);
     for (uint32_t i = 0; i < ecm::kHeadSlots; ++i) {
@@ -3309,7 +3309,7 @@ using ImgFade = uint64_t (__fastcall*)(void*);
 using ImgFind = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
 using ImgInvoke = uint64_t (__fastcall*)(void* third, const void* name, void* fn, void* first);
 // One invocation for a humanoid with BOTH avatars (the local player): third-person at site 1, then first-person at site 2, from one frame.
-uint64_t imgInvoke(void* third, void* first, const void* name) { return reinterpret_cast<ImgInvoke>(g_cimg + 0x19B4000)(third, name, g_cimg + ecm::kFindJointRva, first); }
+uint64_t imgInvoke(void* third, void* first, const void* name) { return reinterpret_cast<ImgInvoke>(g_cimg + 0x19B3F40)(third, name, g_cimg + ecm::kFindJointRva, first); }
 // A LONE attach: site 0 = an invocation with only the third-person avatar (an NPC's), site 1 = only the first-person one, site 2 = a call from somewhere else.
 uint64_t imgAttach(int site, void* iface, const void* name) {
     if (site == 0) return imgInvoke(iface, nullptr, name);
@@ -3620,7 +3620,7 @@ uint64_t __fastcall xformMatrix(uint64_t) {
 }
 
 void testSkeletonLatch(const Pages& p) {
-    std::printf("glue: the FindJoint capture latches only the local humanoid (a site-1 then a site-2 attach in ONE invocation of 0x19B4000)\n");
+    std::printf("glue: the FindJoint capture latches only the local humanoid (a site-1 then a site-2 attach in ONE invocation of 0x19B3F40)\n");
     namespace t = edvr::explorercamtest;
     static Game g;
     static AmcBuf localAmc, npcAmc, localAmc2;
@@ -3875,8 +3875,8 @@ const float kIdentityRows[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
 void testFollowPure() {
     std::printf("the eye from the head joint: the rest offset, the live eye, the trims, the smoothing, the isolation tables (pure)\n");
-    static_assert(ecm::kZoomDofRva == 0x1079A90 && ecm::kZoomDofPrologueBytes == 16 && ecm::kZoomDofPrologue[0] == 0x40 && ecm::kZoomDofPrologue[1] == 0x53,
-                  "the zoom/DOF update is +0x1079A90 and begins `push rbx` (REX 40 53)");
+    static_assert(ecm::kZoomDofRva == 0x1079A30 && ecm::kZoomDofPrologueBytes == 16 && ecm::kZoomDofPrologue[0] == 0x40 && ecm::kZoomDofPrologue[1] == 0x53,
+                  "the zoom/DOF update is +0x1079A30 and begins `push rbx` (REX 40 53)");
     check(stolenOf(ecm::kZoomDofPrologue, ecm::kZoomDofPrologueBytes) == 6, "THE ZOOM/DOF PROLOGUE: CodeHook steals 6 bytes (push rbx; sub rsp,60h), no rip-relative displacement among them");
 
     // ---- the rest offset on a skeleton with a turned joint (hand-worked) ---------------------------------------------------------------------------------------
@@ -4149,9 +4149,9 @@ void testFollowPure() {
     n.why = 1;
     n.a = 0x48;
     n.b = 0x3000000;
-    n.c = 0x43F9F00;
+    n.c = 0x43F9E60;
     ecm::formatFollowNote(line, sizeof(line), n);
-    check(has(line, "vtable slot +0x48 of skeleton 0x23A812307C8 holds 0x3000000, not the build-334473 function 0x43F9F00"), "...a vtable slot that differs names the slot, what it holds and what it should");
+    check(has(line, "vtable slot +0x48 of skeleton 0x23A812307C8 holds 0x3000000, not the build-334925 function 0x43F9E60"), "...a vtable slot that differs names the slot, what it holds and what it should");
 
     ecm::FollowBeatIn fb;
     fb.windowSeconds = 5.0;
@@ -4277,11 +4277,11 @@ void testFollowGlue(const Pages& p) {
           "...a latched skeleton changes nothing: the eye is the fixed one (up 1.68, forward 0.10), no game call was made, the reason is 'not armed'");
 
     begin(true, true);
-    check(!t::followReady() && rig.cap.count("the head-joint source is not armed: the joint-name literals at EliteDangerous64.exe+0x5552030 / +0x51FCB00 are not") == 1,
+    check(!t::followReady() && rig.cap.count("the head-joint source is not armed: the joint-name literals at EliteDangerous64.exe+0x5552000 / +0x51FCAD0 are not") == 1,
           "THE HEAD LITERAL DIFFERS (\"def_c_head_joint\" is not what the exe holds): not armed, one line names the two literals, the fixed keys place the view");
     begin(true);
-    check(t::followReady() && rig.cap.count("explorer cam: head follow: armed (build 334473)") == 1, "ARMED on the synthetic image: one line, once");
-    check(has(rig.cap.nth("head follow: armed", 0), "+0x55A01B0") && has(rig.cap.nth("head follow: armed", 0), "+0x5180D40") && has(rig.cap.nth("head follow: armed", 0), "8 faults stand the head source down"),
+    check(t::followReady() && rig.cap.count("explorer cam: head follow: armed (build 334925)") == 1, "ARMED on the synthetic image: one line, once");
+    check(has(rig.cap.nth("head follow: armed", 0), "+0x55A0180") && has(rig.cap.nth("head follow: armed", 0), "+0x5180D00") && has(rig.cap.nth("head follow: armed", 0), "8 faults stand the head source down"),
           "...it names the two vtables, the checks before every call and the 8-fault stand-down that never touches the placement");
 
     // ---- nothing latched: the fixed keys ------------------------------------------------------------------------------------------------------------------
@@ -4462,7 +4462,7 @@ void testFollowGlue(const Pages& p) {
     g.freeFrame();   // the check before the next call sees it
     rig.boundary();
     check(t::followDown() && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::StoodDown) && rig.cap.count("vtable slot +0x48 of skeleton 0x") == 1 &&
-              has(rig.cap.nth("vtable slot +0x48", 0), "not the build-334473 function") && t::followFaults() == 0 && eyeIs(0.0f, 1.68f, 0.10f),
+              has(rig.cap.nth("vtable slot +0x48", 0), "not the build-334925 function") && t::followFaults() == 0 && eyeIs(0.0f, 1.68f, 0.10f),
           "A VTABLE SLOT THAT DIFFERS (+0x48 swapped): the head source stands down before the next call, naming the slot, and the fixed keys serve");
     g_cr.swapModelSlot = false;
 

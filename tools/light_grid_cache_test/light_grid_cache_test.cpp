@@ -60,7 +60,7 @@ struct Ctx {
 uint64_t ld64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
 void st64(uint8_t* p, uint64_t v) { std::memcpy(p, &v, 8); }
 
-// The game's vector (0x595600): capacity at +0, size at +0x10, data at +0x18; growth past the capacity reallocates, new 32-byte elements are filled with the default.
+// The game's vector (0x5955A0): capacity at +0, size at +0x10, data at +0x18; growth past the capacity reallocates, new 32-byte elements are filled with the default.
 void vecResize(Heap& h, uint8_t* hdr, uint64_t newSize, size_t elem) {
     const uint64_t cap = ld64(hdr), size = ld64(hdr + 0x10);
     auto* data = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(ld64(hdr + 0x18)));
@@ -348,20 +348,20 @@ void testIdentityAndPin() {
     check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, moved, 16) == lg::Install::kWrongPrologue, "one wrong prologue byte refuses");
     // the identity is judged before the bytes: a wrong build whose bytes also differ is a wrong build
     check(lg::installDecision(true, 1, 2, moved, 16) == lg::Install::kWrongIdentity, "the identity is judged first");
-    check(lg::kExpectedTimestamp == 1791840573u && lg::kExpectedImageSize == 104906752u && lg::kBuilderRva == 0x58B2B0u, "the pinned constants are build 334473's");
+    check(lg::kExpectedTimestamp == 1792704584u && lg::kExpectedImageSize == 104906752u && lg::kBuilderRva == 0x58B250u, "the pinned constants are build 334925's");
     const uint8_t pin[16] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8};
     check(std::memcmp(pin, lg::kPrologue, 16) == 0, "the prologue is the sixteen bytes read from the exe");
     // the view-block refresh the glue may run ahead of the rows is pinned the same way
     uint8_t refresh[16];
     std::memcpy(refresh, lg::kRefreshPrologue, 16);
-    check(lg::refreshPinMatches(refresh, 16) && lg::kRefreshRva == 0x4F3150u, "the refresh function's sixteen bytes match the pin");
+    check(lg::refreshPinMatches(refresh, 16) && lg::kRefreshRva == 0x4F30F0u, "the refresh function's sixteen bytes match the pin");
     refresh[7] ^= 1;
     check(!lg::refreshPinMatches(refresh, 16) && !lg::refreshPinMatches(nullptr, 16) && !lg::refreshPinMatches(refresh, 8), "a changed byte, a null read or a short read does not");
     const uint8_t refreshPin[16] = {0x48, 0x8B, 0xC4, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x29, 0x70, 0xE8, 0x48};
     check(std::memcmp(refreshPin, lg::kRefreshPrologue, 16) == 0, "the refresh pin is the sixteen bytes read from the exe");
 }
 
-// The routine at 0x48AD628, transcribed instruction by instruction with the registers as variables (edx, eax, ecx, r8d), as an independent reading to hold the core's gameCeilf to.
+// The routine at 0x48AD588, transcribed instruction by instruction with the registers as variables (edx, eax, ecx, r8d), as an independent reading to hold the core's gameCeilf to.
 float asmCeilf(float xmm0) {
     uint32_t r8d = 0, edx, eax, ecx;
     std::memcpy(&edx, &xmm0, 4);   // movss [rsp+8], xmm0 / mov edx, [rsp+8]
@@ -437,7 +437,7 @@ void testGridCeil() {
         sameAsCeil = sameAsCeil && (a == std::ceil(x) || (a == 0.0f && std::ceil(x) == 0.0f));
         ++compared;
     }
-    check(compared > 100000 && same, "gameCeilf equals the transcription of 0x48AD628 on every quotient and 400000 bit patterns, bit for bit");
+    check(compared > 100000 && same, "gameCeilf equals the transcription of 0x48AD588 on every quotient and 400000 bit patterns, bit for bit");
     check(sameAsCeil, "and both equal ceilf (the routine is ceilf)");
     check(lg::gameCeilf(0.5f) == 1.0f && lg::gameCeilf(16.0f) == 16.0f && lg::gameCeilf(16.0001f) == 17.0f && lg::gameCeilf(-0.5f) == 0.0f && lg::gameCeilf(0.0f) == 0.0f,
           "spot values: 0.5 gives 1, 16 gives 16, 16.0001 gives 17, -0.5 gives -0, 0 gives 0");

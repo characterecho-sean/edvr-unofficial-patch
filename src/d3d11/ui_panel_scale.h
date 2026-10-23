@@ -1,11 +1,11 @@
 // fix.ui_quality -- the engine-side panel sizing (docs/ui-layer-2026-09-23.md,
 // "The engine's panel sizing"; docs/ui-sizing-owner-2026-09-23.md sections
-// 3 and 5; the arithmetic and the build-334473 bytes in ui_sizing_math.h).
+// 3 and 5; the arithmetic and the build-334925 bytes in ui_sizing_math.h).
 //
 // Every Scaleform render-to-texture panel -- the cockpit's panels, the
 // menus, station services, the menu's 16:9 screen -- is sized by the game as
 // stage x W_ui x k / 1920 (/ 1080 for a view wider than 16:9), inlined in
-// the panel init FUN_144573040 and the view-change recompute FUN_144573CC0.
+// the panel init FUN_144572FA0 and the view-change recompute FUN_144573C20.
 // The four DIVSS operands of those divisions are pointed at two EDVR floats
 // in a page within rel32 of the image, holding 1920 x f and 1080 x f with
 // f = (W_ui x k) / (W_out x k_out) / T (clamped to [1/4, 1]), so the game
@@ -34,7 +34,7 @@
 //
 // SAFETY. Build-keyed: the PE stamp and image size, both sites' 30 bytes,
 // the two functions' prologues and the three constants they read must be
-// build 334473's exactly, or nothing is written and one line says which
+// build 334925's exactly, or nothing is written and one line says which
 // check failed. The operands are swapped once, the first time the key is on
 // (all four or none, VirtualProtect and FlushInstructionCache as
 // vscreen_res.cpp does); after that only the floats change -- aligned data
@@ -46,7 +46,7 @@
 //
 // THE CURSOR WINDOW. The one side reader of a panel's (w, h), FUN_144541AC0
 // (panel vtbl +0x198), divides the panel's own size (+0x3B8/+0x3C0, which
-// FUN_144573CC0 writes from these divisions) by the UI screen's (the
+// FUN_144573C20 writes from these divisions) by the UI screen's (the
 // renderer record's width and height, which this does not scale): a
 // mouse-driven render-to-texture panel's cursor window grows by 1/f, up to
 // the whole screen, and the cursor moves across the panel more slowly for

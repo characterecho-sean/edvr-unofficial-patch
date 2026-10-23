@@ -1,5 +1,5 @@
 #pragma once
-// The admission store's detour (FUN_144314D00), for the optimized station.
+// The admission store's detour (FUN_144314C60), for the optimized station.
 //
 // The store writes each record's view mask (rec+0x208) and admitted flag (rec+0x234), then recurses into the record's child
 // list. This detour forwards the call (five arguments: the bucket, the mask, the output, the LOD, and the record on the

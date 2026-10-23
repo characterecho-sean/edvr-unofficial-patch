@@ -9,22 +9,22 @@
 //
 // Two engine functions, both already patched by kinematic_eval_hook.cpp:
 //
-//   * FUN_144311CA0 -- the kinematic "evaluator" hook's own target -- IS the
+//   * FUN_144311C00 -- the kinematic "evaluator" hook's own target -- IS the
 //     traversal's per-(record, view) gate (decomp_430EFE0.txt): param_1 the
 //     gate context (param_1[0] -> the traversal's param_1, whose [0] is the
 //     render context; param_1[2] the engine record, stride 0x2F0), param_2 the
 //     output {u32 LOD index, u8 passed}, param_3 the VIEW (ctx+0x40+i*0x6A0).
 //     Its verdict feeds only the type-2 item path (§9 close-out 1); recorded
 //     after the forward.
-//   * FUN_1442B70E0 -- the bucket bracket's target -- is the draw-item
+//   * FUN_1442B7040 -- the bucket bracket's target -- is the draw-item
 //     builder: param_1 the record's pose context (rec+0x290), param_2 the
 //     render context, param_3 the collection's active view mask, param_4
 //     rec+0x210 (so the record is param_4-0x210). Its own per-view admission
-//     (decomp_42B4420.txt:250-275): view+0x570 & mask, then FUN_1404F4F70
+//     (decomp_42B4420.txt:250-275): view+0x570 & mask, then FUN_1404F4F10
 //     (the view's planes, +0x30 pointer / +0x44 count) on the pose's
 //     transformed bounds, then -- under the global DAT_145ea63e9 and the
 //     view's +0x68D bit 0 -- the FUN_14288D280 visibility callback. The probe
-//     recomputes the first two with the engine's own FUN_1404F4F70 on the
+//     recomputes the first two with the engine's own FUN_1404F4F10 on the
 //     builder's inputs (before the forward) and records where the third
 //     would apply; it never calls the callback.
 //
@@ -41,12 +41,12 @@
 // its plane array, the context's LOD scale (+0x30) and bit table (+0x1A840).
 //
 // A third function, through its own patch (kinematic_eval_hook.cpp, installed
-// only for this probe after a build-keyed signature): FUN_1442B6C80, which the
+// only for this probe after a build-keyed signature): FUN_1442B6BE0, which the
 // builder calls per (sub-item, admitted view) from its sub-item loop
 // (decomp_42B4420.txt:504-523) -- the per-PART admission. It tests the part's
 // own sphere: param_1[0] -> the world centre the builder composed from the
 // model's +0x00 through the sub-item and the pose, param_1[1] -> a copy of
-// the model's +0x10 (its first float the radius), with FUN_1404F4F70 for the
+// the model's +0x10 (its first float the radius), with FUN_1404F4F10 for the
 // frustum half and a screen-size and LOD pick against view +0x540/+0x550/
 // +0x560 (decomp_42B3FC0.txt), and writes {u32 LOD, u8 passed} to param_2;
 // the builder ORs the view's +0x570 bits into the item's mask on a pass. The
@@ -84,7 +84,7 @@ namespace edvr {
 
 class CullGateProbe {
 public:
-    // FUN_1404F4F70's shape: (view, float4 point, float2 interval) -> -1
+    // FUN_1404F4F10's shape: (view, float4 point, float2 interval) -> -1
     // outside a plane, 1 inside all, 0 straddling (decomp_04F4E10.txt).
     using FrustumFn = uint64_t (__fastcall*)(uintptr_t view, const float* point, const float* interval);
 
@@ -114,13 +114,13 @@ public:
     static constexpr uint32_t kTableSlots = 1u << 14;
     static constexpr uint32_t kTableBytes = 0x80;
 
-    // Engine offsets (build 334473, the hash-verified executable).
-    static constexpr uintptr_t kFrustumRva = 0x4F4F70u;     // FUN_1404F4F70
+    // Engine offsets (build 334925, the hash-verified executable).
+    static constexpr uintptr_t kFrustumRva = 0x4F4F10u;     // FUN_1404F4F10
     static constexpr uintptr_t kVisGlobalRva = 0x5EA63E9u;  // DAT_145ea63e9
-    // The builder's frame around its FUN_1442B6C80 call, from the part test's
+    // The builder's frame around its FUN_1442B6BE0 call, from the part test's
     // param_1 (= the builder's rbp+0x70, a six-pointer block it fills per
-    // sub-item). Read out of the builder's machine code 0x1442B70E9..
-    // 0x1442B7851 (decomp_42B4420.txt:434-512); the hook installs only when
+    // sub-item). Read out of the builder's machine code 0x1442B7049..
+    // 0x1442B77B1 (decomp_42B4420.txt:434-512); the hook installs only when
     // those instructions are byte-for-byte in place, and notePart still
     // checks every relation below before it believes an identity.
     static constexpr intptr_t kFrameCentre = -0x20;     // param_1[0] -> the world centre (local_3a8, rbp+0x50)
@@ -162,11 +162,11 @@ public:
         uint32_t subCount = 0, subFirst = 0, subCopied = 0;
         // The model's local sphere as the builder reads it (decomp_42B4420.txt:
         // 391-397): +0x00 the centre (xyz; w carried through the transform),
-        // +0x10 the four floats FUN_1442B6C80 gets as param_1[1], [0] the radius.
+        // +0x10 the four floats FUN_1442B6BE0 gets as param_1[1], [0] the radius.
         float modelCentre[4] = {}, modelSphere[4] = {};
     };
     struct SubItem { float q[4], p[4]; };
-    // One FUN_1442B6C80 call, read after its forward.
+    // One FUN_1442B6BE0 call, read after its forward.
     struct PartObs {
         uint64_t pose = 0;       // param_1[2]: the builder's pose context (its row carries the same)
         uint64_t subItem = 0;    // the sub-item under test (the builder's rbp-0x70); 0 unless verified
@@ -213,7 +213,7 @@ public:
     void configure(bool on) { on_ = on; }
     bool enabled() const { return on_; }
     // Preallocates and opens the window [first, first+kFrames). `frustum` is
-    // the engine's own FUN_1404F4F70 after its prologue check, or null (the
+    // the engine's own FUN_1404F4F10 after its prologue check, or null (the
     // builder's frustum verdicts are then absent, flagged per record); the
     // CALLER attaches the relays and reports their status.
     bool arm(uint32_t first, FrustumFn frustum, uint8_t visGlobal) noexcept;
@@ -229,11 +229,11 @@ public:
     // Returns the row it kept, or kNoRow (outside the window, a fault-free
     // reservation past the cap): the bracket hands it to this call's parts.
     uint32_t noteBuilder(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
-    // FUN_1442B6C80 after its forward: items = param_1, out = param_2, view =
+    // FUN_1442B6BE0 after its forward: items = param_1, out = param_2, view =
     // param_3; builderRow = the enclosing builder call's row; fromBuilder =
     // the call came from the builder's sub-item loop (its return address).
     void notePart(uintptr_t items, uintptr_t out, uintptr_t view, uint32_t builderRow, bool fromBuilder) noexcept;
-    // Whether FUN_1442B6C80's patch is live for this window (set by the
+    // Whether FUN_1442B6BE0's patch is live for this window (set by the
     // caller after the attach): the file's header flag bit 1, so a reader
     // tells "stood down, no rows by construction" from "hooked, no calls".
     void setPartHooked(bool on) noexcept { partHooked_ = on; }

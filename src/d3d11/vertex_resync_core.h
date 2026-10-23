@@ -10,14 +10,14 @@
 //     DESIRED   list+0x60 + 8*slot  wrapper (an f3d buffer object, refcounted)      list+0xE0 + 4*slot  offset      list+0x120 + 4*slot  stride override
 //     APPLIED   list+0x408 + 8*slot native ID3D11Buffer*   list+0x488 + 4*slot stride   list+0x4C8 + 4*slot offset            (the cache of what was last BOUND)
 //
-//   SetVertexBuffer (0x1404E9E70; READ) compares ONLY the desired state -- [list+8*slot+0x60], [list+4*slot+0xE0], [list+4*slot+0x120] against the arguments -- and
-//   returns at 0x1404E9EAF when they are equal. When they differ it writes the desired state and the applied cache together: applied buffer = [wrapper+0x140] (the
+//   SetVertexBuffer (0x1404E9E10; READ) compares ONLY the desired state -- [list+8*slot+0x60], [list+4*slot+0xE0], [list+4*slot+0x120] against the arguments -- and
+//   returns at 0x1404E9E4F when they are equal. When they differ it writes the desired state and the applied cache together: applied buffer = [wrapper+0x140] (the
 //   native buffer), applied offset = the offset, applied stride = 0, and sets bit 0x20 of the dirty word at list+0x1E8.
 //
-//   FlushIA (0x140522BB0; READ), called before a draw with rcx = the pipeline state, r8 = list+0x60 (DESIRED), r9 = list+0x2A0 (so r9+0x168 = APPLIED buffers,
+//   FlushIA (0x140522B50; READ), called before a draw with rcx = the pipeline state, r8 = list+0x60 (DESIRED), r9 = list+0x2A0 (so r9+0x168 = APPLIED buffers,
 //   r9+0x228 = offsets, r9+0x1E8 = strides), computes each slot's stride from the desired state, and when the draw's layout has FEWER slots than the previous draw's it
-//   zeroes applied buffer, offset and stride for the slots from the new count up to the old (0x140522CDC..0x140522D00). It never touches the desired state. It then
-//   binds from the APPLIED arrays (the call at 0x140522D55 is IASetVertexBuffers with [r9+0x168], strides, offsets).
+//   zeroes applied buffer, offset and stride for the slots from the new count up to the old (0x140522C7C..0x140522CA0). It never touches the desired state. It then
+//   binds from the APPLIED arrays (the call at 0x140522CF5 is IASetVertexBuffers with [r9+0x168], strides, offsets).
 //
 //   The failing sequence (INFERRED from those, and consistent with 38 of 38 field frames): the first eye's deferred-lighting resolve binds buffer Q (desired = applied
 //   = Q); two zero-slot full-screen draws follow, whose FlushIA zeroes APPLIED[0] and binds (NULL, 0, 0) while DESIRED[0] stays Q; the second eye's resolve calls
@@ -38,10 +38,10 @@
 namespace edvr {
 namespace vresync {
 
-// ---- identity: build 334473 (EliteDangerous64.exe, SHA-256 6891f70a...7857e93), the pair every build-keyed hook here checks --------------------------------------
-constexpr uint32_t kExpectedTimestamp = 1791840573u;
+// ---- identity: build 334925 (EliteDangerous64.exe, SHA-256 ed5a8f8c...e264b63), the pair every build-keyed hook here checks --------------------------------------
+constexpr uint32_t kExpectedTimestamp = 1792704584u;
 constexpr uint32_t kExpectedImageSize = 104906752u;
-constexpr uintptr_t kFlushIaRva = 0x522BB0u;   // 0x140522BB0
+constexpr uintptr_t kFlushIaRva = 0x522B50u;   // 0x140522B50
 // The first 16 bytes of FlushIA, read from the exe (Epic and the analysis copy agree): mov [rsp+18h],rbx / push rsi / push rdi / push r14 / sub rsp,30h / mov rdi,r8.
 // CodeHook steals the first instruction (5 bytes, no relative operand) and nothing else.
 constexpr size_t kPrologueBytes = 16;
@@ -52,9 +52,9 @@ inline bool prologueMatches(const uint8_t* bytes, size_t n) { return bytes && n 
 
 // ---- the f3d layout, as offsets from the three pointers FlushIA is called with --------------------------------------------------------------------------------
 constexpr uint32_t kMaxSlots = 16;           // the arrays below hold sixteen slots each (the desired offsets start 0x80 bytes after the desired wrappers)
-constexpr size_t kPsoLayout = 0x188;         // pso -> the input-layout object ([rsi+0x188] at 0x140522C0B)
-constexpr size_t kLayoutSlots = 0x60;        // layout -> dword: the slots the layout declares ([rax+0x60] at 0x140522C7E)
-constexpr size_t kWrapperNative = 0x140;     // wrapper -> the native ID3D11Buffer* (SetVertexBuffer: [rax+0x140] at 0x1404E9F20)
+constexpr size_t kPsoLayout = 0x188;         // pso -> the input-layout object ([rsi+0x188] at 0x140522BAB)
+constexpr size_t kLayoutSlots = 0x60;        // layout -> dword: the slots the layout declares ([rax+0x60] at 0x140522C1E)
+constexpr size_t kWrapperNative = 0x140;     // wrapper -> the native ID3D11Buffer* (SetVertexBuffer: [rax+0x140] at 0x1404E9EC0)
 constexpr size_t kDesiredWrappers = 0;       // desired + 8*slot
 constexpr size_t kDesiredOffsets = 0x80;     // desired + 0x80 + 4*slot  (list+0xE0)
 constexpr size_t kAppliedBuffers = 0x168;    // applied + 0x168 + 8*slot (list+0x408)

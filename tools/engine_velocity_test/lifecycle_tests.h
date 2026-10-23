@@ -128,7 +128,7 @@ const char* kinematicEvalMergeStatus() noexcept { return "rig: hooked"; }
 void kinematicEvalSetClearObserver(EngineClearObserverFn) noexcept {}
 const char* kinematicEvalClearStatus() noexcept { return "rig: hooked"; }
 bool kinematicEvalEmitHookLive(const char** why) noexcept {
-    if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144315ac0 refused";
+    if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144315a20 refused";
     return lifecycle_fake::g_hookLive;
 }
 // The emit's own want on the hook set: counted, so the rig can see the
@@ -1413,7 +1413,7 @@ inline void run(const Harness& h) {
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;
     g.ordinaryFrame();
-    h.check(logged("engine motion: STOOD DOWN -- the emit hook is not installed (rig: kinematic-build-144315ac0 refused)", mark),
+    h.check(logged("engine motion: STOOD DOWN -- the emit hook is not installed (rig: kinematic-build-144315a20 refused)", mark),
             "R6: the stand-down is logged when the hook goes");
     g.beginFrame();
     g.writeScene(g.sceneA.Get(), g.rows[0]);

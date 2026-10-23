@@ -581,15 +581,15 @@ void pollCaptures(ID3D11DeviceContext* ctx) {
 }
 
 // --- The build-keyed engine side ----------------------------------------------
-// FUN_143699CA0's first 32 bytes (the dictionary lookup the bracket calls) and
-// FUN_144315AC0's append sequence at 0x144315E45 (the node count at +0x18,
+// FUN_143699C00's first 32 bytes (the dictionary lookup the bracket calls) and
+// FUN_144315A20's append sequence at 0x144315DA5 (the node count at +0x18,
 // the mask store at +0xAA0+i*8, the owner count at +0x2A4): the layout the
-// bracket's reads and writes rest on, in the hash-verified exe (334473).
-constexpr uintptr_t kLookupRva = 0x3699CA0u;
+// bracket's reads and writes rest on, in the hash-verified exe (334925).
+constexpr uintptr_t kLookupRva = 0x3699C00u;
 constexpr uint8_t kLookupPrologue[32] = {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83,
     0xEC, 0x40, 0x8B, 0x42, 0x18, 0x48, 0x8B, 0xDA, 0x33, 0xD2, 0x4C, 0x8B, 0xF1, 0x48, 0xF7, 0x71};
-constexpr uintptr_t kAppendRva = 0x4315E45u;
+constexpr uintptr_t kAppendRva = 0x4315DA5u;
 constexpr uint8_t kAppendBytes[23] = {
     0x48, 0x8B, 0x42, 0x18,                                // mov rax,[rdx+18h]      the node's count
     0x4C, 0x89, 0xBC, 0xC2, 0xA0, 0x0A, 0x00, 0x00,        // mov [rdx+rax*8+0AA0h],r15  the record's mask
@@ -601,16 +601,16 @@ const char* verifyEngine(uintptr_t base) noexcept {
     __try {
         uint32_t peOff = 0;
         std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return "not build 334473 (no PE header)";
+        if (peOff > 0x1000) return "not build 334925 (no PE header)";
         uint32_t timestamp = 0, imageSize = 0;
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
         if (timestamp != KinematicEvalProbe::kExpectedTimestamp || imageSize != KinematicEvalProbe::kExpectedImageSize)
-            return "not build 334473 (PE timestamp/size)";
+            return "not build 334925 (PE timestamp/size)";
         if (std::memcmp(reinterpret_cast<const void*>(base + kLookupRva), kLookupPrologue, sizeof(kLookupPrologue)))
-            return "lookup mismatch at RVA 0x3699CA0";
+            return "lookup mismatch at RVA 0x3699C00";
         if (std::memcmp(reinterpret_cast<const void*>(base + kAppendRva), kAppendBytes, sizeof(kAppendBytes)))
-            return "append sequence mismatch at RVA 0x4315E45";
+            return "append sequence mismatch at RVA 0x4315DA5";
         return nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "engine image unreadable";
@@ -2281,7 +2281,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
             Log::get().note("%s", lockLine);
         }
     }
-    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144315AC0 calls %llu (%llu appended, %llu pool "
+    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144315A20 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "
                     "this call unproven %llu, table full %llu; same-frame repeats %llu; pose disagreements %llu (must be 0), "
@@ -2652,13 +2652,13 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetClearObserver(&observeDictionaryClear);
     }
     refreshEmitStatus(true);
-    Log::get().note("engine motion: primary rigid producer 42B6DF0 %s; canonical collection-record history, "
+    Log::get().note("engine motion: primary rigid producer 42B6D50 %s; canonical collection-record history, "
                     "unit-scale unskinned records only; unsupported records remain native.",kinematicEvalPrimaryEmitStatus());
     g_windowStartMs = nowMs();
     live.store(true, std::memory_order_release);
     if (!g_emitLive.load(std::memory_order_acquire)) { logStoodDown(); return; }
     armSkinLocked();
-    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144315AC0's records carry "
+    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144315A20's records carry "
                     "their previous engine pose when it is continuous and proven; the pool families' own draws write the "
                     "pool slot and depth at MRT6 under an unblended state; the temporal pass takes exact record motion "
                     "there, masks rig records it cannot follow, and keeps the camera term elsewhere. Per-30 s lines "

@@ -7,7 +7,7 @@
 // the startup files, the setter and getter as the game calls them, the order of the first Present, the setter, the
 // getter, and whether the in-memory 3D mode can be read at all.
 //
-// Everything is behind the build gate (PE stamp and image size, build 334473). On any other build the first call says
+// Everything is behind the build gate (PE stamp and image size, build 334925). On any other build the first call says
 // so once, and every other entry point here returns at once.
 #pragma once
 

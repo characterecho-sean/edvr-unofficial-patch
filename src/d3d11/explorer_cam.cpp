@@ -91,7 +91,7 @@ alignas(8) std::atomic<uint64_t> g_bypassed[2];         // [0] collision, [1] bo
 alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed to the original
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
-// The FindJoint hook's capture. 0x19B4000 attaches EVERY humanoid's avatars (F6: site 1 alone is whichever humanoid ran last, usually an NPC). Only the
+// The FindJoint hook's capture. 0x19B3F40 attaches EVERY humanoid's avatars (F6: site 1 alone is whichever humanoid ran last, usually an NPC). Only the
 // local player has a first-person avatar, so a pair is latched as THE local avatar when one thread makes a site-1 attach and then a site-2 attach at the same
 // stack location (one invocation does both, from one frame, with no other site-1 attach on that thread between). Everything that wants "the local
 // third-person skeleton" reads the latch and never a raw capture.
@@ -442,7 +442,7 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
         if (timestamp != ecm::kExpectedTimestamp || imageSize != ecm::kExpectedImageSize) {
-            *why = "the PE timestamp or image size is not build 334473's";
+            *why = "the PE timestamp or image size is not build 334925's";
             return false;
         }
         return true;
@@ -1384,7 +1384,7 @@ std::atomic<uint32_t> g_witnessIntervalMs{1000}, g_witnessUnrooted{0}, g_witness
 std::atomic<bool> g_busyWitness{false};
 ecm::Ring<ecm::AmcWitness, 4> g_witnessRing;
 bool plausiblePointer(uint64_t p) noexcept { return p >= 0x10000u && p < 0x00007FFF00000000ull; }
-// rcx = *(AMC+0x208); rdx = *rcx; call [rdx+0x20] returns a matrix pointer whose origin is at +0x30 (FUN 0x3DD8D00 at 0x3DD8E62..0x3DD8E6F, same call).
+// rcx = *(AMC+0x208); rdx = *rcx; call [rdx+0x20] returns a matrix pointer whose origin is at +0x30 (FUN 0x3DD8C60 at 0x3DD8DC2..0x3DD8DCF, same call).
 // 1 = read, 0 = not available (a pointer along the chain is null or implausible: nothing was called), -1 = a fault.
 __declspec(noinline) int sehAmcOrigin(const uint8_t* amc, float* out3) noexcept {
     __try {
@@ -2922,7 +2922,7 @@ bool resolveAndVerify(int id, uintptr_t* target, char* why, size_t whyCap) {
     }
     if (!sehCheckBytes(t, spec.prologue, spec.prologueBytes)) {
         std::snprintf(why, whyCap,
-                      "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334473's %s prologue); nothing was patched",
+                      "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's %s prologue); nothing was patched",
                       spec.prologueBytes, static_cast<unsigned long long>(spec.rva), spec.what);
         return false;
     }
@@ -3030,7 +3030,7 @@ void tryHook(int id, const ecm::Sink& sink) {
             g_findSite[1].store(base + ecm::kFindSite2Rva, std::memory_order_relaxed);
             g_findPov.store(base + ecm::kPovNameRva, std::memory_order_release);
         }
-        say(sink, "%s %s hook armed: EliteDangerous64.exe+0x%llX (%s, build 334473) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, "
+        say(sink, "%s %s hook armed: EliteDangerous64.exe+0x%llX (%s, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, "
                   "relay at 0x%llX; %s",
             ecm::prefix(), spec.label, static_cast<unsigned long long>(spec.rva), spec.what, static_cast<unsigned long long>(entry.target),
             entry.stolen, spec.prologueBytes, spec.prologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry.relay)),
@@ -3411,7 +3411,7 @@ void followArm(FrameState& fs, const ecm::Sink& sink) {
     }
     g_followT = t;
     g_followReady.store(true, std::memory_order_release);
-    say(sink, "%s armed (build 334473): while a session has placed the view, each placing update reads the head joint of the LOCAL third-person skeleton (the FindJoint "
+    say(sink, "%s armed (build 334925): while a session has placed the view, each placing update reads the head joint of the LOCAL third-person skeleton (the FindJoint "
               "capture's latched pair) through the skeleton interface's +0x58 slot on the camera-job thread, after checking the vtable (RR +0x%llX or AO +0x%llX) and the "
               "slots +0x18 +0x30 +0x58 before every call; nothing is written to the skeleton. The eye is the head joint + the head's rotation x the rest-pose offset to the "
               "povCamera joint + the trims, with no smoothing unless fix.explorer_cam_follow_smoothing_ms is set. The fixed eye keys serve only when no head joint is "

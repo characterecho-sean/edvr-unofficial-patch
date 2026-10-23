@@ -129,7 +129,7 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
         uint32_t timestamp = 0, imageSize = 0;
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (!vresync::identityMatches(timestamp, imageSize)) { *why = "not build 334473 (PE timestamp or image size differs)"; return false; }
+        if (!vresync::identityMatches(timestamp, imageSize)) { *why = "not build 334925 (PE timestamp or image size differs)"; return false; }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *why = "a read faulted while checking the PE header";
@@ -216,7 +216,7 @@ void vertexResyncInstall() {
         target = base + vresync::kFlushIaRva;
     }
     if (!sehCheckBytes(target, vresync::kFlushIaPrologue, vresync::kPrologueBytes)) {
-        sayf("vertex resync: NOT installed -- the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334473's flush prologue. The game's flush runs as it always did.",
+        sayf("vertex resync: NOT installed -- the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's flush prologue. The game's flush runs as it always did.",
              vresync::kPrologueBytes, static_cast<unsigned long long>(vresync::kFlushIaRva));
         return;
     }
@@ -235,7 +235,7 @@ void vertexResyncInstall() {
     g_relayGate.store(1, std::memory_order_release);
     g_installed.store(true, std::memory_order_release);
     Log::get().setExitLine(&exitLine);   // the game never unloads this DLL: its process exit says the session line
-    sayf("vertex resync: hook armed at EliteDangerous64.exe+0x%llX (Frontier's input-assembler flush, build 334473), stolen=%zu bytes, prologue %zu/%zu bytes verified. Before each "
+    sayf("vertex resync: hook armed at EliteDangerous64.exe+0x%llX (Frontier's input-assembler flush, build 334925), stolen=%zu bytes, prologue %zu/%zu bytes verified. Before each "
          "flush the applied vertex-buffer cache is made to agree with the desired state for the slots the draw's layout uses; the first %u sightings are logged, then a count every "
          "60 s while it is non-zero, a heartbeat every 10 min (zero counts included) and a line when the session ends.",
          static_cast<unsigned long long>(vresync::kFlushIaRva), g_hook.stolenBytes(), vresync::kPrologueBytes, vresync::kPrologueBytes, vresync::kMaxSightings);

@@ -96,10 +96,10 @@ using camera_stubs::kStubBOffset;
 // for process lifetime -- disable closes the gate and nothing more (no
 // uninstall, no free, ever).
 
-constexpr uintptr_t kRefreshRva = 0x592360;
+constexpr uintptr_t kRefreshRva = 0x592300;
 // Two site constraints, learned from two refused installs: the function's
 // second instruction is a conditional jump CodeHook will not move, and the
-// patch site must be eight-byte aligned for the atomic store. +0x592360 is
+// patch site must be eight-byte aligned for the atomic store. +0x592300 is
 // the first site satisfying both (push r15; sub rsp,0xE0; register moves
 // after that replay inside the trampoline). The detour's arguments arrive
 // in rcx/rdx/r8 untouched either way, and rax (the frame anchor the

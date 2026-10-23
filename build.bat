@@ -3193,7 +3193,7 @@ REM Build gate for engine-record velocity (part of fix.temporal_aa, phase 1;
 REM docs\kinematic-motion-injection-2026-09-19.md, 2026-09-23): the DXBC
 REM patcher end to end on WARP (patched pool-family shaders disassemble,
 REM reflect, create and DRAW the exact slot and depth at MRT6), the emit
-REM bracket against a fake engine laid out as build 332841 (previous pose,
+REM bracket against a fake engine laid out as build 334925 (previous pose,
 REM self-checking marker, the disagreement gate, the table), and the
 REM compose's arithmetic from the shipped HLSL text against a double
 REM reference. A parser or patcher that drifts fails here, not in a flight.
@@ -3327,7 +3327,7 @@ exit /b 0
 :rig_explorer_cam_test
 echo [edvr] === explorer_cam_test.exe ===
 REM Build gate for Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
-REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five
+REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-334925 identity and CodeHook's reading of all five
 REM prologues, the eye keys' clamp, the exact 16 floats written into the free camera's commander-local pose, the placement machine on
 REM scripted state sequences, the F5 sequencer on scripted mode sequences (enter from every mode, timeouts, the player's own TAB engaging
 REM nothing, detach and re-attach, exit), F5's decision table, the camera-UI hider, the watches, the event ring, every log line's text and
@@ -3505,7 +3505,7 @@ REM recommendation (3070 x 0.65 = 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 =
 REM 1535x1516, the 2458x2824 x 0.65 = 1597x1835 of the 2026-09-23 flight);
 REM 2 tan(vFOV/2) on every recorded frustum; the interface surface's shape;
 REM the sizing chains' formatter and verdicts; the engine-side panel factor
-REM across the flights' states and the build-332841 bytes it patches. The LAYER
+REM across the flights' states and the build-334925 bytes it patches. The LAYER
 REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
 REM scissor map and the jitter cancel; the blend conversion table, a multiply
 REM included, and a CPU model proving layer-then-composite equals the game's

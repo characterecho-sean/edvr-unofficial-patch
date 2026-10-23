@@ -650,7 +650,7 @@ inline void formatExitLine(const Stats& s,char (&out)[kExitLineBytes]) noexcept 
                   static_cast<unsigned long long>(s.copierPrechecked),static_cast<unsigned long long>(s.copierPrecheckDeclined));
 }
 inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
-// 36846D0 frees every list node in this typed336 dictionary. Destination
+// 3684630 frees every list node in this typed336 dictionary. Destination
 // clear precedes a merge of unrelated source collections, so only claims in
 // nodes actually being freed may be revoked on a successful bounded walk.
 // The bounded walk of a typed336 dictionary's list nodes, shared by the locked clear and by the lock-free claim check, so the two
@@ -736,7 +736,7 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
     }catch(...){fail();}
 }
 inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDictionaryImpl<true>(dictionary);}
-// 4351440: full eight-item nodes splice at the HEAD, preserving a nonempty
+// 43513A0: full eight-item nodes splice at the HEAD, preserving a nonempty
 // destination tail; partial nodes fill the
 // destination tail, then shift any remainder within their original node.
 // Claims are staged before ALL source slots/overwritten destinations clear.

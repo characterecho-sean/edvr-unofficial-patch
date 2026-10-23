@@ -46,26 +46,26 @@ internal static class RvaTable
     // and neither belongs to the steady-state chain the gate measures.
     private static readonly (string Name, uint Entry, uint Size, RvaKind Kind, bool Pipeline)[] Seeds =
     [
-        ("update_render_data_job", 0x4324640, 503, RvaKind.Body, true),
-        ("render_data_batch", 0x4323040, 565, RvaKind.Body, true),
-        ("update_physics_objects_job", 0x432DFA0, 62, RvaKind.Body, true),
-        ("table_ba0", 0x4324510, 0, RvaKind.Body, true),
-        ("record_drain", 0x42E2600, 134, RvaKind.Body, true),
-        ("reset_repopulate", 0x36A3C50, 687, RvaKind.Body, false),
-        ("census_bracket", 0x42B70E0, 0x1000, RvaKind.Census, false),
-        ("thunk_42e21e0", 0x42E21E0, 0, RvaKind.Thunk, true),
-        ("thunk_42e2200", 0x42E2200, 0, RvaKind.Thunk, true),
-        ("thunk_42e27b0", 0x42E27B0, 0, RvaKind.Thunk, true),
-        ("thunk_42e2860", 0x42E2860, 0, RvaKind.Thunk, true),
-        ("call_site_431df1f", 0x431DF1F, 0, RvaKind.CallSite, true),
-        ("eval_4311ca0", 0x4311CA0, 1006, RvaKind.Eval, true),
+        ("update_render_data_job", 0x43245A0, 503, RvaKind.Body, true),
+        ("render_data_batch", 0x4322FA0, 565, RvaKind.Body, true),
+        ("update_physics_objects_job", 0x432DF00, 62, RvaKind.Body, true),
+        ("table_ba0", 0x4324470, 0, RvaKind.Body, true),
+        ("record_drain", 0x42E2560, 134, RvaKind.Body, true),
+        ("reset_repopulate", 0x36A3BB0, 687, RvaKind.Body, false),
+        ("census_bracket", 0x42B7040, 0x1000, RvaKind.Census, false),
+        ("thunk_42e2140", 0x42E2140, 0, RvaKind.Thunk, true),
+        ("thunk_42e2160", 0x42E2160, 0, RvaKind.Thunk, true),
+        ("thunk_42e2710", 0x42E2710, 0, RvaKind.Thunk, true),
+        ("thunk_42e27c0", 0x42E27C0, 0, RvaKind.Thunk, true),
+        ("call_site_431de7f", 0x431DE7F, 0, RvaKind.CallSite, true),
+        ("eval_4311c00", 0x4311C00, 1006, RvaKind.Eval, true),
         // Nine bytes: a jmp thunk, so this class will rarely match a sampled
         // frame. Kept because the name is the evaluator the arc is chasing.
-        ("lod_evaluator_4334000", 0x4334000, 9, RvaKind.Lod, true),
+        ("lod_evaluator_4333F60", 0x4333F60, 9, RvaKind.Lod, true),
     ];
 
-    public const uint SchedulerStart = 0x5D6C80;
-    public const uint SchedulerEnd = 0x5D7260;
+    public const uint SchedulerStart = 0x5D6C20;
+    public const uint SchedulerEnd = 0x5D7200;
 
     public static readonly RvaClass[] Classes = Build();
     public static readonly int CensusClassId = Array.FindIndex(Classes, c => c.Kind == RvaKind.Census);
@@ -135,7 +135,7 @@ internal sealed class ModuleInfo(int id, string path, string name, ulong imageBa
 
 /// The topmost game-module RVAs of a stack, innermost first. Three is enough to
 /// name a blocking site and its two callers, which is how the hand count of the
-/// parked trace identified 0x5d6edf under 0x5d42a1 / 0x5d6906.
+/// parked trace identified 0x5d6e7f under 0x5d4241 / 0x5d68a6.
 internal readonly record struct GameTop(uint First, uint Second, uint Third, int Count);
 
 internal sealed class StackInfo

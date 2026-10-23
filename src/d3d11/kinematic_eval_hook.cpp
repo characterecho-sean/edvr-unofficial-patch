@@ -15,10 +15,10 @@ namespace {
 
 using EvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t);
 using JobFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
-// FUN_14431DCE0 (decomp_431AFE0.txt): ulonglong f(longlong rig, longlong
+// FUN_14431DC40 (decomp_431AFE0.txt): ulonglong f(longlong rig, longlong
 // poseCtx) -- exactly two register params, rig state checked at +0x380.
 using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
-// FUN_1442B70E0 (decomp_42B4420.txt): f(param_1 rigOwner, param_2 ctx,
+// FUN_1442B7040 (decomp_42B4420.txt): f(param_1 rigOwner, param_2 ctx,
 // param_3 passedMask, param_4, param_5, param_6) -- SIX params, the last two
 // on the stack (param_6's 16 bytes are copied into every appended item).
 // The callback must declare all six so the compiler reproduces the stack
@@ -26,8 +26,8 @@ using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
 // param_5/param_6 and corrupt the items.
 using BucketFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                          uintptr_t,uintptr_t);
-// The direct bucket producers take the bucket as param_2: FUN_144315AC0
-// has four register params, FUN_14369F6C0 three. One four-param forward
+// The direct bucket producers take the bucket as param_2: FUN_144315A20
+// has four register params, FUN_14369F620 three. One four-param forward
 // covers both -- the three-param callee never reads r9, which is volatile.
 using DirectBuildFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
@@ -87,14 +87,14 @@ std::atomic<RigVetoFn> rigVeto{nullptr};
 std::atomic<bool> rigVetoWanted{false};
 std::atomic<uint64_t> rigEmulateFaults{0};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
-// FUN_1442B6C80's relay gate: a cell of its own, not evalGate, so the
+// FUN_1442B6BE0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe) costs the evalGate
 // consumers nothing. Open only while the probe is attached AND the patch is
 // verified ours.
 alignas(8) std::atomic<uintptr_t> partGate{0};
 static_assert(decltype(partGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic cell directly.");
-// The builder call's return address for the part test (base+0x42B7856), set
+// The builder call's return address for the part test (base+0x42B77B6), set
 // before the part patch goes in; the observer compares _ReturnAddress().
 std::atomic<uintptr_t> g_partReturn{0};
 std::atomic<const char*> g_partStatus{"not requested"};
@@ -119,14 +119,14 @@ struct HookEntry {
 };
 
 // Job bodies behind the run thunks (recovered from the hash-verified exe,
-// SHA-256 6891f70a...; thunk jmps decoded 2026-09-19):
+// SHA-256 ed5a8f8c...; thunk jmps decoded 2026-09-19):
 constexpr uintptr_t kJobRvas[KinematicEvalProbe::kJobCount]={
-    0x4324640, // UpdateRenderDataJob   (thunk 0x42E21E0)
-    0x4323040, // render-data batch     (thunk 0x42E27B0)
-    0x432DFA0, // UpdatePhysicsObjectsJob (thunk 0x42E2200)
-    0x42E21F0, // PrePhysicsAdvanceJob  (run IS the body)
-    0x42E2210, // PrePhysicsAdvanceCurveJob (run IS the body)
-    0x4324510, // unnamed table BA0     (thunk 0x42E2860)
+    0x43245A0, // UpdateRenderDataJob   (thunk 0x42E2140)
+    0x4322FA0, // render-data batch     (thunk 0x42E2710)
+    0x432DF00, // UpdatePhysicsObjectsJob (thunk 0x42E2160)
+    0x42E2150, // PrePhysicsAdvanceJob  (run IS the body)
+    0x42E2170, // PrePhysicsAdvanceCurveJob (run IS the body)
+    0x4324470, // unnamed table BA0     (thunk 0x42E27C0)
 };
 
 int64_t qpcNow() noexcept {
@@ -135,7 +135,7 @@ int64_t qpcNow() noexcept {
     return t.QuadPart;
 }
 
-// Job 2 (UpdatePhysicsObjectsJob, 0x432DFA0) bit-compare-gates its NODE
+// Job 2 (UpdatePhysicsObjectsJob, 0x432DF00) bit-compare-gates its NODE
 // matrix writes and appends every changed node to a dirty queue: the job
 // descriptor's +0x18 is a pointer to the queue's atomic append counter
 // (decomp_432B2A0, param_1[3]; flushed in 0x20 batches by FUN_14489CA90).
@@ -284,68 +284,68 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
 };
 HookEntry g_bucketEntry{"kinematic-bucket-build",KinematicEvalProbe::kBucketBuildRva,
                         reinterpret_cast<void*>(&bucketBuildObserved)};
-HookEntry g_primaryEntry{"engine-primary-rigid-emit",0x42B6DF0u,
+HookEntry g_primaryEntry{"engine-primary-rigid-emit",0x42B6D50u,
                          reinterpret_cast<void*>(&primaryBuildObserved),&primaryGate};
-HookEntry g_poolCopyEntry{"engine-primary-pool-copy",0x4C847C0u,
+HookEntry g_poolCopyEntry{"engine-primary-pool-copy",0x4C846A0u,
                           reinterpret_cast<void*>(&poolCopyObserved),&primaryGate};
-HookEntry g_poolMergeEntry{"engine-primary-list-merge",0x4351440u,
+HookEntry g_poolMergeEntry{"engine-primary-list-merge",0x43513A0u,
                            reinterpret_cast<void*>(&poolMergeObserved),&primaryGate};
-HookEntry g_poolClearEntry{"engine-primary-list-clear",0x36846D0u,
+HookEntry g_poolClearEntry{"engine-primary-list-clear",0x3684630u,
                            reinterpret_cast<void*>(&poolClearObserved),&primaryGate};
 HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
-    {"kinematic-build-144315ac0",KinematicEvalProbe::kDirectBuildRvas[0],
+    {"kinematic-build-144315a20",KinematicEvalProbe::kDirectBuildRvas[0],
      reinterpret_cast<void*>(&directBuild0)},
-    {"kinematic-build-14369f6c0",KinematicEvalProbe::kDirectBuildRvas[1],
+    {"kinematic-build-14369f620",KinematicEvalProbe::kDirectBuildRvas[1],
      reinterpret_cast<void*>(&directBuild1)},
 };
 
-// --- The builder's per-part test (FUN_1442B6C80), the gate probe's third site
+// --- The builder's per-part test (FUN_1442B6BE0), the gate probe's third site
 // decomp_42B3FC0.txt: f(param_1 = the builder's six-pointer block at its
 // rbp+0x70, param_2 = {u32 LOD, u8 passed}, param_3 = the view); frustum
-// (FUN_1404F4F70 at 0x1442B6D26) and screen-size/LOD on the part's own sphere.
-// Its only caller is the builder's sub-item loop (0x1442B7851; the other
+// (FUN_1404F4F10 at 0x1442B6C86) and screen-size/LOD on the part's own sphere.
+// Its only caller is the builder's sub-item loop (0x1442B77B1; the other
 // xref, 0x1462B1388, is outside any function). The observer reads the
 // builder's frame around that call, so the signature below is not only the
 // prologue: it is every instruction the frame offsets were read from, in the
-// hash-verified exe (build 334473). Any mismatch stands this hook down alone.
-constexpr uintptr_t kPartTestRva=0x42B6C80u;
-constexpr uintptr_t kPartCallReturnRva=0x42B7856u;   // after the call at 0x1442B7851
+// hash-verified exe (build 334925). Any mismatch stands this hook down alone.
+constexpr uintptr_t kPartTestRva=0x42B6BE0u;
+constexpr uintptr_t kPartCallReturnRva=0x42B77B6u;   // after the call at 0x1442B77B1
 // mov [rsp+10h],rbx; mov [rsp+18h],rsi; push rdi; sub rsp,50h; mov rax,[rcx]; mov rdi,r8
 constexpr uint8_t kPartPrologue[21]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,
                                      0x48,0x83,0xEC,0x50,0x48,0x8B,0x01,0x49,0x8B,0xF8};
 struct CodeBytes { uintptr_t rva; uint8_t n; uint8_t b[17]; const char* why; };
 constexpr CodeBytes kPartFrame[]={
-    {0x42B70E9u,7,{0x49,0x8D,0xAB,0x08,0xFC,0xFF,0xFF},
-     "builder frame mismatch at RVA 0x42B70E9 (lea rbp,[r11-3F8h]: the frame base)"},
-    {0x42B7115u,4,{0x48,0x89,0x55,0xB8},
-     "builder frame mismatch at RVA 0x42B7115 (mov [rbp-48h],rdx: the render context)"},
-    {0x42B711Cu,4,{0x48,0x89,0x4D,0x98},
-     "builder frame mismatch at RVA 0x42B711C (mov [rbp-68h],rcx: the pose context)"},
-    {0x42B7528u,4,{0x48,0x89,0x75,0xA8},
-     "builder frame mismatch at RVA 0x42B7528 (mov [rbp-58h],rsi: the instance entry)"},
-    {0x42B7578u,4,{0x48,0x89,0x4D,0xC0},
-     "builder frame mismatch at RVA 0x42B7578 (mov [rbp-40h],rcx: the entry's model)"},
-    {0x42B758Du,4,{0x48,0x89,0x45,0xB0},
-     "builder frame mismatch at RVA 0x42B758D (mov [rbp-50h],rax: the model's +0x40)"},
-    {0x42B764Bu,4,{0x48,0x89,0x5D,0x90},
-     "builder frame mismatch at RVA 0x42B764B (mov [rbp-70h],rbx: the first sub-item)"},
-    {0x42B7CABu,4,{0x48,0x83,0xC3,0x20},
-     "builder frame mismatch at RVA 0x42B7CAB (add rbx,20h: the next sub-item)"},
-    {0x42B7CB7u,4,{0x48,0x89,0x5D,0x90},
-     "builder frame mismatch at RVA 0x42B7CB7 (mov [rbp-70h],rbx: the sub-item stored back)"},
-    {0x42B76A3u,4,{0x48,0x8D,0x45,0x50},
-     "builder frame mismatch at RVA 0x42B76A3 (lea rax,[rbp+50h]: the world centre)"},
-    {0x42B76B4u,4,{0x48,0x89,0x45,0x70},
-     "builder frame mismatch at RVA 0x42B76B4 (mov [rbp+70h],rax: param_1[0])"},
-    {0x42B77DDu,4,{0x48,0x8D,0x45,0x60},
-     "builder frame mismatch at RVA 0x42B77DD (lea rax,[rbp+60h]: the model's +0x10 copy)"},
-    {0x42B77E1u,4,{0x48,0x89,0x45,0x78},
-     "builder frame mismatch at RVA 0x42B77E1 (mov [rbp+78h],rax: param_1[1])"},
-    {0x42B7827u,7,{0x48,0x8D,0x95,0xB0,0x00,0x00,0x00},
-     "builder call-site mismatch at RVA 0x42B7827 (lea rdx,[rbp+0B0h]: param_2)"},
-    {0x42B7845u,17,{0x4C,0x8B,0xC0,0x48,0x89,0x44,0x24,0x30,0x48,0x8D,0x4D,0x70,0xE8,0x2A,0xF4,0xFF,0xFF},
-     "builder call-site mismatch at RVA 0x42B7845 (mov r8,rax; mov [rsp+30h],rax; lea rcx,[rbp+70h]; "
-     "call FUN_1442B6C80)"},
+    {0x42B7049u,7,{0x49,0x8D,0xAB,0x08,0xFC,0xFF,0xFF},
+     "builder frame mismatch at RVA 0x42B7049 (lea rbp,[r11-3F8h]: the frame base)"},
+    {0x42B7075u,4,{0x48,0x89,0x55,0xB8},
+     "builder frame mismatch at RVA 0x42B7075 (mov [rbp-48h],rdx: the render context)"},
+    {0x42B707Cu,4,{0x48,0x89,0x4D,0x98},
+     "builder frame mismatch at RVA 0x42B707C (mov [rbp-68h],rcx: the pose context)"},
+    {0x42B7488u,4,{0x48,0x89,0x75,0xA8},
+     "builder frame mismatch at RVA 0x42B7488 (mov [rbp-58h],rsi: the instance entry)"},
+    {0x42B74D8u,4,{0x48,0x89,0x4D,0xC0},
+     "builder frame mismatch at RVA 0x42B74D8 (mov [rbp-40h],rcx: the entry's model)"},
+    {0x42B74EDu,4,{0x48,0x89,0x45,0xB0},
+     "builder frame mismatch at RVA 0x42B74ED (mov [rbp-50h],rax: the model's +0x40)"},
+    {0x42B75ABu,4,{0x48,0x89,0x5D,0x90},
+     "builder frame mismatch at RVA 0x42B75AB (mov [rbp-70h],rbx: the first sub-item)"},
+    {0x42B7C0Bu,4,{0x48,0x83,0xC3,0x20},
+     "builder frame mismatch at RVA 0x42B7C0B (add rbx,20h: the next sub-item)"},
+    {0x42B7C17u,4,{0x48,0x89,0x5D,0x90},
+     "builder frame mismatch at RVA 0x42B7C17 (mov [rbp-70h],rbx: the sub-item stored back)"},
+    {0x42B7603u,4,{0x48,0x8D,0x45,0x50},
+     "builder frame mismatch at RVA 0x42B7603 (lea rax,[rbp+50h]: the world centre)"},
+    {0x42B7614u,4,{0x48,0x89,0x45,0x70},
+     "builder frame mismatch at RVA 0x42B7614 (mov [rbp+70h],rax: param_1[0])"},
+    {0x42B773Du,4,{0x48,0x8D,0x45,0x60},
+     "builder frame mismatch at RVA 0x42B773D (lea rax,[rbp+60h]: the model's +0x10 copy)"},
+    {0x42B7741u,4,{0x48,0x89,0x45,0x78},
+     "builder frame mismatch at RVA 0x42B7741 (mov [rbp+78h],rax: param_1[1])"},
+    {0x42B7787u,7,{0x48,0x8D,0x95,0xB0,0x00,0x00,0x00},
+     "builder call-site mismatch at RVA 0x42B7787 (lea rdx,[rbp+0B0h]: param_2)"},
+    {0x42B77A5u,17,{0x4C,0x8B,0xC0,0x48,0x89,0x44,0x24,0x30,0x48,0x8D,0x4D,0x70,0xE8,0x2A,0xF4,0xFF,0xFF},
+     "builder call-site mismatch at RVA 0x42B77A5 (mov r8,rax; mov [rsp+30h],rax; lea rcx,[rbp+70h]; "
+     "call FUN_1442B6BE0)"},
 };
 HookEntry g_partEntry{"cull-gate-part-test",kPartTestRva,reinterpret_cast<void*>(&partTestObserved),&partGate};
 
@@ -356,7 +356,7 @@ HookEntry g_partEntry{"cull-gate-part-test",kPartTestRva,reinterpret_cast<void*>
 thread_local uint32_t t_jobMask=0;
 // The gate probe's row for the builder call on this thread's stack (set by
 // bucketBuildObserved around its forward, save/restore), read by the part
-// test's observer: joins each FUN_1442B6C80 verdict to its builder row.
+// test's observer: joins each FUN_1442B6BE0 verdict to its builder row.
 thread_local uint32_t t_builderRow=kGateProbeNoRow;
 thread_local engine_velocity_emit::PrimaryIdentity t_primaryIdentity;
 
@@ -385,10 +385,10 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
     return result;
 }
 
-// Built v12: Elite's own off-screen branch of the rig eval 0x431DCE0, performed in place of its body (bytes 0x431DF21..0x431DF40; decomp_431AFE0.txt
+// Built v12: Elite's own off-screen branch of the rig eval 0x431DC40, performed in place of its body (bytes 0x431DE81..0x431DEA0; decomp_431AFE0.txt
 // lines 97 to 103). With collection = rig+0x348 (decomp line 78): [collection+0x629] = 0 (the byte written as r13b, which is zero on this path: r13
-// is cleared at 0x431DD17 and not written again); FUN_144350A50(collection+0x300), which is mov dword [rcx+0x2A4], 0 (owner count); then, when
-// [collection+0x2E0] (the pipe) is non-null, FUN_1442B8420(pipe), which is add rcx,0x78 and jmp 0x144350A50 (pipe+0x31C = 0). Both callees are
+// is cleared at 0x431DC77 and not written again); FUN_1443509B0(collection+0x300), which is mov dword [rcx+0x2A4], 0 (owner count); then, when
+// [collection+0x2E0] (the pipe) is non-null, FUN_1442B8380(pipe), which is add rcx,0x78 and jmp 0x1443509B0 (pipe+0x31C = 0). Both callees are
 // Microsoft x64 with one argument in rcx: void(__fastcall*)(uintptr_t). Returns false, having written nothing, when the collection cannot be read;
 // any fault after the first write is counted and reported as a forward (the caller forwards).
 // Built v12.1: the rig whose evaluation forward is running on this thread (0 outside one). Set by rigEvalObserved around its forward.
@@ -419,8 +419,8 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     __try {
         for(int i=0;i<steps;++i) {
             if(kinds[i]==1)      *reinterpret_cast<volatile uint8_t*>(args[i])=0;          // mov byte [rbx+0x629], r13b (0)
-            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(base+0x4350A50)(args[i]);  // lea rcx,[rbx+0x300]; call 0x4350A50
-            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(base+0x42B8420)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8420
+            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(base+0x43509B0)(args[i]);  // lea rcx,[rbx+0x300]; call 0x43509B0
+            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(base+0x42B8380)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8380
         }
         done=true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -549,7 +549,7 @@ EDVR_JOB_WRAPPER(0) EDVR_JOB_WRAPPER(1) EDVR_JOB_WRAPPER(2)
 EDVR_JOB_WRAPPER(3) EDVR_JOB_WRAPPER(4) EDVR_JOB_WRAPPER(5)
 #undef EDVR_JOB_WRAPPER
 
-// --- Draw-item-builder bracket (FUN_1442B70E0, the census join) ------------
+// --- Draw-item-builder bracket (FUN_1442B7040, the census join) ------------
 // One call builds the draw items for one rig owner: it walks the owner's
 // instance entries (count u64 @ param_1+0x48, array @ +0x50, stride 0x58),
 // resolves each entry's model (entry+0x0) to its bucket (*(model+0x20)) and
@@ -559,7 +559,7 @@ EDVR_JOB_WRAPPER(3) EDVR_JOB_WRAPPER(4) EDVR_JOB_WRAPPER(5)
 // the counters at entry and exit attributes appends to this call; summed
 // per session they are the engine-side item production the D3D11 draw
 // census joins against. Both append paths are covered: the inline site and
-// FUN_1442B6DF0 run inside the forwarded call.
+// FUN_1442B6D50 run inside the forwarded call.
 constexpr uint32_t kBucketWalkCap=64u;
 struct BucketSnap { uintptr_t bucket; int32_t start; };
 
@@ -648,7 +648,7 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
 
 // Six arguments are required: the original reads the mask and optional
 // four-word tail on the stack. The relay jumps here, preserving the native
-// caller's return address; only 42B70E0's verified primary call is eligible.
+// caller's return address; only 42B7040's verified primary call is eligible.
 __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,uintptr_t lod,
     uintptr_t position,uintptr_t quaternion,uintptr_t mask,uintptr_t tail) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_primaryEntry.forward.load(std::memory_order_acquire));
@@ -753,13 +753,13 @@ __declspec(noinline) void __fastcall poolClearObserved(uintptr_t dictionary,uint
     forward(dictionary,allocatorOwner);
 }
 
-// --- The per-part test's observer (FUN_1442B6C80) ---------------------------
+// --- The per-part test's observer (FUN_1442B6BE0) ---------------------------
 // Reached only through its own relay (partGate: the gate probe attached and
 // the patch verified ours). Forwards first; the probe then reads the verdict
 // the call just wrote (param_2) and the builder's frame around it, read-only:
 // the verdict is never written.
 // The return address names the caller: the relay JUMPS here, so the slot
-// holds the builder's return address (base+0x42B7856) when the call came
+// holds the builder's return address (base+0x42B77B6) when the call came
 // from its sub-item loop.
 __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintptr_t out,
                                                            uintptr_t view) noexcept {
@@ -778,7 +778,7 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
 }
 
 // --- Direct-producer brackets (bucket = param_2) -----------------------------
-// Same counter-delta discipline as the 42B70E0 bracket without the entry
+// Same counter-delta discipline as the 42B7040 bracket without the entry
 // walk: param_2 IS the bucket (decomp_4312E00 line 250, decomp_369C9C0 line
 // 318 -- both INC param_2+0x2A4 per appended item). A fault on either read
 // drops the call's items, never the flight.
@@ -819,7 +819,7 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
         } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
     }
     kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
-    // Engine-record velocity: FUN_144315AC0 (producer 0) only, after the
+    // Engine-record velocity: FUN_144315A20 (producer 0) only, after the
     // forward, while the records it appended are still this job's alone.
     if(producer==0 && !fault) {
         const auto emit=emitObserver.load(std::memory_order_acquire);
@@ -871,8 +871,8 @@ bool ensureInstalled(uintptr_t base) noexcept {
         if(!installOne(g_directEntries[i],base)) {
             // Same stand-down-alone rule; bucket_items_direct[i].calls == 0
             // with installed status is the signature, and CodeHook logs
-            // under the site's own name (kinematic-build-144315ac0 /
-            // kinematic-build-14369f6c0).
+            // under the site's own name (kinematic-build-144315a20 /
+            // kinematic-build-14369f620).
         }
     }
     return true;
@@ -933,20 +933,20 @@ bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     return bytes[0]==0xE9 && actual==displacement && std::memcmp(bytes+5,tail,sizeof(tail))==0;
 }
 
-// FUN_1442B6C80's build-keyed signature: null when the image is build
-// 334473 and every byte the part observer's frame offsets rest on is in
+// FUN_1442B6BE0's build-keyed signature: null when the image is build
+// 334925 and every byte the part observer's frame offsets rest on is in
 // place (the prologue, or our own patch followed by the prologue's rest);
 // otherwise the reason the hook stands down.
 const char* partTestSignature(uintptr_t base,const HookEntry& entry) noexcept {
     __try {
         uint32_t peOff=0;
         std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
-        if(peOff>0x1000)return "not build 334473 (no PE header)";
+        if(peOff>0x1000)return "not build 334925 (no PE header)";
         uint32_t timestamp=0,imageSize=0;
         std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
         std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
         if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
-           imageSize!=KinematicEvalProbe::kExpectedImageSize)return "not build 334473 (PE timestamp/size)";
+           imageSize!=KinematicEvalProbe::kExpectedImageSize)return "not build 334925 (PE timestamp/size)";
         uint8_t got[sizeof(kPartPrologue)]{};
         std::memcpy(got,reinterpret_cast<const void*>(base+kPartTestRva),sizeof(got));
         if(std::memcmp(got,kPartPrologue,sizeof(got))!=0) {
@@ -956,7 +956,7 @@ const char* partTestSignature(uintptr_t base,const HookEntry& entry) noexcept {
                 ?reinterpret_cast<intptr_t>(entry.relay)-intptr_t(base+kPartTestRva+5):0;
             if(!(entry.relay && got[0]==0xE9 && actual==displacement &&
                  std::memcmp(got+5,kPartPrologue+5,sizeof(got)-5)==0))
-                return "prologue mismatch at RVA 0x42B6C80";
+                return "prologue mismatch at RVA 0x42B6BE0";
         }
         for(const CodeBytes& c:kPartFrame)
             if(std::memcmp(reinterpret_cast<const void*>(base+c.rva),c.b,c.n)!=0)return c.why;
@@ -976,7 +976,7 @@ bool partPatchIsOurs(uintptr_t base) noexcept {
            std::memcmp(bytes+5,kPartPrologue+5,sizeof(bytes)-5)==0;
 }
 
-// Verified build 334473: primary ABI/prologue, its sole builder callsite,
+// Verified build 334925: primary ABI/prologue, its sole builder callsite,
 // dictionary key/owner loads, and terminal append count. No guessed frame.
 const char* primarySignature(uintptr_t base) noexcept {
     constexpr uint8_t prologue[]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x20,
@@ -987,30 +987,30 @@ const char* primarySignature(uintptr_t base) noexcept {
     constexpr uint8_t owner[]={0x48,0x8B,0x76,0x20}; // mov rsi,[rsi+20h]
     __try {
         uint8_t got[sizeof(prologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+0x42B6DF0),sizeof(got));
+        std::memcpy(got,reinterpret_cast<const void*>(base+0x42B6D50),sizeof(got));
         if(g_primaryEntry.ready.load(std::memory_order_acquire) && !std::memcmp(got,prologue,sizeof(got)))
             return "our primary patch is gone";
         if(std::memcmp(got,prologue,sizeof(got))) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
-            const intptr_t expected=reinterpret_cast<intptr_t>(g_primaryEntry.relay)-intptr_t(base+0x42B6DF5);
+            const intptr_t expected=reinterpret_cast<intptr_t>(g_primaryEntry.relay)-intptr_t(base+0x42B6D55);
             if(!g_primaryEntry.relay || got[0]!=0xE9 || jump!=expected ||
                 std::memcmp(got+5,prologue+5,sizeof(got)-5))return "primary prologue mismatch";
         }
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B7503),call,sizeof(call)))return "primary caller mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B7098),append,sizeof(append)))return "primary append mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6E1B),key,sizeof(key)))return "primary key mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6F9C),owner,sizeof(owner)))return "primary owner mismatch";
+        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B7463),call,sizeof(call)))return "primary caller mismatch";
+        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6FF8),append,sizeof(append)))return "primary append mismatch";
+        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6D7B),key,sizeof(key)))return "primary key mismatch";
+        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6EFC),owner,sizeof(owner)))return "primary owner mismatch";
         uint64_t primaryHash=0xCBF29CE484222325ull,outerHash=primaryHash;
-        for(uintptr_t i=5;i<0x2DA;++i)primaryHash=(primaryHash^*reinterpret_cast<const uint8_t*>(base+0x42B6DF0+i))*0x100000001B3ull;
-        for(uintptr_t i=5;i<0xC96;++i)outerHash=(outerHash^*reinterpret_cast<const uint8_t*>(base+0x42B70E0+i))*0x100000001B3ull;
-        if(primaryHash!=0xC73F259B7CFB42BDull)return "primary body mismatch";
-        if(outerHash!=0xB8DD5BFF8D968DD4ull)return "outer builder body mismatch";
+        for(uintptr_t i=5;i<0x2DA;++i)primaryHash=(primaryHash^*reinterpret_cast<const uint8_t*>(base+0x42B6D50+i))*0x100000001B3ull;
+        for(uintptr_t i=5;i<0xC96;++i)outerHash=(outerHash^*reinterpret_cast<const uint8_t*>(base+0x42B7040+i))*0x100000001B3ull;
+        if(primaryHash!=0x7C7152F32F46C674ull)return "primary body mismatch";
+        if(outerHash!=0xD7B91C22824F5886ull)return "outer builder body mismatch";
         // The complete outer body certifies six-argument setup and record/
         // context derivation. Its bracket must still be our installed relay.
-        uint8_t outer[5]{};std::memcpy(outer,reinterpret_cast<const void*>(base+0x42B70E0),5);
+        uint8_t outer[5]{};std::memcpy(outer,reinterpret_cast<const void*>(base+0x42B7040),5);
         int32_t jump=0;std::memcpy(&jump,outer+1,4);
         if(!g_bucketEntry.ready.load(std::memory_order_acquire) || !g_bucketEntry.relay || outer[0]!=0xE9 ||
-           jump!=reinterpret_cast<intptr_t>(g_bucketEntry.relay)-intptr_t(base+0x42B70E5))return "outer builder patch is not ours";
+           jump!=reinterpret_cast<intptr_t>(g_bucketEntry.relay)-intptr_t(base+0x42B7045))return "outer builder patch is not ours";
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return "primary image unreadable";}
 }
@@ -1018,7 +1018,7 @@ const char* primarySignature(uintptr_t base) noexcept {
 void ensurePrimaryEmit(uintptr_t base) noexcept {
     const char* why=primarySignature(base);
     if(why){g_primaryStatus.store(why,std::memory_order_release);return;}
-    g_primaryReturn.store(base+0x42B7508,std::memory_order_release);
+    g_primaryReturn.store(base+0x42B7468,std::memory_order_release);
     if(!g_primaryEntry.ready.load(std::memory_order_acquire) && !installOne(g_primaryEntry,base)) {
         g_primaryStatus.store("CodeHook refused primary emit",std::memory_order_release);return;
     }
@@ -1033,17 +1033,17 @@ const char* poolCopySignature(uintptr_t base) noexcept {
         0x4C,0x8B,0xB2,0x80,0x01,0x00,0x00,0x8B,0x68,0x10};
     __try {
         uint8_t got[sizeof(prologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+0x4C847C0),sizeof(got));
+        std::memcpy(got,reinterpret_cast<const void*>(base+0x4C846A0),sizeof(got));
         if(std::memcmp(got,prologue,sizeof(got))) {
             int32_t actual=0;std::memcpy(&actual,got+1,4);
             if(!g_poolCopyEntry.relay || got[0]!=0xE9 ||
-               actual!=reinterpret_cast<intptr_t>(g_poolCopyEntry.relay)-intptr_t(base+0x4C847C5) ||
+               actual!=reinterpret_cast<intptr_t>(g_poolCopyEntry.relay)-intptr_t(base+0x4C846A5) ||
                std::memcmp(got+5,prologue+5,sizeof(got)-5))return "pool copier prologue mismatch";
         } else if(g_poolCopyEntry.ready.load(std::memory_order_acquire))return "our pool copier patch is gone";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x4C847DC),layout,sizeof(layout)))return "pool copier layout mismatch";
+        if(std::memcmp(reinterpret_cast<const void*>(base+0x4C846BC),layout,sizeof(layout)))return "pool copier layout mismatch";
         uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=5;i<0x283;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x4C847C0+i))*0x100000001B3ull;
-        if(hash!=0x2D6210EBAEAC7BF7ull)return "pool copier body mismatch";
+        for(uintptr_t i=5;i<0x283;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x4C846A0+i))*0x100000001B3ull;
+        if(hash!=0x9786D5F14E4CCA55ull)return "pool copier body mismatch";
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return "pool copier image unreadable";}
 }
@@ -1060,18 +1060,18 @@ void ensurePoolMerge(uintptr_t base) noexcept {
     const char* why=nullptr;
     __try {
         constexpr uint8_t prologue[]={0x40,0x53,0x41,0x54,0x48,0x83,0xEC,0x28};
-        uint8_t got[sizeof(prologue)]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x4351440),sizeof(got));
+        uint8_t got[sizeof(prologue)]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x43513A0),sizeof(got));
         if(std::memcmp(got,prologue,sizeof(got))) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
             if(!g_poolMergeEntry.relay || got[0]!=0xE9 ||
-               jump!=reinterpret_cast<intptr_t>(g_poolMergeEntry.relay)-intptr_t(base+0x4351445) ||
+               jump!=reinterpret_cast<intptr_t>(g_poolMergeEntry.relay)-intptr_t(base+0x43513A5) ||
                std::memcmp(got+5,prologue+5,3))why="merge prologue mismatch";
         } else if(g_poolMergeEntry.ready.load(std::memory_order_acquire))why="our merge patch is gone";
         // Entire untouched native body includes full-node splice, partial
         // fill/shift and cold free path, certifying every relocation offset.
         uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=8;i<0x2A0;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x4351440+i))*0x100000001B3ull;
-        if(hash!=0xB00C8ABA97918542ull)why="merge body mismatch";
+        for(uintptr_t i=8;i<0x2A0;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x43513A0+i))*0x100000001B3ull;
+        if(hash!=0x70748E8D5FFA83CCull)why="merge body mismatch";
     } __except(EXCEPTION_EXECUTE_HANDLER){why="merge image unreadable";}
     if(why){g_mergeStatus.store(why,std::memory_order_release);return;}
     if(!g_poolMergeEntry.ready.load(std::memory_order_acquire) && !installOne(g_poolMergeEntry,base)) {
@@ -1080,21 +1080,21 @@ void ensurePoolMerge(uintptr_t base) noexcept {
     g_mergeStatus.store("hooked",std::memory_order_release);
 }
 void ensurePoolClear(uintptr_t base) noexcept {
-    // Verified build334473: void(dictionary RCX, allocatorOwner RDX),
+    // Verified build334925: void(dictionary RCX, allocatorOwner RDX),
     // specialized 336-byte nodes using DAT_145F00D70. Entire native body
-    // [36846D5,3684822) FNV below has no PE relocations; own entry separately.
+    // [3684635,3684782) FNV below has no PE relocations; own entry separately.
     const char* why=nullptr;
     __try {
         constexpr uint8_t prologue[]={0x48,0x89,0x4C,0x24,0x08};
-        uint8_t got[5]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x36846D0),5);
+        uint8_t got[5]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x3684630),5);
         if(std::memcmp(got,prologue,5)) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
             if(!g_poolClearEntry.relay || got[0]!=0xE9 ||
-               jump!=reinterpret_cast<intptr_t>(g_poolClearEntry.relay)-intptr_t(base+0x36846D5))why="clear prologue mismatch";
+               jump!=reinterpret_cast<intptr_t>(g_poolClearEntry.relay)-intptr_t(base+0x3684635))why="clear prologue mismatch";
         } else if(g_poolClearEntry.ready.load(std::memory_order_acquire))why="our clear patch is gone";
         uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=5;i<0x152;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x36846D0+i))*0x100000001B3ull;
-        if(hash!=0x6EB91F357CEF84E0ull)why="typed clear body mismatch";
+        for(uintptr_t i=5;i<0x152;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x3684630+i))*0x100000001B3ull;
+        if(hash!=0xEEC934673BEEED00ull)why="typed clear body mismatch";
     } __except(EXCEPTION_EXECUTE_HANDLER){why="clear image unreadable";}
     if(why){g_clearStatus.store(why,std::memory_order_release);return;}
     if(!g_poolClearEntry.ready.load(std::memory_order_acquire) && !installOne(g_poolClearEntry,base)) {
@@ -1108,7 +1108,7 @@ void ensurePoolClear(uintptr_t base) noexcept {
 void ensurePartTest(uintptr_t base) noexcept {
     if(g_partEntry.ready.load(std::memory_order_acquire)) {
         g_partStatus.store(partPatchIsOurs(base)?"hooked"
-                           :"our patch is gone (FUN_1442B6C80's entry was rewritten)",std::memory_order_release);
+                           :"our patch is gone (FUN_1442B6BE0's entry was rewritten)",std::memory_order_release);
         return;
     }
     const char* why=partTestSignature(base,g_partEntry);
@@ -1174,7 +1174,7 @@ const char* kinematicEvalDirectVetoAttach() noexcept {
         if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         if(!g_directEntries[0].ready.load(std::memory_order_acquire))
-            return "CodeHook refused kinematic-build-144315ac0; its own line names why";
+            return "CodeHook refused kinematic-build-144315a20; its own line names why";
         directVetoWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
         return "installed";
@@ -1282,7 +1282,7 @@ bool kinematicEvalEmitHookLive(const char** why) noexcept {
     if(!g_evalEntry.ready.load(std::memory_order_acquire))
         reason="the kinematic hook set is not installed; the emit's attach line names why";
     else if(!g_directEntries[0].ready.load(std::memory_order_acquire))
-        reason="CodeHook refused kinematic-build-144315ac0; its own line names why";
+        reason="CodeHook refused kinematic-build-144315a20; its own line names why";
     else if(evalGate.load(std::memory_order_acquire)==0)
         reason="the hook set's gate is closed (the emit is detached), so the relay never calls the bracket";
     if(why)*why=reason;
