@@ -602,8 +602,9 @@ bool makeShared(State& state, unsigned slot, SharedTexture& target, const char* 
         return fail(why, "shared %s NT handle failed 0x%08X", role, unsigned(hr));
     hr = state.d12->OpenSharedHandle(target.handle, IID_PPV_ARGS(target.d12.GetAddressOf()));
     if (FAILED(hr)) return fail(why, "shared %s D3D12 open failed 0x%08X", role, unsigned(hr));
-    Log::get().note("fsr4: slot=%u shared %s %ux%u format=%u D3D11->D3D12 open ok",
-                    slot, role, width, height, unsigned(format));
+    const D3D12_RESOURCE_DESC opened = target.d12->GetDesc();
+    Log::get().note("fsr4: slot=%u shared %s %ux%u format=%u D3D11->D3D12 open ok, D3D12 flags=0x%X format=%u",
+                    slot, role, width, height, unsigned(format), unsigned(opened.Flags), unsigned(opened.Format));
     return true;
 }
 
@@ -1152,6 +1153,9 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
                             slot, w, h, outW, outH, infiniteDepth ? 1u : 0u, hdr ? 1u : 0u, holder.failedFeature.reason());
             return returnLatchedFailure(holder.failedFeature, why);
         }
+        // The price is the evaluation's, not the create's: makeFeature logs its own duration, and AMD's model setup would
+        // otherwise own the slot's maximum for the session.
+        QueryPerformanceCounter(&began);
     }
     Feature& feature = *holder.feature;
     CommandSlot& command = feature.commands[feature.nextCommand++ % kCommandRing];
@@ -1232,7 +1236,10 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     dispatch.motionVectors = ffxApiGetResourceDX12(feature.motion.d12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     // exposure, reactive and transparencyAndComposition stay empty, as route 1 leaves them: preExposure is 1, both routes have
     // AMD's automatic exposure (fsr4CreateFlags), and EDVR has no reactive or transparency mask in this pass.
-    dispatch.output = ffxApiGetResourceDX12(feature.output.d12.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    // The UAV usage is stated rather than left to the helper, which derives it from the opened resource's own flags: a shared
+    // resource opened through vkd3d-proton is not known to carry ALLOW_UNORDERED_ACCESS (makeShared logs what it does carry).
+    dispatch.output = ffxApiGetResourceDX12(feature.output.d12.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            FFX_API_RESOURCE_USAGE_UAV);
     // dlaa.h's jitter is positive right/down in render pixels, the same axes AMD's contract takes (ml.md, "Camera jitter": the
     // projection is shifted by +2*jx/width and -2*jy/height), and route 1 measured both signs and the motion scale as identities
     // (fsr3_engine.cpp). A motion vector in render pixels needs scale 1: AMD's range is [-width, width] in render pixels.
@@ -1257,6 +1264,8 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     if (rc != FFX_API_RETURN_OK) {
         ++state.failures;
         ++feature.dispatchStrikes;
+        // AMD may have recorded part of its work before failing; the next attempt starts its history afresh.
+        feature.firstDispatch = true;
         // The command list was never submitted; it is safe to close/reset on the next frame, while the producer signal remains a
         // no-op handoff.
         list->Close();
@@ -1356,7 +1365,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     if (allocBlocked) ++holder.window.allocBlocked;
     ++state.evaluations;
     if (reset) ++state.resets;
-    if (state.evaluations <= 3 || state.evaluations % 300 == 0)
+    if (state.evaluations <= 3 || state.evaluations % 3000 == 0)
         Log::get().note("fsr4: slot=%u dispatch #%u rc=0 in=%ux%u out=%ux%u hdr=%u infinite=%u jitter=(%.3f,%.3f) reset=%u fences=%llu/%llu/%llu copy-in=%s/%s/%s provider=%s",
                         slot, state.evaluations, w, h, outW, outH, hdr ? 1u : 0u, infiniteDepth ? 1u : 0u, jx, jy,
                         reset ? 1u : 0u, static_cast<unsigned long long>(producer),

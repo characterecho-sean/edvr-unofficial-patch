@@ -1574,8 +1574,9 @@ inline int flatHdrRouteTests() {
         // The resolver hands the frame's bit down to each engine, with no literal in its place.
         const std::string resolve = slurpSource("src/d3d11/flat_mono_resolve.cpp");
         expect(count(resolve, "f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr);") == 1 &&
-                   count(resolve, "2*std::atan(1/sy),reason,true,hdr);") == 1,
-               "the resolver's backend calls pass the frame's hdr bit to the DLSS/DLAA evaluate and to the FSR evaluate");
+                   count(resolve, "2*std::atan(1/sy),reason,true,hdr);") == 2 && count(resolve, "ok=fsr4Evaluate(") == 1 &&
+                   count(resolve, "ok=fsr3Evaluate(") == 1,
+               "the resolver's backend calls pass the frame's hdr bit to the DLSS/DLAA evaluate and to the FSR 3.1 and FSR 4 evaluates");
     }
 
     // ---- the wiring no rig can run: the runtime's default, merge and publication, and the panel's use of them ---------
