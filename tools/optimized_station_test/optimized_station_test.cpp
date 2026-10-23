@@ -670,18 +670,39 @@ int main(int argc, char** argv) {
     // ---- Built v14.13: the sun inside the hangar (its own state), the hangar watch, the no-hangar pad, the names --------------------------
     {
         // A docked pad with no sized shell: the note is due once; the give-up after kNoShellGiveUpFrames; a shell resets the count; undock starts over.
+        using HE = se::HangarWatchEvent;
         se::HangarWatch hw;
         int notes = 0;
-        for (uint32_t k = 0; k < se::kHangarNoteFrames + 20; ++k) notes += hw.step(false, true, false) ? 1 : 0;
+        for (uint32_t k = 0; k < se::kHangarNoteFrames + 20; ++k) notes += hw.step(false, true, false, false) == HE::kNote ? 1 : 0;
         check(notes == 1 && hw.logged && !hw.giveUp, "v14.13 hangar: the no-hangar note is due once per dock, at 60 frames");
-        for (uint32_t k = 0; k < se::kNoShellGiveUpFrames; ++k) hw.step(false, true, false);
-        check(hw.giveUp, "v14.13 hangar: after 300 frames without a shell the gather of the shell parts stops");
+        int giveUps = 0;
+        for (uint32_t k = 0; k < se::kNoShellGiveUpFrames; ++k) giveUps += hw.step(false, true, false, false) == HE::kGiveUp ? 1 : 0;
+        check(hw.giveUp && giveUps == 1, "v14.13 hangar: after 300 frames without a shell the gather of the shell parts stops (one give-up event)");
         se::HangarWatch found;
-        for (uint32_t k = 0; k < 100; ++k) found.step(false, true, false);
-        found.step(true, true, false);
+        for (uint32_t k = 0; k < 100; ++k) found.step(false, true, false, false);
+        found.step(true, true, false, false);
         check(found.missing == 0 && !found.giveUp, "v14.13 hangar: a shell found resets the count (no give-up)");
-        found.step(false, false, false);
+        found.step(false, false, false, false);
         check(!found.logged && found.missing == 0, "v14.13 hangar: undock starts the dock over (the note is due again)");
+    }
+    {
+        // Built 2026-10-23 (log 20261023_093833, MacLeod Market, large pad, flown in): the pad sat on the surface, HangerLarge out of reach, for the
+        // 300 frames before the descent, and the search never resumed. The game putting the pad in the hangar (r1 0 to 1) starts it over.
+        using HE = se::HangarWatchEvent;
+        se::HangarWatch hw;
+        for (uint32_t k = 0; k < se::kNoShellGiveUpFrames + 50; ++k) hw.step(false, true, false, false);
+        check(hw.giveUp && hw.logged, "2026-10-23 hangar: a large pad on the surface gives up the search");
+        const HE ev = hw.step(false, true, false, true);
+        check(ev == HE::kRearm && !hw.giveUp && !hw.logged && hw.missing == 0, "2026-10-23 hangar: the pad entering the hangar re-arms the search");
+        check(hw.step(false, true, false, true) == HE::kNone && hw.missing == 1, "2026-10-23 hangar: r1 held at 1 is no second re-arm");
+        int notes = 0;
+        for (uint32_t k = 0; k < se::kHangarNoteFrames; ++k) notes += hw.step(false, true, false, true) == HE::kNote ? 1 : 0;
+        check(notes == 1, "2026-10-23 hangar: still no shell in the hangar: the names are noted again, from the lowered pad");
+        se::HangarWatch spawn;   // a session that starts docked in the hangar (the 09:55 log): r1 is 1 from the first docked frame
+        check(spawn.step(false, true, false, true) == HE::kNone && spawn.missing == 1, "2026-10-23 hangar: docked already in the hangar is no re-arm");
+        se::HangarWatch ok;      // a medium pad whose shell is found on the surface: entering the hangar changes nothing
+        for (uint32_t k = 0; k < 10; ++k) ok.step(true, true, false, false);
+        check(ok.step(true, true, false, true) == HE::kNone && !ok.giveUp, "2026-10-23 hangar: a shell already found is no re-arm");
     }
     {
         // Names: the hangar-like filter (hangars, pads, lifts, doors and bays), not a plain structure.
@@ -1454,6 +1475,36 @@ int main(int argc, char** argv) {
         stamp.fetch_add(1);
         const se::PassDrain again = gb.drain([&](const Item& it) { got.push_back(it.seq); });
         check(got.empty() && again.lost == 0 && again.calls == 0, "v14.26 gather, one thread: a drained entry is not delivered twice, and the loss is counted once");
+    }
+    {
+        // Built 2026-10-23: two unfinished drains in a row put the tick more than the ring behind, and the drain after them skips the oldest passes. Their
+        // entries are never read, so they are lost and must be counted, even when no writer comes back to that buffer to overwrite them: an uncounted loss
+        // is an informative pass that silently misses records, and the station's fail-safe (a loss keeps every record) never fires.
+        struct Item {
+            uint32_t thread = 0;
+            uint32_t seq = 0;
+            uint32_t stamp = 0;
+        };
+        std::atomic<uint32_t> stamp{0};
+        se::PassGather<Item, 2, 8> gb(stamp);
+        stamp.fetch_add(1);   // pass 1
+        {
+            se::PassGather<Item, 2, 8>::Writer w(gb);
+            w.call(0x3000);
+            for (uint32_t k = 0; k < 5; ++k) {
+                Item it;
+                it.seq = k;
+                w.push(it);
+            }
+        }
+        stamp.fetch_add(4);   // the tick falls behind: passes 1..4 closed, none drained, and no writer returns
+        uint64_t delivered = 0;
+        uint64_t lost = gb.drain([&](const Item&) { ++delivered; }).lost;
+        for (int k = 0; k < 4; ++k) {
+            stamp.fetch_add(1);
+            lost += gb.drain([&](const Item&) { ++delivered; }).lost;
+        }
+        check(delivered == 0 && lost == 5, "gather, skipped passes: the entries of a pass the tick skipped are counted lost though no writer overwrites them");
     }
     {
         // Eight writers and a draining tick: every entry is delivered once or counted as lost, and each writer's entries keep their order.

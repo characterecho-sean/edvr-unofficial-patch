@@ -207,11 +207,30 @@ bool beginReplay(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, FlatStarRefus
         ++g_win.layerBuilt;
     }
     ID3D11RenderTargetView* s = g_layer.rtv.Get();
+    // The saved state is live from the first call that changes the game's bindings, not from the end of this function: a fault inside either call
+    // below leaves S bound, and the failure path in flatStarGlowReplayBegin puts the game's targets and depth state back only while this is set.
+    g_saved.active = true;
     vScreenSetRenderTargetsRaw(ctx, 1, &s, g_saved.dsv.Get());
     vScreenOMSetDepthStencilStateRaw(ctx, replay, ref);
-    g_saved.active = true;
     why = FlatStarRefusal::kNone;
     return true;
+}
+
+// Puts the saved targets and depth state back. Guarded on its own, not through the fault budget: a bracket that just faulted has charged the budget, and
+// a spent budget would skip the one call that takes S off the game's bindings. A fault here charges the budget like any other in the bracket.
+bool restoreSaved(ID3D11DeviceContext* ctx) {
+    const bool ran = guarded("starGlow.restore", [&] {
+        ID3D11RenderTargetView* raw[kTargets] = {};
+        UINT n = 0;
+        for (UINT i = 0; i < kTargets; ++i) {
+            raw[i] = g_saved.rtvs[i].Get();
+            if (raw[i]) n = i + 1;
+        }
+        vScreenSetRenderTargetsRaw(ctx, n, raw, g_saved.dsv.Get());
+        vScreenOMSetDepthStencilStateRaw(ctx, g_saved.ds.Get(), g_saved.stencilRef);
+    });
+    if (!ran) g_budget.charge();
+    return ran;
 }
 
 // The 5 s line and the line for the setting returning to 100, each built into a buffer of its own right above the call that prints it.
@@ -318,6 +337,9 @@ bool flatStarGlowReplayBegin(ID3D11DeviceContext* ctx, uint8_t role, uint32_t wi
     if (!ran) why = FlatStarRefusal::kStateFault;
     if (!ran || !ok) {
         flatStarCountRefusal(g_win, why);
+        // A fault after the first rebinding left S bound and no ReplayEnd will follow (uiReissue calls it only when Begin returns true): put the game's
+        // bindings back here. A refusal before any rebinding (ok false) never set active, so the game's state was not touched and nothing is put back.
+        if (g_saved.active) restoreSaved(ctx);
         releaseSaved();
         return false;
     }
@@ -329,17 +351,7 @@ bool flatStarGlowReplayBegin(ID3D11DeviceContext* ctx, uint8_t role, uint32_t wi
 void flatStarGlowReplayEnd(ID3D11DeviceContext* ctx) {
     if (!g_saved.active) return;
     FlatComputeInternalScope internal;
-    const bool ran = guardedBudget(g_budget, [&] {
-        ID3D11RenderTargetView* raw[kTargets] = {};
-        UINT n = 0;
-        for (UINT i = 0; i < kTargets; ++i) {
-            raw[i] = g_saved.rtvs[i].Get();
-            if (raw[i]) n = i + 1;
-        }
-        vScreenSetRenderTargetsRaw(ctx, n, raw, g_saved.dsv.Get());
-        vScreenOMSetDepthStencilStateRaw(ctx, g_saved.ds.Get(), g_saved.stencilRef);
-    });
-    if (!ran) flatStarCountRefusal(g_win, FlatStarRefusal::kStateFault);
+    if (!restoreSaved(ctx)) flatStarCountRefusal(g_win, FlatStarRefusal::kStateFault);
     releaseSaved();
 }
 

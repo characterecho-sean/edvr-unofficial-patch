@@ -8,7 +8,7 @@
 
 // The upstream camera injector (docs/design-flat-camera-integration.md, the
 // C3 wiring plan addendum): a CodeHook detour on the game's view-constant
-// refresh (FUN_1405921f0) that applies the temporal phase to the camera's
+// refresh (FUN_1405922f0) that applies the temporal phase to the camera's
 // frustum parameters, transiently, so every projection-dependent consumer in
 // the call derives from the jittered values through the game's own
 // finalizers. On whenever the flat profile has a temporal mode selected (no

@@ -1775,18 +1775,33 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
 
 // Built v14.13: a docked pad with no sized shell. The no-hangar note is due once per dock (after kHangarNoteFrames frames without a shell). After
 // kNoShellGiveUpFrames the gather of the shell parts stops until undock or a new pad. A shell found resets the count.
+// Built 2026-10-23: the game putting the own pad in the hangar (r1 0 to 1) also starts the search over. A large pad docked by flying in sits on the
+// surface, out of the 150 m reach of HangerLarge (120.5 m from the lowered pad), for the 300 frames before it descends (log 20261023_093833).
 constexpr uint32_t kHangarNoteFrames = 60;
 constexpr uint32_t kNoShellGiveUpFrames = 300;
+
+enum class HangarWatchEvent : uint8_t { kNone = 0, kNote = 1, kGiveUp = 2, kRearm = 3 };
 
 struct HangarWatch {
     uint32_t missing = 0;
     bool giveUp = false;
     bool logged = false;
-    // One frame. Returns true on the frame the once-per-dock note is due.
-    bool step(bool shellFound, bool docked, bool padChanged) noexcept {
+    bool inHangar = false;   // the game's pad state on the last docked frame (r1 1)
+    // One frame. kNote on the frame the note is due, kGiveUp on the frame the gather stops, kRearm when the pad entering the hangar starts over a
+    // search that had given up or been noted.
+    HangarWatchEvent step(bool shellFound, bool docked, bool padChanged, bool padInHangar) noexcept {
         if (!docked) {
             *this = HangarWatch{};
-            return false;
+            return HangarWatchEvent::kNone;
+        }
+        const bool entered = padInHangar && !inHangar;
+        inHangar = padInHangar;
+        if (entered) {
+            const bool wasStopped = giveUp || logged;
+            missing = 0;
+            giveUp = false;
+            logged = false;
+            if (wasStopped && !shellFound) return HangarWatchEvent::kRearm;
         }
         if (padChanged) {
             missing = 0;
@@ -1794,15 +1809,18 @@ struct HangarWatch {
         }
         if (shellFound) {
             missing = 0;
-            return false;
+            return HangarWatchEvent::kNone;
         }
         if (missing < kNoShellGiveUpFrames) ++missing;
-        if (missing >= kNoShellGiveUpFrames) giveUp = true;
+        if (missing >= kNoShellGiveUpFrames && !giveUp) {
+            giveUp = true;
+            return HangarWatchEvent::kGiveUp;
+        }
         if (!logged && missing >= kHangarNoteFrames) {
             logged = true;
-            return true;
+            return HangarWatchEvent::kNote;
         }
-        return false;
+        return HangarWatchEvent::kNone;
     }
 };
 

@@ -138,7 +138,7 @@ int64_t qpcNow() noexcept {
 // Job 2 (UpdatePhysicsObjectsJob, 0x432DF00) bit-compare-gates its NODE
 // matrix writes and appends every changed node to a dirty queue: the job
 // descriptor's +0x18 is a pointer to the queue's atomic append counter
-// (decomp_432B2A0, param_1[3]; flushed in 0x20 batches by FUN_14489CA90).
+// (decomp_432B2A0, param_1[3]; flushed in 0x20 batches by FUN_14489C9F0).
 // Reading the counter at job entry and exit yields the per-run append
 // count -- the write-volume number the perf arc's L4 needs and the
 // lifecycle evidence the node capture respected (kinematic arc, flight
@@ -156,7 +156,7 @@ bool readQueueCount(uintptr_t descriptor,uint32_t* out) noexcept {
 }
 
 // The queue's node-pointer array base is descriptor +0x10 (param_1[2];
-// decomp_432B2A0 lines 257-268: FUN_14489ca90(param_1[2] + idx*8, batch,
+// decomp_432B2A0 lines 257-268: FUN_14489c9f0(param_1[2] + idx*8, batch,
 // count*8)). With the lifecycle decoded, the slice [entry, exit) at job-2
 // exit is this run's appended nodes, intact. Reads the newest
 // min(delta, cap) entries; the clamped excess counts as overflow. A reset

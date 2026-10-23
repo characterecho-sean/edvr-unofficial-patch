@@ -44,7 +44,7 @@
 // floats go back to 1080 and 1920, the game's own values. Unload: the
 // original operands are written back. The float page is never freed.
 //
-// THE CURSOR WINDOW. The one side reader of a panel's (w, h), FUN_144541AC0
+// THE CURSOR WINDOW. The one side reader of a panel's (w, h), FUN_144541A20
 // (panel vtbl +0x198), divides the panel's own size (+0x3B8/+0x3C0, which
 // FUN_144573C20 writes from these divisions) by the UI screen's (the
 // renderer record's width and height, which this does not scale): a

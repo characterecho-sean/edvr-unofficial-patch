@@ -193,8 +193,8 @@ bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) 
 // --- The detour. Verified argument count two ways: the decompiler's own
 // signature recovery (void FUN_142845730(longlong,int,longlong), from
 // analysing the callee body directly -- no R9/stack reference anywhere in
-// it) and both direct callers' actual call sites: FUN_14286b250 passes
-// exactly (this+0x1188, 2, *(this+0x11C0)); FUN_14287d660 passes exactly
+// it) and both direct callers' actual call sites: FUN_14286b190 passes
+// exactly (this+0x1188, 2, *(this+0x11C0)); FUN_14287d5a0 passes exactly
 // (rsi, r8+1, ...) with RCX/EDX freshly loaded right before the CALL and R8
 // unchanged from whatever it already held -- an R9D zero immediately before
 // that second call site is unrelated to it (the callee never reads R9; it is
@@ -287,7 +287,7 @@ void armEvent(uint32_t frame) noexcept {
 // with a synthetic mailbox (transitionFlashEyeBaseConsumeForTest).
 void noteConsume(int32_t gameMode, const float m[16]) noexcept {
     const bool unrefilled = (gameMode != 1) && tfeb::isResetMailbox(m);
-    // A CAS loop, not load-then-store: FUN_14286b250 and FUN_14287d660 can both
+    // A CAS loop, not load-then-store: FUN_14286b190 and FUN_14287d5a0 can both
     // consume on one frame, so this is not single-writer. `cur` is the streak
     // as it stood BEFORE this call folded in.
     uint32_t cur = g_ebConsecutiveUnrefilled.load(std::memory_order_relaxed);

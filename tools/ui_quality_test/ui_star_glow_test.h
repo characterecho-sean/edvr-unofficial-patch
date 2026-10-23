@@ -510,6 +510,16 @@ std::vector<Scan> wiringPins(const std::string& runtimeCpp, const std::string& r
                                   "returntrue;}"}) &&
                         has(mod, "returnflatStarGlowOn()&&g_frame.anyReplay&&g_layer.srv;") && countOf(mod, "g_frame.anyReplay=true;") == 1,
                     "the star layer is live for the first level only after a replay was bound (the module marks it, once, in flatStarGlowReplayBegin)"});
+    // A fault between the first rebinding and the end of the bracket's start leaves S bound with no ReplayEnd to follow (Begin returned false): the failure
+    // path must put the game's bindings back, with a guard of its own that a spent fault budget cannot skip, and ReplayEnd must use that same restore.
+    pins.push_back({"begin-fault-restore",
+                    has(mod, "g_saved.active=true;vScreenSetRenderTargetsRaw(ctx,1,&s,g_saved.dsv.Get());vScreenOMSetDepthStencilStateRaw(ctx,replay,ref);why=FlatStarRefusal::kNone;") &&
+                        countOf(mod, "g_saved.active=true;") == 1 &&
+                        inOrder(mod, {"boolflatStarGlowReplayBegin(", "if(!ran||!ok){", "if(g_saved.active)restoreSaved(ctx);", "releaseSaved();", "returnfalse;}"}) &&
+                        inOrder(mod, {"voidflatStarGlowReplayEnd(", "if(!restoreSaved(ctx))flatStarCountRefusal(", "releaseSaved();"}) &&
+                        inOrder(mod, {"boolrestoreSaved(", "guarded(\"starGlow.restore\"", "vScreenSetRenderTargetsRaw(ctx,n,raw,g_saved.dsv.Get());", "g_budget.charge();"}) &&
+                        !has(mod, "guardedBudget(g_budget,[&]{ID3D11RenderTargetView*raw["),
+                    "the saved state is live from the first rebinding, a fault inside Begin puts the game's targets and depth state back (guarded on its own, not through the budget), and ReplayEnd uses the same restore"});
     pins.push_back({"gate",
                     has(math, "returnflatUiGlowFeedWanted(layerOn||starLive,triggerSrvKnown,triggerAmbiguous,srvSlot,hdrW,hdrH,targetW,targetH);"),
                     "the first level is asked for by the HUD layer or by live star light: fix.ui_quality is not a condition of the star glow"});
@@ -551,6 +561,10 @@ void testWiring() {
         {"hud-only-binds-hud", 2, "ID3D11ShaderResourceView* in[1] = {use->srv};", "ID3D11ShaderResourceView* in[1] = {hud->hdrSrv.Get()};"},
         {"gate", 3, "flatUiGlowFeedWanted(layerOn || starLive,", "flatUiGlowFeedWanted(layerOn,"},
         {"live-after-bind", 5, "    g_frame.anyReplay = true;\n    return true;", "    return true;"},
+        {"begin-fault-restore", 5, "        if (g_saved.active) restoreSaved(ctx);\n", ""},
+        {"begin-fault-restore", 5, "    g_saved.active = true;\n    vScreenSetRenderTargetsRaw(ctx, 1, &s, g_saved.dsv.Get());\n    vScreenOMSetDepthStencilStateRaw(ctx, replay, ref);\n",
+         "    vScreenSetRenderTargetsRaw(ctx, 1, &s, g_saved.dsv.Get());\n    vScreenOMSetDepthStencilStateRaw(ctx, replay, ref);\n    g_saved.active = true;\n"},
+        {"begin-fault-restore", 5, "    if (!restoreSaved(ctx)) flatStarCountRefusal(", "    if (!false) flatStarCountRefusal("},
     };
     for (const Control& c : controls) {
         std::string files[6] = {runtimeCpp, runtimeH, uiLayerCpp, flatMath, buildBat, starCpp};

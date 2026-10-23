@@ -23,7 +23,7 @@
 //     (decomp_42B4420.txt:250-275): view+0x570 & mask, then FUN_1404F4F10
 //     (the view's planes, +0x30 pointer / +0x44 count) on the pose's
 //     transformed bounds, then -- under the global DAT_145ea63e9 and the
-//     view's +0x68D bit 0 -- the FUN_14288D280 visibility callback. The probe
+//     view's +0x68D bit 0 -- the FUN_14288D1C0 visibility callback. The probe
 //     recomputes the first two with the engine's own FUN_1404F4F10 on the
 //     builder's inputs (before the forward) and records where the third
 //     would apply; it never calls the callback.
@@ -35,7 +35,7 @@
 // per entry the model at +0x00 -- its local sphere, centre at model+0x00 and
 // radius at model+0x10 -- the sub-item count at +0x20 and array at +0x28,
 // 32-byte sub-items = float4 quaternion + float4 position, the local
-// transforms FUN_144340820 composes into each part's world matrix) -- the
+// transforms FUN_144340780 composes into each part's world matrix) -- the
 // offline join to the t33 pool's per-part records. Once per (context,
 // frame) it dumps the context's view array: every view's raw 0x6A0 bytes and
 // its plane array, the context's LOD scale (+0x30) and bit table (+0x1A840).

@@ -492,8 +492,11 @@ inline void flatRuntimeReachedWrite(FlatRuntimePrefix& p, const void* resource, 
     }
     e->draws = e->writes = 0;
 }
-// A draw's two bindings. The pairs that never read the b1 they happen to have bound, and write nothing a camera placed (the inert
-// filters, the sun-shadow resolve, the star's depth-only pre-pass), are not counted: they are what the witness already looks past.
+// A draw's two bindings. The pairs that never read the b1 they happen to have bound (flatProjectionB1Unread: the inert filters, the
+// sun-shadow resolve, the star's depth-only pre-pass) are not counted: they are what the witness already looks past. The first two write
+// nothing a camera placed. The star pre-pass is different: it writes depth with the jittered b0 matrices, so a Detailed Surface Scanner
+// frame whose only draw on the depth is the star pre-pass is judged empty here although its depth holds star fragments. Whether that
+// shows on screen is not flown yet.
 inline void flatRuntimeReachedDraw(FlatRuntimePrefix& p, const FlatContractObservation& k) {
     if (!p.reachedUsed || flatProjectionB1Unread(k.vs, k.ps)) return;
     for (uint32_t i = 0; i < p.reachedUsed; ++i) {

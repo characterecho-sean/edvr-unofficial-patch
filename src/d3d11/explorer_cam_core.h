@@ -57,7 +57,7 @@ inline constexpr uint8_t kFreeCameraPrologue[kFreeCameraPrologueBytes] = {
 constexpr size_t kCollisionPrologueBytes = 26;
 // `push rbp; push rbx; push rsi; push rdi; push r12; push r14; push r15; lea rbp,[rsp-1B0h]; sub rsp,250h`, the first push with a
 // REX prefix (40 55). Boundaries at 2, 3, 4, 5, 7, 9, 11, 19, 26, so CodeHook steals 5. It takes a FIFTH argument on the stack (a
-// byte at [rsp+28h] on entry) and returns al; the entry is 64-byte aligned.
+// byte at [rsp+28h] on entry) and returns al; the entry is 32-byte aligned (32 mod 64 on build 334925).
 inline constexpr uint8_t kCollisionPrologue[kCollisionPrologueBytes] = {
     0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
     0xAC, 0x24, 0xB0, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x50, 0x02, 0x00, 0x00};
@@ -83,7 +83,7 @@ inline constexpr uint8_t kControllerPrologue[kControllerPrologueBytes] = {
 
 constexpr size_t kAvatarFadePrologueBytes = 16;
 // `mov r11,rsp; push rbx; push rsi; push rdi; sub rsp,110h; mov rax,[rip+disp32]`: CodeHook steals 5 (`mov r11,rsp`, `push rbx`, `push rsi`), no
-// rip-relative byte among them (the disp32 is past byte 16, which is not compared). The entry is 64-byte aligned.
+// rip-relative byte among them (the disp32 is past byte 16, which is not compared). The entry is 32-byte aligned (32 mod 64 on build 334925).
 inline constexpr uint8_t kAvatarFadePrologue[kAvatarFadePrologueBytes] = {
     0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
 

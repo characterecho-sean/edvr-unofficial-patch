@@ -270,7 +270,9 @@ minutes after a flight finally reproduced the effect being chased.
   has corrupted Sean's working config.
 - `edvr.ini` in a game directory carries the settings of whoever flew
   last. A reinstall does not undo an edit to it. `install_edvr.py` does not
-  touch it unless `--ini` says so, and backs it up when it does.
+  overwrite an existing one unless `--ini` says so (and backs it up when it
+  does); a missing one it writes, from the newest copy in the `%LOCALAPPDATA%\EDVR`
+  mirror when there is one, else from the shipped default.
 - `edvr-flat.ini` is the flat profile's own settings file: while the flat
   profile is active, EDVR reads it first and falls back to `edvr.ini`.
   `--scope flat --ini` writes it (never `edvr.ini`), `--scope both --ini`
@@ -340,6 +342,35 @@ file.
 - No agent-addressed text in source comments, commit messages or release
   notes: none of them can be stripped.
 
+## The analysis directory
+
+`analysis\` in the **main checkout** is its own git repository (private: `characterecho-sean/elite-analysis`),
+cloned into this one and git-ignored here. It holds the decompiler and disassembly notes, the address maps and
+the Ghidra scripts, and, kept local and never committed, the game executables for builds 332841, 334473 and
+334925 and the Ghidra projects. **Read `analysis\AGENTS.md` before working in it**; it has its own rules and skills
+(`elite-rva`, `retarget-build`, `ghidra-headless`, `record-finding`).
+
+- A git worktree has no `analysis\`. Reach it by the main checkout's absolute path
+  (`C:\Users\seanm\projects\edvr-unofficial-patch\analysis`; from a worktree, `git rev-parse --git-common-dir`
+  names `<main>\.git`). **Never junction or symlink it into a worktree**: removing the worktree would delete
+  the 4 GB of Ghidra projects through the link. `tools\build_diff.py` and the per-arc `pins.py` take its
+  executables by path.
+- It is a separate repository: commit there with `git -C analysis ...`, to its own `main`, and stage files by
+  path. Its history is not EDVR's, and nothing in it ships in an EDVR archive.
+- Source comments and docs here cite its files as `analysis\decomp\...`. Those files are not in this public
+  repository: a citation is a pointer for the maintainer, not evidence a stranger can check, so state the
+  fact in the doc as well, and do not paste decompiled code into this repository or its issues.
+- **A session in a worktree does not write into `analysis\`.** The app stops Write and Edit there, and one
+  analysis session, started from the main checkout, is the only writer: it reviews, files and commits what
+  others hand over. Do not get around the guard with a shell write, a second clone or a junction. To hand over
+  a finding, make a new folder `C:\Users\seanm\AppData\Local\EDVR\analysis-inbox\<yyyymmdd-hhmmss>-<topic>\`
+  (outside every repository, so it survives your worktree), put the notes and scripts in it with a
+  `MANIFEST.md` (build, from, summary, and for each file its destination under `analysis\`; the format and the
+  checks are in `analysis\AGENTS.md`, "Intake"), then send the folder name to the session titled
+  `elite-analysis intake` (`ListAgents`, or `mcp__ccd_session_mgmt__list_sessions`) if it is running. If it
+  is not, say in your report that an item is waiting. Cite the file in your doc as `analysis\decomp\<name>`
+  once it is filed. Reading `analysis\` needs no handover.
+
 ## Layout
 
 | Path | What |
@@ -352,5 +383,6 @@ file.
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
 | `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
+| `analysis\` | main checkout only: the private `elite-analysis` repository (git-ignored here), see above |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

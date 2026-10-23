@@ -39,7 +39,7 @@ public:
     // The two DIRECT producers of the same bucket lists: the bucket arrives
     // as param_2, so their brackets skip the entry walk and read param_2+0x2A4
     // directly. 0 = FUN_144315A20 (decomp_4312E00.txt; the collection batch's
-    // second item class via FUN_144314C60; FUN_144315D1C is inside it).
+    // second item class via FUN_144314C60; FUN_144315C7C is inside it).
     // 1 = FUN_14369F620 (decomp_369C9C0.txt; FUN_1436A3BB0's four call
     // sites -- the non-eye passes' builder family).
     static constexpr uintptr_t kDirectBuildRvas[2]={0x4315A20u,0x369F620u};

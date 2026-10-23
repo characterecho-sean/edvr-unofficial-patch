@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -1193,7 +1194,8 @@ struct NameNote {
     float dist = 0.0f;
     float radius = 0.0f;
 };
-NameNote g_nameLog[12];
+constexpr size_t kNameLogCap = 32;   // built 2026-10-23: was 12 with repeats, which cut the 10-23 MacLeod Market list before any Hanger name
+NameNote g_nameLog[kNameLogCap];
 size_t g_nameLogN = 0;
 bool g_namesPending = false;
 float g_namesPadC[3] = {};
@@ -1541,15 +1543,30 @@ void hangarNote() noexcept {
         return;
     }
     std::snprintf(g_hangarWhy, sizeof(g_hangarWhy), "%s", "no sized hangar shell matched near the pad (names logged)");
-    char text[400] = {};
-    size_t used = 0;
-    for (size_t i = 0; i < g_nameLogN; ++i) {
-        const int w = std::snprintf(text + used, sizeof(text) - used, "%s%s (%.1f m, r %.1f m)", i > 0 ? "; " : "", g_nameLog[i].name,
-                                    static_cast<double>(g_nameLog[i].dist), static_cast<double>(g_nameLog[i].radius));
-        if (w < 0 || used + static_cast<size_t>(w) >= sizeof(text)) break;
-        used += static_cast<size_t>(w);
+    // Built 2026-10-23: nearest first, every name, over as many lines as it takes (a line holds 1200 bytes; the old single 400-byte line cut off).
+    NameNote sorted[kNameLogCap];
+    const size_t n = g_nameLogN < kNameLogCap ? g_nameLogN : kNameLogCap;
+    for (size_t i = 0; i < n; ++i) sorted[i] = g_nameLog[i];
+    std::sort(sorted, sorted + n, [](const NameNote& a, const NameNote& b) { return a.dist < b.dist; });
+    size_t i = 0;
+    for (int part = 1; i < n; ++part) {
+        char text[900] = {};
+        size_t used = 0;
+        const size_t first = i;
+        for (; i < n; ++i) {
+            const int w = std::snprintf(text + used, sizeof(text) - used, "%s%s (%.1f m, r %.1f m)", i > first ? "; " : "", sorted[i].name,
+                                        static_cast<double>(sorted[i].dist), static_cast<double>(sorted[i].radius));
+            if (w < 0 || used + static_cast<size_t>(w) >= sizeof(text)) {
+                text[used] = '\0';
+                break;
+            }
+            used += static_cast<size_t>(w);
+        }
+        if (i == first) break;   // cannot happen (a name is under 48 bytes); never loop
+        Log::get().note("optimized station: no sized hangar shell within 150 m of the pad; the hangar-like and pad records within 150 m, nearest "
+                        "first (%u names, part %d): %s",
+                        static_cast<unsigned>(n), part, text);
     }
-    Log::get().note("optimized station: no sized hangar shell near the pad; the hangar-like and pad records near it: %s", text);
 }
 
 // Built v14.17: a log value with two decimals, or "n/a" when it is unreadable.
@@ -1958,14 +1975,22 @@ void applyEntry(const GatherEntry& e) {
                 for (int k = 0; k < 3; ++k) cand.centre[k] = e.centre[k];
             }
             break;
-        case GKind::kHangar:
-            if (g_nameLogN < 12) {
-                NameNote& nn = g_nameLog[g_nameLogN++];
-                std::snprintf(nn.name, sizeof(nn.name), "%s", e.name);
-                nn.dist = e.dist;
-                nn.radius = e.radius;
+        case GKind::kHangar: {
+            // Built 2026-10-23: one entry per name (its nearest instance), so repeats of one record across passes cannot fill the list.
+            size_t i = 0;
+            while (i < g_nameLogN && std::strcmp(g_nameLog[i].name, e.name) != 0) ++i;
+            if (i == g_nameLogN) {
+                if (g_nameLogN >= kNameLogCap) break;
+                ++g_nameLogN;
+            } else if (g_nameLog[i].dist <= e.dist) {
+                break;
             }
+            NameNote& nn = g_nameLog[i];
+            std::snprintf(nn.name, sizeof(nn.name), "%s", e.name);
+            nn.dist = e.dist;
+            nn.radius = e.radius;
             break;
+        }
         case GKind::kRigNote:
             applyRigNote(e);
             break;
@@ -2740,8 +2765,24 @@ void optimizedStationFrameBody(uint32_t frame) {
         g_hangarPad = g_pickCell.pad;
         for (int k = 0; k < 3; ++k) g_namesPadC[k] = g_pickCell.centre[k];
     }
-    if (g_hangarWatch.step(shellFound, g_dockedNow.load(std::memory_order_acquire), padChanged)) hangarNote();
-    if (!g_dockedNow.load(std::memory_order_acquire)) g_nameLogN = 0;
+    const bool padInHangar = g_game.r1 == sealed::kReaderInHangar;
+    const sealed::HangarWatchEvent hev = g_hangarWatch.step(shellFound, g_dockedNow.load(std::memory_order_acquire), padChanged, padInHangar);
+    if (hev == sealed::HangarWatchEvent::kNote) {
+        hangarNote();
+    } else if (hev == sealed::HangarWatchEvent::kGiveUp) {
+        Log::get().note("optimized station: no sized hangar shell within 150 m of the pad for %u frames (r0=%d r1=%d, in hangar=%s): the hangar "
+                        "parts are not gathered again until undock, a new pad, or the game putting the own pad in the hangar",
+                        static_cast<unsigned>(sealed::kNoShellGiveUpFrames), g_game.r0, g_game.r1, padInHangar ? "yes" : "no");
+    } else if (hev == sealed::HangarWatchEvent::kRearm) {
+        g_nameLogN = 0;   // the next note names what is near the pad where it is now
+        std::snprintf(g_hangarWhy, sizeof(g_hangarWhy), "%s", "searching for a hangar shell");
+        Log::get().note("optimized station: the game put the own pad in the hangar (r1 0 to 1) after the hangar search had stopped: the search "
+                        "starts again from the pad where it is now");
+    }
+    if (!g_dockedNow.load(std::memory_order_acquire)) {
+        g_nameLogN = 0;
+        std::snprintf(g_hangarWhy, sizeof(g_hangarWhy), "%s", "searching for a hangar shell");
+    }
     g_namesPending = g_dockedNow.load(std::memory_order_acquire) && !shellFound && g_pickCell.has && !g_hangarWatch.logged;
     {
         sealed::SunInputs su;
