@@ -95,10 +95,25 @@ typedef SHORT(WINAPI* PFN_GetKeyState)(int);
 typedef BOOL(WINAPI* PFN_GetKeyboardState)(PBYTE);
 typedef BOOL(WINAPI* PFN_PeekMessageA)(LPMSG, HWND, UINT, UINT, UINT);
 
+// A hat event that returns the hat to neutral: DirectInput reports centred as 0xFFFFFFFF, and some
+// drivers as any value whose low word is 0xFFFF. It must reach the game while a plugin owns input --
+// like a button release -- or a direction the game saw before the plugin took focus never ends.
+inline bool povCentred(DWORD v) { return v == 0xFFFFFFFFu || (v & 0xFFFFu) == 0xFFFFu; }
+
 // The flag every door consults. Relaxed loads are enough: a door that
 // reads the old value for one call more is one more call of the state the
 // player was already in.
 std::atomic<int> g_private{0};
+std::atomic<bool> g_pluginBlock{false};
+// A plugin's ownership of input is a lease: each inputGateSetPluginBlock(true) renews it
+// and inputGatePluginLeaseTick (once per game frame, from the proxy's Present path, not
+// from eye rendering) spends one. A plugin that stops renewing -- no render pass, flat
+// profile, a fault -- loses the block instead of stranding the player's keyboard.
+std::atomic<int> g_pluginLease{0};
+constexpr int kPluginLeaseFrames = 30;
+// Serialises every change of plugin ownership: taking or renewing it, and the three ways it ends (an explicit clear,
+// which is also what a fault or a profile switch calls; the lease running out). The doors never take it.
+SRWLOCK g_pluginLeaseLock = SRWLOCK_INIT;
 
 // The summon key, packed so a live rebind cannot tear it: bits 0-7 the
 // virtual key, 8-15 the DirectInput scan code, 16-18 the modifier bits,
@@ -166,7 +181,32 @@ std::atomic<bool> g_releaseTail{false};
 std::atomic<bool> g_heldVk[256]{};
 std::atomic<bool> g_heldDik[256]{};
 
+// Where the tail reads physical keys. The real GetAsyncKeyState; the rig points it at a fake.
+PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
+
+// Test seam: called as a refresh begins, before it takes the tail lock, so a rig can park a refresh at the one point a real
+// thread can be preempted before the lock. nullptr in production, where it costs one load and a branch per refresh.
+void (*g_tailRefreshEntry)() = nullptr;
+
+// Every writer of the tail (a capture, a cancel, a refresh's publish) holds g_tailLock. Only a capture and a cancel
+// replace the tail, and each bumps g_tailGeneration; a refresh never does. A refresh takes its snapshot under the
+// SHARED lock (it re-checks g_releaseTail there, then reads generation N and a copy of the held keys), scans the
+// physical keys from that copy with no lock held, and publishes under the EXCLUSIVE lock only if the generation is
+// still N. The publish intersects: a key stays in the tail only if both the live tail and this scan still have it held,
+// and g_heldDik and g_releaseTail are rebuilt from the survivors, so a refresh can only remove keys. Orderings covered
+// (PR #92 review): a refresh paused mid-scan cannot overwrite a capture or a cancel that landed meanwhile (the
+// generation differs, the publish is dropped); a refresh that starts while a capture is mid-write waits on the shared
+// lock, so it never pairs the new generation with the old held keys; a refresh racing a cancel sees g_releaseTail false
+// under the lock, or fails the generation check, so it cannot resurrect the tail; and of two refreshes from the same
+// generation both publish in either order, because intersecting is commutative, so neither a stale sample of a key
+// held nor an observed release is lost. The Present thread holds the lock only for the short snapshot and the short
+// publish.
+SRWLOCK g_tailLock = SRWLOCK_INIT;
+std::atomic<uint32_t> g_tailGeneration{0};
+
 void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
+    AcquireSRWLockExclusive(&g_tailLock);
+    g_tailGeneration.fetch_add(1);
     for (int k = 0; k < 256; ++k) g_heldDik[k].store(false);
     bool any = false;
     for (int vk = 0; vk < 256; ++vk) {
@@ -179,24 +219,52 @@ void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
         }
     }
     g_releaseTail.store(any);
+    ReleaseSRWLockExclusive(&g_tailLock);
+}
+
+// The menu taking the keys back: the tail is void. Ordered against a refresh's publish like a capture.
+void cancelReleaseTail() {
+    AcquireSRWLockExclusive(&g_tailLock);
+    g_tailGeneration.fetch_add(1);
+    g_releaseTail.store(false);
+    ReleaseSRWLockExclusive(&g_tailLock);
 }
 
 void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
-    if (!g_releaseTail.load()) return;
-    bool any = false;
+    if (g_tailRefreshEntry) g_tailRefreshEntry();
+    bool tail[256];
+    AcquireSRWLockShared(&g_tailLock);
+    if (!g_releaseTail.load()) {   // checked under the lock, so a cancel that just landed is seen
+        ReleaseSRWLockShared(&g_tailLock);
+        return;
+    }
+    const uint32_t startGeneration = g_tailGeneration.load();
+    for (int vk = 0; vk < 256; ++vk) tail[vk] = g_heldVk[vk].load();
+    ReleaseSRWLockShared(&g_tailLock);
+    bool heldVk[256]{};
     for (int vk = 0; vk < 256; ++vk) {
-        if (!g_heldVk[vk].load()) continue;
-        if (readKey(vk) & 0x8000) { any = true; continue; }
-        g_heldVk[vk].store(false);
+        if (!tail[vk]) continue;
+        if (readKey(vk) & 0x8000) heldVk[vk] = true;
     }
-    // Rebuild after releases: generic/left/right modifier VKs can share a DIK.
-    bool held[256]{};
-    for (int vk = 0; vk < 256; ++vk) if (g_heldVk[vk].load()) {
-        const uint8_t dik = inputGateDikOf(vk);
-        if (dik) held[dik] = true;
-    }
-    for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
-    g_releaseTail.store(any);
+    AcquireSRWLockExclusive(&g_tailLock);
+    if (g_tailGeneration.load() == startGeneration) {
+        // Intersect with the live tail: a refresh only ever removes keys, so a stale scan that still saw a key held
+        // cannot restore one a newer refresh already retired. Rebuild the DIK bits from the survivors, because
+        // generic/left/right modifier VKs can share a DIK.
+        bool any = false;
+        bool held[256]{};
+        for (int vk = 0; vk < 256; ++vk) {
+            const bool stillHeld = g_heldVk[vk].load() && heldVk[vk];
+            g_heldVk[vk].store(stillHeld);
+            if (!stillHeld) continue;
+            any = true;
+            const uint8_t dik = inputGateDikOf(vk);
+            if (dik) held[dik] = true;
+        }
+        for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
+        g_releaseTail.store(any);
+    }   // else a capture or a cancel superseded this scan; the next refresh starts from the new tail
+    ReleaseSRWLockExclusive(&g_tailLock);
 }
 
 bool releaseTailVk(int vk) {
@@ -720,13 +788,39 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
     guardedBudget(g_budgetDi, [&] {
         const DeviceClass cls = classifyDevice(self);
-        if (cls != DeviceClass::Keyboard) {
-            other = cls == DeviceClass::Controller;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        if (cls == DeviceClass::Controller) {
+            other = true;
+            if (pluginBlock) {
+                if (cb >= sizeof(DIJOYSTATE)) {
+                    DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
+                    for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                    memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                    if (cb >= sizeof(DIJOYSTATE2)) {
+                        DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
+                        memset(js2->rgbButtons + 32, 0, 96);
+                    }
+                } else {
+                    // A short format keeps its axes, like joyDeviceState: hats centred, buttons zeroed.
+                    constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                    constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                    if (cb >= kPovEnd) {
+                        auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                        for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                    }
+                    constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+                    if (cb > kBtn0) {
+                        memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
+                    }
+                }
+                d.zeroed.fetch_add(1, std::memory_order_relaxed);
+            }
             return;
         }
+        if (cls != DeviceClass::Keyboard) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -774,20 +868,44 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
-    const DWORD returned = *inOut;
     guardedBudget(g_budgetDi, [&] {
         const DeviceClass cls = classifyDevice(self);
-        if (cls != DeviceClass::Keyboard) {
-            other = cls == DeviceClass::Controller;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        if (cls == DeviceClass::Controller) {
+            other = true;
+            if (pluginBlock && rgdod && inOut && *inOut > 0) {
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+                constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+                constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
+                const uint32_t before = *inOut;
+                uint32_t kept = 0;
+                for (uint32_t i = 0; i < before; ++i) {
+                    const auto& ev = rgdod[i];
+                    const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
+                    const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
+                    if (isButton) {
+                        if (ev.dwData & 0x80) continue; // swallow press, allow release
+                    } else if (isPov && !povCentred(ev.dwData)) {
+                        continue; // swallow hat directions; the re-centre passes, like a button release
+                    }
+                    rgdod[kept++] = ev;
+                }
+                *inOut = kept;
+                if (kept < before) {
+                    d.zeroed.fetch_add(before - kept, std::memory_order_relaxed);
+                }
+            }
             return;
         }
+        if (cls != DeviceClass::Keyboard) return;
         // An empty read is nothing to filter (the check that used to sit above
         // the type test, which now has to run for a joystick's empty read too:
         // a call that returns nothing still proves the game is reading it).
         if (*inOut == 0) return;
         d.dataKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -818,7 +936,7 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     // A joystick or HOTAS: the rows the game's read just returned, copied and
     // untouched (an empty read too: it shows the game is polling the device).
     if (other) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, returned); });
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
     }
     return hr;
 }
@@ -837,7 +955,7 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cb, LPDIDEVICEOBJE
 SHORT WINAPI hookGetAsyncKeyState(int vk) {
     g_user.asyncCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
-        if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -859,7 +977,7 @@ SHORT WINAPI hookGetAsyncKeyState(int vk) {
 SHORT WINAPI hookGetKeyState(int vk) {
     g_user.keyStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
-        if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -886,7 +1004,7 @@ BOOL WINAPI hookGetKeyboardState(PBYTE state) {
     g_user.keyboardStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!r || !state || g_user.retired2) return r;
     guardedBudget(g_budgetUser, [&] {
-        if (g_private.load(std::memory_order_relaxed)) {
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) {
             memset(state, 0, 256);
             return;
         }
@@ -936,7 +1054,7 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
         }
         if (!isKeyboardMessage(m)) return;
         g_user.peekKeyMessages.fetch_add(1, std::memory_order_relaxed);
-        if (g_private.load(std::memory_order_relaxed)) {
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) {
             msg->message = WM_NULL;
             g_user.nulled.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -1046,13 +1164,35 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
                     "is left untouched. Please report this log.", kGameDeviceDoors);
 }
 
-// ---- the joystick doors: observation only ---------------------------------
+// ---- the joystick doors: observation and plugin gating ------------------
 
 template <size_t Index>
 HRESULT STDMETHODCALLTYPE joyDeviceState(void* self, DWORD cb, LPVOID data) {
     JoyDoor& j = g_joyDoors[Index];
     const HRESULT hr = j.origState(self, cb, data);
     if (SUCCEEDED(hr) && data) {
+        if (g_pluginBlock.load(std::memory_order_relaxed)) {
+            if (cb >= sizeof(DIJOYSTATE)) {
+                DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
+                for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                if (cb >= sizeof(DIJOYSTATE2)) {
+                    DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
+                    memset(js2->rgbButtons + 32, 0, 96);
+                }
+            } else {
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                if (cb >= kPovEnd) {
+                    auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                    for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                }
+                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+                if (cb > kBtn0) {
+                    memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
+                }
+            }
+        }
         guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
     }
     return hr;
@@ -1065,7 +1205,26 @@ HRESULT STDMETHODCALLTYPE joyDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDA
     const HRESULT hr = j.origData(self, cb, data, count, flags);
     if (SUCCEEDED(hr) && data && count && cb == sizeof(DIDEVICEOBJECTDATA)) {
         const DWORD returned = *count;
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, returned); });
+        if (g_pluginBlock.load(std::memory_order_relaxed) && returned > 0) {
+            constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+            constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+            constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+            constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < returned; ++i) {
+                const auto& ev = data[i];
+                const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
+                const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
+                if (isButton) {
+                    if (ev.dwData & 0x80) continue; // swallow press, allow release
+                } else if (isPov && !povCentred(ev.dwData)) {
+                    continue; // swallow hat directions; the re-centre passes, like a button release
+                }
+                data[kept++] = ev;
+            }
+            *count = kept;
+        }
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, *count); });
     }
     return hr;
 }
@@ -1338,7 +1497,11 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
         name, modState, modData, d.tableModule);
 }
 
+bool g_userDoorsInstalled = false;   // the trio and the pump: installed once, by the menu's first open or by the first input-filtering plugin
+
 void installUserDoors() {
+    if (g_userDoorsInstalled) return;
+    g_userDoorsInstalled = true;
     char mod[64];
     if (iatHookInstall("user32.dll", "GetAsyncKeyState",
                        reinterpret_cast<void*>(&hookGetAsyncKeyState), &g_user.asyncKey)) {
@@ -1497,7 +1660,7 @@ void inputGateConfigure(Config& cfg) {
     g_summon.store(packed);
     if (!g_privateWanted) {
         g_private.store(0);
-        g_releaseTail.store(false);
+        cancelReleaseTail();
     }
 }
 
@@ -1545,25 +1708,94 @@ void inputGateInstall() {
     }
 }
 
+void inputGateInstallForPlugin() {
+    if (g_userDoorsInstalled) return;
+    if (!Config::get().getBool("advanced.input_gate", true)) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            Log::get().note("keyboard gate: advanced.input_gate is off; an input-filtering addon's block "
+                            "does not reach the game's user32 key polls.");
+        }
+        return;
+    }
+    guarded("inputGate/installForPlugin", [&] {
+        Log::get().note("keyboard gate: an addon with an input filter initialised; installing the user32 doors.");
+        installUserDoors();
+    });
+}
+
 void inputGateSetPrivate(bool priv) {
     const int want = (priv && g_privateWanted) ? 1 : 0;
     if (g_private.load() != want) {
         if (!want) {
             guarded("inputGate/captureReleaseTail",
-                    [&] { captureReleaseTail(&GetAsyncKeyState); });
+                    [&] { captureReleaseTail(g_tailReader); });
         } else {
-            g_releaseTail.store(false);
+            cancelReleaseTail();
         }
         g_private.store(want);
     } else if (!want) {
         // The menu's fault path still calls SetPrivate(false) each frame,
         // even when its normal tick has retired. Never strand held keys there.
         guarded("inputGate/refreshReleaseTail-setPrivate",
-                [&] { refreshReleaseTail(&GetAsyncKeyState); });
+                [&] { refreshReleaseTail(g_tailReader); });
     }
 }
 
 bool inputGatePrivate() { return g_private.load() != 0; }
+
+static std::atomic<unsigned> g_pluginReleases{0};   // true->false transitions this session; reset when the gate shuts down
+static constexpr unsigned kPluginReleaseLogCap = 5;
+
+// The one place plugin ownership ends: an explicit clear (which a fault, a profile switch and shutdown also call) and
+// the lease running out all arrive here.
+//
+// The release tail is captured and published FIRST, while the block is still up, and the block is cleared last. A
+// door that runs during the scan (any thread: the game's poll, the OpenXR owner thread) therefore always sees one of
+// the two: the block, or the tail that holds every key the plugin was holding. Clearing the block before the scan
+// left a window in which a held key read down. Done under the lease lock so a renewal cannot interleave with it.
+//
+// fromLeaseTick: a lease that has been renewed since the tick spent it is not expired, and stays.
+static void releasePluginBlock(const char* why, bool fromLeaseTick = false) {
+    bool released = false;
+    AcquireSRWLockExclusive(&g_pluginLeaseLock);
+    if (g_pluginBlock.load(std::memory_order_relaxed) &&
+        !(fromLeaseTick && g_pluginLease.load(std::memory_order_relaxed) > 0)) {
+        // Keys still held now were the plugin's, not the game's: they wait for release like the menu's
+        // closing keys do (captureReleaseTail), so clearing the block does not turn them into game input.
+        guarded("inputGate/captureReleaseTail-plugin", [&] { captureReleaseTail(g_tailReader); });
+        g_pluginLease.store(0, std::memory_order_relaxed);
+        g_pluginBlock.store(false, std::memory_order_relaxed);
+        released = true;
+    } else if (!fromLeaseTick) {
+        g_pluginLease.store(0, std::memory_order_relaxed);
+    }
+    ReleaseSRWLockExclusive(&g_pluginLeaseLock);
+    if (!released) return;
+    // An addon that takes and drops input every few frames would write a line per release for the whole session:
+    // the first few say why, the rest are counted and summarised at shutdown.
+    const unsigned n = g_pluginReleases.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= kPluginReleaseLogCap) Log::get().note("keyboard gate: plugin input ownership released (%s).", why);
+}
+
+void inputGateSetPluginBlock(bool block) {
+    if (block) {
+        AcquireSRWLockExclusive(&g_pluginLeaseLock);
+        g_pluginLease.store(kPluginLeaseFrames, std::memory_order_relaxed);   // every call is a renewal
+        g_pluginBlock.store(true, std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&g_pluginLeaseLock);
+    } else {
+        releasePluginBlock("cleared");
+    }
+}
+
+void inputGatePluginLeaseTick() {
+    // The tail a plugin release leaves is retired here too: with no menu configured, no one else ticks it.
+    guarded("inputGate/refreshReleaseTail-plugin", [&] { refreshReleaseTail(g_tailReader); });
+    if (!g_pluginBlock.load(std::memory_order_relaxed)) return;
+    if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired", true);
+}
 
 void inputGateSetPadPrivate(bool priv, int index) {
     AcquireSRWLockExclusive(&g_padLock);
@@ -1611,7 +1843,7 @@ bool inputGateGameKeyboardSeen() {
 
 void inputGateTick() {
     if (!g_installTried) return;
-    guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(&GetAsyncKeyState); });
+    guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(g_tailReader); });
     static bool gameReachedNoted = false;
     if (!gameReachedNoted && g_gameKeyboardCalls.load() != 0) {
         gameReachedNoted = true;
@@ -1701,8 +1933,14 @@ void inputGateShutdown() {
     g_padInstalled.store(false);
     iatHookUninstall(&g_padImport);
     g_private.store(0);
+    g_pluginBlock.store(false);
+    g_pluginLease.store(0);
+    if (const unsigned released = g_pluginReleases.exchange(0, std::memory_order_relaxed)) {
+        Log::get().note("keyboard gate: plugin input ownership released %u times this session.", released);
+    }
+    g_userDoorsInstalled = false;
     g_summon.store(0);
-    g_releaseTail.store(false);
+    cancelReleaseTail();
     iatHookUninstall(&g_createImport);
     iatHookUninstall(&g_user.peek);
     iatHookUninstall(&g_user.keyboardState);

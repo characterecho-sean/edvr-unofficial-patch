@@ -141,35 +141,37 @@ Bytes readAll(const std::wstring& path) {
 }
 
 Bytes identityFixture(bool withImport) {
-  Bytes d(0x6409000, 0);
+  Bytes d(0x640C000, 0);
   d[0] = 'M'; d[1] = 'Z'; put32(d, 0x3C, 0x80);
   d[0x80] = 'P'; d[0x81] = 'E';
   put16(d, 0x84, 0x8664); put16(d, 0x86, 7); put16(d, 0x94, 240);
   put16(d, 0x98, 0x20B); put64(d, 0x98 + 24, 0x140000000ull);
-  put32(d, 0x98 + 56, 0x6409000); put32(d, 0x98 + 60, 0x400);
+  put32(d, 0x98 + 56, 0x640C000); put32(d, 0x98 + 60, 0x400);
   put32(d, 0x98 + 108, 16); put32(d, 0x98 + 112 + 8, 0x4DB6000);
   put32(d, 0x98 + 112 + 12, 40);
   const std::size_t table = 0x98 + 240;
-  const std::uint32_t starts[] = {0x1000, 0x4DB3000, 0x4DB5000, 0x4DB6000,
-                                  0x4DB8000, 0x4DBA000, 0x4DBE000};
-  const std::uint32_t spans[] = {0x4DB2000, 0x1000, 0x1000, 0x2000,
+  // Build 334473: .text raw size 0x4DB4C00 (floor in elite_oculus_profile.h); the
+  // .rdata that follows starts at 0x4DB6000, where the import directory sits.
+  const std::uint32_t starts[] = {0x1000, 0x4DB6000, 0x4DB7000, 0x4DB8000,
+                                  0x4DBA000, 0x4DBC000, 0x4DBE000};
+  const std::uint32_t spans[] = {0x4DB4C00, 0x1000, 0x1000, 0x2000,
                                  0x1000, 0x1000, 0x1000};
   for (unsigned i = 0; i != 7; ++i) {
     put32(d, table + i * 40 + 8, spans[i]);
     put32(d, table + i * 40 + 12, starts[i]);
     put32(d, table + i * 40 + 36, i == 0 ? 0x60000020 : 0xC0000040);
   }
-  put32(d, 0x80 + 8, 0x6A989634);
+  put32(d, 0x80 + 8, 0x6ACD513D);
   if (withImport) {
     const std::uint32_t base = 0x4DB6000;
     put32(d, base, base + 0x100); put32(d, base + 12, base + 0x200);
-    put32(d, base + 16, 0x4DB32E0); put32(d, base + 4, 0);
+    put32(d, base + 16, 0x4DB62E0); put32(d, base + 4, 0);
     put64(d, base + 0x100, base + 0x400);
     const char dll[] = "KERNEL32.dll";
     for (unsigned i = 0; i < sizeof(dll); ++i) d[base + 0x200 + i] = dll[i];
     const char fn[] = "LoadLibraryW";
     for (unsigned i = 0; i < sizeof(fn); ++i) d[base + 0x402 + i] = fn[i];
-    put64(d, 0x4DB32E0, 1);
+    put64(d, 0x4DB62E0, 1);
   }
   return d;
 }
@@ -203,7 +205,7 @@ void selfTest() {
   put32(fixture, 0x86, 7);
   put32(fixture, 0x94, 240);
   put32(fixture, 0x98, 0x20B);
-  put32(fixture, 0x98 + 56, 0x6409000);
+  put32(fixture, 0x98 + 56, 0x640C000);
   put32(fixture, 0x98 + 60, 0x400);
   check(!edvr::eliteOculusProfileValidateMapped(fixture.data(), fixture.size(), &out),
         "short mapped span rejected");
@@ -216,17 +218,17 @@ void selfTest() {
   detail::View view{};
   check(detail::image_view(importFixture.data(), importFixture.size(), &view),
         "synthetic header and seven nonoverlapping sections pass structural validation");
-  check(detail::mapped_rva(view, 0x4DB32E0, 8) &&
-        !detail::mapped_rva(view, 0x4DB4FFC, 8), "mapped range cannot cross a section gap");
+  check(detail::mapped_rva(view, 0x4DB62E0, 8) &&
+        !detail::mapped_rva(view, 0x4DB5FFC, 8), "mapped range cannot cross a section gap");
   importFixture[0x1000] = 'a'; importFixture[0x1001] = 'b'; importFixture[0x1002] = 'c';
   check(detail::fingerprint(view, 0x1000, 3, 0xE71FA2190541574Bull), "FNV known vector matches");
   importFixture[0x1002] = 'd';
   check(!detail::fingerprint(view, 0x1000, 3, 0xE71FA2190541574Bull), "changed code fingerprint rejected");
   const auto address = reinterpret_cast<std::uintptr_t>(importFixture.data());
-  put64(importFixture, 0x4DB32E0, address + 0x1000);
-  check(detail::relocated_pointer(view, 0x4DB32E0, 0x1000), "relocated pointer uses actual mapped base");
-  put64(importFixture, 0x4DB32E0, address + 0x1001);
-  check(!detail::relocated_pointer(view, 0x4DB32E0, 0x1000), "changed relocated pointer rejected");
+  put64(importFixture, 0x4DB62E0, address + 0x1000);
+  check(detail::relocated_pointer(view, 0x4DB62E0, 0x1000), "relocated pointer uses actual mapped base");
+  put64(importFixture, 0x4DB62E0, address + 0x1001);
+  check(!detail::relocated_pointer(view, 0x4DB62E0, 0x1000), "changed relocated pointer rejected");
   check(!edvr::eliteOculusProfileValidateMapped(importFixture.data(), importFixture.size(), &out),
         "synthetic executable with valid imports cannot satisfy audited code fingerprints");
   put64(importFixture, 0x98 + 24, address);
@@ -261,7 +263,7 @@ int gameTest(const wchar_t* path) {
   edvr::OculusProfileMatch out{};
   check(edvr::eliteOculusProfileValidateMapped(mapped.data(), mapped.size(), &out),
         "mapped known Elite profile accepted");
-  check(out.loadLibrarySlot != nullptr && out.callerReturnRva == 0x4E70BC,
+  check(out.loadLibrarySlot != nullptr && out.callerReturnRva == 0x4E71BC,
         "mapped profile returns slot and exact caller RVA");
   check(out.failureStage == 0, "successful profile has no failure diagnostic");
   if (failures) return 1;
@@ -274,11 +276,11 @@ int gameTest(const wchar_t* path) {
     check(!out.loadLibrarySlot && !out.callerReturnRva, "mutation rejection clears output");
     mapped[offset] ^= 1;
   };
-  for (const auto rva : {0x8D533Cu, 0x4E4AA0u, 0x4E4630u, 0x4E4870u,
-                         0x4E8530u, 0x4E70D0u, 0x4E6D40u, 0x4E0E60u,
-                         0x4E8230u, 0x4E5CA0u, 0x4E86B0u})
+  for (const auto rva : {0x8D549Cu, 0x4E4BA0u, 0x4E4730u, 0x4E4970u,
+                         0x4E8630u, 0x4E71D0u, 0x4E6E40u, 0x4E0F60u,
+                         0x4E8330u, 0x4E5DA0u, 0x4E87B0u})
     rejectsMutation(rva, "audited code-block mutation rejected");
-  for (const auto rva : {0x4E243F8u, 0x4E24400u, 0x4E245C0u})
+  for (const auto rva : {0x4E27438u, 0x4E27440u, 0x4E27600u})
     rejectsMutation(rva, "vtable mutation rejected");
   const auto nt = u32(mapped, 0x3C);
   for (const auto offset : {nt + 4, nt + 8, nt + 24 + 56})
@@ -292,7 +294,7 @@ int gameTest(const wchar_t* path) {
   put64(mapped, nt + 24 + 24, reinterpret_cast<std::uintptr_t>(mapped.data()));
   check(edvr::eliteOculusProfileValidateMapped(mapped.data(), mapped.size(), &out),
         "known profile accepts Windows-adjusted ImageBase with all other proofs retained");
-  check(slotOffset == 0x4DB32E0, "validated slot has qualified RVA");
+  check(slotOffset == 0x4DB62E0, "validated slot has qualified RVA");
 
   Bytes relocated = mapped;
   // Re-map to a different vector address and adjust only DIR64 entries by
@@ -350,7 +352,7 @@ int secImageTest(const wchar_t* path) {
     accepted = eliteOculusProfileValidate(first, &match);
   }
   check(accepted, "SEC_IMAGE_NO_EXECUTE profile accepted without execution");
-  check(match.loadLibrarySlot != nullptr && match.callerReturnRva == 0x4E70BC,
+  check(match.loadLibrarySlot != nullptr && match.callerReturnRva == 0x4E71BC,
         "SEC_IMAGE profile returns validated slot and caller RVA");
   std::printf("elite_oculus_test: SEC_IMAGE_NO_EXECUTE header_base=0x%llX mapped_base=0x%llX, %u checks, %u failures\n",
               static_cast<unsigned long long>(encodedBase),

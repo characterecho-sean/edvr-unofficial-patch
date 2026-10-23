@@ -47,6 +47,10 @@ edvr-flat.ini instead. --ini writes the settings files of the chosen scope:
 both writes edvr.ini and edvr-flat.ini, vr writes edvr.ini, flat writes
 edvr-flat.ini. A scope that includes flat seeds a missing edvr-flat.ini from
 the existing edvr.ini, so the two halves stop sharing one file's settings.
+A --compile-only build carries no edvr-flat.ini (its recipe stops before the
+generator step that writes one), so --ini derives the flat template in memory
+from gen_installer_rc.flat_ini_bytes(), the function that writes it for a full
+build. The build directory is never written, and the plan says so.
 
 --scope both|vr|flat (default both) is what the install is for. Every scope
 except flat installs the VR payload (runtime, graphics, loader, notice,
@@ -81,6 +85,15 @@ import tempfile
 import time
 import types
 from pathlib import Path
+
+try:
+    from tools import steam_library
+except ImportError:
+    import steam_library
+try:
+    from tools import gen_installer_rc
+except ImportError:
+    import gen_installer_rc
 
 GAME_EXE = "EliteDangerous64.exe"
 
@@ -129,9 +142,9 @@ def _descriptor_scope(path):
 def native_paths(root, target):
     """The deliberately separate native package and its paired graphics DLL."""
     return {
-        "native_source": os.path.join(root, "build", "edvr_openxr_runtime.dll"),
+        "native_source": os.path.join(build_dir(root), "edvr_openxr_runtime.dll"),
         # Native startup routing is compiled into a distinct graphics image.
-        "graphics_source": os.path.join(root, "build", "edvr_openxr_graphics.dll"),
+        "graphics_source": os.path.join(build_dir(root), "edvr_openxr_graphics.dll"),
         "native_target": os.path.join(target, "Openvr", "win64", "openvr_api.dll"),
         "graphics_target": os.path.join(target, "d3d11.dll"),
         "original": os.path.join(target, "Openvr", "win64", "openvr_api_orig.dll"),
@@ -140,6 +153,10 @@ def native_paths(root, target):
 
 
 GAME_PROBE_ATTEMPTS = 4
+# Which kind of host the stopped-game probe reads: Windows asks Toolhelp32 or
+# tasklist; anything else (the Linux test-flight path, where Elite runs under
+# Proton) reads /proc. A Wine-hosted Python cannot see Proton's processes.
+GAME_PROBE_WINDOWS = os.name == "nt"
 GAME_PROBE_PAUSE = 0.4
 _LAST_PROBE_REASON = ""
 
@@ -254,9 +271,40 @@ def _game_pids_toolhelp(exe=None):
         k32.CloseHandle(snap)
 
 
+def _game_pids_proc(exe=None, proc="/proc"):
+    """PIDs of the game from /proc (Linux, Proton). The kernel truncates a
+    process name to 15 characters, so EliteDangerous64.exe is the comm
+    "EliteDangerous6"; match that prefix, any case. `exe` and `proc` are
+    the self-test's."""
+    want = (exe or GAME_EXE)[:15].lower()
+    pids, seen = [], 0
+    try:
+        names = os.listdir(proc)
+    except OSError as exc:
+        raise _ProbeError("cannot list %s: %s" % (proc, exc))
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "comm"), "r", encoding="utf-8", errors="replace") as f:
+                comm = f.read().strip()
+        except FileNotFoundError:
+            continue                    # exited between the listing and the read
+        except OSError as exc:
+            raise _ProbeError("cannot read process %s: %s" % (name, exc))
+        seen += 1
+        if comm.lower() == want:
+            pids.append(int(name))
+    if not seen:
+        raise _ProbeError("%s lists no processes" % proc)
+    return pids
+
+
 def _game_pids():
     """Game PIDs by the first method that reads the list; both failing raises
     with both reasons."""
+    if not GAME_PROBE_WINDOWS:
+        return _game_pids_proc()
     reasons = []
     for name, probe in (("toolhelp", _game_pids_toolhelp),
                         ("tasklist", _game_pids_tasklist)):
@@ -275,7 +323,9 @@ def _probe_game_once(target):
         pids = _game_pids()
     except _ProbeError as exc:
         return False, False, str(exc)
-    if target is None:
+    if target is None or not GAME_PROBE_WINDOWS:
+        # /proc has no Windows image path to compare with a target: any running
+        # game counts, the conservative direction for a tool that replaces DLLs.
         return True, bool(pids), ""
     images = [_process_image_path(pid) for pid in pids]
     known, running = game_running_in(target, images)
@@ -408,11 +458,13 @@ def _native_preflight(root, target, receipt_path):
 
 
 def validate_elite_game(path):
-    """Validate the qualified executable before staging either profile.
+    """Validate the executable before staging either profile.
 
-    On rejection, say which case this is in the same words the installer's
-    own gate uses: Horizons is told no EDVR build supports it, and only an
-    Odyssey revision is pointed at another build.
+    Returns the profile for the pinned revision. Horizons and an unreadable
+    executable raise ValueError with the same words the installer's own gate
+    uses. An Odyssey revision this build was not checked against does not
+    raise: it prints a warning to stderr and returns None, the same as the
+    installer's gate, which installs it with the warning.
     """
     try:
         from elite_oculus import validate_elite_oculus, version_strings
@@ -436,9 +488,12 @@ def validate_elite_game(path):
                          "EDVR supports Odyssey only; no EDVR build supports this game.")
     version = strings.get("FileVersion")
     which = " (version %s)" % version if version else ""
-    raise ValueError("This Elite Dangerous: Odyssey revision%s is not one this EDVR "
-                     "build is qualified for. Install an EDVR build qualified for "
-                     "this game revision." % which)
+    print("[edvr] warning: This Elite Dangerous: Odyssey revision%s is not the one this EDVR "
+          "build was checked against. EDVR will install and the game will start; fixes tied to "
+          "the game build stand down and the gfx log names each one, and the Oculus PC runtime "
+          "may bypass EDVR's OpenXR runtime until an EDVR update for this revision." % which,
+          file=sys.stderr)
+    return None
 
 
 def _native_receipt(root, target, paths, backups, before_hashes,
@@ -875,6 +930,18 @@ def _rc3_flat_ini_target(target):
 
 
 def _validate_v2_receipt(r):
+    """Validate a v2 receipt against the build directory it was installed from."""
+    global _BUILD_OVERRIDE
+    saved = _BUILD_OVERRIDE
+    if isinstance(r, dict) and r.get("build") == COMPILE_ONLY_MARK and isinstance(r.get("root"), str):
+        _BUILD_OVERRIDE = compile_build_dir(r["root"])
+    try:
+        return _validate_v2_receipt_in(r)
+    finally:
+        _BUILD_OVERRIDE = saved
+
+
+def _validate_v2_receipt_in(r):
     if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") not in (NATIVE_KIND, FLAT_KIND) or r.get("state") != "installed":
         raise ValueError("receipt is not an installed EDVR v2 package")
     target, root, files = r.get("target"), r.get("root"), r.get("files")
@@ -907,13 +974,15 @@ def _validate_v2_receipt(r):
         raise ValueError("incomplete or duplicate EDVR v2 components")
     if r["kind"] == FLAT_KIND:
         sources = {"graphics": paths["graphics"],
-                   "dlss": os.path.join(root, "build", "nvngx_dlss.dll"),
-                   "xess": os.path.join(root, "build", "libxess.dll"),
-                   "xess_license": os.path.join(root, "build", "INTEL-XESS-LICENSE.txt"),
-                   "xess_third_party": os.path.join(root, "build", "INTEL-XESS-THIRD-PARTY.txt"),
+                   "dlss": os.path.join(build_dir(root), "nvngx_dlss.dll"),
+                   "xess": os.path.join(build_dir(root), "libxess.dll"),
+                   "xess_license": os.path.join(build_dir(root), "INTEL-XESS-LICENSE.txt"),
+                   "xess_third_party": os.path.join(build_dir(root), "INTEL-XESS-THIRD-PARTY.txt"),
                    "ini": _ini_source(root, "flat"), "profile": "generated"}
         for e in files:
             expected = sources[e["key"]]
+            if e["key"] == "ini" and e.get("source") == INI_GENERATED and r.get("build") == COMPILE_ONLY_MARK:
+                continue   # a compile-only build has no flat template file; see _ini_template
             if e.get("source") != (os.path.abspath(expected) if expected != "generated" else expected):
                 raise ValueError("unsafe flat source: " + e["key"])
     if r["kind"] == FLAT_KIND and _flat_vr_leftovers(target):
@@ -1023,6 +1092,131 @@ def short_hash(root):
     except (OSError, subprocess.SubprocessError):
         pass
     return "nogit"
+
+
+# A compile-only build is the Linux (Steam Deck, Proton) test-flight path: the
+# Wine toolchain in .toolchains/windows/ compiles the production DLLs without
+# any of build.bat's validation gates (AGENTS.md, "Build and verify before
+# commit"). --compile-only installs from its output directory instead of
+# <root>/build, refuses when the tree has moved since the compile, and marks
+# the install receipt so it is never mistaken for a validated build.
+COMPILE_ONLY_KIND = "local-wine-production-dll-compile-only"
+COMPILE_ONLY_MARK = "compile-only"
+COMPILE_ONLY_BUILD_CMD = ('.toolchains/windows/host/powershell/pwsh -Command '
+                          '"python3 .toolchains/windows/toolchain.py build-dlls%s"')
+_BUILD_OVERRIDE = None
+
+
+def build_dir(root):
+    """Where the build's products are: <root>/build, or the compile-only output."""
+    return _BUILD_OVERRIDE or os.path.join(root, "build")
+
+
+def _set_build_override(path):
+    global _BUILD_OVERRIDE
+    _BUILD_OVERRIDE = path
+
+
+def compile_build_dir(root):
+    """Where a compile-only build of `root` lands. The main checkout holds the
+    toolchain, so its output is inside it; any other tree (a worktree) keeps
+    its output in its own ignored build/, which a fingerprint never sees."""
+    toolchain = os.path.join(root, ".toolchains", "windows")
+    if os.path.isdir(toolchain):
+        return os.path.join(toolchain, "compile-build")
+    return os.path.join(root, "build", "compile-build")
+
+
+def _toolchain_dir(root):
+    """The Linux toolchain's folder (device-local, not in git), or None."""
+    env = os.environ.get("EDVR_TOOLCHAIN_DIR")
+    if env:
+        return env if os.path.isfile(os.path.join(env, "compile_only.py")) else None
+    bases = [root, repo_root()]
+    try:   # a worktree's toolchain is the main checkout's
+        common = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        if common:
+            bases.append(os.path.dirname(os.path.abspath(os.path.join(root, common))))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for base in bases:
+        d = os.path.join(base, ".toolchains", "windows")
+        if os.path.isfile(os.path.join(d, "compile_only.py")):
+            return d
+    return None
+
+
+def compile_only_fingerprint(root):
+    """The tree's source fingerprint, computed by compile_only.py itself so the
+    receipt and this check can never drift apart."""
+    import importlib.util
+    d = _toolchain_dir(root)
+    if d is None:
+        raise SystemExit("[edvr] --compile-only needs the Linux toolchain's "
+                         ".toolchains/windows/compile_only.py (device-local, not in git).")
+    spec = importlib.util.spec_from_file_location("edvr_compile_only", os.path.join(d, "compile_only.py"))
+    module = importlib.util.module_from_spec(spec)
+    keep = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, d)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(d)
+        sys.dont_write_bytecode = keep
+    module.ROOT = Path(root)
+    module.SOURCE = module.ROOT / "build.bat"
+    return module.source_fingerprint()
+
+
+def compile_only_build(root, require_current=True, out=print):
+    """The compile-only build directory for `root`, or SystemExit saying why not.
+
+    Refuses without a receipt, with outputs that no longer match it, and (when
+    `require_current`) when the tree is not the one that was compiled. A
+    --verify-only passes require_current=False: it compares the game directory
+    to the build, and a moved tree is a warning there, not a reason to look away.
+    """
+    bdir = compile_build_dir(root)
+    receipt_path = os.path.join(bdir, "compile_only_receipt.json")
+    redo = COMPILE_ONLY_BUILD_CMD % ("" if bdir.startswith(os.path.join(root, ".toolchains")) else " --root " + root)
+    if not os.path.isfile(receipt_path):
+        raise SystemExit("[edvr] no compile-only receipt at %s\n       compile first: %s" % (receipt_path, redo))
+    try:
+        with open(receipt_path, "r", encoding="utf-8") as f:
+            receipt = json.load(f)
+        outputs = receipt["outputs"]
+        fingerprint = receipt["source_fingerprint"]
+        if receipt.get("kind") != COMPILE_ONLY_KIND or receipt.get("validated") is not False \
+                or not isinstance(outputs, dict) or not outputs or not isinstance(fingerprint, str):
+            raise ValueError("not a compile-only receipt")
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit("[edvr] %s is not a usable compile-only receipt (%s)\n       compile again: %s"
+                         % (receipt_path, exc, redo))
+    for name, record in sorted(outputs.items()):
+        path = os.path.join(bdir, name)
+        if not os.path.isfile(path) or not isinstance(record, dict) or \
+                sha256(path).lower() != str(record.get("sha256", "")).lower():
+            raise SystemExit("[edvr] %s no longer matches the compile-only receipt (a compile in "
+                             "progress, or a stale copy)\n       compile again: %s" % (path, redo))
+    out("[edvr] COMPILE-ONLY build, NOT Windows validated and NOT a release asset: %s" % bdir)
+    current = compile_only_fingerprint(root) == fingerprint
+    if not current:
+        message = ("the tree %s is not the one this build was compiled from "
+                   "(commit or edit since, or another branch)" % root)
+        if require_current:
+            raise SystemExit("[edvr] refusing: %s\n       compile again: %s" % (message, redo))
+        out("[edvr] WARNING: %s; --verify-only compares the game directory to the build, not to the tree" % message)
+    try:
+        dirty = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        dirty = ""
+    if dirty:
+        out("[edvr] WARNING: the tree is dirty, so these DLLs report a -dirty version and edvr_log.py "
+            "--expect-build HEAD will not match them; commit, then compile, before a build that will be flown")
+    return bdir
 
 
 def backup_name(dst, tag, now=None):
@@ -1206,44 +1400,10 @@ def _products_under(root):
 
 
 def steam_dirs():
-    roots = []
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Valve\Steam") as k:
-            roots.append(winreg.QueryValueEx(k, "SteamPath")[0])
-    except (ImportError, OSError):
-        pass
-    # Every library, not just the default one: the game is routinely on a
-    # different drive from Steam itself.
-    libs = list(roots)
-    for r in list(roots):
-        vdf = os.path.join(r, "steamapps", "libraryfolders.vdf")
-        if not os.path.isfile(vdf):
-            continue
-        try:
-            with open(vdf, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    parts = line.split('"')
-                    if len(parts) >= 5 and parts[1] == "path":
-                        libs.append(parts[3].replace("\\\\", "\\"))
-        except OSError:
-            pass
-    # A plain fallback for a rig whose registry entry has gone missing.
-    libs.append(r"C:\Steam")
-    # Deduplicated case- and separator-insensitively. The registry hands
-    # back `c:/steam` and the fallback is `C:\Steam`; compared as strings
-    # those are two installs, and the tool then refuses to act because it
-    # has "found two" -- the same directory, twice.
-    out, seen = [], set()
-    for lib in libs:
-        base = os.path.join(lib, "steamapps", "common", "Elite Dangerous")
-        for leaf in _products_under(base):
-            key = os.path.normcase(os.path.normpath(leaf))
-            if key not in seen:
-                seen.add(key)
-                out.append(os.path.normpath(leaf))
-    return out
+    # One resolver for this tool and edvr_log.py: the Windows registry and
+    # every library its libraryfolders.vdf names, or on Linux (Steam Deck,
+    # Proton) ~/.local/share/Steam and ~/.steam/steam.
+    return steam_library.steam_dirs(GAME_EXE)
 
 
 def frontier_dirs():
@@ -1344,10 +1504,10 @@ def native_direct_verify(root, target, loader, runtime):
 def _standard_native_paths(root, target):
     """Files owned by the normal native OpenXR installation."""
     xr = os.path.join(target, "Openvr", "win64")
-    return {"runtime": os.path.join(root, "build", "edvr_openxr_runtime.dll"),
-            "graphics": os.path.join(root, "build", "edvr_openxr_graphics.dll"),
-            "loader": os.path.join(root, "build", "openxr_loader.dll"),
-            "notice": os.path.join(root, "build", "OPENXR-LOADER-LICENSE.txt"),
+    return {"runtime": os.path.join(build_dir(root), "edvr_openxr_runtime.dll"),
+            "graphics": os.path.join(build_dir(root), "edvr_openxr_graphics.dll"),
+            "loader": os.path.join(build_dir(root), "openxr_loader.dll"),
+            "notice": os.path.join(build_dir(root), "OPENXR-LOADER-LICENSE.txt"),
             "runtime_target": os.path.join(xr, "openvr_api.dll"),
             "graphics_target": os.path.join(target, "d3d11.dll"),
             "loader_target": os.path.join(xr, "openxr_loader.dll"),
@@ -1357,7 +1517,7 @@ def _standard_native_paths(root, target):
 
 
 def _flat_paths(root, target):
-    return {"graphics": os.path.join(root, "build", "d3d11.dll"),
+    return {"graphics": os.path.join(build_dir(root), "d3d11.dll"),
             "graphics_target": os.path.join(target, "d3d11.dll"),
             "game": os.path.join(target, GAME_EXE)}
 
@@ -1365,7 +1525,30 @@ def _flat_paths(root, target):
 def _ini_source(root, half):
     """The template for a settings file: `vr` or `flat`, one per half."""
     return os.path.join(root, "edvr.ini") if half == "vr" else \
-        os.path.join(root, "build", "edvr-flat.ini")
+        os.path.join(build_dir(root), "edvr-flat.ini")
+
+
+# A receipt's `source` for a template that was derived in memory and has no file.
+INI_GENERATED = "generated"
+
+
+def _ini_template(root, half):
+    """(source, bytes) for a half's settings template; bytes is None when there is none.
+
+    `source` is the template file's path, or INI_GENERATED. A compile-only
+    build has no edvr-flat.ini: its recipe stops before build.bat's
+    gen_installer_rc.py step, which is what writes that file. When the
+    compile-only output lacks it, the flat template is the generator's own
+    flat_ini_bytes(), derived here in memory. Nothing is written to the build
+    directory, and a dry run stays a dry run. A full build never derives: a
+    build/ without its edvr-flat.ini is a broken build, and still says so."""
+    path = _ini_source(root, half)
+    if os.path.isfile(path):
+        with open(path, "rb") as stream:
+            return os.path.abspath(path), stream.read()
+    if half == "flat" and _BUILD_OVERRIDE:
+        return INI_GENERATED, gen_installer_rc.flat_ini_bytes()
+    return os.path.abspath(path), None
 
 
 def _ini_target(target, half):
@@ -1375,15 +1558,18 @@ def _ini_target(target, half):
 
 
 def _ini_pairs(root, target, scope):
-    """(source, target, receipt key) for each settings file the scope owns. A
-    both install's flat file is keyed ini_flat; a flat install's is ini, as
-    its receipt has always named it."""
+    """(source, target, receipt key, bytes) for each settings file the scope
+    owns; see _ini_template for source and bytes. A both install's flat file
+    is keyed ini_flat; a flat install's is ini, as its receipt has always
+    named it."""
     pairs = []
     if scope in ("both", "vr"):
-        pairs.append((_ini_source(root, "vr"), _ini_target(target, "vr"), "ini"))
+        source, data = _ini_template(root, "vr")
+        pairs.append((source, _ini_target(target, "vr"), "ini", data))
     if scope in ("both", "flat"):
-        pairs.append((_ini_source(root, "flat"), _ini_target(target, "flat"),
-                      "ini" if scope == "flat" else "ini_flat"))
+        source, data = _ini_template(root, "flat")
+        pairs.append((source, _ini_target(target, "flat"),
+                      "ini" if scope == "flat" else "ini_flat", data))
     return pairs
 
 
@@ -1559,6 +1745,116 @@ def _flat_vr_leftovers(target):
     return [path for path in candidates if os.path.exists(path)]
 
 
+def retire_stale_native_receipt(target, tag, dry_run=False):
+    """Archive only a native receipt superseded by a hash-proven GUI flat install."""
+    import configparser
+    target = os.path.abspath(target)
+    receipt = os.path.join(target, "edvr_native_receipt.json")
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag):
+            raise ValueError("unsafe backup tag")
+        state_path = os.path.join(target, "edvr_install", "state.ini")
+        if not _under(state_path, target) or not _under(receipt, target):
+            raise ValueError("install evidence escapes the game directory")
+        state_hash = sha256(state_path)
+        state = configparser.ConfigParser(interpolation=None)
+        with open(state_path, encoding="utf-8-sig") as stream:
+            state.read_file(stream)
+        get = lambda section, key: state.get(section, key, fallback="").strip()
+        if not get("edvr", "version") or any(get("edvr", key) != "flat" for key in ("scope", "profile")):
+            raise ValueError("GUI record does not prove a flat installation")
+        descriptor = os.path.join(target, PROFILE_FILE)
+        if Path(descriptor).read_bytes() != profile_bytes("flat") or \
+                get("edvr", "descriptor_sha256").upper() != sha256(descriptor):
+            raise ValueError("GUI flat descriptor hash does not match")
+        graphics = os.path.join(target, "d3d11.dll")
+        live_hash = sha256(graphics)
+        if not _is_edvr_graphics(graphics):
+            raise ValueError("live graphics DLL is not an EDVR build")
+        if not _valid_hash(get("d3d11", "sha256")) or any(
+                get(section, key).upper() != live_hash
+                for section, key in (("d3d11", "sha256"), ("native", "graphics_sha256"))):
+            raise ValueError("GUI graphics hashes do not match the live DLL")
+        if get("edvr", "openvr_dir") or any(get(section, key) for section, keys in (
+                ("openvr", ("sha256", "orig_name", "orig_sha256")),
+                ("native", ("runtime_sha256", "loader_sha256", "license_sha256", "config_sha256",
+                            "original_name", "original_sha256"))) for key in keys):
+            raise ValueError("GUI record still owns VR components")
+        leftovers = [p for p in _flat_vr_leftovers(target) if p != receipt]
+        if leftovers:
+            raise ValueError("VR components remain: " + ", ".join(leftovers))
+        with open(receipt, encoding="utf-8") as stream:
+            old = json.load(stream)
+        if not isinstance(old, dict) or old.get("version") != 2 or old.get("kind") != NATIVE_KIND or old.get("state") != "installed":
+            raise ValueError("not an installed v2 native receipt")
+        recorded_target, recorded_root = old.get("target"), old.get("root")
+        if not isinstance(recorded_target, str) or not os.path.isabs(recorded_target) or \
+                _real_path(recorded_target) != _real_path(target) or \
+                not isinstance(recorded_root, str) or not os.path.isabs(recorded_root):
+            raise ValueError("native receipt target/root is invalid or foreign")
+        paths = _standard_native_paths(recorded_root, target)
+        allowed = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice")}
+        allowed.update(config=paths["config"], profile=descriptor,
+                       ini=os.path.join(target, "edvr.ini"), ini_flat=os.path.join(target, "edvr-flat.ini"),
+                       dlss=os.path.join(target, "nvngx_dlss.dll"), xess=os.path.join(target, "libxess.dll"),
+                       xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
+                       xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
+        files = old.get("files")
+        if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
+            raise ValueError("malformed native receipt files")
+        keys = [e["key"] for e in files]
+        if len(set(keys)) != len(keys) or not {"runtime", "graphics", "loader", "notice", "config"}.issubset(keys):
+            raise ValueError("incomplete or duplicate native receipt files")
+        for entry in files:
+            want = allowed.get(entry["key"])
+            recorded = entry.get("target")
+            if want is None or not isinstance(recorded, str) or not os.path.isabs(recorded) or \
+                    _real_path(recorded) != _real_path(want) or not _under(recorded, target) or \
+                    not _valid_hash(entry.get("installed_sha256")):
+                raise ValueError("unsafe native receipt file")
+            backup, before = entry.get("backup"), entry.get("before_sha256")
+            if backup is None:
+                if before is not None:
+                    raise ValueError("native receipt has a prior hash without a backup")
+            elif not isinstance(backup, str) or not os.path.isabs(backup) or not _under(backup, target) or \
+                    not _valid_hash(before) or _real_path(os.path.dirname(backup)) != _real_path(os.path.dirname(want)) or \
+                    not BACKUP_FILE.fullmatch(os.path.basename(backup)) or \
+                    not os.path.basename(backup).lower().startswith(os.path.basename(want).lower() + ".pre-"):
+                raise ValueError("unsafe native receipt backup")
+        old_graphics = next(e for e in files if e["key"] == "graphics")
+        if old_graphics["installed_sha256"].upper() == live_hash:
+            raise ValueError("native receipt is not superseded by different graphics")
+        runtime = paths["runtime_target"]
+        if os.path.isfile(runtime):
+            import openxr_pe
+            names, _ = openxr_pe._exports(openxr_pe.Image(Path(runtime).read_bytes()))
+            old_runtime = next(e for e in files if e["key"] == "runtime")
+            if any(name.startswith("edvr") for name in names.values()) or sha256(runtime) == old_runtime["installed_sha256"].upper():
+                raise ValueError("EDVR VR runtime remains")
+        before_hash = sha256(receipt)
+        archive = _native_backup_name(receipt, tag, datetime.datetime.now())
+        print("[edvr] retire stale native receipt%s: %s -> %s (sha256 %s)" %
+              (" (DRY RUN -- nothing will be written)" if dry_run else "", receipt, archive, before_hash))
+        if dry_run:
+            print("[edvr] dry run: wrote nothing."); return 0
+        known, running = strict_game_running(target)
+        if not known or running:
+            raise ValueError("receipt retirement requires a proven stopped game" + probe_reason())
+        if sha256(receipt) != before_hash:
+            raise ValueError("native receipt changed during preflight")
+        if sha256(state_path) != state_hash or sha256(graphics) != live_hash or \
+                sha256(descriptor) != get("edvr", "descriptor_sha256").upper():
+            raise ValueError("GUI flat-install evidence changed during preflight")
+        os.rename(receipt, archive)
+        if sha256(archive) != before_hash or os.path.exists(receipt):
+            raise ValueError("receipt archive verification failed")
+        print("[edvr] stale native receipt archived and verified; its backup references are preserved.")
+        return 0
+    except (OSError, ValueError, UnicodeError, configparser.Error) as exc:
+        print("[edvr] receipt retirement refused: %s" % exc)
+        return 1
+
+
 def _equivalent_startup_config(actual, expected):
     """Accept the same startup config with LF or CRLF line endings only."""
     if actual == expected:
@@ -1578,21 +1874,20 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     payload = ("runtime", "graphics", "loader", "notice") if native else ("graphics",)
     errors = ["missing %s source %s" % ("native" if native else "flat", p[k]) for k in payload
               if not os.path.isfile(p[k])]
-    if include_dlss and not os.path.isfile(os.path.join(root, "build", "nvngx_dlss.dll")):
-        errors.append("missing optional DLSS source %s" % os.path.join(root, "build", "nvngx_dlss.dll"))
+    if include_dlss and not os.path.isfile(os.path.join(build_dir(root), "nvngx_dlss.dll")):
+        errors.append("missing optional DLSS source %s" % os.path.join(build_dir(root), "nvngx_dlss.dll"))
     xess_names = (("xess", "libxess.dll"), ("xess_license", "INTEL-XESS-LICENSE.txt"),
                   ("xess_third_party", "INTEL-XESS-THIRD-PARTY.txt"))
     # XeSS-SR ships with every scope: the flat half and the VR half both select it.
     if include_xess:
         for key, name in xess_names:
-            if not os.path.isfile(os.path.join(root, "build", name)):
-                errors.append("missing XeSS source %s" % os.path.join(root, "build", name))
-    # Each settings file the scope owns, as (source, target, receipt key).
-    ini_pairs = _ini_pairs(root, target, scope)
-    if include_ini:
-        for source, _, _ in ini_pairs:
-            if not os.path.isfile(source):
-                errors.append("missing %s INI source %s" % (scope, source))
+            if not os.path.isfile(os.path.join(build_dir(root), name)):
+                errors.append("missing XeSS source %s" % os.path.join(build_dir(root), name))
+    # Each settings file the scope owns, as (source, target, receipt key, template bytes).
+    ini_pairs = _ini_pairs(root, target, scope) if include_ini else []
+    for source, _, _, data in ini_pairs:
+        if data is None:
+            errors.append("missing %s INI source %s" % (scope, source))
     if not os.path.isfile(p["game"]):
         errors.append("missing target executable %s" % p["game"])
     if errors:
@@ -1601,7 +1896,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     if native:
         try:
             import fetch_openxr_loader
-            fetch_openxr_loader.verify(os.path.join(root, "build"))
+            fetch_openxr_loader.verify(build_dir(root))
         except (ImportError, OSError, ValueError) as exc:
             raise SystemExit("[edvr] pinned OpenXR loader verification failed: %s" % exc)
         try:
@@ -1647,13 +1942,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         if scope == "flat" and _flat_vr_leftovers(target):
             print("[edvr] flat verify mismatch: VR components remain"); ok = False
         if include_dlss:
-            dlss = os.path.join(root, "build", "nvngx_dlss.dll")
+            dlss = os.path.join(build_dir(root), "nvngx_dlss.dll")
             dst = os.path.join(target, "nvngx_dlss.dll")
             if not os.path.isfile(dst) or sha256(dst) != sha256(dlss):
                 print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
         if include_xess:
             for key, name in xess_names:
-                src = os.path.join(root, "build", name); dst = os.path.join(target, name)
+                src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
                 if not os.path.isfile(dst) or sha256(dst) != sha256(src):
                     print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
         elif _selects_xess(target, scope):
@@ -1661,18 +1956,16 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             # A selected XeSS mode must never be reported as fully verified
             # unless the runtime and its notices match this build.
             missing = [name for _, name in xess_names
-                       if not os.path.isfile(os.path.join(root, "build", name)) or
+                       if not os.path.isfile(os.path.join(build_dir(root), name)) or
                        not os.path.isfile(os.path.join(target, name)) or
-                       sha256(os.path.join(root, "build", name)) != sha256(os.path.join(target, name))]
+                       sha256(os.path.join(build_dir(root), name)) != sha256(os.path.join(target, name))]
             if missing:
                 print("[edvr] WARNING: the ini selects XeSS but its runtime/notices are not verified "
                       "(%s); install with --xess" % ", ".join(missing))
                 ok = False
-        if include_ini:
-            for source, ini_target, _ in ini_pairs:
-                if (not os.path.isfile(ini_target) or not os.path.isfile(source) or
-                        open(ini_target, "rb").read() != open(source, "rb").read()):
-                    print("[edvr] %s verify mismatch: %s" % (scope, ini_target)); ok = False
+        for _, ini_target, _, data in ini_pairs:
+            if not os.path.isfile(ini_target) or data is None or open(ini_target, "rb").read() != data:
+                print("[edvr] %s verify mismatch: %s" % (scope, ini_target)); ok = False
         if ok: print("[edvr] %s payload and descriptor verified" % scope)
         return 0 if ok else 1
     if os.path.isfile(p["graphics_target"]):
@@ -1698,24 +1991,27 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                     "installed_sha256": sha256(p[key])})
     if include_dlss:
-        src = os.path.join(root, "build", "nvngx_dlss.dll"); dst = os.path.join(target, "nvngx_dlss.dll")
+        src = os.path.join(build_dir(root), "nvngx_dlss.dll"); dst = os.path.join(target, "nvngx_dlss.dll")
         entries.append({"key": "dlss", "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
     if include_xess:
         for key, name in xess_names:
-            src = os.path.join(root, "build", name); dst = os.path.join(target, name)
+            src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
             entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
                             "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                             "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                             "installed_sha256": sha256(src)})
-    if include_ini:
-        for src, dst, key in ini_pairs:
-            entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
-                            "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
-                            "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
-                            "installed_sha256": sha256(src)})
+    # A template with no file (INI_GENERATED) is installed from its bytes, in memory.
+    generated_ini = {}
+    for src, dst, key, data in ini_pairs:
+        if src == INI_GENERATED:
+            generated_ini[key] = data
+        entries.append({"key": key, "source": src, "target": os.path.abspath(dst),
+                        "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
+                        "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
+                        "installed_sha256": hashlib.sha256(data).hexdigest().upper()})
     if native:
         entries.append({"key": "config", "source": "generated", "target": os.path.abspath(p["config"]),
                         "backup": _native_backup_name(p["config"], tag, stamp) if os.path.isfile(p["config"]) else None,
@@ -1737,12 +2033,16 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     # --ini is about to replace both files with their templates (which then replaces the value too).
     migration = None if include_ini else real_dll_migration(target)
     if include_ini:
-        for _, ini_target, _ in ini_pairs:
+        for _, ini_target, _, _ in ini_pairs:
             if os.path.isfile(ini_target) and ini_real_dll(_ini_read(ini_target)[0]):
                 print("[edvr] NOTE: --ini replaces %s, including its advanced.real_dll; set it again in edvr.ini "
                       "(one value for both profiles)" % ini_target)
     print("[edvr] %s plan%s: %s" % (scope, " (DRY RUN -- nothing will be written)" if dry_run else "", target))
     for e in entries: print("       %-7s %s" % (e["key"], e["target"]))
+    for e in entries:
+        if e["key"] in generated_ini:
+            print("       derive   %s from gen_installer_rc.flat_ini_bytes() (this compile-only build has no "
+                  "edvr-flat.ini; nothing is written to %s)" % (e["target"], build_dir(root)))
     if seed_ini:
         print("       seed     %s (from edvr.ini; a new file, so no backup)" % _ini_target(target, "flat"))
     if migration:
@@ -1754,7 +2054,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                        plan={"receipt": receipt, "backups": [e["backup"] for e in entries if e["backup"]]})
         print("[edvr] dry run: wrote nothing."); return 0
     journal = {"version": 2, "kind": NATIVE_KIND if native else FLAT_KIND, "target": os.path.abspath(target),
-               "root": os.path.abspath(root), "state": "staging", "files": entries}
+               "root": os.path.abspath(root), "state": "staging", "files": entries, **({"build": COMPILE_ONLY_MARK} if _BUILD_OVERRIDE else {})}
     made, changed = [], []
     receipt_owned = False
     try:
@@ -1772,6 +2072,8 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 with open(e["target"], "wb") as stream: stream.write(config_bytes)
             elif e["key"] == "profile":
                 with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
+            elif e["key"] in generated_ini:
+                with open(e["target"], "wb") as stream: stream.write(generated_ini[e["key"]])
             else: shutil.copy2(e["source"], e["target"])
             if sha256(e["target"]) != e["installed_sha256"]: raise ValueError("installed hash verification failed: %s" % e["key"])
         journal["state"] = "installed"; _replace_receipt(receipt, journal)
@@ -2211,6 +2513,79 @@ def _scope_self_test():
         code, text = run(args_for(g, "--scope", "vr", "--verify-only", tag="vrxess"))
         check(code == 1 and "ini selects XeSS" in text,
               "--scope vr verify did not warn for a VR ini selecting XeSS without its runtime")
+
+        def stale_native(name):
+            g = game("retire-" + name)
+            Path(g, "d3d11.dll").write_bytes(b"OLDER-GRAPHICS")
+            code, text = run(args_for(g, "--scope", "both", tag="old"))
+            check(code == 0, "retirement fixture install failed: " + text)
+            for rel in ("openvr_api.dll", "edvr_openxr.ini", "openxr_loader.dll", "OPENXR-LOADER-LICENSE.txt"):
+                Path(g, "Openvr", "win64", rel).unlink()
+            Path(g, "d3d11.dll").write_bytes(b"GUI-FLAT-GRAPHICS")
+            Path(g, PROFILE_FILE).write_bytes(profile_bytes("flat"))
+            Path(g, "edvr_install").mkdir()
+            state = ("[edvr]\nversion=rc3\nscope=flat\nprofile=flat\ndescriptor_sha256=%s\n"
+                     "[d3d11]\nsha256=%s\n[native]\ngraphics_sha256=%s\n" %
+                     (sha256(Path(g, PROFILE_FILE)), sha256(Path(g, "d3d11.dll")), sha256(Path(g, "d3d11.dll"))))
+            Path(g, "edvr_install", "state.ini").write_text(state, encoding="utf-8")
+            return g
+
+        def retire(g, *extra):
+            return run(["--target", g, "--retire-stale-native-receipt", "--tag", "retired"] + list(extra))
+
+        g = stale_native("valid")
+        # Renaming keeps the old receipt's mtime. Family selection must use
+        # the new archive name even when another sibling has a newer mtime.
+        os.utime(Path(g, "edvr_native_receipt.json"), (946684800, 946684800))
+        earlier = datetime.datetime.now() - datetime.timedelta(minutes=1)
+        sibling = Path(_native_backup_name(os.path.join(g, "edvr_native_receipt.json"), "newer-mtime", earlier))
+        sibling.write_text('{"files": []}', encoding="utf-8")
+        before = tree(g)
+        check(retire(g, "--dry-run")[0] == 0 and tree(g) == before,
+              "receipt retirement dry run changed the tree")
+        receipt_bytes = Path(g, "edvr_native_receipt.json").read_bytes()
+        check(retire(g)[0] == 0, "hash-proven superseded receipt was not retired")
+        archives = list(Path(g).glob("edvr_native_receipt.json.pre-retired-*.bak"))
+        check(len(archives) == 1 and archives[0].read_bytes() == receipt_bytes and
+              not Path(g, "edvr_native_receipt.json").exists(), "retirement did not preserve receipt bytes")
+        expected = dict(before); expected.pop("edvr_native_receipt.json")
+        expected[str(archives[0].relative_to(g))] = receipt_bytes
+        check(dict(tree(g)) == expected, "retirement changed files besides the receipt")
+        protected, readable = _protected_by_receipts(_current_receipts(g))
+        old_backups = [e["backup"] for e in json.loads(receipt_bytes)["files"] if e["backup"]]
+        check(_real_path(archives[0]) in {_real_path(p) for p in _current_receipts(g)} and
+              readable and all(_real_path(p) in protected for p in old_backups),
+              "retired receipt lost its referenced-backup protection")
+        code, text = run(args_for(g, "--scope", "flat", tag="after-retire"))
+        check(code == 0, "flat install after receipt retirement failed: " + text)
+        check(run(args_for(g, "--scope", "flat", "--verify-only"))[0] == 0,
+              "flat verification after receipt retirement failed")
+        for name in ("foreign", "malformed", "nonflat", "descriptor", "graphics", "native-owned", "vr-leftover", "vr-runtime", "current", "running"):
+            g = stale_native(name)
+            record = Path(g, "edvr_install", "state.ini")
+            legacy = Path(g, "edvr_native_receipt.json")
+            if name == "foreign":
+                value = json.loads(legacy.read_text(encoding="utf-8")); value["target"] = root
+                legacy.write_text(json.dumps(value), encoding="utf-8")
+            elif name == "malformed": legacy.write_text("{", encoding="utf-8")
+            elif name == "nonflat": record.write_text(record.read_text(encoding="utf-8").replace("scope=flat", "scope=both"), encoding="utf-8")
+            elif name == "descriptor": Path(g, PROFILE_FILE).write_bytes(profile_bytes("both"))
+            elif name == "graphics": Path(g, "d3d11.dll").write_bytes(b"CHANGED")
+            elif name == "native-owned": record.write_text(record.read_text(encoding="utf-8") + "runtime_sha256=" + "A" * 64 + "\n", encoding="utf-8")
+            elif name == "vr-leftover": Path(g, "Openvr", "win64", "edvr_openxr.ini").write_bytes(b"VR")
+            elif name == "vr-runtime": Path(g, "Openvr", "win64", "openvr_api.dll").write_bytes(b"RUNTIME")
+            elif name == "current":
+                value = json.loads(legacy.read_text(encoding="utf-8"))
+                next(e for e in value["files"] if e["key"] == "graphics")["installed_sha256"] = sha256(Path(g, "d3d11.dll"))
+                legacy.write_text(json.dumps(value), encoding="utf-8")
+            before = tree(g)
+            if name == "running": globals()["strict_game_running"] = lambda *args: (True, True)
+            code, text = retire(g)
+            globals()["strict_game_running"] = lambda *args: (True, False)
+            check(code == 1 and tree(g) == before, "unsafe receipt retirement accepted or changed files: " + name + " " + text)
+        before = tree(g)
+        check(retire(g, "--scope", "flat")[0] == "refused" and tree(g) == before,
+              "receipt retirement accepted install options")
     finally:
         (globals()["validate_elite_game"], globals()["strict_game_running"],
          _scope_pe.validate_native_pair, _scope_loader.verify, _scope_pe.Image, _scope_pe._exports) = saved
@@ -2219,6 +2594,13 @@ def _scope_self_test():
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    finally:
+        _set_build_override(None)       # --compile-only is per invocation, never left behind
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(
         description="Install a built EDVR into a game directory, verified.")
     ap.add_argument("--target", default="steam",
@@ -2231,6 +2613,12 @@ def main(argv=None):
                     help="the tree to install FROM; defaults to this "
                          "script's own repository, which is what you want "
                          "unless you are installing another worktree's build")
+    ap.add_argument("--compile-only", action="store_true",
+                    help="install the Linux toolchain's compile-only build "
+                         "(.toolchains/windows/compile-build, or <root>/build/compile-build "
+                         "for a worktree) instead of <root>/build. Refused when its receipt "
+                         "does not match this tree; the build is not Windows validated. "
+                         "Compile with: %s" % (COMPILE_ONLY_BUILD_CMD % ""))
     ap.add_argument("--dll", action="store_true",
                     help="compatibility alias: install the complete native package")
     ap.add_argument("--openvr", action="store_true",
@@ -2242,7 +2630,9 @@ def main(argv=None):
     ap.add_argument("--ini", action="store_true",
                     help="also overwrite the scope's settings files (edvr.ini "
                          "for both and vr, edvr-flat.ini for both and flat) "
-                         "with their templates -- this discards tuned settings")
+                         "with their templates -- this discards tuned settings. "
+                         "A --compile-only build has no edvr-flat.ini, so that "
+                         "template is derived in memory")
     ap.add_argument("--all", action="store_true",
                     help="selected scope plus available DLSS and XeSS (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
@@ -2255,6 +2645,8 @@ def main(argv=None):
     ap.add_argument("--native-runtime", default=None)
     ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
                     help="restore files recorded by a native or flat receipt")
+    ap.add_argument("--retire-stale-native-receipt", action="store_true",
+                    help="archive a superseded native receipt only when the GUI's current flat install is hash-proven")
     ap.add_argument("--suspend", action="store_true",
                     help="no-EDVR baseline: park the game directory's EDVR "
                          "d3d11.dll as d3d11.dll.edvr-suspended (one rename, "
@@ -2281,7 +2673,21 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.self_test:
-        return self_test()
+        return _run_self_test_labelled()
+
+    if args.compile_only and (args.retire_stale_native_receipt or args.restore_native or args.suspend
+                              or args.resume or args.native_openxr):
+        ap.error("--compile-only is for the standard install and --verify-only; "
+                 "it takes no restore, suspend or native-openxr option")
+
+    if args.retire_stale_native_receipt:
+        if any((args.scope, args.profile, args.root, args.native_openxr, args.native_receipt,
+                args.native_loader, args.native_runtime, args.restore_native, args.suspend,
+                args.resume, args.dll, args.openvr, args.dlss, args.xess, args.ini, args.all,
+                args.verify_only, args.force, args.no_backup)) or args.keep_backups != KEEP_BACKUPS:
+            ap.error("--retire-stale-native-receipt takes only --target, --tag and --dry-run")
+        return retire_stale_native_receipt(resolve_target(args.target),
+                                          args.tag or short_hash(repo_root()), args.dry_run)
 
     if args.profile is not None and args.scope is not None:
         ap.error("--profile is a deprecated alias for --scope; pass one or the other")
@@ -2368,16 +2774,18 @@ def main(argv=None):
     root = os.path.abspath(args.root) if args.root else repo_root()
     target = resolve_target(args.target)
     tag = args.tag or short_hash(root)
-    dlss_source = os.path.join(root, "build", "nvngx_dlss.dll")
+    if args.compile_only:
+        _set_build_override(compile_only_build(root, require_current=not args.verify_only))
+    dlss_source = os.path.join(build_dir(root), "nvngx_dlss.dll")
     if args.force or args.no_backup:
         ap.error("normal native installation requires a stopped game and transactional backups")
     if scope == "flat" and (args.dll or args.openvr):
         ap.error("--scope flat cannot be combined with --dll or --openvr")
     if args.dlss and not os.path.isfile(dlss_source):
-        ap.error("--dlss requested but build/nvngx_dlss.dll is missing")
-    xess_source = os.path.join(root, "build", "libxess.dll")
+        ap.error("--dlss requested but %s is missing" % dlss_source)
+    xess_source = os.path.join(build_dir(root), "libxess.dll")
     if args.xess and not os.path.isfile(xess_source):
-        ap.error("--xess requested but build/libxess.dll is missing")
+        ap.error("--xess requested but %s is missing" % xess_source)
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
@@ -2542,16 +2950,18 @@ def _prune_self_test():
                   "an unreadable current receipt (%s) prunes nothing and says so: %r" % (label, text))
 
         # --- a backup that cannot be removed is said and does not stop the rest --------
+        # (a read-only file is unremovable on Windows; on POSIX removal needs only the directory)
         game, xr = new_game()
         gfx = backups(game, "d3d11.dll", 7)
-        os.chmod(gfx[0], stat.S_IREAD)
-        try:
-            removed, text = quiet(prune_backups, game, 5)
-            check(removed == [gfx[1]] and not os.path.exists(gfx[1]) and os.path.exists(gfx[0])
-                  and "could not prune" in text,
-                  "an unremovable backup is reported and the others still go: %r %r" % (removed, text))
-        finally:
-            os.chmod(gfx[0], stat.S_IWRITE | stat.S_IREAD)
+        if os.name == "nt":
+            os.chmod(gfx[0], stat.S_IREAD)
+            try:
+                removed, text = quiet(prune_backups, game, 5)
+                check(removed == [gfx[1]] and not os.path.exists(gfx[1]) and os.path.exists(gfx[0])
+                      and "could not prune" in text,
+                      "an unremovable backup is reported and the others still go: %r %r" % (removed, text))
+            finally:
+                os.chmod(gfx[0], stat.S_IWRITE | stat.S_IREAD)
 
         # --- through main(): a good install prunes; a dry run and a refused count do not ---
         import fetch_openxr_loader as _prune_loader
@@ -2714,6 +3124,374 @@ def _xess_opt_in_self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _compile_only_self_test():
+    """--compile-only: installs from the compile-only output and not from build/,
+    refuses a tree that has moved or an output that changed, marks its receipt,
+    verifies against the compile-only build -- and its --dry-run writes nothing."""
+    import contextlib
+    import io
+
+    def git(root, *args):
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                        "commit.gpgsign=false", *args], check=True, capture_output=True)
+
+    def run(args):
+        """(exit code or the SystemExit text, stdout)"""
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = main(args)
+        except SystemExit as stop:
+            code = stop.code
+        return code, out.getvalue()
+
+    tmp = tempfile.mkdtemp(prefix="edvr_compile_only_test_")
+    old_validate = globals()["validate_elite_game"]
+    old_probe = globals()["strict_game_running"]
+    old_env = os.environ.get("EDVR_TOOLCHAIN_DIR")
+    saved_pe = None
+    try:
+        root, game = Path(tmp, "repo"), Path(tmp, "game")
+        tool = root / ".toolchains" / "windows"
+        cbuild = tool / "compile-build"
+        for d in (tool, cbuild, root / "build", game):
+            d.mkdir(parents=True)
+        (root / "build.bat").write_bytes(b"@echo off\r\n")
+        (root / ".gitignore").write_bytes(b"build/\n.toolchains/\n")
+        # The fingerprint comes from compile_only.py itself. Use the host's own
+        # when it has one (so this test notices it changing shape); a host without
+        # the Linux toolchain gets a stand-in with the same two globals and function.
+        real = _toolchain_dir(repo_root())
+        if real:
+            for name in ("compile_only.py", "toolchain.py"):
+                shutil.copy2(os.path.join(real, name), tool / name)
+        else:
+            (tool / "compile_only.py").write_text(
+                "import hashlib, subprocess\nfrom pathlib import Path\n"
+                "ROOT = Path(__file__).resolve().parents[2]\nSOURCE = ROOT / 'build.bat'\n"
+                "def source_fingerprint():\n"
+                "    git = lambda *a: subprocess.check_output(['git', '-C', str(ROOT), *a])\n"
+                "    return hashlib.sha256(git('rev-parse', 'HEAD') + git('diff', '--binary', 'HEAD')).hexdigest()\n")
+        subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "fixture")
+        os.environ.pop("EDVR_TOOLCHAIN_DIR", None)
+
+        if compile_build_dir(str(root)) != str(cbuild) or \
+                compile_build_dir(str(game)) != str(game / "build" / "compile-build"):
+            print("compile_build_dir does not follow the toolchain/worktree rule")
+            return False
+        products = {"d3d11.dll": b"COMPILE-GRAPHICS", "libxess.dll": b"COMPILE-XESS",
+                    "INTEL-XESS-LICENSE.txt": b"LICENSE", "INTEL-XESS-THIRD-PARTY.txt": b"THIRD-PARTY"}
+        for name, data in products.items():
+            (cbuild / name).write_bytes(data)
+        (root / "build" / "d3d11.dll").write_bytes(b"VALIDATED-GRAPHICS")   # must never be read
+        (game / GAME_EXE).write_bytes(b"GAME")
+        (game / "d3d11.dll").write_bytes(b"OLD-GRAPHICS")
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *a: (True, False)
+        import openxr_pe
+        saved_pe = (openxr_pe.Image, openxr_pe._exports)
+        openxr_pe.Image = lambda data: data           # the live d3d11.dll reads as an EDVR build
+        openxr_pe._exports = lambda image: ({0: "edvr_graphics"}, None)
+        args = ["--root", str(root), "--target", str(game), "--scope", "flat", "--xess", "--compile-only", "--tag", "co"]
+        snapshot = lambda: sorted((str(p.relative_to(game)), p.read_bytes()) for p in game.rglob("*") if p.is_file())
+
+        def write_receipt(**change):
+            receipt = {"kind": COMPILE_ONLY_KIND, "validated": False,
+                       "source_fingerprint": compile_only_fingerprint(str(root)),
+                       "outputs": {"d3d11.dll": {"sha256": hashlib.sha256(products["d3d11.dll"]).hexdigest(),
+                                                  "size": len(products["d3d11.dll"])}}}
+            receipt.update(change)
+            (cbuild / "compile_only_receipt.json").write_text(json.dumps(receipt))
+
+        def refused(why, extra=(), contains=""):
+            before = snapshot()
+            code, text = run(args + list(extra))
+            good = code not in (0, 1, None) and contains in str(code) and snapshot() == before
+            if not good:
+                print("compile-only did not refuse %s: %r %r" % (why, code, text))
+            return good
+
+        ok = True
+        if (cbuild / "compile_only_receipt.json").exists() or \
+                not refused("a missing receipt", ["--dry-run"], "no compile-only receipt"):
+            return False
+        write_receipt()
+        before = snapshot()
+        code, text = run(args + ["--dry-run"])
+        if code != 0 or snapshot() != before or "COMPILE-ONLY build" not in text or "NOT Windows validated" not in text \
+                or "d3d11.dll" not in text or "libxess.dll" not in text:
+            print("compile-only --dry-run: wrote files or planned the wrong thing: %r %r" % (code, text)); ok = False
+        code, text = run(args)
+        receipt_file = game / "edvr_flat_receipt.json"
+        installed = json.loads(receipt_file.read_text()) if receipt_file.is_file() else {}
+        if code != 0 or (game / "d3d11.dll").read_bytes() != products["d3d11.dll"] \
+                or (game / "libxess.dll").read_bytes() != products["libxess.dll"]:
+            print("compile-only install did not take the compile-build files: %r %r" % (code, text)); ok = False
+        if installed.get("build") != COMPILE_ONLY_MARK:
+            print("compile-only install did not mark its receipt: %r" % installed.get("build")); ok = False
+        if run(args + ["--verify-only"])[0] != 0:
+            print("compile-only --verify-only rejected its own install"); ok = False
+        # --ini: the compile-only output holds no edvr-flat.ini, so the template is derived, in a
+        # game directory of its own so the case below still restores game/ to what it began as.
+        game2 = Path(tmp, "game2")
+        game2.mkdir()
+        (game2 / GAME_EXE).write_bytes(b"GAME")
+        args2 = ["--root", str(root), "--target", str(game2), "--scope", "flat", "--compile-only",
+                 "--tag", "ini", "--ini"]
+        outputs = lambda: sorted((p.name, p.read_bytes()) for p in cbuild.iterdir())
+        names2 = lambda: sorted(p.name for p in game2.rglob("*"))
+        outputs_before, game2_before = outputs(), names2()
+        code, text = run(args2 + ["--dry-run"])
+        if code != 0 or outputs() != outputs_before or names2() != game2_before or "derive" not in text:
+            print("compile-only --ini --dry-run wrote files or did not plan the derived template: %r %r" % (code, text)); ok = False
+        code, text = run(args2)
+        if code != 0 or outputs() != outputs_before or \
+                (game2 / "edvr-flat.ini").read_bytes() != gen_installer_rc.flat_ini_bytes():
+            print("compile-only --ini did not install the generator's flat template: %r %r" % (code, text)); ok = False
+        if run(args2 + ["--verify-only"])[0] != 0:
+            print("compile-only --ini --verify-only rejected its own install"); ok = False
+        (game / "d3d11.dll").write_bytes(b"CHANGED")
+        if run(args + ["--verify-only"])[0] != 1:
+            print("compile-only --verify-only accepted a changed d3d11.dll"); ok = False
+        (game / "d3d11.dll").write_bytes(products["d3d11.dll"])
+        # Verification compares against the compile-build, and a moved tree only warns there.
+        (root / "build.bat").write_bytes(b"@echo off\r\nrem edited\r\n")
+        code, text = run(args + ["--verify-only"])
+        if code != 0 or "WARNING" not in text or "dirty" not in text:
+            print("compile-only --verify-only on a moved, dirty tree should warn and still compare: %r %r" % (code, text)); ok = False
+
+        # The refusals: each one leaves the game directory alone.
+        ok &= refused("an edited tree", ["--dry-run"], "not the one this build was compiled from")
+        ok &= refused("an edited tree (real install)", [], "compile again")
+        git(root, "commit", "-q", "-am", "moved")
+        ok &= refused("a committed tree", ["--dry-run"], "not the one this build was compiled from")
+        write_receipt()   # the receipt of the tree as it is now
+        if run(args + ["--dry-run"])[0] != 0:
+            print("compile-only --dry-run refused a tree matching its receipt"); ok = False
+        write_receipt(validated=True)
+        ok &= refused("a receipt that claims validation", ["--dry-run"], "not a usable compile-only receipt")
+        write_receipt()
+        (cbuild / "d3d11.dll").write_bytes(b"RECOMPILING")
+        ok &= refused("an output that no longer matches its receipt", ["--dry-run"], "no longer matches")
+        (cbuild / "d3d11.dll").write_bytes(products["d3d11.dll"])
+
+        # The marked receipt validates against the compile-build, not build/, so it restores.
+        if restore_native(str(receipt_file)) != 0 or (game / "d3d11.dll").read_bytes() != b"OLD-GRAPHICS":
+            print("a compile-only receipt did not restore"); ok = False
+        for combo in (["--restore-native", str(receipt_file)], ["--native-openxr"], ["--suspend"]):
+            code, _ = run(["--target", str(game), "--compile-only"] + combo)
+            if code != 2:
+                print("--compile-only %s was accepted: %r" % (combo[0], code)); ok = False
+        if _BUILD_OVERRIDE is not None:
+            print("--compile-only left the build override set after main()"); ok = False
+        return ok
+    except (AssertionError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        print("compile-only self-test failed: %s" % exc)
+        return False
+    finally:
+        globals()["validate_elite_game"] = old_validate
+        globals()["strict_game_running"] = old_probe
+        if saved_pe:
+            openxr_pe.Image, openxr_pe._exports = saved_pe
+        if old_env is not None:
+            os.environ["EDVR_TOOLCHAIN_DIR"] = old_env
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _compile_only_ini_self_test():
+    """--compile-only --ini: the compile-only output has no edvr-flat.ini, so
+    --scope flat and --scope both derive it from the generator's own
+    flat_ini_bytes() -- in a dry run and a real run, never writing into the
+    build directory, with the backup and receipt a full build's template gets,
+    and the installed bytes the ones a full build's edvr-flat.ini would give.
+    A full build that lacks its edvr-flat.ini still refuses."""
+    import contextlib
+    import io
+    import openxr_pe as _pe
+    import fetch_openxr_loader as _loader
+
+    ok = True
+    tmp = tempfile.mkdtemp(prefix="edvr_compile_ini_test_")
+    saved = (globals()["validate_elite_game"], globals()["strict_game_running"],
+             globals()["compile_only_build"], _pe.validate_native_pair, _loader.verify,
+             _pe.Image, _pe._exports)
+
+    def check(cond, what):
+        nonlocal ok
+        if not cond:
+            print("compile-only --ini self-test: %s" % what); ok = False
+
+    try:
+        root = os.path.join(tmp, "repo")
+        build = os.path.join(root, "build")
+        cbuild = os.path.join(build, "compile-build")
+        os.makedirs(cbuild)
+        user_vr, root_ini = b"[user]\nkeep=1\n", b"[fix]\nvr_template = 1\n"
+        user_flat = b"[user]\nflat=1\n"
+        generated = gen_installer_rc.flat_ini_bytes()
+        payload = {"d3d11.dll": b"FLAT-GRAPHICS", "edvr_openxr_graphics.dll": b"NATIVE-GRAPHICS",
+                   "edvr_openxr_runtime.dll": b"RUNTIME", "openxr_loader.dll": b"LOADER",
+                   "OPENXR-LOADER-LICENSE.txt": b"LICENSE"}
+        Path(root, "edvr.ini").write_bytes(root_ini)
+        for name, data in payload.items():
+            Path(cbuild, name).write_bytes(data)
+            Path(build, name).write_bytes(data)
+        # A full build's template sits in build/. A compile-only install must never read it.
+        Path(build, "edvr-flat.ini").write_bytes(b"NOT-THE-COMPILE-ONLY-TEMPLATE")
+
+        globals()["compile_only_build"] = lambda root_, require_current=True, out=print: cbuild
+        _loader.verify = lambda path: None
+        _pe.validate_native_pair = lambda *args: None
+        _pe.Image = lambda data: data
+        _pe._exports = lambda image: ({0: "edvr_graphics"}, None)
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *args: (True, False)
+
+        def game(name, user_ini=None, user_flat_ini=None):
+            g = os.path.join(tmp, name)
+            os.makedirs(os.path.join(g, "Openvr", "win64"))
+            Path(g, GAME_EXE).write_bytes(b"GAME")
+            if user_ini is not None: Path(g, "edvr.ini").write_bytes(user_ini)
+            if user_flat_ini is not None: Path(g, "edvr-flat.ini").write_bytes(user_flat_ini)
+            return g
+
+        def tree(g):
+            return sorted((str(p.relative_to(g)), p.read_bytes() if p.is_file() else None)
+                          for p in Path(g).rglob("*"))
+
+        def run(argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    return main(argv), out.getvalue()
+                except SystemExit as stop:
+                    return stop.code, out.getvalue()
+
+        def args_for(g, scope, *extra, tag="co", compile_only=True):
+            return (["--root", root, "--target", g, "--tag", tag, "--scope", scope, "--ini"] +
+                    (["--compile-only"] if compile_only else []) + list(extra))
+
+        def backups(g, name):
+            return sorted(Path(g).glob(name + ".pre-*.bak"))
+
+        def receipt_of(g, scope):
+            path = os.path.join(g, "edvr_flat_receipt.json" if scope == "flat" else "edvr_native_receipt.json")
+            return path, json.loads(Path(path).read_text(encoding="utf-8"))
+
+        flat_key = {"flat": "ini", "both": "ini_flat"}
+        for scope in ("flat", "both"):
+            g = game("co-" + scope, user_ini=user_vr, user_flat_ini=user_flat)
+            build_before, game_before = tree(build), tree(g)
+            code, text = run(args_for(g, scope, "--dry-run", tag="dry"))
+            check(code == 0, "%s --dry-run failed: %r %r" % (scope, code, text))
+            check(tree(g) == game_before, "%s --dry-run wrote into the game directory" % scope)
+            check(tree(build) == build_before, "%s --dry-run wrote into the build directory" % scope)
+            check("derive" in text and "flat_ini_bytes" in text and "edvr-flat.ini" in text,
+                  "%s --dry-run did not report the derived template: %r" % (scope, text))
+
+            code, text = run(args_for(g, scope))
+            check(code == 0, "%s --ini failed on a compile-only build: %r %r" % (scope, code, text))
+            check(tree(build) == build_before and not Path(cbuild, "edvr-flat.ini").exists(),
+                  "%s --ini wrote into the build directory" % scope)
+            check(Path(g, "edvr-flat.ini").read_bytes() == generated,
+                  "%s --ini did not install the generator's flat template" % scope)
+            kept = backups(g, "edvr-flat.ini")
+            check(len(kept) == 1 and kept[0].read_bytes() == user_flat,
+                  "%s --ini did not back up the existing edvr-flat.ini" % scope)
+            if scope == "flat":
+                check(Path(g, "edvr.ini").read_bytes() == user_vr and not backups(g, "edvr.ini"),
+                      "--scope flat --ini touched edvr.ini")
+            else:
+                check(Path(g, "edvr.ini").read_bytes() == root_ini,
+                      "--scope both --ini did not write edvr.ini from the repo root")
+                vr_kept = backups(g, "edvr.ini")
+                check(len(vr_kept) == 1 and vr_kept[0].read_bytes() == user_vr,
+                      "--scope both --ini did not back up edvr.ini")
+            receipt, record = receipt_of(g, scope)
+            entry = next((e for e in record["files"] if e["key"] == flat_key[scope]), None)
+            check(record.get("build") == COMPILE_ONLY_MARK, "%s receipt is not marked compile-only" % scope)
+            check(entry is not None and entry["source"] == INI_GENERATED and
+                  entry["target"] == os.path.abspath(os.path.join(g, "edvr-flat.ini")) and
+                  entry["installed_sha256"] == hashlib.sha256(generated).hexdigest().upper() and
+                  entry["backup"] and Path(entry["backup"]).read_bytes() == user_flat and
+                  entry["before_sha256"] == hashlib.sha256(user_flat).hexdigest().upper(),
+                  "%s receipt entry for the flat template is wrong: %r" % (scope, entry))
+            try:
+                check(verify_native_receipt(receipt, g)["version"] == 2, "%s receipt does not verify" % scope)
+            except (OSError, ValueError) as exc:
+                check(False, "%s receipt does not verify: %s" % (scope, exc))
+            code, _ = run(args_for(g, scope, "--verify-only"))
+            check(code == 0, "%s --ini --verify-only failed after the install" % scope)
+            Path(g, "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
+            code, _ = run(args_for(g, scope, "--verify-only"))
+            check(code == 1, "%s --ini --verify-only passed with an edited edvr-flat.ini" % scope)
+            Path(g, "edvr-flat.ini").write_bytes(generated)
+            code, _ = run(["--restore-native", receipt])
+            check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == user_flat and
+                  (scope == "flat" or Path(g, "edvr.ini").read_bytes() == user_vr),
+                  "%s restore did not put the settings files back: %r" % (scope, code))
+
+        # No settings file in the game yet: written new, nothing to back up.
+        g = game("co-fresh")
+        code, text = run(args_for(g, "flat"))
+        _, record = receipt_of(g, "flat") if code == 0 else (None, {"files": []})
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == generated and
+              not backups(g, "edvr-flat.ini") and
+              all(e["backup"] is None for e in record["files"] if e["key"] == "ini"),
+              "--scope flat --ini into a game with no edvr-flat.ini: %r %r" % (code, text))
+
+        # A compile-only output that does carry its own edvr-flat.ini uses it, as a full build does.
+        own = b"[fix]\ntemporal_aa = dlss\n"
+        Path(cbuild, "edvr-flat.ini").write_bytes(own)
+        g = game("co-own")
+        code, text = run(args_for(g, "flat"))
+        _, record = receipt_of(g, "flat") if code == 0 else (None, {"files": []})
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == own and
+              any(e["key"] == "ini" and e["source"] == os.path.abspath(os.path.join(cbuild, "edvr-flat.ini"))
+                  for e in record["files"]),
+              "a compile-only edvr-flat.ini was not preferred to the derived one: %r %r" % (code, text))
+        Path(cbuild, "edvr-flat.ini").unlink()
+
+        # A full build's template is the generator's bytes, installed the same way; so a full-build
+        # install and a compile-only install leave the same edvr-flat.ini, whatever the scope.
+        Path(build, "edvr-flat.ini").write_bytes(generated)
+        for scope in ("flat", "both"):
+            g = game("full-" + scope, user_ini=user_vr, user_flat_ini=user_flat)
+            code, text = run(args_for(g, scope, tag="full", compile_only=False))
+            _, full_record = receipt_of(g, scope) if code == 0 else (None, {"files": []})
+            full_entry = next((e for e in full_record["files"] if e["key"] == flat_key[scope]), {})
+            check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == generated and
+                  full_entry.get("source") == os.path.abspath(os.path.join(build, "edvr-flat.ini")) and
+                  full_entry.get("installed_sha256") == hashlib.sha256(generated).hexdigest().upper(),
+                  "%s full-build install of the generator's template: %r %r" % (scope, code, text))
+
+        # A full build that lacks its edvr-flat.ini is a broken build, not a reason to derive one.
+        Path(build, "edvr-flat.ini").unlink()
+        for scope in ("flat", "both"):
+            g = game("full-missing-" + scope, user_ini=user_vr, user_flat_ini=user_flat)
+            before = tree(g)
+            code, _ = run(args_for(g, scope, "--dry-run", tag="miss", compile_only=False))
+            check("missing %s INI source" % scope in str(code) and tree(g) == before,
+                  "%s without --compile-only derived or accepted a missing build/edvr-flat.ini: %r" % (scope, code))
+        # --scope vr --ini never needed the flat template.
+        g = game("co-vr", user_ini=user_vr)
+        code, text = run(args_for(g, "vr"))
+        check(code == 0 and Path(g, "edvr.ini").read_bytes() == root_ini and not Path(g, "edvr-flat.ini").exists(),
+              "--scope vr --ini on a compile-only build: %r %r" % (code, text))
+        check(_BUILD_OVERRIDE is None, "the build override was left set")
+        return ok
+    except (AssertionError, OSError, ValueError, KeyError, StopIteration) as exc:
+        print("compile-only --ini self-test failed: %r" % exc)
+        return False
+    finally:
+        (globals()["validate_elite_game"], globals()["strict_game_running"],
+         globals()["compile_only_build"], _pe.validate_native_pair, _loader.verify,
+         _pe.Image, _pe._exports) = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _game_probe_self_test():
     """strict_game_running must prove the state or say why it could not, ride
     out a transient failure, and still refuse a game running from the target."""
@@ -2765,22 +3543,30 @@ def _game_probe_self_test():
     finally:
         subprocess.run = saved_run
 
-    # Toolhelp32 reads the live process list and finds this process.
-    try:
-        found = _game_pids_toolhelp(os.path.basename(sys.executable))
-        check(os.getpid() in found, "Toolhelp32 did not find this process (%r)" % (found,))
-        check(isinstance(_game_pids_toolhelp(), list), "Toolhelp32 game probe not a list")
-    except (_ProbeError, OSError) as exc:
-        check(False, "Toolhelp32 failed on a live system: %s" % exc)
+    # Toolhelp32 reads the live process list and finds this process. It is a
+    # Windows API: on another host (the Linux test-flight path) only the
+    # injected-probe cases below can run.
+    import ctypes
+    if hasattr(ctypes, "WinDLL"):
+        try:
+            found = _game_pids_toolhelp(os.path.basename(sys.executable))
+            check(os.getpid() in found, "Toolhelp32 did not find this process (%r)" % (found,))
+            check(isinstance(_game_pids_toolhelp(), list), "Toolhelp32 game probe not a list")
+        except (_ProbeError, OSError) as exc:
+            check(False, "Toolhelp32 failed on a live system: %s" % exc)
+    else:
+        print("[edvr] self-test: live Toolhelp32 check skipped (not a Windows host)")
 
     # strict_game_running: retries, reasons, and the refusal that must stay.
     tmp = tempfile.mkdtemp(prefix="edvr_gameprobe_test_")
     saved = {n: globals()[n] for n in ("_game_pids_toolhelp", "_game_pids_tasklist",
-                                       "_process_image_path", "GAME_PROBE_PAUSE")}
+                                       "_process_image_path", "GAME_PROBE_PAUSE",
+                                       "GAME_PROBE_WINDOWS")}
     try:
         mine = os.path.join(tmp, "mine"); other = os.path.join(tmp, "other")
         os.makedirs(mine); os.makedirs(other)
         globals()["GAME_PROBE_PAUSE"] = 0
+        globals()["GAME_PROBE_WINDOWS"] = True      # these cases script the Windows probes
         calls = []
         def script(results):
             """A pid-lister answering from a list; the last result repeats."""
@@ -2822,16 +3608,106 @@ def _game_probe_self_test():
         check(run([[10]], images=[None]) == (False, False), "unresolved game did not fail closed")
         check("pid 10" in probe_reason(), "unresolved reason missing the pid: %r" % probe_reason())
         check(run([[10]], images=[here], target=None) == (True, True), "targetless probe missed the game")
+
+        # Linux (Proton): /proc, comm truncated to 15 characters, any running game refuses.
+        proc = os.path.join(tmp, "proc")
+        def fake_proc(*comms):
+            shutil.rmtree(proc, ignore_errors=True)
+            for pid, comm in comms:
+                os.makedirs(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "comm"), "w") as f:
+                    f.write(comm + "\n")
+            os.makedirs(os.path.join(proc, "sys"))           # not a pid: ignored
+        fake_proc((1, "systemd"), (20, "EliteDangerous6"), (21, "eliteDANGEROUS6"), (30, "EDLaunch.exe"))
+        check(sorted(_game_pids_proc(proc=proc)) == [20, 21],
+              "/proc probe did not find the truncated comm in any case: %r" % _game_pids_proc(proc=proc))
+        fake_proc((1, "systemd"), (30, "EliteDangerous"), (31, "Elite"))
+        check(_game_pids_proc(proc=proc) == [], "/proc probe matched a name that is not the game")
+        fake_proc()
+        try: _game_pids_proc(proc=proc); check(False, "an empty /proc did not raise")
+        except _ProbeError as exc: check("lists no processes" in str(exc), "empty /proc reason %r" % str(exc))
+        try: _game_pids_proc(proc=os.path.join(tmp, "absent")); check(False, "a missing /proc did not raise")
+        except _ProbeError as exc: check("cannot list" in str(exc), "missing /proc reason %r" % str(exc))
+        globals()["GAME_PROBE_WINDOWS"] = False
+        real_proc = _game_pids_proc
+        try:
+            for comms, want in (([(1, "systemd")], (True, False)), ([(1, "systemd"), (20, "EliteDangerous6")], (True, True)),
+                                ([], (False, False))):
+                fake_proc(*comms)
+                globals()["_game_pids_proc"] = lambda exe=None, _p=proc: real_proc(exe, _p)
+                got = strict_game_running(os.path.join(tmp, "any-target"))
+                check(got == want, "Linux strict_game_running(%r) = %r, want %r" % (comms, got, want))
+        finally:
+            globals()["_game_pids_proc"] = real_proc
     finally:
         globals().update(saved)
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
 
 
+class _ExpectedErrorLabel(object):
+    """A stdout wrapper for the self-test: the self-test provokes the refusals
+    and failures it asserts on, and the code under test prints each as
+    "[edvr] ERROR: ...". Those lines are expected, so they go out as
+    "expected-error: ..." and a green build log holds no "[edvr] ERROR" line
+    (issue #98). The self-test's own verdicts are untouched: each case still
+    asserts on the return code and state, and a failed case prints its own
+    message and makes the exit code nonzero."""
+    _OLD = "[edvr] ERROR"
+    _NEW = "expected-error"
+
+    def __init__(self, stream, label_all=False):
+        self._stream = stream
+        self._pending = ""
+        self._label_all = label_all   # stderr: argparse usage/error text is all expected
+
+    def write(self, text):
+        self._pending += text
+        out = []
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            out.append(self._label(line) + "\n")
+        if out:
+            self._stream.write("".join(out))
+        return len(text)
+
+    def _label(self, line):
+        if self._label_all:
+            return self._NEW + ": " + line if line.strip() else line
+        if line.startswith(self._OLD):
+            return self._NEW + line[len(self._OLD):]
+        return line
+
+    def flush(self):
+        if self._pending:
+            self._stream.write(self._label(self._pending))
+            self._pending = ""
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _run_self_test_labelled():
+    real_out, real_err = sys.stdout, sys.stderr
+    sys.stdout = _ExpectedErrorLabel(real_out)
+    sys.stderr = _ExpectedErrorLabel(real_err, label_all=True)
+    try:
+        return self_test()
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            sys.stdout, sys.stderr = real_out, real_err
+
+
 def self_test():
     ok = True
     if not _game_probe_self_test(): ok = False
     if not _xess_opt_in_self_test(): ok = False
+    if not _compile_only_self_test(): ok = False
+    if not _compile_only_ini_self_test(): ok = False
 
     # The path-aware game probe: only a game running from the install target
     # blocks staging; an unresolvable image path fails closed.
@@ -2855,8 +3731,9 @@ def self_test():
                 print("path-aware probe mismatch: %r gave %r, want %r" %
                       (images, got, want))
                 ok = False
+        # Paths compare case-insensitively on Windows only.
         if game_running_in(probe_game,
-                           [os.path.join(probe_game, ".", GAME_EXE.lower())]) != (True, True):
+                           [os.path.join(probe_game, ".", GAME_EXE.lower() if os.name == "nt" else GAME_EXE)]) != (True, True):
             print("path-aware probe lost a case/separator variant")
             ok = False
     finally:
@@ -3425,9 +4302,11 @@ def self_test():
                 print("native mismatch changed files")
                 ok = False
 
-            # An unrecognized executable profile is equally a preflight
-            # refusal, so migration cannot claim success while Elite would
-            # still choose LibOVR.
+            # A refused executable profile (Horizons or an unreadable exe; an
+            # unknown Odyssey revision now only warns) is a preflight refusal
+            # here, so migration cannot claim success while Elite would still
+            # choose LibOVR. The gate is stubbed to refuse, so this checks the
+            # caller's handling of a refusal.
             old_profile_gate = globals()["validate_elite_game"]
             def reject_profile(path):
                 raise ValueError("unknown Elite executable revision")
@@ -3739,20 +4618,30 @@ def self_test():
                 print("Elite profile validator was not restored")
                 ok = False
         # The elite gate's refusal names the case: Horizons is told no EDVR build
-        # supports it; an unknown Odyssey revision is told what it reports and
-        # which kind of build to get.
+        # supports it. An Odyssey revision this build was not checked against is
+        # not refused: the gate warns on stderr, names what the game reports,
+        # and returns None so the install proceeds.
+        import contextlib
+        import io
         import elite_oculus as _elite_gate
         odyssey_exe = os.path.join(tmp, "gate-odyssey.exe")
         with open(odyssey_exe, "wb") as f:
-            f.write(_elite_gate._fixture())
+            f.write(_elite_gate._fixture(file_version="999999"))
+        warned = io.StringIO()
         try:
-            validate_elite_game(odyssey_exe)
-            print("unqualified Odyssey fixture passed the elite gate")
-            ok = False
+            with contextlib.redirect_stderr(warned):
+                odyssey_profile = validate_elite_game(odyssey_exe)
         except ValueError as exc:
-            if "not one this EDVR build is qualified for" not in str(exc) or \
-               "332841" not in str(exc):
-                print("unknown Odyssey revision got the wrong message: %s" % exc)
+            print("unknown Odyssey revision was refused: %s" % exc)
+            ok = False
+        else:
+            text = warned.getvalue()
+            if odyssey_profile is not None or \
+               not text.startswith("[edvr] warning: ") or \
+               "This Elite Dangerous: Odyssey revision (version 999999) is not the one " \
+               "this EDVR build was checked against." not in text or \
+               "EDVR will install and the game will start" not in text:
+                print("unknown Odyssey revision did not warn and return None: %r" % text)
                 ok = False
         legacy_exe = os.path.join(tmp, "gate-legacy.exe")
         with open(legacy_exe, "wb") as f:

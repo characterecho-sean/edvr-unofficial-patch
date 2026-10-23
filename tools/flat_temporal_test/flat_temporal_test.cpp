@@ -25,6 +25,14 @@
 #include "flat_pixel_capture_tests.h"
 #include "flat_local_reject_tests.h"
 #include "flat_hdr_projection_capture_tests.h"
+#include "flat_light_payload_capture_tests.h"
+#include "flat_forward_light_tests.h"
+#include "flat_forward_light_cache_tests.h"
+#include "flat_forward_watch_tests.h"
+#include "flat_texture_description_tests.h"
+#include "flat_forward_light_integration_tests.h"
+#include "flat_phase_failure_capture_tests.h"
+#include "flat_forward_phase_bound_tests.h"
 #include "flat_negotiated_eval_tests.h"
 #include "flat_standdown_tests.h"
 #include "flat_elite_settings_tests.h"
@@ -37,11 +45,17 @@
 #include "flat_replay_query_reject_tests.h"
 #include "flat_hdr_route_tests.h"
 #include "flat_offscreen_tests.h"
+#include "flat_discovery_policy_tests.h"
 #include "flat_laser_scene_tone_tests.h"
 #include "flat_deferred_camera_tests.h"
 #include "flat_deferred_failure_capture_tests.h"
+#include "flat_deferred_failure_payload_tests.h"
+#include "flat_deferred_witness_tests.h"
+#include "flat_deferred_empty_gbuffer_tests.h"
 #include "flat_copy_structure_tests.h"
 #include "flat_copy_weapon_tests.h"
+#include "flat_noscene_spatial_tests.h"
+#include "flat_camera_spatial_tests.h"
 #include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "flat_no_candidate_tests.h"
@@ -51,6 +65,7 @@
 #include "flat_sibling_policy_tests.h"
 #include "flat_shadow_model_tests.h"
 #include "flat_log_line_tests.h"
+#include "flat_history_depth_tests.h"
 #include "flat_owner_gate_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
@@ -969,6 +984,42 @@ void flatRuntimePrefixTests() {
               std::memcmp(selected.camera, fixture.rows, sizeof(selected.camera)) == 0,
               "online native/scaled replay selects current HDR camera including overwritten handoff words");
         check(!flatRuntimeObserve(*prefix, copy).selected(), "second output copy in same prefix is rejected");
+        auto firstCause = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        flatRuntimeMarkUncertain(*firstCause,FlatRuntimeUncertainCause::SourceCapacity,
+            MonoFixture::token(0xA1),MonoFixture::token(0xB1),0x11,0x22);
+        const auto firstMark=firstCause->firstUncertain;
+        flatRuntimeMarkUncertain(*firstCause,FlatRuntimeUncertainCause::TargetCapacity,MonoFixture::token(0xA2));
+        check(firstCause->firstUncertain.cause==FlatRuntimeUncertainCause::SourceCapacity &&
+              firstCause->firstUncertain.resource==MonoFixture::token(0xA1) &&
+              firstCause->firstUncertain.related==MonoFixture::token(0xB1) &&
+              firstCause->firstUncertain.q==firstMark.q &&
+              firstCause->firstUncertain.vs==0x11 && firstCause->firstUncertain.ps==0x22 &&
+              flatRuntimeObserve(*firstCause,copy).reason==FlatMonoReason::Truncated,
+              "selector retains the first exact uncertainty witness through refusal");
+        auto nextFrame=std::make_unique<FlatRuntimePrefix>();nextFrame->frame=firstCause->frame+1;
+        check(!nextFrame->uncertain && nextFrame->firstUncertain.cause==FlatRuntimeUncertainCause::None,
+              "new frame clears first selector uncertainty");
+        nextFrame->targetsUsed=128;
+        check(!flatRuntimeTarget(*nextFrame,MonoFixture::token(0xA3)) &&
+              nextFrame->firstUncertain.cause==FlatRuntimeUncertainCause::TargetCapacity &&
+              nextFrame->firstUncertain.resource==MonoFixture::token(0xA3),
+              "target capacity records the actual refused identity");
+        auto sourceFull=std::make_unique<FlatRuntimePrefix>();sourceFull->frame=nextFrame->frame;sourceFull->sourcesUsed=32;
+        FlatRuntimeDraw newSource{};newSource.key=fixture.world[19].key;
+        newSource.supported=true;newSource.key.kind=kFlatContractPool;
+        flatRuntimeObserve(*sourceFull,newSource);
+        check(sourceFull->uncertain && sourceFull->firstUncertain.cause==FlatRuntimeUncertainCause::SourceCapacity &&
+              sourceFull->firstUncertain.resource==newSource.key.depth && sourceFull->sourcesUsed==32,
+              "source capacity records the refused depth without admitting a 33rd source");
+        FlatFailureReceiptWindow receiptBudget{};
+        for(unsigned receipt=0;receipt<8;++receipt)
+            check(receiptBudget.admit()==(receipt<FlatFailureReceiptWindow::kDetailLimit),
+                  "failure receipt detail budget admits only its bounded first failures");
+        check(receiptBudget.seen==8 && receiptBudget.emitted==3 && receiptBudget.suppressed()==5,
+              "failure receipt reports suppressed detail");
+        receiptBudget.reset();
+        check(receiptBudget.admit() && receiptBudget.seen==1 && receiptBudget.suppressed()==0,
+              "next report window reopens failure detail budget");
         auto refusal = [&](auto change, const char* message) {
             auto p = std::make_unique<FlatRuntimePrefix>(*beforeCopy); auto d = copy;
             change(*p, d); check(!flatRuntimeObserve(*p, d).selected(), message);
@@ -1300,18 +1351,21 @@ void flatRuntimeImageCopyTests() {
           "unrecognized depthless HDR shader pair remains refused by ordinary HDR rules");
 }
 
-void flatRuntimeMenuCopyTests() {
+// The menu copy (DEF19B03/DED87960, dof=false) and the depth-of-field composite (20F383BB/BF2302BC, dof=true) are the same shape to the
+// reducer: a depthless writer of the tone's input that reads a verified scene HDR, whose depth and camera the output inherits. The
+// composite is not the menu's static-scene policy (menuInherited stays false) and a compute write into its output invalidates it.
+static void flatRuntimeInheritedCopyTests(bool dof) {
     using namespace edvr;
     enum Scenario { Valid, CopyCameraUnused, PreCopySourceCompute, PostCopyDestinationCompute,
         SourceDepth, SourceViewport, SourceStale, SourceLayout,
         SourceCameraChange,
         SourceExplicitWrite, MissingSource, MissingCamera, WrongFormat, Unverified,
         WrongPair, Alias, PriorDestinationWrite, PriorDestinationBad, PriorAndSourceBad };
-    auto replay = [](Scenario scenario) {
+    auto replay = [dof](Scenario scenario) {
         MonoFixture fixture;
         FlatContractRecord menuCopy{};
         fixture.fill(menuCopy, kFlatContractScreen, 0x2600, 26, 500, 500, 1,
-            0xDEF19B035D5EDEDCull, 0xDED8796049C7BB4Aull, 0, 0, false);
+            dof ? 0x20F383BBAC05C031ull : 0xDEF19B035D5EDEDCull, dof ? 0xBF2302BCC7B434DBull : 0xDED8796049C7BB4Aull, 0, 0, false);
         menuCopy.key.depth = menuCopy.key.dsv = nullptr;
         menuCopy.key.depthWidth = menuCopy.key.depthHeight = menuCopy.key.depthFormat = 0;
         menuCopy.key.srvView[0] = MonoFixture::token(0x2802);
@@ -1366,7 +1420,9 @@ void flatRuntimeMenuCopyTests() {
                 d.key.b1 = MonoFixture::token(0xBAAD); d.key.camera = d.camera;
                 d.key.cameraHash = 0xBAD; d.key.writeEpoch = 0;
             }
-            d.menuHdrCopyVerified = events[i].r == &menuCopy && scenario != Unverified;
+            const bool verified = events[i].r == &menuCopy && scenario != Unverified;
+            d.menuHdrCopyVerified = !dof && verified;
+            d.dofCompositeVerified = dof && verified;
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
             d.instances = r.firstInstances;
             if (scenario == SourceExplicitWrite && events[i].r == &menuCopy)
@@ -1379,6 +1435,8 @@ void flatRuntimeMenuCopyTests() {
         }
         return std::make_pair(std::move(prefix), selected);
     };
+    const auto accepted = [dof](const FlatRuntimePrefix& p) { return dof ? p.dofCompositesAccepted : p.menuCopiesAccepted; };
+    const auto refused = [dof](const FlatRuntimePrefix& p) { return dof ? p.dofCompositesRefused : p.menuCopiesRefused; };
     MonoFixture baseline;
     for (Scenario s : {Valid, CopyCameraUnused, PreCopySourceCompute}) {
         auto result = replay(s);
@@ -1387,12 +1445,12 @@ void flatRuntimeMenuCopyTests() {
               result.second.sceneConstants == MonoFixture::token(0xB100) &&
               result.second.cameraHash == baseline.world[19].key.cameraHash &&
               std::memcmp(result.second.camera, baseline.rows, sizeof(result.second.camera)) == 0 &&
-              result.first->menuCopiesAccepted == 1 && result.first->menuCopiesRefused == 0,
+              accepted(*result.first) == 1 && refused(*result.first) == 0,
               "verified menu copy transfers current scene lineage independently of copy b1");
         // The menu-scoped stale-slot policy asks exactly this: the selected HDR is the copy's inherited
         // destination. The copy's SOURCE (0x2800, an ordinary scene HDR) and no pointer at all are not.
-        check(flatFrameThroughMenuCopy(*result.first, result.second.hdr),
-              "a frame selected through a verified menu copy qualifies for the menu's stale-slot policy");
+        check(flatFrameThroughMenuCopy(*result.first, result.second.hdr) == !dof,
+              "a frame selected through a verified menu copy qualifies for the menu's stale-slot policy, and one through the depth-of-field composite does not");
         check(!flatFrameThroughMenuCopy(*result.first, MonoFixture::token(0x2800)) &&
               !flatFrameThroughMenuCopy(*result.first, nullptr),
               "the copy's source HDR and a null HDR do not qualify: it is the inherited destination that does");
@@ -1402,8 +1460,8 @@ void flatRuntimeMenuCopyTests() {
                        MissingSource, MissingCamera, WrongFormat, Unverified, Alias,
                        PriorDestinationWrite, PriorDestinationBad, PriorAndSourceBad}) {
         auto result = replay(s);
-        check(!result.second.selected() && result.first->menuCopiesAccepted == 0 &&
-              result.first->menuCopiesRefused == 1 &&
+        check(!result.second.selected() && accepted(*result.first) == 0 &&
+              refused(*result.first) == 1 &&
               result.second.reason == FlatMonoReason::ConflictingHdr &&
               result.first->selectedConflict.cause != FlatRuntimeConflict::None,
               "menu copy refuses invalid source, prior destination, alias and unverified views");
@@ -1412,7 +1470,7 @@ void flatRuntimeMenuCopyTests() {
               "a refused menu copy never qualifies a frame for the menu's stale-slot policy");
     }
     auto overwritten = replay(PostCopyDestinationCompute);
-    check(!overwritten.second.selected() && overwritten.first->menuCopiesAccepted == 1 &&
+    check(!overwritten.second.selected() && accepted(*overwritten.first) == 1 &&
           overwritten.first->selectedConflict.cause == FlatRuntimeConflict::ExplicitWrite,
           "compute overwrite after accepted menu copy invalidates inherited HDR before tone");
     check(!flatFrameThroughMenuCopy(*overwritten.first, overwritten.second.hdr),
@@ -1422,16 +1480,18 @@ void flatRuntimeMenuCopyTests() {
           depth.first->selectedConflict.current.dsv == MonoFixture::token(0xDEAD),
           "menu copy reports original source depth witness");
     auto absent = replay(MissingSource);
-    check(absent.first->selectedConflict.cause == FlatRuntimeConflict::MenuCopySource,
+    check(absent.first->selectedConflict.cause == (dof ? FlatRuntimeConflict::DofCompositeSource : FlatRuntimeConflict::MenuCopySource),
           "untracked menu copy source is visible as a specific HDR conflict");
     auto prior = replay(PriorAndSourceBad);
     check(prior.first->selectedConflict.cause == FlatRuntimeConflict::Viewport &&
           prior.first->selectedConflict.current.viewport[0] == 1,
           "prior destination conflict wins over later invalid source");
     auto wrong = replay(WrongPair);
-    check(!wrong.second.selected() && !wrong.first->menuCopiesAccepted && !wrong.first->menuCopiesRefused,
+    check(!wrong.second.selected() && !accepted(*wrong.first) && !refused(*wrong.first),
           "unknown depthless shader pair does not enter menu copy path");
 }
+void flatRuntimeMenuCopyTests() { flatRuntimeInheritedCopyTests(false); }
+void flatRuntimeDofCompositeTests() { flatRuntimeInheritedCopyTests(true); }
 
 void testFrameContractTrace() {
     using namespace edvr;
@@ -2812,32 +2872,101 @@ void testFlatCpuWiring() {
     const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
     const std::string engineH = slurp("src/d3d11/engine_velocity.h");
     const std::string cpuH = slurp("src/d3d11/flat_cpu.h");
+    const std::string forwardCpp = slurp("src/d3d11/flat_forward_light_runtime.inl");
+    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
     const std::string menuCpp = slurp("src/d3d11/menu.cpp");
     check(!runtimeCpp.empty() && !resolveCpp.empty() && !resolveH.empty() && !injectCpp.empty() && !temporalCpp.empty() &&
-          !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty(),
+           !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty() && !vscreenCpp.empty(),
           "the census's sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
         return n;
     };
+    const auto scanStart=forwardCpp.find("void forwardDrawWrites(State& s,"),scanEnd=forwardCpp.find("bool forwardConverterState",scanStart);
+    const auto scan=forwardCpp.substr(scanStart,scanEnd-scanStart);
+    check(scan.find("if(!watching){counts.add(flatcpu::kCopyWatchSkip);return;}")<scan.find("flatcpu::Scope outputCost")&&
+          scan.find("flatcpu::Scope outputCost")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews"),
+          "output timing begins only after the unchanged watch gate and covers actual output Gets");
+    const auto decisionAt=scan.find("const auto decision=forward_light::outputWatch(");
+    const auto skipAt=scan.find("if(decision.reason==forward_light::OutputWatchReason::NoUsableState)");
+    const auto queryAt=scan.find("OMGetRenderTargetsAndUnorderedAccessViews");
+    check(decisionAt<skipAt&&skipAt<queryAt&&scan.find("if(counts.active())")==std::string::npos&&
+          scan.find("counts.add(flatcpu::kCopyGuardSkipped);\n        return;",skipAt)<queryAt&&
+          scan.find("counts.add(flatcpu::kCopyGuardFallback);",skipAt)<queryAt,
+          "functional demand guard runs with timing off and only NoUsableState returns before all actual output queries");
+    check(scan.find("owner()&&actualDrawContext&&actualDrawContext==s.context.Get()")<decisionAt&&
+          scan.find("ledger.frame==s.prefix.frame&&!s.prefix.uncertain&&!foreignWork.load")<decisionAt&&
+          scan.find("s.forwardLight.ownerKnown&&s.forwardLight.upstream&&s.device&&s.context")<decisionAt&&
+          runtimeCpp.find("forwardBefore(s,context,d,kind,count,start,instances,startInstance)")!=std::string::npos&&
+          forwardCpp.find("forwardDrawWrites(s,actualDrawContext);")!=std::string::npos,
+          "actual draw context owner epoch uncertainty and foreign state guard the production skip");
+    check(scan.find("for(const auto& p:ledger.publications)anyLivePublication|=p.live;")<decisionAt&&
+          scan.find("flatcpu::Scope inactiveCost")==std::string::npos,
+          "guard reuses complete publication walk and skipped work never acquires the old inactive scan timer");
+    check(scan.find("counts.add(flatcpu::kCopyOmGet)")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews")&&
+          scan.find("kCopyRtvSlots,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT")!=std::string::npos&&
+          scan.find("kCopyUavSlots,n")!=std::string::npos&&
+          scan.find("if(blend){counts.add(flatcpu::kCopyBlendDesc);blend->GetDesc")!=std::string::npos&&
+          count(scan,"counts.add(flatcpu::kCopyGetResource)")==2,
+          "query counters name actual Gets, requested 8/64 slots, nullable GetDesc and writable-resource queries");
+    {
+        const auto ctorAt=runtimeCpp.find("FlatRuntimeDrawScope::FlatRuntimeDrawScope(");
+        const auto ctorEnd=runtimeCpp.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()", ctorAt);
+        const auto ctorBody=ctorAt!=std::string::npos&&ctorEnd!=std::string::npos?runtimeCpp.substr(ctorAt,ctorEnd-ctorAt):std::string{};
+        const auto dtorBody=ctorEnd!=std::string::npos?runtimeCpp.substr(ctorEnd, 4000):std::string{};
+        check(ctorBody.find("flatProducerContinueEarly(")<ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")&&
+              ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")<ctorBody.find("flatcpu::Scope shell(flatcpu::kOther);")&&
+              ctorBody.find("flatProducerContinue(")<ctorBody.find("flatcpu::kCopyChecks")&&
+              ctorBody.find("flatcpu::kCopyChecks")<ctorBody.find("const bool continuesRun")&&
+              ctorBody.find("const bool continuesRun")<ctorBody.find("flatProducerRunRemember(")&&
+              ctorBody.find("const bool continuesRun")<ctorBody.find("flatcpu::drawSplitSetContinued(continuesRun);"),
+              "the constructor arms the shell split before its scope and classes the draw after copy checks");
+        check(dtorBody.find("flatcpu::DrawSplitDtor splitDtor(splitContinued);")<dtorBody.find("flatcpu::Scope shell(flatcpu::kOther);"),
+              "the destructor shell is classed with the constructor's continuesRun");
+    }
+    check(runtimeCpp.find("flatcpu::formatCopyWindow(window,frame,&lines);")!=std::string::npos&&
+          runtimeCpp.find("flatcpu::formatDrawSplit(window, splitLine, sizeof splitLine);")!=std::string::npos&&
+          runtimeCpp.find("flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));")!=std::string::npos&&
+          count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==5,
+          "same completed window emits the partition and capture/filter scopes respect their work gates");
+    const auto beginAt=runtimeCpp.find("void FlatRuntimeDrawScope::beginActualDraw(");
+    const auto endAt=runtimeCpp.find("void FlatRuntimeDrawScope::endActualDraw()",beginAt);
+    const auto dtorAt=runtimeCpp.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()",endAt);
+    const auto beginBody=beginAt!=std::string::npos&&endAt!=std::string::npos?runtimeCpp.substr(beginAt,endAt-beginAt):std::string{};
+    const auto endBody=endAt!=std::string::npos&&dtorAt!=std::string::npos?runtimeCpp.substr(endAt,dtorAt-endAt):std::string{};
+    bool drawOutsideCallbacks=true;size_t hookAt=0;
+    for(unsigned i=0;i<7;++i) {
+        const auto before=vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw",hookAt);
+        const auto draw=before==std::string::npos?std::string::npos:vscreenCpp.find("g_state->realDraw",before);
+        const auto after=before==std::string::npos?std::string::npos:vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.endActualDraw",before);
+        drawOutsideCallbacks=drawOutsideCallbacks&&before!=std::string::npos&&draw!=std::string::npos&&
+            after!=std::string::npos&&before<draw&&draw<after&&after-before<350;
+        hookAt=after==std::string::npos?vscreenCpp.size():after+1;
+    }
+    check(beginBody.find("if(!ctx)return;")<beginBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);")&&
+          beginBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);")<beginBody.find("if(drawPacketOnly)")&&
+          endBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks,ctx!=nullptr);")<endBody.find("forwardReturn(state(),forwardIssue)")&&
+          drawOutsideCallbacks&&count(vscreenCpp,"if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw") == 7&&
+          count(vscreenCpp,"if (flatDraw.needsActualDraw()) flatDraw.endActualDraw") == 7,
+          "both callback scopes wrap optional pre/post issue work, while all seven hooks call the game draw between them");
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // Every family the census names has its scope at the entry points that family stands for.
         {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kOther);", 3, "the draw scope (both halves) and the dispatch scope time their own shells"},
         {&runtimeCpp, "flatcpu::Scope fast(flatcpu::kOffscreenFast);", 1, "the offscreen fast path times itself as its own family"},
-        {&runtimeCpp, "flatcpu::kReduce", 3, "contract reduction times the reducer (the fast path's too) and the final copy's admission by structure"},
+        {&runtimeCpp, "flatcpu::kReduce", 4, "contract reduction times the reducer (both fast paths) and the final copy's admission by structure"},
         {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
         {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
-        {&runtimeCpp, "flatcpu::kTrace", 6, "every trace-ring copy is timed: capture, dispatch, write, record (both paths) and the HDR route's resolve marker"},
+        {&runtimeCpp, "flatcpu::kTrace", 7, "every trace-ring copy is timed: capture, dispatch, write, record (both fast paths and the slow path) and the HDR route's resolve marker"},
         {&runtimeCpp, "flatcpu::kResource", 5, "Written, WrittenExtent, Map, Unmap and Update time their lookups"},
         {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
         {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
         {&runtimeCpp, "flatcpu::kShadows", 7, "the constant-buffer shadow observers and map-cache install/flush"},
         {&runtimeCpp, "flatcpu::kWitness", 1, "the camera witness"},
-        {&runtimeCpp, "flatcpu::kEngineDraw", 4, "engine motion's draw wrapper: naming, its begin (BeforeDraw), its end, and the flush of what it kept bound"},
+        {&runtimeCpp, "flatcpu::kEngineDraw", 5, "engine motion's draw wrapper: naming, its begin (the slow path and the producer continuation), its end, and the flush of what it kept bound"},
         {&runtimeCpp, "flatcpu::kResolve", 2, "the treatment at the copy draw and at the HDR route's trigger"},
-        {&runtimeCpp, "flatcpu::kHdrRoute", 3, "the HDR route's trigger detector on every draw (the fast path's too), and its selection at the trigger"},
+        {&runtimeCpp, "flatcpu::kHdrRoute", 4, "the HDR route's trigger detector on every draw (both fast paths), and its selection at the trigger"},
         {&runtimeCpp, "flatcpu::kTrackers", 5, "the state trackers"},
         {&resolveCpp, "flatcpu::Scope backendScope(flatcpu::kBackend);", 1, "the backend evaluation inside the resolver"},
         {&injectCpp, "flatcpu::Scope timed(flatcpu::kInject);", 2, "the camera inject callback, both halves"},
@@ -2855,7 +2984,7 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "if (censusWasRunning) s.census.noteWrapper(", 1, "and handed to the census only while it runs: no backlog"},
         {&runtimeCpp, "const FlatQueryCounts queries = flatQueryCut().take();", 1, "the query shortcuts' counts are drained every frame too"},
         {&runtimeCpp, "if (censusWasRunning) s.census.noteQueries(queries);", 1, "and handed over only while the census runs"},
-        {&runtimeCpp, "Log::get().note(\"%s\", lines.line[i]);", 1, "the lines go to the log as they are"},
+        {&runtimeCpp, "Log::get().note(\"%s\", lines.line[i]);", 2, "legacy and partition report lines both go to the log as formatted"},
         // The census drives engine motion's clock in the flat profile; nothing else does.
         {&cpuH, "emcpu::g_gate.store(gate, std::memory_order_relaxed);", 1, "the census opens engine motion's gate with its own sampling decision"},
         {&cpuH, "emcpu::g_gate.store(0, std::memory_order_relaxed);", 1, "and closes it when it stops"},
@@ -3030,8 +3159,8 @@ void testFlatWitnessWiring() {
           temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
           temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
           "ordinary discovery avoids compute/manual projection arms and propagates explicit full tier");
-    check(hookCpp.find("flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);")!=std::string::npos,
-          "configured flat census key samples physical Shift for explicit full capture");
+    check(hookCpp.find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
+          "configured flat census key still gives Shift its explicit full tier");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
     const size_t to = runtimeCpp.find("bool depthView(ID3D11Texture2D* depth) {");
@@ -3410,7 +3539,7 @@ void testFlatOverlayMutationWiring() {
     };
     check(clearTyped(rtvClear) &&
           written.find("FlatMutationDetails::named(provenance,entry)")!=std::string::npos &&
-          written.find("flatRuntimeWritten(s.prefix,res);")!=std::string::npos &&
+          written.find("flatRuntimeWritten(s.prefix,res,constantFill);")!=std::string::npos &&
           written.find("flatHdrObserveExplicitWrite(s.hdr,res);")!=std::string::npos &&
           written.find("s.cameras.invalidate(*c);")!=std::string::npos &&
           written.find("s.projection->invalidate(res);")!=std::string::npos &&
@@ -3884,6 +4013,7 @@ void testFlatQueryCutWiring() {
 }
 
 int main(int argc, char** argv) {
+    if(argc==3&&!std::strcmp(argv[1],"--light-payload"))return light_payload_test::report(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "--classify-dir") == 0)
         return flatShaderClassifierSweep(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "--trace-check") == 0)
@@ -3915,7 +4045,7 @@ int main(int argc, char** argv) {
         return out ? 0 : 1;
     }
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
-        std::puts("usage: flat_temporal_test --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | "
+        std::puts("usage: flat_temporal_test --light-payload <file.lca> | --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | "
                   "--trace-rekey <file|dir> | --trace-chain <file> | --trace-structure <file> | "
                   "--trace-trim <in> <out> <frame[,frame...]>");
         return 2;
@@ -3952,13 +4082,36 @@ int main(int argc, char** argv) {
     failures += flatLivePhaseTests();
     failures += flatLocalRejectTests();
     failures += flatHdrProjectionCaptureTests();
+    failures += light_payload_test::run();
+    failures += forward_light_test::run();
+    failures += forward_light_cache_test::run();
+    failures += forward_watch_test::run();
+    failures += texture_description_test::run();
+    failures += forward_light_integration_test::run();
+    failures += flatPhaseFailureCaptureTests();
+    failures += flatForwardPhaseBoundTests();
+    {
+        const auto readLightSource = [](const char* path) {
+            std::ifstream in(path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const auto runtime = readLightSource("src/d3d11/flat_runtime.cpp");
+        const auto capture = readLightSource("src/d3d11/flat_light_payload_runtime.inl");
+        const auto scope = readLightSource("src/d3d11/flat_runtime.h");
+        check(!runtime.empty() && !capture.empty() && !scope.empty(), "light payload wiring sources are readable from the repo root");
+        failures += light_payload_test::wiring(runtime, capture, scope);
+    }
     failures += flatNegotiatedEvalTests();
     flatRuntimePrefixTests();
     flatRuntimeImageCopyTests();
     check(deferred_camera_test::run() == 0, "actual deferred HDR camera proof");
     check(flatDeferredFailureCaptureTests() == 0, "completed failure-frame diagnostic snapshot");
+    failures += deferred_failure_payload_test::run();
+    failures += deferred_witness_test::run();
+    failures += deferred_empty_gbuffer_test::run();
     check(laser_scene_tone_test::run() == 0, "qualified laser scene tone preserves guarded HDR lineage");
     flatRuntimeMenuCopyTests();
+    flatRuntimeDofCompositeTests();
     testFrameContractTrace();
     testFrameContractCorpus();
     testFrameContractOutcomes();
@@ -3995,6 +4148,8 @@ int main(int argc, char** argv) {
     failures += flatCopyStructureTests();
     failures += flatCopyWeaponTests();
     failures += flatCopyWeaponWiringTests();
+    failures += flatNoSceneSpatialTests();
+    failures += flatCameraSpatialTests();
     failures += flatCoveredDrawWiringTests();
     failures += flatHdrCrumbTests();
     failures += flatHdrCrumbWiringTests();
@@ -4013,6 +4168,8 @@ int main(int argc, char** argv) {
     failures += flatShadowAccumulateTests();
     failures += flatShadowWiringTests();
     failures += flatLogLineTests();
+    failures += flatHistoryDepthTests();
+    flat_discovery_policy_tests::run(check);
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

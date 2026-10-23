@@ -9,12 +9,12 @@ KinematicEvalProbe kinematicEvalProbe;
 
 namespace {
 const char* const kJobNames[KinematicEvalProbe::kJobCount]={
-    "Kinematic::UpdateRenderDataJob",   // body RVA 0x4321940 (run thunk 0x42DF520)
-    "Kinematic::RenderDataBatch",       // body RVA 0x4320340 (run thunk 0x42DFAF0)
-    "Kinematic::UpdatePhysicsObjectsJob",// body RVA 0x432B2A0 (run thunk 0x42DF540)
-    "Kinematic::PrePhysicsAdvanceJob",  // body RVA 0x42DF530 (run is the body)
-    "Kinematic::PrePhysicsAdvanceCurveJob",// body RVA 0x42DF550 (run is the body)
-    "Kinematic::Unnamed_BA0",           // body RVA 0x4321810 (run thunk 0x42DFBA0)
+    "Kinematic::UpdateRenderDataJob",   // body RVA 0x4324640 (run thunk 0x42E21E0)
+    "Kinematic::RenderDataBatch",       // body RVA 0x4323040 (run thunk 0x42E27B0)
+    "Kinematic::UpdatePhysicsObjectsJob",// body RVA 0x432DFA0 (run thunk 0x42E2200)
+    "Kinematic::PrePhysicsAdvanceJob",  // body RVA 0x42E21F0 (run is the body)
+    "Kinematic::PrePhysicsAdvanceCurveJob",// body RVA 0x42E2210 (run is the body)
+    "Kinematic::Unnamed_BA0",           // body RVA 0x4324510 (run thunk 0x42E2860)
 };
 }
 
@@ -374,7 +374,7 @@ void KinematicEvalProbe::noteOwnership(uint32_t jobId,uintptr_t arg) noexcept {
     if(!active_.load(std::memory_order_acquire))return;
     std::lock_guard<std::mutex> lock(mutex_);
     bool ok=true;
-    // Job 0 (UpdateRenderDataJob body) takes the FUN_14431AFE0 descriptor;
+    // Job 0 (UpdateRenderDataJob body) takes the FUN_14431DCE0 descriptor;
     // its +0x10 is the ADDRESS of collection+0x300. Job 1 (render-data
     // batch) takes the collection itself.
     const uint64_t collection=
@@ -416,7 +416,7 @@ void KinematicEvalProbe::noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     ++summary_.riglinkChecks;
     bool ok=true;
-    // FUN_14431AFE0 param_1 IS the rig (decomp: state check at +0x380 first).
+    // FUN_14431DCE0 param_1 IS the rig (decomp: state check at +0x380 first).
     const uint64_t collection=read64(rig+0x348,ok); // rig's collection slot
     const uint32_t rigState=read32(rig+0x380,ok);   // 4 = render-ready
     if(!ok){++summary_.readFaults;return;}
@@ -724,7 +724,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
      <<",\"max_items_per_call\":"<<bucketMaxItems_.load(std::memory_order_relaxed)
      <<"},\"bucket_items_direct\":[";
     {   // Names name the producer function; the fixture round-trips them verbatim.
-        static const char* const kNames[kDirectProducerCount]={"fun_144312e00","fun_14369c9c0"};
+        static const char* const kNames[kDirectProducerCount]={"fun_144315ac0","fun_14369f6c0"};
         for(uint32_t i=0;i<kDirectProducerCount;++i) {
             if(i)j<<',';
             const DirectBuildStat& s=direct_[i];

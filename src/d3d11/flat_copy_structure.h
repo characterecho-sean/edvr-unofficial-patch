@@ -77,7 +77,11 @@ inline FlatSceneFacts flatSceneFacts(const FlatRuntimePrefix& p, uint32_t outW, 
     for (uint32_t i = 0; i < p.targetsUsed; ++i) {
         const auto& t = p.targets[i];
         const auto& k = t.writes.key;
-        if (t.writes.draws < kFlatSceneMinDraws || k.format != 26 || !k.color || !k.rtv || !k.depth || !k.dsv ||
+        // A target whose HDR camera came from a verified lighting pass (deferred, or forward light) is a lit G-buffer: a 3D
+        // scene at any draw count. The loadout's suit preview gives its scene H 7 draws (edvr_gfx_20261021_170848). A probe,
+        // a cubemap face or the loading hologram has no such pass and still needs the minimum.
+        const bool lit = t.hdrCamera && t.tone.deferredCamera;
+        if ((t.writes.draws < kFlatSceneMinDraws && !lit) || k.format != 26 || !k.color || !k.rtv || !k.depth || !k.dsv ||
             !k.width || !k.height || k.depthWidth != k.width || k.depthHeight != k.height)
             continue;
         FlatSceneFacts& slot = flatRenderFitsOutput(k.width, k.height, outW, outH) ? on : off;
@@ -128,6 +132,21 @@ inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMono
     // judged by the copy route whenever the HDR route does not take the frame.
     return mode == FlatMonoResolveMode::Taa || mode == FlatMonoResolveMode::Dlaa
         ? FlatWeaponRoute::Unchanged : FlatWeaponRoute::Copy;
+}
+
+// ---- a scene with no world -------------------------------------------------------------------------------------
+// A selected, source-free scene with no world: nothing on its depth but inert full-screen filters (flatProjectionDrawUnchanged: no
+// geometry, no projection), or nothing at all. A loading or menu screen. Ground and sky have geometry draws on that depth, so are not
+// blank. The HDR route declines such a frame (flat_runtime.cpp treatHdr, "blank-scene"): every pixel of its rotating hologram would
+// reach the upscaler with zero motion and keep accumulating (the loading-screen ghost, docs/flat-loading-hologram-ghost-2026-10-09.md).
+inline bool flatFrameBlankScene(const FlatMonoFrame& sel) {
+    if (!sel.selected() || !sel.sourceFree) return false;
+    const auto& n = sel.sourceless;
+    if (!n.draws) return true;
+    if (n.distinctPairs > n.topCount) return false;   // a pair beyond the named four is unclassified
+    for (uint32_t i = 0; i < n.topCount; ++i)
+        if (n.top[i].pool || !flatProjectionDrawUnchanged(n.top[i].vs, n.top[i].ps)) return false;
+    return true;
 }
 
 // ---- the admission --------------------------------------------------------------------------------------------
@@ -191,8 +210,10 @@ inline const FlatRuntimeTarget* findTarget(const FlatRuntimePrefix& p, const voi
 
 // The final copy's verdict. `whitelist` is what the reducer said at this copy draw (flatRuntimeObserveContract);
 // `d` is the copy draw; `f` the HDR detector's state for the frame so far. Returns what the frame is: the whitelist's
-// own answer unless this has something better to say. A frame is only ever touched when the whitelist refused it for
-// its tone pass (no-known-tone-pass, invalid-tone-pass): every other refusal is the same refusal it was.
+// own answer unless this has something better to say. A frame is touched when the whitelist refused it for its tone pass
+// (no-known-tone-pass, invalid-tone-pass), and, for the one verdict no-3d-scene only, when it refused for want of an HDR
+// camera (no-observed-hdr-writes, hdr-camera-not-observed, invalid-camera-rows) with no scene in the frame, or selected a blank scene
+// (flatFrameBlankScene). Every other refusal is the same refusal it was.
 inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, const FlatRuntimeDraw& d,
                                    const FlatMonoFrame& whitelist, const FlatCopyPolicy& policy,
                                    FlatCopyDiag* diag = nullptr) {
@@ -202,8 +223,30 @@ inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, 
     g = FlatCopyDiag{};
     g.whitelist = whitelist.reason;
     g.outputWidth = p.width; g.outputHeight = p.height;
-    if (whitelist.selected() ||
-        (whitelist.reason != FlatMonoReason::NoTonePass && whitelist.reason != FlatMonoReason::InvalidTonePass))
+    // A frame the whitelist SELECTED whose scene is blank (flatFrameBlankScene) is no scene, whatever the render size and whoever else
+    // looked at it: the temporal resolve of a world with nothing in it ghosts whatever moves, which is why the HDR route declines it
+    // ("blank-scene") and leaves the frame to this route. Without this the frame it declined would be resolved here instead.
+    if (whitelist.selected()) {
+        if (flatFrameBlankScene(whitelist)) {
+            g.outcome = FlatCopyOutcome::NoScene;
+            FlatMonoFrame out = whitelist; out.reason = FlatMonoReason::NoScene;
+            return out;
+        }
+        return whitelist;
+    }
+    // A frame whose HDR the whitelist found no usable camera in (none observed, rows that are no camera, or no HDR writes at all) and
+    // whose scene facts name no scene is the same finding as a tone pass it did not know: no 3D scene. Where the facts do name a
+    // scene the refusal stands as it was.
+    const bool noHdrCamera = whitelist.reason == FlatMonoReason::NoHdrCamera || whitelist.reason == FlatMonoReason::NoHdr ||
+                             whitelist.reason == FlatMonoReason::InvalidCamera;
+    if (noHdrCamera) {
+        const FlatSceneFacts facts = flatSceneFacts(p, p.width, p.height);
+        if (facts.onShape || facts.offShape) return whitelist;
+        g.outcome = FlatCopyOutcome::NoScene;
+        FlatMonoFrame out = whitelist; out.reason = FlatMonoReason::NoScene;
+        return out;
+    }
+    if (whitelist.reason != FlatMonoReason::NoTonePass && whitelist.reason != FlatMonoReason::InvalidTonePass)
         return whitelist;
 
     // What the scene is, before anything about the chain.
@@ -278,8 +321,10 @@ inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, 
     }
     if (g.ldrTargetsBefore) return decline("r-sized-image-passes-follow-the-first-consumer-of-the-scene-hdr");
 
+    // The Full System Scanner's tone pass is in no whitelist, so its frames are this admission's, and a bad H refuses here: the one
+    // place a camera-only fault on a temporal-off frame is asked about (waiveCameraOnly), as the reducer's copy branch asks it.
     FlatMonoFrame sel = flatSelectHdrRouteAt(p, f, [](uint64_t, uint64_t) { return true; }, src->writes.first,
-                                             FlatHdrExtentGate::UniformHalfToDouble);
+                                             FlatHdrExtentGate::UniformHalfToDouble, nullptr, nullptr, nullptr, nullptr, true);
     if (!sel.selected()) {
         g.outcome = FlatCopyOutcome::Refused;
         return sel;

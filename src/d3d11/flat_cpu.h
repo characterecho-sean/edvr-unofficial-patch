@@ -110,7 +110,24 @@ enum Family : unsigned {
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
+    kIssueCallbacks, // residual beginActualDraw/endActualDraw time, excluding the game Draw and child scopes
+    kIssueShader, // Geometry Issue's fresh shader/predicate validation
+    kIssueDsv, // Geometry Issue's fresh DSV/depth-state/plane validation
+    kIssueConstants, // Geometry Issue's fresh original-CB/camera validation
+    // Exclusive children of copy checks; folded into its legacy headline.
+    kCopyOutputs, kCopyDomain, kCopyConverter, kCopyForward, kCopyVerify, kCopyCapture, kCopyInactiveOutputs,
     kFamilies
+};
+constexpr bool copyChild(unsigned f) noexcept { return f >= kCopyOutputs && f <= kCopyInactiveOutputs; }
+enum CopyCount : unsigned {
+    kCopyWatch, kCopyWatchSkip, kCopyOmGet, kCopyRtvSlots, kCopyUavSlots,
+    kCopyBlendGet, kCopyBlendDesc, kCopyRtvBound, kCopyUavBound, kCopyGetResource,
+    kCopyShadowChecks, kCopyShadowUnknown, kCopyInactiveCandidate,
+    kCopyGuardChecks, kCopyGuardSkipped, kCopyGuardFallback,
+    kCopyRawDsvGet, kCopyRawDsvHit, kCopyRawDsvMiss,
+    kCopyRawDepthGet, kCopyRawDepthHit, kCopyRawDepthMiss, kCopyRawDepthDefault,
+    kCopyIssueGeometryDsvGet, kCopyIssueLightDsvGet,
+    kCopyCounts
 };
 struct FamilyInfo {
     const char* name;
@@ -136,6 +153,13 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"foreground capture", false},
     {"camera inject", true},
     {"offscreen fast path", false},
+    {"draw issue callbacks residual", false},
+    {"issue geometry shader", false},
+    {"issue geometry DSV", false},
+    {"issue geometry constants", false},
+    {"output scan", false}, {"raw domain", false}, {"converter", false},
+    {"forward admission", false}, {"copy verification", false}, {"manual/conflict", false},
+    {"output inactive-ledger", false},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
 constexpr unsigned kCells = kFamilies + 1;
@@ -189,8 +213,23 @@ struct alignas(32) Cell {
     std::atomic<uint64_t> calls{0};
     uint64_t spare_[2] = {};
 };
+// Exclusive time of one draw, classed by continuesRun. The constructor shell and the
+// copy-check scopes inside it are one draw; the destructor shell is the other half of
+// `other`. A dispatch shell is neither.
+enum DrawSplit : unsigned {
+    kSplitCtorRest = 0,
+    kSplitCtorContinued,
+    kSplitDtorRest,
+    kSplitDtorContinued,
+    kSplitCopyRest,
+    kSplitCopyContinued,
+    kSplitCount
+};
 struct alignas(64) Slot {
     Cell cell[kCells];
+    std::atomic<uint64_t> copy[kCopyCounts]{};
+    std::atomic<uint64_t> splitTicks[kSplitCount]{};
+    std::atomic<uint64_t> splitCalls[kSplitCount]{};
     std::atomic<uint32_t> tid{0};
 };
 constexpr unsigned kMaxSlots = 64;
@@ -204,6 +243,21 @@ struct ThreadCtx {
 };
 inline thread_local ThreadCtx t_ctx{nullptr, 0};
 
+// Armed around the draw constructor's shell, then around the destructor's shell.
+// Copy-check scopes that close while the constructor is armed stash their exclusive
+// time here; the guard commits both when it finishes. Nested shells increment depth
+// and do not take the outer shell's bucket.
+struct DrawSplitState {
+    enum Phase : uint8_t { Idle, Ctor, Dtor } phase = Idle;
+    bool continued = false;
+    unsigned depth = 0;
+    uint64_t copyTicks = 0;
+    uint32_t copyCalls = 0;
+    uint64_t shellTicks = 0;
+    uint32_t shellCalls = 0;
+};
+inline thread_local DrawSplitState t_drawSplit{};
+
 __declspec(noinline) inline Slot* registerSlot() noexcept {
     ThreadCtx& c = t_ctx;
     if (c.slot) return c.slot;
@@ -215,12 +269,26 @@ __declspec(noinline) inline Slot* registerSlot() noexcept {
 }
 inline unsigned slotCount() noexcept { return (std::min)(g_slotCount.load(std::memory_order_acquire), kMaxSlots); }
 
+// Query counters share the sampling gate, but never read a clock. Construct
+// once before the watch gate; disabled/unclocked frames only test the gate.
+class CopyCounter {
+public:
+    CopyCounter() noexcept { if (gateClocks(g_gate.load(std::memory_order_relaxed))) slot_ = registerSlot(); }
+    bool active() const noexcept { return slot_ != nullptr; }
+    void add(CopyCount c, uint64_t n = 1) noexcept {
+        if (slot_) { auto& v = slot_->copy[c]; v.store(v.load(std::memory_order_relaxed) + n, std::memory_order_relaxed); }
+    }
+private:
+    Slot* slot_ = nullptr;
+};
+
 // ---- the scope ----------------------------------------------------------------------------
 // RAII. A scope the gate did not clock is `live_ == false`: construction set one byte and the
 // destructor returns at once.
 class Scope {
 public:
     explicit Scope(unsigned family) noexcept { open(g_gate, family); }
+    Scope(unsigned family, bool enabled) noexcept { if (enabled) open(g_gate, family); }
     // The calibration and the rig give the gate.
     Scope(unsigned family, const std::atomic<uint64_t>& gate) noexcept { open(gate, family); }
     ~Scope() {
@@ -233,6 +301,17 @@ public:
         c.calls.store(c.calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         // The parent sees this scope's whole wall time as its child.
         ctx_->child = savedChild_ + (now - begin_);
+        if (t_drawSplit.phase == DrawSplitState::Ctor && family_ == kCopyChecks) {
+            t_drawSplit.copyTicks += static_cast<uint64_t>(excl);
+            t_drawSplit.copyCalls += 1;
+        }
+        if (t_drawSplit.phase != DrawSplitState::Idle && family_ == kOther) {
+            if (splitOwner_) {
+                t_drawSplit.shellTicks += static_cast<uint64_t>(excl);
+                t_drawSplit.shellCalls += 1;
+            }
+            if (t_drawSplit.depth > 0) --t_drawSplit.depth;
+        }
     }
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
@@ -250,26 +329,85 @@ private:
         savedChild_ = c.child;
         c.child = 0;
         begin_ = EDVR_FLATCPU_NOW();   // last: the bookkeeping above is outside the timed span
+        if (t_drawSplit.phase != DrawSplitState::Idle && family == kOther) {
+            ++t_drawSplit.depth;
+            splitOwner_ = t_drawSplit.depth == 1;
+        }
     }
     bool live_ = false;
+    bool splitOwner_ = false;
     uint8_t family_ = 0;
     ThreadCtx* ctx_ = nullptr;
     Slot* slot_ = nullptr;
     int64_t begin_ = 0, savedChild_ = 0;
 };
 
+inline void drawSplitAdd(unsigned bucket, uint64_t ticks, uint32_t calls) noexcept {
+    if ((!ticks && !calls) || bucket >= kSplitCount) return;
+    Slot* s = t_ctx.slot;
+    if (!s) s = registerSlot();
+    s->splitTicks[bucket].fetch_add(ticks, std::memory_order_relaxed);
+    s->splitCalls[bucket].fetch_add(calls, std::memory_order_relaxed);
+}
+inline void drawSplitArm(DrawSplitState::Phase phase) noexcept {
+    t_drawSplit.phase = phase;
+    t_drawSplit.depth = 0;
+    t_drawSplit.copyTicks = t_drawSplit.shellTicks = 0;
+    t_drawSplit.copyCalls = t_drawSplit.shellCalls = 0;
+    if (phase == DrawSplitState::Ctor) t_drawSplit.continued = false;
+}
+inline void drawSplitSetContinued(bool continued) noexcept { t_drawSplit.continued = continued; }
+// Constructed immediately before the draw constructor's kOther scope, so it finishes after that
+// scope and commits the exclusive shell and the copy-check residual.
+class DrawSplitCtor {
+public:
+    DrawSplitCtor() noexcept { drawSplitArm(DrawSplitState::Ctor); }
+    ~DrawSplitCtor() {
+        const unsigned shell = t_drawSplit.continued ? kSplitCtorContinued : kSplitCtorRest;
+        const unsigned copy = t_drawSplit.continued ? kSplitCopyContinued : kSplitCopyRest;
+        drawSplitAdd(shell, t_drawSplit.shellTicks, t_drawSplit.shellCalls);
+        drawSplitAdd(copy, t_drawSplit.copyTicks, t_drawSplit.copyCalls);
+        t_drawSplit.phase = DrawSplitState::Idle;
+        t_drawSplit.depth = 0;
+    }
+    DrawSplitCtor(const DrawSplitCtor&) = delete;
+    DrawSplitCtor& operator=(const DrawSplitCtor&) = delete;
+};
+// Constructed immediately before the draw destructor's kOther scope.
+class DrawSplitDtor {
+public:
+    explicit DrawSplitDtor(bool continued) noexcept {
+        drawSplitArm(DrawSplitState::Dtor);
+        t_drawSplit.continued = continued;
+    }
+    ~DrawSplitDtor() {
+        const unsigned shell = t_drawSplit.continued ? kSplitDtorContinued : kSplitDtorRest;
+        drawSplitAdd(shell, t_drawSplit.shellTicks, t_drawSplit.shellCalls);
+        t_drawSplit.phase = DrawSplitState::Idle;
+        t_drawSplit.depth = 0;
+    }
+    DrawSplitDtor(const DrawSplitDtor&) = delete;
+    DrawSplitDtor& operator=(const DrawSplitDtor&) = delete;
+};
+
 // ---- the render thread's per-frame cut -----------------------------------------------------
 struct CutState {
     uint64_t ticks[kFamilies];
     uint64_t calls[kFamilies];
+    uint64_t copy[kCopyCounts];
+    uint64_t splitTicks[kSplitCount];
+    uint64_t splitCalls[kSplitCount];
 };
 inline CutState g_cut[kMaxSlots + 1];
 
 struct FrameCut {
+    uint64_t splitTicks[kSplitCount];
+    uint64_t splitCalls[kSplitCount];
     uint64_t renderTicks[kFamilies];
     uint64_t renderCalls[kFamilies];
     uint64_t otherTicks[kFamilies];
     uint64_t otherCalls[kFamilies];
+    uint64_t copy[kCopyCounts];
 };
 // Called by the thread that calls Present, once a frame: deltas since the previous cut, that
 // thread's slot against everyone else's.
@@ -283,6 +421,11 @@ inline void cutFrame(FrameCut& out) noexcept {
         const unsigned index = i < n ? i : kMaxSlots;
         CutState& st = g_cut[index];
         const bool render = s == me;
+        for (unsigned c = 0; c < kCopyCounts; ++c) {
+            const auto value = s->copy[c].load(std::memory_order_relaxed);
+            if (render) out.copy[c] += value - st.copy[c];
+            st.copy[c] = value;
+        }
         for (unsigned f = 0; f < kFamilies; ++f) {
             const uint64_t t = s->cell[f].ticks.load(std::memory_order_relaxed);
             const uint64_t k = s->cell[f].calls.load(std::memory_order_relaxed);
@@ -291,6 +434,14 @@ inline void cutFrame(FrameCut& out) noexcept {
             st.calls[f] = k;
             if (render) { out.renderTicks[f] += dt; out.renderCalls[f] += dk; }
             else { out.otherTicks[f] += dt; out.otherCalls[f] += dk; }
+        }
+        for (unsigned b = 0; b < kSplitCount; ++b) {
+            const uint64_t t = s->splitTicks[b].load(std::memory_order_relaxed);
+            const uint64_t k = s->splitCalls[b].load(std::memory_order_relaxed);
+            const uint64_t dt = t - st.splitTicks[b], dk = k - st.splitCalls[b];
+            st.splitTicks[b] = t;
+            st.splitCalls[b] = k;
+            if (render) { out.splitTicks[b] += dt; out.splitCalls[b] += dk; }
         }
     }
 }
@@ -301,14 +452,19 @@ inline void resetForTest() noexcept {
     for (unsigned i = 0; i < kMaxSlots; ++i) {
         Slot& s = g_slots[i];
         for (unsigned f = 0; f < kCells; ++f) { s.cell[f].ticks.store(0); s.cell[f].calls.store(0); }
+        for (auto& c : s.copy) c.store(0);
+        for (unsigned b = 0; b < kSplitCount; ++b) { s.splitTicks[b].store(0); s.splitCalls[b].store(0); }
         s.tid.store(0);
     }
     for (unsigned f = 0; f < kCells; ++f) { g_overflow.cell[f].ticks.store(0); g_overflow.cell[f].calls.store(0); }
+    for (auto& c : g_overflow.copy) c.store(0);
+    for (unsigned b = 0; b < kSplitCount; ++b) { g_overflow.splitTicks[b].store(0); g_overflow.splitCalls[b].store(0); }
     std::memset(g_cut, 0, sizeof(g_cut));
     g_slotCount.store(0);
     g_gate.store(kSampledBit);
     t_ctx.slot = nullptr;
     t_ctx.child = 0;
+    t_drawSplit = {};
     emcpu::resetForTest();
 }
 
@@ -416,6 +572,11 @@ struct WindowReport {
     double otherMs[kFamilies] = {};
     uint64_t renderCalls[kFamilies] = {};
     uint64_t otherCalls[kFamilies] = {};
+    uint64_t copy[kCopyCounts] = {};
+    // Draw-shell split, render thread, sums over the clocked frames. Same exclusive
+    // ticks as `other` and the copy-check residual, classed by continuesRun.
+    double splitMs[kSplitCount] = {};
+    uint64_t splitCalls[kSplitCount] = {};
     // Engine motion's parts (engine_motion_cpu.h), as the census cut them: window totals.
     double emRenderMs[emcpu::kParts] = {};
     double emOtherMs[emcpu::kParts] = {};
@@ -512,6 +673,11 @@ public:
             renderCalls_[f] += cut.renderCalls[f];
             otherTicks_[f] += cut.otherTicks[f];
             otherCalls_[f] += cut.otherCalls[f];
+        }
+        for (unsigned c = 0; c < kCopyCounts; ++c) copy_[c] += cut.copy[c];
+        for (unsigned b = 0; b < kSplitCount; ++b) {
+            splitTicks_[b] += cut.splitTicks[b];
+            splitCalls_[b] += cut.splitCalls[b];
         }
         emcpu::FrameCut emCut;
         emcpu::cutFrame(emCut);
@@ -617,6 +783,11 @@ public:
             out.emRenderCalls[p] = emRenderCalls_[p];
             out.emOtherCalls[p] = emOtherCalls_[p];
         }
+        for (unsigned c = 0; c < kCopyCounts; ++c) out.copy[c] = copy_[c];
+        for (unsigned b = 0; b < kSplitCount; ++b) {
+            out.splitMs[b] = static_cast<double>(splitTicks_[b]) * msPerTick;
+            out.splitCalls[b] = splitCalls_[b];
+        }
         out.stateCalls = stateCalls_;
         out.substitutedDraws = substitutedDraws_;
         out.offscreen = offscreen_;
@@ -666,6 +837,9 @@ private:
         std::memset(emRenderCalls_, 0, sizeof(emRenderCalls_));
         std::memset(emOtherTicks_, 0, sizeof(emOtherTicks_));
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
+        std::memset(copy_, 0, sizeof(copy_));
+        std::memset(splitTicks_, 0, sizeof(splitTicks_));
+        std::memset(splitCalls_, 0, sizeof(splitCalls_));
         stateCalls_ = substitutedDraws_ = 0;
         offscreen_ = FlatOffscreenCounts{};
         queries_ = FlatQueryCounts{};
@@ -683,6 +857,8 @@ private:
     unsigned frames_ = 0, paused_ = 0, sampled_ = 0, renderClocked_ = 0, gpuFrame_ = 0, gpuResolve_ = 0;
     uint64_t renderTicks_[kFamilies] = {}, renderCalls_[kFamilies] = {};
     uint64_t otherTicks_[kFamilies] = {}, otherCalls_[kFamilies] = {};
+    uint64_t copy_[kCopyCounts] = {};
+    uint64_t splitTicks_[kSplitCount] = {}, splitCalls_[kSplitCount] = {};
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
     uint64_t stateCalls_ = 0, substitutedDraws_ = 0, gpuSkipped_ = 0, gpuInvalid_ = 0;
@@ -784,6 +960,63 @@ inline InstrumentCost instrumentCost(const WindowReport& r) noexcept {
     c.costMs = c.clockedMs * share;
     return c;
 }
+inline double copyCheckMs(const WindowReport& r) noexcept {
+    double ms = r.renderMs[kCopyChecks];
+    for (unsigned f = kCopyOutputs; f <= kCopyInactiveOutputs; ++f) ms += r.renderMs[f];
+    return ms;
+}
+inline void formatCopyWindow(const WindowReport& r, uint64_t completedFrame, Lines* out) {
+    Tokens tk;
+    tk.add("", "flat cpu copy checks 5s: frame-end=%llu frames=%u clocked=%u one-in=%u seconds=%.3f; exclusive partition of legacy copy checks, output-scan queries are sampled-window totals",
+        static_cast<unsigned long long>(completedFrame), r.frames, r.renderClockedFrames, r.renderPeriod, r.seconds);
+    if (r.clocksOff || !r.renderClockedFrames) {
+        tk.add("; ", "%s; time/query counts unavailable, not zero", r.clocksOff ? "timing off" : "no clocked frame");
+    } else {
+        const double n = r.renderClockedFrames;
+        tk.add("; ", "aggregate %.3f ms (parent calls %.1f); residual %.3f ms", copyCheckMs(r)/n,
+            static_cast<double>(r.renderCalls[kCopyChecks])/n, r.renderMs[kCopyChecks]/n);
+        for (unsigned f = kCopyOutputs; f <= kCopyInactiveOutputs; ++f) {
+            char calls[32]; callsText(calls,sizeof(calls),static_cast<double>(r.renderCalls[f])/n);
+            tk.add(" + ", "%s %.3f ms (calls %s)", kInfo[f].name, r.renderMs[f]/n, calls);
+        }
+        const char* names[kCopyCounts] = {"watch entries","watch skips","OM Get calls","RTV slots requested/scanned","UAV slots requested/scanned",
+            "blend Get calls","blend GetDesc calls","bound RTVs","bound UAVs","GetResource calls",
+            "decision samples","decision unknown","inactive-ledger candidates",
+            "actual guard checks","actual guard skips","actual full-scan fallbacks",
+            "raw DSV OM Gets","raw DSV description hits","raw DSV description misses",
+            "raw depth-state OM Gets","raw depth-state description hits","raw depth-state description misses","raw depth-state defaults",
+            "issue geometry DSV Gets","issue light DSV Gets"};
+        for (unsigned c = 0; c < kCopyCounts; ++c)
+            tk.add(c ? ", " : "; ", "%s=%llu", names[c], static_cast<unsigned long long>(r.copy[c]));
+        tk.add("; ", "zero calls means not run in sampled frames; output scan includes guard CPU; inactive-ledger scan time is zero after guard (skips untimed, not measured savings); query counting not floor-corrected");
+    }
+    packLines(tk,out);
+}
+// One line, not a cpu-line token: the cpu line is already at its token budget.
+// Figures match the cpu line: sums over clocked frames, divided by that count.
+inline void formatDrawSplit(const WindowReport& r, char* out, size_t n) noexcept {
+    if (!out || !n) return;
+    if (r.clocksOff || !r.renderClockedFrames) {
+        std::snprintf(out, n, "flat draw shell split: clocked=%u frames=%u; %s",
+            r.renderClockedFrames, r.frames,
+            r.clocksOff ? "CPU timing is off" : "no clocked frame, not a zero");
+        return;
+    }
+    const double k = static_cast<double>(r.renderClockedFrames);
+    auto ms = [&](unsigned b) { return r.splitMs[b] / k; };
+    auto calls = [&](unsigned b) { return static_cast<double>(r.splitCalls[b]) / k; };
+    std::snprintf(out, n,
+        "flat draw shell split: ctor-continued=%.3f ms/frame (calls %.1f) ctor-rest=%.3f ms/frame (calls %.1f) "
+        "dtor-continued=%.3f ms/frame (calls %.1f) dtor-rest=%.3f ms/frame (calls %.1f) "
+        "copy-residual-continued=%.3f ms/frame (calls %.1f) copy-residual-rest=%.3f ms/frame (calls %.1f) "
+        "clocked=%u frames=%u; exclusive, per clocked frame. continued is continuesRun. "
+        "ctor plus dtor is this draw's share of other. copy-residual sums to the copy-check residual",
+        ms(kSplitCtorContinued), calls(kSplitCtorContinued), ms(kSplitCtorRest), calls(kSplitCtorRest),
+        ms(kSplitDtorContinued), calls(kSplitDtorContinued), ms(kSplitDtorRest), calls(kSplitDtorRest),
+        ms(kSplitCopyContinued), calls(kSplitCopyContinued), ms(kSplitCopyRest), calls(kSplitCopyRest),
+        r.renderClockedFrames, r.frames);
+}
+
 inline void formatWindow(const WindowReport& r, Lines* out) {
     Tokens tk;
     char calls[32];
@@ -816,8 +1049,10 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
                r.renderClockedFrames, r.frames, r.renderPeriod, total);
     if (anyClocked) {
         for (unsigned f = 0; f < kFamilies; ++f) {
+            if (copyChild(f)) continue;
             callsText(calls, sizeof(calls), static_cast<double>(r.renderCalls[f]) / clocked);
-            tk.add(f == 0 ? " = " : " + ", "%s %.3f ms (calls %s)", kInfo[f].name, r.renderMs[f] / clocked, calls);
+            const double ms = f == kCopyChecks ? copyCheckMs(r) : r.renderMs[f];
+            tk.add(f == 0 ? " = " : " + ", "%s %.3f ms (calls %s)", kInfo[f].name, ms / clocked, calls);
         }
         callsText(calls, sizeof(calls), static_cast<double>(emRenderCalls) / clocked);
         tk.add(" + ", "engine motion hooks %.3f ms (calls %s)", emRenderMs / clocked, calls);

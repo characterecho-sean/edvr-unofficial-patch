@@ -47,7 +47,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.intro_video (screen | stock -- this module's slices are the
+// Reads visual.intro_video (screen | stock -- this module's slices are the
 // size and the world anchor). Install and reload; live, though the panel
 // only exists during the intro.
 void introPanelConfigure(Config& cfg);

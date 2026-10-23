@@ -671,7 +671,7 @@ bool mixedScene(const Harness& h, std::string* why) {
 // lazy form, with the kept answers (flat_query_cut.h) answering or every state asking the context: the calls the context
 // received. `runs` runs of `draws` consecutive draws, a draw that is not a producer between two runs. `gameSetsPs`: the
 // game binds its own pixel shader before every draw, as it does between materials, so the lazy form still patches each one.
-enum class Form { PerDraw, Lazy, LazyAsking };
+enum class Form { PerDraw, Lazy, LazyAsking, EagerBracket };
 inline std::string g_lastRunDescription;   // what the last countRuns' calls were, by method
 inline unsigned long long countRuns(const Harness& h, Form form, unsigned runs, unsigned draws, bool gameSetsPs) {
     Game g(h);
@@ -679,7 +679,7 @@ inline unsigned long long countRuns(const Harness& h, Form form, unsigned runs, 
     SceneCleanup cleanup(g.ctx);
     for (auto& s : lifecycle_fake::g_slots) { s.ptr = nullptr; s.hash = 0; ++s.gen; }
     edvr::engineVelocityConfigure(true);
-    const bool lazy = form != Form::PerDraw;
+    const bool lazy = form != Form::PerDraw && form != Form::EagerBracket;
     edvr::engineVelocityFlatLazy(lazy);
     edvr::flatQueryCut().reset();
     if (form == Form::LazyAsking) edvr::flatQueryCut().fallBackAll();
@@ -695,7 +695,7 @@ inline unsigned long long countRuns(const Harness& h, Form form, unsigned runs, 
         if (run) e.otherDraw("a draw between two runs");
         for (unsigned i = 0; i < draws; ++i) {
             if (gameSetsPs) e.gameSetPs(i % 2 ? g.ps2.Get() : g.ps.Get(), i % 2 ? lifecycle_tests::kPsHash2 : lifecycle_tests::kPsHash);
-            if (lazy) {
+            if (form != Form::PerDraw) {
                 RecOn on;
                 bool had6 = false;
                 edvr::engineVelocityFlatBeginDraw(g.ctx, &had6);

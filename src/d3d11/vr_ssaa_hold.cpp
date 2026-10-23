@@ -4,7 +4,7 @@
 #include "vr_ssaa_gate.h"       // vrSsaaGateFrame: the frame number the instrument line carries
 #include "vr_ssaa_hold_math.h"
 #include "ui_panel_scale.h"  // uiPanelScaleEarlyHooks: the setter and getter hooks, installed at DLL load
-#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
+#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 334473
 
 #include "../common/elite_graphics_folder.h"       // the Options\Graphics folder under %LOCALAPPDATA%
 #include "../common/log.h"
@@ -26,10 +26,10 @@ void edvrGraphicsEnsureInitialised();
 namespace edvr {
 namespace {
 
-// Build 332841's addresses (RVAs). The wrapper calls the fxcfg loader with the loader's object in r8; the slot holds the wrapper.
-constexpr uint32_t kLoaderSlotRva = 0x52E8368;
-constexpr uint32_t kWrapperRva = 0x2862780;
-constexpr uint32_t kLoaderRva = 0x2855A50;
+// Build 334473's addresses (RVAs). The wrapper calls the fxcfg loader with the loader's object in r8; the slot holds the wrapper.
+constexpr uint32_t kLoaderSlotRva = 0x52EB528;
+constexpr uint32_t kWrapperRva = 0x2864DA0;
+constexpr uint32_t kLoaderRva = 0x2858070;
 constexpr uint32_t kSsFieldOff = 0x13C;     // the loader object's SS field (a stack temporary the game copies from)
 constexpr uintptr_t kCtxSsOff = 0x3564;     // the render context's Supersampling field, the one every sizing consumer reads
 constexpr uint32_t kNoneBits = 0xFFFFFFFFu;  // "no value yet" in the float-bits atomics below
@@ -102,7 +102,7 @@ bool writeFloatGuarded(uintptr_t at, float v) {
 
 bool readFloatGuarded(uintptr_t at, float* out) { return readGame(reinterpret_cast<const uint8_t*>(at), out, sizeof(float)); }
 
-// The game's PE header: build 332841's stamp and image size (the gate ui_panel_scale.cpp applies).
+// The game's PE header: build 334473's stamp and image size (the gate ui_panel_scale.cpp applies).
 bool buildChecked(const uint8_t* base, char* why, size_t whyLen) {
     uint32_t stamp = 0, size = 0;
     __try {
@@ -123,7 +123,7 @@ bool buildChecked(const uint8_t* base, char* why, size_t whyLen) {
         return false;
     }
     if (stamp != kUiPanelStamp || size != kUiPanelImageSize) {
-        std::snprintf(why, whyLen, "game build not checked (PE stamp %u, image %u bytes; build 332841's are %u, %u)", stamp,
+        std::snprintf(why, whyLen, "game build not checked (PE stamp %u, image %u bytes; build 334473's are %u, %u)", stamp,
                       size, kUiPanelStamp, kUiPanelImageSize);
         return false;
     }
@@ -256,7 +256,7 @@ void vrSsaaHoldEarlyInstall() {
     // The wrapper: its bytes, and that its call lands on the loader.
     uint8_t got[sizeof(kWrapperBytes)] = {};
     if (!readGame(base + kWrapperRva, got, sizeof(got)) || std::memcmp(got, kWrapperBytes, sizeof(got)) != 0) {
-        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper at 0x%X is not build 332841's", kWrapperRva);
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper at 0x%X is not build 334473's", kWrapperRva);
         g_slotState.store(2, std::memory_order_release);
         return;
     }
@@ -293,7 +293,7 @@ void vrSsaaHoldReport() {
     if (g_slotState.load(std::memory_order_acquire) == 1) {
         if (g_setterIn)
             Log::get().note("vr ssaa gate: hold installed at DLL load: loader wrapper 0x%X (slot 0x%X) and the Supersampling setter, "
-                            "build 332841 checked",
+                            "build 334473 checked",
                             kWrapperRva, kLoaderSlotRva);
         else
             Log::get().note("vr ssaa gate: hold installed at DLL load: loader wrapper 0x%X (slot 0x%X); the setter hook refused, "
@@ -408,7 +408,7 @@ void vrSsaaHoldProfileChanged() {
 
 // The copy's source block, for the instrument only (log): W copies 0x160 bytes of the active preset entry, [[ctx+0x33C8]+0x230] +
 // index*0x178 + 0x14 (index [obj+0x258], count [obj+0x228]), to ctx+0x3428, and a small header of the object (+0x30, +0x58..+0x80) to
-// ctx+0x33D0.. (read from 0x281C0D0..0x281C3EB, build 332841). Nothing in it is proven to hold the 3D mode; this logs which dwords change
+// ctx+0x33D0.. (read from 0x281E710..0x281C3EB, build 334473). Nothing in it is proven to hold the 3D mode; this logs which dwords change
 // between copies, so a 3D-on apply shows the mode field if it is there. Never written.
 constexpr uintptr_t kCtxSettingsObjOff = 0x33C8;
 constexpr uint32_t kBlockBytes = 0x160, kHeadFrom = 0x30, kHeadBytes = 0x54;  // object +0x30 .. +0x84
@@ -523,7 +523,7 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
         if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
         char modeText[24] = "unreadable";
         if (modeKnown) std::snprintf(modeText, sizeof(modeText), "%u%s", blockMode, modeRose ? " (rose from 0)" : "");
-        Log::get().note("vr ssaa gate: copy call %u (W 0x281C0D0), frame %u: profile %s, block 3D mode %s, hold %d (VR profile %d, arriving "
+        Log::get().note("vr ssaa gate: copy call %u (W 0x281E710), frame %u: profile %s, block 3D mode %s, hold %d (VR profile %d, arriving "
                         "%d), VR live %d; copied %s, %s; ctx 0x%llX",
                         call, vrSsaaGateFrame(), runtimeProfileName(), modeText, allowed ? 1 : 0, profileAllows ? 1 : 0, arriving ? 1 : 0,
                         live ? 1 : 0, copiedText,
@@ -540,7 +540,7 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
     if (wrote == 1 && (!g_copyHeld.load(std::memory_order_acquire) || bits != g_copyBits.load(std::memory_order_acquire))) {
         g_copyHeld.store(true, std::memory_order_release);
         g_copyBits.store(bits, std::memory_order_release);
-        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281C0D0): copied %s, held 1.0, "
+        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281E710): copied %s, held 1.0, "
                         "VR live 1",
                         haveCopied ? "(see the copy call line)" : "unknown");
     }

@@ -707,6 +707,119 @@ int main() {
         check(dropped.carried && !dropped.carriedJump && memcmp(tv, d1tv, sizeof(tv)) == 0,
               "a drop after a jump carries the translation before it (a jump carried: zero)");
     }
+    // A synthetic 20-degree canted pair, with independent camera rotation
+    // and translation. The reference poses are composed directly as the game
+    // renders them; the helper sees only one chosen eye's rows per frame.
+    {
+        float rawPrev[2][12], rawNow[2][12], basePrev[12], baseNow[12];
+        rows34(-10.0f, -.032f, 0.0f, .001f, rawPrev[0]);
+        rows34( 10.0f,  .032f, 0.0f, .001f, rawPrev[1]);
+        memcpy(rawNow, rawPrev, sizeof(rawNow));
+        rows34(4.0f, 2.0f, 3.0f, 4.0f, basePrev);
+        rows34(5.0f, 2.2f, 3.1f, 4.3f, baseNow);
+        // Pitch combined with cant exercises conjugation (yaw alone commutes).
+        const float pitch = .8f * .0174532925f;
+        float pitchR[9] = {1,0,0, 0,cosf(pitch),-sinf(pitch), 0,sinf(pitch),cosf(pitch)};
+        float yawR[9], combined[9];
+        edvr::temporalRot3Of34(baseNow, yawR);
+        edvr::temporalMul3(yawR, pitchR, combined);
+        for (int r=0;r<3;++r) for (int c=0;c<3;++c) baseNow[r*4+c]=combined[r*3+c];
+        float rendered[2][2][12] = {};
+        const float* bases[2] = {basePrev, baseNow};
+        for (int frame=0;frame<2;++frame) for (int eye=0;eye<2;++eye) {
+            const float (*raw)[12] = frame ? rawNow : rawPrev;
+            float e[9], b[9], product[9], t[3], moved[3];
+            edvr::temporalRot3Of34(raw[eye],e);
+            e[2]=-e[2];e[5]=-e[5];e[6]=-e[6];e[7]=-e[7];
+            edvr::temporalRot3Of34(bases[frame],b);
+            edvr::temporalMul3(b,e,product);
+            t[0]=raw[eye][3];t[1]=raw[eye][7];t[2]=-raw[eye][11];
+            edvr::temporalApply3(b,t,moved);
+            for(int r=0;r<3;++r) {
+                for(int c=0;c<3;++c) rendered[frame][eye][r*4+c]=product[r*3+c];
+                rendered[frame][eye][r*4+3]=bases[frame][r*4+3]+moved[r];
+            }
+        }
+        check(edvr::temporalEyesCanted(rawPrev,rawNow),"20-degree runtime geometry is canted");
+        for(int prior=0;prior<2;++prior) for(int current=0;current<2;++current)
+            for(int target=0;target<2;++target) {
+                float W[9],tv[3], wantW[9],wantTv[3],move[3];
+                for(int i=0;i<9;++i) W[i]=100.0f+i;
+                for(int i=0;i<3;++i) tv[i]=200.0f+i;
+                const bool converted=edvr::temporalCantedWorldFromSelected(
+                    rendered[0][prior],rendered[1][current],prior,current,target,
+                    rawPrev,rawNow,true,false,W,tv);
+                if(prior!=current) {
+                    check(!converted&&W[0]==100.0f&&tv[0]==200.0f,
+                          "source-eye switch preserves gate motion until the camera basis is verified");
+                    continue;
+                }
+                edvr::temporalWorldFromRows(rendered[0][target],rendered[1][target],
+                                            wantW,wantTv,move);
+                float error=0;
+                for(int i=0;i<9;++i) error=fmaxf(error,fabsf(W[i]-wantW[i]));
+                for(int i=0;i<3;++i) error=fmaxf(error,fabsf(tv[i]-wantTv[i]));
+                check(converted&&error<2e-5f,"canted world pose matches direct target-eye pose and translation");
+            }
+        float W[9],tv[3],move[3],legacyW[9],legacyTv[3];
+        edvr::temporalWorldFromRows(rendered[0][1],rendered[1][1],legacyW,legacyTv,move);
+        check(edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],1,1,1,
+              rawPrev,rawNow,true,false,W,tv)&&memcmp(W,legacyW,sizeof(W))==0&&
+              memcmp(tv,legacyTv,sizeof(tv))==0,"chosen source eye retains exact legacy motion");
+        for(int i=0;i<9;++i)W[i]=100.0f+i;
+        for(int i=0;i<3;++i)tv[i]=200.0f+i;
+        float heldW[9],heldTv[3];memcpy(heldW,W,sizeof(W));memcpy(heldTv,tv,sizeof(tv));
+        check(!edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],-1,1,0,
+              rawPrev,rawNow,true,false,W,tv)&&memcmp(W,heldW,sizeof(W))==0&&memcmp(tv,heldTv,sizeof(tv))==0,
+              "unknown source eye leaves existing world motion untouched");
+        check(!edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],1,1,0,
+              rawPrev,rawNow,false,false,W,tv)&&memcmp(W,heldW,sizeof(W))==0&&memcmp(tv,heldTv,sizeof(tv))==0,
+              "carried camera verdict leaves existing world motion untouched");
+        check(!edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],0,1,0,
+              rawPrev,rawNow,true,false,W,tv)&&memcmp(W,heldW,sizeof(W))==0&&memcmp(tv,heldTv,sizeof(tv))==0,
+              "smooth identical chosen rows with conflicting DSV eye labels cannot invent a 20-degree turn");
+        check(edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],1,1,0,
+              rawPrev,rawNow,true,true,W,tv)&&tv[0]==0&&tv[1]==0&&tv[2]==0,
+              "origin jump retains corrected rotation and zeroes translation");
+        float parallel[2][12];memcpy(parallel,rawPrev,sizeof(parallel));
+        rows34(0.0f,-.032f,0,0,parallel[0]);rows34(0.0f,.032f,0,0,parallel[1]);
+        memcpy(W,heldW,sizeof(W));memcpy(tv,heldTv,sizeof(tv));
+        check(!edvr::temporalEyesCanted(parallel,parallel)&&
+              !edvr::temporalCantedWorldFromSelected(rendered[0][1],rendered[1][1],1,1,0,
+              parallel,parallel,true,false,W,tv)&&memcmp(W,heldW,sizeof(W))==0&&memcmp(tv,heldTv,sizeof(tv))==0,
+              "parallel geometry is bit-exact legacy motion even with eye offsets");
+    }
+    // Capture 224449, raw C00->C02: the game's chosen camera rows and an
+    // independently fitted left-eye sky rotation from 137 star matches.
+    // The observed correction is a full 20-degree eye-basis conjugation.
+    {
+        const float prev[12] = { .2669019100f,-.7896574740f,-.5524529810f,0,
+                                 -.5136396290f,-.6016020180f,.6117591860f,0,
+                                 -.8154370190f,.1204820870f,-.5661681890f,0 };
+        const float now[12] = { .2751511340f,-.7745143180f,-.5695781110f,0,
+                                -.5065066810f,-.6203393940f,.5988571640f,0,
+                                -.8171551820f,.1237189020f,-.5629838710f,0 };
+        const float leftFit[9] = { .9999955682f,.0029166084f,.0005974409f,
+                                   -.0029013051f,.9997032296f,-.0241875015f,
+                                   -.0006678091f,.0241856609f,.9997072611f };
+        float rawEyes[2][12];
+        rows34(10.0f,-.032f,0,0,rawEyes[0]);
+        rows34(-10.0f,.032f,0,0,rawEyes[1]);
+        float shared[9], corrected[9],tv[3],move[3];
+        edvr::temporalWorldFromRows(prev,now,shared,tv,move);
+        const bool converted=edvr::temporalCantedWorldFromSelected(
+            prev,now,1,1,0,rawEyes,rawEyes,true,false,corrected,tv);
+        float correctedMax=0,sharedMax=0;
+        for(int i=0;i<9;++i) {
+            correctedMax=fmaxf(correctedMax,fabsf(corrected[i]-leftFit[i]));
+            sharedMax=fmaxf(sharedMax,fabsf(shared[i]-leftFit[i]));
+        }
+        // Measured from the captured float rows: corrected max 0.0000594,
+        // shared max 0.008111. A component residual does not mistake the
+        // rows' slight nonorthogonality for angular error.
+        check(converted&&correctedMax<.0001f&&sharedMax>.005f,
+              "224449 left-eye star motion: corrected camera basis agrees with independent raw stars");
+    }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
         return 1;

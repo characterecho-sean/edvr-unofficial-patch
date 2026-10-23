@@ -270,14 +270,14 @@ static uint32_t putSite(Synth& s, uint32_t rva, uint32_t targetRva, const std::v
 static const std::vector<uint8_t> kRealGapAB = {0x0F, 0x29, 0x8D, 0xC0, 0x00, 0x00, 0x00};                // movaps [rbp+0C0h],xmm1
 static const std::vector<uint8_t> kRealGapDE = {0x44, 0x0F, 0x29, 0xA5, 0xE0, 0x00, 0x00, 0x00};          // movaps [rbp+0E0h],xmm12
 
-// The known build's layout: the builder at 0x443E800, the 0.5 at 0x4DDF878, the call site at 0x4455FDD (E8 at 0x4456007).
+// The known build's layout: the builder at 0x4441580, the 0.5 at 0x4DE28B8, the call site at 0x4458D5D (E8 at 0x4458D87).
 static void buildKnown(Synth& s) {
-    s.commit(0x443E000, 0x2000, PAGE_EXECUTE_READWRITE);
-    s.commit(0x4455000, 0x2000, PAGE_EXECUTE_READWRITE);
-    s.commit(0x4DDF000, 0x1000, PAGE_READWRITE);
-    putCallee(s, tc::kTargetRva, 0x4DDF878);
+    s.commit(0x4441000, 0x2000, PAGE_EXECUTE_READWRITE);
+    s.commit(0x4458000, 0x2000, PAGE_EXECUTE_READWRITE);
+    s.commit(0x4DE2000, 0x1000, PAGE_READWRITE);
+    putCallee(s, tc::kTargetRva, 0x4DE28B8);
     const uint32_t call = putSite(s, tc::kSiteRva, tc::kTargetRva, kRealGapAB, kRealGapDE);
-    check(call == tc::kCallRva, "C3 the synthetic call site puts its E8 where the game's is (0x4456007)");
+    check(call == tc::kCallRva, "C3 the synthetic call site puts its E8 where the game's is (0x4458D87)");
 }
 
 static void caseSignature() {
@@ -354,39 +354,39 @@ static void caseLocate() {
     {   // the known build
         Synth s(tc::kExpectedTimestamp, tc::kExpectedImageSize, 0x1000, 0x4400000);
         buildKnown(s);
-        check(tc::locate(s.base, 0, &loc) && loc.byStamp && loc.targetRva == 0x443E800 && loc.callRva == 0x4456007 && loc.stamp == 1788384820u,
-              "C4 a module with build 332841's stamp and size, the builder's head and the call site is found at 0x443E800");
-        check(std::string(loc.how) == "PE stamp 1788384820 and image size 104894464 are build 332841's; the callee's head and the call site at exe+0x4455FDD verified", "C4 ...saying how");
-        s.base[0x443E800 + 5] ^= 1;
-        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).rfind("the PE stamp 1788384820 and image size 104894464 are build 332841's, but the head at exe+0x443E800 is not", 0) == 0,
+        check(tc::locate(s.base, 0, &loc) && loc.byStamp && loc.targetRva == 0x4441580 && loc.callRva == 0x4458D87 && loc.stamp == 1791840573u,
+              "C4 a module with build 334473's stamp and size, the builder's head and the call site is found at 0x4441580");
+        check(std::string(loc.how) == "PE stamp 1791840573 and image size 104906752 are build 334473's; the callee's head and the call site at exe+0x4458D5D verified", "C4 ...saying how");
+        s.base[0x4441580 + 5] ^= 1;
+        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).rfind("the PE stamp 1791840573 and image size 104906752 are build 334473's, but the head at exe+0x4441580 is not", 0) == 0,
               "C4 the right stamp over a wrong head is inert, with the scan not tried");
-        s.base[0x443E800 + 5] ^= 1;
-        s.base[0x4455FDD + 5] ^= 1;
-        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).rfind("the PE stamp 1788384820 and image size 104894464 are build 332841's, but the call site at exe+0x4455FDD is not the one read", 0) == 0,
+        s.base[0x4441580 + 5] ^= 1;
+        s.base[0x4458D5D + 5] ^= 1;
+        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).rfind("the PE stamp 1791840573 and image size 104906752 are build 334473's, but the call site at exe+0x4458D5D is not the one read", 0) == 0,
               "C4 ...a wrong call site likewise");
-        s.base[0x4455FDD + 5] ^= 1;
+        s.base[0x4458D5D + 5] ^= 1;
         {   // the call goes somewhere else
-            const int32_t rel = int32_t(0x443E900 - (0x4456007 + 5));
-            std::memcpy(s.base + 0x4456008, &rel, 4);
-            check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).find("the call site at exe+0x4455FDD is not the one read") != std::string::npos, "C4 ...and a call to another function");
-            const int32_t back = int32_t(0x443E800 - (0x4456007 + 5));
-            std::memcpy(s.base + 0x4456008, &back, 4);
+            const int32_t rel = int32_t(0x4441680 - (0x4458D87 + 5));
+            std::memcpy(s.base + 0x4458D88, &rel, 4);
+            check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).find("the call site at exe+0x4458D5D is not the one read") != std::string::npos, "C4 ...and a call to another function");
+            const int32_t back = int32_t(0x4441580 - (0x4458D87 + 5));
+            std::memcpy(s.base + 0x4458D88, &back, 4);
         }
         {
             const float notHalf = 2.0f;
-            std::memcpy(s.base + 0x4DDF878, &notHalf, 4);
+            std::memcpy(s.base + 0x4DE28B8, &notHalf, 4);
             check(!tc::locate(s.base, 0, &loc), "C4 the head right and its constant not 0.5 is inert");
             const float half = 0.5f;
-            std::memcpy(s.base + 0x4DDF878, &half, 4);
+            std::memcpy(s.base + 0x4DE28B8, &half, 4);
         }
         check(tc::locate(s.base, 0, &loc), "C4 the control, restored");
         s.commit(0x1000, 0x1000, PAGE_READWRITE);                 // a code section small enough to be all committed
         s.put32(0x80 + 24 + 240 + 8, 0x1000);
         s.put32(0x80 + 8, tc::kExpectedTimestamp + 1);
-        check(!tc::locate(s.base, 0, &loc) && loc.byStamp == false && std::string(loc.why).find("is not build 332841's") != std::string::npos, "C4 a stamp one off leaves the known address and scans");
+        check(!tc::locate(s.base, 0, &loc) && loc.byStamp == false && std::string(loc.why).find("is not build 334473's") != std::string::npos, "C4 a stamp one off leaves the known address and scans");
         s.put32(0x80 + 8, tc::kExpectedTimestamp);
         s.put32(0x80 + 0x50, tc::kExpectedImageSize + 0x1000);
-        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).find("is not build 332841's") != std::string::npos, "C4 ...and so does an image size one page off");
+        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why).find("is not build 334473's") != std::string::npos, "C4 ...and so does an image size one page off");
     }
     {   // not a PE
         Synth s(1u, 0x40000u, 0x1000, 0x20000);
@@ -409,20 +409,20 @@ static void caseLocate() {
         const uint32_t call = putSite(s, 0x5003, 0x9000, std::vector<uint8_t>(3, 0x90), std::vector<uint8_t>(11, 0x90));
         check(tc::locate(s.base, 0, &loc) && !loc.byStamp && loc.targetRva == 0x9000 && loc.callRva == call, "C4 another build with one call site and a callee of the same head is found by scanning");
         char want[200];
-        std::snprintf(want, sizeof(want), "found by signature scan: the one call site at exe+0x%X reaches it; PE stamp 1234567 is not build 332841's", call);
+        std::snprintf(want, sizeof(want), "found by signature scan: the one call site at exe+0x%X reaches it; PE stamp 1234567 is not build 334473's", call);
         check(std::string(loc.how) == want, "C4 ...saying how");
         putSite(s, 0xB021, 0x9000, kRealGapAB, kRealGapDE);
-        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why) == "the PE stamp 1234567 is not build 332841's and the signature scan of the 128 KB code section found more than one call site (ambiguous)",
+        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why) == "the PE stamp 1234567 is not build 334473's and the signature scan of the 128 KB code section found more than one call site (ambiguous)",
               "C4 two call sites are ambiguous and inert");
     }
     {
         Synth s(1234567u, 0x40000u, 0x1000, 0x20000);
         scanImage(s);
-        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why) == "the PE stamp 1234567 is not build 332841's and the signature scan of the 128 KB code section found no call site", "C4 no call site is inert");
+        check(!tc::locate(s.base, 0, &loc) && std::string(loc.why) == "the PE stamp 1234567 is not build 334473's and the signature scan of the 128 KB code section found no call site", "C4 no call site is inert");
         const uint32_t call = putSite(s, 0x5003, 0x9000, kRealGapAB, kRealGapDE);
         s.base[0x9000 + 20] ^= 1;
         char want[300];
-        std::snprintf(want, sizeof(want), "the PE stamp 1234567 is not build 332841's; the one call site at exe+0x%X reaches exe+0x9000, whose head is not the cull-plane builder's", call);
+        std::snprintf(want, sizeof(want), "the PE stamp 1234567 is not build 334473's; the one call site at exe+0x%X reaches exe+0x9000, whose head is not the cull-plane builder's", call);
         check(!tc::locate(s.base, 0, &loc) && std::string(loc.why) == want, "C4 one call site whose callee has another head is inert");
         s.base[0x9000 + 20] ^= 1;
         putCallee(s, 0x9000, 0x1A000, 0.25f);
@@ -505,9 +505,9 @@ static void caseHook() {
     terrainCullCoverTestReset();
     terrainCullCoverTestSetImage(s.base);
     terrainCullCoverInstall(false);
-    check(lines().size() == 1 && lines()[0] == "terrain cull cover: hook live at exe+0x443E800 (PE stamp 1788384820 and image size 104894464 are build 332841's; the callee's head and the call site at exe+0x4455FDD verified)" &&
+    check(lines().size() == 1 && lines()[0] == "terrain cull cover: hook live at exe+0x4441580 (PE stamp 1791840573 and image size 104906752 are build 334473's; the callee's head and the call site at exe+0x4458D5D verified)" &&
               terrainCullCoverTestState().installed && terrainCullCoverTestState().byStamp && std::memcmp(before, fn, 16) != 0 && fn[0] == 0xE9,
-          "C5.e the known build: one line, 'hook live at exe+0x443E800', the entry patched with a jump");
+          "C5.e the known build: one line, 'hook live at exe+0x4441580', the entry patched with a jump");
 
     // no tangents known yet (before the first frame): through, bit for bit, and not the call worth a line
     {
@@ -583,13 +583,13 @@ static void caseHook() {
 
     // refusals
     {
-        s.base[0x443E800 + 7] ^= 1;
+        s.base[0x4441580 + 7] ^= 1;
         terrainCullCoverTestSetImage(s.base);
         terrainCullCoverInstall(false);
-        check(lines().size() == 1 && lines()[0].rfind("terrain cull cover: inert: the PE stamp 1788384820 and image size 104894464 are build 332841's, but the head at exe+0x443E800 is not", 0) == 0 &&
+        check(lines().size() == 1 && lines()[0].rfind("terrain cull cover: inert: the PE stamp 1791840573 and image size 104906752 are build 334473's, but the head at exe+0x4441580 is not", 0) == 0 &&
                   !terrainCullCoverTestState().installed && fn[0] == 0x48,
               "C5.x a head that is not the one read: one 'inert' line naming why, nothing patched");
-        s.base[0x443E800 + 7] ^= 1;
+        s.base[0x4441580 + 7] ^= 1;
         terrainCullCoverTestReset();
     }
 }
@@ -605,7 +605,7 @@ static void caseHookScanned() {
     terrainCullCoverTestSetImage(s.base);
     terrainCullCoverInstall(false);
     char want[300];
-    std::snprintf(want, sizeof(want), "terrain cull cover: hook live at exe+0x9000 (found by signature scan: the one call site at exe+0x%X reaches it; PE stamp 777777 is not build 332841's)", call);
+    std::snprintf(want, sizeof(want), "terrain cull cover: hook live at exe+0x9000 (found by signature scan: the one call site at exe+0x%X reaches it; PE stamp 777777 is not build 334473's)", call);
     check(lines().size() == 1 && lines()[0] == want && terrainCullCoverTestState().installed && !terrainCullCoverTestState().byStamp, "C5.y another build with one call site: the hook goes in where the scan found it, and the line says how");
     float f[2][4];
     kQuest3.frusta(f);
@@ -617,7 +617,7 @@ static void caseHookScanned() {
     putSite(s, 0xB021, 0x9000, kRealGapAB, kRealGapDE);
     terrainCullCoverTestSetImage(s.base);
     terrainCullCoverInstall(false);
-    check(lines().size() == 1 && lines()[0].find("terrain cull cover: inert: the PE stamp 777777 is not build 332841's and the signature scan") == 0 && lines()[0].find("ambiguous") != std::string::npos &&
+    check(lines().size() == 1 && lines()[0].find("terrain cull cover: inert: the PE stamp 777777 is not build 334473's and the signature scan") == 0 && lines()[0].find("ambiguous") != std::string::npos &&
               !terrainCullCoverTestState().installed && fn[0] == 0x48,
           "C5.za two call sites: inert, one line, nothing patched");
     terrainCullCoverTestReset();
@@ -729,7 +729,7 @@ int main(int argc, char** argv) {
         const std::string fixture = slurp(root + "\\tools\\terrain_cover_fixture.log");
         check(!fixture.empty(), "C6 tools\\terrain_cover_fixture.log is readable");
         check(fixture == built, "C6 the log tool's fixture file is what the production hook writes for the scripted session, byte for byte (python tools\\edvr_log.py --tally cover reads it; regenerate with --print-fixture)");
-        check(occurrences(built, "hook live at exe+0x443E800") == 1 && occurrences(built, "terrain cull cover: first call: ") == 1 && occurrences(built, "terrain cull cover: armed; ") == 3 &&
+        check(occurrences(built, "hook live at exe+0x4441580") == 1 && occurrences(built, "terrain cull cover: first call: ") == 1 && occurrences(built, "terrain cull cover: armed; ") == 3 &&
                   occurrences(built, "\n") == 5 && occurrences(built, "armed; 60000 of 60001 calls widened") == 1 && occurrences(built, "armed; 0 of 0 calls widened") == 1 && occurrences(built, "armed; 0 of 60000 calls widened") == 1,
               "C6 ...and it carries the live line, one first call, and three heartbeats: 60000 of 60001 widened, 0 of 0 and 0 of 60000, and no other line");
     }

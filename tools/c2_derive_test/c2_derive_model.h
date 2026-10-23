@@ -49,7 +49,7 @@ inline const uint32_t& camU(const Cam& c, uint32_t camOff) { return *reinterpret
 
 inline float negf(float x) { uint32_t u; std::memcpy(&u, &x, 4); u ^= 0x80000000u; std::memcpy(&x, &u, 4); return x; }
 
-// View finalizer: FUN_1404f4910 (camera_cache_helpers.txt:575-617).
+// View finalizer: FUN_1404f4a70 (camera_cache_helpers.txt:575-617).
 inline void finalizeViewRows(Cam& c) {
     const float a0 = c.F(0x00), a1 = c.F(0x04), a2 = c.F(0x08);
     const float a4 = c.F(0x10), a5 = c.F(0x14), a6 = c.F(0x18);
@@ -68,16 +68,16 @@ inline void finalizeViewRows(Cam& c) {
 inline float* projSlot(Cam& c, int i) { return &c.F(0x1B0 + 4 * i); }
 inline const float* projSlot(const Cam& c, int i) { return &c.F(0x1B0 + 4 * i); }
 
-// Projection builder: FUN_1404f2ff0 (camera_cache_helpers.txt:255-493).
+// Projection builder: FUN_1404f3150 (camera_cache_helpers.txt:255-493).
 inline void buildProjection(Cam& c) {
     const float fVar19 = (c.F(0x23C) + 1.0f) * c.F(0x234); // (compoundNear+1)*near
     const uint32_t kind = c.U(0x244);
-    float fVar18 = 1.0f; // DAT_144dde614
+    float fVar18 = 1.0f; // DAT_144de165c
     bool bVar5 = false;
     if (kind != 0) {
         if (kind == 1) {
             // Ortho (camera_cache_helpers.txt:296-310). The branch ends with
-            // goto LAB_1404f35c7 (:310): it skips the trigonometric block
+            // goto LAB_1404f3727 (:310): it skips the trigonometric block
             // entirely. Falling through would overwrite the ortho matrix with
             // the perspective one (the C2-work review's probe caught exactly
             // that here).
@@ -135,7 +135,7 @@ inline void buildProjection(Cam& c) {
         bVar5 = true;
     }
     {
-        // Trigonometric perspective (:404-433), FUN_1448b2390 -> std::tan.
+        // Trigonometric perspective (:404-433), FUN_1448b4ed0 -> std::tan.
         const float fVar21 = c.F(0x260) * 0.5f;
         const float fVar20 = c.F(0x240);
         if (c.B(0x249) == 0) {
@@ -167,7 +167,7 @@ inline void buildProjection(Cam& c) {
             *projSlot(c, 5) = fVar21b;
         } else {
             // The +0x249-flag branch (:434-450): the cot-ratio form, with
-            // FUN_1448aaf90 -> std::cos and FUN_1448b4d80 -> std::sin.
+            // FUN_1448adad0 -> std::cos and FUN_1448b78c0 -> std::sin.
             const float u3 = c.F(0x250), u4 = c.F(0x254);
             const float fVar22 = c.F(0x258);
             const uint32_t u17 = c.U(0x25C) ^ 0x80000000u;
@@ -190,8 +190,8 @@ inline void buildProjection(Cam& c) {
     }
 oblique:
     if (c.B(0x2A0) != 0) {
-        // Oblique/projection adjust (:458-490), DAT_144e2f890 = 2.0,
-        // DAT_144e2f870 = 0.5.
+        // Oblique/projection adjust (:458-490), DAT_144e328d0 = 2.0,
+        // DAT_144e328b0 = 0.5.
         float fVar18o = 2.0f * (negf(*projSlot(c, 14)) / (*projSlot(c, 10) - 1.0f));
         float fVar19o = fVar18o / *projSlot(c, 5);
         fVar18o = fVar18o / *projSlot(c, 0);
@@ -217,7 +217,7 @@ oblique:
     c.U(0x230) &= ~4u;
 }
 
-// VP finalizer: FUN_1404f49f0 (camera_cache_helpers.txt:57-195): vp = view x
+// VP finalizer: FUN_1404f4b50 (camera_cache_helpers.txt:57-195): vp = view x
 // proj, row-major (:149-192).
 inline void finalizeVP(Cam& c) {
     if (c.U(0x230) & 4u) buildProjection(c);
@@ -232,7 +232,7 @@ inline void finalizeVP(Cam& c) {
     c.U(0x230) &= ~8u;
 }
 
-// Scene CB composer: FUN_140596830 (camera_producer.txt:63-121): out =
+// Scene CB composer: FUN_140596990 (camera_producer.txt:63-121): out =
 // [R | 0; 0 0 0 1] x proj with the source axes rows (lane 3 masked).
 inline void composeSceneCb(Cam& c, float out[16]) {
     if (c.U(0x230) & 4u) buildProjection(c);
@@ -259,7 +259,7 @@ inline void composeSceneCb(Cam& c, float out[16]) {
     out[15] = pF;
 }
 
-// Refresh context copy: FUN_1405921f0's VP copy (camera_producer.txt:191-221)
+// Refresh context copy: FUN_140592350's VP copy (camera_producer.txt:191-221)
 // -- the cached VP transposed.
 inline void refreshCopyVp(Cam& c, float ctx[16]) {
     if (c.U(0x230) & 8u) finalizeVP(c);
@@ -268,7 +268,7 @@ inline void refreshCopyVp(Cam& c, float ctx[16]) {
         for (int k = 0; k < 4; ++k) ctx[r * 4 + k] = vp[k * 4 + r];
 }
 
-// Ray snapshot: FUN_1406be790 (camera_ray_writers2.txt:13-30).
+// Ray snapshot: FUN_1406be8f0 (camera_ray_writers2.txt:13-30).
 inline void snapshotRay(Cam& c) {
     if (c.U(0x230) & 2u) finalizeViewRows(c);
     for (int i = 0; i < 18; ++i) camF(c, kCamRayBasis + 4 * i) = c.F(0x170 + 4 * i);
@@ -279,7 +279,7 @@ inline void snapshotRay(Cam& c) {
 }
 
 // ---------------------------------------------------------------------------
-// The 3x4 view inverse, as FUN_1405e9ed0's output is consumed
+// The 3x4 view inverse, as FUN_1405ea030's output is consumed
 // (camera_ray_consumer.txt:142-158). SUBSTITUTION, named like the trig one:
 // the helper computes a general inverse; the view rows the rig (and the
 // game) produce are orthonormal, where the exact inverse is [R^T | -R^T t]
@@ -297,8 +297,8 @@ inline void inverseView34(const float v[12], float inv[16]) {
 }
 
 // ---------------------------------------------------------------------------
-// Ray CB composer: FUN_1405964c0 (camera_ray_consumer.txt:96-188), with the
-// constant blocks resolved: the 1450c8090..0xbc block is the identity 4x4, so
+// Ray CB composer: FUN_140596620 (camera_ray_consumer.txt:96-188), with the
+// constant blocks resolved: the 1450cb0d0..0xbc block is the identity 4x4, so
 // the four pre-vectors are the snapshot rows and the origin delta as a point:
 //   V0..V2 = snapshot rows (basis), V3 = delta x basis + (0,0,0,1)
 // and the CB is the 4x4 product [V0..V3] x inverseView(current view rows),

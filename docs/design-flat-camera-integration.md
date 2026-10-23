@@ -56,9 +56,9 @@
 - Environment: Windows x64, D3D11 flat mono; headset/runtime N/A. VR
   comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable and
   build identities, backend versions, dimensions, formats and mod chain.
-- Extends the [flat AA design](design-flat-temporal-aa-2026-09-23.md) and
-  [architecture review](review-flat-temporal-aa-2026-09-26.md); the camera
-  milestones below supplement, rather than renumber, their gates.
+- **10-17 F1 RE correction:** camera +0x50 is positive `gCameraPos`; its XOR builds negative view translation. See the new F1 proposal in the [flat AA design](design-flat-temporal-aa-2026-09-23.md).
+  Selected source/frame epoch and per-write upload identity remain validation gates.
+  Other milestones supplement the [architecture review](review-flat-temporal-aa-2026-09-26.md).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -738,7 +738,7 @@ camera+0x20, so helper+X is camera+(X+0x20):
 | Region (camera-relative) | Content | Built from | Finalizer | Dirty bit |
 | --- | --- | --- | --- | --- |
 | +0x20..+0x4C | source 3x4 view axes | authoritative input | -- | -- |
-| +0x50/+0x54/+0x58 | source camera origin (stored negated) | authoritative input | -- | -- |
+| +0x50/+0x54/+0x58 | source camera position (positive XYZ; corrected 2026-10-17) | authoritative input | -- | -- |
 | +0x190..+0x1CC | view rows (axes + translation row) | axes + origin | FUN_1404f4910 (or inline inside FUN_1404f49f0) | bit 2 |
 | +0x1D0..+0x20C | projection 4x4 | frustum parameters below | FUN_1404f2ff0 | bit 4 |
 | +0x210..+0x24C | view-projection 4x4 (cached) | view rows x projection | FUN_1404f49f0 | bit 8 |

@@ -1,7 +1,7 @@
 #pragma once
 // Build-specific, bounded capture of the KinematicRig render-record evaluator
-// (FUN_14430EFE0, RVA 0x430EFE0) and a QPC bracket around the Kinematic job
-// bodies, plus a rig-link capture on FUN_14431AFE0 (RVA 0x431AFE0): the
+// (FUN_144311CA0, RVA 0x4311CA0) and a QPC bracket around the Kinematic job
+// bodies, plus a rig-link capture on FUN_14431DCE0 (RVA 0x431DCE0): the
 // direct rig -> *(rig+0x348) collection link the job descriptor cannot give,
 // joined against the ownership capture at dump time.
 // Feeds docs/settlement-flicker-2026-09-17.md's next-flight spec:
@@ -22,27 +22,27 @@ namespace edvr {
 
 class KinematicEvalProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1788384820u;
-    static constexpr uint32_t kExpectedImageSize=104894464u;
-    static constexpr uintptr_t kEvalRva=0x430EFE0u;
+    static constexpr uint32_t kExpectedTimestamp=1791840573u;
+    static constexpr uint32_t kExpectedImageSize=104906752u;
+    static constexpr uintptr_t kEvalRva=0x4311CA0u;
     static constexpr uint32_t kRecordCap=4096u;
     static constexpr uint32_t kTransitionCap=8192u;
     static constexpr uint32_t kVtableCap=128u;
     static constexpr uint32_t kJobCount=6u;
     static constexpr uint32_t kOwnershipCap=64u;
-    static constexpr uintptr_t kRigEvalRva=0x431AFE0u;
+    static constexpr uintptr_t kRigEvalRva=0x431DCE0u;
     static constexpr uint32_t kRigLinkCap=256u;
-    // Per-rig draw-item builder FUN_1442B4420 (decomp_42B4420.txt): appends
+    // Per-rig draw-item builder FUN_1442B70E0 (decomp_42B4420.txt): appends
     // 0x150-byte items to per-bucket lists (bucket = *(model+0x20)), counting
     // each append at bucket+0x2A4. The census-join hook site (perf arc).
-    static constexpr uintptr_t kBucketBuildRva=0x42B4420u;
+    static constexpr uintptr_t kBucketBuildRva=0x42B70E0u;
     // The two DIRECT producers of the same bucket lists: the bucket arrives
     // as param_2, so their brackets skip the entry walk and read param_2+0x2A4
-    // directly. 0 = FUN_144312E00 (decomp_4312E00.txt; the collection batch's
-    // second item class via FUN_144312040; FUN_14431305C is inside it).
-    // 1 = FUN_14369C9C0 (decomp_369C9C0.txt; FUN_1436A0F50's four call
+    // directly. 0 = FUN_144315AC0 (decomp_4312E00.txt; the collection batch's
+    // second item class via FUN_144314D00; FUN_144315D1C is inside it).
+    // 1 = FUN_14369F6C0 (decomp_369C9C0.txt; FUN_1436A3C50's four call
     // sites -- the non-eye passes' builder family).
-    static constexpr uintptr_t kDirectBuildRvas[2]={0x4312E00u,0x369C9C0u};
+    static constexpr uintptr_t kDirectBuildRvas[2]={0x4315AC0u,0x369F6C0u};
     static constexpr uint32_t kDirectProducerCount=2u;
     // Sized to cover a full capture window's mover demand: 31,514 samples
     // measured on flight 094158. 24 B/sample => ~768 KB, fine for a
@@ -110,7 +110,7 @@ public:
         uint32_t ownerState=0,jobId=0,firstFrame=0;
         uint64_t hits=0;
     };
-    // One row per distinct rig seen at FUN_14431AFE0 entry (rig = param_1,
+    // One row per distinct rig seen at FUN_14431DCE0 entry (rig = param_1,
     // pose context = param_2). collection = *(rig+0x348): the direct
     // rig -> collection link the job descriptor cannot give. The dump joins
     // each row's collection against the ownership capture.
@@ -182,7 +182,7 @@ public:
     // Called at job-body entry for jobs 0 (descriptor arg; collection =
     // read64(arg+0x10)-0x300) and 1 (collection arg) before the timed bracket.
     void noteOwnership(uint32_t jobId,uintptr_t arg) noexcept;
-    // Called at FUN_14431AFE0 entry: rig = param_1, pose context = param_2.
+    // Called at FUN_14431DCE0 entry: rig = param_1, pose context = param_2.
     void noteRigLink(uintptr_t rig,uintptr_t poseCtx) noexcept;
     // The job-2 bracket reads the physics dirty-queue append counter at job
     // entry and exit (descriptor +0x18 points at it; decomp_432B2A0,
@@ -200,7 +200,7 @@ public:
     // total == nodes-in-ring + overflow. Same per-session discipline as
     // notePhysQueue: never gated on active(), NOT cleared by clearLocked.
     void notePhysNodes(const uint64_t* nodes,uint32_t count,uint32_t overflow) noexcept;
-    // The draw-item-builder bracket (FUN_1442B4420) reads each touched
+    // The draw-item-builder bracket (FUN_1442B70E0) reads each touched
     // bucket's item counter (bucket+0x2A4) at entry and exit; buckets is the
     // deduped set size, items the summed positive deltas, negDeltas the
     // buckets whose counter fell (mid-call drain). flags: bit0 the entry

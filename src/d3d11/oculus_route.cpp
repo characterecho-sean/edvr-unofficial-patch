@@ -8,6 +8,7 @@
 #include "../common/elite_oculus_profile.h"
 
 #include "../common/log.h"
+#include "../common/proxy.h"
 
 namespace edvr {
 namespace {
@@ -79,7 +80,6 @@ std::atomic<uint32_t> g_reportInitialized{0};
 std::atomic<uint32_t> g_criticalRejectionReported{0};
 std::atomic<uint32_t> g_reporting{0};
 std::atomic<uint32_t> g_eliteProcess{0};
-std::atomic<uint32_t> g_startupFailure{0};
 
 // These two values are written before publishing g_installed and are only
 // read for a status snapshot or after the slot has been restored.  The atomics
@@ -323,6 +323,11 @@ HMODULE WINAPI oculusRouteLoadLibraryW(LPCWSTR path) {
 
 }  // namespace
 
+HMODULE oculusRouteDispatchFrom(LPCWSTR path, uintptr_t returnAddress,
+                                HMODULE (WINAPI* forward)(LPCWSTR)) {
+    return routeDispatch(path, returnAddress, forward);
+}
+
 void oculusRouteInstallEarly(bool nativeBuild) {
     saturatingIncrement(g_installAttempts);
     if (nativeBuild) {
@@ -360,8 +365,7 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     if (!known || !match.loadLibrarySlot || !match.callerReturnRva) {
         saturatingIncrement(g_installFailures);
         if(g_eliteProcess.load(std::memory_order_acquire)) {
-            g_startupFailure.store(1,std::memory_order_release);
-            OutputDebugStringA("EDVR native startup refused: Elite Oculus profile/IAT hook unavailable\n");
+            OutputDebugStringA("EDVR Oculus route not installed: Elite Oculus profile/IAT hook unavailable\n");
         }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
@@ -372,8 +376,7 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     if (!current || current == reinterpret_cast<void*>(&oculusRouteLoadLibraryW)) {
         saturatingIncrement(g_installFailures);
         if(g_eliteProcess.load(std::memory_order_acquire)) {
-            g_startupFailure.store(1,std::memory_order_release);
-            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT target unavailable\n");
+            OutputDebugStringA("EDVR Oculus route not installed: Elite Oculus IAT target unavailable\n");
         }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
@@ -397,8 +400,7 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     if (!VirtualProtect(match.loadLibrarySlot, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
         saturatingIncrement(g_installFailures);
         if(g_eliteProcess.load(std::memory_order_acquire)) {
-            g_startupFailure.store(1,std::memory_order_release);
-            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT protection failed\n");
+            OutputDebugStringA("EDVR Oculus route not installed: Elite Oculus IAT protection failed\n");
         }
         g_routingReady.store(0, std::memory_order_release);
         setDecision(kDecisionInstallFailure);
@@ -420,8 +422,7 @@ void oculusRouteInstallEarly(bool nativeBuild) {
         saturatingIncrement(g_publicationRaces);
         saturatingIncrement(g_installFailures);
         if(g_eliteProcess.load(std::memory_order_acquire)) {
-            g_startupFailure.store(1,std::memory_order_release);
-            OutputDebugStringA("EDVR native startup refused: Elite Oculus IAT publication raced\n");
+            OutputDebugStringA("EDVR Oculus route not installed: Elite Oculus IAT publication raced\n");
         }
         setDecision(kDecisionInstallFailure);
         releaseInstall();
@@ -437,11 +438,6 @@ void oculusRouteInstallEarly(bool nativeBuild) {
     g_installed.store(1, std::memory_order_release);
     setDecision(kDecisionNone);
     releaseInstall();
-}
-
-bool oculusRouteProcessAttachAllowed() noexcept {
-    return !g_eliteProcess.load(std::memory_order_acquire)||
-           !g_startupFailure.load(std::memory_order_acquire);
 }
 
 void oculusRouteUninstallEarly() {
@@ -569,6 +565,15 @@ void oculusRouteReport() {
                         s.malformedName, s.nearName, s.installFailures,
                         s.publicationRaces, s.noOriginal, s.lastDecision, s.lastError,
                         s.reportLimitReached);
+#if !defined(EDVR_OCULUS_ROUTE_TEST)
+        // The build string comes from proxy.cpp, which the route test rig does not link.
+        if (first && g_eliteProcess.load(std::memory_order_acquire) && s.nativeBuild &&
+            !s.installed && s.lastDecision == kDecisionInstallFailure) {
+            const std::string build = gameBuildVersion();
+            Log::get().note("oculus route: not installed on game build %s (profile known=%u, failure stage %u). The game starts normally. With the Oculus PC runtime installed, Elite may open it directly and bypass EDVR's OpenXR runtime until an EDVR update carries a profile for this build; SteamVR, other OpenXR runtimes and the flat profile are unaffected.",
+                            build.empty() ? "unknown" : build.c_str(), s.profileKnown, s.profileFailureStage);
+        }
+#endif
     }
     g_reporting.store(0, std::memory_order_release);
 }
@@ -622,7 +627,6 @@ void oculusRouteTestReset() {
     g_reporting.store(0, std::memory_order_relaxed);
     g_lastCallerReturnRva.store(0, std::memory_order_relaxed);
     g_eliteProcess.store(0, std::memory_order_relaxed);
-    g_startupFailure.store(0, std::memory_order_relaxed);
 #if defined(EDVR_OCULUS_ROUTE_TEST)
     g_testEliteProcessConfigured.store(0, std::memory_order_relaxed);
     g_testEliteProcess.store(0, std::memory_order_relaxed);

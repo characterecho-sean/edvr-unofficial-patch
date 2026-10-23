@@ -8,59 +8,38 @@ block first.
 - **Removed 2026-10-08 (branch claude/remove-settlement-detail):**
   `fix.settlement_detail` no longer exists, so the "set it to game" steps
   below are moot and an old line is carried over as a retired setting.
-- **State (2026-09-30):** one open report, user 5: v0.18.0-rc.4 (build
-  6ABC3FAC) in VR on Windows 10, WMR's OpenXR runtime at 60 Hz (2048x2556
-  per eye), RTX 3080 10 GB, DLSS preset K at HMD Quality 0.85,
-  fix.ui_quality 100, fix.settlement_detail auto, no wrapper. Three of
-  four sessions in 28 minutes crashed. The user says it happens only with
-  EDVR installed, on stock clocks and the latest driver. EDVR has never
-  been flown on Windows 10 or on WMR (Sean runs Windows 11 26200).
-- **The crashes:**
-  - A, 73 s in: EliteDangerous64.exe +0x4F96D9, a read of -1. The stack's
-    +0x288936A is in the code region that creates panel render-to-texture
-    surfaces, which fix.ui_quality's panel patch sizes.
-  - C, 22 s in, at the main menu: the game's device went
-    DXGI_ERROR_DEVICE_HUNG within 0.4 s of normal frames. That is a GPU
-    fault blamed on the device that carries EDVR's passes, not a 2 s
-    timeout. Elite then aborted (+0x34C9322).
-  - D, 5 minutes in: an access violation (read of -1) in nvgpucomp64.dll,
-    NVIDIA's shader compiler, on a non-render thread. The ~600 ms freezes
-    after it are aftermath, not a hang.
-  - B: 20 minutes, clean exit.
-- **Hypotheses, ranked:**
-  1. The platform: Windows 10 WDDM 2.x, WMR and the NVIDIA driver, under
-     EDVR's GPU work (C, D, perhaps A).
-  2. NGX preset K on Ampere (C).
-  3. EDVR's shader variants against the NVIDIA compiler. EDVR's lazily
-     created shaders, and game pixel shaders sent to other render-target
-     formats and blends, force new driver compiles (D).
-  4. The depth probe, by timing only: it was active just before C and D,
-     but harmless at every start and resize.
-  5. Code patches in game code: fix.ui_quality's panel patch (A's stack)
-     and the settlement governor's hooks (`auto`).
-  6. VRAM on 10 GB, and the two-device keyed-mutex transfer (both weak).
-- **Ruled out:**
-  - An RTV/DSV size mismatch after a resize. ui_layer.cpp binds a layer
-    depth-stencil only at the layer's size; the 2048x2556 one in the
-    17:22:41 memory line was stale and unused.
-  - GPU work sized by game data: EDVR's shader loop bounds are constant or
-    set by EDVR.
-- **Windows 10:** src has no GPU-priority, D3DKMT, HAGS, OS- or
-  WDDM-version, or waitable-timer code, and every interface it uses exists
-  on Windows 10. Only the stack under EDVR differs.
-- **Next:**
-  - Ask the user for: Event Viewer entries at 17:17:51 and 17:23:20
-    (Display 4101, nvlddmkm, WHEA); the exact driver and Windows build;
-    whether HAGS is on; any overlays; whether the NVIDIA App's DLSS
-    override is on.
-  - Then one floor session: 20 minutes on a fixed route (main menu 60 s,
-    continue, dock, launch, one jump), with fix.temporal_aa off,
-    fix.ui_quality off and fix.settlement_detail game, all set before
-    launch.
-  - If the floor is clean, add back FSR, then DLSS, then UI quality 100,
-    one leg each.
-  - If the floor crashes, set edvr_openxr.ini frame_end_overlap off, then
-    try HAGS, then an EDVR-free control.
+- **State (2026-09-30, user 5):** open Windows 10/WMR report on v0.18.0-rc.4,
+  RTX 3080 10 GB, DLSS K, HMD quality 0.85, UI quality 100; 3/4 sessions
+  crashed. Cases include a panel-creation game AV, a menu
+  `DEVICE_HUNG`, and a later NVIDIA shader-compiler AV. Ruled out: RTV/DSV
+  size mismatch and game-sized EDVR shader loops. Floor test and follow-up
+  asks are in that entry below; no result reported yet.
+- **State (2026-10-17, anonymous reporter):** separate OpenXR/SteamVR
+  report on v0.20.0-rc.2, RTX 4080 SUPER 16 GB, 144 Hz, per-eye input
+  1622², output 3244², UI 4055² at quality 125 in the first flight;
+  `fix.temporal_aa=dlss`, model K,
+  optimized stations and witchspace stars on, panel curvature 0.2. Driver,
+  Windows build and DLSS DLL version unknown. At 11:29:15.331 the game got
+  `DEVICE_REMOVED` (`0x887A0005`) and removal reason `DEVICE_HUNG`
+  (`0x887A0006`); game fatal-handler breadcrumb followed. Evidence and
+  limits are in the dated entry. No C++ fix is supported.
+- **Second flight (2026-10-17):** same release and DLSS, with only
+  `fix.ui_quality` reduced from 125 to 100 (UI layer 3244²). Near a planet,
+  Elite likely reached the same fatal HRESULT path at about 11:45:36.075 local.
+  Raw stack values suggest device loss, but this run has no refused-create
+  line or removal reason: `DEVICE_HUNG` is unconfirmed. Planet patch motion
+  was gated off in completed windows through 11:45:32; the final seconds
+  are unreported. The short sentinel-recovery launch is not a control.
+- **Next for 2026-10-17:** request driver, Windows build, DLSS DLL version,
+  and Event Viewer/Reliability Monitor evidence around 15:29:15 and
+  15:45:36 UTC. First discriminating test: same release DLLs, route,
+  resolution, HMD quality and UI quality 100; switch only
+  `fix.temporal_aa=fsr`.
+  Count it as valid only with `temporal aa: fsr 3.1.2 engaged` and the
+  1622²→3244² sizing in the log. A repeat of the fatal path with FSR
+  weakens NGX as a necessary cause; one clean leg weakly supports NGX.
+- **Next for 2026-09-30:** request the listed OS/driver and event evidence,
+  then follow the floor and staged FSR/DLSS/UI tests below.
 
 ## 2026-09-30, user 5
 
@@ -95,7 +74,7 @@ thread inside CreatePixelShader) is unknown. Decisive check: no Display
 
 ### Causes
 
-The numbers follow the Status ranking.
+The numbers rank the causes in this report's table below.
 
 | # | Cause | For and against | Explains |
 |---|---|---|---|
@@ -181,3 +160,129 @@ One sitting, stop at the first crash. A clean leg is 20-25 min with no
    for TDRs also `C:\Windows\LiveKernelReports\WATCHDOG`.
 6. Was session B's ini identical, do older logs exist, and how did the
    EDVR-free control run (SteamVR/WMR, which HMD Quality)?
+
+## 2026-10-17, anonymous reporter
+
+Archive `edvr-logs-20261017-113038.zip`; extracted analysis is in
+`analysis/hyperspace-crash-2026-10-17`. The report's 11:29 local time is
+15:29:15 UTC; do not reinterpret it using the maintainer's timezone. The
+game log identifies SteamVR/OpenXR runtime `563027262832644`, headset
+`SteamVR/OpenXR : cv` (model unknown), 144 Hz, 1622² per-eye input, 3244²
+output and 4055² UI. The reported GPU is RTX 4080 SUPER 16 GB. Settings:
+`fix.temporal_aa=dlss`, model K, optimized stations and witchspace stars on, panel
+curvature 0.2, UI quality 125. Windows/driver/DLSS DLL versions were not
+recorded.
+
+Actual release identity is v0.20.0-rc.2, PE `6AD165AB`, linked
+2026-10-15 23:45:47 UTC, tag commit `f2b99bdf`. `edvr_log.py
+--expect-build HEAD` accepts the bare tag, but this is not current HEAD
+at analysis checkout `fbb391a2`. The latest breadcrumb at tick 90268468 is this report's final
+crash; earlier records in that file belong to historical sessions and must
+not be combined with it.
+
+At 11:29:15.331, CreateShaderResourceView failed for view format 21,
+dimension 4 (`D3D11_SRV_DIMENSION_TEXTURE2D`),
+over the 1622² resource in format 19 with bind `0x48`; an 8-byte
+CreateBuffer also failed. Both report `DEVICE_REMOVED` `0x887A0005`, and
+the subsequent removal-reason query reports `DEVICE_HUNG` `0x887A0006`.
+The wrappers forward unchanged and log after failure
+(`device_hook.cpp:970-1065`), so these are witnesses after device loss,
+not causal descriptors; the depth formats are compatible. The latest
+game breadcrumb is C0000005 write at zero in Elite's fatal handler
+`+0x34C9322`, with stack `+0x48C1CF0`, `+0x489F868`, `+0x5216CC`,
+`+0x50EC00`, etc. Treat that abort as aftermath of device failure, not an
+original CPU null-write diagnosis.
+
+Last reported VRAM was 8135/15279 MB (53.2%) at 11:29:13.434. The last
+depth-probe readback sampling line was at 11:29:15.284; the last luma-probe
+line reporting DLSS output was at 11:29:14.820.
+Neither timestamps the GPU's precise last progress. Recent normal logs do
+not expose hung duration. No evidence establishes a 2-second TDR or
+GPU overload, and one VRAM sample cannot fully exclude pressure.
+Microsoft defines [`DXGI_ERROR_DEVICE_HUNG`](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/dxgi-error)
+as badly formed command submission; the offending command is unknown and
+EDVR is not exonerated.
+
+The last logged transition hold began at 11:26:52.890/.896, over two
+minutes before the crash; no hold appears close to it. `StartJump` and
+`FSDJump` silently arm/clear state (`journal_watch.cpp:359-390`), so the
+absence of a jump line proves nothing about a jump. Report timing is the
+user's description only. Ruled out: treating the fatal-handler null write
+as the original CPU bug, because it follows device failure. Ruled out:
+an immediate OOM API error, which was not observed; memory pressure is
+not fully ruled out.
+
+Open hypotheses are NGX-specific failure, a common EDVR motion/UI GPU
+path, or game/driver/runtime interaction. First test: keep the same release
+DLLs, resolution, HMD/UI quality and other settings, and switch only
+`fix.temporal_aa` to FSR. The release's native temporal path uses the same
+DLSS/FSR sizing (`native_temporal` lines 170-173). A valid A/B must log
+`temporal aa: fsr 3.1.2 engaged` and 1622²→3244²; fallback text saying FSR
+was asked for but its own history was used is invalid. If `DEVICE_HUNG`
+recurs with engaged FSR, NGX is not necessary. A clean FSR leg is only
+weak support for NGX; then isolate the common path in a later test.
+
+Ask the reporter for the NVIDIA driver, Windows build, DLSS DLL version,
+and Event Viewer Display/nvlddmkm plus Reliability Monitor LiveKernelEvent
+141/117 at 17 October 11:29:15 local (15:29:15 UTC). The new star fix
+`fd84c7ac` is not a crash fix; launch fixes in `769c1a7f` have an unrelated
+signature.
+
+## 2026-10-17, anonymous reporter: second flight near a planet
+
+Archive `edvr-logs-20261017-114758.zip` is extracted at
+`analysis/planet-crash-2026-10-17-114758`. The flight is graphics log
+`edvr_gfx_20261017_113449.log` with runtime log
+`edvr_openxr_20261017_113452_273_26788.log`. It used the same original
+v0.20.0-rc.2 DLL (PE `6AD165AB`), RTX 4080 SUPER, SteamVR at 144 Hz,
+1622² per-eye input and 3244² output. The only ini change from the first
+bundle was `fix.ui_quality=125` to `100`: the reported UI layer was
+3244² rather than 4055². DLSS preset K remained active; the 11:45:28.640
+price report gives full-frame NGX a 3.74 ms median per stereo pair across
+600 pairs.
+Last reported local VRAM was 7238/15279 MB (47.4%) at 11:45:26.005.
+
+The final breadcrumb, tick 91249218, records `C0000005` writing zero in
+Elite's `+0x34C9322` fatal handler. Proper unwind begins at game offsets
+`+0x48C1CF0`, `+0x489F868`, `+0x5216CC`, then `+0x50F3F9`, `+0x51ECD8`,
+`+0x5928C4`, `+0x200DC2`. The first three unwind frames match the prior flight's
+fatal HRESULT path. Two raw-stack words are `0x887A0005`
+(`DEVICE_REMOVED`) and one is `0x887A0001` (`INVALID_CALL`) in the same
+layout as that flight. Raw stack is circumstantial: this is probably the
+same device-loss/fatal-HRESULT class, but the whole graphics log has no
+`D3D11 REFUSED` line or removal-reason query. The game-device create hooks
+log only intercepted failed creates on the captured device, at most 12
+per session (`device_hook.cpp:901-903,1053-1084,2671-2688`). Absence of
+that line cannot prove the device stayed healthy. In this run, specifically,
+`DEVICE_HUNG` is unknown, as is the failing GPU command.
+
+Anchoring breadcrumb tick 90602640 to the first graphics log line at
+11:34:49.497 places the crash at about 11:45:36.075 local (±20 ms).
+The last luma-probe line reporting DLSS output was 11:45:36.061;
+these readings do not mark the GPU's last progress.
+The runtime's `compositor_unavailable,slot=7` at 15:45:36.083 UTC says
+`PostPresentHandoff` failed, with several possible unavailable-state
+paths (`openvr_compositor.cpp:154-159`, `native_runtime_host.h:1871-1904`);
+it is not a device-removal reason. The last graphics line, 11:45:36.794,
+samples `dbgcore.DLL` during Elite's dump writing, about 719 ms after
+the estimated crash. Its `d3d11.dll` frame is in the exception-filter
+chain (`proxy.cpp:352-374`), not evidence of the initiating render call.
+
+The completed five-second planet patch-motion windows through
+11:45:32.364 were all gated off because Status did not say supercruise:
+no patch capture, records or temporal decision-path-12 pixels in those
+windows (`celestial_motion.cpp:465-470`). The 11:45:20 GPU census also
+prints `planet -`. The final roughly 3.7 seconds have no completed
+five-second report, and these lines say nothing about other planet fixes.
+The reporter described the scene as near a planet; that does not identify
+an active planet-motion pass or a crash cause.
+
+The earlier short graphics log, `edvr_gfx_20261017_113352.log`, says
+`SENTINEL TRIPPED` and disables graphics fixes for that launch. Its runtime
+reports `graphics_unavailable=80004002` and a clean module shutdown; the
+graphics breadcrumb records process exit at tick 90563406. It is neither
+a second crash nor an EDVR-free or FSR control. Reducing UI quality to
+100 did not prevent the fatal path, but FSR has still not been tested.
+Keep UI quality 100 for the next single-change FSR flight described in
+Status. NGX-specific failure, common EDVR motion/UI GPU work, and a
+game/driver/runtime interaction remain open; no C++ fix is supported.

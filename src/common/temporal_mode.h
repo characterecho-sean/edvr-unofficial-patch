@@ -26,15 +26,13 @@ struct TemporalPresetSelection {
     unsigned full = 11;
     bool known = true;
 };
-// Shared model names; feature creation still applies the backend's DLAA guard.
+// Shared model names; feature creation still applies the backend's DLAA guard. J (and its
+// legacy alias responsive) and the driver's own choice (auto, default) were removed
+// 2026-10-21: they are unknown now and run K like any other unknown name.
 inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
     if (_stricmp(model.c_str(), "k") == 0 || _stricmp(model.c_str(), "quality") == 0 ||
         _stricmp(model.c_str(), "steady") == 0)
         return {11, true};
-    if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0)
-        return {0, true};
-    if (_stricmp(model.c_str(), "j") == 0 || _stricmp(model.c_str(), "responsive") == 0)
-        return {10, true};
     if (_stricmp(model.c_str(), "l") == 0) return {12, true};
     if (_stricmp(model.c_str(), "m") == 0) return {13, true};
     return {11, model.empty()};

@@ -2,6 +2,15 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
+These notes include the maintainer's workflow. In a fork or contributor's
+clone, follow the project rules for tools, build validation, diagnosis and
+config editing. Use your own shell and Git workflow, and submit changes by
+pull request. The Git section, release-notes rules, and maintainer-only
+merge, push-to-main, tag, release and workflow-dispatch steps elsewhere in
+this file do not apply to contributors. The host-specific validation paths
+still apply: native Windows uses the full local build, and other hosts use
+the full Windows workflow for C++ changes.
+
 Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
 (`d3d11.dll` beside the game) and EDVR's own OpenXR runtime for
 Elite (`openvr_api.dll` in `Openvr\win64`), a config file, and an
@@ -55,7 +64,7 @@ session averaged 427k tokens per call and never compacted.
 
 ## The sanctioned tools
 
-These five operations go through `tools\`, and **only** through `tools\`.
+These operations go through `tools\`, and **only** through `tools\`.
 Each was an ad-hoc one-liner retyped once a session for a month; the
 evidence is the dozens of backups in both game directories named six
 different ways, and a live `edvr.ini` a stray PowerShell anchor once
@@ -68,6 +77,7 @@ corrupted. Do not regenerate the one-liner — extend the script.
 | Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`) | `Get-Content -Tail` + `Select-String` |
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
+| Make a worktree that can build | `python tools\worktree.py add <path>` | `git worktree add` alone (no deps) |
 
 Every release's notes carry a `## Thanks` section built from
 `release_credits.py --thanks` and finished by hand. It names only the authors
@@ -123,8 +133,95 @@ minutes after a flight finally reproduced the effect being chased.
 
 ## Build and verify before commit
 
-- **Every C++ edit compiles before you report it as done.** Run the full
-  `build.bat` by absolute path and read the tail of its output.
+- **Choose the validation path by host.** On native Windows, every C++
+  edit gets the full local validation build before commit: launch the
+  full absolute path to `build.bat --wait-lock` and read the tail of its
+  output. The GitHub workflow is optional there. From Linux or another
+  non-native Windows host, use the GitHub Windows workflow below for
+  full C++ validation. Wine and Proton do not count as native Windows.
+- From this Linux checkout, the Git-ignored pinned compiler, SDK and
+  Wine prefix are under `.toolchains/windows/`. From a shell, invoke its
+  PowerShell wrapper directly:
+
+  ```text
+  /home/deck/projects/edvr-unofficial-patch/.toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py doctor"
+  ```
+
+  In PowerShell, from this repository root:
+
+  ```powershell
+  python3 .toolchains/windows/toolchain.py doctor
+  python3 .toolchains/windows/toolchain.py build-dlls
+  ```
+
+  `doctor` checks the pinned setup; `build-dlls` is compile-only: it
+  writes `.toolchains/windows/compile-build/`, skips validation gates
+  and does not create a full-build receipt. Its shared toolchain root is
+  this original checkout; do not pass `--repo` or assume it builds a
+  worktree. For worktrees, use the GitHub full-validation path. The
+  local full `build` command currently fails Wine's process/window test
+  gates; do not bypass those gates or use compile-only outputs as
+  release assets. See `.toolchains/windows/README.md` for setup and
+  limits.
+- **Linux test flight (Steam Deck, Proton): a compile-only build.** For a
+  build Sean will fly, CI first is not required; CI is for a merge or
+  release. Commit to the branch before compiling: a dirty tree compiles as
+  `vX.Y.Z-dirty`, which `edvr_log.py --expect-build HEAD` will not match.
+  Close Elite, then:
+
+  ```bash
+  .toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py build-dlls"
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --dry-run
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --verify-only
+  python3 tools/edvr_log.py --target steam --expect-build HEAD --version
+  ```
+
+  `--target steam` finds the game on Linux (`tools/steam_library.py`:
+  `~/.local/share/Steam`, `~/.steam/steam`, then every library in
+  `libraryfolders.vdf`). `--compile-only` installs from
+  `.toolchains/windows/compile-build/` instead of `build/`, and refuses
+  without that build's `compile_only_receipt.json`, when an output no longer
+  matches it, or when the tree has been edited or committed since (it asks
+  `compile_only.py` for the fingerprint, so the two cannot disagree). It
+  prints that the build is not Windows validated and writes `"build":
+  "compile-only"` into the install receipt; `--verify-only` compares the game
+  directory to that build and only warns about a moved tree. A real install
+  runs under the host `python3`, which checks `/proc` for a running
+  `EliteDangerous6*` (Proton); do not run it through the Wine Python, which
+  cannot see Proton's processes and passes that check vacuously. The toolchain
+  compiles the checkout it lives in; to fly a worktree, compile with
+  `build-dlls --root <worktree>` (output `<worktree>/build/compile-build`)
+  and install with `--root <worktree> --compile-only`. `--root` is a local
+  change to the device-local `compile_only.py`, and a copy without it refuses
+  the flag: test-fly from the main checkout there. `tools/worktree.py` makes
+  junctions and is Windows-only; on Linux symlink the ignored `third_party`
+  folders from the main checkout by hand.
+- For C++ changes on a non-native host, commit and push the candidate
+  branch so Actions can validate that exact commit. The `release.yml`
+  workflow is active on `main`; dispatch it with `gh workflow run
+  release.yml --ref <branch>` (a push to `codex/release-*` already
+  triggers the full build and package path, so do not dispatch a
+  duplicate run). Find the branch run with `gh run list --workflow
+  release.yml --branch <branch>`, verify its `headSha` matches the
+  candidate with `gh run view <run-id> --json headSha`, then require `gh
+  run watch <run-id> --exit-status` to pass before merging or releasing.
+  This commit-before-CI order is necessary for remote validation; native
+  Windows keeps the full-build-before-commit order above. Read the full
+  job log and `edvr-diagnostics-<run-id>-<attempt>` on failure; on
+  success inspect `edvr-build-<run-id>-<attempt>` and
+  `edvr-packages-<run-id>-<attempt>`. Branch proof packages use a
+  runner-local CI tag (or an exact existing tag) and are not release
+  assets. See `docs/building.md` for the download, checksum and release
+  commands.
+- For an actual release from a non-native host, merge the validated
+  source, push the exact clean `vX.Y.Z` tag, and require that tag's full
+  Windows build and package run to pass. Download and verify all three
+  ZIPs with `SHA256SUMS`, generate and review release notes including
+  `release_credits.py`'s `## Thanks` section, then create a draft
+  release; publication remains an explicit step. On native Windows, the
+  full local build and `package.bat <version>` at the clean version tag
+  are sufficient; GitHub Actions is not required.
 - **One build at a time on this machine.** Run `build.bat --wait-lock` by
   absolute path: it waits for any other build to finish and then takes the
   lock and builds in one step. A bare `build.bat` that finds another build
@@ -143,19 +240,20 @@ minutes after a flight finally reproduced the effect being chased.
   `build.bat --clean` or `EDVR_NO_COMPILE_CACHE=1` forces full recompiles.
   System and SDK headers are covered only by the `INCLUDE` path and the
   compiler's identity, not by content.
-- After that full build, commit the same source tree. For the install-only
-  rebuild that gives the DLLs the clean commit's version, use
-  `build.bat --dll-only` by absolute path. It requires a clean working tree
-  and a matching full-build receipt, rebuilds and validates the production
-  DLLs, and skips the test rigs and self-contained installer. It is a
-  promotion step, never a substitute for validating changed source; if its
-  receipt check fails, run the full build again. The receipt fingerprints
-  tracked files, untracked files git does not ignore, and the ignored
-  dependency folders (`third_party\ngx`, `third_party\ffx-dx11`,
-  `third_party\openxr\loader`, `third_party\xess`); `docs\`, `reviews\` and
-  other ignored paths
-  are not inputs, so writing a review or a doc does not stale it
-  (`tools\build_receipt.py` states the rule and its self-test pins it).
+- On native Windows, after that full build, commit the same source tree.
+  For the install-only rebuild that gives the DLLs the clean commit's
+  version, use `build.bat --dll-only` by absolute path. It requires a
+  clean working tree and a matching full-build receipt, rebuilds and
+  validates the production DLLs, and skips the test rigs and
+  self-contained installer. It is a promotion step, never a substitute
+  for validating changed source; if its receipt check fails, run the
+  full build again. The receipt fingerprints tracked files, untracked
+  files git does not ignore, and the ignored dependency folders
+  (`third_party\ngx`, `third_party\ffx-dx11`,
+  `third_party\openxr\loader`, `third_party\xess`); `docs\`, `reviews\`
+  and other ignored paths are not inputs, so writing a review or a doc
+  does not stale it (`tools\build_receipt.py` states the rule and its
+  self-test pins it).
 - After editing, re-read the changed region for the things that have bitten
   here: declaration order, a duplicated census or log string, a shader
   entry-point name collision that would silently disable a new instrument.
@@ -224,6 +322,24 @@ minutes after a flight finally reproduced the effect being chased.
   stash stack with the main checkout. Never use bare `git stash` / `git
   stash pop`.
 
+## Agent material
+
+Text addressed to agents rather than people stays where anyone can strip it
+from a clone without reading it: `AGENTS.md` and `CLAUDE.md` at the root,
+where the tools look for them, and everything else agent-only (handoff
+prompts, plans, task lists) under `.agents\`. All of it is `export-ignore`
+in `.gitattributes`, so `git archive` and GitHub's source zips leave it out.
+`tools\check_agent_material.py` checks recognized agent instruction and
+prompt paths for `export-ignore`, and rejects zero-width, bidi or tag
+characters in repository text. Placement of other agent-only material under
+`.agents\` is a rule for authors; filenames alone cannot identify every such
+file.
+
+- `docs\` is written for people and is not agent material, even where an
+  agent wrote it.
+- No agent-addressed text in source comments, commit messages or release
+  notes: none of them can be stripped.
+
 ## Layout
 
 | Path | What |
@@ -235,5 +351,6 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

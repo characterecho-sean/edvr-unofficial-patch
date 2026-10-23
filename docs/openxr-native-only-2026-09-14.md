@@ -1,5 +1,12 @@
 # Native-only release migration
 
+## Status
+
+- State: native-only OpenXR release shipped 2026-09-14. Since 2026-10-20 an unknown Elite build leaves the LibOVR route uninstalled, the game starts, and the gfx log names the build.
+- Open: no launch flight yet on game build 334473 (issue #120).
+- Ruled out: refusing to start on an unknown build. It made the game die at launch with no log.
+- Next flight: launch Elite on build 334473 with the Oculus PC runtime absent, then present. Confirm the menu appears and the gfx log has the "not installed on game build" line.
+
 Sean requested removal of backend fallback logic so every EDVR user moves to
 native OpenXR. Normal CLI installs, GUI installer resources and release ZIPs
 now require the native graphics/runtime pair and bundled Khronos OpenXR loader.
@@ -19,10 +26,12 @@ loader inside SteamVR or another headset vendor's installation.
   package. `--dll` and `--openvr` remain compatibility aliases for that same
   package. A fresh install does not require an original OpenVR DLL to run.
   Existing foreign graphics DLLs require the GUI installer's chaining logic.
-- Native startup refuses an identified Elite process if its audited LibOVR
-  routing hook cannot be established. The installer checks the supported
-  executable hash before writing. Unknown game revisions require an updated
-  profile; they do not enable a legacy backend.
+- Native startup leaves the LibOVR route uninstalled when an identified Elite
+  process's audited routing hook cannot be established. The game starts, and
+  the gfx log names the game build. The installer checks the supported
+  executable hash before writing and installs an unknown Odyssey revision
+  with a warning. Build-tied fixes, the route among them, stand down until an
+  updated profile; an unknown revision never enables a legacy backend.
 - A manual package in `Openvr\win64` works without `edvr_openxr.ini`: the
   runtime uses its sibling loader, the game's native graphics DLL and Windows
   runtime selection. A present invalid configuration fails explicitly.
@@ -94,3 +103,12 @@ Meta or VDXR selected, SteamVR should not be needed. The broader combined
 feature checklist remains in the [parity
 checkpoint](openxr-feature-parity-2026-09-14.md); experimental features and
 performance comparisons remain deferred.
+
+## 2026-10-20: unknown game builds start instead of refusing
+
+Elite game update 334473 made `DllMain` return FALSE when the Oculus route
+profile no longer matched the executable, so the game died at launch with no
+log (GitHub issue #120). A routing failure now leaves the LibOVR route
+uninstalled, lets the process start, and logs "oculus route: not installed on
+game build" once in the gfx log. There is still no legacy backend, and the
+flat profile and the OpenXR runtimes are unaffected.

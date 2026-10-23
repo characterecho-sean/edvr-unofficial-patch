@@ -991,10 +991,11 @@ void journalWatchConfigure() {
     // it sees the watcher active.
     g_v.active.store(true, std::memory_order_release);
     if (runtimeFlatProfile()) {
-        // The flat profile's one reader is the System Map's GuiFocus (journalFlatGuiFocus). The accessors above answer flat with
-        // the no-journal values, so this line is the only place the watcher says it runs there.
-        Log::get().note("journal: flat profile -- Status.json is read for the map's GuiFocus (temporal AA off on the maps). The journal's "
-                        "events are tailed but not used in flat.");
+        // The flat profile's readers are the System Map's GuiFocus (journalFlatGuiFocus) and the supercruise bit for the planet
+        // patch motion (journalFlatSupercruise). The accessors above answer flat with the no-journal values, so this line is the
+        // only place the watcher says it runs there.
+        Log::get().note("journal: flat profile -- Status.json is read for the map's GuiFocus (temporal AA off on the maps and the Full System Scanner) and for "
+                        "supercruise (planet patch motion). The journal's events are tailed but not used in flat.");
         return;
     }
     Log::get().note("journal: watching the game's own event stream for the "
@@ -1040,8 +1041,9 @@ void journalWatchTick() {
     applyPublished(latest);
 }
 
-// THE FLAT PROFILE. The watcher runs there for one reader: the System Map's
-// GuiFocus, through journalFlatGuiFocus below. Every other accessor answers in
+// THE FLAT PROFILE. The watcher runs there for two readers: the System Map's
+// GuiFocus (journalFlatGuiFocus) and the supercruise bit for planet patch
+// motion (journalFlatSupercruise), both below. Every other accessor answers in
 // flat with the value a stopped watcher gives (false, or 0), which is what the
 // flat consumers got before the watcher ran there, so none of them changes.
 bool journalWatchActive() { return !runtimeFlatProfile() && g_v.active.load(std::memory_order_acquire); }
@@ -1091,6 +1093,11 @@ bool journalHeldItemName(char* out, size_t cap) {
 void journalWatchSetEagerStatusOnFoot(bool eager) {
     if (g_eagerOnFoot.exchange(eager, std::memory_order_relaxed) == eager) return;
     if (Session* s = g_session.load(std::memory_order_acquire)) SetEvent(s->wake);
+}
+bool journalFlatSupercruise(bool* supercruise) {
+    if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.supercruiseKnown)) return false;
+    if (supercruise) *supercruise = peek(g_v.supercruise);
+    return true;
 }
 bool journalSupercruiseKnown() {
     return journalWatchActive() && peek(g_v.supercruiseKnown);
@@ -1154,6 +1161,7 @@ uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.st
 JournalRawStatus journalRawStatus() {
     JournalRawStatus r;
     r.active = g_v.active.load(std::memory_order_acquire);
+    r.gameplay = peek(g_v.gameplay);
     r.statusSamples = peek(g_v.statusSamples);
     r.guiKnown = peek(g_v.fssFocusKnown);
     r.gui = peek(g_v.guiFocus);

@@ -551,7 +551,7 @@ void runChain(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srcRaw) {
 
 void introUpscaleConfigure(Config& cfg) {
     const IntroVideoMode ivm =
-        introVideoParseFor(cfg.getString("fix.intro_video", "screen"), runtimeFlatProfile());
+        introVideoParseFor(cfg.getString("visual.intro_video", "screen"), runtimeFlatProfile());
     const Mode want = ivm.upscale == 2
                           ? Mode::kFsr
                           : (ivm.upscale == 1 ? Mode::kSharp : Mode::kOff);

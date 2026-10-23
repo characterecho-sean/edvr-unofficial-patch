@@ -28,8 +28,16 @@
 - Next flight: loading screen + Pilot's Handbook at SS 1.0 (FSR3, DLAA, DLSS): ghost gone? blank-scene-declined ~ frames?
   Also check a settlement / open-ground walk: source-free frames still treated (other-draws high, declined 0).
 - Ruled out: the flat UI layer (idle on these frames, docs\design-flat-ui-quality-2026-10-05.md).
+- 2026-10-21, SS 0.5 (960x600 -> 1920x1200, Arc B390, XeSS): the hologram is untreated by design (no motion source;
+  the game's own bilinear stretch is what shows), but the frames refuse for the wrong reason: every frame is
+  `conflicting-hdr-target-or-camera`, cause `image-copy-source`. The glow layer's additive copy (CFA91824/DFCBA0EC) is the
+  first write to the scene HDR, and the image-copy rule (flat_runtime_model.h, HDR image-copy branch) requires a prior
+  camera-bearing write. Sean chose a spatial pass: no-scene copy frames below native now get SMAA + EASU at the output
+  copy (163b0306, flat_noscene_spatial.h), also while stood down; FLOWN 2026-10-21 18:00 on 5ffb3644, "looks much better".
+- ruled out: blank-scene/no-scene as the cause of the SS 0.5 refusal, because image-copy-source preempts both.
 
 ## Journal
 
 - 2026-10-09: log read, instrument added (flat_runtime.cpp noteSourceFreeContent, log only; flat only).
 - 2026-10-09: b0f4020c flown, ghost gone (Sean). Open: confirm source-free frames in a settlement/open ground are still treated (blank-scene-declined ~ 0 there).
+- 2026-10-21: SS 0.5 loading census (edvr_gfx_20261021_165632, 16:57:57, build 786a1c80): refusal is image-copy-source, not blank-scene; no change made.

@@ -69,11 +69,11 @@ int main(int argc, char** argv) {
         const uint8_t pin[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
         uint8_t wrong[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x21};
         const uint32_t wantStamp = ecm::kExpectedTimestamp, wantSize = ecm::kExpectedImageSize;
-        check(pad::kReaderRva[0] == 0x12C3C20u && pad::kReaderRva[1] == 0x12CAF80u && pad::kReaderRva[2] == 0x12CADE0u &&
-                  pad::kReaderRva[3] == 0x12CB320u,
-              "the four reader RVAs are the build 332841 readers");
+        check(pad::kReaderRva[0] == 0x12C4D60u && pad::kReaderRva[1] == 0x12CC0C0u && pad::kReaderRva[2] == 0x12CBF20u &&
+                  pad::kReaderRva[3] == 0x12CC460u,
+              "the four reader RVAs are the build 334473 readers");
         check(pad::padInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kInstall,
-              "positive: build 332841's identity and the prologue pin install the reader");
+              "positive: build 334473's identity and the prologue pin install the reader");
         check(pad::padInstallDecision(true, wantStamp + 1, wantSize, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kWrongIdentity,
               "wrong stamp with the matching pin: refused (the identity comes first)");
         check(pad::padInstallDecision(true, wantStamp, wantSize + 4096, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kWrongIdentity,

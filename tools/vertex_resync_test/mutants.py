@@ -78,7 +78,7 @@ MUTANTS = [
       "a build with the right size and another timestamp passes the gate"),
     M("image-size-ignored", "V2", "core", [("return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize;", "return timestamp == kExpectedTimestamp;")],
       "a build with the right timestamp and another size passes the gate"),
-    M("rva-moved", "V2", "core", [("constexpr uintptr_t kFlushIaRva = 0x522A50u;", "constexpr uintptr_t kFlushIaRva = 0x522A51u;")], "the hook aims one byte into the function"),
+    M("rva-moved", "V2", "core", [("constexpr uintptr_t kFlushIaRva = 0x522BB0u;", "constexpr uintptr_t kFlushIaRva = 0x522A51u;")], "the hook aims one byte into the function"),
     # ---- V3: the instruments ----
     M("window-shortened", "V3", "core", [("constexpr uint64_t kWindowMs = 60000;", "constexpr uint64_t kWindowMs = 6000;")], "the running count is said every 6 s"),
     M("heartbeat-shortened", "V3", "core", [("constexpr uint64_t kHeartbeatMs = 600000;", "constexpr uint64_t kHeartbeatMs = 60000;")], "the heartbeat is said every minute"),
@@ -108,7 +108,7 @@ MUTANTS = [
     M("repair-never-run", "V4", "hook", [("    if (pso && desired && applied) {\n        vresync::Report r;", "    if (false) {\n        vresync::Report r;")],
       "the callback forwards without repairing"),
     M("prologue-unchecked", "V4", "hook", [("if (!sehCheckBytes(target, vresync::kFlushIaPrologue, vresync::kPrologueBytes)) {", "if (false) {")],
-      "a function whose prologue is not build 332841's is patched"),
+      "a function whose prologue is not build 334473's is patched"),
     M("refusal-retried", "V4", "hook", [("    if (!g_attempted.compare_exchange_strong(expected, true)) return;   // once, ever: a refusal is final\n", "")],
       "a second call tries again"),
     M("sighting-cap-dropped", "V4", "hook", [("if (!r.hasFirst || !g_sightings.take()) return;", "if (!r.hasFirst) return;")], "every repair writes a sighting line"),

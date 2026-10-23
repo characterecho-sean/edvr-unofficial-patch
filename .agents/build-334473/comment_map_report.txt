@@ -1,0 +1,199 @@
+Comment-only address map: 869fd706 (build 332841 -> 334473)
+Scope: src/ and tools/ files touched by 869fd706, minus tools/build_diff.py, tools/build_diff_targets.json and *.log fixtures (114 files scanned; 28 changed).
+Mapper: tools/build_diff.py map, cache analysis/build_map_332841_to_334473.cache.json. Usable statuses: IDENTICAL, RELOC-ONLY, XREF-EXACT, XREF-BRACKET.
+Rule: a token is a candidate only when it is an old-build address and the same token is on the same comment line of the parent (869fd706~1). Tokens 869fd706 introduced were skipped.
+
+## Applied: 167 replacements in 28 files (file:line  old -> new  status)
+src/d3d11/cull_gate_probe.cpp:44  DAT_144e2f8e0 -> DAT_144e32920  XREF-EXACT
+src/d3d11/cull_gate_probe.h:26  FUN_14288AC40 -> FUN_14288D280  IDENTICAL
+src/d3d11/cull_gate_probe.h:38  FUN_14433DB20 -> FUN_144340820  RELOC-ONLY
+src/d3d11/cull_gate_probe.h:123  0x1442B4B91 -> 0x1442B7851  RELOC-ONLY
+src/d3d11/engine_velocity_emit.h:14  0x144313195 -> 0x144315E55  RELOC-ONLY
+src/d3d11/engine_velocity_emit.h:14  0x144313191 -> 0x144315E51  RELOC-ONLY
+src/d3d11/engine_velocity_emit.h:476  DAT_4DDE614 -> DAT_4DE165C  XREF-EXACT
+src/d3d11/explorer_cam.cpp:1333  0x3DD61AF -> 0x3DD8E6F  RELOC-ONLY
+src/d3d11/explorer_cam.cpp:1333  0x3DD61A2 -> 0x3DD8E62  RELOC-ONLY
+src/d3d11/explorer_cam_core.h:40  0x10728B6 -> 0x10739B6  RELOC-ONLY
+src/d3d11/explorer_cam_core.h:98  0x102FA80 -> 0x1030CE0  RELOC-ONLY
+src/d3d11/explorer_cam_core.h:1488  0x3DA1E3B -> 0x3DA4AFB  RELOC-ONLY
+src/d3d11/explorer_cam_core.h:1489  0x3DA20DE -> 0x3DA4D9E  RELOC-ONLY
+src/d3d11/flat_camera_inject.cpp:37  FUN_1405921f0 -> FUN_140592350  IDENTICAL
+src/d3d11/flat_camera_inject.cpp:309  FUN_140594dc8 -> FUN_140594f28  IDENTICAL
+src/d3d11/kinematic_eval_hook.cpp:124  0x42DF520 -> 0x42E21E0  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:125  0x42DFAF0 -> 0x42E27B0  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:126  0x42DF540 -> 0x42E2200  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:129  0x42DFBA0 -> 0x42E2860  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:141  FUN_144899F50 -> FUN_14489CA90  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:159  FUN_144899f50 -> FUN_14489ca90  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:305  0x1442B4066 -> 0x1442B6D26  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:306  0x1442B4B91 -> 0x1442B7851  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:312  0x1442B4B91 -> 0x1442B7851  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:388  0x431B240 -> 0x431DF40  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:388  0x431B221 -> 0x431DF21  RELOC-ONLY
+src/d3d11/kinematic_eval_hook.cpp:390  0x431B017 -> 0x431DD17  IDENTICAL
+src/d3d11/kinematic_eval_hook.cpp:1084  DAT_145EFDD30 -> DAT_145F00D70  XREF-EXACT
+src/d3d11/kinematic_eval_hook.h:108  0x1442B4B91 -> 0x1442B7851  RELOC-ONLY
+src/d3d11/kinematic_eval_probe.cpp:12  0x42DF520 -> 0x42E21E0  RELOC-ONLY
+src/d3d11/kinematic_eval_probe.cpp:13  0x42DFAF0 -> 0x42E27B0  RELOC-ONLY
+src/d3d11/kinematic_eval_probe.cpp:14  0x42DF540 -> 0x42E2200  RELOC-ONLY
+src/d3d11/kinematic_eval_probe.cpp:17  0x42DFBA0 -> 0x42E2860  RELOC-ONLY
+src/d3d11/kinematic_eval_probe.h:42  FUN_14431305C -> FUN_144315D1C  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:6  0x58BA2F -> 0x58BB8F  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:6  0x58B530 -> 0x58B690  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:6  0x58B474 -> 0x58B5D4  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:7  0x590368 -> 0x5904C8  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:7  0x58BDD7 -> 0x58BF37  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:12  58BDD7 -> 58BF37  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:12  58B467 -> 58B5C7  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:12  58B3D4 -> 58B534  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:13  58B273 -> 58B3D3  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:13  58BD6B -> 58BECB  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:17  0x48AAAE8 -> 0x48AD628  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:17  58B353 -> 58B4B3  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:18  58B3A5 -> 58B505  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:18  58B4D0 -> 58B630  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:18  58B33E -> 58B49E  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:19  58B5E4 -> 58B744  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:21  0x55F620 -> 0x55F780  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:21  0x5E9ED0 -> 0x5EA030  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:24  58B8F5 -> 58BA55  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:25  58BD11 -> 58BE71  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:25  58BC8E -> 58BDEE  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:25  58BC0A -> 58BD6A  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:25  58BB70 -> 58BCD0  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:25  58BA2F -> 58BB8F  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:26  58B198 -> 58B2F8  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:31  0x5955E0 -> 0x595740  IDENTICAL
+src/d3d11/light_grid_cache_core.h:72  58B2F4 -> 58B454  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:73  4F3745 -> 4F38A5  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:79  58B27F -> 58B3DF  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:79  58B275 -> 58B3D5  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:80  58B2B2 -> 58B412  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:146  58B735 -> 58B895  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:146  0x55B720 -> 0x55B880  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:146  0x53A590 -> 0x53A6F0  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:146  0x55B720 -> 0x55B880  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:146  0x5955E0 -> 0x595740  IDENTICAL
+src/d3d11/light_grid_cache_core.h:146  0x598F10 -> 0x599070  IDENTICAL
+src/d3d11/light_grid_cache_core.h:146  0x5988F0 -> 0x598A50  IDENTICAL
+src/d3d11/light_grid_cache_core.h:146  0x598740 -> 0x5988A0  IDENTICAL
+src/d3d11/light_grid_cache_core.h:147  0x598CC0 -> 0x598E20  IDENTICAL
+src/d3d11/light_grid_cache_core.h:147  55B813 -> 55B973  IDENTICAL
+src/d3d11/light_grid_cache_core.h:147  0x55B810 -> 0x55B970  IDENTICAL
+src/d3d11/light_grid_cache_core.h:148  58BAF6 -> 58BC56  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:148  58BABA -> 58BC1A  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:148  58BA7F -> 58BBDF  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:148  58BA42 -> 58BBA2  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:175  58B33E -> 58B49E  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:196  58B3A0 -> 58B500  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:196  58B378 -> 58B4D8  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:196  0x48AAAE8 -> 0x48AD628  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:198  48AAAF1 -> 48AD631  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:199  0x48C5AB0 -> 0x48C85F0  IDENTICAL
+src/d3d11/light_grid_cache_core.h:199  48AAB08 -> 48AD648  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:199  48AAB01 -> 48AD641  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:200  0x4DDE614 -> 0x4DE165C  XREF-EXACT
+src/d3d11/light_grid_cache_core.h:200  48AAB36 -> 48AD676  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:200  48AAB26 -> 48AD666  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:200  48AAB1F -> 48AD65F  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:200  48AAB16 -> 48AD656  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:201  48AAB40 -> 48AD680  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:202  0x4DDE614 -> 0x4DE165C  XREF-EXACT
+src/d3d11/light_grid_cache_core.h:202  48AAB66 -> 48AD6A6  RELOC-ONLY
+src/d3d11/light_grid_cache_core.h:202  48AAB5D -> 48AD69D  RELOC-ONLY
+src/d3d11/optimized_station_core.h:719  0x431B240 -> 0x431DF40  RELOC-ONLY
+src/d3d11/optimized_station_core.h:719  0x431B221 -> 0x431DF21  RELOC-ONLY
+src/d3d11/terrain_cull_cover_core.h:9  4455FEA -> 4458D6A  RELOC-ONLY
+src/d3d11/terrain_cull_cover_core.h:10  4455FF9 -> 4458D79  RELOC-ONLY
+src/d3d11/terrain_cull_cover_core.h:10  4455FF3 -> 4458D73  RELOC-ONLY
+src/d3d11/terrain_cull_cover_core.h:10  4456007 -> 4458D87  RELOC-ONLY
+src/d3d11/terrain_cull_cover_core.h:11  0x4DDF878 -> 0x4DE28B8  XREF-EXACT
+src/d3d11/terrain_cull_cover_core.h:13  0x445A1C0 -> 0x445CF40  RELOC-ONLY
+src/d3d11/transition_flash_eye_base.cpp:194  FUN_142868c30 -> FUN_14286b250  RELOC-ONLY
+src/d3d11/transition_flash_eye_base.cpp:195  FUN_14287b030 -> FUN_14287d660  IDENTICAL
+src/d3d11/transition_flash_eye_base.cpp:288  FUN_14287b030 -> FUN_14287d660  IDENTICAL
+src/d3d11/transition_flash_eye_base.cpp:288  FUN_142868c30 -> FUN_14286b250  RELOC-ONLY
+src/d3d11/ui_panel_scale.h:47  FUN_14453EF80 -> FUN_144541AC0  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:87  0x50EC69 -> 0x50EDC9  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:87  0x51AF6B -> 0x51B0CB  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:252  FUN_142842A70 -> FUN_142845090  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:252  FUN_14288E3A0 -> FUN_1428909E0  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:252  FUN_14284CB70 -> FUN_14284F190  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:376  FUN_142842A70 -> FUN_142845090  RELOC-ONLY
+src/d3d11/ui_sizing_math.h:649  0x52E9020 -> 0x52EC1E0  XREF-EXACT
+src/d3d11/vertex_resync_core.h:13  0x1404E9D70 -> 0x1404E9E70  IDENTICAL
+src/d3d11/vertex_resync_core.h:14  0x1404E9DAF -> 0x1404E9EAF  IDENTICAL
+src/d3d11/vertex_resync_core.h:19  0x140522BA0 -> 0x140522D00  RELOC-ONLY
+src/d3d11/vertex_resync_core.h:19  0x140522B7C -> 0x140522CDC  RELOC-ONLY
+src/d3d11/vertex_resync_core.h:20  0x140522BF5 -> 0x140522D55  RELOC-ONLY
+src/d3d11/vr_window_trampolines.h:11  0x7F9F00 -> 0x7FA060  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:52  FUN_1404f4910 -> FUN_1404f4a70  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:75  DAT_144dde614 -> DAT_144de165c  XREF-EXACT
+tools/c2_derive_test/c2_derive_model.h:80  LAB_1404f35c7 -> LAB_1404f3727  IDENTICAL
+tools/c2_derive_test/c2_derive_model.h:138  FUN_1448b2390 -> FUN_1448b4ed0  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:170  FUN_1448b4d80 -> FUN_1448b78c0  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:170  FUN_1448aaf90 -> FUN_1448adad0  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:193  DAT_144e2f890 -> DAT_144e328d0  XREF-EXACT
+tools/c2_derive_test/c2_derive_model.h:194  DAT_144e2f870 -> DAT_144e328b0  XREF-EXACT
+tools/c2_derive_test/c2_derive_model.h:220  FUN_1404f49f0 -> FUN_1404f4b50  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:235  FUN_140596830 -> FUN_140596990  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:262  FUN_1405921f0 -> FUN_140592350  IDENTICAL
+tools/c2_derive_test/c2_derive_model.h:271  FUN_1406be790 -> FUN_1406be8f0  IDENTICAL
+tools/c2_derive_test/c2_derive_model.h:282  FUN_1405e9ed0 -> FUN_1405ea030  RELOC-ONLY
+tools/c2_derive_test/c2_derive_model.h:300  FUN_1405964c0 -> FUN_140596620  RELOC-ONLY
+tools/c2_derive_test/c2_derive_test.cpp:6  FUN_1404f4910 -> FUN_1404f4a70  RELOC-ONLY
+tools/c2_derive_test/c2_derive_test.cpp:8  FUN_1404f49f0 -> FUN_1404f4b50  RELOC-ONLY
+tools/c2_derive_test/c2_derive_test.cpp:9  FUN_140596830 -> FUN_140596990  RELOC-ONLY
+tools/c2_derive_test/c2_derive_test.cpp:10  FUN_1405921f0 -> FUN_140592350  IDENTICAL
+tools/c2_derive_test/c2_derive_test.cpp:11  FUN_1406be790 -> FUN_1406be8f0  IDENTICAL
+tools/c2_derive_test/c2_derive_test.cpp:219  FUN_140591f30 -> FUN_140592090  RELOC-ONLY
+tools/c2_derive_test/c2_derive_test.cpp:455  FUN_140596830 -> FUN_140596990  RELOC-ONLY
+tools/cpu_profile/SelfTests.cs:401  0x42df9a0 -> 0x42e2660  RELOC-ONLY
+tools/cpu_profile/Stacks.cs:138  0x5d67a6 -> 0x5d6906  RELOC-ONLY
+tools/cpu_profile/Stacks.cs:138  0x5d4141 -> 0x5d42a1  RELOC-ONLY
+tools/cpu_profile/Stacks.cs:138  0x5d6d7f -> 0x5d6edf  RELOC-ONLY
+tools/cull_gate_probe.py:927  DAT_144E2F880 -> DAT_144E328C0  XREF-EXACT
+tools/cull_gate_probe.py:927  DAT_144E2F870 -> DAT_144E328B0  XREF-EXACT
+tools/light_grid_cache_test/light_grid_cache_test.cpp:364  0x48AAAE8 -> 0x48AD628  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:372  48AAB6E -> 48AD6AE  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:372  48AAB08 -> 48AD648  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:373  48AAB40 -> 48AD680  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:373  48AAB16 -> 48AD656  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:374  48AAB6E -> 48AD6AE  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:375  48AAB26 -> 48AD666  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:376  0x4DDE614 -> 0x4DE165C  XREF-EXACT
+tools/light_grid_cache_test/light_grid_cache_test.cpp:376  48AAB36 -> 48AD676  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:378  48AAB40 -> 48AD680  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:385  48AAB53 -> 48AD693  RELOC-ONLY
+tools/light_grid_cache_test/light_grid_cache_test.cpp:388  0x4DDE614 -> 0x4DE165C  XREF-EXACT
+tools/openxr_system_test/abi_caller.cpp:9  0x4E3881 -> 0x4E3981  RELOC-ONLY
+tools/terrain_cover_test/terrain_cover_test.cpp:273  0x4DDF878 -> 0x4DE28B8  XREF-EXACT
+tools/vertex_resync_test/vertex_resync_test.cpp:7  0x1404E9D70 -> 0x1404E9E70  IDENTICAL
+tools/vertex_resync_test/vertex_resync_test.cpp:111  0x1404E9D70 -> 0x1404E9E70  IDENTICAL
+tools/vr_camera_census_glue_test/vr_camera_census_glue_test.cpp:441  FUN_140596830 -> FUN_140596990  RELOC-ONLY
+
+## Left in place: 12 (file:line  old  reason  |  line text)
+src/d3d11/optimized_station_core.h:1269  013c6122  flight/session label (2026-10-13 review of a flight), not an exe address  |  // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight): the rig association per rig, the mechanism pose, t
+src/d3d11/optimized_station_core.h:2113  0abc40  runtime pad pointer digits (own pad @), not an exe address  |  //   optimized station: waiting (docked=yes, own pad @0abc40, r0=1 r1=1 in hangar=yes, camera=yes, cell=built)
+src/d3d11/scheduler_stack_probe.h:6  0x145dd0000  mapper AMBIGUOUS (not usable)  |  // B 0x145dd0000+), so static RE cannot name the dispatcher. This probe
+src/d3d11/scheduler_stack_probe.h:12  0x145dd0000  mapper AMBIGUOUS (not usable)  |  // 0x1462b0000..0x1462c0000 or 0x145dd0000..0x145dde000 are table stubs
+src/d3d11/scheduler_stack_probe.h:12  0x145dde000  mapper AMBIGUOUS (not usable)  |  // 0x1462b0000..0x1462c0000 or 0x145dd0000..0x145dde000 are table stubs
+src/d3d11/scheduler_stack_probe.h:46  0x140001000  maps to the same value  |  // at the exe's preferred base 0x140000000 this is [0x140001000,
+src/d3d11/terrain_cull_cover_core.h:6  0x4462E80  mapper CHANGED (not usable)  |  //   The planet draw-list builder 0x4462E80 calls 0x44587C0 (at 0x4463A83), which writes one record per render view. For
+src/d3d11/terrain_cull_cover_core.h:6  0x4463A83  mapper CHANGED (not usable)  |  //   The planet draw-list builder 0x4462E80 calls 0x44587C0 (at 0x4463A83), which writes one record per render view. For
+src/d3d11/terrain_cull_cover_core.h:13  0x445BA40  mapper CHANGED (not usable)  |  //   the ONLY direct caller (a .text scan finds exactly 0x4458D87). The per-(patch, view) test (0x445BA40 -> 0x445CF40) 
+src/d3d11/vr_ssaa_hold.cpp:411  0x281C3EB  mapper NOT-FOUND (not usable)  |  // ctx+0x33D0.. (read from 0x281E710..0x281C3EB, build 334473). Nothing in it is proven to hold the 3D mode; this logs w
+tools/optimized_station_test/optimized_station_test.cpp:1087  013c6122  flight/session label (2026-10-13 review of a flight), not an exe address  |  // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) ---------------------------------------------------
+tools/pad_state_test/pad_state_test.cpp:123  0abc40  low digits of a fake heap pointer (0x7FF0000ABC40), not an exe address  |  const uintptr_t self = 0x7FF0000ABC40u;   // low six hex digits: 0abc40
+
+## Excluded by rule (not replaced, not listed individually)
+- +0x offsets and [reg+0x..] displacements, byte counts, hashes of 12+ hex digits, hex shorter than 6 digits.
+- All-digit tokens without 0x and without A-F letters: run and flight labels (e.g. 091951, 143416, 162120), not addresses. The one all-digit listing address in scope, 4456007 (terrain_cull_cover_core.h:10, named in the brief), was replaced with the mapper result 4458D87.
+- 242 tokens introduced by 869fd706 (already new; their values appear nowhere in the parent comments).
+- Tokens already equal to the mapped value (0x140001000 -> 0x140001000, scheduler_stack_probe.h:46): no edit.
+
+## Notes for the maintainer (code, not comments: not changed)
+- tools/terrain_cover_test/terrain_cover_test.cpp:278, :377, :380 still use 0x4DDF878 as a code constant (synthetic fixture address for the 0.5). Comment :273 now says 0x4DE28B8. A code edit is needed to match; not done (comment-only scope).
+- src/d3d11/terrain_cull_cover_core.h:6 and :13: 0x4462E80, 0x4463A83, 0x445BA40 are CHANGED by the mapper (function body differs between builds), so the header still cites old addresses for them. The 0x4DDF878 -> 0x4DE28B8 constant (0.5 float) is verified in both exes by PE section read.
+- HEAD moved during this run: b73d67c2 "Bring the flat temporal AA Status block back under 60 lines" (docs only, not by this agent). Edits here are unstaged on top of it; nothing committed, no branch switch.
+- src/d3d11/terrain_cull_cover_core.h:10: 4456007 is a bare listing address with no A-F letter and not at line start (it follows "; "). It was replaced because the brief names it explicitly; mapper result 4458D87 agrees with the already-new line 13 ("exactly 0x4458D87").

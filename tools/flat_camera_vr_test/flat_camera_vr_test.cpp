@@ -373,7 +373,7 @@ void testWeaponRole() {
         bool weapon = true;
         for (int count : groups) {
             for (int i = 0; i < count; ++i)
-                roles.push_back(sim.call(world, true, 3, weapon ? wf : sf, Gate::Admit, 0x594E13, !(refuseWeapon && weapon)).plan.role);
+                roles.push_back(sim.call(world, true, 3, weapon ? wf : sf, Gate::Admit, 0x594F73, !(refuseWeapon && weapon)).plan.role);
             weapon = !weapon;
         }
         return roles;
@@ -404,7 +404,7 @@ void testWeaponRole() {
         sim.frame(true, false, 0.125f, 0.25f);
         FlatCameraVrFrustum zoomed = sceneS(); zoomed.fov = 0.6f;
         std::vector<Role> roles;
-        for (int i = 0; i < 63; ++i) roles.push_back(sim.call(world, true, 3, zoomed, Gate::Admit, 0x594EAB).plan.role);
+        for (int i = 0; i < 63; ++i) roles.push_back(sim.call(world, true, 3, zoomed, Gate::Admit, 0x59500B).plan.role);
         const FlatCameraVrCounters c = sim.core.tally().snapshot();
         check(countRole(roles, Role::FirstPerson) == 0 && c.sceneInjected == 63 && c.firstPersonInjected == 0 && c.fovNarrowest == 0.6f && c.fovWidest == 0.6f,
               "R12e", "a frame in which the scene camera zoomed (fov 0.6 against last frame's 0.9831) is all scene calls: nothing is first-person against last frame's wider anchor");
@@ -632,13 +632,13 @@ void testReuseScenario() {
               "R5a", "cockpit, kind 5: Unsupported, not injected, no frustum read, nothing flushed (it was never injected)");
         // Frame 2, on foot: the route injects. The SAME pointer is now kind 3.
         sim.frame(true, false, 0.31f, -0.27f);
-        Sim::Out scene = sim.call(C, true, 3, sceneCam(), Gate::Admit, 0x594E13);
+        Sim::Out scene = sim.call(C, true, 3, sceneCam(), Gate::Admit, 0x594F73);
         check(scene.plan.admit == Admit::Inject && scene.plan.role == Role::Scene && scene.frustumRead && scene.landed && sim.set.contains(C) && !scene.flushed,
               "R5b", "on foot, the same pointer as kind 3 with the screen aspect and near 0.025: Scene, injected; it joins the flush set");
-        Sim::Out weapon = sim.call(C, true, 3, weaponCam(), Gate::Admit, 0x594EAB);
+        Sim::Out weapon = sim.call(C, true, 3, weaponCam(), Gate::Admit, 0x59500B);
         check(weapon.plan.admit == Admit::Inject && weapon.plan.role == Role::FirstPerson && weapon.landed && sim.set.contains(C) && !weapon.flushed,
               "R5c", "the same pointer with near 0.0675 and a tighter fov: FirstPerson, injected (same phase as the scene camera)");
-        Sim::Out aux = sim.call(C, true, 3, squareCam(), Gate::Admit, 0x58DE73);
+        Sim::Out aux = sim.call(C, true, 3, squareCam(), Gate::Admit, 0x58DFD3);
         check(aux.plan.admit == Admit::RoleExcluded && aux.plan.role == Role::Auxiliary && aux.plan.roleKnown && !aux.plan.inject && !aux.landed &&
               aux.flushed && sim.flushWrites == 1 && !sim.set.contains(C) && sim.set.empty(),
               "R5d", "the same pointer as a square-aspect kind-3 camera: excluded by role, not injected, and the flush fires NOW, exactly once (the injected object seen un-injected)");
@@ -650,7 +650,7 @@ void testReuseScenario() {
         const size_t n = sim.core.excluded().copy(rows, 8);
         check(c.calls == 4 && c.sceneInjected == 1 && c.firstPersonInjected == 1 && c.auxiliary == 1 && c.unsupported == 1 && c.notActive == 0 &&
               c.flushed == 1 && c.injectedKind[3] == 2 && c.injectedKind[5] == 0 && flatCameraVrOutcomeSum(c) == c.calls &&
-              n == 1 && rows[0].aspect == 1.0f && rows[0].fov == 1.5708f && rows[0].nearZ == 0.1f && rows[0].farZ == 1000.0f && rows[0].callerRva == 0x58DE73 && rows[0].calls == 1,
+              n == 1 && rows[0].aspect == 1.0f && rows[0].fov == 1.5708f && rows[0].nearZ == 0.1f && rows[0].farZ == 1000.0f && rows[0].callerRva == 0x58DFD3 && rows[0].calls == 1,
               "R5f", "the frame's counters and the excluded signature (aspect, fov, near, far, caller) say exactly that");
         // The same sequence again on the next frame: admission is decided per call, never cached per pointer.
         sim.frame(true, false, -0.11f, 0.42f);
@@ -781,7 +781,7 @@ void testExcluded() {
     std::printf("excluded signatures\n");
     {
         FlatCameraVrExcludedTable t;
-        for (int i = 0; i < 12; ++i) t.note(1.0f + 0.1f * static_cast<float>(i), 1.5f, 0.1f, 1000.0f, 0x58DE73);
+        for (int i = 0; i < 12; ++i) t.note(1.0f + 0.1f * static_cast<float>(i), 1.5f, 0.1f, 1000.0f, 0x58DFD3);
         FlatCameraVrExcluded rows[16];
         const size_t n = t.copy(rows, 16);
         check(n == 8 && t.used() == 8 && t.overflow() == 4 && rows[0].aspect == 1.0f && rows[7].aspect == 1.0f + 0.1f * 7.0f,
@@ -791,11 +791,11 @@ void testExcluded() {
     }
     {
         FlatCameraVrExcludedTable t;
-        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x58DE73);
-        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x58DE73);                 // the same
-        t.note(1.0f, 1.5708f * 1.0005f, 0.1f, 1000.0f, 0x58DE73);      // 0.05% off in fov: the same
-        t.note(1.0f, 1.5708f * 1.002f, 0.1f, 1000.0f, 0x58DE73);       // 0.2% off: another
-        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x594E13);                // another call site: another
+        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x58DFD3);
+        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x58DFD3);                 // the same
+        t.note(1.0f, 1.5708f * 1.0005f, 0.1f, 1000.0f, 0x58DFD3);      // 0.05% off in fov: the same
+        t.note(1.0f, 1.5708f * 1.002f, 0.1f, 1000.0f, 0x58DFD3);       // 0.2% off: another
+        t.note(1.0f, 1.5708f, 0.1f, 1000.0f, 0x594F73);                // another call site: another
         t.note(kNaN, kNaN, kNaN, kNaN, 0);                              // unreadable
         t.note(kNaN, kNaN, kNaN, kNaN, 0);                              // the same unreadable
         t.note(kInf, 1.0f, 0.1f, 1000.0f, 0);
@@ -862,7 +862,7 @@ void testExcluded() {
         FlatCameraInjectedSet set;
         FlatCameraVrFrame f; f.inject = true; f.phaseX = 0.3f; f.renderW = 5040; f.renderH = 2835; f.screenAspect = kS;
         core.beginFrame(f, 500);
-        FlatCameraVrCallIn in; in.camera = 0x100; in.readable = true; in.kind = 3; in.gate = Gate::Admit; in.mode = Mode::Inject; in.callerRva = 0x58DE73;
+        FlatCameraVrCallIn in; in.camera = 0x100; in.readable = true; in.kind = 3; in.gate = Gate::Admit; in.mode = Mode::Inject; in.callerRva = 0x58DFD3;
         core.plan(in, squareCam(), set);
         core.plan(in, sceneCam(), set);                   // a screen view: no row
         in.kind = 5;
@@ -1271,15 +1271,25 @@ void testSourcePins() {
     const std::string phase = slurp("src/d3d11/flat_camera_phase.h");
     const std::string censusCore = slurp("src/d3d11/vr_camera_census_core.h");
     check(!cpp.empty() && !inj.empty() && !vrh.empty() && !phase.empty() && !censusCore.empty(), "R11a", "the injector, its header, the pure VR header, the admission header and the census core are readable from the root");
+    // The temporary stationary observer reads only after the VR branch and owner-thread exit.
+    // Exclude exactly that statement from preFlat's geometry fingerprint, without changing its golden.
+    const std::string stationaryRead =
+        "    flatStationaryCameraRefresh(camera, ctx, callNo, callerRva, readable ? kind : 0);\n";
+    const auto withoutStationaryRead = [&](std::string text) {
+        const size_t at = text.find(stationaryRead);
+        if (at != std::string::npos) text.erase(at, stationaryRead.size());
+        return text;
+    };
 
     // ---- the flat profile and the census: byte-for-byte --------------------------------------------------------------------
     {
         std::string bad;
         for (const Golden& g : kInjectGolden) {
-            const std::string r = region(cpp, g.start, g.end);
+            std::string r = region(cpp, g.start, g.end);
+            if (std::strcmp(g.name, "preFlat") == 0) r = withoutStationaryRead(r);
             if (r.empty() || count(cpp, g.start) != 1 || fnv1a(r) != g.hash) { bad += g.name; bad += ' '; }
         }
-        check(bad.empty(), "R11b", "the flat profile's and the census's regions of the detour are byte-for-byte what they were before the VR mode: the observe-only call and its off-thread report, refreshPre from the census's switch on, refreshPost from its observe branch on, the flat frame step, pause, close, reset, arm and disarm, and the route accessors");
+        check(bad.empty(), "R11b", "apart from the exact stationary observer statement, the flat profile's and the census's regions retain their original geometry fingerprints: observe-only, refreshPre from the census switch on, refreshPost, frame, pause, close, reset, arm/disarm and route accessors");
         if (!bad.empty()) std::printf("  note  changed regions: %s\n", bad.c_str());
         std::string badPhase;
         for (const Golden& g : kPhaseGolden) {
@@ -1290,7 +1300,16 @@ void testSourcePins() {
         if (!badPhase.empty()) std::printf("  note  changed regions: %s\n", badPhase.c_str());
         // Control: the hash can fail (one byte of the region changed changes it).
         const Golden& g = kInjectGolden[3];
-        std::string r = region(cpp, g.start, g.end);
+        const std::string baseline = withoutStationaryRead(region(cpp, g.start, g.end));
+        check(!baseline.empty() && fnv1a(withoutStationaryRead(baseline + stationaryRead)) == g.hash,
+              "R11ba", "control: the exact passive observer statement is excluded while the original preFlat golden remains unchanged");
+        std::string changedProjection = baseline;
+        const size_t projectionAt = changedProjection.find("entryX + jx /");
+        if (projectionAt != std::string::npos)
+            changedProjection.replace(projectionAt, std::strlen("entryX + jx /"), "entryX - jx /");
+        check(projectionAt != std::string::npos && fnv1a(withoutStationaryRead(changedProjection)) != g.hash,
+              "R11bb", "control: reversing the projection phase still fails the unchanged golden after observer exclusion");
+        std::string r = baseline;
         if (!r.empty()) r[r.size() / 2] ^= 1;
         check(!r.empty() && fnv1a(r) != g.hash, "R11d", "control: a region with one byte changed no longer hashes to the golden value");
     }
@@ -1304,6 +1323,11 @@ void testSourcePins() {
               ordered(pre, {"g_refreshTls.vr = 0;\n", "const uint64_t callNo = ", "const FlatCameraGateVerdict gate = g_inject.gate.check(GetCurrentThreadId(), GetTickCount64());\n", branch,
                             "const bool observe = g_inject.observeOnly.load(std::memory_order_acquire);"}),
               "R11e", "refreshPre clears the VR flag with the others, and hands the call to refreshPreVr once the gate is known and before the flat code reads its observe-only switch: a non-zero mode word takes the VR path, zero takes the old one");
+        check(count(cpp, "flatStationaryCameraRefresh(") == 0 ||
+              (count(cpp, stationaryRead) == 1 && count(cpp, "flatStationaryCameraRefresh(") == 1 &&
+               ordered(pre, {branch, "    if (gate == FlatCameraGateVerdict::OffThread) {\n",
+                              "    const bool readable = camera && sehReadU32(camera + kCamKind, &kind);", stationaryRead.c_str()})),
+              "R11bc", "the excluded stationary observation occurs once in the flat owner-thread path after the VR return and off-thread exit");
         const size_t branchAt = pos(pre, branch);
         const std::string above = branchAt == std::string::npos ? std::string() : pre.substr(0, branchAt);
         check(!above.empty() && lacksAll(above, {"sehWrite", "flushCamera", "noteInjected", "flatRuntime", "observeCall(", "admission"}),

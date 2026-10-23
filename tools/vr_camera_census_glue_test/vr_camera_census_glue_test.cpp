@@ -438,7 +438,7 @@ struct Gpu {
         if (FAILED(device->CreateBuffer(&tinyDesc, &init2, &tiny))) return;
         ok = true;
     }
-    // The eye camera's rows into rows 270..273, composed by the DECOMPILE-CITED composer (FUN_140596830's model), not by the
+    // The eye camera's rows into rows 270..273, composed by the DECOMPILE-CITED composer (FUN_140596990's model), not by the
     // census's own function: the census recomputes the same rows from the camera it saw, and the two must agree.
     void setEyeRows(Model& eye) {
         float rows[16];
@@ -537,13 +537,13 @@ int driveFrame(int n, Gpu& gpu) {
         g_eyeR.bound(-kEyeBound + 3.0e-7f, -0.05f + 3.0e-7f);
     }
     int calls = 0;
-    const uint32_t callers[3] = {0x594E13, 0x594EAB, 0x594FE1};
+    const uint32_t callers[3] = {0x594F73, 0x59500B, 0x595141};
     for (int i = 0; i < 36; ++i) { refresh(g_world, g_viewWorld, callers[i % 3], false, inject, 0); ++calls; }
-    for (int i = 0; i < 6; ++i) { refresh(g_weapon, g_viewWeapon, 0x594E13, false, inject, 1); ++calls; }
-    for (int i = 0; i < 2; ++i) { refresh(g_ui, g_viewUi, 0x58DE73, false); ++calls; }
+    for (int i = 0; i < 6; ++i) { refresh(g_weapon, g_viewWeapon, 0x594F73, false, inject, 1); ++calls; }
+    for (int i = 0; i < 2; ++i) { refresh(g_ui, g_viewUi, 0x58DFD3, false); ++calls; }
     for (int i = 0; i < 2; ++i) {
-        refresh(g_eyeL, g_viewEyeL, 0x594FE1, true);
-        refresh(g_eyeR, g_viewEyeR, 0x594FE1, true);
+        refresh(g_eyeL, g_viewEyeL, 0x595141, true);
+        refresh(g_eyeR, g_viewEyeR, 0x595141, true);
         calls += 2;
     }
     stub::progressTone = true;   // the tone was drawn before the eye composite
@@ -644,16 +644,16 @@ int runEpisodes(Gpu& gpu) {
             ++joinDraws;
         }
     };
-    const uint32_t callers[3] = {0x594E13, 0x594EAB, 0x594FE1};
+    const uint32_t callers[3] = {0x594F73, 0x59500B, 0x595141};
     auto frame = [&](int k, bool named) {
         stub::progressDraw = 0;
         drawNo = 0;
         g_world.turn(0.35f + 0.004f * static_cast<float>(k));
         g_eyeL.turn(0.02f * static_cast<float>(k));
         g_eyeR.turn(0.02f * static_cast<float>(k));
-        for (int i = 0; i < 2; ++i) refresh(g_ui, g_viewUi, 0x58DE73, false);
+        for (int i = 0; i < 2; ++i) refresh(g_ui, g_viewUi, 0x58DFD3, false);
         for (int i = 0; i < 4; ++i) refresh(g_world, g_viewWorld, callers[i % 3], false);
-        for (int i = 0; i < 2; ++i) { refresh(g_eyeL, g_viewEyeL, 0x594FE1, true); refresh(g_eyeR, g_viewEyeR, 0x594FE1, true); }
+        for (int i = 0; i < 2; ++i) { refresh(g_eyeL, g_viewEyeL, 0x595141, true); refresh(g_eyeR, g_viewEyeR, 0x595141, true); }
         // The pass chose the left eye's view axes this frame (the stub), from the block bound at the first scene draw.
         stub::chosenValid = true;
         stub::chosenBound = true;
@@ -705,12 +705,12 @@ int runEpisodes(Gpu& gpu) {
     check(!log.empty(), "the glue wrote the episodes' log");
     const std::string head3 = bodyOf(lineWith(log, "vr camera census: episode frame=31 "));
     check(head3 == "vr camera census: episode frame=31 n=3/10 trigger=key-on armed=1 foot=no gui=0 named=0 phase=- calls=10 recorded=10 printed=10 kinds=1:2,3:4,5:4 "
-                   "callers=+0x594FE1:5,+0x58DE73:2,+0x594E13:2,+0x594EAB:1",
+                   "callers=+0x595141:5,+0x58DFD3:2,+0x594F73:2,+0x59500B:1",
           "EPISODE 3 (the key-on one, aboard): frame 31, armed at frame 1, the journal says not on foot, GuiFocus 0, all 10 calls recorded and tallied by kind and caller");
     if (head3.empty()) std::printf("  note  %s\n", censusLinesOnly(log).c_str());
     const std::string head4 = bodyOf(lineWith(log, "vr camera census: episode frame=71 "));
     check(head4 == "vr camera census: episode frame=71 n=4/10 trigger=foot:no>yes armed=41 foot=yes gui=6 named=1 phase=- calls=10 recorded=10 printed=10 kinds=1:2,3:4,5:4 "
-                   "callers=+0x594FE1:5,+0x58DE73:2,+0x594E13:2,+0x594EAB:1",
+                   "callers=+0x595141:5,+0x58DFD3:2,+0x594F73:2,+0x59500B:1",
           "EPISODE 4: armed by the journal's flip (foot:no>yes) at frame 41, sampled at 71 with the journal on foot, GuiFocus 6 and the naming held");
     check(occurrences(log, "vr camera census: episode frame=") == 2 && occurrences(log, "vr camera census: sequence frame=") == 0,
           "exactly two episodes printed, and no first-three sequence (all three were printed before): the episodes' frames are not spent twice");
@@ -774,8 +774,8 @@ int runEpisodes(Gpu& gpu) {
                   has(eps, "join: 4 signature(s); the per-draw hook was handed 95 draw(s), 75 of them into a screen- or eye-sized depth, 4 depth view(s) resolved"),
               "...its calls by kind and caller, and its four join signatures with the draws the hook was handed");
         check(has(eps, "eye 0 2620x2533: first draw 21 (30 draw(s)), vs 0xA1 ps 0xB1, depth write yes, b1 " + hexOf(reinterpret_cast<uintptr_t>(gpu.scene.Get()), true)) &&
-                  has(eps, "rows 270..273 equal the composed rows of: camera " + eyeL + " (kind 5) caller +0x594FE1, 2 call(s) n=7/9, view " + hexOf(g_viewEyeL.ptr(), true) + ", tone after") &&
-                  has(eps, "rows 270..273 equal the composed rows of: camera " + eyeR + " (kind 5) caller +0x594FE1, 2 call(s) n=8/10") &&
+                  has(eps, "rows 270..273 equal the composed rows of: camera " + eyeL + " (kind 5) caller +0x595141, 2 call(s) n=7/9, view " + hexOf(g_viewEyeL.ptr(), true) + ", tone after") &&
+                  has(eps, "rows 270..273 equal the composed rows of: camera " + eyeR + " (kind 5) caller +0x595141, 2 call(s) n=8/10") &&
                   has(eps, "screen 5040x2835: first draw 86 (10 draw(s)), vs 0xD1 ps 0xE1, depth write yes") &&
                   has(eps, "rows 270..273 equal the composed rows of: camera " + world + " (kind 3)") && has(eps, "depth write no") && has(eps, "rows not read (skip)"),
               "the reader joins each depth's first draw to the camera whose calls composed its rows: the left eye's depth to the left eye's kind-5 calls, the right eye's to the right's, the screen's to "
@@ -969,7 +969,7 @@ int run() {
     std::atomic<uint64_t> otherAllocs{~0ull};
     std::thread other([&] {
         const uint64_t a0 = t_allocs;
-        for (int i = 0; i < 7; ++i) stub::observer->offThread(g_world.ptr(), 0x594E13, 3, true, GetCurrentThreadId());
+        for (int i = 0; i < 7; ++i) stub::observer->offThread(g_world.ptr(), 0x594F73, 3, true, GetCurrentThreadId());
         otherAllocs.store(t_allocs - a0);
     });
     other.join();
@@ -995,7 +995,7 @@ int run() {
     }
     {   // a call that arrives while the gate is shut goes straight through the game's body
         const uint64_t callsBefore = g_hot.calls;
-        refresh(g_world, g_viewWorld, 0x594E13, false);
+        refresh(g_world, g_viewWorld, 0x594F73, false);
         check(g_hot.calls == callsBefore, "a refresh call with the observer detached is not observed");
     }
     Config::get().set("advanced.vr_camera_census", "on");
@@ -1076,11 +1076,11 @@ int run() {
     {
         // The eye camera's call lines name the view it was refreshed with and carry its composed rows. (" draw=" is what a
         // call line has after the caller and the camera line does not: the camera line has " thread=owner".)
-        const std::string eyeLine = lineWith(log, "camera=" + hexOf(g_eyeL.ptr(), false) + " kind=5 caller=+0x594FE1 draw=");
+        const std::string eyeLine = lineWith(log, "camera=" + hexOf(g_eyeL.ptr(), false) + " kind=5 caller=+0x595141 draw=");
         check(has(eyeLine, ": call frame=") && has(eyeLine, "tone=after inj=0 role=- ") && has(eyeLine, "view=" + hexOf(g_viewEyeL.ptr(), false)) && has(eyeLine, "rows=[") &&
               !has(eyeLine, "rows=-"),
               "a call line for an eye camera says kind=5 tone=after, is never injected, names that camera's view, and carries the 16 composed rows");
-        const std::string worldLine = lineWith(log, "camera=" + hexOf(g_world.ptr(), false) + " kind=3 caller=+0x594E13 draw=");
+        const std::string worldLine = lineWith(log, "camera=" + hexOf(g_world.ptr(), false) + " kind=3 caller=+0x594F73 draw=");
         check(has(worldLine, ": call frame=") && has(worldLine, "tone=before inj=1 role=scene ") && has(worldLine, "view=" + hexOf(g_viewWorld.ptr(), false)),
               "...and one for the world camera says tone=before, injected, scene, and names the world view");
     }
@@ -1113,7 +1113,7 @@ int run() {
         check(none && occurrences(log, "why=no-b1") == 2,
               "no eye line for the ship frames, the flip frame, the warm-up frames 5-7 (their eye draws found no b1: a sampled frame would have logged 'why=no-b1') or the frame past the budget");
     }
-    check(occurrences(log, "vr camera census: other-thread tid=") == 1 && has(lineWith(log, "vr camera census: other-thread tid="), "caller=+0x594E13 calls=7"),
+    check(occurrences(log, "vr camera census: other-thread tid=") == 1 && has(lineWith(log, "vr camera census: other-thread tid="), "caller=+0x594F73 calls=7"),
           "the seven calls on another thread are reported once, with their count");
     check(occurrences(log, "vr world route 5s: key=auto") == 1 && occurrences(log, "vr world route inject 5s: inj-scene=180 inj-fp=30 ") == 1,
           "the world route's two 5 s lines the script wrote through the log are there, back to back");
@@ -1175,7 +1175,7 @@ int run() {
               "...and the joins that could not be made say why: no b1, a too-small b1, and no sequence logged for frame 11");
         check(has(lineWith(report, "(C) place in the frame:"), "every refresh of a world-side camera precedes every refresh of an eye camera in 3 of 3 logged sequence(s)"),
               "(C) the world's refreshes precede the eyes' in all three logged sequences");
-        check(has(lineWith(report, "(D) caller:"), "+0x594FE1") && has(lineWith(report, "(D) caller:"), "the caller alone does not separate them") &&
+        check(has(lineWith(report, "(D) caller:"), "+0x595141") && has(lineWith(report, "(D) caller:"), "the caller alone does not separate them") &&
                   !has(report, "not enough calls logged to say"),
               "(D) the caller is shared with the world camera, so it does not separate them, and nothing says 'not enough calls'");
         check(has(lineWith(report, "(F) view"), "no view is shared: the view separates them"),

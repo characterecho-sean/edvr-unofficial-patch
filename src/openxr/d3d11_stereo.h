@@ -73,11 +73,13 @@ class D3D11Stereo final {
   // the image is the one this renderer has always drawn, bit for bit; 1 or more
   // is plain black. The same level applies on a replayed pair, because it is an
   // argument of each draw, not a property of the kept pixels.
+  // headPose, when given, is the located head of this frame (geometry_locator.h's input.headPose, in the same origin as the views): it is what the plugin
+  // API's onUpdate receives. Absent, or not a valid pose, the plugins' update is skipped for the frame; an eye pose is never passed in its place.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
-                          float fade = 0.0f);
+                          float fade = 0.0f, const XrPosef* headPose = nullptr);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the

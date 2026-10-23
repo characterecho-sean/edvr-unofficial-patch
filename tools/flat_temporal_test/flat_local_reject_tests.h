@@ -83,8 +83,8 @@ inline int flatLocalRejectTests() {
     for (const char* reason : {"render-extent-changed", "scene-depth-changed",
                               "scene-projection-depth-unassociated", "foreign-work",
                               "actual-shader-mismatch", "projection-viewport-mismatch",
-                              "deferred-inverse-preparation-failed", "deferred-inverse-binding-failed",
-                              "deferred-inverse-unproven"}) {
+                              "deferred-inverse-preparation-failed", "deferred-whole-preparation-failed",
+                              "deferred-inverse-binding-failed", "deferred-inverse-unproven"}) {
         const auto violated = frame(true, true, reason);
         expect(violated.failed && violated.needsSpatialFallback() &&
                !violated.previousAcceptedValid,

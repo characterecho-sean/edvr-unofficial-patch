@@ -39,13 +39,13 @@ struct OculusProfileMatch {
 
 namespace elite_oculus_profile_detail {
 
-constexpr char kProfileId[] = "elite-odyssey-e6be8bbe-libovr-r1";
+constexpr char kProfileId[] = "elite-odyssey-6891f70a-libovr-r1";
 constexpr char kGameSha256[] =
-    "e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988";
+    "6891f70a021fa9f3a0e00458c284f48d1226e68ae7fc02ad48081aed47857e93";
 constexpr std::uint64_t kPreferredImageBase = 0x140000000ull;
-constexpr std::uint32_t kLoadLibraryIatRva = 0x4DB32E0u;
-constexpr std::uint32_t kLoaderCallRva = 0x4E70B6u;
-constexpr std::uint32_t kLoaderReturnRva = 0x4E70BCu;
+constexpr std::uint32_t kLoadLibraryIatRva = 0x4DB62E0u;
+constexpr std::uint32_t kLoaderCallRva = 0x4E71B6u;
+constexpr std::uint32_t kLoaderReturnRva = 0x4E71BCu;
 
 struct Section {
   std::uint32_t rva;
@@ -190,12 +190,12 @@ inline bool image_view(const void* image, std::size_t span, View* out,
   if (!v.sectionCount || v.sectionCount > 96 || v.optionalSize < 112 ||
       !span_range(v, v.optional, v.optionalSize) ||
       u16(v, v.optional) != 0x20Bu || u16(v, nt + 4) != 0x8664u ||
-      u32(v, nt + 8) != 0x6A989634u) return false;
+      u32(v, nt + 8) != 0x6ACD513Du) return false;
   v.directoryCount = u32(v, v.optional + 108);
   if (v.directoryCount > (v.optionalSize - 112u) / 8u) return false;
   v.imageSize = u32(v, v.optional + 56);
   v.headersSize = u32(v, v.optional + 60);
-  if (v.sectionCount != 7 || v.imageSize != 0x6409000u ||
+  if (v.sectionCount != 7 || v.imageSize != 0x640C000u ||
       v.headersSize != 0x400u || v.imageSize > span || v.headersSize > v.imageSize ||
       v.headersSize < v.optional + v.optionalSize) return false;
   // Disk images carry the preferred base.  Windows' SEC_IMAGE mapping may
@@ -230,7 +230,7 @@ inline bool image_view(const void* image, std::size_t span, View* out,
   // below with ASLR-safe relative-call and fixed instruction signatures.
   Section text{};
   if (!section(v, 0, &text) || text.rva != 0x1000u ||
-      text.span < 0x4DB2000u || !(text.characteristics & 0x20000000u))
+      text.span < 0x4DB4C00u || !(text.characteristics & 0x20000000u))
     return false;
   *out = v;
   return true;
@@ -398,17 +398,17 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
 
   out->failureStage = static_cast<std::uint32_t>(
       OculusProfileFailureStage::Fingerprints);
-  if (!fingerprint(v, 0x8D52A0, 0xF3, 0xD7AF874FE886692Full) ||
-      !fingerprint(v, 0x4E4AA0, 0x2C7, 0x004862E1F4FCB501ull) ||
-      !fingerprint(v, 0x4E4630, 0x23C, 0x6A3EB060D842540Aull) ||
-      !fingerprint(v, 0x4E4870, 0x230, 0x8ECA07CE9341C07Eull) ||
-      !fingerprint(v, 0x4E8530, 0x155, 0x7ADD324C355953ABull) ||
-      !fingerprint(v, 0x4E70D0, 0x984, 0x94C8ABF435366D27ull) ||
-      !fingerprint(v, 0x4E6D40, 0x390, 0x586738379777C71Full) ||
-      !fingerprint(v, 0x4E0E60, 0xC7, 0xB21D5E8AF10A5286ull) ||
-      !fingerprint(v, 0x4E8230, 0x3A, 0x0193764C73F7D26Cull) ||
-      !fingerprint(v, 0x4E5CA0, 0x65, 0xFCBA4A2866DCD117ull) ||
-      !fingerprint(v, 0x4E86B0, 0x20, 0xF250867D8F233B0Eull)) return false;
+  if (!fingerprint(v, 0x8D5400, 0xF3, 0x17629A1FD3828894ull) ||
+      !fingerprint(v, 0x4E4BA0, 0x2C7, 0x98376EDD435B9D9Cull) ||
+      !fingerprint(v, 0x4E4730, 0x23C, 0x22A172BD9B250448ull) ||
+      !fingerprint(v, 0x4E4970, 0x230, 0x21CB0709FCF55236ull) ||
+      !fingerprint(v, 0x4E8630, 0x155, 0x2A9E2DBBAEDDE2BBull) ||
+      !fingerprint(v, 0x4E71D0, 0x984, 0x5D9DFCB146397878ull) ||
+      !fingerprint(v, 0x4E6E40, 0x390, 0xC724029334737635ull) ||
+      !fingerprint(v, 0x4E0F60, 0xC7, 0xFD358E07FA8A2868ull) ||
+      !fingerprint(v, 0x4E8330, 0x3A, 0x46C9815E81B0DF4Aull) ||
+      !fingerprint(v, 0x4E5DA0, 0x65, 0xA54979C6EB0CC47Dull) ||
+      !fingerprint(v, 0x4E87B0, 0x20, 0x61126C9627CB6C61ull)) return false;
 
   static constexpr std::uint8_t selectorKinds[] = {
       0xC7, 0x44, 0x24, 0x28, 1, 0, 0, 0,
@@ -431,23 +431,23 @@ inline bool eliteOculusProfileValidateMapped(const void* exeBase,
   };
   out->failureStage = static_cast<std::uint32_t>(
       OculusProfileFailureStage::CallChain);
-  if (!bytes(v, 0x8D530B, selectorKinds, sizeof(selectorKinds)) ||
-      !bytes(v, 0x8D5318, selectorKind2, sizeof(selectorKind2)) ||
-      !bytes(v, 0x8D5320, selectorKind3, sizeof(selectorKind3)) ||
-      !bytes(v, 0x8D5328, exitsOnSuccess, sizeof(exitsOnSuccess)) ||
-      !bytes(v, 0x8D533C, advances, sizeof(advances)) ||
-      !bytes(v, 0x4E4D50, virtualInit, sizeof(virtualInit)) ||
-      !bytes(v, 0x4E467C, initFailure, sizeof(initFailure)) ||
-      !bytes(v, 0x4E46B1, falseReturn, sizeof(falseReturn)) ||
-      !bytes(v, 0x4E710E, nullModule, sizeof(nullModule)) ||
-      !direct_call(v, 0x8D5337, 0x4E4AA0) ||
-      !direct_call(v, 0x4E4666, 0x4E8530) ||
-      !direct_call(v, 0x4E860F, 0x4E70D0) ||
-      !direct_call(v, 0x4E7102, 0x4E6D40) ||
-      !direct_call(v, 0x4E5CF3, 0x4E86B0) ||
-      !relocated_pointer(v, 0x4E243F8, 0x4E4630) ||
-      !relocated_pointer(v, 0x4E24400, 0x4E5CA0) ||
-      !relocated_pointer(v, 0x4E245C0, 0x4E4870) ||
+  if (!bytes(v, 0x8D546B, selectorKinds, sizeof(selectorKinds)) ||
+      !bytes(v, 0x8D5478, selectorKind2, sizeof(selectorKind2)) ||
+      !bytes(v, 0x8D5480, selectorKind3, sizeof(selectorKind3)) ||
+      !bytes(v, 0x8D5488, exitsOnSuccess, sizeof(exitsOnSuccess)) ||
+      !bytes(v, 0x8D549C, advances, sizeof(advances)) ||
+      !bytes(v, 0x4E4E50, virtualInit, sizeof(virtualInit)) ||
+      !bytes(v, 0x4E477C, initFailure, sizeof(initFailure)) ||
+      !bytes(v, 0x4E47B1, falseReturn, sizeof(falseReturn)) ||
+      !bytes(v, 0x4E720E, nullModule, sizeof(nullModule)) ||
+      !direct_call(v, 0x8D5497, 0x4E4BA0) ||
+      !direct_call(v, 0x4E4766, 0x4E8630) ||
+      !direct_call(v, 0x4E870F, 0x4E71D0) ||
+      !direct_call(v, 0x4E7202, 0x4E6E40) ||
+      !direct_call(v, 0x4E5DF3, 0x4E87B0) ||
+      !relocated_pointer(v, 0x4E27438, 0x4E4730) ||
+      !relocated_pointer(v, 0x4E27440, 0x4E5DA0) ||
+      !relocated_pointer(v, 0x4E27600, 0x4E4970) ||
       !loader_call(v, kLoaderCallRva, kLoadLibraryIatRva)) return false;
   static constexpr std::uint8_t continuation[] = {
       0x48, 0x8B, 0xCB, 0x48, 0x8B, 0xF0,

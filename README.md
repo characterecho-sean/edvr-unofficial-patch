@@ -10,9 +10,15 @@ fixes is under [What it fixes](#what-it-fixes), and
 If something is not working, [open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose).
 Bugs get fixed there because you can attach the log, and the log usually shows
-the cause. The [Discord](https://discord.gg/ynkdf6Gdua) is for setup questions,
+the cause. The [Discord](https://discord.gg/AWJ6djKKzr) is for setup questions,
 "is this normal", or just talking about it; chat loses attachments and threads,
 so bug reports belong in an issue.
+
+To contribute code, start with [the build and validation guide](docs/building.md),
+make the change in your fork, and open a pull request with the checks you ran.
+C++ changes need a full native Windows validation build. For rendering changes,
+say which headset and VR runtime you tested, or say that a headset flight is
+still needed. The maintainer handles merging and releases.
 
 EDVR is free and stays free. If it improves your VR experience, [tips are
 welcome](https://ko-fi.com/seancharacterecho), but please do not feel any
@@ -38,8 +44,11 @@ as its active OpenXR runtime, whether SteamVR, PiOpenXR, VDXR or Meta's, and
 all of them run on the same native EDVR backend. The package has no backend to
 choose and never falls back to the legacy EDVR pair; Elite's legacy LibOVR path
 is not supported, even as a fallback. The release installer checks the Elite
-executable's profile and refuses an unsupported game revision before it writes
-anything.
+executable's profile and refuses Elite Dangerous (Horizons) or an unreadable
+executable before it writes anything. An Odyssey revision that build was not
+checked against installs with a warning: the game starts, the fixes tied to the
+game build stand down and the gfx log names each one, and the Oculus PC runtime
+may bypass EDVR's OpenXR runtime until an EDVR update for that revision.
 
 Before launching Elite, set the Windows active OpenXR runtime to the one you
 intend to use, since that is the one the bundled loader picks, and make sure
@@ -81,6 +90,38 @@ To place the files yourself, follow
 [docs/manual-install.md](docs/manual-install.md), which is the same install
 done by hand. It shows where each file goes and covers the `openvr_api.dll`
 rename that most manual installs get wrong.
+
+### Linux on Steam (Proton)
+
+Download `edvr-installer-linux-<version>.zip` from the release and unzip it. It
+contains `edvr_installer.sh`, `edvr-installer-linux.py`, the Windows
+`edvr-installer.exe`, and `README-linux.txt`. The launcher needs Python 3 and
+the Proton installation already used by Steam. It needs no Protontricks or
+system Wine. Run Elite once from Steam, then close it. On Steam Deck, use
+Desktop Mode and run as your normal user:
+
+```sh
+./edvr_installer.sh
+```
+
+This opens the Windows installer GUI with the Odyssey product folder
+preselected. For a flat install with a current installer build:
+
+```sh
+./edvr_installer.sh --install --scope flat
+```
+
+To see the Windows install plan without changing game files:
+
+```sh
+./edvr_installer.sh --preview --scope flat
+```
+
+Preview starts Steam's Proton and runtime and may update prefix bookkeeping.
+`--dry-run` resolves and prints the exact launch command without starting
+anything or writing files. See `README-linux.txt` in the ZIP for options. The
+shell launcher forwards all options to the Python wrapper; you can also run
+`python3 edvr-installer-linux.py` directly.
 
 ### Checking it worked
 

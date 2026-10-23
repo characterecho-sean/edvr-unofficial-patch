@@ -18,10 +18,10 @@ constexpr uint64_t kReportMs=20000;
 
 const char* SchedulerStackProbe::targetName(uint32_t target) noexcept {
     switch(target) {
-        case 0:return "worker-entry-144321940";
-        case 1:return "worker-entry-144320340";
-        case 2:return "record-drain-1442df940";
-        case 3:return "reset-repopulate-1436a0f50";
+        case 0:return "worker-entry-144324640";
+        case 1:return "worker-entry-144323040";
+        case 2:return "record-drain-1442e2600";
+        case 3:return "reset-repopulate-1436a3c50";
     }
     return "unknown";
 }
@@ -290,7 +290,7 @@ void SchedulerStackProbe::selfTestPopulateForJson() noexcept {
         a.count=900+i*10+1;
         a.depth=3;
         a.stack[0]=0x1462B4A0ull+uint64_t(i);
-        a.stack[1]=0x144321940ull+uint64_t(i);
+        a.stack[1]=0x144324640ull+uint64_t(i);
         a.stack[2]=0x1436A1000ull+uint64_t(i);
         SigEntry& b=t.sigs[1];
         b.fnv=0x2222222200000000ull+uint64_t(i)*0x100000000ull+0xBBBBull;

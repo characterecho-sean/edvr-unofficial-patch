@@ -28,8 +28,8 @@ def self_test():
     assert ss['active'] == 0, ss['active']
     targets = ss['targets']
     assert len(targets) == 4, targets
-    names = ['worker-entry-144321940', 'worker-entry-144320340',
-             'record-drain-1442df940', 'reset-repopulate-1436a0f50']
+    names = ['worker-entry-144324640', 'worker-entry-144323040',
+             'record-drain-1442e2600', 'reset-repopulate-1436a3c50']
     for i, t in enumerate(targets):
         assert t['name'] == names[i], t
         assert t['calls'] == 1000 + i * 100 + 1, t
@@ -43,7 +43,7 @@ def self_test():
             sig=f'0x{0x1111111100000000 + i * 0x100000000 + 0xAAAA:x}',
             depth=3, count=900 + i * 10 + 1,
             stack=[f'0x{0x1462B4A0 + i:x}',
-                   f'0x{0x144321940 + i:x}',
+                   f'0x{0x144324640 + i:x}',
                    f'0x{0x1436A1000 + i:x}']), sigs[0]
         assert sigs[1] == dict(
             sig=f'0x{0x2222222200000000 + i * 0x100000000 + 0xBBBB:x}',

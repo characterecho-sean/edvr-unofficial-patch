@@ -55,6 +55,13 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         privateBuffer.binding(FlatProjectionStage::Compute,0,first,count)};
     FlatProjectionBindingPlan plan;
     check(plan.initialize(ctx.Get(),bindings,3),"projection binding preflight");
+    FlatProjectionDiagnosticBinding diagnostic;
+    check(plan.diagnosticBinding(FlatProjectionStage::Pixel,2,diagnostic)&&diagnostic.ready&&
+        diagnostic.original==original.Get()&&diagnostic.replacement==replacement&&
+        diagnostic.first==first&&diagnostic.count==count&&diagnostic.revision==diagnostic.preparedRevision,
+        "read-only diagnostic identity pins exact stage range and private revision");
+    check(!plan.diagnosticBinding(FlatProjectionStage::Pixel,3,diagnostic)&&!diagnostic.original,
+        "diagnostic absent slot clears prior identity");
     float uploaded=0;
     check(plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,256,4,&uploaded) && uploaded==2.625f,
         "plan certificate copies the uploaded private revision");
@@ -120,7 +127,15 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(g_flatComputeInternal,"nested suppression retains outer guard");
     }
     check(!g_flatComputeInternal,"nested suppression restored");checkBindings(original.Get());
+    check(plan.diagnosticBinding(FlatProjectionStage::Vertex,1,diagnostic)&&diagnostic.ready,
+        "retained diagnostic binding is ready before invalidation");
     check(shadows.invalidate(original.Get(),1) && !privateBuffer.prepare(shadows,&patch,1,jitter,2),"failed prepare invalidates existing plan token");
+    check(plan.diagnosticBinding(FlatProjectionStage::Vertex,1,diagnostic)&&!diagnostic.ready&&
+        diagnostic.original==original.Get()&&diagnostic.replacement==replacement,
+        "diagnostic identity retains explicit unready state after invalidation");
+    check(!plan.diagnosticBinding(FlatProjectionStage::Pixel,2,diagnostic)&&!diagnostic.original&&
+        !diagnostic.replacement&&!diagnostic.ready,
+        "absent diagnostic binding remains distinct from retained unready binding");
     certificate[0]=713;
     check(!privateBuffer.copyUploadedConstants(replacement,0,4,certificate) && certificate[0]==713,"invalidated private upload cannot certify stale bytes");
     check(!plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,0,4,certificate),"plan certificate rejects invalidated upload");

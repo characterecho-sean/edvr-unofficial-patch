@@ -210,6 +210,17 @@ bool FlatProjectionBindingPlan::refreshPrepared() {
     for (size_t i = 0; i < count_; ++i) saved_[i].revision = saved_[i].prepared->revision;
     return true;
 }
+bool FlatProjectionBindingPlan::diagnosticBinding(FlatProjectionStage stage,UINT slot,
+    FlatProjectionDiagnosticBinding& out) const {
+    out={};for(size_t i=0;i<count_;++i) {
+        const auto& s=saved_[i];if(s.stage!=stage||s.slot!=slot)continue;
+        out.original=s.original.Get();out.replacement=s.replacement.Get();out.revision=s.revision;
+        out.first=s.first;out.count=s.count;
+        if(s.prepared){out.preparedRevision=s.prepared->revision;out.ready=s.prepared->ready&&s.revision&&
+            s.revision==s.prepared->revision&&s.prepared->original==s.original.Get()&&s.prepared->replacement==s.replacement.Get();}
+        return true;
+    }return false;
+}
 bool FlatProjectionBindingPlan::copyUploadedConstants(FlatProjectionStage stage,UINT slot,
     uint32_t offset,uint32_t count,void* out) const {
     if(!out || !count || !context_)return false;

@@ -474,6 +474,10 @@ void Config::auditResolve(void* parsedMap) {
     int deadShown = 0;
     for (const auto& kv : parsed) {
         if (known.count(kv.first) || movedOld.count(kv.first)) continue;
+        // Addon approvals (addons.<stem>) and addon settings
+        // (addon.<stem>.<header>.<key>) are made at runtime, so no generated
+        // table can list them; they are read by the plugin host.
+        if (kv.first.compare(0, 7, "addons.") == 0 || kv.first.compare(0, 6, "addon.") == 0) continue;
         if (!m_impl->auditNoted.insert("uk:" + kv.first).second) continue;
         // The separator belongs to the NAME, not to the iteration. It was
         // appended every time round while the name stopped after eight, so

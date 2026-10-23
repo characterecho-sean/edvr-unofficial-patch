@@ -119,9 +119,9 @@ def self_test():
                                       max_items_per_call=4711), ke['bucket_items']
     # Direct producers (bucket = param_2): per-producer stat sets, named.
     assert ke['bucket_items_direct'] == [
-        dict(producer='fun_144312e00', calls=6101, items=777777, neg_deltas=13,
+        dict(producer='fun_144315ac0', calls=6101, items=777777, neg_deltas=13,
              read_faults=2, max_items_per_call=909),
-        dict(producer='fun_14369c9c0', calls=6202, items=888888, neg_deltas=14,
+        dict(producer='fun_14369f6c0', calls=6202, items=888888, neg_deltas=14,
              read_faults=4, max_items_per_call=808)], ke['bucket_items_direct']
     print('kinematic json self-test passed')
 

@@ -2,13 +2,12 @@
 
 ## Status
 
-- **State:** design only, for the release after v0.18.0. Nothing is built.
-  It extends draft PR #46 (Devin Nemec, "generic OpenXR addon and plugin
-  architecture"), which this document reuses as its add-on tier (section 6).
-  The runtime-dependency check is done (section 4.1).
-- **Goal (Sean):** every fix and performance item belongs to one plugin,
-  plugins group features logically, and the user picks which to install in
-  the installer. A plugin that is not installed costs nothing.
+- **State:** 3rd-party add-on tier implemented on feat/third-party-plugins;
+  first-party features remain consolidated in core per user priority.
+  include/edvr_plugin_api.h synchronized with edvr-mfd. Full test gates green.
+- **Goal (Sean):** clean 3rd-party plugin architecture with trust-on-first-use,
+  F8 menu approval, SEH crash containment, and input filtering.
+
 - **Built on:** a read-only inventory of main `4296f142` (25 features, 225
   ini keys, 19 draw verdicts, the services they share; section 2), the flat
   CPU census of 2026-09-30 (hook entry about 1.4 ms over 17,180 calls a frame
@@ -24,8 +23,9 @@
   interface, a build gate against one plugin including another's internals,
   and an unselected plugin never registers. The interface stays C-compatible
   so a split into DLLs stays mechanical (section 10 has the reasons).
-  PR #46's C ABI stays the add-on tier, moved into the core so flat mode
-  gets it too.
+  PR #46's C ABI stays the add-on tier, moved into the core (VR-only as
+  built, see Scope). **Scope (PR #92 review): the 3rd-party tier is VR-only; flat is a follow-up (section 11).**
+  Live VR to flat to VR flown 2026-10-16; flat to VR after a flat launch is not possible in Elite today and is open future work (section 11).
 - **Decided, Q2-Q6 (Sean, 2026-09-30):** the nine plugins of section 4
   (regrouped: intro and on-foot-panel split out, UI quality inside
   temporal-aa); defaults that reproduce today's shipped behaviour; the
@@ -140,7 +140,8 @@ of flat mode (no XR renderer, so no manager). Defects found in the diff:
 - the runtime never opens EDVR's log, so plugin lines are dropped;
 - no fault containment around callbacks;
 - unsigned DLLs loaded from a folder;
-- `dt` fixed at 16 ms.
+- `dt` fixed at 16 ms (now fixed: the host measures it with QPC, clamped; the 0.016 the runtime passes is
+  only the fallback for a first frame or an out-of-range measurement).
 
 The OM-unbind fix in the same PR is unrelated and should land on its own.
 
@@ -263,9 +264,9 @@ installs as graphics + profile + ini (+ NGX) with no runtime (plan.cpp:314,
 Keep: the structSize-versioned C ABI, `EdvrPluginRegister`, `registerSetting`
 and `logNote`, `onRenderEye` for overlays, `onFilterInput`. Change:
 
-1. The manager moves into the core. It becomes one instance serving both
-   profiles, so flat mode gets add-ons too. The flat overlay point is the
-   final image before Present.
+1. The manager moves into the core. One instance; as built it serves VR
+   only (Status, scope line). The intended flat overlay point, a follow-up,
+   is the final image before Present.
 2. Load only add-ons named in the install manifest with matching SHA-256.
 3. Wrap every callback in fault containment. A faulting add-on is disabled
    for the session and named in the log.
@@ -417,3 +418,42 @@ when ReShade was removed). The rules:
   revisions (DllMain returns FALSE); `temporal_aa` or FSS `on` without the
   runtime costs with no output; the vr_runtime "Reinstall" advice
   (vr_runtime.cpp:106-113) and the README's second-log guidance turn wrong.
+
+## 11. Third-party add-on tier implementation (2026-10-13)
+
+Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/edvr_plugin_api.h` synchronized with `edvr-mfd`):
+- **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat
+  session calls no add-on. "Flat" below means any non-VR profile: only `Vr` and `LegacyVr` run add-ons, and `Passthrough` is dormant like `Flat`. The profile can switch live (`mode_watch.cpp` `commitPosted()`), so the manager follows it with a dormant state and
+  no change to the add-on ABI: a switch to flat suspends (no update, render or input callback; input ownership released through the normal release path;
+  the add-ons' F8 rows hidden, not deleted, through the menu-thread queue; log `plugin_manager: profile switched to flat, N addon(s) suspended ...`), a
+  switch back to VR resumes (callbacks again, rows shown; log `plugin_manager: profile switched to VR, N addon(s) active`). Nothing is unloaded at a
+  switch. A session launched in flat defers discovery, approval and loading to the first switch into VR (logs `plugin_manager: flat session, no
+  addon loaded (plugins are VR-only); discovery waits for a switch into VR`, then `plugin_manager: profile switched to VR, running the deferred addon
+  discovery`). The flat F8 menu has no Plugins tab (its tabs are `kFlatTabNames`: Performance, Debug). Flat support proper is a follow-up PR: an update and
+  composite hook on the final image before Present, a Plugins entry in `kFlatTabNames`, and a flat-session fixture counter in `addon_manager_test`.
+- **Flown 2026-10-16 (build `2fd5f50e`, Steam, OpenXR, edvr-mfd):** VR to flat to VR twice, live, with the add-on loaded (suspended, rows hidden,
+  resumed with settings intact); focus release; clean exit; settings saved under `addon.edvr_mfd.*`; a flat launch logs the deferral and loads nothing.
+- **Flat to VR (future work, low priority).** Elite offers no way to select the HMD after a flat launch, so this transition cannot happen today; Sean
+  is investigating it, and it is unlikely to land without demand. The deferred path is covered only by `addon_manager_test` case 18 and has never
+  flown. If the switch arrives, check before relying on it:
+  - Discovery and each add-on's `onInitialize` run on the Present thread inside `commitPosted()`: watch for a hitch at the first switch, and for
+    contention on the manager mutex with the OpenXR thread's dispatch.
+  - The OpenXR runtime and the scene pass start mid-session: confirm `openvr_api.dll` acquires the bridge exports from `d3d11.dll` late and that the
+    add-on update and render callbacks begin.
+  - Approval: an unapproved add-on first appears in F8 at that switch, and approving it loads it on the menu thread mid-session.
+  - Settings: rows registered at the switch read their saved values from the VR profile's file, which depends on `onProfileSwitched()` running after
+    `Config::switchProfile()`; keep that order.
+  - Decided (PR #92 review): add-ons are active only when the runtime profile is `Vr` or `LegacyVr`. Every other profile (`Flat`, `Passthrough`, `Invalid`)
+    is dormant, by one predicate (`!runtimeVrProfile()`, `addonsDormantProfile()` in `plugin_manager.cpp`) used for startup, dispatch, approval, loading
+    and transitions. Passthrough is a VR-only install whose game is in flat mode: no scene pass runs and the `addons.*` approvals are unreadable in it
+    (`runtimeProfileAllowsKey`), so a launch there defers discovery and VR to Passthrough suspends. Covered by `addon_manager_test` case 22.
+- **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
+- **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
+  - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.
+  - **In-Headset Approval:** Unapproved add-ons are displayed in the F8 menu "Plugins" tab with an `[Approve]` action button that immediately approves, writes to `edvr.ini`, and loads the plugin into memory.
+  - **SEH Fault Containment:** Non-destructor C wrapper functions isolate all external plugin invocations (`onInitialize`, `onShutdown`, `onUpdate`, `onRenderEye`, `onFilterInput`). Any unhandled access violation is trapped, logged, and disables the offending plugin for the session without crashing the game.
+  - **DirectInput Input Gate Filtering:** Resolves MFD-001 by restoring `rgdwPOV` to `0xFFFFFFFFu` when clearing joystick state and allowing plugins to swallow directional and button events cleanly.
+  - **Menu Setting Persistence:** Resolves MFD-005 by enqueuing writes to `addon.<stem>.<header>.<key>` (section `[addon.<stem>.<header>]`) in `edvr.ini` whenever settings change. `<stem>` is the add-on's DLL file stem, the same identity that tags its rows and keys its approval in `[addons]`, so two add-ons that register the same header and key keep separate rows and separate saved values; a row is only ever removed by its own owner.
+  - **Decoupled OpenXR Render Callbacks:** `openvr_api.dll` dynamically acquires bridge exports from `d3d11.dll` at runtime without static link coupling or duplicating the extension manager instance.
+  - **Test Rig (`addon_manager_test`):** Automated test suite verifying hash verification, unapproved DLL rejection, live approval, input filtering, and SEH containment.
+

@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
+#include "station_draw_mask.h"   // the flat sun draw issued with every write masked (built 2026-10-21)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
@@ -11,6 +12,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 
 #include <atomic>   // g_renderBelowEye
 #include <cctype>   // toupper, in the census-skip spec parser
@@ -30,6 +32,7 @@
 #include "backdrop_fix.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
+#include "flat_issue_epoch.h"
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -180,6 +183,20 @@ constexpr size_t kSlotDrawInstanced         = 21;
 constexpr size_t kSlotVSSetShaderResources  = 25;
 constexpr size_t kSlotOMSetRenderTargets    = 33;
 constexpr size_t kSlotOMSetBlendState       = 35;
+// Counted from the SDK vtable, anchored on DrawInstanced=21, OMSetBlendState=35,
+// ExecuteCommandList=58 and ClearState=110 (um/d3d11.h, um/d3d11_1.h).
+// These are not reclaim slots: a quiet frame is normal for each of them.
+constexpr size_t kSlotGSSetShader           = 23;
+constexpr size_t kSlotSetPredication        = 30;
+constexpr size_t kSlotOMSetDepthStencilState = 36;
+constexpr size_t kSlotHSSetShader           = 60;
+constexpr size_t kSlotDSSetShader           = 64;
+constexpr size_t kSlotCopySubresourceRegion1 = 115;
+constexpr size_t kSlotUpdateSubresource1    = 116;
+constexpr size_t kSlotDiscardResource       = 117;
+constexpr size_t kSlotDiscardView           = 118;
+constexpr size_t kSlotVSSetConstantBuffers1 = 119;
+constexpr size_t kSlotSwapDeviceContextState = 131;
 // The other way to bind render targets. Same effect on slot 0, and it is the
 // call an engine makes whenever a UAV is bound alongside -- so leaving it out
 // meant the binding could change without us seeing it.
@@ -353,6 +370,25 @@ typedef void(STDMETHODCALLTYPE* PFN_CopyStructureCount)(
     ID3D11DeviceContext*, ID3D11Buffer*, UINT, ID3D11UnorderedAccessView*);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
                                                         ID3D11CommandList*, BOOL);
+typedef void(STDMETHODCALLTYPE* PFN_GSSetShader)(ID3D11DeviceContext*, ID3D11GeometryShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_HSSetShader)(ID3D11DeviceContext*, ID3D11HullShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_DSSetShader)(ID3D11DeviceContext*, ID3D11DomainShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_SetPredication)(ID3D11DeviceContext*, ID3D11Predicate*, BOOL);
+typedef void(STDMETHODCALLTYPE* PFN_OMSetDepthStencilState)(ID3D11DeviceContext*,
+                                                            ID3D11DepthStencilState*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_VSSetConstantBuffers1)(ID3D11DeviceContext*, UINT, UINT,
+                                                           ID3D11Buffer* const*, const UINT*, const UINT*);
+typedef void(STDMETHODCALLTYPE* PFN_CopySubresourceRegion1)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                                            UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_UpdateSubresource1)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                                        const D3D11_BOX*, const void*, UINT, UINT, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_DiscardResource)(ID3D11DeviceContext*, ID3D11Resource*);
+typedef void(STDMETHODCALLTYPE* PFN_DiscardView)(ID3D11DeviceContext*, ID3D11View*);
+typedef void(STDMETHODCALLTYPE* PFN_SwapDeviceContextState)(ID3D11DeviceContext*,
+                                                            ID3DDeviceContextState*, ID3DDeviceContextState**);
 
 struct State {
     VTableHook hook;
@@ -448,6 +484,18 @@ struct State {
     PFN_QueryMark            realBegin = nullptr;
     PFN_QueryMark            realEnd = nullptr;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
+    // Geometry Issue reuse. Installed when the vtable reaches them; a miss freezes reuse.
+    PFN_GSSetShader          realGSSetShader = nullptr;
+    PFN_HSSetShader          realHSSetShader = nullptr;
+    PFN_DSSetShader          realDSSetShader = nullptr;
+    PFN_SetPredication       realSetPredication = nullptr;
+    PFN_OMSetDepthStencilState realOMSetDepthStencilState = nullptr;
+    PFN_VSSetConstantBuffers1 realVSSetConstantBuffers1 = nullptr;
+    PFN_CopySubresourceRegion1 realCopySubresourceRegion1 = nullptr;
+    PFN_UpdateSubresource1   realUpdateSubresource1 = nullptr;
+    PFN_DiscardResource      realDiscardResource = nullptr;
+    PFN_DiscardView          realDiscardView = nullptr;
+    PFN_SwapDeviceContextState realSwapDeviceContextState = nullptr;
     // The bound target's underlying resource, cached per binding generation
     // for the FSS viewport paths -- resolved only while fssResActive(), so a
     // session that never opens the scanner never pays it.
@@ -2190,7 +2238,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
                 info.isTexture2D) {
                 introPanelNoteFill(info.a, info.b);
-                // And the skip's witness: with fix.intro_video = skip this
+                // And the skip's witness: with visual.intro_video = skip this
                 // fill is the movie playing despite the refusal.
                 introSkipNoteMovieDrew();
             }
@@ -2926,6 +2974,7 @@ void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
+    if (!foreignContext(self)) flatIssueEpochBumpRt();
     if (g_flatComputeInternal) { g_state->realOMSetRenderTargets(self, n, rtvs, dsv); return; }
     ++g_state->thunkHits[kHitOmSet];
     if (foreignContext(self)) {
@@ -2962,6 +3011,8 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             UINT uavCount,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
+    // 0xFFFFFFFF keeps the current targets. Anything else can replace the depth view.
+    if (!foreignContext(self) && n != 0xFFFFFFFFu) flatIssueEpochBumpRt();
     if (g_flatComputeInternal) { g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); return; }
     // A foreign deferred context cannot write the immediate target yet, but
     // an eventual command list or undocumented cross-context path must not
@@ -3027,6 +3078,7 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
+    if (!foreignContext(self) && start <= 1u && 1u - start < n) flatIssueEpochBumpCb();
     if (g_flatComputeInternal) { g_state->realVSSetConstantBuffers(self, start, n, bufs); return; }
     ++g_state->thunkHits[kHitVsCb];
     if (foreignContext(self)) {
@@ -3072,6 +3124,63 @@ void STDMETHODCALLTYPE hookedVSSetShaderResources(ID3D11DeviceContext* self, UIN
             bindingSet(BindSlot::VsSrv33, srvs ? srvs[kEngineVelocityPoolSlot - start] : nullptr);
     }
     g_state->realVSSetShaderResources(self, start, n, srvs);
+}
+
+// Geometry Issue reuse. These stages are not in the binding shadow. Every owner
+// call, including EDVR's own internal rebinds, moves the epoch. The bodies
+// only forward: a missed call is a frozen certificate, not a guessed binding.
+void STDMETHODCALLTYPE hookedGSSetShader(ID3D11DeviceContext* self, ID3D11GeometryShader* shader,
+                                         ID3D11ClassInstance* const* classes, UINT n) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
+    g_state->realGSSetShader(self, shader, classes, n);
+}
+void STDMETHODCALLTYPE hookedHSSetShader(ID3D11DeviceContext* self, ID3D11HullShader* shader,
+                                         ID3D11ClassInstance* const* classes, UINT n) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
+    g_state->realHSSetShader(self, shader, classes, n);
+}
+void STDMETHODCALLTYPE hookedDSSetShader(ID3D11DeviceContext* self, ID3D11DomainShader* shader,
+                                         ID3D11ClassInstance* const* classes, UINT n) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
+    g_state->realDSSetShader(self, shader, classes, n);
+}
+void STDMETHODCALLTYPE hookedSetPredication(ID3D11DeviceContext* self, ID3D11Predicate* predicate, BOOL value) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
+    g_state->realSetPredication(self, predicate, value);
+}
+void STDMETHODCALLTYPE hookedOMSetDepthStencilState(ID3D11DeviceContext* self, ID3D11DepthStencilState* state, UINT ref) {
+    if (!foreignContext(self)) flatIssueEpochBumpDepth();
+    g_state->realOMSetDepthStencilState(self, state, ref);
+}
+void STDMETHODCALLTYPE hookedVSSetConstantBuffers1(ID3D11DeviceContext* self, UINT start, UINT n,
+                                                   ID3D11Buffer* const* bufs, const UINT* first, const UINT* counts) {
+    if (!foreignContext(self) && start <= 1u && 1u - start < n) flatIssueEpochBumpCb();
+    g_state->realVSSetConstantBuffers1(self, start, n, bufs, first, counts);
+}
+void STDMETHODCALLTYPE hookedCopySubresourceRegion1(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub,
+                                                    UINT dstX, UINT dstY, UINT dstZ, ID3D11Resource* src, UINT srcSub,
+                                                    const D3D11_BOX* box, UINT copyFlags) {
+    if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
+    g_state->realCopySubresourceRegion1(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub, box, copyFlags);
+}
+void STDMETHODCALLTYPE hookedUpdateSubresource1(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub,
+                                                const D3D11_BOX* box, const void* data, UINT rowPitch, UINT depthPitch, UINT copyFlags) {
+    if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
+    g_state->realUpdateSubresource1(self, dst, dstSub, box, data, rowPitch, depthPitch, copyFlags);
+}
+void STDMETHODCALLTYPE hookedDiscardResource(ID3D11DeviceContext* self, ID3D11Resource* resource) {
+    if (!foreignContext(self)) flatIssueEpochNoteResource(resource);
+    g_state->realDiscardResource(self, resource);
+}
+void STDMETHODCALLTYPE hookedDiscardView(ID3D11DeviceContext* self, ID3D11View* view) {
+    // The view's resource is not known without another query. A discard is rare; revoke.
+    if (!foreignContext(self)) flatIssueEpochRevoke();
+    g_state->realDiscardView(self, view);
+}
+void STDMETHODCALLTYPE hookedSwapDeviceContextState(ID3D11DeviceContext* self, ID3DDeviceContextState* state,
+                                                    ID3DDeviceContextState** previous) {
+    if (!foreignContext(self)) flatIssueEpochRevoke();
+    g_state->realSwapDeviceContextState(self, state, previous);
 }
 
 // Every blend-state set bumps the Blend generation: EDVR's own derived state
@@ -3129,6 +3238,7 @@ uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
 
 void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
                                          ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
     if (g_flatComputeInternal) { g_state->realVSSetShader(self, vs, ci, n); return; }
     if (!foreignContext(self)) {
         const uint64_t h = shaderHashMemo(g_state->vsMemo, vs);
@@ -3141,6 +3251,7 @@ void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11Vertex
 
 void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* ps,
                                          ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) flatIssueEpochBumpStage();
     if (g_flatComputeInternal) { g_state->realPSSetShader(self, ps, ci, n); return; }
     if (!foreignContext(self)) {
         const uint64_t h = shaderHashMemo(g_state->psMemo, ps);
@@ -3161,6 +3272,7 @@ void forgetBindings(State*) { bindingForgetAll(); }
 // and ClearState are neighbours in that table. One line each is what turns "the
 // count looks right" into evidence, on whatever machine the log came from.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    if (!foreignContext(self)) flatIssueEpochRevoke();
     if (g_flatComputeInternal) { g_state->realClearState(self); return; }
     gpuFrameCommandIfLive(self);
     State* s = g_state;
@@ -3188,6 +3300,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
 void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                                                 ID3D11CommandList* list,
                                                 BOOL restoreContextState) {
+    if (!foreignContext(self)) flatIssueEpochRevoke();
     gpuFrameCommandIfLive(self);
     State* s = g_state;
     if (foreignContext(self)) {
@@ -3250,6 +3363,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // abandoned. Drop that record before the driver can recycle its pointer.
     flatRuntimeMapBouncePreMap(res);
     if (g_flatComputeInternal) {
+        if (!foreignContext(self) && type != D3D11_MAP_READ) flatIssueEpochNoteResource(res);
         const HRESULT hr=g_state->realMap(self,res,sub,type,flags,mapped);
         flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
         return hr;
@@ -4432,7 +4546,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
-    if (g_flatComputeInternal) { g_state->realCopyResource(self, dst, src); return; }
+    if (g_flatComputeInternal) {
+        if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
+        g_state->realCopyResource(self, dst, src); return;
+    }
     gpuFrameCommandIfLive(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
@@ -4480,7 +4597,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
             FlatMutationDetails::clearDepth(flags,depth,stencil));
         flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
     }
-    if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
+    if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource), FlatOverlayMutationOp::Written, true); }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
@@ -4608,7 +4725,10 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
-    if (g_flatComputeInternal) { g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return; }
+    if (g_flatComputeInternal) {
+        if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
+        g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return;
+    }
     gpuFrameCommandIfLive(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
@@ -4652,7 +4772,10 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
-    if (g_flatComputeInternal) { g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return; }
+    if (g_flatComputeInternal) {
+        if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
+        g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return;
+    }
     gpuFrameCommandIfLive(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
@@ -4836,14 +4959,70 @@ static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count,
 
 // Built v14.34: the optimized station's sun skip in the flat profile. Flat draws never reach beginPanelOverride (VR's verdict makes the same call after its
 // foreign-context return), so the four draw kinds ask here, first, in their flat branch: owner context only, one atomic load while the sun is on.
+// Built 2026-10-21: the answer no longer ends the hook. The draw is the game's deferred lighting pass (kFlatDeferredHdrVs/Ps), which writes the scene HDR
+// target and gives it its camera; the flat runtime's model needs to see it. So the hook goes on to run the scope for it as for any draw and
+// FlatStationSunGate (below) decides what reaches the GPU.
 static inline bool flatStationSkipsDraw(ID3D11DeviceContext* self) {
     return self == g_state->ownerCtx && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
 }
 
+// The station's skipped sun draw, once the flat runtime's scope has observed it and (when it planned anything) begun. Every flat draw builds one of these
+// between beginActualDraw and the real call; for any draw but a skipped sun draw it does nothing (issues() is true, restore() is a no-op). What the
+// scope does depends on needsActualDraw():
+//  - false: the scope plans nothing around the game's issue (it only observed the draw: the model, the trace, the census), so the real draw call is
+//    not made. No GPU work; the scope destructs as for any draw.
+//  - true: some plan (a forward light or light payload capture, a draw packet, an overlay, the foreground or untrusted brackets, a HUD take) expects the
+//    draw between beginActualDraw and endActualDraw. The hook runs them around a real draw issued with every colour write and every depth and stencil
+//    write off (station_draw_mask.h); restore() puts the context's blend state, blend factor, sample mask, depth-stencil state and stencil reference
+//    back before endActualDraw. uiReissue is not called for a skipped draw: a second issue would put the sun back.
+// If the masking states cannot be made the draw is not issued and the plans still get their begin and end. Which way it went is counted (the station's
+// 30 s line); a path that never runs reads 0.
+static edvr::stationmask::Mask g_stationSunMask;
+// The two setters the mask uses are the game's own entry points, past the thunks (no binding shadow, issue epoch or blend generation moves: the state
+// is put back before anything else looks). A slot that was never hooked (realOMSetDepthStencilState stays null on a vtable too short for it) is the
+// context's own method.
+static void STDMETHODCALLTYPE stationMaskSetBlend(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const FLOAT factor[4], UINT sampleMask) {
+    if (g_state->realOMSetBlendState) g_state->realOMSetBlendState(ctx, state, factor, sampleMask);
+    else ctx->OMSetBlendState(state, factor, sampleMask);
+}
+static void STDMETHODCALLTYPE stationMaskSetDepth(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, UINT stencilRef) {
+    if (g_state->realOMSetDepthStencilState) g_state->realOMSetDepthStencilState(ctx, state, stencilRef);
+    else ctx->OMSetDepthStencilState(state, stencilRef);
+}
+class FlatStationSunGate {
+public:
+    FlatStationSunGate(ID3D11DeviceContext* self, const FlatRuntimeDrawScope& scope, bool stationSkip) : ctx_(self) {
+        if (!stationSkip) return;
+        if (!scope.needsActualDraw()) {
+            issue_ = false;
+            optimizedStationNoteSunDraw(SunDrawPath::kNotIssued);
+            return;
+        }
+        masked_ = g_stationSunMask.begin(self, &stationMaskSetBlend, &stationMaskSetDepth);
+        issue_ = masked_;
+        optimizedStationNoteSunDraw(masked_ ? SunDrawPath::kMasked : SunDrawPath::kNotIssued);
+    }
+    bool issues() const { return issue_; }
+    void restore() {
+        if (masked_) {
+            g_stationSunMask.end(ctx_);
+            masked_ = false;
+        }
+    }
+    ~FlatStationSunGate() { restore(); }   // an exception or an early return between the real call and the end call still puts the state back
+    FlatStationSunGate(const FlatStationSunGate&) = delete;
+    FlatStationSunGate& operator=(const FlatStationSunGate&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+    bool issue_ = true;
+    bool masked_ = false;
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDraw];
@@ -4857,9 +5036,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDraw(self, count, start);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);   // built 2026-10-21: only a skipped sun draw is changed (no real call, or a masked one)
+        if (sun.issues()) g_state->realDraw(self, count, start);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -4921,7 +5102,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
@@ -4933,9 +5114,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -4995,7 +5178,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5008,9 +5191,11 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -5065,7 +5250,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5079,10 +5264,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues())
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                              baseVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
@@ -5677,6 +5865,7 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
                                 ID3D11RenderTargetView* const* rtvs,
                                 ID3D11DepthStencilView* dsv) {
     if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
+    flatIssueEpochBumpRt();
     g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
 }
 
@@ -5688,12 +5877,14 @@ void vScreenDrawRaw(ID3D11DeviceContext* ctx, uint32_t vertexCount, uint32_t sta
 void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
                            ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances) {
     if (!g_state || !g_state->realVSSetShader || !ctx) return;
+    flatIssueEpochBumpStage();
     g_state->realVSSetShader(ctx, vs, classInstances, numClassInstances);
 }
 
 void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
                            ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances) {
     if (!g_state || !g_state->realPSSetShader || !ctx) return;
+    flatIssueEpochBumpStage();
     g_state->realPSSetShader(ctx, ps, classInstances, numClassInstances);
 }
 
@@ -5703,10 +5894,17 @@ void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state
     g_state->realOMSetBlendState(ctx, state, blendFactor, sampleMask);
 }
 
+void vScreenOMSetDepthStencilStateRaw(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, uint32_t stencilRef) {
+    if (!ctx) return;
+    if (g_state && g_state->realOMSetDepthStencilState) g_state->realOMSetDepthStencilState(ctx, state, stencilRef);
+    else ctx->OMSetDepthStencilState(state, stencilRef);
+}
+
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch) {
     if (!g_state || !g_state->realUpdateSubresource || !ctx) return;
+    flatIssueEpochNoteResource(dstResource);
     g_state->realUpdateSubresource(ctx, dstResource, dstSubresource, dstBox, srcData, srcRowPitch,
                                    srcDepthPitch);
 }
@@ -5730,6 +5928,7 @@ void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTarge
 
 void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src) {
     if (!ctx || !dst || !src) return;
+    flatIssueEpochNoteResource(dst);
     if (g_state && g_state->realCopyResource) {
         g_state->realCopyResource(ctx, dst, src);
     } else {
@@ -7013,6 +7212,38 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realDrawInstanced));
     s.hook.replace(kSlotDrawIndexedInstanced, &hookedDrawIndexedInstanced,
                    reinterpret_cast<void**>(&s.realDrawIndexedInstanced));
+
+    // Slots past ClearState exist only on a Context1 (or later) vtable. A miss
+    // freezes reuse; the fresh queries stay in place either way.
+    const auto issueSlot = [&](size_t slot, void* fn, void** orig) {
+        if (s.hook.executablePrefix() <= slot || !orig) return false;
+        return s.hook.replace(slot, fn, orig) && *orig != nullptr;
+    };
+    const bool depthHook = issueSlot(kSlotOMSetDepthStencilState, &hookedOMSetDepthStencilState,
+                                     reinterpret_cast<void**>(&s.realOMSetDepthStencilState));
+    const bool gsHook = issueSlot(kSlotGSSetShader, &hookedGSSetShader, reinterpret_cast<void**>(&s.realGSSetShader));
+    const bool hsHook = issueSlot(kSlotHSSetShader, &hookedHSSetShader, reinterpret_cast<void**>(&s.realHSSetShader));
+    const bool dsHook = issueSlot(kSlotDSSetShader, &hookedDSSetShader, reinterpret_cast<void**>(&s.realDSSetShader));
+    const bool predicateHook = issueSlot(kSlotSetPredication, &hookedSetPredication, reinterpret_cast<void**>(&s.realSetPredication));
+    const bool cb1Hook = issueSlot(kSlotVSSetConstantBuffers1, &hookedVSSetConstantBuffers1,
+                                   reinterpret_cast<void**>(&s.realVSSetConstantBuffers1));
+    const bool copy1Hook = issueSlot(kSlotCopySubresourceRegion1, &hookedCopySubresourceRegion1,
+                                     reinterpret_cast<void**>(&s.realCopySubresourceRegion1));
+    const bool update1Hook = issueSlot(kSlotUpdateSubresource1, &hookedUpdateSubresource1,
+                                       reinterpret_cast<void**>(&s.realUpdateSubresource1));
+    const bool discardResourceHook = issueSlot(kSlotDiscardResource, &hookedDiscardResource,
+                                               reinterpret_cast<void**>(&s.realDiscardResource));
+    const bool discardViewHook = issueSlot(kSlotDiscardView, &hookedDiscardView, reinterpret_cast<void**>(&s.realDiscardView));
+    const bool swapHook = issueSlot(kSlotSwapDeviceContextState, &hookedSwapDeviceContextState,
+                                    reinterpret_cast<void**>(&s.realSwapDeviceContextState));
+    const bool issueHooks = depthHook && gsHook && hsHook && dsHook && predicateHook && cb1Hook &&
+        copy1Hook && update1Hook && discardResourceHook && discardViewHook && swapHook;
+    if (!issueHooks) flatIssueEpochFreeze();
+    Log::get().note("flat geometry issue reuse hooks: prefix=%zu depth=%u gs=%u hs=%u ds=%u predicate=%u vs-cb1=%u copy1=%u update1=%u discard-resource=%u discard-view=%u swap=%u frozen=%u",
+                    s.hook.executablePrefix(), depthHook ? 1u : 0u, gsHook ? 1u : 0u, hsHook ? 1u : 0u, dsHook ? 1u : 0u,
+                    predicateHook ? 1u : 0u, cb1Hook ? 1u : 0u, copy1Hook ? 1u : 0u, update1Hook ? 1u : 0u,
+                    discardResourceHook ? 1u : 0u, discardViewHook ? 1u : 0u, swapHook ? 1u : 0u,
+                    flatIssueEpochFrozen() ? 1u : 0u);
 
     if (!s.hook.commit()) {
         Log::get().note("vScreen: vtable commit failed; not installing");

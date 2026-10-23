@@ -21,13 +21,13 @@ between the engine's and the pool's coordinates, the engine record behind
 each t33 record (its parts' world positions matched to the pool), and per
 engine record the per-eye verdicts of the three per-view tests -- the
 distance/LOD mask rec+0x208 (read by each eye view's own +0x570 bits, not its
-array index), the traversal gate FUN_14430EFE0, the draw-item builder's
+array index), the traversal gate FUN_144311CA0, the draw-item builder's
 frustum -- beside the ledger's per-eye draws of its parts, with a per-slot
 tally (every claimant of a t33 slot kept, so a shadow-only twin at the same
 pivot never counts against a test) that says which test admits the pool
 draws: the admitting test rejects no drawn slot and admits no record with
 nothing drawn. With a version 2 gate file, the same per PART: the builder's
-per-(sub-item, view) test FUN_1442B3FC0 -- each part's own sphere (world
+per-(sub-item, view) test FUN_1442B6C80 -- each part's own sphere (world
 centre, radius), view and verdict joined through its builder row, entry and
 sub-item to the t33 slots its position claims -- tallied against the
 ledger's per-eye draws per (slot, eye), with the slots drawn in one eye
@@ -36,7 +36,7 @@ all). With version 9
 geometry in drawstate_<stamp>.eyemesh.bin: the occluder set (seen records
 within --occluder-range metres), its meshes' triangle counts and whether
 their states are opaque and depth-writing. With --lod-bias (version 2):
-FUN_1442B3FC0 re-run on every part row -- its screen-size and frustum terms
+FUN_1442B6C80 re-run on every part row -- its screen-size and frustum terms
 exactly; its t0 term needs the part's LOD table, which the probe does not
 record, so each model's t0 is bracketed by its rows -- and per factor k the
 pool eye draws a bias there removes by the exact instance-range join: the
@@ -56,7 +56,7 @@ version 1 also every [v2] field),
 little-endian, written field by field (cull_gate_probe.cpp, write()):
     8s magic, u32 version, u32 first frame, u32 last frame,
     u32 flags (bit 0: the builder's plane test ran; [v2] bit 1: the part
-      test FUN_1442B3FC0 was hooked), u32 DAT_145ea3399,
+      test FUN_1442B6C80 was hooked), u32 DAT_145ea63e9,
     12 x u32 counters (gate calls/kept/dropped, builder calls/kept/dropped,
       entries dropped, sub-items dropped, faults, record-pose mismatches,
       view dumps, dumps dropped),
@@ -79,7 +79,7 @@ little-endian, written field by field (cull_gate_probe.cpp, write()):
       [v2] f32[4] model+0x00 (the local centre), f32[4] model+0x10 ([0] the
       radius),
     u32 sub-items; per sub-item f32[4] quaternion, f32[4] position,
-    [v2] u32 parts; per FUN_1442B3FC0 call: u64 pose context, u64 sub-item
+    [v2] u32 parts; per FUN_1442B6C80 call: u64 pose context, u64 sub-item
       address (0 unless verified), u64 view +0x570 bits, [v3] u64 LOD table
       pointer *(entry+8) (0 unless verified), f32[3] world centre, f32
       radius, u32 frame, u32 builder row (index in this file, 0xFFFFFFFF
@@ -130,7 +130,7 @@ POOL_RECORD = 336
 # --------------------------------------------------------------------------- the file
 
 def decode_table(raw):
-    """A 0x80-byte LOD table as FUN_1442B3FC0 reads it (decomp_42B3FC0.txt:
+    """A 0x80-byte LOD table as FUN_1442B6C80 reads it (decomp_42B3FC0.txt:
     76-109): t[i] the first float of each 16-byte row (t0 the reject
     threshold, t1.. the level thresholds), count the u32 at +0x70. t[7] is
     the count's own bits as a float: what the engine's loop reads at a count
@@ -796,13 +796,13 @@ def run(pool_dir, stamp, args):
 
 
 def report_parts(gate, obs_frame, eye_views, pclaims, drawn, seen_of, verdicts, off, pool, args):
-    """The per-part site (version 2): FUN_1442B3FC0's verdicts per part and
+    """The per-part site (version 2): FUN_1442B6C80's verdicts per part and
     eye against the ledger's per-eye draws, the one-eye slots, and a listing."""
     if gate.get('version', 1) < 2:
-        print('  gate file version 1: no per-part rows (FUN_1442B3FC0 was not captured before version 2)')
+        print('  gate file version 1: no per-part rows (FUN_1442B6C80 was not captured before version 2)')
         return
     c = gate['counts']
-    print('  per-part test FUN_1442B3FC0: %s; %d calls in the window, %d rows kept, %d dropped over the cap; of '
+    print('  per-part test FUN_1442B6C80: %s; %d calls in the window, %d rows kept, %d dropped over the cap; of '
           'the kept rows %d with the builder frame unverified, %d from a foreign caller, %d outside a kept builder '
           'row' % ('hooked' if gate['flags'] & FLAG_PART_HOOKED else 'STOOD DOWN (no rows by construction)',
                    c['part_calls'], c['part_kept'], c['part_dropped'], c['part_unverified'], c['part_foreign'],
@@ -924,7 +924,7 @@ def report_parts(gate, obs_frame, eye_views, pclaims, drawn, seen_of, verdicts, 
 
 # --------------------------------------------------------------------------- the LOD bias (--lod-bias)
 
-SIZE_FACTOR = 0.5   # DAT_144E2F870 (0.5) x DAT_144E2F880 (1.0), .rdata of build 332841 (decomp_42B3FC0.txt:68-71)
+SIZE_FACTOR = 0.5   # DAT_144E328B0 (0.5) x DAT_144E328C0 (1.0), .rdata of build 334473 (decomp_42B3FC0.txt:68-71)
 
 
 def factors(text):
@@ -939,12 +939,12 @@ def factors(text):
 
 
 def part_row_terms(gate):
-    """FUN_1442B3FC0 (decomp_42B3FC0.txt) re-run on every version 2 part row
+    """FUN_1442B6C80 (decomp_42B3FC0.txt) re-run on every version 2 part row
     whose frame has a view dump. Per row: d, the distance from the view's
     camera (+0x540, xyz); size_ok, the screen-size term 0.5*(A*d + B) <= r
     (A = view +0x550, B = +0x560: the size of one pixel per metre of
     distance and its orthographic constant, FUN_14280F800); inside, the
-    frustum term (FUN_1404F4E10 on the view's dumped planes: out when
+    frustum term (FUN_1404F4F70 on the view's dumped planes: out when
     n.c - w > r); f = A*(d - r)*s + B, the LOD distance (s = the context's
     +0x30). The third term, f <= t0 (the first float of the part's LOD
     table, param_1[4] -> *(entry+8), 0x80 bytes), and the LOD pick need that
@@ -999,7 +999,7 @@ def part_row_terms(gate):
 
 
 def table_repro(gate, terms=None):
-    """Version 3: FUN_1442B3FC0's third term and LOD pick re-run with each
+    """Version 3: FUN_1442B6C80's third term and LOD pick re-run with each
     row's own recorded table, on the rows whose first two terms (screen size,
     frustum) pass. Returns the tally; a disagreement within 0.1% of a
     threshold is 'near' (the engine's distance is rsqrt(rcp(d^2)), ~2^-11 of
@@ -1068,7 +1068,7 @@ def report_tables(gate, limit):
         print('  no view dump: the third term cannot be re-run')
         return
     r = table_repro(gate)
-    print('  the tables re-run FUN_1442B3FC0\'s t0 term and LOD pick on %d rows its screen-size and frustum terms pass: '
+    print('  the tables re-run FUN_1442B6C80\'s t0 term and LOD pick on %d rows its screen-size and frustum terms pass: '
           '%d agree, %d disagree (%d engine passes a table rejects, %d engine rejects a table passes, %d nibbles '
           'differ; %d of them within 0.1%% of a threshold); %d such rows name no recorded table, %d tables run past 7 '
           'levels' % (r['rows'], r['agree'], r['rows'] - r['agree'], r['pass_rejected'], r['reject_passed'],
@@ -1158,7 +1158,7 @@ def draws_removed(kept, claims_of_slot, eye_draws):
 
 
 def report_lod_bias(gate, obs_frame, eye_views, pclaims, verdicts, eye_draws, ks, ms):
-    """--lod-bias: the pool eye draws a bias k at FUN_1442B3FC0 removes, by
+    """--lod-bias: the pool eye draws a bias k at FUN_1442B6C80 removes, by
     the exact instance-range join, per eye and in all; share of the pool eye
     draws and ms at the given settlement shares (post-cut, pre-cut)."""
     import numpy as np
@@ -1175,7 +1175,7 @@ def report_lod_bias(gate, obs_frame, eye_views, pclaims, verdicts, eye_draws, ks
     d0 = next((d for d in gate['dumps'] if d['frame'] == obs_frame), None)
     if d0 is not None and max(eye_views.values()) < len(d0['views']):
         va, vb = d0['views'][eye_views['A']], d0['views'][eye_views['B']]
-        print('  LOD bias at FUN_1442B3FC0, frame %d: eye views %d / %d, A (+0x550) %.9g / %.9g, B (+0x560) %g / %g, '
+        print('  LOD bias at FUN_1442B6C80, frame %d: eye views %d / %d, A (+0x550) %.9g / %.9g, B (+0x560) %g / %g, '
               's (ctx+0x30) %g' % (obs_frame, eye_views['A'], eye_views['B'], va['lod_scale'], vb['lod_scale'],
                                    va['lod_bias'], vb['lod_bias'], d0['lod_scale']))
     print('  reproduction, every row with a view dump (%d of %d): engine passes the model rejects %d; engine rejects '
@@ -1618,7 +1618,7 @@ def main():
     ap.add_argument('--parts', type=int, default=40, help='parts to list (version 2; one-eye parts first)')
     ap.add_argument('--parts-csv', metavar='FILE', help='write every joined part (version 2) to this CSV')
     ap.add_argument('--lod-bias', metavar='K[,K...]', type=factors, default=None,
-                    help='version 2: the pool eye draws a bias k at FUN_1442B3FC0 removes (exact join), per k')
+                    help='version 2: the pool eye draws a bias k at FUN_1442B6C80 removes (exact join), per k')
     ap.add_argument('--settlement-ms', metavar='POST,PRE', type=factors, default=[6.3, 8.5],
                     help='the settlement\'s draw-submission share in ms, post-cut and pre-cut (default 6.3,8.5)')
     ap.add_argument('--tables', type=int, default=10, help='version 3: LOD tables to list, most-used first')

@@ -42,7 +42,7 @@ PUBLIC recordWriterUnwindResume
     ret
 recordWriterUnwindStub ENDP
 
-; A writer-shaped frame with the direct_43130aa record at caller RSP+60h.
+; A writer-shaped frame with the direct_4315d6a record at caller RSP+60h.
 ; It deliberately clobbers RBX/RDI after saving them, so the ownership probe
 ; only sees the ancestor's values if production RtlVirtualUnwind restores them.
 recordWriterOwnershipUnwindStub PROC FRAME

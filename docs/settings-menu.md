@@ -2,13 +2,13 @@
 
 ## Status
 
-*Updated 2026-10-08 (previously 2026-09-29). Historical findings summarize
-the journal below; the current timing and overlay qualification is linked separately. Dated notes
-and the ruled-out list: "Status detail", straight after this block.*
+- **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
+  session state and report uncertain persistence. Focused checks 131/0,
+  mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
-    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - Flat F8 panel (2026-10-22): a Visual tab between Performance and Debug (`menu visual`); "Visual tab" below.
+  - Explorer Cam page (2026-10-08): eye trims and head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
     Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
     "Hotkeys page" and "Explorer Cam page" below.
@@ -62,6 +62,44 @@ and the ruled-out list: "Status detail", straight after this block.*
 
 ## Status detail (moved out of Status 2026-09-29)
 
+**2026-10-17 pre-RC3 R1: add-on write completion correction.**
+
+The review at `3ffed14f` reproduced both successful and failed dynamic writes
+indexing built-in menu arrays with `def = -1`. Current main `7c456cf0` retains
+the defect. Add-on settings already invoke their setter before persistence;
+approvals already authorize and initialize the module. Both menu tick paths
+drain the shared writer queue, so their completion must not use built-in row
+definitions or edit state.
+
+`WriteDestination` explicitly separates built-in rows, plugin settings and
+add-on approvals. The production worker and drainer call the shared
+`runMenuWrite` and `completeMenuWrite` helpers. Dynamic completions branch
+before either built-in array; invalid built-in indices also refuse access.
+Confirmed saves retain reload and last-write reporting. A failed save keeps the
+effect already active in this session and reports the key, error and "save not
+confirmed"; approval may be needed at the next launch. There is no attempt to
+unload an initialized module or roll back unrelated rows. Existing setting
+edits remain available; no new retry UI, configuration key or manager policy is
+introduced.
+
+Persistence failure does not prove the file remained unchanged: a contained
+fault can occur after atomic replacement during later work. The failure status
+therefore reports uncertainty rather than claiming the bytes were not saved.
+Built-in latest-edit rollback, pending badges, headset logging and reload
+behavior are retained.
+
+Sol's focused production-helper rig compiled cleanly and passed 131 checks,
+including setting and approval save success, replacement failure, contained
+fault after replacement, counted array access, invalid row indices and actual
+stale/latest-generation completion. The isolated mutation proof caught all 42
+mutations by their intended cases. Its fixture roots were corrected to include
+the newly extracted header before the final passing run. The combined full
+build passed in 170.6 seconds: Python gates, production DLLs, 170 pooled test
+jobs, six serial jobs, installer checks and receipt. The same tree also passes
+the failed-worktree-removal tests and phase-receipt regression cases. No flight
+is needed to reproduce or verify this indexing defect. Add-on platform/runtime
+scope is unchanged.
+
 Moved verbatim out of the Status block (dated change notes, then the
 ruled-out list); the summary above points here.
 
@@ -105,7 +143,8 @@ ruled-out list); the summary above points here.
 - **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
   is one row for the cockpit panels' size and the UI layer; the one-day
   `HUD quality` row is gone (see the journal's dated entries). Its choices
-  read off / 100% / 125% (the file's `off | 100 | 125`).
+  read off / 100% / 125% / 150% / 200% (the file's `off | 100 | 125 | 150 | 200`;
+  150 and 200 added 2026-10-21).
 - **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
   OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
   desktop gates passed; headset checks remain in the
@@ -205,6 +244,19 @@ while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
 line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
 absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
 on the Hotkeys page only.
+
+### Visual tab (2026-10-22)
+
+BUILT, NOT FLOWN. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in
+that order. Visual lists the `[visual]` options of edvr.ini (a section of user settings, Fix tier,
+like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly `fix.intro_video`, which
+left the Performance tab) and Star glow (`visual.star_glow`, 100 to 200 percent in steps of 25,
+live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`, kept in edvr.ini order and
+checked against the flat key gate like the other two tabs. `visual` is a page only the flat
+panel builds, as `debug` is: the headset's menu has no such page, so Intro movie keeps its bare
+`menu` token and stays on the Fixes page in VR, and Star glow (`menu visual`) is flat-only until
+VR has the page. A `[visual]` row with no `menu` token is desktop-only, as a `[fix]` row is; the
+installer's window shows every `[visual]` row (flat view: the two the flat profile reads).
 
 ## The ask
 

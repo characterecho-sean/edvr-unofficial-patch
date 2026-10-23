@@ -18,9 +18,9 @@ namespace edvr {
 
 class ObjectRecordWriterProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1788384820u;
-    static constexpr uint32_t kExpectedImageSize=104894464u;
-    static constexpr uintptr_t kLookupRva=0x3696FA0u;
+    static constexpr uint32_t kExpectedTimestamp=1791840573u;
+    static constexpr uint32_t kExpectedImageSize=104906752u;
+    static constexpr uintptr_t kLookupRva=0x3699CA0u;
     static constexpr uint32_t kRecordBytes=0x150u;
     static constexpr uint32_t kRecordCap=65536u;
     static constexpr uint32_t kUiRecordReserve=1024u;

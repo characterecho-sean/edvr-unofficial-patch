@@ -35,7 +35,7 @@
 //                         the once-only log lines. golden-zero sets fix.panel_curvature to 0 and must see the same bytes.
 //   golden-asymmetric     the same lock on a Quest-like asymmetric vertical frustum (m12 is not zero there)
 //   head, head-symmetric, head-clamp-low, head-clamp-high
-//                         fix.intro_video = head: the splash-sized panel with no world lock needs no pose and no eye; its bytes, and the
+//                         visual.intro_video = head: the splash-sized panel with no world lock needs no pose and no eye; its bytes, and the
 //                         factor held between 1 and 8
 //   stock, stock-off, config   stock never applies the transform; the resampler alone keeps the path alive; the Wants table; the unrecognised value
 //   splash, splash-no-fill   the game's WORLD-space cb2 from a real capture is refused by its own numbers, for the session; without a fill
@@ -499,7 +499,7 @@ const Golden kGoldens[] = {
         0.0f, 0.0f, 0.0f, 0.0f,   // cb2[3]
         -0.67440176f, -0.0f, 1.67499995f, 3.3499999f   // cb2[4]
     }},
-    // fix.intro_video = head: the movie's own constants with cb2[0] scaled by the splash's half-width in NDC (1.0440) over the panel's
+    // visual.intro_video = head: the movie's own constants with cb2[0] scaled by the splash's half-width in NDC (1.0440) over the panel's
     // (512 * 0.000368732 = 0.18879): x5.52993, so 512 -> 2831.32 and 288 -> 1592.62; every other float is the game's, to the bit.
     {"head-left", {
         2831.32471f, 1592.62012f, 0.0f, 0.0f,   // cb2[0]
@@ -1002,7 +1002,7 @@ const char* g_curvature = nullptr;
 double g_liveCurvature = 0.0;   // what fix.panel_curvature was last set to (0 until it is): what boundFrame expects the module to bend by
 void configure(const char* video, const char* curvature = nullptr, const char* segments = nullptr) {
     Config& c = Config::get();
-    if (video) c.set("fix.intro_video", video);
+    if (video) c.set("visual.intro_video", video);
     if (!curvature) curvature = g_curvature;
     if (curvature) {
         c.set("fix.panel_curvature", curvature);
@@ -1033,8 +1033,8 @@ void goldenBody(Gpu& g, bool zeroKey) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     setPose(kPoseA);
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure(nullptr, zeroKey ? "0" : nullptr);   // fix.intro_video absent: the default is screen; the distance default 3.35
-    check(introPanelWants(), lab("wants"), "the default (fix.intro_video absent) is screen: the panel is wanted");
+    configure(nullptr, zeroKey ? "0" : nullptr);   // visual.intro_video absent: the default is screen; the distance default 3.35
+    check(introPanelWants(), lab("wants"), "the default (visual.intro_video absent) is screen: the panel is wanted");
 
     // The settle frames: the first composite of each buffer starts the readback and the module answers false, leaving VS b2 the game's.
     settle(g, "settle", true);
@@ -1309,7 +1309,7 @@ void scnConfig(Gpu&) {
                         {"1.0", false}, {"2.5", true}, {"splash", true}, {"STOCK", false}};
     for (const Row& r : rows) {
         configure(r.value);
-        g_note = std::string("fix.intro_video = ") + r.value;
+        g_note = std::string("visual.intro_video = ") + r.value;
         check(introPanelWants() == r.wants, lab("wants-table"), fmt("introPanelWants() is %d, want %d", introPanelWants(), r.wants));
     }
     g_note.clear();

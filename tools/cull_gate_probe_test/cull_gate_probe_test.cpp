@@ -2,7 +2,7 @@
 // three relay observers with synthetic engine memory laid out exactly as the
 // decompiles read it -- a render context with three views, a record, its
 // pose context with instance entries, models and sub-items, the traversal's
-// gate context, and the draw-item builder's frame around its FUN_1442B3FC0
+// gate context, and the draw-item builder's frame around its FUN_1442B6C80
 // call -- and a stand-in for the engine's plane test, then writes the file
 // tools/cull_gate_probe.py --verify-fixture checks. No hooks, no game.
 #include "../../src/d3d11/cull_gate_probe.h"
@@ -26,7 +26,7 @@ void check(bool ok, const char* what) {
 template <typename T> void put(std::vector<uint8_t>& block, size_t off, const T& v) { std::memcpy(block.data() + off, &v, sizeof(T)); }
 uintptr_t addr(const std::vector<uint8_t>& block) { return reinterpret_cast<uintptr_t>(block.data()); }
 
-// The stand-in for FUN_1404F4E10: view 0 inside (1), view 1 outside (-1),
+// The stand-in for FUN_1404F4F70: view 0 inside (1), view 1 outside (-1),
 // view 2 straddling (0) -- keyed by the view's own bit index (+0x578).
 uint64_t __fastcall fakeFrustum(uintptr_t view, const float* point, const float* interval) {
     uint32_t bit = 0;
@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     const uintptr_t view0 = addr(ctx) + 0x40, view1 = view0 + 0x6A0;
     // An address that faults: reserved, never committed.
     void* hole = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_NOACCESS);
-    // The builder's frame around its FUN_1442B3FC0 call, as its machine code
+    // The builder's frame around its FUN_1442B6C80 call, as its machine code
     // lays it out (cull_gate_probe.h kFrame*): param_1 is the builder's
     // rbp+0x70, six pointers, with the builder's own locals below it.
     std::vector<uint8_t> frameBlock(0x400, 0);
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
     const uint32_t row0 = probe.noteBuilder(addr(pose), addr(ctx), 0b111ull, addr(record) + 0x210);
     const uint32_t row1 = probe.noteBuilder(addr(pose) + 8, addr(ctx), 0b001ull, addr(record) + 0x210);   // pose disagrees with rec+0x290
     check(row0 == 0 && row1 == 1, "the builder observer returns the rows it kept");
-    // FUN_1442B3FC0's calls inside builder row 0 (entry 0, sub-items 0..2).
+    // FUN_1442B6C80's calls inside builder row 0 (entry 0, sub-items 0..2).
     builderFrame(entry0, model0, sub0 + 32, view0, addr(pose));
     probe.notePart(items, addr(passOut), view0, row0, true);          // P1: verified, passed in view 0
     builderFrame(entry0, model0, sub0 + 64, view1, addr(pose));

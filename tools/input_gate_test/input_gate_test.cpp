@@ -1,4 +1,4 @@
-// Exercise the production hooks with distinct overlay-style COM tables,
+﻿// Exercise the production hooks with distinct overlay-style COM tables,
 // then the executable's real DirectInput import. No keys are injected.
 #include <windows.h>
 static HWND testPadForeground = nullptr;
@@ -8,6 +8,15 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #undef GetForegroundWindow
 
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+#include <thread>
+
+#include "../../src/d3d11/loaded_module_match.h"
 
 using namespace edvr;
 
@@ -210,6 +219,42 @@ bool released(const BYTE (&bytes)[256]) {
 }
 bool physical[256]{};
 SHORT WINAPI physicalKey(int vk) { return vk >= 0 && vk < 256 && physical[vk] ? SHORT(-32768) : 0; }
+// A tail reader that stops inside the release scan until the rig lets it go, so another thread can poll the doors
+// while the scan is in progress (PR #92 review).
+HANDLE g_scanEntered = nullptr;
+HANDLE g_scanMayContinue = nullptr;
+bool g_pauseArmed = false;
+// The pause itself. Both handles are copied before signalling entry: once the rig sees the entry it may point the
+// globals at the next worker's events, and a worker that read g_scanMayContinue after that would wait on the wrong
+// event and fall through on the timeout instead of in the order the case sets (PR #92 review).
+void pauseInScan() {
+    const HANDLE entered = g_scanEntered;
+    const HANDLE mayContinue = g_scanMayContinue;
+    SetEvent(entered);
+    WaitForSingleObject(mayContinue, 10000);
+}
+SHORT WINAPI pausingKey(int vk) {
+    if (g_pauseArmed) {
+        g_pauseArmed = false;
+        pauseInScan();
+    }
+    return physicalKey(vk);
+}
+// A refresh's reader that reports when the refresh first reaches its physical scan.
+HANDLE g_refreshEntered = nullptr;
+SHORT WINAPI refreshProbeKey(int vk) {
+    if (g_refreshEntered) SetEvent(g_refreshEntered);
+    return physicalKey(vk);
+}
+// Like pausingKey, but the reading is taken before the pause, so the resumed scan reports what was true when it began.
+SHORT WINAPI sampleThenPauseKey(int vk) {
+    const SHORT sample = physicalKey(vk);
+    if (g_pauseArmed) {
+        g_pauseArmed = false;
+        pauseInScan();
+    }
+    return sample;
+}
 BOOL WINAPI physicalState(PBYTE out) {
     for (int vk = 0; vk < 256; ++vk) out[vk] = physical[vk] ? 0x80 : 0;
     return TRUE;
@@ -308,13 +353,735 @@ HRESULT readStickRows(Stick& s, DIDEVICEOBJECTDATA (&out)[6], DWORD& count, DWOR
 }
 }
 
+// The LoadLibrary shortcut's matching decision (loaded_module_match.h) against a fake module list that answers like
+// GetModuleHandleEx(0): a bare name matches any loaded file of that name, a path matches only that exact file.
+struct FakeModule {
+    const wchar_t* path;
+    HMODULE handle;
+};
+const FakeModule kFakeModules[] = {
+    {L"c:\\a\\same_name.dll", reinterpret_cast<HMODULE>(0x1000)},
+    {L"c:\\windows\\system32\\advapi32.dll", reinterpret_cast<HMODULE>(0x2000)},
+};
+HMODULE fakeLookupW(const wchar_t* name) {
+    std::wstring want(name);
+    const bool bare = want.find_first_of(L"\\/") == std::wstring::npos;
+    for (const FakeModule& m : kFakeModules) {
+        std::wstring have(m.path);
+        if (bare) have = have.substr(have.find_last_of(L'\\') + 1);
+        if (_wcsicmp(have.c_str(), want.c_str()) == 0) return m.handle;
+    }
+    return nullptr;
+}
+HMODULE fakeLookupA(const char* name) {
+    return fakeLookupW(std::wstring(name, name + strlen(name)).c_str());
+}
+void loadedModuleMatchCases() {
+    const HMODULE a = kFakeModules[0].handle, adv = kFakeModules[1].handle;
+    check(matchLoadedModule(L"advapi32.dll", fakeLookupW) == adv, "wide: a bare basename returns the preloaded module");
+    check(matchLoadedModule(L"advapi32", fakeLookupW) == adv, "wide: a bare name without an extension still matches");
+    check(matchLoadedModule(L"c:\\a\\same_name.dll", fakeLookupW) == a, "wide: a qualified path that is loaded matches");
+    check(matchLoadedModule(L"c:\\b\\same_name.dll", fakeLookupW) == nullptr,
+          "wide: a qualified miss with a basename collision does not match the other module");
+    check(matchLoadedModule(L"c:/b/same_name.dll", fakeLookupW) == nullptr,
+          "wide: a forward-slash qualified miss does not match either");
+    check(matchLoadedModule(L"b\\same_name", fakeLookupW) == nullptr,
+          "wide: a relative qualified miss without an extension does not match");
+    check(matchLoadedModule("advapi32.dll", fakeLookupA) == adv, "ansi: a bare basename returns the preloaded module");
+    check(matchLoadedModule("c:\\a\\same_name.dll", fakeLookupA) == a, "ansi: a qualified path that is loaded matches");
+    check(matchLoadedModule("c:\\b\\same_name.dll", fakeLookupA) == nullptr,
+          "ansi: a qualified miss with a basename collision does not match the other module");
+    check(matchLoadedModule("", fakeLookupA) == nullptr, "ansi: an empty request matches nothing");
+}
+
 // The executable's own import of XInputGetState from xinput9_1_0.dll, which the controller door patches in the real game. Taking the
 // address keeps the linker from dropping the import.
 DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
 
-int main() {
+static void pluginReleaseScanCases(Device& keyboard) {
+    // PR #92 review: there is no moment during a plugin's release when a key it was holding reads down. The tail is
+    // captured while the block is still up and the block cleared last. Another thread polls GetAsyncKeyState and the
+    // DirectInput state while the release's key scan is paused inside the tail reader; every release path is checked.
+        const PFN_GetAsyncKeyState savedReader = g_tailReader;
+        auto releaseWhilePolling = [&](const char* path, const std::function<void()>& release) {
+            physical['A'] = true;
+            keyboard.keys[DIK_A] = 0x80;
+            refreshReleaseTail(&physicalKey);
+            inputGateSetPluginBlock(true);
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_tailReader = &pausingKey;
+            g_pauseArmed = true;
+            SHORT duringScan = 1;
+            BYTE duringKeys[256]{};
+            bool polledDuringScan = false;
+            std::thread poller([&] {
+                if (WaitForSingleObject(g_scanEntered, 10000) == WAIT_OBJECT_0) {
+                    polledDuringScan = true;
+                    duringScan = hookGetAsyncKeyState('A');
+                    readState(keyboard, duringKeys);
+                }
+                SetEvent(g_scanMayContinue);
+            });
+            release();
+            poller.join();
+            char name[160];
+            snprintf(name, sizeof(name), "%s: the poll that lands during the release's key scan was made", path);
+            check(polledDuringScan, name);
+            snprintf(name, sizeof(name), "%s: a key the plugin held reads up in GetAsyncKeyState during the scan", path);
+            check(duringScan == 0, name);
+            snprintf(name, sizeof(name), "%s: ...and in DirectInput state", path);
+            check(duringKeys[DIK_A] == 0, name);
+            snprintf(name, sizeof(name), "%s: ...and still up once the release is done", path);
+            check(!g_pluginBlock.load() && hookGetAsyncKeyState('A') == 0, name);
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            keyboard.keys[DIK_A] = 0;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = savedReader;
+        };
+        releaseWhilePolling("explicit clear (a fault or a profile switch)", [&] { inputGateSetPluginBlock(false); });
+        releaseWhilePolling("lease expiry", [&] {
+            g_pluginLease.store(1);
+            inputGatePluginLeaseTick();
+        });
+        // A renewal that lands between the tick spending the lease and the release keeps the block.
+        inputGateSetPluginBlock(true);
+        g_pluginLease.store(kPluginLeaseFrames);
+        releasePluginBlock("lease expired", true);
+        check(g_pluginBlock.load(), "a renewed lease is not released by a tick that saw it spent");
+        inputGateSetPluginBlock(false);
+        check(!g_pluginBlock.load(), "(and an explicit clear still releases it)");
+
+        // PR #92 review: a Present-thread refresh paused mid-scan must not publish its stale result over a newer
+        // capture. The tail holds B (now released); the refresh scans past A and pauses on B; the owner thread
+        // captures the physically held A and clears the plugin block; the refresh resumes.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['B'] = true;
+            physical['A'] = false;
+            captureReleaseTail(&physicalKey);   // tail = {B}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread refresher([&] { refreshReleaseTail(&pausingKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 10000) == WAIT_OBJECT_0;
+            check(entered, "stale refresh: the refresh reached its scan of B");
+            physical['B'] = false;   // the refresh will see B up and conclude the tail is empty
+            physical['A'] = true;
+            inputGateSetPluginBlock(true);
+            inputGateSetPluginBlock(false);   // captures A, clears the block
+            SetEvent(g_scanMayContinue);
+            refresher.join();
+            check(releaseTailVk('A'), "stale refresh: the tail still covers A after the paused refresh publishes");
+            check(hookGetAsyncKeyState('A') == 0, "stale refresh: the game still reads the held A as up");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review, the reverse ordering: a refresh that starts while a capture is mid-write must not read the new
+        // generation with the old held keys. The tail holds B (now released); A is physically held; a plugin release
+        // captures on the owner thread and pauses before reading A; the refresh starts meanwhile. With the snapshot
+        // under the shared lock the refresh waits for the capture; every wait here is bounded.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['B'] = true;
+            physical['A'] = false;
+            captureReleaseTail(&physicalKey);   // tail = {B}
+            physical['B'] = false;
+            physical['A'] = true;
+            inputGateSetPluginBlock(true);
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_refreshEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_tailReader = &pausingKey;
+            g_pauseArmed = true;
+            std::thread owner([&] { inputGateSetPluginBlock(false); });   // captures A, clears the block
+            const bool paused = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(paused, "refresh during capture: the capture paused inside its key scan");
+            std::thread refresher([&] { refreshReleaseTail(&refreshProbeKey); });
+            WaitForSingleObject(g_refreshEntered, 300);   // fixed: times out, the refresh waits for the capture
+            SetEvent(g_scanMayContinue);
+            owner.join();
+            refresher.join();
+            check(releaseTailVk('A'), "refresh during capture: the tail covers A after both finish");
+            check(hookGetAsyncKeyState('A') == 0, "refresh during capture: the game reads the held A as up");
+            check(!g_pluginBlock.load(), "refresh during capture: the plugin block is cleared");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            CloseHandle(g_refreshEntered);
+            g_scanEntered = g_scanMayContinue = g_refreshEntered = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review: two refreshes from the same generation must not publish in reverse order. The tail covers A.
+        // Refresh 1 samples A held and pauses before it publishes; refresh 2 sees A released and retires the tail; A is
+        // pressed afresh; refresh 1 resumes. It must not restore the held-key bit refresh 2 removed.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread first([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(entered, "two refreshes: the first reached its scan of A");
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);   // the second refresh: A is up, the tail retires
+            check(!releaseTailVk('A'), "two refreshes: the second refresh retired the tail");
+            physical['A'] = true;               // a fresh press
+            SetEvent(g_scanMayContinue);        // the first refresh resumes with its stale sample of A held
+            first.join();
+            check(!releaseTailVk('A'), "two refreshes: the older refresh did not resurrect the retired tail");
+            check(hookGetAsyncKeyState('A') != 0, "two refreshes: the game reads the fresh A press");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review, the other order: the stale refresh publishes FIRST. Both refreshes snapshot the same generation
+        // with the tail {A}. Refresh 1 samples A held and pauses; A is released; refresh 2 samples A up and pauses;
+        // refresh 1 publishes (a no-op), then refresh 2 publishes. The observed release must not be discarded.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            HANDLE entered1 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE go1 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE entered2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE go2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanEntered = entered1;
+            g_scanMayContinue = go1;
+            g_pauseArmed = true;
+            std::thread first([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool in1 = WaitForSingleObject(entered1, 5000) == WAIT_OBJECT_0;
+            check(in1, "stale publishes first: refresh 1 reached its scan of A");
+            physical['A'] = false;
+            g_scanEntered = entered2;
+            g_scanMayContinue = go2;
+            g_pauseArmed = true;
+            std::thread second([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool in2 = WaitForSingleObject(entered2, 5000) == WAIT_OBJECT_0;
+            check(in2, "stale publishes first: refresh 2 reached its scan of A");
+            const ULONGLONG resumed1 = GetTickCount64();
+            SetEvent(go1);
+            first.join();                        // publishes its stale sample of A held
+            // Refresh 1 must finish on go1, not on its reader's 10 s timeout: a timeout would mean it waited on the
+            // wrong event and the publish order this case sets was never enforced.
+            check(GetTickCount64() - resumed1 < 5000, "stale publishes first: refresh 1 resumed on its own event");
+            SetEvent(go2);
+            second.join();                       // publishes the observed release
+            check(!releaseTailVk('A'), "stale publishes first: the observed release retired the tail");
+            physical['A'] = true;                // a fresh press
+            check(hookGetAsyncKeyState('A') != 0, "stale publishes first: a fresh A press reaches the game");
+            CloseHandle(entered1); CloseHandle(go1); CloseHandle(entered2); CloseHandle(go2);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review: a refresh must not resurrect a tail a cancel retired. Both drive the production cancelReleaseTail, so
+        // this cannot drift from what the menu's cancel does. First the scan-paused ordering: the refresh has taken its
+        // snapshot (tail {A}, A sampled held) and is parked in its scan with no lock held; the cancel lands; the refresh then
+        // resumes and tries to publish its stale "A still held" result.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread refresher([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(entered, "refresh racing cancel: the refresh reached its scan of A");
+            cancelReleaseTail();                // the real cancel, while the refresh is parked mid-scan
+            SetEvent(g_scanMayContinue);
+            refresher.join();
+            check(!g_releaseTail.load(), "refresh racing cancel: the cancelled tail is not resurrected by a paused scan");
+            check(!releaseTailVk('A'), "refresh racing cancel: A is not covered after the cancel");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            g_tailReader = saved;
+        }
+        // Then the lock-parked ordering: the refresh waits on the tail lock (held here) and the real cancel queues on it too, so
+        // whichever the lock admits first, the tail must end retired: the refresh either sees no tail under the lock or loses the
+        // generation check.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            AcquireSRWLockExclusive(&g_tailLock);
+            std::thread refresher([&] { refreshReleaseTail(&physicalKey); });
+            Sleep(300);                         // bounded: the refresh is now waiting on the lock
+            std::thread canceller([&] { cancelReleaseTail(); });
+            Sleep(300);                         // ...and so is the cancel
+            ReleaseSRWLockExclusive(&g_tailLock);
+            refresher.join();
+            canceller.join();
+            check(!g_releaseTail.load(), "refresh and cancel both waiting on the lock: the tail ends retired");
+            check(!releaseTailVk('A'), "refresh and cancel both waiting on the lock: A is not covered");
+            physical['A'] = false;
+            g_tailReader = saved;
+        }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Exhaustive interleavings of the release tail's writers (issue #95). PR #92 took five review rounds, each finding one
+// more ordering of the same four writers; the hand-written blocks above pin those repros, and this enumerates the whole
+// space so the next ordering is found here and not in review.
+//
+// Model. Four writers, each on its own pooled thread, parked at deterministic yield points and advanced one step at a
+// time by a scheduler (this thread), so exactly one thread runs at any moment:
+//     C   the plugin release: inputGateSetPluginBlock(false), i.e. the production capture of the tail, then the block
+//         cleared. Steps: C.0 begins the release and runs to its sample of the yield key (inside the tail lock);
+//         C.1 resumes to the end.
+//     X   the menu's cancel: cancelReleaseTail(). One step.
+//     R1, R2  two refreshes from the Present thread and the lease tick. R1.0 runs to the entry of the refresh (the
+//         one test seam in production code, g_tailRefreshEntry: the point before the lock where a real thread can be
+//         preempted); every refresh then takes its snapshot and runs to its sample of the yield key, and finishes the
+//         scan and publishes in its last step. A refresh whose snapshot lacks the yield key has no middle step. R2 has no
+//         entry step: it may not start before R1.0 (the two are symmetric, so that halves the space, loses nothing).
+// Physical key events are schedulable too: release A and release B (A and B both start held; the tail starts as {B},
+// the earlier menu close; A is the key the plugin was holding). The tail reader the writers use is the existing seam
+// (g_tailReader / the readKey parameter), which parks the calling writer after sampling the yield key. The scenario
+// runs once with the yield key A (with the refresh-entry step) and once with B (without it, to bound the space).
+//
+// A writer blocked on the tail lock is a real state. The scheduler cannot tell from outside whether resuming a writer
+// will block (an older revision of the file does not lock the same things), so it probes: a step taken while C holds the
+// lock that does not arrive within a few milliseconds is blocked, remembered by (writer, step, C step), and the writer
+// is not scheduled again until C finishes, when it is awaited. At most one writer is blocked at a time (a second one
+// would queue behind it; the other order is covered by resuming it first). A step that never arrives otherwise is a
+// deadlock and fails the run.
+//
+// Invariants, checked in every state reached, with the game's own reads (hookGetAsyncKeyState):
+//   1 no retired key is resurrected: a refresh or cancel step never raises the cover of a key, and a key a refresh
+//     retired is not covered again before the next capture.
+//   2 an observed release is not lost: a refresh that sampled a key released and was not superseded by a capture or a
+//     cancel since its snapshot leaves that key uncovered once it has published.
+//   3 a key held at capture and still held stays covered: the game reads it up from the start of the release (block)
+//     through the end of it (the tail), until it is physically released.
+//   4 after a cancel that follows the capture, nothing is covered.
+//   5 once every key is released a refresh leaves nothing covered (the tail cannot strand).
+namespace tailsched {
+constexpr int kKeys = 2;
+constexpr int kKeyVk[kKeys] = {'A', 'B'};
+constexpr int kProbeMs = 15;
+constexpr int kLongWaitMs = 5000;
+enum { kC = 0, kX = 1, kR1 = 2, kR2 = 3, kWriters = 4, kRelA = 4, kRelB = 5 };
+const char* const kWriterName[kWriters] = {"release", "cancel", "refresh1", "refresh2"};
+
+struct Worker {
+    int id = 0;
+    HANDLE go = nullptr;
+    HANDLE arrived = nullptr;
+    std::thread thread;
+    std::atomic<bool> quit{false};
+    std::atomic<bool> bodyDone{false};
+    std::function<void()> body;
+    // scheduler-owned
+    bool started = false, blocked = false, finished = false;
+    int step = 0;
+    bool entryYield = false;   // park at the refresh's entry (the test seam g_tailRefreshEntry)
+    bool snapped = false;      // the refresh has taken its snapshot: it has begun sampling keys
+    bool sampledUp[256]{};
+    unsigned superseded = 0;   // captures begun plus cancels done, as of the snapshot
+};
+thread_local Worker* tlWorker = nullptr;
+const unsigned* g_superCount = nullptr;
+int g_yieldVk = 'A';
+std::atomic<bool> g_deadlock{false};
+
+SHORT WINAPI schedKey(int vk) {
+    const bool down = vk >= 0 && vk < 256 && physical[vk];
+    if (Worker* w = tlWorker) {
+        if (!w->snapped) { w->snapped = true; w->superseded = *g_superCount; }   // the first sample follows the snapshot
+        if (!down && vk >= 0 && vk < 256) w->sampledUp[vk] = true;
+        if (vk == g_yieldVk) {
+            SetEvent(w->arrived);
+            if (WaitForSingleObject(w->go, kLongWaitMs) != WAIT_OBJECT_0) g_deadlock = true;
+        }
+    }
+    return down ? SHORT(-32768) : 0;
+}
+
+void tailEntryYield() {
+    if (Worker* w = tlWorker) {
+        if (!w->entryYield) return;
+        SetEvent(w->arrived);
+        if (WaitForSingleObject(w->go, kLongWaitMs) != WAIT_OBJECT_0) g_deadlock = true;
+    }
+}
+
+void workerMain(Worker* w) {
+    tlWorker = w;
+    for (;;) {
+        if (WaitForSingleObject(w->go, INFINITE) != WAIT_OBJECT_0 || w->quit.load()) return;
+        w->body();
+        w->bodyDone = true;
+        SetEvent(w->arrived);
+    }
+}
+
+struct Node {
+    std::vector<int> enabled;
+    size_t pick = 0;
+};
+
+struct Violation {
+    int count = 0;
+    std::string first;
+};
+
+struct Enumeration {
+    Worker W[kWriters];
+    std::map<int, bool> blockedMemo;   // (writer, step, C step) -> the step blocked behind C's lock
+    bool fired[kKeys]{};
+    int lastMove = -1;
+    char lastCX = 0;                   // 'C' or 'X': which of the capture and the cancel landed last
+    unsigned superCount = 0;           // captures begun plus cancels done
+    bool retired[kKeys]{};
+    bool cover[kKeys]{};
+    std::vector<std::string> log;
+    unsigned leafMask = 0;
+    Violation viol[6];
+    long long leaves = 0, steps = 0, blockedSteps = 0;
+    bool aborted = false;
+
+    std::string schedule() const {
+        std::string s;
+        for (const std::string& m : log) { if (!s.empty()) s += " > "; s += m; }
+        return s;
+    }
+    void violate(int inv, const std::string& what) {
+        leafMask |= 1u << inv;
+        ++viol[inv].count;
+        if (viol[inv].first.empty()) viol[inv].first = what + " [" + schedule() + "]";
+    }
+    bool covered(int k) const { return releaseTailVk(kKeyVk[k]); }
+    void abort(const char* why) {
+        if (aborted) return;
+        aborted = true;
+        check(false, why);
+    }
+    // A writer known to block still runs for a moment before it reaches the lock (a refresh of an older revision reads
+    // its tail and its keys first). Wait until it is queued on the tail lock, so it is parked and not racing the steps
+    // that follow. An SRWLOCK with a waiter has its Waiting bit (0x2) set in the lock word: stable since Windows 7, read
+    // here with no call into the kernel.
+    void settleBlocked(Worker& w) {
+        const ULONGLONG start = GetTickCount64();
+        for (;;) {
+            if ((reinterpret_cast<const volatile ULONG_PTR&>(g_tailLock) & 2) != 0) return;
+            if (WaitForSingleObject(w.arrived, 0) == WAIT_OBJECT_0) {   // it arrived after all
+                abort("interleavings: a writer judged blocked on the tail lock was not");
+                return;
+            }
+            if (GetTickCount64() - start > kLongWaitMs) {
+                abort("interleavings: a writer judged blocked on the tail lock never queued on it");
+                return;
+            }
+            YieldProcessor();
+        }
+    }
+    bool waitArrived(Worker& w) {
+        if (WaitForSingleObject(w.arrived, kLongWaitMs) == WAIT_OBJECT_0 && !g_deadlock.load()) return true;
+        abort("interleavings: a writer neither yielded nor finished within the bound (deadlock)");
+        return false;
+    }
+
+    void resetLeaf() {
+        physical['A'] = false;
+        physical['B'] = true;
+        g_tailReader = &physicalKey;
+        cancelReleaseTail();
+        captureReleaseTail(&physicalKey);   // the earlier menu close: tail = {B}
+        physical['A'] = true;               // the plugin was holding A
+        g_tailReader = &schedKey;
+        g_tailRefreshEntry = &tailEntryYield;
+        g_superCount = &superCount;
+        inputGateSetPluginBlock(true);
+        for (int i = 0; i < kWriters; ++i) {
+            Worker& w = W[i];
+            w.started = w.blocked = w.finished = false;
+            w.step = 0;
+            w.superseded = 0;
+            w.snapped = false;
+            w.entryYield = (i == kR1) && g_yieldVk == 'A';   // the second pass skips the entry step: the space is large
+            memset(w.sampledUp, 0, sizeof(w.sampledUp));
+            w.bodyDone = false;
+        }
+        for (int k = 0; k < kKeys; ++k) fired[k] = retired[k] = false;
+        lastMove = -1;
+        lastCX = 0;
+        superCount = 0;
+        leafMask = 0;
+        log.clear();
+    }
+
+    std::vector<int> enabled() const {
+        std::vector<int> v;
+        bool anyBlocked = false;
+        for (const Worker& w : W) anyBlocked = anyBlocked || w.blocked;
+        if (!W[kC].finished) v.push_back(kC);
+        if (!anyBlocked) {
+            if (!W[kX].finished) v.push_back(kX);
+            if (!W[kR1].finished) v.push_back(kR1);
+            if (!W[kR2].finished && W[kR1].started) v.push_back(kR2);
+        }
+        if (!fired[0] && lastMove != kRelB) v.push_back(kRelA);   // A before B when adjacent: the two commute
+        if (!fired[1]) v.push_back(kRelB);
+        return v;
+    }
+
+    void afterArrival(Worker& w, const bool (&covBefore)[kKeys], bool combined) {
+        w.started = true;
+        ++w.step;
+        if (w.bodyDone.load()) w.finished = true;
+        const int id = w.id;
+        if (id == kX && w.finished) { ++superCount; lastCX = 'X'; }
+        if (id == kC && w.finished) {
+            lastCX = 'C';
+            for (int k = 0; k < kKeys; ++k) retired[k] = false;
+        }
+        if (!combined && (id == kX || id >= kR1)) {
+            for (int k = 0; k < kKeys; ++k) {
+                const bool after = covered(k);
+                if (!covBefore[k] && after) {
+                    violate(1, std::string(kWriterName[id]) + " raised the cover of " + char(kKeyVk[k]));
+                }
+                if (id >= kR1 && covBefore[k] && !after) retired[k] = true;
+            }
+        }
+        if (id >= kR1 && w.finished && w.superseded == superCount) {
+            for (int k = 0; k < kKeys; ++k) {
+                if (w.sampledUp[kKeyVk[k]] && covered(k)) {
+                    violate(2, std::string(kWriterName[id]) + " observed " + char(kKeyVk[k]) +
+                                   " released but it is still covered after the publish");
+                }
+            }
+        }
+        if (id == kC && w.finished) {
+            for (Worker& o : W) {
+                if (!o.blocked) continue;
+                if (!waitArrived(o)) return;
+                o.blocked = false;
+                log.back() += "(" + std::string(kWriterName[o.id]) + " unblocks)";
+                afterArrival(o, covBefore, true);
+            }
+        }
+    }
+
+    void exec(int move) {
+        ++steps;
+        char nm[64];
+        if (move >= kWriters) {
+            const int k = move - kRelA;
+            physical[kKeyVk[k]] = false;
+            fired[k] = true;
+            snprintf(nm, sizeof(nm), "release-%c", kKeyVk[k]);
+            log.push_back(nm);
+            lastMove = move;
+            checkState();
+            return;
+        }
+        Worker& w = W[move];
+        snprintf(nm, sizeof(nm), "%s.%d", kWriterName[move], w.step);
+        log.push_back(nm);
+        lastMove = move;
+        const bool inFlight = W[kC].started && !W[kC].finished;
+        if (move == kC && !w.started) {
+            w.started = true;
+            ++superCount;
+            for (int k = 0; k < kKeys; ++k) retired[k] = false;
+        }
+        bool covBefore[kKeys];
+        for (int k = 0; k < kKeys; ++k) covBefore[k] = covered(k);
+        for (Worker& o : W) {
+            // A writer taken for blocked that has in fact arrived was misjudged (a probe that ran slow): fail loudly.
+            if (o.blocked && WaitForSingleObject(o.arrived, 0) == WAIT_OBJECT_0) {
+                abort("interleavings: a writer judged blocked on the tail lock was not (probe too short)");
+                return;
+            }
+        }
+        SetEvent(w.go);
+        bool blocked = false;
+        if (inFlight && move != kC) {
+            // What the step does depends on what it finds: a refresh whose snapshot lacks the yield key never yields,
+            // and one that finds no tail returns before it takes the lock at all (in some revisions).
+            const int key = move * 1000 + w.step * 100 + W[kC].step * 10 + (g_releaseTail.load() ? 4 : 0) +
+                            (g_heldVk[g_yieldVk].load() ? 2 : 0) + (g_heldVk[g_yieldVk == 'A' ? 'B' : 'A'].load() ? 1 : 0);
+            auto it = blockedMemo.find(key);
+            if (it == blockedMemo.end()) {
+                blocked = WaitForSingleObject(w.arrived, kProbeMs) == WAIT_TIMEOUT;
+                blockedMemo[key] = blocked;
+            } else if (it->second) {
+                blocked = true;
+                settleBlocked(w);
+            } else if (!waitArrived(w)) {
+                return;
+            }
+        } else if (!waitArrived(w)) {
+            return;
+        }
+        if (blocked) {
+            w.blocked = true;
+            w.started = true;
+            ++blockedSteps;
+            log.back() += "(blocked on the tail lock)";
+        } else {
+            afterArrival(w, covBefore, false);
+        }
+        checkState();
+    }
+
+    void checkState() {
+        for (int k = 0; k < kKeys; ++k) {
+            const int vk = kKeyVk[k];
+            const bool held = physical[vk];
+            // 3: held at capture and still held: the block, then the tail, hide it until it is physically released.
+            if (held && (!W[kC].finished || lastCX == 'C') && hookGetAsyncKeyState(vk) != 0) {
+                violate(3, std::string("the game reads the still-held ") + char(vk) + " as down");
+            }
+            // 4: a cancel that landed after the capture leaves nothing covered.
+            if (lastCX == 'X' && covered(k)) violate(4, std::string("the cancelled tail covers ") + char(vk));
+            // 1: a key a refresh retired is not covered again before the next capture.
+            if (retired[k] && covered(k)) violate(1, std::string("the retired ") + char(vk) + " is covered again");
+        }
+    }
+
+    bool runLeaf(std::vector<Node>& stack) {
+        resetLeaf();
+        W[kC].body = [] { inputGateSetPluginBlock(false); };
+        W[kX].body = [] { cancelReleaseTail(); };
+        W[kR1].body = W[kR2].body = [] { refreshReleaseTail(&schedKey); };
+        size_t depth = 0;
+        for (;;) {
+            const std::vector<int> en = enabled();
+            if (en.empty()) {
+                if (!fired[0] || !fired[1]) { stack.resize(depth); return false; }   // pruned: B-then-A was left pending
+                break;
+            }
+            if (depth < stack.size()) {
+                if (stack[depth].enabled != en) {
+                    std::string was, now;
+                    for (int m : stack[depth].enabled) was += std::to_string(m) + " ";
+                    for (int m : en) now += std::to_string(m) + " ";
+                    const std::string msg = "interleavings: a schedule did not replay identically (enabled " + was + "then, " + now +
+                                            "now) after " + schedule();
+                    abort(msg.c_str());
+                    return false;
+                }
+            } else {
+                stack.push_back(Node{en, 0});
+            }
+            exec(stack[depth].enabled[stack[depth].pick]);
+            ++depth;
+            if (aborted) return false;
+        }
+        stack.resize(depth);
+        for (const Worker& w : W) {
+            if (!w.finished) { abort("interleavings: the schedule ended with a writer unfinished"); return false; }
+        }
+        // 5: once everything is released one more refresh leaves no key covered.
+        refreshReleaseTail(&physicalKey);
+        for (int k = 0; k < kKeys; ++k) {
+            if (covered(k)) violate(5, std::string("after every key is released ") + char(kKeyVk[k]) + " is still covered");
+        }
+        return true;
+    }
+
+    void run(int yieldVk) {
+        g_yieldVk = yieldVk;
+        blockedMemo.clear();
+        std::vector<Node> stack;
+        for (;;) {
+            if (runLeaf(stack)) ++leaves;
+            if (aborted) return;
+            while (!stack.empty()) {
+                Node& n = stack.back();
+                if (n.pick + 1 < n.enabled.size()) { ++n.pick; break; }
+                stack.pop_back();
+            }
+            if (stack.empty()) return;
+        }
+    }
+};
+}   // namespace tailsched
+
+static void releaseTailInterleavingCases() {
+    using namespace tailsched;
+    auto* e = new Enumeration();
+    for (int i = 0; i < kWriters; ++i) {
+        Worker& w = e->W[i];
+        w.id = i;
+        w.go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        w.arrived = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        w.thread = std::thread(workerMain, &w);
+    }
+    const PFN_GetAsyncKeyState savedReader = g_tailReader;
+    const ULONGLONG t0 = GetTickCount64();
+    for (int yieldVk : {'A', 'B'}) {
+        e->run(yieldVk);
+        if (e->aborted) break;
+    }
+    const ULONGLONG ms = GetTickCount64() - t0;
+    for (Worker& w : e->W) {
+        w.quit = true;
+        SetEvent(w.go);
+        if (e->aborted) w.thread.detach(); else w.thread.join();
+    }
+    physical['A'] = physical['B'] = false;
+    g_tailReader = savedReader;
+    g_tailRefreshEntry = nullptr;
+    cancelReleaseTail();
+    inputGateSetPluginBlock(false);
+    printf("  release tail interleavings: %lld schedules (%lld steps, %lld blocked on the lock) in %llu ms\n",
+           e->leaves, e->steps, e->blockedSteps, static_cast<unsigned long long>(ms));
+    static const char* const kNames[6] = {"", "no retired key is resurrected", "an observed release is not lost",
+                                          "a key held at capture stays covered", "a cancelled tail stays cancelled",
+                                          "the tail cannot strand"};
+    for (int inv = 1; inv <= 5; ++inv) {
+        char name[160];
+        snprintf(name, sizeof(name), "interleavings: %s (%d violations)", kNames[inv], e->viol[inv].count);
+        check(e->viol[inv].count == 0, name);
+        if (e->viol[inv].count) printf("      first: %s\n", e->viol[inv].first.c_str());
+    }
+    if (!e->aborted) delete e;   // an aborted run leaves detached workers pointing into it
+}
+
+static void releaseLogCases();
+
+int main(int argc, char** argv) {
     (void)keepPadImport;
+    if (argc > 1 && strcmp(argv[1], "--interleave-only") == 0) {
+        g_user.origAsync = &physicalKey;
+        g_user.origKeyState = &physicalKey;
+        releaseTailInterleavingCases();
+        printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
+        return failures ? 1 : 0;
+    }
     padHookCases();
+    loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
     auto ftable1 = factoryTable(), ftable2 = factoryTable();
     Device dummy{dummyTable.data()}, keyboard{table1.data()}, second{table2.data()};
@@ -437,6 +1204,68 @@ int main() {
           "the closed-menu summon key is still swallowed through the actual device");
     g_summon.store(0);
     check(g_gameKeyboardCalls.load() != 0, "status evidence counts actual game keyboard reads");
+
+    // PR #92 review: a key held across a plugin's release stays up until it is physically released and pressed
+    // again, exactly as after the menu closes. A key pressed after the release is reported normally.
+    {
+        const PFN_GetAsyncKeyState savedReader = g_tailReader;
+        g_tailReader = &physicalKey;
+        physical[VK_ESCAPE] = false;
+        keyboard.keys[DIK_ESCAPE] = 0;
+        refreshReleaseTail(&physicalKey);
+        physical['A'] = true;
+        keyboard.keys[DIK_A] = 0x80;
+        inputGateSetPluginBlock(true);
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0, "(a plugin owns input: the held key reads up)");
+        inputGateSetPluginBlock(false);
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0,
+              "a key held across the plugin's release is still up in DirectInput state");
+        check(hookGetAsyncKeyState('A') == 0 && hookGetKeyState('A') == 0,
+              "...and in the user32 polls");
+        hookGetKeyboardState(keys);
+        check(keys['A'] == 0, "...and in the full user32 keyboard state");
+        physical['B'] = true;
+        keyboard.keys[DIK_B] = 0x80;
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_B] == 0x80 && hookGetAsyncKeyState('B') != 0,
+              "a key pressed after the release is reported normally");
+        physical['A'] = false;
+        keyboard.keys[DIK_A] = 0;
+        refreshReleaseTail(&physicalKey);
+        physical['A'] = true;
+        keyboard.keys[DIK_A] = 0x80;
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0x80 && hookGetAsyncKeyState('A') != 0,
+              "the held key reads down again once it has been released and pressed again");
+        physical['A'] = physical['B'] = false;
+        keyboard.keys[DIK_A] = keyboard.keys[DIK_B] = 0;
+        refreshReleaseTail(&physicalKey);
+        g_tailReader = savedReader;
+    }
+
+    pluginReleaseScanCases(keyboard);
+    releaseTailInterleavingCases();
+
+    // PR #92 review: while a plugin owns input a buffered hat event is dropped unless it re-centres the hat, in
+    // both representations of centred (0xFFFFFFFF, or a low word of 0xFFFF). Buttons: presses dropped, releases pass.
+    auto povUnderPluginBlock = [&](Stick& js, const char* where) {
+        DIDEVICEOBJECTDATA r[6]{};
+        DWORD n = 0;
+        g_pluginBlock.store(true);
+        js.rows[0] = {kJoyOfsPov, 9000, 1, 1, 0};
+        js.rows[1] = {kJoyOfsPov, 0xFFFFFFFFu, 2, 2, 0};
+        js.rows[2] = {kJoyOfsPov + 4, 18000, 3, 3, 0};
+        js.rows[3] = {kJoyOfsPov + 4, 0x0000FFFFu, 4, 4, 0};
+        js.rows[4] = {kJoyOfsButtons + 3, 0x80, 5, 5, 0};
+        js.rows[5] = {kJoyOfsButtons + 3, 0, 6, 6, 0};
+        js.rowCount = 6;
+        const HRESULT hr = readStickRows(js, r, n);
+        g_pluginBlock.store(false);
+        char name[160];
+        snprintf(name, sizeof(name), "%s: only the two centred hat events and the button release survive a plugin block", where);
+        check(hr == DI_OK && n == 3 && r[0].dwOfs == kJoyOfsPov && r[0].dwData == 0xFFFFFFFFu &&
+                  r[1].dwOfs == kJoyOfsPov + 4 && r[1].dwData == 0x0000FFFFu &&
+                  r[2].dwOfs == kJoyOfsButtons + 3 && r[2].dwData == 0,
+              name);
+    };
 
     // ---- HOTAS / joystick buttons, watched and never captured -------------------------
     //
@@ -593,6 +1422,7 @@ int main() {
         check(buf[kJoyOfsButtons + 2] == 0x80 && joyWatchHeld(0x231D0200, 2, stampMs()),
               "with the keyboard private the stick's state is untouched and still watched");
         inputGateSetPrivate(false);
+        povUnderPluginBlock(stick, "a stick on its own table");
 
         // The interface encoding: an A factory, so the game's enumeration is the ANSI record and
         // the A thunk is the one that records it.
@@ -675,6 +1505,47 @@ int main() {
             check(kbuf[DIK_A] == 0 && g_trapCalls == 0, "...while the keyboard on the same table is still released");
             inputGateSetPrivate(false);
             check(g_trapCalls == 0, "still no call on any device beyond caps and info");
+            povUnderPluginBlock(js3, "a stick on a table the keyboard door holds");
+
+            // PR #92 review: on the shared table the watch sees only the rows the game sees. Two presses are swallowed
+            // and compacted away, a release passes; the stale tail slots left behind by the compaction must not be
+            // watched as a press.
+            joyWatchReset();
+            readStick(js3, kJoyState2Size, buf);   // an ordinary read first, so the next one is not the device's first sight
+            DIDEVICEOBJECTDATA sr[6]{};
+            DWORD sn = 0;
+            js3.rows[0] = {kJoyOfsButtons + 5, 0x80, 1, 1, 0};
+            js3.rows[1] = {kJoyOfsButtons + 7, 0x80, 2, 2, 0};
+            js3.rows[2] = {kJoyOfsButtons + 3, 0, 3, 3, 0};
+            js3.rowCount = 3;
+            g_pluginBlock.store(true);
+            const HRESULT shr = readStickRows(js3, sr, sn);
+            g_pluginBlock.store(false);
+            check(shr == DI_OK && sn == 1 && sr[0].dwOfs == kJoyOfsButtons + 3,
+                  "shared table: a plugin block drops the two presses and passes the release");
+            check(!joyWatchHeld(0x231D0200, 5, stampMs()) && !joyWatchHeld(0x231D0200, 7, stampMs()),
+                  "shared table: the watch sees only the rows the game sees, not the swallowed presses");
+
+            // A short-format state read under a plugin block keeps its axes; only buttons are zeroed and hats centred.
+            uint8_t shortBuf[64];
+            memset(shortBuf, 0xCC, sizeof(shortBuf));
+            const int32_t axis = 1234;
+            memcpy(js3.state, &axis, 4);
+            js3.button(2, true);
+            js3.hat(0, 9000);
+            g_pluginBlock.store(true);
+            const HRESULT sthr = readStick(js3, 64, shortBuf);
+            g_pluginBlock.store(false);
+            int32_t gotAxis = 0;
+            memcpy(&gotAxis, shortBuf, 4);
+            uint32_t gotPov = 0;
+            memcpy(&gotPov, shortBuf + kJoyOfsPov, 4);
+            check(sthr == DI_OK && gotAxis == 1234, "shared table: a short-format state read keeps its axes under a plugin block");
+            check(shortBuf[kJoyOfsButtons + 2] == 0 && gotPov == 0xFFFFFFFFu,
+                  "shared table: ...with the buttons zeroed and the hat centred");
+            js3.button(2, false);
+            js3.hat(0, 0xFFFFFFFFu);
+            memset(js3.state, 0, 4);
         }
 
         // The shared-vtable ghost (the review of 0.19.1): a controller the game never enumerated,
@@ -814,6 +1685,30 @@ int main() {
         check(differs == 0 && stick.refs == 1 && ansi.refs == 1 && bad.refs == 1 && kb3.refs == 1,
               "shutdown restores the joystick tables and gives back the references it held");
     }
+    // PR #92 review: an input-filtering plugin gets the user32 doors without the menu ever opening; with no
+    // plugin they stay out until it does.
+    {
+        inputGateInstallEarly();
+        check(!g_user.asyncKey.applied && !g_installTried,
+              "with no input-filtering plugin and F8 never opened the user32 doors are not installed");
+        inputGateInstallForPlugin();   // what the plugin manager calls when an addon with a filter initialises
+        check(g_user.asyncKey.applied && !g_installTried,
+              "an input-filtering plugin installs the user32 doors with the menu still never opened");
+        void* const asyncOriginal = g_user.asyncKey.original;
+        inputGateInstallForPlugin();
+        check(g_user.asyncKey.original == asyncOriginal, "...and a second plugin does not install them again");
+        g_user.origAsync = &physicalKey;
+        physical[VK_F9] = true;
+        check((GetAsyncKeyState(VK_F9) & 0x8000) != 0, "(the installed door passes a held key while no plugin owns input)");
+        const uint32_t before = g_user.asyncCalls.load();
+        inputGateSetPluginBlock(true);
+        check(GetAsyncKeyState(VK_F9) == 0 && g_user.asyncCalls.load() == before + 1,
+              "the executable's own GetAsyncKeyState call reaches the door and reads a held key up while a plugin owns input");
+        inputGateSetPluginBlock(false);
+        physical[VK_F9] = false;
+        inputGateShutdown();
+        check(!g_user.asyncKey.applied, "(shutdown takes the plugin-installed doors out)");
+    }
     // Review finding 7, through the real setup order: the loader attach, the VR menu's first inputGateInstall, then the flat menu's. The
     // controller door is the executable's real XINPUT9_1_0 import (the rig links it for this), so "installed" is observable.
     {
@@ -843,6 +1738,63 @@ int main() {
         check(!g_padImport.applied && !g_padInstalled.load(), "shutdown takes the controller door out");
         g_runtimeProfile = before;
     }
+    // PR #92 review: a plugin's ownership of input is a lease. Renewing it each frame keeps it; a plugin
+    // that stops renewing (no render pass, flat profile) loses it after one lease period.
+    {
+        inputGateSetPluginBlock(true);
+        check(g_pluginBlock.load(), "(a plugin takes input)");
+        for (int frame = 0; frame < kPluginLeaseFrames * 3; ++frame) {
+            inputGatePluginLeaseTick();
+            inputGateSetPluginBlock(true);   // renewed by the plugin's filter call this frame
+        }
+        check(g_pluginBlock.load(), "a plugin that renews every frame keeps input past several lease periods");
+        for (int frame = 0; frame < kPluginLeaseFrames - 1; ++frame) inputGatePluginLeaseTick();
+        check(g_pluginBlock.load(), "an unrenewed lease still holds until its period is spent");
+        inputGatePluginLeaseTick();
+        check(!g_pluginBlock.load(), "the gate is clear once a lease period passes with no renewal");
+        inputGateSetPluginBlock(true);
+        inputGateSetPluginBlock(false);
+        check(!g_pluginBlock.load(), "an explicit release clears the gate at once");
+        inputGateSetPluginBlock(true);
+        inputGateShutdown();
+        check(!g_pluginBlock.load(), "shutdown clears a block still held");
+    }
+    releaseLogCases();
     printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
     return failures ? 1 : 0;
+}
+
+// PR #92 review follow-up: the release line is logged for the first five releases only, and the shutdown says the total.
+// (Its own function: main holds __try frames, which cannot share a function with objects that unwind.)
+static void releaseLogCases() {
+    {
+        inputGateShutdown();   // earlier cases' releases are summarised (and the count reset) before this log opens
+        wchar_t tmp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmp);
+        const std::filesystem::path dir = std::filesystem::path(tmp) / (L"edvr_igt_log_" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        check(Log::get().open(dir.wstring(), L"igt"), "(the rig's log opens to capture the release lines)");
+        for (int i = 0; i < 7; ++i) {
+            inputGateSetPluginBlock(true);
+            inputGateSetPluginBlock(false);
+        }
+        inputGateSetPluginBlock(false);   // not a transition: no line, no count
+        inputGateShutdown();
+        Log::get().close();
+        int releaseLines = 0, summaryLines = 0;
+        bool summaryIsSeven = false;
+        for (const auto& f : std::filesystem::directory_iterator(dir)) {
+            std::ifstream in(f.path());
+            std::string line;
+            while (std::getline(in, line)) {
+                if (line.find("keyboard gate: plugin input ownership released (") != std::string::npos) ++releaseLines;
+                if (line.find("keyboard gate: plugin input ownership released 7 times this session.") != std::string::npos) summaryIsSeven = true;
+                if (line.find("times this session") != std::string::npos) ++summaryLines;
+            }
+        }
+        check(releaseLines == 5, "seven releases log five lines, then stay silent");
+        check(summaryLines == 1 && summaryIsSeven, "shutdown logs one summary line with the total of seven");
+        std::filesystem::remove_all(dir, ec);
+    }
 }

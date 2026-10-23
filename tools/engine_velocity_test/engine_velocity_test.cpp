@@ -16,7 +16,7 @@
 //
 // What it covers: the DXBC patcher end to end and the slot target's blend
 // states (shader_tests.h), the emit bracket's history rules against a fake
-// engine laid out as build 332841 (emit_tests.h), the compose's arithmetic
+// engine laid out as build 334473 (emit_tests.h), the compose's arithmetic
 // from the shipped HLSL text (math_tests.h), the production `mv` entry with
 // engine inputs bound -- joined exact, masked with no history, corrupt/stale/
 // cleared declined (consumer_tests.h), the on-foot path through the
@@ -59,6 +59,7 @@
 #include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
+#include "flat_discovery_lazy_tests.h"
 #include "flat_domain_tests.h"
 #include "source_free_tests.h"
 #include "pin_tests.h"
@@ -437,6 +438,7 @@ int wmain(int argc, wchar_t** argv) {
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
+    discovery_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
     source_free_tests::run({device.Get(), context.Get(), &check});
     pin_tests::run({device.Get(), context.Get(), &check});

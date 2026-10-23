@@ -16,6 +16,7 @@ std::atomic<DWORD> g_seenIncomingError{ERROR_SUCCESS};
 std::atomic<uint32_t> g_afterCasCalls{0};
 std::atomic<uint32_t> g_checks{0};
 std::atomic<uint32_t> g_reportSinkCalls{0};
+std::atomic<uint32_t> g_forwardCalls{0};
 edvr::OculusRouteStatus g_lastReported{};
 void** g_beforeCasSlot = nullptr;
 void* g_beforeCasForeign = nullptr;
@@ -25,6 +26,12 @@ HMODULE WINAPI fakeLoadLibraryW(LPCWSTR) {
     g_seenIncomingError.store(GetLastError(), std::memory_order_relaxed);
     g_originalCalls.fetch_add(1, std::memory_order_relaxed);
     SetLastError(ERROR_BAD_LENGTH);
+    return reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234));
+}
+
+// The forward target that oculusRouteDispatchFrom receives from an import hook.
+HMODULE WINAPI fakeForward(LPCWSTR) {
+    g_forwardCalls.fetch_add(1, std::memory_order_relaxed);
     return reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234));
 }
 
@@ -85,8 +92,6 @@ int main(int argc, char** argv) {
               unknown.installed == 0 && unknown.installFailures == 1 &&
               unknown.profileFailureStage == 2,
           "unknown profile refuses installation without touching an IAT");
-    check(!edvr::oculusRouteProcessAttachAllowed(),
-          "identified Elite profile failure refuses process attach");
 
     g_reportSinkCalls.store(0, std::memory_order_relaxed);
     edvr::oculusRouteTestSetReportSink(reportSink);
@@ -96,6 +101,18 @@ int main(int argc, char** argv) {
               g_lastReported.installFailures == 1 &&
               g_lastReported.profileFailureStage == 2,
           "initial report records unknown profile without claiming success");
+
+    // Before any install the route is not routing, so the import hook's
+    // dispatch forwards every name, even the refused one at the expected caller.
+    edvr::oculusRouteTestReset();
+    g_forwardCalls.store(0, std::memory_order_relaxed);
+    const uintptr_t exeBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    HMODULE beforeInstall = edvr::oculusRouteDispatchFrom(
+        L"C:\\Oculus\\Support\\oculus-runtime\\LibOVRRT64_1.dll",
+        exeBase + kTestCallerRva, fakeForward);
+    check(beforeInstall == reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234)) &&
+              g_forwardCalls.load(std::memory_order_relaxed) == 1,
+          "import hook forwards every name while the route is not installed");
 
     void* slot = reinterpret_cast<void*>(&fakeLoadLibraryW);
     constexpr uintptr_t kCallerRva = kTestCallerRva;
@@ -118,6 +135,35 @@ int main(int argc, char** argv) {
     check(slotCall(L"LibOVRRT64_1.dll") ==
               reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234)),
           "the production wrapper is reachable through the exchanged slot");
+
+    // The executable's import hook dispatches with its own return address
+    // (base + kCallerRva) and forwards whatever the route does not refuse.
+    const uintptr_t exeCaller = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + kCallerRva;
+    const wchar_t* libOvrPath = L"C:\\Oculus\\Support\\oculus-runtime\\LibOVRRT64_1.dll";
+    g_forwardCalls.store(0, std::memory_order_relaxed);
+    const auto beforeExact = edvr::oculusRouteStatusSnapshot();
+    SetLastError(ERROR_INVALID_HANDLE);
+    HMODULE importRefused = edvr::oculusRouteDispatchFrom(libOvrPath, exeCaller, fakeForward);
+    const auto afterExact = edvr::oculusRouteStatusSnapshot();
+    check(importRefused == nullptr && GetLastError() == ERROR_MOD_NOT_FOUND &&
+              g_forwardCalls.load(std::memory_order_relaxed) == 0 &&
+              afterExact.rejected == beforeExact.rejected + 1 &&
+              afterExact.exactName == beforeExact.exactName + 1,
+          "import hook refuses the exact LibOVR basename from the executable's caller");
+
+    SetLastError(ERROR_ACCESS_DENIED);
+    HMODULE importForwarded = edvr::oculusRouteDispatchFrom(L"xinput1_4.dll", exeCaller, fakeForward);
+    check(importForwarded == reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234)) &&
+              g_forwardCalls.load(std::memory_order_relaxed) == 1,
+          "import hook forwards other names and returns the target's result");
+
+    const auto beforeForeign = edvr::oculusRouteStatusSnapshot();
+    HMODULE importForeign = edvr::oculusRouteDispatchFrom(libOvrPath, exeCaller + 1, fakeForward);
+    const auto afterForeign = edvr::oculusRouteStatusSnapshot();
+    check(importForeign == reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1234)) &&
+              g_forwardCalls.load(std::memory_order_relaxed) == 2 &&
+              afterForeign.unknownCaller == beforeForeign.unknownCaller + 1,
+          "import hook forwards the exact basename from an unrecognised caller");
 
     SetLastError(ERROR_INVALID_HANDLE);
     g_originalCalls.store(0, std::memory_order_relaxed);

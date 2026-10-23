@@ -59,10 +59,10 @@ DllInfo probeDll(const std::wstring& path);
 // Read-only package and executable qualification. These never load or execute
 // the inspected image.
 
-// Which Elite Dangerous the folder's executable is. Only OdysseyQualified may
-// be installed against: the runtime hooks are written for one pinned revision.
-// The other cases exist so the refusal can say which case the user is in
-// instead of one message for all of them.
+// Which Elite Dangerous the folder's executable is. OdysseyQualified is the
+// pinned revision the build-tied fixes are written for; OdysseyUnknown still
+// installs, with a warning that those fixes stand down. Legacy and Unreadable
+// are refused, each with its own message.
 enum class EliteExeKind {
     Unreadable,       // cannot be hashed: missing, locked, or not a file
     Legacy,           // version strings name pre-Odyssey Elite Dangerous (Horizons)

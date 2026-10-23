@@ -566,15 +566,18 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             plan.problems.push_back(
                 "EliteDangerous64.exe could not be read. Verify the game files in the launcher, then try again.");
             return plan;
-        default: {
-            plan.blocked = true;
+        case EliteExeKind::OdysseyUnknown: {
+            // Not blocked: an Odyssey revision this build was not checked against installs, and the
+            // warning goes under "Worth knowing" in the report, the confirmation and the summary.
             std::string msg = "This Elite Dangerous: Odyssey revision";
             if (!s.eliteFileVersion.empty())
                 msg += " (version " + toUtf8(s.eliteFileVersion) + ")";
-            msg += " is not one this EDVR build is qualified for. "
-                   "Install an EDVR build qualified for this game revision.";
+            msg += " is not the one this EDVR build was checked against. "
+                   "EDVR will install and the game will start; fixes tied to the game build stand down "
+                   "and the gfx log names each one, and the Oculus PC runtime may bypass EDVR's OpenXR "
+                   "runtime until an EDVR update for this revision.";
             plan.problems.push_back(msg);
-            return plan;
+            break;
         }
     }
     for (const DllInfo* item : {&s.d3d11,&s.openvrCurrent,&s.openxrLoader,&s.nativeConfig,&s.openxrLicense}) {

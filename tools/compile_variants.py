@@ -59,6 +59,15 @@ def extract_hlsl(text):
     return match.group(1).encode() if match else None
 
 
+def source_label(src):
+    """Prefer a repository-relative label, including headers outside the repo."""
+    try:
+        return os.path.relpath(src, REPO)
+    except ValueError:
+        # Windows cannot make a relative path between different drives.
+        return os.path.abspath(src)
+
+
 def compile_variant(d3d, hlsl, defname, target):
     """Compile once, with `defname` defined to 1 (None: unmodified).
     Returns (ok, hr, compiler's error text)."""
@@ -93,7 +102,7 @@ def main(argv=None):
         sys.exit(f"no R\"HLSL(...)HLSL\" literal in {src}")
     d3d = ctypes.WinDLL("d3dcompiler_47.dll")
 
-    print(f"{os.path.relpath(src, REPO)}: {len(hlsl)} bytes of HLSL")
+    print(f"{source_label(src)}: {len(hlsl)} bytes of HLSL")
     failed = 0
     for d in [None] + defines:
         ok, hr, errors = compile_variant(d3d, hlsl, d, target)
@@ -116,6 +125,7 @@ def self_test():
     import io
     import shutil
     import tempfile
+    from unittest import mock
 
     failures = []
 
@@ -138,6 +148,13 @@ def self_test():
            "the literal was not read back whole")
     expect("extract-none", extract_hlsl('static const char* k = "float4 main()";\n') is None,
            "a header with no literal")
+
+    expect("source-label-relative", source_label(DEFAULT_SRC) == os.path.relpath(DEFAULT_SRC, REPO),
+           "same-drive source labels stay repository-relative")
+    with mock.patch.object(os.path, "relpath", side_effect=ValueError("different drives")) as relpath:
+        expect("source-label-cross-drive", source_label(DEFAULT_SRC) == os.path.abspath(DEFAULT_SRC),
+               "a source on another drive needs an absolute label")
+        relpath.assert_called_once_with(DEFAULT_SRC, REPO)
 
     base = tempfile.mkdtemp(prefix="edvr-compile-variants-")
 

@@ -5,7 +5,7 @@
 // Exact per-pixel motion for the game's rigid movers from the engine's own
 // kinematic records, with no estimation anywhere:
 //
-//  1. EMIT (job threads). FUN_144312E00 builds each kinematic rig record's
+//  1. EMIT (job threads). FUN_144315AC0 builds each kinematic rig record's
 //     0x150-byte pool record -- byte-for-byte the t33 record the vertex shader
 //     reads -- and appends it to the owner's node lists, from which the
 //     engine's copier fills the mapped pool. A bracket on that call (the
@@ -18,7 +18,7 @@
 //     validated pose, masked otherwise (engine_velocity_emit.h has the rules).
 //     The engine's own copy then carries it to the GPU: no slot map, no
 //     matching, no readback of write-combined memory.
-//     Primary rigid 42B4130 emissions use the same canonical history through
+//     Primary rigid 42B6DF0 emissions use the same canonical history through
 //     an emission sink: native records stay unchanged. Verified CPU list
 //     relocation/upload joins certify only EDVR's private clone for patching.
 //  2. DRAW (render thread). The pool families' pixel shaders are substituted
@@ -300,6 +300,10 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext*, ID3D11Texture2D* de
 void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext*);
 bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceView** out);
 
+// Read-only actual-shader receipt for flat camera provenance. Accepts only
+// original shaders or the currently held exact motion/marker replacement;
+// binding generations/context must still name those original shaders.
+bool engineVelocityFlatSourceShaders(ID3D11DeviceContext*, uint64_t vs, uint64_t ps);
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);

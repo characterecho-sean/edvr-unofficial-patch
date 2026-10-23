@@ -5,6 +5,7 @@
 #include <d3d11_1.h>
 #include <wrl/client.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -79,7 +80,8 @@ class FlatDrawCapture {
     std::unique_ptr<Frame> current_;
     std::deque<std::unique_ptr<Frame>> pending_;
     std::wstring directory_;
-    uint64_t armMs_=0,armFrame_=0, allocated_=0; unsigned accepted_=0,serial_=0;
+    inline static std::atomic<uint64_t> nextCaptureId_{0};
+    uint64_t armMs_=0,armFrame_=0, allocated_=0; unsigned accepted_=0;
     unsigned unqualified_=0;
     std::map<std::pair<char,uint64_t>,bool> shaderBytes_;
     bool armed_=false,failed_=false;
@@ -375,7 +377,8 @@ public:
     void arm(uint64_t frame) {
         cancel("rearmed");directory_.clear();accepted_=0;unqualified_=0;failed_=false;shaderBytes_.clear();armed_=true;armFrame_=frame;armMs_=GetTickCount64();
         SYSTEMTIME t{};GetSystemTime(&t);wchar_t leaf[128]{};
-        _snwprintf_s(leaf,_TRUNCATE,L"%04u%02u%02u_%02u%02u%02u_%03u_%lu_%u",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,GetCurrentProcessId(),++serial_);
+        const auto captureId=nextCaptureId_.fetch_add(1,std::memory_order_relaxed)+1;
+        _snwprintf_s(leaf,_TRUNCATE,L"%04u%02u%02u_%02u%02u%02u_%03u_%lu_%llu",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,GetCurrentProcessId(),(unsigned long long)captureId);
         const auto root=Config::get().logDir()+L"\\flat_draw_pixels";directory_=root+L"\\"+leaf;
         if(!ensureDirectory(Config::get().logDir())||!ensureDirectory(root)||!ensureDirectory(directory_)){armed_=false;Log::get().note("flat draw pixels: arm refused directory");return;}
         Log::get().note("flat draw pixels: armed frame=%llu next-two-qualified-frames points=8 window=16 cap=512-draws/frame scene=256 motion=256 stride=64 complementary-phases memory=256MiB expiry=900frames/30s directory=%ls",

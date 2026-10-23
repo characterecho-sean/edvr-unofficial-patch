@@ -289,7 +289,7 @@ void casePhysNodes() {
 }
 
 // Draw-item-builder bucket counts (the census join, perf arc): per-session
-// counters for the FUN_1442B4420 bracket. A wild entry walk counts and
+// counters for the FUN_1442B70E0 bracket. A wild entry walk counts and
 // returns early; an empty walk counts separately; an exit fault drops the
 // call's items but keeps its bucket count; overflow and negative deltas
 // accumulate; the maxima track only what their path measured.
@@ -335,9 +335,9 @@ void caseDirectBuild() {
           "9: producer 1 keeps a separate stat set (index 2 ignored)");
     std::ostringstream j;
     p.writeJson(j);
-    check(j.str().find("\"bucket_items_direct\":[{\"producer\":\"fun_144312e00\","
+    check(j.str().find("\"bucket_items_direct\":[{\"producer\":\"fun_144315ac0\","
                        "\"calls\":3,\"items\":47,\"neg_deltas\":1,\"read_faults\":1,"
-                       "\"max_items_per_call\":40},{\"producer\":\"fun_14369c9c0\","
+                       "\"max_items_per_call\":40},{\"producer\":\"fun_14369f6c0\","
                        "\"calls\":1,\"items\":900,\"neg_deltas\":0,\"read_faults\":0,"
                        "\"max_items_per_call\":900}]") != std::string::npos,
           "9: both producers serialize");

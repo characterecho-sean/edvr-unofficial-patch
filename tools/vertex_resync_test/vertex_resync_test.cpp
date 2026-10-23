@@ -4,7 +4,7 @@
 //   --dry-run    the same run except the one check that writes a log file in the temp folder (V5.m-p), for the gate's --dry-run convention
 //   --self-test  every check; the optional argument is the repository root, where the glue is read as text (the mutation tool hands it a temp root holding an edited copy)
 //
-// The pure half runs on a fake command list laid out at the real offsets (a model of SetVertexBuffer 0x1404E9D70 and of FlushIA's slot loop 0x140522A50, written from the
+// The pure half runs on a fake command list laid out at the real offsets (a model of SetVertexBuffer 0x1404E9E70 and of FlushIA's slot loop 0x140522BB0, written from the
 // disassembly in analysis\decomp\scanner_vb_dump_*). The hook half is the production hook.cpp compiled with EDVR_VERTEX_RESYNC_TEST: the real CodeHook patches a synthetic
 // function that begins with the real 16-byte prologue of FlushIA, the real relay runs, the real SEH-guarded repair runs before the original. The repair has no key: there is
 // no off to test. Cases ("V<case>.<what>"; mutants.py names the case that must catch each mutation):
@@ -108,7 +108,7 @@ struct FakeList {
     }
     uint8_t* wrapperPtr(int i) { return i < 0 ? nullptr : wrappers[i].bytes; }
 
-    // SetVertexBuffer (0x1404E9D70): compares ONLY the desired state; on a change writes desired and applied together and sets dirty bit 0x20.
+    // SetVertexBuffer (0x1404E9E70): compares ONLY the desired state; on a change writes desired and applied together and sets dirty bit 0x20.
     void setVertexBuffer(uint32_t slot, uint8_t* wrapper, uint32_t offset, uint32_t over = 0xFFFFFFFFu) {
         const uint64_t w = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(wrapper));
         if (vr::load64(list + 0x60 + 8 * slot) == w && vr::load32(list + 0xE0 + 4 * slot) == offset && vr::load32(list + 0x120 + 4 * slot) == over) return;   // skipped
@@ -125,7 +125,7 @@ struct FakeList {
         }
         vr::store32(list + 0x488 + 4 * slot, 0);
     }
-    // FlushIA's vertex-buffer half (0x140522A50): strides from the desired state, the "fewer slots" zeroing of the applied arrays, then the bind from the applied arrays.
+    // FlushIA's vertex-buffer half (0x140522BB0): strides from the desired state, the "fewer slots" zeroing of the applied arrays, then the bind from the applied arrays.
     // `dirty` is the word at list+0x1E8: with none of the mask's bits the function returns without binding.
     bool flush() {
         uint8_t* d = desired();
@@ -296,7 +296,7 @@ void caseReplay() {
 
 // ---- V2 ----------------------------------------------------------------------------------------------------------------------------------------------------
 void caseGate() {
-    // The bytes spelled out again here, not copied from the header: build 332841's FlushIA at EliteDangerous64.exe+0x522A50, read from the exe.
+    // The bytes spelled out again here, not copied from the header: build 334473's FlushIA at EliteDangerous64.exe+0x522BB0, read from the exe.
     const uint8_t exe[16] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B, 0xF8};
     check(vr::prologueMatches(exe, 16), "V2.a the 16 bytes read from the exe are the prologue the hook checks");
     bool everyByteMatters = true;
@@ -308,9 +308,9 @@ void caseGate() {
     }
     check(everyByteMatters, "V2.b a prologue that differs in any one of the 16 bytes is refused");
     check(!vr::prologueMatches(exe, 15) && !vr::prologueMatches(nullptr, 16), "V2.c a short or missing buffer is refused");
-    check(vr::kFlushIaRva == 0x522A50u && vr::kPrologueBytes == 16, "V2.d the RVA is 0x522A50 (0x140522A50) and the check covers 16 bytes");
-    check(vr::identityMatches(1788384820u, 104894464u), "V2.e the PE pair of build 332841 passes");
-    check(!vr::identityMatches(1788384821u, 104894464u) && !vr::identityMatches(1788384820u, 104894465u) && !vr::identityMatches(0, 0),
+    check(vr::kFlushIaRva == 0x522BB0u && vr::kPrologueBytes == 16, "V2.d the RVA is 0x522BB0 (0x140522BB0) and the check covers 16 bytes");
+    check(vr::identityMatches(1791840573u, 104906752u), "V2.e the PE pair of build 334473 passes");
+    check(!vr::identityMatches(1788384821u, 104906752u) && !vr::identityMatches(1791840573u, 104894465u) && !vr::identityMatches(0, 0),
           "V2.f a different timestamp, a different image size or neither is refused");
 }
 
@@ -329,9 +329,9 @@ void caseInstruments() {
     check(std::strcmp(line, "vertex resync: armed; 12 stale vertex-buffer bindings repaired this session (5000000000 flushes seen)") == 0, "V3.d the session line is exactly the one asked for");
     vr::Sighting s;
     s.slot = 2; s.wrapper = 0xABC0; s.native = 0xDEF0; s.applied = 0x0;
-    vr::formatSightingLine(line, sizeof(line), 3, s, 0x7F0000, 1, 4242, 2, "0x522A50/0x510404");
+    vr::formatSightingLine(line, sizeof(line), 3, s, 0x7F0000, 1, 4242, 2, "0x522BB0/0x510404");
     check(has(line, "vertex resync: stale binding 3 of 8: slot 2, list 0x7F0000, desired wrapper 0xABC0, native buffer 0xDEF0, applied buffer 0x0, layout slots 1, thread 4242, repaired; "
-                    "game stack (2 frames) 0x522A50/0x510404"),
+                    "game stack (2 frames) 0x522BB0/0x510404"),
           "V3.e a first-sighting line carries the slot, the list, the desired wrapper, the native buffer, the applied value, the layout count, the thread and the game stack");
     vr::formatSightingLine(line, sizeof(line), 1, s, 1, 1, 1, 0, "");
     check(has(line, "(none in the game's image)"), "V3.f ...and the empty stack is said so");
@@ -434,7 +434,7 @@ void caseHook() {
         stale(f);
         check(p && callFlush(reinterpret_cast<FlushFn>(p), f) == 0, "V4.a before the hook the synthetic flush sees the stale cache (applied[0] = NULL): the control");
     }
-    // V4.b a function whose prologue is not build 332841's is refused: one line, nothing patched, and it is not retried
+    // V4.b a function whose prologue is not build 334473's is refused: one line, nothing patched, and it is not retried
     uint8_t wrongBytes[16];
     std::memcpy(wrongBytes, exe, 16);
     wrongBytes[6] ^= 0x01;
@@ -445,7 +445,7 @@ void caseHook() {
     std::memcpy(before, wrongFn, 64);
     vertexResyncInstall();
     check(wrongFn && std::memcmp(before, wrongFn, 64) == 0 && !vertexResyncTestState().installed && countLinesWith("NOT installed -- the 16 bytes") == 1,
-          "V4.b a function whose prologue is not build 332841's is refused: one line, nothing patched, not installed");
+          "V4.b a function whose prologue is not build 334473's is refused: one line, nothing patched, not installed");
     const size_t linesAfterRefusal = vertexResyncTestLineCount();
     vertexResyncInstall();
     check(vertexResyncTestLineCount() == linesAfterRefusal && vertexResyncTestState().attempted, "V4.c a refusal is final: asking again says nothing and tries nothing");

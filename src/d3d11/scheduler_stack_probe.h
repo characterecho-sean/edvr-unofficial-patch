@@ -15,16 +15,16 @@
 // nothing is allocated on the capture path (fixed arrays only), and the
 // whole probe no-ops when the executable's identity (PE timestamp + image
 // size + target prologues) does not match the hash-verified build
-// (SHA-256 e6be8bbe...4e988).
+// (SHA-256 6891f70a...7857e93).
 //
 // Targets (index: RVA, role):
-//   0: 0x4321940 worker entry (UpdateRenderDataJob)   -- observed through
-//   1: 0x4320340 worker entry, batch path              -- the kinematic
+//   0: 0x4324640 worker entry (UpdateRenderDataJob)   -- observed through
+//   1: 0x4323040 worker entry, batch path              -- the kinematic
 //      eval hook's job-0/1 relays: those RVAs already carry that hook's
 //      patch and CodeHook refuses a second patch. The job wrappers run
 //      pre-forward exactly where a dedicated hook would sit.
-//   2: 0x42DF940 per-record drain
-//   3: 0x36A0F50 reset+repopulate
+//   2: 0x42E2600 per-record drain
+//   3: 0x36A3C50 reset+repopulate
 // Targets 2/3 carry this probe's own CodeHooks (scheduler_stack_hook.cpp).
 #include <atomic>
 #include <cstdint>
@@ -35,8 +35,8 @@ namespace edvr {
 
 class SchedulerStackProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1788384820u;
-    static constexpr uint32_t kExpectedImageSize=104894464u;
+    static constexpr uint32_t kExpectedTimestamp=1791840573u;
+    static constexpr uint32_t kExpectedImageSize=104906752u;
     static constexpr uint32_t kTargetCount=4u;
     static constexpr uint32_t kStackCap=24u;   // return addresses per signature
     static constexpr uint32_t kSigCap=64u;     // distinct signatures per target
@@ -44,14 +44,14 @@ public:
     static constexpr uint32_t kMaxGaps=8u;     // tolerated consecutive non-return qwords
     // Return addresses accepted in [imageBase+kRangeLo, imageBase+kRangeHi];
     // at the exe's preferred base 0x140000000 this is [0x140001000,
-    // 0x144DB3000] -- all of .text plus the callback tables' neighbourhood.
+    // 0x144DB6000] -- all of .text plus the callback tables' neighbourhood.
     static constexpr uintptr_t kRangeLo=0x1000u;
-    static constexpr uintptr_t kRangeHi=0x4DB3000u;
+    static constexpr uintptr_t kRangeHi=0x4DB6000u;
     // The two RVAs this probe hooks itself. Prologues verified against the
     // hash-checked binary at install (tools/build_diff_targets.json fields
-    // for 0x4321940/0x4320340/0x36A0F50; 0x42DF940 verified by hand from
+    // for 0x4324640/0x4323040/0x36A3C50; 0x42E2600 verified by hand from
     // analysis/EliteDangerous64.exe, 2026-09-21).
-    static constexpr uintptr_t kHookRvas[2]={0x42DF940u,0x36A0F50u};
+    static constexpr uintptr_t kHookRvas[2]={0x42E2600u,0x36A3C50u};
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 

@@ -7,7 +7,7 @@
 // process.
 //
 // The mechanism (flights 050558 and 095137): the camera driver
-// FUN_1428431d0 copies a 4x4 "mailbox" at ship+0x3330..+0x336F into a local
+// FUN_1428457f0 copies a 4x4 "mailbox" at ship+0x3330..+0x336F into a local
 // before composing the eye views and (mode != 1) resets it to the identity
 // constant below right after. The HMDCamera tick that refills it is absent on
 // the frame after a camera switch (the camera is deactivated one frame and
@@ -24,7 +24,7 @@ namespace tfeb {
 
 // ---------------------------------------------------------------------------
 // The reset value ship+0x3330..+0x336F is set to on every (mode != 1) call:
-// rows 0-2 from the identity constant at VA 0x1450C8090 (verified against
+// rows 0-2 from the identity constant at VA 0x1450CB0D0 (verified against
 // analysis\EliteDangerous64.exe's own bytes -- canonical 0x3F800000/
 // 0x00000000, not some other bit pattern that merely prints as 1/0), row 3
 // (the translation) zeroed by the two qword stores at +0x3360/+0x3368.

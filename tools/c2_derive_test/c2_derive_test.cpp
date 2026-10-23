@@ -3,12 +3,12 @@
 // derive half lives in c2_derive_model.h (shared with c2_warp_test), whose
 // header comment names the artifacts:
 //
-//   view finalizer     FUN_1404f4910  camera_cache_helpers.txt:550-618
-//   projection builder FUN_1404f2ff0  camera_cache_helpers.txt:255-493
-//   VP finalizer       FUN_1404f49f0  camera_cache_helpers.txt:57-195
-//   scene CB composer  FUN_140596830  camera_producer.txt:23-124
-//   refresh ctx copy   FUN_1405921f0  camera_producer.txt:186-249
-//   ray snapshot       FUN_1406be790  camera_ray_writers2.txt:13-30
+//   view finalizer     FUN_1404f4a70  camera_cache_helpers.txt:550-618
+//   projection builder FUN_1404f3150  camera_cache_helpers.txt:255-493
+//   VP finalizer       FUN_1404f4b50  camera_cache_helpers.txt:57-195
+//   scene CB composer  FUN_140596990  camera_producer.txt:23-124
+//   refresh ctx copy   FUN_140592350  camera_producer.txt:186-249
+//   ray snapshot       FUN_1406be8f0  camera_ray_writers2.txt:13-30
 //
 // --self-test runs A1-A8 and prints "c2 derive: PASS" only when every check
 // holds. Exit 1 with the failed checks named otherwise.
@@ -216,7 +216,7 @@ void testA3() {
 
 // ---------------------------------------------------------------------------
 // A4 override composition: jitter, then the per-item setter shape
-// (FUN_140591f30: +0x25C = f2+f14, +0x280 = f14), then the section refresh;
+// (FUN_140592090: +0x25C = f2+f14, +0x280 = f14), then the section refresh;
 // the override lands and the jitter term survives in raster-pixel shift.
 // ---------------------------------------------------------------------------
 void testA4() {
@@ -452,7 +452,7 @@ void testA7() {
 // it is exactly the legacy scope's shift, it is exactly removable, the
 // measured exact-zero encoding survives it, and the live static-pair check
 // tells a right provenance claim from a wrong one. Everything is computed on
-// the C2 derive model, whose composer is the decompiled FUN_140596830.
+// the C2 derive model, whose composer is the decompiled FUN_140596990.
 // ---------------------------------------------------------------------------
 // The six camera rows b1[270..275] as the flat runtime captures them: rows
 // 0..3 are the composer's output, row 4 repeats the view direction (the

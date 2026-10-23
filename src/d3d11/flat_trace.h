@@ -73,10 +73,17 @@ constexpr uint32_t kFlatTraceStencilWrite = 1u << 9;
 // bits, zero in every committed trace, so the corpus replays as it always did.
 constexpr uint32_t kFlatTraceFirstPersonCohort = 1u << 10;
 constexpr uint32_t kFlatTraceAlternateHdr = 1u << 11;
+// Runtime attestation only: replay preserves the checked source type/stamp;
+// stripped payloads cannot independently re-prove light math or resource lineage.
+// Abandoned actual issues append MarkUncertain, cancelling this authority.
+constexpr uint32_t kFlatTraceForwardHdrVerified=1u<<16;
+constexpr uint32_t kFlatTraceForwardUpstreamPhase=1u<<17;
 constexpr uint32_t kFlatTraceDeferredHdrVerified = 1u << 14;
 constexpr uint32_t kFlatTraceDeferredInverseRepaired = 1u << 15;
 // A pool family's vertex shader left stock, drawn into the scene's depth (FlatRuntimeDraw::poolFamilyVs, section 104). Appended the same way.
 constexpr uint32_t kFlatTracePoolFamilyVs = 1u << 12;
+// The depth-of-field composite's verification (FlatRuntimeDraw::dofCompositeVerified). An appended bit, zero in every committed trace.
+constexpr uint32_t kFlatTraceDofCompositeVerified = 1u << 18;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -91,6 +98,8 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.hdrCopyVerified ? kFlatTraceHdrCopyVerified : 0;
     e.flags |= d.menuHdrCopyVerified ? kFlatTraceMenuCopyVerified : 0;
     e.flags |= d.imageSourceCameraIndependentVerified ? kFlatTraceImageSourceVerified : 0;
+    e.flags |= d.forwardHdrVerified?kFlatTraceForwardHdrVerified:0;
+    e.flags |= d.forwardUpstreamPhase?kFlatTraceForwardUpstreamPhase:0;
     e.flags |= d.deferredHdrVerified ? kFlatTraceDeferredHdrVerified : 0;
     e.flags |= d.deferredInverseRepaired ? kFlatTraceDeferredInverseRepaired : 0;
     e.flags |= foreignWork ? kFlatTraceForeignWork : 0;
@@ -100,6 +109,7 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.firstPersonCohort ? kFlatTraceFirstPersonCohort : 0;
     e.flags |= d.alternateHdr ? kFlatTraceAlternateHdr : 0;
     e.flags |= d.poolFamilyVs ? kFlatTracePoolFamilyVs : 0;
+    e.flags |= d.dofCompositeVerified ? kFlatTraceDofCompositeVerified : 0;
     e.kind = kFlatTraceEventDraw;
     return e;
 }
@@ -133,6 +143,8 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.hdrCopyVerified = (e.flags & kFlatTraceHdrCopyVerified) != 0;
     d.menuHdrCopyVerified = (e.flags & kFlatTraceMenuCopyVerified) != 0;
     d.imageSourceCameraIndependentVerified = (e.flags & kFlatTraceImageSourceVerified) != 0;
+    d.forwardHdrVerified=(e.flags&kFlatTraceForwardHdrVerified)!=0;
+    d.forwardUpstreamPhase=(e.flags&kFlatTraceForwardUpstreamPhase)!=0;
     d.deferredHdrVerified = (e.flags & kFlatTraceDeferredHdrVerified) != 0;
     d.deferredInverseRepaired = (e.flags & kFlatTraceDeferredInverseRepaired) != 0;
     d.overlayProtected = (e.flags & kFlatTraceOverlayProtected) != 0;
@@ -141,6 +153,7 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.firstPersonCohort = (e.flags & kFlatTraceFirstPersonCohort) != 0;
     d.alternateHdr = (e.flags & kFlatTraceAlternateHdr) != 0;
     d.poolFamilyVs = (e.flags & kFlatTracePoolFamilyVs) != 0;
+    d.dofCompositeVerified = (e.flags & kFlatTraceDofCompositeVerified) != 0;
     d.instances = e.instances;
     return d;
 }

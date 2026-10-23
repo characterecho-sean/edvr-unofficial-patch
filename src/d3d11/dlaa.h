@@ -193,8 +193,9 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   float frameMs, const char** reason, bool hdr = false);
 
 // The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
-// 11 = K, 10 = J, 12 = L, 13 = M, 0 = the driver's own choice per quality
-// mode): `preset` for the full frame in every mode. Read from the config by
+// 11 = K, 12 = L, 13 = M; NGX also has 10 = J and 0 = the driver's own choice,
+// which no config name selects since 2026-10-21): `preset` for the full frame
+// in every mode. Read from the config by
 // the temporal pass; a change recreates every live feature on its next
 // evaluation, so it is live. Under DLAA the upscaling models L and M are
 // never applied (L cost five times K on the desk). The desk (2026-09-05):

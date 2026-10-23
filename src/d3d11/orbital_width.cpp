@@ -112,7 +112,7 @@ void orbitalWidthRememberVs(ID3D11VertexShader* shader, uint64_t hash, const voi
         return;
     }
     if (!g_capturedNoted.exchange(true, std::memory_order_acq_rel))
-        Log::get().note("orbit lines: captured the game's orbit-line vertex shader %016llX (%zu bytes, build 332841's "
+        Log::get().note("orbit lines: captured the game's orbit-line vertex shader %016llX (%zu bytes, build 334473's "
                         "program, checked instruction by instruction) and made its patched copy: the half-width literal "
                         "2 of its clip-space offset read from a private b13. The copy draws the game's own orbit lines "
                         "while the panel patch is live and its factor is below 1; otherwise the game's shader does.",

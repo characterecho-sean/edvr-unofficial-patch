@@ -9,10 +9,41 @@
 #include "../common/comfort_fade.h"
 #include "flat_notice_placement.h"
 #include "flat_notice_raster.h"
+#include "../../include/edvr_plugin_api.h"
+#include "plugin_frame_args.h"
+#include "native_trace.h"
 
 namespace edvr::openxr {
 namespace {
 using Microsoft::WRL::ComPtr;
+
+struct PluginBridge {
+  typedef int (WINAPI *PFN_HasActive)();
+  typedef void (WINAPI *PFN_Update)(const EdvrPosef*, float);
+  typedef int (WINAPI *PFN_FilterInput)(uint32_t, const void*);
+  typedef void (WINAPI *PFN_RenderEye)(const EdvrEyeRenderContext*);
+
+  PFN_HasActive hasActive = nullptr;
+  PFN_Update update = nullptr;
+  PFN_FilterInput filterInput = nullptr;
+  PFN_RenderEye renderEye = nullptr;
+  bool resolved = false;
+
+  void ensure() {
+    if (resolved) return;
+    HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
+    if (!hD3D11) return;
+    hasActive = reinterpret_cast<PFN_HasActive>(GetProcAddress(hD3D11, "edvrPluginHasActivePlugins"));
+    update = reinterpret_cast<PFN_Update>(GetProcAddress(hD3D11, "edvrPluginDispatchUpdate"));
+    filterInput = reinterpret_cast<PFN_FilterInput>(GetProcAddress(hD3D11, "edvrPluginDispatchFilterInput"));
+    renderEye = reinterpret_cast<PFN_RenderEye>(GetProcAddress(hD3D11, "edvrPluginDispatchRenderEye"));
+    if (hasActive) {
+      resolved = true;
+    }
+  }
+};
+static PluginBridge g_pluginBridge;
+
 struct BlitConstants { float bounds[4], clampUV[4]; float encodeSRGB=0, pad[3]{}; };
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
 static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
@@ -245,7 +276,8 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
 }
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
-                                   StereoWallTimes* times, const StereoPlacement* placement, float fade) {
+                                   StereoWallTimes* times, const StereoPlacement* placement, float fade,
+                                   const XrPosef* headPose) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
@@ -350,7 +382,52 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         drawContext->OMSetBlendState(nullptr,nullptr,~0u);
       }
       ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
+
+      // EDVR 3rd-party extension overlay pass
+      g_pluginBridge.ensure();
+      if (g_pluginBridge.hasActive && g_pluginBridge.hasActive()) {
+        // One builder for the head and both eyes (plugin_frame_args.h): onUpdate gets the located head, each eye context its own view.
+        const bool headKnown = headPose && poseValid(*headPose);
+        const PluginFrameArgs frameArgs = makePluginFrameArgs(headKnown ? *headPose : views[0].pose, views);
+        if (i == 0) {
+          // Once, at the first frame a plugin is active: the pose the plugins' update will get beside the left eye's, so a log shows they differ by
+          // about half the IPD and that the head is not an eye.
+          static bool loggedFrameArgs = false;
+          if (!loggedFrameArgs) {
+            loggedFrameArgs = true;
+            if (headKnown)
+              nativeTracePrintf("plugin_frame_args,head=%.4f/%.4f/%.4f q=%.4f/%.4f/%.4f/%.4f,left_eye=%.4f/%.4f/%.4f q=%.4f/%.4f/%.4f/%.4f\n",
+                frameArgs.head.position.x, frameArgs.head.position.y, frameArgs.head.position.z,
+                frameArgs.head.orientation.x, frameArgs.head.orientation.y, frameArgs.head.orientation.z, frameArgs.head.orientation.w,
+                frameArgs.eyePose[0].position.x, frameArgs.eyePose[0].position.y, frameArgs.eyePose[0].position.z,
+                frameArgs.eyePose[0].orientation.x, frameArgs.eyePose[0].orientation.y, frameArgs.eyePose[0].orientation.z, frameArgs.eyePose[0].orientation.w);
+            else
+              nativeTracePrintf("plugin_frame_args,head=unavailable,update=skipped\n");
+          }
+          if (headKnown && g_pluginBridge.update) {
+            g_pluginBridge.update(&frameArgs.head, 0.016f);
+          }
+          if (g_pluginBridge.filterInput) {
+            g_pluginBridge.filterInput(0, nullptr);
+          }
+        }
+
+        if (g_pluginBridge.renderEye) {
+          EdvrEyeRenderContext eyeCtx{};
+          eyeCtx.structSize = sizeof(EdvrEyeRenderContext);
+          eyeCtx.eyeIndex = i;
+          eyeCtx.device = device_.Get();
+          eyeCtx.context = drawContext;
+          eyeCtx.rtv = rtv;
+          eyeCtx.eyePose = frameArgs.eyePose[i];
+          eyeCtx.eyeFov = frameArgs.eyeFov[i];
+          eyeCtx.viewportWidth = eyes_[i].width;
+          eyeCtx.viewportHeight = eyes_[i].height;
+          g_pluginBridge.renderEye(&eyeCtx);
+        }
+      }
     }
+
     drawContext->OMSetRenderTargets(0,nullptr,nullptr);
     if(ownedImmediateScene_) {
       if(observer)observer->endGpuWork(2u+i,drawContext);

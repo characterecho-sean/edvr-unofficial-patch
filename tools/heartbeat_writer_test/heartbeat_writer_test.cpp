@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -80,9 +81,18 @@ std::mutex g_mutex;
 std::vector<Call> g_calls;
 std::atomic<unsigned> g_blockMs{0};
 std::atomic<unsigned> g_inSink{0};
+std::atomic<HANDLE> g_sinkRelease{nullptr};
+std::atomic<bool> g_sinkWaitFailed{false};
 
 void recordingSink(uint64_t frame, uint64_t uptime) {
     g_inSink.fetch_add(1);
+    if (HANDLE release = g_sinkRelease.load()) {
+        // Bounded even if a broken post() calls us inline on the controller.
+        if (WaitForSingleObject(release, 4000) != WAIT_OBJECT_0) {
+            g_sinkWaitFailed = true;
+            SetEvent(release);
+        }
+    }
     const unsigned block = g_blockMs.load();
     if (block) Sleep(block);
     {
@@ -97,10 +107,37 @@ std::vector<Call> calls() {
     return g_calls;
 }
 
+void checkWriter(bool ok, const char* label, HeartbeatWriter* w, const char* extra = nullptr) {
+    if (ok) { check(true, label); return; }
+    const auto c = calls();
+    std::ostringstream detail;
+    detail << "posts=" << w->posts() << " written=" << w->written() << " closed=" << w->closed() << " writing=" << w->writing()
+           << " exited=" << w->exited() << " inSink=" << g_inSink.load()
+           << " gateWaitFailed=" << g_sinkWaitFailed.load() << " calls=" << c.size() << " frames=";
+    for (size_t i = 0; i < c.size() && i < 24; ++i) detail << ' ' << c[i].frame;
+    if (c.size() > 24) detail << " ... " << c.back().frame;
+    if (extra) detail << ' ' << extra;
+    check(false, label, detail.str().c_str());
+}
+
+void stopAndWait(HeartbeatWriter* w) {
+    // stop() does not join an in-flight sink. It must finish before another
+    // case clears the shared recording vector or changes the sink's controls.
+    const HANDLE release = g_sinkRelease.load();
+    if (release) SetEvent(release); // cleanup must also release a failed case
+    w->stop();
+    const bool exited = waitFor([](void* a) { return static_cast<HeartbeatWriter*>(a)->exited(); }, w, 3000);
+    checkWriter(exited, "fixture.stop: the writer exited before shared sink state is reused", w);
+    if (!exited) std::exit(1); // continuing would contaminate every later case
+    g_sinkRelease = nullptr;
+    if (release) CloseHandle(release);
+}
+
 void reset() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_calls.clear();
     g_blockMs = 0;
+    g_sinkWaitFailed = false;
 }
 
 double nowMs() {
@@ -129,8 +166,19 @@ void threadCases() {
           "H1.thread: the line is written by another thread than the one that posted, with the frame and uptime posted");
     // A sink stuck for 600 ms (a stalled disk): the poster is not held.
     g_blockMs = 600;
+    const HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    check(release != nullptr, "H2.gate: the held sink's release event was created");
+    if (!release) { stopAndWait(w); return; }
+    g_sinkRelease = release;
     w->post(2, 20);
-    waitFor([](void*) { return g_inSink.load() > 0; }, nullptr, 2000);   // the writer is inside the slow sink now
+    const bool held = waitFor([](void*) { return g_inSink.load() > 0; }, nullptr, 2000);
+    checkWriter(held, "H2.entered: the writer entered the held sink", w);
+    if (!held) { stopAndWait(w); return; }
+    // Regression: the controller can lose its CPU for longer than the old
+    // 600 ms sleep. Only its explicit release may let this write finish.
+    Sleep(750);
+    checkWriter(w->written() == 1 && g_inSink.load() == 1 && !g_sinkWaitFailed.load(),
+                "H2.held: the delayed controller still owns the sink release", w);
     double worst = 0.0;
     for (uint64_t i = 3; i < 10; ++i) {
         const double t0 = nowMs();
@@ -140,16 +188,26 @@ void threadCases() {
         Sleep(20);
     }
     check(worst < 250.0, "H1.nonblocking: post() returns while the writer is held up for 600 ms in its sink (the slowest took under 250 ms; it does not wait for the 600)");
+    SetEvent(release); // all replacements, including frame 9, now exist
     // H2 rides on the same run: what the writer wrote when it came back.
     waitFor([](void* a) { return static_cast<Arg*>(a)->w->written() >= 3; }, &arg, 4000);
     Sleep(100);
     c = calls();
     bool increasing = true;
     for (size_t i = 1; i < c.size(); ++i) increasing = increasing && c[i].frame > c[i - 1].frame;
-    check(c.size() >= 3 && c.size() <= 4 && increasing && c.back().frame == 9,
-          "H2.order: held up, it wrote the one it was in the middle of and then the NEWEST post (9), never an older one after a newer, and not one line per post");
-    check(w->posts() == 9 && w->written() == c.size(), "H2.counts: nine posts, and the writer's own count of lines written is the sink's");
-    w->stop();
+    checkWriter(c.size() == 3 && increasing && c.back().frame == 9 && !g_sinkWaitFailed.load(),
+                "H2.order: held up, it wrote the one it was in the middle of and then the NEWEST post (9), never an older one after a newer, and not one line per post", w);
+    checkWriter(w->posts() == 9 && w->written() == c.size(), "H2.counts: nine posts, and the writer's own count of lines written is the sink's", w);
+    // Exercise teardown with a write still inside the sink: its release and
+    // completion must precede ordinaryCases() resetting the shared vector.
+    ResetEvent(release);
+    w->post(10, 100);
+    checkWriter(waitFor([](void*) { return g_inSink.load() > 0; }, nullptr, 2000),
+                "H2.teardown-entered: the last write is held when teardown begins", w);
+    stopAndWait(w);
+    c = calls();
+    checkWriter(g_inSink.load() == 0 && c.size() == 4 && c.back().frame == 10,
+                "H2.teardown: the in-flight write finished before the next case can reset the sink", w);
 }
 
 // ---- H3, H4 -----------------------------------------------------------------------------------------------------
@@ -167,7 +225,7 @@ void ordinaryCases() {
     // H4: no posts, nothing written.
     const uint64_t before = w->written();
     Sleep(600);
-    check(w->written() == before && calls().size() == 20, "H4.silent: 600 ms with no post: nothing written (the writer has no clock of its own)");
+    checkWriter(w->written() == before && calls().size() == 20, "H4.silent: 600 ms with no post: nothing written (the writer has no clock of its own)", w);
     // A wake with nothing new writes nothing, and a writer with nothing to do is asleep: it costs no CPU.
     FILETIME created, exited, kernel0, user0, kernel1, user1;
     GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel0, &user0);
@@ -178,10 +236,10 @@ void ordinaryCases() {
     GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel1, &user1);
     const auto ticks = [](const FILETIME& f) { return (static_cast<ULONGLONG>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
     const double cpuMs = static_cast<double>((ticks(kernel1) - ticks(kernel0)) + (ticks(user1) - ticks(user0))) / 10000.0;
-    check(w->written() == before && calls().size() == 20,
-          "H4.spurious: six wakes with nothing new write nothing");
+    checkWriter(w->written() == before && calls().size() == 20,
+                "H4.spurious: six wakes with nothing new write nothing", w);
     check(cpuMs < 150.0, "H4.idle: and 600 ms of idle writers cost under 150 ms of CPU in all: a writer with nothing to do sleeps (it does not spin)");
-    w->stop();
+    stopAndWait(w);
 }
 
 // ---- H5 ---------------------------------------------------------------------------------------------------------
@@ -255,7 +313,7 @@ void tearCases() {
     check(seenPosting >= kMinSeen, "H5.writer: and the writer did read some of them while the poster posted (at least ten): with none, the line above says nothing", detail);
     check(torn.load() == 0, "H5.reader: and so of every record a second thread read while the poster ran flat out", detail);
     check(readsPosting > kMinReads, "H5.reads: and the second thread did make them, over a hundred thousand reads: with none, the line above says nothing", detail);
-    w->stop();
+    stopAndWait(w);
 }
 
 // ---- H6 ---------------------------------------------------------------------------------------------------------
@@ -274,18 +332,31 @@ void closeCases() {
         check(c.size() == 1 && c[0].frame == 1 && w->closed(),
               "H6.close: the write under way finishes, the pending post is dropped and a post after the close is dropped: nothing is written behind a close");
         check(w->posts() == 2, "H6.dropped: and the post after the close is not even taken (two posts counted, not three)");
-        w->stop();
+        stopAndWait(w);
     }
     // The one place a close can land that the writer's first look at it missed: after that look, before it marks itself
     // writing. The rig closes the writer from a hook placed exactly there.
     {
         HeartbeatWriter* w = fresh();
-        w->setBetweenChecksHook([](void* a) { static_cast<HeartbeatWriter*>(a)->close(); }, w);
+        struct LateClose {
+            HeartbeatWriter* writer;
+            std::atomic<bool> hookFinished{false};
+        } lateClose{w};
+        w->setBetweenChecksHook([](void* a) {
+            auto* state = static_cast<LateClose*>(a);
+            state->writer->close();
+            state->hookFinished.store(true, std::memory_order_release);
+        }, &lateClose);
         w->post(1, 10);
-        Sleep(300);
-        check(calls().empty() && w->written() == 0 && w->closed(),
-              "H6.late-close: a close that lands between the writer's last look and the moment it marks itself writing still stops the write");
-        w->stop();
+        // Wait for this exact hook, then for the worker to finish its inner close check. A fixed sleep can sample
+        // before the worker is scheduled, or before a broken worker reaches its sink.
+        const bool hookFinished = waitFor([](void* a) {
+            return static_cast<LateClose*>(a)->hookFinished.load(std::memory_order_acquire);
+        }, &lateClose, 20000);
+        stopAndWait(w);
+        checkWriter(hookFinished && calls().empty() && w->written() == 0 && w->closed(),
+                    "H6.late-close: a close that lands between the writer's last look and the moment it marks itself writing still stops the write",
+                    w, hookFinished ? "hookFinished=1" : "hookFinished=0");
     }
     // closeAndDrain waits for a write that has begun, and returns only when it is over.
     {
@@ -301,7 +372,7 @@ void closeCases() {
         w->post(2, 20);
         Sleep(300);
         check(calls().size() == 1, "H6.drain: and nothing more is written after it returns");
-        w->stop();
+        stopAndWait(w);
     }
     // The wait is bounded: a disk that is stalling is not waited for while the process dies.
     {
@@ -320,7 +391,7 @@ void closeCases() {
         const bool stillStalled = w->writing() && g_inSink.load() > 0;
         check(!drained && stillStalled && waited >= 10.0, "H6.bounded: closeAndDrain(30) against a write stuck for 600 ms gives up (the write is still under way) and says so, and not after the whole stall");
         Sleep(800);
-        w->stop();
+        stopAndWait(w);
     }
     // A close that lands before the write has begun stops it from beginning.
     {
@@ -329,7 +400,7 @@ void closeCases() {
         w->post(1, 10);
         Sleep(200);
         check(calls().empty() && w->written() == 0, "H6.closed-first: a heartbeat posted after the close never begins");
-        w->stop();
+        stopAndWait(w);
     }
 }
 

@@ -27,6 +27,16 @@ This file is why it does what it does. Using it is one paragraph in the
   runtime is recovered from the newest receipt that still holds it, so an
   update, a switch to flat-only and an uninstall work after two tool installs
   (see "Receipts from the tool"). `installer_test` pins it over real files.
+- **Linux Steam wrapper:** `tools/install_proton.py` and `edvr_installer.sh`
+  ship in the Linux installer and full release ZIPs. They use Steam's existing
+  Proton prefix, recorded Proton runner, and required runtime directly;
+  Protontricks is no longer needed. On 2026-10-16, the direct route reached the
+  Odyssey folder. An older flat installer refused to proceed while Elite was
+  running. A current unified installer preview and actual installation remain
+  unverified; the game session logs do not establish VR rendering behavior.
+- **Windows validation:** Run the full `build.bat --wait-lock` on native
+  Windows; local Wine cannot pass the process-monitor self-tests. A build
+  result and an installer test are separate evidence.
 
 ## Why it exists
 
@@ -44,9 +54,11 @@ uninstalls the other mod silently — nothing reports an error, the other mod's
 effects are simply gone. The fix is a rename plus one line in `edvr.ini`, which
 is fine as an instruction and unreliable as a habit.
 
-The installer validates the supported Elite executable profile and native
-payload before writing. An unsupported profile fails closed instead of choosing
-a legacy OpenVR or LibOVR route.
+The installer validates the Elite executable profile and native payload before
+writing. Horizons and an unreadable executable fail closed. An Odyssey revision
+this build was not checked against installs with a warning instead: the game
+starts, the fixes tied to the game build stand down and the gfx log names each
+one. The installer never chooses a legacy OpenVR or LibOVR route.
 
 ## Finding the game
 
@@ -513,6 +525,94 @@ finds the installs itself and refuses to guess when there is more than one.
 `--dry-run` prints the plan and touches nothing. It is a GUI-subsystem program,
 so a command-line run borrows the calling console; run it with `start /wait` if
 the interleaved prompt bothers you.
+
+### Linux Steam wrapper
+
+#### 2026-10-16 preview evidence
+
+Native Protontricks 1.14.1 is installed. A wrapper preview against the actual
+Elite Steam prefix exits 1 before the installer prints output, with stderr
+`wine client error:0: version mismatch 962/931`. Installed Proton 11.0 and
+Proton Experimental files include `wine` and `wineserver`, but no `winepath`;
+the wrapper's unqualified `winepath` therefore invokes system Wine.
+
+ruled out: Protontricks PATH supplies a matching winepath, because Proton ships
+no winepath launcher and the live preview hit Wine protocol mismatch 962/931.
+
+The user requested removing the Protontricks dependency. The first direct
+`waitforexitandrun` auxiliary preview exceeded 90 seconds without installer
+output. ruled out: `waitforexitandrun` as the auxiliary preview route, because
+it timed out while `runinprefix --help` under the same Proton runner and
+runtime returned 0 in 2.02 seconds. This does not identify the precise cause of
+the timeout.
+
+The final direct wrapper reached the actual Odyssey folder in 2.53 seconds with
+`--preview` and propagated installer exit code 1. The available
+`edvr-installer.exe` is an older VR-only `v0.19.1-10-g99476a02-dirty` build
+without `--scope`, while the installed edition is flat. A matching older
+`edvr-flat-installer.exe` `v0.19.1-22-g75848439` preview launched in 2.44
+seconds and identified both as flat, then reached its normal "Elite Dangerous
+is running" guard and returned 1, refusing installer mutation. A game session
+was active during the checks; its installed build `v0.19.1-35-ga5ed7827` is
+stale relative to HEAD. The session logs give no VR rendering conclusion.
+`runinprefix --help` returned 0 with usage in 2.02 seconds. The wrapper, path
+selection, and runtime launch have live smoke evidence; preview with a current
+unified installer and an actual installation remain unverified.
+
+#### 2026-10-16 native Windows build handoff
+
+The latest-main source's local MSVC build under Wine stopped before compilation
+at `tools/run_jobs.py --self-test`: eight process-tree, window, and CPU-time
+checks failed (log: `/tmp/edvr-installer-latest-main-full-build.log`). Ruled
+out: accepting a Wine-hosted full build as Windows validation, because those
+required gates did not pass. The temporary Windows test-build workflow was
+removed at the maintainer's request; full validation uses the unchanged
+`build.bat --wait-lock` on native Windows. A green build does not establish an
+installer flight.
+
+The Linux installer ZIP includes `edvr_installer.sh`,
+`edvr-installer-linux.py`, the Windows installer, and `README-linux.txt`. The
+launcher needs Python 3 and Steam's existing Proton installation, with no
+Protontricks or system Wine dependency. Run Elite once from Steam, close it,
+then run the wrapper as your normal user. On Steam Deck, use Desktop Mode. With
+no action option, the Windows installer GUI opens with the Odyssey product
+folder selected. For a flat install with a current installer build:
+
+```sh
+./edvr_installer.sh --install --scope flat
+```
+
+To see the Windows install plan without changing game files:
+
+```sh
+./edvr_installer.sh --preview --scope flat
+```
+
+Preview invokes the Windows installer with `--install --dry-run` through the
+selected Proton and its runtime. It may update Proton prefix bookkeeping. The
+wrapper's `--dry-run` instead resolves and prints the exact paths and command
+without starting a process or writing files. The shell launcher works from any
+directory and forwards all options to the Python wrapper, which you can run
+directly as `python3 edvr-installer-linux.py`.
+
+The wrapper discovers native or Flatpak Steam roots, reads Steam's library and
+app manifests, and requires an existing Elite prefix (`pfx/drive_c`). It uses
+the Proton runner recorded as configuring that prefix in `config_info`, then
+finds the runtime named by the runner's `require_tool_appid` in Steam's
+installed app manifests. Windows paths are formed from the prefix's existing
+DOS drive links. If you change Elite's Proton version in Steam, launch Elite
+once before running the wrapper so the prefix record reflects that version.
+`--proton` accepts a Proton directory or script as an explicit override.
+
+The wrapper also accepts `--repair`, `--uninstall`, and `--collect-logs`. Use
+`--game-dir` for a different product folder inside the installed game tree,
+`--installer` for a separate EXE, and `--steam-dir` or `STEAM_DIR` for a
+nonstandard Steam root. `STEAM_COMPAT_DATA_PATH` can name an existing custom
+compatdata directory (the parent of `pfx`); `pfx/drive_c` must already exist.
+
+The wrapper only launches the installer. Keep any existing required Elite
+launch options; headset/OpenXR setup and Proton gameplay remain unverified
+here.
 
 ## How it is built and tested
 

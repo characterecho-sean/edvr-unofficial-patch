@@ -18,13 +18,14 @@ struct Fake {
   XrResult createResult=XR_SUCCESS,destroyResult=XR_SUCCESS;
   bool nullOutput=false,consumeFailedDestroy=true;uintptr_t next=10;
   XrPosef expected{{0,0,0,1},{1,2,3}};
+  XrReferenceSpaceType expectedType=XR_REFERENCE_SPACE_TYPE_LOCAL;
   unsigned creates=0;std::vector<XrSpace> alive,destroyed;
 };
 Fake* fake=nullptr;
 XrResult XRAPI_PTR create(XrSession supplied,const XrReferenceSpaceCreateInfo* info,XrSpace* out) {
   ++fake->creates;
   check(supplied==session&&info&&info->type==XR_TYPE_REFERENCE_SPACE_CREATE_INFO&&!info->next,"create typed session ABI");
-  check(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL,"create uses natural LOCAL");
+  check(info->referenceSpaceType==fake->expectedType,"create uses selected natural space");
   check(std::memcmp(&info->poseInReferenceSpace,&fake->expected,sizeof(XrPosef))==0,"exact origin passed");
   if(fake->createResult==XR_SUCCESS||fake->createResult==XR_SESSION_LOSS_PENDING) {
     *out=fake->nullOutput?XR_NULL_HANDLE:reinterpret_cast<XrSpace>(fake->next++);
@@ -59,6 +60,12 @@ void spaces() {
   check(owned.shutdown()==XR_SUCCESS&&runtime.destroyed.size()==2,"idempotent shutdown");
   check(owned.begin({create,destroy},session,local)&&owned.space()==local,"reinit borrowed state");
   owned.shutdown();
+
+  {Fake stageRuntime;fake=&stageRuntime;stageRuntime.expectedType=XR_REFERENCE_SPACE_TYPE_STAGE;
+    SeatedSpace stageSeat;
+    check(stageSeat.begin({create,destroy},session,local,XR_REFERENCE_SPACE_TYPE_STAGE),"stage natural space begins");
+    check(stageSeat.replace(stageRuntime.expected)==XR_SUCCESS,"stage recenter creates STAGE child");
+    check(stageSeat.shutdown()==XR_SUCCESS&&stageRuntime.alive.empty(),"stage child cleaned up");}
 
   for(XrResult result:{XR_ERROR_RUNTIME_FAILURE,XR_ERROR_SESSION_LOST,XR_SESSION_LOSS_PENDING}) {
     Fake failure;fake=&failure;SeatedSpace item;item.begin({create,destroy},session,local);

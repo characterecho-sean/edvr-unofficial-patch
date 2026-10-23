@@ -1,6 +1,6 @@
 #pragma once
 // The transition-flash ENGINE FIX (docs/design-transition-flash-engine-fix-
-// 2026-09-23.md). The camera driver FUN_1428431d0 copies a 4x4 "mailbox" at
+// 2026-09-23.md). The camera driver FUN_1428457f0 copies a 4x4 "mailbox" at
 // ship+0x3330 into a local before composing the eye views and (mode != 1)
 // resets it to the identity constant. The HMDCamera tick that refills it is
 // absent on the frame after a camera switch (the camera is deactivated one

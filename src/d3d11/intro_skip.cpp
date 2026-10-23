@@ -221,7 +221,7 @@ void sayArmed() {
     char mod[64] = "?";
     entryModule(mod, sizeof(mod));
     Log::get().note(
-        "intro skip: ARMED%s -- fix.intro_video = skip. The executable's imports: CreateFileW "
+        "intro skip: ARMED%s -- visual.intro_video = skip. The executable's imports: CreateFileW "
         "%s, CreateFileA %s, GetFileAttributesW %s, GetFileAttributesA %s, "
         "GetFileAttributesExW %s, GetFileAttributesExA %s; DirectShow reader CreateFileW %s "
         "(original entry in %s). An open of Movies\\Ident_*.webm or intro_temp.webm is "
@@ -241,11 +241,11 @@ void sayArmed() {
 
 void introSkipConfigure(Config& cfg) {
     const IntroVideoMode mode =
-        introVideoParseFor(cfg.getString("fix.intro_video", "screen"), runtimeFlatProfile());
+        introVideoParseFor(cfg.getString("visual.intro_video", "screen"), runtimeFlatProfile());
     const bool was = g_armed.load(std::memory_order_relaxed);
     if (mode.skip != was) {
         if (mode.skip) {
-            if (!g_installTried) install("The movie will play as fix.intro_video = screen.");
+            if (!g_installTried) install("The movie will play as visual.intro_video = screen.");
             if (g_installed) {
                 if (!g_armedSaid) {
                     g_armedSaid = true;

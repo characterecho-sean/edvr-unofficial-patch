@@ -234,6 +234,7 @@ struct FlatContractRecord {
     // Typed inherited scene identity; key.b1 remains the ACTUAL H draw binding.
     // H's first/write provenance remains its own CB2, never the donor's draw.
     bool deferredCamera = false;
+    bool forwardLightCamera = false; // distinct typed original752B upstream witness
     bool deferredInverseRepaired = false;
     const void* sceneCameraB1 = nullptr;
     uint64_t sceneCameraWriteEpoch = 0;

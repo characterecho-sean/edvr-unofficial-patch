@@ -99,7 +99,8 @@ def prepare(packet):
 
 def self_test():
     with tempfile.TemporaryDirectory() as tmp:
-        root = pathlib.Path(tmp)
+        # Windows TEMP may use an 8.3 alias; match leaf()'s resolved paths.
+        root = pathlib.Path(tmp).resolve()
         assert leaf(root, 'a.bin') == root / 'a.bin'
         for name in ('../x', '/x', 'a/b', 'a\\b'):
             try: leaf(root, name)

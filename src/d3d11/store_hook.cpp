@@ -1,25 +1,29 @@
-// The admission store's detour (store_hook.h). A CodeHook on FUN_144312040, pinned by its sixteen bytes in build 332841
+// The admission store's detour (store_hook.h). A CodeHook on FUN_144314D00, pinned by its sixteen bytes in build 334473
 // (concourse-culling doc, P11). The prologue's first five bytes are three pushes and a two-byte push, which the CodeHook
 // decoder steals (push rbp, push rbx, push rsi, push rdi: 2+1+1+1). The observer takes the store's five arguments:
 // four in registers and the record on the stack, which the relay leaves where the store's caller put it. The observer
 // returns whatever the original returns (RAX), so the caller sees the same value with or without the detour.
+#include "flat_origin_capture.h"
 #include "store_hook.h"
 
 #include <windows.h>
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include "../common/code_hook.h"
 #include "../common/log.h"
 #include "explorer_cam_core.h"
+#include "flat_world_store.h"
+#include "flat_world_witness.h"
 #include "optimized_station.h"
 #include "optimized_station_core.h"
 
 namespace edvr {
 namespace {
 
-constexpr uintptr_t kStoreRva = 0x4312040u;
+constexpr uintptr_t kStoreRva = 0x4314D00u;
 constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
 
 using StoreFn = uintptr_t(__fastcall*)(uintptr_t bucket, uintptr_t mask, uintptr_t out, uintptr_t lod, uintptr_t record);
@@ -29,6 +33,8 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
 
 alignas(8) std::atomic<uintptr_t> g_storeGate{0};
 static_assert(decltype(g_storeGate)::is_always_lock_free, "The relay reads the aligned atomic cell directly.");
+std::atomic<bool> g_stationGathering{false}, g_flatWorldActive{false};
+std::atomic<uint32_t> g_flatWorldFrame{0};
 
 struct Detour {
     std::atomic<uintptr_t> forward{0};
@@ -40,6 +46,7 @@ struct Detour {
 };
 
 Detour g_store;
+std::mutex g_storeInstallMutex; // Present and the station setting can request first installation concurrently.
 
 uint8_t* allocateRelay(uintptr_t target) noexcept {
     SYSTEM_INFO info{};
@@ -102,9 +109,18 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
                                                         uintptr_t record) noexcept {
     const auto forward = reinterpret_cast<StoreFn>(g_store.forward.load(std::memory_order_acquire));
     if (!forward) return 0;
-    const uintptr_t result = forward(bucket, mask, out, lod, record);
-    optimizedStationAfterStore(bucket, record);
-    return result;
+    const bool station = g_stationGathering.load(std::memory_order_acquire);
+    return flatWorldStoreStampedPostForward(bucket, mask, out, lod, record, station,
+        g_flatWorldActive, g_flatWorldFrame, forward,
+        [](uintptr_t b,uintptr_t r) noexcept { optimizedStationAfterStore(b,r); },
+        [](uintptr_t b,uintptr_t r,uint32_t frame) noexcept {
+            // Select charges and deduplicates before the first extra read.
+            if (!flatWorldWitnessSelect(r, frame)) return;
+            FlatWorldWitnessInput input{};
+            const uint8_t failure = flatWorldStoreRead(b, r, frame, &input);
+            if (failure) flatWorldWitnessReadFailure(frame, failure);
+            else flatWorldWitnessObserve(input);
+        });
 }
 
 // The PE identity the other build-keyed hooks read (kinematic_eval_hook.cpp targetValid): base+0x3C -> e_lfanew, then the TimeDateStamp at +8
@@ -122,10 +138,9 @@ bool readIdentity(uintptr_t base, uint32_t* stamp, uint32_t* size) noexcept {
     }
 }
 
-// Installs the detour once: the PE identity must be build 332841's, the prologue must match the pin, and the CodeHook must accept it.
+// Installs the detour once: the PE identity must be build 334473's, the prologue must match the pin, and the CodeHook must accept it.
 // A refusal is final and logged once; with the detour refused nothing is written to the game (the observer that writes is never reached).
-void installOnce() noexcept {
-    if (g_store.ready.load(std::memory_order_acquire) || g_store.refused.load(std::memory_order_acquire)) return;
+void installLocked() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base) {
         g_store.status.store("the module base is unknown", std::memory_order_release);
@@ -147,17 +162,17 @@ void installOnce() noexcept {
     if (verdict != sealed::StoreInstall::kInstall) {
         g_store.refused.store(true, std::memory_order_release);
         if (verdict == sealed::StoreInstall::kWrongIdentity) {
-            g_store.status.store("not build 332841 (PE timestamp or image size)", std::memory_order_release);
-            Log::get().note("store hook: refused: not build 332841 (PE timestamp %u, image size %u); the optimized station stands down.",
+            g_store.status.store("not build 334473 (PE timestamp or image size)", std::memory_order_release);
+            Log::get().note("store hook: refused: not build 334473 (PE timestamp %u, image size %u); optimized station and flat world witness stand down.",
                             static_cast<unsigned>(stamp), static_cast<unsigned>(size));
         } else if (verdict == sealed::StoreInstall::kUnreadable) {
             g_store.status.store("the executable's PE header or the store's prologue is unreadable", std::memory_order_release);
             Log::get().note("store hook: refused: the PE header or the admission store's prologue is unreadable; "
-                            "the optimized station stands down.");
+                            "optimized station and flat world witness stand down.");
         } else {
-            g_store.status.store("the store's prologue does not match build 332841", std::memory_order_release);
-            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 332841's; "
-                            "the optimized station stands down.");
+            g_store.status.store("the store's prologue does not match build 334473", std::memory_order_release);
+            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 334473's; "
+                            "optimized station and flat world witness stand down.");
         }
         return;
     }
@@ -176,22 +191,44 @@ void installOnce() noexcept {
     }
     g_store.ready.store(true, std::memory_order_release);
     g_store.status.store("installed", std::memory_order_release);
-    Log::get().note("store hook: the admission store (0x4312040) is detoured; the gate is closed until the sealed trial or "
-                    "the look probe wants it.");
+    Log::get().note("store hook: the admission store (0x4314D00) is detoured; the gate opens for station gathering or the passive flat world witness.");
+}
+
+void installOnce() noexcept {
+    flatWorldStoreInstallGuard(g_storeInstallMutex,g_store.ready,g_store.refused,&installLocked);
 }
 
 }  // namespace
 
 void storeHookRecompute() noexcept {
-    if (optimizedStationOn()) installOnce();
+    if (optimizedStationOn() || g_flatWorldActive.load(std::memory_order_acquire)) installOnce();
     storeHookGate();
 }
 
-// Built v14.20 (review 7b): the observer runs only while the station gathers (setting on, docked) and the detour is installed. Closing the gate
-// only stops new calls; a call already inside takes the station's state lock, which the toggle and the release take too.
 void storeHookGate() noexcept {
-    const bool open = optimizedStationGathers() && g_store.ready.load(std::memory_order_acquire);
+    const bool station = optimizedStationGathers();
+    g_stationGathering.store(station, std::memory_order_release);
+    const bool open = flatWorldStoreGateWanted(station,g_flatWorldActive.load(std::memory_order_acquire),
+                                              g_store.ready.load(std::memory_order_acquire));
     g_storeGate.store(open ? 1u : 0u, std::memory_order_release);
+}
+
+void storeHookSetFlatWorldProbe(bool active, uint32_t frame) noexcept {
+    active = active && flatOriginCaptureEnabled();
+    // A transient refusal may be retried by the station's explicit
+    // recompute or the next flat activation, never on every Present.
+    if (flatWorldStorePublish(active,frame,g_flatWorldActive,g_flatWorldFrame)) {
+        installOnce();
+        Log::get().note("store hook: flat world witness activation frame=%u ready=%u status=%s",
+            frame,g_store.ready.load(std::memory_order_acquire)?1u:0u,g_store.status.load(std::memory_order_acquire));
+    }
+    storeHookGate();
+}
+
+bool storeHookReady() noexcept { return g_store.ready.load(std::memory_order_acquire); }
+bool storeHookFlatWorldProbeGateOpen() noexcept {
+    return g_flatWorldActive.load(std::memory_order_acquire) && storeHookReady() &&
+        g_storeGate.load(std::memory_order_acquire) != 0;
 }
 
 const char* storeHookStatus() noexcept { return g_store.status.load(std::memory_order_acquire); }

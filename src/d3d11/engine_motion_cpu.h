@@ -107,11 +107,11 @@ constexpr unsigned kSamplePeriod = 32;
 
 // ---- the parts ---------------------------------------------------------------
 enum Part : unsigned {
-    kEmit = 0,   // FUN_144312E00's bracket (EDVR's work around the forward) and the emit observer
-    kRigid,      // FUN_1442B4130, the primary rigid emit: relay + observer
-    kCopier,     // FUN_144C81BE0, the engine's pool copier: relay + observer
-    kMerge,      // FUN_14434E740, the list merge: begin and end
-    kClear,      // FUN_1436819D0, the typed dictionary clear: the observer
+    kEmit = 0,   // FUN_144315AC0's bracket (EDVR's work around the forward) and the emit observer
+    kRigid,      // FUN_1442B6DF0, the primary rigid emit: relay + observer
+    kCopier,     // FUN_144C847C0, the engine's pool copier: relay + observer
+    kMerge,      // FUN_144351440, the list merge: begin and end
+    kClear,      // FUN_1436846D0, the typed dictionary clear: the observer
     kEval,       // the evaluator and rig-eval relays: counted; only probe work is clocked
     kJobs,       // the six job-body brackets (UpdateRenderDataJob and its siblings)
     kBuilder,    // the draw-item builder bracket, the second direct producer, the part test, the LOD setter

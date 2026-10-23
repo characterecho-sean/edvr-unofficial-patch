@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstring>  // _stricmp, for the hook-mode override's spellings
+#include <intrin.h>  // _ReturnAddress: the caller of the executable's LoadLibraryW
 #include <string>
 
 #include "../common/config.h"
@@ -33,9 +34,12 @@
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
 #include "input_gate.h"
+#include "loaded_module_match.h"
 #include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
 #include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
 #include "oculus_route.h"
+#include "../plugins/plugin_manager.h"
+#include "../common/iat_hook.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
     sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
@@ -77,6 +81,109 @@ PFN_D3D11CreateDeviceAndSwapChain g_realCreateDeviceAndSwapChain = nullptr;
 // are the only way out of the loop.
 PFN_D3D11CreateDevice             g_systemCreateDevice = nullptr;
 PFN_D3D11CreateDeviceAndSwapChain g_systemCreateDeviceAndSwapChain = nullptr;
+
+edvr::IatPatch g_patchChainedLoadLibraryA;
+edvr::IatPatch g_patchChainedLoadLibraryW;
+edvr::IatPatch g_patchChainedLoadLibraryExA;
+edvr::IatPatch g_patchChainedLoadLibraryExW;
+
+edvr::IatPatch g_patchExeLoadLibraryA;
+edvr::IatPatch g_patchExeLoadLibraryW;
+edvr::IatPatch g_patchExeLoadLibraryExA;
+edvr::IatPatch g_patchExeLoadLibraryExW;
+
+// The matching decision lives in loaded_module_match.h (tested in input_gate_test): a qualified path that
+// misses goes to the real loader instead of matching another module by basename.
+HMODULE findLoadedModuleW(LPCWSTR name) {
+    return edvr::matchLoadedModule(name, [](LPCWSTR n) -> HMODULE {
+        HMODULE mod = nullptr;
+        return (GetModuleHandleExW(0, n, &mod) && mod) ? mod : nullptr;
+    });
+}
+
+HMODULE findLoadedModuleA(LPCSTR name) {
+    return edvr::matchLoadedModule(name, [](LPCSTR n) -> HMODULE {
+        HMODULE mod = nullptr;
+        return (GetModuleHandleExA(0, n, &mod) && mod) ? mod : nullptr;
+    });
+}
+
+HMODULE WINAPI hookedLoadLibraryW(LPCWSTR lpLibFileName) {
+    if (HMODULE mod = findLoadedModuleW(lpLibFileName)) {
+        return mod;
+    }
+    return LoadLibraryW(lpLibFileName);
+}
+
+// The deadlock bypass takes the LoadLibraryW slot that the Oculus route hooked
+// at DllMain, so Elite's own LoadLibraryW calls go through the route's policy
+// first, with Elite's return address, and then through the bypass.
+__declspec(noinline) HMODULE WINAPI hookedExeLoadLibraryW(LPCWSTR lpLibFileName) {
+    return edvr::oculusRouteDispatchFrom(lpLibFileName,
+                                         reinterpret_cast<uintptr_t>(_ReturnAddress()),
+                                         &hookedLoadLibraryW);
+}
+
+HMODULE WINAPI hookedLoadLibraryA(LPCSTR lpLibFileName) {
+    if (HMODULE mod = findLoadedModuleA(lpLibFileName)) {
+        return mod;
+    }
+    return LoadLibraryA(lpLibFileName);
+}
+
+HMODULE WINAPI hookedLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if ((dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) == 0) {
+        if (HMODULE mod = findLoadedModuleW(lpLibFileName)) {
+            return mod;
+        }
+    }
+    return LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+}
+
+HMODULE WINAPI hookedLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if ((dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) == 0) {
+        if (HMODULE mod = findLoadedModuleA(lpLibFileName)) {
+            return mod;
+        }
+    }
+    return LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+}
+
+void preloadSystemLibraries() {
+    const wchar_t* const kPreloadModules[] = {
+        L"d3dcompiler_47.dll",
+        L"advapi32.dll",
+        L"user32.dll",
+        L"gdi32.dll",
+        L"hid.dll",
+        L"setupapi.dll",
+        L"dinput.dll",
+        L"dinput8.dll",
+        L"xinput9_1_0.dll",
+        L"xinput1_4.dll",
+        L"xinput1_3.dll",
+        L"cryptnet.dll",
+        L"msasn1.dll",
+        L"wldp.dll",
+        L"cryptbase.dll",
+        L"devobj.dll",
+        L"shlwapi.dll",
+        L"version.dll"
+    };
+
+    for (const wchar_t* modName : kPreloadModules) {
+        if (!GetModuleHandleW(modName)) {
+            if (_wcsicmp(modName, L"d3dcompiler_47.dll") == 0 && g_moduleDir) {
+                std::wstring compilerPath = *g_moduleDir + L"\\d3dcompiler_47.dll";
+                if (GetFileAttributesW(compilerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    LoadLibraryW(compilerPath.c_str());
+                    continue;
+                }
+            }
+            LoadLibraryW(modName);
+        }
+    }
+}
 
 edvr::FaultBudget g_createBudget("D3D11CreateDevice", 3);
 
@@ -250,6 +357,11 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
         return;
     }
 
+    // Preload system libraries before loading the chained proxy (EDHM / 3Dmigoto / ReShade)
+    // so that subsequent runtime dynamic loads (e.g. Advapi32 for registry/theme parsing,
+    // Gdi32, User32, Setupapi, Hid, DInput) do not trigger ReShade's LoadLibrary deadlock guard.
+    preloadSystemLibraries();
+
     const HMODULE chained = LoadLibraryW(path.c_str());
     if (!chained) {
         edvr::Log::get().note(
@@ -290,6 +402,23 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
         g_realCreateDeviceAndSwapChain = swap;
     }
     // else: keep the system one resolved during the loader phase.
+
+    // Install IAT hooks on the chained proxy for LoadLibrary to bypass ReShade's deadlock guard
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryA",
+                          reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchChainedLoadLibraryA);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryW",
+                          reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchChainedLoadLibraryW);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryExA",
+                          reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchChainedLoadLibraryExA);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryExW",
+                          reinterpret_cast<void*>(&hookedLoadLibraryExW), &g_patchChainedLoadLibraryExW);
+
+    edvr::Log::get().note(
+        "LoadLibrary deadlock bypass installed in chained proxy: (A=%d, W=%d, ExA=%d, ExW=%d)",
+        g_patchChainedLoadLibraryA.applied ? 1 : 0,
+        g_patchChainedLoadLibraryW.applied ? 1 : 0,
+        g_patchChainedLoadLibraryExA.applied ? 1 : 0,
+        g_patchChainedLoadLibraryExW.applied ? 1 : 0);
 
     edvr::Log::get().note(
         "chaining through %S -- %zu export(s) from it, %zu from the system d3d11.dll, "
@@ -360,6 +489,23 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "against this machine's d3d11.dll with build.bat",
             g_missingExports, kExportCount);
     }
+    // Install IAT hooks on the game executable for LoadLibrary deadlock bypass
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryA",
+                         reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchExeLoadLibraryA);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryW",
+                         reinterpret_cast<void*>(&hookedExeLoadLibraryW), &g_patchExeLoadLibraryW);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryExA",
+                         reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchExeLoadLibraryExA);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryExW",
+                         reinterpret_cast<void*>(&hookedLoadLibraryExW), &g_patchExeLoadLibraryExW);
+
+    edvr::Log::get().note(
+        "LoadLibrary deadlock bypass installed in executable: (A=%d, W=%d, ExA=%d, ExW=%d)",
+        g_patchExeLoadLibraryA.applied ? 1 : 0,
+        g_patchExeLoadLibraryW.applied ? 1 : 0,
+        g_patchExeLoadLibraryExA.applied ? 1 : 0,
+        g_patchExeLoadLibraryExW.applied ? 1 : 0);
+
     // Now, out from under the loader lock, is when another proxy can safely be
     // brought in.
     chainThroughOtherProxy(cfg);
@@ -377,6 +523,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     // arrive here -- guard.h absorbs those deliberately -- so what this catches
     // is the ones nobody claimed. See breadcrumbInstallCrashHandler.
     edvr::breadcrumbInstallCrashHandler();
+    edvr::plugins::PluginManager::instance().initialize(*g_moduleDir);
     return TRUE;
 }
 
@@ -385,10 +532,21 @@ void ensureInitialised() {
 }
 
 void shutdown() {
+    edvr::plugins::PluginManager::instance().shutdown();
     edvr::oculusRouteReport();
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
+
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryA);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryW);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryExA);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryExW);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryA);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryW);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryExA);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryExW);
+
     // Before the module goes: a filter pointing into an unmapped image would
     // take the game's own crash reporting down with it.
     edvr::breadcrumbRemoveCrashHandler();
@@ -685,9 +843,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             DisableThreadLibraryCalls(module);
             // Native routing is a build capability, available before Elite's
             // first VR probe. No configuration or logging under loader lock.
+            // A route that cannot be installed leaves Elite's own loading untouched; the gfx log says why.
             edvr::oculusRouteInstallEarly(true);
-            if (!edvr::oculusRouteProcessAttachAllowed())
-                return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
             // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first, so a

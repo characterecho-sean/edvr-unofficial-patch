@@ -1,3 +1,5 @@
+#include "flat_origin_capture.h"
+#include "flat_forward_light.h"
 #include "engine_velocity.h"
 #include "engine_motion_ready.h"
 #include "temporal_shader_bytecode.h"
@@ -26,6 +28,7 @@
 #include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
+#include "flat_origin_witness.h"
 #include "engine_velocity_primary_copy.h"
 #include "engine_velocity_families.h"
 #include "engine_velocity_unkeyed.h"
@@ -173,6 +176,8 @@ engine_velocity_unkeyed::Table g_unkeyed;
 // What EDVR bound in place of the game's state, and at which generation of
 // the game's own binding, so a later look can tell whether it is still bound.
 struct Bound {
+    Ptr<ID3D11DeviceContext> context;
+    ID3D11VertexShader* sourceVs=nullptr;
     ID3D11PixelShader* originalPs = nullptr;
     ID3D11PixelShader* patchedPs = nullptr;
     uint32_t psGen = 0;
@@ -378,6 +383,7 @@ struct FlatDomainSaved {
     Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11VertexShader> vs;
     Ptr<ID3D11PixelShader> ps;
+    uint32_t vsGeneration=0,psGeneration=0;
     Ptr<ID3D11BlendState> blend;
     Ptr<ID3D11RenderTargetView> targets[8];
     Ptr<ID3D11DepthStencilView> depth;
@@ -575,15 +581,15 @@ void pollCaptures(ID3D11DeviceContext* ctx) {
 }
 
 // --- The build-keyed engine side ----------------------------------------------
-// FUN_143696FA0's first 32 bytes (the dictionary lookup the bracket calls) and
-// FUN_144312E00's append sequence at 0x144313185 (the node count at +0x18,
+// FUN_143699CA0's first 32 bytes (the dictionary lookup the bracket calls) and
+// FUN_144315AC0's append sequence at 0x144315E45 (the node count at +0x18,
 // the mask store at +0xAA0+i*8, the owner count at +0x2A4): the layout the
-// bracket's reads and writes rest on, in the hash-verified exe (332841).
-constexpr uintptr_t kLookupRva = 0x3696FA0u;
+// bracket's reads and writes rest on, in the hash-verified exe (334473).
+constexpr uintptr_t kLookupRva = 0x3699CA0u;
 constexpr uint8_t kLookupPrologue[32] = {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83,
     0xEC, 0x40, 0x8B, 0x42, 0x18, 0x48, 0x8B, 0xDA, 0x33, 0xD2, 0x4C, 0x8B, 0xF1, 0x48, 0xF7, 0x71};
-constexpr uintptr_t kAppendRva = 0x4313185u;
+constexpr uintptr_t kAppendRva = 0x4315E45u;
 constexpr uint8_t kAppendBytes[23] = {
     0x48, 0x8B, 0x42, 0x18,                                // mov rax,[rdx+18h]      the node's count
     0x4C, 0x89, 0xBC, 0xC2, 0xA0, 0x0A, 0x00, 0x00,        // mov [rdx+rax*8+0AA0h],r15  the record's mask
@@ -595,16 +601,16 @@ const char* verifyEngine(uintptr_t base) noexcept {
     __try {
         uint32_t peOff = 0;
         std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return "not build 332841 (no PE header)";
+        if (peOff > 0x1000) return "not build 334473 (no PE header)";
         uint32_t timestamp = 0, imageSize = 0;
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
         if (timestamp != KinematicEvalProbe::kExpectedTimestamp || imageSize != KinematicEvalProbe::kExpectedImageSize)
-            return "not build 332841 (PE timestamp/size)";
+            return "not build 334473 (PE timestamp/size)";
         if (std::memcmp(reinterpret_cast<const void*>(base + kLookupRva), kLookupPrologue, sizeof(kLookupPrologue)))
-            return "lookup mismatch at RVA 0x3696FA0";
+            return "lookup mismatch at RVA 0x3699CA0";
         if (std::memcmp(reinterpret_cast<const void*>(base + kAppendRva), kAppendBytes, sizeof(kAppendBytes)))
-            return "append sequence mismatch at RVA 0x4313185";
+            return "append sequence mismatch at RVA 0x4315E45";
         return nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "engine image unreadable";
@@ -616,6 +622,11 @@ const char* verifyEngine(uintptr_t base) noexcept {
 const char* verifyEngine(uintptr_t) noexcept { return nullptr; }
 #endif
 
+void observeRawCurrentPose(uintptr_t record, uintptr_t node, uintptr_t owner,const emit::Pose& now,
+                           uint32_t frame,bool proven,bool primary) noexcept {
+    flatOriginWitnessObserve(record,node,owner,now.w,frame,proven,primary);
+}
+
 void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept {
     if (!live.load(std::memory_order_acquire) || !g_table) return;
     const uint64_t n = g_emit.calls.load(std::memory_order_relaxed);
@@ -624,7 +635,8 @@ void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t afte
     // The census (a hash, a pose read and a lock even on zero-item calls) is
     // a diagnostic: off unless engine motion's diagnostics want it.
     emit::observe(record, owner, before, after, frameNow(), g_lookup.load(std::memory_order_acquire), *g_table, g_emit,
-                  g_diagnosticsWanted.load(std::memory_order_relaxed) ? g_census.get() : nullptr);
+                  g_diagnosticsWanted.load(std::memory_order_relaxed) ? g_census.get() : nullptr,
+                  0,false,nullptr,(flatOriginCaptureEnabled() && runtimeFlatProfile())?&observeRawCurrentPose:nullptr);
     if (sample) {
         g_emitSampled.fetch_add(1, std::memory_order_relaxed);
         g_emitSampledTicks.fetch_add(static_cast<uint64_t>(qpcNow() - t0), std::memory_order_relaxed);
@@ -649,7 +661,8 @@ void observePrimaryEmit(const emit::PrimaryIdentity& identity, uintptr_t owner, 
         else primaryCopy::invalidateEmission(0);
     } else primaryCopy::invalidateEmission(0); // ownership/fault: no stale CPU claim may survive
     emit::observePrimary(identity,owner,key,position,quaternion,before,after,frameNow(),
-                         g_lookup.load(std::memory_order_acquire),*g_table,g_primaryEmit,sink);
+                         g_lookup.load(std::memory_order_acquire),*g_table,g_primaryEmit,sink,
+                         (flatOriginCaptureEnabled() && runtimeFlatProfile())?&observeRawCurrentPose:nullptr);
 }
 
 // The engine's pool copier (game job threads, once per copy-list entry). No
@@ -2048,6 +2061,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     }
     if (psInstalled) ++g_draw.settersSkipped;
     else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.settersIssued; }
+    g_bound.context=ctx;g_bound.sourceVs=vs;
     g_bound.originalPs = ps; g_bound.patchedPs = usePs; g_bound.psGen = cache.ps;
     g_bound.originalVs = useVs != vs ? vs : nullptr; g_bound.patchedVs = useVs != vs ? useVs : nullptr; g_bound.vsGen = cache.vs;
     g_bound.family = f;
@@ -2267,7 +2281,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
             Log::get().note("%s", lockLine);
         }
     }
-    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
+    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144315AC0 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "
                     "this call unproven %llu, table full %llu; same-frame repeats %llu; pose disagreements %llu (must be 0), "
@@ -2638,13 +2652,13 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetClearObserver(&observeDictionaryClear);
     }
     refreshEmitStatus(true);
-    Log::get().note("engine motion: primary rigid producer 42B4130 %s; canonical collection-record history, "
+    Log::get().note("engine motion: primary rigid producer 42B6DF0 %s; canonical collection-record history, "
                     "unit-scale unskinned records only; unsupported records remain native.",kinematicEvalPrimaryEmitStatus());
     g_windowStartMs = nowMs();
     live.store(true, std::memory_order_release);
     if (!g_emitLive.load(std::memory_order_acquire)) { logStoodDown(); return; }
     armSkinLocked();
-    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144312E00's records carry "
+    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144315AC0's records carry "
                     "their previous engine pose when it is continuous and proven; the pool families' own draws write the "
                     "pool slot and depth at MRT6 under an unblended state; the temporal pass takes exact record motion "
                     "there, masks rig records it cannot follow, and keeps the camera term elsewhere. Per-30 s lines "
@@ -2656,6 +2670,7 @@ void engineVelocityDiagnostics(bool on) { g_diagnosticsWanted.store(on, std::mem
 void engineVelocityShutdown() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const bool was = live.exchange(false, std::memory_order_acq_rel);
+    flatOriginWitnessShutdown();
     guardForget();
     kinematicEvalSetEmitObserver(nullptr);
     kinematicEvalSetPrimaryEmitObserver(nullptr);
@@ -2755,6 +2770,7 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if(g_flatDomainSaved.context)return fail("flat-domain-nested-bracket");
     FlatDomainSaved saved; saved.context=ctx;
+    saved.vsGeneration=bindingGeneration(BindSlot::Vs);saved.psGeneration=bindingGeneration(BindSlot::Ps);
     UINT classes=0;ctx->VSGetShader(&saved.vs,nullptr,&classes);if(classes)return fail("flat-domain-VS-linkage");
     ctx->PSGetShader(&saved.ps,nullptr,&classes);if(classes)return fail("flat-domain-PS-linkage");
     if(!saved.vs)return fail("flat-domain-shader-missing");
@@ -2872,6 +2888,36 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     for(auto* view:verified)if(view)view->Release();
     if(!bound){engineVelocityFlatDomainEndDraw(ctx);return fail("flat-domain-slot-bind-refused");}
     return true;
+}
+bool engineVelocityFlatSourceShaders(ID3D11DeviceContext* ctx,uint64_t vsHash,uint64_t psHash) {
+    if(!ctx||!runtimeFlatProfile())return false;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
+    ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;ctx->GetPredication(&predicate,&predicateValue);
+    if(gs||hs||ds||predicate)return false;
+    const bool originalVs=lookupShaderHash(vs.Get())==vsHash;
+    const bool originalPs=lookupShaderHash(ps.Get())==psHash;
+    if(originalVs&&originalPs)return true;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const auto receipt=[&](ID3D11DeviceContext* sourceContext,ID3D11VertexShader* originalVs,ID3D11PixelShader* originalPs,
+                           ID3D11VertexShader* patchedVs,ID3D11PixelShader* patchedPs,uint32_t vsGen,uint32_t psGen) {
+        if(lookupShaderHash(originalVs)!=vsHash||lookupShaderHash(originalPs)!=psHash)return false;
+        forward_light::CloneReceipt r;
+        r.context=reinterpret_cast<uintptr_t>(ctx);r.owner=reinterpret_cast<uintptr_t>(sourceContext);
+        r.originalVs=reinterpret_cast<uintptr_t>(originalVs);r.originalPs=reinterpret_cast<uintptr_t>(originalPs);
+        r.shadowVs=reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Vs));r.shadowPs=reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Ps));
+        r.actualVs=reinterpret_cast<uintptr_t>(vs.Get());r.actualPs=reinterpret_cast<uintptr_t>(ps.Get());
+        r.patchedVs=reinterpret_cast<uintptr_t>(patchedVs);r.patchedPs=reinterpret_cast<uintptr_t>(patchedPs);
+        r.vsGeneration=vsGen;r.psGeneration=psGen;r.currentVsGeneration=bindingGeneration(BindSlot::Vs);r.currentPsGeneration=bindingGeneration(BindSlot::Ps);
+        return forward_light::cloneReceipt(r);
+    };
+    const auto& marker=g_flatDomainSaved;
+    if(marker.context.Get()==ctx)for(const auto& replacement:g_flatDomainShaders)
+        if(replacement.originalVs==marker.vs&&replacement.originalPs==marker.ps&&
+           receipt(marker.context.Get(),marker.vs.Get(),marker.ps.Get(),replacement.patchedVs.Get(),replacement.patchedPs.Get(),marker.vsGeneration,marker.psGeneration))return true;
+    return receipt(g_bound.context.Get(),g_bound.sourceVs,g_bound.originalPs,g_bound.patchedVs,g_bound.patchedPs,g_bound.vsGen,g_bound.psGen);
 }
 void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext* ctx) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -3190,6 +3236,7 @@ void psShadowProbe(ID3D11DeviceContext* ctx) {
 
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept {
     g_frame.store(presentFrame, std::memory_order_release);
+    flatOriginWitnessFrameBoundary(presentFrame,flatOriginCaptureEnabled() && runtimeFlatProfile(),g_emitLive.load(std::memory_order_acquire));
 }
 
 void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {

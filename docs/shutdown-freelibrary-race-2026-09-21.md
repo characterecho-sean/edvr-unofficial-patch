@@ -1,4 +1,4 @@
-# Crash after closing the game: FreeLibrary race in OpenXR shutdown
+# Execute fault in the graphics hook chain
 
 ## Status
 
@@ -17,18 +17,19 @@
   (Quest 3), so SteamVR is not a factor; Steam's desktop overlay turned off
   for Elite with EDHM left in place **stopped the crash** (reported
   directly, no log bundle).
-- **Open (`## Not ruled out`):** whether `FreeLibrary(systemModule_)` is the
-  release that reaches zero references (PR #40 review: very likely not, the
-  startup `systemD3D11CreateDevice()` static leaks a reference); a freed
-  overlay hook trampoline instead of an unmapped module (fault address in
-  or out of `d3d11.dll`'s image range); whether `stereo.drain()` has a gap;
-  whether EDHM is needed beside the overlay; which "d3d11.dll" frames are
-  System32's versus EDVR's proxy. The fixed 31 ms gap (a cadence, not
-  jitter?) may narrow which side owns the next call.
+- **New dump (2026-10-17, different reporter):** an rc.2 minidump shows an
+  execute fault outside loaded images while the proxy forwards
+  `hookedRSSetViewports`; Steam overlay is the next unwound caller. The
+  initial forward pointer and fault-page state are not captured. No paired
+  logs or shutdown timing were supplied; see the dated entry below.
+- **Open:** who supplied the invalid target, its page state at the fault,
+  and whether overlay/EDHM interactions matter. The fourth flight refuted
+  the prior `FreeLibrary(systemModule_)` lifetime theory; `## Not ruled out`
+  preserves questions written before that flight.
 - **Ruled out:** see `## Ruled out` (four items: EDVR's own shutdown
   throwing, the overlay as bystander, a stale build, SteamVR as runtime).
-- **Instrument BUILT 2026-10-13, NOT FLOWN** (branch
-  `claude/vr-framerate-crash-exit-665a26`, full build green). The crash filter
+- **Instrument available in rc.2; paired crash logs pending** (built
+  2026-10-13 on `claude/vr-framerate-crash-exit-665a26`, full build green). The crash filter
   now writes, for an access violation, `crash: fault-page` (VirtualQuery of the
   address), `crash: ledger` (`dll_ledger.h`: a ring of image loads and unloads
   from `LdrRegisterDllNotification`, so an address in a freed DLL is named,
@@ -37,13 +38,18 @@
   and a 256-cell window counting images, zeros and junk). Save logs now also
   writes `edvr-crash-dump-<time>.zip` (Elite's `Temp\...\CrashDumps` minidump
   and any Windows Error Reporting one, within 3 minutes of the session's end,
-  deflated through tar.exe, kept out of the log zip). Read a new bundle by
-  `grep "crash: \(fault-page\|ledger\|cell\)" edvr_breadcrumbs.txt`; the dump's
-  unloaded-module list gives the same answer independently.
-- **Next flight:** the user installs this build, plays to a normal exit and
-  sends Save logs plus the dump. Then repro once with EDHM's chain target
-  switched to the system `d3d11.dll` (overlay on) and once with the overlay
-  off. This user crashes every session.
+  deflated through tar.exe, kept out of the log zip). Read the breadcrumbs with
+  `python tools\edvr_log.py --file <breadcrumbs> --grep "crash: (fault-page|ledger|cell)"`.
+  A dump's unloaded-module list can independently identify an old image, when present.
+- **Next, new reporter:** request the normal Save logs archive from this
+  same session: `edvr_breadcrumbs.txt` (`crash: fault-page`, `crash: ledger`,
+  `crash: cell`) plus graphics and runtime logs. No new build or flight is
+  needed if those logs exist. Consider an overlay-off control with EDHM
+  retained only after reading them; the earlier result was from another
+  reporter and has no independent log validation.
+- **Earlier reporter's planned flight:** install the instrumented build,
+  capture Save logs and dump at normal exit, then control EDHM and overlay
+  separately. That reporter crashed every session.
 - **Environment:** build v0.17.0 in both logged flights (`edvr_log.py
   --expect-build v0.17.0` matched); "separate device" mode (the default for
   every normal install); flight 2 on VirtualDesktopXR / Meta Quest 3.
@@ -537,3 +543,61 @@ analysis above and worth its own look before trusting the fix.
   EDHM-specific, it may be worth a second discriminating flight (Steam
   overlay on, EDHM out of the chain) purely to complete the arc, not
   because the fix's scope depends on the answer.
+
+## 2026-10-17: execute-fault minidump from a different reporter
+
+Archive `edvr-crash-dump-20261017-185141.zip` was extracted at
+`analysis/crash-dump-2026-10-17-185141`. Its only payload is
+`20261017_184939_MiniDump.dmp`, with no paired EDVR graphics, runtime, or
+breadcrumb logs. This is a **different reporter** from the shutdown flights
+above; neither shutdown timing nor a normal-exit trigger was supplied. The
+loaded proxy and EDVR native OpenXR runtime match v0.20.0-rc.2 (proxy PE timestamp
+`0x6AD165AB`, image size `0x2041000`; runtime timestamp `0x6AD164D2`). The
+dump reports x64 Windows 10.0.26300 and loads EDHM 1.4.5.0, Steam overlay
+11.12.30.7, and AMD `amdxx64.dll` 32.0.31041.1004. Their presence does not
+identify a faulty module. The dump does not establish a headset, GPU model,
+VR runtime label, render size, or AA setting; the earlier reporter's setup
+must not be applied to this one.
+
+Independent parses of the exception context find an **execute** access
+violation (`0xC0000005`) at `0x00007fff10f4f780`, outside all loaded module
+image ranges. At exception `RSP=0x5d3d7fe838`, the top return word is the
+EDVR proxy `d3d11.dll+0x33CE04`. Disassembly of the matching release proxy
+places `call rax` at `+0x33CE02`, immediately before that return address,
+inside its `.pdata` function `+0x33CC40..+0x33CE21`. The preceding
+instructions load `rax` from `[rbp+0xC600]`, pass the game context in
+`rcx=rdi=0x1b82c33f058`, set `edx=1`, and pass the viewport stack in
+`r8=rbx=0x5d3d7fe8f8`. This matches the real-forward path of release
+`src/d3d11/vscreen.cpp`'s `hookedRSSetViewports` (slot 44; installed as a
+live vtable hook). A proper epilogue unwind reaches Steam overlay
+`gameoverlayrenderer64.dll+0x71D05` as the next caller; later raw stack
+words are not established call frames.
+
+The exception's `RAX=0x1b82c33f1c0` equals the game context plus `0x168`.
+That is consistent with the address of slot 44 in the live-copy vtable
+mechanism (`src/common/vtable_hook.cpp` and `.h`), whose stub jumps through
+a table cell. It does **not** prove what value the original `[rbp+0xC600]`
+source held: that address was not captured. MemoryList descriptor 315 does
+capture a later snapshot covering RAX (`VA 0x1b82c33ee80..0x1b82c33f4c0`,
+file offset `0x17d8262` for RAX). Its 16 bytes are
+`00 a3 ad 2e f8 7f 00 00 30 85 ad 2e f8 7f 00 00`, or
+`0x00007ff82eada300` and `0x00007ff82ead8530`, both pointers into the
+loaded System32 D3D11 image. This later cell snapshot cannot establish the
+cell's value at the indirect jump or who last wrote it. The invalid target
+appears in exception records, with no confirmed live-cell copy.
+
+The minidump has no MemoryInfoList, UnloadedModuleList, or bytes for the
+fault target page. The target's page state and history are therefore
+unknown; “unmapped” or “freed” would overstate the evidence. EDVR's proxy
+participates in the forward call, but this dump does not assign the bad
+target to EDVR, EDHM, the overlay, the driver, or the game. The prior fourth
+flight already refuted the `FreeLibrary(systemModule_)` theory, and this
+different reporter's dump does not revive it.
+
+First obtain this session's normal Save logs archive, especially
+`edvr_breadcrumbs.txt` lines `crash: fault-page`, `crash: ledger`, and
+`crash: cell`, together with paired graphics and runtime logs. If it exists,
+that requires no new build or test flight. Only after those logs establish
+context should a one-variable Steam-overlay-off run with EDHM retained be
+considered. The earlier reporter's overlay-off success was reported without
+independent logs and does not validate that control for this reporter.

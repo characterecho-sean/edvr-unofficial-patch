@@ -63,7 +63,7 @@ void caseCaptureCollectsInRangeWithGaps() {
     uint64_t image[64]{};
     image[0] = kLo + 0x100;          // immediate caller (the stub)
     image[1] = 0xDEADBEEFull;        // local, not a return address
-    image[2] = kBase + 0x4321940ull; // scheduler candidate (.text, in range)
+    image[2] = kBase + 0x4324640ull; // scheduler candidate (.text, in range)
     image[3] = 0x1234ull;
     image[4] = 0x1235ull;
     image[5] = kHi - 0x10;           // deepest frame

@@ -3,7 +3,7 @@
 // F2: the hook's reading of the game's entry list, as a pure function over a reader (skin_entity_hook.cpp supplies a reader
 // that wraps every read in structured exception handling; the rig supplies a fake heap with faults in it).
 //
-// What it reads, from the decompile of FUN_144c540e0 (build 332841; the offsets are EVIDENCE from the decompile, checked at run
+// What it reads, from the decompile of FUN_144c56cc0 (build 334473; the offsets are EVIDENCE from the decompile, checked at run
 // time by checkSnapshot and by the GPU against the dispatch's own job table, not assumed):
 //   node + 0xA8   the first entry of the list the game walks (a singly linked list, in registration order)
 //   node + 0xC4   the running base after the function has assigned every entry its rows

@@ -2,8 +2,8 @@
 // engine_velocity_test: the EMIT half against a fake engine.
 //
 // A fake rig record, owner, dictionary entry and 8-record nodes, laid out as
-// build 332841 lays them (engine_velocity_emit.h has the offsets and the
-// decompile lines they come from). fakeProducer() does what FUN_144312E00
+// build 334473 lays them (engine_velocity_emit.h has the offsets and the
+// decompile lines they come from). fakeProducer() does what FUN_144315AC0
 // does -- one 0x150-byte record per LOD with both pose blocks copied from the
 // rig record and GARBAGE at +0x120 (nothing writes it), appended to the tail
 // node, owner+0x2A4 counted -- and fakeCopier() does what the copier does:
@@ -63,7 +63,7 @@ struct Fake {
         put<uint64_t>(rec() + ev::kRecordNode, node);
     }
     uintptr_t tail() { return get<uint64_t>(ent() + ev::kEntryTail); }
-    // FUN_144312E00's append, k times.
+    // FUN_144315AC0's append, k times.
     void producer(int k) {
         alignas(16) uint8_t item[0x150];
         for (auto& b : item) b = static_cast<uint8_t>(garbage());
@@ -108,7 +108,7 @@ struct Fake {
     }
 };
 
-// The fake dictionary: FUN_143696FA0's contract -- (owner+0x260, rig+0x250) ->
+// The fake dictionary: FUN_143699CA0's contract -- (owner+0x260, rig+0x250) ->
 // the entry. One fake engine at a time.
 Fake* g_fake = nullptr;
 bool g_lookupRefuses = false;

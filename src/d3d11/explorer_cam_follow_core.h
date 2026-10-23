@@ -25,15 +25,15 @@
 namespace edvr {
 namespace ecm {
 
-// ---- A. the skeleton interface, the pose walk and the slot checks (build 332841) -----------------------------------------------------------------------
+// ---- A. the skeleton interface, the pose walk and the slot checks (build 334473) -----------------------------------------------------------------------
 // The verified addresses of the build the head-joint eye reads (found by the flights' skeleton instruments, since retired; the arc doc has the evidence).
-constexpr uintptr_t kRrVtableRva = 0x559CF90, kAoVtableRva = 0x517DC20;
+constexpr uintptr_t kRrVtableRva = 0x55A01B0, kAoVtableRva = 0x5180D40;
 constexpr uint32_t kHeadSlots = 4;                                                    // the slots used: +0x18, +0x30, +0x48, +0x58
 constexpr uint32_t kHeadSlotIndex[kHeadSlots] = {3, 6, 9, 11};
-constexpr uintptr_t kRrFunctions[kHeadSlots] = {0x43FB900, 0xFDDB10, 0x43F7180, 0x43F6EB0};
-constexpr uintptr_t kAoFunctions[kHeadSlots] = {0xFDE310, 0xFDDB10, 0xFDDEB0, 0xFDDD10};
+constexpr uintptr_t kRrFunctions[kHeadSlots] = {0x43FE680, 0xFDEC10, 0x43F9F00, 0x43F9C30};
+constexpr uintptr_t kAoFunctions[kHeadSlots] = {0xFDF410, 0xFDEC10, 0xFDEFB0, 0xFDEE10};
 constexpr uint32_t kRrCachedFlag = 0x2C0, kAoCachedFlag = 0xF8;                      // iface+: the joint matrices are cached when it is non-zero
-constexpr uintptr_t kHeadNameRva = 0x554EE10, kFootLNameRva = 0x5564118, kFootRNameRva = 0x5564130;
+constexpr uintptr_t kHeadNameRva = 0x5552030, kFootLNameRva = 0x5567338, kFootRNameRva = 0x5567350;
 inline constexpr char kHeadName[] = "def_c_head_joint";
 inline constexpr char kPovName[] = "def_c_povCamera_joint";
 inline constexpr char kFootLName[] = "def_l_foot_joint";
@@ -45,7 +45,7 @@ enum class HeadKind : uint8_t { None = 0, Runtime = 1, Animated = 2 };
 // ---- the joints by WALKING THE ANIMATED POSE ---------------------------------------------------------------------------------------------------
 // F5: the cached +0x58 head did not drop when the commander crouched, and +0x48 drifted 12 m (a frame that is not the free camera's). The cached matrices
 // are only maintained for joints the game asked for (SetAttachJoint marks a joint and its ancestors), so the walk composes the joints from the animated pose
-// itself, exactly as the game's uncached path does (FUN 0xFDE0D0, read and its quaternion constants evaluated against the exe's own data):
+// itself, exactly as the game's uncached path does (FUN 0xFDF1D0, read and its quaternion constants evaluated against the exe's own data):
 //   P = GetPoseData(): the u16 at P+0 is the joint count; *(P+0x48) -> the local transforms, 32 bytes a joint: position vec4 at +0 (x,y,z,w), rotation
 //   quaternion (x,y,z,w) at +0x10; *(P+0x50) -> the u16 parent of each joint (0xFFFF = root); *(P+0x18) -> the u16 name hashes.
 //   Row-vector convention: the joint's matrix is R(q) with its position as the fourth row, and the model-space matrix is joint x parent x grandparent ...
@@ -368,7 +368,7 @@ inline void formatFollowNote(char* out, size_t cap, const FollowNote& n) {
             break;
         case FollowNoteKind::StoodDown:
             if (n.why == 1)
-                o.put("%s the head-joint source stood down for the session: vtable slot +0x%llX of skeleton 0x%llX holds 0x%llX, not the build-332841 function 0x%llX; the "
+                o.put("%s the head-joint source stood down for the session: vtable slot +0x%llX of skeleton 0x%llX holds 0x%llX, not the build-334473 function 0x%llX; the "
                       "fixed eye keys place the view from now on",
                       prefixFollow(), static_cast<unsigned long long>(n.a), iface, static_cast<unsigned long long>(n.b), static_cast<unsigned long long>(n.c));
             else
@@ -397,21 +397,21 @@ constexpr uint32_t isoFieldOffset(IsoKind k) { return k == IsoKind::Axis ? kOffA
 constexpr uint32_t isoFieldWidth(IsoKind k) { return k == IsoKind::Held ? 1u : 4u; }
 enum IsoHolder : int { kIsoFreeCamera = 0, kIsoController, kIsoCameraUi, kIsoZoomDof, kIsoHolderCount };
 
-// FreeCameraActivity (update 0x1071980): FreeCamSpeedInc/Dec held, the move/look axes, ToggleRotationLock, FixCameraWorldToggle, FixCameraRelativeToggle.
+// FreeCameraActivity (update 0x1072A80): FreeCamSpeedInc/Dec held, the move/look axes, ToggleRotationLock, FixCameraWorldToggle, FixCameraRelativeToggle.
 // EDVR's own lock press goes in on +0x508 after the clear.
 inline constexpr IsoField kIsoTabFree[] = {
     {0x4B8, IsoKind::Held}, {0x4C0, IsoKind::Held},
     {0x4C8, IsoKind::Axis}, {0x4D0, IsoKind::Axis}, {0x4F0, IsoKind::Axis}, {0x4D8, IsoKind::Axis}, {0x4E0, IsoKind::Axis}, {0x4E8, IsoKind::Axis},
     {0x4F8, IsoKind::Pressed}, {0x500, IsoKind::Pressed}, {0x508, IsoKind::Pressed}};
-// VesselCameraMountControl (update 0x2DF14C0): PhotoCameraToggle, the two scrolls, ToggleFreeCam, QuitCamera and VanityCameraOne..Ten. EDVR's own F5 presses
+// VesselCameraMountControl (update 0x2DF3F60): PhotoCameraToggle, the two scrolls, ToggleFreeCam, QuitCamera and VanityCameraOne..Ten. EDVR's own F5 presses
 // (+0x310, +0x328) go in after the clear.
 inline constexpr IsoField kIsoTabController[] = {
     {0x310, IsoKind::Pressed}, {0x318, IsoKind::Pressed}, {0x320, IsoKind::Pressed}, {0x328, IsoKind::Pressed}, {0x340, IsoKind::Pressed},
     {0x350, IsoKind::Pressed}, {0x358, IsoKind::Pressed}, {0x360, IsoKind::Pressed}, {0x368, IsoKind::Pressed}, {0x370, IsoKind::Pressed},
     {0x378, IsoKind::Pressed}, {0x380, IsoKind::Pressed}, {0x388, IsoKind::Pressed}, {0x390, IsoKind::Pressed}, {0x398, IsoKind::Pressed}};
-// VanityCameraUIActivity (update 0x47C7640): FreeCamToggleHud. EDVR's own hide/unhide press goes in after the clear.
+// VanityCameraUIActivity (update 0x47CA180): FreeCamToggleHud. EDVR's own hide/unhide press goes in after the clear.
 inline constexpr IsoField kIsoTabCameraUi[] = {{0x1D8, IsoKind::Pressed}};
-// VanityCameraDofAndZoomControls (update 0x1078990; names are data, any handle may be null): +0x260 toggles the advance mode, the rest are held (zoom, aperture, focus).
+// VanityCameraDofAndZoomControls (update 0x1079A90; names are data, any handle may be null): +0x260 toggles the advance mode, the rest are held (zoom, aperture, focus).
 inline constexpr IsoField kIsoTabZoomDof[] = {
     {0x250, IsoKind::Held}, {0x258, IsoKind::Held}, {0x260, IsoKind::Pressed}, {0x268, IsoKind::Held}, {0x270, IsoKind::Held}, {0x278, IsoKind::Held}, {0x280, IsoKind::Held}};
 constexpr size_t kIsoMaxFields = 16;

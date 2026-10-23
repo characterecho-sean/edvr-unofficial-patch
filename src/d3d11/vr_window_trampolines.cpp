@@ -22,17 +22,17 @@
 namespace edvr {
 namespace {
 
-// The mode request (0x7E9D50). Its first eleven bytes, read from build 332841: mov rax,rsp; mov [rax+0x10],rbx; mov [rax+0x18],rsi.
+// The mode request (0x7E9EB0). Its first eleven bytes, read from build 334473: mov rax,rsp; mov [rax+0x10],rbx; mov [rax+0x18],rsi.
 // The request is rdx on entry. The function reads these request fields: [+0x08] (a table selector), [+0x10], [+0x18] (a table index),
 // [+0x20] (the kind, a dword), and [+0x24], [+0x25] (flags). [+0x00] is a locked compare-exchange target and is never written here.
-constexpr uint32_t kRequestRva = 0x7E9D50;
+constexpr uint32_t kRequestRva = 0x7E9EB0;
 constexpr uint8_t kRequestBytes[11] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18};
 constexpr uintptr_t kReqBlockOff = 0x08;   // the remembered block: request +0x08 .. +0x27 (four qwords)
 constexpr uintptr_t kReqKindOff = 0x20;
 
-// The settings copy W (0x281C0D0): the block copy into the render context at ctx+0x3428 (ctx = the first argument's +0x1180). Its first
+// The settings copy W (0x281E710): the block copy into the render context at ctx+0x3428 (ctx = the first argument's +0x1180). Its first
 // eleven bytes: mov r11,rsp; push rbx; sub rsp,0x4D0.
-constexpr uint32_t kCopyRva = 0x281C0D0;
+constexpr uint32_t kCopyRva = 0x281E710;
 constexpr uint8_t kCopyBytes[11] = {0x4C, 0x8B, 0xDC, 0x53, 0x48, 0x81, 0xEC, 0xD0, 0x04, 0x00, 0x00};
 
 constexpr uint32_t kRewriteCap = 64;
@@ -249,7 +249,7 @@ bool installOne(const uint8_t* base, uint32_t rva, const uint8_t* want, size_t l
                 CodeHook* hook, const char* name) {
     uint8_t got[11] = {};
     if (!readGuardedBytes(base + rva, got, len) || std::memcmp(got, want, len) != 0) {
-        Log::get().note("vr window: trampoline %s refused: the bytes at 0x%X are not build 332841's; nothing patched", name, rva);
+        Log::get().note("vr window: trampoline %s refused: the bytes at 0x%X are not build 334473's; nothing patched", name, rva);
         return false;
     }
     const uintptr_t target = reinterpret_cast<uintptr_t>(base) + rva;
@@ -280,10 +280,10 @@ void vrWindowTrampolinesInstall() {
     }
     refreshUserSize();
     const bool req = installOne(base, kRequestRva, kRequestBytes, sizeof(kRequestBytes), reinterpret_cast<void*>(&requestReplacement),
-                                reinterpret_cast<void**>(&g_requestOrig), &g_requestHook, "0x7E9D50 (mode request)");
+                                reinterpret_cast<void**>(&g_requestOrig), &g_requestHook, "0x7E9EB0 (mode request)");
     const bool copy = installOne(base, kCopyRva, kCopyBytes, sizeof(kCopyBytes), reinterpret_cast<void*>(&copyReplacement),
-                                 reinterpret_cast<void**>(&g_copyOrig), &g_copyHook, "0x281C0D0 (settings copy)");
-    Log::get().note("vr window: trampolines: 0x7E9D50 (mode request, window rewrite) %s; 0x281C0D0 (settings copy, hold) %s; DisplaySettings %ux%u; the display config save is not held (its field layout is not proven)",
+                                 reinterpret_cast<void**>(&g_copyOrig), &g_copyHook, "0x281E710 (settings copy)");
+    Log::get().note("vr window: trampolines: 0x7E9EB0 (mode request, window rewrite) %s; 0x281E710 (settings copy, hold) %s; DisplaySettings %ux%u; the display config save is not held (its field layout is not proven)",
                     req ? "installed" : "not installed", copy ? "installed" : "not installed", g_userW.load(), g_userH.load());
 }
 

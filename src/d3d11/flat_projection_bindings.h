@@ -39,6 +39,7 @@ inline FlatProjectionCacheKey flatProjectionCacheKey(const FlatProjectionShadowV
 // must register only stable identities and release them before resource reuse.
 // In particular, a pointer reused for a new COM object needs a new nonzero
 // identityGeneration. One owner thread must serialize all calls.
+enum class FlatProjectionShadowLookupState : uint8_t { Ready, Unregistered, GenerationMismatch, Mapping, Invalid };
 template<size_t MaxBuffers = 64, size_t MaxWidth = 65536>
 class FlatProjectionShadowBank {
     static_assert(MaxBuffers > 0 && MaxBuffers <= 128, "bounded identity count");
@@ -161,6 +162,19 @@ public:
         out = {identity, identityGeneration, e->writeGeneration,
                epoch_, e->bytes, e->width};
         return true;
+    }
+    // Failure-only explanation for a failed lookup. The normal successful
+    // copy path never calls this or scans the bank a second time.
+    FlatProjectionShadowLookupState lookupState(const void* identity, uint64_t identityGeneration) const {
+        if (!entries_ || !identity) return FlatProjectionShadowLookupState::Unregistered;
+        for (size_t i = 0; i < MaxBuffers; ++i) {
+            const Entry& e = entries_[i];
+            if (e.identity != identity) continue;
+            if (e.identityGeneration != identityGeneration) return FlatProjectionShadowLookupState::GenerationMismatch;
+            if (e.mapping) return FlatProjectionShadowLookupState::Mapping;
+            return e.valid ? FlatProjectionShadowLookupState::Ready : FlatProjectionShadowLookupState::Invalid;
+        }
+        return FlatProjectionShadowLookupState::Unregistered;
     }
     bool matches(const FlatProjectionCacheKey& key, uint32_t phase) const {
         FlatProjectionShadowView view{};

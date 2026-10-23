@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
@@ -32,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # other files (NVIDIA's runtime, Microsoft's loader) are not ours to stamp.
 STAMPED = ("d3d11.dll", "openvr/openvr_api.dll", "edvr-installer.exe")
 INSTALLER = "edvr-installer.exe"
+LINUX_WRAPPER = "edvr-installer-linux.py"
+LINUX_LAUNCHER = "edvr_installer.sh"
 STAMP_KEYS = ("FileVersion", "ProductVersion")
 
 
@@ -57,6 +60,9 @@ def _files(root, no_dlss):
               (build / "openxr_loader.dll", "openvr/openxr_loader.dll"),
               (build / "OPENXR-LOADER-LICENSE.txt", "openvr/OPENXR-LOADER-LICENSE.txt"),
               (root / "release" / "README.txt", "README.txt"),
+              (root / "release" / "README-linux.txt", "README-linux.txt"),
+              (root / "tools" / "install_proton.py", LINUX_WRAPPER),
+              (root / LINUX_LAUNCHER, LINUX_LAUNCHER),
               (root / "release" / "OPENVR.txt", "openvr/READ-ME-FIRST.txt")]
     # Historical --no-dlss permits builds made without the SDK. It cannot
     # remove a runtime already embedded in the installer we distribute.
@@ -247,6 +253,19 @@ def _validate_installer_resources(executable, files):
             raise ValueError("installer embeds XeSS without matching runtime and notices")
 
 
+def _write_zip_entry(output, source, name):
+    if name in (LINUX_WRAPPER, LINUX_LAUNCHER):
+        # zipfile.write inherits Windows' non-executable mode. Record the Unix
+        # mode explicitly so extracted wrappers can also be run directly.
+        info = zipfile.ZipInfo(name)
+        info.create_system = 3
+        info.external_attr = 0o100755 << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        output.writestr(info, source.read_bytes())
+    else:
+        output.write(source, name)
+
+
 def package(root, version, no_dlss=False, dry_run=False):
     version = _version(version); root = root.resolve()
     dist = root / "dist"; stage = dist / (".edvr-stage-" + version); final_stage = dist / ("edvr-" + version)
@@ -257,6 +276,12 @@ def package(root, version, no_dlss=False, dry_run=False):
     missing = [str(src) for src, _ in files if not src.is_file()]
     if missing:
         raise ValueError("missing release payload:\n  " + "\n  ".join(missing))
+    wrapper = (root / "tools" / "install_proton.py").read_bytes()
+    if not wrapper.startswith(b"#!/usr/bin/env python3\n") or b"\r" in wrapper:
+        raise ValueError("Linux installer wrapper needs a Python 3 shebang and LF line endings")
+    launcher = (root / LINUX_LAUNCHER).read_bytes()
+    if not launcher.startswith(b"#!/bin/sh\n") or b"\r" in launcher:
+        raise ValueError("Linux shell launcher needs a /bin/sh shebang and LF line endings")
     _check_version_stamps(version, files)
     try:
         import openxr_pe
@@ -272,11 +297,19 @@ def package(root, version, no_dlss=False, dry_run=False):
     _validate_installer_resources(root / "build" / INSTALLER, files)
     print("[edvr] package plan: %s" % archive)
     for _, name in files: print("       %s" % name)
+    installer_archive = dist / ("edvr-installer-" + version + ".zip")
+    linux_archive = dist / ("edvr-installer-linux-" + version + ".zip")
+    print("[edvr] installer plan: %s (%s)" % (installer_archive, INSTALLER))
+    print("[edvr] Linux installer plan: %s (%s, %s, %s, README-linux.txt)" %
+          (linux_archive, INSTALLER, LINUX_WRAPPER, LINUX_LAUNCHER))
     if dry_run:
         print("[edvr] dry run: wrote nothing."); return 0
     dist.mkdir(parents=True, exist_ok=True)
     if stage.exists(): shutil.rmtree(stage)
-    if temporary_archive.exists(): temporary_archive.unlink()
+    temporary_installer_archive = dist / (".edvr-installer-" + version + ".zip.tmp")
+    temporary_linux_archive = dist / (".edvr-installer-linux-" + version + ".zip.tmp")
+    for temporary in (temporary_archive, temporary_installer_archive, temporary_linux_archive):
+        if temporary.exists(): temporary.unlink()
     try:
         for source, name in files:
             destination = stage / Path(name)
@@ -284,28 +317,51 @@ def package(root, version, no_dlss=False, dry_run=False):
             destination.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(source, destination)
         with zipfile.ZipFile(temporary_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
             for path in sorted(stage.rglob("*")):
-                if path.is_file(): output.write(path, path.relative_to(stage).as_posix())
+                if path.is_file(): _write_zip_entry(output, path, path.relative_to(stage).as_posix())
+        with zipfile.ZipFile(temporary_installer_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.write(stage / INSTALLER, INSTALLER)
+        with zipfile.ZipFile(temporary_linux_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            for name in (INSTALLER, LINUX_WRAPPER, LINUX_LAUNCHER, "README-linux.txt"):
+                _write_zip_entry(output, stage / name, name)
     except Exception:
-        if temporary_archive.exists(): temporary_archive.unlink()
+        for temporary in (temporary_archive, temporary_installer_archive, temporary_linux_archive):
+            if temporary.exists(): temporary.unlink()
         raise
     old_stage = dist / (".edvr-old-stage-" + version)
+    archives = ((temporary_archive, archive, dist / (".edvr-old-" + version + ".zip")),
+                (temporary_installer_archive, installer_archive,
+                 dist / (".edvr-old-installer-" + version + ".zip")),
+                (temporary_linux_archive, linux_archive,
+                 dist / (".edvr-old-installer-linux-" + version + ".zip")))
     if old_stage.exists(): shutil.rmtree(old_stage)
+    for _, _, backup in archives:
+        if backup.exists(): backup.unlink()
     if final_stage.exists(): final_stage.replace(old_stage)
+    replaced, backed_up = [], []
     try:
         stage.replace(final_stage)
-        os.replace(temporary_archive, archive)
+        for temporary, destination, backup in archives:
+            if destination.exists():
+                os.replace(destination, backup)
+                backed_up.append((destination, backup))
+            os.replace(temporary, destination)
+            replaced.append(destination)
     except Exception:
         if final_stage.exists(): shutil.rmtree(final_stage)
         if old_stage.exists(): old_stage.replace(final_stage)
+        for destination in replaced:
+            destination.unlink()
+        for destination, backup in backed_up:
+            os.replace(backup, destination)
+        for temporary, _, _ in archives:
+            if temporary.exists(): temporary.unlink()
         raise
     if old_stage.exists(): shutil.rmtree(old_stage)
-    installer_archive = dist / ("edvr-installer-" + version + ".zip")
-    temporary_installer_archive = dist / (".edvr-installer-" + version + ".zip.tmp")
-    if temporary_installer_archive.exists(): temporary_installer_archive.unlink()
-    with zipfile.ZipFile(temporary_installer_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
-        output.write(final_stage / INSTALLER, INSTALLER)
-    os.replace(temporary_installer_archive, installer_archive)
-    print("[edvr] wrote %s (%d bytes)" % (archive, archive.stat().st_size)); return 0
+    for _, _, backup in archives:
+        if backup.exists(): backup.unlink()
+    for written in (archive, installer_archive, linux_archive):
+        print("[edvr] wrote %s (%d bytes)" % (written, written.stat().st_size))
+    return 0
 
 
 def self_test():
@@ -353,9 +409,14 @@ def self_test():
             assert _stamped_versions(bare) is None
 
     with tempfile.TemporaryDirectory(prefix="edvr-package-test-") as temp:
-        root = Path(temp); (root / "build").mkdir(); (root / "release").mkdir()
+        # Windows TEMP may use an 8.3 alias; match package()'s resolved paths.
+        root = Path(temp).resolve(); (root / "build").mkdir(); (root / "release").mkdir()
         for source, _ in _files(root, True):
             source.parent.mkdir(parents=True, exist_ok=True); source.write_bytes(b"payload")
+        wrapper_source = root / "tools" / "install_proton.py"
+        wrapper_source.write_bytes(b"#!/usr/bin/env python3\nprint('fixture')\n")
+        launcher_source = root / LINUX_LAUNCHER
+        launcher_source.write_bytes((ROOT / LINUX_LAUNCHER).read_bytes())
         vr_descriptor = b"[install]\r\nschema = 2\r\nscope = both\r\n"
         (root / "build" / "edvr_profile_vr.ini").write_bytes(vr_descriptor)
         (root / "build" / "OPENXR-LOADER-LICENSE.txt").write_bytes(b"notice")
@@ -402,21 +463,125 @@ def self_test():
             with zipfile.ZipFile(root / "dist" / "edvr-installer-1.2.3.zip") as installer_archive:
                 assert set(installer_archive.namelist()) == {"edvr-installer.exe"}
                 assert installer_archive.read("edvr-installer.exe") == b"payload"
+            with zipfile.ZipFile(root / "dist" / "edvr-installer-linux-1.2.3.zip") as linux_archive:
+                assert set(linux_archive.namelist()) == {INSTALLER, LINUX_WRAPPER, LINUX_LAUNCHER,
+                                                        "README-linux.txt"}
+                assert linux_archive.read(INSTALLER) == b"payload"
+                assert linux_archive.read(LINUX_WRAPPER) == wrapper_source.read_bytes()
+                assert linux_archive.read(LINUX_LAUNCHER) == launcher_source.read_bytes()
+                assert linux_archive.read("README-linux.txt") == b"payload"
+                for name in (LINUX_WRAPPER, LINUX_LAUNCHER):
+                    mode = linux_archive.getinfo(name).external_attr >> 16
+                    assert linux_archive.getinfo(name).create_system == 3
+                    assert mode == 0o100755, oct(mode)
+                if os.name != "nt":
+                    extracted = root / "release with spaces"
+                    linux_archive.extractall(extracted)
+                    extracted_launcher = extracted / LINUX_LAUNCHER
+                    extracted_launcher.chmod(mode & 0o777)
+            if os.name != "nt":
+                fake_bin = root / "fake bin"
+                fake_bin.mkdir()
+                fake_python = fake_bin / "python3"
+                fake_python.write_bytes(b"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$EDVR_ARGS_FILE\"\nexit 37\n")
+                fake_python.chmod(0o755)
+                elsewhere = root / "other cwd"
+                elsewhere.mkdir()
+                args_file = root / "arguments"
+                env = dict(os.environ, PATH=str(fake_bin), EDVR_ARGS_FILE=str(args_file))
+
+                def check_launch(script, wrapper, args):
+                    result = subprocess.run([str(script), *args], cwd=elsewhere, env=env,
+                                            capture_output=True, check=False)
+                    assert result.returncode == 37, result.stderr
+                    assert args_file.read_bytes().splitlines() == [str(wrapper).encode(),
+                                                                    *(arg.encode() for arg in args)]
+
+                check_launch(extracted_launcher, extracted / LINUX_WRAPPER, [])
+                check_launch(extracted_launcher, extracted / LINUX_WRAPPER,
+                             ["--preview", "--installer", "a path/with spaces.exe", ""])
+                source_dir = root / "source with spaces"
+                (source_dir / "tools").mkdir(parents=True)
+                source_launcher = source_dir / LINUX_LAUNCHER
+                shutil.copy2(launcher_source, source_launcher)
+                source_launcher.chmod(0o755)
+                source_wrapper = source_dir / "tools" / "install_proton.py"
+                shutil.copy2(wrapper_source, source_wrapper)
+                check_launch(source_launcher, source_wrapper, ["--dry-run"])
+                check_launch(source_launcher, source_wrapper, ["--self-test"])
+                source_wrapper.unlink()
+                result = subprocess.run([str(source_launcher)], cwd=elsewhere, env=env,
+                                        capture_output=True, check=False)
+                assert result.returncode != 0 and b"Python wrapper missing" in result.stderr
+                result = subprocess.run([str(extracted_launcher)], cwd=elsewhere,
+                                        env=dict(env, PATH=""), capture_output=True, check=False)
+                assert result.returncode != 0 and b"python3 is required" in result.stderr
             assert not (root / "dist" / "edvr-installer-1.2.3.exe").exists()
-            old_archive = (root / "dist" / "edvr-1.2.3.zip").read_bytes()
+            artifacts = [root / "dist" / (name + "-1.2.3.zip") for name in
+                         ("edvr", "edvr-installer", "edvr-installer-linux")]
+            old_archives = {path: path.read_bytes() for path in artifacts}
+            for missing_file in (wrapper_source, launcher_source, root / "release" / "README-linux.txt"):
+                saved = missing_file.read_bytes()
+                missing_file.unlink()
+                for dry_run in (True, False):
+                    try:
+                        package(root, "1.2.3", no_dlss=True, dry_run=dry_run)
+                        raise AssertionError("missing Linux release payload accepted")
+                    except ValueError as error:
+                        assert str(missing_file) in str(error), str(error)
+                assert all(path.read_bytes() == old_archives[path] for path in artifacts)
+                assert not (root / "dist" / ".edvr-stage-1.2.3").exists()
+                missing_file.write_bytes(saved)
+            launcher_source.write_bytes(b"#!/bin/sh\r\nexit 0\r\n")
+            for dry_run in (True, False):
+                try:
+                    package(root, "1.2.3", no_dlss=True, dry_run=dry_run)
+                    raise AssertionError("CRLF shell launcher accepted")
+                except ValueError as error:
+                    assert "shell launcher" in str(error), str(error)
+            launcher_source.write_bytes((ROOT / LINUX_LAUNCHER).read_bytes())
+            assert all(path.read_bytes() == old_archives[path] for path in artifacts)
+            assert not (root / "dist" / ".edvr-stage-1.2.3").exists()
+            old_replace = os.replace
+            linux_temporary = root / "dist" / ".edvr-installer-linux-1.2.3.zip.tmp"
+            linux_destination = root / "dist" / "edvr-installer-linux-1.2.3.zip"
+
+            def fail_linux_publish(source, destination):
+                if Path(source) == linux_temporary and Path(destination) == linux_destination:
+                    raise OSError("simulated Linux archive publish failure")
+                return old_replace(source, destination)
+
+            os.replace = fail_linux_publish
+            try:
+                try:
+                    package(root, "1.2.3", no_dlss=True)
+                    raise AssertionError("failed Linux publish accepted")
+                except OSError as error:
+                    assert "simulated Linux archive publish failure" in str(error)
+            finally:
+                os.replace = old_replace
+            assert all(path.read_bytes() == old_archives[path] for path in artifacts)
+            assert not linux_temporary.exists()
             (root / "build" / "edvr_openxr_runtime.dll").unlink()
             try:
                 package(root, "1.2.3", no_dlss=True)
                 raise AssertionError("missing native payload accepted")
             except ValueError:
                 pass
-            assert (root / "dist" / "edvr-1.2.3.zip").read_bytes() == old_archive
+            assert all(path.read_bytes() == old_archives[path] for path in artifacts)
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.3.zip") as archive:
                 names = set(archive.namelist())
                 assert names == {"d3d11.dll", "edvr_profile.ini", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                                  "openvr/OPENXR-LOADER-LICENSE.txt", "edvr-installer.exe",
                                  "README.txt", "openvr/READ-ME-FIRST.txt", "edvr.ini", "edvr-flat.ini",
-                                 "LICENSE.txt", "DXBC-HASH-LICENSE.txt"}
+                                  "README-linux.txt", LINUX_WRAPPER, LINUX_LAUNCHER,
+                                  "LICENSE.txt", "DXBC-HASH-LICENSE.txt"}
+                assert archive.read(LINUX_WRAPPER) == wrapper_source.read_bytes()
+                assert archive.getinfo(LINUX_WRAPPER).external_attr >> 16 == 0o100755
+                assert archive.read(LINUX_LAUNCHER) == launcher_source.read_bytes()
+                assert archive.getinfo(LINUX_LAUNCHER).external_attr >> 16 == 0o100755
+                with zipfile.ZipFile(root / "dist" / "edvr-installer-linux-1.2.3.zip") as linux_archive:
+                    assert archive.read(INSTALLER) == linux_archive.read(INSTALLER)
             (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
             dlss = root / "build" / "nvngx_dlss.dll"
             notice = root / "build" / "NVIDIA-DLSS-LICENSE.txt"
@@ -488,22 +653,30 @@ def self_test():
                     except ValueError as error:
                         assert needle in str(error) and "3.0.0" in str(error), (label, str(error))
                 assert not (root / "dist" / "edvr-3.0.0.zip").exists(), "a refused release wrote: " + label
+                assert not (root / "dist" / "edvr-installer-linux-3.0.0.zip").exists()
                 assert not (root / "dist" / ".edvr-stage-3.0.0").exists(), "a refused release staged: " + label
                 assert not (root / "dist" / "edvr-3.0.0").exists(), "a refused release staged: " + label
             stamps["override"] = {}
             assert package(root, "3.0.0", no_dlss=True, dry_run=True) == 0
             assert not (root / "dist" / "edvr-3.0.0.zip").exists()
+            assert not (root / "dist" / "edvr-installer-linux-3.0.0.zip").exists()
+            assert not (root / "dist" / ".edvr-installer-linux-3.0.0.zip.tmp").exists()
             assert package(root, "3.0.0", no_dlss=True) == 0 and (root / "dist" / "edvr-3.0.0.zip").is_file()
 
-            # One release, one installer: there is no flat archive, and --profile is
-            # no longer an option. The VR archive carries both settings files.
+            # One release, one installer executable: there is no flat archive,
+            # and --profile is no longer an option. The VR archive carries both settings files.
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
                 assert "edvr-flat.ini" in set(archive.namelist()) and "edvr.ini" in set(archive.namelist())
+            import contextlib, io
+            refusal = io.StringIO()  # argparse's usage text: expected, so not echoed raw
             try:
-                main(["1.2.8", "--root", str(root), "--profile", "flat"])
+                with contextlib.redirect_stderr(refusal):
+                    main(["1.2.8", "--root", str(root), "--profile", "flat"])
                 raise AssertionError("--profile flat accepted")
             except SystemExit as error:
                 assert error.code == 2
+                assert "unrecognized arguments: --profile flat" in refusal.getvalue()
+                print("expected-error: argparse refused --profile flat (exit 2)")
             assert not (root / "dist" / "edvr-flat-1.2.8.zip").exists()
             # The installer's own copy of each settings file is checked against that
             # file, under its own name: edvr-flat.ini (111) is not edvr.ini (103).

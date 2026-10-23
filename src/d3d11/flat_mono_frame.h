@@ -212,11 +212,12 @@ inline const void* cameraIdentity(const FlatContractRecord& r) {
     return r.deferredCamera ? r.sceneCameraB1 : r.key.b1;
 }
 inline bool cameraCurrent(const FlatContractRecord& r, uint64_t epoch) {
+    if(r.forwardLightCamera&&!r.deferredCamera)return false;
     if(r.deferredCamera) {
         const auto& projection=r.key.projection[1];
         if(!r.sceneCameraB1 || r.sceneCameraWriteEpoch!=epoch || !r.sceneCameraWriteSeq ||
            r.sceneCameraWriteSeq>=r.first || !projection.resource ||
-           projection.status!=FlatProjectionStatus::Available || projection.copied!=112 ||
+           projection.status!=FlatProjectionStatus::Available || projection.copied!=(r.forwardLightCamera?752u:112u) ||
            projection.writeEpoch!=epoch || !projection.writeSeq || projection.writeSeq>r.first)return false;
     }
     return ordered(r) && cameraIdentity(r) && r.key.camera &&

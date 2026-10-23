@@ -29,6 +29,7 @@
 // compute composite the openvr half calls at the door.
 #pragma once
 
+#include "../../include/edvr_plugin_api.h"
 #include <cstdint>
 
 struct ID3D11Device;
@@ -97,4 +98,15 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 
 void menuShutdown();
 
+// Addon settings on the Plugins page belong to the addon that registered them (its stem). A setting
+// holds the addon's getter, setter and user-data pointers, so they must go before its DLL does.
+int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting);
+// Retires the addon's rows at once (no callback into it again) and queues their removal for the menu thread, so this is
+// safe from any thread; it does not rebuild the pages.
+void menuRemovePluginSettings(const char* ownerId);
+// Hides every addon row and the approval list (a flat session: the addons are dormant), or shows them again. Nothing is
+// deleted. Queued for the menu thread like a removal.
+void menuSetPluginRowsHidden(bool hidden);
+
 }  // namespace edvr
+

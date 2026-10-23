@@ -3,18 +3,18 @@
 // logic with no D3D in it, so tools/engine_velocity_test drives it with a
 // fake owner, dictionary and node lists laid out as the engine lays them.
 //
-// The existing SECONDARY producer (build 332841; docs/kinematic-motion-injection-2026-09-19.md,
+// The existing SECONDARY producer (build 334473; docs/kinematic-motion-injection-2026-09-19.md,
 // 2026-09-23 "Phase 1 built", and the decompiles it cites):
-//   FUN_144312E00(rig record, owner, masks, tail) builds the record's
+//   FUN_144315AC0(rig record, owner, masks, tail) builds the record's
 //   0x150-byte pool record on its stack -- byte-for-byte the t33 record --
 //   copying rig+0x170/+0x178 (position) and +0x17C/+0x180 (packed
 //   quaternion) into BOTH pose blocks (+0x08/+0x10 and +0x124/+0x138), then
 //   for each LOD with a view mask (k <= 7) appends the whole record to the
-//   tail node of the list FUN_143696FA0(owner+0x260, rig+0x250) returns and
-//   increments owner+0x2A4 (0x144313191/0x144313195). Nodes hold 8 records:
+//   tail node of the list FUN_143699CA0(owner+0x260, rig+0x250) returns and
+//   increments owner+0x2A4 (0x144315E51/0x144315E55). Nodes hold 8 records:
 //   [0] next, [1] prev (the first/last link to entry+0x28), count at +0x18,
 //   records at +0x20+i*0x150. The owner is per collection and has one
-//   writer, the job running the call; the copier 0x4C81BE0 later copies
+//   writer, the job running the call; the copier 0x4C847C0 later copies
 //   whole records into the mapped pool. Nothing on the CPU reads record
 //   bytes +0x120..+0x13F except those whole-record copies, and nothing
 //   writes +0x120 at all (it is uninitialised stack in every producer).
@@ -31,9 +31,9 @@
 // not re-evaluate keeps its last pair and marker, and without the stamp the
 // compose replays that stale delta indefinitely.
 //
-// PRIMARY 42B4130 shares these canonical collection-record history rules,
+// PRIMARY 42B6DF0 shares these canonical collection-record history rules,
 // but uses its exact owned model-key append and an emission sink. It never
-// writes native records. Verified 36819D0 clear, 434E740 relocation and 4C81BE0 upload
+// writes native records. Verified 36846D0 clear, 4351440 relocation and 4C847C0 upload
 // boundaries carry address ownership into engine_velocity_primary_copy;
 // full native-record guards permit previous-pose writes only in EDVR's
 // private clone. Unproved identity, deformation or ownership stays native.
@@ -70,7 +70,7 @@ constexpr uint32_t kMasked = 0x7FC0ED02u;
 constexpr uintptr_t kRecordNode = 0x18;     // the reuse discriminator
 constexpr uintptr_t kRecordPos = 0x170;     // f32 x3
 constexpr uintptr_t kRecordQuat = 0x17C;    // u16 x4
-constexpr uintptr_t kRecordKey = 0x250;     // FUN_143696FA0's key argument
+constexpr uintptr_t kRecordKey = 0x250;     // FUN_143699CA0's key argument
 constexpr uintptr_t kOwnerDictionary = 0x260;
 constexpr uintptr_t kOwnerCount = 0x2A4;
 constexpr uintptr_t kEntryAnchor = 0x28;    // the list's sentinel (first node at +0x28, tail at +0x30)
@@ -285,7 +285,7 @@ private:
 };
 
 // The evaluation census: for one engine record in eight (by address, so the
-// same records every frame), every FUN_144312E00 call -- with items or
+// same records every frame), every FUN_144315AC0 call -- with items or
 // without -- notes the record's pose, so the log can say how many moving
 // records are evaluated here but not drawn, and
 // whether a history gap is a record evaluated without items (culled, not
@@ -364,7 +364,7 @@ inline uint64_t read64(uintptr_t address, bool& ok) noexcept {
     return v;
 }
 
-// FUN_143696FA0: (owner+0x260, rig+0x250) -> the dictionary entry.
+// FUN_143699CA0: (owner+0x260, rig+0x250) -> the dictionary entry.
 using LookupFn = uintptr_t (__fastcall*)(uintptr_t dictionary, uintptr_t key);
 inline uintptr_t guardedLookup(LookupFn lookup, uintptr_t dictionary, uintptr_t key) noexcept {
     __try { return lookup(dictionary, key); }
@@ -406,10 +406,12 @@ inline bool readItemPose(uintptr_t item, Pose& pose) noexcept {
 
 // The primary builder is called for a collection record, not for a model
 // identity: different objects share its owner and dictionary key. Its outer
-// 42B4420 call supplies record+0x210 and *(record+0x290), respectively.
+// 42B70E0 call supplies record+0x210 and *(record+0x290), respectively.
 struct PrimaryIdentity { uintptr_t record = 0, node = 0, context = 0; };
 using EmissionSink = bool (*)(uintptr_t item, const Pose& now, const Pose& previous,
                              uint32_t marker, uint32_t frame) noexcept;
+using CurrentPoseObserver = void (*)(uintptr_t record, uintptr_t node, uintptr_t owner,
+                                     const Pose& now, uint32_t frame, bool proven, bool primary) noexcept;
 inline bool primaryIdentity(uintptr_t context, uintptr_t lod, PrimaryIdentity& out) noexcept {
     out = {};
     if (!context || lod < 0x210) return false;
@@ -425,7 +427,8 @@ inline bool primaryIdentity(uintptr_t context, uintptr_t lod, PrimaryIdentity& o
 // be null (no census this run).
 inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t after, uint32_t frame,
                     LookupFn lookup, Table& table, Stats& s, Census* census = nullptr,
-                    uintptr_t ownedKey = 0, bool primary = false, EmissionSink sink = nullptr) noexcept {
+                    uintptr_t ownedKey = 0, bool primary = false, EmissionSink sink = nullptr,
+                    CurrentPoseObserver currentObserver = nullptr) noexcept {
     bump(s.calls);
     if (after < before) { bump(s.drained); return; }
     const int32_t k = after - before;
@@ -469,8 +472,8 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
                 !read(items[j] + kItemPrevQuat, &copied.w[3], 8)) {
                 bump(s.readFaults); continue;
             }
-            // The secondary 4312E00 initializer also fixes both scale words
-            // to verified DAT_4DDE614=1.0; shared canonical history has the
+            // The secondary 4315AC0 initializer also fixes both scale words
+            // to verified DAT_4DE165C=1.0; shared canonical history has the
             // same unit-scale domain. Only rigid primary records qualify. Bones
             // or variable scale need their own previous deformation source.
             if (header[0] != 0 || header[1] != 0x3F800000u || copiedScale != 0x3F800000u) {
@@ -484,6 +487,9 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
     }
     const bool proven = valid == k;
     if (!proven) bump(s.callsUnproven);
+    // Raw game-owned current position/quaternion, before EDVR's history table
+    // supplies a previous pose. A diagnostic callback cannot certify a draw.
+    if (currentObserver) currentObserver(record,node,owner,pose,frame,proven,primary);
     Pose prev;
     uint32_t gapAge = 0;
     const Table::Result result = table.resolve(record, node, frame, pose, proven, prev, s, &gapAge);
@@ -511,7 +517,8 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
 
 inline void observePrimary(const PrimaryIdentity& identity, uintptr_t owner, uintptr_t key,
                            uintptr_t position, uintptr_t quaternion, int32_t before, int32_t after,
-                           uint32_t frame, LookupFn lookup, Table& table, Stats& s, EmissionSink sink) noexcept {
+                           uint32_t frame, LookupFn lookup, Table& table, Stats& s, EmissionSink sink,
+                           CurrentPoseObserver currentObserver = nullptr) noexcept {
     PrimaryIdentity current;
     uint32_t pos[3]{}, contextPos[3]{}, quat[4]{}, contextQuat[4]{};
     Pose canonical;
@@ -530,7 +537,7 @@ inline void observePrimary(const PrimaryIdentity& identity, uintptr_t owner, uin
     // Same canonical record+0x170/+0x17C pose as the secondary rig producer:
     // share its table and all continuity/ambiguity rules, but use the actual
     // primary model key rather than the secondary record+0x250 key.
-    observe(identity.record, owner, before, after, frame, lookup, table, s, nullptr, key, true, sink);
+    observe(identity.record, owner, before, after, frame, lookup, table, s, nullptr, key, true, sink,currentObserver);
 }
 
 } // namespace engine_velocity_emit

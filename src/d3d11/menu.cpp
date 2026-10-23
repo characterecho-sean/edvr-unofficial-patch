@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -41,6 +42,7 @@
 #include "input_gate.h"
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
+#include "menu_write.h"
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_pad.h"
@@ -59,6 +61,11 @@
 #include "mode_watch.h"         // modeWatchNoticeDue: the 3D mode watch's toast, once per commit
 #include "vscreen_res.h"
 #include "xinput_watch.h"   // the Hotkeys page's capture reads the pad
+#include "../../include/edvr_plugin_api.h"
+#include "../plugins/plugin_manager.h"
+#include "../plugins/plugin_setting_restore.h"
+#include "../plugins/plugin_row_registry.h"
+#include <map>
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
 // temporalPassTrainedTotals, which answers for the engine in force (F6).
@@ -72,7 +79,7 @@
 
 namespace edvr {
 
-// The generated row table: every [fix] row tagged `menu`, and every
+// The generated row table: every [fix], [visual] and [menu] row tagged `menu`, and every
 // developer-tier key the code reads (tools/gen_settings_schema.py).
 #include "menu_schema.inc"
 
@@ -105,12 +112,14 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading };
+enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval };
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
     int         def = -1;        // index into kMenuRows for Setting
     int         action = -1;     // index into g_actions for Action
+    int         pluginSetting = -1; // index into g_pluginRows.rows() for PluginSetting
+    uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
     const char* text = "";       // for Heading
 };
 
@@ -129,6 +138,8 @@ struct Action {
     MenuActionFn fn = nullptr;
     void*        user = nullptr;
 };
+
+static plugins::PluginRowRegistry g_pluginRows;   // the addons' rows and the queue that carries every change to them to this thread (plugin_row_registry.h)
 
 struct RowState {
     std::string value;     // the effective value, as Config reads it
@@ -714,9 +725,9 @@ std::string afterRestartFacts(const ResolutionView& v) {
 }
 
 std::string openxrResolutionLabel(const ResolutionView& v) {
-    if (!v.headset) return "OpenXR res.";
+    if (!v.headset) return "Per eye resolution";
     char text[48];
-    snprintf(text, sizeof(text), "OpenXR res. %u px", v.width);
+    snprintf(text, sizeof(text), "Per eye resolution %u px", v.width);
     return text;
 }
 
@@ -1308,26 +1319,6 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
 // I/O, serialised, coalescing repeated changes to one key while a key is
 // held; and the frame thread drains the results, asking for the reload
 // that applies each landed write.
-struct WriteJob {
-    int         def;
-    std::string dotted;
-    std::string value;
-    std::string before;
-    // Per-headset rows only: the worn headset's key and the values either
-    // side, so the log and the last-write line name what changed rather than
-    // printing two lists; `dropped` names malformed tokens the merge left out
-    // of the list.
-    std::string headset;
-    std::string fromValue;
-    std::string toValue;
-    std::string dropped;
-    uint32_t    gen = 0;   // the row's edit number when this edit was made (EditGeneration): the rollback of a failed write asks whether a newer edit exists
-};
-struct WriteDone {
-    WriteJob    job;
-    bool        ok;
-    std::string err;
-};
 struct Writer {
     std::mutex              m;
     std::condition_variable cv;
@@ -1365,11 +1356,11 @@ void writerMain() {
             if (!later) last.push_back(jobs[i]);
         }
         for (const WriteJob& job : last) {
-            WriteDone d;
-            d.job = job;
-            d.ok = false;
-            guarded("menu/write", [&] { d.ok = menuIniWrite(job.dotted, job.value, &d.err); });
-            if (!d.ok && d.err.empty()) d.err = "the write faulted";
+            WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
+                bool ok = false;
+                guarded("menu/write", [&] { ok = menuIniWrite(write.dotted, write.value, err); });
+                return ok;
+            });
             std::lock_guard<std::mutex> lock(g_writer.m);
             g_writer.done.push_back(d);
         }
@@ -1443,6 +1434,164 @@ void firstSelectable(Page& p) {
     }
 }
 
+static int64_t callSettingGetterSafely(EdvrPluginSettingGetter getter, const char* key, void* userData, int64_t fallback) {
+    __try {
+        return getter(key, userData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return fallback;
+    }
+}
+
+static void callSettingSetterSafely(EdvrPluginSettingSetter setter, const char* key, int64_t val, void* userData) {
+    __try {
+        setter(key, val, userData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void stepPluginSetting(int psIdx, int dir) {
+    std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+    if (psIdx < 0 || psIdx >= static_cast<int>(g_pluginRows.rows().size())) return;
+    auto& ps = g_pluginRows.rows()[psIdx];
+    if (ps.retired) return;   // its addon is gone or faulted; the row goes at the next tick
+    int64_t val = ps.cachedValue;
+    if (ps.getter) {
+        val = callSettingGetterSafely(ps.getter, ps.key.c_str(), ps.userData, ps.cachedValue);
+    }
+
+    if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
+        val = (val == 0) ? 1 : 0;
+    } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
+        int count = static_cast<int>(ps.choiceOptions.size());
+        if (count > 0) {
+            val = (val + (dir >= 0 ? 1 : count - 1)) % count;
+        }
+    } else if (ps.type == EDVR_PLUGIN_SETTING_INT) {
+        val += dir * ps.stepValue;
+        if (val < ps.minValue) val = ps.minValue;
+        if (val > ps.maxValue) val = ps.maxValue;
+    } else if (ps.type == EDVR_PLUGIN_SETTING_FLOAT) {
+        float fval = 0.0f;
+        memcpy(&fval, &val, sizeof(float));
+        float fstep = 0.05f;
+        memcpy(&fstep, &ps.stepValue, sizeof(float));
+        if (fstep == 0.0f) fstep = 0.05f;
+        float fmin = 0.0f, fmax = 1.0f;
+        memcpy(&fmin, &ps.minValue, sizeof(float));
+        memcpy(&fmax, &ps.maxValue, sizeof(float));
+        fval += dir * fstep;
+        if (fval < fmin) fval = fmin;
+        if (fval > fmax) fval = fmax;
+        memcpy(&val, &fval, sizeof(float));
+    } else if (ps.type == EDVR_PLUGIN_SETTING_ACTION) {
+        val = 1;
+    }
+
+    ps.cachedValue = val;
+    if (ps.setter) {
+        callSettingSetterSafely(ps.setter, ps.key.c_str(), val, ps.userData);
+    }
+
+    WriteJob job;
+    job.destination = WriteDestination::PluginSetting;
+    job.dotted = plugins::pluginSettingIniKey(ps.owner, ps.header, ps.key);   // the key registration reads the value back from
+    if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
+        job.value = (val != 0) ? "on" : "off";
+    } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
+        if (!ps.choiceOptions.empty() && val >= 0 && val < static_cast<int64_t>(ps.choiceOptions.size())) {
+            job.value = ps.choiceOptions[static_cast<size_t>(val)];
+        } else {
+            job.value = std::to_string(val);
+        }
+    } else if (ps.type == EDVR_PLUGIN_SETTING_FLOAT) {
+        float fval = 0.0f;
+        memcpy(&fval, &val, sizeof(float));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f", fval);
+        job.value = buf;
+    } else {
+        job.value = std::to_string(val);
+    }
+    enqueueWrite(job);
+    g_s.contentDirty = true;
+}
+
+void buildPages();
+
+// What activating an approval row does. The row holds a candidate id; a stale or already approved id
+// does nothing, and the pages rebuild either way so no approval row outlives its candidate. The approval is saved to the ini only when the
+// addon loaded; a failed load leaves the row in place (with its reason) for a retry. *reason, when given, receives why nothing was approved.
+bool approveAddonCandidate(uint32_t id, std::string* reason = nullptr) {
+    plugins::ApprovalResult r = plugins::PluginManager::instance().approveCandidate(id);
+    if (r.applied) {
+        WriteJob job;
+        job.destination = WriteDestination::AddonApproval;
+        job.dotted = "addons." + r.stem;
+        job.value = r.sha256;
+        enqueueWrite(job);
+        Log::get().note("menu: approved addon '%s' (hash %s); saving approval to %s",
+                        r.stem.c_str(), r.sha256.c_str(), Config::get().iniName());
+    }
+    if (reason) *reason = r.reason;
+    buildPages();
+    return r.applied;
+}
+
+void buildPluginsPage(Page& p) {
+    // Lock order: the manager's mutex comes before g_pluginRows.mutex() (approving an addon registers its
+    // settings while the manager holds its lock). So the candidates are copied here, before the settings
+    // lock is taken; nothing below calls into the manager with the settings lock held.
+    // While the addons are dormant (a flat session) their rows and the approval list are hidden, not deleted.
+    const bool hidden = g_pluginRows.hidden();
+    std::vector<plugins::CandidatePlugin> unapproved;
+    if (!hidden) unapproved = plugins::PluginManager::instance().candidatesSnapshot();
+    unapproved.erase(std::remove_if(unapproved.begin(), unapproved.end(),
+                                    [](const plugins::CandidatePlugin& c) { return c.approved; }),
+                     unapproved.end());
+
+    std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+    std::map<std::string, std::vector<int>> groups;
+    for (size_t i = 0; i < g_pluginRows.rows().size() && !hidden; ++i) {
+        if (g_pluginRows.rows()[i].retired) continue;   // inert, awaiting erase on the next drain: not drawn meanwhile
+        groups[g_pluginRows.rows()[i].header].push_back(static_cast<int>(i));
+    }
+
+    for (const auto& kv : groups) {
+        if (kv.second.empty()) continue;
+        Entry h;
+        h.kind = EntryKind::Heading;
+        h.text = g_pluginRows.internHeading(g_pluginRows.rows()[kv.second[0]].header);   // rows move when the vector grows
+        p.entries.push_back(h);
+
+        for (int idx : kv.second) {
+            Entry e;
+            e.kind = EntryKind::PluginSetting;
+            e.pluginSetting = idx;
+            p.entries.push_back(e);
+        }
+    }
+
+    if (!unapproved.empty()) {
+        Entry h;
+        h.kind = EntryKind::Heading;
+        h.text = "Discovered Addons (Pending Approval)";
+        p.entries.push_back(h);
+
+        for (const auto& c : unapproved) {
+            Entry e;
+            e.kind = EntryKind::Approval;
+            e.candidateId = c.id;
+            p.entries.push_back(e);
+        }
+    }
+
+    if (p.entries.empty()) {
+        Entry h;
+        h.kind = EntryKind::Heading;
+        h.text = "No plugins or addons registered";
+        p.entries.push_back(h);
+    }
+}
+
 void buildPages() {
     State& s = g_s;
     const int keepPage = s.page;
@@ -1456,7 +1605,7 @@ void buildPages() {
     const size_t keepCount = s.pages.empty() ? 0 : s.pages[s.page].entries.size();
     s.pages.clear();
     if (runtimeFlatProfile()) {
-        // Two tabs (2026-10-16): Performance, the flat settings the panel always had, then Debug, last.
+        // Three tabs: Performance (the flat settings the panel always had), Visual (2026-10-22), then Debug (2026-10-16), last.
         {
             Page p;
             p.name = kFlatTabNames[0];
@@ -1475,9 +1624,28 @@ void buildPages() {
             s.pages.push_back(p);
         }
         {
-            // Debug: for bug reports, both off by default. A heading says so; the rows are the `menu debug` rows named in kFlatDebugRows.
+            // Visual (2026-10-22): the [visual] options, for everyone. The rows are the table in menu_flat_rows.h, kept in edvr.ini order whatever
+            // page their `menu` token names: Intro movie stays on VR's Fixes page, which has no Visual page, and Star glow's `menu visual` is the
+            // page only this panel builds.
             Page p;
             p.name = kFlatTabNames[1];
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                if (d.tier != MenuTier::Fix || !flatVisualHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
+        }
+        // No Plugins tab: add-ons are VR-only, so in flat it could only be empty. The flat add-on follow-up adds it to kFlatTabNames with the
+        // flat render path.
+        {
+            // Debug: for bug reports, both off by default. A heading says so; the rows are the `menu debug` rows named in kFlatDebugRows.
+            Page p;
+            p.name = kFlatTabNames[2];
             Entry h;
             h.kind = EntryKind::Heading;
             h.text = "For bug reports. Both are off unless you turn them on.";
@@ -1545,6 +1713,13 @@ void buildPages() {
             e.def = rows[i];
             p.entries.push_back(e);
         }
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
+        Page p;
+        p.name = "Plugins";
+        buildPluginsPage(p);
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -2101,6 +2276,71 @@ void buildContent(MenuContent& c) {
                 if (hi) snprintf(c.hint, sizeof(c.hint), "%s", a.hint.c_str());
                 continue;
             }
+            if (e.kind == EntryKind::Approval) {
+                plugins::CandidatePlugin cand;
+                const bool found = plugins::PluginManager::instance().candidateById(e.candidateId, &cand);
+                if (found && cand.conflicted) {
+                    // Several files claim this name: shown so the player can find them, with no approval to give.
+                    std::string label = "[Conflict] " + cand.stem;
+                    strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
+                    strncpy(l.right, "refused", sizeof(l.right) - 1);
+                    l.style = kMenuRow;
+                    if (hi) {
+                        snprintf(c.hint, sizeof(c.hint), "More than one file in plugins\\ is named '%s'; none can load. Rename or remove all but one.",
+                                 cand.stem.c_str());
+                    }
+                } else if (found && !cand.approved) {
+                    std::string label = "[Approve] " + cand.stem;
+                    strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
+                    strncpy(l.right, "approve", sizeof(l.right) - 1);
+                    l.style = hi ? kMenuRowHi : kMenuRow;
+                    if (!cand.loadNote.empty()) {
+                        strncpy(l.right, cand.loadNote.c_str(), sizeof(l.right) - 1);   // why the last try failed; selecting retries
+                    }
+                    if (hi) {
+                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve it, save the approval to %s and load it now.%s%s",
+                                 cand.sha256.c_str(), Config::get().iniName(),
+                                 cand.loadNote.empty() ? "" : " Last try: ", cand.loadNote.c_str());
+                    }
+                } else {
+                    strncpy(l.left, "(already handled)", sizeof(l.left) - 1);   // a frame between the approval and the rebuild
+                    l.style = kMenuRow;
+                }
+                continue;
+            }
+            if (e.kind == EntryKind::PluginSetting) {
+                std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+                if (e.pluginSetting >= 0 && e.pluginSetting < static_cast<int>(g_pluginRows.rows().size())) {
+                    const auto& ps = g_pluginRows.rows()[e.pluginSetting];
+                    strncpy(l.left, ps.label.c_str(), sizeof(l.left) - 1);
+                    l.style = hi ? kMenuRowHi : kMenuRow;
+                    if (hi && !ps.hint.empty()) snprintf(c.hint, sizeof(c.hint), "%s", ps.hint.c_str());
+
+                    int64_t val = ps.cachedValue;
+                    if (ps.getter) {
+                        val = callSettingGetterSafely(ps.getter, ps.key.c_str(), ps.userData, ps.cachedValue);
+                    }
+                    if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
+                        l.toggle = (val != 0) ? 2 : 1;
+                        l.right[0] = 0;
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
+                        if (!ps.choiceOptions.empty() && val >= 0 && val < static_cast<int64_t>(ps.choiceOptions.size())) {
+                            strncpy(l.right, ps.choiceOptions[static_cast<size_t>(val)].c_str(), sizeof(l.right) - 1);
+                        } else {
+                            snprintf(l.right, sizeof(l.right), "%lld", val);
+                        }
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_INT) {
+                        snprintf(l.right, sizeof(l.right), "%lld", val);
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_FLOAT) {
+                        float fval = 0.0f;
+                        memcpy(&fval, &val, sizeof(float));
+                        snprintf(l.right, sizeof(l.right), "%.2f", fval);
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_ACTION) {
+                        strncpy(l.right, "run", sizeof(l.right) - 1);
+                    }
+                }
+                continue;
+            }
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
@@ -2615,43 +2855,13 @@ void drainWrites() {
         done.swap(g_writer.done);
     }
     for (const WriteDone& w : done) {
-        const MenuRowDef& d = kMenuRows[w.job.def];
-        if (w.ok) {
-            s.pollRequest = true;
-            const char* when = d.applies == 2 ? "takes effect at the next launch"
-                             : d.applies == 1 ? "live"
-                                              : "when it applies is not documented";
-            if (!w.job.headset.empty()) {
-                // The per-headset row: the key and the values, then the
-                // list the file now holds.
-                s.lastWrite = w.job.headset + " = " + w.job.toValue;
-                Log::get().note("menu: %s %s %s -> %s (list now %s%s%s; written to %s; "
-                                "%s).",
-                                w.job.dotted.c_str(), w.job.headset.c_str(), w.job.fromValue.c_str(),
-                                w.job.toValue.c_str(), w.job.value.empty() ? "empty" : w.job.value.c_str(),
-                                w.job.dropped.empty() ? "" : "; dropped malformed ",
-                                w.job.dropped.c_str(), Config::get().iniName(), when);
-            } else {
-                s.lastWrite = w.job.dotted + " = " + w.job.value;
-                Log::get().note("menu: %s %s -> %s (written to %s; %s).", w.job.dotted.c_str(),
-                                w.job.before.empty() ? "(default)" : w.job.before.c_str(),
-                                w.job.value.c_str(), Config::get().iniName(), when);
-            }
-        } else {
-            s.lastWrite = "FAILED: " + w.err;
-            Log::get().note("menu: %s = %s could not be written: %s.", w.job.dotted.c_str(),
-                            w.job.value.c_str(), w.err.c_str());
-            // The row goes back to what the file holds only if this was its latest edit. A newer one (held, queued, or written already) is what the row shows now, and
-            // its own result decides: putting the file's value back here would drop the steps made since (menu_edit_hold.h, EditGeneration).
-            if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {
-                g_rows[w.job.def].value = rowValue(d);
-                if (d.applies == 2) {
-                    g_rows[w.job.def].pending = rowPending(d, g_rows[w.job.def].value,
-                                                           g_rows[w.job.def].snapshot);
-                }
-            }
-        }
-        s.contentDirty = true;
+        completeMenuWrite(w, s, kMenuRows, g_rows, kRowDefCount,
+                          [](const MenuRowDef& d) { return rowValue(d); },
+                          [](const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
+                              return rowPending(d, value, snapshot);
+                          },
+                          [](const char* format, auto... args) { Log::get().note(format, args...); },
+                          Config::get().iniName());
     }
 }
 
@@ -2730,12 +2940,24 @@ void activateEntry() {
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
     const Entry& e = p.entries[p.highlight];
+    if (e.kind == EntryKind::Approval) {
+        const uint32_t id = e.candidateId;   // copied: the rebuild below frees the entry
+        std::string why;
+        const bool applied = approveAddonCandidate(id, &why);
+        s.lastWrite = applied ? "approved an addon" : why.empty() ? "addon not approved" : "addon not approved: " + why;
+        s.contentDirty = true;
+        return;
+    }
     if (e.kind == EntryKind::Action) {
         const Action& a = g_actions[e.action];
         Log::get().note("menu: running \"%s\".", a.label.c_str());
         if (a.fn) a.fn(a.user);
         s.lastWrite = "ran: " + a.label;
         s.contentDirty = true;
+        return;
+    }
+    if (e.kind == EntryKind::PluginSetting) {
+        stepPluginSetting(e.pluginSetting, +1);
         return;
     }
     if (e.kind == EntryKind::Setting) {
@@ -3451,9 +3673,13 @@ void dispatchNav(MenuNav nav, uint64_t now) {
         case kNavDown: moveHighlight(+1); break;
         case kNavLeft:
         case kNavRight:
-            if (!p.status && !p.entries.empty() &&
-                p.entries[p.highlight].kind == EntryKind::Setting) {
-                stepRow(p.entries[p.highlight].def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+            if (!p.status && !p.entries.empty()) {
+                const auto& entry = p.entries[p.highlight];
+                if (entry.kind == EntryKind::Setting) {
+                    stepRow(entry.def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+                } else if (entry.kind == EntryKind::PluginSetting) {
+                    stepPluginSetting(entry.pluginSetting, nav == kNavLeft ? -1 : +1);
+                }
             }
             break;
         case kNavSelect: activateEntry(); break;
@@ -4336,8 +4562,11 @@ void menuFlatResize() {
     g_s.padReady = false;
 }
 
+static void menuDrainPluginRows();
+
 void menuTick(ID3D11Device* dev) {
     State& s = g_s;
+    menuDrainPluginRows();
     if (!s.configured) return;
     if (runtimeFlatProfile()) {
         guardedBudget(g_budget, [&] {
@@ -4856,6 +5085,72 @@ void menuTick(ID3D11Device* dev) {
         hotkeysSuspend(false);
         setMenuVisible(0.0f);
     }
+}
+
+void menuRemovePluginSettings(const char* ownerId) {
+    // Any thread, usually the plugin manager's (a fault on the OpenXR owner thread, a failed initialise). The rows go
+    // inert here, under the settings mutex, so nothing calls into the addon's DLL again; the erase and the page rebuild
+    // are the menu thread's, at the top of its next tick (menuDrainPluginRows), because the menu thread may be inside
+    // menuTick holding Page and Entry values that index into those rows.
+    g_pluginRows.retire(ownerId ? ownerId : "");
+}
+
+void menuSetPluginRowsHidden(bool hidden) {
+    g_pluginRows.postHidden(hidden);
+}
+
+// Menu thread, top of menuTick, whether or not the menu is configured (an unconfigured menu builds its pages from the
+// rows when it does configure, so only the registry changes then).
+static void menuDrainPluginRows() {
+    // The settings mutex is not held here: the rebuild takes the plugin manager's lock first (see PluginManager::m_mutex).
+    if (g_pluginRows.drain() && g_s.configured) buildPages();
+}
+
+static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting);
+
+int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
+    if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
+    int rc;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+        rc = registerPluginSettingLocked(ownerId, setting);
+    }
+    // The pages are the menu thread's to rebuild: this may be any thread.
+    if (rc == 0) g_pluginRows.postChanged();
+    return rc;
+}
+
+// Caller holds g_pluginRows.mutex().
+static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting) {
+    std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
+    std::string keyStr = setting->key ? setting->key : "";
+
+    const std::string owner = ownerId ? ownerId : "";
+    std::string iniKey = plugins::pluginSettingIniKey(owner, headerStr, keyStr);
+    int64_t initialVal = plugins::restoredPluginSettingValue(*setting, iniKey);
+
+    plugins::PluginSettingRow& row = g_pluginRows.upsertLocked(owner, headerStr, keyStr);
+    row.label = setting->label ? setting->label : keyStr;
+    row.hint = setting->hint ? setting->hint : "";
+    row.type = setting->type;
+    row.minValue = setting->minValue;
+    row.maxValue = setting->maxValue;
+    row.stepValue = setting->stepValue != 0 ? setting->stepValue : 1;
+    row.defaultValue = setting->defaultValue;
+    row.getter = setting->getter;
+    row.setter = setting->setter;
+    row.userData = setting->userData;
+    row.cachedValue = initialVal;
+    row.choiceOptions.clear();
+    if (setting->choiceOptions && setting->choiceCount > 0) {
+        for (uint32_t i = 0; i < setting->choiceCount; ++i) {
+            if (setting->choiceOptions[i]) row.choiceOptions.push_back(setting->choiceOptions[i]);
+        }
+    }
+    if (setting->setter) {
+        callSettingSetterSafely(setting->setter, keyStr.c_str(), initialVal, setting->userData);
+    }
+    return 0;
 }
 
 void menuShutdown() {

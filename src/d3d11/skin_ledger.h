@@ -4,7 +4,7 @@
 // no config key, nothing on screen, nothing in motion, and nothing at all while no run is armed. It exists to answer
 // one question with data nobody has seen yet: is the bone palette the game leaves in its OTHER 8 MB buffer, during
 // frame N, bit for bit the palette it used for frame N-1? (fRenderSkinningProcessorNode swaps GpuTransformData and
-// PrevGpuTransformData every frame, FUN_144C54A20, RVA 0x4C54A20; the evidence is decompiled code and a parity
+// PrevGpuTransformData every frame, FUN_144C57600, RVA 0x4C57600; the evidence is decompiled code and a parity
 // pattern, not two consecutive frames.)
 //
 // What a run keeps, for the ledger's 20 frames:

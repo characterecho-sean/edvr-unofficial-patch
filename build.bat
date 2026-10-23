@@ -132,6 +132,11 @@ set /p VSPATH=<"%TEMP%\edvr_vspath.txt"
 del "%TEMP%\edvr_vspath.txt" >nul 2>&1
 if not defined VSPATH goto no_vs
 echo [edvr] using %VSPATH%
+REM vcvars64 -> VsDevCmd runs a bare "vswhere.exe" and prints "'vswhere.exe' is not
+REM recognized" on every build when the Installer directory is not on PATH. It is
+REM harmless to the build but reads as a failure, so put the directory on PATH
+REM (already known to exist: %VSWHERE% was just run) before calling it.
+set "PATH=%PROGFILES86%\Microsoft Visual Studio\Installer;%PATH%"
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 ( echo [edvr] ERROR: vcvars64 failed & exit /b 1 )
 exit /b 0
@@ -203,13 +208,18 @@ python tools\run_jobs.py ^
     --gate "tools\fetch_xess.py --self-test" ^
     --gate "tools\gen_installer_rc.py --self-test" ^
     --gate "tools\package_native.py --self-test" ^
+    --gate "tools\install_proton.py --self-test" ^
     --gate "tools\build_diff.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
     --gate "tools\build_lock.py --self-test" ^
+    --gate "tools\worktree.py --self-test" ^
+    --gate "tools\steam_library.py --self-test" ^
     --gate "tools\release_credits.py --self-test" ^
     --gate "tools\flash_patch_residual.py --self-test" ^
     --gate "tools\check_status_blocks.py --self-test" ^
     --gate "tools\check_status_blocks.py" ^
+    --gate "tools\check_agent_material.py --self-test" ^
+    --gate "tools\check_agent_material.py" ^
     --gate "tools\layer_fixtures.py --self-test" ^
     --gate "tools\blackhole_optics.py --self-test" ^
     --gate "tools\sgra_optics.py --self-test" ^
@@ -401,7 +411,11 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrQueryNativeRenderSettings ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
-    --extra-export edvrGpuFrameEvent
+    --extra-export edvrGpuFrameEvent ^
+    --extra-export edvrPluginDispatchUpdate ^
+    --extra-export edvrPluginDispatchRenderEye ^
+    --extra-export edvrPluginDispatchFilterInput ^
+    --extra-export edvrPluginHasActivePlugins
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build
@@ -591,10 +605,11 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\load_sampler.cpp" "src\d3d11\vram_tick.cpp" ^
+    "src\d3d11\mem_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
+    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
@@ -655,11 +670,12 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_star_glow.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
-    "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp" ^
+    "src\plugins\plugin_manager.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 REM gdi32.lib: the settings menu's panel is rasterised with GDI (the game
@@ -686,7 +702,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resour
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib bcrypt.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -787,7 +803,7 @@ REM whose window is a child of a message-only one.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test,config_test ^
     --after openxr_module_test=openxr_exports_test ^
     --after flat_mono_resolve_shard1=flat_mono_resolve_test ^
     --after flat_mono_resolve_shard2=flat_mono_resolve_test ^
@@ -1327,6 +1343,26 @@ if errorlevel 1 ( echo [edvr] ERROR: vram_watch_test build failed & exit /b 1 )
 python "tools\vram_watch_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_mem_watch_test
+echo [edvr] === mem_watch_test.exe ===
+REM Build gate for the process memory watch (src\common\mem_watch.h, src\common\log_reserve.h, src\d3d11\mem_tick.cpp,
+REM docs\memory-growth-2026-10-22.md): the cadence (a line every 60 s, every 5 s while the machine's commit is at or over 90% of
+REM its limit, the armed line first whatever the figures), the lines' text (whole MB rounded, a group that cannot be read left out
+REM and named once in the armed line, egpu=implausible and eheap=implausible, every line inside its buffer), the plausibility
+REM checks on the figures read out of Elite's memory (each rejection), the log's post-cap reserve accounting (1 MiB, one notice,
+REM then nothing), and by source text that hookedPresent calls memWatchTick once after the graphics memory watch's tick, that
+REM every mem: line is written through Log::noteReserved, and that build.bat compiles the glue. It links nothing of the DLLs.
+if not exist "%OBJ%\memwatch" mkdir "%OBJ%\memwatch"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\memwatch"\ /Fe"%OBJ%\memwatch\mem_watch_test.exe" ^
+    "tools\mem_watch_test\mem_watch_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: mem_watch_test build failed & exit /b 1 )
+"%OBJ%\memwatch\mem_watch_test.exe" --dry-run || exit /b 1
+"%OBJ%\memwatch\mem_watch_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_skin_ledger_test
 echo [edvr] === skin_ledger_test.exe ===
 REM Build gate for the skin ledger (src\d3d11\skin_ledger.h, the F2 settling instrument that rides an armed eye run;
@@ -1667,6 +1703,17 @@ if errorlevel 1 ( echo [edvr] ERROR: flat camera stub test build failed & exit /
 "%BUILD%\flat_camera_stub_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_stationary_camera_test
+echo [edvr] === flat_stationary_camera_test.exe ===
+if not exist "%OBJ%\flatstationarycamera" mkdir "%OBJ%\flatstationarycamera"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%ROOT%" /Fo"%OBJ%\flatstationarycamera\\" ^
+    /Fe"%BUILD%\flat_stationary_camera_test.exe" "tools\flat_stationary_camera_test\flat_stationary_camera_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat stationary camera test build failed & exit /b 1 )
+"%BUILD%\flat_stationary_camera_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_c2_coexist_test
 echo [edvr] === c2_coexist_test.exe ===
 if not exist "%OBJ%\c2coexist" mkdir "%OBJ%\c2coexist"
@@ -1731,6 +1778,7 @@ python "tools\flat_camera_vr_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_config_test
+if "%EDVR_RIG_STEP%"=="run" goto config_test_run
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
@@ -1739,6 +1787,10 @@ REM and every symptom of either being false shows up in the game rather than
 REM in a build. It also registers the generated config_contract_gen.h tables
 REM (the moved-from map parsed from the real edvr.ini), so a moved key's read-
 REM through is proven against what actually shipped, not a fixture.
+REM Its share-delete probe has to land a thread inside a reload that holds the file for
+REM tens of microseconds, so it needs cores the rest of the pool is not using (run
+REM 39799347142: 78 landings in 20000 reloads on a loaded 4-core runner, under its floor of
+REM 100). It is a --quiet rig: the compile runs in the pool and the run alone, after the others.
 if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\cfgtest"\ ^
@@ -1746,6 +1798,8 @@ if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:config_test_run
 "%BUILD%\config_test.exe" "%ROOT%" "%BUILD%\cfgscratch" || (
     echo [edvr] ERROR: the shipped edvr.ini does not parse as documented
     exit /b 1
@@ -3165,6 +3219,48 @@ if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b
 python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_origin_witness_test
+echo [edvr] === flat_origin_witness_test.exe ===
+REM CPU-only six-frame raw-pose witness: event alignment, coherent/unchanged
+REM patterns, identity gaps, owner diversity, pending completion and budgets.
+if not exist "%OBJ%\flatoriginwitness" mkdir "%OBJ%\flatoriginwitness"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatoriginwitness\\" /Fe"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" ^
+    "tools\flat_origin_witness_test\flat_origin_witness_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat origin witness test build failed & exit /b 1 )
+"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_world_witness_test
+echo [edvr] === flat_world_witness_test.exe ===
+REM Passive admission-store world records: bounded reads, source provenance,
+REM six-frame identity/clock coverage and independent event quotas.
+if not exist "%OBJ%\flatworldwitness" mkdir "%OBJ%\flatworldwitness"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatworldwitness\\" /Fe"%OBJ%\flatworldwitness\flat_world_witness_test.exe" ^
+    "tools\flat_world_witness_test\flat_world_witness_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat world witness test build failed & exit /b 1 )
+"%OBJ%\flatworldwitness\flat_world_witness_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatworldwitness\flat_world_witness_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_world_store_test
+echo [edvr] === flat_world_store_test.exe ===
+REM The shipped guarded reader and post-forward dispatch: unreadable fields,
+REM source alternatives and flat-only observation never invoke station writes.
+if not exist "%OBJ%\flatworldstore" mkdir "%OBJ%\flatworldstore"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatworldstore\\" /Fe"%OBJ%\flatworldstore\flat_world_store_test.exe" ^
+    "tools\flat_world_store_test\flat_world_store_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat world store test build failed & exit /b 1 )
+"%OBJ%\flatworldstore\flat_world_store_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatworldstore\flat_world_store_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_engine_motion_cpu_test
 echo [edvr] === engine_motion_cpu_test.exe ===
 REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,
@@ -3968,6 +4064,25 @@ if errorlevel 1 ( echo [edvr] ERROR: sharp weapons test build failed & exit /b 1
 "%OBJ%\sharpweapons\sharp_weapons_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_weapon_admission_test
+echo [edvr] === flat_weapon_admission_test.exe ===
+REM The complete flat adapter and UI layer on WARP: frame N proves the tone target, frame N+1 takes an actual weapon draw,
+REM the named tone route re-issues its on/plain plan, and the flat output copy binds a nonempty published composite.
+REM Includes HUD-quality-off and HUD-free quality-on cases plus stale/alien target refusals. Its System32 D3D11 device
+REM lives beside its own objects, never beside build\d3d11.dll.
+if not exist "%OBJ%\flatweaponadmit" mkdir "%OBJ%\flatweaponadmit"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatweaponadmit\\" /Fe"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" ^
+    "tools\sharp_weapons_test\flat_weapon_admission_test.cpp" "tools\sharp_weapons_test\flat_weapon_bridge.cpp" ^
+    "src\d3d11\flat_ui_layer.cpp" "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat weapon admission test build failed & exit /b 1 )
+"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_shield_ripple_test
 echo [edvr] === shield_ripple_test.exe ===
 REM advanced.shield_ripple (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale"): the pair's family rule, the modes, the
@@ -3996,3 +4111,28 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_pad_test build failed & exit /b 1 )
 "%BUILD%\menu_pad_test.exe" --dry-run || exit /b 1
 "%BUILD%\menu_pad_test.exe" --self-test || exit /b 1
 exit /b 0
+
+:rig_addon_manager_test
+echo [edvr] === addon_manager_test.exe ===
+if not exist "%OBJ%\addon_manager_test" mkdir "%OBJ%\addon_manager_test"
+%CC% /nologo /O2 /MT /LD /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS ^
+    /I"include" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\test_addon_fixture.dll" ^
+    "tools\addon_manager_test\fixture.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: addon fixture build failed & exit /b 1 )
+REM The fixture's variants are the same source with one define each; every one is a DLL of its own.
+for %%V in (b regfault initfail initfault settings renderfault threadreg markshutdown) do (
+    %CC% /nologo /O2 /MT /LD /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DFIXTURE_VARIANT_%%V ^
+        /I"include" /Fo"%OBJ%\addon_manager_test\fixture_%%V.obj" /Fe"%BUILD%\test_addon_fixture_%%V.dll" ^
+        "tools\addon_manager_test\fixture.cpp" /link /INCREMENTAL:NO
+    if errorlevel 1 ( echo [edvr] ERROR: addon fixture variant %%V build failed & exit /b 1 )
+)
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /I"include" /I"%GEN%" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\addon_manager_test.exe" ^
+    "tools\addon_manager_test\addon_manager_test.cpp" "src\plugins\plugin_manager.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\frame_flag.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib bcrypt.lib
+if errorlevel 1 ( echo [edvr] ERROR: addon_manager_test build failed & exit /b 1 )
+"%BUILD%\addon_manager_test.exe" --dry-run || exit /b 1
+"%BUILD%\addon_manager_test.exe" --self-test || exit /b 1
+exit /b 0
+

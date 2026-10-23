@@ -93,12 +93,17 @@ bool journalGuiFocus(uint32_t* focus);
 // watcher gives, so the flat consumers written against "no journal" do not see
 // a change. Known is false when the watcher is off or the field is absent.
 bool journalFlatGuiFocus(uint32_t* focus);
+// The flat profile's second reader: Status.json's supercruise bit (Flags bit 4)
+// for the planet patch motion's gate (tickCelestialStatus). Known is false when
+// the watcher is off or Flags is absent; flat only.
+bool journalFlatSupercruise(bool* supercruise);
 
 // DIAGNOSTIC, ungated by profile: what the watcher holds right now, for the flat map line's 5 s report (flat_runtime.cpp). Not a consumer's
 // answer: the accessors above are the answers. active is the watcher's own state; statusSamples counts Status.json reads that parsed;
 // guiKnown and gui are the last parsed sample's GuiFocus field.
 struct JournalRawStatus {
     bool active = false;
+    bool gameplay = false; // diagnostic, ungated by profile: LoadGame seen in this process
     uint32_t statusSamples = 0;
     bool guiKnown = false;
     uint32_t gui = 0;

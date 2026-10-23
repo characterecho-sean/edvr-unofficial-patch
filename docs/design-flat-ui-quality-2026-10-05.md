@@ -21,13 +21,11 @@
   panels ghosted. It joins E894 in `flatUiSourceTonePair`, and (Sean) any unknown
   pair on a tone VS that passes the full physical shape now grants proof
   (`flatUiLayerShapeToneCandidate`). Entries at the end.
-- **Local flight:** 4b7bfec4, 120427.log, SS 0.5 then about 0.65/UI 125; the
-  cleanup keeps the flown guards (88 CPU checks pass).
-- **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
-  code's fallback and the flat ini template), the fourth flat F8 row. 100: the
-  panels at display size and the cockpit HUD out of temporal history, whatever
-  the render scale; 125: the same 1.25x larger; off: today's frame. The panels
-  and the cockpit HUD layer need the flat anti-aliasing on.
+- **The key:** `fix.ui_quality = off | 100 | 125 | 150 | 200`, default 100 in
+  flat (the code's fallback and the flat ini template), the fourth flat F8 row.
+  100: the panels at display size and the cockpit HUD out of temporal history,
+  whatever the render scale; 125/150/200: the same 1.25x/1.5x/2x larger (150
+  and 200: 2026-10-21); off: today's frame. Both need the flat AA on.
 - **What ships:** the panel factor `f = (R/D)/T` (ui_panel_scale.cpp, "ui
   quality: panels (flat)" lines); the flat UI layer (flat_ui_layer.{h,cpp}, a
   mono adapter over ui_layer.cpp) for the holo panels, flight HUD and target
@@ -51,12 +49,14 @@
 - **System Map families (10-10, built, not flown):** `kMapCanvas` and `kMapSprite`
   (flat only; asked while GuiFocus 6, 7 or 8 is open, on the HDR target) go into the
   flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
-  The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
-- **Temporary:** no keys. The back-off trail log lines (10-15, camera-suite
-  HUD loop) go once the loop is fixed.
-- **Next locally:** no repeat flight needed for capture cleanup. The installed
-  4b7bfec4 rendering path is verified; cleanup 02f50bd7 is pushed and compiled.
-  Keep codex/xess-flat separate pending the user's Windows full build/testing.
+  "flat ui layer map:" counts them; 10-22: the game-334473 Galaxy icon PS joins, and the Full System
+  Scanner's tone is named so its text is taken too (built, not flown). Entries at end.
+- **Temporary:** no keys; the back-off trail log lines (10-15) go once the camera-suite HUD loop is fixed.
+- **Local flight, next locally:** 4b7bfec4 (120427.log, SS 0.5 then about 0.65/UI 125) verified the rendering path; cleanup 02f50bd7
+  keeps the flown guards (88 CPU checks), is pushed and compiled, no repeat flight needed. Keep codex/xess-flat separate pending
+  the user's Windows full build/testing.
+- **2026-10-22, the scanner's zoom (second fix built, not flown):** a one-ulp camera difference between HDR writers refused the map
+  recovery's frames; the copy-branch waiver missed the scanner (flight 135701), now also at the admission by structure. Last entry.
 - **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
 
@@ -862,3 +862,178 @@ re-issue outcome. At most 12 a session. Remove it once the loop is fixed.
 **Flight.** Steam flat, FSR3: about a minute in the cockpit, then the camera
 suite, cycling the interior cameras, then exit and another minute in the
 cockpit.
+
+## 2026-10-21: 150 and 200
+
+A user on the bloom test build (3440x1440, DLAA, `fix.ui_quality` 125, every
+HUD draw taken, none refused) still saw aliasing on the HUD. With the layer on
+the HUD is out of the temporal history, so the layer's size is the only
+smoothing it has: the composite is an exact box over each pixel's footprint, so
+a pixel is the mean of T squared samples (1.56 at 125). Built, not flown:
+`off | 100 | 125 | 150 | 200` (T = 1.5, 2.0).
+
+- 150 is a fractional ratio, so the weights are uneven (2/3 + 1/3, and three
+  texels off the grid); 200 is the exact 2 x 2 mean, four samples a pixel.
+- The composite shader and its CPU model already took a footprint of up to
+  three texels (`kUiLayerMaxTaps` 4, "s <= 2 needs at most 3"), so no shader
+  changed. The panel factor `f = (R/D)/T` already clamps to [1/4, 1] and the
+  budget holds the widest panel; the grid test now runs all four targets.
+- Memory (the 8-bit layer, the HDR layer and the depth-stencil target, 20
+  bytes a pixel) at 3440x1440: 99 MB at 100, 155 at 125, 223 at 150, 396 at
+  200. A 4074x3938 headset door makes an 8148x7876 layer an eye at 200, over a
+  gigabyte an eye: the ini says so. A layer past 16384 on a side is refused as
+  before (an 8192-wide display is the last one 200 serves).
+- Not changed: the holograms stay in the frame, so no size here smooths them.
+- Flight: UI quality 150 and 200 in the cockpit; the `ui quality:` lines name
+  the size (`150%`, `200%`) and the layer's size and MB.
+
+## 2026-10-22: the Galaxy Map's icons left the sprite family with game build 334473 (built, not flown)
+
+Sean: the Galaxy Map's system icons deep below the galactic plane flicker as the view moves (flat, XeSS, 960x600 to 1920x1200,
+census 8 of `edvr_gfx_20261022_101031`).
+
+- The icons are VS C31238331D8AC3D4 with PS 964221955A9E77E7: 174 a frame, n=6, BC3 64x64 / 128x128, into the 960x600
+  R11G11B10F scene with depth off, stencil write only (ref 4, ALWAYS/REPLACE) and alpha over. That is the state of the
+  BD0FEB32 and 539A sprites the family takes. PS BD0FEB3276C8B2D7 is in no retained log.
+- Every Galaxy Map session since the game update of 2026-10-20 (332841 to 334473) reads `sprite asked=0` while the canvas is
+  asked 25k to 73k times per 30 s. The 10-10 flight took 424553 of 424571 Galaxy sprites. So since the update the icons were
+  never asked: they stayed in the scene at 960x600 with SMAA and EASU, under the labels, which the layer takes.
+- Fix: `kFlatUiMapSpritePsC` = 964221955A9E77E7 joins `flatUiMapFamilyOf`'s sprites, under the same map-open and HDR-target
+  gate. PS 96422195 also draws on the System Map; any of its draws that tests depth is still refused by the layer's
+  depth-stencil rule.
+- Open: why only the below-plane icons flicker. The working guess is size. The VS builds a camera-facing world-space quad with
+  no screen-size term, so the farthest icons are the smallest, and quads near a pixel at 960x600 flicker on and off. Taken at
+  the output size they get twice the grid. If the deepest still twitch, dump the PS (`advanced.glare_shader_dump=1`, one
+  launch) for a dim scalar or dither.
+- ruled out: a depth or plane z-fight on the Galaxy icons, because DepthEnable is 0 on every icon and canvas draw and no draw
+  in that range tests stencil.
+- ruled out: a separate below-plane icon pass, because census 8 has one 174-draw sprite pass with one PS and one state.
+- ruled out: the particle billboard fix, because the log reads `particle target off (stock)` throughout the map windows.
+- Flight: open the Galaxy Map and look below the plane. The 30 s `flat ui layer map:` line should read sprite asked about five
+  times the canvas count (174 against 34 a frame) and taken equal to asked; `sprite asked=0` there means the pair is still
+  not named.
+
+## 2026-10-22: the Full System Scanner's text (built, not flown)
+
+Log `edvr_gfx_20261022_112019`, build d4abc498, Steam flat on an Intel Arc B390, render 960x600 to output 1920x1200, GuiFocus 9 from
+11:26:21 to 11:30:03; census 2 at 11:26:50.760 (two frames). The scanner's text was never taken by the UI layer.
+
+- What the scanner draws. The text is the holo panels (VS 81216C77F90DEDD6, 4 a frame) and the target sprite (VS E508648660A352B2, 16
+  a frame) into the 960x600 R11G11B10F scene (@45, resource 7ABC4B80). Draw #210, one triangle, VS F9CFC798F21E9AEA with PS
+  6DE70EBBF82FCBE6, reads that same resource at t0 (@156) and a 480x300 R11G11B10F bloom at t1 (@176 = @168, the target of the bloom
+  chain's draw #204), and writes a 960x600 format-27 target (view 28). 20F383BB/DED87960 upscales that to the 1920x1200 output.
+- Why the text stayed in the scene. Every 30 s window from 11:27:20 to 11:30:00 reads `holo-panels asked=7200 decided=0 taken=0`,
+  `target-sprite asked=28800 decided=0 taken=0`, `refusals: other-work=0 not-hdr-target=0 not-upstream=0 no-camera-rows=0 other-shift=0
+  tone-unproven=36000 after-tone=0` and `tone-candidates=0 tone-proven=0`, with copies = door-armed = 1800. The layer takes a draw only
+  when the previous frame's tone pass was seen reading that draw's target, and 6DE70EBB is in no table: not the registry
+  (`tonePsHdrSlot`), not `flatUiSourceTonePair` (the E894 layout: LUT t0, HDR t1, bloom t2), not `flatUiMapToneSlotOf`. The shape
+  admission (HDR at t1, a format-28 target, a 2D at t2) cannot match it either: `tone-by-shape=0`. The cockpit, same families and same
+  state in the same session, is taken (the 11:26:20 window: holo asked 7953, decided 5851, taken 5851) because its tone pair is named.
+- ruled out: other-work, not-hdr-target and after-tone as the scanner's blockers, because all three read 0 over 36000 asks a window and
+  tone-unproven is the first test after them. ruled out: the door or the copy, because copies = door-armed = 1800 in each window.
+- Fix. The pair is named in `flatUiMapToneSlotOf`'s table (flat_ui_layer_math.h, `kFlatUiScannerToneVs` / `kFlatUiScannerTonePs`), slot 0,
+  exact pair only: it is the UI layer's own table, so the candidate branch (flat_runtime.cpp 6737-6749) takes it as it takes the map tone.
+  It is NOT in the registry, for the reasons recorded under the 10-10 follow-up (the resolve's tone selection, the target's tone record and
+  the HDR route's trigger must not see a new pass); a rig pin keeps 6DE70EBB out of flat_mono_frame.h and tonemap_admit.h. The VS 43CA9F1C
+  (the transition variant E894 also has) is not named: no scanner log shows it with this PS. `flatUiMapToneScreenOf` says which screen's
+  tone a pair is, so the two once-only lines name it ("Full System Scanner tone proven ...", "first Full System Scanner tone candidate
+  ..."; the maps' lines are unchanged) and each screen is said once. The map line's `tone-candidates-map` / `tone-matched-map` count both.
+- The bloom does not double (checked, 2026-10-20 "bloom counted twice" is the risk). The re-issue replays the tone with the HUD layer at the
+  admitted HDR slot and zeroes every other scene-shaped input; it is not keyed to the E894 layout's t2. `crispFindSceneImages` scans PS
+  t0..t15 of the admitted draw (ui_layer.cpp 5243) and marks each input the rule `toneInputIsSceneImage` (ui_layer_math.h 1734) calls a
+  scene image: a 2D colour view of a GPU-written texture, within a pixel of the HDR source's shape, 1/32 to 1x its size, not the HDR slot.
+  The HUD's steps bind null there (`crispBindStep`, ui_layer.cpp 5173-5178; `toneStepKeepsSceneImages`, weapons_fire.h 173), at Begin
+  (5455-5456). The scanner's t1 (480x300, format 26, a render target, half of 960x600) passes the rule and t0 is the HDR slot, so t1 reads
+  zero and the layer is T(HUD) alone. The same layout is flown: 9270C355 (t0 scene, t1 480x300 fmt 26) logs `t1 480x300 fmt 26 ZEROED`
+  at 112019 line 6735 and 101031 line 36791, and the Galaxy Map's census 8 tone is that pair (t0 @120 960x600, t1 @136 480x300, both fmt
+  26). The map tone C89DD4 itself is in no retained log (after game build 334473 the maps run 9270C355), so its bloom slot is unrecorded.
+  The rig pins the rule on the scanner's measured inputs and that the scan covers every slot, with a control edit (ui_tone_scene_test.h).
+  The 10-21 glow feed (the HUD's light joins the bloom chain's first level) is separate: it should run on the scanner's half-size first
+  level (draw #198, 960x600 to 480x300) as in the cockpit, and its `flat ui layer glow:` lines say so.
+- After the proof. Refusals that run after tone-unproven (flat_ui_layer.cpp 266-299) have never been exercised on the scanner. From code:
+  not-upstream reads `flatCameraInjectUpstreamOwns()`, and all 44 five-second `flat camera inject` lines of the scanner read
+  `owner=upstream not-upstream=0`. Jitter is zero (temporal AA is off at focus 9: `zero-phase-resolves` = frames), so a draw whose rows
+  measure no shift counts as phase 0 and is taken; other-shift needs rows with an off-centre of their own. no-camera-rows needs the
+  draw's VS b1 buffer to be missing from the camera table (any buffer wide enough to carry rows 270..275 that the game wrote whole is in
+  it); the holo and sprite VS are the cockpit's and should bind the same scene constants, but that is expected, not observed. The shared
+  decision (depth-stencil-test, blend-refused) sees the cockpit's draws and states.
+- Flight (flat, UI quality on, Full System Scanner open, one 30 s window): `tone-candidates`, `tone-proven`, `tone-admitted` and
+  `tone-reissued` about the frame count (1800 at 60 fps), `tone-declined=0`, `composites` about the frame count, `composite-none` near 0;
+  `holo-panels asked=7200 decided=7200 taken=7200` and `target-sprite asked=28800 decided=28800 taken=28800` (less the first frame or
+  two); `tone-unproven=0`; `tone-by-shape=0` (named, not admitted by shape); `tone-candidates-map` equal to `tone-candidates` with
+  `open-frames=0`. Once: `first Full System Scanner tone candidate`, `Full System Scanner tone proven by VS F9CFC798F21E9AEA PS
+  6DE70EBBF82FCBE6 reading slot 0`, and `crisp hud: tone vs F9CFC798F21E9AEA ps 6DE70EBBF82FCBE6, HDR source t0 960x600 ... t1 480x300 fmt
+  26 ZEROED`. Failures: tone-proven above 0 with tone-admitted 0 (read the tone candidate line's re-issue reason); tone-declined above 0;
+  a new `no-camera-rows`, `not-upstream`, `other-shift`, `depth-stencil-test` or `blend-refused` count; `crisp hud: ... no scene image to
+  zero` or a brighter halo round the scanner's bodies than with `fix.ui_quality = off` (the bloom twice).
+
+## 2026-10-22: the Full System Scanner's zoom (built, not flown)
+
+Log `edvr_gfx_20261022_130004.log`, build a7a5f5ac, Steam flat, Full System Scanner (GuiFocus 9). From 13:08:27.5 the scanner zooms onto a
+planet and the HUD text goes blurry for runs of about 2.4 s, crisp for about 1 s. Before the zoom the same session has no refusals.
+
+- Evidence. On the maps and the scanner temporal AA is off (`flatUiMapTemporalOff`): no jitter, no history. The frame gets SMAA and EASU
+  through the `map-temporal-off` treat block in flat_runtime.cpp, and the UI layer's door arms only on a frame whose copy was treated
+  (`flatUiLayerDoorArms`), where the text is composited at output size. The zoom adds the scanner's reveal composite (VS 953C8123AD8DC13B,
+  PS A473A867BDDBC342, fss-scanner.md) as a second camera-bearing writer of the scene HDR, bound to the b1 of the deferred lighting pass
+  (VS 7E38A6AA1269C901, PS 7CECABDE34FFBE9E) whose witness camera is the HDR's reference. Its rows differ from the reference by one float
+  ulp in a few words on about 70% of frames: `[13:08:27.509] flat runtime conflict: ... cause=hdr-camera-changed ref-vs=7E38A6AA1269C901
+  ref-ps=7CECABDE34FFBE9E cur-vs=953C8123AD8DC13B cur-ps=A473A867BDDBC342 ... changed-words=270.0:BD9C2552>BD9C2551,271.0:BE76B5BF>BE76B5BE,
+  272.0:BD22A498>BD22A497,272.1:3E3CB2E6>3E3CB2E5`. `flatRuntimeSameCamera` is an exact memcmp, so the target went bad and the copy was
+  refused `conflicting-hdr-target-or-camera` (35-96% of the frames of each 5 s window). The treat block sits after the selection, so a
+  refused frame got no spatial treatment, the door stayed unarmed and the text stayed in the scene at render size. Camera injection is off
+  on the scanner (`injected=0`). UI layer refusals are only not-armed; the tone is proven.
+- ruled out: tone-unproven, tone-declined, other-shift, no-camera-rows, depth-stencil-test and bind-failed as the cause of the blur, because
+  all read 0 while zoomed. ruled out: a second or different tone pass, because census 1 shows one tone pair per frame. ruled out: the
+  camera injector, because `injected=0` there.
+- Root cause. A check that guards temporal history (a second camera on the HDR would reproject wrongly) was gating a path that has no
+  history. Not loosened: `flatRuntimeSameCamera` stays an exact compare and no epsilon is added, so every temporal screen keeps its
+  strictness (the cockpit, the DSS).
+- Fix, first (16734035, flown as 135701: did not take). `FlatRuntimeTarget::badCauses` records every cause that made a target bad
+  (`flatRuntimeNoteBad` is the one place the flag is set; the forward authority's revocation goes through it as cause None), where
+  `firstBad` keeps only the first. `FlatRuntimePrefix::temporalOff` is the frame's one GuiFocus read (the same local that gates the treat
+  block, assigned after the prefix is cleared; false in every replayed trace). `flatRuntimeCameraConflictSpatialOnly` holds when temporal AA
+  is off, the target still carries its first camera, its layout is unchanged and CameraChange is the only cause ever marked.
+  `flatRuntimeBadTargetRefuses` asks it, and notes `cameraConflictWaived` or `cameraConflictKept` on the prefix. It was asked in the
+  reducer's copy branch only.
+- Flight 135701 (build v0.20.2-41-g16734035, Steam flat, XeSS 960x600 to 1920x1200, scanner from 13:59:28): all 22 `flat map focus 5s:`
+  lines with focus=9 read `camera-conflict-spatial=0 camera-conflict-kept=0`, while `flat runtime refusal 5s: reason=conflicting-hdr-target-or-camera`
+  read 59, 195, 213, 212, 118, 157, 291 ... (16 windows from 14:00:02) with `flat runtime conflict 5s: cause=hdr-camera-changed` equal to it,
+  and the 30 s windows after the zoom read `door-armed=590 door-refused-untreated=1195` (14:00:31), `719/997` and `767/974` of about 1750
+  copies, against `1789/3` the window before. The conflict lines were the old ones (cur-vs 953C8123AD8DC13B, one to nine words one ulp off).
+- ruled out: the copy-branch waiver alone, because flight 135701 refused at the admission by structure (flat_copy_structure.h
+  `flatCopyAdmit`, 324, calling `flatSelectHdrRouteAt`, whose `if (target->hdrBad)` is flat_hdr_route.h 405) with
+  `camera-conflict-spatial=0 camera-conflict-kept=0`. The scanner's tone pass (VS F9CFC798F21E9AEA, PS 6DE70EBBF82FCBE6) is in no whitelist,
+  so the reducer's copy branch answers `no-known-tone-pass` at its tone check, before it ever looks at the HDR's faults (flat_runtime_model.h,
+  the copy branch: `tone->tones != 1`), and the admission by structure takes the frame. The log said so and the first fix read past it:
+  `flat copy structure 5s: whitelist=0 admitted=92 selector-refused=195 last=selector-refused scene=960x600 output=1920x1200 VS=F9CFC798F21E9AEA
+  PS=6DE70EBBF82FCBE6` (14:00:07), `selector-refused` equal to the window's conflicting-hdr-target-or-camera refusals, and before the zoom
+  `admitted=300` a window. The HDR route's trigger selection refuses the same H too (`flat untrusted H audit: route=conflicting-hdr-target-or-camera`,
+  `last-selector=conflicting-hdr-target-or-camera`), which is the route's own and not what refuses the copy: R < D, so it never treats the frame.
+- Fix, second. `flatSelectHdrRouteAt` takes `waiveCameraOnly` (default off) and asks `flatRuntimeBadTargetRefuses` at its bad-target test; the
+  admission by structure passes it, and the route's own selection at its trigger does not, so that verdict (and the untrusted-camera lines
+  that read it) is unchanged. The waived frame goes on to `flatSelectHdrFrame` with the HDR's first camera (the lighting witness): the
+  reveal's camera is in no record it reads. Layout, target identity (depth), provenance, an explicit write, an unnamed mark and an uncertain
+  frame still refuse on both paths, and so does any frame with temporal AA on. The checks `flatSelectHdrFrame` makes after the bad-target
+  test (extent, order, sources, camera against the sources) are untouched; a waived frame that fails one of them is refused with that
+  reason, not as a conflict.
+- Counters, in the 5 s `flat map focus 5s:` line (zeros print), now covering both paths because both are flags on the prefix:
+  `camera-conflict-spatial` is the map frames the spatial recovery treated that the camera disagreement would have refused;
+  `camera-conflict-kept` is the temporal-off refusals whose first fault was the camera change and which other faults also marked (the waiver
+  did not apply). Rig: flat_camera_spatial_tests.h runs each case on the copy branch (a tone pass the whitelist knows) and on the
+  admission by structure (an unknown tone pass, the scene at half the output, the HDR detector watching: the scanner's frame): the lighting
+  pass then a one-ulp reveal, selected with temporal AA off and refused with it on; each other fault refused; the route's trigger selection
+  still refusing; the predicate term by term; the wiring scan; eleven mutants of the gate caught, among them the first fix (the admission not
+  asking).
+- Not knowable until flown: whether CameraProvenance or another cause also marks the target on the reveal draw (the log's `cause=` is the
+  first only). If it does, `camera-conflict-kept` takes the frames and the refusal stays; that is the next thing to read.
+- Flight (flat, UI quality on, Full System Scanner open and zoomed onto a body): in the zoomed windows `flat copy structure 5s:`
+  `admitted` about `copies` and `selector-refused` near 0 (135701: 195 and 213 of about 300 in the windows at 14:00:07 and 14:00:12); `flat runtime refusal 5s: reason=
+  conflicting-hdr-target-or-camera` near 0; `camera-conflict-spatial` about the old refusal count; `camera-conflict-kept` 0. In the 30 s
+  `flat ui layer:` line `door-armed` about `copies` and `door-refused-untreated` near 0; the 960x600/1920x1200 composite flips stop.
+  Still reading `conflicting-hdr-target-or-camera` and fine: `last-selector=` and `flat untrusted H audit` (the HDR route's, not the
+  copy's). Before the zoom both counters read 0 as before. Failures: refusals unchanged with both counters 0 (the prefix was never told
+  temporal AA is off, or a third site refuses: read `flat copy structure 5s: last=` and the refusal reason); `camera-conflict-kept` above 0
+  (a second cause marks the target: read the `flat runtime conflict` line); a refusal `inconsistent-draw-order` or another new reason
+  (the waived frame failed a later check of the selection: the reveal composite drawn after the first consumer); a cockpit or DSS window
+  with either counter above 0 (the gate leaked).

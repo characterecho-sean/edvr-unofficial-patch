@@ -124,7 +124,9 @@ struct FlatMonoResolveFrame {
     // section 82, the depth-validated steady detail): a pixel whose engine slot a later draw overdrew takes the camera term
     // instead of refusing its history ONLY where last frame's depth confirms the camera term -- the depth, in the best of the four
     // texels around the previous raster position, is within 1% (floor 1e-6, kFlatMonoStaleDepthRelative) of the depth this surface would
-    // have had there had it not moved -- and is refused exactly as before wherever it does not. The check needs last frame's depth: TAA
+    // have had there had it not moved, or those four texels are one plane whose depth at that position is, or the pixel's own plane lies
+    // beside them and every other surface among them is still in this frame's depth where the camera rows carry it (a junction that did not
+    // move) -- and is refused exactly as before wherever it does not. The check needs last frame's depth: TAA
     // keeps it already; the other backends get a second depth image, made on the first frame that asks, and from then on the depth the
     // backend is handed alternates between the two (never while this is false: those frames write the one image they always did). Masked
     // records, corrupt slots, the sky and the first-person pixels are untouched. staticScene (the menu's blanket form) wins when both are
@@ -288,9 +290,10 @@ struct FlatMonoResolveStats {
     uint64_t acceptedResets = 0, acceptedContinues = 0;
     uint64_t requestedResets = 0, lostHistory = 0, frameGaps = 0;
     uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;
-    // Floating-origin re-anchors the resolver took for what they are (row 5 jumped 50 m or more, the camera's rows did not
-    // move, and the origin landed near the camera): history kept, the frame's camera translation zero. The size of the last
-    // one, metres. travelSteps: the same jump that is not a re-anchor (fast travel): history kept, the real translation too.
+    // Compatibility field names: originRebases now counts ambiguous-origin
+    // history resets, not proved coordinate changes. lastOriginRebaseM is the
+    // last such input step. travelSteps counts admitted large steps whose
+    // history continues with the actual previous origin and translation.
     uint64_t originRebases = 0, travelSteps = 0;
     double lastOriginRebaseM = 0;
     uint64_t backendFailures = 0;

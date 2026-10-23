@@ -2,7 +2,7 @@
 //
 // WHY (the settlement CPU arc, docs\flat-cz-fps-2026-10-11.md, 2026-10-16 round 3). The constructor asked the same questions of the
 // same (vertex shader, pixel shader) hashes on every one of 14.6k draws a frame: is the pair a keyed pool family (two table scans),
-// is the vertex shader a pool family's, is it a known tone pass or the map's tonemap or a UI-only source tone, is it the final copy's
+// is the vertex shader a pool family's, is it a known tone pass or the map's or scanner's tonemap or a UI-only source tone, is it the final copy's
 // pair, and could the UI layer's family rule ever name it. Every answer is a pure function of the two hashes and of whether the
 // profile is flat (the family table has flat-only and VR-only rows); none reads a binding, a frame, a target or any mutable state.
 //
@@ -30,7 +30,7 @@ struct FlatPairFacts {
     bool supported = false;       // a keyed pool-family pair (engineVelocityPoolFamilyPair)
     bool familyVs = false;        // a pool family's vertex shader, keyed pixel shader or not (engineVelocityPoolFamilyVs)
     uint32_t toneSlot = ~0u;      // flat_mono_detail::toneHdrSlot: the HDR lineage slot of a registry tone pass, else ~0u
-    uint32_t mapToneSlot = ~0u;   // flatUiMapToneSlotOf: the map frames' tonemap (the UI layer's own table), else ~0u
+    uint32_t mapToneSlot = ~0u;   // flatUiMapToneSlotOf: the map frames' and the Full System Scanner's tonemap (the UI layer's own table), else ~0u
     bool sourceTone = false;      // flatUiSourceTonePair: the UI-only LDR-source tone pairs (E894, 0D43)
     bool copyPair = false;        // the final copy's shader pair (the draw must also write the output to be the copy)
     bool uiMayAsk = false;        // flatUiFamilyFor names the pair for some (map open, HDR target)

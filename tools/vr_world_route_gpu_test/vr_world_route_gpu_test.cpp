@@ -975,8 +975,8 @@ void stage2(World& w) {
     ownedAndJittering(w);
     g_game.aux = 7;
     FlatCameraVrExcluded e1{}, e2{};
-    e1.aspect = 1.0f; e1.fov = 1.0472f; e1.nearZ = 0.1f; e1.farZ = 5000.0f; e1.callerRva = 0x594FE1; e1.calls = 5;
-    e2.aspect = 1.0f; e2.fov = 1.5708f; e2.nearZ = 0.5f; e2.farZ = 9000.0f; e2.callerRva = 0x594EAB; e2.calls = 2;
+    e1.aspect = 1.0f; e1.fov = 1.0472f; e1.nearZ = 0.1f; e1.farZ = 5000.0f; e1.callerRva = 0x595141; e1.calls = 5;
+    e2.aspect = 1.0f; e2.fov = 1.5708f; e2.nearZ = 0.5f; e2.farZ = 9000.0f; e2.callerRva = 0x59500B; e2.calls = 2;
     g_inj.excluded.push_back(e1);
     frame(w);
     check(countLines("camera call EXCLUDED, not a screen view") == 1 && lastEnded().auxiliary == 7,

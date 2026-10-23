@@ -10,16 +10,20 @@ numpy and Pillow packages, which several of the tools the build runs import:
 pip install -r tools\requirements.txt
 ```
 
-First fetch the pinned official Khronos loader and its notice:
+For a release-capable build, fetch all four pinned dependencies. The fetch
+tools verify their sources and staged files; the build verifies them again:
 
 ```
+python tools\fetch_ngx.py
+python tools\fetch_ffx_dx11.py
+python tools\fetch_xess.py
 python tools\fetch_openxr_loader.py
 ```
 
 Then build:
 
 ```
-build.bat
+build.bat --wait-lock --jobs 4
 ```
 
 That produces the native graphics/runtime pair, `build\openxr_loader.dll`, and
@@ -34,6 +38,162 @@ A full build leaves your desktop alone, so you can keep typing in another
 window while it runs. The runner holds every test exe to that and fails the
 build if one shows a window or takes the keyboard focus; see
 `docs\build-focus-steal-2026-09-29.md`.
+
+For a native Windows build from Linux, use the **Native Windows release build**
+workflow (`.github/workflows/release.yml`). It runs on Windows Server 2022 with
+Visual Studio 2022, Python 3.12, and all four pinned dependencies. It invokes
+the full `build.bat --wait-lock --jobs 4`, including every test rig and the
+installer gate, then calls `package.bat`. The packages contain the exact
+version stamp checked by `package_native.py`. Each successful run uploads the
+full build receipt, installer, native DLLs, three release ZIPs, and
+`SHA256SUMS`. Build logs, phase timings, and failed flat pixel fixtures are
+uploaded separately even when a gate fails. The workflow does not create a
+GitHub release or use signing secrets.
+
+A push to a `codex/release-*` branch runs the entire build and package path. If
+the commit already has a release tag, the runner uses its exact version;
+otherwise it creates a temporary local tag, `v0.0.0-ci`, before building. This
+makes the version stamped into the DLLs and installer match the package
+version. The temporary tag exists only on the runner; either branch result is a
+proof artifact, not a release asset. The branch push trigger works before this
+workflow reaches `main`. GitHub does not offer its manual **Run workflow**
+control for a new workflow until the workflow file is on the default branch.
+
+### The caches in CI
+
+The workflow keeps two caches (`actions/cache`), and a third file set inside
+the second. Measured 2026-10-22 on the same branch: a cold run took 16.5 min
+(build step 12.9 min), the next run on a new commit 8.8 min (build step 6.7
+min); the unchanged workflow on `main`, run alongside, took 22.3 min (build
+step 17.9 min). Runner speed varies a good deal between runs (the same cold
+build was 20 min a day earlier), so compare runs made together.
+
+- **Pinned dependencies** (`third_party\ngx`, `ffx-dx11`, `xess`,
+  `openxr\loader`; 229 MB). Key: the runner image and the hash of the four
+  `tools\fetch_*.py` files, which hold the pins. A hit skips the fetch and the
+  FidelityFX build (2.7 min); the `--verify` step runs on a restored copy
+  exactly as on a fetched one, and a failed fetch or verify never saves.
+- **Compile cache** (about 100 MB compressed). Key: the runner image, the
+  branch and the commit; a run restores the newest cache of its own branch,
+  else of the default branch (GitHub shows a run only its own ref's caches and
+  the default branch's, so one `gh workflow run release.yml --ref main` after a
+  merge seeds every branch). It is saved after the build even when a rig
+  failed, so a rerun after a flake starts warm. Release tags (`v*`) neither
+  restore nor save it: they compile from scratch. The build log's
+  `compile_cache:` lines are in the `edvr-diagnostics` artifact; the run's job
+  summary carries the totals (`python tools\compile_cache.py --summary LOG`).
+- **Riding with it**: `build\rig_times.json`, so the longest rigs start first
+  and timeouts are set from the last run, and the two generated shader headers,
+  which carry their own key over the HLSL and the compiler DLL and regenerate
+  when it differs (about 60 s saved).
+
+Why a hit is safe. `compile_cache.py` already decides every compile on a hash
+of the source, of every project header the compiler reported, of the flags, of
+the compiler's identity and of INCLUDE, LIB and CL. Nothing about that changes:
+a restored entry for an input that changed is a miss, and the tool's self-test
+proves it. What the archive adds is a file whose size and time the tool cannot
+trust, so `--pack` stores only entries whose outputs still match their
+manifest, and `--unpack` installs an entry only when each output's sha256
+equals the one recorded when cl wrote it, then sets the file's time back; an
+entry that fails is left out and recompiles. The cache skips compiles only:
+every rig still runs on every build. Proof builds carry one version stamp,
+`0.0.0-ci`, because the stamp is in a header that `log.cpp`, `menu.cpp` and
+several other headers and sources include, and a stamp that changed per run
+missed all of them. Two things still recompile every run: the installer (its
+payload embeds the freshly linked DLLs) and `object_classification_test` (an
+`ml64` object carries a timestamp).
+
+After the workflow is on `main`, a manual branch run is also possible:
+
+```powershell
+gh workflow run release.yml --ref main
+```
+
+These examples use PowerShell syntax compatible with Windows PowerShell 5.1. On
+Linux, run them in `pwsh` with GitHub CLI installed. Inspect a proof run and
+download its packages. Use the run ID shown by `gh run list`; a rerun
+increments `run_attempt`:
+
+```powershell
+gh run list --workflow release.yml --branch codex/release-workflow --limit 5
+$runId = 'RUN_ID'
+gh run view $runId --log-failed
+$repoName = gh repo view --json nameWithOwner --jq .nameWithOwner
+if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve repository name' }
+$runAttempt = gh api "repos/$repoName/actions/runs/$runId" --jq .run_attempt
+if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve run attempt' }
+New-Item -ItemType Directory -Force -Path "edvr-artifacts/$runId" | Out-Null
+gh run download $runId -n "edvr-packages-$runId-$runAttempt" -D "edvr-artifacts/$runId"
+if ($LASTEXITCODE -ne 0) { throw 'Package download failed' }
+Push-Location "edvr-artifacts/$runId"
+try {
+    sha256sum -c SHA256SUMS
+    if ($LASTEXITCODE -ne 0) { throw 'Package checksum verification failed' }
+} finally { Pop-Location }
+```
+
+If a run fails, download `edvr-diagnostics-$runId-$runAttempt` in the same way
+and read its build logs and saved fixture before changing a gate. The complete
+Actions job log is also available through `gh run view $runId --log`.
+
+For a real release, merge and push the validated source to `main`, then make
+and push its exact version tag from a clean checkout. A pushed `v*` tag runs
+the same full validation and packaging at that tag; the workflow refuses a tag
+whose name is not a semantic version:
+
+```powershell
+git switch main
+if ($LASTEXITCODE -ne 0) { throw 'Cannot switch to main' }
+git pull --ff-only
+if ($LASTEXITCODE -ne 0) { throw 'Cannot update main' }
+if (git status --porcelain) { throw 'Checkout must be clean before tagging' }
+$version = 'VERSION'            # for example '0.20.0'
+git tag "v$version"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot create version tag' }
+git push origin "v$version"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot push version tag' }
+gh run list --workflow release.yml --limit 10
+$runId = 'TAG_RUN_ID'
+gh run watch $runId --exit-status
+if ($LASTEXITCODE -ne 0) { throw 'Tagged Windows build failed' }
+$repoName = gh repo view --json nameWithOwner --jq .nameWithOwner
+if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve repository name' }
+$runAttempt = gh api "repos/$repoName/actions/runs/$runId" --jq .run_attempt
+if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve run attempt' }
+New-Item -ItemType Directory -Force -Path "edvr-artifacts/$runId" | Out-Null
+gh run download $runId -n "edvr-packages-$runId-$runAttempt" -D "edvr-artifacts/$runId"
+if ($LASTEXITCODE -ne 0) { throw 'Package download failed' }
+Push-Location "edvr-artifacts/$runId"
+try {
+    sha256sum -c SHA256SUMS
+    if ($LASTEXITCODE -ne 0) { throw 'Package checksum verification failed' }
+} finally { Pop-Location }
+```
+
+Write and review release notes before creating the draft. Generate the Thanks
+section from the previous tag, then write each contributor's sentence by hand.
+Only merged PR authors are named; issue and log reporters get the tool's
+general line. Review the final notes file, then attach the three verified ZIPs
+and `SHA256SUMS` to a draft release:
+
+```powershell
+python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out thanks.md
+if ($LASTEXITCODE -ne 0) { throw 'Review release credits before continuing' }
+# Edit release-notes.md and include the reviewed ## Thanks section from thanks.md.
+$assets = @(
+    "edvr-artifacts/$runId/edvr-$version.zip"
+    "edvr-artifacts/$runId/edvr-installer-$version.zip"
+    "edvr-artifacts/$runId/edvr-installer-linux-$version.zip"
+    "edvr-artifacts/$runId/SHA256SUMS"
+)
+gh release create "v$version" @assets --draft --verify-tag --notes-file release-notes.md
+if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
+```
+
+For a prerelease tag, add `--prerelease` to `gh release create` as well.
+
+The draft is the review point before publication. A failed build has no package
+artifact and should never be used for a release.
 
 The optional DLSS mode, and an installer that carries NVIDIA's runtime, need
 the DLSS SDK on the machine. Its licence keeps it out of this repository, and

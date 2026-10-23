@@ -62,6 +62,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11ShaderResourceView;
 
 struct ID3D11Texture2D;
 
@@ -408,11 +409,35 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
 // The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
-// toneHdrSlot), whatever its vertex count, reading eye 0's HUD target -- or `alias`, a plain copy of it this frame (the
-// HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
+// toneHdrSlot), whatever its vertex count, reading eye 0's fresh HUD or weapons target -- or `alias`, a plain copy of
+// `aliasSource` this frame (the HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
 // 0: not, `why` says which test refused. The ordering guards are VR's.
-int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
-                          size_t whyN);
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, const void* aliasSource,
+                          uint64_t vs, uint64_t ps, char* why, size_t whyN);
+// The flat profile's HUD bloom (docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom"). The HUD the layer takes is
+// out of the scene H, so the game's bloom chain, which reads H, never sees it and the HUD has no halo. At the chain's first level (the HDR
+// route's trigger draw writing a half-size target) the adapter asks for H' = H + the HUD layer's light, made in one pass at H's size, and
+// binds it where that draw reads H: the chain, its tier, its threshold and its tone then carry the HUD's halo as stock does, and the HUD's
+// own light stays in the layer, once. Nothing but that one draw reads H'.
+// The slot holds the game's view of `hdr` for the draw about to be issued. Returns H''s shader view (owned here, valid until the next call
+// or the layer's release), or null with `verdict` (ui_layer_math.h's UiGlowFeed, as an int) saying why.
+//
+// visual.star_glow adds a second input (flat_star_glow.h): `star`, when given, is the star layer S -- the star draws alone, in a texture of H's
+// size -- and H' becomes H + the HUD + m * S: the HUD pass as above (or, with no HUD in the layer this frame, a copy of H), then one more
+// pass that adds S by a blend whose factor is (m, m, m, 0). S never holds the HUD, so each enters once. A star layer of another size than H is not
+// added (`sizeMismatch`) and the HUD's pass, if any, runs as ever. With no HUD and no usable star input the verdict is kNoHud and nothing is made.
+struct UiGlowStar {
+    ID3D11ShaderResourceView* srv = nullptr;   // S
+    float m = 0.0f;                            // k - 1, the weight of S in the first level's input
+    uint32_t w = 0, h = 0;                     // S's size
+    bool applied = false;                      // out: the pass added m * S
+    bool sizeMismatch = false;                 // out: S is not H's size
+    bool unavailable = false;                  // out: the star pass's shader or blend, or the copy of H it starts from, could not be made
+    bool hudIncluded = false;                  // out: the HUD layer's light is in H' (a live HUD this frame)
+    int verdict = 0;                           // out: the pass's UiGlowFeed
+};
+ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict,
+                                          UiGlowStar* star = nullptr);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's

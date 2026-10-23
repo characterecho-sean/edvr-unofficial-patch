@@ -21,7 +21,7 @@ namespace {
 // The camera producer probe (docs/design-flat-camera-integration.md C1->C2).
 //
 // Step 1 hooks the Ghidra-validated single-site upload helper
-// (EliteDangerous64.exe+0x51B640, the f3dx Map/memcpy/Unmap path) to learn
+// (EliteDangerous64.exe+0x51B7A0, the f3dx Map/memcpy/Unmap path) to learn
 // the staging pool block of the 5376-byte scene CB. Step 2 arms one hardware
 // write breakpoint per uploading thread on the block's camera-row span (rows
 // 270..271, the 0x10E0..0x1100 window); each hit names the writer's RIP with
@@ -46,7 +46,7 @@ namespace {
 //   free in someone else's render thread. Off is the gate, not removal --
 //   the pose_reader_watch discipline.
 
-constexpr uintptr_t kUploadRva = 0x51B640;
+constexpr uintptr_t kUploadRva = 0x51B7A0;
 constexpr uint8_t kUploadPrologue[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74,
                                          0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x50, 0x41};
 constexpr uint32_t kSceneBytes = 5376;
