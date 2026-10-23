@@ -91,13 +91,13 @@ int main() {
     for (float scale : {0.0f, -1.0f, NAN, INFINITY}) {
         if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS / DLAA")) { ++g_fails; puts("FAIL: unknown scale label"); }
     }
-    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS", "fsr", "xess", "XeSS"}) {
+    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS", "fsr", "fsr4", "FSR4", "xess", "XeSS"}) {
         if (!edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: bundled temporal mode %s\n", mode); }
     }
     for (const char* mode : {"off", "OFF", "", "bogus"}) {
         if (edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: inactive temporal mode %s\n", mode); }
     }
-    for (const char* mode : {"on", "dlaa", "dlss", "fsr"}) {
+    for (const char* mode : {"on", "dlaa", "dlss", "fsr", "fsr4"}) {
         check(edvr::temporalModeEnabledFor(mode, true) && edvr::temporalModeEnabledFor(mode, false),
               "existing temporal modes stay active in flat and VR");
     }
@@ -113,6 +113,13 @@ int main() {
     check(edvr::temporalEngineForProfile("fsr", true) == edvr::TemporalEngine::Amd &&
           edvr::temporalEngineForProfile("dlaa", false) == edvr::TemporalEngine::Nvidia,
           "the profile-aware engine leaves the other engines unchanged");
+    check(edvr::temporalEngineFor("fsr4") == edvr::TemporalEngine::AmdFsr4 && edvr::temporalEngineFor("FSR4") == edvr::TemporalEngine::AmdFsr4 &&
+          edvr::temporalEngineFor("fsr") == edvr::TemporalEngine::Amd && edvr::temporalExternalEngine("fsr4"),
+          "fsr4 is its own engine, an external one, and fsr stays FSR 3.1's");
+    check(edvr::temporalEngineForProfile("fsr4", true) == edvr::TemporalEngine::AmdFsr4 &&
+          edvr::temporalEngineForProfile("fsr4", false) == edvr::TemporalEngine::AmdFsr4 &&
+          edvr::temporalExternalEngineFor("fsr4", true) && edvr::temporalExternalEngineFor("fsr4", false),
+          "fsr4 reads as the same external engine in flat and in VR, as fsr does");
     check(!edvr::temporalModeEnabledFor("off", true) && !edvr::temporalModeEnabledFor("off", false) &&
           !edvr::temporalModeEnabledFor("bogus", true) && !edvr::temporalModeEnabledFor("bogus", false),
           "off and unknown modes stay inactive in both profiles");

@@ -206,6 +206,7 @@ REM log text to one another -- it reads only src\ and edvr.ini.
 python tools\run_jobs.py ^
     --gate "tools\fetch_openxr_loader.py --self-test" ^
     --gate "tools\fetch_xess.py --self-test" ^
+    --gate "tools\fetch_fsr4.py --self-test" ^
     --gate "tools\gen_installer_rc.py --self-test" ^
     --gate "tools\package_native.py --self-test" ^
     --gate "tools\install_proton.py --self-test" ^
@@ -505,6 +506,46 @@ if defined XESS (
     echo [edvr] NO XeSS SDK. Flat XeSS-SR will refuse at runtime. Fetch with tools\fetch_xess.py.
 )
 
+REM AMD FSR 4.1 (FidelityFX SDK v2.3.0, tools\fetch_fsr4.py) for the flat profile and VR: AMD's own signed D3D12
+REM DLLs, loaded at run time over the D3D11/D3D12 bridge in src\d3d11\fsr4_engine.cpp, as XeSS's is. Nothing is
+REM linked; the headers are the only compile input. EDVR_FSR4_SDK names a copy explicitly, or forces the no-SDK
+REM path with the literal value "none" (proving fix.temporal_aa=fsr4's runtime refusal even on a machine that
+REM already has the SDK staged); else the checkout's own third_party\fsr4; else the machine's copy under
+REM %LOCALAPPDATA%\EDVR\fsr4-sdk. The copy is VERIFIED first, and a mismatch fails the build. Without any SDK
+REM the build still succeeds: fsr4_engine.cpp compiles as a refusing stub. The two DLLs and the licence land in
+REM %BUILD% for tools\install_edvr.py --fsr4 and the rig; they are NOT in the self-contained installer and NOT
+REM in the release packages (docs\fsr-upscaler-design-2026-09-16.md, decision D8), and tools\package_native.py
+REM and tools\gen_installer_rc.py name the files they carry, so these three are never picked up by accident.
+set FSR4=
+set FSR4_NONE=
+if /i "%EDVR_FSR4_SDK%"=="none" set FSR4_NONE=1
+if not defined FSR4_NONE if defined EDVR_FSR4_SDK set FSR4=%EDVR_FSR4_SDK%
+if not defined FSR4_NONE if not defined FSR4 if exist "%ROOT%\third_party\fsr4\include\FidelityFX\upscalers\include\ffx_upscale.h" set FSR4=%ROOT%\third_party\fsr4
+if not defined FSR4_NONE if not defined FSR4 if exist "%LOCALAPPDATA%\EDVR\fsr4-sdk\include\FidelityFX\upscalers\include\ffx_upscale.h" set FSR4=%LOCALAPPDATA%\EDVR\fsr4-sdk
+set FSR4FLAGS=/DEDVR_HAVE_FSR4=0
+if defined FSR4 (
+    python "tools\fetch_fsr4.py" --verify "%FSR4%" || (
+        echo [edvr] ERROR: the FSR 4 SDK at %FSR4% is not the pinned one. tools\fetch_fsr4.py
+        echo        names the commit; fetch it again, or update the pin on purpose.
+        exit /b 1
+    )
+    set FSR4FLAGS=/DEDVR_HAVE_FSR4=1 /I"%FSR4%\include"
+    copy /Y "%FSR4%\bin\amd_fidelityfx_loader_dx12.dll" "%BUILD%\amd_fidelityfx_loader_dx12.dll" >nul || exit /b 1
+    copy /Y "%FSR4%\bin\amd_fidelityfx_upscaler_dx12.dll" "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" >nul || exit /b 1
+    copy /Y "%FSR4%\LICENSE.txt" "%BUILD%\AMD-FIDELITYFX-LICENSE.txt" >nul || exit /b 1
+    echo [edvr] FSR 4 SDK: %FSR4%
+) else (
+    if exist "%BUILD%\amd_fidelityfx_loader_dx12.dll" del /q "%BUILD%\amd_fidelityfx_loader_dx12.dll"
+    if exist "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" del /q "%BUILD%\amd_fidelityfx_upscaler_dx12.dll"
+    if exist "%BUILD%\AMD-FIDELITYFX-LICENSE.txt" del /q "%BUILD%\AMD-FIDELITYFX-LICENSE.txt"
+    if defined FSR4_NONE (
+        echo [edvr] EDVR_FSR4_SDK=none: building without FSR 4 on purpose, to prove the no-SDK path.
+        echo [edvr] fix.temporal_aa=fsr4 will refuse at runtime.
+    ) else (
+        echo [edvr] NO FSR 4 SDK. fix.temporal_aa=fsr4 will refuse at runtime. Fetch with tools\fetch_fsr4.py.
+    )
+)
+
 REM AMD's FSR 3.1 upscaler, the community Direct3D 11 port (the optiscaler
 REM FidelityFX-SDK-DX11 fork; tools\fetch_ffx_dx11.py; design doc section
 REM 3.2). EDVR_FFX_DX11 names a copy explicitly, or forces the no-SDK path
@@ -578,6 +619,8 @@ if defined EDVR_DLL_ONLY (
         --context "ngx=%NGX%" ^
         --context "xess_request=%EDVR_XESS_SDK%" ^
         --context "xess=%XESS%" ^
+        --context "fsr4_request=%EDVR_FSR4_SDK%" ^
+        --context "fsr4=%FSR4%" ^
         --context "ffx_request=%EDVR_FFX_DX11%" ^
         --context "ffx=%FFX%" ^
         --context "fsr_none=%FSR_NONE%" || (
@@ -591,7 +634,7 @@ if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
-python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
+python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% %FSR4FLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
@@ -606,7 +649,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\mem_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
-    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\fsr4_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -829,6 +872,12 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo [edvr] DLSS runtime: NOT CARRIED -- no DLSS SDK was found ^(the boxed notice
     echo        above says where it looked^). Not a release build.
 )
+if exist "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" (
+    echo [edvr] FSR 4 runtime: staged in build\amd_fidelityfx_*.dll for a dev install only ^(decision D8^);
+    echo        it is NOT in the installer or the packages. python tools\install_edvr.py --fsr4 places it.
+) else (
+    echo [edvr] FSR 4 runtime: NOT STAGED -- no FSR 4 SDK was found, so fix.temporal_aa=fsr4 refuses.
+)
 echo.
 python tools\package_native.py --check-installer || exit /b 1
 python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
@@ -841,6 +890,8 @@ python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
     --context "ngx=%NGX%" ^
     --context "xess_request=%EDVR_XESS_SDK%" ^
     --context "xess=%XESS%" ^
+    --context "fsr4_request=%EDVR_FSR4_SDK%" ^
+    --context "fsr4=%FSR4%" ^
     --context "ffx_request=%EDVR_FFX_DX11%" ^
     --context "ffx=%FFX%" ^
     --context "fsr_none=%FSR_NONE%" || exit /b 1
@@ -2823,6 +2874,34 @@ if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test runtime staging failed & e
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --dry-run || exit /b 1
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --self-test || exit /b 1
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --gpu-test-if-available || exit /b 1
+exit /b 0
+
+:rig_fsr4_engine_test
+REM FSR 4 bridge contracts and hardware readback, the twin of :rig_xess_engine_test. GPU-less or unsupported
+REM adapters skip explicitly, and so does a runtime that offers only FSR 3.1.5 (decision D7); a supported adapter
+REM must pass the bridge. Skips cleanly, still green, when this build has no FSR 4 SDK: there is no engine body
+REM to test, as with the FSR3 and NGX stubs. AMD's two DLLs are staged beside the exe, where the engine looks for
+REM them (beside the module that holds it).
+if not defined FSR4 (
+    echo [edvr] fsr4_engine_test: no FSR 4 SDK in this build -- skipping.
+    exit /b 0
+)
+if not exist "%OBJ%\fsr4_engine_test" mkdir "%OBJ%\fsr4_engine_test"
+REM This exe lives below obj for the reason the XeSS one does: an import of d3d11.lib from an exe directly in
+REM build would accidentally load EDVR's proxy instead of the system DLL.
+%CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX %FSR4FLAGS% /I"%GEN%" ^
+    /Fo"%OBJ%\fsr4_engine_test\\" /Fe"%OBJ%\fsr4_engine_test\fsr4_engine_test.exe" ^
+    "tools\fsr4_engine_test\fsr4_engine_test.cpp" "src\d3d11\fsr4_engine.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSR 4 engine test build failed & exit /b 1 )
+copy /y "%BUILD%\amd_fidelityfx_loader_dx12.dll" "%OBJ%\fsr4_engine_test\amd_fidelityfx_loader_dx12.dll" >nul
+if errorlevel 1 ( echo [edvr] ERROR: FSR 4 engine test loader staging failed & exit /b 1 )
+copy /y "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" "%OBJ%\fsr4_engine_test\amd_fidelityfx_upscaler_dx12.dll" >nul
+if errorlevel 1 ( echo [edvr] ERROR: FSR 4 engine test upscaler staging failed & exit /b 1 )
+"%OBJ%\fsr4_engine_test\fsr4_engine_test.exe" --dry-run || exit /b 1
+"%OBJ%\fsr4_engine_test\fsr4_engine_test.exe" --self-test || exit /b 1
+"%OBJ%\fsr4_engine_test\fsr4_engine_test.exe" --gpu-test-if-available || exit /b 1
 exit /b 0
 
 :rig_fsr3_engine_test

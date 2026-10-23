@@ -281,9 +281,12 @@ extern "C" {
 //            either way. bit 6 -- with bit 1 set, the external engine is
 //            AMD's FSR rather than NVIDIA's DLAA/DLSS; ignored when bit 1
 //            is clear. Bit 7 -- with bit 1 set and bit 6 clear, the external
-//            engine is Intel's XeSS-SR. Bits 2-5 are reset's own sub-reasons,
-//            read by the pass's own diagnostics; native_temporal.cpp's treat()
-//            (the ABI's one caller) never sets them.
+//            engine is Intel's XeSS-SR. Bit 8 -- with bit 1 set and bits 6
+//            and 7 clear, it is AMD's FSR 4.1 (fsr4_engine.h); the caller
+//            sets it alone, never with bit 6. Bits 2-5 are reset's own
+//            sub-reasons, read by the pass's own diagnostics;
+//            native_temporal.cpp's treat() (the ABI's one caller) never
+//            sets them.
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

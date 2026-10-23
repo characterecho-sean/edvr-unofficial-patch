@@ -104,12 +104,13 @@ void rebuildItems(List* list) {
 
     const std::vector<SettingRow>& rows = list->model->rows();
 
-    // fsr ignores fix.temporal_aa_model (NVIDIA's preset row): found fresh
-    // each rebuild.
+    // fsr and fsr4 ignore fix.temporal_aa_model (NVIDIA's preset row): found
+    // fresh each rebuild.
     bool hideAaPreset = false;
     for (const SettingRow& r : rows) {
         if (isVscreenKey(*r.def, "temporal_aa")) {
-            hideAaPreset = _stricmp(effectiveValue(r).c_str(), "fsr") == 0;
+            const std::string aa = effectiveValue(r);
+            hideAaPreset = _stricmp(aa.c_str(), "fsr") == 0 || _stricmp(aa.c_str(), "fsr4") == 0;
             break;
         }
     }

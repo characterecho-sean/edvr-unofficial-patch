@@ -5,9 +5,9 @@
     python tools\\worktree.py remove <path> [--dry-run]
     python tools\\worktree.py --self-test
 
-`git worktree add` alone gives a tree with no third_party\\ngx, ffx-dx11, xess
-or openxr\\loader: they are git-ignored, so build.bat cannot run there.  `add`
-runs `git worktree add` and then links each of those folders to the main
+`git worktree add` alone gives a tree with no third_party\\ngx, ffx-dx11, xess,
+fsr4 or openxr\\loader: they are git-ignored, so build.bat cannot run there.
+`add` runs `git worktree add` and then links each of those folders to the main
 checkout's copy with a directory junction (mklink /J).  A dependency the main
 checkout does not have is skipped with a warning.  The target must not exist.
 

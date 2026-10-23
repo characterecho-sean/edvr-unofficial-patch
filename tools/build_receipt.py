@@ -15,9 +15,9 @@ THE INPUT RULE (2026-10-01).  The fingerprint covers exactly:
   2. every untracked file git does not ignore (a new source file that has not
      been `git add`ed yet is still an input);
   3. every file under the named ignored dependency folders, DEPENDENCY_ROOTS:
-     the fetched NVIDIA SDK, FidelityFX checkout, pinned OpenXR loader and
-     XeSS SDK are git-ignored (licence, size) but ARE compiled or linked into
-     the DLLs, so a change to one must change the fingerprint.
+     the fetched NVIDIA SDK, FidelityFX checkout, pinned OpenXR loader, XeSS
+     SDK and FSR 4 SDK are git-ignored (licence, size) but ARE compiled or
+     linked into the DLLs, so a change to one must change the fingerprint.
 Everything else git ignores is not an input: reviews/ (local review write-ups),
 logs, build output, scratch.  Writing or updating a local review therefore
 cannot make `build.bat --dll-only` refuse when no compiled input changed.  The
@@ -47,7 +47,8 @@ EXCLUDED_ROOTS = {".git", ".claude", ".codex", ".vs", "build", "build - Copy",
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache"}
 # Git-ignored folders that are compiled inputs and so stay in the fingerprint
 # (see THE INPUT RULE above).  Relative to the repository root, forward slashes.
-DEPENDENCY_ROOTS = ("third_party/ngx", "third_party/ffx-dx11", "third_party/openxr/loader", "third_party/xess")
+DEPENDENCY_ROOTS = ("third_party/ngx", "third_party/ffx-dx11", "third_party/openxr/loader", "third_party/xess",
+                    "third_party/fsr4")
 
 
 def _excluded(relative):
@@ -335,7 +336,8 @@ def _self_test_in_git_tree(root):
 
     git("init", "-q")
     _write(root / ".gitignore", "build/\ndist/\n__pycache__/\n*.pyc\nreviews/\nscratch.log\n"
-           "third_party/ngx/\nthird_party/ffx-dx11/\nthird_party/openxr/loader/\nthird_party/xess/\n")
+           "third_party/ngx/\nthird_party/ffx-dx11/\nthird_party/openxr/loader/\nthird_party/xess/\n"
+           "third_party/fsr4/\n")
     _write(root / "source.txt", "one")
     _write(root / "tools" / "tool.py", "one")
     git("add", ".gitignore", "source.txt", "tools/tool.py")
@@ -352,6 +354,7 @@ def _self_test_in_git_tree(root):
     _write(root / "third_party" / "ngx" / "lib" / "sdk.lib", "one")
     _write(root / "third_party" / "ffx-dx11" / "ffx.h", "one")
     _write(root / "third_party" / "xess" / "include" / "xess" / "xess.h", "one")
+    _write(root / "third_party" / "fsr4" / "include" / "FidelityFX" / "upscalers" / "include" / "ffx_upscale.h", "one")
     _write(root / "third_party" / "openxr" / "loader" / "openxr_loader.dll", "one")
     first = input_fingerprint(root)
 
@@ -369,6 +372,8 @@ def _self_test_in_git_tree(root):
             ("third_party/ngx/lib/sdk.lib", "a change under third_party/ngx does not affect the input fingerprint"),
             ("third_party/ffx-dx11/ffx.h", "a change under third_party/ffx-dx11 does not affect the input fingerprint"),
             ("third_party/xess/include/xess/xess.h", "a change under third_party/xess does not affect the input fingerprint"),
+            ("third_party/fsr4/include/FidelityFX/upscalers/include/ffx_upscale.h",
+             "a change under third_party/fsr4 does not affect the input fingerprint"),
             ("third_party/openxr/loader/openxr_loader.dll",
              "a change under third_party/openxr/loader does not affect the input fingerprint"),
             ("source.txt", "a tracked source change does not affect the input fingerprint"),

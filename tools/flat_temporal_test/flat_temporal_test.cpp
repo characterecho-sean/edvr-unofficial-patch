@@ -2058,6 +2058,8 @@ void testFlatResolveRoute() {
         {FlatMonoResolveMode::Dlss, 2496,1404, 3840,2160, 3840,2160, false, "trained-upscale"},
         {FlatMonoResolveMode::Dlss, 3840,2160, 3840,2160, 3840,2160, false, "trained-native"},
         {FlatMonoResolveMode::Fsr,  2496,1404, 3840,2160, 3840,2160, false, "trained-upscale"},
+        {FlatMonoResolveMode::Fsr4, 2496,1404, 3840,2160, 3840,2160, false, "trained-upscale"},
+        {FlatMonoResolveMode::Fsr4, 3840,2160, 3840,2160, 3840,2160, false, "trained-native"},
         {FlatMonoResolveMode::Xess, 2496,1404, 3840,2160, 3840,2160, false, "xess-upscale"},
         {FlatMonoResolveMode::Xess, 3840,2160, 3840,2160, 3840,2160, false, "xess-native-aa"},
         // R > D (section 72 step 2): NVIDIA evaluates DLAA at R and the game's
@@ -2065,6 +2067,7 @@ void testFlatResolveRoute() {
         {FlatMonoResolveMode::Dlss, 5760,3240, 3840,2160, 5760,3240, false, "dlss-as-dlaa-supersample"},
         {FlatMonoResolveMode::Dlaa, 5760,3240, 3840,2160, 5760,3240, false, "dlaa-supersample"},
         {FlatMonoResolveMode::Fsr,  5760,3240, 3840,2160, 5760,3240, false, "fsr-native-aa-supersample"},
+        {FlatMonoResolveMode::Fsr4, 5760,3240, 3840,2160, 5760,3240, false, "fsr-native-aa-supersample"},
         {FlatMonoResolveMode::Xess, 5760,3240, 3840,2160, 5760,3240, false, "xess-native-aa-supersample"},
         {FlatMonoResolveMode::Taa,  5760,3240, 3840,2160, 3840,2160, false, "taa-display-grid-down"},
         {FlatMonoResolveMode::Dlaa, 3840,2160, 3840,2160, 3840,2160, false, "dlaa-native"},
@@ -2083,6 +2086,10 @@ void testFlatResolveRoute() {
     check(std::strcmp(flatResolveRoute(FlatMonoResolveMode::Dlaa, 2496, 1404, 3840, 2160).failReason,
                       "flat-dlaa-requires-native-render-size") == 0,
           "the DLAA upscale refusal's log token is stable");
+    check(std::strcmp(flatMonoResolveModeName(FlatMonoResolveMode::Fsr4), "fsr4") == 0 &&
+          std::strcmp(flatMonoResolveModeName(FlatMonoResolveMode::Fsr), "fsr") == 0 &&
+          std::strcmp(flatMonoResolveModeName(FlatMonoResolveMode::Xess), "xess") == 0,
+          "FSR 4.1 has its own mode name beside fsr's and xess's");
     check(flatResolveRoute(FlatMonoResolveMode::Taa, 0, 2160, 3840, 2160).refused &&
           flatResolveRoute(FlatMonoResolveMode::Dlss, 3840, 2160, 3840, 0).refused,
           "a zero on any axis refuses the route");

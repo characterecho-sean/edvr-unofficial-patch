@@ -167,10 +167,11 @@ Settings readConfig() {
   s.on=edvr::temporalModeEnabled(mode);
   s.engine=edvr::temporalEngineFor(mode);
   s.dlaa=edvr::temporalExternalEngine(mode);
-  // fsr and xess take the same sizes dlss does (design doc 3.1): 1:1 at the
+  // fsr, fsr4 and xess take the same sizes dlss does (design doc 3.1): 1:1 at the
   // runtime's size, an upscale when the game renders smaller. "dlaa" stays
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
-  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
+  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"fsr4")==0||
+      _stricmp(mode.c_str(),"xess")==0;
   // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
   s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
 }
@@ -189,6 +190,7 @@ bool sameHistorySettings(const Settings& a,const Settings& b) {
 const char* mode(const Settings& s) {
   if (!s.on) return "off";
   if (s.engine==edvr::TemporalEngine::Amd) return "fsr";
+  if (s.engine==edvr::TemporalEngine::AmdFsr4) return "fsr4";
   if (s.engine==edvr::TemporalEngine::Intel) return "xess";
   return s.upscale?"dlss":s.dlaa?"dlaa":"on";
 }
@@ -497,13 +499,14 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     pd=delta;pt=trans;pto=transOther;
   }
   // bit 6 (temporal_pass.h's own comment): the external engine (bit 1) is
-  // AMD's FSR rather than NVIDIA's. Bit 7 is XeSS (Intel). Bits 2-5 are the
+  // AMD's FSR rather than NVIDIA's. Bit 7 is XeSS (Intel), bit 8 FSR 4. Bits 2-5 are the
   // reset's own sub-reasons (g_dlResetsHeld/Returned/Unjudged/NoDelta,
   // temporal_pass.cpp) that this, the ABI's one caller, has never set; left
   // alone rather than reused.
   const unsigned flags=(resetHistory?1u:0u)|(s->currentSettings.dlaa?2u:0u)|
       (s->currentSettings.engine==edvr::TemporalEngine::Amd?64u:0u)|
-      (s->currentSettings.engine==edvr::TemporalEngine::Intel?128u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
+      (s->currentSettings.engine==edvr::TemporalEngine::Intel?128u:0u)|
+      (s->currentSettings.engine==edvr::TemporalEngine::AmdFsr4?256u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
   const float outJx=s->shift[eye][0],outJy=s->shift[eye][1]; float px=0,py=0;
   if(w){px=-outJx*float(w)/(s->frusta[eye][1]-s->frusta[eye][0]);} if(h){py=outJy*float(h)/(s->frusta[eye][3]-s->frusta[eye][2]);}
   s->renderedJitter[eye][0]=px;s->renderedJitter[eye][1]=py;

@@ -8,32 +8,22 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-09-17): route 1 MERGED TO MAIN** after flights 1 to 3 on
-  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed first,
-  c752ca3). `fix.temporal_aa = fsr` ships in the next release; the "works on
-  AMD" note waits on flight 4. AMD ships no Direct3D 11 backend for the FSR
-  3.1 upscaler (vendor-stated), so "the latest FSR 3" comes from only two
-  places: (1) the community D3D11 port (metarutaiga, hardened by OptiScaler;
-  MIT; FSR 3.1.2) compiled into d3d11.dll, which is route 1; (2) a D3D12
-  sidecar running AMD's signed DLL (FSR 4.1 on RDNA3/RDNA4, 3.1.5 elsewhere),
-  route 2, not built. The full reasoning is in Status detail below.
-- **Recommendation:** route 1 first, as `fix.temporal_aa = fsr`, a third
-  engine at the seam where the pass already chooses between NVIDIA's history
-  and its own (section 3); route 2 as a fourth engine (section 5) once route
-  1 has flown on both rigs and an AMD supporter has reported.
-- **Route 1 build (2026-09-16 evening, branch
-  `claude/fsr3-amd-nvidia-upscaling-00b69f`, since merged):** Track A
-  4d0a5fb, Track B b8cd3b2, merged with main 2c7c21e, Track C 6294f1f (WARP
-  rig `tools\fsr3_engine_test`, 31 checks). Full text: Status detail below.
-- **Flights (numbers in the journal):** 1 FLOWN 2026-09-17 06:00 (e70a44e,
-  Pimax, RTX 5090): clean, fsr 1.6 to 2.1 ms per stereo pair against NGX's
-  2.9 to 3.6, 83 to 89 fps; Sean: slightly better than the pass's own
-  history, not DLSS. 2 and 3 (06:07, Quest 3, VirtualDesktopXR): clean, 1.1
-  to 1.4 ms, 86 to 90 fps. Full entries: Status detail below.
-- **Next:** flight 4, an AMD supporter's log (the gate for a "works on
-  AMD" release note); the exported-symbols nit in the fetch tool (Open);
-  route 2 (FSR 4.1 through a D3D12 sidecar, section 5) only if DLSS-class
-  quality on RDNA3/RDNA4 is wanted, which is Sean's call after flight 4.
+- **State (2026-10-23): route 2 BUILDING, BRANCH ONLY.** `fix.temporal_aa =
+  fsr4` (FSR 4.1 through AMD's signed D3D12 DLLs over a D3D11/D3D12 bridge,
+  modelled on XeSS's) on `claude/fsr-4-1-flat-vr-support-5f6ea4`, flat and
+  VR, beside `fsr` (route 1, unchanged). Not merged to main until Sean says
+  it ships (D9). Facts, decisions D7 to D9 and the flight plan: journal,
+  "2026-10-23: route 2".
+- **Route 1 (2026-09-17): MERGED TO MAIN** after flights 1 to 3 (Pimax
+  and Quest 3, RTX 5090, clean; fsr 1.1 to 2.1 ms per stereo pair; Sean:
+  slightly better than the pass's own history, not DLSS). The community
+  D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
+  reasoning: Status detail below.
+- **Next:** flight 5 on Sean's Strix Halo (Radeon 8060S, RDNA 3.5, Proton)
+  with the route 2 build, launch option `FSR4_UPGRADE=1 %command%`;
+  signatures in the 2026-10-23 entry. Then the AMD licence read and the
+  installer payload (D8). Route 1's flight 4 (an AMD supporter's log) and
+  the exported-symbols nit (Open) still stand.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today; and a cosmetic nit seen
@@ -47,8 +37,9 @@ read 2026-09-16) unless marked believed.
   d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
   d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
   is accepted as a build-time-only tool.
-- **Ruled out (2026-09-16, vendor-stated):** an official AMD D3D11 backend
-  (none exists); FSR 4 on D3D11 (D3D12-only signed DLLs, RDNA3/RDNA4 only);
+- **Ruled out (2026-09-16, vendor-stated; 2026-10-23 additions in the
+  journal):** an official AMD D3D11 backend (none exists); FSR 4 on D3D11
+  or Vulkan (D3D12-only signed DLLs; officially RX 7000/9000 only);
   reaching FSR 4 through the driver's FSR 3.1-to-4 override (D3D12 ffx-api
   titles only); FSR 3.1.5 on D3D11 (it exists only inside the D3D12 DLL,
   and its one change over 3.1.4 is a negative-RCAS-output fix, moot with
@@ -57,9 +48,11 @@ read 2026-09-16) unless marked believed.
   device; the native OpenXR half (src\openxr\) is the only packaged VR half.
   Field rigs: an RTX 5090 with a Pimax Crystal Super and a Quest 3; the
   Steam rig also carries an AMD iGPU (gate on the DXGI vendor id, never on
-  adapter count). No AMD discrete card in-house: AMD verification needs a
-  supporter's log. FSR needs typed UAV loads (vendor-stated); cards without
-  them (believed: NVIDIA before Maxwell) must get a clean refusal.
+  adapter count); since 2026-10-23 a Ryzen AI Max+ 395 (Radeon 8060S, RDNA
+  3.5, gfx1151) on CachyOS, Mesa 26.2.5 RADV, Proton (DXVK + vkd3d-proton),
+  with no local Windows toolchain: builds come from the GitHub workflow.
+  FSR needs typed UAV loads (vendor-stated); cards without them (believed:
+  NVIDIA before Maxwell) must get a clean refusal.
 - **Detail:** 1 what exists; 2 what AMD ships; 3 the design; 4 flights;
   5 the sidecar; 6 decisions; 7 declined; journal at the end.
 
@@ -690,3 +683,73 @@ class of upscaler): that is route 2's go/no-go.
   stands: `advanced.temporal_aa_fsr_reactive` stays off by default and
   live. Ruled out: the reactive mask as a needed input for Elite's HUD
   under FSR 3.1, because both headsets read fine without it.
+- 2026-10-23: route 2, FSR 4.1 through the D3D12 bridge. Sean's ask: FSR
+  4.1 alongside FSR 3.1, flat and VR, on his Strix Halo (Radeon 8060S,
+  RDNA 3.5). **Facts (read 2026-10-23, vendor-stated unless marked):**
+  FSR 4.1.0 shipped in FidelityFX SDK v2.2.0 (2026-03-23), 4.1.1 in v2.3.0
+  (2026-06-24, the latest tag), which added FSR 4.1 on RX 7000 (RDNA 3,
+  INT8 model; RDNA 4 runs FP8). AMD's SDK: "FSR4 requires an AMD 7000
+  series discrete GPU or AMD 9000 series GPU or later" (`ml.md`); GPUOpen
+  puts RDNA 3.5 and RDNA 2 on the FSR 3 path, and the API "will
+  automatically select AMD FidelityFX Super Resolution 3.1.5" on other
+  hardware. So **RDNA 3.5 is not officially covered**. Files:
+  `Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll` (the app
+  calls it) and `amd_fidelityfx_upscaler_dx12.dll` (28.8 MB, beside it);
+  ffx-api headers `Kits/FidelityFX/api/include/{ffx_api.h,
+  ffx_api_types.h, dx12/ffx_api_dx12.h}` and
+  `Kits/FidelityFX/upscalers/include/ffx_upscale.h`. No Vulkan FSR 4.
+  Licence: `docs/license.md` opens with a binary-only redistribution
+  licence and then lists every file, the signed DLLs included, under MIT;
+  ambiguous, so read before shipping (D8). **Proton:** Valve's Wine has
+  an `amdxc64` shim (proton_11.0, experimental_11.0) whose
+  `UpdateFfxApiProvider` loads AMD's driver-side `amdxcffx64.dll` (FSR
+  4.1.1, bundled by Proton Experimental and Proton-CachyOS) when
+  `FSR4_UPGRADE=1`; Experimental auto-enables it only for discrete Navi3x
+  ids, not Strix Halo's 0x1586. vkd3d-proton 3.0 maps AGS WMMA to
+  `VK_KHR_cooperative_matrix` (RADV GFX11+ since Mesa 23.3); gfx1151 has
+  no FP8, so it would take INT8. Believed (community reports, no gfx1151
+  report on 4.1.1 found): the upgrade path runs the INT8 model on RDNA 3.5
+  iGPUs at about 25% fps cost. Precedent: OptiScaler's "FSR4 w/Dx12" for
+  D3D11 games is this bridge (shared NT-handle textures, shared fence),
+  and runs under Proton.
+  **Decisions (Sean, 2026-10-23):** **D7** `fsr4` is its own value
+  ("FSR 4.1" in the menus) and runs only when AMD's runtime offers a 4.x
+  provider for the device (`ffxQueryDescGetVersions`); otherwise it refuses
+  once, naming what was offered and, on Wine, the `FSR4_UPGRADE=1` launch
+  option, and the frame falls back as every refusal does. It never runs
+  3.1.5 in `fsr4`'s name. **D8** this pass ships a dev install only
+  (`tools\fetch_fsr4.py`, the build, the workflow, `install_edvr.py
+  --fsr4`); the installer payload and release packages wait for a working
+  flight and Sean's read of the licence. **D9** the branch is not merged to
+  main until Sean says it is ready to ship to users.
+  **Design:** a fourth engine, `src\d3d11\fsr4_engine.{h,cpp}`, one context
+  per upscaler slot (0 and 1 the eyes, 2 the VR world route; flat uses 0).
+  The bridge is XeSS's (`xess_engine.cpp`: D3D12 device by LUID, shared
+  textures with `SHARED_KEYEDMUTEX | SHARED_NTHANDLE`, the shared fence,
+  an allocator ring), copied rather than factored so the flown XeSS path
+  is not touched; factoring both onto one bridge is a follow-up. Inputs
+  follow route 1's measured contract (jitter and motion vectors in render
+  pixels, scale 1, current to previous; reversed Z; infinite depth and the
+  HDR route's HDR bit as `fsr` sets them), believed to carry over because
+  ffx-api's upscale contract is FSR 3.1's. FSR 4 differs in three places:
+  automatic exposure on both routes, not only the HDR one (AMD's `ml.md`
+  makes the exposure input optional only under `AUTO_EXPOSURE` and
+  recommends it; route 1's LDR route has neither, which FSR 3.1 accepts);
+  LDR colour (display-referred, UNORM) is declared non-linear sRGB
+  (`NON_LINEAR_COLORSPACE` at create, `NON_LINEAR_COLOR_SRGB` at dispatch)
+  as AMD's FSR 4 notes ask; and inputs are copied into shared textures of
+  exactly the render size, because FSR 4's auto exposure reads the whole
+  texture (OptiScaler's finding). The D3D12 device is made at feature
+  level 12_0 (FSR 4 needs Shader Model 6.6), and AMD's loader is never
+  unloaded. No reactive mask, no warm-up and no sharpening in this pass.
+  **Flight 5 signatures** (Strix Halo, Proton Experimental or
+  Proton-CachyOS, `FSR4_UPGRADE=1 %command%`, flat then VR): the
+  provider line names 4.1.x (upgrade path works) or the refusal names
+  3.1.5 only (it does not; ruled out without the launch option is the
+  control); a bridge refusal names the failing call and HRESULT (shared
+  texture or fence plumbing under DXVK/RADV); a stall shows as the
+  bounded fence wait's line or a log that stops mid-frame (the D3D11-side
+  GPU wait on the D3D12 signal; OptiScaler waits on the CPU on Linux for
+  this reason); ghosting or doubled edges point at the jitter or motion
+  sign, which route 1 measured but route 2 has not; the 30 s bridge line
+  gives the cost.

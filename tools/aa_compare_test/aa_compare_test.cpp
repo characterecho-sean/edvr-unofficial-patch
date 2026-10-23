@@ -73,7 +73,7 @@ static void machineCells() {
         check(m.press("dlss") == Press::WentOff, "and the one after goes off again");
     }
     // Every mode EDVR has goes off; off itself has nothing to compare.
-    for (const char* mode : {"on", "dlaa", "dlss", "fsr", "xess", "DLSS", "Xess"}) {
+    for (const char* mode : {"on", "dlaa", "dlss", "fsr", "fsr4", "xess", "DLSS", "Xess"}) {
         Machine m;
         check(m.press(mode) == Press::WentOff, "every temporal mode can be compared");
     }
@@ -143,7 +143,8 @@ static void wordsCells() {
     check(noticeText(Press::WentOff, "dlss", "CTRL+F7") == "AA off (comparison), press CTRL+F7 to restore", "the off notice names the key as bound");
     check(noticeText(Press::Restored, "dlss", "F7") == "AA restored: DLSS", "the restore notice names the mode");
     check(noticeText(Press::Restored, "on", "F7") == "AA restored: TAA" && noticeText(Press::Restored, "dlaa", "F7") == "AA restored: DLAA" &&
-          noticeText(Press::Restored, "fsr", "F7") == "AA restored: FSR" && noticeText(Press::Restored, "xess", "F7") == "AA restored: XeSS",
+          noticeText(Press::Restored, "fsr", "F7") == "AA restored: FSR" && noticeText(Press::Restored, "fsr4", "F7") == "AA restored: FSR 4.1" &&
+          noticeText(Press::Restored, "xess", "F7") == "AA restored: XeSS",
           "every mode has its name");
     check(!noticeText(Press::NothingToCompare, "off", "F7").empty(), "the nothing-to-compare notice exists");
     check(modeLabel("") == "off" && modeLabel("mystery") == "mystery", "an unknown mode is shown as written");

@@ -1187,8 +1187,9 @@ inline int flatHdrRouteTests() {
         expect(superFrame.selected() && flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Taa) == FlatFrameSeen::None &&
                    flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Dlss) == FlatFrameSeen::Treatable &&
                    flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Dlaa) == FlatFrameSeen::Treatable &&
-                   flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Fsr) == FlatFrameSeen::Treatable,
-               "a selected frame is treatable to the route for DLSS, DLAA and FSR above D, and not for EDVR's TAA there");
+                   flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Fsr) == FlatFrameSeen::Treatable &&
+                   flatHdrTriggerSeen(superFrame, FlatMonoResolveMode::Fsr4) == FlatFrameSeen::Treatable,
+               "a selected frame is treatable to the route for DLSS, DLAA, FSR and FSR 4.1 above D, and not for EDVR's TAA there");
         Sim taaAbove, dlssAbove;
         runs(superFrame, FlatMonoResolveMode::Taa, true, &taaAbove);
         runs(superFrame, FlatMonoResolveMode::Dlss, true, &dlssAbove);

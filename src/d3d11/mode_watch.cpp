@@ -8,6 +8,7 @@
 #include "engine_velocity.h"    // engineVelocityFlatAbandon: the flat teardown's velocity state
 #include "flat_runtime.h"       // flatRuntimeResize: the flat teardown, run before a commit leaves flat
 #include "fsr3_engine.h"        // fsr3ReleaseFeatures: FSR's features, released at every switch
+#include "fsr4_engine.h"        // fsr4ReleaseFeatures: FSR 4.1's contexts, released at every switch
 #include "menu.h"               // menuProfileSwitch: the menu closes and forgets the outgoing profile's first-time block
 #include "mode_watch_logic.h"
 #include "perf_monitor.h"       // perfMonitorProfileSwitch: the frame interval restarts at a switch
@@ -442,6 +443,7 @@ void commitPosted(uint64_t packed) {
         }
         dlaaReleaseForSwitch();
         fsr3ReleaseFeatures();
+        fsr4ReleaseFeatures();
         xessReleaseFeatures();
         menuProfileSwitch();
         g_teardowns.fetch_add(1, std::memory_order_relaxed);

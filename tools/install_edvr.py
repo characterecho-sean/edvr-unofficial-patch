@@ -8,6 +8,7 @@
     python tools/install_edvr.py --target steam --scope flat --dry-run
     python tools/install_edvr.py --target steam --scope both --ini
     python tools/install_edvr.py --target steam --scope both --xess --dry-run
+    python tools/install_edvr.py --target steam --scope flat --fsr4 --dry-run
     python tools/install_edvr.py --target frontier --native-openxr --dll \
         --native-receipt C:\\temp\\edvr-native.json
     python tools/install_edvr.py --restore-native C:\\temp\\edvr-native.json
@@ -80,6 +81,16 @@ xess; other modes need only the core profile. A plain --verify-only fails when
 the effective ini selects dlss or dlaa and nvngx_dlss.dll is not beside the game
 (NGX then refuses the mode and the log says DLSS is not available on this GPU).
 
+AMD's FSR 4.1 runtime follows the same rules (--fsr4; fix.temporal_aa = fsr4): the
+two signed D3D12 DLLs (amd_fidelityfx_loader_dx12.dll and
+amd_fidelityfx_upscaler_dx12.dll) and AMD-FIDELITYFX-LICENSE.txt, staged into the
+build by build.bat from tools/fetch_fsr4.py. A plain install adds the ones the game
+directory lacks and leaves a foreign one alone; --fsr4 installs all three, backing
+up a foreign one; --all includes them when built; a plain --verify-only fails when
+the effective ini selects fsr4 and the DLLs are missing or differ from the build.
+This is a developer install only: the self-contained installer and the release
+packages do not carry AMD's DLLs (docs/fsr-upscaler-design-2026-09-16.md, D8).
+
 Exit 0 when everything asked for landed and verified, 1 otherwise.
 """
 
@@ -114,6 +125,13 @@ NATIVE_KIND = "edvr-native-openxr"
 LEGACY_GRAPHICS_SOURCE = "build/d3d11.dll"
 FLAT_KIND = "edvr-flat"
 PROFILE_FILE = "edvr_profile.ini"
+
+# AMD's FSR 4.1 runtime, staged into the build by build.bat from tools/fetch_fsr4.py: the loader the engine
+# calls, the upscaler provider beside it, and AMD's licence. (receipt key, file name), in install order. A
+# developer install only (docs/fsr-upscaler-design-2026-09-16.md, D8): no installer or package carries them.
+FSR4_FILES = (("fsr4_loader", "amd_fidelityfx_loader_dx12.dll"),
+              ("fsr4_upscaler", "amd_fidelityfx_upscaler_dx12.dll"),
+              ("fsr4_license", "AMD-FIDELITYFX-LICENSE.txt"))
 
 # Backup pruning (see prune_backups, below backup_name): the newest KEEP_BACKUPS
 # of each file stay after a good install. BACKUP_FILE is exactly backup_name's
@@ -979,6 +997,7 @@ def _validate_v2_receipt_in(r):
                    xess=os.path.join(target, "libxess.dll"),
                    xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
                    xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
+    targets.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
     # A both install records the flat half's settings file as its own entry.
     if r["kind"] == NATIVE_KIND: targets["ini_flat"] = _ini_target(target, "flat")
     keys = [e["key"] for e in files]
@@ -991,6 +1010,7 @@ def _validate_v2_receipt_in(r):
                    "xess_license": os.path.join(build_dir(root), "INTEL-XESS-LICENSE.txt"),
                    "xess_third_party": os.path.join(build_dir(root), "INTEL-XESS-THIRD-PARTY.txt"),
                    "ini": _ini_source(root, "flat"), "profile": "generated"}
+        sources.update({key: os.path.join(build_dir(root), name) for key, name in FSR4_FILES})
         for e in files:
             expected = sources[e["key"]]
             if e["key"] == "ini" and e.get("source") == INI_GENERATED and r.get("build") == COMPILE_ONLY_MARK:
@@ -1733,6 +1753,13 @@ def _ini_selects_xess(target, half):
     return _ini_temporal_mode(target, half) == "xess"
 
 
+def _selects_fsr4(target, scope):
+    """Whether the settings a scope's game reads select FSR 4.1 (fix.temporal_aa = fsr4, which runs AMD's DLLs
+    from beside the game); see _selects_xess. `fsr` is the D3D11 port compiled into d3d11.dll and needs none."""
+    halves = {"both": ("vr", "flat"), "vr": ("vr",), "flat": ("flat",)}[scope]
+    return any(_ini_temporal_mode(target, half) == "fsr4" for half in halves)
+
+
 def _ini_temporal_mode(target, half):
     """Read one half's effective temporal mode, including the flat half's ini fallback."""
     ini = _ini_target(target, half)
@@ -1952,6 +1979,7 @@ def retire_stale_native_receipt(target, tag, dry_run=False):
                        dlss=os.path.join(target, "nvngx_dlss.dll"), xess=os.path.join(target, "libxess.dll"),
                        xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
                        xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
+        allowed.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
         files = old.get("files")
         if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
             raise ValueError("malformed native receipt files")
@@ -2018,7 +2046,7 @@ def _equivalent_startup_config(actual, expected):
 
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                             include_dlss=False, include_xess=False, include_ini=False, scope="both",
-                            keep_backups=KEEP_BACKUPS):
+                            keep_backups=KEEP_BACKUPS, include_fsr4=False):
     """Stage a scope's graphics payload and optional native components. A
     good install ends by pruning old backups (prune_backups); a dry run says
     what that would remove."""
@@ -2048,6 +2076,16 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     for key, name in (xess_names if include_xess else ()):
         if not os.path.isfile(os.path.join(build_dir(root), name)):
             errors.append("missing XeSS source %s" % os.path.join(build_dir(root), name))
+    # AMD's FSR 4.1 runtime, on the XeSS rules, for every scope: the files the game directory lacks are added
+    # when this build has them; --fsr4 installs all three (backing up a foreign one); a plain install leaves a
+    # foreign one alone.
+    explicit_fsr4 = include_fsr4
+    fsr4_active = FSR4_FILES if include_fsr4 else tuple(
+        (key, name) for key, name in FSR4_FILES
+        if not os.path.isfile(os.path.join(target, name)) and os.path.isfile(os.path.join(build_dir(root), name)))
+    for key, name in (FSR4_FILES if include_fsr4 else ()):
+        if not os.path.isfile(os.path.join(build_dir(root), name)):
+            errors.append("missing FSR 4 source %s" % os.path.join(build_dir(root), name))
     # Each settings file the scope owns, as (source, target, receipt key, template bytes).
     ini_pairs = _ini_pairs(root, target, scope) if include_ini else []
     for source, _, _, data in ini_pairs:
@@ -2162,6 +2200,35 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 print("[edvr] WARNING: the ini selects XeSS but its runtime/notices are not verified "
                       "(%s); install with --xess" % ", ".join(missing))
                 ok = False
+        if not explicit_fsr4:
+            for _, name in fsr4_active:
+                if name.endswith(".dll"):
+                    print("[edvr] WARNING: %s is missing, so FSR 4 cannot run; an install adds it from this build" %
+                          os.path.join(target, name))
+                else:
+                    print("[edvr] WARNING: %s is missing (AMD's licence for the FSR 4 DLLs; FSR 4 itself is not "
+                          "affected); an install adds it from this build" % os.path.join(target, name))
+        if explicit_fsr4:
+            for key, name in FSR4_FILES:
+                src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
+                if not os.path.isfile(dst) or sha256(dst) != sha256(src):
+                    print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
+        elif _selects_fsr4(target, scope):
+            # A plain install intentionally preserves a foreign optional DLL, and fsr4 only runs AMD's DLLs from
+            # beside the game: a selected mode must never read as verified unless they match this build.
+            built = all(os.path.isfile(os.path.join(build_dir(root), name)) for _, name in FSR4_FILES)
+            missing = [name for _, name in FSR4_FILES
+                       if not os.path.isfile(os.path.join(target, name)) or not built or
+                       sha256(os.path.join(build_dir(root), name)) != sha256(os.path.join(target, name))]
+            if missing:
+                if built:
+                    fix = "install with --fsr4"
+                else:
+                    fix = ("this build has no FSR 4 runtime to install either (made without the FSR 4 SDK: "
+                           "python tools/fetch_fsr4.py, then build), so fsr4 stays unavailable")
+                print("[edvr] %s verify mismatch: the ini selects FSR 4 but its runtime is not verified (%s); %s" %
+                      (scope, ", ".join(missing), fix))
+                ok = False
         for _, ini_target, _, data in ini_pairs:
             if not os.path.isfile(ini_target) or data is None or open(ini_target, "rb").read() != data:
                 print("[edvr] %s verify mismatch: %s" % (scope, ini_target)); ok = False
@@ -2208,6 +2275,12 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
     for key, name in xess_active:
+        src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
+        entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
+                        "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
+                        "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
+                        "installed_sha256": sha256(src)})
+    for key, name in fsr4_active:
         src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
         entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
@@ -2261,6 +2334,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     if xess_active and not explicit_xess:
         print("       NOTE     %s missing from the game directory; installed from this build" %
               ", ".join(name for _, name in xess_active))
+    if fsr4_active and not explicit_fsr4:
+        print("       NOTE     %s missing from the game directory; installed from this build" %
+              ", ".join(name for _, name in fsr4_active))
+    elif (not fsr4_active and _selects_fsr4(target, scope) and
+          not all(os.path.isfile(os.path.join(target, name)) for _, name in FSR4_FILES)):
+        print("       NOTE     the ini selects FSR 4, the game directory lacks its DLLs, and this build has none to "
+              "install (made without the FSR 4 SDK): fsr4 will refuse at run time")
     for e in entries:
         if e["key"] in generated_ini:
             print("       derive   %s from gen_installer_rc.flat_ini_bytes() (this compile-only build has no "
@@ -2916,6 +2996,9 @@ def _scope_self_test():
                            ("INTEL-XESS-LICENSE.txt", b"XESS-LICENSE"),
                            ("INTEL-XESS-THIRD-PARTY.txt", b"XESS-NOTICES")):
             Path(root, "build", name).write_bytes(data)
+        # AMD's FSR 4.1 runtime is built too: the optional-runtime rules below cover it as they cover XeSS.
+        for _, name in FSR4_FILES:
+            Path(root, "build", name).write_bytes(b"FSR4:" + name.encode("ascii"))
         g = game("vr-xess")
         before = tree(g)
         code, _ = run(args_for(g, "--scope", "vr", "--xess", "--dry-run", tag="vrxess"))
@@ -2941,7 +3024,8 @@ def _scope_self_test():
         code, text = run(args_for(g, "--scope", "vr", "--dry-run", tag="optmiss"))
         check(code == 0 and tree(g) == before, "a --dry-run that would add the optional runtimes wrote files")
         check("nvngx_dlss.dll was missing from the game directory" in text
-              and "libxess.dll, INTEL-XESS-LICENSE.txt, INTEL-XESS-THIRD-PARTY.txt missing" in text,
+              and "libxess.dll, INTEL-XESS-LICENSE.txt, INTEL-XESS-THIRD-PARTY.txt missing" in text
+              and "amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll, AMD-FIDELITYFX-LICENSE.txt missing" in text,
               "the dry-run plan did not name the missing optional runtimes: %r" % text)
         code, text = run(args_for(g, "--scope", "vr", tag="optmiss"))
         check(code == 0, "--scope vr with no optional runtimes failed: %r" % text)
@@ -2951,7 +3035,8 @@ def _scope_self_test():
               "a plain install did not add the missing DLSS and XeSS runtimes")
         receipt = os.path.join(g, "edvr_native_receipt.json")
         keys = {e["key"] for e in json.loads(Path(receipt).read_text(encoding="utf-8"))["files"]}
-        check({"dlss", "xess", "xess_license", "xess_third_party"} <= keys and verify_native_receipt(receipt, g)["version"] == 2,
+        check({"dlss", "xess", "xess_license", "xess_third_party"} | {key for key, _ in FSR4_FILES} <= keys
+              and verify_native_receipt(receipt, g)["version"] == 2,
               "the added runtimes are not in a verifying receipt: %r" % keys)
         code, text = run(args_for(g, "--scope", "vr", "--verify-only", tag="optmiss"))
         check(code == 0 and "WARNING" not in text, "--verify-only warned or failed with the runtimes in place: %r" % text)
@@ -3147,6 +3232,9 @@ def _main(argv=None):
                     help="also install build/nvngx_dlss.dll")
     ap.add_argument("--xess", action="store_true",
                     help="also install the XeSS-SR runtime and its notices (either scope)")
+    ap.add_argument("--fsr4", action="store_true",
+                    help="also install AMD's FSR 4.1 runtime (the two signed D3D12 DLLs) and its licence "
+                         "(either scope; a developer install, no installer carries them)")
     ap.add_argument("--ini", action="store_true",
                     help="also overwrite the scope's settings files (edvr.ini "
                          "for both and vr, edvr-flat.ini for both and flat) "
@@ -3154,7 +3242,7 @@ def _main(argv=None):
                          "A --compile-only build has no edvr-flat.ini, so that "
                          "template is derived in memory")
     ap.add_argument("--all", action="store_true",
-                    help="selected scope plus available DLSS and XeSS (never ini)")
+                    help="selected scope plus available DLSS, XeSS and FSR 4 (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
                      help="stage the experimental native OpenXR DLL and its "
                          "paired native graphics DLL as d3d11.dll (requires --dll, plus a receipt "
@@ -3203,7 +3291,7 @@ def _main(argv=None):
     if args.retire_stale_native_receipt:
         if any((args.scope, args.profile, args.root, args.native_openxr, args.native_receipt,
                 args.native_loader, args.native_runtime, args.restore_native, args.suspend,
-                args.resume, args.dll, args.openvr, args.dlss, args.xess, args.ini, args.all,
+                args.resume, args.dll, args.openvr, args.dlss, args.xess, args.fsr4, args.ini, args.all,
                 args.verify_only, args.force, args.no_backup)) or args.keep_backups != KEEP_BACKUPS:
             ap.error("--retire-stale-native-receipt takes only --target, --tag and --dry-run")
         return retire_stale_native_receipt(resolve_target(args.target),
@@ -3223,7 +3311,7 @@ def _main(argv=None):
 
     if args.restore_native:
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
-                args.dlss, args.xess, args.ini, args.all, args.verify_only, args.force,
+                args.dlss, args.xess, args.fsr4, args.ini, args.all, args.verify_only, args.force,
                 args.no_backup, args.tag)) or args.scope is not None or args.profile not in (None, "vr"):
             ap.error("--restore-native cannot be combined with install options")
         if not os.path.isabs(args.restore_native):
@@ -3234,7 +3322,7 @@ def _main(argv=None):
         if args.suspend and args.resume:
             ap.error("--suspend and --resume are exclusive")
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
-                args.dlss, args.xess, args.ini, args.all, args.verify_only, args.force,
+                args.dlss, args.xess, args.fsr4, args.ini, args.all, args.verify_only, args.force,
                 args.no_backup, args.tag)):
             ap.error("--suspend/--resume take only --target and --dry-run")
         return suspend_resume(resolve_target(args.target), resume=args.resume,
@@ -3253,9 +3341,9 @@ def _main(argv=None):
         direct = args.no_backup
         if (args.native_loader or args.native_runtime) and not direct:
             ap.error("--native-loader/--native-runtime require --no-backup direct mode")
-        if any((args.openvr, args.all, args.ini, args.dlss, args.xess, args.force)):
+        if any((args.openvr, args.all, args.ini, args.dlss, args.xess, args.fsr4, args.force)):
             ap.error("--native-openxr is mutually exclusive with --openvr, "
-                     "--all, --ini, --dlss, --xess, and --force")
+                     "--all, --ini, --dlss, --xess, --fsr4, and --force")
         if direct:
             if not args.native_loader:
                 ap.error("direct native route requires --native-loader")
@@ -3306,10 +3394,14 @@ def _main(argv=None):
     xess_source = os.path.join(build_dir(root), "libxess.dll")
     if args.xess and not os.path.isfile(xess_source):
         ap.error("--xess requested but %s is missing" % xess_source)
+    fsr4_source = os.path.join(build_dir(root), FSR4_FILES[0][1])
+    if args.fsr4 and not os.path.isfile(fsr4_source):
+        ap.error("--fsr4 requested but %s is missing (build with the FSR 4 SDK: python tools/fetch_fsr4.py)" % fsr4_source)
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
                                    include_xess=(args.xess or (args.all and os.path.isfile(xess_source))),
+                                   include_fsr4=(args.fsr4 or (args.all and os.path.isfile(fsr4_source))),
                                    include_ini=args.ini, scope=scope,
                                    keep_backups=args.keep_backups)
 
@@ -3644,6 +3736,175 @@ def _xess_opt_in_self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _fsr4_opt_in_self_test():
+    """AMD's FSR 4.1 runtime on the XeSS rules, in both scopes: a plain install adds the files the game
+    directory lacks and leaves a foreign one alone; --fsr4 backs a foreign one up; --all includes them when
+    built; verification checks them when requested or when the ini selects fsr4 (and says so when the build
+    has none); a dry run writes nothing; a receipt with them verifies and restores; --fsr4 with no built
+    runtime is refused."""
+    import contextlib
+    import io
+    names = {key: name for key, name in FSR4_FILES}
+    loader, upscaler, licence = (names["fsr4_loader"], names["fsr4_upscaler"], names["fsr4_license"])
+    tmp = tempfile.mkdtemp(prefix="edvr_fsr4_option_test_")
+    old_profile_validate = globals()["validate_elite_game"]
+    old_probe = globals()["strict_game_running"]
+    saved_pe = None
+    try:
+        import openxr_pe
+        import fetch_openxr_loader
+        root = Path(tmp, "repo")
+        (root / "build").mkdir(parents=True)
+        for name, data in (("d3d11.dll", b"FLAT-GRAPHICS"), (loader, b"PINNED-AMD-LOADER"),
+                           (upscaler, b"PINNED-AMD-UPSCALER"), (licence, b"AMD-LICENSE")):
+            (root / "build" / name).write_bytes(data)
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *a: (True, False)
+
+        def run(args):
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    code = main(args)
+            except SystemExit as stop:
+                code = stop.code
+            return code, out.getvalue()
+
+        def new_game(name):
+            game = Path(tmp, name)
+            game.mkdir()
+            (game / GAME_EXE).write_bytes(b"GAME")
+            return game
+
+        snapshot = lambda game: sorted((str(p.relative_to(game)), p.read_bytes())
+                                       for p in game.rglob("*") if p.is_file())
+
+        # ---- flat scope: the XeSS test's shape.
+        game = new_game("game")
+        (game / loader).write_bytes(b"FOREIGN-AMD-LOADER")
+        args = ["--root", str(root), "--target", str(game), "--scope", "flat"]
+        before = snapshot(game)
+        code, text = run(args + ["--dry-run"])
+        assert code == 0 and snapshot(game) == before, "plain FSR 4 dry run wrote files: %r" % text
+        assert upscaler in text and licence in text and "missing from the game directory" in text, \
+            "the plan did not name the missing FSR 4 files: %r" % text
+        code, text = run(args)
+        assert code == 0, "plain flat install failed: %r" % text
+        assert (game / loader).read_bytes() == b"FOREIGN-AMD-LOADER", "plain install overwrote a foreign FSR 4 loader"
+        assert (game / upscaler).read_bytes() == b"PINNED-AMD-UPSCALER" and \
+            (game / licence).read_bytes() == b"AMD-LICENSE", "plain install did not add the missing FSR 4 files"
+        assert run(args + ["--verify-only"])[0] == 0, "plain verify-only started requiring FSR 4"
+        code, text = run(args + ["--fsr4", "--verify-only"])
+        assert code == 1, "explicit FSR 4 verify accepted a foreign loader"
+        (game / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = fsr4 ; selected\n")
+        code, text = run(args + ["--verify-only"])
+        assert code == 1 and "the ini selects FSR 4" in text and loader in text, \
+            "plain verify accepted a selected fsr4 beside a foreign loader: %r" % text
+        (game / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = fsr\n")
+        assert run(args + ["--verify-only"])[0] == 0, "plain verify wanted AMD's DLLs for the D3D11 fsr port"
+        (game / "edvr-flat.ini").unlink()
+        assert restore_native(str(game / "edvr_flat_receipt.json")) == 0
+        assert (game / loader).read_bytes() == b"FOREIGN-AMD-LOADER" and not (game / upscaler).exists() and \
+            not (game / licence).exists(), "restore did not remove the added files and leave the foreign one"
+        before = snapshot(game)
+        code, text = run(args + ["--fsr4", "--dry-run"])
+        assert code == 0 and snapshot(game) == before, "explicit FSR 4 dry run wrote files: %r" % text
+        code, text = run(args + ["--fsr4"])
+        assert code == 0, "explicit FSR 4 install failed: %r" % text
+        assert (game / loader).read_bytes() == b"PINNED-AMD-LOADER"
+        assert any(p.read_bytes() == b"FOREIGN-AMD-LOADER" for p in game.glob(loader + ".pre-*.bak")), \
+            "explicit FSR 4 install did not back up the foreign loader"
+        assert run(args + ["--fsr4", "--verify-only"])[0] == 0
+        (game / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = fsr4\n")
+        assert run(args + ["--verify-only"])[0] == 0, "plain verify rejected a selected fsr4 with its DLLs verified"
+        (game / upscaler).write_bytes(b"STALE-AMD-UPSCALER")
+        assert run(args + ["--verify-only"])[0] == 1, "plain verify accepted a selected fsr4 after a DLL went stale"
+        (game / upscaler).unlink()
+        code, text = run(args + ["--verify-only"])
+        assert code == 1 and "the ini selects FSR 4" in text and "install with --fsr4" in text, \
+            "plain verify did not fail, naming --fsr4, for a selected fsr4 with a DLL missing: %r" % text
+        # edvr.ini alone selects it for the flat half when there is no edvr-flat.ini.
+        (game / "edvr-flat.ini").unlink()
+        (game / "edvr.ini").write_bytes(b"[fix]\ntemporal_aa = FSR4\n")
+        assert run(args + ["--verify-only"])[0] == 1, "an edvr.ini selecting fsr4 was not read for the flat half"
+
+        # ---- the VR scope and the native receipt.
+        saved_pe = (openxr_pe.validate_native_pair, fetch_openxr_loader.verify)
+        openxr_pe.validate_native_pair = lambda *a: None
+        fetch_openxr_loader.verify = lambda *a: None
+        for name, data in (("edvr_openxr_runtime.dll", b"RUNTIME"), ("edvr_openxr_graphics.dll", b"GRAPHICS"),
+                           ("openxr_loader.dll", b"LOADER"), ("OPENXR-LOADER-LICENSE.txt", b"NOTICE")):
+            (root / "build" / name).write_bytes(data)
+        vr = new_game("vr")
+        vr_args = ["--root", str(root), "--target", str(vr), "--scope", "vr"]
+        before = snapshot(vr)
+        code, text = run(vr_args + ["--fsr4", "--dry-run"])
+        assert code == 0 and snapshot(vr) == before, "--scope vr --fsr4 --dry-run wrote files: %r" % text
+        saved_graphics_check = openxr_pe.Image, openxr_pe._exports
+        try:
+            code, text = run(vr_args + ["--fsr4"])
+            assert code == 0, "--scope vr --fsr4 failed: %r" % text
+            for name, data in ((loader, b"PINNED-AMD-LOADER"), (upscaler, b"PINNED-AMD-UPSCALER"),
+                               (licence, b"AMD-LICENSE")):
+                assert (vr / name).read_bytes() == data, "--scope vr --fsr4 did not install " + name
+            receipt = str(vr / "edvr_native_receipt.json")
+            keys = {e["key"] for e in json.loads(Path(receipt).read_text(encoding="utf-8"))["files"]}
+            assert set(names) <= keys and verify_native_receipt(receipt, str(vr))["version"] == 2, \
+                "the FSR 4 files are not in a verifying native receipt: %r" % keys
+            (vr / "edvr.ini").write_bytes(b"[fix]\ntemporal_aa = fsr4\n")
+            assert run(vr_args + ["--verify-only"])[0] == 0, "VR verify rejected a selected fsr4 with its DLLs verified"
+            (vr / loader).unlink()
+            code, text = run(vr_args + ["--verify-only"])
+            assert code == 1 and "the ini selects FSR 4" in text, \
+                "VR verify did not fail for a selected fsr4 without its loader: %r" % text
+        finally:
+            openxr_pe.Image, openxr_pe._exports = saved_graphics_check
+
+        # ---- --all includes them when built; a build without them installs none, and a selected fsr4 says why.
+        every = new_game("all")
+        (every / loader).write_bytes(b"FOREIGN-AMD-LOADER")
+        code, text = run(["--root", str(root), "--target", str(every), "--scope", "flat", "--all"])
+        assert code == 0 and (every / loader).read_bytes() == b"PINNED-AMD-LOADER" and \
+            (every / licence).is_file(), "--all did not include the built FSR 4 runtime: %r" % text
+        assert any(p.read_bytes() == b"FOREIGN-AMD-LOADER" for p in every.glob(loader + ".pre-*.bak")), \
+            "--all did not back up the foreign FSR 4 loader it replaced"
+        hidden = [(root / "build" / name, root / "build" / (name + ".away")) for name in names.values()]
+        for src, dst in hidden:
+            os.rename(src, dst)
+        try:
+            unbuilt = new_game("unbuilt")
+            (unbuilt / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = fsr4\n")
+            code, text = run(["--root", str(root), "--target", str(unbuilt), "--scope", "flat", "--dry-run"])
+            assert code == 0 and "this build has none to install" in text, \
+                "the plan did not say a selected fsr4 has no runtime in this build: %r" % text
+            code, text = run(["--root", str(root), "--target", str(unbuilt), "--scope", "flat"])
+            assert code == 0 and not (unbuilt / loader).exists(), "a build without FSR 4 was refused or installed one"
+            code, text = run(["--root", str(root), "--target", str(unbuilt), "--scope", "flat", "--verify-only"])
+            assert code == 1 and "no FSR 4 runtime to install either" in text, \
+                "verify did not say the build has no FSR 4 runtime: %r" % text
+            code, text = run(["--root", str(root), "--target", str(unbuilt), "--scope", "flat", "--fsr4"])
+            assert code == 2 and not (unbuilt / loader).exists(), "--fsr4 with no built runtime was not refused"
+            fresh = new_game("unbuilt-all")
+            code, text = run(["--root", str(root), "--target", str(fresh), "--scope", "flat", "--all"])
+            assert code == 0 and not (fresh / loader).exists(), "--all failed for a build without FSR 4: %r %r" % (code, text)
+        finally:
+            for src, dst in hidden:
+                os.rename(dst, src)
+        # The options that cannot take part in a restore or a suspend refuse --fsr4 too.
+        for combo in (["--restore-native", str(game / "edvr_flat_receipt.json")], ["--suspend"]):
+            assert run(["--target", str(game), "--fsr4"] + combo)[0] == 2, "%s accepted --fsr4" % combo[0]
+        return True
+    except (AssertionError, OSError, ValueError, ImportError, SystemExit) as exc:
+        print("FSR 4 opt-in self-test failed: %s" % exc)
+        return False
+    finally:
+        if saved_pe:
+            openxr_pe.validate_native_pair, fetch_openxr_loader.verify = saved_pe
+        globals()["validate_elite_game"] = old_profile_validate
+        globals()["strict_game_running"] = old_probe
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _compile_only_self_test():
     """--compile-only: installs from the compile-only output and not from build/,
     refuses a tree that has moved or an output that changed, marks its receipt,
@@ -3702,7 +3963,10 @@ def _compile_only_self_test():
             print("compile_build_dir does not follow the toolchain/worktree rule")
             return False
         products = {"d3d11.dll": b"COMPILE-GRAPHICS", "libxess.dll": b"COMPILE-XESS",
-                    "INTEL-XESS-LICENSE.txt": b"LICENSE", "INTEL-XESS-THIRD-PARTY.txt": b"THIRD-PARTY"}
+                    "INTEL-XESS-LICENSE.txt": b"LICENSE", "INTEL-XESS-THIRD-PARTY.txt": b"THIRD-PARTY",
+                    "amd_fidelityfx_loader_dx12.dll": b"COMPILE-AMD-LOADER",
+                    "amd_fidelityfx_upscaler_dx12.dll": b"COMPILE-AMD-UPSCALER",
+                    "AMD-FIDELITYFX-LICENSE.txt": b"AMD-LICENSE"}
         for name, data in products.items():
             (cbuild / name).write_bytes(data)
         (root / "build" / "d3d11.dll").write_bytes(b"VALIDATED-GRAPHICS")   # must never be read
@@ -3714,7 +3978,8 @@ def _compile_only_self_test():
         saved_pe = (openxr_pe.Image, openxr_pe._exports)
         openxr_pe.Image = lambda data: data           # the live d3d11.dll reads as an EDVR build
         openxr_pe._exports = lambda image: ({0: "edvr_graphics"}, None)
-        args = ["--root", str(root), "--target", str(game), "--scope", "flat", "--xess", "--compile-only", "--tag", "co"]
+        args = ["--root", str(root), "--target", str(game), "--scope", "flat", "--xess", "--fsr4", "--compile-only",
+                "--tag", "co"]
         snapshot = lambda: sorted((str(p.relative_to(game)), p.read_bytes()) for p in game.rglob("*") if p.is_file())
 
         def write_receipt(**change):
@@ -3741,13 +4006,14 @@ def _compile_only_self_test():
         before = snapshot()
         code, text = run(args + ["--dry-run"])
         if code != 0 or snapshot() != before or "COMPILE-ONLY build" not in text or "NOT Windows validated" not in text \
-                or "d3d11.dll" not in text or "libxess.dll" not in text:
+                or "d3d11.dll" not in text or "libxess.dll" not in text or "amd_fidelityfx_loader_dx12.dll" not in text:
             print("compile-only --dry-run: wrote files or planned the wrong thing: %r %r" % (code, text)); ok = False
         code, text = run(args)
         receipt_file = game / "edvr_flat_receipt.json"
         installed = json.loads(receipt_file.read_text()) if receipt_file.is_file() else {}
         if code != 0 or (game / "d3d11.dll").read_bytes() != products["d3d11.dll"] \
-                or (game / "libxess.dll").read_bytes() != products["libxess.dll"]:
+                or (game / "libxess.dll").read_bytes() != products["libxess.dll"] \
+                or any((game / name).read_bytes() != products[name] for _, name in FSR4_FILES):
             print("compile-only install did not take the compile-build files: %r %r" % (code, text)); ok = False
         if installed.get("build") != COMPILE_ONLY_MARK:
             print("compile-only install did not mark its receipt: %r" % installed.get("build")); ok = False
@@ -3798,7 +4064,8 @@ def _compile_only_self_test():
         (cbuild / "d3d11.dll").write_bytes(products["d3d11.dll"])
 
         # The marked receipt validates against the compile-build, not build/, so it restores.
-        if restore_native(str(receipt_file)) != 0 or (game / "d3d11.dll").read_bytes() != b"OLD-GRAPHICS":
+        if restore_native(str(receipt_file)) != 0 or (game / "d3d11.dll").read_bytes() != b"OLD-GRAPHICS" \
+                or any((game / name).exists() for _, name in FSR4_FILES):
             print("a compile-only receipt did not restore"); ok = False
         for combo in (["--restore-native", str(receipt_file)], ["--native-openxr"], ["--suspend"]):
             code, _ = run(["--target", str(game), "--compile-only"] + combo)
@@ -4236,6 +4503,7 @@ def self_test():
     ok = True
     if not _game_probe_self_test(): ok = False
     if not _xess_opt_in_self_test(): ok = False
+    if not _fsr4_opt_in_self_test(): ok = False
     if not _compile_only_self_test(): ok = False
     if not _compile_only_ini_self_test(): ok = False
 
@@ -4436,6 +4704,8 @@ def self_test():
         Path(froot, "build", "libxess.dll").write_bytes(b"FLAT-XESS")
         Path(froot, "build", "INTEL-XESS-LICENSE.txt").write_bytes(b"INTEL-LICENSE")
         Path(froot, "build", "INTEL-XESS-THIRD-PARTY.txt").write_bytes(b"INTEL-THIRD-PARTY")
+        for _key, _name in FSR4_FILES:
+            Path(froot, "build", _name).write_bytes(b"FLAT-" + _name.encode("ascii"))
         Path(froot, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
         Path(fgame, GAME_EXE).write_bytes(b"GAME")
         Path(fgame, "edvr.ini").write_bytes(b"[user]\nkeep=1\n")
@@ -4461,6 +4731,8 @@ def self_test():
             assert Path(fgame, "libxess.dll").read_bytes() == b"FLAT-XESS"
             assert Path(fgame, "INTEL-XESS-LICENSE.txt").read_bytes() == b"INTEL-LICENSE"
             assert Path(fgame, "INTEL-XESS-THIRD-PARTY.txt").read_bytes() == b"INTEL-THIRD-PARTY"
+            for _key, _name in FSR4_FILES:
+                assert Path(fgame, _name).read_bytes() == b"FLAT-" + _name.encode("ascii"), "--all missed " + _name
             assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
             # First flat install with no edvr-flat.ini yet seeds it from the
             # existing edvr.ini; after that the two profiles' settings part.
@@ -4488,6 +4760,7 @@ def self_test():
             assert xr_snapshot() == before_xr, "flat restore changed Openvr"
             assert not Path(fgame, "d3d11.dll").exists()
             assert not Path(fgame, "libxess.dll").exists()
+            assert not any(Path(fgame, _name).exists() for _key, _name in FSR4_FILES)
             assert not descriptor_path.exists()
             # --ini must require the generated flat template, never copy the
             # full VR INI in the repository root, and restore the user's INI.

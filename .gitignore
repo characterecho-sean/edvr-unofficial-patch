@@ -28,6 +28,11 @@ third_party/ffx-dx11/
 # are verified at build time and packaged with their notices.
 third_party/xess/
 
+# AMD FidelityFX (FSR 4.1) SDK subset fetched by tools/fetch_fsr4.py: the ffx-api
+# headers and AMD's signed D3D12 runtime DLLs, verified at build time. Dev
+# install only for now; nothing here is packaged or shipped.
+third_party/fsr4/
+
 # Pinned Khronos loader binary, fetched by tools/fetch_openxr_loader.py.
 third_party/openxr/loader/
 

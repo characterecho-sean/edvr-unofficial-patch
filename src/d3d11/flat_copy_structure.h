@@ -128,7 +128,7 @@ inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMono
                                        uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH) {
     if (keyAuto && !routeLatched && flatHdrRouteEvaluatesAtRender(mode, renderW, renderH, outputW, outputH))
         return FlatWeaponRoute::Hdr;
-    // TAA and DLAA have their existing ownership; every external upscaler is
+    // TAA and DLAA have their existing ownership; every external upscaler (FSR 4.1 among them) is
     // judged by the copy route whenever the HDR route does not take the frame.
     return mode == FlatMonoResolveMode::Taa || mode == FlatMonoResolveMode::Dlaa
         ? FlatWeaponRoute::Unchanged : FlatWeaponRoute::Copy;

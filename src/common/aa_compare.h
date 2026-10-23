@@ -99,6 +99,7 @@ inline std::string modeLabel(const std::string& mode) {
     if (_stricmp(mode.c_str(), "dlaa") == 0) return "DLAA";
     if (_stricmp(mode.c_str(), "dlss") == 0) return "DLSS";
     if (_stricmp(mode.c_str(), "fsr") == 0) return "FSR";
+    if (_stricmp(mode.c_str(), "fsr4") == 0) return "FSR 4.1";
     if (_stricmp(mode.c_str(), "xess") == 0) return "XeSS";
     if (mode.empty() || _stricmp(mode.c_str(), "off") == 0) return "off";
     return mode;

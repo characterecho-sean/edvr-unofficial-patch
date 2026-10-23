@@ -5,6 +5,7 @@
 #include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/dlaa.h"
 #include "../../src/d3d11/fsr3_engine.h"
+#include "../../src/d3d11/fsr4_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
 #include "../../src/d3d11/flat_isolation_mode.h"
@@ -233,6 +234,7 @@ ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* context,const void*
 }
 bool dlaaAvailable(ID3D11Device*,const char**){return true;}
 bool fsr3Available(ID3D11Device*,const char**){return true;}
+bool fsr4Available(ID3D11Device*,const char**){return true;}
 bool xessAvailable(ID3D11Device*,const char**){return true;}
 void xessReleaseFeatures(){}
 void xessShutdown(){}
@@ -265,6 +267,19 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
                                   readPixel(c,colour,&observedBackendOutside,4,1,1);
     infiniteSeen=infinite;check(nearZ==expectedNear && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
+}
+// FSR 4.1 takes fsr3Evaluate's arguments without the reactive mask; the route and the planes are FSR's.
+bool fsr4Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
+    ID3D11Texture2D* out,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,float,
+    float nearZ,float,float fov,const char** why,bool infinite,bool hdr) {
+    backendSlots.push_back(static_cast<int>(slot));
+    observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
+    observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;
+    {D3D11_TEXTURE2D_DESC d{};colour->GetDesc(&d);observedColourFormat=d.Format;out->GetDesc(&d);observedOutFormat=d.Format;}
+    if(hdr) observedBackendPixels=readPixel(c,colour,&observedBackendCenter,4,8,8) &&
+                                  readPixel(c,colour,&observedBackendOutside,4,1,1);
+    infiniteSeen=infinite;check(nearZ==expectedNear && std::abs(fov-1.5707963f)<1e-5f,"FSR 4 actual near and FOV");
+    return backend(c,depth,mv,nullptr,out,jx,jy,reset,why);
 }
 } // namespace edvr
 #include "flat_projection_scope_tests.h"
@@ -520,6 +535,8 @@ int main(int argc,char** argv) {
     check(pixel(taa.Get())==0xff0000ff,"TAA reset spatial upsample");f.reset=false;++f.frame;taa=run(true);
     check(pixel(taa.Get())==0xff0000ff,"TAA static color remains stable");
     f.mode=edvr::FlatMonoResolveMode::Fsr;++f.frame;run(true);check(infiniteSeen,"FSR receives explicit infinite-depth mode");
+    infiniteSeen=false;f.mode=edvr::FlatMonoResolveMode::Fsr4;++f.frame;run(true);
+    check(infiniteSeen,"FSR 4 receives explicit infinite-depth mode");
     f.mode=edvr::FlatMonoResolveMode::Dlss;++f.frame;auto retained=run(true);
     auto beforeInvalidate=edvr::flatMonoResolveStats();
     edvr::flatMonoResolveInvalidateHistory();++f.frame;auto invalidated=run(true);

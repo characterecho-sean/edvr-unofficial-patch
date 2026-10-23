@@ -17,6 +17,7 @@
 #include "flat_celestial.h"    // planet patch motion: the rows' tangents for the records the resolve binds (fetchCelestialRecords)
 #include "celestial_motion.h"
 #include "xess_engine.h"
+#include "fsr4_engine.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
 #include "flat_projection_ownership.h"
@@ -4132,6 +4133,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if (mode != s.mode) {
         if (s.engine == FlatMonoResolveMode::Xess) xessReleaseFeatures();
+        if (s.engine == FlatMonoResolveMode::Fsr4) fsr4ReleaseFeatures();
         s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
         s.mode = mode; reset();
         // A new mode is a new question for the stand-down: everything restarts.
@@ -4139,6 +4141,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         engineVelocityConfigure(enabled);
         s.phase.resetHistory();
         s.engine = _stricmp(mode.c_str(), "xess") == 0 ? FlatMonoResolveMode::Xess :
+            _stricmp(mode.c_str(), "fsr4") == 0 ? FlatMonoResolveMode::Fsr4 :
             _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
             _stricmp(mode.c_str(), "dlss") == 0 ? FlatMonoResolveMode::Dlss :
             _stricmp(mode.c_str(), "dlaa") == 0 ? FlatMonoResolveMode::Dlaa : FlatMonoResolveMode::Taa;
@@ -4189,8 +4192,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.device && actualDevice.Get() != s.device.Get()) {
         flatRuntimeResize();
         // Resize releases XeSS features; end its device binding before this
-        // render thread adopts the replacement device.
+        // render thread adopts the replacement device. FSR 4's bridge is bound the same way.
         xessShutdown();
+        fsr4Shutdown();
         s.thread = GetCurrentThreadId();
     }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }

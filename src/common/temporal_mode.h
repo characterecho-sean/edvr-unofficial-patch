@@ -13,6 +13,7 @@ inline bool temporalModeEnabled(const std::string& mode) {
            _stricmp(mode.c_str(), "dlaa") == 0 ||
            _stricmp(mode.c_str(), "dlss") == 0 ||
            _stricmp(mode.c_str(), "fsr") == 0 ||
+           _stricmp(mode.c_str(), "fsr4") == 0 ||
            _stricmp(mode.c_str(), "xess") == 0;
 }
 
@@ -187,19 +188,22 @@ struct TemporalFootTracker {
 };
 
 // Which history the temporal pass hands the frame to. Own is the pass's own
-// clip; Nvidia, Amd and Intel are the external, trained upscalers (docs\
+// clip; Nvidia, Amd, Intel and AmdFsr4 are the external, trained upscalers (docs\
 // fsr-upscaler-design-2026-09-16.md, section 3); Intel is XeSS-SR. Anything the mode string
 // does not name (off included) reads as Own: off never reaches the seam,
 // and an unrecognised value already falls back to the pass's own history
 // (temporalModeEnabled above), so there is nothing else to run.
 // Intel is XeSS-SR, the third external engine (the VR eye pass runs it per eye; flat runs it through flat_mono_resolve).
-enum class TemporalEngine { Own, Nvidia, Amd, Intel };
+// AmdFsr4 is AMD's FSR 4.1 through AMD's own D3D12 runtime (fsr4_engine.h), the fourth external engine: the readers that
+// only ask for an external engine count it (temporalExternalEngine), and Amd stays FSR 3.1's alone (its warm, its reactive mask).
+enum class TemporalEngine { Own, Nvidia, Amd, Intel, AmdFsr4 };
 
 inline TemporalEngine temporalEngineFor(const std::string& mode) {
     if (_stricmp(mode.c_str(), "dlaa") == 0 || _stricmp(mode.c_str(), "dlss") == 0) {
         return TemporalEngine::Nvidia;
     }
     if (_stricmp(mode.c_str(), "fsr") == 0) return TemporalEngine::Amd;
+    if (_stricmp(mode.c_str(), "fsr4") == 0) return TemporalEngine::AmdFsr4;
     if (_stricmp(mode.c_str(), "xess") == 0) return TemporalEngine::Intel;
     return TemporalEngine::Own;
 }

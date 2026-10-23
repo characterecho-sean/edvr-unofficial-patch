@@ -113,8 +113,9 @@ jobs:
             third_party/ngx
             third_party/ffx-dx11
             third_party/xess
+            third_party/fsr4
             third_party/openxr/loader
-          key: edvr-deps-${{ steps.image.outputs.key }}-${{ hashFiles('tools/fetch_ngx.py', 'tools/fetch_ffx_dx11.py', 'tools/fetch_xess.py', 'tools/fetch_openxr_loader.py') }}
+          key: edvr-deps-${{ steps.image.outputs.key }}-${{ hashFiles('tools/fetch_ngx.py', 'tools/fetch_ffx_dx11.py', 'tools/fetch_xess.py', 'tools/fetch_fsr4.py', 'tools/fetch_openxr_loader.py') }}
 
       - name: Fetch pinned public dependencies
         if: steps.deps.outputs.cache-hit != 'true'
@@ -125,6 +126,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'FidelityFX DX11 fetch/build failed' }
           python tools\fetch_xess.py --dest third_party\xess
           if ($LASTEXITCODE -ne 0) { throw 'Intel XeSS SDK fetch failed' }
+          python tools\fetch_fsr4.py --dest third_party\fsr4
+          if ($LASTEXITCODE -ne 0) { throw 'AMD FSR 4 SDK fetch failed' }
           python tools\fetch_openxr_loader.py
           if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader fetch failed' }
 
@@ -136,6 +139,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'FidelityFX DX11 verification failed' }
           python tools\fetch_xess.py --verify third_party\xess
           if ($LASTEXITCODE -ne 0) { throw 'Intel XeSS SDK verification failed' }
+          python tools\fetch_fsr4.py --verify third_party\fsr4
+          if ($LASTEXITCODE -ne 0) { throw 'AMD FSR 4 SDK verification failed' }
           python tools\fetch_openxr_loader.py --verify
           if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader verification failed' }
 
@@ -147,6 +152,7 @@ jobs:
             third_party/ngx
             third_party/ffx-dx11
             third_party/xess
+            third_party/fsr4
             third_party/openxr/loader
           key: ${{ steps.deps.outputs.cache-primary-key }}
 

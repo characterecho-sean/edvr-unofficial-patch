@@ -10,15 +10,24 @@ numpy and Pillow packages, which several of the tools the build runs import:
 pip install -r tools\requirements.txt
 ```
 
-For a release-capable build, fetch all four pinned dependencies. The fetch
-tools verify their sources and staged files; the build verifies them again:
+For a release-capable build, fetch the pinned dependencies. The fetch tools
+verify their sources and staged files; the build verifies them again:
 
 ```
 python tools\fetch_ngx.py
 python tools\fetch_ffx_dx11.py
 python tools\fetch_xess.py
+python tools\fetch_fsr4.py
 python tools\fetch_openxr_loader.py
 ```
+
+`fetch_fsr4.py` stages AMD's FidelityFX (FSR 4.1) headers and its two signed
+D3D12 DLLs (about 29 MB) into `%LOCALAPPDATA%\EDVR\fsr4-sdk`; `third_party\fsr4`
+or `EDVR_FSR4_SDK` name another copy, and `EDVR_FSR4_SDK=none` forces the build
+without it. A build with no copy still succeeds, and `fix.temporal_aa = fsr4`
+then refuses at run time. The DLLs land in `build\` and
+`python tools\install_edvr.py --fsr4` places them beside the game; the
+installer and the release packages do not carry them yet.
 
 Then build:
 
@@ -41,7 +50,7 @@ build if one shows a window or takes the keyboard focus; see
 
 For a native Windows build from Linux, use the **Native Windows release build**
 workflow (`.github/workflows/release.yml`). It runs on Windows Server 2022 with
-Visual Studio 2022, Python 3.12, and all four pinned dependencies. It invokes
+Visual Studio 2022, Python 3.12, and all five pinned dependencies. It invokes
 the full `build.bat --wait-lock --jobs 4`, including every test rig and the
 installer gate, then calls `package.bat`. The packages contain the exact
 version stamp checked by `package_native.py`. Each successful run uploads the
@@ -68,9 +77,10 @@ min); the unchanged workflow on `main`, run alongside, took 22.3 min (build
 step 17.9 min). Runner speed varies a good deal between runs (the same cold
 build was 20 min a day earlier), so compare runs made together.
 
-- **Pinned dependencies** (`third_party\ngx`, `ffx-dx11`, `xess`,
-  `openxr\loader`; 229 MB). Key: the runner image and the hash of the four
-  `tools\fetch_*.py` files, which hold the pins. A hit skips the fetch and the
+- **Pinned dependencies** (`third_party\ngx`, `ffx-dx11`, `xess`, `fsr4`,
+  `openxr\loader`; 229 MB measured before `fsr4`, whose DLLs add about 29 MB).
+  Key: the runner image and the hash of the five `tools\fetch_*.py` files,
+  which hold the pins. A hit skips the fetch and the
   FidelityFX build (2.7 min); the `--verify` step runs on a restored copy
   exactly as on a fetched one, and a failed fetch or verify never saves.
 - **Compile cache** (about 100 MB compressed). Key: the runner image, the

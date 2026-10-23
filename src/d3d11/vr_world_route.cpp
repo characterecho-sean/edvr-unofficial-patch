@@ -150,8 +150,10 @@ FlatMonoResolveMode resolveModeFromConfig(bool* known) {
     const std::string m = Config::get().getString("fix.temporal_aa", "off");
     // XeSS stays on the world route's fallback: the route's jitter is the flat profile's phase cycle, which has no XeSS minimum
     // (only flat_runtime's own, flat_mono_resolve.cpp:259 refuses a short one), so the route would not get its jitter right.
+    // FSR 4.1 follows FSR 3.1's path: the route's own slot, the phase cycle as it is.
     if (known) *known = temporalModeEnabled(m) && _stricmp(m.c_str(), "xess") != 0;
     if (_stricmp(m.c_str(), "fsr") == 0) return FlatMonoResolveMode::Fsr;
+    if (_stricmp(m.c_str(), "fsr4") == 0) return FlatMonoResolveMode::Fsr4;
     if (_stricmp(m.c_str(), "dlss") == 0) return FlatMonoResolveMode::Dlss;
     if (_stricmp(m.c_str(), "dlaa") == 0) return FlatMonoResolveMode::Dlaa;
     return FlatMonoResolveMode::Taa;

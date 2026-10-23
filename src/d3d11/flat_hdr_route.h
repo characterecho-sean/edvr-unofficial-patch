@@ -446,7 +446,7 @@ inline FlatMonoFrame flatSelectHdrRoute(FlatRuntimePrefix& p, const FlatHdrFrame
 }
 
 // ---- the route's gate ----------------------------------------------------------------------------
-// The effective route's evaluation size must be the render size: DLSS and DLAA at R = D and above, FSR the
+// The effective route's evaluation size must be the render size: DLSS and DLAA at R = D and above, FSR (4.1 too) the
 // same, EDVR's TAA only at R = D (above D it evaluates on the display grid, which stays on the copy route).
 inline bool flatHdrRouteEvaluatesAtRender(FlatMonoResolveMode mode, uint32_t rW, uint32_t rH, uint32_t dW, uint32_t dH) {
     const auto route = flatResolveRoute(mode, rW, rH, dW, dH);

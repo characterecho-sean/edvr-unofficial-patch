@@ -749,15 +749,15 @@ inline int flatCopyStructureTests() {
         expect(od.outcome == FlatCopyOutcome::Disabled && off.reason == FlatMonoReason::NoTonePass,
                "the key off: the structure admits nothing (the whitelist alone, as before the route existed)");
         // A route-served frame is the route's: DLSS, FSR and TAA at R = D, DLSS and FSR above; TAA above it, and the latch, are not.
-        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Taa}) {
+        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Fsr4, FlatMonoResolveMode::Taa}) {
             Build native; Built nb = build(native);
             FlatCopyDiag nd;
             const FlatMonoFrame out = admit(nb, policy(true, mode), &nd);
             expect(nd.outcome == FlatCopyOutcome::RouteServes && out.reason == FlatMonoReason::NoTonePass,
-                   "R = D: the HDR route serves every mode, and the whitelist's answer stands");
+                   "R = D: the HDR route serves every mode, FSR 4.1 included, and the whitelist's answer stands");
         }
         Build up; up.sc.hW = 5760; up.sc.hH = 3240;
-        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Taa}) {
+        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Fsr4, FlatMonoResolveMode::Taa}) {
             Built ub = build(up);
             FlatCopyDiag ud;
             admit(ub, policy(true, mode), &ud);
@@ -765,7 +765,7 @@ inline int flatCopyStructureTests() {
                    "R = 1.5 D: the route serves DLSS and FSR (they evaluate at R); EDVR's TAA does not, so the copy admits it");
         }
         Build down; down.sc.hW = 1920; down.sc.hH = 1080;
-        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Taa}) {
+        for (const FlatMonoResolveMode mode : {FlatMonoResolveMode::Dlss, FlatMonoResolveMode::Fsr, FlatMonoResolveMode::Fsr4, FlatMonoResolveMode::Taa}) {
             Built db = build(down);
             FlatCopyDiag dd;
             admit(db, policy(true, mode), &dd);

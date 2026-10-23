@@ -31,6 +31,7 @@
 #include "../../src/d3d11/flat_mono_resolve.h"
 #include "../../src/d3d11/dlaa.h"
 #include "../../src/d3d11/fsr3_engine.h"
+#include "../../src/d3d11/fsr4_engine.h"
 #include "../../src/d3d11/engine_velocity.h"
 #include "../../src/d3d11/flat_camera_inject.h"
 #include "../../src/d3d11/gpu_census.h"
@@ -226,6 +227,7 @@ bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return fa
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 bool dlaaAvailable(ID3D11Device*, const char**) { return true; }
 bool fsr3Available(ID3D11Device*, const char**) { return true; }
+bool fsr4Available(ID3D11Device*, const char**) { return true; }
 bool xessAvailable(ID3D11Device*, const char**) { return false; }
 void xessReleaseFeatures() {}
 void xessShutdown() {}
@@ -254,6 +256,9 @@ bool dlaaEvaluate(ID3D11DeviceContext* c, int slot, ID3D11Texture2D* colour, ID3
     return true;
 }
 bool fsr3Evaluate(ID3D11DeviceContext*, unsigned, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D*,
+                  ID3D11Texture2D*, uint32_t, uint32_t, uint32_t, uint32_t, float, float, bool, float, float, float, float,
+                  const char**, bool, bool) { return false; }
+bool fsr4Evaluate(ID3D11DeviceContext*, unsigned, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D*,
                   ID3D11Texture2D*, uint32_t, uint32_t, uint32_t, uint32_t, float, float, bool, float, float, float, float,
                   const char**, bool, bool) { return false; }
 }  // namespace edvr

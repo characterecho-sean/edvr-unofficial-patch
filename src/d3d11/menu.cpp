@@ -980,6 +980,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
                 else if (c.value == "on") c.label = "TAA";
                 else if (c.value == "dlss") c.label = nvidiaLabel();
                 else if (c.value == "fsr") c.label = "FSR3";
+                else if (c.value == "fsr4") c.label = "FSR4";
             }
             out.push_back(c);
         }
