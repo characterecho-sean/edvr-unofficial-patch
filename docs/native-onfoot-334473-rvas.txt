@@ -1,0 +1,103 @@
+# Build 332841 RVAs bound by the native on-foot paths (docs/native-onfoot-334473-retarget-2026-10-23.md).
+# Format for tools/build_diff.py map --rvas-file: one RVA per line, optional name, # comments.
+# 99 values, sorted (code, then .rdata, then .data). "(c)" marks a comment-only mention.
+# Not listed: 0x2939677 is a rel32 displacement quoted in a comment (0x434ECC0 - (0x1A15644 + 5)), not an RVA.
+0x653C50 Rir (cmp [rcx+18h],1000h)
+0x741520 frAnim Animate handler
+0x831A10 Deactivate
+0xFDDD10 AO helper (c)
+0xFDE0D0 rest model matrix leaf (main-mapped -> 0xFDF1D0)
+0x19973D0 look-to-aim update
+0x1997C51 ADS action read site
+0x19B1240 povCamera handler (main-mapped -> 0x19B4000)
+0x19B14E0 HumanoidPanelComponent gate (c)
+0x19B1587 panel patch site (76 73)
+0x19B15FC panel gate jbe target (c)
+0x1A0DCD0 HUD layout hook
+0x1A112B0 HumanoidModelManager::SetMode
+0x1A14320 humanoid AR render
+0x1A1485D weapon UI submit caller (return address)
+0x1A148CD weapon UI submit caller (return address)
+0x1A14970 HRC submit
+0x1A149A6 mesh site 2 (FF 90 80 00 00 00)
+0x1A149A8 mesh site 2 patched byte
+0x1A14D80 marker render entry
+0x1A15640 reticle load site (9 bytes)
+0x1A15644 reticle call (c)
+0x1A15645 reticle rel32 (c)
+0x1A15648 reticle rel32 end (c)
+0x1A36453 mesh patch site (74 2A)
+0x1A439F0 sink getter slot target
+0x1A8D190 mesh predicate slot (c)
+0x1A9C370 look processor
+0x1AAF120 weapon UI verify site (25 bytes)
+0x1AAF129 weapon UI branch byte
+0x1AB32F0 HUD layout routine (c)
+0x1AB3351 HUD layout branch (c)
+0x1AB385B HUD layout re-send (c)
+0x1CA6510 load stage dispatcher
+0x1CFBBE0 CTSA ctor
+0x1D0FBA0 CTSA dtor
+0x1D15300 CTSA Run
+0x1D1CDF0 SGMM Run
+0x1D1D1E2 not-ready exit (c)
+0x1D1D220 phase
+0x1D4A710 CTSA Stop
+0x1D7C8E0 CTSA state
+0x1D818D0 CTSA Start
+0x23C7100 caller root (name table)
+0x23C72E9 caller return (name table)
+0x260D6B0 load wait condition
+0x28723C0 render-mode setter
+0x28873C0 requester (c)
+0x2887A15 requester HUD read (c)
+0x3174210 weapon UI getter (call target)
+0x31EBE90 caller root (name table)
+0x31EC020 caller return (name table)
+0x372EF80 caller root (name table)
+0x372F491 caller return (name table)
+0x3C9B760 caller root (name table)
+0x3C9BF53 caller return (name table)
+0x3DA1DE0 AMC submit job (body shift)
+0x3DA2242 AMC return address (same unit as main-mapped 0x3DA20DE)
+0x3DA2C80 avatar visibility job (eye probe)
+0x3DD61AF root getter call (main-mapped comment -> 0x3DD8E6F)
+0x3DD9EA0 item-apply (c)
+0x3E75DA0 caller root (name table)
+0x3E75F6D caller return (name table)
+0x434D320 instance submit
+0x434D8D5 GUI mesh return address
+0x434ECC0 reticle callee
+0x43B796A MGMC thunk (c)
+0x43ED820 MGMC submit job
+0x43EDC24 MGMC return address
+0x43FB740 AO helper (c)
+0x4714FE0 panel submit
+0x4C837B0 record writer
+0x4C8E020 started-array insert
+0x4C8E500 set init
+0x4C8EA60 set free
+0x4C8EEA0 owner AM Update
+0x4C8F960 Instantiate
+0x4C8FAF0 ActivitySet Remove
+0x4C907A0 set insert
+0x4C90B90 StartPending
+0x4C90C40 ActivitySet ClearAll
+0x510E370 frAnim vtable (c)
+0x51F77D0 weapon UI provider vtable
+0x51F8160 weapon UI renderer vtable
+0x51F9BD8 weapon UI sink vtable
+0x5200F90 HumanoidModelManager vtable
+0x5298390 load pipeline vtable (c)
+0x52E9608 render-mode setter vtable
+0x5E7A754 HUD margin x
+0x5E7A758 HUD margin y
+0x5E7A760 HUD layout scale float
+0x5E7A7B4 holster id (read)
+0x5E7B460 load stage table
+0x5E82B3E requester gate byte
+0x5E82B48 first-person HUD override int
+0x5F741B7 visor override byte
+0x5F741B8 visor down byte
+0x5F741CA HUD layout scale mode byte
+0x5F7D7F8 CTSA type key
