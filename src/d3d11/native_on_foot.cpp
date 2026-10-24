@@ -8483,6 +8483,19 @@ std::atomic<uint64_t> g_focusState{nofoot::f87::focusPack(-1, nofoot::f87::kFocu
 // F92c: the indicator owner's SetMarker calls by the type their caller passed, the keys of the type-1001 ones, and an unknown caller's address
 std::atomic<uint64_t> g_indFocusN{0}, g_indInteractN{0}, g_indUnknownN{0}, g_indUnknownLast{0}, g_indInteractMask{0};
 std::atomic<int32_t> g_indFocusKeyLast{-1};
+// F93c: each key's last SetMarker offset argument (float bits) and the marker frame (+1) it came in; the keys with a designed offset this second.
+std::atomic<uint32_t> g_keyOffX[128], g_keyOffY[128], g_keyOffFrame[128];
+std::atomic<uint64_t> g_keyOffMaskLo{0}, g_keyOffMaskHi{0}, g_offReadFail{0};
+// The key's designed offset (its last SetMarker within kKeyOffMaxAge marker frames), false for none.
+constexpr uint32_t kKeyOffMaxAge = 120;
+bool keyDesignOffset(uint32_t key, uint32_t frame, float* x, float* y) noexcept {
+    const uint32_t k = key & 0x7Fu;
+    const uint32_t f1 = g_keyOffFrame[k].load(std::memory_order_relaxed);
+    if (!f1 || f1 - 1u > frame || frame - (f1 - 1u) > kKeyOffMaxAge) return false;
+    *x = drawtag::floatOf(g_keyOffX[k].load(std::memory_order_relaxed));
+    *y = drawtag::floatOf(g_keyOffY[k].load(std::memory_order_relaxed));
+    return nofoot::f87::hasDesignOffset(*x, *y);
+}
 void focusEvent(int ev, int32_t key) noexcept {
     const uint64_t s = nofoot::f87::focusStep(g_focusState.load(std::memory_order_relaxed), ev, key);
     g_focusState.store(s, std::memory_order_relaxed);
@@ -8585,6 +8598,21 @@ void __fastcall markerRecord(uint64_t slot, uint64_t ret, const uint64_t* regs, 
     g_set.fetch_add(1, std::memory_order_relaxed);
     const int32_t key = static_cast<int32_t>(static_cast<uint32_t>(regs[2]));
     const bool visible = (regs[0] & 0xFFu) != 0;
+    // F93c: the offset argument (a pointer at the caller's [rsp+0x30] to two floats), kept per key with the marker frame it came in.
+    {
+        uint64_t offPtr = 0;
+        float off[2] = {};
+        if (stk && guardedRead(reinterpret_cast<uintptr_t>(stk) + nofoot::f87::kSetMarkerOffsetPtrOffset, &offPtr, sizeof(offPtr)) && offPtr &&
+            guardedRead(static_cast<uintptr_t>(offPtr), off, sizeof(off))) {
+            const uint32_t k = static_cast<uint32_t>(key) & 0x7Fu;
+            g_keyOffX[k].store(drawtag::bitsOf(off[0]), std::memory_order_relaxed);
+            g_keyOffY[k].store(drawtag::bitsOf(off[1]), std::memory_order_relaxed);
+            g_keyOffFrame[k].store(g_f44Frame.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+            if (visible && nofoot::f87::hasDesignOffset(off[0], off[1])) (k < 64 ? g_keyOffMaskLo : g_keyOffMaskHi).fetch_or(1ull << (k & 63u), std::memory_order_relaxed);
+        } else {
+            g_offReadFail.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     int role = nofoot::f87::roleOfReturn(rva);
     if (role == nofoot::f87::kRoleList) role = nofoot::f87::kRoleOther;
     g_role[role].fetch_add(1, std::memory_order_relaxed);
@@ -22507,6 +22535,15 @@ struct LabSec {
     bool haveRec = false, haveLeader = false, haveFocus = false;
 };
 LabSec g_labSec[2];
+// F93c: the designed-offset markers (the interaction label) per eye, the second's figures (render thread: fixDecide and the 1 s line)
+struct F93Eye {
+    uint64_t designDraws = 0, patched = 0, noRef = 0, refs = 0, age[2] = {};
+    double distSum = 0.0, corrSum[2] = {}, dropSum[2] = {}, asDrawnSum[2] = {};
+    int lastKey = -1;
+    float lastOff[2] = {};
+};
+F93Eye g_f93[2];
+nofoot::f87::RefSet g_f93RefSet[2];
 uint32_t g_labTallied = 0;
 bool g_labTalliedInit = false;
 
@@ -22949,7 +22986,7 @@ void f87PromptLines(uint64_t nowMs) {
     // F92c: the on-foot HUD placement EDVR applies to the game's HUD (the label is laid out by the game's HUD, which this placement moves): the mesh size with
     // the room in effect, the spread, whether the element-scale override is held, the distance and the follow mode.
     Log::get().note("prompt anchor (F87p) 1 s: SetMarker %llu UpdateMarker %llu UpdateIndicator %llu; focus key %d P (%.3f %.3f %.3f) range %.1f mm; nearby %llu [keys %s] target %llu list %llu hidden %llu "
-                    "other %llu (last +0x%llX); indicators (F92c): focus %llu (key %d) interactable %llu [keys %s] unknown caller %llu (last +0x%llX); focus from %s; "
+                    "other %llu (last +0x%llX); indicators (F92c): focus %llu (key %d) type 1001 %llu [keys %s] unknown caller %llu (last +0x%llX); focus from %s; "
                     "HUD placement: size %.2f x room %.2f, spread %.3f, element override %s, distance %.3f m, follow %s",
                     ull(set - prevSet), ull(upd - prevUpd), ull(ind - prevInd), static_cast<int>(key), static_cast<double>(lastP[0]), static_cast<double>(lastP[1]), static_cast<double>(lastP[2]), range,
                     ull(role[f87::kRoleNearby] - prevRole[f87::kRoleNearby]), keys, ull(role[f87::kRoleTarget] - prevRole[f87::kRoleTarget]), ull(role[f87::kRoleList] - prevRole[f87::kRoleList]),
@@ -22981,6 +23018,32 @@ void f87PromptLines(uint64_t nowMs) {
                         static_cast<double>(r.p[0]), static_cast<double>(r.p[1]), static_cast<double>(r.p[2]), branch, static_cast<double>(r.q.mn[0]),
                         static_cast<double>(r.q.mn[1]), static_cast<double>(r.q.mn[2]), static_cast<double>(r.q.mx[0]), static_cast<double>(r.q.mx[1]), static_cast<double>(r.q.mx[2]),
                         r.front[0], r.front[1], r.front[2], r.delta * 100.0, r.nView);
+    }
+    // F93c: the designed-offset markers, per eye (zeros print: a second with no such marker says so)
+    {
+        const uint64_t lo = f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed), hi = f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
+        const uint64_t readFail = f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
+        char offKeys[200];
+        size_t oa = 0;
+        offKeys[0] = 0;
+        for (uint32_t k = 0; k < 128 && oa + 40 < sizeof(offKeys); ++k) {
+            if (!((k < 64 ? lo : hi) & (1ull << (k & 63u)))) continue;
+            const float ox = drawtag::floatOf(f87p::g_keyOffX[k].load(std::memory_order_relaxed)), oy = drawtag::floatOf(f87p::g_keyOffY[k].load(std::memory_order_relaxed));
+            oa += static_cast<size_t>(std::snprintf(offKeys + oa, sizeof(offKeys) - oa, "%s%u (%.4f %.4f)", oa ? ", " : "", k, static_cast<double>(ox), static_cast<double>(oy)));
+        }
+        if (!oa) std::snprintf(offKeys, sizeof(offKeys), "none");
+        for (int e = 0; e < 2; ++e) {
+            F93Eye& de = g_f93[e];
+            const double nD = de.designDraws ? static_cast<double>(de.designDraws) : 1.0, nP = de.patched ? static_cast<double>(de.patched) : 1.0;
+            Log::get().note("marker design offset (F93c) eye %d 1 s: designed-offset draws %llu (last key %d, offset %.4f %.4f): moved with the nearest dot's correction %llu "
+                            "(reference this frame %llu, the frame before %llu; %.0f px away mean), left as the game placed them (no reference) %llu; references %llu; "
+                            "correction %+.1f %+.1f px mean; offset the aim at P dropped %+.1f %+.1f px mean; as drawn from P %+.1f %+.1f px mean; "
+                            "keys with an offset this second: %s; offset argument not read %llu",
+                            e, ull(de.designDraws), de.lastKey, static_cast<double>(de.lastOff[0]), static_cast<double>(de.lastOff[1]), ull(de.patched), ull(de.age[0]),
+                            ull(de.age[1]), de.distSum / nP, ull(de.noRef), ull(de.refs), de.corrSum[0] / nP, de.corrSum[1] / nP, de.dropSum[0] / nP, de.dropSum[1] / nP,
+                            de.asDrawnSum[0] / nD, de.asDrawnSum[1] / nD, offKeys, ull(readFail));
+            de = F93Eye{};
+        }
     }
     // the label's draws, per eye
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
@@ -24815,6 +24878,45 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             ++kw.gate[e];
         } else if (why != drawtag::kDeltaOk) {
             ++s.fBehind;
+        }
+    }
+    // F93c: a marker whose SetMarker carried a designed offset (the interaction label) keeps the game's layout: it takes the projection correction of
+    // the nearest marker without one in this eye (this eye-frame or the one before), not a move of its record onto P. The others are the references:
+    // their correction is P through the scene rows less the record through the unpatched rows (the icon's mesh offset left out). With no reference the
+    // draw is left as the game placed it.
+    if (haveP && (why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && !nofoot::f85::isReticleKey(keyNow)) {
+        float offX = 0.0f, offY = 0.0f;
+        F93Eye& de = g_f93[e];
+        if (f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
+            double dRef[2] = {}, dist = 0.0;
+            uint32_t age = 0;
+            ++de.designDraws;
+            de.lastKey = static_cast<int>(keyNow & 0x7Fu);
+            de.lastOff[0] = offX;
+            de.lastOff[1] = offY;
+            de.asDrawnSum[0] += (nM0[0] - nWuSave[0]) * W * 0.5;   // the record's offset from P as the game drew it (the designed offset and the error)
+            de.asDrawnSum[1] += (nM0[1] - nWuSave[1]) * H * 0.5;
+            if (!g_f93RefSet[e].nearest(frame, nM0, 1, dRef, &dist, &age)) {
+                ++de.noRef;
+                ++s.pOther;
+                return;   // left as the game placed it: its layout is right, only the projection error stays
+            }
+            ++de.patched;
+            ++de.age[age > 1u ? 1u : age];
+            de.distSum += dist * W * 0.5;
+            de.corrSum[0] += dRef[0] * W * 0.5;
+            de.corrSum[1] += dRef[1] * H * 0.5;
+            de.dropSum[0] += (T[0] - nM0[0] - dRef[0]) * W * 0.5;   // what the old aim at P would have moved it further (the offset it dropped)
+            de.dropSum[1] += (T[1] - nM0[1] - dRef[1]) * H * 0.5;
+            T[0] = nM0[0] + dRef[0];
+            T[1] = nM0[1] + dRef[1];
+            dx = dRef[0];
+            dy = dRef[1];
+            why = (std::fabs(dx) < kGateNdc && std::fabs(dy) < kGateNdc) ? drawtag::kDeltaOk : drawtag::kDeltaGate;
+        } else if (why == drawtag::kDeltaOk) {
+            const double d[2] = {nWuSave[0] - nM0[0], nWuSave[1] - nM0[1]};
+            g_f93RefSet[e].add(frame, nM0, d);
+            ++de.refs;
         }
     }
     // F64: patch when the rows are this frame's or the eye's newest at most one frame older, P is found, both w > 0 and |d| < 0.4 NDC; else

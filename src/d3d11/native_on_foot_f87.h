@@ -473,6 +473,10 @@ constexpr Pin kPins[] = {
     {"interactable indicator type A", 0x1AAE635, 5, {0xBA, 0xE9, 0x03, 0x00, 0x00}},
     {"interactable indicator call B", 0x1AB67CB, 5, {0xE8, 0x60, 0x30, 0xFF, 0xFF}},
     {"interactable indicator type B", 0x1AB67BC, 5, {0xBA, 0xE9, 0x03, 0x00, 0x00}},
+    // F93c: SetMarker's offset argument: its address stored at [rsp+0x30] (focus, nearby), and the focus prompt's offset read from [[hud+0x50]+0x10]
+    {"focus SetMarker offset arg", 0x1AA9DC1, 5, {0x48, 0x89, 0x54, 0x24, 0x30}},
+    {"focus offset source", 0x1AA9D7B, 8, {0x48, 0x8B, 0x43, 0x50, 0x0F, 0x12, 0x70, 0x10}},
+    {"nearby SetMarker offset arg", 0x1A9E259, 5, {0x48, 0x89, 0x54, 0x24, 0x30}},
 };
 constexpr uint32_t kPinIndicatorEntry = 15;   // F92c: the indicator owner's prologue (its `sub rsp, 0x68` immediate is byte 6)
 constexpr uint32_t kPinCount = sizeof(kPins) / sizeof(kPins[0]);
@@ -595,6 +599,64 @@ inline uint64_t focusStep(uint64_t s, int ev, int32_t key) noexcept {
 inline const char* focusSrcText(int src) noexcept {
     return src == kFocusSrcPrompt ? "focus prompt" : src == kFocusSrcIndicator ? "focus indicator" : "none";
 }
+// ---- F93c: a marker with a designed offset keeps it ---------------------------------------------------------------------------------------------------
+// SetMarker's last argument is a screen-plane offset: the focus prompt passes [[hud+0x50]+0x10] (0x1AA9D7B), the nearby markers of types 2001 and 1004
+// take their own (0x1A9E070). The game draws such a marker's record away from its anchor P by that offset (t = v + s (off.x X - off.y Y)), and the
+// interaction label is drawn that way. The marker fix aims every record at P (plus its icon's mesh offset), which drops the designed offset. F92 log
+// 102707, focus key 0: the game's own record sat (+347, +268) px from the patched target in both eyes, every second, against the label's displacement of
+// (-343..-346, -237..-247) px in the F85, F86 and F91 dumps; in frames the fix did not patch (dump frame 0, eye 1) the label sat on its dot as in flat.
+// A marker with a designed offset therefore takes the projection correction of the nearest marker without one in the same eye (this eye-frame or the one
+// before): the game's layout around it is kept and only the projection error is removed, the same correction its dot gets.
+constexpr float kDesignOffsetMin = 1e-4f;   // an offset component over this (in the argument's own units) is designed; the dots and waypoints pass zero
+inline bool hasDesignOffset(float x, float y) noexcept {
+    return std::isfinite(x) && std::isfinite(y) && (std::fabs(x) > kDesignOffsetMin || std::fabs(y) > kDesignOffsetMin);
+}
+// SetMarker's stack arguments, from the trampoline's caller-shadow pointer (the caller's rsp at the call): scale at +0x28, the offset's address at +0x30
+// (the focus prompt's call: movss [rsp+0x28], xmm0 and mov [rsp+0x30], rdx at 0x1AA9DD2 and 0x1AA9DC1).
+constexpr uint32_t kSetMarkerScaleOffset = 0x28, kSetMarkerOffsetPtrOffset = 0x30;
+struct RefCorr {
+    bool have = false;
+    uint32_t frame = 0;
+    double at[2] = {}, d[2] = {};   // the reference's own NDC (through the unpatched rows) and its correction (P through the scene rows less that)
+};
+constexpr int kRefPerEye = 16;
+struct RefSet {
+    RefCorr r[kRefPerEye];
+    int next = 0;
+    void add(uint32_t frame, const double at[2], const double d[2]) noexcept {
+        RefCorr& c = r[next];
+        next = (next + 1) % kRefPerEye;
+        c.have = true;
+        c.frame = frame;
+        c.at[0] = at[0];
+        c.at[1] = at[1];
+        c.d[0] = d[0];
+        c.d[1] = d[1];
+    }
+    // The correction of the reference nearest to `at` (NDC) at most maxAge frames old, the newest frame first; false when there is none.
+    bool nearest(uint32_t frame, const double at[2], uint32_t maxAge, double d[2], double* dist, uint32_t* age) const noexcept {
+        int best = -1;
+        double bestD = 0.0;
+        uint32_t bestAge = 0;
+        for (int i = 0; i < kRefPerEye; ++i) {
+            const RefCorr& c = r[i];
+            if (!c.have || c.frame > frame || frame - c.frame > maxAge) continue;
+            const double dx = c.at[0] - at[0], dy = c.at[1] - at[1], dd = std::sqrt(dx * dx + dy * dy);
+            const uint32_t a = frame - c.frame;
+            if (best < 0 || a < bestAge || (a == bestAge && dd < bestD)) {
+                best = i;
+                bestD = dd;
+                bestAge = a;
+            }
+        }
+        if (best < 0) return false;
+        d[0] = r[best].d[0];
+        d[1] = r[best].d[1];
+        if (dist) *dist = bestD;
+        if (age) *age = bestAge;
+        return true;
+    }
+};
 // The getter stubs' site ids and the calls of the pins' stub: the site of a getter's call, by its pin.
 enum Site : int { kSiteFocus = 0, kSiteNearby, kSiteTarget, kSiteCount };
 inline const char* siteText(int s) noexcept {

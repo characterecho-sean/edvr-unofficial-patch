@@ -10746,10 +10746,25 @@ def _hj_anchor(rows, ctx):
     if ind:
         # F92c: the label's owner is the focus indicator (type 1000); an indicator call that no caller address names means the type table is out of date
         f, n, k = (sum(int(r[x]) for r in ind) for x in ("ifocus", "iint", "iunk"))
-        text += "; indicators (F92c): focus %d, interactable %d, unknown caller %d" % (f, n, k)
+        text += "; indicators (F92c): focus %d, type 1001 %d, unknown caller %d" % (f, n, k)
         if k:
             return ("PARTIAL", text + " (an indicator caller outside the pinned three)")
     return ("NEVER APPLIED" if s + u + i == 0 else "OK", text)
+
+
+def _hj_design(rows, ctx):
+    # F93c: a marker with a designed offset (the interaction label) moved with its nearest dot's correction instead of onto its anchor
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    draws, moved, noref, refs = (_hsum(sec, k) for k in ("draws", "moved", "noref", "refs"))
+    text = "designed-offset draws %d: moved with a dot's correction %d, left as the game placed them %d (no reference); references %d (%d eye-seconds)" % (
+        draws, moved, noref, refs, len(sec))
+    if draws == 0:
+        return ("IDLE", text + "; no marker with a designed offset was drawn")
+    if moved == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if noref * 2 > draws else "OK", text)
 
 
 def _hj_label(rows, ctx):
@@ -10873,7 +10888,7 @@ HEALTH_RULES = (
         ("sec", r"prompt anchor \(F87p\) 1 s: SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
                 r"\[keys [^\]]*\] target (?P<target>\d+) list (?P<list>\d+) hidden (?P<hidden>\d+) other (?P<other>\d+)"
                 # F92c: the indicator owner's calls by type and where the focus came from (absent from older builds' lines)
-                r"(?: \(last \+0x[0-9A-Fa-f]+\); indicators \(F92c\): focus (?P<ifocus>\d+) \(key -?\d+\) interactable (?P<iint>\d+) \[keys [^\]]*\] "
+                r"(?: \(last \+0x[0-9A-Fa-f]+\); indicators \(F92c\): focus (?P<ifocus>\d+) \(key -?\d+\) (?:interactable|type 1001) (?P<iint>\d+) \[keys [^\]]*\] "
                 r"unknown caller (?P<iunk>\d+) \(last \+0x[0-9A-Fa-f]+\); focus from (?P<src>[a-z ]+);)?"),
         ("hooked", r"prompt anchor \(F87p\): slots .* hooked"),
         ("nothook", r"prompt anchor \(F87p\): NOT hooked -- (?P<why>.*?)\. The game's code"),
@@ -10884,6 +10899,10 @@ HEALTH_RULES = (
         ("refuse", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh was NOT decoded \((?P<why>[^)]*)\)"),
         ("_", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh decoded"),
     ), _hj_label),
+    _hrule("marker design offset (F93c)", ("F93c",), ("marker design offset (F93c)",), (
+        ("sec", r"marker design offset \(F93c\) eye (?P<eye>\d) 1 s: designed-offset draws (?P<draws>\d+) \(last key -?\d+, offset \S+ \S+\): moved with the nearest dot's "
+                r"correction (?P<moved>\d+) .*? left as the game placed them \(no reference\) (?P<noref>\d+); references (?P<refs>\d+)"),
+    ), _hj_design),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -11783,6 +11802,7 @@ def self_test_health():
         "weapon readout size (F90)", "pistol readout (F90)", "weapon UI pin (F85b)", "reticle depth (F85c)", "view height hold (F87h)", "weapon eye offset (F88)",
         "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)", "weapon readout part (F91)",
         "ADS press fit (F91)", "ADS item gate (F91)")
+    DO = "marker design offset (F93c)"
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
@@ -11891,6 +11911,10 @@ def self_test_health():
             # F92c: the line with the indicator fields (the F91 flight's second at the charge port, with the focus now typed)
             return R("prompt anchor (F87p) 1 s: SetMarker", 1079, 83, i, ikey, 0.1, 0.2, 1.4, 0.0, 166, "45,46", 0, 83, 83, 580, 0x1AA8000, ifocus, ikey, iint, "46,47", iunk,
                      0x1A00000, src, 2.0, 1.25, 0.04, "held", 0.01, "body")
+
+        def design(draws=88, moved=86, noref=2, refs=300, eye=0):
+            # F93c: the label (a marker with a designed offset) moved with its nearest dot's correction
+            return R("marker design offset (F93c) eye %d 1 s: designed-offset draws", eye, draws, 0, 0.031, -0.022, moved, moved, 0, 12.0, noref, refs)
 
         def anchor_hooked():
             return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 24)
@@ -12103,14 +12127,20 @@ def self_test_health():
         check("F87p anchor: the slots were not hooked", [R("prompt anchor (F87p): NOT hooked", "the vtable slot 0x48 is not the expected function")], 3, [("NEVER APPLIED", AN)],
               has=["NOT hooked: the vtable slot 0x48 is not the expected function"])
         check("F92c anchor: the focus indicator sets the focus key", [anchor_hooked(), anchor_ind(), anchor_ind()], 0, [("OK", AN)],
-              has=["focus key set in 2 s", "indicators (F92c): focus 166, interactable 332, unknown caller 0"])
+              has=["focus key set in 2 s", "indicators (F92c): focus 166, type 1001 332, unknown caller 0"])
         check("F92c anchor: an indicator caller outside the pinned three", [anchor_hooked(), anchor_ind(iunk=3)], 0, [("PARTIAL", AN)],
               has=["unknown caller 3 (an indicator caller outside the pinned three)"])
         check("F92c anchor: no focus indicator in the second leaves the focus unset", [anchor_hooked(), anchor_ind(ifocus=0, ikey=-1, iint=0, src="none")], 0, [("OK", AN)],
-              has=["focus key set in 0 s", "indicators (F92c): focus 0, interactable 0, unknown caller 0"])
+              has=["focus key set in 0 s", "indicators (F92c): focus 0, type 1001 0, unknown caller 0"])
         f91_line = ("prompt anchor (F87p) 1 s: SetMarker 1079 UpdateMarker 83 UpdateIndicator 249; focus key -1 P (0.000 0.000 0.000) range 0.0 mm; nearby 166 [keys 45,46] "
                     "target 0 list 83 hidden 83 other 830 (last +0x1AA992B)")
         check("F92c anchor: an F91 line (no indicator fields) still reads", [anchor_hooked(), f91_line], 0, [("OK", AN)], lacks=["indicators (F92c)"])
+        check("F93c design offset: the label moved with its dot's correction", [design(), design(eye=1)], 0, [("OK", DO)],
+              has=["designed-offset draws 176: moved with a dot's correction 172, left as the game placed them 4 (no reference); references 600 (2 eye-seconds)"])
+        check("F93c design offset: no marker with an offset", [design(0, 0, 0, 300), design(0, 0, 0, 300, eye=1)], 0, [("IDLE", DO)],
+              has=["no marker with a designed offset was drawn"])
+        check("F93c design offset: drawn but never moved", [design(88, 0, 88, 0)], 3, [("NEVER APPLIED", DO)])
+        check("F93c design offset: mostly no reference", [design(88, 20, 68, 10)], 0, [("PARTIAL", DO)])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])
