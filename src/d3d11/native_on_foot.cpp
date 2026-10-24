@@ -37,6 +37,7 @@
 #include "native_on_foot_f93.h"   // F93b: the ADS sight lock's input from the alignment the measured eye was rendered with, the eye chain instrument (pure parts)
 #include "native_on_foot_f93de.h"   // F93d: the game's camera watch (pure parts)
 #include "native_on_foot_f94.h"   // F94a: the neck as the source of truth for the view's height; the body at its animated height (pure parts)
+#include "native_on_foot_f95.h"   // F95a: the neck reference from the stance's settled height; the view-motion instrument (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -126,6 +127,25 @@ std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
 double g_f94EyeHeightLast = -1.0;                             // the value last logged (frame thread)
+// F95a: the stance's settle window (the Animate post-hook), the body's motion as the pin read it (for the HUD probe's split), the view's last frame (the hook),
+// and the HUD's motion against the eye (the HRC instance submit, under F9Lock; the frame thread prints and resets it with the pin's line).
+nofoot::f95::StanceSettle g_f95Settle;
+std::atomic<bool> g_f95Moving{false};
+struct F95ViewLast {
+    bool have = false, pitchOk = false;
+    uint32_t p1 = 0;
+    double y = 0.0, localY = 0.0, pitchDeg = 0.0;
+};
+F95ViewLast g_f95View;
+struct F95Hud {
+    bool have = false, pitchOk = false;
+    uint32_t viewId = 0;
+    uint64_t seq = 0, seenMs = 0;
+    double camY = 0.0, localY = 0.0, pitchDeg = 0.0;
+    nofoot::f95::StepStat eye[2];   // the eye's vertical step in the HUD's frame less the head's own, head still (0 standing, 1 moving)
+    uint32_t frames = 0, notStill = 0;
+};
+F95Hud g_f95Hud;
 // F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_right_cm / _up_cm / _forward_cm and _body (follow | stay).
 // F90: the built-in values are the pilot's from the F89 flight (forward 9.0, up 7.5, right 0.0 cm, follow).
 std::atomic<float> g_f88RightCm{static_cast<float>(nofoot::f88::kRightDefaultCm)}, g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)},
@@ -2518,6 +2538,34 @@ void f9RecordInst(uint8_t st, uint8_t k, void* view) noexcept {
         row->cam[1] = blk[13];
         row->cam[2] = blk[14];
         row->camOk = true;
+    }
+    // F95a: the HUD's motion against the eye. The HUD's placement matrix is fixed in the frame its views' camera position is given in (the "hrc matrix" line), so the
+    // eye's vertical step in that frame, less the head's own (the LOCAL head between the same frames, the head still), is what moves the HUD against the eye. One view
+    // (the first of instance 0 seen; another after a second without it), one sample a frame.
+    if (k == 0 && okBlk && okId && nativeOnFootActive()) {
+        const uint64_t nowMs = GetTickCount64();
+        F95Hud& hd = g_f95Hud;
+        if (hd.have && hd.viewId != vid && nowMs - hd.seenMs < 1000) return;
+        EdvrNativeNowPose np{};
+        double pitchRad = 0.0;
+        const bool pose = nativeFrameNowPose(np) && np.inputVersion >= 3 && np.localValid && nofoot::pinNaturalLocalPitch(np.local, &pitchRad);
+        const double camY = static_cast<double>(blk[13]), localY = pose ? static_cast<double>(np.local[7]) : 0.0, pitchDeg = pitchRad * 180.0 / nofoot::kIkPi;
+        if (hd.have && hd.viewId == vid && pose && hd.pitchOk && np.frameSequence == hd.seq) return;   // this frame's sample is in
+        if (hd.have && hd.viewId == vid && pose && hd.pitchOk && np.frameSequence > hd.seq && np.frameSequence - hd.seq <= 2u) {
+            ++hd.frames;
+            if (nofoot::f95::headStill(localY - hd.localY, pitchDeg - hd.pitchDeg))
+                hd.eye[g_f95Moving.load(std::memory_order_relaxed) ? 1 : 0].add((camY - hd.camY) - (localY - hd.localY));
+            else
+                ++hd.notStill;
+        }
+        hd.have = true;
+        hd.viewId = vid;
+        hd.seq = np.frameSequence;
+        hd.seenMs = nowMs;
+        hd.camY = camY;
+        hd.localY = localY;
+        hd.pitchDeg = pitchDeg;
+        hd.pitchOk = pose;
     }
 }
 
@@ -8503,6 +8551,8 @@ double g_f94NeckSeatedPub = 0.0;   // frame thread: the neck reference's part of
 struct F94Second {   // frame thread: f94Tick adds a tick, the pin's 1 s line (f67cPinLine) prints and resets
     uint32_t n = 0, frozen = 0, stale = 0, clamped = 0;
     double wSum = 0.0, raiseSum = 0.0, appliedSum = 0.0;
+    double movedMm[2] = {};   // F95a: how far the raise moved the view (weighted by 1 - w), standing (0) and with the body moving (1), mm
+    uint32_t ticks[2] = {};
 };
 F94Second g_f94Sec;
 // The part of the alignment the pose the game drew with carried: by the serial the runtime reported with the pose, else the newest published (a runtime that reports
@@ -11470,9 +11520,11 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     in.scope = pin && nativeOnFootActive();
     in.weaponW = weaponW;
     in.dt = dt;
+    in.settleS = nofoot::f95::settleS(static_cast<double>(g_f87SettleS.load(std::memory_order_relaxed)));   // F95a: the hold's settle time (the pilot's 0.1 s), 0.1 s at least
     const F94TargetPub tg = f94TargetRead();
     in.targetFresh = tg.valid && now >= tg.ms && now - tg.ms <= f94::kTargetMaxAgeMs;
     in.targetM = tg.targetM;
+    const double appliedBefore = g_f94Raise.ramp * g_f94Raise.x;   // F95a: the raise's motion this tick (unquantised, before the step)
     t.out = g_f94Raise.step(in);
     t.settling = g_f94Settle.step(t.out.seatedY, dt);
     F94Second& s = g_f94Sec;
@@ -11480,6 +11532,10 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
         s = F94Second{};
         return t;
     }
+    const double moved = std::fabs((1.0 - (weaponW > 1.0 ? 1.0 : weaponW < 0.0 ? 0.0 : weaponW)) * (g_f94Raise.ramp * g_f94Raise.x - appliedBefore));
+    const int mv = g_f95Moving.load(std::memory_order_relaxed) ? 1 : 0;
+    s.movedMm[mv] += 1000.0 * moved;
+    ++s.ticks[mv];
     ++s.n;
     s.wSum += 1.0 - (weaponW > 1.0 ? 1.0 : weaponW < 0.0 ? 0.0 : weaponW);
     s.raiseSum += 100.0 * t.out.raiseM;
@@ -13306,10 +13362,15 @@ struct PinStats {
     // published, or not found); the vertical move written (the lowering: 0 since F94a) and the legs' extension animated and written (hip to foot over the leg).
     struct F94Bin {
         uint32_t n = 0, legsN = 0, animN = 0, srcN[3] = {};
-        double neckSum = 0.0, neckMin = 9.0, neckMax = -9.0, viewSum = 0.0, viewMin = 9.0, viewMax = -9.0, gameSum = 0.0, animSum = 0.0;
-        double tgtSum = 0.0, tgtMin = 9.0, tgtMax = -9.0, camSum = 0.0, vSum = 0.0, vAbsMax = 0.0, askedSum = 0.0;
+        double neckSum = 0.0, neckMin = 1e9, neckMax = -1e9, viewSum = 0.0, viewMin = 1e9, viewMax = -1e9, gameSum = 0.0, animSum = 0.0;   // F95a: the min/max were 9 in cm
+        double tgtSum = 0.0, tgtMin = 1e9, tgtMax = -1e9, camSum = 0.0, vSum = 0.0, vAbsMax = 0.0, askedSum = 0.0;
         double legAnimSum = 0.0, legSum = 0.0, legMin = 9.0;
     } f94[2];
+    // F95a: the settle window's verdicts per pinned call (nofoot::f95::Why), the settled targets' range (cm), and the view's vertical step a game frame with the head still
+    // (0 standing, 1 moving).
+    uint32_t f95Why[nofoot::f95::kWhyN] = {};
+    double f95TgtMin = 1e9, f95TgtMax = -1e9;
+    nofoot::f95::StepStat f95View[2];
 };
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
@@ -13381,6 +13442,11 @@ struct PinCall {
     double f94Target = 0.0, f94Neck = 0.0, f94ViewOver = 0.0, f94GameOver = 0.0, f94AnimEyeOver = 0.0, f94InCam = 0.0, f94Asked = 0.0;
     bool f94TargetOk = false, f94AnimEyeOk = false;
     uint8_t f94Source = nofoot::f94::kSrcLegacy;
+    // F95a: why the stance was or was not settled (nofoot::f95::Why), the body moving, the target published from the settled window (m); the view's vertical step since
+    // the last game frame with the head's own motion out (m) and whether the head was still.
+    uint8_t f95Why = nofoot::f95::kInvalid;
+    bool f95Moving = false, f95HeadStill = false, f95ViewStepOk = false;
+    double f95Target = 0.0, f95ViewStep = 0.0;
     double reachCandidate[3] = {};   // F79: unweighted reach proposal; nonzero infeasible proposals are rejected, not applied to the body pin.
     double reachRadiusM[2] = {};
     bool reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
@@ -13670,13 +13736,47 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.dEyeY = 0.0;
         }
         // F94a: the view's height from the neck (native_on_foot_f94.h). The raise that puts the eye the key's height over the animated neck with the head level, measured
-        // on the game's own camera (E: the transient, the shifts the pin ignores and the raise the pose carried are out of it), goes to the frame thread, which follows
-        // it with F88's 1 - w; the view as drawn over the neck, the game's camera over it and the skeleton's own eye over it are the line's figures.
+        // on the game's own camera (E: the transient, the shifts the pin ignores and the raise the pose carried are out of it), goes to the frame thread (F95a: from a
+        // settled stance only), which follows it with F88's 1 - w; the view as drawn over the neck, the game's camera over it and the skeleton's own eye over it are the
+        // line's figures (the per-frame target among them).
         {
             const double h = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
             pc.f94Target = nofoot::f94::raiseTarget(N0[1], h, pc.eyeYSelected);
             pc.f94TargetOk = std::isfinite(pc.f94Target) && std::isfinite(N0[1]);
-            if (pc.f94TargetOk) f94TargetPublish(pc.f94Target, now);
+            // F95a: the target only from a settled stance (native_on_foot_f95.h): not walking or airborne, and the animated neck and the game's camera each within 1 cm
+            // over the last 0.3 s; it is then the window's means. Anything else (the walk cycle, a landing, a stance still changing) publishes nothing: the frame
+            // thread holds the raise where the last settled stance put it.
+            nofoot::f95::SettleIn si;
+            si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected);
+            si.still = speed < nofoot::kPinWalkMps && std::fabs(vy) <= nofoot::kPinAirMps;
+            si.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
+            si.neckY = N0[1];
+            si.camY = pc.eyeYSelected;
+            const nofoot::f95::SettleOut so = g_f95Settle.step(si);
+            pc.f95Why = so.why;
+            pc.f95Moving = !si.still;
+            g_f95Moving.store(!si.still, std::memory_order_relaxed);
+            if (so.settled) {
+                pc.f95Target = nofoot::f94::raiseTarget(so.neckY, h, so.camY);
+                f94TargetPublish(pc.f95Target, now);
+            }
+            // F95a: the view's vertical step from the last game frame, the head's own motion out of it (the transient and the pitch's pivot), counted while the head was
+            // still: what the view does that the player did not do.
+            const double viewLevel = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid);
+            const double localPitchDeg = localPitchRad * 180.0 / nofoot::kIkPi;
+            if (freshIn && g_f95View.have && in.p1 == g_f95View.p1 + 1u && localPitchValid && g_f95View.pitchOk && std::isfinite(viewLevel)) {
+                pc.f95HeadStill = nofoot::f95::headStill(static_cast<double>(in.localHeadY) - g_f95View.localY, localPitchDeg - g_f95View.pitchDeg);
+                pc.f95ViewStep = viewLevel - g_f95View.y;
+                pc.f95ViewStepOk = true;
+            }
+            if (freshIn) {
+                g_f95View.have = std::isfinite(viewLevel);
+                g_f95View.p1 = in.p1;
+                g_f95View.y = viewLevel;
+                g_f95View.localY = static_cast<double>(in.localHeadY);
+                g_f95View.pitchDeg = localPitchDeg;
+                g_f95View.pitchOk = localPitchValid;
+            }
             pc.f94Neck = N0[1];
             pc.f94GameOver = pc.eyeYSelected - N0[1];
             pc.f94ViewOver = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid) - N0[1];
@@ -14468,6 +14568,13 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 e.legMin = std::min(e.legMin, std::min(lp[0].reachAfter, lp[1].reachAfter));
             }
         }
+        // F95a: the settle window's verdict, the settled target's range, the view's step with the head still
+        ++st.f95Why[pc.f95Why < nofoot::f95::kWhyN ? pc.f95Why : nofoot::f95::kInvalid];
+        if (pc.f95Why == nofoot::f95::kSettled) {
+            st.f95TgtMin = std::min(st.f95TgtMin, 100.0 * pc.f95Target);
+            st.f95TgtMax = std::max(st.f95TgtMax, 100.0 * pc.f95Target);
+        }
+        if (pc.f95ViewStepOk && pc.f95HeadStill) st.f95View[pc.f95Moving ? 1 : 0].add(pc.f95ViewStep);
         if (legsSolved) {
             ++st.legSolves;
             for (int k = 0; k < 2; ++k) {
@@ -19011,6 +19118,31 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                             e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
                             e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
                             e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN);
+        }
+        // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC
+        // views' camera in the HUD's frame less the LOCAL head), how far the raise moved the view, and the settle window's verdicts. Standing every figure should be
+        // near 0; moving, the HUD's against the eye too (the raise holds while the body moves).
+        F95Hud hud;
+        {
+            F9Lock lock;
+            hud = g_f95Hud;
+            for (auto& sStat : g_f95Hud.eye) sStat = nofoot::f95::StepStat{};
+            g_f95Hud.frames = g_f95Hud.notStill = 0;
+        }
+        uint32_t whyAll = 0;
+        for (uint32_t w : st.f95Why) whyAll += w;
+        if (whyAll || hud.frames) {
+            char tgt[48];
+            if (st.f95Why[nofoot::f95::kSettled]) std::snprintf(tgt, sizeof(tgt), "%+.1f..%+.1f cm", st.f95TgtMin, st.f95TgtMax);
+            else std::snprintf(tgt, sizeof(tgt), "none");
+            const nofoot::f95::StepStat &v0 = st.f95View[0], &v1 = st.f95View[1], &h0 = hud.eye[0], &h1 = hud.eye[1];
+            Log::get().note("native on foot view motion (F95a) 1 s: the view a game frame, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms "
+                            "(max %.2f); the HUD against the eye, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms (max %.2f) (%u frames, "
+                            "head moving %u); the raise moved the view %.1f mm standing (%u ticks), %.1f mm moving (%u ticks); the stance settled in %u of %u pin calls (moving %u, "
+                            "the neck moving %u, the camera moving %u, filling %u, no input %u), settled target %s",
+                            v0.n, v0.rms(), v0.maxAbs, v1.n, v1.rms(), v1.maxAbs, h0.n, h0.rms(), h0.maxAbs, h1.n, h1.rms(), h1.maxAbs, hud.frames, hud.notStill,
+                            fs.movedMm[0], fs.ticks[0], fs.movedMm[1], fs.ticks[1], st.f95Why[nofoot::f95::kSettled], whyAll, st.f95Why[nofoot::f95::kMoving],
+                            st.f95Why[nofoot::f95::kNeckMoving], st.f95Why[nofoot::f95::kCamMoving], st.f95Why[nofoot::f95::kFilling], st.f95Why[nofoot::f95::kInvalid], tgt);
         }
         fs = F94Second{};
     }

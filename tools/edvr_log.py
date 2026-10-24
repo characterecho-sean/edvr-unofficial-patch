@@ -10910,6 +10910,40 @@ def _hj_f94a_neck(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f95a_motion(rows, ctx):
+    """F95a: the view's vertical step a game frame with the head still, the HUD's step against the eye (the eye in the HUD's frame less the head's own), how far the
+    raise moved the view, standing and with the body moving, and how often the stance settled. A stance that never settles leaves the neck reference without a target."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+
+    def rms(nk, rk):
+        n = sum(int(r[nk]) for r in sec)
+        return n, (math.sqrt(sum(int(r[nk]) * float(r[rk]) ** 2 for r in sec) / n) if n else 0.0)
+
+    vsn, vs = rms("vsn", "vs")
+    vmn, vm = rms("vmn", "vm")
+    hsn, hs = rms("hsn", "hs")
+    hmn, hm = rms("hmn", "hm")
+    rs, rm = sum(float(r["rs"]) for r in sec), sum(float(r["rm"]) for r in sec)
+    rsn, rmn = sum(int(r["rsn"]) for r in sec), sum(int(r["rmn"]) for r in sec)
+    settled, calls, moving = (sum(int(r[k]) for r in sec) for k in ("settled", "calls", "moving"))
+    rsps = rs * 90.0 / rsn if rsn else 0.0
+    rmps = rm * 90.0 / rmn if rmn else 0.0
+    text = ("the view a frame, the head still: standing %.2f mm rms (%d frames), moving %.2f (%d); the HUD against the eye: standing %.2f mm rms (%d), moving %.2f (%d); "
+            "the raise moved the view %.1f mm/s standing, %.1f mm/s moving; the stance settled in %d of %d pin calls (%d moving) over %d s") % (
+        vs, vsn, vm, vmn, hs, hsn, hm, hmn, rsps, rmps, settled, calls, moving, len(sec))
+    if calls - moving >= 90 and settled == 0:
+        return ("NEVER APPLIED", text + "; the stance never settled: the neck reference took no target")
+    if not (vsn or vmn or hsn or hmn):
+        return ("IDLE", text + "; no frame with the head still")
+    bad = (["the view moves standing"] if vs > 0.5 else []) + (["the HUD moves against the eye standing"] if hs > 0.5 else []) + (
+        ["the HUD moves against the eye walking"] if hm > 1.0 else []) + (["the raise moves the view walking"] if rmps > 9.0 else [])
+    if bad:
+        return ("PARTIAL", text + "; " + ", ".join(bad))
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
 
@@ -11064,6 +11098,14 @@ HEALTH_RULES = (
                 r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % ((_HN,) * 12)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
+    _hrule("view motion (F95a)", ("F95a",), ("native on foot view motion (F95a)",), (
+        ("sec", r"native on foot view motion \(F95a\) 1 s: the view a game frame, the head still: standing (?P<vsn>\d+) frames (?P<vs>[\d.]+) mm rms \(max [\d.]+\), moving "
+                r"(?P<vmn>\d+) frames (?P<vm>[\d.]+) mm rms \(max [\d.]+\); the HUD against the eye, the head still: standing (?P<hsn>\d+) frames (?P<hs>[\d.]+) mm rms "
+                r"\(max [\d.]+\), moving (?P<hmn>\d+) frames (?P<hm>[\d.]+) mm rms \(max [\d.]+\) \((?P<hframes>\d+) frames, head moving (?P<hnot>\d+)\); the raise moved "
+                r"the view (?P<rs>[\d.]+) mm standing \((?P<rsn>\d+) ticks\), (?P<rm>[\d.]+) mm moving \((?P<rmn>\d+) ticks\); the stance settled in (?P<settled>\d+) of "
+                r"(?P<calls>\d+) pin calls \(moving (?P<moving>\d+), the neck moving (?P<neck>\d+), the camera moving (?P<cam>\d+), filling (?P<filling>\d+), no input "
+                r"(?P<noin>\d+)\), settled target (?P<tgt>.+)$"),
+    ), _hj_f95a_motion),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -12308,6 +12350,23 @@ def self_test_health():
         check("F94a neck: the serial not found in most calls", [neck(matched=10, missed=80)] * 2, 0, [("PARTIAL", F94)], has=["the serial was not found in 160 calls"])
         check("F94a neck: no standing second, not calibrated", [neck(bin_="every state", anim="not calibrated yet")] * 2, 0, [("IDLE", F94)], has=["2 s, none standing"],
               lacks=["UNPARSED"])
+
+        # ---- view motion (F95a): the view and the HUD against the eye a frame, the raise from settled stances ----
+        F95 = "view motion (F95a)"
+
+        def motion(vs=0.10, hs=0.12, hm=0.30, vm=0.40, vsn=60, vmn=50, hsn=58, hmn=48, rs=0.0, rm=0.0, settled=60, calls=90, moving=0, tgt="+16.4..+16.6 cm"):
+            return R("native on foot view motion (F95a) 1 s: the view a game frame", vsn, vs, vs * 3, vmn, vm, vm * 3, hsn, hs, hs * 3, hmn, hm, hm * 3, hsn + hmn + 10, 10,
+                     rs, 45, rm, 45, settled, calls, moving, 0, 0, calls - settled - moving, 0, tgt)
+
+        check("F95a motion: still, the HUD locked to the eye", [motion()] * 3, 0, [("OK", F95)],
+              has=["standing 0.10 mm rms (180 frames)", "the HUD against the eye: standing 0.12 mm rms (174), moving 0.30 (144)", "settled in 180 of 270 pin calls"],
+              lacks=["UNPARSED"])
+        check("F95a motion: the F94a bob (the raise following the walk)", [motion(hm=4.1, rm=180.0, moving=90, settled=0, tgt="none")] * 2, 0, [("PARTIAL", F95)],
+              has=["the HUD moves against the eye walking", "the raise moves the view walking"])
+        check("F95a motion: the stance never settled", [motion(settled=0, moving=0, tgt="none")] * 2, 3, [("NEVER APPLIED", F95)],
+              has=["the stance never settled: the neck reference took no target"])
+        check("F95a motion: the view moves standing", [motion(vs=1.4, hs=1.3)] * 2, 0, [("PARTIAL", F95)], has=["the view moves standing", "the HUD moves against the eye standing"])
+        check("F95a motion: no frame with the head still", [motion(vsn=0, vmn=0, hsn=0, hmn=0)] * 2, 0, [("IDLE", F95)], has=["no frame with the head still"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
