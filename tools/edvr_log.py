@@ -10635,6 +10635,13 @@ def _hj_anchor(rows, ctx):
     text = "SetMarker %d UpdateMarker %d UpdateIndicator %d in %d s; focus key set in %d s; roles nearby %d target %d list %d hidden %d other %d%s" % (
         s, u, i, len(sec), _hfocus_seconds(ctx), _hsum(sec, "nearby"), _hsum(sec, "target"), _hsum(sec, "list"), _hsum(sec, "hidden"), _hsum(sec, "other"),
         "" if hooked else " (no hook line)")
+    ind = [r for r in sec if r.get("ifocus") is not None]
+    if ind:
+        # F92c: the label's owner is the focus indicator (type 1000); an indicator call that no caller address names means the type table is out of date
+        f, n, k = (sum(int(r[x]) for r in ind) for x in ("ifocus", "iint", "iunk"))
+        text += "; indicators (F92c): focus %d, interactable %d, unknown caller %d" % (f, n, k)
+        if k:
+            return ("PARTIAL", text + " (an indicator caller outside the pinned three)")
     return ("NEVER APPLIED" if s + u + i == 0 else "OK", text)
 
 
@@ -10728,7 +10735,10 @@ HEALTH_RULES = (
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
         ("sec", r"prompt anchor \(F87p\) 1 s: SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
-                r"\[keys [^\]]*\] target (?P<target>\d+) list (?P<list>\d+) hidden (?P<hidden>\d+) other (?P<other>\d+)"),
+                r"\[keys [^\]]*\] target (?P<target>\d+) list (?P<list>\d+) hidden (?P<hidden>\d+) other (?P<other>\d+)"
+                # F92c: the indicator owner's calls by type and where the focus came from (absent from older builds' lines)
+                r"(?: \(last \+0x[0-9A-Fa-f]+\); indicators \(F92c\): focus (?P<ifocus>\d+) \(key -?\d+\) interactable (?P<iint>\d+) \[keys [^\]]*\] "
+                r"unknown caller (?P<iunk>\d+) \(last \+0x[0-9A-Fa-f]+\); focus from (?P<src>[a-z ]+);)?"),
         ("hooked", r"prompt anchor \(F87p\): slots .* hooked"),
         ("nothook", r"prompt anchor \(F87p\): NOT hooked -- (?P<why>.*?)\. The game's code"),
         ("_", r"prompt anchor \(F87p\): slots and getter calls (?:restored|NOT all restored)"),
@@ -11714,8 +11724,13 @@ def self_test_health():
         def anchor(s=11, u=0, i=1, key=-1):
             return R("prompt anchor (F87p) 1 s: SetMarker", s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10)
 
+        def anchor_ind(ifocus=83, ikey=45, iint=166, iunk=0, src="focus indicator", i=249):
+            # F92c: the line with the indicator fields (the F91 flight's second at the charge port, with the focus now typed)
+            return R("prompt anchor (F87p) 1 s: SetMarker", 1079, 83, i, ikey, 0.1, 0.2, 1.4, 0.0, 166, "45,46", 0, 83, 83, 580, 0x1AA8000, ifocus, ikey, iint, "46,47", iunk,
+                     0x1A00000, src, 2.0, 1.25, 0.04, "held", 0.01, "body")
+
         def anchor_hooked():
-            return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 15)
+            return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 24)
 
         def label(groups=3, draws=6, ours=6, game=0, eye=0):
             return R("prompt label draws (F87p) eye %d 1 s: groups", eye, groups, draws, "624", 0, game, ours)
@@ -11849,6 +11864,15 @@ def self_test_health():
               has=["SetMarker 0 UpdateMarker 0 UpdateIndicator 0 in 2 s"])
         check("F87p anchor: the slots were not hooked", [R("prompt anchor (F87p): NOT hooked", "the vtable slot 0x48 is not the expected function")], 3, [("NEVER APPLIED", AN)],
               has=["NOT hooked: the vtable slot 0x48 is not the expected function"])
+        check("F92c anchor: the focus indicator sets the focus key", [anchor_hooked(), anchor_ind(), anchor_ind()], 0, [("OK", AN)],
+              has=["focus key set in 2 s", "indicators (F92c): focus 166, interactable 332, unknown caller 0"])
+        check("F92c anchor: an indicator caller outside the pinned three", [anchor_hooked(), anchor_ind(iunk=3)], 0, [("PARTIAL", AN)],
+              has=["unknown caller 3 (an indicator caller outside the pinned three)"])
+        check("F92c anchor: no focus indicator in the second leaves the focus unset", [anchor_hooked(), anchor_ind(ifocus=0, ikey=-1, iint=0, src="none")], 0, [("OK", AN)],
+              has=["focus key set in 0 s", "indicators (F92c): focus 0, interactable 0, unknown caller 0"])
+        f91_line = ("prompt anchor (F87p) 1 s: SetMarker 1079 UpdateMarker 83 UpdateIndicator 249; focus key -1 P (0.000 0.000 0.000) range 0.0 mm; nearby 166 [keys 45,46] "
+                    "target 0 list 83 hidden 83 other 830 (last +0x1AA992B)")
+        check("F92c anchor: an F91 line (no indicator fields) still reads", [anchor_hooked(), f91_line], 0, [("OK", AN)], lacks=["indicators (F92c)"])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])

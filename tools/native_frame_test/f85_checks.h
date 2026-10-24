@@ -1615,7 +1615,7 @@ inline void run87(Check&& check) {
     {
         bool lens = true;
         for (uint32_t i = 0; i < f87::kPinCount; ++i) lens = lens && f87::kPins[i].len >= 3 && f87::kPins[i].len <= 16 && f87::kPins[i].rva > 0x100000u;
-        check(lens && f87::kPinCount == 15, "F87p: 15 pins, each 3..16 bytes long");
+        check(lens && f87::kPinCount == 24, "F87p/F92c: 24 pins, each 3..16 bytes long");
         check(f87::callTarget(f87::kPins[f87::kPinFocusGetter].rva, f87::kPins[f87::kPinFocusGetter].bytes) == f87::kGetterFocus &&
                   f87::callTarget(f87::kPins[f87::kPinNearbyGetter].rva, f87::kPins[f87::kPinNearbyGetter].bytes) == f87::kGetterNearby &&
                   f87::callTarget(f87::kPins[f87::kPinTargetGetter].rva, f87::kPins[f87::kPinTargetGetter].bytes) == f87::kGetterNearby,
@@ -1627,6 +1627,41 @@ inline void run87(Check&& check) {
                   f87::roleOfReturn(0x1AA4D66) == f87::kRoleTarget && f87::roleOfReturn(0x1A9E74D) == f87::kRoleList && f87::roleOfReturn(0x1234) == f87::kRoleOther &&
                   f87::kPins[3].rva + 3 == 0x1AA9DE4u && f87::kPins[4].rva + 3 == 0x1A9E27Du && f87::kPins[5].rva + 3 == 0x1AA4D66u,
               "F87p: the roles come from the return addresses (the pinned calls plus 3)");
+        // F92c: the indicator owner 0x1AA9830, its SetMarker's role, its callers and the type each passes, and the stack offset of its own return address
+        const f87::Pin& entry = f87::kPins[f87::kPinIndicatorEntry];
+        check(entry.rva == 0x1AA9830u && entry.len == 7 && entry.bytes[3] == 0x48 && entry.bytes[4] == 0x83 && entry.bytes[5] == 0xEC &&
+                  entry.bytes[6] == f87::kIndicatorOuterReturnOffset,
+              "F92c: the indicator owner's pinned prologue is mov rax,rsp; sub rsp,0x68 and the outer return offset is that immediate (no push before the call)");
+        check(f87::roleOfReturn(f87::kPins[17].rva + 3) == f87::kRoleIndicator && f87::kPins[17].rva == 0x1AA9928u && f87::kPins[16].rva == 0x1AA98EAu &&
+                  f87::roleOfReturn(0x1AA992B) == f87::kRoleIndicator && std::string(f87::roleText(f87::kRoleIndicator)) == "indicator" &&
+                  std::string(f87::roleText(f87::kRoleOther)) == "other",
+              "F92c: the indicator owner's SetMarker (0x1AA9928) returns to 0x1AA992B, the role 'indicator'; UpdateIndicator is called just before it (0x1AA98EA)");
+        bool callers = true;
+        const uint32_t callPin[3] = {18, 20, 22}, typePin[3] = {19, 21, 23}, wantType[3] = {1000u, 1001u, 1001u};
+        for (int i = 0; i < 3; ++i) {
+            const f87::Pin& c = f87::kPins[callPin[i]];
+            const f87::Pin& t = f87::kPins[typePin[i]];
+            uint32_t imm = 0;
+            std::memcpy(&imm, t.bytes + 1, 4);
+            callers = callers && c.len == 5 && c.bytes[0] == 0xE8 && f87::callTarget(c.rva, c.bytes) == 0x1AA9830u && t.bytes[0] == 0xBA && imm == wantType[i] &&
+                      f87::indicatorTypeOfCaller(c.rva + 5) == wantType[i] && t.rva < c.rva && c.rva - t.rva <= 0x20u;
+        }
+        check(callers && f87::indicatorTypeOfCaller(0x1234) == 0u,
+              "F92c: the three callers call 0x1AA9830 with mov edx,1000 (0x1AA9778) and mov edx,1001 (0x1AAE644, 0x1AB67CB); their return addresses give those types");
+        // the focus state: the prompt's hidden path clears only its own key; a focus indicator key holds until a quiet second
+        uint64_t s = f87::focusPack(-1, f87::kFocusSrcNone);
+        s = f87::focusStep(s, f87::kFocusEvIndicator, 45);
+        const bool held = f87::focusKeyOf(s) == 45 && f87::focusSrcOf(s) == f87::kFocusSrcIndicator;
+        s = f87::focusStep(s, f87::kFocusEvPromptHidden, -1);
+        const bool survives = f87::focusKeyOf(s) == 45;
+        s = f87::focusStep(s, f87::kFocusEvQuietSecond, -1);
+        const bool cleared = f87::focusKeyOf(s) == -1 && f87::focusSrcOf(s) == f87::kFocusSrcNone;
+        uint64_t p = f87::focusStep(f87::focusPack(-1, 0), f87::kFocusEvPrompt, 7);
+        const bool prompt = f87::focusKeyOf(p) == 7 && f87::focusKeyOf(f87::focusStep(p, f87::kFocusEvQuietSecond, -1)) == 7 &&
+                            f87::focusKeyOf(f87::focusStep(p, f87::kFocusEvPromptHidden, -1)) == -1;
+        const bool big = f87::focusKeyOf(f87::focusPack(0x7FFFFFFF, 2)) == 0x7FFFFFFF && f87::focusKeyOf(f87::focusPack(-1, 2)) == -1;
+        check(held && survives && cleared && prompt && big,
+              "F92c: a focus indicator key survives the focus prompt's hidden path and clears after a quiet second; the prompt's own key clears on its hidden path");
     }
     {
         f87::Box box;
