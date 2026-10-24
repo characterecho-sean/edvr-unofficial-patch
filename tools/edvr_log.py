@@ -10813,35 +10813,58 @@ def _hj_f93d_camera(rows, ctx):
     return ("OK", text)
 
 
-def _hj_f93e_stance(rows, ctx):
-    """F93e: per held item, the standing seconds: what the rest target would have lowered the neck by, what the hidden head took, what the hips kept, and the legs'
-    extension written against the animated one (the knees bend as it falls)."""
-    sec = rows.get("sec", [])
+def _hj_f94a_neck(rows, ctx):
+    """F94a: per held item, the standing seconds: the animated neck, the view over it against the key while unarmed (the neck reference's weight 1), the raise in the
+    drawn camera against its target, the lowering written (0 since F94a) and the legs' extension written against the animated one. The key's line with no 1 s line
+    while the hold held the view on foot is the code never running."""
+    sec, key = rows.get("sec", []), rows.get("key", [])
     if not sec:
-        return None
+        if not key:
+            return None
+        holding = [r for r in _hrows(ctx, "view height hold (F87h)", "sec") if r["state"].startswith("holding")]
+        if holding:
+            return ("NEVER APPLIED", "eye height key %s cm read and the hold held the view %d s on foot, but no neck height line: the neck reference never ran" % (
+                key[-1]["key"], len(holding)))
+        return ("IDLE", "eye height key %s cm read; no second on foot with the body pinned" % key[-1]["key"])
     items = collections.OrderedDict()
     for r in sec:
         if r["bin"] == "standing":
             items.setdefault(r["item"], []).append(r)
     if not items:
         return ("IDLE", "%d s, none standing" % len(sec))
-    parts, bent, took, lowered = [], [], 0.0, 0
+    parts, off, lowered, bent, never, unarmed = [], [], [], [], [], 0
     for item, rs in items.items():
         n = len(rs)
-        mean = lambda k: sum(float(r[k]) for r in rs) / n
-        low = sum(int(r["low"]) for r in rs)
-        lowered += low
-        took += sum(float(r["took"]) * int(r["low"]) for r in rs)
-        la, lw, hips = mean("la"), mean("lw"), mean("hips")
-        parts.append("%s %d s: lowered in %d calls by %.1f cm, the head took %.1f, the hips kept %.1f cm; legs %.3f -> %.3f" % (
-            item, n, low, mean("gap"), mean("took"), hips, la, lw))
-        if hips > 3.0 or lw < la - 0.03:
+        mean = lambda k, rr=rs: sum(float(r[k]) for r in rr) / len(rr)
+        la, lw, lowmax = mean("la"), mean("lw"), max(float(r["lowmax"]) for r in rs)
+        text = "%s %d s: neck %.3f m, lowering max %.2f cm, legs %.3f -> %.3f" % (item, n, mean("neck"), lowmax, la, lw)
+        un = [r for r in rs if float(r["weight"]) >= 0.99]
+        unarmed += len(un)
+        if un:
+            view, keycm, tgt, incam = mean("view", un), float(un[-1]["key"]), mean("tgt", un), mean("incam", un)
+            text += "; unarmed %d s: the view over the neck %+.1f cm (key %.1f), the raise's target %+.1f cm, in the drawn camera %+.1f cm" % (len(un), view, keycm, tgt, incam)
+            if abs(tgt) > 1.0 and all(abs(float(r["incam"])) < 0.05 for r in un):
+                never.append(item)
+            elif abs(view - keycm) > 1.5:
+                off.append(item)
+        else:
+            text += "; armed throughout (the weapon eye offset places the eye)"
+        if lowmax > 0.5:
+            lowered.append(item)
+        if lw < la - 0.03:
             bent.append(item)
-    text = "; ".join(parts)
-    if lowered and took == 0.0:
-        return ("NEVER APPLIED", text + " (the head took nothing)")
-    if bent:
-        return ("PARTIAL", text + "; the knees still bend standing with %s" % ", ".join(bent))
+        parts.append(text)
+    calls, matched, missed = (sum(int(r[k]) for r in sec) for k in ("n", "matched", "missed"))
+    text = "; ".join(parts) + "; the raise found by the alignment serial in %d of %d calls (not found %d)" % (matched, calls, missed)
+    if never:
+        return ("NEVER APPLIED", text + "; the raise never reached the drawn camera with %s" % ", ".join(never))
+    if not unarmed:
+        return ("IDLE", text + "; no unarmed standing second")
+    notes = (["the view is off the key by more than 1.5 cm with %s" % ", ".join(off)] if off else []) + (
+        ["the body was lowered or raised with %s" % ", ".join(lowered)] if lowered else []) + (["the knees bend with %s" % ", ".join(bent)] if bent else []) + (
+        ["the serial was not found in %d calls" % missed] if missed * 10 > calls else [])
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
 
 
@@ -10977,12 +11000,16 @@ HEALTH_RULES = (
         ("missing", r"native on foot camera \(F93d\): NO camera read in 5 s on foot \((?P<why>.*)\): the body changes stay on in every camera"),
         ("silent", r"native on foot camera \(F93d\): the camera controller has not updated for (?P<ms>\d+) ms with the suite open"),
     ), _hj_f93d_camera),
-    _hrule("stance height (F93e)", ("F93e",), ("native on foot stance height (F93e)",), (
-        ("sec", r"native on foot stance height \(F93e\) 1 s: item (?P<item>\S+); (?P<bin>standing|every state) (?P<n>\d+) calls: the rest target lowered the neck in (?P<low>\d+) "
-                r"\(by (?P<gap>[\d.]+) cm mean, max [\d.]+\), the hidden head took (?P<took>[\d.]+) cm \(pitched [\d.]+ deg, the body %s cm further back\), the hips kept "
-                r"(?P<hips>[\d.]+) cm \(max [\d.]+\); raised in (?P<raise>\d+) \(by [\d.]+ cm mean\); vertical move written mean (?P<v>%s) cm; legs hip to foot over the leg: "
-                r"animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % (_HN, _HN)),
-    ), _hj_f93e_stance),
+    _hrule("neck height (F94a)", ("F94a",), ("native on foot neck height (F94a)", "native on foot eye height (F94a)"), (
+        ("sec", r"native on foot neck height \(F94a\) 1 s: item (?P<item>\S+); (?P<bin>standing|every state) (?P<n>\d+) calls: animated neck (?P<neck>[\d.]+) m \(min [\d.]+ "
+                r"max [\d.]+\); eye height key (?P<key>[\d.]+) cm; the view over the neck (?P<view>%s) cm \(min %s max %s\), the game's camera over it (?P<game>%s) cm, the "
+                r"skeleton's eye over it (?P<anim>.+?) \(head level\); the raise's target (?P<tgt>%s) cm \(min %s max %s\), in the drawn camera (?P<incam>%s) cm \(found "
+                r"by the alignment serial (?P<matched>\d+) calls, the last published (?P<legacy>\d+), serial not found (?P<missed>\d+)\); frame thread (?P<ticks>\d+) ticks: "
+                r"neck reference weight (?P<weight>[\d.]+), raise (?P<raise>%s) cm, applied (?P<applied>%s) cm, target frozen (?P<frozen>\d+), stale (?P<stale>\d+), "
+                r"clamped (?P<clamped>\d+); the rest target asked (?P<asked>%s) cm, the lowering written mean (?P<low>%s) cm max \|(?P<lowmax>[\d.]+)\|; legs hip to foot "
+                r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % ((_HN,) * 12)),
+        ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
+    ), _hj_f94a_neck),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -12133,7 +12160,7 @@ def self_test_health():
                                                                R("native on foot ADS eye hold (F93b): %s (live, from the next press", "on", "no")], 0, [("IDLE", F93C)],
               has=["switched: steady eye 1, eye hold 1 time(s)"])
         # ---- game camera (F93d): the camera suite on foot gates every body change ----
-        F93D, F93E = "game camera (F93d)", "stance height (F93e)"
+        F93D = "game camera (F93d)"
         CTL = 0x14D09AB8080
 
         def cam_text(mode):
@@ -12167,21 +12194,35 @@ def self_test_health():
               R("native on foot camera (F93d): the camera controller has not updated", 1012), cam_change("first person", 0, (1.0, 90, 90, 180, 90))], 0,
               [("PARTIAL", F93D)], has=["the controller went quiet in the suite 1 time(s)"])
 
-        # ---- stance height (F93e): the stance's height taken by the hidden head, not the knees ----
-        ELINK = "$humanoid_rechargetool_name;"
+        # ---- neck height (F94a): the view's height from the animated neck, the body at its animated height ----
+        F94 = "neck height (F94a)"
+        FISTS, RIFLE = "$humanoid_fists_name;", "$wpn_m_assaultrifle_laser_fauto_name;"
 
-        def stance(item=ELINK, bin_="standing", low=90, gap=10.8, took=10.8, hips=0.0, la=0.990, lw=0.989):
-            return R("native on foot stance height (F93e) 1 s: item %s", item, bin_, 90, low, gap, gap + 0.4, took, 41.0, 6.4, hips, hips + 0.2, 0, 0.0,
-                     -hips, la, lw, lw - 0.004, 90, 1.587, 1.540, -0.3, -1.7, 90)
+        def neck(item=FISTS, bin_="standing", view=15.5, tgt=11.6, incam=11.6, matched=90, legacy=0, missed=0, weight=1.0, lowmax=0.0, la=0.996, lw=0.996, key=15.5,
+                 anim="+15.6 cm"):
+            return R("native on foot neck height (F94a) 1 s: item %s", item, bin_, 90, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, 3.9, anim, tgt, tgt - 0.2,
+                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, 90)
 
-        check("F93e stance: the Energylink standing, the head took it all", [stance()] * 3, 0, [("OK", F93E)],
-              has=[ELINK + " 3 s: lowered in 270 calls by 10.8 cm, the head took 10.8, the hips kept 0.0 cm; legs 0.990 -> 0.989"])
-        check("F93e stance: the knees still bend", [stance(took=1.8, hips=9.0, lw=0.800)] * 2, 0, [("PARTIAL", F93E)],
-              has=["the knees still bend standing with " + ELINK])
-        check("F93e stance: lowered and the head took nothing", [stance(took=0.0, hips=10.8, lw=0.870)] * 2, 3, [("NEVER APPLIED", F93E)], has=["the head took nothing"])
-        check("F93e stance: no standing second", [stance(bin_="every state")] * 2, 0, [("IDLE", F93E)], has=["2 s, none standing"])
-        check("F93e stance: the rifle raised, nothing lowered", [stance("$wpn_m_assaultrifle_laser_fauto_name;", low=0, gap=0.0, took=0.0, la=0.890, lw=0.940)], 0,
-              [("OK", F93E)], lacks=["UNPARSED"])
+        def eye_key(cm=15.5):
+            return R("native on foot eye height (F94a): fix", cm, 15.5, 0.0, 30.0)
+
+        check("F94a neck: fists standing, the eye 15.5 cm over the neck", [eye_key()] + [neck()] * 3, 0, [("OK", F94)],
+              has=[FISTS + " 3 s: neck 1.543 m, lowering max 0.00 cm, legs 0.996 -> 0.996; unarmed 3 s: the view over the neck +15.5 cm (key 15.5), the raise's "
+                   "target +11.6 cm, in the drawn camera +11.6 cm", "the raise found by the alignment serial in 270 of 270 calls (not found 0)"], lacks=["UNPARSED"])
+        check("F94a neck: the view off the key", [neck(view=12.0)] * 2, 0, [("PARTIAL", F94)], has=["the view is off the key by more than 1.5 cm with " + FISTS])
+        check("F94a neck: the raise never reached the drawn camera", [neck(view=3.9, incam=0.0)] * 2, 3, [("NEVER APPLIED", F94)],
+              has=["the raise never reached the drawn camera with " + FISTS])
+        check("F94a neck: the key read, the hold held the view on foot, no neck line", [eye_key(), hold(), hold()], 3, [("NEVER APPLIED", F94)],
+              has=["but no neck height line: the neck reference never ran"])
+        check("F94a neck: the key read, never on foot", [eye_key()], 0, [("IDLE", F94)], has=["no second on foot with the body pinned"])
+        check("F94a neck: the rifle drawn throughout", [neck(RIFLE, view=32.0, tgt=27.0, incam=0.0, weight=0.0, la=0.930, lw=0.930)] * 2, 0, [("IDLE", F94)],
+              has=["armed throughout (the weapon eye offset places the eye)", "no unarmed standing second"])
+        check("F94a neck: the body moved and the knees bent", [neck(lowmax=3.0, lw=0.800)] * 2, 0, [("PARTIAL", F94)],
+              has=["the body was lowered or raised with " + FISTS, "the knees bend with " + FISTS])
+        check("F94a neck: a runtime that reports no serial", [neck(matched=0, legacy=90)] * 2, 0, [("OK", F94)], has=["in 0 of 180 calls (not found 0)"])
+        check("F94a neck: the serial not found in most calls", [neck(matched=10, missed=80)] * 2, 0, [("PARTIAL", F94)], has=["the serial was not found in 160 calls"])
+        check("F94a neck: no standing second, not calibrated", [neck(bin_="every state", anim="not calibrated yet")] * 2, 0, [("IDLE", F94)], has=["2 s, none standing"],
+              lacks=["UNPARSED"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
