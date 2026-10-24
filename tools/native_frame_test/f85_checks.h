@@ -1615,7 +1615,7 @@ inline void run87(Check&& check) {
     {
         bool lens = true;
         for (uint32_t i = 0; i < f87::kPinCount; ++i) lens = lens && f87::kPins[i].len >= 3 && f87::kPins[i].len <= 16 && f87::kPins[i].rva > 0x100000u;
-        check(lens && f87::kPinCount == 24, "F87p/F92c: 24 pins, each 3..16 bytes long");
+        check(lens && f87::kPinCount == 27, "F87p/F92c/F93c: 27 pins, each 3..16 bytes long");
         check(f87::callTarget(f87::kPins[f87::kPinFocusGetter].rva, f87::kPins[f87::kPinFocusGetter].bytes) == f87::kGetterFocus &&
                   f87::callTarget(f87::kPins[f87::kPinNearbyGetter].rva, f87::kPins[f87::kPinNearbyGetter].bytes) == f87::kGetterNearby &&
                   f87::callTarget(f87::kPins[f87::kPinTargetGetter].rva, f87::kPins[f87::kPinTargetGetter].bytes) == f87::kGetterNearby,
@@ -1662,6 +1662,48 @@ inline void run87(Check&& check) {
         const bool big = f87::focusKeyOf(f87::focusPack(0x7FFFFFFF, 2)) == 0x7FFFFFFF && f87::focusKeyOf(f87::focusPack(-1, 2)) == -1;
         check(held && survives && cleared && prompt && big,
               "F92c: a focus indicator key survives the focus prompt's hidden path and clears after a quiet second; the prompt's own key clears on its hidden path");
+        // F93c: SetMarker's offset argument is read where both pinned callers store it ([rsp+0x30]); the focus prompt's comes from [[hud+0x50]+0x10]
+        const f87::Pin& fo = f87::kPins[24];
+        const f87::Pin& fs = f87::kPins[25];
+        const f87::Pin& no = f87::kPins[26];
+        check(fo.rva == 0x1AA9DC1u && no.rva == 0x1A9E259u && fo.bytes[4] == f87::kSetMarkerOffsetPtrOffset && no.bytes[4] == f87::kSetMarkerOffsetPtrOffset &&
+                  fo.bytes[0] == 0x48 && fo.bytes[1] == 0x89 && fo.bytes[2] == 0x54 && fs.rva == 0x1AA9D7Bu && fs.bytes[7] == 0x10 &&
+                  fo.rva < f87::kPins[3].rva && f87::kPins[3].rva - fo.rva < 0x30u && no.rva < f87::kPins[4].rva && f87::kPins[4].rva - no.rva < 0x30u,
+              "F93c: the focus and nearby SetMarker calls store the offset's address at [rsp+0x30] just before the call; the focus offset is read from [[hud+0x50]+0x10]");
+        check(!f87::hasDesignOffset(0.0f, 0.0f) && !f87::hasDesignOffset(5e-5f, -5e-5f) && f87::hasDesignOffset(0.031f, -0.022f) && f87::hasDesignOffset(0.0f, 0.5f) &&
+                  !f87::hasDesignOffset(std::numeric_limits<float>::quiet_NaN(), 1.0f),
+              "F93c: a designed offset is a finite offset argument with a component over 1e-4 (zero for the dots and waypoints)");
+    }
+    {
+        // F93c: the designed-offset marker takes the nearest reference's correction, this eye-frame first, then the one before; none older
+        f87::RefSet rs;
+        double d[2] = {}, dist = 0.0;
+        uint32_t age = 9;
+        const bool none = !rs.nearest(100, std::array<double, 2>{0.1, 0.1}.data(), 1, d, &dist, &age);
+        const double a1[2] = {0.20, 0.05}, d1[2] = {-0.17, 0.13}, a2[2] = {0.60, -0.30}, d2[2] = {-0.02, 0.01}, a3[2] = {0.21, 0.06}, d3[2] = {-0.16, 0.12};
+        rs.add(99, a3, d3);    // the frame before, nearest
+        rs.add(100, a1, d1);   // this frame, near
+        rs.add(100, a2, d2);   // this frame, far
+        const double at[2] = {0.22, 0.06};
+        const bool ok1 = rs.nearest(100, at, 1, d, &dist, &age) && age == 0 && d[0] == d1[0] && d[1] == d1[1] && std::fabs(dist - std::sqrt(0.02 * 0.02 + 0.01 * 0.01)) < 1e-12;
+        f87::RefSet only;
+        only.add(99, a3, d3);
+        const bool ok2 = only.nearest(100, at, 1, d, &dist, &age) && age == 1 && d[0] == d3[0] && !only.nearest(101, at, 1, d, &dist, &age);
+        f87::RefSet wrap;
+        for (int i = 0; i < f87::kRefPerEye + 3; ++i) {
+            const double ai[2] = {0.01 * i, 0.0}, di[2] = {static_cast<double>(i), 0.0};
+            wrap.add(200, ai, di);
+        }
+        const double at0[2] = {0.0, 0.0};
+        const bool ok3 = wrap.nearest(200, at0, 1, d, &dist, &age) && d[0] == 3.0;   // entries 0..2 were overwritten by 16..18: entry 3 is nearest
+        check(none && ok1 && ok2 && ok3,
+              "F93c: the reference is the nearest in this eye-frame before any older one, one frame old at most, the ring keeps the newest 16");
+        // the patch the label gets: its own record through the unpatched rows plus the reference's correction (its layout kept), not P plus the mesh offset
+        const double nM0[2] = {0.39, -0.135}, nWu[2] = {0.218, -0.002};
+        const double T[2] = {nM0[0] + d1[0], nM0[1] + d1[1]};
+        const double dropped[2] = {(nWu[0] - nM0[0]) - d1[0], (nWu[1] - nM0[1]) - d1[1]};
+        check(std::fabs(T[0] - 0.22) < 1e-12 && std::fabs(T[1] - (-0.005)) < 1e-12 && std::fabs(dropped[0] - (-0.002)) < 1e-12 && std::fabs(dropped[1] - 0.003) < 1e-12,
+              "F93c: the label's target is its record plus the dot's correction; the aim at P would have dropped the game's (+0.17, -0.13) NDC layout offset");
     }
     {
         f87::Box box;
