@@ -247,6 +247,10 @@ struct FitFrame {
     uint32_t rBase = 0;                  // the residual's base (a new base moves r's offset)
     uint32_t rLag = 0;                   // F92b: how many frames the rows r was measured on are behind this frame (1 in the F91 flight; at most kFitMaxLag)
     bool aimOn = true;                   // F92b: the head aim was engaged this frame (the toggle's A/B)
+    bool steadyOn = true;                // F93b: the sight lock's steady input was on this frame (fix.native_on_foot_ads_eye_steady's A/B)
+    bool holdOn = false;                 // F93b: this press held the eye at its entry point (fix.native_on_foot_ads_eye_hold's A/B)
+    bool chainOk = false;                // F93b: the eye chain's steps below are this frame's
+    double shiftStep = 0.0, lockStep = 0.0, headTrStep = 0.0;   // mm: the sight lock's shift, the position lock, the head's translation (LOCAL), frame to frame
     bool missingOk = false;
     double missing[2] = {};              // the cancel total less the cancel the pose carried (deg)
     bool viewOk = false;
@@ -282,6 +286,10 @@ struct FitResult {
     bool h1 = false, lock = false, h3 = false, enough = false;
     uint32_t aimN = 0;                   // F92b: frames with the head aim engaged
     uint32_t rLagMax = 0;                // F92b: the largest rows lag r was aligned by
+    uint32_t steadyN = 0, chainN = 0;    // F93b: frames with the steady eye on; frames with the eye chain's steps
+    uint32_t holdN = 0;                  // F93b: frames of a press holding the eye
+    double shiftRms = 0.0, lockRms = 0.0, headTrRms = 0.0;   // F93b: their rms, mm a frame
+    double alongAc[2] = {};              // F93b: the along error step's autocorrelation at lags 1 and 2 (a lock corrected two frames late: lag 2 about -0.4)
 };
 // A press's windows: frames go in as they are traced; a full window is fitted and starts the next. The applied history and the last window's motion carry across windows.
 // F92b: r is measured on the right eye's rows of an earlier frame (the trace's tick reads the rows of the frame before it), so the applied steps it is fitted against end
@@ -384,9 +392,25 @@ inline FitResult fitWindow(const FitWindow& w) noexcept {
     R.t0 = w.f[0].t;
     R.t1 = w.f[n - 1].t;
     R.dur = w.dur;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (w.f[i].aimOn) ++R.aimN;
-        if (w.f[i].rOk && w.f[i].rLag > R.rLagMax) R.rLagMax = w.f[i].rLag;
+    {
+        double ss = 0.0, sl = 0.0, sh = 0.0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (w.f[i].aimOn) ++R.aimN;
+            if (w.f[i].steadyOn) ++R.steadyN;
+            if (w.f[i].holdOn) ++R.holdN;
+            if (w.f[i].rOk && w.f[i].rLag > R.rLagMax) R.rLagMax = w.f[i].rLag;
+            if (w.f[i].chainOk) {
+                ++R.chainN;
+                ss += w.f[i].shiftStep * w.f[i].shiftStep;
+                sl += w.f[i].lockStep * w.f[i].lockStep;
+                sh += w.f[i].headTrStep * w.f[i].headTrStep;
+            }
+        }
+        if (R.chainN) {
+            R.shiftRms = std::sqrt(ss / R.chainN);
+            R.lockRms = std::sqrt(sl / R.chainN);
+            R.headTrRms = std::sqrt(sh / R.chainN);
+        }
     }
     double hy[kFitMaxFrames], hp[kFitMaxFrames];
     double netY = 0.0, netP = 0.0;
@@ -574,6 +598,21 @@ inline FitResult fitWindow(const FitWindow& w) noexcept {
         }
         double ssA = 0.0, ssP = 0.0;
         for (uint32_t i = 0; i < R.sightStepN; ++i) ssA += sa[i] * sa[i], ssP += spp[i] * spp[i];
+        if (R.sightStepN >= 8) {   // F93b: the along step's autocorrelation about its mean at lags 1 and 2
+            double m = 0.0;
+            for (uint32_t i = 0; i < R.sightStepN; ++i) m += sa[i];
+            m /= R.sightStepN;
+            double c0 = 0.0, c1 = 0.0, c2 = 0.0;
+            for (uint32_t i = 0; i < R.sightStepN; ++i) {
+                c0 += (sa[i] - m) * (sa[i] - m);
+                if (i >= 1) c1 += (sa[i] - m) * (sa[i - 1] - m);
+                if (i >= 2) c2 += (sa[i] - m) * (sa[i - 2] - m);
+            }
+            if (c0 > 1e-18) {
+                R.alongAc[0] = c1 / c0;
+                R.alongAc[1] = c2 / c0;
+            }
+        }
         R.stepRmsAlong = R.sightStepN ? std::sqrt(ssA / R.sightStepN) : 0.0;
         R.stepRmsPerp = R.sightStepN ? std::sqrt(ssP / R.sightStepN) : 0.0;
         R.netAlong = haveFirst ? lastA - firstA : 0.0;
@@ -607,8 +646,10 @@ inline size_t formatFit(char* buf, size_t cap, const FitResult& R) noexcept {
     size_t at = 0;
     if (buf && cap) buf[0] = '\0';
     appendf(buf, cap, at, "window %u: t %+.2f to %+.2f s, %u frames, head %s (net %.1f deg/s; tremor rms yaw %.3f pitch %.3f deg a frame over %u head steps), head aim %s "
-            "(%u of %u frames)", R.index, R.t0, R.t1, R.frames, R.still ? "STILL" : "MOVING", R.netRate, R.headRms[0], R.headRms[1], R.headN,
-            R.aimN == R.frames ? "on" : R.aimN == 0 ? "off" : "mixed", R.aimN, R.frames);
+            "(%u of %u frames), steady eye %s (%u of %u frames), eye hold %s (%u of %u frames)", R.index, R.t0, R.t1, R.frames, R.still ? "STILL" : "MOVING", R.netRate,
+            R.headRms[0], R.headRms[1], R.headN, R.aimN == R.frames ? "on" : R.aimN == 0 ? "off" : "mixed", R.aimN, R.frames,
+            R.steadyN == R.frames ? "on" : R.steadyN == 0 ? "off" : "mixed", R.steadyN, R.frames, R.holdN == R.frames ? "on" : R.holdN == 0 ? "off" : "mixed", R.holdN,
+            R.frames);
     appendf(buf, cap, at, "; r: %u frames, mean yaw %+.3f pitch %+.3f deg, step rms %.4f deg (yaw %.4f pitch %.4f about the mean, %u steps)", R.rN, R.rMean[0], R.rMean[1],
             R.rStepRms2, R.rStepRms[0], R.rStepRms[1], R.rStepN);
     if (R.enough)
@@ -629,7 +670,10 @@ inline size_t formatFit(char* buf, size_t cap, const FitResult& R) noexcept {
     appendCorr(buf, cap, at, R.xf[1]);
     appendf(buf, cap, at, " (%u/%u/%u pairs)", R.xfN[0], R.xfN[1], R.xfN[2]);
     appendf(buf, cap, at, "; sight: %u frames, step rms along %.3f perp %.3f mm, reversals of %.1f mm or more along %u perp %u, net along %+.3f perp %+.3f mm, overshoot after the head "
-            "stopped %s", R.sightN, R.stepRmsAlong, R.stepRmsPerp, kLockMm, R.revAlong, R.revPerp, R.netAlong, R.netPerp, R.overshoot ? "YES" : "no");
+            "stopped %s, along step autocorrelation lag 1 %+.2f lag 2 %+.2f", R.sightN, R.stepRmsAlong, R.stepRmsPerp, kLockMm, R.revAlong, R.revPerp, R.netAlong, R.netPerp,
+            R.overshoot ? "YES" : "no", R.alongAc[0], R.alongAc[1]);
+    appendf(buf, cap, at, "; eye chain (F93b): rms a frame sight shift %.3f mm, position lock %.3f mm, head translation %.3f mm (%u frames)", R.shiftRms, R.lockRms, R.headTrRms,
+            R.chainN);
     appendf(buf, cap, at, "; verdict: ");
     if (!R.enough) {
         appendf(buf, cap, at, "none (too few r frames)");

@@ -34,6 +34,7 @@
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
 #include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
 #include "native_on_foot_f92.h"   // F92b: the ADS head aim as a live toggle within a press (pure parts)
+#include "native_on_foot_f93.h"   // F93b: the ADS sight lock's input from the alignment the measured eye was rendered with, the eye chain instrument (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -124,6 +125,12 @@ int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 // F89: fix.native_on_foot_ads_close_left_eye (live): the left eye fades to black by the ADS lock's weight while the sights are up. A USER key, default on.
 std::atomic<bool> g_f89CloseLeftKey{true};
+// F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
+// error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
+std::atomic<bool> g_f93SteadyKey{true};
+// F93b (TEMPORARY A/B, live from the next press): fix.native_on_foot_ads_eye_hold. off (the default): in ADS the eye follows the head's own translation and the sight lock
+// keeps it on the sight line; on: F62b's position lock, the head's translation since the press taken out of the eye (through the eye alignment, two frames late).
+std::atomic<bool> g_f93HoldKey{false};
 // F90 (TEMPORARY, live): the pistol's readout in the weapon's frame, fix.native_on_foot_pistol_readout_forward_cm / _left_cm / _up_cm / _toward_eye_cm (read by
 // the render thread's decision at each pistol readout draw).
 std::atomic<float> g_f90ForwardCm{static_cast<float>(nofoot::f90::kForwardDefaultCm)}, g_f90LeftCm{static_cast<float>(nofoot::f90::kLeftDefaultCm)},
@@ -810,6 +817,21 @@ void readKey() {
                                  "releases; the right eye is untouched; never outside ADS"
                                : "both eyes stay open while you aim down sights");
         g_f89CloseLeftKey.store(on, std::memory_order_relaxed);
+    }
+    // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
+    {
+        const bool steadyOn = cfg.getString("fix.native_on_foot_ads_eye_steady", "on") != "off";
+        if (first || steadyOn != g_f93SteadyKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS steady eye (F93b, TEMPORARY): fix.native_on_foot_ads_eye_steady is %s", steadyOn ? "on -- the sight lock's target is the shift "
+                            "the measured eye was rendered with plus the error measured on it (the alignment matched by the serial the runtime reports with each pose)"
+                            : "off -- the sight lock's target is the shift published now plus the error measured on the eye rendered two frames ago (F70)");
+        g_f93SteadyKey.store(steadyOn, std::memory_order_relaxed);
+        const bool hold = cfg.getString("fix.native_on_foot_ads_eye_hold", "off") == "on";
+        if (first || hold != g_f93HoldKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS eye hold (F93b, TEMPORARY): fix.native_on_foot_ads_eye_hold is %s (from the next press)", hold ? "on -- in ADS the head's "
+                            "translation since the press is taken out of the eye (F62b's position lock; it reaches the eye two frames late)"
+                            : "off -- in ADS the eye follows the head's own translation and the sight lock keeps it on the sight line");
+        g_f93HoldKey.store(hold, std::memory_order_relaxed);
     }
     // F90 (TEMPORARY, live, the Native on foot page's "Pistol readout forward / left / up / toward you"): where the pistol's readout sits, from the game's place
     // (over the rear sight), in the pistol's own frame: along the barrel, across it to the left, along its up, and toward your eye on the line of sight. 0, 0, 0, 0
@@ -6450,6 +6472,8 @@ int g_adsState = kAdsIdle;            // frame thread only, as is everything in 
 // itself (g_adsState: the sight lock, the position lock, the left eye, the body detach) runs whatever the toggle says.
 int g_adsAimMode = nofoot::f92::kAimOff;
 uint64_t g_adsAimUnwindMs = 0;
+// F93b: this press holds the eye at its entry point (fix.native_on_foot_ads_eye_hold, latched at each engage so a switch never jumps the eye mid-press).
+bool g_adsHoldThisPress = false, g_adsHoldKeyLast = false, g_adsHoldKeyInit = false;
 nofoot::AdsRamp g_adsRamp;
 double g_adsW = 0.0;                  // the weight this tick
 nofoot::AdsActionReject g_adsActionReject; // frame thread only: rejected held action stays off until a fresh logical false sample
@@ -6776,6 +6800,17 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     // The state: engage on ADS, release when it ends, re-engage from the release (nofoot::f91::adsStateAfter, the rig's). Every engage starts clean.
     const int adsNext = nofoot::f91::adsStateAfter(g_adsState, ads);
     bool entered = false;   // F92b: this tick's edge engaged the press (the head aim engages with it when the toggle is on)
+    {   // F93b: the eye hold's key, logged live; it takes effect at the next press from idle (a press re-engaged during its release keeps its own)
+        const bool holdKey = g_f93HoldKey.load(std::memory_order_relaxed);
+        if (!g_adsHoldKeyInit) {
+            g_adsHoldKeyInit = true;
+            g_adsHoldKeyLast = holdKey;
+        } else if (holdKey != g_adsHoldKeyLast) {
+            g_adsHoldKeyLast = holdKey;
+            Log::get().note("native on foot ADS eye hold (F93b): %s (live, from the next press; in ADS: %s)", holdKey ? "on" : "off", g_adsState == kAdsActive ? "yes" : "no");
+        }
+        if (g_adsState == kAdsIdle && adsNext == kAdsActive) g_adsHoldThisPress = holdKey;
+    }
     if (g_adsState == kAdsIdle && adsNext == kAdsActive) {
         entered = true;
         g_adsState = kAdsActive;
@@ -6973,7 +7008,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsSumQueued[1] += iP;
     }
     // The position lock (natural LOCAL; zero until the entry is taken).
-    if (g_adsEntryValid) nofoot::adsLockOffset(g_adsHeadNow, g_adsEntry, g_adsW, g_adsLock);
+    // F93b: only while this press holds the eye (fix.native_on_foot_ads_eye_hold, latched at the engage). The lock reaches the eye through the eye alignment two frames
+    // after the head's translation it takes out, so the head's translation tremor showed as the eye moving against the weapon (the F92 flight: 0.08 mm a frame, the
+    // sight error's step autocorrelated -0.41 at lag 2); off, the eye follows the head's own translation and the sight lock keeps it on the sight line.
+    if (g_adsEntryValid && g_adsHoldThisPress) nofoot::adsLockOffset(g_adsHeadNow, g_adsEntry, g_adsW, g_adsLock);
     else g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
     if (nofoot::f92::aimUnwound(g_adsState, g_adsAimMode, g_adsMap.releaseDone())) {
         // F92b: the head aim's unwind within the press is done: whatever is left is dropped (that much view jump, logged), as at a release's end; the press goes on.
@@ -8154,6 +8192,23 @@ struct AlignRun {
 AlignRun g_align;       // view (F33): the seated offset, frame thread only
 AlignRun g_alignBody;   // body (F35): the world offset of the body's render records, frame thread only
 AlignRun g_adsSight;    // F63: the ADS sight lock's seated offset (frame thread only), added to the eye alignment; zero outside ADS
+// F93b (frame thread): the sight lock's part of every eye alignment published, by serial (f89AlignPublish); the serial the runtime reported with each frame's pose, by the
+// frame (alignTick); the eye chain's 1 s sums; and this tick's per-frame figures for the F89 trace, stamped with the F91 tick.
+nofoot::f93::SightHistory g_f93Sight;
+nofoot::f93::FrameSerials g_f93Frames;
+nofoot::f93::ChainSecond g_f93Chain;
+struct F93Frame {
+    uint32_t tick = ~0u;
+    int source = nofoot::f93::kLegacy;
+    uint32_t lag = 0;
+    bool have = false;
+    bool stepsOk = false;   // the steps below are this tick's (a frame after another active one)
+    double shiftStepMm = 0.0, lockStepMm = 0.0, headStepMm = 0.0;
+    bool prevValid = false;
+    double prevShift[3] = {}, prevLock[3] = {}, prevHead[3] = {};
+};
+F93Frame g_f93Frame;
+bool g_f93KeyLast = true, g_f93KeyInit = false;
 
 // F35 hand-off: the body offset (world metres) as a seqlock: the frame thread writes, the submit job's hook reads (it runs on the game's thread
 // for each AMC, not the frame thread, so the reads must not block or tear).
@@ -9337,6 +9392,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     nofoot::AdsOpticBasis opticBasis;
     nofoot::AdsSightErr E;
     bool have = false;
+    bool f93Solved = false;          // F93b: the error was measured on the solved rendered eye (the right eye's rows of f93RowsFrame)
+    uint32_t f93RowsFrame = ~0u;
     nofoot::AdsEyeCap eyeCap;
     // F70: the 3P root's world drift from where it stood when this press began (the AMC origin of the pin's input): the body must stay put while the eye moves.
     {
@@ -9528,6 +9585,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             if (eyeOk[1] && nofoot::adsSightErrorEyeK(adsOrigin, eyeW[1], f, rows, eyeCap.kM, E)) {
                 lockOk = true;
                 usedSolved = true;
+                f93Solved = true;
+                f93RowsFrame = eyeFrame[1];
             } else if (modelOk && nofoot::adsSightErrorEyeK(adsOrigin, modelEye, f, rows, eyeCap.kM, E)) {
                 lockOk = true;
             }
@@ -9551,7 +9610,54 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     // guard trip selects zero. The head-aim ramp remains independent and does not scale this eye correction.
     {
         const double beforePos[3] = {g_adsSight.pos[0], g_adsSight.pos[1], g_adsSight.pos[2]};
-        nofoot::adsEyeStep(g_adsSight.pos, g_adsSight.vel, g_adsSight.target, err, have, active, g_adsSightTripped, dt);
+        // F93b: the target is the shift the measured eye was rendered with (by the serial the runtime reported with the rows' frame) plus the error measured on it; with
+        // the key off, or no serial, F70's (the shift published now plus that error).
+        uint32_t word = 0;
+        const bool frameKnown = f93Solved && g_f93Frames.find(f93RowsFrame, &word);
+        const bool steady = g_f93SteadyKey.load(std::memory_order_relaxed);
+        if (!g_f93KeyInit) {
+            g_f93KeyInit = true;
+            g_f93KeyLast = steady;
+        } else if (steady != g_f93KeyLast) {
+            g_f93KeyLast = steady;
+            Log::get().note("native on foot ADS steady eye (F93b): %s (live; in ADS: %s)", steady ? "on" : "off", active ? "yes" : "no");
+        }
+        const nofoot::f93::Target tg = nofoot::f93::sightTarget(steady, have, f93Solved, frameKnown, word, g_f93Sight, g_adsSight.pos, err);
+        nofoot::adsEyeStep(g_adsSight.pos, g_adsSight.vel, g_adsSight.target, tg.err, tg.have, active, g_adsSightTripped, dt);
+        {   // F93b: the eye chain, per frame (this tick's figures for the trace) and summed for the 1 s line, while ADS is active
+            F93Frame& q = g_f93Frame;
+            const double head[3] = {g_adsHeadNow[0], g_adsHeadNow[1], g_adsHeadNow[2]};
+            if (active) {
+                q.tick = g_f91.tick;
+                q.have = have;
+                q.source = have ? tg.source : nofoot::f93::kLegacy;
+                q.lag = tg.lag;
+                q.stepsOk = q.prevValid;
+                if (q.prevValid) {
+                    double shiftSq = 0.0, lockSq = 0.0, headSq = 0.0;
+                    for (int i = 0; i < 3; ++i) {
+                        shiftSq += (g_adsSight.pos[i] - q.prevShift[i]) * (g_adsSight.pos[i] - q.prevShift[i]);
+                        lockSq += (g_adsLock[i] - q.prevLock[i]) * (g_adsLock[i] - q.prevLock[i]);
+                        headSq += (head[i] - q.prevHead[i]) * (head[i] - q.prevHead[i]);
+                    }
+                    q.shiftStepMm = std::sqrt(shiftSq) * 1000.0;
+                    q.lockStepMm = std::sqrt(lockSq) * 1000.0;
+                    q.headStepMm = std::sqrt(headSq) * 1000.0;
+                    g_f93Chain.addSteps(q.shiftStepMm / 1000.0, q.lockStepMm / 1000.0, q.headStepMm / 1000.0);
+                }
+                if (have) g_f93Chain.addSource(q.source, q.lag);
+                g_f93Chain.addAlong(have && f93Solved, E.alongFull);
+                q.prevValid = true;
+            } else {
+                q.prevValid = false;
+                g_f93Chain.addAlong(false, 0.0);
+            }
+            for (int i = 0; i < 3; ++i) {
+                q.prevShift[i] = g_adsSight.pos[i];
+                q.prevLock[i] = g_adsLock[i];
+                q.prevHead[i] = head[i];
+            }
+        }
         if (active && have && !g_adsEyeOnset.targetSeen) {
             g_adsEyeOnset.targetSeen = true;
             g_adsEyeOnset.targetMs = now;
@@ -9627,6 +9733,18 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
                     w.driving ? "" : " (no frame drove the lock this second)");
+    {   // F93b: the eye chain this second (every ADS second, the trace's 4 events a minute aside). The proof of the steady eye: matched on every measured frame, the along
+        // error's step autocorrelation at lag 2 near 0 (F92's flight: -0.41 in every still rifle window) and its rms down from 0.08 mm.
+        nofoot::f93::ChainSecond& c = g_f93Chain;
+        Log::get().note("native on foot ADS eye chain (F93b) 1 s: steady eye %s, eye hold %s; the sight lock's target from the alignment the measured eye was rendered with "
+                        "%u of %u measured frames (serial lag mean %.1f max %u), F70's %u, the model eye %u, held (its alignment not in the history) %u; per frame rms: sight "
+                        "shift %.3f mm, position lock %.3f mm, head translation %.3f mm over %u frames; the along error's step %.3f mm rms, autocorrelation lag 1 "
+                        "%+.2f lag 2 %+.2f over %u steps (the head's translation taken out two frames late reads about -0.4 at lag 2)",
+                        g_f93SteadyKey.load(std::memory_order_relaxed) ? "on" : "off", g_adsHoldThisPress ? "on" : "off", c.matched, c.n, c.lagMean(),
+                        static_cast<unsigned>(c.lagMax), c.legacy, c.model,
+                        c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
+        c.reset();
+    }
     // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
     // (under 1 cm over a press); the sight's NDC equal at the three distances from the actual weapon P14.
     {
@@ -10877,6 +10995,7 @@ void f89AlignPublish(const float f[3]) noexcept {
     g_f89Hist.record(serial, static_cast<double>(f[1]));
     // F91 B: the cancel total (the seated yaw and pitch, published this tick ahead of the alignment) under the same serial: the pose's reported serial names the cancel it carried
     g_f91Cancel.record(serial, g_f91.tick, g_adsMap.yawPublished() / nofoot::kAdsDeg, g_adsMap.pitchPublished() / nofoot::kAdsDeg);
+    g_f93Sight.record(serial, g_adsSight.applied);   // F93b: the sight lock's part of this alignment, for its matched input
     nativeFrameSetEyeAlign(f, serial);
 }
 nofoot::f87::HeightHold g_f87Hold;
@@ -11077,17 +11196,28 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
             vf.rifleStepOk = rifleStepOk;
             char viewText[640];
             nofoot::f91::formatView(viewText, sizeof(viewText), vf);
+            // F93b: the eye chain this frame (the sight lock's input and the translations that move the eye); "eye (F93b): -" when the sight lock did not run this tick
+            char eyeText[320];
+            const F93Frame& q = g_f93Frame;
+            if (q.tick == f91Tick && q.stepsOk)
+                _snprintf_s(eyeText, sizeof(eyeText), _TRUNCATE, "; eye (F93b): steady %s, hold %s, target %s (serial lag %u), sight shift step %.3f mm, position lock step "
+                            "%.3f mm, head translation step %.3f mm, eye - F_root step %.3f mm", g_f93SteadyKey.load(std::memory_order_relaxed) ? "on" : "off",
+                            g_adsHoldThisPress ? "on" : "off",
+                            q.have ? nofoot::f93::sourceName(q.source) : "none (no measurement)", static_cast<unsigned>(q.lag), q.shiftStepMm, q.lockStepMm, q.headStepMm,
+                            stepCm * 10.0);
+            else
+                _snprintf_s(eyeText, sizeof(eyeText), _TRUNCATE, "; eye (F93b): -");
             Log::get().note("ads transition (F89) %s frame %u: t %+.3f s, journal ADS %d, ads state %s, lock weight %.2f, offset w %.2f, eye - F_root right %+.1f up %+.1f "
-                            "forward %+.1f cm, eye step %.2f cm%s%s",
+                            "forward %+.1f cm, eye step %.2f cm%s%s%s",
                             tf.press ? "press" : "release", static_cast<unsigned>(cur), tf.t, ads ? 1 : 0, kAdsStateNames[g_adsState], g_adsW, offsetW,
                             eyeUsed ? g_f87EyeRoot.last[0] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[1] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[2] * 100.0 : 0.0, stepCm,
-                            !eyeUsed ? " (no eye sample this frame)" : !newRows ? " (the eye rows are the last frame's)" : "", viewText);
+                            !eyeUsed ? " (no eye sample this frame)" : !newRows ? " (the eye rows are the last frame's)" : "", viewText, eyeText);
         }
         // F91 B: the fit, over each 0.5 s of a press's trace. A window cut short by the trace's end is fitted when it holds kFitMinFrames frames.
         const bool fitFrame = tf.trace && tf.press;
         const auto fitEmit = [&]() {
             const nofoot::f91::FitResult R = nofoot::f91::fitWindow(g_f91Fit);
-            char fitText[1400];
+            char fitText[2400];
             nofoot::f91::formatFit(fitText, sizeof(fitText), R);
             Log::get().note("ads transition (F89) press fit (F91) %s", fitText);
             nofoot::f91::fitCarry(g_f91Fit, R);
@@ -11115,6 +11245,12 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
             const int32_t rLag = static_cast<int32_t>(cur - g_f91.rowsFrame);
             ff.rLag = !g_f91.rowsKnown || rLag < 0 ? 0u : static_cast<uint32_t>(rLag);
             ff.aimOn = g_adsState == kAdsActive && g_adsAimMode == nofoot::f92::kAimOn;
+            ff.steadyOn = g_f93SteadyKey.load(std::memory_order_relaxed);   // F93b: the steady eye's and the eye hold's A/B, and the eye chain's steps this frame
+            ff.holdOn = g_adsHoldThisPress;
+            ff.chainOk = g_f93Frame.tick == f91Tick && g_f93Frame.stepsOk;
+            ff.shiftStep = g_f93Frame.shiftStepMm;
+            ff.lockStep = g_f93Frame.lockStepMm;
+            ff.headTrStep = g_f93Frame.headStepMm;
             ff.missingOk = f91Pose.ok;
             ff.viewOk = g_f91.viewStepOk;
             ff.viewStep = g_f91.viewStep;
@@ -11291,6 +11427,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     }
     EdvrNativeNowPose np{};
     const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
+    // F93b: the serial of the alignment this frame's pose carries (F89's word), kept by the frame: the sight lock reads the right eye's rows of this frame next tick.
+    g_f93Frames.record(g_f44Frame.load(std::memory_order_relaxed), haveFrame ? np.eyeAlignApplied : 0u);
     const bool ads = journalAds();
     // F58: full-3P body mode: the FP body hidden and the body unclipped (the arm IK's gate keys).
     const bool f58Full3P = mode == 2 && g_fpKeyOn.load(std::memory_order_relaxed) && g_unclipKeyOn.load(std::memory_order_relaxed);
