@@ -38,6 +38,7 @@
 #include "native_on_foot_f93de.h"   // F93d: the game's camera watch (pure parts)
 #include "native_on_foot_f94.h"   // F94a: the neck as the source of truth for the view's height; the body at its animated height (pure parts)
 #include "native_on_foot_f95.h"   // F95a: the neck reference from the stance's settled height; the view-motion instrument (pure parts)
+#include "native_on_foot_f97.h"   // F97a: the armed body under the eye again (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
 #include "native_on_foot_f97b.h"   // F97b: the interaction label sized like a panel in the world at its anchor (pure parts)
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
@@ -137,6 +138,7 @@ struct F95ViewLast {
     bool have = false, pitchOk = false;
     uint32_t p1 = 0;
     double y = 0.0, localY = 0.0, pitchDeg = 0.0;
+    double yWorld = 0.0;   // F97a: the view's height along the character's up in the world
 };
 F95ViewLast g_f95View;
 struct F95Hud {
@@ -156,6 +158,8 @@ std::atomic<int> g_f88Body{nofoot::f88::kFollow};
 double g_f88RightLast = 0.0, g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
 int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
+// F97a: F88's weight and w times the offset's up (metres), published each align tick for the Animate post-hook (the armed body's blend, the eye at the hip)
+std::atomic<float> g_f88WPub{0.0f}, g_f88UpPubM{0.0f};
 // F89: fix.native_on_foot_ads_close_left_eye (live): the left eye fades to black by the ADS lock's weight while the sights are up. A USER key, default on.
 std::atomic<bool> g_f89CloseLeftKey{true};
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
@@ -11469,6 +11473,8 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
     t.out = f88::make(k, g_f88W.w);
     t.settling = g_f88Settle.step(t.out.seated[1], dt);
     for (int i = 0; i < 3; ++i) g_f88Ignore[i] = t.out.ignore[i];
+    g_f88WPub.store(static_cast<float>(g_f88W.w), std::memory_order_relaxed);   // F97a
+    g_f88UpPubM.store(static_cast<float>(t.out.bodyM[1]), std::memory_order_relaxed);
     if (active && (k.any() || g_f88W.w > 0.0) && now - g_f88LineMs >= 1000) {
         g_f88LineMs = now;
         Log::get().note("weapon eye offset (F88) 1 s: keys right %+.1f up %+.1f forward %+.1f cm, body %s, w %.2f (armed %d ADS %d), applied seated (%+.2f %+.2f %+.2f) cm, "
@@ -13348,6 +13354,14 @@ struct PinStats {
     uint32_t f95Why[nofoot::f95::kWhyN] = {};
     double f95TgtMin = 1e9, f95TgtMax = -1e9;
     nofoot::f95::StepStat f95View[2];
+    nofoot::f95::StepStat f95World[2];   // F97a: the view's step against the ground, the head still (0 standing, 1 moving)
+    // F97a: per stance bin (standing, crouched, moving crouched, moving): the weight, the raise written and asked (cm), the calls capped by the legs, the legs'
+    // extension animated and written, the feet lifted, and the eye as drawn over the clavicle line and ahead of the chest (cm) with the INSIDE frames.
+    struct F97Bin {
+        uint32_t n = 0, capped = 0, legsN = 0, lifted = 0, clrN = 0, inside = 0;
+        double wSum = 0.0, raiseSum = 0.0, raiseMin = 1e9, raiseMax = -1e9, askedSum = 0.0, legAnimSum = 0.0, legSum = 0.0, legMin = 9.0;
+        double neckSum = 0.0, neckAnimSum = 0.0, clavSum = 0.0, clavMin = 1e9, chestSum = 0.0, chestMin = 1e9;
+    } f97[nofoot::f97::kStanceN];
 };
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
@@ -13424,6 +13438,12 @@ struct PinCall {
     uint8_t f95Why = nofoot::f95::kInvalid;
     bool f95Moving = false, f95HeadStill = false, f95ViewStepOk = false;
     double f95Target = 0.0, f95ViewStep = 0.0;
+    double f95WorldStep = 0.0;   // F97a: the view's step along the character's up in the world (m)
+    // F97a: F88's weight, the armed demand (F93's raise and the eye's lowering, m), the raise capped by the legs, the stance bin (nofoot::f97::Stance), the eye as
+    // drawn in the model (m) and, at the close, its clearance over the clavicle line and ahead of the chest 24 (heading axes, m) and the INSIDE test on it.
+    double f97W = 0.0, f97Asked = 0.0, f97RaiseF93 = 0.0, f97LowerEye = 0.0, f97EyeDrawn[3] = {}, f97ClavUp = 0.0, f97ChestFwd = 0.0;
+    bool f97Capped = false, f97EyeDrawnOk = false, f97ClrOk = false, f97Inside = false;
+    int f97Stance = 0;
     double reachCandidate[3] = {};   // F79: unweighted reach proposal; nonzero infeasible proposals are rejected, not applied to the body pin.
     double reachRadiusM[2] = {};
     bool reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
@@ -13527,6 +13547,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     }
     nofoot::PinMove mv;
     double E[3] = {}, T[3] = {}, N0[3] = {}, d0[3] = {};
+    double f97W = 0.0, f97Oup = 0.0, f97H = nofoot::f94::kEyeHeightDefaultCm * 0.01;   // F97a: F88's weight, its up (m), the eye height key (m)
     const bool heldRifle = exactRifleForCall;
     bool neckYawEligible = false, neckYawInputsHave = false;
     double neckViewShift[3] = {};
@@ -13602,7 +13623,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         E[1] = nofoot::f87::pinEyeYAdjust(E[1], hold87.transientM, hold87.valid);
         // F94a: the view as drawn (the job camera with all EDVR adds to it: the neck reference's raise, the weapon eye offset, the ADS shifts) less the same
         // transient, for the line's "view over the neck"; E above is the game's own camera (the P1 hook took the raise the pose carried out of it).
-        double f94ViewY = 0.0;
+        double f94ViewY = 0.0, f95WorldY = 0.0;
         {
             const float rw[3] = {static_cast<float>(static_cast<double>(in.camRaw[0]) + (cycSrc != kCycNone ? g_pinCyc.off[0] : 0.0)),
                                  static_cast<float>(static_cast<double>(in.camRaw[1]) + (cycSrc != kCycNone ? g_pinCyc.off[1] : 0.0)),
@@ -13610,6 +13631,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             double vm[3];
             nofoot::ikXform(rw, invM, vm);
             f94ViewY = nofoot::f87::pinEyeYAdjust(vm[1], hold87.transientM, hold87.valid);
+            // F97a: the eye as drawn in the model, the head's own motion included (what the pilot sees through; the head clearance against the torso)
+            for (int i = 0; i < 3; ++i) pc.f97EyeDrawn[i] = vm[i];
+            pc.f97EyeDrawnOk = std::isfinite(vm[0]) && std::isfinite(vm[1]) && std::isfinite(vm[2]);
+            // F97a: the view's height in the world along the character's up (the AMC's up row), less the transient: the view's motion against the ground, which the
+            // model frame does not show when the character's model moves under the camera
+            const double upW[3] = {in.m3p[4], in.m3p[5], in.m3p[6]};
+            const double un = std::sqrt(upW[0] * upW[0] + upW[1] * upW[1] + upW[2] * upW[2]);
+            f95WorldY = un > 1e-6 ? nofoot::f87::pinEyeYAdjust((rw[0] * upW[0] + rw[1] * upW[1] + rw[2] * upW[2]) / un, hold87.transientM, hold87.valid)
+                                  : std::numeric_limits<double>::quiet_NaN();
         }
         double fwdM[3], upM[3];
         for (int i = 0; i < 3; ++i) {
@@ -13741,12 +13771,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // still: what the view does that the player did not do.
             const double viewLevel = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid);
             const double localPitchDeg = localPitchRad * 180.0 / nofoot::kIkPi;
+            const double worldLevel = nofoot::pinEyeHeightNormalized(f95WorldY, localPitchRad, localPitchValid);
             if (freshIn && g_f95View.have && in.p1 == g_f95View.p1 + 1u && localPitchValid && g_f95View.pitchOk && std::isfinite(viewLevel)) {
                 pc.f95HeadStill = nofoot::f95::headStill(static_cast<double>(in.localHeadY) - g_f95View.localY, localPitchDeg - g_f95View.pitchDeg);
                 pc.f95ViewStep = viewLevel - g_f95View.y;
                 pc.f95ViewStepOk = true;
+                pc.f95WorldStep = worldLevel - g_f95View.yWorld;   // F97a: against the ground (NaN when either frame had no up row)
             }
             if (freshIn) {
+                g_f95View.yWorld = worldLevel;
                 g_f95View.have = std::isfinite(viewLevel);
                 g_f95View.p1 = in.p1;
                 g_f95View.y = viewLevel;
@@ -13779,9 +13812,21 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             std::memcpy(neckViewShift, modelShift, sizeof(neckViewShift));
             pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
         }
-        // F94a: the body stands at its animated height with every item: the neck target keeps the animated neck's height (no lowering, no raise; the view's height
-        // comes from the neck instead, above). The horizontal target is the rest offset's, as before.
-        pc.f94Asked = nofoot::f94::bodyKeepsNeckHeight(T, N0);
+        // F94a: unarmed the body stands at its animated height: the neck target keeps the animated neck's height (the view's height comes from the neck instead,
+        // above). F97a: armed (F88's weight w), F93's height where F93 raised the body, lowered only as far as keeps the eye at the hip the key's height over the
+        // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before.
+        f97W = static_cast<double>(g_f88WPub.load(std::memory_order_relaxed));
+        f97Oup = static_cast<double>(g_f88UpPubM.load(std::memory_order_relaxed));
+        f97H = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
+        pc.f94Asked = T[1] - N0[1];
+        {
+            const nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget(N0[1], T[1], pc.eyeYSelected + f97Oup, f97H, pc.detachW, f97W);
+            T[1] = at.y;
+            pc.f97W = f97W;
+            pc.f97Asked = at.asked;
+            pc.f97RaiseF93 = at.raiseF93;
+            pc.f97LowerEye = at.lowerEye;
+        }
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
         if (pl.legOk) {
             double sum = 0.0;
@@ -13994,7 +14039,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         if (pc.neckRestCandidateValid) {
             nofoot::pinDetachTarget(physicalTarget, N0, pc.detachW, physicalTarget);
             nofoot::weaponViewOffsetTarget(physicalTarget, neckViewShift);
-            nofoot::f94::bodyKeepsNeckHeight(physicalTarget, N0);   // F94a: the rifle's physical rest target keeps the animated neck's height too
+            // F94a/F97a: the rifle's physical rest target takes the same height rule (the animated neck's unarmed, F93's raise and the eye's lowering armed)
+            physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97Oup, f97H, pc.detachW, f97W).y;
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
         } else {
@@ -14210,6 +14256,27 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.neckYawFeasible = false;
             pc.neckYawRad = 0.0;
         };
+        // F97a: a raise is capped where a leg would have to lift its foot (legPlant's own reach over the planted foot), so the feet stay on the ground
+        if (mv.delta > 0.0 && pl.legOk) {
+            double room = mv.delta;
+            for (int k = 0; k < 2; ++k) {
+                const nofoot::IkArm& g = pl.leg[k];
+                if (g.U >= count || g.F >= count || g.H >= count) continue;
+                double hip0[3], knee0[3], foot0[3];
+                for (int i = 0; i < 3; ++i) {
+                    hip0[i] = g_pfzAnim[g.U][12 + i];
+                    knee0[i] = g_pfzAnim[g.F][12 + i];
+                    foot0[i] = g_pfzAnim[g.H][12 + i];
+                }
+                const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]}, kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]},
+                             hf[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
+                room = std::min(room, nofoot::f97::legRaiseRoom(hip0[1], foot0[1], nofoot::ikLen(hk), nofoot::ikLen(kf), nofoot::ikLen(hf), nofoot::kStandReach));
+            }
+            if (room < mv.delta) {
+                pc.f97Capped = true;
+                mv.delta = room > 0.0 ? room : 0.0;
+            }
+        }
         double delta = mv.delta;
         if (!pl.legOk) {
             refusal = kPinRefNoLegs;
@@ -14551,7 +14618,31 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             st.f95TgtMin = std::min(st.f95TgtMin, 100.0 * pc.f95Target);
             st.f95TgtMax = std::max(st.f95TgtMax, 100.0 * pc.f95Target);
         }
-        if (pc.f95ViewStepOk && pc.f95HeadStill) st.f95View[pc.f95Moving ? 1 : 0].add(pc.f95ViewStep);
+        if (pc.f95ViewStepOk && pc.f95HeadStill) {
+            st.f95View[pc.f95Moving ? 1 : 0].add(pc.f95ViewStep);
+            if (std::isfinite(pc.f95WorldStep)) st.f95World[pc.f95Moving ? 1 : 0].add(pc.f95WorldStep);
+        }
+        {   // F97a: the stance bin and this call's body figures (the clearance comes at the close, pinRecord)
+            pc.f97Stance = nofoot::f97::stanceBin(nofoot::pinCrouchedWc(pc.wc), pc.f95Moving);
+            PinStats::F97Bin& f = st.f97[pc.f97Stance];
+            ++f.n;
+            f.wSum += pc.f97W;
+            const double rc = 100.0 * mv.delta;
+            f.raiseSum += rc;
+            f.raiseMin = std::min(f.raiseMin, rc);
+            f.raiseMax = std::max(f.raiseMax, rc);
+            f.askedSum += 100.0 * pc.f97Asked * pc.f97W;
+            f.neckSum += N0[1] + mv.delta;
+            f.neckAnimSum += N0[1];
+            if (pc.f97Capped) ++f.capped;
+            if (legsSolved) {
+                ++f.legsN;
+                f.legAnimSum += 0.5 * (lp[0].reachBefore + lp[1].reachBefore);
+                f.legSum += 0.5 * (lp[0].reachAfter + lp[1].reachAfter);
+                f.legMin = std::min(f.legMin, std::min(lp[0].reachAfter, lp[1].reachAfter));
+                if (lp[0].liftM > 1e-4 || lp[1].liftM > 1e-4) ++f.lifted;
+            }
+        }
         if (legsSolved) {
             ++st.legSolves;
             for (int k = 0; k < 2; ++k) {
@@ -14708,6 +14799,15 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
         b.thSum[1] += 100.0 * pc.th[2];
         b.thAbsMax[0] = std::max(b.thAbsMax[0], std::fabs(100.0 * pc.th[0]));
         b.thAbsMax[1] = std::max(b.thAbsMax[1], std::fabs(100.0 * pc.th[2]));
+    }
+    if (pc.f97ClrOk && pc.f97Stance >= 0 && pc.f97Stance < nofoot::f97::kStanceN) {   // F97a: the drawn eye's clearance
+        PinStats::F97Bin& f = st.f97[pc.f97Stance];
+        ++f.clrN;
+        if (pc.f97Inside) ++f.inside;
+        f.clavSum += 100.0 * pc.f97ClavUp;
+        f.clavMin = std::min(f.clavMin, 100.0 * pc.f97ClavUp);
+        f.chestSum += 100.0 * pc.f97ChestFwd;
+        f.chestMin = std::min(f.chestMin, 100.0 * pc.f97ChestFwd);
     }
     g_pinStatSeq.fetch_add(1, std::memory_order_release);
 }
@@ -16957,6 +17057,23 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     const double clavUp = 0.5 * (pinCall.clr[2][1] + pinCall.clr[3][1]);   // eye minus the clavicle line's height
                     pinCall.clrInside = nofoot::headInside(clavUp, pinCall.clr[1][2]);
                 }
+                // F97a: the same test on the eye as drawn (the weapon eye offset, the neck reference and the head's own motion in it): what the pilot sees through
+                if (pinCall.f97EyeDrawnOk) {
+                    double p24[3], p35[3], p36[3];
+                    if (finalAt(24, p24) && finalAt(nofoot::kIkClavL, p35) && finalAt(nofoot::kIkClavR, p36)) {
+                        const double* e = pinCall.f97EyeDrawn;
+                        const double d24[3] = {e[0] - p24[0], e[1] - p24[1], e[2] - p24[2]}, d35[3] = {e[0] - p35[0], e[1] - p35[1], e[2] - p35[2]},
+                                     d36[3] = {e[0] - p36[0], e[1] - p36[1], e[2] - p36[2]};
+                        double a24[3], a35[3], a36[3];
+                        nofoot::headingAxes(h, d24, a24);
+                        nofoot::headingAxes(h, d35, a35);
+                        nofoot::headingAxes(h, d36, a36);
+                        pinCall.f97ClavUp = 0.5 * (a35[1] + a36[1]);
+                        pinCall.f97ChestFwd = a24[2];
+                        pinCall.f97ClrOk = std::isfinite(pinCall.f97ClavUp) && std::isfinite(pinCall.f97ChestFwd);
+                        pinCall.f97Inside = pinCall.f97ClrOk && nofoot::headInside(pinCall.f97ClavUp, pinCall.f97ChestFwd);
+                    }
+                }
             }
         }
         pinRecord(pinCall, res);
@@ -19112,10 +19229,33 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
             Log::get().note("native on foot view motion (F95a) 1 s: the view a game frame, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms "
                             "(max %.2f); the HUD against the eye, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms (max %.2f) (%u frames, "
                             "head moving %u); the raise moved the view %.1f mm standing (%u ticks), %.1f mm moving (%u ticks); the stance settled in %u of %u pin calls (moving %u, "
-                            "the neck moving %u, the camera moving %u, filling %u, no input %u), settled target %s",
+                            "the neck moving %u, the camera moving %u, filling %u, no input %u), settled target %s; F97a: the view against the ground, the head still: standing "
+                            "%u frames %.2f mm rms (max %.2f, %u steps over 1 cm), moving %u frames %.2f mm rms (max %.2f, %u over 1 cm); the view against the body: steps over "
+                            "1 cm standing %u, moving %u",
                             v0.n, v0.rms(), v0.maxAbs, v1.n, v1.rms(), v1.maxAbs, h0.n, h0.rms(), h0.maxAbs, h1.n, h1.rms(), h1.maxAbs, hud.frames, hud.notStill,
                             fs.movedMm[0], fs.ticks[0], fs.movedMm[1], fs.ticks[1], st.f95Why[nofoot::f95::kSettled], whyAll, st.f95Why[nofoot::f95::kMoving],
-                            st.f95Why[nofoot::f95::kNeckMoving], st.f95Why[nofoot::f95::kCamMoving], st.f95Why[nofoot::f95::kFilling], st.f95Why[nofoot::f95::kInvalid], tgt);
+                            st.f95Why[nofoot::f95::kNeckMoving], st.f95Why[nofoot::f95::kCamMoving], st.f95Why[nofoot::f95::kFilling], st.f95Why[nofoot::f95::kInvalid], tgt,
+                            st.f95World[0].n, st.f95World[0].rms(), st.f95World[0].maxAbs, st.f95World[0].over1cm, st.f95World[1].n, st.f95World[1].rms(),
+                            st.f95World[1].maxAbs, st.f95World[1].over1cm, v0.over1cm, v1.over1cm);
+        }
+        // F97a: the body against the eye per stance for the held item: the weapon's weight, the neck raised (written, asked), the calls a leg capped, the neck
+        // written against its animated height, the eye as drawn over the clavicle line and ahead of the chest 24 with the INSIDE frames (F69d's test on the drawn
+        // eye: under the clavicle line + 8 cm and under 12 cm ahead of the chest), the legs' extension and the feet lifted. Armed the eye should never be INSIDE.
+        {
+            char item97[64] = "none";
+            uint32_t serial97 = 0;
+            if (!opticItemRead(&serial97, item97) || !item97[0]) std::snprintf(item97, sizeof(item97), "none");
+            for (int sb = 0; sb < nofoot::f97::kStanceN; ++sb) {
+                const PinStats::F97Bin& f = st.f97[sb];
+                if (!f.n) continue;
+                const double n97 = static_cast<double>(f.n), gn97 = f.legsN ? static_cast<double>(f.legsN) : 1.0, cn97 = f.clrN ? static_cast<double>(f.clrN) : 1.0;
+                Log::get().note("native on foot armed body (F97a) 1 s: item %s; %s %u calls: weapon weight %.2f; the neck raised %+.1f cm (min %+.1f max %+.1f; asked %+.1f; "
+                                "capped by the legs %u), written %.3f m against animated %.3f m; the eye as drawn over the clavicle line %+.1f cm (min %+.1f), ahead of the "
+                                "chest %+.1f cm (min %+.1f), INSIDE %u of %u; legs hip to foot over the leg: animated %.3f, written %.3f (min %.3f), feet lifted %u",
+                                item97, nofoot::f97::stanceName(sb), f.n, f.wSum / n97, f.raiseSum / n97, f.raiseMin, f.raiseMax, f.askedSum / n97, f.capped, f.neckSum / n97,
+                                f.neckAnimSum / n97, f.clavSum / cn97, f.clrN ? f.clavMin : 0.0, f.chestSum / cn97, f.clrN ? f.chestMin : 0.0, f.inside, f.clrN,
+                                f.legAnimSum / gn97, f.legSum / gn97, f.legsN ? f.legMin : 0.0, f.lifted);
+            }
         }
         fs = F94Second{};
     }
