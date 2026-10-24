@@ -21,6 +21,7 @@
 #include "f93de_checks.h"   // F93d: the game's camera published and watched
 #include "f94_checks.h"     // F94a: the neck as the view's reference, the body at its animated height
 #include "f94b_checks.h"    // F94b: the interaction label moved by its own anchor; F93c's rule measured beside it
+#include "f95c_checks.h"    // F95c: the head as shadow-only through the visibility call, the fade hook's guard and action
 
 #include <array>
 #include <chrono>
@@ -7201,6 +7202,8 @@ int wmain(int argc, wchar_t** argv) {
     f94test::run94(check);
     // F94b: the label's row patch from its own anchor (the anchor shown at the dot's place), F93c's rule against it in a lagged turn and at a tie of two dots.
     f94btest::run94b(check);
+    // F95c: the head parts as shadow-only through the visibility call (the game's class 2), the fade hook's guard and its action.
+    f95ctest::run95c(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

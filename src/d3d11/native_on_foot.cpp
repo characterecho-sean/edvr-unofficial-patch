@@ -38,6 +38,7 @@
 #include "native_on_foot_f93de.h"   // F93d: the game's camera watch (pure parts)
 #include "native_on_foot_f94.h"   // F94a: the neck as the source of truth for the view's height; the body at its animated height (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
+#include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -7177,7 +7178,8 @@ std::string f9HrcValues(const F9HrcState& s) {
 
 // ---- F18 (TEMPORARY), probe P1: the eye against the body --------------------------------------------------------------------------------
 // EliteDangerous64.exe+0x3DA58A0 is the avatar visibility job: rcx = the AMC, rdx = the job context, whose floats [rdx+0..8] are the camera position
-// the visibility code subtracts from the AMC origin. Read-only. The callback samples the local third-person AMC (amcLocal(), the same match as the
+// the visibility code subtracts from the AMC origin. Read-only (F95c's head class swap around the game's call is explorer_cam.cpp's, explorerCamHeadShadowBegin
+// and End). The callback samples the local third-person AMC (amcLocal(), the same match as the
 // fade hook) once a second, under SEH, BEFORE it forwards to the game with its own arguments. The camera is read from [rdx]; the AMC's world matrix
 // comes from its transform call (origin at +0x30, rows 0-2 the basis); the body coordinates are (p - origin) dotted with each basis row. The head is
 // the neck census's head joint (avatar-root model space) taken through the same world matrix: that mapping is the assumption this probe tests.
@@ -8135,7 +8137,13 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
         f66gPost('P', d1, 0);
         ikPublishG(amc, job, now, frame3, d1);
     }
-    return original(amc, job);
+    // F95c: the head through the game's call as shadow-only (the game's own class 2), put back after it; the fade hook then keeps the head's shadow views. Every
+    // call goes through Begin, which also withdraws the AMC's previous ticket; it writes only for the local third-person AMC while the head hide writes.
+    nofoot::f95c::Swap headShadow;
+    const bool swapped = amc && explorerCamHeadShadowBegin(amc, job, &headShadow, !g_eyeStop.load(std::memory_order_relaxed));
+    const uint64_t result = original(amc, job);
+    if (swapped) explorerCamHeadShadowEnd(&headShadow);
+    return result;
 }
 
 // Frame thread, every frame: logs the newest sample once (one per second at most). Stays silent while native stereo is off foot.
@@ -19033,7 +19041,7 @@ void installEyeProbeOnce() {
     std::string why;
     if (installF9ProbeInto(g_eyeProbe, spec, base, &stolen, &why)) {
         Log::get().note("native on foot eye vs body: hook installed at EliteDangerous64.exe+0x3DA58A0, stolen=%zu bytes, prologue 32 bytes verified "
-                        "(read only; temporary).", stolen);
+                        "(P1 reads only; F95c gives the local avatar's head parts the shadow-only class for the length of the game's call).", stolen);
     } else {
         Log::get().note("native on foot eye vs body: hook NOT installed -- %s. The game was not touched by it.", why.c_str());
     }
@@ -20019,6 +20027,75 @@ void cameraGateTick(uint64_t now) noexcept {
                             s.last ? "third-person" : "first-person", seen < 0 ? "nothing: no local Animate call" : seen ? "third-person" : "first-person");
         }
     }
+}
+
+// ---- F95c: the commander's head kept in the shadows (native_on_foot_f95c.h; explorer_cam.cpp, explorerCamHeadShadowBegin, End and headHideStep) ---------
+// Frame thread, every boundary while native stereo is on foot: once a second, what the visibility hook and the fade hook did with the head that second (the
+// (instance, view) pairs are what the game draws: one set bit of a mask is the instance drawn into that view); the views of the local avatar's visibility call
+// whenever their flags change; the stand-down once.
+struct F95cState {
+    ExplorerCamHeadShadowStats last;
+    uint64_t nextMs = 0;
+    uint64_t viewSig = 0;
+    bool downSaid = false;
+};
+F95cState g_f95c;
+const char* f95cKindText(uint32_t flags) {
+    switch (nofoot::f95c::viewKind(flags)) {
+        case nofoot::f95c::ViewKind::Main: return "main";
+        case nofoot::f95c::ViewKind::Shadow: return "shadow";
+        default: return "other";
+    }
+}
+void headShadowTick(uint64_t now) noexcept {
+    F95cState& s = g_f95c;
+    if (!nativeOnFootActive()) {
+        s.nextMs = 0;
+        return;
+    }
+    if (s.nextMs == 0) {
+        s.last = explorerCamHeadShadowStats();
+        s.nextMs = now + 1000;
+        return;
+    }
+    if (now < s.nextMs) return;
+    s.nextMs = now + 1000;
+    const ExplorerCamHeadShadowStats c = explorerCamHeadShadowStats();
+    const ExplorerCamHeadShadowStats& p = s.last;
+    if (c.down && !s.downSaid) {
+        s.downSaid = true;
+        Log::get().note("native on foot head shadow (F95c): stood down for the session after %u faults: the head hide zeroes the head's masks as before (no head in "
+                        "the shadow)", c.faults);
+    }
+    const ExplorerCamHeadShadowViews& v = c.views;
+    uint64_t sig = static_cast<uint64_t>(v.n) * 0x9E3779B97F4A7C15ull ^ v.more;
+    for (uint32_t i = 0; i < v.distinct && i < 8; ++i) sig = (sig ^ (static_cast<uint64_t>(v.flags[i]) << 16 ^ v.count[i])) * 0x100000001B3ull;
+    if (v.n && sig != s.viewSig) {
+        s.viewSig = sig;
+        char list[512] = "";
+        size_t at = 0;
+        for (uint32_t i = 0; i < v.distinct && i < 8 && at < sizeof(list); ++i) {
+            const int w = std::snprintf(list + at, sizeof(list) - at, "%s0x%X %s x%u", i ? ", " : "", v.flags[i], f95cKindText(v.flags[i]), v.count[i]);
+            if (w < 0) break;
+            at += static_cast<size_t>(w);
+        }
+        Log::get().note("native on foot head shadow (F95c): the local avatar's visibility call sees %u views: main %u, shadow %u (the head's), other %u, bits a shadow "
+                        "view shares with another %u; flags %s%s",
+                        v.n, v.main, v.shadow, v.other, v.shared, list, v.more ? " and more" : "");
+    }
+    const uint64_t calls = c.calls - p.calls, kept = c.kept - p.kept, zeroed = c.zeroed - p.zeroed, held = c.held - p.held;
+    if (calls || kept || zeroed || held) {
+        Log::get().note("native on foot head shadow (F95c) 1 s: visibility calls %llu, head as shadow-only %llu (head parts %llu), views unread %llu, class changed by "
+                        "the game %llu; head instance x view pairs after the call: shadow views %llu, main or other views %llu (removed by the fade hook); fade hook: "
+                        "kept %llu (mask words left %llu, words that lost a bit %llu), zeroed %llu, held (third-person camera) %llu",
+                        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(c.swapped - p.swapped),
+                        static_cast<unsigned long long>(c.parts - p.parts), static_cast<unsigned long long>(c.noViews - p.noViews),
+                        static_cast<unsigned long long>(c.lost - p.lost), static_cast<unsigned long long>(c.shadowPairs - p.shadowPairs),
+                        static_cast<unsigned long long>(c.eyePairs - p.eyePairs), static_cast<unsigned long long>(kept),
+                        static_cast<unsigned long long>(c.keptWords - p.keptWords), static_cast<unsigned long long>(c.removed - p.removed),
+                        static_cast<unsigned long long>(zeroed), static_cast<unsigned long long>(held));
+    }
+    s.last = c;
 }
 
 // ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
@@ -27016,6 +27093,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
     explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
     cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
+    headShadowTick(now);   // F95c: the head kept in the shadows; its lines
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);

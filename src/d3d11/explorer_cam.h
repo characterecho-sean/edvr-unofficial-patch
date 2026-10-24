@@ -157,6 +157,39 @@ struct ExplorerCamNativeCameraStats {
     uint64_t controller = 0, switches = 0, faults = 0, headHeld = 0, clipHeld = 0;
 };
 ExplorerCamNativeCameraStats explorerCamNativeCameraStats();
+// F95c: the commander's head kept in the shadows (native_on_foot_f95c.h). The avatar visibility job's hook (native_on_foot.cpp, every call) calls Begin before the
+// game's call and End after it: for the local third-person AMC, while the head hide writes, Begin reads the job context's views and gives the head parts the
+// game's shadow-only class for the call; End puts the game's classes back and leaves a ticket the fade hook's head hide takes (it then keeps the head's shadow
+// views instead of zeroing). Begin also withdraws a ticket the AMC's previous call left, so a call the swap did not cover is zeroed as before. `allow` false
+// (shutdown) does only that.
+namespace nofoot {
+namespace f95c {
+struct Swap;
+}  // namespace f95c
+}  // namespace nofoot
+bool explorerCamHeadShadowBegin(void* amc, void* job, nofoot::f95c::Swap* s, bool allow) noexcept;
+void explorerCamHeadShadowEnd(nofoot::f95c::Swap* s) noexcept;
+struct ExplorerCamHeadShadowViews {   // the views of the local AMC's latest covered call, by distinct flags
+    uint32_t n = 0, main = 0, shadow = 0, other = 0, shared = 0;
+    uint32_t distinct = 0, more = 0;  // entries used below (at most 8), views with a flags value past them
+    uint32_t flags[8] = {}, count[8] = {};
+};
+struct ExplorerCamHeadShadowStats {   // cumulative (the frame thread logs the change)
+    uint64_t calls = 0;        // visibility calls of the local third-person AMC while the head hide writes
+    uint64_t swapped = 0;      // ...that ran with the head as shadow-only
+    uint64_t parts = 0;        // head parts given the shadow-only class (or none, from main-only) for those calls
+    uint64_t noViews = 0;      // calls whose job context could not be read (no swap: zeroed as before)
+    uint64_t lost = 0;         // classes the game changed during a call (its value stood)
+    uint64_t shadowPairs = 0;  // (head instance, shadow view) pairs after the call: the head drawn into a shadow pass
+    uint64_t eyePairs = 0;     // (head instance, main or other view) pairs after the call, removed by the fade hook (0 expected)
+    uint64_t kept = 0, keptWords = 0, removed = 0;   // fade-hook calls that kept the shadow masks, their non-zero words, words that lost a bit
+    uint64_t zeroed = 0;       // fade-hook calls that zeroed (no ticket)
+    uint64_t held = 0;         // fade-hook calls that wrote nothing (the game's third-person camera, F93d)
+    uint32_t faults = 0;
+    bool down = false;         // three faults: F95c stood down for the session (the head hide zeroes as before)
+    ExplorerCamHeadShadowViews views;
+};
+ExplorerCamHeadShadowStats explorerCamHeadShadowStats();
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 // The rig's seam (tools\explorer_cam_test): the same boundary with a scripted clock and scripted

@@ -10910,6 +10910,46 @@ def _hj_f94a_neck(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f95c_head_shadow(rows, ctx):
+    """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
+    after the call in the shadow views and in the main or other views, and the fade hook's keeps against its zeroes. A head hide that only zeroed, a swap the fade
+    hook never kept, or no shadow view taking the head is NEVER APPLIED; zeroes beside keeps, a main or other view in a head mask, or a stand-down is PARTIAL."""
+    sec, views, down = rows.get("sec", []), rows.get("views", []), rows.get("down", [])
+    if not (sec or down):
+        return None
+    tot = {k: sum(int(r[k]) for r in sec) for k in ("calls", "swapped", "parts", "unread", "lost", "sp", "ep", "kept", "words", "removed", "zeroed", "held")}
+    text = "%d s: the head as shadow-only in %d of %d visibility calls (views unread %d); head x shadow view pairs %d, x main or other view %d; fade hook kept %d, " \
+           "zeroed %d, held %d" % (len(sec), tot["swapped"], tot["calls"], tot["unread"], tot["sp"], tot["ep"], tot["kept"], tot["zeroed"], tot["held"])
+    if views:
+        v = views[-1]
+        text += "; views %s (main %s, shadow %s, other %s)" % (v["n"], v["main"], v["shadow"], v["other"])
+    if tot["lost"]:
+        text += "; the game changed a head class during %d calls" % tot["lost"]
+    if down:
+        text += "; stood down after %s faults" % down[-1]["faults"]
+    if not (tot["calls"] or tot["kept"] or tot["zeroed"]):
+        if down:
+            return ("NEVER APPLIED", text)
+        return ("IDLE", text + "; the head hide only held (the game's third-person camera)")
+    if not tot["swapped"]:
+        why = "the visibility hook never saw the local avatar while the head hide wrote" if not tot["calls"] else "no call ran the head as shadow-only"
+        return ("NEVER APPLIED", text + "; " + why)
+    if not tot["kept"]:
+        return ("NEVER APPLIED", text + "; the fade hook never kept a shadow-only call (it zeroed)")
+    if not tot["sp"]:
+        return ("NEVER APPLIED", text + "; no shadow view took the head")
+    notes = []
+    if tot["ep"]:
+        notes.append("%d head x main or other view pairs after the call (removed by the fade hook)" % tot["ep"])
+    if tot["zeroed"] * 20 > tot["kept"] + tot["zeroed"]:
+        notes.append("zeroed in %.0f%% of the fade hook's writes (no head in the shadow those frames)" % (100.0 * tot["zeroed"] / (tot["kept"] + tot["zeroed"])))
+    if down:
+        notes.append("stood down")
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
 
@@ -11064,6 +11104,15 @@ HEALTH_RULES = (
                 r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % ((_HN,) * 12)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
+    _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
+        ("sec", r"native on foot head shadow \(F95c\) 1 s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
+                r"views unread (?P<unread>\d+), class changed by the game (?P<lost>\d+); head instance x view pairs after the call: shadow views (?P<sp>\d+), main or "
+                r"other views (?P<ep>\d+) \(removed by the fade hook\); fade hook: kept (?P<kept>\d+) \(mask words left (?P<words>\d+), words that lost a bit "
+                r"(?P<removed>\d+)\), zeroed (?P<zeroed>\d+), held \(third-person camera\) (?P<held>\d+)$"),
+        ("views", r"native on foot head shadow \(F95c\): the local avatar's visibility call sees (?P<n>\d+) views: main (?P<main>\d+), shadow (?P<shadow>\d+) "
+                  r"\(the head's\), other (?P<other>\d+), bits a shadow view shares with another (?P<shared>\d+); flags (?P<flags>.*)$"),
+        ("down", r"native on foot head shadow \(F95c\): stood down for the session after (?P<faults>\d+) faults"),
+    ), _hj_f95c_head_shadow),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -11355,7 +11404,8 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b) saying OK, PARTIAL, NEVER APPLIED "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c) saying OK, "
+                         "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
                          "Exit 3 when any family is NEVER APPLIED, 4 when a rule no longer matches its lines, 2 for a wrong build")
@@ -12308,6 +12358,34 @@ def self_test_health():
         check("F94a neck: the serial not found in most calls", [neck(matched=10, missed=80)] * 2, 0, [("PARTIAL", F94)], has=["the serial was not found in 160 calls"])
         check("F94a neck: no standing second, not calibrated", [neck(bin_="every state", anim="not calibrated yet")] * 2, 0, [("IDLE", F94)], has=["2 s, none standing"],
               lacks=["UNPARSED"])
+
+        # ---- head in the shadows (F95c): the head parts as shadow-only through the visibility call, the fade hook keeps the shadow views ----
+        F95C = "head in the shadows (F95c)"
+
+        def shadow_sec(calls=90, swapped=90, sp=360, ep=0, kept=90, zeroed=0, held=0, unread=0, lost=0, removed=0):
+            return R("native on foot head shadow (F95c) 1 s: visibility calls", calls, swapped, swapped * 6, unread, lost, sp, ep, kept, kept * 4, removed, zeroed, held)
+
+        def shadow_views(n=7, main=2, shadow=4, other=1):
+            return R("native on foot head shadow (F95c): the local avatar's visibility call sees", n, main, shadow, other, 0,
+                     "0x0 main x2, 0x10 shadow x4, 0x40 other x1", "")
+
+        check("F95c head shadow: every call shadow-only, the fade hook kept them", [shadow_views()] + [shadow_sec()] * 3, 0, [("OK", F95C)],
+              has=["3 s: the head as shadow-only in 270 of 270 visibility calls (views unread 0); head x shadow view pairs 1080, x main or other view 0; fade hook "
+                   "kept 270, zeroed 0, held 0; views 7 (main 2, shadow 4, other 1)"], lacks=["UNPARSED"])
+        check("F95c head shadow: the views never read", [shadow_sec(swapped=0, sp=0, kept=0, zeroed=90, unread=90)] * 2, 3, [("NEVER APPLIED", F95C)],
+              has=["no call ran the head as shadow-only"])
+        check("F95c head shadow: the hook never saw the local avatar", [shadow_sec(calls=0, swapped=0, sp=0, kept=0, zeroed=90)] * 2, 3, [("NEVER APPLIED", F95C)],
+              has=["the visibility hook never saw the local avatar while the head hide wrote"])
+        check("F95c head shadow: swapped, the fade hook never kept", [shadow_sec(kept=0, zeroed=90)] * 2, 3, [("NEVER APPLIED", F95C)],
+              has=["the fade hook never kept a shadow-only call (it zeroed)"])
+        check("F95c head shadow: no shadow view took the head", [shadow_views(shadow=0, other=5), shadow_sec(sp=0)], 3, [("NEVER APPLIED", F95C)],
+              has=["no shadow view took the head"])
+        check("F95c head shadow: an eye bit in a head mask, a fifth zeroed", [shadow_sec(ep=2, removed=2), shadow_sec(kept=70, zeroed=20)], 0, [("PARTIAL", F95C)],
+              has=["2 head x main or other view pairs after the call (removed by the fade hook)", "zeroed in 11% of the fade hook's writes"])
+        check("F95c head shadow: the third-person camera only", [shadow_sec(calls=0, swapped=0, sp=0, kept=0, held=90)] * 2, 0, [("IDLE", F95C)],
+              has=["the head hide only held"])
+        check("F95c head shadow: stood down after it ran", [shadow_sec(), R("native on foot head shadow (F95c): stood down for the session", 3)], 0, [("PARTIAL", F95C)],
+              has=["stood down after 3 faults"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
