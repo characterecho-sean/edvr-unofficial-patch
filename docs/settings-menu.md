@@ -8,10 +8,10 @@
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
   - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
-  - Explorer Cam page (2026-10-08): eye trims and head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
-  - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
-    Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
-    "Hotkeys page" and "Explorer Cam page" below.
+  - Explorer Cam page (2026-10-08): REMOVED with Explorer Cam (F98, 2026-10-24); its keys are retired.
+  - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
+    comparison, exposure and history keys (Explorer Cam's key until F98). FLOWN
+    OK ("worked great"). Section "Hotkeys page" below.
   - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
     125%; default 100) drives the cockpit panels' size and the UI layer;
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
@@ -204,7 +204,7 @@ ruled-out list); the summary above points here.
 
 ### Hotkeys page (2026-10-08)
 
-BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
+BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.compare_aa`,
 `.dump_camera`, and with `menu.developer` also
 `.dump_draws`, `.dump_eyes` (`# ui: ... | hotkey | live` is a row for
 everyone, `# dev: label ... | hotkey` a developer-only one). Enter waits for
@@ -216,14 +216,15 @@ refused WITH ANY MODIFIER, for every hotkey, the menu key too: the menu reads
 them raw, so CTRL+ENTER would also be its Enter and CTRL+ALT+ESCAPE would
 open the panel and close it in one tick. An exact copy of another hotkey is
 refused, naming it; a press Elite also binds WARNS ("also in Elite"): keys are
-watched, never captured. `hotkey.explorer_cam` is the Explorer Cam switch
-(empty = off), checked against on-foot bindings, locked while a session is on.
+watched, never captured. (Until F98 `hotkey.explorer_cam` was the Explorer Cam
+switch, checked against on-foot bindings and locked while a session was on;
+the row and its lock went with Explorer Cam.)
 
 Ending a capture PRIMES every live Hotkey (`hotkeysSuspend(false)`): each
-latch takes what is held, key, pad or HOTAS. The menu ticks before Explorer
-Cam's F5 is polled, so the press that ended a capture (a refused duplicate, an
-unchanged F5) was a fresh edge there. The rig runs the real `Hotkey` in that
-poll order for each outcome and each kind of Explorer key.
+latch takes what is held, key, pad or HOTAS. The menu ticks before some keys
+are polled (Explorer Cam's F5 was one), so the press that ended a capture (a
+refused duplicate, an unchanged key) was a fresh edge there. The rig runs the
+real `Hotkey` in that poll order for each outcome and each kind of key.
 
 Values: `F5`, `CTRL+SHIFT+F9`; `GamePad_Back`; `231D0200:Joy_12`,
 `231D0200:Joy_POV1Up` (vendor then product, as Elite's .binds write it). HOTAS
@@ -232,18 +233,13 @@ GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
 and calls only GetCapabilities and GetDeviceInfo. The four diagnostic keys
 re-resolve live. A flight checks the `joystick watch:` log line, the Joy_N
 against the .binds, and no stall.
-### Explorer Cam page (2026-10-08)
+### Explorer Cam page (2026-10-08; removed in F98)
 
-BUILT, NOT FLOWN. The `menu explorer_cam` rows of edvr.ini (generator page
-`explorer_cam`), for everyone: Eye height, Eye forward, Eye sideways
-(`fix.explorer_cam_eye_trim_up`, `_forward`, `_right`; -0.5..0.5 m, step 0.01,
-shown "+0.15 m") and Head-follow smoothing (`fix.explorer_cam_follow_smoothing_ms`;
-0..200 ms, step 10, "0 ms (exact)"). They are Sean's personal-preference
-settings, shipped at his tuning (0.15, -0.08, 0.0; 0), live, and they work
-while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
-line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
-absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
-on the Hotkeys page only.
+REMOVED on 2026-10-24 with Explorer Cam. It held the `menu explorer_cam` rows:
+the three eye trims and the head-follow smoothing. The `ui:` line's `step`,
+`unit`, `signed` and `zero` tokens it introduced still shape number rows (the
+Native on foot page uses them). The keys are retired: hidden lines in
+`edvr.ini` at their last values, read only to name a value that differs.
 
 ### Visual tab (2026-10-22)
 
@@ -896,16 +892,12 @@ they were there (flown 2026-09-07).
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
-   Pages in order: Performance, Fixes, Explorer Cam, Hotkeys, Monitor, Status
-   (and, in developer mode, Advanced, Experimental, Instruments). Two pages
-   were added on 2026-10-08, between Fixes and Monitor, without renumbering
-   this list:
-   - **Explorer Cam** (everyone): the rows tagged `menu explorer_cam` -- Eye
-     height, Eye forward, Eye sideways (`fix.explorer_cam_eye_trim_up`,
-     `_forward`, `_right`, metres, step 0.01, shown "+0.15 m") and Head-follow
-     smoothing (`fix.explorer_cam_follow_smoothing_ms`, 0..200 ms in steps of
-     10, "0 ms (exact)"). Live, also while placed in Explorer Cam. The key
-     stays on the Hotkeys page only.
+   Pages in order: Performance, Fixes, Native on foot, Hotkeys, Monitor,
+   Status (and, in developer mode, Advanced, Experimental, Instruments). Pages
+   added between Fixes and Monitor, without renumbering this list:
+   - **Native on foot** (everyone, 2026-10-14): the rows tagged
+     `menu native_on_foot`. (The Explorer Cam page stood here from 2026-10-08
+     until F98.)
    - **Hotkeys**: the rows of "Hotkeys page (2026-10-08)" above.
 3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
    where each number comes from:
