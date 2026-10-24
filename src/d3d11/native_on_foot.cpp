@@ -110,6 +110,12 @@ std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOf
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
+// F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_right_cm / _up_cm / _forward_cm and _body (follow | stay).
+std::atomic<float> g_f88RightCm{0.0f}, g_f88UpCm{0.0f}, g_f88ForwardCm{0.0f};
+std::atomic<int> g_f88Body{nofoot::f88::kFollow};
+double g_f88RightLast = 0.0, g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
+int g_f88BodyLast = -1;
+double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
@@ -739,6 +745,39 @@ void readKey() {
                                          "quicker movement (a nod, a duck, a bob) is followed; the body never follows your posture");
         g_f87SettleLast = sec;
         g_f87SettleS.store(static_cast<float>(sec), std::memory_order_relaxed);
+    }
+    // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward / up / right" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
+    // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn, 0 unarmed and in ADS, ramped over 0.25 s. 0, 0, 0 and follow leave the view as F87's.
+    {
+        namespace f88 = nofoot::f88;
+        const double fwd = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_forward_cm", 0.0f)), f88::kForwardMinCm, f88::kForwardMaxCm);
+        const double up = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_up_cm", 0.0f)), f88::kUpMinCm, f88::kUpMaxCm);
+        const double right = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", 0.0f)), f88::kRightMinCm, f88::kRightMaxCm);
+        bool bodyKnown = true;
+        const std::string bodyText = cfg.getString("fix.native_on_foot_weapon_eye_body", "follow");
+        const int body = f88::bodyFromText(bodyText.c_str(), &bodyKnown);
+        if (first || fwd != g_f88ForwardLast)
+            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_forward_cm = %+.1f cm -- positive moves your eye toward the weapon "
+                            "or tool drawn at the hip, along the character's forward (range %.0f..%.0f)", fwd, f88::kForwardMinCm, f88::kForwardMaxCm);
+        if (first || up != g_f88UpLast)
+            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_up_cm = %+.1f cm -- positive raises your eye over the weapon or "
+                            "tool drawn at the hip, along the character's up; the body never stands taller for it (range %.0f..%.0f)", up, f88::kUpMinCm, f88::kUpMaxCm);
+        if (first || right != g_f88RightLast)
+            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_right_cm = %+.1f cm -- positive moves your eye right of the weapon "
+                            "or tool drawn at the hip, along the character's right (range %.0f..%.0f)", right, f88::kRightMinCm, f88::kRightMaxCm);
+        if (first || body != g_f88BodyLast)
+            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_body = %s%s -- %s", f88::bodyName(body),
+                            bodyKnown ? "" : " (the value is not follow or stay; follow is used)",
+                            body == f88::kStay ? "stay: the body stays where it would be and only the view moves"
+                                               : "follow: the body moves with the eye forward, back and sideways, as when you lean; it never stands taller for the up offset");
+        g_f88ForwardLast = fwd;
+        g_f88UpLast = up;
+        g_f88RightLast = right;
+        g_f88BodyLast = body;
+        g_f88ForwardCm.store(static_cast<float>(fwd), std::memory_order_relaxed);
+        g_f88UpCm.store(static_cast<float>(up), std::memory_order_relaxed);
+        g_f88RightCm.store(static_cast<float>(right), std::memory_order_relaxed);
+        g_f88Body.store(body, std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
     {
@@ -9299,7 +9338,9 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     {
         PinIn pi;
         const bool pinOk = pinInRead(&pi);
-        double S[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]}, got[3] = {}, want[3] = {};
+        // F88: the pin also ignores its share of the weapon eye offset (zero in ADS but for the 0.25 s ramp), in the shift published beside the ADS lock's.
+        double S[3] = {g_adsLock[0] + g_adsSight.applied[0] + g_f88Ignore[0], g_adsLock[1] + g_adsSight.applied[1] + g_f88Ignore[1],
+                       g_adsLock[2] + g_adsSight.applied[2] + g_f88Ignore[2]}, got[3] = {}, want[3] = {};
         if (pinOk) {
             const float rows9[9] = {pi.m3p[0], pi.m3p[1], pi.m3p[2], pi.m3p[4], pi.m3p[5], pi.m3p[6], pi.m3p[8], pi.m3p[9], pi.m3p[10]};
             nofoot::adsCamShiftWorld(S, rows9, want);
@@ -10528,7 +10569,7 @@ double g_f87LastDev = 0.0, g_f87LastLocalPitchDeg = 0.0, g_f87LastLocalY = 0.0, 
 bool g_f87LastDevValid = false, g_f87SlewedSec = false;
 uint64_t g_f87LineMs = 0;
 const char* g_f87State = "out of scope";
-nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool ads) noexcept {
+nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool ads, bool weaponEyeSettling) noexcept {
     namespace f87 = nofoot::f87;
     const bool scope = g_pinScope.load(std::memory_order_relaxed);
     f87::HoldIn in;
@@ -10547,7 +10588,9 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
     // ADS: the filter freezes while the ADS locks own the eye (they decay to zero after the press ends: the filter waits for that too)
     bool lockBusy = ads;
     for (int i = 0; i < 3; ++i) lockBusy = lockBusy || std::fabs(g_adsLock[i]) > 1e-6 || std::fabs(g_adsSight.applied[i]) > 1e-6;
-    in.frozen = lockBusy;
+    // F88: the filter also waits while the weapon eye offset's up is changing, and 0.3 s after (the runtime applies a published value a frame or two later, and a
+    // render head that has not caught up with the eye alignment would read as the head moving). Never true while that up is 0.
+    in.frozen = lockBusy || weaponEyeSettling;
     const f87::HoldOut out = g_f87Hold.step(in);
     g_f87Still.step(out.transientValid, out.transientM, dt);
     F87HoldPub pub;
@@ -10567,7 +10610,7 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
     g_f87SlewedSec = g_f87SlewedSec || out.slewed;
     g_f87State = !scope ? (out.ramp > 0.0 ? "ramping out" : "out of scope")
                  : !in.devValid ? "no pose (the LOCAL head was not read)"
-                 : in.frozen ? "frozen (ADS)"
+                 : in.frozen ? (lockBusy ? "frozen (ADS)" : "frozen (weapon eye offset moving)")
                  : out.ramp < 1.0 ? "ramping in"
                  : g_f87SlewedSec ? "holding (rate-limited)" : "holding";
     if (nativeOnFootActive() && now - g_f87LineMs >= 1000) {
@@ -10644,6 +10687,41 @@ void f87EyeLines(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool
     Log::get().note("camera path (F87p) 1 s: scene eye vs job camera pitch sd %.3f deg, y sd %.2f mm (n %u)", n > 1.0 ? std::sqrt(g_f87CamM2P / (n - 1.0)) : 0.0,
                     n > 1.0 ? std::sqrt(g_f87CamM2Y / (n - 1.0)) : 0.0, static_cast<unsigned>(n));
     g_f87CamN = g_f87CamMeanP = g_f87CamM2P = g_f87CamMeanY = g_f87CamM2Y = 0.0;
+}
+
+// ---- F88: the weapon eye offset, the frame thread's half --------------------------------------------------------------------------------------------------
+// See nofoot::f88 (native_on_foot_f88.h). Once per align tick, before the standing-height hold: the weight w (1 with a weapon or tool drawn at the hip in the pin's scope, 0
+// unarmed and in ADS, ramped over 0.25 s), w O in the character's axes as the seated shift added to the eye alignment after the hold's term, the share of it the pin ignores
+// (added to the ADS shift S that alignTick publishes), and whether the hold waits. Cockpit and ship VR: w stays 0 and every output is an exact zero.
+nofoot::f88::Weight g_f88W;
+nofoot::f88::Settle g_f88Settle;
+uint64_t g_f88LineMs = 0;
+struct F88Tick {
+    nofoot::f88::Out out;
+    bool settling = false;   // the hold waits: the up of w O is changing, or changed within 0.3 s
+};
+F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
+    namespace f88 = nofoot::f88;
+    F88Tick t;
+    f88::Keys k;
+    k.rightCm = static_cast<double>(g_f88RightCm.load(std::memory_order_relaxed));
+    k.upCm = static_cast<double>(g_f88UpCm.load(std::memory_order_relaxed));
+    k.forwardCm = static_cast<double>(g_f88ForwardCm.load(std::memory_order_relaxed));
+    k.body = g_f88Body.load(std::memory_order_relaxed);
+    const bool active = nativeOnFootActive();
+    const bool adsNow = ads || g_adsState == kAdsActive;   // the journal's flag or the resolved ADS state (the bound action), as the ADS lock reads it
+    g_f88W.step(active && f88::weightOn(pin, g_armed, adsNow), dt);
+    t.out = f88::make(k, g_f88W.w);
+    t.settling = g_f88Settle.step(t.out.seated[1], dt);
+    for (int i = 0; i < 3; ++i) g_f88Ignore[i] = t.out.ignore[i];
+    if (active && (k.any() || g_f88W.w > 0.0) && now - g_f88LineMs >= 1000) {
+        g_f88LineMs = now;
+        Log::get().note("weapon eye offset (F88) 1 s: keys right %+.1f up %+.1f forward %+.1f cm, body %s, w %.2f (armed %d ADS %d), applied seated (%+.2f %+.2f %+.2f) cm, "
+                        "pin ignores (%+.1f %+.1f %+.1f) cm",
+                        k.rightCm, k.upCm, k.forwardCm, f88::bodyName(k.body), g_f88W.w, g_armed ? 1 : 0, adsNow ? 1 : 0, t.out.seated[0] * 100.0, t.out.seated[1] * 100.0,
+                        t.out.seated[2] * 100.0, t.out.ignore[0] * 100.0, t.out.ignore[1] * 100.0, t.out.ignore[2] * 100.0);
+    }
+    return t;
 }
 
 void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignClock); now (ms) is for staleness and the 1 s lines
@@ -11362,7 +11440,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     adsSightTick(now, dt, sIn);   // F63/F75: the ADS lock follows the actual weapon sight line; manual view bias remains a camera shift
     adsAimStep(now, dt, sIn);     // F68a: the ADS guard (the right eye's rows against the head); F67b: the three forwards
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
-    const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads);   // F87h: the standing-height hold (zero outside the pin's scope)
+    const F88Tick weaponEye = f88Tick(now, dt, pin, ads);   // F88: the weapon eye offset (exact zeros unless a key is set and a weapon or tool is drawn at the hip)
+    const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads, weaponEye.settling);   // F87h: the standing-height hold (zero outside the pin's scope)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
     // g_align's, as before. F68f: the eye height (F64's raise) is gone; the pin alone decides where the body sits under the view, and the
     // view height is the game's own.
@@ -11372,10 +11451,13 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
             if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
+            eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
-            const double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]};
+            // F88: plus the share of w O the pin ignores (all of it with body stay, its up part with follow)
+            const double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.ignore[0], g_adsLock[1] + g_adsSight.applied[1] + weaponEye.out.ignore[1],
+                                      g_adsLock[2] + g_adsSight.applied[2] + weaponEye.out.ignore[2]};
             adsShiftPublish(sShift, weaponView.world);
         }
         if (eyeChange > 1e-6) {

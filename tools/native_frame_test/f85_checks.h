@@ -1,13 +1,14 @@
 // F85 checks (the pin-step trace, the weapon UI pinned to the weapon, the reticle's hit depth), F86 checks (the pose carry, the weapon UI depth, the floor probe,
 // run86 below) and F87 checks (the standing-height hold, the previous copy, the stream windows' history and escalation, the scene rows' fallback, the prompt probes'
-// pins and box geometry, the hand residual: run87 below): the pure functions of src\d3d11\native_on_foot_f85.h, _f86.h and _f87.h on synthetic cameras. Header only so
-// that native_frame_test, the depth line rig and a desk driver run the same lines.
+// pins and box geometry, the hand residual: run87 below) and F88 checks (the weapon eye offset: run88 below): the pure functions of src\d3d11\native_on_foot_f85.h, _f86.h,
+// _f87.h and _f88.h on synthetic cameras. Header only so that native_frame_test, the depth line rig and a desk driver run the same lines.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_f85.h"
 #include "../../src/d3d11/native_on_foot_core.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1669,6 +1670,305 @@ inline void run87(Check&& check) {
         lc.text(txt, sizeof(txt));
         check(none && std::strcmp(txt, "3600:2 624:2") == 0, "F87p: the label's index counts are listed as count:draws (3600 and 624 are the two the F85 dump showed), none when there are none");
         check(f87::kLabelVs == 0xB10B032BDFD46700ull && f87::kLabelPs == 0xDB899F4BD577F2E5ull, "F87p: the label's shaders are VS B10B032BDFD46700 and PS DB899F4BD577F2E5");
+    }
+}
+
+// ---- F88 ---------------------------------------------------------------------------------------------------------------------------------------------
+// The pure functions of src\d3d11\native_on_foot_f88.h: the weapon eye offset's weight, its seated image, the pin's share and the hold's wait, on the plant the production
+// code uses: the camera moves by adsCamShiftWorld of the seated shift (the character's rows), and the pin takes adsUnlockedCam of the camera less the shift it ignores.
+template <class Check>
+inline void run88(Check&& check) {
+    namespace f87 = edvr::nofoot::f87;
+    namespace f88 = edvr::nofoot::f88;
+    namespace nf = edvr::nofoot;
+    const double dt = 1.0 / 90.0;
+    struct Body3 {
+        float f[9];
+        double d[3][3];
+    };
+    // a character turned by `a` about the up axis: the rows (right, up, forward) in the world
+    const auto rowsOf = [](double a) {
+        Body3 b;
+        const double c = std::cos(a), s = std::sin(a);
+        const double r[3][3] = {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                b.d[i][j] = r[i][j];
+                b.f[3 * i + j] = float(r[i][j]);
+            }
+        return b;
+    };
+    const double yaws[5] = {0.0, 0.6, 1.5707963267948966, 3.14159, -1.3};
+    f88::Keys keys;
+    keys.rightCm = 4.0;
+    keys.upCm = 3.0;
+    keys.forwardCm = 10.0;
+    const auto isPlusZero = [](const double v[3]) {
+        return v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0 && !std::signbit(v[0]) && !std::signbit(v[1]) && !std::signbit(v[2]);
+    };
+    // ---- the keys ----------------------------------------------------------------------------------------------------------------------------------
+    {
+        bool kn = false, ks = false, kx = true, ke = true, kz = true;
+        const int follow = f88::bodyFromText("follow", &kn), stay = f88::bodyFromText("stay", &ks), other = f88::bodyFromText("Stay", &kx);
+        const int empty = f88::bodyFromText("", &ke), none = f88::bodyFromText(nullptr, &kz);
+        check(f88::clampCm(30.0, f88::kForwardMinCm, f88::kForwardMaxCm) == 25.0 && f88::clampCm(-40.0, f88::kForwardMinCm, f88::kForwardMaxCm) == -10.0 &&
+                  f88::clampCm(20.0, f88::kUpMinCm, f88::kUpMaxCm) == 15.0 && f88::clampCm(-11.0, f88::kUpMinCm, f88::kUpMaxCm) == -10.0 &&
+                  f88::clampCm(12.0, f88::kRightMinCm, f88::kRightMaxCm) == 10.0 && f88::clampCm(-12.0, f88::kRightMinCm, f88::kRightMaxCm) == -10.0 &&
+                  f88::clampCm(2.5, f88::kRightMinCm, f88::kRightMaxCm) == 2.5 &&
+                  f88::clampCm(std::numeric_limits<double>::quiet_NaN(), -10.0, 25.0) == 0.0 && f88::clampCm(std::numeric_limits<double>::infinity(), -10.0, 25.0) == 0.0,
+              "F88: the keys read to forward -10..25, up -10..15 and right -10..10 cm, and a value that is not finite reads 0");
+        check(follow == f88::kFollow && kn && stay == f88::kStay && ks && other == f88::kFollow && !kx && empty == f88::kFollow && !ke && none == f88::kFollow && !kz &&
+                  std::strcmp(f88::bodyName(f88::kStay), "stay") == 0 && std::strcmp(f88::bodyName(f88::kFollow), "follow") == 0 && f88::Keys{}.body == f88::kFollow && !f88::Keys{}.any(),
+              "F88: the body key reads follow or stay, anything else reads follow (and says so), and the defaults are 0, 0, 0 and follow");
+    }
+    // ---- the defaults reproduce F87 exactly ----------------------------------------------------------------------------------------------------------
+    {
+        const double ws[4] = {0.0, 0.37, 1.0, 1.7};
+        bool zeros = true;
+        for (const double w : ws) {
+            const f88::Out o = f88::make(f88::Keys{}, w);   // every key 0
+            zeros = zeros && isPlusZero(o.seated) && isPlusZero(o.ignore) && isPlusZero(o.bodyM);
+            f88::Keys stayKeys = keys;
+            stayKeys.body = f88::kStay;
+            const f88::Out o0 = f88::make(stayKeys, 0.0);   // keys set, nothing drawn
+            zeros = zeros && isPlusZero(o0.seated) && isPlusZero(o0.ignore) && isPlusZero(o0.bodyM);
+        }
+        const double sumF87 = f87::eyeAlignY(0.004, -0.011, 0.0123, -0.0257, 0.031);
+        double sumF88 = sumF87;
+        sumF88 += f88::make(f88::Keys{}, 1.0).seated[1];
+        double sumFollow = sumF87;
+        sumFollow += f88::make(f88::Keys{}, 0.5).seated[1];
+        check(zeros && std::memcmp(&sumF87, &sumF88, sizeof(double)) == 0 && std::memcmp(&sumF87, &sumFollow, sizeof(double)) == 0,
+              "F88: with every key 0, or with nothing drawn, the seated shift, the pin's share and w O are exact positive zeros and the eye alignment's sum is F87's bit for bit");
+    }
+    // ---- the weight --------------------------------------------------------------------------------------------------------------------------------
+    {
+        check(f88::weightOn(true, true, false) && !f88::weightOn(true, false, false) && !f88::weightOn(true, true, true) && !f88::weightOn(false, true, false) &&
+                  !f88::weightOn(false, false, false) && !f88::weightOn(true, false, true),
+              "F88: w is on only with a weapon or tool drawn in the pin's scope and not aiming down sights (unarmed, ADS and the cockpit are off)");
+        f88::Weight w;
+        double w11 = 0.0, w22 = 0.0, w23 = 0.0;
+        for (int i = 1; i <= 23; ++i) {
+            w.step(true, dt);
+            if (i == 11) w11 = w.w;
+            if (i == 22) w22 = w.w;
+            if (i == 23) w23 = w.w;
+        }
+        check(std::fabs(w11 - 11.0 * dt / f88::kRampS) < 1e-12 && w22 > 0.97 && w22 < 1.0 && w23 == 1.0 && f88::kRampS == 0.25,
+              "F88: w ramps 0 -> 1 over 0.25 s: 22 ticks at 90 Hz are short of 1, 23 reach it, and the ramp is linear");
+        // draw, ADS in, ADS out, holster: w never steps more than a tick of the ramp, is 0 in ADS and unarmed, and 1 drawn at the hip
+        f88::Weight v;
+        double maxStep = 0.0, prev = 0.0;
+        const auto phase = [&](bool pin, bool armed, bool ads, int ticks) {
+            for (int i = 0; i < ticks; ++i) {
+                v.step(f88::weightOn(pin, armed, ads), dt);
+                maxStep = std::max(maxStep, std::fabs(v.w - prev));
+                prev = v.w;
+            }
+            return v.w;
+        };
+        const double afterUnarmed = phase(true, false, false, 60), afterDraw = phase(true, true, false, 30), afterAds = phase(true, true, true, 30);
+        const double midAdsOut = phase(true, true, false, 11), afterAdsOut = phase(true, true, false, 30), afterHolster = phase(true, false, false, 30);
+        check(afterUnarmed == 0.0 && afterDraw == 1.0 && afterAds == 0.0 && midAdsOut > 0.4 && midAdsOut < 0.6 && afterAdsOut == 1.0 && afterHolster == 0.0 &&
+                  maxStep <= dt / f88::kRampS + 1e-12,
+              "F88: w is 0 unarmed, 1 with a weapon drawn at the hip, 0 in ADS, back to 1 when ADS ends and 0 holstered, ramped on each change and never more than a tick of the ramp apart");
+    }
+    // ---- the offset rotates with the body's yaw -------------------------------------------------------------------------------------------------------
+    {
+        bool axesOk = true, headingOk = true;
+        double heading0 = 0.0;
+        for (int k = 0; k < 5; ++k) {
+            const Body3 b = rowsOf(yaws[k]);
+            const f88::Out o = f88::make(keys, 1.0);
+            double world[3];
+            nf::adsCamShiftWorld(o.seated, b.f, world);   // how far the camera moves in the world for the shift the eye alignment gets
+            const double want[3] = {0.04, 0.03, 0.10};
+            for (int a = 0; a < 3; ++a) axesOk = axesOk && std::fabs(world[0] * b.d[a][0] + world[1] * b.d[a][1] + world[2] * b.d[a][2] - want[a]) < 1e-7;   // right, up, forward (the hook's rows are floats)
+            const double heading = std::atan2(world[0], world[2]);
+            if (k == 0) heading0 = heading;
+            double turn = heading - heading0 - yaws[k];
+            turn = std::fabs(std::remainder(turn, 6.283185307179586));
+            headingOk = headingOk && turn < 1e-5;
+        }
+        const Body3 yaw90 = rowsOf(1.5707963267948966);
+        double w90[3];
+        nf::adsCamShiftWorld(f88::make(keys, 1.0).seated, yaw90.f, w90);
+        check(axesOk && headingOk && std::fabs(w90[0] - 0.10) < 1e-6 && std::fabs(w90[2] + 0.04) < 1e-6 && std::fabs(w90[1] - 0.03) < 1e-9,
+              "F88: O is in the character's axes: for any body yaw the camera moves by right 4, up 3 and forward 10 cm along the body's own right, up and forward, and its heading turns with the yaw (forward 10 cm at 90 degrees is 10 cm along world x)");
+    }
+    // ---- the hold: its input is the head's posture, never O ----------------------------------------------------------------------------------------------
+    {
+        bool same = true;
+        const double ups[4] = {0.0, 3.0, -10.0, 15.0};
+        for (const double up : ups)
+            for (const double w : {0.0, 0.3, 1.0}) {
+                f88::Keys k = keys;
+                k.upCm = up;
+                const f88::Out o = f88::make(k, w);
+                const double drop = -0.02, headRaw = -0.07;   // the head's seated height without any eye alignment, and the neck pivot's drop
+                const double other = f87::eyeAlignY(0.004, -0.011, 0.0123, -0.0257, 0.031);
+                const double total = other + o.seated[1];
+                const double renderY = headRaw - total;   // the runtime moves the origin up by the eye alignment: the head reads that much lower
+                const double devWith = f87::devOf(renderY, total, drop);
+                const double devNone = f87::devOf(headRaw - other, other, drop);
+                same = same && std::fabs(devWith - devNone) < 1e-12 && std::fabs(devWith - (headRaw - drop)) < 1e-12;
+            }
+        check(same, "F88: the hold's input (the render head plus the eye alignment published for it) is the head's posture whatever w O is: it equals the head's height less the pivot's drop with and without O");
+        // The runtime applies a published value `lag` ticks late: the render head then misses O's change for that long. The hold waits while O's up changes, and 0.3 s after.
+        const int lag = 2;
+        bool heldAll = true, covered = true;
+        double xFrozenMaxDev = 0.0, xFreeMaxDev = 0.0;
+        for (int pass = 0; pass < 2; ++pass) {   // pass 0: the hold waits as the production code does; pass 1: it does not (the control)
+            f88::Weight w;
+            f88::Settle settle;
+            f87::HeightHold h;
+            f87::HoldIn in;
+            in.scope = true;
+            in.devValid = true;
+            in.dt = dt;
+            std::vector<double> pub;   // the up of w O published at each tick
+            double x0 = 0.0;
+            for (int i = 0; i < 90 * 8; ++i) {
+                const bool armed = i >= 90 * 4;   // a rifle drawn at 4 s
+                w.step(f88::weightOn(true, armed, false), dt);
+                f88::Keys k = keys;
+                k.upCm = 10.0;
+                const f88::Out o = f88::make(k, w.w);
+                const bool settling = settle.step(o.seated[1], dt);
+                pub.push_back(o.seated[1]);
+                const double seen = i - 1 - lag >= 0 ? pub[size_t(i - 1 - lag)] : 0.0, publishedLast = i >= 1 ? pub[size_t(i - 1)] : 0.0;
+                const double errO = publishedLast - seen;   // the published value less the one the render head carries
+                const double headRaw = -0.07;
+                in.devM = headRaw + errO;
+                in.frozen = pass == 0 && settling;
+                if (pass == 0 && std::fabs(errO) > 1e-12) covered = covered && settling;
+                const f87::HoldOut out = h.step(in);
+                if (i == 90 * 4 - 1) x0 = out.sustainedM;
+                if (i >= 90 * 4) {
+                    const double dev = std::fabs(out.sustainedM - x0);
+                    if (pass == 0 && i < 90 * 4 + 40) {
+                        xFrozenMaxDev = std::max(xFrozenMaxDev, dev);   // during the ramp and the wait that follows (23 ticks + 27)
+                        heldAll = heldAll && out.sustainedM == x0;
+                    }
+                    if (pass == 1 && i < 90 * 4 + 40) xFreeMaxDev = std::max(xFreeMaxDev, dev);
+                }
+            }
+        }
+        check(heldAll && covered && xFrozenMaxDev == 0.0 && xFreeMaxDev > 0.001,
+              "F88: while O's up changes the render head lags the published eye alignment by two ticks; the hold waits for every tick with that difference (its sustained part does not move) and without the wait it would move by more than a millimetre");
+        // O with no up never holds the hold
+        f88::Keys flat = keys;
+        flat.upCm = 0.0;
+        f88::Weight w;
+        f88::Settle settle;
+        bool ever = false;
+        for (int i = 0; i < 90 * 2; ++i) {
+            w.step(true, dt);
+            ever = ever || settle.step(f88::make(flat, w.w).seated[1], dt);
+        }
+        check(!ever, "F88: with no up offset the hold never waits, whatever the weight: the hold is F87's");
+    }
+    // ---- the pin ---------------------------------------------------------------------------------------------------------------------------------
+    {
+        bool stayOk = true, followOk = true, followUpOnly = true, ignoreShape = true;
+        const double head[3] = {3.0, 1.6, -2.0};
+        const double sAds[3] = {0.012, -0.007, 0.02};   // an ADS shift beside it: the two add
+        const auto pinOf = [&](const Body3& b, const double total[3], const double ignored[3]) {
+            double shift[3], cam[3];
+            nf::adsCamShiftWorld(total, b.f, shift);
+            for (int i = 0; i < 3; ++i) cam[i] = head[i] + shift[i];
+            const float camF[3] = {float(cam[0]), float(cam[1]), float(cam[2])};   // the hook holds floats
+            float out[3];
+            nf::adsUnlockedCam(camF, ignored, b.f, out);
+            return std::array<double, 3>{double(out[0]), double(out[1]), double(out[2])};
+        };
+        for (int k = 0; k < 5; ++k) {
+            const Body3 b = rowsOf(yaws[k]);
+            const auto pin0 = pinOf(b, sAds, sAds);   // no O
+            for (const double w : {0.4, 1.0}) {
+                for (int mode = 0; mode < 2; ++mode) {
+                    f88::Keys kk = keys;
+                    kk.body = mode == 0 ? f88::kStay : f88::kFollow;
+                    const f88::Out o = f88::make(kk, w);
+                    double total[3], ignored[3];
+                    for (int i = 0; i < 3; ++i) {
+                        total[i] = sAds[i] + o.seated[i];     // the eye alignment, as the game moves the camera
+                        ignored[i] = sAds[i] + o.ignore[i];   // what alignTick publishes as S
+                    }
+                    const auto pin1 = pinOf(b, total, ignored);
+                    double d[3] = {pin1[0] - pin0[0], pin1[1] - pin0[1], pin1[2] - pin0[2]};
+                    double dBody[3];
+                    for (int a = 0; a < 3; ++a) dBody[a] = d[0] * b.d[a][0] + d[1] * b.d[a][1] + d[2] * b.d[a][2];
+                    if (mode == 0) {   // stay: the pin demand does not move
+                        for (int a = 0; a < 3; ++a) stayOk = stayOk && std::fabs(d[a]) < 4e-6;
+                        for (int a = 0; a < 3; ++a) ignoreShape = ignoreShape && o.ignore[a] == o.seated[a];
+                    } else {           // follow: the horizontal part moves it, the vertical part does not
+                        followOk = followOk && std::fabs(dBody[0] - w * 0.04) < 4e-6 && std::fabs(dBody[1]) < 4e-6 && std::fabs(dBody[2] - w * 0.10) < 4e-6;
+                        ignoreShape = ignoreShape && o.ignore[0] == 0.0 && o.ignore[2] == 0.0 && o.ignore[1] == o.seated[1];
+                    }
+                }
+            }
+            // follow with an up offset alone: the pin does not move at all
+            f88::Keys upKeys;
+            upKeys.upCm = 12.0;
+            const f88::Out ou = f88::make(upKeys, 1.0);
+            double total[3], ignored[3];
+            for (int i = 0; i < 3; ++i) {
+                total[i] = sAds[i] + ou.seated[i];
+                ignored[i] = sAds[i] + ou.ignore[i];
+            }
+            const auto pin2 = pinOf(b, total, ignored);
+            for (int a = 0; a < 3; ++a) followUpOnly = followUpOnly && std::fabs(pin2[a] - pin0[a]) < 4e-6;
+        }
+        check(stayOk && ignoreShape, "F88: with body stay the pin ignores all of w O: its demand (the camera less the shift S, with the ADS shift beside it) is the same with and without O, for any yaw and weight");
+        check(followOk && followUpOnly, "F88: with body follow the pin demand moves by the horizontal part of w O (w x right 4 cm, w x forward 10 cm in the body's axes) and never by the up part");
+        // The eye over the weapon's root, as the F87h line reads it: it moves by w O in the character's axes
+        bool lineOk = true;
+        for (int k = 0; k < 5; ++k) {
+            const Body3 b = rowsOf(yaws[k]);
+            const double froot[3] = {5.0, 1.0, -3.0}, e0[3] = {0.033, -0.010, -0.039};   // the F87 flight: right +3.3, up -1.0, forward -3.9 cm
+            double eye0[3], eye1[3], shift[3];
+            for (int i = 0; i < 3; ++i) eye0[i] = froot[i] + e0[0] * b.d[0][i] + e0[1] * b.d[1][i] + e0[2] * b.d[2][i];
+            const f88::Out o = f88::make(keys, 0.6);
+            nf::adsCamShiftWorld(o.seated, b.f, shift);
+            for (int i = 0; i < 3; ++i) eye1[i] = eye0[i] + shift[i];
+            f87::EyeRootSecond er;
+            er.add(eye1, froot, b.d);
+            lineOk = lineOk && std::fabs(er.last[0] - (e0[0] + 0.6 * 0.04)) < 1e-9 && std::fabs(er.last[1] - (e0[1] + 0.6 * 0.03)) < 1e-9 && std::fabs(er.last[2] - (e0[2] + 0.6 * 0.10)) < 1e-9;
+        }
+        check(lineOk, "F88: the F87h eye-to-weapon-root readout (the right eye less F_root in the character's axes) moves by w O: 0.6 x (4, 3, 10) cm from (+3.3, -1.0, -3.9) at any yaw");
+    }
+    // ---- no jump at a draw, a holster, or ADS in and out -------------------------------------------------------------------------------------------------
+    {
+        f88::Keys big;
+        big.rightCm = -10.0;
+        big.upCm = 15.0;
+        big.forwardCm = 25.0;
+        f88::Weight w;
+        double prev[3] = {}, maxJump = 0.0, atRest[3] = {};
+        const auto phase = [&](bool armed, bool ads, int ticks) {
+            for (int i = 0; i < ticks; ++i) {
+                w.step(f88::weightOn(true, armed, ads), dt);
+                const f88::Out o = f88::make(big, w.w);
+                for (int a = 0; a < 3; ++a) {
+                    maxJump = std::max(maxJump, std::fabs(o.seated[a] - prev[a]));
+                    prev[a] = o.seated[a];
+                    atRest[a] = o.seated[a];
+                }
+            }
+        };
+        phase(false, false, 30);
+        phase(true, false, 30);
+        const double drawn[3] = {atRest[0], atRest[1], atRest[2]};
+        phase(true, true, 30);
+        const double inAds[3] = {atRest[0], atRest[1], atRest[2]};
+        phase(true, false, 30);
+        const double outAds[3] = {atRest[0], atRest[1], atRest[2]};
+        phase(false, false, 30);
+        const double holstered[3] = {atRest[0], atRest[1], atRest[2]};
+        check(maxJump <= 0.25 * dt / f88::kRampS + 1e-12 && std::fabs(drawn[0] - 0.10) < 1e-12 && std::fabs(drawn[1] + 0.15) < 1e-12 && std::fabs(drawn[2] - 0.25) < 1e-12 &&
+                  isPlusZero(inAds) && std::fabs(outAds[0] - drawn[0]) < 1e-12 && isPlusZero(holstered),
+              "F88: at the largest offsets (right -10, up 15, forward 25 cm) the seated shift steps by at most 1.2 cm a tick through a draw, ADS in, ADS out and a holster, is (+10, -15, +25) cm drawn at the hip and exactly 0 in ADS and holstered");
     }
 }
 

@@ -7143,6 +7143,8 @@ int wmain(int argc, wchar_t** argv) {
     f85test::run86(check);
     // F87: h, the standing-height hold; a, the previous copy, the join, the cap, the hand residual; c, the stream windows' history; f, the scene rows' fallback; p, the pins.
     f85test::run87(check);
+    // F88: the weapon eye offset: the keys, the weight, the yaw, the hold's input, the pin's share, the readout and the continuity.
+    f85test::run88(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
