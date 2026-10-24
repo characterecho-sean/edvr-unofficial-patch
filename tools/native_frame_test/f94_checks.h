@@ -5,6 +5,7 @@
 
 #include "../../src/d3d11/native_on_foot_core.h"
 #include "../../src/d3d11/native_on_foot_f94.h"
+#include "../../src/d3d11/native_on_foot_f95.h"
 
 #include <cmath>
 #include <cstdint>
@@ -211,37 +212,67 @@ inline void run94(Check&& check) {
         check(maxErr(st.viewOver, 1.0, 2.0, kH) <= 0.0011, "F94a loop: standing still, the eye 15.5 cm over the neck from 1 s on (the ramp in)");
     }
 
-    // ---- F98c: one eye height with and without an item --------------------------------------------------------------------------------------------------------------
+    // ---- F98c: armed, the eye where it stands unarmed in the same stance ------------------------------------------------------------------------------------------
     {
-        // The rifle draw: F88's weight ramps over 0.25 s while the stance leans (the animated neck 1.543 -> 1.300 m over 0.4 s, the game's camera 1.582 -> 1.560 m); F97a
-        // raises the leaning stance by w times F93's raise (the neck to 15.5 cm under the camera); the raise's target is the eye height over the neck as written. The
-        // view: the game's camera plus the raise (the weapon eye offset's up is retired). Unarmed and drawn the eye is 15.5 cm over the neck as the body is written.
+        // The rifle draw, the F97 flight's standing figures: unarmed the animated neck 1.543 m and the game's camera 1.625 m; drawn, the stance leans (the neck to
+        // 1.296 m over 0.4 s) and the game's camera itself comes down to 1.559 m; F88's weight ramps over 0.25 s and F97a raises the leaning stance by w times F93's
+        // raise. Targets only from a settled stance (F95a's window); the view is the game's camera plus the raise.
         f88::Weight wt;
         f94::NeckRaise nr;
+        f94::EyeLevel eye;
+        edvr::nofoot::f95::StanceSettle settle;
         f94::In in;
         in.scope = true;
-        in.targetFresh = true;
         in.dt = kDt;
-        double view = 0.0, prevView = 0.0, maxStep = 0.0, unarmedOver = 0.0, armedOver = 0.0;
-        for (int i = 0; i < 360; ++i) {
+        double view = 0.0, prevView = 0.0, maxStep = 0.0, unarmedView = 0.0, armedOverWritten = 0.0;
+        uint8_t lastSrc = f94::kEyeSourceN;
+        for (int i = 0; i < 450; ++i) {
             const double t = i * kDt;
             const bool draw = t >= 2.0;
             const double a = t < 2.0 ? 0.0 : std::fmin(1.0, (t - 2.0) / 0.4);
-            const double g = 1.582 - 0.022 * a, n = 1.543 - 0.243 * a;
+            const double g = 1.625 - 0.066 * a, n = 1.543 - 0.247 * a;
             const double w = wt.step(draw, kDt);
-            const double raise93 = std::fmax((g - kH) - n, 0.0);   // F93's raise of the leaning stance (none upright)
-            const double neckWritten = n + w * raise93;
-            in.targetM = f94::raiseTarget(neckWritten, kH, g);
+            const double neckWritten = n + w * std::fmax((g - kH) - n, 0.0);   // F97a: w times F93's raise (none upright)
+            edvr::nofoot::f95::SettleIn si;
+            si.valid = si.still = true;
+            si.tS = t;
+            si.neckY = neckWritten;
+            si.camY = g;
+            const edvr::nofoot::f95::SettleOut so = settle.step(si);
+            in.targetFresh = so.settled;
+            if (so.settled) in.targetM = eye.target(draw || w > 0.0, f94::kClassStanding, so.neckY, so.camY, kH, &lastSrc);
             const f94::Out o = nr.step(in);
             view = g - o.seatedY;
             if (i > 0 && t > 1.0) maxStep = std::fmax(maxStep, std::fabs(view - prevView));
             prevView = view;
-            if (i == 179) unarmedOver = view - neckWritten;
-            armedOver = view - neckWritten;
+            if (i == 179) unarmedView = view;
+            armedOverWritten = view - neckWritten;
         }
-        check(within(unarmedOver, kH, 0.0011) && within(armedOver, kH, 0.0011),
-              "F98c: one eye height: unarmed (fists) and drawn (the rifle, its stance raised upright by F97a) the eye is 15.5 cm over the neck as written");
-        check(maxStep <= 0.02, "F98c: drawing (the weight's 0.25 s ramp, the stance leaning under it) moves the view under 2 cm a tick: no jump");
+        check(within(unarmedView, 1.543 + kH, 0.0011) && within(view, 1.543 + kH, 0.0011) && lastSrc == f94::kEyeStance,
+              "F98c: the rifle drawn and settled, the eye stands where it stood unarmed (the upright neck plus the key), though the game's camera came down 6.6 cm");
+        check(armedOverWritten > kH + 0.10, "F98c (control): drawn, the eye is not the key over the leaning stance's neck (that put it 12-18 cm under the unarmed eye)");
+        check(maxStep <= 0.02, "F98c: drawing (the weight's 0.25 s ramp, the stance and the camera coming down under it) moves the view under 2 cm a tick: no jump");
+        // The key moves both: 2 cm more lifts the unarmed and the armed targets by 2 cm.
+        f94::EyeLevel e2 = eye;
+        const double up0 = eye.target(true, f94::kClassStanding, 1.404, 1.559, kH, nullptr), up1 = e2.target(true, f94::kClassStanding, 1.404, 1.559, kH + 0.02, nullptr);
+        const double un0 = f94::EyeLevel{}.target(false, f94::kClassStanding, 1.543, 1.625, kH, nullptr);
+        const double un1 = f94::EyeLevel{}.target(false, f94::kClassStanding, 1.543, 1.625, kH + 0.02, nullptr);
+        check(within(up1 - up0, 0.02, 1e-9) && within(un1 - un0, 0.02, 1e-9), "F98c: the eye height key moves the unarmed and the armed eye together");
+        // Crouched with no unarmed crouch stored: the standing unarmed raise over the crouched camera (the game's camera carries the crouch); once one is stored, its eye.
+        uint8_t src = f94::kEyeSourceN;
+        const double rc = eye.target(true, f94::kClassCrouched, 0.908, 0.935, kH, &src);
+        const bool overCrouch = src == f94::kEyeStandingOverCrouch && within(rc, 1.543 + kH - 1.625, 1e-9);
+        eye.target(false, f94::kClassCrouched, 0.950, 0.990, kH, &src);
+        const double rc2 = eye.target(true, f94::kClassCrouched, 0.908, 0.935, kH, &src);
+        check(overCrouch && src == f94::kEyeStance && within(0.935 + rc2, 0.950 + kH, 1e-9),
+              "F98c: crouched, the standing unarmed raise over the crouched camera until an unarmed crouch is stored, then the eye of that crouch");
+        // Nothing stored (on foot with an item from the start): the starting raise; unarmed with the stance not known: its own target, nothing stored.
+        f94::EyeLevel none;
+        const double r0 = none.target(true, f94::kClassStanding, 1.404, 1.559, kH, &src);
+        const bool start = src == f94::kEyeStart && within(r0, kH - f94::kCamOverUprightNeckM, 1e-9);
+        none.target(false, f94::kClassUnknown, 1.543, 1.625, kH, &src);
+        check(start && src == f94::kEyeUnarmedNoClass && !none.have[0] && !none.have[1],
+              "F98c: no unarmed stance stored: the starting raise (the upright neck 8 cm under the camera); an unarmed stance of unknown class is not stored");
     }
 
     // ---- the hold never sees the neck term -------------------------------------------------------------------------------------------------------------------------

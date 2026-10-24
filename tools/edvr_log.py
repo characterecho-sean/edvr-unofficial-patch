@@ -11069,6 +11069,43 @@ def _hj_f98a_elbow(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f98c_eye(rows, ctx):
+    """F98c: the settled targets by source, unarmed and armed, and the eye's height they put the view at. Armed, the eye stands over the stored unarmed neck of the
+    stance; the starting raise is for a session with no unarmed stance stored. The starting raise taken after a second that closed with one stored, or unarmed
+    stances settling with none ever stored (the stance's class never known), is PARTIAL."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    tot = dict((k, sum(int(r[k]) for r in sec)) for k in ("un", "unk", "ar", "stance", "over", "start"))
+
+    def eye_mean(key, nkey):
+        n, s = 0, 0.0
+        for r in sec:
+            m = re.match(r"([\d.]+) m", r[key])
+            if m and int(r[nkey]):
+                n += int(r[nkey])
+                s += int(r[nkey]) * float(m.group(1))
+        return s / n if n else None
+
+    ue, ae = eye_mean("ueye", "un"), eye_mean("aeye", "ar")
+    stored = [r["ns"] for r in sec if r["ns"] != "none"]
+    start_stored = sum(int(sec[i]["start"]) for i in range(1, len(sec)) if sec[i - 1]["ns"] != "none")
+    text = ("%d s: settled targets unarmed %d (the stance not known %d), armed %d (the unarmed eye of the stance %d, the standing raise over the crouch %d, the "
+            "starting raise %d)") % (len(sec), tot["un"], tot["unk"], tot["ar"], tot["stance"], tot["over"], tot["start"])
+    if ue is not None:
+        text += "; the unarmed eye %.3f m" % ue
+    if ae is not None:
+        text += "; the armed eye %.3f m" % ae
+    text += "; the unarmed standing neck stored %s" % (stored[-1] if stored else "never")
+    if not tot["ar"]:
+        return ("IDLE", text + "; no armed settled stance")
+    if start_stored:
+        return ("PARTIAL", text + "; the starting raise taken %d times with an unarmed stance stored" % start_stored)
+    if tot["un"] and not stored and not any(r["nc"] != "none" for r in sec):
+        return ("PARTIAL", text + "; unarmed stances settled but none was stored (the stance's class never known): the armed eye came from the starting raise")
+    return ("OK", text)
+
+
 def _hj_f97a_body(rows, ctx):
     """F97a: per held item and stance, the body against the eye: the weapon's weight, the neck raised (written and asked), the neck written against its animated
     height, the eye as drawn over the clavicle line with the INSIDE frames (the eye in the torso), the legs and the feet lifted. Armed seconds whose raise was asked
@@ -11346,6 +11383,12 @@ HEALTH_RULES = (
                 r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
                 r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)" % ((_HN,) * 6)),
     ), _hj_f98a_elbow),
+    _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
+        ("sec", r"native on foot eye level \(F98c\) 1 s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)\), armed (?P<ar>\d+): "
+                r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
+                r"put the view at: unarmed (?P<ueye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none), armed (?P<aeye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none); the unarmed "
+                r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"),
+    ), _hj_f98c_eye),
     _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
         ("sec", r"native on foot head shadow \(F95c\) 1 s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
                 r"views unread (?P<unread>\d+), class changed by the game (?P<lost>\d+); head instance x view pairs after the call: shadow views (?P<sp>\d+), main or "
@@ -12672,6 +12715,19 @@ def self_test_health():
         check("F98a elbow: the F97 flight's swung elbow", [elbow98(plane=92.0, over45=76)] * 3 + [elbow98()], 0, [("PARTIAL", F98)],
               has=["the elbow swung off the stance's plane (" + RIFLE97 + " 3 s)"])
         check("F98a elbow: the elbow jumped", [elbow98(over10=2, step=3.0)], 0, [("PARTIAL", F98)], has=["the elbow jumped (" + RIFLE97 + " 2)"])
+
+        # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
+        F98C = "eye level (F98c)"
+
+        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none"):
+            return R("native on foot eye level (F98c) 1 s: item %s", item, un, unk, ar, stance, over, start, ueye, aeye, ns, nc)
+
+        EYE = "1.693 m (min 1.693 max 1.693)"
+        check("F98c eye: unarmed stored, then the rifle at the unarmed eye", [eye98("$humanoid_fists_name;", un=60, ueye=EYE)] + [eye98(ar=60, stance=60, aeye=EYE)] * 2,
+              0, [("OK", F98C)], has=["armed 120 (the unarmed eye of the stance 120", "the armed eye 1.693 m"], lacks=["UNPARSED"])
+        check("F98c eye: the starting raise with an unarmed stance stored", [eye98("$humanoid_fists_name;", un=60, ueye=EYE), eye98(ar=60, start=60, aeye="1.629 m "
+              "(min 1.629 max 1.629)")], 0, [("PARTIAL", F98C)], has=["the starting raise taken 60 times with an unarmed stance stored"])
+        check("F98c eye: fists only", [eye98("$humanoid_fists_name;", un=60, ueye=EYE)] * 2, 0, [("IDLE", F98C)], has=["no armed settled stance"])
 
         # ---- F98a: the F94a and F95a rules against the F97a design ----
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,

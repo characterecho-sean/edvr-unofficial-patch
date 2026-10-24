@@ -134,6 +134,7 @@ double g_f94EyeHeightLast = -1.0;                             // the value last 
 // and the HUD's motion against the eye (the HRC instance submit, under F9Lock; the frame thread prints and resets it with the pin's line).
 nofoot::f95::StanceSettle g_f95Settle;
 std::atomic<bool> g_f95Moving{false};
+nofoot::f94::EyeLevel g_f98Eye;   // F98c: the settled unarmed stances by class (the Animate post-hook; kept for the skeleton, cleared with the pin's calibration on another)
 struct F95ViewLast {
     bool have = false, pitchOk = false;
     uint32_t p1 = 0;
@@ -637,8 +638,8 @@ void retiredKeysNote(const Config& cfg, bool first) {
     // F94a: fix.native_on_foot_eye_height_cm (retired in F68f) is a live key again, with a new meaning: the eyes' height over the commander's neck (readKey).
     // F98c: the weapon eye offset's up; the eye height places the eye with and without an item. The shipping file carries it at its last value (7.5).
     if (std::fabs(cfg.getFloat("fix.native_on_foot_weapon_eye_up_cm", static_cast<float>(nofoot::f88::kUpDefaultCm)) - static_cast<float>(nofoot::f88::kUpDefaultCm)) > 1e-6f)
-        Log::get().note("native on foot: fix.native_on_foot_weapon_eye_up_cm is retired (F98c): ignored (the eye height places your eye over the commander's neck with and "
-                        "without an item)");
+        Log::get().note("native on foot: fix.native_on_foot_weapon_eye_up_cm is retired (F98c): ignored (with an item drawn the eye stands where the eye height puts it "
+                        "unarmed in the same stance)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -749,9 +750,9 @@ void readKey() {
     }
     // F44 (TEMPORARY instrument, live): the marker probe, off by default. Measure only (native_on_foot.h; draw_record_tag.h).
     {
-        // F47 (TEMPORARY, live): the marker composite's per-eye NDC correction, off by default; on turns the probe's machinery on with it
-        // (the correction needs its tags, finds and read-backs).
-        const bool fix = runtimeVrProfile() && cfg.getString("fix.native_on_foot_marker_fix", "off") == "on";
+        // F47 (TEMPORARY, live): the marker composite's per-eye NDC correction, on by default since F98c (the waypoint and dot world lock the pilot
+        // flies); on turns the probe's machinery on with it (the correction needs its tags, finds and read-backs).
+        const bool fix = runtimeVrProfile() && cfg.getString("fix.native_on_foot_marker_fix", "on") == "on";
         const bool probe = runtimeVrProfile() && (cfg.getString("fix.native_on_foot_marker_probe", "off") == "on" || fix);
         if (first || probe != g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot marker probe (F44/F46/F47, TEMPORARY): %s%s", probe ? "on -- world markers are tagged in t' (low mantissa "
@@ -823,8 +824,9 @@ void readKey() {
         namespace f94 = nofoot::f94;
         const double cm = f94::eyeHeightClampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_eye_height_cm", static_cast<float>(f94::kEyeHeightDefaultCm))));
         if (first || cm != g_f94EyeHeightLast)
-            Log::get().note("native on foot eye height (F94a): fix.native_on_foot_eye_height_cm = %.1f cm -- your eyes sit this far above the commander's neck with your head "
-                            "level, with and without an item (F98c; the commander's own is %.1f); a leaning weapon stance stands upright under the eye (F97a) "
+            Log::get().note("native on foot eye height (F94a): fix.native_on_foot_eye_height_cm = %.1f cm -- your eyes sit this far above the commander's upright neck with "
+                            "your head level (the commander's own is %.1f); with an item drawn, where they sit unarmed in the same stance (F98c); a leaning weapon stance "
+                            "stands upright under the eye (F97a) "
                             "(range %.0f..%.0f)", cm, f94::kEyeHeightOwnCm, f94::kEyeHeightMinCm, f94::kEyeHeightMaxCm);
         g_f94EyeHeightLast = cm;
         g_f94EyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
@@ -11487,8 +11489,8 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
 
 // ---- F94a: the neck reference, the frame thread's half ----------------------------------------------------------------------------------------------------------
 // See nofoot::f94 (native_on_foot_f94.h). Once per align tick, after F88's weight: the hook's newest target (the raise that puts the eye the key's height over the
-// animated neck, measured on the game's own camera) is followed critically damped, frozen while a weapon or tool is drawn, weighted by 1 - w, and its seated y goes
-// into the eye alignment's sum with the hold's. It never enters the hold's input: the hold takes out of the pose the alignment the pose carried (F89), this term
+// animated neck, measured on the game's own camera; F98c: armed, over the unarmed neck of the stance) is followed critically damped, whole with and without an item,
+// and its seated y goes into the eye alignment's sum with the hold's. It never enters the hold's input: the hold takes out of the pose the alignment the pose carried (F89), this term
 // included. For a runtime that reports no serial the hold also waits while this term moves (as for F88's up).
 nofoot::f94::NeckRaise g_f94Raise;
 nofoot::f88::Settle g_f94Settle;
@@ -13365,6 +13367,11 @@ struct PinStats {
     double f95TgtMin = 1e9, f95TgtMax = -1e9;
     nofoot::f95::StepStat f95View[2];
     nofoot::f95::StepStat f95World[2];   // F97a: the view's step against the ground, the head still (0 standing, 1 moving)
+    // F98c: the settled targets by source, and the eye's height they put the view at, unarmed and armed (the model, m)
+    uint32_t f98Src[nofoot::f94::kEyeSourceN] = {};
+    double f98EyeSum[2] = {}, f98EyeMin[2] = {1e9, 1e9}, f98EyeMax[2] = {-1e9, -1e9};
+    bool f98Have[2] = {};          // the stored unarmed stances (standing, crouched) as the second closed
+    double f98Neck[2] = {};
     // F97a: per stance bin (standing, crouched, moving crouched, moving): the weight, the raise written and asked (cm), the calls capped by the legs, the legs'
     // extension animated and written, the feet lifted, and the eye as drawn over the clavicle line and ahead of the chest (cm) with the INSIDE frames.
     struct F97Bin {
@@ -13449,6 +13456,9 @@ struct PinCall {
     bool f95Moving = false, f95HeadStill = false, f95ViewStepOk = false;
     double f95Target = 0.0, f95ViewStep = 0.0;
     double f95WorldStep = 0.0;   // F97a: the view's step along the character's up in the world (m)
+    // F98c: where a settled target came from (nofoot::f94::EyeSource; kEyeSourceN when none was taken) and the eye's height it puts the view at (the model, m)
+    uint8_t f98Src = nofoot::f94::kEyeSourceN;
+    double f98EyeY = 0.0;
     // F97a: F88's weight, the armed demand (F93's raise and the eye's lowering, m), the raise capped by the legs, the stance bin (nofoot::f97::Stance), the eye as
     // drawn in the model (m) and, at the close, its clearance over the clavicle line and ahead of the chest 24 (heading axes, m) and the INSIDE test on it.
     double f97W = 0.0, f97Asked = 0.0, f97RaiseF93 = 0.0, f97LowerEye = 0.0, f97EyeDrawn[3] = {}, f97ClavUp = 0.0, f97ChestFwd = 0.0;
@@ -13704,6 +13714,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         if (g_pinEyeCalX != pl.x) {
             g_pinEyeCal.reset();
+            g_f98Eye.reset();   // F98c: another skeleton's unarmed necks are not this one's
             g_pinEyeCalX = pl.x;
         }
         if (localPitchValid && (!g_pinEyeCalRefGenHave || in.localPoseGeneration != g_pinEyeCalRefGen)) {
@@ -13754,7 +13765,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // F94a: the view's height from the neck (native_on_foot_f94.h). The raise that puts the eye the key's height over the animated neck with the head level, measured
         // on the game's own camera (E: the transient, the shifts the pin ignores and the raise the pose carried are out of it), goes to the frame thread (F95a: from a
-        // settled stance only), which follows it with F88's 1 - w; the view as drawn over the neck, the game's camera over it and the skeleton's own eye over it are the
+        // settled stance only; F98c: armed, over the unarmed neck of the stance), which follows it; the view as drawn over the neck, the game's camera over it and the skeleton's own eye over it are the
         // line's figures (the per-frame target among them).
         {
             const double h = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
@@ -13826,9 +13837,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.f97LowerEye = at.lowerEye;
         }
         // F95a/F98c: the raise's target only from a settled stance (native_on_foot_f95.h): not walking or airborne, and the neck as the body is written (the animated
-        // neck plus w times F97a's armed raise: the leaning stances stand upright under the eye) and the game's camera each within 1 cm over the last 0.3 s; it is then
-        // the window's means, the eye height over that neck with and without an item. Anything else (the walk cycle, a landing, a stance still changing) publishes
-        // nothing: the frame thread holds the raise where the last settled stance put it.
+        // neck plus w times F97a's armed raise) and the game's camera each within 1 cm over the last 0.3 s. Unarmed the target is the window's means, the eye height
+        // over the animated neck, and the stance is stored by class; armed, the eye height over the stored unarmed neck of the stance's class, measured on the armed
+        // camera (nofoot::f94::EyeLevel): the eye where it would stand unarmed. Anything else (the walk cycle, a landing, a stance still changing) publishes nothing:
+        // the frame thread holds the raise where the last settled stance put it.
         {
             nofoot::f95::SettleIn si;
             // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there, and the stance's raise is released with the detach, so a
@@ -13841,7 +13853,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             const nofoot::f95::SettleOut so = g_f95Settle.step(si);
             pc.f95Why = so.why;
             if (so.settled) {
-                pc.f95Target = nofoot::f94::raiseTarget(so.neckY, f97H, so.camY);
+                // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
+                namespace f94 = nofoot::f94;
+                int cls = f94::kClassUnknown;
+                if (pc.calHave) cls = nofoot::pinCrouchedWc(pc.wc) ? f94::kClassCrouched : f94::kClassStanding;
+                else if (g_f98Eye.have[f94::kClassStanding])
+                    cls = nofoot::pinCrouchedWc(nofoot::pinCrouchWeight(true, g_f98Eye.camY[f94::kClassStanding], so.camY)) ? f94::kClassCrouched : f94::kClassStanding;
+                const bool itemDrawn = armed || f97W > 0.0;
+                pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src);
+                pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
             }
         }
@@ -14635,6 +14655,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         if (pc.f95Why == nofoot::f95::kSettled) {
             st.f95TgtMin = std::min(st.f95TgtMin, 100.0 * pc.f95Target);
             st.f95TgtMax = std::max(st.f95TgtMax, 100.0 * pc.f95Target);
+        }
+        if (pc.f98Src < nofoot::f94::kEyeSourceN) {   // F98c
+            ++st.f98Src[pc.f98Src];
+            const int a = pc.f98Src >= nofoot::f94::kEyeStance ? 1 : 0;
+            st.f98EyeSum[a] += pc.f98EyeY;
+            st.f98EyeMin[a] = std::min(st.f98EyeMin[a], pc.f98EyeY);
+            st.f98EyeMax[a] = std::max(st.f98EyeMax[a], pc.f98EyeY);
+        }
+        for (int c = 0; c < 2; ++c) {
+            st.f98Have[c] = g_f98Eye.have[c];
+            st.f98Neck[c] = g_f98Eye.neckY[c];
         }
         if (pc.f95ViewStepOk && pc.f95HeadStill) {
             st.f95View[pc.f95Moving ? 1 : 0].add(pc.f95ViewStep);
@@ -19348,6 +19379,25 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                             e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
                             e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
                             e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN);
+            // F98c: the settled targets by source and the eye's height they put the view at (the model, the head level), unarmed and armed, with the stored unarmed
+            // necks. Armed from "the unarmed eye of the stance", the armed eye reads the unarmed eye of the same stance; a build that never stores an unarmed
+            // stance reads every armed target from the starting raise.
+            namespace f94 = nofoot::f94;
+            char eyeBuf[2][64], neckBuf[2][24];
+            for (int a = 0; a < 2; ++a) {
+                const uint32_t na = a ? st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart]
+                                      : st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass];
+                if (na) std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "%.3f m (min %.3f max %.3f)", st.f98EyeSum[a] / static_cast<double>(na), st.f98EyeMin[a], st.f98EyeMax[a]);
+                else std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "none");
+                if (st.f98Have[a]) std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "%.3f m", st.f98Neck[a]);
+                else std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "none");
+            }
+            Log::get().note("native on foot eye level (F98c) 1 s: item %s; settled targets: unarmed %u (the stance not known %u), armed %u: the unarmed eye of the stance %u, "
+                            "the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the unarmed neck "
+                            "stored: standing %s, crouched %s",
+                            item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass], st.f98Src[f94::kEyeUnarmedNoClass],
+                            st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
+                            st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1]);
         }
         // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC
         // views' camera in the HUD's frame less the LOCAL head), how far the raise moved the view, and the settle window's verdicts. Standing every figure should be
