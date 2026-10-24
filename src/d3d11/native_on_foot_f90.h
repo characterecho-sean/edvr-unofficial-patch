@@ -214,8 +214,8 @@ constexpr double kForwardDefaultCm = 13.0, kLeftDefaultCm = 3.5, kUpDefaultCm = 
 // _toward_eye_cm (TEMPORARY, live), the pistol's ranges. All four 0 leave F91's rows bit for bit. The built-in values put the readout just clear of the receiver's
 // left side (F91 flight, dump 092535205001, the right eye in ADS: the content sat on the receiver's top centre behind the scope, 0.3 cm left of the centre, with
 // its lower line under the recess rim; the receiver was about 5.5 cm wide there and the content 2.3 x 1.7 cm): 5 cm left puts its right edge about 1 cm past the
-// receiver's left edge, beside the gun and away from the sight line above it.
-constexpr double kRifleForwardDefaultCm = 0.0, kRifleLeftDefaultCm = 5.0, kRifleUpDefaultCm = 0.0, kRifleTowardDefaultCm = 0.0;
+// receiver's left edge, beside the gun and away from the sight line above it. F93a: the pilot's value from the F92 flight ("Rifle ADS ui looks good"): left 3.5.
+constexpr double kRifleForwardDefaultCm = 0.0, kRifleLeftDefaultCm = 3.5, kRifleUpDefaultCm = 0.0, kRifleTowardDefaultCm = 0.0;
 struct Keys {
     double forwardCm = 0.0, leftCm = 0.0, upCm = 0.0, towardCm = 0.0;
     bool any() const noexcept { return forwardCm != 0.0 || leftCm != 0.0 || upCm != 0.0 || towardCm != 0.0; }
@@ -250,9 +250,9 @@ inline bool target(const double C[3], const WeaponFrame& w, const Keys& k, const
 enum Item : int { kItemOther = 0, kItemPistol = 1, kItemNotHeld = 2, kItemPrimary = 3 };
 // A: no table part (F91: the record matches no row: not scaled, not moved, counted), the hip readout, a scaled ADS readout, the tool's readout (left as it is).
 enum AState : int { kANotTable = 0, kAHip = 1, kAScaled = 2, kATool = 3 };
-// F92: kBRefClass: the held item is the placement's class, but a part of another class (the other weapon's ADS readout, a tool's readout) was drawn this frame or
-// the last. Status.json names a switch up to 0.9 s after the game starts drawing the next item (F91 flight), and the hip readout is one part for the rifle and the
-// pistol, so without this the pistol placement moved the rifle's hip readout through a pistol-to-rifle switch.
+// F92: kBRefClass: a part of another class (the other weapon's ADS readout, a tool's readout) was drawn beside this class's (F93a: two classes' parts in the newest
+// frame, DrawnTracker's mixed). The hip readout is one part for the rifle and the pistol, so without this the pistol placement moved the rifle's hip readout through
+// a pistol-to-rifle switch. kBRefItem (F93a): Status.json names the other weapon class while the drawn class has stood longer than kClassGraceS.
 enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefFrame, kBRefEye, kBRefNoTarget, kBRefClass, kBCount };
 // A placement's target, latched once a render frame by its first decision (either eye), for one held item.
 struct LatchT {
@@ -264,12 +264,79 @@ struct LatchT {
 struct Latch : LatchT {
     LatchT rifle;
 };
+// ---- F93a: the class the game is drawing --------------------------------------------------------------------------------------------------------------------------
+// Each class draws a readout part only it has, every frame its item is out (the rifle's ADS readout at the hip too, the pistol's ADS readout at the hip too, the
+// tool's readout). Status.json names a switch 0.1 to 1.0 s after the game starts drawing the next item (F91 and F92 flights; F92's rifle-to-pistol swap: the
+// pistol's ADS part first decided at 10:29:41.057, Status.json at 10:29:42.072, the first placed frame 10:29:42.082), so the class comes from those parts: the
+// class whose own part was decided most recently, within this render frame or the last, is what the game draws; two classes' parts in the newest of those frames
+// is a switch in progress (mixed). F92a's guard read the parts too, but placed only once Status.json agreed.
+enum DrawnClass : int { kDrawnNone = 0, kDrawnPrimary = 1, kDrawnPistol = 2, kDrawnTool = 3, kDrawnMixed = 4 };
+inline const char* drawnName(int c) noexcept {
+    return c == kDrawnPrimary ? "primary" : c == kDrawnPistol ? "pistol" : c == kDrawnTool ? "tool" : c == kDrawnMixed ? "mixed" : "none";
+}
+inline int drawnClassOfRole(int role) noexcept {
+    return role == kRoleRifleAds ? kDrawnPrimary : role == kRolePistolAds ? kDrawnPistol : role == kRoleTool ? kDrawnTool : kDrawnNone;
+}
+// Status.json may still veto a placement once the drawn class has stood this long and it names the other weapon class (a part shared by a weapon this table
+// does not know): longer than any lag seen (1.0 s).
+constexpr double kClassGraceS = 3.0;
+struct DrawnTracker {
+    uint32_t last[4] = {~0u, ~0u, ~0u, ~0u};   // [DrawnClass] the last render frame a part of that class was decided; ~0u never
+    // A decision of a class's own part (the caller sees it before deciding, so the draw counts for itself).
+    void see(int role, uint32_t frame) noexcept {
+        const int c = drawnClassOfRole(role);
+        if (c != kDrawnNone) last[c] = frame;
+    }
+    // True when the class's part was decided this frame or the last.
+    bool recent(int c, uint32_t frame) const noexcept { return last[c] != ~0u && frame - last[c] <= 1u; }
+    int classAt(uint32_t frame) const noexcept {
+        uint32_t newest = 0;
+        bool any = false;
+        for (int c = kDrawnPrimary; c <= kDrawnTool; ++c)
+            if (recent(c, frame) && (!any || int32_t(last[c] - newest) > 0)) {
+                newest = last[c];
+                any = true;
+            }
+        if (!any) return kDrawnNone;
+        int found = kDrawnNone, n = 0;
+        for (int c = kDrawnPrimary; c <= kDrawnTool; ++c)
+            if (recent(c, frame) && last[c] == newest) {
+                found = c;
+                ++n;
+            }
+        return n > 1 ? kDrawnMixed : found;
+    }
+};
+// F93a: one swap, for the log: from the first frame a weapon class's own part is drawn after two frames without it (the first draw frame) to the first frame a
+// placement of that class is applied (the first placed frame).
+struct SwapWatch {
+    bool open = false;
+    int from = kDrawnNone, to = kDrawnNone;
+    uint32_t firstDraw = 0;
+    // Before a class part's decision: `wasRecent` its class had a part this frame or the last; `previous` the drawn class before this draw. A weapon class's
+    // part appearing opens a swap to it.
+    void onPart(int cls, bool wasRecent, int previous, uint32_t frame) noexcept {
+        if (wasRecent || (cls != kDrawnPrimary && cls != kDrawnPistol)) return;
+        open = true;
+        from = previous;
+        to = cls;
+        firstDraw = frame;
+    }
+    // After a decision that placed a part of class `cls`: true, with the gap in frames, when that closes the open swap.
+    bool onPlaced(int cls, uint32_t frame, uint32_t* gap) noexcept {
+        if (!open || cls != to) return false;
+        open = false;
+        if (gap) *gap = frame - firstDraw;
+        return true;
+    }
+};
+inline int placementClassOfRole(int role) noexcept { return role == kRoleRifleAds ? kDrawnPrimary : role == kRoleHip || role == kRolePistolAds ? kDrawnPistol : kDrawnNone; }
 struct In {
-    uint32_t frame = 0, name = 0, itemSerial = 0;   // name: the part's name id this session, for the lines only (F91: never an identity)
-    int item = kItemOther;
-    // F92: which classes' parts the game drew this render frame or the last (the role of each decision, kept by the caller): the evidence of what is drawn,
-    // which leads Status.json through a switch
-    bool drawnRifleAds = false, drawnPistolAds = false, drawnTool = false;
+    uint32_t frame = 0, name = 0, itemSerial = 0;   // name: the part's name id this session, for the lines only (F91: never an identity); itemSerial (F93a):
+                                                    // the drawn class's epoch, the latch's key
+    int item = kItemOther;                          // Status.json's held item: its class, for the steady-state veto only (F93a)
+    int drawnClass = kDrawnNone;                    // F93a: the class the game is drawing (DrawnTracker), which decides the placements
+    double drawnClassAgeS = 0.0;                    // F93a: how long it has been that class
     bool meshRead = false;
     double meshExt[2] = {};   // the icon mesh's x and z extents (mesh units)
     double recScale = 0.0;
@@ -307,11 +374,12 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         o.a = kATool;
         return o;
     }
-    // the placements: the pistol's for the hip readout and the pistol's ADS readout, the rifle's (F92) for the rifle's ADS readout, each only with its class held
+    // the placements: the pistol's for the hip readout and the pistol's ADS readout, the rifle's (F92) for the rifle's ADS readout, each only while the game draws
+    // its class (F93a: the drawn class, not Status.json's)
     const bool pistolPart = p->role == kRoleHip || p->role == kRolePistolAds;
     const bool riflePart = p->role == kRoleRifleAds;
-    const int want = pistolPart ? kItemPistol : kItemPrimary;
-    const int item = pistolPart || riflePart ? in.item : kItemOther;
+    const int wantClass = pistolPart ? kDrawnPistol : kDrawnPrimary;
+    const int otherItem = pistolPart ? kItemPrimary : kItemPistol;
     double c[3], Crel[3];
     contentPoint(in.x0rel, in.q2, in.q3, in.recScale, p->centre, rotate, c);
     f85::mulVec3(uf.U3, c, Crel);
@@ -361,13 +429,17 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
             }
         }
     };
-    if (item == kItemNotHeld) {
-        o.b = kBRefItem;
-    } else if (item == want && (pistolPart ? in.drawnRifleAds || in.drawnTool : in.drawnPistolAds || in.drawnTool)) {
-        o.b = kBRefClass;   // the held class is right, but the game is drawing another class's part: a switch Status.json has not named yet
-    } else if (item == want && riflePart) {
+    if (!pistolPart && !riflePart) {
+        // no placement for this role
+    } else if (in.drawnClass == kDrawnMixed) {
+        o.b = kBRefClass;   // two classes' parts in the newest frame: the game is drawing both items (a switch); the shared hip readout could be either's
+    } else if (in.drawnClass != wantClass) {
+        // the game draws another class (or none): no placement for this part
+    } else if (in.item == otherItem && in.drawnClassAgeS > kClassGraceS) {
+        o.b = kBRefItem;    // Status.json names the other weapon class long after any switch: a weapon this table does not know shares the part
+    } else if (riflePart) {
         place(latch.rifle, in.rifleKeys);
-    } else if (item == want) {
+    } else {
         const bool sameItem = latch.have && latch.serial == in.itemSerial;
         if (p->role == kRoleHip) {
             place(latch, in.keys);
@@ -420,7 +492,7 @@ struct RoleLog {
 inline int appliedState(const Out& o) noexcept { return o.role * 32 + (o.a == kAScaled ? 16 : 0) + (o.b == kBMovedPrevious ? int(kBMoved) : o.b); }
 inline const char* refusalName(int b) noexcept {
     switch (b) {
-        case kBRefItem: return "the held item is not the one read";
+        case kBRefItem: return "Status.json names the other weapon class";
         case kBRefFrame: return "no weapon frame";
         case kBRefEye: return "no eye origin";
         case kBRefNoTarget: return "no target this frame or the last";

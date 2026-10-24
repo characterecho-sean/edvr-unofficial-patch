@@ -105,6 +105,8 @@ inline f90::In inOf(const Rig& g, int e, uint32_t frame, const Record& rec, int 
     in.name = rec.name;
     in.item = item;
     in.itemSerial = serial;
+    // F93a: the class the game draws decides the placements; the F90-F92 checks' "held" item is what is drawn, in steady state (Status.json agreeing)
+    in.drawnClass = item == f90::kItemPistol ? f90::kDrawnPistol : item == f90::kItemPrimary ? f90::kDrawnPrimary : f90::kDrawnNone;
     in.meshRead = true;
     in.meshExt[0] = rec.mesh[0];
     in.meshExt[1] = rec.mesh[1];
@@ -456,11 +458,16 @@ inline void run90(Check&& check) {
         const f90::Out nn = f90::decide(inOf(g, 0, 103, pads, f90::kItemPistol, 7, keys), g0, fresh, rot, frameFn);
         check(n2.b == f90::kBRefNoTarget && ni.b == f90::kBRefNoTarget && nn.b == f90::kBRefNoTarget && !n2.map.move && !ni.map.move && !nn.map.move && nn.map.scale,
               "F90 B: 29498 with no T of this frame or the last (two frames old, another item, none yet) is refused and only scaled");
-        // a pistol name whose serial is not the held item's: refused, rows untouched
-        f90::Latch lm;
-        f85::UFrame um = g0;
-        const f90::Out m = f90::decide(inOf(g, 0, 110, hip, f90::kItemNotHeld, 7, keys), um, lm, rot, frameFn);
-        check(m.b == f90::kBRefItem && m.map.identity() && !lm.have, "F90 B: a pistol readout whose item is not the held one is refused and left as F85b's");
+        // F93a: Status.json naming the primary while the pistol has been drawn longer than the grace: refused, rows untouched; within the grace (a switch): placed
+        f90::Latch lm, lg;
+        f90::In veto = inOf(g, 0, 110, hip, f90::kItemPistol, 7, keys);
+        veto.item = f90::kItemPrimary;
+        veto.drawnClassAgeS = f90::kClassGraceS + 0.5;
+        const f90::Out m = f90::decide(veto, g0, lm, rot, frameFn);
+        veto.drawnClassAgeS = 0.9;
+        const f90::Out mg = f90::decide(veto, g0, lg, rot, frameFn);
+        check(m.b == f90::kBRefItem && m.map.identity() && !lm.have && mg.b == f90::kBMoved && mg.map.move,
+              "F93a: Status.json naming the other weapon class vetoes the placement only after the drawn class has stood 3 s; 0.9 s into a switch it places");
     }
 
     // ---- 5: the weapon frame -----------------------------------------------------------------------------------------------------------------------------------
@@ -564,8 +571,8 @@ inline void run90(Check&& check) {
         rk.leftCm = f90::kRifleLeftDefaultCm;
         rk.upCm = f90::kRifleUpDefaultCm;
         rk.towardCm = f90::kRifleTowardDefaultCm;
-        check(rk.forwardCm == 0.0 && rk.leftCm == 5.0 && rk.upCm == 0.0 && rk.towardCm == 0.0 && rk.leftCm <= f90::kLeftMaxCm,
-              "F92: the rifle ADS readout's built-in values: 5 cm left (beside the receiver), nothing else");
+        check(rk.forwardCm == 0.0 && rk.leftCm == 3.5 && rk.upCm == 0.0 && rk.towardCm == 0.0 && rk.leftCm <= f90::kLeftMaxCm,
+              "F93a: the rifle ADS readout's built-in values are the pilot's (F92 flight): 3.5 cm left, nothing else");
         const auto inR = [&](int e, uint32_t frame, const Record& rec, int item, const f90::Keys& keys) {
             f90::In in = inOf(g, e, frame, rec, item, 21, f90::Keys{});
             in.rifleKeys = keys;
@@ -620,8 +627,8 @@ inline void run90(Check&& check) {
                 oneT = dist3(o.T, T0) == 0.0;
             }
         }
-        check(toT < 1e-6 && std::fabs(alongL - 0.05) < 1e-9 && oneT && frames == 1,
-              "F92: with a primary held the rifle's ADS readout content lands on T = C + 5 cm along the weapon's left, one T for both eyes, the frame read once");
+        check(toT < 1e-6 && std::fabs(alongL - 0.01 * rk.leftCm) < 1e-9 && oneT && frames == 1,
+              "F92: with a primary held the rifle's ADS readout content lands on T = C + the built-in left along the weapon's left, one T for both eyes, the frame read once");
         check(facing, "F92: the rifle placement is a translation on top of A's scale: U3 is the scaled U3, unturned");
         // each placement only for its class
         const auto rowsAre = [&](const f90::Out& o, int e, bool scaleOnly) {
@@ -641,29 +648,29 @@ inline void run90(Check&& check) {
         pk.leftCm = f90::kLeftDefaultCm;
         pk.upCm = f90::kUpDefaultCm;
         pk.towardCm = f90::kTowardDefaultCm;
-        const auto inP = [&](uint32_t frame, const Record& rec, int item, bool drawnRifle, bool drawnPistol, bool drawnTool) {
+        // F93a: the class is what the game draws (DrawnTracker); Status.json's item agrees in these cases
+        const auto inP = [&](uint32_t frame, const Record& rec, int drawn, int item) {
             f90::In in = inOf(g, 0, frame, rec, item, 21, pk);
             in.rifleKeys = rk;
-            in.drawnRifleAds = drawnRifle;
-            in.drawnPistolAds = drawnPistol;
-            in.drawnTool = drawnTool;
+            in.drawnClass = drawn;
             return in;
         };
-        const f90::Out rifWithPistol = f90::decide(inP(80, radsRec, f90::kItemPistol, false, true, false), uOf(g, 0), lc, rot, frameFn);
-        const f90::Out hipWithRifle = f90::decide(inP(80, hipRec, f90::kItemPrimary, true, false, false), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out rifWithPistol = f90::decide(inP(80, radsRec, f90::kDrawnPistol, f90::kItemPistol), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out hipWithRifle = f90::decide(inP(80, hipRec, f90::kDrawnPrimary, f90::kItemPrimary), uOf(g, 0), lc, rot, frameFn);
         check(rifWithPistol.b == f90::kBNone && rowsAre(rifWithPistol, 0, true) && hipWithRifle.b == f90::kBNone && rowsAre(hipWithRifle, 0, false) && !lc.have && !lc.rifle.have,
-              "F92: the rifle placement never runs with a pistol held, the pistol placement never with a primary held (rows: A's scale only, F85b's)");
-        const f90::Out hipSwitch = f90::decide(inP(81, hipRec, f90::kItemPistol, true, false, false), uOf(g, 0), lc, rot, frameFn);
-        const f90::Out padsSwitch = f90::decide(inP(81, padsRec, f90::kItemPistol, true, true, false), uOf(g, 0), lc, rot, frameFn);
-        const f90::Out rifSwitch = f90::decide(inP(81, radsRec, f90::kItemPrimary, true, true, false), uOf(g, 0), lc, rot, frameFn);
-        const f90::Out hipTool = f90::decide(inP(82, hipRec, f90::kItemPistol, false, true, true), uOf(g, 0), lc, rot, frameFn);
-        const f90::Out rifTool = f90::decide(inP(82, radsRec, f90::kItemPrimary, true, false, true), uOf(g, 0), lc, rot, frameFn);
+              "F92: the rifle placement never runs while a pistol is drawn, the pistol placement never while a primary is (rows: A's scale only, F85b's)");
+        const f90::Out hipSwitch = f90::decide(inP(81, hipRec, f90::kDrawnMixed, f90::kItemPistol), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out padsSwitch = f90::decide(inP(81, padsRec, f90::kDrawnMixed, f90::kItemPistol), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out rifSwitch = f90::decide(inP(81, radsRec, f90::kDrawnMixed, f90::kItemPrimary), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out hipTool = f90::decide(inP(82, hipRec, f90::kDrawnTool, f90::kItemPistol), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out rifTool = f90::decide(inP(82, radsRec, f90::kDrawnMixed, f90::kItemPrimary), uOf(g, 0), lc, rot, frameFn);
         check(hipSwitch.b == f90::kBRefClass && rowsAre(hipSwitch, 0, false) && padsSwitch.b == f90::kBRefClass && rowsAre(padsSwitch, 0, true) && !lc.have,
-              "F92: the F91 flight's switch: a pistol held while the rifle's ADS readout is drawn: the hip readout is left as F85b's and refused as a switch (counted)");
-        check(rifSwitch.b == f90::kBRefClass && rowsAre(rifSwitch, 0, true) && hipTool.b == f90::kBRefClass && rifTool.b == f90::kBRefClass && !lc.rifle.have,
-              "F92: a primary held while the pistol's or a tool's readout is drawn, and a pistol held while a tool's is: refused as a switch, only A's scale");
-        const f90::Out hipPistol = f90::decide(inP(83, hipRec, f90::kItemPistol, false, true, false), uOf(g, 0), lc, rot, frameFn);
-        check(hipPistol.b == f90::kBMoved && hipPistol.map.move && lc.have, "F92: a pistol held with only its own parts drawn is placed as in F90");
+              "F92: two classes' parts in the newest frame (a switch): the hip readout is left as F85b's and refused as a switch (counted)");
+        check(rifSwitch.b == f90::kBRefClass && rowsAre(rifSwitch, 0, true) && hipTool.b == f90::kBNone && rowsAre(hipTool, 0, false) && rifTool.b == f90::kBRefClass &&
+                  !lc.rifle.have,
+              "F92: the rifle's readout in a switch is refused, only A's scale; a tool drawn: no pistol placement");
+        const f90::Out hipPistol = f90::decide(inP(83, hipRec, f90::kDrawnPistol, f90::kItemPistol), uOf(g, 0), lc, rot, frameFn);
+        check(hipPistol.b == f90::kBMoved && hipPistol.map.move && lc.have, "F92: the pistol drawn alone is placed as in F90");
         // the role line: applied against matched only, and a change of what was applied is a new line
         char t1[200], t2[200], t3[200], t4[200], t5[200];
         f90::Latch lt;
@@ -683,6 +690,133 @@ inline void run90(Check&& check) {
         const bool logs = rl.step(5, f90::appliedState(hipSwitch)) && !rl.step(5, f90::appliedState(hipSwitch)) && rl.step(5, f90::appliedState(hipPistol)) &&
                           f90::appliedState(hipSwitch) != f90::appliedState(hipPistol);
         check(texts && logs, "F92: the role line says what was applied (scaled, the placement) and what was only matched or refused, and a change of it is a new line");
+    }
+
+    // ---- F93a: a swap, the class from the parts the game draws, Status.json 0.9 s late ----------------------------------------------------------------------------
+    {
+        const Record radsRec{kN90RifleAds, {-0.34, -0.05, 0.52}, 0.0500976555, {3.0, 1.0}};
+        const Record hipRec{kN90Hip, {0.10, -0.12, 0.36}, 0.072070308, {2.0, 1.0}};
+        const Record padsRec{kN90PistolAds, {0.07, -0.05, 0.42}, 0.166796863, {2.0, 1.0}};
+        const Weapon wp = weaponOf(g, 7.0);
+        const auto frameFn = [&] { return f90::weaponFrame(true, wp.attach, true, wp.froot); };
+        f90::Keys pk, rk;
+        pk.forwardCm = f90::kForwardDefaultCm;
+        pk.leftCm = f90::kLeftDefaultCm;
+        pk.upCm = f90::kUpDefaultCm;
+        pk.towardCm = f90::kTowardDefaultCm;
+        rk.leftCm = f90::kRifleLeftDefaultCm;
+        // the DLL's composition (f90Decide): the class part is seen before its own decision, the drawn class and its epoch, the swap watch
+        struct Sim {
+            f90::DrawnTracker tr;
+            f90::SwapWatch sw;
+            f90::Latch latch;
+            int cls = f90::kDrawnNone;
+            double since = 0.0;
+            uint32_t epoch = 1, gap = ~0u, firstPlaced[2] = {~0u, ~0u};   // [0] the pistol class, [1] the primary
+            bool closed = false;
+            int closedTo = f90::kDrawnNone, closedFrom = f90::kDrawnNone;
+        };
+        const auto draw = [&](Sim& sm, uint32_t frame, const Record& rec, int e, int statusItem) {
+            const double t = frame / 90.0;
+            f90::In in = inOf(g, e, frame, rec, statusItem, 0, pk);
+            in.rifleKeys = rk;
+            const f90::Part* p = f90::partOf(true, rec.mesh, rec.scale);
+            const int pc = p ? f90::drawnClassOfRole(p->role) : f90::kDrawnNone;
+            if (pc != f90::kDrawnNone) {
+                const bool wasRecent = sm.tr.recent(pc, frame);
+                const int prev = sm.tr.classAt(frame);
+                sm.tr.see(p->role, frame);
+                sm.sw.onPart(pc, wasRecent, prev, frame);
+            }
+            const int c = sm.tr.classAt(frame);
+            if (c != sm.cls) {
+                sm.cls = c;
+                sm.since = t;
+                ++sm.epoch;
+            }
+            in.drawnClass = c;
+            in.drawnClassAgeS = t - sm.since;
+            in.itemSerial = sm.epoch;
+            const f90::Out o = f90::decide(in, uOf(g, e), sm.latch, rot, frameFn);
+            if (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious) {
+                const int plc = f90::placementClassOfRole(o.role);
+                uint32_t& fp = sm.firstPlaced[plc == f90::kDrawnPistol ? 0 : 1];
+                if (fp == ~0u) fp = frame;
+                const int from = sm.sw.from, to = sm.sw.to;
+                uint32_t gp = 0;
+                if (sm.sw.onPlaced(plc, frame, &gp)) {
+                    sm.gap = gp;
+                    sm.closed = true;
+                    sm.closedFrom = from;
+                    sm.closedTo = to;
+                }
+            }
+            return o;
+        };
+        // frames 0-99 one item drawn, 100-299 the other (overlap: both drawn for that many frames from 100); Status.json names the new item 0.9 s (81 frames) late;
+        // classFirst: the class's own part is drawn before the hip readout within each eye (else after). Counts the hip readout's moves by the pistol placement
+        // while the primary is drawn (the other class's part moved).
+        struct Run {
+            Sim sm;
+            uint32_t wrongMoves = 0, placedFirstFrameEyes = 0;
+        };
+        const auto run = [&](bool rifleToPistol, bool classFirst, uint32_t overlap) {
+            Run r;
+            for (uint32_t frame = 0; frame < 300; ++frame) {
+                const bool newOn = frame >= 100, oldOn = frame < 100 + overlap;
+                const bool statusNew = frame >= 181;
+                const int oldItem = rifleToPistol ? f90::kItemPrimary : f90::kItemPistol, newItem = rifleToPistol ? f90::kItemPistol : f90::kItemPrimary;
+                const int status = statusNew ? newItem : oldItem;
+                for (int e = 0; e < 2; ++e) {
+                    std::vector<const Record*> parts;
+                    const Record* oldPart = rifleToPistol ? &radsRec : &padsRec;
+                    const Record* newPart = rifleToPistol ? &padsRec : &radsRec;
+                    if (classFirst) {
+                        if (oldOn) parts.push_back(oldPart);
+                        if (newOn) parts.push_back(newPart);
+                        parts.push_back(&hipRec);
+                    } else {
+                        parts.push_back(&hipRec);
+                        if (oldOn) parts.push_back(oldPart);
+                        if (newOn) parts.push_back(newPart);
+                    }
+                    for (const Record* rec : parts) {
+                        const f90::Out o = draw(r.sm, frame, *rec, e, status);
+                        const bool rifleDrawn = rifleToPistol ? oldOn : newOn;
+                        const bool pistolDrawn = rifleToPistol ? newOn : oldOn;
+                        // the pistol placement moving the shared hip readout while the rifle is drawn (and the pistol is not), or during an overlap
+                        if (rec == &hipRec && o.b == f90::kBMoved && rifleDrawn && (!pistolDrawn || (oldOn && newOn))) ++r.wrongMoves;
+                        if (frame == 100 && o.b == f90::kBMoved && f90::placementClassOfRole(o.role) == (rifleToPistol ? f90::kDrawnPistol : f90::kDrawnPrimary))
+                            ++r.placedFirstFrameEyes;
+                    }
+                }
+            }
+            return r;
+        };
+        const Run a1 = run(true, true, 0), a2 = run(true, false, 0);
+        check(a1.sm.closed && a1.sm.gap == 0 && a1.sm.closedFrom == f90::kDrawnPrimary && a1.sm.closedTo == f90::kDrawnPistol && a1.sm.firstPlaced[0] == 100 &&
+                  a2.sm.closed && a2.sm.gap == 0 && a2.sm.firstPlaced[0] == 100 && a1.placedFirstFrameEyes >= 2 && a2.placedFirstFrameEyes >= 1,
+              "F93a: rifle to pistol with Status.json 0.9 s late: the pistol's readout is placed from its first drawn frame (gap 0), in either draw order");
+        check(a1.wrongMoves == 0 && a2.wrongMoves == 0, "F93a: rifle to pistol: the pistol placement never moves the hip readout while the rifle is drawn");
+        const Run b1 = run(false, true, 0), b2 = run(false, false, 0);
+        check(b1.sm.closed && b1.sm.gap == 0 && b1.sm.closedTo == f90::kDrawnPrimary && b1.sm.firstPlaced[1] == 100 && b2.sm.closed && b2.sm.gap == 0 &&
+                  b2.sm.firstPlaced[1] == 100,
+              "F93a: pistol to rifle with Status.json 0.9 s late: the rifle's ADS readout is placed from its first drawn frame (gap 0)");
+        check(b1.wrongMoves == 0 && b2.wrongMoves <= 1,
+              "F93a: pistol to rifle: the pistol placement never moves the rifle's hip readout, but for one draw when the hip readout is drawn before the rifle's part in "
+              "the first frame (the order is the game's)");
+        const Run c1 = run(true, true, 5);
+        check(c1.wrongMoves == 0 && c1.sm.closed && c1.sm.gap == 5, "F93a: both items drawn for 5 frames: the shared hip readout is left alone until the rifle's part stops");
+        // the tracker itself
+        f90::DrawnTracker tr;
+        for (uint32_t f = 10; f < 20; ++f) tr.see(f90::kRoleRifleAds, f);
+        const int before = tr.classAt(20);
+        tr.see(f90::kRolePistolAds, 20);
+        const int after = tr.classAt(20);
+        tr.see(f90::kRoleRifleAds, 20);
+        const int both = tr.classAt(20);
+        check(before == f90::kDrawnPrimary && after == f90::kDrawnPistol && both == f90::kDrawnMixed && tr.classAt(23) == f90::kDrawnNone && !tr.recent(f90::kDrawnTool, 20),
+              "F93a: the drawn class is the newest class part within this frame or the last; two in the newest frame is mixed; none after two frames");
     }
 
     // ---- the keys -----------------------------------------------------------------------------------------------------------------------------------------------

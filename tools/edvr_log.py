@@ -10469,6 +10469,20 @@ def _hj_f92_rifle(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f93_swap(rows, ctx):
+    """A readout swap: frames from the new item's first drawn readout part to its first placed frame (0 = placed from the first frame)."""
+    placed, never = rows.get("placed", []), rows.get("never", [])
+    if not placed and not never:
+        return None
+    gaps = [int(x["gap"]) for x in placed]
+    kinds = collections.Counter("%s->%s" % (x["from"], x["to"]) for x in placed + never)
+    text = "%d swaps (%s): gap max %d frames, %d with gap 0%s" % (len(placed) + len(never), _htop(kinds, 4), max(gaps or [0]), sum(1 for g in gaps if g == 0),
+                                                                "; %d NOT PLACED in 3 s" % len(never) if never else "")
+    if never:
+        return ("NEVER APPLIED", text)
+    return ("OK" if max(gaps) == 0 else "PARTIAL", text)
+
+
 def _hj_f91_fit(rows, ctx):
     """The ADS vibration instrument's 0.5 s windows: STILL against MOVING and the verdicts H1 (d frames late), LOCK, H3."""
     w = rows.get("fit", [])
@@ -10754,6 +10768,10 @@ HEALTH_RULES = (
                  r"moved (?P<moved>\d+) \(ADS weight at the moved draws min (?P<amin>[\d.]+) max (?P<amax>[\d.]+)\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]; "
                  r"content shift mean [\d.]+ cm; content (?P<cm>[\d.]+) m from eye 0, nearest surface on its rays (?P<ds>[\d.]+) m \((?P<surf>[^)]*)\)" % (_HN, _HN, _HN, _HN)),
     ), _hj_f92_rifle),
+    _hrule("readout swap (F93a)", ("F93a",), ("readout swap (F93a)",), (
+        ("placed", r"readout swap \(F93a\): item (?P<from>\S+) -> (?P<to>\S+), first draw frame (?P<first>\d+), first placed frame (?P<placed>\d+), gap (?P<gap>\d+)"),
+        ("never", r"readout swap \(F93a\): item (?P<from>\S+) -> (?P<to>\S+), first draw frame (?P<first>\d+), NOT PLACED in 3 s"),
+    ), _hj_f93_swap),
     _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
         ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits this second \((?P<tagged>\d+) tagged; [^)]*\); "
                 r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)"),
@@ -11114,7 +11132,7 @@ def main(argv=None):
                          "then a summary; exit 3 when the log has none of those lines")
     ap.add_argument("--health", action="store_true",
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
-                         "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, weapon UI pin F85b, reticle "
+                         "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
                          "prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
@@ -11882,6 +11900,18 @@ def self_test_health():
         check("F92 role: a refusal the slot later applied is the last word", [role_line(what=what92(placed=None, refused=("rifle placement", "no weapon frame"))),
                                                                               role_line(what=what92())], 0, [("OK", F91R)],
               has=["$wpn_m_assaultrifle_laser_fauto_name;: rifle ADS readout"], lacks=["refused: no weapon frame"])
+
+        # ---- readout swap (F93a) ----
+        def swapln(frm="primary", to="pistol", first=1000, gap=0):
+            return R("readout swap (F93a): item %s -> %s, first draw frame %u, first placed", frm, to, first, first + gap, gap, "$wpn_m_assaultrifle_laser_fauto_name;")
+
+        def swapln_never(frm="primary", to="pistol", first=1000):
+            return R("readout swap (F93a): item %s -> %s, first draw frame %u, NOT PLACED", frm, to, first, "$wpn_m_assaultrifle_laser_fauto_name;")
+        SW = "readout swap (F93a)"
+        check("F93a swap: placed from the first frame", [swapln(), swapln("pistol", "primary", 2000), swapln("none", "primary", 10)], 0, [("OK", SW)],
+              has=["3 swaps (", "primary->pistol 1", "gap max 0 frames, 3 with gap 0"])
+        check("F93a swap: a gap is PARTIAL", [swapln(), swapln(gap=92)], 0, [("PARTIAL", SW)], has=["gap max 92 frames, 1 with gap 0"])
+        check("F93a swap: never placed", [swapln(), swapln_never()], 3, [("NEVER APPLIED", SW)], has=["1 NOT PLACED in 3 s"])
 
         # ---- rifle ADS readout (F92) ----
         check("F92 rifle: moved every second, in front of the surface in ADS", [rifle(180, 1.0, 90, 90, cm=0.29, ds=0.31, surf="in front by 2.0 cm")] * 3, 0,

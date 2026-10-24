@@ -23608,10 +23608,25 @@ F90Place g_f90Pistol, g_f92Rifle;
 int g_f90SlotHip = -1;     // the hip readout's slot (its F86d rays give the surface under the moved readout)
 int g_f92SlotRifle = -1;   // F92: the rifle's ADS readout's slot, the same for its line
 nofoot::f90::Latch g_f90Latch;
-// F92: the render frame each class's own part (the rifle's ADS readout, the pistol's ADS readout, the tool's readout) was last decided: what the game is drawing.
-// [role] for f90::kRoleRifleAds, kRolePistolAds, kRoleTool; ~0u: never.
-uint32_t g_f92Drawn[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
-bool f92DrawnRecently(int role, uint32_t frame) noexcept { return g_f92Drawn[role] != ~0u && frame - g_f92Drawn[role] <= 1u; }
+// F93a: the class the game is drawing, from each class's own readout part (nofoot::f90::DrawnTracker), how long it has stood and its epoch (the placements'
+// latch key), and the swap watch for the `readout swap (F93a)` line. Render thread only.
+nofoot::f90::DrawnTracker g_f93Drawn;
+int g_f93Class = nofoot::f90::kDrawnNone;
+uint64_t g_f93ClassSinceMs = 0;
+uint32_t g_f93ClassEpoch = 1;
+nofoot::f90::SwapWatch g_f93Swap;
+uint64_t g_f93SwapOpenMs = 0;
+char g_f93SwapHeld[64] = {};   // Status.json's held item at the swap's first draw
+// The swap's line: closed by its first placed frame, or given up after 3 s without one.
+void f93SwapLog(uint32_t placedFrame, uint32_t gap, bool placed) {
+    namespace f90 = nofoot::f90;
+    if (placed)
+        Log::get().note("readout swap (F93a): item %s -> %s, first draw frame %u, first placed frame %u, gap %u; Status.json named \"%s\" at the first draw",
+                        f90::drawnName(g_f93Swap.from), f90::drawnName(g_f93Swap.to), g_f93Swap.firstDraw, placedFrame, gap, g_f93SwapHeld);
+    else
+        Log::get().note("readout swap (F93a): item %s -> %s, first draw frame %u, NOT PLACED in 3 s; Status.json named \"%s\" at the first draw",
+                        f90::drawnName(g_f93Swap.from), f90::drawnName(g_f93Swap.to), g_f93Swap.firstDraw, g_f93SwapHeld);
+}
 // One weapon UI draw's F90 decision; the map is applied to uf (the getter frame of this eye) and returned for the proof.
 nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, uint32_t slot, const F85Solve& s, nofoot::f85::UFrame& uf) {
     namespace f90 = nofoot::f90;
@@ -23638,20 +23653,42 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         for (int i = 0; i < 3; ++i) in.eye[i] = eyeRel[i] + s.ow[i];
     }
     const f90::Part* known = f90::partOf(in.meshRead, in.meshExt, in.recScale);   // F91: the part by its mesh and scale (decide looks it up the same way)
-    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds || known->role == f90::kRoleRifleAds)) {   // the placements: the held item's class
+    char heldName[64] = {};
+    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds || known->role == f90::kRoleRifleAds)) {   // Status.json's class (F93a: the veto only)
         uint32_t serial = 0;
-        char item[64] = {};
-        const bool read = opticItemRead(&serial, item);
-        const bool pistol = read && nofoot::supportItem(item) == nofoot::kSupportPistol;
-        const bool primary = read && std::strncmp(item, "$wpn_m_", 7) == 0;   // F92: a primary weapon (the rifles' `$wpn_m_` names)
+        const bool read = opticItemRead(&serial, heldName);
+        const bool pistol = read && nofoot::supportItem(heldName) == nofoot::kSupportPistol;
+        const bool primary = read && std::strncmp(heldName, "$wpn_m_", 7) == 0;   // F92: a primary weapon (the rifles' `$wpn_m_` names)
         const bool held = serial == g_heldItemSerial.load(std::memory_order_acquire);
         in.item = !read ? f90::kItemNotHeld : !pistol && !primary ? f90::kItemOther : !held ? f90::kItemNotHeld : pistol ? f90::kItemPistol : f90::kItemPrimary;
-        in.itemSerial = serial;
     }
-    // F92: what the game drew this frame or the last, by each class's own part
-    in.drawnRifleAds = f92DrawnRecently(f90::kRoleRifleAds, frame);
-    in.drawnPistolAds = f92DrawnRecently(f90::kRolePistolAds, frame);
-    in.drawnTool = f92DrawnRecently(f90::kRoleTool, frame);
+    // F93a: the class the game draws, from the class parts; this draw's own class part counts for itself. A weapon class's part appearing opens a swap.
+    const uint64_t nowMs = GetTickCount64();
+    if (known) {
+        const int partClass = f90::drawnClassOfRole(known->role);
+        if (partClass != f90::kDrawnNone) {
+            const bool wasRecent = g_f93Drawn.recent(partClass, frame);
+            const int previous = g_f93Drawn.classAt(frame);
+            g_f93Drawn.see(known->role, frame);
+            const bool wasOpen = g_f93Swap.open;
+            const uint32_t firstBefore = g_f93Swap.firstDraw;
+            g_f93Swap.onPart(partClass, wasRecent, previous, frame);
+            if (g_f93Swap.open && (!wasOpen || g_f93Swap.firstDraw != firstBefore)) {
+                g_f93SwapOpenMs = nowMs;
+                uint32_t serial = 0;
+                if (!opticItemRead(&serial, g_f93SwapHeld) || !g_f93SwapHeld[0]) std::snprintf(g_f93SwapHeld, sizeof(g_f93SwapHeld), "none");
+            }
+        }
+    }
+    const int drawn = g_f93Drawn.classAt(frame);
+    if (drawn != g_f93Class) {
+        g_f93Class = drawn;
+        g_f93ClassSinceMs = nowMs;
+        ++g_f93ClassEpoch;
+    }
+    in.drawnClass = drawn;
+    in.drawnClassAgeS = static_cast<double>(nowMs - g_f93ClassSinceMs) / 1000.0;
+    in.itemSerial = g_f93ClassEpoch;
     in.keys.forwardCm = static_cast<double>(g_f90ForwardCm.load(std::memory_order_relaxed));
     in.keys.leftCm = static_cast<double>(g_f90LeftCm.load(std::memory_order_relaxed));
     in.keys.upCm = static_cast<double>(g_f90UpCm.load(std::memory_order_relaxed));
@@ -23672,7 +23709,10 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     };
     const f90::Out o = f90::decide(in, uf, g_f90Latch, drawtag::rotateByPackedQuat, frameFn);
     f90::applyMap(uf, o.map);
-    if (o.role == f90::kRoleRifleAds || o.role == f90::kRolePistolAds || o.role == f90::kRoleTool) g_f92Drawn[o.role] = frame;
+    if (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious) {   // F93a: the swap's first placed frame
+        uint32_t gap = 0;
+        if (g_f93Swap.onPlaced(f90::placementClassOfRole(o.role), frame, &gap)) f93SwapLog(frame, gap, true);
+    }
     // F91: the slot's role, named once per held item and on every change (a miss is loud); F92: and what was applied (scaled, placed) against merely matched
     {
         f90::RoleLog& rl = g_f91RoleLog[slot];
@@ -23783,6 +23823,11 @@ void f90Report() {
         pt = F90Part{};
     }
     if (anyDecided && !anyRole) Log::get().note("weapon readout size (F91) 1 s: no table part among the decided parts (%s)", parts);
+    // F93a: a swap whose class was never placed within 3 s says so
+    if (g_f93Swap.open && GetTickCount64() - g_f93SwapOpenMs > 3000) {
+        f93SwapLog(0, 0, false);
+        g_f93Swap.open = false;
+    }
     // B: the placements' lines (the pistol's, F90; the rifle's ADS readout's, F92)
     uint32_t serial = 0;
     char item[64] = {};
@@ -23790,8 +23835,8 @@ void f90Report() {
     const bool heldNow = read && serial == g_heldItemSerial.load(std::memory_order_acquire);
     // the refusals by name, and the content against the surface on its F86d rays
     const auto whyText = [&](const F90Place& pl, char* why, size_t cap) {
-        static const char* const kWhy[f90::kBCount] = {"", "", "", "item not the held one or not read", "no weapon frame", "no eye origin", "no target this frame or the last",
-                                                       "another class's part drawn: a switch"};
+        static const char* const kWhy[f90::kBCount] = {"", "", "", "Status.json names the other weapon class", "no weapon frame", "no eye origin",
+                                                       "no target this frame or the last", "another class's part drawn: a switch"};
         size_t wl = 0;
         why[0] = '\0';
         for (int k = f90::kBRefItem; k < f90::kBCount; ++k)
