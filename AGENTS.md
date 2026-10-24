@@ -204,10 +204,9 @@ minutes after a flight finally reproduced the effect being chased.
   folders from the main checkout by hand.
 - For C++ changes on a non-native host, commit and push the candidate
   branch so Actions can validate that exact commit. The `release.yml`
-  workflow is active on `main`; dispatch it with `gh workflow run
-  release.yml --ref <branch>` (a push to `codex/release-*` already
-  triggers the full build and package path, so do not dispatch a
-  duplicate run). Find the branch run with `gh run list --workflow
+  workflow runs the full build and package path on every pull request
+  and every push to `main` or `codex/release-*`; for a branch with none
+  of those, dispatch it with `gh workflow run release.yml --ref <branch>`. Find the branch run with `gh run list --workflow
   release.yml --branch <branch>`, verify its `headSha` matches the
   candidate with `gh run view <run-id> --json headSha`, then require `gh
   run watch <run-id> --exit-status` to pass before merging or releasing.

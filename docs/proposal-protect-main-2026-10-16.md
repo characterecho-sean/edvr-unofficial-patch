@@ -4,9 +4,9 @@
 
 - **State**: proposal from the PR #92 retro, for Sean to decide. Nothing is
   enabled.
-- **Depends on**: #93. This PR restores the Windows build workflow as CI on
-  pull requests and pushes to `main`. It has to be green before it can be
-  a required check.
+- **Depends on**: #93. This PR extends the existing `release.yml` build to
+  run on pull requests and pushes to `main`. It has to be green before it
+  can be a required check.
 - **If accepted**: enable the rule below, then update the AGENTS.md Git
   section, which still says "Solo project: branch, commit, merge to main,
   push. No pull requests."
@@ -32,8 +32,8 @@ The project now has two people and several agents committing.
 GitHub branch protection, or a ruleset, on `main`:
 
 1. Changes land through a pull request. No direct pushes.
-2. The `Windows build` check (`.github/workflows/ci.yml`, job `full-build`)
-   must pass. Enable this once #93 is green.
+2. The `Native Windows build` check (`.github/workflows/release.yml`, job
+   `build`) must pass. Enable this once #93 is green.
 3. No force-pushes, and the branch can't be deleted.
 4. No required approvals to start with. Sean can merge his own PRs
    immediately; the rule enforces the gate, not a second reviewer.

@@ -1,22 +1,31 @@
-name: Native Windows release build
+# The one native Windows build: the full build.bat, every gate and rig, and
+# package.bat, for releases and as validation of pull requests and main (#93).
+# Untagged runs package the runner-only 0.0.0-ci proof version.
+name: Native Windows build
 
 on:
   push:
     branches:
+      - main
       - 'codex/release-*'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: edvr-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: edvr-build-${{ github.ref }}
+  # A newer push to a pull request supersedes its run; release and main runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
+    # A codex/release-* branch is already built by its push; its pull request
+    # would build the same commit a second time.
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'codex/release-')
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
