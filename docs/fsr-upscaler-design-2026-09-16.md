@@ -952,5 +952,13 @@ class of upscaler): that is route 2's go/no-go.
   DLSS holds it), or (g) the covering draw's pixels differ frame to
   frame beyond the jitter (a jitter or camera mismatch on that draw).
   Discriminator for platform against content: TAA and FSR 3 at the same
-  spot on Windows. Not asked yet: whether the yellow stays yellow or
-  alternates with pink.
+  spot on Windows. Sean: not every yellow pixel flickers, and the edge
+  keeps flickering inside the view. The view paints each class colour at
+  twice the resolved pixel's own luma (`refusalPaint`), so the class stays
+  yellow while the resolved brightness pulses: the history is kept every
+  frame and the resolve itself oscillates. Note with it: under F7 the
+  jitter stops and the camera does not move (`moved=0`), yet "a lot of
+  things flicker", so the game's own image changes frame to frame here.
+  Next: on Windows at the same spot, F7 (does the game's image flicker
+  there too?) and TAA or FSR 3 on the edge; on this rig, whether the
+  flicker under F7 is on the same edge.
