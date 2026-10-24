@@ -349,7 +349,7 @@ void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* resource, const void* d
 // vScreen's shutdown: the staging buffers (and F47's private constant buffers).
 void nativeOnFootMarkerProbeShutdown();
 
-// F47 (TEMPORARY, fix.native_on_foot_marker_fix = off | on, default off, live; it turns the probe's machinery on with it): the marker
+// F47 (TEMPORARY, fix.native_on_foot_marker_fix = off | on, default on since F98c, live; it turns the probe's machinery on with it): the marker
 // composite's per-eye NDC correction. The draw tee decides (both eyes' marker draws matched in the recent read-backs, this draw the one that
 // matched, the CPU shadows of its b0 and o_hud and the eye's world view present, |dx|, |dy| < 0.1 NDC and w > 0; the last good delta held one
 // frame on a miss); Begin, inside the UI layer's bracket around the game's own issue, binds a private copy of b0 with rows 4 and 5 moved by

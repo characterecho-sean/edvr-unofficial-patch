@@ -17,10 +17,10 @@
 // not the frame thread): the measured camera is then the game's own and R's target does not contain R (open at any delay). A runtime that reports no serial gets
 // the R published last (the measurement carries R's last change: the filter below keeps that loop stable at one and two frames of delay; the rig checks it).
 //
-// The weapon. With a weapon or tool drawn the weapon eye offset (F88) places the eye relative to the item, which the game places relative to its own camera: the
-// view is the game's camera plus w O. The neck reference is weighted by 1 - w, so armed it is exactly zero and F88's armed view is the same as before; drawing and
-// holstering blend the two over F88's 0.25 s ramp. While w is above 0 the raise's target is frozen (the stance changes under the draw would otherwise pull the
-// blend down mid-ramp); it follows again from w 0, through the filter, so a holster in another stance moves the view in about kSettleS and does not jump.
+// The weapon (F98c). The eye height is the one vertical setting with and without an item: the weapon eye offset's up is retired, and the raise applies whole with a
+// weapon or tool drawn. Armed, the eye stands where it would stand unarmed in the same stance (EyeLevel below): the weapon stances lean the neck 12-25 cm under the
+// upright one, so the key's height over the armed neck would put the eye that much lower than unarmed. Until F98c the raise was weighted by 1 - w (F88's weight) and
+// frozen while w was above 0, and the armed eye came from F88's up.
 #pragma once
 
 #include <atomic>
@@ -32,10 +32,10 @@ namespace edvr {
 namespace nofoot {
 namespace f94 {
 
-// The key: how far the eyes sit above the commander's animated neck with the head level, cm. The default is the commander's own: in the F93 flight (log
-// edvr_gfx_20261024_124854, the pin's calibration at 12:50:10) the animated head joint 44 stood 11.7 cm over the neck joint 34 standing level (1.660 m against
-// 1.543 m) and the calibrated eye point sits 3.9 cm up the head's frame from it (e_h 0.0033, 0.0391, 0.0381 m): 15.5-15.6 cm, the rest offset's 15.5.
-constexpr double kEyeHeightDefaultCm = 15.5;
+// The key: how far the eyes sit above the commander's neck with the head level, cm. The commander's own: in the F93 flight (log edvr_gfx_20261024_124854, the pin's
+// calibration at 12:50:10) the animated head joint 44 stood 11.7 cm over the neck joint 34 standing level (1.660 m against 1.543 m) and the calibrated eye point
+// sits 3.9 cm up the head's frame from it (e_h 0.0033, 0.0391, 0.0381 m): 15.5-15.6 cm, the rest offset's 15.5. F98c: the default is the pilot's 15.0.
+constexpr double kEyeHeightDefaultCm = 15.0, kEyeHeightOwnCm = 15.5;
 constexpr double kEyeHeightMinCm = 0.0, kEyeHeightMaxCm = 30.0;
 inline double eyeHeightClampCm(double cm) noexcept {
     return !std::isfinite(cm) ? kEyeHeightDefaultCm : cm < kEyeHeightMinCm ? kEyeHeightMinCm : cm > kEyeHeightMaxCm ? kEyeHeightMaxCm : cm;
@@ -53,6 +53,51 @@ constexpr uint64_t kTargetMaxAgeMs = 250; // a target the hook has not renewed i
 // raise the camera carried).
 inline double raiseTarget(double neckY, double eyeHeightM, double eyeLevelY) noexcept { return neckY + eyeHeightM - eyeLevelY; }
 
+// F98c: the armed eye at the unarmed eye's height of the same stance. Unarmed (no weapon or tool, F88's weight 0) each settled stance stores the animated neck and the
+// game's camera by stance class (standing, crouched: the pin's crouch weight); armed, a settled stance's target is the raise that puts the eye the key's height over
+// the stored unarmed neck of its class, measured on the armed camera, so the view stands at the unarmed view's height whatever is held and the key moves both. The
+// game's camera itself moves with the item (the F97 flight, standing, the head level: fists 1.625 m, rifle 1.559 m, pistol 1.573 m), so the unarmed raise added to
+// the armed camera would not do it. Without a stored unarmed stance of the class: crouched, the standing unarmed raise (the game's camera carries the crouch);
+// with no unarmed stance stored at all (on foot with an item from the start), the starting raise puts the upright neck kCamOverUprightNeckM under the camera.
+constexpr double kCamOverUprightNeckM = 0.08;   // the game's camera over the upright unarmed neck, standing, the head level: 8.2 cm (F97 flight), 8.7 (F95), 6.5 (F96)
+enum EyeSource : uint8_t { kEyeUnarmed = 0, kEyeUnarmedNoClass = 1, kEyeStance = 2, kEyeStandingOverCrouch = 3, kEyeStart = 4, kEyeSourceN = 5 };
+inline const char* eyeSourceName(int s) noexcept {
+    return s == kEyeUnarmed ? "unarmed" : s == kEyeUnarmedNoClass ? "unarmed, the stance not known" : s == kEyeStance ? "the unarmed eye of the stance"
+         : s == kEyeStandingOverCrouch ? "the standing unarmed raise over the crouch" : "the starting raise";
+}
+enum EyeClass : int { kClassUnknown = -1, kClassStanding = 0, kClassCrouched = 1 };
+struct EyeLevel {
+    bool have[2] = {false, false};
+    double neckY[2] = {0.0, 0.0}, camY[2] = {0.0, 0.0};   // the settled unarmed stance's animated neck and the game's camera (the model, the head level)
+    void reset() noexcept { *this = EyeLevel{}; }
+    // One settled stance's target. armed: a weapon or tool (F88's weight above 0); cls: the stance class (kClassUnknown when the pin has no crouch reference).
+    double target(bool armed, int cls, double neckYNow, double camYNow, double eyeHeightM, uint8_t* source) noexcept {
+        uint8_t src = kEyeUnarmed;
+        double t = 0.0;
+        if (!armed) {
+            if (cls == kClassStanding || cls == kClassCrouched) {
+                have[cls] = true;
+                neckY[cls] = neckYNow;
+                camY[cls] = camYNow;
+            } else {
+                src = kEyeUnarmedNoClass;
+            }
+            t = raiseTarget(neckYNow, eyeHeightM, camYNow);
+        } else if ((cls == kClassStanding || cls == kClassCrouched) && have[cls]) {
+            src = kEyeStance;
+            t = raiseTarget(neckY[cls], eyeHeightM, camYNow);
+        } else if (cls == kClassCrouched && have[kClassStanding]) {
+            src = kEyeStandingOverCrouch;
+            t = raiseTarget(neckY[kClassStanding], eyeHeightM, camY[kClassStanding]);
+        } else {
+            src = kEyeStart;
+            t = eyeHeightM - kCamOverUprightNeckM;
+        }
+        if (source) *source = src;
+        return t;
+    }
+};
+
 // F94a's body: the pin's neck target keeps the animated neck's height (no lowering, no raise in any stance). Returns the vertical move the target asked for.
 inline double bodyKeepsNeckHeight(double target[3], const double n0[3]) noexcept {
     const double asked = target[1] - n0[1];
@@ -64,16 +109,14 @@ struct In {
     bool scope = false;        // the pin's scope (native stereo on foot, the full third-person body pinned)
     bool targetFresh = false;  // the hook renewed the target within kTargetMaxAgeMs
     double targetM = 0.0;      // raiseTarget of the newest pinned call
-    double weaponW = 0.0;      // F88's weight (1 with a weapon or tool drawn)
     double dt = 0.0;
     double settleS = kSettleS; // the filter's 95% time (F95a passes the standing-height hold's, at least nofoot::f95::kSettleMinS)
 };
 struct Out {
     double raiseM = 0.0;     // the neck reference's raise (ramped, quantised): the view over the game's camera unarmed
-    double appliedM = 0.0;   // (1 - w) raise, quantised: what goes into the view
+    double appliedM = 0.0;   // what goes into the view (F98c: the raise itself, with and without an item)
     double seatedY = 0.0;    // the eye alignment's y term: -appliedM (an exact positive zero when nothing is applied)
     double ramp = 0.0;
-    bool frozen = false;     // the target is held: a weapon or tool is drawn (w above 0)
     bool clamped = false;    // the target was past kMaxM
     bool following = false;  // a fresh target was taken this tick
 };
@@ -88,9 +131,7 @@ struct NeckRaise {
         if (!in.scope && ramp <= 0.0) {
             x = v = target = 0.0;
         }
-        const double w = !(in.weaponW > 0.0) ? 0.0 : in.weaponW > 1.0 ? 1.0 : in.weaponW;
-        o.frozen = w > 0.0;
-        if (in.scope && in.targetFresh && !o.frozen && std::isfinite(in.targetM)) {
+        if (in.scope && in.targetFresh && std::isfinite(in.targetM)) {
             double t = in.targetM;
             if (t > kMaxM || t < -kMaxM) {
                 t = t > 0.0 ? kMaxM : -kMaxM;
@@ -110,8 +151,7 @@ struct NeckRaise {
         raise = raise > kMaxM ? kMaxM : raise < -kMaxM ? -kMaxM : raise;
         raise = std::round(raise / kStepM) * kStepM;
         o.raiseM = raise == 0.0 ? 0.0 : raise;
-        double applied = std::round((1.0 - w) * o.raiseM / kStepM) * kStepM;
-        o.appliedM = applied == 0.0 ? 0.0 : applied;
+        o.appliedM = o.raiseM;
         o.seatedY = o.appliedM == 0.0 ? 0.0 : -o.appliedM;
         return o;
     }

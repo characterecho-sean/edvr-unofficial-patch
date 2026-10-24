@@ -9,8 +9,9 @@
 // stances, lowered for the rest).
 //
 // F97a, armed (F88's weight w above 0), the neck target's height is F93's again where F93 raised the body (the leaning stances stand upright under the eye), and
-// it is lowered only as far as keeps the eye as drawn at the hip (the pin's eye plus the weapon eye offset's up) the eye height key above the neck: an upright
-// stance whose eye is already that high (a tool) keeps its legs, a crouch whose eye sits at the neck goes down with the eye. The ADS detach (F73) releases the
+// it is lowered only as far as keeps the eye as drawn at the hip (the pin's eye plus, since F98c, the neck reference's raise the pose carried; F97a had the weapon
+// eye offset's up) the eye height key above the neck: an upright stance whose eye is already that high (a tool) keeps its legs, and when the model moves under
+// the camera the body goes down with the eye. The ADS detach (F73) releases the
 // lowering with it. Unarmed (w 0) the target is the animated neck's height, F94a's, exactly; between the two it is blended by w, the same weight and ramp as the
 // eye's, so a draw or a holster moves the body and the view together. A raise is capped where a leg would have to lift its foot (the hip at most the leg's reach
 // over the foot, the planting rule's own reach), so the feet stay on the ground.

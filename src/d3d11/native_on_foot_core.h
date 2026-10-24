@@ -242,7 +242,7 @@ constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 0;   /
 // F16: the per-group HUD offsets (a fraction of the HUD canvas, live), and the default spread (the margins' extra, F14).
 // F19: the spread's default is Sean's 0.04.
 constexpr float kHudOffsetMin = -0.30f, kHudOffsetMax = 0.30f;
-constexpr float kHudSpreadDefault = 0.04f;
+constexpr float kHudSpreadDefault = 0.05f;   // F98c: the pilot's (0.04 before)
 // F16: the HUD group of a layout part, by the name the layout passes (rec+0). 0 left, 1 top, 2 right, 3 centre; -1 is a name not in the table: no
 // offset for it, and the layout logs it once. The names are the ones the F14 layout probe logged.
 constexpr int kHudGroupCount = 4;
@@ -2907,7 +2907,7 @@ struct AdsSightGrowth {
 // the rear sight), never closer than kAdsEyeClearanceM to any FP weapon point readable on the line.
 // The lock's target is absolute: on an active ADS tick with a valid rendered-eye measurement, target = applied + measured error. One critically damped filter
 // (tau kAdsEyeTauSec) follows that target; a missing measurement holds the last target. The actual ADS state gates the target, independently of the head-aim ramp.
-constexpr double kAdsEyeDistDefaultCm = 15.0, kAdsEyeDistMaxCm = 30.0;
+constexpr double kAdsEyeDistDefaultCm = 21.0, kAdsEyeDistMaxCm = 30.0;   // F98c: the pilot's (15 before)
 constexpr double kAdsEyeClearanceM = 0.06;      // the eye stays this far behind any readable FP weapon point on the sight line
 constexpr double kAdsEyeOnLineM = 0.06;         // "on the line": a point within this of the sight line, ahead of P14
 constexpr double kAdsEyeTauSec = 0.05;          // 95% in about 0.25 s (tau 0.07 would take 0.33 s)

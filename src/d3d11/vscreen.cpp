@@ -4388,7 +4388,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // A Verdict-class draw also carries the fix that wraps it (alteredFixOf): the census names each.
     const AlteredDrawClass alteredClass = classifyAlteredDraw(owner, v == DrawVerdict::kNone,
                                                               engineVelocityDrawSubstituted(), layered);
-    // F47 (TEMPORARY, fix.native_on_foot_marker_fix, default off): the marker composite's private b0 (rows 4 and 5 moved by the eye's NDC
+    // F47 (TEMPORARY, fix.native_on_foot_marker_fix, default on since F98c): the marker composite's private b0 (rows 4 and 5 moved by the eye's NDC
     // delta), bound inside the layer's bracket for the game's own issue and the layer's second issues alone; End below, after them, puts the
     // game's b0 back. Begin binds nothing unless the draw tee decided this very draw. Two loads while off.
     const bool markerFixed = layered && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
