@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "native_on_foot_core.h"   // f85::UFrame, f86::scaleUFrameAbout, barrelRow, ikUnit, f88::clampCm
@@ -202,13 +203,19 @@ inline WeaponFrame weaponFrame(bool attachFresh, const float attach[16], bool ro
 
 // ---- B: the keys and the target ---------------------------------------------------------------------------------------------------------------------------------
 // fix.native_on_foot_pistol_readout_forward_cm, _left_cm, _up_cm, _toward_eye_cm (TEMPORARY, live): clamped to these ranges (f88::clampCm: anything not finite
-// reads 0). The built-in values are the review's, from one dump (+-2 cm): forward 13 (mid-slide), left 6 (about 4 cm clear of the slide), up -3 (down to about
-// the barrel's height), toward eye 2 (nearer than the barrel beside it). Keys{} stays all zero: a struct with no keys set; the config reader falls back to these.
+// reads 0). F92: the built-in values are the pilot's from the F91 flight ("Pistol ui looks good with these offsets"): forward 13, left 3.5, up -3, toward eye 3
+// (F90 started from the review's 13, 6, -3, 2). Keys{} stays all zero: a struct with no keys set; the config reader falls back to these.
 constexpr double kForwardMinCm = -10.0, kForwardMaxCm = 30.0;
 constexpr double kLeftMinCm = -15.0, kLeftMaxCm = 15.0;
 constexpr double kUpMinCm = -10.0, kUpMaxCm = 10.0;
 constexpr double kTowardMinCm = -5.0, kTowardMaxCm = 10.0;
-constexpr double kForwardDefaultCm = 13.0, kLeftDefaultCm = 6.0, kUpDefaultCm = -3.0, kTowardDefaultCm = 2.0;
+constexpr double kForwardDefaultCm = 13.0, kLeftDefaultCm = 3.5, kUpDefaultCm = -3.0, kTowardDefaultCm = 3.0;
+// F92: the rifle's ADS readout, the same placement in the primary weapon's frame: fix.native_on_foot_rifle_ads_readout_forward_cm, _left_cm, _up_cm,
+// _toward_eye_cm (TEMPORARY, live), the pistol's ranges. All four 0 leave F91's rows bit for bit. The built-in values put the readout just clear of the receiver's
+// left side (F91 flight, dump 092535205001, the right eye in ADS: the content sat on the receiver's top centre behind the scope, 0.3 cm left of the centre, with
+// its lower line under the recess rim; the receiver was about 5.5 cm wide there and the content 2.3 x 1.7 cm): 5 cm left puts its right edge about 1 cm past the
+// receiver's left edge, beside the gun and away from the sight line above it.
+constexpr double kRifleForwardDefaultCm = 0.0, kRifleLeftDefaultCm = 5.0, kRifleUpDefaultCm = 0.0, kRifleTowardDefaultCm = 0.0;
 struct Keys {
     double forwardCm = 0.0, leftCm = 0.0, upCm = 0.0, towardCm = 0.0;
     bool any() const noexcept { return forwardCm != 0.0 || leftCm != 0.0 || upCm != 0.0 || towardCm != 0.0; }
@@ -238,21 +245,31 @@ inline bool target(const double C[3], const WeaponFrame& w, const Keys& k, const
 }
 
 // ---- the decision ----------------------------------------------------------------------------------------------------------------------------------------------
-// The held item, for B: not a pistol (or nothing held: B does nothing), the held pistol, or a pistol name the decision cannot trust (its serial is not the held
-// item's, or the item could not be read): B refuses and counts it.
-enum Item : int { kItemOther = 0, kItemPistol = 1, kItemNotHeld = 2 };
+// The held item, for the placements: none of their classes (or nothing held: no placement), the held pistol, the held primary weapon (F92: `$wpn_m_`), or a
+// name the decision cannot trust (its serial is not the held item's, or the item could not be read): refused and counted.
+enum Item : int { kItemOther = 0, kItemPistol = 1, kItemNotHeld = 2, kItemPrimary = 3 };
 // A: no table part (F91: the record matches no row: not scaled, not moved, counted), the hip readout, a scaled ADS readout, the tool's readout (left as it is).
 enum AState : int { kANotTable = 0, kAHip = 1, kAScaled = 2, kATool = 3 };
-enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefFrame, kBRefEye, kBRefNoTarget, kBCount };
-// B's target, latched once a render frame by the first hip readout decision (either eye), for one held item.
-struct Latch {
+// F92: kBRefClass: the held item is the placement's class, but a part of another class (the other weapon's ADS readout, a tool's readout) was drawn this frame or
+// the last. Status.json names a switch up to 0.9 s after the game starts drawing the next item (F91 flight), and the hip readout is one part for the rifle and the
+// pistol, so without this the pistol placement moved the rifle's hip readout through a pistol-to-rifle switch.
+enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefFrame, kBRefEye, kBRefNoTarget, kBRefClass, kBCount };
+// A placement's target, latched once a render frame by its first decision (either eye), for one held item.
+struct LatchT {
     bool have = false;
     uint32_t frame = 0, serial = 0;
     double T[3] = {}, C[3] = {};   // absolute world
 };
+// The pistol's latch (its own fields, as F90 had them) and the rifle's (F92).
+struct Latch : LatchT {
+    LatchT rifle;
+};
 struct In {
     uint32_t frame = 0, name = 0, itemSerial = 0;   // name: the part's name id this session, for the lines only (F91: never an identity)
     int item = kItemOther;
+    // F92: which classes' parts the game drew this render frame or the last (the role of each decision, kept by the caller): the evidence of what is drawn,
+    // which leads Status.json through a switch
+    bool drawnRifleAds = false, drawnPistolAds = false, drawnTool = false;
     bool meshRead = false;
     double meshExt[2] = {};   // the icon mesh's x and z extents (mesh units)
     double recScale = 0.0;
@@ -261,7 +278,8 @@ struct In {
     double ow[3] = {};        // the eye's rows' origin (absolute)
     bool eyeOk = false;
     double eye[3] = {};       // the eye's origin from its scene rows (absolute)
-    Keys keys;
+    Keys keys;                // the pistol readout's
+    Keys rifleKeys;           // F92: the rifle's ADS readout's
     double adsW = 0.0;        // the ADS weight at the draw, for the line only: the decision never reads it
 };
 struct Out {
@@ -289,8 +307,11 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         o.a = kATool;
         return o;
     }
-    const bool bPart = p->role == kRoleHip || p->role == kRolePistolAds;
-    const int item = bPart ? in.item : kItemOther;
+    // the placements: the pistol's for the hip readout and the pistol's ADS readout, the rifle's (F92) for the rifle's ADS readout, each only with its class held
+    const bool pistolPart = p->role == kRoleHip || p->role == kRolePistolAds;
+    const bool riflePart = p->role == kRoleRifleAds;
+    const int want = pistolPart ? kItemPistol : kItemPrimary;
+    const int item = pistolPart || riflePart ? in.item : kItemOther;
     double c[3], Crel[3];
     contentPoint(in.x0rel, in.q2, in.q3, in.recScale, p->centre, rotate, c);
     f85::mulVec3(uf.U3, c, Crel);
@@ -308,39 +329,48 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
     } else {
         o.a = kAHip;
     }
+    // A part's target in the weapon's frame, latched once a render frame: the first decision of the frame (either eye) reads the weapon frame and latches T, the
+    // other eye reuses it. All keys 0: no move at all, so the rows are F85b's (the rifle's ADS readout: F91's) bit for bit in both eyes.
+    const auto place = [&](LatchT& L, const Keys& keys) {
+        if (L.have && L.serial == in.itemSerial && L.frame == in.frame) {
+            std::memcpy(o.T, L.T, sizeof(o.T));
+            o.haveT = true;
+        } else {
+            o.wf = frameFn();
+            o.frameComputed = true;
+            if (target(o.C, o.wf, keys, in.eyeOk ? in.eye : nullptr, o.T)) {
+                L.have = true;
+                L.frame = in.frame;
+                L.serial = in.itemSerial;
+                std::memcpy(L.T, o.T, sizeof(L.T));
+                std::memcpy(L.C, o.C, sizeof(L.C));
+                o.latched = true;
+                o.haveT = true;
+                const double d[3] = {o.T[0] - o.C[0], o.T[1] - o.C[1], o.T[2] - o.C[2]};
+                o.shiftM = ikLen(d);
+            } else {
+                const bool needFrame = keys.forwardCm != 0.0 || keys.leftCm != 0.0 || keys.upCm != 0.0;
+                o.b = needFrame && o.wf.src == kFrameNone ? kBRefFrame : kBRefEye;
+            }
+        }
+        if (o.haveT) {
+            o.b = kBMoved;
+            if (keys.any()) {
+                o.map.move = true;
+                for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
+            }
+        }
+    };
     if (item == kItemNotHeld) {
         o.b = kBRefItem;
-    } else if (item == kItemPistol) {
+    } else if (item == want && (pistolPart ? in.drawnRifleAds || in.drawnTool : in.drawnPistolAds || in.drawnTool)) {
+        o.b = kBRefClass;   // the held class is right, but the game is drawing another class's part: a switch Status.json has not named yet
+    } else if (item == want && riflePart) {
+        place(latch.rifle, in.rifleKeys);
+    } else if (item == want) {
         const bool sameItem = latch.have && latch.serial == in.itemSerial;
         if (p->role == kRoleHip) {
-            if (sameItem && latch.frame == in.frame) {
-                std::memcpy(o.T, latch.T, sizeof(o.T));
-                o.haveT = true;
-            } else {
-                o.wf = frameFn();
-                o.frameComputed = true;
-                if (target(o.C, o.wf, in.keys, in.eyeOk ? in.eye : nullptr, o.T)) {
-                    latch.have = true;
-                    latch.frame = in.frame;
-                    latch.serial = in.itemSerial;
-                    std::memcpy(latch.T, o.T, sizeof(latch.T));
-                    std::memcpy(latch.C, o.C, sizeof(latch.C));
-                    o.latched = true;
-                    o.haveT = true;
-                    const double d[3] = {o.T[0] - o.C[0], o.T[1] - o.C[1], o.T[2] - o.C[2]};
-                    o.shiftM = ikLen(d);
-                } else {
-                    const bool needFrame = in.keys.forwardCm != 0.0 || in.keys.leftCm != 0.0 || in.keys.upCm != 0.0;
-                    o.b = needFrame && o.wf.src == kFrameNone ? kBRefFrame : kBRefEye;
-                }
-            }
-            if (o.haveT) {
-                o.b = kBMoved;
-                if (in.keys.any()) {   // all keys 0: no move at all, so the rows are F85b's bit for bit in both eyes
-                    o.map.move = true;
-                    for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
-                }
-            }
+            place(latch, in.keys);
         } else {   // the pistol's ADS readout: this frame's T, else the previous frame's (counted), else none
             if (sameItem && (latch.frame == in.frame || latch.frame + 1u == in.frame)) {
                 std::memcpy(o.T, latch.T, sizeof(o.T));
@@ -360,24 +390,24 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
 }
 
 // ---- F91: the role line, once per (held item, slot) ---------------------------------------------------------------------------------------------------------------
-// A slot's role is named at its first decision after an item change and whenever it changes; a role that keeps changing for one item is named at most
-// kRoleLinesPerItem times (the rest are counted), so a part whose mesh is read on some frames only cannot flood the log.
+// A slot's role is named at its first decision after an item change and whenever it changes (F92: the role or what the decision applied); a state that keeps
+// changing for one item is named at most kRoleLinesPerItem times (the rest are counted), so a part whose mesh is read on some frames only cannot flood the log.
 constexpr uint32_t kRoleLinesPerItem = 8;
 struct RoleLog {
     bool have = false;
     uint32_t serial = 0, lines = 0, suppressed = 0;
-    int role = kRoleNone;
-    // True when this decision's (serial, role) is to be logged; the state moves on either way.
-    bool step(uint32_t heldSerial, int role_) noexcept {
+    int state = kRoleNone;
+    // True when this decision's (serial, state) is to be logged; the state moves on either way.
+    bool step(uint32_t heldSerial, int state_) noexcept {
         const bool newItem = !have || heldSerial != serial;
-        if (!newItem && role_ == role) return false;
+        if (!newItem && state_ == state) return false;
         if (newItem) {
             lines = 0;
             suppressed = 0;
         }
         have = true;
         serial = heldSerial;
-        role = role_;
+        state = state_;
         if (lines >= kRoleLinesPerItem) {
             ++suppressed;
             return false;
@@ -386,6 +416,43 @@ struct RoleLog {
         return true;
     }
 };
+// F92: the role line's state: the role, whether it was scaled and what its placement did (a move from the previous frame's T counts as a move).
+inline int appliedState(const Out& o) noexcept { return o.role * 32 + (o.a == kAScaled ? 16 : 0) + (o.b == kBMovedPrevious ? int(kBMoved) : o.b); }
+inline const char* refusalName(int b) noexcept {
+    switch (b) {
+        case kBRefItem: return "the held item is not the one read";
+        case kBRefFrame: return "no weapon frame";
+        case kBRefEye: return "no eye origin";
+        case kBRefNoTarget: return "no target this frame or the last";
+        case kBRefClass: return "another class's part is drawn: a switch";
+        default: return "";
+    }
+}
+// F92: the role line's text after "->": what was applied to the part and what was only matched. "applied: scaled, rifle placement", "matched only (no placement
+// for the held item)", "applied: scaled; pistol placement refused (another class's part is drawn: a switch)"; the tool and no table part as in F91.
+inline void roleText(const Out& o, char* buf, size_t cap) noexcept {
+    if (!buf || !cap) return;
+    if (o.role == kRoleNone) {
+        std::snprintf(buf, cap, "NO TABLE PART: not scaled, not moved");
+        return;
+    }
+    if (o.role == kRoleTool) {
+        std::snprintf(buf, cap, "tool readout (not scaled)");
+        return;
+    }
+    const bool scaled = o.a == kAScaled, placed = o.b == kBMoved || o.b == kBMovedPrevious, refused = o.b >= kBRefItem && o.b < kBCount;
+    const char* kind = o.role == kRoleRifleAds ? "rifle placement" : "pistol placement";
+    const double k = o.role == kRoleHip ? 1.0 : sizeFactor(o.role);
+    char head[96];
+    if (scaled || placed)
+        std::snprintf(head, sizeof(head), "applied: %s%s%s", scaled ? "scaled" : "", scaled && placed ? ", " : "", placed ? kind : "");
+    else
+        std::snprintf(head, sizeof(head), "matched only%s", refused ? "" : " (no placement for the held item)");
+    if (refused)
+        std::snprintf(buf, cap, "%s (x%.4f): %s; %s refused (%s)", roleName(o.role), k, head, kind, refusalName(o.b));
+    else
+        std::snprintf(buf, cap, "%s (x%.4f): %s", roleName(o.role), k, head);
+}
 
 }  // namespace f90
 }  // namespace nofoot

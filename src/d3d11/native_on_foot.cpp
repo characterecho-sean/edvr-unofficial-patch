@@ -128,6 +128,11 @@ std::atomic<bool> g_f89CloseLeftKey{true};
 std::atomic<float> g_f90ForwardCm{static_cast<float>(nofoot::f90::kForwardDefaultCm)}, g_f90LeftCm{static_cast<float>(nofoot::f90::kLeftDefaultCm)},
     g_f90UpCm{static_cast<float>(nofoot::f90::kUpDefaultCm)}, g_f90TowardCm{static_cast<float>(nofoot::f90::kTowardDefaultCm)};
 double g_f90KeyLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
+// F92 (TEMPORARY, live): the rifle's ADS readout in the primary weapon's frame, fix.native_on_foot_rifle_ads_readout_forward_cm / _left_cm / _up_cm /
+// _toward_eye_cm (read by the render thread's decision at each rifle ADS readout draw).
+std::atomic<float> g_f92ForwardCm{static_cast<float>(nofoot::f90::kRifleForwardDefaultCm)}, g_f92LeftCm{static_cast<float>(nofoot::f90::kRifleLeftDefaultCm)},
+    g_f92UpCm{static_cast<float>(nofoot::f90::kRifleUpDefaultCm)}, g_f92TowardCm{static_cast<float>(nofoot::f90::kRifleTowardDefaultCm)};
+double g_f92KeyLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
@@ -836,6 +841,38 @@ void readKey() {
         g_f90LeftCm.store(static_cast<float>(v[1]), std::memory_order_relaxed);
         g_f90UpCm.store(static_cast<float>(v[2]), std::memory_order_relaxed);
         g_f90TowardCm.store(static_cast<float>(v[3]), std::memory_order_relaxed);
+    }
+    // F92 (TEMPORARY, live, the Native on foot page's "Rifle ADS readout forward / left / up / toward you"): where the rifle's ADS readout sits, from the game's
+    // place (on the receiver behind the sight), in the primary weapon's frame, the pistol readout's four moves. 0, 0, 0, 0 leave it where F91 put it.
+    {
+        namespace f90 = nofoot::f90;
+        const double v[4] = {
+            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_forward_cm", static_cast<float>(f90::kRifleForwardDefaultCm))),
+                                 f90::kForwardMinCm, f90::kForwardMaxCm),
+            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_left_cm", static_cast<float>(f90::kRifleLeftDefaultCm))),
+                                 f90::kLeftMinCm, f90::kLeftMaxCm),
+            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_up_cm", static_cast<float>(f90::kRifleUpDefaultCm))), f90::kUpMinCm,
+                                 f90::kUpMaxCm),
+            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", static_cast<float>(f90::kRifleTowardDefaultCm))),
+                                 f90::kTowardMinCm, f90::kTowardMaxCm)};
+        if (first || v[0] != g_f92KeyLast[0])
+            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_forward_cm = %+.1f cm -- positive moves the rifle's ADS "
+                            "readout toward the muzzle along the barrel (range %.0f..%.0f)", v[0], f90::kForwardMinCm, f90::kForwardMaxCm);
+        if (first || v[1] != g_f92KeyLast[1])
+            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_left_cm = %+.1f cm -- positive moves the rifle's ADS "
+                            "readout to the left of the barrel, across it (range %.0f..%.0f)", v[1], f90::kLeftMinCm, f90::kLeftMaxCm);
+        if (first || v[2] != g_f92KeyLast[2])
+            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_up_cm = %+.1f cm -- positive raises the rifle's ADS "
+                            "readout along the rifle's up (range %.0f..%.0f)", v[2], f90::kUpMinCm, f90::kUpMaxCm);
+        if (first || v[3] != g_f92KeyLast[3])
+            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_toward_eye_cm = %+.1f cm -- positive brings the "
+                            "rifle's ADS readout toward your eye along the line of sight, so only its depth changes (range %.0f..%.0f)", v[3], f90::kTowardMinCm,
+                            f90::kTowardMaxCm);
+        std::memcpy(g_f92KeyLast, v, sizeof(v));
+        g_f92ForwardCm.store(static_cast<float>(v[0]), std::memory_order_relaxed);
+        g_f92LeftCm.store(static_cast<float>(v[1]), std::memory_order_relaxed);
+        g_f92UpCm.store(static_cast<float>(v[2]), std::memory_order_relaxed);
+        g_f92TowardCm.store(static_cast<float>(v[3]), std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
     {
@@ -23420,17 +23457,24 @@ struct F90Part {   // per part slot, this second
 };
 F90Part g_f90Part[kF85bParts];
 nofoot::f90::RoleLog g_f91RoleLog[kF85bParts];   // F91: the role line's state, per slot
-struct F90Pistol {   // this second
+struct F90Place {   // a placement's second: the pistol's (F90) and the rifle's ADS readout's (F92)
     uint64_t frames[3] = {};   // the weapon frame computed for a latch: none, attach 51, F_root only (nofoot::f90::FrameSrc)
     uint64_t latched = 0, movedHip = 0, movedAds = 0, movedPrev = 0, refused = 0, why[nofoot::f90::kBCount] = {};
     double barrelSum = 0.0, barrelMax = 0.0, shiftSum = 0.0;
     uint64_t barrelN = 0;
     bool haveContent = false;
-    double contentM = 0.0;   // the hip readout's content after the move, from eye 0 (the last eye 0 decision of the second)
+    double contentM = 0.0;   // the placed part's content after the move, from eye 0 (the last eye 0 decision of the second)
+    bool haveAds = false;
+    double adsMin = 0.0, adsMax = 0.0;   // the ADS weight at the moved draws
 };
-F90Pistol g_f90Pistol;
-int g_f90SlotHip = -1;   // the hip readout's slot (its F86d rays give the surface under the moved readout)
+F90Place g_f90Pistol, g_f92Rifle;
+int g_f90SlotHip = -1;     // the hip readout's slot (its F86d rays give the surface under the moved readout)
+int g_f92SlotRifle = -1;   // F92: the rifle's ADS readout's slot, the same for its line
 nofoot::f90::Latch g_f90Latch;
+// F92: the render frame each class's own part (the rifle's ADS readout, the pistol's ADS readout, the tool's readout) was last decided: what the game is drawing.
+// [role] for f90::kRoleRifleAds, kRolePistolAds, kRoleTool; ~0u: never.
+uint32_t g_f92Drawn[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
+bool f92DrawnRecently(int role, uint32_t frame) noexcept { return g_f92Drawn[role] != ~0u && frame - g_f92Drawn[role] <= 1u; }
 // One weapon UI draw's F90 decision; the map is applied to uf (the getter frame of this eye) and returned for the proof.
 nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, uint32_t slot, const F85Solve& s, nofoot::f85::UFrame& uf) {
     namespace f90 = nofoot::f90;
@@ -23457,18 +23501,28 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         for (int i = 0; i < 3; ++i) in.eye[i] = eyeRel[i] + s.ow[i];
     }
     const f90::Part* known = f90::partOf(in.meshRead, in.meshExt, in.recScale);   // F91: the part by its mesh and scale (decide looks it up the same way)
-    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds)) {   // B: the held item, pistols only
+    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds || known->role == f90::kRoleRifleAds)) {   // the placements: the held item's class
         uint32_t serial = 0;
         char item[64] = {};
         const bool read = opticItemRead(&serial, item);
         const bool pistol = read && nofoot::supportItem(item) == nofoot::kSupportPistol;
-        in.item = !read ? f90::kItemNotHeld : !pistol ? f90::kItemOther : serial == g_heldItemSerial.load(std::memory_order_acquire) ? f90::kItemPistol : f90::kItemNotHeld;
+        const bool primary = read && std::strncmp(item, "$wpn_m_", 7) == 0;   // F92: a primary weapon (the rifles' `$wpn_m_` names)
+        const bool held = serial == g_heldItemSerial.load(std::memory_order_acquire);
+        in.item = !read ? f90::kItemNotHeld : !pistol && !primary ? f90::kItemOther : !held ? f90::kItemNotHeld : pistol ? f90::kItemPistol : f90::kItemPrimary;
         in.itemSerial = serial;
     }
+    // F92: what the game drew this frame or the last, by each class's own part
+    in.drawnRifleAds = f92DrawnRecently(f90::kRoleRifleAds, frame);
+    in.drawnPistolAds = f92DrawnRecently(f90::kRolePistolAds, frame);
+    in.drawnTool = f92DrawnRecently(f90::kRoleTool, frame);
     in.keys.forwardCm = static_cast<double>(g_f90ForwardCm.load(std::memory_order_relaxed));
     in.keys.leftCm = static_cast<double>(g_f90LeftCm.load(std::memory_order_relaxed));
     in.keys.upCm = static_cast<double>(g_f90UpCm.load(std::memory_order_relaxed));
     in.keys.towardCm = static_cast<double>(g_f90TowardCm.load(std::memory_order_relaxed));
+    in.rifleKeys.forwardCm = static_cast<double>(g_f92ForwardCm.load(std::memory_order_relaxed));
+    in.rifleKeys.leftCm = static_cast<double>(g_f92LeftCm.load(std::memory_order_relaxed));
+    in.rifleKeys.upCm = static_cast<double>(g_f92UpCm.load(std::memory_order_relaxed));
+    in.rifleKeys.towardCm = static_cast<double>(g_f92TowardCm.load(std::memory_order_relaxed));
     in.adsW = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
     const auto frameFn = []() {   // the FP right attach (joint 51) through F_root, both within kIkFreshMs
         float m[nofoot::kIkFpSlots][16];
@@ -23481,21 +23535,20 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     };
     const f90::Out o = f90::decide(in, uf, g_f90Latch, drawtag::rotateByPackedQuat, frameFn);
     f90::applyMap(uf, o.map);
-    // F91: the slot's role, named once per held item and on every change (a miss is loud)
+    if (o.role == f90::kRoleRifleAds || o.role == f90::kRolePistolAds || o.role == f90::kRoleTool) g_f92Drawn[o.role] = frame;
+    // F91: the slot's role, named once per held item and on every change (a miss is loud); F92: and what was applied (scaled, placed) against merely matched
     {
         f90::RoleLog& rl = g_f91RoleLog[slot];
         const uint32_t held = g_heldItemSerial.load(std::memory_order_acquire);
         const uint64_t suppressedBefore = rl.suppressed;
-        if (rl.step(held, o.role)) {
+        if (rl.step(held, f90::appliedState(o))) {
             uint32_t serial = 0;
             char item[64] = {};
             if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
             const F91SlotLayout& lay = g_f91SlotLayout[slot];
             const bool layOk = lay.state.load(std::memory_order_acquire) == 2u;
-            char what[64];
-            if (o.role == f90::kRoleHip || f90::scaledRole(o.role)) std::snprintf(what, sizeof(what), "%s (x%.4f)", f90::roleName(o.role), f90::sizeFactor(o.role));
-            else if (o.role == f90::kRoleTool) std::snprintf(what, sizeof(what), "tool readout (not scaled)");
-            else std::snprintf(what, sizeof(what), "NO TABLE PART: not scaled, not moved");
+            char what[200];
+            f90::roleText(o, what, sizeof(what));
             Log::get().note("weapon readout part (F91): item %s serial %u, slot %u name %u: mesh %.2f x %.2f, record scale %.6f, layout %.6f x %.6f base %.6f -> %s", item, held, slot,
                             in.name, in.meshExt[0], in.meshExt[1], in.recScale, layOk ? static_cast<double>(lay.width) : 0.0, layOk ? static_cast<double>(lay.height) : 0.0,
                             layOk ? static_cast<double>(lay.base) : 0.0, what);
@@ -23527,8 +23580,9 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         pt.contentM = nofoot::f85::len3(d);
         pt.haveContent = true;
     }
-    // B's figures
-    F90Pistol& ps = g_f90Pistol;
+    // the placements' figures: the rifle's ADS readout's (F92) apart from the pistol's
+    const bool rifle = o.role == f90::kRoleRifleAds;
+    F90Place& ps = rifle ? g_f92Rifle : g_f90Pistol;
     if (o.frameComputed) {
         ++ps.frames[o.wf.src >= 0 && o.wf.src < 3 ? o.wf.src : 0];
         if (o.wf.src != f90::kFrameNone) {
@@ -23550,13 +23604,18 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         ++ps.refused;
         ++ps.why[o.b];
     }
-    if (o.role == f90::kRoleHip && o.b == f90::kBMoved) {
-        g_f90SlotHip = static_cast<int>(slot);
+    if ((o.role == f90::kRoleHip || rifle) && o.b == f90::kBMoved) {
+        (rifle ? g_f92SlotRifle : g_f90SlotHip) = static_cast<int>(slot);
         if (e == 0 && in.eyeOk) {
             const double d[3] = {o.shown[0] - in.eye[0], o.shown[1] - in.eye[1], o.shown[2] - in.eye[2]};
             ps.contentM = nofoot::f85::len3(d);
             ps.haveContent = true;
         }
+    }
+    if (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious) {
+        ps.adsMin = ps.haveAds ? std::min(ps.adsMin, in.adsW) : in.adsW;
+        ps.adsMax = ps.haveAds ? std::max(ps.adsMax, in.adsW) : in.adsW;
+        ps.haveAds = true;
     }
     return o;
 }
@@ -23587,32 +23646,42 @@ void f90Report() {
         pt = F90Part{};
     }
     if (anyDecided && !anyRole) Log::get().note("weapon readout size (F91) 1 s: no table part among the decided parts (%s)", parts);
-    // B
-    F90Pistol& ps = g_f90Pistol;
+    // B: the placements' lines (the pistol's, F90; the rifle's ADS readout's, F92)
     uint32_t serial = 0;
     char item[64] = {};
     const bool read = opticItemRead(&serial, item);
-    const bool pistolHeld = read && nofoot::supportItem(item) == nofoot::kSupportPistol && serial == g_heldItemSerial.load(std::memory_order_acquire);
-    const bool anyB = ps.latched || ps.movedHip || ps.movedAds || ps.refused || ps.frames[0] || ps.frames[1] || ps.frames[2];
-    if ((pistolHeld && nativeOnFootActive()) || anyB) {
-        static const char* const kWhy[f90::kBCount] = {"", "", "", "item not the held pistol or not read", "no weapon frame", "no eye origin", "no target this frame or the last"};
-        char why[300];
+    const bool heldNow = read && serial == g_heldItemSerial.load(std::memory_order_acquire);
+    // the refusals by name, and the content against the surface on its F86d rays
+    const auto whyText = [&](const F90Place& pl, char* why, size_t cap) {
+        static const char* const kWhy[f90::kBCount] = {"", "", "", "item not the held one or not read", "no weapon frame", "no eye origin", "no target this frame or the last",
+                                                       "another class's part drawn: a switch"};
         size_t wl = 0;
         why[0] = '\0';
         for (int k = f90::kBRefItem; k < f90::kBCount; ++k)
-            if (ps.why[k]) {
-                const int n = std::snprintf(why + wl, sizeof(why) - wl, "%s%s %llu", wl ? ", " : "", kWhy[k], ull(ps.why[k]));
-                if (n > 0 && static_cast<size_t>(n) < sizeof(why) - wl) wl += static_cast<size_t>(n);
+            if (pl.why[k]) {
+                const int n = std::snprintf(why + wl, cap - wl, "%s%s %llu", wl ? ", " : "", kWhy[k], ull(pl.why[k]));
+                if (n > 0 && static_cast<size_t>(n) < cap - wl) wl += static_cast<size_t>(n);
             }
-        if (!wl) std::snprintf(why, sizeof(why), "none");
-        const F86dPart* dp = g_f90SlotHip >= 0 && g_f90SlotHip < static_cast<int>(kF85bParts) ? &g_f86d[g_f90SlotHip] : nullptr;
+        if (!wl) std::snprintf(why, cap, "none");
+    };
+    const auto surfText = [&](const F90Place& pl, int slot, char* surf, size_t cap, double* dsOut) {
+        const F86dPart* dp = slot >= 0 && slot < static_cast<int>(kF85bParts) ? &g_f86d[slot] : nullptr;
         const bool haveDs = dp && dp->sm.have;
         const double ds = haveDs ? dp->sm.depth() : 0.0;
-        char surf[80];
-        if (!ps.haveContent) std::snprintf(surf, sizeof(surf), "no eye 0 placement this second");
-        else if (!haveDs) std::snprintf(surf, sizeof(surf), "no surface hit yet");
-        else if (ds >= ps.contentM) std::snprintf(surf, sizeof(surf), "in front by %.1f cm", (ds - ps.contentM) * 100.0);
-        else std::snprintf(surf, sizeof(surf), "behind a surface by %.1f cm", (ps.contentM - ds) * 100.0);
+        *dsOut = ds;
+        if (!pl.haveContent) std::snprintf(surf, cap, "no eye 0 placement this second");
+        else if (!haveDs) std::snprintf(surf, cap, "no surface hit yet");
+        else if (ds >= pl.contentM) std::snprintf(surf, cap, "in front by %.1f cm", (ds - pl.contentM) * 100.0);
+        else std::snprintf(surf, cap, "behind a surface by %.1f cm", (pl.contentM - ds) * 100.0);
+    };
+    F90Place& ps = g_f90Pistol;
+    const bool pistolHeld = heldNow && nofoot::supportItem(item) == nofoot::kSupportPistol;
+    const bool anyB = ps.latched || ps.movedHip || ps.movedAds || ps.refused || ps.frames[0] || ps.frames[1] || ps.frames[2];
+    if ((pistolHeld && nativeOnFootActive()) || anyB) {
+        char why[360], surf[80];
+        double ds = 0.0;
+        whyText(ps, why, sizeof(why));
+        surfText(ps, g_f90SlotHip, surf, sizeof(surf), &ds);
         Log::get().note("pistol readout (F90) 1 s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, F_root only "
                         "%llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved: hip readout %llu, pistol ADS readout %llu (x%.4f), previous-frame target %llu, "
                         "refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s)",
@@ -23623,7 +23692,27 @@ void f90Report() {
                         ull(ps.movedAds), f90::sizeFactor(f90::kRolePistolAds), ull(ps.movedPrev), ull(ps.refused), why,
                         ps.latched ? ps.shiftSum / static_cast<double>(ps.latched) * 100.0 : 0.0, ps.haveContent ? ps.contentM : 0.0, ds, surf);
     }
-    ps = F90Pistol{};
+    ps = F90Place{};
+    // F92: the rifle's ADS readout, while a primary weapon is held on foot (zeros then mean nothing ran) or while any of its counters moved
+    F90Place& rs = g_f92Rifle;
+    const bool primaryHeld = heldNow && std::strncmp(item, "$wpn_m_", 7) == 0;
+    const bool anyR = rs.latched || rs.movedAds || rs.refused || rs.frames[0] || rs.frames[1] || rs.frames[2];
+    if ((primaryHeld && nativeOnFootActive()) || anyR) {
+        char why[360], surf[80];
+        double ds = 0.0;
+        whyText(rs, why, sizeof(why));
+        surfText(rs, g_f92SlotRifle, surf, sizeof(surf), &ds);
+        Log::get().note("rifle ADS readout placement (F92) 1 s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, "
+                        "F_root only %llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved %llu (ADS weight at the moved draws min %.2f max "
+                        "%.2f), refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s)",
+                        item[0] ? item : "none", serial, static_cast<double>(g_f92ForwardCm.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_f92LeftCm.load(std::memory_order_relaxed)), static_cast<double>(g_f92UpCm.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_f92TowardCm.load(std::memory_order_relaxed)), ull(rs.frames[f90::kFrameAttach]), ull(rs.frames[f90::kFrameRoot]),
+                        ull(rs.frames[f90::kFrameNone]), rs.barrelN ? rs.barrelSum / static_cast<double>(rs.barrelN) : 0.0, rs.barrelMax, ull(rs.latched), ull(rs.movedAds),
+                        rs.haveAds ? rs.adsMin : 0.0, rs.haveAds ? rs.adsMax : 0.0, ull(rs.refused), why,
+                        rs.latched ? rs.shiftSum / static_cast<double>(rs.latched) * 100.0 : 0.0, rs.haveContent ? rs.contentM : 0.0, ds, surf);
+    }
+    rs = F90Place{};
 }
 
 // The decision for a draw whose record carries a weapon UI tag (the CPU identification named it): sets g_fix.pending with the rewritten rows, or counts why not.

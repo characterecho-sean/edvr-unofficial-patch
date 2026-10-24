@@ -379,7 +379,8 @@ inline void run90(Check&& check) {
         keys.leftCm = f90::kLeftDefaultCm;
         keys.upCm = f90::kUpDefaultCm;
         keys.towardCm = f90::kTowardDefaultCm;
-        check(keys.forwardCm == 13.0 && keys.leftCm == 6.0 && keys.upCm == -3.0 && keys.towardCm == 2.0, "F90 B: the built-in values are the review's: forward 13, left 6, up -3, toward eye 2 cm");
+        check(keys.forwardCm == 13.0 && keys.leftCm == 3.5 && keys.upCm == -3.0 && keys.towardCm == 3.0,
+              "F92 B: the pistol readout's built-in values are the pilot's (F91 flight): forward 13, left 3.5, up -3, toward eye 3 cm");
         const auto lands = [&](const f90::Out& o, const f85::UFrame& game, int e, const Record& rec, double* toT, bool* facing, double* scale) {
             f85::UFrame uf = game;
             f90::applyMap(uf, o.map);
@@ -418,7 +419,7 @@ inline void run90(Check&& check) {
         {
             const f90::WeaponFrame wf = a0.wf;
             double T0[3], toE[3], dE[3];
-            for (int i = 0; i < 3; ++i) T0[i] = a0.C[i] + 0.13 * wf.b[i] + 0.06 * wf.l[i] - 0.03 * wf.u[i];
+            for (int i = 0; i < 3; ++i) T0[i] = a0.C[i] + 0.01 * (keys.forwardCm * wf.b[i] + keys.leftCm * wf.l[i] + keys.upCm * wf.u[i]);
             const f90::In in0 = inOf(g, 0, 100, hip, f90::kItemPistol, 7, keys);
             for (int i = 0; i < 3; ++i) {
                 toE[i] = a0.T[i] - T0[i];
@@ -430,8 +431,8 @@ inline void run90(Check&& check) {
             double across = 0.0;
             for (int i = 0; i < 3; ++i) across = std::max(across, std::fabs(toE[i] - along * dEu[i]));
             const double eyeErr = std::max({std::fabs(in0.eye[0] - g.eyePos[0][0]), std::fabs(in0.eye[1] - g.eyePos[0][1]), std::fabs(in0.eye[2] - g.eyePos[0][2])});
-            check(std::fabs(along - 0.02) < 1e-9 && across < 1e-9 && eyeErr < 1e-6 && std::fabs(a0.shiftM - dist3(a0.T, a0.C)) < 1e-12,
-                  "F90 B: T = C + 13 cm along the barrel + 6 cm left - 3 cm up, then 2 cm toward the deciding eye (its origin from its scene rows)");
+            check(std::fabs(along - 0.01 * keys.towardCm) < 1e-9 && across < 1e-9 && eyeErr < 1e-6 && std::fabs(a0.shiftM - dist3(a0.T, a0.C)) < 1e-12,
+                  "F90 B: T = C + forward along the barrel + left + up (the built-in 13, 3.5, -3 cm), then toward the deciding eye (3 cm, its origin from its scene rows)");
         }
         // frame 101: eye 1 first
         const f90::Out b1 = f90::decide(inOf(g, 1, 101, hip, f90::kItemPistol, 7, keys), g1, latch, rot, frameFn);
@@ -545,6 +546,143 @@ inline void run90(Check&& check) {
         f90::Latch latch;
         ok = ok && f90::decide(unread, uOf(g, 0), latch, rot, [] { return f90::WeaponFrame{}; }).a == f90::kANotTable;
         check(ok && misses.size() == 11, "F91 A: a scale 2% off any row, a 3x1 mesh at 0.0721, F90's two mismatches and an unread mesh match no row: not scaled, not moved, the rows left as F85b's");
+    }
+
+    // ---- F92: the rifle's ADS readout placed in the primary weapon's frame; each placement only for its class -------------------------------------------------------
+    {
+        const Record radsRec{kN90RifleAds, {-0.34, -0.05, 0.52}, 0.0500976555, {3.0, 1.0}};
+        const Record hipRec{kN90Hip, {0.10, -0.12, 0.36}, 0.072070308, {2.0, 1.0}};
+        const Record padsRec{kN90PistolAds, {0.07, -0.05, 0.42}, 0.166796863, {2.0, 1.0}};
+        const Weapon wp = weaponOf(g, 7.0);
+        int frames = 0;
+        const auto frameFn = [&] {
+            ++frames;
+            return f90::weaponFrame(true, wp.attach, true, wp.froot);
+        };
+        f90::Keys rk;
+        rk.forwardCm = f90::kRifleForwardDefaultCm;
+        rk.leftCm = f90::kRifleLeftDefaultCm;
+        rk.upCm = f90::kRifleUpDefaultCm;
+        rk.towardCm = f90::kRifleTowardDefaultCm;
+        check(rk.forwardCm == 0.0 && rk.leftCm == 5.0 && rk.upCm == 0.0 && rk.towardCm == 0.0 && rk.leftCm <= f90::kLeftMaxCm,
+              "F92: the rifle ADS readout's built-in values: 5 cm left (beside the receiver), nothing else");
+        const auto inR = [&](int e, uint32_t frame, const Record& rec, int item, const f90::Keys& keys) {
+            f90::In in = inOf(g, e, frame, rec, item, 21, f90::Keys{});
+            in.rifleKeys = keys;
+            return in;
+        };
+        // the rows F91 gave the rifle's ADS readout: its scale alone
+        const auto f91Rows = [&](int e, float r[12]) {
+            f90::Latch l;
+            f85::UFrame uf = uOf(g, e);
+            f90::applyMap(uf, f90::decide(inOf(g, e, 1, radsRec, f90::kItemOther, 0, f90::Keys{}), uf, l, rot, [] { return f90::WeaponFrame{}; }).map);
+            return rowsOf(g, e, uf, r);
+        };
+        // keys 0 with the primary held: F91's rows bit for bit, both eyes, either eye first; the latch still runs
+        bool same0 = true;
+        f90::Latch l0;
+        for (const int first : {0, 1})
+            for (int i = 0; i < 2; ++i) {
+                const int e = i == 0 ? first : 1 - first;
+                f85::UFrame uf = uOf(g, e);
+                const f90::Out o = f90::decide(inR(e, 60 + first, radsRec, f90::kItemPrimary, f90::Keys{}), uf, l0, rot, frameFn);
+                f90::applyMap(uf, o.map);
+                float ra[12], rb[12];
+                same0 = same0 && o.b == f90::kBMoved && !o.map.move && f91Rows(e, ra) && rowsOf(g, e, uf, rb) && std::memcmp(ra, rb, sizeof(ra)) == 0;
+            }
+        check(same0 && l0.rifle.have && l0.rifle.frame == 61 && !l0.have, "F92: rifle ADS readout keys all 0 keep F91's rows bit for bit in both eyes, either eye first");
+        // the built-in values: the content lands on T, 5 cm along the weapon's left; U3 is A's scale and nothing else; one T and one frame read per frame
+        frames = 0;
+        f90::Latch lr;
+        double toT = 1.0, alongL = 0.0;
+        bool facing = true, oneT = true;
+        double T0[3] = {};
+        for (int e = 0; e < 2; ++e) {
+            const f85::UFrame game = uOf(g, e);
+            f85::UFrame uf = game;
+            const f90::Out o = f90::decide(inR(e, 70, radsRec, f90::kItemPrimary, rk), game, lr, rot, frameFn);
+            f90::applyMap(uf, o.map);
+            f85::UFrame ufA = game;
+            f90::Map a = o.map;
+            a.move = false;
+            f90::applyMap(ufA, a);
+            facing = facing && o.a == f90::kAScaled && o.map.scale && o.map.move && std::memcmp(uf.U3, ufA.U3, sizeof(uf.U3)) == 0;
+            double cv[3], P[3];
+            contentHud(g, e, radsRec, cv);
+            worldOf(uf, cv, P);
+            for (int i = 0; i < 3; ++i) P[i] += g.ow[e][i];
+            toT = e == 0 ? dist3(P, o.T) : std::max(toT, dist3(P, o.T));
+            if (e == 0) {
+                std::memcpy(T0, o.T, sizeof(T0));
+                const double d[3] = {o.T[0] - o.C[0], o.T[1] - o.C[1], o.T[2] - o.C[2]};
+                alongL = edvr::nofoot::ikDot(d, o.wf.l);
+            } else {
+                oneT = dist3(o.T, T0) == 0.0;
+            }
+        }
+        check(toT < 1e-6 && std::fabs(alongL - 0.05) < 1e-9 && oneT && frames == 1,
+              "F92: with a primary held the rifle's ADS readout content lands on T = C + 5 cm along the weapon's left, one T for both eyes, the frame read once");
+        check(facing, "F92: the rifle placement is a translation on top of A's scale: U3 is the scaled U3, unturned");
+        // each placement only for its class
+        const auto rowsAre = [&](const f90::Out& o, int e, bool scaleOnly) {
+            f85::UFrame uf = uOf(g, e), ref = uOf(g, e);
+            f90::applyMap(uf, o.map);
+            if (scaleOnly) {
+                f90::Map a = o.map;
+                a.move = false;
+                f90::applyMap(ref, a);
+            }
+            float ra[12], rb[12];
+            return !o.map.move && rowsOf(g, e, uf, ra) && rowsOf(g, e, ref, rb) && std::memcmp(ra, rb, sizeof(ra)) == 0;
+        };
+        f90::Latch lc;
+        f90::Keys pk;
+        pk.forwardCm = f90::kForwardDefaultCm;
+        pk.leftCm = f90::kLeftDefaultCm;
+        pk.upCm = f90::kUpDefaultCm;
+        pk.towardCm = f90::kTowardDefaultCm;
+        const auto inP = [&](uint32_t frame, const Record& rec, int item, bool drawnRifle, bool drawnPistol, bool drawnTool) {
+            f90::In in = inOf(g, 0, frame, rec, item, 21, pk);
+            in.rifleKeys = rk;
+            in.drawnRifleAds = drawnRifle;
+            in.drawnPistolAds = drawnPistol;
+            in.drawnTool = drawnTool;
+            return in;
+        };
+        const f90::Out rifWithPistol = f90::decide(inP(80, radsRec, f90::kItemPistol, false, true, false), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out hipWithRifle = f90::decide(inP(80, hipRec, f90::kItemPrimary, true, false, false), uOf(g, 0), lc, rot, frameFn);
+        check(rifWithPistol.b == f90::kBNone && rowsAre(rifWithPistol, 0, true) && hipWithRifle.b == f90::kBNone && rowsAre(hipWithRifle, 0, false) && !lc.have && !lc.rifle.have,
+              "F92: the rifle placement never runs with a pistol held, the pistol placement never with a primary held (rows: A's scale only, F85b's)");
+        const f90::Out hipSwitch = f90::decide(inP(81, hipRec, f90::kItemPistol, true, false, false), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out padsSwitch = f90::decide(inP(81, padsRec, f90::kItemPistol, true, true, false), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out rifSwitch = f90::decide(inP(81, radsRec, f90::kItemPrimary, true, true, false), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out hipTool = f90::decide(inP(82, hipRec, f90::kItemPistol, false, true, true), uOf(g, 0), lc, rot, frameFn);
+        const f90::Out rifTool = f90::decide(inP(82, radsRec, f90::kItemPrimary, true, false, true), uOf(g, 0), lc, rot, frameFn);
+        check(hipSwitch.b == f90::kBRefClass && rowsAre(hipSwitch, 0, false) && padsSwitch.b == f90::kBRefClass && rowsAre(padsSwitch, 0, true) && !lc.have,
+              "F92: the F91 flight's switch: a pistol held while the rifle's ADS readout is drawn: the hip readout is left as F85b's and refused as a switch (counted)");
+        check(rifSwitch.b == f90::kBRefClass && rowsAre(rifSwitch, 0, true) && hipTool.b == f90::kBRefClass && rifTool.b == f90::kBRefClass && !lc.rifle.have,
+              "F92: a primary held while the pistol's or a tool's readout is drawn, and a pistol held while a tool's is: refused as a switch, only A's scale");
+        const f90::Out hipPistol = f90::decide(inP(83, hipRec, f90::kItemPistol, false, true, false), uOf(g, 0), lc, rot, frameFn);
+        check(hipPistol.b == f90::kBMoved && hipPistol.map.move && lc.have, "F92: a pistol held with only its own parts drawn is placed as in F90");
+        // the role line: applied against matched only, and a change of what was applied is a new line
+        char t1[200], t2[200], t3[200], t4[200], t5[200];
+        f90::Latch lt;
+        const f90::Out rifApplied = f90::decide(inR(0, 90, radsRec, f90::kItemPrimary, rk), uOf(g, 0), lt, rot, frameFn);
+        f90::roleText(rifApplied, t1, sizeof(t1));
+        f90::roleText(hipWithRifle, t2, sizeof(t2));
+        f90::roleText(hipSwitch, t3, sizeof(t3));
+        f90::roleText(rifWithPistol, t4, sizeof(t4));
+        f90::Out none;
+        f90::roleText(none, t5, sizeof(t5));
+        const bool texts = std::strcmp(t1, "rifle ADS readout (x1.7778): applied: scaled, rifle placement") == 0 &&
+                           std::strcmp(t2, "hip readout (x1.0000): matched only (no placement for the held item)") == 0 &&
+                           std::strcmp(t3, "hip readout (x1.0000): matched only; pistol placement refused (another class's part is drawn: a switch)") == 0 &&
+                           std::strcmp(t4, "rifle ADS readout (x1.7778): applied: scaled") == 0 && std::strcmp(t5, "NO TABLE PART: not scaled, not moved") == 0;
+        if (!texts) std::printf("native_frame_test: F92 role texts:\n  %s\n  %s\n  %s\n  %s\n  %s\n", t1, t2, t3, t4, t5);
+        f90::RoleLog rl;
+        const bool logs = rl.step(5, f90::appliedState(hipSwitch)) && !rl.step(5, f90::appliedState(hipSwitch)) && rl.step(5, f90::appliedState(hipPistol)) &&
+                          f90::appliedState(hipSwitch) != f90::appliedState(hipPistol);
+        check(texts && logs, "F92: the role line says what was applied (scaled, the placement) and what was only matched or refused, and a change of it is a new line");
     }
 
     // ---- the keys -----------------------------------------------------------------------------------------------------------------------------------------------

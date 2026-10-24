@@ -267,7 +267,8 @@ too), 3 when the log holds none of the freeze lines and no slow regime (a build 
 freeze logging), 4 for a slow regime the vendor runtime or EDVR holds (and no STOP).
 
 --health is the first command to run on an on-foot flight log. It reads the graphics log once and prints one line per feature family (the weapon readout
-size, the weapon readout parts' roles (F91: NO TABLE PART is NEVER APPLIED for that item) and the pistol readout, the weapon UI pin, the reticle depth, the
+size, the weapon readout parts' roles (F91: NO TABLE PART is NEVER APPLIED for that item; F92: what was applied against matched only), the pistol readout and
+the rifle's ADS readout placement (F92), the weapon UI pin, the reticle depth, the
 view height hold, the weapon eye offset, the ADS trace, its press fit windows (F91: STILL or MOVING, verdicts H1, LOCK, H3) and the closing left eye, the ADS
 item gate (F91: refused and allowed), the marker fix, the prompt anchor and label) with a status and the counters that decide it: OK; PARTIAL (it ran, but not
 for everything); NEVER APPLIED (its own lines
@@ -10421,9 +10422,19 @@ def _hj_f91_role(rows, ctx):
         if x["what"].startswith("NO TABLE PART") and not last[(x["serial"], x["slot"])]["what"].startswith("NO TABLE PART"):
             flipped += 1
     missed, named = [], []
+
+    def state(what):
+        # F92: the line says what was applied (scaled, placed) and what was only matched or refused; F91's lines name the role alone
+        role = re.sub(r" \(.*$", "", what)
+        m = re.search(r"; (\w+) placement refused \(([^)]*)\)", what)
+        if m:
+            return "%s [%s placement refused: %s]" % (role, m.group(1), m.group(2))
+        if "): matched only" in what:
+            return "%s [matched only]" % role
+        return role
     for (item, serial), xs in items.items():
         bad = [x for x in xs if x["what"].startswith("NO TABLE PART")]
-        roles = sorted({re.sub(r" \(.*$", "", x["what"]) for x in xs if not x["what"].startswith("NO TABLE PART")})
+        roles = sorted({state(x["what"]) for x in xs if not x["what"].startswith("NO TABLE PART")})
         named.append("%s: %s" % (item, ", ".join(roles) or "-"))
         for x in bad:
             missed.append("%s slot %s name %s mesh %s x %s scale %s" % (item, x["slot"], x["name"], x["mx"], x["mz"], x["scale"]))
@@ -10433,6 +10444,29 @@ def _hj_f91_role(rows, ctx):
     if missed:
         return ("NEVER APPLIED", text + "; NO TABLE PART: " + "; ".join(missed))
     return ("PARTIAL" if flipped else "OK", text)
+
+
+def _hj_f92_rifle(rows, ctx):
+    """The rifle's ADS readout placement: moved at all, in how many seconds, and where its content stood against the surface on its rays in the last ADS second."""
+    r = rows.get("line", [])
+    if not r:
+        return None
+    attach, root, none, latched, moved, refused = (_hsum(r, k) for k in ("attach", "root", "none", "latched", "moved", "refused"))
+    why = collections.Counter()
+    for x in r:
+        why.update(_hpairs(x["why"]))
+    last = r[-1]
+    ads = [x for x in r if float(x["amax"]) >= 0.99 and int(x["moved"]) > 0]
+    text = ("item %s, keys forward %s left %s up %s toward eye %s cm; held %d s: weapon frame attach %d, F_root only %d, none %d; latched %d; moved %d (%d s in ADS); "
+            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], len(r), attach, root, none, latched, moved, len(ads), refused, _htop(why)))
+    if ads:
+        a = ads[-1]
+        text += "; last ADS second: content %s m from eye 0, surface on its rays %s m (%s)" % (a["cm"], a["ds"], a["surf"])
+    if moved == 0:
+        return ("NEVER APPLIED", text)
+    if sum(1 for x in r if int(x["moved"]) > 0) * 2 < len(r):
+        return ("PARTIAL", text)
+    return ("OK", text)
 
 
 def _hj_f91_fit(rows, ctx):
@@ -10679,6 +10713,12 @@ HEALTH_RULES = (
                  r"moved: (?:\d+|hip readout) (?P<hip>\d+), (?:\d+|pistol ADS readout) (?P<ads>\d+) \([^)]*\), previous-frame target \d+, refused (?P<refused>\d+) "
                  r"\[(?P<why>[^\]]*)\]" % (_HN, _HN, _HN, _HN)),
     ), _hj_f90_pistol),
+    _hrule("rifle ADS readout (F92)", ("F92",), ("rifle ADS readout placement (F92)",), (
+        ("line", r"rifle ADS readout placement \(F92\) 1 s: item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) "
+                 r"cm[^;]*; frame: attach \d+ (?P<attach>\d+), F_root only (?P<root>\d+), none (?P<none>\d+) \([^)]*\); target latched (?P<latched>\d+) frames; "
+                 r"moved (?P<moved>\d+) \(ADS weight at the moved draws min (?P<amin>[\d.]+) max (?P<amax>[\d.]+)\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]; "
+                 r"content shift mean [\d.]+ cm; content (?P<cm>[\d.]+) m from eye 0, nearest surface on its rays (?P<ds>[\d.]+) m \((?P<surf>[^)]*)\)" % (_HN, _HN, _HN, _HN)),
+    ), _hj_f92_rifle),
     _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
         ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits this second \((?P<tagged>\d+) tagged; [^)]*\); "
                 r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)"),
@@ -11027,7 +11067,7 @@ def main(argv=None):
                          "then a summary; exit 3 when the log has none of those lines")
     ap.add_argument("--health", action="store_true",
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
-                         "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, weapon UI pin F85b, reticle "
+                         "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
                          "prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
@@ -11571,6 +11611,15 @@ def self_test_health():
             raise AssertionError("native_on_foot.cpp has no log format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[needle], vals)
 
+    def R90(needle, *vals):
+        """A piece of the role line's text, which native_on_foot_f90.h builds (roleText), from its own format literal."""
+        key = "f90:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f90src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f90.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
     def R91(needle, *vals):
         """A piece of a line native_on_foot_f91.h builds (formatView, formatFit), from its own format literal."""
         key = "f91:" + needle
@@ -11641,6 +11690,20 @@ def self_test_health():
 
         def role_line(item="$wpn_m_assaultrifle_laser_fauto_name;", serial=4, slot=1, name=29526, mesh=(3.0, 1.0), scale=0.050098, what="rifle ADS readout (x1.7778)"):
             return R("weapon readout part (F91): item %s", item, serial, slot, name, mesh[0], mesh[1], scale, 0.667969, 0.222656, 0.225, what)
+
+        def what92(role="rifle ADS readout", k=1.7778, scaled=True, placed="rifle placement", refused=None):
+            """F92's role text (roleText in native_on_foot_f90.h): what was applied, or matched only, and a refused placement."""
+            if scaled or placed:
+                head = R90("applied: %s%s%s", "scaled" if scaled else "", ", " if scaled and placed else "", placed or "")
+            else:
+                head = R90("matched only%s", "" if refused else " (no placement for the held item)")
+            if refused:
+                return R90("%s (x%.4f): %s; %s refused", role, k, head, refused[0], refused[1])
+            return R90('%s (x%.4f): %s"', role, k, head)
+
+        def rifle(moved=0, amax=0.0, attach=0, latched=0, refused=0, why="none", cm=0.0, ds=0.0, surf="no eye 0 placement this second"):
+            return R("rifle ADS readout placement (F92) 1 s: item %s", "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
+                     moved, 0.0, amax, refused, why, 5.0, cm, ds, surf)
 
         def fit(win=0, head="MOVING", verdict="h1", d=2):
             text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44)
@@ -11752,10 +11815,28 @@ def self_test_health():
                role_line("$wpn_s_pistol_kinetic_sauto_name;", 6, 2, 29524, (2.0, 1.0), 0.5, "NO TABLE PART: not scaled, not moved")], 3, [("NEVER APPLIED", F91R)],
               has=["$humanoid_companalyser_name;: tool readout", "NO TABLE PART: $wpn_s_pistol_kinetic_sauto_name; slot 2"])
         checks += 1
-        if "NO TABLE PART: not scaled, not moved" not in source or "tool readout (not scaled)" not in source or not all(
-                ('"%s"' % r) in f90src for r in ("hip readout", "rifle ADS readout", "pistol ADS readout", "tool readout")):
+        if "NO TABLE PART: not scaled, not moved" not in f90src or "tool readout (not scaled)" not in f90src or not all(
+                ('"%s"' % r) in f90src for r in ("hip readout", "rifle ADS readout", "pistol ADS readout", "tool readout", "rifle placement", "pistol placement")):
             print("health: the role line's role texts are no longer where the role rule's fixtures take them from")
             ok = False
+        check("F92 role: applied against matched only and refused, per item",
+              [role_line(what=what92()), role_line(slot=0, name=29627, mesh=(2.0, 1.0), scale=0.072070, what=what92("hip readout", 1.0, False, None)),
+               role_line("$wpn_s_pistol_kinetic_sauto_name;", 9, 1, 29627, (2.0, 1.0), 0.072070,
+                         what92("hip readout", 1.0, False, None, ("pistol placement", "another class's part is drawn: a switch")))], 0, [("OK", F91R)],
+              has=["$wpn_m_assaultrifle_laser_fauto_name;: hip readout [matched only], rifle ADS readout",
+                   "$wpn_s_pistol_kinetic_sauto_name;: hip readout [pistol placement refused: another class's part is drawn: a switch]"])
+        check("F92 role: a refusal the slot later applied is the last word", [role_line(what=what92(placed=None, refused=("rifle placement", "no weapon frame"))),
+                                                                              role_line(what=what92())], 0, [("OK", F91R)],
+              has=["$wpn_m_assaultrifle_laser_fauto_name;: rifle ADS readout"], lacks=["refused: no weapon frame"])
+
+        # ---- rifle ADS readout (F92) ----
+        check("F92 rifle: moved every second, in front of the surface in ADS", [rifle(180, 1.0, 90, 90, cm=0.29, ds=0.31, surf="in front by 2.0 cm")] * 3, 0,
+              [("OK", "rifle ADS readout (F92)")], has=["keys forward +0.0 left +5.0 up +0.0 toward eye +0.0 cm", "moved 540 (3 s in ADS)",
+                                                        "last ADS second: content 0.290 m from eye 0, surface on its rays 0.310 m (in front by 2.0 cm)"])
+        check("F92 rifle: a primary held and nothing moved", [rifle()] * 3, 3, [("NEVER APPLIED", "rifle ADS readout (F92)")], has=["moved 0 (0 s in ADS)"])
+        check("F92 rifle: refused as a switch most seconds", [rifle(20, 0.0, 10, 10), rifle(refused=90, why="another class's part drawn: a switch 90")] * 2, 0,
+              [("OK", "rifle ADS readout (F92)")], has=["refused 180 [another class's part drawn: a switch 180]"])
+        check("F92 rifle: moved in one second of four", [rifle(20, 0.0, 10, 10), rifle(), rifle(), rifle()], 0, [("PARTIAL", "rifle ADS readout (F92)")])
 
         # ---- ADS press fit (F91) ----
         check("F91 fit: H1 windows while moving, H3 still", [fit(0, "MOVING", "h1", 2), fit(1, "MOVING", "h1", 1), fit(2, "STILL", "h3"), fit(3, "STILL", "none")], 0,
