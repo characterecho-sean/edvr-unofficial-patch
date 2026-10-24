@@ -13230,6 +13230,18 @@ struct HingeStats {
 std::atomic<uint32_t> g_hingeSeq{0};
 HingeStats g_hingeStats;
 std::atomic<bool> g_hingeReset{false};
+// F98a: the left arm with a weapon drawn, per pin call (the hook writes under the counter at the pin's close, the frame thread prints and resets once a second): the
+// game's aim pitch, the chest's lean (chest 24 to neck 34, forward positive) as written and as animated, F82's torso yaw, the elbow's swivel from the stance's
+// own plane (the plane change), its step a frame (the angle between this frame's solved radial and the last frame's, about the arm's axis), where the swivel came
+// from, how far the arm's axis is from the stable pole's seed, and the hand twist at the forearm's limit.
+struct F98Left {
+    uint32_t n = 0, aimN = 0, leanN = 0, steps = 0, stepsOver10 = 0, src[3] = {}, spanN = 0, twistLimited = 0;
+    double aimSum = 0.0, aimMin = 1e9, aimMax = -1e9, leanSum = 0.0, leanAnimSum = 0.0, yawSum = 0.0, yawMax = 0.0, planeSum = 0.0, planeMax = 0.0, planeOver45 = 0.0;
+    double stepSq = 0.0, stepMax = 0.0, spanSum = 0.0, spanMax = 0.0;
+};
+std::atomic<uint32_t> g_f98Seq{0};
+F98Left g_f98;
+std::atomic<bool> g_f98Reset{false};
 
 // F66g, the parity split (the overseer's second candidate for the F65 judder: a two-slot pose source, where our writes reach the drawn pose only on
 // alternate frames). The hook counts its own outputs by game-frame parity (the local P1 frame index's low bit): calls, the distinct span buffers it
@@ -15492,6 +15504,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         bool swivelDiagnostic = false, swivelHadPrevious = false, swivelFallback = false, swivelMinViolation = false;
         double swivelChosenDeg = 0.0, swivelReferenceDeg = 0.0, swivelWristSwingDeg = 0.0, swivelViolationCm = 0.0;
         bool physicalPoleStable = false, poseRadialValid = false, poseOutWaived = false;
+        // F98a: the stable pole kept its seed (transported from the seed's axis, not frame to frame), where the swivel came from (0 the legacy swivel, 1 the
+        // seed's pole, 2 a body-down pole: F84's rifle support or the pistol's), the angle from the seed's axis to the arm's now (deg), the solved elbow's radial
+        // about the shoulder-to-hand axis and the axis (model axes)
+        bool f98SeedKept = false, f98RadialOk = false;
+        int f98Source = 0;
+        double f98SeedSpanDeg = 0.0, f98Radial[3] = {}, f98Axis[3] = {};
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -16300,6 +16318,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 stablePoleFallback = stable.usedFallback;
                 o.physicalPoleStable = true;
                 o.poseOutWaived = true;
+                o.f98Source = 2;   // F98a: the pistol's body-down pole
                 theta = wSolve * nofoot::ikWrapPi(stable.theta);
                 stablePoleReferenceTheta = tb.angleOf(stable.reference);
                 physicalPoleCommit[side] = seed;
@@ -16318,9 +16337,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // Keep the authored-pose acquisition ramp; at weight 1 this is the transported physical pole's exact solution.
                 theta = wSolve * nofoot::ikWrapPi(stable.theta);
                 if (stable.transportedReference) stablePoleReferenceTheta = tb.angleOf(stable.reference);
+                // F98a: the seed's axis and reference are kept, so the next frame transports the reference from the seed in one rotation. Carried frame to
+                // frame (F76 to F97), the reference picked up the rotation of every loop the arm's axis went round (the aim's pitch, the pin moving the body with
+                // the head's pitch, F82's torso yaw) and the elbow came to rest up to 90 deg off the stance's own plane; from the seed it depends on where the
+                // arm is now, not on how it got there. Only the previous radial (the fallback's) moves with the arm.
                 physicalPoleCommit[side] = seed;
-                std::memcpy(physicalPoleCommit[side].axis, stable.axis, sizeof(stable.axis));
-                std::memcpy(physicalPoleCommit[side].reference, stable.reference, sizeof(stable.reference));
+                o.f98SeedKept = true;
+                o.f98Source = 1;
+                {
+                    double sa[3];
+                    o.f98SeedSpanDeg = nofoot::ikUnit(seed.axis, sa) ? std::acos(std::fmax(-1.0, std::fmin(1.0, nofoot::ikDot(sa, tb.dir)))) * 180.0 / nofoot::kIkPi : 0.0;
+                }
                 physicalPoleCommitValid[side] = nofoot::ikElbowRadial(tb, theta, physicalPoleCommit[side].previous);
             }
         }
@@ -16330,6 +16357,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (nofoot::ikRifleSupportTheta(tb, theta, pinCall.detachW, rifleQualityWeight, elbowOutM, trimRad, &rifleTheta, rifleRadial)) {
                 theta = rifleTheta;
                 rifleQualityPoleApplied = true;
+                o.f98Source = 2;   // F98a: F84's body-down rifle support
                 o.poseOutWaived = true; // F84 replaces only the generic model-X half-space with the body-down support policy.
             }
         }
@@ -16489,6 +16517,15 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         o.hSource = hs.source;
         o.hOldErr = hs.oldHingeErrDeg;
         o.hPlane = hs.planeDeg;
+        {   // F98a: the solved elbow's radial about the shoulder-to-hand axis (the swivel), for its step a frame
+            const double se98[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
+            const double along = nofoot::ikDot(se98, tb.dir);
+            for (int i = 0; i < 3; ++i) {
+                o.f98Radial[i] = se98[i] - along * tb.dir[i];
+                o.f98Axis[i] = tb.dir[i];
+            }
+            o.f98RadialOk = nofoot::ikUnit(o.f98Radial, o.f98Radial);
+        }
         o.hFlexAnim = hs.flexAnimDeg;
         o.hFlexSolved = hs.flexSolvedDeg;
         for (int g = 0; g < 3; ++g)
@@ -17076,6 +17113,73 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 }
             }
         }
+        // F98a: the left arm's figures of this call (a weapon drawn, the left arm solved)
+        if (armedNow && so[0].hOk) {
+            static double s_prevRadial[3] = {};
+            static bool s_prevHave = false;
+            static uint32_t s_prevItem = 0, s_prevP1 = 0;
+            const uint32_t item98 = g_heldItemSerial.load(std::memory_order_relaxed);
+            double lean = 0.0, leanAnim = 0.0;
+            bool leanOk = false;
+            {
+                const double hx = pinCall.hEye[0], hz = pinCall.hEye[1], hn = std::sqrt(hx * hx + hz * hz);
+                double c24[3], n34[3];
+                if (hn > 0.5 && finalAt(24, c24) && finalAt(34, n34) && 34 < count && 24 < count) {
+                    const double v[3] = {n34[0] - c24[0], n34[1] - c24[1], n34[2] - c24[2]};
+                    const double va[3] = {static_cast<double>(g_pfzAnim[34][12]) - g_pfzAnim[24][12], static_cast<double>(g_pfzAnim[34][13]) - g_pfzAnim[24][13],
+                                          static_cast<double>(g_pfzAnim[34][14]) - g_pfzAnim[24][14]};
+                    lean = std::atan2((v[0] * hx + v[2] * hz) / hn, v[1]) * 180.0 / nofoot::kIkPi;
+                    leanAnim = std::atan2((va[0] * hx + va[2] * hz) / hn, va[1]) * 180.0 / nofoot::kIkPi;
+                    leanOk = std::isfinite(lean) && std::isfinite(leanAnim);
+                }
+            }
+            double step = -1.0;
+            if (so[0].f98RadialOk && s_prevHave && s_prevItem == item98 && pinCall.p1Valid && pinCall.p1 == s_prevP1 + 1u) {
+                double pr[3];
+                const double along = nofoot::ikDot(s_prevRadial, so[0].f98Axis);
+                for (int i = 0; i < 3; ++i) pr[i] = s_prevRadial[i] - along * so[0].f98Axis[i];
+                if (nofoot::ikUnit(pr, pr)) step = std::acos(std::fmax(-1.0, std::fmin(1.0, nofoot::ikDot(pr, so[0].f98Radial)))) * 180.0 / nofoot::kIkPi;
+            }
+            s_prevHave = so[0].f98RadialOk;
+            if (s_prevHave) std::memcpy(s_prevRadial, so[0].f98Radial, sizeof(s_prevRadial));
+            s_prevItem = item98;
+            s_prevP1 = pinCall.p1;
+            g_f98Seq.fetch_add(1, std::memory_order_acq_rel);
+            if (g_f98Reset.exchange(false, std::memory_order_relaxed)) g_f98 = F98Left{};
+            F98Left& f = g_f98;
+            ++f.n;
+            if (pinCall.f86Ok) {
+                ++f.aimN;
+                f.aimSum += pinCall.f86AimPitch;
+                f.aimMin = std::min(f.aimMin, pinCall.f86AimPitch);
+                f.aimMax = std::max(f.aimMax, pinCall.f86AimPitch);
+            }
+            if (leanOk) {
+                ++f.leanN;
+                f.leanSum += lean;
+                f.leanAnimSum += leanAnim;
+            }
+            const double yawDeg = pinCall.neckYawRad * 180.0 / nofoot::kIkPi;
+            f.yawSum += yawDeg;
+            f.yawMax = std::max(f.yawMax, std::fabs(yawDeg));
+            f.planeSum += so[0].hPlane;
+            f.planeMax = std::max(f.planeMax, so[0].hPlane);
+            if (so[0].hPlane > 45.0) f.planeOver45 += 1.0;
+            if (step >= 0.0) {
+                ++f.steps;
+                f.stepSq += step * step;
+                f.stepMax = std::max(f.stepMax, step);
+                if (step > 10.0) ++f.stepsOver10;
+            }
+            ++f.src[so[0].f98Source >= 0 && so[0].f98Source < 3 ? so[0].f98Source : 0];
+            if (so[0].f98SeedKept) {
+                ++f.spanN;
+                f.spanSum += so[0].f98SeedSpanDeg;
+                f.spanMax = std::max(f.spanMax, so[0].f98SeedSpanDeg);
+            }
+            if (so[0].hTwistLimited) ++f.twistLimited;
+            g_f98Seq.fetch_add(1, std::memory_order_release);
+        }
         pinRecord(pinCall, res);
     }
     // F67f: the armed invariants of this call, and F67e's record (the frame thread decides whether an event is running).
@@ -17452,7 +17556,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample.actualOutM[side] = actualOut;
                 sample.violationM[side] = (o.poseOutWaived ? 0.0 : std::max(0.0, o.poseElbowOutM - actualOut)) + std::max(0.0, actualE[1] - actualS[1]);
                 so[side].poseActualValid = axisOk && radialOk;
-                if (so[side].poseActualValid && o.physicalPoleStable) {
+                if (so[side].poseActualValid && o.physicalPoleStable && o.f98SeedKept) {
+                    // F98a: the seed's axis and reference stay; only the previous radial follows the arm as written
+                    std::memcpy(physicalPoleCommit[side].previous, actualRadial, sizeof(actualRadial));
+                    physicalPoleCommitValid[side] = true;
+                    std::memcpy(sample.preferred[side], physicalPoleCommit[side].reference, sizeof(actualAxis));
+                } else if (so[side].poseActualValid && o.physicalPoleStable) {
                     std::memcpy(physicalPoleCommit[side].axis, actualAxis, sizeof(actualAxis));
                     const double refAlong = nofoot::ikDot(physicalPoleCommit[side].reference, actualAxis);
                     for (int k = 0; k < 3; ++k) physicalPoleCommit[side].reference[k] -= refAlong * actualAxis[k];
@@ -18123,6 +18232,31 @@ void f66dLine(uint64_t now, int mode) noexcept {
                         side ? "R" : "L", h.n, h.src[0], h.src[1], h.src[2], h.src[3], h.oldErrSum / n, h.oldErrMax, h.planeSum / n, h.planeMax,
                         h.flexAnimSum / n, h.flexSolvedSum / n, h.twistN ? h.twistRawAbsSum / h.twistN : 0.0,
                         h.twistN ? h.twistAppliedAbsSum / h.twistN : 0.0, h.twistLimited, h.twistN, rows);
+    }
+    // F98a: the left arm with a weapon drawn, once a second (two tries at the counter; a torn second is skipped and reset)
+    F98Left f98;
+    bool got98 = false;
+    for (int tries = 0; tries < 2 && !got98; ++tries) {
+        const uint32_t s1 = g_f98Seq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&f98, &g_f98, sizeof(f98));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got98 = g_f98Seq.load(std::memory_order_relaxed) == s1;
+    }
+    g_f98Reset.store(true, std::memory_order_relaxed);
+    if (got98 && f98.n) {
+        char item98[64] = "none";
+        uint32_t serial98 = 0;
+        if (!opticItemRead(&serial98, item98) || !item98[0]) std::snprintf(item98, sizeof(item98), "none");
+        const double n98 = static_cast<double>(f98.n), an = f98.aimN ? static_cast<double>(f98.aimN) : 1.0, ln = f98.leanN ? static_cast<double>(f98.leanN) : 1.0;
+        Log::get().note("native on foot left elbow (F98a) 1 s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
+                        "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
+                        "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
+                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u",
+                        item98, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
+                        f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
+                        f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
+                        f98.twistLimited);
     }
 }
 // F66g: the frame order line, once a second while native stereo is on foot and the hooks run: drain the ring; between one local P1 and the next, the

@@ -25,6 +25,7 @@
 #include "f95c_checks.h"    // F95c: the head as shadow-only through the visibility call, the fade hook's guard and action
 #include "f97_checks.h"     // F97a: the armed body under the eye again
 #include "f97b_checks.h"    // F97b: the interaction label sized like a panel at its anchor facing the eye
+#include "f98_checks.h"     // F98a: the left elbow's stable pole transported from its seed
 
 #include <array>
 #include <chrono>
@@ -7211,6 +7212,8 @@ int wmain(int argc, wchar_t** argv) {
     f97test::run97(check);
     // F97b: the label's size and record place as a panel at its anchor (the game's NDC-fixed size shrinks as cos^2 and cos off the eye's axis), the guards.
     f97btest::run97b(check);
+    // F98a: the stable pole from its seed (no turn from the arm's path), against the frame-to-frame carry's 84 deg on a 40 deg cone.
+    f98test::run98(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
