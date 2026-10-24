@@ -14,7 +14,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/log.h"
-#include "explorer_cam_core.h"
+#include "avatar_hooks_core.h"
 #include "flat_world_store.h"
 #include "flat_world_witness.h"
 #include "optimized_station.h"
@@ -157,7 +157,7 @@ void installLocked() noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         readOk = false;
     }
-    const sealed::StoreInstall verdict = sealed::storeInstallDecision(identityRead, stamp, size, ecm::kExpectedTimestamp, ecm::kExpectedImageSize,
+    const sealed::StoreInstall verdict = sealed::storeInstallDecision(identityRead, stamp, size, avh::kExpectedTimestamp, avh::kExpectedImageSize,
                                                                      readOk ? got : nullptr, sealed::kStorePrologue, sizeof(got));
     if (verdict != sealed::StoreInstall::kInstall) {
         g_store.refused.store(true, std::memory_order_release);

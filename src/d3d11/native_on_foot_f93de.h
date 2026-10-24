@@ -4,7 +4,7 @@
 //
 // F93d, the game's camera. The camera suite's controller (VesselCameraMountControl) keeps the suite's mode in its byte +0x3E0, 0 while the suite is closed and the
 // game's own first-person camera is the view, 1..6 while the suite is open (a preset such as "Commander control" or "Commander profile", the free camera and its locks).
-// Explorer Cam's controller hook reads it after each game update and publishes it (native_on_foot.h, nativeOnFootCameraPublish); every EDVR change to the commander's
+// The avatar hooks' controller hook (native_on_foot_hooks.cpp) reads it after each game update and publishes it (native_on_foot.h, nativeOnFootCameraPublish); every EDVR change to the commander's
 // body is first-person behaviour and stands down while it is not 0. CameraWatch is the frame thread's side: which lines are owed and when the published flag is no
 // longer evidence (native stereo on foot ended, or the controller stopped updating with the suite open).
 #pragma once

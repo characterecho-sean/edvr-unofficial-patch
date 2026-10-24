@@ -1,6 +1,6 @@
 #pragma once
 // The seat memory's cross-DLL word (docs/seat-memory-2026-10-14.md). d3d11.dll knows what the game says about the commander's seat (Status.json
-// Flags and Flags2, the journal's boundary events, Explorer Cam) and the one setting; openvr_api.dll owns the seated origin and has to act on
+// Flags and Flags2, the journal's boundary events) and the one setting; openvr_api.dll owns the seated origin and has to act on
 // them. One 32-bit word crosses, so the runtime can never read half a change: a count that moved together with the flag it belongs to.
 //
 //   bit  0       published    d3d11.dll has written the word (0 is a fresh mapping or a graphics half that does not know the seat memory)
@@ -9,7 +9,7 @@
 //   bit  2       gameplay     LoadGame seen in this process
 //   bit  3, 4    seatedKnown, seated    Status.json says the commander is in a seat (ship, fighter, SRV, taxi, multicrew)
 //   bit  5, 6    onFootKnown, onFoot    Status.json Flags2 bit 0
-//   bit  7       cameraOpen   Explorer Cam has a session open
+//   bit  7       cameraOpen   a camera session is open (Explorer Cam's until F98; this build always writes 0)
 //   bits 8-12    seatKind     Flags bits 24-26 and Flags2 bits 1-2 (journal_watch.h journalSeatKind)
 //   bits 13-31   transitions  embarks + disembarks + LoadGames + Undocks, modulo 2^19; a change is a journal boundary
 //

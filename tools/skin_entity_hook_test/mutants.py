@@ -31,7 +31,7 @@ FILES = {
 # everything else the rig compiles or includes, copied into the temp tree unmutated
 COMMON = ["code_hook.h", "code_hook.cpp", "guard.h", "guard.cpp", "log.h", "log.cpp", "config.h", "config.cpp", "ini_name.h", "runtime_profile.h", "proxy.h"]
 TREE_EXTRA = [("src/common/" + name, ROOT / "src" / "common" / name) for name in COMMON] + [
-    ("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h"),
+    ("src/d3d11/avatar_hooks_core.h", ROOT / "src" / "d3d11" / "avatar_hooks_core.h"),
     ("src/d3d11/skin_entity_hook.h", ROOT / "src" / "d3d11" / "skin_entity_hook.h"),
     ("src/d3d11/skin_join.h", ROOT / "src" / "d3d11" / "skin_join.h"),
 ]

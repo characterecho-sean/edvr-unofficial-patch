@@ -1,5 +1,5 @@
 #include "flat_world_store_tests.h"
-#include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/avatar_hooks_core.h"
 
 #include <cstdio>
 #include <cstring>
@@ -82,7 +82,7 @@ int main(int argc,char** argv) {
     using namespace edvr;
     flatOriginCaptureInitialize(true); // this rig exercises the diagnostic store observer
     const uint8_t* pin=sealed::kStorePrologue;
-    const uint32_t stamp=ecm::kExpectedTimestamp,size=ecm::kExpectedImageSize;
+    const uint32_t stamp=avh::kExpectedTimestamp,size=avh::kExpectedImageSize;
     check(sealed::storeInstallDecision(true,stamp,size,stamp,size,pin,pin,16)==sealed::StoreInstall::kInstall,
           "flat world store: only pinned build and prologue admit hook");
     check(sealed::storeInstallDecision(true,stamp+1,size,stamp,size,pin,pin,16)==sealed::StoreInstall::kWrongIdentity&&

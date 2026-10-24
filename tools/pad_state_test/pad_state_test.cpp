@@ -1,14 +1,14 @@
 // Test rig for the pad-state probe's pure half (src/d3d11/pad_state_core.h): the identity and prologue decision, change detection (no line when
 // nothing changed, one line per change), the exact line texts, the bounded table and its full-table fallback (drop and count), and the line cap.
 // TEMPORARY, log only. No DLL and no game.
-#include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/avatar_hooks_core.h"
 #include "../../src/d3d11/pad_state_core.h"
 
 #include <cstdio>
 #include <cstring>
 
 namespace pad = edvr::padstate;
-namespace ecm = edvr::ecm;
+namespace avh = edvr::avh;
 
 namespace {
 
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     {
         const uint8_t pin[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
         uint8_t wrong[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x21};
-        const uint32_t wantStamp = ecm::kExpectedTimestamp, wantSize = ecm::kExpectedImageSize;
+        const uint32_t wantStamp = avh::kExpectedTimestamp, wantSize = avh::kExpectedImageSize;
         check(pad::kReaderRva[0] == 0x12C4CC0u && pad::kReaderRva[1] == 0x12CC020u && pad::kReaderRva[2] == 0x12CBE80u &&
                   pad::kReaderRva[3] == 0x12CC3C0u,
               "the four reader RVAs are the build 334925 readers");

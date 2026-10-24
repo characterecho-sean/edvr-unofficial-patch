@@ -27,7 +27,7 @@
 #include "draw_record_tag.h"   // F44: the marker probe's tag, find and match (after d3d11.h: its staging ring)
 #include "engine_velocity.h"   // F45: engineVelocityShadowSceneRows, the CB shadow's rows 270..275 (the world view's row 275)
 #include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
-#include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
+#include "native_on_foot_hooks.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
 #include "load_sampler.h"   // F24: the load sampler's tick (read only, temporary)
 #include "native_on_foot_core.h"
@@ -376,7 +376,7 @@ bool selectorValid(uintptr_t selector, const SelectorProbe& p) noexcept {
     return nofoot::selectorShapeOk(p.vtReadOk ? p.vt : 0, g_base + nofoot::kSetterVtableRva, p.ownerReadOk ? p.owner : 0, selector);
 }
 
-// The same PE check explorer_cam.cpp makes (its constants, in explorer_cam_core.h, are the ones shared here).
+// The same PE check native_on_foot_hooks.cpp makes (its constants, in avatar_hooks_core.h, are the ones shared here).
 bool checkIdentity(uintptr_t base, const char** why) noexcept {
     uint32_t peOff = 0, timestamp = 0, imageSize = 0;
     if (!guardedRead(base + 0x3C, &peOff, 4)) { *why = "a read faulted while checking the PE header"; return false; }
@@ -475,8 +475,8 @@ void refuse(const char* why) {
 }
 
 // The near relay. CodeHook's five-byte jump reaches only two gigabytes, and EDVR's DLL loads more than that from the game, so the
-// replacement is a relay placed within reach of the setter (explorer_cam.cpp's and skin_entity_hook.cpp's pattern: ecm::buildCallbackRelay
-// in explorer_cam_core.h, and allocateRelay below, copied from skin_entity_hook.cpp). The relay compares g_gate with zero: zero jumps to the
+// replacement is a relay placed within reach of the setter (native_on_foot_hooks.cpp's and skin_entity_hook.cpp's pattern: avh::buildCallbackRelay
+// in avatar_hooks_core.h, and allocateRelay below, copied from skin_entity_hook.cpp). The relay compares g_gate with zero: zero jumps to the
 // original (the trampoline), anything else jumps to setterHooked.
 uint8_t* g_relay = nullptr;
 alignas(8) std::atomic<uintptr_t> g_gate{0};
@@ -517,9 +517,9 @@ uint8_t* allocateRelay(uintptr_t target) noexcept {
 // relay executable, and sets g_original, so the original is reachable before any call can reach the hook.
 bool prepareRelay(void* trampoline, void*) noexcept {
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(g_relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(g_relay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(g_relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_relay, ecm::kCallbackRelayBytes)) return false;
+    if (!VirtualProtect(g_relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_relay, avh::kCallbackRelayBytes)) return false;
     g_original = reinterpret_cast<SetterFn>(address);
     return true;
 }
@@ -571,7 +571,7 @@ void installOnce() {
         refuse("no executable memory could be placed within two gigabytes of the setter, so the relay cannot reach it; nothing was patched");
         return;
     }
-    ecm::buildCallbackRelay(g_relay, &g_gate, reinterpret_cast<const void*>(&setterHooked));
+    avh::buildCallbackRelay(g_relay, &g_gate, reinterpret_cast<const void*>(&setterHooked));
     g_hook = new CodeHook();   // deliberately never deleted (see g_hook)
     if (!g_hook->install(reinterpret_cast<void*>(target), g_relay, nullptr, "native-on-foot-setter", &prepareRelay, nullptr)) {
         VirtualFree(g_relay, 0, MEM_RELEASE);
@@ -634,6 +634,23 @@ void retiredKeysNote(const Config& cfg, bool first) {
         Log::get().note("native on foot: fix.native_on_foot_arm_ads_shoulder_forward_cm is retired (F96): ignored (the ADS shoulder forward is a constant, 0 cm)");
     if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_ads_lean_deg", 8.0f) - 8.0f) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_arm_ads_lean_deg is retired (F96): ignored (the ADS lean is a constant, 8 deg)");
+    // F98: Explorer Cam's eight keys went with it (native on foot is the on-foot VR mode). The shipping file carries them at their last values.
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_up", 1.68f) - 1.68f) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_up is retired (F98): ignored (Explorer Cam was removed)");
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_forward", 0.10f) - 0.10f) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_forward is retired (F98): ignored (Explorer Cam was removed)");
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_right", 0.0f)) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_right is retired (F98): ignored (Explorer Cam was removed)");
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_trim_up", 0.15f) - 0.15f) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_trim_up is retired (F98): ignored (Explorer Cam was removed)");
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_trim_forward", -0.08f) + 0.08f) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_trim_forward is retired (F98): ignored (Explorer Cam was removed)");
+    if (std::fabs(cfg.getFloat("fix.explorer_cam_eye_trim_right", 0.0f)) > 1e-6f)
+        Log::get().note("native on foot: fix.explorer_cam_eye_trim_right is retired (F98): ignored (Explorer Cam was removed)");
+    if (cfg.getInt("fix.explorer_cam_follow_smoothing_ms", 0) != 0)
+        Log::get().note("native on foot: fix.explorer_cam_follow_smoothing_ms is retired (F98): ignored (Explorer Cam was removed)");
+    if (cfg.getString("hotkey.explorer_cam", "F5") != "F5")
+        Log::get().note("native on foot: hotkey.explorer_cam is retired (F98): ignored (Explorer Cam was removed; its key is no longer watched)");
     // F94a: fix.native_on_foot_eye_height_cm (retired in F68f) is a live key again, with a new meaning: the eyes' height over the commander's neck (readKey).
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
@@ -1145,7 +1162,7 @@ void readKey() {
     if (room > 2.5f) room = 2.5f;
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
     // F34: the reticle stub is the feature's (key 10 while native stereo is on foot); the probe key is gone.
-    // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp, explorerCamFpBody).
+    // F15 (TEMPORARY): the first-person body hide (native_on_foot_hooks.cpp, nativeOnFootFpBody).
     const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "on") == "on";
     g_fpKeyOn.store(fpOn, std::memory_order_relaxed);
     if (first || fpOn != g_fpKeyLast) {
@@ -1168,14 +1185,14 @@ void readKey() {
         Log::get().note("native on foot: fix.native_on_foot_body_cull is %s (temporary)", kBodyCullNames[bodyCullMode]);
         g_bodyCullKeyLast = bodyCullMode;
     }
-    // F19 (TEMPORARY): the body unclip, explorer_cam.cpp (explorerCamBodyClipTick, the fade hook's bodyClipStep). Written while native stereo is on foot.
+    // F19 (TEMPORARY): the body unclip, native_on_foot_hooks.cpp (nativeOnFootBodyClipTick, the fade hook's bodyClipStep). Written while native stereo is on foot.
     const bool unclipOn = cfg.getString("fix.native_on_foot_body_unclip", "on") == "on";
     g_unclipKeyOn.store(unclipOn, std::memory_order_relaxed);
     if (first || unclipOn != g_unclipKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_body_unclip is %s (temporary)", unclipOn ? "on" : "off");
         g_unclipKeyLast = unclipOn;
     }
-    // F21 (TEMPORARY): the hybrid first-person body (explorer_cam.cpp, explorerCamHybridTick). While it is on and native stereo is on foot it
+    // F21 (TEMPORARY): the hybrid first-person body (native_on_foot_hooks.cpp, nativeOnFootHybridTick). While it is on and native stereo is on foot it
     // overrides fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip.
     const bool hybridOn = cfg.getString("fix.native_on_foot_body_hybrid", "off") == "on";
     g_hybridKeyOn.store(hybridOn, std::memory_order_relaxed);
@@ -1191,7 +1208,7 @@ void readKey() {
 
 // The caller's address, image-relative; "+0x?" when it is not inside the game image.
 void callerText(uintptr_t caller, char* out, size_t cap) {
-    if (g_base && caller >= g_base && caller < g_base + ecm::kExpectedImageSize) {
+    if (g_base && caller >= g_base && caller < g_base + avh::kExpectedImageSize) {
         std::snprintf(out, cap, "+0x%llX", static_cast<unsigned long long>(caller - g_base));
     } else {
         std::snprintf(out, cap, "+0x?");
@@ -1347,7 +1364,7 @@ void gateByteTick(bool wantByte, const char* restoreReason) {
     Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E85B8A 0 -> 1 (restored: %s)", restoreReason);
 }
 
-// The avatar census (F1, log only): the local third-person avatar's parts and view masks, from Explorer Cam's head-hiding capture, read-only.
+// The avatar census (F1, log only): the local third-person avatar's parts and view masks, from the head-hiding capture (native_on_foot_hooks.cpp), read-only.
 uint64_t g_lastAvatarMs = 0;   // frame thread only
 void avatarLine(uint64_t nowMs) {
     if (!nativeOnFootActive()) return;
@@ -1511,7 +1528,7 @@ void hudStackDrain() {
 }
 
 // ---- the avatar census (F3, log only) -----------------------------------------------------------------------------------------------
-// Every 5 s while native stereo is on foot: the AMCs the fade hook collected in the window (explorer_cam.cpp), at most six, one line each
+// Every 5 s while native stereo is on foot: the AMCs the fade hook collected in the window (native_on_foot_hooks.cpp), at most six, one line each
 // (a second line for the parts that do not fit one).
 constexpr uint32_t kFpRows = 6;
 uint64_t g_lastFpMs = 0;   // frame thread only
@@ -1550,7 +1567,7 @@ void logAvatarRow(const AvatarCensusRow& r) {
 // F15 (TEMPORARY): the first-person body hide's zeroes as the hook left them, read straight after the write. The frame thread's own census read can
 // land after the game's next-frame rewrite, so this line is the evidence that the zero happened.
 void logFpBodyReadback() {
-    const FpBodyReadback rb = explorerCamFpBodyReadback();
+    const FpBodyReadback rb = nativeOnFootFpBodyReadback();
     if (rb.amc == 0) {
         Log::get().note("native on foot body: first-person masks not zeroed yet (parts found=%u, first-person AMC calls=%llu)", rb.parts,
                         static_cast<unsigned long long>(rb.mode2Seen));
@@ -2356,7 +2373,7 @@ bool f9Read(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
 // An image RVA of a pointer value, 0 when it is outside the image.
 uint32_t f9Rva(uint64_t value) noexcept {
     const uintptr_t base = g_base;
-    if (!base || value < base || value >= base + ecm::kExpectedImageSize) return 0;
+    if (!base || value < base || value >= base + avh::kExpectedImageSize) return 0;
     return static_cast<uint32_t>(value - base);
 }
 std::string f9RvaText(uint32_t rva, bool ok) {
@@ -4506,10 +4523,10 @@ uint64_t __fastcall f9HumanoidArRenderHooked(void* renderer, void* listA, void* 
 bool prepareF9Relay(void* trampoline, void* context) noexcept {
     F9Probe* probe = static_cast<F9Probe*>(context);
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(probe->relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(probe->relay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
     if (!VirtualProtect(probe->relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
-        !FlushInstructionCache(GetCurrentProcess(), probe->relay, ecm::kCallbackRelayBytes))
+        !FlushInstructionCache(GetCurrentProcess(), probe->relay, avh::kCallbackRelayBytes))
         return false;
     probe->original = trampoline;
     return true;
@@ -4550,7 +4567,7 @@ bool installF9ProbeInto(F9Probe& pr, const F9ProbeSpec& s, uintptr_t base, size_
         *whyOut = "no executable memory within two gigabytes of the target";
         return false;
     }
-    ecm::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
+    avh::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
     pr.hook = new CodeHook();
     if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &prepareF9Relay, &pr)) {
         const char* why = pr.hook->refusal();
@@ -7199,7 +7216,7 @@ std::string f9HrcValues(const F9HrcState& s) {
 
 // ---- F18 (TEMPORARY), probe P1: the eye against the body --------------------------------------------------------------------------------
 // EliteDangerous64.exe+0x3DA58A0 is the avatar visibility job: rcx = the AMC, rdx = the job context, whose floats [rdx+0..8] are the camera position
-// the visibility code subtracts from the AMC origin. Read-only (F95c's head class swap around the game's call is explorer_cam.cpp's, explorerCamHeadShadowBegin
+// the visibility code subtracts from the AMC origin. Read-only (F95c's head class swap around the game's call is native_on_foot_hooks.cpp's, nativeOnFootHeadShadowBegin
 // and End). The callback samples the local third-person AMC (amcLocal(), the same match as the
 // fade hook) once a second, under SEH, BEFORE it forwards to the game with its own arguments. The camera is read from [rdx]; the AMC's world matrix
 // comes from its transform call (origin at +0x30, rows 0-2 the basis); the body coordinates are (p - origin) dotted with each basis row. The head is
@@ -7223,7 +7240,7 @@ struct EyeSample {
     float origin[3] = {}, rows[9] = {}, headModel[3] = {};
     // F33: the third-person pov in world space (the head joint plus the rest offset, through the AMC matrix), when the rest offset is known.
     bool povOk = false;
-    bool povDerived = false;   // true: Explorer Cam's rest offset; false: the head joint itself (plus the trims)
+    bool povDerived = false;   // always false since F98: the head joint itself (plus the trims); the derived rest offset went with Explorer Cam
     // F37: the AMC's root matrix origin ([AMC+0x208] through the root getter) and its own position ([AMC+0x2E0]), for the verification line.
     bool rootOk = false, amcPosOk = false;
     float root[3] = {}, amcPos[3] = {};
@@ -7248,11 +7265,11 @@ uint64_t g_eyeLoggedStamp = 0;           // frame thread only
 __declspec(noinline) bool sehAmcMatrix(const uint8_t* amc, float* out16) noexcept {
     __try {
         uint64_t obj = 0, vt = 0, fn = 0;
-        std::memcpy(&obj, amc + ecm::kOffAmcTransform, 8);
+        std::memcpy(&obj, amc + avh::kOffAmcTransform, 8);
         if (obj < 0x10000u || obj >= 0x00007FFF00000000ull) return false;
         std::memcpy(&vt, reinterpret_cast<const void*>(obj), 8);
         if (vt < 0x10000u || vt >= 0x00007FFF00000000ull) return false;
-        std::memcpy(&fn, reinterpret_cast<const void*>(vt + ecm::kTransformMatrixSlot), 8);
+        std::memcpy(&fn, reinterpret_cast<const void*>(vt + avh::kTransformMatrixSlot), 8);
         if (fn < 0x10000u || fn >= 0x00007FFF00000000ull) return false;
         const uint64_t m = reinterpret_cast<uint64_t(__fastcall*)(uint64_t)>(fn)(obj);
         if (m < 0x10000u || m >= 0x00007FFF00000000ull) return false;
@@ -7299,13 +7316,11 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         for (size_t j = 0; j < 3; ++j) s.rows[3 * i + j] = M[4 * i + j];
     }
     if (s.headOk) std::memcpy(s.headModel, nk.head, sizeof(s.headModel));
-    // F33: the third-person pov: the head joint plus the rest offset (model space), through the AMC matrix (row vectors, as the head above).
-    // The rest offset is Explorer Cam's when its walk has derived one; otherwise the head joint itself (the pov source is logged).
-    float rest[3] = {};
-    s.povDerived = s.headOk && explorerCamRestPovDelta(rest);
+    // F33: the third-person pov: the head joint (model space), through the AMC matrix (row vectors, as the head above). F98: the head joint itself,
+    // always; the rest offset to the povCamera joint was derived only by Explorer Cam's placement, removed with it (the pov source is logged).
+    s.povDerived = false;
     if (s.headOk) {
-        if (!s.povDerived) rest[0] = rest[1] = rest[2] = 0.0f;
-        const float pm[3] = {nk.head[0] + rest[0], nk.head[1] + rest[1], nk.head[2] + rest[2]};
+        const float pm[3] = {nk.head[0], nk.head[1], nk.head[2]};
         for (size_t j = 0; j < 3; ++j) s.pov[j] = pm[0] * M[j] + pm[1] * M[4 + j] + pm[2] * M[8 + j] + M[12 + j];
         s.povOk = true;
     }
@@ -7890,40 +7905,40 @@ void fpPartTableDump(uintptr_t a) noexcept {
     if (a == g_f48PartsAmc) return;
     g_f48PartsAmc = a;
     uint32_t populated = 0, unread = 0;
-    for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx) {
-        const uintptr_t at = a + static_cast<uintptr_t>(idx) * ecm::kPartStride;
-        uint64_t inst[ecm::kPartVariants] = {}, mask[ecm::kPartVariants] = {};
+    for (uint32_t idx = 0; idx < avh::kPartCount; ++idx) {
+        const uintptr_t at = a + static_cast<uintptr_t>(idx) * avh::kPartStride;
+        uint64_t inst[avh::kPartVariants] = {}, mask[avh::kPartVariants] = {};
         uint8_t flags = 0;
         int32_t sp[3] = {};   // state, pending, current
-        if (!guardedRead(at + ecm::kOffAmcInstances, inst, sizeof(inst)) || !guardedRead(at + ecm::kOffAmcMasks, mask, sizeof(mask)) ||
-            !guardedRead(at + ecm::kOffAmcPartFlags, &flags, 1) || !guardedRead(at + ecm::kOffAmcPartState, &sp[0], 4) ||
-            !guardedRead(at + ecm::kOffAmcPartPending, &sp[1], 4) || !guardedRead(at + ecm::kOffAmcPartCurrent, &sp[2], 4)) {
+        if (!guardedRead(at + avh::kOffAmcInstances, inst, sizeof(inst)) || !guardedRead(at + avh::kOffAmcMasks, mask, sizeof(mask)) ||
+            !guardedRead(at + avh::kOffAmcPartFlags, &flags, 1) || !guardedRead(at + avh::kOffAmcPartState, &sp[0], 4) ||
+            !guardedRead(at + avh::kOffAmcPartPending, &sp[1], 4) || !guardedRead(at + avh::kOffAmcPartCurrent, &sp[2], 4)) {
             ++unread;
             continue;
         }
         bool any = flags != 0;
-        for (uint32_t k = 0; k < ecm::kPartVariants; ++k) any = any || inst[k] != 0 || mask[k] != 0;
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k) any = any || inst[k] != 0 || mask[k] != 0;
         if (!any) continue;
         ++populated;
         Log::get().note("native on foot FP part table (AMC 0x%llX): part %u %s: inst 0x%llX 0x%llX 0x%llX 0x%llX; mask 0x%llX 0x%llX 0x%llX 0x%llX; "
                         "flags 0x%02X state %d pending %d current %d",
-                        static_cast<unsigned long long>(a), static_cast<unsigned>(idx), ecm::kPartNames[idx],
+                        static_cast<unsigned long long>(a), static_cast<unsigned>(idx), avh::kPartNames[idx],
                         static_cast<unsigned long long>(inst[0]), static_cast<unsigned long long>(inst[1]), static_cast<unsigned long long>(inst[2]),
                         static_cast<unsigned long long>(inst[3]), static_cast<unsigned long long>(mask[0]), static_cast<unsigned long long>(mask[1]),
                         static_cast<unsigned long long>(mask[2]), static_cast<unsigned long long>(mask[3]), static_cast<unsigned>(flags), sp[0], sp[1], sp[2]);
     }
     Log::get().note("native on foot FP part table (AMC 0x%llX): %u of %u entries populated (an instance, a mask or the flag byte non-zero), %u not readable",
-                    static_cast<unsigned long long>(a), populated, static_cast<unsigned>(ecm::kPartCount), unread);
+                    static_cast<unsigned long long>(a), populated, static_cast<unsigned>(avh::kPartCount), unread);
 }
 // F68d: how many parts of the FP AMC have an instance (what the FP skeleton submits: a drawn weapon is one more), read each FP call; the onset
 // instrument's third column. Game thread.
 std::atomic<uint32_t> g_fpPartsN{0};
 uint32_t fpPartCount(uintptr_t a) noexcept {
     uint32_t n = 0;
-    for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx) {
-        uint64_t inst[ecm::kPartVariants] = {};
-        if (!guardedRead(a + static_cast<uintptr_t>(idx) * ecm::kPartStride + ecm::kOffAmcInstances, inst, sizeof(inst))) continue;
-        for (uint32_t k = 0; k < ecm::kPartVariants; ++k)
+    for (uint32_t idx = 0; idx < avh::kPartCount; ++idx) {
+        uint64_t inst[avh::kPartVariants] = {};
+        if (!guardedRead(a + static_cast<uintptr_t>(idx) * avh::kPartStride + avh::kOffAmcInstances, inst, sizeof(inst))) continue;
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k)
             if (inst[k]) {
                 ++n;
                 break;
@@ -8161,9 +8176,9 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     // F95c: the head through the game's call as shadow-only (the game's own class 2), put back after it; the fade hook then keeps the head's shadow views. Every
     // call goes through Begin, which also withdraws the AMC's previous ticket; it writes only for the local third-person AMC while the head hide writes.
     nofoot::f95c::Swap headShadow;
-    const bool swapped = amc && explorerCamHeadShadowBegin(amc, job, &headShadow, !g_eyeStop.load(std::memory_order_relaxed));
+    const bool swapped = amc && nativeOnFootHeadShadowBegin(amc, job, &headShadow, !g_eyeStop.load(std::memory_order_relaxed));
     const uint64_t result = original(amc, job);
-    if (swapped) explorerCamHeadShadowEnd(&headShadow);
+    if (swapped) nativeOnFootHeadShadowEnd(&headShadow);
     return result;
 }
 
@@ -8389,7 +8404,7 @@ void bodyShiftApply(uint64_t amc) noexcept {
                 if (movedAt[idx][k]) ++partsShifted;
                 if (!present[idx][k]) continue;
                 Log::get().note("native on foot body shift part: block %d slot %d name %s mask %016llX %s", idx, k,
-                                idx < ecm::kPartCount ? ecm::kPartNames[idx] : "?", static_cast<unsigned long long>(maskAt[idx][k]),
+                                idx < avh::kPartCount ? avh::kPartNames[idx] : "?", static_cast<unsigned long long>(maskAt[idx][k]),
                                 movedAt[idx][k] ? "shifted" : (dz ? "present (d zero: not shifted)" : "present, not shifted"));
             }
         Log::get().note("native on foot body shift: %u parts present, %u shifted this pass (%llu records shifted, %llu skipped; d %s)", partsPresent,
@@ -16514,7 +16529,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
             n = n > 1e-12f ? 1.0f / std::sqrt(n) : 1.0f;
             for (int i = 0; i < 4; ++i) q[i] *= n;
-            ecm::quatRows(q, rows);
+            avh::quatRows(q, rows);
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) MH[r * 4 + c] = rows[r * 3 + c];
                 MH[r * 4 + 3] = 0.0f;
@@ -17936,7 +17951,7 @@ void pfzIdentLine(int mode, bool ads, bool headFresh) noexcept {
                         "(P %016llX%s, %llu Animate calls in 5-10 s), X=*(iface+0x120) %016llX (P %016llX%s, %llu calls); [iface+0x2C0]=%016llX "
                         "[iface+0xF8]=%016llX; the census takes %016llX: %s (%llu X seen with P = GetPoseData)",
                         slot ? "FP" : "3P (local, g_skelIface[0])", static_cast<unsigned long long>(c.iface.load(std::memory_order_relaxed)),
-                        ecm::hkindText(static_cast<uint32_t>(c.kind.load(std::memory_order_relaxed))),
+                        avh::hkindText(static_cast<uint32_t>(c.kind.load(std::memory_order_relaxed))),
                         static_cast<unsigned long long>(nowMs >= stamp ? nowMs - stamp : 0), static_cast<unsigned long long>(gp),
                         static_cast<unsigned long long>(xa), static_cast<unsigned long long>(pa), gp && pa == gp ? " = GetPoseData" : "",
                         static_cast<unsigned long long>(pfz::xCount(xa)), static_cast<unsigned long long>(xb), static_cast<unsigned long long>(pb),
@@ -20179,7 +20194,7 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 }
 
 // ---- F93d: the game's camera gates the body changes (native_on_foot.h, nativeOnFootCameraExternal) ------------------------------------------------
-// Frame thread, every boundary. The camera controller's mode byte is read by Explorer Cam's controller hook after each game update (explorer_cam.cpp,
+// Frame thread, every boundary. The camera controller's mode byte is read by the avatar hooks' controller hook after each game update (native_on_foot_hooks.cpp,
 // nativeCamAfterUpdate); this tick logs each change between the game's first-person camera and its third-person camera suite with what the body's hooks
 // held back, says once per stretch on foot that the reads happen (or that they do not, and why), and clears a suite state the controller stopped
 // confirming (no read for a second) or that outlived native stereo on foot.
@@ -20192,7 +20207,7 @@ struct F93dState {
 };
 F93dState g_f93d;
 const char* f93dModeText(uint32_t packed) {
-    return (packed & 0x100u) ? ecm::modeText(packed & 0xFFu) : "never read";
+    return (packed & 0x100u) ? avh::modeText(packed & 0xFFu) : "never read";
 }
 void cameraGateTick(uint64_t now) noexcept {
     F93dState& s = g_f93d;
@@ -20209,7 +20224,7 @@ void cameraGateTick(uint64_t now) noexcept {
         Log::get().note("native on foot camera (F93d): first person (native stereo on foot ended) -- body changes on (from the next stretch on foot)");
     }
     if (!in.active) return;
-    const ExplorerCamNativeCameraStats ec = explorerCamNativeCameraStats();
+    const NativeOnFootCameraStats ec = nativeOnFootCameraStats();
     if (w.watching) {
         const uint32_t m = g_nativeOnFootCamMode.load(std::memory_order_relaxed);
         Log::get().note("native on foot camera (F93d): watching the game's camera: the camera controller 0x%llX reads mode %u (%s) after its update; the body changes "
@@ -20266,12 +20281,12 @@ void cameraGateTick(uint64_t now) noexcept {
     }
 }
 
-// ---- F95c: the commander's head kept in the shadows (native_on_foot_f95c.h; explorer_cam.cpp, explorerCamHeadShadowBegin, End and headHideStep) ---------
+// ---- F95c: the commander's head kept in the shadows (native_on_foot_f95c.h; native_on_foot_hooks.cpp, nativeOnFootHeadShadowBegin, End and headHideStep) ---------
 // Frame thread, every boundary while native stereo is on foot: once a second, what the visibility hook and the fade hook did with the head that second (the
 // (instance, view) pairs are what the game draws: one set bit of a mask is the instance drawn into that view); the views of the local avatar's visibility call
 // whenever their flags change; the stand-down once.
 struct F95cState {
-    ExplorerCamHeadShadowStats last;
+    NativeOnFootHeadShadowStats last;
     uint64_t nextMs = 0;
     uint64_t viewSig = 0;
     bool downSaid = false;
@@ -20291,20 +20306,20 @@ void headShadowTick(uint64_t now) noexcept {
         return;
     }
     if (s.nextMs == 0) {
-        s.last = explorerCamHeadShadowStats();
+        s.last = nativeOnFootHeadShadowStats();
         s.nextMs = now + 1000;
         return;
     }
     if (now < s.nextMs) return;
     s.nextMs = now + 1000;
-    const ExplorerCamHeadShadowStats c = explorerCamHeadShadowStats();
-    const ExplorerCamHeadShadowStats& p = s.last;
+    const NativeOnFootHeadShadowStats c = nativeOnFootHeadShadowStats();
+    const NativeOnFootHeadShadowStats& p = s.last;
     if (c.down && !s.downSaid) {
         s.downSaid = true;
         Log::get().note("native on foot head shadow (F95c): stood down for the session after %u faults: the head hide zeroes the head's masks as before (no head in "
                         "the shadow)", c.faults);
     }
-    const ExplorerCamHeadShadowViews& v = c.views;
+    const NativeOnFootHeadShadowViews& v = c.views;
     uint64_t sig = static_cast<uint64_t>(v.n) * 0x9E3779B97F4A7C15ull ^ v.more;
     for (uint32_t i = 0; i < v.distinct && i < 8; ++i) sig = (sig ^ (static_cast<uint64_t>(v.flags[i]) << 16 ^ v.count[i])) * 0x100000001B3ull;
     if (v.n && sig != s.viewSig) {
@@ -20338,7 +20353,7 @@ void headShadowTick(uint64_t now) noexcept {
 // ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
 // HumanoidModelManager::SetMode (vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5204168, build 334925) sets the model mode: 0 =
 // first-person models, 1 = third-person models (the first-person avatar hidden, the third-person body and its weapon shown). It does not touch
-// the camera type, so the first-person view, the HUD gate and isFirstPerson stay as they are. Two hooks, both relays (ecm::buildCallbackRelay):
+// the camera type, so the first-person view, the HUD gate and isFirstPerson stay as they are. Two hooks, both relays (avh::buildCallbackRelay):
 //   - a detour on SetMode: the game's requests for the local player are recorded and, while the body is wanted as third person, a request for
 //     0 (first-person models) is forwarded as 1, or as 0 while aiming down sights. EDVR's own calls go through the trampoline, never the detour.
 //   - an entry hook on the povCamera handler (EliteDangerous64.exe+0x19B3F40, every humanoid, every frame): the original runs first, then the
@@ -20411,18 +20426,18 @@ void modePush(const ModeEvent& e) {
 
 bool prepareModeSetRelay(void* trampoline, void*) noexcept {
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(g_modeSetRelay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(g_modeSetRelay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(g_modeSetRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_modeSetRelay, ecm::kCallbackRelayBytes))
+    if (!VirtualProtect(g_modeSetRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_modeSetRelay, avh::kCallbackRelayBytes))
         return false;
     g_modeSetOriginal = reinterpret_cast<ModeSetFn>(address);
     return true;
 }
 bool preparePovRelay(void* trampoline, void*) noexcept {
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(g_povRelay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(g_povRelay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(g_povRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_povRelay, ecm::kCallbackRelayBytes))
+    if (!VirtualProtect(g_povRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_povRelay, avh::kCallbackRelayBytes))
         return false;
     g_povOriginal = reinterpret_cast<PovFn>(address);
     return true;
@@ -20562,8 +20577,8 @@ void installModeHooks() {
         modeRefuse("no executable memory within two gigabytes of the targets for the relays");
         return;
     }
-    ecm::buildCallbackRelay(g_modeSetRelay, &g_modeSetGate, reinterpret_cast<const void*>(&modeSetCallback));
-    ecm::buildCallbackRelay(g_povRelay, &g_povGate, reinterpret_cast<const void*>(&povCallback));
+    avh::buildCallbackRelay(g_modeSetRelay, &g_modeSetGate, reinterpret_cast<const void*>(&modeSetCallback));
+    avh::buildCallbackRelay(g_povRelay, &g_povGate, reinterpret_cast<const void*>(&povCallback));
     g_modeSetHook = new CodeHook();
     if (!g_modeSetHook->install(reinterpret_cast<void*>(base + kModeSetRva), g_modeSetRelay, nullptr, "native-on-foot-body-mode-set",
                                 &prepareModeSetRelay, nullptr)) {
@@ -27420,9 +27435,9 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const bool hudKeyOn = g_hudKeyOn.load(std::memory_order_relaxed);
     const char* hudWhy = !hudKeyOn ? "fix.native_on_foot_hud is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";
     hudOverrideTick(hudKeyOn && nativeOnFootActive() && session, hudWhy);
-    // The body (F2): Explorer Cam's fade and head-part code runs while native stereo is on foot. Its head hooks are wanted from launch while the key is on.
+    // The body (F2): the avatar hooks' fade and head-part code runs while native stereo is on foot (native_on_foot_hooks.cpp). Its hooks are wanted from launch while the key is on.
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
-    explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
+    nativeOnFootHooksBody(keyOn, nativeOnFootActive(), bodyWhy);
     cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
     headShadowTick(now);   // F95c: the head kept in the shadows; its lines
     gateLine(now);
@@ -27557,19 +27572,19 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     }
     const bool visorWant = visorUp && breathable && nativeOnFootActive() && session;
     visorTick(visorWant, !visorUp ? "the visor in breathable air is game" : !breathable ? "breathable air off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
-    // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
-    // F21 (TEMPORARY): the hybrid body (explorer_cam.cpp, explorerCamHybridTick). While on, it overrides the two body keys below.
+    // F15 (TEMPORARY): the first-person body hide (native_on_foot_hooks.cpp), while native stereo is on foot and its key is on.
+    // F21 (TEMPORARY): the hybrid body (native_on_foot_hooks.cpp, nativeOnFootHybridTick). While on, it overrides the two body keys below.
     const bool hybridKey = g_hybridKeyOn.load(std::memory_order_relaxed);
     const bool hybridWant = hybridKey && nativeOnFootActive();
-    explorerCamHybridTick(now, hybridWant, !hybridKey ? "fix.native_on_foot_body_hybrid is off" : "native stereo on foot ended");
+    nativeOnFootHybridTick(now, hybridWant, !hybridKey ? "fix.native_on_foot_body_hybrid is off" : "native stereo on foot ended");
     const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
-    explorerCamFpBody((fpKey || hybridWant) && nativeOnFootActive(),
+    nativeOnFootFpBody((fpKey || hybridWant) && nativeOnFootActive(),
                       !(fpKey || hybridWant) ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
-    // F19 (TEMPORARY): the body's clip modifiers (unclip, written while native stereo is on foot) and their 5 s probe (explorer_cam.cpp).
+    // F19 (TEMPORARY): the body's clip modifiers (unclip, written while native stereo is on foot) and their 5 s probe (native_on_foot_hooks.cpp).
     const bool unclipKey = g_unclipKeyOn.load(std::memory_order_relaxed);
-    explorerCamBodyClipTick(now, unclipKey && !hybridWant && nativeOnFootActive(), nativeOnFootActive(),
+    nativeOnFootBodyClipTick(now, unclipKey && !hybridWant && nativeOnFootActive(), nativeOnFootActive(),
                             !(unclipKey && !hybridWant) ? "fix.native_on_foot_body_unclip is off or the hybrid body is on" : "native stereo on foot ended");
-    // F19 (TEMPORARY): the constant-buffer probe's flag (on foot, native or Explorer Cam) and the drain of its readings.
+    // F19 (TEMPORARY): the constant-buffer probe's flag (on foot) and the drain of its readings.
     bodyModeTick(now, session);   // F20 (TEMPORARY): the model mode (fix.native_on_foot_body_mode), the hooks' wants and their lines
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
@@ -27615,9 +27630,9 @@ void nativeOnFootShutdown() {
         F9Lock lock;
         g_hudOffsetOn = false;                                  // F16: the layout hook applies no offsets from here
     }
-    explorerCamFpBody(false, "the game is shutting down");
-    explorerCamHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
-    explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
+    nativeOnFootFpBody(false, "the game is shutting down");
+    nativeOnFootHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
+    nativeOnFootBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     bodyModeShutdown();                                                                    // F20
     g_lookEngaged.store(false, std::memory_order_relaxed);                                 // F22: no more input; the hooks pass through
     g_lookInput.store(0.0f, std::memory_order_relaxed);

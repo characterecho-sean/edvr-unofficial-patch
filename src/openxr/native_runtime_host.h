@@ -2609,7 +2609,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return XR_ERROR_RUNTIME_FAILURE;
     }
     StereoWallTimes wall{};
-    // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
+    // The comfort fade (comfort_fade.h), on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
     // F89: the left eye's darkening (fix.native_on_foot_ads_close_left_eye), also on a replayed pair: it is this frame's level, an argument of each draw.

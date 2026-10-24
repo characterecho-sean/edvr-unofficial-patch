@@ -1107,7 +1107,7 @@ int wmain(int argc, wchar_t** argv) {
             check(noFoot.why == 0 && !noFoot.footResolved && noFoot.anchor == 1 && noFoot.count == 5,
                   "F49: an unresolved foot anchors at the root's child on the neck's path");
             check(nf::pfzFrozenSet(parents, 9, 1, 8).why == 4, "F49: a neck that is the common ancestor itself is refused");
-            // The rest chain: rest locals composed parent first match the explorer cam walk (position and rotation).
+            // The rest chain: rest locals composed parent first match the skeleton walk (avatar_skeleton_core.h; position and rotation).
             float locals[9 * 8] = {};
             for (int j = 0; j < 9; ++j) {
                 const float ang = 0.15f * static_cast<float>(j + 1), ax[3] = {0.3f, 0.8f, -0.5f};
@@ -1123,13 +1123,13 @@ int wmain(int argc, wchar_t** argv) {
             float model[16] = {}, walk[3] = {}, rot[9] = {};
             uint32_t depth = 0;
             const bool okModel = nf::pfzRestModel(locals, parents, 9, 6, model);
-            const bool okWalk = edvr::ecm::walkJointToModel(locals, parents, 9, 6, walk, &depth) &&
-                                edvr::ecm::walkJointRotationToModel(locals, parents, 9, 6, rot);
+            const bool okWalk = edvr::avh::walkJointToModel(locals, parents, 9, 6, walk, &depth) &&
+                                edvr::avh::walkJointRotationToModel(locals, parents, 9, 6, rot);
             double err = 0.0;
             for (int i = 0; i < 3; ++i) err = std::max(err, std::fabs(static_cast<double>(model[12 + i]) - walk[i]));
             for (int i = 0; i < 3; ++i)
                 for (int k = 0; k < 3; ++k) err = std::max(err, std::fabs(static_cast<double>(model[i * 4 + k]) - rot[i * 3 + k]));
-            check(okModel && okWalk && err < 1e-5, "F49: restLocal x parent, composed to the root, equals the explorer cam walk");
+            check(okModel && okWalk && err < 1e-5, "F49: restLocal x parent, composed to the root, equals the skeleton walk");
             // M'_j = restLocal_j x M'_parent, anchored at an animated hips matrix: the child's model matrix is its local times the anchor's.
             float anchorM[16] = {}, l2[16] = {}, chain2[16] = {}, inv[16] = {}, back[16] = {};
             nf::pfzLocalMatrix(locals + 1 * 8, anchorM);
@@ -6036,7 +6036,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::g_nativeOnFootActive.store(false);
     g_journalActive = g_onFootKnown = g_onFoot = false;
 
-    // ---- Explorer Cam's comfort fade (comfort_fade.h; EdvrNativeFrameOutput::fadeAlpha, version 5) --------------------------------------------------------------
+    // ---- The comfort fade (comfort_fade.h; EdvrNativeFrameOutput::fadeAlpha, version 5; Explorer Cam's until F98) --------------------------------------------------------------
     {
         uint64_t seq = 40;
         auto ask5 = [&](float* fade) {

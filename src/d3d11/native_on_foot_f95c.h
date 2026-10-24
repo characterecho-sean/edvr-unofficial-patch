@@ -1,5 +1,5 @@
 // F95c (native on-foot VR): the commander's head kept in the shadows. The pure parts. Header only, no game or D3D11 state, so native_frame_test runs the very
-// functions the avatar visibility job's hook (native_on_foot.cpp, eyeProbeHooked) and the fade hook (explorer_cam.cpp, headHideStep) use. Journal: the arc doc,
+// functions the avatar visibility job's hook (native_on_foot.cpp, eyeProbeHooked) and the fade hook (native_on_foot_hooks.cpp, headHideStep) use. Journal: the arc doc,
 // 2026-10-24, F95c.
 //
 // The game's avatar visibility job (EliteDangerous64.exe+0x3DA58A0, build 334925; rcx = the AvatarModelComponent, rdx = the job context; read with capstone on the
@@ -32,7 +32,7 @@ constexpr uint32_t kViewFlagsOff = 0x688;   // the view's flags, a dword
 constexpr uint32_t kMaxViews = 64;          // a mask is 64 bits; a larger count is not a context this reads
 constexpr uint32_t kShadowish = 0x7FF0;     // 0x2856680: the view is shadow-ish
 constexpr uint32_t kShadowCast = 0x1030;    // class 2's second test (0x3DA5DDD)
-constexpr uint32_t kOffPartClass = 0x1820;  // AMC + this + idx*0x680: the part's visibility class (explorer_cam_core.h, kOffAmcPartState)
+constexpr uint32_t kOffPartClass = 0x1820;  // AMC + this + idx*0x680: the part's visibility class (avatar_hooks_core.h, kOffAmcPartState)
 
 // ---- the part classes ----------------------------------------------------------------------------------------------------------------------------------------------
 constexpr int32_t kClassAll = 1, kClassShadow = 2, kClassMain = 3, kClassNever = 0;

@@ -659,7 +659,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\explorer_cam.cpp" "src\d3d11\native_on_foot.cpp" ^
+    "src\d3d11\native_on_foot_hooks.cpp" "src\d3d11\native_on_foot.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -1871,7 +1871,7 @@ echo [edvr] === hotkey_capture_test.exe ===
 REM The F8 menu's Hotkeys page below the menu: the three hotkey value formats and their round trip
 REM through edvr.ini, the pad and joystick edge, the joystick table against synthetic DIJOYSTATE2
 REM buffers on a read-only page, the capture state machine, the checks on a captured binding
-REM (duplicate, reserved, Elite clash, the Explorer Cam lock), Elite's bindings read for keyboard,
+REM (duplicate, reserved, Elite clash), Elite's bindings read for keyboard,
 REM pad and joystick, and which generated rows are on the page in which tier. Nothing is opened:
 REM no device, no window, no game.
 if not exist "%OBJ%\hotkeycapturetest" mkdir "%OBJ%\hotkeycapturetest"
@@ -3396,50 +3396,25 @@ if errorlevel 1 ( echo [edvr] ERROR: transition flash prevent test build failed 
 "%BUILD%\transition_flash_prevent_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_explorer_cam_test
-echo [edvr] === explorer_cam_test.exe ===
-REM Build gate for Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
-REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-334925 identity and CodeHook's reading of all five
-REM prologues, the eye keys' clamp, the exact 16 floats written into the free camera's commander-local pose, the placement machine on
-REM scripted state sequences, the F5 sequencer on scripted mode sequences (enter from every mode, timeouts, the player's own TAB engaging
-REM nothing, detach and re-attach, exit), F5's decision table, the camera-UI hider, the watches, the event ring, every log line's text and
-REM the relays' machine code. Part B compiles the REAL glue (explorer_cam.cpp, EDVR_EXPLORER_CAM_TEST) with the real CodeHook and installs all
-REM five hooks on synthetic functions that begin with the real prologues: the pose is written before the original, every pressed int is 1
-REM for exactly one call and restored after it, both bypass relays answer 0 without running the function for the placed activity only and
-REM hand every other call, with its arguments (the sweep's fifth on the stack), to the original, each wrong prologue stands down with one
-REM line and no patch, F5 opens the camera, switches to the free camera, places, locks and hides the UI and F5 again gives the UI back and
-REM closes the camera, the hotkey is checked against a fixture of the player's Elite bindings at launch and on a rebind, faults are counted
-REM and the eighth ends the feature, and the keys are read from the config under their real names.
-if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
+:rig_native_on_foot_hooks_test
+echo [edvr] === native_on_foot_hooks_test.exe ===
+REM Build gate for native on foot's avatar hooks (src\d3d11\native_on_foot_hooks.cpp; docs\design-native-onfoot-vr-2026-10-13.md). Part A drives the
+REM pure half the DLL compiles (src\d3d11\avatar_hooks_core.h, avatar_skeleton_core.h): the build-334925 identity and CodeHook's reading of the three
+REM prologues, the avatar fade guard, the ring, the callback relay's machine code, the head-hiding tables, the local-AMC test, the capture filter and
+REM the census text. Part B compiles the REAL glue (EDVR_NATIVE_ON_FOOT_HOOKS_TEST) with the real CodeHook and installs the three hooks on synthetic
+REM functions that begin with the real prologues: nothing is installed until native on foot wants the hooks, the want acts at the next boundary, the
+REM hooks go in in order (FindJoint, the fade, the controller), each wrong prologue stands its hook down with one line and no patch, the fade global
+REM goes to 0 for the body and back to -1 when it ends and at unload, head hiding writes only for the local avatar in first person, the capture
+REM latches only the local humanoid, and the camera signal is read after the controller's update and changes nothing.
+if not exist "%OBJ%\nofoothooks" mkdir "%OBJ%\nofoothooks"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
-    /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
-    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\d3d11\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
-    "src\common\hotkey.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_NATIVE_ON_FOOT_HOOKS_TEST /I"%GEN%" ^
+    /Fo"%OBJ%\nofoothooks"\ /Fe"%BUILD%\native_on_foot_hooks_test.exe" ^
+    "tools\native_on_foot_hooks_test\native_on_foot_hooks_test.cpp" "src\d3d11\native_on_foot_hooks.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
-"%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_explorer_cam_fade_test
-echo [edvr] === explorer_cam_fade_test.exe ===
-REM Build gate for the entry fade's wait for the engine's motion (src\d3d11\explorer_cam_fade_core.h, "MOTION"; docs\kinematic-motion-injection-2026-09-19.md,
-REM "F12 fixes built"): the pure comfort timeline driven with the facts the glue feeds it from the engine (engine_motion_ready.h). An entry that is otherwise
-REM ready fades in at once when the engine's motion is live (the eye path's views for three frames in a row, and the second skin's join when the frame has
-REM skinned jobs), holds black until it is, gives up one second after it was otherwise ready and says which condition was missing, does not wait for a join
-REM in a scene with no characters, waits for nothing when the engine's motion is not armed, never delays an exit, waits on a re-attach like an entry, starts
-REM the hold over when the entry stops being ready, and leaves the 3 s cap from the press as it was. The lines. No device needed.
-REM tools\explorer_cam_fade_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
-if not exist "%OBJ%\explorercamfade" mkdir "%OBJ%\explorercamfade"
-%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
-    /Fo"%OBJ%\explorercamfade"\ /Fe"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" ^
-    "tools\explorer_cam_fade_test\explorer_cam_fade_test.cpp" ^
-    /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: explorer_cam_fade_test build failed & exit /b 1 )
-"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --dry-run || exit /b 1
-"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --self-test "%ROOT%" || exit /b 1
-python "tools\explorer_cam_fade_test\mutants.py" --self-test || exit /b 1
+if errorlevel 1 ( echo [edvr] ERROR: native on foot hooks test build failed & exit /b 1 )
+"%BUILD%\native_on_foot_hooks_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_menu_edit_hold_test

@@ -48,7 +48,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "store_hook.h"
 #include "flat_world_witness.h"
-#include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
+#include "native_on_foot_hooks.h"   // nativeOnFootHooksFrameBoundary (the frame tick) and nativeOnFootHooksShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -1242,11 +1242,10 @@ EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's 
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
 EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
-// Explorer Cam (explorer_cam.h): reads its keys, installs its hooks, publishes the settings to the hook thread and writes its log lines. It lived in vScreen's
-// boundary until 2026-10-08, which only exists when vScreen installs a State: with fix.black_void off, fix.panel_distance 1, no flash observation,
-// advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs transport-only and F5 did nothing. Here it runs every owned Present.
-EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // Native on-foot VR, flight F0 (native_on_foot.h): installs the render-mode setter's hook once in VR, reads fix.native_on_foot and writes the setter's log lines.
+// Its avatar hooks (native_on_foot_hooks.h) run first in the same tick. Not vScreen's boundary, which only exists when vScreen installs a State (with
+// fix.black_void off, fix.panel_distance 1, no flash observation, advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs
+// transport-only): here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkNativeOnFoot, "native_on_foot");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
@@ -1632,10 +1631,12 @@ void presentFrameBoundary() {
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
-    // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
-    // every frame too, so binding it live arms the feature on the next one.
-    tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
-    tkNativeOnFoot.run([] { nativeOnFootFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
+    // Native on foot, after the journal's tick it reads (on foot, gameplay). The avatar hooks' boundary runs first: it acts on the want and the body
+    // the previous frame's nativeOnFootFrameBoundary published (native_on_foot_hooks.h), which keeps their one-frame order.
+    tkNativeOnFoot.run([] {
+        nativeOnFootHooksFrameBoundary();
+        nativeOnFootFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));
+    });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that
@@ -2051,7 +2052,7 @@ std::string hotkeyDescribe(const Hotkey& k) {
 
 // The three diagnostic keys, bound at launch and RE-bound whenever the ini says
 // something else: the settings menu's Hotkeys page writes these while the game
-// runs, so (like hotkey.menu and hotkey.explorer_cam) they re-resolve live. A
+// runs, so (like hotkey.menu) they re-resolve live. A
 // reload that changed none of them says nothing.
 //
 // The bind is SAID, because it failed silently once: dump_draws was set to
@@ -2231,7 +2232,7 @@ void seatContextPublish() {
         c.seated = c.seatedKnown && journalSeated();
         c.onFootKnown = journalOnFootKnown();
         c.onFoot = c.onFootKnown && journalOnFoot();
-        c.cameraOpen = explorerCamSessionActive();
+        c.cameraOpen = false;   // the word keeps the bit (seat_context.h); nothing in this build opens a camera session since Explorer Cam's removal
         c.seatKind = journalSeatKind();
         c.transitions = (journalEmbarks() + journalDisembarks() + journalLoadGames() + journalUndocks()) & kSeatTransitionMask;
         word = encodeSeatContext(c);
@@ -2625,7 +2626,7 @@ void hookDevice(ID3D11Device* device) {
                 "hooks are installed on the device or on its context, this session "
                 "or any other: the black void, the panel distance, the exposure "
                 "share, the transition flash fix, the anti-aliasing passes, "
-                "the shader replacements and Explorer Cam are "
+                "the shader replacements and native on foot are "
                 "all inert, and the game renders as it would without this half "
                 "installed. What is still hooked is the swapchain's Present and "
                 "the DXGI factory, which carry the frame boundary the openvr half "
@@ -2655,7 +2656,7 @@ void hookDevice(ID3D11Device* device) {
             "ended in the first few seconds looks the same from here. EVERY fix in "
             "d3d11.dll is off for THIS session only, on every device, and it will try again next "
             "launch: the black void, the panel distance, the exposure share, the "
-            "transition flash fix and Explorer Cam. The game "
+            "transition flash fix and native on foot. The game "
             "renders without EDVR's graphics treatments; the EDVR menu is unavailable "
             "until the next launch. The OpenVR half has its own recovery guard.\n"
             "  If this keeps happening, the hooks really are crashing and the log is "
@@ -3303,10 +3304,10 @@ void shutdownDeviceHooks() {
     // keyboard the game never gets back.
     menuShutdown();
     journalWatchShutdown();
-    // Explorer Cam: the avatar dither-fade global goes back to -1 if EDVR still holds it at 0 (explorer_cam.h). The hooks are CodeHooks
-    // and come off with their own destructors.
+    // Native on foot: the gate byte goes back first, then the avatar dither-fade global goes back to -1 if EDVR still holds it at 0
+    // (native_on_foot_hooks.h). The hooks are CodeHooks and come off with their own destructors.
     nativeOnFootShutdown();   // F2: the gate byte goes back to 1 if EDVR holds it at 0
-    explorerCamShutdown();
+    nativeOnFootHooksShutdown();
     // The probe's reference on the device. Read-only for its whole life, so
     // there is nothing to put back -- only the reference to let go.
     if (g_state && g_state->multithread) {

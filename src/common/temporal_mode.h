@@ -45,7 +45,7 @@ inline constexpr float kTemporalShipMetres = 10.0f;
 // split (kTemporalShipMetres) is the ship's -- the cockpit, the hull -- and takes the
 // head's delta alone; every pixel farther, and the far plane, takes the camera's own (the head and the ship together, the
 // game's view rows). That is right in a cockpit, where the near things ride with the head. On foot there is no ship: in
-// Explorer Cam, the one on-foot mode Elite draws in stereo through the eye path, the camera walks with the commander and the
+// Explorer Cam (the on-foot stereo mode then, removed in F98), the camera walked with the commander and the
 // ground 1.5 to 10 m away is the world, not a cockpit. Eye dump 090359 (Steam, v0.18.2-90-g6c63f6aa) had 55% of its decision
 // crop on the head path -- the ground within 10 m, 53.5% of the frame, no cockpit stencil anywhere -- and the head path
 // missed the camera's whole walk: by block matching the raw crops its prediction was off by 24.9 px at the median, the camera's

@@ -348,7 +348,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
                                  : EDVR_NATIVE_FRAME_VERSION_1;
-    // Explorer Cam's comfort fade (comfort_fade.h): how black the view is
+    // The comfort fade (comfort_fade.h; no publisher since F98, so 0): how black the view is
     // this frame, 0 unless the frame thread published a fresh level. Only a
     // version 5 caller has the slot; every older shape never learns of it.
     result.fadeAlpha = edvr::comfort::read(GetTickCount64());

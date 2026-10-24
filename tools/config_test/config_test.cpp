@@ -3,9 +3,9 @@
 // The file users edit is the one asserted here. Two properties of the parser
 // that edvr.ini's own layout depends on are proven rather than assumed:
 //
-//   1. a section header may REPEAT -- edvr.ini opens with the settings most
-//      people touch under [fix] and [hotkey], then returns to both further
-//      down for the Explorer Cam block. If a repeat were a parse error, or
+//   1. a section header may REPEAT -- a settings file may return to [fix] or
+//      [hotkey] further down (an installer merge or a hand edit leaves one
+//      that way). If a repeat were a parse error, or
 //      silently discarded everything after it, half the file would do
 //      nothing while still looking perfectly valid in an editor.
 //   2. a key set twice takes the LAST value, because parse() assigns into a
@@ -57,7 +57,6 @@
 #include "../../src/common/star_glow.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
-#include "../../src/d3d11/explorer_cam_follow_core.h"   // the Explorer Cam trims' and smoothing defaults: header-only, no link
 #include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
@@ -1213,9 +1212,10 @@ static const char* const kRetiredKeys[] = {
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
-// Retired by EXACT name, because the bare name is a substring of live keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
-// 2026-10-08: Explorer Cam is armed exactly when hotkey.explorer_cam is set. Its qualified name "fix.explorer_cam" is also the beginning of every live
-// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...), so a match counts only when the next character is not part of a name. A hotkey
+// Retired by EXACT name, because the bare name is a substring of other keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
+// 2026-10-08: Explorer Cam was then armed exactly when hotkey.explorer_cam was set. Its qualified name "fix.explorer_cam" is also the beginning of every
+// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...; retired in F98 and held by kRetiredNotedKeys), so a match counts only when the
+// next character is not part of a name. A hotkey
 // line spells "hotkey.explorer_cam", which never contains "fix.". The shipped file's [fix] section is held out by the key lookup in main (expectStr, "<unset>"),
 // because there the key is the bare "explorer_cam", which sits in [hotkey] too.
 static const char* const kRetiredExactKeys[] = {
@@ -1283,7 +1283,7 @@ static void retiredKeyScan(const std::wstring& root) {
                                                        " names found, or a live key was flagged");
 
     // The exact-name scan's own control: it finds the retired switch in a read, a message, a comment and at the end of a sentence or of the text, and passes
-    // every live key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing).
+    // every key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing: retired in F98, held by kRetiredNotedKeys).
     {
         const std::string retired[] = {
             "Config::get().getBool(\"fix.explorer_cam\", true)",
@@ -1306,7 +1306,7 @@ static void retiredKeyScan(const std::wstring& root) {
         for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
         if (foundAll && passedAll && kRetiredExactKeyCount == 6)
             ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
-               "fix.explorer_cam_eye_*, the trims and the smoothing beside it");
+               "fix.explorer_cam_eye_*, the trims and the smoothing beside it (their own list holds them)");
         else
             fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
     }
@@ -1368,6 +1368,93 @@ static void retiredKeyScan(const std::wstring& root) {
             " sources under src (the installer's included) spells a retired key: no reader, no allow-list entry, no message")
                .c_str());
     }
+}
+
+// Explorer Cam's eight keys, retired in F98 with Explorer Cam, under native on foot's convention for retired keys (its F34, F66 and F96 keys are the same):
+// the shipped file keeps each at its last shipping value on a hidden retired line, and native_on_foot.cpp's retiredKeysNote reads each once, to name a
+// value that differs. Nothing else may spell them: no other line of the shipped file, no other source, no other function.
+static const char* const kRetiredNotedKeys[] = {
+    "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right", "fix.explorer_cam_eye_trim_up",
+    "fix.explorer_cam_eye_trim_forward", "fix.explorer_cam_eye_trim_right", "fix.explorer_cam_follow_smoothing_ms", "hotkey.explorer_cam",
+};
+static const char* const kRetiredNotedMarker = "# ui: hidden -- retired (F98): ignored.";
+
+static void retiredNotedKeyScan(const std::wstring& root) {
+    // The shipped file: each key's bare name is spelled on exactly one line, that line is the key in its own section, and the line above it is the marker.
+    const std::string ini = readRepoFile(root, L"edvr.ini");
+    if (ini.empty()) {
+        fail("edvr.ini is readable from the repo root (F98 retired keys)", "could not read it");
+        return;
+    }
+    std::vector<std::string> lines;
+    {
+        size_t at = 0;
+        while (at <= ini.size()) {
+            const size_t nl = ini.find('\n', at);
+            std::string l = ini.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            lines.push_back(l);
+            if (nl == std::string::npos) break;
+            at = nl + 1;
+        }
+    }
+    int good = 0;
+    std::string why;
+    for (const char* qualified : kRetiredNotedKeys) {
+        const std::string q(qualified);
+        const std::string section = q.substr(0, q.find('.')), bare = q.substr(q.find('.') + 1);
+        std::string current;
+        int keyed = 0, elsewhere = 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const std::string& l = lines[i];
+            if (!l.empty() && l[0] == '[') {
+                current = l.substr(1, l.find(']') == std::string::npos ? std::string::npos : l.find(']') - 1);
+                continue;
+            }
+            if (!spellsExactKey(l, bare.c_str())) continue;
+            const bool isKey = l.compare(0, bare.size() + 2, bare + " =") == 0 && current == section && i > 0 && lines[i - 1] == kRetiredNotedMarker;
+            if (isKey) ++keyed;
+            else ++elsewhere;
+        }
+        if (keyed == 1 && elsewhere == 0) ++good;
+        else if (why.empty()) why = q + ": " + std::to_string(keyed) + " retired line(s), " + std::to_string(elsewhere) + " other line(s)";
+    }
+    const int count = static_cast<int>(sizeof(kRetiredNotedKeys) / sizeof(kRetiredNotedKeys[0]));
+    if (good == count)
+        ok("the shipped edvr.ini spells each of Explorer Cam's eight retired keys once, as its own hidden retired line (F98), and nowhere else");
+    else
+        fail("the shipped edvr.ini keeps each F98 retired key on one hidden retired line and nowhere else", why);
+
+    // The sources: only native_on_foot.cpp, and only inside retiredKeysNote.
+    std::vector<std::wstring> files;
+    collectSources(root + L"\\src", L"", &files, true);
+    int bad = 0, inNote = 0;
+    for (const std::wstring& rel : files) {
+        const std::string text = readRepoFile(root, (L"src\\" + rel).c_str());
+        const bool noteFile = rel == L"d3d11\\native_on_foot.cpp";
+        size_t lo = std::string::npos, hi = std::string::npos;
+        if (noteFile) {
+            lo = text.find("void retiredKeysNote(");
+            if (lo != std::string::npos) hi = text.find("\n}\n", lo);
+        }
+        for (const char* qualified : kRetiredNotedKeys) {
+            const size_t n = std::strlen(qualified);
+            for (size_t at = text.find(qualified); at != std::string::npos; at = text.find(qualified, at + 1)) {
+                const char next = at + n < text.size() ? text[at + n] : '\0';
+                if (std::isalnum(static_cast<unsigned char>(next)) || next == '_') continue;   // a longer name
+                if (noteFile && lo != std::string::npos && hi != std::string::npos && at > lo && at < hi) {
+                    ++inNote;
+                    continue;
+                }
+                ++bad;
+                fail("a production source spells an F98 retired key outside native on foot's retired-key note", narrow(rel) + " spells " + qualified);
+            }
+        }
+    }
+    if (!bad && inNote >= 2 * count)
+        ok("Explorer Cam's eight retired keys are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and named once)");
+    else if (!bad)
+        fail("each F98 retired key is read and named in retiredKeysNote", std::to_string(inNote) + " spellings there, " + std::to_string(2 * count) + " wanted");
 }
 
 // switchProfile (2026-10-12): the settings file follows the profile the frame boundary has set, and a switch reads that
@@ -1790,69 +1877,21 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The Explorer Cam switch reads from the shipped file, and the keys of the
-    // old route it replaced are not defined there (kRetiredKeys, above).
-    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file (Explorer Cam is armed by its hotkey alone)");
-    expectStr("hotkey.explorer_cam", "F5", "...and the hotkey that arms Explorer Cam ships as F5");
-    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the fallback eye keys ship at 1.68 up,");
+    // Explorer Cam's eight keys, retired in F98 with Explorer Cam (native on foot is the on-foot VR mode). The shipped file carries each at its last
+    // shipping value as a hidden retired line, so a stock file reads clean; retiredNotedKeyScan holds their names to that block and to the one log note.
+    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file");
+    expectStr("hotkey.explorer_cam", "F5", "the retired Explorer Cam key's line keeps its last shipping value, F5");
+    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the retired fallback eye lines keep 1.68 up,");
     expectFloat("fix.explorer_cam_eye_forward", 0.10f, "...0.10 forward,");
     expectFloat("fix.explorer_cam_eye_right", 0.0f, "...and 0.0 right");
-    // The trims and the smoothing are PERMANENT user settings (Sean, 2026-10-08) and ship with his own tuning. Three places must say the same three numbers: the
-    // shipped file, the constants in explorer_cam_follow_core.h, and the code's fallback for an ini that lacks the keys (which must USE those constants).
-    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "the Explorer Cam eye trims ship at Sean's tuning: up 0.15,");
+    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "...the retired trims keep up 0.15,");
     expectFloat("fix.explorer_cam_eye_trim_forward", -0.08f, "...forward -0.08,");
     expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
-    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the retired follow smoothing 0");
     expectStr("advanced.explorer_cam_probe", "<unset>", "the retired Explorer Cam probe key is absent from the shipped file (removed 2026-10-09; kRetiredKeys holds its name out of every source)");
     // The transition-flash switch (removed 2026-10-13) is a bare [fix] key like fix.explorer_cam was: the exact-name scan holds its qualified name out of the
     // sources and the file's text, and this lookup holds the [fix] line itself out.
     expectStr("fix.transition_flash", "<unset>", "the retired transition-flash switch is absent from the shipped file (the hold is always on in the VR profile and has no setting)");
-    expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
-    expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
-    expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");
-    expectFloat("fix.explorer_cam_follow_smoothing_ms", static_cast<float>(ecm::kSmoothingMsDefault), "...the shipped smoothing is ecm::kSmoothingMsDefault");
-    {
-        const float trims[3] = {ecm::kTrimUpDefault, ecm::kTrimForwardDefault, ecm::kTrimRightDefault};
-        bool inside = true;
-        for (float v : trims) inside = inside && v >= -ecm::kTrimLimit && v <= ecm::kTrimLimit && ecm::clampTrim(v) == v;
-        if (inside && static_cast<float>(ecm::kSmoothingMsDefault) >= 0.0f && static_cast<float>(ecm::kSmoothingMsDefault) <= ecm::kSmoothingMsMax)
-            ok("every shipped Explorer Cam default is inside its clamp (+-0.5 m, 0..1000 ms)");
-        else
-            fail("every shipped Explorer Cam default is inside its clamp", "a default sits outside what the code would let through");
-    }
-    {
-        // The code's fallback must be the constant, not a number that happens to match today. The control rewrites each call to a literal that
-        // differs and must be caught. The reads are in the settings cache (explorer_cam_settings_core.h), which explorerCamFrameBoundary reads them through once per
-        // configuration change; explorer_cam_fade_test pins that the frame boundary reads none of these keys itself.
-        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam_settings_core.h");
-        struct Read { const char* key; const char* call; const char* expr; };
-        const Read reads[] = {
-            {"fix.explorer_cam_eye_trim_up", "getFloat", "kTrimUpDefault"},
-            {"fix.explorer_cam_eye_trim_forward", "getFloat", "kTrimForwardDefault"},
-            {"fix.explorer_cam_eye_trim_right", "getFloat", "kTrimRightDefault"},
-            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "kSmoothingMsDefault"},
-        };
-        auto usesConstant = [](const std::string& text, const Read& r) {
-            return text.find(std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")") != std::string::npos;
-        };
-        if (source.empty()) {
-            fail("explorer_cam_settings_core.h is readable from the repo root", "could not read it");
-        } else {
-            bool all = true, controlsCaught = true;
-            for (const Read& r : reads) {
-                all = all && usesConstant(source, r);
-                std::string flipped = source;
-                const std::string from = std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")";
-                const size_t at = flipped.find(from);
-                if (at != std::string::npos) flipped.replace(at, from.size(), std::string(r.call) + "(\"" + r.key + "\", 0.0f)");
-                controlsCaught = controlsCaught && at != std::string::npos && !usesConstant(flipped, r);
-            }
-            if (all) ok("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
-            else fail("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
-            if (controlsCaught) ok("control: a read rewritten to a literal fallback is caught");
-            else fail("control: a read rewritten to a literal fallback is caught", "the rewritten source still passed, or the call was not found");
-        }
-    }
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 
@@ -2611,6 +2650,7 @@ int main(int argc, char** argv) {
     iniNameScan(dir);
     realDllChoiceCases(dir);
     retiredKeyScan(dir);
+    retiredNotedKeyScan(dir);
     if (argc >= 3) {
         const std::wstring scratch = widen(argv[2]);
         floatCases(scratch);
@@ -2692,7 +2732,7 @@ int main(int argc, char** argv) {
     expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
-    Config::get().set("fix.explorer_cam_eye_forward", "12");
+    Config::get().set("fix.native_on_foot_world_markers_lead", "12");
     Config::get().set("experimental.night_vision_realistic", "on");
     Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
     expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
@@ -2716,9 +2756,9 @@ int main(int argc, char** argv) {
     Config::get().set("advanced.eye_depth_capture", "on");
     expectBool("advanced.eye_depth_capture", false,
                "flat profile: eye depth capture reads off, so it cannot arm the depth probe or hold the draw gate open");
-    expectInt("fix.explorer_cam_eye_forward", 0, "flat profile suppresses numeric fix");
-    expectFloat("fix.explorer_cam_eye_forward", 0.0f, "flat profile suppresses float fix");
-    if (Config::get().getIntInRange("fix.explorer_cam_eye_forward", 12, 1, 100) != 0)
+    expectInt("fix.native_on_foot_world_markers_lead", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.native_on_foot_world_markers_lead", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.native_on_foot_world_markers_lead", 12, 1, 100) != 0)
         fail("flat bounded getter", "minimum reactivated disabled feature");
     else ok("flat scope precedes bounded numeric defaults");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");

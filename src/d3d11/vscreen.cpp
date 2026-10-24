@@ -56,7 +56,6 @@
 #include "boundary_tick.h"     // one fault budget per boundary tick
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "glitch_frame.h"
-#include "explorer_cam.h"        // Explorer Cam (hotkey.explorer_cam): the free camera placed at the commander's head and locked (the Explorer Cam redesign)
 #include "native_on_foot.h"      // the HUD issuer probe (F3): nativeOnFootHudProbe, one compare per draw
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
@@ -1291,8 +1290,8 @@ bool targetIsEyeSized(void* rtv, int* candOut = nullptr) {
             Log::get().note(
                 "vScreen: your eye textures and the on-foot panel are BOTH %ux%u, "
                 "so nothing here can tell one from the other by size. They are "
-                "being counted as eye textures, which keeps the black void and "
-                "Explorer Cam fed; the panel distance fix "
+                "being counted as eye textures, which keeps the black void "
+                "fed; the panel distance fix "
                 "may match a draw into the panel and place it wrongly. Set "
                 "fix.vscreen_res_width to a width your eye textures are not (the "
                 "height follows it at 16:9) if the panel sits at the wrong distance.",
@@ -5972,7 +5971,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
-    // THE RELOAD COMES BEFORE THE STATE CHECK. This is the only place the ini is re-read, and its readers outside vScreen (hotkey.explorer_cam, the diagnostic keys,
+    // THE RELOAD COMES BEFORE THE STATE CHECK. This is the only place the ini is re-read, and its readers outside vScreen (fix.native_on_foot, the diagnostic keys,
     // each read live from Config) need no vScreen State: with vScreen installed transport-only (no State) a reload that waited for one never happened, and a key
     // bound or cleared while the game runs never applied (review 2026-10-08, finding 3; tools\gate_test pins the order, the transport fixture binds a key live).
     if (!forced && !cfg.reloadIfChanged()) return;
@@ -6206,8 +6205,8 @@ EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
-// (Explorer Cam's frame tick and its probe's are device_hook.cpp's: they must run whatever this file's options say, and when vScreen installs transport-only
-// there is no State here and no vScreenFrameBoundary to carry them. tools\gate_test pins that.)
+// (Native on foot's frame tick, with its avatar hooks, is device_hook.cpp's: it must run whatever this file's options say, and when vScreen installs transport-only
+// there is no State here and no vScreenFrameBoundary to carry it. tools\gate_test pins that.)
 
 // The one line the surface strip adds when the intro ends, said once, at the first rendered scene: how many strip draws the intro had in all
 // (panel_curve.h counts every one it drew: the movie's, the splash's, and the splash dim's re-issues of either) and how many composite draws the
@@ -6400,8 +6399,8 @@ void vScreenFrameBoundary() {
                     "vScreen: the panel resolution you asked for (%ux%u) is EXACTLY the "
                     "size of your eye textures, so nothing here can tell one from the "
                     "other by size. The panel is no longer being excluded from the "
-                    "eye-draw count, which is what keeps the black void and "
-                    "Explorer Cam fed -- but the panel distance fix can now "
+                    "eye-draw count, which is what keeps the black void "
+                    "fed -- but the panel distance fix can now "
                     "match a draw INTO the panel and put it at the wrong distance. If the "
                     "panel sits wrong, set fix.vscreen_res_width to a width your eye "
                     "textures are not: 2880 is a safe pick at any headset resolution, "
@@ -6520,7 +6519,7 @@ void vScreenFrameBoundary() {
         }
         Log::get().note(
             "vScreen: NOT ONE eye-sized render target in %u frames over %u seconds. The black void, the "
-            "panel distance and Explorer Cam all read that "
+            "panel distance and the transition flash fix all read that "
             "count, so all three are inert -- not broken, starved. They will say nothing "
             "further, which is why this line exists. Largest targets seen: %s. The panel "
             "is at %ux%u and its exclusion answered no %llu time(s); the headset %s. %s",
@@ -6585,7 +6584,7 @@ void vScreenFrameBoundary() {
                 "guessed: it is the eye's own shape to within a percent, and one frame "
                 "put %u draws into it while the submitted size peaked at %u for the "
                 "whole session. It now counts as an eye texture as well, which is what "
-                "feeds the black void, Explorer Cam, the "
+                "feeds the black void, the "
                 "RemLok lines and the loading hologram -- all of "
                 "them inert until this line. If something now lands on the wrong pass, "
                 "set advanced.eye_render_size = off under [advanced] in %s and "
@@ -6704,8 +6703,7 @@ void vScreenFrameBoundary() {
             "menu peaks at about 20, and the sessions measured for these numbers peaked "
             "at 975 and 1074. So the world is being drawn somewhere that is not an eye "
             "texture, and only the last few passes land on one. Consequences, all "
-            "silent until now: Explorer Cam cannot arm (it needs more than 50 in a "
-            "frame), the transition flash fix cannot withhold anything (100), and the "
+            "silent until now: the transition flash fix cannot withhold anything (100), and the "
             "camera scan loses its own gameplay signal. The sizes it saw are on the "
             "next line.",
             s->eyeDrawsMax,
@@ -6969,7 +6967,7 @@ void vScreenFrameBoundary() {
                 "vScreen: eye textures were being recognised and now are not -- %u "
                 "frames in this window and not one eye-sized draw, against a session "
                 "peak of %u. The black void, the panel distance, the transition flash "
-                "fix and Explorer Cam all read that count, so all four have gone inert "
+                "fix all read that count, so all three have gone inert "
                 "as of this window. If you changed headset mode, resolution or "
                 "supersampling mid-session, the eye size changed with it. Said once.",
                 windowFrames, s->eyeDrawsMax);

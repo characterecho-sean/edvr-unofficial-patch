@@ -4,8 +4,8 @@
 // Pure decisions and bytes: no Windows, no game, no Config, so a rig could drive them. native_on_foot.cpp holds the hook, the key,
 // the journal reads and the log.
 //
-// THE SETTER. EliteDangerous64.exe build 334925 (retargeted from 332841; the build Explorer Cam pins; PE stamp and image size are ecm::kExpectedTimestamp and
-// ecm::kExpectedImageSize) has a render-mode setter, a virtual function reached only through the vtable at image RVA 0x52EC798, slot 5
+// THE SETTER. EliteDangerous64.exe build 334925 (retargeted from 332841; the build the avatar hooks pin; PE stamp and image size are avh::kExpectedTimestamp and
+// avh::kExpectedImageSize) has a render-mode setter, a virtual function reached only through the vtable at image RVA 0x52EC798, slot 5
 // (byte offset 0x28), at function RVA 0x2874920. Its signature is void(__fastcall*)(void* selector, uint32_t mode). It records the mode
 // it was asked for in selector+0x20 (the source mode); selector+0x58 is the renderer owner, and owner+0x60 points back at selector.
 // The modes come in pairs: each cinema mode (the flat screen shown in the headset) has an HMD partner (the headset's own stereo). The
@@ -23,8 +23,8 @@
 #include <cstring>
 #include <limits>
 
-#include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: the PE identity of the build the addresses belong to, shared with the other build-keyed hooks
-#include "explorer_cam_follow_core.h"   // F49: ecm::quatRows, the pose's rotation rows (the pose freeze's rest locals)
+#include "avatar_hooks_core.h"   // avh::kExpectedTimestamp and avh::kExpectedImageSize: the PE identity of the build the addresses belong to, shared with the other build-keyed hooks
+#include "avatar_skeleton_core.h"   // F49: avh::quatRows, the pose's rotation rows (the pose freeze's rest locals)
 #include "native_on_foot_f85.h"          // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts)
 #include "native_on_foot_f86.h"          // F86: the pose carry, the weapon UI depth (measure only since F87) and the floor probe (pure parts)
 #include "native_on_foot_f87.h"          // F87: the standing-height hold, the stream windows' history, the scene rows' fallback, the prompt probes, the hand residual (pure parts)
@@ -110,7 +110,7 @@ inline bool selectorShapeOk(uintptr_t vtable, uintptr_t expectedVtable, uintptr_
 
 // The identity check's answer for a PE stamp and image size: the build the addresses belong to (334925) or not.
 inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) {
-    return timestamp == ecm::kExpectedTimestamp && imageSize == ecm::kExpectedImageSize;
+    return timestamp == avh::kExpectedTimestamp && imageSize == avh::kExpectedImageSize;
 }
 
 // The on-foot HUD issuers (F3 stack probe; flat_projection_recipes.h:154-155 names both as vertex-projected UI). Drawn into the flat frame
@@ -603,7 +603,7 @@ struct PfzLocoRest {
 // ---- F49 (TEMPORARY): the pose freeze, pure half -------------------------------------------------------------------------------
 // The frAnim Animate handler writes one 64-byte row-vector model matrix per joint: rows 0..2 the rotation (w 0), row 3 the position (w 1), and
 // out[j] = local[j] x out[parent(j)]. The rest local of a joint is the pose's 32-byte record (position vec4, then the quaternion) as R(q) with the
-// position in row 3, R(q) laid out as ecm::quatRows. The frozen set F is the torso-side child subtree of the lowest common ancestor of the neck and
+// position in row 3, R(q) laid out as avh::quatRows. The frozen set F is the torso-side child subtree of the lowest common ancestor of the neck and
 // the left foot (the hips); each member's matrix is its local (rest, or blended toward rest) times its parent's new matrix, anchored at the
 // animated matrix of the hips.
 constexpr uint32_t kPfzMaxF = 0xC0;          // the frozen set's member cap (F53: 192, the joint cap; F51/F52's 128 refused the 185-member set)
@@ -619,7 +619,7 @@ inline void pfzIdentity(float out[16]) noexcept {
 // The rest local matrix of a pose record (pos vec4 at +0, quaternion at +0x10).
 inline void pfzLocalMatrix(const float rec[8], float out[16]) noexcept {
     float r[9];
-    ecm::quatRows(rec + 4, r);
+    avh::quatRows(rec + 4, r);
     for (int i = 0; i < 3; ++i) {
         out[i * 4 + 0] = r[i * 3 + 0];
         out[i * 4 + 1] = r[i * 3 + 1];
@@ -677,7 +677,7 @@ inline bool pfzAffineInverse(const float m[16], float out[16]) noexcept {
     out[15] = 1.0f;
     return true;
 }
-// The quaternion (x, y, z, w) of a rotation in the upper 3x3 (the inverse of ecm::quatRows; each row is normalised first, so a uniform scale drops out).
+// The quaternion (x, y, z, w) of a rotation in the upper 3x3 (the inverse of avh::quatRows; each row is normalised first, so a uniform scale drops out).
 inline void pfzQuatFromMatrix(const float m[16], float q[4]) noexcept {
     double R[3][3];
     for (int i = 0; i < 3; ++i) {
@@ -745,12 +745,12 @@ inline void pfzBlendRecord(const float animLocal[16], const float rest[8], float
 // The rest model matrix of joint idx: its rest local times every ancestor's (the uncached path 0xFDF170 computes). False on a bad index or a cycle.
 inline bool pfzRestModel(const float* locals, const uint16_t* parents, uint32_t joints, uint32_t idx, float out[16]) noexcept {
     if (idx >= joints) return false;
-    pfzLocalMatrix(locals + idx * ecm::kJointFloats, out);
+    pfzLocalMatrix(locals + idx * avh::kJointFloats, out);
     uint32_t steps = 0;
     for (uint32_t a = parents[idx]; a != 0xFFFFu; a = parents[a]) {
         if (a >= joints || ++steps > joints) return false;
         float pm[16], next[16];
-        pfzLocalMatrix(locals + a * ecm::kJointFloats, pm);
+        pfzLocalMatrix(locals + a * avh::kJointFloats, pm);
         pfzMul(out, pm, next);
         std::memcpy(out, next, sizeof(next));
     }
@@ -5479,7 +5479,7 @@ inline bool handBlendRigid(const float from[16], const float to[16], double weig
     if (!(norm > 1e-12f) || !std::isfinite(norm)) return false;
     norm = 1.0f / std::sqrt(norm);
     for (int i = 0; i < 4; ++i) q[i] *= norm;
-    ecm::quatRows(q, rows);
+    avh::quatRows(q, rows);
     pfzIdentity(out);
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) out[r*4+c] = rows[r*3+c];

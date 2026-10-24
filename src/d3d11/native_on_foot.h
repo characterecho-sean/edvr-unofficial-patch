@@ -21,7 +21,7 @@
 // substitution; while the key is on and a game session is live EDVR holds the byte at EliteDangerous64.exe+0x5E85B8A at 0, so the game's own
 // requester asks for HMD. Goes away when the arc picks one.
 //
-// THE BODY (F2). While the flag is set, explorerCamNativeBody(...) runs Explorer Cam's fade and head-part code for the local avatar, once a
+// THE BODY (F2). While the flag is set, nativeOnFootHooksBody(...) runs the avatar hooks' fade and head-part code (native_on_foot_hooks.h) for the local avatar, once a
 // frame, under either method. Its head hooks are wanted from launch while fix.native_on_foot is on.
 //
 // THE GATES. Log-only counters, no behaviour: each engaged gate calls nativeOnFootCountGate() and counts only while the flag is set.
@@ -112,9 +112,9 @@ inline bool nativeOnFootActive() { return g_nativeOnFootActive.load(std::memory_
 
 // F93d: the game's own camera on foot. The camera suite's controller (VesselCameraMountControl, an activity that runs every update while the commander
 // is on foot) keeps the suite's mode in its byte +0x3E0: 0 = closed, the game's first-person camera; 1, 2 = the suite on a preset ("Commander control",
-// "Commander profile"), 3..6 = the free camera and its locks (explorer_cam_core.h, modeText; analysis\decomp\explorer_cam\decomp_2DF14C0.txt). Opening
+// "Commander profile"), 3..6 = the free camera and its locks (avatar_hooks_core.h, modeText; analysis\decomp\explorer_cam\decomp_2DF14C0.txt). Opening
 // the suite starts the game's VanityCamera activity and removes HumanoidCamera and PlacedCamera; closing it does the reverse (the F93d flight log,
-// 10:31:17.355 and 10:31:43.539). Explorer Cam's controller hook (explorer_cam.cpp, controllerHooked) reads the byte after the game's own update, on
+// 10:31:17.355 and 10:31:43.539). The avatar hooks' controller hook (native_on_foot_hooks.cpp, controllerHooked) reads the byte after the game's own update, on
 // the game's thread, while native stereo is on foot, and publishes it here; every EDVR change to the commander's body (the pin, the square-up, the bend,
 // the arm IK, the head and first-person body hides, the unclip, the body shift and pose carry, the body cull) and the eye alignment's offsets are
 // first-person behaviour and stand down while the byte is not 0, so the game's third-person camera shows the game's own body.
@@ -127,8 +127,8 @@ inline std::atomic<uint64_t> g_nativeOnFootCamFlipQpc{0};    // QPC of the last 
 inline bool nativeOnFootCameraExternal() {
     return g_nativeOnFootCamExternal.load(std::memory_order_relaxed) && nativeOnFootActive();
 }
-// The controller hook's post-call publication (explorer_cam.cpp), on the game's thread: mode is the byte after the update, qpc the read's time. Header-only so
-// the rigs that compile explorer_cam.cpp without native_on_foot.cpp link. True when the flag changed.
+// The controller hook's post-call publication (native_on_foot_hooks.cpp), on the game's thread: mode is the byte after the update, qpc the read's time. Header-only so
+// the rigs that compile native_on_foot_hooks.cpp without native_on_foot.cpp link. True when the flag changed.
 inline bool nativeOnFootCameraPublish(uint8_t mode, uint64_t qpc) {
     const bool external = mode != 0;
     g_nativeOnFootCamMode.store(0x100u | mode, std::memory_order_relaxed);
@@ -146,10 +146,10 @@ inline void nativeOnFootCountGate(NativeOnFootGate gate) {
     if (nativeOnFootActive()) g_nativeOnFootGates[size_t(gate)].fetch_add(1, std::memory_order_relaxed);
 }
 
-// F49 (TEMPORARY): the pose freeze's hand-off. The census (explorer_cam.cpp, the game's job thread, every 100 ms) finds the local avatar's
+// F49 (TEMPORARY): the pose freeze's hand-off. The census (native_on_foot_hooks.cpp, the game's job thread, every 100 ms) finds the local avatar's
 // evaluator X from the local third-person skeleton interface and builds the plan (the frozen set and its rest locals) once per X; the Animate
 // post-hook (native_on_foot.cpp, frAnim worker threads) reads it under the sequence counter and touches only that X. Inline, as above: the
-// explorer cam rig compiles the census without native_on_foot.cpp.
+// avatar hooks rig (tools\native_on_foot_hooks_test) compiles the census without native_on_foot.cpp.
 namespace pfz {
 struct Plan {
     uint64_t x = 0;                                  // the evaluator the plan belongs to
@@ -286,7 +286,7 @@ inline std::atomic<bool> g_ikWanted{true};
 // key when the configuration changes, writes the queued setter lines and the 5 s gate line.
 void nativeOnFootFrameBoundary(uint32_t frameNo);
 
-// Shutdown (device_hook.cpp, before explorerCamShutdown): puts the gate byte back to 1 if EDVR holds it at 0. Frame-thread context.
+// Shutdown (device_hook.cpp, before nativeOnFootHooksShutdown): puts the gate byte back to 1 if EDVR holds it at 0. Frame-thread context.
 void nativeOnFootShutdown();
 
 // THE HUD ISSUER PROBE (F3, log only, always on, any key state). beginPanelOverride (vscreen.cpp) passes every VR-path draw's bound

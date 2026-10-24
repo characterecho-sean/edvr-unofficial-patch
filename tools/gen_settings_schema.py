@@ -72,15 +72,14 @@ tier: `# ui: Menu key | hotkey | live` is a row for everyone, and
 `# dev: label Draw census key | hotkey` is a row only while menu.developer is on.
 The section names the page, so neither line does. See HOTKEY_SECTION.
 
-THE EXPLORER CAM PAGE (2026-10-08) is `menu explorer_cam`: the eye trims and the
-follow smoothing, for everyone. Four more tokens shape a NUMBER row there and
-nowhere else: `step 0.01` (the arrow keys' step, instead of the range's
-twentieth), `unit m` (the text after the number), `signed` (an explicit + on a
-positive one) and `zero exact` (the word in brackets after a zero, so `0 ms
-(exact)`). A step that is not a positive number, or any of the four on a
-row the code does not read as a number, fails the build. The older absolute
-fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
-schema gets a row for it.
+THE NATIVE ON FOOT PAGE (2026-10-14) is `menu native_on_foot`. Four more tokens
+shape a NUMBER row (first written for the Explorer Cam page of 2026-10-08,
+removed with Explorer Cam in F98): `step 0.01` (the arrow keys' step, instead
+of the range's twentieth), `unit m` (the text after the number), `signed` (an
+explicit + on a positive one) and `zero exact` (the word in brackets after a
+zero, so `0 ms (exact)`). A step that is not a positive number, or any of the
+four on a row the code does not read as a number, fails the build. A
+`ui: hidden` key gets a row in neither schema.
 
 THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has Performance (its settings) and Debug tabs (and, since 2026-10-22,
 a Visual one between them, below), and the Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
@@ -162,10 +161,7 @@ import sys
 # after the halves of EDVR that read them, not fixes somebody came here to turn
 # on. [visual] (2026-10-22) is the exception that is exposed: it holds the options
 # that change how the picture looks, which somebody does come here to turn on, and
-# its keys are user settings exactly as [fix]'s are. Explorer Cam's own switches
-# live in [fix] and are exposed; the metre offsets it is tuned with
-# (fix.explorer_cam_eye_*) are not, because tuning them means wearing the
-# headset and watching, which is what the ini's hot reload is for.
+# its keys are user settings exactly as [fix]'s are.
 EXPOSED_SECTIONS = ('fix', 'visual')
 # The sections whose keys may carry a `ui:` line at all. The installer's
 # window still shows only EXPOSED_SECTIONS; what a ui: line buys a developer
@@ -211,11 +207,10 @@ UI_RE = re.compile(r'^ui\s*:\s*(.*)$', re.I)
 DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
-# Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
-# 'native_on_foot' is the Native on foot page (2026-10-14): the native on-foot settings explicitly tagged for the page, in file order.
+# Pages a `menu <page>` token can name. 'native_on_foot' is the Native on foot page (2026-10-14): the native on-foot settings explicitly tagged for the page, in file order.
 # 'visual' (2026-10-22) and 'debug' (2026-10-16) are the flat panel's tabs; VR's menu builds neither. 'flat_performance' (2026-10-24) is the flat Performance tab's own rows, the
 # ones that do nothing in the headset: VR's Performance page lists only `menu performance`, the flat tab lists menu_flat_rows.h's kFlatPageRows whatever the token.
-MENU_PAGES = ('fixes', 'performance', 'flat_performance', 'explorer_cam', 'native_on_foot', 'visual', 'debug')
+MENU_PAGES = ('fixes', 'performance', 'flat_performance', 'native_on_foot', 'visual', 'debug')
 FLAT_PERFORMANCE_PAGE = 'flat_performance'
 # The table a `flat_performance` row must be listed in, relative to the repo root (the flat Performance tab is built from it).
 FLAT_PAGE_ROWS_HEADER = os.path.join('src', 'd3d11', 'menu_flat_rows.h')
@@ -369,7 +364,7 @@ class Setting(object):
         # dev: line's `label <text>`, for a developer row with no ui: line.
         self.hotkey = False
         self.devLabel = ''
-        # How a menu NUMBER row is stepped and shown (2026-10-08, the Explorer Cam page): `step 0.01` is the arrow keys' step in place of the range's
+        # How a menu NUMBER row is stepped and shown (2026-10-08): `step 0.01` is the arrow keys' step in place of the range's
         # twentieth, `unit m` the text after the number, `signed` an explicit + on a positive one, `zero exact` the word that follows a
         # zero in brackets (`0 ms (exact)`). The installer's window ignores all four.
         self.step = ''
@@ -1823,53 +1818,53 @@ def self_test():
                 {'a.cpp': debug_reads['a.cpp'].replace('flat_cpu_timing', 'other_timing')}, 1)
     expect_in(name, said, 'advanced.other_timing')
 
-    # The Explorer Cam page (2026-10-08): `menu explorer_cam` puts a [fix] number row on its own page for everyone (Fix tier), and
-    # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). The two fallback keys the head joint replaced
-    # are `ui: hidden`: neither schema gets a row for them, however the neighbours are annotated.
-    explorer_ini = ('[fix]\n'
-                    '# Fallback eye height, used only when the head joint cannot be read. Live.\n'
-                    '# ui: hidden -- fallback only | range 0.5..2.5 | recommended 1.68\n'
-                    'eye_up = 1.68\n\n'
-                    '# Eye height: raises or lowers the view, in metres. Live.\n'
-                    '# ui: Eye height | range -0.5..0.5 | step 0.01 | unit m | signed | recommended 0.15 | live | menu explorer_cam\n'
-                    'trim_up = 0.15\n\n'
-                    '# Smoothing in milliseconds, 0 = exact. Live.\n'
-                    '# ui: Smoothing | range 0..200 | step 10 | unit ms | zero exact | recommended 0 | live | menu explorer_cam\n'
-                    'smooth = 0\n')
-    explorer_reads = {'a.cpp': ('float u = cfg.getFloat("fix.eye_up", 1.68f);\n'
-                                'float t = cfg.getFloat("fix.trim_up", 0.15f);\n'
-                                'int s = cfg.getInt("fix.smooth", 0);\n')}
-    name = 'explorer-page'
-    wrote = case(name, explorer_ini, explorer_reads, 0)
+    # The number-row tokens (2026-10-08) on a page of their own: `menu native_on_foot` puts a [fix] number row on that page for everyone (Fix tier), and
+    # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). A `ui: hidden` key beside them gets a row in neither schema,
+    # however the neighbours are annotated.
+    page_ini = ('[fix]\n'
+                '# A retired height, kept at its last value. Ignored.\n'
+                '# ui: hidden -- retired | range 0.5..2.5 | recommended 1.68\n'
+                'eye_up = 1.68\n\n'
+                '# Eye height: raises or lowers the view, in metres. Live.\n'
+                '# ui: Eye height | range -0.5..0.5 | step 0.01 | unit m | signed | recommended 0.15 | live | menu native_on_foot\n'
+                'trim_up = 0.15\n\n'
+                '# Smoothing in milliseconds, 0 = exact. Live.\n'
+                '# ui: Smoothing | range 0..200 | step 10 | unit ms | zero exact | recommended 0 | live | menu native_on_foot\n'
+                'smooth = 0\n')
+    page_reads = {'a.cpp': ('float u = cfg.getFloat("fix.eye_up", 1.68f);\n'
+                            'float t = cfg.getFloat("fix.trim_up", 0.15f);\n'
+                            'int s = cfg.getInt("fix.smooth", 0);\n')}
+    name = 'number-tokens-page'
+    wrote = case(name, page_ini, page_reads, 0)
     expect_in(name, wrote, 'MenuKind::Number, "0.15", "-0.5", "0.5", 2, "", false, false, 1,\n'
-                           '     MenuTier::Fix, "explorer_cam", "", "0.01", "m", "", true}')
+                           '     MenuTier::Fix, "native_on_foot", "", "0.01", "m", "", true}')
     expect_in(name, wrote, 'MenuKind::Number, "0", "0", "200", 0, "", false, false, 1,\n'
-                           '     MenuTier::Fix, "explorer_cam", "", "10", "ms", "exact", false}')
+                           '     MenuTier::Fix, "native_on_foot", "", "10", "ms", "exact", false}')
     expect_not_in(name, wrote, 'eye_up')
-    if wrote.count('"explorer_cam"') != 2:
-        failures.append('%s: expected exactly two rows on the explorer_cam page, found %d'
-                        % (name, wrote.count('"explorer_cam"')))
+    if wrote.count('"native_on_foot"') != 2:
+        failures.append('%s: expected exactly two rows on the native_on_foot page, found %d'
+                        % (name, wrote.count('"native_on_foot"')))
     # A row that does not use the tokens carries empty ones, so every other page is unchanged.
-    name = 'explorer-page-plain-rows'
+    name = 'number-tokens-plain-rows'
     wrote = case(name, '[fix]\n# A thing. Live.\n# ui: Thing | range 0..5 | menu fixes\nthing = 2\n',
                  {'a.cpp': 'int t = cfg.getInt("fix.thing", 2);\n'}, 0)
     expect_in(name, wrote, 'MenuTier::Fix, "fixes", "", "", "", "", false}')
     # The tokens belong to number rows, and a step is a positive number.
-    name = 'explorer-step-on-a-switch'
+    name = 'number-tokens-on-a-switch'
     said = case(name, '[fix]\n# A switch. Live.\n# ui: Switch | unit m | menu fixes\nswitch = 1\n',
                 {'a.cpp': 'bool b = cfg.getBool("fix.switch", true);\n'}, 1)
     expect_in(name, said, 'fix.switch')
     expect_in(name, said, 'shape a number row')
     for bad in ('0', '-0.01', 'abc', '0.0'):
-        name = 'explorer-bad-step-' + bad
+        name = 'number-tokens-bad-step-' + bad
         said = case(name, ('[fix]\n# A number. Live.\n# ui: Number | range 0..5 | step %s | menu fixes\nnumber = 2\n' % bad),
                     {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
         expect_in(name, said, '`step %s` is not a positive number' % bad)
-    # A page nobody built is refused by name, as ever.
-    name = 'explorer-unknown-page'
-    said = case(name, '[fix]\n# A number. Live.\n# ui: Number | range 0..5 | menu explorer\nnumber = 2\n',
+    # A page nobody built is refused by name, as ever: the Explorer Cam page went with Explorer Cam (F98).
+    name = 'retired-explorer-cam-page'
+    said = case(name, '[fix]\n# A number. Live.\n# ui: Number | range 0..5 | menu explorer_cam\nnumber = 2\n',
                 {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
-    expect_in(name, said, 'explorer_cam')
+    expect_in(name, said, 'native_on_foot')
     # The Visual section and tab (2026-10-22). [visual] is exposed like [fix]: its keys are rows of the installer's window, a ui: line makes
     # them one, and `menu visual` is a page. The moved key carries its old name into kMovedSettings (the installer's window reads an old
     # file through it), keeps the bare `menu` token (VR's Fixes page) and its place in ini order; star_glow is a Fix-tier row on the

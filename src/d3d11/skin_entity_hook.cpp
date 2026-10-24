@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "../common/code_hook.h"
-#include "explorer_cam_core.h"
+#include "avatar_hooks_core.h"
 #include "skin_entity_walk.h"
 
 namespace edvr {
@@ -97,7 +97,7 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
         uint32_t timestamp = 0, imageSize = 0;
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != ecm::kExpectedTimestamp || imageSize != ecm::kExpectedImageSize) {
+        if (timestamp != avh::kExpectedTimestamp || imageSize != avh::kExpectedImageSize) {
             *why = "the PE timestamp or image size is not build 334925's";
             return false;
         }
@@ -246,9 +246,9 @@ uint8_t* allocateRelay(uintptr_t target) noexcept {
 bool prepareRelay(void* trampoline, void* context) noexcept {
     auto& s = *static_cast<State*>(context);
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(s.relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(s.relay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(s.relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), s.relay, ecm::kCallbackRelayBytes)) return false;
+    if (!VirtualProtect(s.relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), s.relay, avh::kCallbackRelayBytes)) return false;
     s.forward.store(address, std::memory_order_release);
     return true;
 }
@@ -295,7 +295,7 @@ SkinHookState skinEntityHookArm(char* whyOut, size_t cap) {
     s->target = target;
     s->relay = allocateRelay(target);
     if (!s->relay) return stood("no executable memory could be placed within two gigabytes of the target");
-    ecm::buildCallbackRelay(s->relay, &s->gate, reinterpret_cast<const void*>(&skinJobsHooked));
+    avh::buildCallbackRelay(s->relay, &s->gate, reinterpret_cast<const void*>(&skinJobsHooked));
     // the gate opens only after the patch is live and the forward pointer is published
     if (!s->hook.install(reinterpret_cast<void*>(target), s->relay, nullptr, "skin-jobs", &prepareRelay, s)) {
         VirtualFree(s->relay, 0, MEM_RELEASE);

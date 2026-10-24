@@ -1036,7 +1036,7 @@ constexpr uint64_t kBayStillMs = 2000;   // the latch's movers window (the recor
 // The camera has left the held box by more than this: the seal is released (riding the elevator down, an external camera flying out).
 constexpr float kCameraLeaveM = 2.0f;
 // The camera counts in both directions over this many consecutive frames: it must be outside the held box for this long to release, and inside the
-// bay for this long to re-seal. Explorer Cam is no condition.
+// bay for this long to re-seal.
 constexpr uint32_t kCameraFrames = 10;
 // Built v14.24: a mechanism release (the Lift, a hatch) is not a launch unless the bay stays away. The latched records must be back within these of
 // their sealed poses for kPoseBackFrames consecutive frames (with r1 1) before the seal may come back without the r1 0 to 1 edge.
@@ -1286,10 +1286,10 @@ inline bool rigMayVeto(uint32_t slotEpoch, uint32_t epoch, bool bounded, uint8_t
     return slotEpoch == epoch && bounded && verdict == static_cast<uint8_t>(RigVerdict::kOutside);
 }
 
-// Review 7c: the view's centre is ready when the origin the station prefers is read, or the explorer cam's rows are (the only case the rows are
-// preferred). A missing eye pose alone is not a reason to resolve the view again.
-inline bool viewCentreReady(bool originOk, bool poseOk, bool explorerCam) noexcept {
-    return originOk || (poseOk && explorerCam);
+// Review 7c: the view's centre is ready when the origin the station prefers is read. A missing eye pose alone is not a reason to resolve
+// the view again.
+inline bool viewCentreReady(bool originOk) noexcept {
+    return originOk;
 }
 
 // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight): the rig association per rig, the mechanism pose, the cost summary, the log gate ----
@@ -1388,7 +1388,7 @@ inline constexpr uint8_t kStorePrologue[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x4
 
 // The store hook's install decision (store_hook.cpp installOnce). The identity (the PE TimeDateStamp and SizeOfImage the other build-keyed hooks
 // check) is read first; a mismatch refuses whatever the prologue is. identityRead false: the PE header was unreadable. got null: the prologue was
-// unreadable. The caller passes the expected pair from the build's constants (explorer_cam_core.h's ecm::kExpectedTimestamp and ecm::kExpectedImageSize).
+// unreadable. The caller passes the expected pair from the build's constants (avatar_hooks_core.h's avh::kExpectedTimestamp and avh::kExpectedImageSize).
 enum class StoreInstall : uint8_t { kInstall = 0, kUnreadable, kWrongIdentity, kWrongPrologue };
 inline StoreInstall storeInstallDecision(bool identityRead, uint32_t stamp, uint32_t size, uint32_t wantStamp, uint32_t wantSize,
                                          const uint8_t* got, const uint8_t* pin, size_t n) noexcept {

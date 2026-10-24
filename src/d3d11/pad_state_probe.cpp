@@ -15,7 +15,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/log.h"
-#include "explorer_cam_core.h"
+#include "avatar_hooks_core.h"
 #include "pad_state_core.h"
 
 namespace edvr {
@@ -194,7 +194,7 @@ void installReaders(uintptr_t base) {
     uint32_t stamp = 0;
     uint32_t size = 0;
     const bool identityRead = readIdentity(base, &stamp, &size);
-    if (!identityRead || stamp != ecm::kExpectedTimestamp || size != ecm::kExpectedImageSize) {
+    if (!identityRead || stamp != avh::kExpectedTimestamp || size != avh::kExpectedImageSize) {
         for (size_t i = 0; i < pad::kReaders; ++i) {
             g_readers[i].refused.store(true, std::memory_order_release);
             g_readers[i].name = kReaderNames[i];
@@ -210,7 +210,7 @@ void installReaders(uintptr_t base) {
         const uintptr_t target = base + static_cast<uintptr_t>(pad::kReaderRva[i]);
         uint8_t got[sizeof(pad::kReaderPin)] = {};
         const bool readOk = readBytes(target, got, sizeof(got));
-        const pad::PadInstall verdict = pad::padInstallDecision(identityRead, stamp, size, ecm::kExpectedTimestamp, ecm::kExpectedImageSize,
+        const pad::PadInstall verdict = pad::padInstallDecision(identityRead, stamp, size, avh::kExpectedTimestamp, avh::kExpectedImageSize,
                                                                 readOk ? got : nullptr, pad::kReaderPin, sizeof(got));
         if (verdict != pad::PadInstall::kInstall) {
             r.refused.store(true, std::memory_order_release);

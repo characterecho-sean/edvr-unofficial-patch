@@ -67,7 +67,7 @@ class D3D11Stereo final {
   // XR calls and private deferred recording stay on the renderer owner.
   // placement, when given, points at one entry per eye. Absent, or the whole
   // image, is the path this renderer has always taken.
-  // fade, 0..1 (Explorer Cam's comfort fade, comfort_fade.h), blends black over
+  // fade, 0..1 (the comfort fade, comfort_fade.h), blends black over
   // each finished eye image by that much: out = in * (1 - fade). Exactly 0 (and
   // anything that is not a number or is negative) runs no extra pass at all, so
   // the image is the one this renderer has always drawn, bit for bit; 1 or more

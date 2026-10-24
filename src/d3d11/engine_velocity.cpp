@@ -1,7 +1,6 @@
 #include "flat_origin_capture.h"
 #include "flat_forward_light.h"
 #include "engine_velocity.h"
-#include "engine_motion_ready.h"
 #include "temporal_shader_bytecode.h"
 #include "dxbc_flat_overlay.h"
 
@@ -238,20 +237,6 @@ struct SkinStats {
     bool hookLogged = false;
     uint32_t windowStart = 0;
 } g_skinStats;
-
-// What Explorer Cam's entry fade waits for (engine_motion_ready.h, explorer_cam_fade_core.h "MOTION"), kept at every frame boundary: whether BOTH eyes were
-// handed the engine-motion views since the boundary before (a run of such frames), and whether the palette chain ran with jobs since then and the second
-// skin's join was live for it. Under g_mutex.
-constexpr uint32_t kMotionNeverAsked = 1u << 30, kMotionAskWindow = 30;
-struct MotionReadyState {
-    uint64_t viewsGiven[2] = {0, 0}, viewsSeen[2] = {0, 0};   // views handed out per eye, ever / at the last boundary
-    uint32_t viewsRun = 0;                                    // consecutive boundaries at which both eyes had been given views since the one before
-    uint64_t chainCalls = 0, chainSeen = 0;                   // chain dispatches the join took (with jobs), ever / at the last boundary
-    bool skinJobs = false, skinLive = false;                  // as of the last boundary
-    uint64_t asked = 0, askedSeen = 0;                        // engineVelocityViews calls (either eye), ever / at the last boundary: somebody is consuming the views
-    uint32_t sinceAsk = kMotionNeverAsked;                    // boundaries since the last one at which the views were asked for
-    bool consumer = false;                                    // asked within the last kMotionAskWindow boundaries
-} g_motion;
 
 // The derived blend states, one per game state (held, so a pointer is an
 // identity). A few in practice; cleared past the cap.
@@ -2561,7 +2546,6 @@ void clearLocked() {
     g_skinPoseFrame = ~0u;
     g_skinPoseEye = -1;
     g_skinRefs = SkinRefCollector{};
-    g_motion = MotionReadyState{};
     g_skinStats = SkinStats{};
     for (auto& d : familyDraws) d = 0;
     g_guardedFast = 0;
@@ -3296,20 +3280,6 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     // The frame's palette-chain dispatches are joined once: at the first skinned draw that needed the views, or here when no draw did (the history chain must
     // not skip a frame because a character was out of view).
     if (ctx) g_skin.flushPending(ctx);
-    {
-        // The entry fade's signals for the frame that just ended (engineMotionReady): both eyes handed the views since the last boundary, and the skinned jobs.
-        const bool both = g_motion.viewsGiven[0] != g_motion.viewsSeen[0] && g_motion.viewsGiven[1] != g_motion.viewsSeen[1];
-        g_motion.viewsRun = both ? g_motion.viewsRun + 1u : 0u;
-        g_motion.viewsSeen[0] = g_motion.viewsGiven[0];
-        g_motion.viewsSeen[1] = g_motion.viewsGiven[1];
-        g_motion.skinJobs = g_motion.chainCalls != g_motion.chainSeen;
-        g_motion.skinLive = g_motion.skinJobs && g_skin.lastJoinLive();   // (the frame's join has run: a draw needed it, or the flush above)
-        g_motion.chainSeen = g_motion.chainCalls;
-        if (g_motion.asked != g_motion.askedSeen) g_motion.sinceAsk = 0;
-        else if (g_motion.sinceAsk < kMotionNeverAsked) ++g_motion.sinceAsk;
-        g_motion.askedSeen = g_motion.asked;
-        g_motion.consumer = g_motion.sinceAsk <= kMotionAskWindow;
-    }
     skinBuildPoseLocked(ctx);     // F2: the frame's pose table, now that every draw has said which records it read
     if (ctx) pollCaptures(ctx);   // the eye-pass capture's GPU timers, without waiting
     // The on-foot source's slot target lives only while the source is drawn:
@@ -3385,24 +3355,10 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    ++g_motion.asked;
     const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
                                        {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                                         g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);
-    if (given) ++g_motion.viewsGiven[eye];
     return given;
-}
-
-EngineMotionReady engineMotionReady() {
-    EngineMotionReady r;
-    if (!live.load(std::memory_order_acquire) || !g_emitLive.load(std::memory_order_acquire)) return r;   // the engine's motion is not running: nothing to wait for
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    if (!g_motion.consumer) return r;   // the temporal pass is not asking for the views (it is off, or this is not a scene it runs in): nothing to wait for
-    r.armed = true;
-    r.viewsRun = g_motion.viewsRun;
-    r.skinJobs = g_skinWanted.load(std::memory_order_relaxed) && g_motion.skinJobs;
-    r.skinLive = g_motion.skinLive;
-    return r;
 }
 
 bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
@@ -3632,9 +3588,8 @@ bool engineVelocitySkinWanted() noexcept { return g_skinWanted.load(std::memory_
 void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups) {
     if (!g_skinWanted.load(std::memory_order_acquire) || !live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    // One dispatch of the frame's palette chain (the game makes one or two a frame): noted here, joined once per present frame (SkinJoinGpu::noteChain). A
-    // dispatch the join took is the fade's "a character is loaded"; "its join is live" is read at the boundary, after the frame's one join.
-    if (g_skin.noteChain(ctx, frameNow(), groups)) ++g_motion.chainCalls;
+    // One dispatch of the frame's palette chain (the game makes one or two a frame): noted here, joined once per present frame (SkinJoinGpu::noteChain).
+    g_skin.noteChain(ctx, frameNow(), groups);
 }
 
 ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth) {
