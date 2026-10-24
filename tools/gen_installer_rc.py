@@ -46,7 +46,7 @@ RT_MANIFEST = 24
 def flat_ini_bytes():
     """The shipped edvr-flat.ini: the flat profile's own default settings."""
     return (b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
-            b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 / FSR 4.1 / XeSS-SR and DLSS model presets.\r\n'
+            b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 / FSR4 / XeSS-SR and DLSS model presets.\r\n'
             b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr, fsr4, xess. Game SS controls render scale.\r\n'
             b'# XeSS-SR needs libxess.dll beside the game; the flat installer includes it when built with the SDK.\r\n'
             b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
@@ -545,7 +545,7 @@ def self_test():
                 assert b'[diag]\r\n' in flat_ini and b'flat_origin_capture = off\r\n' in flat_ini
                 assert b'Restart the game after changing this value.' in flat_ini
                 assert b'fsr, fsr4, xess. Game SS controls render scale.' in flat_ini
-                assert b'FSR3 / FSR 4.1 / XeSS-SR' in flat_ini
+                assert b'FSR3 / FSR4 / XeSS-SR' in flat_ini
                 assert b'XeSS-SR needs libxess.dll' in flat_ini
                 assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
                 assert b'dump_draws = NUMLOCK' in flat_ini and b'dump_draws = F10' not in flat_ini

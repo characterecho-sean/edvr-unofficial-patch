@@ -27,6 +27,9 @@ inline bool flatProfileReadsKey(const char* key) {
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         // TEMPORARY (GPU pass profile, 2026-10-12): the flat profile reads the same key. Remove with the arc.
         std::strcmp(key, "hotkey.gpu_pass_profile") == 0 ||
+        // TEMPORARY (FSR 4 bridge lock A/B, 2026-10-24; fsr4_engine.cpp): the flat profile reads the same key. Unlisted, getString answers
+        // "off" here, which the engine does not understand and runs as per_frame. Remove with the arc.
+        std::strcmp(key, "diag.fsr4_shared_locks") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The launch movie (intro_skip.cpp), flat's one value being `skip`: the game's open of the ident file is answered "not found". Every
         // other value plays the movie (intro_mode.h: introVideoParseFor), so the VR panel and resample stay inert in flat. Unlisted, getString

@@ -8,22 +8,35 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-10-23): route 2 BUILDING, BRANCH ONLY.** `fix.temporal_aa =
-  fsr4` (FSR 4.1 through AMD's signed D3D12 DLLs over a D3D11/D3D12 bridge,
-  modelled on XeSS's) on `claude/fsr-4-1-flat-vr-support-5f6ea4`, flat and
-  VR, beside `fsr` (route 1, unchanged). Not merged to main until Sean says
-  it ships (D9). Facts, decisions D7 to D9 and the flight plan: journal,
-  "2026-10-23: route 2".
+- **State (2026-10-24): route 2 FLOWN FLAT, BRANCH ONLY; render-thread
+  stall under instrument.** `fix.temporal_aa = fsr4` (FSR 4.1 through
+  AMD's signed D3D12 DLLs over a D3D11/D3D12 bridge, modelled on XeSS's)
+  on `claude/fsr-4-1-flat-vr-support-5f6ea4`, flat and VR, beside `fsr`
+  (route 1, unchanged). Not merged to main until Sean says it ships (D9).
+  Facts, decisions D7 to D9 and the flight plan: journal, "2026-10-23:
+  route 2". Flight 5 (journal, "2026-10-23 night"): FSR 4.1.1 ran on the
+  Radeon 8060S through `FSR4_UPGRADE=1`, every dispatch clean. Its GPU
+  work is small (0.8 ms at 1280x800 to 2560x1600); the bridge holds the
+  render thread 3 to 8 ms a frame, a wait on the GPU (journal,
+  "2026-10-24: the render-thread stall"). Same spot, FSR 4 35 to 38 fps,
+  FSR 3 36 to 38. Sean reports artifacts (vertical streaks in a station,
+  FSR 3 comparison pending). A main-menu crash after a display change
+  was in Elite's occlusion culler, before FSR 4 ran (set aside).
+- **Temporary key (remove or ship when the stall is settled):**
+  `diag.fsr4_shared_locks` (`per_frame` default, `held`, `alternate`), the
+  A/B of the bridge's D3D11 keyed-mutex locks, held for a context's life
+  against taken and released each frame.
 - **Route 1 (2026-09-17): MERGED TO MAIN** after flights 1 to 3 (Pimax
   and Quest 3, RTX 5090, clean; fsr 1.1 to 2.1 ms per stereo pair; Sean:
   slightly better than the pass's own history, not DLSS). The community
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
-- **Next:** flight 5 on Sean's Strix Halo (Radeon 8060S, RDNA 3.5, Proton)
-  with the route 2 build, launch option `FSR4_UPGRADE=1 %command%`;
-  signatures in the 2026-10-23 entry. Then the AMD licence read and the
-  installer payload (D8). Route 1's flight 4 (an AMD supporter's log) and
-  the exported-symbols nit (Open) still stand.
+- **Next:** flight 6, the instrumented bridge with
+  `diag.fsr4_shared_locks = alternate`, standing still in a station for
+  three minutes; signatures in the 2026-10-24 entry. Then the artifacts
+  (FSR 3 against FSR 4 at the same spot, a NumLock capture), VR, the AMD
+  licence read and the installer payload (D8). Route 1's flight 4 (an AMD
+  supporter's log) and the exported-symbols nit (Open) still stand.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
   history, which is what an AMD user gets today; and a cosmetic nit seen
@@ -32,11 +45,8 @@ read 2026-09-16) unless marked believed.
   symbols (inert: nothing imports them; fix in the fetch tool by building
   the port without its export macro, with `--verify` checking for it);
   and the create's VRAM figure, meaningless in the field (flight 1
-  journal). CLOSED by Track A: the
-  build recipe (CMake, `/MT` forced, the upscaler-only targets) and the
-  d3d11-import stop of 3.5 (neither library imports d3d11, dxgi or
-  d3dcompiler by name). DECIDED (D6): the port's prebuilt shader compiler
-  is accepted as a build-time-only tool.
+  journal). Closed: Track A's build recipe and d3d11-import stop
+  (journal), the prebuilt shader compiler (D6, section 6).
 - **Ruled out (2026-09-16, vendor-stated; 2026-10-23 additions in the
   journal):** an official AMD D3D11 backend (none exists); FSR 4 on D3D11
   or Vulkan (D3D12-only signed DLLs; officially RX 7000/9000 only);
@@ -776,3 +786,91 @@ class of upscaler): that is route 2's go/no-go.
   stamped 0.0.0-ci, so the flight log's build check is `edvr_log.py
   --expect-build 0.0.0-ci`, with the install receipt's hashes as the
   stronger tie to this run.
+- 2026-10-23 night, flight 5 (ci-40031975573 at 5dcc0608; Steam, flat,
+  Strix Halo, Proton Experimental, `FSR4_UPGRADE=1` read from the game
+  process's environment; log `edvr_gfx_20261023_203819.log`, build check
+  passed). **FSR 4.1.1 is offered and runs:** "AMD's runtime offers FSR
+  4.1.1, 3.1.5, 2.3.4 for this device", provider 4.1.1 on every context.
+  2560x720 to 5120x1440 (2x a side), LDR, infinite depth, flags 0x138.
+  Every dispatch rc=0, no message from AMD's runtime, no refusal, no
+  stall (dispatch #3000 reached); jitter live at #3000 (0.000, -0.167).
+  About a dozen live switches among fsr4, fsr, dlss, on and xess
+  destroyed and rebuilt the context cleanly (2.5 ms; 130 ms the first
+  time). The bridge line over 1799 evaluations, median/p95: GPU 2.8/3.1 ms
+  for the whole step, of which the D3D12 dispatch 1.7/1.7, copy-in 0.39,
+  copy-out 0.18; render-thread CPU 6.3/7.1 ms, with the allocator wait 0
+  and the submit 0.013, so the CPU goes elsewhere in the evaluate (the
+  D3D11 flushes, the timer queries or ffxDispatch's recording under
+  vkd3d-proton; not split yet). Hidden at 60 fps here; split it before
+  calling FSR 4 cheap. DXVK reports the GPU as vendor 0x10DE
+  (`DXVK_ENABLE_NVAPI=1`) with the real device id 0x1586; AMD's runtime
+  offered 4.1.1 regardless. The camera position was constant in every
+  sample read, so motion was barely exercised; Sean has not yet judged
+  the image.
+- 2026-10-23 night, the next launch crashed (`edvr_gfx_20261023_204910.log`,
+  same build). Run 1 had exited cleanly (breadcrumbs: "process exit" at
+  20:48:21) before the machine suspended and resumed (20:48:24 to 20:48:26).
+  Run 2 died 21 s in, at the main menu (its game journal holds only the
+  Fileheader): `UNHANDLED exception 0xC0000005 at 0x144BD17A0 in
+  EliteDangerous64.exe +0x4BD17A0`, watchdog exit code 3221225477. The
+  faulting instruction is `vmovups ymm2,[rcx-0x20]`, the head of an AVX2
+  loop over 96-byte records, in function 0x4BD1550 (its .pdata chunk). No
+  direct call or jmp reaches it; the file holds one absolute pointer to it,
+  so it is called through a table or vtable. Ruled out: FSR 4 as the
+  cause, because run 2 has no `fsr4:` line (the probe, whose first line is
+  the adapter match, never ran, so no D3D12 device existed), the flat
+  runtime treated no frame (`treated=0`), and the log, flushed every
+  250 ms, runs to 1.2 s before the fault. **Whose code (2026-10-24, READ
+  from the exe's RTTI):** the pointer sits in slot 11 of the vtable whose
+  locator names `MaskedOcclusionCullingAVX2::MaskedOcclusionCullingPrivate`
+  (base `MaskedOcclusionCulling`): Intel's Masked Occlusion Culling
+  library. The loop (INFERRED from the instructions) is its hierarchical-Z
+  test: per 96-byte tile, two depth vectors and a mask, blended by mask,
+  min, then `zMax >= zBuf`; a read past the tile buffer means the buffer
+  was freed or sized for another resolution. **What differed:** the
+  ultrawide (DP-1) disconnected at 20:48:22, before the suspend; run 1
+  opened at 5120x1440, run 2 at 2560x1600 (the laptop panel) and resized
+  to 2560x1440 and then 1x1601 within a second, with the game's
+  `Settings.xml` now present (run 1: absent). Leading suspicion: the
+  game's culler set up for a degenerate window. Weaker lead: the light
+  grid cache (`docs\light-grid-cache-2026-10-13.md`; no key, always on,
+  detours the cluster builder 0x58B250), which ran at the main menu in
+  run 2 (contexts 1920x1080 and 256x256 at 20:49:27) and not in run 1.
+  Not checked: whether EDVR's kept display mode made the 1x1601 resize.
+  Set aside by Sean on 2026-10-24 in favour of FSR 4; the next launch on
+  the same panel (03:10) did not crash.
+- 2026-10-24: the render-thread stall. Log `edvr_gfx_20261024_031006.log`
+  (same build, laptop panel, 1280x800 to 2560x1600, on foot in a
+  station). **Same spot, same minute:** FSR 4 35 fps, FSR 3 36 to 38,
+  FSR 4 again 35 to 38 (5 s frame counts across Sean's F8 switches at
+  03:12:36 to 03:12:57); in space both held the 60 fps cap. FSR 4's
+  D3D12 dispatch is 0.80 ms there (1.7 ms at 2560x720 to 5120x1440); the
+  render thread spends 3.2 to 4.3 ms a frame in the evaluate (6.3 to
+  7.9 ms on the ultrawide), with the allocator wait and the submit ~0,
+  and the span shrinks and grows with the GPU work (3.4 ms when the
+  ultrawide's dispatch fell to 0.75 ms): a wait on the GPU, not work.
+  Ruled out: a newer Mesa as the fix for this cost, because Mesa 26.2.5
+  is current in every repository here (only `mesa-git` 26.3 is newer)
+  and the GPU part is under 1 ms at the panel's size; the time is the
+  render thread waiting. **Mechanism found in DXVK's source** (Proton
+  Experimental ships DXVK v3.1.1-97-ga78a467ca): `IDXGIKeyedMutex::
+  ReleaseSync` calls `WaitForResource(image, SynchronizeAll,
+  READ_WRITE)`, a CPU wait until the GPU has finished every pending use
+  of the texture; `AcquireSync` is a CPU-side lock; D3D11 fence
+  `Signal` and `Wait` are GPU-side. The bridge releases its three input
+  keys right after queueing the input copies (so the render thread waits
+  for the game's frame so far) and the output key after the output copy
+  (so it waits for FSR 4 too). D3D12 never uses the keyed mutex: the
+  shared fences already order the work. The XeSS bridge does the same.
+  **Instrument (flight 6):** the evaluate's CPU span split into phases,
+  one 30 s line `fsr4: slot=N cpu phases over ...` beside the bridge
+  line, and the temporary key `diag.fsr4_shared_locks`: `held` keeps a
+  context's keys from its first use to its destruction, `alternate`
+  flips between per-frame and held at each 30 s window. Signatures: H1
+  (the releases are the stall) `give-in` and `give-out` carry most of the
+  eval median under `locks=per-frame` and fall to ~0 under `locks=held`,
+  with the evaluations a second rising at a fixed spot; H2 (AMD's
+  recording) `record` carries it under both; H3 (DXVK's flushes)
+  `signal-in` or `signal-out` carries it. Held keys that broke the
+  interop would show as a stale, black or flickering image only in the
+  held windows, or refusals in the log.

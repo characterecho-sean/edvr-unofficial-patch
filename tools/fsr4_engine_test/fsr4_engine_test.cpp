@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/d3d11/fsr4_engine.h"
 #include "../../src/d3d11/fsr4_version.h"
@@ -47,6 +48,9 @@ void Log::note(const char* format, ...) {
     va_end(args);
     std::fputc('\n', stderr);
 }
+// The engine reads diag.fsr4_shared_locks once when the backend becomes available; the rig runs it at its default.
+Config& Config::get() { static Config config; return config; }
+std::string Config::getString(const char*, const char* def) const { return def; }
 }  // namespace edvr
 
 namespace {
