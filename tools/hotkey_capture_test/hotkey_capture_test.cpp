@@ -1872,7 +1872,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 48, "the Native on foot page retains its other 48 settings (33, F88's four weapon eye rows, F89's ADS: close left eye, F90's four pistol readout rows, "
+    check(nativePageRows == 39, "the Native on foot page retains its other 39 settings (24, F88's four weapon eye rows, F89's ADS: close left eye, F90's four pistol readout rows, "
                                 "F92a's four rifle ADS readout rows, F92b's ADS: aim with head and F94a's Eye height)");
     for (const char* key : keys) {
         bool found = false;

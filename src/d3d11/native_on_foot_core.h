@@ -1166,8 +1166,8 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
 // The swivel clamp: the elbow at least kIkElbowOutM out on the arm's side (out = +1 or -1: the sign of the clavicle's model x) and not above
 // the shoulder (E.y <= S.y). Valid authored pistol support uses a separate body-down pole for the left elbow; the slider sets its starting
 // lateral angle and swivel trim is added. Other policies retain this clamp and its nearest-angle/least-violation fallback.
-// F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm). F59: measured from the arm's OWN shoulder,
-// out x (E.x - S.x) >= elbowOutM (default 6 cm), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
+// F57: the elbow-out distance is the Elbow out constant, kIkElbowOutCm (F96: its config key was removed). F59: measured from the arm's OWN shoulder,
+// out x (E.x - S.x) >= elbowOutM (3.5 cm since F96), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
 inline double ikElbowOutOf(const double E[3], const double S[3], double out) noexcept { return out * (E[0] - S[0]); }
 // Preserve the existing 3P model-X half-space convention by anatomical rig side. The rig is translated
 // during pinStage0, so a joint's current absolute X is not a stable indicator of which arm it belongs to.
@@ -1711,7 +1711,8 @@ constexpr uint32_t kIkSpine[3] = {16, 21, 24};       // the spine chain the squa
 constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
-constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSwivelTrimDefaultDeg = 6.0, kIkSquareAmountDefault = 0.75, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
+// F96: the arm IK's shipped values. Their config keys were removed, so these are the values now (degrees, the 0..1 amount, cm).
+constexpr double kIkSwivelTrimDeg = 2.0, kIkSquareAmount = 0.75, kIkElbowOutCm = 3.5;   // the values Sean flew (F96)
 constexpr double kWeaponViewOffsetDefaultCm = 2.0;   // F90: the pilot's value from the F89 flight (2.5 before)
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
 // def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
@@ -1722,19 +1723,6 @@ constexpr uint32_t kIkFpSlotPov = 10;
 constexpr uint32_t kIkFpSlotAttach[2] = {1, 0}, kIkFpSlotHand[2] = {2, 3}, kIkFpSlotClav[2] = {4, 5}, kIkFpSlotUpper[2] = {6, 7},
                    kIkFpSlotFore[2] = {8, 9};
 
-// The slider values, clamped (NaN takes the default).
-inline double ikSwivelTrimClampDeg(double v) noexcept {
-    if (!(v == v)) return 0.0;
-    return v < -kIkSwivelTrimMaxDeg ? -kIkSwivelTrimMaxDeg : v > kIkSwivelTrimMaxDeg ? kIkSwivelTrimMaxDeg : v;
-}
-inline double ikSquareAmountClamp(double v) noexcept {
-    if (!(v == v)) return kIkSquareAmountDefault;
-    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
-}
-inline double ikElbowOutClampCm(double v) noexcept {
-    if (!(v == v)) return kIkElbowOutCmDefault;
-    return v < 0.0 ? 0.0 : v > kIkElbowOutCmMax ? kIkElbowOutCmMax : v;
-}
 // A point through a row-vector 4x4 (v x M).
 inline void ikXform(const float p[3], const float M[16], double out[3]) noexcept {
     for (int c = 0; c < 3; ++c)
@@ -2127,17 +2115,12 @@ constexpr uint32_t kBendNeckJoint = 34;
 constexpr double kIkAssistReach = 0.97, kIkAssistMarginM = 0.03, kIkAssistMaxM = 0.10, kIkAssistMaxDeg = 25.0;
 constexpr double kIkAdsRampSec = 0.15;
 constexpr float kIkGateFullAdsM = 0.6f, kIkGateZeroAdsM = 1.2f;
-// F62a: the ADS shoulder-forward default is 0 (it was 5 cm: in ADS the right arm folded to the 40 deg limit).
-constexpr double kIkAdsSquareDefault = 1.0, kIkAdsElbowOutCmDefault = 6.0, kIkAdsTrimDegDefault = 3.0, kIkAdsRaiseCmDefault = 5.5,
-                 kIkAdsForwardCmDefault = 0.0, kIkAdsLeanDegDefault = 6.0;
-constexpr double kIkAdsElbowOutCmMax = 20.0, kIkAdsTrimDegMax = 60.0, kIkAdsShoulderCmMax = 10.0, kIkAdsLeanDegMax = 15.0;
+// F62a: the ADS shoulder-forward is 0 (it was 5 cm: in ADS the right arm folded to the 40 deg limit). F96: the ADS values are constants now
+// (their config keys were removed). kIkAdsSquareAmount stays in the ADS blend because the square-up reads the amount whenever it is not armed.
+// kIkAdsLeanDeg stays in the bend: the bend weight is 1 - detachW, still above zero while the body detaches, so the lean is not a no-op there.
+constexpr double kIkAdsSquareAmount = 1.0, kIkAdsElbowOutCm = 6.0, kIkAdsTrimDeg = 3.0, kIkAdsRaiseCm = 5.5, kIkAdsForwardCm = 0.0, kIkAdsLeanDeg = 8.0;
 
 inline double ikLerp(double a, double b, double w) noexcept { return a + (b - a) * w; }
-// A slider's value clamped to [lo, hi]; NaN takes the default.
-inline double ikClampOr(double v, double lo, double hi, double dflt) noexcept {
-    if (!(v == v)) return dflt;
-    return v < lo ? lo : v > hi ? hi : v;
-}
 // The per-arm distance gate with the ADS weight: full under lerp(0.35, 0.6, w), none from lerp(0.8, 1.2, w), linear between (NaN: 0).
 inline float ikDistanceGateAds(float dist, float adsW) noexcept {
     if (!(dist == dist)) return 0.0f;

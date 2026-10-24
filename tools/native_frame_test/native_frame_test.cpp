@@ -1506,11 +1506,9 @@ int wmain(int argc, wchar_t** argv) {
                 bool cl = false;
                 double E2[3];
                 t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
-                check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::ikElbowOutClampCm(45.0) == 30.0 && nf::ikElbowOutClampCm(-1.0) == 0.0 &&
-                          nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == nf::kIkSquareAmountDefault &&
-                          nf::kIkSwivelTrimDefaultDeg == 6.0 && nf::kIkSquareAmountDefault == 0.75 && nf::kIkAdsTrimDegDefault == 3.0 &&
-                          nf::kIkAdsRaiseCmDefault == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
-                      "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
+                check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::kIkSwivelTrimDeg == 2.0 && nf::kIkSquareAmount == 0.75 &&
+                          nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
+                      "F57: the clamp keeps the elbow out by the distance (25 cm); the arm IK's shipped values are the constants");
             }
             // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.
             {
@@ -2126,9 +2124,9 @@ int wmain(int argc, wchar_t** argv) {
                 tL.elbowAt(nf::ikSwivelClamp(tL, 0.0, -1.0, &clL), El);
                 check(E0r[0] > 0.06 && nf::ikElbowOutOf(E0r, SRt, 1.0) < 0.0 && clR && nf::ikElbowOutOf(Er, SRt, 1.0) >= 0.06 - 1e-9 &&
                           Er[1] <= SRt[1] + 1e-9 && clL && nf::ikElbowOutOf(El, SLt, -1.0) >= 0.06 - 1e-9 && El[1] <= SLt[1] + 1e-9 &&
-                          nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCmDefault == 6.0,
+                          nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCm == 3.5,
                       "F59: the elbow-out clamp measures from the arm's own shoulder (an inboard elbow the midline passed is clamped to S.x + 6 cm, "
-                      "both sides); the default is 6 cm");
+                      "both sides); the arm's default is 3.5 cm");
                 // F77: the arm's anatomical model-X half-space is tied to its rig side, not its translated clavicle position.
                 bool translationInvariant = nf::ikArmOutSign(0) == -1.0 && nf::ikArmOutSign(1) == 1.0 && nf::ikArmOutSign(2) == 0.0;
                 const double shifts[] = {-0.8, -0.4, 0.0, 0.4, 0.8};
@@ -2187,10 +2185,8 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(nf::ikDistanceGateAds(1.0f, 1.0f) - 0.2f / 0.6f) < 1e-6f && nf::ikDistanceGateAds(1.0f, 0.0f) == 0.0f &&
                           std::fabs(nf::ikDistanceGateAds(0.9f, 0.5f) - 0.1f / 0.525f) < 1e-5f &&
                           nf::ikDistanceGateAds(std::numeric_limits<float>::quiet_NaN(), 1.0f) == 0.0f &&
-                          std::fabs(nf::ikLerp(0.10, 0.06, 0.5) - 0.08) < 1e-12 &&
-                          nf::ikClampOr(std::numeric_limits<double>::quiet_NaN(), 0.0, 10.0, 3.0) == 3.0 && nf::ikClampOr(12.0, 0.0, 10.0, 3.0) == 10.0,
-                      "F59: the ADS weight ramps in 0.15 s (half at 0.075 s) and out; the gate relaxes to 0.6..1.2 m with it; the sliders lerp and "
-                      "clamp (NaN takes the default)");
+                          std::fabs(nf::ikLerp(0.10, 0.06, 0.5) - 0.08) < 1e-12,
+                      "F59: the ADS weight ramps in 0.15 s (half at 0.075 s) and out; the gate relaxes to 0.6..1.2 m with it; the arm values lerp");
             }
             // F59b: the full-3P head follow's fallback (live; the AMC matrix or the last good frame up to 0.5 s; none past it), the ramp between
             // sources (the change frame outputs the last output), the body-axes residual and the hook's (T - N1) to eye - neck.
@@ -2256,8 +2252,8 @@ int wmain(int argc, wchar_t** argv) {
             // F62a (kept): the full-3P eye-to-neck rest and the ADS shoulder-forward default. (F66: the weapon fit's checks went with the fit.)
             {
                 check(nf::kNeckRestOffsetFull3P[0] == 0.0 && nf::kNeckRestOffsetFull3P[1] == -0.155 && nf::kNeckRestOffsetFull3P[2] == -0.09 &&
-                          nf::kNeckRestOffset[2] == -0.161 && nf::kIkAdsForwardCmDefault == 0.0,
-                      "F62a: the full-3P neck rests 0.155 m below and 0.09 m behind the eye (0.161 kept outside full 3P); the ADS shoulder forward defaults to 0");
+                          nf::kNeckRestOffset[2] == -0.161 && nf::kIkAdsForwardCm == 0.0,
+                      "F62a: the full-3P neck rests 0.155 m below and 0.09 m behind the eye (0.161 kept outside full 3P); the ADS shoulder forward is 0");
             }
             // F61 (TEMPORARY): the rotation calibration. The schedule (yaw, rest, pitch, rest at 1 s each, repeating), the three sources'
             // deltas (yaw + = turned left, pitch + = up, each in its own axes), the head subtraction and the verdict rule.
