@@ -3,6 +3,12 @@
 //
 // The camera: a pinhole yawed about y; the scene rows (b1 270..273, row-vector form) at this frame's yaw, the marker rows (b0 rows 4, 5, 7) at a yaw some frames
 // older, with the marker projection's own focal scale (sigma about 1.0094, the F65 measurement) and the scene rows carrying a TAA jitter. 2016 x 2017 target.
+// run94b's scene and marker rows share one frame and one origin, which the game's do not (the F94b flight never applied: run95b below); its checks hold for
+// the row patch given the anchor in the marker's own frame.
+//
+// run95b (F95b): the game's frames. The scene rows take world points less o_w through a camera yawed in the world; the marker rows take the record's HUD frame
+// (camera axes, origin o_hud). A label's record is laid out there from its anchor v by the designed offset (X0 = v + scale (-off.x, off.y, 0)); its world anchor
+// P stands for v. F94b's anchor (P through the marker rows) fails the gate as the flight's 3616 label draws did; v passes it and the patch shows v at P's place.
 #pragma once
 
 #include "../../src/d3d11/draw_record_tag.h"
@@ -12,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace f94btest {
 
@@ -82,6 +89,7 @@ struct View {
         dt::displayOfUi(aff, n, out);
     }
 };
+inline bool within(double a, double b, double tol) { return std::fabs(a - b) <= tol; }
 inline double px(const double a[2], const double b[2]) { return std::sqrt(std::pow((a[0] - b[0]) * kW * 0.5, 2) + std::pow((a[1] - b[1]) * kH * 0.5, 2)); }
 
 // The F92 flight's charge port, roughly: the label's anchor P 1.9 m ahead, its record laid out right of it and below in the plane of the camera the game laid it out
@@ -359,6 +367,120 @@ inline void run94b(Check&& check) {
         got[0] = 0.0;
         const bool keyless = rs.nearest(7, at, 1, got, &dist, &age) && got[0] == e[0];
         check(ok && keyless, "F94b: F93c's nearest reference names its key; a caller that asks for no key gets the correction as before");
+    }
+}
+
+// ---- run95b -----------------------------------------------------------------------------------------------------------------------------------------------------
+// The F94b flight's frame (log 135403, 1536 x 1632 target, the marker rows' focal scales fitted to key 1's head-still baseline): the HUD frame's axes are the
+// camera's; the world is far from its origin (the anchor some hundreds of metres from o_hud, as P was from it in the flight).
+constexpr double kW5 = 1536.0, kH5 = 1632.0, kFx5 = 0.90326, kFy5 = 0.83612, kCx5 = -0.12, kCy5 = 0.04, kScaleZ = 0.3821;
+inline void markerRows5(double lagYawDeg, float r4[4], float r5[4], float r7[4]) {
+    // HUD coordinates (camera axes at layout time) to clip, the eye turned lagYawDeg since
+    const double s = std::sin(lagYawDeg * kPi / 180.0), c = std::cos(lagYawDeg * kPi / 180.0);
+    r4[0] = static_cast<float>(kFx5 * c + kCx5 * s), r4[1] = 0.0f, r4[2] = static_cast<float>(-kFx5 * s + kCx5 * c), r4[3] = 0.0f;
+    r5[0] = static_cast<float>(kCy5 * s), r5[1] = static_cast<float>(kFy5), r5[2] = static_cast<float>(kCy5 * c), r5[3] = 0.0f;
+    r7[0] = static_cast<float>(s), r7[1] = 0.0f, r7[2] = static_cast<float>(c), r7[3] = 0.0f;
+}
+inline void sceneRows5(double yawDeg, float rows[16]) {
+    const double s = std::sin(yawDeg * kPi / 180.0), c = std::cos(yawDeg * kPi / 180.0);
+    for (int i = 0; i < 16; ++i) rows[i] = 0.0f;
+    rows[0] = static_cast<float>(kFx5 * c + kCx5 * s);
+    rows[8] = static_cast<float>(-kFx5 * s + kCx5 * c);
+    rows[1] = static_cast<float>(kCy5 * s);
+    rows[5] = static_cast<float>(kFy5);
+    rows[9] = static_cast<float>(kCy5 * c);
+    rows[3] = static_cast<float>(s);
+    rows[11] = static_cast<float>(c);
+    rows[10] = 0.5f;
+    rows[14] = 0.01f;
+}
+inline void ndcM(const float r4[4], const float r5[4], const float r7[4], const double p[3], const double o[3], double out[2], double* w = nullptr) {
+    double mc[3];
+    dt::markerClip(r4, r5, r7, p, o, mc);
+    out[0] = mc[0] / mc[2];
+    out[1] = mc[1] / mc[2];
+    if (w) *w = mc[2];
+}
+
+template <class Check>
+inline void run95b(Check&& check) {
+    namespace f95b = edvr::nofoot::f95b;
+    // ---- the designed offset in the HUD frame reproduces the flight's two labels through one projection -----------------------------------------------------------
+    {
+        float r4[4], r5[4], r7[4];
+        markerRows5(0.0, r4, r5, r7);
+        const double o[3] = {0.0, 0.0, 0.0};
+        auto drawn = [&](double z, float offX, float offY, double px[2]) {
+            const double X0[3] = {0.36, -0.08, z};
+            double D[3], v[3], a[2], b[2];
+            const bool ok = f95b::labelOffsetHud(static_cast<float>(kScaleZ * z), offX, offY, D);
+            for (int k = 0; k < 3; ++k) v[k] = X0[k] - D[k];
+            ndcM(r4, r5, r7, X0, o, a);
+            ndcM(r4, r5, r7, v, o, b);
+            px[0] = (a[0] - b[0]) * kW5 * 0.5;
+            px[1] = (a[1] - b[1]) * kH5 * 0.5;
+            return ok;
+        };
+        double k1[2], k3[2], k1far[2];
+        const bool ok = drawn(2.46, -0.4791f, -0.3320f, k1) && drawn(1.83, -0.2773f, 0.1094f, k3) && drawn(4.0, -0.4791f, -0.3320f, k1far);
+        check(ok && within(k1[0], 127.0, 0.3) && within(k1[1], -86.5, 0.3) && within(k3[0], 73.52, 0.3) && within(k3[1], 28.49, 0.3) && within(k1far[0], k1[0], 1e-3) &&
+                  within(k1far[1], k1[1], 1e-3),
+              "F95b: X0 = v + scale (-off.x, off.y, 0) with scale 0.3821 z gives the flight's head-still label offsets through one projection: key 1 (+127.0, -86.5) and "
+              "key 3 (+73.5, +28.5) px at 1536x1632, at any depth");
+        double D[3];
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        check(!f95b::labelOffsetHud(0.0f, -0.4f, 0.1f, D) && !f95b::labelOffsetHud(-1.0f, -0.4f, 0.1f, D) && !f95b::labelOffsetHud(nan, -0.4f, 0.1f, D) &&
+                  !f95b::labelOffsetHud(0.9f, nan, 0.1f, D) && f95b::labelOffsetHud(0.94f, -0.4791f, -0.3320f, D) && within(D[0], 0.94 * 0.4791, 1e-6) &&
+                  within(D[1], -0.94 * 0.3320, 1e-6) && D[2] == 0.0,
+              "F95b: no record scale (zero, negative, NaN) or no offset refuses; the offset is right of and below the anchor for key 1's argument");
+    }
+    // ---- the live frames: F94b's anchor fails the gate, the label's own anchor passes and is shown where the scene shows P --------------------------------------------
+    {
+        const double yaw = 35.0, lag = 0.8;   // the camera's heading in the world; the marker rows a little behind it
+        const double oW[3] = {1500.0, 4.1, 900.0}, oHud[3] = {0.0, 0.0, 0.0};
+        const double s = std::sin(yaw * kPi / 180.0), c = std::cos(yaw * kPi / 180.0);
+        const double vT[3] = {0.10, -0.05, 2.40};   // the anchor in the camera's axes
+        const double P[3] = {oW[0] + c * vT[0] + s * vT[2], oW[1] + vT[1], oW[2] - s * vT[0] + c * vT[2]};   // the world anchor (the inverse of sceneRows' yaw)
+        float rows[16], r4[4], r5[4], r7[4];
+        sceneRows5(yaw, rows);
+        markerRows5(lag, r4, r5, r7);
+        double D[3], X0[3], v[3];
+        f95b::labelOffsetHud(static_cast<float>(kScaleZ * vT[2]), -0.4791f, -0.3320f, D);
+        for (int k = 0; k < 3; ++k) {
+            X0[k] = vT[k] + D[k];   // the record, as the game wrote it
+            v[k] = X0[k] - D[k];    // the anchor F95b takes back from it
+        }
+        double wc[4], nWu[2], nM0[2], nMP94[2], nMv[2], w94 = 0.0, wv = 0.0;
+        dt::worldClip(rows, P, oW, wc);
+        nWu[0] = wc[0] / wc[3];
+        nWu[1] = wc[1] / wc[3];
+        ndcM(r4, r5, r7, X0, oHud, nM0);
+        ndcM(r4, r5, r7, P, oHud, nMP94, &w94);   // F94b: the world anchor through the HUD frame's rows
+        ndcM(r4, r5, r7, v, oHud, nMv, &wv);
+        double T94[2];
+        f94b::ownAnchorTarget(nWu, nM0, nMP94, T94);
+        const double d94[2] = {T94[0] - nM0[0], T94[1] - nM0[1]};
+        // refused at the gate, in front of the marker camera, as the flight's every label draw ("gate refused 3616, anchor behind the marker camera 0")
+        const bool refused94 = w94 > 1e-9 && !(std::fabs(d94[0]) < dt::kPatchGateNdc && std::fabs(d94[1]) < dt::kPatchGateNdc);
+        // F95b: the dot's path on v (T = P through the scene rows, no icon offset), then the record's place
+        const double T[2] = {nWu[0], nWu[1]}, d95[2] = {T[0] - nMv[0], T[1] - nMv[1]};
+        const bool passes = wv > 1e-9 && std::fabs(d95[0]) < dt::kPatchGateNdc && std::fabs(d95[1]) < dt::kPatchGateNdc;
+        dt::MarkerAffine plain;   // sigma 1, no axis: the translation
+        double u[2];
+        dt::markerAffineU(plain, T, nMv, u);
+        float q4[4], q5[4];
+        for (int i = 0; i < 4; ++i) q4[i] = r4[i], q5[i] = r5[i];
+        dt::affineOffsetRows(q4, q5, r7, plain.sigma, u);
+        double shownV[2], shownX0[2], Trec[2];
+        ndcM(q4, q5, r7, v, oHud, shownV);
+        ndcM(q4, q5, r7, X0, oHud, shownX0);
+        f94b::ownAnchorTarget(nWu, nM0, nMv, Trec);
+        const double pxV = std::sqrt(std::pow((shownV[0] - nWu[0]) * kW5 * 0.5, 2) + std::pow((shownV[1] - nWu[1]) * kH5 * 0.5, 2));
+        const double pxR = std::sqrt(std::pow((shownX0[0] - Trec[0]) * kW5 * 0.5, 2) + std::pow((shownX0[1] - Trec[1]) * kH5 * 0.5, 2));
+        const double lagPx = std::sqrt(std::pow(d95[0] * kW5 * 0.5, 2) + std::pow(d95[1] * kH5 * 0.5, 2));
+        check(refused94 && passes && pxV < 0.01 && pxR < 0.01 && lagPx > 5.0 && lagPx < 40.0,
+              "F95b: in the game's frames (the world 1.7 km from the HUD origin, the camera at 35 deg) F94b's anchor fails the 0.4 NDC gate as every flight draw did; the "
+              "anchor from the designed offset passes it with the dot's lag (0.8 deg), and the patched rows show it exactly at P's place and the record at its own");
     }
 }
 

@@ -7201,6 +7201,8 @@ int wmain(int argc, wchar_t** argv) {
     f94test::run94(check);
     // F94b: the label's row patch from its own anchor (the anchor shown at the dot's place), F93c's rule against it in a lagged turn and at a tie of two dots.
     f94btest::run94b(check);
+    // F95b: the label's anchor taken back from its designed offset in the marker's HUD frame (F94b's world anchor failed the gate in the flight's frames).
+    f94btest::run95b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

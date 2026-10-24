@@ -10809,6 +10809,44 @@ def _hj_f94b_design(rows, ctx):
     return ("PARTIAL" if (gate + behind) * 2 > draws else "OK", text)
 
 
+def _hj_f95b_label(rows, ctx):
+    """F95b: the label's decision runs on its anchor taken back from the designed offset in the marker's HUD frame, as a dot's runs on its record. Every label draw is
+    counted with its verdict, so a label that is never moved names the condition (F94b's flight: every draw at the gate). The anchor at rest against P checks the
+    anchor itself: a dot reads under a pixel."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    draws, moved, refused, noscale, stale, nop, behind, gate, other, restn, steps, eyen = (_hsum(sec, k) for k in (
+        "draws", "moved", "refused", "noscale", "stale", "nop", "behind", "gate", "other", "restn", "steps", "eyen"))
+
+    def wmean(key, weight):
+        n = sum(int(r[weight]) for r in sec)
+        return sum(float(r[key]) * int(r[weight]) for r in sec) / n if n else 0.0
+
+    def mx(key):
+        return max(float(r[key]) for r in sec)
+    offered = sum(1 for r in sec if r.get("offkeys") and r["offkeys"] != "none")
+    rest = wmean("rest", "restn")
+    text = ("label draws %d: moved %d, refused %d (no record scale %d, rows stale %d, no P %d, behind %d, gate %d, other %d) over %d eye-seconds; the anchor at rest "
+            "against P %.2f mean %.2f max px (%d draws), record scale over depth %.4f; the label against its anchor a frame %.2f mean %.2f max px, its anchor in the "
+            "world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px (%d frames)") % (
+        draws, moved, refused, noscale, stale, nop, behind, gate, other, len(sec), rest, mx("restmax"), restn, wmean("scale", "draws"), wmean("step", "steps"),
+        mx("stepmax"), wmean("pstep", "steps"), mx("pstepmax"), wmean("eyed", "eyen"), mx("eyedmax"), eyen)
+    if draws == 0:
+        if offered >= 10:
+            return ("NEVER APPLIED", text + "; the game set a visible marker with a designed offset in %d eye-seconds and no draw of one reached the decision" % offered)
+        return ("IDLE", text + "; no label was drawn")
+    if moved == 0:
+        name, n = max((("no record scale", noscale), ("rows stale", stale), ("no P", nop), ("behind", behind), ("gate", gate), ("other", other)), key=lambda kv: kv[1])
+        text += "; refused the most: %s %d" % (name, n)
+        if gate:
+            text += " (|d| max %.3f NDC)" % mx("gmax")
+        return ("NEVER APPLIED", text)
+    if restn >= 30 and rest > 2.0:
+        return ("PARTIAL", text + "; the anchor at rest is %.2f px off P: it is not the point P stands for" % rest)
+    return ("PARTIAL" if refused * 2 > draws else "OK", text)
+
+
 def _hj_label(rows, ctx):
     sec, refuse = rows.get("sec", []), rows.get("refuse", [])
     if not sec and not refuse:
@@ -11042,6 +11080,15 @@ HEALTH_RULES = (
                 r"(?P<errmax>[\d.]+) max px \((?P<errfast>[\d.]+) mean over (?P<fast>\d+) draws at \d+ deg/s or more\), its step a frame (?P<step93>[\d.]+) mean "
                 r"(?P<step93max>[\d.]+) max px(?:; references \d+; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?"),
     ), _hj_f94b_design),
+    _hrule("marker design offset (F95b)", ("F95b",), ("marker design offset (F95b)",), (
+        ("sec", r"marker design offset \(F95b\) eye (?P<eye>\d) 1 s: label draws (?P<draws>\d+) \(keys [^)]*\): moved (?P<moved>\d+) \(record behind its camera \d+\); "
+                r"refused (?P<refused>\d+): no record scale (?P<noscale>\d+), scene rows stale (?P<stale>\d+), no P (?P<nop>\d+), behind (?P<behind>\d+), gate "
+                r"(?P<gate>\d+) \(\|d\| max (?P<gmax>[\d.]+) NDC, last \S+ \S+\), other (?P<other>\d+); the anchor at rest against P (?P<rest>[\d.]+) mean "
+                r"(?P<restmax>[\d.]+) max px over (?P<restn>\d+) draws \(record scale over depth (?P<scale>[\d.]+)\); over the moved: the label from its anchor \S+ \S+ "
+                r"px mean, its step a frame (?P<step>[\d.]+) mean (?P<stepmax>[\d.]+) max px over (?P<steps>\d+) steps, the anchor's in the world (?P<pstep>[\d.]+) mean "
+                r"(?P<pstepmax>[\d.]+) max mm, the eyes' difference (?P<eyed>[\d.]+) mean (?P<eyedmax>[\d.]+) max px over (?P<eyen>\d+) frames"
+                r"(?:; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?"),
+    ), _hj_f95b_label),
     _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
         ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
         ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
@@ -11965,6 +12012,7 @@ def self_test_health():
         "ADS press fit (F91)", "ADS item gate (F91)")
     DO = "marker design offset (F93c)"
     D94 = "marker design offset (F94b)"
+    D95 = "marker design offset (F95b)"
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
@@ -12090,11 +12138,25 @@ def self_test_health():
             # F93c: the label (a marker with a designed offset) moved with its nearest dot's correction
             return health_render(f93c_fmt, (eye, draws, 0, 0.031, -0.022, moved, moved, 0, 12.0, noref, refs))
 
+        # F94b's line, which F95b retired: its format as the 987f898a build printed it, for that build's logs
+        f94b_fmt = ("marker design offset (F94b) eye %d 1 s: designed-offset draws %llu (keys %s): moved by their own anchor %llu, gate refused %llu, anchor behind the "
+                    "marker camera %llu (left as the game placed them); the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f mean %.2f max px over %llu "
+                    "steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; F93c's rule (measured, not "
+                    "applied): reference this frame %llu, the frame before %llu, none %llu, switches %llu; its target from the applied %.1f mean %.1f max px (%.1f mean "
+                    "over %llu draws at %.0f deg/s or more), its step a frame %.2f mean %.2f max px; references %llu; px at %ux%u; keys with an offset this second: %s; "
+                    "offset argument not read %llu")
+
         def design94(draws=84, moved=84, gate=0, behind=0, step=0.04, stepmax=0.3, steps=83, rthis=0, rbefore=84, rnone=0, sw=6, err=4.2, errmax=36.1, errfast=11.5,
                      fast=20, step93=3.1, step93max=36.2, eye=0, offkeys="1 (-0.4791 -0.3320)", pstep=0.01, pstepmax=0.05, eyed=0.3, eyedmax=0.9, eyen=84):
             # F94b: the label moved by its own anchor, F93c's rule measured beside it
-            return R("marker design offset (F94b) eye %d 1 s: designed-offset draws", eye, draws, "1" if draws else "none", moved, gate, behind, 173.4, -120.2, step,
-                     stepmax, steps, pstep, pstepmax, eyed, eyedmax, eyen, rthis, rbefore, rnone, sw, err, errmax, errfast, fast, 30.0, step93, step93max, 249, 2016, 2017,
+            return health_render(f94b_fmt, (eye, draws, "1" if draws else "none", moved, gate, behind, 173.4, -120.2, step, stepmax, steps, pstep, pstepmax, eyed,
+                                            eyedmax, eyen, rthis, rbefore, rnone, sw, err, errmax, errfast, fast, 30.0, step93, step93max, 249, 2016, 2017, offkeys, 0))
+
+        def label95(draws=84, moved=84, noscale=0, stale=0, nop=0, behind=0, gate=0, gmax=0.0, other=0, rest=0.4, restmax=1.1, restn=40, scale=0.3821, step=0.05,
+                    stepmax=0.3, steps=83, pstep=0.0, pstepmax=0.0, eyed=0.4, eyedmax=1.0, eyen=84, eye=0, offkeys="1 (-0.4791 -0.3320)"):
+            # F95b: the label's decision on its anchor taken back from the designed offset, by its verdict
+            return R("marker design offset (F95b) eye %d 1 s: label draws", eye, draws, "1" if draws else "none", moved, 0, draws - moved, noscale, stale, nop, behind,
+                     gate, gmax, 0.0, 0.0, other, rest, restmax, restn, scale, 127.0, -86.5, step, stepmax, steps, pstep, pstepmax, eyed, eyedmax, eyen, 1536, 1632,
                      offkeys, 0)
 
         def anchor_hooked():
@@ -12415,6 +12477,27 @@ def self_test_health():
               [("NEVER APPLIED", D94)], has=["the game set a visible marker with a designed offset in 10 eye-seconds"])
         check("F94b design offset: mostly refused at the gate", [design94(84, 30, gate=54)], 0, [("PARTIAL", D94)])
         check("F94b design offset: the anchor behind the marker camera", [design94(84, 20, behind=64)], 0, [("PARTIAL", D94)])
+        check("F94b design offset: the 987f898a flight's own line (every draw refused at the gate)", [
+            "marker design offset (F94b) eye 0 1 s: designed-offset draws 90 (keys 1): moved by their own anchor 0, gate refused 90, anchor behind the marker camera 0 (left "
+            "as the game placed them); the label from its anchor +489.6 -830.8 px mean, its step a frame 1.55 mean 46.11 max px over 90 steps, the anchor's in the world "
+            "2.39 mean 215.43 max mm, the eyes' difference 0.00 mean 0.00 max px over 0 frames; F93c's rule (measured, not applied): reference this frame 0, the frame "
+            "before 0, none 90, switches 0; its target from the applied 828.5 mean 851.6 max px (0.0 mean over 0 draws at 30 deg/s or more), its step a frame 0.26 mean "
+            "0.74 max px; references 0; px at 1536x1632; keys with an offset this second: 1 (-0.4791 -0.3320); offset argument not read 0"], 3, [("NEVER APPLIED", D94)],
+              has=["designed-offset draws 90: moved by their own anchor 0, gate refused 90"], lacks=["UNPARSED"])
+        # F95b: the label's decision on its anchor taken back from the designed offset, every draw by its verdict
+        check("F95b label: every draw moved, the anchor at rest on P", [label95(), label95(eye=1, eyed=0.2, eyedmax=0.6)], 0, [("OK", D95)],
+              has=["label draws 168: moved 168, refused 0 (no record scale 0, rows stale 0, no P 0, behind 0, gate 0, other 0) over 2 eye-seconds; the anchor at rest "
+                   "against P 0.40 mean 1.10 max px (80 draws), record scale over depth 0.3821; the label against its anchor a frame 0.05 mean 0.30 max px, its anchor "
+                   "in the world 0.00 mean 0.00 max mm, the eyes' difference 0.30 mean 1.00 max px (168 frames)"], lacks=["UNPARSED"])
+        check("F95b label: no label drawn", [label95(0, 0, restn=0, steps=0, eyen=0, offkeys="none")] * 2, 0, [("IDLE", D95)], has=["no label was drawn"])
+        check("F95b label: drawn, every draw refused at the gate (F94b's failure)", [label95(90, 0, gate=90, gmax=0.912, steps=0, eyen=0)], 3, [("NEVER APPLIED", D95)],
+              has=["the most: gate 90", "|d| max 0.912 NDC"])
+        check("F95b label: drawn, no record scale", [label95(90, 0, noscale=90, restn=0, steps=0, eyen=0)], 3, [("NEVER APPLIED", D95)], has=["the most: no record scale 90"])
+        check("F95b label: set visible by the game for 10 s, never drawn to the decision", [label95(0, 0, restn=0, steps=0, eyen=0)] * 10, 3, [("NEVER APPLIED", D95)],
+              has=["the game set a visible marker with a designed offset in 10 eye-seconds"])
+        check("F95b label: mostly refused", [label95(90, 30, stale=60)], 0, [("PARTIAL", D95)])
+        check("F95b label: moved, but the anchor at rest is off P (the anchor model is wrong)", [label95(rest=6.5, restmax=7.0)] * 2, 0, [("PARTIAL", D95)],
+              has=["the anchor at rest is 6.50 px off P"])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])

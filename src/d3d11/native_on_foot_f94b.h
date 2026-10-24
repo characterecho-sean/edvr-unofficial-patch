@@ -12,11 +12,10 @@
 //
 // The label's own anchor needs no other marker. Its record and its anchor go through the same unpatched marker rows (the game's projection), so their difference
 // is the game's layout offset as the game drew it this frame; the anchor goes through the scene rows as the dot's does. The record is shown at
-//   T = ndc_scene(P), unjittered  +  (ndc_M(X0) - ndc_M(P))
-// both from this frame and this eye. The row patch (drawtag::markerAffineU) keeps every vertex's UI offset from the record, so with this T the patched rows show
-// the anchor P itself exactly at ndc_scene(P), where its dot is, whatever the affine's scale: the whole label is the game's layout moved rigidly onto its anchor.
-// With the head still that is the game's placement (F93c's "properly placed"); in a turn the anchor follows the world and the layout, two points of one projection,
-// keeps its size. F93c's rule gives the same T when its reference is the label's own anchor in the same frame; the measure below is the effect of any other choice.
+//   T = ndc_scene(P), unjittered  +  (ndc_M(X0) - ndc_M(v))
+// both from this frame and this eye, v being the anchor in the marker rows' own (HUD) frame. The row patch (drawtag::markerAffineU) keeps every vertex's UI offset
+// from the record, so with this T the patched rows show the anchor itself exactly at ndc_scene(P), where its dot is, whatever the affine's scale: the whole label
+// is the game's layout moved rigidly onto its anchor. F94b took v as P itself, a world point, and never applied; F95b (below) takes v from the designed offset.
 #pragma once
 
 #include <algorithm>
@@ -167,5 +166,24 @@ struct Tracker {
 };
 
 }  // namespace f94b
+
+// ---- F95b: the label's anchor in the marker's HUD frame -------------------------------------------------------------------------------------------------------
+// F94b never applied (flight 135403: 3616 label draws, every one refused at the 0.4 NDC gate; 14:00:22, key 1: the label from its "anchor" +526.9 -796.6 px
+// against the game's +127.0 -86.5): it put the anchor through the marker rows as P - o_hud, but P (node+0x50) is a world point while the marker rows take the
+// record's HUD frame (camera axes, origin o_hud); F47's "P through the marker rows" has read about 50 deg off in every flight. A label's record is laid out in
+// that HUD frame from its anchor v by the designed offset: X0 = v + scale (-off.x, off.y, 0), the scale being the record's own (0.382 z for the labels: 0.940 at
+// z 2.460, 0.799 at 2.091). The flight's head-still baselines bear it out on two labels through one projection: key 1 (offset -0.4791 -0.3320) +127.0 -86.5 px,
+// key 3 (-0.2773 +0.1094) +73.6 +28.5 px at 1536x1632. v is the HUD point the world anchor P stands for, as a plain dot's record stands for its own P: the label's
+// decision runs on v as the dot's runs on its record (fixDecide), and the row patch keeps the record's UI offset from v.
+namespace f95b {
+// D = X0 - v in the HUD frame; false for a scale that is not a finite positive length (the decision is then refused: no record scale).
+inline bool labelOffsetHud(float scale, float offX, float offY, double D[3]) noexcept {
+    if (!std::isfinite(scale) || !(scale > 0.0f) || !(scale < 1.0e3f) || !std::isfinite(offX) || !std::isfinite(offY)) return false;
+    D[0] = -static_cast<double>(scale) * static_cast<double>(offX);
+    D[1] = static_cast<double>(scale) * static_cast<double>(offY);
+    D[2] = 0.0;
+    return true;
+}
+}  // namespace f95b
 }  // namespace nofoot
 }  // namespace edvr

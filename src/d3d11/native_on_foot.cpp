@@ -22871,18 +22871,29 @@ struct LabSec {
     bool haveRec = false, haveLeader = false, haveFocus = false;
 };
 LabSec g_labSec[2];
-// F94b: the designed-offset markers (the interaction label) per eye, the second's figures (render thread: fixDecide and the 1 s line). F93c's references are
-// still collected from the plain markers, for the measure of its rule.
-struct F94bEye {
-    uint64_t draws = 0, moved = 0, gate = 0, behind = 0, refs = 0, refAge[2] = {}, refNone = 0;
+// F95b: the label decisions per eye, the second's figures (render thread: fixDecide and the 1 s line): every decision by its verdict, the refusals' values,
+// the anchor's lag at rest, and over the moved draws the label against its anchor (the step a frame, the anchor's own step, the eyes' difference).
+struct F95bEye {
+    uint64_t draws = 0, noScale = 0, recBehind = 0, verdict[drawtag::kPatchWhyCount] = {};
     uint64_t keysLo = 0, keysHi = 0;   // the keys drawn
     uint32_t tw = 0, th = 0;           // the marker target's size (the pixels of the line)
+    uint64_t restN = 0, scaleN = 0;
+    double restSum = 0.0, restMax = 0.0, gateMax = 0.0, gateLast[2] = {}, scaleSum = 0.0;
     nofoot::f94b::Sec sec;
 };
-F94bEye g_f94b[2];
-nofoot::f94b::Tracker g_f94bTrack[2];
-nofoot::f94b::EyeJoin g_f94bEyes;
-nofoot::f87::RefSet g_f93RefSet[2];
+F95bEye g_f95b[2];
+nofoot::f94b::Tracker g_f95bTrack[2];
+nofoot::f94b::EyeJoin g_f95bEyes;
+// F95b: a label draw refused before its decision (its key matched in this eye only, a ranged b0, no rows or no origin) is counted with that verdict
+void f95bEarly(int e, uint32_t frame, uint32_t key, int verdictWhy) noexcept {
+    float ox = 0.0f, oy = 0.0f;
+    if (e < 0 || e > 1 || nofoot::f85::isReticleKey(key) || !f87p::keyDesignOffset(key, frame, &ox, &oy)) return;
+    F95bEye& lab = g_f95b[e];
+    ++lab.draws;
+    const uint32_t k7 = key & 0x7Fu;
+    (k7 < 64u ? lab.keysLo : lab.keysHi) |= 1ull << (k7 & 63u);
+    ++lab.verdict[verdictWhy >= 0 && verdictWhy < drawtag::kPatchWhyCount ? verdictWhy : drawtag::kPatchUnmatched];
+}
 uint32_t g_labTallied = 0;
 bool g_labTalliedInit = false;
 
@@ -23358,8 +23369,8 @@ void f87PromptLines(uint64_t nowMs) {
                         static_cast<double>(r.q.mn[1]), static_cast<double>(r.q.mn[2]), static_cast<double>(r.q.mx[0]), static_cast<double>(r.q.mx[1]), static_cast<double>(r.q.mx[2]),
                         r.front[0], r.front[1], r.front[2], r.delta * 100.0, r.nView);
     }
-    // F94b: the designed-offset markers, per eye (zeros print: a second with no such marker says so). Each label is moved by its own anchor; F93c's rule is measured
-    // beside it (its target's distance from the applied one, its own step a frame, its switches of reference).
+    // F95b: the label decisions, per eye (zeros print: a second with no label says so): moved, or refused by which condition with the values that failed the gate,
+    // the anchor's lag at rest, and over the moved draws the label against its anchor.
     {
         const uint64_t lo = f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed), hi = f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
         const uint64_t readFail = f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
@@ -23373,7 +23384,7 @@ void f87PromptLines(uint64_t nowMs) {
         }
         if (!oa) std::snprintf(offKeys, sizeof(offKeys), "none");
         for (int e = 0; e < 2; ++e) {
-            F94bEye& de = g_f94b[e];
+            F95bEye& de = g_f95b[e];
             const nofoot::f94b::Sec& q = de.sec;
             char drawn[96];
             size_t da = 0;
@@ -23381,18 +23392,22 @@ void f87PromptLines(uint64_t nowMs) {
             for (uint32_t k = 0; k < 128 && da + 8 < sizeof(drawn); ++k)
                 if ((k < 64 ? de.keysLo : de.keysHi) & (1ull << (k & 63u))) da += static_cast<size_t>(std::snprintf(drawn + da, sizeof(drawn) - da, "%s%u", da ? " " : "", k));
             if (!da) std::snprintf(drawn, sizeof(drawn), "none");
-            const double nq = q.n ? static_cast<double>(q.n) : 1.0, st = q.steps ? static_cast<double>(q.steps) : 1.0, nf = q.fastN ? static_cast<double>(q.fastN) : 1.0;
-            Log::get().note("marker design offset (F94b) eye %d 1 s: designed-offset draws %llu (keys %s): moved by their own anchor %llu, gate refused %llu, anchor behind the "
-                            "marker camera %llu (left as the game placed them); the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f mean %.2f max px over %llu "
-                            "steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; F93c's rule (measured, not "
-                            "applied): reference this frame %llu, the frame before %llu, none %llu, switches %llu; its target from the applied %.1f mean %.1f max px (%.1f mean "
-                            "over %llu draws at %.0f deg/s or more), its step a frame %.2f mean %.2f max px; references %llu; px at %ux%u; keys with an offset this second: %s; "
-                            "offset argument not read %llu",
-                            e, ull(de.draws), drawn, ull(de.moved), ull(de.gate), ull(de.behind), q.offSum[0] / nq, q.offSum[1] / nq, q.stepSum / st, q.stepMax, ull(q.steps),
-                            q.pStepSum / st, q.pStepMax, q.eyeN ? q.eyeSum / static_cast<double>(q.eyeN) : 0.0, q.eyeMax, ull(q.eyeN), ull(de.refAge[0]), ull(de.refAge[1]),
-                            ull(de.refNone), ull(q.switches), q.err93Sum / nq, q.err93Max, q.err93FastSum / nf, ull(q.fastN), nofoot::f94b::kFastDps, q.step93Sum / st,
-                            q.step93Max, ull(de.refs), de.tw, de.th, offKeys, ull(readFail));
-            de = F94bEye{};
+            const uint64_t* vd = de.verdict;
+            const uint64_t moved = vd[drawtag::kPatchApplied], refused = de.draws > moved ? de.draws - moved : 0,
+                           other = vd[drawtag::kPatchUnmatched] + vd[drawtag::kPatchBothEyes] + vd[drawtag::kPatchNoIcon];
+            const double nq = q.n ? static_cast<double>(q.n) : 1.0, st = q.steps ? static_cast<double>(q.steps) : 1.0;
+            Log::get().note("marker design offset (F95b) eye %d 1 s: label draws %llu (keys %s): moved %llu (record behind its camera %llu); refused %llu: no record scale %llu, "
+                            "scene rows stale %llu, no P %llu, behind %llu, gate %llu (|d| max %.3f NDC, last %+.3f %+.3f), other %llu; the anchor at rest against P %.2f mean "
+                            "%.2f max px over %llu draws (record scale over depth %.4f); over the moved: the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f "
+                            "mean %.2f max px over %llu steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; px "
+                            "at %ux%u; keys with an offset this second: %s; offset argument not read %llu",
+                            e, ull(de.draws), drawn, ull(moved), ull(de.recBehind), ull(refused), ull(de.noScale), ull(vd[drawtag::kPatchStale]), ull(vd[drawtag::kPatchNoP]),
+                            ull(vd[drawtag::kPatchW]), ull(vd[drawtag::kPatchGate]), de.gateMax, de.gateLast[0], de.gateLast[1], ull(other),
+                            de.restN ? de.restSum / static_cast<double>(de.restN) : 0.0, de.restMax, ull(de.restN),
+                            de.scaleN ? de.scaleSum / static_cast<double>(de.scaleN) : 0.0, q.offSum[0] / nq, q.offSum[1] / nq, q.stepSum / st, q.stepMax,
+                            ull(q.steps), q.pStepSum / st, q.pStepMax, q.eyeN ? q.eyeSum / static_cast<double>(q.eyeN) : 0.0, q.eyeMax, ull(q.eyeN), de.tw, de.th, offKeys,
+                            ull(readFail));
+            de = F95bEye{};
         }
     }
     // the label's draws, per eye
@@ -24956,6 +24971,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         if (ks >= 0) {
             ++g_win.keys[ks].otherUnmatched[e];
             ++s.pWhy[drawtag::kPatchBothEyes];   // F62c: the key is matched in this eye, not in the other
+            f95bEarly(e, frame, g_keyIdx.key[ks], drawtag::kPatchBothEyes);
         } else if (s.pUnmatchedFrame != frame) {
             s.pUnmatchedFrame = frame;
             ++s.pWhy[drawtag::kPatchUnmatched];   // F62c: once per eye-frame (every marker composite draw of the eye lands here)
@@ -24976,16 +24992,19 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (!b0Plain) {
         ++s.fRanged;
         ++s.pOther;
+        f95bEarly(e, frame, g_keyIdx.key[ks], drawtag::kPatchUnmatched);
         return;
     }
     if (!sh || !sh->valid) {
         ++s.fNoRows;
         ++s.pOther;
+        f95bEarly(e, frame, g_keyIdx.key[ks], drawtag::kPatchUnmatched);
         return;
     }
     if (!oHud) {
         ++s.fNoOrigin;
         ++s.pOther;
+        f95bEarly(e, frame, g_keyIdx.key[ks], drawtag::kPatchUnmatched);
         return;
     }
     double dx = 0.0, dy = 0.0;
@@ -25042,6 +25061,43 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             fP[0] = Pn[0];
             fP[1] = Pn[1];
             fP[2] = Pn[2];
+        }
+    }
+    // F95b: an interaction label (a marker whose SetMarker carried a designed offset) takes its dot's path. Its record X0 is in the marker rows' HUD
+    // frame (camera axes, origin o_hud), not the world's: the game laid it out from its anchor v by the offset, X0 = v + scale (-off.x, off.y, 0), the
+    // scale being the record's own (0.382 z for the labels). v is the HUD point the world anchor P stands for, as a plain dot's record stands for its
+    // P. The decision below runs on v exactly as on a dot's record (the lag, the gate, the target P through the scene rows; no icon offset), and the row
+    // patch then moves the label's layout rigidly with its anchor. F94b put the anchor through the marker rows as P - o_hud, a world point in the HUD
+    // frame (F47's "P through the marker rows" is 50 deg off in every flight): every label draw failed the gate.
+    F95bEye& lab = g_f95b[e];
+    bool label = false;
+    double labRec[3] = {}, labD[3] = {};
+    {
+        float offX = 0.0f, offY = 0.0f;
+        if (!nofoot::f85::isReticleKey(keyNow) && f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
+            label = true;
+            ++lab.draws;
+            const uint32_t k7 = keyNow & 0x7Fu;
+            (k7 < 64u ? lab.keysLo : lab.keysHi) |= 1ull << (k7 & 63u);
+            lab.tw = r.tw;
+            lab.th = r.th;
+            if (!haveP) {
+                // counted with the verdict below (no P)
+            } else if (!headOk || !nofoot::f95b::labelOffsetHud(hScale, offX, offY, labD)) {
+                ++lab.noScale;
+                ++s.pOther;
+                return;   // no record scale: left as the game placed it
+            } else {
+                const double zRec = fX0[2] - static_cast<double>(oHud[2]);
+                if (zRec > 1e-3) {
+                    ++lab.scaleN;
+                    lab.scaleSum += static_cast<double>(hScale) / zRec;   // the record's scale over its depth (0.382 for the labels' type in the indicator lines)
+                }
+                for (int k = 0; k < 3; ++k) {
+                    labRec[k] = fX0[k];
+                    fX0[k] -= labD[k];   // the decision runs on the anchor v
+                }
+            }
         }
     }
     int why = -1;
@@ -25167,8 +25223,10 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             // The icon offset (F67d: never a refusal): from the mesh (the anchor and the disc's centre vertex through the draw's own rows, per frame)
             // when the draw's range was read, the record is rigid and e passes the gate; else the head-still baseline once seeded and steady; else the
             // constant of F65 (36.38 px up).
+            // F95b: a label's decision is its anchor's, which is a point, not an icon: e is zero (source 4).
             const int mi = r.icon;
-            if (mi >= 0 && mi < kIconMeshes && g_iconMesh[mi].state == 2 && headOk && hW0 == 0u && hScale > 0.0f && hScale < 1.0e6f) {
+            if (label) eSrc = 4;
+            if (!label && mi >= 0 && mi < kIconMeshes && g_iconMesh[mi].state == 2 && headOk && hW0 == 0u && hScale > 0.0f && hScale < 1.0e6f) {
                 const double x0rel[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
                 double em[2];
                 if (drawtag::iconEdrawNdc(sh->rows[4], sh->rows[5], sh->rows[7], x0rel, static_cast<double>(hScale), hQ2, hQ3, g_iconMesh[mi].disc, em)) {
@@ -25221,6 +25279,19 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             dx = T[0] - nM0[0];
             dy = T[1] - nM0[1];
             why = (std::fabs(dx) < kGateNdc && std::fabs(dy) < kGateNdc) ? drawtag::kDeltaOk : drawtag::kDeltaGate;
+            if (label && g_headDps >= 0.0 && g_headDps < 3.0) {
+                // F95b: the anchor v shown unpatched against P through the scene rows, the head still: a plain dot's lag at rest (under a pixel when v
+                // is the point P stands for; the layout offset if it were not)
+                const double ax = lag[0] * W * 0.5, ay = lag[1] * H * 0.5, apx = std::sqrt(ax * ax + ay * ay);
+                ++lab.restN;
+                lab.restSum += apx;
+                lab.restMax = std::max(lab.restMax, apx);
+            }
+            if (label && why == drawtag::kDeltaGate) {
+                lab.gateMax = std::max(lab.gateMax, std::max(std::fabs(dx), std::fabs(dy)));   // the |d| that failed (NDC), quoted in the 1 s line
+                lab.gateLast[0] = dx;
+                lab.gateLast[1] = dy;
+            }
         }
         // F62c: F53's trust gate (the scene rows against the temporal pass under 1 px) is gone; it refused about 45% of frames.
         if (why == drawtag::kDeltaGate) {
@@ -25230,67 +25301,42 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             ++s.fBehind;
         }
     }
-    // F94b: a marker whose SetMarker carried a designed offset (the interaction label) is moved by its own anchor: shown where the scene rows show its anchor P
-    // (the dot's target, unjittered) plus the game's layout offset, its record's projection less its anchor's through the same unpatched marker rows (F93c's
-    // "properly placed" kept). Nothing is taken from another marker or another frame. F93c's rule (the nearest plain marker's correction, this eye-frame or the
-    // one before, else the game's placement) is measured beside it, so one flight compares the two; its references are still collected from the plain markers.
-    if (haveP && (why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && !nofoot::f85::isReticleKey(keyNow)) {
-        float offX = 0.0f, offY = 0.0f;
-        F94bEye& de = g_f94b[e];
-        if (f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
-            ++de.draws;
-            const uint32_t k7 = keyNow & 0x7Fu;
-            (k7 < 64u ? de.keysLo : de.keysHi) |= 1ull << (k7 & 63u);
-            de.tw = static_cast<uint32_t>(W);
-            de.th = static_cast<uint32_t>(H);
-            double dRef[2] = {}, dist = 0.0;
-            uint32_t age = 0, refKey = 0;
-            const bool haveRef = g_f93RefSet[e].nearest(frame, nM0, 1, dRef, &dist, &age, &refKey);
-            if (haveRef) ++de.refAge[age > 1u ? 1u : age];
-            else ++de.refNone;
-            const double P3[3] = {fP[0], fP[1], fP[2]}, oh3[3] = {oHud[0], oHud[1], oHud[2]};
-            double mcP[3];
-            drawtag::markerClip(sh->rows[4], sh->rows[5], sh->rows[7], P3, oh3, mcP);
-            if (!(mcP[2] > 1e-9)) {
-                ++de.behind;
-                ++s.pOther;
-                return;   // the anchor is behind the game's marker camera: left as the game placed it
-            }
-            const double nMP[2] = {mcP[0] / mcP[2], mcP[1] / mcP[2]};
-            nofoot::f94b::ownAnchorTarget(nWuSave, nM0, nMP, T);
-            double shownGame[2];
-            drawtag::displayOfUi(aff, nM0, shownGame);   // where the game's placement is shown unpatched
-            const double T93[2] = {haveRef ? nM0[0] + dRef[0] : shownGame[0], haveRef ? nM0[1] + dRef[1] : shownGame[1]};
-            nofoot::f94b::Sample smp;
-            smp.frame = frame;
-            smp.key = keyNow;
-            smp.off[0] = (T[0] - nWuSave[0]) * W * 0.5;
-            smp.off[1] = (T[1] - nWuSave[1]) * H * 0.5;
-            smp.off93[0] = (T93[0] - nWuSave[0]) * W * 0.5;
-            smp.off93[1] = (T93[1] - nWuSave[1]) * H * 0.5;
-            smp.ref93 = haveRef;
-            smp.refKey = refKey;
-            smp.headDps = g_headDps;
-            for (int k = 0; k < 3; ++k) smp.p[k] = fP[k];
-            g_f94bTrack[e].add(smp, de.sec);
-            double eyeDiff[2] = {};
-            nofoot::f94b::eyeJoinTally(g_f94bEyes.post(e, keyNow, frame, smp.off, eyeDiff), eyeDiff, de.sec);
-            dx = T[0] - nM0[0];
-            dy = T[1] - nM0[1];
-            why = (std::fabs(dx) < kGateNdc && std::fabs(dy) < kGateNdc) ? drawtag::kDeltaOk : drawtag::kDeltaGate;
-            if (why == drawtag::kDeltaOk) ++de.moved;
-            else ++de.gate;
-        } else if (why == drawtag::kDeltaOk) {
-            const double d[2] = {nWuSave[0] - nM0[0], nWuSave[1] - nM0[1]};
-            g_f93RefSet[e].add(frame, nM0, d, keyNow);
-            ++de.refs;
-        }
-    }
     // F64: patch when the rows are this frame's or the eye's newest at most one frame older, P is found, both w > 0 and |d| < 0.4 NDC; else
     // refuse (no delta is held over from an earlier frame).
     const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, rowsState, haveP, why, dx, dy);
     if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
     if (v.newest) ++s.pNewest;
+    // F95b: every label decision is counted by its verdict, so a label that is never moved says why in its own line
+    double labTrec[2] = {};
+    if (label) {
+        ++lab.verdict[v.why >= 0 && v.why < drawtag::kPatchWhyCount ? v.why : drawtag::kPatchUnmatched];
+        if (v.patch) {
+            // the record is shown at T plus its UI offset from the anchor (the row patch keeps it): the label's place against its anchor's
+            const double oh3[3] = {oHud[0], oHud[1], oHud[2]};
+            double mcR[3];
+            drawtag::markerClip(sh->rows[4], sh->rows[5], sh->rows[7], labRec, oh3, mcR);
+            if (mcR[2] > 1e-9) {
+                labTrec[0] = T[0] + (mcR[0] / mcR[2] - nM0[0]);
+                labTrec[1] = T[1] + (mcR[1] / mcR[2] - nM0[1]);
+                nofoot::f94b::Sample smp;
+                smp.frame = frame;
+                smp.key = keyNow;
+                smp.off[0] = (labTrec[0] - T[0]) * W * 0.5;
+                smp.off[1] = (labTrec[1] - T[1]) * H * 0.5;
+                smp.off93[0] = smp.off[0];
+                smp.off93[1] = smp.off[1];
+                smp.headDps = g_headDps;
+                for (int k = 0; k < 3; ++k) smp.p[k] = fP[k];
+                g_f95bTrack[e].add(smp, lab.sec);
+                double eyeDiff[2] = {};
+                nofoot::f94b::eyeJoinTally(g_f95bEyes.post(e, keyNow, frame, smp.off, eyeDiff), eyeDiff, lab.sec);
+            } else {
+                labTrec[0] = T[0];
+                labTrec[1] = T[1];
+                ++lab.recBehind;
+            }
+        }
+    }
     if (!v.patch) return;
     dx = v.dx;
     dy = v.dy;
@@ -25313,7 +25359,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     s.sigmaDevMax = std::max(s.sigmaDevMax, std::max(std::fabs(aff.sigma[0] - 1.0), std::fabs(aff.sigma[1] - 1.0)));
     if (eSrc == 1) ++s.eGeo;
     else if (eSrc == 2) ++s.eBase;
-    else ++s.eConst;
+    else if (eSrc != 4) ++s.eConst;   // F95b: a label's anchor (source 4) has no icon offset
     s.exPxSum += eIcon[0] * W * 0.5;
     s.eyPxSum += eIcon[1] * H * 0.5;
     s.eyPxMin = std::min(s.eyPxMin, eIcon[1] * H * 0.5);
@@ -25322,8 +25368,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // The e used, the target and the affine, for the read-back's residual (the anchor shown against its target).
     g_fix.cx = eIcon[0];
     g_fix.cy = eIcon[1];
-    g_fix.tx = T[0];
-    g_fix.ty = T[1];
+    g_fix.tx = label ? labTrec[0] : T[0];   // F95b: a label's read-back measures its record against the record's target
+    g_fix.ty = label ? labTrec[1] : T[1];
     g_fix.aff = aff;
     g_fix.eSrc = eSrc;
     g_fix.meshOk = meshIdx >= 0;
