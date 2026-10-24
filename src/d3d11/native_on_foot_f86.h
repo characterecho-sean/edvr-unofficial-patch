@@ -1,5 +1,6 @@
-// F86 (native on-foot VR): the pure parts of the pose carry (a), the stream windows (c), the weapon UI at the weapon's surface (d), the charge-port prompt
-// snap (f) and the floor probe (g). Design: reviews\native-onfoot-f86-review-2026-10-23.md; journal: the arc doc, F86.
+// F86 (native on-foot VR): the pure parts of the pose carry (a), the weapon UI depth (d, measure only since F87) and the floor probe (g). The stream windows (c) and
+// the charge-port prompt snap (f) of F86 were replaced / backed out in F87 (native_on_foot_f87.h). Design: reviews\native-onfoot-f86-review-2026-10-23.md;
+// journal: the arc doc, F86 and F87.
 //
 // Header only, no game or D3D11 state, so native_frame_test and the depth line rig run the very functions the hooks use. Conventions as native_on_foot_f85.h:
 // 4x4 float matrices are row-vector affines (world = p R + t, the rows R[0..2] the axes, the translation at 12..14); scene rows are the column-form Rows.
@@ -62,11 +63,11 @@ struct PoseIn {
 };
 enum CarryWhy : int { kCarried = 0, kCarryNoPose, kCarryOld, kCarryHitch, kCarryScope, kCarryWhyCount };
 inline const char* carryWhyText(int why) noexcept {
-    static const char* const n[kCarryWhyCount] = {"carried", "no pose", "over 3 frames", "over 50 cm", "out of scope"};
+    static const char* const n[kCarryWhyCount] = {"carried", "no pose", "over 3 frames", "over 1.5 m", "out of scope"};
     return n[why < 0 || why >= kCarryWhyCount ? 0 : why];
 }
 constexpr uint32_t kCarryMaxAge = 3;
-constexpr double kCarryMaxM = 0.5;
+constexpr double kCarryMaxM = 1.5;   // F87: the take-off and landing deltas of 83-94 cm matched the Animate targets (F86 flight), so they are carried
 struct CarryFrame {
     uint32_t p1 = 0;
     float m3p[16] = {}, froot[16] = {};
@@ -171,33 +172,29 @@ inline StepGeom stepGeom(const float prev[16], const float cur[16]) noexcept {
     g.ok = std::isfinite(g.step[0]) && std::isfinite(g.step[1]) && std::isfinite(g.step[2]) && std::isfinite(g.turnDeg);
     return g;
 }
-// The record's previous copy (+0x124): what the game made of it last frame. Compared with last frame's positions BEFORE the body shift touched them:
-// bit-equal to the game's own position of last frame ("game": the game keeps its own copy, so ours moves with the carry of last frame), bit-equal to the
-// position we wrote ("ours": the game copies the record back, nothing to do), or neither.
-enum PrevCase : uint8_t { kPrevNone = 0, kPrevGame, kPrevOurs, kPrevNeither };
+// The record's previous copy (+0x124), compared with the record's own position at the submit's start, before the body shift and the carry touched either (F87: the
+// flight's dump 003 showed the game writes both from the same value, so the copy equals the position "with pos"; anything else is "other" and is left alone).
+// The previous copy moves by the carry whenever it was with the position, so position - previous stays the game's own motion.
+enum PrevCase : uint8_t { kPrevNone = 0, kPrevWithPos, kPrevOther };
 inline const char* prevCaseText(int c) noexcept {
-    static const char* const n[4] = {"none", "game", "ours", "neither"};
-    return n[c < 0 || c > 3 ? 0 : c];
+    static const char* const n[3] = {"none", "with pos", "other"};
+    return n[c < 0 || c > 2 ? 0 : c];
 }
-inline PrevCase classifyPrev(const float prevRaw[3], const float lastRawPos[3], const float lastFinalPos[3]) noexcept {
-    if (std::memcmp(prevRaw, lastRawPos, 12) == 0) return kPrevGame;
-    if (std::memcmp(prevRaw, lastFinalPos, 12) == 0) return kPrevOurs;
-    return kPrevNeither;
+inline PrevCase classifyPrev(const float prevRaw[3], const float posRaw[3]) noexcept {
+    return std::memcmp(prevRaw, posRaw, 12) == 0 ? kPrevWithPos : kPrevOther;
 }
-// The value to write into the previous copy: the game's case adds last frame's carry, the others leave it.
-inline void prevToWrite(PrevCase c, const float prevNow[3], const double lastDelta[3], float out[3]) noexcept {
-    for (int i = 0; i < 3; ++i) out[i] = c == kPrevGame ? static_cast<float>(static_cast<double>(prevNow[i]) + lastDelta[i]) : prevNow[i];
+// The value to write into the previous copy: the carry added when it was with the position, else the copy as it is.
+inline void prevToWrite(PrevCase c, const float prevNow[3], const double delta[3], float out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = c == kPrevWithPos ? static_cast<float>(static_cast<double>(prevNow[i]) + delta[i]) : prevNow[i];
 }
-// One frame's verdict over the records examined: unanimous or "neither".
+// One frame's verdict over the records examined: unanimous "with pos", else "other"; none examined: none.
 struct PrevTally {
-    uint32_t n[4] = {};
+    uint32_t n[3] = {};
     void add(PrevCase c) noexcept { ++n[c]; }
     PrevCase verdict() const noexcept {
-        const uint32_t total = n[kPrevGame] + n[kPrevOurs] + n[kPrevNeither];
+        const uint32_t total = n[kPrevWithPos] + n[kPrevOther];
         if (!total) return kPrevNone;
-        if (n[kPrevGame] == total) return kPrevGame;
-        if (n[kPrevOurs] == total) return kPrevOurs;
-        return kPrevNeither;
+        return n[kPrevWithPos] == total ? kPrevWithPos : kPrevOther;
     }
 };
 // The second's figures joined from the carry ring by the frame thread: the wrist error by speed bin, and the carry's size.
@@ -205,77 +202,7 @@ struct CarrySecond {
     f85::StepAcc before[f85::kStepBins], after[f85::kStepBins], carry;
 };
 
-// ---- C: the instance stream's windows ------------------------------------------------------------------------------------------------------
-// The CPU identification names a draw from a copy of the instance stream made at its Unmap. A window of kWinEntries about each cluster of the entries the
-// eye drew last frame (a gap of at most kWinGap starts another), at most kWinMax per eye.
-constexpr uint32_t kWinEntries = 4096, kWinMax = 4, kWinGap = 2048;
-struct WinPlan {
-    uint32_t lo[kWinMax] = {}, n[kWinMax] = {};
-    uint32_t windows = 0, clusters = 0, entries = 0, entryMin = 0, entryMax = 0, uncovered = 0;
-    bool holds(uint32_t entry) const noexcept {
-        for (uint32_t w = 0; w < windows; ++w)
-            if (n[w] && entry >= lo[w] && entry - lo[w] < n[w]) return true;
-        return false;
-    }
-    // Entries between `entry` and the nearest window (0 inside one); ~0u with no window.
-    uint32_t distance(uint32_t entry) const noexcept {
-        uint32_t best = ~0u;
-        for (uint32_t w = 0; w < windows; ++w) {
-            if (!n[w]) continue;
-            const uint32_t end = lo[w] + n[w];   // one past
-            const uint32_t d = entry < lo[w] ? lo[w] - entry : entry >= end ? entry - end + 1u : 0u;
-            best = std::min(best, d);
-        }
-        return best;
-    }
-};
-inline uint32_t winPlace(uint32_t centre, uint32_t total, uint32_t* lo) noexcept {
-    uint32_t a = centre > kWinEntries / 2 ? centre - kWinEntries / 2 : 0u;
-    a &= ~1u;
-    if (total < kWinEntries) a = 0;
-    else if (a > total - kWinEntries) a = (total - kWinEntries) & ~1u;
-    const uint32_t left = total > a ? total - a : 0u;
-    *lo = a;
-    return (left < kWinEntries ? left : kWinEntries) & ~1u;
-}
-// `entries` (count of them, any order, duplicates allowed) are sorted in place. total: the stream's entries.
-inline void planWindows(uint32_t* entries, uint32_t count, uint32_t total, WinPlan* out) noexcept {
-    *out = WinPlan{};
-    if (!count || !total) return;
-    std::sort(entries, entries + count);
-    uint32_t u = 0;
-    for (uint32_t i = 0; i < count; ++i)
-        if (!u || entries[i] != entries[u - 1]) entries[u++] = entries[i];
-    out->entries = u;
-    out->entryMin = entries[0];
-    out->entryMax = entries[u - 1];
-    uint32_t i = 0;
-    while (i < u) {
-        uint32_t j = i;
-        while (j + 1 < u && entries[j + 1] - entries[j] <= kWinGap) ++j;
-        ++out->clusters;
-        const uint32_t a = entries[i], b = entries[j];
-        if (b - a + 1u + 2u <= kWinEntries) {   // one window about the cluster (the +2 is the even alignment of its start)
-            if (out->windows < kWinMax) {
-                out->n[out->windows] = winPlace(a + (b - a) / 2u, total, &out->lo[out->windows]);
-                ++out->windows;
-            }
-        } else {   // a cluster wider than a window: windows end to end from its first entry
-            uint32_t at = a & ~1u;
-            while (at <= b && out->windows < kWinMax) {
-                out->lo[out->windows] = at;
-                out->n[out->windows] = std::min(kWinEntries, total > at ? total - at : 0u) & ~1u;
-                ++out->windows;
-                at += kWinEntries;
-            }
-        }
-        i = j + 1;
-    }
-    for (uint32_t k = 0; k < u; ++k)
-        if (!out->holds(entries[k])) ++out->uncovered;
-}
-
-// ---- D/F/G: depth lines --------------------------------------------------------------------------------------------------------------------
+// ---- D/G: depth lines --------------------------------------------------------------------------------------------------------------------
 // A ranged march of the line O + d u through an eye's scene depth: the procedure of the depth shader's `main` with a per-line range (it is
 // nofoot::f85::marchCpu with the range a parameter), and the hit pixel and its four neighbours' view depths the shader returns beside it.
 enum LineStatus : uint32_t { kLineMiss = 0, kLineHit = 1, kLineNear = 2, kLineOffscreen = 3, kLineUnused = 4 };
@@ -373,7 +300,6 @@ struct SurfaceNormal {
     bool ok = false;
     double n[3] = {}, cosView = 0.0;
 };
-constexpr double kFacingMin = 0.2;      // a surface seen within ~78 degrees of its normal faces the camera enough
 constexpr double kNeighbourRel = 0.08;  // a neighbour's depth within 8% of the hit's: the same surface
 inline SurfaceNormal surfaceNormal(const f85::Rows& W, uint32_t width, uint32_t height, const LineOut& l, double wHit, const double u[3]) noexcept {
     SurfaceNormal s;
@@ -476,44 +402,6 @@ struct RangeSmoother {
         return 1.0 / x;
     }
     double depth() const noexcept { return have ? 1.0 / x : 0.0; }
-};
-
-// F: the charge-port prompt's anchor snapped onto the surface it lies behind. A hit H on a facing surface (n . -u above kFacingMin) puts the anchor at
-// P' = P + n ((H - P) . n): the same place on the surface's plane along its normal. Keys 1 and 45..50 (the interaction icon, the waypoints and the dots).
-inline bool isPromptKey(uint32_t key) noexcept { return key == 1u || (key >= 45u && key <= 50u); }
-constexpr double kPromptBehindM = 0.15, kPromptAheadM = 0.01, kPromptSameM = 0.001;
-inline bool promptSnap(const double P[3], const double H[3], const SurfaceNormal& s, double Pout[3]) noexcept {
-    if (!s.ok || !(s.cosView > kFacingMin)) return false;
-    const double hp[3] = {H[0] - P[0], H[1] - P[1], H[2] - P[2]};
-    const double k = hp[0] * s.n[0] + hp[1] * s.n[1] + hp[2] * s.n[2];
-    for (int i = 0; i < 3; ++i) Pout[i] = P[i] + s.n[i] * k;
-    return std::isfinite(Pout[0]) && std::isfinite(Pout[1]) && std::isfinite(Pout[2]);
-}
-// A prompt key's cache: the offset P' - P for the P it was measured at, an EMA while P holds within a millimetre.
-struct PromptCache {
-    bool have = false;
-    double p[3] = {}, off[3] = {};
-    static constexpr double kAlpha = 0.25;
-    void put(const double P[3], const double offNew[3]) noexcept {
-        const double dd[3] = {P[0] - p[0], P[1] - p[1], P[2] - p[2]};
-        if (!have || f85::len3(dd) > kPromptSameM) {
-            have = true;
-            for (int i = 0; i < 3; ++i) {
-                p[i] = P[i];
-                off[i] = offNew[i];
-            }
-            return;
-        }
-        for (int i = 0; i < 3; ++i) off[i] += kAlpha * (offNew[i] - off[i]);
-    }
-    // The offset to apply to P: the cache's, when it was measured at this P (1 mm).
-    bool offsetFor(const double P[3], double out[3]) const noexcept {
-        if (!have) return false;
-        const double dd[3] = {P[0] - p[0], P[1] - p[1], P[2] - p[2]};
-        if (f85::len3(dd) > kPromptSameM) return false;
-        for (int i = 0; i < 3; ++i) out[i] = off[i];
-        return true;
-    }
 };
 
 // G: the floor probe. Two rays from eye 0 toward the 3P model's floor line ahead of its origin, (-0.3, 0, 0.7) and (+0.3, 0, 0.7) in the model axes (right, up,

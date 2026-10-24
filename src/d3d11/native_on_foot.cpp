@@ -108,6 +108,8 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
+std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
+double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
@@ -726,6 +728,17 @@ void readKey() {
         if (first || cm != g_weaponViewOffsetCm.load(std::memory_order_relaxed))
             Log::get().note("native on foot weapon view offset (F75): fix.native_on_foot_weapon_view_offset_cm = %+.1f cm -- positive shifts the view and body right relative to the fixed equipped weapon or tool; while ADS the eye aligns independently to the actual sight and the body keeps this offset", cm);
         g_weaponViewOffsetCm.store(cm, std::memory_order_relaxed);
+    }
+    // F87h (TEMPORARY, hidden, live): the standing-height hold's settle time, in seconds (0..10, default 3; 0 holds the neck's height hard).
+    {
+        const double sec = nofoot::f87::settleClamp(static_cast<double>(cfg.getFloat("fix.native_on_foot_standing_height_settle_s", static_cast<float>(nofoot::f87::kSettleDefaultS))));
+        if (first || sec != g_f87SettleLast)
+            Log::get().note("native on foot standing height (F87h, TEMPORARY): fix.native_on_foot_standing_height_settle_s = %.1f s -- %s", sec,
+                            sec <= 0.0 ? "0: the view's height is held hard about the neck (a nod still lowers the eye; a bob or a breath does not move it)"
+                                       : "the part of your head's height that lasts is absorbed in about this long (95%, at most 4 cm a second) and the view keeps the character's eye height; "
+                                         "quicker movement (a nod, a duck, a bob) is followed; the body never follows your posture");
+        g_f87SettleLast = sec;
+        g_f87SettleS.store(static_cast<float>(sec), std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
     {
@@ -6977,34 +6990,7 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
 // own ring under a sequence count and never waits; the frame thread joins the frames older than the newest 3P frame (so every site has posted), steps the
 // tracker (native_on_foot_f85.h: four triggers, 16 frames before and 24 after, at most 8 events a minute) and prints.
 template <class T, uint32_t N>
-struct F85Ring {
-    struct Slot {
-        std::atomic<uint32_t> seq{0};
-        uint32_t frame = ~0u;
-        T v{};
-    };
-    Slot s[N];
-    void post(uint32_t frame, const T& v) noexcept {
-        Slot& d = s[frame % N];
-        uint32_t q = d.seq.load(std::memory_order_relaxed);
-        if ((q & 1u) || !d.seq.compare_exchange_strong(q, q + 1, std::memory_order_acq_rel)) return;   // a writer is in it: skip, never wait
-        d.frame = frame;
-        d.v = v;
-        d.seq.store(q + 2, std::memory_order_release);
-    }
-    bool get(uint32_t frame, T* out) const noexcept {
-        const Slot& d = s[frame % N];
-        for (int tries = 0; tries < 2; ++tries) {
-            const uint32_t s1 = d.seq.load(std::memory_order_acquire);
-            if (!s1 || (s1 & 1u)) continue;
-            if (d.frame != frame) return false;
-            *out = d.v;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (d.seq.load(std::memory_order_relaxed) == s1) return true;
-        }
-        return false;
-    }
-};
+using F85Ring = nofoot::f87::Ring<T, N>;   // F87: the ring moved to native_on_foot_f87.h (the rig runs the same post and get)
 struct F85P1 {
     uint64_t qpc = 0;
     uint32_t tid = 0;
@@ -7123,7 +7109,14 @@ struct F86Fi {
     float m[16] = {};
 };
 F85Ring<F86Fi, kF85Ring> g_f86Fi;
+// F87a: the hand residual (the Animate hook adds, never waits; the frame thread's second reads and resets) and the newest FP frame posted (the submit counts how far it
+// is from its own frame).
+nofoot::f87::HandSecond g_f87Hand;
+std::atomic<bool> g_f87HandBusy{false};
+std::atomic<uint32_t> g_f87FpLatest{0};
+std::atomic<uint64_t> g_f87FpBucket[4];
 void f85PostFp(uint32_t frame, const float origin[3], const float m[16]) noexcept {
+    g_f87FpLatest.store(frame, std::memory_order_relaxed);
     F85Fp p;
     p.qpc = f30Qpc();
     p.tid = static_cast<uint32_t>(GetCurrentThreadId());
@@ -7172,8 +7165,7 @@ struct F86Carry {   // one submit's carry, for the trace lines and the optic rec
     bool haveWrist[2] = {};
     float drawnBefore[2][3] = {}, drawnAfter[2][3] = {};   // the wrists in world as the body is drawn without and with the carry
 };
-F85Ring<F86Carry, kF85Ring> g_f86Carry;   // by the submit's game frame
-F85Ring<F86Carry, 256> g_f86Drawn;        // by the game frame of the POSE the submit drew (the optic record's join)
+F85Ring<F86Carry, kF85Ring> g_f86Carry;   // by the submit's game frame (F87: the optic record joins it by the pose's game frame)
 std::atomic<uint64_t> g_f86Submits{0}, g_f86Carried{0}, g_f86Why[nofoot::f86::kCarryWhyCount], g_f86Age[4], g_f86Prev[4], g_f86Busy{0}, g_f86NoRecords{0},
     g_f86NoInputs{0}, g_f86WriteFaults{0};
 // F86g: the floor probe's second (the render thread adds, the frame thread's F69a line reads and resets): the summed height of the accepted hits (mm), their count,
@@ -7438,15 +7430,15 @@ void f85Drain(uint64_t nowMs) noexcept {
         }
         const uint64_t busy = g_f86Busy.load(std::memory_order_relaxed), noRecords = g_f86NoRecords.load(std::memory_order_relaxed), noInputs = g_f86NoInputs.load(std::memory_order_relaxed),
                        writeFaults = g_f86WriteFaults.load(std::memory_order_relaxed);
-        Log::get().note("pose carry (F86a): submits %llu, carried %llu [no pose %llu, over 3 frames %llu, over 50 cm %llu, out of scope %llu]; pose age 0/1/2/3+ %llu/%llu/%llu/%llu; wrist error before (cm) "
-                        "still %s | walk %s | jog %s | sprint %s | step %s; after (same) still %s | walk %s | jog %s | sprint %s | step %s; |carry| %s; prev game %llu ours %llu neither %llu; "
+        Log::get().note("pose carry (F86a): submits %llu, carried %llu [no pose %llu, over 3 frames %llu, over 1.5 m %llu, out of scope %llu]; pose age 0/1/2/3+ %llu/%llu/%llu/%llu; wrist error before (cm) "
+                        "still %s | walk %s | jog %s | sprint %s | step %s; after (same) still %s | walk %s | jog %s | sprint %s | step %s; |carry| %s; prev with pos %llu other %llu; "
                         "also: no M3P_i or F_i for the frame %llu, no body records %llu, busy %llu, write faults %llu",
                         ull(submits - d.prevSubmits), ull(carried - d.prevCarried), ull(why[nofoot::f86::kCarryNoPose] - d.prevWhy[nofoot::f86::kCarryNoPose]),
                         ull(why[nofoot::f86::kCarryOld] - d.prevWhy[nofoot::f86::kCarryOld]), ull(why[nofoot::f86::kCarryHitch] - d.prevWhy[nofoot::f86::kCarryHitch]),
                         ull(why[nofoot::f86::kCarryScope] - d.prevWhy[nofoot::f86::kCarryScope]), ull(age[0] - d.prevAge[0]), ull(age[1] - d.prevAge[1]), ull(age[2] - d.prevAge[2]),
                         ull(age[3] - d.prevAge[3]), before[0], before[1], before[2], before[3], before[4], after[0], after[1], after[2], after[3], after[4], cm,
-                        ull(pv[nofoot::f86::kPrevGame] - d.prevPrev[nofoot::f86::kPrevGame]), ull(pv[nofoot::f86::kPrevOurs] - d.prevPrev[nofoot::f86::kPrevOurs]),
-                        ull(pv[nofoot::f86::kPrevNeither] - d.prevPrev[nofoot::f86::kPrevNeither]), ull(noInputs - d.prevNoInputs), ull(noRecords - d.prevNoRecords), ull(busy - d.prevBusy),
+                        ull(pv[nofoot::f86::kPrevWithPos] - d.prevPrev[nofoot::f86::kPrevWithPos]), ull(pv[nofoot::f86::kPrevOther] - d.prevPrev[nofoot::f86::kPrevOther]),
+                        ull(noInputs - d.prevNoInputs), ull(noRecords - d.prevNoRecords), ull(busy - d.prevBusy),
                         ull(writeFaults - d.prevWriteFaults));
         d.prevSubmits = submits;
         d.prevCarried = carried;
@@ -7460,6 +7452,31 @@ void f85Drain(uint64_t nowMs) noexcept {
         d.prevNoInputs = noInputs;
         d.prevWriteFaults = writeFaults;
         d.sec86 = nofoot::f86::CarrySecond{};
+    }
+    // F87a: the hand residual (always on foot, zeros included): per hand |(target_i - w_{i-1}) R(M3P_i) - the carry written|, frame i's own Animate target against the
+    // wrist frame i-1's Animate wrote, turned by M3P_i, less what the submit moved the body by. A perfect carry reads 0; the target's own solve error stays in it.
+    {
+        using ull = unsigned long long;
+        nofoot::f87::HandSecond hs;
+        if (!g_f87HandBusy.exchange(true, std::memory_order_acquire)) {
+            hs = g_f87Hand;
+            g_f87Hand.reset();
+            g_f87HandBusy.store(false, std::memory_order_release);
+        }
+        char handBins[5][64];
+        for (int b = 0; b < kStepBins; ++b) {
+            const uint64_t nb = hs.binN[b][0] + hs.binN[b][1];
+            if (!nb) std::snprintf(handBins[b], sizeof(handBins[b]), "-");
+            else std::snprintf(handBins[b], sizeof(handBins[b]), "%.2f/%.2f (%llu)", hs.binN[b][0] ? hs.binSum[b][0] / static_cast<double>(hs.binN[b][0]) : 0.0,
+                                hs.binN[b][1] ? hs.binSum[b][1] / static_cast<double>(hs.binN[b][1]) : 0.0, ull(nb));
+        }
+        uint64_t fpb[4];
+        for (int k = 0; k < 4; ++k) fpb[k] = g_f87FpBucket[k].exchange(0, std::memory_order_relaxed);
+        char fps[96];
+        std::snprintf(fps, sizeof(fps), "-1:%llu 0:%llu +1:%llu other:%llu", ull(fpb[0]), ull(fpb[1]), ull(fpb[2]), ull(fpb[3]));
+        Log::get().note("hand residual (F87a) 1 s: L/R mean %.2f/%.2f max %.2f/%.2f cm; still %s | walk %s | jog %s | sprint %s | step %s; FP frame - submit frame %s",
+                        hs.n[0] ? hs.sum[0] / static_cast<double>(hs.n[0]) : 0.0, hs.n[1] ? hs.sum[1] / static_cast<double>(hs.n[1]) : 0.0, hs.mx[0], hs.mx[1], handBins[0], handBins[1], handBins[2],
+                        handBins[3], handBins[4], fps);
     }
     s = StepSecond{};
 }
@@ -8082,6 +8099,361 @@ bool adsShiftRead(double s[3], double weaponViewWorld[3]) noexcept {
     weaponViewWorld[0] = weaponViewWorld[1] = weaponViewWorld[2] = 0.0;
     return false;
 }
+// F87h: what the standing-height hold tells the pin (published by alignTick every tick, a seqlock): the transient the view still carries over the character's eye
+// height (the pin takes the camera less it) and whether the standing calibration may run (the view has been still for a second).
+struct F87HoldPub {
+    double transientM = 0.0;
+    bool valid = false, calOk = true;
+};
+std::atomic<uint32_t> g_f87PubSeq{0};
+F87HoldPub g_f87Pub;
+void f87HoldPublish(const F87HoldPub& p) noexcept {
+    g_f87PubSeq.fetch_add(1, std::memory_order_acq_rel);
+    g_f87Pub = p;
+    g_f87PubSeq.fetch_add(1, std::memory_order_release);
+}
+F87HoldPub f87HoldRead() noexcept {
+    for (int tries = 0; tries < 3; ++tries) {
+        const uint32_t s1 = g_f87PubSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        const F87HoldPub p = g_f87Pub;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_f87PubSeq.load(std::memory_order_relaxed) == s1) return p;
+    }
+    return F87HoldPub{};
+}
+// ---- F87p (TEMPORARY, read only): the interaction prompt's anchor -----------------------------------------------------------------------------------------
+// The prompt's point is the interactable model's `Root!Ui_interact` node, else the centre of the model's bounding box (analysis\onfoot_prompt_anchor_334925.txt). The
+// game hands it to the marker interface (vtable 0x520B2E8 of the marker component) with SetMarker (slot +0x50) from three call sites and UpdateMarker (+0x60), and
+// the label's indicator with UpdateIndicator (+0x48). F86f's key list was an atlas slot list, not an identity (keys 1 and 45..50 caught the waypoints); the role is
+// the call site. These probes change nothing: three vtable slots are swapped for trampolines that count, record the arguments and jump to the game's function, and
+// three call sites of the point's getters are swapped for stubs that record the point before and after and, once per entity, ask the model for its node and box
+// through the game's own calls (the sequence of 0x191F140, under SEH) and work out the box's front-face point. Gated on native stereo on foot and
+// fix.native_on_foot_marker_fix. The render thread prints the lines; the hooks only count and post.
+namespace f87p {
+using nofoot::f87::Role;
+std::atomic<uint64_t> g_set{0}, g_upd{0}, g_ind{0}, g_role[nofoot::f87::kRoleCount], g_nearbyMask{0}, g_otherLast{0};
+std::atomic<int32_t> g_focusKey{-1};
+struct FocusSample {
+    int32_t key = -1;
+    float p[3] = {};
+};
+nofoot::f87::Ring<FocusSample, 256> g_focusRing;
+std::atomic<uint32_t> g_focusN{0};
+uint32_t g_focusDrained = 0;   // render thread
+struct Query {
+    bool fault = false, haveComp = false, haveNode = false, haveBox = false;
+    float tr[4] = {}, rows[16] = {}, mn[4] = {}, mx[4] = {}, world[16] = {};
+};
+struct GetterRec {
+    int site = 0;
+    uint64_t ent = 0;
+    float p0[4] = {}, p[4] = {};
+    bool haveQuery = false;
+    Query q;
+    bool haveFront = false;
+    double node[3] = {}, front[3] = {}, nView = 0.0, delta = 0.0;
+};
+nofoot::f87::Ring<GetterRec, 32> g_getterRing;
+std::atomic<uint32_t> g_getterN{0};
+uint32_t g_getterDrained = 0;   // render thread
+struct Ent {
+    bool used = false;
+    int site = 0;
+    uint64_t ent = 0;
+    nofoot::f87::BoxFace face;
+};
+Ent g_ent[24];   // game threads, one at a time (the HUD update); read by nothing else
+uint32_t g_entN = 0;
+std::atomic<uint64_t> g_getterPosts{0}, g_getterCalls[nofoot::f87::kSiteCount];
+struct PreRec {
+    float p0[4] = {};
+    bool ok = false;
+};
+thread_local PreRec t_pre;
+
+__declspec(noinline) bool readP(uint64_t ptr, float out[4]) noexcept { return ptr && guardedRead(static_cast<uintptr_t>(ptr), out, 16); }
+// The model query, the sequence of 0x191F140 (pinned at install): the entity reference -> the entity -> its component table -> the model component -> FindNode, then
+// the bounds and the world matrix. Under SEH: a fault is a failed probe, not a crash.
+__declspec(noinline) void querySeh(uint64_t ref, uint32_t typeId, const char* name, Query* q) noexcept {
+    __try {
+        uintptr_t entity = *reinterpret_cast<uintptr_t*>(ref);
+        if (entity) entity = *reinterpret_cast<uintptr_t*>(entity + 0xC8);
+        if (!entity) return;
+        const uintptr_t obj = entity + 8;
+        const uintptr_t vt = *reinterpret_cast<uintptr_t*>(obj);
+        using FnComp = void*(__fastcall*)(void*, uint32_t);
+        void* comp = reinterpret_cast<FnComp>(*reinterpret_cast<uintptr_t*>(vt))(reinterpret_cast<void*>(obj), typeId);
+        if (!comp) return;
+        q->haveComp = true;
+        const uintptr_t cvt = *reinterpret_cast<uintptr_t*>(comp);
+        using FnFind = void*(__fastcall*)(void*, const char*);
+        void* node = reinterpret_cast<FnFind>(*reinterpret_cast<uintptr_t*>(cvt + 0x128))(comp, name);
+        if (node) {
+            std::memcpy(q->tr, reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(node) + 0x30), sizeof(q->tr));
+            const float* rows = *reinterpret_cast<const float**>(reinterpret_cast<uintptr_t>(node) + 0x50);
+            std::memcpy(q->rows, rows, sizeof(q->rows));
+            q->haveNode = true;
+        }
+        alignas(16) float mn[4] = {}, mx[4] = {};
+        using FnBounds = void(__fastcall*)(void*, float*, float*, int64_t, uint8_t);
+        reinterpret_cast<FnBounds>(*reinterpret_cast<uintptr_t*>(cvt + 0x110))(comp, mn, mx, -1, 0);
+        using FnWorld = const float*(__fastcall*)(void*);
+        const float* w = reinterpret_cast<FnWorld>(*reinterpret_cast<uintptr_t*>(cvt + 0xA8))(comp);
+        if (w) {
+            std::memcpy(q->world, w, sizeof(q->world));
+            std::memcpy(q->mn, mn, sizeof(q->mn));
+            std::memcpy(q->mx, mx, sizeof(q->mx));
+            q->haveBox = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        q->fault = true;
+    }
+}
+// The trampolines' record (slot 0 UpdateIndicator +0x48, 1 SetMarker +0x50, 2 UpdateMarker +0x60): regs = r9, r8, rdx, rcx as the game passed them.
+void __fastcall markerRecord(uint64_t slot, uint64_t ret, const uint64_t* regs, const uint8_t* stk) noexcept {
+    (void)stk;
+    if (slot == 0) {
+        g_ind.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t rva = (g_base && ret >= g_base && ret - g_base < 0x10000000ull) ? static_cast<uint32_t>(ret - g_base) : 0u;
+    if (slot == 2) {
+        g_upd.fetch_add(1, std::memory_order_relaxed);
+        if (nofoot::f87::roleOfReturn(rva) == nofoot::f87::kRoleList) {
+            g_role[nofoot::f87::kRoleList].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_role[nofoot::f87::kRoleOther].fetch_add(1, std::memory_order_relaxed);
+            g_otherLast.store(rva, std::memory_order_relaxed);
+        }
+        return;
+    }
+    g_set.fetch_add(1, std::memory_order_relaxed);
+    const int32_t key = static_cast<int32_t>(static_cast<uint32_t>(regs[2]));
+    const bool visible = (regs[0] & 0xFFu) != 0;
+    int role = nofoot::f87::roleOfReturn(rva);
+    if (role == nofoot::f87::kRoleList) role = nofoot::f87::kRoleOther;
+    g_role[role].fetch_add(1, std::memory_order_relaxed);
+    if (role == nofoot::f87::kRoleOther) g_otherLast.store(rva, std::memory_order_relaxed);
+    if (role == nofoot::f87::kRoleNearby) g_nearbyMask.fetch_or(1ull << (key >= 0 && key < 63 ? key : 63), std::memory_order_relaxed);
+    if (role == nofoot::f87::kRoleFocusHidden) g_focusKey.store(-1, std::memory_order_relaxed);   // nothing is focused: the focus key is the focused interactable's, never a fixed one
+    if (role == nofoot::f87::kRoleFocus && visible) {
+        FocusSample smp;
+        smp.key = key;
+        float p[4];
+        if (readP(regs[1], p)) std::memcpy(smp.p, p, sizeof(smp.p));
+        g_focusKey.store(key, std::memory_order_relaxed);
+        const uint32_t n = g_focusN.fetch_add(1, std::memory_order_acq_rel);
+        g_focusRing.post(n, smp);
+    }
+}
+// The getter stubs: pre (before the game's call: the point as it stands, P0) and post (after it: the point the game made). site: 0 focus (rcx the entity reference, rdx the
+// point), 1 nearby and 2 target (rdx the entity reference, r8 the point).
+void __fastcall getterPre(uint64_t a, uint64_t b, uint64_t c, uint64_t site) noexcept {
+    (void)a;
+    t_pre.ok = readP(site == nofoot::f87::kSiteFocus ? b : c, t_pre.p0);
+}
+void __fastcall getterPost(uint64_t a, uint64_t b, uint64_t c, uint64_t site) noexcept {
+    if (site >= nofoot::f87::kSiteCount) return;
+    g_getterCalls[site].fetch_add(1, std::memory_order_relaxed);
+    float p[4] = {};
+    const bool pOk = readP(site == nofoot::f87::kSiteFocus ? b : c, p);
+    const uint64_t ref = site == nofoot::f87::kSiteFocus ? a : b;
+    uint64_t ent = 0;
+    uintptr_t inner = 0;
+    if (ref && guardedRead(static_cast<uintptr_t>(ref), &inner, sizeof(inner)) && inner) guardedRead(inner + 0xC8, &ent, sizeof(ent));
+    if (!pOk || !ent) return;
+    Ent* known = nullptr;
+    for (uint32_t i = 0; i < g_entN && !known; ++i)
+        if (g_ent[i].used && g_ent[i].site == static_cast<int>(site) && g_ent[i].ent == ent) known = &g_ent[i];
+    if (known) return;
+    Ent& slot = g_ent[g_entN % 24u];
+    ++g_entN;
+    slot = Ent{};
+    slot.used = true;
+    slot.site = static_cast<int>(site);
+    slot.ent = ent;
+    GetterRec rec;
+    rec.site = static_cast<int>(site);
+    rec.ent = ent;
+    if (t_pre.ok) std::memcpy(rec.p0, t_pre.p0, sizeof(rec.p0));
+    std::memcpy(rec.p, p, sizeof(rec.p));
+    uint32_t typeId = 0;
+    if (g_base && guardedRead(g_base + nofoot::f87::kTypeIdRva, &typeId, sizeof(typeId))) {
+        const char* name = reinterpret_cast<const char*>(g_base + nofoot::f87::kNodeNameRva);
+        querySeh(ref, typeId, name, &rec.q);
+        rec.haveQuery = true;
+    }
+    if (rec.q.haveNode) {
+        const double t[3] = {rec.q.tr[0], rec.q.tr[1], rec.q.tr[2]};
+        for (int j = 0; j < 3; ++j)
+            rec.node[j] = t[0] * rec.q.rows[j] + t[1] * rec.q.rows[4 + j] + t[2] * rec.q.rows[8 + j] + rec.q.rows[12 + j];
+    }
+    if (rec.q.haveBox) {
+        nofoot::f87::Box box;
+        for (int j = 0; j < 3; ++j) {
+            box.mn[j] = rec.q.mn[j];
+            box.mx[j] = rec.q.mx[j];
+        }
+        std::memcpy(box.world, rec.q.world, sizeof(box.world));
+        PinIn pin;
+        if (pinInRead(&pin)) {
+            const double cam[3] = {pin.camRaw[0], pin.camRaw[1], pin.camRaw[2]};
+            slot.face = nofoot::f87::boxFaceFacing(box, cam);   // latched at first sight
+            const double P[3] = {p[0], p[1], p[2]};
+            if (nofoot::f87::boxFrontPoint(box, slot.face, P, rec.front)) {
+                rec.haveFront = true;
+                rec.delta = std::sqrt((rec.front[0] - P[0]) * (rec.front[0] - P[0]) + (rec.front[1] - P[1]) * (rec.front[1] - P[1]) + (rec.front[2] - P[2]) * (rec.front[2] - P[2]));
+                double C[3];
+                nofoot::f87::boxCentre(box, C);
+                const double v[3] = {cam[0] - C[0], cam[1] - C[1], cam[2] - C[2]};
+                const double vl = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                rec.nView = vl > 1e-9 ? (slot.face.n[0] * v[0] + slot.face.n[1] * v[1] + slot.face.n[2] * v[2]) / vl : 0.0;
+            }
+        }
+    }
+    g_getterPosts.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t n = g_getterN.fetch_add(1, std::memory_order_acq_rel);
+    g_getterRing.post(n, rec);
+}
+
+// ---- the install (frame thread) -----------------------------------------------------------------------------------------------------------------------
+uint8_t* g_page = nullptr;
+bool g_installed = false;
+std::string g_refusalLast;
+uint64_t g_slotOrig[3] = {};
+uintptr_t g_slotTramp[3] = {};
+int32_t g_callOrigRel[3] = {};
+uintptr_t g_callStub[3] = {};
+constexpr uint32_t kSlotRva[3] = {nofoot::f87::kSlotUpdateIndicator, nofoot::f87::kSlotSetMarker, nofoot::f87::kSlotUpdateMarker};
+constexpr uint32_t kSlotFn[3] = {nofoot::f87::kFnUpdateIndicator, nofoot::f87::kFnSetMarker, nofoot::f87::kFnUpdateMarker};
+constexpr uint32_t kCallPin[3] = {nofoot::f87::kPinFocusGetter, nofoot::f87::kPinNearbyGetter, nofoot::f87::kPinTargetGetter};
+constexpr uint32_t kCallFn[3] = {nofoot::f87::kGetterFocus, nofoot::f87::kGetterNearby, nofoot::f87::kGetterNearby};
+__declspec(noinline) bool guardedStoreQword(uintptr_t address, uint64_t value) noexcept {
+    __try {
+        *reinterpret_cast<volatile uint64_t*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool storeSlot(uintptr_t address, uint64_t value) noexcept {
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), 8, PAGE_READWRITE, &old)) return false;
+    const bool ok = guardedStoreQword(address, value);
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(address), 8, old, &ignored);
+    return ok;
+}
+void refuse(const std::string& why) {
+    if (why == g_refusalLast) return;
+    g_refusalLast = why;
+    Log::get().note("prompt anchor (F87p): NOT hooked -- %s. The game's code is left as it is.", why.c_str());
+}
+// Frame thread: `want` installs (identity, every pin, the three slots, the three getter calls; all read before anything is written), else restores.
+void tick(bool want, const char* reason) {
+    namespace f87 = nofoot::f87;
+    if (want) {
+        if (g_installed) return;
+        const char* idWhy = nullptr;
+        if (!g_base || !checkIdentity(g_base, &idWhy)) {
+            refuse(std::string("the PE identity check failed (") + (idWhy ? idWhy : "no module") + ")");
+            return;
+        }
+        for (uint32_t i = 0; i < f87::kPinCount; ++i) {
+            const f87::Pin& pin = f87::kPins[i];
+            if (!bytesMatch(g_base + pin.rva, pin.bytes, pin.len)) {
+                refuse(std::string("the bytes of ") + pin.name + " at +0x" + [&] { char b[16]; std::snprintf(b, sizeof(b), "%X", pin.rva); return std::string(b); }() + " are not build 334925's");
+                return;
+            }
+        }
+        for (int i = 0; i < 3; ++i) {
+            uint64_t v = 0;
+            if (!guardedRead(g_base + kSlotRva[i], &v, sizeof(v)) || v != g_base + kSlotFn[i]) {
+                refuse("a marker interface slot does not hold the game's function");
+                return;
+            }
+            g_slotOrig[i] = v;
+            const f87::Pin& pin = f87::kPins[kCallPin[i]];
+            if (f87::callTarget(pin.rva, pin.bytes) != kCallFn[i]) {
+                refuse("a getter call does not target the getter");
+                return;
+            }
+            g_callOrigRel[i] = 0;
+            std::memcpy(&g_callOrigRel[i], pin.bytes + 1, 4);
+        }
+        if (!g_page) {
+            g_page = allocateRelay(g_base + f87::kPins[kCallPin[0]].rva);
+            if (!g_page) {
+                refuse("no executable memory within two gigabytes of the getter calls");
+                return;
+            }
+            size_t at = 0;
+            for (int i = 0; i < 3; ++i) {
+                g_callStub[i] = reinterpret_cast<uintptr_t>(g_page + at);
+                at += f87::emitGetterStub(g_page + at, g_base + kCallFn[i], static_cast<uint64_t>(i), reinterpret_cast<uint64_t>(&getterPre), reinterpret_cast<uint64_t>(&getterPost));
+                at = (at + 15) & ~static_cast<size_t>(15);
+            }
+            for (int i = 0; i < 3; ++i) {
+                g_slotTramp[i] = reinterpret_cast<uintptr_t>(g_page + at);
+                at += f87::emitTrampoline(g_page + at, g_slotOrig[i], static_cast<uint64_t>(i), reinterpret_cast<uint64_t>(&markerRecord));
+                at = (at + 15) & ~static_cast<size_t>(15);
+            }
+            DWORD old = 0;
+            if (at > 4096 || !VirtualProtect(g_page, 4096, PAGE_EXECUTE_READ, &old) || !FlushInstructionCache(GetCurrentProcess(), g_page, at)) {
+                refuse("the stub page could not be made executable");
+                return;
+            }
+        }
+        int32_t rel[3];
+        for (int i = 0; i < 3; ++i) {
+            const uintptr_t call = g_base + f87::kPins[kCallPin[i]].rva;
+            const int64_t r = static_cast<int64_t>(g_callStub[i]) - static_cast<int64_t>(call + 5);
+            if (r < INT32_MIN || r > INT32_MAX) {
+                refuse("a stub is out of reach of its call");
+                return;
+            }
+            rel[i] = static_cast<int32_t>(r);
+        }
+        int done = 0;
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; ++i) {
+            ok = storeRel32(g_base + f87::kPins[kCallPin[i]].rva + 1, rel[i]);
+            if (ok) ++done;
+        }
+        int slots = 0;
+        for (int i = 0; i < 3 && ok; ++i) {
+            ok = storeSlot(g_base + kSlotRva[i], static_cast<uint64_t>(g_slotTramp[i]));
+            if (ok) ++slots;
+        }
+        if (!ok) {   // roll back what was written
+            for (int i = 0; i < slots; ++i) storeSlot(g_base + kSlotRva[i], g_slotOrig[i]);
+            for (int i = 0; i < done; ++i) storeRel32(g_base + f87::kPins[kCallPin[i]].rva + 1, g_callOrigRel[i]);
+            refuse("a write to the game's code or table failed");
+            return;
+        }
+        g_installed = true;
+        g_refusalLast.clear();
+        Log::get().note("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked, bytes verified (%u pins; vtable EliteDangerous64.exe+0x520B2E8 slots -> counting trampolines; getter calls "
+                        "+0x1AA9A8F, +0x1A9E13D, +0x1AA4AD8 -> read-only stubs); nothing is written to the game's data", f87::kPinCount);
+        return;
+    }
+    if (!g_installed) return;
+    bool clean = true;
+    for (int i = 0; i < 3; ++i) {
+        uint64_t v = 0;
+        if (guardedRead(g_base + kSlotRva[i], &v, sizeof(v)) && v == g_slotTramp[i]) clean = storeSlot(g_base + kSlotRva[i], g_slotOrig[i]) && clean;
+        else clean = false;
+        int32_t cur = 0;
+        const uintptr_t call = g_base + f87::kPins[kCallPin[i]].rva;
+        if (guardedRead(call + 1, &cur, 4) && cur == static_cast<int32_t>(static_cast<int64_t>(g_callStub[i]) - static_cast<int64_t>(call + 5))) clean = storeRel32(call + 1, g_callOrigRel[i]) && clean;
+        else clean = false;
+    }
+    g_installed = false;
+    Log::get().note("prompt anchor (F87p): slots and getter calls %s (%s)", clean ? "restored to the game's own" : "NOT all restored (a slot or call was not ours)", reason);
+}
+
+}  // namespace f87p
 enum WeaponViewBasisState : uint32_t { kWeaponViewOff = 0, kWeaponViewReady, kWeaponViewNoLocal, kWeaponViewNoScene, kWeaponViewBadAxes };
 struct WeaponViewBias {
     double seated[3] = {}, world[3] = {};
@@ -8283,6 +8655,7 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
 struct F86Rec {
     bool present = false, prevOk = false;
     float pos[3] = {}, prev[3] = {};   // as the original left them
+    nofoot::f86::PrevCase prevCase = nofoot::f86::kPrevNone;   // F87: the previous copy against the position, both as the original left them
 };
 struct F86CarryState {
     std::atomic<bool> busy{false};
@@ -8292,9 +8665,6 @@ struct F86CarryState {
     bool haveLast = false;
     uint32_t lastP1 = 0;
     float lastM3p[16] = {}, lastFroot[16] = {};
-    double lastDelta[3] = {};
-    bool lastHave[bodyrec::kBlocks][bodyrec::kSlots] = {};
-    float lastRaw[bodyrec::kBlocks][bodyrec::kSlots][3] = {}, lastFinal[bodyrec::kBlocks][bodyrec::kSlots][3] = {};
 };
 F86CarryState g_f86cs;
 bool f86CarryBegin(uintptr_t amc) noexcept {
@@ -8324,6 +8694,7 @@ bool f86CarryBegin(uintptr_t amc) noexcept {
             const uintptr_t rec = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * bodyrec::kRecSize;
             if (!guardedRead(rec + bodyrec::kRecPos, r.pos, sizeof(r.pos))) continue;
             r.prevOk = guardedRead(rec + bodyrec::kPrev, r.prev, sizeof(r.prev));
+            r.prevCase = r.prevOk ? nofoot::f86::classifyPrev(r.prev, r.pos) : nofoot::f86::kPrevNone;   // F87: before the shift and the carry touch either
             r.present = true;
             ++cs.nPresent;
         }
@@ -8354,6 +8725,7 @@ void f86CarryEnd(uintptr_t amc) noexcept {
     F86Fi fi;
     f86::PoseIn pose;
     const bool inputs = g_f85P1.get(p1, &p1r) && g_f86Fi.get(p1, &fi);
+    if (scope) g_f87FpBucket[nofoot::f87::fpFrameBucket(static_cast<int32_t>(g_f87FpLatest.load(std::memory_order_relaxed) - p1))].fetch_add(1, std::memory_order_relaxed);   // F87a
     const bool poseOk = f86PoseRead(&pose);
     f86::CarryResult cr;
     if (!scope) {
@@ -8383,47 +8755,34 @@ void f86CarryEnd(uintptr_t amc) noexcept {
             out.mTurn = static_cast<float>(mg.turnDeg);
         }
     }
-    // the writes: the carry onto every present record's position, last frame's carry onto the previous copy of the records whose copy is the game's
+    // the writes: the carry onto every present record's position and, when the record's previous copy equalled its position at the start of the submit (F87: the
+    // game writes both from one value), onto the previous copy too, so position - previous stays the game's own motion and not the carry
     const bool carried = cr.why == f86::kCarried;
     f86::PrevTally tally;
     if (scope) {
         for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
             for (int k = 0; k < bodyrec::kSlots; ++k) {
                 const F86Rec& r = cs.g[idx][k];
-                if (!r.present) {
-                    cs.lastHave[idx][k] = false;
-                    continue;
-                }
+                if (!r.present) continue;
                 const uintptr_t addr = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * bodyrec::kRecSize;
-                f86::PrevCase pcase = f86::kPrevNone;
-                if (consecutive && cs.lastHave[idx][k] && r.prevOk) {
-                    pcase = f86::classifyPrev(r.prev, cs.lastRaw[idx][k], cs.lastFinal[idx][k]);
-                    tally.add(pcase);
-                }
+                if (r.prevCase != f86::kPrevNone) tally.add(r.prevCase);
                 float posNow[3];
-                if (!guardedRead(addr + bodyrec::kRecPos, posNow, sizeof(posNow))) {
-                    cs.lastHave[idx][k] = false;
-                    continue;
-                }
-                float posNew[3] = {posNow[0], posNow[1], posNow[2]};
-                if (carried) {
-                    for (int i = 0; i < 3; ++i) posNew[i] = static_cast<float>(static_cast<double>(posNow[i]) + cr.delta[i]);
-                    bool ok = true;
-                    for (int i = 0; i < 3; ++i) ok = guardedWriteFloat(addr + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), posNew[i]) && ok;
-                    if (!ok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
-                }
-                if (pcase == f86::kPrevGame && (cs.lastDelta[0] != 0.0 || cs.lastDelta[1] != 0.0 || cs.lastDelta[2] != 0.0)) {
+                if (!guardedRead(addr + bodyrec::kRecPos, posNow, sizeof(posNow))) continue;
+                if (!carried) continue;
+                float posNew[3];
+                for (int i = 0; i < 3; ++i) posNew[i] = static_cast<float>(static_cast<double>(posNow[i]) + cr.delta[i]);
+                bool ok = true;
+                for (int i = 0; i < 3; ++i) ok = guardedWriteFloat(addr + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), posNew[i]) && ok;
+                if (!ok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
+                if (r.prevCase == f86::kPrevWithPos) {
                     float prevNow[3], prevNew[3];
                     if (guardedRead(addr + bodyrec::kPrev, prevNow, sizeof(prevNow))) {
-                        f86::prevToWrite(pcase, prevNow, cs.lastDelta, prevNew);
-                        bool ok = true;
-                        for (int i = 0; i < 3; ++i) ok = guardedWriteFloat(addr + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prevNew[i]) && ok;
-                        if (!ok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
+                        f86::prevToWrite(r.prevCase, prevNow, cr.delta, prevNew);
+                        bool pok = true;
+                        for (int i = 0; i < 3; ++i) pok = guardedWriteFloat(addr + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prevNew[i]) && pok;
+                        if (!pok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-                cs.lastHave[idx][k] = true;
-                std::memcpy(cs.lastRaw[idx][k], r.pos, sizeof(r.pos));
-                std::memcpy(cs.lastFinal[idx][k], posNew, sizeof(posNew));
             }
         }
         cs.haveLast = inputs;
@@ -8432,12 +8791,8 @@ void f86CarryEnd(uintptr_t amc) noexcept {
             std::memcpy(cs.lastM3p, p1r.m3p, sizeof(cs.lastM3p));
             std::memcpy(cs.lastFroot, fi.m, sizeof(cs.lastFroot));
         }
-        for (int i = 0; i < 3; ++i) cs.lastDelta[i] = carried ? cr.delta[i] : 0.0;
     } else {
         cs.haveLast = false;
-        for (auto& row : cs.lastHave)
-            for (bool& b : row) b = false;
-        for (int i = 0; i < 3; ++i) cs.lastDelta[i] = 0.0;
     }
     // the figures
     out.why = cr.why;
@@ -8459,7 +8814,6 @@ void f86CarryEnd(uintptr_t amc) noexcept {
     if (cr.why == f86::kCarried || cr.why == f86::kCarryHitch || cr.why == f86::kCarryOld) g_f86Age[std::min<uint32_t>(cr.age, 3u)].fetch_add(1, std::memory_order_relaxed);
     if (out.prevCase != f86::kPrevNone) g_f86Prev[out.prevCase].fetch_add(1, std::memory_order_relaxed);
     g_f86Carry.post(p1, out);
-    if ((cr.why == f86::kCarried || cr.why == f86::kCarryHitch) && poseOk) g_f86Drawn.post(pose.p1, out);
     cs.busy.store(false, std::memory_order_release);
 }
 
@@ -10163,6 +10517,135 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     g_f66aGateSum = 0.0;
 }
 
+// ---- F87h: the standing-height hold, the frame thread's half ---------------------------------------------------------------------------------------------
+// See nofoot::f87 (native_on_foot_f87.h) for the filter. The measurement: the render head's height in the seated space (np.render) with the eye alignment taken out (the
+// hold, the ADS locks and the weapon view offset are all part of that space), less the neck pivot's drop at the head's LOCAL pitch. The result goes out as the y of the
+// eye alignment (alignTick's sum) and, as the transient, to the pin. Outside the pin's scope the hold ramps to zero in 0.5 s and the cockpit publishes zeros.
+nofoot::f87::HeightHold g_f87Hold;
+nofoot::f87::StillGate g_f87Still;
+nofoot::f87::HoldSecond g_f87Sec;
+double g_f87LastDev = 0.0, g_f87LastLocalPitchDeg = 0.0, g_f87LastLocalY = 0.0, g_f87LastSeatMeterCm = 0.0, g_f87LastSustained = 0.0, g_f87LastTransient = 0.0, g_f87LastRaise = 0.0;
+bool g_f87LastDevValid = false, g_f87SlewedSec = false;
+uint64_t g_f87LineMs = 0;
+const char* g_f87State = "out of scope";
+nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool ads) noexcept {
+    namespace f87 = nofoot::f87;
+    const bool scope = g_pinScope.load(std::memory_order_relaxed);
+    f87::HoldIn in;
+    in.scope = scope;
+    in.dt = dt;
+    in.settleS = static_cast<double>(g_f87SettleS.load(std::memory_order_relaxed));
+    double pitchRad = 0.0;
+    const bool pose = haveFrame && np.inputVersion >= 3 && np.localValid && nofoot::pinNaturalLocalPitch(np.local, &pitchRad);
+    double dev = 0.0;
+    if (pose && std::isfinite(np.render[7])) {
+        const double drop = nofoot::pinPitchRestUp(pitchRad, true) - nofoot::kPinRestUpM;
+        dev = f87::devOf(static_cast<double>(np.render[7]), g_eyeAlignPub[1], drop);
+        in.devValid = std::isfinite(dev);
+        in.devM = dev;
+    }
+    // ADS: the filter freezes while the ADS locks own the eye (they decay to zero after the press ends: the filter waits for that too)
+    bool lockBusy = ads;
+    for (int i = 0; i < 3; ++i) lockBusy = lockBusy || std::fabs(g_adsLock[i]) > 1e-6 || std::fabs(g_adsSight.applied[i]) > 1e-6;
+    in.frozen = lockBusy;
+    const f87::HoldOut out = g_f87Hold.step(in);
+    g_f87Still.step(out.transientValid, out.transientM, dt);
+    F87HoldPub pub;
+    pub.valid = out.transientValid;
+    pub.transientM = out.transientM;
+    pub.calOk = !out.transientValid || g_f87Still.ok;
+    f87HoldPublish(pub);
+    g_f87Sec.add(in.devValid, dev, out.transientM, static_cast<double>(np.local[7]), pose);
+    g_f87LastDev = dev;
+    g_f87LastDevValid = in.devValid;
+    g_f87LastSustained = out.sustainedM;
+    g_f87LastTransient = out.transientM;
+    g_f87LastRaise = out.raiseM;
+    g_f87LastLocalPitchDeg = pitchRad * 180.0 / nofoot::kIkPi;
+    g_f87LastLocalY = pose ? static_cast<double>(np.local[7]) : 0.0;
+    g_f87LastSeatMeterCm = haveFrame ? (static_cast<double>(np.render[7]) + g_eyeAlignPub[1]) * 100.0 : 0.0;
+    g_f87SlewedSec = g_f87SlewedSec || out.slewed;
+    g_f87State = !scope ? (out.ramp > 0.0 ? "ramping out" : "out of scope")
+                 : !in.devValid ? "no pose (the LOCAL head was not read)"
+                 : in.frozen ? "frozen (ADS)"
+                 : out.ramp < 1.0 ? "ramping in"
+                 : g_f87SlewedSec ? "holding (rate-limited)" : "holding";
+    if (nativeOnFootActive() && now - g_f87LineMs >= 1000) {
+        g_f87LineMs = now;
+        nofoot::f87::HoldSecond& sec = g_f87Sec;
+        Log::get().note("view height hold (F87h) 1 s: state %s; neck dev raw %+.1f cm (min %+.1f max %+.1f), sustained %+.1f, transient %+.1f (max %.1f); hold %+.1f cm; LOCAL y %.3f pitch %+.1f; "
+                        "seat_meter %+.1f cm; max |dL_y| a frame %.1f cm (>2 cm: %u)",
+                        g_f87State, g_f87LastDev * 100.0, sec.n ? sec.devMin * 100.0 : 0.0, sec.n ? sec.devMax * 100.0 : 0.0, g_f87LastSustained * 100.0, g_f87LastTransient * 100.0,
+                        sec.maxTransient * 100.0, g_f87LastRaise * 100.0, g_f87LastLocalY, g_f87LastLocalPitchDeg, g_f87LastSeatMeterCm, sec.maxStep * 100.0, static_cast<unsigned>(sec.jumps));
+        sec.reset();
+        g_f87SlewedSec = false;
+    }
+    return out;
+}
+// The eye over the weapon's root (the right eye less the FP root, in the character's axes: the AMC's right, up and forward) and the camera path's stability, once a second
+// on foot. The right eye is the scene's (eye 1's rows of this game frame); the root is the FP root the frame thread reads (fresh within 100 ms).
+nofoot::f87::EyeRootSecond g_f87EyeRoot;
+double g_f87CamN = 0.0, g_f87CamMeanP = 0.0, g_f87CamM2P = 0.0, g_f87CamMeanY = 0.0, g_f87CamM2Y = 0.0;
+uint64_t g_f87EyeLineMs = 0;
+void f87EyeLines(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ads, const EyeSample& s, const FpRootSnap& fp, bool fpFresh) noexcept {
+    if (!nativeOnFootActive()) return;
+    const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
+    float rows[2][16] = {}, o[2][4] = {};
+    uint32_t fr[2] = {~0u, ~0u};
+    double eyes[2][3] = {};
+    bool eyeOk[2] = {};
+    for (int e = 0; e < 2; ++e) {
+        const bool got = eyeRowsRead(e, &fr[e], rows[e], o[e]);
+        const int32_t age = static_cast<int32_t>(cur - fr[e]);
+        const double org[3] = {o[e][0], o[e][1], o[e][2]};
+        eyeOk[e] = got && age >= 0 && age <= 1 && nofoot::eyeFromRows(rows[e], org, eyes[e]);
+    }
+    const bool rowsOk = s.valid && s.rows[4] == s.rows[4];
+    if (eyeOk[1] && fpFresh && rowsOk) {
+        const double ax[3][3] = {{s.rows[0], s.rows[1], s.rows[2]}, {s.rows[3], s.rows[4], s.rows[5]}, {s.rows[6], s.rows[7], s.rows[8]}};
+        const double root[3] = {fp.origin[0], fp.origin[1], fp.origin[2]};
+        g_f87EyeRoot.add(eyes[1], root, ax);
+    }
+    // the camera path: eye 0's pitch in the scene against the pitch the runtime handed the game (both over the character's up), and eye 0's height against the job camera's
+    if (eyeOk[0] && haveFrame && np.renderValid && rowsOk) {
+        double rA[3], uA[3], fA[3];
+        const double up[3] = {s.rows[3], s.rows[4], s.rows[5]};
+        double rr[3], ru[3], rf[3];
+        if (drawtag::worldBasis(rows[0], rA, uA, fA) && nofoot::rotAxesFromHead(np.render, rr, ru, rf)) {
+            const double scenePitch = std::asin(std::max(-1.0, std::min(1.0, fA[0] * up[0] + fA[1] * up[1] + fA[2] * up[2]))) * 180.0 / nofoot::kIkPi;
+            const double renderPitch = std::asin(std::max(-1.0, std::min(1.0, rf[1]))) * 180.0 / nofoot::kIkPi;
+            PinIn pin;
+            if (pinInRead(&pin)) {
+                const double d[3] = {eyes[0][0] - pin.camRaw[0], eyes[0][1] - pin.camRaw[1], eyes[0][2] - pin.camRaw[2]};
+                const double dy = (d[0] * up[0] + d[1] * up[1] + d[2] * up[2]) * 1000.0;
+                const double dp = scenePitch - renderPitch;
+                if (std::isfinite(dp) && std::isfinite(dy)) {
+                    g_f87CamN += 1.0;
+                    const double dP = dp - g_f87CamMeanP;
+                    g_f87CamMeanP += dP / g_f87CamN;
+                    g_f87CamM2P += dP * (dp - g_f87CamMeanP);
+                    const double dY = dy - g_f87CamMeanY;
+                    g_f87CamMeanY += dY / g_f87CamN;
+                    g_f87CamM2Y += dY * (dy - g_f87CamMeanY);
+                }
+            }
+        }
+    }
+    if (now - g_f87EyeLineMs < 1000) return;
+    g_f87EyeLineMs = now;
+    char item[64] = "none";
+    uint32_t serial = 0;
+    if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
+    nofoot::f87::EyeRootSecond& er = g_f87EyeRoot;
+    Log::get().note("eye to weapon root (F87h) 1 s: right eye - F_root (character axes) right %+.1f up %+.1f forward %+.1f cm (up min %+.1f max %+.1f, n %u), item %s, ADS %d",
+                    er.last[0] * 100.0, er.last[1] * 100.0, er.last[2] * 100.0, er.n ? er.upMin * 100.0 : 0.0, er.n ? er.upMax * 100.0 : 0.0, static_cast<unsigned>(er.n), item, ads ? 1 : 0);
+    er.reset();
+    const double n = g_f87CamN;
+    Log::get().note("camera path (F87p) 1 s: scene eye vs job camera pitch sd %.3f deg, y sd %.2f mm (n %u)", n > 1.0 ? std::sqrt(g_f87CamM2P / (n - 1.0)) : 0.0,
+                    n > 1.0 ? std::sqrt(g_f87CamM2Y / (n - 1.0)) : 0.0, static_cast<unsigned>(n));
+    g_f87CamN = g_f87CamMeanP = g_f87CamM2P = g_f87CamMeanY = g_f87CamM2Y = 0.0;
+}
+
 void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignClock); now (ms) is for staleness and the 1 s lines
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -10879,6 +11362,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     adsSightTick(now, dt, sIn);   // F63/F75: the ADS lock follows the actual weapon sight line; manual view bias remains a camera shift
     adsAimStep(now, dt, sIn);     // F68a: the ADS guard (the right eye's rows against the head); F67b: the three forwards
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
+    const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads);   // F87h: the standing-height hold (zero outside the pin's scope)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
     // g_align's, as before. F68f: the eye height (F64's raise) is gone; the pin alone decides where the body sits under the view, and the
     // view height is the game's own.
@@ -10887,6 +11371,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
+            if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
@@ -10900,6 +11385,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         }
     }
 
+    f87EyeLines(now, np, haveFrame, ads, s, fp, fpFresh);   // F87h: the eye over the weapon's root and the camera path, one line a second on foot
     // The once-a-second line while the offset is live.
     if (on && !wait && now - a.lineMs >= 1000) {
         a.lineMs = now;
@@ -12159,6 +12645,11 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         const float ew[3] = {static_cast<float>(eyeW[0]), static_cast<float>(eyeW[1]), static_cast<float>(eyeW[2])};
         nofoot::ikXform(ew, invM, E);
+        // F87h: the body keeps the character's height: the pin (and its standing calibration) takes the camera less the transient the view still carries over the
+        // character's eye height (a nod, a duck, a bob), so the hold's raise and the quick part of the posture both leave the body where the character stands.
+        const F87HoldPub hold87 = f87HoldRead();
+        const double eyeRawModelY = E[1];
+        E[1] = nofoot::f87::pinEyeYAdjust(E[1], hold87.transientM, hold87.valid);
         double fwdM[3], upM[3];
         for (int i = 0; i < 3; ++i) {
             fwdM[i] = fwdW[0] * invM[i] + fwdW[1] * invM[4 + i] + fwdW[2] * invM[8 + i];
@@ -12195,7 +12686,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             for (int i = 0; i < 3; ++i)
                 fwd[i] = static_cast<double>(G->froot[8]) * invM[i] + static_cast<double>(G->froot[9]) * invM[4 + i] + static_cast<double>(G->froot[10]) * invM[8 + i];
             pc.f86FModelY = fm[1];
-            pc.f86CamOverF = E[1] - fm[1];
+            pc.f86CamOverF = eyeRawModelY - fm[1];   // F87h: the camera itself, not the pin's
             pc.f86NeckY = N0[1];
             pc.f86AimPitch = std::atan2(fwd[1], std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2])) * 180.0 / nofoot::kIkPi;
             pc.f86Ok = std::isfinite(pc.f86FModelY) && std::isfinite(pc.f86CamOverF) && std::isfinite(pc.f86NeckY) && std::isfinite(pc.f86AimPitch);
@@ -12220,7 +12711,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             g_pinEyeCalRefGenHave = true;
         }
         if (headFinite) {
-            const bool standing = nofoot::pinCalStanding(speed, armed, g_ikAdsW.load(std::memory_order_relaxed) > 0.05f, p44[1]);
+            const bool standing = nofoot::pinCalStanding(speed, armed, g_ikAdsW.load(std::memory_order_relaxed) > 0.05f, p44[1]) && hold87.calOk;   // F87h: and the view still
             if ((localPitchValid || !g_pinEyeCalRefGenHave) && g_pinEyeCal.add(standing, p44, rows44, N0, pc.eyeYSelected, pc.rawEyeY))
                 g_pinEyeCalDone.fetch_add(1, std::memory_order_relaxed);
             nofoot::PinAnimTarget pa;
@@ -15942,6 +16433,32 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
             f81PoseCapturePost(capture);
         }
+        if (armsOk) {   // F87a: the hand residual after the carry, independent of the carry's own prediction (see the line)
+            nofoot::f86::PoseIn prevPose;
+            F86Carry crSub;
+            if (f86PoseRead(&prevPose) && prevPose.have && prevPose.p1 + 1u == G.frame && g_f86Carry.get(G.frame, &crSub)) {
+                const double delta[3] = {crSub.why == nofoot::f86::kCarried ? static_cast<double>(crSub.delta[0]) : 0.0, crSub.why == nofoot::f86::kCarried ? static_cast<double>(crSub.delta[1]) : 0.0,
+                                         crSub.why == nofoot::f86::kCarried ? static_cast<double>(crSub.delta[2]) : 0.0};
+                const uint64_t fq = f66QpcFreq();
+                int bin = -1;
+                if (fq && sample.qpc > prevPose.qpc) {
+                    const double dtS = static_cast<double>(sample.qpc - prevPose.qpc) / static_cast<double>(fq);
+                    const double stepM = std::sqrt((static_cast<double>(G.m3p[12]) - prevPose.m3p[12]) * (static_cast<double>(G.m3p[12]) - prevPose.m3p[12]) +
+                                                   (static_cast<double>(G.m3p[13]) - prevPose.m3p[13]) * (static_cast<double>(G.m3p[13]) - prevPose.m3p[13]) +
+                                                   (static_cast<double>(G.m3p[14]) - prevPose.m3p[14]) * (static_cast<double>(G.m3p[14]) - prevPose.m3p[14]));
+                    if (dtS > 1e-4) bin = nofoot::f85::speedBin(stepM / dtS);
+                }
+                if (!g_f87HandBusy.exchange(true, std::memory_order_acquire)) {
+                    for (int side = 0; side < 2; ++side) {
+                        if (!prevPose.wrote[side] || !so[side].wrote) continue;
+                        const double wrist[3] = {prevPose.wrist[side][0], prevPose.wrist[side][1], prevPose.wrist[side][2]};
+                        const double target[3] = {so[side].poseTarget[0], so[side].poseTarget[1], so[side].poseTarget[2]};
+                        g_f87Hand.add(side, nofoot::f87::handResidualCm(target, wrist, G.m3p, delta), bin);
+                    }
+                    g_f87HandBusy.store(false, std::memory_order_release);
+                }
+            }
+        }
         if (armsOk) {   // F86a: the pose this call wrote, for the next submit's carry (M3P_p, F_p, the body shift, the written wrists, the pin's eye)
             nofoot::f86::PoseIn pi;
             pi.p1 = G.frame;
@@ -18003,9 +18520,10 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
         r.poseNativeEpoch = poseRow.poseNativeEpoch;
         r.poseRigGeneration = poseRow.poseRigGeneration;
         std::memcpy(r.poseArm, poseRow.poseArm, sizeof(r.poseArm));
-        {   // F86a: the wrists as the submit that drew this pose put them (the carry joins by the pose's game frame)
+        {   // F86a: the wrists as the submit of the pose's game frame put them (F87: joined by that submit's frame; the submit after the pose has not run by the time the
+            // record is written, 38-47 ms after the pose)
             F86Carry drawn;
-            if (poseRow.poseKey.gGameFrame != ~uint32_t(0) && g_f86Drawn.get(poseRow.poseKey.gGameFrame, &drawn)) {
+            if (poseRow.poseKey.gGameFrame != ~uint32_t(0) && g_f86Carry.get(poseRow.poseKey.gGameFrame, &drawn)) {
                 r.poseArmDrawnValid = true;
                 r.poseArmDrawnWhy = drawn.why;
                 r.poseArmDrawnAge = drawn.age;
@@ -18871,6 +19389,8 @@ struct Rec {
     int8_t icon = -1;        // F67d: the icon mesh (g_iconMesh) the draw's own vertex range names; -1 none
     // F47: every marker composite draw is recorded, its stream copied or not.
     uint32_t start = 0;                  // StartInstanceLocation
+    uint32_t idxCount = 0, idxStart = 0; // F87p: IndexCountPerInstance (or the vertex count), StartIndexLocation (or StartVertexLocation)
+    int32_t idxBase = 0;                 // F87p: BaseVertexLocation
     uint16_t ordEye = 0, ordAll = 0;     // its place among the frame's marker composite draws of its eye, and of the frame
     const void* t33 = nullptr;           // its VS t33 resource (identity; any)
     bool watched = false, findsNow = false;   // bound to a watched pool; that pool had a find this frame or the last
@@ -19024,15 +19544,6 @@ struct Untag {
     uint32_t bits = 0;   // the 24 low bits as a sentinel would carry them
     int tagKey = -1;     // a tag in flight they match (the key), -1 none
     uint32_t tagAge = 0;
-    // F86f (the label instrument): the draws of this place made while a prompt key was drawn in the eye-frame, those that drew with our private b0 (a patched
-    // draw) against the game's, the rows (b0 rows 4, 5 and 7) and the origin of the latest, and the patched targets (NDC) of the prompt keys drawn then.
-    uint64_t labDraws = 0, labOurs = 0;
-    bool labHave = false;
-    float labRows[12] = {}, labOrigin[3] = {};
-    uint32_t labTw = 0, labTh = 0;
-    int labKeys = 0;
-    uint32_t labKey[4] = {};
-    double labT[4][2] = {};
 };
 // F52: an eye's world rows' source this second: the first world pool draw that gave the eye's view (its shaders, target, depth view, viewport,
 // b1), the last one and how often the vertex shader changed between eye-frames.
@@ -19273,34 +19784,31 @@ struct ResCell {
 };
 ResCell g_resRing[2][kResRing];
 // F63: THE CPU IDENTIFICATION. The marker composite draws' instance stream (the single stride-8 vertex buffer they read; one DYNAMIC buffer the
-// game maps WRITE_DISCARD once a frame) is shadowed at its Unmap, before the real one, as the t33 pool is: per eye windows (F86c, below)
-// about the eye's marker composite entries (F63: one window about the newest entry, drawtag::streamWindow). At a draw, its entry (offset / 8 +
-// StartInstanceLocation) read from the window names the record (FirstElement + x) without a GPU read-back. Fix key only; render thread.
-// F86c: the windows cover every entry the eye drew last frame, not only the neighbourhood of its newest one. The 2026-10-23 flight: eye 1's draws outside the
-// windows 78-123 a second from 20:27:50 and 165-180 a second while the rifle was drawn, 0 once eye 1 reached 87/87 draws named (the first-equip flicker: a
-// draw more than 4096 entries from the newest one went unnamed and was drawn unpatched). Per eye, the entries drawn in the last two frames are clustered (a gap of
-// at most 2048 starts another) and each cluster gets a window of 4096 entries, at most 4 per eye (nofoot::f86::planWindows).
-constexpr uint32_t kStreamSetMax = 512;
-struct StreamSet {
-    uint32_t frame = ~0u, n = 0;
-    uint32_t e[kStreamSetMax] = {};
-};
+// game maps WRITE_DISCARD once a frame) is shadowed at its Unmap, before the real one, as the t33 pool is. At a draw, its entry (offset / 8 +
+// StartInstanceLocation) read from the copy names the record (FirstElement + x) without a GPU read-back. Fix key only; render thread.
+// F87c: per eye the copy is F85's window (8192 entries about the eye's newest entry, always), the windows of a history (4096 entries about each cluster of the entries
+// the eye drew in the last 64 frames, at most 6) and, for 8 frames after a draw that no window held, the whole stream (nofoot::f87::planWindows, Escalation). The
+// 2026-10-24 flight: F86's windows (the last two frames' entries) left the first-equip flicker where it was; an extra pass moves eye 1's entries 6-14k between layouts.
 struct StreamShadow {
     const void* res = nullptr;          // identity only
     uint32_t bytes = 0;
     void* mapped = nullptr;
     int mapType = 0;
-    uint32_t frame = ~0u;               // the frame of the newest window copy
+    uint32_t frame = ~0u;               // the frame of the newest copy
     uint32_t centre[2] = {~0u, ~0u};    // per eye: the newest marker composite entry seen
-    StreamSet cur[2], prev[2];          // F86c: per eye, the entries drawn in the newest frame and in the one before
-    nofoot::f86::WinPlan plan[2];       // F86c: per eye, the windows copied at the newest Unmap (lo, n, how many)
-    uint32_t setDropped = 0;
+    nofoot::f87::ClusterHist hist[2];   // per eye: the entries drawn in the last 64 frames, as clusters
+    nofoot::f87::WinPlan plan[2];       // per eye: the windows copied at the newest Unmap (lo, n, where in the eye's buffer)
+    nofoot::f87::Escalation esc;        // the whole stream's copy after a draw outside the windows
+    bool fullOk = false;                // the newest copy held the whole stream
+    uint32_t entryFrame[2] = {~0u, ~0u}, firstEntry[2] = {}, lastEntry[2] = {}, ringFirst[2] = {}, ringLast[2] = {};   // the eye's first and last entry of the newest frame and of the one before
+    bool ringHave[2] = {};
 };
 StreamShadow g_stream;
-alignas(16) uint32_t g_streamWin[2][nofoot::f86::kWinMax][nofoot::f86::kWinEntries * 2];   // per eye, per window: (x, y) per entry
-// F86c: this second's figures per eye: draws named from a window, draws outside every window and how far from the nearest window the nearest of them was.
+alignas(16) uint32_t g_streamWin[2][nofoot::f87::kWinCapEntries * 2];   // per eye: the windows end to end, (x, y) per entry
+std::vector<uint32_t> g_streamFull;                                     // the whole stream (x, y per entry), made on the first escalation
+// F87c: this second's figures per eye: draws named from a window or the whole copy, draws outside every window and how far from the nearest window the nearest of them was.
 struct StreamSecond {
-    uint64_t named = 0, outside = 0, uncovered = 0, copies = 0, windowsSum = 0, clustersSum = 0, droppedEntries = 0;
+    uint64_t named = 0, outside = 0, fullNamed = 0, copies = 0, escCopies = 0, windowsSum = 0, clustersSum = 0;
     uint32_t nearest = ~0u;
 };
 StreamSecond g_streamSec[2];
@@ -19525,6 +20033,57 @@ void addFind(const Pool& p, const uint8_t* base, const drawtag::Hit& h, int mapT
     std::memcpy(g_win.tp, f.tp, sizeof(g_win.tp));
 }
 
+// F87p (the label instrument): the camera-local records the label's draws name. A candidate draw's record (pool, index) is kept here and read, whole, at each Unmap of
+// its pool, so at the next draw it is the record as this frame's Unmap wrote it: its position, scale, quaternion words and word 20 (+0x50).
+struct LabRec {
+    const void* pool = nullptr;
+    uint32_t rec = 0, lastSeen = 0;
+    bool used = false, read = false, camLocal = false;
+    float pos[3] = {}, scale = 0.0f;
+    uint32_t q2 = 0, q3 = 0, w20 = 0;
+};
+LabRec g_labRec[16];
+LabRec* labRecFind(const void* pool, uint32_t rec, uint32_t frame) {
+    LabRec* freeSlot = nullptr;
+    LabRec* oldest = nullptr;
+    for (LabRec& r : g_labRec) {
+        if (r.used && r.pool == pool && r.rec == rec) {
+            r.lastSeen = frame;
+            return &r;
+        }
+        if (!r.used) {
+            if (!freeSlot) freeSlot = &r;
+        } else if (!oldest || frame - r.lastSeen > frame - oldest->lastSeen) {
+            oldest = &r;
+        }
+    }
+    LabRec* n = freeSlot ? freeSlot : oldest;
+    *n = LabRec{};
+    n->used = true;
+    n->pool = pool;
+    n->rec = rec;
+    n->lastSeen = frame;
+    return n;
+}
+void labRecRead(const void* pool, const uint8_t* base, uint32_t bytes, uint32_t frame) {
+    for (LabRec& r : g_labRec) {
+        if (!r.used || r.pool != pool) continue;
+        if (frame - r.lastSeen > 120u) {
+            r = LabRec{};
+            continue;
+        }
+        uint32_t w[84];
+        if (!readRecordWordsGuarded(base, bytes, r.rec, w)) continue;
+        for (int k = 0; k < 3; ++k) r.pos[k] = drawtag::floatOf(w[4 + k]);
+        r.scale = drawtag::floatOf(w[1]);
+        r.q2 = w[2];
+        r.q3 = w[3];
+        r.w20 = w[20];
+        r.camLocal = nofoot::f87::cameraLocal(r.pos);
+        r.read = true;
+    }
+}
+
 void unmapPool(Pool& p) {
     const uint8_t* base = static_cast<const uint8_t*>(p.mapped);
     const int mapType = p.mapType;
@@ -19532,6 +20091,7 @@ void unmapPool(Pool& p) {
     if (!base || (mapType != D3D11_MAP_WRITE_DISCARD && mapType != D3D11_MAP_WRITE_NO_OVERWRITE)) return;
     const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
     p.unmapFrame = frame;   // F63: the CPU identification takes only finds of this Unmap
+    labRecRead(p.res, base, p.bytes, frame);   // F87p: the label candidates' records, as this Unmap wrote them
     // F63: each held match's record in this pool, as this Unmap wrote it (the hold's X0 when its key has no find this frame); under SEH.
     if (g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
         for (uint32_t i = 0; i < kKeySlots; ++i) {
@@ -20274,6 +20834,91 @@ void v2Report() {
     w = V2Window{};
 }
 
+// F87f: THE SCENE ROWS' FALLBACK. An eye-frame whose world draws include no scene-geometry vertex shader (bare ground, the head down: 1,089 frames of the F86 flight,
+// present in F85 too) has no scene rows, and every consumer of them (the marker patch, the weapon UI pin, the depth lines) refuses it: the 80 "head-down" refusals. The
+// depth prepass (drawtag::kFbVs / kFbPs) carries the same constants in all 1,089 of those frames and was the main content in 12,858 of 12,858 scene frames. Its
+// rows are kept per eye-frame as they come and stand in at the first marker composite draw of an eye-frame that has no scene rows. A frame that has both compares them:
+// one difference over 1e-5 latches the fallback off for the session (logged). Fix key and native stereo on foot only; render thread.
+struct FbRows {
+    uint32_t frame = ~0u, w = 0, h = 0;
+    float rows[16] = {}, o[4] = {};
+    const void* cb1 = nullptr;   // identity only
+};
+FbRows g_fb[2];
+nofoot::f87::FbGuard g_fbGuard;
+uint32_t g_fbCounted[2] = {~0u, ~0u};
+struct FbSecond {
+    uint64_t noMain = 0, fromFb = 0, both = 0;
+    double maxDiff = 0.0;
+};
+FbSecond g_fbSec[2];
+bool g_fbLatchNoted = false;
+// A scene-VS draw gave the eye's rows this frame: compare them with the prepass's when it came first.
+void f87FallbackCompare(int e, uint32_t frame) {
+    if (g_fb[e].frame != frame || g_cpuWorld[e].frame != frame) return;
+    float a[20], b[20];
+    std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
+    std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
+    std::memcpy(b, g_fb[e].rows, 16 * sizeof(float));
+    std::memcpy(b + 16, g_fb[e].o, 4 * sizeof(float));
+    const double diff = nofoot::f87::rowsMaxDiff(a, b);
+    const bool wasOn = !g_fbGuard.latchedOff;
+    g_fbGuard.compare(diff);
+    FbSecond& s = g_fbSec[e];
+    ++s.both;
+    s.maxDiff = std::max(s.maxDiff, diff);
+    if (wasOn && g_fbGuard.latchedOff && !g_fbLatchNoted) {
+        g_fbLatchNoted = true;
+        Log::get().note("native on foot scene rows fallback (F87f): LATCHED OFF -- eye %d frame %u: the depth prepass's rows differ from the scene rows by %.3e (over %.0e); no "
+                        "frame uses the fallback from here", e, frame, diff, nofoot::f87::kFbTolerance);
+    }
+}
+// The prepass draw's rows, once per eye-frame (the CB shadow's copy only: the rows are the constants already shadowed for the scene VS).
+void f87FallbackCapture(ID3D11DeviceContext* ctx, int e, uint32_t frame, const WorldTarget* t) {
+    if (g_fbGuard.latchedOff || g_fb[e].frame == frame) return;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f1 = 0;
+    vsConstants(ctx, 1, &cb1, &f1);
+    float shadow[6][4] = {};
+    if (cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow)) {
+        FbRows& f = g_fb[e];
+        f.frame = frame;
+        std::memcpy(f.rows, shadow, sizeof(f.rows));
+        std::memcpy(f.o, shadow[5], sizeof(f.o));
+        f.cb1 = cb1;
+        f.w = t->w;
+        f.h = t->h;
+        f87FallbackCompare(e, frame);
+    }
+    if (cb1) cb1->Release();
+}
+// The first marker composite draw of an eye-frame: counted when the frame has no scene rows, and given the prepass's when it has them.
+void f87FallbackPromote(int e, uint32_t frame) {
+    if (e != 0 && e != 1) return;
+    const bool have = g_cpuWorld[e].frame == frame;
+    if (g_fbCounted[e] != frame) {
+        g_fbCounted[e] = frame;
+        if (!have) ++g_fbSec[e].noMain;
+    }
+    if (have || g_fbGuard.latchedOff || g_fb[e].frame != frame) return;
+    FbRows& f = g_fb[e];
+    WorldView v;
+    v.frame = frame;
+    v.eye = e;
+    std::memcpy(v.rows, f.rows, sizeof(v.rows));
+    std::memcpy(v.o, f.o, sizeof(v.o));
+    worldPut(v);
+    g_cpuWorld[e].frame = frame;
+    std::memcpy(g_cpuWorld[e].rows, f.rows, sizeof(f.rows));
+    std::memcpy(g_cpuWorld[e].o, f.o, sizeof(f.o));
+    g_cpuWorld[e].cb1 = f.cb1;
+    eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
+    g_f85SceneW[e] = f.w;
+    g_f85SceneH[e] = f.h;
+    g_worldOk[e] = frame;
+    ++g_fbSec[e].fromFb;
+}
+
 // F46: a world pool draw (render thread, the game's bindings): its target's eye (the UI layer's; else ui depth's rule over the frame's
 // eye-sized world targets), then b1 rows 270..275 once per eye a frame -- the CB shadow's when it holds them, else one 96-byte GPU copy.
 // F53: only a main-scene pass gives the eye's rows (drawtag::sceneRefWhy: not the first-person body's PS, the scene depth view, a scene
@@ -20352,6 +20997,8 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     const uint64_t ps = bindingShaderHash(BindSlot::Ps);
     const int sceneWhy = drawtag::sceneRefWhy(vs, ps, eyeOfDraw(frame) >= 0);
     if (census) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
+    if (sceneWhy == drawtag::kSceneNotSceneVs && nofoot::f87::fallbackPair(vs, ps) && g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootActive())
+        f87FallbackCapture(ctx, e, frame, t);   // F87f: kept, used only by an eye-frame that has no scene rows
     if (g_worldOk[e] == frame) return;
     if (sceneWhy != drawtag::kSceneOk) {
         ++g_win.sceneRefused[sceneWhy];
@@ -20384,6 +21031,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
         eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
         ++g_win.worldShadow;
+        f87FallbackCompare(e, frame);   // F87f: the prepass came first
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
         ++g_win.worldNoRows;
@@ -20557,8 +21205,7 @@ __declspec(noinline) bool streamCopyGuarded(uint32_t* dst, const uint8_t* src, u
     }
     return true;
 }
-// The Unmap tee's half: each eye's windows about the entries it drew in the last two frames (a WRITE_DISCARD or NO_OVERWRITE map only); with none yet, one
-// window about its newest entry.
+// The Unmap tee's half (a WRITE_DISCARD or NO_OVERWRITE map only): per eye F85's window and the history's windows; the whole stream while an escalation is on.
 void streamUnmapCopy(uint32_t frame) {
     const uint8_t* base = static_cast<const uint8_t*>(g_stream.mapped);
     const int type = g_stream.mapType;
@@ -20571,35 +21218,35 @@ void streamUnmapCopy(uint32_t frame) {
     const uint64_t t0 = f30Qpc();
     const uint32_t total = g_stream.bytes / drawtag::kStreamStride;
     bool any = false;
+    g_stream.fullOk = false;
+    const bool escalated = g_stream.esc.active(frame);
+    if (escalated && total) {
+        if (g_streamFull.size() != static_cast<size_t>(total) * 2u) g_streamFull.assign(static_cast<size_t>(total) * 2u, 0u);
+        if (streamCopyGuarded(g_streamFull.data(), base, total * drawtag::kStreamStride)) g_stream.fullOk = true;
+        else ++g_win.streamFaults;
+    }
     for (int e = 0; e < 2; ++e) {
-        nofoot::f86::WinPlan& plan = g_stream.plan[e];
-        plan = nofoot::f86::WinPlan{};
-        uint32_t entries[2 * kStreamSetMax + 1];
-        uint32_t count = 0;
-        for (const StreamSet* s : {&g_stream.prev[e], &g_stream.cur[e]}) {
-            // the newest frame's set is partial when this Unmap lands inside its draws; the frame before is whole: both are taken
-            if (s->frame == ~0u || frame - s->frame > 3u) continue;
-            for (uint32_t i = 0; i < s->n; ++i) entries[count++] = s->e[i];
-        }
-        if (!count && g_stream.centre[e] != ~0u) entries[count++] = g_stream.centre[e];
-        if (!count) continue;
-        nofoot::f86::planWindows(entries, count, total, &plan);
+        nofoot::f87::WinPlan& plan = g_stream.plan[e];
+        g_stream.hist[e].expire(frame);
+        nofoot::f87::planWindows(g_stream.hist[e], g_stream.centre[e] != ~0u, g_stream.centre[e], total, &plan);
+        plan.full = g_stream.fullOk;
         uint32_t good = 0;
         for (uint32_t w = 0; w < plan.windows; ++w) {
             if (!plan.n[w]) continue;
-            if (!streamCopyGuarded(g_streamWin[e][w], base + static_cast<size_t>(plan.lo[w]) * drawtag::kStreamStride, plan.n[w] * drawtag::kStreamStride)) {
+            if (!streamCopyGuarded(g_streamWin[e] + static_cast<size_t>(plan.off[w]) * 2u, base + static_cast<size_t>(plan.lo[w]) * drawtag::kStreamStride,
+                                   plan.n[w] * drawtag::kStreamStride)) {
                 ++g_win.streamFaults;
                 plan.n[w] = 0;
                 continue;
             }
             ++good;
         }
-        if (good) any = true;
+        if (good || plan.full) any = true;
         StreamSecond& ss = g_streamSec[e];
         ++ss.copies;
+        if (plan.full) ++ss.escCopies;
         ss.windowsSum += good;
         ss.clustersSum += plan.clusters;
-        ss.uncovered += plan.uncovered;
     }
     if (any) {
         g_stream.frame = frame;
@@ -20619,45 +21266,58 @@ void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry, uint32_t frame) {
         ++g_win.streamLearned;
         if (g_streamNotes < 4) {
             ++g_streamNotes;
-            Log::get().note("native on foot marker fix (F63, F86c): the marker composite draws' instance stream %p (%u bytes, %u entries, usage %u, CPU "
-                            "access 0x%X) is shadowed at its Unmap: per eye, windows of %u entries about each cluster of the entries the eye drew last frame (a gap of "
-                            "%u entries starts another), at most %u windows",
+            Log::get().note("native on foot marker fix (F63, F87c): the marker composite draws' instance stream %p (%u bytes, %u entries, usage %u, CPU "
+                            "access 0x%X) is shadowed at its Unmap: per eye, F85's window of %u entries about the newest entry, windows of %u entries about each cluster of the "
+                            "entries drawn in the last %u frames (a gap of %u entries starts another; at most %u), and the whole stream for %u frames after a draw no window held",
                             static_cast<void*>(vb), d.ByteWidth, d.ByteWidth / drawtag::kStreamStride, static_cast<unsigned>(d.Usage),
-                            static_cast<unsigned>(d.CPUAccessFlags), nofoot::f86::kWinEntries, nofoot::f86::kWinGap, nofoot::f86::kWinMax);
+                            static_cast<unsigned>(d.CPUAccessFlags), nofoot::f87::kF85Entries, nofoot::f87::kWinEntries, nofoot::f87::kKeepFrames, nofoot::f87::kWinGap,
+                            nofoot::f87::kHistWindows, nofoot::f87::kEscalateFrames);
         }
     }
     if (eye != 0 && eye != 1) return;
     g_stream.centre[eye] = entry;
-    StreamSet& cur = g_stream.cur[eye];
-    if (cur.frame != frame) {   // a new frame: the set of the frame before is kept beside it
-        g_stream.prev[eye] = cur;
-        cur.frame = frame;
-        cur.n = 0;
+    g_stream.hist[eye].add(entry, frame);
+    if (g_stream.entryFrame[eye] != frame) {   // a new frame: the first and last entry of the one before are kept for the second's line
+        if (g_stream.entryFrame[eye] != ~0u) {
+            g_stream.ringFirst[eye] = g_stream.firstEntry[eye];
+            g_stream.ringLast[eye] = g_stream.lastEntry[eye];
+            g_stream.ringHave[eye] = true;
+        }
+        g_stream.entryFrame[eye] = frame;
+        g_stream.firstEntry[eye] = entry;
     }
-    if (cur.n && cur.e[cur.n - 1] == entry) return;
-    if (cur.n < kStreamSetMax) cur.e[cur.n++] = entry;
-    else ++g_stream.setDropped;
+    g_stream.lastEntry[eye] = entry;
 }
-// The x of stream entry `entry` from this frame's windows. False when the stream was not copied this frame or no window holds the entry
-// (*outside then says which). F86c: eye is the drawing eye (-1 unknown): its draws are counted named / outside in the second's line.
+// The x of stream entry `entry` from this frame's copy. False when the stream was not copied this frame or nothing holds the entry (*outside then says which).
+// F87c: eye is the drawing eye (-1 unknown): its draws are counted named / outside in the second's line; a draw no WINDOW held (the whole copy may name it) starts an
+// escalation.
 bool streamEntryX(const void* res, uint32_t entry, uint32_t frame, uint32_t* x, bool* outside, int eye = -1) {
     *outside = false;
     if (!res || res != g_stream.res || g_stream.frame != frame) return false;
-    for (int e = 0; e < 2; ++e)
-        for (uint32_t w = 0; w < g_stream.plan[e].windows; ++w) {
-            const nofoot::f86::WinPlan& p = g_stream.plan[e];
-            if (p.n[w] && entry >= p.lo[w] && entry - p.lo[w] < p.n[w]) {
-                *x = g_streamWin[e][w][2 * (entry - p.lo[w])];
-                if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
-                return true;
-            }
+    for (int e = 0; e < 2; ++e) {
+        const nofoot::f87::WinPlan& p = g_stream.plan[e];
+        const int w = p.where(entry);
+        if (w >= 0) {
+            *x = g_streamWin[e][2 * (static_cast<size_t>(p.off[w]) + (entry - p.lo[w]))];
+            if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
+            return true;
         }
-    *outside = true;
+    }
     if (eye == 0 || eye == 1) {
         StreamSecond& ss = g_streamSec[eye];
         ++ss.outside;
         ss.nearest = std::min(ss.nearest, g_stream.plan[eye].distance(entry));
     }
+    g_stream.esc.outside(frame);
+    if (g_stream.fullOk && static_cast<size_t>(entry) * 2u < g_streamFull.size()) {
+        *x = g_streamFull[2 * static_cast<size_t>(entry)];
+        if (eye == 0 || eye == 1) {
+            ++g_streamSec[eye].named;
+            ++g_streamSec[eye].fullNamed;
+        }
+        return true;
+    }
+    *outside = true;
     return false;
 }
 
@@ -21047,6 +21707,537 @@ void iconOnData(int slot, const uint8_t* data) {
     refuse("no offset of 0, 16, 32 or 48 decodes every used vertex to a finite point within 64 units");
 }
 
+// ---- F87p: THE LABEL INSTRUMENT (read only; appendix A of the F87 review) -------------------------------------------------------------------------------------
+// Pilot, flat captures: the CHARGE PORT / OFFLINE label's leader runs to the ringed dot of the FOCUSED interactable (the socket face for the charge port, the housing's
+// corner dot for the maintenance panel). Layered in VR the leader sits (-343, -247) px from the true socket point: EDVR's displacement. This finds the mechanism: M1 the
+// layer's per-draw map moves the draws, M2 a b0 left bound by a marker patch, M3 the movie lays out from state EDVR changed. The label's draws are the marker
+// composite's shaders (VS B10B032BDFD46700, PS DB899F4BD577F2E5), kind X, one instance, whose record is camera-local (0, 0, 0.01), two per eye (3600 and 624 indices).
+// They are named at the untagged return of fixDecide (a held key, no key's match naming the draw) and completed at the issue (vscreen.cpp, right before the game's draw):
+// layered or not, the viewport as issued and as mapped, which b0 is bound. The focus key is the one the game's focus marker call reads each frame (F87p's hook), never a
+// fixed key; only eye-frames in which that key's marker was matched to a draw count.
+constexpr uint32_t kLabFrames = 256, kLabDraws = 4, kLabIdxBytes = 4096, kLabVtxBytes = 28672, kLabSlotBytes = kLabIdxBytes + kLabVtxBytes, kLabMaxVerts = 1024;
+struct LabDraw {
+    bool used = false, recKnown = false, camLocal = false, issued = false, layered = false, vpIssuedOk = false, vpMappedOk = false, b0Ours = false, b0Game = false, rowsOk = false,
+         leaderOk = false, oHudOk = false;
+    int8_t eye = -1;
+    uint16_t ord = 0;
+    uint32_t frame = ~0u, count = 0, start = 0, startInstance = 0, instances = 0, record = 0, q2 = 0, q3 = 0, w20 = 0;
+    int32_t base = 0;
+    float pos[3] = {}, scale = 0.0f, vpIssued[6] = {}, vpMapped[6] = {}, rowsGame[12] = {}, rows[12] = {}, oHud[4] = {};
+    bool rowsGameOk = false;
+    double leaderNdc[2] = {};
+};
+struct LabFrame {
+    uint32_t frame = ~0u;
+    uint8_t n[2] = {};
+    LabDraw d[2][kLabDraws];
+};
+LabFrame g_labFrame[kLabFrames];
+struct LabFocus {
+    uint32_t frame = ~0u;
+    int32_t key = -1;
+    bool drawn[2] = {}, haveNdc[2] = {};
+    double target[2][2] = {}, game[2][2] = {}, w[2] = {}, h[2] = {};
+};
+LabFocus g_labFocus[kLabFrames];
+struct LabLeader {
+    bool have = false;
+    uint32_t frame = 0, count = 0, start = 0, verts = 0, clusters = 0;
+    int32_t base = 0;
+    double v[3] = {};
+};
+LabLeader g_labLeader[2];
+struct LabCap {
+    bool inFlight = false;
+    int eye = -1;
+    uint32_t count = 0, start = 0, stride = 0, ibFmt = 0, copiedVtx = 0, frame = 0;
+    int32_t base = 0;
+};
+LabCap g_labCap[2];
+drawtag::StagingRing<2, kLabSlotBytes> g_labRing;
+uint64_t g_labRingLost = 0, g_labDecodeDueMs[2] = {}, g_labDropped = 0;
+uint32_t g_labRefusals = 0;
+float g_privRows[12] = {};   // the rows 4, 5 and 7 the private b0 was last written with (nativeOnFootMarkerFixBegin)
+struct LabPending {
+    bool valid = false, wantDecode = false;
+    uint64_t serial = 0;
+    LabDraw* d = nullptr;
+    const void* b0 = nullptr;
+};
+LabPending g_labPending;
+struct LabSec {
+    uint64_t eyeFrames = 0, groups = 0, draws = 0, layered = 0, ours = 0, game = 0, nonLayered = 0, decoded = 0;
+    nofoot::f87::LabelCensus idx;
+    float rec[3] = {};
+    double leader[2] = {}, target[2] = {}, gameNdc[2] = {}, n = 0, mx = 0, m2x = 0, my = 0, m2y = 0;
+    int32_t focusKey = -1;
+    bool haveRec = false, haveLeader = false, haveFocus = false;
+};
+LabSec g_labSec[2];
+uint32_t g_labTallied = 0;
+bool g_labTalliedInit = false;
+
+// fixDecide: key `key` was matched to a marker composite draw of eye e in `frame`. Only the focused interactable's key counts.
+void labFocusNote(int e, uint32_t frame, uint32_t key) {
+    const int32_t fk = f87p::g_focusKey.load(std::memory_order_relaxed);
+    if (fk < 0 || (key & 0xFFu) != (static_cast<uint32_t>(fk) & 0xFFu)) return;
+    LabFocus& f = g_labFocus[frame % kLabFrames];
+    if (f.frame != frame) f = LabFocus{frame};
+    f.key = fk;
+    f.drawn[e] = true;
+}
+// fixDecide: the focus key's patched target (T) and the NDC the game's own rows give its anchor (nM0), in the target's NDC, for this eye-frame.
+void labFocusNdc(int e, uint32_t frame, uint32_t key, const double T[2], const double nM0[2], double W, double H) {
+    const int32_t fk = f87p::g_focusKey.load(std::memory_order_relaxed);
+    if (fk < 0 || (key & 0xFFu) != (static_cast<uint32_t>(fk) & 0xFFu)) return;
+    LabFocus& f = g_labFocus[frame % kLabFrames];
+    if (f.frame != frame) f = LabFocus{frame};
+    f.key = fk;
+    f.haveNdc[e] = true;
+    for (int k = 0; k < 2; ++k) {
+        f.target[e][k] = T[k];
+        f.game[e][k] = nM0[k];
+    }
+    f.w[e] = W;
+    f.h[e] = H;
+}
+// fixDecide's untagged return: is this draw one of the label's? Recorded into the frame's cell; completed at the issue.
+void labelIdentify(ID3D11DeviceContext* ctx, int e, uint32_t frame, const Rec& r, const CbShadow* sh, ID3D11Buffer* b0Plain, const float* oHud) {
+    g_labPending.valid = false;
+    if (!(r.ps == nofoot::f87::kLabelPs && r.vs == nofoot::f87::kLabelVs && r.kind == 'X' && r.instances == 1 && r.cpuHave && r.pool && (e == 0 || e == 1))) return;
+    LabRec* lr = labRecFind(r.pool, r.cpuRec, frame);
+    LabFrame& lf = g_labFrame[frame % kLabFrames];
+    if (lf.frame != frame) lf = LabFrame{frame};
+    if (lf.n[e] >= kLabDraws) {
+        ++g_labDropped;
+        return;
+    }
+    LabDraw& d = lf.d[e][lf.n[e]++];
+    d = LabDraw{};
+    d.used = true;
+    d.frame = frame;
+    d.eye = static_cast<int8_t>(e);
+    d.ord = r.ordEye;
+    d.count = r.idxCount;
+    d.start = r.idxStart;
+    d.base = r.idxBase;
+    d.startInstance = r.start;
+    d.instances = r.instances;
+    d.record = r.cpuRec;
+    if (lr->read) {
+        d.recKnown = true;
+        d.camLocal = lr->camLocal;
+        std::memcpy(d.pos, lr->pos, sizeof(d.pos));
+        d.scale = lr->scale;
+        d.q2 = lr->q2;
+        d.q3 = lr->q3;
+        d.w20 = lr->w20;
+    }
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp >= 1) {
+        d.vpIssuedOk = true;
+        const float v6[6] = {vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth};
+        std::memcpy(d.vpIssued, v6, sizeof(v6));
+    }
+    if (sh && sh->valid) {
+        std::memcpy(d.rowsGame, sh->rows[4], 4 * sizeof(float));
+        std::memcpy(d.rowsGame + 4, sh->rows[5], 4 * sizeof(float));
+        std::memcpy(d.rowsGame + 8, sh->rows[7], 4 * sizeof(float));
+        d.rowsGameOk = true;
+    }
+    if (oHud) {
+        std::memcpy(d.oHud, oHud, sizeof(d.oHud));
+        d.oHudOk = true;
+    }
+    g_labPending.valid = true;
+    g_labPending.serial = g_drawSerial;
+    g_labPending.d = &d;
+    g_labPending.b0 = b0Plain;
+    // the decode of the small draw's mesh, once a second per eye (the 3600-index draw's indices do not fit the 4 KB window)
+    g_labPending.wantDecode = d.recKnown && d.camLocal && d.count && static_cast<uint64_t>(d.count) * 2u <= kLabIdxBytes && GetTickCount64() >= g_labDecodeDueMs[e];
+}
+// markerDraw, after fixDecide: the small draw's index and vertex ranges copied for the decode (the icon capture's way, with a larger window).
+void labelCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8], char kind) {
+    if (!g_labPending.valid || !g_labPending.wantDecode || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
+    g_labPending.wantDecode = false;
+    const LabDraw& d = *g_labPending.d;
+    const int e = d.eye;
+    if ((e != 0 && e != 1) || kind != 'X') return;
+    int pick = -1;
+    for (int i = 0; i < 8 && pick < 0; ++i)
+        if (vbs[i] && strides[i] != drawtag::kStreamStride && strides[i] >= 12 && strides[i] <= 128) pick = i;
+    if (pick < 0) return;
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    UINT ibOff = 0;
+    ctx->IAGetIndexBuffer(&ib, &fmt, &ibOff);
+    const UINT isz = fmt == DXGI_FORMAT_R16_UINT ? 2u : fmt == DXGI_FORMAT_R32_UINT ? 4u : 0u;
+    bool staged = false;
+    if (ib && isz && static_cast<uint64_t>(d.count) * isz <= kLabIdxBytes) {
+        D3D11_BUFFER_DESC vd{}, id{};
+        vbs[pick]->GetDesc(&vd);
+        ib->GetDesc(&id);
+        const int64_t vtxAt = static_cast<int64_t>(offs[pick]) + static_cast<int64_t>(d.base) * strides[pick];
+        const uint64_t idxBytes = (static_cast<uint64_t>(d.count) * isz + 3u) & ~3ull;
+        if (vtxAt >= 0 && static_cast<uint64_t>(vtxAt) + strides[pick] <= vd.ByteWidth && static_cast<uint64_t>(ibOff) + d.start * isz + idxBytes <= id.ByteWidth) {
+            drawtag::CopyRegion rg[2];
+            rg[0].src = ib;
+            rg[0].srcOffset = ibOff + d.start * isz;
+            rg[0].bytes = static_cast<UINT>(idxBytes);
+            rg[0].dstOffset = 0;
+            rg[1].src = vbs[pick];
+            rg[1].srcOffset = static_cast<UINT>(vtxAt);
+            rg[1].bytes = static_cast<UINT>(std::min<uint64_t>(kLabVtxBytes, vd.ByteWidth - static_cast<uint64_t>(vtxAt)) & ~3ull);
+            rg[1].dstOffset = kLabIdxBytes;
+            const int slot = g_labRing.stage(ctx, rg, 2, frame);
+            if (slot >= 0) {
+                LabCap& c = g_labCap[slot & 1];
+                c.inFlight = true;
+                c.eye = e;
+                c.count = d.count;
+                c.start = d.start;
+                c.base = d.base;
+                c.stride = strides[pick];
+                c.ibFmt = static_cast<uint32_t>(fmt);
+                c.copiedVtx = rg[1].bytes;
+                c.frame = frame;
+                g_labDecodeDueMs[e] = GetTickCount64() + 1000u;
+                staged = true;
+            }
+        }
+    }
+    (void)staged;
+    if (ib) ib->Release();
+}
+// The read-back of the small draw's mesh: the vertices decoded as the icon's are, grouped by the triangles they share; the leader's dot is the smallest group (a quad
+// cluster at the leader's free end), its centre the vertex the leader's NDC is taken at.
+void labOnData(int slot, const uint8_t* data) {
+    LabCap& cap = g_labCap[slot & 1];
+    if (!cap.inFlight) return;
+    cap.inFlight = false;
+    const int e = cap.eye;
+    const auto refuse = [&](const char* why) {
+        if (g_labRefusals >= 3) return;
+        ++g_labRefusals;
+        Log::get().note("prompt label draws (F87p) eye %d: the %u-index draw's mesh was NOT decoded (%s); draw X start %u base %d, vertex stride %u, %u bytes copied", e, cap.count, why,
+                        cap.start, cap.base, cap.stride, cap.copiedVtx);
+    };
+    const uint32_t isz = cap.ibFmt == static_cast<uint32_t>(DXGI_FORMAT_R16_UINT) ? 2u : 4u;
+    static uint32_t used[kLabMaxVerts];
+    static double pos[kLabMaxVerts][3];
+    static int parent[kLabMaxVerts];
+    uint32_t nd = 0, mx = 0;
+    if (cap.count % 3u) return refuse("the index count is not a multiple of 3");
+    if (!drawtag::readIndexRange(data, cap.count, isz, &mx, used, kLabMaxVerts, &nd)) return refuse("the index range could not be read");
+    if (nd > kLabMaxVerts) return refuse("more than 1024 distinct vertices");
+    if ((static_cast<uint64_t>(mx) + 1u) * cap.stride > cap.copiedVtx) return refuse("an index lies beyond the vertex window copied from the base vertex");
+    bool decoded = false;
+    uint32_t posOffset = 0;
+    for (uint32_t off = 0; off + 12 <= cap.stride && off <= 48 && !decoded; off += 16) {
+        double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+        bool good = true;
+        for (uint32_t v = 0; v < nd && good; ++v) {
+            uint32_t a3[3];
+            std::memcpy(a3, data + kLabIdxBytes + static_cast<size_t>(used[v]) * cap.stride + off, sizeof(a3));
+            if (!drawtag::decodePackedPosition(a3[0], a3[1], a3[2], pos[v])) {
+                good = false;
+                break;
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (!(std::fabs(pos[v][i]) <= 64.0)) good = false;
+                lo[i] = std::min(lo[i], pos[v][i]);
+                hi[i] = std::max(hi[i], pos[v][i]);
+            }
+        }
+        if (good && (hi[0] - lo[0] > 1e-6 || hi[1] - lo[1] > 1e-6 || hi[2] - lo[2] > 1e-6)) {
+            decoded = true;
+            posOffset = off;
+        }
+    }
+    if (!decoded) return refuse("no offset of 0, 16, 32 or 48 decodes every used vertex to a finite point within 64 units");
+    for (uint32_t v = 0; v < nd; ++v) parent[v] = static_cast<int>(v);
+    const auto slotOf = [&](uint32_t idx) {
+        for (uint32_t v = 0; v < nd; ++v)
+            if (used[v] == idx) return static_cast<int>(v);
+        return -1;
+    };
+    const auto root = [&](int a) {
+        while (parent[a] != a) {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        return a;
+    };
+    for (uint32_t t = 0; t + 2 < cap.count; t += 3) {
+        uint32_t ix[3];
+        for (int k = 0; k < 3; ++k) {
+            if (isz == 2) {
+                uint16_t h;
+                std::memcpy(&h, data + 2u * (t + k), 2);
+                ix[k] = h;
+            } else {
+                std::memcpy(&ix[k], data + 4u * (t + k), 4);
+            }
+        }
+        const int a = slotOf(ix[0]), b = slotOf(ix[1]), c = slotOf(ix[2]);
+        if (a < 0 || b < 0 || c < 0) continue;
+        parent[root(b)] = root(a);
+        parent[root(c)] = root(a);
+    }
+    static uint32_t count[kLabMaxVerts];
+    static double sum[kLabMaxVerts][3];
+    for (uint32_t v = 0; v < nd; ++v) {
+        count[v] = 0;
+        sum[v][0] = sum[v][1] = sum[v][2] = 0.0;
+    }
+    double all[3] = {};
+    for (uint32_t v = 0; v < nd; ++v) {
+        const int rt = root(static_cast<int>(v));
+        ++count[rt];
+        for (int i = 0; i < 3; ++i) {
+            sum[rt][i] += pos[v][i];
+            all[i] += pos[v][i];
+        }
+    }
+    uint32_t clusters = 0;
+    int best = -1;
+    double bestFar = -1.0;
+    for (uint32_t v = 0; v < nd; ++v) {
+        if (count[v] < 3) continue;   // a cluster is at least a triangle
+        ++clusters;
+        double c[3];
+        for (int i = 0; i < 3; ++i) c[i] = sum[v][i] / count[v];
+        double away = 0.0;
+        for (int i = 0; i < 3; ++i) away += (c[i] - all[i] / nd) * (c[i] - all[i] / nd);
+        if (best < 0 || count[v] < count[best] || (count[v] == count[best] && away > bestFar)) {
+            best = static_cast<int>(v);
+            bestFar = away;
+        }
+    }
+    if (best < 0) return refuse("no cluster of at least a triangle");
+    LabLeader& L = g_labLeader[e];
+    L.have = true;
+    L.frame = cap.frame;
+    L.count = cap.count;
+    L.start = cap.start;
+    L.base = cap.base;
+    L.verts = count[best];
+    L.clusters = clusters;
+    for (int i = 0; i < 3; ++i) L.v[i] = sum[best][i] / count[best];
+    ++g_labSec[e].decoded;
+    static bool said[2] = {};
+    if (!said[e]) {
+        said[e] = true;
+        Log::get().note("prompt label draws (F87p) eye %d: the %u-index draw's mesh decoded: %u distinct vertices (PACKEDVERTEXDATAA at +%u) in %u clusters; the leader's dot is the smallest, %u vertices, "
+                        "centre (%.4f, %.4f, %.4f)", e, cap.count, nd, posOffset, clusters, L.verts, L.v[0], L.v[1], L.v[2]);
+    }
+}
+// vscreen.cpp, right before the game's own issue of the draw: layered or not, the viewport as mapped, the b0 bound (the game's, ours, or another) and its rows 4/5/7; the
+// leader's NDC through those rows for the draw that was decoded.
+void labelIssue(ID3D11DeviceContext* ctx, bool layered) {
+    if (!g_labPending.valid || g_labPending.serial != g_drawSerial || !g_labPending.d) return;
+    g_labPending.valid = false;
+    LabDraw& d = *g_labPending.d;
+    d.issued = true;
+    d.layered = layered;
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp >= 1) {
+        d.vpMappedOk = true;
+        const float v6[6] = {vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth};
+        std::memcpy(d.vpMapped, v6, sizeof(v6));
+    }
+    ID3D11Buffer* b = nullptr;
+    ctx->VSGetConstantBuffers(0, 1, &b);
+    d.b0Ours = b && b == g_privCb;
+    d.b0Game = b && b == g_labPending.b0;
+    if (b) b->Release();
+    if (d.b0Ours) {
+        std::memcpy(d.rows, g_privRows, sizeof(d.rows));
+        d.rowsOk = true;
+    } else if (d.b0Game && d.rowsGameOk) {
+        std::memcpy(d.rows, d.rowsGame, sizeof(d.rows));
+        d.rowsOk = true;
+    }
+    const int e = d.eye;
+    const LabLeader& L = g_labLeader[e];
+    if (d.rowsOk && d.recKnown && d.oHudOk && L.have && L.count == d.count && L.start == d.start && L.base == d.base) {
+        double rv[3];
+        drawtag::rotateByPackedQuat(d.q2, d.q3, L.v, rv);
+        const double x0rel[3] = {static_cast<double>(d.pos[0]) - d.oHud[0], static_cast<double>(d.pos[1]) - d.oHud[1], static_cast<double>(d.pos[2]) - d.oHud[2]};
+        const double c[3] = {x0rel[0] + d.scale * rv[0], x0rel[1] + d.scale * rv[1], x0rel[2] + d.scale * rv[2]};
+        const double zero[3] = {};
+        double clip[3];
+        drawtag::markerClip(d.rows, d.rows + 4, d.rows + 8, c, zero, clip);
+        if (clip[2] > 1e-9) {
+            d.leaderNdc[0] = clip[0] / clip[2];
+            d.leaderNdc[1] = clip[1] / clip[2];
+            d.leaderOk = std::isfinite(d.leaderNdc[0]) && std::isfinite(d.leaderNdc[1]);
+        }
+    }
+}
+// The frames that are done (three or more frames old) and not yet counted: per eye, the eye-frames in which the focus key's marker was drawn.
+void labTally(uint32_t cur) {
+    if (!g_labTalliedInit) {
+        g_labTalliedInit = true;
+        g_labTallied = cur;
+        return;
+    }
+    const uint32_t upto = cur >= 3u ? cur - 3u : 0u;
+    if (static_cast<int32_t>(upto - g_labTallied) <= 0) return;
+    if (upto - g_labTallied > 250u) g_labTallied = upto - 250u;
+    for (uint32_t f = g_labTallied + 1u; f != upto + 1u; ++f) {
+        const LabFrame& lf = g_labFrame[f % kLabFrames];
+        const LabFocus& fo = g_labFocus[f % kLabFrames];
+        if (fo.frame != f) continue;
+        for (int e = 0; e < 2; ++e) {
+            if (!fo.drawn[e]) continue;
+            LabSec& s = g_labSec[e];
+            ++s.eyeFrames;
+            uint32_t nv = 0;
+            bool nonLayered = false, leaderOk = false;
+            double leader[2] = {};
+            if (lf.frame == f)
+                for (uint32_t i = 0; i < lf.n[e] && i < kLabDraws; ++i) {
+                    const LabDraw& d = lf.d[e][i];
+                    if (!d.recKnown || !d.camLocal) continue;
+                    ++nv;
+                    ++s.draws;
+                    s.idx.index(d.count);
+                    if (d.issued && d.layered) ++s.layered;
+                    if (d.issued && !d.layered) nonLayered = true;
+                    if (d.b0Ours) ++s.ours;
+                    else if (d.b0Game) ++s.game;
+                    std::memcpy(s.rec, d.pos, sizeof(s.rec));
+                    s.haveRec = true;
+                    if (d.leaderOk) {
+                        leaderOk = true;
+                        leader[0] = d.leaderNdc[0];
+                        leader[1] = d.leaderNdc[1];
+                        s.leader[0] = leader[0];
+                        s.leader[1] = leader[1];
+                        s.haveLeader = true;
+                    }
+                }
+            if (nv) ++s.groups;
+            if (nonLayered) ++s.nonLayered;
+            if (fo.haveNdc[e]) {
+                s.focusKey = fo.key;
+                s.target[0] = fo.target[e][0];
+                s.target[1] = fo.target[e][1];
+                s.gameNdc[0] = fo.game[e][0];
+                s.gameNdc[1] = fo.game[e][1];
+                s.haveFocus = true;
+                if (leaderOk) {
+                    const double dx = (leader[0] - fo.target[e][0]) * fo.w[e] * 0.5, dy = (leader[1] - fo.target[e][1]) * fo.h[e] * 0.5;
+                    s.n += 1.0;
+                    const double ddx = dx - s.mx;
+                    s.mx += ddx / s.n;
+                    s.m2x += ddx * (dx - s.mx);
+                    const double ddy = dy - s.my;
+                    s.my += ddy / s.n;
+                    s.m2y += ddy * (dy - s.my);
+                }
+            }
+        }
+    }
+    g_labTallied = upto;
+}
+// Render thread, once a second: the interface probe's counts, the getter probes posted since, and the label draws.
+void f87PromptLines(uint64_t nowMs) {
+    (void)nowMs;
+    namespace f87 = nofoot::f87;
+    const auto ull = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+    if (!nativeOnFootActive()) return;
+    // the focus marker's points of the second: the last key, its point and the extent of its points
+    uint32_t to = f87p::g_focusN.load(std::memory_order_acquire), from = f87p::g_focusDrained;
+    if (to - from > 256u) from = to - 256u;
+    f87p::g_focusDrained = to;
+    int32_t key = f87p::g_focusKey.load(std::memory_order_relaxed);
+    float lastP[3] = {}, lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    uint32_t n = 0;
+    int32_t lastKey = key;
+    for (uint32_t i = from; i != to; ++i) {
+        f87p::FocusSample smp;
+        if (!f87p::g_focusRing.get(i, &smp)) continue;
+        if (n && smp.key != lastKey) {   // the focus moved to another interactable: the range is the new one's
+            n = 0;
+            for (int j = 0; j < 3; ++j) {
+                lo[j] = 1e30f;
+                hi[j] = -1e30f;
+            }
+        }
+        lastKey = smp.key;
+        ++n;
+        for (int j = 0; j < 3; ++j) {
+            lastP[j] = smp.p[j];
+            lo[j] = std::min(lo[j], smp.p[j]);
+            hi[j] = std::max(hi[j], smp.p[j]);
+        }
+    }
+    if (n) key = lastKey;
+    double range = 0.0;
+    if (n) {
+        const double d[3] = {static_cast<double>(hi[0]) - lo[0], static_cast<double>(hi[1]) - lo[1], static_cast<double>(hi[2]) - lo[2]};
+        range = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * 1000.0;
+    }
+    const uint64_t mask = f87p::g_nearbyMask.exchange(0, std::memory_order_relaxed);
+    char keys[160];
+    size_t at = 0;
+    keys[0] = 0;
+    for (int k = 0; k < 64 && at + 8 < sizeof(keys); ++k)
+        if (mask & (1ull << k)) at += static_cast<size_t>(std::snprintf(keys + at, sizeof(keys) - at, "%s%d%s", at ? "," : "", k, k == 63 ? "+" : ""));
+    if (!at) std::snprintf(keys, sizeof(keys), "none");
+    static uint64_t prevSet = 0, prevUpd = 0, prevInd = 0, prevRole[f87::kRoleCount] = {};
+    const uint64_t set = f87p::g_set.load(std::memory_order_relaxed), upd = f87p::g_upd.load(std::memory_order_relaxed), ind = f87p::g_ind.load(std::memory_order_relaxed);
+    uint64_t role[f87::kRoleCount];
+    for (int r = 0; r < f87::kRoleCount; ++r) role[r] = f87p::g_role[r].load(std::memory_order_relaxed);
+    Log::get().note("prompt anchor (F87p) 1 s: SetMarker %llu UpdateMarker %llu UpdateIndicator %llu; focus key %d P (%.3f %.3f %.3f) range %.1f mm; nearby %llu [keys %s] target %llu list %llu hidden %llu "
+                    "other %llu (last +0x%llX)",
+                    ull(set - prevSet), ull(upd - prevUpd), ull(ind - prevInd), static_cast<int>(key), static_cast<double>(lastP[0]), static_cast<double>(lastP[1]), static_cast<double>(lastP[2]), range,
+                    ull(role[f87::kRoleNearby] - prevRole[f87::kRoleNearby]), keys, ull(role[f87::kRoleTarget] - prevRole[f87::kRoleTarget]), ull(role[f87::kRoleList] - prevRole[f87::kRoleList]),
+                    ull(role[f87::kRoleFocusHidden] - prevRole[f87::kRoleFocusHidden]), ull(role[f87::kRoleOther] - prevRole[f87::kRoleOther]), ull(f87p::g_otherLast.load(std::memory_order_relaxed)));
+    prevSet = set;
+    prevUpd = upd;
+    prevInd = ind;
+    for (int r = 0; r < f87::kRoleCount; ++r) prevRole[r] = role[r];
+    // the getters' posts: one line per entity, the first time it is seen at a site
+    uint32_t gTo = f87p::g_getterN.load(std::memory_order_acquire), gFrom = f87p::g_getterDrained;
+    if (gTo - gFrom > 32u) gFrom = gTo - 32u;
+    f87p::g_getterDrained = gTo;
+    for (uint32_t i = gFrom; i != gTo; ++i) {
+        f87p::GetterRec r;
+        if (!f87p::g_getterRing.get(i, &r)) continue;
+        const char* branch = r.q.fault ? "fault (the model query faulted)" : !r.haveQuery ? "not queried (the model type id could not be read)" : !r.q.haveComp ? "no model component"
+                           : r.q.haveNode ? "node (Root!Ui_interact)" : "box (no Ui_interact node: the bounding box's centre)";
+        Log::get().note("prompt getter (F87p) site %s entity %p: P0 (%.3f %.3f %.3f) P (%.3f %.3f %.3f) branch %s; aabb (%.3f %.3f %.3f)-(%.3f %.3f %.3f); "
+                        "P' (%.3f %.3f %.3f) |P'-P| %.1f cm n.view %.2f",
+                        f87::siteText(r.site), reinterpret_cast<void*>(static_cast<uintptr_t>(r.ent)), static_cast<double>(r.p0[0]), static_cast<double>(r.p0[1]), static_cast<double>(r.p0[2]),
+                        static_cast<double>(r.p[0]), static_cast<double>(r.p[1]), static_cast<double>(r.p[2]), branch, static_cast<double>(r.q.mn[0]),
+                        static_cast<double>(r.q.mn[1]), static_cast<double>(r.q.mn[2]), static_cast<double>(r.q.mx[0]), static_cast<double>(r.q.mx[1]), static_cast<double>(r.q.mx[2]),
+                        r.front[0], r.front[1], r.front[2], r.delta * 100.0, r.nView);
+    }
+    // the label's draws, per eye
+    const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
+    labTally(cur);
+    for (int e = 0; e < 2; ++e) {
+        LabSec& s = g_labSec[e];
+        char idx[96];
+        s.idx.text(idx, sizeof(idx));
+        Log::get().note("prompt label draws (F87p) eye %d 1 s: groups %llu (draws %llu, index counts %s), layered %llu, b0 at issue game %llu ours %llu; record (%.4f %.4f %.4f); leader NDC %+.4f %+.4f "
+                        "(decoded %llu, age %u fr); focus key %d target %+.4f %+.4f, game %+.4f %+.4f; leader - target %+.1f %+.1f px (sd %.1f %.1f); non-layered eye-frames %llu",
+                        e, ull(s.groups), ull(s.draws), idx, ull(s.layered), ull(s.game), ull(s.ours), static_cast<double>(s.haveRec ? s.rec[0] : 0.0f), static_cast<double>(s.haveRec ? s.rec[1] : 0.0f),
+                        static_cast<double>(s.haveRec ? s.rec[2] : 0.0f), s.haveLeader ? s.leader[0] : 0.0, s.haveLeader ? s.leader[1] : 0.0, ull(s.decoded),
+                        static_cast<unsigned>(g_labLeader[e].have ? cur - g_labLeader[e].frame : 0u), static_cast<int>(s.haveFocus ? s.focusKey : key), s.haveFocus ? s.target[0] : 0.0,
+                        s.haveFocus ? s.target[1] : 0.0, s.haveFocus ? s.gameNdc[0] : 0.0, s.haveFocus ? s.gameNdc[1] : 0.0, s.n > 0.0 ? s.mx : 0.0, s.n > 0.0 ? s.my : 0.0,
+                        s.n > 1.0 ? std::sqrt(s.m2x / (s.n - 1.0)) : 0.0, s.n > 1.0 ? std::sqrt(s.m2y / (s.n - 1.0)) : 0.0, ull(s.nonLayered));
+        s = LabSec{};
+    }
+}
+
 // One eye's solve for a draw: the scene rows, the display affine and K.
 struct F85Solve {
     nofoot::f85::AffParams ap;
@@ -21099,22 +22290,18 @@ void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
     }
 }
 
-// ---- F85c / F86d / F86f / F86g: the depth lines ------------------------------------------------------------------------------------------------------
+// ---- F85c / F86d / F86g: the depth lines ------------------------------------------------------------------------------------------------------
 // One compute dispatch a frame (reticle_depth_shader.h) marches up to 32 lines through eye 0's scene depth. Line 0 is key 10's aim line (F85c, as before). The
 // others are the consumers' requests, held as world points and refreshed by their eye 0 draws: the weapon UI parts' panels (F86d: the nearest surface under
-// the panel's centre and corners), the charge-port prompt keys (F86f: the surface the anchor lies behind) and the floor probe (F86g). The dispatch builds
+// the panel's centre and corners; measure only since F87) and the floor probe (F86g). The dispatch builds
 // its lines from the requests that are at most kF86Fresh frames old against eye 0's rows of the dispatching frame; the answers come back two frames later
 // (a 3-deep staging ring) and update the consumers' state, which both eyes' draws read.
-enum F86LineKind : uint8_t { kLineKReticle = 0, kLineKWeapon = 1, kLineKPrompt = 2, kLineKFloor = 3 };
+enum F86LineKind : uint8_t { kLineKReticle = 0, kLineKWeapon = 1, kLineKFloor = 3 };
 struct F86Meta {
     uint8_t kind = 0, id = 0, idx = 0;
     double u[3] = {}, target[3] = {};
 };
 constexpr uint32_t kF86Fresh = 2;
-constexpr int kF86PromptKeys = 8;   // keys 1 and 45..50, and a spare
-int f86PromptIdx(uint32_t key) {
-    return key == 1u ? 0 : (key >= 45u && key <= 50u) ? static_cast<int>(key) - 44 : -1;
-}
 struct F85cGpu {
     ID3D11ComputeShader* cs = nullptr;
     bool csTried = false;
@@ -21171,19 +22358,10 @@ struct F86dPart {
     // this second
     uint64_t hits = 0, misses = 0, held = 0, noView = 0, noHit = 0, decisions = 0;
     bool seen = false;
-    double panel = 0.0, panelNew = 0.0, scale = 1.0;
+    double panel = 0.0, wouldScale = 1.0, centreD = 0.0;   // F87: the centre ray's own D (the last hit), the panel's distance, the scale F86 would have applied
+    bool haveCentre = false;
 };
 F86dPart g_f86d[kF85bParts];
-// F86f: a prompt key's anchor snapped onto the surface behind it.
-struct F86fKey {
-    bool used = false;
-    uint32_t key = 0, reqFrame = ~0u;
-    double P[3] = {};
-    nofoot::f86::PromptCache cache;
-    uint64_t drawn = 0, cached = 0, noSurface = 0, grazing = 0, snapped = 0;
-    double pDist = 0.0, surfaceD = 0.0, offRayDeg = 0.0, movedCm = 0.0;
-};
-F86fKey g_f86f[kF86PromptKeys];
 // F86g: the floor probe: two model points ahead of the 3P origin, the heights the hits found (read by the frame thread for the F69a line).
 struct F86gFloor {
     uint32_t reqFrame = ~0u, frame = ~0u;
@@ -21221,7 +22399,6 @@ void f85cRelease() {
     g_f85c = F85cState{};
     g_f85Latch = nofoot::f85::KLatch{};
     for (F86dPart& p : g_f86d) p = F86dPart{};
-    for (F86fKey& k : g_f86f) k = F86fKey{};
     g_f86g = F86gFloor{};
     g_f86LastReticle = 0;
 }
@@ -21273,10 +22450,6 @@ bool f85cEnsure(ID3D11DeviceContext* ctx) {
         return false;
     }
     return true;
-}
-// A line's view-depth, clip w of a point relative to the rows' origin.
-double f86ClipW(const nofoot::f85::Rows& W, const double p[3]) {
-    return W.r[2][0] * p[0] + W.r[2][1] * p[1] + W.r[2][2] * p[2] + W.r[2][3];
 }
 // Two frames on (the depth_probe pattern: DO_NOT_WAIT on the staging copy): each answered dispatch's lines go to their consumers, once a frame.
 void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
@@ -21357,30 +22530,6 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
                     weaponRay[mt.id][mt.idx] = lo;
                     weaponN[mt.id] = std::max(weaponN[mt.id], static_cast<int>(mt.idx) + 1);
                 }
-            } else if (mt.kind == kLineKPrompt) {
-                if (mt.id >= kF86PromptKeys) continue;
-                F86fKey& fk = g_f86f[mt.id];
-                if (lo.status != f86::kLineHit) {
-                    ++fk.noSurface;
-                    continue;
-                }
-                double H[3], Hrel[3];
-                for (int c = 0; c < 3; ++c) {
-                    H[c] = sl.O[c] + lo.d * mt.u[c];
-                    Hrel[c] = H[c] - sl.ow[c];
-                }
-                const f86::SurfaceNormal sn = f86::surfaceNormal(sl.W, sl.texW, sl.texH, lo, f86ClipW(sl.W, Hrel), mt.u);
-                double Pn[3];
-                if (sn.ok) fk.offRayDeg = f86::normalOffRayDeg(sn);
-                fk.surfaceD = lo.d;
-                if (f86::promptSnap(mt.target, H, sn, Pn)) {
-                    const double off[3] = {Pn[0] - mt.target[0], Pn[1] - mt.target[1], Pn[2] - mt.target[2]};
-                    fk.cache.put(mt.target, off);
-                    fk.movedCm = nofoot::f85::len3(off) * 100.0;
-                    ++fk.snapped;
-                } else {
-                    ++fk.grazing;
-                }
             } else if (mt.kind == kLineKFloor) {
                 if (lo.status != f86::kLineHit || !sl.floorOk) {
                     g_f86gMisses.fetch_add(1, std::memory_order_relaxed);
@@ -21400,6 +22549,10 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
             if (!weaponN[p]) continue;
             F86dPart& pt = g_f86d[p];
             double dnear = 0.0;
+            if (weaponRay[p][0].status == f86::kLineHit) {   // F87: ray 0 is the panel's centre
+                pt.centreD = weaponRay[p][0].d;
+                pt.haveCentre = true;
+            }
             if (f86::nearestHit(weaponRay[p], weaponN[p], &dnear)) {
                 ++pt.hits;
                 pt.dsTarget = dnear;
@@ -21432,8 +22585,7 @@ void f86FloorRequest(uint32_t frame) {
     PinIn in;
     g_f86g.ok = false;
     if (!pinInRead(&in)) return;
-    for (int i = 0; i < 16; ++i)
-        if (!std::isfinite(in.m3p[i])) return;
+    if (!nofoot::f87::affineFinite(in.m3p)) return;   // F87: the 12 affine entries; the padding words (3, 7, 11, 15) were NaN from 02:35:11 of the F86 flight
     const double r1[3] = {in.m3p[4], in.m3p[5], in.m3p[6]};
     const double l1 = nofoot::f85::len3(r1);
     if (!(l1 > 0.5)) return;
@@ -21463,7 +22615,6 @@ bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticle
     const auto others = [&]() {
         bool any = false;
         for (const F86dPart& p : g_f86d) any = any || (p.nRays && frame - p.reqFrame <= kF86Fresh);
-        for (const F86fKey& k : g_f86f) any = any || (k.used && frame - k.reqFrame <= kF86Fresh);
         return any || (g_f86g.ok && frame - g_f86g.reqFrame <= kF86Fresh);
     };
     anyOther = others();
@@ -21524,12 +22675,6 @@ bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticle
         const F86dPart& pt = g_f86d[p];
         if (!pt.nRays || frame - pt.reqFrame > kF86Fresh) continue;
         for (int i = 0; i < pt.nRays; ++i) addRay(kLineKWeapon, static_cast<uint8_t>(p), static_cast<uint8_t>(i), pt.target[i], 0, f86::kPanelMinM, f86::kPanelMaxM, nullptr);
-    }
-    for (int k = 0; k < kF86PromptKeys; ++k) {
-        F86fKey& fk = g_f86f[k];
-        if (!fk.used || frame - fk.reqFrame > kF86Fresh) continue;
-        double dist = 0.0;
-        if (addRay(kLineKPrompt, static_cast<uint8_t>(k), 0, fk.P, 1, f86::kPromptBehindM, f86::kPromptAheadM, &dist)) fk.pDist = dist;
     }
     if (g_f86g.ok && frame - g_f86g.reqFrame <= kF86Fresh)
         for (int s = 0; s < 2; ++s) addRay(kLineKFloor, 0, static_cast<uint8_t>(s), g_f86g.pts[s], 2, 0.5, 1.6, nullptr);
@@ -21686,48 +22831,6 @@ void f86hCount(uint32_t frame, int eye, bool bound) {
         c.frame.store(frame, std::memory_order_release);
     }
     (bound ? c.bound : c.decided)[eye].fetch_add(1, std::memory_order_relaxed);
-}
-// F86f: a prompt key's P with the offset that puts it on the surface behind it. Eye 0's decisions renew the request (and tick the depth lines); both eyes apply the
-// cached offset (P is the same world point in both: the cache holds while it stays within a millimetre). False leaves the game's P.
-bool f86PromptApply(ID3D11DeviceContext* ctx, int e, uint32_t frame, uint32_t key, const double P[3], double Pout[3]) {
-    const int ki = f86PromptIdx(key);
-    if (ki < 0) return false;
-    F86fKey& fk = g_f86f[ki];
-    fk.used = true;
-    fk.key = key;
-    ++fk.drawn;
-    if (e == 0) {
-        fk.reqFrame = frame;
-        for (int i = 0; i < 3; ++i) fk.P[i] = P[i];
-        f86Tick(ctx, frame, nullptr, nullptr, 0.0);
-    }
-    double off[3];
-    if (!fk.cache.offsetFor(P, off)) return false;
-    for (int i = 0; i < 3; ++i) Pout[i] = P[i] + off[i];
-    ++fk.cached;
-    return true;
-}
-// F86f (the label instrument): the prompt keys drawn in an eye-frame and their patched targets (NDC, in the texture), up to four, by the frame.
-struct F86Lab {
-    uint32_t frame = ~0u;
-    int n = 0;
-    uint32_t key[4] = {};
-    double t[4][2] = {};
-};
-F86Lab g_f86lab[2][8];
-void f86LabNote(int e, uint32_t frame, uint32_t key, const double T[2]) {
-    F86Lab& L = g_f86lab[e][frame % 8u];
-    if (L.frame != frame) {
-        L = F86Lab{};
-        L.frame = frame;
-    }
-    for (int i = 0; i < L.n; ++i)
-        if (L.key[i] == key) return;
-    if (L.n >= 4) return;
-    L.key[L.n] = key;
-    L.t[L.n][0] = T[0];
-    L.t[L.n][1] = T[1];
-    ++L.n;
 }
 // F86d: the part's smoother, once a frame (the closed-form step, so the frame time does not matter).
 void f86dSmooth(F86dPart& pt, uint32_t frame) {
@@ -21917,14 +23020,16 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
             f86Tick(ctx, frame, nullptr, nullptr, 0.0);
         }
         f86dSmooth(part, frame);
+        // F87: measure only. The scale the panel would take is logged, never applied (the nearest of five rays read 0.264 m for the rifle against a surface median of
+        // 0.326 m and hit the scale's floor in 62 of 135 seconds, the F86 flight's R2): `scale` stays 1, and the guards below skip, so the rows are F85's.
+        double wouldScale = 1.0;
         if (part.haveDs && part.sm.have && dPanel > 0.05) {
-            scale = nofoot::f86::panelScale(part.sm.depth(), dPanel);   // applied to the correction below
+            wouldScale = nofoot::f86::panelScale(part.sm.depth(), dPanel);
         } else if (!part.haveDs) {
-            ++part.noHit;   // none yet: the game's depth stands
+            ++part.noHit;   // none yet
         }
         part.panel = dPanel;
-        part.panelNew = dPanel * scale;
-        part.scale = scale;
+        part.wouldScale = wouldScale;
     }
     nofoot::f85::Corr c = nofoot::f85::makeCorrection(s.K, uf);
     if (!c.ok) { f85Refuse(pe, kF85WhyCorr); return; }
@@ -22173,14 +23278,15 @@ void f85Report(uint64_t nowMs) {
             F86dPart& pt = g_f86d[p];
             if (!pt.seen) continue;
             anyPart = true;
-            Log::get().note("weapon UI depth (F86d) part slot %u: D_s %.3f m (hits %llu, misses %llu, held %llu), panel %.3f -> %.3f m, scale %.3f; refused: no depth view %llu, no hit %llu", p,
-                            pt.sm.have ? pt.sm.depth() : 0.0, ull(pt.hits), ull(pt.misses), ull(pt.held), pt.panel, pt.panelNew, pt.scale, ull(pt.noView), ull(pt.noHit));
+            Log::get().note("weapon UI depth (F86d, measure only) part slot %u: D_s %.3f centre %.3f m, panel %.3f m, would scale %.3f (not applied); rays: hits %llu, misses %llu, held %llu, "
+                            "no depth view %llu, no hit yet %llu", p, pt.sm.have ? pt.sm.depth() : 0.0, pt.haveCentre ? pt.centreD : 0.0, pt.panel, pt.wouldScale, ull(pt.hits), ull(pt.misses),
+                            ull(pt.held), ull(pt.noView), ull(pt.noHit));
             pt.hits = pt.misses = pt.held = pt.noView = pt.noHit = pt.decisions = 0;
             pt.seen = false;
         }
         if (!anyPart && nativeOnFootActive() && nowMs - lastIdleD >= 5000) {
             lastIdleD = nowMs;
-            Log::get().note("weapon UI depth (F86d): no weapon UI part decided this second (no tool or weapon out, or the marker fix is off, or no part was tagged)");
+            Log::get().note("weapon UI depth (F86d, measure only): no weapon UI part decided this second (no tool or weapon out, or the marker fix is off, or no part was tagged)");
         }
         // F86e: the panel's size, hip and ADS apart, per part (eye 0, the second's latest)
         for (uint32_t p = 0; p < kF85bParts; ++p)
@@ -22195,56 +23301,7 @@ void f85Report(uint64_t nowMs) {
                 fg.n = 0;
             }
     }
-    // F86f: per prompt key drawn this second, and the label instrument per eye
-    {
-        bool anyPrompt = false;
-        for (int k = 0; k < kF86PromptKeys; ++k) {
-            F86fKey& fk = g_f86f[k];
-            if (!fk.used || !fk.drawn) continue;
-            anyPrompt = true;
-            Log::get().note("prompt snap (F86f) key %u: P %.3f m, surface %.3f m, normal off the ray %.1f deg, moved %.1f cm, cached %llu, no surface %llu, grazing %llu", fk.key, fk.pDist, fk.surfaceD,
-                            fk.offRayDeg, fk.movedCm, ull(fk.cached), ull(fk.noSurface), ull(fk.grazing));
-            fk.drawn = fk.cached = fk.noSurface = fk.grazing = fk.snapped = 0;
-        }
-        static uint64_t lastIdleF = 0;
-        if (!anyPrompt && nativeOnFootActive() && nowMs - lastIdleF >= 5000) {
-            lastIdleF = nowMs;
-            Log::get().note("prompt snap (F86f): no prompt key (1, 45..50) was decided this second (no charge port or waypoint in view, or the marker fix is off)");
-        }
-        // the untagged marker composite draws of an eye while a prompt key was drawn in it (the leader, the label, the corner dot): whose b0 they drew with and
-        // where they stand against the owning key's patched NDC (the nearest key's), in pixels of the eye's target
-        if (anyPrompt)
-            for (int e = 0; e < 2; ++e) {
-                uint64_t draws = 0, ours = 0, places = 0, withPos = 0;
-                double sum = 0.0, mx = 0.0, nearest = 1e30;
-                for (uint32_t i = 0; i < g_win.nUntag; ++i) {
-                    const Untag& u = g_win.untag[i];
-                    if (u.eye != e || !u.labDraws) continue;
-                    draws += u.labDraws;
-                    ours += u.labOurs;
-                    ++places;
-                    if (!u.havePos || !u.labHave || !u.labKeys) continue;
-                    const double X0[3] = {u.pos[0], u.pos[1], u.pos[2]}, oh[3] = {u.labOrigin[0], u.labOrigin[1], u.labOrigin[2]};
-                    double mc[3];
-                    drawtag::markerClip(u.labRows, u.labRows + 4, u.labRows + 8, X0, oh, mc);
-                    if (!(mc[2] > 1e-9)) continue;
-                    const double nx = mc[0] / mc[2], ny = mc[1] / mc[2];
-                    const double W = u.labTw ? static_cast<double>(u.labTw) : kDefaultTargetSize, H = u.labTh ? static_cast<double>(u.labTh) : kDefaultTargetSize;
-                    double best = 1e30;
-                    for (int q = 0; q < u.labKeys; ++q) {
-                        const double dx = (nx - u.labT[q][0]) * W * 0.5, dy = (ny - u.labT[q][1]) * H * 0.5;
-                        best = std::min(best, std::sqrt(dx * dx + dy * dy));
-                    }
-                    ++withPos;
-                    sum += best;
-                    mx = std::max(mx, best);
-                    nearest = std::min(nearest, best);
-                }
-                Log::get().note("prompt labels (F86f) eye %d: untagged B10B draws while a prompt key was drawn: %llu draws at %llu places (b0 ours %llu, the game's %llu); with a record position and rows %llu: "
-                                "NDC offset from the nearest drawn key's patched NDC mean %.1f max %.1f nearest %.1f px",
-                                e, ull(draws), ull(places), ull(ours), ull(draws - ours), ull(withPos), withPos ? sum / static_cast<double>(withPos) : 0.0, mx, withPos ? nearest : 0.0);
-            }
-    }
+    f87PromptLines(nowMs);   // F87p: the marker interface probe, the getter probe and the label census (read only)
     {
         const F85cState keep = st;   // the smoother and the held target stay; the second's sums go
         st = F85cState{};
@@ -22383,12 +23440,16 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         ++s.viaHold;
     }
     // F64: a key's match names this draw: the marker is visible in this eye-frame (counted once, as none until a bound patch upgrades it).
-    if (ks >= 0) s.f64.visible(frame, g_headDps);
+    if (ks >= 0) {
+        s.f64.visible(frame, g_headDps);
+        labFocusNote(e, frame, g_keyIdx.key[ks]);   // F87p: the focus key's marker is drawn in this eye-frame
+    }
     // F63: the both-eyes rule accepts a held match for the other eye.
     if (ks < 0 || !g_keys[ks].eye[1 - e].hold.held(frame)) {
         const int u = ks < 0 ? e : 1 - e;
         if (ks < 0 && anyHeld) {
             ++s.fOtherDraw;   // no key's match names this draw (an untagged marker composite draw)
+            labelIdentify(ctx, e, frame, r, sh, b0Plain, oHud);   // F87p: one of the label's draws?
             return;
         }
         if (ks >= 0) {
@@ -22477,16 +23538,6 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         const double P0[3] = {fP[0], fP[1], fP[2]};
         double Pn[3];
         if (f85cReticle(ctx, e, frame, sh, oHud, P0, Pn)) {
-            fP[0] = Pn[0];
-            fP[1] = Pn[1];
-            fP[2] = Pn[2];
-        }
-    }
-    // F86f: a charge-port prompt key's P (keys 1 and 45..50) snapped onto the surface it lies behind; the game's P stays without a facing surface in reach.
-    if (haveP && nofoot::f86::isPromptKey(keyNow)) {
-        const double P0[3] = {fP[0], fP[1], fP[2]};
-        double Pn[3];
-        if (f86PromptApply(ctx, e, frame, keyNow, P0, Pn)) {
             fP[0] = Pn[0];
             fP[1] = Pn[1];
             fP[2] = Pn[2];
@@ -22684,7 +23735,6 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
     if (v.newest) ++s.pNewest;
     if (!v.patch) return;
-    if (nofoot::f86::isPromptKey(keyNow)) f86LabNote(e, frame, keyNow, T);   // F86f: this key's patched target, for the label instrument
     dx = v.dx;
     dy = v.dy;
     float r4[4], r5[4];
@@ -22711,6 +23761,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     s.eyPxSum += eIcon[1] * H * 0.5;
     s.eyPxMin = std::min(s.eyPxMin, eIcon[1] * H * 0.5);
     s.eyPxMax = std::max(s.eyPxMax, eIcon[1] * H * 0.5);
+    labFocusNdc(e, frame, keyNow, T, nM0, W, H);   // F87p: the focus key's patched target and the game's own NDC for this eye-frame
     // The e used, the target and the affine, for the read-back's residual (the anchor shown against its target).
     g_fix.cx = eIcon[0];
     g_fix.cy = eIcon[1];
@@ -22767,6 +23818,9 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
     r.ps = bindingShaderHash(BindSlot::Ps);
     r.instances = instances;
     r.start = startInstance;
+    r.idxCount = args.count;
+    r.idxStart = args.start;
+    r.idxBase = args.base;
     r.kind = kind;
     r.flags = kRecMarker;
     r.ordAll = g_ordAll++;
@@ -22779,6 +23833,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         }
     }
     if (r.eye == 0 || r.eye == 1) r.ordEye = g_ordEye[r.eye]++;
+    if ((r.eye == 0 || r.eye == 1) && g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed)) f87FallbackPromote(r.eye, frame);   // F87f
     SrvInfo t33;
     const bool haveT33 = t33Of(ctx, frame, t33);
     if (!haveT33) ++g_win.b10bNoT33;
@@ -22923,7 +23978,10 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         list.push_back(r);
         ++g_win.recs;
         // F47: the correction's decision for this draw (the key on only).
-        if (fixKey) fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh, cpuFind);
+        if (fixKey) {
+            fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh, cpuFind);
+            labelCapture(ctx, frame, vbs, strides, offs, kind);   // F87p: the label's small draw, once a second per eye
+        }
     }
     for (ID3D11Buffer* b : vbs)
         if (b) b->Release();
@@ -23310,26 +24368,6 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
             if (u) {
                 ++u->n;
                 u->instances = r.instances;
-                const F86Lab& lab = g_f86lab[r.eye][frame % 8u];
-                if (lab.frame == frame && lab.n > 0) {   // F86f: a prompt key was drawn in this eye-frame: this untagged draw is a candidate label
-                    ++u->labDraws;
-                    if (r.fixApplied) ++u->labOurs;
-                    if (r.cpuRows && (r.flags & kRecShadowO)) {
-                        std::memcpy(u->labRows, r.cpu, 4 * sizeof(float));
-                        std::memcpy(u->labRows + 4, r.cpu + 4, 4 * sizeof(float));
-                        std::memcpy(u->labRows + 8, r.cpu + 12, 4 * sizeof(float));
-                        for (int i = 0; i < 3; ++i) u->labOrigin[i] = r.origin[i];
-                        u->labTw = r.tw;
-                        u->labTh = r.th;
-                        u->labKeys = lab.n;
-                        for (int i = 0; i < lab.n; ++i) {
-                            u->labKey[i] = lab.key[i];
-                            u->labT[i][0] = lab.t[i][0];
-                            u->labT[i][1] = lab.t[i][1];
-                        }
-                        u->labHave = true;
-                    }
-                }
             } else {
                 ++g_win.untagDropped;
             }
@@ -23381,6 +24419,7 @@ void frameTurn(ID3D11DeviceContext* ctx, uint32_t frame) {
     rowCensusTurn(frame);   // F53: the census frame that ended is logged; a new one may start
     g_staging.poll(ctx, frame, 2, 12, [](int slot, uint32_t f, const uint8_t* d, uint32_t used) { readFrame(slot, f, d, used); }, &g_win.lost);
     g_iconRing.poll(ctx, frame, 2, 60, [](int slot, const uint8_t* d) { iconOnData(slot, d); }, &g_iconLost);   // F66f
+    g_labRing.poll(ctx, frame, 2, 60, [](int slot, const uint8_t* d) { labOnData(slot, d); }, &g_labRingLost);   // F87p
 }
 
 const char* mapName(int t) {
@@ -23699,15 +24738,28 @@ void report(uint64_t nowMs) {
                             ull(w.streamFaults), ull(w.streamOtherMaps), ull(w.streamUpdates), ull(w.cpuFind), ull(w.cpuHeldRec), ull(w.cpuOther),
                             ull(w.cpuSkipped), ull(w.tally[0].skipped), ull(w.tally[1].skipped), ull(w.cpuNoShadow), ull(w.cpuOutside),
                             ull(w.cpuAgree), ull(w.cpuDiffer));
-        // F86c, per eye: the windows at the newest Unmap (the clusters of last frame's entries, their lowest and highest entry, the windows copied) and what the
-        // second's draws found: named from a window, outside every window, and how far from the nearest window the nearest outside draw was.
+        // F87c, per eye: the windows at the newest Unmap (F85's, the history's), the Unmap copies of the second that held the whole stream, and what the second's draws
+        // found: named (from a window or the whole copy), outside every window, how far from the nearest window the nearest outside draw was, and the eye's first and last
+        // entry of the frame before (eye 1's ring moves 6-14k between layouts in the flicker).
         if (fixOn)
             for (int e = 0; e < 2; ++e) {
                 StreamSecond& ss = g_streamSec[e];
-                const nofoot::f86::WinPlan& pl = f44::g_stream.plan[e];
-                Log::get().note("marker fix (F86c): eye %d: last-frame entries %u clusters (min %u max %u), windows %u; named %llu, outside %llu (nearest window %u entries away)", e,
-                                pl.clusters, pl.entryMin, pl.entryMax, pl.windows, ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest);
+                const nofoot::f87::WinPlan& pl = f44::g_stream.plan[e];
+                char ring[64];
+                if (e == 1 && f44::g_stream.ringHave[1]) std::snprintf(ring, sizeof(ring), "first %u last %u", f44::g_stream.ringFirst[1], f44::g_stream.ringLast[1]);
+                else std::snprintf(ring, sizeof(ring), "%s", e == 1 ? "none yet" : "-");
+                Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); eye-1 first/last ring %s", e,
+                                pl.windows, pl.f85, pl.history, static_cast<unsigned>(ss.escCopies), ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest, ring);
                 ss = StreamSecond{};
+            }
+        // F87f, per eye: the eye-frames with a marker composite draw and no scene rows, those given the depth prepass's rows, those that had both (compared) and the largest
+        // difference of the compared rows (the guard latches the fallback off past 1e-5).
+        if (fixOn)
+            for (int e = 0; e < 2; ++e) {
+                FbSecond& fs = g_fbSec[e];
+                Log::get().note("scene rows fallback (F87f) eye %d: no-main frames %llu, from F516BF02 %llu; both %llu, max diff %.2e%s", e, ull(fs.noMain), ull(fs.fromFb), ull(fs.both),
+                                fs.maxDiff, g_fbGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5)" : "");
+                fs = FbSecond{};
             }
         // F50, per key and eye (F52: each key has its own baseline): the baseline c and its spread, |m - c| against the head's speed, the
         // patched draws, the residual after the patch by the head's speed, and the honesty check (c by head pitch and roll on slow-head frames,
@@ -24036,6 +25088,48 @@ uint32_t nativeOnFootRenderFrame() {
     return g_f44Frame.load(std::memory_order_relaxed);
 }
 
+void nativeOnFootLabelIssue(ID3D11DeviceContext* ctx, bool layered) {
+    if (ctx) f44::labelIssue(ctx, layered);
+}
+
+// F87p: the label's draws of a render frame as a JSON array of two arrays (eye 0, eye 1) for the eye dump's decisions.json; the characters written, 0 when the frame has none.
+size_t nativeOnFootLabelDrawsJson(uint32_t renderFrame, char* buf, size_t cap) {
+    if (!buf || cap < 8) return 0;
+    const f44::LabFrame& lf = f44::g_labFrame[renderFrame % f44::kLabFrames];
+    if (lf.frame != renderFrame) return 0;
+    size_t at = 0;
+    const auto put = [&](const char* fmt, ...) {
+        va_list ap;
+        va_start(ap, fmt);
+        const int k = _vsnprintf_s(buf + at, cap - at, _TRUNCATE, fmt, ap);
+        va_end(ap);
+        if (k > 0) at += static_cast<size_t>(k);
+    };
+    put("[");
+    for (int e = 0; e < 2; ++e) {
+        put("%s[", e ? ", " : "");
+        for (uint32_t i = 0; i < lf.n[e] && i < f44::kLabDraws; ++i) {
+            const f44::LabDraw& d = lf.d[e][i];
+            put("%s{\"order\": %u, \"index_count\": %u, \"start_index\": %u, \"base_vertex\": %d, \"start_instance\": %u, \"record\": %u, \"record_known\": %s, \"camera_local\": %s, "
+                "\"record_pos\": [%.5f, %.5f, %.5f], \"record_scale\": %.6g, \"record_q\": [%u, %u], \"record_w20\": %u, \"issued\": %s, \"layered\": %s, \"b0\": \"%s\", ",
+                i ? ", " : "", static_cast<unsigned>(d.ord), d.count, d.start, d.base, d.startInstance, d.record, d.recKnown ? "true" : "false", d.camLocal ? "true" : "false",
+                static_cast<double>(d.pos[0]), static_cast<double>(d.pos[1]), static_cast<double>(d.pos[2]), static_cast<double>(d.scale), d.q2, d.q3, d.w20, d.issued ? "true" : "false",
+                d.layered ? "true" : "false", !d.issued ? "unknown" : d.b0Ours ? "ours" : d.b0Game ? "game" : "other");
+            if (d.vpIssuedOk) put("\"viewport_issued\": [%.1f, %.1f, %.1f, %.1f], ", static_cast<double>(d.vpIssued[0]), static_cast<double>(d.vpIssued[1]), static_cast<double>(d.vpIssued[2]), static_cast<double>(d.vpIssued[3]));
+            else put("\"viewport_issued\": null, ");
+            if (d.vpMappedOk) put("\"viewport_mapped\": [%.1f, %.1f, %.1f, %.1f], ", static_cast<double>(d.vpMapped[0]), static_cast<double>(d.vpMapped[1]), static_cast<double>(d.vpMapped[2]), static_cast<double>(d.vpMapped[3]));
+            else put("\"viewport_mapped\": null, ");
+            if (d.rowsOk) put("\"b0_rows_4_5_7\": [%.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g, %.6g], ", static_cast<double>(d.rows[0]), static_cast<double>(d.rows[1]), static_cast<double>(d.rows[2]), static_cast<double>(d.rows[3]), static_cast<double>(d.rows[4]), static_cast<double>(d.rows[5]), static_cast<double>(d.rows[6]), static_cast<double>(d.rows[7]), static_cast<double>(d.rows[8]), static_cast<double>(d.rows[9]), static_cast<double>(d.rows[10]), static_cast<double>(d.rows[11]));
+            else put("\"b0_rows_4_5_7\": null, ");
+            if (d.leaderOk) put("\"leader_ndc\": [%.5f, %.5f]}", d.leaderNdc[0], d.leaderNdc[1]);
+            else put("\"leader_ndc\": null}");
+        }
+        put("]");
+    }
+    put("]");
+    return at;
+}
+
 bool nativeOnFootMarkerFrameCounts(uint32_t renderFrame, uint32_t decided[2], uint32_t bound[2]) {
     const f44::F86hCell& c = f44::g_f86h[renderFrame % f44::kF86hRing];
     if (c.frame.load(std::memory_order_acquire) != renderFrame) return false;
@@ -24228,6 +25322,9 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     }
     ctx->CopySubresourceRegion(g_privCb, 0, 0, 0, 0, g_workBuf, 0, &all);
     ctx->VSSetConstantBuffers(0, 1, &g_privCb);
+    std::memcpy(g_privRows, g_fix.rows45, 8 * sizeof(float));   // F87p: rows 4 and 5 as written; row 7 is the game's unless the weapon UI's was written
+    if (g_fix.rows7) std::memcpy(g_privRows + 8, g_fix.row7, 4 * sizeof(float));
+    else if (const CbShadow* gsh = shadowFor(cb0, false, g_privBytes)) std::memcpy(g_privRows + 8, gsh->rows[7], 4 * sizeof(float));
     g_fix.saved = cb0;   // the reference vsB0Plain took, held until End
     g_fix.bound = true;
     f86hCount(g_fix.frame, g_fix.eye, true);   // F86h
@@ -24309,6 +25406,8 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_keyIdx = drawtag::KeyIndex<f44::kKeySlots>{};
     f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
     f44::g_iconRing.release();   // F66f
+    f44::g_labRing.release();    // F87p
+    f44::g_labPending = f44::LabPending{};
     for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
     f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
     for (f44::KeyP& kp : f44::g_keyP) kp = f44::KeyP{};
@@ -24457,6 +25556,9 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         // F18: the reticle stub is in place whenever native stereo is on foot (both modes write key 10), or while the probe key is on.
         const bool reticleWant = nativeOnFootActive() && session;
         reticleTick(reticleWant, !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+        // F87p (read only): the marker interface's slots and the point getters' calls, while native stereo is on foot and the marker fix key is on.
+        f87p::tick(reticleWant && g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed),
+                   !nativeOnFootActive() ? "native stereo on foot ended" : !session ? "the game session ended" : "fix.native_on_foot_marker_fix is off");
         const bool writeNow = nativeOnFootActive() && session;
         g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
         if (writeNow != g_reticleWriteLast) {
@@ -24535,6 +25637,7 @@ void nativeOnFootShutdown() {
     g_hudRoomEff.store(1.0f, std::memory_order_relaxed);
     g_sGame.store(0.0f, std::memory_order_relaxed);
     reticleTick(false, "the game is shutting down");
+    f87p::tick(false, "the game is shutting down");   // F87p
     g_reticleWriteOn.store(false, std::memory_order_relaxed);   // F16: no more centring writes
     {
         F9Lock lock;

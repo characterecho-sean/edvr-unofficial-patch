@@ -362,6 +362,12 @@ uint32_t nativeOnFootRenderFrame();
 // F86h: the marker composite draws of a render frame, per eye: those the fix decided to patch and those whose patch was bound at the draw's issue. False when the
 // frame is not in the ring (256 frames) or the fix saw no draw in it.
 bool nativeOnFootMarkerFrameCounts(uint32_t renderFrame, uint32_t decided[2], uint32_t bound[2]);
+// F87p (read only): the label's draws of a render frame, as a JSON array of two arrays (eye 0, eye 1), for the eye dump's decisions.json; the characters written, 0 when the
+// frame has none (the ring holds 256 frames).
+size_t nativeOnFootLabelDrawsJson(uint32_t renderFrame, char* buf, size_t cap);
+// F87p (read only; owner context, vscreen.cpp): right before the game's own issue of a draw, with whether the UI layer's bracket was begun for it. A draw the marker
+// instrument named at fixDecide's untagged return is completed here (the viewport as mapped, the b0 bound); every other draw returns at once.
+void nativeOnFootLabelIssue(ID3D11DeviceContext* ctx, bool layered);
 struct NativeOnFootPoseStamp {
     bool valid = false, writePresent = false, matricesValid = false, sourceFresh = false;
     uint32_t renderFrame = 0, fpFrame = 0, fpSequence = 0, gGameFrame = 0, itemSerial = 0, rigGeneration = 0;

@@ -2383,6 +2383,12 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
                     markerBound[k][1], markerBound[k][0] > 0 && markerBound[k][1] > 0 ? "true" : "false");
         else
             fputs("\"marker_patched\": null, \"marker_bound\": null, \"marker_both_eyes_bound\": null, ", f);
+        {   // F87p: the interaction label's draws of the frame, per eye (index count, layered, b0, record, leader NDC)
+            static char labelJson[8192];
+            const size_t labelLen = nativeOnFootLabelDrawsJson(d.renderFrame, labelJson, sizeof(labelJson));
+            if (labelLen) fprintf(f, "\"label_draws\": %s, ", labelJson);
+            else fputs("\"label_draws\": null, ", f);
+        }
         fprintf(f, "\"input_size\": [%u, %u], \"decision_crop\": [%u, %u, %u, %u], ",
                 d.inputW, d.inputH, d.decisionCrop[0], d.decisionCrop[1],
                 d.decisionCrop[2], d.decisionCrop[3]);

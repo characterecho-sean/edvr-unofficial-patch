@@ -1,6 +1,7 @@
-// F85 checks (the pin-step trace, the weapon UI pinned to the weapon, the reticle's hit depth) and F86 checks (the pose carry, the stream windows, the weapon UI
-// at the weapon's surface, the prompt snap, the floor probe, run86 below): the pure functions of src\d3d11\native_on_foot_f85.h and native_on_foot_f86.h on synthetic
-// cameras. Header only so that native_frame_test, the depth line rig and a desk driver run the same lines.
+// F85 checks (the pin-step trace, the weapon UI pinned to the weapon, the reticle's hit depth), F86 checks (the pose carry, the weapon UI depth, the floor probe,
+// run86 below) and F87 checks (the standing-height hold, the previous copy, the stream windows' history and escalation, the scene rows' fallback, the prompt probes'
+// pins and box geometry, the hand residual: run87 below): the pure functions of src\d3d11\native_on_foot_f85.h, _f86.h and _f87.h on synthetic cameras. Header only so
+// that native_frame_test, the depth line rig and a desk driver run the same lines.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_f85.h"
@@ -11,7 +12,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#include <intrin.h>
+#endif
 
 namespace f85test {
 
@@ -606,7 +612,7 @@ inline void run(Check&& check) {
     }
 }
 
-// ---- F86 (the pose carry, the stream windows, the weapon UI at the weapon's surface, the prompt snap, the floor probe) -----------------------------------------
+// ---- F86 (the pose carry, the weapon UI depth, the floor probe; F86c and F86f went in F87) -----------------------------------------
 // The pure functions of src\d3d11\native_on_foot_f86.h on synthetic scenes. Design: reviews\native-onfoot-f86-review-2026-10-23.md.
 inline void putMat(float m[16], const double R[3][3], const double t[3]) {
     for (int i = 0; i < 16; ++i) m[i] = 0.0f;
@@ -798,7 +804,7 @@ inline void run86(Check&& check) {
         for (int j = 0; j < 3; ++j) fr.rec[j] = Mt[1][j];
         f86::CarryResult r = f86::poseCarry(pose, fr, true);
         check(r.why == f86::kCarryHitch && f85::len3(r.delta) == 0.0 && std::fabs(r.errBeforeCm[0] - 240.0) < 0.1 && std::fabs(r.errAfterCm[0] - 240.0) < 0.1,
-              "F86a: a 2.4 m step is refused (over 50 cm), nothing is moved, and the error before is still reported");
+              "F86a: a 2.4 m step is refused (over 1.5 m), nothing is moved, and the error before is still reported");
         for (uint32_t age = 0; age <= 4; ++age) {
             f86::PoseIn p2 = solvePose(M[0], F[0], d0, 6 - age);
             f86::CarryFrame f2 = fr;
@@ -848,102 +854,48 @@ inline void run86(Check&& check) {
         const f86::StepGeom h = f86::stepGeom(m2, m1);   // the earlier frame's axes are turned: the same world step reads differently
         check(h.ok && std::fabs(h.step[0] - (0.05 * R2[0][0] + 0.30 * R2[0][2])) < 1e-6, "F86a: the step follows the earlier frame's axes (a turned earlier frame reads the world step in its own)");
     }
-    {   // the previous copy of a record: both cases give the true drawn motion
+    {   // the previous copy of a record (F87): equal to the position at the submit's start; the carry moves both, so the drawn motion is the game's own
         std::srand(7);
-        for (int mode = 0; mode < 2; ++mode) {   // 0: the game keeps its own copy; 1: the game copies the record back
-            float X[3] = {1.0f, 2.0f, 3.0f};
-            float lastRaw[3] = {}, lastFinal[3] = {};
-            double lastDelta[3] = {};
-            bool have = false, motionOk = true, classOk = true;
-            for (int i = 0; i < 20; ++i) {
-                const float Xn[3] = {X[0] + 0.011f * (i % 3), X[1] + 0.002f * i, X[2] + 0.05f};
-                const double delta[3] = {0.001 * (std::rand() % 50 - 25), 0.001 * (std::rand() % 50 - 25), 0.001 * (std::rand() % 50 - 25)};
-                // what the game leaves: pos = Xn; prev = its own last pos (mode 0) or the record as we left it (mode 1)
-                const float pos[3] = {Xn[0], Xn[1], Xn[2]};
-                float prev[3];
-                for (int k = 0; k < 3; ++k) prev[k] = have ? (mode == 0 ? lastRaw[k] : lastFinal[k]) : X[k];
-                f86::PrevCase c = f86::kPrevNone;
-                if (have) {
-                    c = f86::classifyPrev(prev, lastRaw, lastFinal);
-                    classOk = classOk && (mode == 0 ? c == f86::kPrevGame : c == f86::kPrevOurs);
-                }
-                float prevW[3];
-                f86::prevToWrite(c, prev, lastDelta, prevW);
-                float posW[3];
-                for (int k = 0; k < 3; ++k) posW[k] = static_cast<float>(static_cast<double>(pos[k]) + delta[k]);
-                if (have) {
-                    for (int k = 0; k < 3; ++k) {
-                        const double drawn = static_cast<double>(posW[k]) - static_cast<double>(prevW[k]);
-                        const double truth = (static_cast<double>(pos[k]) + delta[k]) - (static_cast<double>(lastRaw[k]) + lastDelta[k]);
-                        motionOk = motionOk && std::fabs(drawn - truth) < 1e-5;
-                    }
-                }
-                std::memcpy(lastRaw, pos, sizeof(lastRaw));
-                std::memcpy(lastFinal, posW, sizeof(lastFinal));
-                std::memcpy(lastDelta, delta, sizeof(lastDelta));
-                for (int k = 0; k < 3; ++k) X[k] = Xn[k];
-                have = true;
+        bool motionOk = true, stillOk = true;
+        float X[3] = {1.0f, 2.0f, 3.0f};
+        float lastPos[3] = {X[0], X[1], X[2]};
+        double lastDelta[3] = {};
+        for (int i = 0; i < 20; ++i) {
+            const bool still = i < 6;
+            const float pos[3] = {still ? 1.0f : X[0] + 0.011f * (i % 3), still ? 2.0f : X[1] + 0.002f * i, still ? 3.0f : X[2] + 0.05f * (i - 5)};
+            const double delta[3] = {i == 9 ? 0.30 : 0.001 * (std::rand() % 50 - 25), i == 9 ? -0.20 : 0.001 * (std::rand() % 50 - 25), i == 9 ? 0.05 : 0.001 * (std::rand() % 50 - 25)};
+            // what the game leaves: pos = this frame's; prev = the same value (the flight's dump 003)
+            float prev[3] = {pos[0], pos[1], pos[2]};
+            const f86::PrevCase c = f86::classifyPrev(prev, pos);
+            float prevW[3];
+            f86::prevToWrite(c, prev, delta, prevW);
+            float posW[3];
+            for (int k = 0; k < 3; ++k) posW[k] = static_cast<float>(static_cast<double>(pos[k]) + delta[k]);
+            for (int k = 0; k < 3; ++k) {
+                const double drawn = static_cast<double>(posW[k]) - static_cast<double>(prevW[k]);   // what the renderer reads as this frame's motion
+                if (c != f86::kPrevWithPos || std::fabs(drawn) > 1e-5) motionOk = false;
+                if (still && std::fabs(drawn) > 1e-5) stillOk = false;
             }
-            check(classOk, mode == 0 ? "F86a: the game's own copy of last frame's position is recognised bit for bit" : "F86a: the record copied back (our written position) is recognised bit for bit");
-            check(motionOk, mode == 0 ? "F86a: the game's case adds last frame's carry to the previous copy: the drawn motion is (pos + d_i) - (pos_prev + d_{i-1})"
-                                       : "F86a: our case leaves the previous copy: the drawn motion is (pos + d_i) - (pos_prev + d_{i-1})");
+            std::memcpy(lastPos, pos, sizeof(lastPos));
+            std::memcpy(lastDelta, delta, sizeof(lastDelta));
         }
-        const float a[3] = {1.0f, 2.0f, 3.0f}, b[3] = {1.0f, 2.0f, 3.5f}, c3[3] = {1.0f, 2.0f, 4.0f};
-        float w[3];
-        const double dl[3] = {0.1, 0.1, 0.1};
-        f86::prevToWrite(f86::classifyPrev(c3, a, b), c3, dl, w);
-        check(f86::classifyPrev(c3, a, b) == f86::kPrevNeither && w[0] == c3[0] && w[1] == c3[1] && w[2] == c3[2], "F86a: a previous copy that is neither is left alone");
+        check(motionOk, "F87a: where prev equals pos at the start, prev takes the carry too: pos - prev stays 0 whatever the carry (5-30 cm in a jump)");
+        check(stillOk, "F87a: a body standing still draws no motion with a still carry (pos - prev 0)");
+        // a previous copy that is another value is left alone: the drawn motion is then the carry plus the game's own step
+        const float posO[3] = {1.0f, 2.0f, 3.5f}, prevO[3] = {1.0f, 2.0f, 3.4f};
+        const double dO[3] = {0.1, 0.1, 0.1};
+        float wO[3];
+        const f86::PrevCase co = f86::classifyPrev(prevO, posO);
+        f86::prevToWrite(co, prevO, dO, wO);
+        check(co == f86::kPrevOther && wO[0] == prevO[0] && wO[1] == prevO[1] && wO[2] == prevO[2], "F87a: a previous copy that differs from the position is left alone");
         f86::PrevTally t;
-        t.add(f86::kPrevGame);
-        t.add(f86::kPrevGame);
-        check(t.verdict() == f86::kPrevGame, "F86a: a frame whose records all show the game's case is the game's");
-        t.add(f86::kPrevOurs);
-        check(t.verdict() == f86::kPrevNeither && f86::PrevTally{}.verdict() == f86::kPrevNone, "F86a: a mixed frame is neither; a frame with no history is none");
-    }
-    // ---- C: the stream windows -------------------------------------------------------------------------------------------------------------------
-    {
-        const uint32_t total = 196608;
-        uint32_t e[3] = {30000, 1000, 1010};
-        f86::WinPlan p;
-        f86::planWindows(e, 3, total, &p);
-        check(p.clusters == 2 && p.windows == 2 && p.entries == 3 && p.entryMin == 1000 && p.entryMax == 30000 && p.holds(1005) && p.holds(30020) && p.uncovered == 0,
-              "F86c: entries {1000, 1010, 30000} give two windows holding 1005 and 30020");
-        check(p.holds(1000) && p.holds(1010) && p.holds(30000) && !p.holds(15000), "F86c: every entry drawn last frame is inside a window, the space between them is not");
-        uint32_t e2[2] = {1010, 1000};
-        f86::planWindows(e2, 2, total, &p);
-        check(p.clusters == 1 && p.windows == 1 && p.uncovered == 0, "F86c: entries 10 apart are one cluster and one window");
-        bool aligned = true;
-        for (uint32_t w = 0; w < p.windows; ++w) aligned = aligned && (p.lo[w] % 2u) == 0u && (p.n[w] % 2u) == 0u && p.n[w] <= f86::kWinEntries;
-        check(aligned, "F86c: windows start on an even entry and hold an even number of at most 4096 (16-byte loads)");
-        // the byte budget: at most 4 windows of 4096 entries (8 bytes each) per eye; two clusters cost what a window of 8192 did
-        uint32_t many[40];
-        for (int i = 0; i < 40; ++i) many[i] = 4500u * static_cast<uint32_t>(i);   // 40 clusters, 4500 apart (past the 2048 gap)
-        f86::planWindows(many, 40, total, &p);
-        uint64_t bytes = 0;
-        for (uint32_t w = 0; w < p.windows; ++w) bytes += static_cast<uint64_t>(p.n[w]) * 8u;
-        check(p.windows == f86::kWinMax && bytes <= static_cast<uint64_t>(f86::kWinMax) * f86::kWinEntries * 8u && p.clusters == 40 && p.uncovered > 0,
-              "F86c: at most 4 windows an eye (128 KB); the clusters past them are counted as uncovered entries");
-        uint32_t two[2] = {5000, 90000};
-        f86::planWindows(two, 2, total, &p);
-        check(static_cast<uint64_t>(p.n[0] + p.n[1]) * 8u <= 8192u * 8u, "F86c: two clusters copy no more than the old 8192-entry window did (64 KB)");
-        // a cluster wider than a window: windows end to end; the end of the buffer; a small buffer
-        uint32_t wide[6] = {0, 2000, 4000, 6000, 8000, 10000};
-        f86::planWindows(wide, 6, total, &p);
-        bool all = true;
-        for (uint32_t v : {0u, 2000u, 4000u, 6000u, 8000u, 10000u}) all = all && p.holds(v);
-        check(p.clusters == 1 && p.windows == 3 && all && p.uncovered == 0, "F86c: a cluster wider than a window is covered by windows end to end");
-        uint32_t tail[1] = {total - 3};
-        f86::planWindows(tail, 1, total, &p);
-        check(p.windows == 1 && p.holds(total - 3) && p.lo[0] + p.n[0] <= total, "F86c: a window about the last entries of the buffer stays inside it");
-        uint32_t tiny[1] = {100};
-        f86::planWindows(tiny, 1, 1000, &p);
-        check(p.windows == 1 && p.lo[0] == 0 && p.holds(100) && p.n[0] <= 1000, "F86c: a buffer smaller than a window is copied from its start");
-        f86::planWindows(tiny, 0, total, &p);
-        check(p.windows == 0 && !p.holds(0) && p.distance(5) == ~0u, "F86c: no entries, no windows");
-        uint32_t far2[2] = {1000, 30000};
-        f86::planWindows(far2, 2, total, &p);
-        check(p.windows == 2 && p.lo[1] == 27952u && p.n[1] == 4096u && p.distance(1500) == 0u && p.distance(40000) == 40000u - 32048u + 1u && p.distance(27949) == 3u && p.distance(32048) == 1u,
-              "F86c: the distance from an entry to the nearest window is 0 inside one and the number of entries past its edge outside");
+        t.add(f86::kPrevWithPos);
+        t.add(f86::kPrevWithPos);
+        check(t.verdict() == f86::kPrevWithPos, "F87a: a frame whose records all had prev with pos says with pos");
+        t.add(f86::kPrevOther);
+        check(t.verdict() == f86::kPrevOther && f86::PrevTally{}.verdict() == f86::kPrevNone, "F87a: a mixed frame says other; a frame with no record examined says none");
+        (void)lastPos;
+        (void)lastDelta;
     }
     // ---- D, F, G: the depth lines ----------------------------------------------------------------------------------------------------------------
     {
@@ -1107,7 +1059,7 @@ inline void run86(Check&& check) {
             for (int i = 0; i < 60; ++i) clamp.step(5.0, 0.011);
             check(clamp.depth() <= f86::kPanelMaxM + 1e-9, "F86d: the smoother's clamp is the part's 0.12..0.8 m range");
         }
-        // F: the prompt snap onto a tilted plate; the normal; a wall far in front of the anchor; a grazing plane; the cache
+        // the surface normal from the neighbours the depth shader returns (F86f's snap is gone; the normal stays for the multi-line shader's rig)
         {
             // the normal on a wide camera: a plane 34 degrees off the view ray at 0.94 m
             {
@@ -1135,112 +1087,9 @@ inline void run86(Check&& check) {
                 const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
                 const double dot = -(sn.n[0] * nrm[0] + sn.n[1] * nrm[1] + sn.n[2] * nrm[2]);
                 check(lo.status == f86::kLineHit && std::fabs(lo.d - 0.94) < 0.003 && sn.ok && std::acos(std::min(1.0, dot)) * f85::kDeg < 1.0 && std::fabs(sn.cosView - std::cos(a34)) < 0.01,
-                      "F86f: the surface normal from the four neighbours is the plane's within 1 degree (34 degrees off the view ray at 0.94 m)");
-                check(std::fabs(f86::normalOffRayDeg(sn) - 34.0) < 1.0, "F86f: the normal's angle off the ray is 34 degrees");
+                      "F86: the surface normal from the four neighbours is the plane's within 1 degree (34 degrees off the view ray at 0.94 m)");
+                check(std::fabs(f86::normalOffRayDeg(sn) - 34.0) < 1.0, "F86: the normal's angle off the ray is 34 degrees");
             }
-            // the snap, on a narrow camera so that a pixel is 0.07 mm: P 5 cm behind the plate's centre lands on the centre
-            {
-                const double fx = 25.0;
-                float rows[16];
-                sceneRows(I, e0, fx, fx, 0.0, 0.0, nearZ, rows);
-                double A = 0.0, B = 0.0;
-                f85::zwFit(rows, &A, &B);
-                const uint32_t N = 1024;
-                std::vector<float> img;
-                const double a34 = 34.0 * f85::kPi / 180.0;
-                const double nrm[3] = {std::sin(a34), 0.0, std::cos(a34)};
-                const double C[3] = {0.0, 0.0, 0.94};
-                planeImage(img, N, fx, 0.0, 0.0, nrm, 0.94 * std::cos(a34), nearZ);
-                f85::MarchView mv;
-                mv.rows = rows;
-                mv.A = A;
-                mv.B = B;
-                mv.width = mv.height = N;
-                mv.depth = img.data();
-                const double P[3] = {C[0] + 0.05 * nrm[0], C[1] + 0.05 * nrm[1], C[2] + 0.05 * nrm[2]};
-                const double dist = f85::len3(P);
-                const double u[3] = {P[0] / dist, P[1] / dist, P[2] / dist};
-                const double O[3] = {0, 0, 0};
-                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, std::max(0.12, dist - f86::kPromptBehindM), dist + f86::kPromptAheadM);
-                const f85::Rows Wr = f85::rowsOfWorld(rows);
-                const double H[3] = {lo.d * u[0], lo.d * u[1], lo.d * u[2]};
-                const double w = Wr.r[2][0] * H[0] + Wr.r[2][1] * H[1] + Wr.r[2][2] * H[2] + Wr.r[2][3];
-                const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
-                double Pn[3] = {};
-                const bool snapped = f86::promptSnap(P, H, sn, Pn);
-                const double err = std::sqrt((Pn[0] - C[0]) * (Pn[0] - C[0]) + (Pn[1] - C[1]) * (Pn[1] - C[1]) + (Pn[2] - C[2]) * (Pn[2] - C[2]));
-                check(lo.status == f86::kLineHit && snapped && err < 1e-4, "F86f: a prompt anchor 5 cm behind a 34-degree plate's centre is snapped onto the centre (within 0.1 mm)");
-                f86::PromptCache cache;
-                const double off[3] = {Pn[0] - P[0], Pn[1] - P[1], Pn[2] - P[2]};
-                cache.put(P, off);
-                double got[3];
-                const double Pnear[3] = {P[0] + 0.0004, P[1], P[2]}, Pfar[3] = {P[0] + 0.002, P[1], P[2]};
-                check(cache.offsetFor(P, got) && std::fabs(got[0] - off[0]) < 1e-12 && cache.offsetFor(Pnear, got) && !cache.offsetFor(Pfar, got),
-                      "F86f: the cached offset applies to the anchor it was measured at (1 mm) and to no other");
-                const double off2[3] = {off[0] + 0.01, off[1], off[2]};
-                cache.put(P, off2);
-                cache.offsetFor(P, got);
-                check(std::fabs(got[0] - (off[0] + 0.25 * 0.01)) < 1e-9, "F86f: the cached offset is an EMA while the anchor holds");
-                cache.put(Pfar, off2);
-                check(cache.offsetFor(Pfar, got) && std::fabs(got[0] - off2[0]) < 1e-12 && !cache.offsetFor(P, got), "F86f: an anchor that moved a millimetre or more starts the cache again");
-            }
-            // a waypoint 2 m behind a wall: no surface within 15 cm in front of it: untouched
-            {
-                const double fx = 1.38, px = 0.0153, py = 0.0031;
-                float rows[16];
-                sceneRows(I, e0, fx, fx, px, py, nearZ, rows);
-                double A = 0.0, B = 0.0;
-                f85::zwFit(rows, &A, &B);
-                const uint32_t N = 256;
-                std::vector<float> img;
-                const double nz[3] = {0, 0, 1};
-                planeImage(img, N, fx, px, py, nz, 1.0, nearZ);   // a wall at 1 m
-                f85::MarchView mv;
-                mv.rows = rows;
-                mv.A = A;
-                mv.B = B;
-                mv.width = mv.height = N;
-                mv.depth = img.data();
-                const double P[3] = {0, 0, 3.0}, O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
-                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 3.0 - f86::kPromptBehindM, 3.0 + f86::kPromptAheadM);
-                f86::SurfaceNormal none;
-                double Pn[3];
-                check(lo.status != f86::kLineHit && !f86::promptSnap(P, P, none, Pn), "F86f: a waypoint 2 m behind a wall finds no surface within 15 cm in front of it and is left alone");
-                planeImage(img, N, fx, px, py, nz, 2.9, nearZ);   // a wall 10 cm in front of it
-                const f86::LineOut lo2 = f86::marchRangeCpu(mv, O, u, 3.0 - f86::kPromptBehindM, 3.0 + f86::kPromptAheadM);
-                check(lo2.status == f86::kLineHit && std::fabs(lo2.d - 2.9) < 0.003, "F86f: a wall within 15 cm in front of the anchor is a hit");
-            }
-            // a grazing plane (80 degrees off the view ray) is refused
-            {
-                const double fx = 1.38;
-                float rows[16];
-                sceneRows(I, e0, fx, fx, 0.0, 0.0, nearZ, rows);
-                double A = 0.0, B = 0.0;
-                f85::zwFit(rows, &A, &B);
-                const uint32_t N = 512;
-                std::vector<float> img;
-                const double a80 = 80.0 * f85::kPi / 180.0;
-                const double nrm[3] = {std::sin(a80), 0.0, std::cos(a80)};
-                planeImage(img, N, fx, 0.0, 0.0, nrm, 0.94 * std::cos(a80), nearZ);
-                f85::MarchView mv;
-                mv.rows = rows;
-                mv.A = A;
-                mv.B = B;
-                mv.width = mv.height = N;
-                mv.depth = img.data();
-                const double O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
-                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 0.5, 1.5);
-                const f85::Rows Wr = f85::rowsOfWorld(rows);
-                const double H[3] = {lo.d * u[0], lo.d * u[1], lo.d * u[2]};
-                const double w = Wr.r[2][0] * H[0] + Wr.r[2][1] * H[1] + Wr.r[2][2] * H[2] + Wr.r[2][3];
-                const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
-                const double P[3] = {H[0], H[1], H[2] + 0.05};
-                double Pn[3];
-                check(lo.status == f86::kLineHit && sn.ok && sn.cosView < f86::kFacingMin && !f86::promptSnap(P, H, sn, Pn), "F86f: a grazing plane (80 degrees off the ray, cosine 0.17) is not snapped onto");
-            }
-            check(f86::isPromptKey(1) && f86::isPromptKey(45) && f86::isPromptKey(46) && f86::isPromptKey(49) && f86::isPromptKey(50) && !f86::isPromptKey(0) && !f86::isPromptKey(10) &&
-                      !f86::isPromptKey(44) && !f86::isPromptKey(51) && !f86::isPromptKey(0x70) && !f86::isPromptKey(0x8A),
-                  "F86f: keys 1 and 45..50 take the snap, the reticle (10), the weapon UI keys and the rest do not");
         }
         // G: the floor probe
         {
@@ -1270,18 +1119,557 @@ inline void run86(Check&& check) {
         sceneRows(Mat{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}}, zero3, 1.38, 1.38, 0.01, 0.002, 0.025, rows);
         const f85::Rows W = f85::rowsOfWorld(rows);
         double p[3];
-        check(f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 2.0, p), "F86f: a pixel at a view depth unprojects");
+        check(f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 2.0, p), "F86: a pixel at a view depth unprojects");
         double ndc[2], w = 0.0;
         check(f85::project(W, p, ndc, &w) && std::fabs(w - 2.0) < 1e-9 && std::fabs((ndc[0] * 0.5 + 0.5) * 512.0 - 100.5) < 1e-6 && std::fabs((0.5 - ndc[1] * 0.5) * 512.0 - 300.5) < 1e-6,
-              "F86f: the unprojected point projects back to the pixel's centre at its view depth");
+              "F86: the unprojected point projects back to the pixel's centre at its view depth");
         double o[3];
         check(f86::cameraOriginOfRows(W, o) && f85::len3(o) < 1e-9, "F86d: the eye's origin from its scene rows is where the rows put it");
-        check(!f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 0.0, p) && !f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 1e30, p), "F86f: a pixel at no depth, or at the far plane, does not unproject");
+        check(!f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 0.0, p) && !f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 1e30, p), "F86: a pixel at no depth, or at the far plane, does not unproject");
     }
     check(std::strcmp(f86::carryWhyText(f86::kCarried), "carried") == 0 && std::strcmp(f86::carryWhyText(f86::kCarryNoPose), "no pose") == 0 &&
-              std::strcmp(f86::carryWhyText(f86::kCarryOld), "over 3 frames") == 0 && std::strcmp(f86::carryWhyText(f86::kCarryHitch), "over 50 cm") == 0 &&
-              std::strcmp(f86::carryWhyText(f86::kCarryScope), "out of scope") == 0 && std::strcmp(f86::prevCaseText(f86::kPrevNeither), "neither") == 0,
+              std::strcmp(f86::carryWhyText(f86::kCarryOld), "over 3 frames") == 0 && std::strcmp(f86::carryWhyText(f86::kCarryHitch), "over 1.5 m") == 0 &&
+              std::strcmp(f86::carryWhyText(f86::kCarryScope), "out of scope") == 0 && std::strcmp(f86::prevCaseText(f86::kPrevWithPos), "with pos") == 0 &&
+              std::strcmp(f86::prevCaseText(f86::kPrevOther), "other") == 0,
           "F86a: the carry's status words are the second's line's");
+}
+
+
+#ifdef _WIN32
+// F87p: stand-ins for the game's functions and for the probes' callbacks, to run the emitted machine code (nofoot::f87::emitTrampoline, emitGetterStub).
+namespace stubrig {
+struct State {
+    uint64_t origArgs[7] = {};
+    double origD[3] = {};
+    uint64_t origRet = 0, recSlot = ~0ull, recRet = 0, recRegs[4] = {}, recStk[3] = {}, preArgs[4] = {}, postArgs[4] = {}, realArgs[3] = {};
+    int origCalls = 0, recCalls = 0, seq = 0, preAt = 0, realAt = 0, postAt = 0;
+    float pAtPre = 0.0f, pAtPost = 0.0f;
+    bool aligned = true;
+};
+inline State& st() {
+    static State s;
+    return s;
+}
+inline void clobber() {   // the callbacks use every xmm register they like
+    volatile double a = 1.0, b = 2.0, c = 3.0, d = 4.0, e = 5.0, f = 6.0, g = 7.0, h = 8.0;
+    for (int i = 0; i < 4; ++i) {
+        a = a * b + c;
+        b = c * d + e;
+        c = d * e + f;
+        d = e * f + g;
+        e = f * g + h;
+        f = g * h + a;
+        g = h * a + b;
+        h = a * b + c;
+    }
+}
+__forceinline bool enteredAligned() { return (reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()) % 16) == 8; }
+inline uint64_t fakeOrig(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e5, uint64_t e6, uint64_t e7) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    const uint64_t v[7] = {a, b, c, d, e5, e6, e7};
+    for (int i = 0; i < 7; ++i) s.origArgs[i] = v[i];
+    ++s.origCalls;
+    return 0xABCD0001ull;
+}
+inline uint64_t fakeOrigF(uint64_t a, double d1, double d2, double d3) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    s.origArgs[0] = a;
+    s.origD[0] = d1;
+    s.origD[1] = d2;
+    s.origD[2] = d3;
+    ++s.origCalls;
+    return 0xABCD0002ull;
+}
+inline void record(uint64_t slot, uint64_t ret, const uint64_t* regs, const uint8_t* stk) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    s.recSlot = slot;
+    s.recRet = ret;
+    for (int i = 0; i < 4; ++i) s.recRegs[i] = regs[i];
+    std::memcpy(s.recStk, stk + 0x20, sizeof(s.recStk));
+    ++s.recCalls;
+    clobber();
+}
+inline void pre(uint64_t a, uint64_t b, uint64_t c, uint64_t site) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    s.preArgs[0] = a;
+    s.preArgs[1] = b;
+    s.preArgs[2] = c;
+    s.preArgs[3] = site;
+    s.pAtPre = *reinterpret_cast<float*>(c);
+    s.preAt = ++s.seq;
+    clobber();
+}
+inline uint64_t real(uint64_t a, uint64_t b, uint64_t c) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    s.realArgs[0] = a;
+    s.realArgs[1] = b;
+    s.realArgs[2] = c;
+    *reinterpret_cast<float*>(c) = 5.0f;
+    s.realAt = ++s.seq;
+    return a + b + c;
+}
+inline void post(uint64_t a, uint64_t b, uint64_t c, uint64_t site) {
+    State& s = st();
+    s.aligned = s.aligned && enteredAligned();
+    s.postArgs[0] = a;
+    s.postArgs[1] = b;
+    s.postArgs[2] = c;
+    s.postArgs[3] = site;
+    s.pAtPost = *reinterpret_cast<float*>(c);
+    s.postAt = ++s.seq;
+    clobber();
+}
+}  // namespace stubrig
+#endif
+
+// ---- F87 ---------------------------------------------------------------------------------------------------------------------------------------------
+// The pure functions of src\d3d11\native_on_foot_f87.h. Design: reviews\native-onfoot-f87-review-2026-10-24.md.
+template <class Check>
+inline void run87(Check&& check) {
+    namespace f86 = edvr::nofoot::f86;
+    namespace f87 = edvr::nofoot::f87;
+    namespace nf = edvr::nofoot;
+    const double I3[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const double dt = 1.0 / 90.0;
+    // ---- H: the standing-height hold -----------------------------------------------------------------------------------------------------------
+    {   // a 10 cm slump held: the hold reaches +10 cm within 1 cm by 4 s, and the pin's eye does not move
+        f87::HeightHold h;
+        double e0 = 1.62, maxPinErr = 0.0, raiseAt1 = 0.0, raiseAt2 = 0.0, raiseAt3 = 0.0, raiseAt4 = 0.0, transientAt03 = 0.0, transientAt6 = 1.0, maxRate = 0.0, prevRaise = 0.0;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        for (int i = 0; i < 90; ++i) h.step(in);   // 1 s at the seat: dev 0
+        for (int i = 0; i < 90 * 6; ++i) {
+            in.devM = -0.10;
+            const f87::HoldOut o = h.step(in);
+            const double t = (i + 1) * dt;
+            const double eCam = e0 + in.devM + o.raiseM;   // the camera over the character's standing height
+            maxPinErr = std::max(maxPinErr, std::fabs(f87::pinEyeYAdjust(eCam, o.transientM, o.transientValid) - e0));
+            if (i == 89) raiseAt1 = o.raiseM;
+            if (i == 179) raiseAt2 = o.raiseM;
+            if (i == 269) raiseAt3 = o.raiseM;
+            if (i == 359) raiseAt4 = o.raiseM;
+            if (std::fabs(t - 0.3) < dt * 0.6) transientAt03 = o.transientM;
+            if (i == 90 * 6 - 1) transientAt6 = o.transientM;
+            if (i >= 90 && i % 90 == 0) {
+                maxRate = std::max(maxRate, std::fabs(o.raiseM - prevRaise));
+                prevRaise = o.raiseM;
+            }
+        }
+        check(std::fabs(raiseAt4 - 0.10) < 0.01 && raiseAt4 > 0.0, "F87h: a 10 cm slump held for 4 s is absorbed: the hold reads +10 cm within 1 cm");
+        check(maxPinErr < 1e-9, "F87h: while it is absorbed the pin's eye (camera less the transient) does not move: the body keeps the character's height");
+        check(transientAt03 < -0.085 && std::fabs(transientAt6) < 0.01, "F87h: the slump is seen at first (the view is 8.5+ cm down at 0.3 s) and undone: the transient is under 1 cm at 6 s");
+        check(raiseAt1 > 0.01 && raiseAt1 < raiseAt2 && raiseAt2 < raiseAt3 && raiseAt3 <= raiseAt4 + 1e-9 && maxRate <= 0.0415, "F87h: the hold rises steadily, at most 4 cm a second (the largest second's rise reads under 4.15 cm: 4 cm and a millimetre of rounding)");
+        check(f87::kHoldSlewMps == 0.04 && f87::kHoldStepM == 0.001 && f87::kHoldRampS == 0.5 && f87::kSettleDefaultS == 3.0, "F87h: the constants are 4 cm/s, 1 mm steps, a 0.5 s ramp and a 3 s default settle");
+    }
+    {   // a -60 degree nod with the neck still: the eye drops by the pivot's drop and the hold stays 0
+        const double pitch = -60.0 * f85::kPi / 180.0;
+        const double drop = nf::pinPitchRestUp(pitch, true) - nf::kPinRestUpM;
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        double worst = 0.0, worstDev = 0.0;
+        for (int i = 0; i < 90 * 5; ++i) {
+            in.devM = f87::devOf(0.0 + drop, 0.0, drop);   // the head's seated height is the seat's plus the drop of the pivot
+            worstDev = std::max(worstDev, std::fabs(in.devM));
+            worst = std::max(worst, std::fabs(h.step(in).raiseM));
+        }
+        check(drop < -0.15 && worstDev < 1e-12 && worst == 0.0, "F87h: a 60 degree nod with a still neck lowers the eye 15 cm about the pivot and the hold reads 0");
+    }
+    {   // a 5 cm bob of 0.3 s: at least 80% in the view, none in the pin
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        for (int i = 0; i < 90 * 2; ++i) h.step(in);
+        double worstView = 0.0, pinErr = 0.0;
+        for (int i = 0; i < 27; ++i) {   // 0.3 s
+            in.devM = -0.05;
+            const f87::HoldOut o = h.step(in);
+            worstView = std::max(worstView, std::fabs(in.devM + o.raiseM));
+            pinErr = std::max(pinErr, std::fabs(f87::pinEyeYAdjust(1.62 + in.devM + o.raiseM, o.transientM, o.transientValid) - 1.62));
+        }
+        check(worstView >= 0.04 && pinErr < 1e-9, "F87h: a 5 cm bob of 0.3 s is followed by the view (at least 4 cm of it) and not by the pin");
+    }
+    {   // the game's crouch moves F_root, not the head: the hold stays, the crouch weight reaches 1
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        double worst = 0.0;
+        for (int i = 0; i < 90 * 3; ++i) worst = std::max(worst, std::fabs(h.step(in).raiseM));
+        const double hStand = 1.62, eCrouched = hStand - 0.45;   // the camera follows F_root down 45 cm; the headset did not move
+        const f87::HoldOut o = h.step(in);
+        check(worst == 0.0 && std::fabs(f87::pinEyeYAdjust(eCrouched, o.transientM, o.transientValid) - eCrouched) < 1e-12 && nf::pinCrouchWeight(true, hStand, f87::pinEyeYAdjust(eCrouched, o.transientM, o.transientValid)) == 1.0,
+              "F87h: a game crouch leaves the hold at 0 and the pin sees the full crouch (the crouch weight is 1)");
+    }
+    {   // ADS: the filter freezes, the eye alignment is the hold plus the lock
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        in.devM = -0.08;
+        for (int i = 0; i < 90 * 5; ++i) h.step(in);
+        const f87::HoldOut before = h.step(in);
+        in.frozen = true;
+        in.devM = -0.20;
+        f87::HoldOut o;
+        for (int i = 0; i < 90 * 3; ++i) o = h.step(in);
+        check(before.raiseM > 0.07 && o.raiseM == before.raiseM && o.sustainedM == before.sustainedM, "F87h: in ADS the filter is frozen: a head that moves 12 cm more changes neither the sustained part nor the hold");
+        const double lockY = 0.013;
+        check(std::fabs(f87::eyeAlignY(0.0, lockY, 0.0, 0.0, o.eyeY) - (o.eyeY + lockY)) < 1e-15 && o.eyeY == -o.raiseM,
+              "F87h: the eye alignment's y is the hold's (the negative of the raise: the runtime moves the origin up to lower the view) plus the ADS lock");
+    }
+    {   // out of scope: the hold ramps to 0 in 0.5 s, in whole millimetres
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        in.devM = -0.09;
+        for (int i = 0; i < 90 * 8; ++i) h.step(in);
+        const double full = h.step(in).raiseM;
+        in.scope = false;
+        bool mm = true;
+        double at0 = 1.0, at05 = 1.0;
+        for (int i = 0; i < 60; ++i) {
+            const f87::HoldOut o = h.step(in);
+            mm = mm && std::fabs(o.raiseM * 1000.0 - std::round(o.raiseM * 1000.0)) < 1e-6 && std::fabs(o.eyeY * 1000.0 - std::round(o.eyeY * 1000.0)) < 1e-6;
+            if (i == 0) at0 = o.raiseM;
+            if (i == 45) at05 = o.raiseM;
+        }
+        const f87::HoldOut last = h.step(in);
+        check(full > 0.085 && at0 < full && at05 == 0.0 && last.raiseM == 0.0 && last.eyeY == 0.0 && !last.transientValid && mm,
+              "F87h: out of the pin's scope the hold is 0 within 0.5 s, in whole millimetres, and the cockpit publishes zeros");
+        in.scope = true;
+        double at05in = 0.0;
+        for (int i = 0; i < 46; ++i) at05in = h.step(in).raiseM;
+        check(at05in > 0.085 && at05in < 0.095, "F87h: entering the scope with a 9 cm slump the view is up 9 cm within 0.5 s (no 3 s drift at the start)");
+    }
+    {   // settle 0: the neck's height held hard; the clamp of the key
+        f87::HeightHold h;
+        f87::HoldIn in;
+        in.scope = true;
+        in.devValid = true;
+        in.dt = dt;
+        in.settleS = 0.0;
+        for (int i = 0; i < 90; ++i) h.step(in);
+        in.devM = -0.07;
+        f87::HoldOut o = h.step(in);
+        check(std::fabs(o.raiseM - 0.07) < 1e-9 && std::fabs(o.transientM) < 1e-9, "F87h: a settle time of 0 holds the neck hard: the raise is the whole deviation at once and the transient is 0");
+        check(f87::settleClamp(std::numeric_limits<double>::quiet_NaN()) == f87::kSettleDefaultS && f87::settleClamp(-1.0) == 0.0 && f87::settleClamp(20.0) == f87::kSettleMaxS && f87::settleClamp(3.0) == 3.0,
+              "F87h: the settle key reads 0..10 s, NaN reads the default 3");
+    }
+    {   // the measurement and the pin calibration's stillness gate
+        check(std::fabs(f87::devOf(0.05, -0.02, -0.10) - 0.13) < 1e-12, "F87h: dev is the seated height plus the eye alignment taken out, less the neck pivot's drop");
+        f87::StillGate g;
+        for (int i = 0; i < 90 * 2; ++i) g.step(true, (i % 2) ? 0.02 : -0.02, dt);
+        const bool movingNo = !g.ok;
+        for (int i = 0; i < 80; ++i) g.step(true, 0.003, dt);
+        const bool notYet = !g.ok;
+        for (int i = 0; i < 20; ++i) g.step(true, 0.003, dt);
+        check(movingNo && notYet && g.ok, "F87h: the pin's standing calibration waits until the view has been within 1 cm of the character's height for 1 s");
+        f87::HoldSecond sec;
+        sec.add(true, -0.08, -0.01, 0.846, true);
+        sec.add(true, -0.10, -0.02, 0.744, true);
+        sec.add(true, -0.09, -0.01, 0.745, true);
+        check(sec.n == 3 && sec.jumps == 1 && std::fabs(sec.maxStep - 0.102) < 1e-9 && std::fabs(sec.devMin + 0.10) < 1e-12 && std::fabs(sec.maxTransient - 0.02) < 1e-12,
+              "F87h: the second's figures: the largest step of the LOCAL height (10.2 cm), the steps over 2 cm, dev's range and the transient's largest");
+        f87::EyeRootSecond er;
+        const double rowsA[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        const double eye[3] = {0.032, 1.58, 0.21}, root[3] = {0.0, 1.60, 0.20};
+        er.add(eye, root, rowsA);
+        const double eye2[3] = {0.032, 1.52, 0.21};
+        er.add(eye2, root, rowsA);
+        check(er.n == 2 && std::fabs(er.last[0] - 0.032) < 1e-12 && std::fabs(er.last[1] + 0.08) < 1e-12 && std::fabs(er.upMin + 0.08) < 1e-12 && std::fabs(er.upMax + 0.02) < 1e-12,
+              "F87h: the eye over the weapon's root in the character's axes, with the second's up range");
+    }
+    // ---- A: the carry, its join, the cap, the floor probe, the hand residual -----------------------------------------------------------------------
+    {
+        f87::Ring<int, 64> ring;
+        ring.post(10, 100);
+        ring.post(11, 111);
+        int v = 0;
+        check(ring.get(10, &v) && v == 100 && ring.get(11, &v) && v == 111 && !ring.get(12, &v) && !ring.get(10 + 64, &v) && !ring.get(9, &v),
+              "F87a: the optic record joins the carry by the pose's game frame (the submit of that frame): a frame not yet posted, or one a ring older, is not found");
+    }
+    {   // 1.2 m is carried, 1.6 m is refused
+        float F[2][16], M[2][16];
+        const double Fa[3] = {0, 0, 0}, Ma[3] = {0, -1, 0};
+        for (double step : {1.2, 1.6}) {
+            const double Fb[3] = {0, step, 0};
+            putMat(F[0], I3, Fa);
+            putMat(F[1], I3, Fb);
+            putMat(M[0], I3, Ma);
+            putMat(M[1], I3, Ma);
+            f86::PoseIn pose;
+            pose.have = true;
+            pose.p1 = 5;
+            std::memcpy(pose.m3p, M[0], sizeof(pose.m3p));
+            std::memcpy(pose.froot, F[0], sizeof(pose.froot));
+            pose.eyeOk = true;
+            pose.eye[1] = 1.6f;
+            f86::CarryFrame fr;
+            fr.p1 = 6;
+            std::memcpy(fr.m3p, M[1], sizeof(fr.m3p));
+            std::memcpy(fr.froot, F[1], sizeof(fr.froot));
+            for (int j = 0; j < 3; ++j) fr.rec[j] = Ma[j];
+            const f86::CarryResult r = f86::poseCarry(pose, fr, true);
+            if (step < 1.5) check(r.why == f86::kCarried && std::fabs(f85::len3(r.delta) - 1.2) < 1e-6, "F87a: a 1.2 m delta (a take-off or a landing) is carried");
+            else check(r.why == f86::kCarryHitch && f85::len3(r.delta) == 0.0, "F87a: a 1.6 m delta is refused (over 1.5 m) and nothing is moved");
+        }
+    }
+    {
+        float m[16];
+        const double t[3] = {1, 2, 3};
+        putMat(m, I3, t);
+        check(f87::affineFinite(m), "F87a: a matrix with finite affine entries is accepted");
+        m[3] = m[7] = m[11] = std::numeric_limits<float>::quiet_NaN();
+        m[15] = std::numeric_limits<float>::infinity();
+        check(f87::affineFinite(m), "F87a: NaN in the padding words (3, 7, 11, 15) is accepted: the floor probe no longer refuses M3P from 02:35:11 on");
+        m[13] = std::numeric_limits<float>::quiet_NaN();
+        check(!f87::affineFinite(m), "F87a: NaN in an affine entry is refused");
+    }
+    {   // the hand residual: 0 when the carry is exactly the change, the carry's size without it, the turn applied
+        const double target[3] = {0.20, 1.40, 0.50}, wrist[3] = {0.10, 1.30, 0.30};
+        double Rm[3][3];
+        const double c90 = 0.0, s90 = 1.0;   // rotY(90): row 0 (1,0,0) -> (0,0,-1), row 2 (0,0,1) -> (1,0,0)
+        const double Ry[3][3] = {{c90, 0, -s90}, {0, 1, 0}, {s90, 0, c90}};
+        std::memcpy(Rm, Ry, sizeof(Rm));
+        float m[16];
+        const double z3[3] = {};
+        putMat(m, Rm, z3);
+        // (target - wrist) = (0.10, 0.10, 0.20); times R: x' = 0.10*0 + 0.10*0 + 0.20*1 = 0.20; y' = 0.10; z' = 0.10*(-1) = -0.10
+        const double want[3] = {0.20, 0.10, -0.10};
+        check(std::fabs(f87::handResidualCm(target, wrist, m, want)) < 1e-9, "F87a: the hand residual is 0 when the carry written is the change of the hand in the world");
+        const double none[3] = {};
+        check(std::fabs(f87::handResidualCm(target, wrist, m, none) - 100.0 * std::sqrt(0.04 + 0.01 + 0.01)) < 1e-9, "F87a: with no carry the residual is the hand's change, turned by M3P, in cm");
+        f87::HandSecond hs;
+        hs.add(0, 1.0, 0);
+        hs.add(0, 3.0, 0);
+        hs.add(1, 2.0, 2);
+        hs.add(1, -1.0, 2);
+        check(hs.n[0] == 2 && hs.n[1] == 1 && hs.mx[0] == 3.0 && std::fabs(hs.sum[0] - 4.0) < 1e-12 && hs.binN[0][0] == 2 && hs.binN[2][1] == 1 && f87::fpFrameBucket(-1) == 0 &&
+                  f87::fpFrameBucket(0) == 1 && f87::fpFrameBucket(1) == 2 && f87::fpFrameBucket(7) == 3,
+              "F87a: the second's residual figures by hand and speed bin (a negative residual is not counted), and the FP-frame buckets");
+    }
+    // ---- C: the stream windows' history and escalation ---------------------------------------------------------------------------------------------
+    {
+        const uint32_t total = 196608;
+        f87::ClusterHist hist;
+        f87::WinPlan p;
+        f87::planWindows(hist, true, 100000, total, &p);
+        check(p.windows == 1 && p.f85 == 1 && p.history == 0 && p.n[0] == f87::kF85Entries && p.holds(100000 - 4090) && p.holds(100000 + 4090) && !p.holds(100000 + 4100),
+              "F87c: F85's window (8192 entries about the newest entry) is always in the plan, with no history yet");
+        // three layouts cycling one per frame: only the first cycle misses
+        int misses = 0, lateMisses = 0;
+        uint32_t centre = ~0u;
+        const uint32_t base[3] = {20000, 60000, 140000};
+        f87::ClusterHist h;
+        for (uint32_t f = 0; f < 60; ++f) {
+            f87::WinPlan plan;
+            h.expire(f);
+            f87::planWindows(h, centre != ~0u, centre, total, &plan);
+            const uint32_t entry = base[f % 3] + 5 * (f % 7);
+            if (!plan.holds(entry)) {
+                ++misses;
+                if (f >= 3) ++lateMisses;
+            }
+            h.add(entry, f);
+            centre = entry;
+        }
+        check(misses == 3 && lateMisses == 0, "F87c: three layouts cycling one a frame: only the first cycle misses (3 draws), every later frame is covered by the history");
+        // escalation covers all
+        f87::Escalation esc;
+        esc.outside(100);
+        bool on = true;
+        for (uint32_t f = 100; f <= 108; ++f) on = on && esc.active(f);
+        check(on && !esc.active(109) && !esc.active(300), "F87c: a draw outside the windows holds the whole stream for 8 frames, then not");
+        f87::WinPlan full;
+        full.full = true;
+        check(full.full && f87::kEscalateFrames == 8 && f87::kKeepFrames == 64, "F87c: the escalation lasts 8 frames and the history 64");
+    }
+    {
+        const uint32_t total = 196608;
+        f87::ClusterHist h;
+        for (uint32_t i = 0; i < 12; ++i) h.add(5000u * (i + 1), 10 + i);   // 12 clusters 5000 apart
+        f87::WinPlan p;
+        f87::planWindows(h, true, 100, total, &p);
+        uint64_t bytes = 0;
+        bool even = true, contiguous = true;
+        uint32_t offAt = 0;
+        for (uint32_t w = 0; w < p.windows; ++w) {
+            bytes += static_cast<uint64_t>(p.n[w]) * 8u;
+            even = even && (p.lo[w] % 2u) == 0u && (p.n[w] % 2u) == 0u && (w == 0 ? p.n[w] <= f87::kF85Entries : p.n[w] <= f87::kWinEntries);
+            contiguous = contiguous && p.off[w] == offAt;
+            offAt += p.n[w];
+        }
+        check(p.windows == f87::kWinMax && p.history == f87::kHistWindows && p.dropped >= 5 && bytes <= static_cast<uint64_t>(f87::kWinCapEntries) * 8u && even && contiguous,
+              "F87c: at most 1 + 6 windows an eye (256 KB), even starts and lengths, laid end to end in the eye's buffer; the clusters past them are counted as dropped");
+        // the most recently seen clusters are the ones kept
+        check(p.holds(5000u * 12u) && p.holds(5000u * 8u) && !p.holds(5000u * 2u), "F87c: when the windows run out the newest clusters are kept and the oldest dropped");
+        h.expire(10 + 11 + 65);
+        check(h.count() == 0, "F87c: clusters not drawn for 64 frames leave the history");
+        f87::ClusterHist m;
+        m.add(1000, 1);
+        m.add(1010, 2);
+        const uint32_t one = m.count();
+        m.add(30000, 3);
+        const uint32_t two = m.count();
+        m.add(1000 + 2048, 4);
+        m.add(1000 + 2 * 2048, 5);
+        m.add(1000 + 3 * 2048, 5);
+        check(one == 1 && two == 2 && m.count() == 2, "F87c: entries within 2048 of a cluster join it (10 apart: one), 29000 apart open another, a chain of near entries extends one cluster");
+        f87::ClusterHist wide;
+        for (uint32_t x = 0; x <= 10000; x += 1500) wide.add(x, 1);
+        f87::planWindows(wide, false, 0, total, &p);
+        bool all = true;
+        for (uint32_t x = 0; x <= 10000; x += 1500) all = all && p.holds(x);
+        check(p.clusters == 1 && p.windows == 3 && all, "F87c: a cluster wider than a window is covered by windows end to end");
+        f87::planWindows(wide, true, 5000, 1000, &p);
+        check(p.windows >= 1 && p.lo[0] == 0 && p.n[0] <= 1000 && p.distance(500) == 0u, "F87c: a buffer smaller than a window is copied from its start");
+        f87::planWindows(f87::ClusterHist{}, false, 0, total, &p);
+        check(p.windows == 0 && !p.holds(0) && p.distance(5) == ~0u, "F87c: no entries, no windows");
+    }
+    // ---- F: the scene rows' fallback ---------------------------------------------------------------------------------------------------------------
+    {
+        float a[20], b[20];
+        for (int i = 0; i < 20; ++i) a[i] = b[i] = 1.0f + static_cast<float>(i) * 0.25f;
+        check(f87::rowsMaxDiff(a, b) == 0.0, "F87f: identical rows differ by 0");
+        b[5] += 2e-5f;
+        check(std::fabs(f87::rowsMaxDiff(a, b) - 2e-5) < 5e-6, "F87f: the largest absolute difference of the 20 values is reported");
+        b[5] = std::numeric_limits<float>::quiet_NaN();
+        check(f87::rowsMaxDiff(a, b) > 1e29, "F87f: a NaN counts as infinite");
+        f87::FbGuard g;
+        check(g.compare(0.0) && g.compare(9e-6) && !g.latchedOff && g.both == 2, "F87f: a match is accepted: the fallback stays on");
+        check(!g.compare(2e-5) && g.latchedOff && g.mismatches == 1 && std::fabs(g.maxDiff - 2e-5) < 1e-12, "F87f: one difference over 1e-5 latches the fallback off");
+        check(!g.compare(0.0) && g.latchedOff, "F87f: and it stays off");
+        check(f87::fallbackPair(f87::kFbVs, f87::kFbPs) && !f87::fallbackPair(f87::kFbVs, 0) && !f87::fallbackPair(0, f87::kFbPs) && f87::kFbVs == 0xF516BF0201303B87ull && f87::kFbPs == 0xB40B0462256E31C2ull,
+              "F87f: the fallback is the depth prepass pair F516BF02 / B40B0462");
+    }
+
+#ifdef _WIN32
+    {   // the emitted machine code, run (the very bytes the hooks install)
+        using namespace stubrig;
+        uint8_t* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        check(page != nullptr, "F87p: executable memory for the stub rig");
+        if (page) {
+            size_t at = 0;
+            // a trampoline in front of a 7-argument game function: all seven arguments, the return value and the stack alignment reach it exactly as given
+            uint8_t* t1 = page + at;
+            at += f87::emitTrampoline(page + at, reinterpret_cast<uint64_t>(&fakeOrig), 1, reinterpret_cast<uint64_t>(&record));
+            at = (at + 15) & ~static_cast<size_t>(15);
+            uint8_t* t2 = page + at;
+            at += f87::emitTrampoline(page + at, reinterpret_cast<uint64_t>(&fakeOrigF), 2, reinterpret_cast<uint64_t>(&record));
+            at = (at + 15) & ~static_cast<size_t>(15);
+            uint8_t* g1 = page + at;
+            at += f87::emitGetterStub(page + at, reinterpret_cast<uint64_t>(&real), 2, reinterpret_cast<uint64_t>(&pre), reinterpret_cast<uint64_t>(&post));
+            FlushInstructionCache(GetCurrentProcess(), page, at);
+            State& s = st();
+            s = State{};
+            using Fn7 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+            const uint64_t r = reinterpret_cast<Fn7>(t1)(0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777);
+            check(s.origCalls == 1 && s.origArgs[0] == 0x1111 && s.origArgs[1] == 0x2222 && s.origArgs[2] == 0x3333 && s.origArgs[3] == 0x4444 && s.origArgs[4] == 0x5555 &&
+                      s.origArgs[5] == 0x6666 && s.origArgs[6] == 0x7777 && r == 0xABCD0001ull,
+                  "F87p: the vtable trampoline hands the game's function its seven arguments (registers and stack) and returns its value unchanged");
+            check(s.recCalls == 1 && s.recSlot == 1 && s.recRegs[3] == 0x1111 && s.recRegs[2] == 0x2222 && s.recRegs[1] == 0x3333 && s.recRegs[0] == 0x4444 && s.recStk[0] == 0x5555 &&
+                      s.recStk[1] == 0x6666 && s.recStk[2] == 0x7777 && s.recRet != 0,
+                  "F87p: the record gets the slot, the return address and the saved r9, r8, rdx, rcx, and the caller's fifth to seventh arguments from its shadow space's end");
+            check(s.aligned, "F87p: the game's function and the callbacks are all entered with the stack 16-byte aligned");
+            s = State{};
+            using FnF = uint64_t (*)(uint64_t, double, double, double);
+            const uint64_t rf = reinterpret_cast<FnF>(t2)(0x77, 1.25, 2.5, 3.75);
+            check(s.origCalls == 1 && s.origArgs[0] == 0x77 && s.origD[0] == 1.25 && s.origD[1] == 2.5 && s.origD[2] == 3.75 && rf == 0xABCD0002ull && s.recSlot == 2 && s.aligned,
+                  "F87p: xmm0..3 survive the record (which uses every xmm register): a float argument reaches the game's function unchanged");
+            s = State{};
+            float p = 1.0f;
+            using FnG = uint64_t (*)(uint64_t, uint64_t, uint64_t);
+            const uint64_t rg = reinterpret_cast<FnG>(g1)(0xAA, 0xBB, reinterpret_cast<uint64_t>(&p));
+            const uint64_t pp = reinterpret_cast<uint64_t>(&p);
+            check(s.preAt == 1 && s.realAt == 2 && s.postAt == 3 && s.preArgs[0] == 0xAA && s.preArgs[1] == 0xBB && s.preArgs[2] == pp && s.preArgs[3] == 2 && s.realArgs[0] == 0xAA &&
+                      s.realArgs[1] == 0xBB && s.realArgs[2] == pp && s.postArgs[0] == 0xAA && s.postArgs[1] == 0xBB && s.postArgs[2] == pp && s.postArgs[3] == 2,
+                  "F87p: the getter stub calls pre, the game's getter, then post, each with the registers the game's call had (and the site)");
+            check(s.pAtPre == 1.0f && s.pAtPost == 5.0f && p == 5.0f && rg == 0xAA + 0xBB + pp && s.aligned,
+                  "F87p: pre sees the point before the game's call, post the point after it; the game's result comes back in rax; everything is entered aligned");
+            VirtualFree(page, 0, MEM_RELEASE);
+        }
+    }
+#endif
+    // ---- P: the prompt probes: the pins (the 334925 address table), roles, geometry --------------------------------------------------------------------
+    {
+        bool lens = true;
+        for (uint32_t i = 0; i < f87::kPinCount; ++i) lens = lens && f87::kPins[i].len >= 3 && f87::kPins[i].len <= 16 && f87::kPins[i].rva > 0x100000u;
+        check(lens && f87::kPinCount == 15, "F87p: 15 pins, each 3..16 bytes long");
+        check(f87::callTarget(f87::kPins[f87::kPinFocusGetter].rva, f87::kPins[f87::kPinFocusGetter].bytes) == f87::kGetterFocus &&
+                  f87::callTarget(f87::kPins[f87::kPinNearbyGetter].rva, f87::kPins[f87::kPinNearbyGetter].bytes) == f87::kGetterNearby &&
+                  f87::callTarget(f87::kPins[f87::kPinTargetGetter].rva, f87::kPins[f87::kPinTargetGetter].bytes) == f87::kGetterNearby,
+              "F87p: the three getter calls decode to 0x191F140 (focus) and 0x1A43230 (nearby, target)");
+        check(f87::kSlotUpdateIndicator == 0x520B2E8u + 0x48u && f87::kSlotSetMarker == 0x520B2E8u + 0x50u && f87::kSlotUpdateMarker == 0x520B2E8u + 0x60u &&
+                  f87::kPins[3].bytes[2] == 0x50 && f87::kPins[4].bytes[2] == 0x50 && f87::kPins[5].bytes[2] == 0x50,
+              "F87p: the swapped slots are +0x48, +0x50 and +0x60 of the interface at 0x520B2E8, and the three SetMarker calls read call [rax+0x50]");
+        check(f87::roleOfReturn(0x1AA9DE4) == f87::kRoleFocus && f87::roleOfReturn(0x1AA9F67) == f87::kRoleFocusHidden && f87::roleOfReturn(0x1A9E27D) == f87::kRoleNearby &&
+                  f87::roleOfReturn(0x1AA4D66) == f87::kRoleTarget && f87::roleOfReturn(0x1A9E74D) == f87::kRoleList && f87::roleOfReturn(0x1234) == f87::kRoleOther &&
+                  f87::kPins[3].rva + 3 == 0x1AA9DE4u && f87::kPins[4].rva + 3 == 0x1A9E27Du && f87::kPins[5].rva + 3 == 0x1AA4D66u,
+              "F87p: the roles come from the return addresses (the pinned calls plus 3)");
+    }
+    {
+        f87::Box box;
+        box.mn[0] = box.mn[1] = box.mn[2] = -0.5;
+        box.mx[0] = box.mx[1] = box.mx[2] = 0.5;
+        const double t[3] = {10.0, 2.0, -5.0};
+        putMat(box.world, I3, t);
+        const double cam[3] = {10.0, 2.0, -3.0};   // 2 m in front, on +z
+        const f87::BoxFace f = f87::boxFaceFacing(box, cam);
+        const double P[3] = {10.0, 2.0, -5.0};   // the box's centre (the bounding-box branch)
+        double Pp[3];
+        check(f.ok && f.axis == 2 && f.sign > 0.0 && std::fabs(f.h - 0.5) < 1e-12 && f87::boxFrontPoint(box, f, P, Pp) && std::fabs(Pp[2] - (-4.5)) < 1e-12 && std::fabs(Pp[0] - 10.0) < 1e-12,
+              "F87p: a box facing the camera on +z gives the +z face; the centre carried along the normal lands on the face (half an extent in front)");
+        // a node 5 cm inside the face, off centre: P' keeps the lateral place and lands on the face plane
+        const double Pn[3] = {10.2, 2.1, -4.55};
+        check(f87::boxFrontPoint(box, f, Pn, Pp) && std::fabs(Pp[0] - 10.2) < 1e-12 && std::fabs(Pp[1] - 2.1) < 1e-12 && std::fabs(Pp[2] + 4.5) < 1e-12,
+              "F87p: a node 5 cm behind the face and off centre moves 5 cm along the normal onto the face, nothing laterally");
+        // a turned and scaled box: the normal is the model's axis in the world, the extent includes the scale
+        double R[3][3];
+        const double a = 30.0 * f85::kPi / 180.0;
+        const double Rz[3][3] = {{0.5 * std::cos(a), 0.5 * std::sin(a), 0}, {-0.5 * std::sin(a), 0.5 * std::cos(a), 0}, {0, 0, 0.5}};
+        std::memcpy(R, Rz, sizeof(R));
+        f87::Box b2;
+        b2.mn[0] = b2.mn[1] = b2.mn[2] = -1.0;
+        b2.mx[0] = b2.mx[1] = b2.mx[2] = 1.0;
+        putMat(b2.world, R, t);
+        const double cam2[3] = {10.0 + 3.0 * std::cos(a), 2.0 + 3.0 * std::sin(a), -5.0};   // along the box's +x axis
+        const f87::BoxFace f2 = f87::boxFaceFacing(b2, cam2);
+        double C2[3], P2[3];
+        f87::boxCentre(b2, C2);
+        const double Pq[3] = {C2[0] - 0.05 * f2.n[0], C2[1] - 0.05 * f2.n[1], C2[2] - 0.05 * f2.n[2]};
+        const bool ok2 = f87::boxFrontPoint(b2, f2, Pq, P2);
+        const double onPlane = (P2[0] - C2[0]) * f2.n[0] + (P2[1] - C2[1]) * f2.n[1] + (P2[2] - C2[2]) * f2.n[2];
+        const double moved = (P2[0] - Pq[0]) * f2.n[0] + (P2[1] - Pq[1]) * f2.n[1] + (P2[2] - Pq[2]) * f2.n[2];
+        check(f2.ok && f2.axis == 0 && ok2 && std::fabs(f2.h - 0.5) < 1e-6 && std::fabs(onPlane - 0.5) < 1e-6 && std::fabs(moved - 0.55) < 1e-6,
+              "F87p: a turned, half-scale box: the face is the model's x axis in the world, 0.5 m (the scale) from the centre, and the point moves 0.55 m along it");
+        const float inside[3] = {0.0f, 0.0f, 0.01f}, near2[3] = {1e-7f, -1e-7f, 0.01f}, off[3] = {0.0f, 0.0f, 0.02f};
+        check(f87::cameraLocal(inside) && f87::cameraLocal(near2) && !f87::cameraLocal(off), "F87p: the label's record is camera-local (0, 0, 0.01) within 1e-6");
+        f87::LabelCensus lc;
+        char txt[96];
+        lc.text(txt, sizeof(txt));
+        const bool none = std::strcmp(txt, "none") == 0;
+        for (int i = 0; i < 2; ++i) lc.index(3600);
+        for (int i = 0; i < 2; ++i) lc.index(624);
+        lc.text(txt, sizeof(txt));
+        check(none && std::strcmp(txt, "3600:2 624:2") == 0, "F87p: the label's index counts are listed as count:draws (3600 and 624 are the two the F85 dump showed), none when there are none");
+        check(f87::kLabelVs == 0xB10B032BDFD46700ull && f87::kLabelPs == 0xDB899F4BD577F2E5ull, "F87p: the label's shaders are VS B10B032BDFD46700 and PS DB899F4BD577F2E5");
+    }
 }
 
 }  // namespace f85test

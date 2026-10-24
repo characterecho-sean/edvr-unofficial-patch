@@ -4393,6 +4393,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // delta), bound inside the layer's bracket for the game's own issue and the layer's second issues alone; End below, after them, puts the
     // game's b0 back. Begin binds nothing unless the draw tee decided this very draw. Two loads while off.
     const bool markerFixed = layered && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
+    if (owner && nativeOnFootMarkerProbeLive()) nativeOnFootLabelIssue(self, layered);   // F87p: the label instrument's issue facts (read only)
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.
     // Here and not in the on-foot branch above, which returns before the verdict's Begin: kBackdrop's slot swap is in place by now, and the splash

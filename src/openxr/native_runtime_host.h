@@ -57,6 +57,7 @@
 #include "openvr_system.h"
 #include "system_publication.h"
 #include "head_locator.h"
+#include "head_track_probe.h"   // F87h: the headset's tracking, one line a second (read only)
 #include "pose_gap.h"
 #include "runtime_gate.h"
 #include "frame_pacer.h"
@@ -424,6 +425,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
   const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
   uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
+  // F87h (read only): the head in the natural space and where LOCAL sits in it, sampled at each WaitGetPoses once the native frame provider is acquired.
+  headtrack::Probe headProbe;uint64_t headProbeLineMs=0,headProbeLocalMs=0,headProbeEventsAtLine=0;
   const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
   PressInfo seatTracePress{};bool seatTraceHasPress=false;      // the HMD key press that went with the reset being traced (seat_memory.h PressInfo)
   bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
@@ -3407,9 +3410,42 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           (unsigned long long)adsPivotMoves,(unsigned long long)adsRefusals,seatRadToDeg(lookComp),adsPivot[0],adsPivot[1],adsPivot[2],adsWhy);
     }
   }
+  // F87h (read only): WaitGetPoses, no frame open. The VIEW space in the natural space every poll (its step in y, its tracking flags), LOCAL in the natural space
+  // ten times a second (STAGE natural only: with LOCAL natural the two are the same space), and one line a second. Changes nothing.
+  void headTrackSample() {
+    if(!eyeProviderSeen||!features.acquired()||!session||!local)return;
+    const uint64_t now=GetTickCount64();
+    constexpr XrSpaceLocationFlags posBit=XR_SPACE_LOCATION_POSITION_TRACKED_BIT,oriBit=XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    if(HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,h,&t,counterNow,nullptr,boundary.estimateNow())==XR_SUCCESS) {
+      const double pos[3]={h.pose.position.x,h.pose.position.y,h.pose.position.z};
+      const double q[4]={h.pose.orientation.x,h.pose.orientation.y,h.pose.orientation.z,h.pose.orientation.w},back[3]={0,0,-1};
+      double fwd[3];seatQuatApply(q,back,fwd);
+      headProbe.noteView((h.locationFlags&posBit)!=0,(h.locationFlags&oriBit)!=0,pos,seatRadToDeg(std::asin(std::fmax(-1.0,std::fmin(1.0,fwd[1])))));
+    }
+    if(seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE&&xrLocal&&now-headProbeLocalMs>=100) {
+      headProbeLocalMs=now;
+      XrSpaceLocation lo{XR_TYPE_SPACE_LOCATION};
+      if(HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,xrLocal,local,0,lo,nullptr,counterNow,nullptr,boundary.estimateNow())==XR_SUCCESS) {
+        const double pos[3]={lo.pose.position.x,lo.pose.position.y,lo.pose.position.z};
+        headProbe.noteLocal(pos,seatRadToDeg(seatPoseYawOf(lo.pose).yaw));
+      }
+    }
+    if(headProbeLineMs==0)headProbeLineMs=now;
+    if(now-headProbeLineMs>=1000) {
+      headProbeLineMs=now;
+      const headtrack::Probe& p=headProbe;
+      nativeTracePrintf("head tracking (F87h, runtime) 1 s: VIEW in STAGE (%.3f %.3f %.3f) pitch %+.1f; LOCAL in STAGE (%.3f %.3f %.3f) yaw %+.2f moved %.1f mm; tracked pos %u/%u orient %u/%u; "
+          "space-change events %u; max |dy| a frame %.1f cm\n",p.view[0],p.view[1],p.view[2],p.pitchDeg,p.local[0],p.local[1],p.local[2],p.localYawDeg,p.localMovedMm(),
+          p.posTracked,p.posN,p.oriTracked,p.oriN,unsigned(referenceChanges-headProbeEventsAtLine),p.maxDy*100.0);
+      headProbeEventsAtLine=referenceChanges;
+      headProbe.lineDone();
+    }
+  }
   // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
   bool seatPoll() {
     if(GetCurrentThreadId()!=ownerThread)return false;
+    headTrackSample();   // F87h (read only)
     seatEnsureLoaded();
     const uint64_t now=GetTickCount64();
     if(!seatRefsTraced)seatTraceReferenceSpaces();
