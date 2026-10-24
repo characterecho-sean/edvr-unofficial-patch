@@ -201,6 +201,8 @@ REM (docs\design-sagittarius-a-2026-09-30.md) are the physics those shaders are
 REM held to; focus_watch is the guard run_jobs holds every rig to (no window, no
 REM console, no keyboard-focus move) and its self-test starts it on real
 REM processes; check_status_blocks (plain) checks the docs' Status blocks;
+REM check_tool_conventions (plain) holds every tools\*.py to its --self-test and
+REM to this gate, and steam_library.py to being the one Steam search;
 REM check_config_contract (plain) holds the keys the code reads, edvr.ini and the
 REM log text to one another -- it reads only src\ and edvr.ini.
 python tools\run_jobs.py ^
@@ -220,6 +222,8 @@ python tools\run_jobs.py ^
     --gate "tools\check_status_blocks.py" ^
     --gate "tools\check_agent_material.py --self-test" ^
     --gate "tools\check_agent_material.py" ^
+    --gate "tools\check_tool_conventions.py --self-test" ^
+    --gate "tools\check_tool_conventions.py" ^
     --gate "tools\layer_fixtures.py --self-test" ^
     --gate "tools\blackhole_optics.py --self-test" ^
     --gate "tools\sgra_optics.py --self-test" ^
