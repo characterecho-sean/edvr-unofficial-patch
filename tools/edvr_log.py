@@ -10847,6 +10847,40 @@ def _hj_f95b_label(rows, ctx):
     return ("PARTIAL" if refused * 2 > draws else "OK", text)
 
 
+def _hj_f97b_size(rows, ctx):
+    """F97b: the label drawn as a panel at its anchor facing the eye. By the label's angle off the eye's axis (0-10, 10-20, 20-30, 30+ deg): its size against the
+    panel's as the game drew it (one NDC size: cos^2 across and cos up off the axis) and as drawn (1 when the size map took). A label never sized is NEVER APPLIED; a
+    bin of 20 draws or more whose drawn width or height is 5% off the panel's, or most labels left unsized, is PARTIAL."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    moved, sized, refused, proj, rng = (_hsum(sec, k) for k in ("moved", "sized", "refused", "proj", "range"))
+    n = [sum(int(r["n%d" % b]) for r in sec) for b in range(4)]
+
+    def wm(key, b):
+        return sum(float(r["%s%d" % (key, b)]) * int(r["n%d" % b]) for r in sec) / n[b] if n[b] else 0.0
+
+    def row(key):
+        return "/".join("%.3f" % wm(key, b) if n[b] else "-" for b in range(4))
+    widest = max(float(r["widest"]) for r in sec)
+    text = ("labels moved %d, sized %d, refused %d (no projection %d, out of range %d) over %d eye-seconds; by the angle off the eye's axis 0-10/10-20/20-30/30+ deg: "
+            "draws %s; the game's size against a panel's: width %s height %s; as drawn: width %s height %s; widest %.1f deg") % (
+        moved, sized, refused, proj, rng, len(sec), "/".join(str(x) for x in n), row("gw"), row("gh"), row("dw"), row("dh"), widest)
+    if moved == 0:
+        return ("IDLE", text + "; no label was moved")
+    if sized == 0:
+        return ("NEVER APPLIED", text + "; no label was sized (%s)" % ("out of range" if rng >= proj else "no projection"))
+    off = ["%s deg %s %.3f" % (("0-10", "10-20", "20-30", "30+")[b], k, wm(k2, b)) for b in range(4) if n[b] >= 20
+           for k, k2 in (("width", "dw"), ("height", "dh")) if abs(wm(k2, b) - 1.0) > 0.05]
+    if off:
+        return ("PARTIAL", text + "; the label still changes size: " + ", ".join(off))
+    if sized * 2 < moved:
+        return ("PARTIAL", text + "; most labels were left at the game's size")
+    if not (n[2] or n[3]):
+        text += "; no label was seen 20 deg or more off the axis (a head turn tests it)"
+    return ("OK", text)
+
+
 def _hj_label(rows, ctx):
     sec, refuse = rows.get("sec", []), rows.get("refuse", [])
     if not sec and not refuse:
@@ -11163,6 +11197,13 @@ HEALTH_RULES = (
                 r"(?P<pstepmax>[\d.]+) max mm, the eyes' difference (?P<eyed>[\d.]+) mean (?P<eyedmax>[\d.]+) max px over (?P<eyen>\d+) frames"
                 r"(?:; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?"),
     ), _hj_f95b_label),
+    _hrule("label size (F97b)", ("F97b",), ("label size (F97b)",), (
+        ("sec", r"label size \(F97b\) eye (?P<eye>\d) 1 s: labels moved (?P<moved>\d+), sized (?P<sized>\d+), refused (?P<refused>\d+) \(no projection (?P<proj>\d+), out "
+                r"of range (?P<range>\d+)\); by the angle off the eye's axis 0-10/10-20/20-30/30\+ deg: draws (?P<n0>\d+)/(?P<n1>\d+)/(?P<n2>\d+)/(?P<n3>\d+); the game's "
+                r"size against the panel's: width (?P<gw0>[\d.]+)/(?P<gw1>[\d.]+)/(?P<gw2>[\d.]+)/(?P<gw3>[\d.]+) height (?P<gh0>[\d.]+)/(?P<gh1>[\d.]+)/(?P<gh2>[\d.]+)/"
+                r"(?P<gh3>[\d.]+); as drawn: width (?P<dw0>[\d.]+)/(?P<dw1>[\d.]+)/(?P<dw2>[\d.]+)/(?P<dw3>[\d.]+) height (?P<dh0>[\d.]+)/(?P<dh1>[\d.]+)/(?P<dh2>[\d.]+)/"
+                r"(?P<dh3>[\d.]+); the record's depth over its distance [\d./]+; widest (?P<widest>[\d.]+) deg"),
+    ), _hj_f97b_size),
     _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
         ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
         ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
@@ -12105,6 +12146,7 @@ def self_test_health():
     DO = "marker design offset (F93c)"
     D94 = "marker design offset (F94b)"
     D95 = "marker design offset (F95b)"
+    S97 = "label size (F97b)"
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
@@ -12635,6 +12677,22 @@ def self_test_health():
         check("F95b label: mostly refused", [label95(90, 30, stale=60)], 0, [("PARTIAL", D95)])
         check("F95b label: moved, but the anchor at rest is off P (the anchor model is wrong)", [label95(rest=6.5, restmax=7.0)] * 2, 0, [("PARTIAL", D95)],
               has=["the anchor at rest is 6.50 px off P"])
+
+        # F97b: the label's size against a panel at its anchor facing the eye, by its angle off the eye's axis
+        def size97(moved=84, sized=84, proj=0, rng=0, n=(30, 30, 14, 10), gw=(0.99, 0.93, 0.80, 0.64), gh=(0.99, 0.96, 0.89, 0.80), dw=(1.0, 1.0, 1.0, 1.0),
+                   dh=(1.0, 1.0, 1.0, 1.0), widest=38.0, eye=0):
+            return R("label size (F97b) eye %d 1 s: labels moved", eye, moved, sized, proj + rng, proj, rng, *n, *gw, *gh, *dw, *dh, 0.99, 0.95, 0.89, 0.81, widest)
+
+        check("F97b size: every label the panel's size across the turn", [size97(), size97(eye=1, widest=41.0)], 0, [("OK", S97)],
+              has=["labels moved 168, sized 168, refused 0 (no projection 0, out of range 0) over 2 eye-seconds; by the angle off the eye's axis 0-10/10-20/20-30/30+ deg: "
+                   "draws 60/60/28/20; the game's size against a panel's: width 0.990/0.930/0.800/0.640 height 0.990/0.960/0.890/0.800; as drawn: width "
+                   "1.000/1.000/1.000/1.000 height 1.000/1.000/1.000/1.000; widest 41.0 deg"], lacks=["UNPARSED"])
+        check("F97b size: no label moved", [size97(0, 0, n=(0, 0, 0, 0))] * 2, 0, [("IDLE", S97)], has=["no label was moved"])
+        check("F97b size: moved, never sized", [size97(84, 0, rng=84)] * 2, 3, [("NEVER APPLIED", S97)], has=["no label was sized (out of range)"])
+        check("F97b size: still smaller off the axis", [size97(dw=(1.0, 0.98, 0.85, 0.70), n=(30, 30, 30, 30))], 0, [("PARTIAL", S97)],
+              has=["the label still changes size: 20-30 deg width 0.850, 30+ deg width 0.700"])
+        check("F97b size: most left at the game's size", [size97(84, 20, proj=64)], 0, [("PARTIAL", S97)], has=["most labels were left at the game's size"])
+        check("F97b size: only near the axis", [size97(n=(40, 40, 0, 0))] * 2, 0, [("OK", S97)], has=["no label was seen 20 deg or more off the axis"])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])

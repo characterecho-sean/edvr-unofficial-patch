@@ -39,6 +39,7 @@
 #include "native_on_foot_f94.h"   // F94a: the neck as the source of truth for the view's height; the body at its animated height (pure parts)
 #include "native_on_foot_f95.h"   // F95a: the neck reference from the stance's settled height; the view-motion instrument (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
+#include "native_on_foot_f97b.h"   // F97b: the interaction label sized like a panel in the world at its anchor (pure parts)
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -23057,6 +23058,9 @@ struct F95bEye {
 F95bEye g_f95b[2];
 nofoot::f94b::Tracker g_f95bTrack[2];
 nofoot::f94b::EyeJoin g_f95bEyes;
+// F97b: the label's size against a world panel's at its anchor, per eye, the second's figures (render thread: fixDecide and the 1 s line)
+nofoot::f97b::Sec g_f97b[2];
+uint64_t g_f97bMoved[2] = {};
 // F95b: a label draw refused before its decision (its key matched in this eye only, a ranged b0, no rows or no origin) is counted with that verdict
 void f95bEarly(int e, uint32_t frame, uint32_t key, int verdictWhy) noexcept {
     float ox = 0.0f, oy = 0.0f;
@@ -23582,6 +23586,21 @@ void f87PromptLines(uint64_t nowMs) {
                             ull(readFail));
             de = F95bEye{};
         }
+    }
+    // F97b: the label's size against a panel at its anchor facing the eye (1 = the panel's), per eye, by the angle off the eye's axis; zeros print
+    for (int e = 0; e < 2; ++e) {
+        nofoot::f97b::Sec& z = g_f97b[e];
+        const auto m = [&z](const double* v, int b) { return z.mean(v, b); };
+        Log::get().note("label size (F97b) eye %d 1 s: labels moved %llu, sized %llu, refused %llu (no projection %llu, out of range %llu); by the angle off the eye's "
+                        "axis 0-10/10-20/20-30/30+ deg: draws %llu/%llu/%llu/%llu; the game's size against the panel's: width %.3f/%.3f/%.3f/%.3f height "
+                        "%.3f/%.3f/%.3f/%.3f; as drawn: width %.3f/%.3f/%.3f/%.3f height %.3f/%.3f/%.3f/%.3f; the record's depth over its distance "
+                        "%.3f/%.3f/%.3f/%.3f; widest %.1f deg",
+                        e, ull(g_f97bMoved[e]), ull(z.sized), ull(z.refusedProj + z.refusedRange), ull(z.refusedProj), ull(z.refusedRange), ull(z.n[0]), ull(z.n[1]),
+                        ull(z.n[2]), ull(z.n[3]), m(z.gameW, 0), m(z.gameW, 1), m(z.gameW, 2), m(z.gameW, 3), m(z.gameH, 0), m(z.gameH, 1), m(z.gameH, 2), m(z.gameH, 3),
+                        m(z.drawnW, 0), m(z.drawnW, 1), m(z.drawnW, 2), m(z.drawnW, 3), m(z.drawnH, 0), m(z.drawnH, 1), m(z.drawnH, 2), m(z.drawnH, 3),
+                        m(z.depthOverDist, 0), m(z.depthOverDist, 1), m(z.depthOverDist, 2), m(z.depthOverDist, 3), z.maxAngle);
+        z = nofoot::f97b::Sec{};
+        g_f97bMoved[e] = 0;
     }
     // the label's draws, per eye
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
@@ -25481,21 +25500,36 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (v.newest) ++s.pNewest;
     // F95b: every label decision is counted by its verdict, so a label that is never moved says why in its own line
     double labTrec[2] = {};
+    nofoot::f97b::LabelPanel labPanel;   // F97b: the label's size map (G the identity unless sized)
+    double labPRec[3] = {}, labNRec[2] = {};
     if (label) {
         ++lab.verdict[v.why >= 0 && v.why < drawtag::kPatchWhyCount ? v.why : drawtag::kPatchUnmatched];
         if (v.patch) {
-            // the record is shown at T plus its UI offset from the anchor (the row patch keeps it): the label's place against its anchor's
+            ++g_f97bMoved[e];
+            // the record is shown at T plus G times its UI offset from the anchor: the label's place against its anchor's (F97b: G, the panel's size)
             const double oh3[3] = {oHud[0], oHud[1], oHud[2]};
             double mcR[3];
             drawtag::markerClip(sh->rows[4], sh->rows[5], sh->rows[7], labRec, oh3, mcR);
             if (mcR[2] > 1e-9) {
-                labTrec[0] = T[0] + (mcR[0] / mcR[2] - nM0[0]);
-                labTrec[1] = T[1] + (mcR[1] / mcR[2] - nM0[1]);
+                labNRec[0] = mcR[0] / mcR[2];
+                labNRec[1] = mcR[1] / mcR[2];
+                const double dUi[2] = {labNRec[0] - nM0[0], labNRec[1] - nM0[1]};
+                for (int k = 0; k < 3; ++k) labPRec[k] = labRec[k] - oh3[k];
+                // F97b: the record where a panel at the anchor facing the eye puts it (from the anchor's direction, whose decision gated the move above), its
+                // layout sized there
+                const double q[3] = {fP[0] - w.o[0], fP[1] - w.o[1], fP[2] - w.o[2]}, layoutAt[2] = {T[0] + dUi[0], T[1] + dUi[1]};
+                labPanel = nofoot::f97b::labelPanel(w.rows, sh->rows[4], sh->rows[5], sh->rows[7], aff, labPRec, labRec[2], labD, q, layoutAt);
+                nofoot::f97b::Sec& zs = g_f97b[e];
+                if (labPanel.why == 0) ++zs.sized;
+                else if (labPanel.why == 2) ++zs.refusedRange;
+                else ++zs.refusedProj;
+                labTrec[0] = labPanel.why == 0 ? labPanel.Trec[0] : layoutAt[0];
+                labTrec[1] = labPanel.why == 0 ? labPanel.Trec[1] : layoutAt[1];
                 nofoot::f94b::Sample smp;
                 smp.frame = frame;
                 smp.key = keyNow;
-                smp.off[0] = (labTrec[0] - T[0]) * W * 0.5;
-                smp.off[1] = (labTrec[1] - T[1]) * H * 0.5;
+                smp.off[0] = dUi[0] * W * 0.5;   // the game's layout (before the size map): F95b's step stays the layout's own
+                smp.off[1] = dUi[1] * H * 0.5;
                 smp.off93[0] = smp.off[0];
                 smp.off93[1] = smp.off[1];
                 smp.headDps = g_headDps;
@@ -25519,7 +25553,22 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // F66f: the affine rows (sigma = 1 and u = T - n_M(X0) when the decomposition is unusable: today's translation).
     double uRows[2];
     drawtag::markerAffineU(aff, T, nM0, uRows);
-    drawtag::affineOffsetRows(r4, r5, sh->rows[7], aff.sigma, uRows);
+    if (label && labPanel.why == 0) {
+        // F97b: a label is drawn as a panel at its anchor facing the eye: its record at the panel's place, its layout sized by G about the record
+        nofoot::f97b::affineRowsG(r4, r5, sh->rows[7], aff, labPanel.G, labPanel.Trec, labNRec);
+    } else {
+        drawtag::affineOffsetRows(r4, r5, sh->rows[7], aff.sigma, uRows);
+    }
+    if (label && labPanel.at.ok && labPanel.atGame.ok && labRec[2] > 0.05) {
+        // F97b: the label's size against the panel's, as the game drew it (the unpatched rows, where its layout puts the record) and as drawn (these rows, at the
+        // panel's place), by the angle off the eye's axis; with the size map refused the drawn figure is the game's layout's
+        double gw = 0.0, gh = 0.0, dw = 0.0, dh = 0.0;
+        if (nofoot::f97b::sizeFactor(sh->rows[4], sh->rows[5], sh->rows[7], aff, labPanel.atGame.J, labPRec, labRec[2], &gw, &gh) &&
+            nofoot::f97b::sizeFactor(r4, r5, sh->rows[7], aff, labPanel.at.J, labPRec, labRec[2], &dw, &dh)) {
+            const double dRec = std::sqrt(labPRec[0] * labPRec[0] + labPRec[1] * labPRec[1] + labPRec[2] * labPRec[2]);
+            g_f97b[e].add(labPanel.at.angleDeg, gw, gh, dw, dh, dRec > 1e-6 ? labRec[2] / dRec : 0.0);
+        }
+    }
     ++s.aN;
     if (aff.ok) ++s.aOk;
     if (aff.haveAxis) ++s.aAxis;
