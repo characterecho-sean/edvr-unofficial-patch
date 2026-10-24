@@ -1,22 +1,109 @@
-name: Native Windows release build
+# The one native Windows build: the full build.bat, every gate and rig, and
+# package.bat, for releases and as validation of pull requests and main (#93).
+# Untagged runs package the runner-only 0.0.0-ci proof version.
+name: Native Windows build
 
 on:
   push:
     branches:
+      - main
       - 'codex/release-*'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: edvr-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: edvr-build-${{ github.ref }}
+  # A newer push to a pull request supersedes its run; release and main runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # What a pull request needs, from the files it changes. Every other event builds.
+  #   build           anything the build or one of its rigs can read
+  #   light gates     only notes: root *.md, docs\*.md, .agents\, issue templates. Their
+  #                   gates are check_status_blocks.py (docs\ Status blocks) and
+  #                   check_agent_material.py (agent files export-ignore; no zero-width,
+  #                   bidi or tag character in any tracked text), seconds instead of the build.
+  # A codex/release-* branch of this repository is already built by its push; its
+  # pull request would build the same commit a second time.
+  # A job skipped by its `if` counts as passing, so `light-gates` and `build` can both be
+  # required checks: each pull request runs exactly one of them (or neither, for a
+  # release branch's own pull request).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      light: ${{ steps.decide.outputs.light }}
+    steps:
+      - name: Check out with history
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "light=false" >> "$GITHUB_OUTPUT"
+            echo "$EVENT: full build"; exit 0
+          fi
+          if [[ "$HEAD_REF" == codex/release-* && "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"; echo "light=false" >> "$GITHUB_OUTPUT"
+            echo "release branch: its push builds this commit"; exit 0
+          fi
+          files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          printf '%s\n' "$files"
+          build=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*.md|.agents/*|.github/ISSUE_TEMPLATE/*|.github/FUNDING.yml) ;;
+              */*) build=true ;;
+              *.md) ;;
+              *) build=true ;;
+            esac
+          done <<< "$files"
+          light=true; [ "$build" = true ] && light=false
+          echo "build=$build" >> "$GITHUB_OUTPUT"; echo "light=$light" >> "$GITHUB_OUTPUT"
+          echo "full build: $build; light gates only: $light"
+
+  light-gates:
+    needs: changes
+    if: needs.changes.outputs.light == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # check_agent_material.py needs the .git directory (ls-files, check-attr), not history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check the docs' Status blocks
+        run: |
+          python3 tools/check_status_blocks.py --self-test
+          python3 tools/check_status_blocks.py
+      - name: Check agent material and hidden characters
+        run: |
+          python3 tools/check_agent_material.py --self-test
+          python3 tools/check_agent_material.py
+
   build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:

@@ -39,8 +39,10 @@ window while it runs. The runner holds every test exe to that and fails the
 build if one shows a window or takes the keyboard focus; see
 `docs\build-focus-steal-2026-09-29.md`.
 
-For a native Windows build from Linux, use the **Native Windows release build**
-workflow (`.github/workflows/release.yml`). It runs on Windows Server 2022 with
+For a native Windows build from Linux, use the **Native Windows build**
+workflow (`.github/workflows/release.yml`). It also runs by itself on every pull
+request and every push to `main` (a `codex/release-*` pull request is left to
+its branch's push run). It runs on Windows Server 2022 with
 Visual Studio 2022, Python 3.12, and all four pinned dependencies. It invokes
 the full `build.bat --wait-lock --jobs 4`, including every test rig and the
 installer gate, then calls `package.bat`. The packages contain the exact
