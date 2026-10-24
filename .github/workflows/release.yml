@@ -22,10 +22,78 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # What a pull request needs, from the files it changes. Every other event builds.
+  #   build           anything the build or a gate can read
+  #   status blocks   only docs\*.md: check_status_blocks.py is the one gate that reads docs\
+  #   nothing         only files no gate reads (root notes, .agents\, issue templates)
+  # A codex/release-* branch of this repository is already built by its push; its
+  # pull request would build the same commit a second time.
+  # A job skipped by its `if` counts as passing, so `build` can be a required check
+  # without stranding a docs-only pull request.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      docs: ${{ steps.decide.outputs.docs }}
+    steps:
+      - name: Check out with history
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "docs=false" >> "$GITHUB_OUTPUT"
+            echo "$EVENT: full build"; exit 0
+          fi
+          if [[ "$HEAD_REF" == codex/release-* && "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"; echo "docs=false" >> "$GITHUB_OUTPUT"
+            echo "release branch: its push builds this commit"; exit 0
+          fi
+          files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          printf '%s\n' "$files"
+          build=false; docs=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              README.md|AGENTS.md|CLAUDE.md|.agents/*|.github/ISSUE_TEMPLATE/*|.github/FUNDING.yml) ;;
+              docs/*.md) docs=true ;;
+              *) build=true ;;
+            esac
+          done <<< "$files"
+          echo "build=$build" >> "$GITHUB_OUTPUT"; echo "docs=$docs" >> "$GITHUB_OUTPUT"
+          echo "full build: $build; status blocks only: $docs"
+
+  status-blocks:
+    needs: changes
+    if: needs.changes.outputs.build != 'true' && needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check the docs' Status blocks
+        run: |
+          python3 tools/check_status_blocks.py --self-test
+          python3 tools/check_status_blocks.py
+
   build:
-    # A codex/release-* branch is already built by its push; its pull request
-    # would build the same commit a second time.
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'codex/release-')
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:

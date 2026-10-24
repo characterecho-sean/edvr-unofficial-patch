@@ -15,11 +15,11 @@
 
 The project now has two people and several agents committing.
 
-- **Nothing runs on `main`.** `main` has no workflow at all. The temporary
-  manual Windows build (c3c5b046, removed in 519ec0bf) never passed in its
-  four runs. Its last failure, a gate that breaks on a Windows CRLF checkout
-  (#94), was already on `main` and stayed there. PR #92 merged with no CI
-  run.
+- **Nothing checks `main` or a pull request.** `release.yml` builds only
+  release branches, tags and manual runs. The temporary manual Windows
+  build (c3c5b046, removed in 519ec0bf) never passed in its four runs, and
+  its last failure, a gate that breaks on a Windows CRLF checkout (#94),
+  was already on `main` and stayed there. PR #92 merged with no CI run.
 - **Direct pushes race open PRs.** PR #92 needed two catch-up merges of
   `main`, and one had a conflict in `menu.cpp`. Both were against work
   pushed straight to `main` while the PR was under review.
@@ -32,8 +32,10 @@ The project now has two people and several agents committing.
 GitHub branch protection, or a ruleset, on `main`:
 
 1. Changes land through a pull request. No direct pushes.
-2. The `Native Windows build` check (`.github/workflows/release.yml`, job
-   `build`) must pass. Enable this once #93 is green.
+2. The `changes` and `build` checks (`.github/workflows/release.yml`, the
+   `Native Windows build` workflow) must pass. Enable this once #93 is
+   green. A PR that changes only notes or `docs\*.md` skips `build`, and a
+   skipped job counts as passing, so such a PR isn't left waiting.
 3. No force-pushes, and the branch can't be deleted.
 4. No required approvals to start with. Sean can merge his own PRs
    immediately; the rule enforces the gate, not a second reviewer.
@@ -47,15 +49,15 @@ GitHub branch protection, or a ruleset, on `main`:
 - **Agents:** the AGENTS.md Git section changes from "merge to main, push"
   to "push the branch, open a PR, merge when green". The "task is not done
   until it is pushed" check becomes "until the PR is merged".
-- **CI time:** every change waits for a full Windows build. If that's too
-  slow, gate on the Python source gates first and keep the full build as a
-  second, non-blocking job.
+- **CI time:** a change to code or build inputs waits for a full Windows
+  build. A docs-only PR runs just the Status-block gate, in seconds, and a
+  PR that changes only notes no gate reads runs nothing.
 
 ## Enabling it
 
 Once #93 is green, in the repository's Settings → Rules → Rulesets: target
 `main`, then turn on "Require a pull request before merging" (0 approvals),
-"Require status checks to pass" (the Windows build job), "Block force
+"Require status checks to pass" (`changes` and `build`), "Block force
 pushes" and "Restrict deletions".
 
 Or the classic protection API:
@@ -63,7 +65,8 @@ Or the classic protection API:
 ```
 gh api -X PUT repos/characterecho-sean/edvr-unofficial-patch/branches/main/protection \
   -F required_status_checks.strict=false \
-  -f "required_status_checks.contexts[]=full-build" \
+  -f "required_status_checks.contexts[]=changes" \
+  -f "required_status_checks.contexts[]=build" \
   -F enforce_admins=false \
   -F required_pull_request_reviews.required_approving_review_count=0 \
   -F restrictions=null -F allow_force_pushes=false -F allow_deletions=false
