@@ -31,9 +31,9 @@ read 2026-09-16) unless marked believed.
   slightly better than the pass's own history, not DLSS). The community
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
-- **Next:** at flight 7's spot (main menu, a hull panel's lower edge; 32
-  phases did not help), F8 through FSR 4, FSR 3, XeSS-SR and TAA, F7 for
-  AA off, and a NumLock capture (candidates, flight 6 entry). Held keys
+- **Next:** the flicker at flight 7's spot (a hull panel's edge in the
+  main menu) is in all three temporal paths; lead (e), EDVR refusing it
+  (flight 7 entry): the refusal view there, and TAA on Windows. Held keys
   looked mostly clean; they become the behaviour once (c) is out, and the
   key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
@@ -919,5 +919,24 @@ class of upscaler): that is route 2's go/no-go.
   out at this spot: the jitter cycle (a), because 32 phases took effect at
   06:32:03 (`flat jitter: the cycle is 32 phases`) and the flicker did not
   change; at 1.18x AMD's own count is about 12, so 8 was near it anyway.
-  The 2x case (1280x800) is untested. Open: (b) to (d), and whether the
-  edge flickers under FSR 3, XeSS-SR, TAA and with AA off (F7) there.
+  The 2x case (1280x800) is untested. Then, same flight: ruled out (c),
+  the held locks, because the flicker is constant, not in 30 s windows;
+  ruled out (d), FSR 4's model, because the edge flickers under FSR 3
+  (06:39:52 on) and EDVR's own TAA (06:39:46) too, so it is in what all
+  three temporal paths share. F7 stops the jitter as well (phase back to
+  (0,0), warming), so "everything flickers with AA off" is the game's own
+  image. XeSS-SR was not tested: `libxess.dll is missing beside EDVR`
+  (the flight 6 install had no `--xess`), so it fell back to spatial.
+  The scene is still: `pool records joined 417600 (with motion 0)`,
+  `flat camera origin 5s: frames=300 moved=0`, no history resets. Yet the
+  refusal census the NumLock press armed (06:38:34 to 06:38:44, FSR 4)
+  counts about 250 to 340 refused pixels a frame, classes `stale` (the
+  steady-detail depth check failed: last frame's depth at the reprojected
+  spot is off by more than 1%) and `range` (the reprojection leaves the
+  screen or is not finite); a refused pixel shows the raw jittered frame
+  under every engine. Lead, not yet placed on the edge: (e) EDVR refuses
+  that edge's pixels, at a depth edge the jitter moves. Discriminator:
+  `advanced.flat_refusal_view` at the spot (pink stale refused, white any
+  other refusal), and TAA or FSR 3 at the same spot on Windows. Aside:
+  the adapter reports vendor 0x10DE with device 0x1586 (the 8060S), a
+  spoofed NVIDIA vendor, which matters to anything gated on vendor id.
