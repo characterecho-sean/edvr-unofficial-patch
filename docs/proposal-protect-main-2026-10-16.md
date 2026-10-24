@@ -32,10 +32,13 @@ The project now has two people and several agents committing.
 GitHub branch protection, or a ruleset, on `main`:
 
 1. Changes land through a pull request. No direct pushes.
-2. The `changes` and `build` checks (`.github/workflows/release.yml`, the
-   `Native Windows build` workflow) must pass. Enable this once #93 is
-   green. A PR that changes only notes or `docs\*.md` skips `build`, and a
-   skipped job counts as passing, so such a PR isn't left waiting.
+2. The `changes`, `light-gates` and `build` checks
+   (`.github/workflows/release.yml`, the `Native Windows build` workflow)
+   must pass. Enable this once #93 is green. Each PR runs either
+   `light-gates` (only notes: root `*.md`, `docs\*.md`, `.agents\`, issue
+   templates) or `build` (anything else). A skipped job counts as passing,
+   so neither strands a PR, and both must be required: otherwise a notes-only
+   PR could merge with its light gates failing.
 3. No force-pushes, and the branch can't be deleted.
 4. No required approvals to start with. Sean can merge his own PRs
    immediately; the rule enforces the gate, not a second reviewer.
@@ -50,14 +53,14 @@ GitHub branch protection, or a ruleset, on `main`:
   to "push the branch, open a PR, merge when green". The "task is not done
   until it is pushed" check becomes "until the PR is merged".
 - **CI time:** a change to code or build inputs waits for a full Windows
-  build. A docs-only PR runs just the Status-block gate, in seconds, and a
-  PR that changes only notes no gate reads runs nothing.
+  build. A notes-only PR runs just the two gates that read notes
+  (`check_status_blocks.py`, `check_agent_material.py`), in seconds.
 
 ## Enabling it
 
 Once #93 is green, in the repository's Settings → Rules → Rulesets: target
 `main`, then turn on "Require a pull request before merging" (0 approvals),
-"Require status checks to pass" (`changes` and `build`), "Block force
+"Require status checks to pass" (`changes`, `light-gates` and `build`), "Block force
 pushes" and "Restrict deletions".
 
 Or the classic protection API:
@@ -66,6 +69,7 @@ Or the classic protection API:
 gh api -X PUT repos/characterecho-sean/edvr-unofficial-patch/branches/main/protection \
   -F required_status_checks.strict=false \
   -f "required_status_checks.contexts[]=changes" \
+  -f "required_status_checks.contexts[]=light-gates" \
   -f "required_status_checks.contexts[]=build" \
   -F enforce_admins=false \
   -F required_pull_request_reviews.required_approving_review_count=0 \
