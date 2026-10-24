@@ -8423,7 +8423,16 @@ F87HoldPub f87HoldRead() noexcept {
 namespace f87p {
 using nofoot::f87::Role;
 std::atomic<uint64_t> g_set{0}, g_upd{0}, g_ind{0}, g_role[nofoot::f87::kRoleCount], g_nearbyMask{0}, g_otherLast{0};
-std::atomic<int32_t> g_focusKey{-1};
+std::atomic<int32_t> g_focusKey{-1};   // the focused interactable's key (F92c: from the focus prompt or the focus indicator; g_focusState says which)
+std::atomic<uint64_t> g_focusState{nofoot::f87::focusPack(-1, nofoot::f87::kFocusSrcNone)};
+// F92c: the indicator owner's SetMarker calls by the type their caller passed, the keys of the type-1001 ones, and an unknown caller's address
+std::atomic<uint64_t> g_indFocusN{0}, g_indInteractN{0}, g_indUnknownN{0}, g_indUnknownLast{0}, g_indInteractMask{0};
+std::atomic<int32_t> g_indFocusKeyLast{-1};
+void focusEvent(int ev, int32_t key) noexcept {
+    const uint64_t s = nofoot::f87::focusStep(g_focusState.load(std::memory_order_relaxed), ev, key);
+    g_focusState.store(s, std::memory_order_relaxed);
+    g_focusKey.store(nofoot::f87::focusKeyOf(s), std::memory_order_relaxed);
+}
 struct FocusSample {
     int32_t key = -1;
     float p[3] = {};
@@ -8526,13 +8535,36 @@ void __fastcall markerRecord(uint64_t slot, uint64_t ret, const uint64_t* regs, 
     g_role[role].fetch_add(1, std::memory_order_relaxed);
     if (role == nofoot::f87::kRoleOther) g_otherLast.store(rva, std::memory_order_relaxed);
     if (role == nofoot::f87::kRoleNearby) g_nearbyMask.fetch_or(1ull << (key >= 0 && key < 63 ? key : 63), std::memory_order_relaxed);
-    if (role == nofoot::f87::kRoleFocusHidden) g_focusKey.store(-1, std::memory_order_relaxed);   // nothing is focused: the focus key is the focused interactable's, never a fixed one
-    if (role == nofoot::f87::kRoleFocus && visible) {
+    // nothing is focused by the focus prompt: it clears only a key it set itself (F92c: the focus indicator's key is the label owner's and stays)
+    if (role == nofoot::f87::kRoleFocusHidden) focusEvent(nofoot::f87::kFocusEvPromptHidden, -1);
+    // F92c: the indicator owner's SetMarker. Its caller (0x1AA9830's own return address, 0x68 above the stack at the call) says the type: 1000 the focused
+    // interactable's indicator (the label's owner), 1001 another interactable's.
+    bool indicatorFocus = false;
+    if (role == nofoot::f87::kRoleIndicator) {
+        uint64_t outer = 0;
+        uint32_t outerRva = 0;
+        if (stk && guardedRead(reinterpret_cast<uintptr_t>(stk) + nofoot::f87::kIndicatorOuterReturnOffset, &outer, sizeof(outer)) && g_base && outer >= g_base &&
+            outer - g_base < 0x10000000ull)
+            outerRva = static_cast<uint32_t>(outer - g_base);
+        const uint32_t type = nofoot::f87::indicatorTypeOfCaller(outerRva);
+        if (type == nofoot::f87::kIndicatorTypeFocus) {
+            g_indFocusN.fetch_add(1, std::memory_order_relaxed);
+            g_indFocusKeyLast.store(key, std::memory_order_relaxed);
+            indicatorFocus = visible;
+        } else if (type == nofoot::f87::kIndicatorTypeInteractable) {
+            g_indInteractN.fetch_add(1, std::memory_order_relaxed);
+            g_indInteractMask.fetch_or(1ull << (key >= 0 && key < 63 ? key : 63), std::memory_order_relaxed);
+        } else {
+            g_indUnknownN.fetch_add(1, std::memory_order_relaxed);
+            g_indUnknownLast.store(outerRva, std::memory_order_relaxed);
+        }
+    }
+    if ((role == nofoot::f87::kRoleFocus && visible) || indicatorFocus) {
         FocusSample smp;
         smp.key = key;
         float p[4];
         if (readP(regs[1], p)) std::memcpy(smp.p, p, sizeof(smp.p));
-        g_focusKey.store(key, std::memory_order_relaxed);
+        focusEvent(indicatorFocus ? nofoot::f87::kFocusEvIndicator : nofoot::f87::kFocusEvPrompt, key);
         const uint32_t n = g_focusN.fetch_add(1, std::memory_order_acq_rel);
         g_focusRing.post(n, smp);
     }
@@ -22593,8 +22625,12 @@ void labOnData(int slot, const uint8_t* data) {
     static bool said[2] = {};
     if (!said[e]) {
         said[e] = true;
+        // F92c: the F91 dumps' replay of this vertex shader on the captured vertices: the 3600- and 624-index camera-local draws are one connected surface each, a
+        // shell about 1 m round the eye that carries the HUD's own texture (compass, radar, objective, prompt text): the HUD dome, not the label group. One cluster
+        // says so here, so the "leader" below is not read as the label's dot.
         Log::get().note("prompt label draws (F87p) eye %d: the %u-index draw's mesh decoded: %u distinct vertices (PACKEDVERTEXDATAA at +%u) in %u clusters; the leader's dot is the smallest, %u vertices, "
-                        "centre (%.4f, %.4f, %.4f)", e, cap.count, nd, posOffset, clusters, L.verts, L.v[0], L.v[1], L.v[2]);
+                        "centre (%.4f, %.4f, %.4f)%s", e, cap.count, nd, posOffset, clusters, L.verts, L.v[0], L.v[1], L.v[2],
+                        clusters == 1 ? " -- one connected surface: the HUD dome (F92c), not a label group; its 'leader' is the dome's centroid" : "");
     }
 }
 // vscreen.cpp, right before the game's own issue of the draw: layered or not, the viewport as mapped, the b0 bound (the game's, ours, or another) and its rows 4/5/7; the
@@ -22758,14 +22794,39 @@ void f87PromptLines(uint64_t nowMs) {
     const uint64_t set = f87p::g_set.load(std::memory_order_relaxed), upd = f87p::g_upd.load(std::memory_order_relaxed), ind = f87p::g_ind.load(std::memory_order_relaxed);
     uint64_t role[f87::kRoleCount];
     for (int r = 0; r < f87::kRoleCount; ++r) role[r] = f87p::g_role[r].load(std::memory_order_relaxed);
+    // F92c: the indicator owner's calls of the second by type; a focus indicator key with no focus indicator call this second is no longer the focus.
+    static uint64_t prevIndF = 0, prevIndI = 0, prevIndU = 0;
+    const uint64_t indF = f87p::g_indFocusN.load(std::memory_order_relaxed), indI = f87p::g_indInteractN.load(std::memory_order_relaxed),
+                   indU = f87p::g_indUnknownN.load(std::memory_order_relaxed);
+    if (indF == prevIndF) f87p::focusEvent(f87::kFocusEvQuietSecond, -1);
+    const uint64_t focusState = f87p::g_focusState.load(std::memory_order_relaxed);
+    if (!n) key = f87::focusKeyOf(focusState);
+    const uint64_t indMask = f87p::g_indInteractMask.exchange(0, std::memory_order_relaxed);
+    char indKeys[160];
+    size_t ia = 0;
+    indKeys[0] = 0;
+    for (int k = 0; k < 64 && ia + 8 < sizeof(indKeys); ++k)
+        if (indMask & (1ull << k)) ia += static_cast<size_t>(std::snprintf(indKeys + ia, sizeof(indKeys) - ia, "%s%d%s", ia ? "," : "", k, k == 63 ? "+" : ""));
+    if (!ia) std::snprintf(indKeys, sizeof(indKeys), "none");
+    // F92c: the on-foot HUD placement EDVR applies to the game's HUD (the label is laid out by the game's HUD, which this placement moves): the mesh size with
+    // the room in effect, the spread, whether the element-scale override is held, the distance and the follow mode.
     Log::get().note("prompt anchor (F87p) 1 s: SetMarker %llu UpdateMarker %llu UpdateIndicator %llu; focus key %d P (%.3f %.3f %.3f) range %.1f mm; nearby %llu [keys %s] target %llu list %llu hidden %llu "
-                    "other %llu (last +0x%llX)",
+                    "other %llu (last +0x%llX); indicators (F92c): focus %llu (key %d) interactable %llu [keys %s] unknown caller %llu (last +0x%llX); focus from %s; "
+                    "HUD placement: size %.2f x room %.2f, spread %.3f, element override %s, distance %.3f m, follow %s",
                     ull(set - prevSet), ull(upd - prevUpd), ull(ind - prevInd), static_cast<int>(key), static_cast<double>(lastP[0]), static_cast<double>(lastP[1]), static_cast<double>(lastP[2]), range,
                     ull(role[f87::kRoleNearby] - prevRole[f87::kRoleNearby]), keys, ull(role[f87::kRoleTarget] - prevRole[f87::kRoleTarget]), ull(role[f87::kRoleList] - prevRole[f87::kRoleList]),
-                    ull(role[f87::kRoleFocusHidden] - prevRole[f87::kRoleFocusHidden]), ull(role[f87::kRoleOther] - prevRole[f87::kRoleOther]), ull(f87p::g_otherLast.load(std::memory_order_relaxed)));
+                    ull(role[f87::kRoleFocusHidden] - prevRole[f87::kRoleFocusHidden]), ull(role[f87::kRoleOther] - prevRole[f87::kRoleOther]), ull(f87p::g_otherLast.load(std::memory_order_relaxed)),
+                    ull(indF - prevIndF), static_cast<int>(f87p::g_indFocusKeyLast.load(std::memory_order_relaxed)), ull(indI - prevIndI), indKeys, ull(indU - prevIndU),
+                    ull(f87p::g_indUnknownLast.load(std::memory_order_relaxed)), f87::focusSrcText(f87::focusSrcOf(focusState)),
+                    static_cast<double>(g_hudSize.load(std::memory_order_relaxed)), static_cast<double>(g_hudRoomEff.load(std::memory_order_relaxed)),
+                    static_cast<double>(g_hudSpread.load(std::memory_order_relaxed)), g_elemOverrideOn.load(std::memory_order_relaxed) ? "held" : "off",
+                    static_cast<double>(g_hudDistance.load(std::memory_order_relaxed)), g_followHead.load(std::memory_order_relaxed) ? "head" : "body");
     prevSet = set;
     prevUpd = upd;
     prevInd = ind;
+    prevIndF = indF;
+    prevIndI = indI;
+    prevIndU = indU;
     for (int r = 0; r < f87::kRoleCount; ++r) prevRole[r] = role[r];
     // the getters' posts: one line per entity, the first time it is seen at a site
     uint32_t gTo = f87p::g_getterN.load(std::memory_order_acquire), gFrom = f87p::g_getterDrained;

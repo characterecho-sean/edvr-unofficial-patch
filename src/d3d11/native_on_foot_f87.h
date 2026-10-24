@@ -463,7 +463,18 @@ constexpr Pin kPins[] = {
     {"FindNode call", 0x191F1C7, 7, {0x4C, 0x8B, 0x81, 0x28, 0x01, 0x00, 0x00}},
     {"bounds call", 0x191F382, 6, {0xFF, 0x90, 0x10, 0x01, 0x00, 0x00}},
     {"world matrix call", 0x191F3A3, 6, {0xFF, 0x90, 0xA8, 0x00, 0x00, 0x00}},
+    // F92c: the indicator owner 0x1AA9830 and its three callers (the type each passes)
+    {"indicator owner entry", 0x1AA9830, 7, {0x48, 0x8B, 0xC4, 0x48, 0x83, 0xEC, 0x68}},
+    {"indicator UpdateIndicator call", 0x1AA98EA, 3, {0x41, 0xFF, 0xD0}},
+    {"indicator SetMarker call", 0x1AA9928, 3, {0xFF, 0x50, 0x50}},
+    {"focus indicator call", 0x1AA9778, 5, {0xE8, 0xB3, 0x00, 0x00, 0x00}},
+    {"focus indicator type", 0x1AA976B, 5, {0xBA, 0xE8, 0x03, 0x00, 0x00}},
+    {"interactable indicator call A", 0x1AAE644, 5, {0xE8, 0xE7, 0xB1, 0xFF, 0xFF}},
+    {"interactable indicator type A", 0x1AAE635, 5, {0xBA, 0xE9, 0x03, 0x00, 0x00}},
+    {"interactable indicator call B", 0x1AB67CB, 5, {0xE8, 0x60, 0x30, 0xFF, 0xFF}},
+    {"interactable indicator type B", 0x1AB67BC, 5, {0xBA, 0xE9, 0x03, 0x00, 0x00}},
 };
+constexpr uint32_t kPinIndicatorEntry = 15;   // F92c: the indicator owner's prologue (its `sub rsp, 0x68` immediate is byte 6)
 constexpr uint32_t kPinCount = sizeof(kPins) / sizeof(kPins[0]);
 constexpr uint32_t kPinFocusGetter = 8, kPinNearbyGetter = 9, kPinTargetGetter = 10;
 // The machine code of the two probe shapes (x64, the Microsoft calling convention), emitted byte for byte so the rig can run the very code the hooks install.
@@ -531,9 +542,9 @@ inline uint32_t callTarget(uint32_t rva, const uint8_t b[5]) noexcept {
     return static_cast<uint32_t>(static_cast<int64_t>(rva) + 5 + rel);
 }
 // Which SetMarker / UpdateMarker call a return address (RVA) belongs to.
-enum Role : int { kRoleFocus = 0, kRoleFocusHidden, kRoleNearby, kRoleTarget, kRoleList, kRoleOther, kRoleCount };
+enum Role : int { kRoleFocus = 0, kRoleFocusHidden, kRoleNearby, kRoleTarget, kRoleList, kRoleIndicator, kRoleOther, kRoleCount };
 inline const char* roleText(int r) noexcept {
-    static const char* const n[kRoleCount] = {"focus", "focus hidden", "nearby", "target", "list", "other"};
+    static const char* const n[kRoleCount] = {"focus", "focus hidden", "nearby", "target", "list", "indicator", "other"};
     return n[r < 0 || r >= kRoleCount ? kRoleOther : r];
 }
 inline int roleOfReturn(uint32_t rva) noexcept {
@@ -543,8 +554,46 @@ inline int roleOfReturn(uint32_t rva) noexcept {
         case 0x1A9E27D: return kRoleNearby;
         case 0x1AA4D66: return kRoleTarget;
         case 0x1A9E74D: return kRoleList;
+        case 0x1AA992B: return kRoleIndicator;   // F92c: the indicator owner's SetMarker (0x1AA9830)
         default: return kRoleOther;
     }
+}
+// ---- F92c: the label's owner ------------------------------------------------------------------------------------------------------------------------
+// The F91 flight (log 092147): the focus prompt's producer 0x1AA99C0 took its hidden path every frame (SetMarker visible 0 returning to 0x1AA9F67, 83 a second),
+// so no focus key was ever set although UpdateIndicator fired 45,410 times. The labels come from the indicator owner 0x1AA9830 (this = rcx; [this+0x108] the
+// marker type, [this+0x10C] its key, [this+0xF8] the marker interface): UpdateIndicator (+0x48, at 0x1AA98EA) and then SetMarker (+0x50, at 0x1AA9928, returning
+// to 0x1AA992B) with that key, the caller's point (r8), visible 1, offset 0, scale 1. It has three callers, each passing the type in edx: 0x1AA9778 (type 1000,
+// the focused interactable) and 0x1AAE644 and 0x1AB67CB (type 1001, the other interactables). 0x1AA9830 saves nothing with a push and takes 0x68 of stack, so at
+// its SetMarker call its own return address (into the caller) is 0x68 above the stack pointer: the trampoline's caller-shadow pointer + 0x68.
+constexpr uint32_t kIndicatorOuterReturnOffset = 0x68;   // the immediate of the pinned `sub rsp, 0x68` (the rig checks the two agree)
+constexpr uint32_t kIndicatorTypeFocus = 1000, kIndicatorTypeInteractable = 1001;
+inline uint32_t indicatorTypeOfCaller(uint32_t rva) noexcept {
+    switch (rva) {
+        case 0x1AA977D: return kIndicatorTypeFocus;
+        case 0x1AAE649:
+        case 0x1AB67D0: return kIndicatorTypeInteractable;
+        default: return 0u;
+    }
+}
+// The focused interactable's key and where it came from (0 none, 1 the focus prompt 0x1AA99C0, 2 the focus indicator 0x1AA9778), packed so a reader sees both
+// from one store. The focus prompt's hidden path clears only a key it set itself; a focus indicator key is cleared by the render thread after a second in which no
+// focus indicator was posted.
+enum FocusSrc : int { kFocusSrcNone = 0, kFocusSrcPrompt = 1, kFocusSrcIndicator = 2 };
+enum FocusEvent : int { kFocusEvPrompt = 0, kFocusEvPromptHidden, kFocusEvIndicator, kFocusEvQuietSecond };
+inline uint64_t focusPack(int32_t key, int src) noexcept { return static_cast<uint64_t>(static_cast<uint32_t>(key)) | (static_cast<uint64_t>(static_cast<uint32_t>(src)) << 32); }
+inline int32_t focusKeyOf(uint64_t s) noexcept { return static_cast<int32_t>(static_cast<uint32_t>(s & 0xFFFFFFFFull)); }
+inline int focusSrcOf(uint64_t s) noexcept { return static_cast<int>(s >> 32); }
+inline uint64_t focusStep(uint64_t s, int ev, int32_t key) noexcept {
+    switch (ev) {
+        case kFocusEvPrompt: return focusPack(key, kFocusSrcPrompt);
+        case kFocusEvPromptHidden: return focusSrcOf(s) == kFocusSrcPrompt ? focusPack(-1, kFocusSrcNone) : s;
+        case kFocusEvIndicator: return focusPack(key, kFocusSrcIndicator);
+        case kFocusEvQuietSecond: return focusSrcOf(s) == kFocusSrcIndicator ? focusPack(-1, kFocusSrcNone) : s;
+        default: return s;
+    }
+}
+inline const char* focusSrcText(int src) noexcept {
+    return src == kFocusSrcPrompt ? "focus prompt" : src == kFocusSrcIndicator ? "focus indicator" : "none";
 }
 // The getter stubs' site ids and the calls of the pins' stub: the site of a getter's call, by its pin.
 enum Site : int { kSiteFocus = 0, kSiteNearby, kSiteTarget, kSiteCount };
