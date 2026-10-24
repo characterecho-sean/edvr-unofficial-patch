@@ -10486,19 +10486,50 @@ def _hj_f91_fit(rows, ctx):
     text = "%d windows (STILL %d, MOVING %d): H1 %d [%s] (%s), LOCK %d (%s), H3 %d (%s), none %d, too few r frames %d" % (
         len(w), still, len(w) - still, sum(h1.values()), ", ".join("d%s %d" % kv for kv in sorted(h1.items())) or "-", split(lambda x: "H1 (" in x["verdict"]), lock,
         split(lambda x: "LOCK (" in x["verdict"]), h3, split(lambda x: "H3 (" in x["verdict"]), none, len(few))
-    # F92b: the head aim's toggle in the same flight is an A/B: the windows split by whether the head aim was on (a window the F91 build wrote has no aim field)
-    aims = [a for a in ("on", "off", "mixed") if any(x.get("aim") == a for x in w)]
-    if aims:
+    # F92b: the head aim's toggle in the same flight is an A/B: the windows split by whether the head aim was on (a window the F91 build wrote has no aim field). F93b: the
+    # same for the steady eye and the eye hold (a window the F92 build wrote has neither).
+    for key, label in (("aim", "head aim"), ("steady", "steady eye"), ("hold", "eye hold")):
+        vals = [a for a in ("on", "off", "mixed") if any(x.get(key) == a for x in w)]
+        if not vals:
+            continue
         parts = []
-        for a in aims:
-            ws = [x for x in w if x.get("aim") == a]
+        for a in vals:
+            ws = [x for x in w if x.get(key) == a]
             parts.append("%s %d (STILL %d; H1 %d, LOCK %d, H3 %d, none %d)" % (a, len(ws), sum(1 for x in ws if x["head"] == "STILL"), sum(1 for x in ws if "H1 (" in x["verdict"]),
                                                                             sum(1 for x in ws if "LOCK (" in x["verdict"]), sum(1 for x in ws if "H3 (" in x["verdict"]),
                                                                             sum(1 for x in ws if x["verdict"].startswith("none of H1"))))
-        text += "; head aim " + ", ".join(parts)
+        text += "; %s %s" % (label, ", ".join(parts))
     if len(few) == len(w):
         return ("NEVER APPLIED", text + " (no window had enough r frames to fit)")
     return ("PARTIAL" if len(few) * 2 > len(w) else "OK", text)
+
+
+def _hj_f93_chain(rows, ctx):
+    """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
+    step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
+    sec, st, hd = rows.get("sec", []), rows.get("steady", []), rows.get("hold", [])
+    if not sec and not st and not hd:
+        return None
+    if not sec:
+        return ("IDLE", "switched: steady eye %d, eye hold %d time(s); no ADS second" % (len(st), len(hd)))
+    parts = []
+    for s in ("on", "off"):
+        for h in ("off", "on"):
+            ss = [x for x in sec if x["steady"] == s and x["hold"] == h and int(x["acn"]) > 0]
+            if not ss:
+                continue
+            mean = lambda k: sum(float(x[k]) for x in ss) / len(ss)
+            parts.append("steady %s hold %s: %d s, along step %.3f mm, lag-2 autocorrelation %+.2f, position lock step %.3f mm, head translation %.3f mm" % (
+                s, h, len(ss), mean("along"), mean("ac2"), mean("lock"), mean("head")))
+    on = [x for x in sec if x["steady"] == "on"]
+    meas, matched = _hsum(on, "n"), _hsum(on, "matched")
+    text = "%d s; steady eye on: matched %d of %d measured frames (F70's %d, model eye %d, held %d)%s" % (
+        len(sec), matched, meas, _hsum(on, "legacy"), _hsum(on, "model"), _hsum(on, "missed"), "; " + "; ".join(parts) if parts else "")
+    if meas and matched == 0:
+        return ("NEVER APPLIED", text + " (the steady eye never matched the alignment the eye was drawn with)")
+    if meas and matched * 5 < meas * 4:
+        return ("PARTIAL", text)
+    return ("OK", text)
 
 
 def _hj_f92_aim(rows, ctx):
@@ -10784,8 +10815,18 @@ HEALTH_RULES = (
     ), _hj_f89_ads),
     _hrule("ADS press fit (F91)", ("F89",), ("press fit (F91)",), (
         ("fit", r"ads transition \(F89\) press fit \(F91\) window (?P<win>\d+): t \S+ to \S+ s, \d+ frames, head (?P<head>STILL|MOVING) "
-                r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) )?.*; verdict: (?P<verdict>.+)$"),
+                r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) \(\d+ of \d+ frames\)"
+                r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?.*; verdict: (?P<verdict>.+)$"),
     ), _hj_f91_fit),
+    _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
+        ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
+                r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
+                r"eye (?P<model>\d+), held \(its alignment not in the history\) (?P<missed>\d+); per frame rms: sight shift (?P<shift>[\d.]+) mm, position lock "
+                r"(?P<lock>[\d.]+) mm, head translation (?P<head>[\d.]+) mm over (?P<steps>\d+) frames; the along error's step (?P<along>[\d.]+) mm rms, autocorrelation "
+                r"lag 1 (?P<ac1>%s) lag 2 (?P<ac2>%s) over (?P<acn>\d+) steps" % (_HN, _HN)),
+        ("steady", r"native on foot ADS steady eye \(F93b\): (?P<to>on|off) \(live; in ADS: (?:yes|no)\)"),
+        ("hold", r"native on foot ADS eye hold \(F93b\): (?P<to>on|off) \(live, from the next press; in ADS: (?:yes|no)\)"),
+    ), _hj_f93_chain),
     _hrule("ADS head aim (F92b)", ("F92b",), ("ADS head aim (F92b)",), (
         ("switch", r"native on foot ADS head aim \(F92b\): (?P<to>on|off) \(live; in ADS: (?P<ads>yes|no)\)"),
         ("pressoff", r"native on foot ADS head aim \(F92b\): engaged \(ADS\) with the head aim off"),
@@ -11752,10 +11793,12 @@ def self_test_health():
             return R("rifle ADS readout placement (F92) 1 s: item %s", "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
                      moved, 0.0, amax, refused, why, 5.0, cm, ds, surf)
 
-        def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None):
-            """aim (F92b): the window's head aim, on, off or mixed; None renders the field as the F91 build wrote none (a neutral value the rule skips)."""
+        def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None, steady=None, hold=None):
+            """aim (F92b), steady and hold (F93b): the window's head aim, steady eye and eye hold, on, off or mixed; None renders the field as an earlier build wrote none
+            (a neutral value the rule skips)."""
+            count = {"on": 45, "off": 0, "mixed": 20}
             text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44, aim,
-                       {"on": 45, "off": 0, "mixed": 20}.get(aim), 45 if aim else None)
+                       count.get(aim), 45 if aim else None, steady, count.get(steady), 45 if steady else None, hold, count.get(hold), 45 if hold else None)
             text += R91("; sight: %u frames", 45, 0.02, 0.01, 0.2, 0, 0, 0.05, 0.01, "no")
             text += R91("; verdict: ")
             text += {"h1": R91("H1 (the cancel lands %d frame", d, "" if d == 1 else "s"), "lock": R91("%sLOCK (the sight lock", ""), "h3": R91("%sH3 (the view follows", ""),
@@ -11935,6 +11978,26 @@ def self_test_health():
         check("F92b aim: switched outside ADS only", [aim_switch("off", "no"), aim_switch("on", "no")], 0, [("IDLE", F92A)])
         check("F92b aim: off in ADS and nothing unwound", [aim_switch("off", "yes")], 3, [("NEVER APPLIED", F92A)])
         check("F92b aim: a remainder dropped", [aim_switch("off"), aim_off(), aim_unwound(0.4, True)], 0, [("PARTIAL", F92A)], has=["1 with a DROPPED remainder"])
+
+        # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
+        F93C = "ADS eye chain (F93b)"
+
+        def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05):
+            return R("native on foot ADS eye chain (F93b) 1 s", steady, hold, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
+                     89, along, -0.5, ac2, 86)
+
+        check("F93b fit: the steady eye and the eye hold split the windows",
+              [fit(0, "STILL", "none", aim="on", steady="on", hold="on"), fit(1, "STILL", "h3", aim="on", steady="on", hold="off"), fit(2, "STILL", "h3", aim="on", steady="on",
+                                                                                                                                     hold="off")],
+              0, [("OK", F91F)], has=["; steady eye on 3 (STILL 3; H1 0, LOCK 0, H3 2, none 1)", "; eye hold on 1 (STILL 1; H1 0, LOCK 0, H3 0, none 1), off 2 (STILL 2; H1 0"])
+        check("F93b chain: matched with the hold off and on", [chain(), chain(), chain(hold="on", ac2=-0.41, along=0.084)], 0, [("OK", F93C)],
+              has=["steady eye on: matched 264 of 270 measured frames", "steady on hold off: 2 s, along step 0.050 mm, lag-2 autocorrelation -0.02",
+                   "steady on hold on: 1 s, along step 0.084 mm, lag-2 autocorrelation -0.41, position lock step 0.080 mm, head translation 0.057 mm"])
+        check("F93b chain: the steady eye never matched", [chain(matched=0, legacy=90)] * 2, 3, [("NEVER APPLIED", F93C)], has=["matched 0 of 180"])
+        check("F93b chain: the steady eye matched a third of the frames", [chain(matched=30, legacy=60)], 0, [("PARTIAL", F93C)])
+        check("F93b chain: the keys switched, no ADS second", [R("native on foot ADS steady eye (F93b): %s (live", "off", "no"),
+                                                               R("native on foot ADS eye hold (F93b): %s (live, from the next press", "on", "no")], 0, [("IDLE", F93C)],
+              has=["switched: steady eye 1, eye hold 1 time(s)"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
