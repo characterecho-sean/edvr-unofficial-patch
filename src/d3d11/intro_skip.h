@@ -1,4 +1,4 @@
-// The launch movie, not played: fix.intro_video = skip.
+// The launch movie, not played: visual.intro_video = skip.
 //
 // WHAT THE MOVIE IS (docs/intro-video.md). Elite's launch idents are WebM
 // files under Products\...\Movies\ -- Ident_Frontier_*.webm, about twenty
@@ -39,7 +39,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.intro_video. `skip` arms the refusal and installs the import
+// Reads visual.intro_video. `skip` arms the refusal and installs the import
 // hooks the first time it is seen; any other value disarms (the hooks stay,
 // forwarding everything). Install and reload; the movie is decided at
 // launch, so a change mid-session matters at the next one.

@@ -3,8 +3,9 @@
 //
 // The seated origin is where Elite's cockpit eye point sits in tracking space (the OpenVR seated convention), so the cockpit lines up whenever the
 // origin is the player's real seated head position and heading. The game moves that origin with ResetSeatedZeroPose from wherever the head happens
-// to be (standing, turned, mid-boarding). This remembers where the player really sits, as a pose in the runtime's natural LOCAL space, and puts the
+// to be (standing, turned, mid-boarding). This remembers where the player really sits, as a pose in the selected natural reference space, and puts the
 // origin back there at every seated transition instead of trusting the head at the moment the game asks.
+// SteamVR's STAGE workaround has its own seat key because its coordinates are not interchangeable with prior LOCAL records.
 //
 // No windows.h and no OpenXR types: the rig (tools\seat_memory_test) and the runtime host both include it. The host feeds it the context word
 // (src/common/seat_context.h), head samples and the clock; it answers with decisions and the host acts. File input and output is seat_store.h.
@@ -19,6 +20,11 @@
 #include <vector>
 
 namespace edvr::openxr {
+
+inline std::string seatKeyForNaturalSpace(std::string key,bool stage) {
+  if(stage)key+="-stage";
+  return key;
+}
 
 constexpr double kSeatPi = 3.14159265358979323846;
 

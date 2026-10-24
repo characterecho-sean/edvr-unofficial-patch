@@ -358,6 +358,9 @@ void meter() {
 
 // ---- persistence
 void bookText() {
+    const std::string key="steamvr-openxr/steamvr-openxr-aapvr";
+    check(seatKeyForNaturalSpace(key,false)==key&&seatKeyForNaturalSpace(key,true)==key+"-stage",
+          "STAGE seat key is separate from old LOCAL seat key");
     std::vector<SeatRecord> book;
     seatBookPut(book, "pimax-openxr/pimax-crystal", SeatPose{-0.53, 0.0, -1.11, seatDegToRad(-28)});
     seatBookPut(book, "steamvr-openxr/steamvr-openxr-aapvr", SeatPose{-0.53, 0.45, -1.11, seatDegToRad(-28.5)});

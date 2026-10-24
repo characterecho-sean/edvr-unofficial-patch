@@ -62,6 +62,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11ShaderResourceView;
 
 struct ID3D11Texture2D;
 
@@ -293,6 +294,11 @@ UiLayerWorldStats uiLayerWorldStats();
 inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
 // The rigs' switch for the gate (it is on in production, always): the gate-off path is driven with it.
 void uiLayerSetMapsGateForTest(bool on);
+// The rigs' window onto the bound depth view's resolve memo (resolveBoundDsv, which seedWritersCheck asks): resolves `view` through
+// the memo, keyed by the Dsv0 binding's generation exactly as the draw path does, and reports the window's running hit and miss counts.
+// Returns the resolve's answer. Nothing in production calls it.
+struct ResourceInfo;
+bool uiLayerResolveBoundDsvForTest(void* view, ResourceInfo* info, uint64_t* hits, uint64_t* misses);
 // screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
 // scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
 // layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.
@@ -413,6 +419,30 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
 // 0: not, `why` says which test refused. The ordering guards are VR's.
 int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, const void* aliasSource,
                           uint64_t vs, uint64_t ps, char* why, size_t whyN);
+// The flat profile's HUD bloom (docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom"). The HUD the layer takes is
+// out of the scene H, so the game's bloom chain, which reads H, never sees it and the HUD has no halo. At the chain's first level (the HDR
+// route's trigger draw writing a half-size target) the adapter asks for H' = H + the HUD layer's light, made in one pass at H's size, and
+// binds it where that draw reads H: the chain, its tier, its threshold and its tone then carry the HUD's halo as stock does, and the HUD's
+// own light stays in the layer, once. Nothing but that one draw reads H'.
+// The slot holds the game's view of `hdr` for the draw about to be issued. Returns H''s shader view (owned here, valid until the next call
+// or the layer's release), or null with `verdict` (ui_layer_math.h's UiGlowFeed, as an int) saying why.
+//
+// visual.star_glow adds a second input (flat_star_glow.h): `star`, when given, is the star layer S -- the star draws alone, in a texture of H's
+// size -- and H' becomes H + the HUD + m * S: the HUD pass as above (or, with no HUD in the layer this frame, a copy of H), then one more
+// pass that adds S by a blend whose factor is (m, m, m, 0). S never holds the HUD, so each enters once. A star layer of another size than H is not
+// added (`sizeMismatch`) and the HUD's pass, if any, runs as ever. With no HUD and no usable star input the verdict is kNoHud and nothing is made.
+struct UiGlowStar {
+    ID3D11ShaderResourceView* srv = nullptr;   // S
+    float m = 0.0f;                            // k - 1, the weight of S in the first level's input
+    uint32_t w = 0, h = 0;                     // S's size
+    bool applied = false;                      // out: the pass added m * S
+    bool sizeMismatch = false;                 // out: S is not H's size
+    bool unavailable = false;                  // out: the star pass's shader or blend, or the copy of H it starts from, could not be made
+    bool hudIncluded = false;                  // out: the HUD layer's light is in H' (a live HUD this frame)
+    int verdict = 0;                           // out: the pass's UiGlowFeed
+};
+ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict,
+                                          UiGlowStar* star = nullptr);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's

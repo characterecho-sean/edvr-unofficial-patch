@@ -1070,8 +1070,9 @@ std::string statusText(uint32_t flags, int flags2, int gui) {
 
 // A Status.json as Elite writes it in play: the field order and value shapes of the game's file, with GuiFocus
 // (gui 0 and up) where the game puts it, and left out for gui below zero.
-std::string playStatus(int gui) {
-    std::string s = "{ \"timestamp\":\"2026-10-10T07:00:00Z\", \"event\":\"Status\", \"Flags\":16777232, \"Flags2\":0, "
+std::string playStatus(int gui, unsigned flags = 16777232u) {   // 16777232: in the main ship (bit 24), supercruise (bit 4)
+    std::string s = "{ \"timestamp\":\"2026-10-10T07:00:00Z\", \"event\":\"Status\", \"Flags\":" + std::to_string(flags) +
+                    ", \"Flags2\":0, "
                     "\"Pips\":[4,4,4], \"FireGroup\":0";
     if (gui >= 0) s += ", \"GuiFocus\":" + std::to_string(gui);
     s += ", \"Fuel\":{ \"FuelMain\":32.000000, \"FuelReservoir\":0.550000 }, \"Cargo\":0, \"LegalState\":\"Clean\", "
@@ -1542,7 +1543,8 @@ int journalWorkerChecks() {
         writeWhole(statusFile, playStatus(7));
         journalWatchConfigure();
         uint32_t focus0 = 99;
-        verify(!journalWatchActive() && !journalFlatGuiFocus(&focus0),
+        bool supercruise0 = true;
+        verify(!journalWatchActive() && !journalFlatGuiFocus(&focus0) && !journalFlatSupercruise(&supercruise0),
                "flat: nothing is answered before the worker has read anything");
         verify(tickUntil([] { uint32_t f = 0; return journalFlatGuiFocus(&f) && f == 7; }, 10000),
                "flat: a play-time Status.json with GuiFocus 7 reaches journalFlatGuiFocus through the worker");
@@ -1555,7 +1557,14 @@ int journalWorkerChecks() {
         writeWhole(statusFile, playStatus(-1));
         verify(tickUntil([] { uint32_t f = 0; return !journalFlatGuiFocus(&f); }, 10000),
                "flat: a Status.json without GuiFocus answers not-known");
-        verify(!journalWatchActive() && !journalGameplay(),
+        // The second flat reader: Flags bit 4 for the planet patch motion's supercruise gate (tickCelestialStatus).
+        writeWhole(statusFile, playStatus(0));
+        verify(tickUntil([] { bool sc = false; return journalFlatSupercruise(&sc) && sc; }, 10000),
+               "flat: Flags with bit 4 reaches journalFlatSupercruise as supercruise");
+        writeWhole(statusFile, playStatus(0, 16777216u));
+        verify(tickUntil([] { bool sc = true; return journalFlatSupercruise(&sc) && !sc; }, 10000),
+               "flat: Flags without bit 4 answers known and not supercruise");
+        verify(!journalWatchActive() && !journalGameplay() && !journalSupercruiseKnown() && !journalSupercruise(),
                "flat: the VR accessors still answer the no-journal values");
         g_runtimeProfile = savedProfile;
         stopWorker();

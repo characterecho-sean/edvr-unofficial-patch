@@ -31,7 +31,10 @@ inline bool flatProfileReadsKey(const char* key) {
         // The launch movie (intro_skip.cpp), flat's one value being `skip`: the game's open of the ident file is answered "not found". Every
         // other value plays the movie (intro_mode.h: introVideoParseFor), so the VR panel and resample stay inert in flat. Unlisted, getString
         // answers "off" here and the skip never arms.
-        std::strcmp(key, "fix.intro_video") == 0 ||
+        std::strcmp(key, "visual.intro_video") == 0 ||
+        // The star glow (visual.star_glow, star_glow.h): a percentage of the halo the game's own bloom draws around a star, flat only for now.
+        // The Visual tab's row. Unlisted, getString answers "off" here, which the reader takes for the stock 100.
+        std::strcmp(key, "visual.star_glow") == 0 ||
         // The AA comparison key (aa_compare.cpp): turns EDVR's temporal AA off for a side-by-side look and back, runtime only. Unlisted, a hotkey
         // key reads empty in flat, which is unbound.
         std::strcmp(key, "hotkey.compare_aa") == 0 ||
@@ -46,6 +49,10 @@ inline bool flatProfileReadsKey(const char* key) {
         // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel
         // row. Unlisted, getInt answers 0 here whatever the file says, which the reader takes for out of range and reads as 8.
         std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0 ||
+        // The shader dump (device_hook.cpp): every VS, PS and CS the game creates, to edvr_logs\shaders by hash. Flat's post
+        // chain (bloom, tone, copy) is in no effects archive, so a running game is the only place its bytecode can be read.
+        // Developer tier, no flat panel row. Unlisted, getBool answers false here whatever the file says.
+        std::strcmp(key, "advanced.glare_shader_dump") == 0 ||
         // The journal watcher, for the System Map's GuiFocus (journal_watch.h: journalFlatGuiFocus). Its other accessors answer
         // flat with the no-journal values, so enabling the watcher here changes no other flat behaviour. journal_dir names the
         // Saved Games folder when the default is wrong; unlisted, it reads "off" and the watcher looks in a folder named "off".

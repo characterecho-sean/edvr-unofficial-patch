@@ -341,7 +341,7 @@ render-thread termination or general graphics inactivity. The native module's
 final GPU drain and callback-held cleanup still require Present service, so
 teardown needs a safe contract for stopped application rendering before native
 game launch. The original runtime is preserved; the only observed INI change
-during the flight was `fix.intro_video = screen` to `skip`, which is retained.
+during the flight was `visual.intro_video = screen` to `skip`, which is retained.
 Native export/launch integration remains open.
 
 The latest [application System caller

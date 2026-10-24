@@ -388,13 +388,15 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
 // The prefix model's records at a draw, assembled the way the copy branch assembles them for the copy
 // route (flatRuntimeObserve) and run through flatSelectHdrFrame. `consumerSeq` is the place every H draw and every
 // source must precede and `gate` the extent bound (flatSelectHdrRoute below is the trigger's, the route's own).
-// A conflict the model recorded on H is kept as the witness, as the copy route keeps it.
+// A conflict the model recorded on H is kept as the witness, as the copy route keeps it. `waiveCameraOnly`: the admission by structure's
+// asking (flat_copy_structure.h), where a temporal-off frame whose H is bad for a camera disagreement alone goes on to the selection
+// (flatRuntimeBadTargetRefuses); the route's own selection at its trigger leaves the target refused, as it always did.
 inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFrame& f,
                                           bool (*supportedPair)(uint64_t, uint64_t), uint32_t consumerSeq,
                                           FlatHdrExtentGate gate,
                                           FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr,
                                           bool (*qualifiedAlternate)(const FlatContractRecord&,const unsigned char*,void*) = nullptr,
-                                          void* qualifiedAlternateUser = nullptr) {
+                                          void* qualifiedAlternateUser = nullptr, bool waiveCameraOnly = false) {
     using namespace flat_mono_detail;
     FlatMonoFrame out{}; out.frame = out.epoch = p.frame;
     if (!f.triggered) { out.reason = FlatMonoReason::NoHdrConsumer; return out; }
@@ -403,7 +405,7 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
     const FlatRuntimeTarget* target = nullptr;
     for (uint32_t i = 0; i < p.targetsUsed; ++i) if (p.targets[i].resource == f.trigger.hdr) { target = &p.targets[i]; break; }
     if (!target || !target->writes.draws || target->writes.key.format != 26) { out.reason = FlatMonoReason::NoHdr; return out; }
-    if (target->hdrBad) {
+    if (target->hdrBad && (!waiveCameraOnly || flatRuntimeBadTargetRefuses(p, *target))) {
         p.selectedConflict = target->firstBad;
         out.reason = FlatMonoReason::ConflictingHdr; return out;
     }

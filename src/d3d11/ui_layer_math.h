@@ -21,7 +21,7 @@
 //     composite reproduces what the game's own blends painted, in order;
 //   * the COMPOSITE's filter: an exact box (area) filter of the layer over
 //     each output pixel's footprint -- a copy at 1.0, a supersampled
-//     downsample at 1.25.
+//     downsample at 1.25, 1.5 and 2.0 (2.0 is the exact 2 x 2 average).
 //
 // WHY TRANSMITTANCE AND NOT COVERAGE. The design (A3) kept coverage in alpha,
 // which cannot express an OPAQUE draw: D3D11's blend is src*f1 + dst*f2 with
@@ -53,9 +53,9 @@ namespace edvr {
 
 // ---------------------------------------------------------------- the key --
 
-// "off" | "100" | "125" -> 0 (off) | 1.0 | 1.25: the target HMD Quality, as
+// "off" | "100" | "125" | "150" | "200" -> 0 (off) | 1.0 | 1.25 | 1.5 | 2.0: the target HMD Quality, as
 // a percentage of HMD Quality 1.0 in the file (a plain number, like every
-// numeric key) and "100%" / "125%" in the F8 menu. Exact text, the way the
+// numeric key) and "100%" ... "200%" in the F8 menu. Exact text, the way the
 // other choice keys read: "100.0" is not "100". The first
 // spellings -- "1.0", "1" and "1.25" -- are read for one release as 100 and
 // 125, with *alias set to the new spelling for the log's one-time note.
@@ -71,6 +71,8 @@ inline float uiQualityParse(const char* text, bool* recognized, const char** ali
     if (std::strcmp(text, "off") == 0) return 0.0f;
     if (std::strcmp(text, "100") == 0) return 1.0f;
     if (std::strcmp(text, "125") == 0) return 1.25f;
+    if (std::strcmp(text, "150") == 0) return 1.5f;
+    if (std::strcmp(text, "200") == 0) return 2.0f;
     if (std::strcmp(text, "1.0") == 0 || std::strcmp(text, "1") == 0) {
         if (alias) *alias = "100";
         return 1.0f;
@@ -83,10 +85,12 @@ inline float uiQualityParse(const char* text, bool* recognized, const char** ali
     return 0.0f;
 }
 
-// The target as the menu and the log say it: "100%", "125%", else "off".
+// The target as the menu and the log say it: "100%", "125%", "150%", "200%", else "off".
 inline const char* uiQualityLabel(float target) {
     if (target == 1.0f) return "100%";
     if (target == 1.25f) return "125%";
+    if (target == 1.5f) return "150%";
+    if (target == 2.0f) return "200%";
     return "off";
 }
 
@@ -551,19 +555,19 @@ struct UiLayerPrivateDepthGuard {
 // area weights normalised to 1. Output pixel i of a region whose layer
 // rectangle starts at layer coordinate o with s layer texels a pixel covers
 // [o + i*s, o + (i+1)*s): one texel with weight 1 at s = 1 on the grid (a
-// copy), up to three at s = 1.25. The HLSL in ui_layer_shaders.h is this
+// copy), up to three at s = 1.25, 1.5 or 2. The HLSL in ui_layer_shaders.h is this
 // loop, transcribed; the rig compares the two on WARP.
 constexpr int kUiLayerMaxTaps = 4;  // s <= 2 needs at most 3; one spare
-inline int uiLayerFootprint(double x0, double x1, uint32_t layerDim, uint32_t* first,
-                            float weights[kUiLayerMaxTaps]) {
-    if (!(x1 > x0) || layerDim == 0 || !first) return 0;
+inline int uiLayerFootprintTaps(double x0, double x1, uint32_t layerDim, uint32_t* first, float* weights,
+                                int maxTaps) {
+    if (!(x1 > x0) || layerDim == 0 || !first || !weights) return 0;
     int64_t k0 = static_cast<int64_t>(std::floor(x0));
     int64_t k1 = static_cast<int64_t>(std::ceil(x1)) - 1;
     if (k0 < 0) k0 = 0;
     if (k1 > static_cast<int64_t>(layerDim) - 1) k1 = static_cast<int64_t>(layerDim) - 1;
     int n = 0;
     double total = 0.0;
-    for (int64_t k = k0; k <= k1 && n < kUiLayerMaxTaps; ++k) {
+    for (int64_t k = k0; k <= k1 && n < maxTaps; ++k) {
         const double a = (x0 > static_cast<double>(k)) ? x0 : static_cast<double>(k);
         const double b = (x1 < static_cast<double>(k + 1)) ? x1 : static_cast<double>(k + 1);
         const double w = b - a;
@@ -574,6 +578,28 @@ inline int uiLayerFootprint(double x0, double x1, uint32_t layerDim, uint32_t* f
     }
     for (int j = 0; j < n; ++j) weights[j] = static_cast<float>(weights[j] / total);
     return n;
+}
+inline int uiLayerFootprint(double x0, double x1, uint32_t layerDim, uint32_t* first,
+                            float weights[kUiLayerMaxTaps]) {
+    return uiLayerFootprintTaps(x0, x1, layerDim, first, weights, kUiLayerMaxTaps);
+}
+
+// THE HUD'S BLOOM FEED'S FILTER (fixed_shader_source.h kUiGlowFeedPsHlsl; ui_layer.h UiGlowFeed). The feed reads the HUD layer, which is the
+// display's size times the quality target, at the scene H's size: a pixel of H covers `scale` layer texels per axis, 1.0 on the grid, 20/13 at
+// quality 100 of a 1248x780 scene on a 1920x1200 display, 1.25 at quality 125 at native size. Pixel i integrates the texels of [i*scale,
+// (i+1)*scale) by the area they cover, the composite's weights above: the footprints tile the layer, so a detail sends the same light to the
+// bloom wherever it falls on H's grid -- a one-texel line a total of 1/scale per row of pixels, a single texel 1/(scale.x*scale.y). A footprint
+// wider than kUiGlowFeedMaxSpan texels (a ratio past 4) is cut to its central kUiGlowFeedMaxSpan, which keeps the pass at 5 loads an axis
+// and the mean of a flat field. The HLSL is this loop, transcribed; the rig replays it for the energy.
+constexpr int kUiGlowFeedMaxTaps = 5;          // a footprint of kUiGlowFeedMaxSpan texels crosses at most 5
+constexpr double kUiGlowFeedMaxSpan = 4.0;
+inline int uiGlowFeedFootprint(uint32_t pixel, double scale, uint32_t layerDim, uint32_t* first,
+                               float weights[kUiGlowFeedMaxTaps]) {
+    if (!(scale > 0.0)) return 0;
+    const double x0 = static_cast<double>(pixel) * scale;
+    const double x1 = x0 + scale;
+    const double cut = (scale > kUiGlowFeedMaxSpan) ? (scale - kUiGlowFeedMaxSpan) * 0.5 : 0.0;
+    return uiLayerFootprintTaps(x0 + cut, x1 - cut, layerDim, first, weights, kUiGlowFeedMaxTaps);
 }
 
 // ------------------------------------------------------ the classifier gate --
@@ -631,8 +657,8 @@ enum class UiLayerFamily : uint8_t {
                  // the System Map, the Orrery -- is open): the map's GUI canvas composite (vs 12382D2EA45E9632 with
                  // ps 855C469156AB997F), drawn into the HDR scene and taken into the flat UI layer. No VR classifier
                  // names it: uiLayerFamilyFor's HDR branch never returns it.
-    kMapSprite,  // flat only, the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, or
-                 // with ps 539A4858CE3A3477 on the System Map)
+    kMapSprite,  // flat only, the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, with
+                 // ps 539A4858CE3A3477 on the System Map, or with ps 964221955A9E77E7 on the Galaxy Map since game build 334473)
     kWeaponsFire,  // the weapons fire (weapons_fire.h: beams and bolts, multicannon rounds and the shield strike's additive part, by
                    // their exact vertex/pixel PAIRS): additive world light taken into the eye's OWN additive HDR layer, separate from
                    // the HUD's over-blend one, and added onto the upscaled picture after the tonemap. Governed by fix.sharp_weapons,
@@ -1142,6 +1168,65 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
     }
 }
 
+// The decisions that get a first-seen line of their own. The transient ones -- not armed yet, late this frame -- are counted on the
+// totals line and never get one.
+inline bool uiLayerDecisionIsStructural(UiLayerDecision d) {
+    return d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate && d != UiLayerDecision::kNotUi;
+}
+
+// The first-seen table behind ui_layer.cpp's noteFamily: one line per (family, decision, vertex shader, pixel shader), a structural
+// decision only, at most Cap lines. wanted() is the whole rule and record() is built on it, so a caller that formats a line's detail text
+// asks wanted() first and pays for the text only when the line will print (the decision of an ordinary draw is made ~100 times a frame and
+// the pair was seen long ago). record() answers whether the line is to be written, and takes the pair into the table when it is.
+template <uint32_t Cap>
+struct UiFamilySeenTable {
+    struct Entry {
+        uint8_t family, decision;
+        uint64_t vs, ps;
+    };
+    Entry entries[Cap];
+    uint32_t count = 0;
+
+    bool wanted(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) const {
+        if (!uiLayerDecisionIsStructural(d)) return false;
+        for (uint32_t i = 0; i < count; ++i) {
+            const Entry& s = entries[i];
+            if (s.family == uint8_t(f) && s.decision == uint8_t(d) && s.vs == vs && s.ps == ps) return false;
+        }
+        return count < Cap;
+    }
+    bool record(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) {
+        if (!wanted(f, d, vs, ps)) return false;
+        entries[count++] = {uint8_t(f), uint8_t(d), vs, ps};
+        return true;
+    }
+};
+
+// The flat HUD's bloom feed (ui_layer.h uiLayerGlowFeed; docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom"): what the
+// pass that makes H' = H + the HUD layer's light came to for one draw.
+enum class UiGlowFeed : uint8_t {
+    kFed = 0,     // H' is made: bind it at the slot for this draw
+    kNoHud,       // no HUD in the layer this frame (nothing to feed)
+    kNotReady,    // the pass's shaders or deferred context are not available
+    kBinding,     // the draw's own binding at the slot is not H
+    kTexture,     // H is not a plain 2D mip-0 view, or H' could not be made
+    kFormat,      // H is not R11G11B10_FLOAT, one sample, one slice
+    kFault,       // the pass faulted (its fault budget; stays off once spent)
+    kCount
+};
+inline const char* uiGlowFeedName(UiGlowFeed v) {
+    switch (v) {
+        case UiGlowFeed::kFed: return "fed";
+        case UiGlowFeed::kNoHud: return "no-hud";
+        case UiGlowFeed::kNotReady: return "not-ready";
+        case UiGlowFeed::kBinding: return "binding-not-h";
+        case UiGlowFeed::kTexture: return "texture";
+        case UiGlowFeed::kFormat: return "format";
+        case UiGlowFeed::kFault: return "fault";
+        default: return "?";
+    }
+}
+
 // The facts the draw path gathers; the decision is a pure function of them.
 struct UiLayerDrawFacts {
     UiLayerFamily family = UiLayerFamily::kNone;
@@ -1632,6 +1717,62 @@ inline double uiLayerPercentile(float* v, uint32_t n, double frac) {
     if (!v || !n) return 0.0;
     std::sort(v, v + n);
     return uiLayerSortedPercentile(v, n, frac);
+}
+
+// THE TONEMAP RE-ISSUE'S SCENE IMAGES (docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-20: bloom counted twice").
+// The re-issue swaps only the tone's HDR source for the HDR layer; everything else the game's draw bound stays bound. With
+// Elite's Bloom on, the tone reads the scene's bloom from a slot of its own (quarter size at t2 on the flat E894/0D43 tone, t1
+// on 9270), so the layer came out T(HUD + bloom): over every pixel with no HUD that is T(bloom), and the composite adds it onto
+// a frame that already carries it. Bloom counted twice: on Sean's F7 pair of the System Map the halo of the star was 1.95-2.0x
+// as bright at every radius out to 300 px, the bodies 1.3-1.4x, the grid lines and stars unchanged; fix.ui_quality = off
+// restored it. The light the layer adds must be its own, so on the steps that tonemap the layer's light by itself every scene
+// image reads zero (toneStepKeepsSceneImages, weapons_fire.h, says which steps those are).
+//
+// A scene image is a reduced copy of the frame: a 2D view in a colour format (three or more channels) of a texture the GPU wrote
+// (a render target or UAV), the HDR source's shape to within a pixel's rounding, from 1/32 of its size to its full size per
+// axis. The colour LUT (a 3D view), the exposure (1x1, a single channel, and on the VS), a strip or square table, an asset
+// texture and the HDR source's own slot are none of these. `blendSlot` names an input the tone BLENDS with its HDR source
+// rather than adds -- the DoF composite's blur (flat_mono_frame.h kToneDofCompositePs, PS1), (1-f) H + f blur -- where zero
+// would dim the light by f instead: it is not this rule's case. The re-issue binds the step's own source there (ui_layer.cpp
+// crispBindStep), so the blend mixes the layer with itself and adds nothing of the scene's. -1 for none.
+// The PS slots the re-issue looks at: t0..t15. The measured tones bind t0..t3 (t3 null on E894); EDHM's t120 is its config table,
+// a buffer, not an image.
+constexpr int kToneSceneScanSlots = 16;
+struct ToneInputShape {
+    bool tex2d = false;       // a TEXTURE2D view: not 3D, an array, multisampled or a buffer
+    bool gpuWritten = false;  // its texture binds as a render target or an unordered-access view
+    uint32_t viewFormat = 0;  // the view's DXGI_FORMAT, as a number (ui_layer.cpp asserts the values below against dxgiformat.h)
+    uint32_t w = 0, h = 0;    // the texture's mip 0
+};
+// Three or more channels: the formats a frame or its bloom is held in. A luminance or exposure texture is one or two.
+inline bool toneInputColourFormat(uint32_t f) {
+    switch (f) {
+        case 2:   // R32G32B32A32_FLOAT
+        case 6:   // R32G32B32_FLOAT
+        case 10:  // R16G16B16A16_FLOAT
+        case 11:  // R16G16B16A16_UNORM
+        case 24:  // R10G10B10A2_UNORM
+        case 26:  // R11G11B10_FLOAT
+        case 28:  // R8G8B8A8_UNORM
+        case 29:  // R8G8B8A8_UNORM_SRGB
+        case 67:  // R9G9B9E5_SHAREDEXP
+        case 87:  // B8G8R8A8_UNORM
+        case 88:  // B8G8R8X8_UNORM
+        case 91:  // B8G8R8A8_UNORM_SRGB
+        case 93:  // B8G8R8X8_UNORM_SRGB
+            return true;
+        default:
+            return false;
+    }
+}
+inline bool toneInputIsSceneImage(int slot, int hdrSlot, int blendSlot, const ToneInputShape& in, uint32_t hdrW, uint32_t hdrH) {
+    if (slot == hdrSlot || slot == blendSlot) return false;
+    if (!in.tex2d || !in.gpuWritten || !toneInputColourFormat(in.viewFormat)) return false;
+    if (!in.w || !in.h || !hdrW || !hdrH || in.w > hdrW || in.h > hdrH) return false;
+    if (static_cast<uint64_t>(in.w) * 32u < hdrW || static_cast<uint64_t>(in.h) * 32u < hdrH) return false;
+    // The same shape: w/h = W/H, cross-multiplied, with a pixel of rounding on either axis (a chain that rounds up or down).
+    const int64_t cross = static_cast<int64_t>(in.w) * hdrH - static_cast<int64_t>(in.h) * hdrW;
+    return (cross < 0 ? -cross : cross) <= static_cast<int64_t>(hdrW) + static_cast<int64_t>(hdrH);
 }
 
 }  // namespace edvr

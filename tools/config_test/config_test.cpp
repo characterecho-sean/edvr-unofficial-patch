@@ -42,6 +42,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -53,6 +54,7 @@
 #include "../../src/common/ini_name.h"
 #include "../../src/common/real_dll_choice.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/common/star_glow.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
 #include "../../src/d3d11/explorer_cam_follow_core.h"   // the Explorer Cam trims' and smoothing defaults: header-only, no link
@@ -600,9 +602,11 @@ static void shareDeleteCase(const std::wstring& scratch) {
     std::thread probe(probeMain, &path, &st);
 
     // At least 300 reloads, and on until the probe has landed 300 times inside
-    // them: a probe thread that is starved by a busy machine (the rigs run in a
-    // pool) gets the time it needs rather than failing the run for want of it.
-    // The cap is what ends a probe that never runs.
+    // them: a probe thread that is starved by a busy machine gets the time it
+    // needs rather than failing the run for want of it. The cap is what ends a
+    // probe that never runs. build.bat runs this rig alone, after the pool (it is
+    // --quiet): a reload holds the file for tens of microseconds, and a pool of
+    // four busy rigs on four cores let one run make 78 landings in 20000 reloads.
     int  reloads = 0;
     int  unparsed = 0;
     bool writeFailed = false;
@@ -2095,6 +2099,106 @@ int main(int argc, char** argv) {
             Config::get().setAuditTables(nullptr, 0, nullptr, 0);
         }
 
+        // --- fix.intro_video moved to visual.intro_video (2026-10-22), over the SHIPPED tables ----
+        //
+        // The same proof as the trims: the tables the DLLs register come from the real edvr.ini, so what is shown is that an old-layout
+        // [fix] line is read as the new key, that the retired default is not a choice, and that it is the shipped annotation doing it.
+        {
+            using contractgen::kKnownKeys;
+            using contractgen::kMovedKeys;
+            constexpr size_t kKnownCount = sizeof(kKnownKeys) / sizeof(kKnownKeys[0]);
+            constexpr size_t kMovedCount = sizeof(kMovedKeys) / sizeof(kMovedKeys[0]);
+            static const char* filtered[kMovedCount][3];
+            size_t filteredCount = 0;
+            bool carriesIntro = false;
+            int olderIntro = 0;
+            for (size_t i = 0; i < kMovedCount; ++i) {
+                const std::string oldKey = kMovedKeys[i][0], newKey = kMovedKeys[i][1];
+                if (oldKey == "fix.intro_video" && newKey == "visual.intro_video" && std::string(kMovedKeys[i][2]) == "screen") {
+                    carriesIntro = true;
+                    continue;   // the control's tables lose this one move
+                }
+                if (newKey == "visual.intro_video") ++olderIntro;
+                for (int c = 0; c < 3; ++c) filtered[filteredCount][c] = kMovedKeys[i][c];
+                ++filteredCount;
+            }
+            check(carriesIntro, "the shipped moved-from map carries fix.intro_video to visual.intro_video, its shipped default screen");
+            check(olderIntro == 3, "...and the three older intro keys still land on the same key");
+            int known = 0, retired = 0;
+            for (size_t i = 0; i < kKnownCount; ++i) {
+                if (strcmp(kKnownKeys[i], "visual.intro_video") == 0 || strcmp(kKnownKeys[i], "visual.star_glow") == 0) ++known;
+                if (strcmp(kKnownKeys[i], "fix.intro_video") == 0) ++retired;
+            }
+            check(known == 2 && retired == 0, "visual.intro_video and visual.star_glow are known keys, and fix.intro_video is not one any more",
+                  std::to_string(known) + " known, " + std::to_string(retired) + " retired still known");
+
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, kMovedKeys, kMovedCount);
+            if (!writeIni(scratch, "[fix]\r\nintro_video = skip\r\n")) {
+                fail("old-layout intro_video ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("visual.intro_video", "skip", "an old-layout [fix] intro_video is read as visual.intro_video");
+                // The retired default is not a choice: nothing is synthesized, so the key's own default (the caller's) rules.
+                if (!rewriteIni(scratch, "[fix]\r\nintro_video = screen\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("old-layout stale intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "<unset>", "an old-layout line still carrying the shipped default is ignored, not read");
+                }
+                // Both spellings: the new name wins.
+                if (!rewriteIni(scratch, "[fix]\r\nintro_video = skip\r\n[visual]\r\nintro_video = stock\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("both-layout intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "stock", "when both spellings are set, visual.intro_video wins");
+                }
+                // A new-layout file is read as it stands.
+                if (!rewriteIni(scratch, "[visual]\r\nintro_video = skip\r\nstar_glow = 150\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("new-layout intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "skip", "a new-layout visual.intro_video is read as it stands");
+                    check(edvr::starGlowPercent(Config::get()) == 150, "visual.star_glow = 150 reads as 150 percent");
+                }
+            }
+            // CONTROL: the same old-layout file over the same tables minus that one move: the value is stranded under the old name.
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, reinterpret_cast<const char* const(*)[3]>(filtered), filteredCount);
+            if (!writeIni(scratch, "[fix]\r\nintro_video = skip\r\n")) {
+                fail("control intro_video ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("visual.intro_video", "<unset>", "control: without the annotation an old-layout intro_video is NOT read as the new name");
+            }
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+        }
+
+        // --- visual.star_glow: the percentages, read exactly ---------------------
+        {
+            struct Case { const char* text; int percent; bool recognised; };
+            const Case cases[] = {{"100", 100, true}, {"125", 125, true}, {"150", 150, true}, {"175", 175, true}, {"200", 200, true},
+                                  {"", 100, false}, {"off", 100, false}, {"110", 100, false}, {"225", 100, false}, {"150%", 100, false},
+                                  {"1.5", 100, false}, {"150.0", 100, false}, {" 150", 100, false}, {"-150", 100, false}};
+            for (const Case& c : cases) {
+                bool recognised = false;
+                const int got = edvr::starGlowParse(c.text, &recognised);
+                check(got == c.percent && recognised == c.recognised,
+                      (std::string("star glow \"") + c.text + "\" reads as " + std::to_string(c.percent) + (c.recognised ? "" : " (unrecognised)")).c_str(),
+                      "got " + std::to_string(got) + (recognised ? " recognised" : " unrecognised"));
+            }
+            bool recognised = true;
+            check(edvr::starGlowParse(nullptr, &recognised) == 100 && !recognised, "a null value is the stock 100, unrecognised");
+            // Through the Config accessor, absent and set. The key is flat-listed (flat_profile_keys.h); in VR it reads whatever the file says.
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+            if (!writeIni(scratch, "[fix]\r\nblack_void = on\r\n")) {
+                fail("star glow absent ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                check(edvr::starGlowPercent(Config::get(), &recognised) == 100 && recognised, "an absent visual.star_glow is the stock 100, recognised");
+                Config::get().set("visual.star_glow", "175");
+                check(edvr::starGlowPercent(Config::get()) == 175, "a set visual.star_glow = 175 reads as 175 percent");
+                Config::get().set("visual.star_glow", "banana");
+                check(edvr::starGlowPercent(Config::get(), &recognised) == 100 && !recognised, "a typo is the stock 100, unrecognised: it must not strengthen the picture");
+            }
+        }
+
         // --- the log directory, and the environment's say over it ----------
         //
         // build.bat's test runner gives each rig's proxies their own log
@@ -2355,7 +2459,7 @@ int main(int argc, char** argv) {
             }
             return n;
         };
-        const char* const kCapLine = "log size cap reached; nothing further will be written";
+        const char* const kCapLine = "log size cap reached; only lines noted as reserved";
         const uint64_t kMiB = 1024ull * 1024ull;
 
         const CapRun byDefault = session("", L"capdefault", true);
@@ -2382,6 +2486,121 @@ int main(int argc, char** argv) {
         check(four.opened && four.maxBytes == 4 * kMiB, "an ini that says max_mb = 4 keeps 4 MB", std::to_string(four.maxBytes) + " bytes");
         const CapRun none = session("max_mb = 0\r\n", L"capnone", false);
         check(none.opened && none.maxBytes == 0, "max_mb = 0 is no cap", std::to_string(none.maxBytes) + " bytes");
+        Log::get().close();
+
+        // --- Log::noteReserved: a line that outlives the cap, from a reserve of 1 MiB (2026-10-22, the memory watch's mem: lines) ----------
+        //
+        // Before the cap it is an ordinary line. After it, the lines go on from the reserve, in order, until the reserve cannot take the
+        // next one; the log says so once and writes no more of them. The reserve's arithmetic is held by tools\mem_watch_test; this is
+        // the file: that the lines are on disk, in order, that an ordinary line after the cap still is not, that the notice is the end.
+        const auto readLog = [&](const wchar_t* tag) {
+            std::string body;
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((scratch + L"\\edvr_" + tag + L"_*.log").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return body;
+            const std::wstring name = fd.cFileName;
+            FindClose(h);
+            HANDLE f = CreateFileW((scratch + L"\\" + name).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f == INVALID_HANDLE_VALUE) return body;
+            char chunk[65536];
+            DWORD got = 0;
+            while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) && got) body.append(chunk, got);
+            CloseHandle(f);
+            return body;
+        };
+        const auto openLog = [&](const char* maxMbLine, const wchar_t* tag) {
+            std::string ini = "[log]\r\nenabled = 1\r\nbuffer_mb = 16\r\n";
+            ini += maxMbLine;
+            if (!writeIni(scratch, ini.c_str())) return false;
+            Config::get().init(scratch);
+            Log::get().close();
+            WIN32_FIND_DATAW old{};
+            HANDLE oh = FindFirstFileW((scratch + L"\\edvr_" + tag + L"_*.log").c_str(), &old);
+            if (oh != INVALID_HANDLE_VALUE) {
+                do {
+                    DeleteFileW((scratch + L"\\" + old.cFileName).c_str());
+                } while (FindNextFileW(oh, &old));
+                FindClose(oh);
+            }
+            return Log::get().open(scratch, tag);
+        };
+
+        // Under the default cap a reserved line is an ordinary line: written, timestamped, in order with the notes around it, no cap notice.
+        if (!openLog("", L"resdefault")) {
+            fail("log reserve default", "the log would not open in the scratch dir");
+        } else {
+            Log::get().note("resdefault plain before");
+            Log::get().noteReserved("resdefault reserved %d", 7);
+            Log::get().note("resdefault plain after");
+            Log::get().close();
+            const std::string body = readLog(L"resdefault");
+            const size_t a = body.find("resdefault plain before"), b = body.find("resdefault reserved 7"), c = body.find("resdefault plain after");
+            check(a != std::string::npos && b != std::string::npos && c != std::string::npos && a < b && b < c && count(body, kCapLine) == 0,
+                  "noteReserved under the cap is note(): the line is written in order with the ordinary ones, and no cap is mentioned");
+            const size_t lineStart = b == std::string::npos ? 0 : body.rfind('\n', b) + 1;
+            check(b != std::string::npos && body.size() > lineStart + 14 && body[lineStart] == '[' && body[lineStart + 3] == ':' && body[lineStart + 13] == ']',
+                  "...and it is stamped like the others ([hh:mm:ss.mmm])");
+        }
+
+        // Past a 1 MB cap: the burst crosses it; once the cap notice is on disk, a reserved line, then 1.3 MB of them.
+        if (!openLog("max_mb = 1\r\n", L"respast")) {
+            fail("log reserve past the cap", "the log would not open in the scratch dir");
+        } else {
+            const std::string filler(1000, 'y');
+            for (int i = 0; i < 1300; ++i) Log::get().note("capfill %d %s", i, filler.c_str());
+            const auto waitForBody = [&](const char* needle, const char* why) {
+                const ULONGLONG started = GetTickCount64();
+                while (readLog(L"respast").find(needle) == std::string::npos) {
+                    if (GetTickCount64() - started > 120000ull) {
+                        fail("log reserve wait", std::string("never reached disk in 120 s: ") + why);
+                        return false;
+                    }
+                    Sleep(20);
+                }
+                return true;
+            };
+            // The burst is on disk, then one ordinary line gives the next pass something to write, and that pass finds the cap.
+            const bool burstWritten = waitForBody("capfill 1299 ", "the burst");
+            Log::get().note("resmarker the pass that finds the cap");
+            const bool capSeen = burstWritten && waitForBody(kCapLine, "the cap notice");
+            Log::get().noteReserved("resfirst reserved line after the cap");
+            Log::get().note("resplain ordinary line after the cap");
+            for (int i = 0; i < 1300; ++i) Log::get().noteReserved("resflood %05d %s", i, filler.c_str());
+            Log::get().noteReserved("resnever a line after the flood");
+            Log::get().close();   // joins the flusher and runs the last passes: everything noted is decided before the file is read
+            const std::string body = readLog(L"respast");
+            if (capSeen) {
+                const size_t capAt = body.find(kCapLine), firstAt = body.find("resfirst reserved line after the cap"), floodAt = body.find("resflood 00000 ");
+                check(count(body, kCapLine) == 1 && firstAt != std::string::npos && floodAt != std::string::npos && capAt < firstAt && firstAt < floodAt,
+                      "a reserved line noted after the cap is still written, once, after the cap notice and before the lines that follow it");
+                check(count(body, "resplain ordinary line after the cap") == 0 && count(body, "resmarker") == 0 && count(body, "resnever") == 0,
+                      "...while an ordinary line after the cap is not (the cap is still the cap)");
+                // The reserved lines on disk: whole, consecutive from 0, in order, adding up to no more than 1 MiB.
+                size_t floodLines = 0, reservedBytes = 0;
+                bool consecutive = true;
+                for (size_t at = body.find("resflood "); at != std::string::npos; at = body.find("resflood ", at + 1)) {
+                    const size_t lineStart = body.rfind('\n', at) + 1;
+                    const size_t lineEnd = body.find('\n', at);
+                    if (lineEnd == std::string::npos || body.find(filler, at) == std::string::npos || body.find(filler, at) > lineEnd) consecutive = false;
+                    if (std::atoi(body.c_str() + at + 9) != static_cast<int>(floodLines)) consecutive = false;
+                    reservedBytes += lineEnd - lineStart + 1;
+                    ++floodLines;
+                }
+                const size_t firstBytes = body.find('\n', firstAt) + 1 - (body.rfind('\n', firstAt) + 1);
+                reservedBytes += firstBytes;
+                check(floodLines > 900 && floodLines < 1300 && consecutive,
+                      "the flood is cut off partway (a whole number of lines, consecutive from 0, none missing), not written to its end",
+                      std::to_string(floodLines) + " lines");
+                check(reservedBytes <= kMiB && reservedBytes + 1100 > kMiB,
+                      "...at the reserve: no more than 1 MiB of reserved lines, and not a line's width short of it",
+                      std::to_string(reservedBytes) + " bytes");
+                const char* const spent = "[edvr] the post-cap reserve of 1 MiB for reserved lines is spent; nothing further will be written.";
+                const size_t spentAt = body.find(spent);
+                check(count(body, spent) == 1 && spentAt != std::string::npos && body.size() == spentAt + std::strlen(spent) + 2,
+                      "the reserve says it is spent exactly once, and that notice is the end of the file");
+            }
+        }
         Log::get().close();
     }
 
@@ -2435,6 +2654,20 @@ int main(int argc, char** argv) {
             if (Config::get().getString("fix.ui_quality", "100") == "100")
                 ok("flat ui_quality uses the 100 default when absent");
             else fail("flat ui_quality default", "missing key was not 100");
+            // The Visual tab's two keys (2026-10-22): read in flat. Refused, the star glow would read "off" (the stock 100 anyway, but never the
+            // 150 somebody chose) and the movie's skip could never arm; the retired [fix] name is refused, so the one place that reads it is the
+            // moved-from map.
+            if (Config::get().getString("visual.intro_video", "screen") == "screen" && edvr::starGlowPercent(Config::get()) == 100)
+                ok("flat visual.intro_video and visual.star_glow use their defaults when absent");
+            else fail("flat visual defaults", "an absent [visual] key did not read its default");
+            if (!rewriteIni(scratch, "[fix]\r\nintro_video = skip\r\n[visual]\r\nintro_video = skip\r\nstar_glow = 150\r\n") ||
+                !Config::get().reloadIfChanged()) {
+                fail("flat visual scratch ini", "the edit did not reload");
+            } else {
+                expectStr("visual.intro_video", "skip", "flat reads visual.intro_video");
+                check(edvr::starGlowPercent(Config::get()) == 150, "flat reads visual.star_glow = 150 as 150 percent");
+                expectStr("fix.intro_video", "off", "flat refuses the retired fix.intro_video name");
+            }
         }
     }
     Config::get().set("advanced.input_gate", "off");
@@ -2500,9 +2733,11 @@ int main(int argc, char** argv) {
     expectFloat("fix.render_sharpness", 0.3f, "flat scope permits the sharpening setting");
     expectStr("hotkey.dump_camera", "", "flat menu exception leaves unrelated hotkeys suppressed");
     const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
-        {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
         {"K",11,11,true},{"l",12,12,true},{"m",13,13,true},
-        {"quality",11,11,true},{"steady",11,12,true},{"responsive",10,10,true},
+        {"quality",11,11,true},{"steady",11,12,true},{"",11,11,true},
+        // J, its alias responsive and the driver's choice (auto, default) were removed
+        // 2026-10-21: unknown, so K with the once-per-session note.
+        {"j",11,11,false},{"auto",11,11,false},{"default",11,11,false},{"responsive",11,11,false},
         {"removed-preset",11,11,false}
     };
     for (const auto& p : presets) {

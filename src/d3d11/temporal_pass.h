@@ -46,6 +46,7 @@ namespace edvr { void temporalPassDumpHistory(const char* trigger); }
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11ShaderResourceView;
 
 namespace edvr {
 
@@ -191,6 +192,13 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 // (ui_resolve.h). False until one has run.
 bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]);
 
+// The motion prep's mv dispatches this session by which scene-depth layers
+// were bound: byLayers[0] the smoke's depth (t6) and the private UI depth (t7)
+// both, [1] the smoke's only, [2] the UI's only, [3] neither. An absent layer
+// is skipped, not read as zeros from a null view (zSceneAt,
+// temporal_shader_source.h). False until one has run.
+bool temporalPassMvDepthLayerTotals(uint64_t byLayers[4]);
+
 // The trained totals of whichever engine fix.temporal_aa names RIGHT NOW,
 // with the word a display should print for it ("NVIDIA", or "fsr 3.1.2"),
 // and whether that engine is AMD's -- the per-role figures below are
@@ -241,6 +249,16 @@ void temporalPassShutdown();
 // d3d11.dll; the established exported head-pose ABI stays unchanged.
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],
                           const float (*nowEyes)[12]);
+
+// probe.w bits 64 and 256 of the temporal shader: t6 (the smoke's depth) / t7
+// (the private UI depth) NOT bound, so zSceneAt skips the fetch and uses the
+// +0.0 a null view returns. Read off the very SRV array a dispatch binds from
+// slot 0, so a bit can never disagree with its binding; a clear bit fetches as
+// it always did. Inline here so a rig can hold it to the slots
+// (zscene_gate_test.h).
+inline uint32_t depthLayersAbsentBits(ID3D11ShaderResourceView* const* srvs) {
+    return (srvs[6] ? 0u : 64u) | (srvs[7] ? 0u : 256u);
+}
 }  // namespace edvr
 
 extern "C" {

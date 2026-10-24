@@ -168,7 +168,7 @@ bool     g_trained = false;    // ...and it is NVIDIA's history, which reads the
 bool     g_announced = false;
 bool     g_waitingNoted = false;
 // THE ENCODING. The menu's and the loader's composites are drawn through
-// the interface projection -- near 0.1 m, far 1000 m on build 332841 (the
+// the interface projection -- near 0.1 m, far 1000 m on build 334473 (the
 // receiver logs every pair the game asks for) -- while the scene pair the
 // pass reads is decoded with the scene's (0.025 m, 50000 m). A reversed-Z
 // value is near/z to within a part in a thousand this side of ten metres,

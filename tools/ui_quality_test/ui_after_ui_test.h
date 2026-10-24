@@ -779,6 +779,134 @@ bool functionBody(const std::string& text, const char* signature, std::string* b
     return true;
 }
 
+size_t occurrences(const std::string& text, const char* piece) {
+    size_t n = 0;
+    for (size_t at = text.find(piece); at != std::string::npos; at = text.find(piece, at + 1)) ++n;
+    return n;
+}
+
+// The index of the '}' that closes the '{' at `open` in squeezed code (string and character literals skipped), or npos.
+size_t closingBrace(const std::string& s, size_t open) {
+    int depth = 0;
+    for (size_t i = open; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == '"' || c == '\'') {
+            for (++i; i < s.size() && s[i] != c; ++i) {
+                if (s[i] == '\\') ++i;
+            }
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+// The CPU paths of the UI layer (2026-10-23 review, CPU-02/04/05/06): each one skips work whose answer nothing reads, and each skip is
+// pinned in the text -- a rig cannot link ui_layer.cpp or vscreen.cpp.
+//   CPU-02  uiLayerDecide builds the first-seen line's detail text (describeBlend/describeDs and the detail formats) only inside
+//           `if (familyLineWanted(...))`, the predicate noteFamily itself is built on;
+//   CPU-04  vscreen.cpp asks the panel probe at the after-UI site only behind !excluded && the held world screen -- the two facts
+//           uiLayerAfterWritePreserved reads panelSized behind;
+//   CPU-05  uiLayerNoteOther scans the PS SRVs for an eye-sized input after the preserved-exclusion return, not before it;
+//   CPU-06  seedWritersCheck resolves the bound depth view through the Dsv0-generation memo, and remembers a successful resolve only.
+void testCpuPathWiring(const std::string& layerText, const std::string& layerSqueezed, const std::string& noteOtherSqueezed) {
+    // ---- CPU-02
+    std::string decideRaw;
+    check(functionBody(layerText, "bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt", &decideRaw),
+          "CPU-02: uiLayerDecide is found");
+    const std::string d = squeeze(decideRaw);
+    check(occurrences(d, "describeBlend(") == 1 && occurrences(d, "describeDs(") == 1,
+          "CPU-02: uiLayerDecide calls describeBlend and describeDs once each");
+    const char* const kGuard = "if(familyLineWanted(family,d)){charbl[64],ds[256];describeBlend(game,bl,sizeof(bl));describeDs(dsState,ref,dsFmt,ds,sizeof(ds));";
+    const size_t guard = d.find(kGuard);
+    check(guard != std::string::npos && occurrences(d, kGuard) == 1,
+          "CPU-02: describeBlend and describeDs open one block, guarded by familyLineWanted(family, d)");
+    if (guard != std::string::npos) {
+        const size_t open = d.find('{', guard);
+        const size_t close = closingBrace(d, open);
+        const std::string block = close == std::string::npos ? std::string() : d.substr(open, close - open + 1);
+        check(!block.empty() && occurrences(block, "describeBlend(") == 1 && occurrences(block, "describeDs(") == 1,
+              "CPU-02: both calls lie inside the guarded block (no use of them outside it)");
+        check(occurrences(block, "_snprintf_s(detail,") == 4 &&
+                  occurrences(block, "kBlendRefused") == 1 && occurrences(block, "kFamilyNotReady") == 1 &&
+                  occurrences(block, "kDepthStencilTest") == 1 && occurrences(block, "kSubstitutedWrite") == 1,
+              "CPU-02: the four detail texts that read bl/ds (blend refused, depth-stencil, family not ready, redirect) are the block's");
+    }
+    // Every detail text is built behind the predicate: the six formats are the eager no-density one, the hologram refusal's, and the four above.
+    check(occurrences(d, "_snprintf_s(detail,") == 6, "CPU-02: uiLayerDecide formats the detail text in exactly six places");
+    check(d.find("if(d==UiLayerDecision::kNoDensityGain&&familyLineWanted(family,d)){_snprintf_s(detail,") != std::string::npos,
+          "CPU-02: the no-density text is built behind the predicate");
+    check(d.find("if(familyLineWanted(family,d)){_snprintf_s(detail,_TRUNCATE,\"%s PS bytecode/device preparation unavailable") != std::string::npos,
+          "CPU-02: the hologram refusal's text is built behind the predicate");
+    // The text's one reader, and the predicate's one rule: noteFamily records through the table, familyLineWanted asks it.
+    check(occurrences(d, "noteFamily(family,d,detail);") == 2,
+          "CPU-02: the detail text is read by noteFamily alone, at the two sites the decision ends in");
+    std::string noteFamilyRaw, wantedRaw;
+    check(functionBody(layerText, "void noteFamily(", &noteFamilyRaw) && functionBody(layerText, "bool familyLineWanted(", &wantedRaw),
+          "CPU-02: noteFamily and familyLineWanted are found");
+    const std::string nf = squeeze(noteFamilyRaw), fw = squeeze(wantedRaw);
+    check(nf.find("if(!g_familySeen.record(f,d,vs,ps))return;") != std::string::npos && occurrences(nf, "g_familySeen") == 1 &&
+              fw.find("returng_familySeen.wanted(f,d,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));") != std::string::npos,
+          "CPU-02: noteFamily's rule is the table's record (built on wanted), the predicate is the table's wanted, over the same two hashes");
+    // ---- CPU-04
+    std::ifstream vin("src/d3d11/vscreen.cpp", std::ios::binary);
+    check(bool(vin), "src/d3d11/vscreen.cpp is readable from the working directory (CPU-04)");
+    if (vin) {
+        const std::string v = squeeze(std::string((std::istreambuf_iterator<char>(vin)), std::istreambuf_iterator<char>()));
+        check(occurrences(v, "afterPanelSized=") == 1 &&
+                  v.find("constboolafterPanelSized=!afterExcluded&&uiLayerWorldScreenHeld()&&srv0IsPanelSized(g_state,kind,count);") != std::string::npos,
+              "CPU-04: the after-UI site asks srv0IsPanelSized only behind !afterExcluded and uiLayerWorldScreenHeld()");
+        check(v.find("constboolafterExcluded=uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));constboolafterPanelSized=") != std::string::npos &&
+                  v.find("uiLayerNoteOther(self,count,uiLayerVerdictForwards(v),g_state->curveThisDraw,afterExcluded,afterPanelSized,") != std::string::npos,
+              "CPU-04: the exclusion is read first, and both facts go to uiLayerNoteOther");
+    }
+    // The consumer the guard rests on: panelSized read once, behind excluded and the held gate, which is g_screenHeld == 1.
+    check(occurrences(noteOtherSqueezed, "panelSized") == 2 &&
+              noteOtherSqueezed.find("if(!uiLayerAfterWritePreserved(excluded,g_screenHeld==1,panelSized)){") != std::string::npos,
+          "CPU-04: uiLayerNoteOther reads panelSized once, as uiLayerAfterWritePreserved's third argument, with the gate g_screenHeld == 1");
+    check(layerSqueezed.find("booluiLayerWorldScreenHeld(){returng_screenHeld==1;}") != std::string::npos,
+          "CPU-04: uiLayerWorldScreenHeld() is exactly g_screenHeld == 1");
+    // ---- CPU-05
+    const size_t preserved = noteOtherSqueezed.find("uiLayerAfterWritePreserved("), scan = noteOtherSqueezed.find("kPsSlots");
+    check(preserved != std::string::npos && scan != std::string::npos && preserved < scan,
+          "CPU-05: the eye-sized-input scan of the PS SRV slots runs after the preserved-exclusion return, not before it");
+    // ---- CPU-06
+    std::string seedRaw, memoRaw;
+    check(functionBody(layerText, "void seedWritersCheck(", &seedRaw) && functionBody(layerText, "bool resolveBoundDsv(", &memoRaw),
+          "CPU-06: seedWritersCheck and resolveBoundDsv are found");
+    const std::string sw = squeeze(seedRaw), memo = squeeze(memoRaw);
+    check(sw.find("!resolveBoundDsv(dsvView,&info)") != std::string::npos && sw.find("bindingResolve(") == std::string::npos,
+          "CPU-06: seedWritersCheck resolves the bound depth view through the memo, never directly");
+    const size_t hit = memo.find("g_dsvMemo.view==view&&g_dsvMemo.gen==gen"), resolve = memo.find("if(!bindingResolve(view,info))returnfalse;"),
+                 store = memo.find("g_dsvMemo.view=view;");
+    check(hit != std::string::npos && resolve != std::string::npos && store != std::string::npos && hit < resolve && resolve < store,
+          "CPU-06: the memo is keyed by the view and the generation, and a result is stored only after a successful resolve");
+    check(memo.find("constuint32_tgen=bindingGeneration(BindSlot::Dsv0);") != std::string::npos,
+          "CPU-06: the key's generation is the Dsv0 slot's");
+    // The memo's counts reach a log line in both profiles: logTotals (not live in the flat profile) through logDsvMemo, and the flat
+    // branch of the frame boundary through the same function, before the window reset discards them. The behaviour of the memo itself
+    // is held by tools\ui_layer_world_test (testDsvMemo), which links ui_layer.cpp.
+    std::string reportRaw, totalsRaw;
+    check(functionBody(layerText, "void logDsvMemo(", &reportRaw) && functionBody(layerText, "void logTotals(", &totalsRaw),
+          "CPU-06: logDsvMemo and logTotals are found");
+    const std::string rep = squeeze(reportRaw), totals = squeeze(totalsRaw);
+    check(rep.find("g_win.dsvMemoHits") != std::string::npos && rep.find("g_win.dsvMemoMisses") != std::string::npos,
+          "CPU-06: logDsvMemo reports both counts");
+    check(occurrences(totals, "logDsvMemo();") == 1 && totals.find("dsvMemo") == std::string::npos,
+          "CPU-06: logTotals reports the counts through logDsvMemo, once, with no copy of the line of its own");
+    // The flat call is gated: with the layer off nothing can reach the memo (flatUiLayerNoteSceneDraw returns early unless the layer took
+    // a draw this frame), so only a live layer, or a window that counted something before it stood down, reports; a live layer that
+    // nothing reached still reports its zeros.
+    const size_t flatReport = layerSqueezed.find(
+        "uiPanelScaleLog();if(detail::g_uiLayerLive||g_win.dsvMemoHits||g_win.dsvMemoMisses)logDsvMemo();}elseif(g_target>0.0f||anything){");
+    const size_t windowReset = flatReport == std::string::npos ? std::string::npos : layerSqueezed.find("g_win=Window{};", flatReport);
+    check(flatReport != std::string::npos && windowReset != std::string::npos && occurrences(layerSqueezed, "logDsvMemo();") == 2,
+          "CPU-06: the flat profile's window report calls logDsvMemo (beside the panel half's line) only while the layer is live or the window "
+          "counted something, before g_win is reset; no other caller");
+}
+
 void testWiring() {
     std::ifstream in("src/d3d11/ui_layer.cpp", std::ios::binary);
     check(bool(in), "src/d3d11/ui_layer.cpp is readable from the working directory (the rig runs from the repo root)");
@@ -819,6 +947,7 @@ void testWiring() {
           "the layer's first UI draw of a frame names its own target and closes the chain");
     check(all.find("++e.draws;e.chainOpen=false;") != std::string::npos,
           "every taken UI draw closes the chain");
+    testCpuPathWiring(text, all, o);
 }
 
 }  // namespace afterui

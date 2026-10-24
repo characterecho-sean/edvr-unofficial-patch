@@ -29,8 +29,8 @@ RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, 
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
 Texture2D<float> ZP : register(t3);      // last frame's ZC; holoJitter.w validates it
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
-Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
-Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
+Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value; probe.w bit 64 = not bound, not fetched (zSceneAt)
+Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws; probe.w bit 256 = not bound, not fetched (zSceneAt; before 319c1c5a the bit was per-object motion's)
 Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha is coverage, not opacity
 // t9..t11 were the terrain patch index, its depth and its transform records (retired 2026-10-01: terrain takes the camera's motion).
 Texture2D<float2> HC : register(t12);
@@ -40,6 +40,11 @@ StructuredBuffer<HoloRecord> HR : register(t13);
 // the outputs of this one, with no records bound, byte for byte to the other's.
 #ifndef EDVR_CELESTIAL
 #define EDVR_CELESTIAL 1
+#endif
+// EDVR_MAIN_DEPTH_TILE 0 compiles main's 3x3 depth fetch as it was before its group tile (fetchHistoryT): the private UI
+// depth rig (main_depth_tile_test.h) builds it and holds every output of the production main to it, byte for byte.
+#ifndef EDVR_MAIN_DEPTH_TILE
+#define EDVR_MAIN_DEPTH_TILE 1
 #endif
 )HLSL"
 R"HLSL(
@@ -305,7 +310,7 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -380,9 +385,21 @@ R"HLSL(
 // copy is seeded once per eye/frame; reading the latest scene here also
 // lets later nearer geometry win. The game's live depth is never modified
 // by these coverage passes. Reversed-Z; unbound layer SRVs read far (zero).
+// An absent layer is not fetched: probe.w bit 64 says t6 (the smoke's depth)
+// is not bound, bit 256 that t7 (the private UI depth) is not, read off the
+// very views the dispatch binds (temporal_pass.cpp). A fetch from a null view
+// returns +0.0 and costs the pass on an RTX 5090 (ui_resolve.h: 0.04 ms an eye
+// per null 9-tap input), and the trail's smoke is absent on most frames. The
+// absent operand is that same +0.0, so the max chain and its result are the
+// fetch's to the bit (NaN, -0, denormals and negatives included); a clear bit
+// -- a rig, or a caller that does not say -- fetches as it always did.
 float zSceneAt(int2 q) {
     if((uint(probe.w+.5)&32u)!=0u) { float4 s=Screen.Load(int3(q,0));if(s.w>0)return s.z; }
-    return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0)));
+    float z = Z.Load(int3(q, 0)), zs = 0.0, zu = 0.0;   // what a null view returns: +0.0
+    [branch] if ((uint(probe.w + 0.5) & 64u) == 0u) zs = ZS.Load(int3(q, 0));
+    z = max(z, zs);
+    [branch] if ((uint(probe.w + 0.5) & 256u) == 0u) zu = ZUI.Load(int3(q, 0));
+    return max(z, zu);
 }
 float zAt(int2 q) { return zSceneAt(q); }
 // The interface's pixel, by ui_depth's coverage mask when it is bound
@@ -677,6 +694,16 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
 }
 )HLSL"
 R"HLSL(
+#if EDVR_MAIN_DEPTH_TILE
+// main's tile of this frame's scene depth: the group's 8x8 with a one-texel
+// apron, entry (x, y) = zSceneAt at the group's origin + (x - 1, y - 1),
+// clamped to the image as the 3x3 below clamps, filled at the top of main()
+// whenever the 3x3 can run. fetchHistoryT's 3x3 reads it where main set
+// gMainDepthTile; any other entry (a rig's) never sets it and fetches as before.
+groupshared float mainDepthTile[100];
+static bool gMainDepthTile = false;
+static int2 gMainDepthTileOrigin = int2(0, 0);   // the group's first pixel (main sets it)
+#endif
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres -- 0 when the pixel took no real depth (the far plane, no
 // depth bound).
@@ -724,8 +751,20 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         float zr = 0.0;
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
+#if EDVR_MAIN_DEPTH_TILE
+                // The same texel from main's tile: clamp(p + o) is the entry
+                // (p - origin + o + 1), filled as clamp(origin + entry - 1).
+                float zs;
+                if (gMainDepthTile) {
+                    const int2 t = int2(p) - gMainDepthTileOrigin + int2(ox, oy) + 1;
+                    zs = mainDepthTile[t.y * 10 + t.x];
+                } else {
+                    zs = zSceneAt(region.xy + clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1));
+                }
+#else
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
                 float zs = zSceneAt(region.xy + q);
+#endif
                 zr = max(zr, zs);
                 if (zs > 0.0) ++depthN;
             }
@@ -1104,8 +1143,32 @@ R"HLSL(
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+#if EDVR_MAIN_DEPTH_TILE
+    // The history fetch's 3x3 of the scene depth, once a group: 100 fetches
+    // where the pixels' own 3x3s were 576 (and twice that again for the
+    // instrument's depth candidates). Filled whenever fetchHistoryT can run
+    // its 3x3, by the constants alone (the same for every group): a history
+    // to blend, depth bound, and the head's depth term or the world split
+    // (its useDepth || worldOn from main's call), or, in the instrument, a
+    // depth candidate (1 or 3). Then whatever the group's pixels do, the 3x3
+    // never reads an entry it did not write; threads past the image fill
+    // clamped entries. On a history reset or with no depth nothing is
+    // fetched. The barrier stays outside the branch, met by every thread.
+    gMainDepthTile = true;
+    gMainDepthTileOrigin = int2(id.xy) - int2(gi & 7u, gi >> 3u);
+    bool depthTileRead = tvUsed.w != 0.0 || (tvCam.w != 0.0 && split.x > 0.0);
+#if EDVR_TEMPORAL_DIAGNOSTICS
+    depthTileRead = depthTileRead || (candMask & 10) != 0;
+#endif
+    [branch] if (haveHistory != 0 && knobs.y != 0.0 && depthTileRead) {
+        for (uint tk = gi; tk < 100u; tk += 64u)
+            mainDepthTile[tk] = zSceneAt(region.xy + clamp(gMainDepthTileOrigin + int2(tk % 10u, tk / 10u) - 1, int2(0, 0), size - 1));
+    }
+#endif
 #if EDVR_TEMPORAL_DIAGNOSTICS
     if (gi < 48) gCount[gi] = 0;
+#endif
+#if EDVR_TEMPORAL_DIAGNOSTICS || EDVR_MAIN_DEPTH_TILE
     GroupMemoryBarrierWithGroupSync();
 #endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};

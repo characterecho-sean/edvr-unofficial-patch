@@ -52,13 +52,56 @@ GitHub release or use signing secrets.
 
 A push to a `codex/release-*` branch runs the entire build and package path. If
 the commit already has a release tag, the runner uses its exact version;
-otherwise it creates a temporary local tag such as `v0.0.0-ci.123456789.1`
-before building. This makes the version stamped into the DLLs and installer
-match the package version. The temporary tag exists only on the runner; either
-branch result is a proof artifact, not a release asset. The branch push trigger
-works before this workflow reaches `main`. GitHub does not offer its manual
-**Run workflow** control for a new workflow until the workflow file is on the
-default branch.
+otherwise it creates a temporary local tag, `v0.0.0-ci`, before building. This
+makes the version stamped into the DLLs and installer match the package
+version. The temporary tag exists only on the runner; either branch result is a
+proof artifact, not a release asset. The branch push trigger works before this
+workflow reaches `main`. GitHub does not offer its manual **Run workflow**
+control for a new workflow until the workflow file is on the default branch.
+
+### The caches in CI
+
+The workflow keeps two caches (`actions/cache`), and a third file set inside
+the second. Measured 2026-10-22 on the same branch: a cold run took 16.5 min
+(build step 12.9 min), the next run on a new commit 8.8 min (build step 6.7
+min); the unchanged workflow on `main`, run alongside, took 22.3 min (build
+step 17.9 min). Runner speed varies a good deal between runs (the same cold
+build was 20 min a day earlier), so compare runs made together.
+
+- **Pinned dependencies** (`third_party\ngx`, `ffx-dx11`, `xess`,
+  `openxr\loader`; 229 MB). Key: the runner image and the hash of the four
+  `tools\fetch_*.py` files, which hold the pins. A hit skips the fetch and the
+  FidelityFX build (2.7 min); the `--verify` step runs on a restored copy
+  exactly as on a fetched one, and a failed fetch or verify never saves.
+- **Compile cache** (about 100 MB compressed). Key: the runner image, the
+  branch and the commit; a run restores the newest cache of its own branch,
+  else of the default branch (GitHub shows a run only its own ref's caches and
+  the default branch's, so one `gh workflow run release.yml --ref main` after a
+  merge seeds every branch). It is saved after the build even when a rig
+  failed, so a rerun after a flake starts warm. Release tags (`v*`) neither
+  restore nor save it: they compile from scratch. The build log's
+  `compile_cache:` lines are in the `edvr-diagnostics` artifact; the run's job
+  summary carries the totals (`python tools\compile_cache.py --summary LOG`).
+- **Riding with it**: `build\rig_times.json`, so the longest rigs start first
+  and timeouts are set from the last run, and the two generated shader headers,
+  which carry their own key over the HLSL and the compiler DLL and regenerate
+  when it differs (about 60 s saved).
+
+Why a hit is safe. `compile_cache.py` already decides every compile on a hash
+of the source, of every project header the compiler reported, of the flags, of
+the compiler's identity and of INCLUDE, LIB and CL. Nothing about that changes:
+a restored entry for an input that changed is a miss, and the tool's self-test
+proves it. What the archive adds is a file whose size and time the tool cannot
+trust, so `--pack` stores only entries whose outputs still match their
+manifest, and `--unpack` installs an entry only when each output's sha256
+equals the one recorded when cl wrote it, then sets the file's time back; an
+entry that fails is left out and recompiles. The cache skips compiles only:
+every rig still runs on every build. Proof builds carry one version stamp,
+`0.0.0-ci`, because the stamp is in a header that `log.cpp`, `menu.cpp` and
+several other headers and sources include, and a stamp that changed per run
+missed all of them. Two things still recompile every run: the installer (its
+payload embeds the freshly linked DLLs) and `object_classification_test` (an
+`ml64` object carries a timestamp).
 
 After the workflow is on `main`, a manual branch run is also possible:
 

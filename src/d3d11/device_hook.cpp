@@ -65,6 +65,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/proxy.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "swapchain_probe.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
@@ -91,6 +92,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
+#include "mem_tick.h"        // memWatchTick: the process memory watch, once per owned Present (one atomic read; its thread does the sampling)
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
@@ -1233,7 +1235,7 @@ EDVR_BOUNDARY_TICK(tkOptimizedStation, "optimized_station");
 EDVR_BOUNDARY_TICK(tkLightGridCache, "light_grid_cache");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
 EDVR_BOUNDARY_TICK(tkAaCompare, "aa_compare");   // hotkey.compare_aa: the AA comparison toggle (aa_compare.h); one key poll when idle
-EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's verdict for fix.intro_video = skip (intro_skip.h); one load outside flat
+EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's verdict for visual.intro_video = skip (intro_skip.h); one load outside flat
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
 EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
@@ -1396,7 +1398,15 @@ void tickEliteBinds() {
 // The supercruise word for planet patch motion (tkCelestialStatus): Status.json's Flags, once a frame. Unknown counts as not
 // supercruise (celestial_motion.h). It rode the head-offset gate's journal tick until that tick went with the old Explorer Cam
 // route (2026-10-07); the call and its once-a-frame cadence are unchanged.
+// Flat reads the word through its own accessor: the VR accessors answer flat with the no-journal values, so the gate stayed
+// unknown there and planet patch motion never ran in flat (edvr_gfx_20261022_044106: every 5 s line gated off).
 void tickCelestialStatus() {
+    if (runtimeFlatProfile()) {
+        bool supercruise = false;
+        const bool known = journalFlatSupercruise(&supercruise);
+        celestialMotionNoteStatus(known, known && supercruise);
+        return;
+    }
     celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());
 }
 
@@ -1817,6 +1827,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // on a clock, under pressure and at each crossing. One compare of two integers per frame; the OS is asked once
     // a second. Here because this is the one hook the VR and the flat profile share.
     vramWatchTick(presentT1, dev);
+    memWatchTick(dev);   // the process memory watch (mem_watch.h): one atomic read a frame; its own thread does the sampling
     if (routeCrumbs)
         hdrCrumbWrite("present", "end", "hr=0x%08X removed=0x%08X", static_cast<unsigned>(hr),
                       static_cast<unsigned>(dev ? dev->GetDeviceRemovedReason() : S_OK));
@@ -2189,7 +2200,7 @@ State& ensureState() {
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
         g_state->fssModeLatchWanted = true;
-        // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
+        // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map, the Orrery and the Full System Scanner) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
     return *g_state;
@@ -2944,18 +2955,18 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
-            // fix.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
+            // visual.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
             // own install does it too when it has a State; this call does not depend on that and is idempotent beside it.
             if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
-            // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
+            // cache is the game's, not VR's. A build that is not 334925 is one log line and nothing patched.
             vertexResyncInstall();
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
-            // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 332841 is one log line.
+            // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 334925 is one log line.
             lightGridCacheInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
-            // profile passes through per call). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
+            // profile passes through per call). A build that is not 334925 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());
             // The optimized station (optimized_station.cpp): reads fix.optimized_stations; its hooks attach while it is on (VR by default; flat off).
             optimizedStationInstall(runtimeFlatProfile());
@@ -3084,11 +3095,16 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             reinterpret_cast<void**>(&s.realResizeBuffers));
         IDXGISwapChain3* third = nullptr;
         bool resize1 = false;
-        if (SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
+        const bool safeToProbeResize1 = s.swapChainHook.executablePrefix() > kSwapResizeBuffers1 &&
+            swapChainResize1ProbeSafe(s.swapChainHook.originalVTable()[kSwapPresent]);
+        if (safeToProbeResize1 &&
+            SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
             if (static_cast<IDXGISwapChain*>(third) == swapChain && s.swapChainHook.executablePrefix() > kSwapResizeBuffers1)
                 resize1 = s.swapChainHook.replace(kSwapResizeBuffers1, &hookedFlatResizeBuffers1, reinterpret_cast<void**>(&s.realResizeBuffers1));
             third->Release();
         }
+        if (!safeToProbeResize1)
+            Log::get().note("flat runtime resize hooks: skipped optional IDXGISwapChain3 probe on a non-system swap-chain wrapper");
         Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
         if (!resize) {
             // The abort also takes the Present hook down. A VR launch keeps it: the flat hooks are only missing, and a switch into

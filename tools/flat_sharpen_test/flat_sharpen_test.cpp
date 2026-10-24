@@ -28,6 +28,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/flat_sharpen.h"
 #include "../../src/d3d11/menu_flat_rows.h"
+#include "../../src/d3d11/swapchain_probe.h"
 
 using namespace rig;
 
@@ -120,10 +121,23 @@ bool sourceBuildsFlatPageFromTable(const std::string& menuCpp) {
            region.find("strcmp(d.key,") == std::string::npos;
 }
 
-// The Debug tab (2026-10-16): built from kFlatDebugRows and the `menu debug` page, after the Performance tab, as the last tab, with its
-// heading, and from no key list of menu.cpp's own.
-bool sourceBuildsFlatDebugFromTable(const std::string& menuCpp) {
+// The Visual tab (2026-10-22): built from kFlatVisualRows, after the Performance tab and before the Debug tab, and from no key list of
+// menu.cpp's own.
+bool sourceBuildsFlatVisualFromTable(const std::string& menuCpp) {
     const size_t at = menuCpp.find("p.name = kFlatTabNames[1];");
+    const size_t first = menuCpp.find("p.name = kFlatTabNames[0];");
+    const size_t debug = menuCpp.find("p.name = kFlatTabNames[2];");
+    if (at == std::string::npos || first == std::string::npos || debug == std::string::npos || !(first < at && at < debug)) return false;
+    const size_t end = menuCpp.find("firstSelectable(p);", at);
+    if (end == std::string::npos) return false;
+    const std::string region = menuCpp.substr(at, end - at);
+    return region.find("flatVisualHasRow(") != std::string::npos && region.find("strcmp(d.key,") == std::string::npos;
+}
+
+// The Debug tab (2026-10-16): built from kFlatDebugRows and the `menu debug` page, after the Performance and Visual tabs, as the last tab,
+// with its heading, and from no key list of menu.cpp's own.
+bool sourceBuildsFlatDebugFromTable(const std::string& menuCpp) {
+    const size_t at = menuCpp.find("p.name = kFlatTabNames[2];");
     const size_t first = menuCpp.find("p.name = kFlatTabNames[0];");
     if (at == std::string::npos || first == std::string::npos || first > at) return false;
     const size_t end = menuCpp.find("firstSelectable(p);", at);
@@ -225,12 +239,22 @@ void panelTable(const std::string& root, const std::string& gen) {
     check(m3 && std::strcmp(m3->key, "ui_quality") == 0,
           "control: a gate without fix.ui_quality is caught, by name");
     const auto lacksIntro = [](const char* dotted) {
-        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "fix.intro_video") != 0;
+        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "visual.intro_video") != 0;
     };
     const FlatPageRow* m4 = flatPageFirstRefused(lacksIntro);
     check(m4 && std::strcmp(m4->key, "intro_video") == 0,
-          "control: a gate without fix.intro_video is caught, by name");
-    check(flatPageHasRow("fix", "intro_video"), "the flat page has the Intro movie row (skip, flat 2026-10-14)");
+          "control: a gate without visual.intro_video is caught, by name");
+    check(flatVisualHasRow("visual", "intro_video") && !flatPageHasRow("visual", "intro_video") && !flatPageHasRow("fix", "intro_video"),
+          "the Intro movie row (skip, flat 2026-10-14) is on the Visual tab, not the Performance one, and under its [visual] name");
+    const auto lacksStarGlow = [](const char* dotted) {
+        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "visual.star_glow") != 0;
+    };
+    const FlatPageRow* m5 = flatPageFirstRefused(lacksStarGlow);
+    check(m5 && std::strcmp(m5->key, "star_glow") == 0,
+          "control: a gate without visual.star_glow is caught, by name");
+    check(runtimeProfileAllowsKey("visual.intro_video") && runtimeProfileAllowsKey("visual.star_glow") && !runtimeProfileAllowsKey("fix.intro_video") &&
+              !runtimeProfileAllowsKey("visual.other"),
+          "the flat gate reads the two [visual] keys, not the retired [fix] name, and not any other [visual] key");
     check(flatPageFirstRefused([](const char*) { return false; }) != nullptr,
           "control: a gate that refuses everything is caught");
     // And the gate as shipped really does refuse what it should, so the check above
@@ -292,17 +316,38 @@ void panelTable(const std::string& root, const std::string& gen) {
     check(!noEdit.empty() && !sourceGatesSharpenRow(noEdit), "control: a dimmed row that still takes typing is caught");
     check(!vrDims.empty() && !sourceGatesSharpenRow(vrDims), "control: a row asking about a profile other than the running one is caught");
 
-    // THE DEBUG TAB (2026-10-16). Exactly two tabs, Performance then Debug, Debug last; the Performance rows are the ones the panel always had,
-    // in their order; the Debug rows are the two toggles, each read through the gate and built from the table.
-    check(kFlatTabCount == 2 && std::strcmp(kFlatTabNames[0], "Performance") == 0 && std::strcmp(kFlatTabNames[kFlatTabCount - 1], "Debug") == 0,
-          "the flat panel has exactly two tabs: Performance, then Debug last");
+    // THE TABS (Debug 2026-10-16, Visual 2026-10-22). Exactly three, Performance, Visual, Debug, Debug last; the Performance rows are the ones the
+    // panel always had bar the Intro movie, in their order; the Visual rows are the two [visual] options; the Debug rows are the two toggles, each
+    // read through the gate and built from the table.
+    check(kFlatTabCount == 3 && std::strcmp(kFlatTabNames[0], "Performance") == 0 && std::strcmp(kFlatTabNames[1], "Visual") == 0 &&
+              std::strcmp(kFlatTabNames[kFlatTabCount - 1], "Debug") == 0,
+          "the flat panel has exactly three tabs: Performance, Visual, then Debug last");
     {
-        const char* const order[][2] = {{"fix", "intro_video"}, {"fix", "temporal_aa"}, {"fix", "temporal_aa_model"},
+        const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"},
                                         {"fix", "render_sharpness"}, {"fix", "ui_quality"}, {"fix", "sharp_weapons"}, {"fix", "optimized_stations"}};
-        bool same = kFlatPageRowCount == 7;
-        for (size_t i = 0; same && i < 7; ++i)
+        bool same = kFlatPageRowCount == 6;
+        for (size_t i = 0; same && i < 6; ++i)
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
-        check(same, "the Performance tab keeps the flat page's seven rows in their order (Sharp weapons directly under UI quality)");
+        check(same, "the Performance tab keeps the flat page's six rows in their order (Sharp weapons directly under UI quality)");
+    }
+    check(kFlatVisualRowCount == 2 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
+              std::strcmp(kFlatVisualRows[1].section, "visual") == 0 && std::strcmp(kFlatVisualRows[1].key, "star_glow") == 0 &&
+              flatVisualHasRow("visual", "star_glow") && !flatVisualHasRow("fix", "temporal_aa"),
+          "the Visual tab has the Intro movie, then the Star glow");
+    check(!flatPageHasRow("visual", "star_glow") && !flatDebugHasRow("visual", "star_glow") && !flatVisualHasRow("advanced", "flat_cpu_timing"),
+          "no key is on two tabs");
+    check(sourceBuildsFlatVisualFromTable(menuCpp), "menu.cpp builds the Visual tab, between Performance and Debug, from kFlatVisualRows");
+    {
+        std::string listed = menuCpp;
+        const char* gate = "!flatVisualHasRow(d.section, d.key)";
+        const size_t j = listed.find(gate);
+        if (j != std::string::npos) listed.replace(j, std::strlen(gate), "strcmp(d.key, \"star_glow\") != 0");
+        check(j != std::string::npos && !sourceBuildsFlatVisualFromTable(listed), "control: a Visual tab built from a key list in menu.cpp is caught");
+        std::string swapped = menuCpp;
+        const char* nameDebug = "p.name = kFlatTabNames[2];";
+        const size_t k = swapped.find(nameDebug);
+        if (k != std::string::npos) swapped.replace(k, std::strlen(nameDebug), "p.name = kFlatTabNames[0];");
+        check(k != std::string::npos && !sourceBuildsFlatVisualFromTable(swapped), "control: a Visual tab with no Debug tab after it is caught");
     }
     check(kFlatDebugRowCount == 2 && flatDebugHasRow("advanced", "flat_cpu_timing") && flatDebugHasRow("advanced", "flat_refusal_view") &&
               std::strcmp(kFlatDebugRows[0].key, "flat_cpu_timing") == 0 && std::strcmp(kFlatDebugRows[1].key, "flat_refusal_view") == 0,
@@ -347,6 +392,30 @@ void panelTable(const std::string& root, const std::string& gen) {
     for (const FlatPageRow& r : kFlatPageRows) {
         check(schemaHasRow(schema, r.section, r.key),
               (std::string("the generated schema has the panel's ") + r.section + "." + r.key).c_str());
+    }
+    for (const FlatPageRow& r : kFlatVisualRows) {
+        check(schemaHasRow(schema, r.section, r.key),
+              (std::string("the generated schema has the Visual tab's ") + r.section + "." + r.key).c_str());
+    }
+    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie keeps VR's Fixes page (the headset's menu has no Visual page, so
+    // a `menu visual` token on it would take it out of the headset); Star glow is a choice of five percentages on the page only this panel builds.
+    {
+        const std::string movie = schemaRow(schema, "visual", "intro_video");
+        const std::string glow = schemaRow(schema, "visual", "star_glow");
+        check(movie.find("\"Intro movie\"") != std::string::npos && movie.find("\"screen|stock|skip\"") != std::string::npos &&
+                  movie.find("MenuTier::Fix, \"fixes\",") != std::string::npos,
+              "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) still on VR's Fixes page");
+        check(glow.find("\"Star glow\"") != std::string::npos &&
+                  glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%\", false, false, 1,") != std::string::npos &&
+                  glow.find("MenuTier::Fix, \"visual\",") != std::string::npos,
+              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the page 'visual'");
+        const size_t a = schema.find("{\"visual\", \"intro_video\",");
+        const size_t b = schema.find("{\"visual\", \"star_glow\",");
+        check(a != std::string::npos && b != std::string::npos && a < b &&
+                  schema.find("{\"visual\", \"intro_video\",", a + 1) == std::string::npos &&
+                  schema.find("{\"visual\", \"star_glow\",", b + 1) == std::string::npos,
+              "each Visual row appears once, Intro movie before Star glow");
+        check(!schemaHasRow(schema, "fix", "intro_video"), "control: the retired [fix] name has no row");
     }
     check(!schemaHasRow("", "fix", "render_sharpness"),
           "control: a schema without the row is caught");
@@ -616,6 +685,21 @@ void wrapperContract() {
 
 }  // namespace
 
+void swapChainProbeGuard() {
+    HMODULE systemDxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    check(systemDxgi != nullptr, "the system DXGI module is available for the swap-chain probe test");
+    if (systemDxgi) {
+        void* factoryExport = reinterpret_cast<void*>(GetProcAddress(systemDxgi, "CreateDXGIFactory"));
+        check(factoryExport && edvr::swapChainResize1ProbeSafe(factoryExport),
+              "the optional interface probe is allowed for a system DXGI method");
+        FreeLibrary(systemDxgi);
+    }
+    check(!edvr::swapChainResize1ProbeSafe(reinterpret_cast<void*>(&swapChainProbeGuard)),
+          "the optional interface probe is refused for a third-party wrapper");
+    check(!edvr::swapChainResize1ProbeSafe(nullptr),
+          "the optional interface probe is refused for an unknown method");
+}
+
 int main(int argc, char** argv) {
     SetErrorMode(3);
     if (argc >= 2 && !std::strcmp(argv[1], "--dry-run")) {
@@ -627,6 +711,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     panelTable(argv[2], argv[3]);
+    swapChainProbeGuard();
     sharpenRowDim();
     wrapperContract();
     std::printf("flat_sharpen_test: %u checks, %u failures\n", g_checks, g_failures);

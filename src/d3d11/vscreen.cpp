@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
+#include "station_draw_mask.h"   // the flat sun draw issued with every write masked (built 2026-10-21)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
@@ -2231,7 +2232,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
                 info.isTexture2D) {
                 introPanelNoteFill(info.a, info.b);
-                // And the skip's witness: with fix.intro_video = skip this
+                // And the skip's witness: with visual.intro_video = skip this
                 // fill is the movie playing despite the refusal.
                 introSkipNoteMovieDrew();
             }
@@ -3357,7 +3358,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (g_flatComputeInternal) {
         if (!foreignContext(self) && type != D3D11_MAP_READ) flatIssueEpochNoteResource(res);
         const HRESULT hr=g_state->realMap(self,res,sub,type,flags,mapped);
-        flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
         return hr;
     }
     // Necessary, not sufficient, for gpuFrameCommand to do anything but
@@ -3370,7 +3371,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (foreignContext(self)) {
         if(type!=D3D11_MAP_READ)engineVelocityResourceUnknown(res);
         const HRESULT hr=s->realMap(self, res, sub, type, flags, mapped);
-        flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
         if (type!=D3D11_MAP_READ && SUCCEEDED(hr) && flatRuntimeActive())
             flatRuntimeOverlayForeignMutation();
         return hr;
@@ -3411,7 +3412,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const bool mapData = mapOk && mapped->pData != nullptr;
     const bool mapSub0 = mapOk && sub == 0;
     const bool mapData0 = mapData && sub == 0;
-    flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
+    // The window's counters are read only by the flat profile's report (flat_runtime.cpp reportMapBounce), so the VR
+    // profile does not pay the three locked increments per Map, nor the call across to flat_runtime.cpp.
+    if (!runtimeVrProfile()) flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
     if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
     if (mapData0 && flatRuntimeActive()) {
         if (type != D3D11_MAP_READ) {
@@ -3441,7 +3444,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (mapSub0 && res == s->compositeCb) {
-        flatRuntimeMapBounceNoteKind(res,true);
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteKind(res,true);
         // GetType FIRST here too, for the reason spelled out in the branch below.
         //
         // This branch was the one that did not do it. compositeCb is a raw
@@ -3488,7 +3491,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             mm.byteWidth = 0;
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
         }
-        flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
+        if (!runtimeVrProfile()) flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
         if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
             s->camResource = res;
             s->camData = mapped->pData;
@@ -4247,8 +4250,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // uiLayerFamilyOf reads it) and the held world-screen identity (the
         // 2D screen's panel-sized SRV, as uiLayerDecide's kWorldScreen reads
         // it) -- both lost when the kAfterUi family was taken on its own.
+        // The panel probe is asked only where its answer can matter: uiLayerAfterWritePreserved reads panelSized alone
+        // behind !excluded && the held world screen (uiLayerNoteOther passes g_screenHeld == 1, which is what
+        // uiLayerWorldScreenHeld() returns; it is written at the frame boundary only).
         const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
-        const bool afterPanelSized = srv0IsPanelSized(g_state, kind, count);
+        const bool afterPanelSized = !afterExcluded && uiLayerWorldScreenHeld() && srv0IsPanelSized(g_state, kind, count);
         uiLayer = uiLayerNoteOther(self, count, uiLayerVerdictForwards(v), g_state->curveThisDraw,
                                    afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
         // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
@@ -4575,7 +4581,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
             FlatMutationDetails::clearDepth(flags,depth,stencil));
         flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
     }
-    if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
+    if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource), FlatOverlayMutationOp::Written, true); }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
@@ -4930,14 +4936,70 @@ static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count,
 
 // Built v14.34: the optimized station's sun skip in the flat profile. Flat draws never reach beginPanelOverride (VR's verdict makes the same call after its
 // foreign-context return), so the four draw kinds ask here, first, in their flat branch: owner context only, one atomic load while the sun is on.
+// Built 2026-10-21: the answer no longer ends the hook. The draw is the game's deferred lighting pass (kFlatDeferredHdrVs/Ps), which writes the scene HDR
+// target and gives it its camera; the flat runtime's model needs to see it. So the hook goes on to run the scope for it as for any draw and
+// FlatStationSunGate (below) decides what reaches the GPU.
 static inline bool flatStationSkipsDraw(ID3D11DeviceContext* self) {
     return self == g_state->ownerCtx && optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
 }
 
+// The station's skipped sun draw, once the flat runtime's scope has observed it and (when it planned anything) begun. Every flat draw builds one of these
+// between beginActualDraw and the real call; for any draw but a skipped sun draw it does nothing (issues() is true, restore() is a no-op). What the
+// scope does depends on needsActualDraw():
+//  - false: the scope plans nothing around the game's issue (it only observed the draw: the model, the trace, the census), so the real draw call is
+//    not made. No GPU work; the scope destructs as for any draw.
+//  - true: some plan (a forward light or light payload capture, a draw packet, an overlay, the foreground or untrusted brackets, a HUD take) expects the
+//    draw between beginActualDraw and endActualDraw. The hook runs them around a real draw issued with every colour write and every depth and stencil
+//    write off (station_draw_mask.h); restore() puts the context's blend state, blend factor, sample mask, depth-stencil state and stencil reference
+//    back before endActualDraw. uiReissue is not called for a skipped draw: a second issue would put the sun back.
+// If the masking states cannot be made the draw is not issued and the plans still get their begin and end. Which way it went is counted (the station's
+// 30 s line); a path that never runs reads 0.
+static edvr::stationmask::Mask g_stationSunMask;
+// The two setters the mask uses are the game's own entry points, past the thunks (no binding shadow, issue epoch or blend generation moves: the state
+// is put back before anything else looks). A slot that was never hooked (realOMSetDepthStencilState stays null on a vtable too short for it) is the
+// context's own method.
+static void STDMETHODCALLTYPE stationMaskSetBlend(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const FLOAT factor[4], UINT sampleMask) {
+    if (g_state->realOMSetBlendState) g_state->realOMSetBlendState(ctx, state, factor, sampleMask);
+    else ctx->OMSetBlendState(state, factor, sampleMask);
+}
+static void STDMETHODCALLTYPE stationMaskSetDepth(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, UINT stencilRef) {
+    if (g_state->realOMSetDepthStencilState) g_state->realOMSetDepthStencilState(ctx, state, stencilRef);
+    else ctx->OMSetDepthStencilState(state, stencilRef);
+}
+class FlatStationSunGate {
+public:
+    FlatStationSunGate(ID3D11DeviceContext* self, const FlatRuntimeDrawScope& scope, bool stationSkip) : ctx_(self) {
+        if (!stationSkip) return;
+        if (!scope.needsActualDraw()) {
+            issue_ = false;
+            optimizedStationNoteSunDraw(SunDrawPath::kNotIssued);
+            return;
+        }
+        masked_ = g_stationSunMask.begin(self, &stationMaskSetBlend, &stationMaskSetDepth);
+        issue_ = masked_;
+        optimizedStationNoteSunDraw(masked_ ? SunDrawPath::kMasked : SunDrawPath::kNotIssued);
+    }
+    bool issues() const { return issue_; }
+    void restore() {
+        if (masked_) {
+            g_stationSunMask.end(ctx_);
+            masked_ = false;
+        }
+    }
+    ~FlatStationSunGate() { restore(); }   // an exception or an early return between the real call and the end call still puts the state back
+    FlatStationSunGate(const FlatStationSunGate&) = delete;
+    FlatStationSunGate& operator=(const FlatStationSunGate&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+    bool issue_ = true;
+    bool masked_ = false;
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDraw];
@@ -4951,9 +5013,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDraw(self, count, start);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);   // built 2026-10-21: only a skipped sun draw is changed (no real call, or a masked one)
+        if (sun.issues()) g_state->realDraw(self, count, start);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -5013,7 +5077,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
@@ -5025,9 +5089,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -5085,7 +5151,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5098,9 +5164,11 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues()) g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -5153,7 +5221,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
-        if (flatStationSkipsDraw(self)) return;
+        const bool stationSkip = flatStationSkipsDraw(self);
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5167,10 +5235,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
+        FlatStationSunGate sun(self, flatDraw, stationSkip);
+        if (sun.issues())
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                              baseVertex, startInstance);
+        sun.restore();
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
-        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
+        if (!stationSkip) flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
@@ -5782,6 +5853,12 @@ void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state
                                const float blendFactor[4], uint32_t sampleMask) {
     if (!g_state || !g_state->realOMSetBlendState || !ctx) return;
     g_state->realOMSetBlendState(ctx, state, blendFactor, sampleMask);
+}
+
+void vScreenOMSetDepthStencilStateRaw(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, uint32_t stencilRef) {
+    if (!ctx) return;
+    if (g_state && g_state->realOMSetDepthStencilState) g_state->realOMSetDepthStencilState(ctx, state, stencilRef);
+    else ctx->OMSetDepthStencilState(state, stencilRef);
 }
 
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
@@ -6763,6 +6840,26 @@ void vScreenFrameBoundary() {
                     "history %llu (each skipped, not read as zeros from a null view).",
                     static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(lacked[0]),
                     static_cast<unsigned long long>(lacked[1]), static_cast<unsigned long long>(lacked[2]));
+            }
+        }
+        // The motion prep's scene-depth layers, the same way: how often each
+        // of the smoke's depth and the private UI depth was absent, which
+        // zSceneAt then skips rather than fetches as zeros.
+        {
+            static uint64_t lastLayerDispatches = 0;
+            uint64_t byLayers[4] = {};
+            if (temporalPassMvDepthLayerTotals(byLayers)) {
+                const uint64_t dispatches = byLayers[0] + byLayers[1] + byLayers[2] + byLayers[3];
+                if (dispatches != lastLayerDispatches) {
+                    lastLayerDispatches = dispatches;
+                    Log::get().note(
+                        "motion prep depth layers: %llu mv dispatches this session; smoke and UI depth "
+                        "both bound %llu, smoke depth only %llu, UI depth only %llu, neither %llu (an "
+                        "absent layer is skipped, not read as zeros from a null view).",
+                        static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(byLayers[0]),
+                        static_cast<unsigned long long>(byLayers[1]), static_cast<unsigned long long>(byLayers[2]),
+                        static_cast<unsigned long long>(byLayers[3]));
+                }
             }
         }
         // The sharpening's, the same way. Worded for the profile (VR counts

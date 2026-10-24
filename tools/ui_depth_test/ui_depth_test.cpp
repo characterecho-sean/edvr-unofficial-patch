@@ -166,7 +166,15 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
 }
 #include "planet_coverage_test.h"
 #include "corona_coverage_test.h"
+#include "zscene_gate_test.h"
+#include "main_depth_tile_test.h"
 int main(int argc, char** argv) {
+    // The motion prep's absent-layer gate alone, on the adapter asked for (zscene_gate_test.h); never the build's run.
+    if (argc > 1 && std::strcmp(argv[1], "--zscene-gate") == 0) return zgate::runAlone(argc, argv);
+    // main's depth tile alone, the same way (main_depth_tile_test.h).
+    if (argc > 1 && std::strcmp(argv[1], "--main-tile") == 0) return maintile::runAlone(argc, argv);
+    // The gate's CPU half first: no device, and a slot slip fails here in a second (zscene_gate_test.h).
+    zgate::cpuHalf();
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     D3D_FEATURE_LEVEL level;
     const auto driver = argc>2 && std::strcmp(argv[2],"hardware")==0 ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP;
@@ -1296,6 +1304,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     UiDepthLayer declined; check(!declined.acquire(ctx.Get(),msaa.tex.Get()),"MSAA safely declined");
     testPlanetCoverage(dev.Get(),ctx.Get());
     testCoronaCoverage(dev.Get(),ctx.Get());
+    zgate::parity(dev.Get(),ctx.Get(),driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");
+    maintile::abTest(dev.Get(),ctx.Get());
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
         SIZE_T size=0; info->GetMessage(i,nullptr,&size); std::vector<unsigned char> storage(size);
         auto* m=reinterpret_cast<D3D11_MESSAGE*>(storage.data()); hr(info->GetMessage(i,m,&size));

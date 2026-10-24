@@ -97,7 +97,7 @@ constexpr float kHalfIpd = 0.0315f;
 // nobody can see (90 degrees or more off the view axis, outside the frustum), and a test would pop the whole bend off at about 20 degrees
 // of head yaw -- differently in the two eyes near its threshold -- to protect a part that clipping already takes care of.
 
-// World lock (part of fix.intro_video = screen). The counter-move is the
+// World lock (part of visual.intro_video = screen). The counter-move is the
 // retired witchstar fix's (removed 2026-09-23), which held a head-locked sprite on a world direction by shifting
 // the VIEWPORT for one draw -- no matrix, no new channel, and field-proven on
 // a different draw. It counter-moves against the game's world forward, and
@@ -116,7 +116,7 @@ bool  g_anchored = false;   // the "holding" line has been said
 bool  g_lockRefusedNoted = false;
 bool  g_recentreRequested = false;   // requestIntroRecentre has been asked
 
-// Set when fix.intro_video plays the movie on the splash's screen.
+// Set when visual.intro_video plays the movie on the splash's screen.
 bool  g_matchSplash = false;
 float g_engagedScale = 1.0f;
 
@@ -401,7 +401,7 @@ void releaseSlot(Slot& s) {
 void introPanelConfigure(Config& cfg) {
     const float wasSize = g_size;
     const bool  wasMatch = g_matchSplash;
-    const std::string raw = cfg.getString("fix.intro_video", "screen");
+    const std::string raw = cfg.getString("visual.intro_video", "screen");
     const IntroVideoMode mode = introVideoParseFor(raw, runtimeFlatProfile());
     if (!mode.recognised) {
         Log::get().note("intro_video \"%s\" is not screen, stock or skip; running "

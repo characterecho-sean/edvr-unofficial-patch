@@ -512,7 +512,7 @@ inline int flatRangeInvalidateWiringTests() {
     expect(has(compact(body(runtimeSource, "void flatRuntimeMap(")), "resourceWritten(state(), res,\"flatRuntimeMap\",FlatOverlayMutationOp::Written,historyWholeWrite(HistoryWriteEntry::Map));"),
            "a map is a whole-resource write");
     expect(has(compact(body(runtimeSource, "void flatRuntimeWrittenExtent(")), "resourceWritten(state(), res,\"flatRuntimeWritten\",FlatOverlayMutationOp::Written,extent);") &&
-               has(compact(body(runtimeSource, "void flatRuntimeWritten(ID3D11Resource* res,FlatOverlayMutationOp provenance)")), "historyWholeWrite(clear?HistoryWriteEntry::Clear:HistoryWriteEntry::Other)"),
+               has(compact(body(runtimeSource, "void flatRuntimeWritten(ID3D11Resource* res,FlatOverlayMutationOp provenance,bool constantFill)")), "historyWholeWrite(clear?HistoryWriteEntry::Clear:HistoryWriteEntry::Other)"),
            "a write with a known extent is passed on as it is, one without is a whole clear or an unnamed whole write");
     expect(has(compact(runtimeSource), "domainResourceWritten(s,u.Get(),\"foreground-dispatch-depth-write\",historyWholeWrite(HistoryWriteEntry::Dispatch));"),
            "a compute dispatch's UAV is a whole-resource write, counted at the dispatch (no API-level report covers it)");

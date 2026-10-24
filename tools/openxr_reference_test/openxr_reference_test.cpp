@@ -72,6 +72,14 @@ void validation() {
   check(!policy.note(event(200))&&!policy.active(),"overflow never drops silently");
   applied=44;check(!policy.advance(300,applied)&&applied==44,"overflow output unchanged");
   check(policy.begin(session)&&policy.advance(0,applied)&&applied==0&&policy.epoch()==1,"reinit after overflow");
+  policy.clear();
+  check(policy.begin(session,XR_REFERENCE_SPACE_TYPE_STAGE),"stage change policy starts");
+  check(policy.note(event(10))&&policy.crosses(0,10),"stage policy retains LOCAL-only dashboard recenter");
+  check(policy.advance(10,applied)&&applied==1&&policy.epoch()==2,
+        "LOCAL-only recenter advances the seat-change epoch in STAGE mode");
+  auto stageChange=event(20);stageChange.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_STAGE;
+  check(policy.note(stageChange)&&policy.crosses(0,20),"stage policy tracks STAGE changes");
+  check(policy.advance(20,applied)&&applied==1&&policy.epoch()==3,"stage change advances epoch after LOCAL recenter");
 }
 } // namespace
 int main(int argc,char** argv) {

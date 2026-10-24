@@ -34,7 +34,7 @@ using camera_stubs::kStubBOffset;
 
 // The upstream camera injector (docs/design-flat-camera-integration.md, C3
 // wiring plan addendum). One CodeHook on the game's view-constant refresh
-// (FUN_1405921f0): the detour applies the temporal phase to the camera's
+// (FUN_1405922f0): the detour applies the temporal phase to the camera's
 // bound pair transiently -- mutate on the entry values, run the original,
 // restore immediately (the restore-after-call protocol: no accumulation,
 // nothing left behind on disable, mid-frame setters compose naturally).
@@ -96,10 +96,10 @@ using camera_stubs::kStubBOffset;
 // for process lifetime -- disable closes the gate and nothing more (no
 // uninstall, no free, ever).
 
-constexpr uintptr_t kRefreshRva = 0x592200;
+constexpr uintptr_t kRefreshRva = 0x592300;
 // Two site constraints, learned from two refused installs: the function's
 // second instruction is a conditional jump CodeHook will not move, and the
-// patch site must be eight-byte aligned for the atomic store. +0x592200 is
+// patch site must be eight-byte aligned for the atomic store. +0x592300 is
 // the first site satisfying both (push r15; sub rsp,0xE0; register moves
 // after that replay inside the trampoline). The detour's arguments arrive
 // in rcx/rdx/r8 untouched either way, and rax (the frame anchor the
@@ -306,7 +306,7 @@ void buildRelay(uint8_t* code, const void* gate, void* callback) noexcept {
     // rax was the known constraint (this target's frame anchor is mov rax,rsp
     // BEFORE the patch site, so rax must survive), and 905bddd0 also kept r11
     // on the theory that this pipeline family passes a frame base in it
-    // (FUN_140594dc8 spills through [r11+0x10] at entry). That theory was not
+    // (FUN_140594ec8 spills through [r11+0x10] at entry). That theory was not
     // the crash: the 04:23 flight crashed identically with this relay, and
     // the cause was stubA's missing home area (see the header comment). The
     // relay stays as it is because it costs one push and pop and leaves the

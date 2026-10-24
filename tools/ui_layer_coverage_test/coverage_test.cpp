@@ -187,15 +187,66 @@ int main(int argc,char** argv) {
     {FinishSpy otherSpy(deferred2.Get());check(cache.execute(f.ctx.Get(),deferred2.Get(),b,executeRaw),"deferred identity change records");
         check(cache.execute(f.ctx.Get(),deferred2.Get(),b,executeRaw),"new deferred identity reused");check(otherSpy.calls==1,"deferred replacement records once");}
     Fixture other;FinishSpy deviceSpy(other.deferred.Get());other.content(0);other.bindSentinel();
+    // The live ReShade/EDHM chain reports the native device from contexts
+    // and view resources, but a proxy device from views, shaders and states.
+    // A second WARP device models that proxy identity without requiring the
+    // mods in the test process.
+    auto nativeBindings=f.bindings();
+    UiCoverageDeviceDomainProof wrapped{f.dev.Get(),f.dev.Get(),f.dev.Get(),
+        f.dev.Get(),f.dev.Get(),other.dev.Get(),other.dev.Get(),other.dev.Get(),other.dev.Get(),other.dev.Get()};
+    check(uiCoverageProveDeviceDomains(wrapped),"native resources with wrapped children accepted");
+    auto nativeOnly=wrapped;
+    nativeOnly.sourceView=nativeOnly.targetView=nativeOnly.vs=nativeOnly.ps=nativeOnly.blend=f.dev.Get();
+    check(uiCoverageProveDeviceDomains(nativeOnly),"native-only device domain remains accepted");
+    auto wrongResource=wrapped;wrongResource.sourceResource=other.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongResource),"foreign source resource refused in wrapped domain");
+    wrongResource=wrapped;wrongResource.targetResource=other.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongResource),"foreign target resource refused in wrapped domain");
+    wrongResource=wrapped;wrongResource.anchor=other.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongResource),"foreign anchor refused in wrapped domain");
+    auto wrongView=wrapped;wrongView.sourceView=f.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongView),"foreign source view refused in wrapped domain");
+    wrongView=wrapped;wrongView.targetView=f.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongView),"foreign target view refused in wrapped domain");
+    auto wrongChild=wrapped;wrongChild.vs=f.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongChild),"foreign shader refused in wrapped domain");
+    wrongChild=wrapped;wrongChild.ps=f.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongChild),"foreign pixel shader refused in wrapped domain");
+    wrongChild=wrapped;wrongChild.blend=f.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongChild),"foreign blend refused in wrapped domain");
+    auto wrongContext=wrapped;wrongContext.deferred=other.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongContext),"foreign deferred context refused in wrapped domain");
+    wrongContext=wrapped;wrongContext.immediate=other.dev.Get();
+    check(!uiCoverageProveDeviceDomains(wrongContext),"foreign immediate context refused in wrapped domain");
+    wrongView=wrapped;wrongView.sourceView=nullptr;
+    check(!uiCoverageProveDeviceDomains(wrongView),"missing wrapped view identity refused");
+    // These use real native WARP objects. The mixed identities above are only
+    // a predicate model; production derives its anchor from the context.
+    check(uiCoverageDeviceDomainsMatch(f.dev.Get(),f.dev.Get(),f.dev.Get(),nativeBindings),
+          "native bindings accepted by the complete device-domain check");
+    check(!uiCoverageDeviceDomainsMatch(other.dev.Get(),f.dev.Get(),f.dev.Get(),nativeBindings),
+          "different immediate and deferred devices refused");
+    auto foreignBindings=nativeBindings;foreignBindings.source=other.srv.Get();
+    check(!uiCoverageDeviceDomainsMatch(f.dev.Get(),f.dev.Get(),f.dev.Get(),foreignBindings),
+          "foreign source view refused by the complete check");
+    foreignBindings=nativeBindings;foreignBindings.target=other.rtv.Get();
+    check(!uiCoverageDeviceDomainsMatch(f.dev.Get(),f.dev.Get(),f.dev.Get(),foreignBindings),
+          "foreign target resource refused by the complete check");
     check(cache.execute(other.ctx.Get(),other.deferred.Get(),other.bindings(),executeRaw),"device change records own resources");
     check(deviceSpy.calls==1 && other.read()==baseline[0],"new device exact output and recording count");other.state();
     const unsigned wrongBefore=executed;
-    check(!cache.execute(other.ctx.Get(),other.deferred.Get(),b,executeRaw),"foreign device resources refused before recording");
+    const char* failure=nullptr;
+    check(!cache.execute(other.ctx.Get(),other.deferred.Get(),b,executeRaw,&failure) &&
+          failure && std::strcmp(failure,"device domains")==0,
+          "foreign device resources refused before recording with a device-domain reason");
     check(!cache.hasCommands() && executed==wrongBefore && deviceSpy.calls==1,"foreign resources clear old cache without commands");
-    check(cache.execute(other.ctx.Get(),other.deferred.Get(),other.bindings(),executeRaw),"correct resources retry after refusal");
+    check(cache.execute(other.ctx.Get(),other.deferred.Get(),other.bindings(),executeRaw,&failure) && !failure,
+          "correct resources retry after refusal and clear the failure reason");
     check(deviceSpy.calls==2,"device refusal forces fresh valid recording");
     auto invalid=other.bindings();invalid.source=nullptr;
-    check(!cache.execute(other.ctx.Get(),other.deferred.Get(),invalid,executeRaw) && !cache.hasCommands(),"missing view clears cache");
+    check(!cache.execute(other.ctx.Get(),other.deferred.Get(),invalid,executeRaw,&failure) &&
+          failure && std::strcmp(failure,"missing input")==0 && !cache.hasCommands(),
+          "missing view clears cache with a missing-input reason");
     cache.reset();
     // Explicit key references keep caller resources alive, and reset releases
     // them as well as the command list before Eye replacement/shutdown.

@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstring>  // _stricmp, for the hook-mode override's spellings
+#include <intrin.h>  // _ReturnAddress: the caller of the executable's LoadLibraryW
 #include <string>
 
 #include "../common/config.h"
@@ -112,6 +113,15 @@ HMODULE WINAPI hookedLoadLibraryW(LPCWSTR lpLibFileName) {
         return mod;
     }
     return LoadLibraryW(lpLibFileName);
+}
+
+// The deadlock bypass takes the LoadLibraryW slot that the Oculus route hooked
+// at DllMain, so Elite's own LoadLibraryW calls go through the route's policy
+// first, with Elite's return address, and then through the bypass.
+__declspec(noinline) HMODULE WINAPI hookedExeLoadLibraryW(LPCWSTR lpLibFileName) {
+    return edvr::oculusRouteDispatchFrom(lpLibFileName,
+                                         reinterpret_cast<uintptr_t>(_ReturnAddress()),
+                                         &hookedLoadLibraryW);
 }
 
 HMODULE WINAPI hookedLoadLibraryA(LPCSTR lpLibFileName) {
@@ -483,7 +493,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryA",
                          reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchExeLoadLibraryA);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryW",
-                         reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchExeLoadLibraryW);
+                         reinterpret_cast<void*>(&hookedExeLoadLibraryW), &g_patchExeLoadLibraryW);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryExA",
                          reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchExeLoadLibraryExA);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryExW",
@@ -833,9 +843,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             DisableThreadLibraryCalls(module);
             // Native routing is a build capability, available before Elite's
             // first VR probe. No configuration or logging under loader lock.
+            // A route that cannot be installed leaves Elite's own loading untouched; the gfx log says why.
             edvr::oculusRouteInstallEarly(true);
-            if (!edvr::oculusRouteProcessAttachAllowed())
-                return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
             // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first, so a

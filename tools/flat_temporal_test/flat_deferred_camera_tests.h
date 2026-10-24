@@ -6,6 +6,8 @@
 #include "../../src/d3d11/flat_projection_bindings.h"
 #include "../../src/d3d11/flat_standdown.h"
 #include "flat_laser_scene_tone_tests.h"
+#include "flat_deferred_rc5_camera_captures.h"
+#include "flat_deferred_forward_omission_captures.h"
 namespace deferred_camera_test {
 using namespace edvr;
 inline unsigned run(){
@@ -26,6 +28,8 @@ inline unsigned run(){
  expect(flatDeferredExecutionCoherent(true,FlatDeferredCameraMatch::Match,false),"coherent original executes unchanged");
  expect(flatDeferredExecutionCoherent(true,FlatDeferredCameraMatch::Inverse,true),"certified prepared clone executes coherently");
  expect(!flatDeferredExecutionCoherent(true,FlatDeferredCameraMatch::Inverse,false) && !flatDeferredExecutionCoherent(false,FlatDeferredCameraMatch::Match,true),"later unproved inverse or changed ownership fails closed");
+ expect(flatDeferredExecutionCoherent(true,FlatDeferredCameraMatch::Forward,true) && !flatDeferredExecutionCoherent(true,FlatDeferredCameraMatch::Forward,false),
+        "certified whole-camera clone executes coherently, an unprepared forward mismatch fails closed");
  // Captured frame 6060: primary 1248x780 and secondary 256x256 share the
  // shader pair, but have separate HDR/depth identities. Ownership must precede
  // preparation and cannot be inferred from a successful camera certificate.
@@ -80,6 +84,18 @@ inline unsigned run(){
  expect(foundVerifier && gate!=std::string::npos && firstCheck!=std::string::npos &&
         preflight!=std::string::npos && failure!=std::string::npos && gate<firstCheck && gate<preflight && gate<failure,
         "Upstream outside gate precedes all verifier work/preparation/failure while preserving Legacy");
+ // Whole-camera omission: its plan is the legacy recipe's forward-plus-inverse shape, accepted only on the
+ // certified bytes, and a prepared repair of either kind keeps the later unproven-execution gate quiet.
+ const auto formsForward=verifier.find("{FlatProjectionPatchLayout::ForwardDp4,kFlatDeferredCameraFirstRow*16,{}}");
+ const auto formsInverse=verifier.find("{FlatProjectionPatchLayout::InverseUvRay,kFlatDeferredInverseFirstRow*16,{}}");
+ const auto wholeRepair=verifier.find("flatRepairDeferredWholeOmission(donor.camera,raw,jitter,certified)");
+ const auto acceptance=verifier.find("std::memcmp(uploaded,certified,sizeof(uploaded))==0 &&");
+ const auto wholeFailure=verifier.find("reportFailure(\"deferred-whole-preparation-failed\")");
+ expect(formsForward!=std::string::npos&&formsInverse!=std::string::npos&&formsForward<formsInverse&&wholeRepair!=std::string::npos&&
+        acceptance!=std::string::npos&&wholeFailure!=std::string::npos&&wholeRepair<preflight&&preflight<acceptance&&acceptance<wholeFailure&&
+        verifier.find("nonzero && !executionCoherent && !repairing")!=std::string::npos&&
+        verifier.find("flatDeferredExecutionCoherent(qualified,match,prepared)")!=std::string::npos,
+        "whole-camera plan patches forward rows then rays, uploads only certified bytes, fails closed, and counts as a prepared repair");
  // Exact same-frame current original payload from the nonzero diagnostic flight.
  const uint32_t captureCamera[]={0xBF69510B,0xBF578742,0x00000000,0xB72B8D41,0xBF06B489,0x3FBAA73D,0x00000000,0xB7125F51,0x3A4892F6,0x3974AE5A,0x00000000,0xBF800000,0x00000000,0x00000000,0x3CCCCCCD,0x00000000,0xB72B8D41,0xB7125F51,0xBF800000,0x00000000,0x401E8A8A,0xC075C0CE,0xC2512BFA,0x00000000};
  const uint32_t captureRows[]={0xBF69510B,0xBF06B489,0x3A4892F6,0x3E8DECBA,0xBF578742,0x3FBAA73D,0x3974AE5A,0x40F64FA6,0x00000000,0x00000000,0x00000000,0x3CCCCCCD,0xB72B8D41,0xB7125F51,0xBF800000,0xC2512BFC,0xBFD2AAAE,0x3F180910,0x80000000,0x3F06A57A,0xBF7341B4,0xBF83AAAC,0x00000000,0x3F7D4AF4,0x37D2B746,0x3642BB1C,0x00000000,0xBF800076};
@@ -159,6 +175,37 @@ inline unsigned run(){
      else expect(!selected.selected() && wake!=FlatStandDownEvent::Resumed && sleep.standing,"stale partial mapped ambiguous foreign inverse creation later short or no-consumer probe cannot wake");
  };
  coldProbe(0);for(unsigned n=1;n<=10;++n)coldProbe(n);
+ failures+=deferred_rc5_camera::run();
+ failures+=deferred_forward_omission::run();
+ std::ifstream cameraHeader("src/d3d11/flat_deferred_camera.h");std::string cameraSource,cameraLine;
+ while(std::getline(cameraHeader,cameraLine))cameraSource+=cameraLine+'\n';
+ const auto repairFn=cameraSource.find("inline bool flatRepairDeferredMissingPhase(");
+ const auto dephased=cameraSource.find("flatDeferredDephasedOmission(",repairFn);
+ const auto corrected=cameraSource.find("flatMatchDeferredCamera(cameraBytes,reinterpret_cast<unsigned char*>(rows))!=FlatDeferredCameraMatch::Match",repairFn);
+ expect(repairFn!=std::string::npos&&dephased!=std::string::npos&&corrected!=std::string::npos&&dephased<corrected,
+        "missing-phase repair proves the dephased omission before the strict corrected certificate");
+ const auto wholeFn=cameraSource.find("inline bool flatRepairDeferredWholeOmission(");
+ const auto wholeForward=cameraSource.find("!=FlatDeferredCameraMatch::Forward)return false;",wholeFn);
+ const auto wholeDephased=cameraSource.find("flatDeferredDephasedOmission(camera,rows,jitter.ndcX,jitter.ndcY,false)",wholeFn);
+ const auto wholeLayouts=cameraSource.find("flatJitterForwardDp4(forward,jitter) || !flatJitterInverseUvRay(rays,jitter)",wholeFn);
+ const auto wholeCorrected=cameraSource.find("flatMatchDeferredCamera(cameraBytes,reinterpret_cast<unsigned char*>(rows),true)!=FlatDeferredCameraMatch::Match",wholeFn);
+ expect(wholeFn!=std::string::npos&&wholeForward!=std::string::npos&&wholeDephased!=std::string::npos&&wholeLayouts!=std::string::npos&&wholeCorrected!=std::string::npos&&
+        wholeForward<wholeDephased&&wholeDephased<wholeLayouts&&wholeLayouts<wholeCorrected,
+        "whole-camera repair needs the forward relation, proves the dephased omission, then the strict corrected certificate");
+ const auto inverseFn=cameraSource.find("inline bool flatRepairDeferredMissingPhase(");
+ const auto inverseEnd=cameraSource.find("inline bool flatRepairDeferredWholeOmission(");
+ const auto inverseBody=inverseFn!=std::string::npos&&inverseEnd!=std::string::npos?cameraSource.substr(inverseFn,inverseEnd-inverseFn):std::string{};
+ expect(!inverseBody.empty()&&inverseBody.find("rows),true)")==std::string::npos&&inverseBody.find("nsigned char*>(rows))!=FlatDeferredCameraMatch::Match")!=std::string::npos,
+        "inverse-only repair keeps the unextended strict forward comparison");
+ const auto sharedFn=cameraSource.find("inline bool flatDeferredDephasedOmission(");
+ const auto sharedEnd=cameraSource.find("// Certify the measured omission",sharedFn);
+ const auto shared=sharedFn!=std::string::npos&&sharedEnd!=std::string::npos?cameraSource.substr(sharedFn,sharedEnd-sharedFn):std::string{};
+ expect(!shared.empty()&&shared.find("bool forwardCarriesPhase=true")!=std::string::npos&&
+        shared.find("cb[0][i]-=rowX*cb[3][i];cb[1][i]-=rowY*cb[3][i];")!=std::string::npos&&
+        shared.find("cam[i][0]-=ndcX*cam[i][3];cam[i][1]-=ndcY*cam[i][3];")!=std::string::npos&&
+        shared.find("flatDeferredReverseDelta(rows[0][i],ndcX")==std::string::npos&&shared.find("flatDeferredReverseDelta(rows[1][i],ndcY")==std::string::npos&&
+        shared.find("flatDeferredReverseDelta(rows[0][c],ndcX")==std::string::npos&&shared.find("flatDeferredReverseDelta(rows[0][3],ndcX")==std::string::npos,
+        "shared omission proof dephases the CB2 side only when it carries the phase and charges its reversal only then");
  std::printf("flat deferred camera: %u failure(s)\n",failures);return failures;
 }
 }

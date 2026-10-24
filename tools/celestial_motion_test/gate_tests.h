@@ -95,7 +95,11 @@ bool tickPushesStatus(const std::string& text) {
     const size_t end = text.find("\n}", at);   // the function's closing brace at column 0 (either line ending)
     if (end == std::string::npos) return false;
     const std::string body = text.substr(at, end - at);
-    return body.find("celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());") != std::string::npos;
+    // Flat has its own reader (journalFlatSupercruise): the VR accessors answer flat with "unknown", which kept the gate shut there.
+    return body.find("celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());") != std::string::npos &&
+           body.find("if (runtimeFlatProfile()) {") != std::string::npos &&
+           body.find("const bool known = journalFlatSupercruise(&supercruise);") != std::string::npos &&
+           body.find("celestialMotionNoteStatus(known, known && supercruise);") != std::string::npos;
 }
 
 void all(const Fixture& fx) {

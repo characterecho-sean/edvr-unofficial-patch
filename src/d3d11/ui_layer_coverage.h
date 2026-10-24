@@ -16,6 +16,50 @@ struct UiCoverageBindings {
     uint32_t width = 0, height = 0;
 };
 using UiCoverageExecute = void (*)(ID3D11DeviceContext*, ID3D11CommandList*, int);
+inline bool uiCoverageSameDevice(ID3D11Device* a, ID3D11Device* b) {
+    if (!a || !b) return false;
+    Microsoft::WRL::ComPtr<IUnknown> ai, bi;
+    return SUCCEEDED(a->QueryInterface(IID_PPV_ARGS(&ai))) &&
+        SUCCEEDED(b->QueryInterface(IID_PPV_ARGS(&bi))) && ai.Get() == bi.Get();
+}
+// D3D11 wrappers may give views/shaders/states a proxy GetDevice identity
+// while resources and contexts report the native device. Both view resources
+// must belong to the context's native domain; all bound children must share
+// one view domain. A second WARP device can model either domain in tests.
+struct UiCoverageDeviceDomainProof {
+    ID3D11Device *immediate, *deferred, *anchor;
+    ID3D11Device *sourceResource, *targetResource;
+    ID3D11Device *sourceView, *targetView, *vs, *ps, *blend;
+};
+inline bool uiCoverageProveDeviceDomains(const UiCoverageDeviceDomainProof& d) {
+    return uiCoverageSameDevice(d.immediate, d.deferred) &&
+        uiCoverageSameDevice(d.sourceResource, d.anchor) &&
+        uiCoverageSameDevice(d.targetResource, d.anchor) &&
+        uiCoverageSameDevice(d.sourceView, d.targetView) &&
+        uiCoverageSameDevice(d.sourceView, d.vs) &&
+        uiCoverageSameDevice(d.sourceView, d.ps) &&
+        uiCoverageSameDevice(d.sourceView, d.blend);
+}
+inline bool uiCoverageDeviceDomainsMatch(ID3D11Device* immediateDevice, ID3D11Device* deferredDevice,
+                                         ID3D11Device* anchorDevice, const UiCoverageBindings& b) {
+    if (!b.source || !b.target || !b.vs || !b.ps || !b.blend) return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> sourceResource, targetResource;
+    b.source->GetResource(&sourceResource);
+    b.target->GetResource(&targetResource);
+    if (!sourceResource || !targetResource) return false;
+    Microsoft::WRL::ComPtr<ID3D11Device> sourceResourceDevice, targetResourceDevice;
+    Microsoft::WRL::ComPtr<ID3D11Device> sourceViewDevice, targetViewDevice, vsDevice, psDevice, blendDevice;
+    sourceResource->GetDevice(&sourceResourceDevice);
+    targetResource->GetDevice(&targetResourceDevice);
+    b.source->GetDevice(&sourceViewDevice);
+    b.target->GetDevice(&targetViewDevice);
+    b.vs->GetDevice(&vsDevice);
+    b.ps->GetDevice(&psDevice);
+    b.blend->GetDevice(&blendDevice);
+    return uiCoverageProveDeviceDomains({immediateDevice, deferredDevice, anchorDevice,
+        sourceResourceDevice.Get(), targetResourceDevice.Get(), sourceViewDevice.Get(),
+        targetViewDevice.Get(), vsDevice.Get(), psDevice.Get(), blendDevice.Get()});
+}
 inline bool uiCoverageRecord(ID3D11DeviceContext* deferred, const UiCoverageBindings& b,
                              Microsoft::WRL::ComPtr<ID3D11CommandList>& list) {
     if (!deferred || !b.source || !b.target || !b.vs || !b.ps || !b.blend || !b.width || !b.height)
@@ -64,11 +108,6 @@ class UiCoverageCommandCache {
             vs_.Get() == b.vs && ps_.Get() == b.ps && blend_.Get() == b.blend &&
             width_ == b.width && height_ == b.height;
     }
-    static bool onDevice(ID3D11DeviceChild* child, ID3D11Device* device) {
-        Microsoft::WRL::ComPtr<ID3D11Device> actual;
-        child->GetDevice(&actual);
-        return actual.Get() == device;
-    }
 public:
     void reset() noexcept {
         // Drop commands first: they retain every referenced view and shader.
@@ -77,20 +116,39 @@ public:
     }
     bool hasCommands() const noexcept { return !!list_; }
     bool execute(ID3D11DeviceContext* ctx, ID3D11DeviceContext* deferred,
-                 const UiCoverageBindings& b, UiCoverageExecute executeRaw) {
+                 const UiCoverageBindings& b, UiCoverageExecute executeRaw,
+                 const char** failure = nullptr) {
+        if (failure) *failure = nullptr;
+        const auto fail = [&](const char* reason) {
+            if (failure) *failure = reason;
+            return false;
+        };
         if (!ctx || !deferred || !executeRaw || !b.source || !b.target || !b.vs ||
-            !b.ps || !b.blend || !b.width || !b.height) { reset(); return false; }
+            !b.ps || !b.blend || !b.width || !b.height) { reset(); return fail("missing input"); }
         if (!matches(ctx, deferred, b)) {
             reset();
             Microsoft::WRL::ComPtr<ID3D11Device> device;
             ctx->GetDevice(&device);
+            Microsoft::WRL::ComPtr<ID3D11Device> deferredDevice;
+            deferred->GetDevice(&deferredDevice);
             if (!device || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE ||
-                deferred->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED ||
-                !onDevice(deferred, device.Get()) || !onDevice(b.source, device.Get()) ||
-                !onDevice(b.target, device.Get()) || !onDevice(b.vs, device.Get()) ||
-                !onDevice(b.ps, device.Get()) || !onDevice(b.blend, device.Get())) return false;
+                deferred->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return fail("context type or device");
+            // An anchor created through the context's device identifies the
+            // native resource domain even when child GetDevice is proxied.
+            D3D11_BUFFER_DESC anchorDesc{};
+            anchorDesc.ByteWidth = 16;
+            anchorDesc.Usage = D3D11_USAGE_DEFAULT;
+            anchorDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            Microsoft::WRL::ComPtr<ID3D11Buffer> anchor;
+            if (FAILED(device->CreateBuffer(&anchorDesc, nullptr, &anchor)) || !anchor) return fail("anchor creation");
+            Microsoft::WRL::ComPtr<ID3D11Device> nativeDevice;
+            anchor->GetDevice(&nativeDevice);
+            if (!uiCoverageSameDevice(device.Get(), deferredDevice.Get())) return fail("context device identities");
+            if (!nativeDevice) return fail("anchor device");
+            if (!uiCoverageDeviceDomainsMatch(device.Get(), deferredDevice.Get(), nativeDevice.Get(), b))
+                return fail("device domains");
             Microsoft::WRL::ComPtr<ID3D11CommandList> recorded;
-            if (!uiCoverageRecord(deferred, b, recorded)) return false;
+            if (!uiCoverageRecord(deferred, b, recorded)) return fail("command recording");
             device_ = device; immediate_ = ctx; deferred_ = deferred;
             source_ = b.source; target_ = b.target; vs_ = b.vs; ps_ = b.ps; blend_ = b.blend;
             width_ = b.width; height_ = b.height; list_ = recorded;

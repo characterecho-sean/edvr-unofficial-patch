@@ -1105,7 +1105,7 @@ void testPins(const std::string& root) {
         {&journal, "s.pub.seatedKnown = sawFlags;", 1, "R5j", "the seat is known whenever Flags is"},
         {&journal, "s.pub.seatedKnown = false;", 1, "R5j", "three missed reads drop the seat with the rest"},
         // the shader's reading of split.x, which a millimetre relies on: > 0 turns the world path on, z > split picks a pixel
-        {&shader, "split.x > 0.0", 3, "R5k", "the shader reads split.x > 0 as the world path being available (the history fetch, the motion entry, the flag)"},
+        {&shader, "split.x > 0.0", 4, "R5k", "the shader reads split.x > 0 as the world path being available (the history fetch, main's depth tile fill, the motion entry, the flag)"},
         {&shader, "(far || z > split.x)", 2, "R5k", "the shader sends a pixel to the world path when it is far or farther than split.x"},
     };
     runPins(pins);

@@ -107,8 +107,15 @@ uint64_t fnv1a64(const void* data, size_t bytes) {
     return h;
 }
 
+// Where in a buffer a noteReserved line sits, so the pass that finds the cap reached can still write it.
+struct ReservedSpan {
+    size_t offset;
+    size_t bytes;
+};
+
 struct Log::Impl {
     std::vector<char> buf[2];
+    std::vector<ReservedSpan> spans[2];   // the reserved lines in buf[i], in order; guarded with it
     std::atomic<int>  active{0};
     std::atomic_flag  spin = ATOMIC_FLAG_INIT;
     std::thread       flusher;
@@ -148,6 +155,7 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     // its first flush.)
     m_bytesWritten = 0;
     m_capped = false;
+    m_reserve.reset();
 
     // Clamped rather than trusted: 0 here would drop every line silently, and
     // the value is read once at open so a typo cannot be walked back mid
@@ -167,6 +175,8 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     m_impl = new Impl();
     m_impl->buf[0].reserve(kReserveBytes);
     m_impl->buf[1].reserve(kReserveBytes);
+    m_impl->spans[0].reserve(16);
+    m_impl->spans[1].reserve(16);
     m_dir = dir;
 
     // Created here rather than at config time, so logging turned off leaves no
@@ -292,6 +302,7 @@ void Log::writeBuffer(int index) {
     // log.max_mb was reached kept its peak for the rest of the session.
     auto release = [&] {
         b.clear();
+        m_impl->spans[index].clear();
         if (b.capacity() > kReclaimAboveBytes) {
             std::vector<char>().swap(b);
             b.reserve(kReserveBytes);
@@ -301,12 +312,16 @@ void Log::writeBuffer(int index) {
     if (m_maxBytes && m_bytesWritten >= m_maxBytes) {
         if (!m_capped) {
             m_capped = true;
-            const char msg[] = "\r\n[edvr] log size cap reached; nothing further will "
-                               "be written. Raise log.max_mb to change this.\r\n";
+            // "Nothing further" stopped being true when noteReserved was added: the lines it marks go on from their own
+            // reserve (writeReserved). tools\config_test matches the start of this text.
+            const char msg[] = "\r\n[edvr] log size cap reached; only lines noted as reserved (the memory watch's mem: "
+                               "lines) are still written, from a reserve of 1 MiB, and nothing else will be. Raise "
+                               "log.max_mb to change this.\r\n";
             DWORD n = 0;
             WriteFile(m_impl->file, msg, sizeof(msg) - 1, &n, nullptr);
             FlushFileBuffers(m_impl->file);
         }
+        writeReserved(index);
         release();
         return;
     }
@@ -360,9 +375,29 @@ void Log::writeBuffer(int index) {
     }
 }
 
-void Log::append(const char* text, size_t bytes) {
+// The reserved lines of a buffer the cap has refused, from the reserve (log_reserve.h), in the order they were noted. Called only
+// where writeBuffer has found the cap reached, so the file is written by one thread here as it is everywhere else.
+void Log::writeReserved(int index) {
+    const std::vector<char>& b = m_impl->buf[index];
+    for (const ReservedSpan& span : m_impl->spans[index]) {
+        if (span.offset > b.size() || span.bytes > b.size() - span.offset) break;
+        const ReserveVerdict verdict = m_reserve.admit(span.bytes);
+        if (verdict == ReserveVerdict::Skip) break;
+        DWORD written = 0;
+        if (verdict == ReserveVerdict::Write) {
+            WriteFile(m_impl->file, b.data() + span.offset, static_cast<DWORD>(span.bytes), &written, nullptr);
+            continue;
+        }
+        const char msg[] = "[edvr] the post-cap reserve of 1 MiB for reserved lines is spent; nothing further will be written.\r\n";
+        WriteFile(m_impl->file, msg, sizeof(msg) - 1, &written, nullptr);
+        break;
+    }
+}
+
+void Log::append(const char* text, size_t bytes, bool reserved) {
     lock();
-    std::vector<char>& b = m_impl->buf[m_impl->active.load(std::memory_order_relaxed)];
+    const int active = m_impl->active.load(std::memory_order_relaxed);
+    std::vector<char>& b = m_impl->buf[active];
     if (b.size() + bytes > m_bufferCapBytes) {
         // Counted BEFORE the unlock and through an atomic, so a burst on two
         // threads cannot lose counts. The number is the whole point: an
@@ -371,24 +406,20 @@ void Log::append(const char* text, size_t bytes) {
         unlock();
         return;
     }
+    if (reserved) m_impl->spans[active].push_back(ReservedSpan{b.size(), bytes});
     b.insert(b.end(), text, text + bytes);
     unlock();
 }
 
-void Log::note(const char* fmt, ...) {
-    if (!m_open) return;
-    startFlusherOnce();
-
+// One timestamped line, "[hh:mm:ss.mmm] text\r\n", in line[0..cap). Returns its length, or 0 when nothing can be written.
+static int formatStamped(char* line, size_t cap, const char* fmt, va_list ap) {
     SYSTEMTIME st;
     GetLocalTime(&st);
 
-    char line[1200];
-    int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "[%02u:%02u:%02u.%03u] ",
+    int n = _snprintf_s(line, cap, _TRUNCATE, "[%02u:%02u:%02u.%03u] ",
                         st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    if (n < 0) return;
+    if (n < 0) return 0;
 
-    va_list ap;
-    va_start(ap, fmt);
     // Room for the marker is reserved up front, not found afterwards.
     //
     // Formatting into the whole buffer and then looking for space left exactly
@@ -398,9 +429,8 @@ void Log::note(const char* fmt, ...) {
     // notice that is a line being truncated anyway.
     static const char kMark[] = " ...[truncated]";
     const int kMarkLen = static_cast<int>(sizeof(kMark)) - 1;
-    const int m = _vsnprintf_s(line + n, sizeof(line) - n - 3 - kMarkLen, _TRUNCATE,
+    const int m = _vsnprintf_s(line + n, cap - n - 3 - kMarkLen, _TRUNCATE,
                                fmt, ap);
-    va_end(ap);
     if (m > 0) {
         n += m;
     } else if (m < 0) {
@@ -412,7 +442,7 @@ void Log::note(const char* fmt, ...) {
         // timestamp -- and the messages long enough to hit this are the ones
         // carrying paths and diagnostics somebody is reading off a support log.
         n += static_cast<int>(strlen(line + n));
-        const int room = static_cast<int>(sizeof(line)) - n - 3;
+        const int room = static_cast<int>(cap) - n - 3;
         const int take = kMarkLen < room ? kMarkLen : room;
         if (take > 0) {
             memcpy(line + n, kMark, static_cast<size_t>(take));
@@ -422,7 +452,31 @@ void Log::note(const char* fmt, ...) {
 
     line[n++] = '\r';
     line[n++] = '\n';
-    append(line, static_cast<size_t>(n));
+    return n;
+}
+
+void Log::note(const char* fmt, ...) {
+    if (!m_open) return;
+    startFlusherOnce();
+
+    char line[1200];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = formatStamped(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n > 0) append(line, static_cast<size_t>(n), false);
+}
+
+void Log::noteReserved(const char* fmt, ...) {
+    if (!m_open) return;
+    startFlusherOnce();
+
+    char line[kLogReservedLineBytes];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = formatStamped(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n > 0) append(line, static_cast<size_t>(n), true);
 }
 
 void Log::detachDuringProcessExit() {

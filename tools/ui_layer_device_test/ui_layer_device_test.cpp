@@ -58,6 +58,8 @@ ID3D11Texture2D* layerTexture();
 ID3D11Texture2D* hdrLayerTexture();
 uint32_t layerWidth();
 bool hudFrame(ID3D11DeviceContext* ctx, uint64_t seq, const float ldr[4], const float hdr[4]);
+bool failedCoverageRetiresWithoutPublishing();
+bool missingConsumerLeavesCurrentDrawStock(ID3D11DeviceContext* ctx);
 }  // namespace devtest
 }  // namespace edvr
 
@@ -280,6 +282,8 @@ int main(int argc, char** argv) {
     detail::g_uiLayerLive = true;
     detail::g_uiQualityLive = true;
     detail::g_uiLayerCrispOn = true;
+    check(devtest::failedCoverageRetiresWithoutPublishing(),
+          "failed coverage retires stale HUD once without claiming a published tonemap");
 
     frameRound(devA.Get(), ctxA.Get(), 10, 64, 64, "device A");
     check(devtest::sharpReady(ctxA.Get()) && devtest::rippleReady(ctxA.Get()) &&
@@ -317,6 +321,8 @@ int main(int argc, char** argv) {
     // The in-place composite on the production code path: an owned, UAV-bindable, whole frame.
     frameRound(devB.Get(), ctxB.Get(), 40, 48, 32, "device B, an owned frame composited in place", true);
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B after the in-place composite: every retained device child is still B's");
+    check(devtest::missingConsumerLeavesCurrentDrawStock(ctxB.Get()),
+          "missing HUD consumer stands down before binding the layer and leaves the current draw stock");
 
     uiLayerShutdown();
     std::printf("ui_layer_device_test: %u checks, %u failures\n", g_checks, g_fails);

@@ -16,6 +16,7 @@
 
 #include "ui_layer_math.h"
 #include "flat_ui_layer.h"  // the back-off trail's hooks (log only; the flat profile calls them)
+#include "flat_star_glow_math.h"  // visual.star_glow: the blend equation of the star pass
 #include "ui_scene_composites.h"  // the census of the interface composites left in the scene, and its line
 #include "ui_maps_math.h"   // the on-foot maps gate: the key, the step, the door's predicate, the lines
 #include "ui_holo_remap.h"
@@ -30,6 +31,7 @@
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
 #include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
+#include "flat_mono_frame.h"  // kToneDofCompositePs: the one tone input the re-issue blends rather than adds
 
 #include "binding_shadow.h"
 #include "depth_probe.h"   // depthProbeDrawsAtSize: the world-screen gate's own count
@@ -108,7 +110,7 @@ constexpr uint32_t kCrispHdrMissFrames = 30;
 
 // ------------------------------------------------------------ configuration
 
-float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125)
+float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125), 1.5 (150), 2.0 (200)
 // fix.sharp_weapons (default on): the weapons fire into its own additive HDR layer, composited after the upscale. INDEPENDENT of
 // fix.ui_quality: g_sharpWeapons is the key, g_weaponsLive the key with everything it needs (a temporal mode, not stood down, not the
 // flat profile). The layer's machinery runs when either half is live (refreshLive); the interface families are taken only while
@@ -636,11 +638,15 @@ struct Window {
     uint64_t afterFollowed = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
     uint64_t depthOnlySeedPreservedWriters = 0;
+    // seedWritersCheck's resolve of the bound depth view: answered from the memo, or by the guarded resolve (a miss, a failure included).
+    uint64_t dsvMemoHits = 0, dsvMemoMisses = 0;
     uint64_t privateDepthPotentialBegins = 0;
     // the crisp-HUD half of fix.ui_quality: HUD draws taken into the HDR layer, tonemap re-issues,
     // coverage passes, HDR layers whose content never reached a tonemap, and
     // the re-issue's declines by reason (each also named once a session).
     uint64_t hdrRedirected = 0, hdrReissued = 0, hdrCoveragePasses = 0, hdrLost = 0;
+    uint64_t hdrSceneZeroed = 0;  // re-issues that read zero at the tone's scene images (the scene's bloom)
+    uint64_t hdrDofReplaced = 0;  // re-issues that bound the step's own source at the DoF composite's blur
     uint64_t hdrDrawTimingEligible = 0, hdrDrawTimingDisabled = 0, hdrDrawTimingIssued = 0;
     uint64_t hdrDrawTimingAborted = 0;
     // fix.sharp_weapons: weapons draws taken into the weapons layer (by pair), layers whose content no re-issue published, and the
@@ -969,13 +975,8 @@ uint64_t g_sessionRedirected = 0;
 // nothing is written while fix.ui_quality is off and nothing was redirected.
 PeriodicWork g_workTotals{"ui_layer_totals", "samples"};
 
-// First-seen lines, deduplicated.
-struct FamilySeen {
-    uint8_t family, decision;
-    uint64_t vs, ps;
-};
-FamilySeen g_familySeen[kMaxFamilyLines];
-uint32_t g_familySeenCount = 0;
+// First-seen lines, deduplicated (ui_layer_math.h UiFamilySeenTable: the rule is its wanted()).
+UiFamilySeenTable<kMaxFamilyLines> g_familySeen;
 struct AfterSeen {
     char kind;
     uint64_t vs, ps;
@@ -984,25 +985,19 @@ AfterSeen g_afterSeen[kMaxAfterLines];
 uint32_t g_afterSeenCount = 0;
 bool g_engageNoted = false, g_compositeNoted = false;
 
-bool structuralDecision(UiLayerDecision d) {
-    // The transient ones -- not armed yet, late this frame -- are counted on
-    // the totals line and never get a first-seen line of their own.
-    return d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate &&
-           d != UiLayerDecision::kNotUi;
+// Will noteFamily print a line for this decision, the draw's own (vs, ps) being bound: a structural decision, the pair not seen yet, the
+// table not full. The detail text is built only when this is true -- noteFamily is called for every decided draw and the text is read
+// only by the line it prints. noteFamily's rule is this one (UiFamilySeenTable::record is built on wanted()), so the two cannot differ.
+bool familyLineWanted(UiLayerFamily f, UiLayerDecision d) {
+    return g_familySeen.wanted(f, d, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
 }
 
 // Once per (family, outcome, shader pair): what it is, where it draws, what
 // was decided -- with the blend or depth-stencil state that decided it, so a
 // refusal names the numbers rather than a category.
 void noteFamily(UiLayerFamily f, UiLayerDecision d, const char* detail) {
-    if (!structuralDecision(d)) return;
     const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
-    for (uint32_t i = 0; i < g_familySeenCount; ++i) {
-        const FamilySeen& s = g_familySeen[i];
-        if (s.family == uint8_t(f) && s.decision == uint8_t(d) && s.vs == vs && s.ps == ps) return;
-    }
-    if (g_familySeenCount >= kMaxFamilyLines) return;
-    g_familySeen[g_familySeenCount++] = {uint8_t(f), uint8_t(d), vs, ps};
+    if (!g_familySeen.record(f, d, vs, ps)) return;
     Log::get().note("ui quality: layer: %s (vs %016llX ps %016llX) into a %ux%u %s target: %s%s%s.",
                     uiLayerFamilyName(f), static_cast<unsigned long long>(vs),
                     static_cast<unsigned long long>(ps), g_tc.info.a, g_tc.info.b,
@@ -2057,8 +2052,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             // when the path works; a streak of kCrispHdrMissFrames says the
             // consumer is not coming, so stand down to stock rather than
             // lose the HUD every frame. The streak resets where a
-            // publication lands (uiLayerCrispToneEnd). This draw still
-            // completes into the layer; the NEXT HUD draw is stock.
+            // publication lands (uiLayerCrispToneEnd). This draw is issued
+            // stock too, because the stand-down happened before its bind.
             // The flat profile takes only behind a proven tonemap (flat_ui_layer.cpp), so one miss is already a broken
             // proof: it backs off at the first, losing one frame's HUD instead of thirty.
             const uint32_t missLimit = runtimeFlatProfile() ? 1u : kCrispHdrMissFrames;
@@ -2069,6 +2064,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                             "(the cockpit HUD was taken but never came back)",
                             missLimit);
                 crispStandDown(why);
+                // This draw was decided while the path was live, but the
+                // missing-consumer check just stood it down. Let it issue
+                // stock; taking it would poison the next re-arm as well.
+                e.hdrDraws = 0;
+                if (bs) bs->Release();
+                ++g_win.refusedAtIssue;
+                return false;
             }
         }
         const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
@@ -3231,6 +3233,17 @@ void logSharpWeapons() {
         static_cast<unsigned long long>(g_win.weaponsContentFrames), static_cast<unsigned long long>(g_win.weaponsLost), pairs.c_str());
 }
 
+// The bound depth view's resolve memo (resolveBoundDsv): how often seedWritersCheck's question was answered from it and how often it
+// was resolved (a miss, a failed resolve included). Its own 30 s line so the flat profile, which skips logTotals but runs
+// seedWritersCheck on every scene draw (flatUiLayerNoteSceneDraw), reports the counts too, before the window reset discards them.
+// All zeros means no draw reached the resolve in the window, which is not the same as this line missing.
+void logDsvMemo() {
+    Log::get().note(
+        "ui quality: depth view memo: the bound depth view's resource was answered from the Dsv0-generation memo %llu times "
+        "and resolved on a miss (a failed resolve included) %llu times in this window.",
+        static_cast<unsigned long long>(g_win.dsvMemoHits), static_cast<unsigned long long>(g_win.dsvMemoMisses));
+}
+
 void logTotals(double seconds) {
     // The frosted base's own count: the flight's answer to "did the station menu's base go through the
     // remapped program" -- admitted must climb with the panels, refused stay 0.
@@ -3306,6 +3319,7 @@ void logTotals(double seconds) {
         "across both eyes/layers (potential writes, including no private DSV or original read-only view).",
         static_cast<unsigned long long>(g_win.depthOnlySeedPreservedWriters),
         static_cast<unsigned long long>(g_win.privateDepthPotentialBegins));
+    logDsvMemo();
     Log::get().note(
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
         "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
@@ -3386,10 +3400,13 @@ void logTotals(double seconds) {
         }
         Log::get().note(
             "crisp hud: %.2f HUD draws a frame taken into the HDR layer, %.2f tonemap "
-            "re-issues and %.2f coverage passes a frame; %llu HDR layers' content never reached "
+            "re-issues (%.2f with the scene's bloom zeroed, %.2f with the DoF blur replaced) and %.2f coverage passes a frame; %llu "
+            "HDR layers' content never reached "
             "a tonemap; re-issue declines: %s.",
             static_cast<double>(g_win.hdrRedirected) / frames,
             static_cast<double>(g_win.hdrReissued) / frames,
+            static_cast<double>(g_win.hdrSceneZeroed) / frames,
+            static_cast<double>(g_win.hdrDofReplaced) / frames,
             static_cast<double>(g_win.hdrCoveragePasses) / frames,
             static_cast<unsigned long long>(g_win.hdrLost),
             declines.empty() ? "none" : declines.c_str());
@@ -3502,7 +3519,7 @@ void uiLayerConfigure(Config& cfg) {
     g_seedCensus.configure(g_hdrDrawTimingOn);
     // The fallback, for an ini with no such line (a hand-copied DLL over an old
     // file, a deleted line), is the shipped default: 100 since 2026-09-29. A line
-    // that is present and not off/100/125 is refused below and reads as off.
+    // that is present and not off/100/125/150/200 is refused below and reads as off.
     const std::string text = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;
     const char* newSpelling = nullptr;
@@ -3598,7 +3615,7 @@ void uiLayerConfigure(Config& cfg) {
     if (!changed) return;
     g_keyNoted = true;
     if (!recognized) {
-        Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 100 or 125 -- off.",
+        Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 100, 125, 150 or 200 -- off.",
                         text.c_str());
         return;
     }
@@ -3912,7 +3929,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
     char detail[320] = "";
-    if (d == UiLayerDecision::kNoDensityGain) {
+    // Every detail text below is read by noteFamily alone: it is built only when that line will print (familyLineWanted -- the
+    // decision is final here, and nothing between this and noteFamily binds a shader or writes the table).
+    if (d == UiLayerDecision::kNoDensityGain && familyLineWanted(family, d)) {
         _snprintf_s(detail, _TRUNCATE, "the layer would be %ux%u and the render is %ux%u: a line drawn there is no denser",
                     sceneLayerW, sceneLayerH, g_tc.info.a, g_tc.info.b);
     }
@@ -3996,8 +4015,10 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                 ++g_holoRefused; d = UiLayerDecision::kLayerFailed;
                 const int slot = ui_holo_remap::index(ps);
                 if (slot >= 0) ++g_holoRefusedBy[slot];
-                _snprintf_s(detail, _TRUNCATE, "%s PS bytecode/device preparation unavailable; stock complete draw retained",
-                            slot >= 0 ? ui_holo_remap::kindName(ui_holo_remap::kindOf(slot)) : "hologram");
+                if (familyLineWanted(family, d)) {
+                    _snprintf_s(detail, _TRUNCATE, "%s PS bytecode/device preparation unavailable; stock complete draw retained",
+                                slot >= 0 ? ui_holo_remap::kindName(ui_holo_remap::kindOf(slot)) : "hologram");
+                }
                 if (slot >= 0 && !g_holoRefusalNoted[slot]) {
                     Log::get().note("crisp holo remap: prepare refused PS %016llX before admission (verified bytecode, original identity, device or allocation unavailable); stock complete draw retained.",
                         static_cast<unsigned long long>(ps));
@@ -4014,30 +4035,33 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                 }
             }
         }
-        // What decided it, in the census's own numbers, for the first line.
-        char bl[64], ds[256];
-        describeBlend(game, bl, sizeof(bl));
-        describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
-        if (d == UiLayerDecision::kBlendRefused) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
-                        multiplyWrites ? " (a multiply that writes depth or stencil)"
-                        : hdrMultiply  ? " (a multiply has no transmittance route into the HDR layer)"
-                                       : "");
-        } else if (d == UiLayerDecision::kDepthStencilTest ||
-                   d == UiLayerDecision::kSubstitutedWrite) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
-        } else if (d == UiLayerDecision::kFamilyNotReady) {
-            _snprintf_s(detail, _TRUNCATE, "%s", familyWhy);
-        } else if (d == UiLayerDecision::kRedirect) {
-            _snprintf_s(detail, _TRUNCATE, "%s%s%s%s", uiBlendShapeName(f.blend),
-                        f.ds.tests() ? "; tests against the layer's seeded copy of the game's "
-                                       "depth-stencil"
-                                     : "",
-                        f.ds.writes() ? "; its depth/stencil write kept in the game's buffer by a "
-                                        "colourless re-issue"
-                                      : "",
-                        (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
-                                                        : "");
+        // What decided it, in the census's own numbers, for the first line -- built only when that line will print (the decision is
+        // final here; see the kNoDensityGain text above).
+        if (familyLineWanted(family, d)) {
+            char bl[64], ds[256];
+            describeBlend(game, bl, sizeof(bl));
+            describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
+            if (d == UiLayerDecision::kBlendRefused) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
+                            multiplyWrites ? " (a multiply that writes depth or stencil)"
+                            : hdrMultiply  ? " (a multiply has no transmittance route into the HDR layer)"
+                                           : "");
+            } else if (d == UiLayerDecision::kDepthStencilTest ||
+                       d == UiLayerDecision::kSubstitutedWrite) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
+            } else if (d == UiLayerDecision::kFamilyNotReady) {
+                _snprintf_s(detail, _TRUNCATE, "%s", familyWhy);
+            } else if (d == UiLayerDecision::kRedirect) {
+                _snprintf_s(detail, _TRUNCATE, "%s%s%s%s", uiBlendShapeName(f.blend),
+                            f.ds.tests() ? "; tests against the layer's seeded copy of the game's "
+                                           "depth-stencil"
+                                         : "",
+                            f.ds.writes() ? "; its depth/stencil write kept in the game's buffer by a "
+                                            "colourless re-issue"
+                                          : "",
+                            (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
+                                                            : "");
+            }
         }
         for (auto* r : rtvs)
             if (r) r->Release();
@@ -4241,6 +4265,14 @@ struct CrispToneSave {
     UINT scCount = 0;
     bool scissorSet = false;
     Ptr<ID3D11ShaderResourceView> gameHdrSrv;  // the game's own HDR source at the slot
+    // The tone's scene images (ui_layer_math.h toneInputIsSceneImage: the scene's bloom), as the game bound them, by PS slot:
+    // each step that tonemaps the layer's own light binds null there (weapons_fire.h toneStepKeepsSceneImages), End puts them back.
+    Ptr<ID3D11ShaderResourceView> sceneSrv[kToneSceneScanSlots];
+    uint32_t sceneMask = 0;
+    // The DoF composite's blur (its blend slot, PS1), as the game bound it: each step that tonemaps the layer's own light binds that
+    // step's source there instead, so the blend mixes the layer with itself; End puts it back.
+    int blendSlot = -1;
+    Ptr<ID3D11ShaderResourceView> blendSrv;
     int routeSlot = -1;
     int eye = -1;
     uint64_t seq = 0;
@@ -4289,6 +4321,213 @@ bool crispCoverageContextReady(ID3D11DeviceContext* ctx) {
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     return dev && SUCCEEDED(dev->CreateDeferredContext(0, &g_crispDeferred)) && g_crispDeferred;
+}
+
+// The HUD's light for the game's bloom (ui_layer.h UiGlowFeed; docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom").
+// H' = H + the HUD layer's premultiplied radiance, one fullscreen pass at H's size into a texture of H's own format (kUiGlowFeedPsHlsl),
+// recorded on the coverage pass's deferred context and executed with the immediate context's state restored. The caller binds H' for the
+// one draw that reads H as the bloom chain's first level and puts the game's view back after it. The HUD's light is added, not blended
+// over H: behind an opaque panel over a bright scene the halo reads slightly bright, where stock's panel would have replaced the scene.
+//
+// visual.star_glow (flat_star_glow.h) adds one input to the same texture: m * S, S being the star draws replayed into a layer of their own. The pass
+// that follows the HUD's (or follows a plain copy of H, when no HUD is in the layer this frame) draws a fullscreen triangle that reads S and blends it
+// in with the factor (m, m, m, 0): source BLEND_FACTOR, destination ONE, ADD. H' = H + HUD + m * S, each term once -- S holds no HUD and H holds no
+// star light of its own that S repeats beyond the k - 1 the setting asks for.
+struct GlowFeedTexture {
+    Ptr<ID3D11Texture2D> tex;
+    Ptr<ID3D11RenderTargetView> rtv;
+    Ptr<ID3D11ShaderResourceView> srv;
+    uint32_t w = 0, h = 0;
+};
+GlowFeedTexture g_glow;
+ID3D11PixelShader* g_glowPs = nullptr;
+bool g_glowPsTried = false;
+ID3D11PixelShader* g_starAddPs = nullptr;   // kStarGlowAddPsHlsl: S read as it is
+bool g_starAddPsTried = false;
+Ptr<ID3D11BlendState> g_starAddBlend;       // Src = BLEND_FACTOR, Dst = ONE, ADD (flat_star_glow_math.h kFlatStarBlend*)
+FaultBudget g_glowBudget("uiLayer.glowFeed", 4);
+
+static_assert(kFlatStarBlendSrc == D3D11_BLEND_BLEND_FACTOR && kFlatStarBlendDst == D3D11_BLEND_ONE && kFlatStarBlendOp == D3D11_BLEND_OP_ADD &&
+                  kFlatStarBlendSrcAlpha == D3D11_BLEND_ZERO && kFlatStarBlendDstAlpha == D3D11_BLEND_ONE,
+              "the star pass's blend is the equation flat_star_glow_math.h documents");
+
+void compileGlowFeedOnce(ID3D11DeviceContext* ctx) {
+    if (g_glowPs || g_glowPsTried || !ctx) return;
+    g_glowPsTried = true;
+    g_glowPs = shaderSwapCreatePs(ctx, kUiGlowFeedPsBytecode, sizeof(kUiGlowFeedPsBytecode), "ui_glow_feed_ps", "crisp hud");
+}
+
+// The star pass's shader and its blend state, made at the first star feed. False: the star input is unavailable (the HUD's pass, if any, still runs).
+bool starAddReady(ID3D11DeviceContext* ctx) {
+    if (!g_starAddPs && !g_starAddPsTried && ctx) {
+        g_starAddPsTried = true;
+        g_starAddPs = shaderSwapCreatePs(ctx, kStarGlowAddPsBytecode, sizeof(kStarGlowAddPsBytecode), "star_glow_add_ps", "star glow");
+    }
+    if (!g_starAddPs) return false;
+    if (!g_starAddBlend) {
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_BLEND_FACTOR;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (!dev || FAILED(dev->CreateBlendState(&bd, &g_starAddBlend)) || !g_starAddBlend) {
+            g_starAddBlend.Reset();
+            return false;
+        }
+    }
+    return true;
+}
+
+static ID3D11ShaderResourceView* glowFeedPass(ID3D11DeviceContext* ctx, const Eye* hud, uint32_t slot, const void* hdr, UiGlowFeed& verdict,
+                                              UiGlowStar* star) {
+    compileCoverageOnce(ctx);  // the shared fullscreen vertex shader
+    if (hud) compileGlowFeedOnce(ctx);
+    if (!g_covVs || (hud && !g_glowPs) || !crispCoverageContextReady(ctx) || !g_crispDeferred) {
+        verdict = UiGlowFeed::kNotReady;
+        return nullptr;
+    }
+    Ptr<ID3D11ShaderResourceView> gameH;
+    ctx->PSGetShaderResources(slot, 1, &gameH);
+    Ptr<ID3D11Resource> gameRes;
+    if (gameH) gameH->GetResource(&gameRes);
+    if (!gameH || !gameRes || gameRes.Get() != hdr) {
+        verdict = UiGlowFeed::kBinding;
+        return nullptr;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    gameH->GetDesc(&sd);
+    Ptr<ID3D11Texture2D> hTex;
+    if (sd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || sd.Texture2D.MostDetailedMip != 0 || FAILED(gameRes.As(&hTex))) {
+        verdict = UiGlowFeed::kTexture;
+        return nullptr;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    hTex->GetDesc(&td);
+    if (td.Format != DXGI_FORMAT_R11G11B10_FLOAT || td.SampleDesc.Count != 1 || td.ArraySize != 1) {
+        verdict = UiGlowFeed::kFormat;
+        return nullptr;
+    }
+    // The star input: S at H's size, and the star pass's own shader and blend. An input that cannot be added leaves H' as the HUD alone makes it.
+    UiGlowStar* use = star;
+    if (use) {
+        if (!use->srv || !(use->m > 0.0f)) {
+            use = nullptr;
+        } else if (use->w != td.Width || use->h != td.Height) {
+            star->sizeMismatch = true;
+            use = nullptr;
+        } else if (!starAddReady(ctx)) {
+            star->unavailable = true;
+            use = nullptr;
+        }
+    }
+    if (!hud && !use) {
+        verdict = UiGlowFeed::kNoHud;
+        return nullptr;
+    }
+    if (!hud && td.MipLevels != 1) {   // the plain copy of H below needs a destination of H's own shape
+        star->unavailable = true;
+        verdict = UiGlowFeed::kTexture;
+        return nullptr;
+    }
+    if (!g_glow.tex || g_glow.w != td.Width || g_glow.h != td.Height) {
+        g_glow = GlowFeedTexture{};
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = td.Width;
+        d.Height = td.Height;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        GlowFeedTexture made;
+        if (!dev || FAILED(dev->CreateTexture2D(&d, nullptr, &made.tex)) || !made.tex ||
+            FAILED(dev->CreateRenderTargetView(made.tex.Get(), nullptr, &made.rtv)) || !made.rtv ||
+            FAILED(dev->CreateShaderResourceView(made.tex.Get(), nullptr, &made.srv)) || !made.srv) {
+            verdict = UiGlowFeed::kTexture;
+            return nullptr;
+        }
+        made.w = td.Width;
+        made.h = td.Height;
+        g_glow = made;
+    }
+    ID3D11DeviceContext* dc = g_crispDeferred.Get();
+    ID3D11RenderTargetView* target = g_glow.rtv.Get();
+    const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(td.Width), static_cast<float>(td.Height), 0.0f, 1.0f};
+    dc->IASetInputLayout(nullptr);
+    dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dc->VSSetShader(g_covVs, nullptr, 0);
+    if (hud) {
+        // H + the HUD's light, in one pass.
+        ID3D11ShaderResourceView* in[2] = {hud->hdrSrv.Get(), gameH.Get()};
+        dc->PSSetShader(g_glowPs, nullptr, 0);
+        dc->PSSetShaderResources(0, 2, in);
+        dc->OMSetRenderTargets(1, &target, nullptr);
+        dc->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+        dc->RSSetViewports(1, &vp);
+        dc->Draw(3, 0);
+        ID3D11ShaderResourceView* none[2] = {};
+        dc->PSSetShaderResources(0, 2, none);
+    } else {
+        // No HUD in the layer this frame: H' starts as H itself, and only the star light is added to it.
+        dc->CopyResource(g_glow.tex.Get(), hTex.Get());
+    }
+    if (use) {
+        // + m * S: the factor is the weight, so the pass binds one texture and no constants (kStarGlowAddPsHlsl).
+        const float factor[4] = {use->m, use->m, use->m, 0.0f};
+        ID3D11ShaderResourceView* in[1] = {use->srv};
+        dc->PSSetShader(g_starAddPs, nullptr, 0);
+        dc->PSSetShaderResources(0, 1, in);
+        dc->OMSetRenderTargets(1, &target, nullptr);
+        dc->OMSetBlendState(g_starAddBlend.Get(), factor, 0xFFFFFFFFu);
+        dc->RSSetViewports(1, &vp);
+        dc->Draw(3, 0);
+        ID3D11ShaderResourceView* none[1] = {};
+        dc->PSSetShaderResources(0, 1, none);
+        dc->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    }
+    Ptr<ID3D11CommandList> list;
+    if (FAILED(dc->FinishCommandList(FALSE, &list)) || !list) {
+        verdict = UiGlowFeed::kFault;
+        return nullptr;
+    }
+    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    verdict = UiGlowFeed::kFed;
+    if (use) use->applied = true;
+    if (star) star->hudIncluded = hud != nullptr;
+    return g_glow.srv.Get();
+}
+
+ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict, UiGlowStar* star) {
+    UiGlowFeed v = UiGlowFeed::kNotReady;
+    ID3D11ShaderResourceView* out = nullptr;
+    do {
+        if (!ctx || !hdr || slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT || !runtimeFlatProfile()) break;
+        const Eye& e = g_eye[0];
+        const bool hudLive = e.hdrSeq == frame && e.hdrDraws && e.hdrSrv;
+        if (!hudLive && !(star && star->srv)) {
+            v = UiGlowFeed::kNoHud;
+            break;
+        }
+        if (!guardedBudget(g_glowBudget, [&] { out = glowFeedPass(ctx, hudLive ? &e : nullptr, slot, hdr, v, star); })) {
+            v = UiGlowFeed::kFault;
+            out = nullptr;
+        }
+    } while (false);
+    if (star) {
+        if (!out) star->applied = false;
+        star->verdict = static_cast<int>(v);
+    }
+    if (verdict) *verdict = static_cast<int>(v);
+    return out;
 }
 
 // The whole dependency set a taken HUD draw needs at the tonemap,
@@ -4824,16 +5063,21 @@ bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) 
     if (!blend) return false;
     const int timer = routeBegin(ctx, UiRouteStage::kHdrCoverage, eye, seq);
     bool ok = false;
+    const char* failure = nullptr;
     try {
         const UiCoverageBindings bindings{e.hdrSrv.Get(), e.rtv.Get(), g_covVs, g_covPs,
                                           blend, e.w, e.h};
-        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw);
+        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw, &failure);
     } catch (const std::exception&) {
         e.coverage.reset();
         ok = false;
+        failure = "command exception";
     }
     if (ok) routeEnd(ctx, timer);
-    else routeAbort(ctx, timer);
+    else {
+        routeAbort(ctx, timer);
+        if (failure) Log::get().note("crisp hud: coverage stage failed: %s", failure);
+    }
     return ok;
 }
 
@@ -5016,7 +5260,8 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
 }
 
 // The step the re-issue is on: its HDR source at the admitted slot, its blend over the 8-bit layer (weapons_fire.h's plan; the mapping is
-// sharp_weapons.h's, which the WARP rig runs too). Everything else the game's draw bound stays bound.
+// sharp_weapons.h's, which the WARP rig runs too), and the tone's scene images and DoF blur by the step (toneStepKeepsSceneImages).
+// Everything else the game's draw bound stays bound.
 void crispBindStep(ID3D11DeviceContext* ctx, ToneStep step) {
     Eye& e = g_eye[g_crispSave.eye];
     const SharpStepBinding b =
@@ -5024,6 +5269,131 @@ void crispBindStep(ID3D11DeviceContext* ctx, ToneStep step) {
     vScreenOMSetBlendStateRaw(ctx, b.blend, g_crispSave.factor, g_crispSave.sampleMask);
     ID3D11ShaderResourceView* src = b.source;
     vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.hdrSlot), 1, &src);
+    // The scene's images: null for a step that tonemaps the layer's own light, the game's own for the matched weapons pair.
+    const bool keep = toneStepKeepsSceneImages(step);
+    for (int s = 0; s < kToneSceneScanSlots; ++s) {
+        if (!(g_crispSave.sceneMask & (1u << s))) continue;
+        ID3D11ShaderResourceView* v = keep ? g_crispSave.sceneSrv[s].Get() : nullptr;
+        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(s), 1, &v);
+    }
+    // The DoF blur: the step's own source for a step that tonemaps the layer's own light, (1-f)L + f*L = L, so the scene's blur is not
+    // mixed in a second time and the light is not dimmed by f, as zero would; the game's own blur for the matched weapons pair.
+    if (g_crispSave.blendSrv) {
+        ID3D11ShaderResourceView* v = keep ? g_crispSave.blendSrv.Get() : src;
+        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.blendSlot), 1, &v);
+    }
+}
+
+// ui_layer_math.h toneInputColourFormat names its formats by number; they are dxgiformat.h's.
+static_assert(DXGI_FORMAT_R32G32B32A32_FLOAT == 2 && DXGI_FORMAT_R32G32B32_FLOAT == 6 &&
+                  DXGI_FORMAT_R16G16B16A16_FLOAT == 10 && DXGI_FORMAT_R16G16B16A16_UNORM == 11 &&
+                  DXGI_FORMAT_R10G10B10A2_UNORM == 24 && DXGI_FORMAT_R11G11B10_FLOAT == 26 &&
+                  DXGI_FORMAT_R8G8B8A8_UNORM == 28 && DXGI_FORMAT_R8G8B8A8_UNORM_SRGB == 29 &&
+                  DXGI_FORMAT_R9G9B9E5_SHAREDEXP == 67 && DXGI_FORMAT_B8G8R8A8_UNORM == 87 &&
+                  DXGI_FORMAT_B8G8R8X8_UNORM == 88 && DXGI_FORMAT_B8G8R8A8_UNORM_SRGB == 91 &&
+                  DXGI_FORMAT_B8G8R8X8_UNORM_SRGB == 93,
+              "toneInputColourFormat's numbers are DXGI_FORMAT values");
+static_assert(kToneSceneScanSlots <= 32, "CrispToneSave::sceneMask is 32 bits wide");
+
+// Puts the tone's scene images back as the game bound them (End, and Begin's fault path).
+void crispRestoreSceneImages(ID3D11DeviceContext* ctx) {
+    for (int s = 0; s < kToneSceneScanSlots; ++s) {
+        if (!(g_crispSave.sceneMask & (1u << s))) continue;
+        ID3D11ShaderResourceView* v = g_crispSave.sceneSrv[s].Get();
+        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(s), 1, &v);
+    }
+    if (g_crispSave.blendSrv) {
+        ID3D11ShaderResourceView* v = g_crispSave.blendSrv.Get();
+        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.blendSlot), 1, &v);
+    }
+}
+
+// The tone draw's scene images (ui_layer_math.h toneInputIsSceneImage), read from the admitted draw's own PS bindings: the mask
+// and the views go into g_crispSave. The HDR source's size is the game's input at the admitted slot (`gameHdr`). The DoF
+// composite's blur is the one input the tone blends rather than adds, so it is never one of them: it is saved apart, as the slot
+// crispBindStep gives the step's own source. Each (vs, ps) pair's reading
+// is said once, whether or not it found any, so a log without the line is a build or a path that never ran this.
+void crispFindSceneImages(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* gameHdr, int hdrSlot, uint64_t vs, uint64_t ps) {
+    g_crispSave.sceneMask = 0;
+    for (auto& v : g_crispSave.sceneSrv) v.Reset();
+    g_crispSave.blendSlot = -1;
+    g_crispSave.blendSrv.Reset();
+    uint32_t hdrW = 0, hdrH = 0;
+    if (gameHdr) {
+        Ptr<ID3D11Resource> r;
+        gameHdr->GetResource(&r);
+        Ptr<ID3D11Texture2D> t;
+        if (r && SUCCEEDED(r.As(&t))) {
+            D3D11_TEXTURE2D_DESC d{};
+            t->GetDesc(&d);
+            hdrW = d.Width;
+            hdrH = d.Height;
+        }
+    }
+    // Once per pair, at most 16 pairs a session: whether this call says what it found.
+    static uint64_t pairs[16][2] = {};
+    static uint32_t pairCount = 0;
+    bool newPair = pairCount < 16;
+    for (uint32_t i = 0; i < pairCount && newPair; ++i)
+        if (pairs[i][0] == vs && pairs[i][1] == ps) newPair = false;
+    const int blendSlot = ps == flat_mono_detail::kToneDofCompositePs ? 1 : -1;
+    ID3D11ShaderResourceView* raw[kToneSceneScanSlots] = {};
+    ctx->PSGetShaderResources(0, kToneSceneScanSlots, raw);
+    std::string inputs;
+    for (int s = 0; s < kToneSceneScanSlots; ++s) {
+        Ptr<ID3D11ShaderResourceView> view;
+        view.Attach(raw[s]);
+        if (!view) continue;
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        view->GetDesc(&vd);
+        ToneInputShape in;
+        in.tex2d = vd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D;
+        in.viewFormat = static_cast<uint32_t>(vd.Format);
+        if (in.tex2d) {
+            Ptr<ID3D11Resource> r;
+            view->GetResource(&r);
+            Ptr<ID3D11Texture2D> t;
+            if (r && SUCCEEDED(r.As(&t))) {
+                D3D11_TEXTURE2D_DESC d{};
+                t->GetDesc(&d);
+                in.gpuWritten = (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)) != 0;
+                in.w = d.Width;
+                in.h = d.Height;
+            }
+        }
+        const bool scene = toneInputIsSceneImage(s, hdrSlot, blendSlot, in, hdrW, hdrH);
+        if (scene) {
+            g_crispSave.sceneMask |= 1u << s;
+            g_crispSave.sceneSrv[s] = view;
+        }
+        const bool blur = s == blendSlot && s != hdrSlot && in.tex2d;
+        if (blur) {
+            g_crispSave.blendSlot = s;
+            g_crispSave.blendSrv = view;
+        }
+        if (!newPair) continue;
+        if (in.tex2d)
+            appendf(inputs, "%st%d %ux%u fmt %u%s%s%s%s", inputs.empty() ? "" : ", ", s, in.w, in.h, in.viewFormat,
+                    in.gpuWritten ? "" : " (not GPU-written)",
+                    s == hdrSlot ? " (the HDR source)" : "", scene ? " ZEROED" : "", blur ? " (the DoF blur) REPLACED by the step's source" : "");
+        else
+            appendf(inputs, "%st%d %s", inputs.empty() ? "" : ", ", s,
+                    vd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE3D ? "3D" : "not a 2D view");
+    }
+    if (g_crispSave.sceneMask) ++g_win.hdrSceneZeroed;
+    if (g_crispSave.blendSrv) ++g_win.hdrDofReplaced;
+    if (!newPair) return;
+    pairs[pairCount][0] = vs;
+    pairs[pairCount][1] = ps;
+    ++pairCount;
+    Log::get().note("crisp hud: tone vs %016llX ps %016llX, HDR source t%d %ux%u: %s%s. Its PS inputs: %s. A zeroed input is "
+                    "the scene's bloom or the like, which the frame already carries once, and a replaced one the DoF blur the tone "
+                    "blends its source with: the HUD's steps and the plain weapons add read zero, and their own source, there; the "
+                    "matched weapons pair keeps the game's. Said once a pair.",
+                    static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps), hdrSlot, hdrW, hdrH,
+                    g_crispSave.sceneMask ? "the re-issue zeroes the scene's images" : "no scene image to zero",
+                    g_crispSave.blendSrv ? " and replaces the DoF blur" : "",
+                    inputs.empty() ? "none in t0..t15" : inputs.c_str());
 }
 
 // After the admitted draw's own issue (vscreen's forwardWithVerdict, around
@@ -5182,6 +5552,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         g_crispSave.plan = plan;
         g_crispSave.step = 0;
         g_crispSave.fellBack = fellBack;
+        crispFindSceneImages(ctx, gameHdr.Get(), p.hdrSlot, p.vs, p.ps);
         crispBindStep(ctx, plan.steps[0]);
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
         g_crispSave.active = true;
@@ -5209,6 +5580,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
                     vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.hdrSlot),
                                                    1, &gameHdr);
                 }
+                crispRestoreSceneImages(ctx);
             });
         }
         g_crispSave = CrispToneSave{};
@@ -5230,6 +5602,16 @@ bool uiLayerCrispToneNext(ID3D11DeviceContext* ctx) {
         return false;
     }
     return true;
+}
+
+void retireFailedCrispCoverage(Eye& e, uint64_t seq) {
+    // No publication took place. Count and retire only this failed frame's
+    // content, leaving hdrToneSeq untouched for the publication invariant.
+    if (e.hdrSeq == seq && e.hdrDraws) {
+        ++g_win.hdrLost;
+        e.hdrDraws = 0;
+        e.hdrMissStreak = 0;
+    }
 }
 
 void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
@@ -5258,6 +5640,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
             if (g_crispSave.scissorSet) ctx->RSSetScissorRects(g_crispSave.scCount, g_crispSave.sc);
             ID3D11ShaderResourceView* gameHdr = g_crispSave.gameHdrSrv.Get();
             vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(hdrSlot), 1, &gameHdr);
+            crispRestoreSceneImages(ctx);
         })) {
         crispStandDown("a fault while putting the game's state back after the tonemap re-issue");
     }
@@ -5285,6 +5668,12 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
         if (plan.coverage) ++g_win.hdrCoveragePasses;
     } else {
         vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        // The tonemap ran, but its alpha transfer did not. Retire this
+        // frame's unpublished HUD before a flat-profile re-arm; otherwise
+        // beginInner mistakes it for a new missed consumer and backs off
+        // again on the first draw, even though no new tonemap was missed.
+        // Do not stamp hdrToneSeq: no HUD was published to the eye.
+        retireFailedCrispCoverage(e, seq);
         if (!g_crispStoodDown) {
             Log::get().note("crisp hud: the coverage pass failed; the HUD misses this frame, and "
                             "the crisp-HUD half of fix.ui_quality stands down (the cockpit HUD is drawn as it always "
@@ -5591,6 +5980,35 @@ bool uiLayerDoorLayerOnly(uint32_t eye, uint64_t sequence) {
 }
 
 namespace {
+// The resource behind the bound depth view, remembered against the Dsv0 binding's generation. seedWritersCheck asks up to four times a
+// call (each eye, each layer depth target) and on every owner draw, and a resolve is a guarded GetResource, GetType, GetDesc and Release.
+// A view's resource cannot change for the view's life, and the binding shadow moves the generation on every rebind
+// (OMSetRenderTargets and the UAV form that sets targets, ClearState, a command list that leaves the context unknown) and once a frame
+// (bindingFrameBoundary), so a remembered answer cannot outlive the binding it describes -- the idiom engine_velocity.cpp and
+// temporal_pass.cpp use for the same slot. Only a successful resolve is remembered: a failure is asked again every time, exactly as before,
+// and its fault budget is charged as before.
+struct DsvResolveMemo {
+    void* view = nullptr;
+    uint32_t gen = 0;  // the shadow's generations start at 1, so a zero memo matches nothing
+    ResourceInfo info;
+};
+DsvResolveMemo g_dsvMemo;
+
+bool resolveBoundDsv(void* view, ResourceInfo* info) {
+    const uint32_t gen = bindingGeneration(BindSlot::Dsv0);
+    if (g_dsvMemo.view == view && g_dsvMemo.gen == gen) {
+        *info = g_dsvMemo.info;
+        ++g_win.dsvMemoHits;
+        return true;
+    }
+    ++g_win.dsvMemoMisses;
+    if (!bindingResolve(view, info)) return false;
+    g_dsvMemo.view = view;
+    g_dsvMemo.gen = gen;
+    g_dsvMemo.info = *info;
+    return true;
+}
+
 // A game draw that writes the depth target a seed copied, after the seed: the layer's copy is stale, and the next
 // tested draw seeds again. uiLayerNoteOther's first step, and the whole of uiLayerNoteSceneDraw (the flat profile).
 void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, uint32_t verdict, char drawKind) {
@@ -5604,7 +6022,7 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
             if (!freshCandidate && !diagnosticCandidate) continue;
             void* dsvView = bindingGet(BindSlot::Dsv0);
             ResourceInfo info;
-            if (!dsvView || !bindingResolve(dsvView, &info))
+            if (!dsvView || !resolveBoundDsv(dsvView, &info))
                 continue;
             const bool matchingFresh = freshCandidate && info.resource == l->source;
             const bool matchingDiagnostic = g_seedCensus.matches(eye, hdr, info.resource);
@@ -5635,6 +6053,13 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
 
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind) {
     if (ctx) seedWritersCheck(ctx, count, instances, 0, drawKind);
+}
+
+bool uiLayerResolveBoundDsvForTest(void* view, ResourceInfo* info, uint64_t* hits, uint64_t* misses) {
+    const bool ok = resolveBoundDsv(view, info);
+    if (hits) *hits = g_win.dsvMemoHits;
+    if (misses) *misses = g_win.dsvMemoMisses;
+    return ok;
 }
 
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
@@ -5713,14 +6138,27 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
         }
         return false;
     }
-    // kind == 'W'. Exclusion 2: a post pass that samples an eye-sized texture
+    // kind == 'W'.
+    if (kind == 'W') {
+        // rc-since-rc2 review F4: the retry preserves the original decision's
+        // two exclusions before attempting the take -- the shader exclusion
+        // and the held world-screen identity -- which the kAfterUi family
+        // alone never saw.
+        if (!uiLayerAfterWritePreserved(excluded, g_screenHeld == 1, panelSized)) {
+            // Left in the game's frame: lost while the VR world route owns this eye (the layer is the whole eye).
+            if (g_eye[takenEye].worldSeq == g_lastRedirectSeq) ++g_win.worldLeftDraws;
+            return false;
+        }
+    }
+    // Exclusion 2: a post pass that samples an eye-sized texture
     // at ANY bound PS SRV slot is left in the frame, never taken -- whole-frame
     // input, whatever the resource, is how a post pass differs from an
     // overlay (the field log's named draws sample 512x512 and 614x365, both
     // smaller than the eye). vScreenIsEyeSized is the same predicate
     // uiLayerTargetKind() already used to call this draw's OWN target an eye
     // target, so a match here means literally "as large as the thing being
-    // written," not a fresh tolerance.
+    // written," not a fresh tolerance. Scanned after the preserved-exclusion
+    // return above: a draw that return left in the frame never reads the result.
     bool eyeSizedInput = false;
     uint32_t srvW = 0, srvH = 0;
     static const BindSlot kPsSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2,
@@ -5734,17 +6172,6 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
             srvW = info.a;
             srvH = info.b;
             break;
-        }
-    }
-    if (kind == 'W') {
-        // rc-since-rc2 review F4: the retry preserves the original decision's
-        // two exclusions before attempting the take -- the shader exclusion
-        // and the held world-screen identity -- which the kAfterUi family
-        // alone never saw.
-        if (!uiLayerAfterWritePreserved(excluded, g_screenHeld == 1, panelSized)) {
-            // Left in the game's frame: lost while the VR world route owns this eye (the layer is the whole eye).
-            if (g_eye[takenEye].worldSeq == g_lastRedirectSeq) ++g_win.worldLeftDraws;
-            return false;
         }
     }
     if (uiLayerAfterWriteDecide(eyeSizedInput) == UiAfterWriteDecision::kPostPass) {
@@ -6045,8 +6472,13 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     const bool anything = g_win.redirected || g_win.composites || g_win.compositeRefused;
     if (runtimeFlatProfile()) {
         // The flat profile: this file's per-eye layer is never live there (fix.temporal_aa reads off through the flat
-        // gate), so its totals would only say so. The panel half's line is the key's 30 s account in flat.
+        // gate), so its totals would only say so. The panel half's line is the key's 30 s account in flat. The scene draws still run
+        // seedWritersCheck there, so the depth-view memo's counts are reported here, before g_win is cleared below. Only while the
+        // layer is live (or the window counted something before it stood down): flatUiLayerNoteSceneDraw returns early unless the
+        // layer took a draw this frame, so with the layer off nothing can reach the memo and the line would be zeros every 30 s. A
+        // live layer that nothing reached still logs its zeros.
         uiPanelScaleLog();
+        if (detail::g_uiLayerLive || g_win.dsvMemoHits || g_win.dsvMemoMisses) logDsvMemo();
     } else if (g_target > 0.0f || anything) {
         uint64_t samples = 0;  // what logTotals is about to sort
         for (const RouteStats& r : g_routeStats) samples += r.n;
@@ -6088,6 +6520,7 @@ bool uiLayerFlatRelease() {
         e.doorFromPass = false;
         e.compositedSeq = 0;
     }
+    g_glow = GlowFeedTexture{};  // H' is H's size: a resize or a profile switch builds it afresh
     g_tc = TargetCache{};
     g_flatDraw = FlatDraw{};
     g_crispPending = CrispTonePending{};
@@ -6163,6 +6596,18 @@ void releaseDeviceObjects() {
         g_covPs = nullptr;
     }
     g_covTried = false;
+    g_glow = GlowFeedTexture{};
+    if (g_glowPs) {
+        g_glowPs->Release();
+        g_glowPs = nullptr;
+    }
+    g_glowPsTried = false;
+    if (g_starAddPs) {
+        g_starAddPs->Release();
+        g_starAddPs = nullptr;
+    }
+    g_starAddPsTried = false;
+    g_starAddBlend.Reset();
     if (g_cb) {
         g_cb->Release();
         g_cb = nullptr;
@@ -6185,6 +6630,7 @@ void uiLayerDeviceReset() {
     uiLayerFlatRelease();  // the door, the target cache and the per-draw facts, as on a same-device resize
     g_draw = Draw{};
     g_crispSave = CrispToneSave{};
+    g_dsvMemo = DsvResolveMemo{};  // the old device's views are gone; nothing resolved through them is kept
     detail::g_uiLayerRedirecting = false;
     detail::g_uiLayerWatching = false;
 }
@@ -6197,6 +6643,7 @@ void uiLayerShutdown() {
     g_hdrSeedGpu.reset(); // release-only shutdown; the owner/device may already be gone
     g_hdrSeedActive = 0;
     g_seedCensus = UiSeedCensus{};
+    g_dsvMemo = DsvResolveMemo{};
     detail::g_uiSeedDiagnostics = false;
     if (g_draw.active) releaseSaved();
     g_draw = Draw{};

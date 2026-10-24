@@ -39,25 +39,31 @@ who does not read ini files, and nothing else in the build would notice: the
 game reads it, the log names it, and the window that is supposed to expose it
 simply does not. That is a build failure here.
 
-Only [fix] is exposed. [advanced] and [experimental] are safety valves and
-developer instruments -- the log names one when it wants you to change it, and
-that is the only way anybody should arrive at them -- and the remaining sections
-are plumbing named after the halves of EDVR that read them. A ui: line outside
-[fix] is an error, so the rule cannot drift by accident.
+Only [fix] and [visual] are exposed. [advanced] and [experimental] are safety
+valves and developer instruments -- the log names one when it wants you to
+change it, and that is the only way anybody should arrive at them -- and the
+remaining sections are plumbing named after the halves of EDVR that read them.
+A ui: line outside [fix] and [visual] is an error, so the rule cannot drift by
+accident. [visual] (2026-10-22) holds the options that change how the picture
+looks rather than repair something; its keys are user settings exactly as
+[fix]'s are, with the same tier, the same live-needs-a-ui:-line rule and the
+same desktop-only default for a row with no `menu` token.
 
-Commented-out expert settings inside [fix] are not required to have one.
+Commented-out expert settings inside [fix] or [visual] are not required to have
+one.
 Annotate one and it appears; leave it and it stays where it is, which is the
 right default for a developer instrument.
 
 THE IN-HEADSET MENU (docs/settings-menu.md) is the second consumer, and it
-reads the same annotations. A `menu` token on a [fix] setting's ui: line puts
-that row on the menu's Fixes page; `menu performance` puts it on the
-Performance page. A [fix] row with no token stays desktop-only. The menu's
+reads the same annotations. A `menu` token on a [fix] or [visual] setting's
+ui: line puts that row on the menu's Fixes page; `menu performance` puts it on
+the Performance page. A [fix] or [visual] row with no token stays desktop-only.
+The menu's
 developer tier shows every [advanced] and [experimental] key the code reads,
 with no annotation at all: a getBool read is a switch, a bounded number is a
 number, and a getString read is read-only unless a `# dev: choices a, b, c`
 line above it names its values (the mirror of ui:, allowed only OUTSIDE
-[fix]). `# dev: hidden` keeps a key off the menu entirely.
+[fix] and [visual]). `# dev: hidden` keeps a key off the menu entirely.
 
 THE HOTKEYS PAGE (2026-10-08) takes its rows from [hotkey] by the same two
 annotations, the `hotkey` token marking a row whose value is a key, a pad button
@@ -76,8 +82,13 @@ row the code does not read as a number, fails the build. The older absolute
 fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
 schema gets a row for it.
 
-THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has two tabs, Performance (its settings) and Debug, and the
-Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
+THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has Performance (its settings) and Debug tabs (and, since 2026-10-22,
+a Visual one between them, below), and the Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
+
+THE FLAT PANEL'S VISUAL TAB (2026-10-22) is `menu visual`: the flat profile's F8 panel now has three tabs, Performance, Visual and Debug, in that order, and
+the Visual tab lists the [visual] options (menu_flat_rows.h's kFlatVisualRows) for everyone, Fix tier. `visual` is a page only the flat panel builds, as `debug`
+is: VR's menu builds no page of that name, so a row that must also be in the headset keeps the bare `menu` token (visual.intro_video does, and stays on VR's
+Fixes page), and a row marked `menu visual` is flat-only until VR grows the page. A [visual] row with no token is desktop-only, as a [fix] row is.
 
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
@@ -135,7 +146,7 @@ import os
 import re
 import sys
 
-# The window shows [fix] and nothing else.
+# The window shows [fix] and [visual] and nothing else.
 #
 # [advanced] and [experimental] are safety valves and developer instruments --
 # the log names one when it wants you to change it, and that is the only way
@@ -143,29 +154,32 @@ import sys
 # nobody asked you to change, and turns a support thread into a guessing game.
 # The remaining sections ([hotkey], [log], [d3d11]) are plumbing named
 # after the halves of EDVR that read them, not fixes somebody came here to turn
-# on. Explorer Cam's own switches live in [fix] and are exposed; the metre
-# offsets it is tuned with (fix.explorer_cam_eye_*) are not, because tuning
-# them means wearing the headset and watching, which is what the ini's hot
-# reload is for.
-EXPOSED_SECTIONS = ('fix',)
+# on. [visual] (2026-10-22) is the exception that is exposed: it holds the options
+# that change how the picture looks, which somebody does come here to turn on, and
+# its keys are user settings exactly as [fix]'s are. Explorer Cam's own switches
+# live in [fix] and are exposed; the metre offsets it is tuned with
+# (fix.explorer_cam_eye_*) are not, because tuning them means wearing the
+# headset and watching, which is what the ini's hot reload is for.
+EXPOSED_SECTIONS = ('fix', 'visual')
 # The sections whose keys may carry a `ui:` line at all. The installer's
 # window still shows only EXPOSED_SECTIONS; what a ui: line buys a developer
 # key is its LABEL and its CHOICES in the in-headset menu, so that demoting a
 # setting from [fix] to [experimental] costs it its tier and its page but not
 # the words somebody already wrote for it.
-UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu', 'hotkey')
+UI_SECTIONS = ('fix', 'visual', 'advanced', 'experimental', 'menu', 'hotkey')
 # [hotkey] is the one section whose keys are rows by annotation alone, and whose
 # TIER is the annotation that carries the `hotkey` token (2026-10-08, the F8
 # menu's Hotkeys page): a `# ui:` line is a row everyone sees, a `# dev:` line is a
 # row only in developer mode. The section decides the page ("hotkeys"), so neither
-# line names one; the installer's window still shows [fix] and nothing else.
+# line names one; the installer's window still shows [fix] and [visual] and nothing else.
 HOTKEY_SECTION = 'hotkey'
 HOTKEY_PAGE = 'hotkeys'
 # The sections whose keys may be ordinary rows of the in-headset menu -- the
-# fixes, and the menu's own switches, which are the only [menu] keys anyone
-# would reach for while wearing the headset. Both are Fix tier: neither is a
-# developer instrument, and neither is hidden behind menu.developer.
-MENU_ROW_SECTIONS = ('fix', 'menu')
+# fixes, the visual options, and the menu's own switches, which are the only
+# [menu] keys anyone would reach for while wearing the headset. All are Fix
+# tier: none is a developer instrument, and none is hidden behind
+# menu.developer.
+MENU_ROW_SECTIONS = ('fix', 'visual', 'menu')
 # Exceptions: [advanced] keys that carry a `menu <page>` token on their ui: line and are rows of the in-headset menu for everyone (Fix tier), not
 # developer-tier rows. The flat profile's Debug tab (2026-10-16): two toggles every flat user may reach, labelled debug. Flat-only keys, so VR's
 # developer tier loses nothing by their having no row of their own there. Their page is `debug`, which only the flat panel builds.
@@ -192,7 +206,8 @@ DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
 # Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
-MENU_PAGES = ('fixes', 'performance', 'explorer_cam', 'debug')
+# 'visual' (2026-10-22) and 'debug' are the flat panel's tabs; VR's menu builds neither.
+MENU_PAGES = ('fixes', 'performance', 'explorer_cam', 'visual', 'debug')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -1793,6 +1808,59 @@ def self_test():
     said = case(name, '[fix]\n# A number. Live.\n# ui: Number | range 0..5 | menu explorer\nnumber = 2\n',
                 {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
     expect_in(name, said, 'explorer_cam')
+    # The Visual section and tab (2026-10-22). [visual] is exposed like [fix]: its keys are rows of the installer's window, a ui: line makes
+    # them one, and `menu visual` is a page. The moved key carries its old name into kMovedSettings (the installer's window reads an old
+    # file through it), keeps the bare `menu` token (VR's Fixes page) and its place in ini order; star_glow is a Fix-tier row on the
+    # flat panel's `visual` page; a [visual] key with no menu token is in the window and in neither menu table.
+    visual_ini = ('[fix]\n# A switch. Live.\n# ui: Alpha | choices on, off | live | menu performance\nalpha = on\n\n'
+                  '[visual]\n'
+                  '# The movie. Live.\n'
+                  '# moved-from: fix.movie (default screen)\n'
+                  '# moved-from: fix.movie_size (default stock)\n'
+                  '# ui: Movie | choices screen, stock, skip | live | menu\nmovie = screen\n\n'
+                  '# A glow. Live.\n'
+                  '# ui: Glow | choices 100=100%, 125=125%, 150=150% | live | menu visual\nglow = 100\n\n'
+                  '# Desktop only. Live.\n'
+                  '# ui: Tint | choices on, off | live\ntint = on\n')
+    visual_reads = {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
+                              'std::string m = cfg.getString("visual.movie", "screen");\n'
+                              'std::string g = cfg.getString("visual.glow", "100");\n'
+                              'std::string t = cfg.getString("visual.tint", "on");\n')}
+    name = 'visual-section-rows'
+    wrote = case(name, visual_ini, visual_reads, 0)
+    for key in ('movie', 'glow', 'tint'):
+        expect_in(name, wrote, '{"visual", "%s", ' % key)   # the installer's window shows every exposed [visual] key
+    expect_in(name, wrote, 'MenuTier::Fix, "fixes"')         # the movie keeps VR's Fixes page
+    expect_in(name, wrote, 'MenuKind::Choice, "100", "", "", 2, "100=100%|125=125%|150=150%", false, false, 1,\n'
+                           '     MenuTier::Fix, "visual"')    # the glow is on the page only the flat panel builds
+    if wrote.count('"tint"') != 1:
+        failures.append('%s: a [visual] key with no menu token is a row of the window and of no menu table '
+                        '(expected one "tint", found %d)' % (name, wrote.count('"tint"')))
+    # The old name rides along with the shipped default, so a stale line is not a choice.
+    expect_in(name, wrote, '{"fix.movie", "visual.movie", "screen"}')
+    expect_in(name, wrote, '{"fix.movie_size", "visual.movie", "stock"}')
+    if not (0 <= wrote.find('"movie"') < wrote.find('"glow"')):
+        failures.append('%s: the rows keep the ini order (movie, then glow)' % name)
+    # The same rules as [fix]: a live key needs its ui: line, and a dev: line has no place here.
+    name = 'visual-live-key-needs-a-ui-line'
+    said = case(name, '[visual]\n# A glow. Live.\nglow = 100\n',
+                {'a.cpp': 'std::string g = cfg.getString("visual.glow", "100");\n'}, 1)
+    expect_in(name, said, 'visual.glow')
+    expect_in(name, said, 'not in the settings window')
+    name = 'visual-dev-line-refused'
+    said = case(name, '[visual]\n# A glow. Live.\n# dev: choices a, b\nglow = a\n',
+                {'a.cpp': 'std::string g = cfg.getString("visual.glow", "a");\n'}, 1)
+    expect_in(name, said, 'a dev: line belongs outside [fix]/[visual]')
+    name = 'visual-key-nothing-reads'
+    said = case(name, '[visual]\n# A glow. Live.\n# ui: Glow | choices 100, 125 | live | menu visual\nglow = 100\n',
+                {'a.cpp': 'int unrelated = 0;\n'}, 1)
+    expect_in(name, said, 'visual.glow is in the settings window but nothing in src/ reads it')
+    # A page that is not one is refused by name, and the message lists `visual` among the real ones.
+    name = 'visual-unknown-page'
+    said = case(name, '[visual]\n# A glow. Live.\n# ui: Glow | choices 100, 125 | live | menu visuals\nglow = 100\n',
+                {'a.cpp': 'std::string g = cfg.getString("visual.glow", "100");\n'}, 1)
+    expect_in(name, said, 'visual.glow  (menu visuals)')
+    expect_in(name, said, 'visual, debug')
     shutil.rmtree(base, ignore_errors=True)
     if failures:
         print('gen_settings_schema: self-test FAILED')

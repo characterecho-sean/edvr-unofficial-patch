@@ -7,8 +7,8 @@
   mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
-    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - Flat F8 panel (2026-10-22): a Visual tab between Performance and Debug (`menu visual`); "Visual tab" below.
+  - Explorer Cam page (2026-10-08): eye trims and head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
     Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
     "Hotkeys page" and "Explorer Cam page" below.
@@ -143,7 +143,8 @@ ruled-out list); the summary above points here.
 - **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
   is one row for the cockpit panels' size and the UI layer; the one-day
   `HUD quality` row is gone (see the journal's dated entries). Its choices
-  read off / 100% / 125% (the file's `off | 100 | 125`).
+  read off / 100% / 125% / 150% / 200% (the file's `off | 100 | 125 | 150 | 200`;
+  150 and 200 added 2026-10-21).
 - **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
   OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
   desktop gates passed; headset checks remain in the
@@ -243,6 +244,19 @@ while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
 line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
 absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
 on the Hotkeys page only.
+
+### Visual tab (2026-10-22)
+
+BUILT, NOT FLOWN. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in
+that order. Visual lists the `[visual]` options of edvr.ini (a section of user settings, Fix tier,
+like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly `fix.intro_video`, which
+left the Performance tab) and Star glow (`visual.star_glow`, 100 to 200 percent in steps of 25,
+live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`, kept in edvr.ini order and
+checked against the flat key gate like the other two tabs. `visual` is a page only the flat
+panel builds, as `debug` is: the headset's menu has no such page, so Intro movie keeps its bare
+`menu` token and stays on the Fixes page in VR, and Star glow (`menu visual`) is flat-only until
+VR has the page. A `[visual]` row with no `menu` token is desktop-only, as a `[fix]` row is; the
+installer's window shows every `[visual]` row (flat view: the two the flat profile reads).
 
 ## The ask
 

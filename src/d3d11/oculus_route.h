@@ -25,11 +25,6 @@ struct OculusProfileMatch;
 // rather than a user setting.
 void oculusRouteInstallEarly(bool nativeBuild);
 
-// Process-attach gate for the native graphics build.  It is true for
-// non-Elite fixtures and for a validated Elite profile; an identified Elite
-// process is refused when the audited IAT hook cannot be installed.
-bool oculusRouteProcessAttachAllowed() noexcept;
-
 // Called after log initialisation and outside the loader lock.  Emits only a
 // bounded number of changed counter snapshots; querying status itself is
 // side-effect free.
@@ -87,6 +82,12 @@ static_assert(offsetof(OculusRouteStatus, iatSlot) == 112,
               "OculusRouteStatus pointer fields must retain their ABI offset");
 
 OculusRouteStatus oculusRouteStatusSnapshot();
+
+// For an import hook that takes the route's place in Elite's LoadLibraryW slot.
+// It applies the route's policy with the executable's own return address and
+// forwards every call the route does not refuse to `forward`.
+HMODULE oculusRouteDispatchFrom(LPCWSTR path, uintptr_t returnAddress,
+                                HMODULE (WINAPI* forward)(LPCWSTR));
 
 // Test-only seams.  They exercise the same wrapper dispatch body while
 // injecting a known original target and profile identity, so tests never

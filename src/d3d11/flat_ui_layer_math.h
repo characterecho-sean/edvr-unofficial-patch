@@ -49,10 +49,15 @@ constexpr uint64_t kFlatUiMapCanvasPs = 0x855C469156AB997Full;
 constexpr uint64_t kFlatUiMapSpriteVs = 0xC31238331D8AC3D4ull;
 constexpr uint64_t kFlatUiMapSpritePsA = 0xBD0FEB3276C8B2D7ull;  // the 64x64 / 128x128 BC3 / BC7 icons (Galaxy, Orrery)
 constexpr uint64_t kFlatUiMapSpritePsB = 0x539A4858CE3A3477ull;  // the System Map's sprites (n=12)
+// The Galaxy Map's icons since game build 334473 (2026-10-20): the same n=6 BC3 64x64 / 128x128 icons as A, 174 a frame, the same
+// VS, target and state (no depth test, stencil write only), with this PS. A was in no Galaxy Map census after the update and every
+// Galaxy session read `sprite asked=0` (census 8 of edvr_gfx_20261022_101031). The layer's own depth-stencil refusal still applies.
+constexpr uint64_t kFlatUiMapSpritePsC = 0x964221955A9E77E7ull;
 inline UiLayerFamily flatUiMapFamilyOf(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget) {
     if (!mapOpen || !hdrTarget) return UiLayerFamily::kNone;
     if (vs == kFlatUiMapCanvasVs && ps == kFlatUiMapCanvasPs) return UiLayerFamily::kMapCanvas;
-    if (vs == kFlatUiMapSpriteVs && (ps == kFlatUiMapSpritePsA || ps == kFlatUiMapSpritePsB)) return UiLayerFamily::kMapSprite;
+    if (vs == kFlatUiMapSpriteVs && (ps == kFlatUiMapSpritePsA || ps == kFlatUiMapSpritePsB || ps == kFlatUiMapSpritePsC))
+        return UiLayerFamily::kMapSprite;
     return UiLayerFamily::kNone;
 }
 
@@ -73,8 +78,25 @@ inline UiLayerFamily flatUiFamilyFor(uint64_t vs, uint64_t ps, bool mapOpen, boo
 // composite) and stays out: only the exact pair is named.
 constexpr uint64_t kFlatUiMapToneVs = 0xCFA91824129ECBBCull;
 constexpr uint64_t kFlatUiMapTonePs = 0xC89DD4ED362D743Full;
+// THE FULL SYSTEM SCANNER'S TONEMAP, IN THE SAME TABLE (2026-10-22, census 2 of log edvr_gfx_20261022_112019, build d4abc498, GuiFocus 9):
+// VS F9CFC798F21E9AEA (the steady tone VS, E894's) with PS 6DE70EBBF82FCBE6 reads the 960x600 R11G11B10F scene at PS t0 and a 480x300
+// R11G11B10F bloom at t1, and writes a 960x600 target (format 27, RGBA8 view) that 20F383BB/DED87960 takes to the 1920x1200 output. The
+// scanner's text is the holo panels (4 a frame) and the target sprite (16 a frame) drawn into that scene; the layer asked for all 36000
+// of them in 30 s and refused every one tone-unproven, because no tone table named this pair. Like the map tone it reads the scene in
+// slot 0, so the UI layer's candidate branch takes it as it takes the map's, and like the map tone it is NOT in the registry (the
+// reasons above hold: the resolve, the target's tone record and the HDR route's trigger must not see a new pass). Only the exact pair
+// is named: E894 shares the VS, and a neighbouring PS on it is another pass.
+constexpr uint64_t kFlatUiScannerToneVs = 0xF9CFC798F21E9AEAull;
+constexpr uint64_t kFlatUiScannerTonePs = 0x6DE70EBBF82FCBE6ull;
+// Which screen's tonemap a pair of this table is, for the log lines that say so (the table's slot answer is the same for both).
+enum class FlatUiToneScreen : uint8_t { kNone = 0, kMaps, kScanner };
+inline FlatUiToneScreen flatUiMapToneScreenOf(uint64_t vs, uint64_t ps) {
+    if (vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs) return FlatUiToneScreen::kMaps;
+    if (vs == kFlatUiScannerToneVs && ps == kFlatUiScannerTonePs) return FlatUiToneScreen::kScanner;
+    return FlatUiToneScreen::kNone;
+}
 inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
-    return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
+    return flatUiMapToneScreenOf(vs, ps) != FlatUiToneScreen::kNone ? 0u : ~0u;  // the scene is SRV slot 0
 }
 
 // The 11:40 XeSS cockpit capture physically verified both exact E894 variants reading the HDR HUD at PS t1 and writing
@@ -180,13 +202,23 @@ inline bool flatUiSourceToneDirectHud(const void* cachedHud, const void* physica
 // TEMPORAL AA OFF WHILE A MAP IS OPEN (maintainer's decisions, 2026-10-10: the Galaxy Map and the Orrery first, then the System
 // Map). The map scenes' grid, line and star draws are not taken by the UI layer, and their temporal history smears (the
 // System Map's stars pan with the plane in one capture and sit near still in another, so no motion rule fits both: the
-// plane-motion and star-choice work is removed). While GuiFocus is 6, 7 or 8 the frame runs no temporal resolve and no jitter
-// (the copy route's spatial recovery stands in, flat_runtime.cpp); the UI layer keeps the map's text and markers. GuiFocus
+// plane-motion and star-choice work is removed). While GuiFocus is 6, 7, 8 or 9 the frame runs no temporal resolve and no jitter
+// (the copy route's spatial recovery stands in, flat_runtime.cpp); the UI layer keeps the screen's text and markers. GuiFocus
 // unknown, and every other screen, keep temporal AA as before.
-inline bool flatUiMapTemporalOff(bool known, uint32_t focus) { return known && (focus == 6 || focus == 7 || focus == 8); }
-inline const char* flatUiMapTemporalName(uint32_t focus) {
-    return focus == 8 ? "the Orrery" : focus == 7 ? "the System Map" : "the Galaxy Map";
+// The Full System Scanner (GuiFocus 9) joined the maps on 2026-10-22 (the maintainer: handle it as the other maps are): its view
+// turns with the scanner and the history smeared it (edvr_gfx_20261022_101031: temporal AA ran on it, about half the frames refused
+// engine-source-not-ready). The Detailed Surface Scanner (10) is NOT in it: it is mostly a 3D planet view that keeps temporal AA (the
+// maintainer, 2026-10-22), as do the codex (11) and every other screen.
+inline bool flatUiMapTemporalOff(bool known, uint32_t focus) {
+    return known && (focus == 6 || focus == 7 || focus == 8 || focus == 9);
 }
+inline const char* flatUiMapTemporalName(uint32_t focus) {
+    return focus == 9 ? "the Full System Scanner" : focus == 8 ? "the Orrery" : focus == 7 ? "the System Map" : "the Galaxy Map";
+}
+// The screens whose draws are the map families' (flatUiMapFamilyOf, flat_runtime.cpp flatRuntimeMapOpenFrame): the three maps only.
+// The Full System Scanner turns temporal AA off with them but is not here: the map families are keyed to the map shaders' own
+// pairs, and no scanner draw has been identified as one of them (its log windows name no such pair).
+inline bool flatUiMapFamiliesOpen(bool known, uint32_t focus) { return known && (focus == 6 || focus == 7 || focus == 8); }
 
 // The map line's temporal-AA counts (2026-10-10), as pure state so the rig pins them. A frame is `temporalOff` when the
 // mechanism is armed at the frame boundary; `jitterZeroed` when that frame would otherwise have jittered. A frame whose copy
@@ -634,6 +666,29 @@ inline bool flatUiToneConsumed(const FlatUiToneProof& p, uint64_t frame, const v
 // another size (an evaluation size below the display's), arms nothing, and the next frame's HUD stays in the game's frame.
 inline bool flatUiLayerDoorArms(bool treated, uint32_t inW, uint32_t inH, uint32_t outW, uint32_t outH) {
     return treated && outW && outH && inW == outW && inH == outH;
+}
+
+// THE HUD'S BLOOM (ui_layer.h UiGlowFeed). The HUD the layer takes is out of H, which the game's bloom chain reads, so it has no halo. The
+// chain's first level is the HDR route's trigger draw when Bloom is on (the 2026-10-20 flight: VS DFED8E1C, PS 143AAE05, a 624x390 target of a
+// 1248x780 H), and its target is half of H per axis -- a pixel of slack for an odd extent halved down or up. That is the one draw H' is bound
+// at. A trigger that writes any other size (Bloom off: the depth of field, the tone) is left alone, as is an ambiguous trigger, whose H is a
+// guess, and a slot the detector could not read.
+inline bool flatUiGlowFeedShape(uint32_t hdrW, uint32_t hdrH, uint32_t targetW, uint32_t targetH) {
+    if (!hdrW || !hdrH || !targetW || !targetH) return false;
+    const int64_t dx = static_cast<int64_t>(targetW) * 2 - static_cast<int64_t>(hdrW);
+    const int64_t dy = static_cast<int64_t>(targetH) * 2 - static_cast<int64_t>(hdrH);
+    return dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1;
+}
+inline bool flatUiGlowFeedWanted(bool layerOn, bool triggerSrvKnown, bool triggerAmbiguous, uint32_t srvSlot, uint32_t hdrW, uint32_t hdrH,
+                                 uint32_t targetW, uint32_t targetH) {
+    return layerOn && triggerSrvKnown && !triggerAmbiguous && srvSlot < 4 && flatUiGlowFeedShape(hdrW, hdrH, targetW, targetH);
+}
+// The same draw is asked for by visual.star_glow (flat_star_glow.h): the first level reads H' with the star layer added, the HUD layer live or not.
+// `starLive` is the setting above 100 with star light in S this frame. The trigger's own shape rules are the HUD's, whoever asks; the star glow does
+// not depend on fix.ui_quality.
+inline bool flatUiGlowFeedAsked(bool layerOn, bool starLive, bool triggerSrvKnown, bool triggerAmbiguous, uint32_t srvSlot, uint32_t hdrW,
+                                uint32_t hdrH, uint32_t targetW, uint32_t targetH) {
+    return flatUiGlowFeedWanted(layerOn || starLive, triggerSrvKnown, triggerAmbiguous, srvSlot, hdrW, hdrH, targetW, targetH);
 }
 
 }  // namespace edvr

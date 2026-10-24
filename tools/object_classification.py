@@ -48,8 +48,8 @@ RECORD_OWNERSHIP_LIMITS = {
     "ownership_opaque_prefix_bytes": 0x80,
 }
 RECORD_WRITERS = {
-    "direct_369ce91", "primary_42b42ef", "inline_42b4ed6",
-    "direct_43130aa", "helper_434d149",
+    "direct_369faf1", "primary_42b6f0f", "inline_42b7af6",
+    "direct_4315cca", "helper_434fda9",
 }
 RECORD_OWNERSHIP_STATUSES = {
     "linked", "unsupported_writer", "ancestor_missing", "unwind_failed",
@@ -272,12 +272,12 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
                 raise CaptureError("%s ownership link and status disagree" % label)
 
         applicable = {"record": True, "key_snapshot": True,
-                      "builder_snapshot": writer == "primary_42b42ef",
-                      "object_snapshot": writer in {"primary_42b42ef", "inline_42b4ed6", "helper_434d149"},
+                      "builder_snapshot": writer == "primary_42b6f0f",
+                      "object_snapshot": writer in {"primary_42b6f0f", "inline_42b7af6", "helper_434fda9"},
                       "entry_snapshot": lookup_status != "pending"}
         sizes = {"record": POOL_STRIDE, "key_snapshot": 32,
                  "builder_snapshot": 96,
-                 "object_snapshot": (416 if writer == "helper_434d149" else
+                 "object_snapshot": (416 if writer == "helper_434fda9" else
                                      192 if ownership else 176),
                  "entry_snapshot": 0x38}
         snapshots = {}
@@ -354,10 +354,10 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
             "provider_prefix": limits["ownership_opaque_prefix_bytes"],
             "parent_prefix": limits["ownership_opaque_prefix_bytes"],
         }
-        branch_rvas = {"direct_4321940": 0x431B212, "virtual_50": 0x431B21F}
+        branch_rvas = {"direct_43245A0": 0x431DE72, "virtual_50": 0x431DE7F}
         relation_writers = {
-            "inline_registry_plus_78": {"inline_42b4ed6", "primary_42b42ef"},
-            "direct_collection_plus_300": {"direct_43130aa"},
+            "inline_registry_plus_78": {"inline_42b7af6", "primary_42b6f0f"},
+            "direct_collection_plus_300": {"direct_4315cca"},
         }
         for oi, ownership in enumerate(ownerships):
             label = "record_writers.ownerships[%u]" % oi
@@ -847,7 +847,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
     not content."""
     root = {
         "schema": SCHEMA_V3, "binary": binary_name,
-        "executable": {"pe_timestamp": 1788384820, "image_size": 104894464},
+        "executable": {"pe_timestamp": 1792704584, "image_size": 104906752},
         "summary": {"binary_ok": True},
     }
     source = bytes((slot * 31 + i) & 0xFF for slot in (1, 2) for i in range(POOL_STRIDE))
@@ -855,7 +855,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
     contexts = (("0x920078", "0x820000", "0x830000", "0x930000"),
                 ("0xa10300", "0xa40250", "0x831000", "0x0"),
                 ("0x920078", "0x820000", "0x830000", "0x930000"))
-    writers = ("inline_42b4ed6", "direct_43130aa", "inline_42b4ed6")
+    writers = ("inline_42b7af6", "direct_4315cca", "inline_42b7af6")
     chunks = []
     cursor = 0
     records = []
@@ -873,7 +873,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
         chunks.append(key_bytes)
         cursor += len(key_bytes)
         builder_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
-        if writer == "inline_42b4ed6":
+        if writer == "inline_42b7af6":
             object_bytes = bytes([0x40]) * 176 + bytes(object_size - 176)
             object_span = {"status": "available", "offset": cursor, "bytes": len(object_bytes)}
             chunks.append(object_bytes)
@@ -937,7 +937,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
             struct.pack_into("<Q", record_tail, 0x10, context)
         else:
             record_tail = None
-        ancestor_rva = 0x431B212 if branch == "direct_4321940" else 0x431B21F
+        ancestor_rva = 0x431DE72 if branch == "direct_43245A0" else 0x431DE7F
         writer_owner = registry + 0x78 if not direct else collection + 0x300
         result = {
             "id": index, "first_sequence": 1 if index == 0 else 3,
@@ -978,7 +978,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
         return result
 
     ownerships = [
-        make_ownership(0, "inline_registry_plus_78", "direct_4321940",
+        make_ownership(0, "inline_registry_plus_78", "direct_43245A0",
                        0x900000, 0x910000, 0x920000, 0x930000, 0,
                        0x940000, 0x950000, 0x960000, 0x970000, UINT32_MAX, None),
         make_ownership(1, "direct_collection_plus_300", "virtual_50",
@@ -1140,7 +1140,7 @@ def self_test():
         rejected("an ownership item whose first sequence is not its earliest writer's",
                  lambda value: value["record_writers"]["ownerships"][0].update(first_sequence=2))
         rejected("a writer whose return RVA is another's",
-                 lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b42ef"))
+                 lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b6f0f"))
         rejected("a snapshot off the packed cursor",
                  lambda value: value["record_writers"]["records"][1]["record"].update(
                      offset=value["record_writers"]["records"][1]["record"]["offset"] + 1))
@@ -1162,7 +1162,7 @@ def self_test():
                  lambda value: value["record_writers"]["records"][0].update(ownership_id=None))
         rejected("an ancestor RVA that is not its branch's",
                  lambda value: value["record_writers"]["ownerships"][0].update(
-                     ancestor_return_rva="0x431b21f"))
+                     ancestor_return_rva="0x431de7f"))
         rejected("a record index that is not the writer's",
                  lambda value: value["record_writers"]["ownerships"][1].update(record_index=1))
         rejected("a context snapshot that lost its bytes",
@@ -1182,7 +1182,7 @@ def self_test():
             "status": "unwind_failed", "writer_record": 2,
             "return_rva": unwind_record["return_rva"],
             "frames": [
-                {"address": "0x431b21f", "status": "module_relative",
+                {"address": "0x431de7f", "status": "module_relative",
                  "module_rva": "0x31b21f"},
                 {"address": "0x0", "status": "outside_image",
                  "module_rva": None},

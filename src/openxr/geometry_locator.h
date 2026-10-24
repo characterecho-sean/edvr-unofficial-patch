@@ -36,4 +36,22 @@ inline XrResult locateGeometry(const LocateDispatch& api,const SessionBinding& b
   // geometry or a runtime error. Publication validates/invalidate that sample.
   out=input;if(headVelocity)*headVelocity=velocity;return XR_SUCCESS;
 }
+
+enum class NaturalSpaceProbe {Stage,LocalFallback,Pending};
+// Enumeration and creation do not guarantee a usable STAGE. Probe both eye
+// views and the head at the same begun frame's predicted time before the
+// first seated origin or saved seat is selected.
+inline XrResult probeNaturalSpace(const LocateDispatch& api,const SessionBinding& binding,
+                                  const Frame& frame,uint64_t generation,
+                                  const XrViewConfigurationView (&sizes)[2],NaturalSpaceProbe& choice) {
+  if(binding.naturalType()!=XR_REFERENCE_SPACE_TYPE_STAGE){choice=NaturalSpaceProbe::LocalFallback;return XR_SUCCESS;}
+  GeometryInput stage{},local{};GeometrySnapshot snapshot{};
+  const XrResult stageResult=locateGeometry(api,binding,frame,generation,sizes,stage,nullptr,binding.naturalSpace());
+  if(stageResult==XR_SUCCESS&&makeGeometrySnapshot(stage,snapshot)){choice=NaturalSpaceProbe::Stage;return XR_SUCCESS;}
+  const XrResult localResult=locateGeometry(api,binding,frame,generation,sizes,local,nullptr,binding.localSpace());
+  if(localResult==XR_SUCCESS&&makeGeometrySnapshot(local,snapshot)){choice=NaturalSpaceProbe::LocalFallback;return XR_SUCCESS;}
+  if(stageResult!=XR_SUCCESS)return stageResult;
+  if(localResult!=XR_SUCCESS)return localResult;
+  choice=NaturalSpaceProbe::Pending;return XR_SUCCESS;
+}
 }

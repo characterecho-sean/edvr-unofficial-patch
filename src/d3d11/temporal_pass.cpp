@@ -1097,6 +1097,11 @@ ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tole
 static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
 static bool                g_uiResolveUnboundNoted[8] = {};   // one line for each combination of unbound inputs the resolve has run with
 static uint64_t            g_uiResolveDispatches = 0, g_uiResolveLacked[3] = {};   // the full-frame path's dispatches, and how many lacked coverage / source edits / history
+// The motion prep's scene-depth layers (zSceneAt, temporal_shader_source.h): mv dispatches by which of t6 (the smoke's depth) and t7
+// (the private UI depth) were bound -- [0] both, [1] the smoke's only, [2] the UI's only, [3] neither.
+static uint64_t            g_mvDepthLayers[4] = {};
+// probe.w bits 64 and 256 (t6 / t7 not bound): depthLayersAbsentBits, temporal_pass.h. The rig's zscene_gate_test.h (cpuHalf)
+// holds it to the slots, and holds both dispatches below to reading it off the array they bind, before setParams.
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 // The refusal line, ONE PER ENGINE. It was a single session-lifetime flag,
@@ -3506,7 +3511,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // from a usable scene row, else the game's infinite-far scene
         // encoding. The camera rows can arrive without a projection row;
         // the runtime's finite far plane is not a valid fallback for it.
-        // The scene row on build 332841 says A = 0,
+        // The scene row on build 334473 says A = 0,
         // B = 0.025 -- no far plane -- where the runtime's 0.025..50000 m
         // decoded 10 km as 8.3 km, 3 km as 2.8 km, and the body's grid
         // missed the station beyond a few hundred metres (19:52).
@@ -4199,7 +4204,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // presets and FSR that read it (modern DLSS honours the
                     // history-invalidate vector the same pixel also gets).
                     if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
-                    setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[24] = {};
                     // t19..t23 are touched only while engine-record velocity is bound.
                     const UINT srvCountM = engineBound ? 24u : 19u;
@@ -4221,6 +4225,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr,
                                                           engineBound ? engineSkinSrv.Get() : nullptr};   // t23: target 7, the skinned characters' E (probe.w 16384)
+                    // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch). The constants are written
+                    // here, after the views are known, and before the dispatch.
+                    const uint32_t layersAbsentM = depthLayersAbsentBits(srvsM);
+                    p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | layersAbsentM);
+                    ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
+                    setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
@@ -4557,7 +4567,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // trained path was running without diagnostics.
         if (ran && !usedDlaa && !leanOwn && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
         if (ran && !usedDlaa) {
-            setParams(ctx, p);
             ID3D11ShaderResourceView* nullSrv[24] = {};
             const UINT srvCount = engineOwn ? 24u : 19u;
             ID3D11UnorderedAccessView* nullUav[7] = {};
@@ -4582,6 +4591,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                       engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                       engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr,
                                                       engineOwn ? engineSkinSrv.Get() : nullptr};   // t23: the second skin
+            // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch), then the constants.
+            p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | depthLayersAbsentBits(srvs));
+            setParams(ctx, p);
             ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav, nullptr,
                                                   nullptr, nullptr,
@@ -5047,20 +5059,19 @@ void temporalPassConfigure(Config& cfg) {
     // it observes the engine, not the renderer, so it arms on its own key.
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
     applyEngineMotionDiagnostics();
-    // K is the default in every mode. The legacy "steady" alias uses K for the
-    // full frame in every mode; quality = K everywhere; responsive = J everywhere (NVIDIA: slightly less
-    // ghosting, a little more flicker); auto = the driver's own choice per
-    // mode (K for DLAA, Quality and Balanced, M for Performance, L for Ultra
-    // Performance). The letters are silent aliases for one model everywhere
-    // (L and M are never applied under DLAA: five times the price). Live: a
-    // change recreates the features.
+    // K is the default in every mode; the legacy "steady" and "quality" aliases
+    // are K too. The letters are silent aliases for one model everywhere (L and
+    // M are never applied under DLAA: five times the price). J, its alias
+    // "responsive", and the driver's own choice ("auto", "default") were
+    // removed 2026-10-21 and run K through the unknown-name note below. Live:
+    // a change recreates the features.
     const std::string model = cfg.getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
     // The letters stop here, and deliberately. NVSDK_NGX_DLSS_Hint_Render_
     // Preset (nvsdk_ngx_defs.h, DLSS SDK 310.4) has no A, B, C or D at all
     // -- they were removed, with the header saying to use J or K instead --
     // and it marks G, H, I, N and O as reverting to default behaviour if
-    // asked for. E and F are deprecated; this UI exposes J, K, L and M.
+    // asked for. E and F are deprecated; this UI exposes K, L and M.
     // A tidier-looking letter range would offer four presets that no
     // longer exist.
     if (!preset.known) {
@@ -5072,7 +5083,7 @@ void temporalPassConfigure(Config& cfg) {
             modelWarned = true;
             Log::get().note(
                 "temporal aa: fix.temporal_aa_model = \"%s\" is not a model this build knows "
-                "(k, j, l, m, auto, or legacy steady/quality/responsive). Running preset K.",
+                "(k, l, m, or legacy steady/quality; j, auto and responsive were removed). Running preset K.",
                 model.c_str());
         }
     }
@@ -5370,7 +5381,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // The projection's z row sits at row 198 of the same block (float
     // offset 792), read the column-vector way the x and y rows' off-centre
     // terms confirm: clip z = A * view z + B with the view z as clip w, so
-    // the depth the game writes is A + B / z. On build 332841 it reads
+    // the depth the game writes is A + B / z. On build 334473 it reads
     // A = 0, B = 0.025 -- reversed-Z with NO far plane, depth = 0.025 / z.
     // The 0.025..50000 m the game asks the runtime for is the runtime's
     // projection, not this one, and decoding with those planes read 10 km
@@ -6000,6 +6011,13 @@ bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]) {
     return true;
 }
 
+bool temporalPassMvDepthLayerTotals(uint64_t byLayers[4]) {
+    const uint64_t dispatches = g_mvDepthLayers[0] + g_mvDepthLayers[1] + g_mvDepthLayers[2] + g_mvDepthLayers[3];
+    if (dispatches == 0) return false;
+    if (byLayers) for (int k = 0; k < 4; ++k) byLayers[k] = g_mvDepthLayers[k];
+    return true;
+}
+
 bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
                                const char** engineLabel, bool* amd) {
     // The CURRENT engine's price, not "whichever one has a count". Both
@@ -6127,6 +6145,7 @@ void temporalPassShutdown() {
     g_coronaHoldNoted=false;
     for (bool& noted : g_uiResolveUnboundNoted) noted=false;
     g_uiResolveDispatches=0; for (uint64_t& n : g_uiResolveLacked) n=0;
+    for (uint64_t& n : g_mvDepthLayers) n=0;
     // Stage 0 price report: any eye still waiting for its stereo twin at
     // shutdown is never going to get one -- drop it and count it (F2)
     // rather than price it alone, before the window it would have landed

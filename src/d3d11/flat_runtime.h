@@ -11,6 +11,7 @@
 #include "flat_mutation_diagnostic.h"
 #include "animated_history_writes.h"
 #include "flat_ui_layer.h"   // fix.ui_quality's flat layer: the draw scope's second issues (uiReissue)
+#include "flat_star_glow.h"  // visual.star_glow: a star pass issued once more into the star layer (uiReissue)
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -84,7 +85,9 @@ void flatRuntimeViewport(UINT, const D3D11_VIEWPORT*);
 void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
-void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written);
+// constantFill: the write is a clear or another fill with a constant (the depth clear, whose provenance stays Written for the history
+// ledgers). It carries no content, which the prefix's record of what reached a resource (FlatRuntimeReached) needs to know.
+void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written, bool constantFill=false);
 // A write whose bytes the hook knows (section 104, range-aware invalidation of the first-person history): the extents the hooks pass.
 void flatRuntimeWrittenExtent(ID3D11Resource*, const HistoryWriteExtent&);
 HistoryWriteExtent flatRuntimeCopyExtent(UINT dstSub, UINT dstX, const void* src, const D3D11_BOX* box);
@@ -147,6 +150,20 @@ struct FlatRuntimeDrawScope {
     // (uiComposite).
     bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
     uint64_t uiVs=0,uiPs=0;
+    // The HUD's bloom (flat_ui_layer.h flatUiGlowWanted): this is the HDR route's trigger draw and it writes a half-size target of H, the bloom
+    // chain's first level. Begin binds H' = H + the HUD layer's light at `glowSlot` for the game's issue (glowOriginal holds the game's view then),
+    // End puts the game's view back.
+    bool uiGlow=false;
+    // visual.star_glow (flat_star_glow.h): this draw is a star pass the gates let through (starReplay: issue it once more into the star layer, right after
+    // the game's own issue; starRole is the pass), or any star pass of any target (starTouched: kept out of the offscreen fast path); starW/H is its colour
+    // target. starFeed: this is the trigger draw and the star layer holds light, so the first-level draw reads it added to H' (beginActualDraw).
+    bool starReplay=false,starTouched=false,starFeed=false;
+    uint8_t starRole=0;
+    uint32_t starW=0,starH=0;
+    uint32_t glowSlot=0,glowHdrW=0,glowHdrH=0,glowTargetW=0,glowTargetH=0;
+    const void* glowHdr=nullptr;
+    uint64_t glowVs=0,glowPs=0;
+    ID3D11ShaderResourceView* glowOriginal=nullptr;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
@@ -162,15 +179,18 @@ struct FlatRuntimeDrawScope {
     forward_light::Issue forwardIssue{};
     uint64_t lightPayloadToken=0;
     const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
-    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite ||
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite || uiGlow ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's
     // draw again through `issue` (the hook's own real call, same arguments) -- a taken draw's colourless depth/stencil
-    // write-back into the game's buffer, and the admitted tonemap's re-issue over the HDR HUD layer. Nothing otherwise.
+    // write-back into the game's buffer, and the admitted tonemap's re-issue over the HDR HUD layer -- and visual.star_glow's
+    // star pass into the star layer. Nothing otherwise.
     template <class Issue> void uiReissue(Issue issue) {
         if (!ctx) return;
         if (uiTaken && flatUiLayerWriteBackBegin(ctx)) { issue(); flatUiLayerWriteBackEnd(ctx); }
+        // visual.star_glow: a star pass the game just issued into H is issued once more into the star layer, with the game's own state (the hook's real call).
+        if (starReplay && flatStarGlowReplayBegin(ctx, starRole, starW, starH)) { issue(); flatStarGlowReplayEnd(ctx); }
         // The weapons' light is re-issued through the same draw before the HUD's (fix.sharp_weapons: the layer binds each step's source and blend and says when
         // none is left); with only the HUD in the layer the plan is one step and the loop never runs.
         if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); while (flatUiLayerToneNext(ctx)) issue(); flatUiLayerToneEnd(ctx); }
@@ -190,6 +210,10 @@ struct FlatRuntimeDrawScope {
     void beginActualDraw(ID3D11Buffer* indirectArgs=nullptr, UINT indirectOffset=0);
     void endActualDraw();
     bool recover(const char* reason);
+    // The spatial recovery at the output copy of a frame with no 3D scene (flat_noscene_spatial.h): the copy's source through SMAA 1x
+    // and EASU, in place of the game's bilinear stretch, with no jitter and no history. `stoodDown` is a paused frame's call. True
+    // when the copy now reads the recovery's picture; false leaves the copy exactly as the game bound it.
+    bool treatNoScene(bool stoodDown);
     // The HDR route's treatment at its trigger draw (flat_hdr_route.h, design section 81): the resolve of the game's HDR
     // scene target H, written back into H, before the game's pass that reads it. `srvSlot` is the pixel-shader slot that
     // binds H for this draw. Declines quietly (the copy route then serves the frame) and never leaves H half-written.

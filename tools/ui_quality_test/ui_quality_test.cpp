@@ -6,7 +6,7 @@
 //     Quality (3070 x 0.65 = 1995 and the rest), the vertical field of view
 //     as the panel formula reads it, the interface surface's shape; the
 //     sizing chains' formatter and verdicts; the engine-side panel factor
-//     across the flights' states and the build-332841 bytes it patches.
+//     across the flights' states and the build-334925 bytes it patches.
 //   * the layer's arithmetic (src/d3d11/ui_layer_math.h): the key; the
 //     layer's size and memory at 1.0 and 1.25; the viewport and scissor map;
 //     the jitter cancel, both from pixels and from the tangent shift the
@@ -77,12 +77,14 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/flat_projection_math.h"  // flatProjectionJitter: the flat layer's jitter rule is its inverse
 #include "../../src/d3d11/flat_ui_layer_math.h"    // the flat layer's adapter rules
+#include "../../src/d3d11/flat_star_glow_math.h"   // visual.star_glow: the pair table, the run machine, the window line
 #include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
@@ -109,12 +111,14 @@ bool near1(double a, double b, double eps = 1e-4) { return std::fabs(a - b) <= e
 // ------------------------------------------------------------ arithmetic
 
 void testKey() {
-    // off | 100 | 125: percent of HMD Quality 1.0, the target 1.0 / 1.25 inside.
+    // off | 100 | 125 | 150 | 200: percent of HMD Quality 1.0, the target 1.0 / 1.25 / 1.5 / 2.0 inside.
     bool ok = false;
     const char* alias = "unset";
     check(uiQualityParse("off", &ok, &alias) == 0.0f && ok && !alias, "off is off");
     check(uiQualityParse("100", &ok, &alias) == 1.0f && ok && !alias, "100 is a target of 1.0");
     check(uiQualityParse("125", &ok, &alias) == 1.25f && ok && !alias, "125 is a target of 1.25");
+    check(uiQualityParse("150", &ok, &alias) == 1.5f && ok && !alias, "150 is a target of 1.5");
+    check(uiQualityParse("200", &ok, &alias) == 2.0f && ok && !alias, "200 is a target of 2.0");
     // The first spellings, read for one release, each naming its new one.
     check(uiQualityParse("1.0", &ok, &alias) == 1.0f && ok && alias && std::strcmp(alias, "100") == 0,
           "1.0 is read as 100, and says so");
@@ -124,18 +128,19 @@ void testKey() {
           "1.25 is read as 125, and says so");
     check(uiQualityParse("125", &ok) == 1.25f && ok, "the alias out-parameter is optional");
     // Anything else is off, and refused out loud.
-    const char* garbage[] = {"100%", "125%", "100.0", "1.00", "Off", "on", "150", "0", "", " 125"};
+    const char* garbage[] = {"100%", "125%", "150%", "200%", "100.0", "1.00", "1.5", "2", "2.0", "Off", "on", "175", "250", "0", "", " 125", "150 "};
     bool refused = true;
     for (const char* g : garbage) {
         alias = "unset";
         refused = refused && uiQualityParse(g, &ok, &alias) == 0.0f && !ok && !alias;
     }
-    check(refused, "100%, 125%, 100.0, 1.00, Off, on, 150, 0, empty and a leading space are refused as off");
+    check(refused, "the percent forms, 100.0, 1.00, 1.5, 2, 2.0, Off, on, 175, 250, 0, empty and stray spaces are refused as off");
     check(uiQualityParse(nullptr, &ok) == 0.0f && !ok, "no text is off");
     // The log's and the menu's spelling.
     check(std::strcmp(uiQualityLabel(1.0f), "100%") == 0 && std::strcmp(uiQualityLabel(1.25f), "125%") == 0 &&
+              std::strcmp(uiQualityLabel(1.5f), "150%") == 0 && std::strcmp(uiQualityLabel(2.0f), "200%") == 0 &&
               std::strcmp(uiQualityLabel(0.0f), "off") == 0,
-          "the label: 100%, 125%, off");
+          "the label: 100%, 125%, 150%, 200%, off");
 }
 
 void testSize() {
@@ -151,6 +156,21 @@ void testSize() {
           "4340x4284: the handoff's 74 MB per eye");
     s = uiLayerSize(13108, 1000, 1.25f);
     check(s.w == 0 && s.h == 0, "a layer past D3D11's 16384 is refused, never clamped");
+    // 150 and 200 on the reporter's 3440x1440 display (2026-10-21), and the memory the ini documents: the 8-bit layer, the
+    // HDR layer (8 bytes a pixel) and the depth-stencil target (8) make 20 bytes a pixel.
+    s = uiLayerSize(3440, 1440, 1.5f);
+    check(s.w == 5160 && s.h == 2160, "1.5: 3440x1440 x 1.5 = 5160x2160");
+    s = uiLayerSize(3440, 1440, 2.0f);
+    check(s.w == 6880 && s.h == 2880, "2.0: 3440x1440 x 2 = 6880x2880");
+    check(near1(uiLayerMB(uiLayerBytes(3440, 1440)) * 5.0, 99.07, 0.05) && near1(uiLayerMB(uiLayerBytes(4300, 1800)) * 5.0, 154.8, 0.1) &&
+              near1(uiLayerMB(uiLayerBytes(5160, 2160)) * 5.0, 223.0, 0.1) && near1(uiLayerMB(uiLayerBytes(6880, 2880)) * 5.0, 396.3, 0.1),
+          "3440x1440 at 100, 125, 150 and 200: the 99, 155, 223 and 396 MB (20 bytes a pixel) the ini and the answer give");
+    s = uiLayerSize(8192, 4320, 2.0f);
+    check(s.w == 16384 && s.h == 8640, "2.0: an 8192-wide display's layer is exactly D3D11's limit and is made");
+    s = uiLayerSize(8193, 4320, 2.0f);
+    check(s.w == 0 && s.h == 0, "2.0: one pixel more is refused, never clamped");
+    s = uiLayerSize(4074, 3938, 2.0f);
+    check(s.w == 8148 && s.h == 7876, "2.0: a 4074x3938 headset door makes an 8148x7876 layer per eye");
     s = uiLayerSize(0, 3032, 1.0f);
     check(s.w == 0 && s.h == 0, "no door size, no layer");
     s = uiLayerSize(3070, 3032, 0.0f);
@@ -396,6 +416,196 @@ void testFootprint() {
     check(n == 2 && first == 3 && near1(w[0], 0.2) && near1(w[1], 0.8), "1.25: pixel 3 is 0.2 + 0.8");
     n = uiLayerFootprint(98.9, 100.4, 100, &first, w);
     check(n == 2 && first == 98 && near1(w[0] + w[1], 1.0), "the edge clamps and renormalises");
+    // 1.5: three texels at most, the weights a box of 1.5 gives (each over 1.5, so they sum to 1).
+    n = uiLayerFootprint(0.0, 1.5, 100, &first, w);
+    check(n == 2 && first == 0 && near1(w[0], 2.0 / 3.0) && near1(w[1], 1.0 / 3.0), "1.5: pixel 0 is 2/3 + 1/3");
+    n = uiLayerFootprint(1.5, 3.0, 100, &first, w);
+    check(n == 2 && first == 1 && near1(w[0], 1.0 / 3.0) && near1(w[1], 2.0 / 3.0), "1.5: pixel 1 is 1/3 + 2/3");
+    n = uiLayerFootprint(0.9, 2.4, 100, &first, w);
+    check(n == 3 && first == 0 && near1(w[0] + w[1] + w[2], 1.0) && near1(w[0], 0.1 / 1.5) && near1(w[1], 1.0 / 1.5) && near1(w[2], 0.4 / 1.5),
+          "1.5: a footprint off the grid reaches three texels");
+    // 2.0: the exact 2 x 2 average on the grid, and the tent a half-texel offset gives (a pixel the layer rectangle does not align to).
+    n = uiLayerFootprint(4.0, 6.0, 100, &first, w);
+    check(n == 2 && first == 4 && near1(w[0], 0.5) && near1(w[1], 0.5), "2.0: on the grid a pixel is the exact average of two texels (2 x 2 with the other axis)");
+    n = uiLayerFootprint(4.5, 6.5, 100, &first, w);
+    check(n == 3 && first == 4 && near1(w[0], 0.25) && near1(w[1], 0.5) && near1(w[2], 0.25), "2.0: half a texel off the grid is 1/4, 1/2, 1/4");
+    for (double x0 = 0.0; x0 < 8.0; x0 += 0.37) {
+        n = uiLayerFootprint(x0, x0 + 2.0, 100, &first, w);
+        float sum = 0.0f;
+        for (int k = 0; k < n; ++k) sum += w[k];
+        if (n < 2 || n > 3 || !near1(sum, 1.0)) {
+            check(false, "2.0: every footprint is 2 or 3 texels with weights summing to 1");
+            break;
+        }
+    }
+    n = uiLayerFootprint(98.0, 100.0, 100, &first, w);
+    check(n == 2 && first == 98 && near1(w[0], 0.5) && near1(w[1], 0.5), "2.0: the last pixel of the layer is whole");
+}
+
+// The flat HUD's bloom feed (2026-10-21; fixed_shader_source.h kUiGlowFeedPsHlsl), replayed on the CPU. The feed reads the HUD layer, the
+// display's size times the quality target, at the scene H's size, so a pixel of H covers `scale` layer texels an axis. What a layer texel
+// of unit radiance sends to the bloom is the sum of its weights over H's pixels. Area weights (ui_layer_math.h uiGlowFeedFootprint, the
+// shader's loop transcribed) make that 1/scale an axis wherever the texel falls on H's grid; the n x n point samples the feed had before
+// made it 0.5 or 1.0 at 20/13 and at 1.25, by the column.
+struct FeedAxis {
+    std::vector<std::vector<std::pair<uint32_t, float>>> byTexel;  // per layer texel: the H pixels that read it, and their weights
+};
+FeedAxis feedAreaAxis(uint32_t scenePx, uint32_t layerPx) {
+    FeedAxis a;
+    a.byTexel.resize(layerPx);
+    const double scale = static_cast<double>(layerPx) / scenePx;
+    for (uint32_t i = 0; i < scenePx; ++i) {
+        uint32_t first = 0;
+        float w[kUiGlowFeedMaxTaps] = {};
+        const int n = uiGlowFeedFootprint(i, scale, layerPx, &first, w);
+        for (int k = 0; k < n; ++k) a.byTexel[first + k].emplace_back(i, w[k]);
+    }
+    return a;
+}
+// The feed before 2026-10-21: n points at the centres of n equal parts of the pixel's footprint along each axis, weight 1/n each.
+FeedAxis feedPointAxis(uint32_t scenePx, uint32_t layerPx, int n) {
+    FeedAxis a;
+    a.byTexel.resize(layerPx);
+    const double scale = static_cast<double>(layerPx) / scenePx;
+    for (uint32_t i = 0; i < scenePx; ++i) {
+        for (int s = 0; s < n; ++s) {
+            const double q = (i + (s + 0.5) / n) * scale;
+            const int64_t t = (std::min)((std::max)(static_cast<int64_t>(std::floor(q)), int64_t{0}), static_cast<int64_t>(layerPx) - 1);
+            a.byTexel[static_cast<size_t>(t)].emplace_back(i, 1.0f / n);
+        }
+    }
+    return a;
+}
+double feedAxisSum(const FeedAxis& a, uint32_t texel) {
+    double e = 0.0;
+    for (const auto& pw : a.byTexel[texel]) e += pw.second;
+    return e;
+}
+struct FeedSpread {
+    double lo = 1e300, hi = -1e300;
+    void add(double v) {
+        lo = (std::min)(lo, v);
+        hi = (std::max)(hi, v);
+    }
+};
+FeedSpread feedAxisSpread(const FeedAxis& a) {
+    FeedSpread s;
+    for (uint32_t t = 0; t < a.byTexel.size(); ++t) s.add(feedAxisSum(a, t));
+    return s;
+}
+// A unit impulse at layer texel (tx, ty): the sum over H's pixels (x, y) of the pass's output there, the pixel's weight being
+// wx[x] * wy[y] (the shader's wx * wy / wsum, which separates). Every texel, every pixel that reads it.
+FeedSpread feedImpulseSpread(const FeedAxis& ax, const FeedAxis& ay) {
+    FeedSpread s;
+    for (uint32_t ty = 0; ty < ay.byTexel.size(); ++ty) {
+        for (uint32_t tx = 0; tx < ax.byTexel.size(); ++tx) {
+            double e = 0.0;
+            for (const auto& py : ay.byTexel[ty]) {
+                for (const auto& px : ax.byTexel[tx]) e += static_cast<double>(px.second) * py.second;
+            }
+            s.add(e);
+        }
+    }
+    return s;
+}
+
+void testGlowFeedFilter() {
+    // The weights themselves: the composite's footprint, on H's grid.
+    uint32_t first = 0;
+    float w[kUiGlowFeedMaxTaps] = {};
+    int n = uiGlowFeedFootprint(7, 1.0, 100, &first, w);
+    check(n == 1 && first == 7 && near1(w[0], 1.0), "glow feed: 1:1 on the grid is a copy");
+    n = uiGlowFeedFootprint(3, 2.0, 100, &first, w);
+    check(n == 2 && first == 6 && near1(w[0], 0.5) && near1(w[1], 0.5), "glow feed: 2:1 is the average of the two texels");
+    n = uiGlowFeedFootprint(1, 20.0 / 13.0, 1920, &first, w);
+    check(n == 3 && first == 1 && near1(w[0], 0.30) && near1(w[1], 0.65) && near1(w[2], 0.05),
+          "glow feed: 20/13, pixel 1 covers texels 1..3 for 0.30, 0.65 and 0.05");
+    n = uiGlowFeedFootprint(0, 1.25, 100, &first, w);
+    check(n == 2 && first == 0 && near1(w[0], 0.8) && near1(w[1], 0.2), "glow feed: 1.25, pixel 0 is 0.8 + 0.2 (the composite's own)");
+    n = uiGlowFeedFootprint(1, 6.0, 100, &first, w);
+    check(n == 4 && first == 7 && near1(w[0], 0.25) && near1(w[3], 0.25),
+          "glow feed: a ratio past 4 is cut to the central 4 texels of the footprint");
+    n = uiGlowFeedFootprint(1, 3.7, 100, &first, w);
+    check(n == 5 && first == 3 && near1(w[0], 0.3 / 3.7) && near1(w[2], 1.0 / 3.7) && near1(w[4], 0.4 / 3.7),
+          "glow feed: 3.7, a footprint that starts mid-texel reaches five texels");
+    {
+        // Whatever the ratio, no footprint is cut by the tap bound at ratios up to 4, and none needs more than the bound at any ratio.
+        bool bounded = true, same = true, unit = true;
+        for (double scale = 0.3; scale < 9.0; scale += 0.07) {
+            for (uint32_t i = 0; i < 40; ++i) {
+                uint32_t f1 = 0, f2 = 0;
+                float a[kUiGlowFeedMaxTaps] = {}, b[16] = {};
+                const int na = uiGlowFeedFootprint(i, scale, 4000, &f1, a);
+                const double cut = (scale > kUiGlowFeedMaxSpan) ? (scale - kUiGlowFeedMaxSpan) * 0.5 : 0.0;
+                const int nb = uiLayerFootprintTaps(i * scale + cut, (i + 1) * scale - cut, 4000, &f2, b, 16);
+                float sum = 0.0f;
+                for (int k = 0; k < na; ++k) sum += a[k];
+                bounded = bounded && na >= 1 && na <= kUiGlowFeedMaxTaps;
+                same = same && na == nb && f1 == f2;
+                unit = unit && near1(sum, 1.0);
+            }
+        }
+        check(bounded, "glow feed: every footprint is 1 to 5 texels an axis, 25 loads at most, at any ratio");
+        check(same, "glow feed: the tap bound never cuts a footprint (the same texels as an unbounded footprint)");
+        check(unit, "glow feed: the weights of every footprint sum to 1, so a flat field keeps its level at any ratio");
+    }
+
+    // The energy. 1/scale an axis, wherever the texel falls on the grid: 0.65 for a line and 0.4225 for a texel at 20/13.
+    struct Case {
+        uint32_t sw, sh, lw, lh;
+        const char* what;
+    };
+    const Case cases[] = {
+        {64, 48, 64, 48, "ratio 1"},
+        {64, 48, 128, 96, "ratio 2"},
+        {13, 13, 20, 20, "ratio 20/13, one period of the grid"},
+        {1248, 780, 1920, 1200, "ratio 20/13, the flown 1248x780 scene on a 1920x1200 output at quality 100"},
+        {8, 8, 10, 10, "ratio 1.25, one period of the grid"},
+        {1920, 1200, 2400, 1500, "ratio 1.25, quality 125 at native size"},
+        {40, 30, 140, 105, "ratio 3.5"},
+        {40, 30, 160, 120, "ratio 4"},
+        {100, 100, 150, 200, "ratios 1.5 and 2 on the two axes"},
+        {128, 96, 64, 48, "ratio 1/2, a layer smaller than the scene"},
+    };
+    for (const Case& c : cases) {
+        const FeedAxis ax = feedAreaAxis(c.sw, c.lw), ay = feedAreaAxis(c.sh, c.lh);
+        const double sx = static_cast<double>(c.lw) / c.sw, sy = static_cast<double>(c.lh) / c.sh;
+        const FeedSpread lx = feedAxisSpread(ax), ly = feedAxisSpread(ay), pt = feedImpulseSpread(ax, ay);
+        char what[256];
+        std::snprintf(what, sizeof(what), "glow feed, %s: a line sends 1/scale an axis to the bloom at every column and row", c.what);
+        check(near1(lx.lo, 1.0 / sx, 1e-5) && near1(lx.hi, 1.0 / sx, 1e-5) && near1(ly.lo, 1.0 / sy, 1e-5) && near1(ly.hi, 1.0 / sy, 1e-5), what);
+        std::snprintf(what, sizeof(what), "glow feed, %s: a single texel sends 1/(scale.x * scale.y) at every position", c.what);
+        check(near1(pt.lo, 1.0 / (sx * sy), 1e-5) && near1(pt.hi, 1.0 / (sx * sy), 1e-5), what);
+    }
+    {
+        // The review's numbers (reviews/main-since-0.20.0-review-2026-10-21.md, finding 3), at the flown dimensions.
+        const FeedAxis ax = feedAreaAxis(1248, 1920), ay = feedAreaAxis(780, 1200);
+        const FeedSpread line = feedAxisSpread(ax), texel = feedImpulseSpread(ax, ay);
+        check(near1(line.lo, 0.65, 1e-5) && near1(line.hi, 0.65, 1e-5), "glow feed: a one-texel line at 20/13 sends 0.65 per row of pixels, in every column");
+        check(near1(texel.lo, 0.4225, 1e-5) && near1(texel.hi, 0.4225, 1e-5), "glow feed: one bright texel at 20/13 sends 0.4225, at every position");
+    }
+    {
+        // The check has teeth: the point samples the feed had are the review's 0.5 or 1.0 and 0.25, 0.5 or 1.0 at 20/13, and uneven at 1.25 too.
+        const FeedAxis ax = feedPointAxis(1248, 1920, 2), ay = feedPointAxis(780, 1200, 2);
+        const FeedSpread line = feedAxisSpread(ax), texel = feedImpulseSpread(ax, ay);
+        check(near1(line.lo, 0.5, 1e-5) && near1(line.hi, 1.0, 1e-5), "glow feed: the former point samples sent 0.5 or 1.0 for a line at 20/13");
+        check(near1(texel.lo, 0.25, 1e-5) && near1(texel.hi, 1.0, 1e-5), "glow feed: ...and 0.25 to 1.0 for a single texel");
+        const FeedSpread l125 = feedAxisSpread(feedPointAxis(1920, 2400, 2));
+        check(l125.hi - l125.lo > 0.4, "glow feed: ...and uneven at 1.25 as well");
+        const FeedSpread l1 = feedAxisSpread(feedPointAxis(64, 64, 1)), l2 = feedAxisSpread(feedPointAxis(64, 128, 2));
+        check(near1(l1.lo, l1.hi) && near1(l2.lo, l2.hi), "glow feed: ...and exact at the integer ratios, which the area weights keep");
+    }
+    {
+        // The shader's text carries the constants the replay uses (the cut past 4 texels, the loop's reach of 5 an axis).
+        char pat[64];
+        std::snprintf(pat, sizeof(pat), "max(span - %.1f,", kUiGlowFeedMaxSpan);
+        check(std::strstr(kUiGlowFeedPsHlsl, pat) != nullptr, "glow feed: the shader cuts a footprint to the replay's span");
+        std::snprintf(pat, sizeof(pat), "k0.x + %d)", kUiGlowFeedMaxTaps - 1);
+        check(std::strstr(kUiGlowFeedPsHlsl, pat) != nullptr, "glow feed: the shader's loop over x reaches the replay's taps");
+        std::snprintf(pat, sizeof(pat), "k0.y + %d)", kUiGlowFeedMaxTaps - 1);
+        check(std::strstr(kUiGlowFeedPsHlsl, pat) != nullptr, "glow feed: ...and over y");
+        check(std::strstr(kUiGlowFeedPsHlsl, "ceil(max(sc.x") == nullptr, "glow feed: the n x n point samples are gone from the shader");
+    }
 }
 
 void testGate() {
@@ -784,7 +994,7 @@ void testGate() {
 // 09-23.md section 8): a create's chain -- the game's frames, innermost
 // first -- read into a verdict, on synthetic chains.
 void testChains() {
-    const uintptr_t base = 0x140000000ull, size = 104894464ull;  // build 332841's image
+    const uintptr_t base = 0x140000000ull, size = 104906752ull;  // build 334925's image
     auto chainOf = [&](std::initializer_list<uint32_t> rvas, bool withForeign) {
         uintptr_t frames[40] = {};
         uint32_t n = 0;
@@ -798,46 +1008,46 @@ void testChains() {
         return c;
     };
     // The chain section 8 expects, innermost first.
-    const UiChain initColour = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x28148A9, 0x2833883, 0x4551C7D,
-                                        0x45517F6, 0x4570902, 0x456D910, 0x10},
+    const UiChain initColour = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816E29, 0x28337C3, 0x455471D,
+                                        0x4554296, 0x45733A2, 0x456D870, 0x10},
                                        true);
-    check(initColour.n == 10 && initColour.rva[0] == 0x51AF6B && initColour.rva[5] == 0x4551C7D,
+    check(initColour.n == 10 && initColour.rva[0] == 0x51AF0B && initColour.rva[5] == 0x455471D,
           "a chain keeps the game's frames, innermost first, and skips EDVR's and the runtime's");
     UiChainVerdict v = uiChainVerdict(initColour);
     check(v.kind == UiChainKind::kRtt && v.init && !v.change && v.colour && !v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt init colour") == 0,
-          "0x4551C7D and 0x45517F6, through 0x4570902 and 0x28148A9: rtt init colour");
+          "0x455471D and 0x4554296, through 0x45733A2 and 0x2816E29: rtt init colour");
     char text[320];
     uiChainVerdictText(v, text, sizeof(text));
-    check(std::strcmp(text, "rtt init colour (0x4551C7D yes, 0x45517F6 yes, 0x4570902 yes, 0x456DA45 no, "
-                            "0x28148A9 yes, 0x2814686 no, 0x30FC1A no, 0x312450 no)") == 0,
+    check(std::strcmp(text, "rtt init colour (0x455471D yes, 0x4554296 yes, 0x45733A2 yes, 0x45704E5 no, "
+                            "0x2816E29 yes, 0x2816C06 no, 0x30FCBA no, 0x3124F0 no)") == 0,
           "...and the verdict names every key's hit and miss");
     char rvas[160];
     uiChainFormat(initColour, rvas, sizeof(rvas));
-    check(std::strcmp(rvas, "0x51AF6B/0x50EC69/0x5185B3/0x28148A9/0x2833883/0x4551C7D/0x45517F6/"
-                            "0x4570902/0x456D910/0x10") == 0,
+    check(std::strcmp(rvas, "0x51AF0B/0x50EC09/0x518553/0x2816E29/0x28337C3/0x455471D/0x4554296/"
+                            "0x45733A2/0x456D870/0x10") == 0,
           "the chain formatted innermost first");
-    const UiChain changeDepth = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x2814686, 0x28338B0, 0x4551C7D,
-                                         0x45517F6, 0x456DA45},
+    const UiChain changeDepth = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816C06, 0x28337F0, 0x455471D,
+                                         0x4554296, 0x45704E5},
                                         false);
     v = uiChainVerdict(changeDepth);
     check(v.kind == UiChainKind::kRtt && v.change && v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt change depth") == 0,
-          "through 0x456DA45 and 0x2814686: rtt change depth");
-    v = uiChainVerdict(chainOf({0x51AF6B, 0x4551C7D, 0x4570902}, false));
+          "through 0x45704E5 and 0x2816C06: rtt change depth");
+    v = uiChainVerdict(chainOf({0x51AF0B, 0x455471D, 0x45733A2}, false));
     check(v.kind == UiChainKind::kOther && (v.hits & 1u) && !(v.hits & 2u),
-          "0x4551C7D without 0x45517F6 is other (a miss, and it says which)");
-    check(uiChainVerdict(chainOf({0x30C0AA, 0x30FC1A, 0x30F9E0}, true)).kind == UiChainKind::kGlyphCache &&
-              uiChainVerdict(chainOf({0x312450}, false)).kind == UiChainKind::kGlyphCache,
-          "the raster cache's texture maker, init 0x30FC1A or re-create 0x312450: glyph-cache");
+          "0x455471D without 0x4554296 is other (a miss, and it says which)");
+    check(uiChainVerdict(chainOf({0x30C07A, 0x30FCBA, 0x30F9B0}, true)).kind == UiChainKind::kGlyphCache &&
+              uiChainVerdict(chainOf({0x3124F0}, false)).kind == UiChainKind::kGlyphCache,
+          "the raster cache's texture maker, init 0x30FCBA or re-create 0x3124F0: glyph-cache");
     const UiChain none = chainOf({0x1000, 0x2000}, true);
     v = uiChainVerdict(none);
     uiChainVerdictText(v, text, sizeof(text));
     check(v.kind == UiChainKind::kOther && v.hits == 0 &&
-              std::strcmp(text, "other (0x4551C7D no, 0x45517F6 no, 0x4570902 no, 0x456DA45 no, 0x28148A9 no, "
-                                "0x2814686 no, 0x30FC1A no, 0x312450 no)") == 0,
+              std::strcmp(text, "other (0x455471D no, 0x4554296 no, 0x45733A2 no, 0x45704E5 no, 0x2816E29 no, "
+                                "0x2816C06 no, 0x30FCBA no, 0x3124F0 no)") == 0,
           "neither: other, every key a miss");
-    const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x4551C7D, 0x45517F6}, false);
+    const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x455471D, 0x4554296}, false);
     check(deep.n == 12 && deep.rva[11] == 12 && uiChainVerdict(deep).kind == UiChainKind::kOther,
           "twelve game frames kept: keys past the twelfth are not seen");
     UiChain empty;
@@ -859,7 +1069,7 @@ void testChains() {
 
 // The engine-side panel sizing (ui_sizing_math.h, ui_panel_scale.h): the
 // factor across the flights' states, the cap and the floor, and the four
-// operand sites' bytes -- the embedded build-332841 patterns against the
+// operand sites' bytes -- the embedded build-334925 patterns against the
 // shape, a synthetic scan, the rel32 arithmetic, and, when the game is
 // installed at the usual place and is that build, the executable itself
 // (read-only; any other build is skipped, as the patch stands down on it).
@@ -993,9 +1203,9 @@ void testPanelScale() {
               i == 0 ? "the init site's bytes are the shape, reading 16/9, 1080 and 1920"
                      : "the view-change site's bytes are the shape, reading 16/9, 1080 and 1920");
     }
-    check(kUiPanelSiteRva[0] + kUiPanel1080Disp == 0x4570707 && kUiPanelSiteRva[0] + kUiPanel1920Disp == 0x4570714 &&
-              kUiPanelSiteRva[1] + kUiPanel1080Disp == 0x4571212 && kUiPanelSiteRva[1] + kUiPanel1920Disp == 0x457121F,
-          "the four operands are at 0x4570707, 0x4570714, 0x4571212, 0x457121F (the trace's section 3)");
+    check(kUiPanelSiteRva[0] + kUiPanel1080Disp == 0x45731A7 && kUiPanelSiteRva[0] + kUiPanel1920Disp == 0x45731B4 &&
+              kUiPanelSiteRva[1] + kUiPanel1080Disp == 0x4573CB2 && kUiPanelSiteRva[1] + kUiPanel1920Disp == 0x4573CBF,
+          "the four operands are at 0x45731A7, 0x45731B4, 0x4573CB2, 0x4573CBF (the trace's section 3)");
     std::vector<uint8_t> text(4096, 0x90);
     std::memcpy(text.data() + 100, kUiPanelSiteBytes[0], 30);
     std::memcpy(text.data() + 2000, kUiPanelSiteBytes[1], 30);
@@ -1011,10 +1221,10 @@ void testPanelScale() {
               uiPanelDisp(0x140000000ull, 0x13FFF0000ull, &disp) && disp == -0x10000 &&
               !uiPanelDisp(0x140000000ull, 0x240000000ull, &disp),
           "rel32 to a page near the image, and refused out of range");
-    check(uiPanelDisp(0x14457070Bull, 0x144DDE660ull, &disp) && disp == uiReadDisp(kUiPanelSiteBytes[0] + 13),
+    check(uiPanelDisp(0x1445731ABull, 0x144DE16A8ull, &disp) && disp == uiReadDisp(kUiPanelSiteBytes[0] + 13),
           "the game's own 1080 operand is exactly that arithmetic");
 
-    // The executable, when it is here and is build 332841.
+    // The executable, when it is here and is build 334925.
     static const char* kExe =
         "C:\\Users\\seanm\\AppData\\Local\\Frontier_Developments\\Products\\elite-dangerous-odyssey-64\\"
         "EliteDangerous64.exe";
@@ -1024,7 +1234,7 @@ void testPanelScale() {
         return;
     }
     if (pe.stamp != kUiPanelStamp || pe.imageSize != kUiPanelImageSize) {
-        std::printf("  (the installed game is not build 332841 -- stamp %u: the patch stands down on it)\n",
+        std::printf("  (the installed game is not build 334925 -- stamp %u: the patch stands down on it)\n",
                     pe.stamp);
         return;
     }
@@ -1037,7 +1247,7 @@ void testPanelScale() {
     const uint8_t* p1 = pe.at(kUiPanelFuncRva[1], sizeof(kUiPanelProlog1));
     check(sitesOk && p0 && p1 && std::memcmp(p0, kUiPanelProlog0, sizeof(kUiPanelProlog0)) == 0 &&
               std::memcmp(p1, kUiPanelProlog1, sizeof(kUiPanelProlog1)) == 0,
-          "build 332841 on disk: both sites' 30 bytes and both prologues are the embedded ones");
+          "build 334925 on disk: both sites' 30 bytes and both prologues are the embedded ones");
     float aspect = 0.0f, c1080 = 0.0f, c1920 = 0.0f;
     const uint8_t* a = pe.at(kUiPanelAspectRva, 4);
     const uint8_t* b = pe.at(kUiPanel1080Rva, 4);
@@ -1187,14 +1397,20 @@ void testFlatLayerRules() {
     {
         static const uint64_t kCanvasVs = 0x12382D2EA45E9632ull, kCanvasPs = 0x855C469156AB997Full;
         static const uint64_t kSpriteVs = 0xC31238331D8AC3D4ull, kSpritePsA = 0xBD0FEB3276C8B2D7ull,
-                              kSpritePsB = 0x539A4858CE3A3477ull;
+                              kSpritePsB = 0x539A4858CE3A3477ull, kSpritePsC = 0x964221955A9E77E7ull;
         static const uint64_t kUnrelatedVs = 0x1111222233334444ull, kUnrelatedPs = 0x5555666677778888ull;
-        // With a map open on the HDR target, the canvas pair is the canvas and both sprite pairs are sprites.
+        // With a map open on the HDR target, the canvas pair is the canvas and the three sprite pairs are sprites.
         check(flatUiMapFamilyOf(kCanvasVs, kCanvasPs, true, true) == UiLayerFamily::kMapCanvas,
               "map families: the canvas pair, with a map open on the HDR target, is the canvas");
         check(flatUiMapFamilyOf(kSpriteVs, kSpritePsA, true, true) == UiLayerFamily::kMapSprite &&
-                  flatUiMapFamilyOf(kSpriteVs, kSpritePsB, true, true) == UiLayerFamily::kMapSprite,
-              "map families: both sprite pairs (BD0F on the Galaxy and the Orrery, 539A on the System Map) are sprites");
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsB, true, true) == UiLayerFamily::kMapSprite &&
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsC, true, true) == UiLayerFamily::kMapSprite,
+              "map families: the three sprite pairs (BD0F on the Galaxy and the Orrery, 539A on the System Map, 9642 on the "
+              "Galaxy Map since game build 334473) are sprites");
+        check(flatUiMapFamilyOf(kSpriteVs, kSpritePsC, false, true) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsC, true, false) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kCanvasVs, kSpritePsC, true, true) == UiLayerFamily::kNone,
+              "map families: the 334473 Galaxy sprite is under the same gate, and only with the sprite vertex shader");
         // The gate: with no map open, or on any target that is not the HDR class, neither family is named.
         check(flatUiMapFamilyOf(kCanvasVs, kCanvasPs, false, true) == UiLayerFamily::kNone &&
                   flatUiMapFamilyOf(kSpriteVs, kSpritePsB, false, true) == UiLayerFamily::kNone,
@@ -1243,6 +1459,34 @@ void testFlatLayerRules() {
               flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xFEE777E92850B390ull) == ~0u,
           "map tone: a neighbouring PS on CFA918, the same PS on another VS, and the registry's own pair are not this table's "
           "(the bloom composite FA01CD writes the scene and is named by neither: its exact hash is not in the repo)");
+    // The Full System Scanner's tonemap (census 2 of edvr_gfx_20261022_112019, GuiFocus 9, build d4abc498): VS F9CFC798F21E9AEA with PS
+    // 6DE70EBBF82FCBE6 reads the 960x600 scene in slot 0 (and a 480x300 bloom at t1). Named in the same UI-only table as the map tone: the
+    // exact pair answers slot 0, every other mix does not, and it is neither an E894-layout source tone nor (wiring scan below) a registry tone.
+    check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0x6DE70EBBF82FCBE6ull) == 0u &&
+              flatUiMapToneSlotOf(kFlatUiScannerToneVs, kFlatUiScannerTonePs) == 0u,
+          "scanner tone: VS F9CFC798 with PS 6DE70EBB is the Full System Scanner's tonemap, reading the scene in slot 0");
+    check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0x6DE70EBBF82FCBE7ull) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEBull, 0x6DE70EBBF82FCBE6ull) == ~0u &&
+              flatUiMapToneSlotOf(0x43CA9F1C0AD2ACFEull, 0x6DE70EBBF82FCBE6ull) == ~0u &&
+              flatUiMapToneSlotOf(0xCFA91824129ECBBCull, 0x6DE70EBBF82FCBE6ull) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0) == ~0u && flatUiMapToneSlotOf(0, 0x6DE70EBBF82FCBE6ull) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xFEE777E92850B390ull) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xC89DD4ED362D743Full) == ~0u &&
+              flatUiMapToneSlotOf(0xCFA91824129ECBBCull, 0xE8948389387DA083ull) == ~0u,
+          "scanner tone: only the exact pair; a neighbouring PS or VS, the transition VS 43CA9F1C, the map VS, a VS-only or PS-only mix and "
+          "the VS with the E894, registry or map PS are not named");
+    check(!flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0x6DE70EBBF82FCBE6ull) &&
+              !flatUiSourceTonePair(0x43CA9F1C0AD2ACFEull, 0x6DE70EBBF82FCBE6ull) &&
+              !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0x6DE70EBBF82FCBE6ull),
+          "scanner tone: it is not a flatUiSourceTonePair (the E894 layout reads the HUD at t1; this tone reads the scene at t0)");
+    check(flatUiMapToneScreenOf(kFlatUiMapToneVs, kFlatUiMapTonePs) == FlatUiToneScreen::kMaps &&
+              flatUiMapToneScreenOf(kFlatUiScannerToneVs, kFlatUiScannerTonePs) == FlatUiToneScreen::kScanner &&
+              flatUiMapToneScreenOf(kFlatUiMapToneVs, kFlatUiScannerTonePs) == FlatUiToneScreen::kNone &&
+              flatUiMapToneScreenOf(kFlatUiScannerToneVs, kFlatUiMapTonePs) == FlatUiToneScreen::kNone &&
+              flatUiMapToneScreenOf(kFlatUiScannerToneVs, kFlatUiSourceTonePs) == FlatUiToneScreen::kNone &&
+              flatUiMapToneScreenOf(0, 0) == FlatUiToneScreen::kNone,
+          "scanner tone: the table says which screen's tonemap a pair is (the maps', the scanner's, or neither); the log lines name it");
     check(flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) &&
               flatUiSourceTonePair(0x43CA9F1C0AD2ACFEull, 0xE8948389387DA083ull) &&
               !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA082ull) &&
@@ -1465,14 +1709,28 @@ void testFlatLayerRules() {
               "map tone reason: a proof state from another frame names no recorded target");
     }
     // Temporal AA off while a map is open (2026-10-10, maintainer's decisions): the Galaxy Map (6), the System Map (7) and the
-    // Orrery (8). Another screen and an unknown GuiFocus keep temporal AA on.
-    check(flatUiMapTemporalOff(true, 6) && flatUiMapTemporalOff(true, 7) && flatUiMapTemporalOff(true, 8) &&
-              !flatUiMapTemporalOff(true, 1) && !flatUiMapTemporalOff(false, 6) && !flatUiMapTemporalOff(false, 7) &&
-              !flatUiMapTemporalOff(false, 8),
-          "temporal AA off: exactly GuiFocus 6, 7 and 8 while the focus is known (not another screen, not unknown)");
+    // Orrery (8); and, since 2026-10-22, the Full System Scanner (9). Another screen and an unknown GuiFocus keep temporal AA on: the
+    // Detailed Surface Scanner (10) is a 3D planet view and stays out on purpose (the maintainer, 2026-10-22), and so does the codex (11).
+    check(flatUiMapTemporalOff(true, 6) && flatUiMapTemporalOff(true, 7) && flatUiMapTemporalOff(true, 8) && flatUiMapTemporalOff(true, 9) &&
+              !flatUiMapTemporalOff(true, 0) && !flatUiMapTemporalOff(true, 1) && !flatUiMapTemporalOff(true, 5) &&
+              !flatUiMapTemporalOff(true, 10) && !flatUiMapTemporalOff(true, 11) && !flatUiMapTemporalOff(true, 12) &&
+              !flatUiMapTemporalOff(false, 6) && !flatUiMapTemporalOff(false, 7) && !flatUiMapTemporalOff(false, 8) &&
+              !flatUiMapTemporalOff(false, 9) && !flatUiMapTemporalOff(false, 10),
+          "temporal AA off: exactly GuiFocus 6, 7, 8 and 9 while the focus is known (not another screen, the Detailed Surface Scanner (10) "
+          "and the codex (11) included, not unknown)");
     check(std::strcmp(flatUiMapTemporalName(6), "the Galaxy Map") == 0 && std::strcmp(flatUiMapTemporalName(7), "the System Map") == 0 &&
-              std::strcmp(flatUiMapTemporalName(8), "the Orrery") == 0,
-          "temporal AA off: the log names the Galaxy Map (6), the System Map (7) and the Orrery (8)");
+              std::strcmp(flatUiMapTemporalName(8), "the Orrery") == 0 &&
+              std::strcmp(flatUiMapTemporalName(9), "the Full System Scanner") == 0,
+          "temporal AA off: the log names the Galaxy Map (6), the System Map (7), the Orrery (8) and the Full System Scanner (9)");
+    // The map families' gate is the three maps only: the Full System Scanner turns temporal AA off with them, but no scanner draw is
+    // identified as a map pair, so it does not open the families (flatUiMapFamiliesOpen, which flatRuntimeMapOpenFrame answers from).
+    check(flatUiMapFamiliesOpen(true, 6) && flatUiMapFamiliesOpen(true, 7) && flatUiMapFamiliesOpen(true, 8) &&
+              !flatUiMapFamiliesOpen(true, 9) && !flatUiMapFamiliesOpen(true, 10) && !flatUiMapFamiliesOpen(true, 0) &&
+              !flatUiMapFamiliesOpen(true, 1) && !flatUiMapFamiliesOpen(true, 5) && !flatUiMapFamiliesOpen(true, 11) &&
+              !flatUiMapFamiliesOpen(false, 6) && !flatUiMapFamiliesOpen(false, 7) && !flatUiMapFamiliesOpen(false, 8) &&
+              !flatUiMapFamiliesOpen(false, 9) && !flatUiMapFamiliesOpen(false, 10),
+          "map families gate: exactly GuiFocus 6, 7 and 8 while the focus is known (neither the Full System Scanner (9) nor the Detailed "
+          "Surface Scanner (10) is one)");
     // The map line's temporal counts: a frame that armed the mechanism and never reached its copy is counted, not silent.
     {
         FlatUiMapAaTally t;
@@ -1570,6 +1828,22 @@ void testFlatLayerRules() {
     check(!flatUiLayerDoorArms(false, 3840, 2160, 3840, 2160), "flat layer: a refused frame arms nothing");
     check(!flatUiLayerDoorArms(true, 1920, 1080, 3840, 2160), "flat layer: a picture at the render size (an E below D) arms nothing");
     check(!flatUiLayerDoorArms(true, 0, 0, 0, 0), "flat layer: no display size arms nothing");
+    // The HUD's bloom feed (2026-10-21): H' goes to the draw that writes a half-size target of H, the bloom chain's first level.
+    check(flatUiGlowFeedShape(1248, 780, 624, 390), "glow feed: the flown 624x390 level of a 1248x780 H is the chain's first");
+    check(flatUiGlowFeedShape(3840, 2160, 1920, 1080), "glow feed: half of 3840x2160 is the first level");
+    check(flatUiGlowFeedShape(1921, 1081, 960, 540) && flatUiGlowFeedShape(1921, 1081, 961, 541),
+          "glow feed: an odd extent halved down or up is within the pixel of slack");
+    check(!flatUiGlowFeedShape(1248, 780, 1248, 780) && !flatUiGlowFeedShape(1248, 780, 312, 195) && !flatUiGlowFeedShape(1248, 780, 624, 780),
+          "glow feed: a full-size or quarter-size target, or a half in one axis only, is not the first level");
+    check(!flatUiGlowFeedShape(0, 780, 0, 390) && !flatUiGlowFeedShape(1248, 780, 0, 390), "glow feed: no size reads nothing");
+    check(flatUiGlowFeedWanted(true, true, false, 0, 1248, 780, 624, 390) && flatUiGlowFeedWanted(true, true, false, 3, 1248, 780, 624, 390),
+          "glow feed: wanted at a first-level trigger with the layer on and a known slot");
+    check(!flatUiGlowFeedWanted(false, true, false, 0, 1248, 780, 624, 390) && !flatUiGlowFeedWanted(true, false, false, 0, 1248, 780, 624, 390) &&
+              !flatUiGlowFeedWanted(true, true, true, 0, 1248, 780, 624, 390) && !flatUiGlowFeedWanted(true, true, false, 4, 1248, 780, 624, 390) &&
+              !flatUiGlowFeedWanted(true, true, false, ~0u, 1248, 780, 624, 390),
+          "glow feed: not wanted with the layer off, an unread or ambiguous trigger, or a slot past t3");
+    for (size_t i = 0; i < static_cast<size_t>(UiGlowFeed::kCount); ++i)
+        check(std::strcmp(uiGlowFeedName(static_cast<UiGlowFeed>(i)), "?") != 0, "glow feed: every verdict has a name");
     // The layer's size at the door, VR's own rule: D at 100, 1.25 D at 125.
     const UiLayerSize s100 = uiLayerSize(3840, 2160, 1.0f), s125 = uiLayerSize(3840, 2160, 1.25f);
     check(s100.w == 3840 && s100.h == 2160 && s125.w == 4800 && s125.h == 2700,
@@ -1652,6 +1926,21 @@ void testFlatLayerRules() {
                   adapter.find("flatUiToneProofCopy(g_proof, frame, source, output)") != std::string::npos &&
                   runtime.find("flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color)") != std::string::npos,
               "wiring: the original plain-copy tone proof remains after diagnostic cleanup");
+        // The map focus (flat_runtime.cpp flatRuntimeMapFocusFrame): temporal AA's answer is flatUiMapTemporalOff's (the maps and the Full System
+        // Scanner), the map families' gate is flatUiMapFamiliesOpen's (the maps only), and the transition lines name the screen
+        // entered and the screen left.
+        check(!runtime.empty() && runtime.find("const bool off = flatUiMapTemporalOff(known, focus);") != std::string::npos &&
+                  runtime.find("return flatUiMapFamiliesOpen(w.frameKnown, w.frameFocus);") != std::string::npos &&
+                  runtime.find("\"flat map aa: temporal AA off on %s (GuiFocus %u): ") != std::string::npos &&
+                  runtime.find("flatUiMapTemporalName(focus), focus);") != std::string::npos &&
+                  runtime.find("\"flat map aa: temporal AA on again after %s (GuiFocus %u)\", flatUiMapTemporalName(left), focus);") !=
+                      std::string::npos &&
+                  runtime.find("\"flat map aa: temporal AA on again after %s (GuiFocus unknown)\", flatUiMapTemporalName(left));") !=
+                      std::string::npos &&
+                  runtime.find("refused on %s (%s); the frame stays the game's (frame %llu)\",\n"
+                               "                flatUiMapTemporalName(mapFocusWatch().offFocus),") != std::string::npos,
+              "wiring: the map focus answers temporal AA from flatUiMapTemporalOff and the map families from flatUiMapFamiliesOpen, and "
+              "its transition and refusal lines name the screen entered, left or refused on");
         const size_t physicalShape = adapter.find("bool sourceTonePhysicalShape(");
         const size_t afterPhysicalShape = adapter.find("uint32_t g_candidateLines", physicalShape);
         const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");
@@ -1702,6 +1991,19 @@ void testFlatLayerRules() {
         check(!mono.empty() && !sharedTone.empty() && mono.find("E8948389387DA083") == std::string::npos &&
                   sharedTone.find("E8948389387DA083") == std::string::npos,
               "wiring: E894 remains absent from the mono HDR selector and shared tonemap registry");
+        check(!mono.empty() && !sharedTone.empty() && mono.find("6DE70EBBF82FCBE6") == std::string::npos &&
+                  sharedTone.find("6DE70EBBF82FCBE6") == std::string::npos &&
+                  mono.find("6de70ebbf82fcbe6") == std::string::npos &&
+                  sharedTone.find("6de70ebbf82fcbe6") == std::string::npos,
+              "wiring: the Full System Scanner's 6DE70EBB tone stays out of the mono HDR selector and shared tonemap registry, in either hex case "
+              "(it is named in the UI layer's own table, flatUiMapToneSlotOf, alone)");
+        check(!adapter.empty() && adapter.find("g_mapToneNoted[scanner]") != std::string::npos &&
+                  adapter.find("g_mapFirstToneNoted[scanner]") != std::string::npos &&
+                  adapter.find("scanner ? \"Full System Scanner\" : \"map-frame\"") != std::string::npos &&
+                  adapter.find("scanner ? \"Full System Scanner tone\" : \"map-tone\"") != std::string::npos &&
+                  runtime.find("pairFact.mapToneSlot != ~0u || pairFact.sourceTone) {") != std::string::npos,
+              "wiring: the first candidate and the first proof are said once for each screen's tonemap and name it, and the runtime's candidate "
+              "branch takes the table's pairs");
         check(!mono.empty() && !sharedTone.empty() && mono.find("0D4329BDF65DE8F7") == std::string::npos &&
                   sharedTone.find("0D4329BDF65DE8F7") == std::string::npos &&
                   mono.find("0d4329bdf65de8f7") == std::string::npos &&
@@ -1891,6 +2193,100 @@ void testFamilyRule() {
         check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kLearnedSurface,
               "a holo panel over a learned surface on the post-tonemap eye, either vertex shader");
     }
+}
+
+// The first-seen table behind ui_layer.cpp's noteFamily (ui_layer_math.h UiFamilySeenTable), whose wanted() gates the detail text of a
+// decision's line (the text is built only when the line will print). The reference is noteFamily's rule as it stood before the predicate
+// was split out: a structural decision, no entry for (family, decision, vs, ps), the table not full. wanted() must agree with what that
+// rule prints for every call of a sequence -- duplicates, the transient decisions, a pair under another decision, family or shader, and
+// more distinct pairs than the table holds -- and record() with what it emitted.
+template <uint32_t Cap>
+struct FamilyLineReference {
+    struct Seen {
+        uint8_t family, decision;
+        uint64_t vs, ps;
+    };
+    Seen seen[Cap];
+    uint32_t n = 0;
+    bool prints(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) {
+        if (!(d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate && d != UiLayerDecision::kNotUi)) return false;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (seen[i].family == uint8_t(f) && seen[i].decision == uint8_t(d) && seen[i].vs == vs && seen[i].ps == ps) return false;
+        }
+        if (n >= Cap) return false;
+        seen[n++] = {uint8_t(f), uint8_t(d), vs, ps};
+        return true;
+    }
+};
+
+template <uint32_t Cap>
+void checkFamilyLineSequence(const char* label) {
+    UiFamilySeenTable<Cap> table;
+    FamilyLineReference<Cap> ref;
+    const UiLayerFamily families[] = {UiLayerFamily::kScreen, UiLayerFamily::kPanel, UiLayerFamily::kHolo, UiLayerFamily::kFlightHud,
+                                      UiLayerFamily::kHoloGeneric, UiLayerFamily::kOrbitLines, UiLayerFamily::kAfterUi};
+    const UiLayerDecision decisions[] = {UiLayerDecision::kRedirect, UiLayerDecision::kBlendRefused, UiLayerDecision::kNotArmed,
+                                         UiLayerDecision::kMrt, UiLayerDecision::kLate, UiLayerDecision::kNotUi,
+                                         UiLayerDecision::kDepthStencilTest, UiLayerDecision::kLayerFailed};
+    const uint64_t vss[] = {0x11, 0x22, 0x33}, pss[] = {0xA1, 0xA2};
+    uint32_t calls = 0, mismatches = 0, printed = 0, wantedConst = 0;
+    // Two passes over every pair: the second is all duplicates, or (past the cap) all refusals; each call is also made twice in a row.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (UiLayerFamily f : families) {
+            for (UiLayerDecision d : decisions) {
+                for (uint64_t vs : vss) {
+                    for (uint64_t ps : pss) {
+                        for (int again = 0; again < 2; ++again) {
+                            const uint32_t before = table.count;
+                            const bool asked = table.wanted(f, d, vs, ps);
+                            wantedConst += table.count == before ? 1u : 0u;  // asking changes nothing
+                            const bool refPrints = ref.prints(f, d, vs, ps);
+                            const bool emitted = table.record(f, d, vs, ps);
+                            ++calls;
+                            if (asked != refPrints || emitted != refPrints || table.count != ref.n) ++mismatches;
+                            if (emitted) ++printed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    char msg[240];
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): wanted() and record() agree with the frozen rule over %u calls", Cap, label, calls);
+    check(mismatches == 0, msg);
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): wanted() never changes the table", Cap, label);
+    check(wantedConst == calls, msg);
+    // 7 families x 5 structural decisions x 3 x 2 = 210 distinct pairs: more than either table holds, so the cap is what stops the lines.
+    std::snprintf(msg, sizeof(msg), "family line table (cap %u, %s): exactly the cap's worth of lines print, the first ones, once each", Cap, label);
+    check(printed == Cap && table.count == Cap && ref.n == Cap, msg);
+}
+
+void testFamilyLineTable() {
+    checkFamilyLineSequence<80>("the layer's table");
+    checkFamilyLineSequence<3>("a tiny table");
+    // The structural decisions are all but the three transient ones.
+    bool structuralOk = true;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(UiLayerDecision::kCount); ++i) {
+        const UiLayerDecision d = static_cast<UiLayerDecision>(i);
+        const bool transient = d == UiLayerDecision::kNotArmed || d == UiLayerDecision::kLate || d == UiLayerDecision::kNotUi;
+        structuralOk = structuralOk && uiLayerDecisionIsStructural(d) == !transient;
+    }
+    check(structuralOk, "family line table: every decision but not-armed, late and not-UI is structural");
+    // The cases a rewrite most often gets wrong, by hand.
+    UiFamilySeenTable<2> t;
+    check(!t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed, 1, 2) && !t.record(UiLayerFamily::kScreen, UiLayerDecision::kLate, 1, 2) &&
+              t.count == 0,
+          "family line table: a transient decision is never wanted and never taken in, on an empty table");
+    check(t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) && t.record(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) &&
+              !t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2) && !t.record(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 2),
+          "family line table: a pair prints once");
+    check(t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2) && t.wanted(UiLayerFamily::kPanel, UiLayerDecision::kRedirect, 1, 2) &&
+              t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 9, 2) && t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kRedirect, 1, 9),
+          "family line table: the same pair under another decision, family, vertex shader or pixel shader is wanted");
+    check(t.record(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2) && t.count == 2 &&
+              !t.wanted(UiLayerFamily::kPanel, UiLayerDecision::kRedirect, 1, 2) && !t.record(UiLayerFamily::kHolo, UiLayerDecision::kMrt, 5, 6) &&
+              t.count == 2 && !t.wanted(UiLayerFamily::kScreen, UiLayerDecision::kMrt, 1, 2),
+          "family line table: a full table wants nothing new, and a pair in it is still not wanted");
 }
 
 // The orbit lines and the supercruise bars in the HDR layer (2026-10-07; docs/ui-layer-2026-09-23.md, "2026-10-07: orbit lines,
@@ -3499,6 +3895,8 @@ void testWriteBack(Gpu& g) {
 #include "ui_intro_curve_wiring_test.h"
 #include "ui_panel_budget_test.h"
 #include "ui_flat_panel_settle_test.h"
+#include "ui_tone_scene_test.h"
+#include "ui_star_glow_test.h"
 
 // 2026-10-13 instruments: the seed reasons as counters (ui_layer_seed_census.h's tallyUiSeedReasons), one per bit, and the name table.
 void testSeedReasonTally() {
@@ -3526,6 +3924,8 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && std::strcmp(argv[1], "--flat-cpu") == 0) {
         testFlatLayerRules();
+        testGlowFeedFilter();
+        starglowtest::testAll();
         std::printf("ui_quality_test --flat-cpu: %u checks, %u failures\n", g_checks, g_fails);
         return g_fails ? 1 : 0;
     }
@@ -3556,8 +3956,10 @@ int main(int argc, char** argv) {
     testBlend();
     testDepthStencil();
     testFootprint();
+    testGlowFeedFilter();
     testGate();
     testFamilyRule();
+    testFamilyLineTable();
     testSupercruiseLines();
     testAfterUi();
     afterui::testIdentity();
@@ -3577,6 +3979,8 @@ int main(int argc, char** argv) {
     panelbudget::testAll();
     panelbudget::testWiring();
     flatsettle::testAll();
+    tonescene::testAll();
+    starglowtest::testAll();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");

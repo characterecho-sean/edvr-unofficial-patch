@@ -716,9 +716,20 @@ inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
     return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
 }
 
-// Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431B221..0x431B240). Kind 1: the byte
-// store [coll+0x629] = 0. Kind 2: the call of 0x434DD50 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B5760 with rcx = the
-// pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x434DD50: pipe+0x31C). Returns the number of steps written to kinds and args.
+// Whether a sphere overlaps the box: the distance from its centre (o, in box coordinates from boxCoords) to the centre's clamp into the box (half: the
+// half-extents) is at most the radius. A non-finite or negative radius never overlaps.
+inline bool sphereOverlapsBox(const float o[3], float radius, const float half[3]) noexcept {
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float over = std::fmax(std::fabs(o[k]) - half[k], 0.0f);
+        d2 += over * over;
+    }
+    return std::isfinite(radius) && radius >= 0.0f && d2 <= radius * radius;
+}
+
+// Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431DE81..0x431DEA0). Kind 1: the byte
+// store [coll+0x629] = 0. Kind 2: the call of 0x43509B0 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B8380 with rcx = the
+// pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x43509B0: pipe+0x31C). Returns the number of steps written to kinds and args.
 inline int offScreenSteps(uintptr_t coll, uintptr_t pipe, int* kinds, uintptr_t* args) noexcept {
     int n = 0;
     kinds[n] = 1;
@@ -864,8 +875,9 @@ inline size_t pickExplicitSegment(const ExplicitObs* obs, size_t n, const float 
     return written;
 }
 
-// Why a record is kept in named mode.
-enum class KeepWhy : uint8_t { kNone = 0, kCell = 1, kExplicit = 2, kSphere = 3 };
+// Why a record is kept in named mode. kReach (built 2026-10-21): a box cell only; the centre lies outside the box but the sphere reaches into it (whether
+// or not it contains the camera).
+enum class KeepWhy : uint8_t { kNone = 0, kCell = 1, kExplicit = 2, kSphere = 3, kReach = 4 };
 
 struct NamedKeep {
     bool keep = false;
@@ -881,8 +893,13 @@ inline bool inAddrSet(const uintptr_t* set, size_t n, uintptr_t addr) noexcept {
 }
 
 // The named rule for one record (Built v8.3b). No own cell: the sphere rule for the frame. With one: kept when the record's centre lies within
-// the cell radius of the cell centre (why cell), or when it is an explicit part's nearest instance (why explicit). Otherwise culled, including a
-// record whose sphere contains the camera.
+// the cell radius of the cell centre (why cell), or when it is an explicit part's nearest instance (why explicit). Otherwise culled. Built 2026-10-21:
+// in box mode a record that those two would cull is also kept (why reach) when its sphere overlaps the box: a bay door's panels have their centres to
+// one side of the box and reach well into it (flight log, fleet carrier, large bay: DoorA0 to DoorA3, radius 72.5 m, centres up to 42 m outside,
+// culled by the centre rule). A sphere that contains the camera is kept too: the first form of this rule culled it as the station's enclosing
+// structure, but DoorA1 and DoorA2 (radius 72.5 m) contain the camera at the pad and were still culled, and at a station where the seal engaged
+// (box 446 x 148 x 556 m) a census of the culled records found none overlapping the box, so the exception protected nothing. The capsule and
+// sphere cells judge the centre alone.
 inline NamedKeep keepNamedCell(const float centre[3], float radius, const float camera[3], float R, const OwnCell& cell,
                                const uintptr_t* explicitSet, size_t explicitN, uintptr_t addr) noexcept {
     NamedKeep v;
@@ -905,6 +922,15 @@ inline NamedKeep keepNamedCell(const float centre[3], float radius, const float 
     if (inAddrSet(explicitSet, explicitN, addr)) {
         v.keep = true;
         v.why = KeepWhy::kExplicit;
+        return v;
+    }
+    if (cell.box) {
+        float o[3];
+        boxCoords(centre, cell, o);
+        if (sphereOverlapsBox(o, radius, cell.boxHalf)) {
+            v.keep = true;
+            v.why = KeepWhy::kReach;
+        }
     }
     return v;
 }
@@ -1356,8 +1382,8 @@ inline uint64_t textKey(const char* s) noexcept {
     return h;
 }
 
-// Built v14.18 (2026-10-13, the store hook's identity gate): the admission store's sixteen prologue bytes in build 332841. store_hook.cpp detours
-// FUN_144312040 by them, and the identity check comes first.
+// Built v14.18 (2026-10-13, the store hook's identity gate): the admission store's sixteen prologue bytes in build 334925. store_hook.cpp detours
+// FUN_144314C60 by them, and the identity check comes first.
 inline constexpr uint8_t kStorePrologue[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE, 0xFF};
 
 // The store hook's install decision (store_hook.cpp installOnce). The identity (the PE TimeDateStamp and SizeOfImage the other build-keyed hooks
@@ -1749,18 +1775,33 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
 
 // Built v14.13: a docked pad with no sized shell. The no-hangar note is due once per dock (after kHangarNoteFrames frames without a shell). After
 // kNoShellGiveUpFrames the gather of the shell parts stops until undock or a new pad. A shell found resets the count.
+// Built 2026-10-23: the game putting the own pad in the hangar (r1 0 to 1) also starts the search over. A large pad docked by flying in sits on the
+// surface, out of the 150 m reach of HangerLarge (120.5 m from the lowered pad), for the 300 frames before it descends (log 20261023_093833).
 constexpr uint32_t kHangarNoteFrames = 60;
 constexpr uint32_t kNoShellGiveUpFrames = 300;
+
+enum class HangarWatchEvent : uint8_t { kNone = 0, kNote = 1, kGiveUp = 2, kRearm = 3 };
 
 struct HangarWatch {
     uint32_t missing = 0;
     bool giveUp = false;
     bool logged = false;
-    // One frame. Returns true on the frame the once-per-dock note is due.
-    bool step(bool shellFound, bool docked, bool padChanged) noexcept {
+    bool inHangar = false;   // the game's pad state on the last docked frame (r1 1)
+    // One frame. kNote on the frame the note is due, kGiveUp on the frame the gather stops, kRearm when the pad entering the hangar starts over a
+    // search that had given up or been noted.
+    HangarWatchEvent step(bool shellFound, bool docked, bool padChanged, bool padInHangar) noexcept {
         if (!docked) {
             *this = HangarWatch{};
-            return false;
+            return HangarWatchEvent::kNone;
+        }
+        const bool entered = padInHangar && !inHangar;
+        inHangar = padInHangar;
+        if (entered) {
+            const bool wasStopped = giveUp || logged;
+            missing = 0;
+            giveUp = false;
+            logged = false;
+            if (wasStopped && !shellFound) return HangarWatchEvent::kRearm;
         }
         if (padChanged) {
             missing = 0;
@@ -1768,15 +1809,18 @@ struct HangarWatch {
         }
         if (shellFound) {
             missing = 0;
-            return false;
+            return HangarWatchEvent::kNone;
         }
         if (missing < kNoShellGiveUpFrames) ++missing;
-        if (missing >= kNoShellGiveUpFrames) giveUp = true;
+        if (missing >= kNoShellGiveUpFrames && !giveUp) {
+            giveUp = true;
+            return HangarWatchEvent::kGiveUp;
+        }
         if (!logged && missing >= kHangarNoteFrames) {
             logged = true;
-            return true;
+            return HangarWatchEvent::kNote;
         }
-        return false;
+        return HangarWatchEvent::kNone;
     }
 };
 

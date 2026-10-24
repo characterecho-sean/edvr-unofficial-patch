@@ -144,7 +144,7 @@ inline bool vrCensusTangents(const VrCensusSig& sig, float out[4]) {
     return true;
 }
 
-// Rows 270..273 of the scene constant buffer as the composer (FUN_140596830) writes them for this camera (B): the
+// Rows 270..273 of the scene constant buffer as the composer (FUN_140596930) writes them for this camera (B): the
 // source axes rows (lane 3 masked to zero) times the projection, with the projection's own translation row last -- the
 // model's composeSceneCb, term for term. It is what the composer WOULD write given the derived blocks, so it is only
 // offered when the projection is clean (flag bit 4 clear): after the body ran, a dirty projection means the composer

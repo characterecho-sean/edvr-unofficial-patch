@@ -109,6 +109,7 @@ struct LegacyContract {
 #include "fixed_facing_shader_variants.h"
 #include "fixed_sharp_weapons_variants.h"
 #include "fixed_shield_ripple_variants.h"
+#include "fixed_glow_feed_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -328,6 +329,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), sharpWeapons.begin(), sharpWeapons.end());
     const auto shieldRipple = shieldRippleVariants();
     variants.insert(variants.end(), shieldRipple.begin(), shieldRipple.end());
+    const auto glowFeed = glowFeedVariants();
+    variants.insert(variants.end(), glowFeed.begin(), glowFeed.end());
     return variants;
 }
 
@@ -590,8 +593,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 71 && coreLegacy.size() + 24 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders and the shield ripple's door pass are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 73 && coreLegacy.size() + 26 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass and the star light pass are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -946,6 +949,57 @@ static void selfTest() {
                 }
                 check(ok, "the sharp weapons source pass: the vertex shader binds nothing, the pixel shader reads one texture at t0 and no constant buffer or sampler");
             }
+        }
+    }
+
+    // The flat HUD's bloom feed pass (src/d3d11/fixed_shader_source.h kUiGlowFeedPsHlsl): new, held to its own contract -- the symbol, source name, entry,
+    // profile and flags, the text it compiles, and the pixel stage ui_layer.cpp binds it with: the HUD layer at t0 and the scene at t1, no constant buffer and
+    // no sampler (the filter is made of Loads), so nothing of the game's sampler or constant state matters to it.
+    {
+        auto& shader = coreFixed[coreLegacy.size() + 24];
+        check(!std::strcmp(shader.symbol, "kUiGlowFeedPsBytecode") && !std::strcmp(shader.sourceName, "ui_glow_feed_ps") &&
+              !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "ps_5_0") && shader.alternate == edvr::kUiGlowFeedPsHlsl &&
+              shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+              "the HUD bloom feed pass has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+              "the HUD bloom feed pass compiles to fixed DXBC");
+        if (reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                       reinterpret_cast<void**>(reflection.GetAddressOf()));
+            bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_PIXEL_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5 &&
+                      desc.ConstantBuffers == 0 && desc.BoundResources == 2;
+            D3D11_SHADER_INPUT_BIND_DESC layer{}, scene{};
+            ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("HudLayer", &layer)) && layer.Type == D3D_SIT_TEXTURE && layer.BindPoint == 0 &&
+                 SUCCEEDED(reflection->GetResourceBindingDescByName("Scene", &scene)) && scene.Type == D3D_SIT_TEXTURE && scene.BindPoint == 1;
+            check(ok, "the HUD bloom feed pass: the pixel shader reads the HUD layer at t0 and the scene at t1, with no constant buffer or sampler");
+        }
+    }
+
+    // The star light pass (src/d3d11/fixed_shader_source.h kStarGlowAddPsHlsl; visual.star_glow): new, held to its own contract -- the symbol, source name,
+    // entry, profile and flags, the text it compiles, and the pixel stage ui_layer.cpp binds it with: the star layer at t0 and nothing else. Its weight is the
+    // blend factor of the state it draws with, so a constant buffer here would be a second weight and a sampler a filter over texels it must read as they are.
+    {
+        auto& shader = coreFixed[coreLegacy.size() + 25];
+        check(!std::strcmp(shader.symbol, "kStarGlowAddPsBytecode") && !std::strcmp(shader.sourceName, "star_glow_add_ps") &&
+              !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "ps_5_0") && shader.alternate == edvr::kStarGlowAddPsHlsl &&
+              shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+              "the star light pass has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+              "the star light pass compiles to fixed DXBC");
+        if (reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                       reinterpret_cast<void**>(reflection.GetAddressOf()));
+            bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_PIXEL_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5 &&
+                      desc.ConstantBuffers == 0 && desc.BoundResources == 1;
+            D3D11_SHADER_INPUT_BIND_DESC star{};
+            ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("Star", &star)) && star.Type == D3D_SIT_TEXTURE && star.BindPoint == 0;
+            check(ok, "the star light pass: the pixel shader reads the star layer at t0 and nothing else, with no constant buffer or sampler");
         }
     }
 

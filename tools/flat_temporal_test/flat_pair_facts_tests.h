@@ -42,7 +42,7 @@ inline int flatPairFactsTests() {
     for (const auto& m : engine_velocity_family::kSelfMarking) { h.push_back(m.vs); h.push_back(m.ps); }
     for (uint64_t x : {flat_mono_detail::kToneVs, flat_mono_detail::kToneVsNoConst, flat_mono_detail::kToneVsCbZ, flat_mono_detail::kTonePs,
                        flat_mono_detail::kToneDofCompositePs, flat_mono_detail::kToneBloomCompositePs, flat_mono_detail::kToneEdhmGradePs,
-                       flat_mono_detail::kCopyVs, flat_mono_detail::kCopyPs, kFlatUiMapToneVs, kFlatUiMapTonePs, kFlatUiSourceToneVsSteady,
+                       flat_mono_detail::kCopyVs, flat_mono_detail::kCopyPs, kFlatUiMapToneVs, kFlatUiMapTonePs, kFlatUiScannerTonePs, kFlatUiSourceToneVsSteady,
                        kFlatUiSourceToneVsTransition, kFlatUiSourceTonePs, kFlatUiSourceTonePsEdhm, kFlatUiMapCanvasVs, kFlatUiMapCanvasPs,
                        kFlatUiMapSpriteVs, kFlatUiMapSpritePsA, kFlatUiMapSpritePsB, kUiVsPanel, kUiVsLoader, kUiVsHolo, kUiVsFlightHud,
                        kUiVsSprite, kUiVsGuiVector, kUiVsGuiText})
@@ -65,6 +65,15 @@ inline int flatPairFactsTests() {
     expect(supported > 0 && familyVs > 0 && unsupportedFamilyVs > 0 && tone > 0 && mapTone > 0 && sourceTone > 0 && copyPair > 0 && uiAsk > 0,
            "the corpus reaches every fact (a keyed pair, a family VS with another PS, a tone pass, the map tonemap, a source tone, the copy, a UI family)");
     expect(profileDiffers > 0, "the profile changes an answer for some pair (a flat-only or VR-only family row), so a memo blind to it can be caught");
+
+    // ---- the Full System Scanner's tonemap is the UI layer's table alone ------------------------------------------------------
+    // (flatUiMapToneSlotOf: slot 0, like the map's). Not a registry tone, not an E894-layout source tone, not the copy, no UI family, and the
+    // same in both profiles: the resolve's tone selection, the target's tone record and the HDR route's trigger do not see a new pass.
+    for (bool flat : {true, false}) {
+        const FlatPairFacts f = flatPairFactsFresh(kFlatUiScannerToneVs, kFlatUiScannerTonePs, flat);
+        expect(f.mapToneSlot == 0u && f.toneSlot == ~0u && !f.sourceTone && !f.copyPair && !f.uiMayAsk && !f.supported,
+               "the scanner's tone (F9CFC798 / 6DE70EBB) answers only mapToneSlot = 0");
+    }
 
     // ---- equivalence and memoising ------------------------------------------------------------------------------------------
     auto compare = [&](auto& memo, unsigned* mismatches, uint64_t* queries) {

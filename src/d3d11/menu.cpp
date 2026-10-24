@@ -79,7 +79,7 @@
 
 namespace edvr {
 
-// The generated row table: every [fix] row tagged `menu`, and every
+// The generated row table: every [fix], [visual] and [menu] row tagged `menu`, and every
 // developer-tier key the code reads (tools/gen_settings_schema.py).
 #include "menu_schema.inc"
 
@@ -725,9 +725,9 @@ std::string afterRestartFacts(const ResolutionView& v) {
 }
 
 std::string openxrResolutionLabel(const ResolutionView& v) {
-    if (!v.headset) return "OpenXR res.";
+    if (!v.headset) return "Per eye resolution";
     char text[48];
-    snprintf(text, sizeof(text), "OpenXR res. %u px", v.width);
+    snprintf(text, sizeof(text), "Per eye resolution %u px", v.width);
     return text;
 }
 
@@ -1605,7 +1605,7 @@ void buildPages() {
     const size_t keepCount = s.pages.empty() ? 0 : s.pages[s.page].entries.size();
     s.pages.clear();
     if (runtimeFlatProfile()) {
-        // Two tabs (2026-10-16): Performance, the flat settings the panel always had, then Debug, last.
+        // Three tabs: Performance (the flat settings the panel always had), Visual (2026-10-22), then Debug (2026-10-16), last.
         {
             Page p;
             p.name = kFlatTabNames[0];
@@ -1623,12 +1623,29 @@ void buildPages() {
             firstSelectable(p);
             s.pages.push_back(p);
         }
+        {
+            // Visual (2026-10-22): the [visual] options, for everyone. The rows are the table in menu_flat_rows.h, kept in edvr.ini order whatever
+            // page their `menu` token names: Intro movie stays on VR's Fixes page, which has no Visual page, and Star glow's `menu visual` is the
+            // page only this panel builds.
+            Page p;
+            p.name = kFlatTabNames[1];
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                if (d.tier != MenuTier::Fix || !flatVisualHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
+        }
         // No Plugins tab: add-ons are VR-only, so in flat it could only be empty. The flat add-on follow-up adds it to kFlatTabNames with the
         // flat render path.
         {
             // Debug: for bug reports, both off by default. A heading says so; the rows are the `menu debug` rows named in kFlatDebugRows.
             Page p;
-            p.name = kFlatTabNames[1];
+            p.name = kFlatTabNames[2];
             Entry h;
             h.kind = EntryKind::Heading;
             h.text = "For bug reports. Both are off unless you turn them on.";

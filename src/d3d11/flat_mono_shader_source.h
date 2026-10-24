@@ -101,6 +101,26 @@ bool cameraBefore(float2 uv, float depth, out float4 before) {
     before=position.x*o0+position.y*o1+position.z*o2+iz*o3;
     return before.w>0 && all(isfinite(before));
 }
+// cameraBefore's inverse: the point that last frame's raster showed under `uv` (unjittered, last frame's) at `depth` (last frame's depth, the
+// same convention), where it stands in THIS frame. `after` is its clip position under this frame's rows, scaled as cameraBefore's `before` is:
+// after.xy/after.w is the NDC position, after.z/after.w the depth. It is cameraBefore with the two cameras exchanged: the position is solved
+// with last frame's rows and carries last frame's camera origin, so the origin term reverses and the projection uses this frame's rows.
+bool cameraAfter(float2 uv, float depth, out float4 after) {
+    float4 n0=unjitterRow(now[0],rowsJitter.xy), n1=unjitterRow(now[1],rowsJitter.xy);
+    float4 n2=unjitterRow(now[2],rowsJitter.xy), n3=unjitterRow(now[3],rowsJitter.xy);
+    float4 o0=unjitterRow(old[0],rowsJitter.zw), o1=unjitterRow(old[1],rowsJitter.zw);
+    float4 o2=unjitterRow(old[2],rowsJitter.zw), o3=unjitterRow(old[3],rowsJitter.zw);
+    float3 a=float3(o0.x,o1.x,o2.x);
+    float3 b=float3(o0.y,o1.y,o2.y);
+    float3 c=float3(o0.w,o1.w,o2.w);
+    float3 ca=cross(b,c), cb=cross(c,a), cc=cross(a,b);
+    float det=dot(a,ca), iz=depth/o3.z;
+    float3 rhs=float3(uv*float2(2,-2)+float2(-1,1),1)-o3.xyw*iz;
+    float3 position=(ca*rhs.x+cb*rhs.y+cc*rhs.z)/det;
+    position-=(now[5].xyz-old[5].xyz)*iz;
+    after=position.x*n0+position.y*n1+position.z*n2+iz*n3;
+    return after.w>0 && all(isfinite(after));
+}
 )HLSL"
 R"HLSL(
 // Planet patch motion (celestial_motion.h; docs/terrain-motion-dispatch-cost-2026-09-17.md). 0: the pixel is in no body's
@@ -140,7 +160,69 @@ uint celestialBefore(float2 rawUv, float depth, out float4 before) {
 // doc). True = confirmed; false = refused: the prep refuses the stale slot's history, as it always did, and taa() shows the current
 // colour. The prep calls it for a stale pixel whose camera term was already formed and in range, and only then; taa() for a pixel the
 // prep did not reject.
+// The best of four is a point test, and a point test has an error floor on a slope. A far floor seen at a grazing angle is a plane, and the
+// depth of a plane is affine in screen space (reversed-Z, d = near/z), so across delta pixels it changes by about delta/y of itself, y being
+// the rows below the horizon. The nearest texel is up to half a texel of jitter away from the exact position, so within about 33 rows of the
+// horizon at 960x600 it is off by more than 1% in most frames and a still camera showed those rows raw. When the point test refuses, the
+// four texels are asked once more as a footprint: they confirm the surface if they lie on one plane (the cross difference
+// d00+d11-d10-d01, zero for any plane, is within the tolerance) and their bilinear value at the exact position is within the tolerance of
+// `expected`. A slope is exactly bilinear and passes. A step in depth is not a plane: a corner or a
+// diagonal edge has a large cross difference, and an edge along one axis leaves a bilinear value between the two sides that is not the
+// surface's depth. A disocclusion or a mover shows another depth and fails the second test. The tolerance is `expected`'s for both: it is
+// the pixel being validated that defines it, never the texels, whose magnitude an occluder inflates. Only a footprint wholly inside the
+// image whose four texels are finite and non-zero (no sky, no cleared texel, no clamped copy of an edge texel) takes this path; anywhere
+// else the answer is the point test's.
+// A third test serves a junction. A footprint that straddles two surfaces (a far floor meeting a wall, the floor under a parked hull's
+// edge) is not one plane, so the footprint test refuses it, and a still camera showed thin lines there. Refusing is right for a
+// disocclusion, where an object left the floor and the history colour at its edge is the object's, but a junction that is still there
+// must be told apart from it, and two things do, both required. (1) The pixel's own surface is in the history: one of the four quads
+// of texels edge-adjacent to the footprint (the 2x2 moved one texel right, left, down, up, asked in that order and the first that
+// qualifies is the one) lies wholly in the image, holds four finite non-zero texels, is planar (the same cross difference within the
+// same tolerance) and its plane, extrapolated to the exact previous raster position, has the expected depth within the tolerance.
+// (2) Every other surface in the footprint persists: a footprint texel more than the tolerance from that plane is another surface, and
+// it is carried into this frame (cameraAfter: its own unjittered position under the previous phase, its history depth, last frame's
+// rows to this frame's), where the best of the four SceneDepth texels around it must hold its depth within 1% (floor 1e-6) of the
+// projected depth. A parked hull or a wall is still there, so the pixel is kept; where an object moved away its texels now show the floor
+// behind it, so the pixel is refused. A texel that lands outside the image (the four texels it is read from wholly inside), behind the
+// camera or not finite refuses, as does any quad that leaves the image or holds a zero or non-finite texel. The history depth carries
+// the SDK foreground map's scale (foregroundDepth.x, debug.w bit 1) and SceneDepth does not; the scale is divided out first. A surface
+// that moved less than a texel between two frames cannot be told from one that did not, here as in the point test.
+)HLSL"
+R"HLSL(
 static const float kStaleDepthRel=.01, kStaleDepthFloor=1e-6;   // named for the rule they were written for; taa() shares them
+float4 historyQuad(int2 at) {   // the 2x2 texels from `at`: d00, d10, d01, d11
+    return float4(HistoryDepth.Load(int3(at,0)),HistoryDepth.Load(int3(at+int2(1,0),0)),HistoryDepth.Load(int3(at+int2(0,1),0)),HistoryDepth.Load(int3(at+int2(1,1),0)));
+}
+float quadDepthAt(float4 quad,float2 at) {return lerp(lerp(quad.x,quad.y,at.x),lerp(quad.z,quad.w,at.x),at.y);}   // at outside [0,1] extrapolates
+bool junctionPersists(int2 base,float2 raster,float4 footprint,float expected,float tol) {
+    const int2 hi=int2(size.xy)-1;
+    float4 own=0; int2 ownBase=0; bool found=false;
+    [unroll]for(int i=0;i<4;++i) {
+        const int2 at=base+(i==0?int2(1,0):(i==1?int2(-1,0):(i==2?int2(0,1):int2(0,-1))));
+        if(found || any(at<0) || any(at>=hi))continue;
+        const float4 quad=historyQuad(at);
+        if(!all(isfinite(quad)) || !all(quad>0))continue;
+        if(!(abs(quad.x+quad.w-quad.y-quad.z)<=tol) || !(abs(quadDepthAt(quad,raster-float2(at))-expected)<=tol))continue;
+        own=quad; ownBase=at; found=true;
+    }
+    if(!found)return false;
+    const float depthScale=(debug.w&2)!=0?foregroundDepth.x:1.0;
+    [loop]for(int k=0;k<4;++k) {
+        const int2 texel=base+int2(k&1,k>>1);
+        const float depthThen=footprint[k];
+        if(abs(depthThen-quadDepthAt(own,float2(texel-ownBase)))<=tol)continue;
+        float4 after;
+        if(!cameraAfter((float2(texel)+.5-jitter.zw)/float2(size.xy),depthThen/depthScale,after))return false;
+        const float e=after.z/after.w;
+        const float2 cur=(after.xy/after.w*float2(.5,-.5)+.5)*float2(size.xy)+jitter.xy-.5;
+        if(!isfinite(e) || !all(cur>=0) || !all(cur<float2(hi)))return false;
+        const int2 curBase=int2(floor(cur));
+        float best=3.402823e38;
+        [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)best=min(best,abs(SceneDepth.Load(int3(curBase+int2(x,y),0))-e));
+        if(!(best<=max(kStaleDepthFloor,e*kStaleDepthRel)))return false;
+    }
+    return true;
+}
 bool historyDepthMatches(float2 prev,float expected) {
     const int2 hi=int2(size.xy)-1;
     const float2 raster=prev*float2(size.xy)+jitter.zw-.5;   // the previous raster position in texel-centre coordinates: the 2x2 below surrounds it
@@ -148,7 +230,16 @@ bool historyDepthMatches(float2 prev,float expected) {
     const float tol=max(kStaleDepthFloor,expected*kStaleDepthRel);
     float best=3.402823e38;
     [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)best=min(best,abs(HistoryDepth.Load(int3(clamp(base+int2(x,y),0,hi),0))-expected));
-    return best<=tol;
+    if(best<=tol)return true;
+    if(any(base<0) || any(base>=hi))return false;
+    const float d00=HistoryDepth.Load(int3(base,0)), d10=HistoryDepth.Load(int3(base+int2(1,0),0));
+    const float d01=HistoryDepth.Load(int3(base+int2(0,1),0)), d11=HistoryDepth.Load(int3(base+int2(1,1),0));
+    const float4 footprint=float4(d00,d10,d01,d11);
+    if(!all(isfinite(footprint)) || !all(footprint>0))return false;
+    const float2 at=raster-float2(base);
+    const float planeDepth=lerp(lerp(d00,d10,at.x),lerp(d01,d11,at.x),at.y);
+    if(abs(planeDepth-expected)<=tol && abs(d00+d11-d10-d01)<=tol)return true;
+    return junctionPersists(base,raster,footprint,expected,tol);
 }
 // 0 = camera term, 1 = exact engine motion, 2 = explicitly reject history, 3 = the camera term if the depth check confirms it (a stale
 // slot with flags.w==2). `cls` is what the pixel is (kClass*): the refusal census and view read it, nothing else does, and no return

@@ -410,8 +410,11 @@ inline int flatCopyStructureTests() {
                     if (asked.diag.outcome == FlatCopyOutcome::Admitted && asked.admitted.selected()) ++unknownAdmitted;
                 } else {
                     ++noScene;
+                    // The whitelist found no HDR writes at all (a 2D menu draws none): with no scene in the frame that is no-3d-scene too,
+                    // asked as a tone refusal or as the whitelist left it.
                     if (asked.diag.outcome == FlatCopyOutcome::NoScene && asked.admitted.reason == FlatMonoReason::NoScene &&
-                        real.diag.outcome == FlatCopyOutcome::Untouched && real.admitted.reason == real.whitelist.reason)
+                        real.whitelist.reason == FlatMonoReason::NoHdr &&
+                        real.diag.outcome == FlatCopyOutcome::NoScene && real.admitted.reason == FlatMonoReason::NoScene)
                         ++noSceneAsked;
                 }
                 if (asked.admitted.selected()) ++admittedAny;
@@ -430,7 +433,8 @@ inline int flatCopyStructureTests() {
         expect(leftover == 0, "with the key off the structure leaves every frame with a scene alone");
         expect(unknownAdmitted == 3 && unknownRouteServes == 3,
                "the 3 Bloom 3 / DoF 2 frames are admitted by structure as the copy route's, and at R = D the HDR route serves them");
-        expect(noSceneAsked == 1, "the 2D menu frame has no scene: asked as a refusal it is no-3d-scene, as the whitelist left it it is untouched");
+        expect(noSceneAsked == 1, "the 2D menu frame has no scene: asked as a tone refusal it is no-3d-scene, and as the whitelist left it "
+                                  "(no-observed-hdr-writes) it is no-3d-scene as well");
         expect(admittedAny == 45, "45 of 46 frames are admitted by structure when asked");
     }
 
@@ -925,8 +929,8 @@ inline int flatCopyStructureTests() {
                    count(runtime, "policy.routeLatched = s.hdrLatch.tripped;") == 1 &&
                    count(runtime, "flatCopyAdmit(s.prefix, s.hdr, d, whitelist, policy, &diag)") == 1,
                "the policy is the route's key, the mode and the latch; the admission reads the prefix and the detector as they stand");
-        expect(count(runtime, "if (whitelist.selected()) s.copyWindow.noteWhitelist(); else s.copyWindow.note(diag);") == 1,
-               "every ruling is counted, the whitelist's frames apart");
+        expect(count(runtime, "if (whitelist.selected() && diag.outcome != FlatCopyOutcome::NoScene) s.copyWindow.noteWhitelist(); else s.copyWindow.note(diag);") == 1,
+               "every ruling is counted, the whitelist's frames apart (a selected blank scene the copy route calls no-scene is counted as that)");
         expect(count(runtime, "flatCopyFormatWindow(copyText, sizeof(copyText), s.hdrKey == FlatHdrKey::Auto, s.copyWindow);\n"
                               "            Log::get().note(\"%s\", copyText);\n            s.copyWindow.reset();") == 1,
                "the census line prints every window while a temporal mode runs, and the window resets with it");

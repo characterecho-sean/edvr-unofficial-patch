@@ -1,4 +1,4 @@
-// The intro's THREE keys -- fix.intro_video, fix.intro_backdrop,
+// The intro's THREE keys -- visual.intro_video, fix.intro_backdrop,
 // fix.loading_dim -- each one function, parsed here for every module that
 // consumes a slice of one.
 //
@@ -8,7 +8,7 @@
 // user wants half of any of these, so the surface is now the function
 // (one key that names the function, not the mechanisms):
 //
-//   fix.intro_video = screen | stock | skip
+//   visual.intro_video = screen | stock | skip
 //     screen  the movie plays on the splash's own screen -- world-anchored,
 //             splash-sized, FSR-resampled to the vscreen resolution (the
 //             default)

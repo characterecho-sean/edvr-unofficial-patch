@@ -24,14 +24,14 @@
 namespace edvr {
 namespace {
 
-// --- Identity: build 332841, the same pair pose_reader_watch.cpp keys on (and
+// --- Identity: build 334925, the same pair pose_reader_watch.cpp keys on (and
 // the transition_flash_prevent.cpp removed 2026-09-29 did). Kept as this
 // file's own copy rather than a shared constant -- the copy-culture rule -- so
 // neither is touched by a change in the other.
-constexpr uint32_t kExpectedTimestamp = 1788384820u;
-constexpr uint32_t kExpectedImageSize = 104894464u;
+constexpr uint32_t kExpectedTimestamp = 1792704584u;
+constexpr uint32_t kExpectedImageSize = 104906752u;
 
-// The consumer, FUN_1428431d0 (design doc, "Static round 6"). First 16 bytes
+// The consumer, FUN_142845730 (design doc, "Static round 6"). First 16 bytes
 // verified two ways: analysis\decomp\flash\r6\follow_28431D0.txt's own
 // disassembly dump, and independently by walking analysis\
 // EliteDangerous64.exe's own PE section table (RVA -> file offset via
@@ -39,7 +39,7 @@ constexpr uint32_t kExpectedImageSize = 104894464u;
 // committed here. `40 55 53 56 48 8D AC 24 50 E8 FF FF` is PUSH RBP; PUSH
 // RBX; PUSH RSI; LEA RBP,[RSP-0x17B0] -- CodeHook steals all four
 // instructions (12 bytes) to cover its 5-byte patch.
-constexpr uintptr_t kConsumerRva = 0x28431D0u;
+constexpr uintptr_t kConsumerRva = 0x2845730u;
 constexpr uint8_t kConsumerBytes[16] = {
     0x40, 0x55, 0x53, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x50, 0xE8, 0xFF, 0xFF, 0xB8, 0xB0, 0x18, 0x00};
 
@@ -72,7 +72,7 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
         std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
         std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
         if (timestamp != kExpectedTimestamp || imageSize != kExpectedImageSize) {
-            *why = "not build 332841 (PE timestamp/size mismatch)";
+            *why = "not build 334925 (PE timestamp/size mismatch)";
             return false;
         }
         return true;
@@ -166,7 +166,7 @@ std::atomic<uintptr_t> g_relayGate{0};
 
 bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) noexcept {
     if (!sehCheckBytes(base + entry.rva, expectedBytes, 16)) {
-        entry.failReason = "prologue mismatch at this RVA (not build 332841's shape)";
+        entry.failReason = "prologue mismatch at this RVA (not build 334925's shape)";
         return false;
     }
     entry.relay = allocateRelay(base + entry.rva);
@@ -189,10 +189,10 @@ bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) 
 }
 
 // --- The detour. Verified argument count two ways: the decompiler's own
-// signature recovery (void FUN_1428431d0(longlong,int,longlong), from
+// signature recovery (void FUN_142845730(longlong,int,longlong), from
 // analysing the callee body directly -- no R9/stack reference anywhere in
-// it) and both direct callers' actual call sites: FUN_142868c30 passes
-// exactly (this+0x1188, 2, *(this+0x11C0)); FUN_14287b030 passes exactly
+// it) and both direct callers' actual call sites: FUN_14286b190 passes
+// exactly (this+0x1188, 2, *(this+0x11C0)); FUN_14287d5a0 passes exactly
 // (rsi, r8+1, ...) with RCX/EDX freshly loaded right before the CALL and R8
 // unchanged from whatever it already held -- an R9D zero immediately before
 // that second call site is unrelated to it (the callee never reads R9; it is
@@ -285,7 +285,7 @@ void armEvent(uint32_t frame) noexcept {
 // with a synthetic mailbox (transitionFlashEyeBaseConsumeForTest).
 void noteConsume(int32_t gameMode, const float m[16]) noexcept {
     const bool unrefilled = (gameMode != 1) && tfeb::isResetMailbox(m);
-    // A CAS loop, not load-then-store: FUN_142868c30 and FUN_14287b030 can both
+    // A CAS loop, not load-then-store: FUN_14286b190 and FUN_14287d5a0 can both
     // consume on one frame, so this is not single-writer. `cur` is the streak
     // as it stood BEFORE this call folded in.
     uint32_t cur = g_ebConsecutiveUnrefilled.load(std::memory_order_relaxed);
@@ -442,13 +442,13 @@ void doInstall() noexcept {
         glitchFrameNoteEngineFix(true);
         Log::get().note(
             "transition flash: engine fix armed. "
-            "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x28431D0: installed.",
+            "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x2845730: installed.",
             kExpectedTimestamp, kExpectedImageSize);
     } else {
         glitchFrameNoteEngineFix(false);
         Log::get().note(
             "transition flash: engine fix NOT armed -- the consumer hook did not install. "
-            "consumer 0x28431D0: %s. %s", g_consumerEntry.failReason, kNoProtection);
+            "consumer 0x2845730: %s. %s", g_consumerEntry.failReason, kNoProtection);
     }
 }
 

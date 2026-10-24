@@ -4,15 +4,15 @@
 // (tools/ui_quality_test) both include this one file.
 //
 // THE CONFIRMATION INSTRUMENT (the doc's section 8). Every Scaleform
-// render-to-texture panel is sized in FUN_144570500 (init) or FUN_144571180
+// render-to-texture panel is sized in FUN_144572FA0 (init) or FUN_144573C20
 // (a view change) as stage x s, s = c/1920 with c = W_ui x k and
 // k = tan(0.782)/tan(vFOV/2), and created through one chain of calls. A
 // create's return-address chain -- the game's own frames, innermost first --
-// says whether it is one: `rtt` when it holds both 0x4551C7D and 0x45517F6,
-// tagged `init` (0x4570902) or `change` (0x456DA45) and `colour` (0x28148A9)
-// or `depth` (0x2814686); `glyph-cache` when it holds Scaleform's raster
-// cache's texture maker's returns, 0x30FC1A (init) or 0x312450 (re-create);
-// `other` otherwise. Every RVA is EliteDangerous64.exe build 332841's.
+// says whether it is one: `rtt` when it holds both 0x455471D and 0x4554296,
+// tagged `init` (0x45733A2) or `change` (0x45704E5) and `colour` (0x2816E29)
+// or `depth` (0x2816C06); `glyph-cache` when it holds Scaleform's raster
+// cache's texture maker's returns, 0x30FCBA (init) or 0x3124F0 (re-create);
+// `other` otherwise. Every RVA is EliteDangerous64.exe build 334925's.
 #pragma once
 
 #include <cmath>
@@ -53,10 +53,10 @@ inline bool uiChainHas(const UiChain& c, uint32_t rva) {
 }
 
 // The RVAs the verdict reads (section 8), in the order the line names them.
-constexpr uint32_t kUiRvaRttMid = 0x4551C7D, kUiRvaRttOuter = 0x45517F6;
-constexpr uint32_t kUiRvaInit = 0x4570902, kUiRvaChange = 0x456DA45;
-constexpr uint32_t kUiRvaColour = 0x28148A9, kUiRvaDepth = 0x2814686;
-constexpr uint32_t kUiRvaGlyphInit = 0x30FC1A, kUiRvaGlyphRecreate = 0x312450;
+constexpr uint32_t kUiRvaRttMid = 0x455471D, kUiRvaRttOuter = 0x4554296;
+constexpr uint32_t kUiRvaInit = 0x45733A2, kUiRvaChange = 0x45704E5;
+constexpr uint32_t kUiRvaColour = 0x2816E29, kUiRvaDepth = 0x2816C06;
+constexpr uint32_t kUiRvaGlyphInit = 0x30FCBA, kUiRvaGlyphRecreate = 0x3124F0;
 constexpr uint32_t kUiChainKeys[] = {kUiRvaRttMid, kUiRvaRttOuter, kUiRvaInit, kUiRvaChange,
                                      kUiRvaColour, kUiRvaDepth, kUiRvaGlyphInit,
                                      kUiRvaGlyphRecreate};
@@ -84,7 +84,7 @@ inline UiChainVerdict uiChainVerdict(const UiChain& c) {
     return v;
 }
 
-// "0x51AF6B/0x50EC69/..." (at most 12 x 10 characters).
+// "0x51B06B/0x50ED69/..." (at most 12 x 10 characters).
 inline void uiChainFormat(const UiChain& c, char* out, size_t n) {
     if (!out || !n) return;
     out[0] = '\0';
@@ -111,7 +111,7 @@ inline const char* uiChainVerdictShort(const UiChainVerdict& v) {
 }
 
 // "rtt init colour" / "glyph-cache" / "other", then every key's hit or miss:
-// "(0x4551C7D yes, 0x45517F6 yes, 0x4570902 yes, 0x456DA45 no, ...)".
+// "(0x455471D yes, 0x4554296 yes, 0x45733A2 yes, 0x45704E5 no, ...)".
 inline void uiChainVerdictText(const UiChainVerdict& v, char* out, size_t n) {
     if (!out || !n) return;
     const char* kind = v.kind == UiChainKind::kRtt          ? "rtt"
@@ -155,8 +155,8 @@ inline double uiImpliedStage(uint32_t dim, uint32_t renderW, double k) {
 // ------------------------------------------------ the engine-side sizing --
 //
 // THE PATCH (the trace's section 3). The panel formula's two divisions,
-// inlined in the init FUN_144570500 and the view-change recompute
-// FUN_144571180, are `divss xmm6, [rip+disp32]` against the game's 1080.0f
+// inlined in the init FUN_144572FA0 and the view-change recompute
+// FUN_144573C20, are `divss xmm6, [rip+disp32]` against the game's 1080.0f
 // and 1920.0f. Pointing the four disp32s at EDVR's own two floats, 1080 x f
 // and 1920 x f, makes the game itself create, lay out, viewport and depth-
 // partner every render-to-texture panel at s / f: an operand swap, no length
@@ -180,17 +180,17 @@ constexpr uint32_t kUiPanelCmpDisp = 3, kUiPanelCmpNext = 7;
 constexpr uint32_t kUiPanel1080Disp = 13, kUiPanel1080Next = 17;
 constexpr uint32_t kUiPanel1920Disp = 26, kUiPanel1920Next = 30;
 
-// Build 332841 (EliteDangerous64.exe, PE stamp 1788384820, image 104894464).
-constexpr uint32_t kUiPanelStamp = 1788384820u, kUiPanelImageSize = 104894464u;
-constexpr uint32_t kUiPanelSiteRva[2] = {0x45706FA, 0x4571205};  // init, view change
+// Build 334925 (EliteDangerous64.exe, PE stamp 1792704584, image 104906752).
+constexpr uint32_t kUiPanelStamp = 1792704584u, kUiPanelImageSize = 104906752u;
+constexpr uint32_t kUiPanelSiteRva[2] = {0x457319A, 0x4573CA5};  // init, view change
 constexpr uint8_t kUiPanelSiteBytes[2][30] = {
-    {0x0F, 0x2F, 0x05, 0x83, 0x26, 0xD8, 0x00, 0x72, 0x0A, 0xF3, 0x0F, 0x5E, 0x35, 0x55, 0xDF,
-     0x86, 0x00, 0xEB, 0x0B, 0x0F, 0x28, 0xF1, 0xF3, 0x0F, 0x5E, 0x35, 0x4C, 0xDF, 0x86, 0x00},
-    {0x0F, 0x2F, 0x05, 0x78, 0x1B, 0xD8, 0x00, 0x72, 0x0A, 0xF3, 0x0F, 0x5E, 0x35, 0x4A, 0xD4,
-     0x86, 0x00, 0xEB, 0x0B, 0x0F, 0x28, 0xF1, 0xF3, 0x0F, 0x5E, 0x35, 0x41, 0xD4, 0x86, 0x00}};
-constexpr uint32_t kUiPanelAspectRva = 0x52F2D84, kUiPanel1080Rva = 0x4DDE660,
-                   kUiPanel1920Rva = 0x4DDE664;
-constexpr uint32_t kUiPanelFuncRva[2] = {0x4570500, 0x4571180};
+    {0x0F, 0x2F, 0x05, 0x73, 0x2D, 0xD8, 0x00, 0x72, 0x0A, 0xF3, 0x0F, 0x5E, 0x35, 0xFD, 0xE4,
+     0x86, 0x00, 0xEB, 0x0B, 0x0F, 0x28, 0xF1, 0xF3, 0x0F, 0x5E, 0x35, 0xF4, 0xE4, 0x86, 0x00},
+    {0x0F, 0x2F, 0x05, 0x68, 0x22, 0xD8, 0x00, 0x72, 0x0A, 0xF3, 0x0F, 0x5E, 0x35, 0xF2, 0xD9,
+     0x86, 0x00, 0xEB, 0x0B, 0x0F, 0x28, 0xF1, 0xF3, 0x0F, 0x5E, 0x35, 0xE9, 0xD9, 0x86, 0x00}};
+constexpr uint32_t kUiPanelAspectRva = 0x52F5F14, kUiPanel1080Rva = 0x4DE16A8,
+                   kUiPanel1920Rva = 0x4DE16AC;
+constexpr uint32_t kUiPanelFuncRva[2] = {0x4572FA0, 0x4573C20};
 constexpr uint8_t kUiPanelProlog0[11] = {0x40, 0x55, 0x56, 0x57, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00};
 constexpr uint8_t kUiPanelProlog1[13] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x40, 0x4C,
                                          0x8B, 0x81, 0xF8, 0x00, 0x00, 0x00};
@@ -249,7 +249,7 @@ inline bool uiPanelDisp(uint64_t next, uint64_t target, int32_t* disp) {
 // (docs/ui-layer-2026-09-23.md, "2026-10-07: Supersampling and the panel budget"):
 //   * the UI screen record carries two sizes, +0x40 (the base: the VR manager's trunc(recommended x HMD
 //     Quality), the display, or a 2D-mode override) and +0x30 = trunc(+0x40 x scale), the scale being the
-//     SSAAMultiplier entry of the .fxcfg (FUN_14284CB70 and FUN_14288E3A0 write both; FUN_142842A70 reads
+//     SSAAMultiplier entry of the .fxcfg (FUN_14284F0D0 and FUN_142890920 write both; FUN_142844FD0 reads
 //     c = max(+0x30, +0x40) x k). The scene's own views are sized from +0x30 too.
 //   * so the game's c is linear in Supersampling, per axis: at Supersampling S > 1 every panel the game makes
 //     is S times wider than W_ui x k says, and EDVR's f (made from W_ui x k) must carry the same S or the
@@ -269,7 +269,7 @@ struct UiPanelInputs {
     float fovTangent = 0.0f;  // 2 tan(vFOV/2) of the frustum the game is told
     uint32_t outputW = 0;     // W_out: the runtime's untrimmed recommendation
     float trueTangent = 0.0f; // 2 tan(vFOV/2) of the true display frustum
-    float target = 0.0f;      // T: fix.ui_quality's 100 or 125, as 1.0 or 1.25
+    float target = 0.0f;      // T: fix.ui_quality's 100, 125, 150 or 200, as 1.0, 1.25, 1.5 or 2.0
     float supersampling = 0.0f;  // the .fxcfg's SSAAMultiplier; 0 while unknown (then there is no factor)
     uint32_t displayW = 0;    // the game window's width (DisplaySettings.xml); 0 unknown (the observed base stands)
     uint32_t screenW = 0;     // the 2D screen's forced width (fix.vscreen_res_width, applied); 0 none
@@ -373,7 +373,7 @@ inline bool uiPanelFactor(const UiPanelInputs& in, double* f, UiPanelClamp* clam
 // ------------------------------------------------------------ the flat profile's factor (2026-10-09) --
 //
 // In the flat profile the panel formula's (c, d) are the UI screen record's width and height with k = 1
-// (FUN_142842A70 asks the VR manager for k only in the VR modes): the scene's render size R, Supersampling already in
+// (FUN_142844FD0 asks the VR manager for k only in the VR modes): the scene's render size R, Supersampling already in
 // it. Measured on the 2026-10-09 09:36 Epic flight (771bb99a, D 3840x2160 throughout): the same rtt-init panel was
 // created 1920x960 while R was 3840x2160 and 960x480 once R was 1920x1080 -- the panels follow R, not the display D.
 // The game divides by 1080 when c/d is not below 16/9 (the comiss/jb at both sites), by 1920 when it is; the ratio is
@@ -384,7 +384,7 @@ inline bool uiPanelFactor(const UiPanelInputs& in, double* f, UiPanelClamp* clam
 struct UiFlatPanelInputs {
     uint32_t renderW = 0, renderH = 0;  // R: the scene the game renders (the flat runtime's own measurement)
     uint32_t outputW = 0, outputH = 0;  // D: the swap chain's back buffer
-    float target = 0.0f;                // T: 1.0 or 1.25
+    float target = 0.0f;                // T: 1.0, 1.25, 1.5 or 2.0
 };
 // fix.ui_quality follows temporal AA in both profiles (2026-10-13): with AA off the panels are the game's own size, as at
 // ui_quality off. The edge between two readings of the AA gate is what the render thread logs once per change.
@@ -645,13 +645,13 @@ inline uint32_t uiPanelSize(uint32_t stage, double c, float divisor1920) {
 // 2026-10-08. 6b1ce794 read the Supersampling from the .fxcfg every 5 s, so a change in the game's graphics menu
 // could reach the panels before the factor knew. The value the game acts on is the scale entry of its render
 // context, ctx+0x3564 (docs/ui-layer-2026-09-23.md, "2026-10-07: Supersampling and the panel budget"), clamped
-// to [ctx+0x3568, ctx+0x356C] by FUN_1428767D0, the setter, which is virtual slot +0x90 of the context's
-// interface class (vtable 0x52E9020; slot RVA 0x52E90B0). The interface object holds the context at this+0x18;
-// the setter's sibling at +0x98 (0x28414E0) reads ctx+0x359C, the scale the last configure used. EDVR replaces
+// to [ctx+0x3568, ctx+0x356C] by FUN_142878D40, the setter, which is virtual slot +0x90 of the context's
+// interface class (vtable 0x52EC1B0; slot RVA 0x52EC240). The interface object holds the context at this+0x18;
+// the setter's sibling at +0x98 (0x2843A40) reads ctx+0x359C, the scale the last configure used. EDVR replaces
 // both slots with thunks that forward untouched and remember the context (and, at the setter, move the
 // factor before the original runs: the game's reconfigure follows the setter, never precedes it).
-constexpr uint32_t kUiSsSetterSlotRva = 0x52E90B0, kUiSsGetterSlotRva = 0x52E90B8;
-constexpr uint32_t kUiSsSetterRva = 0x28767D0, kUiSsGetterRva = 0x28414E0;
+constexpr uint32_t kUiSsSetterSlotRva = 0x52EC240, kUiSsGetterSlotRva = 0x52EC248;
+constexpr uint32_t kUiSsSetterRva = 0x2878D40, kUiSsGetterRva = 0x2843A40;
 constexpr uint32_t kUiSsCtxFromThis = 0x18;
 constexpr uint32_t kUiSsOffCur = 0x3564, kUiSsOffMin = 0x3568, kUiSsOffMax = 0x356C;
 constexpr uint8_t kUiSsSetterBytes[38] = {0x48, 0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x10, 0x80, 0x68, 0x35, 0x00, 0x00, 0x0F,

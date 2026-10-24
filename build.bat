@@ -213,10 +213,13 @@ python tools\run_jobs.py ^
     --gate "tools\build_receipt.py --self-test" ^
     --gate "tools\build_lock.py --self-test" ^
     --gate "tools\worktree.py --self-test" ^
+    --gate "tools\steam_library.py --self-test" ^
     --gate "tools\release_credits.py --self-test" ^
     --gate "tools\flash_patch_residual.py --self-test" ^
     --gate "tools\check_status_blocks.py --self-test" ^
     --gate "tools\check_status_blocks.py" ^
+    --gate "tools\check_agent_material.py --self-test" ^
+    --gate "tools\check_agent_material.py" ^
     --gate "tools\layer_fixtures.py --self-test" ^
     --gate "tools\blackhole_optics.py --self-test" ^
     --gate "tools\sgra_optics.py --self-test" ^
@@ -600,6 +603,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
+    "src\d3d11\mem_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
@@ -664,7 +668,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_star_glow.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -797,7 +801,7 @@ REM whose window is a child of a message-only one.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test,config_test ^
     --after openxr_module_test=openxr_exports_test ^
     --after flat_mono_resolve_shard1=flat_mono_resolve_test ^
     --after flat_mono_resolve_shard2=flat_mono_resolve_test ^
@@ -1332,6 +1336,26 @@ if errorlevel 1 ( echo [edvr] ERROR: vram_watch_test build failed & exit /b 1 )
 python "tools\vram_watch_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_mem_watch_test
+echo [edvr] === mem_watch_test.exe ===
+REM Build gate for the process memory watch (src\common\mem_watch.h, src\common\log_reserve.h, src\d3d11\mem_tick.cpp,
+REM docs\memory-growth-2026-10-22.md): the cadence (a line every 60 s, every 5 s while the machine's commit is at or over 90% of
+REM its limit, the armed line first whatever the figures), the lines' text (whole MB rounded, a group that cannot be read left out
+REM and named once in the armed line, egpu=implausible and eheap=implausible, every line inside its buffer), the plausibility
+REM checks on the figures read out of Elite's memory (each rejection), the log's post-cap reserve accounting (1 MiB, one notice,
+REM then nothing), and by source text that hookedPresent calls memWatchTick once after the graphics memory watch's tick, that
+REM every mem: line is written through Log::noteReserved, and that build.bat compiles the glue. It links nothing of the DLLs.
+if not exist "%OBJ%\memwatch" mkdir "%OBJ%\memwatch"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\memwatch"\ /Fe"%OBJ%\memwatch\mem_watch_test.exe" ^
+    "tools\mem_watch_test\mem_watch_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: mem_watch_test build failed & exit /b 1 )
+"%OBJ%\memwatch\mem_watch_test.exe" --dry-run || exit /b 1
+"%OBJ%\memwatch\mem_watch_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_skin_ledger_test
 echo [edvr] === skin_ledger_test.exe ===
 REM Build gate for the skin ledger (src\d3d11\skin_ledger.h, the F2 settling instrument that rides an armed eye run;
@@ -1747,6 +1771,7 @@ python "tools\flat_camera_vr_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_config_test
+if "%EDVR_RIG_STEP%"=="run" goto config_test_run
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
@@ -1755,6 +1780,10 @@ REM and every symptom of either being false shows up in the game rather than
 REM in a build. It also registers the generated config_contract_gen.h tables
 REM (the moved-from map parsed from the real edvr.ini), so a moved key's read-
 REM through is proven against what actually shipped, not a fixture.
+REM Its share-delete probe has to land a thread inside a reload that holds the file for
+REM tens of microseconds, so it needs cores the rest of the pool is not using (run
+REM 39799347142: 78 landings in 20000 reloads on a loaded 4-core runner, under its floor of
+REM 100). It is a --quiet rig: the compile runs in the pool and the run alone, after the others.
 if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\cfgtest"\ ^
@@ -1762,6 +1791,8 @@ if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:config_test_run
 "%BUILD%\config_test.exe" "%ROOT%" "%BUILD%\cfgscratch" || (
     echo [edvr] ERROR: the shipped edvr.ini does not parse as documented
     exit /b 1
@@ -3154,7 +3185,7 @@ REM Build gate for engine-record velocity (part of fix.temporal_aa, phase 1;
 REM docs\kinematic-motion-injection-2026-09-19.md, 2026-09-23): the DXBC
 REM patcher end to end on WARP (patched pool-family shaders disassemble,
 REM reflect, create and DRAW the exact slot and depth at MRT6), the emit
-REM bracket against a fake engine laid out as build 332841 (previous pose,
+REM bracket against a fake engine laid out as build 334925 (previous pose,
 REM self-checking marker, the disagreement gate, the table), and the
 REM compose's arithmetic from the shipped HLSL text against a double
 REM reference. A parser or patcher that drifts fails here, not in a flight.
@@ -3288,7 +3319,7 @@ exit /b 0
 :rig_explorer_cam_test
 echo [edvr] === explorer_cam_test.exe ===
 REM Build gate for Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
-REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five
+REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-334925 identity and CodeHook's reading of all five
 REM prologues, the eye keys' clamp, the exact 16 floats written into the free camera's commander-local pose, the placement machine on
 REM scripted state sequences, the F5 sequencer on scripted mode sequences (enter from every mode, timeouts, the player's own TAB engaging
 REM nothing, detach and re-attach, exit), F5's decision table, the camera-UI hider, the watches, the event ring, every log line's text and
@@ -3466,7 +3497,7 @@ REM recommendation (3070 x 0.65 = 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 =
 REM 1535x1516, the 2458x2824 x 0.65 = 1597x1835 of the 2026-09-23 flight);
 REM 2 tan(vFOV/2) on every recorded frustum; the interface surface's shape;
 REM the sizing chains' formatter and verdicts; the engine-side panel factor
-REM across the flights' states and the build-332841 bytes it patches. The LAYER
+REM across the flights' states and the build-334925 bytes it patches. The LAYER
 REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
 REM scissor map and the jitter cancel; the blend conversion table, a multiply
 REM included, and a CPU model proving layer-then-composite equals the game's

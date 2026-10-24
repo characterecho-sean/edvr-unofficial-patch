@@ -296,6 +296,57 @@ float4 main(float4 p : SV_POSITION) : SV_Target {
 }
 )HLSL";
 
+// The HUD's light for the game's bloom (flat fix.ui_quality): the scene H plus the HUD HDR layer's premultiplied radiance, one
+// pass at H's size. The layer is the display's size times the quality target, so a pixel of H covers `span` layer texels per
+// axis, a fractional number at 20/13 or 1.25. Each pixel integrates the texels of its own footprint by the area they cover, the
+// UI composite's weights (ui_layer_math.h uiGlowFeedFootprint is this loop, transcribed): the footprints tile the layer, so a
+// one-texel line or a single bright texel sends the same light to the bloom wherever it falls on the grid. A footprint wider than
+// 4 texels (a ratio past 4) is cut to its central 4, which bounds the loop at 5 x 5 loads and keeps the mean of a flat field.
+// Non-finite texels read zero; the sum stays inside R11G11B10_FLOAT's range.
+constexpr char kUiGlowFeedPsHlsl[] = R"HLSL(
+Texture2D<float4> HudLayer : register(t0);
+Texture2D<float4> Scene : register(t1);
+float4 main(float4 p : SV_POSITION) : SV_Target {
+    uint sw, sh, lw, lh;
+    Scene.GetDimensions(sw, sh);
+    HudLayer.GetDimensions(lw, lh);
+    float2 span = float2(lw, lh) / float2(sw, sh);
+    float2 cut = max(span - 4.0, float2(0, 0)) * 0.5;
+    float2 x0 = (p.xy - 0.5) * span + cut;
+    float2 x1 = x0 + span - 2.0 * cut;
+    int2 k0 = max(int2(floor(x0)), int2(0, 0));
+    int2 k1 = min(int2(ceil(x1)) - 1, int2(lw - 1, lh - 1));
+    float3 acc = float3(0, 0, 0);
+    float wsum = 0;
+    [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 4); ++j) {
+        float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
+        if (wy <= 0) continue;
+        [loop] for (int i = k0.x; i <= min(k1.x, k0.x + 4); ++i) {
+            float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
+            if (wx <= 0) continue;
+            float3 c = HudLayer.Load(int3(i, j, 0)).rgb;
+            acc += (all(isfinite(c)) ? max(c, float3(0, 0, 0)) : float3(0, 0, 0)) * (wx * wy);
+            wsum += wx * wy;
+        }
+    }
+    float3 o = Scene.Load(int3(p.xy, 0)).rgb + (wsum > 0 ? acc / wsum : float3(0, 0, 0));
+    return float4(min(o, float3(60000, 60000, 60000)), 1.0);
+}
+)HLSL";
+
+// The star light for the game's bloom (visual.star_glow): one fullscreen pass that reads the star layer S (the star draws alone, replayed as the game
+// issued them) and writes it as it is. It is blended into H' with a blend factor of (m, m, m, 0) -- source BLEND_FACTOR, destination ONE, ADD -- so
+// H' = H [+ HUD] + m * S with m the setting's k - 1; the weight is the blend's, not a constant buffer's, so the shader has one texture and nothing
+// else. Non-finite texels read zero and the sum stays inside R11G11B10_FLOAT's range, as the HUD feed does.
+constexpr char kStarGlowAddPsHlsl[] = R"HLSL(
+Texture2D<float4> Star : register(t0);
+float4 main(float4 p : SV_POSITION) : SV_Target {
+    float3 c = Star.Load(int3(p.xy, 0)).rgb;
+    c = all(isfinite(c)) ? max(c, float3(0, 0, 0)) : float3(0, 0, 0);
+    return float4(min(c, float3(60000, 60000, 60000)), 0.0);
+}
+)HLSL";
+
 inline constexpr const char* kUiSeedVs = R"(
 struct V { float4 p:SV_POSITION; };
 V main(uint id:SV_VertexID) {

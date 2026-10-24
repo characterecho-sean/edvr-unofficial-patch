@@ -202,6 +202,28 @@ class BasicPoseCache final {
     return true;
   }
 
+  // Caller thread, flat profile only (flat_owner_waits.h). While flat the owner publishes once per headset frame from its empty frames
+  // (publishFlatHead), and a call is answered from the `now` slot of that publication whatever the caller or the game's frame: no display-time
+  // freshness rule (a sleeping headset's frames are ~77 ms apart), no new-caller hop, no wait slot. It still requires the keys the publication
+  // was made under and a publication no older than maxAgeUs, so a loop that stopped publishing sends its callers to the hop (the owner is not in
+  // xrWaitFrame then). ageUs is the publication's age at this call. The VR counters are not touched.
+  bool answerFlat(uint64_t geometry, uint64_t origin, uint64_t maxAgeUs, PoseCacheAnswer& out, uint64_t& ageUs, PoseCacheMiss& why) {
+    std::lock_guard<Mutex> lock(mutex_);
+    const uint64_t nowUs = clock_();
+    why = PoseCacheMiss::Unpublished;
+    if (!rec_.valid) return false;
+    if (!(rec_.keys == PoseCacheKeys{geometry, origin})) { why = PoseCacheMiss::Keys; return false; }
+    const uint64_t elapsedUs = nowUs >= rec_.publishedUs ? nowUs - rec_.publishedUs : 0;
+    if (elapsedUs > maxAgeUs) { why = PoseCacheMiss::Stale; return false; }
+    if (!rec_.now.valid) { why = PoseCacheMiss::Slot; return false; }
+    out = PoseCacheAnswer{};
+    out.pose = rec_.now.pose;
+    out.target = rec_.now.target;
+    out.display = rec_.display;
+    ageUs = elapsedUs;
+    return true;
+  }
+
   // Owner, waitPoses entry: a call made from now until the next publish is answered from `next`.
   void beginWait() {
     std::lock_guard<Mutex> lock(mutex_);
