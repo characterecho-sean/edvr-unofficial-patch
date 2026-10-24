@@ -727,6 +727,8 @@ recording/mutation epochs likewise remains to be joined.
 
 ## Cache-helper addendum, 2026-09-28: the dirty-flag protocol
 
+Field lookup with both bases and the source constants: `camera-struct.md`.
+
 The three gate helpers are decompiled
 (analysis/decomp/flash/camera/camera_cache_helpers.txt, script
 CameraCacheHelpers.java). All take **camera+0x20** and finalize one derived
