@@ -25,6 +25,7 @@
 #include "f95c_checks.h"    // F95c: the head as shadow-only through the visibility call, the fade hook's guard and action
 #include "f97_checks.h"     // F97a: the armed body under the eye again
 #include "f97b_checks.h"    // F97b: the interaction label sized like a panel at its anchor facing the eye
+#include "f98b_checks.h"    // F98b: the interaction label placed in the world, upright and facing the neck's pivot
 
 #include <array>
 #include <chrono>
@@ -7211,6 +7212,8 @@ int wmain(int argc, wchar_t** argv) {
     f97test::run97(check);
     // F97b: the label's size and record place as a panel at its anchor (the game's NDC-fixed size shrinks as cos^2 and cos off the eye's axis), the guards.
     f97btest::run97b(check);
+    // F98b: the label upright and facing the neck's pivot: still through head turns (F97b's eye-facing placement not), scaled by distance, the guards.
+    f98btest::run98b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

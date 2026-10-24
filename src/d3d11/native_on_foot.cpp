@@ -41,6 +41,7 @@
 #include "native_on_foot_f97.h"   // F97a: the armed body under the eye again (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
 #include "native_on_foot_f97b.h"   // F97b: the interaction label sized like a panel in the world at its anchor (pure parts)
+#include "native_on_foot_f98b.h"   // F98b: the interaction label placed in the world, upright and facing the head's position (pure parts)
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -21155,6 +21156,7 @@ Fix g_fix;
 // F50: the head this frame (headSample): its angular speed (deg/s, -1 unknown), pitch and roll (deg, from the newest render head).
 double g_headDps = -1.0, g_headPitch = 0.0, g_headRoll = 0.0;
 bool g_headPoseOk = false;
+float g_headRot[12] = {};   // F98b: the newest head pose in seated space (row-major 3x4, y up, -z forward), valid with g_headPoseOk
 // F50: an eye's lag baseline (drawtag::LagBaseline), the frustum it was taken under (b0 row 5 and row 7 scales, the marker target's size),
 // the eye's matched draw place (the eye assignment), and the honesty check's bins since the last reset: m on slow-head frames by head pitch
 // (< -15, -15..15, > 15 deg) and roll (|roll| < 10, >= 10 deg).
@@ -21716,6 +21718,7 @@ void headSample() {
     const double kDeg = 180.0 / 3.14159265358979323846;
     g_headPitch = std::asin(std::max(-1.0, std::min(1.0, -static_cast<double>(R[6])))) * kDeg;
     g_headRoll = std::asin(std::max(-1.0, std::min(1.0, static_cast<double>(R[4])))) * kDeg;
+    std::memcpy(g_headRot, R, sizeof(g_headRot));
     g_headPoseOk = true;
     g_headDps = dps;
     ++g_win.headN;
@@ -23216,6 +23219,10 @@ nofoot::f94b::EyeJoin g_f95bEyes;
 // F97b: the label's size against a world panel's at its anchor, per eye, the second's figures (render thread: fixDecide and the 1 s line)
 nofoot::f97b::Sec g_f97b[2];
 uint64_t g_f97bMoved[2] = {};
+// F98b: the label placed in the world (render thread): the world's up, steady; per eye the second's figures and the labels' previous frames
+nofoot::f98b::UpFilter g_f98bUp;
+nofoot::f98b::Sec g_f98b[2];
+nofoot::f98b::Tracker g_f98bTrack[2];
 // F95b: a label draw refused before its decision (its key matched in this eye only, a ranged b0, no rows or no origin) is counted with that verdict
 void f95bEarly(int e, uint32_t frame, uint32_t key, int verdictWhy) noexcept {
     float ox = 0.0f, oy = 0.0f;
@@ -23756,6 +23763,20 @@ void f87PromptLines(uint64_t nowMs) {
                         m(z.depthOverDist, 0), m(z.depthOverDist, 1), m(z.depthOverDist, 2), m(z.depthOverDist, 3), z.maxAngle);
         z = nofoot::f97b::Sec{};
         g_f97bMoved[e] = 0;
+    }
+    // F98b: the label placed in the world, per eye: placed or refused, and its own world point's step a frame against its anchor (the anchor still) by the head's
+    // turning speed, as placed and as F97b's eye-facing panel would have placed it; zeros print
+    for (int e = 0; e < 2; ++e) {
+        nofoot::f98b::Sec& q = g_f98b[e];
+        Log::get().note("label world (F98b) eye %d 1 s: placed in the world %llu, refused: no head frame %llu, no panel %llu (F97b's eye-facing panel drawn); the label's "
+                        "own world point a frame against its anchor (the anchor still), by the head's turning speed under 3/3-30/30-90/90+ deg/s: steps "
+                        "%llu/%llu/%llu/%llu; as placed %.2f/%.2f/%.2f/%.2f mean %.2f/%.2f/%.2f/%.2f max mm; as F97b placed it %.2f/%.2f/%.2f/%.2f mean "
+                        "%.2f/%.2f/%.2f/%.2f max mm; anchor moving %llu; the world's up against the eye's up %.1f deg mean (%llu draws, %llu samples)",
+                        e, ull(q.placed), ull(q.refusedNoHead), ull(q.refusedPanel), ull(q.steps[0]), ull(q.steps[1]), ull(q.steps[2]), ull(q.steps[3]), q.mean(q.nowSum, 0),
+                        q.mean(q.nowSum, 1), q.mean(q.nowSum, 2), q.mean(q.nowSum, 3), q.nowMax[0], q.nowMax[1], q.nowMax[2], q.nowMax[3], q.meanOld(0), q.meanOld(1),
+                        q.meanOld(2), q.meanOld(3), q.oldMax[0], q.oldMax[1], q.oldMax[2], q.oldMax[3], ull(q.anchorMoving),
+                        q.upN ? q.upTiltSum / static_cast<double>(q.upN) : 0.0, ull(q.upN), ull(g_f98bUp.samples));
+        q = nofoot::f98b::Sec{};
     }
     // the label's draws, per eye
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
@@ -25673,7 +25694,49 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
                 // F97b: the record where a panel at the anchor facing the eye puts it (from the anchor's direction, whose decision gated the move above), its
                 // layout sized there
                 const double q[3] = {fP[0] - w.o[0], fP[1] - w.o[1], fP[2] - w.o[2]}, layoutAt[2] = {T[0] + dUi[0], T[1] + dUi[1]};
-                labPanel = nofoot::f97b::labelPanel(w.rows, sh->rows[4], sh->rows[5], sh->rows[7], aff, labPRec, labRec[2], labD, q, layoutAt);
+                const nofoot::f97b::LabelPanel lp97 = nofoot::f97b::labelPanel(w.rows, sh->rows[4], sh->rows[5], sh->rows[7], aff, labPRec, labRec[2], labD, q, layoutAt);
+                labPanel = lp97;
+                // F98b: the label placed in the world: upright (the world's up from the head's seated pose), facing the neck's pivot (both eyes' rows), its
+                // record on that panel; F97b's eye-facing panel is kept for the measure and drawn only when the world panel cannot be placed
+                {
+                    nofoot::f98b::Sec& ws = g_f98b[e];
+                    const CpuWorld& w0 = g_cpuWorld[0];
+                    const CpuWorld& w1 = g_cpuWorld[1];
+                    nofoot::f98b::HeadFrame hf;
+                    if (w0.frame != ~0u && w1.frame != ~0u && (w0.frame > w1.frame ? w0.frame - w1.frame : w1.frame - w0.frame) <= 1u) {
+                        const double o0[3] = {w0.o[0], w0.o[1], w0.o[2]}, o1[3] = {w1.o[0], w1.o[1], w1.o[2]};
+                        hf = nofoot::f98b::headFrame(w0.rows, o0, w1.rows, o1);
+                    }
+                    double upS[3];
+                    if (hf.ok && g_headPoseOk && nofoot::f98b::worldUp(hf, g_headRot, upS)) g_f98bUp.feed(upS, g_headDps);
+                    const double ow[3] = {w.o[0], w.o[1], w.o[2]};
+                    double recOld[3] = {}, recNow[3] = {};
+                    const bool haveOld = nofoot::f98b::eyeFacingRecord(w.rows, q, labD, labRec[2], recOld);
+                    if (haveOld)
+                        for (int k = 0; k < 3; ++k) recOld[k] += ow[k];
+                    if (hf.ok && g_f98bUp.have) {
+                        const double pivot[3] = {hf.pivot[0] - ow[0], hf.pivot[1] - ow[1], hf.pivot[2] - ow[2]};
+                        const nofoot::f98b::WorldPanel wp = nofoot::f98b::labelPanelWorld(w.rows, sh->rows[4], sh->rows[5], sh->rows[7], aff, labPRec, labRec[2], labD, q,
+                                                                                         pivot, g_f98bUp.up, layoutAt);
+                        if (wp.lp.why == 0) {
+                            labPanel = wp.lp;
+                            labPanel.atGame = lp97.atGame;
+                            ++ws.placed;
+                            for (int k = 0; k < 3; ++k) recNow[k] = wp.rec[k] + ow[k];
+                            const double fPd[3] = {fP[0], fP[1], fP[2]};
+                            g_f98bTrack[e].add(keyNow, frame, fPd, recNow, recOld, haveOld, g_headDps, ws);
+                            double ex[3], ey[3], ef[3];
+                            if (nofoot::f98b::eyeAxes(w.rows, ex, ey, ef)) {
+                                ws.upTiltSum += std::acos(std::min(1.0, std::max(-1.0, nofoot::f98b::dot3(g_f98bUp.up, ey)))) * 180.0 / 3.14159265358979323846;
+                                ++ws.upN;
+                            }
+                        } else {
+                            ++ws.refusedPanel;
+                        }
+                    } else {
+                        ++ws.refusedNoHead;
+                    }
+                }
                 nofoot::f97b::Sec& zs = g_f97b[e];
                 if (labPanel.why == 0) ++zs.sized;
                 else if (labPanel.why == 2) ++zs.refusedRange;
