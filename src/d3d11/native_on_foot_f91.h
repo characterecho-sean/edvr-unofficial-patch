@@ -183,6 +183,7 @@ struct ViewFields {
     bool sightOk = false;
     double along = 0.0, perp = 0.0;    // this frame's sight lock error (the ADS eye point line's figures), mm
     double asked[2] = {}, cancelNow[2] = {};   // the look input asked of the game this frame (seat), the cancel taken this frame
+    double ahead[2] = {};              // F92b: the cancel published ahead of the game's turn (this frame's ask; in the cancel total)
     bool poseOk = false;
     double cancelPose[2] = {};         // the cancel total the pose of this frame carried
     uint32_t poseAge = 0, serialLag = 0;
@@ -206,7 +207,8 @@ inline size_t formatView(char* buf, size_t cap, const ViewFields& v) noexcept {
     appendf(buf, cap, at, ", cancel total yaw %+.3f pitch %+.3f deg; ", v.cancelTotal[0], v.cancelTotal[1]);
     if (v.sightOk) appendf(buf, cap, at, "sight along %+.2f perp %.2f mm", v.along, v.perp);
     else appendf(buf, cap, at, "sight -");
-    appendf(buf, cap, at, "; asked yaw %+.3f pitch %+.3f, cancel this frame yaw %+.3f pitch %+.3f, ", v.asked[0], v.asked[1], v.cancelNow[0], v.cancelNow[1]);
+    appendf(buf, cap, at, "; asked yaw %+.3f pitch %+.3f, cancel this frame yaw %+.3f pitch %+.3f, ahead yaw %+.3f pitch %+.3f, ", v.asked[0], v.asked[1], v.cancelNow[0],
+            v.cancelNow[1], v.ahead[0], v.ahead[1]);
     if (v.poseOk)
         appendf(buf, cap, at, "cancel in the pose yaw %+.3f pitch %+.3f deg (%u frames old, alignment serial lag %u); ", v.cancelPose[0], v.cancelPose[1],
                 static_cast<unsigned>(v.poseAge), static_cast<unsigned>(v.serialLag));
@@ -239,10 +241,12 @@ struct FitFrame {
     bool headOk = false;
     double head[2] = {};                 // the head's step this frame (deg, seat)
     double applied[2] = {};              // the game's turn for our input this frame (deg, seat; 0 when the map did not run)
-    double sum[3][2] = {};               // the last 1, 2 and 3 applied steps summed, this frame's included (FitWindow::add fills it)
+    double sum[3][2] = {};               // the last 1, 2 and 3 applied steps summed, ending rLag frames back (FitWindow::add fills it)
     bool rOk = false;
     double r[2] = {};                    // the residual this frame (deg)
     uint32_t rBase = 0;                  // the residual's base (a new base moves r's offset)
+    uint32_t rLag = 0;                   // F92b: how many frames the rows r was measured on are behind this frame (1 in the F91 flight; at most kFitMaxLag)
+    bool aimOn = true;                   // F92b: the head aim was engaged this frame (the toggle's A/B)
     bool missingOk = false;
     double missing[2] = {};              // the cancel total less the cancel the pose carried (deg)
     bool viewOk = false;
@@ -276,13 +280,18 @@ struct FitResult {
     double stepRmsAlong = 0.0, stepRmsPerp = 0.0, netAlong = 0.0, netPerp = 0.0;
     bool overshoot = false;
     bool h1 = false, lock = false, h3 = false, enough = false;
+    uint32_t aimN = 0;                   // F92b: frames with the head aim engaged
+    uint32_t rLagMax = 0;                // F92b: the largest rows lag r was aligned by
 };
 // A press's windows: frames go in as they are traced; a full window is fitted and starts the next. The applied history and the last window's motion carry across windows.
+// F92b: r is measured on the right eye's rows of an earlier frame (the trace's tick reads the rows of the frame before it), so the applied steps it is fitted against end
+// that many frames back: F91 fitted r of frame N - 1 against the steps ending at N, which no lag fits, and its 23 "none" verdicts of the F91 flight were that misalignment.
+constexpr uint32_t kFitMaxLag = 2;
 struct FitWindow {
     FitFrame f[kFitMaxFrames];
     uint32_t n = 0, index = 0;
     double dur = 0.0;
-    double hist[3][2] = {};              // the last three applied steps, newest first
+    double hist[3 + kFitMaxLag][2] = {}; // the last applied steps, newest first
     bool prevValid = false, prevMoving = false;
     double prevNet[2] = {};              // the last window's sight change (along, perp; mm), for the overshoot
     void beginPress() noexcept {
@@ -296,14 +305,20 @@ struct FitWindow {
     // True when the window is full (kFitWindowS of frames, or kFitMaxFrames).
     bool add(const FitFrame& in) noexcept {
         if (n >= kFitMaxFrames) return true;
-        for (int k = 2; k > 0; --k) hist[k][0] = hist[k - 1][0], hist[k][1] = hist[k - 1][1];
+        constexpr int kHist = static_cast<int>(3 + kFitMaxLag);
+        for (int k = kHist - 1; k > 0; --k) hist[k][0] = hist[k - 1][0], hist[k][1] = hist[k - 1][1];
         hist[0][0] = std::isfinite(in.applied[0]) ? in.applied[0] : 0.0;
         hist[0][1] = std::isfinite(in.applied[1]) ? in.applied[1] : 0.0;
         FitFrame& d = f[n++];
         d = in;
+        d.rLag = in.rLag > kFitMaxLag ? kFitMaxLag : in.rLag;
         for (int k = 0; k < 3; ++k) {
             d.sum[k][0] = d.sum[k][1] = 0.0;
-            for (int j = 0; j <= k; ++j) d.sum[k][0] += hist[j][0], d.sum[k][1] += hist[j][1];
+            for (int j = 0; j <= k; ++j) {
+                const int at = j + static_cast<int>(d.rLag);
+                d.sum[k][0] += hist[at][0];
+                d.sum[k][1] += hist[at][1];
+            }
         }
         dur += in.dt > 0.0 ? in.dt : 0.0;
         return dur >= kFitWindowS || n >= kFitMaxFrames;
@@ -369,6 +384,10 @@ inline FitResult fitWindow(const FitWindow& w) noexcept {
     R.t0 = w.f[0].t;
     R.t1 = w.f[n - 1].t;
     R.dur = w.dur;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (w.f[i].aimOn) ++R.aimN;
+        if (w.f[i].rOk && w.f[i].rLag > R.rLagMax) R.rLagMax = w.f[i].rLag;
+    }
     double hy[kFitMaxFrames], hp[kFitMaxFrames];
     double netY = 0.0, netP = 0.0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -587,13 +606,15 @@ inline void appendCorr(char* buf, size_t cap, size_t& at, const double c[3]) noe
 inline size_t formatFit(char* buf, size_t cap, const FitResult& R) noexcept {
     size_t at = 0;
     if (buf && cap) buf[0] = '\0';
-    appendf(buf, cap, at, "window %u: t %+.2f to %+.2f s, %u frames, head %s (net %.1f deg/s; tremor rms yaw %.3f pitch %.3f deg a frame over %u head steps)", R.index, R.t0, R.t1,
-            R.frames, R.still ? "STILL" : "MOVING", R.netRate, R.headRms[0], R.headRms[1], R.headN);
+    appendf(buf, cap, at, "window %u: t %+.2f to %+.2f s, %u frames, head %s (net %.1f deg/s; tremor rms yaw %.3f pitch %.3f deg a frame over %u head steps), head aim %s "
+            "(%u of %u frames)", R.index, R.t0, R.t1, R.frames, R.still ? "STILL" : "MOVING", R.netRate, R.headRms[0], R.headRms[1], R.headN,
+            R.aimN == R.frames ? "on" : R.aimN == 0 ? "off" : "mixed", R.aimN, R.frames);
     appendf(buf, cap, at, "; r: %u frames, mean yaw %+.3f pitch %+.3f deg, step rms %.4f deg (yaw %.4f pitch %.4f about the mean, %u steps)", R.rN, R.rMean[0], R.rMean[1],
             R.rStepRms2, R.rStepRms[0], R.rStepRms[1], R.rStepN);
     if (R.enough)
-        appendf(buf, cap, at, "; H1 fit r = the last d applied steps: rms d1 %.4f d2 %.4f d3 %.4f deg, best d %d (signs yaw %+d pitch %+d) %.4f; r against the cancel missing from the pose "
-                "%.4f deg rms over %u frames", R.rmsD[0], R.rmsD[1], R.rmsD[2], R.bestD, R.signY, R.signP, R.bestRms, R.missRms, R.missN);
+        appendf(buf, cap, at, "; H1 fit r = the last d applied steps (ending %u frame(s) back, at r's rows): rms d1 %.4f d2 %.4f d3 %.4f deg, best d %d (signs yaw %+d pitch "
+                "%+d) %.4f; r against the cancel missing from the pose %.4f deg rms over %u frames", R.rLagMax, R.rmsD[0], R.rmsD[1], R.rmsD[2], R.bestD, R.signY, R.signP,
+                R.bestRms, R.missRms, R.missN);
     else
         appendf(buf, cap, at, "; H1 fit: too few r frames (%u, need %u)", R.rN, kFitMinFrames);
     appendf(buf, cap, at, "; rifle in view: step rms yaw %.4f pitch %.4f deg (%u steps); view step - head step rms %.4f deg (%u frames)", R.rifleRms[0], R.rifleRms[1],

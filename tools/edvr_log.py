@@ -10452,9 +10452,37 @@ def _hj_f91_fit(rows, ctx):
     text = "%d windows (STILL %d, MOVING %d): H1 %d [%s] (%s), LOCK %d (%s), H3 %d (%s), none %d, too few r frames %d" % (
         len(w), still, len(w) - still, sum(h1.values()), ", ".join("d%s %d" % kv for kv in sorted(h1.items())) or "-", split(lambda x: "H1 (" in x["verdict"]), lock,
         split(lambda x: "LOCK (" in x["verdict"]), h3, split(lambda x: "H3 (" in x["verdict"]), none, len(few))
+    # F92b: the head aim's toggle in the same flight is an A/B: the windows split by whether the head aim was on (a window the F91 build wrote has no aim field)
+    aims = [a for a in ("on", "off", "mixed") if any(x.get("aim") == a for x in w)]
+    if aims:
+        parts = []
+        for a in aims:
+            ws = [x for x in w if x.get("aim") == a]
+            parts.append("%s %d (STILL %d; H1 %d, LOCK %d, H3 %d, none %d)" % (a, len(ws), sum(1 for x in ws if x["head"] == "STILL"), sum(1 for x in ws if "H1 (" in x["verdict"]),
+                                                                            sum(1 for x in ws if "LOCK (" in x["verdict"]), sum(1 for x in ws if "H3 (" in x["verdict"]),
+                                                                            sum(1 for x in ws if x["verdict"].startswith("none of H1"))))
+        text += "; head aim " + ", ".join(parts)
     if len(few) == len(w):
         return ("NEVER APPLIED", text + " (no window had enough r frames to fit)")
     return ("PARTIAL" if len(few) * 2 > len(w) else "OK", text)
+
+
+def _hj_f92_aim(rows, ctx):
+    """The ADS head aim's live toggle: its switches (in ADS or not), the presses engaged with it off, and in a press the unwinds when turned off and the fresh engages."""
+    sw, poff, on, off, unw = (rows.get(k, []) for k in ("switch", "pressoff", "on", "off", "unwound"))
+    if not sw and not poff and not on and not off and not unw:
+        return None
+    dropped = [x for x in unw if x["how"].startswith("the remainder")]
+    text = "switched %d time(s) (on %d, off %d; in ADS %d); presses engaged with it off %d; in a press: turned off %d (unwound %d, %d with a DROPPED remainder), turned on %d" % (
+        len(sw), sum(1 for x in sw if x["to"] == "on"), sum(1 for x in sw if x["to"] == "off"), sum(1 for x in sw if x["ads"] == "yes"), len(poff), len(off), len(unw),
+        len(dropped), len(on))
+    if any(x["ads"] == "yes" and x["to"] == "off" for x in sw) and not off:
+        return ("NEVER APPLIED", text + " (turned off in ADS, but no press unwound the head aim)")
+    if dropped:
+        return ("PARTIAL", text)
+    if not off and not on and not poff:
+        return ("IDLE", text + " (never switched while aiming, no press with it off)")
+    return ("OK", text)
 
 
 def _hj_f91_gate(rows, ctx):
@@ -10708,8 +10736,17 @@ HEALTH_RULES = (
         ("_", r"ads transition \(F89\) press fit \(F91\) window"),   # the press fit rule's (below)
     ), _hj_f89_ads),
     _hrule("ADS press fit (F91)", ("F89",), ("press fit (F91)",), (
-        ("fit", r"ads transition \(F89\) press fit \(F91\) window (?P<win>\d+): t \S+ to \S+ s, \d+ frames, head (?P<head>STILL|MOVING) .*; verdict: (?P<verdict>.+)$"),
+        ("fit", r"ads transition \(F89\) press fit \(F91\) window (?P<win>\d+): t \S+ to \S+ s, \d+ frames, head (?P<head>STILL|MOVING) "
+                r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) )?.*; verdict: (?P<verdict>.+)$"),
     ), _hj_f91_fit),
+    _hrule("ADS head aim (F92b)", ("F92b",), ("ADS head aim (F92b)",), (
+        ("switch", r"native on foot ADS head aim \(F92b\): (?P<to>on|off) \(live; in ADS: (?P<ads>yes|no)\)"),
+        ("pressoff", r"native on foot ADS head aim \(F92b\): engaged \(ADS\) with the head aim off"),
+        ("on", r"native on foot ADS head aim \(F92b\): turned on in ADS"),
+        ("off", r"native on foot ADS head aim \(F92b\): turned off in ADS: the carried yaw \((?P<yaw>%s) deg\) and pitch \((?P<pitch>%s) deg\)" % (_HN, _HN)),
+        ("unwound", r"native on foot ADS head aim \(F92b\): unwound in ADS after (?P<s>[\d.]+) s: yaw (?P<y>%s) deg and pitch (?P<p>%s) deg left; "
+                    r"(?P<how>unwound with|the remainder was DROPPED)" % (_HN, _HN)),
+    ), _hj_f92_aim),
     _hrule("ADS item gate (F91)", ("F91", "F70b"), ("ADS item gate (F91)", "item gate refused"), (
         ("refused", r"native on foot ADS item gate \(F91\): refused: the held item \"(?P<item>[^\"]*)\" is not a weapon \((?P<why>[^)]*)\)"),
         ("stopped", r"native on foot ADS item gate \(F91\): stopped: the held item changed to \"(?P<item>[^\"]*)\""),
@@ -11642,8 +11679,10 @@ def self_test_health():
         def role_line(item="$wpn_m_assaultrifle_laser_fauto_name;", serial=4, slot=1, name=29526, mesh=(3.0, 1.0), scale=0.050098, what="rifle ADS readout (x1.7778)"):
             return R("weapon readout part (F91): item %s", item, serial, slot, name, mesh[0], mesh[1], scale, 0.667969, 0.222656, 0.225, what)
 
-        def fit(win=0, head="MOVING", verdict="h1", d=2):
-            text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44)
+        def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None):
+            """aim (F92b): the window's head aim, on, off or mixed; None renders the field as the F91 build wrote none (a neutral value the rule skips)."""
+            text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44, aim,
+                       {"on": 45, "off": 0, "mixed": 20}.get(aim), 45 if aim else None)
             text += R91("; sight: %u frames", 45, 0.02, 0.01, 0.2, 0, 0, 0.05, 0.01, "no")
             text += R91("; verdict: ")
             text += {"h1": R91("H1 (the cancel lands %d frame", d, "" if d == 1 else "s"), "lock": R91("%sLOCK (the sight lock", ""), "h3": R91("%sH3 (the view follows", ""),
@@ -11761,6 +11800,10 @@ def self_test_health():
         check("F91 fit: H1 windows while moving, H3 still", [fit(0, "MOVING", "h1", 2), fit(1, "MOVING", "h1", 1), fit(2, "STILL", "h3"), fit(3, "STILL", "none")], 0,
               [("OK", F91F)], has=["4 windows (STILL 2, MOVING 2): H1 2 [d1 1, d2 1] (STILL 0 MOVING 2), LOCK 0 (STILL 0 MOVING 0), H3 1 (STILL 1 MOVING 0), none 1"])
         check("F91 fit: H1 and LOCK in one window", [fit(0, "MOVING", "h1lock", 2)], 0, [("OK", F91F)], has=["H1 1 [d2 1]", "LOCK 1 (STILL 0 MOVING 1)"])
+        check("F92b fit: the head aim's on/off windows are an A/B", [fit(0, "STILL", "h1", 1, "on"), fit(1, "STILL", "h1", 1, "on"), fit(2, "STILL", "h3", aim="off"),
+                                                                  fit(3, "MOVING", "none", aim="mixed")], 0, [("OK", F91F)],
+              has=["head aim on 2 (STILL 2; H1 2, LOCK 0, H3 0, none 0), off 1 (STILL 1; H1 0, LOCK 0, H3 1, none 0), mixed 1 (STILL 0; H1 0, LOCK 0, H3 0, none 1)"])
+        check("F92b fit: a window the F91 build wrote has no head aim field", [fit(0, "STILL", "h1", 1)], 0, [("OK", F91F)], lacks=["head aim on", "UNPARSED"])
         check("F91 fit: no window had enough r frames", [fit(0, "STILL", "few"), fit(1, "MOVING", "few")], 3, [("NEVER APPLIED", F91F)], has=["too few r frames 2"])
         check("F91 fit: mostly too few r frames", [fit(0, "STILL", "few"), fit(1, "MOVING", "few"), fit(2, "MOVING", "lock")], 0, [("PARTIAL", F91F)])
         check("F91 fit: the fit line is not an unparsed trace line", [ads_start("press"), ads_frame(), fit(0), ads_start("release"), ads_frame("release", "releasing", 0.5)], 0,
@@ -11775,6 +11818,27 @@ def self_test_health():
         check("F91 gate: a switch to a tool mid-press and back", [gate("stopped"), gate("allowed", "$wpn_m_assaultrifle_laser_fauto_name;", "weapon")], 0, [("OK", F91G)],
               has=["stopped 1, allowed 1"])
         check("F91 gate: weapons only, nothing refused", [gate_ticks(0)] * 3, 0, [("IDLE", F91G)], has=["refused ticks 0 over 3 s"])
+
+        # ---- ADS head aim (F92b): the live toggle ----
+        F92A = "ADS head aim (F92b)"
+
+        def aim_switch(to="off", in_ads="yes"):
+            return R("native on foot ADS head aim (F92b): %s (live", to, in_ads)
+
+        def aim_off(yaw=4.5, pitch=-1.2):
+            return R("native on foot ADS head aim (F92b): turned off in ADS", yaw, pitch, 0.3)
+
+        def aim_unwound(left=0.0, dropped=False):
+            return R("native on foot ADS head aim (F92b): unwound in ADS", 0.31, left, 0.0,
+                     "the remainder was DROPPED: the view jumped by it" if dropped else "unwound with the game's turn: the view did not move", "nothing to reset")
+
+        check("F92b aim: off in ADS, unwound, on again", [aim_switch("off"), aim_off(), aim_unwound(), aim_switch("on"), R("native on foot ADS head aim (F92b): turned on in ADS", 0.0, 0.0)],
+              0, [("OK", F92A)], has=["switched 2 time(s) (on 1, off 1; in ADS 2); presses engaged with it off 0; in a press: turned off 1 (unwound 1, 0 with a DROPPED remainder), turned on 1"])
+        check("F92b aim: a press engaged with it off", [aim_switch("off", "no"), R("native on foot ADS head aim (F92b): engaged (ADS) with the head aim off", 0.0, 0.0)], 0,
+              [("OK", F92A)], has=["presses engaged with it off 1"])
+        check("F92b aim: switched outside ADS only", [aim_switch("off", "no"), aim_switch("on", "no")], 0, [("IDLE", F92A)])
+        check("F92b aim: off in ADS and nothing unwound", [aim_switch("off", "yes")], 3, [("NEVER APPLIED", F92A)])
+        check("F92b aim: a remainder dropped", [aim_switch("off"), aim_off(), aim_unwound(0.4, True)], 0, [("PARTIAL", F92A)], has=["1 with a DROPPED remainder"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],

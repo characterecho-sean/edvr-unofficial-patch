@@ -194,12 +194,15 @@ inline void run91bc(Check&& check) {
         v.rifleStepOk = true;
         v.rifleStep[0] = 0.002;
         v.rifleStep[1] = -0.001;
+        v.ahead[0] = 0.030;   // F92b: the ask published ahead
+        v.ahead[1] = 0.004;
         char buf[640];
         f91::formatView(buf, sizeof(buf), v);
         const char* want =
             "; view (F91): r yaw +0.123 pitch -0.045 deg (rows frame 1234, head seq 5678), applied yaw +0.010 pitch -0.020, head step yaw +0.030 pitch +0.004, view step 0.031 deg, "
-            "cancel total yaw +1.500 pitch -0.250 deg; sight along +0.12 perp 0.34 mm; asked yaw +0.030 pitch +0.004, cancel this frame yaw +0.010 pitch -0.020, cancel in the pose "
-            "yaw +1.480 pitch -0.230 deg (2 frames old, alignment serial lag 1); rifle in view yaw +0.500 pitch -1.250 deg, step yaw +0.002 pitch -0.001";
+            "cancel total yaw +1.500 pitch -0.250 deg; sight along +0.12 perp 0.34 mm; asked yaw +0.030 pitch +0.004, cancel this frame yaw +0.010 pitch -0.020, ahead yaw "
+            "+0.030 pitch +0.004, cancel in the pose yaw +1.480 pitch -0.230 deg (2 frames old, alignment serial lag 1); rifle in view yaw +0.500 pitch -1.250 deg, step yaw "
+            "+0.002 pitch -0.001";
         const bool exact = std::strcmp(buf, want) == 0;
         if (!exact) std::printf("F91 formatView got:  %s\nF91 formatView want: %s\n", buf, want);
         check(exact, "F91 B: a synthetic tick's fields print as the design gives them (r, rows frame, head seq, applied, head step, view step, cancel total, sight) and the additions");
@@ -486,6 +489,44 @@ inline void run91bc(Check&& check) {
         const std::vector<f91::FitResult> R = fitAll(*fw, fr), Q = fitAll(*fw, oneBase);
         check(R.size() == 2 && R[1].h1 && R[1].bestD == 2 && Q.size() == 2 && !Q[1].h1 && Q[1].bestRms > 0.5,
               "F91 B: a new residual base mid-window (r moved 2.5 deg) still fits H1 d 2: the offset is taken out per base (on one base the same series does not fit)");
+    }
+    {   // F92b: the F91 flight's still windows: r of tick N is measured on the rows of frame N - 1 and equals the game's step applied there (the head's tremor two ticks
+        // back). Aligned by the rows' frame it is H1 d 1; aligned by the tick, as F91 fitted it, no d fits (its "none" verdicts). And the head aim's count per window.
+        Lcg rng;
+        std::vector<f91::FitFrame> fr, unaligned;
+        std::vector<double> applied;
+        double uPrev = rng.next(), hPrev = 0.0;
+        for (int i = 0; i < 100; ++i) {
+            f91::FitFrame f;
+            f.dt = dt;
+            f.t = i * dt;
+            f.headOk = true;
+            const double u = rng.next();
+            f.head[0] = 0.04 * (u - uPrev);
+            uPrev = u;
+            f.applied[0] = hPrev;   // the game applies the last tick's ask
+            hPrev = f.head[0];
+            applied.push_back(f.applied[0]);
+            f.rOk = true;
+            f.r[0] = i > 0 ? applied[static_cast<size_t>(i) - 1] : 0.0;   // r at tick N: the step applied in frame N - 1
+            f.rLag = 1;
+            f.aimOn = i < 30;   // the head aim turned off at frame 30 of the first window
+            fr.push_back(f);
+            f.rLag = 0;
+            f.aimOn = false;
+            unaligned.push_back(f);
+        }
+        const std::vector<f91::FitResult> R = fitAll(*fw, fr);
+        char text[1400];
+        if (R.size() == 2) f91::formatFit(text, sizeof(text), R[1]);
+        const bool aligned = R.size() == 2 && R[1].h1 && R[1].bestD == 1 && R[1].bestRms < 1e-9 && R[1].rLagMax == 1 && R[1].still && has(text, "ending 1 frame(s) back") &&
+                             has(text, "verdict: H1 (the cancel lands 1 frame late)") && has(text, "head aim off (0 of ");
+        if (R.size() == 2) f91::formatFit(text, sizeof(text), R[0]);
+        const bool mixed = R.size() == 2 && R[0].aimN == 30 && has(text, "head aim mixed (30 of ");
+        const std::vector<f91::FitResult> Q = fitAll(*fw, unaligned);
+        check(aligned && mixed && Q.size() == 2 && !Q[1].h1 && Q[1].bestRms > f91::kH1FitDeg,
+              "F92b: r measured on the rows a frame behind the tick, aligned by the rows' frame, fits H1 d 1 exactly (the F91 flight's still windows); aligned by the tick, as "
+              "F91 fitted it, no d fits; a window says whether the head aim was on, off or mixed");
     }
     delete fw;
 }

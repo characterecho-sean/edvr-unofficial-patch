@@ -3455,15 +3455,25 @@ struct AdsInFlight {
     }
 };
 // The map's state (radians, seat convention). step() is one frame-thread tick: the cancel first (what the game applied since the last tick, exactly), then
-// what to ask the game for next. The caller queues the injection as look input through the measured gain and the sign keys, publishes yawSeat through
-// the look's total and pitchSeat through the ADS pitch overlay, and applies the cancel by that publication.
+// what to ask the game for next. The caller queues the injection as look input through the measured gain and the sign keys, publishes yawPublished() through
+// the look's total and pitchPublished() through the ADS pitch overlay, and applies the cancel by that publication.
 struct AdsAimMap {
-    double yawSeat = 0.0;      // the seated yaw published, cumulative (never reset: the runtime re-bases at a reset serial)
+    double yawSeat = 0.0;      // the cancel of what the game applied, cumulative (never reset: the runtime re-bases at a reset serial)
     double yawCarried = 0.0;   // its part since the last reset serial
-    double pitchSeat = 0.0;    // the seated pitch published (+-60 deg)
+    double pitchSeat = 0.0;    // the pitch cancel of what the game applied (+-60 deg)
     AdsInFlight flightYaw, flightPitch;   // asked and not yet seen applied
     double yawInFlight() const noexcept { return flightYaw.sum(); }
     double pitchInFlight() const noexcept { return flightPitch.sum(); }
+    // F92b: the cancel published ahead, this tick's ask. The game applies an ask queued at tick N in its next look update and renders that turn in frame N + 1, and the
+    // runtime applies a value published at tick N to the pose of frame N + 1; publishing the cancel only once the applied turn was seen (tick N + 1) put it in frame
+    // N + 2, a frame after the game's turn (the F91 flight: the view less the head equal to the game's last applied step to 0.0005 deg rms in every still window). So the
+    // published seated rotation is what the game applied plus this tick's ask; next tick the ask's applied turn replaces it (a refused ask shows for one frame).
+    double aheadYaw = 0.0, aheadPitch = 0.0;
+    double yawPublished() const noexcept { return yawSeat + aheadYaw; }
+    double pitchPublished() const noexcept { return adsClampPitch(pitchSeat + aheadPitch); }
+    // A remainder the runtime holds in its look total since the last reset serial (the carried yaw, and the ask published ahead): a stop or a release's end bumps the
+    // serial for it.
+    bool yawToReset() const noexcept { return std::fabs(yawCarried) > 1e-9 || std::fabs(aheadYaw) > 1e-9; }
     double relT = 0.0, relY0 = 0.0, relP0 = 0.0, relYDur = kAdsUnwindSec, relPDur = kAdsUnwindSec, relDur = kAdsUnwindSec;
     uint32_t clampHits = 0;
     AdsCentre centre;   // F69i: the press's snap, asked through the same path as the head's step
@@ -3491,6 +3501,7 @@ struct AdsAimMap {
     // The feature stops (a trip, a switch-off): the seated rotation returns to zero (the caller bumps the reset serial for the yaw and publishes the pitch).
     void dropSeated() noexcept {
         yawCarried = pitchSeat = 0.0;
+        aheadYaw = aheadPitch = 0.0;
         clearInFlight();
         centre.cancel();
     }
@@ -3542,6 +3553,8 @@ struct AdsAimMap {
         if (!pitchOn || !(inP == inP)) inP = 0.0;
         flightYaw.add(inY);
         flightPitch.add(inP);
+        aheadYaw = inY;   // F92b: published with what the game applied, for the frame the game renders this ask in
+        aheadPitch = inP;
         o.injYaw = inY;
         o.injPitch = inP;
         return o;
