@@ -359,6 +359,9 @@ inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
 uint32_t nativeOnFootMarkerFrameNow();
 // The Present-boundary render/Animate frame identity for joining captures across frame domains.
 uint32_t nativeOnFootRenderFrame();
+// F86h: the marker composite draws of a render frame, per eye: those the fix decided to patch and those whose patch was bound at the draw's issue. False when the
+// frame is not in the ring (256 frames) or the fix saw no draw in it.
+bool nativeOnFootMarkerFrameCounts(uint32_t renderFrame, uint32_t decided[2], uint32_t bound[2]);
 struct NativeOnFootPoseStamp {
     bool valid = false, writePresent = false, matricesValid = false, sourceFresh = false;
     uint32_t renderFrame = 0, fpFrame = 0, fpSequence = 0, gGameFrame = 0, itemSerial = 0, rigGeneration = 0;

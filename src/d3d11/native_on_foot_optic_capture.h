@@ -85,6 +85,11 @@ struct Record {
     bool poseRawMatricesValid = false, posePinEyeCalValid = false, poseWriteFresh = false;
     bool poseM3pAffineValid = false, poseM3pPaddingFinite = false, poseM3pPaddingCanonicalized = false;
     float poseArm[2][4][3] = {}; // actual shoulder, elbow, hand and target; model coordinates, metres.
+    // F86a: the wrists in world as the submit that drew this pose put them, after the pose carry (and without it), joined by the pose's game frame.
+    bool poseArmDrawnValid = false, poseArmDrawnHave[2] = {};
+    int poseArmDrawnWhy = 0; // nofoot::f86::CarryWhy of that submit
+    uint32_t poseArmDrawnAge = 0;
+    float poseArmDrawn[2][3] = {}, poseArmDrawnBefore[2][3] = {}, poseCarryDelta[3] = {};
     bool poseRifleQualityValid = false, poseRifleQualityAccepted = false;
     float poseRifleQualityWeight = 0.0f, poseRifleDetachWeight = 0.0f;
     float poseRifleBaselineYawDeg = 0.0f, poseRifleSelectedYawDeg = 0.0f, poseRifleBaselineCost = 0.0f, poseRifleSelectedCost = 0.0f;

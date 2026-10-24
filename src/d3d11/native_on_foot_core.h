@@ -26,6 +26,7 @@
 #include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: the PE identity of the build the addresses belong to, shared with the other build-keyed hooks
 #include "explorer_cam_follow_core.h"   // F49: ecm::quatRows, the pose's rotation rows (the pose freeze's rest locals)
 #include "native_on_foot_f85.h"          // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts)
+#include "native_on_foot_f86.h"          // F86: the pose carry, the stream windows, the weapon UI depth, the prompt snap and the floor probe (pure parts)
 
 namespace edvr {
 namespace nofoot {

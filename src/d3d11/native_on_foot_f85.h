@@ -473,27 +473,34 @@ struct StepFrame {
     uint32_t p1 = 0;
     uint64_t qpc = 0, qpcFp = 0, recQpc = 0;
     uint32_t tid3 = 0, tidFp = 0, recTid = 0;
-    bool haveFp = false, haveRec = false, haveFpRec = false, haveCam = false, havePin = false, haveHand = false, haveFpRoot = false;
+    bool haveFp = false, haveRec = false, haveCam = false, havePin = false, haveHand = false, haveFpRoot = false;
     float m3pT[3] = {}, up[3] = {};          // the 3P AMC matrix (what G and the pin use): translation and the body's up row
     float cam[3] = {};                       // the job camera the pin follows (world)
     float rec[3] = {};                       // the body's world translation as the renderer packs it (the AMC writer's first record)
     float recSpread = 0.0f, amcOrg[3] = {};  // the farthest other record from the first; the AMC's own origin (+0x2E0)
     bool haveAmcOrg = false;
     uint32_t recCalls = 0, recRecords = 0;
-    float fpRoot[3] = {}, fpRec[3] = {}, fpOrg[3] = {}, wpn[3] = {};   // the FP AMC's root, its drawn record and origin; the FP weapon's (MGMC) record
-    bool haveWpn = false;
+    float fpRoot[3] = {};                    // the FP AMC's root (the FP P1 call)
     // the pin (pinRecord): the demanded and the applied moves, the clamp flags, the crouch weight, the eye height less the standing height
     float pinDemandV = 0.0f, pinAppliedV = 0.0f, pinDemandH = 0.0f, pinAppliedH = 0.0f, wc = 0.0f, dEyeY = 0.0f;
     bool vClamp = false, hClamp = false;
     float handErrCm[2] = {-1.0f, -1.0f};
     bool handWritten[2] = {};
+    // F86a: the pose carry of this frame's submit (joined by the P1 frame): the figures the line prints and the hand-lag trigger reads
+    bool haveCarry = false;
+    int carryWhy = 0;
+    uint32_t poseAge = 0, prevCase = 0;
+    float fStep[3] = {}, fTurn = 0.0f, mStep[3] = {}, mTurn = 0.0f, carry[3] = {};
+    bool stepsOk = false;
+    float carryBeforeCm[2] = {-1.0f, -1.0f}, carryAfterCm[2] = {-1.0f, -1.0f};
     // derived by the tracker
     float speed = 0.0f, vy = 0.0f, stepUp = 0.0f, camBody[3] = {}, camMoveCm = 0.0f, dtMs = 0.0f;
-    float recMinusM3pCm = -1.0f, recMinusOrgCm = -1.0f, fpRecMinusRootCm = -1.0f;
+    float recMinusM3pCm = -1.0f, recMinusOrgCm = -1.0f, handLagCm = -1.0f;
     uint32_t trig = 0;
 };
-enum StepTrigger : uint32_t { kTrigM3pStep = 1, kTrigPinCap = 2, kTrigCamMove = 4, kTrigVy = 8 };
-constexpr double kStepM3pM = 0.3, kStepCamCm = 2.0, kStepVyMps = 0.8;
+// F86b: the camera-in-the-model trigger fired on every walk start and is gone; hand-lag (the pose carry's error before the carry, over 2 cm) takes its place.
+enum StepTrigger : uint32_t { kTrigM3pStep = 1, kTrigPinCap = 2, kTrigHandLag = 4, kTrigVy = 8 };
+constexpr double kStepM3pM = 0.3, kStepHandLagCm = 2.0, kStepVyMps = 0.8;
 constexpr int kStepBins = 5;   // still < 0.3, walk 0.3-2.5, jog 2.5-6, sprint 6-20, step over 20 m/s
 inline int speedBin(double mps) noexcept { return !(mps >= 0.3) ? 0 : mps < 2.5 ? 1 : mps < 6.0 ? 2 : mps < 20.0 ? 3 : 4; }
 inline const char* speedBinName(int b) noexcept {
@@ -512,7 +519,8 @@ struct StepAcc {
 struct StepSecond {
     uint64_t frames = 0, noRec = 0, noPin = 0, noFp = 0, eventsStarted = 0, eventsSuppressed = 0;
     uint64_t trigSeen[4] = {};
-    StepAcc rec[kStepBins], recTrig, fpRec, orgVsM3p;
+    uint64_t suppressedBy[4] = {};   // F86b: per trigger, the times its 8 a minute cap held it back
+    StepAcc rec[kStepBins], recTrig, orgVsM3p;
     double maxStepUpCm = 0.0;
 };
 struct StepResult {
@@ -530,8 +538,8 @@ struct StepTracker {
     StepFrame prev;
     int postLeft = 0, offset = 0, lastNPre = 0;
     uint32_t eventNo = 0;
-    uint64_t starts[kMaxPerMinute] = {};
-    uint32_t nStarts = 0;
+    uint64_t starts[4][kMaxPerMinute] = {};   // F86b: the start times of the last events each trigger began, per trigger
+    uint32_t nStarts[4] = {};
     StepSecond sec;
     uint64_t totalFrames = 0, totalEvents = 0, totalTrig[4] = {};
     bool prevAir = false;
@@ -550,20 +558,23 @@ struct StepTracker {
                 const double d[3] = {static_cast<double>(f.m3pT[0]) - prev.m3pT[0], static_cast<double>(f.m3pT[1]) - prev.m3pT[1],
                                      static_cast<double>(f.m3pT[2]) - prev.m3pT[2]};
                 f.speed = static_cast<float>(len3(d) / dt);
-                f.vy = static_cast<float>(d[1] / dt);
                 const double up[3] = {f.up[0], f.up[1], f.up[2]};
                 f.stepUp = static_cast<float>(dot3(d, up));
+                f.vy = static_cast<float>(static_cast<double>(f.stepUp) / dt);   // F86b: along the body's up row, not world Y (world Y read 1-3.7 m/s walking with no up-step)
                 if (std::fabs(static_cast<double>(f.stepUp)) > kStepM3pM) r.trig |= kTrigM3pStep;
-                if (f.haveCam && prev.haveCam) {
+                if (f.haveCam && prev.haveCam) {   // a figure of the line, no longer a trigger (it fired on every walk start)
                     const double c[3] = {static_cast<double>(f.camBody[0]) - prev.camBody[0], static_cast<double>(f.camBody[1]) - prev.camBody[1],
                                          static_cast<double>(f.camBody[2]) - prev.camBody[2]};
                     f.camMoveCm = static_cast<float>(len3(c) * 100.0);
-                    if (f.camMoveCm > kStepCamCm) r.trig |= kTrigCamMove;
                 }
                 const bool air = std::fabs(static_cast<double>(f.vy)) > kStepVyMps;
                 if (air != prevAir) r.trig |= kTrigVy;
                 prevAir = air;
             }
+        }
+        if (f.haveCarry) {   // F86b: the hand-lag trigger: the pose carry's error before the carry, the larger hand
+            f.handLagCm = std::max(f.carryBeforeCm[0], f.carryBeforeCm[1]);
+            if (f.handLagCm > static_cast<float>(kStepHandLagCm)) r.trig |= kTrigHandLag;
         }
         if (f.havePin && (f.vClamp || f.hClamp)) r.trig |= kTrigPinCap;
         for (int b = 0; b < 4; ++b)
@@ -588,11 +599,6 @@ struct StepTracker {
         }
         if (!f.havePin) ++sec.noPin;
         if (!f.haveFp) ++sec.noFp;
-        if (f.haveFpRec && f.haveFpRoot) {
-            const double d[3] = {static_cast<double>(f.fpRec[0]) - f.fpRoot[0], static_cast<double>(f.fpRec[1]) - f.fpRoot[1], static_cast<double>(f.fpRec[2]) - f.fpRoot[2]};
-            f.fpRecMinusRootCm = static_cast<float>(len3(d) * 100.0);
-            sec.fpRec.add(f.fpRecMinusRootCm);
-        }
         sec.maxStepUpCm = std::max(sec.maxStepUpCm, std::fabs(static_cast<double>(f.stepUp)) * 100.0);
         f.trig = r.trig;
         // the event: a trigger frame starts one (unless 8 started in the last minute); the 24 frames after it print whatever they carry
@@ -602,14 +608,24 @@ struct StepTracker {
             r.eventNo = eventNo;
             r.offset = ++offset;
         } else if (r.trig) {
-            uint32_t recent = 0;
-            for (const uint64_t s : starts)
-                if (s && f.qpc >= s && f.qpc - s < 60ull * freq) ++recent;
-            if (recent >= static_cast<uint32_t>(kMaxPerMinute)) {
+            // F86b: the cap is per trigger (8 events a minute each): a trigger at its cap is counted and does not start an event on its own.
+            uint32_t capped = 0;
+            for (int b = 0; b < 4; ++b) {
+                if (!(r.trig & (1u << b))) continue;
+                uint32_t recent = 0;
+                for (const uint64_t s : starts[b])
+                    if (s && f.qpc >= s && f.qpc - s < 60ull * freq) ++recent;
+                if (recent >= static_cast<uint32_t>(kMaxPerMinute)) {
+                    capped |= 1u << b;
+                    ++sec.suppressedBy[b];
+                }
+            }
+            if ((r.trig & ~capped) == 0u) {
                 r.suppressed = true;
                 ++sec.eventsSuppressed;
             } else {
-                starts[nStarts++ % kMaxPerMinute] = f.qpc;
+                for (int b = 0; b < 4; ++b)
+                    if ((r.trig & ~capped) & (1u << b)) starts[b][nStarts[b]++ % kMaxPerMinute] = f.qpc;
                 ++eventNo;
                 ++totalEvents;
                 ++sec.eventsStarted;

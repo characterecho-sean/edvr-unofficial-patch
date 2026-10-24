@@ -1,12 +1,15 @@
-// F85 checks (the pin-step trace, the weapon UI pinned to the weapon, the reticle's hit depth): the pure functions of
-// src\d3d11\native_on_foot_f85.h on synthetic cameras. Header only so that native_frame_test and a desk driver run the same lines.
+// F85 checks (the pin-step trace, the weapon UI pinned to the weapon, the reticle's hit depth) and F86 checks (the pose carry, the stream windows, the weapon UI
+// at the weapon's surface, the prompt snap, the floor probe, run86 below): the pure functions of src\d3d11\native_on_foot_f85.h and native_on_foot_f86.h on synthetic
+// cameras. Header only so that native_frame_test, the depth line rig and a desk driver run the same lines.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_f85.h"
 #include "../../src/d3d11/native_on_foot_core.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -492,18 +495,35 @@ inline void run(Check&& check) {
             check(r.eventStart && (r.trig & f85::kTrigPinCap), "F85a: a pin cap trip starts an event");
         }
         {
+            // F86b: the camera moving in the model is a figure of the line, no longer a trigger (it fired on every walk start); the hand lag takes its place
             f85::StepTracker t;
             f85::StepFrame f0 = mkFrame(0, 0.0), f1 = mkFrame(1, 0.0);
             f1.camBody[2] = 0.03f;
             t.step(f0, freq);
             const f85::StepResult r = t.step(f1, freq);
-            check(r.eventStart && (r.trig & f85::kTrigCamMove) && f1.camMoveCm > 2.9f && f1.camMoveCm < 3.1f, "F85a: the camera moving 3 cm in the model in a frame starts an event");
+            check(!r.eventStart && r.trig == 0u && f1.camMoveCm > 2.9f && f1.camMoveCm < 3.1f, "F86b: the camera moving 3 cm in the model in a frame is measured and starts no event");
             f85::StepTracker u;
             f85::StepFrame g0 = mkFrame(0, 0.0), g1 = mkFrame(1, 0.0);
-            g1.camBody[2] = 0.015f;
+            g1.haveCarry = true;
+            g1.carryBeforeCm[0] = 1.5f;
+            g1.carryBeforeCm[1] = 1.9f;
             u.step(g0, freq);
             const f85::StepResult q = u.step(g1, freq);
-            check(!q.eventStart && !(q.trig & f85::kTrigCamMove), "F85a: 1.5 cm in a frame is under the camera trigger");
+            check(!q.eventStart && !(q.trig & f85::kTrigHandLag), "F86b: a hand error of 1.9 cm before the carry is under the hand-lag trigger (2 cm)");
+            f85::StepTracker w;
+            f85::StepFrame h0 = mkFrame(0, 0.0), h1 = mkFrame(1, 0.0);
+            h1.haveCarry = true;
+            h1.carryBeforeCm[0] = 0.4f;
+            h1.carryBeforeCm[1] = 2.6f;
+            w.step(h0, freq);
+            const f85::StepResult z = w.step(h1, freq);
+            check(z.eventStart && (z.trig & f85::kTrigHandLag) && std::fabs(h1.handLagCm - 2.6f) < 1e-6f && w.sec.trigSeen[2] == 1u,
+                  "F86b: a hand error of 2.6 cm before the carry starts a hand-lag event and is counted under its trigger");
+            f85::StepTracker nw;
+            f85::StepFrame n0 = mkFrame(0, 0.0), n1 = mkFrame(1, 0.0);
+            n1.haveCarry = true;   // no wrist written: both errors -1
+            nw.step(n0, freq);
+            check(!nw.step(n1, freq).eventStart, "F86b: a carry with no written wrist (error -1) starts nothing");
         }
         {
             f85::StepTracker t;
@@ -519,6 +539,19 @@ inline void run(Check&& check) {
             }
             check(vyTrig == 2, "F85a: |vy| over 0.8 m/s starting (take-off) and ending (landing) trigger once each");
         }
+        {
+            // F86b: vy is the step along the body's up row over dt, not world Y: a body tilted 90 degrees (up = world +x) walking along world Y has no vy
+            f85::StepTracker t;
+            double maxAbsVy = 0.0;
+            for (uint32_t i = 0; i < 30; ++i) {
+                f85::StepFrame f = mkFrame(i, i * 2.0 / 90.0);   // 2 m/s along world Y
+                f.up[0] = 1.0f;
+                f.up[1] = 0.0f;
+                t.step(f, freq);
+                maxAbsVy = std::max(maxAbsVy, std::fabs(static_cast<double>(f.vy)));
+            }
+            check(maxAbsVy < 1e-3 && t.sec.trigSeen[3] == 0, "F86b: vy reads the step along the body's up row (walking along world Y with up = +x gives 0 and no vy trigger)");
+        }
         // at most 8 events a minute
         {
             f85::StepTracker t;
@@ -532,6 +565,28 @@ inline void run(Check&& check) {
                 suppressed += r.suppressed ? 1 : 0;
             }
             check(starts == 8 && suppressed >= 1 && t.sec.eventsStarted == 8u, "F85a: at most 8 events start in a minute; the rest are counted as suppressed");
+        }
+        // F86b: the cap is per trigger: a busy pin-cap does not use up the hand-lag's eight, and the suppressed count names the trigger
+        {
+            f85::StepTracker t;
+            int starts = 0, capStarts = 0, lagStarts = 0;
+            for (uint32_t i = 0; i < 90 * 20; ++i) {
+                f85::StepFrame f = mkFrame(i, 0.0);
+                f.havePin = true;
+                f.vClamp = (i % 45) == 0 && i > 0;   // a cap trip every half second
+                if (i >= 90 * 5 && (i % 45) == 20) {   // a hand lag every half second from the fifth second, between the cap trips
+                    f.haveCarry = true;
+                    f.carryBeforeCm[0] = 5.0f;
+                }
+                const f85::StepResult r = t.step(f, freq);
+                if (r.eventStart) {
+                    ++starts;
+                    if (r.trig & f85::kTrigPinCap) ++capStarts;
+                    if (r.trig & f85::kTrigHandLag) ++lagStarts;
+                }
+            }
+            check(capStarts == 8 && lagStarts == 8 && starts == 16 && t.sec.suppressedBy[1] > 0 && t.sec.suppressedBy[2] > 0 && t.sec.suppressedBy[0] == 0 && t.sec.suppressedBy[3] == 0,
+                  "F86b: each trigger has its own 8 a minute (8 pin-cap and 8 hand-lag events), and the suppressed count is kept per trigger");
         }
         // the drawn record against M3P, by speed
         {
@@ -549,6 +604,684 @@ inline void run(Check&& check) {
         }
         check(f85::speedBin(0.1) == 0 && f85::speedBin(1.0) == 1 && f85::speedBin(4.0) == 2 && f85::speedBin(7.0) == 3 && f85::speedBin(25.0) == 4, "F85a: the speed bins are still / walk / jog / sprint / step");
     }
+}
+
+// ---- F86 (the pose carry, the stream windows, the weapon UI at the weapon's surface, the prompt snap, the floor probe) -----------------------------------------
+// The pure functions of src\d3d11\native_on_foot_f86.h on synthetic scenes. Design: reviews\native-onfoot-f86-review-2026-10-23.md.
+inline void putMat(float m[16], const double R[3][3], const double t[3]) {
+    for (int i = 0; i < 16; ++i) m[i] = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) m[4 * i + j] = static_cast<float>(R[i][j]);
+        m[12 + i] = static_cast<float>(t[i]);
+    }
+    m[15] = 1.0f;
+}
+// A depth image (reversed-Z, infinite far) of the plane n . x = c seen by the camera at the origin looking down +z (the scene rows of sceneRows with the same fx, px, py).
+inline void planeImage(std::vector<float>& img, uint32_t N, double fx, double px, double py, const double nrm[3], double c, double nearZ) {
+    img.resize(static_cast<size_t>(N) * N);
+    for (uint32_t iy = 0; iy < N; ++iy)
+        for (uint32_t ix = 0; ix < N; ++ix) {
+            const double nx = ((ix + 0.5) / N) * 2.0 - 1.0, ny = 1.0 - ((iy + 0.5) / N) * 2.0;
+            const double tx = (nx - px) / fx, ty = (ny - py) / fx;
+            const double den = nrm[0] * tx + nrm[1] * ty + nrm[2];
+            const double s = den > 1e-6 ? c / den : 1e30;
+            img[static_cast<size_t>(iy) * N + ix] = s < 1e29 && s > 0.0 ? static_cast<float>(nearZ / s) : 0.0f;
+        }
+}
+
+template <class Check>
+inline void run86(Check&& check) {
+    namespace f86 = edvr::nofoot::f86;
+    const double I3[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const auto rotYd = [](double a, double R[3][3]) {
+        const double c = std::cos(a), s = std::sin(a);
+        const double v[3][3] = {{c, 0, s}, {0, 1, 0}, {-s, 0, c}};
+        std::memcpy(R, v, sizeof(v));
+    };
+    // ---- A: the pose carry ------------------------------------------------------------------------------------------------------------------------
+    // The wrists are fixed points A_s of the FP root's frame; the pose of Animate p puts them (in the 3P model) at a_s = (A_s . F_p - d) . inv(M_p); the submit of
+    // frame i draws them at a_s . R(M_i) + rec_i. M3P trails F_root by one frame. The hand misses by the change of F_root's step: dF_i - dM_i = dF_i - dF_{i-1}.
+    const double Aw[2][3] = {{-0.20, -0.25, 0.35}, {0.20, -0.25, 0.35}};
+    struct Seq {
+        float F[12][16], M[12][16];
+        double rec[12][3];
+    };
+    const auto solvePose = [&](const float Mp[16], const float Fp[16], const double d[3], uint32_t p1) {
+        f86::PoseIn pose;
+        pose.have = true;
+        pose.p1 = p1;
+        std::memcpy(pose.m3p, Mp, sizeof(pose.m3p));
+        std::memcpy(pose.froot, Fp, sizeof(pose.froot));
+        for (int i = 0; i < 3; ++i) pose.d[i] = static_cast<float>(d[i]);
+        f86::Aff aF = f86::affOf(Fp), aMi;
+        f86::affInv(f86::affOf(Mp), &aMi);
+        for (int s = 0; s < 2; ++s) {
+            double w[3], m[3];
+            f86::affPoint(aF, Aw[s], w);
+            for (int j = 0; j < 3; ++j) w[j] -= d[j];
+            f86::affPoint(aMi, w, m);
+            pose.wrote[s] = true;
+            for (int j = 0; j < 3; ++j) pose.wrist[s][j] = static_cast<float>(m[j]);
+        }
+        return pose;
+    };
+    {   // the dump-001 shape: uneven vertical steps, M3P a frame behind F_root, no turn
+        const double upStepCm[10] = {0.0, 1.5, 11.1, 0.8, -2.0, -4.6, -6.2, -9.1, -13.5, -13.4};
+        double Fy[10] = {}, Mt[10][3], Ft[10][3];
+        for (int i = 0; i < 10; ++i) {
+            Fy[i] = (i ? Fy[i - 1] : 0.0) + upStepCm[i] * 0.01;
+            Ft[i][0] = 0.0;
+            Ft[i][1] = Fy[i];
+            Ft[i][2] = 0.05 * i;
+        }
+        for (int i = 1; i < 10; ++i) {
+            Mt[i][0] = Ft[i - 1][0];
+            Mt[i][1] = Ft[i - 1][1] - 1.0;   // the model sits a metre below the root
+            Mt[i][2] = Ft[i - 1][2] + 0.02;
+        }
+        float F[10][16], M[10][16];
+        for (int i = 0; i < 10; ++i) putMat(F[i], I3, Ft[i]);
+        for (int i = 1; i < 10; ++i) putMat(M[i], I3, Mt[i]);
+        const double d0[3] = {0, 0, 0};
+        double worstAfter = 0.0, before[10] = {};
+        bool allCarried = true;
+        for (int i = 2; i < 10; ++i) {
+            const f86::PoseIn pose = solvePose(M[i - 1], F[i - 1], d0, static_cast<uint32_t>(i - 1));
+            f86::CarryFrame fr;
+            fr.p1 = static_cast<uint32_t>(i);
+            std::memcpy(fr.m3p, M[i], sizeof(fr.m3p));
+            std::memcpy(fr.froot, F[i], sizeof(fr.froot));
+            for (int j = 0; j < 3; ++j) fr.rec[j] = Mt[i][j];
+            const f86::CarryResult r = f86::poseCarry(pose, fr, true);
+            allCarried = allCarried && r.why == f86::kCarried && r.age == 1u && r.haveWrist[0] && r.haveWrist[1] && !r.usedEye;
+            before[i] = std::max(r.errBeforeCm[0], r.errBeforeCm[1]);
+            worstAfter = std::max(worstAfter, std::max(r.errAfterCm[0], r.errAfterCm[1]));
+        }
+        check(allCarried, "F86a: every frame of the dump-001 shape is carried at pose age 1 with both wrists written");
+        check(std::fabs(before[2] - 9.6) < 0.01 && std::fabs(before[3] - 10.3) < 0.01 && std::fabs(before[4] - 2.8) < 0.01,
+              "F86a: without the carry the wrists miss by 9.6, 10.3 and 2.8 cm in the first three frames of uneven steps (the change of F_root's step)");
+        check(worstAfter < 0.01, "F86a: with the carry the same wrists are within 0.01 cm in every frame");
+    }
+    {   // M3P and F turn 20 degrees a frame together
+        float F[8][16], M[8][16];
+        double Ft[8][3], Mt[8][3];
+        for (int i = 0; i < 8; ++i) {
+            Ft[i][0] = 0.3 * i * 0.1;
+            Ft[i][1] = 0.02 * i * i;
+            Ft[i][2] = 0.12 * i;
+            if (i) {
+                std::memcpy(Mt[i], Ft[i - 1], sizeof(Mt[i]));
+                Mt[i][1] -= 1.0;
+            }
+            double R[3][3];
+            rotYd(20.0 * f85::kPi / 180.0 * i, R);
+            putMat(F[i], R, Ft[i]);
+            if (i) putMat(M[i], R, Mt[i]);
+        }
+        const double d0[3] = {0, 0, 0};
+        double worstAfter = 0.0, worstBefore = 0.0;
+        for (int i = 2; i < 8; ++i) {
+            const f86::PoseIn pose = solvePose(M[i - 1], F[i - 1], d0, static_cast<uint32_t>(i - 1));
+            f86::CarryFrame fr;
+            fr.p1 = static_cast<uint32_t>(i);
+            std::memcpy(fr.m3p, M[i], sizeof(fr.m3p));
+            std::memcpy(fr.froot, F[i], sizeof(fr.froot));
+            for (int j = 0; j < 3; ++j) fr.rec[j] = Mt[i][j];
+            const f86::CarryResult r = f86::poseCarry(pose, fr, true);
+            worstAfter = std::max(worstAfter, std::max(r.errAfterCm[0], r.errAfterCm[1]));
+            worstBefore = std::max(worstBefore, std::max(r.errBeforeCm[0], r.errBeforeCm[1]));
+        }
+        check(worstBefore > 5.0 && worstAfter < 0.1, "F86a: M3P and F turning 20 degrees a frame together: centimetres of error without the carry, under 0.1 cm with it");
+    }
+    {   // F alone turns 3.7 degrees a frame; M3P does not: the residual is the turn times the wrists' distance from their mean
+        float F[8][16], M[8][16];
+        double Ft[8][3], Mt[8][3];
+        for (int i = 0; i < 8; ++i) {
+            Ft[i][0] = 0.0;
+            Ft[i][1] = 0.0;
+            Ft[i][2] = 0.1 * i;
+            if (i) {
+                std::memcpy(Mt[i], Ft[i - 1], sizeof(Mt[i]));
+                Mt[i][1] -= 1.0;
+            }
+            double R[3][3];
+            rotYd(3.7 * f85::kPi / 180.0 * i, R);
+            putMat(F[i], R, Ft[i]);
+            if (i) putMat(M[i], I3, Mt[i]);
+        }
+        const double d0[3] = {0, 0, 0};
+        double worst = 0.0;
+        for (int i = 2; i < 8; ++i) {
+            const f86::PoseIn pose = solvePose(M[i - 1], F[i - 1], d0, static_cast<uint32_t>(i - 1));
+            f86::CarryFrame fr;
+            fr.p1 = static_cast<uint32_t>(i);
+            std::memcpy(fr.m3p, M[i], sizeof(fr.m3p));
+            std::memcpy(fr.froot, F[i], sizeof(fr.froot));
+            for (int j = 0; j < 3; ++j) fr.rec[j] = Mt[i][j];
+            const f86::CarryResult r = f86::poseCarry(pose, fr, true);
+            worst = std::max(worst, std::max(r.errAfterCm[0], r.errAfterCm[1]));
+        }
+        const double bound = 2.0 * std::sin(0.5 * 3.7 * f85::kPi / 180.0) * 0.20 * 100.0;   // |dR_F| x half the wrist spacing (0.20 m), cm
+        check(worst <= bound * 1.01 && worst >= bound * 0.9, "F86a: F alone at 3.7 degrees a frame leaves the turn times half the wrist spacing at the wrists (1.29 cm), no more");
+    }
+    {   // the body shift d rides both: the pose carried d_p, the record is shifted by d_i
+        const double d[3] = {0.10, 0.0, -0.20};
+        const double Ft[2][3] = {{0.0, 0.0, 0.0}, {0.0, 0.05, 0.12}}, Mt[2][3] = {{0.0, -1.0, 0.0}, {0.0, -0.99, 0.05}};
+        float F[2][16], M[2][16];
+        putMat(F[0], I3, Ft[0]);
+        putMat(F[1], I3, Ft[1]);
+        putMat(M[0], I3, Mt[0]);
+        putMat(M[1], I3, Mt[1]);
+        const double* Mt1 = Mt[1];
+        const f86::PoseIn pose = solvePose(M[0], F[0], d, 0);
+        f86::CarryFrame fr;
+        fr.p1 = 1;
+        std::memcpy(fr.m3p, M[1], sizeof(fr.m3p));
+        std::memcpy(fr.froot, F[1], sizeof(fr.froot));
+        for (int j = 0; j < 3; ++j) fr.rec[j] = Mt1[j] + d[j];   // the record the body shift moved by d
+        const f86::CarryResult r = f86::poseCarry(pose, fr, true);
+        check(r.why == f86::kCarried && r.errAfterCm[0] < 0.01 && r.errAfterCm[1] < 0.01, "F86a: the body shift d (in the pose and in the record) is carried through: the wrists land within 0.01 cm");
+    }
+    {   // refusals: a hitch, the age, no pose, the scope
+        double Ft[2][3] = {{0, 0, 0}, {0, 2.4, 0}}, Mt[2][3] = {{0, -1, 0}, {0, -1, 0}};
+        float F[2][16], M[2][16];
+        for (int i = 0; i < 2; ++i) {
+            putMat(F[i], I3, Ft[i]);
+            putMat(M[i], I3, Mt[i]);
+        }
+        const double d0[3] = {0, 0, 0};
+        f86::PoseIn pose = solvePose(M[0], F[0], d0, 5);
+        f86::CarryFrame fr;
+        fr.p1 = 6;
+        std::memcpy(fr.m3p, M[1], sizeof(fr.m3p));
+        std::memcpy(fr.froot, F[1], sizeof(fr.froot));
+        for (int j = 0; j < 3; ++j) fr.rec[j] = Mt[1][j];
+        f86::CarryResult r = f86::poseCarry(pose, fr, true);
+        check(r.why == f86::kCarryHitch && f85::len3(r.delta) == 0.0 && std::fabs(r.errBeforeCm[0] - 240.0) < 0.1 && std::fabs(r.errAfterCm[0] - 240.0) < 0.1,
+              "F86a: a 2.4 m step is refused (over 50 cm), nothing is moved, and the error before is still reported");
+        for (uint32_t age = 0; age <= 4; ++age) {
+            f86::PoseIn p2 = solvePose(M[0], F[0], d0, 6 - age);
+            f86::CarryFrame f2 = fr;
+            std::memcpy(f2.froot, F[0], sizeof(f2.froot));
+            std::memcpy(f2.m3p, M[0], sizeof(f2.m3p));
+            const f86::CarryResult q = f86::poseCarry(p2, f2, true);
+            check(q.age == age && (age <= 3 ? q.why == f86::kCarried : q.why == f86::kCarryOld), "F86a: a pose up to 3 frames old is carried, a fourth is refused (over 3 frames)");
+        }
+        f86::PoseIn later = solvePose(M[0], F[0], d0, 9);
+        check(f86::poseCarry(later, fr, true).why == f86::kCarryOld, "F86a: a pose from a frame after the submit's is refused (its age wraps)");
+        check(f86::poseCarry(f86::PoseIn{}, fr, true).why == f86::kCarryNoPose, "F86a: no pose record: refused (no pose)");
+        check(f86::poseCarry(pose, fr, false).why == f86::kCarryScope, "F86a: outside the pin's scope: refused (out of scope)");
+        // one hand written: the eye stands in; neither hand and no eye: no pose
+        pose.wrote[1] = false;
+        pose.eyeOk = true;
+        pose.eye[0] = 0.0f;
+        pose.eye[1] = 1.6f;
+        pose.eye[2] = 0.1f;
+        fr.p1 = 6;
+        std::memcpy(fr.froot, F[0], sizeof(fr.froot));
+        std::memcpy(fr.m3p, M[0], sizeof(fr.m3p));
+        f86::CarryResult e1 = f86::poseCarry(pose, fr, true);
+        check(e1.why == f86::kCarried && e1.usedEye && e1.haveWrist[0] && !e1.haveWrist[1] && e1.errBeforeCm[1] < 0.0, "F86a: with one hand written the eye is the carried point, the written wrist is still measured");
+        pose.eyeOk = false;
+        check(f86::poseCarry(pose, fr, true).why == f86::kCarryNoPose, "F86a: one hand written and no eye: no pose");
+        pose.wrote[0] = false;
+        pose.eyeOk = true;
+        e1 = f86::poseCarry(pose, fr, true);
+        check(e1.why == f86::kCarried && e1.usedEye && !e1.haveWrist[0] && !e1.haveWrist[1] && e1.errBeforeCm[0] < 0.0 && e1.errAfterCm[1] < 0.0,
+              "F86a: no hand written (a weapon not out): the eye is carried, no wrist error is reported (-1)");
+    }
+    {   // the steps and turns the line prints
+        double R0[3][3], R1[3][3];
+        rotYd(0.0, R0);
+        rotYd(20.0 * f85::kPi / 180.0, R1);
+        const double t0[3] = {1.0, 2.0, 3.0}, t1[3] = {1.0 + 0.05, 2.0 + 0.02, 3.0 + 0.30};
+        float m0[16], m1[16];
+        putMat(m0, R0, t0);
+        putMat(m1, R1, t1);
+        const f86::StepGeom g = f86::stepGeom(m0, m1);
+        check(g.ok && std::fabs(g.turnDeg - 20.0) < 1e-4 && std::fabs(g.step[0] - 0.05) < 1e-6 && std::fabs(g.step[1] - 0.02) < 1e-6 && std::fabs(g.step[2] - 0.30) < 1e-6,
+              "F86a: the step is read in the earlier frame's right / up / forward axes and the turn is the angle between the two frames");
+        double R2[3][3];
+        rotYd(90.0 * f85::kPi / 180.0, R2);
+        float m2[16];
+        putMat(m2, R2, t0);
+        const f86::StepGeom h = f86::stepGeom(m2, m1);   // the earlier frame's axes are turned: the same world step reads differently
+        check(h.ok && std::fabs(h.step[0] - (0.05 * R2[0][0] + 0.30 * R2[0][2])) < 1e-6, "F86a: the step follows the earlier frame's axes (a turned earlier frame reads the world step in its own)");
+    }
+    {   // the previous copy of a record: both cases give the true drawn motion
+        std::srand(7);
+        for (int mode = 0; mode < 2; ++mode) {   // 0: the game keeps its own copy; 1: the game copies the record back
+            float X[3] = {1.0f, 2.0f, 3.0f};
+            float lastRaw[3] = {}, lastFinal[3] = {};
+            double lastDelta[3] = {};
+            bool have = false, motionOk = true, classOk = true;
+            for (int i = 0; i < 20; ++i) {
+                const float Xn[3] = {X[0] + 0.011f * (i % 3), X[1] + 0.002f * i, X[2] + 0.05f};
+                const double delta[3] = {0.001 * (std::rand() % 50 - 25), 0.001 * (std::rand() % 50 - 25), 0.001 * (std::rand() % 50 - 25)};
+                // what the game leaves: pos = Xn; prev = its own last pos (mode 0) or the record as we left it (mode 1)
+                const float pos[3] = {Xn[0], Xn[1], Xn[2]};
+                float prev[3];
+                for (int k = 0; k < 3; ++k) prev[k] = have ? (mode == 0 ? lastRaw[k] : lastFinal[k]) : X[k];
+                f86::PrevCase c = f86::kPrevNone;
+                if (have) {
+                    c = f86::classifyPrev(prev, lastRaw, lastFinal);
+                    classOk = classOk && (mode == 0 ? c == f86::kPrevGame : c == f86::kPrevOurs);
+                }
+                float prevW[3];
+                f86::prevToWrite(c, prev, lastDelta, prevW);
+                float posW[3];
+                for (int k = 0; k < 3; ++k) posW[k] = static_cast<float>(static_cast<double>(pos[k]) + delta[k]);
+                if (have) {
+                    for (int k = 0; k < 3; ++k) {
+                        const double drawn = static_cast<double>(posW[k]) - static_cast<double>(prevW[k]);
+                        const double truth = (static_cast<double>(pos[k]) + delta[k]) - (static_cast<double>(lastRaw[k]) + lastDelta[k]);
+                        motionOk = motionOk && std::fabs(drawn - truth) < 1e-5;
+                    }
+                }
+                std::memcpy(lastRaw, pos, sizeof(lastRaw));
+                std::memcpy(lastFinal, posW, sizeof(lastFinal));
+                std::memcpy(lastDelta, delta, sizeof(lastDelta));
+                for (int k = 0; k < 3; ++k) X[k] = Xn[k];
+                have = true;
+            }
+            check(classOk, mode == 0 ? "F86a: the game's own copy of last frame's position is recognised bit for bit" : "F86a: the record copied back (our written position) is recognised bit for bit");
+            check(motionOk, mode == 0 ? "F86a: the game's case adds last frame's carry to the previous copy: the drawn motion is (pos + d_i) - (pos_prev + d_{i-1})"
+                                       : "F86a: our case leaves the previous copy: the drawn motion is (pos + d_i) - (pos_prev + d_{i-1})");
+        }
+        const float a[3] = {1.0f, 2.0f, 3.0f}, b[3] = {1.0f, 2.0f, 3.5f}, c3[3] = {1.0f, 2.0f, 4.0f};
+        float w[3];
+        const double dl[3] = {0.1, 0.1, 0.1};
+        f86::prevToWrite(f86::classifyPrev(c3, a, b), c3, dl, w);
+        check(f86::classifyPrev(c3, a, b) == f86::kPrevNeither && w[0] == c3[0] && w[1] == c3[1] && w[2] == c3[2], "F86a: a previous copy that is neither is left alone");
+        f86::PrevTally t;
+        t.add(f86::kPrevGame);
+        t.add(f86::kPrevGame);
+        check(t.verdict() == f86::kPrevGame, "F86a: a frame whose records all show the game's case is the game's");
+        t.add(f86::kPrevOurs);
+        check(t.verdict() == f86::kPrevNeither && f86::PrevTally{}.verdict() == f86::kPrevNone, "F86a: a mixed frame is neither; a frame with no history is none");
+    }
+    // ---- C: the stream windows -------------------------------------------------------------------------------------------------------------------
+    {
+        const uint32_t total = 196608;
+        uint32_t e[3] = {30000, 1000, 1010};
+        f86::WinPlan p;
+        f86::planWindows(e, 3, total, &p);
+        check(p.clusters == 2 && p.windows == 2 && p.entries == 3 && p.entryMin == 1000 && p.entryMax == 30000 && p.holds(1005) && p.holds(30020) && p.uncovered == 0,
+              "F86c: entries {1000, 1010, 30000} give two windows holding 1005 and 30020");
+        check(p.holds(1000) && p.holds(1010) && p.holds(30000) && !p.holds(15000), "F86c: every entry drawn last frame is inside a window, the space between them is not");
+        uint32_t e2[2] = {1010, 1000};
+        f86::planWindows(e2, 2, total, &p);
+        check(p.clusters == 1 && p.windows == 1 && p.uncovered == 0, "F86c: entries 10 apart are one cluster and one window");
+        bool aligned = true;
+        for (uint32_t w = 0; w < p.windows; ++w) aligned = aligned && (p.lo[w] % 2u) == 0u && (p.n[w] % 2u) == 0u && p.n[w] <= f86::kWinEntries;
+        check(aligned, "F86c: windows start on an even entry and hold an even number of at most 4096 (16-byte loads)");
+        // the byte budget: at most 4 windows of 4096 entries (8 bytes each) per eye; two clusters cost what a window of 8192 did
+        uint32_t many[40];
+        for (int i = 0; i < 40; ++i) many[i] = 4500u * static_cast<uint32_t>(i);   // 40 clusters, 4500 apart (past the 2048 gap)
+        f86::planWindows(many, 40, total, &p);
+        uint64_t bytes = 0;
+        for (uint32_t w = 0; w < p.windows; ++w) bytes += static_cast<uint64_t>(p.n[w]) * 8u;
+        check(p.windows == f86::kWinMax && bytes <= static_cast<uint64_t>(f86::kWinMax) * f86::kWinEntries * 8u && p.clusters == 40 && p.uncovered > 0,
+              "F86c: at most 4 windows an eye (128 KB); the clusters past them are counted as uncovered entries");
+        uint32_t two[2] = {5000, 90000};
+        f86::planWindows(two, 2, total, &p);
+        check(static_cast<uint64_t>(p.n[0] + p.n[1]) * 8u <= 8192u * 8u, "F86c: two clusters copy no more than the old 8192-entry window did (64 KB)");
+        // a cluster wider than a window: windows end to end; the end of the buffer; a small buffer
+        uint32_t wide[6] = {0, 2000, 4000, 6000, 8000, 10000};
+        f86::planWindows(wide, 6, total, &p);
+        bool all = true;
+        for (uint32_t v : {0u, 2000u, 4000u, 6000u, 8000u, 10000u}) all = all && p.holds(v);
+        check(p.clusters == 1 && p.windows == 3 && all && p.uncovered == 0, "F86c: a cluster wider than a window is covered by windows end to end");
+        uint32_t tail[1] = {total - 3};
+        f86::planWindows(tail, 1, total, &p);
+        check(p.windows == 1 && p.holds(total - 3) && p.lo[0] + p.n[0] <= total, "F86c: a window about the last entries of the buffer stays inside it");
+        uint32_t tiny[1] = {100};
+        f86::planWindows(tiny, 1, 1000, &p);
+        check(p.windows == 1 && p.lo[0] == 0 && p.holds(100) && p.n[0] <= 1000, "F86c: a buffer smaller than a window is copied from its start");
+        f86::planWindows(tiny, 0, total, &p);
+        check(p.windows == 0 && !p.holds(0) && p.distance(5) == ~0u, "F86c: no entries, no windows");
+        uint32_t far2[2] = {1000, 30000};
+        f86::planWindows(far2, 2, total, &p);
+        check(p.windows == 2 && p.lo[1] == 27952u && p.n[1] == 4096u && p.distance(1500) == 0u && p.distance(40000) == 40000u - 32048u + 1u && p.distance(27949) == 3u && p.distance(32048) == 1u,
+              "F86c: the distance from an entry to the nearest window is 0 inside one and the number of entries past its edge outside");
+    }
+    // ---- D, F, G: the depth lines ----------------------------------------------------------------------------------------------------------------
+    {
+        const Mat I = Mat{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+        const double nearZ = 0.025;
+        const double e0[3] = {0, 0, 0};
+        // ranged march: planes inside, short of and past the range
+        {
+            const double fx = 1.38, px = 0.0153 + 0.002, py = 0.0031;
+            float rows[16];
+            sceneRows(I, e0, fx, fx, px, py, nearZ, rows);
+            double A = 0.0, B = 0.0;
+            f85::zwFit(rows, &A, &B);
+            const uint32_t N = 256;
+            std::vector<float> img;
+            f85::MarchView mv;
+            mv.rows = rows;
+            mv.A = A;
+            mv.B = B;
+            mv.width = mv.height = N;
+            const double O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
+            const double nz[3] = {0, 0, 1};
+            planeImage(img, N, fx, px, py, nz, 0.395, nearZ);
+            mv.depth = img.data();
+            f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 0.12, 0.8);
+            check(lo.status == f86::kLineHit && std::fabs(lo.d - 0.395) < 0.002, "F86d: a plane at 0.395 m is found by a ranged march over 0.12..0.8 m");
+            lo = f86::marchRangeCpu(mv, O, u, 0.5, 5.0);
+            check(lo.status == f86::kLineNear, "F86d: a range that starts behind the surface reports a surface nearer than its minimum (status near)");
+            planeImage(img, N, fx, px, py, nz, 1.2, nearZ);
+            lo = f86::marchRangeCpu(mv, O, u, 0.12, 0.8);
+            check(lo.status == f86::kLineMiss && !lo.pixOk, "F86d: a plane past the range is a miss");
+            f86::LineOut rays[5];
+            for (auto& r : rays) r = lo;
+            double dn = 0.0;
+            check(!f86::nearestHit(rays, 5, &dn), "F86d: five misses give no D_s (the part's last value holds)");
+            planeImage(img, N, fx, px, py, nz, 0.395, nearZ);
+            rays[3] = f86::marchRangeCpu(mv, O, u, 0.12, 0.8);
+            rays[1] = rays[3];
+            rays[1].d = 0.41;
+            check(f86::nearestHit(rays, 5, &dn) && std::fabs(dn - rays[3].d) < 1e-12, "F86d: D_s is the nearest hit of the part's rays");
+            f86::LineOut unused = f86::marchRangeCpu(mv, O, u, 0.5, 0.5);
+            check(unused.status == f86::kLineUnused, "F86d: a line with no range is unused");
+        }
+        // the panel, the scale and the two eyes
+        {
+            const double kIpd = 0.0606, fxv = 1.38;
+            float s0[16], s1[16];
+            const double e1[3] = {kIpd, 0, 0};
+            sceneRows(I, e0, fxv, fxv, 0.0, 0.0, nearZ, s0);
+            sceneRows(I, e1, fxv, fxv, 0.0, 0.0, nearZ, s1);
+            const f85::Rows W[2] = {f85::rowsOfWorld(s0), f85::rowsOfWorld(s1)};
+            f85::AffParams aff;   // sigma 1, no offsets
+            const double oh[3] = {0, 0, 0}, ow[3] = {0, 0, 0};
+            double K3[3][3];
+            std::memcpy(K3, I3, sizeof(K3));
+            const double k4[3] = {0, 0, 0};
+            f85::Rows B[2];
+            f85::CamK K[2];
+            for (int e = 0; e < 2; ++e) {
+                B[e] = compositeFrom(W[e], aff, 1.0, K3, k4);
+                K[e] = f85::solveK(B[e], W[e], aff);
+            }
+            // the panel 0.30 m ahead: centre and four corners (hud space = K space here), the plane under it at 0.395 m
+            const double pv[5][3] = {{0, 0, 0.30}, {-0.02, -0.012, 0.30}, {0.02, -0.012, 0.30}, {-0.02, 0.012, 0.30}, {0.02, 0.012, 0.30}};
+            const double Dpanel = f85::len3(pv[0]);
+            float rows[16];
+            sceneRows(I, e0, fxv, fxv, 0.0, 0.0, nearZ, rows);
+            double A = 0.0, Bz = 0.0;
+            f85::zwFit(rows, &A, &Bz);
+            const uint32_t N = 512;
+            std::vector<float> img;
+            const double nz[3] = {0, 0, 1};
+            planeImage(img, N, fxv, 0.0, 0.0, nz, 0.395, nearZ);
+            f85::MarchView mv;
+            mv.rows = rows;
+            mv.A = A;
+            mv.B = Bz;
+            mv.width = mv.height = N;
+            mv.depth = img.data();
+            f86::LineOut rays[5];
+            const double O[3] = {0, 0, 0};
+            for (int k = 0; k < 5; ++k) {
+                const double l = f85::len3(pv[k]);
+                const double u[3] = {pv[k][0] / l, pv[k][1] / l, pv[k][2] / l};
+                rays[k] = f86::marchRangeCpu(mv, O, u, f86::kPanelMinM, f86::kPanelMaxM);
+            }
+            double Ds = 0.0;
+            check(f86::nearestHit(rays, 5, &Ds) && std::fabs(Ds - 0.395) < 0.001, "F86d: the plane at 0.395 m under the panel is D_s = 0.395 m (the centre's ray is the nearest)");
+            const double s = f86::panelScale(Ds, Dpanel);
+            check(std::fabs(s - (0.395 - 0.045) / 0.30) < 0.005 && std::fabs(s * Dpanel - 0.35) < 0.001, "F86d: the panel lands at D_s - 4.5 cm = 0.35 m (scale 1.167)");
+            check(f86::panelScale(0.2, 0.30) < 1.0 && f86::panelScale(10.0, 0.30) == f86::kPanelScaleMax && f86::panelScale(0.01, 0.30) == f86::kPanelScaleMin && f86::panelScale(0.3, 0.0) == 1.0,
+                  "F86d: a surface nearer than the panel pulls it in; the scale is bounded to 0.5..2 and a degenerate panel keeps 1");
+            // the rows: eye 0's corners stay (0.01 px), eye 1's disparity is IPD f / 0.35 m
+            double worst0 = 0.0, disparity = 0.0, worstPlace = 0.0;
+            bool ok = true;
+            const double axis[2] = {0, 0};
+            for (int k = 0; k < 5; ++k) {
+                double shown[2][2], shownScaled[2][2];
+                for (int e = 0; e < 2; ++e) {
+                    f85::UFrame uf;
+                    std::memcpy(uf.U3, I3, sizeof(uf.U3));
+                    f85::Corr c = f85::makeCorrection(K[e], uf);
+                    ok = ok && c.ok;
+                    const f85::Rows Bu = f85::applyCorrection(B[e], c);
+                    f86::scaleCorrection(c, s, oh);
+                    const f85::Rows Bs = f85::applyCorrection(B[e], c);
+                    ok = ok && f85::shownNdc(aff, axis, Bu, pv[k], shown[e]) && f85::shownNdc(aff, axis, Bs, pv[k], shownScaled[e]);
+                    const double ps[3] = {s * pv[k][0], s * pv[k][1], s * pv[k][2]};   // the scaled point in world (rows' origin = the K origin = 0)
+                    double want[2];
+                    ok = ok && f85::targetNdc(aff, axis, W[e], ps, want);
+                    worstPlace = std::max(worstPlace, std::max(std::fabs(shownScaled[e][0] - want[0]), std::fabs(shownScaled[e][1] - want[1])) * 2016.0 * 0.5);
+                }
+                worst0 = std::max(worst0, std::max(std::fabs(shownScaled[0][0] - shown[0][0]), std::fabs(shownScaled[0][1] - shown[0][1])) * 2016.0 * 0.5);
+                if (k == 0) disparity = (shownScaled[1][0] - shownScaled[0][0]) * 2016.0 * 0.5;
+            }
+            const double wantDisp = -kIpd * fxv / 0.35 * 2016.0 * 0.5;
+            check(ok && worst0 < 0.01, "F86d: eye 0's image of the panel's centre and four corners is unchanged by the scale (within 0.01 px)");
+            check(ok && std::fabs(disparity - wantDisp) < 0.02, "F86d: eye 1's disparity of the scaled panel is IPD . f / 0.35 m");
+            check(ok && worstPlace < 0.01, "F86d: both eyes draw every scaled vertex where the scaled world point projects (within 0.01 px)");
+            // the scale on the correction equals the scale on U about the pivot (a rotated K, a turned U, a pivot away from the hud origin)
+            {
+                const Mat Rk2 = mul(rotY(0.31), rotX(-0.12));
+                f85::CamK Kr;
+                Kr.ok = true;
+                std::memcpy(Kr.K3, Rk2.m, sizeof(Kr.K3));
+                Kr.k4[0] = 0.7;
+                Kr.k4[1] = -1.1;
+                Kr.k4[2] = 0.4;
+                const double ohr[3] = {0.4, -0.1, 2.0};
+                f85::UFrame uf;
+                const Mat Ru = mul(Rk2, rotY(30.0 * f85::kPi / 180.0));
+                std::memcpy(uf.U3, Ru.m, sizeof(uf.U3));
+                uf.u4[0] = 0.5;
+                uf.u4[1] = 0.25;
+                uf.u4[2] = -0.7;
+                double Orel[3];
+                f85::mulVec3(Kr.K3, ohr, Orel);
+                for (int i = 0; i < 3; ++i) Orel[i] = -Orel[i] + Kr.k4[i];   // K3 (-o_hud) + k4
+                f85::Corr c1 = f85::makeCorrection(Kr, uf);
+                f86::scaleCorrection(c1, 1.17, ohr);
+                f85::UFrame us = uf;
+                f86::scaleUFrameAbout(us, Orel, 1.17);
+                const f85::Corr c2 = f85::makeCorrection(Kr, us);
+                double err = 0.0;
+                for (int i = 0; i < 3; ++i) {
+                    err = std::max(err, std::fabs(c1.m4[i] - c2.m4[i]));
+                    for (int j = 0; j < 3; ++j) err = std::max(err, std::fabs(c1.M3[i][j] - c2.M3[i][j]));
+                }
+                check(c1.ok && c2.ok && err < 1e-9, "F86d: scaling the correction M = K^-1 U about the aim camera's origin is scaling U about it");
+            }
+            // a miss holds: the smoother keeps its value when no ray hits, and the first value is taken at once
+            f86::RangeSmoother sm{f86::kPanelMinM, f86::kPanelMaxM};
+            check(std::fabs(sm.step(0.395, 0.011) - 0.395) < 1e-12 && sm.have, "F86d: the part's first D_s is taken at once");
+            for (int i = 0; i < 20; ++i) sm.step(0.395, 0.011);
+            const double held = sm.depth();
+            check(std::fabs(held - 0.395) < 1e-9, "F86d: a held target keeps the smoothed depth");
+            for (int i = 0; i < 20; ++i) sm.step(0.30, 0.011);
+            check(sm.depth() < 0.31 && sm.depth() >= f86::kPanelMinM, "F86d: the smoother follows a new target (in 1/D)");
+            f86::RangeSmoother clamp{f86::kPanelMinM, f86::kPanelMaxM};
+            clamp.step(0.4, 0.01);
+            for (int i = 0; i < 60; ++i) clamp.step(5.0, 0.011);
+            check(clamp.depth() <= f86::kPanelMaxM + 1e-9, "F86d: the smoother's clamp is the part's 0.12..0.8 m range");
+        }
+        // F: the prompt snap onto a tilted plate; the normal; a wall far in front of the anchor; a grazing plane; the cache
+        {
+            // the normal on a wide camera: a plane 34 degrees off the view ray at 0.94 m
+            {
+                const double fx = 1.38, px = 0.0153 + 0.002, py = 0.0031;
+                float rows[16];
+                sceneRows(I, e0, fx, fx, px, py, nearZ, rows);
+                double A = 0.0, B = 0.0;
+                f85::zwFit(rows, &A, &B);
+                const uint32_t N = 512;
+                std::vector<float> img;
+                const double a34 = 34.0 * f85::kPi / 180.0;
+                const double nrm[3] = {std::sin(a34), 0.0, std::cos(a34)};
+                planeImage(img, N, fx, px, py, nrm, 0.94 * std::cos(a34), nearZ);
+                f85::MarchView mv;
+                mv.rows = rows;
+                mv.A = A;
+                mv.B = B;
+                mv.width = mv.height = N;
+                mv.depth = img.data();
+                const double O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
+                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 0.5, 1.5);
+                const f85::Rows Wr = f85::rowsOfWorld(rows);
+                const double H[3] = {lo.d * u[0], lo.d * u[1], lo.d * u[2]};
+                const double w = Wr.r[2][0] * H[0] + Wr.r[2][1] * H[1] + Wr.r[2][2] * H[2] + Wr.r[2][3];
+                const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
+                const double dot = -(sn.n[0] * nrm[0] + sn.n[1] * nrm[1] + sn.n[2] * nrm[2]);
+                check(lo.status == f86::kLineHit && std::fabs(lo.d - 0.94) < 0.003 && sn.ok && std::acos(std::min(1.0, dot)) * f85::kDeg < 1.0 && std::fabs(sn.cosView - std::cos(a34)) < 0.01,
+                      "F86f: the surface normal from the four neighbours is the plane's within 1 degree (34 degrees off the view ray at 0.94 m)");
+                check(std::fabs(f86::normalOffRayDeg(sn) - 34.0) < 1.0, "F86f: the normal's angle off the ray is 34 degrees");
+            }
+            // the snap, on a narrow camera so that a pixel is 0.07 mm: P 5 cm behind the plate's centre lands on the centre
+            {
+                const double fx = 25.0;
+                float rows[16];
+                sceneRows(I, e0, fx, fx, 0.0, 0.0, nearZ, rows);
+                double A = 0.0, B = 0.0;
+                f85::zwFit(rows, &A, &B);
+                const uint32_t N = 1024;
+                std::vector<float> img;
+                const double a34 = 34.0 * f85::kPi / 180.0;
+                const double nrm[3] = {std::sin(a34), 0.0, std::cos(a34)};
+                const double C[3] = {0.0, 0.0, 0.94};
+                planeImage(img, N, fx, 0.0, 0.0, nrm, 0.94 * std::cos(a34), nearZ);
+                f85::MarchView mv;
+                mv.rows = rows;
+                mv.A = A;
+                mv.B = B;
+                mv.width = mv.height = N;
+                mv.depth = img.data();
+                const double P[3] = {C[0] + 0.05 * nrm[0], C[1] + 0.05 * nrm[1], C[2] + 0.05 * nrm[2]};
+                const double dist = f85::len3(P);
+                const double u[3] = {P[0] / dist, P[1] / dist, P[2] / dist};
+                const double O[3] = {0, 0, 0};
+                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, std::max(0.12, dist - f86::kPromptBehindM), dist + f86::kPromptAheadM);
+                const f85::Rows Wr = f85::rowsOfWorld(rows);
+                const double H[3] = {lo.d * u[0], lo.d * u[1], lo.d * u[2]};
+                const double w = Wr.r[2][0] * H[0] + Wr.r[2][1] * H[1] + Wr.r[2][2] * H[2] + Wr.r[2][3];
+                const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
+                double Pn[3] = {};
+                const bool snapped = f86::promptSnap(P, H, sn, Pn);
+                const double err = std::sqrt((Pn[0] - C[0]) * (Pn[0] - C[0]) + (Pn[1] - C[1]) * (Pn[1] - C[1]) + (Pn[2] - C[2]) * (Pn[2] - C[2]));
+                check(lo.status == f86::kLineHit && snapped && err < 1e-4, "F86f: a prompt anchor 5 cm behind a 34-degree plate's centre is snapped onto the centre (within 0.1 mm)");
+                f86::PromptCache cache;
+                const double off[3] = {Pn[0] - P[0], Pn[1] - P[1], Pn[2] - P[2]};
+                cache.put(P, off);
+                double got[3];
+                const double Pnear[3] = {P[0] + 0.0004, P[1], P[2]}, Pfar[3] = {P[0] + 0.002, P[1], P[2]};
+                check(cache.offsetFor(P, got) && std::fabs(got[0] - off[0]) < 1e-12 && cache.offsetFor(Pnear, got) && !cache.offsetFor(Pfar, got),
+                      "F86f: the cached offset applies to the anchor it was measured at (1 mm) and to no other");
+                const double off2[3] = {off[0] + 0.01, off[1], off[2]};
+                cache.put(P, off2);
+                cache.offsetFor(P, got);
+                check(std::fabs(got[0] - (off[0] + 0.25 * 0.01)) < 1e-9, "F86f: the cached offset is an EMA while the anchor holds");
+                cache.put(Pfar, off2);
+                check(cache.offsetFor(Pfar, got) && std::fabs(got[0] - off2[0]) < 1e-12 && !cache.offsetFor(P, got), "F86f: an anchor that moved a millimetre or more starts the cache again");
+            }
+            // a waypoint 2 m behind a wall: no surface within 15 cm in front of it: untouched
+            {
+                const double fx = 1.38, px = 0.0153, py = 0.0031;
+                float rows[16];
+                sceneRows(I, e0, fx, fx, px, py, nearZ, rows);
+                double A = 0.0, B = 0.0;
+                f85::zwFit(rows, &A, &B);
+                const uint32_t N = 256;
+                std::vector<float> img;
+                const double nz[3] = {0, 0, 1};
+                planeImage(img, N, fx, px, py, nz, 1.0, nearZ);   // a wall at 1 m
+                f85::MarchView mv;
+                mv.rows = rows;
+                mv.A = A;
+                mv.B = B;
+                mv.width = mv.height = N;
+                mv.depth = img.data();
+                const double P[3] = {0, 0, 3.0}, O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
+                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 3.0 - f86::kPromptBehindM, 3.0 + f86::kPromptAheadM);
+                f86::SurfaceNormal none;
+                double Pn[3];
+                check(lo.status != f86::kLineHit && !f86::promptSnap(P, P, none, Pn), "F86f: a waypoint 2 m behind a wall finds no surface within 15 cm in front of it and is left alone");
+                planeImage(img, N, fx, px, py, nz, 2.9, nearZ);   // a wall 10 cm in front of it
+                const f86::LineOut lo2 = f86::marchRangeCpu(mv, O, u, 3.0 - f86::kPromptBehindM, 3.0 + f86::kPromptAheadM);
+                check(lo2.status == f86::kLineHit && std::fabs(lo2.d - 2.9) < 0.003, "F86f: a wall within 15 cm in front of the anchor is a hit");
+            }
+            // a grazing plane (80 degrees off the view ray) is refused
+            {
+                const double fx = 1.38;
+                float rows[16];
+                sceneRows(I, e0, fx, fx, 0.0, 0.0, nearZ, rows);
+                double A = 0.0, B = 0.0;
+                f85::zwFit(rows, &A, &B);
+                const uint32_t N = 512;
+                std::vector<float> img;
+                const double a80 = 80.0 * f85::kPi / 180.0;
+                const double nrm[3] = {std::sin(a80), 0.0, std::cos(a80)};
+                planeImage(img, N, fx, 0.0, 0.0, nrm, 0.94 * std::cos(a80), nearZ);
+                f85::MarchView mv;
+                mv.rows = rows;
+                mv.A = A;
+                mv.B = B;
+                mv.width = mv.height = N;
+                mv.depth = img.data();
+                const double O[3] = {0, 0, 0}, u[3] = {0, 0, 1};
+                const f86::LineOut lo = f86::marchRangeCpu(mv, O, u, 0.5, 1.5);
+                const f85::Rows Wr = f85::rowsOfWorld(rows);
+                const double H[3] = {lo.d * u[0], lo.d * u[1], lo.d * u[2]};
+                const double w = Wr.r[2][0] * H[0] + Wr.r[2][1] * H[1] + Wr.r[2][2] * H[2] + Wr.r[2][3];
+                const f86::SurfaceNormal sn = f86::surfaceNormal(Wr, N, N, lo, w, u);
+                const double P[3] = {H[0], H[1], H[2] + 0.05};
+                double Pn[3];
+                check(lo.status == f86::kLineHit && sn.ok && sn.cosView < f86::kFacingMin && !f86::promptSnap(P, H, sn, Pn), "F86f: a grazing plane (80 degrees off the ray, cosine 0.17) is not snapped onto");
+            }
+            check(f86::isPromptKey(1) && f86::isPromptKey(45) && f86::isPromptKey(46) && f86::isPromptKey(49) && f86::isPromptKey(50) && !f86::isPromptKey(0) && !f86::isPromptKey(10) &&
+                      !f86::isPromptKey(44) && !f86::isPromptKey(51) && !f86::isPromptKey(0x70) && !f86::isPromptKey(0x8A),
+                  "F86f: keys 1 and 45..50 take the snap, the reticle (10), the weapon UI keys and the rest do not");
+        }
+        // G: the floor probe
+        {
+            const double T[3] = {10.0, 2.0, -5.0}, up[3] = {0, 1, 0};
+            double h = 0.0;
+            const double H1[3] = {10.5, 1.97, -4.4}, H2[3] = {10.2, 2.0, -5.1}, H3[3] = {12.0, 2.0, -5.0};
+            check(f86::floorAccept(H1, T, up, &h) && std::fabs(h + 0.03) < 1e-9, "F86g: a hit 0.78 m from the 3P origin, 3 cm below it, is accepted and reads -3 cm");
+            check(!f86::floorAccept(H2, T, up, &h) && !f86::floorAccept(H3, T, up, &h), "F86g: hits under 0.4 m and over 1.2 m horizontally are refused");
+            const double tilt[3] = {0.0, std::cos(0.2), std::sin(0.2)};
+            const double Ht[3] = {10.0 + 0.7, 2.0 - 0.1, -5.0 + 0.3};   // 0.7 right, 0.1 down, 0.3 ahead in the world axes
+            check(f86::floorAccept(Ht, T, tilt, &h) && std::fabs(h - (-0.1 * tilt[1] + 0.3 * tilt[2])) < 1e-9, "F86g: the height is along the body's up, the distance across it");
+            float m3p[16];
+            double R[3][3];
+            rotYd(90.0 * f85::kPi / 180.0, R);
+            putMat(m3p, R, T);
+            double pts[2][3];
+            f86::floorProbePoints(m3p, pts);
+            // R = rotY(90): row 0 (right) = (0, 0, 1), row 2 (forward) = (-1, 0, 0): the points are T + 0.7 fwd -+ 0.3 right
+            check(std::fabs(pts[0][0] - (T[0] - 0.7)) < 1e-6 && std::fabs(pts[0][2] - (T[2] - 0.3)) < 1e-6 && std::fabs(pts[1][2] - (T[2] + 0.3)) < 1e-6 && std::fabs(pts[0][1] - T[1]) < 1e-6,
+                  "F86g: the probe's two rays aim at the floor line 0.7 m ahead of the 3P origin, 0.3 m to each side, in the body's axes");
+        }
+    }
+    // ---- the depth pass in the rig of reticle_depth_test: the CPU side of the unproject / normal ---------------------------------------------------
+    {
+        float rows[16];
+        const double zero3[3] = {0, 0, 0};
+        sceneRows(Mat{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}}, zero3, 1.38, 1.38, 0.01, 0.002, 0.025, rows);
+        const f85::Rows W = f85::rowsOfWorld(rows);
+        double p[3];
+        check(f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 2.0, p), "F86f: a pixel at a view depth unprojects");
+        double ndc[2], w = 0.0;
+        check(f85::project(W, p, ndc, &w) && std::fabs(w - 2.0) < 1e-9 && std::fabs((ndc[0] * 0.5 + 0.5) * 512.0 - 100.5) < 1e-6 && std::fabs((0.5 - ndc[1] * 0.5) * 512.0 - 300.5) < 1e-6,
+              "F86f: the unprojected point projects back to the pixel's centre at its view depth");
+        double o[3];
+        check(f86::cameraOriginOfRows(W, o) && f85::len3(o) < 1e-9, "F86d: the eye's origin from its scene rows is where the rows put it");
+        check(!f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 0.0, p) && !f86::unprojectPixel(W, 512, 512, 100.0, 300.0, 1e30, p), "F86f: a pixel at no depth, or at the far plane, does not unproject");
+    }
+    check(std::strcmp(f86::carryWhyText(f86::kCarried), "carried") == 0 && std::strcmp(f86::carryWhyText(f86::kCarryNoPose), "no pose") == 0 &&
+              std::strcmp(f86::carryWhyText(f86::kCarryOld), "over 3 frames") == 0 && std::strcmp(f86::carryWhyText(f86::kCarryHitch), "over 50 cm") == 0 &&
+              std::strcmp(f86::carryWhyText(f86::kCarryScope), "out of scope") == 0 && std::strcmp(f86::prevCaseText(f86::kPrevNeither), "neither") == 0,
+          "F86a: the carry's status words are the second's line's");
 }
 
 }  // namespace f85test

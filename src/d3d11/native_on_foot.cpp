@@ -7010,6 +7010,7 @@ struct F85P1 {
     uint32_t tid = 0;
     float m3pT[3] = {}, up[3] = {}, cam[3] = {}, camBody[3] = {};
     bool camOk = false;
+    float m3p[16] = {};   // F86a: the whole matrix (the pose carry's M3P_i)
 };
 struct F85Fp {
     uint64_t qpc = 0;
@@ -7022,9 +7023,6 @@ struct F85Rec {   // one AMC submit job's records, read at the job's end
     float rec[3] = {}, spread = 0.0f, org[3] = {};
     bool orgOk = false;
 };
-struct F85Wpn {
-    float pos[3] = {};
-};
 struct F85Pin {
     float demandV = 0.0f, appliedV = 0.0f, demandH = 0.0f, appliedH = 0.0f, wc = 0.0f, dEyeY = 0.0f;
     bool vClamp = false, hClamp = false;
@@ -7036,13 +7034,13 @@ struct F85Hand {
 constexpr uint32_t kF85Ring = 64;
 F85Ring<F85P1, kF85Ring> g_f85P1;
 F85Ring<F85Fp, kF85Ring> g_f85Fp;
-F85Ring<F85Rec, kF85Ring> g_f85Rec3, g_f85RecFp;
-F85Ring<F85Wpn, kF85Ring> g_f85Wpn;
+F85Ring<F85Rec, kF85Ring> g_f85Rec3;
 F85Ring<F85Pin, kF85Ring> g_f85Pin;
 F85Ring<F85Hand, kF85Ring> g_f85Hand;
-std::atomic<uint32_t> g_f85LatestP1{0}, g_f85LatestFpP1{0};   // the newest 3P and FP game-frame index posted (the writer job and the weapon record join under them)
-std::atomic<uintptr_t> g_f85FpAmc{0};
-std::atomic<uint64_t> g_f85P1Posts{0}, g_f85FpPosts{0}, g_f85JobsSeen{0}, g_f85RecPosts{0}, g_f85FpRecPosts{0}, g_f85WpnPosts{0}, g_f85PinPosts{0}, g_f85HandPosts{0},
+std::atomic<uint32_t> g_f85LatestP1{0};   // the newest 3P game-frame index posted (the writer job joins under it)
+// F86b: the first-person half of the trace is gone (the FP AMC's submit job never calls 0x4C86270, the MGMC hook saw no submits on 334925): its record and
+// weapon sites, rings and fields were removed; the log says so once.
+std::atomic<uint64_t> g_f85P1Posts{0}, g_f85FpPosts{0}, g_f85JobsSeen{0}, g_f85RecPosts{0}, g_f85PinPosts{0}, g_f85HandPosts{0},
     g_f85JobCalls{0}, g_f85JobNoRecord{0};
 // The AMC submit job (0x3DA4A00) in flight on this thread: the 0x4C86270 calls made inside it (the AMC writer, from +0x3DA4E62) leave their record pointers here.
 struct F85Job {
@@ -7073,8 +7071,7 @@ void f85JobEnd(uintptr_t amc) noexcept {
     if (!j.amc || j.amc != amc) return;
     g_f85JobsSeen.fetch_add(1, std::memory_order_relaxed);
     const bool local = amc == static_cast<uintptr_t>(localAmcPointer());
-    const bool fpAmc = !local && amc == g_f85FpAmc.load(std::memory_order_relaxed);
-    if (!local && !fpAmc) return;
+    if (!local) return;
     g_f85JobCalls.fetch_add(j.calls, std::memory_order_relaxed);
     F85Rec r;
     r.calls = j.calls;
@@ -7095,13 +7092,8 @@ void f85JobEnd(uintptr_t amc) noexcept {
     }
     r.spread = spread;
     r.orgOk = guardedRead(amc + 0x2E0, r.org, sizeof(r.org));   // bodyrec::kOrigin: the AMC's own world position
-    if (local) {
-        g_f85Rec3.post(g_f85LatestP1.load(std::memory_order_relaxed), r);
-        g_f85RecPosts.fetch_add(1, std::memory_order_relaxed);
-    } else {
-        g_f85RecFp.post(g_f85LatestFpP1.load(std::memory_order_relaxed), r);
-        g_f85FpRecPosts.fetch_add(1, std::memory_order_relaxed);
-    }
+    g_f85Rec3.post(g_f85LatestP1.load(std::memory_order_relaxed), r);
+    g_f85RecPosts.fetch_add(1, std::memory_order_relaxed);
 }
 // The 3P P1 call (ikPublishG): M3P, the job camera and the camera in the model (body axes: the matrix's rows are the axes).
 void f85PostP1(uint32_t frame, const float m3p[16], const float* cam) noexcept {
@@ -7121,20 +7113,74 @@ void f85PostP1(uint32_t frame, const float m3p[16], const float* cam) noexcept {
             p.camBody[a] = static_cast<float>(s);
         }
     }
+    std::memcpy(p.m3p, m3p, sizeof(p.m3p));   // F86a
     g_f85P1.post(frame, p);
     g_f85LatestP1.store(frame, std::memory_order_release);
     g_f85P1Posts.fetch_add(1, std::memory_order_relaxed);
 }
-void f85PostFp(uintptr_t amc, uint32_t frame, const float origin[3]) noexcept {
+// F86a: the FP root matrix of a game frame (the FP P1 call), kept whole: F_i of the pose carry. The F85a trace's FP root (the translation) rides the same call.
+struct F86Fi {
+    float m[16] = {};
+};
+F85Ring<F86Fi, kF85Ring> g_f86Fi;
+void f85PostFp(uint32_t frame, const float origin[3], const float m[16]) noexcept {
     F85Fp p;
     p.qpc = f30Qpc();
     p.tid = static_cast<uint32_t>(GetCurrentThreadId());
     for (int i = 0; i < 3; ++i) p.root[i] = origin[i];
-    g_f85FpAmc.store(amc, std::memory_order_relaxed);
     g_f85Fp.post(frame, p);
-    g_f85LatestFpP1.store(frame, std::memory_order_release);
+    F86Fi fi;
+    std::memcpy(fi.m, m, sizeof(fi.m));
+    g_f86Fi.post(frame, fi);
     g_f85FpPosts.fetch_add(1, std::memory_order_relaxed);
 }
+// ---- F86a (BEHAVIOUR, no key: it is exact): the pose carry -----------------------------------------------------------------------------------------
+// The 2026-10-23 flight (reviews\native-onfoot-f86-review-2026-10-23.md section 1): the order of a game frame is P1, submit, Animate, so frame i draws M3P_i
+// (the matrix the submit packs, record minus M3P 0.00 cm in all 20,353 joined frames) with the pose of Animate i-1, which was solved against G_{i-1}. The hand
+// misses the weapon by the frame-to-frame change of F_root's step (dt jitter, vertical acceleration): zero still, 9-10 cm at a sprint's take-off. The carry
+// moves every record of the local 3P AMC by the difference between where the FP root frame of THIS frame has a point of the pose (the mean of the two written
+// wrists, else the eye) and where the submit draws it. The Animate hook publishes the pose (PoseIn: M3P_p, F_p, the body shift, the written wrists, the eye),
+// the FP P1 call posts F_i, the 3P P1 call posts M3P_i, the submit job's post-hook applies it. Lock-free; the submit takes a try-lock and skips when it is busy.
+struct F86PoseSlot {
+    std::atomic<uint32_t> seq{0};
+    nofoot::f86::PoseIn v;
+};
+F86PoseSlot g_f86Pose;
+void f86PosePublish(const nofoot::f86::PoseIn& p) noexcept {
+    uint32_t q = g_f86Pose.seq.load(std::memory_order_relaxed);
+    if ((q & 1u) || !g_f86Pose.seq.compare_exchange_strong(q, q + 1, std::memory_order_acq_rel)) return;   // a writer is in it: skip, never wait
+    g_f86Pose.v = p;
+    g_f86Pose.seq.store(q + 2, std::memory_order_release);
+}
+bool f86PoseRead(nofoot::f86::PoseIn* out) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_f86Pose.seq.load(std::memory_order_acquire);
+        if (!s1 || (s1 & 1u)) continue;
+        *out = g_f86Pose.v;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_f86Pose.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+struct F86Carry {   // one submit's carry, for the trace lines and the optic record
+    uint64_t qpc = 0;
+    int32_t why = 0;
+    uint32_t age = 0, prevCase = 0, poseP1 = 0;
+    bool steps = false;
+    float fStep[3] = {}, fTurn = 0.0f, mStep[3] = {}, mTurn = 0.0f, delta[3] = {};
+    float before[2] = {-1.0f, -1.0f}, after[2] = {-1.0f, -1.0f};
+    bool haveWrist[2] = {};
+    float drawnBefore[2][3] = {}, drawnAfter[2][3] = {};   // the wrists in world as the body is drawn without and with the carry
+};
+F85Ring<F86Carry, kF85Ring> g_f86Carry;   // by the submit's game frame
+F85Ring<F86Carry, 256> g_f86Drawn;        // by the game frame of the POSE the submit drew (the optic record's join)
+std::atomic<uint64_t> g_f86Submits{0}, g_f86Carried{0}, g_f86Why[nofoot::f86::kCarryWhyCount], g_f86Age[4], g_f86Prev[4], g_f86Busy{0}, g_f86NoRecords{0},
+    g_f86NoInputs{0}, g_f86WriteFaults{0};
+// F86g: the floor probe's second (the render thread adds, the frame thread's F69a line reads and resets): the summed height of the accepted hits (mm), their count,
+// the rays without a surface and the hits outside the accepted ring.
+std::atomic<int64_t> g_f86gSumMm{0};
+std::atomic<uint64_t> g_f86gHits{0}, g_f86gMisses{0}, g_f86gRejected{0};
+
 // The 1 s lines, the events and the tracker (frame thread only).
 struct F85Drain {
     bool have = false;
@@ -7142,12 +7188,16 @@ struct F85Drain {
     uint64_t lastSecMs = 0, gaps = 0, missing3P = 0;
     nofoot::f85::StepTracker tracker;
     uint64_t secSkip = 0;
+    nofoot::f86::CarrySecond sec86;   // F86a: the second's wrist error by speed bin and the carry's size, joined from the carry ring
+    bool saidFpGone = false;
+    uint64_t prevSubmits = 0, prevCarried = 0, prevWhy[nofoot::f86::kCarryWhyCount] = {}, prevAge[4] = {}, prevPrev[4] = {}, prevBusy = 0, prevNoRecords = 0, prevNoInputs = 0,
+             prevWriteFaults = 0;
 };
 F85Drain g_f85;
 const char* f85TrigText(uint32_t trig, char* buf, size_t n) noexcept {
     buf[0] = '\0';
     size_t len = 0;
-    static const char* const names[4] = {"m3p-step", "pin-cap", "cam-move", "vy"};
+    static const char* const names[4] = {"m3p-step", "pin-cap", "hand-lag", "vy"};
     for (int b = 0; b < 4; ++b)
         if (trig & (1u << b)) {
             const int k = std::snprintf(buf + len, n - len, "%s%s", len ? "+" : "", names[b]);
@@ -7157,7 +7207,7 @@ const char* f85TrigText(uint32_t trig, char* buf, size_t n) noexcept {
     return buf;
 }
 void f85PrintFrame(const nofoot::f85::StepFrame& f, int offset, uint32_t eventNo) noexcept {
-    char trig[40], rec[96], org[48], fpr[48], wpn[48], hand[2][24];
+    char trig[40], rec[96], org[48], hand[2][24];
     f85TrigText(f.trig, trig, sizeof(trig));
     if (f.haveRec) {
         std::snprintf(rec, sizeof(rec), "%+.1f/%+.1f/%+.1f (%.1f cm; spread %.2f cm, %u calls %u records)",
@@ -7170,11 +7220,6 @@ void f85PrintFrame(const nofoot::f85::StepFrame& f, int offset, uint32_t eventNo
                                                  std::sqrt(static_cast<double>(f.amcOrg[0] - f.m3pT[0]) * (f.amcOrg[0] - f.m3pT[0]) + static_cast<double>(f.amcOrg[1] - f.m3pT[1]) * (f.amcOrg[1] - f.m3pT[1]) +
                                                            static_cast<double>(f.amcOrg[2] - f.m3pT[2]) * (f.amcOrg[2] - f.m3pT[2])) * 100.0);
     else std::snprintf(org, sizeof(org), "(unread)");
-    if (f.fpRecMinusRootCm >= 0.0f) std::snprintf(fpr, sizeof(fpr), "%.2f cm", static_cast<double>(f.fpRecMinusRootCm));
-    else std::snprintf(fpr, sizeof(fpr), "(unread)");
-    if (f.haveWpn && f.haveFpRoot) std::snprintf(wpn, sizeof(wpn), "%.1f cm", std::sqrt(static_cast<double>(f.wpn[0] - f.fpRoot[0]) * (f.wpn[0] - f.fpRoot[0]) + static_cast<double>(f.wpn[1] - f.fpRoot[1]) * (f.wpn[1] - f.fpRoot[1]) +
-                                                                                      static_cast<double>(f.wpn[2] - f.fpRoot[2]) * (f.wpn[2] - f.fpRoot[2])) * 100.0);
-    else std::snprintf(wpn, sizeof(wpn), "(unread)");
     for (int s = 0; s < 2; ++s) {
         if (f.haveHand && f.handErrCm[s] >= 0.0f) std::snprintf(hand[s], sizeof(hand[s]), "%.2f%s", static_cast<double>(f.handErrCm[s]), f.handWritten[s] ? "" : "(anim)");
         else std::snprintf(hand[s], sizeof(hand[s]), "(unread)");
@@ -7187,12 +7232,28 @@ void f85PrintFrame(const nofoot::f85::StepFrame& f, int offset, uint32_t eventNo
     else std::snprintf(recTime, sizeof(recTime), "(none)");
     Log::get().note("pin step (F85a) ev %u %+03d P1 %u [%s] dt %.1f ms speed %.2f m/s vy %+.2f: M3P up-step %+.1f cm; record minus M3P (world, cm) %s; record minus AMC origin / AMC origin minus M3P %s; "
                     "3P P1 tid %u, FP P1 %s, writer job %s; camera in the model (right %+.1f, up %+.1f, fwd %+.1f cm) moved %.1f cm; pin %s: demand v %+.1f h %.1f, applied v %+.1f h %.1f cm, "
-                    "caps v%s h%s, w_c %.2f, E_y - h_stand %+.1f cm; hand error after the solve L %s R %s; FP record minus F_root %s, FP weapon record minus F_root %s",
+                    "caps v%s h%s, w_c %.2f, E_y - h_stand %+.1f cm; hand error after the solve L %s R %s",
                     eventNo, offset, f.p1, trig, static_cast<double>(f.dtMs), static_cast<double>(f.speed), static_cast<double>(f.vy), static_cast<double>(f.stepUp) * 100.0, rec, org, f.tid3,
                     fpTime, recTime, static_cast<double>(f.camBody[0]) * 100.0, static_cast<double>(f.camBody[1]) * 100.0, static_cast<double>(f.camBody[2]) * 100.0,
                     static_cast<double>(f.camMoveCm), f.havePin ? "read" : "(unread)", static_cast<double>(f.pinDemandV) * 100.0, static_cast<double>(f.pinDemandH) * 100.0,
                     static_cast<double>(f.pinAppliedV) * 100.0, static_cast<double>(f.pinAppliedH) * 100.0, f.vClamp ? " TRIPPED" : " ok", f.hClamp ? " TRIPPED" : " ok",
-                    static_cast<double>(f.wc), static_cast<double>(f.dEyeY) * 100.0, hand[0], hand[1], fpr, wpn);
+                    static_cast<double>(f.wc), static_cast<double>(f.dEyeY) * 100.0, hand[0], hand[1]);
+    // F86a: the same frame's pose carry
+    if (!f.haveCarry) {
+        Log::get().note("pose carry (F86a) ev %u %+03d P1 %u: no submit joined this frame (the local AMC's submit job did not run in it, or its slot was overwritten)", eventNo, offset, f.p1);
+        return;
+    }
+    char steps[256];
+    if (f.stepsOk)
+        std::snprintf(steps, sizeof(steps), "F_root step r/u/f %+.1f %+.1f %+.1f cm turn %.2f deg; M3P step %+.1f %+.1f %+.1f cm turn %.2f deg", static_cast<double>(f.fStep[0]) * 100.0,
+                      static_cast<double>(f.fStep[1]) * 100.0, static_cast<double>(f.fStep[2]) * 100.0, static_cast<double>(f.fTurn), static_cast<double>(f.mStep[0]) * 100.0,
+                      static_cast<double>(f.mStep[1]) * 100.0, static_cast<double>(f.mStep[2]) * 100.0, static_cast<double>(f.mTurn));
+    else
+        std::snprintf(steps, sizeof(steps), "F_root step r/u/f (no earlier frame) cm turn - deg; M3P step (no earlier frame) cm turn - deg");
+    Log::get().note("pose carry (F86a) ev %u %+03d P1 %u: pose age %u; %s; carry %+.1f %+.1f %+.1f cm (%s); wrist error before L %.2f R %.2f, after L %.2f R %.2f cm; prev %s", eventNo, offset, f.p1,
+                    f.poseAge, steps, static_cast<double>(f.carry[0]) * 100.0, static_cast<double>(f.carry[1]) * 100.0, static_cast<double>(f.carry[2]) * 100.0,
+                    nofoot::f86::carryWhyText(f.carryWhy), static_cast<double>(f.carryBeforeCm[0]), static_cast<double>(f.carryBeforeCm[1]), static_cast<double>(f.carryAfterCm[0]),
+                    static_cast<double>(f.carryAfterCm[1]), nofoot::f86::prevCaseText(static_cast<int>(f.prevCase)));
 }
 void f85Drain(uint64_t nowMs) noexcept {
     using namespace nofoot::f85;
@@ -7258,18 +7319,24 @@ void f85Drain(uint64_t nowMs) noexcept {
                     sf.amcOrg[i] = rec.org[i];
                 }
             }
-            F85Rec frec;
-            if (g_f85RecFp.get(f, &frec)) {
-                sf.haveFpRec = true;
+            F86Carry cr;
+            if (g_f86Carry.get(f, &cr)) {   // F86a: this frame's submit
+                sf.haveCarry = true;
+                sf.carryWhy = cr.why;
+                sf.poseAge = cr.age;
+                sf.prevCase = cr.prevCase;
+                sf.stepsOk = cr.steps;
+                sf.fTurn = cr.fTurn;
+                sf.mTurn = cr.mTurn;
                 for (int i = 0; i < 3; ++i) {
-                    sf.fpRec[i] = frec.rec[i];
-                    sf.fpOrg[i] = frec.org[i];
+                    sf.fStep[i] = cr.fStep[i];
+                    sf.mStep[i] = cr.mStep[i];
+                    sf.carry[i] = cr.delta[i];
                 }
-            }
-            F85Wpn wp;
-            if (g_f85Wpn.get(f, &wp)) {
-                sf.haveWpn = true;
-                for (int i = 0; i < 3; ++i) sf.wpn[i] = wp.pos[i];
+                for (int s = 0; s < 2; ++s) {
+                    sf.carryBeforeCm[s] = cr.before[s];
+                    sf.carryAfterCm[s] = cr.after[s];
+                }
             }
             F85Pin pin;
             if (g_f85Pin.get(f, &pin)) {
@@ -7292,14 +7359,22 @@ void f85Drain(uint64_t nowMs) noexcept {
                 }
             }
             const StepResult r = d.tracker.step(sf, freq);
+            if (sf.haveCarry && sf.carryWhy == nofoot::f86::kCarried) {   // F86a: the second's wrist error by speed bin, the carry's size
+                const int bin = speedBin(sf.speed);
+                for (int s = 0; s < 2; ++s) {
+                    if (sf.carryBeforeCm[s] >= 0.0f) d.sec86.before[bin].add(static_cast<double>(sf.carryBeforeCm[s]));
+                    if (sf.carryAfterCm[s] >= 0.0f) d.sec86.after[bin].add(static_cast<double>(sf.carryAfterCm[s]));
+                }
+                d.sec86.carry.add(std::sqrt(static_cast<double>(sf.carry[0]) * sf.carry[0] + static_cast<double>(sf.carry[1]) * sf.carry[1] + static_cast<double>(sf.carry[2]) * sf.carry[2]) * 100.0);
+            }
             if (r.eventStart) {
                 char t[40];
                 f85TrigText(r.trig, t, sizeof(t));
-                Log::get().note("pin step (F85a): event %u starts at P1 frame %u (trigger %s; M3P up-step %+.1f cm, camera in the model moved %.1f cm, vy %+.2f m/s, pin caps v%s h%s): %d frames "
+                Log::get().note("pin step (F85a): event %u starts at P1 frame %u (trigger %s; M3P up-step %+.1f cm, camera in the model moved %.1f cm, vy %+.2f m/s, hand lag %.2f cm, pin caps v%s h%s): %d frames "
                                 "before, this one and %d after, one line each; \"record\" is the body's world translation as the renderer packs it (the AMC writer's 0x4C86270 call from "
-                                "+0x3DA4E62, read at the submit job's end), M3P the matrix G and the pin use; lengths in cm",
-                                r.eventNo, f, t, static_cast<double>(sf.stepUp) * 100.0, static_cast<double>(sf.camMoveCm), static_cast<double>(sf.vy), sf.vClamp ? " TRIPPED" : " ok",
-                                sf.hClamp ? " TRIPPED" : " ok", r.nPre, StepTracker::kPost);
+                                "+0x3DA4E62, read at the submit job's end), M3P the matrix G and the pin use; lengths in cm; the pose carry's line (F86a) follows each frame's",
+                                r.eventNo, f, t, static_cast<double>(sf.stepUp) * 100.0, static_cast<double>(sf.camMoveCm), static_cast<double>(sf.vy), static_cast<double>(sf.handLagCm),
+                                sf.vClamp ? " TRIPPED" : " ok", sf.hClamp ? " TRIPPED" : " ok", r.nPre, StepTracker::kPost);
                 for (int i = 0; i < r.nPre; ++i) {
                     const StepFrame& pf = d.tracker.pre(i);
                     f85PrintFrame(pf, i - r.nPre, r.eventNo);
@@ -7318,25 +7393,74 @@ void f85Drain(uint64_t nowMs) noexcept {
         if (a.n) std::snprintf(buf, n, "%llu mean %.2f max %.2f", static_cast<unsigned long long>(a.n), a.sum / static_cast<double>(a.n), a.mx);
         else std::snprintf(buf, n, "none");
     };
-    char bins[5][64], trigBuf[160], tr[64], org[64], fpr[64];
+    char bins[5][64], trigBuf[160], supBuf[160], tr[64], org[64];
     for (int b = 0; b < kStepBins; ++b) acc(s.rec[b], bins[b], sizeof(bins[b]));
     acc(s.recTrig, tr, sizeof(tr));
     acc(s.orgVsM3p, org, sizeof(org));
-    acc(s.fpRec, fpr, sizeof(fpr));
-    std::snprintf(trigBuf, sizeof(trigBuf), "m3p-step %llu, pin-cap %llu, cam-move %llu, vy %llu", static_cast<unsigned long long>(s.trigSeen[0]),
+    std::snprintf(trigBuf, sizeof(trigBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.trigSeen[0]),
                   static_cast<unsigned long long>(s.trigSeen[1]), static_cast<unsigned long long>(s.trigSeen[2]), static_cast<unsigned long long>(s.trigSeen[3]));
-    Log::get().note("pin step (F85a): %llu events (triggers seen: %s; %llu suppressed by the 8 a minute cap; %llu events in all): %llu frames joined (no writer record %llu, no pin %llu, no FP call %llu; "
+    std::snprintf(supBuf, sizeof(supBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.suppressedBy[0]),
+                  static_cast<unsigned long long>(s.suppressedBy[1]), static_cast<unsigned long long>(s.suppressedBy[2]), static_cast<unsigned long long>(s.suppressedBy[3]));
+    if (!d.saidFpGone) {   // F86b: said once
+        d.saidFpGone = true;
+        Log::get().note("pin step (F85a): the first-person half is gone from this trace (F86b): the FP AMC's submit job never calls 0x4C86270 (the jobs 'without a record' of the F85 flight were all "
+                        "its) and the MGMC hook saw no submit on 334925, so 'FP record minus F_root' and 'FP weapon record minus F_root' are no longer measured; the FP root of the FP P1 call "
+                        "stays (the pose carry's F_i)");
+    }
+    Log::get().note("pin step (F85a): %llu events (triggers seen: %s; %llu frames held back by the 8 a minute cap, per trigger: %s; %llu events in all): %llu frames joined (no writer record %llu, no pin %llu, no FP call %llu; "
                     "frame gaps %llu, 3P P1 slots missing %llu); drawn record minus M3P (cm) by speed: still %s | walk %s | jog %s | sprint %s | step %s | at trigger frames %s; AMC origin minus "
-                    "M3P %s; FP record minus F_root %s; largest M3P step along up %.1f cm; sites this run: 3P P1 %llu, FP P1 %llu, submit jobs %llu (%llu calls, %llu without a record), "
-                    "3P record posts %llu, FP record posts %llu, pin %llu, hands %llu, FP weapon %llu",
-                    static_cast<unsigned long long>(s.eventsStarted), trigBuf, static_cast<unsigned long long>(s.eventsSuppressed), static_cast<unsigned long long>(d.tracker.totalEvents),
+                    "M3P %s; largest M3P step along up %.1f cm; sites this run: 3P P1 %llu, FP P1 %llu, submit jobs %llu (%llu calls, %llu without a record), "
+                    "3P record posts %llu, pin %llu, hands %llu",
+                    static_cast<unsigned long long>(s.eventsStarted), trigBuf, static_cast<unsigned long long>(s.eventsSuppressed), supBuf, static_cast<unsigned long long>(d.tracker.totalEvents),
                     static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.noRec), static_cast<unsigned long long>(s.noPin), static_cast<unsigned long long>(s.noFp),
-                    static_cast<unsigned long long>(d.gaps), static_cast<unsigned long long>(d.missing3P), bins[0], bins[1], bins[2], bins[3], bins[4], tr, org, fpr, s.maxStepUpCm,
+                    static_cast<unsigned long long>(d.gaps), static_cast<unsigned long long>(d.missing3P), bins[0], bins[1], bins[2], bins[3], bins[4], tr, org, s.maxStepUpCm,
                     static_cast<unsigned long long>(posts), static_cast<unsigned long long>(g_f85FpPosts.load(std::memory_order_relaxed)),
                     static_cast<unsigned long long>(g_f85JobsSeen.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85JobCalls.load(std::memory_order_relaxed)),
                     static_cast<unsigned long long>(g_f85JobNoRecord.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85RecPosts.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(g_f85FpRecPosts.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85PinPosts.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(g_f85HandPosts.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85WpnPosts.load(std::memory_order_relaxed)));
+                    static_cast<unsigned long long>(g_f85PinPosts.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85HandPosts.load(std::memory_order_relaxed)));
+    // F86a: the carry's second (always on foot, zeros included: a carry that never ran says "submits 0, carried 0")
+    {
+        using ull = unsigned long long;
+        char before[5][64], after[5][64], cm[64];
+        for (int b = 0; b < kStepBins; ++b) {
+            acc(d.sec86.before[b], before[b], sizeof(before[b]));
+            acc(d.sec86.after[b], after[b], sizeof(after[b]));
+        }
+        const nofoot::f86::CarrySecond& c = d.sec86;
+        if (c.carry.n) std::snprintf(cm, sizeof(cm), "mean %.2f max %.2f", c.carry.sum / static_cast<double>(c.carry.n), c.carry.mx);
+        else std::snprintf(cm, sizeof(cm), "mean 0.00 max 0.00");
+        const uint64_t submits = g_f86Submits.load(std::memory_order_relaxed), carried = g_f86Carried.load(std::memory_order_relaxed);
+        uint64_t why[nofoot::f86::kCarryWhyCount], age[4], pv[4];
+        for (int k = 0; k < nofoot::f86::kCarryWhyCount; ++k) why[k] = g_f86Why[k].load(std::memory_order_relaxed);
+        for (int k = 0; k < 4; ++k) {
+            age[k] = g_f86Age[k].load(std::memory_order_relaxed);
+            pv[k] = g_f86Prev[k].load(std::memory_order_relaxed);
+        }
+        const uint64_t busy = g_f86Busy.load(std::memory_order_relaxed), noRecords = g_f86NoRecords.load(std::memory_order_relaxed), noInputs = g_f86NoInputs.load(std::memory_order_relaxed),
+                       writeFaults = g_f86WriteFaults.load(std::memory_order_relaxed);
+        Log::get().note("pose carry (F86a): submits %llu, carried %llu [no pose %llu, over 3 frames %llu, over 50 cm %llu, out of scope %llu]; pose age 0/1/2/3+ %llu/%llu/%llu/%llu; wrist error before (cm) "
+                        "still %s | walk %s | jog %s | sprint %s | step %s; after (same) still %s | walk %s | jog %s | sprint %s | step %s; |carry| %s; prev game %llu ours %llu neither %llu; "
+                        "also: no M3P_i or F_i for the frame %llu, no body records %llu, busy %llu, write faults %llu",
+                        ull(submits - d.prevSubmits), ull(carried - d.prevCarried), ull(why[nofoot::f86::kCarryNoPose] - d.prevWhy[nofoot::f86::kCarryNoPose]),
+                        ull(why[nofoot::f86::kCarryOld] - d.prevWhy[nofoot::f86::kCarryOld]), ull(why[nofoot::f86::kCarryHitch] - d.prevWhy[nofoot::f86::kCarryHitch]),
+                        ull(why[nofoot::f86::kCarryScope] - d.prevWhy[nofoot::f86::kCarryScope]), ull(age[0] - d.prevAge[0]), ull(age[1] - d.prevAge[1]), ull(age[2] - d.prevAge[2]),
+                        ull(age[3] - d.prevAge[3]), before[0], before[1], before[2], before[3], before[4], after[0], after[1], after[2], after[3], after[4], cm,
+                        ull(pv[nofoot::f86::kPrevGame] - d.prevPrev[nofoot::f86::kPrevGame]), ull(pv[nofoot::f86::kPrevOurs] - d.prevPrev[nofoot::f86::kPrevOurs]),
+                        ull(pv[nofoot::f86::kPrevNeither] - d.prevPrev[nofoot::f86::kPrevNeither]), ull(noInputs - d.prevNoInputs), ull(noRecords - d.prevNoRecords), ull(busy - d.prevBusy),
+                        ull(writeFaults - d.prevWriteFaults));
+        d.prevSubmits = submits;
+        d.prevCarried = carried;
+        for (int k = 0; k < nofoot::f86::kCarryWhyCount; ++k) d.prevWhy[k] = why[k];
+        for (int k = 0; k < 4; ++k) {
+            d.prevAge[k] = age[k];
+            d.prevPrev[k] = pv[k];
+        }
+        d.prevBusy = busy;
+        d.prevNoRecords = noRecords;
+        d.prevNoInputs = noInputs;
+        d.prevWriteFaults = writeFaults;
+        d.sec86 = nofoot::f86::CarrySecond{};
+    }
     s = StepSecond{};
 }
 
@@ -7444,7 +7568,7 @@ void fpRootTrack(void* amcPtr, uint64_t now, bool buildG) noexcept {
         g_fpRoot.qpc = f30Qpc();
         g_fpRoot.frame = g_p1Pair.on(0);
         g_fpRoot.renderFrame = g_f44Frame.load(std::memory_order_relaxed);
-        f85PostFp(a, g_fpRoot.frame, g_fpRoot.origin);   // F85a
+        f85PostFp(g_fpRoot.frame, g_fpRoot.origin, m);   // F85a; F86a: the whole matrix
         if (buildG) {
             pair = g_p1Pair.take(true, g_fpRoot.frame, g_fpRoot.qpc, g_p1ThreeP.have, g_p1ThreeP.frame, g_p1ThreeP.qpc, f66QpcFreq());
             if (pair) {
@@ -7875,6 +7999,7 @@ struct PinIn {
     bool localPitchValid = false;
     uint32_t localPoseGeneration = 0;
     uint64_t localPoseFrame = 0, localPoseQpc = 0;
+    float localHeadY = 0.0f;   // F86g: the headset's height in natural LOCAL (m), with the pitch's validity
 };
 std::atomic<uint32_t> g_pinInSeq{0};
 PinIn g_pinIn;
@@ -7892,6 +8017,7 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
     bool localPitchValid = false;
     uint32_t localPoseGeneration = 0;
     uint64_t localPoseFrame = 0, localPoseQpc = 0;
+    float localHeadY = 0.0f;
     EdvrNativeNowPose np{};
     const bool havePose = nativeFrameNowPose(np);
     const uint64_t poseReadQpc = f30Qpc();
@@ -7899,6 +8025,7 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
         np.ringSequence[np.ringNewest] == np.frameSequence && np.ringQpc[np.ringNewest] != 0 && np.ringQpc[np.ringNewest] <= poseReadQpc &&
         nofoot::pinNaturalLocalPitch(np.local, &localPitchRad)) {
         localPitchValid = true;
+        localHeadY = np.local[7];   // F86g: the 3x4 pose's y (the translation is [3], [7], [11])
         localPoseGeneration = np.referenceGeneration;
         localPoseFrame = np.frameSequence;
         localPoseQpc = np.ringQpc[np.ringNewest];
@@ -7916,6 +8043,7 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
     g_pinIn.localPoseGeneration = localPoseGeneration;
     g_pinIn.localPoseFrame = localPoseFrame;
     g_pinIn.localPoseQpc = localPoseQpc;
+    g_pinIn.localHeadY = localHeadY;
     g_pinInSeq.fetch_add(1, std::memory_order_release);
 }
 bool pinInRead(PinIn* out) noexcept {
@@ -8149,16 +8277,205 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
     else if (!m3pOk) g_ikGRefusals.fetch_add(1, std::memory_order_relaxed);
 }
 
+// ---- F86a: the carry's submit side ------------------------------------------------------------------------------------------------------------------
+// Begin (before the body shift): the local AMC's present records, as the original job left them. End (after it): the carry is computed and written, the
+// previous copies of the records are kept consistent, the figures are posted. One submit job a frame for the local AMC; a second caller skips (never waits).
+struct F86Rec {
+    bool present = false, prevOk = false;
+    float pos[3] = {}, prev[3] = {};   // as the original left them
+};
+struct F86CarryState {
+    std::atomic<bool> busy{false};
+    F86Rec g[bodyrec::kBlocks][bodyrec::kSlots];
+    uint32_t nPresent = 0;
+    bool outOfScope = false;
+    bool haveLast = false;
+    uint32_t lastP1 = 0;
+    float lastM3p[16] = {}, lastFroot[16] = {};
+    double lastDelta[3] = {};
+    bool lastHave[bodyrec::kBlocks][bodyrec::kSlots] = {};
+    float lastRaw[bodyrec::kBlocks][bodyrec::kSlots][3] = {}, lastFinal[bodyrec::kBlocks][bodyrec::kSlots][3] = {};
+};
+F86CarryState g_f86cs;
+bool f86CarryBegin(uintptr_t amc) noexcept {
+    g_f86Submits.fetch_add(1, std::memory_order_relaxed);
+    if (g_f86cs.busy.exchange(true, std::memory_order_acquire)) {
+        g_f86Busy.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    F86CarryState& cs = g_f86cs;
+    cs.nPresent = 0;
+    cs.outOfScope = !g_pinScope.load(std::memory_order_relaxed);
+    uint8_t flags = 0;
+    if (cs.outOfScope || !guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) {
+        for (auto& row : cs.g)
+            for (F86Rec& r : row) r.present = false;
+        return true;   // End counts it (out of the pin's scope: the records are not even read)
+    }
+    for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
+        for (int k = 0; k < bodyrec::kSlots; ++k) {
+            F86Rec& r = cs.g[idx][k];
+            r.present = false;
+            uint64_t inst = 0, mask = 0, instField = 0;
+            const uintptr_t slot = static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * 8u;
+            if (!guardedRead(amc + bodyrec::kInstBase + slot, &inst, 8) || !inst) continue;
+            if (!guardedRead(amc + bodyrec::kMaskBase + slot, &mask, 8) || !mask) continue;
+            if (!guardedRead(static_cast<uintptr_t>(inst) + bodyrec::kInstOff, &instField, 8) || !instField) continue;
+            const uintptr_t rec = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * bodyrec::kRecSize;
+            if (!guardedRead(rec + bodyrec::kRecPos, r.pos, sizeof(r.pos))) continue;
+            r.prevOk = guardedRead(rec + bodyrec::kPrev, r.prev, sizeof(r.prev));
+            r.present = true;
+            ++cs.nPresent;
+        }
+    }
+    return true;
+}
+void f86CarryEnd(uintptr_t amc) noexcept {
+    namespace f86 = nofoot::f86;
+    F86CarryState& cs = g_f86cs;
+    const uint32_t p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
+    F86Carry out;
+    out.qpc = f30Qpc();
+    // the record's translation as the renderer will read it: the first present record, now (after the body shift)
+    bool haveRec = false;
+    double rec[3] = {};
+    for (int idx = 0; idx < bodyrec::kBlocks && !haveRec; ++idx)
+        for (int k = 0; k < bodyrec::kSlots && !haveRec; ++k) {
+            if (!cs.g[idx][k].present) continue;
+            float pos[3];
+            const uintptr_t addr = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * bodyrec::kRecSize + bodyrec::kRecPos;
+            if (!guardedRead(addr, pos, sizeof(pos))) continue;
+            for (int i = 0; i < 3; ++i) rec[i] = pos[i];
+            haveRec = true;
+        }
+    if (!haveRec && !cs.outOfScope) g_f86NoRecords.fetch_add(1, std::memory_order_relaxed);
+    const bool scope = nativeOnFootActive() && !cs.outOfScope && haveRec;
+    F85P1 p1r;
+    F86Fi fi;
+    f86::PoseIn pose;
+    const bool inputs = g_f85P1.get(p1, &p1r) && g_f86Fi.get(p1, &fi);
+    const bool poseOk = f86PoseRead(&pose);
+    f86::CarryResult cr;
+    if (!scope) {
+        cr.why = f86::kCarryScope;
+    } else if (!inputs || !poseOk) {
+        cr.why = f86::kCarryNoPose;
+        if (!inputs) g_f86NoInputs.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        f86::CarryFrame fr;
+        fr.p1 = p1;
+        std::memcpy(fr.m3p, p1r.m3p, sizeof(fr.m3p));
+        std::memcpy(fr.froot, fi.m, sizeof(fr.froot));
+        for (int i = 0; i < 3; ++i) fr.rec[i] = rec[i];
+        cr = f86::poseCarry(pose, fr, true);
+    }
+    // the steps against the frame before
+    const bool consecutive = cs.haveLast && cs.lastP1 + 1u == p1;
+    if (consecutive && inputs) {
+        const f86::StepGeom fg = f86::stepGeom(cs.lastFroot, fi.m), mg = f86::stepGeom(cs.lastM3p, p1r.m3p);
+        if (fg.ok && mg.ok) {
+            out.steps = true;
+            for (int i = 0; i < 3; ++i) {
+                out.fStep[i] = static_cast<float>(fg.step[i]);
+                out.mStep[i] = static_cast<float>(mg.step[i]);
+            }
+            out.fTurn = static_cast<float>(fg.turnDeg);
+            out.mTurn = static_cast<float>(mg.turnDeg);
+        }
+    }
+    // the writes: the carry onto every present record's position, last frame's carry onto the previous copy of the records whose copy is the game's
+    const bool carried = cr.why == f86::kCarried;
+    f86::PrevTally tally;
+    if (scope) {
+        for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
+            for (int k = 0; k < bodyrec::kSlots; ++k) {
+                const F86Rec& r = cs.g[idx][k];
+                if (!r.present) {
+                    cs.lastHave[idx][k] = false;
+                    continue;
+                }
+                const uintptr_t addr = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * bodyrec::kRecSize;
+                f86::PrevCase pcase = f86::kPrevNone;
+                if (consecutive && cs.lastHave[idx][k] && r.prevOk) {
+                    pcase = f86::classifyPrev(r.prev, cs.lastRaw[idx][k], cs.lastFinal[idx][k]);
+                    tally.add(pcase);
+                }
+                float posNow[3];
+                if (!guardedRead(addr + bodyrec::kRecPos, posNow, sizeof(posNow))) {
+                    cs.lastHave[idx][k] = false;
+                    continue;
+                }
+                float posNew[3] = {posNow[0], posNow[1], posNow[2]};
+                if (carried) {
+                    for (int i = 0; i < 3; ++i) posNew[i] = static_cast<float>(static_cast<double>(posNow[i]) + cr.delta[i]);
+                    bool ok = true;
+                    for (int i = 0; i < 3; ++i) ok = guardedWriteFloat(addr + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), posNew[i]) && ok;
+                    if (!ok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (pcase == f86::kPrevGame && (cs.lastDelta[0] != 0.0 || cs.lastDelta[1] != 0.0 || cs.lastDelta[2] != 0.0)) {
+                    float prevNow[3], prevNew[3];
+                    if (guardedRead(addr + bodyrec::kPrev, prevNow, sizeof(prevNow))) {
+                        f86::prevToWrite(pcase, prevNow, cs.lastDelta, prevNew);
+                        bool ok = true;
+                        for (int i = 0; i < 3; ++i) ok = guardedWriteFloat(addr + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prevNew[i]) && ok;
+                        if (!ok) g_f86WriteFaults.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                cs.lastHave[idx][k] = true;
+                std::memcpy(cs.lastRaw[idx][k], r.pos, sizeof(r.pos));
+                std::memcpy(cs.lastFinal[idx][k], posNew, sizeof(posNew));
+            }
+        }
+        cs.haveLast = inputs;
+        cs.lastP1 = p1;
+        if (inputs) {
+            std::memcpy(cs.lastM3p, p1r.m3p, sizeof(cs.lastM3p));
+            std::memcpy(cs.lastFroot, fi.m, sizeof(cs.lastFroot));
+        }
+        for (int i = 0; i < 3; ++i) cs.lastDelta[i] = carried ? cr.delta[i] : 0.0;
+    } else {
+        cs.haveLast = false;
+        for (auto& row : cs.lastHave)
+            for (bool& b : row) b = false;
+        for (int i = 0; i < 3; ++i) cs.lastDelta[i] = 0.0;
+    }
+    // the figures
+    out.why = cr.why;
+    out.age = cr.age;
+    out.poseP1 = pose.p1;
+    out.prevCase = tally.verdict();
+    for (int i = 0; i < 3; ++i) out.delta[i] = static_cast<float>(cr.delta[i]);
+    for (int s = 0; s < 2; ++s) {
+        out.before[s] = static_cast<float>(cr.errBeforeCm[s]);
+        out.after[s] = static_cast<float>(cr.errAfterCm[s]);
+        out.haveWrist[s] = cr.haveWrist[s];
+        for (int i = 0; i < 3; ++i) {
+            out.drawnBefore[s][i] = static_cast<float>(cr.drawnBefore[s][i]);
+            out.drawnAfter[s][i] = static_cast<float>(cr.drawnAfter[s][i]);
+        }
+    }
+    g_f86Why[cr.why].fetch_add(1, std::memory_order_relaxed);
+    if (carried) g_f86Carried.fetch_add(1, std::memory_order_relaxed);
+    if (cr.why == f86::kCarried || cr.why == f86::kCarryHitch || cr.why == f86::kCarryOld) g_f86Age[std::min<uint32_t>(cr.age, 3u)].fetch_add(1, std::memory_order_relaxed);
+    if (out.prevCase != f86::kPrevNone) g_f86Prev[out.prevCase].fetch_add(1, std::memory_order_relaxed);
+    g_f86Carry.post(p1, out);
+    if ((cr.why == f86::kCarried || cr.why == f86::kCarryHitch) && poseOk) g_f86Drawn.post(pose.p1, out);
+    cs.busy.store(false, std::memory_order_release);
+}
+
 uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     const F35Fn original = reinterpret_cast<F35Fn>(g_bodyShift.original);
     if (!original) return 0;
     f85JobBegin(static_cast<uintptr_t>(a1));   // F85a: the 0x4C86270 calls made inside this job leave their record pointers
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);
     g_bodyCalls.fetch_add(1, std::memory_order_relaxed);
+    const bool local = a1 && a1 == localAmcPointer();
+    const bool carry = local && nativeOnFootActive() && f86CarryBegin(static_cast<uintptr_t>(a1));   // F86a: the records as the job left them
     if (g_alignMode.load(std::memory_order_relaxed) == 2 && a1) {
-        if (a1 == localAmcPointer()) bodyShiftApply(a1);
+        if (local) bodyShiftApply(a1);
     }
-    f85JobEnd(static_cast<uintptr_t>(a1));   // F85a: after the shift, the records are what the renderer will read
+    if (carry) f86CarryEnd(static_cast<uintptr_t>(a1));   // F86a: the pose carry, after the body shift
+    f85JobEnd(static_cast<uintptr_t>(a1));   // F85a: after the shift (and the carry), the records are what the renderer will read
     return r;
 }
 
@@ -10769,10 +11086,6 @@ void mgmcAfterSubmit(uint64_t obj) noexcept {
     Joints j;
     if (jointsRead(j) && nofoot::weaponIsLocalFp(mask, flag, pos, j.fp, j.fpOk)) {
         g_mgmcMatched.fetch_add(1, std::memory_order_relaxed);
-        F85Wpn wp;   // F85a: the local FP weapon's record, joined to the FP AMC's latest game frame
-        for (int i = 0; i < 3; ++i) wp.pos[i] = pos[i];
-        g_f85Wpn.post(g_f85LatestFpP1.load(std::memory_order_relaxed), wp);
-        g_f85WpnPosts.fetch_add(1, std::memory_order_relaxed);
     }
     MgmcSlot* s = slotFor(obj, g_gen.load(std::memory_order_relaxed));
     if (!s) {
@@ -11578,6 +11891,10 @@ struct PinBin {
     // and under 12 cm ahead of the chest).
     uint64_t feetPre = 0, clrN = 0, inside = 0, clrHaveN[6] = {};
     double clrSum[6][3] = {}, clrMin[6][3] = {};
+    // F86g: the vertical demand's parts (calls with G in; the LOCAL height with the pitch's validity), summed
+    uint64_t vdN = 0, vdLocalN = 0;
+    uint32_t vdLocalGen = 0;
+    double vdLocalYSum = 0.0, vdCamOverFSum = 0.0, vdFYSum = 0.0, vdNeckYSum = 0.0, vdPitchSum = 0.0;
 };
 struct PinStats {
     uint64_t calls = 0, pinned = 0, refused[kPinRefKinds] = {};
@@ -11703,6 +12020,10 @@ struct PinCall {
     double localPitchDeg = 0.0, scenePitchDeg = 0.0, rawEyeY = 0.0, eyeYSelected = 0.0;
     uint32_t localPoseGeneration = 0, localPoseAgeMs = 0;
     uint64_t localPoseFrame = 0;
+    // F86g: the vertical demand's parts: the headset's LOCAL height (valid with the pitch), the cyclopean eye over F_root in the 3P model, F_root's height in the
+    // model, the animated neck's height and the aim's pitch (F_root's forward against the body's up), when G is in.
+    bool f86Ok = false, f86LocalOk = false;
+    double f86LocalY = 0.0, f86CamOverF = 0.0, f86FModelY = 0.0, f86NeckY = 0.0, f86AimPitch = 0.0;
     double hEye[2] = {};   // the eye's heading (x, z); F69d's axes
     // F69d: the pre-pin feet test (both animated feet over kPinFeetHighM), and the eye against the joints as finally written (eye minus joint, the eye's
     // heading axes: right, up, forward; metres): neck 34, chest 24, clavicles 35 and 36, upper arms (plan U of the left and right sides).
@@ -11866,6 +12187,19 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];
         for (int i = 0; i < 3; ++i) N0[i] = static_cast<double>(nk[12 + i]);
+        pc.f86LocalOk = localPitchValid;   // F86g
+        pc.f86LocalY = static_cast<double>(in.localHeadY);
+        if (G) {
+            double fm[3], fwd[3];
+            nofoot::ikXform(&G->froot[12], invM, fm);
+            for (int i = 0; i < 3; ++i)
+                fwd[i] = static_cast<double>(G->froot[8]) * invM[i] + static_cast<double>(G->froot[9]) * invM[4 + i] + static_cast<double>(G->froot[10]) * invM[8 + i];
+            pc.f86FModelY = fm[1];
+            pc.f86CamOverF = E[1] - fm[1];
+            pc.f86NeckY = N0[1];
+            pc.f86AimPitch = std::atan2(fwd[1], std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2])) * 180.0 / nofoot::kIkPi;
+            pc.f86Ok = std::isfinite(pc.f86FModelY) && std::isfinite(pc.f86CamOverF) && std::isfinite(pc.f86NeckY) && std::isfinite(pc.f86AimPitch);
+        }
         // F68e: the animated head joint 44 (position, axis rows), the calibration of the eye point in its frame, and the target from the animated head.
         const float* hd = froze && g_ikFzSlot[44] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[44]] : g_pfzAnim[44];
         double p44[3], rows44[3][3];
@@ -12781,6 +13115,18 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
             }
         }
         if (pc.feetHighPre) ++b.feetPre;   // F69d
+        if (pc.f86Ok) {   // F86g
+            ++b.vdN;
+            b.vdCamOverFSum += 100.0 * pc.f86CamOverF;
+            b.vdFYSum += pc.f86FModelY;
+            b.vdNeckYSum += pc.f86NeckY;
+            b.vdPitchSum += pc.f86AimPitch;
+        }
+        if (pc.f86LocalOk) {
+            ++b.vdLocalN;
+            b.vdLocalYSum += pc.f86LocalY;
+            b.vdLocalGen = pc.localPoseGeneration;
+        }
         if (pc.clrOk) {
             ++b.clrN;
             if (pc.clrInside) ++b.inside;
@@ -15596,6 +15942,27 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
             f81PoseCapturePost(capture);
         }
+        if (armsOk) {   // F86a: the pose this call wrote, for the next submit's carry (M3P_p, F_p, the body shift, the written wrists, the pin's eye)
+            nofoot::f86::PoseIn pi;
+            pi.p1 = G.frame;
+            pi.qpc = sample.qpc;
+            std::memcpy(pi.m3p, G.m3p, sizeof(pi.m3p));
+            std::memcpy(pi.froot, G.froot, sizeof(pi.froot));
+            for (int c = 0; c < 3; ++c) pi.d[c] = G.d[c];
+            for (int side = 0; side < 2; ++side) {
+                double h[3];
+                if (so[side].wrote && pl.ok[side] && finalAt(pl.side[side].H, h)) {
+                    pi.wrote[side] = true;
+                    for (int c = 0; c < 3; ++c) pi.wrist[side][c] = static_cast<float>(h[c]);
+                }
+            }
+            if (pinCall.valid && std::isfinite(pinCall.E[0]) && std::isfinite(pinCall.E[1]) && std::isfinite(pinCall.E[2])) {
+                pi.eyeOk = true;
+                for (int c = 0; c < 3; ++c) pi.eye[c] = static_cast<float>(pinCall.E[c]);
+            }
+            pi.have = pi.eyeOk || (pi.wrote[0] && pi.wrote[1]);
+            if (pi.have) f86PosePublish(pi);
+        }
         if (sample.fresh) {
             g_poseDeviationSamples.fetch_add(1, std::memory_order_relaxed);
             if (sample.reachMeasured) g_poseDeviationReachMeasured.fetch_add(1, std::memory_order_relaxed);
@@ -16964,7 +17331,13 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
         got = g_pinStatSeq.load(std::memory_order_relaxed) == s1;
     }
     g_pinStatReset.store(true, std::memory_order_relaxed);
+    // F86g: the floor probe's second (render thread's hits), read once for every bin's line
+    const int64_t floorSumMm = g_f86gSumMm.exchange(0, std::memory_order_relaxed);
+    const uint64_t floorHits = g_f86gHits.exchange(0, std::memory_order_relaxed), floorMiss = g_f86gMisses.exchange(0, std::memory_order_relaxed),
+                   floorRej = g_f86gRejected.exchange(0, std::memory_order_relaxed);
     if (!got || (!scope && st.calls == 0)) return;
+    Log::get().note("floor probe (F86g): two rays from eye 0 toward the model points (+-0.3, 0, 0.7) of the 3P body; %llu hits accepted (0.4-1.2 m horizontally from the 3P origin), %llu rays without a surface, "
+                    "%llu hits outside that range", static_cast<unsigned long long>(floorHits), static_cast<unsigned long long>(floorMiss), static_cast<unsigned long long>(floorRej));
     const double an = st.ageN ? static_cast<double>(st.ageN) : 1.0;
     const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
     const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
@@ -17024,11 +17397,21 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
         else
             std::snprintf(pitchBuf, sizeof(pitchBuf), "local pitch unavailable (0 valid, %llu fallback); %s; eye height raw/norm mean %.3f/%.3f m",
                           static_cast<unsigned long long>(p.n), sceneBuf, p.rawEyeYSum / n, p.eyeYSelectedSum / n);
+        // F86g: the parts of the vertical demand (the headset's LOCAL height, the camera over F_root, F_root and the animated neck in the 3P model, the aim's pitch) and the
+        // floor under the body (the probe's hits, mean of the second): the knees-bend question is whether the body floats (floor 2 cm or more below the origin) or bends.
+        char vdBuf[420];
+        {
+            const double vn = p.vdN ? static_cast<double>(p.vdN) : 1.0, ln = p.vdLocalN ? static_cast<double>(p.vdLocalN) : 1.0;
+            std::snprintf(vdBuf, sizeof(vdBuf),
+                          "vertical demand parts (F86g): LOCAL head y %.3f m (gen %u), camera over F_root %+.1f cm, F_root in the model %.3f m, animated neck %.3f m, aim pitch %+.1f deg; floor %+.1f cm from the 3P origin (%llu hits)",
+                          p.vdLocalN ? p.vdLocalYSum / ln : 0.0, p.vdLocalGen, p.vdN ? p.vdCamOverFSum / vn : 0.0, p.vdN ? p.vdFYSum / vn : 0.0, p.vdN ? p.vdNeckYSum / vn : 0.0,
+                          p.vdN ? p.vdPitchSum / vn : 0.0, floorHits ? static_cast<double>(floorSumMm) / static_cast<double>(floorHits) * 0.1 : 0.0, static_cast<unsigned long long>(floorHits));
+        }
         Log::get().note("native on foot body pin (F69a): %s, %llu calls: w_c (the animated neck-to-eye vector's weight, smoothstep(%.2f, %.2f, h_stand - E_y_selected)) "
                         "mean %.2f max %.2f, %llu calls at %.1f or more (the bin 'crouching'); E_y_selected - h_stand (the cyclopean eye's model height, normalized when LOCAL pitch is valid and raw on fallback, against its %u-frame "
-                        "standing mean, cm) %s; F73 pose source: %s; the vector used is the F68e line's",
+                        "standing mean, cm) %s; F73 pose source: %s; the vector used is the F68e line's; %s",
                         kBinNames[b], static_cast<unsigned long long>(p.n), nofoot::kPinCrouchLoM, nofoot::kPinCrouchHiM, p.wcSum / n, p.wcMax,
-                        static_cast<unsigned long long>(p.wcHigh), nofoot::kPinCrouchWc, nofoot::kPinEyeCalFrames, calBuf, pitchBuf);
+                        static_cast<unsigned long long>(p.wcHigh), nofoot::kPinCrouchWc, nofoot::kPinEyeCalFrames, calBuf, pitchBuf, vdBuf);
         Log::get().note("native on foot body pin (F73 ADS detach): %s, %llu calls: detach weight mean %.2f; blended head target distance from same-call authored neck mean %.1f cm",
                         kBinNames[b], static_cast<unsigned long long>(p.n), p.detachWSum / n, p.targetFromAuthoredSum / n);
         // F69d: the eye against the joints as finally written; proof: "inside" 0 in every state.
@@ -17620,6 +18003,22 @@ void nativeOnFootOpticCaptureSample(uint32_t index, uint32_t sceneFrame, uint32_
         r.poseNativeEpoch = poseRow.poseNativeEpoch;
         r.poseRigGeneration = poseRow.poseRigGeneration;
         std::memcpy(r.poseArm, poseRow.poseArm, sizeof(r.poseArm));
+        {   // F86a: the wrists as the submit that drew this pose put them (the carry joins by the pose's game frame)
+            F86Carry drawn;
+            if (poseRow.poseKey.gGameFrame != ~uint32_t(0) && g_f86Drawn.get(poseRow.poseKey.gGameFrame, &drawn)) {
+                r.poseArmDrawnValid = true;
+                r.poseArmDrawnWhy = drawn.why;
+                r.poseArmDrawnAge = drawn.age;
+                for (int s = 0; s < 2; ++s) {
+                    r.poseArmDrawnHave[s] = drawn.haveWrist[s];
+                    for (int c = 0; c < 3; ++c) {
+                        r.poseArmDrawn[s][c] = drawn.drawnAfter[s][c];
+                        r.poseArmDrawnBefore[s][c] = drawn.drawnBefore[s][c];
+                    }
+                }
+                for (int c = 0; c < 3; ++c) r.poseCarryDelta[c] = drawn.delta[c];
+            }
+        }
         r.poseRifleQualityValid = poseRow.poseRifleQualityValid;
         r.poseRifleQualityAccepted = poseRow.poseRifleQualityAccepted;
         r.poseRifleQualityWeight = poseRow.poseRifleQualityWeight;
@@ -17790,7 +18189,22 @@ void nativeOnFootOpticCaptureEnd(const char* reason, const nofoot::optic_capture
                 for (int point = 0; point < 4; ++point) { if (point) fputc(',', f); opticWriteVec(f, r.poseArm[side][point], 3); }
                 fputc(']', f);
             }
-            fprintf(f, "],\"rifle_geometry\":{\"valid\":%s,\"quality_accepted\":%s,\"native_epoch\":%llu,\"quality_weight\":",
+            // F86a: the wrists in world as the submit that drew this pose placed them, after the pose carry (and without it): the proof of the carry is the left cuff
+            // within about 10 px of the lens in a sprint-jump dump (dump 001 of the F85 flight: up to 155 px)
+            fputc(']', f);
+            fprintf(f, ",\"pose_arm_drawn\":{\"valid\":%s,\"carry_state\":\"%s\",\"pose_age\":%u,\"carry\":", r.poseArmDrawnValid ? "true" : "false",
+                    nofoot::f86::carryWhyText(r.poseArmDrawnWhy), r.poseArmDrawnAge);
+            opticWriteVec(f, r.poseCarryDelta, 3);
+            for (int pass = 0; pass < 2; ++pass) {
+                fputs(pass == 0 ? ",\"world\":[" : "],\"world_without_carry\":[", f);
+                for (int side = 0; side < 2; ++side) {
+                    if (side) fputc(',', f);
+                    if (r.poseArmDrawnValid && r.poseArmDrawnHave[side]) opticWriteVec(f, pass == 0 ? r.poseArmDrawn[side] : r.poseArmDrawnBefore[side], 3);
+                    else fputs("null", f);
+                }
+            }
+            fputs("]}", f);
+            fprintf(f, ",\"rifle_geometry\":{\"valid\":%s,\"quality_accepted\":%s,\"native_epoch\":%llu,\"quality_weight\":",
                     r.poseRifleQualityValid ? "true" : "false", r.poseRifleQualityAccepted ? "true" : "false",
                     static_cast<unsigned long long>(r.poseNativeEpoch));
             opticWriteFloat(f, r.poseRifleQualityWeight); fputs(",\"detach_weight\":", f); opticWriteFloat(f, r.poseRifleDetachWeight);
@@ -18386,7 +18800,6 @@ constexpr double kDefaultTargetSize = 2016.0;                 // the marker targ
 // F47: the correction and its instruments.
 // F63: a match is an identity held kMatchHold frames (was kMatchFresh = 8), dropped early only by contradicting evidence (drawtag::HeldMatch).
 constexpr uint32_t kMatchHold = drawtag::kMatchHoldFrames;
-constexpr uint32_t kStreamWinEntries = 8192;   // F63: the instance stream's CPU shadow: entries copied per eye window at each Unmap (64 KB)
 constexpr uint32_t kResRing = 128;             // F63: the per-frame residual ring per eye (the waypoint series' CSV reads it)
 constexpr double kGateNdc = drawtag::kPatchGateNdc;   // F64: |dx|, |dy| under 0.4 NDC (F62c: 0.1; F50..F53: 0.05; F47: 0.1 on P's own delta)
 constexpr double kLagStdMaxPx = 0.5;     // F50: no patch until the eye's baseline is seeded and its standard deviation is under this
@@ -18611,6 +19024,15 @@ struct Untag {
     uint32_t bits = 0;   // the 24 low bits as a sentinel would carry them
     int tagKey = -1;     // a tag in flight they match (the key), -1 none
     uint32_t tagAge = 0;
+    // F86f (the label instrument): the draws of this place made while a prompt key was drawn in the eye-frame, those that drew with our private b0 (a patched
+    // draw) against the game's, the rows (b0 rows 4, 5 and 7) and the origin of the latest, and the patched targets (NDC) of the prompt keys drawn then.
+    uint64_t labDraws = 0, labOurs = 0;
+    bool labHave = false;
+    float labRows[12] = {}, labOrigin[3] = {};
+    uint32_t labTw = 0, labTh = 0;
+    int labKeys = 0;
+    uint32_t labKey[4] = {};
+    double labT[4][2] = {};
 };
 // F52: an eye's world rows' source this second: the first world pool draw that gave the eye's view (its shaders, target, depth view, viewport,
 // b1), the last one and how often the vertex shader changed between eye-frames.
@@ -18851,9 +19273,18 @@ struct ResCell {
 };
 ResCell g_resRing[2][kResRing];
 // F63: THE CPU IDENTIFICATION. The marker composite draws' instance stream (the single stride-8 vertex buffer they read; one DYNAMIC buffer the
-// game maps WRITE_DISCARD once a frame) is shadowed at its Unmap, before the real one, as the t33 pool is: per eye a window of
-// kStreamWinEntries entries about the eye's newest marker composite entry (drawtag::streamWindow). At a draw, its entry (offset / 8 +
+// game maps WRITE_DISCARD once a frame) is shadowed at its Unmap, before the real one, as the t33 pool is: per eye windows (F86c, below)
+// about the eye's marker composite entries (F63: one window about the newest entry, drawtag::streamWindow). At a draw, its entry (offset / 8 +
 // StartInstanceLocation) read from the window names the record (FirstElement + x) without a GPU read-back. Fix key only; render thread.
+// F86c: the windows cover every entry the eye drew last frame, not only the neighbourhood of its newest one. The 2026-10-23 flight: eye 1's draws outside the
+// windows 78-123 a second from 20:27:50 and 165-180 a second while the rifle was drawn, 0 once eye 1 reached 87/87 draws named (the first-equip flicker: a
+// draw more than 4096 entries from the newest one went unnamed and was drawn unpatched). Per eye, the entries drawn in the last two frames are clustered (a gap of
+// at most 2048 starts another) and each cluster gets a window of 4096 entries, at most 4 per eye (nofoot::f86::planWindows).
+constexpr uint32_t kStreamSetMax = 512;
+struct StreamSet {
+    uint32_t frame = ~0u, n = 0;
+    uint32_t e[kStreamSetMax] = {};
+};
 struct StreamShadow {
     const void* res = nullptr;          // identity only
     uint32_t bytes = 0;
@@ -18861,10 +19292,18 @@ struct StreamShadow {
     int mapType = 0;
     uint32_t frame = ~0u;               // the frame of the newest window copy
     uint32_t centre[2] = {~0u, ~0u};    // per eye: the newest marker composite entry seen
-    uint32_t lo[2] = {}, n[2] = {};     // per eye: the window's first entry and its entries copied
+    StreamSet cur[2], prev[2];          // F86c: per eye, the entries drawn in the newest frame and in the one before
+    nofoot::f86::WinPlan plan[2];       // F86c: per eye, the windows copied at the newest Unmap (lo, n, how many)
+    uint32_t setDropped = 0;
 };
 StreamShadow g_stream;
-alignas(16) uint32_t g_streamWin[2][kStreamWinEntries * 2];   // per eye window: (x, y) per entry
+alignas(16) uint32_t g_streamWin[2][nofoot::f86::kWinMax][nofoot::f86::kWinEntries * 2];   // per eye, per window: (x, y) per entry
+// F86c: this second's figures per eye: draws named from a window, draws outside every window and how far from the nearest window the nearest of them was.
+struct StreamSecond {
+    uint64_t named = 0, outside = 0, uncovered = 0, copies = 0, windowsSum = 0, clustersSum = 0, droppedEntries = 0;
+    uint32_t nearest = ~0u;
+};
+StreamSecond g_streamSec[2];
 // F52: the reference: the frame each eye's comparison ran, the last frame the temporal rows were usable for the eye, the reference in use
 // per eye (-1 not yet) and its epoch (a change resets every baseline of the eye), the eye's world b1 (identity) for the same-buffer check,
 // the switches said.
@@ -18967,6 +19406,24 @@ __declspec(noinline) bool readRecordHeadGuarded(const uint8_t* base, uint32_t by
     return true;
 }
 
+// F86e: a weapon UI find's whole record (84 words), under SEH, kept per part slot for the ADS-press comparison (the F85b path reads the record head only).
+__declspec(noinline) bool readRecordWordsGuarded(const uint8_t* base, uint32_t bytes, uint32_t index, uint32_t out[84]) noexcept {
+    const uint64_t at = static_cast<uint64_t>(index) * drawtag::kRecordStride;
+    if (!base || at + 336u > bytes) return false;
+    __try {
+        for (uint32_t i = 0; i < 21; ++i) drawtag::streamLoad16(base + at + 16u * i, out + 4u * i);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+struct F86eRec {
+    bool valid = false;
+    uint32_t frame = 0;
+    uint32_t w[84] = {};
+};
+F86eRec g_f86eRec[nofoot::f85::kWeaponKeySlots];
+
 // ---- F85b / F85c (TEMPORARY): the weapon UI pinned to the weapon, and the reticle at the aim ray's hit depth -- the render side ----------------------
 // Review: reviews\native-onfoot-hands-ui-reticle-review-2026-10-23.md sections 4.2 and 4.3; pure parts and their rig: native_on_foot_f85.h, f85_checks.h.
 // Both parts need the composite camera K: the camera the marker composite's b0 rows 4, 5 and 7 (B) were built for. B = A . W . K (W the eye's scene rows, A
@@ -19044,6 +19501,12 @@ void addFind(const Pool& p, const uint8_t* base, const drawtag::Hit& h, int mapT
     if (nofoot::f85::isWeaponKey(f.key)) {   // F85b: the identification path that ran
         if (g_f85InValueScan) ++g_f85w.valueFinds;
         else ++g_f85w.tagFinds;
+        uint32_t wslot = 0;   // F86e: the part's record, whole
+        if (nofoot::f85::isWeaponKey(f.key, &wslot)) {
+            F86eRec& wr = g_f86eRec[wslot];
+            wr.valid = readRecordWordsGuarded(base, p.bytes, h.index, wr.w);
+            wr.frame = frame;
+        }
     }
     if (g_haveLast[f.key]) {
         if (g_lastIndex[f.key] == f.index) ++g_win.sameIndex; else ++g_win.changedIndex;
@@ -20094,7 +20557,8 @@ __declspec(noinline) bool streamCopyGuarded(uint32_t* dst, const uint8_t* src, u
     }
     return true;
 }
-// The Unmap tee's half: each eye's window about its newest marker composite entry (a WRITE_DISCARD or NO_OVERWRITE map only).
+// The Unmap tee's half: each eye's windows about the entries it drew in the last two frames (a WRITE_DISCARD or NO_OVERWRITE map only); with none yet, one
+// window about its newest entry.
 void streamUnmapCopy(uint32_t frame) {
     const uint8_t* base = static_cast<const uint8_t*>(g_stream.mapped);
     const int type = g_stream.mapType;
@@ -20108,18 +20572,34 @@ void streamUnmapCopy(uint32_t frame) {
     const uint32_t total = g_stream.bytes / drawtag::kStreamStride;
     bool any = false;
     for (int e = 0; e < 2; ++e) {
-        g_stream.n[e] = 0;
-        if (g_stream.centre[e] == ~0u) continue;
-        uint32_t lo = 0, n = 0;
-        drawtag::streamWindow(g_stream.centre[e], total, kStreamWinEntries, &lo, &n);
-        if (!n) continue;
-        if (!streamCopyGuarded(g_streamWin[e], base + static_cast<size_t>(lo) * drawtag::kStreamStride, n * drawtag::kStreamStride)) {
-            ++g_win.streamFaults;
-            continue;
+        nofoot::f86::WinPlan& plan = g_stream.plan[e];
+        plan = nofoot::f86::WinPlan{};
+        uint32_t entries[2 * kStreamSetMax + 1];
+        uint32_t count = 0;
+        for (const StreamSet* s : {&g_stream.prev[e], &g_stream.cur[e]}) {
+            // the newest frame's set is partial when this Unmap lands inside its draws; the frame before is whole: both are taken
+            if (s->frame == ~0u || frame - s->frame > 3u) continue;
+            for (uint32_t i = 0; i < s->n; ++i) entries[count++] = s->e[i];
         }
-        g_stream.lo[e] = lo;
-        g_stream.n[e] = n;
-        any = true;
+        if (!count && g_stream.centre[e] != ~0u) entries[count++] = g_stream.centre[e];
+        if (!count) continue;
+        nofoot::f86::planWindows(entries, count, total, &plan);
+        uint32_t good = 0;
+        for (uint32_t w = 0; w < plan.windows; ++w) {
+            if (!plan.n[w]) continue;
+            if (!streamCopyGuarded(g_streamWin[e][w], base + static_cast<size_t>(plan.lo[w]) * drawtag::kStreamStride, plan.n[w] * drawtag::kStreamStride)) {
+                ++g_win.streamFaults;
+                plan.n[w] = 0;
+                continue;
+            }
+            ++good;
+        }
+        if (good) any = true;
+        StreamSecond& ss = g_streamSec[e];
+        ++ss.copies;
+        ss.windowsSum += good;
+        ss.clustersSum += plan.clusters;
+        ss.uncovered += plan.uncovered;
     }
     if (any) {
         g_stream.frame = frame;
@@ -20127,9 +20607,9 @@ void streamUnmapCopy(uint32_t frame) {
     }
     g_win.streamCopyTicks += f30Qpc() - t0;
 }
-// A marker composite draw's stream: learned (a new buffer starts a fresh shadow) and the eye's window centred on its entry from now on.
+// A marker composite draw's stream: learned (a new buffer starts a fresh shadow) and the entry kept for the eye's windows from the next Unmap on.
 uint32_t g_streamNotes = 0;
-void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry) {
+void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry, uint32_t frame) {
     if (static_cast<const void*>(vb) != g_stream.res) {
         D3D11_BUFFER_DESC d{};
         vb->GetDesc(&d);
@@ -20139,25 +20619,45 @@ void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry) {
         ++g_win.streamLearned;
         if (g_streamNotes < 4) {
             ++g_streamNotes;
-            Log::get().note("native on foot marker fix (F63): the marker composite draws' instance stream %p (%u bytes, %u entries, usage %u, CPU "
-                            "access 0x%X) is shadowed at its Unmap: per eye %u entries about the eye's newest marker composite entry",
+            Log::get().note("native on foot marker fix (F63, F86c): the marker composite draws' instance stream %p (%u bytes, %u entries, usage %u, CPU "
+                            "access 0x%X) is shadowed at its Unmap: per eye, windows of %u entries about each cluster of the entries the eye drew last frame (a gap of "
+                            "%u entries starts another), at most %u windows",
                             static_cast<void*>(vb), d.ByteWidth, d.ByteWidth / drawtag::kStreamStride, static_cast<unsigned>(d.Usage),
-                            static_cast<unsigned>(d.CPUAccessFlags), kStreamWinEntries);
+                            static_cast<unsigned>(d.CPUAccessFlags), nofoot::f86::kWinEntries, nofoot::f86::kWinGap, nofoot::f86::kWinMax);
         }
     }
-    if (eye == 0 || eye == 1) g_stream.centre[eye] = entry;
+    if (eye != 0 && eye != 1) return;
+    g_stream.centre[eye] = entry;
+    StreamSet& cur = g_stream.cur[eye];
+    if (cur.frame != frame) {   // a new frame: the set of the frame before is kept beside it
+        g_stream.prev[eye] = cur;
+        cur.frame = frame;
+        cur.n = 0;
+    }
+    if (cur.n && cur.e[cur.n - 1] == entry) return;
+    if (cur.n < kStreamSetMax) cur.e[cur.n++] = entry;
+    else ++g_stream.setDropped;
 }
 // The x of stream entry `entry` from this frame's windows. False when the stream was not copied this frame or no window holds the entry
-// (*outside then says which).
-bool streamEntryX(const void* res, uint32_t entry, uint32_t frame, uint32_t* x, bool* outside) {
+// (*outside then says which). F86c: eye is the drawing eye (-1 unknown): its draws are counted named / outside in the second's line.
+bool streamEntryX(const void* res, uint32_t entry, uint32_t frame, uint32_t* x, bool* outside, int eye = -1) {
     *outside = false;
     if (!res || res != g_stream.res || g_stream.frame != frame) return false;
     for (int e = 0; e < 2; ++e)
-        if (g_stream.n[e] && entry >= g_stream.lo[e] && entry - g_stream.lo[e] < g_stream.n[e]) {
-            *x = g_streamWin[e][2 * (entry - g_stream.lo[e])];
-            return true;
+        for (uint32_t w = 0; w < g_stream.plan[e].windows; ++w) {
+            const nofoot::f86::WinPlan& p = g_stream.plan[e];
+            if (p.n[w] && entry >= p.lo[w] && entry - p.lo[w] < p.n[w]) {
+                *x = g_streamWin[e][w][2 * (entry - p.lo[w])];
+                if (eye == 0 || eye == 1) ++g_streamSec[eye].named;
+                return true;
+            }
         }
     *outside = true;
+    if (eye == 0 || eye == 1) {
+        StreamSecond& ss = g_streamSec[eye];
+        ++ss.outside;
+        ss.nearest = std::min(ss.nearest, g_stream.plan[eye].distance(entry));
+    }
     return false;
 }
 
@@ -20599,103 +21099,27 @@ void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
     }
 }
 
-// The decision for a draw whose record carries a weapon UI tag (the CPU identification named it): sets g_fix.pending with the rewritten rows, or counts why not.
-void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Buffer* b0Plain, const float* oHud, const CbShadow* sh, const Find* f) {
-    uint32_t slot = 0;
-    if (!nofoot::f85::isWeaponKey(f->key, &slot)) return;
-    const int e = r.eye;
-    F85bPe& pe = g_f85w.pe[slot][e];
-    ++pe.found;
-    if (!b0Plain) { f85Refuse(pe, kF85WhyNoRanged); return; }
-    if (!sh || !sh->valid) { f85Refuse(pe, kF85WhyNoRows); return; }
-    if (!oHud) { f85Refuse(pe, kF85WhyNoOrigin); return; }
-    // A draw of several instances is rewritten whole (every instance of a draw shares its b0): counted, and refused past 16 (not a weapon readout).
-    if (r.instances > 16) { f85Refuse(pe, kF85WhyMulti); return; }
-    if (r.instances > 1) ++pe.multi;
-    F85bUCell u;
-    if (!f85bReadU(f->sentinel, &u)) { f85Refuse(pe, kF85WhyNoU); return; }
-    ++pe.matched;
-    F85Solve s;
-    int why = -1;
-    if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why); return; }
-    f85LatchPut(e, frame, s);
-    if (!g_f85Latch.usable(frame)) {
-        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + 1u ? kF85WhyNoPair : kF85WhyDisagree);
-        return;
-    }
-    const nofoot::f85::UFrame uf = nofoot::f85::uFrame(u.U, s.oh, s.ow);
-    const nofoot::f85::Corr c = nofoot::f85::makeCorrection(s.K, uf);
-    if (!c.ok) { f85Refuse(pe, kF85WhyCorr); return; }
-    // K's origin against U's (the same eye position when the aim camera is the head's: a frame mismatch shows here)
-    double Ok[3], originCm = 0.0;
-    nofoot::f85::cameraOrigin(s.K, s.oh, s.ow, Ok);
-    for (int a = 0; a < 3; ++a) {
-        const double d = Ok[a] - static_cast<double>(u.U[12 + a]);
-        originCm += d * d;
-    }
-    originCm = std::sqrt(originCm) * 100.0;
-    if (!(originCm < 500.0)) { f85Refuse(pe, kF85WhyFarOrigin); return; }
-    const nofoot::f85::Rows Bp = nofoot::f85::applyCorrection(s.B, c);
-    float r4[4], r5[4], r7[4];
-    nofoot::f85::rowsToFloat(Bp, r4, r5, r7);   // as the private b0 stores them
-    // The proof: the anchor (the record's translation) drawn by the unpatched rows and by the rewritten ones, against where the CPU put it on the weapon
-    // (P_ui = t R_U + p_U, published at the submit, through the eye's scene rows, unjittered).
-    const double x0[3] = {f->x0[0], f->x0[1], f->x0[2]};
-    const double v[3] = {x0[0] - s.oh[0], x0[1] - s.oh[1], x0[2] - s.oh[2]};
-    const double pRel[3] = {static_cast<double>(u.pUi[0]) - s.ow[0], static_cast<double>(u.pUi[1]) - s.ow[1], static_cast<double>(u.pUi[2]) - s.ow[2]};
-    double shown0[2], shown1[2], target[2];
-    const nofoot::f85::Rows Bf = nofoot::f85::rowsOfComposite(r4, r5, r7);
-    if (nofoot::f85::shownNdc(s.ap, s.axis, s.B, v, shown0) && nofoot::f85::shownNdc(s.ap, s.axis, Bf, v, shown1) &&
-        nofoot::f85::targetNdc(s.ap, s.axis, s.W, pRel, target)) {
-        const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
-        const double e0x = (shown0[0] - target[0]) * W * 0.5, e0y = (shown0[1] - target[1]) * H * 0.5;
-        const double e1x = (shown1[0] - target[0]) * W * 0.5, e1y = (shown1[1] - target[1]) * H * 0.5;
-        const double a[2] = {shown0[0] + s.jitter[0], shown0[1] + s.jitter[1]}, b[2] = {target[0] + s.jitter[0], target[1] + s.jitter[1]};
-        const double deg = drawtag::ndcAngleDeg(g_cpuWorld[e].rows, a, b);
-        const double px = std::sqrt(e0x * e0x + e0y * e0y);
-        ++pe.n;
-        pe.errPxSum += px;
-        pe.errPxMax = std::max(pe.errPxMax, px);
-        pe.errDegSum += deg > 0.0 ? deg : 0.0;
-        pe.angleSum += c.angleDeg;
-        pe.yawSum += c.yawDeg;
-        pe.pitchSum += c.pitchDeg;
-        pe.resPxMax = std::max(pe.resPxMax, std::sqrt(e1x * e1x + e1y * e1y));
-        pe.originCmSum += originCm;
-        pe.originCmMax = std::max(pe.originCmMax, originCm);
-    }
-    ++pe.decided;
-    if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
-    g_fix.pending = true;
-    g_fix.weapon = true;
-    g_fix.rows7 = true;
-    g_fix.wSlot = static_cast<int>(slot);
-    g_fix.serial = g_drawSerial;
-    g_fix.ctx = ctx;
-    g_fix.cb0 = b0Plain;
-    g_fix.eye = e;
-    g_fix.frame = frame;
-    g_fix.slot = -1;   // not a key 10 style decision: no read-back record
-    g_fix.rec = 0;
-    g_fix.keySlot = -1;
-    g_fix.newest = s.rowsState == drawtag::kRowsNewest;
-    g_fix.head = g_headDps;
-    g_fix.dx = g_fix.dy = 0.0;
-    std::memcpy(g_fix.rows45, r4, sizeof(r4));
-    std::memcpy(g_fix.rows45 + 4, r5, sizeof(r5));
-    std::memcpy(g_fix.row7, r7, sizeof(r7));
+// ---- F85c / F86d / F86f / F86g: the depth lines ------------------------------------------------------------------------------------------------------
+// One compute dispatch a frame (reticle_depth_shader.h) marches up to 32 lines through eye 0's scene depth. Line 0 is key 10's aim line (F85c, as before). The
+// others are the consumers' requests, held as world points and refreshed by their eye 0 draws: the weapon UI parts' panels (F86d: the nearest surface under
+// the panel's centre and corners), the charge-port prompt keys (F86f: the surface the anchor lies behind) and the floor probe (F86g). The dispatch builds
+// its lines from the requests that are at most kF86Fresh frames old against eye 0's rows of the dispatching frame; the answers come back two frames later
+// (a 3-deep staging ring) and update the consumers' state, which both eyes' draws read.
+enum F86LineKind : uint8_t { kLineKReticle = 0, kLineKWeapon = 1, kLineKPrompt = 2, kLineKFloor = 3 };
+struct F86Meta {
+    uint8_t kind = 0, id = 0, idx = 0;
+    double u[3] = {}, target[3] = {};
+};
+constexpr uint32_t kF86Fresh = 2;
+constexpr int kF86PromptKeys = 8;   // keys 1 and 45..50, and a spare
+int f86PromptIdx(uint32_t key) {
+    return key == 1u ? 0 : (key >= 45u && key <= 50u) ? static_cast<int>(key) - 44 : -1;
 }
-// The patch was bound at the draw's issue (nativeOnFootMarkerFixBegin).
-void f85bBound(int eye, int slot) {
-    if (eye < 0 || eye > 1 || slot < 0 || slot >= static_cast<int>(kF85bParts)) return;
-    ++g_f85w.pe[slot][eye].corrected;
-}
-
-// ---- F85c ----------------------------------------------------------------------------------------------------------------------------------
 struct F85cGpu {
     ID3D11ComputeShader* cs = nullptr;
     bool csTried = false;
-    ID3D11Buffer* cb = nullptr;
+    ID3D11Buffer* cb = nullptr;        // b0: the rows, line 0, the dimensions (128 bytes)
+    ID3D11Buffer* cbLines = nullptr;   // b1: lines 1..31 (1024 bytes)
     ID3D11Buffer* out = nullptr;
     ID3D11UnorderedAccessView* uav = nullptr;
     ID3D11Buffer* stage[3] = {};
@@ -20704,11 +21128,17 @@ struct F85cGpu {
     uint32_t srvW = 0, srvH = 0;
     struct Slot {
         bool inFlight = false;
-        uint32_t frame = 0, seq = 0;
+        uint32_t frame = 0, seq = 0, n = 0;
         double gameD = 0.0;   // |P - O| of the game's key 10 when dispatched (0 unknown): "the game's 5 m was behind a surface"
+        // what the answers are read against: eye 0's rows, origin and depth fit of the dispatching frame, the lines' camera, the 3P origin and up (the floor)
+        nofoot::f85::Rows W;
+        double ow[3] = {}, O[3] = {}, A = 0.0, B = 0.0, T[3] = {}, up[3] = {};
+        uint32_t texW = 0, texH = 0;
+        bool floorOk = false;
+        F86Meta meta[kDepthLinesMax];
     };
     Slot slot[3];
-    uint32_t seq = 0, dispatchedFrame = ~0u;
+    uint32_t seq = 0, dispatchedFrame = ~0u, pollFrame = ~0u, failFrame = ~0u;   // failFrame: a refused dispatch is tried once a frame, not once a draw
 };
 F85cGpu g_f85g;
 struct F85cState {
@@ -20726,6 +21156,56 @@ struct F85cState {
     uint64_t draws = 0;
 };
 F85cState g_f85c;
+uint32_t g_f86LastReticle = 0;   // the frame key 10's eye 0 draw last came: while it comes each frame it owns the dispatch (its line is the freshest)
+
+// F86d: a weapon UI part's panel at the surface under it (per part slot).
+struct F86dPart {
+    uint32_t reqFrame = ~0u, item = 0;
+    int nRays = 0;
+    double target[5][3] = {};
+    nofoot::f86::RangeSmoother sm{nofoot::f86::kPanelMinM, nofoot::f86::kPanelMaxM};
+    bool haveDs = false;
+    double dsTarget = 0.0;
+    uint32_t smoothFrame = ~0u;
+    uint64_t lastQpc = 0;
+    // this second
+    uint64_t hits = 0, misses = 0, held = 0, noView = 0, noHit = 0, decisions = 0;
+    bool seen = false;
+    double panel = 0.0, panelNew = 0.0, scale = 1.0;
+};
+F86dPart g_f86d[kF85bParts];
+// F86f: a prompt key's anchor snapped onto the surface behind it.
+struct F86fKey {
+    bool used = false;
+    uint32_t key = 0, reqFrame = ~0u;
+    double P[3] = {};
+    nofoot::f86::PromptCache cache;
+    uint64_t drawn = 0, cached = 0, noSurface = 0, grazing = 0, snapped = 0;
+    double pDist = 0.0, surfaceD = 0.0, offRayDeg = 0.0, movedCm = 0.0;
+};
+F86fKey g_f86f[kF86PromptKeys];
+// F86g: the floor probe: two model points ahead of the 3P origin, the heights the hits found (read by the frame thread for the F69a line).
+struct F86gFloor {
+    uint32_t reqFrame = ~0u, frame = ~0u;
+    double pts[2][3] = {}, T[3] = {}, up[3] = {};
+    bool ok = false;
+};
+F86gFloor g_f86g;
+// F86e: a weapon UI part's panel size, hip and ADS (eye 0, the latest of the second), and the record of its newest find.
+struct F86eFig {
+    bool have = false;
+    double quadCm[2] = {}, atM = 0.0, mesh[2] = {}, scale = 0.0, urows[3] = {}, angDeg[2] = {};
+    uint32_t t0w = 0, t0h = 0;
+    bool t0 = false, meshRead = false;
+    uint64_t n = 0;
+};
+F86eFig g_f86e[kF85bParts][2];
+struct F86eAds {
+    bool adsOn = false, haveHip = false;
+    uint32_t hip[84] = {};
+};
+F86eAds g_f86eAds[kF85bParts];
+
 void f85cRelease() {
     for (auto& s : g_f85g.stage) {
         if (s) s->Release();
@@ -20734,12 +21214,18 @@ void f85cRelease() {
     if (g_f85g.srv) g_f85g.srv->Release();
     if (g_f85g.uav) g_f85g.uav->Release();
     if (g_f85g.out) g_f85g.out->Release();
+    if (g_f85g.cbLines) g_f85g.cbLines->Release();
     if (g_f85g.cb) g_f85g.cb->Release();
     if (g_f85g.cs) g_f85g.cs->Release();
     g_f85g = F85cGpu{};
     g_f85c = F85cState{};
     g_f85Latch = nofoot::f85::KLatch{};
+    for (F86dPart& p : g_f86d) p = F86dPart{};
+    for (F86fKey& k : g_f86f) k = F86fKey{};
+    g_f86g = F86gFloor{};
+    g_f86LastReticle = 0;
 }
+constexpr uint32_t kF86OutWords = 8u * (1u + kDepthLinesMax);   // the header line and the lines' 8 values each
 bool f85cEnsure(ID3D11DeviceContext* ctx) {
     F85cGpu& g = g_f85g;
     if (!g.cs && !g.csTried) {
@@ -20752,7 +21238,7 @@ bool f85cEnsure(ID3D11DeviceContext* ctx) {
     ctx->GetDevice(&dev);
     if (!dev) return false;
     D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = 16;
+    bd.ByteWidth = kF86OutWords * 4u;
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -20760,9 +21246,9 @@ bool f85cEnsure(ID3D11DeviceContext* ctx) {
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format = DXGI_FORMAT_UNKNOWN;
     ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements = 4;
+    ud.Buffer.NumElements = kF86OutWords;
     D3D11_BUFFER_DESC sd{};
-    sd.ByteWidth = 16;
+    sd.ByteWidth = kF86OutWords * 4u;
     sd.Usage = D3D11_USAGE_STAGING;
     sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     D3D11_BUFFER_DESC cd{};
@@ -20770,9 +21256,12 @@ bool f85cEnsure(ID3D11DeviceContext* ctx) {
     cd.Usage = D3D11_USAGE_DYNAMIC;
     cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    D3D11_BUFFER_DESC ld = cd;
+    ld.ByteWidth = 1024;
     const bool made = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g.out)) && SUCCEEDED(dev->CreateUnorderedAccessView(g.out, &ud, &g.uav)) &&
                       SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[0])) && SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[1])) &&
-                      SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[2])) && SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g.cb));
+                      SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[2])) && SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g.cb)) &&
+                      SUCCEEDED(dev->CreateBuffer(&ld, nullptr, &g.cbLines));
     dev->Release();
     if (!made) {
         Log::get().note("reticle depth (F85c): the GPU resources could not be made; the reticle keeps the game's 5 m");
@@ -20785,10 +21274,17 @@ bool f85cEnsure(ID3D11DeviceContext* ctx) {
     }
     return true;
 }
-// Two frames on (the depth_probe pattern: DO_NOT_WAIT on the staging copy): the result of a dispatch lands in the smoother's target.
-void f85cPoll(ID3D11DeviceContext* ctx, uint32_t frame, double gameDepthNow) {
+// A line's view-depth, clip w of a point relative to the rows' origin.
+double f86ClipW(const nofoot::f85::Rows& W, const double p[3]) {
+    return W.r[2][0] * p[0] + W.r[2][1] * p[1] + W.r[2][2] * p[2] + W.r[2][3];
+}
+// Two frames on (the depth_probe pattern: DO_NOT_WAIT on the staging copy): each answered dispatch's lines go to their consumers, once a frame.
+void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
+    namespace f86 = nofoot::f86;
     F85cGpu& g = g_f85g;
     F85cState& st = g_f85c;
+    if (g.pollFrame == frame) return;
+    g.pollFrame = frame;
     for (int i = 0; i < 3; ++i) {
         F85cGpu::Slot& sl = g.slot[i];
         if (!sl.inFlight) continue;
@@ -20810,65 +21306,233 @@ void f85cPoll(ID3D11DeviceContext* ctx, uint32_t frame, double gameDepthNow) {
             ++st.mapFail;
             continue;
         }
-        uint32_t v[4];
+        uint32_t v[kF86OutWords];
         std::memcpy(v, m.pData, sizeof(v));
         ctx->Unmap(g.stage[i], 0);
         sl.inFlight = false;
-        if (v[2] != sl.seq) {
+        if (v[0] != sl.seq || v[1] != sl.n) {
             ++st.seqBad;
             continue;
         }
-        float d = 0.0f;
-        std::memcpy(&d, &v[0], sizeof(d));
-        ++st.reads;
-        st.ageSum += age;
-        st.ageMax = std::max(st.ageMax, static_cast<double>(age));
-        const uint32_t status = v[1];
-        if (status == nofoot::f85::kMarchHit || status == nofoot::f85::kMarchSky) {
-            const double dd = status == nofoot::f85::kMarchHit ? static_cast<double>(d) : nofoot::f85::kReticleMaxM;
-            st.targetD = std::max(nofoot::f85::kReticleMinM, std::min(nofoot::f85::kReticleMaxM, dd));
-            st.haveTarget = true;
-            if (status == nofoot::f85::kMarchHit) {
-                ++st.hit;
-                if (sl.gameD > 0.0 && dd < sl.gameD - 0.05) ++st.behindBefore;
-            } else {
-                ++st.sky;
+        f86::LineOut weaponRay[kF85bParts][5];
+        int weaponN[kF85bParts] = {};
+        for (uint32_t k = 0; k < sl.n && k < kDepthLinesMax; ++k) {
+            const F86Meta& mt = sl.meta[k];
+            const uint32_t b = 8u + 8u * k;
+            f86::LineOut lo;
+            lo.status = v[b];
+            float fv[7];
+            std::memcpy(fv, &v[b + 1], sizeof(fv));
+            lo.d = fv[0];
+            lo.px = fv[1];
+            lo.py = fv[2];
+            for (int q = 0; q < 4; ++q) lo.nb[q] = fv[3 + q];
+            lo.pixOk = lo.status == f86::kLineHit && lo.px >= 0.0 && lo.py >= 0.0;
+            if (mt.kind == kLineKReticle) {
+                if (lo.status == f86::kLineUnused) continue;
+                ++st.reads;
+                st.ageSum += age;
+                st.ageMax = std::max(st.ageMax, static_cast<double>(age));
+                const uint32_t status = lo.status;   // 0 sky, 1 hit, 2 near, 3 off screen: the F85c codes
+                if (status == nofoot::f85::kMarchHit || status == nofoot::f85::kMarchSky) {
+                    const double dd = status == nofoot::f85::kMarchHit ? lo.d : nofoot::f85::kReticleMaxM;
+                    st.targetD = std::max(nofoot::f85::kReticleMinM, std::min(nofoot::f85::kReticleMaxM, dd));
+                    st.haveTarget = true;
+                    if (status == nofoot::f85::kMarchHit) {
+                        ++st.hit;
+                        if (sl.gameD > 0.0 && dd < sl.gameD - 0.05) ++st.behindBefore;
+                    } else {
+                        ++st.sky;
+                    }
+                    st.hitSum += st.targetD;
+                    st.hitMin = std::min(st.hitMin, st.targetD);
+                    st.hitMax = std::max(st.hitMax, st.targetD);
+                } else if (status == nofoot::f85::kMarchNear) {
+                    ++st.nearSurf;   // a surface nearer than 0.5 m on the aim: ignored, the last value holds
+                } else {
+                    ++st.offscreen;
+                }
+            } else if (mt.kind == kLineKWeapon) {
+                if (mt.id < kF85bParts && mt.idx < 5) {
+                    weaponRay[mt.id][mt.idx] = lo;
+                    weaponN[mt.id] = std::max(weaponN[mt.id], static_cast<int>(mt.idx) + 1);
+                }
+            } else if (mt.kind == kLineKPrompt) {
+                if (mt.id >= kF86PromptKeys) continue;
+                F86fKey& fk = g_f86f[mt.id];
+                if (lo.status != f86::kLineHit) {
+                    ++fk.noSurface;
+                    continue;
+                }
+                double H[3], Hrel[3];
+                for (int c = 0; c < 3; ++c) {
+                    H[c] = sl.O[c] + lo.d * mt.u[c];
+                    Hrel[c] = H[c] - sl.ow[c];
+                }
+                const f86::SurfaceNormal sn = f86::surfaceNormal(sl.W, sl.texW, sl.texH, lo, f86ClipW(sl.W, Hrel), mt.u);
+                double Pn[3];
+                if (sn.ok) fk.offRayDeg = f86::normalOffRayDeg(sn);
+                fk.surfaceD = lo.d;
+                if (f86::promptSnap(mt.target, H, sn, Pn)) {
+                    const double off[3] = {Pn[0] - mt.target[0], Pn[1] - mt.target[1], Pn[2] - mt.target[2]};
+                    fk.cache.put(mt.target, off);
+                    fk.movedCm = nofoot::f85::len3(off) * 100.0;
+                    ++fk.snapped;
+                } else {
+                    ++fk.grazing;
+                }
+            } else if (mt.kind == kLineKFloor) {
+                if (lo.status != f86::kLineHit || !sl.floorOk) {
+                    g_f86gMisses.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                double H[3], hM = 0.0;
+                for (int c = 0; c < 3; ++c) H[c] = sl.O[c] + lo.d * mt.u[c];
+                if (f86::floorAccept(H, sl.T, sl.up, &hM)) {
+                    g_f86gSumMm.fetch_add(static_cast<int64_t>(std::llround(hM * 1000.0)), std::memory_order_relaxed);
+                    g_f86gHits.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    g_f86gRejected.fetch_add(1, std::memory_order_relaxed);
+                }
             }
-            st.hitSum += st.targetD;
-            st.hitMin = std::min(st.hitMin, st.targetD);
-            st.hitMax = std::max(st.hitMax, st.targetD);
-        } else if (status == nofoot::f85::kMarchNear) {
-            ++st.nearSurf;   // a surface nearer than 0.5 m on the aim: ignored, the last value holds
-        } else {
-            ++st.offscreen;
+        }
+        for (uint32_t p = 0; p < kF85bParts; ++p) {
+            if (!weaponN[p]) continue;
+            F86dPart& pt = g_f86d[p];
+            double dnear = 0.0;
+            if (f86::nearestHit(weaponRay[p], weaponN[p], &dnear)) {
+                ++pt.hits;
+                pt.dsTarget = dnear;
+                pt.haveDs = true;
+            } else {
+                ++pt.misses;
+                if (pt.haveDs) ++pt.held;   // a miss holds the part's last D_s
+            }
         }
     }
-    (void)gameDepthNow;
 }
-// Eye 0's key 10 draw: the dispatch (once a frame). Orel = O - the rows' origin.
-void f85cDispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double Orel[3], const double u[3], double gameD) {
+// Eye 0's origin from its scene rows (the point where the three clip rows x, y, w vanish); false when the rows are singular.
+bool f86EyeOrigin(const CpuWorld& w, nofoot::f85::Rows* Wout, double O[3]) {
+    const nofoot::f85::Rows W = nofoot::f85::rowsOfWorld(w.rows);
+    double W3[3][3], Wi[3][3];
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) W3[r][c] = W.r[r][c];
+    if (!nofoot::f85::inv3(W3, Wi)) return false;
+    const double t[3] = {-W.r[0][3], -W.r[1][3], -W.r[2][3]};
+    double v[3];
+    nofoot::f85::mulVec3(Wi, t, v);
+    for (int i = 0; i < 3; ++i) O[i] = v[i] + static_cast<double>(w.o[i]);
+    *Wout = W;
+    return std::isfinite(O[0]) && std::isfinite(O[1]) && std::isfinite(O[2]);
+}
+// F86g: the floor probe's request, once a frame: two points on the 3P model's floor line ahead of its origin, (+-0.3, 0, 0.7) in the model axes.
+void f86FloorRequest(uint32_t frame) {
+    if (g_f86g.frame == frame) return;
+    g_f86g.frame = frame;
+    PinIn in;
+    g_f86g.ok = false;
+    if (!pinInRead(&in)) return;
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(in.m3p[i])) return;
+    const double r1[3] = {in.m3p[4], in.m3p[5], in.m3p[6]};
+    const double l1 = nofoot::f85::len3(r1);
+    if (!(l1 > 0.5)) return;
+    for (int i = 0; i < 3; ++i) {
+        g_f86g.T[i] = in.m3p[12 + i];
+        g_f86g.up[i] = r1[i] / l1;
+    }
+    nofoot::f86::floorProbePoints(in.m3p, g_f86g.pts);
+    g_f86g.ok = true;
+    g_f86g.reqFrame = frame;
+}
+// The dispatch: line 0 is key 10's (reticleOrel = O - the rows' origin, reticleU: false when the caller has none), the others the consumers' current requests.
+// False when nothing was dispatched. The refusals of the reticle are F85c's (the 1 s line); the weapon parts are told "no depth view".
+bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD) {
+    namespace f86 = nofoot::f86;
     F85cGpu& g = g_f85g;
     F85cState& st = g_f85c;
-    if (g.dispatchedFrame == frame) return;
+    if (g.dispatchedFrame == frame || g.failFrame == frame) return false;
     const CpuWorld& w = g_cpuWorld[0];
-    if (drawtag::sceneRowsState(w.frame, frame) == drawtag::kRowsNone) {
-        ++st.noScene;
-        return;
-    }
+    struct Ln {
+        double orel[3], dir[3], dmin, dmax;
+    } lines[kDepthLinesMax] = {};
+    F86Meta meta[kDepthLinesMax];
+    uint32_t n = 1;
+    const bool reticle = reticleOrel && reticleU;
+    bool anyOther = false;
+    const auto others = [&]() {
+        bool any = false;
+        for (const F86dPart& p : g_f86d) any = any || (p.nRays && frame - p.reqFrame <= kF86Fresh);
+        for (const F86fKey& k : g_f86f) any = any || (k.used && frame - k.reqFrame <= kF86Fresh);
+        return any || (g_f86g.ok && frame - g_f86g.reqFrame <= kF86Fresh);
+    };
+    anyOther = others();
+    if (!reticle && !anyOther) return false;
+    const auto fail = [&](uint64_t* reticleCounter) {
+        g.failFrame = frame;
+        if (reticle && reticleCounter) ++*reticleCounter;
+        for (F86dPart& p : g_f86d)
+            if (p.nRays && frame - p.reqFrame <= kF86Fresh) ++p.noView;
+        return false;
+    };
+    if (drawtag::sceneRowsState(w.frame, frame) == drawtag::kRowsNone) return fail(&st.noScene);
     double A = 0.0, B = 0.0;
-    if (!nofoot::f85::zwFit(w.rows, &A, &B)) {
-        ++st.noZw;
-        return;
-    }
+    if (!nofoot::f85::zwFit(w.rows, &A, &B)) return fail(&st.noZw);
+    nofoot::f85::Rows W;
+    double O0[3];
+    if (!f86EyeOrigin(w, &W, O0)) return fail(&st.noScene);
     ID3D11Texture2D* tex = nullptr;
-    if (!g_f85SceneW[0] || !g_f85SceneH[0] || !depthProbeSceneDepth(g_f85SceneW[0], g_f85SceneH[0], 0, &tex) || !tex) {
-        ++st.noDepth;
-        return;
+    if (!g_f85SceneW[0] || !g_f85SceneH[0] || !depthProbeSceneDepth(g_f85SceneW[0], g_f85SceneH[0], 0, &tex) || !tex) return fail(&st.noDepth);
+    if (!f85cEnsure(ctx)) return fail(&st.noGpu);
+    const double ow[3] = {w.o[0], w.o[1], w.o[2]};
+    if (reticle) {
+        for (int i = 0; i < 3; ++i) {
+            lines[0].orel[i] = reticleOrel[i];
+            lines[0].dir[i] = reticleU[i];
+        }
+        lines[0].dmin = nofoot::f85::kReticleMinM;
+        lines[0].dmax = nofoot::f85::kReticleMaxM;
+        meta[0].kind = kLineKReticle;
+        for (int i = 0; i < 3; ++i) meta[0].u[i] = reticleU[i];
     }
-    if (!f85cEnsure(ctx)) {
-        ++st.noGpu;
-        return;
+    // mode 0: [p0, p1] metres; mode 1: [dist - p0, dist + p1]; mode 2: [p0 dist, p1 dist]
+    const auto addRay = [&](uint8_t kind, uint8_t id, uint8_t idx, const double tgt[3], int mode, double p0, double p1, double* distOut) {
+        if (n >= kDepthLinesMax) return false;
+        const double d[3] = {tgt[0] - O0[0], tgt[1] - O0[1], tgt[2] - O0[2]};
+        const double dist = nofoot::f85::len3(d);
+        if (!(dist > 1e-4)) return false;
+        Ln& l = lines[n];
+        for (int i = 0; i < 3; ++i) {
+            l.orel[i] = O0[i] - ow[i];
+            l.dir[i] = d[i] / dist;
+        }
+        l.dmin = mode == 0 ? p0 : mode == 1 ? std::max(0.12, dist - p0) : p0 * dist;
+        l.dmax = mode == 0 ? p1 : mode == 1 ? dist + p1 : p1 * dist;
+        F86Meta& m = meta[n];
+        m.kind = kind;
+        m.id = id;
+        m.idx = idx;
+        for (int i = 0; i < 3; ++i) {
+            m.u[i] = l.dir[i];
+            m.target[i] = tgt[i];
+        }
+        if (distOut) *distOut = dist;
+        ++n;
+        return true;
+    };
+    for (uint32_t p = 0; p < kF85bParts; ++p) {
+        const F86dPart& pt = g_f86d[p];
+        if (!pt.nRays || frame - pt.reqFrame > kF86Fresh) continue;
+        for (int i = 0; i < pt.nRays; ++i) addRay(kLineKWeapon, static_cast<uint8_t>(p), static_cast<uint8_t>(i), pt.target[i], 0, f86::kPanelMinM, f86::kPanelMaxM, nullptr);
     }
+    for (int k = 0; k < kF86PromptKeys; ++k) {
+        F86fKey& fk = g_f86f[k];
+        if (!fk.used || frame - fk.reqFrame > kF86Fresh) continue;
+        double dist = 0.0;
+        if (addRay(kLineKPrompt, static_cast<uint8_t>(k), 0, fk.P, 1, f86::kPromptBehindM, f86::kPromptAheadM, &dist)) fk.pDist = dist;
+    }
+    if (g_f86g.ok && frame - g_f86g.reqFrame <= kF86Fresh)
+        for (int s = 0; s < 2; ++s) addRay(kLineKFloor, 0, static_cast<uint8_t>(s), g_f86g.pts[s], 2, 0.5, 1.6, nullptr);
     D3D11_TEXTURE2D_DESC td{};
     tex->GetDesc(&td);
     if (g.srvTex != tex || g.srvW != td.Width || g.srvH != td.Height || !g.srv) {
@@ -20897,54 +21561,63 @@ void f85cDispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double Orel[3]
         g.srvTex = tex;
         g.srvW = td.Width;
         g.srvH = td.Height;
-        if (!g.srv) {
-            ++st.noDepth;
-            return;
-        }
+        if (!g.srv) return fail(&st.noDepth);
     }
     const int si = static_cast<int>(frame % 3u);
     if (g.slot[si].inFlight) {
-        ++st.ringFull;
-        return;
+        if (reticle) ++st.ringFull;
+        g.failFrame = frame;
+        return false;
     }
     D3D11_MAPPED_SUBRESOURCE m{};
-    if (FAILED(ctx->Map(g.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
-        ++st.mapFail;
-        return;
-    }
+    if (FAILED(ctx->Map(g.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) return fail(&st.mapFail);
     struct Cb {
         float rows[16], orel[4], dir[4], prm[4];
         uint32_t dim[4];
     } cb{};
+    static_assert(sizeof(Cb) == 128, "the constants are 128 bytes");
     std::memcpy(cb.rows, w.rows, sizeof(cb.rows));
     for (int i = 0; i < 3; ++i) {
-        cb.orel[i] = static_cast<float>(Orel[i]);
-        cb.dir[i] = static_cast<float>(u[i]);
+        cb.orel[i] = static_cast<float>(lines[0].orel[i]);
+        cb.dir[i] = static_cast<float>(lines[0].dir[i]);
     }
     cb.prm[0] = static_cast<float>(A);
     cb.prm[1] = static_cast<float>(B);
-    cb.prm[2] = static_cast<float>(nofoot::f85::kReticleMinM);
-    cb.prm[3] = static_cast<float>(nofoot::f85::kReticleMaxM);
+    cb.prm[2] = static_cast<float>(lines[0].dmin);
+    cb.prm[3] = static_cast<float>(lines[0].dmax);
     cb.dim[0] = td.Width;
     cb.dim[1] = td.Height;
     cb.dim[2] = ++g.seq;
+    cb.dim[3] = n;
     std::memcpy(m.pData, &cb, sizeof(cb));
     ctx->Unmap(g.cb, 0);
+    if (FAILED(ctx->Map(g.cbLines, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) return fail(&st.mapFail);
+    float ln[64][4] = {};
+    for (uint32_t k = 1; k < n; ++k) {
+        for (int i = 0; i < 3; ++i) {
+            ln[2 * (k - 1)][i] = static_cast<float>(lines[k].orel[i]);
+            ln[2 * (k - 1) + 1][i] = static_cast<float>(lines[k].dir[i]);
+        }
+        ln[2 * (k - 1)][3] = static_cast<float>(lines[k].dmin);
+        ln[2 * (k - 1) + 1][3] = static_cast<float>(lines[k].dmax);
+    }
+    std::memcpy(m.pData, ln, sizeof(ln));
+    ctx->Unmap(g.cbLines, 0);
     ID3D11ComputeShader* savedCs = nullptr;
     ID3D11ShaderResourceView* savedSrv = nullptr;
     ID3D11UnorderedAccessView* savedUav = nullptr;
-    ID3D11Buffer* savedCb = nullptr;
+    ID3D11Buffer* savedCb[2] = {};
     ctx->CSGetShader(&savedCs, nullptr, nullptr);
     ctx->CSGetShaderResources(0, 1, &savedSrv);
     ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
-    ctx->CSGetConstantBuffers(0, 1, &savedCb);
+    ctx->CSGetConstantBuffers(0, 2, savedCb);
     ID3D11ShaderResourceView* nullSrv = nullptr;
     ID3D11UnorderedAccessView* nullUav = nullptr;
     ctx->CSSetShaderResources(0, 1, &nullSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
     ctx->CSSetShader(g.cs, nullptr, 0);
-    ID3D11Buffer* cbp = g.cb;
-    ctx->CSSetConstantBuffers(0, 1, &cbp);
+    ID3D11Buffer* cbp[2] = {g.cb, g.cbLines};
+    ctx->CSSetConstantBuffers(0, 2, cbp);
     ctx->CSSetShaderResources(0, 1, &g.srv);
     ctx->CSSetUnorderedAccessViews(0, 1, &g.uav, nullptr);
     ctx->Dispatch(1, 1, 1);
@@ -20954,20 +21627,377 @@ void f85cDispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double Orel[3]
     ctx->CSSetShader(savedCs, nullptr, 0);
     ctx->CSSetShaderResources(0, 1, &savedSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
-    ctx->CSSetConstantBuffers(0, 1, &savedCb);
+    ctx->CSSetConstantBuffers(0, 2, savedCb);
     if (savedCs) savedCs->Release();
     if (savedSrv) savedSrv->Release();
     if (savedUav) savedUav->Release();
-    if (savedCb) savedCb->Release();
-    g.slot[si].inFlight = true;
-    g.slot[si].frame = frame;
-    g.slot[si].seq = g.seq;
-    g.slot[si].gameD = gameD;
+    for (ID3D11Buffer* b : savedCb)
+        if (b) b->Release();
+    F85cGpu::Slot& sl = g.slot[si];
+    sl.inFlight = true;
+    sl.frame = frame;
+    sl.seq = g.seq;
+    sl.n = n;
+    sl.gameD = gameD;
+    sl.W = W;
+    for (int i = 0; i < 3; ++i) {
+        sl.ow[i] = ow[i];
+        sl.O[i] = O0[i];
+        sl.T[i] = g_f86g.T[i];
+        sl.up[i] = g_f86g.up[i];
+    }
+    sl.A = A;
+    sl.B = B;
+    sl.texW = td.Width;
+    sl.texH = td.Height;
+    sl.floorOk = g_f86g.ok;
+    for (uint32_t k = 0; k < n; ++k) sl.meta[k] = meta[k];
     g.dispatchedFrame = frame;
-    ++st.dispatched;
+    if (reticle) ++st.dispatched;
+    return true;
 }
-// Key 10's P at a composite draw (fixDecide): P' = O + D_f u when the aim line K gives passes through the game's P and a hit depth has come back; false
-// leaves the game's P. Only key 10 comes here.
+// Called by the eye 0 draws of the consumers (key 10's, a weapon UI part's, a prompt key's): the poll, the floor probe's request, and the dispatch unless key 10 will
+// make it (it comes each frame while the reticle is drawn; its line is then the freshest).
+void f86Tick(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD) {
+    f86Poll(ctx, frame);
+    f86FloorRequest(frame);
+    if (g_f85g.dispatchedFrame == frame) return;
+    const bool fromReticle = reticleOrel && reticleU;
+    if (!fromReticle && frame - g_f86LastReticle <= 3u) return;
+    f86Dispatch(ctx, frame, reticleOrel, reticleU, gameD);
+}
+// F86h: per render frame and eye, the marker composite draws the fix decided to patch and those whose patch was bound at the draw's issue: the eye dump's
+// decisions.json carries them per frame (the first-frame eye 1 composites of the F85 flight's dumps 001, 002, 003 and 005 were unpatched).
+constexpr uint32_t kF86hRing = 256;
+struct F86hCell {
+    std::atomic<uint32_t> frame{~0u};
+    std::atomic<uint32_t> decided[2], bound[2];
+};
+F86hCell g_f86h[kF86hRing];
+void f86hCount(uint32_t frame, int eye, bool bound) {
+    if (eye != 0 && eye != 1) return;
+    F86hCell& c = g_f86h[frame % kF86hRing];
+    if (c.frame.load(std::memory_order_relaxed) != frame) {
+        c.frame.store(~0u, std::memory_order_release);   // a reader refuses the cell while it is rewritten
+        for (int e = 0; e < 2; ++e) {
+            c.decided[e].store(0, std::memory_order_relaxed);
+            c.bound[e].store(0, std::memory_order_relaxed);
+        }
+        c.frame.store(frame, std::memory_order_release);
+    }
+    (bound ? c.bound : c.decided)[eye].fetch_add(1, std::memory_order_relaxed);
+}
+// F86f: a prompt key's P with the offset that puts it on the surface behind it. Eye 0's decisions renew the request (and tick the depth lines); both eyes apply the
+// cached offset (P is the same world point in both: the cache holds while it stays within a millimetre). False leaves the game's P.
+bool f86PromptApply(ID3D11DeviceContext* ctx, int e, uint32_t frame, uint32_t key, const double P[3], double Pout[3]) {
+    const int ki = f86PromptIdx(key);
+    if (ki < 0) return false;
+    F86fKey& fk = g_f86f[ki];
+    fk.used = true;
+    fk.key = key;
+    ++fk.drawn;
+    if (e == 0) {
+        fk.reqFrame = frame;
+        for (int i = 0; i < 3; ++i) fk.P[i] = P[i];
+        f86Tick(ctx, frame, nullptr, nullptr, 0.0);
+    }
+    double off[3];
+    if (!fk.cache.offsetFor(P, off)) return false;
+    for (int i = 0; i < 3; ++i) Pout[i] = P[i] + off[i];
+    ++fk.cached;
+    return true;
+}
+// F86f (the label instrument): the prompt keys drawn in an eye-frame and their patched targets (NDC, in the texture), up to four, by the frame.
+struct F86Lab {
+    uint32_t frame = ~0u;
+    int n = 0;
+    uint32_t key[4] = {};
+    double t[4][2] = {};
+};
+F86Lab g_f86lab[2][8];
+void f86LabNote(int e, uint32_t frame, uint32_t key, const double T[2]) {
+    F86Lab& L = g_f86lab[e][frame % 8u];
+    if (L.frame != frame) {
+        L = F86Lab{};
+        L.frame = frame;
+    }
+    for (int i = 0; i < L.n; ++i)
+        if (L.key[i] == key) return;
+    if (L.n >= 4) return;
+    L.key[L.n] = key;
+    L.t[L.n][0] = T[0];
+    L.t[L.n][1] = T[1];
+    ++L.n;
+}
+// F86d: the part's smoother, once a frame (the closed-form step, so the frame time does not matter).
+void f86dSmooth(F86dPart& pt, uint32_t frame) {
+    if (pt.smoothFrame == frame) return;
+    pt.smoothFrame = frame;
+    const uint64_t q = f30Qpc();
+    const double dt = pt.lastQpc && q > pt.lastQpc ? static_cast<double>(q - pt.lastQpc) / static_cast<double>(f66QpcFreq()) : 0.0;
+    pt.lastQpc = q;
+    if (pt.haveDs) pt.sm.step(pt.dsTarget, dt);
+}
+// F86d: a decision's panel in hud space (v = X - o_hud): the mesh's centre and four corners turned and scaled as the vertex shader does, else the anchor alone.
+struct F86Panel {
+    int n = 1;
+    double v[5][3] = {};
+    bool mesh = false;
+    double mex[2] = {};
+    double scale = 0.0;
+};
+F86Panel f86dPanel(const Rec& r, const Find* f, const double x0rel[3]) {
+    F86Panel p;
+    for (int i = 0; i < 3; ++i) p.v[0][i] = x0rel[i];
+    const int mi = r.icon;
+    if (mi < 0 || mi >= kIconMeshes || g_iconMesh[mi].state != 2 || !f->headOk || !(f->scale > 0.0f) || !(f->scale < 1.0e6f)) return p;
+    const IconMesh& m = g_iconMesh[mi];
+    double ext[3];
+    for (int i = 0; i < 3; ++i) ext[i] = m.hi[i] - m.lo[i];
+    int a0 = 0, a1 = 1;   // the two largest extents, in axis order
+    {
+        int least = 0;   // the smallest extent's axis: the other two are the panel's
+        for (int i = 1; i < 3; ++i)
+            if (ext[i] < ext[least]) least = i;
+        a0 = least == 0 ? 1 : 0;
+        a1 = least == 2 ? 1 : 2;
+        if (a0 > a1) std::swap(a0, a1);
+    }
+    if (!(ext[a0] > 1e-6) || !(ext[a1] > 1e-6)) return p;
+    double mid[3];
+    for (int i = 0; i < 3; ++i) mid[i] = 0.5 * (m.lo[i] + m.hi[i]);
+    for (int k = 0; k < 5; ++k) {
+        double q[3] = {mid[0], mid[1], mid[2]};
+        if (k > 0) {
+            q[a0] = (k == 1 || k == 3) ? m.lo[a0] : m.hi[a0];
+            q[a1] = (k == 1 || k == 2) ? m.lo[a1] : m.hi[a1];
+        }
+        double rv[3];
+        drawtag::rotateByPackedQuat(f->q2, f->q3, q, rv);
+        for (int i = 0; i < 3; ++i) p.v[k][i] = x0rel[i] + static_cast<double>(f->scale) * rv[i];
+    }
+    p.n = 5;
+    p.mesh = true;
+    p.mex[0] = ext[a0];
+    p.mex[1] = ext[a1];
+    p.scale = static_cast<double>(f->scale);
+    return p;
+}
+// F86e: the panel's size figures of one decision (eye 0), kept for the second's line: hip and ADS apart. The first of the second also reads the texture t0 bound
+// to the pixel shader (its size).
+void f86eNote(ID3D11DeviceContext* ctx, uint32_t slot, const F86Panel& panel, double atM, const float U[16]) {
+    const bool ads = g_ikAdsW.load(std::memory_order_relaxed) > 0.5f;
+    F86eFig& fg = g_f86e[slot][ads ? 1 : 0];
+    ++fg.n;
+    fg.have = true;
+    fg.meshRead = panel.mesh;
+    fg.atM = atM;
+    fg.mesh[0] = panel.mex[0];
+    fg.mesh[1] = panel.mex[1];
+    fg.scale = panel.scale;
+    fg.quadCm[0] = panel.mex[0] * panel.scale * 100.0;
+    fg.quadCm[1] = panel.mex[1] * panel.scale * 100.0;
+    for (int a = 0; a < 3; ++a) fg.urows[a] = std::sqrt(static_cast<double>(U[4 * a]) * U[4 * a] + static_cast<double>(U[4 * a + 1]) * U[4 * a + 1] + static_cast<double>(U[4 * a + 2]) * U[4 * a + 2]);
+    for (int k = 0; k < 2; ++k) fg.angDeg[k] = atM > 1e-6 ? 2.0 * std::atan(0.5 * (k ? fg.quadCm[1] : fg.quadCm[0]) * 0.01 / atM) * nofoot::f85::kDeg : 0.0;
+    if (!fg.t0) {
+        ID3D11ShaderResourceView* srv0 = nullptr;
+        ctx->PSGetShaderResources(0, 1, &srv0);
+        if (srv0) {
+            ID3D11Resource* res = nullptr;
+            srv0->GetResource(&res);
+            ID3D11Texture2D* t2 = nullptr;
+            if (res && SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t2))) && t2) {
+                D3D11_TEXTURE2D_DESC d{};
+                t2->GetDesc(&d);
+                fg.t0w = d.Width;
+                fg.t0h = d.Height;
+                fg.t0 = true;
+                t2->Release();
+            }
+            if (res) res->Release();
+            srv0->Release();
+        }
+    }
+}
+// F86e: once per ADS press (the weight past 0.9 after it was under 0.1), the record words that differ from the last hip frame's.
+void f86eAdsCheck(uint32_t slot) {
+    const float adsW = g_ikAdsW.load(std::memory_order_relaxed);
+    F86eAds& as = g_f86eAds[slot];
+    const F86eRec& rec = g_f86eRec[slot];
+    if (adsW <= 0.1f) {
+        as.adsOn = false;
+        if (rec.valid) {
+            std::memcpy(as.hip, rec.w, sizeof(as.hip));
+            as.haveHip = true;
+        }
+        return;
+    }
+    if (adsW < 0.9f || as.adsOn) return;
+    as.adsOn = true;
+    if (!as.haveHip || !rec.valid) {
+        Log::get().note("weapon UI size (F86e) part slot %u ADS press: no hip record to compare with (%s)", slot, as.haveHip ? "no record of the part's newest find" : "none seen before the press");
+        return;
+    }
+    char list[900];
+    size_t len = 0;
+    uint32_t diff = 0;
+    list[0] = '\0';
+    for (uint32_t i = 0; i < 84; ++i) {
+        if (as.hip[i] == rec.w[i]) continue;
+        ++diff;
+        float a, b;
+        std::memcpy(&a, &as.hip[i], 4);
+        std::memcpy(&b, &rec.w[i], 4);
+        if (len + 80 < sizeof(list)) {
+            const int k = std::snprintf(list + len, sizeof(list) - len, "%s[%u] %08X -> %08X (%g -> %g)", len ? ", " : "", i, as.hip[i], rec.w[i], static_cast<double>(a), static_cast<double>(b));
+            if (k > 0) len += static_cast<size_t>(k);
+        }
+    }
+    Log::get().note("weapon UI size (F86e) part slot %u ADS press: %u of 84 record words differ from the last hip frame's: %s", slot, diff, diff ? list : "none");
+}
+
+// The decision for a draw whose record carries a weapon UI tag (the CPU identification named it): sets g_fix.pending with the rewritten rows, or counts why not.
+void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Buffer* b0Plain, const float* oHud, const CbShadow* sh, const Find* f) {
+    uint32_t slot = 0;
+    if (!nofoot::f85::isWeaponKey(f->key, &slot)) return;
+    const int e = r.eye;
+    F85bPe& pe = g_f85w.pe[slot][e];
+    ++pe.found;
+    if (!b0Plain) { f85Refuse(pe, kF85WhyNoRanged); return; }
+    if (!sh || !sh->valid) { f85Refuse(pe, kF85WhyNoRows); return; }
+    if (!oHud) { f85Refuse(pe, kF85WhyNoOrigin); return; }
+    // A draw of several instances is rewritten whole (every instance of a draw shares its b0): counted, and refused past 16 (not a weapon readout).
+    if (r.instances > 16) { f85Refuse(pe, kF85WhyMulti); return; }
+    if (r.instances > 1) ++pe.multi;
+    F85bUCell u;
+    if (!f85bReadU(f->sentinel, &u)) { f85Refuse(pe, kF85WhyNoU); return; }
+    ++pe.matched;
+    F85Solve s;
+    int why = -1;
+    if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why); return; }
+    f85LatchPut(e, frame, s);
+    if (!g_f85Latch.usable(frame)) {
+        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + 1u ? kF85WhyNoPair : kF85WhyDisagree);
+        return;
+    }
+    const nofoot::f85::UFrame uf = nofoot::f85::uFrame(u.U, s.oh, s.ow);
+    // K's origin: the pivot of F86d's scale (the eyes' K agree to a millimetre here, the latch is usable)
+    double Ok[3], originCm = 0.0;
+    nofoot::f85::cameraOrigin(s.K, s.oh, s.ow, Ok);
+    const double Orel[3] = {Ok[0] - s.ow[0], Ok[1] - s.ow[1], Ok[2] - s.ow[2]};
+    // F86d: the panel (the mesh's centre and corners, else the anchor) where the getter camera U puts it; its depth at the surface under it scales it about
+    // eye 0's origin so that it stands 4.5 cm in front of that surface: eye 0's image and angular size stay, only the disparity changes.
+    double scale = 1.0, dPanel = 0.0;
+    {
+        const double x0rel[3] = {f->x0[0] - s.oh[0], f->x0[1] - s.oh[1], f->x0[2] - s.oh[2]};
+        const F86Panel panel = f86dPanel(r, f, x0rel);
+        F86dPart& part = g_f86d[slot];
+        const uint32_t item = g_heldItemSerial.load(std::memory_order_acquire);
+        if (part.item != item) {   // another item: its panel is another surface
+            part.item = item;
+            part.haveDs = false;
+            part.sm = nofoot::f86::RangeSmoother{nofoot::f86::kPanelMinM, nofoot::f86::kPanelMaxM};
+        }
+        part.seen = true;
+        ++part.decisions;
+        double pw[5][3];   // the panel's points in world (relative to the rows' origin of this eye's solve, then absolute for the request)
+        for (int k = 0; k < panel.n; ++k) {
+            nofoot::f85::mulVec3(uf.U3, panel.v[k], pw[k]);
+            for (int i = 0; i < 3; ++i) pw[k][i] += uf.u4[i];
+        }
+        const double dc[3] = {pw[0][0] - Orel[0], pw[0][1] - Orel[1], pw[0][2] - Orel[2]};
+        dPanel = nofoot::f85::len3(dc);
+        if (e == 0) {   // the request, and F86e's figures; the dispatch and the answers are the tick's
+            part.reqFrame = frame;
+            part.nRays = panel.n;
+            for (int k = 0; k < panel.n; ++k)
+                for (int i = 0; i < 3; ++i) part.target[k][i] = pw[k][i] + s.ow[i];
+            f86eNote(ctx, slot, panel, dPanel, u.U);
+            f86eAdsCheck(slot);
+            f86Tick(ctx, frame, nullptr, nullptr, 0.0);
+        }
+        f86dSmooth(part, frame);
+        if (part.haveDs && part.sm.have && dPanel > 0.05) {
+            scale = nofoot::f86::panelScale(part.sm.depth(), dPanel);   // applied to the correction below
+        } else if (!part.haveDs) {
+            ++part.noHit;   // none yet: the game's depth stands
+        }
+        part.panel = dPanel;
+        part.panelNew = dPanel * scale;
+        part.scale = scale;
+    }
+    nofoot::f85::Corr c = nofoot::f85::makeCorrection(s.K, uf);
+    if (!c.ok) { f85Refuse(pe, kF85WhyCorr); return; }
+    if (scale != 1.0) nofoot::f86::scaleCorrection(c, scale, s.oh);   // F86d: the angle and the yaw / pitch figures stay those of K -> U
+    // K's origin against U's (the same eye position when the aim camera is the head's: a frame mismatch shows here)
+    for (int a = 0; a < 3; ++a) {
+        const double d = Ok[a] - static_cast<double>(u.U[12 + a]);
+        originCm += d * d;
+    }
+    originCm = std::sqrt(originCm) * 100.0;
+    if (!(originCm < 500.0)) { f85Refuse(pe, kF85WhyFarOrigin); return; }
+    const nofoot::f85::Rows Bp = nofoot::f85::applyCorrection(s.B, c);
+    float r4[4], r5[4], r7[4];
+    nofoot::f85::rowsToFloat(Bp, r4, r5, r7);   // as the private b0 stores them
+    // The proof: the anchor (the record's translation) drawn by the unpatched rows and by the rewritten ones, against where the CPU put it on the weapon
+    // (P_ui = t R_U + p_U, published at the submit, through the eye's scene rows, unjittered).
+    const double x0[3] = {f->x0[0], f->x0[1], f->x0[2]};
+    const double v[3] = {x0[0] - s.oh[0], x0[1] - s.oh[1], x0[2] - s.oh[2]};
+    double pRel[3] = {static_cast<double>(u.pUi[0]) - s.ow[0], static_cast<double>(u.pUi[1]) - s.ow[1], static_cast<double>(u.pUi[2]) - s.ow[2]};
+    if (scale != 1.0)   // F86d: the part's world anchor scaled about the pivot, as the panel is
+        for (int i = 0; i < 3; ++i) pRel[i] = scale * pRel[i] + (1.0 - scale) * Orel[i];
+    double shown0[2], shown1[2], target[2];
+    const nofoot::f85::Rows Bf = nofoot::f85::rowsOfComposite(r4, r5, r7);
+    if (nofoot::f85::shownNdc(s.ap, s.axis, s.B, v, shown0) && nofoot::f85::shownNdc(s.ap, s.axis, Bf, v, shown1) &&
+        nofoot::f85::targetNdc(s.ap, s.axis, s.W, pRel, target)) {
+        const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
+        const double e0x = (shown0[0] - target[0]) * W * 0.5, e0y = (shown0[1] - target[1]) * H * 0.5;
+        const double e1x = (shown1[0] - target[0]) * W * 0.5, e1y = (shown1[1] - target[1]) * H * 0.5;
+        const double a[2] = {shown0[0] + s.jitter[0], shown0[1] + s.jitter[1]}, b[2] = {target[0] + s.jitter[0], target[1] + s.jitter[1]};
+        const double deg = drawtag::ndcAngleDeg(g_cpuWorld[e].rows, a, b);
+        const double px = std::sqrt(e0x * e0x + e0y * e0y);
+        ++pe.n;
+        pe.errPxSum += px;
+        pe.errPxMax = std::max(pe.errPxMax, px);
+        pe.errDegSum += deg > 0.0 ? deg : 0.0;
+        pe.angleSum += c.angleDeg;
+        pe.yawSum += c.yawDeg;
+        pe.pitchSum += c.pitchDeg;
+        pe.resPxMax = std::max(pe.resPxMax, std::sqrt(e1x * e1x + e1y * e1y));
+        pe.originCmSum += originCm;
+        pe.originCmMax = std::max(pe.originCmMax, originCm);
+    }
+    ++pe.decided;
+    if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
+    f86hCount(frame, e, false);
+    g_fix.pending = true;
+    g_fix.weapon = true;
+    g_fix.rows7 = true;
+    g_fix.wSlot = static_cast<int>(slot);
+    g_fix.serial = g_drawSerial;
+    g_fix.ctx = ctx;
+    g_fix.cb0 = b0Plain;
+    g_fix.eye = e;
+    g_fix.frame = frame;
+    g_fix.slot = -1;   // not a key 10 style decision: no read-back record
+    g_fix.rec = 0;
+    g_fix.keySlot = -1;
+    g_fix.newest = s.rowsState == drawtag::kRowsNewest;
+    g_fix.head = g_headDps;
+    g_fix.dx = g_fix.dy = 0.0;
+    std::memcpy(g_fix.rows45, r4, sizeof(r4));
+    std::memcpy(g_fix.rows45 + 4, r5, sizeof(r5));
+    std::memcpy(g_fix.row7, r7, sizeof(r7));
+}
+// The patch was bound at the draw's issue (nativeOnFootMarkerFixBegin).
+void f85bBound(int eye, int slot) {
+    if (eye < 0 || eye > 1 || slot < 0 || slot >= static_cast<int>(kF85bParts)) return;
+    ++g_f85w.pe[slot][eye].corrected;
+}
+
+// ---- F85c ----------------------------------------------------------------------------------------------------------------------------------
+// The GPU pass, its state and the depth lines of the other consumers are above (F86). Key 10's P at a composite draw (fixDecide): P' = O + D_f u when the aim
+// line K gives passes through the game's P and a hit depth has come back; false leaves the game's P. Only key 10 comes here.
 bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow* sh, const float* oHud, const double P[3], double Pout[3]) {
     F85cState& st = g_f85c;
     ++st.draws;
@@ -20986,10 +22016,12 @@ bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow
         return false;
     }
     const double dGame = std::sqrt((P[0] - O[0]) * (P[0] - O[0]) + (P[1] - O[1]) * (P[1] - O[1]) + (P[2] - O[2]) * (P[2] - O[2]));
-    f85cPoll(ctx, frame, dGame);
     if (e == 0) {
+        g_f86LastReticle = frame;   // F86: key 10 owns the frame's dispatch while it comes
         const double Orel[3] = {O[0] - s.ow[0], O[1] - s.ow[1], O[2] - s.ow[2]};
-        f85cDispatch(ctx, frame, Orel, u, dGame);
+        f86Tick(ctx, frame, Orel, u, dGame);
+    } else {
+        f86Poll(ctx, frame);
     }
     // the smoother: once per frame
     if (st.smoothFrame != frame) {
@@ -21132,6 +22164,86 @@ void f85Report(uint64_t nowMs) {
     } else if (nativeOnFootActive() && nowMs - lastIdleC >= 5000) {
         lastIdleC = nowMs;
         Log::get().note("reticle depth (F85c): no key 10 composite draw this second (no tool or weapon out, ADS, or the marker fix is off)");
+    }
+    // F86d: per weapon UI part that was decided this second (one line a second with a weapon out, whatever it did)
+    {
+        static uint64_t lastIdleD = 0;
+        bool anyPart = false;
+        for (uint32_t p = 0; p < kF85bParts; ++p) {
+            F86dPart& pt = g_f86d[p];
+            if (!pt.seen) continue;
+            anyPart = true;
+            Log::get().note("weapon UI depth (F86d) part slot %u: D_s %.3f m (hits %llu, misses %llu, held %llu), panel %.3f -> %.3f m, scale %.3f; refused: no depth view %llu, no hit %llu", p,
+                            pt.sm.have ? pt.sm.depth() : 0.0, ull(pt.hits), ull(pt.misses), ull(pt.held), pt.panel, pt.panelNew, pt.scale, ull(pt.noView), ull(pt.noHit));
+            pt.hits = pt.misses = pt.held = pt.noView = pt.noHit = pt.decisions = 0;
+            pt.seen = false;
+        }
+        if (!anyPart && nativeOnFootActive() && nowMs - lastIdleD >= 5000) {
+            lastIdleD = nowMs;
+            Log::get().note("weapon UI depth (F86d): no weapon UI part decided this second (no tool or weapon out, or the marker fix is off, or no part was tagged)");
+        }
+        // F86e: the panel's size, hip and ADS apart, per part (eye 0, the second's latest)
+        for (uint32_t p = 0; p < kF85bParts; ++p)
+            for (int ads = 0; ads < 2; ++ads) {
+                F86eFig& fg = g_f86e[p][ads];
+                if (!fg.have) continue;
+                Log::get().note("weapon UI size (F86e) part slot %u %s: quad %.2f x %.2f cm in K space at %.3f m (mesh %.4f x %.4f, scale %.5f), |U rows| %.4f %.4f %.4f, t0 %ux%u, angular %.2f x %.2f deg%s",
+                                p, ads ? "ADS" : "hip", fg.quadCm[0], fg.quadCm[1], fg.atM, fg.mesh[0], fg.mesh[1], fg.scale, fg.urows[0], fg.urows[1], fg.urows[2], fg.t0w, fg.t0h, fg.angDeg[0],
+                                fg.angDeg[1], fg.meshRead ? "" : " (the mesh was not read: the anchor alone)");
+                fg.have = false;
+                fg.t0 = false;
+                fg.n = 0;
+            }
+    }
+    // F86f: per prompt key drawn this second, and the label instrument per eye
+    {
+        bool anyPrompt = false;
+        for (int k = 0; k < kF86PromptKeys; ++k) {
+            F86fKey& fk = g_f86f[k];
+            if (!fk.used || !fk.drawn) continue;
+            anyPrompt = true;
+            Log::get().note("prompt snap (F86f) key %u: P %.3f m, surface %.3f m, normal off the ray %.1f deg, moved %.1f cm, cached %llu, no surface %llu, grazing %llu", fk.key, fk.pDist, fk.surfaceD,
+                            fk.offRayDeg, fk.movedCm, ull(fk.cached), ull(fk.noSurface), ull(fk.grazing));
+            fk.drawn = fk.cached = fk.noSurface = fk.grazing = fk.snapped = 0;
+        }
+        static uint64_t lastIdleF = 0;
+        if (!anyPrompt && nativeOnFootActive() && nowMs - lastIdleF >= 5000) {
+            lastIdleF = nowMs;
+            Log::get().note("prompt snap (F86f): no prompt key (1, 45..50) was decided this second (no charge port or waypoint in view, or the marker fix is off)");
+        }
+        // the untagged marker composite draws of an eye while a prompt key was drawn in it (the leader, the label, the corner dot): whose b0 they drew with and
+        // where they stand against the owning key's patched NDC (the nearest key's), in pixels of the eye's target
+        if (anyPrompt)
+            for (int e = 0; e < 2; ++e) {
+                uint64_t draws = 0, ours = 0, places = 0, withPos = 0;
+                double sum = 0.0, mx = 0.0, nearest = 1e30;
+                for (uint32_t i = 0; i < g_win.nUntag; ++i) {
+                    const Untag& u = g_win.untag[i];
+                    if (u.eye != e || !u.labDraws) continue;
+                    draws += u.labDraws;
+                    ours += u.labOurs;
+                    ++places;
+                    if (!u.havePos || !u.labHave || !u.labKeys) continue;
+                    const double X0[3] = {u.pos[0], u.pos[1], u.pos[2]}, oh[3] = {u.labOrigin[0], u.labOrigin[1], u.labOrigin[2]};
+                    double mc[3];
+                    drawtag::markerClip(u.labRows, u.labRows + 4, u.labRows + 8, X0, oh, mc);
+                    if (!(mc[2] > 1e-9)) continue;
+                    const double nx = mc[0] / mc[2], ny = mc[1] / mc[2];
+                    const double W = u.labTw ? static_cast<double>(u.labTw) : kDefaultTargetSize, H = u.labTh ? static_cast<double>(u.labTh) : kDefaultTargetSize;
+                    double best = 1e30;
+                    for (int q = 0; q < u.labKeys; ++q) {
+                        const double dx = (nx - u.labT[q][0]) * W * 0.5, dy = (ny - u.labT[q][1]) * H * 0.5;
+                        best = std::min(best, std::sqrt(dx * dx + dy * dy));
+                    }
+                    ++withPos;
+                    sum += best;
+                    mx = std::max(mx, best);
+                    nearest = std::min(nearest, best);
+                }
+                Log::get().note("prompt labels (F86f) eye %d: untagged B10B draws while a prompt key was drawn: %llu draws at %llu places (b0 ours %llu, the game's %llu); with a record position and rows %llu: "
+                                "NDC offset from the nearest drawn key's patched NDC mean %.1f max %.1f nearest %.1f px",
+                                e, ull(draws), ull(places), ull(ours), ull(draws - ours), ull(withPos), withPos ? sum / static_cast<double>(withPos) : 0.0, mx, withPos ? nearest : 0.0);
+            }
     }
     {
         const F85cState keep = st;   // the smoother and the held target stay; the second's sums go
@@ -21370,6 +22482,16 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             fP[2] = Pn[2];
         }
     }
+    // F86f: a charge-port prompt key's P (keys 1 and 45..50) snapped onto the surface it lies behind; the game's P stays without a facing surface in reach.
+    if (haveP && nofoot::f86::isPromptKey(keyNow)) {
+        const double P0[3] = {fP[0], fP[1], fP[2]};
+        double Pn[3];
+        if (f86PromptApply(ctx, e, frame, keyNow, P0, Pn)) {
+            fP[0] = Pn[0];
+            fP[1] = Pn[1];
+            fP[2] = Pn[2];
+        }
+    }
     int why = -1;
     // F50: the eye's baseline, reset when the frustum it was taken under changes (b0 row 5 or row 7 scale, the target's size) or the eye's
     // matched draw moves to another place (the eye assignment). F52: one per key per eye; also reset when the eye's reference changes.
@@ -21562,6 +22684,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
     if (v.newest) ++s.pNewest;
     if (!v.patch) return;
+    if (nofoot::f86::isPromptKey(keyNow)) f86LabNote(e, frame, keyNow, T);   // F86f: this key's patched target, for the label instrument
     dx = v.dx;
     dy = v.dy;
     float r4[4], r5[4];
@@ -21608,6 +22731,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
     g_fix.ref = ref;
+    f86hCount(frame, e, false);
     g_fix.pending = true;
     g_fix.weapon = false;   // F85b
     g_fix.rows7 = false;
@@ -21693,10 +22817,10 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
     const Find* cpuFind = nullptr;
     if (fixKey && r.watched && direct && eights == 1 && pick >= 0 && (r.eye == 0 || r.eye == 1) && offs[pick] % drawtag::kStreamStride == 0) {
         const uint32_t entry = offs[pick] / drawtag::kStreamStride + startInstance;
-        streamLearn(vbs[pick], r.eye, entry);
+        streamLearn(vbs[pick], r.eye, entry, frame);
         uint32_t x = 0;
         bool outside = false;
-        if (streamEntryX(vbs[pick], entry, frame, &x, &outside)) {
+        if (streamEntryX(vbs[pick], entry, frame, &x, &outside, r.eye)) {
             r.cpuHave = true;
             r.cpuRec = t33.first + x;
             cpuFind = findAt(t33.res, r.cpuRec);
@@ -22186,6 +23310,26 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
             if (u) {
                 ++u->n;
                 u->instances = r.instances;
+                const F86Lab& lab = g_f86lab[r.eye][frame % 8u];
+                if (lab.frame == frame && lab.n > 0) {   // F86f: a prompt key was drawn in this eye-frame: this untagged draw is a candidate label
+                    ++u->labDraws;
+                    if (r.fixApplied) ++u->labOurs;
+                    if (r.cpuRows && (r.flags & kRecShadowO)) {
+                        std::memcpy(u->labRows, r.cpu, 4 * sizeof(float));
+                        std::memcpy(u->labRows + 4, r.cpu + 4, 4 * sizeof(float));
+                        std::memcpy(u->labRows + 8, r.cpu + 12, 4 * sizeof(float));
+                        for (int i = 0; i < 3; ++i) u->labOrigin[i] = r.origin[i];
+                        u->labTw = r.tw;
+                        u->labTh = r.th;
+                        u->labKeys = lab.n;
+                        for (int i = 0; i < lab.n; ++i) {
+                            u->labKey[i] = lab.key[i];
+                            u->labT[i][0] = lab.t[i][0];
+                            u->labT[i][1] = lab.t[i][1];
+                        }
+                        u->labHave = true;
+                    }
+                }
             } else {
                 ++g_win.untagDropped;
             }
@@ -22555,6 +23699,16 @@ void report(uint64_t nowMs) {
                             ull(w.streamFaults), ull(w.streamOtherMaps), ull(w.streamUpdates), ull(w.cpuFind), ull(w.cpuHeldRec), ull(w.cpuOther),
                             ull(w.cpuSkipped), ull(w.tally[0].skipped), ull(w.tally[1].skipped), ull(w.cpuNoShadow), ull(w.cpuOutside),
                             ull(w.cpuAgree), ull(w.cpuDiffer));
+        // F86c, per eye: the windows at the newest Unmap (the clusters of last frame's entries, their lowest and highest entry, the windows copied) and what the
+        // second's draws found: named from a window, outside every window, and how far from the nearest window the nearest outside draw was.
+        if (fixOn)
+            for (int e = 0; e < 2; ++e) {
+                StreamSecond& ss = g_streamSec[e];
+                const nofoot::f86::WinPlan& pl = f44::g_stream.plan[e];
+                Log::get().note("marker fix (F86c): eye %d: last-frame entries %u clusters (min %u max %u), windows %u; named %llu, outside %llu (nearest window %u entries away)", e,
+                                pl.clusters, pl.entryMin, pl.entryMax, pl.windows, ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest);
+                ss = StreamSecond{};
+            }
         // F50, per key and eye (F52: each key has its own baseline): the baseline c and its spread, |m - c| against the head's speed, the
         // patched draws, the residual after the patch by the head's speed, and the honesty check (c by head pitch and roll on slow-head frames,
         // since the last reset). A key-eye with no read and no decision this second is not printed.
@@ -22882,6 +24036,16 @@ uint32_t nativeOnFootRenderFrame() {
     return g_f44Frame.load(std::memory_order_relaxed);
 }
 
+bool nativeOnFootMarkerFrameCounts(uint32_t renderFrame, uint32_t decided[2], uint32_t bound[2]) {
+    const f44::F86hCell& c = f44::g_f86h[renderFrame % f44::kF86hRing];
+    if (c.frame.load(std::memory_order_acquire) != renderFrame) return false;
+    for (int e = 0; e < 2; ++e) {
+        decided[e] = c.decided[e].load(std::memory_order_relaxed);
+        bound[e] = c.bound[e].load(std::memory_order_relaxed);
+    }
+    return c.frame.load(std::memory_order_acquire) == renderFrame;
+}
+
 bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out) {
     if (!out) return false;
     *out = NativeOnFootPoseStamp{};
@@ -23066,6 +24230,7 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     ctx->VSSetConstantBuffers(0, 1, &g_privCb);
     g_fix.saved = cb0;   // the reference vsB0Plain took, held until End
     g_fix.bound = true;
+    f86hCount(g_fix.frame, g_fix.eye, true);   // F86h
     if (g_fix.weapon) {   // F85b: the weapon UI's draw: counted per part and eye, none of the marker key's statistics
         f85bBound(g_fix.eye, g_fix.wSlot);
         return true;

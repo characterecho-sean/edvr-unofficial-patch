@@ -7139,6 +7139,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     // F85: a, the pin-step tracker; b, the weapon UI pinned to the weapon; c, the reticle at the aim ray's hit depth.
     f85test::run(check);
+    // F86: a, the pose carry; c, the stream windows; d, the weapon UI at the weapon's surface; f, the prompt snap; g, the floor probe.
+    f85test::run86(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -1319,6 +1319,7 @@ uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before t
 enum class EyeUiMode : uint8_t { None, Legacy };
 struct EyeDecisionFrame {
     uint32_t frame = 0, diagnosticFrame = 0;
+    uint32_t renderFrame = 0;   // F86h: the native on-foot render frame of the capture, which the marker composite counts are kept by
     uint32_t inputW = 0, inputH = 0, outputW = 0, outputH = 0;
     uint32_t decisionCrop[4] = {}, outputCrop[4] = {};
     bool diagnostic = false, preUi = false, dlssSuccess = false;
@@ -2357,12 +2358,31 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         }
         return;
     }
-    fprintf(f, "{\n  \"schema\": 1,\n  \"engine_kind_shift\": 12,\n  \"engine_kind_mask\": 7,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n  \"frames\": [\n",
-            g_eyeRunStamp, kEyeRun);
+    // F86h: the native on-foot marker composites of each frame, per eye: the draws the fix decided to patch and those whose patch was bound at the issue. In the
+    // F85 flight eye 1's composites were unpatched in frame 0 of four dumps (the first frame with both eyes bound is where a reader starts).
+    uint32_t markerPatched[kEyeRun][2] = {}, markerBound[kEyeRun][2] = {};
+    bool markerHave[kEyeRun] = {};
+    int firstBoth = -1, haveCount = 0;
+    for (int k = 0; k < g_eyeRunTaken && k < kEyeRun; ++k) {
+        markerHave[k] = nativeOnFootMarkerFrameCounts(g_eyeDecisions[k].renderFrame, markerPatched[k], markerBound[k]);
+        if (markerHave[k]) ++haveCount;
+        if (markerHave[k] && firstBoth < 0 && markerBound[k][0] > 0 && markerBound[k][1] > 0) firstBoth = k;
+    }
+    fprintf(f, "{\n  \"schema\": 1,\n  \"engine_kind_shift\": 12,\n  \"engine_kind_mask\": 7,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n", g_eyeRunStamp, kEyeRun);
+    if (firstBoth >= 0) fprintf(f, "  \"first_frame_both_eyes_bound\": %d,\n", firstBoth);
+    else fputs("  \"first_frame_both_eyes_bound\": null,\n", f);
+    fputs("  \"frames\": [\n", f);
+    Log::get().note("eye capture (F86h): marker composites per frame, patched / bound (eye 0 | eye 1): %d of %d frames have counts; first frame with both eyes bound: %d%s.", haveCount,
+                    g_eyeRunTaken, firstBoth, haveCount ? "" : " (none: the marker fix saw no draw in them, or it is off)");
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         const EyeDecisionFrame& d = g_eyeDecisions[k];
-        fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, ",
-                k, d.frame, d.diagnosticFrame);
+        fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, \"render_frame\": %u, ",
+                k, d.frame, d.diagnosticFrame, d.renderFrame);
+        if (k < kEyeRun && markerHave[k])
+            fprintf(f, "\"marker_patched\": [%u, %u], \"marker_bound\": [%u, %u], \"marker_both_eyes_bound\": %s, ", markerPatched[k][0], markerPatched[k][1], markerBound[k][0],
+                    markerBound[k][1], markerBound[k][0] > 0 && markerBound[k][1] > 0 ? "true" : "false");
+        else
+            fputs("\"marker_patched\": null, \"marker_bound\": null, \"marker_both_eyes_bound\": null, ", f);
         fprintf(f, "\"input_size\": [%u, %u], \"decision_crop\": [%u, %u, %u, %u], ",
                 d.inputW, d.inputH, d.decisionCrop[0], d.decisionCrop[1],
                 d.decisionCrop[2], d.decisionCrop[3]);
@@ -4182,6 +4202,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                 decision = {};
                 decision.frame = g_rowsFrame;
+                decision.renderFrame = nativeOnFootRenderFrame();   // F86h
                 g_eyeRunFrames[g_eyeRunTaken] = g_rowsFrame;
                 decision.inputW = w; decision.inputH = h;
                 decision.outputW = outW ? outW : w; decision.outputH = outH ? outH : h;
