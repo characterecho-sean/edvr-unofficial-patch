@@ -6,10 +6,24 @@
 #include <fstream>
 #include <iterator>
 
+// Capture directory names must be unique per arm, whatever the clock granularity: 200 fresh instances armed back to back
+// (#105: a per-instance serial let two instances share <timestamp>_<pid>_1 and mix their frame files).
+inline int flatWeaponFootprintDirectoryTests() {
+    edvr::flatDrawCaptureNoDirectoryWrites = true;
+    std::set<std::wstring> seen; int bad = 0;
+    for (unsigned i = 0; i < 200; ++i) {
+        edvr::FlatWeaponFootprint capture; capture.arm(1000 + i);
+        if (capture.directory().empty() || !seen.insert(capture.directory()).second) ++bad;
+    }
+    edvr::flatDrawCaptureNoDirectoryWrites = false;
+    if (bad) std::printf("FAIL: flat weapon footprint: %d of 200 back-to-back arms got an empty or repeated directory\n", bad);
+    return bad ? 1 : 0;
+}
+
 inline int flatWeaponFootprintGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     namespace fs = std::filesystem;
     using Microsoft::WRL::ComPtr;
-    int failures = 0;
+    int failures = flatWeaponFootprintDirectoryTests();
     auto check = [&](bool good, const char* why) {
         if (!good) { std::printf("FAIL: flat weapon GPU %s\n", why); ++failures; }
     };
