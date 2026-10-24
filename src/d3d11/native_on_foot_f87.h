@@ -616,25 +616,28 @@ inline bool hasDesignOffset(float x, float y) noexcept {
 constexpr uint32_t kSetMarkerScaleOffset = 0x28, kSetMarkerOffsetPtrOffset = 0x30;
 struct RefCorr {
     bool have = false;
-    uint32_t frame = 0;
+    uint32_t frame = 0, key = 0;
     double at[2] = {}, d[2] = {};   // the reference's own NDC (through the unpatched rows) and its correction (P through the scene rows less that)
 };
 constexpr int kRefPerEye = 16;
+// F94b: no longer what moves the label (its own anchor does, native_on_foot_f94b.h); kept to measure what this rule would have done.
 struct RefSet {
     RefCorr r[kRefPerEye];
     int next = 0;
-    void add(uint32_t frame, const double at[2], const double d[2]) noexcept {
+    void add(uint32_t frame, const double at[2], const double d[2], uint32_t key = 0) noexcept {
         RefCorr& c = r[next];
         next = (next + 1) % kRefPerEye;
         c.have = true;
         c.frame = frame;
+        c.key = key;
         c.at[0] = at[0];
         c.at[1] = at[1];
         c.d[0] = d[0];
         c.d[1] = d[1];
     }
-    // The correction of the reference nearest to `at` (NDC) at most maxAge frames old, the newest frame first; false when there is none.
-    bool nearest(uint32_t frame, const double at[2], uint32_t maxAge, double d[2], double* dist, uint32_t* age) const noexcept {
+    // The correction of the reference nearest to `at` (NDC) at most maxAge frames old, the newest frame first; false when there is none. F94b: refKey, when
+    // given, receives the reference's key.
+    bool nearest(uint32_t frame, const double at[2], uint32_t maxAge, double d[2], double* dist, uint32_t* age, uint32_t* refKey = nullptr) const noexcept {
         int best = -1;
         double bestD = 0.0;
         uint32_t bestAge = 0;
@@ -654,6 +657,7 @@ struct RefSet {
         d[1] = r[best].d[1];
         if (dist) *dist = bestD;
         if (age) *age = bestAge;
+        if (refKey) *refKey = r[best].key;
         return true;
     }
 };

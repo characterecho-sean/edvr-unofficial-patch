@@ -650,6 +650,27 @@ inline size_t formatFit(char* buf, size_t cap, const FitResult& R) noexcept {
             R.headRms[0], R.headRms[1], R.headN, R.aimN == R.frames ? "on" : R.aimN == 0 ? "off" : "mixed", R.aimN, R.frames,
             R.steadyN == R.frames ? "on" : R.steadyN == 0 ? "off" : "mixed", R.steadyN, R.frames, R.holdN == R.frames ? "on" : R.holdN == 0 ? "off" : "mixed", R.holdN,
             R.frames);
+    // F94b: the verdict right after the window's head, before the figures: the whole line runs past the log's 1,200 characters since F93b's eye chain was added, and
+    // the f358d3ce build's lines lost the verdict at their end to the cut.
+    appendf(buf, cap, at, "; verdict: ");
+    if (!R.enough) {
+        appendf(buf, cap, at, "none (too few r frames)");
+    } else {
+        bool any = false;
+        if (R.h1) {
+            appendf(buf, cap, at, "H1 (the cancel lands %d frame%s late)", R.bestD, R.bestD == 1 ? "" : "s");
+            any = true;
+        }
+        if (R.lock) {
+            appendf(buf, cap, at, "%sLOCK (the sight lock moves the eye back and forth)", any ? " + " : "");
+            any = true;
+        }
+        if (R.h3) {
+            appendf(buf, cap, at, "%sH3 (the view follows the head: the readout pin's one-frame lag is the suspect)", any ? " + " : "");
+            any = true;
+        }
+        if (!any) appendf(buf, cap, at, "none of H1, LOCK or H3");
+    }
     appendf(buf, cap, at, "; r: %u frames, mean yaw %+.3f pitch %+.3f deg, step rms %.4f deg (yaw %.4f pitch %.4f about the mean, %u steps)", R.rN, R.rMean[0], R.rMean[1],
             R.rStepRms2, R.rStepRms[0], R.rStepRms[1], R.rStepN);
     if (R.enough)
@@ -674,25 +695,6 @@ inline size_t formatFit(char* buf, size_t cap, const FitResult& R) noexcept {
             R.overshoot ? "YES" : "no", R.alongAc[0], R.alongAc[1]);
     appendf(buf, cap, at, "; eye chain (F93b): rms a frame sight shift %.3f mm, position lock %.3f mm, head translation %.3f mm (%u frames)", R.shiftRms, R.lockRms, R.headTrRms,
             R.chainN);
-    appendf(buf, cap, at, "; verdict: ");
-    if (!R.enough) {
-        appendf(buf, cap, at, "none (too few r frames)");
-        return at;
-    }
-    bool any = false;
-    if (R.h1) {
-        appendf(buf, cap, at, "H1 (the cancel lands %d frame%s late)", R.bestD, R.bestD == 1 ? "" : "s");
-        any = true;
-    }
-    if (R.lock) {
-        appendf(buf, cap, at, "%sLOCK (the sight lock moves the eye back and forth)", any ? " + " : "");
-        any = true;
-    }
-    if (R.h3) {
-        appendf(buf, cap, at, "%sH3 (the view follows the head: the readout pin's one-frame lag is the suspect)", any ? " + " : "");
-        any = true;
-    }
-    if (!any) appendf(buf, cap, at, "none of H1, LOCK or H3");
     return at;
 }
 

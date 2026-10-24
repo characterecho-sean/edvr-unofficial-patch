@@ -10485,9 +10485,18 @@ def _hj_f93_swap(rows, ctx):
 
 def _hj_f91_fit(rows, ctx):
     """The ADS vibration instrument's 0.5 s windows: STILL against MOVING and the verdicts H1 (d frames late), LOCK, H3."""
-    w = rows.get("fit", [])
-    if not w:
+    allw = rows.get("fit", [])
+    if not allw:
         return None
+    for x in allw:
+        x["verdict"] = x.get("verdict") or x.get("vend") or ""
+    # F94b: the F93 builds' lines ran past the log's line limit and lost the verdict, which they printed last; those windows are counted, not judged
+    w = [x for x in allw if x["verdict"]]
+    cut = len(allw) - len(w)
+    if not w:
+        still = sum(1 for x in allw if x["head"] == "STILL")
+        return ("PARTIAL", "%d windows (STILL %d, MOVING %d), the verdict of every one cut off by the log's 1,200-character line limit (the F93 builds printed it "
+                           "last): nothing to judge" % (len(allw), still, len(allw) - still))
     still = sum(1 for x in w if x["head"] == "STILL")
     few = [x for x in w if x["verdict"].startswith("none (too few")]
     h1 = collections.Counter(m.group(1) for x in w for m in [re.search(r"H1 \(the cancel lands (\d+) frame", x["verdict"])] if m)
@@ -10513,9 +10522,11 @@ def _hj_f91_fit(rows, ctx):
                                                                             sum(1 for x in ws if "LOCK (" in x["verdict"]), sum(1 for x in ws if "H3 (" in x["verdict"]),
                                                                             sum(1 for x in ws if x["verdict"].startswith("none of H1"))))
         text += "; %s %s" % (label, ", ".join(parts))
+    if cut:
+        text += "; %d more window(s) whose verdict the log's line limit cut off" % cut
     if len(few) == len(w):
         return ("NEVER APPLIED", text + " (no window had enough r frames to fit)")
-    return ("PARTIAL" if len(few) * 2 > len(w) else "OK", text)
+    return ("PARTIAL" if len(few) * 2 > len(w) or cut * 2 > len(allw) else "OK", text)
 
 
 def _hj_f93_chain(rows, ctx):
@@ -10767,6 +10778,37 @@ def _hj_design(rows, ctx):
     return ("PARTIAL" if noref * 2 > draws else "OK", text)
 
 
+def _hj_f94b_design(rows, ctx):
+    """F94b: a marker with a designed offset (the interaction label) moved by its own anchor, and F93c's rule (the nearest plain marker's correction, this frame or the
+    one before) measured beside it: how far its target was from the applied one, how much it stepped a frame against the anchor, how often its reference switched."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    draws, moved, gate, behind, steps, sw, rthis, rbefore, rnone, fast = (_hsum(sec, k) for k in (
+        "draws", "moved", "gate", "behind", "steps", "sw", "rthis", "rbefore", "rnone", "fast"))
+
+    def wmean(key, weight):
+        n = sum(int(r[weight]) for r in sec)
+        return sum(float(r[key]) * int(r[weight]) for r in sec) / n if n else 0.0
+
+    def mx(key):
+        return max(float(r[key]) for r in sec)
+    offered = sum(1 for r in sec if r.get("offkeys") and r["offkeys"] != "none")
+    text = ("designed-offset draws %d: moved by their own anchor %d, gate refused %d, anchor behind the marker camera %d (%d eye-seconds); the label against its anchor "
+            "a frame %.2f mean %.2f max px, its anchor in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px (%d frames); F93c's rule "
+            "(measured): its target %.1f mean %.1f max px from the applied (%.1f mean over %d draws at 30 deg/s or more), its step a frame %.2f mean %.2f max px, "
+            "%d switches of reference, reference the frame before %d, this frame %d, none %d") % (
+        draws, moved, gate, behind, len(sec), wmean("step", "steps"), mx("stepmax"), wmean("pstep", "steps"), mx("pstepmax"), wmean("eyed", "eyen"), mx("eyedmax"),
+        _hsum(sec, "eyen"), wmean("err", "draws"), mx("errmax"), wmean("errfast", "fast"), fast, wmean("step93", "steps"), mx("step93max"), sw, rbefore, rthis, rnone)
+    if draws == 0:
+        if offered >= 10:
+            return ("NEVER APPLIED", text + "; the game set a visible marker with a designed offset in %d eye-seconds and no draw of one reached the move" % offered)
+        return ("IDLE", text + "; no marker with a designed offset was drawn")
+    if moved == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if (gate + behind) * 2 > draws else "OK", text)
+
+
 def _hj_label(rows, ctx):
     sec, refuse = rows.get("sec", []), rows.get("refuse", [])
     if not sec and not refuse:
@@ -10909,9 +10951,11 @@ HEALTH_RULES = (
         ("_", r"ads transition \(F89\) press fit \(F91\) window"),   # the press fit rule's (below)
     ), _hj_f89_ads),
     _hrule("ADS press fit (F91)", ("F89",), ("press fit (F91)",), (
+        # the verdict: right after the window's head (F94b on), at the line's end (F91 to F92), or cut off by the log's 1,200-character line limit (F93's builds)
         ("fit", r"ads transition \(F89\) press fit \(F91\) window (?P<win>\d+): t \S+ to \S+ s, \d+ frames, head (?P<head>STILL|MOVING) "
                 r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) \(\d+ of \d+ frames\)"
-                r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?.*; verdict: (?P<verdict>.+)$"),
+                r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
+                r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
@@ -10965,6 +11009,16 @@ HEALTH_RULES = (
         ("sec", r"marker design offset \(F93c\) eye (?P<eye>\d) 1 s: designed-offset draws (?P<draws>\d+) \(last key -?\d+, offset \S+ \S+\): moved with the nearest dot's "
                 r"correction (?P<moved>\d+) .*? left as the game placed them \(no reference\) (?P<noref>\d+); references (?P<refs>\d+)"),
     ), _hj_design),
+    _hrule("marker design offset (F94b)", ("F94b",), ("marker design offset (F94b)",), (
+        ("sec", r"marker design offset \(F94b\) eye (?P<eye>\d) 1 s: designed-offset draws (?P<draws>\d+) \(keys [^)]*\): moved by their own anchor (?P<moved>\d+), gate "
+                r"refused (?P<gate>\d+), anchor behind the marker camera (?P<behind>\d+) \(left as the game placed them\); the label from its anchor \S+ \S+ px mean, its "
+                r"step a frame (?P<step>[\d.]+) mean (?P<stepmax>[\d.]+) max px over (?P<steps>\d+) steps, the anchor's in the world (?P<pstep>[\d.]+) mean "
+                r"(?P<pstepmax>[\d.]+) max mm, the eyes' difference (?P<eyed>[\d.]+) mean (?P<eyedmax>[\d.]+) max px over (?P<eyen>\d+) frames; F93c's rule "
+                r"\(measured, not applied\): reference this frame "
+                r"(?P<rthis>\d+), the frame before (?P<rbefore>\d+), none (?P<rnone>\d+), switches (?P<sw>\d+); its target from the applied (?P<err>[\d.]+) mean "
+                r"(?P<errmax>[\d.]+) max px \((?P<errfast>[\d.]+) mean over (?P<fast>\d+) draws at \d+ deg/s or more\), its step a frame (?P<step93>[\d.]+) mean "
+                r"(?P<step93max>[\d.]+) max px(?:; references \d+; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?"),
+    ), _hj_f94b_design),
     _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
         ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
         ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
@@ -11274,7 +11328,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
-                         "prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b) saying OK, PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
                          "Exit 3 when any family is NEVER APPLIED, 4 when a rule no longer matches its lines, 2 for a wrong build")
@@ -11883,6 +11937,7 @@ def self_test_health():
         "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)", "weapon readout part (F91)",
         "ADS press fit (F91)", "ADS item gate (F91)")
     DO = "marker design offset (F93c)"
+    D94 = "marker design offset (F94b)"
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
@@ -11911,18 +11966,24 @@ def self_test_health():
             return R("rifle ADS readout placement (F92) 1 s: item %s", "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
                      moved, 0.0, amax, refused, why, 5.0, cm, ds, surf)
 
-        def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None, steady=None, hold=None):
+        def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None, steady=None, hold=None, form="head"):
             """aim (F92b), steady and hold (F93b): the window's head aim, steady eye and eye hold, on, off or mixed; None renders the field as an earlier build wrote none
-            (a neutral value the rule skips)."""
+            (a neutral value the rule skips). form: "head", the verdict right after the window's head (formatFit since F94b); "end", the verdict last (the F91 to F93
+            builds' order); "cut", that order cut by the log's line limit before the verdict, as the F93 builds' lines reached the log (" ...[truncated]")."""
             count = {"on": 45, "off": 0, "mixed": 20}
             text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44, aim,
                        count.get(aim), 45 if aim else None, steady, count.get(steady), 45 if steady else None, hold, count.get(hold), 45 if hold else None)
-            text += R91("; sight: %u frames", 45, 0.02, 0.01, 0.2, 0, 0, 0.05, 0.01, "no")
-            text += R91("; verdict: ")
-            text += {"h1": R91("H1 (the cancel lands %d frame", d, "" if d == 1 else "s"), "lock": R91("%sLOCK (the sight lock", ""), "h3": R91("%sH3 (the view follows", ""),
-                     "none": R91("none of H1, LOCK or H3"), "few": R91("none (too few r frames)"),
-                     "h1lock": R91("H1 (the cancel lands %d frame", d, "s") + R91("%sLOCK (the sight lock", " + ")}[verdict]
-            return R("ads transition (F89) press fit (F91) %s", text)
+            v = R91("; verdict: ")
+            v += {"h1": R91("H1 (the cancel lands %d frame", d, "" if d == 1 else "s"), "lock": R91("%sLOCK (the sight lock", ""), "h3": R91("%sH3 (the view follows", ""),
+                  "none": R91("none of H1, LOCK or H3"), "few": R91("none (too few r frames)"),
+                  "h1lock": R91("H1 (the cancel lands %d frame", d, "s") + R91("%sLOCK (the sight lock", " + ")}[verdict]
+            figures = R91("; r: %u frames", 45, -0.038, 0.004, 0.0147, 0.0084, 0.0120, 44) + R91("; sight: %u frames", 45, 0.02, 0.01, 0.2, 0, 0, 0.05, 0.01, "no") + \
+                R91("; eye chain (F93b): rms a frame", 0.004, 0.0, 0.057, 46)
+            if form == "head":
+                return R("ads transition (F89) press fit (F91) %s", text + v + figures)
+            if form == "end":
+                return R("ads transition (F89) press fit (F91) %s", text + figures + v)
+            return R("ads transition (F89) press fit (F91) %s", text + figures) + " ...[truncated]"
 
         def gate(kind="refused", item="$humanoid_companalyser_name;", why="tool"):
             if kind == "refused":
@@ -11992,9 +12053,22 @@ def self_test_health():
             return R("prompt anchor (F87p) 1 s: SetMarker", 1079, 83, i, ikey, 0.1, 0.2, 1.4, 0.0, 166, "45,46", 0, 83, 83, 580, 0x1AA8000, ifocus, ikey, iint, "46,47", iunk,
                      0x1A00000, src, 2.0, 1.25, 0.04, "held", 0.01, "body")
 
+        # F93c's line, which F94b retired: its format as the f358d3ce build printed it, for that build's logs
+        f93c_fmt = ("marker design offset (F93c) eye %d 1 s: designed-offset draws %llu (last key %d, offset %.4f %.4f): moved with the nearest dot's correction %llu "
+                    "(reference this frame %llu, the frame before %llu; %.0f px away mean), left as the game placed them (no reference) %llu; references %llu; "
+                    "correction %+.1f %+.1f px mean; offset the aim at P dropped %+.1f %+.1f px mean; as drawn from P %+.1f %+.1f px mean; "
+                    "keys with an offset this second: %s; offset argument not read %llu")
+
         def design(draws=88, moved=86, noref=2, refs=300, eye=0):
             # F93c: the label (a marker with a designed offset) moved with its nearest dot's correction
-            return R("marker design offset (F93c) eye %d 1 s: designed-offset draws", eye, draws, 0, 0.031, -0.022, moved, moved, 0, 12.0, noref, refs)
+            return health_render(f93c_fmt, (eye, draws, 0, 0.031, -0.022, moved, moved, 0, 12.0, noref, refs))
+
+        def design94(draws=84, moved=84, gate=0, behind=0, step=0.04, stepmax=0.3, steps=83, rthis=0, rbefore=84, rnone=0, sw=6, err=4.2, errmax=36.1, errfast=11.5,
+                     fast=20, step93=3.1, step93max=36.2, eye=0, offkeys="1 (-0.4791 -0.3320)", pstep=0.01, pstepmax=0.05, eyed=0.3, eyedmax=0.9, eyen=84):
+            # F94b: the label moved by its own anchor, F93c's rule measured beside it
+            return R("marker design offset (F94b) eye %d 1 s: designed-offset draws", eye, draws, "1" if draws else "none", moved, gate, behind, 173.4, -120.2, step,
+                     stepmax, steps, pstep, pstepmax, eyed, eyedmax, eyen, rthis, rbefore, rnone, sw, err, errmax, errfast, fast, 30.0, step93, step93max, 249, 2016, 2017,
+                     offkeys, 0)
 
         def anchor_hooked():
             return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 24)
@@ -12081,6 +12155,17 @@ def self_test_health():
         check("F91 fit: mostly too few r frames", [fit(0, "STILL", "few"), fit(1, "MOVING", "few"), fit(2, "MOVING", "lock")], 0, [("PARTIAL", F91F)])
         check("F91 fit: the fit line is not an unparsed trace line", [ads_start("press"), ads_frame(), fit(0), ads_start("release"), ads_frame("release", "releasing", 0.5)], 0,
               [("OK", F89A), ("OK", F91F)], lacks=["UNPARSED"])
+        # F94b: the verdict after the window's head (this build), last (the F91 to F93 builds), or cut off with the line (the F93 builds' lines past 1,200 characters)
+        check("F94b fit: the verdict after the head, the figures after it", [fit(0, "MOVING", "h1", 2, form="head"), fit(1, "STILL", "lock", aim="off", steady="on",
+                                                                                                                  hold="off", form="head")], 0, [("OK", F91F)],
+              has=["2 windows (STILL 1, MOVING 1): H1 1 [d2 1]", "LOCK 1 (STILL 1 MOVING 0)", "steady eye on 1 (STILL 1; H1 0, LOCK 1"], lacks=["UNPARSED", "cut off"])
+        check("F94b fit: an older build's verdict at the end", [fit(0, "MOVING", "h3", form="end"), fit(1, "STILL", "none", aim="on", steady="on", hold="off", form="end")],
+              0, [("OK", F91F)], has=["H3 1 (STILL 0 MOVING 1)", "none 1"], lacks=["UNPARSED"])
+        check("F94b fit: every verdict cut off by the line limit (the f358d3ce flight)", [fit(0, "STILL", aim="off", steady="on", hold="off", form="cut"),
+                                                                                          fit(1, "MOVING", aim="off", steady="on", hold="off", form="cut")],
+              0, [("PARTIAL", F91F)], has=["2 windows (STILL 1, MOVING 1), the verdict of every one cut off by the log's 1,200-character line limit"], lacks=["UNPARSED"])
+        check("F94b fit: one cut window beside two judged ones", [fit(0, "MOVING", "h1", 1), fit(1, "STILL", "h3"), fit(2, "STILL", form="cut")], 0, [("OK", F91F)],
+              has=["2 windows (STILL 1, MOVING 1): H1 1", "; 1 more window(s) whose verdict the log's line limit cut off"], lacks=["UNPARSED"])
         view = R91("; view (F91): ") + R91("r yaw %+.3f pitch %+.3f deg", 0.12, -0.03)
         check("F91 trace: the view fields on the frame lines are counted", [ads_start("press"), ads_frame_v(view), ads_frame_v(R91("; view (F91): ") + "r -"), ads_frame(),
                                                                             ads_start("release")], 0, [("OK", F89A)], has=["view (F91) fields on 2 of 3 frame lines (r shown on 1)"])
@@ -12271,6 +12356,24 @@ def self_test_health():
               has=["no marker with a designed offset was drawn"])
         check("F93c design offset: drawn but never moved", [design(88, 0, 88, 0)], 3, [("NEVER APPLIED", DO)])
         check("F93c design offset: mostly no reference", [design(88, 20, 68, 10)], 0, [("PARTIAL", DO)])
+        check("F93c design offset: the f358d3ce flight's own line", [
+            "marker design offset (F93c) eye 0 1 s: designed-offset draws 83 (last key 1, offset -0.4791 -0.3320): moved with the nearest dot's correction 83 (reference "
+            "this frame 0, the frame before 83; 220 px away mean), left as the game placed them (no reference) 0; references 249; correction +0.1 +0.0 px mean; offset the "
+            "aim at P dropped -173.5 +120.2 px mean; as drawn from P +173.4 -120.2 px mean; keys with an offset this second: 1 (-0.4791 -0.3320); offset argument not read 0"],
+              0, [("OK", DO)], has=["designed-offset draws 83: moved with a dot's correction 83"], lacks=["UNPARSED"])
+        # F94b: the label moved by its own anchor; F93c's rule measured beside it
+        check("F94b design offset: every label moved by its own anchor", [design94(), design94(eye=1, sw=2, errmax=8.0)], 0, [("OK", D94)],
+              has=["designed-offset draws 168: moved by their own anchor 168, gate refused 0, anchor behind the marker camera 0 (2 eye-seconds); the label against its anchor "
+                   "a frame 0.04 mean 0.30 max px, its anchor in the world 0.01 mean 0.05 max mm, the eyes' difference 0.30 mean 0.90 max px (168 frames); F93c's rule "
+                   "(measured): its target 4.2 mean 36.1 max px from the applied (11.5 mean over 40 draws at 30 deg/s or more), its step a frame 3.10 mean 36.20 max px, "
+                   "8 switches of reference, reference the frame before 168, this frame 0, none 0"], lacks=["UNPARSED"])
+        check("F94b design offset: no label drawn", [design94(0, 0, steps=0, rbefore=0, sw=0, fast=0, offkeys="none")] * 2, 0, [("IDLE", D94)],
+              has=["no marker with a designed offset was drawn"])
+        check("F94b design offset: drawn, never moved", [design94(84, 0, gate=84)], 3, [("NEVER APPLIED", D94)])
+        check("F94b design offset: set visible by the game for 10 s, never drawn to the move", [design94(0, 0, steps=0, rbefore=0, sw=0, fast=0)] * 10, 3,
+              [("NEVER APPLIED", D94)], has=["the game set a visible marker with a designed offset in 10 eye-seconds"])
+        check("F94b design offset: mostly refused at the gate", [design94(84, 30, gate=54)], 0, [("PARTIAL", D94)])
+        check("F94b design offset: the anchor behind the marker camera", [design94(84, 20, behind=64)], 0, [("PARTIAL", D94)])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])

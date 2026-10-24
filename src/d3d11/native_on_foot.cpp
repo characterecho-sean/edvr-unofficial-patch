@@ -36,6 +36,7 @@
 #include "native_on_foot_f92.h"   // F92b: the ADS head aim as a live toggle within a press (pure parts)
 #include "native_on_foot_f93.h"   // F93b: the ADS sight lock's input from the alignment the measured eye was rendered with, the eye chain instrument (pure parts)
 #include "native_on_foot_f93de.h"   // F93d: the game's camera watch; F93e: the stance's height taken by the hidden head (pure parts)
+#include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -22716,14 +22717,17 @@ struct LabSec {
     bool haveRec = false, haveLeader = false, haveFocus = false;
 };
 LabSec g_labSec[2];
-// F93c: the designed-offset markers (the interaction label) per eye, the second's figures (render thread: fixDecide and the 1 s line)
-struct F93Eye {
-    uint64_t designDraws = 0, patched = 0, noRef = 0, refs = 0, age[2] = {};
-    double distSum = 0.0, corrSum[2] = {}, dropSum[2] = {}, asDrawnSum[2] = {};
-    int lastKey = -1;
-    float lastOff[2] = {};
+// F94b: the designed-offset markers (the interaction label) per eye, the second's figures (render thread: fixDecide and the 1 s line). F93c's references are
+// still collected from the plain markers, for the measure of its rule.
+struct F94bEye {
+    uint64_t draws = 0, moved = 0, gate = 0, behind = 0, refs = 0, refAge[2] = {}, refNone = 0;
+    uint64_t keysLo = 0, keysHi = 0;   // the keys drawn
+    uint32_t tw = 0, th = 0;           // the marker target's size (the pixels of the line)
+    nofoot::f94b::Sec sec;
 };
-F93Eye g_f93[2];
+F94bEye g_f94b[2];
+nofoot::f94b::Tracker g_f94bTrack[2];
+nofoot::f94b::EyeJoin g_f94bEyes;
 nofoot::f87::RefSet g_f93RefSet[2];
 uint32_t g_labTallied = 0;
 bool g_labTalliedInit = false;
@@ -23200,7 +23204,8 @@ void f87PromptLines(uint64_t nowMs) {
                         static_cast<double>(r.q.mn[1]), static_cast<double>(r.q.mn[2]), static_cast<double>(r.q.mx[0]), static_cast<double>(r.q.mx[1]), static_cast<double>(r.q.mx[2]),
                         r.front[0], r.front[1], r.front[2], r.delta * 100.0, r.nView);
     }
-    // F93c: the designed-offset markers, per eye (zeros print: a second with no such marker says so)
+    // F94b: the designed-offset markers, per eye (zeros print: a second with no such marker says so). Each label is moved by its own anchor; F93c's rule is measured
+    // beside it (its target's distance from the applied one, its own step a frame, its switches of reference).
     {
         const uint64_t lo = f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed), hi = f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
         const uint64_t readFail = f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
@@ -23214,16 +23219,26 @@ void f87PromptLines(uint64_t nowMs) {
         }
         if (!oa) std::snprintf(offKeys, sizeof(offKeys), "none");
         for (int e = 0; e < 2; ++e) {
-            F93Eye& de = g_f93[e];
-            const double nD = de.designDraws ? static_cast<double>(de.designDraws) : 1.0, nP = de.patched ? static_cast<double>(de.patched) : 1.0;
-            Log::get().note("marker design offset (F93c) eye %d 1 s: designed-offset draws %llu (last key %d, offset %.4f %.4f): moved with the nearest dot's correction %llu "
-                            "(reference this frame %llu, the frame before %llu; %.0f px away mean), left as the game placed them (no reference) %llu; references %llu; "
-                            "correction %+.1f %+.1f px mean; offset the aim at P dropped %+.1f %+.1f px mean; as drawn from P %+.1f %+.1f px mean; "
-                            "keys with an offset this second: %s; offset argument not read %llu",
-                            e, ull(de.designDraws), de.lastKey, static_cast<double>(de.lastOff[0]), static_cast<double>(de.lastOff[1]), ull(de.patched), ull(de.age[0]),
-                            ull(de.age[1]), de.distSum / nP, ull(de.noRef), ull(de.refs), de.corrSum[0] / nP, de.corrSum[1] / nP, de.dropSum[0] / nP, de.dropSum[1] / nP,
-                            de.asDrawnSum[0] / nD, de.asDrawnSum[1] / nD, offKeys, ull(readFail));
-            de = F93Eye{};
+            F94bEye& de = g_f94b[e];
+            const nofoot::f94b::Sec& q = de.sec;
+            char drawn[96];
+            size_t da = 0;
+            drawn[0] = 0;
+            for (uint32_t k = 0; k < 128 && da + 8 < sizeof(drawn); ++k)
+                if ((k < 64 ? de.keysLo : de.keysHi) & (1ull << (k & 63u))) da += static_cast<size_t>(std::snprintf(drawn + da, sizeof(drawn) - da, "%s%u", da ? " " : "", k));
+            if (!da) std::snprintf(drawn, sizeof(drawn), "none");
+            const double nq = q.n ? static_cast<double>(q.n) : 1.0, st = q.steps ? static_cast<double>(q.steps) : 1.0, nf = q.fastN ? static_cast<double>(q.fastN) : 1.0;
+            Log::get().note("marker design offset (F94b) eye %d 1 s: designed-offset draws %llu (keys %s): moved by their own anchor %llu, gate refused %llu, anchor behind the "
+                            "marker camera %llu (left as the game placed them); the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f mean %.2f max px over %llu "
+                            "steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; F93c's rule (measured, not "
+                            "applied): reference this frame %llu, the frame before %llu, none %llu, switches %llu; its target from the applied %.1f mean %.1f max px (%.1f mean "
+                            "over %llu draws at %.0f deg/s or more), its step a frame %.2f mean %.2f max px; references %llu; px at %ux%u; keys with an offset this second: %s; "
+                            "offset argument not read %llu",
+                            e, ull(de.draws), drawn, ull(de.moved), ull(de.gate), ull(de.behind), q.offSum[0] / nq, q.offSum[1] / nq, q.stepSum / st, q.stepMax, ull(q.steps),
+                            q.pStepSum / st, q.pStepMax, q.eyeN ? q.eyeSum / static_cast<double>(q.eyeN) : 0.0, q.eyeMax, ull(q.eyeN), ull(de.refAge[0]), ull(de.refAge[1]),
+                            ull(de.refNone), ull(q.switches), q.err93Sum / nq, q.err93Max, q.err93FastSum / nf, ull(q.fastN), nofoot::f94b::kFastDps, q.step93Sum / st,
+                            q.step93Max, ull(de.refs), de.tw, de.th, offKeys, ull(readFail));
+            de = F94bEye{};
         }
     }
     // the label's draws, per eye
@@ -25061,42 +25076,59 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             ++s.fBehind;
         }
     }
-    // F93c: a marker whose SetMarker carried a designed offset (the interaction label) keeps the game's layout: it takes the projection correction of
-    // the nearest marker without one in this eye (this eye-frame or the one before), not a move of its record onto P. The others are the references:
-    // their correction is P through the scene rows less the record through the unpatched rows (the icon's mesh offset left out). With no reference the
-    // draw is left as the game placed it.
+    // F94b: a marker whose SetMarker carried a designed offset (the interaction label) is moved by its own anchor: shown where the scene rows show its anchor P
+    // (the dot's target, unjittered) plus the game's layout offset, its record's projection less its anchor's through the same unpatched marker rows (F93c's
+    // "properly placed" kept). Nothing is taken from another marker or another frame. F93c's rule (the nearest plain marker's correction, this eye-frame or the
+    // one before, else the game's placement) is measured beside it, so one flight compares the two; its references are still collected from the plain markers.
     if (haveP && (why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && !nofoot::f85::isReticleKey(keyNow)) {
         float offX = 0.0f, offY = 0.0f;
-        F93Eye& de = g_f93[e];
+        F94bEye& de = g_f94b[e];
         if (f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
+            ++de.draws;
+            const uint32_t k7 = keyNow & 0x7Fu;
+            (k7 < 64u ? de.keysLo : de.keysHi) |= 1ull << (k7 & 63u);
+            de.tw = static_cast<uint32_t>(W);
+            de.th = static_cast<uint32_t>(H);
             double dRef[2] = {}, dist = 0.0;
-            uint32_t age = 0;
-            ++de.designDraws;
-            de.lastKey = static_cast<int>(keyNow & 0x7Fu);
-            de.lastOff[0] = offX;
-            de.lastOff[1] = offY;
-            de.asDrawnSum[0] += (nM0[0] - nWuSave[0]) * W * 0.5;   // the record's offset from P as the game drew it (the designed offset and the error)
-            de.asDrawnSum[1] += (nM0[1] - nWuSave[1]) * H * 0.5;
-            if (!g_f93RefSet[e].nearest(frame, nM0, 1, dRef, &dist, &age)) {
-                ++de.noRef;
+            uint32_t age = 0, refKey = 0;
+            const bool haveRef = g_f93RefSet[e].nearest(frame, nM0, 1, dRef, &dist, &age, &refKey);
+            if (haveRef) ++de.refAge[age > 1u ? 1u : age];
+            else ++de.refNone;
+            const double P3[3] = {fP[0], fP[1], fP[2]}, oh3[3] = {oHud[0], oHud[1], oHud[2]};
+            double mcP[3];
+            drawtag::markerClip(sh->rows[4], sh->rows[5], sh->rows[7], P3, oh3, mcP);
+            if (!(mcP[2] > 1e-9)) {
+                ++de.behind;
                 ++s.pOther;
-                return;   // left as the game placed it: its layout is right, only the projection error stays
+                return;   // the anchor is behind the game's marker camera: left as the game placed it
             }
-            ++de.patched;
-            ++de.age[age > 1u ? 1u : age];
-            de.distSum += dist * W * 0.5;
-            de.corrSum[0] += dRef[0] * W * 0.5;
-            de.corrSum[1] += dRef[1] * H * 0.5;
-            de.dropSum[0] += (T[0] - nM0[0] - dRef[0]) * W * 0.5;   // what the old aim at P would have moved it further (the offset it dropped)
-            de.dropSum[1] += (T[1] - nM0[1] - dRef[1]) * H * 0.5;
-            T[0] = nM0[0] + dRef[0];
-            T[1] = nM0[1] + dRef[1];
-            dx = dRef[0];
-            dy = dRef[1];
+            const double nMP[2] = {mcP[0] / mcP[2], mcP[1] / mcP[2]};
+            nofoot::f94b::ownAnchorTarget(nWuSave, nM0, nMP, T);
+            double shownGame[2];
+            drawtag::displayOfUi(aff, nM0, shownGame);   // where the game's placement is shown unpatched
+            const double T93[2] = {haveRef ? nM0[0] + dRef[0] : shownGame[0], haveRef ? nM0[1] + dRef[1] : shownGame[1]};
+            nofoot::f94b::Sample smp;
+            smp.frame = frame;
+            smp.key = keyNow;
+            smp.off[0] = (T[0] - nWuSave[0]) * W * 0.5;
+            smp.off[1] = (T[1] - nWuSave[1]) * H * 0.5;
+            smp.off93[0] = (T93[0] - nWuSave[0]) * W * 0.5;
+            smp.off93[1] = (T93[1] - nWuSave[1]) * H * 0.5;
+            smp.ref93 = haveRef;
+            smp.refKey = refKey;
+            smp.headDps = g_headDps;
+            for (int k = 0; k < 3; ++k) smp.p[k] = fP[k];
+            g_f94bTrack[e].add(smp, de.sec);
+            double eyeDiff[2] = {};
+            nofoot::f94b::eyeJoinTally(g_f94bEyes.post(e, keyNow, frame, smp.off, eyeDiff), eyeDiff, de.sec);
+            dx = T[0] - nM0[0];
+            dy = T[1] - nM0[1];
             why = (std::fabs(dx) < kGateNdc && std::fabs(dy) < kGateNdc) ? drawtag::kDeltaOk : drawtag::kDeltaGate;
+            if (why == drawtag::kDeltaOk) ++de.moved;
+            else ++de.gate;
         } else if (why == drawtag::kDeltaOk) {
             const double d[2] = {nWuSave[0] - nM0[0], nWuSave[1] - nM0[1]};
-            g_f93RefSet[e].add(frame, nM0, d);
+            g_f93RefSet[e].add(frame, nM0, d, keyNow);
             ++de.refs;
         }
     }

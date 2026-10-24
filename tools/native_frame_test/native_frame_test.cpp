@@ -19,6 +19,7 @@
 #include "f92_checks.h"     // F92b: the ADS head aim's cancel published ahead, and the head aim as a live toggle within a press
 #include "f93_checks.h"     // F93b: the ADS sight lock's steady input, the eye chain
 #include "f93de_checks.h"   // F93d: the game's camera published and watched; F93e: the stance's height taken by the hidden head
+#include "f94b_checks.h"    // F94b: the interaction label moved by its own anchor; F93c's rule measured beside it
 
 #include <array>
 #include <chrono>
@@ -7195,6 +7196,8 @@ int wmain(int argc, wchar_t** argv) {
     f93test::run93(check);
     // F93d: the game's camera (the suite's mode byte) gates the body changes; F93e: the stance's height goes to the hidden head, not the knees.
     f93detest::run93de(check);
+    // F94b: the label's row patch from its own anchor (the anchor shown at the dot's place), F93c's rule against it in a lagged turn and at a tie of two dots.
+    f94btest::run94b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
