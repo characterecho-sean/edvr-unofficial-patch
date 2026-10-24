@@ -16,6 +16,7 @@
 #include "f89_checks.h"   // F89: the ADS release, the left eye closing in ADS, the transition trace, the hold's open-loop input
 #include "f90_checks.h"   // F90: the weapon readout's size in ADS, the pistol's readout in the weapon's frame
 #include "f91bc_checks.h"   // F91 B and C: the ADS vibration instrument's fields and fit, the ADS item gate
+#include "f92_checks.h"     // F92b: the ADS head aim's cancel published ahead, and the head aim as a live toggle within a press
 
 #include <array>
 #include <chrono>
@@ -7186,6 +7187,8 @@ int wmain(int argc, wchar_t** argv) {
     f90test::run90(check);
     // F91: B, the ADS vibration instrument (the trace's fields, the cancel the pose carried, the fit: H1, the lock, H3); C, the ADS item gate.
     f91bctest::run91bc(check);
+    // F92b: the ADS head aim's cancel published ahead (the view the head's exactly, the weapon a frame off the eye), and the head aim as a live toggle within a press.
+    f92test::run92(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
