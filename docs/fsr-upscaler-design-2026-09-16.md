@@ -32,8 +32,8 @@ read 2026-09-16) unless marked believed.
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
 - **Next:** the flicker at flight 7's spot (a hull panel's edge in the
-  main menu) is in all three temporal paths, with history kept (yellow in
-  the refusal view; flight 7 entry): TAA and FSR 3 there on Windows. Held keys
+  main menu) is in the game's image under F7 and in DLSS on Windows too,
+  so not FSR 4's (flight 7 entry): the no-EDVR baseline there. Held keys
   looked mostly clean; they become the behaviour once (c) is out, and the
   key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
@@ -959,6 +959,11 @@ class of upscaler): that is route 2's go/no-go.
   frame and the resolve itself oscillates. Note with it: under F7 the
   jitter stops and the camera does not move (`moved=0`), yet "a lot of
   things flicker", so the game's own image changes frame to frame here.
-  Next: on Windows at the same spot, F7 (does the game's image flicker
-  there too?) and TAA or FSR 3 on the edge; on this rig, whether the
-  flicker under F7 is on the same edge.
+  Sean: under F7 that same edge flickers, and with DLSS on his Windows
+  rig it flickers too, only less. So the edge changes frame to frame in
+  the image every temporal path is given, on both platforms, and each
+  path passes some of it through (DLSS the least). Ruled out: Proton,
+  RADV or the AMD GPU as the source, and anything specific to FSR 4.
+  Left: the game's own rendering of that edge, or one of EDVR's
+  always-on non-AA fixes making it change. Discriminator: the no-EDVR
+  baseline at the spot (`install_edvr.py --suspend`, then `--resume`).
