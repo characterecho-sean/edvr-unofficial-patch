@@ -267,8 +267,10 @@ too), 3 when the log holds none of the freeze lines and no slow regime (a build 
 freeze logging), 4 for a slow regime the vendor runtime or EDVR holds (and no STOP).
 
 --health is the first command to run on an on-foot flight log. It reads the graphics log once and prints one line per feature family (the weapon readout
-size and the pistol readout, the weapon UI pin, the reticle depth, the view height hold, the weapon eye offset, the ADS trace and the closing left eye, the
-marker fix, the prompt anchor and label) with a status and the counters that decide it: OK; PARTIAL (it ran, but not for everything); NEVER APPLIED (its own lines
+size, the weapon readout parts' roles (F91: NO TABLE PART is NEVER APPLIED for that item) and the pistol readout, the weapon UI pin, the reticle depth, the
+view height hold, the weapon eye offset, the ADS trace, its press fit windows (F91: STILL or MOVING, verdicts H1, LOCK, H3) and the closing left eye, the ADS
+item gate (F91: refused and allowed), the marker fix, the prompt anchor and label) with a status and the counters that decide it: OK; PARTIAL (it ran, but not
+for everything); NEVER APPLIED (its own lines
 say it did nothing, as F90's "no table part among the decided parts" did every second of a flight, or a trigger the log proves happened found it idle); IDLE
 (nothing for it to act on); UNPARSED (labelled lines no pattern matches: the rule is out of date, not the feature). A family with no line at all is listed as not
 present. Then it lists the build-tagged lines, `(F85b)`, `(F87h, TEMPORARY)`, `(F62c/F64)`, by tag -- count, first and last time, leading label -- for the newest
@@ -10373,21 +10375,99 @@ def _hfocus_seconds(ctx):
 
 
 def _hj_f90_size(rows, ctx):
-    parts, idle = rows.get("part", []), rows.get("idle", [])
+    # F91 lines name the role ("rifle ADS readout (slot 1 name 29526)"); the F90 build's ("part 29526 (slot 1)") are read too, for the logs of that build. The tool's
+    # readout is named but never scaled by design, so only the ADS readouts decide the status.
+    parts = rows.get("part", []) + rows.get("part90", [])
+    idle = rows.get("idle", []) + rows.get("idle90", [])
     if not parts and not idle:
         return None
-    seen = sorted({n.strip() for r in idle for n in r["names"].split(",") if n.strip()}, key=lambda s: (len(s), s))
-    if not parts:
-        return ("NEVER APPLIED", "no table part among the decided parts in all %d s (names %s)" % (len(idle), ", ".join(seen) or "-"))
-    decided, scaled, mism = _hsum(parts, "decided"), _hsum(parts, "scaled"), _hsum(parts, "mismatch")
-    names = sorted({r["part"] for r in parts}, key=lambda s: (len(s), s))
-    text = "part %s: scaled %d of %d decided (eye 0 %d, eye 1 %d), table mismatch %d, %d s" % (
-        ", ".join(names), scaled, decided, _hsum(parts, "e0"), _hsum(parts, "e1"), mism, len(parts))
+    seen = {n for r in rows.get("idle90", []) for n in (x.strip() for x in r["names"].split(",")) if n}
+    seen |= {n for r in rows.get("idle", []) for n in re.findall(r"name (\d+)", r["parts"])}
+    seen = sorted(seen, key=lambda s: (len(s), s))
+    scal = [r for r in parts if r.get("role") != "tool readout"]
+    tool = [r for r in parts if r.get("role") == "tool readout"]
+    if not scal:
+        if idle:
+            return ("NEVER APPLIED", "no table part among the decided parts in all %d s (names %s)%s" % (
+                len(idle), ", ".join(seen) or "-", "; the tool readout was named in %d s" % len(tool) if tool else ""))
+        return ("IDLE", "only the tool readout was decided (%d s, %d decisions): it is named, never scaled" % (len(tool), _hsum(tool, "decided")))
+    decided, scaled, mism = _hsum(scal, "decided"), _hsum(scal, "scaled"), _hsum(scal, "mismatch")
+    names = sorted({("%s %s" % (r["role"], r["name"])) if r.get("role") else "part %s" % r["part"] for r in scal}, key=lambda s: (len(s), s))
+    text = "%s: scaled %d of %d decided (eye 0 %d, eye 1 %d), table mismatch %d, %d s" % (
+        ", ".join(names), scaled, decided, _hsum(scal, "e0"), _hsum(scal, "e1"), mism, len(scal))
+    if tool:
+        text += "; the tool readout named in %d s" % len(tool)
     if idle:
         text += "; %d s with no table part (names %s)" % (len(idle), ", ".join(seen) or "-")
     if scaled == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if scaled * 10 < decided * 9 else "OK", text)
+
+
+def _hj_f91_role(rows, ctx):
+    """The role line: one per (held item, slot) and on every change. The last line of each (item serial, slot) decides it: NO TABLE PART there is that item's
+    readout never scaled or moved."""
+    r = rows.get("role", [])
+    if not r:
+        return None
+    last = {}
+    for x in r:
+        last[(x["serial"], x["slot"])] = x
+    items = collections.OrderedDict()
+    flipped = 0
+    for (serial, slot), x in last.items():
+        items.setdefault((x["item"], serial), []).append(x)
+    for x in r:
+        if x["what"].startswith("NO TABLE PART") and not last[(x["serial"], x["slot"])]["what"].startswith("NO TABLE PART"):
+            flipped += 1
+    missed, named = [], []
+    for (item, serial), xs in items.items():
+        bad = [x for x in xs if x["what"].startswith("NO TABLE PART")]
+        roles = sorted({re.sub(r" \(.*$", "", x["what"]) for x in xs if not x["what"].startswith("NO TABLE PART")})
+        named.append("%s: %s" % (item, ", ".join(roles) or "-"))
+        for x in bad:
+            missed.append("%s slot %s name %s mesh %s x %s scale %s" % (item, x["slot"], x["name"], x["mx"], x["mz"], x["scale"]))
+    text = "%d role lines over %d items; %s" % (len(r), len(items), "; ".join(named))
+    if flipped:
+        text += "; %d NO TABLE PART line(s) later matched" % flipped
+    if missed:
+        return ("NEVER APPLIED", text + "; NO TABLE PART: " + "; ".join(missed))
+    return ("PARTIAL" if flipped else "OK", text)
+
+
+def _hj_f91_fit(rows, ctx):
+    """The ADS vibration instrument's 0.5 s windows: STILL against MOVING and the verdicts H1 (d frames late), LOCK, H3."""
+    w = rows.get("fit", [])
+    if not w:
+        return None
+    still = sum(1 for x in w if x["head"] == "STILL")
+    few = [x for x in w if x["verdict"].startswith("none (too few")]
+    h1 = collections.Counter(m.group(1) for x in w for m in [re.search(r"H1 \(the cancel lands (\d+) frame", x["verdict"])] if m)
+    lock = sum(1 for x in w if "LOCK (" in x["verdict"])
+    h3 = sum(1 for x in w if "H3 (" in x["verdict"])
+    none = sum(1 for x in w if x["verdict"].startswith("none of H1"))
+
+    def split(pred):
+        return "STILL %d MOVING %d" % (sum(1 for x in w if pred(x) and x["head"] == "STILL"), sum(1 for x in w if pred(x) and x["head"] == "MOVING"))
+    text = "%d windows (STILL %d, MOVING %d): H1 %d [%s] (%s), LOCK %d (%s), H3 %d (%s), none %d, too few r frames %d" % (
+        len(w), still, len(w) - still, sum(h1.values()), ", ".join("d%s %d" % kv for kv in sorted(h1.items())) or "-", split(lambda x: "H1 (" in x["verdict"]), lock,
+        split(lambda x: "LOCK (" in x["verdict"]), h3, split(lambda x: "H3 (" in x["verdict"]), none, len(few))
+    if len(few) == len(w):
+        return ("NEVER APPLIED", text + " (no window had enough r frames to fit)")
+    return ("PARTIAL" if len(few) * 2 > len(w) else "OK", text)
+
+
+def _hj_f91_gate(rows, ctx):
+    """The ADS item gate: refused, stopped and allowed edges, and the F70b 1 s line's refused ticks."""
+    ref, stop, allow, ticks = rows.get("refused", []), rows.get("stopped", []), rows.get("allowed", []), rows.get("ticks", [])
+    if not ref and not stop and not allow and not ticks:
+        return None
+    nt = _hsum(ticks, "ticks")
+    items = collections.Counter("%s (%s)" % (x["item"], x["why"]) for x in ref)
+    text = "refused %d press(es) [%s], stopped %d, allowed %d; refused ticks %d over %d s" % (len(ref), _htop(items), len(stop), len(allow), nt, len(ticks))
+    if not ref and not stop and nt == 0:
+        return ("IDLE", text + " (no press on a held item that is not a weapon)")
+    return ("OK", text)
 
 
 def _hj_f90_pistol(rows, ctx):
@@ -10496,6 +10576,9 @@ def _hj_f89_ads(rows, ctx):
     engaged = [r for r in fr if r["state"] == "engaged"]
     lock = max([float(r["lw"]) for r in fr] or [0.0])
     text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, "; %d events not traced" % len(skip) if skip else "")
+    view = [r for r in fr if r.get("view")]
+    if view:   # F91 B: the vibration instrument's fields; a frame line without them (from F91 on) means the fields never ran
+        text += "; view (F91) fields on %d of %d frame lines (r shown on %d)" % (len(view), len(fr), sum(1 for r in view if r["rv"] != "-"))
     if engaged and max(float(r["lw"]) for r in engaged) == 0.0:
         return ("NEVER APPLIED", text + " (ADS engaged, the lock weight never rose)")
     if not press or not rel:
@@ -10576,15 +10659,25 @@ def _hrule(name, tags, labels, kinds, judge):
 
 
 HEALTH_RULES = (
-    _hrule("weapon readout size (F90)", ("F90",), ("weapon readout size (F90)",), (
-        ("part", r"weapon readout size \(F90\) 1 s: part (?P<part>\d+) \(slot \d+\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), scaled (?P<scaled>\d+) "
-                 r"\(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
-        ("idle", r"weapon readout size \(F90\) 1 s: no table part among the decided parts \(names (?P<names>[^)]*)\)"),
+    _hrule("weapon readout size (F90)", ("F90", "F91"), ("weapon readout size (F90)", "weapon readout size (F91)"), (
+        ("part", r"weapon readout size \(F90\) 1 s: (?P<role>[a-zA-Z ]+?) \(slot (?P<slot>\d+) name (?P<name>\d+)\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), "
+                 r"scaled (?P<scaled>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
+        ("idle", r"weapon readout size \(F91\) 1 s: no table part among the decided parts \((?P<parts>slot .*)\)$"),
+        # the F90 build's lines (part names as the identity), for that build's logs
+        ("part90", r"weapon readout size \(F90\) 1 s: part (?P<part>\d+) \(slot \d+\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), scaled (?P<scaled>\d+) "
+                   r"\(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
+        ("idle90", r"weapon readout size \(F90\) 1 s: no table part among the decided parts \(names (?P<names>[^)]*)\)"),
     ), _hj_f90_size),
+    _hrule("weapon readout part (F91)", ("F91",), ("weapon readout part (F91)",), (
+        ("role", r"weapon readout part \(F91\): item (?P<item>\S+) serial (?P<serial>\d+), slot (?P<slot>\d+) name (?P<name>\d+): mesh (?P<mx>[\d.]+) x (?P<mz>[\d.]+), "
+                 r"record scale (?P<scale>[\d.]+), layout [\d.]+ x [\d.]+ base [\d.]+ -> (?P<what>.+)$"),
+        ("_", r"weapon readout part \(F91\): slot \d+ name \d+: its role changed"),
+    ), _hj_f91_role),
     _hrule("pistol readout (F90)", ("F90",), ("pistol readout (F90)",), (
         ("line", r"pistol readout \(F90\) 1 s: item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) cm[^;]*; "
                  r"frame: attach \d+ (?P<attach>\d+), F_root only (?P<root>\d+), none (?P<none>\d+) \([^)]*\); target latched (?P<latched>\d+) frames; "
-                 r"moved: \d+ (?P<hip>\d+), \d+ (?P<ads>\d+) \([^)]*\), previous-frame target \d+, refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]" % (_HN, _HN, _HN, _HN)),
+                 r"moved: (?:\d+|hip readout) (?P<hip>\d+), (?:\d+|pistol ADS readout) (?P<ads>\d+) \([^)]*\), previous-frame target \d+, refused (?P<refused>\d+) "
+                 r"\[(?P<why>[^\]]*)\]" % (_HN, _HN, _HN, _HN)),
     ), _hj_f90_pistol),
     _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
         ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits this second \((?P<tagged>\d+) tagged; [^)]*\); "
@@ -10609,9 +10702,20 @@ HEALTH_RULES = (
     ), _hj_f88),
     _hrule(H_F89_ADS, ("F89",), ("ads transition (F89)",), (
         ("start", r"ads transition \(F89\) (?P<dir>press|release): tracing the next"),
-        ("frame", r"ads transition \(F89\) (?P<dir>press|release) frame (?P<frame>\d+): t %s s, journal ADS \d, ads state (?P<state>\w+), lock weight (?P<lw>[\d.]+)" % _HN),
+        ("frame", r"ads transition \(F89\) (?P<dir>press|release) frame (?P<frame>\d+): t %s s, journal ADS \d, ads state (?P<state>\w+), lock weight (?P<lw>[\d.]+)"
+                  r"(?:.*(?P<view>; view \(F91\): r (?P<rv>-|yaw)))?" % _HN),
         ("skip", r"ads transition \(F89\): not traced"),
+        ("_", r"ads transition \(F89\) press fit \(F91\) window"),   # the press fit rule's (below)
     ), _hj_f89_ads),
+    _hrule("ADS press fit (F91)", ("F89",), ("press fit (F91)",), (
+        ("fit", r"ads transition \(F89\) press fit \(F91\) window (?P<win>\d+): t \S+ to \S+ s, \d+ frames, head (?P<head>STILL|MOVING) .*; verdict: (?P<verdict>.+)$"),
+    ), _hj_f91_fit),
+    _hrule("ADS item gate (F91)", ("F91", "F70b"), ("ADS item gate (F91)", "item gate refused"), (
+        ("refused", r"native on foot ADS item gate \(F91\): refused: the held item \"(?P<item>[^\"]*)\" is not a weapon \((?P<why>[^)]*)\)"),
+        ("stopped", r"native on foot ADS item gate \(F91\): stopped: the held item changed to \"(?P<item>[^\"]*)\""),
+        ("allowed", r"native on foot ADS item gate \(F91\): allowed: \"(?P<item>[^\"]*)\""),
+        ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)"),
+    ), _hj_f91_gate),
     _hrule("ads close left eye (F89)", ("F89",), ("ads close left eye (F89)",), (
         ("sec", r"ads close left eye \(F89\) 1 s: darken (?P<d>[\d.]+) \(key (?P<key>on|off), lock weight (?P<lw>[\d.]+), ads state \w+\)"),
         ("event", r"ads close left eye \(F89\): (?P<ev>closed|open) \(key \w+, lock weight [\d.]+\)"),
@@ -10923,8 +11027,9 @@ def main(argv=None):
                          "then a summary; exit 3 when the log has none of those lines")
     ap.add_argument("--health", action="store_true",
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
-                         "readout F90, weapon UI pin F85b, reticle depth F85c, view height hold F87h, weapon eye offset F88, ADS "
-                         "transition and left eye F89, marker fix, prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
+                         "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, weapon UI pin F85b, reticle "
+                         "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
+                         "prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
                          "Exit 3 when any family is NEVER APPLIED, 4 when a rule no longer matches its lines, 2 for a wrong build")
@@ -11449,8 +11554,10 @@ def self_test_health():
     header = "[10:00:00.000] version %s (build 01234567)\n" % version
     src_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot.cpp")
     swap_path = os.path.join(repo_root(), "src", "d3d11", "shader_swap.cpp")
+    f90_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f90.h")
+    f91_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f91.h")
     try:
-        source, swap = read_text(src_path), read_text(swap_path)
+        source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -11463,6 +11570,15 @@ def self_test_health():
         if fmts[needle] is None:
             raise AssertionError("native_on_foot.cpp has no log format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[needle], vals)
+
+    def R91(needle, *vals):
+        """A piece of a line native_on_foot_f91.h builds (formatView, formatFit), from its own format literal."""
+        key = "f91:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f91src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f91.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
 
     def stamp(sec):
         return "[%02d:%02d:%02d.000]" % (10 + sec // 3600, sec // 60 % 60, sec % 60)
@@ -11508,17 +11624,42 @@ def self_test_health():
             ok = False
         return out
 
-    F90S, F90P, F85B, F85C, F87H, F88, F89A, F89E, MK, AN, LB = (
+    F90S, F90P, F85B, F85C, F87H, F88, F89A, F89E, MK, AN, LB, F91R, F91F, F91G = (
         "weapon readout size (F90)", "pistol readout (F90)", "weapon UI pin (F85b)", "reticle depth (F85c)", "view height hold (F87h)", "weapon eye offset (F88)",
-        "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)")
+        "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)", "weapon readout part (F91)",
+        "ADS press fit (F91)", "ADS item gate (F91)")
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
         def f90_idle(names="29510, 29526"):
-            return R("weapon readout size (F90) 1 s: no table part", names)
+            """F91's idle form: each decided part's slot, name, mesh and scale (the names given; a 2x1 mesh at 0.06, which no row has)."""
+            parts = "; ".join("slot %d name %s mesh 2.00 x 1.00 scale 0.060000" % (i, n.strip()) for i, n in enumerate(names.split(",")))
+            return R("weapon readout size (F91) 1 s: no table part", parts)
 
-        def f90_part(part=29526, decided=120, scaled=120, mismatch=0):
-            return R("weapon readout size (F90) 1 s: part %u", part, 1, 0.5714, 0.1, -0.2, decided, scaled, scaled // 2, scaled - scaled // 2, mismatch)
+        def f90_part(part=29526, decided=120, scaled=120, mismatch=0, role="rifle ADS readout"):
+            return R("weapon readout size (F90) 1 s: %s (slot %u", role, 1, part, 1.7778, -0.96, 0.02, decided, scaled, scaled // 2, scaled - scaled // 2, mismatch)
+
+        def role_line(item="$wpn_m_assaultrifle_laser_fauto_name;", serial=4, slot=1, name=29526, mesh=(3.0, 1.0), scale=0.050098, what="rifle ADS readout (x1.7778)"):
+            return R("weapon readout part (F91): item %s", item, serial, slot, name, mesh[0], mesh[1], scale, 0.667969, 0.222656, 0.225, what)
+
+        def fit(win=0, head="MOVING", verdict="h1", d=2):
+            text = R91("window %u: t %+.2f", win, 0.5 * win, 0.5 * win + 0.5, 45, head, 12.5 if head == "MOVING" else 0.8, 0.02, 0.01, 44)
+            text += R91("; sight: %u frames", 45, 0.02, 0.01, 0.2, 0, 0, 0.05, 0.01, "no")
+            text += R91("; verdict: ")
+            text += {"h1": R91("H1 (the cancel lands %d frame", d, "" if d == 1 else "s"), "lock": R91("%sLOCK (the sight lock", ""), "h3": R91("%sH3 (the view follows", ""),
+                     "none": R91("none of H1, LOCK or H3"), "few": R91("none (too few r frames)"),
+                     "h1lock": R91("H1 (the cancel lands %d frame", d, "s") + R91("%sLOCK (the sight lock", " + ")}[verdict]
+            return R("ads transition (F89) press fit (F91) %s", text)
+
+        def gate(kind="refused", item="$humanoid_companalyser_name;", why="tool"):
+            if kind == "refused":
+                return R("native on foot ADS item gate (F91): refused", item, why, "on", "bound HumanoidZoom", "off")
+            if kind == "stopped":
+                return R("native on foot ADS item gate (F91): stopped", item, why, "engaged", "on", "bound HumanoidZoom", "off")
+            return R("native on foot ADS item gate (F91): allowed", item, why, "on", "bound HumanoidZoom", "on")
+
+        def gate_ticks(ticks=0, held="$wpn_m_assaultrifle_laser_fauto_name;", state="allowed", why="weapon"):
+            return R("native on foot ADS input (F70b): source %s; request", "bound HumanoidZoom", "on", "fresh", 12, 800, "off", 3, "clear", 400, 0, ticks, held, state, why)
 
         def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none"):
             return R("pistol readout (F90) 1 s: item %s", "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why)
@@ -11546,7 +11687,11 @@ def self_test_health():
             return R("ads transition (F89) %s: tracing the next", d, 1.5, 1, 4, 0)
 
         def ads_frame(d="press", state="engaged", lw=0.98):
-            return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "")
+            return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "", "")
+
+        def ads_frame_v(view, d="press", state="engaged", lw=0.98):
+            """A frame line with F91's view fields (the last %s)."""
+            return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "", view)
 
         def eye_sec(d=0.44, key="on", state="engaged"):
             return R("ads close left eye (F89) 1 s: darken", d, key, d, state)
@@ -11579,10 +11724,57 @@ def self_test_health():
         check("F90 size: no table part in any second", [f90_idle()] * 5, 3, [("NEVER APPLIED", F90S)], has=["no table part among the decided parts in all 5 s (names 29510, 29526)", "exit 3"])
         check("F90 size: the names it saw are joined and sorted", [f90_idle("29510, 29526"), f90_idle("29553"), f90_idle("29510, 29526, 29524")], 3, [("NEVER APPLIED", F90S)],
               has=["names 29510, 29524, 29526, 29553)"])
-        check("F90 size: every decided draw scaled", [f90_part()] * 4, 0, [("OK", F90S)], has=["part 29526: scaled 480 of 480 decided (eye 0 240, eye 1 240), table mismatch 0, 4 s"])
+        check("F90 size: every decided draw scaled", [f90_part()] * 4, 0, [("OK", F90S)],
+              has=["rifle ADS readout 29526: scaled 480 of 480 decided (eye 0 240, eye 1 240), table mismatch 0, 4 s"])
         check("F90 size: a table part plus an idle second is OK and says so", [f90_part(), f90_idle("29553"), f90_part()], 0, [("OK", F90S)], has=["1 s with no table part (names 29553)"])
         check("F90 size: every decision a table mismatch", [f90_part(scaled=0, mismatch=120)] * 3, 3, [("NEVER APPLIED", F90S)], has=["scaled 0 of 360", "table mismatch 360"])
         check("F90 size: under 90 percent scaled", [f90_part(decided=120, scaled=50, mismatch=70)] * 2, 0, [("PARTIAL", F90S)])
+        check("F91 size: the tool readout alone is named, never scaled", [f90_part(29553, 60, 0, 0, "tool readout")] * 2, 0, [("IDLE", F90S)],
+              has=["only the tool readout was decided (2 s, 120 decisions)"])
+        check("F91 size: the tool beside a scaled ADS readout does not lower it", [f90_part(), f90_part(29553, 60, 0, 0, "tool readout")], 0, [("OK", F90S)],
+              has=["scaled 120 of 120 decided", "the tool readout named in 1 s"])
+        check("F91 size: the F90 build's lines still read (that flight's own text)",
+              ["weapon readout size (F90) 1 s: no table part among the decided parts (names 29510, 29526)",
+               "weapon readout size (F90) 1 s: part 29526 (slot 1) x1.7777 about mesh (-0.96, +0.02): decided 120, scaled 120 (eye 0 60, eye 1 60), table mismatch 0 "
+               "(mesh 3.00 x 1.00 scale 0.05010); ADS weight at the scaled draws min 1.00 max 1.00; content centre 0.297 m from eye 0"], 0, [("OK", F90S)],
+              has=["part 29526: scaled 120 of 120", "1 s with no table part (names 29510, 29526)"])
+
+        # ---- weapon readout part (F91): the role line ----
+        check("F91 role: every part named", [role_line(), role_line(slot=0, name=29510, mesh=(2.0, 1.0), scale=0.072070, what="hip readout (x1.0000)")], 0, [("OK", F91R)],
+              has=["2 role lines over 1 items; $wpn_m_assaultrifle_laser_fauto_name;: hip readout, rifle ADS readout"])
+        check("F91 role: a part that matched no row is NEVER APPLIED for its item",
+              [role_line(), role_line(slot=2, name=29524, mesh=(2.0, 1.0), scale=0.2, what="NO TABLE PART: not scaled, not moved")], 3, [("NEVER APPLIED", F91R)],
+              has=["NO TABLE PART: $wpn_m_assaultrifle_laser_fauto_name; slot 2 name 29524 mesh 2.00 x 1.00 scale 0.200000"])
+        check("F91 role: a miss the slot later matched is PARTIAL",
+              [role_line(what="NO TABLE PART: not scaled, not moved"), role_line()], 0, [("PARTIAL", F91R)], has=["1 NO TABLE PART line(s) later matched"])
+        check("F91 role: one item's miss is named, another item's roles are OK",
+              [role_line(), role_line("$humanoid_companalyser_name;", 5, 3, 29553, (2.0, 1.0), 0.093994, "tool readout (not scaled)"),
+               role_line("$wpn_s_pistol_kinetic_sauto_name;", 6, 2, 29524, (2.0, 1.0), 0.5, "NO TABLE PART: not scaled, not moved")], 3, [("NEVER APPLIED", F91R)],
+              has=["$humanoid_companalyser_name;: tool readout", "NO TABLE PART: $wpn_s_pistol_kinetic_sauto_name; slot 2"])
+        checks += 1
+        if "NO TABLE PART: not scaled, not moved" not in source or "tool readout (not scaled)" not in source or not all(
+                ('"%s"' % r) in f90src for r in ("hip readout", "rifle ADS readout", "pistol ADS readout", "tool readout")):
+            print("health: the role line's role texts are no longer where the role rule's fixtures take them from")
+            ok = False
+
+        # ---- ADS press fit (F91) ----
+        check("F91 fit: H1 windows while moving, H3 still", [fit(0, "MOVING", "h1", 2), fit(1, "MOVING", "h1", 1), fit(2, "STILL", "h3"), fit(3, "STILL", "none")], 0,
+              [("OK", F91F)], has=["4 windows (STILL 2, MOVING 2): H1 2 [d1 1, d2 1] (STILL 0 MOVING 2), LOCK 0 (STILL 0 MOVING 0), H3 1 (STILL 1 MOVING 0), none 1"])
+        check("F91 fit: H1 and LOCK in one window", [fit(0, "MOVING", "h1lock", 2)], 0, [("OK", F91F)], has=["H1 1 [d2 1]", "LOCK 1 (STILL 0 MOVING 1)"])
+        check("F91 fit: no window had enough r frames", [fit(0, "STILL", "few"), fit(1, "MOVING", "few")], 3, [("NEVER APPLIED", F91F)], has=["too few r frames 2"])
+        check("F91 fit: mostly too few r frames", [fit(0, "STILL", "few"), fit(1, "MOVING", "few"), fit(2, "MOVING", "lock")], 0, [("PARTIAL", F91F)])
+        check("F91 fit: the fit line is not an unparsed trace line", [ads_start("press"), ads_frame(), fit(0), ads_start("release"), ads_frame("release", "releasing", 0.5)], 0,
+              [("OK", F89A), ("OK", F91F)], lacks=["UNPARSED"])
+        view = R91("; view (F91): ") + R91("r yaw %+.3f pitch %+.3f deg", 0.12, -0.03)
+        check("F91 trace: the view fields on the frame lines are counted", [ads_start("press"), ads_frame_v(view), ads_frame_v(R91("; view (F91): ") + "r -"), ads_frame(),
+                                                                            ads_start("release")], 0, [("OK", F89A)], has=["view (F91) fields on 2 of 3 frame lines (r shown on 1)"])
+
+        # ---- ADS item gate (F91) ----
+        check("F91 gate: a tool's presses refused", [gate(), gate_ticks(14, "$humanoid_companalyser_name;", "refused", "tool"), gate("refused", "$humanoid_repairtool_name;")], 0,
+              [("OK", F91G)], has=["refused 2 press(es) [$humanoid_companalyser_name; (tool) 1, $humanoid_repairtool_name; (tool) 1], stopped 0, allowed 0; refused ticks 14 over 1 s"])
+        check("F91 gate: a switch to a tool mid-press and back", [gate("stopped"), gate("allowed", "$wpn_m_assaultrifle_laser_fauto_name;", "weapon")], 0, [("OK", F91G)],
+              has=["stopped 1, allowed 1"])
+        check("F91 gate: weapons only, nothing refused", [gate_ticks(0)] * 3, 0, [("IDLE", F91G)], has=["refused ticks 0 over 3 s"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
@@ -11674,10 +11866,10 @@ def self_test_health():
         # ---- the census: a feature with no rule still shows its tag ----
         label6 = "skin join: second skin this window: x | views given 0 (live 0) | on-foot source"
         out = check("census", [
-            "newest thing (F91): started", "newest thing (F91): ran", "newest thing (F91): ran again", "foo bar (F62c/F64): x", "native on foot pistol readout (F90, TEMPORARY): key = 1",
-            label6 + " (F2 on foot): target 7 (see also F3's note)", "a line about a cross reference (F70b) that mentions (F12) later", "a line with no tag at all",
+            "newest thing (F99): started", "newest thing (F99): ran", "newest thing (F99): ran again", "foo bar (F62c/F64): x", "native on foot pistol readout (F90, TEMPORARY): key = 1",
+            label6 + " (F2 on foot): target 7 (see also F3's note)", "a line about a cross reference (F70c) that mentions (F12) later", "a line with no tag at all",
             "a paren (F) and (Fx) and (F-1) and (F 1) here"], 0, has=["7 build-tagged lines, 6 tags, 10:00:01 to 10:00:07"], extra=["--health-all"])
-        for tag, n, a, b, text, star in (("F91", 3, 1, 3, "newest thing", ""), ("F90", 1, 5, 5, "native on foot pistol readout", "  *"), ("F70b", 1, 7, 7, "a line about a cross reference", ""),
+        for tag, n, a, b, text, star in (("F99", 3, 1, 3, "newest thing", ""), ("F90", 1, 5, 5, "native on foot pistol readout", "  *"), ("F70c", 1, 7, 7, "a line about a cross reference", ""),
                                          ("F64", 1, 4, 4, "foo bar", "  *"), ("F62c", 1, 4, 4, "foo bar", "  *"), ("F2", 1, 6, 6, "..." + label6[-45:], "")):
             checks += 1
             want = "    %-5s %7d  10:00:%02d-10:00:%02d  %s%s" % (tag, n, a, b, text, star)
@@ -11688,8 +11880,8 @@ def self_test_health():
         if re.search(r"^\s+F(12|3|1)\s", out, re.M):
             print("health census counted a tag that is only mentioned later in a line, or a malformed one:\n%s" % out)
             ok = False
-        check("census: only the tags with no rule by default", [f90_idle(), "newest thing (F91): started", "older thing (F70c): x"], 3,
-              has=["newest 2 of 2 tags with no rule", "    F91 ", "    F70c "], lacks=["    F90 "])
+        check("census: only the tags with no rule by default", [f90_idle(), "newest thing (F99): started", "older thing (F70c): x"], 3,
+              has=["newest 2 of 2 tags with no rule", "    F99 ", "    F70c "], lacks=["    F91 ", "    F90 "])
         out = check("census: the newest tag first", ["a (F80): x", "b (F95): y", "c (F9): z"], 0)
         checks += 1
         if not (out.index("    F95 ") < out.index("    F80 ") < out.index("    F9 ")):
