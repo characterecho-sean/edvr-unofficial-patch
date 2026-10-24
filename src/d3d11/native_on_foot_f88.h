@@ -6,16 +6,21 @@
 // The game places the first-person weapon relative to the character, not to the headset, so moving the eye moves it relative to the weapon. The offset O = (right, up,
 // forward) is in the character's axes (the AMC's right, up and forward: the axes of the "eye to weapon root (F87h)" line), so it turns with the body's yaw and not with the
 // head. It rides the eye alignment's seated translation: the camera moves by (-S0, -S1, +S2) in those axes for a seated shift S (F40's plant, as the ADS lock uses it), so the
-// seated shift for a camera move O is (-O0, -O1, +O2). The weight w is 1 while a weapon or tool is drawn at the hip, 0 unarmed and 0 in ADS (the F70 lock owns the eye
-// there), ramped over kRampS on each change.
+// seated shift for a camera move O is (-O0, -O1, +O2). The weight w is 1 while a weapon or tool is drawn at the hip, 0 unarmed, ramped over kRampS on each change. F89: w does
+// not depend on ADS. The F70 sight lock measures the rendered eye and sets its shift from the error to P14w + k f, so O under it only changes the shift the lock has to find and
+// the eye still lands on the sight; and on release the lock's shift runs down to zero and leaves the eye at the offset eye, with no dip to the un-offset eye in between (F88
+// zeroed w in ADS, which dropped the eye to the un-offset position the moment the sights came down and ramped it back once the journal's ADS flag cleared).
 //
 // The body pin takes the camera less the ADS shift S (nofoot::adsUnlockedCam). The pin ignores w O through the same mechanism: its seated image is added to S. stay: all of
 // it, so the body stays where it would be and only the view moves. follow: the vertical part only, so the body moves with the eye horizontally, as when the pilot leans, and
-// never stands taller than its standing height.
+// never stands taller than its standing height. In ADS the pin ignores the sight lock's shift beside it, and the same share of w O, so the pin's demand is the same at the hip
+// and in the sights.
 //
 // The standing-height hold (native_on_foot_f87.h) measures the head's posture as the render head plus the eye alignment published for it; w O is part of both, so it cancels
-// (devOf). The runtime applies a published value a frame or two later, and a moving w O would show as a difference for that long: the hold waits while the published up of
-// w O is changing and kHoldFreezeS after (Settle). The hold's output goes into the sum before w O is added to it, and w O never enters the hold.
+// (devOf). Until F89 the runtime applied a published value a frame or two later than the hold assumed, and a moving w O showed as a difference for that long: the hold waited
+// while the published up of w O was changing and kHoldFreezeS after (Settle). F89 matches the alignment the pose carries by its serial (native_on_foot_f89.h), so the
+// difference is gone; Settle remains for a runtime that does not report the applied serial. The hold's output goes into the sum before w O is added to it, and w O never
+// enters the hold.
 #pragma once
 
 #include <algorithm>
@@ -31,6 +36,9 @@ constexpr double kHoldFreezeS = 0.3;     // the hold's wait after the published 
 constexpr double kRightMinCm = -10.0, kRightMaxCm = 10.0;
 constexpr double kUpMinCm = -10.0, kUpMaxCm = 15.0;
 constexpr double kForwardMinCm = -10.0, kForwardMaxCm = 25.0;
+// F89: the keys' built-in values are the pilot's (F88 flight, 2026-10-24): forward 5.0, up 6.0, right 0.5 cm, body follow. (Keys{} below stays all zero: a struct with no
+// keys set; the config reader falls back to these.)
+constexpr double kForwardDefaultCm = 5.0, kUpDefaultCm = 6.0, kRightDefaultCm = 0.5;
 
 // A key's value, held to its range; anything not finite reads 0.
 inline double clampCm(double cm, double lo, double hi) noexcept { return std::isfinite(cm) ? std::min(hi, std::max(lo, cm)) : 0.0; }
@@ -51,8 +59,8 @@ struct Keys {
     bool any() const noexcept { return rightCm != 0.0 || upCm != 0.0 || forwardCm != 0.0; }
 };
 
-// The weight's target: in the body pin's scope, a weapon or tool drawn, and not aiming down sights.
-inline bool weightOn(bool pinScope, bool armed, bool ads) noexcept { return pinScope && armed && !ads; }
+// The weight's target: in the body pin's scope and a weapon or tool drawn (F89: aiming down sights does not change it).
+inline bool weightOn(bool pinScope, bool armed) noexcept { return pinScope && armed; }
 struct Weight {
     double w = 0.0;
     double step(bool on, double dt) noexcept {

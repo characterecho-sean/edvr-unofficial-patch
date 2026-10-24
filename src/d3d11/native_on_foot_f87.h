@@ -61,7 +61,7 @@ struct Ring {
 //     camera raise = - sustained,   published as the eye alignment's y = - raise (the runtime moves the seated origin: its +y lowers the view, as weaponViewOffsetSeated)
 //     transient = dev + raise       what the view still carries over the character's eye height
 // The body never follows the posture: the pin takes the camera less the transient (pinEyeYAdjust).
-constexpr double kSettleDefaultS = 3.0, kSettleMaxS = 10.0;
+constexpr double kSettleDefaultS = 0.1, kSettleMaxS = 10.0;   // F89: the pilot's value (was 3; the rate cap still applies)
 constexpr double kHoldSlewMps = 0.04, kHoldRampS = 0.5, kHoldStepM = 0.001, kHoldMaxM = 0.5;
 constexpr double kHoldCritical95 = 4.743898;   // omega * t for 1 - (1 + wt) exp(-wt) = 0.95
 constexpr double kPinCalStillM = 0.01, kPinCalStillS = 1.0;

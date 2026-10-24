@@ -75,11 +75,15 @@ class D3D11Stereo final {
   // argument of each draw, not a property of the kept pixels.
   // headPose, when given, is the located head of this frame (geometry_locator.h's input.headPose, in the same origin as the views): it is what the plugin
   // API's onUpdate receives. Absent, or not a valid pose, the plugins' update is skipped for the frame; an eye pose is never passed in its place.
+  // leftEyeDarken, 0..1 (F89, native on foot: the left eye closes while the sights are up, left_eye_darken.h), blends black over the LEFT eye's finished image by that
+  // much, as the very last pass over that image, after the plugins' overlay: out = in * (1 - level), the same blend as the comfort fade. Exactly 0 (and anything that is
+  // not a number or is negative) runs no extra pass, so the image is the one this renderer has always drawn, bit for bit; 1 or more is plain black. The right eye never
+  // reads it. Like the fade it is an argument of each draw, not a state of the renderer.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
-                          float fade = 0.0f, const XrPosef* headPose = nullptr);
+                          float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeDarken = 0.0f);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the

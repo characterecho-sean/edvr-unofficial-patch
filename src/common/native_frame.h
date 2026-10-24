@@ -76,10 +76,14 @@ struct EdvrNativeFrameInput {
     uint32_t ringCount;
     // Version 3 and later (F62b). The render head located in the runtime's natural LOCAL space at the frame's display time (the same 3x4 row-major
     // rigid transform as physicalHead), so it carries none of the seated origin's turns or offsets: the d3d11 half reads the headset's own
-    // motion from it while the seated space is being turned under it. localValid is 1 when it was located. localReserved is zero.
+    // motion from it while the seated space is being turned under it. localValid is 1 when it was located.
     float localHead[12];
     uint32_t localValid;
-    uint32_t localReserved;
+    // F89 (was localReserved, always zero): the eye alignment the pose of this frame (physicalHead, located in the seated space) carries. 0: not reported (a runtime from
+    // before F89, which sent zero here). Else the serial of the alignment (EdvrNativeFrameOutput::eyeAlignSerial, the one the runtime applied to its seated origin before it
+    // located this pose) plus 1; 1 is "none applied" (serial 0). The d3d11 half takes exactly that alignment out of the pose when it measures the head's posture, matched by
+    // serial and not by timing. A provider from before F89 ignores the word.
+    uint32_t eyeAlignApplied;
 };
 
 // The size of the version 1 input: the words through valid, which is what a version 1 caller's struct is.
@@ -105,6 +109,7 @@ struct EdvrNativeNowPose {
     uint32_t ringNewest, ringCount;
     float local[12];                // F62b: the render head in natural LOCAL (version 3 input), when localValid
     bool localValid;
+    uint32_t eyeAlignApplied;       // F89: the version 3 input's applied-alignment word (0: not reported)
 };
 
 struct EdvrNativeFrameOutput {
@@ -146,6 +151,9 @@ struct EdvrNativeFrameOutput {
     // RETIRED 2026-10-09 (version 4's one word: which projection query channel
     // the terrain guard's widened frustum was told through). Always zero, never
     // read; the slot stays for the same reason as the 21 above.
+    // F89 (fix.native_on_foot_ads_close_left_eye): in a version 10 answer only, the slot carries the LEFT eye's darkening, a float's bits (left_eye_darken.h): 0 (the image
+    // as it is) to 1 (black). The runtime blends black over the left eye's finished image by it, after everything else is drawn into it. A provider or runtime from before
+    // F89 leaves it zero and reads nothing, so a mismatched pair darkens nothing; a version 9 or older answer's slot is not believed (native_frame_client.h).
     uint32_t reservedProjectionChannel;
     // Version 5 and later. How black the projection layer is, 0 (clear, the
     // default and the only value an older provider can mean) to 1: the runtime

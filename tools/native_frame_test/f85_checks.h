@@ -1245,6 +1245,7 @@ inline void run87(Check&& check) {
         in.scope = true;
         in.devValid = true;
         in.dt = dt;
+        in.settleS = 3.0;   // F89: the default is 0.1 s; this case is the slow absorb
         for (int i = 0; i < 90; ++i) h.step(in);   // 1 s at the seat: dev 0
         for (int i = 0; i < 90 * 6; ++i) {
             in.devM = -0.10;
@@ -1267,7 +1268,8 @@ inline void run87(Check&& check) {
         check(maxPinErr < 1e-9, "F87h: while it is absorbed the pin's eye (camera less the transient) does not move: the body keeps the character's height");
         check(transientAt03 < -0.085 && std::fabs(transientAt6) < 0.01, "F87h: the slump is seen at first (the view is 8.5+ cm down at 0.3 s) and undone: the transient is under 1 cm at 6 s");
         check(raiseAt1 > 0.01 && raiseAt1 < raiseAt2 && raiseAt2 < raiseAt3 && raiseAt3 <= raiseAt4 + 1e-9 && maxRate <= 0.0415, "F87h: the hold rises steadily, at most 4 cm a second (the largest second's rise reads under 4.15 cm: 4 cm and a millimetre of rounding)");
-        check(f87::kHoldSlewMps == 0.04 && f87::kHoldStepM == 0.001 && f87::kHoldRampS == 0.5 && f87::kSettleDefaultS == 3.0, "F87h: the constants are 4 cm/s, 1 mm steps, a 0.5 s ramp and a 3 s default settle");
+        check(f87::kHoldSlewMps == 0.04 && f87::kHoldStepM == 0.001 && f87::kHoldRampS == 0.5 && f87::kSettleDefaultS == 0.1 && f87::HoldIn{}.settleS == 0.1,
+              "F87h: the constants are 4 cm/s, 1 mm steps, a 0.5 s ramp and a 0.1 s default settle (F89: was 3)");
     }
     {   // a -60 degree nod with the neck still: the eye drops by the pivot's drop and the hold stays 0
         const double pitch = -60.0 * f85::kPi / 180.0;
@@ -1291,6 +1293,7 @@ inline void run87(Check&& check) {
         in.scope = true;
         in.devValid = true;
         in.dt = dt;
+        in.settleS = 3.0;   // F89: the default is 0.1 s; this case is the slow absorb
         for (int i = 0; i < 90 * 2; ++i) h.step(in);
         double worstView = 0.0, pinErr = 0.0;
         for (int i = 0; i < 27; ++i) {   // 0.3 s
@@ -1320,6 +1323,7 @@ inline void run87(Check&& check) {
         in.scope = true;
         in.devValid = true;
         in.dt = dt;
+        in.settleS = 3.0;   // F89: the default is 0.1 s; this case is the slow absorb
         in.devM = -0.08;
         for (int i = 0; i < 90 * 5; ++i) h.step(in);
         const f87::HoldOut before = h.step(in);
@@ -1370,7 +1374,7 @@ inline void run87(Check&& check) {
         f87::HoldOut o = h.step(in);
         check(std::fabs(o.raiseM - 0.07) < 1e-9 && std::fabs(o.transientM) < 1e-9, "F87h: a settle time of 0 holds the neck hard: the raise is the whole deviation at once and the transient is 0");
         check(f87::settleClamp(std::numeric_limits<double>::quiet_NaN()) == f87::kSettleDefaultS && f87::settleClamp(-1.0) == 0.0 && f87::settleClamp(20.0) == f87::kSettleMaxS && f87::settleClamp(3.0) == 3.0,
-              "F87h: the settle key reads 0..10 s, NaN reads the default 3");
+              "F87h: the settle key reads 0..10 s, NaN reads the default 0.1");
     }
     {   // the measurement and the pin calibration's stillness gate
         check(std::fabs(f87::devOf(0.05, -0.02, -0.10) - 0.13) < 1e-12, "F87h: dev is the seated height plus the eye alignment taken out, less the neck pivot's drop");
@@ -1719,7 +1723,7 @@ inline void run88(Check&& check) {
               "F88: the keys read to forward -10..25, up -10..15 and right -10..10 cm, and a value that is not finite reads 0");
         check(follow == f88::kFollow && kn && stay == f88::kStay && ks && other == f88::kFollow && !kx && empty == f88::kFollow && !ke && none == f88::kFollow && !kz &&
                   std::strcmp(f88::bodyName(f88::kStay), "stay") == 0 && std::strcmp(f88::bodyName(f88::kFollow), "follow") == 0 && f88::Keys{}.body == f88::kFollow && !f88::Keys{}.any(),
-              "F88: the body key reads follow or stay, anything else reads follow (and says so), and the defaults are 0, 0, 0 and follow");
+              "F88: the body key reads follow or stay, anything else reads follow (and says so), and a Keys with nothing set is 0, 0, 0 and follow (F89's built-in values are checked in run89)");
     }
     // ---- the defaults reproduce F87 exactly ----------------------------------------------------------------------------------------------------------
     {
@@ -1743,9 +1747,8 @@ inline void run88(Check&& check) {
     }
     // ---- the weight --------------------------------------------------------------------------------------------------------------------------------
     {
-        check(f88::weightOn(true, true, false) && !f88::weightOn(true, false, false) && !f88::weightOn(true, true, true) && !f88::weightOn(false, true, false) &&
-                  !f88::weightOn(false, false, false) && !f88::weightOn(true, false, true),
-              "F88: w is on only with a weapon or tool drawn in the pin's scope and not aiming down sights (unarmed, ADS and the cockpit are off)");
+        check(f88::weightOn(true, true) && !f88::weightOn(true, false) && !f88::weightOn(false, true) && !f88::weightOn(false, false),
+              "F88: w is on only with a weapon or tool drawn in the pin's scope (F89: aiming down sights is not an input; unarmed and the cockpit are off)");
         f88::Weight w;
         double w11 = 0.0, w22 = 0.0, w23 = 0.0;
         for (int i = 1; i <= 23; ++i) {
@@ -1756,22 +1759,22 @@ inline void run88(Check&& check) {
         }
         check(std::fabs(w11 - 11.0 * dt / f88::kRampS) < 1e-12 && w22 > 0.97 && w22 < 1.0 && w23 == 1.0 && f88::kRampS == 0.25,
               "F88: w ramps 0 -> 1 over 0.25 s: 22 ticks at 90 Hz are short of 1, 23 reach it, and the ramp is linear");
-        // draw, ADS in, ADS out, holster: w never steps more than a tick of the ramp, is 0 in ADS and unarmed, and 1 drawn at the hip
+        // draw, ADS in, ADS out, holster: w never steps more than a tick of the ramp, is 0 unarmed, 1 with a weapon drawn, and stays 1 through the ADS (F89)
         f88::Weight v;
         double maxStep = 0.0, prev = 0.0;
-        const auto phase = [&](bool pin, bool armed, bool ads, int ticks) {
+        const auto phase = [&](bool pin, bool armed, int ticks) {
             for (int i = 0; i < ticks; ++i) {
-                v.step(f88::weightOn(pin, armed, ads), dt);
+                v.step(f88::weightOn(pin, armed), dt);
                 maxStep = std::max(maxStep, std::fabs(v.w - prev));
                 prev = v.w;
             }
             return v.w;
         };
-        const double afterUnarmed = phase(true, false, false, 60), afterDraw = phase(true, true, false, 30), afterAds = phase(true, true, true, 30);
-        const double midAdsOut = phase(true, true, false, 11), afterAdsOut = phase(true, true, false, 30), afterHolster = phase(true, false, false, 30);
-        check(afterUnarmed == 0.0 && afterDraw == 1.0 && afterAds == 0.0 && midAdsOut > 0.4 && midAdsOut < 0.6 && afterAdsOut == 1.0 && afterHolster == 0.0 &&
+        const double afterUnarmed = phase(true, false, 60), afterDraw = phase(true, true, 30), afterAds = phase(true, true, 30);   // the sights up: nothing changes
+        const double afterAdsOut = phase(true, true, 30), midHolster = phase(true, false, 11), afterHolster = phase(true, false, 30);
+        check(afterUnarmed == 0.0 && afterDraw == 1.0 && afterAds == 1.0 && afterAdsOut == 1.0 && midHolster > 0.4 && midHolster < 0.6 && afterHolster == 0.0 &&
                   maxStep <= dt / f88::kRampS + 1e-12,
-              "F88: w is 0 unarmed, 1 with a weapon drawn at the hip, 0 in ADS, back to 1 when ADS ends and 0 holstered, ramped on each change and never more than a tick of the ramp apart");
+              "F88: w is 0 unarmed, 1 with a weapon drawn at the hip and still 1 through ADS in and out (F89), 0 holstered, ramped on each change and never more than a tick of the ramp apart");
     }
     // ---- the offset rotates with the body's yaw -------------------------------------------------------------------------------------------------------
     {
@@ -1830,7 +1833,7 @@ inline void run88(Check&& check) {
             double x0 = 0.0;
             for (int i = 0; i < 90 * 8; ++i) {
                 const bool armed = i >= 90 * 4;   // a rifle drawn at 4 s
-                w.step(f88::weightOn(true, armed, false), dt);
+                w.step(f88::weightOn(true, armed), dt);
                 f88::Keys k = keys;
                 k.upCm = 10.0;
                 const f88::Out o = f88::make(k, w.w);
@@ -1947,8 +1950,9 @@ inline void run88(Check&& check) {
         f88::Weight w;
         double prev[3] = {}, maxJump = 0.0, atRest[3] = {};
         const auto phase = [&](bool armed, bool ads, int ticks) {
+            (void)ads;   // F89: aiming down sights is not an input to w; the phases keep the sequence the F88 check had
             for (int i = 0; i < ticks; ++i) {
-                w.step(f88::weightOn(true, armed, ads), dt);
+                w.step(f88::weightOn(true, armed), dt);
                 const f88::Out o = f88::make(big, w.w);
                 for (int a = 0; a < 3; ++a) {
                     maxJump = std::max(maxJump, std::fabs(o.seated[a] - prev[a]));
@@ -1967,8 +1971,9 @@ inline void run88(Check&& check) {
         phase(false, false, 30);
         const double holstered[3] = {atRest[0], atRest[1], atRest[2]};
         check(maxJump <= 0.25 * dt / f88::kRampS + 1e-12 && std::fabs(drawn[0] - 0.10) < 1e-12 && std::fabs(drawn[1] + 0.15) < 1e-12 && std::fabs(drawn[2] - 0.25) < 1e-12 &&
-                  isPlusZero(inAds) && std::fabs(outAds[0] - drawn[0]) < 1e-12 && isPlusZero(holstered),
-              "F88: at the largest offsets (right -10, up 15, forward 25 cm) the seated shift steps by at most 1.2 cm a tick through a draw, ADS in, ADS out and a holster, is (+10, -15, +25) cm drawn at the hip and exactly 0 in ADS and holstered");
+                  std::fabs(inAds[0] - drawn[0]) < 1e-12 && std::fabs(inAds[1] - drawn[1]) < 1e-12 && std::fabs(inAds[2] - drawn[2]) < 1e-12 &&
+                  std::fabs(outAds[0] - drawn[0]) < 1e-12 && isPlusZero(holstered),
+              "F88: at the largest offsets (right -10, up 15, forward 25 cm) the seated shift steps by at most 1.2 cm a tick through a draw and a holster, is (+10, -15, +25) cm drawn at the hip, the same in ADS (F89) and exactly 0 holstered");
     }
 }
 

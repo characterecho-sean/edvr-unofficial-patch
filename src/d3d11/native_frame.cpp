@@ -1,6 +1,7 @@
 #include "../common/native_frame.h"
 
 #include "../common/comfort_fade.h"
+#include "../common/left_eye_darken.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
@@ -64,6 +65,7 @@ float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (
 // F62b: the latest version 3 input's head in natural LOCAL (guarded by g_mutex).
 float g_localHead[12] = {};
 bool g_localHeadValid = false;
+uint32_t g_eyeAlignApplied = 0;   // F89: the latest version 3 input's applied-alignment word (0: not reported; guarded by g_mutex)
 // F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
 float g_renderHead[12] = {};
 float g_nowHeadPose[12] = {};
@@ -369,6 +371,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         result.reservedOffset[1] = g_rotCal[1];
         // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
         if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
+        // F89: the left eye's darkening (fix.native_on_foot_ads_close_left_eye), in a version 10 answer only: 0 unless the frame thread published a fresh level.
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10)
+            result.reservedProjectionChannel = edvr::eyedarken::toBits(edvr::eyedarken::read(GetTickCount64()));
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -397,6 +402,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // F62b: the head in LOCAL (version 3 only). An unusable one is dropped for this frame, never a refusal (the F32 rule).
     g_localHeadValid = inputV3 && input->localValid == 1 && rigidPose(input->localHead);
     if (g_localHeadValid) std::memcpy(g_localHead, input->localHead, sizeof(g_localHead));
+    g_eyeAlignApplied = inputV3 ? input->eyeAlignApplied : 0u;   // F89: the alignment the pose carries, by serial (0: a runtime that does not say)
     if (inputV3) {
         static bool accepted = false;
         if (!accepted) {
@@ -657,6 +663,7 @@ bool nativeFrameNowPose(EdvrNativeNowPose& out) {
     out.ringCount = g_ringCount;
     std::memcpy(out.local, g_localHead, sizeof(out.local));   // F62b
     out.localValid = g_localHeadValid;
+    out.eyeAlignApplied = g_eyeAlignApplied;   // F89
     return true;
 }
 

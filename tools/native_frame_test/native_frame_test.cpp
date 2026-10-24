@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 #include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
 #include "f85_checks.h"   // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts, shared with a desk driver)
+#include "f89_checks.h"   // F89: the ADS release, the left eye closing in ADS, the transition trace, the hold's open-loop input
 
 #include <array>
 #include <chrono>
@@ -5990,7 +5991,39 @@ int wmain(int argc, wchar_t** argv) {
                   table.beginFrame(table.context, &v10ShortFrame, &v10Short) == E_INVALIDARG,
               "F62b: version 10 with a version 2 input, version 9 with a version 3 input, and a version 3 input of the version 2 size are refused");
         check(EDVR_NATIVE_FRAME_INPUT_SIZE_2 + 14u * 4u == sizeof(EdvrNativeFrameInput) && EDVR_NATIVE_FRAME_INPUT_SIZE_1 < EDVR_NATIVE_FRAME_INPUT_SIZE_2,
-              "F62b: the version 3 input is the version 2 words plus the LOCAL head (12 floats), its flag and a reserved word");
+              "F62b: the version 3 input is the version 2 words plus the LOCAL head (12 floats), its flag and a word (F89: the applied alignment's serial)");
+        // F89: the left eye's darkening rides a version 10 answer's reservedProjectionChannel (the float's bits); no other shape carries it, and a stale or absent level reads 0.
+        edvr::eyedarken::clear();
+        EdvrNativeFrameOutput darkNone{sizeof(darkNone), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput darkNoneFrame = v3Input(34, 0.1f);
+        edvr::eyedarken::publish(0.6f, GetTickCount64());
+        EdvrNativeFrameOutput darkSet{sizeof(darkSet), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput darkSetFrame = v3Input(32, 0.1f);
+        EdvrNativeFrameOutput dark9{sizeof(dark9), EDVR_NATIVE_FRAME_VERSION_9};
+        EdvrNativeFrameInput dark9Frame = input(41, 7, 33);
+        dark9Frame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        dark9Frame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        dark9.reservedProjectionChannel = 0xA5A5A5A5u;
+        const bool setOk = table.beginFrame(table.context, &darkSetFrame, &darkSet) == S_OK && darkSet.version == EDVR_NATIVE_FRAME_VERSION_10 &&
+                           edvr::eyedarken::fromBits(darkSet.reservedProjectionChannel) == 0.6f;
+        const bool v9Ok = table.beginFrame(table.context, &dark9Frame, &dark9) == S_OK && dark9.version == EDVR_NATIVE_FRAME_VERSION_9 && dark9.reservedProjectionChannel == 0u;
+        edvr::eyedarken::clear();
+        const bool noneOk = table.beginFrame(table.context, &darkNoneFrame, &darkNone) == S_OK && darkNone.reservedProjectionChannel == 0u;
+        check(setOk && v9Ok && noneOk,
+              "F89: a version 10 answer carries the left eye's darkening in reservedProjectionChannel (0.6 as published), a version 9 answer's slot is 0, and with nothing published the slot is 0");
+        // F89: the applied alignment's serial rides the version 3 input's last word and arrives with the frame; a version 2 input has none (0: not reported)
+        EdvrNativeFrameOutput appliedOut{sizeof(appliedOut), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput appliedFrame = v3Input(35, 0.1f);
+        appliedFrame.eyeAlignApplied = 42u;
+        EdvrNativeNowPose npApplied{};
+        const bool v3Applied = table.beginFrame(table.context, &appliedFrame, &appliedOut) == S_OK && edvr::nativeFrameNowPose(npApplied) && npApplied.eyeAlignApplied == 42u;
+        EdvrNativeFrameOutput applied9{sizeof(applied9), EDVR_NATIVE_FRAME_VERSION_9};
+        EdvrNativeFrameInput applied9Frame = input(41, 7, 36);
+        applied9Frame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        applied9Frame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        applied9Frame.eyeAlignApplied = 99u;
+        const bool v2Applied = table.beginFrame(table.context, &applied9Frame, &applied9) == S_OK && edvr::nativeFrameNowPose(npApplied) && npApplied.eyeAlignApplied == 0u;
+        check(v3Applied && v2Applied, "F89: the applied-alignment serial of a version 3 input reaches nativeFrameNowPose, and an older input reads 0 (the runtime does not say)");
         edvr::nativeFrameSetAdsPitch(0.0f);
     }
     edvr::g_nativeOnFootActive.store(false);
@@ -7145,6 +7178,8 @@ int wmain(int argc, wchar_t** argv) {
     f85test::run87(check);
     // F88: the weapon eye offset: the keys, the weight, the yaw, the hold's input, the pin's share, the readout and the continuity.
     f85test::run88(check);
+    // F89: the ADS release (w has no ADS input, the eye path, the pin), the left eye closing in ADS, the transition trace and the hold's open-loop input.
+    f89test::run89(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

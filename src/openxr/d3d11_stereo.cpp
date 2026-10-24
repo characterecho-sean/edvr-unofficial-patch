@@ -277,9 +277,10 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose) {
+                                   const XrPosef* headPose, float leftEyeDarken) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
+  leftEyeDarken=comfort::sanitize(leftEyeDarken);
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -424,6 +425,29 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
           eyeCtx.viewportWidth = eyes_[i].width;
           eyeCtx.viewportHeight = eyes_[i].height;
           g_pluginBridge.renderEye(&eyeCtx);
+        }
+      }
+
+      // F89 (native on foot, fix.native_on_foot_ads_close_left_eye): the LEFT eye closes while the sights are up. This is the last pass over that eye's image, after the
+      // fade and the plugins' overlay, so it covers everything that eye shows: the scene, the HUD and the menu are all in the captured image, and the runtime submits
+      // one projection layer and no other. The plugins may have changed any state, so the full pass is bound again. The right eye (i == 1) never takes it.
+      if(i==0&&leftEyeDarken>0.f) {
+        drawContext->OMSetRenderTargets(1,&rtv,nullptr);
+        if(leftEyeDarken>=1.f) {
+          const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);
+        } else {
+          const D3D11_VIEWPORT whole{0,0,float(eyes_[i].width),float(eyes_[i].height),0,1};
+          drawContext->RSSetViewports(1,&whole);
+          drawContext->RSSetState(rasterizer_.Get());drawContext->OMSetDepthStencilState(depth_.Get(),0);
+          drawContext->IASetInputLayout(nullptr);drawContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+          drawContext->VSSetShader(blitVertexShader_.Get(),nullptr,0);drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
+          drawContext->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
+          drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
+          drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
+          const float factor[4]={leftEyeDarken,leftEyeDarken,leftEyeDarken,leftEyeDarken};
+          drawContext->OMSetBlendState(fadeBlend_.Get(),factor,~0u);drawContext->Draw(3,0);
+          drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+          ID3D11ShaderResourceView* nullDarken=nullptr;drawContext->PSSetShaderResources(0,1,&nullDarken);
         }
       }
     }

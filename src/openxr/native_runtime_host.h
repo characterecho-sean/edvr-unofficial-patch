@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include "../common/comfort_fade.h"
+#include "../common/left_eye_darken.h"
 #include "../common/frame_flag.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/periodic_work.h"
@@ -406,6 +407,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
   // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
   double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
+  // F89: the serial of the alignment eyeApplied is (0: none, the origin's own). Told to the provider with each frame's pose (EdvrNativeFrameInput::eyeAlignApplied, serial + 1), so
+  // the d3d11 half takes out of the pose exactly the alignment that was applied to it, however late the runtime applied it. Moves only where eyeApplied does.
+  uint32_t eyeAppliedSerial=0;
   uint64_t eyeApplies=0,eyeRefusals=0,eyeLineMs=0;const char* eyeWhy="";bool eyeFirstSeen=false;
   // F61 (TEMPORARY, the rotation calibration, fix.native_on_foot_rot_calibrate): the seated yaw and pitch (radians) the provider wants the
   // seated origin turned by about the head (version 9 output's reservedOffset[0..1]), and what it carries now. The yaw turns lookSeated about
@@ -1569,7 +1573,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
         if(!adsLocalSent){adsLocalSent=true;nativeTracePrintf("ads_head_aim_runtime: first LOCAL head for input version 3: %s\n",haveLocal?"located":"not located");}
       }
-      if(features.begin(located,poses.read().originGeneration,next,haveLocal?localHead:nullptr)!=S_OK) {
+      // F89: the pose above was located with the alignment of serial eyeAppliedSerial in the seated origin (eyePoll ran before it): said with the pose.
+      if(features.begin(located,poses.read().originGeneration,next,haveLocal?localHead:nullptr,eyeAppliedSerial+1u)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
@@ -2607,9 +2612,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
+    // F89: the left eye's darkening (fix.native_on_foot_ads_close_left_eye), also on a replayed pair: it is this frame's level, an argument of each draw.
+    const float leftDark=leftEyeDarken();
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose());
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftDark):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftDark);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -2647,6 +2654,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
   float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
+  // F89: how black the LEFT eye is (fix.native_on_foot_ads_close_left_eye in the d3d11 half): a version 10 answer's reservedProjectionChannel, else 0. Traced at each edge between
+  // clear and darkened, and once a second while darkened.
+  float leftEyeDarken() {
+    const float level=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10?
+      eyedarken::fromBits(featureFrame.reservedProjectionChannel):0.f;
+    const uint64_t now=GetTickCount64();
+    if((level>0.f)!=leftDarkenOn||(level>0.f&&now-leftDarkenLineMs>=1000)) {
+      leftDarkenOn=level>0.f;leftDarkenLineMs=now;
+      nativeTracePrintf("left_eye_darken,level=%.3f,state=%s,path=runtime_final_pass\n",double(level),level>0.f?"darkened":"clear");
+    }
+    return level;
+  }
+  bool leftDarkenOn=false;uint64_t leftDarkenLineMs=0;
   SystemRead read() const override {return geometry.read();}
   void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
     temporal.noteProjection(sequence,eye,nearZ,farZ); // CPU only; never dispatch/wait on the XR owner
@@ -3191,6 +3211,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
     lookWanted=lookBase;lookComp=0;
     eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;   // F33: the new origin carries no body-align translation either
+    eyeAppliedSerial=0;                            // F89: ... which is serial 0, the zero alignment
     rotApplied[0]=rotApplied[1]=0;                 // F61: nor the calibration rotation (rotPoll applies the wanted value again)
     adsApplied=0;                                  // F62b: nor the ADS head-aim's pitch (adsPoll applies the wanted value again)
   }
@@ -3292,6 +3313,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         ++eyeApplies;eyeWhy="";
       }
     }
+    // F89: what eyeApplied now is, by serial: the wanted alignment once it is (within a micrometre) the applied one. An apply that was refused, or put off because a frame
+    // is open, leaves the serial of the alignment the origin really carries.
+    if(std::fmax(std::fabs(eyeWanted[0]-eyeApplied[0]),std::fmax(std::fabs(eyeWanted[1]-eyeApplied[1]),std::fabs(eyeWanted[2]-eyeApplied[2])))<=1e-6)
+      eyeAppliedSerial=eyeSerialSeen;
     if(now-eyeLineMs>=5000||eyeLineMs==0) {
       eyeLineMs=now;
       nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s\n",

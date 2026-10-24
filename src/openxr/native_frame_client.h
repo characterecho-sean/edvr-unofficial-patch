@@ -27,11 +27,13 @@ class NativeFrameClient final {
   // F62b: the version the client asks first (10 until a provider refuses it): the host locates the LOCAL head only for a version 10 ask.
   uint32_t askedVersion()const{return providerVersion_;}
   // F62b: localHead (optional, 12 floats, row-major 3x4 rigid in natural LOCAL) rides the version 3 input of a version 10 ask.
-  HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out,const float* localHead=nullptr) {
+  // F89: eyeApplied is the applied-alignment word (native_frame.h, EdvrNativeFrameInput::eyeAlignApplied): the serial of the eye alignment the pose carries, plus 1.
+  HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out,const float* localHead=nullptr,uint32_t eyeApplied=0) {
     out=ask(providerVersion_);
     if(!acquired())return S_FALSE;
     EdvrNativeFrameInput in{sizeof(in),EDVR_NATIVE_FRAME_INPUT_VERSION_3};
     if(localHead){std::memcpy(in.localHead,localHead,sizeof(in.localHead));in.localValid=1;}
+    in.eyeAlignApplied=eyeApplied;
     in.generation=generation_;in.referenceGeneration=reference;in.sequence=geometry.sequence;
     GeometrySnapshot snapshot{};in.valid=makeGeometrySnapshot(geometry,snapshot)?1u:0u;
     if(in.valid)std::memcpy(in.physicalHead,snapshot.headToLocal.m,sizeof(in.physicalHead));
@@ -100,6 +102,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_9) out.nowPoseRender=0;
     // F62b: the ADS head-aim's pitch (reservedYaw) is zero unless a version 10 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10||!(out.reservedYaw==out.reservedYaw)) out.reservedYaw=0;
+    // F89: the left eye's darkening (reservedProjectionChannel, a float's bits) is zero unless a version 10 answer carried it.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.reservedProjectionChannel=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
