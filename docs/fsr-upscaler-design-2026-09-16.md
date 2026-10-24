@@ -9,16 +9,16 @@ read 2026-09-16) unless marked believed.
 ## Status
 
 - **State (2026-10-24): route 2 FLOWN FLAT, BRANCH ONLY; render-thread
-  stall under instrument.** `fix.temporal_aa = fsr4` (FSR 4.1 through
+  stall found: the D3D11 key releases.** `fix.temporal_aa = fsr4` (FSR 4.1 through
   AMD's signed D3D12 DLLs over a D3D11/D3D12 bridge, modelled on XeSS's)
   on `claude/fsr-4-1-flat-vr-support-5f6ea4`, flat and VR, beside `fsr`
   (route 1, unchanged). Not merged to main until Sean says it ships (D9).
   Facts, decisions D7 to D9 and the flight plan: journal, "2026-10-23:
   route 2". Flight 5 (journal, "2026-10-23 night"): FSR 4.1.1 ran on the
   Radeon 8060S through `FSR4_UPGRADE=1`, every dispatch clean. Its GPU
-  work is small (0.8 ms at 1280x800 to 2560x1600); the bridge holds the
-  render thread 3 to 8 ms a frame, a wait on the GPU (journal,
-  "2026-10-24: the render-thread stall"). Same spot, FSR 4 35 to 38 fps,
+  work is small (0.8 ms); the bridge held the render thread 3 to 8 ms a
+  frame in DXVK's keyed-mutex `ReleaseSync` (flight 6, journal): held keys
+  cut the evaluate from 6.6 to 0.27 ms, 52 to 60 fps. Same spot, FSR 4 35 to 38 fps,
   FSR 3 36 to 38. Sean reports artifacts (vertical streaks in a station,
   FSR 3 comparison pending). A main-menu crash after a display change
   was in Elite's occlusion culler, before FSR 4 ran (set aside).
@@ -31,11 +31,11 @@ read 2026-09-16) unless marked believed.
   slightly better than the pass's own history, not DLSS). The community
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
-- **Next:** flight 6, the instrumented bridge with
-  `diag.fsr4_shared_locks = alternate`, standing still in a station for
-  three minutes; signatures in the 2026-10-24 entry. Then the artifacts
-  (FSR 3 against FSR 4 at the same spot, a NumLock capture), VR, the AMD
-  licence read and the installer payload (D8). Route 1's flight 4 (an AMD
+- **Next:** flight 7, no build: at a spot that flickers, F8 through FSR 4,
+  FSR 3, XeSS-SR and TAA, then `temporal_aa_jitter_phases` 8 to 32 live
+  and a NumLock capture (candidates a to d, flight 6 entry). Held keys
+  looked mostly clean; they become the behaviour once (c) is out, and the
+  key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
@@ -60,7 +60,7 @@ read 2026-09-16) unless marked believed.
   Steam rig also carries an AMD iGPU (gate on the DXGI vendor id, never on
   adapter count); since 2026-10-23 a Ryzen AI Max+ 395 (Radeon 8060S, RDNA
   3.5, gfx1151) on CachyOS, Mesa 26.2.5 RADV, Proton (DXVK + vkd3d-proton),
-  with no local Windows toolchain: builds come from the GitHub workflow.
+  compile-only builds from tools/linux_toolchain.py since 2026-10-24.
   FSR needs typed UAV loads (vendor-stated); cards without them (believed:
   NVIDIA before Maxwell) must get a clean refusal.
 - **Detail:** 1 what exists; 2 what AMD ships; 3 the design; 4 flights;
@@ -874,3 +874,41 @@ class of upscaler): that is route 2's go/no-go.
   `signal-in` or `signal-out` carries it. Held keys that broke the
   interop would show as a stale, black or flickering image only in the
   held windows, or refusals in the log.
+- 2026-10-24: flight 6, H1 confirmed. Log `edvr_gfx_20261024_060947.log`
+  (the CI build of c967b6ca, v0.0.0-ci, `locks alternate` logged; laptop
+  panel, out 2560x1600, in 1280x800 then 2176x1360 after a quality
+  change at 06:13:22; read mid-flight, five windows to 06:13:57; every
+  dispatch rc=0, no refusals). Medians, ms:
+
+  | window | locks | evals/s | eval | give-in | give-out | record |
+  |---|---|---|---|---|---|---|
+  | 06:11:27 (79 s, load) | per-frame | 15.3 | 3.620 | 2.228 | 1.229 | 0.076 |
+  | 06:11:57 | held | 60.0 | 0.245 | 0.000 | 0.000 | 0.184 |
+  | 06:12:27 | per-frame | 52.3 | 6.594 | 4.886 | 1.323 | 0.170 |
+  | 06:12:57 | held | 59.7 | 0.271 | 0.000 | 0.000 | 0.199 |
+  | 06:13:27 (2176x1360) | per-frame | 46.9 | 7.042 | 5.341 | 1.336 | 0.176 |
+  | 06:13:57 (2176x1360) | held | 58.4 | 1.619 | 0.000 | 0.000 | 0.263 |
+
+  The two key releases are the stall: under per-frame they are 95% of
+  the evaluate; under held it falls from 6.6 to 0.27 ms and the game
+  reaches its 60 fps cap. FSR 4's GPU side did not change (D3D12 wait
+  1.2 to 1.4 ms, d3d11 total 1.4 to 1.8 ms in both modes). Ruled out:
+  AMD's recording as the stall (H2), because `record` is 0.08 to 0.26 ms
+  under both; DXVK's fence flushes (H3), because `signal-in` and
+  `signal-out` stay under 0.01 ms. Sean, after the flight: the image
+  looked mostly clean, with no stale or black frames; certain parts of it
+  flicker, which DLSS on his Windows rig does not show. Not yet tied to
+  the held windows. Candidates, each with what would tell it apart:
+  (a) the jitter cycle: FSR 3 and FSR 4 get the configured 8 phases
+  (`flat jitter: ... phases=8` in this log) where AMD asks for 8 x the
+  scale squared, 32 at 1280x800 to 2560x1600 (XeSS-SR alone gets a
+  scale-aware count): flicker on fine static detail with an 8-frame
+  period, fixed by `advanced.temporal_aa_jitter_phases = 32` (live
+  reload, no build); (b) no reactive or transparency mask (both routes
+  pass none): flicker or smear on holograms, screens, particles and
+  glass, unchanged by (a); (c) the held locks racing the copies: flicker
+  that comes and goes with the 30 s `alternate` windows; (d) FSR 4's
+  model on RDNA 3.5 (`FSR4_UPGRADE`): FSR 4 flickers where FSR 3 and
+  XeSS-SR at the same spot do not, and (a) does not help. A DLSS rig on
+  Windows differs in GPU, platform and jitter use, so it is not a control
+  here; the same-spot F8 comparison on this rig is.
