@@ -14,6 +14,7 @@
 #include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
 #include "f85_checks.h"   // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts, shared with a desk driver)
 #include "f89_checks.h"   // F89: the ADS release, the left eye closing in ADS, the transition trace, the hold's open-loop input
+#include "f90_checks.h"   // F90: the weapon readout's size in ADS, the pistol's readout in the weapon's frame
 
 #include <array>
 #include <chrono>
@@ -1500,7 +1501,7 @@ int wmain(int argc, wchar_t** argv) {
                 check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::ikElbowOutClampCm(45.0) == 30.0 && nf::ikElbowOutClampCm(-1.0) == 0.0 &&
                           nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == nf::kIkSquareAmountDefault &&
                           nf::kIkSwivelTrimDefaultDeg == 6.0 && nf::kIkSquareAmountDefault == 0.75 && nf::kIkAdsTrimDegDefault == 3.0 &&
-                          nf::kIkAdsRaiseCmDefault == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.5,
+                          nf::kIkAdsRaiseCmDefault == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
                       "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
             }
             // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.
@@ -7180,6 +7181,8 @@ int wmain(int argc, wchar_t** argv) {
     f85test::run88(check);
     // F89: the ADS release (w has no ADS input, the eye path, the pin), the left eye closing in ADS, the transition trace and the hold's open-loop input.
     f89test::run89(check);
+    // F90: A, the ADS readout part scaled to the hip's texels per metre about its content centre; B, the pistol's readout in the weapon's frame, its latch and keys.
+    f90test::run90(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

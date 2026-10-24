@@ -1,0 +1,330 @@
+// F90 (native on-foot VR): the weapon readout at the hip's size while aiming down sights (A) and the pistol's readout placed in the weapon's frame (B). Design:
+// reviews\native-onfoot-f90-review-2026-10-24.md; journal: the arc doc, F90. Header only, no game or D3D11 state: native_frame_test runs these functions on the
+// F85 two-eye rig, and f85bDecide (native_on_foot.cpp) calls them at each weapon UI draw.
+//
+// A. Every weapon UI part (a B10B quad of the marker composite) samples one texture, 3525 x 3133 texels and redrawn each frame, through its own UV rectangle
+// (UV = unpack(PACKEDVERTEXDATAB) x b2 row 6 .xy x 16 + .zw). The game draws the readout into the rectangle of the part it shows: 29501 at the hip (rifle and
+// pistol), 29500 in the rifle's ADS and, inferred from the rifle's ADS texture (no pistol ADS dump yet), 29498 in the pistol's. The content has one texel size
+// in the texture, so its world size is set by the part's texels per metre: 29500 maps 16/9 as many per cm as 29501, and its digits are 9/16 of the hip's size
+// (the ADS shrink seen since F85). Scaling the part by texels/m(part) / texels/m(29501) about its content centre gives them the hip's size at the game's own
+// ADS place. The scale belongs to the part (29500's rectangle is empty at the hip in every frame of the F89 flight's hip dumps), so there is no ADS gate and
+// no ramp.
+//
+// B. The pistol's hip readout (29501) sits over the rear sight, 13 cm behind mid-barrel and 4.7 cm nearer than the gun under it. With a pistol held it moves
+// to T = T0 + toward unit(E - T0), T0 = C + R_w (forward, left, up): C the game's content centre, R_w the barrel, left and up of the FP right attach (joint 51)
+// through F_root, E the deciding eye. Four TEMPORARY keys; all four 0 leave F85b's rows bit for bit. T is latched once a render frame by the first eye that
+// decides 29501 and is reused by the other eye and by 29498 (scaled by A, then moved onto T, so the ADS readout keeps the hip spot and the hip size). A
+// translation keeps the game's facing: U3 is untouched.
+#pragma once
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+#include "native_on_foot_core.h"   // f85::UFrame, f86::scaleUFrameAbout, barrelRow, ikUnit, f88::clampCm
+
+namespace edvr {
+namespace nofoot {
+namespace f90 {
+
+// ---- A: the parts -------------------------------------------------------------------------------------------------------------------------------------------
+constexpr uint32_t kHipPart = 29501, kRifleAdsPart = 29500, kPistolAdsPart = 29498;
+constexpr double kTexSize[2] = {3525.0, 3133.0};   // the texture every part samples (u, v)
+constexpr double kUvSpanPerUnit = 0.9995;           // the packed quad's UV extent per unit of |b2 row 6 .xy| (0.4098 / 0.41), the same for every part: it cancels in a ratio
+constexpr double kMatchTol = 0.01;                  // the mesh's extents and the record's scale must be within 1% of the table's
+struct Part {
+    uint32_t name;
+    double mesh[2];     // the quad's extents in mesh units: x (the panel's right) and z (its up)
+    double scale;       // the record's scale (word 1)
+    double uv[2];       // |b2 row 6 .xy|: the UV rectangle's size per unit of the packed span
+    double centre[2];   // the content's centre in mesh units (x, z), from the F89 flight's dumps
+};
+constexpr int kPartCount = 3;
+constexpr Part kParts[kPartCount] = {
+    {kHipPart, {2.0, 1.0}, 0.07207, {0.41, 0.230625}, {-0.19, 0.20}},
+    {kRifleAdsPart, {3.0, 1.0}, 0.05010, {0.76, 0.285}, {-0.96, 0.02}},
+    {kPistolAdsPart, {2.0, 1.0}, 0.16680, {0.542222, 0.305}, {-0.58, 0.02}},
+};
+inline const Part* part(uint32_t name) noexcept {
+    for (const Part& p : kParts)
+        if (p.name == name) return &p;
+    return nullptr;
+}
+// Texels per metre along the panel's right (axis 0, u) or up (axis 1, v), at the table's record scale.
+inline double texelsPerM(const Part& p, int axis) noexcept { return p.uv[axis] * kUvSpanPerUnit * kTexSize[axis] / (p.mesh[axis] * p.scale); }
+// texels/m(name) / texels/m(29501) along one axis: the factor that gives the part's content the hip's world size (29500: 1.77769 u, 1.77768 v; 29498: 0.57142
+// both; 29501: 1). NaN for a name outside the table.
+inline double texelRatio(uint32_t name, int axis) noexcept {
+    const Part* p = part(name);
+    const Part* hip = part(kHipPart);
+    if (!p || !hip || axis < 0 || axis > 1) return std::nan("");
+    return texelsPerM(*p, axis) / texelsPerM(*hip, axis);
+}
+// The factor A applies (the scale is one number): the mean of the two axes' ratios, which agree to 1e-5.
+inline double sizeFactor(uint32_t name) noexcept { return 0.5 * (texelRatio(name, 0) + texelRatio(name, 1)); }
+inline bool within(double v, double want) noexcept { return std::isfinite(v) && std::fabs(v - want) <= kMatchTol * std::fabs(want); }
+// The draw is the table's part: its icon mesh was read and its x and z extents and the record's scale are each within 1% of the table's.
+inline bool tableMatches(const Part& p, bool meshRead, const double ext[2], double recScale) noexcept {
+    return meshRead && within(ext[0], p.mesh[0]) && within(ext[1], p.mesh[1]) && within(recScale, p.scale);
+}
+// A mesh point (x, 0, z) where the vertex shader puts it in the hud frame: x0rel + scale * q(v), the transform F86d's panel uses for its corners. Rot is
+// drawtag::rotateByPackedQuat (passed in: draw_record_tag.h needs d3d11.h ahead of it, and this header does not).
+template <class Rot>
+inline void contentPoint(const double x0rel[3], uint32_t q2, uint32_t q3, double scale, const double cMesh[2], Rot rotate, double out[3]) noexcept {
+    const double v[3] = {cMesh[0], 0.0, cMesh[1]};
+    double rv[3];
+    rotate(q2, q3, v, rv);
+    for (int i = 0; i < 3; ++i) out[i] = x0rel[i] + scale * rv[i];
+}
+
+// ---- the map a decision applies -------------------------------------------------------------------------------------------------------------------------------
+// P' = k P + (1 - k) c + t, in the composite frame's world (relative to the eye's rows' origin): A's scale about the content centre c, then B's move t. U3 is
+// scaled by k and never turned, so the panel keeps the game's facing.
+struct Map {
+    bool scale = false, move = false;
+    double c[3] = {}, k = 1.0, t[3] = {};
+    bool identity() const noexcept { return !scale && !move; }
+};
+inline void mapPoint(const Map& m, const double p[3], double out[3]) noexcept {
+    double q[3] = {p[0], p[1], p[2]};
+    if (m.scale)
+        for (int i = 0; i < 3; ++i) q[i] = m.k * q[i] + (1.0 - m.k) * m.c[i];
+    if (m.move)
+        for (int i = 0; i < 3; ++i) q[i] += m.t[i];
+    std::memcpy(out, q, sizeof(q));
+}
+inline void applyMap(f85::UFrame& uf, const Map& m) noexcept {
+    if (m.scale) f86::scaleUFrameAbout(uf, m.c, m.k);
+    if (m.move)
+        for (int a = 0; a < 3; ++a) uf.u4[a] += m.t[a];
+}
+
+// ---- B: the weapon frame ----------------------------------------------------------------------------------------------------------------------------------------
+enum FrameSrc : int { kFrameNone = 0, kFrameAttach = 1, kFrameRoot = 2 };
+struct WeaponFrame {
+    int src = kFrameNone;
+    double b[3] = {}, l[3] = {}, u[3] = {};   // the barrel (toward the muzzle), left and up, world, unit
+    double barrelDeg = 0.0;                   // b against F_root's forward
+};
+// attachFresh, rootFresh: the FP snapshot and F_root are within kIkFreshMs. attach: the FP right attach (joint 51, snapshot slot kIkFpSlotAttach[1]), FP model
+// space, row-vector; froot: F_root, row-vector, world. The attach's rows reach the world through F_root (row x F_root, as ikXform takes a point). b: the attach
+// row most aligned with F_root's forward, signed (barrelRow, F69b's rule: within 45 degrees). u: of the two other rows the one most aligned with F_root's up,
+// signed toward it and made orthogonal to b. l = b x u, signed so that l . (F_root's right) < 0. A stale snapshot, or no attach row within 45 degrees of the aim,
+// takes F_root's own rows (forward, up, minus right); no fresh F_root: none.
+inline WeaponFrame weaponFrame(bool attachFresh, const float attach[16], bool rootFresh, const float froot[16]) noexcept {
+    WeaponFrame w;
+    if (!rootFresh || !froot) return w;
+    double R[3][3];
+    for (int i = 0; i < 3; ++i) {
+        const double r[3] = {froot[4 * i], froot[4 * i + 1], froot[4 * i + 2]};
+        if (!ikUnit(r, R[i])) return w;
+    }
+    const auto finish = [&](const double b[3], const double upHint[3], int src) noexcept {
+        WeaponFrame o;
+        const double d = ikDot(upHint, b);
+        const double u[3] = {upHint[0] - d * b[0], upHint[1] - d * b[1], upHint[2] - d * b[2]};
+        double l[3];
+        if (!ikUnit(u, o.u)) return o;
+        ikCross(b, o.u, l);
+        if (ikDot(l, R[0]) > 0.0)
+            for (double& x : l) x = -x;
+        if (!ikUnit(l, o.l)) return WeaponFrame{};
+        std::memcpy(o.b, b, sizeof(o.b));
+        const double c = ikDot(o.b, R[2]);
+        o.barrelDeg = std::acos(c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c) * f85::kDeg;
+        o.src = src;
+        return o;
+    };
+    if (attachFresh && attach) {
+        double rows[3][3];
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; ++i) {
+            double r[3];
+            for (int c = 0; c < 3; ++c)
+                r[c] = static_cast<double>(attach[4 * i]) * froot[c] + static_cast<double>(attach[4 * i + 1]) * froot[4 + c] +
+                       static_cast<double>(attach[4 * i + 2]) * froot[8 + c];
+            ok = ikUnit(r, rows[i]);
+        }
+        int axis = -1;
+        double sign = 1.0;
+        if (ok && barrelRow(rows, R[2], &axis, &sign)) {
+            const double b[3] = {sign * rows[axis][0], sign * rows[axis][1], sign * rows[axis][2]};
+            int best = -1;
+            double bd = -1.0, bs = 1.0;
+            for (int i = 0; i < 3; ++i) {
+                if (i == axis) continue;
+                const double d = ikDot(rows[i], R[1]);
+                if (std::fabs(d) > bd) {
+                    bd = std::fabs(d);
+                    best = i;
+                    bs = d < 0.0 ? -1.0 : 1.0;
+                }
+            }
+            const double hint[3] = {bs * rows[best][0], bs * rows[best][1], bs * rows[best][2]};
+            w = finish(b, hint, kFrameAttach);
+            if (w.src == kFrameAttach) return w;
+        }
+    }
+    w = finish(R[2], R[1], kFrameRoot);
+    return w;
+}
+
+// ---- B: the keys and the target ---------------------------------------------------------------------------------------------------------------------------------
+// fix.native_on_foot_pistol_readout_forward_cm, _left_cm, _up_cm, _toward_eye_cm (TEMPORARY, live): clamped to these ranges (f88::clampCm: anything not finite
+// reads 0). The built-in values are the review's, from one dump (+-2 cm): forward 13 (mid-slide), left 6 (about 4 cm clear of the slide), up -3 (down to about
+// the barrel's height), toward eye 2 (nearer than the barrel beside it). Keys{} stays all zero: a struct with no keys set; the config reader falls back to these.
+constexpr double kForwardMinCm = -10.0, kForwardMaxCm = 30.0;
+constexpr double kLeftMinCm = -15.0, kLeftMaxCm = 15.0;
+constexpr double kUpMinCm = -10.0, kUpMaxCm = 10.0;
+constexpr double kTowardMinCm = -5.0, kTowardMaxCm = 10.0;
+constexpr double kForwardDefaultCm = 13.0, kLeftDefaultCm = 6.0, kUpDefaultCm = -3.0, kTowardDefaultCm = 2.0;
+struct Keys {
+    double forwardCm = 0.0, leftCm = 0.0, upCm = 0.0, towardCm = 0.0;
+    bool any() const noexcept { return forwardCm != 0.0 || leftCm != 0.0 || upCm != 0.0 || towardCm != 0.0; }
+};
+// T = T0 + toward unit(E - T0), T0 = C + forward b + left l + up u (absolute world, metres). All keys 0: T = C exactly. False when a key needs what is missing:
+// a weapon frame for forward, left or up, the eye for toward.
+inline bool target(const double C[3], const WeaponFrame& w, const Keys& k, const double* eye, double T[3]) noexcept {
+    if (!k.any()) {
+        std::memcpy(T, C, 3 * sizeof(double));
+        return true;
+    }
+    double T0[3] = {C[0], C[1], C[2]};
+    if (k.forwardCm != 0.0 || k.leftCm != 0.0 || k.upCm != 0.0) {
+        if (w.src == kFrameNone) return false;
+        for (int i = 0; i < 3; ++i) T0[i] += 0.01 * (k.forwardCm * w.b[i] + k.leftCm * w.l[i] + k.upCm * w.u[i]);
+    }
+    if (k.towardCm != 0.0) {
+        if (!eye) return false;
+        const double d[3] = {eye[0] - T0[0], eye[1] - T0[1], eye[2] - T0[2]};
+        double du[3];
+        if (!ikUnit(d, du)) return false;
+        for (int i = 0; i < 3; ++i) T0[i] += 0.01 * k.towardCm * du[i];
+    }
+    if (!std::isfinite(T0[0]) || !std::isfinite(T0[1]) || !std::isfinite(T0[2])) return false;
+    std::memcpy(T, T0, sizeof(T0));
+    return true;
+}
+
+// ---- the decision ----------------------------------------------------------------------------------------------------------------------------------------------
+// The held item, for B: not a pistol (or nothing held: B does nothing), the held pistol, or a pistol name the decision cannot trust (its serial is not the held
+// item's, or the item could not be read): B refuses and counts it.
+enum Item : int { kItemOther = 0, kItemPistol = 1, kItemNotHeld = 2 };
+enum AState : int { kANotTable = 0, kAHip = 1, kAScaled = 2, kAMismatch = 3 };
+enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefTable, kBRefFrame, kBRefEye, kBRefNoTarget, kBCount };
+// B's target, latched once a render frame by the first 29501 decision (either eye), for one held item.
+struct Latch {
+    bool have = false;
+    uint32_t frame = 0, serial = 0;
+    double T[3] = {}, C[3] = {};   // absolute world
+};
+struct In {
+    uint32_t frame = 0, name = 0, itemSerial = 0;
+    int item = kItemOther;
+    bool meshRead = false;
+    double meshExt[2] = {};   // the icon mesh's x and z extents (mesh units)
+    double recScale = 0.0;
+    uint32_t q2 = 0, q3 = 0;  // the record's packed quaternion
+    double x0rel[3] = {};     // the record's translation less o_hud
+    double ow[3] = {};        // the eye's rows' origin (absolute)
+    bool eyeOk = false;
+    double eye[3] = {};       // the eye's origin from its scene rows (absolute)
+    Keys keys;
+    double adsW = 0.0;        // the ADS weight at the draw, for the line only: the decision never reads it
+};
+struct Out {
+    int a = kANotTable, b = kBNone;
+    double k = 1.0;
+    Map map;
+    bool haveC = false;
+    double C[3] = {}, shown[3] = {};   // the content centre before and after the map (absolute world)
+    bool frameComputed = false, latched = false;   // this call computed the weapon frame (wf) and put T into the latch
+    WeaponFrame wf;
+    bool haveT = false;
+    double T[3] = {}, shiftM = 0.0;    // B's target and, when this call latched it, |T - C|
+};
+// One weapon UI draw: A's scale and B's move for the part `in.name`, given the eye's getter frame uf (P - o_world = U3 v + u4). frameFn() returns the weapon
+// frame; it is called only when this draw latches T. The caller applies o.map to uf (applyMap) and to the proof's target (mapPoint).
+template <class Rot, class FrameFn>
+inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate, FrameFn frameFn) noexcept {
+    Out o;
+    const Part* p = part(in.name);
+    if (!p) return o;
+    const bool bPart = in.name == kHipPart || in.name == kPistolAdsPart;
+    const int item = bPart ? in.item : kItemOther;
+    if (!tableMatches(*p, in.meshRead, in.meshExt, in.recScale)) {   // skipped and counted, never applied
+        o.a = kAMismatch;
+        o.b = item == kItemPistol ? kBRefTable : item == kItemNotHeld ? kBRefItem : kBNone;
+        return o;
+    }
+    double c[3], Crel[3];
+    contentPoint(in.x0rel, in.q2, in.q3, in.recScale, p->centre, rotate, c);
+    f85::mulVec3(uf.U3, c, Crel);
+    for (int i = 0; i < 3; ++i) {
+        Crel[i] += uf.u4[i];
+        o.C[i] = Crel[i] + in.ow[i];
+    }
+    o.haveC = true;
+    if (in.name != kHipPart) {
+        o.a = kAScaled;
+        o.k = sizeFactor(in.name);
+        o.map.scale = true;
+        o.map.k = o.k;
+        std::memcpy(o.map.c, Crel, sizeof(Crel));
+    } else {
+        o.a = kAHip;
+    }
+    if (item == kItemNotHeld) {
+        o.b = kBRefItem;
+    } else if (item == kItemPistol) {
+        const bool sameItem = latch.have && latch.serial == in.itemSerial;
+        if (in.name == kHipPart) {
+            if (sameItem && latch.frame == in.frame) {
+                std::memcpy(o.T, latch.T, sizeof(o.T));
+                o.haveT = true;
+            } else {
+                o.wf = frameFn();
+                o.frameComputed = true;
+                if (target(o.C, o.wf, in.keys, in.eyeOk ? in.eye : nullptr, o.T)) {
+                    latch.have = true;
+                    latch.frame = in.frame;
+                    latch.serial = in.itemSerial;
+                    std::memcpy(latch.T, o.T, sizeof(latch.T));
+                    std::memcpy(latch.C, o.C, sizeof(latch.C));
+                    o.latched = true;
+                    o.haveT = true;
+                    const double d[3] = {o.T[0] - o.C[0], o.T[1] - o.C[1], o.T[2] - o.C[2]};
+                    o.shiftM = ikLen(d);
+                } else {
+                    const bool needFrame = in.keys.forwardCm != 0.0 || in.keys.leftCm != 0.0 || in.keys.upCm != 0.0;
+                    o.b = needFrame && o.wf.src == kFrameNone ? kBRefFrame : kBRefEye;
+                }
+            }
+            if (o.haveT) {
+                o.b = kBMoved;
+                if (in.keys.any()) {   // all keys 0: no move at all, so the rows are F85b's bit for bit in both eyes
+                    o.map.move = true;
+                    for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
+                }
+            }
+        } else {   // 29498: this frame's T, else the previous frame's (counted), else none
+            if (sameItem && (latch.frame == in.frame || latch.frame + 1u == in.frame)) {
+                std::memcpy(o.T, latch.T, sizeof(o.T));
+                o.haveT = true;
+                o.b = latch.frame == in.frame ? kBMoved : kBMovedPrevious;
+                o.map.move = true;
+                for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
+            } else {
+                o.b = kBRefNoTarget;
+            }
+        }
+    }
+    double shownRel[3];
+    mapPoint(o.map, Crel, shownRel);
+    for (int i = 0; i < 3; ++i) o.shown[i] = shownRel[i] + in.ow[i];
+    return o;
+}
+
+}  // namespace f90
+}  // namespace nofoot
+}  // namespace edvr

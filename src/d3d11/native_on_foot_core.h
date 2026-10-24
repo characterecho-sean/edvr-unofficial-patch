@@ -1712,7 +1712,7 @@ constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
 constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSwivelTrimDefaultDeg = 6.0, kIkSquareAmountDefault = 0.75, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
-constexpr double kWeaponViewOffsetDefaultCm = 2.5;
+constexpr double kWeaponViewOffsetDefaultCm = 2.0;   // F90: the pilot's value from the F89 flight (2.5 before)
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
 // def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
 constexpr uint32_t kIkFpJoints[11] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34, 14};

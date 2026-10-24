@@ -102,10 +102,10 @@ inline void run89(Check&& check) {
 
     // ---- the built-in values --------------------------------------------------------------------------------------------------------------------------
     {
-        check(f88::kForwardDefaultCm == 5.0 && f88::kUpDefaultCm == 6.0 && f88::kRightDefaultCm == 0.5 && f87::kSettleDefaultS == 0.1 && f88::Keys{}.body == f88::kFollow,
-              "F89: the built-in values are the pilot's: weapon eye forward 5.0, up 6.0, right 0.5 cm, body follow, standing height settle 0.1 s");
+        check(f88::kForwardDefaultCm == 9.0 && f88::kUpDefaultCm == 7.5 && f88::kRightDefaultCm == 0.0 && f87::kSettleDefaultS == 0.1 && f88::Keys{}.body == f88::kFollow,
+              "F90: the built-in values are the pilot's (F89 flight): weapon eye forward 9.0, up 7.5, right 0.0 cm, body follow, standing height settle 0.1 s");
         check(pilot.rightCm >= f88::kRightMinCm && pilot.rightCm <= f88::kRightMaxCm && pilot.upCm >= f88::kUpMinCm && pilot.upCm <= f88::kUpMaxCm &&
-                  pilot.forwardCm >= f88::kForwardMinCm && pilot.forwardCm <= f88::kForwardMaxCm && f88::clampCm(pilot.forwardCm, f88::kForwardMinCm, f88::kForwardMaxCm) == 5.0,
+                  pilot.forwardCm >= f88::kForwardMinCm && pilot.forwardCm <= f88::kForwardMaxCm && f88::clampCm(pilot.forwardCm, f88::kForwardMinCm, f88::kForwardMaxCm) == 9.0,
               "F89: the built-in values are inside the keys' ranges and the clamp leaves them as they are");
     }
 
@@ -271,12 +271,13 @@ inline void run89(Check&& check) {
                         dBody[a] = 0.0;
                         for (int c = 0; c < 3; ++c) dBody[a] += (sights[static_cast<size_t>(c)] - noO[static_cast<size_t>(c)]) * b.d[static_cast<size_t>(3 * a + c)];
                     }
-                    followOk = followOk && dHipSights < 4e-6 && std::fabs(dBody[0] - 0.005) < 4e-6 && std::fabs(dBody[1]) < 4e-6 && std::fabs(dBody[2] - 0.05) < 4e-6;
+                    followOk = followOk && dHipSights < 4e-6 && std::fabs(dBody[0] - 0.01 * pilot.rightCm) < 4e-6 && std::fabs(dBody[1]) < 4e-6 &&
+                               std::fabs(dBody[2] - 0.01 * pilot.forwardCm) < 4e-6;
                 }
             }
         }
         check(stayOk && noOStay, "F89: with body stay the pin's demand in the sights is the same as at the hip and the same as with no O at all: the pin ignores the lock's shift and all of w O, for any yaw");
-        check(followOk, "F89: with body follow the pin's demand in the sights is the same as at the hip: it moves with O's right 0.5 and forward 5 cm (the body's axes) and never by the up 6 cm, for any yaw");
+        check(followOk, "F89: with body follow the pin's demand in the sights is the same as at the hip: it moves with O's right and forward (the built-in values, the body's axes) and never by its up, for any yaw");
     }
 
     // ---- the hold's input in the sights is the head's posture -----------------------------------------------------------------------------------------------
