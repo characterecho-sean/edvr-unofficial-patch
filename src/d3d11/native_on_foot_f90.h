@@ -15,6 +15,10 @@
 // through F_root, E the deciding eye. Four TEMPORARY keys; all four 0 leave F85b's rows bit for bit. T is latched once a render frame by the first eye that
 // decides 29501 and is reused by the other eye and by 29498 (scaled by A, then moved onto T, so the ADS readout keeps the hip spot and the hip size). A
 // translation keeps the game's facing: U3 is untouched.
+//
+// F91 (reviews\native-onfoot-f91-review-2026-10-24.md, part A): the F90 flight applied nothing, because the table was keyed on the F89 session's part names and
+// the game interns them per session. The parts are now known by their record's mesh and scale (partOf), the data F90 read as its guard; the names above are the
+// F89 session's, kept as the parts' history. In the F90 session the same parts were 29510 (hip), 29526 (rifle ADS), 29524 (pistol ADS) and 29553 (tool).
 #pragma once
 
 #include <cmath>
@@ -28,45 +32,72 @@ namespace nofoot {
 namespace f90 {
 
 // ---- A: the parts -------------------------------------------------------------------------------------------------------------------------------------------
-constexpr uint32_t kHipPart = 29501, kRifleAdsPart = 29500, kPistolAdsPart = 29498;
+// F91: a part is known by its record's mesh (x and z extents) and scale, each within 1% of a row. The name ids F90 keyed on are interned per session (29501,
+// 29500, 29498 and 29495 in the F89 flight, 29510, 29526, 29524 and 29553 in F90's) and the slots follow the first-submit order, so neither names a part; the
+// mesh, the record's scale, the layout, b2 row 6 and the texture were bit-identical in both sessions. The four scales are at least 1.3x apart, so a match is
+// unambiguous. The record scale is the layout's width x base / mesh x, and the UV span is width x 4008 texels, so texels/m = 4008 / base and A's factor is
+// base(hip) / base(part): 1.7777779 and 0.5714286, which the UV-derived factor below matches within 1e-4.
+enum Role : int { kRoleNone = 0, kRoleHip = 1, kRoleRifleAds = 2, kRolePistolAds = 3, kRoleTool = 4 };
 constexpr double kTexSize[2] = {3525.0, 3133.0};   // the texture every part samples (u, v)
 constexpr double kUvSpanPerUnit = 0.9995;           // the packed quad's UV extent per unit of |b2 row 6 .xy| (0.4098 / 0.41), the same for every part: it cancels in a ratio
-constexpr double kMatchTol = 0.01;                  // the mesh's extents and the record's scale must be within 1% of the table's
+constexpr double kMatchTol = 0.01;                  // the mesh's extents and the record's scale must be within 1% of a row
 struct Part {
-    uint32_t name;
+    int role;
     double mesh[2];     // the quad's extents in mesh units: x (the panel's right) and z (its up)
-    double scale;       // the record's scale (word 1)
-    double uv[2];       // |b2 row 6 .xy|: the UV rectangle's size per unit of the packed span
+    double scale;       // the record's scale (word 1), as both flights measured it
+    double base;        // the game's layout base scale (the submit sample's +0x54): the log, and the rig's check of the factor
+    double uv[2];       // |b2 row 6 .xy|: the UV rectangle's size per unit of the packed span (the tool's was not dumped: 0)
     double centre[2];   // the content's centre in mesh units (x, z), from the F89 flight's dumps
 };
-constexpr int kPartCount = 3;
+constexpr int kPartCount = 4;
 constexpr Part kParts[kPartCount] = {
-    {kHipPart, {2.0, 1.0}, 0.07207, {0.41, 0.230625}, {-0.19, 0.20}},
-    {kRifleAdsPart, {3.0, 1.0}, 0.05010, {0.76, 0.285}, {-0.96, 0.02}},
-    {kPistolAdsPart, {2.0, 1.0}, 0.16680, {0.542222, 0.305}, {-0.58, 0.02}},
+    {kRoleHip, {2.0, 1.0}, 0.072070308, 0.400000006, {0.41, 0.230625}, {-0.19, 0.20}},
+    {kRoleRifleAds, {3.0, 1.0}, 0.0500976555, 0.224999994, {0.76, 0.285}, {-0.96, 0.02}},
+    {kRolePistolAds, {2.0, 1.0}, 0.166796863, 0.699999988, {0.542222, 0.305}, {-0.58, 0.02}},
+    {kRoleTool, {2.0, 1.0}, 0.0939941406, 0.699999988, {0.0, 0.0}, {0.0, 0.0}},   // never scaled or moved: the row exists so the log names it
 };
-inline const Part* part(uint32_t name) noexcept {
+inline const Part* partOfRole(int role) noexcept {
     for (const Part& p : kParts)
-        if (p.name == name) return &p;
+        if (p.role == role) return &p;
     return nullptr;
 }
-// Texels per metre along the panel's right (axis 0, u) or up (axis 1, v), at the table's record scale.
-inline double texelsPerM(const Part& p, int axis) noexcept { return p.uv[axis] * kUvSpanPerUnit * kTexSize[axis] / (p.mesh[axis] * p.scale); }
-// texels/m(name) / texels/m(29501) along one axis: the factor that gives the part's content the hip's world size (29500: 1.77769 u, 1.77768 v; 29498: 0.57142
-// both; 29501: 1). NaN for a name outside the table.
-inline double texelRatio(uint32_t name, int axis) noexcept {
-    const Part* p = part(name);
-    const Part* hip = part(kHipPart);
-    if (!p || !hip || axis < 0 || axis > 1) return std::nan("");
-    return texelsPerM(*p, axis) / texelsPerM(*hip, axis);
+inline const char* roleName(int role) noexcept {
+    switch (role) {
+        case kRoleHip: return "hip readout";
+        case kRoleRifleAds: return "rifle ADS readout";
+        case kRolePistolAds: return "pistol ADS readout";
+        case kRoleTool: return "tool readout";
+        default: return "no table part";
+    }
 }
-// The factor A applies (the scale is one number): the mean of the two axes' ratios, which agree to 1e-5.
-inline double sizeFactor(uint32_t name) noexcept { return 0.5 * (texelRatio(name, 0) + texelRatio(name, 1)); }
+inline bool scaledRole(int role) noexcept { return role == kRoleRifleAds || role == kRolePistolAds; }
 inline bool within(double v, double want) noexcept { return std::isfinite(v) && std::fabs(v - want) <= kMatchTol * std::fabs(want); }
-// The draw is the table's part: its icon mesh was read and its x and z extents and the record's scale are each within 1% of the table's.
+// The draw is a row's part: its icon mesh was read and its x and z extents and the record's scale are each within 1% of the row's.
 inline bool tableMatches(const Part& p, bool meshRead, const double ext[2], double recScale) noexcept {
     return meshRead && within(ext[0], p.mesh[0]) && within(ext[1], p.mesh[1]) && within(recScale, p.scale);
 }
+// The unique row the record matches, else nullptr (none, or more than one).
+inline const Part* partOf(bool meshRead, const double ext[2], double recScale) noexcept {
+    const Part* found = nullptr;
+    for (const Part& p : kParts)
+        if (tableMatches(p, meshRead, ext, recScale)) {
+            if (found) return nullptr;
+            found = &p;
+        }
+    return found;
+}
+// Texels per metre along the panel's right (axis 0, u) or up (axis 1, v), at the row's record scale.
+inline double texelsPerM(const Part& p, int axis) noexcept { return p.uv[axis] * kUvSpanPerUnit * kTexSize[axis] / (p.mesh[axis] * p.scale); }
+// texels/m(role) / texels/m(hip) along one axis: the factor that gives the part's content the hip's world size (rifle ADS 1.77777, pistol ADS 0.57143, hip 1).
+// NaN for the tool (its UV rectangle was not dumped) and for no role.
+inline double texelRatio(int role, int axis) noexcept {
+    const Part* p = partOfRole(role);
+    const Part* hip = partOfRole(kRoleHip);
+    if (!p || !hip || axis < 0 || axis > 1 || (role != kRoleHip && !scaledRole(role))) return std::nan("");
+    return texelsPerM(*p, axis) / texelsPerM(*hip, axis);
+}
+// The factor A applies (the scale is one number): the mean of the two axes' ratios, which agree to 1e-5.
+inline double sizeFactor(int role) noexcept { return 0.5 * (texelRatio(role, 0) + texelRatio(role, 1)); }
 // A mesh point (x, 0, z) where the vertex shader puts it in the hud frame: x0rel + scale * q(v), the transform F86d's panel uses for its corners. Rot is
 // drawtag::rotateByPackedQuat (passed in: draw_record_tag.h needs d3d11.h ahead of it, and this header does not).
 template <class Rot>
@@ -210,16 +241,17 @@ inline bool target(const double C[3], const WeaponFrame& w, const Keys& k, const
 // The held item, for B: not a pistol (or nothing held: B does nothing), the held pistol, or a pistol name the decision cannot trust (its serial is not the held
 // item's, or the item could not be read): B refuses and counts it.
 enum Item : int { kItemOther = 0, kItemPistol = 1, kItemNotHeld = 2 };
-enum AState : int { kANotTable = 0, kAHip = 1, kAScaled = 2, kAMismatch = 3 };
-enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefTable, kBRefFrame, kBRefEye, kBRefNoTarget, kBCount };
-// B's target, latched once a render frame by the first 29501 decision (either eye), for one held item.
+// A: no table part (F91: the record matches no row: not scaled, not moved, counted), the hip readout, a scaled ADS readout, the tool's readout (left as it is).
+enum AState : int { kANotTable = 0, kAHip = 1, kAScaled = 2, kATool = 3 };
+enum BState : int { kBNone = 0, kBMoved, kBMovedPrevious, kBRefItem, kBRefFrame, kBRefEye, kBRefNoTarget, kBCount };
+// B's target, latched once a render frame by the first hip readout decision (either eye), for one held item.
 struct Latch {
     bool have = false;
     uint32_t frame = 0, serial = 0;
     double T[3] = {}, C[3] = {};   // absolute world
 };
 struct In {
-    uint32_t frame = 0, name = 0, itemSerial = 0;
+    uint32_t frame = 0, name = 0, itemSerial = 0;   // name: the part's name id this session, for the lines only (F91: never an identity)
     int item = kItemOther;
     bool meshRead = false;
     double meshExt[2] = {};   // the icon mesh's x and z extents (mesh units)
@@ -233,6 +265,7 @@ struct In {
     double adsW = 0.0;        // the ADS weight at the draw, for the line only: the decision never reads it
 };
 struct Out {
+    int role = kRoleNone;
     int a = kANotTable, b = kBNone;
     double k = 1.0;
     Map map;
@@ -243,20 +276,21 @@ struct Out {
     bool haveT = false;
     double T[3] = {}, shiftM = 0.0;    // B's target and, when this call latched it, |T - C|
 };
-// One weapon UI draw: A's scale and B's move for the part `in.name`, given the eye's getter frame uf (P - o_world = U3 v + u4). frameFn() returns the weapon
-// frame; it is called only when this draw latches T. The caller applies o.map to uf (applyMap) and to the proof's target (mapPoint).
+// One weapon UI draw: A's scale and B's move for the part the record's mesh and scale name (F91: partOf; the name id is not read), given the eye's getter
+// frame uf (P - o_world = U3 v + u4). frameFn() returns the weapon frame; it is called only when this draw latches T. The caller applies o.map to uf
+// (applyMap) and to the proof's target (mapPoint).
 template <class Rot, class FrameFn>
 inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate, FrameFn frameFn) noexcept {
     Out o;
-    const Part* p = part(in.name);
-    if (!p) return o;
-    const bool bPart = in.name == kHipPart || in.name == kPistolAdsPart;
-    const int item = bPart ? in.item : kItemOther;
-    if (!tableMatches(*p, in.meshRead, in.meshExt, in.recScale)) {   // skipped and counted, never applied
-        o.a = kAMismatch;
-        o.b = item == kItemPistol ? kBRefTable : item == kItemNotHeld ? kBRefItem : kBNone;
+    const Part* p = partOf(in.meshRead, in.meshExt, in.recScale);
+    if (!p) return o;   // no table part: not scaled, not moved (counted by the caller)
+    o.role = p->role;
+    if (p->role == kRoleTool) {   // named for the log, left as the game draws it
+        o.a = kATool;
         return o;
     }
+    const bool bPart = p->role == kRoleHip || p->role == kRolePistolAds;
+    const int item = bPart ? in.item : kItemOther;
     double c[3], Crel[3];
     contentPoint(in.x0rel, in.q2, in.q3, in.recScale, p->centre, rotate, c);
     f85::mulVec3(uf.U3, c, Crel);
@@ -265,9 +299,9 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         o.C[i] = Crel[i] + in.ow[i];
     }
     o.haveC = true;
-    if (in.name != kHipPart) {
+    if (p->role != kRoleHip) {
         o.a = kAScaled;
-        o.k = sizeFactor(in.name);
+        o.k = sizeFactor(p->role);
         o.map.scale = true;
         o.map.k = o.k;
         std::memcpy(o.map.c, Crel, sizeof(Crel));
@@ -278,7 +312,7 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         o.b = kBRefItem;
     } else if (item == kItemPistol) {
         const bool sameItem = latch.have && latch.serial == in.itemSerial;
-        if (in.name == kHipPart) {
+        if (p->role == kRoleHip) {
             if (sameItem && latch.frame == in.frame) {
                 std::memcpy(o.T, latch.T, sizeof(o.T));
                 o.haveT = true;
@@ -307,7 +341,7 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
                     for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
                 }
             }
-        } else {   // 29498: this frame's T, else the previous frame's (counted), else none
+        } else {   // the pistol's ADS readout: this frame's T, else the previous frame's (counted), else none
             if (sameItem && (latch.frame == in.frame || latch.frame + 1u == in.frame)) {
                 std::memcpy(o.T, latch.T, sizeof(o.T));
                 o.haveT = true;
@@ -324,6 +358,34 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
     for (int i = 0; i < 3; ++i) o.shown[i] = shownRel[i] + in.ow[i];
     return o;
 }
+
+// ---- F91: the role line, once per (held item, slot) ---------------------------------------------------------------------------------------------------------------
+// A slot's role is named at its first decision after an item change and whenever it changes; a role that keeps changing for one item is named at most
+// kRoleLinesPerItem times (the rest are counted), so a part whose mesh is read on some frames only cannot flood the log.
+constexpr uint32_t kRoleLinesPerItem = 8;
+struct RoleLog {
+    bool have = false;
+    uint32_t serial = 0, lines = 0, suppressed = 0;
+    int role = kRoleNone;
+    // True when this decision's (serial, role) is to be logged; the state moves on either way.
+    bool step(uint32_t heldSerial, int role_) noexcept {
+        const bool newItem = !have || heldSerial != serial;
+        if (!newItem && role_ == role) return false;
+        if (newItem) {
+            lines = 0;
+            suppressed = 0;
+        }
+        have = true;
+        serial = heldSerial;
+        role = role_;
+        if (lines >= kRoleLinesPerItem) {
+            ++suppressed;
+            return false;
+        }
+        ++lines;
+        return true;
+    }
+};
 
 }  // namespace f90
 }  // namespace nofoot

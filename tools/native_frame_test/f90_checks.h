@@ -1,4 +1,5 @@
-// F90 checks (native on-foot VR): the weapon readout at the hip's size in ADS (A) and the pistol's readout placed in the weapon's frame (B), run90 below: the pure
+// F90 and F91a checks (native on-foot VR; F91a: the parts known by their record's mesh and scale, across sessions, and the role line). F90: the weapon readout at
+// the hip's size in ADS (A) and the pistol's readout placed in the weapon's frame (B), run90 below: the pure
 // functions of src\d3d11\native_on_foot_f90.h on the F85 two-eye rig (two eyes 6.06 cm apart with a 10.75 degree cant, a display affine and jittered scene rows).
 // Header only, run by native_frame_test.
 #pragma once
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace f90test {
 
@@ -86,8 +88,11 @@ inline void worldOf(const f85::UFrame& uf, const double v[3], double out[3]) {
     f85::mulVec3(uf.U3, v, out);
     for (int i = 0; i < 3; ++i) out[i] += uf.u4[i];
 }
-// A part's record on the rig: the translation X0 in the hud frame, the quaternion words (-90 degrees about x, as every record of the F89 flight's dumps), the
-// scale and the mesh's x and z extents.
+// The parts' name ids in the two flights' sessions (F91: labels only; the game interns them per session).
+constexpr uint32_t kN89Hip = 29501, kN89RifleAds = 29500, kN89PistolAds = 29498, kN89Tool = 29495;
+constexpr uint32_t kN90Hip = 29510, kN90RifleAds = 29526, kN90PistolAds = 29524, kN90Tool = 29553;
+// A part's record on the rig: the name id (a label), the translation X0 in the hud frame, the quaternion words (-90 degrees about x, as every record of the F89
+// flight's dumps), the scale and the mesh's x and z extents.
 struct Record {
     uint32_t name;
     double x0[3];
@@ -119,7 +124,7 @@ inline f90::In inOf(const Rig& g, int e, uint32_t frame, const Record& rec, int 
 }
 // The content centre of a record relative to o_hud (v = X - o_hud: the table's centre turned and scaled as the vertex shader does).
 inline void contentHud(const Rig& g, int e, const Record& rec, double v[3]) {
-    const f90::Part* p = f90::part(rec.name);
+    const f90::Part* p = f90::partOf(true, rec.mesh, rec.scale);
     double x0rel[3];
     for (int i = 0; i < 3; ++i) x0rel[i] = rec.x0[i] - g.oh[e][i];
     f90::contentPoint(x0rel, kQ2, kQ3, rec.scale, p->centre, edvr::drawtag::rotateByPackedQuat, v);
@@ -160,22 +165,106 @@ inline void run90(Check&& check) {
 
     // ---- 1: the texel ratios, from the table ----------------------------------------------------------------------------------------------------------------
     {
-        const double r0u = f90::texelRatio(f90::kRifleAdsPart, 0), r0v = f90::texelRatio(f90::kRifleAdsPart, 1);
-        const double r8u = f90::texelRatio(f90::kPistolAdsPart, 0), r8v = f90::texelRatio(f90::kPistolAdsPart, 1);
-        check(std::fabs(r0u - 16.0 / 9.0) < 1e-3 && std::fabs(r0v - 16.0 / 9.0) < 1e-3, "F90 A: part 29500 maps 16/9 the hip part's texels per metre, in u and in v (1e-3)");
-        check(std::fabs(r8u - 4.0 / 7.0) < 1e-3 && std::fabs(r8v - 4.0 / 7.0) < 1e-3, "F90 A: part 29498 maps 4/7 the hip part's texels per metre, in u and in v (1e-3)");
-        check(f90::texelRatio(f90::kHipPart, 0) == 1.0 && f90::texelRatio(f90::kHipPart, 1) == 1.0 && std::isnan(f90::texelRatio(31000, 0)),
-              "F90 A: the hip part's ratio is exactly 1; a name outside the table has none");
-        const double t1 = f90::texelsPerM(*f90::part(f90::kHipPart), 0), t0 = f90::texelsPerM(*f90::part(f90::kRifleAdsPart), 0);
-        check(std::fabs(t1 - 10022.0) < 5.0 && std::fabs(t0 - 17816.0) < 5.0 && std::fabs(f90::sizeFactor(f90::kRifleAdsPart) - 1.77768) < 2e-5 &&
-                  std::fabs(f90::sizeFactor(f90::kPistolAdsPart) - 0.57142) < 2e-5,
-              "F90 A: the table reproduces the review's texels per metre (10022 and 17816) and factors (x1.7777, x0.5714)");
+        const double r0u = f90::texelRatio(f90::kRoleRifleAds, 0), r0v = f90::texelRatio(f90::kRoleRifleAds, 1);
+        const double r8u = f90::texelRatio(f90::kRolePistolAds, 0), r8v = f90::texelRatio(f90::kRolePistolAds, 1);
+        check(std::fabs(r0u - 16.0 / 9.0) < 1e-3 && std::fabs(r0v - 16.0 / 9.0) < 1e-3, "F90 A: the rifle's ADS readout maps 16/9 the hip readout's texels per metre, in u and in v (1e-3)");
+        check(std::fabs(r8u - 4.0 / 7.0) < 1e-3 && std::fabs(r8v - 4.0 / 7.0) < 1e-3, "F90 A: the pistol's ADS readout maps 4/7 the hip readout's texels per metre, in u and in v (1e-3)");
+        check(f90::texelRatio(f90::kRoleHip, 0) == 1.0 && f90::texelRatio(f90::kRoleHip, 1) == 1.0 && std::isnan(f90::texelRatio(f90::kRoleNone, 0)) &&
+                  std::isnan(f90::texelRatio(f90::kRoleTool, 0)),
+              "F90 A: the hip readout's ratio is exactly 1; no role and the tool (never scaled) have none");
+        const double t1 = f90::texelsPerM(*f90::partOfRole(f90::kRoleHip), 0), t0 = f90::texelsPerM(*f90::partOfRole(f90::kRoleRifleAds), 0);
+        check(std::fabs(t1 - 10022.0) < 5.0 && std::fabs(t0 - 17816.0) < 5.0, "F90 A: the table reproduces the review's texels per metre (10022 and 17816)");
+        // F91 check 2: the factor is the layouts' base-scale ratio (texels/m = 4008 / base)
+        const double bh = f90::partOfRole(f90::kRoleHip)->base;
+        check(std::fabs(f90::sizeFactor(f90::kRoleRifleAds) - bh / f90::partOfRole(f90::kRoleRifleAds)->base) < 1e-3 &&
+                  std::fabs(f90::sizeFactor(f90::kRolePistolAds) - bh / f90::partOfRole(f90::kRolePistolAds)->base) < 1e-3 && f90::sizeFactor(f90::kRoleHip) == 1.0,
+              "F91 A: the factor equals the game's base-scale ratio, 0.400000006 / 0.224999994 and / 0.699999988 (1e-3); the hip's is 1");
+    }
+
+    // ---- F91 1: the parts are known across sessions by the record's mesh and scale --------------------------------------------------------------------------
+    {
+        // the measured parts, each session's names, and the name 0 or garbage: the same roles
+        const double meshes[4][2] = {{2.0, 1.0}, {3.0, 1.0}, {2.0, 1.0}, {2.0, 1.0}};
+        const double scales[4] = {0.072070308, 0.0500976555, 0.166796863, 0.0939941406};
+        const int roles[4] = {f90::kRoleHip, f90::kRoleRifleAds, f90::kRolePistolAds, f90::kRoleTool};
+        const uint32_t names[4][4] = {{kN89Hip, kN89RifleAds, kN89PistolAds, kN89Tool}, {kN90Hip, kN90RifleAds, kN90PistolAds, kN90Tool}, {0, 0, 0, 0},
+                                      {0xDEADBEEFu, 7u, 0xFFFFFFFFu, 29501u}};
+        bool ok = true;
+        for (int s = 0; s < 4; ++s)
+            for (int q = 0; q < 4; ++q) {
+                const f90::Part* p = f90::partOf(true, meshes[q], scales[q]);
+                const Record rec{names[s][q], {-0.34, -0.05, 0.52}, scales[q], {meshes[q][0], meshes[q][1]}};
+                f90::Latch latch;
+                const f90::Out o = f90::decide(inOf(g, 0, 5, rec, f90::kItemOther, 0, f90::Keys{}), uOf(g, 0), latch, rot, [] { return f90::WeaponFrame{}; });
+                ok = ok && p && p->role == roles[q] && o.role == roles[q];
+            }
+        check(ok, "F91 A: the hip, rifle ADS, pistol ADS and tool readouts are named by mesh and scale, whatever the name id (F89's, F90's, 0, garbage)");
+        bool unique = true;
+        for (int q = 0; q < 4; ++q)
+            for (int r = 0; r < 4; ++r)
+                if (q != r && f90::tableMatches(*f90::partOfRole(roles[r]), true, meshes[q], scales[q])) unique = false;
+        check(unique, "F91 A: each measured part matches exactly one row (the four scales are at least 1.3x apart)");
+        // the same draws named by each session give the same rows, bit for bit: the rifle's ADS readout x1.7778; a pistol held: the hip readout moved to T,
+        // the pistol's ADS readout x0.5714 and moved
+        const Weapon wp = weaponOf(g, 7.0);
+        const auto frameFn = [&] { return f90::weaponFrame(true, wp.attach, true, wp.froot); };
+        f90::Keys keys;
+        keys.forwardCm = 13.0;
+        keys.leftCm = 6.0;
+        keys.upCm = -3.0;
+        keys.towardCm = 2.0;
+        const auto session = [&](const uint32_t nm[4], bool pistolFirst, float rows[3][2][12], f90::Out outs[3][2]) {
+            f90::Latch latch;
+            bool s = true;
+            const Record recs[3] = {{nm[0], {0.10, -0.12, 0.36}, 0.072070308, {2.0, 1.0}},
+                                    {nm[1], {-0.34, -0.05, 0.52}, 0.0500976555, {3.0, 1.0}},
+                                    {nm[2], {0.07, -0.05, 0.42}, 0.166796863, {2.0, 1.0}}};
+            for (uint32_t frame = 40; frame < 42; ++frame)   // two frames: with the pistol's ADS readout first, its second frame finds the first frame's T
+                for (int e = 0; e < 2; ++e)
+                    for (int k = 0; k < 3; ++k) {
+                        const int q = pistolFirst ? (k == 0 ? 2 : k == 2 ? 0 : 1) : k;
+                        const f85::UFrame game = uOf(g, e);
+                        f85::UFrame uf = game;
+                        const int item = q == 1 ? f90::kItemOther : f90::kItemPistol;
+                        const f90::Out o = f90::decide(inOf(g, e, frame, recs[q], item, 9, keys), game, latch, rot, frameFn);
+                        f90::applyMap(uf, o.map);
+                        if (frame == 41) {
+                            outs[q][e] = o;
+                            s = s && rowsOf(g, e, uf, rows[q][e]);
+                        }
+                    }
+            return s;
+        };
+        float r89[3][2][12], r90[3][2][12], rPerm[3][2][12];
+        f90::Out o89[3][2], o90[3][2], oPerm[3][2];
+        const bool ran = session(names[0], false, r89, o89) && session(names[1], false, r90, o90) && session(names[3], true, rPerm, oPerm);
+        check(ran && std::memcmp(r89, r90, sizeof(r89)) == 0, "F91 A: the F89-named and F90-named draws give bit-identical rows");
+        check(ran && o90[1][0].a == f90::kAScaled && std::fabs(o90[1][0].k - 16.0 / 9.0) < 1e-4 && o90[0][0].b == f90::kBMoved && o90[0][0].map.move &&
+                  o90[2][0].a == f90::kAScaled && std::fabs(o90[2][0].k - 4.0 / 7.0) < 1e-4 && o90[2][0].b == f90::kBMoved && o90[2][0].map.move,
+              "F91 A: by mesh and scale: 29526 x1.7778, and with a pistol held 29510 moved to T, 29524 x0.5714 and moved");
+        check(ran && std::memcmp(r89, rPerm, sizeof(r89)) == 0 && oPerm[2][0].b == f90::kBMovedPrevious,
+              "F91 A: the pistol's parts drawn first and with garbage names give the same rows (its ADS readout takes the previous frame's T, counted)");
+        // the role line: once per (held item, slot) whatever the slot order, again on an item change or a role change, at most kRoleLinesPerItem a held item
+        f90::RoleLog logs[4];
+        const int order[2][4] = {{0, 1, 2, 3}, {2, 0, 3, 1}};   // which role sits in which slot: F89's order, then pistol first
+        bool once = true;
+        for (const auto& ord : order) {
+            for (f90::RoleLog& l : logs) l = f90::RoleLog{};
+            for (int rep = 0; rep < 3; ++rep)
+                for (int sl = 0; sl < 4; ++sl) once = once && logs[sl].step(11, roles[ord[sl]]) == (rep == 0);
+            for (int sl = 0; sl < 4; ++sl) once = once && logs[sl].step(12, roles[ord[sl]]);   // another item
+        }
+        f90::RoleLog flip;
+        int lines = 0;
+        for (int i = 0; i < 20; ++i) lines += flip.step(13, i % 2 ? f90::kRoleNone : f90::kRoleRifleAds) ? 1 : 0;
+        check(once && lines == static_cast<int>(f90::kRoleLinesPerItem) && flip.suppressed == 20 - f90::kRoleLinesPerItem && flip.step(14, f90::kRoleNone),
+              "F91 A: the role line comes once per held item and slot in any slot order, again on an item change; a flipping role is capped and counted");
     }
 
     // ---- 2: part 29500 at the hip's size, about its content centre, on the two-eye rig ------------------------------------------------------------------------
     // The record sits 0.52 m out along U, 30 degrees left of U's axis, so the scaled panel (27 cm wide, its content 4.8 cm left of its centre) lies within 23
     // degrees of both eyes' axes: on screen, where a pixel figure means something.
-    const Record ads{f90::kRifleAdsPart, {-0.34, -0.05, 0.52}, 0.0501, {3.0, 1.0}};
+    const Record ads{kN89RifleAds, {-0.34, -0.05, 0.52}, 0.0501, {3.0, 1.0}};
     {
         double moved = 0.0, ratioErr = 0.0, cornerPx = 0.0, proofPx = 0.0, k = 0.0;
         bool ok = true;
@@ -243,9 +332,10 @@ inline void run90(Check&& check) {
             f90::applyMap(b, f90::decide(inOf(g, e, 20, ads, f90::kItemOther, 0, f90::Keys{}, 1.0), b, l1, rot, [] { return f90::WeaponFrame{}; }).map);
             ok = ok && rowsOf(g, e, a, r0) && rowsOf(g, e, b, r1) && std::memcmp(r0, r1, sizeof(r0)) == 0;
         }
-        check(ok, "F90 A: ADS weight 0 and 1 give part 29500 the same rows bit for bit (no ADS gate, no ramp)");
-        const Record hip{f90::kHipPart, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
-        const Record tool{31000, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
+        check(ok, "F90 A: ADS weight 0 and 1 give the rifle's ADS readout the same rows bit for bit (no ADS gate, no ramp)");
+        const Record hip{kN89Hip, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
+        const Record tool{kN90Tool, {0.10, -0.12, 0.36}, 0.0939941406, {2.0, 1.0}};
+        const Record outside{31000, {0.10, -0.12, 0.36}, 0.11, {2.0, 1.0}};
         const Weapon wp = weaponOf(g, 7.0);
         const auto frameFn = [&] { return f90::weaponFrame(true, wp.attach, true, wp.froot); };
         const auto same = [&](const Record& rec, int item, int firstEye, uint32_t frame, f90::Latch& latch) {
@@ -262,17 +352,22 @@ inline void run90(Check&& check) {
             return s;
         };
         f90::Latch latch;
-        check(same(hip, f90::kItemOther, 0, 30, latch), "F90: a rifle's hip part (29501) keeps F85b's rows bit for bit in both eyes");
-        check(same(tool, f90::kItemOther, 0, 30, latch) && same(tool, f90::kItemPistol, 0, 30, latch), "F90: a part outside the table (a tool's) keeps F85b's rows bit for bit");
+        check(same(hip, f90::kItemOther, 0, 30, latch), "F90: a rifle's hip readout keeps F85b's rows bit for bit in both eyes");
+        check(same(outside, f90::kItemOther, 0, 30, latch) && same(outside, f90::kItemPistol, 0, 30, latch), "F90: a part outside the table keeps F85b's rows bit for bit");
+        f90::Latch tl;
+        const f90::Out to = f90::decide(inOf(g, 0, 30, tool, f90::kItemPistol, 7, f90::Keys{}), uOf(g, 0), tl, rot, frameFn);
+        check(to.role == f90::kRoleTool && to.a == f90::kATool && to.b == f90::kBNone && same(tool, f90::kItemOther, 0, 30, tl) && same(tool, f90::kItemPistol, 1, 31, tl) &&
+                  !tl.have,
+              "F91 A: the tool's readout is named and keeps F85b's rows bit for bit (never scaled or moved)");
         f90::Latch pl;
         check(same(hip, f90::kItemPistol, 0, 31, pl) && same(hip, f90::kItemPistol, 1, 32, pl) && pl.have && pl.frame == 32,
               "F90 B: a pistol with all four keys 0 keeps F85b's rows bit for bit in both eyes, either eye first (the latch still runs)");
     }
 
-    // ---- 4: the pistol's keys (13, 6, -3, 2): 29501 on T, the facing kept, 29498 on T at the hip's size, one T per frame ----------------------------------------
+    // ---- 4: the pistol's keys (13, 6, -3, 2): the hip readout on T, the facing kept, the ADS readout on T at the hip's size, one T per frame ------------------------
     {
-        const Record hip{f90::kHipPart, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
-        const Record pads{f90::kPistolAdsPart, {0.07, -0.05, 0.42}, 0.1668, {2.0, 1.0}};
+        const Record hip{kN89Hip, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
+        const Record pads{kN89PistolAds, {0.07, -0.05, 0.42}, 0.1668, {2.0, 1.0}};
         const Weapon wp = weaponOf(g, 7.0);
         int frames = 0;
         const auto frameFn = [&] {
@@ -314,7 +409,7 @@ inline void run90(Check&& check) {
               "F90 B: the other eye reuses the latched T and its content lands on it; the weapon frame is read once a frame");
         double tpmErr = 0.0;
         for (int ax = 0; ax < 2; ++ax) {
-            const double world = f90::texelsPerM(*f90::part(f90::kPistolAdsPart), ax) / s8, hipW = f90::texelsPerM(*f90::part(f90::kHipPart), ax);
+            const double world = f90::texelsPerM(*f90::partOfRole(f90::kRolePistolAds), ax) / s8, hipW = f90::texelsPerM(*f90::partOfRole(f90::kRoleHip), ax);
             tpmErr = std::max(tpmErr, std::fabs(world / hipW - 1.0));
         }
         check(a8.a == f90::kAScaled && a8.b == f90::kBMoved && d8 < 1e-6 && tpmErr < 1e-3,
@@ -406,7 +501,7 @@ inline void run90(Check&& check) {
         check(f90::weaponFrame(true, wp.attach, false, wp.froot).src == f90::kFrameNone && f90::weaponFrame(false, wp.attach, false, wp.froot).src == f90::kFrameNone,
               "F90 B: no fresh F_root: no weapon frame");
         // in the decision: a stale snapshot still moves (counted as F_root only); no frame leaves the rows unmoved (counted as none)
-        const Record hip{f90::kHipPart, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
+        const Record hip{kN89Hip, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
         f90::Keys keys;
         keys.forwardCm = 13.0;
         keys.leftCm = 6.0;
@@ -426,28 +521,30 @@ inline void run90(Check&& check) {
               "F90 B: with no weapon frame the rows are left as F85b's and the refusal is counted");
     }
 
-    // ---- 6: a table mismatch is skipped and counted --------------------------------------------------------------------------------------------------------------
+    // ---- 6 (F91 3): a record that matches no row is not scaled, not moved, and counted ---------------------------------------------------------------------------
     {
         bool ok = true;
-        const Record wrongScale{f90::kRifleAdsPart, {0.06, -0.10, 0.30}, 0.06, {3.0, 1.0}};
-        const Record wrongMesh{f90::kRifleAdsPart, {0.06, -0.10, 0.30}, 0.0501, {2.0, 1.0}};
-        for (const Record& rec : {wrongScale, wrongMesh}) {
-            f90::Latch latch;
-            const f85::UFrame game = uOf(g, 0);
-            f85::UFrame uf = game;
-            const f90::Out o = f90::decide(inOf(g, 0, 300, rec, f90::kItemOther, 0, f90::Keys{}), uf, latch, rot, [] { return f90::WeaponFrame{}; });
-            f90::applyMap(uf, o.map);
-            float ra[12], rb[12];
-            ok = ok && o.a == f90::kAMismatch && o.map.identity() && rowsOf(g, 0, game, ra) && rowsOf(g, 0, uf, rb) && std::memcmp(ra, rb, sizeof(ra)) == 0;
-        }
+        std::vector<Record> misses = {{kN89RifleAds, {0.06, -0.10, 0.30}, 0.06, {3.0, 1.0}},                // F90's scale 0.06 for the rifle's ADS mesh
+                                      {kN89RifleAds, {0.06, -0.10, 0.30}, 0.0501, {2.0, 1.0}},              // the rifle's ADS scale on a 2x1 mesh
+                                      {kN90RifleAds, {0.06, -0.10, 0.30}, 0.0721, {3.0, 1.0}}};             // a 3x1 mesh at the hip's scale
+        for (int r = 0; r < f90::kPartCount; ++r)   // each row's scale 2% off, either way
+            for (const double f : {1.02, 0.98}) misses.push_back(Record{0, {0.06, -0.10, 0.30}, f90::kParts[r].scale * f, {f90::kParts[r].mesh[0], f90::kParts[r].mesh[1]}});
+        for (const Record& rec : misses)
+            for (const int item : {f90::kItemOther, f90::kItemPistol}) {
+                f90::Latch latch;
+                const f85::UFrame game = uOf(g, 0);
+                f85::UFrame uf = game;
+                const f90::Out o = f90::decide(inOf(g, 0, 300, rec, item, 7, f90::Keys{}), uf, latch, rot, [] { return f90::WeaponFrame{}; });
+                f90::applyMap(uf, o.map);
+                float ra[12], rb[12];
+                ok = ok && o.role == f90::kRoleNone && o.a == f90::kANotTable && o.b == f90::kBNone && o.map.identity() && !latch.have && rowsOf(g, 0, game, ra) &&
+                     rowsOf(g, 0, uf, rb) && std::memcmp(ra, rb, sizeof(ra)) == 0;
+            }
         f90::In unread = inOf(g, 0, 300, ads, f90::kItemOther, 0, f90::Keys{});
         unread.meshRead = false;
         f90::Latch latch;
-        ok = ok && f90::decide(unread, uOf(g, 0), latch, rot, [] { return f90::WeaponFrame{}; }).a == f90::kAMismatch;
-        f90::In pistolHip = inOf(g, 0, 300, Record{f90::kHipPart, {0.10, -0.12, 0.36}, 0.06, {2.0, 1.0}}, f90::kItemPistol, 7, f90::Keys{});
-        const f90::Out ph = f90::decide(pistolHip, uOf(g, 0), latch, rot, [] { return f90::WeaponFrame{}; });
-        ok = ok && ph.a == f90::kAMismatch && ph.b == f90::kBRefTable && ph.map.identity() && !latch.have;
-        check(ok, "F90: a table mismatch (scale 0.06, a 2x1 mesh for 29500, an unread mesh) is skipped and counted, the rows left as F85b's; the pistol's is refused too");
+        ok = ok && f90::decide(unread, uOf(g, 0), latch, rot, [] { return f90::WeaponFrame{}; }).a == f90::kANotTable;
+        check(ok && misses.size() == 11, "F91 A: a scale 2% off any row, a 3x1 mesh at 0.0721, F90's two mismatches and an unread mesh match no row: not scaled, not moved, the rows left as F85b's");
     }
 
     // ---- the keys -----------------------------------------------------------------------------------------------------------------------------------------------

@@ -3729,6 +3729,13 @@ F85bUCell g_f85bU[kF85bUCells];   // a ring, found by the tag's sentinel: the ga
 std::atomic<uint32_t> g_f85bUNext{0};
 constexpr uint32_t kF85bParts = nofoot::f85::kWeaponKeySlots;
 std::atomic<uint32_t> g_f85bSlotName[kF85bParts];   // the part's nameId + 1 (0: free); the slot is the tag key's low bits
+// F91 (the log only): each slot's layout as the game set it (the submit sample's width, height and base scale), its first valid sample. Written once by the
+// submit (state 0 -> 1 -> 2), read by the render side's role line once the state is 2.
+struct F91SlotLayout {
+    std::atomic<uint32_t> state{0};
+    float width = 0.0f, height = 0.0f, base = 0.0f;
+};
+F91SlotLayout g_f91SlotLayout[kF85bParts];
 enum F85bPath : int { kF85bPathTag = 0, kF85bPathValue = 1, kF85bPathNone = 2 };
 std::atomic<int> g_f85bPath{kF85bPathTag};
 std::atomic<uint64_t> g_f85bSeen{0}, g_f85bNotSpace1{0}, g_f85bSlotFull{0}, g_f85bNoGetter[kF85bParts], g_f85bNoCamera[kF85bParts], g_f85bReadFault[kF85bParts],
@@ -3818,6 +3825,16 @@ void f85bTagSubmit(uintptr_t inst, const WeaponUiPartSample& sample) noexcept {
     if (slot < 0) {
         g_f85bSlotFull.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+    if (sample.fieldsValid) {   // F91: the slot's layout, for the role line (before the U is published)
+        F91SlotLayout& lay = g_f91SlotLayout[slot];
+        uint32_t empty = 0;
+        if (lay.state.load(std::memory_order_relaxed) == 0 && lay.state.compare_exchange_strong(empty, 1u, std::memory_order_acq_rel)) {
+            lay.width = sample.width;
+            lay.height = sample.height;
+            lay.base = sample.baseScale;
+            lay.state.store(2u, std::memory_order_release);
+        }
     }
     WeaponUiPartSample getter;
     if (!f85bFindGetterRow(sample, &getter)) {   // a missing or stale getter row: no tag
@@ -23201,22 +23218,24 @@ void f86eAdsCheck(uint32_t slot) {
 // ---- F90: the weapon readout's size in ADS (A) and the pistol's readout in the weapon's frame (B) -----------------------------------------------------------
 // The decision is nofoot::f90::decide (native_on_foot_f90.h); here its inputs, its application to the draw's getter frame and the 1 s lines. Render thread only.
 struct F90Part {   // per part slot, this second
-    uint64_t decided = 0, scaled = 0, scaledEye[2] = {}, mismatch = 0;
+    uint64_t decided = 0, scaled = 0, scaledEye[2] = {}, mismatch = 0;   // mismatch (F91): decisions whose record matched no row
     double adsMin = 0.0, adsMax = 0.0, mesh[2] = {}, scale = 0.0, contentM = 0.0;
     bool haveAds = false, haveContent = false;
     uint32_t name = 0;
+    int role = nofoot::f90::kRoleNone;   // F91: the slot's last role this second (none: no decision matched a row)
 };
 F90Part g_f90Part[kF85bParts];
+nofoot::f90::RoleLog g_f91RoleLog[kF85bParts];   // F91: the role line's state, per slot
 struct F90Pistol {   // this second
     uint64_t frames[3] = {};   // the weapon frame computed for a latch: none, attach 51, F_root only (nofoot::f90::FrameSrc)
-    uint64_t latched = 0, moved501 = 0, moved498 = 0, movedPrev = 0, refused = 0, why[nofoot::f90::kBCount] = {};
+    uint64_t latched = 0, movedHip = 0, movedAds = 0, movedPrev = 0, refused = 0, why[nofoot::f90::kBCount] = {};
     double barrelSum = 0.0, barrelMax = 0.0, shiftSum = 0.0;
     uint64_t barrelN = 0;
     bool haveContent = false;
-    double contentM = 0.0;   // 29501's content after the move, from eye 0 (the last eye 0 decision of the second)
+    double contentM = 0.0;   // the hip readout's content after the move, from eye 0 (the last eye 0 decision of the second)
 };
 F90Pistol g_f90Pistol;
-int g_f90Slot501 = -1;   // the hip part's slot (its F86d rays give the surface under the moved readout)
+int g_f90SlotHip = -1;   // the hip readout's slot (its F86d rays give the surface under the moved readout)
 nofoot::f90::Latch g_f90Latch;
 // One weapon UI draw's F90 decision; the map is applied to uf (the getter frame of this eye) and returned for the proof.
 nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, uint32_t slot, const F85Solve& s, nofoot::f85::UFrame& uf) {
@@ -23243,7 +23262,8 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         in.eyeOk = true;
         for (int i = 0; i < 3; ++i) in.eye[i] = eyeRel[i] + s.ow[i];
     }
-    if (in.name == f90::kHipPart || in.name == f90::kPistolAdsPart) {   // B: the held item, pistols only
+    const f90::Part* known = f90::partOf(in.meshRead, in.meshExt, in.recScale);   // F91: the part by its mesh and scale (decide looks it up the same way)
+    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds)) {   // B: the held item, pistols only
         uint32_t serial = 0;
         char item[64] = {};
         const bool read = opticItemRead(&serial, item);
@@ -23267,10 +23287,34 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     };
     const f90::Out o = f90::decide(in, uf, g_f90Latch, drawtag::rotateByPackedQuat, frameFn);
     f90::applyMap(uf, o.map);
+    // F91: the slot's role, named once per held item and on every change (a miss is loud)
+    {
+        f90::RoleLog& rl = g_f91RoleLog[slot];
+        const uint32_t held = g_heldItemSerial.load(std::memory_order_acquire);
+        const uint64_t suppressedBefore = rl.suppressed;
+        if (rl.step(held, o.role)) {
+            uint32_t serial = 0;
+            char item[64] = {};
+            if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
+            const F91SlotLayout& lay = g_f91SlotLayout[slot];
+            const bool layOk = lay.state.load(std::memory_order_acquire) == 2u;
+            char what[64];
+            if (o.role == f90::kRoleHip || f90::scaledRole(o.role)) std::snprintf(what, sizeof(what), "%s (x%.4f)", f90::roleName(o.role), f90::sizeFactor(o.role));
+            else if (o.role == f90::kRoleTool) std::snprintf(what, sizeof(what), "tool readout (not scaled)");
+            else std::snprintf(what, sizeof(what), "NO TABLE PART: not scaled, not moved");
+            Log::get().note("weapon readout part (F91): item %s serial %u, slot %u name %u: mesh %.2f x %.2f, record scale %.6f, layout %.6f x %.6f base %.6f -> %s", item, held, slot,
+                            in.name, in.meshExt[0], in.meshExt[1], in.recScale, layOk ? static_cast<double>(lay.width) : 0.0, layOk ? static_cast<double>(lay.height) : 0.0,
+                            layOk ? static_cast<double>(lay.base) : 0.0, what);
+        } else if (rl.suppressed == 1 && suppressedBefore == 0) {
+            Log::get().note("weapon readout part (F91): slot %u name %u: its role changed %u times for item serial %u; further changes for this item are counted, not logged", slot,
+                            in.name, f90::kRoleLinesPerItem, held);
+        }
+    }
     // A's figures, per part
     F90Part& pt = g_f90Part[slot];
     ++pt.decided;
     pt.name = in.name;
+    if (o.role != f90::kRoleNone) pt.role = o.role;
     if (o.a == f90::kAScaled) {
         ++pt.scaled;
         ++pt.scaledEye[e == 1 ? 1 : 0];
@@ -23278,12 +23322,12 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         pt.adsMax = pt.haveAds ? std::max(pt.adsMax, in.adsW) : in.adsW;
         pt.haveAds = true;
     }
-    if (o.a == f90::kAMismatch || !pt.mismatch) {   // the mesh the line names: the last mismatch's, else the last decision's
+    if (o.a == f90::kANotTable || !pt.mismatch) {   // the mesh the line names: the last decision's that matched no row, else the last decision's
         pt.mesh[0] = in.meshExt[0];
         pt.mesh[1] = in.meshExt[1];
         pt.scale = in.recScale;
     }
-    if (o.a == f90::kAMismatch) ++pt.mismatch;
+    if (o.a == f90::kANotTable) ++pt.mismatch;
     if (e == 0 && o.haveC && in.eyeOk) {
         const double d[3] = {o.shown[0] - in.eye[0], o.shown[1] - in.eye[1], o.shown[2] - in.eye[2]};
         pt.contentM = nofoot::f85::len3(d);
@@ -23304,16 +23348,16 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         ps.shiftSum += o.shiftM;
     }
     if (o.b == f90::kBMoved) {
-        ++(in.name == f90::kHipPart ? ps.moved501 : ps.moved498);
+        ++(o.role == f90::kRoleHip ? ps.movedHip : ps.movedAds);
     } else if (o.b == f90::kBMovedPrevious) {
-        ++ps.moved498;
+        ++ps.movedAds;
         ++ps.movedPrev;
     } else if (o.b >= f90::kBRefItem && o.b < f90::kBCount) {
         ++ps.refused;
         ++ps.why[o.b];
     }
-    if (in.name == f90::kHipPart && o.b == f90::kBMoved) {
-        g_f90Slot501 = static_cast<int>(slot);
+    if (o.role == f90::kRoleHip && o.b == f90::kBMoved) {
+        g_f90SlotHip = static_cast<int>(slot);
         if (e == 0 && in.eyeOk) {
             const double d[3] = {o.shown[0] - in.eye[0], o.shown[1] - in.eye[1], o.shown[2] - in.eye[2]};
             ps.contentM = nofoot::f85::len3(d);
@@ -23322,41 +23366,42 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     }
     return o;
 }
-// The 1 s lines: A per scaled part (or the idle form naming the parts decided), B while a pistol is held.
+// The 1 s lines: A per decided part with a role other than the hip's (F91: the role, its slot and name), or the idle form naming each decided part's slot,
+// name, mesh and scale when none matched a row; B while a pistol is held.
 void f90Report() {
     namespace f90 = nofoot::f90;
     using ull = unsigned long long;
-    bool anyDecided = false, anyTable = false;
-    char names[256];
+    bool anyDecided = false, anyRole = false;
+    char parts[600];
     size_t nl = 0;
-    names[0] = '\0';
+    parts[0] = '\0';
     for (uint32_t p = 0; p < kF85bParts; ++p) {
         F90Part& pt = g_f90Part[p];
         if (!pt.decided) continue;
         anyDecided = true;
-        const int n = std::snprintf(names + nl, sizeof(names) - nl, "%s%u", nl ? ", " : "", pt.name);
-        if (n > 0 && static_cast<size_t>(n) < sizeof(names) - nl) nl += static_cast<size_t>(n);
-        const f90::Part* tp = f90::part(pt.name);
-        if (tp && pt.name != f90::kHipPart) {
-            anyTable = true;
-            Log::get().note("weapon readout size (F90) 1 s: part %u (slot %u) x%.4f about mesh (%+.2f, %+.2f): decided %llu, scaled %llu (eye 0 %llu, eye 1 %llu), table mismatch %llu "
+        const int n = std::snprintf(parts + nl, sizeof(parts) - nl, "%sslot %u name %u mesh %.2f x %.2f scale %.6f", nl ? "; " : "", p, pt.name, pt.mesh[0], pt.mesh[1], pt.scale);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(parts) - nl) nl += static_cast<size_t>(n);
+        if (pt.role != f90::kRoleNone) anyRole = true;
+        const f90::Part* tp = f90::partOfRole(pt.role);
+        if (tp && pt.role != f90::kRoleHip) {
+            Log::get().note("weapon readout size (F90) 1 s: %s (slot %u name %u) x%.4f about mesh (%+.2f, %+.2f): decided %llu, scaled %llu (eye 0 %llu, eye 1 %llu), table mismatch %llu "
                             "(mesh %.2f x %.2f scale %.5f); ADS weight at the scaled draws min %.2f max %.2f; content centre %.3f m from eye 0",
-                            pt.name, p, f90::sizeFactor(pt.name), tp->centre[0], tp->centre[1], ull(pt.decided), ull(pt.scaled), ull(pt.scaledEye[0]), ull(pt.scaledEye[1]),
-                            ull(pt.mismatch), pt.mesh[0], pt.mesh[1], pt.scale, pt.haveAds ? pt.adsMin : 0.0, pt.haveAds ? pt.adsMax : 0.0, pt.haveContent ? pt.contentM : 0.0);
+                            f90::roleName(pt.role), p, pt.name, f90::scaledRole(pt.role) ? f90::sizeFactor(pt.role) : 1.0, tp->centre[0], tp->centre[1], ull(pt.decided),
+                            ull(pt.scaled), ull(pt.scaledEye[0]), ull(pt.scaledEye[1]), ull(pt.mismatch), pt.mesh[0], pt.mesh[1], pt.scale, pt.haveAds ? pt.adsMin : 0.0,
+                            pt.haveAds ? pt.adsMax : 0.0, pt.haveContent ? pt.contentM : 0.0);
         }
         pt = F90Part{};
     }
-    if (anyDecided && !anyTable) Log::get().note("weapon readout size (F90) 1 s: no table part among the decided parts (names %s)", names);
+    if (anyDecided && !anyRole) Log::get().note("weapon readout size (F91) 1 s: no table part among the decided parts (%s)", parts);
     // B
     F90Pistol& ps = g_f90Pistol;
     uint32_t serial = 0;
     char item[64] = {};
     const bool read = opticItemRead(&serial, item);
     const bool pistolHeld = read && nofoot::supportItem(item) == nofoot::kSupportPistol && serial == g_heldItemSerial.load(std::memory_order_acquire);
-    const bool anyB = ps.latched || ps.moved501 || ps.moved498 || ps.refused || ps.frames[0] || ps.frames[1] || ps.frames[2];
+    const bool anyB = ps.latched || ps.movedHip || ps.movedAds || ps.refused || ps.frames[0] || ps.frames[1] || ps.frames[2];
     if ((pistolHeld && nativeOnFootActive()) || anyB) {
-        static const char* const kWhy[f90::kBCount] = {"", "", "", "item not the held pistol or not read", "table mismatch", "no weapon frame", "no eye origin",
-                                                       "no target this frame or the last"};
+        static const char* const kWhy[f90::kBCount] = {"", "", "", "item not the held pistol or not read", "no weapon frame", "no eye origin", "no target this frame or the last"};
         char why[300];
         size_t wl = 0;
         why[0] = '\0';
@@ -23366,7 +23411,7 @@ void f90Report() {
                 if (n > 0 && static_cast<size_t>(n) < sizeof(why) - wl) wl += static_cast<size_t>(n);
             }
         if (!wl) std::snprintf(why, sizeof(why), "none");
-        const F86dPart* dp = g_f90Slot501 >= 0 && g_f90Slot501 < static_cast<int>(kF85bParts) ? &g_f86d[g_f90Slot501] : nullptr;
+        const F86dPart* dp = g_f90SlotHip >= 0 && g_f90SlotHip < static_cast<int>(kF85bParts) ? &g_f86d[g_f90SlotHip] : nullptr;
         const bool haveDs = dp && dp->sm.have;
         const double ds = haveDs ? dp->sm.depth() : 0.0;
         char surf[80];
@@ -23375,13 +23420,13 @@ void f90Report() {
         else if (ds >= ps.contentM) std::snprintf(surf, sizeof(surf), "in front by %.1f cm", (ds - ps.contentM) * 100.0);
         else std::snprintf(surf, sizeof(surf), "behind a surface by %.1f cm", (ps.contentM - ds) * 100.0);
         Log::get().note("pistol readout (F90) 1 s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, F_root only "
-                        "%llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved: 29501 %llu, 29498 %llu (x%.4f), previous-frame target %llu, "
+                        "%llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved: hip readout %llu, pistol ADS readout %llu (x%.4f), previous-frame target %llu, "
                         "refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s)",
                         item[0] ? item : "none", serial, static_cast<double>(g_f90ForwardCm.load(std::memory_order_relaxed)),
                         static_cast<double>(g_f90LeftCm.load(std::memory_order_relaxed)), static_cast<double>(g_f90UpCm.load(std::memory_order_relaxed)),
                         static_cast<double>(g_f90TowardCm.load(std::memory_order_relaxed)), ull(ps.frames[f90::kFrameAttach]), ull(ps.frames[f90::kFrameRoot]),
-                        ull(ps.frames[f90::kFrameNone]), ps.barrelN ? ps.barrelSum / static_cast<double>(ps.barrelN) : 0.0, ps.barrelMax, ull(ps.latched), ull(ps.moved501),
-                        ull(ps.moved498), f90::sizeFactor(f90::kPistolAdsPart), ull(ps.movedPrev), ull(ps.refused), why,
+                        ull(ps.frames[f90::kFrameNone]), ps.barrelN ? ps.barrelSum / static_cast<double>(ps.barrelN) : 0.0, ps.barrelMax, ull(ps.latched), ull(ps.movedHip),
+                        ull(ps.movedAds), f90::sizeFactor(f90::kRolePistolAds), ull(ps.movedPrev), ull(ps.refused), why,
                         ps.latched ? ps.shiftSum / static_cast<double>(ps.latched) * 100.0 : 0.0, ps.haveContent ? ps.contentM : 0.0, ds, surf);
     }
     ps = F90Pistol{};
@@ -23412,7 +23457,8 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         return;
     }
     nofoot::f85::UFrame uf = nofoot::f85::uFrame(u.U, s.oh, s.ow);
-    // F90: A, the part's size (29500 and 29498 scaled about their content centre to the hip part's texels per metre), and B, the pistol's readout moved in the
+    // F90: A, the part's size (the rifle's and the pistol's ADS readouts, known since F91 by the record's mesh and scale, scaled about their content centre to the
+    // hip readout's texels per metre), and B, the pistol's readout moved in the
     // weapon's frame: applied to the getter frame here, ahead of F86d's panel, so its rays probe the final place. ufGame keeps the game's U for the figures.
     const nofoot::f85::UFrame ufGame = uf;
     const nofoot::f90::Out f90o = f90Decide(frame, e, r, f, slot, s, uf);
