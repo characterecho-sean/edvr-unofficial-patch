@@ -32,6 +32,7 @@
 #include "explorer_cam_follow_core.h"
 #include "explorer_cam_settings_core.h"
 #include "native_on_foot.h"   // nativeOnFootActive: the F3 avatar census collects only while native stereo is on foot
+#include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
 
 #include <windows.h>
 #include <intrin.h>
@@ -119,6 +120,16 @@ std::atomic<uint64_t> g_amcLocal{0}, g_amcLocalPose{0}, g_amcCand{0}, g_amcCandP
 std::atomic<bool> g_busyAmc{false};
 uint64_t g_amcCensused = 0;                            // g_busyAmc
 ecm::Ring<ecm::AmcCensus, 2> g_censusRing;
+// F95c: the head kept in the shadows (native_on_foot_f95c.h). The visibility job's hook writes the ticket after the game's call (End) and withdraws it before the
+// AMC's next call (Begin); the fade hook's post-call takes it. The counters are cumulative; the frame thread logs their change once a second.
+std::atomic<uint64_t> g_f95cTicket{0};   // the AMC whose latest visibility call ran with the head as shadow-only
+std::atomic<uint64_t> g_f95cDeny{0};     // ...that call's main and other view bits
+std::atomic<uint64_t> g_f95cCalls{0}, g_f95cSwapped{0}, g_f95cParts{0}, g_f95cNoViews{0}, g_f95cLost{0}, g_f95cShadowPairs{0}, g_f95cEyePairs{0}, g_f95cKept{0},
+    g_f95cKeptWords{0}, g_f95cRemoved{0}, g_f95cZeroed{0};
+std::atomic<uint32_t> g_f95cFaults{0};
+std::atomic<bool> g_f95cDown{false};
+std::mutex g_f95cViewMutex;              // guards g_f95cViews (the hook only try-locks it)
+ExplorerCamHeadShadowViews g_f95cViews;
 // F15 (native on foot E1, TEMPORARY): the first-person body hide. The frame thread writes g_fpHideWant and the names (g_fpIdx); the hook thread writes the
 // readback and counts the first-person AMC calls. g_fpBodyMutex guards g_fpIdx and g_fpReadback.
 std::atomic<bool> g_fpHideWant{false};
@@ -1369,6 +1380,107 @@ __declspec(noinline) bool sehZeroPartMasks(uint8_t* amc, const int* idx, size_t 
         return false;
     }
 }
+// ---- F95c: the head kept in the shadows (native_on_foot_f95c.h) ----------------------------------------------------------------------------------------------------
+namespace f95c = nofoot::f95c;
+static_assert(ecm::kHeadPartCount <= f95c::kMaxParts, "F95c: the swap record holds every head part");
+static_assert(f95c::kOffPartClass == ecm::kOffAmcPartState, "F95c: the part class is the census's state");
+// The views of a visibility job context: each view's flags and bit. 1 read, 0 not a context this reads (more than 64 views), -1 a fault.
+__declspec(noinline) int sehReadViews(const uint8_t* job, uint32_t* flags, uint64_t* bits, uint32_t* n) noexcept {
+    __try {
+        uint64_t count = 0;
+        std::memcpy(&count, job + f95c::kViewCountOff, 8);
+        if (count > f95c::kMaxViews) return 0;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i) {
+            const uint8_t* v = job + f95c::kViewsOff + static_cast<size_t>(i) * f95c::kViewStride;
+            std::memcpy(&flags[i], v + f95c::kViewFlagsOff, 4);
+            std::memcpy(&bits[i], v + f95c::kViewBitOff, 8);
+        }
+        *n = static_cast<uint32_t>(count);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+// The head parts' classes for the call: each one shadowClass changes is swapped by compare-exchange (a class the game changed between the read and the write is left
+// alone and not recorded). False on a fault; the parts recorded before it are in s.
+__declspec(noinline) bool sehSwapHeadClasses(uint8_t* amc, f95c::Swap* s) noexcept {
+    __try {
+        for (uint32_t i = 0; i < ecm::kHeadPartCount; ++i) {
+            volatile LONG* p = reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + ecm::kHeadParts[i] * ecm::kPartStride);
+            const int32_t was = static_cast<int32_t>(*p);
+            const int32_t set = f95c::shadowClass(was);
+            if (set == was) continue;
+            if (InterlockedCompareExchange(p, set, was) != was) continue;
+            s->part[s->n] = ecm::kHeadParts[i];
+            s->was[s->n] = was;
+            s->set[s->n] = set;
+            ++s->n;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The game's classes put back: a class still at the value written gets the game's value; one the game changed during the call stands (f95c::restoredClass).
+// `lost` counts those. False on a fault.
+__declspec(noinline) bool sehRestoreHeadClasses(uint8_t* amc, const f95c::Swap* s, uint32_t* lost) noexcept {
+    __try {
+        uint32_t l = 0;
+        for (uint32_t j = 0; j < s->n; ++j) {
+            volatile LONG* p = reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + s->part[j] * ecm::kPartStride);
+            if (InterlockedCompareExchange(p, s->was[j], s->set[j]) != s->set[j]) ++l;
+        }
+        *lost = l;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The head masks after the call: (instance, view) pairs in the shadow views, and in the main and other views (the bits the fade hook removes).
+__declspec(noinline) bool sehCountHeadPairs(const uint8_t* amc, uint64_t shadowBits, uint64_t deny, uint64_t* shadowPairs, uint64_t* eyePairs) noexcept {
+    __try {
+        uint64_t sp = 0, ep = 0;
+        for (uint32_t i = 0; i < ecm::kHeadPartCount; ++i) {
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                uint64_t m = 0;
+                std::memcpy(&m, amc + ecm::kOffAmcMasks + ecm::kHeadParts[i] * ecm::kPartStride + 8 * k, 8);
+                sp += f95c::popcount64(m & shadowBits & ~deny);
+                ep += f95c::popcount64(m & deny);
+            }
+        }
+        *shadowPairs = sp;
+        *eyePairs = ep;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The fade hook's keep: every head mask less deny (f95c::guarded). `removed` counts the words that lost a bit, `kept` the words left non-zero.
+__declspec(noinline) bool sehGuardHeadMasks(uint8_t* amc, uint64_t deny, uint32_t* removed, uint32_t* kept) noexcept {
+    __try {
+        uint32_t r = 0, kp = 0;
+        for (uint32_t i = 0; i < ecm::kHeadPartCount; ++i) {
+            volatile uint64_t* masks = reinterpret_cast<volatile uint64_t*>(amc + ecm::kOffAmcMasks + ecm::kHeadParts[i] * ecm::kPartStride);
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                const uint64_t m = masks[k];
+                const uint64_t g = f95c::guarded(m, deny);
+                if (g != m) {
+                    masks[k] = g;
+                    ++r;
+                }
+                if (g != 0) ++kp;
+            }
+        }
+        *removed = r;
+        *kept = kp;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+void f95cFault() noexcept {
+    if (g_f95cFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= ecm::kMaxHideFaults) g_f95cDown.store(true, std::memory_order_release);
+}
 __declspec(noinline) bool sehReadCensus(const uint8_t* amc, ecm::AmcCensus* c) noexcept {
     __try {
         std::memcpy(&c->viewFilter, amc + ecm::kOffAmcViewFilter, 4);
@@ -1463,6 +1575,11 @@ void witnessStep(uint8_t* amc) noexcept {
 void hideFault() noexcept {
     if (g_hideFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= ecm::kMaxHideFaults) g_hideDown.store(true, std::memory_order_release);
 }
+// Whether the head hide writes now: a placement stands (Explorer Cam's own), or native stereo's body (F2) in the game's first-person camera (F93d).
+bool headHideWritesNow() noexcept {
+    const bool placed = g_placeActive.load(std::memory_order_acquire) && g_placedActivity.load(std::memory_order_acquire) != 0;
+    return placed || (g_nativeBody.load(std::memory_order_acquire) && !nativeOnFootCameraExternal());
+}
 void headHideStep(void* amcPtr) noexcept {
     if (!amcPtr || g_hideDown.load(std::memory_order_acquire)) return;
     g_amcCalls.fetch_add(1, std::memory_order_relaxed);
@@ -1514,10 +1631,26 @@ void headHideStep(void* amcPtr) noexcept {
     // function with neither, and reads only.
     const bool placed = g_placeActive.load(std::memory_order_acquire) && g_placedActivity.load(std::memory_order_acquire) != 0;
     // F93d: native stereo's head hiding is first-person only: in the game's third-person camera (the camera suite) the head is the game's.
-    if (!placed && (!g_nativeBody.load(std::memory_order_acquire) || nativeOnFootCameraExternal())) {
+    if (!headHideWritesNow()) {
         if (!placed && g_nativeBody.load(std::memory_order_acquire)) g_nativeHideHeld.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // F95c: the AMC's latest visibility call ran with the head as shadow-only (the ticket): keep its masks, less every main and other view's bit. Else zero.
+    uint64_t mine = reinterpret_cast<uint64_t>(amcPtr);
+    const bool ticket = g_f95cTicket.compare_exchange_strong(mine, 0, std::memory_order_acq_rel);
+    if (f95c::fadeAction(true, ticket) == f95c::Action::Keep) {
+        uint32_t removed = 0, kept = 0;
+        if (!sehGuardHeadMasks(amc, g_f95cDeny.load(std::memory_order_relaxed), &removed, &kept)) {
+            hideFault();
+            return;
+        }
+        g_hideCalls.fetch_add(1, std::memory_order_relaxed);
+        g_f95cKept.fetch_add(1, std::memory_order_relaxed);
+        g_f95cKeptWords.fetch_add(kept, std::memory_order_relaxed);
+        g_f95cRemoved.fetch_add(removed, std::memory_order_relaxed);
+        return;
+    }
+    g_f95cZeroed.fetch_add(1, std::memory_order_relaxed);
     uint32_t zeroed = 0;
     if (!sehZeroHeadMasks(amc, &zeroed)) {
         hideFault();
@@ -4386,6 +4519,107 @@ ExplorerCamNativeCameraStats explorerCamNativeCameraStats() {   // F93d
     s.clipHeld = g_clipExternalSkips.load(std::memory_order_relaxed);
     return s;
 }
+// F95c: the head through the visibility call as shadow-only (explorer_cam.h). The hook thread; the views are read before anything is written, and a call that
+// cannot be covered leaves no ticket (the fade hook then zeroes, as before F95c).
+bool explorerCamHeadShadowBegin(void* amcPtr, void* job, nofoot::f95c::Swap* s, bool allow) noexcept {
+    s->armed = false;
+    s->n = 0;
+    if (!amcPtr) return false;
+    uint64_t mine = reinterpret_cast<uint64_t>(amcPtr);
+    if (g_f95cTicket.load(std::memory_order_relaxed) == mine)   // this AMC's previous call no longer stands for its masks (every avatar's call reads; one locks)
+        g_f95cTicket.compare_exchange_strong(mine, 0, std::memory_order_acq_rel);
+    if (!allow || !job || !g_hideOn.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire) || g_f95cDown.load(std::memory_order_acquire))
+        return false;
+    if (reinterpret_cast<uint64_t>(amcPtr) != g_amcLocal.load(std::memory_order_relaxed) || !headHideWritesNow()) return false;
+    uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
+    AmcIdent id;
+    if (!sehReadAmcIdent(amc, &id) || !ecm::isLocalAmc(id.id, id.pose, g_skelIface[0].load(std::memory_order_acquire), id.mode)) return false;
+    g_f95cCalls.fetch_add(1, std::memory_order_relaxed);
+    uint32_t flags[f95c::kMaxViews];
+    uint64_t bits[f95c::kMaxViews];
+    uint32_t n = 0;
+    const int got = sehReadViews(static_cast<const uint8_t*>(job), flags, bits, &n);
+    if (got <= 0) {
+        g_f95cNoViews.fetch_add(1, std::memory_order_relaxed);
+        if (got < 0) f95cFault();
+        return false;
+    }
+    s->views = f95c::splitViews(flags, bits, n);
+    if (g_f95cViewMutex.try_lock()) {   // the census of this call's views, for the frame thread's line (skipped, never waited for, while it reads)
+        ExplorerCamHeadShadowViews& c = g_f95cViews;
+        c = ExplorerCamHeadShadowViews{};
+        c.n = s->views.n;
+        c.main = s->views.main;
+        c.shadow = s->views.shadow;
+        c.other = s->views.other;
+        c.shared = s->views.shared;
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t j = 0;
+            while (j < c.distinct && c.flags[j] != flags[i]) ++j;
+            if (j < c.distinct) {
+                ++c.count[j];
+            } else if (c.distinct < 8) {
+                c.flags[c.distinct] = flags[i];
+                c.count[c.distinct++] = 1;
+            } else {
+                ++c.more;
+            }
+        }
+        g_f95cViewMutex.unlock();
+    }
+    s->amc = amc;
+    if (!sehSwapHeadClasses(amc, s)) {
+        uint32_t lost = 0;
+        sehRestoreHeadClasses(amc, s, &lost);   // the parts swapped before the fault go back
+        f95cFault();
+        return false;
+    }
+    s->armed = true;
+    g_f95cSwapped.fetch_add(1, std::memory_order_relaxed);
+    g_f95cParts.fetch_add(s->n, std::memory_order_relaxed);
+    return true;
+}
+void explorerCamHeadShadowEnd(nofoot::f95c::Swap* s) noexcept {
+    if (!s->armed) return;
+    s->armed = false;
+    uint32_t lost = 0;
+    if (!sehRestoreHeadClasses(s->amc, s, &lost)) {
+        f95cFault();
+        return;
+    }
+    g_f95cLost.fetch_add(lost, std::memory_order_relaxed);
+    uint64_t sp = 0, ep = 0;
+    if (!sehCountHeadPairs(s->amc, s->views.shadowBits, s->views.deny, &sp, &ep)) {
+        f95cFault();
+        return;
+    }
+    g_f95cShadowPairs.fetch_add(sp, std::memory_order_relaxed);
+    g_f95cEyePairs.fetch_add(ep, std::memory_order_relaxed);
+    g_f95cDeny.store(s->views.deny, std::memory_order_relaxed);
+    g_f95cTicket.store(reinterpret_cast<uint64_t>(s->amc), std::memory_order_release);
+}
+ExplorerCamHeadShadowStats explorerCamHeadShadowStats() {
+    ExplorerCamHeadShadowStats s;
+    s.calls = g_f95cCalls.load(std::memory_order_relaxed);
+    s.swapped = g_f95cSwapped.load(std::memory_order_relaxed);
+    s.parts = g_f95cParts.load(std::memory_order_relaxed);
+    s.noViews = g_f95cNoViews.load(std::memory_order_relaxed);
+    s.lost = g_f95cLost.load(std::memory_order_relaxed);
+    s.shadowPairs = g_f95cShadowPairs.load(std::memory_order_relaxed);
+    s.eyePairs = g_f95cEyePairs.load(std::memory_order_relaxed);
+    s.kept = g_f95cKept.load(std::memory_order_relaxed);
+    s.keptWords = g_f95cKeptWords.load(std::memory_order_relaxed);
+    s.removed = g_f95cRemoved.load(std::memory_order_relaxed);
+    s.zeroed = g_f95cZeroed.load(std::memory_order_relaxed);
+    s.held = g_nativeHideHeld.load(std::memory_order_relaxed);
+    s.faults = g_f95cFaults.load(std::memory_order_relaxed);
+    s.down = g_f95cDown.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(g_f95cViewMutex);
+        s.views = g_f95cViews;
+    }
+    return s;
+}
 bool explorerCamRestPovDelta(float out[3]) {   // F33
     std::lock_guard<std::mutex> lock(g_restPovMutex);
     if (!g_restPovKnown) return false;
@@ -4564,6 +4798,9 @@ void reset() {
     g_hideOn.store(false);
     g_hideDown.store(false);
     g_hideFaults.store(0);
+    g_f95cTicket.store(0);   // F95c
+    g_f95cDown.store(false);
+    g_f95cFaults.store(0);
     g_partNames.store(0);
     g_amcCalls.store(0);
     g_amcLocalMatches.store(0);
