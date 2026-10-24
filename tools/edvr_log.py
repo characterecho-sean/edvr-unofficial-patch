@@ -10881,6 +10881,42 @@ def _hj_f97b_size(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f98b_world(rows, ctx):
+    """F98b: the label placed in the world, upright and facing the neck's pivot. Its own world point's step a frame against its still anchor, by the head's turning
+    speed, as placed and as F97b's eye-facing panel placed it. No label through the world panel is NEVER APPLIED; a step over 2 mm a frame with the head turning
+    (30 deg/s and over, 20 steps or more) is PARTIAL: the label still moves with the head."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    placed, nohead, nopanel, moving = (_hsum(sec, k) for k in ("placed", "nohead", "nopanel", "moving"))
+    n = [sum(int(r["n%d" % b]) for r in sec) for b in range(4)]
+
+    def wm(key, b):
+        return sum(float(r["%s%d" % (key, b)]) * int(r["n%d" % b]) for r in sec) / n[b] if n[b] else 0.0
+
+    def mx(key, b):
+        return max(float(r["%s%d" % (key, b)]) for r in sec)
+
+    def row(key):
+        return "/".join("%.2f" % wm(key, b) if n[b] else "-" for b in range(4))
+    text = ("placed in the world %d, refused %d (no head frame %d, no panel %d) over %d eye-seconds; the label's own point a frame against its still anchor by the "
+            "head's speed under 3/3-30/30-90/90+ deg/s: steps %s; as placed %s mm mean (max %s); as F97b placed it %s mm mean; anchor moving %d") % (
+        placed, nohead + nopanel, nohead, nopanel, len(sec), "/".join(str(x) for x in n), row("now"), "/".join("%.2f" % mx("nowmax", b) for b in range(4)),
+        row("old"), moving)
+    if placed == 0:
+        if nohead + nopanel:
+            return ("NEVER APPLIED", text + "; no label went through the world panel")
+        return ("IDLE", text + "; no label was drawn")
+    fast = [b for b in (2, 3) if n[b] >= 20 and wm("now", b) > 2.0]
+    if fast:
+        return ("PARTIAL", text + "; the label still moves with the head: " + ", ".join("%s deg/s %.2f mm a frame" % (("30-90", "90+")[b - 2], wm("now", b)) for b in fast))
+    if (nohead + nopanel) * 2 > placed + nohead + nopanel:
+        return ("PARTIAL", text + "; most labels were drawn on F97b's eye-facing panel")
+    if not (n[2] or n[3]):
+        text += "; no step with the head turning 30 deg/s or more (a head turn tests it)"
+    return ("OK", text)
+
+
 def _hj_label(rows, ctx):
     sec, refuse = rows.get("sec", []), rows.get("refuse", [])
     if not sec and not refuse:
@@ -11254,6 +11290,13 @@ HEALTH_RULES = (
                 r"(?P<gh3>[\d.]+); as drawn: width (?P<dw0>[\d.]+)/(?P<dw1>[\d.]+)/(?P<dw2>[\d.]+)/(?P<dw3>[\d.]+) height (?P<dh0>[\d.]+)/(?P<dh1>[\d.]+)/(?P<dh2>[\d.]+)/"
                 r"(?P<dh3>[\d.]+); the record's depth over its distance [\d./]+; widest (?P<widest>[\d.]+) deg"),
     ), _hj_f97b_size),
+    _hrule("label world (F98b)", ("F98b",), ("label world (F98b)",), (
+        ("sec", r"label world \(F98b\) eye (?P<eye>\d) 1 s: placed in the world (?P<placed>\d+), refused: no head frame (?P<nohead>\d+), no panel (?P<nopanel>\d+) "
+                r"\(F97b's eye-facing panel drawn\); the label's own world point a frame against its anchor \(the anchor still\), by the head's turning speed under "
+                r"3/3-30/30-90/90\+ deg/s: steps (?P<n0>\d+)/(?P<n1>\d+)/(?P<n2>\d+)/(?P<n3>\d+); as placed (?P<now0>[\d.]+)/(?P<now1>[\d.]+)/(?P<now2>[\d.]+)/"
+                r"(?P<now3>[\d.]+) mean (?P<nowmax0>[\d.]+)/(?P<nowmax1>[\d.]+)/(?P<nowmax2>[\d.]+)/(?P<nowmax3>[\d.]+) max mm; as F97b placed it (?P<old0>[\d.]+)/"
+                r"(?P<old1>[\d.]+)/(?P<old2>[\d.]+)/(?P<old3>[\d.]+) mean [\d./]+ max mm; anchor moving (?P<moving>\d+)"),
+    ), _hj_f98b_world),
     _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
         ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
         ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
@@ -12207,6 +12250,7 @@ def self_test_health():
     D94 = "marker design offset (F94b)"
     D95 = "marker design offset (F95b)"
     S97 = "label size (F97b)"
+    W98 = "label world (F98b)"
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
@@ -12780,6 +12824,22 @@ def self_test_health():
               has=["the label still changes size: 20-30 deg width 0.850, 30+ deg width 0.700"])
         check("F97b size: most left at the game's size", [size97(84, 20, proj=64)], 0, [("PARTIAL", S97)], has=["most labels were left at the game's size"])
         check("F97b size: only near the axis", [size97(n=(40, 40, 0, 0))] * 2, 0, [("OK", S97)], has=["no label was seen 20 deg or more off the axis"])
+
+        # F98b: the label placed in the world; its own point's step a frame against its still anchor by the head's speed
+        def world98(placed=84, nohead=0, nopanel=0, n=(30, 30, 14, 9), now=(0.02, 0.03, 0.05, 0.08), nowmax=(0.1, 0.2, 0.3, 0.4), old=(0.05, 0.4, 1.6, 3.9), eye=0):
+            return R("label world (F98b) eye %d 1 s: placed in the world", eye, placed, nohead, nopanel, *n, *now, *nowmax, *old, 0.2, 1.0, 4.0, 9.0, 0, 6.5, placed, 900)
+
+        check("F98b world: placed, still through head turns", [world98(), world98(eye=1, n=(30, 30, 16, 11))], 0, [("OK", W98)],
+              has=["placed in the world 168, refused 0 (no head frame 0, no panel 0) over 2 eye-seconds; the label's own point a frame against its still anchor by the "
+                   "head's speed under 3/3-30/30-90/90+ deg/s: steps 60/60/30/20; as placed 0.02/0.03/0.05/0.08 mm mean (max 0.10/0.20/0.30/0.40); as F97b placed it "
+                   "0.05/0.40/1.60/3.90 mm mean; anchor moving 0"], lacks=["UNPARSED"])
+        check("F98b world: no label", [world98(0, n=(0, 0, 0, 0))] * 2, 0, [("IDLE", W98)], has=["no label was drawn"])
+        check("F98b world: never through the world panel", [world98(0, nohead=84, n=(0, 0, 0, 0))] * 2, 3, [("NEVER APPLIED", W98)],
+              has=["no label went through the world panel"])
+        check("F98b world: still moving with the head", [world98(now=(0.02, 0.5, 2.6, 4.0), n=(30, 30, 30, 30))], 0, [("PARTIAL", W98)],
+              has=["the label still moves with the head: 30-90 deg/s 2.60 mm a frame, 90+ deg/s 4.00 mm a frame"])
+        check("F98b world: mostly on the eye-facing panel", [world98(20, nopanel=64)], 0, [("PARTIAL", W98)], has=["most labels were drawn on F97b's eye-facing panel"])
+        check("F98b world: no head turn", [world98(n=(40, 40, 0, 0))] * 2, 0, [("OK", W98)], has=["no step with the head turning 30 deg/s or more"])
         check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
         check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
         check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])
