@@ -5,8 +5,8 @@
 //
 // ADS release (the trace). F88 gated the weapon eye offset's weight on ADS (the journal's flag or the resolved ADS state) and so dropped the eye to the un-offset position
 // when the sights came down, then ramped it back once the journal's flag, which lags the release, cleared. The weight no longer depends on ADS (native_on_foot_f88.h). The
-// trace proves the sequence in the next flight: one line per frame for kTraceWindowS after each ADS press and release, with the journal flag, the ADS state, the lock weight
-// and the weight of the offset logged separately, and the eye's frame-to-frame step.
+// trace proves the sequence in the next flight: one line per frame for kTraceWindowS after each ADS release (F91: kTracePressWindowS after each press), with the journal flag,
+// the ADS state, the lock weight and the weight of the offset logged separately, and the eye's frame-to-frame step.
 //
 // Close left eye. In ADS the right eye is the eye the sight lock lines up; with fix.native_on_foot_ads_close_left_eye on, the left eye's final image fades to black by the
 // ADS lock's weight (0.15 s in, 0.3 s out) and the runtime applies it as the last pass over that eye's image (d3d11_stereo.cpp). darken() is the whole decision: never above 0
@@ -31,7 +31,9 @@ namespace nofoot {
 namespace f89 {
 
 // ---- the ADS transition trace --------------------------------------------------------------------------------------------------------------------------
-constexpr double kTraceWindowS = 1.5;       // each press and each release is traced for this long
+constexpr double kTraceWindowS = 1.5;       // each release is traced for this long
+constexpr double kTracePressWindowS = 4.0;  // F91: each press for this long (the ADS vibration instrument's fields and fit, native_on_foot_f91.h)
+inline double traceWindowS(bool press) noexcept { return press ? kTracePressWindowS : kTraceWindowS; }
 constexpr int kTraceMaxPerMinute = 4;       // at most this many events in any minute; the rest are counted and not traced
 constexpr uint64_t kTraceMinuteMs = 60000;
 struct TraceFrame {
@@ -70,7 +72,7 @@ struct AdsTrace {
         } else if (open) {
             t += dt > 0.0 ? dt : 0.0;
         }
-        if (open && t > kTraceWindowS) open = false;
+        if (open && t > traceWindowS(press)) open = false;
         if (open) {
             f.trace = true;
             f.press = press;

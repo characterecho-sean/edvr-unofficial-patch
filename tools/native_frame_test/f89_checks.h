@@ -582,18 +582,32 @@ inline void run89(Check&& check) {
             }
         };
         frames(false, 90);
-        frames(true, 90 * 3);    // press (event 1)
+        frames(true, 90 * 5);    // press (event 1)
         frames(false, 90 * 3);   // release (event 2)
-        frames(true, 90 * 3);    // press (event 3)
+        frames(true, 90 * 5);    // press (event 3)
         frames(false, 90 * 3);   // release (event 4)
         frames(true, 90 * 2);    // press: the fifth event in under a minute (not traced)
         frames(false, 90 * 2);   // release: not traced
         const bool capped = started == 4 && supp == 2 && tr.suppressed == 2;
-        bool windows = lines.size() == 4;
-        for (const int n : lines) windows = windows && n >= 135 && n <= 137;   // 1.5 s at 90 Hz: 136 frames, the edge's own included
+        bool windows = lines.size() == 4 && kinds.size() == 4;
+        // F91: a press is traced for 4 s (361 frames at 90 Hz, the edge's own included), a release for 1.5 s (136 frames)
+        for (size_t i = 0; windows && i < lines.size(); ++i)
+            windows = kinds[i] == 1 ? (lines[i] >= 360 && lines[i] <= 362) : (lines[i] >= 135 && lines[i] <= 137);
         const bool order = kinds.size() == 4 && kinds[0] == 1 && kinds[1] == 0 && kinds[2] == 1 && kinds[3] == 0;
         check(capped && windows && order,
-              "F89: the ADS transition trace writes one line a frame for 1.5 s after each press and each release (136 frames at 90 Hz), at most 4 events in a minute: the fifth and sixth are counted and not traced");
+              "F89/F91: the ADS transition trace writes one line a frame for 4 s after each press and 1.5 s after each release (361 and 136 frames at 90 Hz), at most 4 events in a minute: the fifth and sixth are counted and not traced");
+        {   // F91: a press released before 4 s is traced until the release, whose own window starts there
+            f89::AdsTrace t2;
+            uint64_t m2 = 500000;
+            int pressLines = 0, releaseLines = 0;
+            for (int i = 0; i < 90 * 4; ++i) {
+                m2 += 11;
+                const f89::TraceFrame f = t2.step(i >= 10 && i < 10 + 90, m2, dt);   // a 1 s press
+                if (f.trace) (f.press ? pressLines : releaseLines) += 1;
+            }
+            check(pressLines == 90 && releaseLines >= 135 && releaseLines <= 137 && f89::traceWindowS(true) == 4.0 && f89::traceWindowS(false) == 1.5,
+                  "F91: a 1 s press is traced for its 90 frames and its release for 1.5 s (the press window is 4 s, the release's 1.5 s)");
+        }
         // a minute after the first traced event the cap has room again
         for (int i = 0; i < 90 * 60; ++i) {
             ms += 11;

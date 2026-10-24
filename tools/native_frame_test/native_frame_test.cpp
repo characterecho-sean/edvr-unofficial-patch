@@ -15,6 +15,7 @@
 #include "f85_checks.h"   // F85: the pin-step trace, the weapon UI pin and the reticle depth (pure parts, shared with a desk driver)
 #include "f89_checks.h"   // F89: the ADS release, the left eye closing in ADS, the transition trace, the hold's open-loop input
 #include "f90_checks.h"   // F90: the weapon readout's size in ADS, the pistol's readout in the weapon's frame
+#include "f91bc_checks.h"   // F91 B and C: the ADS vibration instrument's fields and fit, the ADS item gate
 
 #include <array>
 #include <chrono>
@@ -7183,6 +7184,8 @@ int wmain(int argc, wchar_t** argv) {
     f89test::run89(check);
     // F90: A, the ADS readout part scaled to the hip's texels per metre about its content centre; B, the pistol's readout in the weapon's frame, its latch and keys.
     f90test::run90(check);
+    // F91: B, the ADS vibration instrument (the trace's fields, the cancel the pose carried, the fit: H1, the lock, H3); C, the ADS item gate.
+    f91bctest::run91bc(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
