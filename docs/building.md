@@ -59,6 +59,41 @@ proof artifact, not a release asset. The branch push trigger works before this
 workflow reaches `main`. GitHub does not offer its manual **Run workflow**
 control for a new workflow until the workflow file is on the default branch.
 
+### Linux: compile-only builds under Wine
+
+For a test flight on a Steam Deck or another Linux machine that runs Elite
+under Proton, `tools/linux_toolchain.py` compiles the production DLLs with
+Microsoft's compiler under Wine. It runs `build.bat --compile-only`, which
+skips every test, rig and installer gate, so the result is not validated and
+not a release asset: a merge or a release still needs CI's full build. Use host
+`python3`, from any shell:
+
+```
+python3 tools/linux_toolchain.py setup --dry-run
+python3 tools/linux_toolchain.py setup --accept-license
+python3 tools/linux_toolchain.py doctor
+python3 tools/linux_toolchain.py build-dlls [--root <worktree>]
+```
+
+`setup` needs the system packages `wine msitools git`, which you install
+yourself (it never runs sudo), and downloads VS 2022's Build Tools, a Windows
+Python and the pinned SDKs. The Build Tools are under Microsoft's licence:
+using them needs a valid Visual Studio licence, and they must never be shared,
+published or committed. `--accept-license` says you have read and accept those
+terms; without it `setup` stops before downloading. Everything lives in the
+Git-ignored `.toolchains/windows/` of the main checkout (`EDVR_TOOLCHAIN_HOME`
+moves it) and serves every worktree. A tree's output, a worktree's included, is
+`build/compile-build` in that tree, with a `compile_only_receipt.json` that
+`install_edvr.py --compile-only` checks (`tools/compile_only.py`).
+
+It differs from CI's build in a few ways: the MSVC (14.44.35207) and Windows
+SDK (10.0.26100) are CI's own; shaders compile with the SDK's own
+`d3dcompiler_47.dll`, not Wine's; the proxy's export list comes from Wine's
+`d3d11.dll`, which lacks some exports Windows has (Elite imports
+`D3D11CreateDevice` alone from it); the FSR 3 DX11 port builds with CMake and
+Ninja (`fetch_ffx_dx11.py --generator ninja`), not the Visual Studio generator;
+and no gates run. The docstring of `tools/linux_toolchain.py` has the details.
+
 ### The caches in CI
 
 The workflow keeps two caches (`actions/cache`), and a third file set inside

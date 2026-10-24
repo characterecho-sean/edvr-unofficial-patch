@@ -2,6 +2,7 @@
 
 ## Status
 
+- **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
 - **State (2026-10-22 3D main menu, render below output):** FLOWN with the cause logger (`edvr_gfx_20261022_121507`): the stand-down is `missing-depth-or-dsv`, the DoF composite `20F383BB/BF2302BC` writing the f26 image the tone reads with no depth; DoF off fixed it (user). MERGED (CI green, 618f1454): the composite taken as the scene HDR's alias (`dofCompositeVerified`, `flat dof composite:` line); the user reports it works with DoF on (no log read yet). See "2026-10-22: the 3D main menu at render below output".
 - **State (2026-10-21 shuttle, supercruise/planetary):** `edvr_gfx_20261021_133402` (`v0.20.1-13-gdb52d367`, Arc B390, XeSS, 960×600) is the first paired capture of the deferred `forward-mismatch`: in all 31 witnesses CB2 rows 10..16 are the donor camera with the requested phase removed, so every nonzero frame is refused and AA runs unjittered. Whole-camera omission repair `6b8f62c1`: FLOWN 2026-10-21 14:10 in supercruise, PASS (`edvr_gfx_20261021_141041`; last entry). Planetary flight not yet flown on it. Why the game drops the phase there: open. Suit/weapon loadout screen (`edvr_gfx_20261021_143902`): no deferred donor (source-free scene, only `vrOnly`/unkeyed G-buffer pairs), fixed by the source-free camera witness, the b1-free pairs and the lit-scene rule, FLOWN 2026-10-21 18:00 PASS on `5ffb3644` (last entries).
@@ -54,8 +55,7 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `visual.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-17 RC3 scope fix PASS:** Steam flat `c7c14898`, probe off, main-menu and carrier on-foot F7 comparisons visibly fixed. Nonzero phases/history recover with zero stable phase/backend failures; user approved merge (last entry).
-- **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven normal-space ambiguity resets with clean
-  history recovery. Temporary `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
+- **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges, seven normal-space ambiguity resets recovered cleanly. Temporary `diag.flat_origin_capture = off`.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -18549,3 +18549,181 @@ ordinary scene frame, not with the menu's static-scene policy.
 
 - Risk if the menu is later treated: a rotating hologram can ghost (the loading
   screen's ghost, flat-loading-hologram-ghost-2026-10-09.md).
+
+### 2026-10-24: a 2560x1440 DLAA user, the whole-camera repair refuses four of eight phases (instrument built, not flown)
+
+Report (a user, v0.21.0, issue thread): fps "dropped to 60", AA broken, and the DLSS preset row no longer offers an automatic choice under
+DLAA. Main menu fine. `edvr_gfx_20261024_134658` (build 6ADB8BC7, game build 334925, RTX 4060 8 GB, flat, game SS 1.0 so render equals output at
+2560x1440, route `dlss-as-dlaa-supersample`, `temporal_aa_model = m`, `fix.optimized_stations = on`, in a station).
+
+Evidence.
+- LoadGame 13:54:44. From 13:55:57 to the log's end (about nine minutes) every 5 s window has 75 of 300 frames refused (`jitter failure census`),
+  as `deferred-inverse-unproven`, `compute-source-invalidated` and `relevant-observations-truncated` (105 windows, 7,669 frames each). The runtime
+  alternates `treated-jittered-hdr`, `treated-zero-jitter-hdr` and the refusal: the 4-frame cycle of 2026-10-22, here with a donor.
+- All 107 `flat deferred failure witness` lines are `forward-mismatch`, donor-role `pool` (`qualified-pool` in the ownership line). The
+  `6b8f62c1` whole-camera repair ran on 31 sampled frames (`repair=whole prepared=1`, `whole-executions` 7,767 by 14:04:33) and was refused on
+  25 (`repair=none prepared=0 warmed=0`), with no `deferred-whole-preparation-failed`: the refusal is inside `flatRepairDeferredWholeOmission` or its
+  gate, silently.
+- By jitter phase (the 8-phase Halton cycle): accepted (0, -0.1667), (0.125, 0.2778), (-0.125, -0.2778), (-0.4375, 0.3889); refused (-0.25, 0.1667),
+  (0.25, -0.3889), (-0.375, -0.0556), (0.375, 0.0556). Not a function of the phase's size. The 31 captures the repair was written on are all at
+  960x600; this is the first 2560x1440 log with the repair live.
+- The wake of the stand-down and the empty G-buffer rule both ran (`empty-gbuffer-total` 847 at 14:04:25, 98 `why=empty-gbuffer` witness lines), and the cycle
+  continued: this is not the scanner mechanism.
+- The user says the fault clears for a while when the view changes (map, or the head-look toggle). The log has that stretch: 14:00:22 to 14:00:47,
+  five windows with 0 failed frames; the HDR route's trigger is VS 20F383BB / PS FDB74215 (the DoF composite) at target 1280x720 into an
+  HDR of 2560x1440, and the only deferred camera line is `relation=match` at zero phase. The failures resume at 14:00:52 on phase
+  (0.25, -0.3889). So the fault lives in the primary view's deferred lighting pass, not in the session. The same user's F8 trials (13:55:22 to
+  13:55:34: AA modes, `fix.optimized_stations` off for 3 s and back on; 14:03:19 model k/l/m) did not change the cycle; "clear with optimized
+  stations off" is one unrepeated observation, not shown by this log.
+- The frame time is 16.68 ms (p50) from the main menu on (13:48 onward), before the refusals start. EDVR does not pace flat; the settings file
+  asks for a 75 Hz refresh and vsync. Not tied to the cycle.
+- The preset row: `fix.temporal_aa_model` offers k, l, m only since 2026-10-21 (no automatic), and `dlaaSafe` turns L and M into K under DLAA
+  (`dlaa.cpp`); the log says "DLAA, preset K". The row does not dim or say so under DLAA. By design, but silent.
+
+Ruled out: the 2026-10-22 empty G-buffer mechanism, because `empty-gbuffer-total` climbs while the cycle continues on a frame with a pool donor.
+Ruled out: a GPU or driver fault, because the log has no device-removed or reset line and VRAM held at 5573 of 7188 MB.
+
+Hypotheses, each with its signature in the new lines.
+1. A numeric bound in the dephase proof, derived at 960x600, refuses at this size for some phases: `stage=dephase`, `ratio` just over 1, the same
+   `check` and `row`/`col` on every refused phase.
+2. The strict re-match of the corrected rows fails: `stage=rematch`.
+3. The camera or CB2 is not the whole-camera omission in those frames at all (the station's veto changes what is drawn): `stage=match`, or
+   `dephase` with a large ratio.
+4. A gate: `stage=gate` or `repairable=0` with `qualified=1`.
+
+Instrument (BUILT on `claude/whole-omission-reject-reason`, NOT FLOWN): `flat deferred whole-omission refused:` names the stage, the check, the
+coefficient, the residual against its bound, the phase and the render size, for the first 32 refusals then once per 5 s;
+`flat deferred whole-omission bytes:` carries the donor camera and CB2 rows as hex for the first two refusals of each phase, which
+`tools/flat_temporal_test/flat_deferred_forward_omission_captures.h` can take as new captures. `flatExplainWholeOmission`
+(`src/d3d11/flat_deferred_reject.h`) mirrors the repair's checks without touching it; `flat_deferred_reject_tests.h` pins that the two agree on all 31
+captures, the 35 inverse-only captures and every negative the repair's rig uses. If the new code never ran: a `deferred-inverse-unproven` with
+`relation=forward-mismatch repair=none` and no `whole-omission refused` line.
+
+### 2026-10-24 (flown): the probe names the check, the donor camera carries 1.0001x the phase
+
+Flown: the probe build `v0.21.0-2-g396bce13` on the same rig, two logs (`edvr_gfx_20261024_151628`, `_151924`, same scene, DLAA 2560x1440,
+the second with the DLSS preset row on L). `edvr_log.py --expect-build 396bce13` matches. 85 `whole-omission refused` lines and 22 `bytes` lines.
+
+Result. Every refusal is `stage=dephase check=translation row=0 col=3 qualified=1 upstream=1 repairable=1`: the match stage passed (Forward), the gate
+passed, the patch and rematch stages were never reached. Residual 2e-7 to 3.3e-7 against a bound of 1.97e-7 in the first log (ratio 1.1 to 1.7)
+and 5e-10 to 1.5e-9 in the second (ratio 21 to 250).
+
+The bytes show why. In frame 4722 (phase -0.25, ndc -1.953125e-4) the translation residual equals (CB2 x-row z minus the dephased camera's x-row z)
+times the camera's world z: (1.35135097e-5 - 1.35330773e-5) x -11.1551542 = 2.18e-7. The donor camera's x-row z is 2.0884558e-4; removing the
+requested phase would leave 1.35330773e-5, CB2 has 1.35135097e-5, so the camera carries the offset 1.95337e-4, 1.0001 times the nominal
+1.953125e-4. The same factor, 1.000100, holds for x and y in 20 of 22 captures (the other two are the x phase -0.4375, 1.000009, whose float
+rounding lands closer); the CB2 forward rows themselves are phase-free to 2e-8. The camera is built by the game's own function from EDVR's requested
+phase; why it applies 1.0001x is not known. At 0.4 px the difference is 4e-5 px.
+
+Why 4 of 8 phases passed in the 13:46 flight: the translation bound scales with the magnitude of the terms, so it depends on the camera's lateral
+offset from the world origin. In the first probe log the camera sat at world x 0.31, the bound was 1.97e-7 and the residual (proportional to |phase x|:
+1.09e-7 at 0.125, 2.2e-7 at 0.25, 3.3e-7 at 0.375) fell under it at 0.125 and, by float quantisation, at -0.4375 only. In the second log world x was
+1.3e-4 and the bound fell 200-fold, so every x phase was refused. The 31 captures the repair was written on (supercruise, world terms in the
+thousands) have a bound far above this residual.
+
+Ruled out: a gate or preparation failure (`qualified`, `upstream`, `repairable` all 1; no `deferred-whole-preparation-failed`); the strict
+re-match (never reached); a Forward-match failure (stage match passed); a GPU or driver fault (earlier entry).
+
+Options, none built (the repair is unchanged):
+1. Charge the translation check for the coefficients it multiplies: each rotation coefficient is only certified to the forward bound, so the
+   translation bound gains sum(forward bound_c x |world_c|). Derived, not tuned; loosens the check to about 1e-5 at 11 m.
+2. Measure the phase the camera carries (from the donor's x-row z and w column) and dephase by that, with a tolerance on its ratio to the request;
+   keeps the check tight and makes the 1.0001 visible.
+3. Find where the game's camera gets 1.0001 (render size, a near-plane term) and request the phase it will apply.
+The 22 `bytes` captures belong in `flat_deferred_forward_omission_captures.h` first, as refused-today cases, whichever is chosen.
+
+### 2026-10-24: the translation allowance follows the world multiply (built, not flown)
+
+Review (Opus 5.5, independent): all three claims of the previous entry hold; it ported the dephase check and reproduced every logged residual and bound.
+It also found where the 1.0001x comes from: the game forms the off-centre window in float32 (`tools/c2_derive_test/c2_derive_model.h:139-167`) and
+takes p8 = (R+L)/(L-R), so the phase it lands is the request rounded at the step of the frustum, about 2e-8 in ndc at this scale (2.5e-5 px at 2560).
+Emulating that branch with the frustum scales read from the CB2 gives 1.0001001 for x phases 0.125, 0.25 and 0.375 and 1.0000084 for 0.4375, matching
+the bytes to about seven digits. Not an EDVR bug, not a size, and nothing to request: every requested bound lands on the same rounding grid.
+
+Ruled out: option 2 (measure the carried phase), because the x-row coefficient it would read is the one being certified, and the error is absolute so a
+ratio tolerance drifts by 1e-3 at small phases; option 3 (request the phase the game will land), because the rounding cannot be requested away.
+
+Also found: widening only the dephase check would still have been refused at the strict re-match's translation check (same gap: the patched CB2
+carries the nominal phase, the camera the landed one), which the probe never reached.
+
+Fix (option 1, BUILT, NOT FLOWN): `flatDeferredWorldAllowance` in `flat_deferred_camera.h` adds `flatDeferredFloatBound(8, 2*frustumScale_r*sum|world_c|)` to the
+translation bound for rows 0 and 1, only in whole-omission mode (`flatDeferredDephasedOmission` with `forwardCarriesPhase` false, and
+`flatMatchDeferredCamera` with `frustumScaleForward`). The default matcher, the inverse-only repair and row 3 (w) are unchanged. It is the forward comparison's
+own allowance (the camera and CB2 are finalized apart), charged where the coefficients are multiplied by the position. Window: the review measured a sideways displacement of
+1.8e-5 to 3.2e-5 m at 11 m as the first refused (about 20 ulps of the position); the rig refuses 2e-4 m sideways and 1e-3 m along the view (the w row has no allowance).
+`flat_deferred_reject.h` mirrors both.
+
+Tests. `flat_deferred_landed_phase_captures.h` holds the eleven distinct pairs of the probe flights (refused before, accepted now: strict rematch Match, clone equals
+the patch preparation) with the negatives of the supercruise rig plus camera-position displacements. `flat_deferred_generated_tests.h` builds 2,688
+camera/CB2 pairs the way the game's projection does (four fields of view, four aspects and sizes, six positions from the origin to 100 m, four tilts, seven
+phases) and checks every one repairs, that the zero-phase pair matches the strict matcher, that the landed phase is 1.0001x as the flights saw, and that 8,064 displaced cameras are
+refused. With the allowance set to zero the generator test fails on 1,466 of the 2,688 and the captures on 22 checks: it would have caught this. The 31
+supercruise and 35 rc.5 captures and the probe-agreement test are unchanged.
+
+Flight signature: `edvr_log.py --expect-build` the new commit; `flat deferred HDR camera:` shows `relation=forward-mismatch accepted=1 repair=whole prepared=1` on every
+nonzero phase; no `flat deferred whole-omission refused:` line; no `deferred-inverse-unproven` and no 4-frame cycle at 2560x1440 (the runtime window reads `treated-jittered`).
+A `whole-omission refused ... stage=rematch` would mean the matcher change missed; a persisting `stage=dephase` that the allowance did not cover (read `ratio`).
+The probe lines stay in this build so the flight reads either way.
+
+### 2026-10-24 (flown): the translation allowance fixes the cycle; what is left is not in the verifier
+
+Flown: `9fdf4c32` (`v0.21.0-4-g9fdf4c32`, build 6ADCBAE0) on the same rig, `edvr_gfx_20261024_163549` (flat, DLAA 2560x1440, `temporal_aa = dlss`, model L). The reporter
+says the heavy shimmering is gone, also with SMAA on; the flicker with the head-look toggle plus movement and the 60 fps are not.
+
+Result. LoadGame 16:36:42; from 16:37:25 to 16:42:00 (4 min 35 s) the runtime is `treated-jittered-hdr` on every frame: 17,090 treated, `longest-continue-run=16545`,
+`accepted-reset=2` for the session (the two warm-ups), `camera-cut=0`, `jitter refusals=2` in total, no `deferred-inverse-unproven`, no `whole-omission refused` line (0 of 0),
+`relation=forward-mismatch` frames accepted. The same scene before: 75 refused frames in every 300, for nine minutes. The `hdr route` window reads treated=300 of 300.
+
+Not explained by the log. The temporal side is clean in play: coverage `exact` 61,139 of 64,739 draws with no local refusal, no source-free frame, the
+camera census steady at 71 to 83 injected per frame over 60 windows with no step to mark a toggle, no refusal. The flicker the reporter sees on the head-look toggle
+with movement therefore needs the Motion source view (F8 Debug) screenshotted while it happens, or a NumLock census, and a note of which surface flickers.
+The frame time is 16.7 ms p50 from the main menu on again (p95 25 ms in play): a 60 Hz lock before any EDVR work; the settings file asks for 75 Hz with vsync, so the monitor mode or a driver cap is the first thing to ask.
+
+The UI layer reads `tone-proven` on every copy but `tone-admitted=0` and no composite; fix.ui_quality is 100 and the layer is not exercised in this view. Not a finding on its own.
+
+### 2026-10-24: the witness's second camera, reproduced on the Steam rig (census, not yet explained)
+
+A user's planet report (`edvr_gfx_20261024_163112`, v0.21.0, RTX 3070 Ti Laptop, render 1664x702): the cycle returns on the planet, 772 refused frames in 13 windows, now with
+`donor-role=none` and `why=witness-conflict`, not the forward-mismatch of the earlier entries (those are repaired there: `repair=whole` accepted 52 times, `repair=inverse` 33).
+The witness line names the pair every time: the entry's first writer VS 7B0DC42D / PS 0DF03E64 (a known world pair, typed origin role) with one camera, then
+VS 4435F2E50020E7F3 / PS 026709B54867F893 at the 4th q after it, `conflict=second-camera`, camera-bearing, epoch, ordered and trusted. The unknown-projection capture
+reads that VS as `forward-columns slot=1 row=270` (it does read b1) with a 30,456-byte PS the model cannot size (`unknown-opcode 61`), role `pre-world-structural`, and `planned=0`.
+
+Reproduced on the maintainer's Steam rig (`edvr_gfx_20261024_100625`, `v0.21.0-21-gf0d179e9-dirty`, 3840x2160 output, render 1920x1080, in the 3D main menu scene, before LoadGame): 14 witness lines
+`conflict=second-camera`, first writer CFCA8FFC / 8A08FF78, offender 4435F2E5 / 026709B5 in 13 of them (72BDD292 / F1670378 in the first). Census 1 (10:08:35, frames 14365 to 14366,
+`flat_trace_14370.bin`): on the 1920x1080 G-buffer (r=@85 d=@84) CFCA8FFC has 4 draws (q 1370 to 1431) and 4435F2E5 has 32 (q 1376 to 1451), interleaved in one pass, the latter
+indexed instanced with four bound views. The reducer (`flat_temporal_test --trace-chain`) reads frames 14367 to 14369 as `hdr-route-needs-render-at-least-output` (the HDR route needs render >= output; here it
+is half) and frame 14370 as `relevant-observations-truncated`: the same refusal chain. So the fault is not planet-specific, not tied to render size, and not the whole-camera omission.
+
+Open: what the two cameras are. The witness keeps a camera hash, not bytes. Hypotheses with the signature that settles each:
+1. A real second view drawn into the same G-buffer (a planet or sky camera): the offender's camera hash differs and neither matches the lighting pass's CB2 (`relation` against each).
+2. The pass's own camera is the offender's and the first writer's is stale: CB2 matches the OFFENDER's camera strictly and not the first writer's.
+3. The two differ only by the landed-phase rounding of the 2026-10-24 entries: the cameras equal after dephasing.
+The Steam rig's installed build predates the translation fix and the probe; the maintainer's rig still shows the cycle on it.
+
+Instrument built (branch `claude/witness-second-camera-bytes`, log only, the witness decides exactly as before). The entry now keeps the offender's 96 camera bytes beside the first writer's
+(`FlatRuntimeCameraWitness::offenderCamera`, copied only when `conflict == Camera`), the donor hands both out, and `noteSecondCamera` (flat_runtime.cpp) writes three lines for a poolless
+`second-camera` entry, the first 8 two seconds apart and then once per 5 s:
+- `flat deferred second-camera:` both writers' pairs and camera hashes, the pass's `relation`, then `first-match` / `first-scaled` / `offender-match` / `offender-scaled` (CB2 against each camera under the
+  strict relation, plain and with the repair's frustum allowance) and `differing-floats` / `first-diff` / `max-abs` / `max-rel` between the two cameras.
+- `flat deferred second-camera check:` the deciding comparison of each plain match (stage/check, row, col, residual, bound).
+- `flat deferred second-camera bytes:` (first 8 only) the first camera, the offender's and CB2 rows 10..16 as hex, with the phase bits.
+Reading it: hypothesis 1 (a real second view) is `first-match` and `offender-match` both not `match` with a large `max-rel`; 2 (the offender is the pass's camera) is `offender-match=match` (or `offender-scaled`)
+and the first not; 3 (rounding only) is a `max-rel` near 1e-7 with one or two `differing-floats`. If the line never appears beside a `conflict=second-camera` witness line, the build lacks this branch.
+Rig: `flat_deferred_second_camera_tests.h` (entry and donor keep the bytes; the report equals the matcher on every capture the repair accepts; the logger is wired after the verdict and touches no draw).
+
+### 2026-10-24: the instrument flown (Steam, `edvr_gfx_20261024_131540`, v0.21.0-31-g2e39d231, build 6ADD0368, 1920x1080)
+
+10 second-camera lines, 7 witness lines, all `why=witness-conflict`, first writer CFCA8FFC / 8A08FF78 every time, offender 4435F2E5 / 026709B5 (9) or 154FB5A4 / BB32FCBB (1). Every line reads the same way:
+- The two cameras differ in 7 of 24 floats, first at float 0, `max-rel=0.62963` (a different projection, not rounding). Hypothesis 3 (rounding only) is ruled out: the difference is 0.63 relative, not 1e-7.
+- CB2 never matches the FIRST writer's camera: `forward-coefficient row=0 col=0`, residual 0.007 to 0.105 against a bound of 3e-8 to 5e-7.
+- CB2 matches the OFFENDER's camera exactly at zero phase (`offender-match=match`, frames 11512 to 12948, five lines), and at a nonzero phase fails only `inverse row=0 col=2` with a residual equal to the phase in ndc: phase 0.375 px at 1920 wide is 2*0.375/1920 = 3.906e-4, logged 3.9069e-4 and 3.9060e-4; phase -0.4375 gives 4.558e-4, logged 4.558e-4. The forward rows, near plane and translation all pass. That is the inverse-only omission (the rays lack the phase), the case `flatRepairDeferredMissingPhase` repairs when it has the camera.
+So hypothesis 2 holds: the pass's camera is the offender's, and a second view (the first writer's, 4 draws against the offender's 32) shares the depth. The refusal is the witness's rule that a second camera on the depth fails closed: no donor, so the repair that would accept this frame never runs.
+Open before any fix: whether the first writer's draws carry the injected phase of their own camera. The repair patches CB2 to the offender's phase; if the 4 first-writer draws were jittered by a different phase the G-buffer would mix two phases. The fix would need the verifier, which sees CB2, to pick the one camera whose strict relation (match, inverse or forward) holds and only when the other holds none; the resolver cannot, it never sees CB2. Not built.
+
+### 2026-10-24: the second-camera pick (branch `claude/second-camera-pick`, from `claude/witness-second-camera-bytes`)
+
+The open question above (do the first writer's draws carry the injected phase?) is answered from the logged bytes with the new camera-phase estimate (`flatEstimateCameraPhase`: a camera's off-centre term over its w row): on all five nonzero-phase Steam captures BOTH cameras carry the requested phase, the first within 1e-7 of it and the offender within 1e-7 (frame 10357: requested ndc 3.90625e-4, first 3.90635e-4, offender 3.90680e-4). They differ in scale, not phase: first (1.294, 2.300), offender (1.051, 1.868), so a different field of view (the 4-draw first writer is a second view). Repairing CB2 to the offender's phase therefore leaves one phase in the G-buffer.
+Built: after a `Camera` conflict the witness entry keeps counting its writers by camera (`firstWriters`, `offenderWriters`, each camera's last write) and stays `pairClean` only while every later writer is current, full-viewport, in the entry's layout and binds exactly one of the two cameras. The resolver reports `pairSelectable` (also: the depth's only witness entry, written before q, a different colour from the pass's) and, given a camera's 96 bytes (`select`), hands that camera out as the witness donor. The verifier asks of each camera whether its relation to CB2 holds (matches, or the missing-phase or whole-omission repair certifies it) and names the one that does when the other does not; both or neither leave the pass without a donor, refused as before. The repair then runs on that donor unchanged. The qualification names the verified draw's own camera the same way. Nothing changes for an entry whose writers agree, for a pool source, or for a third camera.
+Log: `flat deferred second-camera phase:` (requested ndc, each camera's phase, scale and near, writers per camera, pair-clean, selectable, the pick, selected, running pick counts). If the pick counts show `neither-holds` or `both-hold` on a frame, the CB2 belongs to no camera the entry holds or to an ambiguous one.
+Rig: `flat_deferred_second_pick_tests.h` (the eight Steam triples: the first camera never holds, the offender always does, at zero phase by match and otherwise by the missing-phase repair; the entry and resolver cases; the phase estimate against the forward-omission captures; the verifier's wiring). Three source-text tests that pinned the resolver's call counts and donor sites were updated to the new counts.

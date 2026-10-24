@@ -78,6 +78,7 @@ corrupted. Do not regenerate the one-liner — extend the script.
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
 | Make a worktree that can build | `python tools\worktree.py add <path>` | `git worktree add` alone (no deps) |
+| Compile on Linux for a test flight | `python3 tools/linux_toolchain.py build-dlls` | running `build.bat` under Wine by hand |
 
 Every release's notes carry a `## Thanks` section built from
 `release_credits.py --thanks` and finished by hand. It names only the authors
@@ -139,64 +140,47 @@ minutes after a flight finally reproduced the effect being chased.
   output. The GitHub workflow is optional there. From Linux or another
   non-native Windows host, use the GitHub Windows workflow below for
   full C++ validation. Wine and Proton do not count as native Windows.
-- From this Linux checkout, the Git-ignored pinned compiler, SDK and
-  Wine prefix are under `.toolchains/windows/`. From a shell, invoke its
-  PowerShell wrapper directly:
-
-  ```text
-  /home/deck/projects/edvr-unofficial-patch/.toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py doctor"
-  ```
-
-  In PowerShell, from this repository root:
-
-  ```powershell
-  python3 .toolchains/windows/toolchain.py doctor
-  python3 .toolchains/windows/toolchain.py build-dlls
-  ```
-
-  `doctor` checks the pinned setup; `build-dlls` is compile-only: it
-  writes `.toolchains/windows/compile-build/`, skips validation gates
-  and does not create a full-build receipt. Its shared toolchain root is
-  this original checkout; do not pass `--repo` or assume it builds a
-  worktree. For worktrees, use the GitHub full-validation path. The
-  local full `build` command currently fails Wine's process/window test
-  gates; do not bypass those gates or use compile-only outputs as
-  release assets. See `.toolchains/windows/README.md` for setup and
-  limits.
-- **Linux test flight (Steam Deck, Proton): a compile-only build.** For a
-  build Sean will fly, CI first is not required; CI is for a merge or
-  release. Commit to the branch before compiling: a dirty tree compiles as
-  `vX.Y.Z-dirty`, which `edvr_log.py --expect-build HEAD` will not match.
-  Close Elite, then:
+- **Linux: a compile-only build.** `tools/linux_toolchain.py` runs
+  `build.bat --compile-only` under Wine, with the same MSVC and Windows SDK as
+  CI, and writes the production DLLs to `<root>/build/compile-build` for the
+  main checkout or any worktree. It runs none of the gates, so it is not
+  validation and not a release asset; CI stays the validation for a merge or
+  release, and the full `build.bat` currently fails Wine's process/window gates
+  (do not bypass them). Run it with host `python3` from any shell, no wrapper.
+  Once per machine the user installs `wine msitools git` with sudo; then
+  `python3 tools/linux_toolchain.py setup --dry-run`, and
+  `setup --accept-license` only when the user has accepted VS 2022's Build
+  Tools licence (it needs a Visual Studio licence). Microsoft's binaries, the
+  Wine prefix and the SDKs sit in the Git-ignored
+  `<main checkout>/.toolchains/windows/` and are never shared; `doctor` checks
+  them.
+- **Linux test flight (Steam Deck, Proton).** For a build Sean will fly, CI
+  first is not required; CI is for a merge or release. Commit to the branch
+  before compiling: a dirty tree compiles as `vX.Y.Z-dirty`, which
+  `edvr_log.py --expect-build HEAD` will not match. Close Elite, then:
 
   ```bash
-  .toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py build-dlls"
+  python3 tools/linux_toolchain.py build-dlls
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --dry-run
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --verify-only
   python3 tools/edvr_log.py --target steam --expect-build HEAD --version
   ```
 
-  `--target steam` finds the game on Linux (`tools/steam_library.py`:
-  `~/.local/share/Steam`, `~/.steam/steam`, then every library in
-  `libraryfolders.vdf`). `--compile-only` installs from
-  `.toolchains/windows/compile-build/` instead of `build/`, and refuses
-  without that build's `compile_only_receipt.json`, when an output no longer
-  matches it, or when the tree has been edited or committed since (it asks
-  `compile_only.py` for the fingerprint, so the two cannot disagree). It
-  prints that the build is not Windows validated and writes `"build":
-  "compile-only"` into the install receipt; `--verify-only` compares the game
-  directory to that build and only warns about a moved tree. A real install
-  runs under the host `python3`, which checks `/proc` for a running
-  `EliteDangerous6*` (Proton); do not run it through the Wine Python, which
-  cannot see Proton's processes and passes that check vacuously. The toolchain
-  compiles the checkout it lives in; to fly a worktree, compile with
-  `build-dlls --root <worktree>` (output `<worktree>/build/compile-build`)
-  and install with `--root <worktree> --compile-only`. `--root` is a local
-  change to the device-local `compile_only.py`, and a copy without it refuses
-  the flag: test-fly from the main checkout there. `tools/worktree.py` makes
-  junctions and is Windows-only; on Linux symlink the ignored `third_party`
-  folders from the main checkout by hand.
+  To fly a worktree, give `build-dlls` and `install_edvr.py` `--root
+  <worktree>`. `--target steam` finds the game on Linux
+  (`tools/steam_library.py`: `~/.local/share/Steam`, `~/.steam/steam`, then
+  every library in `libraryfolders.vdf`). `--compile-only` installs from
+  `<root>/build/compile-build` instead of `build/`, and refuses without that
+  build's `compile_only_receipt.json`, when an output no longer matches it, or
+  when the tree has been edited or committed since (`tools/compile_only.py`
+  holds the fingerprint, shared with the toolchain). It prints that the build
+  is not Windows validated and writes `"build": "compile-only"` into the
+  install receipt; `--verify-only` compares the game directory to that build
+  and only warns about a moved tree. A real install runs under the host
+  `python3`, which checks `/proc` for a running `EliteDangerous6*` (Proton); do
+  not run it through the Wine Python, which cannot see Proton's processes and
+  passes that check vacuously.
 - For C++ changes on a non-native host, commit and push the candidate
   branch so Actions can validate that exact commit. The `release.yml`
   workflow is active on `main`; dispatch it with `gh workflow run

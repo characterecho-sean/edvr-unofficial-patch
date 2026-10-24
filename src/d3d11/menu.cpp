@@ -55,6 +55,7 @@
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 #include "terrain_checkerboard.h"   // Elite's terrain checkerboard rendering in VR: the worker's tick and the word it publishes
+#include "ui_layer_math.h"  // uiQualityParse: the HUD Anti-Aliasing row dims while fix.ui_quality is off (or the anti-aliasing is), UI quality read as the layer reads it
 #include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vr_ssaa_hold.h"       // vrSsaaHoldNoticeDue: the Supersampling hold's toast (a requested value held at 1.0)
 #include "vr_ssaa_hold_math.h"  // ssaahold::formatHoldToast
@@ -471,6 +472,37 @@ bool weaponsRowDisabled() {
     const bool flat = runtimeFlatProfile();
     const Config& cfg = Config::get();
     return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString("fix.temporal_aa", "off"), flat));
+}
+
+// fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24; the flat panel only: its `menu flat_performance` page is one VR's menu builds none of). It smooths
+// the HUD layer, which is live only while fix.ui_quality is not off AND the flat anti-aliasing is on (flat_ui_layer.cpp), so with either off the row stays on the
+// page, dimmed, and stops responding. UI quality is read as the layer reads it (uiQualityParse, the shipped 100 for a missing line) and the anti-aliasing as
+// weaponsRowDisabled's flat branch reads it (the row is flat only), live, every time the page is drawn or a row is touched. The hint and the refused step name
+// the cause that applies: UI quality first when it is off, else the anti-aliasing.
+bool isHudAntiAliasingRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "hud_antialiasing") == 0;
+}
+
+bool hudAntiAliasingUiQualityOn() {
+    const std::string quality = Config::get().getString("fix.ui_quality", "100");
+    return uiQualityParse(quality.c_str(), nullptr) > 0.0f;
+}
+
+bool hudAntiAliasingModeOn() {
+    return temporalModeEnabledFor(Config::get().requestedTemporalMode(), true);
+}
+
+bool hudAntiAliasingRowDisabled() {
+    return hudAntiAliasingRowDim(hudAntiAliasingUiQualityOn(), hudAntiAliasingModeOn());
+}
+
+const char* hudAntiAliasingHint() {
+    return hudAntiAliasingUiQualityOn() ? "Needs anti-aliasing: turn it on to use this." : "Needs UI quality: turn it on to use this.";
+}
+
+const char* hudAntiAliasingRefusal() {
+    return hudAntiAliasingUiQualityOn() ? "HUD Anti-Aliasing is inactive: turn anti-aliasing on first."
+                                        : "HUD Anti-Aliasing is inactive: turn UI quality on above first.";
 }
 
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
@@ -2350,9 +2382,11 @@ void buildContent(MenuContent& c) {
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
             const bool weaponsRow = isWeaponsRow(d);
+            const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
-                             (weaponsRow && weaponsRowDisabled());
+                             (weaponsRow && weaponsRowDisabled()) ||
+                             (hudAaRow && hudAntiAliasingRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             if (dlssRow) {
@@ -2429,6 +2463,8 @@ void buildContent(MenuContent& c) {
                                   : kMenuRow;
             if (hi && dim && weaponsRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", "Needs temporal AA: turn anti-aliasing on to use it.");
+            else if (hi && dim && hudAaRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
@@ -2880,6 +2916,11 @@ void stepRow(int defIndex, int dir, int mult) {
     }
     if (isWeaponsRow(d) && weaponsRowDisabled()) {
         g_s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
+        g_s.contentDirty = true;
+        return;
+    }
+    if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {
+        g_s.lastWrite = hudAntiAliasingRefusal();
         g_s.contentDirty = true;
         return;
     }

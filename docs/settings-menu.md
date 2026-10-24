@@ -7,7 +7,7 @@
   mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Flat F8 panel (2026-10-22): a Visual tab between Performance and Debug (`menu visual`); "Visual tab" below.
+  - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
   - Explorer Cam page (2026-10-08): eye trims and head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
     Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
@@ -257,6 +257,19 @@ panel builds, as `debug` is: the headset's menu has no such page, so Intro movie
 `menu` token and stays on the Fixes page in VR, and Star glow (`menu visual`) is flat-only until
 VR has the page. A `[visual]` row with no `menu` token is desktop-only, as a `[fix]` row is; the
 installer's window shows every `[visual]` row (flat view: the two the flat profile reads).
+
+### Flat-only rows on the Performance tab (2026-10-24)
+
+BUILT. The Performance tab is built from `kFlatPageRows` in `menu_flat_rows.h` whatever page a row's `menu`
+token names, and the headset's Performance page is the Fix-tier rows whose page is `performance`. A row that
+does something only in the flat profile therefore takes `menu flat_performance`: a page the headset's menu
+builds none of, so the row is on the flat tab and not on VR's page. The first is HUD Anti-Aliasing
+(`fix.hud_antialiasing`, on or off, default off, live), directly under UI quality; it dims, and refuses a step,
+while UI quality is off or the flat anti-aliasing is off (`hudAntiAliasingRowDim`; the layer it smooths is live
+only with both on), and its hint and refusal name the cause that applies. `tools/gen_settings_schema.py` refuses the token on a key
+that is not in `[fix]` and on a key `kFlatPageRows` does not list (the row would be on no menu at all); the
+rigs `flat_sharpen_test` and `sharp_weapons_test` hold the placement, the dimming and VR's page. The installer's
+window, VR view, still lists the row.
 
 ## The ask
 

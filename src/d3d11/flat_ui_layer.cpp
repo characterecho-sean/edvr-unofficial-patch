@@ -11,6 +11,7 @@
 #include "ui_layer.h"
 #include "vscreen.h"            // vScreenPSSetShaderResourcesRaw: the bloom feed binds past the shadow
 
+#include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 
@@ -43,6 +44,11 @@ struct Window {
     uint64_t toneCandidates = 0, toneProven = 0, toneAdmitted = 0, toneReissued = 0, toneDeclined = 0, toneByShape = 0;
     uint64_t copies = 0, doorsArmed = 0, doorUntreated = 0, doorSize = 0;
     uint64_t composites = 0, compositeNone = 0, bindFailed = 0;
+    // The HUD layer's edge smoothing (fix.hud_antialiasing, ui_layer_smaa.h): the layer composites by what they read -- the SMAA output, the raw
+    // layer because the key was off, the raw layer because the passes could not be had -- the key as the last composite read it, and the layer's size then.
+    uint64_t edgeSmoothed = 0, edgeRawKeyOff = 0, edgeRawFault = 0;
+    bool edgeKeyOn = false;
+    uint32_t edgeW = 0, edgeH = 0;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;  // the last copy's picture and the display
     double otherX = 0.0, otherY = 0.0;              // the last other-shift draw's measured shift, render pixels
     // The System Map's two families (2026-10-10): the frames a map was open in, and per family (0 canvas, 1 sprite) the
@@ -683,8 +689,22 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
     // The composite: this frame's HUD over the picture the copy reads (the resolve's, or the game's own after a refusal).
     const uint32_t region[4] = {0, 0, td.Width, td.Height};
     const float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+    // The HUD layer's edge smoothing (fix.hud_antialiasing, off by default; the F8 panel's HUD Anti-Aliasing row): the key is read here, a frame at a time, so a
+    // change is live; the layer decides nothing, it does what the ask says and reports what it did. A key the flat allow-list does not carry reads off, and the
+    // 30 s line shows it.
+    const bool smooth = Config::get().getBool("fix.hud_antialiasing", false);
+    g_w.edgeKeyOn = smooth;
+    uiLayerFlatSetEdgeSmoothing(smooth);
     // `treated`: the picture is the one EDVR's resolve made (unjittered), which the shield ripple reads at D minus the jitter; the game's own is left alone.
     ID3D11Texture2D* out = uiLayerComposite(frame, 0, picture.Get(), region, uv, false, treated);
+    const UiLayerEdgeSmoothingResult edge = uiLayerFlatEdgeSmoothingResult();
+    if (edge.outcome != UiLayerEdgeSmoothing::kNone) {
+        g_w.edgeW = edge.w;
+        g_w.edgeH = edge.h;
+        if (edge.outcome == UiLayerEdgeSmoothing::kSmoothed) ++g_w.edgeSmoothed;
+        else if (edge.outcome == UiLayerEdgeSmoothing::kFault) ++g_w.edgeRawFault;
+        else ++g_w.edgeRawKeyOff;
+    }
     if (!out) {
         ++g_w.compositeNone;
         return;
@@ -803,6 +823,13 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.compositeNone), static_cast<unsigned long long>(w.bindFailed),
         static_cast<unsigned long long>(w.writeBacks), static_cast<unsigned long long>(w.jitterPhase),
         static_cast<unsigned long long>(w.jitterZero), static_cast<unsigned long long>(w.toneByShape));
+    // The HUD layer's edge smoothing (fix.hud_antialiasing), whenever the window composited the layer: the composites that read the SMAA
+    // output, those that read the raw layer because the key was off, those that fell back to it because the passes could not be had, the key as the last
+    // composite read it and the layer's size. A window with composites and all three counts zero says the composite never reached the smoothing.
+    if (w.composites || w.edgeSmoothed || w.edgeRawKeyOff || w.edgeRawFault)
+        Log::get().note("flat ui layer smaa: key=%s smoothed=%llu raw-key-off=%llu raw-fault=%llu size=%ux%u", w.edgeKeyOn ? "on" : "off",
+                        static_cast<unsigned long long>(w.edgeSmoothed), static_cast<unsigned long long>(w.edgeRawKeyOff),
+                        static_cast<unsigned long long>(w.edgeRawFault), w.edgeW, w.edgeH);
     const UiLayerFamily families[4] = {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite,
                                        UiLayerFamily::kHoloGeneric};
     const size_t f0 = static_cast<size_t>(families[0]), f1 = static_cast<size_t>(families[1]),

@@ -26,6 +26,7 @@
 #include "ui_layer_seed.h"  // the Seeder: the game's depth-stencil at the layer's size
 #include "ui_layer_seed_census.h"
 #include "ui_layer_seed_timing.h"
+#include "ui_layer_smaa.h"  // the flat profile's HUD edge smoothing: SMAA 1x over the layer before the composite
 #include "shield_ripple_shaders.h"  // the shield ripple's door pass
 #include "sharp_weapons.h"  // fix.sharp_weapons: the weapons layer's source pass, blend states and step bindings
 #include "temporal_shader_bytecode.h"
@@ -475,6 +476,9 @@ struct Eye {
     Ptr<ID3D11ShaderResourceView> copySrv;
     uint32_t copyW = 0, copyH = 0;
     DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
+    // The flat profile's HUD edge smoothing: SMAA 1x on the layer at the layer's size, its output read in the layer's place (ui_layer_smaa.h).
+    // Made at the first composite that asks, released with the layer and when the ask stops.
+    UiLayerSmaa smaa;
 };
 Eye g_eye[2];
 
@@ -1277,7 +1281,8 @@ bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
         any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
-              e.hdrTex || e.hdrDs.tex || e.wTex;
+              e.hdrTex || e.hdrDs.tex || e.wTex || e.smaa.ready();
+        e.smaa.releaseTargets();
         e.coverage.reset();
         e.tex.Reset();
         e.rtv.Reset();
@@ -2403,6 +2408,13 @@ ID3D11ComputeShader* g_csInPlace = nullptr;
 bool g_loadChecked[2] = {}, g_loadOk[2] = {};
 unsigned g_inPlaceDeclinedNoted = 0;   // bit per reason, said once
 bool g_inPlaceNoted = false;
+// The flat profile's HUD edge smoothing (ui_layer.h, uiLayerFlatSetEdgeSmoothing): the adapter's ask for the next composite, taken and cleared on entry to
+// uiLayerComposite, and what that composite did with it. The VR profiles never set the ask.
+struct FlatEdgeSmoothing {
+    bool ask = false;
+    UiLayerEdgeSmoothingResult result;
+};
+FlatEdgeSmoothing g_flatEdge;
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
@@ -2485,9 +2497,30 @@ ID3D11UnorderedAccessView* inPlaceUavFor(Eye& e, ID3D11Device* dev, ID3D11Textur
     return e.frameUav.Get();
 }
 
+// The layer's SMAA resources for this composite, or null: a creation that failed is said once per size (the stand-down line) and the composite reads the raw
+// layer; a creation that succeeded says so once (the ready line).
+UiLayerSmaa* edgeSmoothingFor(Eye& e, ID3D11Device* dev) {
+    UiLayerSmaaFail fail;
+    switch (uiLayerSmaaEnsure(e.smaa, dev, e.w, e.h, &fail)) {
+        case UiLayerSmaaState::kMade:
+            Log::get().note("flat ui layer smaa: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", e.w, e.h,
+                            uiLayerMB(uiLayerBytes(e.w, e.h, 10)));
+            return &e.smaa;
+        case UiLayerSmaaState::kReady:
+            return &e.smaa;
+        case UiLayerSmaaState::kFailed:
+            Log::get().note("flat ui layer smaa: stood down at %ux%u -- %s hr=0x%08X", e.w, e.h, fail.what ? fail.what : "a creation failed",
+                            static_cast<unsigned>(fail.hr));
+            return nullptr;
+        case UiLayerSmaaState::kStoodDown:
+            return nullptr;
+    }
+    return nullptr;
+}
+
 ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                                 const uint32_t region[4], const float layerUv[4], bool useMult,
-                                bool ownedFrame, const char** why) {
+                                bool ownedFrame, const char** why, bool smooth) {
     D3D11_TEXTURE2D_DESC fd{};
     frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
@@ -2627,6 +2660,13 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                         eye == 0 ? "left" : "right", rw, rh, viewName(view),
                         uiLayerMB(uiLayerBytes(rw, rh)));
     }
+    // The flat profile's HUD edge smoothing: the SMAA resources for the layer's size are made here and the passes run inside the timed span below. Not asked
+    // for, nothing is kept.
+    UiLayerSmaa* smaa = nullptr;
+    if (smooth)
+        smaa = edgeSmoothingFor(e, dev.Get());
+    else if (e.smaa.ready())
+        e.smaa.releaseTargets();
 
     UiLayerCompositeParams p{};
     if (viaCopy) {
@@ -2668,6 +2708,15 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
         ctx->CopySubresourceRegion(e.copy.Get(), 0, 0, 0, 0, frame, 0, &box);
     }
+    // The layer the composite reads: its SMAA output when the passes ran, else the layer itself.
+    ID3D11ShaderResourceView* layerSrv = e.srv.Get();
+    bool smoothed = false;
+    if (smaa) {
+        if (ID3D11ShaderResourceView* output = uiLayerSmaaRun(*smaa, ctx.Get(), e.srv.Get())) {
+            layerSrv = output;
+            smoothed = true;
+        }
+    }
     ID3D11ShaderResourceView* nullSrv[3] = {};
     ID3D11UnorderedAccessView* nullUav = nullptr;
     ctx->CSSetShaderResources(0, 3, nullSrv);
@@ -2676,7 +2725,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ctx->CSSetConstantBuffers(0, 1, &g_cb);
     // In place the frame is bound ONLY as the UAV: slot 0 stays null, so the one texture is never an
     // SRV and a UAV in the same dispatch (the hazard D3D11 resolves by silently dropping a binding).
-    ID3D11ShaderResourceView* srvs[3] = {inPlaceUav ? nullptr : frameSrv, e.srv.Get(),
+    ID3D11ShaderResourceView* srvs[3] = {inPlaceUav ? nullptr : frameSrv, layerSrv,
                                          useMult ? e.mSrv.Get() : nullptr};
     ctx->CSSetShaderResources(0, 3, srvs);
     ID3D11UnorderedAccessView* uav = inPlaceUav ? inPlaceUav : e.outUav.Get();
@@ -2699,6 +2748,9 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedCb) savedCb->Release();
 
     ++g_win.composites;
+    g_flatEdge.result.outcome = !smooth ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
+    g_flatEdge.result.w = e.w;
+    g_flatEdge.result.h = e.h;
     if (inPlaceUav) {
         ++g_win.compositesInPlace;
         if (!g_inPlaceNoted) {
@@ -6322,6 +6374,10 @@ uint32_t g_eyeRearmSeen = 0;            // F30: g_nativeModeEdges at the last fr
 constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
+    // The flat adapter's ask for this composite (uiLayerFlatSetEdgeSmoothing), taken whatever happens below so it never carries to another call.
+    const bool smooth = g_flatEdge.ask;
+    g_flatEdge.ask = false;
+    g_flatEdge.result = UiLayerEdgeSmoothingResult{};
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
@@ -6401,7 +6457,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     ID3D11Texture2D* result = nullptr;
     const char* why = nullptr;
     const bool ran = guardedBudget(g_compositeBudget, [&] {
-        result = compositeInner(e, eye, frame, region, layerUv, useMult, ownedFrame, &why);
+        result = compositeInner(e, eye, frame, region, layerUv, useMult, ownedFrame, &why, smooth);
     });
     if (!result) {
         ++g_win.compositeRefused;
@@ -6569,6 +6625,9 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
     g_flatDraw.renderH = renderH;
 }
 
+void uiLayerFlatSetEdgeSmoothing(bool on) { g_flatEdge.ask = on; }
+UiLayerEdgeSmoothingResult uiLayerFlatEdgeSmoothingResult() { return g_flatEdge.result; }
+
 int uiLayerLastDecision() { return g_lastDecision; }
 uint32_t uiLayerDecisionCount() { return g_decisionCount; }
 int uiLayerEyeOfGameTarget(const void* res) {
@@ -6619,6 +6678,8 @@ void releaseDeviceObjects() {
     g_hdrSeedGpu.reset();  // release-only; the old device may already be gone
     g_hdrSeedActive = 0;
     releaseLayers();
+    // releaseLayers let go of the SMAA targets; the passes, samplers, lookup textures and the remembered failure belong to the device.
+    for (Eye& e : g_eye) e.smaa.releaseAll();
     for (RouteSlot& s : g_route) {
         s.timer.reset();
         s.inUse = false;

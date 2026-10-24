@@ -58,6 +58,7 @@
 #include "flat_camera_table.h"
 #include "flat_hdr_projection_capture.h"
 #include "flat_deferred_camera.h"
+#include "flat_deferred_reject.h"
 #include "flat_deferred_failure_witness.h"
 #include "flat_query_cut.h"
 #include "flat_query_reads.h"
@@ -535,6 +536,13 @@ struct State {
     // The prepared clone this draw is about to execute rewrites the whole camera, not just the rays.
     bool deferredRepairWhole = false, deferredInverseLastWhole = false;
     uint64_t deferredWholeExecutions = 0;
+    // Log only: forward-mismatch frames the whole-camera repair refused, and which phases already had their bytes logged.
+    uint64_t deferredWholeRejects = 0, deferredWholeRejectLastLog = 0;
+    struct WholeRejectPhase { uint64_t key = 0; uint32_t bytesLogged = 0; };
+    WholeRejectPhase deferredWholeRejectPhases[16]{};
+    uint64_t deferredSecondCameras = 0, deferredSecondCameraLastLog = 0;
+    uint32_t deferredSecondCamerasLogged = 0;
+    uint64_t deferredSecondPicks[6]{};   // by SecondCameraPick
     bool deferredCameraNonzeroLogged = false;
     FlatCameraProbe cameraProbe{};
     struct CopyProvenanceSample {
@@ -2047,6 +2055,102 @@ void expireDeferredFailure(State& s,const char* event) {
         s.deferredFailureCapture.cancel();
     }
 }
+// Log only. A nonzero-phase deferred frame whose CB2 lacks the phase (relation forward-mismatch) that the whole-camera repair refused:
+// name the check that refused, with its residual and bound, and for the first frames of each phase the 96 + 112 bytes that reproduce it
+// offline. Reads nothing the repair did not already read and decides nothing. The lines appear only when the repair refuses, so a
+// `deferred-inverse-unproven` with relation=forward-mismatch repair=none and no such line means this code did not run.
+static void noteWholeOmissionRefused(State& s, uint64_t frame, uint32_t q, unsigned width, unsigned height,
+        const unsigned char* donorCamera, const unsigned char* cb2, const FlatProjectionJitter& jitter,
+        float phaseX, float phaseY, bool qualified, bool upstream, bool repairable) {
+    ++s.deferredWholeRejects;
+    FlatDeferredReject why;
+    const bool wouldAccept=flatExplainWholeOmission(donorCamera,cb2,jitter,why);
+    uint32_t bitsX=0,bitsY=0;std::memcpy(&bitsX,&phaseX,4);std::memcpy(&bitsY,&phaseY,4);
+    const uint64_t key=(uint64_t(bitsX)<<32)|bitsY;
+    State::WholeRejectPhase* slot=nullptr;
+    for(auto& p:s.deferredWholeRejectPhases)if(p.key==key){slot=&p;break;}
+    if(!slot)for(auto& p:s.deferredWholeRejectPhases)if(!p.key){p.key=key;slot=&p;break;}
+    const uint64_t now=GetTickCount64();
+    if(s.deferredWholeRejects<=32 || now-s.deferredWholeRejectLastLog>=5000) {
+        const double ratio=why.bound>0?why.residual/why.bound:0;
+        Log::get().note("flat deferred whole-omission refused: frame=%llu q=%u stage=%s check=%s row=%u col=%u residual=%.6g bound=%.6g ratio=%.4g phase=(%.9g,%.9g) ndc=(%.9g,%.9g) size=%ux%u qualified=%u upstream=%u repairable=%u explain-accepts=%u total=%llu; the repair's own checks in its own order, the first that failed; log only, nothing is decided here",
+            (unsigned long long)frame,q,why.stage,why.check,why.row,why.col,why.residual,why.bound,ratio,phaseX,phaseY,
+            jitter.ndcX,jitter.ndcY,width,height,qualified?1u:0u,upstream?1u:0u,repairable?1u:0u,wouldAccept?1u:0u,
+            (unsigned long long)s.deferredWholeRejects);
+        s.deferredWholeRejectLastLog=now;
+    }
+    if(slot && slot->bytesLogged<2) {
+        ++slot->bytesLogged;
+        static const char digits[]="0123456789ABCDEF";
+        char donorHex[2*kFlatCameraBytes+1],cb2Hex[2*kFlatDeferredCameraBytes+1];
+        for(unsigned i=0;i<kFlatCameraBytes;++i){donorHex[2*i]=digits[donorCamera[i]>>4];donorHex[2*i+1]=digits[donorCamera[i]&15];}
+        donorHex[2*kFlatCameraBytes]=0;
+        for(unsigned i=0;i<kFlatDeferredCameraBytes;++i){cb2Hex[2*i]=digits[cb2[i]>>4];cb2Hex[2*i+1]=digits[cb2[i]&15];}
+        cb2Hex[2*kFlatDeferredCameraBytes]=0;
+        Log::get().note("flat deferred whole-omission bytes: frame=%llu size=%ux%u phase-bits=%08X/%08X donor=%s cb2=%s; the donor camera (%u bytes) and CB2 rows 10..16 (%u bytes), the pair tools/flat_temporal_test captures hold",
+            (unsigned long long)frame,width,height,bitsX,bitsY,donorHex,cb2Hex,(unsigned)kFlatCameraBytes,(unsigned)kFlatDeferredCameraBytes);
+    }
+}
+// Log only. The witness line says two writers on the depth bound different cameras (conflict=second-camera) and keeps their hashes. This
+// says what the two cameras are: how each matches the pass's own CB2 under the strict relation, how they differ from each other, and for
+// the first lines the 96 + 96 + 112 bytes that reproduce it offline. It reads the entry the witness already holds and decides nothing; a
+// witness line with conflict=second-camera and no such line means this code did not run.
+enum class SecondCameraPick : uint8_t { NotApplicable, Unqualified, First, Offender, Both, Neither };
+static const char* secondCameraPickName(SecondCameraPick p) {
+    switch(p) {
+    case SecondCameraPick::Unqualified: return "unqualified";
+    case SecondCameraPick::First: return "first";
+    case SecondCameraPick::Offender: return "offender";
+    case SecondCameraPick::Both: return "both-hold";
+    case SecondCameraPick::Neither: return "neither-holds";
+    default: return "not-selectable";
+    }
+}
+static void noteSecondCamera(State& s, uint64_t frame, uint32_t q, unsigned width, unsigned height, const FlatDeferredDonor& donor,
+        const unsigned char* cb2, float phaseX, float phaseY, FlatDeferredCameraMatch relation, SecondCameraPick pick, double ndcX, double ndcY) {
+    ++s.deferredSecondCameras;
+    const uint64_t now=GetTickCount64();
+    // The first 8 lines are 2 s apart (consecutive frames repeat one another); then the witness line's 5 s.
+    if(s.deferredSecondCamerasLogged && now-s.deferredSecondCameraLastLog<(s.deferredSecondCamerasLogged<8?2000u:5000u))return;
+    const bool bytesDue=++s.deferredSecondCamerasLogged<=8;
+    const auto report=flatExplainSecondCamera(donor.entryCamera,donor.offenderCamera,cb2);
+    uint32_t bitsX=0,bitsY=0;std::memcpy(&bitsX,&phaseX,4);std::memcpy(&bitsY,&phaseY,4);
+    const uint64_t offenderHash=donor.offenderCamera?flatCameraHash(donor.offenderCamera):0;
+    // Two lines: the 1200-byte line holds one of these, not both.
+    Log::get().note("flat deferred second-camera: frame=%llu q=%u size=%ux%u phase=(%.9g,%.9g) first-vs=%016llX first-ps=%016llX first-camera=%016llX offender-vs=%016llX offender-ps=%016llX offender-camera=%016llX cb2=%u relation=%s first-match=%s first-scaled=%s offender-match=%s offender-scaled=%s compared=%u differing-floats=%u first-diff=%u max-abs=%.6g max-rel=%.6g total=%llu; each writer's camera against this pass's CB2 under the strict relation (scaled: with the repair's frustum allowance) and against each other; log only, nothing is decided here",
+        (unsigned long long)frame,q,width,height,phaseX,phaseY,
+        (unsigned long long)donor.entryFirstVs,(unsigned long long)donor.entryFirstPs,(unsigned long long)donor.entryCameraHash,
+        (unsigned long long)donor.offender.vs,(unsigned long long)donor.offender.ps,(unsigned long long)offenderHash,cb2?1u:0u,
+        flatDeferredCameraMatchName(relation),
+        flatDeferredCameraMatchName(report.first),flatDeferredCameraMatchName(report.firstScaled),
+        flatDeferredCameraMatchName(report.offender),flatDeferredCameraMatchName(report.offenderScaled),
+        report.compared?1u:0u,report.differing,report.firstDiff,report.maxAbs,report.maxRel,(unsigned long long)s.deferredSecondCameras);
+    Log::get().note("flat deferred second-camera check: frame=%llu q=%u first=%s/%s row=%u col=%u residual=%.6g bound=%.6g offender=%s/%s row=%u col=%u residual=%.6g bound=%.6g; the strict match's deciding comparison for each camera, empty when it matched",
+        (unsigned long long)frame,q,report.firstWhy.stage,report.firstWhy.check,report.firstWhy.row,report.firstWhy.col,
+        report.firstWhy.residual,report.firstWhy.bound,report.offenderWhy.stage,report.offenderWhy.check,report.offenderWhy.row,
+        report.offenderWhy.col,report.offenderWhy.residual,report.offenderWhy.bound);
+    // What each camera's writers carry: the phase in the 96 bytes against the phase EDVR requested this frame (ndc), the writers by camera, and
+    // what the verifier made of it. Equal phases mean the pass can be repaired to either camera's phase without mixing two in the G-buffer.
+    const auto firstPhase=flatEstimateCameraPhase(donor.entryCamera),offenderPhase=flatEstimateCameraPhase(donor.offenderCamera);
+    Log::get().note("flat deferred second-camera phase: frame=%llu q=%u requested-ndc=(%.9g,%.9g) first-ndc=(%.9g,%.9g) first-scale=(%.6g,%.6g) first-near=%.6g first-writers=%u offender-ndc=(%.9g,%.9g) offender-scale=(%.6g,%.6g) offender-near=%.6g offender-writers=%u pair-clean=%u selectable=%u pick=%s selected=%u picks=first:%llu,offender:%llu,both:%llu,neither:%llu,unqualified:%llu; ndc is the camera's own off-centre term over its w row, scale what remains; pick is the camera whose relation to CB2 holds, selected that the donor is it",
+        (unsigned long long)frame,q,ndcX,ndcY,firstPhase.ndcX,firstPhase.ndcY,firstPhase.scaleX,firstPhase.scaleY,firstPhase.nearPlane,donor.firstWriters,
+        offenderPhase.ndcX,offenderPhase.ndcY,offenderPhase.scaleX,offenderPhase.scaleY,offenderPhase.nearPlane,donor.offenderWriters,
+        donor.pairClean?1u:0u,donor.pairSelectable?1u:0u,secondCameraPickName(pick),donor.selected?1u:0u,
+        (unsigned long long)s.deferredSecondPicks[static_cast<unsigned>(SecondCameraPick::First)],
+        (unsigned long long)s.deferredSecondPicks[static_cast<unsigned>(SecondCameraPick::Offender)],
+        (unsigned long long)s.deferredSecondPicks[static_cast<unsigned>(SecondCameraPick::Both)],
+        (unsigned long long)s.deferredSecondPicks[static_cast<unsigned>(SecondCameraPick::Neither)],
+        (unsigned long long)s.deferredSecondPicks[static_cast<unsigned>(SecondCameraPick::Unqualified)]);
+    if(bytesDue) {
+        char firstHex[2*kFlatCameraBytes+1]="unavailable",offenderHex[2*kFlatCameraBytes+1]="unavailable",cb2Hex[2*kFlatDeferredCameraBytes+1]="unavailable";
+        if(donor.entryCamera)flatDeferredFailureHex(donor.entryCamera,kFlatCameraBytes,firstHex);
+        if(donor.offenderCamera)flatDeferredFailureHex(donor.offenderCamera,kFlatCameraBytes,offenderHex);
+        if(cb2)flatDeferredFailureHex(cb2,kFlatDeferredCameraBytes,cb2Hex);
+        Log::get().note("flat deferred second-camera bytes: frame=%llu size=%ux%u phase-bits=%08X/%08X first=%s offender=%s cb2=%s; the first writer's camera and the offender's (%u bytes each) and CB2 rows 10..16 (%u bytes)",
+            (unsigned long long)frame,width,height,bitsX,bitsY,firstHex,offenderHex,cb2Hex,(unsigned)kFlatCameraBytes,(unsigned)kFlatDeferredCameraBytes);
+    }
+    s.deferredSecondCameraLastLog=now;
+}
 const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.format!=kFlatDeferredHdrFormat || k.vs!=kFlatDeferredHdrVs || k.ps!=kFlatDeferredHdrPs || k.camera)return nullptr;
@@ -2091,7 +2195,7 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
     s.context->PSGetShaderResources(1,1,&srv1);s.context->PSGetShaderResources(2,1,&srv2);
     if(srv1)srv1->GetResource(&source1);if(srv2)srv2->GetResource(&source2);
     const void* const gbuffer[3]={source.Get(),source1.Get(),source2.Get()};
-    const auto donor=flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1,gbuffer);
+    const auto resolved=flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1,gbuffer);
     Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
     if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(2,1,&buffer,&first,&count);
     const auto metadata=s.projection?s.projection->constantsMetadata(buffer.Get()):FlatProjectionShadowMetadata{};
@@ -2115,6 +2219,31 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
         view.Texture2D.MostDetailedMip==0 && view.Texture2D.MipLevels==1 &&
         desc.Width==k.width && desc.Height==k.height && desc.Format==DXGI_FORMAT_R10G10B10A2_TYPELESS &&
         desc.ArraySize==1 && desc.SampleDesc.Count==1;
+    FlatProjectionJitter jitter{};unsigned char certified[kFlatDeferredCameraBytes]{};
+    const bool jitterReady=flatCameraInjectUpstreamOwns() && nonzero &&
+        flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,jitter);
+    // Two cameras drew into the pass's G-buffer and no source record stands on the depth (the witness's conflict=second-camera). The
+    // resolver cannot say which one the pass uses, because it never sees CB2. This can: the camera whose relation to CB2 holds, meaning
+    // it matches or one of the two certified phase omissions (the rays alone, or the whole camera) repairs it. Exactly one holding names
+    // the donor; none, or both, leave the pass without one, refused as before. The resolver still demands that the entry be the depth's
+    // only one, clean (every writer bound one of the two cameras) and current, so a third camera or a stale one is never chosen.
+    SecondCameraPick pick=SecondCameraPick::NotApplicable;
+    const auto donor=[&]()->FlatDeferredDonor {
+        if(!resolved.pairSelectable)return resolved;
+        if(!(actual && input && copied && !foreignWork.load(std::memory_order_acquire))){pick=SecondCameraPick::Unqualified;return resolved;}
+        unsigned char scratch[kFlatDeferredCameraBytes];
+        const auto holds=[&](const unsigned char* camera) {
+            return flatMatchDeferredCamera(camera,raw)==FlatDeferredCameraMatch::Match ||
+                (jitterReady && (flatRepairDeferredMissingPhase(camera,raw,jitter,scratch) ||
+                                 flatRepairDeferredWholeOmission(camera,raw,jitter,scratch)));
+        };
+        const bool holdsFirst=holds(resolved.entryCamera),holdsOffender=holds(resolved.offenderCamera);
+        pick=holdsFirst&&holdsOffender?SecondCameraPick::Both:holdsFirst?SecondCameraPick::First:
+            holdsOffender?SecondCameraPick::Offender:SecondCameraPick::Neither;
+        ++s.deferredSecondPicks[static_cast<unsigned>(pick)];
+        if(holdsFirst==holdsOffender)return resolved;
+        return flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1,gbuffer,holdsFirst?resolved.entryCamera:resolved.offenderCamera);
+    }();
     const auto match=donor && copied?flatMatchDeferredCamera(donor.camera,raw):FlatDeferredCameraMatch::Unavailable;
     const bool qualified=actual && input && donor && copied && !foreignWork.load(std::memory_order_acquire);
     // No donor because nothing a camera placed reached the pass's inputs this frame (flatRuntimeEmptyGBuffer): the pass has nothing in its
@@ -2137,13 +2266,14 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
         witness.original=copied?raw:nullptr;
         recordDeferredFailure(s,k,why,actual,input,donor,firstWitness,&witness);
     };
-    FlatProjectionJitter jitter{};unsigned char certified[kFlatDeferredCameraBytes]{};
-    const bool repairable=qualified && flatCameraInjectUpstreamOwns() && nonzero &&
-        flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,jitter);
+    const bool repairable=qualified && jitterReady;
     // Two certified omissions, mutually exclusive by their strict relation:
     // the rays alone lack the phase (Inverse), or the whole camera does (Forward).
     const bool missingPhase=repairable && flatRepairDeferredMissingPhase(donor.camera,raw,jitter,certified);
     const bool wholeOmission=repairable && !missingPhase && flatRepairDeferredWholeOmission(donor.camera,raw,jitter,certified);
+    if(nonzero && match==FlatDeferredCameraMatch::Forward && !missingPhase && !wholeOmission)
+        noteWholeOmissionRefused(s,requestedFrame,requestedQ,k.width,k.height,donor.camera,raw,jitter,
+            requestedPhaseX,requestedPhaseY,qualified,flatCameraInjectUpstreamOwns(),repairable);
     const bool repairing=missingPhase || wholeOmission;
     const char* repairName=wholeOmission?"whole":missingPhase?"inverse":"none";
     const FlatProjectionBindingPlan* deferredPlan=nullptr;
@@ -2235,6 +2365,9 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
             flatDeferredCameraMatchName(match),draw.deferredHdrVerified?1u:0u,(unsigned long long)s.deferredWitnessCalls);
         witnessLastLog=now;
     }
+    if(!donor.poolRecords && donor.entry && donor.conflict==FlatWitnessConflict::Camera)
+        noteSecondCamera(s,requestedFrame,requestedQ,k.width,k.height,donor,copied?raw:nullptr,requestedPhaseX,requestedPhaseY,match,pick,
+            jitterReady?jitter.ndcX:0.0,jitterReady?jitter.ndcY:0.0);
     if(s.deferredCameraChecks<=8 ||
        (nonzero && !s.deferredCameraNonzeroLogged) || now-s.deferredCameraLastLog>=5000) {
         Log::get().note("flat deferred HDR camera: frame=%llu q=%u H=%p actual-b1=%p CB2=%p first=%u count=%u original=%u current=%u write-frame=%llu write-q=%u donor-b1=%p donor-last=%u donor-role=%s source=%p actual=%u input=%u relation=%s accepted=%u repair=%s missing-phase=%u prepared=%u warmed=%u phase=(%.9g,%.9g) checks=%llu accepted-total=%llu refused-total=%llu empty-gbuffer-total=%llu work=%s; actual H CB2 witness, donor identity separate; prepared admission awaits verified binding",
@@ -6214,7 +6347,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
         s.deferredInverseLastBound=deferredProjection->active();s.deferredInverseLastWhole=wholeClone;
         if(!deferredProjection->active()) {
-            recordDeferredFailure(s,k,"deferred-inverse-binding-failed",true,true,flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1),d.deferredHdrVerified);
+            recordDeferredFailure(s,k,"deferred-inverse-binding-failed",true,true,flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1,nullptr,d.camera),d.deferredHdrVerified);
             d.deferredHdrVerified=false;d.deferredInverseRepaired=false;
             failPhase(s,"deferred-inverse-binding-failed");
             flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredBinding,k.color,k.depth,k.vs,k.ps);

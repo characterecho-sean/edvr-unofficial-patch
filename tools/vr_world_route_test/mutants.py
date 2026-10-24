@@ -76,7 +76,7 @@ RIGS = {
         "label": ":rig_ui_layer_world_test",
         "target": SRC / "ui_layer.cpp",
         # the production source the mutations edit is the second of these; it is replaced by the edited copy
-        "sources": ["tools\\ui_layer_world_test\\ui_layer_world_test.cpp", "src\\d3d11\\ui_layer.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp",
+        "sources": ["tools\\ui_layer_world_test\\ui_layer_world_test.cpp", "src\\d3d11\\ui_layer.cpp", "src\\d3d11\\map_smaa.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp",
                     "src\\common\\guard.cpp", "third_party\\dxbc_hash\\DxilHash.cpp"],
         "libs": ["d3dcompiler.lib", "user32.lib"],
         "include_gen": True,

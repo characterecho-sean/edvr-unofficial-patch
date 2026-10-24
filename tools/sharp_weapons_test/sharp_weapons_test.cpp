@@ -787,12 +787,14 @@ static void flatTests() {
             }
     // The key and its row.
     check(flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has the Sharp weapons row and no Weapons blend row");
-    int quality = -1, sharp = -1;
+    int quality = -1, hud = -1, sharp = -1;
     for (size_t i = 0; i < kFlatPageRowCount; ++i) {
         if (std::strcmp(kFlatPageRows[i].key, "ui_quality") == 0) quality = static_cast<int>(i);
+        if (std::strcmp(kFlatPageRows[i].key, "hud_antialiasing") == 0) hud = static_cast<int>(i);
         if (std::strcmp(kFlatPageRows[i].key, "sharp_weapons") == 0) sharp = static_cast<int>(i);
     }
-    check(quality >= 0 && sharp == quality + 1, "...directly under UI quality, as in VR");
+    check(quality >= 0 && hud == quality + 1 && sharp == hud + 1,
+          "...under UI quality and the flat-only HUD Anti-Aliasing row (VR's page, which has no such row, has it directly under UI quality: menuTests)");
     check(sharp >= 0 && kFlatPageRows[sharp].read == FlatRowRead::Allowlist, "...read through the allow-listed getters (flat_profile_keys.h names the key)");
     const std::string adapter = readFile("src/d3d11/flat_ui_layer.cpp"), runtimeH = readFile("src/d3d11/flat_runtime.h"), keys = readFile("src/common/flat_profile_keys.h");
     check(adapter.size() > 10000 && runtimeH.size() > 1000 && keys.size() > 500, "the flat sources are readable from the repo root");
@@ -805,8 +807,9 @@ static void flatTests() {
 }
 
 // ============================================================================================ the menu rows
-// The one Sharp weapons row (On, On (plain blend), Off (stock)): Fix tier, the Performance page, live, directly under UI quality in the table the build generated
-// from the real edvr.ini; there is no Weapons blend row. Dimmed, and refusing steps and typing, with anti-aliasing off.
+// The one Sharp weapons row (On, On (plain blend), Off (stock)): Fix tier, the Performance page, live, under UI quality in the table the build generated
+// from the real edvr.ini (directly under it on VR's page; the flat-only HUD Anti-Aliasing row, on the page VR does not build, sits between them in the table);
+// there is no Weapons blend row. Dimmed, and refusing steps and typing, with anti-aliasing off.
 static int rowIndex(const char* section, const char* key) {
     const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     for (int i = 0; i < count; ++i)
@@ -824,9 +827,21 @@ static bool gatedMenu(const std::string& t) {
 static void menuTests() {
     const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     check(count > 10, "the generated menu table is there");
-    const int quality = rowIndex("fix", "ui_quality"), sharp = rowIndex("fix", "sharp_weapons");
-    check(quality >= 0 && sharp >= 0, "UI quality and Sharp weapons are rows");
-    check(sharp == quality + 1, "Sharp weapons is directly under UI quality");
+    const int quality = rowIndex("fix", "ui_quality"), sharp = rowIndex("fix", "sharp_weapons"), hud = rowIndex("fix", "hud_antialiasing");
+    check(quality >= 0 && sharp >= 0 && hud >= 0, "UI quality, HUD Anti-Aliasing and Sharp weapons are rows");
+    check(hud == quality + 1 && sharp == hud + 1, "the table has HUD Anti-Aliasing directly under UI quality and Sharp weapons directly under it");
+    // VR's Performance page is the Fix-tier rows whose page is "performance" (menu.cpp addSettingRows); on it Sharp weapons is directly under UI quality, as it
+    // was before the HUD row, because that row is on the page VR does not build.
+    {
+        int pos = 0, qualityPos = -1, sharpPos = -1;
+        for (int i = 0; i < count; ++i) {
+            if (kMenuRows[i].tier != MenuTier::Fix || std::strcmp(kMenuRows[i].page, "performance") != 0) continue;
+            if (i == quality) qualityPos = pos;
+            if (i == sharp) sharpPos = pos;
+            ++pos;
+        }
+        check(qualityPos >= 0 && sharpPos == qualityPos + 1, "on VR's Performance page Sharp weapons is directly under UI quality");
+    }
     check(rowIndex("advanced", "sharp_weapons_blend") < 0, "there is no Weapons blend row (and so no second one in the developer tier)");
     if (sharp >= 0) {
         const MenuRowDef& r = kMenuRows[sharp];
