@@ -21,6 +21,7 @@
 #include "f93de_checks.h"   // F93d: the game's camera published and watched
 #include "f94_checks.h"     // F94a: the neck as the view's reference, the body at its animated height
 #include "f94b_checks.h"    // F94b: the interaction label moved by its own anchor; F93c's rule measured beside it
+#include "f95_checks.h"     // F95a: the neck reference from the stance's settled height; the view-motion instrument
 
 #include <array>
 #include <chrono>
@@ -7201,6 +7202,8 @@ int wmain(int argc, wchar_t** argv) {
     f94test::run94(check);
     // F94b: the label's row patch from its own anchor (the anchor shown at the dot's place), F93c's rule against it in a lagged turn and at a tie of two dots.
     f94btest::run94b(check);
+    // F95a: the raise's target from settled stances only (the walk cycle, a landing and a stance in transition held out), the loop with the window, the instrument.
+    f95test::run95(check);
     // F95b: the label's anchor taken back from its designed offset in the marker's HUD frame (F94b's world anchor failed the gate in the flight's frames).
     f94btest::run95b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);

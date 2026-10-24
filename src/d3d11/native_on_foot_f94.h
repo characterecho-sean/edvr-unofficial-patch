@@ -66,6 +66,7 @@ struct In {
     double targetM = 0.0;      // raiseTarget of the newest pinned call
     double weaponW = 0.0;      // F88's weight (1 with a weapon or tool drawn)
     double dt = 0.0;
+    double settleS = kSettleS; // the filter's 95% time (F95a passes the standing-height hold's, at least nofoot::f95::kSettleMinS)
 };
 struct Out {
     double raiseM = 0.0;     // the neck reference's raise (ramped, quantised): the view over the game's camera unarmed
@@ -99,7 +100,8 @@ struct NeckRaise {
             o.following = true;
         }
         if (dt > 0.0) {   // the filter runs in and out of the scope (out of it the ramp takes the raise down)
-            const double om = kCritical95 / kSettleS, e = x - target, c = v + om * e, ex = std::exp(-om * dt);
+            const double settle = std::isfinite(in.settleS) && in.settleS >= 0.01 ? in.settleS : kSettleS;
+            const double om = kCritical95 / settle, e = x - target, c = v + om * e, ex = std::exp(-om * dt);
             x = target + (e + c * dt) * ex;
             v = (v - om * c * dt) * ex;
         }
