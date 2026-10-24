@@ -590,10 +590,10 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (std::fabs(cfg.getFloat("fix.native_on_foot_fp_shoulder_drop_cm", 0.0f)) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_fp_shoulder_drop_cm is retired (F66): ignored");
     // F96: the ten arm keys were removed; the arm IK's values are constants now. A file that still sets one gets one note, at the shipped value.
-    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_elbow_out_cm", 6.0f) - 6.0f) > 1e-6f)
-        Log::get().note("native on foot: fix.native_on_foot_arm_elbow_out_cm is retired (F96): ignored (the elbow out is a constant, 6 cm)");
-    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_elbow_swivel_trim_deg", 6.0f) - 6.0f) > 1e-6f)
-        Log::get().note("native on foot: fix.native_on_foot_arm_elbow_swivel_trim_deg is retired (F96): ignored (the swivel trim is a constant, 6 deg)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_elbow_out_cm", 3.5f) - 3.5f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_arm_elbow_out_cm is retired (F96): ignored (the elbow out is a constant, 3.5 cm)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_elbow_swivel_trim_deg", 2.0f) - 2.0f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_arm_elbow_swivel_trim_deg is retired (F96): ignored (the swivel trim is a constant, 2 deg)");
     if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_square_amount", 0.75f) - 0.75f) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_arm_square_amount is retired (F96): ignored (the torso square-up amount is a constant, 0.75)");
     if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_ads_square_amount", 1.0f) - 1.0f) > 1e-6f)
@@ -606,8 +606,8 @@ void retiredKeysNote(const Config& cfg, bool first) {
         Log::get().note("native on foot: fix.native_on_foot_arm_ads_shoulder_raise_cm is retired (F96): ignored (the ADS shoulder raise is a constant, 5.5 cm)");
     if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_ads_shoulder_forward_cm", 0.0f)) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_arm_ads_shoulder_forward_cm is retired (F96): ignored (the ADS shoulder forward is a constant, 0 cm)");
-    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_ads_lean_deg", 6.0f) - 6.0f) > 1e-6f)
-        Log::get().note("native on foot: fix.native_on_foot_arm_ads_lean_deg is retired (F96): ignored (the ADS lean is a constant, 6 deg)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_arm_ads_lean_deg", 8.0f) - 8.0f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_arm_ads_lean_deg is retired (F96): ignored (the ADS lean is a constant, 8 deg)");
     // F94a: fix.native_on_foot_eye_height_cm (retired in F68f) is a live key again, with a new meaning: the eyes' height over the commander's neck (readKey).
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).

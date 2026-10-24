@@ -1504,7 +1504,7 @@ int wmain(int argc, wchar_t** argv) {
                 bool cl = false;
                 double E2[3];
                 t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
-                check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::kIkSwivelTrimDeg == 6.0 && nf::kIkSquareAmount == 0.75 &&
+                check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::kIkSwivelTrimDeg == 2.0 && nf::kIkSquareAmount == 0.75 &&
                           nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
                       "F57: the clamp keeps the elbow out by the distance (25 cm); the arm IK's shipped values are the constants");
             }
@@ -2122,9 +2122,9 @@ int wmain(int argc, wchar_t** argv) {
                 tL.elbowAt(nf::ikSwivelClamp(tL, 0.0, -1.0, &clL), El);
                 check(E0r[0] > 0.06 && nf::ikElbowOutOf(E0r, SRt, 1.0) < 0.0 && clR && nf::ikElbowOutOf(Er, SRt, 1.0) >= 0.06 - 1e-9 &&
                           Er[1] <= SRt[1] + 1e-9 && clL && nf::ikElbowOutOf(El, SLt, -1.0) >= 0.06 - 1e-9 && El[1] <= SLt[1] + 1e-9 &&
-                          nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCm == 6.0,
+                          nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCm == 3.5,
                       "F59: the elbow-out clamp measures from the arm's own shoulder (an inboard elbow the midline passed is clamped to S.x + 6 cm, "
-                      "both sides); the default is 6 cm");
+                      "both sides); the arm's default is 3.5 cm");
                 // F77: the arm's anatomical model-X half-space is tied to its rig side, not its translated clavicle position.
                 bool translationInvariant = nf::ikArmOutSign(0) == -1.0 && nf::ikArmOutSign(1) == 1.0 && nf::ikArmOutSign(2) == 0.0;
                 const double shifts[] = {-0.8, -0.4, 0.0, 0.4, 0.8};

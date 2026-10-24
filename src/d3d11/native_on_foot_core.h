@@ -1167,7 +1167,7 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
 // the shoulder (E.y <= S.y). Valid authored pistol support uses a separate body-down pole for the left elbow; the slider sets its starting
 // lateral angle and swivel trim is added. Other policies retain this clamp and its nearest-angle/least-violation fallback.
 // F57: the elbow-out distance is the Elbow out constant, kIkElbowOutCm (F96: its config key was removed). F59: measured from the arm's OWN shoulder,
-// out x (E.x - S.x) >= elbowOutM (default 6 cm), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
+// out x (E.x - S.x) >= elbowOutM (3.5 cm since F96), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
 inline double ikElbowOutOf(const double E[3], const double S[3], double out) noexcept { return out * (E[0] - S[0]); }
 // Preserve the existing 3P model-X half-space convention by anatomical rig side. The rig is translated
 // during pinStage0, so a joint's current absolute X is not a stable indicator of which arm it belongs to.
@@ -1712,7 +1712,7 @@ constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
 // F96: the arm IK's shipped values. Their config keys were removed, so these are the values now (degrees, the 0..1 amount, cm).
-constexpr double kIkSwivelTrimDeg = 6.0, kIkSquareAmount = 0.75, kIkElbowOutCm = 6.0;   // F59: 6 cm
+constexpr double kIkSwivelTrimDeg = 2.0, kIkSquareAmount = 0.75, kIkElbowOutCm = 3.5;   // the values Sean flew (F96)
 constexpr double kWeaponViewOffsetDefaultCm = 2.0;   // F90: the pilot's value from the F89 flight (2.5 before)
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
 // def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
@@ -2118,7 +2118,7 @@ constexpr float kIkGateFullAdsM = 0.6f, kIkGateZeroAdsM = 1.2f;
 // F62a: the ADS shoulder-forward is 0 (it was 5 cm: in ADS the right arm folded to the 40 deg limit). F96: the ADS values are constants now
 // (their config keys were removed). kIkAdsSquareAmount stays in the ADS blend because the square-up reads the amount whenever it is not armed.
 // kIkAdsLeanDeg stays in the bend: the bend weight is 1 - detachW, still above zero while the body detaches, so the lean is not a no-op there.
-constexpr double kIkAdsSquareAmount = 1.0, kIkAdsElbowOutCm = 6.0, kIkAdsTrimDeg = 3.0, kIkAdsRaiseCm = 5.5, kIkAdsForwardCm = 0.0, kIkAdsLeanDeg = 6.0;
+constexpr double kIkAdsSquareAmount = 1.0, kIkAdsElbowOutCm = 6.0, kIkAdsTrimDeg = 3.0, kIkAdsRaiseCm = 5.5, kIkAdsForwardCm = 0.0, kIkAdsLeanDeg = 8.0;
 
 inline double ikLerp(double a, double b, double w) noexcept { return a + (b - a) * w; }
 // The per-arm distance gate with the ADS weight: full under lerp(0.35, 0.6, w), none from lerp(0.8, 1.2, w), linear between (NaN: 0).
