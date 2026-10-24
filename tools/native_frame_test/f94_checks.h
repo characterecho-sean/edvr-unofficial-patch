@@ -55,7 +55,6 @@ inline PlantOut runPlant(int d, bool legacy, bool raw, double seconds, StanceAt 
         in.scope = true;
         in.targetFresh = true;
         in.targetM = f94::raiseTarget(s.n, kH, e);
-        in.weaponW = 0.0;
         in.dt = kDt;
         double seatedY = 0.0;
         if (raw) {
@@ -91,9 +90,9 @@ inline double maxErr(const std::vector<double>& v, double from, double to, doubl
 template <class Check>
 inline void run94(Check&& check) {
     // ---- the key ---------------------------------------------------------------------------------------------------------------------------------------------------
-    check(f94::eyeHeightClampCm(std::nan("")) == 15.5 && f94::eyeHeightClampCm(-3.0) == 0.0 && f94::eyeHeightClampCm(45.0) == 30.0 && f94::eyeHeightClampCm(11.5) == 11.5 &&
-              f94::kEyeHeightDefaultCm == 15.5,
-          "F94a: the eye height key: default 15.5 cm (the commander's own neck-to-eye height), 0..30, a value that is not a number reads the default");
+    check(f94::eyeHeightClampCm(std::nan("")) == 15.0 && f94::eyeHeightClampCm(-3.0) == 0.0 && f94::eyeHeightClampCm(45.0) == 30.0 && f94::eyeHeightClampCm(11.5) == 11.5 &&
+              f94::kEyeHeightDefaultCm == 15.0 && f94::kEyeHeightOwnCm == 15.5,
+          "F94a/F98c: the eye height key: default 15.0 cm (the pilot's; the commander's own neck-to-eye height is 15.5), 0..30, a value that is not a number reads the default");
     // ---- the raise's target ----------------------------------------------------------------------------------------------------------------------------------------
     check(within(f94::raiseTarget(1.543, 0.155, 1.582), 0.116, 1e-12) && within(f94::raiseTarget(1.543, 0.04, 1.582), 0.001, 1e-12),
           "F94a: the F93 flight's fists standing (neck 1.543 m, the game's camera 1.582 m level): the view rises 11.6 cm to put the eye 15.5 cm over the neck; at 4 cm "
@@ -138,42 +137,19 @@ inline void run94(Check&& check) {
         }
         check(within(o.appliedM, 0.116, 0.0011) && monotone && overshoot <= 0.0010001 && within(o.seatedY, -o.appliedM, 0.0),
               "F94a: entering the scope: the raise rises to 11.6 cm within a second (the 0.5 s ramp, 0.2 s settle), monotone, no overshoot; seated y is its negative");
-        // A draw: F88's weight ramps over 0.25 s while the stance goes to the rifle's (the target falls 20 cm): the target is frozen, the blend is linear.
-        f88::Weight wt;
+        // F98c: the raise applies whole with and without an item (no weight, no freeze): a settled armed stance's target (here 5 cm lower) is followed through the
+        // filter, under 2 cm a tick, and reached within a millimetre in 0.7 s.
         double maxStep = 0.0, prev = o.appliedM;
-        bool frozenRaise = true;
-        for (int i = 0; i < 45; ++i) {
-            in.weaponW = wt.step(true, kDt);
-            in.targetM = 0.116 - 0.20 * std::fmin(1.0, i / 30.0);
-            o = nr.step(in);
-            maxStep = std::fmax(maxStep, std::fabs(o.appliedM - prev));
-            prev = o.appliedM;
-            frozenRaise = frozenRaise && within(o.raiseM, 0.116, 0.0011) && o.frozen;
-        }
-        check(frozenRaise && o.appliedM == 0.0 && o.seatedY == 0.0 && !std::signbit(o.seatedY) && maxStep <= 0.116 / 22.5 + 0.0011,
-              "F94a: a draw: the neck term blends out with F88's weight (at most 0.6 cm a tick) to an exact 0 armed; the stance's own drop under the draw is not followed");
-        // Armed, the stance and the target move freely: nothing reaches the view.
-        bool armedZero = true;
-        for (int i = 0; i < 90; ++i) {
-            in.targetM = -0.05 + 0.1 * std::sin(i * 0.3);
-            o = nr.step(in);
-            armedZero = armedZero && o.seatedY == 0.0 && o.appliedM == 0.0;
-        }
-        check(armedZero, "F94a: armed for a second while the target swings 10 cm: the neck term stays exactly 0 (F88 alone places the eye)");
-        // A holster in another stance: w falls over 0.25 s with the target frozen at the upright value, then follows the new target (5 cm lower) through the filter.
-        maxStep = 0.0;
-        prev = o.appliedM;
         double lastMiss = 0.0;   // the last tick the view was not yet at the new height
         for (int i = 0; i < 135; ++i) {
-            in.weaponW = wt.step(false, kDt);
             in.targetM = 0.066;
             o = nr.step(in);
             maxStep = std::fmax(maxStep, std::fabs(o.appliedM - prev));
             prev = o.appliedM;
             if (!within(o.appliedM, 0.066, 0.0011)) lastMiss = (i + 1) * kDt;
         }
-        check(maxStep <= 0.012 && lastMiss < 0.7 && within(o.appliedM, 0.066, 0.0011),
-              "F94a: a holster in another stance: no step over 1.2 cm a tick, the new height within a millimetre 0.7 s after the holster began");
+        check(maxStep <= 0.012 && lastMiss < 0.7 && within(o.appliedM, 0.066, 0.0011) && o.appliedM == o.raiseM,
+              "F98c: a new settled target (a draw's stance, 5 cm lower) is followed whole through the filter: no step over 1.2 cm a tick, within a millimetre in 0.7 s");
         // A stale target: the raise holds where it is.
         in.targetFresh = false;
         in.targetM = 0.4;
@@ -235,36 +211,37 @@ inline void run94(Check&& check) {
         check(maxErr(st.viewOver, 1.0, 2.0, kH) <= 0.0011, "F94a loop: standing still, the eye 15.5 cm over the neck from 1 s on (the ramp in)");
     }
 
-    // ---- the weapon eye offset and the neck: the pilot's values ----------------------------------------------------------------------------------------------------
+    // ---- F98c: one eye height with and without an item --------------------------------------------------------------------------------------------------------------
     {
-        // The view's height over the model: the game's camera (1.582 upright, 1.56 in the rifle stance) plus the neck term plus F88's up (seated y image: up = -seated).
-        f88::Keys k;
-        k.upCm = 10.0;
-        k.forwardCm = 9.0;
+        // The rifle draw: F88's weight ramps over 0.25 s while the stance leans (the animated neck 1.543 -> 1.300 m over 0.4 s, the game's camera 1.582 -> 1.560 m); F97a
+        // raises the leaning stance by w times F93's raise (the neck to 15.5 cm under the camera); the raise's target is the eye height over the neck as written. The
+        // view: the game's camera plus the raise (the weapon eye offset's up is retired). Unarmed and drawn the eye is 15.5 cm over the neck as the body is written.
         f88::Weight wt;
         f94::NeckRaise nr;
         f94::In in;
         in.scope = true;
         in.targetFresh = true;
         in.dt = kDt;
-        double view = 0.0, prevView = 0.0, maxStep = 0.0, unarmedView = 0.0;
+        double view = 0.0, prevView = 0.0, maxStep = 0.0, unarmedOver = 0.0, armedOver = 0.0;
         for (int i = 0; i < 360; ++i) {
             const double t = i * kDt;
             const bool draw = t >= 2.0;
-            const double a = t < 2.0 ? 0.0 : std::fmin(1.0, (t - 2.0) / 0.4);   // the stance leans over 0.4 s from the draw
-            const double g = 1.582 - 0.022 * a, n = 1.543 - 0.20 * a;
-            in.weaponW = wt.step(draw, kDt);
-            in.targetM = f94::raiseTarget(n, kH, g);   // matched: the game's camera itself
+            const double a = t < 2.0 ? 0.0 : std::fmin(1.0, (t - 2.0) / 0.4);
+            const double g = 1.582 - 0.022 * a, n = 1.543 - 0.243 * a;
+            const double w = wt.step(draw, kDt);
+            const double raise93 = std::fmax((g - kH) - n, 0.0);   // F93's raise of the leaning stance (none upright)
+            const double neckWritten = n + w * raise93;
+            in.targetM = f94::raiseTarget(neckWritten, kH, g);
             const f94::Out o = nr.step(in);
-            const f88::Out w = f88::make(k, wt.w);
-            view = g - o.seatedY - w.seated[1];
+            view = g - o.seatedY;
             if (i > 0 && t > 1.0) maxStep = std::fmax(maxStep, std::fabs(view - prevView));
             prevView = view;
-            if (i == 179) unarmedView = view - n;
+            if (i == 179) unarmedOver = view - neckWritten;
+            armedOver = view - neckWritten;
         }
-        check(within(unarmedView, kH, 0.0011), "F94a with F88: unarmed the eye is 15.5 cm over the neck");
-        check(within(view, 1.560 + 0.10, 1e-9), "F94a with F88: drawn, the view is the game's camera plus the pilot's 10 cm up exactly, as F88 alone had it (his armed view kept)");
-        check(maxStep <= 0.0075, "F94a with F88: drawing (the weight's 0.25 s ramp, the stance leaning under it) moves the view at most 0.75 cm a tick: no jump");
+        check(within(unarmedOver, kH, 0.0011) && within(armedOver, kH, 0.0011),
+              "F98c: one eye height: unarmed (fists) and drawn (the rifle, its stance raised upright by F97a) the eye is 15.5 cm over the neck as written");
+        check(maxStep <= 0.02, "F98c: drawing (the weight's 0.25 s ramp, the stance leaning under it) moves the view under 2 cm a tick: no jump");
     }
 
     // ---- the hold never sees the neck term -------------------------------------------------------------------------------------------------------------------------

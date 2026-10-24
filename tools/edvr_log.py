@@ -10962,7 +10962,7 @@ def _hj_f94a_neck(rows, ctx):
             elif abs(view - keycm) > 1.5:
                 off.append(item)
         else:
-            text += "; armed throughout (the weapon eye offset places the eye)"
+            text += "; armed throughout (the armed body is F97a's rule)"
         # F98a: the body's height and legs are F94a's to judge unarmed only; armed, F97a raises or lowers the body by design ("armed body (F97a)" judges it)
         if un and max(float(r["lowmax"]) for r in un) > 0.5:
             lowered.append(item)
@@ -12609,7 +12609,7 @@ def self_test_health():
               has=["but no neck height line: the neck reference never ran"])
         check("F94a neck: the key read, never on foot", [eye_key()], 0, [("IDLE", F94)], has=["no second on foot with the body pinned"])
         check("F94a neck: the rifle drawn throughout", [neck(RIFLE, view=32.0, tgt=27.0, incam=0.0, weight=0.0, la=0.930, lw=0.930)] * 2, 0, [("IDLE", F94)],
-              has=["armed throughout (the weapon eye offset places the eye)", "no unarmed standing second"])
+              has=["armed throughout (the armed body is F97a's rule)", "no unarmed standing second"])
         check("F94a neck: the body moved and the knees bent", [neck(lowmax=3.0, lw=0.800)] * 2, 0, [("PARTIAL", F94)],
               has=["the body was lowered or raised with " + FISTS, "the knees bend with " + FISTS])
         check("F94a neck: a runtime that reports no serial", [neck(matched=0, legacy=90)] * 2, 0, [("OK", F94)], has=["in 0 of 180 calls (not found 0)"])

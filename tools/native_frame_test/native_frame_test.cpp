@@ -4561,10 +4561,10 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(e0.along + 0.073) < 1e-9 && std::fabs(eK.alongFull - (e0.along + 0.15)) < 1e-12 && std::fabs(eK.perpNorm - e0.perpNorm) < 1e-15,
                       "F70: the lock's target is P14w + k f: the eye 7.3 cm ahead of P14 is asked 7.3 cm back at k 0 (P14 itself, the animator's eye point) and 7.7 cm forward "
                       "at k 15 cm; the perpendicular figures (the guard's input) and the old perpendicular-only outputs are unchanged");
-                // The setting: 0..30 cm, NaN reads the default 15.
-                check(nf::adsEyeDistanceClampCm(std::numeric_limits<double>::quiet_NaN()) == 15.0 && nf::adsEyeDistanceClampCm(-3.0) == 0.0 && nf::adsEyeDistanceClampCm(45.0) == 30.0 &&
-                          nf::adsEyeDistanceClampCm(12.5) == 12.5 && nf::kAdsEyeDistDefaultCm == 15.0 && nf::kAdsSightClampM == 0.40,
-                      "F70: the eye distance is 0..30 cm, default 15, and the lock's clamp is 40 cm");
+                // The setting: 0..30 cm, NaN reads the default (21 since F98c, the pilot's).
+                check(nf::adsEyeDistanceClampCm(std::numeric_limits<double>::quiet_NaN()) == 21.0 && nf::adsEyeDistanceClampCm(-3.0) == 0.0 && nf::adsEyeDistanceClampCm(45.0) == 30.0 &&
+                          nf::adsEyeDistanceClampCm(12.5) == 12.5 && nf::kAdsEyeDistDefaultCm == 21.0 && nf::kAdsSightClampM == 0.40,
+                      "F70/F98c: the eye distance is 0..30 cm, default 21 (the pilot's), and the lock's clamp is 40 cm");
                 // The clearance cap: a point on the line 20 cm ahead limits k to 14 cm; points off the line (over 6 cm), behind P14 or none leave it; one 3 cm ahead takes it to 0.
                 double onLine[1][3], offLine[1][3], behind[1][3], near3[1][3];
                 for (int i = 0; i < 3; ++i) {

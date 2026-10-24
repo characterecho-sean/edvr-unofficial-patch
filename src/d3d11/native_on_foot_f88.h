@@ -38,7 +38,8 @@ constexpr double kUpMinCm = -10.0, kUpMaxCm = 15.0;
 constexpr double kForwardMinCm = -10.0, kForwardMaxCm = 25.0;
 // The keys' built-in values are the pilot's: F89 took his F88-flight values (forward 5.0, up 6.0, right 0.5 cm), F90 those of the F89 flight (2026-10-24): forward
 // 9.0, up 7.5, right 0.0 cm, body follow. (Keys{} below stays all zero: a struct with no keys set; the config reader falls back to these.)
-constexpr double kForwardDefaultCm = 9.0, kUpDefaultCm = 7.5, kRightDefaultCm = 0.0;
+// F98c: forward 8.5 and right 2.0 are the pilot's; the up key is retired (kUpDefaultCm is its last shipped value, for the retired-key note).
+constexpr double kForwardDefaultCm = 8.5, kUpDefaultCm = 7.5, kRightDefaultCm = 2.0;
 
 // A key's value, held to its range; anything not finite reads 0.
 inline double clampCm(double cm, double lo, double hi) noexcept { return std::isfinite(cm) ? std::min(hi, std::max(lo, cm)) : 0.0; }
