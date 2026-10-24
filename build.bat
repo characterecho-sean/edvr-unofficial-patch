@@ -11,7 +11,7 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only] [--wait-lock]
+REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only] [--compile-only] [--wait-lock]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
@@ -21,6 +21,10 @@ REM  and runs that one subroutine. --rig is the runner's, not for hand use.
 REM  --dll-only is the post-commit promotion path: it requires the receipt from
 REM  a matching green full build, rebuilds the production DLLs, and skips rigs
 REM  and the self-contained installer.
+REM  --compile-only is the Linux test-flight path, run under Wine by
+REM  tools\linux_toolchain.py: the same production DLLs, into
+REM  build\compile-build, with no Python gates, no receipt check, no rigs and
+REM  no installer. It is never validation and never a release asset.
 REM
 REM  Only one top-level build runs at a time on this machine (tools\
 REM  build_lock.py): a second invocation is refused immediately with a
@@ -47,6 +51,7 @@ if "%~1"=="" goto args_done
 if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
 if /I "%~1"=="--dll-only" goto arg_dll_only
+if /I "%~1"=="--compile-only" goto arg_compile_only
 if /I "%~1"=="--rig" goto arg_rig
 if /I "%~1"=="--wait-lock" goto arg_wait_lock
 echo [edvr] unknown argument: %~1
@@ -68,6 +73,10 @@ goto parse_args
 set "EDVR_DLL_ONLY=1"
 shift
 goto parse_args
+:arg_compile_only
+set "EDVR_COMPILE_ONLY=1"
+shift
+goto parse_args
 :arg_rig
 set "EDVR_RIG=%~2"
 shift
@@ -77,6 +86,22 @@ goto parse_args
 if defined EDVR_DLL_ONLY if defined DO_CLEAN (
     echo [edvr] ERROR: --dll-only cannot be combined with --clean
     exit /b 1
+)
+if defined EDVR_COMPILE_ONLY if defined EDVR_DLL_ONLY (
+    echo [edvr] ERROR: --compile-only cannot be combined with --dll-only
+    exit /b 1
+)
+REM A compile-only build takes the DLL-only path below without its receipt
+REM check, in a directory of its own, so it can neither be mistaken for a
+REM validated build nor overwrite one. --clean then removes only that directory.
+REM tools\linux_toolchain.py holds its own lock on the host for the whole
+REM compile: under Wine, build_lock.py cannot name its owner (os.getppid fails).
+if defined EDVR_COMPILE_ONLY (
+    set "EDVR_DLL_ONLY=1"
+    set "EDVR_BUILD_GUARDED=1"
+    set "BUILD=%ROOT%\build\compile-build"
+    set "GEN=%ROOT%\build\compile-build\gen"
+    set "OBJ=%ROOT%\build\compile-build\obj"
 )
 if defined EDVR_RIG goto run_rig
 
@@ -182,6 +207,9 @@ REM Dependency cache survives --clean. Never discover a loader in SteamVR.
 python tools\fetch_openxr_loader.py --verify || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\OPENXR-LOADER-LICENSE.txt" "%BUILD%\OPENXR-LOADER-LICENSE.txt" >nul || exit /b 1
+REM A compile-only build is not validation and skips the Python gates; the
+REM full build runs every one of them.
+if defined EDVR_COMPILE_ONLY goto python_gates_done
 REM The runner is proven before it is trusted with the gates below (and the rigs,
 REM much later, use the same file).
 python tools\run_jobs.py --self-test || exit /b 1
@@ -212,6 +240,8 @@ python tools\run_jobs.py ^
     --gate "tools\install_proton.py --self-test" ^
     --gate "tools\build_diff.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
+    --gate "tools\compile_only.py --self-test" ^
+    --gate "tools\linux_toolchain.py --self-test" ^
     --gate "tools\build_lock.py --self-test" ^
     --gate "tools\worktree.py --self-test" ^
     --gate "tools\steam_library.py --self-test" ^
@@ -235,6 +265,7 @@ python tools\run_jobs.py ^
     --gate "tools\build_flat_sdk_bench_proxy.py --self-test" ^
     --gate "tools\build_phases.py --self-test" ^
     --gate "tools\compile_cache.py --self-test" || exit /b 1
+:python_gates_done
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -249,6 +280,9 @@ REM No git or no repo (a source-zip build) falls back to "unknown" and the
 REM build carries on -- versioning must never be the reason a build fails.
 set "EDVR_VER=unknown"
 for /f "delims=" %%v in ('git -C "%ROOT%" describe --tags --always --dirty 2^>nul') do set "EDVR_VER=%%v"
+REM Wine has no git: tools\linux_toolchain.py passes the host's describe of
+REM the same tree, and only a compile-only build reads it.
+if defined EDVR_COMPILE_ONLY if defined EDVR_GIT_DESCRIBE set "EDVR_VER=%EDVR_GIT_DESCRIBE%"
 echo [edvr] version %EDVR_VER%
 
 REM A -dirty build is fine to make and dangerous to SEND, so say so loudly.
@@ -607,7 +641,7 @@ if defined FFX (
     )
 )
 
-if defined EDVR_DLL_ONLY (
+if defined EDVR_DLL_ONLY if not defined EDVR_COMPILE_ONLY (
     echo [edvr] === DLL-only promotion ===
     python tools\build_receipt.py --verify "%BUILD%\full_build_receipt.json" ^
         --root "%ROOT%" --require-clean ^
@@ -919,9 +953,16 @@ python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dc
 python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 python tools\build_phases.py --mark "%PHASES%" "dll-only outputs"
 python tools\build_phases.py --report "%PHASES%"
+if defined EDVR_COMPILE_ONLY goto compile_only_finish
 echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
 echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
 echo        before distributing an installer or accepting new source changes.
+exit /b 0
+
+:compile_only_finish
+echo [edvr] COMPILE-ONLY build finished in %BUILD%
+echo [edvr] NOT Windows validated and NOT a release asset: no Python gates, rigs or
+echo        installer ran. tools\linux_toolchain.py writes its receipt next.
 exit /b 0
 
 REM ===========================================================================
