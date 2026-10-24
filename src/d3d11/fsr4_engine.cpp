@@ -7,7 +7,6 @@
 #include <cstring>
 #include <cwchar>
 
-#include "../common/config.h"   // diag.fsr4_shared_locks, read once when the backend becomes available
 #include "../common/log.h"
 #include "dlaa.h"          // kUpscalerSlots: one FSR 4 context per upscaler slot
 #include "fsr4_version.h"  // the pure decisions: version pick, refusal text, formats, flags, camera planes
@@ -150,14 +149,16 @@ struct SharedTexture {
     ComPtr<IDXGIKeyedMutex> key;  // null only where the runtime exposes none
     ComPtr<ID3D12Resource> d12;
     HANDLE handle = nullptr;
-    // TEMPORARY (diag.fsr4_shared_locks, 2026-10-24): true while the D3D11 key is kept across evaluations instead of being taken and
-    // given back inside each one. Always false in the default per-frame mode.
+    // True once the D3D11 key has been taken: it is kept across evaluations until the texture is freed. DXVK's
+    // IDXGIKeyedMutex::ReleaseSync waits on the CPU until the GPU has finished with the texture, and giving the keys back every
+    // frame held the render thread 5 to 7 ms (flight 6, docs\fsr-upscaler-design-2026-09-16.md); the D3D12 side never takes the
+    // key, and the shared fences order the two devices' work.
     bool held = false;
     SharedTexture() = default;
     SharedTexture(const SharedTexture&) = delete;
     SharedTexture& operator=(const SharedTexture&) = delete;
     ~SharedTexture() { if (handle) CloseHandle(handle); }
-    // Gives back a key the held mode kept; nothing for a texture that holds none. Every path that frees the texture runs this first.
+    // Gives back the kept key; nothing for a texture that holds none. Every path that frees the texture runs this first.
     void releaseHeld() {
         if (held && key) key->ReleaseSync(0);
         held = false;
@@ -184,7 +185,8 @@ constexpr unsigned kBridgeSets = 4;           // D3D11 evaluations in flight per
 constexpr unsigned kBridgeTotal = 0, kBridgeCopyIn = 1, kBridgeWait = 2, kBridgeCopyOut = 3, kBridgeParts = 4;
 constexpr unsigned kBridgeAll = (1u << kBridgeParts) - 1;
 // The CPU phases of one evaluation, in the order the evaluate runs them; together they are most of the eval span (what is left is the
-// checks before the allocator wait). The phase line in reportSlot prints them in this order under these names.
+// checks before the allocator wait). The phase line in reportSlot prints them in this order under these names. take-* and give-*
+// keep their names from flight 6, when the keys went back every frame; now they are a context's first take and the keep.
 constexpr unsigned kPhaseReset = 0, kPhaseTakeIn = 1, kPhaseCopyIn = 2, kPhaseGiveIn = 3, kPhaseSignalIn = 4, kPhaseQueueWait = 5,
                    kPhaseRecord = 6, kPhaseSubmit = 7, kPhaseWaitOut = 8, kPhaseTakeOut = 9, kPhaseCopyOut = 10, kPhaseGiveOut = 11,
                    kPhaseSignalOut = 12, kPhases = 13;
@@ -216,8 +218,6 @@ struct BridgeWindow {
     unsigned allocBlocked = 0;                 // evaluations whose allocator fence had not passed when reused
     // The same executed evaluations cut into phases (kPhase*), milliseconds, for the phase line beside the bridge line.
     std::vector<double> phases[kPhases];
-    // Executed evaluations by shared-texture lock mode (diag.fsr4_shared_locks): the phase line's locks= label.
-    unsigned perFrameEvals = 0, heldEvals = 0;
 };
 
 // The create descriptor chain. ffx_api.h asks that what a create descriptor points at stay live until ffxDestroyContext, so the
@@ -243,7 +243,7 @@ struct Feature {
     Feature() = default;
     Feature(const Feature&) = delete;
     Feature& operator=(const Feature&) = delete;
-    // The lock A/B's held mode keeps D3D11 keys across evaluations: give them back before the textures below them are freed. The
+    // The D3D11 keys are kept across evaluations: give them back before the textures below them are freed. The
     // paths that free a feature on purpose (releaseSlot, which fsr4ReleaseFeatures, fsr4Shutdown and a context rebuild all go
     // through) do it themselves; this covers the rest (a feature dropped half built, State's own destructor).
     void releaseHeldKeys() {
@@ -255,21 +255,11 @@ struct Feature {
     ~Feature() { releaseHeldKeys(); }
 };
 
-// diag.fsr4_shared_locks (TEMPORARY A/B, 2026-10-24): how the bridge's D3D11 side takes the shared textures' keyed mutexes. PerFrame is
-// the shipped behaviour: take key 0 around each batch of D3D11 work and give it back (ReleaseSync). Held takes it once, on a context's
-// first use, and keeps it until the context is destroyed. Alternate starts PerFrame and flips each time a slot's bridge window is
-// reported, so one flight measures both.
-enum class LockSetting { PerFrame, Held, Alternate };
-
 // One per upscaler slot (dlaa.h, kUpscalerSlots), as fsr3_engine.cpp keeps one context per slot. Each slot keys, builds,
 // releases and latches its own context; the shared textures hang off the Feature, so they are per slot too.
 struct FeatureSlot {
     Fsr4FailureLatch failedFeature;
     std::unique_ptr<Feature> feature;
-    // The lock A/B, per slot. holdKeysDesired is what the setting asks for now (the alternate flip changes it when the slot's window
-    // is reported); holdKeys is the mode the running evaluation applied (applyLockMode) and the one giveKeys follows.
-    bool holdKeysDesired = false;
-    bool holdKeys = false;
     uint32_t creations = 0;  // test seam: contexts this slot has built since the backend started
     // The slot's price, as CPU time for each successful evaluate call (submission and its copies; the GPU is not timed).
     uint32_t evaluations = 0, resets = 0;
@@ -305,7 +295,6 @@ struct State {
     uint32_t evaluations = 0, resets = 0, failures = 0;
     bool untrackedSubmission = false;
     bool untrackedRefusalLogged = false;
-    LockSetting lockSetting = LockSetting::PerFrame;   // diag.fsr4_shared_locks, read once when the probe succeeds
     std::array<FeatureSlot, kUpscalerSlots> slots;
     ~State() {
         // Normal shutdown has already destroyed every ffx context after the consumer fence. Release COM objects, which
@@ -578,10 +567,9 @@ void reportSlot(State& state, unsigned slot) {
         if (hasPhase) mediansSum += phaseMedian;
     }
     const double seconds = window.startedAt ? double(GetTickCount64() - window.startedAt) / 1000.0 : 0.0;
-    const char* const locks = window.perFrameEvals && window.heldEvals ? "mixed" : window.heldEvals ? "held" : "per-frame";
-    Log::get().note("fsr4: slot=%u cpu phases over %u evals in %.1f s (%.1f a second), locks=%s, ms median/p95: %s; "
+    Log::get().note("fsr4: slot=%u cpu phases over %u evals in %.1f s (%.1f a second), ms median/p95: %s; "
                     "medians sum %.3f, eval median %.3f",
-                    slot, window.executed, seconds, seconds > 0.0 ? double(window.executed) / seconds : 0.0, locks,
+                    slot, window.executed, seconds, seconds > 0.0 ? double(window.executed) / seconds : 0.0,
                     phaseText.c_str(), mediansSum, hasEval ? evalMedian : 0.0);
 
     for (std::vector<double>& samples : window.parts) samples.clear();
@@ -595,10 +583,6 @@ void reportSlot(State& state, unsigned slot) {
     window.untimed = 0;
     window.invalid = 0;
     window.allocBlocked = 0;
-    window.perFrameEvals = 0;
-    window.heldEvals = 0;
-    // The alternate setting changes this slot's lock mode at each window; the next evaluation applies it (applyLockMode).
-    if (state.lockSetting == LockSetting::Alternate) holder.holdKeysDesired = !holder.holdKeysDesired;
 }
 
 // Starts an evaluation's D3D11 intervals: the whole bridge, then copy-in. A set that cannot begin counts as untimed and the
@@ -700,8 +684,8 @@ bool makeShared(State& state, unsigned slot, SharedTexture& target, const char* 
 }
 
 // AcquireSync reports WAIT_TIMEOUT and WAIT_ABANDONED as success HRESULTs, so only S_OK means the key is held. A failed take
-// gives back what it took. A key the held mode already keeps is not taken again (it would wait out kKeyWaitMs and time out), and
-// is not given back by a failed take either: it was not taken here.
+// gives back what it took. A key already kept (SharedTexture::held) is not taken again (it would wait out kKeyWaitMs and time
+// out), and is not given back by a failed take either: it was not taken here.
 template <size_t N>
 bool takeKeys(SharedTexture* const (&textures)[N], const char** why, const char* stage) {
     for (size_t i = 0; i < N; ++i) {
@@ -717,45 +701,12 @@ bool takeKeys(SharedTexture* const (&textures)[N], const char** why, const char*
     return true;
 }
 
-// The end of a batch of D3D11 work on the textures. Per frame (hold false) the key goes back, as it always has. Held keeps it and
-// marks the texture, so the next evaluation's takeKeys leaves it alone; the key then goes back when the context is destroyed
-// (Feature::releaseHeldKeys) or when the slot's mode returns to per frame (applyLockMode).
+// The end of a batch of D3D11 work on the textures: the key is kept, not given back (SharedTexture::held says why), and marked so
+// the next evaluation's takeKeys leaves it alone. It goes back when the context is destroyed (Feature::releaseHeldKeys).
 template <size_t N>
-void giveKeys(SharedTexture* const (&textures)[N], bool hold) {
-    for (SharedTexture* texture : textures) {
-        if (!texture->key) continue;
-        if (hold) {
-            texture->held = true;
-        } else {
-            texture->key->ReleaseSync(0);
-            texture->held = false;
-        }
-    }
-}
-
-// Brings a feature's keys to the lock mode its slot wants, before the evaluation takes them. Held to per frame gives back every
-// key the held mode kept (each ReleaseSync waits once for the GPU to finish with its texture); per frame to held needs nothing
-// here, because giveKeys keeps the keys at the end of the evaluation.
-void applyLockMode(FeatureSlot& holder, Feature& feature) {
-    if (holder.holdKeys && !holder.holdKeysDesired) feature.releaseHeldKeys();
-    holder.holdKeys = holder.holdKeysDesired;
-}
-
-const char* lockSettingName(LockSetting setting) {
-    switch (setting) {
-        case LockSetting::Held: return "held";
-        case LockSetting::Alternate: return "alternate";
-        default: return "per_frame";
-    }
-}
-
-// The value of diag.fsr4_shared_locks. False when the text is none of the three; the setting is then PerFrame.
-bool parseLockSetting(const char* text, LockSetting& setting) {
-    setting = LockSetting::PerFrame;
-    if (_stricmp(text, "per_frame") == 0) return true;
-    if (_stricmp(text, "held") == 0) { setting = LockSetting::Held; return true; }
-    if (_stricmp(text, "alternate") == 0) { setting = LockSetting::Alternate; return true; }
-    return false;
+void keepKeys(SharedTexture* const (&textures)[N]) {
+    for (SharedTexture* texture : textures)
+        if (texture->key) texture->held = true;
 }
 
 // The bridge's D3D12 timestamps for one allocator: a two-entry timestamp heap and a readback buffer for its resolve. A failure
@@ -1124,15 +1075,7 @@ bool probeRuntime(State& state, const char** why) {
     if (!state.cpuEvent) return failProbe(why, "GPU fence CPU event failed (Win32=%lu)", GetLastError());
     Log::get().note("fsr4: D3D11/D3D12 shared queue and fence ready");
 
-    // TEMPORARY A/B (diag.fsr4_shared_locks, 2026-10-24; docs\fsr-upscaler-design-2026-09-16.md, the render-thread stall): read once
-    // here, per backend. A value that is none of the three runs per_frame and says so. Every slot starts in the mode the setting
-    // names; alternate starts per frame and flips each slot at its own window report (reportSlot).
-    const std::string lockText = Config::get().getString("diag.fsr4_shared_locks", "per_frame");
-    if (!parseLockSetting(lockText.c_str(), state.lockSetting))
-        Log::get().note("fsr4: diag.fsr4_shared_locks = \"%s\" is not per_frame, held or alternate; running per_frame", lockText.c_str());
-    for (FeatureSlot& slot : state.slots) slot.holdKeysDesired = state.lockSetting == LockSetting::Held;
-    Log::get().note("fsr4: shared-texture locks %s (diag.fsr4_shared_locks, a temporary A/B; restart the game to change it)",
-                    lockSettingName(state.lockSetting));
+    Log::get().note("fsr4: shared-texture keys are taken on a context's first use and held until it is destroyed");
     return true;
 }
 #endif  // EDVR_HAVE_FSR4
@@ -1320,9 +1263,6 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     phase.end(kPhaseReset);
     SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth};
     const char* keyWhy = nullptr;
-    // The slot's lock mode for this evaluation (diag.fsr4_shared_locks); the one change that waits, held back to per frame, is
-    // counted in take-in.
-    applyLockMode(holder, feature);
     if (!takeKeys(inputs, &keyWhy, "D3D11 input copy")) {
         command.list->Close();   // Reset opened it; no D3D12 work was submitted.
         holder.failedFeature.record(key, keyWhy);
@@ -1336,7 +1276,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     copyInput(ctx, feature.motion.d11.Get(), mv, w, h, motionPlan.exact);
     copyInput(ctx, feature.depth.d11.Get(), depth, w, h, depthPlan.exact);
     phase.end(kPhaseCopyIn);
-    giveKeys(inputs, holder.holdKeys);
+    keepKeys(inputs);
     phase.end(kPhaseGiveIn);
     const uint64_t producer = ++state.nextFenceValue;
     hr = ctx4->Signal(state.fence11.Get(), producer);
@@ -1489,7 +1429,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     // RGBA8): a plain copy, no widening.
     ctx->CopyResource(out, feature.output.d11.Get());
     phase.end(kPhaseCopyOut);
-    giveKeys(result, holder.holdKeys);
+    keepKeys(result);
     phase.end(kPhaseGiveOut);
     if (bridge) {   // copy-out and the whole bridge end after the output copy
         bridge->timers[kBridgeCopyOut].end(ctx);
@@ -1522,8 +1462,6 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     noteSample(holder.window.cpuAlloc, allocMs);
     noteSample(holder.window.cpuSubmit, submitMs);
     for (unsigned index = 0; index < kPhases; ++index) noteSample(holder.window.phases[index], phase.ms[index]);
-    if (holder.holdKeys) ++holder.window.heldEvals;
-    else ++holder.window.perFrameEvals;
     if (allocBlocked) ++holder.window.allocBlocked;
     ++state.evaluations;
     if (reset) ++state.resets;

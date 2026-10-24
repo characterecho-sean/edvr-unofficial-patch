@@ -8,8 +8,8 @@ read 2026-09-16) unless marked believed.
 
 ## Status
 
-- **State (2026-10-24): route 2 FLOWN FLAT, BRANCH ONLY; render-thread
-  stall found: the D3D11 key releases.** `fix.temporal_aa = fsr4` (FSR 4.1 through
+- **State (2026-10-24): route 2 FLOWN FLAT, BRANCH ONLY; held keys
+  shipped against the render-thread stall.** `fix.temporal_aa = fsr4` (FSR 4.1 through
   AMD's signed D3D12 DLLs over a D3D11/D3D12 bridge, modelled on XeSS's)
   on `claude/fsr-4-1-flat-vr-support-5f6ea4`, flat and VR, beside `fsr`
   (route 1, unchanged). Not merged to main until Sean says it ships (D9).
@@ -22,10 +22,10 @@ read 2026-09-16) unless marked believed.
   FSR 3 36 to 38. Sean reports artifacts (vertical streaks in a station,
   FSR 3 comparison pending). A main-menu crash after a display change
   was in Elite's occlusion culler, before FSR 4 ran (set aside).
-- **Temporary key (remove or ship when the stall is settled):**
-  `diag.fsr4_shared_locks` (`per_frame` default, `held`, `alternate`), the
-  A/B of the bridge's D3D11 keyed-mutex locks, held for a context's life
-  against taken and released each frame.
+- **Held keys (2026-10-24):** the bridge takes a context's D3D11 keys
+  once and keeps them until it is destroyed; `diag.fsr4_shared_locks`,
+  flight 6's A/B, is removed (journal, "held keys shipped"). Its flight
+  is next.
 - **Route 1 (2026-09-17): MERGED TO MAIN** after flights 1 to 3 (Pimax
   and Quest 3, RTX 5090, clean; fsr 1.1 to 2.1 ms per stereo pair; Sean:
   slightly better than the pass's own history, not DLSS). The community
@@ -33,9 +33,8 @@ read 2026-09-16) unless marked believed.
   reasoning: Status detail below.
 - **Next:** the flicker at flight 7's spot (a hull panel's edge in the
   main menu) is in the game's image under F7 and in DLSS on Windows too,
-  so not FSR 4's (flight 7 entry): the no-EDVR baseline there. Held keys
-  looked mostly clean; they become the behaviour once (c) is out, and the
-  key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
+  so not FSR 4's (flight 7 entry): the no-EDVR baseline there, when Sean
+  chooses. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
 - **Open:** the reactive mask under FSR (off in flight 1, D3); the jitter
   phase count above 1:1; FSR 3.1's quality in VR against the pass's own
@@ -967,3 +966,18 @@ class of upscaler): that is route 2's go/no-go.
   Left: the game's own rendering of that edge, or one of EDVR's
   always-on non-AA fixes making it change. Discriminator: the no-EDVR
   baseline at the spot (`install_edvr.py --suspend`, then `--resume`).
+- 2026-10-24: held keys shipped. Flights 6 and 7 showed nothing the held
+  keys break: no stale or black frames, and the one flicker Sean saw is
+  constant, present with AA off (F7) and under DLSS on Windows, so not
+  the locks'. The bridge now takes each shared texture's D3D11 key on a
+  context's first use and keeps it until the context is destroyed
+  (`SharedTexture::held`, `keepKeys`, `Feature::releaseHeldKeys`);
+  `diag.fsr4_shared_locks`, its allowlist entry, the per-frame path and
+  the phase line's `locks=` label are gone. The probe logs `fsr4:
+  shared-texture keys are taken on a context's first use and held until
+  it is destroyed`, which names a build with the change. On native
+  Windows D3D11 still holds the key for every copy it makes, as its
+  runtime requires; D3D12 never takes it, as before. The phase line's
+  `give-in` and `give-out` keep their names and now time the keep.
+  Expected in the next flight: `give-in` and `give-out` about 0 in every
+  window, eval median 0.2 to 1.6 ms, evaluations a second at the cap.
