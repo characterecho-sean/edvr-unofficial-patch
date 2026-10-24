@@ -31,9 +31,9 @@ read 2026-09-16) unless marked believed.
   slightly better than the pass's own history, not DLSS). The community
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
-- **Next:** flight 7, no build: at a spot that flickers, F8 through FSR 4,
-  FSR 3, XeSS-SR and TAA, then `temporal_aa_jitter_phases` 8 to 32 live
-  and a NumLock capture (candidates a to d, flight 6 entry). Held keys
+- **Next:** at flight 7's spot (main menu, a hull panel's lower edge; 32
+  phases did not help), F8 through FSR 4, FSR 3, XeSS-SR and TAA, F7 for
+  AA off, and a NumLock capture (candidates, flight 6 entry). Held keys
   looked mostly clean; they become the behaviour once (c) is out, and the
   key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
@@ -912,3 +912,12 @@ class of upscaler): that is route 2's go/no-go.
   XeSS-SR at the same spot do not, and (a) does not help. A DLSS rig on
   Windows differs in GPU, platform and jitter use, so it is not a control
   here; the same-spot F8 comparison on this rig is.
+- 2026-10-24: flight 7 (log `edvr_gfx_20261024_063126.log`, same CI
+  build, `locks alternate`). A reproducible spot: the main menu hangar,
+  where only the lower edge of one square hull panel flickers (Sean's
+  screenshot). FSR 4 ran 2176x1360 to 2560x1600 (1.18x per axis). Ruled
+  out at this spot: the jitter cycle (a), because 32 phases took effect at
+  06:32:03 (`flat jitter: the cycle is 32 phases`) and the flicker did not
+  change; at 1.18x AMD's own count is about 12, so 8 was near it anyway.
+  The 2x case (1280x800) is untested. Open: (b) to (d), and whether the
+  edge flickers under FSR 3, XeSS-SR, TAA and with AA off (F7) there.
