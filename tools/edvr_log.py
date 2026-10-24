@@ -10971,14 +10971,64 @@ def _hj_f95a_motion(rows, ctx):
     text = ("the view a frame, the head still: standing %.2f mm rms (%d frames), moving %.2f (%d); the HUD against the eye: standing %.2f mm rms (%d), moving %.2f (%d); "
             "the raise moved the view %.1f mm/s standing, %.1f mm/s moving; the stance settled in %d of %d pin calls (%d moving) over %d s") % (
         vs, vsn, vm, vmn, hs, hsn, hm, hmn, rsps, rmps, settled, calls, moving, len(sec))
+    # F97a: a single frame's step (a teleport, the character's model moving under the camera) dominates a pooled rms; the verdict reads the median second (20 frames
+    # or more), against the ground where the line carries it (F97a), else against the body
+    ground = [r for r in sec if r.get("wsn") is not None]
+    key_n, key_r = ("wsn", "ws") if ground and sum(int(r["wsn"]) for r in ground) else ("vsn", "vs")
+    per = sorted(float(r[key_r]) for r in (ground if key_n == "wsn" else sec) if int(r[key_n]) >= 20)
+    vsMed = per[len(per) // 2] if per else vs
+    spikes = sum(int(r["wso"]) for r in ground) if key_n == "wsn" else sum(int(r["bso"]) for r in ground)
+    text += "; standing the median second %.2f mm rms against the %s (%d seconds), steps over 1 cm %d" % (vsMed, "ground" if key_n == "wsn" else "body", len(per), spikes)
     if calls - moving >= 90 and settled == 0:
         return ("NEVER APPLIED", text + "; the stance never settled: the neck reference took no target")
     if not (vsn or vmn or hsn or hmn):
         return ("IDLE", text + "; no frame with the head still")
-    bad = (["the view moves standing"] if vs > 0.5 else []) + (["the HUD moves against the eye standing"] if hs > 0.5 else []) + (
+    bad = (["the view moves standing"] if vsMed > 0.5 else []) + (["the HUD moves against the eye standing"] if hs > 0.5 else []) + (
         ["the HUD moves against the eye walking"] if hm > 1.0 else []) + (["the raise moves the view walking"] if rmps > 9.0 else [])
     if bad:
         return ("PARTIAL", text + "; " + ", ".join(bad))
+    return ("OK", text)
+
+
+def _hj_f97a_body(rows, ctx):
+    """F97a: per held item and stance, the body against the eye: the weapon's weight, the neck raised (written and asked), the neck written against its animated
+    height, the eye as drawn over the clavicle line with the INSIDE frames (the eye in the torso), the legs and the feet lifted. Armed seconds whose raise was asked
+    but never written are NEVER APPLIED; an INSIDE frame or a lifted foot is PARTIAL."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    groups = collections.OrderedDict()
+    for r in sec:
+        groups.setdefault((r["item"], r["stance"]), []).append(r)
+    parts, inside, lifted, never, armed = [], [], [], [], 0
+    for (item, stance), rs in groups.items():
+        n = sum(int(r["n"]) for r in rs)
+        if not n:
+            continue
+        mean = lambda k, rr=rs, nn=n: sum(int(r["n"]) * float(r[k]) for r in rr) / nn
+        w, raise_, asked = mean("w"), mean("raise"), mean("asked")
+        ins, clr, lif, cap = (sum(int(r[k]) for r in rs) for k in ("inside", "clr", "lifted", "capped"))
+        clavmin = min((float(r["clavmin"]) for r in rs if int(r["clr"])), default=0.0)
+        name = "%s %s" % (item, stance)
+        parts.append("%s %d s: weight %.2f, neck raised %+.1f cm (asked %+.1f, capped %d), written %.3f m against %.3f, the eye over the clavicles %+.1f cm (min %+.1f), "
+                     "INSIDE %d of %d, legs %.3f -> %.3f, feet lifted %d" % (name, len(rs), w, raise_, asked, cap, mean("neckw"), mean("necka"), mean("clav"), clavmin,
+                                                                             ins, clr, mean("la"), mean("lw"), lif))
+        if w >= 0.99:
+            armed += len(rs)
+            if asked > 2.0 and raise_ < 0.5 and cap == 0:
+                never.append(name)
+        if ins:
+            inside.append("%s %d" % (name, ins))
+        if lif:
+            lifted.append("%s %d" % (name, lif))
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; the raise was asked and never written with %s" % ", ".join(never))
+    if not armed:
+        return ("IDLE", text + "; no armed second")
+    notes = (["the eye entered the torso (%s)" % ", ".join(inside)] if inside else []) + (["feet lifted (%s)" % ", ".join(lifted)] if lifted else [])
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
 
 
@@ -11191,8 +11241,18 @@ HEALTH_RULES = (
                 r"\(max [\d.]+\), moving (?P<hmn>\d+) frames (?P<hm>[\d.]+) mm rms \(max [\d.]+\) \((?P<hframes>\d+) frames, head moving (?P<hnot>\d+)\); the raise moved "
                 r"the view (?P<rs>[\d.]+) mm standing \((?P<rsn>\d+) ticks\), (?P<rm>[\d.]+) mm moving \((?P<rmn>\d+) ticks\); the stance settled in (?P<settled>\d+) of "
                 r"(?P<calls>\d+) pin calls \(moving (?P<moving>\d+), the neck moving (?P<neck>\d+), the camera moving (?P<cam>\d+), filling (?P<filling>\d+), no input "
-                r"(?P<noin>\d+)\), settled target (?P<tgt>.+)$"),
+                r"(?P<noin>\d+)\), settled target (?P<tgt>.+?)"
+                r"(?:; F97a: the view against the ground, the head still: standing (?P<wsn>\d+) frames (?P<ws>[\d.]+) mm rms \(max [\d.]+, (?P<wso>\d+) steps over 1 cm\), "
+                r"moving (?P<wmn>\d+) frames (?P<wm>[\d.]+) mm rms \(max [\d.]+, (?P<wmo>\d+) over 1 cm\); the view against the body: steps over 1 cm standing "
+                r"(?P<bso>\d+), moving (?P<bmo>\d+))?$"),
     ), _hj_f95a_motion),
+    _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
+        ("sec", r"native on foot armed body \(F97a\) 1 s: item (?P<item>\S+); (?P<stance>standing|crouched|moving crouched|moving) (?P<n>\d+) calls: weapon weight "
+                r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
+                r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
+                r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
+                r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
+    ), _hj_f97a_body),
     _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
         ("sec", r"native on foot head shadow \(F95c\) 1 s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
                 r"views unread (?P<unread>\d+), class changed by the game (?P<lost>\d+); head instance x view pairs after the call: shadow views (?P<sp>\d+), main or "
@@ -12479,6 +12539,33 @@ def self_test_health():
               has=["the stance never settled: the neck reference took no target"])
         check("F95a motion: the view moves standing", [motion(vs=1.4, hs=1.3)] * 2, 0, [("PARTIAL", F95)], has=["the view moves standing", "the HUD moves against the eye standing"])
         check("F95a motion: no frame with the head still", [motion(vsn=0, vmn=0, hsn=0, hmn=0)] * 2, 0, [("IDLE", F95)], has=["no frame with the head still"])
+
+        def motion97(vs=0.30, ws=0.25, wso=0, bso=0, vsn=80):
+            """F97a's form: the view against the ground and the steps over 1 cm appended (motion()'s leading fields)."""
+            return R("native on foot view motion (F95a) 1 s: the view a game frame", vsn, vs, vs * 3, 50, 0.4, 1.2, 78, 0.12, 0.36, 48, 0.3, 0.9, 136, 10, 0.0, 45, 0.0,
+                     45, 60, 90, 0, 0, 0, 30, 0, "+16.4..+16.6 cm", vsn, ws, ws * 3, wso, 50, 0.3, 0.9, 0, bso, 0)
+
+        check("F97a motion: a teleport second (one 525 mm step) beside still seconds", [motion97(vs=71.5, ws=60.0, wso=1, bso=1, vsn=54)] + [motion97()] * 4, 0,
+              [("OK", F95)], has=["standing the median second 0.25 mm rms against the ground (5 seconds), steps over 1 cm 1"], lacks=["UNPARSED", "the view moves standing"])
+        check("F97a motion: the view moves against the ground every second", [motion97(vs=2.0, ws=1.8)] * 3, 0, [("PARTIAL", F95)], has=["the view moves standing"])
+
+        # ---- armed body (F97a): the body against the eye per item and stance ----
+        F97 = "armed body (F97a)"
+        RIFLE97 = "$wpn_m_assaultrifle_laser_fauto_name;"
+
+        def body97(item=RIFLE97, stance="standing", w=1.0, raise_=8.2, asked=8.4, capped=0, clav=18.2, clavmin=15.0, chest=28.0, chestmin=20.0, inside=0, clr=90,
+                   la=0.894, lw=0.985, lifted=0):
+            return R("native on foot armed body (F97a) 1 s: item %s", item, stance, 90, w, raise_, raise_ - 1.0, raise_ + 1.0, asked, capped, 1.300 + raise_ / 100.0, 1.300,
+                     clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted)
+
+        check("F97a body: the rifle raised upright, the eye clear", [body97()] * 2 + [body97(stance="crouched", raise_=-6.8, asked=-6.8, clav=14.0, clavmin=12.0)] * 2, 0,
+              [("OK", F97)], has=[RIFLE97 + " standing 2 s: weight 1.00, neck raised +8.2 cm (asked +8.4, capped 0)", RIFLE97 + " crouched 2 s"], lacks=["UNPARSED"])
+        check("F97a body: the eye in the torso moving crouched", [body97(stance="moving crouched", inside=40, clav=4.0, clavmin=-12.0)] * 2, 0, [("PARTIAL", F97)],
+              has=["the eye entered the torso (" + RIFLE97 + " moving crouched 80)"])
+        check("F97a body: the raise asked and never written", [body97(raise_=0.0, asked=8.4)] * 2, 3, [("NEVER APPLIED", F97)],
+              has=["the raise was asked and never written with " + RIFLE97 + " standing"])
+        check("F97a body: a foot lifted", [body97(lifted=3)] * 2, 0, [("PARTIAL", F97)], has=["feet lifted (" + RIFLE97 + " standing 6)"])
+        check("F97a body: fists only", [body97("$humanoid_fists_name;", w=0.0, raise_=0.0, asked=0.0, clav=10.0)] * 2, 0, [("IDLE", F97)], has=["no armed second"])
 
         # ---- head in the shadows (F95c): the head parts as shadow-only through the visibility call, the fade hook keeps the shadow views ----
         F95C = "head in the shadows (F95c)"

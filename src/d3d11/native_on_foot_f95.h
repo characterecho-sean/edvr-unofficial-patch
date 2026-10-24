@@ -115,7 +115,7 @@ struct StanceSettle {
 
 // The view-motion instrument: the frame-to-frame vertical step of a quantity (mm), as rms and largest.
 struct StepStat {
-    uint32_t n = 0;
+    uint32_t n = 0, over1cm = 0;   // F97a: the steps over 1 cm counted apart (a model jump or a teleport is one frame and dominates the rms)
     double sumSq = 0.0, maxAbs = 0.0;
     void add(double stepM) noexcept {
         if (!std::isfinite(stepM)) return;
@@ -123,6 +123,7 @@ struct StepStat {
         ++n;
         sumSq += mm * mm;
         maxAbs = std::fmax(maxAbs, std::fabs(mm));
+        if (std::fabs(mm) > 10.0) ++over1cm;
     }
     double rms() const noexcept { return n ? std::sqrt(sumSq / n) : 0.0; }
 };

@@ -23,6 +23,7 @@
 #include "f94b_checks.h"    // F94b: the interaction label moved by its own anchor; F93c's rule measured beside it
 #include "f95_checks.h"     // F95a: the neck reference from the stance's settled height; the view-motion instrument
 #include "f95c_checks.h"    // F95c: the head as shadow-only through the visibility call, the fade hook's guard and action
+#include "f97_checks.h"     // F97a: the armed body under the eye again
 
 #include <array>
 #include <chrono>
@@ -7205,6 +7206,8 @@ int wmain(int argc, wchar_t** argv) {
     f94btest::run95b(check);
     // F95c: the head parts as shadow-only through the visibility call (the game's class 2), the fade hook's guard and its action.
     f95ctest::run95c(check);
+    // F97a: the armed neck target (F93's raise, the eye's lowering, the weight's blend), the legs' room for a raise, the stance bins.
+    f97test::run97(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
