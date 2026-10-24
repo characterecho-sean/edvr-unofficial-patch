@@ -32,8 +32,8 @@ read 2026-09-16) unless marked believed.
   D3D11 port (FSR 3.1.2) compiled into d3d11.dll. Build, flights and
   reasoning: Status detail below.
 - **Next:** the flicker at flight 7's spot (a hull panel's edge in the
-  main menu) is in all three temporal paths; lead (e), EDVR refusing it
-  (flight 7 entry): the refusal view there, and TAA on Windows. Held keys
+  main menu) is in all three temporal paths, with history kept (yellow in
+  the refusal view; flight 7 entry): TAA and FSR 3 there on Windows. Held keys
   looked mostly clean; they become the behaviour once (c) is out, and the
   key retires. Then VR, the AMD licence and the installer payload (D8). Route 1's flight 4 (an AMD
   supporter's log) and the exported-symbols nit (Open) still stand.
@@ -940,3 +940,17 @@ class of upscaler): that is route 2's go/no-go.
   other refusal), and TAA or FSR 3 at the same spot on Windows. Aside:
   the adapter reports vendor 0x10DE with device 0x1586 (the 8060S), a
   spoofed NVIDIA vendor, which matters to anything gated on vendor id.
+  Then Sean, refusal view on at the spot: the flickering edge is yellow,
+  a stale slot KEPT (`flat_mono_refusal.h`: the pool slot under it is a
+  draw's that a later draw covered, and the steady-detail check kept the
+  camera-term history, confirmed by last frame's depth). Ruled out: (e)
+  as stated, EDVR refusing the edge, because its pixels are kept, not
+  refused; the ~300 refused a frame are elsewhere. So the edge has
+  history and zero motion under all three paths and still flickers.
+  Left: (f) the edge's own content defeats a non-ML history clamp and
+  FSR 4 alike (a thin feature the jitter samples in some phases only;
+  DLSS holds it), or (g) the covering draw's pixels differ frame to
+  frame beyond the jitter (a jitter or camera mismatch on that draw).
+  Discriminator for platform against content: TAA and FSR 3 at the same
+  spot on Windows. Not asked yet: whether the yellow stays yellow or
+  alternates with pink.
