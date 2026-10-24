@@ -248,6 +248,7 @@ float* g_fadeAmount = nullptr;
 // (its own guard; Explorer Cam's g_fade wins while it holds the global).
 std::atomic<bool> g_nativeWant{false};
 std::atomic<bool> g_nativeBody{false};
+std::atomic<uint64_t> g_nativeHideHeld{0};   // F93d, hook threads: head-hide calls that wrote nothing because the game's camera was third-person
 const char* g_nativeReason = "";
 ecm::FadeGuard g_nativeFade;
 
@@ -1224,12 +1225,35 @@ __declspec(noinline) PreState preCtl(void* controller) noexcept {
     return ps;
 }
 
+// F93d: the controller last read for native on foot's camera signal, and how often a different controller answered (the frame thread logs both).
+std::atomic<uint64_t> g_nativeCamCtl{0};
+std::atomic<uint64_t> g_nativeCamCtlSwitches{0};
+std::atomic<uint64_t> g_nativeCamReadFaults{0};
+
+// F93d: after the game's own update the mode byte is the suite's state for this frame (the update copies the shared record's +0x30 in at its start and
+// writes its own result back at its end), so it is read here, not in the pre-call. Read only; native stereo on foot only.
+__declspec(noinline) void nativeCamAfterUpdate(void* controller) noexcept {
+    if (!controller || !nativeOnFootActive()) return;
+    uint8_t mode = 0, pending = 0;
+    if (!sehReadCtlView(static_cast<const uint8_t*>(controller), &mode, &pending)) {
+        g_nativeCamReadFaults.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint64_t c = reinterpret_cast<uint64_t>(controller);
+    const uint64_t was = g_nativeCamCtl.exchange(c, std::memory_order_relaxed);
+    if (was != 0 && was != c) g_nativeCamCtlSwitches.fetch_add(1, std::memory_order_relaxed);
+    LARGE_INTEGER q{};
+    QueryPerformanceCounter(&q);
+    nativeOnFootCameraPublish(mode, static_cast<uint64_t>(q.QuadPart));
+}
+
 __declspec(noinline) uint64_t __fastcall controllerHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkCtl].load(std::memory_order_acquire));
     if (!forward) return 0;
     PreState ps = preCtl(a);
     const uint64_t result = forward(a, b, c, d);
     postFor(ps);
+    nativeCamAfterUpdate(a);   // F93d: the game's camera for native on foot's body changes
     return result;
 }
 
@@ -1489,7 +1513,11 @@ void headHideStep(void* amcPtr) noexcept {
     // The writes need a placement (Explorer Cam's own) or native stereo's body (F2, explorerCamNativeBody). Native on foot's census runs this
     // function with neither, and reads only.
     const bool placed = g_placeActive.load(std::memory_order_acquire) && g_placedActivity.load(std::memory_order_acquire) != 0;
-    if (!placed && !g_nativeBody.load(std::memory_order_acquire)) return;
+    // F93d: native stereo's head hiding is first-person only: in the game's third-person camera (the camera suite) the head is the game's.
+    if (!placed && (!g_nativeBody.load(std::memory_order_acquire) || nativeOnFootCameraExternal())) {
+        if (!placed && g_nativeBody.load(std::memory_order_acquire)) g_nativeHideHeld.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     uint32_t zeroed = 0;
     if (!sehZeroHeadMasks(amc, &zeroed)) {
         hideFault();
@@ -1524,6 +1552,7 @@ __declspec(noinline) bool sehZeroFpMasks(uint8_t* amc, const int* idx, uint32_t*
 }
 void fpBodyStep(void* amcPtr) noexcept {
     if (!amcPtr || !g_fpHideWant.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire)) return;
+    if (nativeOnFootCameraExternal()) return;   // F93d: the first-person avatar is the game's own business in its third-person camera
     uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
     AmcIdent id;
     if (!sehReadAmcIdent(amc, &id)) {
@@ -1584,6 +1613,7 @@ std::atomic<bool> g_unclipWant{false};       // frame thread: fix.native_on_foot
 std::atomic<bool> g_clipProbeWant{false};    // frame thread: native stereo is on foot (the 5 s read runs)
 std::atomic<uint64_t> g_clipWrites{0};       // hook thread: modifier writes since the frame thread last logged
 std::atomic<uint64_t> g_clipWriteFaults{0};  // hook thread: guarded writes that faulted
+std::atomic<uint64_t> g_clipExternalSkips{0};  // F93d, hook thread: calls that wrote nothing because the game's camera was third-person
 std::atomic<uint64_t> g_clipNextMs{0};       // hook thread: the next probe read
 BodyClipSnap g_clipSnap;                     // guarded by g_fpBodyMutex
 int g_clipIdx[kClipParts] = {-1, -1, -1, -1, -1, -1, -1, -1};   // guarded by g_fpBodyMutex: the part index of each name, -1 when absent
@@ -1670,6 +1700,10 @@ void bodyClipStep(void* amcPtr) noexcept {
             std::lock_guard<std::mutex> lock(g_fpBodyMutex);
             g_clipSnap = s;
         }
+    }
+    if (nativeOnFootCameraExternal()) {   // F93d: no mask or clip write in the game's third-person camera (the probe above still reads)
+        if (unclip || hybrid) g_clipExternalSkips.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
     if (hybrid) {   // F21: the third-person arms, hands and both shoulders are hidden by their view masks (the torso is unclipped below)
         const int maskIdx[4] = {idx[1], idx[2], idx[3], idx[4]};
@@ -3047,7 +3081,9 @@ bool armed(int id) { return g_hooks[id].state == kHookStateArmed; }
 void updateGates() {
     const bool active = g_placeActive.load(std::memory_order_relaxed);
     g_gate[kHkFree].store(armed(kHkFree) && active ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkCtl].store(armed(kHkCtl) && (active || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
+    // F93d: and while native stereo is on foot, for the camera signal (the pre-call does nothing for it: runCtlPre returns before any read or press
+    // without a placement or the fade global; the post-call reads the mode byte).
+    g_gate[kHkCtl].store(armed(kHkCtl) && (active || g_fadeOurs.load(std::memory_order_relaxed) || nativeOnFootActive()) ? 1u : 0u, std::memory_order_release);
     // Head hiding needs both optional hooks, the part names verified, and a placement-capable Explorer Cam; it also needs the FindJoint capture from
     // launch (the attach runs every frame, but the hook must be in place), so the capture's share of the gate is open whenever Explorer Cam is active.
     // Native on foot (F0 census, flight F1): the same capture also runs while native stereo is on foot, read-only. Placement stays Explorer
@@ -3535,6 +3571,9 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
     if (g_nativeWant.load(std::memory_order_relaxed)) {
         if (g_hooks[kHkFind].state == kHookStateNotTried) tryHook(kHkFind, sink);
         if (g_hooks[kHkFade].state == kHookStateNotTried) tryHook(kHkFade, sink);
+        // F93d: the camera controller's update, for the game's camera (the suite's mode byte): native on foot's body changes are first-person only.
+        // Optional: a stand-down leaves the body changes on in every camera, as before F93d (native_on_foot.cpp says so once).
+        if (g_hooks[kHkCtl].state == kHookStateNotTried) tryHook(kHkCtl, sink);
         checkPartNames(sink);
     }
 
@@ -3609,7 +3648,10 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
 
     // 6b. The avatar fade global. Before the not-active clean-up below, so a feature turned off while the camera is closed puts it back.
     fadeTick(active, g_placedActivity.load(std::memory_order_acquire) != 0, g_sessionActive.load(std::memory_order_acquire), frame, false, sink);
-    nativeFadeTick(g_nativeBody.load(std::memory_order_acquire), g_nativeReason, sink);
+    {   // F93d: the fade claim is first-person behaviour too: in the game's third-person camera the global is the game's (auto)
+        const bool nativeBody = g_nativeBody.load(std::memory_order_acquire), external = nativeBody && nativeOnFootCameraExternal();
+        nativeFadeTick(nativeBody && !external, external ? "the game's third-person camera (F93d)" : g_nativeReason, sink);
+    }
     updateGates();
 
     // 6c. The comfort fade: how black the view is this frame, and whether F5's request may go (not before the view is dark). Before the not-active return below, so
@@ -4332,6 +4374,18 @@ FpBodyReadback explorerCamFpBodyReadback() {
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 uint64_t localAmcPointer() { return g_amcLocal.load(); }   // F18
+ExplorerCamNativeCameraStats explorerCamNativeCameraStats() {   // F93d
+    ExplorerCamNativeCameraStats s;
+    const HookEntry& h = g_hooks[kHkCtl];
+    s.controllerHook = h.state == kHookStateArmed ? 1 : h.state == kHookStateStoodDown ? 2 : 0;
+    s.why = h.state == kHookStateStoodDown ? h.why : "";
+    s.controller = g_nativeCamCtl.load(std::memory_order_relaxed);
+    s.switches = g_nativeCamCtlSwitches.load(std::memory_order_relaxed);
+    s.faults = g_nativeCamReadFaults.load(std::memory_order_relaxed);
+    s.headHeld = g_nativeHideHeld.load(std::memory_order_relaxed);
+    s.clipHeld = g_clipExternalSkips.load(std::memory_order_relaxed);
+    return s;
+}
 bool explorerCamRestPovDelta(float out[3]) {   // F33
     std::lock_guard<std::mutex> lock(g_restPovMutex);
     if (!g_restPovKnown) return false;
@@ -4623,6 +4677,20 @@ void reset() {
     g_hotkeyKeeper = ecm::HotkeyKeeper();
     g_settings.reset();
     g_frameSink = ecm::Sink{&logSink, nullptr};
+    // F93d: native on foot's body state and the camera signal
+    g_nativeWant.store(false);
+    g_nativeBody.store(false);
+    g_nativeFade = ecm::FadeGuard();
+    g_nativeHideHeld.store(0);
+    g_clipExternalSkips.store(0);
+    g_nativeCamCtl.store(0);
+    g_nativeCamCtlSwitches.store(0);
+    g_nativeCamReadFaults.store(0);
+    g_nativeOnFootCamExternal.store(false);
+    g_nativeOnFootCamMode.store(0);
+    g_nativeOnFootCamReads.store(0);
+    g_nativeOnFootCamFlips.store(0);
+    g_nativeOnFootCamFlipQpc.store(0);
 }
 }  // namespace explorercamtest
 #endif

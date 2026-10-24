@@ -45,6 +45,7 @@
 #include "../../src/d3d11/explorer_cam_core.h"
 #include "../../src/d3d11/explorer_cam_follow_core.h"
 #include "../../src/d3d11/explorer_cam_fade_core.h"
+#include "../../src/d3d11/native_on_foot.h"   // F93d: the native flag and the camera signal the controller hook publishes
 #include "../../src/common/comfort_fade.h"
 
 using namespace edvr;
@@ -3611,6 +3612,97 @@ void testHeadHideGlue(const Pages& p) {
     t::reset();
 }
 
+// F93d: native on foot's camera signal. Explorer Cam off (its hotkey empty), the native key on: the controller hook is installed for the signal alone, its gate
+// opens only on foot, its post-call reads the mode byte the update left and publishes it (native_on_foot.h), presses nothing and changes nothing; native stereo's
+// head hiding zeroes the local head parts in the game's first-person camera only (mode 0), and leaves them to the game in its third-person camera suite (1..6).
+void testNativeCameraGlue(const Pages& p) {
+    std::printf("glue: native on foot's camera signal (F93d): the controller's mode byte after its update gates native stereo's head hiding\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    static AmcBuf local;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100];
+    Rig rig;
+    t::reset();
+    edvr::g_nativeOnFootActive.store(false);
+    g.init();
+    cimgInit(-1);
+    rig.f.hotkey = "";   // Explorer Cam off: the native key alone wants the hooks
+    ExplorerCamTestTargets tt;
+    tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+    tt.collision = reinterpret_cast<uintptr_t>(p.colG);
+    tt.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+    tt.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+    tt.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+    tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kAvatarFadeRva;
+    tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kFindJointRva;
+    t::setTargets(tt);
+    g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
+    g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
+    g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
+    explorerCamNativeBody(true, false, "rig: not on foot yet");
+    rig.boundary();
+    rig.boundary();
+    check(t::stolenBytes(4) == 5 && p.ctlG[0] == 0xE9 && rig.cap.count("controller hook armed:") == 1 && t::stolenBytes(0) == 0 && p.freeG[0] != 0xE9,
+          "THE NATIVE KEY ALONE INSTALLS THE CONTROLLER HOOK (Explorer Cam off): armed once; the free camera is not hooked");
+    check(!t::controllerGateOpen() && !t::placeActive(), "...its gate stays closed off foot and Explorer Cam does not run");
+    g.setMode(1);
+    g.ctlFrame();
+    check(edvr::g_nativeOnFootCamReads.load() == 0 && !edvr::nativeOnFootCameraExternal(), "OFF FOOT: the suite open is not read (the relay runs the original alone)");
+    g.setMode(0);
+
+    // ---- on foot ------------------------------------------------------------------------------------------------------------------------------------------------
+    edvr::g_nativeOnFootActive.store(true);
+    explorerCamNativeBody(true, true, "");
+    rig.boundary();
+    check(t::controllerGateOpen() && !t::placeActive(), "ON FOOT: the controller gate opens for the camera signal; Explorer Cam still does not run");
+    local.init(reinterpret_cast<uint64_t>(skelA), 3);
+    imgInvoke(skelA, skelB, g_cimg + ecm::kPovNameRva);
+    g.ctlFrame();
+    check(edvr::g_nativeOnFootCamReads.load() == 1 && edvr::g_nativeOnFootCamMode.load() == 0x100u && !edvr::nativeOnFootCameraExternal(),
+          "FIRST PERSON: the controller's update read mode 0 after the call: one read, the game's first-person camera");
+    check(g.seenPhoto() == 0 && g.seenFree() == 0 && g.mode() == 0 && t::controllerCalls() >= 1, "...it pressed nothing and changed nothing: the read is all it does");
+    imgFade(local.b);
+    check(local.onlyHeadZeroed(), "FIRST PERSON: native stereo's head hiding zeroes the local AMC's head parts (as before F93d)");
+
+    // The suite opens: the update leaves mode 1 (the rig sets the byte before the call; in the game the update itself writes it, and the hook reads it after).
+    g.setMode(1);
+    g.ctlFrame();
+    check(edvr::nativeOnFootCameraExternal() && edvr::g_nativeOnFootCamFlips.load() == 1 && edvr::g_nativeOnFootCamMode.load() == 0x101u,
+          "THE SUITE OPENS (mode 1 after the update): the game's third-person camera, one change");
+    local.refillMasks();
+    const uint64_t calls = t::hideCalls();
+    imgFade(local.b);
+    imgFade(local.b);
+    check(local.allMasksIntact() && t::hideCalls() == calls && edvr::explorerCamNativeCameraStats().headHeld == 2,
+          "THIRD PERSON: the head is the game's: every mask intact over two fade calls, both counted as held back");
+    g.setMode(3);
+    g.ctlFrame();
+    imgFade(local.b);
+    check(edvr::nativeOnFootCameraExternal() && edvr::g_nativeOnFootCamFlips.load() == 1 && local.allMasksIntact(), "THE FREE CAMERA (mode 3): still third person, still the game's head");
+    g.setMode(0);
+    g.ctlFrame();
+    check(!edvr::nativeOnFootCameraExternal() && edvr::g_nativeOnFootCamFlips.load() == 2, "THE SUITE CLOSES (mode 0): first person again, the second change");
+    imgFade(local.b);
+    check(local.onlyHeadZeroed(), "...and the head hiding is back on the very next fade call");
+    const edvr::ExplorerCamNativeCameraStats st = edvr::explorerCamNativeCameraStats();
+    check(st.controllerHook == 1 && st.controller == reinterpret_cast<uint64_t>(g.ctl) && st.switches == 0 && st.faults == 0,
+          "THE STATS: the controller hook armed, the controller the rig's, no other controller, no fault");
+
+    // Native stereo on foot ends inside the suite: nothing is read and the flag does not count.
+    g.setMode(1);
+    g.ctlFrame();
+    const bool openOnFoot = edvr::nativeOnFootCameraExternal();
+    edvr::g_nativeOnFootActive.store(false);
+    explorerCamNativeBody(true, false, "rig: boarded");
+    rig.boundary();
+    const uint64_t readsOff = edvr::g_nativeOnFootCamReads.load();
+    g.ctlFrame();
+    check(openOnFoot && !edvr::nativeOnFootCameraExternal() && !t::controllerGateOpen() && edvr::g_nativeOnFootCamReads.load() == readsOff,
+          "OFF FOOT AGAIN: the flag does not count, the gate closes, nothing more is read");
+    t::reset();
+    edvr::g_nativeOnFootActive.store(false);
+}
+
 // What the fade code reads for an avatar's world origin: rcx = *(AMC+0x208) (an object whose first qword is a vtable), call [vtable+0x20] -> a matrix, origin at +0x30.
 float g_xform[16];
 int g_xformCalls = 0;
@@ -5919,6 +6011,7 @@ void testGlue() {
     testTabWaitGlue(p);
     testFadeGlue(p);
     testHeadHideGlue(p);
+    testNativeCameraGlue(p);   // F93d
     testSkeletonLatch(p);
     testFollowGlue(p);
     testIsolationGlue(p);
