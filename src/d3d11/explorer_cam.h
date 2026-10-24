@@ -149,6 +149,14 @@ struct NeckCensusReading {
 bool neckCensusRead(NeckCensusReading* out);
 bool explorerCamRestPovDelta(float out[3]);   // F33: the povCamera joint minus the head joint in model space, once Explorer Cam's walk derived it
 uint64_t localAmcPointer();   // F18: the local third-person AMC last matched by the fade hook (0 = none); the latch the census reads
+// F93d: the camera signal's side in Explorer Cam's hooks, for native on foot's lines: whether the controller hook is armed (or stood down, and why),
+// the controller last read and how often another answered, the reads that faulted, and the writes each fade-hook step held back in the third-person camera.
+struct ExplorerCamNativeCameraStats {
+    int controllerHook = 0;          // 0 not tried, 1 armed, 2 stood down
+    const char* why = "";            // the stand-down's reason (static storage)
+    uint64_t controller = 0, switches = 0, faults = 0, headHeld = 0, clipHeld = 0;
+};
+ExplorerCamNativeCameraStats explorerCamNativeCameraStats();
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 // The rig's seam (tools\explorer_cam_test): the same boundary with a scripted clock and scripted

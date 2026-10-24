@@ -10723,6 +10723,68 @@ def _hj_label(rows, ctx):
     return ("PARTIAL" if ours == 0 or refuse else "OK", text)
 
 
+def _hj_f93d_camera(rows, ctx):
+    """F93d: the game's camera gates every body change. The watching line proves the controller is read; each change names the camera; a return to first person
+    says what the hooks held back in the third-person camera (a stretch that held nothing is a gate that never closed)."""
+    watch, change, missing, silent = (rows.get(k, []) for k in ("watch", "change", "missing", "silent"))
+    edge, noedge, ended = rows.get("edge", []), rows.get("noedge", []), rows.get("ended", [])
+    if not (watch or change or missing):
+        return None
+    ext = [r for r in change if r["cam"] == "external"]
+    back = [r for r in change if r["cam"] == "first person" and r.get("anim") is not None]
+    held = [(int(r["anim"]), int(r["shift"]), int(r["head"]), int(r["clip"]), float(r["s"])) for r in back]
+    text = "watching %d stretch(es) on foot; third-person camera entered %d time(s), left %d (%s)" % (
+        len(watch), len(ext), len(back) + len(ended),
+        ", ".join("%.1f s: Animate %d, submit %d, head %d, clip %d" % (s, a, sh, h, c) for a, sh, h, c, s in held) or "none held")
+    if edge:
+        text += "; the Animate post-hook took the change %s ms after the controller" % ", ".join(r["ms"] for r in edge)
+    sw = max((int(r["sw"]) for r in change), default=0)
+    if sw:
+        text += "; another controller answered %d times" % sw
+    if missing and not watch:
+        return ("NEVER APPLIED", "no camera read on foot (%s)" % missing[0]["why"])
+    if not ext:
+        return ("IDLE", text + "; the camera suite was not opened on foot")
+    if held and all(a == 0 and h == 0 for a, sh, h, c, s in held):
+        return ("NEVER APPLIED", text + " (the gate held nothing back)")
+    if noedge or silent or missing:
+        return ("PARTIAL", text + "%s%s" % ("; the Animate post-hook missed %d change(s)" % len(noedge) if noedge else "",
+                                            "; the controller went quiet in the suite %d time(s)" % len(silent) if silent else ""))
+    return ("OK", text)
+
+
+def _hj_f93e_stance(rows, ctx):
+    """F93e: per held item, the standing seconds: what the rest target would have lowered the neck by, what the hidden head took, what the hips kept, and the legs'
+    extension written against the animated one (the knees bend as it falls)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        if r["bin"] == "standing":
+            items.setdefault(r["item"], []).append(r)
+    if not items:
+        return ("IDLE", "%d s, none standing" % len(sec))
+    parts, bent, took, lowered = [], [], 0.0, 0
+    for item, rs in items.items():
+        n = len(rs)
+        mean = lambda k: sum(float(r[k]) for r in rs) / n
+        low = sum(int(r["low"]) for r in rs)
+        lowered += low
+        took += sum(float(r["took"]) * int(r["low"]) for r in rs)
+        la, lw, hips = mean("la"), mean("lw"), mean("hips")
+        parts.append("%s %d s: lowered in %d calls by %.1f cm, the head took %.1f, the hips kept %.1f cm; legs %.3f -> %.3f" % (
+            item, n, low, mean("gap"), mean("took"), hips, la, lw))
+        if hips > 3.0 or lw < la - 0.03:
+            bent.append(item)
+    text = "; ".join(parts)
+    if lowered and took == 0.0:
+        return ("NEVER APPLIED", text + " (the head took nothing)")
+    if bent:
+        return ("PARTIAL", text + "; the knees still bend standing with %s" % ", ".join(bent))
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
 
@@ -10825,6 +10887,24 @@ HEALTH_RULES = (
         ("refuse", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh was NOT decoded \((?P<why>[^)]*)\)"),
         ("_", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh decoded"),
     ), _hj_label),
+    _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
+        ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
+        ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
+                   r"(?P<reads>\d+) reads, (?P<flips>\d+) changes seen by the hook, another controller answered (?P<sw>\d+) times"
+                   r"(?:; held back over (?P<s>[\d.]+) s in the third-person camera: Animate post-calls (?P<anim>\d+), submit jobs \(body shift, pose carry\) (?P<shift>\d+), "
+                   r"head hides (?P<head>\d+), clip and mask writes (?P<clip>\d+))?$"),
+        ("ended", r"native on foot camera \(F93d\): first person \(native stereo on foot ended\) -- body changes on"),
+        ("edge", r"native on foot camera \(F93d\): the Animate post-hook took the (?P<cam>third-person|first-person) camera (?P<ms>[\d.]+) ms after the controller's read"),
+        ("noedge", r"native on foot camera \(F93d\): the Animate post-hook did not take the (?P<cam>third-person|first-person) camera within 2 s"),
+        ("missing", r"native on foot camera \(F93d\): NO camera read in 5 s on foot \((?P<why>.*)\): the body changes stay on in every camera"),
+        ("silent", r"native on foot camera \(F93d\): the camera controller has not updated for (?P<ms>\d+) ms with the suite open"),
+    ), _hj_f93d_camera),
+    _hrule("stance height (F93e)", ("F93e",), ("native on foot stance height (F93e)",), (
+        ("sec", r"native on foot stance height \(F93e\) 1 s: item (?P<item>\S+); (?P<bin>standing|every state) (?P<n>\d+) calls: the rest target lowered the neck in (?P<low>\d+) "
+                r"\(by (?P<gap>[\d.]+) cm mean, max [\d.]+\), the hidden head took (?P<took>[\d.]+) cm \(pitched [\d.]+ deg, the body %s cm further back\), the hips kept "
+                r"(?P<hips>[\d.]+) cm \(max [\d.]+\); raised in (?P<raise>\d+) \(by [\d.]+ cm mean\); vertical move written mean (?P<v>%s) cm; legs hip to foot over the leg: "
+                r"animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % (_HN, _HN)),
+    ), _hj_f93e_stance),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -11935,6 +12015,57 @@ def self_test_health():
         check("F92b aim: switched outside ADS only", [aim_switch("off", "no"), aim_switch("on", "no")], 0, [("IDLE", F92A)])
         check("F92b aim: off in ADS and nothing unwound", [aim_switch("off", "yes")], 3, [("NEVER APPLIED", F92A)])
         check("F92b aim: a remainder dropped", [aim_switch("off"), aim_off(), aim_unwound(0.4, True)], 0, [("PARTIAL", F92A)], has=["1 with a DROPPED remainder"])
+
+        # ---- game camera (F93d): the camera suite on foot gates every body change ----
+        F93D, F93E = "game camera (F93d)", "stance height (F93e)"
+        CTL = 0x14D09AB8080
+
+        def cam_text(mode):
+            return {0: "closed", 1: "suite open on a preset", 3: "free camera", 5: "detached (world lock)"}[mode]
+
+        def cam_watch(mode=0):
+            return R("native on foot camera (F93d): watching the game's camera", CTL, mode, cam_text(mode))
+
+        def cam_change(cam="external", mode=1, held=None, sw=0):
+            """held: (seconds, Animate, submit, head, clip) for a return to first person; the C code builds that tail with its own format."""
+            tail = R("; held back over %.1f s in the third-person camera", *held) if held else ""
+            return R("native on foot camera (F93d): %s (mode %u", cam, mode, cam_text(mode), "off" if cam == "external" else "on", CTL, 2400, 1, sw, tail)
+
+        def cam_edge(cam="third-person", ms=3.1):
+            return R("native on foot camera (F93d): the Animate post-hook took the", cam, ms)
+
+        check("F93d camera: the suite opened and closed, the hooks held back", [cam_watch(), cam_change("external", 1), cam_edge("third-person", 3.1),
+              cam_change("first person", 0, (26.2, 2356, 2356, 4712, 2356)), cam_edge("first-person", 2.04)], 0, [("OK", F93D)],
+              has=["third-person camera entered 1 time(s), left 1 (26.2 s: Animate 2356, submit 2356, head 4712, clip 2356)", "3.10, 2.04 ms after the controller"])
+        check("F93d camera: watching, the suite never opened", [cam_watch()], 0, [("IDLE", F93D)], has=["the camera suite was not opened on foot"])
+        check("F93d camera: no read on foot", [R("native on foot camera (F93d): NO camera read in 5 s", "stood down: ", "the game build differs", "")], 3,
+              [("NEVER APPLIED", F93D)], has=["no camera read on foot (the controller hook is stood down: the game build differs)"])
+        check("F93d camera: a third-person stretch that held nothing", [cam_watch(), cam_change("external", 3), cam_change("first person", 0, (5.0, 0, 0, 0, 0))], 3,
+              [("NEVER APPLIED", F93D)], has=["the gate held nothing back"])
+        check("F93d camera: the Animate post-hook missed a change, a mode text with parentheses", [cam_watch(), cam_change("external", 5),
+              R("native on foot camera (F93d): the Animate post-hook did not take", "third-person", "first-person")], 0, [("PARTIAL", F93D)],
+              has=["the Animate post-hook missed 1 change(s)"], lacks=["UNPARSED"])
+        check("F93d camera: native stereo on foot ended inside the suite", [cam_watch(), cam_change("external", 1), cam_edge(),
+              R("native on foot camera (F93d): first person (native stereo on foot ended)")], 0, [("OK", F93D)], has=["left 1 (none held)"], lacks=["UNPARSED"])
+        check("F93d camera: the controller went quiet in the suite", [cam_watch(), cam_change("external", 1), cam_edge(),
+              R("native on foot camera (F93d): the camera controller has not updated", 1012), cam_change("first person", 0, (1.0, 90, 90, 180, 90))], 0,
+              [("PARTIAL", F93D)], has=["the controller went quiet in the suite 1 time(s)"])
+
+        # ---- stance height (F93e): the stance's height taken by the hidden head, not the knees ----
+        ELINK = "$humanoid_rechargetool_name;"
+
+        def stance(item=ELINK, bin_="standing", low=90, gap=10.8, took=10.8, hips=0.0, la=0.990, lw=0.989):
+            return R("native on foot stance height (F93e) 1 s: item %s", item, bin_, 90, low, gap, gap + 0.4, took, 41.0, 6.4, hips, hips + 0.2, 0, 0.0,
+                     -hips, la, lw, lw - 0.004, 90, 1.587, 1.540, -0.3, -1.7, 90)
+
+        check("F93e stance: the Energylink standing, the head took it all", [stance()] * 3, 0, [("OK", F93E)],
+              has=[ELINK + " 3 s: lowered in 270 calls by 10.8 cm, the head took 10.8, the hips kept 0.0 cm; legs 0.990 -> 0.989"])
+        check("F93e stance: the knees still bend", [stance(took=1.8, hips=9.0, lw=0.800)] * 2, 0, [("PARTIAL", F93E)],
+              has=["the knees still bend standing with " + ELINK])
+        check("F93e stance: lowered and the head took nothing", [stance(took=0.0, hips=10.8, lw=0.870)] * 2, 3, [("NEVER APPLIED", F93E)], has=["the head took nothing"])
+        check("F93e stance: no standing second", [stance(bin_="every state")] * 2, 0, [("IDLE", F93E)], has=["2 s, none standing"])
+        check("F93e stance: the rifle raised, nothing lowered", [stance("$wpn_m_assaultrifle_laser_fauto_name;", low=0, gap=0.0, took=0.0, la=0.890, lw=0.940)], 0,
+              [("OK", F93E)], lacks=["UNPARSED"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],

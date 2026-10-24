@@ -34,6 +34,7 @@
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
 #include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
 #include "native_on_foot_f92.h"   // F92b: the ADS head aim as a live toggle within a press (pure parts)
+#include "native_on_foot_f93.h"   // F93d: the game's camera watch; F93e: the stance's height taken by the hidden head (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -69,6 +70,12 @@ bool g_fpKeyLast = false;                                       // frame thread 
 uint8_t g_bodyCullKeyLast = 0;                                  // frame thread only: fix.native_on_foot_body_cull as last logged (F18, temporary)
 std::atomic<bool> g_unclipKeyOn{true};                          // fix.native_on_foot_body_unclip, as the frame thread last read it (F19, temporary)
 bool g_unclipKeyLast = false;                                   // frame thread only: as last logged (F19)
+// F93d: what the body's hooks held back while the game's camera was third-person (native_on_foot.h, nativeOnFootCameraExternal), and when the Animate
+// post-hook first took each change of camera (QPC; the frame thread compares it with the controller's read, g_nativeOnFootCamFlipQpc).
+std::atomic<uint64_t> g_f93dAnimHeld{0};                        // local-avatar Animate post-calls that wrote nothing (the pin, bend, square-up, arm IK, freeze)
+std::atomic<uint64_t> g_f93dShiftHeld{0};                       // local-AMC submit jobs with no body shift and no pose carry
+std::atomic<int> g_f93dAnimSeen{-1};                            // the camera the Animate post-hook last saw: 1 third-person, 0 first-person, -1 none yet
+std::atomic<uint64_t> g_f93dAnimEdgeQpc{0};                     // its last change
 
 
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
@@ -9146,9 +9153,12 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);
     g_bodyCalls.fetch_add(1, std::memory_order_relaxed);
     const bool local = a1 && a1 == localAmcPointer();
-    const bool carry = local && nativeOnFootActive() && f86CarryBegin(static_cast<uintptr_t>(a1));   // F86a: the records as the job left them
+    // F93d: in the game's third-person camera the records are the game's: no body shift and no pose carry
+    const bool camExternal = local && nativeOnFootCameraExternal();
+    if (camExternal) g_f93dShiftHeld.fetch_add(1, std::memory_order_relaxed);
+    const bool carry = local && !camExternal && nativeOnFootActive() && f86CarryBegin(static_cast<uintptr_t>(a1));   // F86a: the records as the job left them
     if (g_alignMode.load(std::memory_order_relaxed) == 2 && a1) {
-        if (local) bodyShiftApply(a1);
+        if (local && !camExternal) bodyShiftApply(a1);
     }
     if (carry) f86CarryEnd(static_cast<uintptr_t>(a1));   // F86a: the pose carry, after the body shift
     f85JobEnd(static_cast<uintptr_t>(a1));   // F85a: after the shift (and the carry), the records are what the renderer will read
@@ -11960,11 +11970,15 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     // view height is the game's own.
     {
         double eye[3] = {}, eyeChange = 0.0;
+        // F93d: the eye alignment (the hold, the weapon eye and view offsets, the ADS locks) is first-person: in the game's third-person camera the runtime
+        // gets zero, so the suite's camera takes the head as it is; the terms keep running and come back whole on the first first-person tick.
+        const bool camExternal = nativeOnFootCameraExternal();
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
             if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
+            if (camExternal) eye[i] = 0.0;
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
@@ -13003,6 +13017,14 @@ struct PinStats {
     uint32_t ageN = 0, fresh[2] = {}, repeat[2] = {};
     double ageSum = 0.0, ageMax = 0.0, ageSumPar[2] = {}, ageMaxPar[2] = {};
     double speedSum = 0.0, speedMax = 0.0;
+    // F93e: the stance's height, per pinned call (bin 0 standing, 1 every state): the pin's vertical demand from the rest target (gap > 0 would lower the upper body),
+    // what the hidden head took of it (its pitch, the body further back), what the hips kept, the vertical move written, the legs' extension animated and written
+    // (hip to foot over the leg's length; the knees bend as it falls), the camera and the animated neck, the camera over F_root and the aim's pitch.
+    struct F93eBin {
+        uint32_t n = 0, lowerN = 0, raiseN = 0, legsN = 0, camN = 0;
+        double gapSum = 0.0, gapMax = 0.0, takenSum = 0.0, pitchSum = 0.0, backSum = 0.0, hipsSum = 0.0, hipsMax = 0.0, raiseSum = 0.0, vSum = 0.0;
+        double legAnimSum = 0.0, legSum = 0.0, legMin = 9.0, eyeYSum = 0.0, neckYSum = 0.0, camOverFSum = 0.0, aimSum = 0.0;
+    } f93e[2];
 };
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
@@ -13069,6 +13091,7 @@ struct PinCall {
     double off[3] = {}, lean = 0.0, neckLean = 0.0, legReach = 0.0, headY = 0.0;
     bool animT = false, clampedT = false, leanOk = false;
     double reach[3] = {};   // F68g: the reach rule's correction as applied (model axes: right, up, forward; metres)
+    nofoot::f93::NeckTake f93e;   // F93e: what the hidden head took of the stance's height (zeros: nothing to take)
     double reachCandidate[3] = {};   // F79: unweighted reach proposal; nonzero infeasible proposals are rejected, not applied to the body pin.
     double reachRadiusM[2] = {};
     bool reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
@@ -13345,6 +13368,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.off[2] = pa.vUsed[0] * pa.hEye[0] + pa.vUsed[2] * pa.hEye[2];
             pc.wc = 0.0;
             pc.dEyeY = 0.0;
+        }
+        // F93e: the height the stance stands over the camera is taken by the hidden head, not the knees (native_on_foot_f93.h): where the rest target would lower the
+        // animated neck, the neck-to-eye vector pitches forward about the neck until the neck keeps its animated height (the eye level with the neck at most); only
+        // the rest lowers the hips. Before the ADS release and the weapon view offset, which move the target from here as before.
+        pc.f93e = nofoot::f93::neckTakesHeight(E, T, pc.hEye[0], pc.hEye[1], N0[1]);
+        if (pc.f93e.applied) {
+            pc.off[0] = (E[0] - T[0]) * pc.hEye[1] - (E[2] - T[2]) * pc.hEye[0];   // the vector used, as the F68e line reports it: right = (h.z, 0, -h.x)
+            pc.off[1] = E[1] - T[1];
+            pc.off[2] = (E[0] - T[0]) * pc.hEye[0] + (E[2] - T[2]) * pc.hEye[1];
         }
         // ADS leaves the camera and weapon aim untouched, but releases the body toward the authored neck pose.
         const double detachW = pc.detachW;
@@ -14090,6 +14122,39 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         st.d0Sum[1] += 100.0 * d0[2];
         st.dSum[0] += 100.0 * mv.th[0];
         st.dSum[1] += 100.0 * mv.th[2];
+        for (int b = 0; b < 2; ++b) {   // F93e
+            if (b == 0 && pc.state != 0) continue;
+            PinStats::F93eBin& e = st.f93e[b];
+            ++e.n;
+            const double gapCm = 100.0 * pc.f93e.gapM;
+            if (gapCm > 0.0) {
+                ++e.lowerN;
+                e.gapSum += gapCm;
+                e.gapMax = std::max(e.gapMax, gapCm);
+                e.takenSum += 100.0 * pc.f93e.takenM;
+                e.pitchSum += pc.f93e.pitchDeg;
+                e.backSum += 100.0 * pc.f93e.backM;
+                e.hipsSum += 100.0 * pc.f93e.hipsM;
+                e.hipsMax = std::max(e.hipsMax, 100.0 * pc.f93e.hipsM);
+            } else if (gapCm < 0.0) {
+                ++e.raiseN;
+                e.raiseSum += -gapCm;
+            }
+            e.vSum += 100.0 * mv.delta;
+            if (legsSolved) {
+                ++e.legsN;
+                e.legAnimSum += 0.5 * (lp[0].reachBefore + lp[1].reachBefore);
+                e.legSum += 0.5 * (lp[0].reachAfter + lp[1].reachAfter);
+                e.legMin = std::min(e.legMin, std::min(lp[0].reachAfter, lp[1].reachAfter));
+            }
+            e.eyeYSum += E[1];
+            e.neckYSum += N0[1];
+            if (pc.f86Ok) {
+                ++e.camN;
+                e.camOverFSum += 100.0 * pc.f86CamOverF;
+                e.aimSum += pc.f86AimPitch;
+            }
+        }
         if (legsSolved) {
             ++st.legSolves;
             for (int k = 0; k < 2; ++k) {
@@ -17238,6 +17303,14 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
     const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire), ax = pfz::g_armX.load(std::memory_order_acquire);
     const bool freeze = freezeMode != 0 && lx && x == lx, ik = ikWanted && ax && x == ax;
     if (!freeze && !ik) return r;   // only the local avatar's evaluator
+    {   // F93d: in the game's third-person camera the pose is the game's: no pin, bend, square-up, arm IK or freeze write, and nothing of this call is kept
+        const int ext = nativeOnFootCameraExternal() ? 1 : 0;
+        if (g_f93dAnimSeen.exchange(ext, std::memory_order_acq_rel) != ext) g_f93dAnimEdgeQpc.store(f30Qpc(), std::memory_order_relaxed);
+        if (ext) {
+            g_f93dAnimHeld.fetch_add(1, std::memory_order_relaxed);
+            return r;
+        }
+    }
     g_pfzLocalCalls.fetch_add(1, std::memory_order_relaxed);
     if (g_pfzBusy.exchange(true, std::memory_order_acquire)) {
         g_pfzBusySkips.fetch_add(1, std::memory_order_relaxed);
@@ -18600,6 +18673,26 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         st.neckYawDegSum / static_cast<double>(st.neckYawCalls), st.neckYawDegMax, st.neckErrorMaxCm,
                         st.neckFootErrorMaxMm, st.neckShortfallMaxCm);
     }
+    // F93e: the stance's height for the held item, standing when there were standing calls this second, else every state. The knees bend as the legs' written
+    // extension falls below the animated one; "the hips kept" is the part of the stance's height over the camera the hidden head could not take.
+    {
+        const int b = st.f93e[0].n ? 0 : 1;
+        const PinStats::F93eBin& e = st.f93e[b];
+        if (e.n) {
+            char item[64] = "none";
+            uint32_t serial = 0;
+            if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
+            const double n = static_cast<double>(e.n), ln = e.lowerN ? static_cast<double>(e.lowerN) : 1.0, rn = e.raiseN ? static_cast<double>(e.raiseN) : 1.0,
+                         gn = e.legsN ? static_cast<double>(e.legsN) : 1.0, cn = e.camN ? static_cast<double>(e.camN) : 1.0;
+            Log::get().note("native on foot stance height (F93e) 1 s: item %s; %s %u calls: the rest target lowered the neck in %u (by %.1f cm mean, max %.1f), the hidden head took "
+                            "%.1f cm (pitched %.1f deg, the body %.1f cm further back), the hips kept %.1f cm (max %.1f); raised in %u (by %.1f cm mean); vertical move written "
+                            "mean %+.1f cm; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves); camera %.3f m, animated neck %.3f m; "
+                            "camera over F_root %+.1f cm, aim pitch %+.1f deg (%u calls)",
+                            item, b == 0 ? "standing" : "every state", e.n, e.lowerN, e.gapSum / ln, e.gapMax, e.takenSum / ln, e.pitchSum / ln, e.backSum / ln,
+                            e.hipsSum / ln, e.hipsMax, e.raiseN, e.raiseSum / rn, e.vSum / n, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN,
+                            e.eyeYSum / n, e.neckYSum / n, e.camOverFSum / cn, e.aimSum / cn, e.camN);
+        }
+    }
 }
 
 void installEyeProbeOnce() {
@@ -19517,6 +19610,94 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
     }
     g_hudRing[g_hudWritten % kHudRing] = rec;
     ++g_hudWritten;
+}
+
+// ---- F93d: the game's camera gates the body changes (native_on_foot.h, nativeOnFootCameraExternal) ------------------------------------------------
+// Frame thread, every boundary. The camera controller's mode byte is read by Explorer Cam's controller hook after each game update (explorer_cam.cpp,
+// nativeCamAfterUpdate); this tick logs each change between the game's first-person camera and its third-person camera suite with what the body's hooks
+// held back, says once per stretch on foot that the reads happen (or that they do not, and why), and clears a suite state the controller stopped
+// confirming (no read for a second) or that outlived native stereo on foot.
+struct F93dState {
+    nofoot::f93::CameraWatch watch;  // the decisions (native_on_foot_f93.h)
+    bool last = false;              // the camera as last logged: true third-person
+    uint64_t sinceMs = 0, flipQpc = 0;
+    uint64_t animHeld0 = 0, shiftHeld0 = 0, headHeld0 = 0, clipHeld0 = 0;
+    bool edgePending = false;       // the Animate post-hook's timing line is owed for the change last logged
+};
+F93dState g_f93d;
+const char* f93dModeText(uint32_t packed) {
+    return (packed & 0x100u) ? ecm::modeText(packed & 0xFFu) : "never read";
+}
+void cameraGateTick(uint64_t now) noexcept {
+    F93dState& s = g_f93d;
+    nofoot::f93::WatchIn in;
+    in.active = nativeOnFootActive();
+    in.reads = g_nativeOnFootCamReads.load(std::memory_order_relaxed);
+    in.flag = g_nativeOnFootCamExternal.load(std::memory_order_relaxed);
+    in.nowMs = now;
+    const nofoot::f93::WatchOut w = s.watch.step(in);
+    if (w.clearFlag) g_nativeOnFootCamExternal.store(false, std::memory_order_relaxed);
+    if (w.ended) {
+        s.last = false;
+        s.edgePending = false;
+        Log::get().note("native on foot camera (F93d): first person (native stereo on foot ended) -- body changes on (from the next stretch on foot)");
+    }
+    if (!in.active) return;
+    const ExplorerCamNativeCameraStats ec = explorerCamNativeCameraStats();
+    if (w.watching) {
+        const uint32_t m = g_nativeOnFootCamMode.load(std::memory_order_relaxed);
+        Log::get().note("native on foot camera (F93d): watching the game's camera: the camera controller 0x%llX reads mode %u (%s) after its update; the body changes "
+                        "(the pin, the square-up, the bend, the arm IK, the head and first-person body hides, the unclip, the body shift and pose carry, the body cull, "
+                        "the avatar fade claim) and the eye alignment are first-person only",
+                        static_cast<unsigned long long>(ec.controller), m & 0xFFu, f93dModeText(m));
+    }
+    if (w.missing)
+        Log::get().note("native on foot camera (F93d): NO camera read in 5 s on foot (the controller hook is %s%s%s): the body changes stay on in every camera",
+                        ec.controllerHook == 1 ? "armed but its update has not run" : ec.controllerHook == 2 ? "stood down: " : "not installed",
+                        ec.controllerHook == 2 ? ec.why : "", ec.faults ? "; reads faulted" : "");
+    if (w.silent)   // the suite was open at the last read and the controller has gone quiet: not evidence of a third-person camera any more
+        Log::get().note("native on foot camera (F93d): the camera controller has not updated for %llu ms with the suite open at its last read: taken as first person",
+                        static_cast<unsigned long long>(w.quietMs));
+    const bool ext = w.external;
+    const uint64_t animHeld = g_f93dAnimHeld.load(std::memory_order_relaxed), shiftHeld = g_f93dShiftHeld.load(std::memory_order_relaxed);
+    if (w.changed) {
+        const uint32_t m = g_nativeOnFootCamMode.load(std::memory_order_relaxed);
+        const double heldS = s.sinceMs ? static_cast<double>(now - s.sinceMs) / 1000.0 : 0.0;
+        char held[320] = "";
+        if (!ext && s.sinceMs)
+            std::snprintf(held, sizeof(held), "; held back over %.1f s in the third-person camera: Animate post-calls %llu, submit jobs (body shift, pose carry) %llu, "
+                                              "head hides %llu, clip and mask writes %llu", heldS,
+                          static_cast<unsigned long long>(animHeld - s.animHeld0), static_cast<unsigned long long>(shiftHeld - s.shiftHeld0),
+                          static_cast<unsigned long long>(ec.headHeld - s.headHeld0), static_cast<unsigned long long>(ec.clipHeld - s.clipHeld0));
+        Log::get().note("native on foot camera (F93d): %s (mode %u, %s) -- body changes %s; controller 0x%llX, %llu reads, %llu changes seen by the hook, another "
+                        "controller answered %llu times%s",
+                        ext ? "external" : "first person", m & 0xFFu, f93dModeText(m), ext ? "off" : "on", static_cast<unsigned long long>(ec.controller),
+                        static_cast<unsigned long long>(in.reads), static_cast<unsigned long long>(g_nativeOnFootCamFlips.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(ec.switches), held);
+        s.last = ext;
+        s.sinceMs = now;
+        s.flipQpc = w.silent ? f30Qpc() : g_nativeOnFootCamFlipQpc.load(std::memory_order_relaxed);   // the frame thread's clear has no controller read behind it
+        s.edgePending = true;
+        s.animHeld0 = animHeld;
+        s.shiftHeld0 = shiftHeld;
+        s.headHeld0 = ec.headHeld;
+        s.clipHeld0 = ec.clipHeld;
+    }
+    // The Animate post-hook's side of the change: the time from the controller's read to the first local Animate call that saw it (a positive figure under
+    // a frame means the same game frame's pose; the cut and the body change land together). Owed until it is seen; 2 s without it is said too.
+    if (s.edgePending) {
+        const int seen = g_f93dAnimSeen.load(std::memory_order_acquire);
+        const uint64_t edge = g_f93dAnimEdgeQpc.load(std::memory_order_relaxed);
+        if (seen == (s.last ? 1 : 0) && edge >= s.flipQpc && s.flipQpc != 0) {
+            s.edgePending = false;
+            Log::get().note("native on foot camera (F93d): the Animate post-hook took the %s camera %.2f ms after the controller's read",
+                            s.last ? "third-person" : "first-person", static_cast<double>(f30QpcUs(edge - s.flipQpc)) / 1000.0);
+        } else if (now - s.sinceMs >= 2000) {
+            s.edgePending = false;
+            Log::get().note("native on foot camera (F93d): the Animate post-hook did not take the %s camera within 2 s (it last saw %s)",
+                            s.last ? "third-person" : "first-person", seen < 0 ? "nothing: no local Animate call" : seen ? "third-person" : "first-person");
+        }
+    }
 }
 
 // ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
@@ -26363,6 +26544,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // The body (F2): Explorer Cam's fade and head-part code runs while native stereo is on foot. Its head hooks are wanted from launch while the key is on.
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
     explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
+    cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);

@@ -110,6 +110,37 @@ inline std::atomic<uint64_t> g_nativeOnFootGates[size_t(NativeOnFootGate::Count)
 // The native stereo flag: true from a substitution until the next forwarded natural HMD mode (3 or 4).
 inline bool nativeOnFootActive() { return g_nativeOnFootActive.load(std::memory_order_relaxed); }
 
+// F93d: the game's own camera on foot. The camera suite's controller (VesselCameraMountControl, an activity that runs every update while the commander
+// is on foot) keeps the suite's mode in its byte +0x3E0: 0 = closed, the game's first-person camera; 1, 2 = the suite on a preset ("Commander control",
+// "Commander profile"), 3..6 = the free camera and its locks (explorer_cam_core.h, modeText; analysis\decomp\explorer_cam\decomp_2DF14C0.txt). Opening
+// the suite starts the game's VanityCamera activity and removes HumanoidCamera and PlacedCamera; closing it does the reverse (the F93d flight log,
+// 10:31:17.355 and 10:31:43.539). Explorer Cam's controller hook (explorer_cam.cpp, controllerHooked) reads the byte after the game's own update, on
+// the game's thread, while native stereo is on foot, and publishes it here; every EDVR change to the commander's body (the pin, the square-up, the bend,
+// the arm IK, the head and first-person body hides, the unclip, the body shift and pose carry, the body cull) and the eye alignment's offsets are
+// first-person behaviour and stand down while the byte is not 0, so the game's third-person camera shows the game's own body.
+inline std::atomic<uint32_t> g_nativeOnFootCamMode{0};        // the byte as last read (bits 0..7), 0x100 once a read has succeeded
+inline std::atomic<bool> g_nativeOnFootCamExternal{false};   // the byte was not 0 at the last read
+inline std::atomic<uint64_t> g_nativeOnFootCamReads{0};      // controller updates read (the frame thread's staleness check)
+inline std::atomic<uint64_t> g_nativeOnFootCamFlips{0};      // changes of the external flag the hook saw
+inline std::atomic<uint64_t> g_nativeOnFootCamFlipQpc{0};    // QPC of the last change (the caller's clock: QueryPerformanceCounter)
+// True while native stereo is on foot and the game's camera is not its first-person camera (the camera suite, its presets or its free camera).
+inline bool nativeOnFootCameraExternal() {
+    return g_nativeOnFootCamExternal.load(std::memory_order_relaxed) && nativeOnFootActive();
+}
+// The controller hook's post-call publication (explorer_cam.cpp), on the game's thread: mode is the byte after the update, qpc the read's time. Header-only so
+// the rigs that compile explorer_cam.cpp without native_on_foot.cpp link. True when the flag changed.
+inline bool nativeOnFootCameraPublish(uint8_t mode, uint64_t qpc) {
+    const bool external = mode != 0;
+    g_nativeOnFootCamMode.store(0x100u | mode, std::memory_order_relaxed);
+    const bool flipped = g_nativeOnFootCamExternal.exchange(external, std::memory_order_acq_rel) != external;
+    if (flipped) {
+        g_nativeOnFootCamFlipQpc.store(qpc, std::memory_order_relaxed);
+        g_nativeOnFootCamFlips.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_nativeOnFootCamReads.fetch_add(1, std::memory_order_relaxed);
+    return flipped;
+}
+
 // Count one engagement of a gate, only while the flag is set. A relaxed atomic add, safe from any thread.
 inline void nativeOnFootCountGate(NativeOnFootGate gate) {
     if (nativeOnFootActive()) g_nativeOnFootGates[size_t(gate)].fetch_add(1, std::memory_order_relaxed);
@@ -273,7 +304,8 @@ inline void nativeOnFootHudProbe(uint64_t vs) {
 // stencil ref 21) and binds a clone of the game's rasterizer state with only CullMode changed. End puts the game's own state back.
 inline std::atomic<uint8_t> g_nativeOnFootBodyCull{0};
 inline bool nativeOnFootBodyCullWanted() {
-    return g_nativeOnFootBodyCull.load(std::memory_order_relaxed) != 0 && nativeOnFootActive();
+    // F93d: first-person body behaviour: the game's third-person camera draws the torso with the game's own state
+    return g_nativeOnFootBodyCull.load(std::memory_order_relaxed) != 0 && nativeOnFootActive() && !nativeOnFootCameraExternal();
 }
 // Draw thread, owner context only. True when the culled clone is bound: the caller owes exactly one End after the draw.
 bool nativeOnFootBodyCullBegin(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances);   // native_on_foot.cpp
