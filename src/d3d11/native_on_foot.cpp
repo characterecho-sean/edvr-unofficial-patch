@@ -32,6 +32,7 @@
 #include "load_sampler.h"   // F24: the load sampler's tick (read only, temporary)
 #include "native_on_foot_core.h"
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
+#include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -6384,6 +6385,8 @@ void lookPassiveTick(uint64_t nowMs) {
 // clean (the in-flight account, the residual's base, the sight lock's guard); the one hold-off left besides the trip, a look value that could not be
 // restored, lasts until the ADS flag falls.
 enum AdsState : int { kAdsIdle = 0, kAdsActive = 1, kAdsReleasing = 2 };
+static_assert(kAdsIdle == nofoot::f91::kStateIdle && kAdsActive == nofoot::f91::kStateEngaged && kAdsReleasing == nofoot::f91::kStateReleasing,
+              "F91: adsAimTick's edges come from nofoot::f91::adsStateAfter, which the rig runs");
 const char* const kAdsStateNames[3] = {"idle", "engaged", "releasing"};
 int g_adsState = kAdsIdle;            // frame thread only, as is everything in this block
 nofoot::AdsRamp g_adsRamp;
@@ -6462,6 +6465,32 @@ uint32_t g_adsCentrePresses = 0;
 uint64_t g_adsLineMs = 0;
 uint32_t g_adsSteps = 0, g_adsSkips = 0, g_adsWritesSeen = 0, g_adsProcSeen = 0, g_adsRefSeen = 0;
 double g_adsSumHead[2] = {}, g_adsSumIn[2] = {}, g_adsSumQueued[2] = {}, g_adsSumApplied[2] = {}, g_adsSumUser[2] = {}, g_adsSumCancel[2] = {};
+// F91 B: the ADS vibration instrument's per-frame fields (frame thread; nofoot::f91). adsAimTick writes the head aim's figures (its map step), adsAimStep the residual's
+// stamps, adsSightTick the sight lock's error and the rifle's sight line in the right eye's view; the F89 trace (f87EyeLines) adds the view's step, prints them on every traced
+// frame and fits each 0.5 s of a press. tick counts adsAimTick's calls: a figure is this frame's when its tick is the current one, else it is carried and its stamp shows its age.
+struct F91View {
+    uint32_t tick = 0;
+    uint32_t mapTick = ~0u;                 // adsAimTick's map step ran in this tick
+    bool headOk = false;                    // ... with a new head sample (the step is real)
+    double head[2] = {}, applied[2] = {}, asked[2] = {}, cancelNow[2] = {};   // degrees, the seat convention
+    uint32_t rTick = ~0u, rBase = 0, rowsFrame = 0;   // the residual measured in this tick; the bases taken; the right eye's rows it was measured on
+    bool rowsKnown = false;
+    uint32_t sightTick = ~0u;
+    double along = 0.0, perp = 0.0;         // the sight lock's error (the ADS eye point line's figures), mm
+    uint32_t rifleTick = ~0u;
+    double rifle[2] = {};                   // the rifle's sight line in the right eye's view (rows fresh for the lock), degrees
+    bool viewAxesHave = false, viewStepOk = false;
+    uint32_t viewRowsFrame = ~0u;
+    double viewAx[3][3] = {}, viewStep = 0.0;
+    uint32_t rifleLastTick = ~0u;
+    double rifleLast[2] = {};
+};
+F91View g_f91;
+nofoot::f91::CancelHistory g_f91Cancel;   // the cancel total at every eye alignment serial published (f89AlignPublish)
+nofoot::f91::FitWindow g_f91Fit;          // the press's fit windows (f87EyeLines)
+// F91 C: the ADS item gate's edges and the F70b 1 s line's count of refused ticks (frame thread).
+nofoot::f91::GateEdges g_f91Gate;
+uint32_t g_f91GateRefusedTicks = 0;
 
 void adsQueue(std::atomic<float>& q, double add, double cap) noexcept {
     float cur = q.load(std::memory_order_relaxed);
@@ -6527,6 +6556,7 @@ const char* full3PWhy() noexcept {
 // game's applied deltas and their cancel, the injection of the headset's turn, the position lock. The guard (adsAimStep) reads the right eye's rows and
 // runs in alignTick, after the sight lock.
 void adsAimTick(uint64_t now, bool session) noexcept {
+    ++g_f91.tick;   // F91 B: the frame thread's tick (this frame's figures carry it)
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
     const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
     const bool onFoot = nativeOnFootActive();
@@ -6575,7 +6605,32 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     const bool actionVeto = actionEligible && actionFresh ? nofoot::adsActionRejectStep(g_adsActionReject, action.value, now, journalKnown, journalValue, statusSamples)
                                                          : actionEligible && g_adsActionReject.latched;
     const nofoot::AdsInputChoice adsChoice = nofoot::adsInputChoice(actionEligible, journalKnown, journalValue, actionFresh, action.value, actionAgeUs, actionVeto);
-    const bool ads = adsChoice.ads;
+    const bool asked = adsChoice.ads;
+    // F91 C: the ADS item gate. Our ADS features engage only for a weapon: F83's native primary (as f66ArmedStep reads it) or a held item whose Status.json name starts
+    // "$wpn_". A tool or the fists with HumanoidZoom pressed is refused here, so every consumer below (the head aim, the sight lock, the centre, the left eye's close, the body
+    // detach, the pose freeze's release, the F89 trace) sees no ADS. A weapon switched to a tool mid-press releases through the normal unwind (ads falls).
+    char heldName[64] = {};
+    const JournalHeldItem heldKind = onFoot ? journalHeldItem() : kHeldUnknown;
+    if (heldKind != kHeldUnknown) journalHeldItemName(heldName, sizeof(heldName));
+    F83SelectionRead f83{};
+    const bool nativePrimary = onFoot && f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
+    const nofoot::f91::ItemGate itemGate = nofoot::f91::adsItemGate(nativePrimary, heldKind, heldName);
+    const nofoot::f91::GateEdges::Out gated = g_f91Gate.step(asked, itemGate.allow);
+    const bool ads = gated.ads;
+    if (actionEligible && asked && !itemGate.allow) ++g_f91GateRefusedTicks;
+    if (onFoot && gated.event != nofoot::f91::kGateNone) {
+        const char* srcName = adsChoice.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : adsChoice.source == nofoot::kAdsInputJournal ? "journal" : "none";
+        const char* journalText = journalKnown ? (journalValue ? "on" : "off") : "unknown";
+        if (gated.event == nofoot::f91::kGateRefused)
+            Log::get().note("native on foot ADS item gate (F91): refused: the held item \"%s\" is not a weapon (%s); request %s (source %s), journal %s", heldName, itemGate.reason,
+                            action.value ? "on" : "off", srcName, journalText);
+        else if (gated.event == nofoot::f91::kGateStopped)
+            Log::get().note("native on foot ADS item gate (F91): stopped: the held item changed to \"%s\" (not a weapon: %s); our ADS releases through its normal unwind (state %s); "
+                            "request %s (source %s), journal %s", heldName, itemGate.reason, kAdsStateNames[g_adsState], action.value ? "on" : "off", srcName, journalText);
+        else
+            Log::get().note("native on foot ADS item gate (F91): allowed: \"%s\" (%s), the held press engages; request %s (source %s), journal %s", heldName, itemGate.reason,
+                            action.value ? "on" : "off", srcName, journalText);
+    }
     // F73: body detachment follows the resolved ADS state independently of whether ADS head-aim is enabled or passes its own guard.
     // Leaving the native full-3P lifecycle clears the published state immediately, so it cannot persist into menus or another mode.
     static nofoot::AdsRamp bodyDetachRamp;
@@ -6592,7 +6647,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsActionSourceLast = adsChoice.source;
         Log::get().note("native on foot ADS input (F70b): source %s, value %s; action sample %s, seq %u, age %llu us; journal %s%s; action hook reads %u, invalid %u",
                         adsChoice.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : adsChoice.source == nofoot::kAdsInputJournal ? "journal" : "none",
-                        ads ? "on" : "off", actionFresh ? "fresh" : action.valid ? "stale" : "absent/invalid", action.seq,
+                        asked ? "on" : "off", actionFresh ? "fresh" : action.valid ? "stale" : "absent/invalid", action.seq,
                         static_cast<unsigned long long>(actionAgeUs), journalKnown ? (journalValue ? "on" : "off") : "unknown",
                         adsChoice.journalVeto ? " (held request rejected; latched until logical release)" : "",
                         g_adsActionReads.load(std::memory_order_relaxed), g_adsActionInvalid.load(std::memory_order_relaxed));
@@ -6608,11 +6663,14 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     static uint64_t actionLineMs = 0;
     if (actionEligible && (!actionLineMs || now - actionLineMs >= 1000)) {
         actionLineMs = now;
-        Log::get().note("native on foot ADS input (F70b): source %s; request %s (%s, seq %u, age %llu us); journal %s; Status.json samples %u; held-request veto %s; update-hook action reads %u invalid %u",
+        Log::get().note("native on foot ADS input (F70b): source %s; request %s (%s, seq %u, age %llu us); journal %s; Status.json samples %u; held-request veto %s; update-hook action reads %u invalid %u; "
+                        "item gate refused %u ticks (F91: held \"%s\" %s, %s)",
                         adsChoice.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : adsChoice.source == nofoot::kAdsInputJournal ? "journal" : "none",
                         action.value ? "on" : "off", actionFresh ? "fresh" : action.valid ? "stale" : "absent/invalid", action.seq, static_cast<unsigned long long>(actionAgeUs),
                         journalKnown ? (journalValue ? "on" : "off") : "unknown", statusSamples, actionVeto ? "latched" : "clear",
-                        g_adsActionReads.load(std::memory_order_relaxed), g_adsActionInvalid.load(std::memory_order_relaxed));
+                        g_adsActionReads.load(std::memory_order_relaxed), g_adsActionInvalid.load(std::memory_order_relaxed), static_cast<unsigned>(g_f91GateRefusedTicks), heldName,
+                        itemGate.allow ? "allowed" : "refused", itemGate.reason);
+        g_f91GateRefusedTicks = 0;
     }
     const char* full3PNot = full3P ? nullptr : full3PWhy();
     const char* off = !key ? "fix.native_on_foot_ads_head_aim is off"
@@ -6650,8 +6708,9 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsHavePrev = false;
         return;
     }
-    // The state: engage on ADS, release when it ends, re-engage from the release. Every engage starts clean.
-    if (g_adsState == kAdsIdle && ads) {
+    // The state: engage on ADS, release when it ends, re-engage from the release (nofoot::f91::adsStateAfter, the rig's). Every engage starts clean.
+    const int adsNext = nofoot::f91::adsStateAfter(g_adsState, ads);
+    if (g_adsState == kAdsIdle && adsNext == kAdsActive) {
         g_adsState = kAdsActive;
         g_adsEyeOnset = AdsEyeOnset{};
         g_adsHavePrev = false;
@@ -6684,7 +6743,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                         "%.2f deg (from a release still unwinding), signs yaw %d pitch %d, gain yaw %.4f pitch %.4f (0 = none measured yet: 1.0 is used)",
                         g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, ySign, pSign,
                         static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed)), static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed)));
-    } else if (g_adsState == kAdsActive && !ads) {
+    } else if (g_adsState == kAdsActive && adsNext == kAdsReleasing) {
         g_adsState = kAdsReleasing;
         g_adsRelMs = now;
         if (g_adsCentre.pending || g_adsMap.centre.active) {   // F69i: ADS ended before the snap was done: stop it, say so (the cone is the usual cause)
@@ -6710,7 +6769,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                         "lock (%.1f, %.1f, %.1f cm) and the body go with the weight (%.2f)",
                         g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, g_adsMap.yawInFlight() / nofoot::kAdsDeg,
                         g_adsMap.pitchInFlight() / nofoot::kAdsDeg, 100.0 * g_adsLock[0], 100.0 * g_adsLock[1], 100.0 * g_adsLock[2], g_adsW);
-    } else if (g_adsState == kAdsReleasing && ads) {
+    } else if (g_adsState == kAdsReleasing && adsNext == kAdsActive) {
         g_adsState = kAdsActive;
         g_adsPressMs = now;
         g_adsEyeOnset = AdsEyeOnset{};
@@ -6778,6 +6837,19 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     const nofoot::AdsAimMap::Out mo = g_adsMap.step(g_adsState == kAdsActive, g_adsState == kAdsReleasing, dt, g_adsW, headStep, dYaw, dPitch, aY, aP,
                                                     ySign != 0, pSign != 0);
     adsPublishPitch();
+    {   // F91 B: this tick's head aim figures for the trace (degrees, the seat convention), stamped with the tick and the head sample (g_adsHeadSeq)
+        const double kD = 1.0 / nofoot::kAdsDeg;
+        g_f91.mapTick = g_f91.tick;
+        g_f91.headOk = headStep;
+        g_f91.head[0] = dYaw * kD;
+        g_f91.head[1] = dPitch * kD;
+        g_f91.applied[0] = aY * kD;
+        g_f91.applied[1] = aP * kD;
+        g_f91.asked[0] = mo.injYaw * kD;
+        g_f91.asked[1] = mo.injPitch * kD;
+        g_f91.cancelNow[0] = mo.cancelYaw * kD;
+        g_f91.cancelNow[1] = mo.cancelPitch * kD;
+    }
     g_adsSumApplied[0] += aY;
     g_adsSumApplied[1] += aP;
     g_adsSumUser[0] += uY;
@@ -9228,6 +9300,14 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             if (eyeOk[1]) {
                 ++w.opticEyeN;
                 g_adsOpticGood.fetch_add(1, std::memory_order_relaxed);
+                {   // F91 B: the rifle's sight line (the FP root's forward, the lock's sight direction) in the right eye's view, for the trace
+                    double vr[3], vu[3], vf[3], yawDeg = 0.0, pitchDeg = 0.0;
+                    if (nofoot::rotAxesFromClip(eyeRows[1], vr, vu, vf) && nofoot::f91::rifleInView(fUnit, vr, vu, vf, &yawDeg, &pitchDeg)) {
+                        g_f91.rifleTick = g_f91.tick;
+                        g_f91.rifle[0] = yawDeg;
+                        g_f91.rifle[1] = pitchDeg;
+                    }
+                }
                 const double rightOrigin[3] = {eyeO[1][0], eyeO[1][1], eyeO[1][2]};
                 for (int q = 0; q < 3; ++q) {
                     opticRootNdcHave[q] = nofoot::sightPointNdc(eyeRows[1], rightOrigin, p14w, f, opticDistances[q], opticRootNdc[q]);
@@ -9351,6 +9431,9 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         w.alongErrAbsMax = std::max(w.alongErrAbsMax, std::fabs(E.alongFull));
         w.perpSum += E.perpNorm;
         if (E.perpNorm > w.perpMax) w.perpMax = E.perpNorm;
+        g_f91.sightTick = g_f91.tick;   // F91 B: this frame's figures behind the ADS eye point line, for the trace (mm)
+        g_f91.along = 1000.0 * E.alongFull;
+        g_f91.perp = 1000.0 * E.perpNorm;
         w.beforeSum += std::sqrt(before[0] * before[0] + before[1] * before[1] + before[2] * before[2]);
         w.wSum += g_adsW;
         for (size_t i = 0; i < 3; ++i) w.relSum[i] += rel[i];
@@ -9521,6 +9604,13 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
     if (axesOk) {
         const nofoot::AdsResidual::Result r = g_adsResid.step(now, true, vr, vu, vf, g_adsHeadAxOk, g_adsHeadAx[0], g_adsHeadAx[1], g_adsHeadAx[2],
                                                             ySign != 0, pSign != 0);
+        // F91 B: the residual's stamps for the trace (a new base moves r by a constant: the fit takes the offset out per base)
+        if (r == nofoot::AdsResidual::kBase || r == nofoot::AdsResidual::kRebased) ++g_f91.rBase;
+        if (r == nofoot::AdsResidual::kMeasured) {
+            g_f91.rTick = g_f91.tick;
+            g_f91.rowsFrame = rf;
+            g_f91.rowsKnown = true;
+        }
         if (r == nofoot::AdsResidual::kBase) ++aw.bases;
         else if (r == nofoot::AdsResidual::kRebased) ++aw.rebases;
         else if (r == nofoot::AdsResidual::kTrip) {
@@ -10629,6 +10719,8 @@ nofoot::f89::HoldAlignSecond g_f89AlignSec;
 void f89AlignPublish(const float f[3]) noexcept {
     const uint32_t serial = ++g_align.serial;
     g_f89Hist.record(serial, static_cast<double>(f[1]));
+    // F91 B: the cancel total (the seated yaw and pitch, published this tick ahead of the alignment) under the same serial: the pose's reported serial names the cancel it carried
+    g_f91Cancel.record(serial, g_f91.tick, g_adsMap.yawSeat / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg);
     nativeFrameSetEyeAlign(f, serial);
 }
 nofoot::f87::HeightHold g_f87Hold;
@@ -10717,8 +10809,10 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
 nofoot::f87::EyeRootSecond g_f87EyeRoot;
 double g_f87CamN = 0.0, g_f87CamMeanP = 0.0, g_f87CamM2P = 0.0, g_f87CamMeanY = 0.0, g_f87CamM2Y = 0.0;
 uint64_t g_f87EyeLineMs = 0;
-// F89: the ADS transition trace (nofoot::f89::AdsTrace): one line a frame for 1.5 s after each press and each release, at most 4 events a minute. The eye is the right eye's
-// (eye 1's scene rows) less F_root in the character's axes, as the line above; the step is its motion since the last new rows, in the same frame.
+// F89: the ADS transition trace (nofoot::f89::AdsTrace): one line a frame for 4 s after each press (F91; 1.5 s before) and 1.5 s after each release, at most 4 events a
+// minute. The eye is the right eye's (eye 1's scene rows) less F_root in the character's axes, as the line above; the step is its motion since the last new rows, in the same
+// frame. F91 B: every traced line carries the vibration instrument's fields ("; view (F91)": nofoot::f91::formatView) and each 0.5 s of a press is fitted (a "press fit (F91)"
+// line: nofoot::f91::fitWindow).
 nofoot::f89::AdsTrace g_f89Trace;
 nofoot::f89::EyeStep g_f89EyeStep;
 uint32_t g_f89EyeRowFrame = ~0u;
@@ -10755,18 +10849,118 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
         }
         if (tf.started)
             Log::get().note("ads transition (F89) %s: tracing the next %.1f s, a line a frame (event %d of at most %d a minute; %u earlier events were not traced)",
-                            tf.press ? "press" : "release", nofoot::f89::kTraceWindowS, g_f89Trace.count, nofoot::f89::kTraceMaxPerMinute, static_cast<unsigned>(g_f89Trace.suppressed));
+                            tf.press ? "press" : "release", nofoot::f89::traceWindowS(tf.press), g_f89Trace.count, nofoot::f89::kTraceMaxPerMinute,
+                            static_cast<unsigned>(g_f89Trace.suppressed));
         else if (tf.suppressed && now - g_f89SuppressLogMs >= 5000) {
             g_f89SuppressLogMs = now;
             Log::get().note("ads transition (F89): not traced, %d events were already traced in the last minute (%u not traced so far)", nofoot::f89::kTraceMaxPerMinute,
                             static_cast<unsigned>(g_f89Trace.suppressed));
         }
+        // F91 B: the view's step, every frame on foot (the angle between consecutive new right-eye rows; a gap in the rows restarts it)
+        g_f91.viewStepOk = false;
+        if (eyeOk[1] && fr[1] != g_f91.viewRowsFrame) {
+            double ax[3][3];
+            if (nofoot::rotAxesFromClip(rows[1], ax[0], ax[1], ax[2])) {
+                if (g_f91.viewAxesHave && fr[1] == g_f91.viewRowsFrame + 1u) {
+                    g_f91.viewStep = nofoot::f91::viewStepDeg(g_f91.viewAx[0], g_f91.viewAx[1], g_f91.viewAx[2], ax[0], ax[1], ax[2]);
+                    g_f91.viewStepOk = true;
+                }
+                std::memcpy(g_f91.viewAx, ax, sizeof(ax));
+                g_f91.viewAxesHave = true;
+            } else {
+                g_f91.viewAxesHave = false;
+            }
+            g_f91.viewRowsFrame = fr[1];
+        }
+        // F91 B: this frame's fields. A figure from an earlier tick is carried (its stamp shows its age); the fit takes only this tick's.
+        const uint32_t f91Tick = g_f91.tick;
+        const bool mapNow = g_f91.mapTick == f91Tick;
+        const bool rNow = g_adsState == kAdsActive && g_adsResid.have && g_f91.rTick == f91Tick;
+        const bool sightNow = g_f91.sightTick == f91Tick;
+        const bool rifleNow = g_f91.rifleTick == f91Tick;
+        const bool rifleStepOk = rifleNow && g_f91.rifleLastTick + 1u == f91Tick;
+        const double rifleStep[2] = {rifleStepOk ? nofoot::f91::wrapDeg(g_f91.rifle[0] - g_f91.rifleLast[0]) : 0.0,
+                                     rifleStepOk ? nofoot::f91::wrapDeg(g_f91.rifle[1] - g_f91.rifleLast[1]) : 0.0};
+        if (rifleNow) {
+            g_f91.rifleLastTick = f91Tick;
+            g_f91.rifleLast[0] = g_f91.rifle[0];
+            g_f91.rifleLast[1] = g_f91.rifle[1];
+        }
+        const double cancelTotal[2] = {g_adsMap.yawSeat / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg};
+        const nofoot::f91::CancelHistory::Found f91Pose = g_f91Cancel.find(haveFrame ? np.eyeAlignApplied : 0u, f91Tick);
         if (tf.trace) {
+            nofoot::f91::ViewFields vf;
+            vf.rShown = g_adsState == kAdsActive && g_adsResid.have;
+            vf.r[0] = g_adsResid.res[0];
+            vf.r[1] = g_adsResid.res[1];
+            vf.rowsKnown = g_f91.rowsKnown;
+            vf.rowsFrame = g_f91.rowsFrame;
+            vf.headSeq = g_adsHeadSeq;
+            for (int i = 0; i < 2; ++i) {
+                vf.applied[i] = g_f91.applied[i];
+                vf.head[i] = g_f91.head[i];
+                vf.cancelTotal[i] = cancelTotal[i];
+                vf.asked[i] = g_f91.asked[i];
+                vf.cancelNow[i] = g_f91.cancelNow[i];
+                vf.rifle[i] = g_f91.rifle[i];
+                vf.rifleStep[i] = rifleStep[i];
+            }
+            vf.viewOk = g_f91.viewStepOk;
+            vf.viewStep = g_f91.viewStep;
+            vf.sightOk = sightNow;
+            vf.along = g_f91.along;
+            vf.perp = g_f91.perp;
+            vf.poseOk = f91Pose.ok;
+            vf.cancelPose[0] = f91Pose.yaw;
+            vf.cancelPose[1] = f91Pose.pitch;
+            vf.poseAge = f91Pose.age;
+            vf.serialLag = f91Pose.serialLag;
+            vf.rifleOk = rifleNow;
+            vf.rifleStepOk = rifleStepOk;
+            char viewText[640];
+            nofoot::f91::formatView(viewText, sizeof(viewText), vf);
             Log::get().note("ads transition (F89) %s frame %u: t %+.3f s, journal ADS %d, ads state %s, lock weight %.2f, offset w %.2f, eye - F_root right %+.1f up %+.1f "
-                            "forward %+.1f cm, eye step %.2f cm%s",
+                            "forward %+.1f cm, eye step %.2f cm%s%s",
                             tf.press ? "press" : "release", static_cast<unsigned>(cur), tf.t, ads ? 1 : 0, kAdsStateNames[g_adsState], g_adsW, offsetW,
                             eyeUsed ? g_f87EyeRoot.last[0] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[1] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[2] * 100.0 : 0.0, stepCm,
-                            !eyeUsed ? " (no eye sample this frame)" : !newRows ? " (the eye rows are the last frame's)" : "");
+                            !eyeUsed ? " (no eye sample this frame)" : !newRows ? " (the eye rows are the last frame's)" : "", viewText);
+        }
+        // F91 B: the fit, over each 0.5 s of a press's trace. A window cut short by the trace's end is fitted when it holds kFitMinFrames frames.
+        const bool fitFrame = tf.trace && tf.press;
+        const auto fitEmit = [&]() {
+            const nofoot::f91::FitResult R = nofoot::f91::fitWindow(g_f91Fit);
+            char fitText[1400];
+            nofoot::f91::formatFit(fitText, sizeof(fitText), R);
+            Log::get().note("ads transition (F89) press fit (F91) %s", fitText);
+            nofoot::f91::fitCarry(g_f91Fit, R);
+        };
+        if (g_f91Fit.n && (!fitFrame || tf.started)) {
+            if (g_f91Fit.n >= nofoot::f91::kFitMinFrames) fitEmit();
+            else g_f91Fit.clear();
+        }
+        if (tf.started && tf.press) g_f91Fit.beginPress();
+        if (fitFrame) {
+            nofoot::f91::FitFrame ff;
+            ff.dt = dt;
+            ff.t = tf.t;
+            ff.headOk = mapNow && g_f91.headOk;
+            for (int i = 0; i < 2; ++i) {
+                ff.head[i] = ff.headOk ? g_f91.head[i] : 0.0;
+                ff.applied[i] = mapNow ? g_f91.applied[i] : 0.0;
+                ff.r[i] = g_adsResid.res[i];
+                ff.missing[i] = cancelTotal[i] - (i == 0 ? f91Pose.yaw : f91Pose.pitch);
+                ff.rifle[i] = g_f91.rifle[i];
+            }
+            ff.rOk = rNow;
+            ff.rBase = g_f91.rBase;
+            ff.missingOk = f91Pose.ok;
+            ff.viewOk = g_f91.viewStepOk;
+            ff.viewStep = g_f91.viewStep;
+            ff.sightOk = sightNow;
+            ff.along = g_f91.along;
+            ff.perp = g_f91.perp;
+            ff.rifleOk = rifleNow;
+            if (g_f91Fit.add(ff)) fitEmit();
         }
     }
     // the camera path: eye 0's pitch in the scene against the pitch the runtime handed the game (both over the character's up), and eye 0's height against the job camera's
