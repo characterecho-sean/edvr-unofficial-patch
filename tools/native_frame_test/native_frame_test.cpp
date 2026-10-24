@@ -18,7 +18,8 @@
 #include "f91bc_checks.h"   // F91 B and C: the ADS vibration instrument's fields and fit, the ADS item gate
 #include "f92_checks.h"     // F92b: the ADS head aim's cancel published ahead, and the head aim as a live toggle within a press
 #include "f93_checks.h"     // F93b: the ADS sight lock's steady input, the eye chain
-#include "f93de_checks.h"   // F93d: the game's camera published and watched; F93e: the stance's height taken by the hidden head
+#include "f93de_checks.h"   // F93d: the game's camera published and watched
+#include "f94_checks.h"     // F94a: the neck as the view's reference, the body at its animated height
 #include "f94b_checks.h"    // F94b: the interaction label moved by its own anchor; F93c's rule measured beside it
 
 #include <array>
@@ -7194,8 +7195,10 @@ int wmain(int argc, wchar_t** argv) {
     f92test::run92(check);
     // F93b: the ADS sight lock's input from the alignment the measured eye was drawn with (no two-frame loop), the eye chain's 1 s sums.
     f93test::run93(check);
-    // F93d: the game's camera (the suite's mode byte) gates the body changes; F93e: the stance's height goes to the hidden head, not the knees.
+    // F93d: the game's camera (the suite's mode byte) gates the body changes.
     f93detest::run93de(check);
+    // F94a: the view's height from the animated neck (the key, the filter, F88's weight, the loop on a plant at 0-3 frames of delay), the body at its animated height.
+    f94test::run94(check);
     // F94b: the label's row patch from its own anchor (the anchor shown at the dot's place), F93c's rule against it in a lagged turn and at a tie of two dots.
     f94btest::run94b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);

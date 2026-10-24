@@ -35,7 +35,8 @@
 #include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
 #include "native_on_foot_f92.h"   // F92b: the ADS head aim as a live toggle within a press (pure parts)
 #include "native_on_foot_f93.h"   // F93b: the ADS sight lock's input from the alignment the measured eye was rendered with, the eye chain instrument (pure parts)
-#include "native_on_foot_f93de.h"   // F93d: the game's camera watch; F93e: the stance's height taken by the hidden head (pure parts)
+#include "native_on_foot_f93de.h"   // F93d: the game's camera watch (pure parts)
+#include "native_on_foot_f94.h"   // F94a: the neck as the source of truth for the view's height; the body at its animated height (pure parts)
 #include "native_on_foot_f94b.h"   // F94b: the interaction label moved by its own anchor; F93c's rule kept as a measure (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -123,6 +124,8 @@ std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOf
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
+std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
+double g_f94EyeHeightLast = -1.0;                             // the value last logged (frame thread)
 // F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_right_cm / _up_cm / _forward_cm and _body (follow | stay).
 // F90: the built-in values are the pilot's from the F89 flight (forward 9.0, up 7.5, right 0.0 cm, follow).
 std::atomic<float> g_f88RightCm{static_cast<float>(nofoot::f88::kRightDefaultCm)}, g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)},
@@ -598,10 +601,7 @@ void retiredKeysNote(const Config& cfg, bool first) {
         Log::get().note("native on foot: fix.native_on_foot_body_raise_cm is retired (F66): ignored");
     if (std::fabs(cfg.getFloat("fix.native_on_foot_fp_shoulder_drop_cm", 0.0f)) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_fp_shoulder_drop_cm is retired (F66): ignored");
-    // F68f: the eye height slider (F64). With the body pinned to the camera it lifted the whole body off the ground; the view height is the game's own.
-    if (std::fabs(cfg.getFloat("fix.native_on_foot_eye_height_cm", 4.0f) - 4.0f) > 1e-6f)
-        Log::get().note("native on foot: fix.native_on_foot_eye_height_cm is retired (F68): ignored (the body pin alone decides where the body sits "
-                        "under the view; the view height is the game's own)");
+    // F94a: fix.native_on_foot_eye_height_cm (retired in F68f) is a live key again, with a new meaning: the eyes' height over the commander's neck (readKey).
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -778,6 +778,19 @@ void readKey() {
                                          "quicker movement (a nod, a duck, a bob) is followed; the body never follows your posture");
         g_f87SettleLast = sec;
         g_f87SettleS.store(static_cast<float>(sec), std::memory_order_relaxed);
+    }
+    // F94a (live, the Native on foot page's "Eye height"): how far the eyes sit above the commander's animated neck with the head level, cm (0..30, default the
+    // commander's own 15.5). The body stands at its animated height with every item; unarmed the view sits this far over its neck; with a weapon or tool drawn the
+    // weapon eye offset places the eye instead (F88's weight blends the two). F68f retired the key's old meaning (a raise over the game's camera).
+    {
+        namespace f94 = nofoot::f94;
+        const double cm = f94::eyeHeightClampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_eye_height_cm", static_cast<float>(f94::kEyeHeightDefaultCm))));
+        if (first || cm != g_f94EyeHeightLast)
+            Log::get().note("native on foot eye height (F94a): fix.native_on_foot_eye_height_cm = %.1f cm -- your eyes sit this far above the commander's neck with your head "
+                            "level (the commander's own is %.1f); the body stands at its animated height with every item; with a weapon or tool drawn the weapon eye "
+                            "offset places your eye instead (range %.0f..%.0f)", cm, f94::kEyeHeightDefaultCm, f94::kEyeHeightMinCm, f94::kEyeHeightMaxCm);
+        g_f94EyeHeightLast = cm;
+        g_f94EyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
     // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward / up / right" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
     // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn (F89: in ADS too), 0 unarmed, ramped over 0.25 s. 0, 0, 0 and follow leave the view as F87's.
@@ -8370,6 +8383,8 @@ struct PinIn {
     uint32_t localPoseGeneration = 0;
     uint64_t localPoseFrame = 0, localPoseQpc = 0;
     float localHeadY = 0.0f;   // F86g: the headset's height in natural LOCAL (m), with the pitch's validity
+    float f94SeatedY = 0.0f;   // F94a: the neck reference's seated y the camera carried (taken out of cam), and where it came from (nofoot::f94::Source)
+    uint8_t f94Source = nofoot::f94::kSrcLegacy;
 };
 std::atomic<uint32_t> g_pinInSeq{0};
 PinIn g_pinIn;
@@ -8382,7 +8397,8 @@ OpticHeldItemPub g_opticHeldItem;
 bool opticItemRead(uint32_t* serial, char name[64]) noexcept;
 std::atomic<uint8_t> g_supportCupMode{nofoot::kSupportNone};
 std::atomic<bool> g_gameAuthoredLeftArm{false};   // Energy Link and Profile Analyser: preserve the game's relaxed left-arm pose
-void pinInPublish(const float cam[3], const float camRaw[3], const float weaponViewWorld[3], const float m3p[16], uint64_t nowMs) noexcept {
+void pinInPublish(const float cam[3], const float camRaw[3], const float weaponViewWorld[3], const float m3p[16], uint64_t nowMs, double f94SeatedY,
+                  uint8_t f94Source) noexcept {
     double localPitchRad = 0.0;
     bool localPitchValid = false;
     uint32_t localPoseGeneration = 0;
@@ -8414,6 +8430,8 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
     g_pinIn.localPoseFrame = localPoseFrame;
     g_pinIn.localPoseQpc = localPoseQpc;
     g_pinIn.localHeadY = localHeadY;
+    g_pinIn.f94SeatedY = static_cast<float>(f94SeatedY);
+    g_pinIn.f94Source = f94Source;
     g_pinInSeq.fetch_add(1, std::memory_order_release);
 }
 bool pinInRead(PinIn* out) noexcept {
@@ -8474,6 +8492,56 @@ F87HoldPub f87HoldRead() noexcept {
         if (g_f87PubSeq.load(std::memory_order_relaxed) == s1) return p;
     }
     return F87HoldPub{};
+}
+// ---- F94a: the neck as the source of truth for the view's height (nofoot::f94, native_on_foot_f94.h) -----------------------------------------------------
+// The frame thread keeps the neck reference's part of every eye alignment it publishes by serial (g_f94Hist, lock-free) and the newest one (g_f94SeatedPub); the P1
+// hook takes the part the drawn pose carried out of the pin's camera (f94NeckForPin), so the hook's target is measured on the game's own camera; the hook publishes
+// that target (f94TargetPublish) and the frame thread follows it (f94Tick).
+nofoot::f94::SeatedHistory g_f94Hist;
+std::atomic<float> g_f94SeatedPub{0.0f};
+double g_f94NeckSeatedPub = 0.0;   // frame thread: the neck reference's part of the alignment about to be published (recorded under its serial by f89AlignPublish)
+struct F94Second {   // frame thread: f94Tick adds a tick, the pin's 1 s line (f67cPinLine) prints and resets
+    uint32_t n = 0, frozen = 0, stale = 0, clamped = 0;
+    double wSum = 0.0, raiseSum = 0.0, appliedSum = 0.0;
+};
+F94Second g_f94Sec;
+// The part of the alignment the pose the game drew with carried: by the serial the runtime reported with the pose, else the newest published (a runtime that reports
+// none, or a serial the history no longer holds).
+void f94NeckForPin(double* seatedY, uint8_t* source) noexcept {
+    EdvrNativeNowPose np{};
+    const bool have = nativeFrameNowPose(np);
+    const nofoot::f94::SeatedHistory::Found f = g_f94Hist.find(have && np.inputVersion >= 3 ? np.eyeAlignApplied : 0u);
+    if (f.matched) {
+        *seatedY = f.seatedY;
+        *source = nofoot::f94::kSrcMatched;
+        return;
+    }
+    *seatedY = static_cast<double>(g_f94SeatedPub.load(std::memory_order_acquire));
+    *source = f.reported ? nofoot::f94::kSrcMissed : nofoot::f94::kSrcLegacy;
+}
+struct F94TargetPub {
+    double targetM = 0.0;
+    uint64_t ms = 0;
+    bool valid = false;
+};
+std::atomic<uint32_t> g_f94TgtSeq{0};
+F94TargetPub g_f94Tgt;
+void f94TargetPublish(double targetM, uint64_t ms) noexcept {
+    g_f94TgtSeq.fetch_add(1, std::memory_order_acq_rel);
+    g_f94Tgt.targetM = targetM;
+    g_f94Tgt.ms = ms;
+    g_f94Tgt.valid = true;
+    g_f94TgtSeq.fetch_add(1, std::memory_order_release);
+}
+F94TargetPub f94TargetRead() noexcept {
+    for (int tries = 0; tries < 3; ++tries) {
+        const uint32_t s1 = g_f94TgtSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        const F94TargetPub p = g_f94Tgt;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_f94TgtSeq.load(std::memory_order_relaxed) == s1) return p;
+    }
+    return F94TargetPub{};
 }
 // ---- F87p (TEMPORARY, read only): the interaction prompt's anchor -----------------------------------------------------------------------------------------
 // The prompt's point is the interactable model's `Root!Ui_interact` node, else the centre of the model's bounding box (analysis\onfoot_prompt_anchor_334925.txt). The
@@ -9015,13 +9083,19 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
             // F70: the pin takes the camera less the ADS shift: the unlocked head.
             float camU[3] = {cam[0], cam[1], cam[2]};
             double S[3], weaponViewWorld[3] = {};
-            if (adsShiftRead(S, weaponViewWorld)) {
+            const bool haveS = adsShiftRead(S, weaponViewWorld);
+            // F94a: and less the neck reference's raise this pose carried (by its alignment serial), so the pin and the raise's own target see the game's camera
+            double f94SeatedY = 0.0;
+            uint8_t f94Source = nofoot::f94::kSrcLegacy;
+            f94NeckForPin(&f94SeatedY, &f94Source);
+            S[1] += f94SeatedY;
+            if (haveS || f94SeatedY != 0.0) {
                 const float rows[9] = {m3p[0], m3p[1], m3p[2], m3p[4], m3p[5], m3p[6], m3p[8], m3p[9], m3p[10]};
                 nofoot::adsUnlockedCam(cam, S, rows, camU);
             }
             for (int i = 0; i < 3; ++i) camU[i] = static_cast<float>(static_cast<double>(camU[i]) - weaponViewWorld[i]);
             const float weaponWorldFloat[3] = {static_cast<float>(weaponViewWorld[0]), static_cast<float>(weaponViewWorld[1]), static_cast<float>(weaponViewWorld[2])};
-            pinInPublish(camU, cam, weaponWorldFloat, m3p, now);
+            pinInPublish(camU, cam, weaponWorldFloat, m3p, now, f94SeatedY, f94Source);
             for (int i = 0; i < 3; ++i) f85Cam[i] = camU[i];
             f85CamOk = true;
         }
@@ -11035,6 +11109,8 @@ void f89AlignPublish(const float f[3]) noexcept {
     // F91 B: the cancel total (the seated yaw and pitch, published this tick ahead of the alignment) under the same serial: the pose's reported serial names the cancel it carried
     g_f91Cancel.record(serial, g_f91.tick, g_adsMap.yawPublished() / nofoot::kAdsDeg, g_adsMap.pitchPublished() / nofoot::kAdsDeg);
     g_f93Sight.record(serial, g_adsSight.applied);   // F93b: the sight lock's part of this alignment, for its matched input
+    g_f94Hist.record(serial, g_f94NeckSeatedPub);    // F94a: the neck reference's part, for the P1 hook (another thread: the history is lock-free)
+    g_f94SeatedPub.store(static_cast<float>(g_f94NeckSeatedPub), std::memory_order_release);
     nativeFrameSetEyeAlign(f, serial);
 }
 nofoot::f87::HeightHold g_f87Hold;
@@ -11373,6 +11449,44 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
                         k.rightCm, k.upCm, k.forwardCm, f88::bodyName(k.body), g_f88W.w, g_armed ? 1 : 0, adsNow ? 1 : 0, t.out.seated[0] * 100.0, t.out.seated[1] * 100.0,
                         t.out.seated[2] * 100.0, t.out.ignore[0] * 100.0, t.out.ignore[1] * 100.0, t.out.ignore[2] * 100.0);
     }
+    return t;
+}
+
+// ---- F94a: the neck reference, the frame thread's half ----------------------------------------------------------------------------------------------------------
+// See nofoot::f94 (native_on_foot_f94.h). Once per align tick, after F88's weight: the hook's newest target (the raise that puts the eye the key's height over the
+// animated neck, measured on the game's own camera) is followed critically damped, frozen while a weapon or tool is drawn, weighted by 1 - w, and its seated y goes
+// into the eye alignment's sum with the hold's. It never enters the hold's input: the hold takes out of the pose the alignment the pose carried (F89), this term
+// included. For a runtime that reports no serial the hold also waits while this term moves (as for F88's up).
+nofoot::f94::NeckRaise g_f94Raise;
+nofoot::f88::Settle g_f94Settle;
+struct F94Tick {
+    nofoot::f94::Out out;
+    bool settling = false;
+};
+F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
+    namespace f94 = nofoot::f94;
+    F94Tick t;
+    f94::In in;
+    in.scope = pin && nativeOnFootActive();
+    in.weaponW = weaponW;
+    in.dt = dt;
+    const F94TargetPub tg = f94TargetRead();
+    in.targetFresh = tg.valid && now >= tg.ms && now - tg.ms <= f94::kTargetMaxAgeMs;
+    in.targetM = tg.targetM;
+    t.out = g_f94Raise.step(in);
+    t.settling = g_f94Settle.step(t.out.seatedY, dt);
+    F94Second& s = g_f94Sec;
+    if (!in.scope) {
+        s = F94Second{};
+        return t;
+    }
+    ++s.n;
+    s.wSum += 1.0 - (weaponW > 1.0 ? 1.0 : weaponW < 0.0 ? 0.0 : weaponW);
+    s.raiseSum += 100.0 * t.out.raiseM;
+    s.appliedSum += 100.0 * t.out.appliedM;
+    if (t.out.frozen) ++s.frozen;
+    if (!in.targetFresh) ++s.stale;
+    if (t.out.clamped) ++s.clamped;
     return t;
 }
 
@@ -12130,11 +12244,12 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     adsAimStep(now, dt, sIn);     // F68a: the ADS guard (the right eye's rows against the head); F67b: the three forwards
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
     const F88Tick weaponEye = f88Tick(now, dt, pin, ads);   // F88: the weapon eye offset (exact zeros unless a key is set and a weapon or tool is drawn at the hip)
+    const F94Tick neckRef = f94Tick(now, dt, pin, g_f88W.w);   // F94a: the view's height from the animated neck, weighted by 1 - w (exact zeros outside the pin's scope)
     f89DarkenTick(now);   // F89: the left eye's darkening (the ADS lock's weight with the key on and a weapon drawn; 0 otherwise)
-    const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads, weaponEye.settling);   // F87h: the standing-height hold (zero outside the pin's scope)
+    const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads, weaponEye.settling || neckRef.settling);   // F87h: the standing-height hold (zero outside the pin's scope)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
-    // g_align's, as before. F68f: the eye height (F64's raise) is gone; the pin alone decides where the body sits under the view, and the
-    // view height is the game's own.
+    // g_align's, as before. F68f removed F64's raise over the game's camera; F94a raises the view to the key's height over the animated neck instead
+    // (the body stays at its animated height; the pin never moves it up or down).
     {
         double eye[3] = {}, eyeChange = 0.0;
         // F93d: the eye alignment (the hold, the weapon eye and view offsets, the ADS locks) is first-person: in the game's third-person camera the runtime
@@ -12145,6 +12260,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
             if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
+            if (i == 1) eye[i] += neckRef.out.seatedY;   // F94a: (1 - w) of the neck reference's raise; the P1 hook takes it back out of the pin's camera by serial
             if (camExternal) eye[i] = 0.0;
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
@@ -12157,6 +12273,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         if (eyeChange > 1e-6) {
             for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
             const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
+            g_f94NeckSeatedPub = camExternal ? 0.0 : neckRef.out.seatedY;   // F94a: the neck reference's part of this alignment, kept under its serial
             f89AlignPublish(f);   // F89: the serial and the y under it are kept for the hold's input
         }
     }
@@ -13184,14 +13301,15 @@ struct PinStats {
     uint32_t ageN = 0, fresh[2] = {}, repeat[2] = {};
     double ageSum = 0.0, ageMax = 0.0, ageSumPar[2] = {}, ageMaxPar[2] = {};
     double speedSum = 0.0, speedMax = 0.0;
-    // F93e: the stance's height, per pinned call (bin 0 standing, 1 every state): the pin's vertical demand from the rest target (gap > 0 would lower the upper body),
-    // what the hidden head took of it (its pitch, the body further back), what the hips kept, the vertical move written, the legs' extension animated and written
-    // (hip to foot over the leg's length; the knees bend as it falls), the camera and the animated neck, the camera over F_root and the aim's pitch.
-    struct F93eBin {
-        uint32_t n = 0, lowerN = 0, raiseN = 0, legsN = 0, camN = 0;
-        double gapSum = 0.0, gapMax = 0.0, takenSum = 0.0, pitchSum = 0.0, backSum = 0.0, hipsSum = 0.0, hipsMax = 0.0, raiseSum = 0.0, vSum = 0.0;
-        double legAnimSum = 0.0, legSum = 0.0, legMin = 9.0, eyeYSum = 0.0, neckYSum = 0.0, camOverFSum = 0.0, aimSum = 0.0;
-    } f93e[2];
+    // F94a: the neck as the view's reference, per pinned call (bin 0 standing, 1 every state): the animated neck's height; the view as drawn over it, the game's own
+    // camera over it and the skeleton's own eye over it (the head level); the raise's target and the raise the drawn pose carried (by the alignment serial, the last
+    // published, or not found); the vertical move written (the lowering: 0 since F94a) and the legs' extension animated and written (hip to foot over the leg).
+    struct F94Bin {
+        uint32_t n = 0, legsN = 0, animN = 0, srcN[3] = {};
+        double neckSum = 0.0, neckMin = 9.0, neckMax = -9.0, viewSum = 0.0, viewMin = 9.0, viewMax = -9.0, gameSum = 0.0, animSum = 0.0;
+        double tgtSum = 0.0, tgtMin = 9.0, tgtMax = -9.0, camSum = 0.0, vSum = 0.0, vAbsMax = 0.0, askedSum = 0.0;
+        double legAnimSum = 0.0, legSum = 0.0, legMin = 9.0;
+    } f94[2];
 };
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
@@ -13258,7 +13376,11 @@ struct PinCall {
     double off[3] = {}, lean = 0.0, neckLean = 0.0, legReach = 0.0, headY = 0.0;
     bool animT = false, clampedT = false, leanOk = false;
     double reach[3] = {};   // F68g: the reach rule's correction as applied (model axes: right, up, forward; metres)
-    nofoot::f93::NeckTake f93e;   // F93e: what the hidden head took of the stance's height (zeros: nothing to take)
+    // F94a: the raise's target (m) and whether it was published; the animated neck's height; the view as drawn, the game's camera and the skeleton's own eye over the
+    // neck, the head level (m); the raise the drawn pose carried (m, from the P1 hook) and where it came from; the vertical move the rest target asked (now never applied).
+    double f94Target = 0.0, f94Neck = 0.0, f94ViewOver = 0.0, f94GameOver = 0.0, f94AnimEyeOver = 0.0, f94InCam = 0.0, f94Asked = 0.0;
+    bool f94TargetOk = false, f94AnimEyeOk = false;
+    uint8_t f94Source = nofoot::f94::kSrcLegacy;
     double reachCandidate[3] = {};   // F79: unweighted reach proposal; nonzero infeasible proposals are rejected, not applied to the body pin.
     double reachRadiusM[2] = {};
     bool reachMeasured = false, reachActive = false, reachInfeasible = false, reachRejected = false;
@@ -13435,6 +13557,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         const F87HoldPub hold87 = f87HoldRead();
         const double eyeRawModelY = E[1];
         E[1] = nofoot::f87::pinEyeYAdjust(E[1], hold87.transientM, hold87.valid);
+        // F94a: the view as drawn (the job camera with all EDVR adds to it: the neck reference's raise, the weapon eye offset, the ADS shifts) less the same
+        // transient, for the line's "view over the neck"; E above is the game's own camera (the P1 hook took the raise the pose carried out of it).
+        double f94ViewY = 0.0;
+        {
+            const float rw[3] = {static_cast<float>(static_cast<double>(in.camRaw[0]) + (cycSrc != kCycNone ? g_pinCyc.off[0] : 0.0)),
+                                 static_cast<float>(static_cast<double>(in.camRaw[1]) + (cycSrc != kCycNone ? g_pinCyc.off[1] : 0.0)),
+                                 static_cast<float>(static_cast<double>(in.camRaw[2]) + (cycSrc != kCycNone ? g_pinCyc.off[2] : 0.0))};
+            double vm[3];
+            nofoot::ikXform(rw, invM, vm);
+            f94ViewY = nofoot::f87::pinEyeYAdjust(vm[1], hold87.transientM, hold87.valid);
+        }
         double fwdM[3], upM[3];
         for (int i = 0; i < 3; ++i) {
             fwdM[i] = fwdW[0] * invM[i] + fwdW[1] * invM[4 + i] + fwdW[2] * invM[8 + i];
@@ -13536,14 +13669,25 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.wc = 0.0;
             pc.dEyeY = 0.0;
         }
-        // F93e: the height the stance stands over the camera is taken by the hidden head, not the knees (native_on_foot_f93de.h): where the rest target would lower the
-        // animated neck, the neck-to-eye vector pitches forward about the neck until the neck keeps its animated height (the eye level with the neck at most); only
-        // the rest lowers the hips. Before the ADS release and the weapon view offset, which move the target from here as before.
-        pc.f93e = nofoot::f93::neckTakesHeight(E, T, pc.hEye[0], pc.hEye[1], N0[1]);
-        if (pc.f93e.applied) {
-            pc.off[0] = (E[0] - T[0]) * pc.hEye[1] - (E[2] - T[2]) * pc.hEye[0];   // the vector used, as the F68e line reports it: right = (h.z, 0, -h.x)
-            pc.off[1] = E[1] - T[1];
-            pc.off[2] = (E[0] - T[0]) * pc.hEye[0] + (E[2] - T[2]) * pc.hEye[1];
+        // F94a: the view's height from the neck (native_on_foot_f94.h). The raise that puts the eye the key's height over the animated neck with the head level, measured
+        // on the game's own camera (E: the transient, the shifts the pin ignores and the raise the pose carried are out of it), goes to the frame thread, which follows
+        // it with F88's 1 - w; the view as drawn over the neck, the game's camera over it and the skeleton's own eye over it are the line's figures.
+        {
+            const double h = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
+            pc.f94Target = nofoot::f94::raiseTarget(N0[1], h, pc.eyeYSelected);
+            pc.f94TargetOk = std::isfinite(pc.f94Target) && std::isfinite(N0[1]);
+            if (pc.f94TargetOk) f94TargetPublish(pc.f94Target, now);
+            pc.f94Neck = N0[1];
+            pc.f94GameOver = pc.eyeYSelected - N0[1];
+            pc.f94ViewOver = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid) - N0[1];
+            pc.f94InCam = in.f94SeatedY == 0.0f ? 0.0 : -static_cast<double>(in.f94SeatedY);
+            pc.f94Source = in.f94Source;
+            pc.f94AnimEyeOk = headFinite && g_pinEyeCal.have && nofoot::pinRowsRigid(rows44);
+            if (pc.f94AnimEyeOk) {
+                const double* e = g_pinEyeCal.e;
+                pc.f94AnimEyeOver = p44[1] + e[0] * rows44[0][1] + e[1] * rows44[1][1] + e[2] * rows44[2][1] - N0[1];
+                pc.f94AnimEyeOk = std::isfinite(pc.f94AnimEyeOver);
+            }
         }
         // ADS leaves the camera and weapon aim untouched, but releases the body toward the authored neck pose.
         const double detachW = pc.detachW;
@@ -13558,6 +13702,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             std::memcpy(neckViewShift, modelShift, sizeof(neckViewShift));
             pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
         }
+        // F94a: the body stands at its animated height with every item: the neck target keeps the animated neck's height (no lowering, no raise; the view's height
+        // comes from the neck instead, above). The horizontal target is the rest offset's, as before.
+        pc.f94Asked = nofoot::f94::bodyKeepsNeckHeight(T, N0);
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
         if (pl.legOk) {
             double sum = 0.0;
@@ -13770,6 +13917,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         if (pc.neckRestCandidateValid) {
             nofoot::pinDetachTarget(physicalTarget, N0, pc.detachW, physicalTarget);
             nofoot::weaponViewOffsetTarget(physicalTarget, neckViewShift);
+            nofoot::f94::bodyKeepsNeckHeight(physicalTarget, N0);   // F94a: the rifle's physical rest target keeps the animated neck's height too
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
         } else {
@@ -14289,37 +14437,35 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         st.d0Sum[1] += 100.0 * d0[2];
         st.dSum[0] += 100.0 * mv.th[0];
         st.dSum[1] += 100.0 * mv.th[2];
-        for (int b = 0; b < 2; ++b) {   // F93e
+        for (int b = 0; b < 2; ++b) {   // F94a
             if (b == 0 && pc.state != 0) continue;
-            PinStats::F93eBin& e = st.f93e[b];
+            PinStats::F94Bin& e = st.f94[b];
             ++e.n;
-            const double gapCm = 100.0 * pc.f93e.gapM;
-            if (gapCm > 0.0) {
-                ++e.lowerN;
-                e.gapSum += gapCm;
-                e.gapMax = std::max(e.gapMax, gapCm);
-                e.takenSum += 100.0 * pc.f93e.takenM;
-                e.pitchSum += pc.f93e.pitchDeg;
-                e.backSum += 100.0 * pc.f93e.backM;
-                e.hipsSum += 100.0 * pc.f93e.hipsM;
-                e.hipsMax = std::max(e.hipsMax, 100.0 * pc.f93e.hipsM);
-            } else if (gapCm < 0.0) {
-                ++e.raiseN;
-                e.raiseSum += -gapCm;
+            const double neck = pc.f94Neck, view = 100.0 * pc.f94ViewOver, tgt = 100.0 * pc.f94Target;
+            e.neckSum += neck;
+            e.neckMin = std::min(e.neckMin, neck);
+            e.neckMax = std::max(e.neckMax, neck);
+            e.viewSum += view;
+            e.viewMin = std::min(e.viewMin, view);
+            e.viewMax = std::max(e.viewMax, view);
+            e.gameSum += 100.0 * pc.f94GameOver;
+            if (pc.f94AnimEyeOk) {
+                ++e.animN;
+                e.animSum += 100.0 * pc.f94AnimEyeOver;
             }
+            e.tgtSum += tgt;
+            e.tgtMin = std::min(e.tgtMin, tgt);
+            e.tgtMax = std::max(e.tgtMax, tgt);
+            e.camSum += 100.0 * pc.f94InCam;
+            ++e.srcN[pc.f94Source < 3 ? pc.f94Source : 1];
+            e.askedSum += 100.0 * pc.f94Asked;
             e.vSum += 100.0 * mv.delta;
+            e.vAbsMax = std::max(e.vAbsMax, 100.0 * std::fabs(mv.delta));
             if (legsSolved) {
                 ++e.legsN;
                 e.legAnimSum += 0.5 * (lp[0].reachBefore + lp[1].reachBefore);
                 e.legSum += 0.5 * (lp[0].reachAfter + lp[1].reachAfter);
                 e.legMin = std::min(e.legMin, std::min(lp[0].reachAfter, lp[1].reachAfter));
-            }
-            e.eyeYSum += E[1];
-            e.neckYSum += N0[1];
-            if (pc.f86Ok) {
-                ++e.camN;
-                e.camOverFSum += 100.0 * pc.f86CamOverF;
-                e.aimSum += pc.f86AimPitch;
             }
         }
         if (legsSolved) {
@@ -18840,25 +18986,33 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         st.neckYawDegSum / static_cast<double>(st.neckYawCalls), st.neckYawDegMax, st.neckErrorMaxCm,
                         st.neckFootErrorMaxMm, st.neckShortfallMaxCm);
     }
-    // F93e: the stance's height for the held item, standing when there were standing calls this second, else every state. The knees bend as the legs' written
-    // extension falls below the animated one; "the hips kept" is the part of the stance's height over the camera the hidden head could not take.
+    // F94a: the neck as the view's reference, for the held item, standing when there were standing calls this second, else every state. Unarmed (weight 1) the view
+    // over the neck reads the key; the lowering written is 0 and the legs are the animation's in every stance. A build without F94a has no such line; one whose raise
+    // never reaches the camera reads a target with "in the drawn camera" at 0.
     {
-        const int b = st.f93e[0].n ? 0 : 1;
-        const PinStats::F93eBin& e = st.f93e[b];
+        const int b = st.f94[0].n ? 0 : 1;
+        const PinStats::F94Bin& e = st.f94[b];
+        F94Second& fs = g_f94Sec;
         if (e.n) {
             char item[64] = "none";
             uint32_t serial = 0;
             if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
-            const double n = static_cast<double>(e.n), ln = e.lowerN ? static_cast<double>(e.lowerN) : 1.0, rn = e.raiseN ? static_cast<double>(e.raiseN) : 1.0,
-                         gn = e.legsN ? static_cast<double>(e.legsN) : 1.0, cn = e.camN ? static_cast<double>(e.camN) : 1.0;
-            Log::get().note("native on foot stance height (F93e) 1 s: item %s; %s %u calls: the rest target lowered the neck in %u (by %.1f cm mean, max %.1f), the hidden head took "
-                            "%.1f cm (pitched %.1f deg, the body %.1f cm further back), the hips kept %.1f cm (max %.1f); raised in %u (by %.1f cm mean); vertical move written "
-                            "mean %+.1f cm; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves); camera %.3f m, animated neck %.3f m; "
-                            "camera over F_root %+.1f cm, aim pitch %+.1f deg (%u calls)",
-                            item, b == 0 ? "standing" : "every state", e.n, e.lowerN, e.gapSum / ln, e.gapMax, e.takenSum / ln, e.pitchSum / ln, e.backSum / ln,
-                            e.hipsSum / ln, e.hipsMax, e.raiseN, e.raiseSum / rn, e.vSum / n, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN,
-                            e.eyeYSum / n, e.neckYSum / n, e.camOverFSum / cn, e.aimSum / cn, e.camN);
+            const double n = static_cast<double>(e.n), gn = e.legsN ? static_cast<double>(e.legsN) : 1.0, fn = fs.n ? static_cast<double>(fs.n) : 1.0;
+            char anim[48];
+            if (e.animN) std::snprintf(anim, sizeof(anim), "%+.1f cm", e.animSum / static_cast<double>(e.animN));
+            else std::snprintf(anim, sizeof(anim), "not calibrated yet");
+            Log::get().note("native on foot neck height (F94a) 1 s: item %s; %s %u calls: animated neck %.3f m (min %.3f max %.3f); eye height key %.1f cm; the view over "
+                            "the neck %+.1f cm (min %+.1f max %+.1f), the game's camera over it %+.1f cm, the skeleton's eye over it %s (head level); the raise's target "
+                            "%+.1f cm (min %+.1f max %+.1f), in the drawn camera %+.1f cm (found by the alignment serial %u calls, the last published %u, serial not found %u); "
+                            "frame thread %u ticks: neck reference weight %.2f, raise %+.1f cm, applied %+.1f cm, target frozen %u, stale %u, clamped %u; the rest target "
+                            "asked %+.1f cm, the lowering written mean %+.2f cm max |%.2f|; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves)",
+                            item, b == 0 ? "standing" : "every state", e.n, e.neckSum / n, e.neckMin, e.neckMax,
+                            static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), e.viewSum / n, e.viewMin, e.viewMax, e.gameSum / n, anim,
+                            e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
+                            e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
+                            e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN);
         }
+        fs = F94Second{};
     }
 }
 
@@ -27021,6 +27175,7 @@ void nativeOnFootShutdown() {
     adsShiftPublish(zeroShift, zeroShift);
     g_eyeAlignPub[0] = g_eyeAlignPub[1] = g_eyeAlignPub[2] = 0.0;
     const float zeroEyeAlign[3] = {};
+    g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
     f89AlignPublish(zeroEyeAlign);
     eyedarken::publish(0.0f, GetTickCount64());   // F89: no darkened left eye past shutdown
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
