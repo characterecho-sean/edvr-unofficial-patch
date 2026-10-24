@@ -23,6 +23,8 @@
     python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
     python tools/edvr_log.py --target steam --switches
+    python tools/edvr_log.py --target epic --health --expect-build HEAD
+    python tools/edvr_log.py --target epic --health --since 08:08:40 --until 08:10:00
     python tools/edvr_log.py --list
 
 This is the sanctioned replacement for `Get-Content <some path> -Tail 200 |
@@ -264,6 +266,16 @@ the verdict: 0 for PASS or WARN, 1 for STOP, 2 for a wrong build (the runtime lo
 too), 3 when the log holds none of the freeze lines and no slow regime (a build from before the
 freeze logging), 4 for a slow regime the vendor runtime or EDVR holds (and no STOP).
 
+--health is the first command to run on an on-foot flight log. It reads the graphics log once and prints one line per feature family (the weapon readout
+size and the pistol readout, the weapon UI pin, the reticle depth, the view height hold, the weapon eye offset, the ADS trace and the closing left eye, the
+marker fix, the prompt anchor and label) with a status and the counters that decide it: OK; PARTIAL (it ran, but not for everything); NEVER APPLIED (its own lines
+say it did nothing, as F90's "no table part among the decided parts" did every second of a flight, or a trigger the log proves happened found it idle); IDLE
+(nothing for it to act on); UNPARSED (labelled lines no pattern matches: the rule is out of date, not the feature). A family with no line at all is listed as not
+present. Then it lists the build-tagged lines, `(F85b)`, `(F87h, TEMPORARY)`, `(F62c/F64)`, by tag -- count, first and last time, leading label -- for the newest
+tags that have no rule (--health-all lists every tag), so a feature added with no rule here still shows. --since and --until (HH:MM[:SS], the log's own clock,
+across midnight when since is after until) cut the log to a window. Exit 0 when no family is NEVER APPLIED or UNPARSED, 3 when one is NEVER APPLIED (a script can
+gate on it), 4 when a rule is UNPARSED and none is NEVER APPLIED, 2 for a wrong --expect-build. The rules are the rows of HEALTH_RULES; a new feature adds a row.
+
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
 --vr-supersampling no VR line, or --terrain-checkerboard no terrain checkerboard line), 2 when --expect-build did not match (--tally periodic
@@ -275,6 +287,7 @@ and --freezes check the runtime log against it too). --maps-sharp's, --route-cur
 import argparse
 import bisect
 import calendar
+import collections
 import datetime
 import math
 import os
@@ -10295,6 +10308,482 @@ def self_test_phase_failure():
     print("phase failure receipt self-test: %s" % ("PASS" if ok else "FAIL"));return ok
 
 
+# --health: after a flight, which build-tagged features ran, matched and applied (docs\native-onfoot-vr.md). A feature that does nothing says so in its own
+# 1 s lines ("no table part among the decided parts", a pair of counters at zero) and the line looks like any other until somebody counts it. This reads the
+# graphics log once and prints (1) one line per feature family in HEALTH_RULES, a status and the counters that decide it, then (2) a census of every
+# build-tagged line, so a feature added with no rule below still shows its tag, its line count, its first and last time and its leading label.
+#
+# Every rule is one row of HEALTH_RULES: the tags its lines carry (the dispatch), the literal labels that mark a line as the rule's (a labelled line that none of the
+# rule's patterns matches is counted as unparsed, so a format that drifts from its rule fails loudly instead of reading as "no lines"), the (kind, regex) patterns that
+# extract the counters, and the judge function that turns the extracted rows into a status. To cover a new feature add a row and, above it, a judge of ten lines.
+#
+# Statuses: OK; PARTIAL (it ran and applied, but not for everything or not every second); NEVER APPLIED (its lines are there and say it did nothing, or a trigger the
+# log proves happened found it idle); IDLE (its lines say there was nothing for it to act on, which is not a failure); UNPARSED (labelled lines that no pattern
+# matches: the rule is out of date, not the feature). A rule with no line at all in the window is listed as not present. Exit 3 when any rule says NEVER APPLIED, 4
+# for an UNPARSED rule and no NEVER APPLIED, 0 otherwise (2 for a wrong build is main()'s, before any of this).
+# The self-test (self_test_health) renders its fixture lines from the C format strings in src\d3d11\native_on_foot.cpp, so a format that drifts from its rule fails the
+# build. The PARTIAL cut-offs (90% of the decisions scaled or bound, half the draws patched, half the seconds holding, 80%/50% elsewhere) are judgement calls from the
+# 2026-10-24 flight; every counter that decides a status is printed beside it, so a reader can overrule one.
+_HN =r"[+-]?\d+(?:\.\d+)?"
+HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*)(?![0-9A-Za-z])")
+HEALTH_STAMP_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*")
+HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
+HEALTH_OTHER_TAGS = 8
+HEALTH_SELF_TEST_CHECKS = 0
+
+HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge")
+
+H_F88 = "weapon eye offset (F88)"
+H_F89_ADS = "ads transition (F89)"
+H_ANCHOR = "prompt anchor (F87p)"
+
+
+def _hrows(ctx, name, kind):
+    return ctx.get(name, {}).get(kind, [])
+
+
+def _hsum(rows, key):
+    return sum(int(r[key]) for r in rows)
+
+
+def _hpairs(text):
+    """The `name N, name N` list a line prints for its refusals, as a Counter ("none" gives an empty one). A parenthesised aside is dropped first."""
+    c = collections.Counter()
+    for name, n in re.findall(r"(?:^|, )(.+?) (\d+)(?=, |$)", re.sub(r"\s*\([^)]*\)", "", text)):
+        c[name] += int(n)
+    return c
+
+
+def _htop(counter, n=3):
+    items = [(k, v) for k, v in counter.most_common() if v > 0][:n]
+    return ", ".join("%s %d" % kv for kv in items) if items else "none"
+
+
+def _hpct(a, b):
+    return "%.0f%%" % (100.0 * a / b) if b else "-"
+
+
+def _harmed_seconds(ctx):
+    """Seconds the weapon eye offset's own line says a weapon or tool was drawn: the log's proof that a weapon family had something to do."""
+    return sum(1 for r in _hrows(ctx, H_F88, "tick") if r["armed"] == "1")
+
+
+def _hfocus_seconds(ctx):
+    return sum(1 for r in _hrows(ctx, H_ANCHOR, "sec") if int(r["key"]) >= 0)
+
+
+def _hj_f90_size(rows, ctx):
+    parts, idle = rows.get("part", []), rows.get("idle", [])
+    if not parts and not idle:
+        return None
+    seen = sorted({n.strip() for r in idle for n in r["names"].split(",") if n.strip()}, key=lambda s: (len(s), s))
+    if not parts:
+        return ("NEVER APPLIED", "no table part among the decided parts in all %d s (names %s)" % (len(idle), ", ".join(seen) or "-"))
+    decided, scaled, mism = _hsum(parts, "decided"), _hsum(parts, "scaled"), _hsum(parts, "mismatch")
+    names = sorted({r["part"] for r in parts}, key=lambda s: (len(s), s))
+    text = "part %s: scaled %d of %d decided (eye 0 %d, eye 1 %d), table mismatch %d, %d s" % (
+        ", ".join(names), scaled, decided, _hsum(parts, "e0"), _hsum(parts, "e1"), mism, len(parts))
+    if idle:
+        text += "; %d s with no table part (names %s)" % (len(idle), ", ".join(seen) or "-")
+    if scaled == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if scaled * 10 < decided * 9 else "OK", text)
+
+
+def _hj_f90_pistol(rows, ctx):
+    r = rows.get("line", [])
+    if not r:
+        return None
+    attach, root, none, latched, hip, ads, refused = (_hsum(r, k) for k in ("attach", "root", "none", "latched", "hip", "ads", "refused"))
+    moved = hip + ads
+    why = collections.Counter()
+    for x in r:
+        why.update(_hpairs(x["why"]))
+    last = r[-1]
+    text = ("item %s, keys forward %s left %s up %s toward eye %s cm; held %d s: weapon frame attach %d, F_root only %d, none %d; latched %d; moved %d (hip part %d, ADS part %d); "
+            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], len(r), attach, root, none, latched, moved, hip, ads, refused, _htop(why)))
+    if moved == 0:
+        return ("NEVER APPLIED", text)
+    if sum(1 for x in r if int(x["hip"]) + int(x["ads"]) > 0) * 2 < len(r):
+        return ("PARTIAL", text)
+    return ("OK", text)
+
+
+def _hj_f85b(rows, ctx):
+    sec, part = rows.get("sec", []), rows.get("part", [])
+    if not sec and not part:
+        return None
+    active = [r for r in sec if int(r["submits"]) > 0]
+    if not active and not part:
+        armed = _harmed_seconds(ctx)
+        if armed:
+            return ("NEVER APPLIED", "no weapon UI part submitted in %d lines, though the weapon eye offset line says a weapon was drawn for %d s" % (len(sec), armed))
+        return ("IDLE", "no weapon UI part submitted (%d idle lines: no weapon or tool out, or the submit hook sees none)" % len(sec))
+    submits, ftag, fval = (_hsum(active, k) for k in ("submits", "ftag", "fval"))
+    path = active[-1]["path"] if active else "none"
+    found, decided, bound, refused = (_hsum(part, k) for k in ("found", "decided", "bound", "refused"))
+    why = collections.Counter()
+    for x in part:
+        why.update(_hpairs(x["why"]))
+    text = "%d matched submits in %d s, path %s, found %d (pool: by tag %d, by translation %d), decided %d, bound %d, refused %d [%s]" % (
+        submits, len(active), path, found, ftag, fval, decided, bound, refused, _htop(why, 2))
+    if path == "none" or found == 0 or decided == 0 or bound == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided else "OK", text)
+
+
+def _hj_f85c(rows, ctx):
+    draws, idle, fail = rows.get("draws", []), rows.get("idle", []), rows.get("fail", [])
+    if not draws and not idle and not fail:
+        return None
+    if fail:
+        return ("NEVER APPLIED", "the compute pass could not run: %s" % fail[0]["why"])
+    if not draws:
+        armed = _harmed_seconds(ctx)
+        if armed:
+            return ("NEVER APPLIED", "no key 10 composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
+        return ("IDLE", "no key 10 composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
+    nd, patched, reads, hit, sky = (_hsum(draws, k) for k in ("draws", "patched", "reads", "hit", "sky"))
+    refs = collections.Counter()
+    for x in draws:
+        refs.update(_hpairs(x["refs"]))
+    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), len(draws), reads, hit, sky, _htop(refs))
+    if patched == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if patched * 2 < nd else "OK", text)
+
+
+def _hj_f87h(rows, ctx):
+    r = rows.get("sec", [])
+    if not r:
+        return None
+    c = collections.Counter()
+    for x in r:
+        s = x["state"].strip()
+        c["holding" if s.startswith("holding") else "frozen" if s.startswith("frozen") else "no pose" if s.startswith("no pose") else
+          "ramping" if s.startswith("ramping") else "out of scope" if s.startswith("out of scope") else "other"] += 1
+    text = "%d s: " % len(r) + ", ".join("%s %d" % (k, c[k]) for k in ("holding", "frozen", "no pose", "ramping", "out of scope", "other") if c[k])
+    live = len(r) - c["out of scope"]
+    if not live:
+        return ("IDLE", text)
+    if c["holding"] == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if c["holding"] * 2 < live else "OK", text)
+
+
+def _hj_f88(rows, ctx):
+    t = rows.get("tick", [])
+    if not t:
+        return None
+    armed = [r for r in t if r["armed"] == "1"]
+    if not armed:
+        return ("IDLE", "%d s with the keys set but no weapon or tool drawn (w 0 throughout)" % len(t))
+    w = [float(r["w"]) for r in armed]
+    moved = sum(1 for r in armed if any(float(r[k]) != 0.0 for k in ("sx", "sy", "sz")))
+    keys = any(float(r[k]) != 0.0 for r in armed for k in ("kr", "ku", "kf"))
+    text = "armed %d s, w min %.2f median %.2f max %.2f, applied seated offset nonzero in %d s; keys %s" % (
+        len(armed), min(w), statistics.median(w), max(w), moved, "set" if keys else "all zero")
+    if max(w) == 0.0 or (keys and moved == 0):
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if statistics.median(w) < 0.9 else "OK", text)
+
+
+def _hj_f89_ads(rows, ctx):
+    st, fr, skip = rows.get("start", []), rows.get("frame", []), rows.get("skip", [])
+    if not st and not fr and not skip:
+        return None
+    press, rel = sum(1 for r in st if r["dir"] == "press"), sum(1 for r in st if r["dir"] == "release")
+    engaged = [r for r in fr if r["state"] == "engaged"]
+    lock = max([float(r["lw"]) for r in fr] or [0.0])
+    text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, "; %d events not traced" % len(skip) if skip else "")
+    if engaged and max(float(r["lw"]) for r in engaged) == 0.0:
+        return ("NEVER APPLIED", text + " (ADS engaged, the lock weight never rose)")
+    if not press or not rel:
+        return ("PARTIAL", text + " (one direction only)")
+    return ("OK", text)
+
+
+def _hj_f89_eye(rows, ctx):
+    sec, ev, guard = rows.get("sec", []), rows.get("event", []), rows.get("guard", [])
+    if not sec and not ev and not guard:
+        return None
+    closed = sum(1 for r in ev if r["ev"] == "closed")
+    opened = sum(1 for r in ev if r["ev"] == "open")
+    on = [r for r in sec if r["key"] == "on"]
+    dmax = max([float(r["d"]) for r in on] or [0.0])
+    gn = max([int(r["n"]) for r in guard] or [0])
+    text = "closed %d, open %d, ADS seconds with the key on %d of %d, darken max %.2f%s" % (closed, opened, len(on), len(sec), dmax, ", guard tripped %d" % gn if gn else "")
+    if sec and not on and not ev:
+        return ("IDLE", text + " (key off)")
+    if on and dmax == 0.0:
+        return ("NEVER APPLIED", text)
+    if gn:
+        return ("PARTIAL", text)
+    return ("OK", text)
+
+
+def _hj_marker(rows, ctx):
+    ap, idle, win = rows.get("applied", []), rows.get("idle", []), rows.get("win", [])
+    if not ap and not idle and not win:
+        return None
+    dec, bound = _hsum(ap, "dec"), _hsum(ap, "bound")
+    per = []
+    for e in ("0", "1"):
+        er = [r for r in ap if r["eye"] == e]
+        if er:
+            per.append("eye %s %s (%d of %d)" % (e, _hpct(_hsum(er, "bound"), _hsum(er, "dec")), _hsum(er, "bound"), _hsum(er, "dec")))
+    text = "patch applied %s; named %d, outside %d (F87c)" % (", ".join(per) or "no decision line", _hsum(win, "named"), _hsum(win, "outside"))
+    if dec == 0:
+        return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % len(idle))
+    if bound == 0:
+        return ("NEVER APPLIED", text)
+    return ("PARTIAL" if bound * 2 < dec else "OK", text)
+
+
+def _hj_anchor(rows, ctx):
+    sec, hooked, nothook = rows.get("sec", []), rows.get("hooked", []), rows.get("nothook", [])
+    if not sec and not hooked and not nothook:
+        return None
+    if nothook:
+        return ("NEVER APPLIED", "NOT hooked: %s" % nothook[0]["why"])
+    if not sec:
+        return ("NEVER APPLIED", "the slots are hooked but no 1 s line was written")
+    s, u, i = (_hsum(sec, k) for k in ("set", "upd", "ind"))
+    text = "SetMarker %d UpdateMarker %d UpdateIndicator %d in %d s; focus key set in %d s; roles nearby %d target %d list %d hidden %d other %d%s" % (
+        s, u, i, len(sec), _hfocus_seconds(ctx), _hsum(sec, "nearby"), _hsum(sec, "target"), _hsum(sec, "list"), _hsum(sec, "hidden"), _hsum(sec, "other"),
+        "" if hooked else " (no hook line)")
+    return ("NEVER APPLIED" if s + u + i == 0 else "OK", text)
+
+
+def _hj_label(rows, ctx):
+    sec, refuse = rows.get("sec", []), rows.get("refuse", [])
+    if not sec and not refuse:
+        return None
+    groups, draws, ours, game = (_hsum(sec, k) for k in ("groups", "draws", "ours", "game"))
+    text = "groups %d, draws %d, b0 at issue ours %d game %d (%d eye-seconds)" % (groups, draws, ours, game, len(sec))
+    if refuse:
+        text += "; the label mesh was NOT decoded %d time(s) (%s)" % (len(refuse), refuse[0]["why"])
+    if groups == 0 and draws == 0:
+        focus = _hfocus_seconds(ctx)
+        if focus:
+            return ("NEVER APPLIED", text + "; a focus key was set in %d s" % focus)
+        return ("IDLE", text + "; no focus key was set")
+    return ("PARTIAL" if ours == 0 or refuse else "OK", text)
+
+
+def _hrule(name, tags, labels, kinds, judge):
+    return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
+
+
+HEALTH_RULES = (
+    _hrule("weapon readout size (F90)", ("F90",), ("weapon readout size (F90)",), (
+        ("part", r"weapon readout size \(F90\) 1 s: part (?P<part>\d+) \(slot \d+\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), scaled (?P<scaled>\d+) "
+                 r"\(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
+        ("idle", r"weapon readout size \(F90\) 1 s: no table part among the decided parts \(names (?P<names>[^)]*)\)"),
+    ), _hj_f90_size),
+    _hrule("pistol readout (F90)", ("F90",), ("pistol readout (F90)",), (
+        ("line", r"pistol readout \(F90\) 1 s: item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) cm[^;]*; "
+                 r"frame: attach \d+ (?P<attach>\d+), F_root only (?P<root>\d+), none (?P<none>\d+) \([^)]*\); target latched (?P<latched>\d+) frames; "
+                 r"moved: \d+ (?P<hip>\d+), \d+ (?P<ads>\d+) \([^)]*\), previous-frame target \d+, refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]" % (_HN, _HN, _HN, _HN)),
+    ), _hj_f90_pistol),
+    _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
+        ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits this second \((?P<tagged>\d+) tagged; [^)]*\); "
+                r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)"),
+        ("part", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): tagged (?P<tagged>\d+) in all \(all eyes\), found (?P<found>\d+), "
+                 r"matched (?P<matched>\d+), decided (?P<decided>\d+), bound (?P<bound>\d+) \([^)]*\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]"),
+        ("_", r"weapon UI pin \(F85b\): identification path"),
+    ), _hj_f85b),
+    _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
+        ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
+                  r"sky (?P<sky>\d+).*refusals: (?P<refs>.*)$"),
+        ("idle", r"reticle depth \(F85c\): no key 10 composite draw this second"),
+        ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
+        ("_", r"reticle depth \(F85c\): precompiled"),
+    ), _hj_f85c),
+    _hrule("view height hold (F87h)", ("F87h",), ("view height hold (F87h)",), (
+        ("sec", r"view height hold \(F87h\) 1 s: state (?P<state>[^;]+);"),
+    ), _hj_f87h),
+    _hrule(H_F88, ("F88",), ("weapon eye offset (F88)",), (
+        ("tick", r"weapon eye offset \(F88\) 1 s: keys right (?P<kr>%s) up (?P<ku>%s) forward (?P<kf>%s) cm, body \w+, w (?P<w>[\d.]+) \(armed (?P<armed>\d) ADS (?P<ads>\d)\), "
+                 r"applied seated \((?P<sx>%s) (?P<sy>%s) (?P<sz>%s)\) cm" % (_HN, _HN, _HN, _HN, _HN, _HN)),
+    ), _hj_f88),
+    _hrule(H_F89_ADS, ("F89",), ("ads transition (F89)",), (
+        ("start", r"ads transition \(F89\) (?P<dir>press|release): tracing the next"),
+        ("frame", r"ads transition \(F89\) (?P<dir>press|release) frame (?P<frame>\d+): t %s s, journal ADS \d, ads state (?P<state>\w+), lock weight (?P<lw>[\d.]+)" % _HN),
+        ("skip", r"ads transition \(F89\): not traced"),
+    ), _hj_f89_ads),
+    _hrule("ads close left eye (F89)", ("F89",), ("ads close left eye (F89)",), (
+        ("sec", r"ads close left eye \(F89\) 1 s: darken (?P<d>[\d.]+) \(key (?P<key>on|off), lock weight (?P<lw>[\d.]+), ads state \w+\)"),
+        ("event", r"ads close left eye \(F89\): (?P<ev>closed|open) \(key \w+, lock weight [\d.]+\)"),
+        ("guard", r"ads close left eye \(F89\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
+    ), _hj_f89_eye),
+    _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
+        ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"),
+        ("idle", r"marker fix \(F62c\): eye \d: no decision this second"),
+        ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)"),
+    ), _hj_marker),
+    _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
+        ("sec", r"prompt anchor \(F87p\) 1 s: SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
+                r"\[keys [^\]]*\] target (?P<target>\d+) list (?P<list>\d+) hidden (?P<hidden>\d+) other (?P<other>\d+)"),
+        ("hooked", r"prompt anchor \(F87p\): slots .* hooked"),
+        ("nothook", r"prompt anchor \(F87p\): NOT hooked -- (?P<why>.*?)\. The game's code"),
+        ("_", r"prompt anchor \(F87p\): slots and getter calls (?:restored|NOT all restored)"),
+    ), _hj_anchor),
+    _hrule("prompt label draws (F87p)", ("F87p",), ("prompt label draws (F87p)",), (
+        ("sec", r"prompt label draws \(F87p\) eye \d 1 s: groups (?P<groups>\d+) \(draws (?P<draws>\d+), index counts [^)]*\), layered \d+, b0 at issue game (?P<game>\d+) ours (?P<ours>\d+)"),
+        ("refuse", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh was NOT decoded \((?P<why>[^)]*)\)"),
+        ("_", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh decoded"),
+    ), _hj_label),
+)
+HEALTH_BY_TAG = {}
+for _rule in HEALTH_RULES:
+    for _tag in _rule.tags:
+        HEALTH_BY_TAG.setdefault(_tag, []).append(_rule)
+
+
+def parse_health_time(text, end=False):
+    """HH:MM[:SS[.mmm]] as seconds of the day; an end with no fraction takes the whole second. ValueError on anything else."""
+    m = HEALTH_TIME_RE.match(text.strip())
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59 or int(m.group(3) or 0) > 59:
+        raise ValueError(text)
+    t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3) or 0)
+    if m.group(4):
+        return t + int(m.group(4).ljust(3, "0")) / 1000.0
+    return t + (0.999 if end else 0.0)
+
+
+def _health_in_window(tod, since, until):
+    if since is None and until is None:
+        return True
+    if tod is None:
+        return False
+    if since is not None and until is not None and since > until:   # a window across midnight
+        return tod >= since or tod <= until
+    return (since is None or tod >= since) and (until is None or tod <= until)
+
+
+def health_scan(text, since=None, until=None):
+    """One pass over the log: the tag census, the rows each rule extracts, and the labelled lines no pattern of a rule matched."""
+    census = {}
+    rows = {rule.name: {} for rule in HEALTH_RULES}
+    unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
+    tagged = 0
+    first = last = None
+    for raw in text.splitlines():
+        if "(F" not in raw:
+            continue
+        m = HEALTH_TAG_RE.search(raw)
+        if not m:
+            continue
+        sm = HEALTH_STAMP_RE.match(raw)
+        tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+        if not _health_in_window(tod, since, until):
+            continue
+        stamp = "%s:%s:%s" % sm.group(1, 2, 3) if sm else ""
+        tagged += 1
+        if stamp:
+            first = first or stamp
+            last = stamp
+        label = raw[sm.end() if sm else 0:m.start()].strip()
+        if len(label) > 48:
+            label = "..." + label[-45:]
+        tags = m.group(1).split("/")
+        for tag in tags:
+            c = census.setdefault(tag, [0, stamp, stamp, collections.Counter()])
+            c[0] += 1
+            if stamp:
+                c[1] = c[1] or stamp
+                c[2] = stamp
+            c[3][label or "(none)"] += 1
+        seen = set()
+        for tag in tags:
+            for rule in HEALTH_BY_TAG.get(tag, ()):
+                if rule.name in seen:
+                    continue
+                seen.add(rule.name)
+                body = raw[sm.end():] if sm else raw
+                for kind, rx in rule.kinds:
+                    g = rx.search(body)
+                    if g:
+                        if kind != "_":
+                            d = g.groupdict()
+                            d["_t"] = tod
+                            rows[rule.name].setdefault(kind, []).append(d)
+                        break
+                else:
+                    if any(label_text in raw for label_text in rule.labels):
+                        u = unparsed[rule.name]
+                        u[0] += 1
+                        u[1] = u[1] or raw.strip()[:160]
+    return {"census": census, "rows": rows, "unparsed": unparsed, "tagged": tagged, "first": first, "last": last}
+
+
+def health_verdicts(scan):
+    """[(rule, status, detail)] in table order for the rules with lines in the window, and the names of the rules with none."""
+    out, absent = [], []
+    for rule in HEALTH_RULES:
+        got = rule.judge(scan["rows"][rule.name], scan["rows"])
+        count, example = scan["unparsed"][rule.name]
+        if got is None:
+            if count:
+                out.append((rule, "UNPARSED", "%d line(s) carry the rule's label but no pattern matches (first: %s)" % (count, example)))
+            else:
+                absent.append(rule.name)
+            continue
+        status, detail = got
+        if count:
+            detail += " [+%d line(s) the rule's patterns do not match: %s]" % (count, example[:80])
+        out.append((rule, status, detail))
+    return out, absent
+
+
+def health_report(scan, window=""):
+    """(lines, exit code) of the --health report for a health_scan result."""
+    verdicts, absent = health_verdicts(scan)
+    census = scan["census"]
+    lines = ["[edvr] health%s: %d build-tagged lines, %d tags, %s to %s" % (window, scan["tagged"], len(census), scan["first"] or "-", scan["last"] or "-")]
+    for rule, status, detail in verdicts:
+        lines.append("  %-13s  %-26s %s" % (status, rule.name, detail))
+    if absent:
+        lines.append("  not present    %s" % ", ".join(absent))
+    covered = {t for rule in HEALTH_RULES for t in rule.tags}
+    order = sorted(census, key=lambda t: (-int(re.match(r"F(\d+)", t).group(1)), t))
+    shown = [t for t in order if t not in covered] if not scan.get("all") else order
+    if scan.get("all"):
+        lines.append("  every tag (* has a rule above):")
+    elif shown:
+        lines.append("  newest %d of %d tags with no rule (--health-all lists every tag):" % (min(HEALTH_OTHER_TAGS, len(shown)), len(shown)))
+    for t in shown if scan.get("all") else shown[:HEALTH_OTHER_TAGS]:
+        n, a, b, labels = census[t]
+        lines.append("    %-5s %7d  %s-%s  %s%s" % (t, n, a or "-", b or "-", labels.most_common(1)[0][0], "  *" if t in covered and scan.get("all") else ""))
+    bad = [rule.name for rule, status, _ in verdicts if status == "NEVER APPLIED"]
+    drift = [rule.name for rule, status, _ in verdicts if status == "UNPARSED"]
+    counts = collections.Counter(status for _, status, _ in verdicts)
+    lines.append("[edvr] health: %s%s; exit %d" % (
+        ", ".join("%d %s" % (counts[s], s) for s in ("OK", "PARTIAL", "NEVER APPLIED", "IDLE", "UNPARSED") if counts[s]) or "no rule had a line",
+        "; %d not present" % len(absent) if absent else "", 3 if bad else 4 if drift else 0))
+    return lines, (3 if bad else 4 if drift else 0)
+
+
+def print_health(text, args):
+    """The --health report. Returns the process exit code."""
+    try:
+        since = parse_health_time(args.since) if args.since else None
+        until = parse_health_time(args.until, end=True) if args.until else None
+    except ValueError as e:
+        print("[edvr] bad --since/--until time %s (use HH:MM or HH:MM:SS)" % e)
+        return 1
+    scan = health_scan(text, since, until)
+    scan["all"] = bool(args.health_all)
+    window = ""
+    if args.since or args.until:
+        window = " (window %s..%s)" % (args.since or "start", args.until or "end")
+    lines, rc = health_report(scan, window)
+    for line in lines:
+        print(line)
+    return rc
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Locate and read EDVR flight logs.")
@@ -10432,6 +10921,19 @@ def main(argv=None):
                          "profile switch: one row per line in log order with the "
                          "watch's ms since the previous line and since the last hint, "
                          "then a summary; exit 3 when the log has none of those lines")
+    ap.add_argument("--health", action="store_true",
+                    help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
+                         "readout F90, weapon UI pin F85b, reticle depth F85c, view height hold F87h, weapon eye offset F88, ADS "
+                         "transition and left eye F89, marker fix, prompt anchor and label F87p) saying OK, PARTIAL, NEVER APPLIED "
+                         "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
+                         "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
+                         "Exit 3 when any family is NEVER APPLIED, 4 when a rule no longer matches its lines, 2 for a wrong build")
+    ap.add_argument("--since", default=None,
+                    help="with --health, only lines at or after this time of day, HH:MM[:SS] (the log's own clock)")
+    ap.add_argument("--until", default=None,
+                    help="with --health, only lines at or before this time of day, HH:MM[:SS]")
+    ap.add_argument("--health-all", action="store_true",
+                    help="with --health, list every tag in the census, not only the newest tags that have no rule")
     ap.add_argument("--window-ms", type=float, default=100.0,
                     help="with --tally periodic, a long frame coincides with a "
                          "periodic event when the event's end time is inside "
@@ -10474,6 +10976,10 @@ def main(argv=None):
     if args.freezes and not args.file and args.tag.lower() != "gfx":
         print("[edvr] --freezes reads the graphics log (--tag gfx) and pairs "
               "its runtime log itself; drop --tag %s." % args.tag)
+        return 1
+
+    if (args.since or args.until or args.health_all) and not args.health:
+        print("[edvr] --since, --until and --health-all belong to --health.")
         return 1
 
     native_dirs = None
@@ -10546,6 +11052,8 @@ def main(argv=None):
     if args.version:
         return 0
 
+    if args.health:
+        return print_health(text, args)
     if args.vscreen_fit:
         return print_vscreen_fit(text)
     if args.flat_upscale:
@@ -10889,6 +11397,361 @@ def self_test_switches():
                 fail("--switches on the drifted log lacks %r:\n%s" % (line, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+def health_c_format(source, needle):
+    """The C format string of the Log note whose literal holds needle: that literal and the string literals that follow it (adjacent literals concatenate), or None."""
+    at = source.find(needle)
+    if at < 0:
+        return None
+    pos = source.rfind('"', 0, at)
+    literal, white = re.compile(r'"((?:[^"\\\n]|\\.)*)"'), re.compile(r"\s*")
+    out = []
+    while True:
+        m = literal.match(source, pos)
+        if not m:
+            break
+        out.append(m.group(1))
+        pos = white.match(source, m.end()).end()
+        if pos >= len(source) or source[pos] != '"':
+            break
+    return "".join(out).replace('\\"', '"').replace("\\\\", "\\")
+
+
+def health_render(fmt, vals):
+    """fmt (a C printf format) filled from vals in order; a conversion past the end of vals, or given None, gets a neutral value. A field added to the end of a log
+    line therefore does not break a fixture built on its leading ones, while one inserted before them shifts the fields and fails the match."""
+    state = [0]
+
+    def one(m):
+        if m.group(0) == "%%":
+            return "%"
+        i, conv = state[0], m.group(2)
+        state[0] += 1
+        v = vals[i] if i < len(vals) and vals[i] is not None else ("x" if conv == "s" else 0.0 if conv in "fFeEgG" else 0)
+        return ("%" + m.group(1) + ("d" if conv in "diu" else conv)) % (v,)
+    return re.sub(r"%%|%([-+ #0]*\d*(?:\.\d+)?)(?:ll|l|z|h)?([diuxXsfFeEgGc])", one, fmt)
+
+
+def self_test_health():
+    """--health on synthetic logs whose lines are rendered from the C format strings in src\\d3d11\\native_on_foot.cpp (so a format that drifts from its rule fails
+    here, in the build, and not in the half hour after a flight): every rule's OK, PARTIAL, NEVER APPLIED, IDLE and UNPARSED cases and its cross-checks, the tag census,
+    the --since/--until window, the exit codes and --expect-build. Returns ok; HEALTH_SELF_TEST_CHECKS holds the number of checks made."""
+    import contextlib
+    import io
+    import shutil
+
+    global HEALTH_SELF_TEST_CHECKS
+    ok = True
+    checks = 0
+    version = "0.21.0-1-g0123456"
+    header = "[10:00:00.000] version %s (build 01234567)\n" % version
+    src_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot.cpp")
+    swap_path = os.path.join(repo_root(), "src", "d3d11", "shader_swap.cpp")
+    try:
+        source, swap = read_text(src_path), read_text(swap_path)
+    except OSError as e:
+        print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
+        return False
+    fmts = {}
+
+    def R(needle, *vals):
+        """The line the DLL writes for the format holding needle, with vals as its leading arguments."""
+        if needle not in fmts:
+            fmts[needle] = health_c_format(source, needle)
+        if fmts[needle] is None:
+            raise AssertionError("native_on_foot.cpp has no log format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[needle], vals)
+
+    def stamp(sec):
+        return "[%02d:%02d:%02d.000]" % (10 + sec // 3600, sec // 60 % 60, sec % 60)
+
+    def body(msgs, start=1):
+        """msgs at one second apiece from 10:00:01; a (second, msg) pair names its second."""
+        out, sec = [], start
+        for m in msgs:
+            if isinstance(m, tuple):
+                sec, m = m
+            out.append("%s %s\n" % (stamp(sec), m))
+            sec += 1
+        return "".join(out)
+
+    tmp = tempfile.mkdtemp(prefix="edvr_health_test_")
+    counter = [0]
+
+    def write(text, name=None):
+        counter[0] += 1
+        path = os.path.join(tmp, name or "%03d.log" % counter[0])
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(header + text)
+        return path
+
+    def cli(args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = main(args)
+        return rc, out.getvalue()
+
+    def row(status, name):
+        return "%-13s  %-26s " % (status, name)
+
+    def check(name, msgs, rc, rows=(), has=(), lacks=(), extra=()):
+        """Run --health on msgs (a list of messages, or the log text); rc must match, every (status, rule) row and every text in has must be in the output, nothing
+        in lacks may be. Returns the output."""
+        nonlocal ok, checks
+        checks += 1
+        got_rc, out = cli(["--file", write(msgs if isinstance(msgs, str) else body(msgs)), "--health", "--expect-build", version] + list(extra))
+        bad = [w for w in [row(s, n) for s, n in rows] + list(has) if w not in out] + [x for x in lacks if x in out]
+        if got_rc != rc or bad:
+            print("health %s: rc=%d wanted %d; missing or unwanted %r:\n%s" % (name, got_rc, rc, bad, out))
+            ok = False
+        return out
+
+    F90S, F90P, F85B, F85C, F87H, F88, F89A, F89E, MK, AN, LB = (
+        "weapon readout size (F90)", "pistol readout (F90)", "weapon UI pin (F85b)", "reticle depth (F85c)", "view height hold (F87h)", "weapon eye offset (F88)",
+        "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)")
+
+    try:
+        # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
+        def f90_idle(names="29510, 29526"):
+            return R("weapon readout size (F90) 1 s: no table part", names)
+
+        def f90_part(part=29526, decided=120, scaled=120, mismatch=0):
+            return R("weapon readout size (F90) 1 s: part %u", part, 1, 0.5714, 0.1, -0.2, decided, scaled, scaled // 2, scaled - scaled // 2, mismatch)
+
+        def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none"):
+            return R("pistol readout (F90) 1 s: item %s", "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why)
+
+        def pin_sec(submits=540, path="tag"):
+            return R("weapon UI pin (F85b): %s%llu matched", "" if submits else "no weapon UI part this second (no tool or weapon out, or the submit hook sees none); ",
+                     submits, submits * 2 // 3, 0, path, submits * 2 // 3 if path == "tag" else 0, submits * 2 // 3 if path == "value" else 0, 540, 100, 0)
+
+        def pin_part(found=88, decided=88, bound=88, refused=0, why="none"):
+            return R("weapon UI pin (F85b) part slot %u", 0, 29510, 0, 400, found, found, decided, bound, 0, 0, refused, why)
+
+        def retic(draws=47, patched=42, reads=21, refs=()):
+            v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
+            for i, n in enumerate(refs):
+                v[17 + i] = n
+            return R("reticle depth (F85c): key 10 draws", *v)
+
+        def hold(state="holding"):
+            return R("view height hold (F87h) 1 s: state %s", state)
+
+        def eyeoff(w=0.96, armed=1, ads=0, seated=(0.0, -7.23, 8.68)):
+            return R("weapon eye offset (F88) 1 s: keys right", 0.0, 7.5, 9.0, "follow", w, armed, ads, *seated)
+
+        def ads_start(d="press"):
+            return R("ads transition (F89) %s: tracing the next", d, 1.5, 1, 4, 0)
+
+        def ads_frame(d="press", state="engaged", lw=0.98):
+            return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "")
+
+        def eye_sec(d=0.44, key="on", state="engaged"):
+            return R("ads close left eye (F89) 1 s: darken", d, key, d, state)
+
+        def eye_ev(ev="closed", key="on"):
+            return R("ads close left eye (F89): %s (key %s", ev, key, 0.08)
+
+        def eye_guard(n=2):
+            return R("ads close left eye (F89): GUARD TRIPPED", n, 0.5, "no weapon or tool is drawn")
+
+        def mark(bound=23, dec=25, eye=0):
+            return R("native on foot marker fix (F62c/F64): eye %d: patch applied", eye, 100.0 * bound / dec, bound, dec, 0)
+
+        def mark_idle(eye=0):
+            return R("native on foot marker fix (F62c): eye %d: no decision", eye)
+
+        def mark_win(named=113, outside=8, eye=1):
+            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, "first 1 last 2")
+
+        def anchor(s=11, u=0, i=1, key=-1):
+            return R("prompt anchor (F87p) 1 s: SetMarker", s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10)
+
+        def anchor_hooked():
+            return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 15)
+
+        def label(groups=3, draws=6, ours=6, game=0, eye=0):
+            return R("prompt label draws (F87p) eye %d 1 s: groups", eye, groups, draws, "624", 0, game, ours)
+
+        # ---- weapon readout size (F90): the flight that started this mode ----
+        check("F90 size: no table part in any second", [f90_idle()] * 5, 3, [("NEVER APPLIED", F90S)], has=["no table part among the decided parts in all 5 s (names 29510, 29526)", "exit 3"])
+        check("F90 size: the names it saw are joined and sorted", [f90_idle("29510, 29526"), f90_idle("29553"), f90_idle("29510, 29526, 29524")], 3, [("NEVER APPLIED", F90S)],
+              has=["names 29510, 29524, 29526, 29553)"])
+        check("F90 size: every decided draw scaled", [f90_part()] * 4, 0, [("OK", F90S)], has=["part 29526: scaled 480 of 480 decided (eye 0 240, eye 1 240), table mismatch 0, 4 s"])
+        check("F90 size: a table part plus an idle second is OK and says so", [f90_part(), f90_idle("29553"), f90_part()], 0, [("OK", F90S)], has=["1 s with no table part (names 29553)"])
+        check("F90 size: every decision a table mismatch", [f90_part(scaled=0, mismatch=120)] * 3, 3, [("NEVER APPLIED", F90S)], has=["scaled 0 of 360", "table mismatch 360"])
+        check("F90 size: under 90 percent scaled", [f90_part(decided=120, scaled=50, mismatch=70)] * 2, 0, [("PARTIAL", F90S)])
+
+        # ---- pistol readout (F90) ----
+        check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
+              has=["item $wpn_s_pistol_kinetic_sauto_name;", "keys forward +13.0 left +6.0 up -3.0 toward eye +2.0 cm", "held 4 s", "moved 0 (hip part 0, ADS part 0)"])
+        check("F90 pistol: the weapon frame exists and the target never latched", [pistol(attach=51, refused=51, why="no target this frame or the last 51")] * 2, 3,
+              [("NEVER APPLIED", F90P)], has=["weapon frame attach 102", "refused 102 [no target this frame or the last 102]"])
+        check("F90 pistol: moved every second", [pistol(hip=40, ads=10, attach=40)] * 3, 0, [("OK", F90P)], has=["moved 150 (hip part 120, ADS part 30)"])
+        check("F90 pistol: moved in one second of four", [pistol(hip=40, attach=40), pistol(), pistol(), pistol()], 0, [("PARTIAL", F90P)])
+
+        # ---- weapon UI pin (F85b) ----
+        check("F85b: matched, found, bound", [pin_sec(), pin_part(), pin_part()], 0, [("OK", F85B)],
+              has=["540 matched submits in 1 s, path tag, found 176", "decided 176, bound 176, refused 0 [none]"])
+        check("F85b: nothing submitted and no weapon drawn", [pin_sec(0)] * 3, 0, [("IDLE", F85B)], has=["3 idle lines"])
+        check("F85b: nothing submitted while the weapon eye offset says armed", [pin_sec(0), eyeoff(), eyeoff()], 3, [("NEVER APPLIED", F85B)],
+              has=["though the weapon eye offset line says a weapon was drawn for 2 s"])
+        check("F85b: submits but the identification path is none", [pin_sec(540, "none"), pin_part()], 3, [("NEVER APPLIED", F85B)], has=["path none"])
+        check("F85b: parts found and none bound", [pin_sec(), pin_part(bound=0)], 3, [("NEVER APPLIED", F85B)], has=["bound 0"])
+        check("F85b: submits that never reach a part line", [pin_sec(), pin_sec()], 3, [("NEVER APPLIED", F85B)], has=["found 0"])
+        check("F85b: a tenth of the decisions refused", [pin_sec(), pin_part(found=100, decided=90, bound=90, refused=20, why="no scene rows for the eye 18, no K 2")], 0,
+              [("PARTIAL", F85B)], has=["refused 20 [no scene rows for the eye 18, no K 2]"])
+
+        # ---- reticle depth (F85c) ----
+        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
+        check("F85c: draws and no patch", [retic(patched=0, refs=(47,))] * 2, 3, [("NEVER APPLIED", F85C)], has=["patched 0 of 94", "refusals no depth view 94"])
+        check("F85c: under half patched", [retic(draws=10, patched=3)], 0, [("PARTIAL", F85C)])
+        check("F85c: no key 10 draw and no weapon", [R("reticle depth (F85c): no key 10 composite")] * 2, 0, [("IDLE", F85C)])
+        check("F85c: no key 10 draw while a weapon is drawn", [R("reticle depth (F85c): no key 10 composite"), eyeoff()], 3, [("NEVER APPLIED", F85C)])
+        check("F85c: the compute shader could not be created",
+              ["reticle depth (F85c): precompiled compute shader reticle_depth_cs creation FAILED; standing down (0x80004005, 0.100 ms)."], 3,
+              [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
+        check("F85c: the shader line of a good start is not a failure", ["reticle depth (F85c): precompiled compute shader reticle_depth_cs created (0x00000000, 0.057 ms).", retic()], 0,
+              [("OK", F85C)])
+
+        # ---- view height hold (F87h) ----
+        check("F87h: holding", [hold(), hold("holding (rate-limited)"), hold("ramping in")], 0, [("OK", F87H)], has=["3 s: holding 2, ramping 1"])
+        check("F87h: never holding, no pose throughout", [hold("no pose (the LOCAL head was not read)")] * 3, 3, [("NEVER APPLIED", F87H)], has=["no pose 3"])
+        check("F87h: out of scope throughout", [hold("out of scope")] * 3, 0, [("IDLE", F87H)])
+        check("F87h: holding a third of the time", [hold(), hold("frozen (ADS)"), hold("frozen (weapon eye offset moving)")], 0, [("PARTIAL", F87H)], has=["frozen 2"])
+
+        # ---- weapon eye offset (F88) ----
+        check("F88: armed with the weight up", [eyeoff(), eyeoff(w=1.0), eyeoff(w=0.5, ads=1)], 0, [("OK", F88)], has=["armed 3 s, w min 0.50 median 0.96 max 1.00"])
+        check("F88: armed and the weight never rose", [eyeoff(w=0.0, seated=(0.0, 0.0, 0.0))] * 3, 3, [("NEVER APPLIED", F88)], has=["w min 0.00 median 0.00 max 0.00"])
+        check("F88: keys set, weight up, applied offset zero", [eyeoff(seated=(0.0, 0.0, 0.0))] * 3, 3, [("NEVER APPLIED", F88)], has=["applied seated offset nonzero in 0 s; keys set"])
+        check("F88: the weight mostly low", [eyeoff(w=0.3)] * 3, 0, [("PARTIAL", F88)])
+        check("F88: keys set and no weapon drawn", [eyeoff(w=0.0, armed=0, seated=(0.0, 0.0, 0.0))] * 2, 0, [("IDLE", F88)])
+
+        # ---- ads transition (F89) and ads close left eye (F89) ----
+        check("F89 trace: a press and a release", [ads_start("press"), ads_frame(), ads_frame(), ads_start("release"), ads_frame("release", "releasing", 0.5)], 0, [("OK", F89A)],
+              has=["traced 1 presses and 1 releases, 3 frame lines, lock weight max 0.98"])
+        check("F89 trace: a press with no release", [ads_start("press"), ads_frame()], 0, [("PARTIAL", F89A)], has=["one direction only"])
+        check("F89 trace: engaged and the lock weight never rose", [ads_start("press"), ads_frame(lw=0.0), ads_start("release"), ads_frame("release", "idle", 0.0)], 3,
+              [("NEVER APPLIED", F89A)], has=["the lock weight never rose"])
+        check("F89 trace: events past the minute's cap are counted", [ads_start("press"), ads_start("release"), ads_frame(), R("ads transition (F89): not traced, %d events", 4, 7)], 0,
+              [("OK", F89A)], has=["1 events not traced"])
+        check("F89 eye: closed and opened", [eye_ev("closed"), eye_sec(), eye_sec(0.9), eye_ev("open")], 0, [("OK", F89E)],
+              has=["closed 1, open 1, ADS seconds with the key on 2 of 2, darken max 0.90"])
+        check("F89 eye: key off", [eye_sec(0.0, "off")] * 3, 0, [("IDLE", F89E)], has=["(key off)"])
+        check("F89 eye: key on, ADS, darken never above zero", [eye_sec(0.0), eye_sec(0.0)], 3, [("NEVER APPLIED", F89E)])
+        check("F89 eye: the guard tripped", [eye_ev("closed"), eye_sec(), eye_guard(2)], 0, [("PARTIAL", F89E)], has=["guard tripped 2"])
+
+        # ---- marker fix ----
+        check("marker fix: applied for most decisions", [mark(23, 25, 0), mark(23, 25, 1), mark_win()], 0, [("OK", MK)],
+              has=["patch applied eye 0 92% (23 of 25), eye 1 92% (23 of 25); named 113, outside 8 (F87c)"])
+        check("marker fix: decisions and none bound", [mark(0, 25)] * 2, 3, [("NEVER APPLIED", MK)])
+        check("marker fix: under half bound", [mark(10, 25)], 0, [("PARTIAL", MK)])
+        check("marker fix: no decision at all", [mark_idle(0), mark_idle(1)], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"])
+
+        # ---- prompt anchor and label (F87p) ----
+        check("F87p anchor: the hooks fired", [anchor_hooked(), anchor(), anchor(12, 1, 1, 3)], 0, [("OK", AN)],
+              has=["SetMarker 23 UpdateMarker 1 UpdateIndicator 2 in 2 s; focus key set in 1 s"])
+        check("F87p anchor: hooked and nothing ever fired", [anchor_hooked(), anchor(0, 0, 0), anchor(0, 0, 0)], 3, [("NEVER APPLIED", AN)],
+              has=["SetMarker 0 UpdateMarker 0 UpdateIndicator 0 in 2 s"])
+        check("F87p anchor: the slots were not hooked", [R("prompt anchor (F87p): NOT hooked", "the vtable slot 0x48 is not the expected function")], 3, [("NEVER APPLIED", AN)],
+              has=["NOT hooked: the vtable slot 0x48 is not the expected function"])
+        check("F87p label: groups drawn with our b0", [label(), label(eye=1)], 0, [("OK", LB)], has=["groups 6, draws 12, b0 at issue ours 12 game 0 (2 eye-seconds)"])
+        check("F87p label: a focus key was set and no label was ever drawn", [anchor(12, 1, 1, 3), label(0, 0, 0)], 3, [("NEVER APPLIED", LB)], has=["a focus key was set in 1 s"])
+        check("F87p label: no focus key and no label", [anchor(), label(0, 0, 0)], 0, [("IDLE", LB)])
+        check("F87p label: drawn with the game's b0 only", [label(ours=0, game=6)], 0, [("PARTIAL", LB)])
+        check("F87p label: a mesh that was not decoded",
+              [label(), R("prompt label draws (F87p) eye %d: the %u-index draw's mesh was NOT decoded", 0, 624, "the index range could not be read")], 0, [("PARTIAL", LB)],
+              has=["NOT decoded 1 time(s) (the index range could not be read)"])
+
+        # ---- the exit code is the worst row, and every row is still printed ----
+        check("a mixed flight", [f90_idle(), f90_idle(), pistol(), pin_sec(), pin_part(), hold(), eyeoff()], 3,
+              [("NEVER APPLIED", F90S), ("NEVER APPLIED", F90P), ("OK", F85B), ("OK", F87H), ("OK", F88)], has=["2 NEVER APPLIED", "exit 3"], lacks=["exit 0"])
+        check("a healthy flight", [f90_part(), pistol(hip=3, attach=3), pin_sec(), pin_part(), hold(), eyeoff()], 0, [("OK", F90S), ("OK", F90P), ("OK", F85B)], has=["exit 0"],
+              lacks=["NEVER"])
+
+        # ---- the census: a feature with no rule still shows its tag ----
+        label6 = "skin join: second skin this window: x | views given 0 (live 0) | on-foot source"
+        out = check("census", [
+            "newest thing (F91): started", "newest thing (F91): ran", "newest thing (F91): ran again", "foo bar (F62c/F64): x", "native on foot pistol readout (F90, TEMPORARY): key = 1",
+            label6 + " (F2 on foot): target 7 (see also F3's note)", "a line about a cross reference (F70b) that mentions (F12) later", "a line with no tag at all",
+            "a paren (F) and (Fx) and (F-1) and (F 1) here"], 0, has=["7 build-tagged lines, 6 tags, 10:00:01 to 10:00:07"], extra=["--health-all"])
+        for tag, n, a, b, text, star in (("F91", 3, 1, 3, "newest thing", ""), ("F90", 1, 5, 5, "native on foot pistol readout", "  *"), ("F70b", 1, 7, 7, "a line about a cross reference", ""),
+                                         ("F64", 1, 4, 4, "foo bar", "  *"), ("F62c", 1, 4, 4, "foo bar", "  *"), ("F2", 1, 6, 6, "..." + label6[-45:], "")):
+            checks += 1
+            want = "    %-5s %7d  10:00:%02d-10:00:%02d  %s%s" % (tag, n, a, b, text, star)
+            if want not in out:
+                print("health census: %r is not in the output:\n%s" % (want, out))
+                ok = False
+        checks += 1
+        if re.search(r"^\s+F(12|3|1)\s", out, re.M):
+            print("health census counted a tag that is only mentioned later in a line, or a malformed one:\n%s" % out)
+            ok = False
+        check("census: only the tags with no rule by default", [f90_idle(), "newest thing (F91): started", "older thing (F70c): x"], 3,
+              has=["newest 2 of 2 tags with no rule", "    F91 ", "    F70c "], lacks=["    F90 "])
+        out = check("census: the newest tag first", ["a (F80): x", "b (F95): y", "c (F9): z"], 0)
+        checks += 1
+        if not (out.index("    F95 ") < out.index("    F80 ") < out.index("    F9 ")):
+            print("health census is not newest tag first:\n%s" % out)
+            ok = False
+        check("census: a log with no tagged line", ["nothing here", "still nothing"], 0, has=["0 build-tagged lines, 0 tags", "no rule had a line"])
+        many = ["t%d (F%d): x" % (i, 100 + i) for i in range(12)]
+        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F111 ", "    F104 "], lacks=["    F103 "])
+
+        # ---- a format that drifts from its rule fails loudly ----
+        check("a rule whose lines no longer match", [pistol().replace("keys forward", "knobs forward")] * 2, 4, [("UNPARSED", F90P)],
+              has=["2 line(s) carry the rule's label but no pattern matches (first: [10:00:01.000] pistol readout (F90) 1 s: item"])
+        check("a drifted line among good ones is counted beside the verdict", [pistol(hip=3, attach=3), pistol(hip=3, attach=3).replace("keys forward", "knobs forward")], 0,
+              [("OK", F90P)], has=["[+1 line(s) the rule's patterns do not match"])
+        check("NEVER APPLIED outranks UNPARSED", [f90_idle(), pistol().replace("keys forward", "knobs forward")], 3, [("NEVER APPLIED", F90S), ("UNPARSED", F90P)])
+
+        # ---- the window ----
+        timed = body([(10, f90_idle()), (11, f90_idle()), (70, f90_part()), (71, f90_part()), (72, pistol(hip=2, attach=2))])
+        check("window: --until keeps the bad first half", timed, 3, [("NEVER APPLIED", F90S)], has=["(window start..10:00:30)"], extra=["--until", "10:00:30"])
+        check("window: --since keeps the good second half", timed, 0, [("OK", F90S), ("OK", F90P)], has=["(window 10:00:30..end)"], extra=["--since", "10:00:30"])
+        check("window: both ends, the end taking its whole second", timed, 3, [("NEVER APPLIED", F90S)], has=["(window 10:00:10..10:00:11)", "2 build-tagged lines"],
+              extra=["--since", "10:00:10", "--until", "10:00:11"])
+        check("window: across midnight", "[23:59:58.000] %s\n[00:00:02.000] %s\n[12:00:00.000] %s\n" % (f90_idle(), f90_idle(), f90_part()), 3, [("NEVER APPLIED", F90S)],
+              has=["2 build-tagged lines"], extra=["--since", "23:59:00", "--until", "00:01:00"])
+        check("window: a time that is not a time", [f90_idle()], 1, has=["bad --since/--until time 25:00"], extra=["--since", "25:00"])
+        checks += 1
+        rc, out = cli(["--file", write(body([f90_idle()])), "--since", "10:00:00"])
+        if rc != 1 or "belong to --health" not in out:
+            print("health: --since without --health rc=%d:\n%s" % (rc, out))
+            ok = False
+
+        # ---- the build check comes first, and the help names the mode ----
+        checks += 1
+        rc, out = cli(["--file", write(body([f90_idle()])), "--health", "--expect-build", "0.21.0-2-g7654321"])
+        if rc != 2 or "BUILD MISMATCH" not in out or "NEVER APPLIED" in out:
+            print("health: a wrong build did not stop before the report (rc=%d):\n%s" % (rc, out))
+            ok = False
+        checks += 1
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                main(["--help"])
+            except SystemExit:
+                pass
+        help_text = " ".join(out.getvalue().split())
+        if "--health" not in help_text or "NEVER APPLIED" not in help_text or "--health-all" not in help_text or "--health" not in (__doc__ or ""):
+            print("health: --help or the module text does not describe --health")
+            ok = False
+
+        # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
+        checks += 1
+        if "creation FAILED; standing down" not in swap or "creation faulted/refused; standing down" not in swap or "%s: precompiled compute shader %s %s (0x%08X" not in swap:
+            print("health: shader_swap.cpp no longer writes the creation failure lines the reticle depth rule reads")
+            ok = False
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("health: self-test stopped at an exception")
+        ok = False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    HEALTH_SELF_TEST_CHECKS = checks
     return ok
 
 
@@ -11281,6 +12144,8 @@ def self_test():
     if not self_test_switches():
         ok = False
     if not self_test_owner_invoke():
+        ok = False
+    if not self_test_health():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
