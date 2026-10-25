@@ -57,6 +57,8 @@
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
+#include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
+#include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -12237,6 +12239,31 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     g_f66aGateSum = 0.0;
 }
 
+// ---- F119: head containment, measure only (nofoot::f119, native_on_foot_f119.h) -------------------------------------------------------------------------------
+// The state the frame thread keeps (f119Tick, once a frame in alignTick: the head's offset from the rest point) and the depth side adds to (f44::f119Boundary, at the
+// Present boundary: the scene depth grid) before the one line a second. The eye alignment published under each serial, all three axes, is kept here so the pose's
+// applied alignment is known whole (F89's history keeps the y alone). The pin's Animate post-hook publishes the stance it sees (g_f119StancePub: 0 standing, 1 crouched,
+// 2 not known) with the time of its call.
+nofoot::f119::AlignHistory3 g_f119Hist;
+std::atomic<int> g_f119StancePub{2};
+std::atomic<uint64_t> g_f119StanceMs{0};
+struct F119State {
+    nofoot::f119::OffsetSecond off;
+    nofoot::f119::OwnSecond own;
+    nofoot::f119::DepthSecond depth;
+    uint64_t lineMs = 0, restMs = 0, startMs = 0;
+    uint32_t generation = 0, recentres = 0, moves = 0;   // the reference generation seen; the moves of the rest point on foot since it began (moves: all of them)
+    bool genSeen = false, wasOn = false, sessionSaid = false;
+    bool haveLast = false;   // the newest sample: the head's offset, its class, and when
+    nofoot::f119::Offset last;
+    int lastStance = nofoot::f119::kStanceUnknown, lastItem = nofoot::f119::kUnarmed;
+    bool lastAds = false;
+    uint64_t lastMs = 0;
+    double costUs = 0.0;       // the second's own cost: the sampling here and the depth side's dispatch, readback and line (microseconds)
+    uint32_t costFrames = 0;
+};
+F119State g_f119;
+std::atomic<uint32_t> g_f119DrawThread{0};   // the thread of the game's draws (the first draw of each frame), for the Present boundary's GPU work to check against
 // ---- F87h: the standing-height hold, the frame thread's half ---------------------------------------------------------------------------------------------
 // See nofoot::f87 (native_on_foot_f87.h) for the filter. The measurement: the render head's height in the seated space (np.render) with the eye alignment taken out (the
 // hold, the ADS locks and the weapon view offset are all part of that space), less the neck pivot's drop at the head's LOCAL pitch. The result goes out as the y of the
@@ -12251,6 +12278,10 @@ nofoot::f89::HoldAlignSecond g_f89AlignSec;
 void f89AlignPublish(const float f[3]) noexcept {
     const uint32_t serial = ++g_align.serial;
     g_f89Hist.record(serial, static_cast<double>(f[1]));
+    {   // F119: the same alignment, whole
+        const double whole[3] = {static_cast<double>(f[0]), static_cast<double>(f[1]), static_cast<double>(f[2])};
+        g_f119Hist.record(serial, whole);
+    }
     // F91 B: the cancel total (the seated yaw and pitch, published this tick ahead of the alignment) under the same serial: the pose's reported serial names the cancel it carried
     g_f91Cancel.record(serial, g_f91.tick, g_adsMap.yawPublished() / nofoot::kAdsDeg, g_adsMap.pitchPublished() / nofoot::kAdsDeg);
     g_f93Sight.record(serial, g_adsSight.applied);   // F93b: the sight lock's part of this alignment, for its matched input
@@ -12909,6 +12940,86 @@ void f115Tick(uint64_t now) noexcept {
     } else if (g_f115Rec.due(now)) {
         f115Followup(now);
     }
+}
+
+// ---- F119: the head's offset from the rest point, the frame thread's half ----------------------------------------------------------------------------------
+// Once a frame in alignTick, after the eye alignment of the tick is made: the pose's head in the seated space (np.render) plus the alignment that pose carried (found by
+// the serial the runtime reported with it, as F89 does) is the physical head; its offset from the seated origin (the rest point) is kept by class (stance, item, ADS) for
+// the second, apart from EDVR's own eye offsets (the alignment as published and the terms it is made of). A move of the rest point on foot (the reference generation) is
+// logged with the head's offset just before it. The second's line, with the depth side's numbers, is f44::f119Boundary's. Nothing here changes a value anyone reads.
+void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ads, bool cameraOn, const double total[3], const double lock[3], const double weapon[3],
+              const double view[3], double neckUp, double holdUp) noexcept {
+    namespace f119 = nofoot::f119;
+    F119State& s = g_f119;
+    const uint64_t t0 = f30Qpc();
+    if (!nativeOnFootActive()) {
+        s.wasOn = false;
+        return;
+    }
+    if (!s.wasOn) {   // native stereo on foot began: a new rest point history, a new second
+        s.wasOn = true;
+        s.genSeen = s.haveLast = false;
+        s.recentres = 0;
+        s.restMs = s.startMs = s.lineMs = now;
+        s.off.reset();
+        s.own.reset();
+        s.depth.reset();
+        s.costUs = 0.0;
+        s.costFrames = 0;
+    }
+    ++s.off.frames;
+    if (!haveFrame || !cameraOn) {   // no head from the runtime, or off the commander's first-person camera (boarding, the game's own third-person camera)
+        ++s.off.noPose;
+        s.genSeen = s.haveLast = false;
+        s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
+        ++s.costFrames;
+        return;
+    }
+    const f119::AlignHistory3::Found found = g_f119Hist.find(np.inputVersion >= 3 ? np.eyeAlignApplied : 0u);
+    double applied[3] = {};
+    if (found.matched) {
+        for (int i = 0; i < 3; ++i) applied[i] = found.v[i];
+    } else if (!found.reported) {   // a runtime that reports no serial: the alignment published last (F88's measurement)
+        for (int i = 0; i < 3; ++i) applied[i] = g_eyeAlignPub[i];
+    } else {   // a serial the history no longer holds
+        ++s.off.alignMissed;
+        ++s.off.noPose;
+        s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
+        ++s.costFrames;
+        return;
+    }
+    const f119::Offset o = f119::physicalOffset(np.render, applied);
+    const int stance = f119::stanceOf(g_f119StancePub.load(std::memory_order_relaxed), g_f119StanceMs.load(std::memory_order_relaxed), now, 1000);
+    const JournalHeldItem kind = journalHeldItem();
+    char heldName[64] = {};
+    if (kind != kHeldUnknown) journalHeldItemName(heldName, sizeof(heldName));
+    F83SelectionRead f83{};
+    const bool nativePrimary = f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
+    const int item = f119::itemOf(nofoot::f91::adsItemGate(nativePrimary, kind, heldName).allow, g_armed);
+    const bool adsNow = ads || g_adsState == kAdsActive;
+    if (!s.genSeen) {
+        s.genSeen = true;
+        s.generation = np.referenceGeneration;
+        s.restMs = now;
+    } else if (np.referenceGeneration != s.generation) {
+        ++s.recentres;
+        char b[640];
+        f119::formatRecentre(b, sizeof(b), s.generation, np.referenceGeneration, s.recentres, s.haveLast && now >= s.lastMs && now - s.lastMs <= 1000, s.last,
+                             static_cast<double>(now - s.restMs) * 1e-3, s.lastStance, s.lastItem, s.lastAds);
+        Log::get().note("%s", b);
+        s.generation = np.referenceGeneration;
+        s.restMs = now;
+    }
+    s.off.add(f119::classIndex(stance, item, adsNow), o);
+    s.own.add(total, lock, weapon, view, neckUp, holdUp);
+    s.haveLast = true;
+    s.last = o;
+    s.lastStance = stance;
+    s.lastItem = item;
+    s.lastAds = adsNow;
+    s.lastMs = now;
+    s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
+    ++s.costFrames;
 }
 
 void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignClock); now (ms) is for staleness and the 1 s lines
@@ -13651,6 +13762,10 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             if (camExternal) eye[i] = 0.0;
             eye[i] = nofoot::f115::gate(onFoot, eye[i]);
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
+        }
+        {   // F119 (measure only): the head's offset from the rest point against EDVR's own eye offsets, which are the alignment just made and the terms it holds
+            const double lockSum[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]};
+            f119Tick(now, np, haveFrame, ads, onFoot && !camExternal, eye, lockSum, weaponEye.out.seated, weaponView.seated, neckRef.out.seatedY, hold.eyeY);
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
             // F88: plus the share of w O the pin ignores (all of it with body stay, its up part with follow)
@@ -15151,6 +15266,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F95a/F98c: the target is published from a settled stance below, once F97a's armed raise is known (the neck as the body is written).
             pc.f95Moving = !(speed < nofoot::kPinWalkMps && std::fabs(vy) <= nofoot::kPinAirMps);
             g_f95Moving.store(pc.f95Moving, std::memory_order_relaxed);
+            // F119: the stance the pin sees (the camera's crouch weight against the standing calibration), for the head containment instrument; unknown without the calibration
+            g_f119StancePub.store(pc.calHave ? (nofoot::pinCrouchedWc(pc.wc) ? 1 : 0) : 2, std::memory_order_relaxed);
+            g_f119StanceMs.store(GetTickCount64(), std::memory_order_relaxed);
             // F95a: the view's vertical step from the last game frame, the head's own motion out of it (the transient and the pitch's pivot), counted while the head was
             // still: what the view does that the player did not do.
             const double viewLevel = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid);
@@ -26028,6 +26146,387 @@ void f86Tick(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel
     if (!fromReticle && frame - g_f86LastReticle <= 3u) return;
     f86Dispatch(ctx, frame, reticleOrel, reticleU, gameD, reticleRing);
 }
+
+// ---- F119: the scene depth grid and the second's line, the Present boundary's half ------------------------------------------------------------------------------
+// Once a frame at the Present boundary (nativeOnFootFrameBoundary, after alignTick), for each eye that drew its scene in the frame that ended: one dispatch of
+// head_containment_shader.h over the eye's scene depth and its stencil plane, both eyes into one output buffer, copied into a staging ring of three and read two frames on
+// (the F85c pattern, DO_NOT_WAIT). The compute stage's shader, views, UAV and constants are put back; a scene depth still bound as a depth target is taken off the output
+// merger for the dispatch and put back. Nothing the game reads is written. The eye's rows (the depth prepass's, F113) give the depth fit and the near plane.
+static_assert(kHeadEyeWords == nofoot::f119::kEyeWords && kHeadCells == nofoot::f119::kCells && kHeadGrid == nofoot::f119::kGrid && kHeadTaps == nofoot::f119::kTaps &&
+              kHeadStencilMask == nofoot::f119::kStencilMask, "the shader's grid and the decode's are one");
+struct F119Gpu {
+    ID3D11ComputeShader* cs = nullptr;
+    bool csTried = false;
+    ID3D11Buffer* cb = nullptr;
+    ID3D11Buffer* out = nullptr;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    ID3D11Buffer* stage[3] = {};
+    ID3D11ShaderResourceView* depthSrv[2] = {};
+    ID3D11ShaderResourceView* stencilSrv[2] = {};
+    const void* srvTex[2] = {};
+    uint32_t srvW[2] = {}, srvH[2] = {};
+    struct Slot {
+        bool inFlight = false;
+        bool dispatched[2] = {};
+        uint32_t frame = 0, seq = 0, w[2] = {}, h[2] = {};
+        double nearM[2] = {};
+        bool offsetKnown = false;
+        double offsetCm = 0.0;
+    };
+    Slot slot[3];
+    uint32_t seq = 0, dsvUnbound = 0, noStencil = 0;
+    bool saidThread = false, saidNoSrv[2] = {}, saidNoStencil[2] = {};
+};
+F119Gpu g_f119g;
+void f119Release() {
+    F119Gpu& g = g_f119g;
+    for (int e = 0; e < 2; ++e) {
+        if (g.depthSrv[e]) g.depthSrv[e]->Release();
+        if (g.stencilSrv[e]) g.stencilSrv[e]->Release();
+    }
+    for (auto& s : g.stage)
+        if (s) s->Release();
+    if (g.uav) g.uav->Release();
+    if (g.out) g.out->Release();
+    if (g.cb) g.cb->Release();
+    if (g.cs) g.cs->Release();
+    g = F119Gpu{};
+}
+bool f119Ensure(ID3D11DeviceContext* ctx) {
+    F119Gpu& g = g_f119g;
+    if (!g.cs && !g.csTried) {
+        g.csTried = true;
+        g.cs = shaderSwapCreateCs(ctx, kHeadContainmentBytecode, sizeof(kHeadContainmentBytecode), "head_containment_cs", "head containment (F119)");
+    }
+    if (!g.cs) return false;
+    if (g.out) return true;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = kHeadOutWords * 4u;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bd.StructureByteStride = 4;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = kHeadOutWords;
+    D3D11_BUFFER_DESC sd{};
+    sd.ByteWidth = kHeadOutWords * 4u;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    D3D11_BUFFER_DESC cd{};
+    cd.ByteWidth = 48;
+    cd.Usage = D3D11_USAGE_DYNAMIC;
+    cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    const bool made = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g.out)) && SUCCEEDED(dev->CreateUnorderedAccessView(g.out, &ud, &g.uav)) &&
+                      SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[0])) && SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[1])) &&
+                      SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[2])) && SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g.cb));
+    dev->Release();
+    if (!made) {
+        Log::get().note("head containment (F119): the GPU resources could not be made; the depth grid is not measured");
+        ID3D11ComputeShader* keep = g.cs;
+        g.cs = nullptr;
+        f119Release();
+        g.csTried = true;
+        if (keep) keep->Release();
+        return false;
+    }
+    return true;
+}
+// The views of an eye's scene depth: the depth plane and, where the format has one, the stencil plane. False when the depth cannot be viewed (said once per eye).
+bool f119Views(ID3D11DeviceContext* ctx, int e, ID3D11Texture2D* tex) {
+    F119Gpu& g = g_f119g;
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (g.srvTex[e] == tex && g.srvW[e] == td.Width && g.srvH[e] == td.Height) return g.depthSrv[e] != nullptr;
+    if (g.depthSrv[e]) g.depthSrv[e]->Release();
+    if (g.stencilSrv[e]) g.stencilSrv[e]->Release();
+    g.depthSrv[e] = g.stencilSrv[e] = nullptr;
+    g.srvTex[e] = tex;
+    g.srvW[e] = td.Width;
+    g.srvH[e] = td.Height;
+    DXGI_FORMAT df = DXGI_FORMAT_UNKNOWN, sf = DXGI_FORMAT_UNKNOWN;
+    switch (td.Format) {
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: df = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; sf = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT; break;
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT: df = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; sf = DXGI_FORMAT_X24_TYPELESS_G8_UINT; break;
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT: df = DXGI_FORMAT_R32_FLOAT; break;
+        default: break;
+    }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    bool ok = false;
+    if (dev && df != DXGI_FORMAT_UNKNOWN && (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) && td.SampleDesc.Count == 1) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = df;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        vd.Texture2D.MipLevels = 1;
+        if (FAILED(dev->CreateShaderResourceView(tex, &vd, &g.depthSrv[e]))) g.depthSrv[e] = nullptr;
+        if (g.depthSrv[e] && sf != DXGI_FORMAT_UNKNOWN) {
+            vd.Format = sf;
+            if (FAILED(dev->CreateShaderResourceView(tex, &vd, &g.stencilSrv[e]))) g.stencilSrv[e] = nullptr;
+        }
+        ok = g.depthSrv[e] != nullptr;
+    }
+    if (dev) dev->Release();
+    if (!ok && !g.saidNoSrv[e]) {
+        g.saidNoSrv[e] = true;
+        Log::get().note("head containment (F119): eye %d's scene depth cannot be viewed (format %u, bind flags 0x%X, %u samples): the depth grid is not measured for it", e,
+                        static_cast<unsigned>(td.Format), static_cast<unsigned>(td.BindFlags), static_cast<unsigned>(td.SampleDesc.Count));
+    }
+    if (ok && !g.stencilSrv[e] && !g.saidNoStencil[e]) {
+        g.saidNoStencil[e] = true;
+        Log::get().note("head containment (F119): eye %d's scene depth (format %u) has no stencil view: the player's own geometry cannot be told from the world there (world = all)", e,
+                        static_cast<unsigned>(td.Format));
+    }
+    return ok;
+}
+// Two frames on: each answered dispatch's cells become the second's coverage.
+void f119Poll(ID3D11DeviceContext* ctx, uint32_t ended) {
+    namespace f119 = nofoot::f119;
+    F119Gpu& g = g_f119g;
+    f119::DepthSecond& d = g_f119.depth;
+    for (int i = 0; i < 3; ++i) {
+        F119Gpu::Slot& sl = g.slot[i];
+        if (!sl.inFlight) continue;
+        const uint32_t age = ended - sl.frame;
+        if (age < 2u) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(g.stage[i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (age > 8u) {
+                sl.inFlight = false;
+                ++d.skipped[f119::kSkipDropped];
+            } else {
+                ++d.skipped[f119::kSkipLate];
+            }
+            continue;
+        }
+        if (FAILED(hr) || !m.pData) {
+            sl.inFlight = false;
+            ++d.skipped[f119::kSkipMap];
+            continue;
+        }
+        uint32_t words[kHeadOutWords];
+        std::memcpy(words, m.pData, sizeof(words));
+        ctx->Unmap(g.stage[i], 0);
+        sl.inFlight = false;
+        f119::Coverage cov[2];
+        bool have[2] = {};
+        for (int e = 0; e < 2; ++e) {
+            if (!sl.dispatched[e]) continue;
+            f119::EyeGrid grid;
+            if (!f119::decodeEye(words + e * f119::kEyeWords, sl.seq, sl.w[e], sl.h[e], &grid)) {
+                ++d.skipped[f119::kSkipSeq];
+                continue;
+            }
+            if (!grid.mask) ++g.noStencil;
+            cov[e] = f119::coverage(grid, sl.nearM[e]);
+            d.eye[e].add(cov[e], sl.nearM[e]);
+            have[e] = true;
+        }
+        d.addFrame(cov, have, sl.offsetKnown, sl.offsetCm);
+    }
+}
+// The dispatch for the frame that ended: both eyes that drew their scene in it.
+void f119Dispatch(ID3D11DeviceContext* ctx, uint32_t ended, ID3D11Texture2D* const tex[2], const double fit[2][2], const bool ready[2]) {
+    namespace f119 = nofoot::f119;
+    F119Gpu& g = g_f119g;
+    const int si = static_cast<int>(ended % 3u);
+    if (g.slot[si].inFlight) {
+        ++g_f119.depth.skipped[f119::kSkipRing];
+        return;
+    }
+    // a scene depth still bound as a depth target cannot be read: take it off for the dispatch
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+    bool unbind = false;
+    if (dsv) {
+        ID3D11Resource* res = nullptr;
+        dsv->GetResource(&res);
+        for (int e = 0; e < 2; ++e) unbind = unbind || (ready[e] && res == tex[e]);
+        if (res) res->Release();
+    }
+    if (unbind) {
+        ++g.dsvUnbound;
+        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, nullptr);
+    }
+    ID3D11ComputeShader* savedCs = nullptr;
+    ID3D11ShaderResourceView* savedSrv[2] = {};
+    ID3D11UnorderedAccessView* savedUav = nullptr;
+    ID3D11Buffer* savedCb = nullptr;
+    ctx->CSGetShader(&savedCs, nullptr, nullptr);
+    ctx->CSGetShaderResources(0, 2, savedSrv);
+    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+    ctx->CSGetConstantBuffers(0, 1, &savedCb);
+    ID3D11ShaderResourceView* nullSrv[2] = {};
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ctx->CSSetShaderResources(0, 2, nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    ctx->CSSetShader(g.cs, nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, &g.cb);
+    ctx->CSSetUnorderedAccessViews(0, 1, &g.uav, nullptr);
+    F119Gpu::Slot& sl = g.slot[si];
+    sl = F119Gpu::Slot{};
+    ++g.seq;
+    bool any = false;
+    for (int e = 0; e < 2; ++e) {
+        if (!ready[e]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(g.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
+            ++g_f119.depth.skipped[f119::kSkipMap];
+            continue;
+        }
+        struct Cb {
+            float p[4];
+            uint32_t d[4], f[4];
+        } cb{};
+        static_assert(sizeof(Cb) == 48, "the constants are 48 bytes");
+        cb.p[0] = static_cast<float>(fit[e][0]);
+        cb.p[1] = static_cast<float>(fit[e][1]);
+        cb.d[0] = g.srvW[e];
+        cb.d[1] = g.srvH[e];
+        cb.d[2] = g.seq;
+        cb.d[3] = static_cast<uint32_t>(e) * kHeadEyeWords;
+        cb.f[0] = g.stencilSrv[e] ? kHeadStencilMask : 0u;
+        cb.f[1] = kHeadGrid;
+        cb.f[2] = kHeadTaps;
+        std::memcpy(m.pData, &cb, sizeof(cb));
+        ctx->Unmap(g.cb, 0);
+        ID3D11ShaderResourceView* views[2] = {g.depthSrv[e], g.stencilSrv[e]};
+        ctx->CSSetShaderResources(0, 2, views);
+        ctx->Dispatch(1, 1, 1);
+        ctx->CSSetShaderResources(0, 2, nullSrv);
+        sl.dispatched[e] = true;
+        sl.w[e] = g.srvW[e];
+        sl.h[e] = g.srvH[e];
+        sl.nearM[e] = fit[e][1];   // B: the near plane for reversed-Z with an infinite far plane (A = 0)
+        any = true;
+    }
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    if (any) ctx->CopyResource(g.stage[si], g.out);
+    ctx->CSSetShader(savedCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 2, savedSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &savedCb);
+    if (savedCs) savedCs->Release();
+    for (ID3D11ShaderResourceView* v : savedSrv)
+        if (v) v->Release();
+    if (savedUav) savedUav->Release();
+    if (savedCb) savedCb->Release();
+    if (unbind) ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+    for (ID3D11RenderTargetView* v : rtv)
+        if (v) v->Release();
+    if (dsv) dsv->Release();
+    if (!any) return;
+    sl.inFlight = true;
+    sl.frame = ended;
+    sl.seq = g.seq;
+    const F119State& s = g_f119;
+    const uint64_t nowMs = GetTickCount64();
+    sl.offsetKnown = s.haveLast && s.lastMs != 0 && nowMs >= s.lastMs && nowMs - s.lastMs <= 250;
+    sl.offsetCm = s.haveLast ? s.last.horizontal() * 100.0 : 0.0;
+}
+// The Present boundary's call (nativeOnFootFrameBoundary, after alignTick): the readbacks, the dispatch, and the line once a second. frameNo is the frame now in progress.
+void f119Boundary(uint32_t frameNo, uint64_t now) {
+    namespace f119 = nofoot::f119;
+    F119State& s = g_f119;
+    F119Gpu& g = g_f119g;
+    if (!s.sessionSaid) {   // once, at the first Present boundary: the build carries the instrument (--health tells a build without it from one that never ran it)
+        s.sessionSaid = true;
+        char b[800];
+        f119::formatSession(b, sizeof(b));
+        Log::get().note("%s", b);
+    }
+    if (!nativeOnFootActive()) {
+        for (auto& sl : g.slot) sl.inFlight = false;
+        return;
+    }
+    const uint64_t t0 = f30Qpc();
+    const uint32_t ended = frameNo - 1u;
+    f119::DepthSecond& d = s.depth;
+    // the eyes that drew their scene in the frame that ended, and their depth
+    ID3D11Texture2D* tex[2] = {};
+    double fit[2][2] = {};
+    bool ready[2] = {};
+    for (int e = 0; e < 2; ++e) {
+        const CpuWorld& w = g_cpuWorld[e];
+        if (w.frame != ended) {
+            ++d.skipped[f119::kSkipRows];
+            continue;
+        }
+        if (!nofoot::f85::zwFit(w.rows, &fit[e][0], &fit[e][1]) || !(fit[e][1] > 0.0)) {
+            ++d.skipped[f119::kSkipZw];
+            continue;
+        }
+        if (!g_f85SceneW[e] || !g_f85SceneH[e] || !depthProbeSceneDepth(g_f85SceneW[e], g_f85SceneH[e], e, &tex[e]) || !tex[e]) {
+            tex[e] = nullptr;
+            ++d.skipped[f119::kSkipDepth];
+            continue;
+        }
+        ready[e] = true;
+    }
+    ID3D11Texture2D* first = ready[0] ? tex[0] : ready[1] ? tex[1] : nullptr;
+    if (first) {
+        ID3D11Device* dev = nullptr;
+        ID3D11DeviceContext* ctx = nullptr;
+        first->GetDevice(&dev);
+        if (dev) dev->GetImmediateContext(&ctx);
+        if (dev) dev->Release();
+        const uint32_t drawThread = g_f119DrawThread.load(std::memory_order_relaxed);
+        if (ctx && drawThread != 0 && GetCurrentThreadId() != drawThread) {
+            if (!g.saidThread) {
+                g.saidThread = true;
+                Log::get().note("head containment (F119): the Present boundary runs on thread %u, the game's draws on thread %u: the depth grid is not dispatched from it",
+                                static_cast<unsigned>(GetCurrentThreadId()), static_cast<unsigned>(drawThread));
+            }
+            ++d.skipped[f119::kSkipThread];
+        } else if (ctx && f119Ensure(ctx)) {
+            f119Poll(ctx, ended);
+            bool views[2] = {};
+            for (int e = 0; e < 2; ++e) views[e] = ready[e] && f119Views(ctx, e, tex[e]);
+            for (int e = 0; e < 2; ++e) {
+                if (ready[e] && !views[e]) {
+                    ++d.skipped[f119::kSkipSrv];
+                    ready[e] = false;
+                }
+            }
+            if (ready[0] || ready[1]) f119Dispatch(ctx, ended, tex, fit, ready);
+        } else {
+            ++d.skipped[f119::kSkipGpu];
+        }
+        if (ctx) ctx->Release();
+    }
+    s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
+    if (now - s.lineMs < 1000 || !s.off.frames) return;
+    s.lineMs = now;
+    f119::LineIn li;
+    li.frames = s.off.frames;
+    li.noPose = s.off.noPose;
+    li.dropped = s.off.dropped;
+    li.generation = s.generation;
+    li.recentres = s.recentres;
+    li.restAgeS = static_cast<double>(now - s.restMs) * 1e-3;
+    li.off = &s.off;
+    li.own = &s.own;
+    li.depth = &s.depth;
+    li.costUs = s.costFrames ? s.costUs / static_cast<double>(s.costFrames) : 0.0;
+    char b[1400];
+    f119::formatLine(b, sizeof(b), li);
+    Log::get().note("%s", b);
+    s.off.reset();
+    s.own.reset();
+    s.depth.reset();
+    s.costUs = 0.0;
+    s.costFrames = 0;
+}
 // F86h: per render frame and eye, the marker composite draws the fix decided to patch and those whose patch was bound at the draw's issue: the eye dump's
 // decisions.json carries them per frame (the first-frame eye 1 composites of the F85 flight's dumps 001, 002, 003 and 005 were unpatched).
 constexpr uint32_t kF86hRing = 256;
@@ -28983,6 +29482,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     if (measure) f44::v2Draw(frame);   // F57 part 2, before frameTurn's head sample (a frame that ends is binned by its own head speed); F100: the probe key alone
     if (frame != f44::g_polledFrame) {
         f44::g_polledFrame = frame;
+        g_f119DrawThread.store(GetCurrentThreadId(), std::memory_order_relaxed);   // F119: the thread of the game's draws, for the Present boundary's GPU work
         f44::rowsFrameTurn(frame);   // F113: the frame that ended, each eye's rows and their source
         f44::frameTurn(ctx, frame);
     }
@@ -29204,6 +29704,7 @@ void nativeOnFootMarkerProbeShutdown() {
     if (f44::g_workBuf) f44::g_workBuf->Release();
     f44::g_privCb = f44::g_workBuf = nullptr;
     f44::f85cRelease();   // F85c: the reticle depth pass's resources
+    f44::f119Release();   // F119: the head containment depth grid's resources
 }
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
@@ -29389,6 +29890,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
+    f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset
 }
 
 void nativeOnFootShutdown() {

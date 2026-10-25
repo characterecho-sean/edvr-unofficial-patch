@@ -41,6 +41,7 @@
 #include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
 #include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
 #include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
+#include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 
 #include <array>
 #include <chrono>
@@ -7315,6 +7316,9 @@ int wmain(int argc, wchar_t** argv) {
     f117test::run117(check);
     // F120: a screen-space panel's cursor carried by the head's turn against the HUD frame since the panel opened; composed after F117's place.
     f120test::run120(check);
+    // F119 (measure only): the physical head from the pose and its alignment, the second's percentiles and histogram by class, EDVR's own offsets kept apart, the depth
+    // grid decoded from the shader's words (a wall, the player's weapon, the near plane, the sky), the baseline and contact tallies, and the lines within the log's limit.
+    f119test::run119(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

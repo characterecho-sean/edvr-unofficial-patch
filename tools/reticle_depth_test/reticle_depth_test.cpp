@@ -1,17 +1,21 @@
 // F85c rig: the reticle's hit-depth march on a WARP device, the PRODUCTION bytecode (kReticleDepthBytecode, built by tools\temporal_shader_build from
-// src\d3d11\reticle_depth_shader.h) against nofoot::f85::marchCpu and against the analytic answer.
+// src\d3d11\reticle_depth_shader.h) against nofoot::f85::marchCpu and against the analytic answer. F119 adds the head containment depth grid (kHeadContainmentBytecode)
+// against nofoot::f119::cellCpu over a depth-stencil texture, at the end of the same run.
 //
 // The scenes are synthetic depth buffers (R32_FLOAT, reversed-Z with an infinite far plane: depth = near / view depth) seen through a synthetic eye's scene
 // rows: a plane at 1.5 m, a slanted wall, sky, a surface under the 0.5 m minimum (ignored), a plane just past the minimum, a plane past the maximum, an
 // off-axis line, a line that never meets the screen, and a plane with a nearer patch off the line (the patch must not matter). The dispatch uses the same
 // constants layout the hook writes (128 bytes) and the same 16-byte structured output.
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/head_containment_shader.h"   // F119: the grid's sizes
+#include "../../src/d3d11/native_on_foot_f119.h"       // F119: the CPU procedure the grid shader is compared with
 #include "../native_frame_test/f85_checks.h"
-#include "temporal_shader_bytecode.h"   // kReticleDepthBytecode
+#include "temporal_shader_bytecode.h"   // kReticleDepthBytecode, kHeadContainmentBytecode
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -482,6 +486,143 @@ int wmain(int argc, wchar_t** argv) {
             uint32_t sb = 0;
             const bool ran = gpu.run(depth, N, N, rows, O, fwd, A, B, &g, &sb);
             check(ran && sb == gpu.seq && g.status == f85::kMarchHit && std::fabs(g.d - 1.5) < 0.02, "F86: after multi-line dispatches the single-line contract (Dim.w = 0) still answers as before");
+        }
+    }
+    // ---- F119: the head containment depth grid, the PRODUCTION bytecode (kHeadContainmentBytecode, from src\d3d11\head_containment_shader.h) on WARP against
+    // nofoot::f119::cellCpu, over a depth-stencil texture in the game's format (R32G8X24 typeless, the depth and stencil planes viewed as the hook views them). The scene is
+    // a depth ramp with a stencil pattern (the first-person bit 0x10 on a third of the texels, another bit on others), so cells hold marked and unmarked taps.
+    {
+        namespace f119 = edvr::nofoot::f119;
+        ComPtr<ID3D11ComputeShader> cs119;
+        check(SUCCEEDED(gpu.dev->CreateComputeShader(edvr::kHeadContainmentBytecode, sizeof(edvr::kHeadContainmentBytecode), nullptr, &cs119)),
+              "F119: the production bytecode (kHeadContainmentBytecode) creates on WARP");
+        const uint32_t W = 1000, H = 720;
+        const double A119 = 0.0, B119 = 0.10;
+        std::vector<float> depth119(static_cast<size_t>(W) * H);
+        std::vector<uint8_t> stencil119(static_cast<size_t>(W) * H);
+        std::vector<uint32_t> texels(static_cast<size_t>(W) * H * 2u);
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x) {
+                const size_t i = static_cast<size_t>(y) * W + x;
+                const double wv = (x < 60 && y < 40) ? 0.0 : 0.12 + 0.0007 * static_cast<double>((x * 7u + y * 3u) % 997u);   // the top left corner is sky
+                depth119[i] = wv > 0.0 ? static_cast<float>(B119 / wv) : 0.0f;
+                stencil119[i] = ((x / 13u + y / 9u) % 3u == 0u) ? 0x10 : (x % 5u == 0u ? 0x01 : 0x00);
+                std::memcpy(&texels[2 * i], &depth119[i], 4);
+                texels[2 * i + 1] = stencil119[i];
+            }
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = W;
+        td.Height = H;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11ShaderResourceView> dsrv, ssrv;
+        bool made = SUCCEEDED(gpu.dev->CreateTexture2D(&td, nullptr, &tex));
+        if (made) {
+            gpu.ctx->UpdateSubresource(tex.Get(), 0, nullptr, texels.data(), W * 8u, 0);
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            vd.Texture2D.MipLevels = 1;
+            vd.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            made = SUCCEEDED(gpu.dev->CreateShaderResourceView(tex.Get(), &vd, &dsrv));
+            vd.Format = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+            made = made && SUCCEEDED(gpu.dev->CreateShaderResourceView(tex.Get(), &vd, &ssrv));
+        }
+        check(made, "F119: a depth-stencil texture (R32G8X24 typeless) filled by UpdateSubresource, its depth and stencil planes viewed (R32_FLOAT_X8X24, X32_TYPELESS_G8X24_UINT)");
+        ComPtr<ID3D11Buffer> out119, stage119, cb119;
+        ComPtr<ID3D11UnorderedAccessView> uav119;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = edvr::kHeadOutWords * 4u;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = 4;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_UNKNOWN;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = edvr::kHeadOutWords;
+        D3D11_BUFFER_DESC sd{};
+        sd.ByteWidth = edvr::kHeadOutWords * 4u;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        D3D11_BUFFER_DESC cd{};
+        cd.ByteWidth = 48;
+        cd.Usage = D3D11_USAGE_DYNAMIC;
+        cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        const bool bufs = SUCCEEDED(gpu.dev->CreateBuffer(&bd, nullptr, &out119)) && SUCCEEDED(gpu.dev->CreateUnorderedAccessView(out119.Get(), &ud, &uav119)) &&
+                          SUCCEEDED(gpu.dev->CreateBuffer(&sd, nullptr, &stage119)) && SUCCEEDED(gpu.dev->CreateBuffer(&cd, nullptr, &cb119));
+        check(bufs, "F119: the 392-word output, its staging copy and the 48-byte constants");
+        if (made && bufs && cs119) {
+            const auto dispatchEye = [&](uint32_t eye, uint32_t seq, bool withStencil) {
+                D3D11_MAPPED_SUBRESOURCE m{};
+                gpu.ctx->Map(cb119.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m);
+                struct Cb {
+                    float p[4];
+                    uint32_t d[4], f[4];
+                } c{};
+                static_assert(sizeof(Cb) == 48, "the constants are 48 bytes");
+                c.p[0] = static_cast<float>(A119);
+                c.p[1] = static_cast<float>(B119);
+                c.d[0] = W;
+                c.d[1] = H;
+                c.d[2] = seq;
+                c.d[3] = eye * edvr::kHeadEyeWords;
+                c.f[0] = withStencil ? edvr::kHeadStencilMask : 0u;
+                c.f[1] = edvr::kHeadGrid;
+                c.f[2] = edvr::kHeadTaps;
+                std::memcpy(m.pData, &c, sizeof(c));
+                gpu.ctx->Unmap(cb119.Get(), 0);
+                gpu.ctx->CSSetShader(cs119.Get(), nullptr, 0);
+                ID3D11Buffer* cbp = cb119.Get();
+                gpu.ctx->CSSetConstantBuffers(0, 1, &cbp);
+                ID3D11ShaderResourceView* views[2] = {dsrv.Get(), withStencil ? ssrv.Get() : nullptr};
+                gpu.ctx->CSSetShaderResources(0, 2, views);
+                ID3D11UnorderedAccessView* u = uav119.Get();
+                gpu.ctx->CSSetUnorderedAccessViews(0, 1, &u, nullptr);
+                gpu.ctx->Dispatch(1, 1, 1);
+                ID3D11UnorderedAccessView* nu = nullptr;
+                gpu.ctx->CSSetUnorderedAccessViews(0, 1, &nu, nullptr);
+                ID3D11ShaderResourceView* nv[2] = {};
+                gpu.ctx->CSSetShaderResources(0, 2, nv);
+            };
+            dispatchEye(0, 41, true);    // the left eye, with the stencil plane
+            dispatchEye(1, 42, false);   // the right eye, without a stencil view: no tap is marked
+            gpu.ctx->CopyResource(stage119.Get(), out119.Get());
+            D3D11_MAPPED_SUBRESOURCE r{};
+            std::vector<uint32_t> words(edvr::kHeadOutWords);
+            const bool read = SUCCEEDED(gpu.ctx->Map(stage119.Get(), 0, D3D11_MAP_READ, 0, &r));
+            if (read) {
+                std::memcpy(words.data(), r.pData, words.size() * 4u);
+                gpu.ctx->Unmap(stage119.Get(), 0);
+            }
+            check(read, "F119: both eyes' dispatches read back");
+            f119::EyeGrid g0, g1;
+            const bool d0 = read && f119::decodeEye(words.data(), 41, W, H, &g0), d1 = read && f119::decodeEye(words.data() + f119::kEyeWords, 42, W, H, &g1);
+            check(d0 && d1 && g0.mask == edvr::kHeadStencilMask && g1.mask == 0u, "F119: each eye's header carries its sequence, the texture's size and the stencil mask in use (0x10; 0 without a view)");
+            uint32_t badWorld = 0, badAll = 0, badMarked = 0, badNoStencil = 0, markedCells = 0, skyCells = 0;
+            for (uint32_t cy = 0; cy < f119::kGrid && d0 && d1; ++cy)
+                for (uint32_t cx = 0; cx < f119::kGrid; ++cx) {
+                    const uint32_t k = cy * f119::kGrid + cx;
+                    const f119::Cell with = f119::cellCpu(depth119.data(), stencil119.data(), W, H, A119, B119, cx, cy);
+                    const f119::Cell without = f119::cellCpu(depth119.data(), nullptr, W, H, A119, B119, cx, cy);
+                    const auto same = [](float a, float b) { return (a > 1e29f && b > 1e29f) || std::fabs(a - b) <= 1e-5f * std::max(a, b); };
+                    if (!same(g0.world[k], with.world)) ++badWorld;
+                    if (!same(g0.all[k], with.all)) ++badAll;
+                    if (g0.marked[k] != with.marked) ++badMarked;
+                    if (!same(g1.world[k], without.world) || !same(g1.all[k], without.all) || g1.marked[k] != 0) ++badNoStencil;
+                    if (with.marked) ++markedCells;
+                    if (with.all > 1e29f) ++skyCells;
+                }
+            check(d0 && d1 && badWorld == 0 && badAll == 0 && badMarked == 0, "F119: the shader's 64 cells (world depth, all-tap depth, marked taps) equal the CPU procedure's, with the stencil plane");
+            check(d0 && d1 && badNoStencil == 0, "F119: without a stencil view the shader marks no tap and the world depth is the all-tap depth, as the CPU procedure's");
+            check(markedCells == 64 && skyCells == 0, "F119: the scene gives every cell marked taps and no all-sky cell (so the checks above compare real values)");
+            // a corner cell on the sky: the top left cell's taps read the 60 x 40 sky block partly (depth 0 reads as 1e30 view depth, never as a near surface)
+            check(d0 && g0.all[0] > 0.11f && g0.world[0] > 0.11f && g0.all[0] < 1e29f, "F119: the sky's depth 0 is infinitely far: the corner cell's nearest depth is the ramp's, never 0");
         }
     }
     std::printf("reticle_depth_test: %u checks, %u failures\n", g_checks, g_failures);
