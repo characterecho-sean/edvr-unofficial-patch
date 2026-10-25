@@ -39,6 +39,7 @@
 #include "vscreen.h"   // vScreenSetRenderTargetsRaw: the rebind past the binding shadow
 #include "shader_swap.h"                 // shaderSwapCreateCs: F108's census shader
 #include "temporal_shader_bytecode.h"    // kWorldScreenCensusBytecode (tools\temporal_shader_build)
+#include "fixed_shader_source.h"         // EDVR_WORLD_SCREEN_HOLD_FRAMES, which the tracked stand-in compiles in
 
 // F108 (docs\design-native-onfoot-vr-2026-10-13.md, journal 2026-10-25 "F108"): F105 held every screen pixel every frame,
 // so the eye got the render-resolution rebuild over the whole interface, and the text read low resolution: in eye dump
@@ -63,9 +64,20 @@ constexpr uint32_t kWorldScreenMaskValue = 2;
 constexpr uint32_t kWorldScreenFreshMaskValue = 6;
 constexpr uint32_t kWorldScreenEditValue = 255;
 constexpr uint32_t kWorldScreenStateRest = 1, kWorldScreenStateEdited = 2, kWorldScreenStateFresh = 3;
-// UiContent's edit expiry (the age falls 1/32 a frame): a census frame this many frames or more after the last change
-// began is at rest.
-constexpr uint32_t kWorldScreenRestFrames = 32;
+// F108b (journal 2026-10-25 "F108b"): how many frames the tracked stand-in holds a block from its last change, counting
+// the frame it changed. F108 held it for UiContent's whole expiry (32 frames, the age falling 1/32 a frame), and the
+// pilot saw the interface go soft for about a second after each keystroke. The hold is not what keeps a change from
+// trailing: the first frame's history restart is (bit 2 of the coverage value; F105's doubling in eye dump 221109514003
+// was DLSS's history, with the screen never marked). What the hold covers is DLSS's history refilling on the new
+// content. EDVR's jitter for DLSS repeats every 8 frames (kTemporalJitterCount, Halton 2,3), so 8 frames after the
+// restart DLSS's history holds every offset it ever gets: DLSS is shown again on the 8th frame, held for the 7 before
+// it. The same count is the worst case of a narrower test, at the 2x upscale of the flights: from every starting
+// phase, each of a render pixel's four output pixels has had an offset strictly inside it by the 8th frame (an offset
+// of exactly 0 counted for neither side), and from 6 of the 8 phases not yet by the 5th frame, which a hold of 4 shows.
+// The census calls a frame this many frames or more after the last change began at rest, so a hold that outlives it
+// shows as edits at rest.
+constexpr uint32_t kWorldScreenHoldFrames = EDVR_WORLD_SCREEN_HOLD_FRAMES;
+static_assert(kWorldScreenHoldFrames >= 1 && kWorldScreenHoldFrames < 32, "the hold ends before UiContent's 32-frame expiry");
 
 // The draw this marks: the exact pair, sampling a learned interface surface (ui depth's composite test), drawn into
 // the scene's depth, while an external upscaler runs. Anything else is left exactly as before.
@@ -124,25 +136,29 @@ struct WorldScreenWindow {
 
 // F108's census: one row a frame in which a screen was drawn (the per-eye state targets counted, both eyes summed), read
 // back a few frames later and added in frame order. A frame is DURING a change from the frame a change began (a fresh
-// pixel) until kWorldScreenRestFrames frames later, and AT REST otherwise; the edited fraction at rest is the hold's
-// leftover (near 0 when it works, 1 under F105's rule). The last change survives a window, so the boundary does not
+// pixel) until kWorldScreenHoldFrames frames later, and AT REST otherwise; the edited fraction at rest is the hold's
+// leftover (near 0 when it works, 1 under F105's rule, above 0 for a hold longer than this one). The last change survives a window, so the boundary does not
 // call the frames after a change at rest.
 struct WorldScreenCensus {
     bool haveChange = false;
     uint64_t lastChange = 0;
     uint32_t frames = 0, editFrames = 0, changeFrames = 0, restFrames = 0, duringFrames = 0, skipped = 0;
+    // F108b: the changes that began from rest (no change in the hold before), so a keystroke whose interface animates over a
+    // few frames counts once; frames with an edit over these is the mean a change held the screen.
+    uint32_t changes = 0;
     uint64_t restScreen = 0, restEdited = 0, duringScreen = 0, duringEdited = 0, freshPx = 0;
     void add(uint64_t frame, uint32_t screen, uint32_t edited, uint32_t fresh) {
         if (!screen) return;
         ++frames;
         if (edited) ++editFrames;
         if (fresh) {
+            if (!haveChange || frame - lastChange >= kWorldScreenHoldFrames) ++changes;
             ++changeFrames;
             freshPx += fresh;
             haveChange = true;
             lastChange = frame;
         }
-        if (haveChange && frame >= lastChange && frame - lastChange < kWorldScreenRestFrames) {
+        if (haveChange && frame >= lastChange && frame - lastChange < kWorldScreenHoldFrames) {
             ++duringFrames;
             duringScreen += screen;
             duringEdited += edited;
@@ -161,19 +177,19 @@ struct WorldScreenCensus {
     }
 };
 
-// F108's line (the Log adds the time); tools\edvr_log.py --health's `world screens (F108)` reads it by its first words.
+// F108's line (the Log adds the time); tools\edvr_log.py --health's `terminal hold (F108)` reads it by its first words.
 // heldWhy: UiContent's decisions for the held draws, as text ("none" when every marked draw was tracked).
 inline int worldScreenFormatF108(char* out, size_t size, const WorldScreenWindow& w, const WorldScreenCensus& c, const char* heldWhy) {
     return std::snprintf(out, size,
-        "ui depth world screens (F108): %u frames; draws tracked %u, held without change tracking %u (%s); not taken at the "
+        "ui depth world screens (F108): %u frames, a change held %u frames; draws tracked %u, held without change tracking %u (%s); not taken at the "
         "classification: no learned surface %u, not the scene's depth %u, no external upscaler %u; census %u frames with a "
-        "screen (%u skipped): frames with an edit %u, a change began %u; at rest %u frames, edited %llu of %llu px; during a "
+        "screen (%u skipped): frames with an edit %u, a change began %u, changes from rest %u; at rest %u frames, edited %llu of %llu px; during a "
         "change %u frames, edited %llu of %llu px; history restarts %llu px in %u frames.",
-        w.frames, w.tracked, w.held, heldWhy ? heldWhy : "?",
+        w.frames, kWorldScreenHoldFrames, w.tracked, w.held, heldWhy ? heldWhy : "?",
         w.classRefused[static_cast<size_t>(WorldScreenClassRefusal::kNoSurface)],
         w.classRefused[static_cast<size_t>(WorldScreenClassRefusal::kNotSceneDepth)],
         w.classRefused[static_cast<size_t>(WorldScreenClassRefusal::kNotTrained)],
-        c.frames, c.skipped, c.editFrames, c.changeFrames, c.restFrames, static_cast<unsigned long long>(c.restEdited),
+        c.frames, c.skipped, c.editFrames, c.changeFrames, c.changes, c.restFrames, static_cast<unsigned long long>(c.restEdited),
         static_cast<unsigned long long>(c.restScreen), c.duringFrames, static_cast<unsigned long long>(c.duringEdited),
         static_cast<unsigned long long>(c.duringScreen), static_cast<unsigned long long>(c.freshPx), c.changeFrames);
 }

@@ -3057,6 +3057,12 @@ bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
     if (gui && g_worldScreenTrackedPs) {
         ages = g_uiContent.prepare(ctx, gui.Get(), g_frame, (g_frame & 15u) == 0u);
         decision = g_uiContent.lastDecision;
+        // F108b: the stand-in reads the ages as a Texture2DArray, as the game's shader reads the interface; a 2D interface's
+        // 2D ages are given as a one-slice array view, not bound to the array register as they are.
+        if (ages) {
+            ages = g_uiContent.arrayView(ctx, ages);
+            if (!ages) decision = UiContent::Decision::kDeclinedCreateFailed;
+        }
     } else if (gui) {
         decision = UiContent::Decision::kDeclinedShaderFailed;
     }

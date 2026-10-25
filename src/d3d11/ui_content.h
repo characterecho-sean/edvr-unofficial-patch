@@ -42,6 +42,8 @@ class UiContent {
         // F108: a Texture2DArray view's entry (the in-world screens' interface): the view's slices, each with its own blocks and ages.
         bool array=false;
         uint32_t firstSlice=0, slices=0;
+        // F108b: a 2D entry's ages as one-slice Texture2DArray views, made on first ask (arrayView), for a reader that declares an array.
+        Ptr<ID3D11ShaderResourceView> arrayViews[2];
     };
     Entry entries[24];
     Ptr<ID3D11ComputeShader> shader, arrayShader;
@@ -171,6 +173,26 @@ public:
         else{++totals.updates;lastDecision=Decision::kUpdated;}
         if(sample)gpu.end(ctx);
         e.frame=frame;e.ready=true;return e.view[e.read].Get();
+    }
+    // F108b: the ages prepare() returned, as a Texture2DArray view, for a shader that declares them as one (the in-world screens' tracked
+    // stand-in, whose game shader samples its interface as an array even when the game binds a 2D view of a one-slice texture: in the
+    // 2026-10-25 05:56 flight the interface was a Texture2D view, and its 2D ages were bound to the array register). An array entry's ages
+    // are returned as they are; a 2D entry's get a one-slice array view of the same texture. Null when the ages are not this cache's, or
+    // the view cannot be made.
+    ID3D11ShaderResourceView* arrayView(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* ages) {
+        if(!ctx || !ages) return nullptr;
+        for(auto& e:entries) for(unsigned i=0;i<2;++i) {
+            if(!e.source || e.view[i].Get()!=ages) continue;
+            if(e.array) return ages;
+            if(!e.arrayViews[i]) {
+                Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};vd.Format=DXGI_FORMAT_R8_UNORM;vd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                vd.Texture2DArray.MostDetailedMip=0;vd.Texture2DArray.MipLevels=1;vd.Texture2DArray.FirstArraySlice=0;vd.Texture2DArray.ArraySize=1;
+                if(!dev || FAILED(dev->CreateShaderResourceView(e.age[i].Get(),&vd,&e.arrayViews[i]))) return nullptr;
+            }
+            return e.arrayViews[i].Get();
+        }
+        return nullptr;
     }
     // F108: a Texture2DArray view (the in-world screens' interface). The view's slices from its first, mip 0 (the view must start at it;
     // the source may carry more mips, which follow mip 0 when the game makes them), each slice its own blocks and ages: the digest an

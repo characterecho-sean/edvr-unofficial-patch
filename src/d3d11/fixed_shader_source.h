@@ -467,7 +467,17 @@ float4 main(In i, out float4 state : SV_Target1, out float edit : SV_Target2) : 
 // the texcoord times cb2[1].xy plus cb2[1].zw. The slice's per-4x4-block edit age (UiContent, at t14: 1 on the frame
 // a block changed, falling 1/32 a frame) is read as uiEdit reads it, the 2x2 blocks about the uv. Where an edit begins
 // (age 1) the coverage value carries bit 2 (6, not 2): the motion pass restarts NVIDIA's history there.
-const char kWorldScreenTrackedHlsl[] = R"HLSL(
+//
+// F108b: the edit is held only EDVR_WORLD_SCREEN_HOLD_FRAMES frames from a block's last change (the frame it changed and
+// the six after), not UiContent's 32. The restart already cleared the old content from NVIDIA's history, so the hold
+// only covers DLSS's first frames on the new content: it is shown again on the 8th frame, once its history holds one
+// whole cycle of the jitter (world_screen_coverage.h, kWorldScreenHoldFrames, gives the count).
+// UiContent's R8 age k frames after the change is (255 - 8k)/255, so a block is held while its age is above
+// 1 - (N - 0.5)/32: k = 0..N-1 held, k = N not, with about half a frame's step of margin on each side.
+#define EDVR_WORLD_SCREEN_HOLD_FRAMES 7
+#define EDVR_WORLD_SCREEN_STR2(x) #x
+#define EDVR_WORLD_SCREEN_STR(x) EDVR_WORLD_SCREEN_STR2(x)
+const char kWorldScreenTrackedHlsl[] = "#define WORLD_SCREEN_HOLD_FRAMES " EDVR_WORLD_SCREEN_STR(EDVR_WORLD_SCREEN_HOLD_FRAMES) "\n" R"HLSL(
 struct In {
     nointerpolation uint2 faceInvariant : __USER_VERTEX_FACEINVARIANT;
     float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
@@ -493,8 +503,9 @@ float4 main(In i, out float4 state : SV_Target1, out float edit : SV_Target2) : 
         }
     }
     const bool fresh = age >= 1.0;
-    state = (fresh ? 3.0 : (age > 0.0 ? 2.0 : 1.0)) / 255.0;
-    edit = age;
+    const bool held = age > 1.0 - (WORLD_SCREEN_HOLD_FRAMES - 0.5) / 32.0;
+    state = (fresh ? 3.0 : (held ? 2.0 : 1.0)) / 255.0;
+    edit = held ? age : 0.0;
     return (fresh ? 6.0 : 2.0) / 255.0;
 }
 )HLSL";
