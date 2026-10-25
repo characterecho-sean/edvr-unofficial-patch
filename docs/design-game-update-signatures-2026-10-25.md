@@ -38,8 +38,9 @@
   v0.21.1-41-gc041596b): `315 of 318 found, all equal`, 0 differ, in 90.4 ms.
   The 3 not found (0x52EB4F8, 0x52EC240, 0x52EC248) are the pointer slots the
   VR SSAA hold's DLL-load install rewrites before the check's thread starts
-  (entry below); every hook armed with its usual text. Next: flat with the
-  key on. An unknown build needs a game update; none is out yet.
+  (entry below); every hook armed with its usual text. Flat
+  (`edvr_gfx_20261025_134245.log`): the same 315 and the same three, 84.2 ms.
+  An unknown build needs a game update; none is out yet.
 - **Open:** (1) `tools\object_classification.py` checks a capture's
   return RVAs against build 334925's; a capture from an unknown build carries
   that build's offsets and would be rejected (step 3 left the reader alone);
@@ -423,6 +424,14 @@ version line matched `edvr_log.py --expect-build HEAD`), `advanced.game_update_c
   (job-3's "a jump or a call" decline is in every Frontier log since 10-23),
   skin join, vertex resync, light grid cache (97.8% hits), terrain cull
   cover, the store hook, optimized station and the pad state probe.
+- Flat, the same install (`edvr_gfx_20261025_134245.log`, profile flat, 3D
+  mode 0): `315 of 318 found, all equal`, the same three not found, in 84.2
+  ms. The VR SSAA hold installs at DLL load in flat too. The first flat start
+  (13:38) had no check line: the key was only in `edvr.ini`, and the flat
+  profile reads `edvr-flat.ini` alone when it exists. Its hooks armed as
+  usual: vertex resync, light grid cache, the store hook, optimized station,
+  the pad state probe, the UI panel sites and slots, flat camera inject's
+  refresh hook; transition flash "not the VR profile", as before.
 
 ## After each retarget
 
