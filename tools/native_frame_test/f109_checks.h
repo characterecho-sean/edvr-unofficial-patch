@@ -300,6 +300,68 @@ inline void run109(Check&& check) {
               "F109b guard: a growth run with 300 ms of no fresh rows in it restarts at the first fresh row (gap restarts 1) and trips only 0.5 s after it, not on "
               "the time it did not see");
     }
+    // F109c (the F109b flight, edvr_gfx_20261025_085120, the Arc Cutter at 08:57:09-12): the gain only between the game's two ends, and one pitch account.
+    {   // the split with the ends read (hip 1.0, ADS 0.85335): the flight's foreign ratios are not taken, the gain stays, the call's delta is still the head aim's
+        const double lo = 1.0, hi = 0.85335;
+        auto clean = [&](f109::Split& s, double in, double d) {
+            f109::SplitIn c;
+            c.in = in;
+            c.d = d;
+            c.gainLo = lo;
+            c.gainHi = hi;
+            return s.step(c);
+        };
+        f109::Split s;
+        const f109::SplitOut hip = clean(s, 0.01, 0.01);
+        const f109::SplitOut ads = clean(s, 0.01, 0.01 * hi * 0.99);
+        const f109::SplitOut a = clean(s, 0.001, 0.001 * 741.12622), b = clean(s, 0.001, -0.001 * 405.42361), c = clean(s, 0.001, 0.001 * 22.21323);
+        const f109::SplitOut tiny = clean(s, 0.01, 0.01 * 0.002), flip = clean(s, 0.01, -0.01 * 0.9);
+        f109::Split old;
+        f109::SplitIn u;
+        u.in = 0.001;
+        u.d = 0.001 * 741.12622;
+        const f109::SplitOut unread = old.step(u);
+        const double askRad = 2.0 * kD;
+        check(hip.gainTaken && ads.gainTaken && std::fabs(s.gain - hi * 0.99) < 1e-12 && !a.gainTaken && a.foreign && !b.gainTaken && b.foreign && !c.gainTaken &&
+                  c.foreign && !tiny.gainTaken && tiny.foreign && !flip.gainTaken && flip.foreign && std::fabs(a.ours - 0.001 * 741.12622) < 1e-12 &&
+                  unread.gainTaken && std::fabs(old.gain - 741.12622) < 1e-9 && std::fabs(nofoot::adsInput(askRad, 0.002) - 500.0 * askRad) < 1e-9 &&
+                  std::fabs(nofoot::adsInput(askRad, s.gain) - askRad / (hi * 0.99)) < 1e-12,
+              "F109c split: with the ends read (1.0, 0.85335) a clean call takes the hip and the ADS gain; the flight's 741.1, -405.4 and 22.2, a 0.002 and a "
+              "sign flip are foreign and not taken (the gain stays 0.845, the call's delta still the head aim's); with the ends unread F109's window took 741; a "
+              "0.002 gain would have sent the next 2 deg ask as 1000 deg of input");
+    }
+    {   // one pitch account: the game turns the aim +10 deg a tick on its own for 10 ticks (counted as applied, as a clean call counts it) against the follower's
+        // asks, so the aim goes past 60; the follower brings it back, then the head pitches down 30 deg. The account is the aim's turn throughout, its publication
+        // held to +-60; F68a's clamped account (computed alongside, the control) is left as far from the aim as the turn went past 60, which is what parted the
+        // follower from the map's limit in the flight.
+        nofoot::AdsAimMap map;
+        f109::Follower fo;
+        double pending = 0.0, aim = 0.0, head = 0.0, oldSeat = 0.0, oldErr = 0.0, seatMax = 0.0, pubMax = 0.0, accErr = 0.0;
+        const double dt = 1.0 / 90.0;
+        for (int k = 0; k < 900; ++k) {
+            const double dHead = (k >= 400 && k < 490) ? -30.0 * kD / 90.0 : 0.0;
+            head += dHead;
+            const double game = (k >= 90 && k < 100) ? 10.0 * kD : 0.0;
+            const double applied = pending + game;
+            fo.addHead(0.0, dHead);
+            fo.addApplied(0.0, applied);
+            const double ifp = f109::inFlightAfter(map.flightPitch, applied), ify = f109::inFlightAfter(map.flightYaw, 0.0);
+            double askY = 0.0, askP = 0.0;
+            fo.ask(dt, 0.0, ify, ifp, &askY, &askP);
+            const nofoot::AdsAimMap::Out mo = map.step(true, false, dt, 1.0, askP != 0.0, 0.0, askP, 0.0, applied, true, true);
+            aim += applied;
+            oldSeat = nofoot::adsClampPitch(oldSeat + applied);
+            if (k == 399) oldErr = oldSeat - aim;
+            pending = mo.injPitch;
+            seatMax = std::max(seatMax, map.pitchSeat);
+            pubMax = std::max(pubMax, map.pitchPublished());
+            accErr = std::max(accErr, std::fabs(map.pitchSeat - aim));
+        }
+        check(seatMax > 75.0 * kD && pubMax <= nofoot::kAdsPitchClampRad + 1e-12 && accErr < 1e-12 && std::fabs(fo.applied[1] - map.pitchSeat) < 1e-12 &&
+                  std::fabs(head - aim) < 0.05 * kD && std::fabs(oldErr + (seatMax - nofoot::kAdsPitchClampRad)) < 1e-9,
+              "F109c account: a turn of the game's own to past 75 deg is carried whole (the publication held to 60), the follower's sum and the map's account "
+              "agree, the aim comes back and follows the head 30 deg down; F68a's clamped account is left as far from the aim as the turn went past 60");
+    }
 }
 
 }  // namespace f109test
