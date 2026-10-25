@@ -30,6 +30,7 @@
 #include "f99_checks.h"     // F99a: a drawn item's hands from the game's own selection, not from Status.json
 #include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the paced F68d window, the throttled lines
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
+#include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 
 #include <array>
 #include <chrono>
@@ -7277,6 +7278,8 @@ int wmain(int argc, wchar_t** argv) {
     f100test::run100(check);
     // F101: this runtime's ladder against a released provider's shape checks, the frozen v0.21.1 layouts, reticle follow game in the render path.
     f101test::run101(check);
+    // F107: the carrier management screen's camera away from the commander: the gate, the episode, the neck reference held out, the calibration's consequence.
+    f107test::run107(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
