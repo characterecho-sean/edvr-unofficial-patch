@@ -11843,28 +11843,35 @@ def _hj_f94a_neck(rows, ctx):
     if not sec:
         if not key:
             return None
-        holding = [r for r in _hrows(ctx, "view height hold (F87h)", "sec") if r["state"].startswith("holding")]
+        holding = _hcount(_hrows(ctx, "view height hold (F87h)", "sec"), "hs", lambda r: r["state"].startswith("holding"))
         if holding:
             return ("NEVER APPLIED", "eye height key %s cm read and the hold held the view %d s on foot, but no neck height line: the neck reference never ran" % (
-                key[-1]["key"], len(holding)))
+                key[-1]["key"], holding))
         return ("IDLE", "eye height key %s cm read; no second on foot with the body pinned" % key[-1]["key"])
     items = collections.OrderedDict()
     for r in sec:
         if r["bin"] == "standing":
             items.setdefault(r["item"], []).append(r)
     if not items:
-        return ("IDLE", "%d s, none standing" % len(sec))
+        return ("IDLE", "%d s, none standing" % _hsecs(sec))
     parts, off, lowered, bent, never, unarmed = [], [], [], [], [], 0
     for item, rs in items.items():
-        n = len(rs)
-        mean = lambda k, rr=rs: sum(float(r[k]) for r in rr) / len(rr)
+        n = _hsecs(rs)
+        # Legacy rows keep their original unweighted means; new windows preserve the underlying call/solve weights.
+        def mean(k, rr=rs):
+            count = "solves" if k in ("la", "lw") else "n"
+            weights = [int(r[count]) if r.get("remote") is not None else 1 for r in rr]
+            return sum(w * float(r[k]) for w, r in zip(weights, rr)) / (sum(weights) or 1)
         la, lw, lowmax = mean("la"), mean("lw"), max(float(r["lowmax"]) for r in rs)
         text = "%s %d s: neck %.3f m, lowering max %.2f cm, legs %.3f -> %.3f" % (item, n, mean("neck"), lowmax, la, lw)
+        if item == "mixed":
+            parts.append(text + "; mixed-context raw seconds are not judged against one item's eye-height key")
+            continue
         un = [r for r in rs if float(r["weight"]) >= 0.99]
-        unarmed += len(un)
+        unarmed += _hsecs(un)
         if un:
             view, keycm, tgt, incam = mean("view", un), float(un[-1]["key"]), mean("tgt", un), mean("incam", un)
-            text += "; unarmed %d s: the view over the neck %+.1f cm (key %.1f), the raise's target %+.1f cm, in the drawn camera %+.1f cm" % (len(un), view, keycm, tgt, incam)
+            text += "; unarmed %d s: the view over the neck %+.1f cm (key %.1f), the raise's target %+.1f cm, in the drawn camera %+.1f cm" % (_hsecs(un), view, keycm, tgt, incam)
             if abs(tgt) > 1.0 and all(abs(float(r["incam"])) < 0.05 for r in un):
                 never.append(item)
             elif abs(view - keycm) > 1.5:
@@ -11877,10 +11884,16 @@ def _hj_f94a_neck(rows, ctx):
         if un and mean("lw", un) < mean("la", un) - 0.03:
             bent.append(item)
         parts.append(text)
-    calls, matched, missed = (sum(int(r[k]) for r in sec) for k in ("n", "matched", "missed"))
+    # F125 prints both standing and every-state bins. The every-state bin already includes standing calls.
+    all_calls = [r for r in sec if r.get("remote") is None or r["bin"] == "every state"]
+    if not all_calls:   # a selected time window can end between the standing row and its every-state companion
+        all_calls = sec
+    calls, matched, missed = (sum(int(r[k]) for r in all_calls) for k in ("n", "matched", "missed"))
     text = "; ".join(parts) + "; the raise found by the alignment serial in %d of %d calls (not found %d)" % (matched, calls, missed)
     if never:
         return ("NEVER APPLIED", text + "; the raise never reached the drawn camera with %s" % ", ".join(never))
+    if not unarmed and any(item == "mixed" for item in items) and missed * 10 > calls:
+        return ("PARTIAL", text + "; the serial was not found in %d calls (the general guard is judged even for mixed-context data)" % missed)
     if not unarmed:
         return ("IDLE", text + "; no unarmed standing second")
     notes = (["the view is off the key by more than 1.5 cm with %s" % ", ".join(off)] if off else []) + (
@@ -11896,15 +11909,17 @@ def _hj_f107_away(rows, ctx):
     refused, and the neck reference's seconds whose game camera stood 3 m or more from the neck. Such seconds are the camera measured as the commander's eye:
     with no episode line that is the gate never running (NEVER APPLIED), beside episode lines a camera the gate let through (PARTIAL)."""
     left, ended = rows.get("left", []), rows.get("ended", [])
-    remote = [r for r in _hrows(ctx, "neck height (F94a)", "sec") if abs(float(r["game"])) >= 300.0]
+    necks = _hrows(ctx, "neck height (F94a)", "sec")
+    remote = [r for r in necks if r.get("remote") is not None and int(r["remote"]) > 0 and r["bin"] == "every state"]
+    remote += [r for r in necks if r.get("remote") is None and abs(float(r["game"])) >= 300.0]
     if not left and not ended and not remote:
         return None
     text = "%d episodes" % len(left)
     if ended:
         text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck" % (float(r["s"]), r["calls"], r["near"], r["far"]) for r in ended)
     if remote:
-        far = max(abs(float(r["game"])) for r in remote) / 100.0
-        note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, len(remote))
+        far = max(float(r["remote_max"]) if r.get("remote_max") is not None else abs(float(r["game"])) for r in remote) / 100.0
+        note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, sum(int(r["remote"]) if r.get("remote") is not None else 1 for r in remote))
         return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note)
     return ("OK", text + "; the neck reference and the standing calibration held")
 
@@ -12127,23 +12142,32 @@ def _hj_f95a_motion(rows, ctx):
     rmps = rm * 90.0 / rmn if rmn else 0.0
     text = ("the view a frame, the head still: standing %.2f mm rms (%d frames), moving %.2f (%d); the HUD against the eye: standing %.2f mm rms (%d), moving %.2f (%d); "
             "the raise moved the view %.1f mm/s standing, %.1f mm/s moving; the stance settled in %d of %d pin calls (%d moving) over %d s") % (
-        vs, vsn, vm, vmn, hs, hsn, hm, hmn, rsps, rmps, settled, calls, moving, len(sec))
+        vs, vsn, vm, vmn, hs, hsn, hm, hmn, rsps, rmps, settled, calls, moving, _hsecs(sec))
     # F97a: a single frame's step (a teleport, the character's model moving under the camera) dominates a pooled rms; the verdict reads the median second (20 frames
     # or more), against the ground where the line carries it (F97a), else against the body
     ground = [r for r in sec if r.get("wsn") is not None]
     key_n, key_r = ("wsn", "ws") if ground and sum(int(r["wsn"]) for r in ground) else ("vsn", "vs")
-    per = sorted(float(r[key_r]) for r in (ground if key_n == "wsn" else sec) if int(r[key_n]) >= 20)
+    samples = rows.get("seconds", [])
+    def samples_for(key):
+        return [float(v) for row in samples for v in row[key].split(",") if v]
+    if samples:
+        # Exact eligible seconds survive aggregation, including the session median across unequal windows.
+        per = sorted(samples_for("ground") if key_n == "wsn" else samples_for("body"))
+    else:
+        per = sorted(float(r[key_r]) for r in (ground if key_n == "wsn" else sec) if int(r[key_n]) >= 20)
     vsMed = per[len(per) // 2] if per else vs
     spikes = sum(int(r["wso"]) for r in ground) if key_n == "wsn" else sum(int(r["bso"]) for r in ground)
     text += "; standing the median second %.2f mm rms against the %s (%d seconds), steps over 1 cm %d" % (vsMed, "ground" if key_n == "wsn" else "body", len(per), spikes)
+    if samples:
+        text += "; settled in %d of %d measured seconds" % (sum(int(r["settled_s"]) for r in samples), sum(int(r["ws"]) for r in samples))
     if calls - moving >= 90 and settled == 0:
         return ("NEVER APPLIED", text + "; the stance never settled: the neck reference took no target")
     if not (vsn or vmn or hsn or hmn):
         return ("IDLE", text + "; no frame with the head still")
     # F98a: the HUD's verdicts read the median second too: the F97 flight's pooled 0.73 mm standing came from a few seconds (largest 10.1 mm rms) beside a median
     # of 0.19 mm, with no bob reported; the hold's own correction moves the eye against the HUD by its millimetre steps (at most 0.44 mm a frame)
-    hsMed = sorted(float(r["hs"]) for r in sec if int(r["hsn"]) >= 20)
-    hmMed = sorted(float(r["hm"]) for r in sec if int(r["hmn"]) >= 20)
+    hsMed = sorted(samples_for("hs")) if samples else sorted(float(r["hs"]) for r in sec if int(r["hsn"]) >= 20)
+    hmMed = sorted(samples_for("hm")) if samples else sorted(float(r["hm"]) for r in sec if int(r["hmn"]) >= 20)
     hsM = hsMed[len(hsMed) // 2] if hsMed else hs
     hmM = hmMed[len(hmMed) // 2] if hmMed else hm
     text += "; the HUD against the eye, the median second: standing %.2f mm rms, moving %.2f" % (hsM, hmM)
@@ -12173,10 +12197,10 @@ def _hj_f98a_elbow(rows, ctx):
         jumps = sum(int(r["over10"]) for r in rs)
         steps = sum(int(r["steps"]) for r in rs)
         stepRms = math.sqrt(sum(int(r["steps"]) * float(r["step"]) ** 2 for r in rs) / steps) if steps else 0.0
-        swung_s = sum(1 for r in rs if int(r["over45"]) * 2 > int(r["n"]))
+        swung_s = _hcount(rs, "swung_s", lambda r: int(r["over45"]) * 2 > int(r["n"]))
         parts.append("%s %d s: aim %+.1f deg, chest lean %+.1f (animated %+.1f), F82 yaw %+.1f, the elbow off the stance's plane %.1f deg (over 45 in %d calls, %d s mostly), "
                      "step %.2f deg rms (over 10: %d), seed %d body-down %d legacy %d" % (
-                         item, len(rs), mean("aim"), mean("lean"), mean("leanAnim"), mean("yaw"), mean("plane"), over, swung_s, stepRms, jumps,
+                         item, _hsecs(rs), mean("aim"), mean("lean"), mean("leanAnim"), mean("yaw"), mean("plane"), over, swung_s, stepRms, jumps,
                          sum(int(r["seed"]) for r in rs), sum(int(r["down"]) for r in rs), sum(int(r["legacy"]) for r in rs)))
         if swung_s:
             swung.append("%s %d s" % (item, swung_s))
@@ -12197,16 +12221,19 @@ def _hj_f98a_elbow(rows, ctx):
         if flips:
             near = [r for r in flips if float(r["dang"]) < 15.0 or float(r["dang"]) > 165.0]
             twisted = [r for r in flips if r["dtwist"] == "hit" and 15.0 <= float(r["dang"]) <= 165.0]
+            flip_n = sum(int(r["flip_s"]) if r.get("flip_s") is not None else 1 for r in flips)
+            near_n = sum(int(r["near_s"]) if r.get("near_s") is not None else (r in near) for r in flips)
+            twist_n = sum(int(r["twist_s"]) if r.get("twist_s") is not None else (r in twisted) for r in flips)
             angles = ", ".join("%.1f" % float(r["dang"]) for r in flips[:6]) + (", ..." if len(flips) > 6 else "")
             text += "; %d flip second(s) (the largest step over 10 deg): the axis was %s deg from down, the twist limit hit in %d" % (
-                len(flips), angles, sum(1 for r in flips if r["dtwist"] == "hit"))
-            if near and len(near) >= len(twisted):
+                flip_n, angles, sum(int(r["twist_s"]) + (int(r["near_twist_s"] or 0)) if r.get("twist_s") is not None else (r["dtwist"] == "hit") for r in flips))
+            if near_n and near_n >= twist_n:
                 notes.append("leading hypothesis: the body-down pole degenerates with the arm near vertical (%d of %d flip seconds with the axis within 15 deg of down or up)" % (
-                    len(near), len(flips)))
-            elif twisted:
-                notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (len(twisted), len(flips)))
+                    near_n, flip_n))
+            elif twist_n:
+                notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (twist_n, flip_n))
             else:
-                notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % len(flips))
+                notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % flip_n)
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
@@ -12268,14 +12295,16 @@ def _hj_f98c_eye(rows, ctx):
 
     ue, ae = eye_mean("ueye", "un"), eye_mean("aeye", "ar")
     stored = [r["ns"] for r in sec if r["ns"] != "none"]
-    start_stored = sum(int(sec[i]["start"]) for i in range(1, len(sec)) if sec[i - 1]["ns"] != "none")
+    start_stored = sum(int(r["after_stored"]) for r in sec if r.get("after_stored") is not None)
+    start_stored += sum(int(sec[i]["start"]) for i in range(1, len(sec)) if sec[i].get("after_stored") is None and sec[i - 1]["ns"] != "none")
     hunched = sum(int(r["hunch"] or 0) for r in sec)
     # F103: the stored upright neck is the skeleton's; a move of 10 cm or more from one second to the next is a hunched stance stored as the standing one (the
     # F102 flight: 1.543 -> 1.307 m when the fists took their combat stance, and every view after it 23.5 cm low)
-    vals = [float(v.split()[0]) for v in stored]
+    vals = [float(r["ns"].split()[0]) for r in sec if r["ns"] != "none" and r.get("neck_jump") is None]
     jumps = ["%.3f -> %.3f m" % (vals[i - 1], vals[i]) for i in range(1, len(vals)) if abs(vals[i] - vals[i - 1]) >= 0.10]
+    jumps += ["%.3f m in 1 s" % float(r["neck_jump"]) for r in sec if r.get("neck_jump") is not None and float(r["neck_jump"]) >= 0.10]
     text = ("%d s: settled targets unarmed %d (the stance not known %d, hunched %d), armed %d (the unarmed eye of the stance %d, the standing raise over the crouch "
-            "%d, the starting raise %d)") % (len(sec), tot["un"], tot["unk"], hunched, tot["ar"], tot["stance"], tot["over"], tot["start"])
+            "%d, the starting raise %d)") % (_hsecs(sec), tot["un"], tot["unk"], hunched, tot["ar"], tot["stance"], tot["over"], tot["start"])
     if ue is not None:
         text += "; the unarmed eye %.3f m" % ue
     if ae is not None:
@@ -12313,11 +12342,15 @@ def _hj_f97a_body(rows, ctx):
         clavmin = min((float(r["clavmin"]) for r in rs if int(r["clr"])), default=0.0)
         name = "%s %s" % (item, stance)
         parts.append("%s %d s: weight %.2f, neck raised %+.1f cm (asked %+.1f, capped %d), written %.3f m against %.3f, the eye over the clavicles %+.1f cm (min %+.1f), "
-                     "INSIDE %d of %d, legs %.3f -> %.3f, feet lifted %d" % (name, len(rs), w, raise_, asked, cap, mean("neckw"), mean("necka"), mean("clav"), clavmin,
+                     "INSIDE %d of %d, legs %.3f -> %.3f, feet lifted %d" % (name, _hsecs(rs), w, raise_, asked, cap, mean("neckw"), mean("necka"), mean("clav"), clavmin,
                                                                              ins, clr, mean("la"), mean("lw"), lif))
-        if w >= 0.99:
-            armed += len(rs)
-            if asked > 2.0 and raise_ < 0.5 and cap == 0:
+        armed_rows = [r for r in rs if float(r["w"]) >= 0.99]
+        if armed_rows and item != "mixed":
+            armed += _hsecs(armed_rows)
+            aw = sum(int(r["n"]) for r in armed_rows)
+            asked_a = sum(int(r["n"]) * float(r["asked"]) for r in armed_rows) / aw
+            raise_a = sum(int(r["n"]) * float(r["raise"]) for r in armed_rows) / aw
+            if asked_a > 2.0 and raise_a < 0.5 and sum(int(r["capped"]) for r in armed_rows) == 0:
                 never.append(name)
         if ins:
             inside.append("%s %d" % (name, ins))
@@ -12326,6 +12359,9 @@ def _hj_f97a_body(rows, ctx):
     text = "; ".join(parts)
     if never:
         return ("NEVER APPLIED", text + "; the raise was asked and never written with %s" % ", ".join(never))
+    if not armed and any(item == "mixed" for item, stance in groups) and (inside or lifted):
+        return ("PARTIAL", text + "; mixed-context general guards: " + "; ".join(
+            (["the eye entered the torso (%s)" % ", ".join(inside)] if inside else []) + (["feet lifted (%s)" % ", ".join(lifted)] if lifted else [])))
     if not armed:
         return ("IDLE", text + "; no armed second")
     notes = (["the eye entered the torso (%s)" % ", ".join(inside)] if inside else []) + (["feet lifted (%s)" % ", ".join(lifted)] if lifted else [])
@@ -12343,7 +12379,7 @@ def _hj_f95c_head_shadow(rows, ctx):
         return None
     tot = {k: sum(int(r[k]) for r in sec) for k in ("calls", "swapped", "parts", "unread", "lost", "sp", "ep", "kept", "words", "removed", "zeroed", "held")}
     text = "%d s: the head as shadow-only in %d of %d visibility calls (views unread %d); head x shadow view pairs %d, x main or other view %d; fade hook kept %d, " \
-           "zeroed %d, held %d" % (len(sec), tot["swapped"], tot["calls"], tot["unread"], tot["sp"], tot["ep"], tot["kept"], tot["zeroed"], tot["held"])
+           "zeroed %d, held %d" % (_hsecs(sec), tot["swapped"], tot["calls"], tot["unread"], tot["sp"], tot["ep"], tot["kept"], tot["zeroed"], tot["held"])
     if views:
         v = views[-1]
         text += "; views %s (main %s, shadow %s, other %s)" % (v["n"], v["main"], v["shadow"], v["other"])
@@ -12410,13 +12446,14 @@ def _hj_f100_pose(rows, ctx):
         return None
     busy = [r for r in sec if int(r["calls"])]
     calls = sum(int(r["calls"]) for r in sec)
-    text = "%d s: %d calls" % (len(sec), calls)
+    text = "%d s: %d calls" % (_hsecs(sec), calls)
     if not busy:
         return ("IDLE", text + "; no local Animate work clocked")
     mean = sorted(float(r["mean"]) for r in busy)
-    tot = sorted(float(r["ms"]) for r in busy)
-    text += " (%.0f a second), %.1f us a call (median second), max %.1f us, %.3f ms a second (median, max %.3f)" % (
-        calls / len(busy), mean[len(mean) // 2], max(float(r["max"]) for r in busy), tot[len(tot) // 2], tot[-1])
+    tot = sorted(float(r["ms"]) / _hwl(r) for r in busy)
+    unit = "second" if all(_hwl(r) == 1 for r in busy) else "window"
+    text += " (%.0f a second), %.1f us a call (median %s), max %.1f us, %.3f ms a second (median, max %.3f)" % (
+        calls / _hsecs(busy), mean[len(mean) // 2], unit, max(float(r["max"]) for r in busy), tot[len(tot) // 2], tot[-1])
     return ("OK", text)
 
 
@@ -12873,13 +12910,14 @@ HEALTH_RULES = (
         ("silent", r"native on foot camera \(F93d\): the camera controller has not updated for (?P<ms>\d+) ms with the suite open"),
     ), _hj_f93d_camera),
     _hrule("neck height (F94a)", ("F94a",), ("native on foot neck height (F94a)", "native on foot eye height (F94a)"), (
-        ("sec", r"native on foot neck height \(F94a\) 1 s: item (?P<item>\S+); (?P<bin>standing|every state) (?P<n>\d+) calls: animated neck (?P<neck>[\d.]+) m \(min [\d.]+ "
+        ("sec", r"native on foot neck height \(F94a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<bin>standing|every state) (?P<n>\d+) calls: animated neck (?P<neck>[\d.]+) m \(min [\d.]+ "
                 r"max [\d.]+\); eye height key (?P<key>[\d.]+) cm; the view over the neck (?P<view>%s) cm \(min %s max %s\), the game's camera over it (?P<game>%s) cm, the "
                 r"skeleton's eye over it (?P<anim>.+?) \(head level\); the raise's target (?P<tgt>%s) cm \(min %s max %s\), in the drawn camera (?P<incam>%s) cm \(found "
                 r"by the alignment serial (?P<matched>\d+) calls, the last published (?P<legacy>\d+), serial not found (?P<missed>\d+)\); frame thread (?P<ticks>\d+) ticks: "
                 r"neck reference weight (?P<weight>[\d.]+), raise (?P<raise>%s) cm, applied (?P<applied>%s) cm, target frozen (?P<frozen>\d+), stale (?P<stale>\d+), "
                 r"clamped (?P<clamped>\d+); the rest target asked (?P<asked>%s) cm, the lowering written mean (?P<low>%s) cm max \|(?P<lowmax>[\d.]+)\|; legs hip to foot "
-                r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % ((_HN,) * 12)),
+                r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)"
+                r"(?:; camera 3 m away (?P<remote>\d+) s \(max (?P<remote_max>[\d.]+) cm\))?" % ((_HN,) * 12)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
@@ -12950,7 +12988,7 @@ HEALTH_RULES = (
                 r"no aim (?P<noaim>\d+)\): (?P<verdict>agrees|DISAGREES)" % ((_HN,) * 4)),
     ), _hj_f109_turn),
     _hrule("view motion (F95a)", ("F95a",), ("native on foot view motion (F95a)",), (
-        ("sec", r"native on foot view motion \(F95a\) 1 s: the view a game frame, the head still: standing (?P<vsn>\d+) frames (?P<vs>[\d.]+) mm rms \(max [\d.]+\), moving "
+        ("sec", r"native on foot view motion \(F95a\) (?P<wl>\d+) s: the view a game frame, the head still: standing (?P<vsn>\d+) frames (?P<vs>[\d.]+) mm rms \(max [\d.]+\), moving "
                 r"(?P<vmn>\d+) frames (?P<vm>[\d.]+) mm rms \(max [\d.]+\); the HUD against the eye, the head still: standing (?P<hsn>\d+) frames (?P<hs>[\d.]+) mm rms "
                 r"\(max [\d.]+\), moving (?P<hmn>\d+) frames (?P<hm>[\d.]+) mm rms \(max [\d.]+\) \((?P<hframes>\d+) frames, head moving (?P<hnot>\d+)\); the raise moved "
                 r"the view (?P<rs>[\d.]+) mm standing \((?P<rsn>\d+) ticks\), (?P<rm>[\d.]+) mm moving \((?P<rmn>\d+) ticks\); the stance settled in (?P<settled>\d+) of "
@@ -12959,16 +12997,18 @@ HEALTH_RULES = (
                 r"(?:; F97a: the view against the ground, the head still: standing (?P<wsn>\d+) frames (?P<ws>[\d.]+) mm rms \(max [\d.]+, (?P<wso>\d+) steps over 1 cm\), "
                 r"moving (?P<wmn>\d+) frames (?P<wm>[\d.]+) mm rms \(max [\d.]+, (?P<wmo>\d+) over 1 cm\); the view against the body: steps over 1 cm standing "
                 r"(?P<bso>\d+), moving (?P<bmo>\d+))?$"),
+        ("seconds", r"native on foot view motion \(F95a\) seconds: body \[(?P<body>[\d.,]*)\], ground \[(?P<ground>[\d.,]*)\], HUD standing \[(?P<hs>[\d.,]*)\], "
+                    r"HUD moving \[(?P<hm>[\d.,]*)\]; settled (?P<settled_s>\d+) of (?P<ws>\d+) s$"),
     ), _hj_f95a_motion),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
-        ("sec", r"native on foot armed body \(F97a\) 1 s: item (?P<item>\S+); (?P<stance>standing|crouched|moving crouched|moving) (?P<n>\d+) calls: weapon weight "
+        ("sec", r"native on foot armed body \(F97a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<stance>standing|crouched|moving crouched|moving) (?P<n>\d+) calls: weapon weight "
                 r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
                 r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
                 r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
                 r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
     ), _hj_f97a_body),
     _hrule("left elbow (F98a)", ("F98a",), ("native on foot left elbow (F98a)",), (
-        ("sec", r"native on foot left elbow \(F98a\) 1 s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
+        ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
                 r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
                 r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
@@ -12976,7 +13016,8 @@ HEALTH_RULES = (
                 # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
                 r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
                 r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
-                r"|no elbow step was measured))?" % ((_HN,) * 6)),
+                r"|no elbow step was measured))?"
+                r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?" % ((_HN,) * 6)),
     ), _hj_f98a_elbow),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
@@ -12985,13 +13026,14 @@ HEALTH_RULES = (
                 r"put away (?P<away>\d+)"),
     ), _hj_f99a_draw),
     _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
-        ("sec", r"native on foot eye level \(F98c\) 1 s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)(?:, hunched (?P<hunch>\d+))?\), armed (?P<ar>\d+): "
+        ("sec", r"native on foot eye level \(F98c\) (?P<wl>\d+) s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)(?:, hunched (?P<hunch>\d+))?\), armed (?P<ar>\d+): "
                 r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
                 r"put the view at: unarmed (?P<ueye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none), armed (?P<aeye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none); the unarmed "
-                r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"),
+                r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"
+                r"(?:; starting raise after stored (?P<after_stored>\d+); largest 1 s neck change (?P<neck_jump>[\d.]+) m)?"),
     ), _hj_f98c_eye),
     _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
-        ("sec", r"native on foot head shadow \(F95c\) 1 s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
+        ("sec", r"native on foot head shadow \(F95c\) (?P<wl>\d+) s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
                 r"views unread (?P<unread>\d+), class changed by the game (?P<lost>\d+); head instance x view pairs after the call: shadow views (?P<sp>\d+), main or "
                 r"other views (?P<ep>\d+) \(removed by the fade hook\); fade hook: kept (?P<kept>\d+) \(mask words left (?P<words>\d+), words that lost a bit "
                 r"(?P<removed>\d+)\), zeroed (?P<zeroed>\d+), held \(third-person camera\) (?P<held>\d+)$"),
@@ -13005,7 +13047,7 @@ HEALTH_RULES = (
         ("families", r"marker probe \(F100\): measurement families (?P<state>ON|off) "),
     ), _hj_f100_tee),
     _hrule("pose hook CPU (F100)", ("F100",), ("pose hook CPU (F100)",), (
-        ("sec", r"pose hook CPU \(F100\) 1 s: (?P<calls>\d+) calls \([^)]*\), (?P<mean>[\d.]+) us mean, (?P<max>[\d.]+) us max, (?P<ms>[\d.]+) ms in all"),
+        ("sec", r"pose hook CPU \(F100\) (?P<wl>\d+) s: (?P<calls>\d+) calls \([^)]*\), (?P<mean>[\d.]+) us mean, (?P<max>[\d.]+) us max, (?P<ms>[\d.]+) ms in all"),
     ), _hj_f100_pose),
     _hrule("world screens (F105)", ("F105",), ("ui depth world screens (F105)",), (
         ("win", r"ui depth world screens \(F105\): (?P<frames>\d+) frames, seen (?P<seen>\d+), marked (?P<marked>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\); "
@@ -14885,9 +14927,10 @@ def self_test_health():
         FISTS, RIFLE = "$humanoid_fists_name;", "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def neck(item=FISTS, bin_="standing", view=15.5, tgt=11.6, incam=11.6, matched=90, legacy=0, missed=0, weight=1.0, lowmax=0.0, la=0.996, lw=0.996, key=15.5,
-                 anim="+15.6 cm", game=3.9):
-            return R("native on foot neck height (F94a) 1 s: item %s", item, bin_, 90, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, game, anim, tgt, tgt - 0.2,
-                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, 90)
+                 anim="+15.6 cm", game=3.9, wl=1, remote=None, remote_max=0.0, n=90, solves=90):
+            line = R("native on foot neck height (F94a) %u s: item %s", wl, item, bin_, n, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, game, anim, tgt, tgt - 0.2,
+                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, solves, remote or 0, remote_max)
+            return line if remote is not None else line.split("; camera 3 m away")[0]
 
         def eye_key(cm=15.5):
             return R("native on foot eye height (F94a): fix", cm, 15.5, 0.0, 30.0)
@@ -14913,8 +14956,8 @@ def self_test_health():
         # ---- view motion (F95a): the view and the HUD against the eye a frame, the raise from settled stances ----
         F95 = "view motion (F95a)"
 
-        def motion(vs=0.10, hs=0.12, hm=0.30, vm=0.40, vsn=60, vmn=50, hsn=58, hmn=48, rs=0.0, rm=0.0, settled=60, calls=90, moving=0, tgt="+16.4..+16.6 cm"):
-            return R("native on foot view motion (F95a) 1 s: the view a game frame", vsn, vs, vs * 3, vmn, vm, vm * 3, hsn, hs, hs * 3, hmn, hm, hm * 3, hsn + hmn + 10, 10,
+        def motion(vs=0.10, hs=0.12, hm=0.30, vm=0.40, vsn=60, vmn=50, hsn=58, hmn=48, rs=0.0, rm=0.0, settled=60, calls=90, moving=0, tgt="+16.4..+16.6 cm", wl=1):
+            return R("native on foot view motion (F95a) %u s: the view a game frame", wl, vsn, vs, vs * 3, vmn, vm, vm * 3, hsn, hs, hs * 3, hmn, hm, hm * 3, hsn + hmn + 10, 10,
                      rs, 45, rm, 45, settled, calls, moving, 0, 0, calls - settled - moving, 0, tgt)
 
         check("F95a motion: still, the HUD locked to the eye", [motion()] * 3, 0, [("OK", F95)],
@@ -14927,9 +14970,9 @@ def self_test_health():
         check("F95a motion: the view moves standing", [motion(vs=1.4, hs=1.3)] * 2, 0, [("PARTIAL", F95)], has=["the view moves standing", "the HUD moves against the eye standing"])
         check("F95a motion: no frame with the head still", [motion(vsn=0, vmn=0, hsn=0, hmn=0)] * 2, 0, [("IDLE", F95)], has=["no frame with the head still"])
 
-        def motion97(vs=0.30, ws=0.25, wso=0, bso=0, vsn=80):
+        def motion97(vs=0.30, ws=0.25, wso=0, bso=0, vsn=80, wl=1):
             """F97a's form: the view against the ground and the steps over 1 cm appended (motion()'s leading fields)."""
-            return R("native on foot view motion (F95a) 1 s: the view a game frame", vsn, vs, vs * 3, 50, 0.4, 1.2, 78, 0.12, 0.36, 48, 0.3, 0.9, 136, 10, 0.0, 45, 0.0,
+            return R("native on foot view motion (F95a) %u s: the view a game frame", wl, vsn, vs, vs * 3, 50, 0.4, 1.2, 78, 0.12, 0.36, 48, 0.3, 0.9, 136, 10, 0.0, 45, 0.0,
                      45, 60, 90, 0, 0, 0, 30, 0, "+16.4..+16.6 cm", vsn, ws, ws * 3, wso, 50, 0.3, 0.9, 0, bso, 0)
 
         check("F97a motion: a teleport second (one 525 mm step) beside still seconds", [motion97(vs=71.5, ws=60.0, wso=1, bso=1, vsn=54)] + [motion97()] * 4, 0,
@@ -14941,8 +14984,8 @@ def self_test_health():
         RIFLE97 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def body97(item=RIFLE97, stance="standing", w=1.0, raise_=8.2, asked=8.4, capped=0, clav=18.2, clavmin=15.0, chest=28.0, chestmin=20.0, inside=0, clr=90,
-                   la=0.894, lw=0.985, lifted=0):
-            return R("native on foot armed body (F97a) 1 s: item %s", item, stance, 90, w, raise_, raise_ - 1.0, raise_ + 1.0, asked, capped, 1.300 + raise_ / 100.0, 1.300,
+                   la=0.894, lw=0.985, lifted=0, wl=1):
+            return R("native on foot armed body (F97a) %u s: item %s", wl, item, stance, 90, w, raise_, raise_ - 1.0, raise_ + 1.0, asked, capped, 1.300 + raise_ / 100.0, 1.300,
                      clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted)
 
         check("F97a body: the rifle raised upright, the eye clear", [body97()] * 2 + [body97(stance="crouched", raise_=-6.8, asked=-6.8, clav=14.0, clavmin=12.0)] * 2, 0,
@@ -14957,9 +15000,10 @@ def self_test_health():
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"
 
-        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail=""):
-            return R("native on foot left elbow (F98a) 1 s: item %s", item, n, aim, aim - 0.5, aim + 0.5, 2.0, 1.5, 3.0, 7.0, plane, plane + 4.0, over45, step, step * 3,
+        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail="", wl=1):
+            line = R("native on foot left elbow (F98a) %u s: item %s", wl, item, n, aim, aim - 0.5, aim + 0.5, 2.0, 1.5, 3.0, 7.0, plane, plane + 4.0, over45, step, step * 3,
                      over10, n - 1, seed, 25.0, 31.0, down, legacy, 0, tail)
+            return line.rsplit("; seconds mostly over 45 deg", 1)[0]
 
         PISTOL98 = "$wpn_m_pistol_laser_name;"
 
@@ -15011,8 +15055,9 @@ def self_test_health():
         # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
         F98C = "eye level (F98c)"
 
-        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0):
-            return R("native on foot eye level (F98c) 1 s: item %s", item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc)
+        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0, wl=1, after_stored=None, neck_jump=None):
+            line = R("native on foot eye level (F98c) %u s: item %s", wl, item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc, after_stored or 0, neck_jump or 0.0)
+            return line if after_stored is not None or neck_jump is not None else line.split("; starting raise after stored")[0]
 
         EYE = "1.693 m (min 1.693 max 1.693)"
         check("F98c eye: unarmed stored, then the rifle at the unarmed eye", [eye98("$humanoid_fists_name;", un=60, ueye=EYE)] + [eye98(ar=60, stance=60, aeye=EYE)] * 2,
@@ -15199,15 +15244,15 @@ def self_test_health():
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,
               [("OK", F94)], lacks=["the body was lowered or raised"])
         check("F98a: the HUD's pooled rms carried by one second", [motion97(), motion97(), motion97()] +
-              [R("native on foot view motion (F95a) 1 s: the view a game frame", 80, 0.30, 0.9, 50, 0.4, 1.2, 78, 10.09, 51.1, 48, 0.3, 0.9, 136, 10, 0.0, 45, 0.0, 45, 60, 90,
+              [R("native on foot view motion (F95a) %u s: the view a game frame", 1, 80, 0.30, 0.9, 50, 0.4, 1.2, 78, 10.09, 51.1, 48, 0.3, 0.9, 136, 10, 0.0, 45, 0.0, 45, 60, 90,
                  0, 0, 0, 30, 0, "+16.4..+16.6 cm", 80, 0.25, 0.75, 0, 50, 0.3, 0.9, 0, 0, 0)], 0, [("OK", F95)],
               has=["the HUD against the eye, the median second: standing 0.12 mm rms"], lacks=["the HUD moves against the eye standing"])
 
         # ---- head in the shadows (F95c): the head parts as shadow-only through the visibility call, the fade hook keeps the shadow views ----
         F95C = "head in the shadows (F95c)"
 
-        def shadow_sec(calls=90, swapped=90, sp=360, ep=0, kept=90, zeroed=0, held=0, unread=0, lost=0, removed=0):
-            return R("native on foot head shadow (F95c) 1 s: visibility calls", calls, swapped, swapped * 6, unread, lost, sp, ep, kept, kept * 4, removed, zeroed, held)
+        def shadow_sec(calls=90, swapped=90, sp=360, ep=0, kept=90, zeroed=0, held=0, unread=0, lost=0, removed=0, wl=1):
+            return R("native on foot head shadow (F95c) %u s: visibility calls", wl, calls, swapped, swapped * 6, unread, lost, sp, ep, kept, kept * 4, removed, zeroed, held)
 
         def shadow_views(n=7, main=2, shadow=4, other=1):
             return R("native on foot head shadow (F95c): the local avatar's visibility call sees", n, main, shadow, other, 0,
@@ -15239,8 +15284,8 @@ def self_test_health():
             tail = R(", tee clock: %llu calls clocked", clocked, ns, ms, wl) if clocked else R(", tee clock: none", wl)
             return head + R("; tee (F100): fast path %llu", fast, calls, frames) + tail
 
-        def pose100(calls=90, mean=42.5, mx=120.0, ms=3.825):
-            return R("native on foot pose hook CPU (F100) 1 s:", calls, mean, mx, ms)
+        def pose100(calls=90, mean=42.5, mx=120.0, ms=3.825, wl=1):
+            return R("native on foot pose hook CPU (F100) %u s:", wl, calls, mean, mx, ms)
 
         check("F100 tee: the prefilter takes most calls, the clock ran", [tee100()] * 3, 0, [("OK", T100)],
               has=["3 s: the prefilter took 90% of 6000000 draw tee calls (22222 a frame over 270 frames); the tee 0.556 ms a frame (median of 3 clocked seconds"],
@@ -15727,6 +15772,44 @@ def self_test_health():
         if not all(next(r for r in HEALTH_RULES if r.name == name).needs_detail for name in (D95, S97, W98)):
             print("health: F125: F95b, F97b and F98b must need the detailed on-foot log")
             ok = False
+
+        # F125 step 6: the original one-second forms remain readable beside ten-second and flushed windows.
+        check("F125 step6 legacy neck", ["native on foot neck height (F94a) 1 s: item $humanoid_fists_name;; standing 90 calls: animated neck 1.543 m (min 1.540 max 1.546); eye height key 15.5 cm; the view over the neck +15.5 cm (min +15.2 max +15.8), the game's camera over it +3.9 cm, the skeleton's eye over it +15.6 cm (head level); the raise's target +11.6 cm (min +11.4 max +11.8), in the drawn camera +11.6 cm (found by the alignment serial 90 calls, the last published 0, serial not found 0); frame thread 90 ticks: neck reference weight 1.00, raise +11.6 cm, applied +11.6 cm, target frozen 0, stale 0, clamped 0; the rest target asked -11.6 cm, the lowering written mean +0.00 cm max |0.00|; legs hip to foot over the leg: animated 0.996, written mean 0.996 min 0.993 (90 solves)"], 0, [("OK", F94)], lacks=["UNPARSED"])
+        check("F125 step6 legacy motion", ['native on foot view motion (F95a) 1 s: the view a game frame, the head still: standing 60 frames 0.10 mm rms (max 0.30), moving 50 frames 0.40 mm rms (max 1.20); the HUD against the eye, the head still: standing 58 frames 0.12 mm rms (max 0.36), moving 48 frames 0.30 mm rms (max 0.90) (116 frames, head moving 10); the raise moved the view 0.0 mm standing (45 ticks), 0.0 mm moving (45 ticks); the stance settled in 60 of 90 pin calls (moving 0, the neck moving 0, the camera moving 0, filling 30, no input 0), settled target +16.4..+16.6 cm; F97a: the view against the ground, the head still: standing 0 frames 0.00 mm rms (max 0.00, 0 steps over 1 cm), moving 0 frames 0.00 mm rms (max 0.00, 0 over 1 cm); the view against the body: steps over 1 cm standing 0, moving 0'], 0, [("OK", F95)], lacks=["UNPARSED"])
+        check("F125 step6 legacy motion97", ['native on foot view motion (F95a) 1 s: the view a game frame, the head still: standing 80 frames 0.30 mm rms (max 0.90), moving 50 frames 0.40 mm rms (max 1.20); the HUD against the eye, the head still: standing 78 frames 0.12 mm rms (max 0.36), moving 48 frames 0.30 mm rms (max 0.90) (136 frames, head moving 10); the raise moved the view 0.0 mm standing (45 ticks), 0.0 mm moving (45 ticks); the stance settled in 60 of 90 pin calls (moving 0, the neck moving 0, the camera moving 0, filling 30, no input 0), settled target +16.4..+16.6 cm; F97a: the view against the ground, the head still: standing 80 frames 0.25 mm rms (max 0.75, 0 steps over 1 cm), moving 50 frames 0.30 mm rms (max 0.90, 0 over 1 cm); the view against the body: steps over 1 cm standing 0, moving 0'], 0, [("OK", F95)], lacks=["UNPARSED"])
+        check("F125 step6 legacy body97", ['native on foot armed body (F97a) 1 s: item $wpn_m_assaultrifle_laser_fauto_name;; standing 90 calls: weapon weight 1.00; the neck raised +8.2 cm (min +7.2 max +9.2; asked +8.4; capped by the legs 0), written 1.382 m against animated 1.300 m; the eye as drawn over the clavicle line +18.2 cm (min +15.0), ahead of the chest +28.0 cm (min +20.0), INSIDE 0 of 90; legs hip to foot over the leg: animated 0.894, written 0.985 (min 0.975), feet lifted 0'], 0, [("OK", F97)], lacks=["UNPARSED"])
+        check("F125 step6 legacy elbow98", ["native on foot left elbow (F98a) 1 s: item $wpn_m_assaultrifle_laser_fauto_name;; 76 solves: the game's aim pitch -23.9 deg (min -24.4 max -23.4); the chest's lean as written +2.0 deg (animated +1.5); F82's torso yaw +3.0 deg (largest 7.0); the elbow's swivel from the stance's plane 8.0 deg (max 12.0, over 45 deg in 0); its step a frame 0.40 deg rms (max 1.2, over 10 deg 0, of 75 steps); the swivel from the stable pole's seed 76 (the arm 25.0 deg from the seed's axis, max 31.0), a body-down pole 0, the legacy swivel 0; hand twist at the forearm's limit 0"], 0, [("OK", F98)], lacks=["UNPARSED"])
+        check("F125 step6 legacy eye98", ['native on foot eye level (F98c) 1 s: item $wpn_m_assaultrifle_laser_fauto_name;; settled targets: unarmed 0 (the stance not known 0, hunched 0), armed 0: the unarmed eye of the stance 0, the standing unarmed raise over the crouch 0, the starting raise 0; the eye they put the view at: unarmed none, armed none; the unarmed neck stored: standing 1.543 m, crouched none'], 0, [("IDLE", F98C)], lacks=["UNPARSED"])
+        check("F125 step6 legacy shadow_sec", ['native on foot head shadow (F95c) 1 s: visibility calls 90, head as shadow-only 90 (head parts 540), views unread 0, class changed by the game 0; head instance x view pairs after the call: shadow views 360, main or other views 0 (removed by the fade hook); fade hook: kept 90 (mask words left 360, words that lost a bit 0), zeroed 0, held (third-person camera) 0'], 0, [("OK", F95C)], lacks=["UNPARSED"])
+        check("F125 step6 legacy pose100", ["native on foot pose hook CPU (F100) 1 s: 90 calls (the local avatar's FP snapshot, and its pin, legs, bend and arm IK, in the game's animation job), 42.5 us mean, 120.0 us max, 3.825 ms in all"], 0, [("OK", P100)], lacks=["UNPARSED"])
+        check("F125 F94a: weighted 10 s plus short window", [neck(wl=10), neck(wl=3)], 0, [("OK", F94)], has=["13 s:"], lacks=["UNPARSED"])
+        check("F125 F94a: unequal call counts weight the mean instead of the number of rows", [neck(view=0.0, n=1, solves=1, remote=0),
+              neck(n=99, solves=99, wl=10, remote=0)], 0, [("OK", F94)], has=["the view over the neck +15.3 cm"], lacks=["the view is off the key", "UNPARSED"])
+        check("F125 pin: mixed item raw seconds are not judged against a specific eye-height key", [neck(item="mixed", view=3.9, incam=0.0, remote=0)], 0,
+              [("IDLE", F94)], has=["mixed-context raw seconds are not judged"], lacks=["NEVER APPLIED", "the raise never reached"])
+        check("F125 pin: a later clean item B window is judged normally", [neck(item="mixed", view=3.9, incam=0.0, remote=0), neck(RIFLE, wl=10, remote=0)], 0,
+              [("OK", F94)], has=[RIFLE + " 10 s:"], lacks=["NEVER APPLIED", "the raise never reached"])
+        check("F125 body: mixed-item raises are not attributed to one item", [body97(item="mixed", raise_=0.0, asked=8.4)], 0,
+              [("IDLE", F97)], lacks=["NEVER APPLIED", "the raise was asked and never written"])
+        check("F125 body: mixed-item general torso guard remains judged", [body97(item="mixed", raise_=0.0, asked=8.4, inside=1)], 0,
+              [("PARTIAL", F97)], has=["mixed-context general guards", "the eye entered the torso"], lacks=["NEVER APPLIED"])
+        check("F125 F107: a remote second survives the camera mean", [neck(game=20.0, wl=10, remote=1, remote_max=500.0, bin_="every state")], 3,
+              [("NEVER APPLIED", F107)], has=["camera 5.0 m from the neck in 1 neck reference seconds"], lacks=["UNPARSED"])
+        check("F125 F97a: full-weight evidence remains judged beside ramp seconds", [body97(w=0.5, wl=10), body97(raise_=0.0, asked=8.4, wl=2)], 3,
+              [("NEVER APPLIED", F97)], has=["the raise was asked and never written"], lacks=["UNPARSED"])
+        check("F125 F98c: starting raise after stored survives one window", [eye98(ar=60, start=60, after_stored=60, wl=10)], 0,
+              [("PARTIAL", F98C)], has=["10 s:", "starting raise taken 60 times"], lacks=["UNPARSED"])
+        check("F125 F98c: the stored neck can jump and return inside one window", [eye98(ar=60, stance=60, neck_jump=0.235, wl=10)], 0,
+              [("PARTIAL", F98C)], has=["stored standing neck jumped", "0.235 m in 1 s"], lacks=["UNPARSED"])
+        check("F125 F95a: exact second RMS survives a large pooled teleport RMS", [motion97(vs=25.0, ws=20.0, wl=10),
+              R("native on foot view motion (F95a) seconds:", "0.25,0.25,60.00", "0.25,0.25,60.00", "0.12,0.12,10.09", "0.30,0.30,0.30", 3, 10)], 0,
+              [("OK", F95)], has=["standing the median second 0.25 mm rms", "settled in 3 of 10 measured seconds"], lacks=["UNPARSED", "the view moves standing"])
+        check("F125 F98a: mostly-off-plane seconds survive pooling", [elbow98(wl=10, tail="; seconds mostly over 45 deg 2; flip seconds 0 (near vertical 0, twist limit 0, near with twist 0)")], 0,
+              [("PARTIAL", F98)], has=["10 s:", "2 s mostly"], lacks=["UNPARSED"])
+        check("F125 F95c: summed 10 s and partial shadow windows", [shadow_sec(calls=900, swapped=900, wl=10), shadow_sec(wl=3)], 0,
+              [("OK", F95C)], has=["13 s:"], lacks=["UNPARSED"])
+        check("F125 F100: per-second cost divides by window length", [pose100(calls=900, ms=38.25, wl=10)], 0,
+              [("OK", P100)], has=["10 s: 900 calls (90 a second)", "3.825 ms a second"], lacks=["UNPARSED"])
 
         # ---- F125: the on-foot log diet: the detail state, the rules that need the detail log, the window helpers ----
         F125_OFF = R("native on foot log (F125): detail %s", "off", 10)

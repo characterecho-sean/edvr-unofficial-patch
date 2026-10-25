@@ -62,6 +62,7 @@
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
 #include "native_on_foot_f123.h"   // F123: head containment, the leash and the wall contact (the machine, the fade mix, the lines)
 #include "native_on_foot_f125ui.h"
+#include "native_on_foot_logpin.h"
 #include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
@@ -19879,8 +19880,57 @@ void pfzTick(uint64_t now) {
 // forearm joint's hinge row (the row of F's matrix most parallel to the animated hinge: hits per row, mean angle per row, the learned row).
 // A line with no solves says so: the hook did not run, which reads differently from a hinge of zero error.
 uint64_t g_f66dLineMs = 0;
+struct F125ElbowWindow {
+    F98Left sum;
+    uint32_t seconds = 0, swung = 0, flips = 0, nearCount = 0, twisted = 0, nearTwisted = 0, serial = 0;
+    uint64_t startMs = 0;
+    int stance = 2;
+    bool detail = false, active = false;
+    char item[64] = "none";
+};
+F125ElbowWindow g_f125Elbow;
+nofoot::logpin::ContextSecond g_f125ElbowContext;
+void f125ElbowClose(uint64_t now) noexcept {
+    F125ElbowWindow& w = g_f125Elbow;
+    if (w.seconds && w.sum.n) {
+        const F98Left& f98 = w.sum;
+        w.seconds = nofoot::logwin::closedSeconds(now - w.startMs);
+        if (std::strcmp(w.item, "mixed") == 0)
+            Log::get().note("native on foot elbow measurement (F125): mixed-context raw second; item, stance or settings changed inside the hook's 1 s snapshot; the figures below are labelled mixed");
+        const double n98 = static_cast<double>(f98.n), an = f98.aimN ? static_cast<double>(f98.aimN) : 1.0, ln = f98.leanN ? static_cast<double>(f98.leanN) : 1.0;
+        // F124: the body-down solves' figures (none, and nothing printed, on a second with no such solve)
+        char down98[256] = "";
+        if (f98.downN) {
+            char at98[128];
+            if (f98.downStepMax >= 0.0)
+                std::snprintf(at98, sizeof(at98), "at the largest step (%.1f deg) the axis was %.1f deg from down, the twist limit %s", f98.downStepMax, f98.downStepAng,
+                              f98.downStepTwist ? "hit" : "not hit");
+            else
+                std::snprintf(at98, sizeof(at98), "no elbow step was measured");
+            std::snprintf(down98, sizeof(down98), "; on %u body-down solves the arm's axis came within %.1f deg of the body's down; %s", f98.downN, f98.downMin, at98);
+        }
+        Log::get().note("native on foot left elbow (F98a) %u s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
+                        "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
+                        "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
+                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u%s; seconds mostly over 45 deg %u; flip seconds %u (near vertical %u, twist limit %u, near with twist %u)",
+                        w.seconds, w.item, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
+                        f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
+                        f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
+                        f98.twistLimited, down98, w.swung, w.flips, w.nearCount, w.twisted, w.nearTwisted);
+    }
+    w = F125ElbowWindow{};
+}
 void f66dLine(uint64_t now, int mode) noexcept {
-    if (mode == 0 || !nativeOnFootActive() || !g_pfzArmed) {
+    F125ElbowWindow& pending = g_f125Elbow;
+    uint64_t rawContext = nofoot::logwin::sigMix(g_cfgGeneration, g_heldItemSerial.load(std::memory_order_relaxed));
+    rawContext = nofoot::logwin::sigMix(rawContext, static_cast<uint32_t>(g_f119StancePub.load(std::memory_order_relaxed)));
+    rawContext = nofoot::logwin::sigMix(rawContext, static_cast<uint32_t>(mode) | (nativeOnFootActive() ? 8u : 0u));
+    g_f125ElbowContext.observe(rawContext);
+    const bool active = mode != 0 && nativeOnFootActive() && g_pfzArmed;
+    if (pending.seconds && (!active || pending.serial != g_heldItemSerial.load(std::memory_order_relaxed) ||
+        pending.detail != nofoot::logwin::detail() || pending.stance != g_f119StancePub.load(std::memory_order_relaxed) ||
+        now - pending.startMs >= 1000ull * nofoot::logwin::windowSeconds())) f125ElbowClose(now);
+    if (!active) {
         g_f66dLineMs = 0;
         return;
     }
@@ -19936,6 +19986,7 @@ void f66dLine(uint64_t now, int mode) noexcept {
         seq98 = s1;
     }
     g_f98Reset.store(true, std::memory_order_relaxed);
+    const bool mixedRawSecond = g_f125ElbowContext.take();
     // F124: the hook resets the window at its next solve, so a second with no solve left the last one in g_f98 and it printed again (one log had the same line 42 and 33
     // times in a row, which the health rule counted as that many seconds). Print only when the counter has moved since the last print.
     static nofoot::f124::SeqPrintGate gate98;
@@ -19943,26 +19994,23 @@ void f66dLine(uint64_t now, int mode) noexcept {
         char item98[64] = "none";
         uint32_t serial98 = 0;
         if (!opticItemRead(&serial98, item98) || !item98[0]) std::snprintf(item98, sizeof(item98), "none");
-        const double n98 = static_cast<double>(f98.n), an = f98.aimN ? static_cast<double>(f98.aimN) : 1.0, ln = f98.leanN ? static_cast<double>(f98.leanN) : 1.0;
-        // F124: the body-down solves' figures (none, and nothing printed, on a second with no such solve)
-        char down98[256] = "";
-        if (f98.downN) {
-            char at98[128];
-            if (f98.downStepMax >= 0.0)
-                std::snprintf(at98, sizeof(at98), "at the largest step (%.1f deg) the axis was %.1f deg from down, the twist limit %s", f98.downStepMax, f98.downStepAng,
-                              f98.downStepTwist ? "hit" : "not hit");
-            else
-                std::snprintf(at98, sizeof(at98), "no elbow step was measured");
-            std::snprintf(down98, sizeof(down98), "; on %u body-down solves the arm's axis came within %.1f deg of the body's down; %s", f98.downN, f98.downMin, at98);
+        F125ElbowWindow& w = g_f125Elbow;
+        if (mixedRawSecond && w.seconds) f125ElbowClose(now);
+        if (!w.seconds) {
+            w.startMs = now >= 1000 ? now - 1000 : now;
+            w.serial = serial98; std::snprintf(w.item, sizeof(w.item), "%s", mixedRawSecond ? "mixed" : item98);
+            w.stance = g_f119StancePub.load(std::memory_order_relaxed); w.detail = nofoot::logwin::detail(); w.active = true;
         }
-        Log::get().note("native on foot left elbow (F98a) 1 s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
-                        "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
-                        "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
-                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u%s",
-                        item98, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
-                        f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
-                        f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
-                        f98.twistLimited, down98);
+        nofoot::logpin::elbow(w.sum, f98);
+        w.swung += f98.planeOver45 * 2 > f98.n;
+        if (f98.downN && f98.downStepMax > 10.0) {
+            ++w.flips;
+            if (f98.downStepAng < 15.0 || f98.downStepAng > 165.0) { ++w.nearCount; w.nearTwisted += f98.downStepTwist != 0; }
+            else if (f98.downStepTwist) ++w.twisted;
+        }
+        ++w.seconds;
+        if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125ElbowClose(now);
+
     }
 }
 // F66g: the frame order line, once a second while native stereo is on foot and the hooks run: drain the ring; between one local P1 and the next, the
@@ -20895,6 +20943,174 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
 // beside them) with the proof's figures: the target - neck as written (after the bend) and the eye - neck, right, up, forward, mean and largest |value|
 // in cm, the vertical move (min, mean, max) and the horizontal move; one for the legs (re-planted, outward, lifted, per foot); one for the reach limit.
 uint64_t g_f67cLineMs = 0;
+struct F125CpuWindow {
+    uint64_t ticks = 0, calls = 0, mx = 0;
+    uint32_t seconds = 0;
+    bool scope = false, detail = false;
+};
+F125CpuWindow g_f125Cpu;
+void f125CpuClose() noexcept {
+    F125CpuWindow& sum = g_f125Cpu;
+    if (sum.seconds && (sum.calls || sum.scope)) {
+        const double us = static_cast<double>(f66QpcFreq() ? f66QpcFreq() : 1) / 1e6;
+        Log::get().note("native on foot pose hook CPU (F100) %u s: %llu calls (the local avatar's FP snapshot, and its pin, legs, bend and arm IK, in the game's "
+                        "animation job), %.1f us mean, %.1f us max, %.3f ms in all", sum.seconds, static_cast<unsigned long long>(sum.calls),
+                        sum.calls ? static_cast<double>(sum.ticks) / us / static_cast<double>(sum.calls) : 0.0, static_cast<double>(sum.mx) / us,
+                        static_cast<double>(sum.ticks) / us / 1000.0);
+    }
+    sum = F125CpuWindow{};
+}
+
+// F125: only this frame-thread window owns the aggregate. Hooks still reset once a second.
+struct F125PinWindow {
+    PinStats pin;
+    F94Second frame;
+    F95Hud hud;
+    uint32_t seconds = 0, remote[2] = {}, settled = 0;
+    double remoteMax[2] = {};
+    nofoot::logpin::Seconds bodyRms, groundRms, hudStill, hudMove;
+    nofoot::logpin::StoredNeck neck;
+    char item[64] = "none";
+    uint32_t serial = 0, weightSig = 0;
+    int stance = 2;
+    bool scope = false, detail = false, standKey = false, ads = false;
+    double eyeKey = 0.0;
+};
+F125PinWindow g_f125Pin;
+nofoot::logpin::ContextSecond g_f125PinContext;
+void f125PinPrint(const F125PinWindow& w) noexcept {
+    if (!w.seconds) return;
+    const PinStats& st = w.pin;
+    const F94Second& fs = w.frame;
+    const F95Hud& hud = w.hud;
+    const uint32_t ws = w.seconds;
+    if (std::strcmp(w.item, "mixed") == 0)
+        Log::get().note("native on foot pin measurement (F125): mixed-context raw second; item, stance or settings changed inside the hook's 1 s snapshot; item-specific figures below are labelled mixed (the snapshot cannot split the edge)");
+    const double an = st.ageN ? static_cast<double>(st.ageN) : 1.0;
+    const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
+    const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
+    Log::get().note("native on foot body pin (F67c, key %s): %llu hook calls, %llu pinned (refused: no P1 input %llu, input over 500 ms %llu, singular matrix "
+                    "%llu, the game's camera away from the commander %llu (F107); pinned without the legs' plan %llu, without a leg solve %llu, span write %llu); "
+                    "P1 input age at the Animate call %.1f ms mean "
+                    "(max %.1f): P1 frames even %.1f/%.1f ms (mean/max) odd %.1f/%.1f; a NEW publication since the last call: even %u of %.0f, odd %u of "
+                    "%.0f (the bend's old target refreshed on a random subset of calls); the eyes' cyclopean offset from the scene rows %u, the cached "
+                    "one %u, none (the body's forward, no IPD offset) %u; horizontal move clamped at %.1f m %u, vertical at %.1f m %u; AMC speed mean %.2f "
+                    "max %.2f m/s; over %u s",
+                    w.standKey ? "on" : "off", static_cast<unsigned long long>(st.calls),
+                    static_cast<unsigned long long>(st.pinned), static_cast<unsigned long long>(st.refused[kPinRefNoInput]),
+                    static_cast<unsigned long long>(st.refused[kPinRefStaleInput]), static_cast<unsigned long long>(st.refused[kPinRefMatrix]),
+                    static_cast<unsigned long long>(st.refused[kPinRefCameraAway]),
+                    static_cast<unsigned long long>(st.refused[kPinRefNoLegs]), static_cast<unsigned long long>(st.refused[kPinRefLeg]),
+                    static_cast<unsigned long long>(st.refused[kPinRefWrite]), st.ageSum / an, st.ageMax,
+                    st.fresh[0] + st.repeat[0] ? st.ageSumPar[0] / ne : 0.0, st.ageMaxPar[0], st.fresh[1] + st.repeat[1] ? st.ageSumPar[1] / no : 0.0,
+                    st.ageMaxPar[1], st.fresh[0], ne, st.fresh[1], no, st.cycRows, st.cycCached, st.cycNone, nofoot::kPinHorizCapM, st.hClamped,
+                    nofoot::kPinVertCapM, st.vClamped, st.speedSum / an, st.speedMax, ws);
+    // F94a: the neck as the view's reference, for the held item, standing when there were standing calls this second, else every state. Unarmed (weight 1) the view
+    // over the neck reads the key; the lowering written is 0 and the legs are the animation's in every stance. A build without F94a has no such line; one whose raise
+    // never reaches the camera reads a target with "in the drawn camera" at 0.
+    {
+        for (int b = 0; b < 2; ++b) {
+        const PinStats::F94Bin& e = st.f94[b];
+
+        if (e.n) {
+            const char* item = w.item;
+            const double n = static_cast<double>(e.n), gn = e.legsN ? static_cast<double>(e.legsN) : 1.0, fn = fs.n ? static_cast<double>(fs.n) : 1.0;
+            char anim[48];
+            if (e.animN) std::snprintf(anim, sizeof(anim), "%+.1f cm", e.animSum / static_cast<double>(e.animN));
+            else std::snprintf(anim, sizeof(anim), "not calibrated yet");
+            Log::get().note("native on foot neck height (F94a) %u s: item %s; %s %u calls: animated neck %.3f m (min %.3f max %.3f); eye height key %.1f cm; the view over "
+                            "the neck %+.1f cm (min %+.1f max %+.1f), the game's camera over it %+.1f cm, the skeleton's eye over it %s (head level); the raise's target "
+                            "%+.1f cm (min %+.1f max %+.1f), in the drawn camera %+.1f cm (found by the alignment serial %u calls, the last published %u, serial not found %u); "
+                            "frame thread %u ticks: neck reference weight %.2f, raise %+.1f cm, applied %+.1f cm, target frozen %u, stale %u, clamped %u; the rest target "
+                            "asked %+.1f cm, the lowering written mean %+.2f cm max |%.2f|; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves); camera 3 m away %u s (max %.1f cm)",
+                            ws, item, b == 0 ? "standing" : "every state", e.n, e.neckSum / n, e.neckMin, e.neckMax,
+                            w.eyeKey, e.viewSum / n, e.viewMin, e.viewMax, e.gameSum / n, anim,
+                            e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
+                            e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
+                            e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN, w.remote[b], w.remoteMax[b]);
+
+        }
+        }
+        if (st.f98Src[0] || st.f98Src[1] || st.f98Src[2] || st.f98Src[3] || st.f98Src[4] || st.f98Src[5]) {
+            const char* item = w.item;
+            // F98c: the settled targets by source and the eye's height they put the view at (the model, the head level), unarmed and armed, with the stored unarmed
+            // necks. Armed from "the unarmed eye of the stance", the armed eye reads the unarmed eye of the same stance; a build that never stores an unarmed
+            // stance reads every armed target from the starting raise.
+            namespace f94 = nofoot::f94;
+            char eyeBuf[2][64], neckBuf[2][24];
+            for (int a = 0; a < 2; ++a) {
+                const uint32_t na = a ? st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart]
+                                      : st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched];
+                if (na) std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "%.3f m (min %.3f max %.3f)", st.f98EyeSum[a] / static_cast<double>(na), st.f98EyeMin[a], st.f98EyeMax[a]);
+                else std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "none");
+                if (st.f98Have[a]) std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "%.3f m", st.f98Neck[a]);
+                else std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "none");
+            }
+            // F103: "hunched" counts the unarmed standing stances whose head joint was under a standing height: their eye from the stored upright neck.
+            Log::get().note("native on foot eye level (F98c) %u s: item %s; settled targets: unarmed %u (the stance not known %u, hunched %u), armed %u: the unarmed eye of "
+                            "the stance %u, the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the "
+                            "unarmed neck stored: standing %s, crouched %s; starting raise after stored %u; largest 1 s neck change %.3f m",
+                            ws, item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeUnarmedNoClass],
+                            st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
+                            st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1], w.neck.startAfterStored, w.neck.jump);
+        }
+        // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC
+        // views' camera in the HUD's frame less the LOCAL head), how far the raise moved the view, and the settle window's verdicts. Standing every figure should be
+        // near 0; moving, the HUD's against the eye too (the raise holds while the body moves).
+        uint32_t whyAll = 0;
+        for (uint32_t count : st.f95Why) whyAll += count;
+        if (whyAll || hud.frames) {
+            char tgt[48];
+            if (st.f95Why[nofoot::f95::kSettled]) std::snprintf(tgt, sizeof(tgt), "%+.1f..%+.1f cm", st.f95TgtMin, st.f95TgtMax);
+            else std::snprintf(tgt, sizeof(tgt), "none");
+            const nofoot::f95::StepStat &v0 = st.f95View[0], &v1 = st.f95View[1], &h0 = hud.eye[0], &h1 = hud.eye[1];
+            Log::get().note("native on foot view motion (F95a) %u s: the view a game frame, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms "
+                            "(max %.2f); the HUD against the eye, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms (max %.2f) (%u frames, "
+                            "head moving %u); the raise moved the view %.1f mm standing (%u ticks), %.1f mm moving (%u ticks); the stance settled in %u of %u pin calls (moving %u, "
+                            "the neck moving %u, the camera moving %u, filling %u, no input %u), settled target %s; F97a: the view against the ground, the head still: standing "
+                            "%u frames %.2f mm rms (max %.2f, %u steps over 1 cm), moving %u frames %.2f mm rms (max %.2f, %u over 1 cm); the view against the body: steps over "
+                            "1 cm standing %u, moving %u",
+                            ws, v0.n, v0.rms(), v0.maxAbs, v1.n, v1.rms(), v1.maxAbs, h0.n, h0.rms(), h0.maxAbs, h1.n, h1.rms(), h1.maxAbs, hud.frames, hud.notStill,
+                            fs.movedMm[0], fs.ticks[0], fs.movedMm[1], fs.ticks[1], st.f95Why[nofoot::f95::kSettled], whyAll, st.f95Why[nofoot::f95::kMoving],
+                            st.f95Why[nofoot::f95::kNeckMoving], st.f95Why[nofoot::f95::kCamMoving], st.f95Why[nofoot::f95::kFilling], st.f95Why[nofoot::f95::kInvalid], tgt,
+                            st.f95World[0].n, st.f95World[0].rms(), st.f95World[0].maxAbs, st.f95World[0].over1cm, st.f95World[1].n, st.f95World[1].rms(),
+                            st.f95World[1].maxAbs, st.f95World[1].over1cm, v0.over1cm, v1.over1cm);
+        }
+        if (whyAll || hud.frames) {
+            char b[192], g[192], hs[192], hm[192];
+            w.bodyRms.text(b, sizeof(b)); w.groundRms.text(g, sizeof(g));
+            w.hudStill.text(hs, sizeof(hs)); w.hudMove.text(hm, sizeof(hm));
+            Log::get().note("native on foot view motion (F95a) seconds: body [%s], ground [%s], HUD standing [%s], HUD moving [%s]; settled %u of %u s",
+                            b, g, hs, hm, w.settled, ws);
+        }
+        // F97a: the body against the eye per stance for the held item: the weapon's weight, the neck raised (written, asked), the calls a leg capped, the neck
+        // written against its animated height, the eye as drawn over the clavicle line and ahead of the chest 24 with the INSIDE frames (F69d's test on the drawn
+        // eye: under the clavicle line + 8 cm and under 12 cm ahead of the chest), the legs' extension and the feet lifted. Armed the eye should never be INSIDE.
+        {
+            const char* item97 = w.item;
+            for (int sb = 0; sb < nofoot::f97::kStanceN; ++sb) {
+                const PinStats::F97Bin& f = st.f97[sb];
+                if (!f.n) continue;
+                const double n97 = static_cast<double>(f.n), gn97 = f.legsN ? static_cast<double>(f.legsN) : 1.0, cn97 = f.clrN ? static_cast<double>(f.clrN) : 1.0;
+                Log::get().note("native on foot armed body (F97a) %u s: item %s; %s %u calls: weapon weight %.2f; the neck raised %+.1f cm (min %+.1f max %+.1f; asked %+.1f; "
+                                "capped by the legs %u), written %.3f m against animated %.3f m; the eye as drawn over the clavicle line %+.1f cm (min %+.1f), ahead of the "
+                                "chest %+.1f cm (min %+.1f), INSIDE %u of %u; legs hip to foot over the leg: animated %.3f, written %.3f (min %.3f), feet lifted %u",
+                                ws, item97, nofoot::f97::stanceName(sb), f.n, f.wSum / n97, f.raiseSum / n97, f.raiseMin, f.raiseMax, f.askedSum / n97, f.capped, f.neckSum / n97,
+                                f.neckAnimSum / n97, f.clavSum / cn97, f.clrN ? f.clavMin : 0.0, f.chestSum / cn97, f.clrN ? f.chestMin : 0.0, f.inside, f.clrN,
+                                f.legAnimSum / gn97, f.legSum / gn97, f.legsN ? f.legMin : 0.0, f.lifted);
+            }
+        }
+
+    }
+}
+void f125PinClose() noexcept {
+    F125PinWindow& w = g_f125Pin;
+    f125PinPrint(w);
+    const nofoot::logpin::StoredNeck neck = w.neck;
+    w = F125PinWindow{};
+    w.neck = neck;
+    w.neck.clearWindow();
+}
 void f67cPinLine(uint64_t now, bool scope) noexcept {
     // F68e: the eye calibration's completion, an event: written at the first tick after it (F125: no longer held for the 1 s line, nor lost to a second the
     // pin's statistics were torn or empty, and written whatever log.on_foot_detail says).
@@ -20904,6 +21120,20 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         "(0, -0.155, -0.09) by construction; eye height is normalized for natural-LOCAL pitch, a crouch's animated head moves it back",
                         g_pinEyeCal.e[0], g_pinEyeCal.e[1], g_pinEyeCal.e[2], g_pinEyeCal.axes.fSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.fAxis,
                         g_pinEyeCal.axes.uSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.uAxis, nofoot::kPinEyeCalFrames, g_pinEyeCal.headY);
+    F125PinWindow& pending = g_f125Pin;
+    uint64_t rawContext = nofoot::logwin::sigMix(g_cfgGeneration, g_heldItemSerial.load(std::memory_order_relaxed));
+    rawContext = nofoot::logwin::sigMix(rawContext, static_cast<uint32_t>(g_f119StancePub.load(std::memory_order_relaxed)));
+    rawContext = nofoot::logwin::sigMix(rawContext, (scope ? 1u : 0u) | (nofoot::logwin::detail() ? 2u : 0u) |
+        (g_standKeyOn.load(std::memory_order_relaxed) ? 4u : 0u) | ((journalAds() || g_adsState == kAdsActive) ? 8u : 0u));
+    g_f125PinContext.observe(rawContext);
+    const bool adsNow = journalAds() || g_adsState == kAdsActive;
+    if (pending.seconds && (pending.scope != scope || pending.detail != nofoot::logwin::detail() ||
+        pending.serial != g_heldItemSerial.load(std::memory_order_relaxed) || pending.stance != g_f119StancePub.load(std::memory_order_relaxed) ||
+        pending.standKey != g_standKeyOn.load(std::memory_order_relaxed) || pending.eyeKey != g_f94EyeHeightCm.load(std::memory_order_relaxed) ||
+        (pending.ads && !adsNow))) {
+        f125PinClose(); f125CpuClose();
+    }
+    if (g_f125Cpu.seconds && (g_f125Cpu.scope != scope || g_f125Cpu.detail != nofoot::logwin::detail())) f125CpuClose();
     if (g_f67cLineMs == 0) g_f67cLineMs = now;
     if (now - g_f67cLineMs < 1000) return;
     g_f67cLineMs = now;
@@ -20917,20 +21147,18 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
         got = g_pinStatSeq.load(std::memory_order_relaxed) == s1;
     }
     g_pinStatReset.store(true, std::memory_order_relaxed);
+    const bool mixedRawSecond = g_f125PinContext.take();
     // F86g: the floor probe's second (render thread's hits), read once for every bin's line
     const int64_t floorSumMm = g_f86gSumMm.exchange(0, std::memory_order_relaxed);
     const uint64_t floorHits = g_f86gHits.exchange(0, std::memory_order_relaxed), floorMiss = g_f86gMisses.exchange(0, std::memory_order_relaxed),
                    floorRej = g_f86gRejected.exchange(0, std::memory_order_relaxed);
-    // F100: the local avatar's Animate work, clocked in the game's job (pfzAnimateHooked). "0 calls" in scope: the hook did no local work this second.
+    // F100: consume/reset hook counters once a second even when the pin's own snapshot was torn.
     {
+        F125CpuWindow& sum = g_f125Cpu;
         const uint64_t ticks = g_f100PoseTicks.exchange(0, std::memory_order_relaxed), calls = g_f100PoseCalls.exchange(0, std::memory_order_relaxed),
                        mx = g_f100PoseMaxTicks.exchange(0, std::memory_order_relaxed);
-        const double us = static_cast<double>(f66QpcFreq() ? f66QpcFreq() : 1) / 1e6;
-        if (calls || scope)
-            Log::get().note("native on foot pose hook CPU (F100) 1 s: %llu calls (the local avatar's FP snapshot, and its pin, legs, bend and arm IK, in the game's "
-                            "animation job), %.1f us mean, %.1f us max, %.3f ms in all", static_cast<unsigned long long>(calls),
-                            calls ? static_cast<double>(ticks) / us / static_cast<double>(calls) : 0.0, static_cast<double>(mx) / us,
-                            static_cast<double>(ticks) / us / 1000.0);
+        sum.ticks += ticks; sum.calls += calls; sum.mx = std::max(sum.mx, mx); ++sum.seconds; sum.scope = scope; sum.detail = nofoot::logwin::detail();
+        if (nofoot::logwin::due(sum.seconds)) f125CpuClose();
     }
     if (!got || (!scope && st.calls == 0)) return;
     // F125: the floor probe, the per-state lines (F67c, F68e, F69a, F73, F69d), F75's square-up and F82's line are the detail log's; the window above was
@@ -20939,25 +21167,6 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     if (sayPin)
         Log::get().note("floor probe (F86g): two rays from eye 0 toward the model points (+-0.3, 0, 0.7) of the 3P body; %llu hits accepted (0.4-1.2 m horizontally from the 3P origin), %llu rays without a surface, "
                         "%llu hits outside that range", static_cast<unsigned long long>(floorHits), static_cast<unsigned long long>(floorMiss), static_cast<unsigned long long>(floorRej));
-    const double an = st.ageN ? static_cast<double>(st.ageN) : 1.0;
-    const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
-    const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
-    Log::get().note("native on foot body pin (F67c, key %s): %llu hook calls, %llu pinned (refused: no P1 input %llu, input over 500 ms %llu, singular matrix "
-                    "%llu, the game's camera away from the commander %llu (F107); pinned without the legs' plan %llu, without a leg solve %llu, span write %llu); "
-                    "P1 input age at the Animate call %.1f ms mean "
-                    "(max %.1f): P1 frames even %.1f/%.1f ms (mean/max) odd %.1f/%.1f; a NEW publication since the last call: even %u of %.0f, odd %u of "
-                    "%.0f (the bend's old target refreshed on a random subset of calls); the eyes' cyclopean offset from the scene rows %u, the cached "
-                    "one %u, none (the body's forward, no IPD offset) %u; horizontal move clamped at %.1f m %u, vertical at %.1f m %u; AMC speed mean %.2f "
-                    "max %.2f m/s",
-                    g_standKeyOn.load(std::memory_order_relaxed) ? "on" : "off", static_cast<unsigned long long>(st.calls),
-                    static_cast<unsigned long long>(st.pinned), static_cast<unsigned long long>(st.refused[kPinRefNoInput]),
-                    static_cast<unsigned long long>(st.refused[kPinRefStaleInput]), static_cast<unsigned long long>(st.refused[kPinRefMatrix]),
-                    static_cast<unsigned long long>(st.refused[kPinRefCameraAway]),
-                    static_cast<unsigned long long>(st.refused[kPinRefNoLegs]), static_cast<unsigned long long>(st.refused[kPinRefLeg]),
-                    static_cast<unsigned long long>(st.refused[kPinRefWrite]), st.ageSum / an, st.ageMax,
-                    st.fresh[0] + st.repeat[0] ? st.ageSumPar[0] / ne : 0.0, st.ageMaxPar[0], st.fresh[1] + st.repeat[1] ? st.ageSumPar[1] / no : 0.0,
-                    st.ageMaxPar[1], st.fresh[0], ne, st.fresh[1], no, st.cycRows, st.cycCached, st.cycNone, nofoot::kPinHorizCapM, st.hClamped,
-                    nofoot::kPinVertCapM, st.vClamped, st.speedSum / an, st.speedMax);
     static const char* const kBinNames[6] = {"standing", "walking", "running", "jumping", "crouching", "armed (any movement)"};
     for (int b = 0; b < 6 && sayPin; ++b) {
         const PinBin& p = st.bin[b];
@@ -21085,102 +21294,46 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         st.neckYawDegSum / static_cast<double>(st.neckYawCalls), st.neckYawDegMax, st.neckErrorMaxCm,
                         st.neckFootErrorMaxMm, st.neckShortfallMaxCm);
     }
-    // F94a: the neck as the view's reference, for the held item, standing when there were standing calls this second, else every state. Unarmed (weight 1) the view
-    // over the neck reads the key; the lowering written is 0 and the legs are the animation's in every stance. A build without F94a has no such line; one whose raise
-    // never reaches the camera reads a target with "in the drawn camera" at 0.
+    // F125: take the same frame and HUD seconds, at the same fold point, before extending only their reporting window.
+    const F94Second fs = g_f94Sec;
+    g_f94Sec = F94Second{};
+    F95Hud hud;
     {
-        const int b = st.f94[0].n ? 0 : 1;
-        const PinStats::F94Bin& e = st.f94[b];
-        F94Second& fs = g_f94Sec;
-        if (e.n) {
-            char item[64] = "none";
-            uint32_t serial = 0;
-            if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
-            const double n = static_cast<double>(e.n), gn = e.legsN ? static_cast<double>(e.legsN) : 1.0, fn = fs.n ? static_cast<double>(fs.n) : 1.0;
-            char anim[48];
-            if (e.animN) std::snprintf(anim, sizeof(anim), "%+.1f cm", e.animSum / static_cast<double>(e.animN));
-            else std::snprintf(anim, sizeof(anim), "not calibrated yet");
-            Log::get().note("native on foot neck height (F94a) 1 s: item %s; %s %u calls: animated neck %.3f m (min %.3f max %.3f); eye height key %.1f cm; the view over "
-                            "the neck %+.1f cm (min %+.1f max %+.1f), the game's camera over it %+.1f cm, the skeleton's eye over it %s (head level); the raise's target "
-                            "%+.1f cm (min %+.1f max %+.1f), in the drawn camera %+.1f cm (found by the alignment serial %u calls, the last published %u, serial not found %u); "
-                            "frame thread %u ticks: neck reference weight %.2f, raise %+.1f cm, applied %+.1f cm, target frozen %u, stale %u, clamped %u; the rest target "
-                            "asked %+.1f cm, the lowering written mean %+.2f cm max |%.2f|; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves)",
-                            item, b == 0 ? "standing" : "every state", e.n, e.neckSum / n, e.neckMin, e.neckMax,
-                            static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), e.viewSum / n, e.viewMin, e.viewMax, e.gameSum / n, anim,
-                            e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
-                            e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
-                            e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN);
-            // F98c: the settled targets by source and the eye's height they put the view at (the model, the head level), unarmed and armed, with the stored unarmed
-            // necks. Armed from "the unarmed eye of the stance", the armed eye reads the unarmed eye of the same stance; a build that never stores an unarmed
-            // stance reads every armed target from the starting raise.
-            namespace f94 = nofoot::f94;
-            char eyeBuf[2][64], neckBuf[2][24];
-            for (int a = 0; a < 2; ++a) {
-                const uint32_t na = a ? st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart]
-                                      : st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched];
-                if (na) std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "%.3f m (min %.3f max %.3f)", st.f98EyeSum[a] / static_cast<double>(na), st.f98EyeMin[a], st.f98EyeMax[a]);
-                else std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "none");
-                if (st.f98Have[a]) std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "%.3f m", st.f98Neck[a]);
-                else std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "none");
-            }
-            // F103: "hunched" counts the unarmed standing stances whose head joint was under a standing height: their eye from the stored upright neck.
-            Log::get().note("native on foot eye level (F98c) 1 s: item %s; settled targets: unarmed %u (the stance not known %u, hunched %u), armed %u: the unarmed eye of "
-                            "the stance %u, the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the "
-                            "unarmed neck stored: standing %s, crouched %s",
-                            item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeUnarmedNoClass],
-                            st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
-                            st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1]);
-        }
-        // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC
-        // views' camera in the HUD's frame less the LOCAL head), how far the raise moved the view, and the settle window's verdicts. Standing every figure should be
-        // near 0; moving, the HUD's against the eye too (the raise holds while the body moves).
-        F95Hud hud;
-        {
-            F9Lock lock;
-            hud = g_f95Hud;
-            for (auto& sStat : g_f95Hud.eye) sStat = nofoot::f95::StepStat{};
-            g_f95Hud.frames = g_f95Hud.notStill = 0;
-        }
-        uint32_t whyAll = 0;
-        for (uint32_t w : st.f95Why) whyAll += w;
-        if (whyAll || hud.frames) {
-            char tgt[48];
-            if (st.f95Why[nofoot::f95::kSettled]) std::snprintf(tgt, sizeof(tgt), "%+.1f..%+.1f cm", st.f95TgtMin, st.f95TgtMax);
-            else std::snprintf(tgt, sizeof(tgt), "none");
-            const nofoot::f95::StepStat &v0 = st.f95View[0], &v1 = st.f95View[1], &h0 = hud.eye[0], &h1 = hud.eye[1];
-            Log::get().note("native on foot view motion (F95a) 1 s: the view a game frame, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms "
-                            "(max %.2f); the HUD against the eye, the head still: standing %u frames %.2f mm rms (max %.2f), moving %u frames %.2f mm rms (max %.2f) (%u frames, "
-                            "head moving %u); the raise moved the view %.1f mm standing (%u ticks), %.1f mm moving (%u ticks); the stance settled in %u of %u pin calls (moving %u, "
-                            "the neck moving %u, the camera moving %u, filling %u, no input %u), settled target %s; F97a: the view against the ground, the head still: standing "
-                            "%u frames %.2f mm rms (max %.2f, %u steps over 1 cm), moving %u frames %.2f mm rms (max %.2f, %u over 1 cm); the view against the body: steps over "
-                            "1 cm standing %u, moving %u",
-                            v0.n, v0.rms(), v0.maxAbs, v1.n, v1.rms(), v1.maxAbs, h0.n, h0.rms(), h0.maxAbs, h1.n, h1.rms(), h1.maxAbs, hud.frames, hud.notStill,
-                            fs.movedMm[0], fs.ticks[0], fs.movedMm[1], fs.ticks[1], st.f95Why[nofoot::f95::kSettled], whyAll, st.f95Why[nofoot::f95::kMoving],
-                            st.f95Why[nofoot::f95::kNeckMoving], st.f95Why[nofoot::f95::kCamMoving], st.f95Why[nofoot::f95::kFilling], st.f95Why[nofoot::f95::kInvalid], tgt,
-                            st.f95World[0].n, st.f95World[0].rms(), st.f95World[0].maxAbs, st.f95World[0].over1cm, st.f95World[1].n, st.f95World[1].rms(),
-                            st.f95World[1].maxAbs, st.f95World[1].over1cm, v0.over1cm, v1.over1cm);
-        }
-        // F97a: the body against the eye per stance for the held item: the weapon's weight, the neck raised (written, asked), the calls a leg capped, the neck
-        // written against its animated height, the eye as drawn over the clavicle line and ahead of the chest 24 with the INSIDE frames (F69d's test on the drawn
-        // eye: under the clavicle line + 8 cm and under 12 cm ahead of the chest), the legs' extension and the feet lifted. Armed the eye should never be INSIDE.
-        {
-            char item97[64] = "none";
-            uint32_t serial97 = 0;
-            if (!opticItemRead(&serial97, item97) || !item97[0]) std::snprintf(item97, sizeof(item97), "none");
-            for (int sb = 0; sb < nofoot::f97::kStanceN; ++sb) {
-                const PinStats::F97Bin& f = st.f97[sb];
-                if (!f.n) continue;
-                const double n97 = static_cast<double>(f.n), gn97 = f.legsN ? static_cast<double>(f.legsN) : 1.0, cn97 = f.clrN ? static_cast<double>(f.clrN) : 1.0;
-                Log::get().note("native on foot armed body (F97a) 1 s: item %s; %s %u calls: weapon weight %.2f; the neck raised %+.1f cm (min %+.1f max %+.1f; asked %+.1f; "
-                                "capped by the legs %u), written %.3f m against animated %.3f m; the eye as drawn over the clavicle line %+.1f cm (min %+.1f), ahead of the "
-                                "chest %+.1f cm (min %+.1f), INSIDE %u of %u; legs hip to foot over the leg: animated %.3f, written %.3f (min %.3f), feet lifted %u",
-                                item97, nofoot::f97::stanceName(sb), f.n, f.wSum / n97, f.raiseSum / n97, f.raiseMin, f.raiseMax, f.askedSum / n97, f.capped, f.neckSum / n97,
-                                f.neckAnimSum / n97, f.clavSum / cn97, f.clrN ? f.clavMin : 0.0, f.chestSum / cn97, f.clrN ? f.chestMin : 0.0, f.inside, f.clrN,
-                                f.legAnimSum / gn97, f.legSum / gn97, f.legsN ? f.legMin : 0.0, f.lifted);
-            }
-        }
-        fs = F94Second{};
+        F9Lock lock;
+        hud = g_f95Hud;
+        for (auto& sStat : g_f95Hud.eye) sStat = nofoot::f95::StepStat{};
+        g_f95Hud.frames = g_f95Hud.notStill = 0;
     }
+    F125PinWindow& w = g_f125Pin;
+    uint32_t weightSig = fs.n && fs.wSum / fs.n >= 0.99 ? 1u : 0u;
+    for (int i = 0; i < nofoot::f97::kStanceN; ++i)
+        if (st.f97[i].n && st.f97[i].wSum / st.f97[i].n >= 0.99) weightSig |= 2u << i;
+    if (w.seconds && (mixedRawSecond || w.weightSig != weightSig)) f125PinClose();
+    if (!w.seconds) {
+        w.serial = g_heldItemSerial.load(std::memory_order_relaxed);
+        if (!opticItemRead(&w.serial, w.item) || !w.item[0]) std::snprintf(w.item, sizeof(w.item), "none");
+        if (mixedRawSecond) std::snprintf(w.item, sizeof(w.item), "mixed");
+        w.stance = g_f119StancePub.load(std::memory_order_relaxed);
+        w.scope = scope; w.detail = nofoot::logwin::detail(); w.standKey = g_standKeyOn.load(std::memory_order_relaxed);
+        w.eyeKey = g_f94EyeHeightCm.load(std::memory_order_relaxed); w.ads = journalAds() || g_adsState == kAdsActive; w.weightSig = weightSig;
+    }
+    namespace lp = nofoot::logpin;
+    lp::pin(w.pin, st); lp::frame(w.frame, fs); lp::hud(w.hud, hud);
+    for (int b = 0; b < 2; ++b) {
+        const PinStats::F94Bin& n = st.f94[b];
+        if (n.n) {
+            const double remoteDistance = std::fabs(n.gameSum / n.n);
+            w.remote[b] += remoteDistance >= 300.0;
+            w.remoteMax[b] = std::max(w.remoteMax[b], remoteDistance);
+        }
+    }
+    w.bodyRms.add(st.f95View[0].n, st.f95View[0].rms());
+    w.groundRms.add(st.f95World[0].n, st.f95World[0].rms());
+    w.hudStill.add(hud.eye[0].n, hud.eye[0].rms()); w.hudMove.add(hud.eye[1].n, hud.eye[1].rms());
+    w.settled += st.f95Why[nofoot::f95::kSettled] != 0;
+    w.neck.fold(st.f98Have[0], st.f98Neck[0], st.f98Src[nofoot::f94::kEyeStart]);
+    ++w.seconds;
+    if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125PinClose();
 }
 
 void installEyeProbeOnce() {
@@ -22197,7 +22350,9 @@ void cameraGateTick(uint64_t now) noexcept {
 // (instance, view) pairs are what the game draws: one set bit of a mask is the instance drawn into that view); the views of the local avatar's visibility call
 // whenever their flags change; the stand-down once.
 struct F95cState {
-    NativeOnFootHeadShadowStats last;
+    NativeOnFootHeadShadowStats last, base;
+    uint64_t windowMs = 0;
+    bool detail = false;
     uint64_t nextMs = 0;
     uint64_t viewSig = 0;
     bool downSaid = false;
@@ -22210,21 +22365,44 @@ const char* f95cKindText(uint32_t flags) {
         default: return "other";
     }
 }
+void f125ShadowClose(uint64_t now, const NativeOnFootHeadShadowStats& c) noexcept {
+    F95cState& s = g_f95c;
+    if (!s.windowMs) return;
+    const NativeOnFootHeadShadowStats& p = s.base;
+    const uint64_t calls = c.calls - p.calls, kept = c.kept - p.kept, zeroed = c.zeroed - p.zeroed, held = c.held - p.held;
+    if (calls || kept || zeroed || held) {
+        Log::get().note("native on foot head shadow (F95c) %u s: visibility calls %llu, head as shadow-only %llu (head parts %llu), views unread %llu, class changed by "
+                        "the game %llu; head instance x view pairs after the call: shadow views %llu, main or other views %llu (removed by the fade hook); fade hook: "
+                        "kept %llu (mask words left %llu, words that lost a bit %llu), zeroed %llu, held (third-person camera) %llu",
+                        nofoot::logwin::closedSeconds(now - s.windowMs), static_cast<unsigned long long>(calls), static_cast<unsigned long long>(c.swapped - p.swapped),
+                        static_cast<unsigned long long>(c.parts - p.parts), static_cast<unsigned long long>(c.noViews - p.noViews),
+                        static_cast<unsigned long long>(c.lost - p.lost), static_cast<unsigned long long>(c.shadowPairs - p.shadowPairs),
+                        static_cast<unsigned long long>(c.eyePairs - p.eyePairs), static_cast<unsigned long long>(kept),
+                        static_cast<unsigned long long>(c.keptWords - p.keptWords), static_cast<unsigned long long>(c.removed - p.removed),
+                        static_cast<unsigned long long>(zeroed), static_cast<unsigned long long>(held));
+    }
+    s.base = c; s.windowMs = now;
+}
 void headShadowTick(uint64_t now) noexcept {
     F95cState& s = g_f95c;
+    if (s.windowMs && (!nativeOnFootActive() || s.detail != nofoot::logwin::detail())) {
+        f125ShadowClose(now, nativeOnFootHeadShadowStats());
+        s.detail = nofoot::logwin::detail();
+    }
     if (!nativeOnFootActive()) {
+        s.windowMs = 0;
         s.nextMs = 0;
         return;
     }
     if (s.nextMs == 0) {
-        s.last = nativeOnFootHeadShadowStats();
+        s.last = s.base = nativeOnFootHeadShadowStats();
+        s.windowMs = now; s.detail = nofoot::logwin::detail();
         s.nextMs = now + 1000;
         return;
     }
     if (now < s.nextMs) return;
     s.nextMs = now + 1000;
     const NativeOnFootHeadShadowStats c = nativeOnFootHeadShadowStats();
-    const NativeOnFootHeadShadowStats& p = s.last;
     if (c.down && !s.downSaid) {
         s.downSaid = true;
         Log::get().note("native on foot head shadow (F95c): stood down for the session after %u faults: the head hide zeroes the head's masks as before (no head in "
@@ -22246,18 +22424,7 @@ void headShadowTick(uint64_t now) noexcept {
                         "view shares with another %u; flags %s%s",
                         v.n, v.main, v.shadow, v.other, v.shared, list, v.more ? " and more" : "");
     }
-    const uint64_t calls = c.calls - p.calls, kept = c.kept - p.kept, zeroed = c.zeroed - p.zeroed, held = c.held - p.held;
-    if (calls || kept || zeroed || held) {
-        Log::get().note("native on foot head shadow (F95c) 1 s: visibility calls %llu, head as shadow-only %llu (head parts %llu), views unread %llu, class changed by "
-                        "the game %llu; head instance x view pairs after the call: shadow views %llu, main or other views %llu (removed by the fade hook); fade hook: "
-                        "kept %llu (mask words left %llu, words that lost a bit %llu), zeroed %llu, held (third-person camera) %llu",
-                        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(c.swapped - p.swapped),
-                        static_cast<unsigned long long>(c.parts - p.parts), static_cast<unsigned long long>(c.noViews - p.noViews),
-                        static_cast<unsigned long long>(c.lost - p.lost), static_cast<unsigned long long>(c.shadowPairs - p.shadowPairs),
-                        static_cast<unsigned long long>(c.eyePairs - p.eyePairs), static_cast<unsigned long long>(kept),
-                        static_cast<unsigned long long>(c.keptWords - p.keptWords), static_cast<unsigned long long>(c.removed - p.removed),
-                        static_cast<unsigned long long>(zeroed), static_cast<unsigned long long>(held));
-    }
+    if (now - s.windowMs >= 1000ull * nofoot::logwin::windowSeconds()) f125ShadowClose(now, c);
     s.last = c;
 }
 

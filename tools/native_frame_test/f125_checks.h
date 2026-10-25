@@ -9,6 +9,8 @@
 //    changes.
 #pragma once
 
+#include "../../src/d3d11/native_on_foot_logpin.h"
+#include "../../src/d3d11/native_on_foot_f95.h"
 #include "../../src/d3d11/native_on_foot_logwin.h"
 #include "../../src/d3d11/native_on_foot_f125ui.h"
 #include "../../src/d3d11/native_on_foot_f91.h"
@@ -425,6 +427,40 @@ inline void run125(Check&& check) {
         const Meta after = metadata.prime(Meta{2, 20});
         check(before.item == 1 && before.setting == 10 && after.item == 2 && after.setting == 20,
               "F125 UI: metadata primed before the first fold labels an immediate flush with the old item/settings, then starts the new metadata");
+    }
+    // F125 step 6: exact second medians and adjacency survive aggregation, while RMS retains its frame weights.
+    {
+        namespace lp = edvr::nofoot::logpin;
+        edvr::nofoot::f95::StepStat a, b;
+        a.add(0.001);
+        b.add(0.003); b.add(0.003); b.add(0.003);
+        lp::step(a, b);
+        check(a.n == 4 && std::fabs(a.rms() - std::sqrt(7.0)) < 1e-12 && a.maxAbs == 3.0,
+              "F125 pin: pooled RMS merges squares/counts, never an unweighted mean of one-second RMS values");
+        lp::Seconds seconds;
+        seconds.add(19, 99.0); seconds.add(20, 0.25); seconds.add(90, 60.0); seconds.add(90, 0.25);
+        char text[192]; seconds.text(text, sizeof(text));
+        check(seconds.n == 3 && std::strcmp(text, "0.25,60.00,0.25") == 0,
+              "F125 pin: the exact eligible one-second RMS samples survive a teleport and a low-frame second is excluded");
+        for (int i = 0; i < 100; ++i) seconds.add(90, 0.25);
+        check(seconds.n == 10, "F125 pin: second RMS evidence has fixed bounded storage for a ten-second window");
+        lp::StoredNeck neck;
+        neck.fold(true, 1.543, 0); neck.fold(true, 1.307, 60); neck.fold(true, 1.543, 0);
+        check(neck.startAfterStored == 60 && std::fabs(neck.jump - 0.236) < 1e-12,
+              "F125 pin: a stored neck that jumps and returns within one window still reports the jump and starting raises after a stored neck");
+        neck.clearWindow(); neck.fold(true, 1.533, 20);
+        check(neck.startAfterStored == 20 && std::fabs(neck.jump - 0.010) < 1e-12,
+              "F125 pin: closing a reporting window retains the adjacent-second neck baseline for the next window");
+        neck.fold(false, 0.0, 0); neck.fold(true, 1.200, 0);
+        check(std::fabs(neck.jump - 0.010) < 1e-12,
+              "F125 pin: a missing stored-neck second prevents a false adjacent-second jump across the gap");
+        lp::ContextSecond context;
+        context.observe(10); context.observe(20);
+        check(context.take(), "F125 pin: item A to B before the first fold is isolated as mixed context");
+        context.observe(20); context.observe(20);
+        check(!context.take(), "F125 pin: the later clean B second starts a clean item window after the isolated mixed second");
+        context.observe(30); context.observe(20);
+        check(context.take() && !context.take(), "F125 pin: a context change and return inside one second is mixed once, never replayed without new samples");
     }
     lw::setDetail(was);
 }
