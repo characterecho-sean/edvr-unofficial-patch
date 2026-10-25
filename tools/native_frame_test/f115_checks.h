@@ -79,6 +79,18 @@ inline void run115(Check&& check) {
                   std::string(f115::exitName(f115::Exit::kOther)).rfind("not a boarding", 0) == 0,
               "F115b: no runtime frame since the edge is told apart (the quit's last pose is not judged), and the other exit is named as not a boarding");
     }
+    {   // F115c: what the edge itself can say. The 11:31 flight (log edvr_gfx_20261025_113157): native on foot ended at 11:38:19.215 with the game session ended, the
+        // game stopped presenting 1.5 s later, and no read-back came
+        check(f115::exitAtEdge(false, false, false) == f115::Exit::kOther && f115::exitAtEdge(false, true, false) == f115::Exit::kBoardingSeated &&
+                  f115::exitAtEdge(true, false, false) == f115::Exit::kBoardingPanels && f115::exitAtEdge(true, true, true) == f115::Exit::kBoardingPanels &&
+                  f115::exitAtEdge(false, true, true) == f115::Exit::kBoardingSeated && f115::exitAtEdge(false, false, true) == f115::Exit::kUnknown,
+              "F115c: at the edge the panels or the seated flag make a boarding, a game session that has ended makes another exit (the 11:38 quit), else the read-back decides");
+        check(std::string(f115::exitNameAtEdge(f115::Exit::kOther)) == "not a boarding (the game session ended)" &&
+                  std::string(f115::exitNameAtEdge(f115::Exit::kUnknown)) == "not yet known (read back a second later)" &&
+                  std::string(f115::exitNameAtEdge(f115::Exit::kBoardingSeated)) == f115::exitName(f115::Exit::kBoardingSeated) &&
+                  std::string(f115::exitName(f115::Exit::kUnknown)).rfind("not yet known", 0) == 0,
+              "F115c: the edge names the other exit by its session, the unknown exit as not yet known, and a boarding as the read-back does");
+    }
     {   // the flight's eye alignment through the edge, the hold and the neck reference stepped as alignTick steps them
         const double dt = 1.0 / 90.0;
         struct Ys { double before = 1.0, edge = 1.0, quarter = 1.0, second = 1.0, back = 1.0; };
