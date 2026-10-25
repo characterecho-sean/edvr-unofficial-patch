@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include "../common/config.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
 #include "flat_draw_capture_policy.h"
 
@@ -358,7 +359,8 @@ class FlatDrawCapture {
         empty=nullptr;if(_wfopen_s(&empty,(stem+L"_pool.bin").c_str(),L"ab")==0&&empty)std::fclose(empty);
         const std::wstring temporary=stem+L".json.tmp",manifest=stem+L".json";
         const bool files=write(temporary,body.data(),body.size())&&
-            MoveFileExW(temporary.c_str(),manifest.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+            replaceFileAtomic(temporary,manifest);
+        if(!files)DeleteFileW(temporary.c_str());
         Log::get().note("flat draw pixels: frame=%llu status=%s reason=%s draws=%u/%u scene=%u/%u skip=%u quota-skip=%u motion-eligible=%u recorded=%u skip=%u quota-skip=%u copies=%llu cb-bytes=%llu motion=%u/%u refusals=%u pool-bytes=%llu files=%s directory=%ls",
             (unsigned long long)f.number,status,f.reason,(unsigned)f.draws.size(),f.drawsSeen,
             f.admission.sceneRecorded,f.admission.sceneEligible,f.admission.sceneSkipped,f.admission.sceneQuotaSkipped,

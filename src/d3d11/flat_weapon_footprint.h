@@ -22,6 +22,7 @@
 #include "shader_swap.h"
 #include "temporal_shader_bytecode.h"
 #include "../common/config.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
 #ifdef EDVR_HAVE_VERSION_HEADER
 #include "edvr_version.h"
@@ -413,7 +414,8 @@ class FlatWeaponFootprint {
         const std::string body=json(f);
         const std::wstring temporary=stem+L".json.tmp",target=stem+L".json";
         const bool files=write(temporary,body.data(),body.size())&&
-            MoveFileExW(temporary.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+            replaceFileAtomic(temporary,target);
+        if(!files)DeleteFileW(temporary.c_str());
         Log::get().note("flat weapon footprint: frame=%llu status=%s reason=%s draw-seq=%u exact-draws=%u consumer=%u stages=%s/%s/%s/%s bytes=%llu files=%s directory=%ls",
             static_cast<unsigned long long>(f.number),f.status,f.reason,f.drawSeq,f.drawCountExact,f.consumerFound?1u:0u,
             f.stages[0].status,f.stages[1].status,f.stages[2].status,f.stages[3].status,
