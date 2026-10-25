@@ -127,6 +127,8 @@ void kinematicEvalSetMergeObserver(EngineMergeBeginFn,EngineMergeEndFn) noexcept
 const char* kinematicEvalMergeStatus() noexcept { return "rig: hooked"; }
 void kinematicEvalSetClearObserver(EngineClearObserverFn) noexcept {}
 const char* kinematicEvalClearStatus() noexcept { return "rig: hooked"; }
+// src\common\game_build.h's resolver, as on build 334925 (the known build): an RVA is itself.
+uintptr_t gameRva(uint32_t knownRva) noexcept { return knownRva; }
 bool kinematicEvalEmitHookLive(const char** why) noexcept {
     if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144315a20 refused";
     return lifecycle_fake::g_hookLive;
