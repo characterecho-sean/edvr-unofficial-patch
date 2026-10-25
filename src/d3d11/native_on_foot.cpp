@@ -64,6 +64,7 @@
 #include "native_on_foot_f125ui.h"
 #include "native_on_foot_logpin.h"
 #include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
+#include "native_on_foot_ads_log.h"
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -7568,6 +7569,31 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     F83SelectionRead f83{};
     const bool nativePrimary = onFoot && f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
     const nofoot::f91::ItemGate itemGate = nofoot::f91::adsItemGate(nativePrimary, heldKind, heldName);
+    struct InputSnapshot {
+        int source = 0; bool value = false, fresh = false, valid = false, journalKnown = false, journalValue = false, veto = false, allow = false;
+        uint32_t seq = 0, samples = 0, reads = 0, invalid = 0;
+        uint64_t ageUs = 0;
+        char held[64] = {}; const char* reason = "";
+    };
+    static InputSnapshot last;
+    static nofoot::adslog::Window inputWindow;
+    uint64_t inputContext = nofoot::adslog::text(key ? 1u : 0u, heldName);
+    inputContext = nofoot::adslog::mix(nofoot::adslog::mix(inputContext, asked ? 1u : 0u), g_cfgGeneration);
+    inputWindow.poll(now, actionEligible, inputContext, []() noexcept {}, [&](uint32_t seconds) noexcept {
+        Log::get().note("native on foot ADS input (F70b): source %s; request %s (%s, seq %u, age %llu us); journal %s; Status.json samples %u; held-request veto %s; update-hook action reads %u invalid %u; "
+                        "item gate refused %u ticks (F91: held \"%s\" %s, %s); over %u s",
+                        last.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : last.source == nofoot::kAdsInputJournal ? "journal" : "none",
+                        last.value ? "on" : "off", last.fresh ? "fresh" : last.valid ? "stale" : "absent/invalid", last.seq, static_cast<unsigned long long>(last.ageUs),
+                        last.journalKnown ? (last.journalValue ? "on" : "off") : "unknown", last.samples, last.veto ? "latched" : "clear",
+                        last.reads, last.invalid, static_cast<unsigned>(g_f91GateRefusedTicks), last.held,
+                        last.allow ? "allowed" : "refused", last.reason, seconds);
+        g_f91GateRefusedTicks = 0;
+    });
+    last.source = adsChoice.source; last.value = action.value; last.fresh = actionFresh; last.valid = action.valid;
+    last.seq = action.seq; last.ageUs = actionAgeUs; last.journalKnown = journalKnown; last.journalValue = journalValue;
+    last.samples = statusSamples; last.veto = actionVeto; last.reads = g_adsActionReads.load(std::memory_order_relaxed);
+    last.invalid = g_adsActionInvalid.load(std::memory_order_relaxed); last.allow = itemGate.allow; last.reason = itemGate.reason;
+    std::memcpy(last.held, heldName, sizeof(last.held));
     const nofoot::f91::GateEdges::Out gated = g_f91Gate.step(asked, itemGate.allow);
     const bool ads = gated.ads;
     if (actionEligible && asked && !itemGate.allow) ++g_f91GateRefusedTicks;
@@ -7612,18 +7638,6 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                         actionCompare == 3 ? "bound request and game state diverged" : actionCompare == 2 ? "bound request and game state agree" : actionCompare == 1 ? "journal state unknown" : "no fresh action comparison",
                         action.value ? "on" : "off", journalKnown ? (journalValue ? "on" : "off") : "unknown", static_cast<unsigned long long>(actionAgeUs), statusSamples,
                         static_cast<double>(nofoot::kAdsActionRejectGraceMs) / 1000.0);
-    }
-    static uint64_t actionLineMs = 0;
-    if (actionEligible && (!actionLineMs || now - actionLineMs >= 1000)) {
-        actionLineMs = now;
-        Log::get().note("native on foot ADS input (F70b): source %s; request %s (%s, seq %u, age %llu us); journal %s; Status.json samples %u; held-request veto %s; update-hook action reads %u invalid %u; "
-                        "item gate refused %u ticks (F91: held \"%s\" %s, %s)",
-                        adsChoice.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : adsChoice.source == nofoot::kAdsInputJournal ? "journal" : "none",
-                        action.value ? "on" : "off", actionFresh ? "fresh" : action.valid ? "stale" : "absent/invalid", action.seq, static_cast<unsigned long long>(actionAgeUs),
-                        journalKnown ? (journalValue ? "on" : "off") : "unknown", statusSamples, actionVeto ? "latched" : "clear",
-                        g_adsActionReads.load(std::memory_order_relaxed), g_adsActionInvalid.load(std::memory_order_relaxed), static_cast<unsigned>(g_f91GateRefusedTicks), heldName,
-                        itemGate.allow ? "allowed" : "refused", itemGate.reason);
-        g_f91GateRefusedTicks = 0;
     }
     const char* full3PNot = full3P ? nullptr : full3PWhy();
     // F92b: the head aim's toggle (key) is not a reason here: the press (the sight lock, the left eye, the body detach) runs with it off, and the head aim within the
@@ -7759,7 +7773,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsState = kAdsReleasing;
         g_adsRelMs = now;
         if (g_adsCentre.pending || g_adsMap.centre.active) {   // F69i: ADS ended before the snap was done: stop it, say so (the cone is the usual cause)
-            Log::get().note("native on foot ADS centre (F69i): press %u: the game's ADS flag fell %.2f s %s (the weapon's yaw offset from the body %+.1f deg at the last "
+            if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u: the game's ADS flag fell %.2f s %s (the weapon's yaw offset from the body %+.1f deg at the last "
                             "measurement, the cone is %.0f deg): the snap is stopped; the release unwinds what was injected (yaw %+.2f pitch %+.2f deg carried)",
                             g_adsCentre.press, static_cast<double>(now - g_adsCentre.engageMs) / 1000.0,
                             g_adsCentre.pending ? "after the press, before the sight was measured" : "into the press, during the snap", g_adsOffLast[0],
@@ -8110,9 +8124,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     // The 1 s lines while engaged or releasing.
     if (g_adsState != kAdsIdle && now - g_adsLineMs >= 1000) {
         g_adsLineMs = now;
-        const double kD = 1.0 / nofoot::kAdsDeg;
         const uint32_t writes = g_adsWrites.load(std::memory_order_relaxed), procs = g_adsProcCalls.load(std::memory_order_relaxed),
                        refs = g_adsRefusals.load(std::memory_order_relaxed);
+        if (nofoot::logwin::detail()) {
+        const double kD = 1.0 / nofoot::kAdsDeg;
         const float gY = g_adsGainYaw.load(std::memory_order_relaxed), gP = g_adsGainPitch.load(std::memory_order_relaxed);
         const char* hookWhy = g_adsHookWhy.load(std::memory_order_relaxed);
         const double hm[3] = {g_adsHeadNow[0] - g_adsEntry[0], g_adsHeadNow[1] - g_adsEntry[1], g_adsHeadNow[2] - g_adsEntry[2]};
@@ -8150,6 +8165,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                         res, aw.frames, aw.noRows, aw.degenerate, aw.noHead, static_cast<unsigned long long>(g_adsResid.growth.runMs(now)),
                         static_cast<unsigned long long>(nofoot::kAdsResGrowMs), nofoot::kAdsResFloorDeg, nofoot::kAdsResGrowDeg,
                         100.0 * nofoot::kAdsResRatio, aw.bases, aw.rebases, nofoot::kAdsViewJumpDeg, aw.trips, aw.engages);
+        }
         g_adsAimWin.frames = g_adsAimWin.noRows = g_adsAimWin.degenerate = g_adsAimWin.noHead = g_adsAimWin.bases = g_adsAimWin.rebases = g_adsAimWin.trips = 0;
         g_adsAimWin.engages = 0;
         g_adsWritesSeen = writes;
@@ -10517,11 +10533,149 @@ bool retNdcRead(int e, uint32_t* frame, double ndc[2], double* depth) noexcept {
     return false;
 }
 AdsSightWin g_adsSightWin;
-uint64_t g_adsSightLineMs = 0;
+nofoot::adslog::Window g_adsSightLogWindow;
 nofoot::AdsSightGrowth g_adsSightGrowth;
 double g_adsSightIpd = nofoot::kAdsSightIpdFallbackM;   // F110: the job camera (the left eye) to the right eye
 bool g_adsSightIpdMeasured = false;
 std::atomic<uint64_t> g_adsOpticGood{0}, g_adsOpticNoFp{0}, g_adsOpticNoRoot{0}, g_adsOpticNoSample{0}, g_adsOpticNoEye{0}, g_adsOpticBadBasis{0};
+void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexcept {
+    AdsSightWin& w = g_adsSightWin;
+    const double appliedNorm = nofoot::ikLen(g_adsSight.applied);
+    const double opticDistances[3] = {0.3, 0.5, 10.0};
+    const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
+    if (detailed) {
+    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
+                    "e perpendicular (the right eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
+                    "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
+                    "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
+                    "flipped to the body's right %u, held off by the guard %u%s",
+                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
+                    g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
+                    100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
+                    100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
+                    w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
+                    w.driving ? "" : " (no frame drove the lock this second)");
+    }
+    {   // F93b: the eye chain this second (every ADS second, the trace's 4 events a minute aside). The proof of the steady eye: matched on every measured frame, the along
+        // error's step autocorrelation at lag 2 near 0 (F92's flight: -0.41 in every still rifle window) and its rms down from 0.08 mm.
+        nofoot::f93::ChainSecond& c = g_f93Chain;
+        Log::get().note("native on foot ADS eye chain (F93b) %u s: steady eye %s, eye hold %s; the sight lock's target from the alignment the measured eye was rendered with "
+                        "%u of %u measured frames (serial lag mean %.1f max %u), F70's %u, the model eye %u, held (its alignment not in the history) %u; per frame rms: sight "
+                        "shift %.3f mm, position lock %.3f mm, head translation %.3f mm over %u frames; the along error's step %.3f mm rms, autocorrelation lag 1 "
+                        "%+.2f lag 2 %+.2f over %u steps (the head's translation taken out two frames late reads about -0.4 at lag 2)",
+                        seconds, steady ? "on" : "off", hold ? "on" : "off", c.matched, c.n, c.lagMean(),
+                        static_cast<unsigned>(c.lagMax), c.legacy, c.model,
+                        c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
+        c.reset();
+    }
+    if (detailed) {
+    // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
+    // (under 1 cm over a press); the sight's NDC equal at the three distances from the actual weapon P14.
+    {
+        PinIn pi;
+        const bool pinOk = pinInRead(&pi);
+        // F88: the pin also ignores its share of the weapon eye offset (zero in ADS but for the 0.25 s ramp), in the shift published beside the ADS lock's.
+        double S[3] = {g_adsLock[0] + g_adsSight.applied[0] + g_f88Ignore[0], g_adsLock[1] + g_adsSight.applied[1] + g_f88Ignore[1],
+                       g_adsLock[2] + g_adsSight.applied[2] + g_f88Ignore[2]}, got[3] = {}, want[3] = {};
+        if (pinOk) {
+            const float rows9[9] = {pi.m3p[0], pi.m3p[1], pi.m3p[2], pi.m3p[4], pi.m3p[5], pi.m3p[6], pi.m3p[8], pi.m3p[9], pi.m3p[10]};
+            nofoot::adsCamShiftWorld(S, rows9, want);
+            for (int i = 0; i < 3; ++i) {
+                got[i] = static_cast<double>(pi.cam[i]) - pi.camRaw[i];   // the pin input minus the job camera
+                want[i] = -want[i] - pi.weaponViewWorld[i];
+            }
+        }
+        const double dn = w.driving ? static_cast<double>(w.driving) : 1.0;
+        const double diff[3] = {got[0] - want[0], got[1] - want[1], got[2] - want[2]};
+        char ndcText[260];
+        if (w.ndc3Have)
+            std::snprintf(ndcText, sizeof(ndcText), "(%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m", w.ndc3[0][0], w.ndc3[0][1], w.ndcD[0], w.ndc3[1][0],
+                          w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
+        else
+            std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
+        Log::get().note("native on foot ADS eye point (F70/F75/F79): k %.1f cm asked, %.1f cm after the raw-P14 clearance cap (%s); the eye to the effective sight origin (raw P14, or calibrated rifle optic) + k f after the lock: "
+                        "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
+                        "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against total expected %+.1f %+.1f %+.1f "
+                        "(difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
+                        "now %.2f cm, largest %.2f cm (max 1; a walk counts); raw-P14 reference NDC ahead of P14: %s (not the calibrated-origin alignment)",
+                        100.0 * w.kWantedSum / dn, 100.0 * w.kEffSum / dn,
+                        w.capped ? "a readable FP weapon point on the sight line cut it" : w.readableMax ? "points on the line, none close enough to cut it"
+                                                                                                          : "no FP weapon point readable on the line: the setting's own 30 cm bound",
+                        100.0 * w.alongErrSum / dn, 100.0 * w.alongErrAbsMax, 100.0 * w.perpSum / dn, 100.0 * w.perpMax, 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM,
+                        w.wSum / dn, g_adsW, 100.0 * got[0], 100.0 * got[1], 100.0 * got[2], 100.0 * want[0], 100.0 * want[1], 100.0 * want[2],
+                        100.0 * nofoot::ikLen(diff), 100.0 * nofoot::ikLen(S), 100.0 * w.rootDriftNow, 100.0 * w.rootDriftMax, ndcText);
+    }
+    Log::get().note("native on foot ADS optic origin (F79): measured joint-51 laser-rifle profile used %u times; fallback/refused item/frame/geometry/matrix %u/%u/%u/%u; quad-half-width plausibility bound %.3f cm, maximum accepted transverse residual %.3f cm; mean applied transverse origin shift in FP-root R/U/F %.2f/%.2f/%.2f cm, attach51/52 span mean %.2f cm; eye-lock residuals above use this effective origin when active, while user clearance and raw-P14 NDC diagnostics stay on P14",
+                    w.rifleAnchorUsed, w.rifleAnchorItemRefused, w.rifleAnchorFrameRefused, w.rifleAnchorGeometryRefused, w.rifleAnchorMatrixRefused,
+                    100.0 * nofoot::kAdsRifleAnchorQuadHalfWidthM, 100.0 * w.rifleAnchorResidualMaxM,
+                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[0] / w.rifleAnchorUsed : 0.0,
+                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[1] / w.rifleAnchorUsed : 0.0,
+                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[2] / w.rifleAnchorUsed : 0.0,
+                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorSpanSum / w.rifleAnchorUsed : 0.0);
+    }
+    // F66e: the two rendered eyes against the job camera and the sight line. The eye positions are solved from each eye's scene rows (clip x, y, w
+    // zero). If the job camera sat at one eye (A1) the first ADS second shows it here, before the lock moves: eye minus camera not symmetric.
+    // Flight proof: IPD 6.0-6.1 cm; the right eye's distance to the sight line under 0.5 cm and the left's about 6 cm; used = solved right eye.
+    {
+        const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
+        const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
+        // F110: which source the model took on the frames the lock used it, and the job camera's model (the left eye plus the IPD) against the solved right eye
+        // whenever both were there: about 0 cm (F63's half-IPD model read the IPD's half, 3.1 cm, short: the nose)
+        const double nd = w.modelDiffN ? static_cast<double>(w.modelDiffN) : 1.0;
+        Log::get().note("native on foot ADS sight check (F66e/F79): eye rows these %u s: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
+                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
+                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved right eye (body right, up, forward, cm, "
+                        "mean) %+.1f %+.1f %+.1f, %.1f cm mean, %.1f max over %u frames; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f "
+                        "R %.1f %.1f %.1f; IPD %.2f cm (%u "
+                        "frames); eye to the raw-P14 reference sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
+                        "of raw-P14 sight at 0.5 m and 10 m (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; these remain raw-P14 diagnostics "
+                        "when the rifle anchor is active)%s",
+                        seconds, w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
+                        w.modelFrom[nofoot::kAdsModelFromLeftEye], g_adsSightIpd, g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback",
+                        100.0 * w.modelDiffSum[0] / nd, 100.0 * w.modelDiffSum[1] / nd, 100.0 * w.modelDiffSum[2] / nd, 100.0 * w.modelDiffAbsSum / nd,
+                        100.0 * w.modelDiffMax, w.modelDiffN, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
+                        100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
+                        100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
+                        100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcNear[0][0], w.ndcNear[0][1], w.ndcFar[0][0],
+                        w.ndcFar[0][1], w.ndcNear[1][0], w.ndcNear[1][1], w.ndcFar[1][0], w.ndcFar[1][1],
+                        (w.ndcHave[0] && w.ndcHave[1]) ? "" : " (an eye had no NDC: its figures are zero)");
+    }
+    if (detailed) {
+    // F68b: the sight against the fire line. Proof: the two NDC points agree within 0.3 deg; the sight-to-fire angle constant across weapons (the same
+    // figure after a weapon switch) before it is corrected in the sight lock. The reticle composite is found through the marker machinery (key 10), so
+    // "not found" names what to check.
+    {
+        const double rn = w.retFrames ? static_cast<double>(w.retFrames) : 1.0;
+        if (w.retFrames)
+            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key 10, the aim reticle) in the right eye on %u of %u frames with a sight "
+                            "NDC (%u without); its NDC mean (%.4f, %.4f) at depth %.1f m; the sight line (P14 + 10 m f) mean (%.4f, %.4f); sight minus reticle "
+                            "%+.2f deg right, %+.2f deg up, total mean %.2f deg (largest %.2f; largest |right| %.2f, |up| %.2f): the sight-to-fire angle, to agree "
+                            "within 0.3 deg for shots to land on the sights",
+                            w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
+                            w.sightNdc[1] / rn, w.retRight / rn, w.retUp / rn, w.retTotal / rn, w.retTotalMax, w.retRightMax, w.retUpMax);
+        else if (w.retMiss)
+            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key 10) was NOT found in the right eye on any of %u frames with a sight NDC "
+                            "(no matched key-10 composite draw: the marker probe is off, the reticle is hidden in this ADS, or the tag was not found)",
+                            w.retMiss);
+    }
+    {
+        const double bn = w.opticBasisN ? static_cast<double>(w.opticBasisN) : 1.0;
+        char rootNdc[160] = {}, opticNdc[160] = {};
+        for (int q = 0; q < 3; ++q) {
+            char item[52];
+            if (w.opticRootNdcN[q]) std::snprintf(item, sizeof(item), "%s%.1fm=(%.4f,%.4f)/%u", q ? "," : "", opticDistances[q], w.opticRootNdcSum[q][0] / w.opticRootNdcN[q], w.opticRootNdcSum[q][1] / w.opticRootNdcN[q], w.opticRootNdcN[q]);
+            else std::snprintf(item, sizeof(item), "%s%.1fm=missing", q ? "," : "", opticDistances[q]);
+            strncat_s(rootNdc, item, _TRUNCATE);
+            if (w.opticP14NdcN[q]) std::snprintf(item, sizeof(item), "%s%.1fm=(%.4f,%.4f)/%u", q ? "," : "", opticDistances[q], w.opticP14NdcSum[q][0] / w.opticP14NdcN[q], w.opticP14NdcSum[q][1] / w.opticP14NdcN[q], w.opticP14NdcN[q]);
+            else std::snprintf(item, sizeof(item), "%s%.1fm=missing", q ? "," : "", opticDistances[q]);
+            strncat_s(opticNdc, item, _TRUNCATE);
+        }
+        Log::get().note("native on foot ADS optic basis (F70c): valid/bad basis %u/%u, fresh right eye %u (missing %u), mean yaw/pitch vs root %.2f/%.2f deg; right-eye root/P14-forward NDC %s / %s (per-distance counts included)",
+                        w.opticBasisN, w.opticBadBasis, w.opticEyeN, w.opticNoEye, w.opticYawSum / bn, w.opticPitchSum / bn, rootNdc, opticNdc);
+    }
+    }
+    w = AdsSightWin{};
+}
 void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     const bool active = g_adsState == kAdsActive;
     g_opticAdsState.seq.fetch_add(1, std::memory_order_acq_rel);
@@ -10530,11 +10684,19 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     g_opticAdsState.active = active;
     g_opticAdsState.seq.fetch_add(1, std::memory_order_release);
     const bool engaged = active || g_adsState == kAdsReleasing;
+    static bool lastSteady = false, lastHold = false;
+    const bool logSteady = g_f93SteadyKey.load(std::memory_order_relaxed);
+    uint64_t context = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), active ? 1u : 0u);
+    context = nofoot::adslog::mix(nofoot::adslog::mix(context, logSteady ? 1u : 0u), g_adsHoldThisPress ? 1u : 0u);
+    context = nofoot::adslog::mix(context, g_cfgGeneration);
+    g_adsSightLogWindow.poll(now, nativeOnFootActive() && (engaged || nofoot::ikLen(g_adsSight.applied) >= 1e-5), context,
+        []() noexcept {}, [&](uint32_t seconds) noexcept { adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed); });
+    lastSteady = logSteady; lastHold = g_adsHoldThisPress;
     AdsSightWin& w = g_adsSightWin;
     if (active && !g_adsEyeOnset.stateSeen) {
         g_adsEyeOnset.stateSeen = true;
         g_adsEyeOnset.stateMs = now;
-        Log::get().note("native on foot ADS eye (F70a): active state observed %llu ms after the ADS state transition; waiting for a valid eye target",
+        if (nofoot::logwin::detail()) Log::get().note("native on foot ADS eye (F70a): active state observed %llu ms after the ADS state transition; waiting for a valid eye target",
                         static_cast<unsigned long long>(now > g_adsPressMs ? now - g_adsPressMs : 0));
     }
     double err[3] = {0.0, 0.0, 0.0}, rel[3] = {}, before[3] = {};
@@ -10835,7 +10997,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         if (active && have && !g_adsEyeOnset.targetSeen) {
             g_adsEyeOnset.targetSeen = true;
             g_adsEyeOnset.targetMs = now;
-            Log::get().note("native on foot ADS eye (F70a): first valid target %+.1f, %+.1f, %+.1f cm; %llu ms after state observation",
+            if (nofoot::logwin::detail()) Log::get().note("native on foot ADS eye (F70a): first valid target %+.1f, %+.1f, %+.1f cm; %llu ms after state observation",
                             100.0 * g_adsSight.target[0], 100.0 * g_adsSight.target[1], 100.0 * g_adsSight.target[2],
                             static_cast<unsigned long long>(now > g_adsEyeOnset.stateMs ? now - g_adsEyeOnset.stateMs : 0));
         }
@@ -10843,11 +11005,11 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         if (active && !g_adsEyeOnset.movementSeen && nofoot::ikLen(moved) > 1e-6) {
             g_adsEyeOnset.movementSeen = true;
             if (g_adsEyeOnset.targetSeen)
-                Log::get().note("native on foot ADS eye (F70a): first eye movement %llu ms after state observation and %llu ms after the first valid target",
+                if (nofoot::logwin::detail()) Log::get().note("native on foot ADS eye (F70a): first eye movement %llu ms after state observation and %llu ms after the first valid target",
                                 static_cast<unsigned long long>(now > g_adsEyeOnset.stateMs ? now - g_adsEyeOnset.stateMs : 0),
                                 static_cast<unsigned long long>(now > g_adsEyeOnset.targetMs ? now - g_adsEyeOnset.targetMs : 0));
             else
-                Log::get().note("native on foot ADS eye (F70a): first eye movement %llu ms after state observation, before any valid target (carried release motion)",
+                if (nofoot::logwin::detail()) Log::get().note("native on foot ADS eye (F70a): first eye movement %llu ms after state observation, before any valid target (carried release motion)",
                                 static_cast<unsigned long long>(now > g_adsEyeOnset.stateMs ? now - g_adsEyeOnset.stateMs : 0));
         }
     }
@@ -10884,145 +11046,9 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         g_adsSightGrowth = nofoot::AdsSightGrowth{};
         if (!engaged) ++w.idle;
     }
-    // Once a second while the head-aim is engaged or the lock has not decayed: the probe line.
-    const double appliedNorm = std::sqrt(g_adsSight.applied[0] * g_adsSight.applied[0] + g_adsSight.applied[1] * g_adsSight.applied[1] +
-                                         g_adsSight.applied[2] * g_adsSight.applied[2]);
-    if (!engaged && appliedNorm < 1e-5 && !w.driving) {
-        g_adsSightLineMs = 0;
-        w = AdsSightWin{};
-        return;
-    }
-    if (g_adsSightLineMs == 0) g_adsSightLineMs = now;
-    if (now - g_adsSightLineMs < 1000) return;
-    g_adsSightLineMs = now;
-    const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
-    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
-                    "e perpendicular (the right eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
-                    "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
-                    "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
-                    "flipped to the body's right %u, held off by the guard %u%s",
-                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
-                    g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
-                    100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
-                    100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
-                    w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
-                    w.driving ? "" : " (no frame drove the lock this second)");
-    {   // F93b: the eye chain this second (every ADS second, the trace's 4 events a minute aside). The proof of the steady eye: matched on every measured frame, the along
-        // error's step autocorrelation at lag 2 near 0 (F92's flight: -0.41 in every still rifle window) and its rms down from 0.08 mm.
-        nofoot::f93::ChainSecond& c = g_f93Chain;
-        Log::get().note("native on foot ADS eye chain (F93b) 1 s: steady eye %s, eye hold %s; the sight lock's target from the alignment the measured eye was rendered with "
-                        "%u of %u measured frames (serial lag mean %.1f max %u), F70's %u, the model eye %u, held (its alignment not in the history) %u; per frame rms: sight "
-                        "shift %.3f mm, position lock %.3f mm, head translation %.3f mm over %u frames; the along error's step %.3f mm rms, autocorrelation lag 1 "
-                        "%+.2f lag 2 %+.2f over %u steps (the head's translation taken out two frames late reads about -0.4 at lag 2)",
-                        g_f93SteadyKey.load(std::memory_order_relaxed) ? "on" : "off", g_adsHoldThisPress ? "on" : "off", c.matched, c.n, c.lagMean(),
-                        static_cast<unsigned>(c.lagMax), c.legacy, c.model,
-                        c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
-        c.reset();
-    }
-    // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
-    // (under 1 cm over a press); the sight's NDC equal at the three distances from the actual weapon P14.
-    {
-        PinIn pi;
-        const bool pinOk = pinInRead(&pi);
-        // F88: the pin also ignores its share of the weapon eye offset (zero in ADS but for the 0.25 s ramp), in the shift published beside the ADS lock's.
-        double S[3] = {g_adsLock[0] + g_adsSight.applied[0] + g_f88Ignore[0], g_adsLock[1] + g_adsSight.applied[1] + g_f88Ignore[1],
-                       g_adsLock[2] + g_adsSight.applied[2] + g_f88Ignore[2]}, got[3] = {}, want[3] = {};
-        if (pinOk) {
-            const float rows9[9] = {pi.m3p[0], pi.m3p[1], pi.m3p[2], pi.m3p[4], pi.m3p[5], pi.m3p[6], pi.m3p[8], pi.m3p[9], pi.m3p[10]};
-            nofoot::adsCamShiftWorld(S, rows9, want);
-            for (int i = 0; i < 3; ++i) {
-                got[i] = static_cast<double>(pi.cam[i]) - pi.camRaw[i];   // the pin input minus the job camera
-                want[i] = -want[i] - pi.weaponViewWorld[i];
-            }
-        }
-        const double dn = w.driving ? static_cast<double>(w.driving) : 1.0;
-        const double diff[3] = {got[0] - want[0], got[1] - want[1], got[2] - want[2]};
-        char ndcText[260];
-        if (w.ndc3Have)
-            std::snprintf(ndcText, sizeof(ndcText), "(%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m", w.ndc3[0][0], w.ndc3[0][1], w.ndcD[0], w.ndc3[1][0],
-                          w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
-        else
-            std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
-        Log::get().note("native on foot ADS eye point (F70/F75/F79): k %.1f cm asked, %.1f cm after the raw-P14 clearance cap (%s); the eye to the effective sight origin (raw P14, or calibrated rifle optic) + k f after the lock: "
-                        "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
-                        "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against total expected %+.1f %+.1f %+.1f "
-                        "(difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
-                        "now %.2f cm, largest %.2f cm (max 1; a walk counts); raw-P14 reference NDC ahead of P14: %s (not the calibrated-origin alignment)",
-                        100.0 * w.kWantedSum / dn, 100.0 * w.kEffSum / dn,
-                        w.capped ? "a readable FP weapon point on the sight line cut it" : w.readableMax ? "points on the line, none close enough to cut it"
-                                                                                                          : "no FP weapon point readable on the line: the setting's own 30 cm bound",
-                        100.0 * w.alongErrSum / dn, 100.0 * w.alongErrAbsMax, 100.0 * w.perpSum / dn, 100.0 * w.perpMax, 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM,
-                        w.wSum / dn, g_adsW, 100.0 * got[0], 100.0 * got[1], 100.0 * got[2], 100.0 * want[0], 100.0 * want[1], 100.0 * want[2],
-                        100.0 * nofoot::ikLen(diff), 100.0 * nofoot::ikLen(S), 100.0 * w.rootDriftNow, 100.0 * w.rootDriftMax, ndcText);
-    }
-    Log::get().note("native on foot ADS optic origin (F79): measured joint-51 laser-rifle profile used %u times; fallback/refused item/frame/geometry/matrix %u/%u/%u/%u; quad-half-width plausibility bound %.3f cm, maximum accepted transverse residual %.3f cm; mean applied transverse origin shift in FP-root R/U/F %.2f/%.2f/%.2f cm, attach51/52 span mean %.2f cm; eye-lock residuals above use this effective origin when active, while user clearance and raw-P14 NDC diagnostics stay on P14",
-                    w.rifleAnchorUsed, w.rifleAnchorItemRefused, w.rifleAnchorFrameRefused, w.rifleAnchorGeometryRefused, w.rifleAnchorMatrixRefused,
-                    100.0 * nofoot::kAdsRifleAnchorQuadHalfWidthM, 100.0 * w.rifleAnchorResidualMaxM,
-                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[0] / w.rifleAnchorUsed : 0.0,
-                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[1] / w.rifleAnchorUsed : 0.0,
-                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorShiftSum[2] / w.rifleAnchorUsed : 0.0,
-                    w.rifleAnchorUsed ? 100.0 * w.rifleAnchorSpanSum / w.rifleAnchorUsed : 0.0);
-    // F66e: the two rendered eyes against the job camera and the sight line. The eye positions are solved from each eye's scene rows (clip x, y, w
-    // zero). If the job camera sat at one eye (A1) the first ADS second shows it here, before the lock moves: eye minus camera not symmetric.
-    // Flight proof: IPD 6.0-6.1 cm; the right eye's distance to the sight line under 0.5 cm and the left's about 6 cm; used = solved right eye.
-    {
-        const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
-        const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
-        // F110: which source the model took on the frames the lock used it, and the job camera's model (the left eye plus the IPD) against the solved right eye
-        // whenever both were there: about 0 cm (F63's half-IPD model read the IPD's half, 3.1 cm, short: the nose)
-        const double nd = w.modelDiffN ? static_cast<double>(w.modelDiffN) : 1.0;
-        Log::get().note("native on foot ADS sight check (F66e/F79): eye rows this second: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
-                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
-                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved right eye (body right, up, forward, cm, "
-                        "mean) %+.1f %+.1f %+.1f, %.1f cm mean, %.1f max over %u frames; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f "
-                        "R %.1f %.1f %.1f; IPD %.2f cm (%u "
-                        "frames); eye to the raw-P14 reference sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
-                        "of raw-P14 sight at 0.5 m and 10 m (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; these remain raw-P14 diagnostics "
-                        "when the rifle anchor is active)%s",
-                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
-                        w.modelFrom[nofoot::kAdsModelFromLeftEye], g_adsSightIpd, g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback",
-                        100.0 * w.modelDiffSum[0] / nd, 100.0 * w.modelDiffSum[1] / nd, 100.0 * w.modelDiffSum[2] / nd, 100.0 * w.modelDiffAbsSum / nd,
-                        100.0 * w.modelDiffMax, w.modelDiffN, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
-                        100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
-                        100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
-                        100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcNear[0][0], w.ndcNear[0][1], w.ndcFar[0][0],
-                        w.ndcFar[0][1], w.ndcNear[1][0], w.ndcNear[1][1], w.ndcFar[1][0], w.ndcFar[1][1],
-                        (w.ndcHave[0] && w.ndcHave[1]) ? "" : " (an eye had no NDC: its figures are zero)");
-    }
-    // F68b: the sight against the fire line. Proof: the two NDC points agree within 0.3 deg; the sight-to-fire angle constant across weapons (the same
-    // figure after a weapon switch) before it is corrected in the sight lock. The reticle composite is found through the marker machinery (key 10), so
-    // "not found" names what to check.
-    {
-        const double rn = w.retFrames ? static_cast<double>(w.retFrames) : 1.0;
-        if (w.retFrames)
-            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key 10, the aim reticle) in the right eye on %u of %u frames with a sight "
-                            "NDC (%u without); its NDC mean (%.4f, %.4f) at depth %.1f m; the sight line (P14 + 10 m f) mean (%.4f, %.4f); sight minus reticle "
-                            "%+.2f deg right, %+.2f deg up, total mean %.2f deg (largest %.2f; largest |right| %.2f, |up| %.2f): the sight-to-fire angle, to agree "
-                            "within 0.3 deg for shots to land on the sights",
-                            w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
-                            w.sightNdc[1] / rn, w.retRight / rn, w.retUp / rn, w.retTotal / rn, w.retTotalMax, w.retRightMax, w.retUpMax);
-        else if (w.retMiss)
-            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key 10) was NOT found in the right eye on any of %u frames with a sight NDC "
-                            "(no matched key-10 composite draw: the marker probe is off, the reticle is hidden in this ADS, or the tag was not found)",
-                            w.retMiss);
-    }
-    {
-        const double bn = w.opticBasisN ? static_cast<double>(w.opticBasisN) : 1.0;
-        char rootNdc[160] = {}, opticNdc[160] = {};
-        for (int q = 0; q < 3; ++q) {
-            char item[52];
-            if (w.opticRootNdcN[q]) std::snprintf(item, sizeof(item), "%s%.1fm=(%.4f,%.4f)/%u", q ? "," : "", opticDistances[q], w.opticRootNdcSum[q][0] / w.opticRootNdcN[q], w.opticRootNdcSum[q][1] / w.opticRootNdcN[q], w.opticRootNdcN[q]);
-            else std::snprintf(item, sizeof(item), "%s%.1fm=missing", q ? "," : "", opticDistances[q]);
-            strncat_s(rootNdc, item, _TRUNCATE);
-            if (w.opticP14NdcN[q]) std::snprintf(item, sizeof(item), "%s%.1fm=(%.4f,%.4f)/%u", q ? "," : "", opticDistances[q], w.opticP14NdcSum[q][0] / w.opticP14NdcN[q], w.opticP14NdcSum[q][1] / w.opticP14NdcN[q], w.opticP14NdcN[q]);
-            else std::snprintf(item, sizeof(item), "%s%.1fm=missing", q ? "," : "", opticDistances[q]);
-            strncat_s(opticNdc, item, _TRUNCATE);
-        }
-        Log::get().note("native on foot ADS optic basis (F70c): valid/bad basis %u/%u, fresh right eye %u (missing %u), mean yaw/pitch vs root %.2f/%.2f deg; right-eye root/P14-forward NDC %s / %s (per-distance counts included)",
-                        w.opticBasisN, w.opticBadBasis, w.opticEyeN, w.opticNoEye, w.opticYawSum / bn, w.opticPitchSum / bn, rootNdc, opticNdc);
-    }
-    w = AdsSightWin{};
+    if (!g_adsSightLogWindow.open) w = AdsSightWin{};
 }
+
 // ---- F68a / F67b: the ADS guard and the ADS instruments (frame thread, alignTick, after the sight lock) ------------------------------------------
 // F68a. While ADS is engaged (the weight above 0): the guard reads the rendered view from the right eye's scene rows (the first main-scene pass: its
 // forward is the clip w column, right and up the x and y columns less their part along it), never camera C, and compares its turn since the base with the
@@ -11176,6 +11202,7 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
     if (g_adsAimLineMs == 0) g_adsAimLineMs = now;
     if (now - g_adsAimLineMs < 1000) return;
     g_adsAimLineMs = now;
+    if (nofoot::logwin::detail()) {
     const double n = static_cast<double>(w.offN ? w.offN : 1u);
     const double an = w.angN ? static_cast<double>(w.angN) : 1.0, acn = w.angCN ? static_cast<double>(w.angCN) : 1.0;
     Log::get().note("native on foot ADS aim (F67b): %u frames engaged (no right-eye rows %u, no FP root %u, no body sample %u, degenerate %u); the weapon's "
@@ -11187,6 +11214,7 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
                     w.frames, w.noRows, w.noRoot, w.noSample, w.degenerate, w.offSum[0] / n, w.offAbsMax, w.offSum[1] / n, w.angSum[0] / an, w.angMax[0],
                     w.angN, w.angSum[1] / acn, w.angMax[1], w.angSum[2] / acn, w.angMax[2], w.cYawSum / acn, w.cPitchSum / acn, w.angCN, w.angSum[3] / an,
                     w.angMax[3], w.angSum[4] / an, w.angMax[4]);
+    }
     w = AdsAngWin{};
 }
 
@@ -11253,7 +11281,7 @@ void adsCentreTick(uint64_t now) noexcept {
     if (c.pending) {
         if (now - c.engageMs > 600) {
             c.pending = false;
-            Log::get().note("native on foot ADS centre (F69i): press %u: the sight could not be measured within 0.6 s of the press (%u tries; last: %s): no snap",
+            if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u: the sight could not be measured within 0.6 s of the press (%u tries; last: %s): no snap",
                             c.press, c.misses, c.missWhy);
             return;
         }
@@ -11295,7 +11323,7 @@ void adsCentreTick(uint64_t now) noexcept {
         c.resStart = g_adsResid.have ? std::sqrt(g_adsResid.res[0] * g_adsResid.res[0] + g_adsResid.res[1] * g_adsResid.res[1]) : 0.0;
         c.resMax = c.resStart;
         c.at025 = c.at1 = !c.snapping;   // nothing to report on when no snap was made
-        Log::get().note("native on foot ADS centre (F69i): press %u, %.0f ms after the engage (%u tries): the sight (the FP root's forward, P14's) is yaw %+.2f pitch %+.2f "
+        if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %.0f ms after the engage (%u tries): the sight (the FP root's forward, P14's) is yaw %+.2f pitch %+.2f "
                         "deg from the head's forward (the mean of the two eyes' forwards; the right eye's lens axis is yaw %+.2f pitch %+.2f deg from it: the "
                         "canted-display check, Pimax about -10.75 / 0); the weapon is yaw %+.1f deg off the body (%s; the cone is %.0f deg); injected yaw %+.2f "
                         "pitch %+.2f deg over %.2f s through F68a's path (its cancel keeps the view still; the release unwinds it)%s",
@@ -11309,14 +11337,14 @@ void adsCentreTick(uint64_t now) noexcept {
         AdsCentreMeas m;
         const char* why = "";
         if (!adsCentreMeasure(now, &m, &why)) {
-            Log::get().note("native on foot ADS centre (F69i): press %u, %s: not measured (%s)", c.press, when, why);
+            if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %s: not measured (%s)", c.press, when, why);
             return;
         }
         char view[160] = {};
         if (withView)
             std::snprintf(view, sizeof(view), "; the view moved at most %.2f deg against the head during the snap (the proof: under 0.3 deg; the residual %.2f deg at its start)",
                           c.resMax, c.resStart);
-        Log::get().note("native on foot ADS centre (F69i): press %u, %s: the sight is yaw %+.2f pitch %+.2f deg from the head's forward (before: %+.2f %+.2f; the proof: under "
+        if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u, %s: the sight is yaw %+.2f pitch %+.2f deg from the head's forward (before: %+.2f %+.2f; the proof: under "
                         "1 deg after the snap)%s; carried seat yaw %+.2f pitch %+.2f deg",
                         c.press, when, m.yawDeg, m.pitchDeg, c.beforeYaw, c.beforePitch, view, g_adsMap.yawCarried / kD, g_adsMap.pitchSeat / kD);
     };
@@ -12349,10 +12377,33 @@ nofoot::f87::StillGate g_f87Still;
 nofoot::f87::HoldSecond g_f87Sec;
 double g_f87LastDev = 0.0, g_f87LastLocalPitchDeg = 0.0, g_f87LastLocalY = 0.0, g_f87LastSeatMeterCm = 0.0, g_f87LastSustained = 0.0, g_f87LastTransient = 0.0, g_f87LastRaise = 0.0;
 bool g_f87LastDevValid = false, g_f87SlewedSec = false;
-uint64_t g_f87LineMs = 0;
 const char* g_f87State = "out of scope";
+void f87HoldLog(uint64_t now, bool live, uint64_t context) noexcept {
+    static nofoot::adslog::Window window;
+    static nofoot::adslog::HoldStates states;
+    auto& sec = g_f87Sec; auto& al = g_f89AlignSec;
+    if (!window.open) { sec.reset(); al.reset(); }
+    window.poll(now, live, context, [&]() noexcept {
+        states.fold(g_f87State); g_f87SlewedSec = false;
+    }, [&](uint32_t seconds) noexcept {
+        Log::get().note("view height hold (F87h) %u s: state %s; neck dev raw %+.1f cm (min %+.1f max %+.1f), sustained %+.1f, transient %+.1f (max %.1f); hold %+.1f cm; LOCAL y %.3f pitch %+.1f; "
+                        "seat_meter %+.1f cm; max |dL_y| a frame %.1f cm (>2 cm: %u); applied align (F89): serial lag mean %.1f max %u frames (publications behind the newest), "
+                        "matched %u of %u (serial not in the history %u, runtime does not report %u), residual of the input after taking the applied align out %.2f mm "
+                        "(taking the last published out instead: %.2f mm; 0 = the input is the head's posture alone); holding %u of %u s; frozen %u; no pose %u; ramping %u; out of scope %u; other %u",
+                        seconds, g_f87State, g_f87LastDev * 100.0, sec.n ? sec.devMin * 100.0 : 0.0, sec.n ? sec.devMax * 100.0 : 0.0, g_f87LastSustained * 100.0, g_f87LastTransient * 100.0,
+                        sec.maxTransient * 100.0, g_f87LastRaise * 100.0, g_f87LastLocalY, g_f87LastLocalPitchDeg, g_f87LastSeatMeterCm, sec.maxStep * 100.0, static_cast<unsigned>(sec.jumps),
+                        al.lagMean(), static_cast<unsigned>(al.lagMax), static_cast<unsigned>(al.matched), static_cast<unsigned>(al.n), static_cast<unsigned>(al.missed),
+                        static_cast<unsigned>(al.legacy), al.newSpreadMm(), al.oldSpreadMm(), states.n[0], seconds, states.n[1], states.n[2], states.n[3], states.n[4], states.n[5]);
+        sec.reset(); al.reset(); states.reset();
+    });
+}
 nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool ads, bool weaponEyeSettling) noexcept {
     namespace f87 = nofoot::f87;
+    uint64_t logContext = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), ads ? 1u : 0u);
+    logContext = nofoot::adslog::mix(logContext, np.referenceGeneration);
+    logContext = nofoot::adslog::number(logContext, g_f87SettleS.load(std::memory_order_relaxed));
+    logContext = nofoot::adslog::mix(logContext, g_cfgGeneration);
+    f87HoldLog(now, nativeOnFootActive(), logContext);
     if (g_f123HoldReset) {   // F123: the seated origin was moved under the head: the standing height is the new rest height, so the hold starts again from it
         g_f123HoldReset = false;
         g_f87Hold.reset();
@@ -12411,22 +12462,6 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
                  : in.frozen ? (lockBusy ? "frozen (ADS)" : feed.wait ? "frozen (the applied alignment's serial is not in the history)" : "frozen (weapon eye offset moving)")
                  : out.ramp < 1.0 ? "ramping in"
                  : g_f87SlewedSec ? "holding (rate-limited)" : "holding";
-    if (nativeOnFootActive() && now - g_f87LineMs >= 1000) {
-        g_f87LineMs = now;
-        nofoot::f87::HoldSecond& sec = g_f87Sec;
-        nofoot::f89::HoldAlignSecond& al = g_f89AlignSec;
-        Log::get().note("view height hold (F87h) 1 s: state %s; neck dev raw %+.1f cm (min %+.1f max %+.1f), sustained %+.1f, transient %+.1f (max %.1f); hold %+.1f cm; LOCAL y %.3f pitch %+.1f; "
-                        "seat_meter %+.1f cm; max |dL_y| a frame %.1f cm (>2 cm: %u); applied align (F89): serial lag mean %.1f max %u frames (publications behind the newest), "
-                        "matched %u of %u (serial not in the history %u, runtime does not report %u), residual of the input after taking the applied align out %.2f mm "
-                        "(taking the last published out instead: %.2f mm; 0 = the input is the head's posture alone)",
-                        g_f87State, g_f87LastDev * 100.0, sec.n ? sec.devMin * 100.0 : 0.0, sec.n ? sec.devMax * 100.0 : 0.0, g_f87LastSustained * 100.0, g_f87LastTransient * 100.0,
-                        sec.maxTransient * 100.0, g_f87LastRaise * 100.0, g_f87LastLocalY, g_f87LastLocalPitchDeg, g_f87LastSeatMeterCm, sec.maxStep * 100.0, static_cast<unsigned>(sec.jumps),
-                        al.lagMean(), static_cast<unsigned>(al.lagMax), static_cast<unsigned>(al.matched), static_cast<unsigned>(al.n), static_cast<unsigned>(al.missed),
-                        static_cast<unsigned>(al.legacy), al.newSpreadMm(), al.oldSpreadMm());
-        sec.reset();
-        al.reset();
-        g_f87SlewedSec = false;
-    }
     return out;
 }
 // The eye over the weapon's root (the right eye less the FP root, in the character's axes: the AMC's right, up and forward) and the camera path's stability, once a second
@@ -12696,7 +12731,6 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
 // Cockpit and ship VR: w stays 0 and every output is an exact zero.
 nofoot::f88::Weight g_f88W;
 nofoot::f88::Settle g_f88Settle;
-uint64_t g_f88LineMs = 0;
 struct F88Tick {
     nofoot::f88::Out out;
     bool settling = false;   // the hold waits: the up of w O is changing, or changed within 0.3 s
@@ -12710,19 +12744,34 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
     k.forwardCm = static_cast<double>(g_f88ForwardCm.load(std::memory_order_relaxed));
     k.body = g_f88Body.load(std::memory_order_relaxed);
     const bool active = nativeOnFootActive();
-    const bool adsNow = ads || g_adsState == kAdsActive;   // the journal's flag or the resolved ADS state (the bound action): logged, never an input to w (F89)
+    const bool adsNow = ads || g_adsState == kAdsActive;
+    static nofoot::adslog::Window window;
+    static nofoot::adslog::OffsetStates states;
+    static f88::Keys lastKeys;
+    static f88::Out lastOut;
+    static double lastW = 0.0;
+    static bool lastArmed = false, lastAds = false;
+    uint64_t context = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), adsNow ? 1u : 0u);
+    context = nofoot::adslog::number(nofoot::adslog::number(context, k.upCm), k.forwardCm);
+    context = nofoot::adslog::mix(context, static_cast<uint64_t>(k.body));
+    context = nofoot::adslog::mix(context, g_cfgGeneration);
+    window.poll(now, active && (k.any() || g_f88W.w > 0.0), context, [&]() noexcept {
+        states.fold(lastArmed, lastAds, lastW, lastOut.seated[0] != 0.0 || lastOut.seated[1] != 0.0 || lastOut.seated[2] != 0.0);
+    }, [&](uint32_t seconds) noexcept {
+        const auto& k = lastKeys;
+        char weights[96]; states.weightText(weights, sizeof(weights));
+        Log::get().note("weapon eye offset (F88) %u s: keys right %+.1f up %+.1f forward %+.1f cm, body %s, w %.2f (armed %d ADS %d), applied seated (%+.2f %+.2f %+.2f) cm, "
+                        "pin ignores (%+.1f %+.1f %+.1f) cm; armed %u of %u s; ADS %u of %u s; w >= 0.9 %u of %u s; offset nonzero %u of %u s; armed w min/max %.2f/%.2f; armed second weights [%s]",
+                        seconds, k.rightCm, k.upCm, k.forwardCm, f88::bodyName(k.body), lastW, lastArmed ? 1 : 0, lastAds ? 1 : 0, lastOut.seated[0] * 100.0, lastOut.seated[1] * 100.0,
+                        lastOut.seated[2] * 100.0, lastOut.ignore[0] * 100.0, lastOut.ignore[1] * 100.0, lastOut.ignore[2] * 100.0, states.armed, seconds, states.ads, seconds, states.high, seconds, states.moved, seconds, states.armed ? states.lo : 0.0, states.hi, weights);
+        states.reset();
+    });   // the journal's flag or the resolved ADS state (the bound action): logged, never an input to w (F89)
     g_f88W.step(active && f88::weightOn(pin, g_armed), dt);
     t.out = f88::make(k, g_f88W.w);
     t.settling = g_f88Settle.step(t.out.seated[1], dt);
     for (int i = 0; i < 3; ++i) g_f88Ignore[i] = t.out.ignore[i];
     g_f88WPub.store(static_cast<float>(g_f88W.w), std::memory_order_relaxed);   // F97a
-    if (active && (k.any() || g_f88W.w > 0.0) && now - g_f88LineMs >= 1000) {
-        g_f88LineMs = now;
-        Log::get().note("weapon eye offset (F88) 1 s: keys right %+.1f up %+.1f forward %+.1f cm, body %s, w %.2f (armed %d ADS %d), applied seated (%+.2f %+.2f %+.2f) cm, "
-                        "pin ignores (%+.1f %+.1f %+.1f) cm",
-                        k.rightCm, k.upCm, k.forwardCm, f88::bodyName(k.body), g_f88W.w, g_armed ? 1 : 0, adsNow ? 1 : 0, t.out.seated[0] * 100.0, t.out.seated[1] * 100.0,
-                        t.out.seated[2] * 100.0, t.out.ignore[0] * 100.0, t.out.ignore[1] * 100.0, t.out.ignore[2] * 100.0);
-    }
+    lastKeys = k; lastOut = t.out; lastW = g_f88W.w; lastArmed = g_armed; lastAds = adsNow;
     return t;
 }
 
@@ -12809,13 +12858,31 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
 // thread never leaves the left eye on the right eye's view. What the runtime drew comes back once a press through edvrNoteNativeEyeShare (the press line, at the end
 // of this file): these lines say what was asked, that one what was drawn.
 bool g_f106ShareOn = false;
-uint64_t g_f106ShareLineMs = 0, g_f106GuardLineMs = 0;
+uint64_t g_f106GuardLineMs = 0;
 uint32_t g_f106GuardTrips = 0;
 void f106ShareTick(uint64_t now) noexcept {
     namespace f106 = nofoot::f106;
     const bool key = g_f106SightBothKey.load(std::memory_order_relaxed);
     const bool onFoot = nativeOnFootActive();
     const f106::Share s = f106::share(key, onFoot, g_armed, g_adsW);
+    static nofoot::adslog::Window window;
+    static uint32_t adsSeconds = 0, onSeconds = 0;
+    static double askedMax = 0.0, lastShare = 0.0, lastLock = 0.0;
+    static bool lastKey = false;
+    static int lastState = kAdsIdle;
+    uint64_t context = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), key ? 1u : 0u);
+    context = nofoot::adslog::mix(context, g_adsState == kAdsActive ? 1u : 0u);
+    context = nofoot::adslog::mix(context, g_cfgGeneration);
+    window.poll(now, onFoot && (s.weight > 0.0 || g_adsState != kAdsIdle), context, [&]() noexcept {
+        if (lastState != kAdsIdle) { ++adsSeconds; if (lastKey) ++onSeconds; }
+    }, [&](uint32_t seconds) noexcept {
+        Log::get().note("ADS sight in both eyes (F106) %u s: share %.2f (key %s, lock weight %.2f, ads state %s); path: the runtime's left eye scene pass (the right eye's "
+                        "image, turned into the left view, over the left eye's own; the fade and the plugin overlay over both); ADS %u of %u s; key on in ADS %u of %u s; share asked max %.2f",
+                        seconds, lastShare, lastKey ? "on" : "off", lastLock, kAdsStateNames[lastState], adsSeconds, seconds, onSeconds, seconds, askedMax);
+        adsSeconds = onSeconds = 0; askedMax = 0.0;
+    });
+    lastShare = s.weight; lastLock = g_adsW; lastKey = key; lastState = g_adsState;
+    if (window.open) askedMax = std::max(askedMax, s.weight);
     eyeshare::publish(static_cast<float>(s.weight), now);
     if (s.tripped) {
         ++g_f106GuardTrips;
@@ -12830,12 +12897,7 @@ void f106ShareTick(uint64_t now) noexcept {
         g_f106ShareOn = shared;
         Log::get().note("ADS sight in both eyes (F106): %s (key %s, lock weight %.2f)", shared ? "shared" : "stereo", key ? "on" : "off", g_adsW);
     }
-    if ((shared || g_adsState != kAdsIdle) && now - g_f106ShareLineMs >= 1000) {   // once a second in ADS (key off included: it reads share 0.00 then) and while shared
-        g_f106ShareLineMs = now;
-        Log::get().note("ADS sight in both eyes (F106) 1 s: share %.2f (key %s, lock weight %.2f, ads state %s); path: the runtime's left eye scene pass (the right eye's "
-                        "image, turned into the left view, over the left eye's own; the fade and the plugin overlay over both)",
-                        s.weight, key ? "on" : "off", g_adsW, kAdsStateNames[g_adsState]);
-    }
+
 }
 
 // ---- F115: boarding undoes every on-foot camera change (nofoot::f115, native_on_foot_f115.h) ----------------------------------------------------------------

@@ -10418,7 +10418,7 @@ def _hpct(a, b):
 
 def _harmed_seconds(ctx):
     """Seconds the weapon eye offset's own line says a weapon or tool was drawn: the log's proof that a weapon family had something to do."""
-    return sum(1 for r in _hrows(ctx, H_F88, "tick") if r["armed"] == "1")
+    return _hcount(_hrows(ctx, H_F88, "tick"), "ars", lambda r: r["armed"] == "1")
 
 
 def _hfocus_seconds(ctx):
@@ -10589,8 +10589,8 @@ def _hj_f110_model_eye(rows, ctx):
     if old and not new:
         solved, model = sum(int(r["solved"]) for r in old), sum(int(r["model"]) for r in old)
         if not solved + model:
-            return ("IDLE", "%d s, no ADS frame drove the lock" % len(old))
-        text = "%d s: the solved right eye %d frames, F63's model %d (%.0f%%)" % (len(old), solved, model, 100.0 * model / (solved + model))
+            return ("IDLE", "%d s, no ADS frame drove the lock" % _hsecs(old))
+        text = "%d s: the solved right eye %d frames, F63's model %d (%.0f%%)" % (_hsecs(old), solved, model, 100.0 * model / (solved + model))
         if model:
             return ("PARTIAL", text + "; F63's model is the job camera (the left eye) plus half the IPD: the nose (the build before F110)")
         return ("OK", text)
@@ -10598,9 +10598,9 @@ def _hj_f110_model_eye(rows, ctx):
     fromcam, fromleft = sum(int(r["fromcam"]) for r in new), sum(int(r["fromleft"]) for r in new)
     dn = sum(int(r["dn"]) for r in new)
     if not solved + model:
-        return ("IDLE", "%d s, no ADS frame drove the lock" % len(new))
+        return ("IDLE", "%d s, no ADS frame drove the lock" % _hsecs(new))
     text = "%d s: the solved right eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
-        len(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
+        _hsecs(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
     if not dn:
         return ("OK", text + "; no frame had the model and the solved right eye together")
     dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
@@ -11366,13 +11366,22 @@ def _hj_f93_chain(rows, ctx):
             ss = [x for x in sec if x["steady"] == s and x["hold"] == h and int(x["acn"]) > 0]
             if not ss:
                 continue
-            mean = lambda k: sum(float(x[k]) for x in ss) / len(ss)
+            def mean(k):
+                if not any(x.get("wl") is not None and int(x["wl"]) > 1 for x in ss):
+                    return sum(float(x[k]) for x in ss) / len(ss)
+                count = "acn" if k in ("along", "ac2") else "steps"
+                n = _hsum(ss, count)
+                if not n:
+                    return 0.0
+                if k == "ac2":
+                    return sum(float(x[k]) * int(x[count]) for x in ss) / n
+                return math.sqrt(sum(float(x[k]) ** 2 * int(x[count]) for x in ss) / n)
             parts.append("steady %s hold %s: %d s, along step %.3f mm, lag-2 autocorrelation %+.2f, position lock step %.3f mm, head translation %.3f mm" % (
-                s, h, len(ss), mean("along"), mean("ac2"), mean("lock"), mean("head")))
+                s, h, _hsecs(ss), mean("along"), mean("ac2"), mean("lock"), mean("head")))
     on = [x for x in sec if x["steady"] == "on"]
     meas, matched = _hsum(on, "n"), _hsum(on, "matched")
     text = "%d s; steady eye on: matched %d of %d measured frames (F70's %d, model eye %d, held %d)%s" % (
-        len(sec), matched, meas, _hsum(on, "legacy"), _hsum(on, "model"), _hsum(on, "missed"), "; " + "; ".join(parts) if parts else "")
+        _hsecs(sec), matched, meas, _hsum(on, "legacy"), _hsum(on, "model"), _hsum(on, "missed"), "; " + "; ".join(parts) if parts else "")
     if meas and matched == 0:
         return ("NEVER APPLIED", text + " (the steady eye never matched the alignment the eye was drawn with)")
     if meas and matched * 5 < meas * 4:
@@ -11405,7 +11414,7 @@ def _hj_f91_gate(rows, ctx):
         return None
     nt = _hsum(ticks, "ticks")
     items = collections.Counter("%s (%s)" % (x["item"], x["why"]) for x in ref)
-    text = "refused %d press(es) [%s], stopped %d, allowed %d; refused ticks %d over %d s" % (len(ref), _htop(items), len(stop), len(allow), nt, len(ticks))
+    text = "refused %d press(es) [%s], stopped %d, allowed %d; refused ticks %d over %d s" % (len(ref), _htop(items), len(stop), len(allow), nt, _hsecs(ticks))
     if not ref and not stop and nt == 0:
         return ("IDLE", text + " (no press on a held item that is not a weapon)")
     return ("OK", text)
@@ -11486,12 +11495,16 @@ def _hj_f87h(rows, ctx):
     if not r:
         return None
     c = collections.Counter()
+    labels = ("holding", "frozen", "no pose", "ramping", "out of scope", "other")
     for x in r:
-        s = x["state"].strip()
-        c["holding" if s.startswith("holding") else "frozen" if s.startswith("frozen") else "no pose" if s.startswith("no pose") else
-          "ramping" if s.startswith("ramping") else "out of scope" if s.startswith("out of scope") else "other"] += 1
-    text = "%d s: " % len(r) + ", ".join("%s %d" % (k, c[k]) for k in ("holding", "frozen", "no pose", "ramping", "out of scope", "other") if c[k])
-    live = len(r) - c["out of scope"]
+        if x.get("hs") is not None:
+            for k, field in zip(labels, ("hs", "fs", "ns", "rs", "os", "others")):
+                c[k] += int(x[field])
+        else:
+            state = x["state"].strip()
+            c[next((k for k in labels[:-1] if state.startswith(k)), "other")] += 1
+    text = "%d s: " % _hsecs(r) + ", ".join("%s %d" % (k, c[k]) for k in labels if c[k])
+    live = _hsecs(r) - c["out of scope"]
     if not live:
         return ("IDLE", text)
     if c["holding"] == 0:
@@ -11503,14 +11516,14 @@ def _hj_f88(rows, ctx):
     t = rows.get("tick", [])
     if not t:
         return None
-    armed = [r for r in t if r["armed"] == "1"]
+    armed = [r for r in t if int(r.get("ars") or r["armed"]) > 0]
     if not armed:
-        return ("IDLE", "%d s with the keys set but no weapon or tool drawn (w 0 throughout)" % len(t))
-    w = [float(r["w"]) for r in armed]
-    moved = sum(1 for r in armed if any(float(r[k]) != 0.0 for k in ("sx", "sy", "sz")))
+        return ("IDLE", "%d s with the keys set but no weapon or tool drawn (w 0 throughout)" % _hsecs(t))
+    w = [v for r in armed for v in ([float(x) for x in r["weights"].split(",") if x] if r.get("weights") is not None else [float(r["w"])])]
+    moved = _hcount(armed, "moves", lambda r: any(float(r[k]) != 0.0 for k in ("sx", "sy", "sz")))
     keys = any(float(r[k]) != 0.0 for r in armed for k in ("kr", "ku", "kf"))
     text = "armed %d s, w min %.2f median %.2f max %.2f, applied seated offset nonzero in %d s; keys %s" % (
-        len(armed), min(w), statistics.median(w), max(w), moved, "set" if keys else "all zero")
+        _hcount(armed, "ars", lambda r: r["armed"] == "1"), min(w), statistics.median(w), max(w), moved, "set" if keys else "all zero")
     if max(w) == 0.0 or (keys and moved == 0):
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if statistics.median(w) < 0.9 else "OK", text)
@@ -11559,7 +11572,7 @@ def _hj_f106_share(rows, ctx):
     if not (press or sec or ev or guard or key):
         return None
     on = [r for r in sec if r["key"] == "on"]
-    asked = max([float(r["w"]) for r in on] or [0.0])
+    asked = max([float(r.get("asked") or r["w"]) for r in on] or [0.0])
     key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev)
     traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "press")
     gn = max([int(r["n"]) for r in guard] or [0])
@@ -11571,7 +11584,7 @@ def _hj_f106_share(rows, ctx):
         covs, yaws = [float(r["cov"]) for r in press], [float(r["yaw"]) for r in press]
         text += ", coverage %.1f-%.1f%%, the eyes' yaw %+.2f..%+.2f deg, hidden area %s, %d frames shared (%d refused)" % (
             min(covs), max(covs), min(yaws), max(yaws), "/".join(sorted({r["hidden"] for r in press})), _hsum(press, "frames"), refused)
-    text += "; ADS seconds with the key on %d of %d, share asked max %.2f; F89 trace presses %d%s" % (len(on), len(sec), asked, traced, ", guard tripped %d" % gn if gn else "")
+    text += "; ADS seconds with the key on %d of %d, share asked max %.2f; F89 trace presses %d%s" % (_hcount(sec, "ons", lambda r: r["key"] == "on"), _hcount(sec, "adssec", lambda r: True), asked, traced, ", guard tripped %d" % gn if gn else "")
     if not press:
         if asked > 0.0 or (traced and key_on):
             return ("NEVER APPLIED", text + " (the share was asked for and the runtime never reported drawing it: an openvr_api.dll from before F106, or one that "
@@ -12693,11 +12706,14 @@ HEALTH_RULES = (
         ("after", r"head containment \(F123\): wall contact still present (?P<s>[\d.]+) s after position recentre (?P<n>\d+)"),
     ), _hj_f123_containment),
     _hrule("view height hold (F87h)", ("F87h",), ("view height hold (F87h)",), (
-        ("sec", r"view height hold \(F87h\) 1 s: state (?P<state>[^;]+);"),
+        ("sec", r"view height hold \(F87h\) " + H_WL + r": state (?P<state>[^;]+);"
+                r"(?:.*?; holding (?P<hs>\d+) of \d+ s; frozen (?P<fs>\d+); no pose (?P<ns>\d+); ramping (?P<rs>\d+); out of scope (?P<os>\d+); other (?P<others>\d+))?.*$"),
     ), _hj_f87h),
     _hrule(H_F88, ("F88",), ("weapon eye offset (F88)",), (
-        ("tick", r"weapon eye offset \(F88\) 1 s: keys right (?P<kr>%s) up (?P<ku>%s) forward (?P<kf>%s) cm, body \w+, w (?P<w>[\d.]+) \(armed (?P<armed>\d) ADS (?P<ads>\d)\), "
-                 r"applied seated \((?P<sx>%s) (?P<sy>%s) (?P<sz>%s)\) cm" % (_HN, _HN, _HN, _HN, _HN, _HN)),
+        ("tick", r"weapon eye offset \(F88\) " + H_WL + r": keys right (?P<kr>%s) up (?P<ku>%s) forward (?P<kf>%s) cm, body \w+, w (?P<w>[\d.]+) \(armed (?P<armed>\d+) ADS (?P<ads>\d+)\), "
+                 r"applied seated \((?P<sx>%s) (?P<sy>%s) (?P<sz>%s)\) cm" % (_HN, _HN, _HN, _HN, _HN, _HN) +
+                 r"(?:.*?; armed (?P<ars>\d+) of \d+ s; ADS (?P<adss>\d+) of \d+ s; w >= 0.9 (?P<highs>\d+) of \d+ s; offset nonzero (?P<moves>\d+) of \d+ s; "
+                 r"armed w min/max [\d.]+/[\d.]+; armed second weights \[(?P<weights>[\d.,]*)\])?.*$"),
     ), _hj_f88),
     _hrule(H_F89_ADS, ("F89",), ("ads transition (F89)",), (
         ("start", r"ads transition \(F89\) (?P<dir>press|release): tracing the next"),
@@ -12723,12 +12739,12 @@ HEALTH_RULES = (
                 r"(?P<norows>\d+), latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?$"),
     ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
-        ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+        ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
                 r"(?P<model>\d+) \(F110: from the job camera, the left eye, (?P<fromcam>\d+), from the solved left eye (?P<fromleft>\d+); IPD (?P<ipd>[\d.]+) m, "
                 r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved right eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
                 r"(?P<du>%s) (?P<df>%s), (?P<dmean>[\d.]+) cm mean, (?P<dmax>[\d.]+) max over (?P<dn>\d+) frames" % (_HN, _HN, _HN)),
-        ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+        ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
                 r"\(camera \+ half IPD along the FP right\) in (?P<model>\d+);"),
     ), _hj_f110_model_eye),
@@ -12807,7 +12823,7 @@ HEALTH_RULES = (
                 r"exposure e0 (?P<ex0>\S+) e1 (?P<ex1>\S+) \(read in (?P<exr>\d+) samples, non-finite in (?P<exn>\d+)\); dropped (?P<drop>\d+)$"),
     ), _hj_f121b_census),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
-        ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
+        ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
                 r"eye (?P<model>\d+), held \(its alignment not in the history\) (?P<missed>\d+); per frame rms: sight shift (?P<shift>[\d.]+) mm, position lock "
                 r"(?P<lock>[\d.]+) mm, head translation (?P<head>[\d.]+) mm over (?P<steps>\d+) frames; the along error's step (?P<along>[\d.]+) mm rms, autocorrelation "
@@ -12827,13 +12843,13 @@ HEALTH_RULES = (
         ("refused", r"native on foot ADS item gate \(F91\): refused: the held item \"(?P<item>[^\"]*)\" is not a weapon \((?P<why>[^)]*)\)"),
         ("stopped", r"native on foot ADS item gate \(F91\): stopped: the held item changed to \"(?P<item>[^\"]*)\""),
         ("allowed", r"native on foot ADS item gate \(F91\): allowed: \"(?P<item>[^\"]*)\""),
-        ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)"),
+        ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)(?:.*?; over (?P<wl>\d+) s)?.*$"),
     ), _hj_f91_gate),
     _hrule(H_F106, ("F106",), ("ADS sight in both eyes (F106)",), (
         ("press", r"ADS sight in both eyes \(F106\) press: peak (?P<peak>[\d.]+), frames (?P<frames>\d+) \(at full weight (?P<full>\d+), refused (?P<refused>\d+), "
                   r"replayed \d+\) over [\d.]+ s; the eyes' rotation \(left view against the right\) yaw (?P<yaw>%s) pitch %s roll %s deg; .*?the left eye from the "
                   r"right at full weight (?P<cov>[\d.]+)%% \(wholly [\d.]+%%\); hidden area (?P<hidden>used|none) \(\d+ triangles\)" % (_HN, _HN, _HN)),
-        ("sec", r"ADS sight in both eyes \(F106\) 1 s: share (?P<w>[\d.]+) \(key (?P<key>on|off), lock weight [\d.]+, ads state \w+\)"),
+        ("sec", r"ADS sight in both eyes \(F106\) " + H_WL + r": share (?P<w>[\d.]+) \(key (?P<key>on|off), lock weight [\d.]+, ads state \w+\)(?:.*?; ADS (?P<adssec>\d+) of \d+ s; key on in ADS (?P<ons>\d+) of \d+ s; share asked max (?P<asked>[\d.]+))?.*$"),
         ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off), lock weight [\d.]+\)"),
         ("guard", r"ADS sight in both eyes \(F106\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
@@ -14153,7 +14169,7 @@ def self_test_health():
             return R("native on foot ADS item gate (F91): allowed", item, why, "on", "bound HumanoidZoom", "on")
 
         def gate_ticks(ticks=0, held="$wpn_m_assaultrifle_laser_fauto_name;", state="allowed", why="weapon"):
-            return R("native on foot ADS input (F70b): source %s; request", "bound HumanoidZoom", "on", "fresh", 12, 800, "off", 3, "clear", 400, 0, ticks, held, state, why)
+            return R("native on foot ADS input (F70b): source %s; request", "bound HumanoidZoom", "on", "fresh", 12, 800, "off", 3, "clear", 400, 0, ticks, held, state, why, 1)
 
         def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none", wl=1, moved_secs=None):
             return RWindowTail("pistol readout (F90) %u s: item %s", wl, "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why,
@@ -14173,10 +14189,12 @@ def self_test_health():
             return R("reticle depth (F85c): key 10 draws", *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
 
         def hold(state="holding"):
-            return R("view height hold (F87h) 1 s: state %s", state)
+            c = [int(state.startswith(x)) for x in ("holding", "frozen", "no pose", "ramping", "out of scope")]
+            return R("view height hold (F87h) %u s: state %s", 1, state, *([0] * 20), c[0], 1, *c[1:], int(not any(c)))
 
         def eyeoff(w=0.96, armed=1, ads=0, seated=(0.0, -7.23, 8.68)):
-            return R("weapon eye offset (F88) 1 s: keys right", 0.0, 7.5, 9.0, "follow", w, armed, ads, *seated)
+            return R("weapon eye offset (F88) %u s: keys right", 1, 0.0, 7.5, 9.0, "follow", w, armed, ads, *seated, 0.0, 0.0, 0.0,
+                     armed, 1, ads, 1, int(armed and w >= 0.9), 1, int(armed and any(seated)), 1, w if armed else 0.0, w if armed else 0.0, "%.2f" % w if armed else "")
 
         def ads_start(d="press"):
             return R("ads transition (F89) %s: tracing the next", d, 1.5, 1, 4, 0)
@@ -14193,7 +14211,7 @@ def self_test_health():
             return R("ads transition (F89) %s traced: frames", d, frames, engaged, lw, elw)
 
         def share_sec(w=0.44, key="on", state="engaged"):
-            return R("ADS sight in both eyes (F106) 1 s: share", w, key, w, state)
+            return R("ADS sight in both eyes (F106) %u s: share", 1, w, key, w, state, int(state != "idle"), 1, int(key == "on" and state != "idle"), 1, w)
 
         def share_ev(ev="shared", key="on"):
             return R("ADS sight in both eyes (F106): %s (key %s", ev, key, 0.08)
@@ -14367,8 +14385,8 @@ def self_test_health():
 
         # ---- ADS item gate (F91) ----
         check("F91 gate: a tool's presses refused", [gate(), gate_ticks(14, "$humanoid_companalyser_name;", "refused", "tool"), gate("refused", "$humanoid_repairtool_name;")], 0,
-              [("OK", F91G)], has=["refused 2 press(es) [$humanoid_companalyser_name; (tool) 1, $humanoid_repairtool_name; (tool) 1], stopped 0, allowed 0; refused ticks 14 over 1 s"])
-        check("F91 gate: a switch to a tool mid-press and back", [gate("stopped"), gate("allowed", "$wpn_m_assaultrifle_laser_fauto_name;", "weapon")], 0, [("OK", F91G)],
+              [("OK", "ADS item gate (F91)")], has=["refused 2 press(es) [$humanoid_companalyser_name; (tool) 1, $humanoid_repairtool_name; (tool) 1], stopped 0, allowed 0; refused ticks 14 over 1 s"])
+        check("F91 gate: a switch to a tool mid-press and back", [gate("stopped"), gate("allowed", "$wpn_m_assaultrifle_laser_fauto_name;", "weapon")], 0, [("OK", "ADS item gate (F91)")],
               has=["stopped 1, allowed 1"])
         check("F91 gate: weapons only, nothing refused", [gate_ticks(0)] * 3, 0, [("IDLE", F91G)], has=["refused ticks 0 over 3 s"])
 
@@ -14398,7 +14416,7 @@ def self_test_health():
 
         def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
                         dmax=0.3, dn=87):
-            return R("native on foot ADS sight check (F66e/F79): eye rows", both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
                      dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
 
         # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
@@ -14872,7 +14890,7 @@ def self_test_health():
         F93C = "ADS eye chain (F93b)"
 
         def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05):
-            return R("native on foot ADS eye chain (F93b) 1 s", steady, hold, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
+            return R("native on foot ADS eye chain (F93b) %u s", 1, steady, hold, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
                      89, along, -0.5, ac2, 86)
 
         check("F93b fit: the steady eye and the eye hold split the windows",
@@ -14887,6 +14905,14 @@ def self_test_health():
         check("F93b chain: the keys switched, no ADS second", [R("native on foot ADS steady eye (F93b): %s (live", "off", "no"),
                                                                R("native on foot ADS eye hold (F93b): %s (live, from the next press", "on", "no")], 0, [("IDLE", F93C)],
               has=["switched: steady eye 1, eye hold 1 time(s)"])
+        def chain_window(wl, steps, acn, along, ac2, lock):
+            return R("native on foot ADS eye chain (F93b) %u s", wl, "on", "on", steps, steps, 2.0, 2, 0, 0, 0, 0.004, lock, 0.057,
+                     steps, along, -0.5, ac2, acn)
+        check("F125 ADS: chain RMS and correlation use frame counts across unequal windows",
+              [chain_window(10, 900, 900, 0.01, -0.10, 0.02), chain_window(1, 90, 90, 0.10, -0.50, 0.20)],
+              0, [("OK", F93C)], has=["11 s;", "along step 0.032 mm, lag-2 autocorrelation -0.14, position lock step 0.063 mm"])
+        old_chain = chain()
+        check("F125 ADS: legacy one-second chain remains readable", [old_chain], 0, [("OK", F93C)], has=["1 s; steady eye on"])
         # ---- game camera (F93d): the camera suite on foot gates every body change ----
         F93D = "game camera (F93d)"
         CTL = 0x14D09AB8080
@@ -15453,6 +15479,19 @@ def self_test_health():
         check("F87h: out of scope throughout", [hold("out of scope")] * 3, 0, [("IDLE", F87H)])
         check("F87h: holding a third of the time", [hold(), hold("frozen (ADS)"), hold("frozen (weapon eye offset moving)")], 0, [("PARTIAL", F87H)], has=["frozen 2"])
 
+        # F125: frozen legacy lines remain readable after the default window
+        # changes; counted flags retain mixed seconds even if the last state is
+        # frozen. These rows deliberately disagree with their last snapshot.
+        check("F125 ADS: old hold lines still count one second each",
+              ["view height hold (F87h) 1 s: state holding; legacy", "view height hold (F87h) 1 s: state frozen (ADS); legacy"],
+              0, [("OK", F87H)], has=["2 s: holding 1, frozen 1"])
+        def hold_window(wl, hs, fs, ns=0, rs=0, os=0):
+            return R("view height hold (F87h) %u s: state %s", wl, "frozen (ADS)", *([0] * 20), hs, wl, fs, ns, rs, os, 0)
+        check("F125 ADS: hold counts the mixed states across unequal windows", [hold_window(10, 8, 2), hold_window(2, 0, 1, 1)],
+              0, [("OK", F87H)], has=["12 s: holding 8, frozen 3, no pose 1"])
+        check("F125 ADS: an apparent last-frame hold cannot hide missing holding seconds", [hold_window(10, 0, 10)],
+              3, [("NEVER APPLIED", F87H)], has=["10 s: frozen 10"])
+
         # ---- weapon eye offset (F88) ----
         check("F88: armed with the weight up", [eyeoff(), eyeoff(w=1.0), eyeoff(w=0.5, ads=1)], 0, [("OK", F88)], has=["armed 3 s, w min 0.50 median 0.96 max 1.00"])
         check("F88: armed and the weight never rose", [eyeoff(w=0.0, seated=(0.0, 0.0, 0.0))] * 3, 3, [("NEVER APPLIED", F88)], has=["w min 0.00 median 0.00 max 0.00"])
@@ -15489,6 +15528,26 @@ def self_test_health():
         check("F125 F89: an unfinished press contributes its lock weight beside a completed release", [R("native on foot log (F125): detail %s", "on", 1),
               ads_start("release"), ads_done("release", 90, 0, 0.0, 0.0), ads_start("press"), ads_frame(lw=0.98)], 0, [("OK", F89A)],
               has=["lock weight max 0.98", "1 frame lines also read (the frame counts above cover completed traces)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        def offset_window(wl, weights, moved, armed_snapshot=0):
+            return R("weapon eye offset (F88) %u s: keys right", wl, 0.0, 7.5, 9.0, "follow", 0.0, armed_snapshot, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                     len(weights), wl, 0, wl, sum(w >= 0.9 for w in weights), wl, moved, wl, min(weights) if weights else 0.0, max(weights) if weights else 0.0,
+                     ",".join("%.2f" % w for w in weights))
+        check("F125 ADS: armed seconds and individual weights survive an unarmed last frame",
+              [offset_window(10, [0.3] * 4 + [0.96] * 6, 10), offset_window(2, [1.0, 1.0], 2)],
+              0, [("OK", F88)], has=["armed 12 s, w min 0.30 median 0.96 max 1.00", "nonzero in 12 s"])
+        check("F125 ADS: a low-weight majority is not hidden by window maxima",
+              [offset_window(10, [0.2] * 8 + [1.0] * 2, 10)], 0, [("PARTIAL", F88)], has=["median 0.20"])
+        check("F125 ADS: armed seconds reach weapon UI cross-checks", [pin_sec(0), offset_window(10, [1.0] * 10, 10)],
+              3, [("NEVER APPLIED", F85B)], has=["weapon was drawn for 10 s"])
+        old_offset = "weapon eye offset (F88) 1 s: keys right +0.0 up +7.5 forward +9.0 cm, body follow, w 0.96 (armed 1 ADS 0), applied seated (+0.00 -7.23 +8.68) cm"
+        check("F125 ADS: old offset format still judged", [old_offset], 0, [("OK", F88)], has=["armed 1 s"])
+        check("F125 ADS: item gate elapsed time is summed", [gate_ticks(14).replace("over 1 s", "over 10 s"), gate_ticks(4).replace("over 1 s", "over 2 s")],
+              0, [("OK", "ADS item gate (F91)")], has=["refused ticks 18 over 12 s"])
+
+        def share_window(wl, ads_s, on_s, peak):
+            return R("ADS sight in both eyes (F106) %u s: share", wl, 0.0, "on", 0.0, "idle", ads_s, wl, on_s, wl, peak)
+        check("F125 ADS: release flush retains a nonzero request", [share_window(2, 2, 2, 1.0)], 3, [("NEVER APPLIED", H_F106)],
+              has=["ADS seconds with the key on 2 of 2, share asked max 1.00"])
         # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
         check("F106: a press drawn at full weight", [share_key(), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_press()], 0, [("OK", S106)],
               has=["1 presses drawn by the runtime (1 at full weight, 1 with 30-100% of the left eye taken), coverage 74.1-74.1%, the eyes' yaw +21.50..+21.50 deg, "
@@ -15858,6 +15917,45 @@ def self_test_health():
                       has=[row("NEVER APPLIED", syn.name)], lacks=["not judged"])
         detail_report("F125: the off state carried into a --since window", [F125_OFF, (90, f90_part())], 0, has=["not judged (detail log off)"],
                       lacks=["NEVER APPLIED"], since="10:01:00")
+        # The ADS residual is controller input, not a logging accumulator.
+        # A suppressed detail line must still close this original 1 s window;
+        # F109's independent 1 s player-turn events must remain outside the gate.
+        checks += 1
+        ads_reset = source[source.index("// The 1 s lines while engaged or releasing."):source.index("void lookPublishTick()")]
+        if ("now - g_adsLineMs >= 1000" not in ads_reset or
+                not re.search(r"\}\s*g_adsAimWin\.frames.*?adsLineReset\(\);", ads_reset, re.S) or
+                "g_adsResid.clearWindow();" not in source[source.index("void adsLineReset()"):source.index("void adsStop(")] or
+                "native on foot ADS player turn (F109) 1 s:" not in source or
+                "adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed)" not in source or
+                "nofoot::logwin::detail()" in source[source.index("void adsSightLog("):source.index("void adsSightTick(")]):
+            print("health: F125 ADS detail suppression moved a controller reset or an F109 event window")
+            ok = False
+        # Stress the production ADS summary formats with long state/item text,
+        # ten retained second weights and generous four-digit counters. The
+        # note buffer must retain the appended evidence and its window length.
+        ads_budgets = (
+            ("view height hold (F87h) %u s", ["frozen (the applied alignment's serial is not in the history)"]),
+            ("weapon eye offset (F88) %u s", ["follow", ",".join(["1.00"] * 10)]),
+            ("ADS sight in both eyes (F106) %u s", ["off", "releasing"]),
+            ("native on foot ADS eye chain (F93b) %u s", ["off", "off"]),
+            ("ADS sight check (F66e/F79)", ["the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
+            ("native on foot ADS input (F70b): source %s; request", ["bound HumanoidZoom", "off", "absent/invalid", "unknown", "latched", "x" * 63, "refused", "x" * 63]),
+        )
+        for needle, strings in ads_budgets:
+            fmt = health_c_format(source, needle)
+            values, string_i = [], 0
+            for field in re.finditer(r"%[-+ #0]*\d*(?:\.\d+)?(?:hh|h|ll|l|z|j|t|L|I64)?[diouxXeEfFgGaAcsp]", fmt):
+                kind = field.group()[-1]
+                if kind == "s":
+                    values.append(strings[string_i])
+                    string_i += 1
+                else:
+                    values.append(123.45 if kind in "eEfFgGaA" else 9000)
+            checks += 1
+            if len(health_render(fmt, values).encode("utf-8")) > 1100:
+                print("health: F125 ADS summary exceeds the note budget: %s" % needle)
+                ok = False
+
         # The window helpers the converted rules read with.
         checks += 1
         rows_wl = [{"wl": None}, {"wl": "10"}, {}, {"wl": "3"}]
