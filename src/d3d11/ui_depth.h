@@ -223,7 +223,16 @@ void uiDepthPlanetEnd(ID3D11DeviceContext* ctx);
 // state back.
 bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx);
 void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx);
-void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
+// F116 (native_on_foot_f116.h): the HUD hidden while a terminal fills the view. The hide as the render thread last stepped it at a
+// frame boundary (stepMs, GetTickCount64; 0 never), the last stepped frame's footprint (the larger eye's share of its render
+// pixels covered by an F105 screen; -1 none yet), and running counts: frames stepped, over 15%, hidden, census rows read, and
+// whether an external upscaler ran at the last frame boundary (F105 marks screens only then). Any thread.
+struct UiDepthTerminalState {
+    bool hidden = false, upscaler = false;
+    uint64_t stepMs = 0, stepped = 0, over = 0, hiddenFrames = 0, rows = 0;
+    float footprint = -1.0f;
+};
+UiDepthTerminalState uiDepthTerminalState();void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
 // Coverage supports UI history decisions. The temporal pass keeps per-eye
 // raw UI colour and coverage, aligns it with UI motion, and rejects detected

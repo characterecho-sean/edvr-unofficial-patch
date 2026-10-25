@@ -48,6 +48,7 @@
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
+#include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -4530,6 +4531,167 @@ void f14FrameTick(uint64_t nowMs) {
     }
 }
 
+// ---- F116: the HUD hidden while a terminal fills the view (native_on_foot_f116.h) ---------------------------------------------------------------------
+// The hide is ui depth's (the F105 screens' footprint and its hysteresis, render thread); P2 below skips the HUD's submit while it holds. The game's two hide
+// counters are read in the same call and logged by the frame thread, nothing more. The hook only adds to the atomics; the frame thread logs.
+std::atomic<bool> g_f116Verified{false};                 // the pins held at install (frame thread writes once): the counters may be read
+std::atomic<uint64_t> g_f116Calls{0}, g_f116Skipped{0};   // P2 calls decided, and those skipped (the HUD hidden)
+std::atomic<uint64_t> g_f116ReadCalls{0}, g_f116HideSet{0}, g_f116SiblingSet{0};
+std::atomic<uint64_t> g_f116Refused[static_cast<size_t>(nofoot::f116::Read::kCount)] = {};
+std::atomic<uint32_t> g_f116RefusedSeen{0};              // bits: the read refusals seen (the frame thread names each once)
+std::atomic<uint32_t> g_f116Hide{0}, g_f116Sibling{0};    // the last counters read
+std::atomic<uint64_t> g_f116CountersMs{0};               // when they were read (GetTickCount64)
+
+// Game thread, every P2 call: read the counters (logged only), then the hide. True: skip the submit.
+bool f116Hrc(void* hrc) noexcept {
+    namespace f116 = nofoot::f116;
+    g_f116Calls.fetch_add(1, std::memory_order_relaxed);
+    const bool verified = g_f116Verified.load(std::memory_order_acquire);
+    const uintptr_t h = reinterpret_cast<uintptr_t>(hrc);
+    uintptr_t controller = 0, vtable = 0;
+    uint32_t counters[2] = {};
+    const bool controllerRead = verified && h && guardedRead(h + f116::kControllerOff, &controller, sizeof(controller));
+    const bool vtableRead = controllerRead && controller && guardedRead(controller, &vtable, sizeof(vtable));
+    const bool vtableOk = vtableRead && g_base && vtable == g_base + f116::kVtableRva;
+    const bool countersRead = vtableOk && guardedRead(controller + f116::kHideOff, counters, sizeof(counters));
+    const f116::Read r = f116::readCounters(verified, controllerRead, controller, vtableRead, vtableOk, countersRead);
+    if (r == f116::Read::kRead) {
+        g_f116ReadCalls.fetch_add(1, std::memory_order_relaxed);
+        if (counters[0]) g_f116HideSet.fetch_add(1, std::memory_order_relaxed);
+        if (counters[1]) g_f116SiblingSet.fetch_add(1, std::memory_order_relaxed);
+        g_f116Hide.store(counters[0], std::memory_order_relaxed);
+        g_f116Sibling.store(counters[1], std::memory_order_relaxed);
+        g_f116CountersMs.store(GetTickCount64(), std::memory_order_release);
+    } else {
+        g_f116Refused[static_cast<size_t>(r)].fetch_add(1, std::memory_order_relaxed);
+        g_f116RefusedSeen.fetch_or(1u << static_cast<unsigned>(r), std::memory_order_relaxed);
+    }
+    const UiDepthTerminalState s = uiDepthTerminalState();
+    const uint64_t now = GetTickCount64();
+    const bool skip = f116::decideSkip(s.hidden, s.stepMs != 0, s.stepMs && now >= s.stepMs ? now - s.stepMs : ~0ull);
+    if (skip) g_f116Skipped.fetch_add(1, std::memory_order_relaxed);
+    return skip;
+}
+
+// Frame thread, once, after the probes: every address the counters' read relies on, against build 334925, or a refusal named (the hide is unaffected).
+void f116VerifyOnce(uintptr_t base) {
+    namespace f116 = nofoot::f116;
+    const char* why = nullptr;
+    char slotWhy[160] = {};
+    if (!g_f9Armed[1]) why = "the HRC submit probe (P2) is not installed";
+    else if (!bytesMatch(base + f116::kGateSiteRva, f116::kGateSitePin, sizeof(f116::kGateSitePin))) why = "the gate's call site (+0x1A16F37) is not build 334925's";
+    else if (!bytesMatch(base + f116::kTestRva, f116::kTestPin, sizeof(f116::kTestPin))) why = "the HUD meshes' test (+0x1A8F950) is not build 334925's";
+    else if (!bytesMatch(base + f116::kPushRva, f116::kPushPin, sizeof(f116::kPushPin))) why = "the counter's push (+0x1A4A9F0) is not build 334925's";
+    else if (!bytesMatch(base + f116::kPopRva, f116::kPopPin, sizeof(f116::kPopPin))) why = "the counter's pop (+0x1A912E0) is not build 334925's";
+    else if (!bytesMatch(base + f116::kSiblingPushRva, f116::kSiblingPushPin, sizeof(f116::kSiblingPushPin))) why = "the sibling's push (+0x1A4AC10) is not build 334925's";
+    else if (!bytesMatch(base + f116::kSiblingPopRva, f116::kSiblingPopPin, sizeof(f116::kSiblingPopPin))) why = "the sibling's pop (+0x1A917B0) is not build 334925's";
+    else {
+        for (size_t i = 0; i < f116::kSlotCount && !why; ++i) {
+            uint64_t q = 0;
+            if (!guardedRead(base + f116::kVtableRva + f116::kSlots[i], &q, sizeof(q)) || q != base + f116::kSlotTargets[i]) {
+                std::snprintf(slotWhy, sizeof(slotWhy), "the controller's vtable (+0x%llX) slot +0x%X is not +0x%llX",
+                              static_cast<unsigned long long>(f116::kVtableRva), f116::kSlots[i], static_cast<unsigned long long>(f116::kSlotTargets[i]));
+                why = slotWhy;
+            }
+        }
+    }
+    char line[512];
+    if (why) {
+        f116::formatRefusedInstall(line, sizeof(line), why);
+    } else {
+        g_f116Verified.store(true, std::memory_order_release);
+        f116::formatVerified(line, sizeof(line));
+    }
+    Log::get().note("%s", line);
+}
+
+// Frame thread, every frame: the episodes (the hide's and the counters'), the HUD submitted while a terminal filled the view, the refusals, and the 30 s line.
+struct F116Frame {
+    bool started = false, upscaler = false;
+    uint64_t windowMs = 0, lastMs = 0, lastCalls = 0, lastSkipped = 0;
+    uint32_t refusedNamed = 0;
+    nofoot::f116::Window base;     // the running counts at the window's start
+    nofoot::f116::Window win;      // this window's own episode counts
+    nofoot::f116::TerminalEpisode terminal;
+    nofoot::f116::CounterEpisode counter;
+    nofoot::f116::SubmittedRun submitted;
+};
+F116Frame g_f116Frame;   // frame thread only
+
+void f116Tick(uint64_t now) {
+    namespace f116 = nofoot::f116;
+    F116Frame& f = g_f116Frame;
+    const UiDepthTerminalState s = uiDepthTerminalState();
+    const uint64_t calls = g_f116Calls.load(std::memory_order_relaxed), skipped = g_f116Skipped.load(std::memory_order_relaxed);
+    const bool fresh = s.stepMs && now >= s.stepMs && now - s.stepMs <= f116::kFreshMs;
+    const float fp = fresh && s.footprint >= 0.0f ? s.footprint : -1.0f;
+    char line[1024];
+    if (!f.started) {
+        f.started = true;
+        f.windowMs = f.lastMs = now;
+        f.lastCalls = calls;
+        f.lastSkipped = skipped;
+    }
+    switch (f.terminal.step(fresh && s.hidden, fp, now, calls, skipped)) {
+        case f116::TerminalEpisode::kBegan: f116::formatTerminalBegan(line, sizeof(line), f.terminal); Log::get().note("%s", line); ++f.win.terminalBegan; break;
+        case f116::TerminalEpisode::kEnded: f116::formatTerminalEnded(line, sizeof(line), f.terminal); Log::get().note("%s", line); ++f.win.terminalEnded; break;
+        default: break;
+    }
+    const uint64_t cMs = g_f116CountersMs.load(std::memory_order_acquire);
+    const bool countersFresh = cMs && now >= cMs && now - cMs <= f116::kFreshMs;
+    const uint32_t hide = countersFresh ? g_f116Hide.load(std::memory_order_relaxed) : 0u, sibling = countersFresh ? g_f116Sibling.load(std::memory_order_relaxed) : 0u;
+    switch (f.counter.step(hide, sibling, fp, now)) {
+        case f116::CounterEpisode::kBegan: f116::formatCounterBegan(line, sizeof(line), f.counter); Log::get().note("%s", line); ++f.win.counterBegan; break;
+        case f116::CounterEpisode::kEnded: f116::formatCounterEnded(line, sizeof(line), f.counter); Log::get().note("%s", line); ++f.win.counterEnded; break;
+        default: break;
+    }
+    f.submitted.step(fp >= 0.0f, fp, calls != f.lastCalls, skipped != f.lastSkipped, static_cast<double>(now - f.lastMs) / 1000.0);
+    f.lastMs = now;
+    f.lastCalls = calls;
+    f.lastSkipped = skipped;
+    if (s.upscaler) f.upscaler = true;
+    const uint32_t seen = g_f116RefusedSeen.load(std::memory_order_relaxed) & ~f.refusedNamed;
+    for (unsigned r = 1; r < static_cast<unsigned>(f116::Read::kCount); ++r) {
+        if (!(seen & (1u << r))) continue;
+        f.refusedNamed |= 1u << r;
+        f116::formatRefusedRead(line, sizeof(line), static_cast<f116::Read>(r));
+        Log::get().note("%s", line);
+    }
+    if (now - f.windowMs < 30000) return;
+    f.windowMs = now;
+    f116::Window cur;
+    cur.calls = calls;
+    cur.skipped = skipped;
+    cur.stepped = s.stepped;
+    cur.over = s.over;
+    cur.hiddenFrames = s.hiddenFrames;
+    cur.censusRows = s.rows;
+    cur.readCalls = g_f116ReadCalls.load(std::memory_order_relaxed);
+    cur.hideSet = g_f116HideSet.load(std::memory_order_relaxed);
+    cur.siblingSet = g_f116SiblingSet.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < static_cast<size_t>(f116::Read::kCount); ++i) cur.refused[i] = g_f116Refused[i].load(std::memory_order_relaxed);
+    f116::Window w = f.win;
+    w.calls = cur.calls - f.base.calls;
+    w.skipped = cur.skipped - f.base.skipped;
+    w.stepped = cur.stepped - f.base.stepped;
+    w.over = cur.over - f.base.over;
+    w.hiddenFrames = cur.hiddenFrames - f.base.hiddenFrames;
+    w.censusRows = cur.censusRows - f.base.censusRows;
+    w.readCalls = cur.readCalls - f.base.readCalls;
+    w.hideSet = cur.hideSet - f.base.hideSet;
+    w.siblingSet = cur.siblingSet - f.base.siblingSet;
+    for (size_t i = 0; i < static_cast<size_t>(f116::Read::kCount); ++i) w.refused[i] = cur.refused[i] - f.base.refused[i];
+    w.upscaler = f.upscaler;
+    if (w.calls || nativeOnFootActive()) {
+        f116::formatWindow(line, sizeof(line), w, f.submitted, fp);
+        Log::get().note("%s", line);
+    }
+    f.base = cur;
+    f.win = f116::Window{};
+    f.upscaler = false;
+    f.submitted.resetWindow();
+}
+
 // F22: defined with the look-to-aim block below. Reads list B into the look head when the frame thread wants it (never stands anything down).
 void lookReadHeadP2(uintptr_t listB) noexcept;
 
@@ -4539,6 +4701,9 @@ uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t
     if (!original) return 0;
     if (!g_f9Stop[1].load(std::memory_order_relaxed)) f9RecordHrc(f9State(), hrc);   // reads before the call
     if (g_lookWantRead.load(std::memory_order_relaxed)) lookReadHeadP2(static_cast<uintptr_t>(a3));   // F22: the look and probe B's head (read only)
+    // F116: while a terminal fills the view, nothing is submitted and nothing written, as when the game's own gate answers no (it returns 0 before anything
+    // with a side effect). The counters' read inside is logged only.
+    if (f116Hrc(hrc)) return 0;
     f13PlaceHud(hrc, static_cast<uintptr_t>(a3));   // F12/F13: the HUD placement (distance, size, head), before the original runs
     return original(hrc, a2, a3, a4, a5, a6);
 }
@@ -4681,6 +4846,7 @@ void installF9ProbesOnce() {
                             s.label, static_cast<unsigned long long>(s.rva), why.c_str());
         }
     }
+    f116VerifyOnce(base);   // F116: the game's hide counters' addresses, before P2 reads them
     const F9ProbeSpec arSpec{"native-on-foot-humanoid-ar-render", nofoot::kHumanoidArRenderRva, nofoot::kHumanoidArRenderPrologue,
                              nofoot::kHumanoidArRenderPrologueBytes, nofoot::kHumanoidArRenderStolen,
                              reinterpret_cast<void*>(&f9HumanoidArRenderHooked), "weapon UI AR renderer scope"};
@@ -28231,6 +28397,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
     armIkTick(now);          // F56 (TEMPORARY): the arm IK's base weight (nudge and on only), its refusals and its 5 s lines
     f14FrameTick(now);
+    f116Tick(now);   // F116: the HUD hidden while a terminal fills the view: its episodes, the game's counters (logged only), its 30 s line
     {
         const float spreadNow = g_hudSpread.load(std::memory_order_relaxed);
         const bool spreadWant = spreadNow > 0.0f && nativeOnFootActive() && g_meshCreateLive.load(std::memory_order_relaxed) && session;

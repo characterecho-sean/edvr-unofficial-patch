@@ -15,7 +15,7 @@
 // history-invalidate value only where the coverage carries the fresh bit. F108b: a block is held exactly kWorldScreenHoldFrames
 // frames from its last change and at rest after, while UiContent's age still lasts; a block that changes again is held again, and a
 // change within the hold restarts it; the census counts a burst of changes once; a 2D interface's ages reach the stand-in as a
-// one-slice array view.
+// one-slice array view. F116: the census counts each eye's screen pixels apart (the terminal hide's footprint).
 namespace wstest {
 // Every slice of a 2D or array texture of 1-byte texels (R8_UNORM), as floats in 0..1, slice by slice.
 std::vector<std::vector<float>> readSlices8(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* t) {
@@ -568,17 +568,31 @@ O main(float2 q : POSITION, uint instance : SV_InstanceID) {
         WorldScreenCensusPass census;
         ID3D11ShaderResourceView* both[2] = {sv.Get(), sv.Get()};
         check(census.count(ctx, both, 2, 7), "F108: the census counts");
-        uint64_t gotFrame = 0; uint32_t got[3] = {}; bool drained = false;
+        WorldScreenCensusRow got; bool drained = false;
         const auto deadline = GetTickCount64() + 2000;
         while (!drained && GetTickCount64() < deadline) {
             ctx->Flush();
-            census.drain(ctx, [&](uint64_t f, uint32_t s, uint32_t e, uint32_t fr) { gotFrame = f; got[0] = s; got[1] = e; got[2] = fr; drained = true; });
+            census.drain(ctx, [&](const WorldScreenCensusRow& r) { got = r; drained = true; });
             if (!drained) Sleep(1);
         }
-        check(drained && gotFrame == 7 && got[0] == 36 && got[1] == 16 && got[2] == 6,
+        check(drained && got.ok && got.frame == 7 && got.screen == 36 && got.edited == 16 && got.fresh == 6,
               "F108: the census counts both eyes' screen, edited and first-frame pixels");
-        for (int i = 0; i < 4; ++i) check(census.count(ctx, both, 1, 8 + i), "F108: the ring takes four frames");
-        check(!census.count(ctx, both, 1, 12), "F108: a fifth frame in flight is skipped, not waited for");
+        check(got.eye[0] == 18 && got.eye[1] == 18, "F116: ...and each eye's screen pixels apart");
+        {   // F116: one eye only (the other not marked): its pixels in its own range, none in the other's
+            ID3D11ShaderResourceView* oneEye[2] = {nullptr, sv.Get()};
+            check(census.count(ctx, oneEye, 2, 8), "F116: the census counts one eye");
+            WorldScreenCensusRow one; bool done = false;
+            const auto until = GetTickCount64() + 2000;
+            while (!done && GetTickCount64() < until) {
+                ctx->Flush();
+                census.drain(ctx, [&](const WorldScreenCensusRow& r) { one = r; done = true; });
+                if (!done) Sleep(1);
+            }
+            check(done && one.ok && one.frame == 8 && one.eye[0] == 0 && one.eye[1] == 18 && one.screen == 18,
+                  "F116: an eye with no screen counts 0, the other its own 18");
+        }
+        for (int i = 0; i < 4; ++i) check(census.count(ctx, both, 1, 9 + i), "F108: the ring takes four frames");
+        check(!census.count(ctx, both, 1, 13), "F108: a fifth frame in flight is skipped, not waited for");
         census.reset();
     }
     ctx->ClearState();
