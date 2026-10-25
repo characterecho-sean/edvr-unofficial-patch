@@ -38,6 +38,7 @@
 #include "f116_checks.h"    // F116: the HUD hidden while a terminal fills the view (hysteresis, frame order, the hook's skip, the lines)
 #include "f114b_checks.h"   // F114b: the panel pointer's turned transform, the click path, the mode getter
 #include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
+#include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
 
 #include <array>
 #include <chrono>
@@ -7306,6 +7307,8 @@ int wmain(int argc, wchar_t** argv) {
     f114btest::run114b(check);
     // F115: native stereo on foot's exit edge: the flight's 34.6 cm raise an exact zero from the edge's frame (against the 0.5 s ramp), the read-back, the seat.
     f115test::run115(check);
+    // F117: a turned pick mesh read from its triangles; panel puts the cursor at the uv's drawn place, view mirrors it, an upright panel is left alone.
+    f117test::run117(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
