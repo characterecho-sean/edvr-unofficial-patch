@@ -32,11 +32,12 @@ struct TeeState {
     bool census = false;           // this frame routes every world draw to the slow path (F53's census frames)
     uint32_t polledFrame = kNoFrame;   // the frame the slow path last turned
     uint32_t worldOk[2] = {kNoFrame, kNoFrame};   // the frame each eye's world rows are from
+    bool check = false;            // F113: a row source's rows wait for a scene mesh's check this frame (once a second an eye at most)
 };
 
 // The frame the next draws may take the fast path in, or kNoFrame.
 inline uint32_t teeFastFrame(const TeeState& s, uint32_t frame) noexcept {
-    const bool ok = !s.measure && !s.pending && !s.bound && !s.census && s.polledFrame == frame && s.worldOk[0] == frame && s.worldOk[1] == frame;
+    const bool ok = !s.measure && !s.pending && !s.bound && !s.census && !s.check && s.polledFrame == frame && s.worldOk[0] == frame && s.worldOk[1] == frame;
     return ok && frame != kNoFrame ? frame : kNoFrame;
 }
 

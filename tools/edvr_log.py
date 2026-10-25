@@ -10598,6 +10598,37 @@ def _hj_f111_pointer(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f113_rows(rows, ctx):
+    """F113: each eye's scene rows per frame on foot and where they came from (the scene meshes, the depth prepass, the terrain), the frames with none, and the
+    checks of a source's rows against a scene mesh's. A latch (a source disagreed), or an eye without rows in more than 2% of its frames, is PARTIAL; frames
+    without rows while no source ever gave any is the sources never running (NEVER APPLIED)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    parts, short = [], []
+    src_total, none_total = 0, 0
+    for e in (0, 1):
+        f = sum(int(r["f%d" % e]) for r in sec)
+        m, p, t, n = (sum(int(r[k + str(e)]) for r in sec) for k in ("m", "p", "t", "n"))
+        src_total += p + t
+        none_total += n
+        if f:
+            parts.append("eye %d %d frames: the scene meshes %.0f%%, the depth prepass %.0f%%, the terrain %.0f%%, none %.1f%%" % (
+                e, f, 100.0 * m / f, 100.0 * p / f, 100.0 * t / f, 100.0 * n / f))
+            if n * 50 > f:
+                short.append("eye %d without rows in %.1f%% of its frames" % (e, 100.0 * n / f))
+    checked = sum(int(r["checked"]) for r in sec)
+    diffs = [float(r["diff"]) for r in sec if int(r["checked"])]
+    text = "%d s: %s; checked against a scene mesh %d (max diff %.2e)" % (len(sec), "; ".join(parts), checked, max(diffs) if diffs else 0.0)
+    if any(r["lat"] for r in sec):
+        return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's")
+    if none_total and not src_total:
+        return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any")
+    if short:
+        return ("PARTIAL", text + "; " + "; ".join(short))
+    return ("OK", text)
+
+
 def _hj_f93_chain(rows, ctx):
     """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
     step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
@@ -11652,6 +11683,12 @@ HEALTH_RULES = (
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit),
+    _hrule("eye rows (F113)", ("F113",), ("native on foot eye rows (F113)",), (
+        ("sec", r"native on foot eye rows \(F113\) 1 s: eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
+                r"none (?P<n0>\d+); eye 1 (?P<f1>\d+) frames: the scene meshes (?P<m1>\d+), the depth prepass (?P<p1>\d+), the terrain (?P<t1>\d+), none (?P<n1>\d+); "
+                r"checked against a scene mesh (?P<checked>\d+) \(max diff (?P<diff>\S+)\); source draws with no scene depth eye (?P<noeye>\d+), no b1 shadow "
+                r"(?P<norows>\d+), latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?$"),
+    ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
         ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
@@ -13109,6 +13146,20 @@ def self_test_health():
               [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
+
+        # ---- eye rows (F113): each eye's scene rows and their source ----
+        F113 = "eye rows (F113)"
+
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False):
+            f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
+            return R("native on foot eye rows (F113) 1 s: eye 0", f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, 0,
+                     " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" if latched else "")
+
+        check("F113 rows: bare ground, the prepass gives the rows", [rows113()] * 3, 0, [("OK", F113)],
+              has=["eye 0 270 frames: the scene meshes 11%, the depth prepass 89%, the terrain 0%, none 0.0%"], lacks=["UNPARSED"])
+        check("F113 rows: a source latched off", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF"])
+        check("F113 rows: the sources never ran (the 07:10 flight's bare ground)", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0)] * 2, 3,
+              [("NEVER APPLIED", F113)], has=["none 66.7%", "no source ever gave any"])
 
         # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
         F111 = "panel pointer (F111)"
