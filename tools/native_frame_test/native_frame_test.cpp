@@ -31,6 +31,7 @@
 #include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the paced F68d window, the throttled lines
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
+#include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 
@@ -7285,6 +7286,9 @@ int wmain(int argc, wchar_t** argv) {
     f101test::run101(check);
     // F107: the carrier management screen's camera away from the commander: the gate, the episode, the neck reference held out, the calibration's consequence.
     f107test::run107(check);
+    // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
+    // snap's fade, the smoothing, the follower against the real map, the per-second check.
+    f109test::run109(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
