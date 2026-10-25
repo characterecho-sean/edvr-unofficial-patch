@@ -1516,7 +1516,7 @@ int wmain(int argc, wchar_t** argv) {
                 double E2[3];
                 t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
                 check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::kIkSwivelTrimDeg == 2.0 && nf::kIkSquareAmount == 0.75 &&
-                          nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
+                          nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 0.0,
                       "F57: the clamp keeps the elbow out by the distance (25 cm); the arm IK's shipped values are the constants");
             }
             // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.

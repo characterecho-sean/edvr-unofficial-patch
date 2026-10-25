@@ -154,12 +154,12 @@ struct F95Hud {
     uint32_t frames = 0, notStill = 0;
 };
 F95Hud g_f95Hud;
-// F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_right_cm / _up_cm / _forward_cm and _body (follow | stay).
-// F90: the built-in values are the pilot's from the F89 flight (forward 9.0, up 7.5, right 0.0 cm, follow).
-std::atomic<float> g_f88RightCm{static_cast<float>(nofoot::f88::kRightDefaultCm)}, g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)},
-    g_f88ForwardCm{static_cast<float>(nofoot::f88::kForwardDefaultCm)};
+// F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_forward_cm and _body (follow | stay). F98c retired its up and F112 its
+// right: the runtime reads neither, and the right of the eye offset is always 0.
+// F112: the built-in forward is the pilot's flown value, 10.0 cm, with follow.
+std::atomic<float> g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)}, g_f88ForwardCm{static_cast<float>(nofoot::f88::kForwardDefaultCm)};
 std::atomic<int> g_f88Body{nofoot::f88::kFollow};
-double g_f88RightLast = 0.0, g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
+double g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
 int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 // F97a: F88's weight, published each align tick for the Animate post-hook (the armed body's blend)
@@ -670,6 +670,11 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_ads_close_left_eye", "on") != "on")
         Log::get().note("native on foot: fix.native_on_foot_ads_close_left_eye is retired (F106): ignored (the left eye no longer closes in ADS; "
                         "fix.native_on_foot_ads_sight_both_eyes shows both eyes the view from the aiming eye instead)");
+    // F112: the weapon eye offset's right; the eye offset is forward alone now. The shipping file carries the key at its last value (2). The sideways setting that stays is
+    // fix.native_on_foot_weapon_view_offset_cm.
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", static_cast<float>(nofoot::f88::kRightDefaultCm)) - static_cast<float>(nofoot::f88::kRightDefaultCm)) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_weapon_eye_right_cm is retired (F112): ignored (the eye offset has no sideways part; "
+                        "fix.native_on_foot_weapon_view_offset_cm is the sideways setting)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -836,7 +841,7 @@ void readKey() {
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
     }
-    // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default shifts view/body 2.0 cm right (F90; 2.5 before).
+    // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default is 0: no shift (F112; F90 had 2.0 cm right, 2.5 before).
     {
         const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm));
         const float cm = std::isfinite(rawCm) ? std::clamp(rawCm, -10.0f, 10.0f) : 0.0f;
@@ -869,25 +874,21 @@ void readKey() {
         g_f94EyeHeightLast = cm;
         g_f94EyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
-    // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward / up / right" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
-    // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn (F89: in ADS too), 0 unarmed, ramped over 0.25 s. 0, 0, 0 and follow leave the view as F87's.
-    // F90: the built-in values are the pilot's from the F89 flight: forward 9.0, up 7.5, right 0.0 cm, follow.
+    // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
+    // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn (F89: in ADS too), 0 unarmed, ramped over 0.25 s. 0 and follow leave the view as F87's.
+    // F112: the built-in forward is the pilot's flown value, 10.0 cm, with follow.
     {
         namespace f88 = nofoot::f88;
         const double fwd = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_forward_cm", static_cast<float>(f88::kForwardDefaultCm))), f88::kForwardMinCm,
                                         f88::kForwardMaxCm);
         const double up = 0.0;   // F98c: the weapon eye's up key is retired (the eye height places the eye with and without an item; retiredKeysNote)
-        const double right = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", static_cast<float>(f88::kRightDefaultCm))), f88::kRightMinCm,
-                                          f88::kRightMaxCm);
+        // F112: the weapon eye's right key is retired too (retiredKeysNote); the sideways setting that stays is fix.native_on_foot_weapon_view_offset_cm. f88Tick feeds Keys::rightCm 0.
         bool bodyKnown = true;
         const std::string bodyText = cfg.getString("fix.native_on_foot_weapon_eye_body", "follow");
         const int body = f88::bodyFromText(bodyText.c_str(), &bodyKnown);
         if (first || fwd != g_f88ForwardLast)
             Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_forward_cm = %+.1f cm -- positive moves your eye toward the weapon "
                             "or tool drawn at the hip, along the character's forward (range %.0f..%.0f)", fwd, f88::kForwardMinCm, f88::kForwardMaxCm);
-        if (first || right != g_f88RightLast)
-            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_right_cm = %+.1f cm -- positive moves your eye right of the weapon "
-                            "or tool drawn at the hip, along the character's right (range %.0f..%.0f)", right, f88::kRightMinCm, f88::kRightMaxCm);
         if (first || body != g_f88BodyLast)
             Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_body = %s%s -- %s", f88::bodyName(body),
                             bodyKnown ? "" : " (the value is not follow or stay; follow is used)",
@@ -895,11 +896,9 @@ void readKey() {
                                                : "follow: the body moves with the eye forward, back and sideways, as when you lean; it never stands taller for the up offset");
         g_f88ForwardLast = fwd;
         g_f88UpLast = up;
-        g_f88RightLast = right;
         g_f88BodyLast = body;
         g_f88ForwardCm.store(static_cast<float>(fwd), std::memory_order_relaxed);
         g_f88UpCm.store(static_cast<float>(up), std::memory_order_relaxed);
-        g_f88RightCm.store(static_cast<float>(right), std::memory_order_relaxed);
         g_f88Body.store(body, std::memory_order_relaxed);
     }
     // F106 (live, the Native on foot page's "ADS: sight in both eyes"): while the sights are up the left eye shows the right eye's image, the eye the sight lock lines
@@ -1181,7 +1180,7 @@ void readKey() {
     }
     // F18: the HUD room (a user setting, live): 1.00..2.50. Elements keep their angular size; the element scale is divided by the room and the
     // mesh is multiplied by it (the room is applied only when the game's scale is known; see hudRoomTick).
-    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.25f);
+    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.0f);   // F112: the pilot's flown value is 1.00, the game's own room (1.25 before)
     if (room < 1.0f) room = 1.0f;
     if (room > 2.5f) room = 2.5f;
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
@@ -11258,7 +11257,7 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
     namespace f88 = nofoot::f88;
     F88Tick t;
     f88::Keys k;
-    k.rightCm = static_cast<double>(g_f88RightCm.load(std::memory_order_relaxed));
+    k.rightCm = 0.0;   // F112: the weapon eye's right key is retired; the sideways eye offset is fix.native_on_foot_weapon_view_offset_cm alone
     k.upCm = static_cast<double>(g_f88UpCm.load(std::memory_order_relaxed));
     k.forwardCm = static_cast<double>(g_f88ForwardCm.load(std::memory_order_relaxed));
     k.body = g_f88Body.load(std::memory_order_relaxed);

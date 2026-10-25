@@ -234,11 +234,13 @@ constexpr float kHudDefaultDistance = 0.192f;
 constexpr float kHudDistanceMin = 0.01f, kHudDistanceMax = 0.40f;
 // F16: the setting's default distance (Sean's tuning), which is not the game's 0.192 above; used only as the setting's fallback.
 // F19: Sean's tuning is 0.01 (the minimum of the range).
-constexpr float kHudDistanceSettingDefault = 0.01f;
+// F112: the pilot's flown value is 0.19, the setting's step nearest the game's own 0.192.
+constexpr float kHudDistanceSettingDefault = 0.19f;
 // F13: the HUD size (the basis rows only), the head follow's smoothing (ms), and the visor override test (TEMPORARY).
 // F16: size's default is 1.50 and its maximum 3.00 (Sean's tuning hit the old maximum); smoothing's default is 40 ms.
 // F19: size's default is Sean's 1.60.
-constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.60f;
+// F112: the pilot's flown value is 1.00.
+constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.00f;
 constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 0;   // F34: the shipping default (Sean's tuning)
 // F16: the per-group HUD offsets (a fraction of the HUD canvas, live), and the default spread (the margins' extra, F14).
 // F19: the spread's default is Sean's 0.04.
@@ -1714,7 +1716,7 @@ constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs t
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
 // F96: the arm IK's shipped values. Their config keys were removed, so these are the values now (degrees, the 0..1 amount, cm).
 constexpr double kIkSwivelTrimDeg = 2.0, kIkSquareAmount = 0.75, kIkElbowOutCm = 3.5;   // the values Sean flew (F96)
-constexpr double kWeaponViewOffsetDefaultCm = 2.0;   // F90: the pilot's value from the F89 flight (2.5 before)
+constexpr double kWeaponViewOffsetDefaultCm = 0.0;   // F112: the pilot's flown value (F90: 2.0, 2.5 before)
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
 // def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
 constexpr uint32_t kIkFpJoints[11] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34, 14};
