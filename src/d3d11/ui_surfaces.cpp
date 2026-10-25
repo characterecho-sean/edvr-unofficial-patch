@@ -10,6 +10,7 @@
 #include "device_hook.h"      // deviceHookHmdQuality: the .fxcfg's HMD Quality
 #include "ui_panel_scale.h"   // uiPanelScaleLive/Factor: a chain's stage under the engine's sizing
 
+#include "../common/game_build.h"  // gameRva: the verdict's keys in the running build
 #include "../common/log.h"
 #include "../common/runtime_profile.h"  // the VR instruments do not run in the flat profile
 
@@ -176,6 +177,18 @@ UiChain captureChain() {
     return c;
 }
 
+// The verdict's keys in the running build, once: build 334925's own; an unknown build's found by signature
+// (gameRva), 0 for one that was not (a miss).
+const uint32_t* chainKeys() {
+    static const struct Keys {
+        uint32_t at[kUiChainKeyCount] = {};
+        Keys() {
+            for (uint32_t i = 0; i < kUiChainKeyCount; ++i) at[i] = static_cast<uint32_t>(gameRva(kUiChainKeys[i]));
+        }
+    } keys;
+    return keys.at;
+}
+
 // Under g_lock: the chain entry of this size and kind, or null.
 ChainSeen* chainFor(uint32_t w, uint32_t h, bool depth) {
     for (uint32_t i = 0; i < g_s.chainCount; ++i) {
@@ -245,7 +258,7 @@ void uiSurfacesNoteChain(const D3D11_TEXTURE2D_DESC& d) {
     c.h = d.Height;
     c.depth = depth;
     c.chain = captureChain();
-    c.verdict = uiChainVerdict(c.chain);
+    c.verdict = uiChainVerdict(c.chain, chainKeys());
     const double k = uiSizingK(b.T);
     // Under the engine-side sizing the game divides by 1920 x f: the stage is
     // the create's size times f (ui_panel_scale.h).
@@ -309,7 +322,7 @@ bool uiSurfacesPanelNet(const D3D11_TEXTURE2D_DESC& in, bool initialData, D3D11_
     g_netDistinct.fetch_add(1, std::memory_order_relaxed);
     const bool depth = (in.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
     char verdict[64];
-    std::snprintf(verdict, sizeof(verdict), "%s", uiChainVerdictShort(uiChainVerdict(captureChain())));
+    std::snprintf(verdict, sizeof(verdict), "%s", uiChainVerdictShort(uiChainVerdict(captureChain(), chainKeys())));
     const char* source = "none";
     const double ss = uiPanelScaleChosenSupersampling(&source);
     const double f = uiPanelScaleLive() ? uiPanelScaleFactor() : 1.0;
@@ -355,7 +368,7 @@ bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d) {
 void uiSurfacesNoteAtlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& d, bool initialData) {
     if (!tex) return;
     const UiChain chain = captureChain();
-    const UiChainVerdict verdict = uiChainVerdict(chain);
+    const UiChainVerdict verdict = uiChainVerdict(chain, chainKeys());
     const uint32_t frame = g_frameNo.load(std::memory_order_relaxed);
     Lock lock;
     // The same address again is a new texture there (the old one released):

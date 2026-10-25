@@ -9,6 +9,7 @@
 #include "vr_window_gate.h"  // vrWindowRewriteAllowed: the rewrite's profile gate (VR launch stays rewritten in Passthrough)
 
 #include "../common/code_hook.h"
+#include "../common/game_build.h"  // gameRva, gamePinMatches: build 334925's addresses, or an unknown build's by signature
 #include "../common/log.h"
 #include "../common/runtime_profile.h"  // runtimeScopeIncludesVr, runtimeProfileValue: the per-call rewrite gate
 #include "cross_profile_cost.h"         // the mode request's and the settings copy's cost while flat runs (log only)
@@ -35,6 +36,16 @@ constexpr uintptr_t kReqKindOff = 0x20;
 // eleven bytes: mov r11,rsp; push rbx; sub rsp,0x4D0.
 constexpr uint32_t kCopyRva = 0x281E650;
 constexpr uint8_t kCopyBytes[11] = {0x4C, 0x8B, 0xDC, 0x53, 0x48, 0x81, 0xEC, 0xD0, 0x04, 0x00, 0x00};
+
+// A pinned entry: build 334925's RVA (gameRva places it in the running build) and its first bytes there.
+struct PinnedEntry {
+    uint32_t rva;
+    const uint8_t* bytes;
+    size_t len;
+};
+constexpr PinnedEntry kRequest = {kRequestRva, kRequestBytes, sizeof(kRequestBytes)};
+constexpr PinnedEntry kCopy = {kCopyRva, kCopyBytes, sizeof(kCopyBytes)};
+constexpr uint32_t kEntryRvas[2] = {kRequestRva, kCopyRva};  // both (gameRvasFound)
 
 constexpr uint32_t kRewriteCap = 64;
 
@@ -382,16 +393,27 @@ bool prepareForward(void* trampoline, void* context) noexcept {
     return true;
 }
 
-// Pins the function's first bytes, then installs the entry through a near relay. False (and no patch) when the bytes differ, no
+// Pins the function's first bytes, then installs the entry through a near relay. False (and no patch) when the entry is not found
+// (an unknown build: gameRva found no match), the bytes differ (gamePinMatches: an unknown build's outside the masked fields), no
 // relay can be placed, or CodeHook refuses. The forward is published through Prepare, and cleared again when CodeHook refuses.
-bool installOne(const uint8_t* base, uint32_t rva, const uint8_t* want, size_t len, void* replacement, void** origOut,
-                CodeHook* hook, const char* name) {
-    uint8_t got[11] = {};
-    if (!readGuardedBytes(base + rva, got, len) || std::memcmp(got, want, len) != 0) {
-        Log::get().note("vr window: trampoline %s refused: the bytes at 0x%X are not build 334925's; nothing patched", name, rva);
+bool installOne(const uint8_t* base, const PinnedEntry& entry, void* replacement, void** origOut, CodeHook* hook, const char* name) {
+    const uintptr_t at = gameRva(entry.rva);
+    if (!at) {
+        Log::get().note("vr window: trampoline %s refused: %s, and its entry (0x%X in build 334925) was not found by signature; nothing "
+                        "patched", name, gameBuildText(), entry.rva);
         return false;
     }
-    const uintptr_t target = reinterpret_cast<uintptr_t>(base) + rva;
+    uint8_t got[11] = {};
+    if (!readGuardedBytes(base + at, got, entry.len) || !gamePinMatches(entry.rva, got, entry.bytes, entry.len)) {
+        if (gameBuildKnown())
+            Log::get().note("vr window: trampoline %s refused: the bytes at 0x%X are not build 334925's; nothing patched", name, entry.rva);
+        else
+            Log::get().note("vr window: trampoline %s refused: %s: its entry was found by signature at 0x%llX, but its first bytes are not "
+                            "build 334925's outside the masked fields; nothing patched", name, gameBuildText(),
+                            static_cast<unsigned long long>(at));
+        return false;
+    }
+    const uintptr_t target = reinterpret_cast<uintptr_t>(base) + at;
     uint8_t* relay = buildRelayNear(target, replacement);
     if (!relay) {
         Log::get().note("vr window: trampoline %s refused: no page within +/-2 GB of the target for its relay; nothing patched", name);
@@ -403,10 +425,17 @@ bool installOne(const uint8_t* base, uint32_t rva, const uint8_t* want, size_t l
                         "above); nothing patched", name);
         return false;
     }
+    if (!gameBuildKnown())
+        Log::get().note("vr window: trampoline %s: its entry (0x%X in build 334925) was found by signature on %s at 0x%llX and is "
+                        "installed", name, entry.rva, gameBuildText(), static_cast<unsigned long long>(at));
     return true;
 }
 
 }  // namespace
+
+// For vr_ssaa_gate.cpp's build check: whether gameRva finds both entries (always on build 334925); the first it does not in
+// *firstMissing.
+bool vrWindowTrampolinesFound(uint32_t* firstMissing) { return gameRvasFound(kEntryRvas, 2, firstMissing); }
 
 void vrWindowTrampolinesInstall() {
     static bool done = false;
@@ -419,9 +448,9 @@ void vrWindowTrampolinesInstall() {
     }
     g_installTickMs.store(GetTickCount64(), std::memory_order_release);
     refreshUserSize();
-    const bool req = installOne(base, kRequestRva, kRequestBytes, sizeof(kRequestBytes), reinterpret_cast<void*>(&requestReplacement),
+    const bool req = installOne(base, kRequest, reinterpret_cast<void*>(&requestReplacement),
                                 reinterpret_cast<void**>(&g_requestOrig), &g_requestHook, "0x7E9E50 (mode request)");
-    const bool copy = installOne(base, kCopyRva, kCopyBytes, sizeof(kCopyBytes), reinterpret_cast<void*>(&copyReplacement),
+    const bool copy = installOne(base, kCopy, reinterpret_cast<void*>(&copyReplacement),
                                  reinterpret_cast<void**>(&g_copyOrig), &g_copyHook, "0x281E650 (settings copy)");
     Log::get().note("vr window: trampolines: 0x7E9E50 (mode request, window rewrite) %s; 0x281E650 (settings copy, hold) %s; DisplaySettings %ux%u; the display config save is not held (its field layout is not proven)",
                     req ? "installed" : "not installed", copy ? "installed" : "not installed", g_userW.load(), g_userH.load());
