@@ -30,6 +30,7 @@
 #include <cstdint>
 
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
+#include "native_on_foot_f100.h"   // F100: the marker tee's prefilter (pure parts)
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
 struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
@@ -334,6 +335,26 @@ inline std::atomic<bool> g_nativeOnFootMarkerProbeKey{false};
 inline bool nativeOnFootMarkerProbeLive() {
     return g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive();
 }
+// F100: the probe's measurement families (F53's census frames' notes, untagged records and key census, F57's cb1 census, F47 item 4's re-measure of
+// the patched rows, the 8 burst lines a second, the `marker probe:` 1 s lines and F53's per-key lines) run only while fix.native_on_foot_marker_probe
+// itself is on. g_nativeOnFootMarkerProbeKey above is the machinery (the probe key or the marker fix); this is the probe key alone (readKey).
+inline std::atomic<bool> g_nativeOnFootMarkerMeasureKey{false};
+inline bool nativeOnFootMarkerMeasure() { return g_nativeOnFootMarkerMeasureKey.load(std::memory_order_relaxed); }
+// F100: the draw tee's prefilter (render thread; nofoot::f100::teeFast). The slow path leaves g_nativeOnFootTeeFastFrame at the frame a draw that is
+// neither an on-foot HUD issuer's nor the marker composite's may skip it in; the frame boundary mirrors the probe's frame into g_nativeOnFootTeeFrameNow;
+// Begin clears the fast frame. A skipped draw only advances the draw serial (F47's, which Begin and the label instrument compare against) and counts.
+inline std::atomic<uint32_t> g_nativeOnFootTeeFastFrame{nofoot::f100::kNoFrame};
+inline std::atomic<uint32_t> g_nativeOnFootTeeFrameNow{0};
+inline uint64_t g_nativeOnFootDrawSerial = 0;     // render thread only
+inline uint64_t g_nativeOnFootTeeFastCalls = 0;   // render thread only; the probe's 1 s cost line takes and clears it
+inline uint64_t g_nativeOnFootTeeClockTicks = 0, g_nativeOnFootTeeClockCalls = 0;   // F100: the tee's clock (vscreen.cpp), render thread only
+inline bool nativeOnFootTeeFast(uint64_t vs) {
+    if (!nofoot::f100::teeFast(g_nativeOnFootTeeFastFrame.load(std::memory_order_relaxed), g_nativeOnFootTeeFrameNow.load(std::memory_order_relaxed), vs))
+        return false;
+    ++g_nativeOnFootDrawSerial;
+    ++g_nativeOnFootTeeFastCalls;
+    return true;
+}
 // Owner context only (vscreen.cpp): a buffer mapped for writing (after the real Map), a buffer about to be unmapped (before the real Unmap), and
 // a draw before its verdict (the game's bindings). F45: every draw call kind, named by `kind` ('N' DrawInstanced, 'X' DrawIndexedInstanced,
 // 'D' Draw and 'I' DrawIndexed with one instance from 0, 'Y' and 'Z' the indirect ones, whose instance range is not readable here).
@@ -354,8 +375,8 @@ void nativeOnFootMarkerProbeShutdown();
 // matched, the CPU shadows of its b0 and o_hud and the eye's world view present, |dx|, |dy| < 0.1 NDC and w > 0; the last good delta held one
 // frame on a miss); Begin, inside the UI layer's bracket around the game's own issue, binds a private copy of b0 with rows 4 and 5 moved by
 // (dx, dy) . row 7; End, after the layer's second issues, puts the game's b0 back. Begin returns false (and binds nothing) on every refusal.
-// F63: the match is identified on the CPU at the draw (the instance stream shadowed at its Unmap) and held 90 frames (drawtag::HeldMatch);
-// the patch aims at e less a bias learned from the read-back of fresh patched frames (drawtag::BiasEma).
+// F63: the match is identified on the CPU at the draw (the instance stream shadowed at its Unmap) and held 90 frames (drawtag::HeldMatch). F100:
+// the patch reads no read-back of its own patched rows (F63's bias EMA is gone), so F47 item 4's re-measure is a measurement (the probe key).
 inline std::atomic<bool> g_nativeOnFootMarkerFixKey{false};
 inline bool nativeOnFootMarkerFixLive() {
     return g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootMarkerProbeLive();

@@ -11259,6 +11259,50 @@ def _hj_f95c_head_shadow(rows, ctx):
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
 
+def _hj_f100_tee(rows, ctx):
+    """F100: the marker probe's draw tee. Per second (its cost line): the calls, the share the prefilter took, the frames, and the tee's clock (a mean call from
+    one call in 64 on the perf monitor's sample frames, and the estimate a frame). Calls and no prefilter hit is NEVER APPLIED, unless the probe key's
+    measurement families are on (the prefilter stands aside for them: IDLE); no clocked second is PARTIAL (the cost is not measured)."""
+    sec, fam = rows.get("sec", []), rows.get("families", [])
+    if not sec:
+        return None
+    calls, fast, frames = (sum(int(r[k]) for r in sec) for k in ("calls", "fast", "frames"))
+    clocked = [r for r in sec if r.get("clocked")]
+    ms = sorted(float(r["ms"]) for r in clocked)
+    ns = sorted(float(r["ns"]) for r in clocked)
+    text = "%d s: the prefilter took %s of %d draw tee calls (%d a frame over %d frames)" % (len(sec), _hpct(fast, calls), calls, calls // frames if frames else 0, frames)
+    if ms:
+        text += "; the tee %.3f ms a frame (median of %d clocked seconds, max %.3f), %.1f ns a call" % (ms[len(ms) // 2], len(ms), ms[-1], ns[len(ns) // 2])
+    else:
+        text += "; the tee's clock took no call (no perf sample frame on foot)"
+    if not calls:
+        return ("IDLE", text)
+    if not fast:
+        if fam and fam[-1]["state"] == "ON":
+            return ("IDLE", text + "; the probe key's measurement families are on, so the prefilter stands aside")
+        return ("NEVER APPLIED", text + "; the prefilter took no draw")
+    if not ms:
+        return ("PARTIAL", text)
+    return ("OK", text)
+
+
+def _hj_f100_pose(rows, ctx):
+    """F100: the local avatar's Animate work (the FP snapshot, the pin, legs, bend and arm IK), clocked in the game's animation job, per second. No call in any
+    second is IDLE (the hook did no local work)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    busy = [r for r in sec if int(r["calls"])]
+    calls = sum(int(r["calls"]) for r in sec)
+    text = "%d s: %d calls" % (len(sec), calls)
+    if not busy:
+        return ("IDLE", text + "; no local Animate work clocked")
+    mean = sorted(float(r["mean"]) for r in busy)
+    tot = sorted(float(r["ms"]) for r in busy)
+    text += " (%.0f a second), %.1f us a call (median second), max %.1f us, %.3f ms a second (median, max %.3f)" % (
+        calls / len(busy), mean[len(mean) // 2], max(float(r["max"]) for r in busy), tot[len(tot) // 2], tot[-1])
+    return ("OK", text)
+
 
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
@@ -11483,6 +11527,14 @@ HEALTH_RULES = (
                   r"\(the head's\), other (?P<other>\d+), bits a shadow view shares with another (?P<shared>\d+); flags (?P<flags>.*)$"),
         ("down", r"native on foot head shadow \(F95c\): stood down for the session after (?P<faults>\d+) faults"),
     ), _hj_f95c_head_shadow),
+    _hrule("marker tee (F100)", ("F100",), ("tee (F100)",), (
+        ("sec", r"tee \(F100\): fast path (?P<fast>\d+) of (?P<calls>\d+) calls, (?P<frames>\d+) frames, tee clock: (?:(?P<clocked>\d+) calls clocked, (?P<ns>-?[\d.]+) ns a "
+                r"call, est\. (?P<ms>-?[\d.]+) ms a frame|none)"),
+        ("families", r"marker probe \(F100\): measurement families (?P<state>ON|off) "),
+    ), _hj_f100_tee),
+    _hrule("pose hook CPU (F100)", ("F100",), ("pose hook CPU (F100)",), (
+        ("sec", r"pose hook CPU \(F100\) 1 s: (?P<calls>\d+) calls \([^)]*\), (?P<mean>[\d.]+) us mean, (?P<max>[\d.]+) us max, (?P<ms>[\d.]+) ms in all"),
+    ), _hj_f100_pose),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -11774,7 +11826,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -12865,6 +12917,28 @@ def self_test_health():
         check("F95c head shadow: stood down after it ran", [shadow_sec(), R("native on foot head shadow (F95c): stood down for the session", 3)], 0, [("PARTIAL", F95C)],
               has=["stood down after 3 faults"])
 
+        # ---- marker tee (F100): the draw tee's prefilter and its clock; pose hook CPU (F100): the local avatar's Animate work ----
+        T100, P100 = "marker tee (F100)", "pose hook CPU (F100)"
+
+        def tee100(fast=1800000, calls=2000000, frames=90, clocked=350, ns=25.0, ms=0.556):
+            head = R("native on foot marker probe: cost: draw tee calls %llu", calls, 300000, 1000, 900, 298100, 8900, 960, 44640, 0)
+            tail = R(", tee clock: %llu calls clocked", clocked, ns, ms) if clocked else R(", tee clock: none")
+            return head + R("; tee (F100): fast path %llu", fast, calls, frames) + tail
+
+        def pose100(calls=90, mean=42.5, mx=120.0, ms=3.825):
+            return R("native on foot pose hook CPU (F100) 1 s:", calls, mean, mx, ms)
+
+        check("F100 tee: the prefilter takes most calls, the clock ran", [tee100()] * 3, 0, [("OK", T100)],
+              has=["3 s: the prefilter took 90% of 6000000 draw tee calls (22222 a frame over 270 frames); the tee 0.556 ms a frame (median of 3 clocked seconds"],
+              lacks=["UNPARSED"])
+        check("F100 tee: no fast call", [tee100(fast=0)] * 2, 3, [("NEVER APPLIED", T100)], has=["the prefilter took no draw"])
+        check("F100 tee: no fast call with the measurement families on", [R("native on foot marker probe (F100): measurement families", "ON", "on", ""),
+              tee100(fast=0)], 0, [("IDLE", T100)], has=["the prefilter stands aside"])
+        check("F100 tee: the clock took no call", [tee100(clocked=0)] * 2, 0, [("PARTIAL", T100)], has=["the tee's clock took no call"])
+        check("F100 pose: the local Animate work clocked", [pose100(), pose100(ms=4.1)], 0, [("OK", P100)],
+              has=["2 s: 180 calls (90 a second), 42.5 us a call (median second), max 120.0 us"], lacks=["UNPARSED"])
+        check("F100 pose: no local work", [pose100(0, 0.0, 0.0, 0.0)] * 2, 0, [("IDLE", P100)], has=["no local Animate work clocked"])
+
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],
               has=["item $wpn_s_pistol_kinetic_sauto_name;", "keys forward +13.0 left +6.0 up -3.0 toward eye +2.0 cm", "held 4 s", "moved 0 (hip part 0, ADS part 0)"])
@@ -13063,8 +13137,8 @@ def self_test_health():
             print("health census is not newest tag first:\n%s" % out)
             ok = False
         check("census: a log with no tagged line", ["nothing here", "still nothing"], 0, has=["0 build-tagged lines, 0 tags", "no rule had a line"])
-        many = ["t%d (F%d): x" % (i, 100 + i) for i in range(12)]
-        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F111 ", "    F104 "], lacks=["    F103 "])
+        many = ["t%d (F%d): x" % (i, 200 + i) for i in range(12)]   # F200..F211: tags no rule reads (F100 has rules since F100)
+        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F211 ", "    F204 "], lacks=["    F203 "])
 
         # ---- a format that drifts from its rule fails loudly ----
         check("a rule whose lines no longer match", [pistol().replace("keys forward", "knobs forward")] * 2, 4, [("UNPARSED", F90P)],
