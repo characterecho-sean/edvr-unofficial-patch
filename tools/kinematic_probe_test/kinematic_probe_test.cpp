@@ -31,6 +31,8 @@ namespace edvr {
 const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept { return "installed"; }
 void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
 bool kinematicEvalHooksMatch(uintptr_t) noexcept { return false; }
+// src\common\game_build.h's identity read (the vtable range): no game image here.
+bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *stamp = 0; if (size) *size = 0; return false; }
 }
 using namespace edvr;
 

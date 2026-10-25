@@ -2523,7 +2523,7 @@ struct HingeSwings {
     bool ok = false;
     int source = 0;                    // n0 from: 0 the animated joints' cross, 1 the last solved hinge, 2 the shortest arc, 3 the given row
     double n0[3] = {}, n1[3] = {};
-    double R1[9] = {}, R2[9] = {};     // swing 1 about S (the whole arm), swing 2 about E (the forearm and hand), about n1 only
+    double R1[9] = {}, R2[9] = {};     // swing 1 about S (the whole arm), swing 2 about E (the forearm and hand); about n1 outside the near-straight window
     double flexAnimDeg = 0.0, flexSolvedDeg = 0.0;
     double planeDeg = 0.0;             // the twist about the upper arm the shortest-arc swing would have missed: angle(n0 turned by it, n1)
     double oldHingeErrDeg = 0.0;       // the old two swings' forearm axis against the hinge their swing 1 dragged along (computed, not applied)
@@ -2564,18 +2564,16 @@ inline HingeSwings ikHingeSwings(const double S[3], const double F0[3], const do
     double h1[3], h1u[3];
     ikRowRot(h0, o.R1, h1);
     if (!ikUnit(h1, h1u)) return o;
-    if (o.source == 0 || o.source == 3) {
-        // The animated hinge (or the learned row, which is that hinge as the forearm joint carries it) is the axis the animated forearm really bent about, so
-        // the carried forearm lies in the plane perpendicular to n1 with the target direction: swing 2 is a rotation about n1 alone.
+    if (geo) {
+        // Outside the near-straight window, preserve the selected hinge's flexion: normally the animated hinge, or the learned row deliberately selected by
+        // the unarmed policy (F80). The near-straight correction below must not override that choice when a geometric hinge is defined.
         double cx[3];
         ikCross(h1u, eT, cx);
         ikRotAxis(o.n1, std::atan2(ikDot(o.n1, cx), ikDot(h1u, eT)), o.R2);
     } else {
-        // F126: no hinge to go on (the last solved one, or the shortest arc): the animated forearm leans off the upper arm by the arm's bend, up to asin(kHingeMinSin)
-        // = 2.87 degrees, in a direction the stand-in does not know, so the carried forearm is out of the plane of n1 by up to l2 x 0.05 = 14 mm at the hand and a
-        // rotation about n1 cannot reach the target. Swing 2 is the shortest arc from the carried forearm onto the target direction: the same rotation about n1 when
-        // the arm is straight or the stand-in was right, and the hand lands on the grip whatever the stand-in was. The hinge is not chosen better, because no
-        // choice that does not read the animated forearm's own lean (the cross, the very thing this window distrusts) puts that lean in the plane.
+        // F126: inside the near-straight window, a stand-in hinge or approximate learned row need not describe the animated bend. The carried forearm is then out of n1's plane (up to l2 x 0.05 =
+        // 14 mm at the hand in the near-straight window), so a rotation about n1 cannot reach the target. Swing 2 is the shortest arc onto the target direction:
+        // the same rotation about n1 when the arm is straight or the hint was right, and the hand lands while both segment lengths stay unchanged.
         ikRotFromTo(h1u, eT, o.R2);
     }
     const auto flexDeg = [](const double u[3], const double h[3]) noexcept {

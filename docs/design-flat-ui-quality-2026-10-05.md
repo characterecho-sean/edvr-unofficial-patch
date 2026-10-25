@@ -56,9 +56,9 @@
 - **2026-10-24, HUD Anti-Aliasing (FLOWN OK at 1440p on 88a54953, merged to main):** the HUD layer is composited after the AA, so below
   4K its slanted edges stepped. SMAA 1x over the layer before the composite is the user setting `fix.hud_antialiasing` (F8 "HUD
   Anti-Aliasing", flat Performance tab under UI quality, default off; "flat ui layer smaa:" lines). Seen working at 2560x1440 (15:43);
-  nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost. Last entry.
-- **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
-  admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
+  nothing to do at 4K, where the edges already carry coverage ramps. Owed: the maps, and its frame-time cost.
+- **2026-10-25, the UI route's GPU timers (Plokhi; built, not flown):** none opened in flat, where nothing reads them. Last entry.
+- **Next on Epic:** SS 0.5 on the shipped build (copy route, eced5813's admission change), 100% at SS 1.0, then all three maps.
 
 ## Purpose
 
@@ -1143,3 +1143,25 @@ distributor panel: its diagonal runs show a step every pixel or two, where the g
   at 15:43:13-15:43:34; the window reads `key=on smoothed=1862 raw-key-off=837 raw-fault=0 size=2560x1440`. Sean: "Okay I see it now at 1440p, ship
   it." So the setting smooths the steps where the HUD has them (below 4K) and has nothing to do at 4K, where the artwork already covers enough pixels
   to carry its own edge ramps. Merged to main, default off. Still owed: the Galaxy and System Maps with it on, and its frame-time cost.
+
+## 2026-10-25: the UI route's GPU timers stop in flat (built, not flown)
+
+- Report (Plokhi, macOS through DXMT, flat). With the UI route's per-stage GPU timers turned off, a scene below 60 fps went back to 60, at the
+  same settings, and the UI composite and depth replays kept working. Their reading: DXMT's timestamp queries end the active Metal pass and
+  force a flush, so timers whose results are thrown away were splitting the command buffers. Their guard was an early return in `routeBegin`.
+- Checked in the source. `routeBegin` (ui_layer.cpp) opens a GpuTimer for each stage of the route: the clears, the multiply, the seed, each
+  HUD write-back, the composite, coverage and the tonemap. With the crisp HUD on, that is tens a frame. `routePoll` reads them every frame into
+  `g_routeStats`. Their one reader is `logTotals`, the price at the end of the 30 s "ui quality: layer" line. The window boundary skips
+  `logTotals` in the flat profile, prints only the panel-scale and depth-memo lines, and then clears the stats. ui_layer.h exports none of it,
+  and the census item tied to the route (AlteredHdrHud) opens only with `g_hdrDrawTimingOn`, which is off. So in flat every one of these
+  timers was measured and discarded.
+- Built (no key: nothing reads what it removes). `routeBegin` returns -1 in the flat profile. The return comes before the ring and before the
+  "no free timer" and coverage bookkeeping, which feed only that line too. Every caller already takes -1: `routeEnd` and `routeAbort` return
+  at once. `routePoll` still drains, so timers a VR frame left in flight at a live switch to flat are read and freed. Full build green.
+- VR keeps them: the price prints there whenever the layer is live.
+- The saving elsewhere is not measured. On native Windows a timestamp query is a GPU write, so the saving should be small, likely tens of
+  microseconds a frame at most (an estimate). Under DXVK (Proton) it is unknown. The route's timers also no longer take slots in the shared
+  clock's lease table (gpu_disjoint_clock.h), which flat's reported timers draw from as well.
+- Flight check (flat): the HUD layer and panels look as before, and the "flat ui layer" 30 s lines read as before. The "ui quality: layer"
+  line never printed in flat, so no log line goes away. On the Deck, a same-scene frame-time comparison against the previous build would
+  price it under DXVK.

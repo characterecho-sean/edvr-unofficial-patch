@@ -41,6 +41,7 @@
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
 #include "skin_join_gpu.h"      // F2: the join at the palette chain's dispatch, the pose table, the views the cloned vertex shaders read
 #include "vscreen.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "../common/timing.h"
@@ -581,25 +582,67 @@ constexpr uint8_t kAppendBytes[23] = {
     0x48, 0xFF, 0x42, 0x18,                                // inc qword [rdx+18h]
     0x41, 0xFF, 0x85, 0xA4, 0x02, 0x00, 0x00};             // inc dword [r13+2A4h]   the owner's count
 
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the producer's own instructions
+// that carry, unmasked, the layout the secondary path writes (an item's +0x124 previous position, +0x138 previous rotation, +0x120
+// marker) and the fields it follows to find the item. In FUN_144315A20: the frame (0x4315A29: rbp = rsp+0x100 once 0x4315A31 subtracts
+// 0x1C8), the local item at rsp+0x60 built by the item constructor (the call at 0x4315A5C), its pose at +0x10 (0x4315AA6) and +0x08
+// (0x4315AC8), its second pose block at +0x124 (0x4315AAC, rbp+0x84) and +0x138 (0x4315AD4, rbp+0x98), the record's pose at +0x170
+// (0x4315A6D) and +0x17C (0x4315A7C) and key at +0x250 (0x4315CA3), the owner's dictionary at +0x260 (0x4315CBA) and count at +0x2A4
+// (0x4315DB5), the entry's list at +0x28 (0x4315CCA) with its tail at +0x30 (0x4315CD3), the node's count at +0x18 (0x4315CD7), and the
+// copy of the local into the node's records at +0x20, 0x150 bytes each (0x4315D14, 0x4315D22, 0x4315D27). The marker's dword is one no
+// game code here writes: the item constructor FUN_144C86090 stores +0x118 (0x4C861D6) and then +0x124 (0x4C861F4), nothing between.
+// On an unknown build every one must be found, and the producer's call must reach the constructor found, or engine motion stands down.
+constexpr uint32_t kItemCtorCallRva = 0x4315A5Cu;
+constexpr uint32_t kItemCtorRva = 0x4C86090u;
+constexpr uint32_t kEngineWitnessRvas[20] = {0x4315A29u, 0x4315A31u, kItemCtorCallRva, 0x4315A6Du, 0x4315A7Cu, 0x4315AA6u, 0x4315AACu,
+                                             0x4315AC8u, 0x4315AD4u, 0x4315CA3u, 0x4315CBAu, 0x4315CCAu, 0x4315CD3u, 0x4315CD7u,
+                                             0x4315D14u, 0x4315D22u, 0x4315D27u, 0x4315DB5u, 0x4C861D6u, 0x4C861F4u};
+std::atomic<bool> g_unknownBuildNoted{false};   // the unknown build's "found by signature" line, once per session
+
 #ifndef EDVR_ENGINE_VELOCITY_RIG
 const char* verifyEngine(uintptr_t base) noexcept {
+    if (!gameBuildIdentity(nullptr, nullptr)) return "not build 334925 (no PE header)";
+    // Both in the running build: build 334925, themselves; an unknown build, found by signature (0: not found).
+    const uintptr_t lookup = gameRva(static_cast<uint32_t>(kLookupRva)), append = gameRva(static_cast<uint32_t>(kAppendRva));
+    if (!lookup || !append)
+        return "an unknown build, and the dictionary lookup or the append sequence (0x3699C00, 0x4315DA5 in build 334925) was not found by signature";
+    uint32_t missing = 0;
+    if (!gameRvasFound(kEngineWitnessRvas, sizeof(kEngineWitnessRvas) / sizeof(kEngineWitnessRvas[0]), &missing)) {
+        static char why[160];
+        std::snprintf(why, sizeof(why), "an unknown build, and the record layout's field witness 0x%X (in build 334925) was not found by signature",
+                      missing);
+        return why;
+    }
+    if (!gameBuildKnown()) {
+        // The constructor call's rel32 is masked by the signature: its target is computed here and must be the constructor found.
+        const uintptr_t callAt = gameRva(kItemCtorCallRva), ctorAt = gameRva(kItemCtorRva);
+        uint8_t call[5] = {};
+        int32_t rel = 0;
+        __try {
+            std::memcpy(call, reinterpret_cast<const void*>(base + callAt), sizeof(call));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return "engine image unreadable";
+        }
+        std::memcpy(&rel, call + 1, 4);
+        if (!callAt || !ctorAt || call[0] != 0xE8 || uint64_t(callAt) + 5u + uint64_t(int64_t(rel)) != uint64_t(ctorAt))
+            return "an unknown build: the producer's call found by signature does not reach the item constructor found by signature";
+    }
     __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return "not build 334925 (no PE header)";
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != KinematicEvalProbe::kExpectedTimestamp || imageSize != KinematicEvalProbe::kExpectedImageSize)
-            return "not build 334925 (PE timestamp/size)";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kLookupRva), kLookupPrologue, sizeof(kLookupPrologue)))
+        uint8_t got[sizeof(kLookupPrologue)] = {};
+        std::memcpy(got, reinterpret_cast<const void*>(base + lookup), sizeof(kLookupPrologue));
+        if (!gamePinMatches(static_cast<uint32_t>(kLookupRva), got, kLookupPrologue, sizeof(kLookupPrologue)))
             return "lookup mismatch at RVA 0x3699C00";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kAppendRva), kAppendBytes, sizeof(kAppendBytes)))
+        std::memcpy(got, reinterpret_cast<const void*>(base + append), sizeof(kAppendBytes));
+        if (!gamePinMatches(static_cast<uint32_t>(kAppendRva), got, kAppendBytes, sizeof(kAppendBytes)))
             return "append sequence mismatch at RVA 0x4315DA5";
-        return nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "engine image unreadable";
     }
+    if (!gameBuildKnown() && !g_unknownBuildNoted.exchange(true))
+        Log::get().note("engine motion: the dictionary lookup (0x3699C00 in build 334925) and the append sequence (0x4315DA5) were found by "
+                        "signature on %s at 0x%llX and 0x%llX; the record fields it writes are witnessed.", gameBuildText(),
+                        static_cast<unsigned long long>(lookup), static_cast<unsigned long long>(append));
+    return nullptr;
 }
 #else
 // tools/engine_velocity_test drives this file's draw half on WARP: there is
@@ -2628,7 +2671,8 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetMergeObserver(nullptr,nullptr);
         kinematicEvalSetClearObserver(nullptr);
     } else {
-        g_lookup.store(reinterpret_cast<emit::LookupFn>(base + kLookupRva), std::memory_order_release);
+        const uintptr_t lookupAt = gameRva(static_cast<uint32_t>(kLookupRva));   // found: verifyEngine checked it
+        g_lookup.store(lookupAt ? reinterpret_cast<emit::LookupFn>(base + lookupAt) : nullptr, std::memory_order_release);
         kinematicEvalSetEmitObserver(&observeEmit);
         kinematicEvalSetPrimaryEmitObserver(&observePrimaryEmit);
         kinematicEvalSetPoolCopyObserver(&observePoolCopy);

@@ -4,8 +4,8 @@
 //    window) and put the midpoint 22 mm behind where it is.
 // 2. The arm IK's FP snapshot: after a skeleton change the snapshot of the earlier rig is not used by either target path (the anatomical one was already
 //    refused; the attach fallback kept pulling the hands to the earlier rig's grips) until the next FP call replaces it.
-// 3. A nearly straight elbow with no learned hinge reaches a reachable grip exactly on both sides of the hinge window (the sine of the bend over 0.05), where the
-//    shortest-arc stand-in missed it by up to 14 mm just under the window.
+// 3. A nearly straight elbow reaches a reachable grip exactly on both sides of the hinge window (the sine of the bend over 0.05), with no learned hinge or an
+//    approximate learned row. The stand-ins missed by up to 14 mm and a row within the learning tolerance by 2.2 mm just under the window.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_f126.h"
@@ -296,6 +296,54 @@ inline void run126(Check&& check) {
             if (c.ok) straightWorst = std::max(straightWorst, c.missMm);
         }
         check(straightWorst < 1e-6, "F126: an exactly straight arm still reaches the grip exactly, with the last hinge to go on or without");
+        // A learned row need not be the exact hinge: its learning gate accepts a mean error under 10 degrees. Below the window the written stable-pole path uses
+        // that row; above it the geometric hinge takes over. A row 5 or 9 degrees off used to leave a 1.2 or 2.2 mm gap just below the window, then snap onto the grip.
+        double rowWorstMm = 0.0, lengthWorstM = 0.0;
+        int rowCases = 0, rowSources = 0, geometricSources = 0;
+        for (double rowDeg : {0.0, 5.0, 9.0}) for (double bendDeg : {0.0, 2.859, 2.871}) {
+            const double l1 = 0.30, l2 = 0.28, bend = bendDeg * nf::kIkPi / 180.0, angle = rowDeg * nf::kIkPi / 180.0;
+            const double S[3] = {}, E0[3] = {0.0, -l1, 0.0}, H0[3] = {0.0, -l1 - l2 * std::cos(bend), l2 * std::sin(bend)};
+            const double T[3] = {0.20, -0.35, 0.10}, ref[3] = {0.0, -1.0, 0.0}, row[3] = {-std::cos(angle), 0.0, std::sin(angle)};
+            const nf::IkTwoBone tb = nf::ikTwoBoneFrame(S, T, l1, l2, ref, 40.0, 170.0);
+            double E[3], geo[3];
+            tb.elbowAt(0.7, E);
+            const bool haveGeo = nf::ikHingeAnimated(S, E0, H0, geo);
+            const bool useRow = nf::ikUseHingeRow(true, haveGeo, rowDeg, true);
+            const nf::HingeSwings hs = nf::ikHingeSwings(S, E0, H0, E, tb.hand, useRow ? row : nullptr, nullptr);
+            double carried[3], rel[3], fore[3], hand[3], elbow[3];
+            nf::ikRowRot(H0, hs.R1, carried);
+            nf::ikRowRot(E0, hs.R1, elbow);
+            for (int i = 0; i < 3; ++i) rel[i] = carried[i] - E[i];
+            nf::ikRowRot(rel, hs.R2, fore);
+            for (int i = 0; i < 3; ++i) hand[i] = E[i] + fore[i];
+            if (tb.ok && !tb.limited && hs.ok) ++rowCases;
+            if (hs.source == 3) ++rowSources;
+            if (hs.source == 0) ++geometricSources;
+            rowWorstMm = std::max(rowWorstMm, distMm(hand, tb.hand));
+            lengthWorstM = std::max(lengthWorstM, std::max(std::fabs(nf::ikLen(elbow) - l1), std::fabs(nf::ikLen(fore) - l2)));
+        }
+        check(rowCases == 9 && rowSources == 6 && geometricSources == 3 && rowWorstMm < 1e-6 && lengthWorstM < 1e-12,
+              "F126: an approximate learned hinge row (0, 5 or 9 degrees off) reaches the grip below the near-straight window and the geometric hinge above it: no gap "
+              "or snap across the window, and both segment lengths stay unchanged");
+        // Outside the near-straight window, unarmed selection may deliberately use a learned row over the animated hinge (F80). Its second swing must still
+        // rotate about that hinge, even when the row and animated plane disagree; the near-straight correction must not change this policy.
+        bool bentRowKeepsHinge = true;
+        for (double bendDeg : {2.871, 30.0}) {
+            const double l1 = 0.30, l2 = 0.28, bend = bendDeg * nf::kIkPi / 180.0, angle = 35.0 * nf::kIkPi / 180.0;
+            const double S[3] = {}, E0[3] = {0.0, -l1, 0.0}, H0[3] = {0.0, -l1 - l2 * std::cos(bend), l2 * std::sin(bend)};
+            const double T[3] = {0.20, -0.35, 0.10}, ref[3] = {0.0, -1.0, 0.0}, row[3] = {-std::cos(angle), 0.0, std::sin(angle)};
+            const nf::IkTwoBone tb = nf::ikTwoBoneFrame(S, T, l1, l2, ref, 40.0, 170.0);
+            double E[3], geo[3], hingeAfter[3];
+            tb.elbowAt(0.7, E);
+            const bool haveGeo = nf::ikHingeAnimated(S, E0, H0, geo);
+            const bool useRow = nf::ikUseHingeRow(true, haveGeo, 35.0, false);
+            const nf::HingeSwings hs = nf::ikHingeSwings(S, E0, H0, E, tb.hand, useRow ? row : nullptr, nullptr);
+            nf::ikRowRot(hs.n1, hs.R2, hingeAfter);
+            bentRowKeepsHinge = bentRowKeepsHinge && tb.ok && !tb.limited && haveGeo && useRow && hs.ok && hs.source == 3 &&
+                               distMm(hingeAfter, hs.n1) < 1e-6;
+        }
+        check(bentRowKeepsHinge,
+              "F126: above the near-straight window (2.871 and 30 degrees), an unarmed learned-row solve retains its hinge-only second swing");
     }
 }
 

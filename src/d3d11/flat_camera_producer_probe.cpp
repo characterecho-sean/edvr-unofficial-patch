@@ -9,6 +9,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/module_name.h"
 #include "../common/runtime_profile.h"
@@ -89,8 +90,9 @@ std::atomic<uintptr_t> g_uploadForward{0};
 void* g_veh = nullptr;
 bool g_holdNoted = false; // frame thread only: the held-open note, said once
 
-bool sehCheck(uintptr_t at, const uint8_t* expected, size_t bytes) noexcept {
-    __try { return std::memcmp(reinterpret_cast<const void*>(at), expected, bytes) == 0; }
+// The bytes at `at`, read under __try: false when the page is unreadable (the caller compares them with gamePinMatches).
+bool sehReadBytes(uintptr_t at, uint8_t* got, size_t bytes) noexcept {
+    __try { std::memcpy(got, reinterpret_cast<const void*>(at), bytes); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -387,9 +389,29 @@ void flatCameraProducerProbeFrame(uint64_t frame) {
         return;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(game);
-    if (!sehCheck(base + kUploadRva, kUploadPrologue, sizeof(kUploadPrologue))) {
-        g_probe.failReason = "upload helper prologue mismatch at this build (not the Ghidra-verified shape)";
-        Log::get().note("flat camera producer: %s; the probe stands down", g_probe.failReason);
+    // The upload helper in the running build (src\common\game_build.h): kUploadRva itself on build 334925; on an unknown build the
+    // address the signature resolver found, or 0 when it found none.
+    const bool knownBuild = gameBuildKnown();
+    const uintptr_t uploadRva = gameRva(static_cast<uint32_t>(kUploadRva));
+    if (!uploadRva) {
+        g_probe.failReason = "an unknown build, and the upload helper was not found by signature";
+        Log::get().note("flat camera producer: %s, and the upload helper (0x51B740 in build 334925) was not found by signature; "
+                        "the probe stands down", gameBuildText());
+        g_probe.relay = reinterpret_cast<uint8_t*>(1); // do not retry
+        return;
+    }
+    uint8_t got[sizeof(kUploadPrologue)] = {};
+    if (!sehReadBytes(base + uploadRva, got, sizeof(got)) ||
+        !gamePinMatches(static_cast<uint32_t>(kUploadRva), got, kUploadPrologue, sizeof(got))) {
+        if (knownBuild) {
+            g_probe.failReason = "upload helper prologue mismatch at this build (not the Ghidra-verified shape)";
+            Log::get().note("flat camera producer: %s; the probe stands down", g_probe.failReason);
+        } else {
+            g_probe.failReason = "found by signature, but the upload helper's prologue is not build 334925's";
+            Log::get().note("flat camera producer: %s: the upload helper was found by signature at 0x%llX, but its sixteen prologue "
+                            "bytes are not build 334925's outside the masked fields; the probe stands down",
+                            gameBuildText(), static_cast<unsigned long long>(uploadRva));
+        }
         g_probe.relay = reinterpret_cast<uint8_t*>(1); // do not retry
         return;
     }
@@ -406,10 +428,10 @@ void flatCameraProducerProbeFrame(uint64_t frame) {
             return;
         }
     }
-    g_probe.relay = allocateRelay(base + kUploadRva);
+    g_probe.relay = allocateRelay(base + uploadRva);
     if (!g_probe.relay) { g_probe.failReason = "relay allocation failed (no free memory within 2 GB)"; return; }
     buildRelay(g_probe.relay, &g_gate, &uploadRelay);
-    if (!g_probe.hook.install(reinterpret_cast<void*>(base + kUploadRva), g_probe.relay, nullptr,
+    if (!g_probe.hook.install(reinterpret_cast<void*>(base + uploadRva), g_probe.relay, nullptr,
                               "camera-producer-upload", &prepareRelay, &g_probe)) {
         VirtualFree(g_probe.relay, 0, MEM_RELEASE); g_probe.relay = reinterpret_cast<uint8_t*>(1);
         g_probe.failReason = "CodeHook refused it (its own line above names why)";
@@ -418,9 +440,12 @@ void flatCameraProducerProbeFrame(uint64_t frame) {
     }
     g_probe.installed.store(true, std::memory_order_release);
     g_gate.store(1, std::memory_order_release);
+    if (!knownBuild)
+        Log::get().note("flat camera producer: the upload helper (0x51B740 in build 334925) was found by signature on %s at 0x%llX",
+                        gameBuildText(), static_cast<unsigned long long>(uploadRva));
     Log::get().note("flat camera producer: upload hook installed at EliteDangerous64.exe+0x%llX; "
                     "scene-sized uploads now name their staging block, first one requests a camera-row write watch",
-                    static_cast<unsigned long long>(kUploadRva));
+                    static_cast<unsigned long long>(uploadRva));
 }
 
 } // namespace edvr

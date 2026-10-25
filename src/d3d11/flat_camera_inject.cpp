@@ -10,6 +10,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "flat_camera_ownership.h"
@@ -168,6 +169,7 @@ struct InjectState {
     FlatCameraSignatureTable signatures;
     std::atomic<bool> kind3Seen{false}; // a kind-3 camera reached the detour this frame
     uintptr_t gameBase = 0;    // EliteDangerous64.exe, for the census's call-site offsets
+    uint64_t knownCallers[4] = {}; // kFlatCameraKnownCallers in the running build (gameRva, at install); 0 = not found
     uint64_t frame = 0;
     // No call-path I/O, ever: the 2026-09-28 20:09 crash (a null-read downstream
     // in the camera pipeline, sentinel-caught) came with the detour doing
@@ -240,8 +242,9 @@ std::atomic<uintptr_t> g_lastIncomingR11{0};
 uintptr_t g_stubB = 0;
 uint32_t g_stubATrampOfs = 0;
 
-bool sehCheck(uintptr_t at, const uint8_t* expected, size_t bytes) noexcept {
-    __try { return std::memcmp(reinterpret_cast<const void*>(at), expected, bytes) == 0; }
+// The bytes at `at`, read under __try: false when the page is unreadable (the caller compares them with gamePinMatches).
+bool sehReadBytes(uintptr_t at, uint8_t* got, size_t bytes) noexcept {
+    __try { std::memcpy(got, reinterpret_cast<const void*>(at), bytes); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -621,7 +624,7 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
     {
         uint64_t ret = 0;
         if (g_inject.gameBase && sehReadU64(r0, &ret) && ret > g_inject.gameBase) callerRva = ret - g_inject.gameBase;
-        g_inject.census.noteCaller(callerRva);
+        g_inject.census.noteCaller(callerRva, g_inject.knownCallers);
     }
     flatStationaryCameraRefresh(camera, ctx, callNo, callerRva, readable ? kind : 0);
     // The phase, in RENDER pixels from the validated resolve plan (R5).
@@ -799,13 +802,53 @@ void installRefreshHook(bool observe, const char* vrAsked = nullptr) {
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(game);
     g_inject.gameBase = base; // before the hook exists: the detour reads it
-    if (!sehCheck(base + kRefreshRva, kRefreshPrologue, sizeof(kRefreshPrologue))) {
-        g_inject.failReason = "refresh prologue mismatch at this build (not the Ghidra-verified shape)";
-        Log::get().note("flat camera inject: %s; standing down", g_inject.failReason);
+    // The hook site in the running build (src\common\game_build.h): kRefreshRva itself on build 334925; on an unknown build the same
+    // offset in the refresh the signature resolver found, or 0 when it found none.
+    const bool knownBuild = gameBuildKnown();
+    const uintptr_t refreshRva = gameRva(static_cast<uint32_t>(kRefreshRva));
+    if (!refreshRva) {
+        g_inject.failReason = "an unknown build, and the view-constant refresh was not found by signature";
+        Log::get().note("flat camera inject: %s, and the view-constant refresh's hook site (0x592300 in build 334925) was not "
+                        "found by signature; the refresh hook stands down", gameBuildText());
         g_inject.relay = reinterpret_cast<uint8_t*>(1); // do not retry
         return;
     }
-    g_inject.relay = allocateRelay(base + kRefreshRva);
+    uint8_t got[sizeof(kRefreshPrologue)] = {};
+    if (!sehReadBytes(base + refreshRva, got, sizeof(got)) ||
+        !gamePinMatches(static_cast<uint32_t>(kRefreshRva), got, kRefreshPrologue, sizeof(got))) {
+        if (knownBuild) {
+            g_inject.failReason = "refresh prologue mismatch at this build (not the Ghidra-verified shape)";
+            Log::get().note("flat camera inject: %s; standing down", g_inject.failReason);
+        } else {
+            g_inject.failReason = "found by signature, but the refresh's hook-site bytes are not build 334925's";
+            Log::get().note("flat camera inject: %s: the view-constant refresh's hook site was found by signature at 0x%llX, but its "
+                            "sixteen bytes are not build 334925's outside the masked fields; the refresh hook stands down",
+                            gameBuildText(), static_cast<unsigned long long>(refreshRva));
+        }
+        g_inject.relay = reinterpret_cast<uint8_t*>(1); // do not retry
+        return;
+    }
+    // The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the game's own instructions
+    // that carry, unmasked, the camera fields this hook writes (the bounds +0x28C/+0x290, the flag word +0x250) and reads (the kind +0x264,
+    // aspect +0x260, vertical fov +0x280, near +0x254, far +0x258). The refresh itself: test byte [r8+0x250],8 (0x592344), then lea
+    // rcx,[r8+0x20] (0x59234E) -- the finalizers take camera+0x20, so their displacements are 0x20 less. The projection builder (the
+    // finalizer of bit 4, 0x4F30F0's body): the kind at +0x244 (0x4F3135), near +0x234 (0x4F312D), far +0x238 (0x4F3208), fov +0x260
+    // (0x4F3422), aspect +0x240 (0x4F343A), the bounds +0x270 and +0x26C (0x4F3499, 0x4F34A1), and its clear of bit 4 at +0x230
+    // (0x4F3845). On an unknown build each must be found, or the refresh hook stands down.
+    static constexpr uint32_t kCameraWitnessRvas[10] = {0x592344, 0x59234E, 0x4F3135, 0x4F312D, 0x4F3208,
+                                                        0x4F3422, 0x4F343A, 0x4F3499, 0x4F34A1, 0x4F3845};
+    uint32_t missingWitness = 0;
+    if (!gameRvasFound(kCameraWitnessRvas, 10, &missingWitness)) {
+        g_inject.failReason = "an unknown build, and a camera field witness was not found by signature";
+        Log::get().note("flat camera inject: %s, and the camera field witness 0x%X (in build 334925) was not found by signature, so the "
+                        "camera fields the hook writes are not proven on this build; the refresh hook stands down", gameBuildText(),
+                        missingWitness);
+        g_inject.relay = reinterpret_cast<uint8_t*>(1); // do not retry
+        return;
+    }
+    // The census's call sites (diagnostic only: one not found counts as other).
+    for (size_t i = 0; i < 4; ++i) g_inject.knownCallers[i] = gameRva(kFlatCameraKnownCallers[i]);
+    g_inject.relay = allocateRelay(base + refreshRva);
     if (!g_inject.relay) { g_inject.failReason = "relay allocation failed (no free memory within 2 GB)"; return; }
     // TLS placement for stubB's walk: _tls_index is process-constant
     // after CRT init, and the struct's offset from this thread's TLS
@@ -832,7 +875,7 @@ void installRefreshHook(bool observe, const char* vrAsked = nullptr) {
                                  &g_lastIncomingR11);
     buildStubB(g_inject.relay + kStubBOffset, &refreshPost, _tls_index,
                static_cast<uint32_t>(tlsStruct - tlsBase));
-    if (!g_inject.hook.install(reinterpret_cast<void*>(base + kRefreshRva), g_inject.relay, nullptr,
+    if (!g_inject.hook.install(reinterpret_cast<void*>(base + refreshRva), g_inject.relay, nullptr,
                                "camera-inject-refresh", &prepareRelay, &g_inject)) {
         VirtualFree(g_inject.relay, 0, MEM_RELEASE); g_inject.relay = reinterpret_cast<uint8_t*>(1);
         g_inject.failReason = "CodeHook refused it (its own line above names why)";
@@ -841,19 +884,22 @@ void installRefreshHook(bool observe, const char* vrAsked = nullptr) {
     }
     g_inject.installed.store(true, std::memory_order_release);
     g_gate.store(g_inject.paused.load(std::memory_order_acquire) ? 0 : 1, std::memory_order_release);
+    if (!knownBuild)
+        Log::get().note("flat camera inject: the view-constant refresh's hook site (0x592300 in build 334925) was found by signature "
+                        "on %s at 0x%llX", gameBuildText(), static_cast<unsigned long long>(refreshRva));
     if (vrAsked) {
         Log::get().note("flat camera inject: refresh hook installed at EliteDangerous64.exe+0x%llX for the VR world route "
                         "(asked for by %s): kind-3 screen-view cameras get the world's sub-pixel phase applied transiently at "
                         "the source while the route injects; kinds 4 and 5 (the eyes) are never injected",
-                        static_cast<unsigned long long>(kRefreshRva), vrAsked);
+                        static_cast<unsigned long long>(refreshRva), vrAsked);
     } else if (observe) {
         Log::get().note("flat camera inject: refresh hook installed at EliteDangerous64.exe+0x%llX in OBSERVE-ONLY mode "
                         "(the VR camera census): no camera is ever written",
-                        static_cast<unsigned long long>(kRefreshRva));
+                        static_cast<unsigned long long>(refreshRva));
     } else {
         Log::get().note("flat camera inject: refresh hook installed at EliteDangerous64.exe+0x%llX; "
                         "kind-3 cameras now get the temporal phase applied transiently at the source",
-                        static_cast<unsigned long long>(kRefreshRva));
+                        static_cast<unsigned long long>(refreshRva));
     }
     // Readback verification: the relay stub, its callback literal, the
     // trampoline's and stubA's first bytes, so a later crash can be

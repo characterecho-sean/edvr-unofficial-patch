@@ -230,7 +230,11 @@ REM held to; focus_watch is the guard run_jobs holds every rig to (no window, no
 REM console, no keyboard-focus move) and its self-test starts it on real
 REM processes; check_status_blocks (plain) checks the docs' Status blocks;
 REM check_config_contract (plain) holds the keys the code reads, edvr.ini and the
-REM log text to one another -- it reads only src\ and edvr.ini.
+REM log text to one another -- it reads only src\ and edvr.ini; hook_signatures
+REM audit (issue 124) fails the build when a hook outside the exact-only files
+REM uses a game address raw instead of through gameRva/gamePinMatches, keys on
+REM the PE identity itself, or names an address the signature table cannot place
+REM -- it reads only src\.
 python tools\run_jobs.py ^
     --gate "tools\fetch_openxr_loader.py --self-test" ^
     --gate "tools\fetch_xess.py --self-test" ^
@@ -244,6 +248,9 @@ python tools\run_jobs.py ^
     --gate "tools\build_lock.py --self-test" ^
     --gate "tools\worktree.py --self-test" ^
     --gate "tools\steam_library.py --self-test" ^
+    --gate "tools\hook_signatures.py --self-test" ^
+    --gate "tools\hook_signatures.py audit --src src" ^
+    --gate "tools\archive_game_exe.py --self-test" ^
     --gate "tools\release_credits.py --self-test" ^
     --gate "tools\flash_patch_residual.py --self-test" ^
     --gate "tools\check_status_blocks.py --self-test" ^
@@ -633,7 +640,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
-    "src\common\frame_flag.cpp" ^
+    "src\common\frame_flag.cpp" "src\common\game_build.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
@@ -1613,7 +1620,7 @@ if not exist "%OBJ%\vrworldroutegpu" mkdir "%OBJ%\vrworldroutegpu"
     /Fe"%BUILD%\vr_world_route_gpu_test.exe" "tools\vr_world_route_gpu_test\vr_world_route_gpu_test.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" "src\common\iniedit.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vr world route GPU test build failed & exit /b 1 )
 "%BUILD%\vr_world_route_gpu_test.exe" --dry-run || exit /b 1
@@ -1654,6 +1661,7 @@ if not exist "%OBJ%\flat_mono_resolve_test" mkdir "%OBJ%\flat_mono_resolve_test"
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\flat_mono_resolve_test\\" ^
     /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
     "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\common\iniedit.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
@@ -2444,6 +2452,24 @@ if not exist "%OBJ%\optimizedstation" mkdir "%OBJ%\optimizedstation"
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: optimized station test build failed & exit /b 1 )
 "%BUILD%\optimized_station_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_game_build_test
+echo [edvr] === game_build_test.exe ===
+REM The runtime signature resolver (src\common\game_build_core.h, issue 124) against its reference, tools\hook_signatures.py. Always: the
+REM self-test's synthetic exes (hook_signatures.py fixture writes them, their table as C++ and Python's answers) mapped as the loader maps
+REM an image, every target's answer equal to Python's, the named cases, the masked pin compare and an unreadable page. When the archived
+REM executables are at the main checkout's analysis\ (or EDVR_ANALYSIS_DIR): each mapped and resolved with the committed table against
+REM tools\game_build_test\expect_*.txt, 0 WRONG and Python's answer per target, and the known build resolving to itself; without them
+REM it prints "skipped: no archived exes" and passes. No DLL and no game.
+if not exist "%OBJ%\gamebuild" mkdir "%OBJ%\gamebuild"
+python tools\hook_signatures.py fixture --out-dir "%OBJ%\gamebuild" >nul || exit /b 1
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%OBJ%\gamebuild" /Fo"%OBJ%\gamebuild\\" ^
+    /Fe"%BUILD%\game_build_test.exe" "tools\game_build_test\game_build_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: game build test build failed & exit /b 1 )
+"%BUILD%\game_build_test.exe" --self-test "%OBJ%\gamebuild" "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_exposure_chain_test

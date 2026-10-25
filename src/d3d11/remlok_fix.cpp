@@ -60,6 +60,7 @@ std::atomic<bool> g_axisKeyOn{false};   // F121b (TEMPORARY, live): fix.native_o
 bool  g_axisKeyKnown = false, g_axisKeyLast = false;
 bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure; F121c: said when the test key is on, in outer mode)
 std::atomic<bool> g_axisSelfOff{false};   // F121c: the replacement turned itself off (non-finite HDR after it); cleared when the key is turned off
+uint64_t g_axisAttempt = 0;             // render thread: a key-off edge retires every outstanding census sample from the previous attempt
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
 inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
@@ -199,7 +200,10 @@ void remlokConfigure(Config& cfg) {
     {
         const bool keyOn = cfg.getString("fix.native_on_foot_visor_axis", "off") == "on";
         g_axisKeyOn.store(keyOn, std::memory_order_relaxed);
-        if (!keyOn) g_axisSelfOff.store(false, std::memory_order_relaxed);   // F121c: off and on again is the way to try it once more
+        if (!keyOn) {
+            if (g_axisKeyKnown && g_axisKeyLast) ++g_axisAttempt;
+            g_axisSelfOff.store(false, std::memory_order_relaxed);   // off and on again retries without an older readback turning it off again
+        }
         if (!g_axisKeyKnown || keyOn != g_axisKeyLast) {
             g_axisKeyKnown = true;
             g_axisKeyLast = keyOn;
@@ -500,6 +504,7 @@ struct CensusGpu {
     uint32_t copyW[2] = {}, copyH[2] = {};
     struct Slot {
         bool inFlight = false, keyOn = false, shifted = false;   // F121c: shifted = taken right after a draw through the replacement vertex shader
+        uint64_t attempt = 0;
         uint32_t seq = 0, w = 0, h = 0, age = 0;
     };
     Slot slot[2][3];
@@ -662,8 +667,8 @@ void censusPoll(ID3D11DeviceContext* ctx) {
                 ++g_cenWin.skipped;
                 continue;
             }
-            censusAdd(e, c, sl.keyOn);
-            if (visorcensus::selfOffVerdict(sl.shifted, c) && !g_axisSelfOff.exchange(true, std::memory_order_relaxed)) {   // F121c: said once
+            if (sl.attempt == g_axisAttempt) censusAdd(e, c, sl.keyOn);
+            if (visorcensus::selfOffVerdict(sl.shifted, c, sl.attempt, g_axisAttempt) && !g_axisSelfOff.exchange(true, std::memory_order_relaxed)) {   // F121c: said once
                 char line[420];
                 visoraxis::formatSelfOff(line, sizeof(line), c.nonFinite, c.taps, e);
                 Log::get().note("%s", line);
@@ -802,6 +807,7 @@ void censusRun(ID3D11DeviceContext* ctx) {
     if (savedCb) savedCb->Release();
 
     sl.inFlight = true;
+    sl.attempt = g_axisAttempt;
     sl.shifted = g.pendingShifted;
     sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);
     sl.seq = g.seq;

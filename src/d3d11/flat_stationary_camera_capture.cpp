@@ -8,9 +8,11 @@
 #include <cstdio>
 #include <cstring>
 #include <intrin.h>
+#include <iterator>
 #include <new>
 
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "flat_stationary_camera_core.h"
@@ -21,10 +23,12 @@ namespace edvr { namespace {
 // Temporary F1 source-topology capture for the verified Steam executable.
 // 2874290 is a normal three-argument, void Win64 function. The hook only
 // observes its source and stack-local helper, and calls the original once.
+// On another build every address here and in stationcam::kGameRvas comes from
+// the signature resolver (src\common\game_build.h), or the capture stands down.
 constexpr uintptr_t kRendererRva = 0x2874290;
 constexpr uint8_t kPrologue[15] = {0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xEC,0x20};
-constexpr uint32_t kPeTimestamp = 1792704584u;
-constexpr uint32_t kPeImageSize = 104906752u;
+constexpr uintptr_t kMainViewCallerRva = 0x281D259; // the MainView root's renderer call returns here
+constexpr uint32_t kHookRvas[] = {static_cast<uint32_t>(kRendererRva), static_cast<uint32_t>(kMainViewCallerRva)};
 constexpr unsigned kSourceSlots = 16, kRefreshSlots = 32;
 constexpr unsigned kReportRows = 1024;
 constexpr uint64_t kCaptureFrames = 120;
@@ -34,15 +38,8 @@ bool sehCopy(void*, uintptr_t at, void* out, size_t size) noexcept {
     __try { std::memcpy(out, reinterpret_cast<const void*>(at), size); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-bool peMatches(uintptr_t base) noexcept {
-    __try {
-        auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 4096) return false;
-        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.TimeDateStamp == kPeTimestamp &&
-            nt->OptionalHeader.SizeOfImage == kPeImageSize;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
+// base + an RVA gameRva returned, 0 where it found none.
+uintptr_t gameAddress(uintptr_t base, uintptr_t resolved) noexcept { return resolved ? base + resolved : 0; }
 
 struct SourceSlot {
     std::atomic<uintptr_t> key{0};
@@ -65,6 +62,9 @@ struct State {
     std::atomic<uintptr_t> gate{0};
     std::atomic<uintptr_t> forward{0};
     std::atomic<uintptr_t> gameBase{0};
+    // The resolved addresses (install fills them before it stores gameBase): the decoder's, the MainView call site, the image size.
+    stationcam::Game game;
+    uintptr_t mainViewCaller = 0, imageSize = 0;
     std::atomic<bool> profileDropped{false};
     std::atomic<uint32_t> inflight{0}, sourceOverflow{0}, refreshOverflow{0};
     std::atomic<uint64_t> captures{0}, refreshes{0};
@@ -145,7 +145,8 @@ void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_
     if (!chosen) { s.sourceOverflow.fetch_add(1, std::memory_order_relaxed); return; }
     auto& out = chosen->snapshot;
     out.owner = owner; out.source = source; out.helper = helper;
-    out.callerRva = stationcam::rva(caller, base);
+    out.caller = caller;
+    out.callerRva = stationcam::rva(caller, base, s.imageSize);
     out.sourceBeforeRead = beforeRead;
     if (beforeRead) std::memcpy(out.sourceBefore, before, sizeof(out.sourceBefore));
     out.sourceAfterRead = sehCopy(nullptr, source + 0x70, out.sourceAfter, sizeof(out.sourceAfter));
@@ -158,7 +159,7 @@ void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_
         std::memcmp(out.sourceAfter, out.helperAfter, sizeof(out.sourceAfter)) != 0) {
         out.consistent = false; stationcam::fail(out, "helper-copy-mismatch");
     }
-    stationcam::capture(&sehCopy, nullptr, base, out);
+    stationcam::capture(&sehCopy, nullptr, s.game, out);
     if (s.armFrame != epoch) { out.consistent = false; stationcam::fail(out, "frame-overlap"); }
     chosen->ready.store(true, std::memory_order_release);
     s.captures.fetch_add(1, std::memory_order_relaxed);
@@ -192,23 +193,51 @@ bool install(State& s) noexcept {
     const HMODULE game = GetModuleHandleW(L"EliteDangerous64.exe");
     if (!game) { s.waitReason = "game-module-unavailable"; return false; }
     const uintptr_t base = reinterpret_cast<uintptr_t>(game);
-    uint8_t found[sizeof(kPrologue)]{};
-    if (!peMatches(base) || !sehCopy(nullptr, base + kRendererRva, found, sizeof(found)) ||
-        std::memcmp(found, kPrologue, sizeof(found)) != 0) {
-        s.waitReason = "verified-exe-or-prologue-mismatch"; return false;
+    // The addresses in the running build (src\common\game_build.h): build 334925's own; on an unknown build each the signature
+    // resolver found, and the capture stands down unless it found every one.
+    uint32_t imageSize = 0, missing = 0;
+    const bool identityRead = gameBuildIdentity(nullptr, &imageSize);
+    const bool knownBuild = identityRead && gameBuildKnown();
+    const bool allFound = gameRvasFound(kHookRvas, std::size(kHookRvas), &missing) &&
+        gameRvasFound(stationcam::kGameRvas, stationcam::kGameAddresses, &missing);
+    if (!allFound) {
+        Log::get().note("flat stationary camera: %s, and 0x%X in build 334925 (an address the renderer capture needs) was not found "
+                        "by signature; the capture stands down", gameBuildText(), static_cast<unsigned>(missing));
+        s.waitReason = "not-found-by-signature"; return false;
     }
+    const uintptr_t rendererRva = gameRva(static_cast<uint32_t>(kRendererRva));
+    uint8_t found[sizeof(kPrologue)]{};
+    if (!sehCopy(nullptr, base + rendererRva, found, sizeof(found)) ||
+        !gamePinMatches(static_cast<uint32_t>(kRendererRva), found, kPrologue, sizeof(found))) {
+        if (knownBuild) { s.waitReason = "verified-exe-or-prologue-mismatch"; return false; }
+        Log::get().note("flat stationary camera: %s: the renderer was found by signature at 0x%llX, but its fifteen prologue bytes are "
+                        "not build 334925's outside the masked fields; the capture stands down",
+                        gameBuildText(), static_cast<unsigned long long>(rendererRva));
+        s.waitReason = "prologue-mismatch-after-signature"; return false;
+    }
+    for (unsigned i = 0; i < stationcam::kGameAddresses; ++i) s.game.at[i] = gameAddress(base, gameRva(stationcam::kGameRvas[i]));
+    s.mainViewCaller = gameAddress(base, gameRva(static_cast<uint32_t>(kMainViewCallerRva)));
+    // The bound on the RVAs the log prints: build 334925's, as it always was; another build's SizeOfImage.
+    constexpr uintptr_t kKnownLogBound = 0x6000000;
+    s.imageSize = knownBuild ? kKnownLogBound : imageSize;
+    if (!s.game.found() || !s.mainViewCaller || !s.imageSize) { s.waitReason = "not-found-by-signature"; return false; }
     s.gameBase.store(base, std::memory_order_release);
-    s.relay = allocateRelay(base + kRendererRva);
+    s.relay = allocateRelay(base + rendererRva);
     if (!s.relay) { s.waitReason = "relay-allocation-failed"; return false; }
     buildRelay(s.relay, &s.gate, reinterpret_cast<void*>(&rendererDetour));
-    if (!s.hook.install(reinterpret_cast<void*>(base + kRendererRva), s.relay, nullptr,
+    if (!s.hook.install(reinterpret_cast<void*>(base + rendererRva), s.relay, nullptr,
                         "flat-stationary-camera", &prepareRelay, &s)) {
         VirtualFree(s.relay, 0, MEM_RELEASE);
         s.relay = nullptr;
         s.waitReason = "CodeHook-refused"; return false;
     }
+    if (!knownBuild)
+        Log::get().note("flat stationary camera: the renderer (0x2874290 in build 334925) and the capture's %u other addresses were "
+                        "found by signature on %s; the renderer is at 0x%llX",
+                        static_cast<unsigned>(std::size(kHookRvas) - 1 + stationcam::kGameAddresses), gameBuildText(),
+                        static_cast<unsigned long long>(rendererRva));
     Log::get().note("flat stationary camera: passive renderer hook installed at +0x%llX; no game getters called or camera writes made",
-                    static_cast<unsigned long long>(kRendererRva));
+                    static_cast<unsigned long long>(rendererRva));
     return true;
 }
 
@@ -235,10 +264,10 @@ void report(State& s, uint64_t frame) noexcept {
         if (slot.snapshot.validSource) ++sourceValid;
         if (slot.snapshot.complete && slot.snapshot.consistent) ++sourceComplete;
         if (slot.snapshot.complete && slot.snapshot.consistent && slot.snapshot.stageCount &&
-            slot.snapshot.stages[0].stackVtable == s.gameBase.load() + 0x5189370 &&
+            slot.snapshot.stages[0].stackVtable == s.game.at[stationcam::kStackVtable] &&
             slot.snapshot.stages[0].nameRead &&
             std::strcmp(slot.snapshot.stages[0].stackName, "MainView") == 0 &&
-            slot.snapshot.callerRva == 0x281D259) ++mainView;
+            slot.snapshot.caller == s.mainViewCaller) ++mainView;
         if (slot.snapshot.stageCount && slot.snapshot.stages[0].nameRead &&
             std::strcmp(slot.snapshot.stages[0].stackName, "MainView") == 0) {
             mainPlaced += slot.snapshot.placedSeen;
@@ -309,7 +338,7 @@ void report(State& s, uint64_t frame) noexcept {
             const auto& z = q.stages[j];
             Log::get().note("flat stationary stage[%u,%u]: edge=%c parent=%d C=%p B=%p B-vt=+0x%llX name=%s base=%p nested-parent=%p mode=%u activities=%llu inactive-nested-omitted=%u pose-changed=%u output=(%.7g %.7g %.7g) inherited=(%.7g %.7g %.7g) output-axis0=(%.7g %.7g %.7g) inherited-axis0=(%.7g %.7g %.7g) valid=%u/%u",
                 i,j,z.edge,z.parent,reinterpret_cast<void*>(z.child),reinterpret_cast<void*>(z.stack),
-                static_cast<unsigned long long>(stationcam::rva(z.stackVtable,s.gameBase.load())),
+                static_cast<unsigned long long>(stationcam::rva(z.stackVtable,s.gameBase.load(),s.imageSize)),
                 z.nameRead ? z.stackName : "UNKNOWN", reinterpret_cast<void*>(z.predecessor),
                 reinterpret_cast<void*>(z.nestedParent),z.mode,static_cast<unsigned long long>(z.activityCount),z.inactiveNestedOmitted,
                 z.outputRead && z.baseRead && std::memcmp(z.outputPose,z.basePose,sizeof(z.outputPose)) != 0 ? 1u : 0u,
@@ -323,11 +352,11 @@ void report(State& s, uint64_t frame) noexcept {
                 const auto& a = z.activities[k];
                 Log::get().note("flat stationary activity[%u,%u,%u]: iface=%p vt=+0x%llX concrete-vt=+0x%llX weight-fn=+0x%llX weight=%s%.7g state-fn=+0x%llX state=%p pose=%s(%.7g %.7g %.7g) name=%s",
                     i,j,k,reinterpret_cast<void*>(a.iface),
-                    static_cast<unsigned long long>(stationcam::rva(a.vtable,s.gameBase.load())),
-                    static_cast<unsigned long long>(stationcam::rva(a.concreteVtable,s.gameBase.load())),
-                    static_cast<unsigned long long>(stationcam::rva(a.weightFn,s.gameBase.load())),
+                    static_cast<unsigned long long>(stationcam::rva(a.vtable,s.gameBase.load(),s.imageSize)),
+                    static_cast<unsigned long long>(stationcam::rva(a.concreteVtable,s.gameBase.load(),s.imageSize)),
+                    static_cast<unsigned long long>(stationcam::rva(a.weightFn,s.gameBase.load(),s.imageSize)),
                     a.weightKnown ? "" : "UNKNOWN:",a.weight,
-                    static_cast<unsigned long long>(stationcam::rva(a.stateFn,s.gameBase.load())),
+                    static_cast<unsigned long long>(stationcam::rva(a.stateFn,s.gameBase.load(),s.imageSize)),
                     reinterpret_cast<void*>(a.state),a.poseRead?"":"UNKNOWN:",
                     a.pose[12],a.pose[13],a.pose[14],a.nameRead?a.name:"UNKNOWN");
             }
@@ -341,9 +370,9 @@ void report(State& s, uint64_t frame) noexcept {
                 d.recordRead?"":"UNKNOWN:",reinterpret_cast<void*>(d.record),
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.provider),
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.providerVtable),
-                static_cast<unsigned long long>(stationcam::rva(d.providerVtable,s.gameBase.load())),
+                static_cast<unsigned long long>(stationcam::rva(d.providerVtable,s.gameBase.load(),s.imageSize)),
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.providerFn),
-                static_cast<unsigned long long>(stationcam::rva(d.providerFn,s.gameBase.load())),
+                static_cast<unsigned long long>(stationcam::rva(d.providerFn,s.gameBase.load(),s.imageSize)),
                 d.identityComplete?1u:0u,
                 d.identityComplete?"":"UNVALIDATED:",d.providerPresent?1u:0u,
                 d.identityComplete?"":"UNVALIDATED:",d.providerKnown?1u:0u,d.reason,
@@ -364,9 +393,9 @@ void report(State& s, uint64_t frame) noexcept {
                 d.identityComplete?"":"UNVALIDATED:",d.overrideHandle,
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideObject),
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideVtable),
-                static_cast<unsigned long long>(stationcam::rva(d.overrideVtable,s.gameBase.load())),
+                static_cast<unsigned long long>(stationcam::rva(d.overrideVtable,s.gameBase.load(),s.imageSize)),
                 d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideFn),
-                static_cast<unsigned long long>(stationcam::rva(d.overrideFn,s.gameBase.load())),
+                static_cast<unsigned long long>(stationcam::rva(d.overrideFn,s.gameBase.load(),s.imageSize)),
                 d.eligibilityKnown?"":"UNKNOWN:",d.overrideEligible?1u:0u);
             const bool recordAbsent = d.identityComplete && d.recordRead && !d.record;
             logPlacedMatrix(i,d.stage,d.activity,"E+20-local",d.local,!recordAbsent,d.localRead);

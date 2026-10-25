@@ -48,16 +48,30 @@ constexpr uintptr_t kNestedName = 0x29000000, kNestedFirst = 0x30000000;
 constexpr uintptr_t kPlacedRecord = 0x31000000, kProvider = 0x32000000;
 constexpr uintptr_t kConfig = 0x33000000, kOverride = 0x34000000, kTarget = 0x35000000;
 
+// The decoder's addresses (Game). Build 334925: base + kGameRvas, what the glue's gameRva returns there. g_moved stands in for an
+// unknown build, where the resolver found each address elsewhere (entry i moved by (i + 1) * 0x40; one RVA, one address).
+bool g_moved = false;
+uintptr_t A(uint32_t rva) {
+    for (unsigned i = 0; i < kGameAddresses; ++i)
+        if (kGameRvas[i] == rva) return kBase + rva + (g_moved ? (i + 1) * 0x40u : 0u);
+    return kBase + rva;
+}
+Game gameAt() {
+    Game g;
+    for (unsigned i = 0; i < kGameAddresses; ++i) g.at[i] = A(kGameRvas[i]);
+    return g;
+}
+
 Memory fixture() {
     Memory m;
-    m.put(kC, kBase + 0x5189070);
-    m.put(kC + 0x10, kBase + 0x5189078);
+    m.put(kC, A(0x5189070));
+    m.put(kC + 0x10, A(0x5189078));
     m.put(kC + 0x30, kB);
     m.put(kC + 0x40, kB + 0xB8);
     m.put(kC + 0x58, uint64_t{1});
     m.put(kC + 0x60, kRoster);
     m.put(kC + 0x68, uint32_t{0});
-    m.put(kB, kBase + 0x5189370);
+    m.put(kB, A(0x5189370));
     m.put(kB + 0x20, kName);
     for (unsigned i = 0; i < 11; ++i) m.put(kB + 0x28 + 8*i, i == 10 ? kC : uintptr_t{0});
     m.put(kName, uint64_t{8});
@@ -70,8 +84,8 @@ Memory fixture() {
     m.putBytes(kC + 0x70 + 0x40, poseData, sizeof(poseData));
     m.put(kRoster, kActivity);
     m.put(kActivity, kVtable);
-    m.put(kVtable + 0x20, kBase + 0x8BEA20);
-    m.put(kVtable + 0x28, kBase + 0x5294E0);
+    m.put(kVtable + 0x20, A(0x8BEA20));
+    m.put(kVtable + 0x28, A(0x5294E0));
     m.put(kActivity - 4, uint8_t{1});
     m.put(kActivity + 8, kActivityName);
     m.put(kActivity - 0x20, kBase + 0x12345);
@@ -85,12 +99,12 @@ Memory nestedFixture(float weight) {
     Memory m = fixture();
     const uintptr_t nestedActivity = kNestedStack + 0x98;
     m.put(kRoster, nestedActivity);
-    m.put(nestedActivity, kBase + 0x5189A90);
-    m.put(kBase + 0x5189A90 + 0x20, kBase + 0x108BE80);
-    m.put(kBase + 0x5189A90 + 0x28, kBase + 0x108BA2C);
+    m.put(nestedActivity, A(0x5189A90));
+    m.put(A(0x5189A90) + 0x20, A(0x108BE80));
+    m.put(A(0x5189A90) + 0x28, A(0x108BA2C));
     m.put(nestedActivity - 0xA0, kNestedConfig);
     m.put(kNestedConfig + 0x34, weight);
-    m.put(kNestedStack, kBase + 0x5189A18);
+    m.put(kNestedStack, A(0x5189A18));
     m.put(kNestedStack + 0x20, kNestedName);
     m.put(kNestedStack + 0x1B8, kC);
     m.put(kNestedName, uint64_t{10});
@@ -101,8 +115,8 @@ Memory nestedFixture(float weight) {
     for (unsigned i = 0; i < 11; ++i) {
         const uintptr_t child = kNestedFirst + 0x1000 * i;
         m.put(kNestedStack + 0x28 + 8 * i, child);
-        m.put(child, kBase + 0x5189070);
-        m.put(child + 0x10, kBase + 0x5189078);
+        m.put(child, A(0x5189070));
+        m.put(child + 0x10, A(0x5189078));
         m.put(child + 0x30, kNestedStack);
         m.put(child + 0x40, i ? kNestedFirst + 0x1000 * (i - 1) + 0x70 : kB + 0xB8);
         m.put(child + 0x58, uint64_t{0});
@@ -117,24 +131,24 @@ Memory nestedFixture(float weight) {
 Memory placedFixture() {
     Memory m = fixture();
     const uintptr_t object = kActivity - 0x20;
-    const uintptr_t placedVtable = kBase + 0x518CF88;
+    const uintptr_t placedVtable = A(0x518CF88);
     m.put(kActivity, placedVtable);
-    m.put(object, kBase + 0x518CF18);
-    m.put(placedVtable + 0x20, kBase + 0x8BEA20);
-    m.put(placedVtable + 0x28, kBase + 0x5294E0);
+    m.put(object, A(0x518CF18));
+    m.put(placedVtable + 0x20, A(0x8BEA20));
+    m.put(placedVtable + 0x28, A(0x5294E0));
     m.put(object + 0x1E8, kPlacedRecord);
     m.put(kPlacedRecord + 8, kTarget);
     m.put(kPlacedRecord + 0x10, kProvider);
-    m.put(kProvider, kBase + 0x530E500); // class is observed, semantics unknown
-    m.put(kBase + 0x530E500 + 0x20, kBase + 0x5294E0);
+    m.put(kProvider, A(0x530E500)); // class is observed, semantics unknown
+    m.put(A(0x530E500) + 0x20, A(0x5294E0));
     m.put(kTarget + 0xC0, int32_t{8});
     m.put(object + 0x10, kConfig);
     m.put(kConfig + 0x14, int32_t{1});
     m.put(kConfig + 0x18, int32_t{0});
     m.put(object + 0x188, int32_t{-1});
     m.put(object + 0x190, kOverride);
-    m.put(kOverride, kBase + 0x53584E8);
-    m.put(kBase + 0x53584E8 + 0x70, kBase + 0x123456);
+    m.put(kOverride, A(0x53584E8));
+    m.put(A(0x53584E8) + 0x70, kBase + 0x123456);
     float matrix[16]{};
     matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1.0f;
     matrix[12] = 10.0f;
@@ -376,7 +390,7 @@ bool testPassiveSceneWitness() {
 bool testCapture() {
     Memory m = fixture();
     auto s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
-    capture(&Memory::read, &m, kBase, *s);
+    capture(&Memory::read, &m, gameAt(), *s);
     if (!s->complete || !s->consistent || !s->validSource || s->stageCount != 1) return false;
     const Stage& stage = s->stages[0];
     if (!stage.nameRead || std::strcmp(stage.stackName, "MainView") != 0 ||
@@ -387,41 +401,41 @@ bool testCapture() {
 
     Memory cycle = fixture(); cycle.put(kC + 0x40, kC + 0x70);
     auto cycleResult = std::make_unique<Snapshot>(); cycleResult->source = kC + 0x70;
-    capture(&Memory::read, &cycle, kBase, *cycleResult);
+    capture(&Memory::read, &cycle, gameAt(), *cycleResult);
     if (cycleResult->complete || std::strcmp(cycleResult->failure, "cycle") != 0) return false;
 
     Memory overflow = fixture(); overflow.put(kC + 0x58, uint64_t{kActivities + 1});
     auto overflowResult = std::make_unique<Snapshot>(); overflowResult->source = kC + 0x70;
-    capture(&Memory::read, &overflow, kBase, *overflowResult);
+    capture(&Memory::read, &overflow, gameAt(), *overflowResult);
     if (overflowResult->complete || std::strcmp(overflowResult->failure, "activity-bound") != 0) return false;
 
     Memory partial = fixture(); partial.denied = kC + 0x68;
     auto partialResult = std::make_unique<Snapshot>(); partialResult->source = kC + 0x70;
-    capture(&Memory::read, &partial, kBase, *partialResult);
+    capture(&Memory::read, &partial, gameAt(), *partialResult);
     if (partialResult->complete || std::strcmp(partialResult->failure, "stage-fields-read") != 0) return false;
 
     Memory changing = fixture(); changing.put(kRoster, kActivity + 8);
     auto changingResult = std::make_unique<Snapshot>(); changingResult->source = kC + 0x70;
-    capture(&Memory::read, &changing, kBase, *changingResult);
+    capture(&Memory::read, &changing, gameAt(), *changingResult);
     if (changingResult->complete || std::strcmp(changingResult->failure, "activity-vtable-read") != 0) return false;
 
     Memory inactive = nestedFixture(0.0f);
     auto inactiveResult = std::make_unique<Snapshot>(); inactiveResult->source = kC + 0x70;
-    capture(&Memory::read, &inactive, kBase, *inactiveResult);
+    capture(&Memory::read, &inactive, gameAt(), *inactiveResult);
     if (!inactiveResult->complete || inactiveResult->stageCount != 1 ||
         inactiveResult->stages[0].inactiveNestedOmitted != 1 ||
         inactiveResult->stages[0].activityCount != 1) return false;
 
     Memory active = nestedFixture(1.0f);
     auto activeResult = std::make_unique<Snapshot>(); activeResult->source = kC + 0x70;
-    capture(&Memory::read, &active, kBase, *activeResult);
+    capture(&Memory::read, &active, gameAt(), *activeResult);
     if (!activeResult->complete || activeResult->stageCount != 12 ||
         activeResult->stages[0].inactiveNestedOmitted != 0) return false;
 
     Memory unknown = nestedFixture(1.0f);
-    unknown.put(kBase + 0x5189A90 + 0x20, kBase + 0x123456);
+    unknown.put(A(0x5189A90) + 0x20, kBase + 0x123456);
     auto unknownResult = std::make_unique<Snapshot>(); unknownResult->source = kC + 0x70;
-    capture(&Memory::read, &unknown, kBase, *unknownResult);
+    capture(&Memory::read, &unknown, gameAt(), *unknownResult);
     if (!unknownResult->complete || unknownResult->stageCount != 12 ||
         unknownResult->stages[0].activities[0].weightKnown) return false;
     return true;
@@ -430,12 +444,12 @@ bool testCapture() {
 bool testPlaced() {
     Memory m = placedFixture();
     auto s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
-    capture(&Memory::read, &m, kBase, *s);
+    capture(&Memory::read, &m, gameAt(), *s);
     if (!s->complete || s->placedSeen != 1 || s->placedCount != 1 || s->placedOverflow) return false;
     const PlacedDetail& d = s->placed[0];
     if (!d.identityComplete || !d.providerPresent || !d.providerKnown || !d.overridePresent ||
-        d.provider != kProvider || d.providerVtable != kBase + 0x530E500 ||
-        d.providerFn != kBase + 0x5294E0 || d.overrideFn != kBase + 0x123456 ||
+        d.provider != kProvider || d.providerVtable != A(0x530E500) ||
+        d.providerFn != A(0x5294E0) || d.overrideFn != kBase + 0x123456 ||
         d.targetRef != kTarget || !d.targetStateRead || d.targetState != 8 ||
         !d.validatorKnown || !d.valid5 || !d.valid8 || !d.overrideEligible || !d.poseStable ||
         !d.localRead || !d.cacheRead || !d.finalRead ||
@@ -443,7 +457,7 @@ bool testPlaced() {
 
     Memory noProvider = placedFixture(); noProvider.put(kPlacedRecord + 0x10, uintptr_t{0});
     auto nullResult = std::make_unique<Snapshot>(); nullResult->source = kC + 0x70;
-    capture(&Memory::read, &noProvider, kBase, *nullResult);
+    capture(&Memory::read, &noProvider, gameAt(), *nullResult);
     if (nullResult->placedCount != 1 || !nullResult->placed[0].identityComplete ||
         nullResult->placed[0].providerPresent ||
         std::strcmp(nullResult->placed[0].reason, "provider-null") != 0) return false;
@@ -452,14 +466,14 @@ bool testPlaced() {
     unknownProvider.put(kProvider, kBase + 0x5310000);
     unknownProvider.put(kBase + 0x5310000 + 0x20, kBase + 0x100000);
     auto unknownProviderResult = std::make_unique<Snapshot>(); unknownProviderResult->source = kC + 0x70;
-    capture(&Memory::read, &unknownProvider, kBase, *unknownProviderResult);
+    capture(&Memory::read, &unknownProvider, gameAt(), *unknownProviderResult);
     if (!unknownProviderResult->placed[0].identityComplete ||
         !unknownProviderResult->placed[0].providerPresent ||
         unknownProviderResult->placed[0].providerKnown) return false;
 
     Memory noRecord = placedFixture(); noRecord.put(kActivity - 0x20 + 0x1E8, uintptr_t{0});
     auto noRecordResult = std::make_unique<Snapshot>(); noRecordResult->source = kC + 0x70;
-    capture(&Memory::read, &noRecord, kBase, *noRecordResult);
+    capture(&Memory::read, &noRecord, gameAt(), *noRecordResult);
     if (noRecordResult->placedCount != 1 || !noRecordResult->placed[0].identityComplete ||
         noRecordResult->placed[0].record || noRecordResult->placed[0].providerPresent ||
         noRecordResult->placed[0].localRead || noRecordResult->placed[0].cacheRead ||
@@ -469,7 +483,7 @@ bool testPlaced() {
 
     Memory noTarget = placedFixture(); noTarget.put(kPlacedRecord + 8, uintptr_t{0});
     auto noTargetResult = std::make_unique<Snapshot>(); noTargetResult->source = kC + 0x70;
-    capture(&Memory::read, &noTarget, kBase, *noTargetResult);
+    capture(&Memory::read, &noTarget, gameAt(), *noTargetResult);
     if (!noTargetResult->placed[0].identityComplete || noTargetResult->placed[0].targetRef ||
         noTargetResult->placed[0].targetStateRead || !noTargetResult->placed[0].validatorKnown ||
         !noTargetResult->placed[0].eligibilityKnown ||
@@ -480,7 +494,7 @@ bool testPlaced() {
     for (const int32_t state : states) {
         Memory boundary = placedFixture(); boundary.put(kTarget + 0xC0, state);
         auto boundaryResult = std::make_unique<Snapshot>(); boundaryResult->source = kC + 0x70;
-        capture(&Memory::read, &boundary, kBase, *boundaryResult);
+        capture(&Memory::read, &boundary, gameAt(), *boundaryResult);
         const auto& value = boundaryResult->placed[0];
         if (!value.identityComplete || !value.targetStateRead || value.targetState != state ||
             value.valid5 != (state >= 5) || value.valid8 != (state >= 8) ||
@@ -489,7 +503,7 @@ bool testPlaced() {
 
     Memory unreadable = placedFixture(); unreadable.denied = kProvider;
     auto unreadableResult = std::make_unique<Snapshot>(); unreadableResult->source = kC + 0x70;
-    capture(&Memory::read, &unreadable, kBase, *unreadableResult);
+    capture(&Memory::read, &unreadable, gameAt(), *unreadableResult);
     if (unreadableResult->placedCount != 1 || unreadableResult->placed[0].identityComplete ||
         std::strcmp(unreadableResult->placed[0].reason, "provider-vtable-read") != 0) return false;
 
@@ -499,7 +513,7 @@ bool testPlaced() {
     changed.changeValue = kProvider + 8;
     changed.changeAfter = 2;
     auto changedResult = std::make_unique<Snapshot>(); changedResult->source = kC + 0x70;
-    capture(&Memory::read, &changed, kBase, *changedResult);
+    capture(&Memory::read, &changed, gameAt(), *changedResult);
     if (changedResult->placedCount != 1 || changedResult->placed[0].identityComplete ||
         changedResult->placed[0].eligibilityKnown ||
         std::strcmp(changedResult->placed[0].reason, "identity-changed") != 0) return false;
@@ -510,13 +524,13 @@ bool testPlaced() {
     movingPose.changeValue = uintptr_t{0};
     movingPose.changeAfter = 2;
     auto movingResult = std::make_unique<Snapshot>(); movingResult->source = kC + 0x70;
-    capture(&Memory::read, &movingPose, kBase, *movingResult);
+    capture(&Memory::read, &movingPose, gameAt(), *movingResult);
     if (movingResult->placedCount != 1 || !movingResult->placed[0].identityComplete ||
         !movingResult->placed[0].localRead || movingResult->placed[0].poseStable) return false;
 
     Memory targetUnreadable = placedFixture(); targetUnreadable.denied = kTarget + 0xC0;
     auto targetResult = std::make_unique<Snapshot>(); targetResult->source = kC + 0x70;
-    capture(&Memory::read, &targetUnreadable, kBase, *targetResult);
+    capture(&Memory::read, &targetUnreadable, gameAt(), *targetResult);
     if (targetResult->placedCount != 1 || targetResult->placed[0].identityComplete ||
         targetResult->placed[0].validatorKnown || targetResult->placed[0].eligibilityKnown ||
         std::strcmp(targetResult->placed[0].reason, "target-state-read") != 0) return false;
@@ -525,7 +539,7 @@ bool testPlaced() {
     targetUnreadableButQAbsent.denied = kTarget + 0xC0;
     targetUnreadableButQAbsent.put(kActivity - 0x20 + 0x190, uintptr_t{0});
     auto knownFalseResult = std::make_unique<Snapshot>(); knownFalseResult->source = kC + 0x70;
-    capture(&Memory::read, &targetUnreadableButQAbsent, kBase, *knownFalseResult);
+    capture(&Memory::read, &targetUnreadableButQAbsent, gameAt(), *knownFalseResult);
     if (!knownFalseResult->placed[0].eligibilityKnown || knownFalseResult->placed[0].overrideEligible ||
         knownFalseResult->placed[0].identityComplete) return false;
 
@@ -533,41 +547,73 @@ bool testPlaced() {
     targetUnreadableButCfgZero.denied = kTarget + 0xC0;
     targetUnreadableButCfgZero.put(kConfig + 0x14, int32_t{0});
     auto cfgFalseResult = std::make_unique<Snapshot>(); cfgFalseResult->source = kC + 0x70;
-    capture(&Memory::read, &targetUnreadableButCfgZero, kBase, *cfgFalseResult);
+    capture(&Memory::read, &targetUnreadableButCfgZero, gameAt(), *cfgFalseResult);
     if (!cfgFalseResult->placed[0].eligibilityKnown || cfgFalseResult->placed[0].overrideEligible ||
         cfgFalseResult->placed[0].identityComplete) return false;
 
     Memory cfg18 = placedFixture(); cfg18.put(kConfig + 0x18, int32_t{1});
     auto cfg18Result = std::make_unique<Snapshot>(); cfg18Result->source = kC + 0x70;
-    capture(&Memory::read, &cfg18, kBase, *cfg18Result);
+    capture(&Memory::read, &cfg18, gameAt(), *cfg18Result);
     if (!cfg18Result->placed[0].identityComplete || cfg18Result->placed[0].config18 != 1 ||
         !cfg18Result->placed[0].overrideEligible) return false;
 
     Memory rootGuard = placedFixture(); rootGuard.put(kActivity - 0x20, kBase + 0x12345);
     auto guardResult = std::make_unique<Snapshot>(); guardResult->source = kC + 0x70;
-    capture(&Memory::read, &rootGuard, kBase, *guardResult);
+    capture(&Memory::read, &rootGuard, gameAt(), *guardResult);
     if (guardResult->placedSeen != 1 || guardResult->placed[0].identityComplete ||
         std::strcmp(guardResult->placed[0].reason, "placed-root-guard-refused") != 0) return false;
 
     Memory noOverride = placedFixture(); noOverride.put(kActivity - 0x20 + 0x190, uintptr_t{0});
     auto noOverrideResult = std::make_unique<Snapshot>(); noOverrideResult->source = kC + 0x70;
-    capture(&Memory::read, &noOverride, kBase, *noOverrideResult);
+    capture(&Memory::read, &noOverride, gameAt(), *noOverrideResult);
     if (noOverrideResult->placedCount != 1 || !noOverrideResult->placed[0].identityComplete ||
         noOverrideResult->placed[0].overridePresent || !noOverrideResult->placed[0].eligibilityKnown ||
         noOverrideResult->placed[0].overrideEligible) return false;
 
     Memory noPlaced = fixture();
     auto absentResult = std::make_unique<Snapshot>(); absentResult->source = kC + 0x70;
-    capture(&Memory::read, &noPlaced, kBase, *absentResult);
+    capture(&Memory::read, &noPlaced, gameAt(), *absentResult);
     if (!absentResult->complete || absentResult->placedSeen || absentResult->placedCount) return false;
 
     auto bounded = std::make_unique<Snapshot>();
     bounded->placedCount = kPlacedDetails;
     bounded->placedSeen = kPlacedDetails;
-    placedDetail(&Memory::read, &m, kBase, s->stages[0].activities[0], 0, 0, *bounded);
+    placedDetail(&Memory::read, &m, gameAt(), s->stages[0].activities[0], 0, 0, *bounded);
     if (!bounded->placedOverflow || bounded->placedSeen != kPlacedDetails + 1 ||
         bounded->placedCount != kPlacedDetails) return false;
     return true;
+}
+
+// The resolved addresses (issue 124): the glue arms only when every one was found, and the decoder compares with what it is given.
+bool testResolved() {
+    // Build 334925: every address is base + its table RVA.
+    const Game known = gameAt();
+    if (!known.found() || known.at[kChildVtable] != kBase + 0x5189070 || known.at[kStackVtable] != kBase + 0x5189370 ||
+        known.at[kPlacedProviders + 15] != kBase + 0xF8E0A0) return false;
+    // Not found: any one address the resolver did not find (0) keeps the capture from arming.
+    for (unsigned i = 0; i < kGameAddresses; ++i) {
+        Game g = known; g.at[i] = 0;
+        if (g.found()) return false;
+    }
+    // An unknown build, every address found elsewhere: the moved fixtures decode as the known ones do, and the known build's
+    // addresses refuse them at the first guard.
+    g_moved = true;
+    const Game moved = gameAt();
+    Memory placed = placedFixture();
+    auto s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
+    capture(&Memory::read, &placed, moved, *s);
+    Memory nested = nestedFixture(1.0f);
+    auto t = std::make_unique<Snapshot>(); t->source = kC + 0x70;
+    capture(&Memory::read, &nested, moved, *t);
+    auto u = std::make_unique<Snapshot>(); u->source = kC + 0x70;
+    capture(&Memory::read, &placed, known, *u);
+    g_moved = false;
+    return moved.found() && moved.at[kChildVtable] != known.at[kChildVtable] &&
+        s->complete && s->placedCount == 1 && s->placed[0].identityComplete && s->placed[0].providerKnown &&
+        s->placed[0].overrideEligible && t->complete && t->stageCount == 12 &&
+        !u->complete && std::strcmp(u->failure, "source-child-guard") == 0 &&
+        rva(kBase + 0x281D259, kBase, 0x6200000) == 0x281D259 && rva(kBase + 0x6200000, kBase, 0x6200000) == 0 &&
+        rva(kBase - 1, kBase, 0x6200000) == 0;
 }
 
 std::string sourceText(const char* path) {
@@ -652,7 +698,7 @@ bool testReportMarkers() {
 
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testCaptureWiring() || !testReportMarkers()) {
+    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testResolved() || !testCaptureWiring() || !testReportMarkers()) {
         std::fprintf(stderr, "flat stationary camera test failed\n"); return 1;
     }
     std::puts("flat stationary camera test passed");

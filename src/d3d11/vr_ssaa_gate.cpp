@@ -3,13 +3,13 @@
 
 #include "device_hook.h"     // deviceHookFxcfgMultipliers: the newest .fxcfg's two floats (device_hook.cpp's eliteHmdMultiplier)
 #include "ui_panel_scale.h"  // uiPanelScaleFactor, uiPanelScaleChosenSupersampling: lock-free
-#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 334925
 #include "ui_surfaces.h"     // uiSurfacesHmdQuality: lock-free
 #include "vr_ssaa_hold.h"    // the hold's report, mode re-read and loader object (the hold changes values; this file only logs)
 #include "vr_display_observer.h"  // the game window's frame check (read-only)
 #include "vr_window_trampolines.h"  // the game's mode request (the window rewrite) and settings copy (the hold)
 
 #include "../common/elite_graphics_folder.h"  // the Options\Graphics folder under %LOCALAPPDATA%
+#include "../common/game_build.h"  // gameBuildIdentity, gameBuildText: the build the addresses below are found in
 #include "../common/log.h"
 #include "../common/runtime_profile.h"  // runtimeScopeIncludesVr, runtimeProfileName: the window rewrite is VR-scoped
 
@@ -23,6 +23,12 @@
 #include <string>
 
 namespace edvr {
+
+// vr_window_trampolines.cpp's and vr_ssaa_hold.cpp's: whether gameRva finds every address they need (always on build 334925); the
+// first it does not in *firstMissing.
+bool vrWindowTrampolinesFound(uint32_t* firstMissing);
+bool vrSsaaHoldFound(uint32_t* firstMissing);
+
 namespace {
 
 constexpr uint32_t kSetterLinesFirst = 64;  // every setter call logs while the count is at or under this
@@ -58,20 +64,13 @@ double nowSeconds() {
     return freq.QuadPart ? static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart) : 0.0;
 }
 
-// The game's own PE header: build 334925's stamp and image size, the same gate ui_panel_scale.cpp applies. The guard
-// holds no objects.
-bool gameBuildChecked() {
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
-    if (!base) return false;
-    __try {
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-        return nt->FileHeader.TimeDateStamp == kUiPanelStamp && nt->OptionalHeader.SizeOfImage == kUiPanelImageSize;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+// The game build: its PE header readable (gameBuildIdentity), and every address the trampolines this gate installs and the hold
+// need found (gameRva: build 334925's own; an unknown build's by signature). *missing: the first that was not, 0 when the header
+// was unreadable.
+bool gameBuildChecked(uint32_t* missing) {
+    *missing = 0;
+    if (!GetModuleHandleW(nullptr) || !gameBuildIdentity(nullptr, nullptr)) return false;
+    return vrWindowTrampolinesFound(missing) && vrSsaaHoldFound(missing);
 }
 
 // A small text file, read whole. False when missing or over 1 MB.
@@ -123,8 +122,13 @@ std::string narrow(const std::wstring& w) {
 void vrSsaaGateStartup() {
     bool expected = false;
     if (!g_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-    if (!gameBuildChecked()) {
-        Log::get().note("vr ssaa gate: game build not checked; instruments off");
+    uint32_t missing = 0;
+    if (!gameBuildChecked(&missing)) {
+        if (missing)
+            Log::get().note("vr ssaa gate: %s, and 0x%X in build 334925 was not found by signature; instruments off", gameBuildText(),
+                            missing);
+        else
+            Log::get().note("vr ssaa gate: game build not checked; instruments off");
         vrSsaaHoldReport();
         return;
     }

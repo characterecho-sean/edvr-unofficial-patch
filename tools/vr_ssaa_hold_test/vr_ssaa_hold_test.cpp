@@ -43,7 +43,9 @@ bool g_installRefuse = false;
 bool g_prepareGiven = false;
 void* g_forwardAtPublish = nullptr;
 uint8_t g_fakeTrampoline[16] = {};
-bool CodeHook::install(void*, void*, void** origOut, const char*, Prepare prepare, void* prepareContext) {
+void* g_installTarget = nullptr;
+bool CodeHook::install(void* target, void*, void** origOut, const char*, Prepare prepare, void* prepareContext) {
+    g_installTarget = target;
     if (g_installRefuse) return false;
     g_prepareGiven = prepare != nullptr;
     if (prepare && !prepare(g_fakeTrampoline, prepareContext)) return false;
@@ -52,6 +54,30 @@ bool CodeHook::install(void*, void*, void** origOut, const char*, Prepare prepar
     return true;
 }
 void CodeHook::uninstall() {}
+
+// The signature resolver (src\common\game_build.h), stubbed: build 334925 (every RVA its own, pins exact), or an unknown build
+// whose entries were found g_stubShift further on (0 for a target in g_stubLost: not found), pins compared the same way here.
+bool g_stubKnown = true;
+uint32_t g_stubShift = 0;
+uint32_t g_stubLost = 0;
+bool gameBuildKnown() noexcept { return g_stubKnown; }
+const char* gameBuildText() noexcept { return g_stubKnown ? "build 334925" : "unknown build (stub)"; }
+uintptr_t gameRva(uint32_t knownRva) noexcept {
+    if (g_stubKnown) return knownRva;
+    return knownRva == g_stubLost ? 0 : uintptr_t(knownRva) + g_stubShift;
+}
+bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept {
+    if (firstMissing) *firstMissing = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (gameRva(knownRvas[i]) == 0) {
+            if (firstMissing) *firstMissing = knownRvas[i];
+            return false;
+        }
+    return true;
+}
+bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept {
+    return got && pin && std::memcmp(got, pin, n) == 0;
+}
 
 }  // namespace edvr
 
@@ -479,13 +505,16 @@ void installCases() {
     const int c0 = g_checks, f0 = g_fails;
     resetWindowState();
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
-    std::vector<uint8_t> image(edvr::kRequestRva + 16u, 0);   // a stand-in for the game module: only the entry's bytes matter here
+    constexpr uint32_t kShift = 0x40;                          // an unknown build's entry, found by signature this much further on
+    std::vector<uint8_t> image(edvr::kRequestRva + kShift + 16u, 0);   // a stand-in for the game module: only the entry's bytes matter here
     std::memcpy(image.data() + edvr::kRequestRva, edvr::kRequestBytes, sizeof(edvr::kRequestBytes));
     auto install = [&](const char* name) {
-        return edvr::installOne(image.data(), edvr::kRequestRva, edvr::kRequestBytes, sizeof(edvr::kRequestBytes),
-                                reinterpret_cast<void*>(&edvr::requestReplacement), reinterpret_cast<void**>(&edvr::g_requestOrig),
-                                &edvr::g_requestHook, name);
+        return edvr::installOne(image.data(), edvr::kRequest, reinterpret_cast<void*>(&edvr::requestReplacement),
+                                reinterpret_cast<void**>(&edvr::g_requestOrig), &edvr::g_requestHook, name);
     };
+    edvr::g_stubKnown = true;
+    edvr::g_stubShift = 0;
+    edvr::g_stubLost = 0;
     edvr::g_installRefuse = true;
     const bool refused = install("test: refused");
     check(!refused && edvr::g_requestOrig == nullptr, "CodeHook refusal: nothing patched and the forward is cleared");
@@ -497,6 +526,29 @@ void installCases() {
           "the forward is set before the entry is published");
     check(reinterpret_cast<void*>(edvr::g_requestOrig) == static_cast<void*>(edvr::g_fakeTrampoline),
           "the forward is the trampoline after the install");
+    check(edvr::g_installTarget == static_cast<void*>(image.data() + edvr::kRequestRva),
+          "build 334925: the entry is hooked at its own RVA");
+    // Issue 124: an unknown build. Not found by signature: refused before anything is read or hooked. Found, its bytes there: hooked
+    // at the address found. Found, but the bytes there are not the pin: refused.
+    edvr::g_stubKnown = false;
+    edvr::g_stubLost = edvr::kRequestRva;
+    edvr::g_requestOrig = nullptr;
+    edvr::g_installTarget = nullptr;
+    check(!install("test: not found") && edvr::g_requestOrig == nullptr && edvr::g_installTarget == nullptr,
+          "issue 124: an entry not found by signature is refused, nothing hooked");
+    uint32_t missing = 0;
+    check(!edvr::vrWindowTrampolinesFound(&missing) && missing == edvr::kRequestRva,
+          "issue 124: the gate's check names the entry that was not found");
+    edvr::g_stubLost = 0;
+    edvr::g_stubShift = kShift;
+    check(!install("test: moved, bytes not there") && edvr::g_installTarget == nullptr,
+          "issue 124: an entry found by signature whose bytes are not the pin is refused, nothing hooked");
+    std::memcpy(image.data() + edvr::kRequestRva + kShift, edvr::kRequestBytes, sizeof(edvr::kRequestBytes));
+    check(install("test: moved") && edvr::g_installTarget == static_cast<void*>(image.data() + edvr::kRequestRva + kShift) &&
+              edvr::vrWindowTrampolinesFound(&missing) && missing == 0,
+          "issue 124: an entry found by signature on an unknown build is hooked at the address found");
+    edvr::g_stubKnown = true;
+    edvr::g_stubShift = 0;
     reportGroup("install ordering", c0, f0);
 }
 

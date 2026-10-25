@@ -863,9 +863,14 @@ void routeMovedMissing(int eye, uint64_t seq) {
 
 // Opens a timer for one stage of one eye-frame; -1 when none could be had
 // (the ring full, or the timing domain not ours), and that eye-frame's sums
-// are then dropped rather than reported short.
+// are then dropped rather than reported short. -1 in the flat profile too,
+// before any of that: logTotals is the only reader and flat never calls it,
+// and each timestamp query costs the driver work (on DXMT it splits the
+// Metal pass: a reporter's flat scene went from under 60 fps to 60 without
+// them). routePoll still drains what a VR frame left in flight.
 int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t seq) {
     if (!ctx || eye < 0 || eye > 1 || !seq) return -1;
+    if (runtimeFlatProfile()) return -1;
     const size_t si = static_cast<size_t>(stage);
     RouteSlot& s = g_route[g_routeHead % kRouteRing];
     bool ok = false;

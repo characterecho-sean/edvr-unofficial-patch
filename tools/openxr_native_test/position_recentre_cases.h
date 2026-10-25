@@ -86,6 +86,63 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
     bool again=false;
     f.owner.invoke([&]{again=h.applyPositionRecentre(10);});
     check(again&&h.currentOrigin.x==5.0&&h.currentOrigin.yaw==seatedYaw&&h.positionRecentres==2,"F123: a later ask with everything in order is applied");
+
+    // Delivery must survive a transient tracking dropout: a contact latch sends one serial, not a replacement every frame.
+    const auto onFoot=[&](bool foot){
+      SeatContext c{};c.published=c.keep=c.gameplay=true;c.onFootKnown=true;c.onFoot=foot;
+      h.seat.onContext(c,GetTickCount64());
+    };
+    bool lost=false,recovered=false,duplicate=true;
+    f.owner.invoke([&]{
+      f.fake.flags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+      f.fake.head.position.x=6.0f;
+      lost=h.positionRecentreDispatch(11,1000);
+      f.fake.flags=launch_fixture::tracked;
+      recovered=h.positionRecentreDispatch(11,1011);
+      duplicate=h.positionRecentreDispatch(11,1022);
+    });
+    check(!lost&&recovered&&!duplicate&&h.currentOrigin.x==6.0&&h.positionRecentres==3,
+          "F123: a valid but temporarily untracked head leaves the same request pending, recovery applies it exactly once");
+
+    bool locateLost=false,withdrawn=true,resurrected=true;
+    f.owner.invoke([&]{
+      f.fake.locateResult=XR_ERROR_TIME_INVALID;
+      locateLost=h.positionRecentreDispatch(12,2000);
+      withdrawn=h.positionRecentreDispatch(0,2011);
+      f.fake.locateResult=XR_SUCCESS;f.fake.head.position.x=7.0f;
+      resurrected=h.positionRecentreDispatch(12,2022);
+    });
+    check(!locateLost&&!withdrawn&&!resurrected&&h.currentOrigin.x==6.0&&h.positionRecentres==3,
+          "F123: withdrawal cancels a request waiting on a transient locate failure; the old serial cannot act later");
+
+    bool boarded=true,afterBoarding=true;
+    f.owner.invoke([&]{
+      f.fake.flags=0;h.positionRecentreDispatch(13,3000);
+      onFoot(false);f.fake.flags=launch_fixture::tracked;
+      boarded=h.positionRecentreDispatch(13,3011);
+      onFoot(true);afterBoarding=h.positionRecentreDispatch(13,3022);
+    });
+    check(!boarded&&!afterBoarding&&h.currentOrigin.x==6.0&&h.positionRecentres==3,
+          "F123: leaving on foot cancels a tracking retry permanently, including after on foot begins again");
+
+    bool changed=true;
+    f.owner.invoke([&]{
+      f.fake.flags=0;h.positionRecentreDispatch(14,4000);
+      h.poses.resetOrigin(h.compositorGeneration);
+      f.fake.flags=launch_fixture::tracked;
+      changed=h.positionRecentreDispatch(14,4011);
+    });
+    check(!changed&&h.currentOrigin.x==6.0&&h.positionRecentres==3,
+          "F123: a reference generation change cancels the old tracking retry before it can move the new origin");
+
+    bool expired=true;
+    f.owner.invoke([&]{
+      f.fake.flags=0;h.positionRecentreDispatch(15,5000);
+      f.fake.flags=launch_fixture::tracked;
+      expired=h.positionRecentreDispatch(15,5000+h.kPositionRecentreRetryMs);
+    });
+    check(!expired&&h.currentOrigin.x==6.0&&h.positionRecentres==3&&h.positionRecentreHandled==15,
+          "F123: tracking retries expire after 0.5 s, so an old request cannot move the origin long after its fade");
     f.owner.stop();
   }
   if(hadPrevious)SetEnvironmentVariableW(L"LOCALAPPDATA",previous);else SetEnvironmentVariableW(L"LOCALAPPDATA",nullptr);

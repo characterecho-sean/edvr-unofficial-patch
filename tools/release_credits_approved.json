@@ -1,0 +1,23 @@
+{
+  "about": "Maintainer-approved credits for people who are not authors of a PR merged in the release. release_credits.py --thanks names each login in a release whose range contains one of the entry's commits. Add an entry only on the maintainer's word, with the date it was given.",
+  "credits": [
+    {
+      "login": "RocketsProjects",
+      "approved": "2026-10-23",
+      "for": "the EDVR-001 performance audit, the no-smoke A/B bench and the smoke census design",
+      "commits": ["f0d179e9"]
+    },
+    {
+      "login": "RocketsProjects",
+      "approved": "2026-10-24",
+      "for": "issue #131, the closed-form stale-stamp window",
+      "commits": ["01431ff5"]
+    },
+    {
+      "login": "Plokhi",
+      "approved": "2026-10-25",
+      "for": "finding the flat UI route's discarded GPU timers (measured on DXMT, macOS) and the guard that stops them",
+      "commits": ["361dddbe"]
+    }
+  ]
+}

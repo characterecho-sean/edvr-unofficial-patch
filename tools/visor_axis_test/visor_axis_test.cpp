@@ -717,9 +717,16 @@ int main(int argc, char** argv) {
         clean.ok = true; clean.taps = edvr::visorcensus::kSamples;
         bad = clean; bad.nonFinite = 5; bad.nan = 5;
         notOk = bad; notOk.ok = false;
-        check(edvr::visorcensus::selfOffVerdict(true, bad) && !edvr::visorcensus::selfOffVerdict(true, clean) && !edvr::visorcensus::selfOffVerdict(false, bad) &&
-                  !edvr::visorcensus::selfOffVerdict(true, notOk),
+        check(edvr::visorcensus::selfOffVerdict(true, bad, 0, 0) && !edvr::visorcensus::selfOffVerdict(true, clean, 0, 0) && !edvr::visorcensus::selfOffVerdict(false, bad, 0, 0) &&
+                  !edvr::visorcensus::selfOffVerdict(true, notOk, 0, 0),
               "V13.self-off-only-on-a-sample-after-a-draw-through-the-replacement-with-a-non-finite-tap");
+        const uint64_t oldAttempt = 7, retryAttempt = oldAttempt + 1;
+        bool selfOff = false;   // key off cleared the latch; two older GPU readbacks are still in flight
+        for (int pending = 0; pending < 2; ++pending)
+            selfOff = selfOff || edvr::visorcensus::selfOffVerdict(true, bad, oldAttempt, retryAttempt);
+        check(!selfOff && !edvr::visorcensus::selfOffVerdict(true, clean, retryAttempt, retryAttempt) &&
+                  edvr::visorcensus::selfOffVerdict(true, bad, retryAttempt, retryAttempt),
+              "V13.key-cycle-retry-ignores-pending-old-NaN-samples-and-still-guards-new-draws");
         char line[480];
         edvr::visoraxis::formatSelfOff(line, sizeof line, 29753344u, 29753344u, 1);
         const std::string s = line;
@@ -765,8 +772,9 @@ int main(int argc, char** argv) {
         check(countOf(rf, "axisBegin(ctx, eye, gamesPs, g_trustVerdict)") == 1 && countOf(rf, "if (nativeOnFootActive()) eyeWatchNote();") == 1 &&
                   countOf(rf, "Refusal::kOneEye") >= 2 && countOf(rf, "uiLayerSubmittedTarget(0)") == 1 && countOf(rf, "uiLayerSubmittedTarget(1)") == 1,
               "V8.F121c-the-bind-takes-the-eye-trust-verdict-and-the-tracker-sees-every-visor-draw-on-foot");
-        check(countOf(rf, "selfOffVerdict(sl.shifted, c)") == 1 && countOf(rf, "formatSelfOff(") == 1 && countOf(rf, "g_axisSelfOff.load(") == 1 &&
-                  countOf(rf, "g_axisSelfOff.store(false") == 1 && countOf(rf, "sl.shifted = g.pendingShifted;") == 1,
+        check(countOf(rf, "selfOffVerdict(sl.shifted, c, sl.attempt, g_axisAttempt)") == 1 && countOf(rf, "formatSelfOff(") == 1 && countOf(rf, "g_axisSelfOff.load(") == 1 &&
+                  countOf(rf, "g_axisSelfOff.store(false") == 1 && countOf(rf, "sl.shifted = g.pendingShifted;") == 1 &&
+                  countOf(rf, "if (g_axisKeyKnown && g_axisKeyLast) ++g_axisAttempt;") == 1 && countOf(rf, "sl.attempt = g_axisAttempt;") == 1,
               "V8.F121c-a-sample-after-a-draw-through-the-replacement-with-a-non-finite-tap-turns-it-off-and-the-key-cycled-turns-it-back");
     }
 

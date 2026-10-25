@@ -18,8 +18,7 @@ namespace edvr {
 
 class ObjectRecordWriterProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1792704584u;
-    static constexpr uint32_t kExpectedImageSize=104906752u;
+    // Build 334925's RVA; the running build's address comes from the signature resolver (src\common\game_build.h).
     static constexpr uintptr_t kLookupRva=0x3699C00u;
     static constexpr uint32_t kRecordBytes=0x150u;
     static constexpr uint32_t kRecordCap=65536u;
@@ -44,8 +43,9 @@ public:
         uint64_t offset=0;
         std::vector<uint8_t> data;
     };
+    // Every *Offset below is from the running image's base (the capture's *_rva fields): build 334925's RVA on that build.
     struct Record {
-        uint32_t id=0;uint64_t sequence=0,returnRva=0;
+        uint32_t id=0;uint64_t sequence=0,returnOffset=0;
         uint32_t threadId=0,observedFrame=0;uint64_t completionSequence=0;
         std::string writer,contextStatus="unavailable",lookupStatus="pending";
         std::string ownershipStatus="unsupported_writer";
@@ -57,12 +57,12 @@ public:
         Snapshot record,keySnapshot,builderSnapshot,objectSnapshot,entrySnapshot;
     };
     struct PointerIdentity {
-        uint64_t address=0,vtable=0,vtableRva=0;
+        uint64_t address=0,vtable=0,vtableOffset=0;
         std::string status="null_pointer";
     };
     struct Ownership {
         uint32_t id=0,observedFrame=0,threadId=0,unwindDepth=0;
-        uint64_t firstSequence=0,ancestorReturnRva=0;
+        uint64_t firstSequence=0,ancestorReturnOffset=0;
         std::string status="partial",branch,writerRelation,recordStatus="not_applicable",parentStatus="read_fault";
         uint64_t writerOwner=0,outer=0,collectionOwner=0,registry=0,context=0,collectionRecord=0;
         uint64_t gameObject=0,descriptor=0,provider=0,parent=0;
@@ -72,9 +72,9 @@ public:
         Snapshot outerSnapshot,collectionSnapshot,contextSnapshot,recordTailSnapshot;
         Snapshot gameObjectPrefix,descriptorPrefix,providerPrefix,parentPrefix;
     };
-    struct AncestorFrame {uint64_t address=0,moduleRva=0;bool moduleRelative=false;};
+    struct AncestorFrame {uint64_t address=0,moduleOffset=0;bool moduleRelative=false;};
     struct AncestorTrace {
-        uint32_t writerRecord=0;uint64_t returnRva=0;std::string status;
+        uint32_t writerRecord=0;uint64_t returnOffset=0;std::string status;
         std::vector<AncestorFrame> frames;
     };
     struct Summary {
@@ -163,7 +163,7 @@ private:
     bool validateExecutableBaseLocked(uintptr_t imageBase) noexcept;
     struct OwnershipCandidate {
         const char* status="ancestor_missing";
-        uint64_t returnRva=0;uint32_t depth=0;CONTEXT context{};
+        uint64_t returnOffset=0;uint32_t depth=0;CONTEXT context{};
         std::array<AncestorFrame,kAncestorTraceFrameCap> frames{};uint32_t frameCount=0;
     };
     Pending beginRvaLocked(uint64_t returnRva,uintptr_t callerRsp,

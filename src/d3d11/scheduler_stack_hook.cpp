@@ -2,6 +2,8 @@
 #include "scheduler_stack_probe.h"
 #include "kinematic_eval_hook.h"
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
+#include "../common/log.h"
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
@@ -41,6 +43,7 @@ struct HookEntry {
     CodeHook hook;
     uint8_t* relay=nullptr;
     std::atomic<bool> ready{false};
+    bool refusalLogged=false; // an unknown build's refusal, said once (under g_installMutex)
 };
 
 __declspec(noinline) uintptr_t __fastcall drainObserved(uintptr_t,uintptr_t,
@@ -144,38 +147,68 @@ std::mutex g_installMutex;
 
 bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept;
 
+// An unknown build (issue 124): says once, per entry, why the probe stands down. The known build is as silent as it always was.
+void noteUnknownBuildRefusal(HookEntry& entry,uintptr_t found) noexcept {
+    if(entry.refusalLogged)return;
+    entry.refusalLogged=true;
+    if(!found)
+        Log::get().note("scheduler stack hook: refused: %s, and %s (0x%llX in build 334925) was not found by signature; "
+                        "the scheduler stack probe stands down.",
+                        gameBuildText(),entry.name,static_cast<unsigned long long>(entry.rva));
+    else
+        Log::get().note("scheduler stack hook: refused: %s: %s was found by signature at 0x%llX, but its prologue bytes are not "
+                        "build 334925's outside the masked fields; the scheduler stack probe stands down.",
+                        gameBuildText(),entry.name,static_cast<unsigned long long>(found));
+}
+
+// The scan's upper bound, an RVA. Build 334925: the probe's constant, as it always was. Another build: the end of its own executable
+// section, from its PE header (read under __try).
+bool scanBoundRva(uintptr_t base,uintptr_t* hi) noexcept {
+    if(gameBuildKnown()){*hi=SchedulerStackProbe::kRangeHi;return true;}
+    uint8_t headers[4096]{};
+    __try {std::memcpy(headers,reinterpret_cast<const void*>(base),sizeof(headers));}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+    *hi=SchedulerStackProbe::executableEndRva(headers,sizeof(headers));
+    return *hi!=0;
+}
+
 bool targetValid(uintptr_t base) noexcept {
+    if(!gameBuildIdentity(nullptr,nullptr))return false;
+    const bool known=gameBuildKnown();
     __try {
-        uint32_t peOff=0;
-        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
-        if(peOff>0x1000)return false;
-        uint32_t timestamp=0,imageSize=0;
-        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
-        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
-        if(timestamp!=SchedulerStackProbe::kExpectedTimestamp ||
-           imageSize!=SchedulerStackProbe::kExpectedImageSize)return false;
-        for(const HookEntry& entry:g_entries) {
+        for(HookEntry& entry:g_entries) {
+            const uintptr_t found=gameRva(static_cast<uint32_t>(entry.rva));
+            if(!found){if(!known)noteUnknownBuildRefusal(entry,0);return false;}
             uint8_t got[14]{};
-            std::memcpy(got,reinterpret_cast<const void*>(base+entry.rva),sizeof(got));
-            if(std::memcmp(got,entry.prologue,sizeof(got))!=0 &&
-               !(entry.ready.load(std::memory_order_acquire) && patchIsOurs(entry,base)))
+            std::memcpy(got,reinterpret_cast<const void*>(base+found),sizeof(got));
+            if(!gamePinMatches(static_cast<uint32_t>(entry.rva),got,entry.prologue,sizeof(got)) &&
+               !(entry.ready.load(std::memory_order_acquire) && patchIsOurs(entry,base))) {
+                if(!known)noteUnknownBuildRefusal(entry,found);
                 return false;
+            }
         }
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
-    entry.relay=allocateRelay(base+entry.rva);
+    const uintptr_t found=gameRva(static_cast<uint32_t>(entry.rva));
+    if(!found)return false;
+    entry.relay=allocateRelay(base+found);
     if(!entry.relay)return false;
     buildRelay(entry.relay,&observer,entry.callback);
-    if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
+    if(!entry.hook.install(reinterpret_cast<void*>(base+found),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
         entry.relay=nullptr;
         return false;
     }
     entry.ready.store(true,std::memory_order_release);
+    if(!gameBuildKnown())
+        Log::get().note("scheduler stack hook: %s (0x%llX in build 334925) was found by signature on %s at 0x%llX and is detoured; "
+                        "the scheduler stack probe observes it.",
+                        entry.name,static_cast<unsigned long long>(entry.rva),gameBuildText(),
+                        static_cast<unsigned long long>(found));
     return true;
     // Process-lifetime storage: do not free a relay or trampoline which an
     // in-flight call may already be executing. Captures only gate it.
@@ -183,14 +216,21 @@ bool installOne(HookEntry& entry,uintptr_t base) noexcept {
 
 bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     if(!entry.ready.load(std::memory_order_acquire) || !entry.relay)return false;
-    const uintptr_t target=base+entry.rva;
+    const uintptr_t found=gameRva(static_cast<uint32_t>(entry.rva));
+    if(!found)return false;
+    const uintptr_t target=base+found;
     const intptr_t displacement=reinterpret_cast<intptr_t>(entry.relay)-intptr_t(target+5);
     uint8_t bytes[13]{};
     __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
     __except(EXCEPTION_EXECUTE_HANDLER){return false;}
     int32_t actual=0;std::memcpy(&actual,bytes+1,4);
-    return bytes[0]==0xE9 && actual==displacement &&
-           std::memcmp(bytes+5,entry.prologue+5,8)==0;
+    if(bytes[0]!=0xE9 || actual!=displacement)return false;
+    // Our five-byte jump is in place; the rest of the stolen prologue (bytes 5..12) is still the pin's, outside the fields
+    // an unknown build's signature masks. The expected row is the jump as read plus the pin's tail.
+    uint8_t expected[sizeof(bytes)];
+    std::memcpy(expected,bytes,5);
+    std::memcpy(expected+5,entry.prologue+5,8);
+    return gamePinMatches(static_cast<uint32_t>(entry.rva),bytes,expected,sizeof(bytes));
 }
 
 bool ensureInstalled(uintptr_t base) noexcept {
@@ -225,6 +265,17 @@ const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         // probe's 2026-09-20 review finding 5: an unlocked pre-check raced a
         // concurrent install's half-published patch).
         if(!targetValid(base))return "identity_mismatch";
+        uintptr_t scanHi=0;
+        if(!scanBoundRva(base,&scanHi)) {
+            static bool logged=false;
+            if(!logged) {
+                logged=true;
+                Log::get().note("scheduler stack hook: refused: %s, and the end of its executable section could not be read from the "
+                                "PE header; the scheduler stack probe stands down.",gameBuildText());
+            }
+            return "identity_mismatch";
+        }
+        probe->setScanHi(scanHi);
         if(!ensureInstalled(base))return "install_failed";
         if(!schedulerStackHooksMatch(base))return "opcode_mismatch";
         // Targets 0/1 are observed through the kinematic eval hook's job

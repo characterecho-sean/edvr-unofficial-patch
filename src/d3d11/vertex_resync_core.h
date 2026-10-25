@@ -38,17 +38,25 @@
 namespace edvr {
 namespace vresync {
 
-// ---- identity: build 334925 (EliteDangerous64.exe, SHA-256 ed5a8f8c...e264b63), the pair every build-keyed hook here checks --------------------------------------
-constexpr uint32_t kExpectedTimestamp = 1792704584u;
-constexpr uint32_t kExpectedImageSize = 104906752u;
+// ---- FlushIA in build 334925 (EliteDangerous64.exe, SHA-256 ed5a8f8c...e264b63); other builds find it by signature (src\common\game_build.h, issue 124) ----------
 constexpr uintptr_t kFlushIaRva = 0x522B50u;   // 0x140522B50
 // The first 16 bytes of FlushIA, read from the exe (Epic and the analysis copy agree): mov [rsp+18h],rbx / push rsi / push rdi / push r14 / sub rsp,30h / mov rdi,r8.
 // CodeHook steals the first instruction (5 bytes, no relative operand) and nothing else.
 constexpr size_t kPrologueBytes = 16;
 constexpr uint8_t kFlushIaPrologue[kPrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B, 0xF8};
 
-inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) { return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize; }
-inline bool prologueMatches(const uint8_t* bytes, size_t n) { return bytes && n >= kPrologueBytes && std::memcmp(bytes, kFlushIaPrologue, kPrologueBytes) == 0; }
+// The install decision (vertex_resync_hook.cpp vertexResyncInstall). identityRead false: the PE header was unreadable. flushIaRva: where FlushIA is in the running
+// build -- kFlushIaRva itself on build 334925, the address the signature resolver found on an unknown build, 0 when it found none (kNotFound: the hook stands down).
+// got null: the prologue was unreadable. pinMatches: the sixteen bytes read there are the pin (gamePinMatches: an exact compare on build 334925; on an unknown build the
+// bytes the signature masks are skipped and every other byte must match). The glue resolves and passes the answers in; this header calls no resolver.
+enum class Install : uint8_t { kInstall = 0, kUnreadable, kNotFound, kWrongPrologue };
+inline Install installDecision(bool identityRead, uintptr_t flushIaRva, const uint8_t* got, bool pinMatches) {
+    if (!identityRead) return Install::kUnreadable;
+    if (flushIaRva == 0) return Install::kNotFound;
+    if (got == nullptr) return Install::kUnreadable;
+    if (!pinMatches) return Install::kWrongPrologue;
+    return Install::kInstall;
+}
 
 // ---- the f3d layout, as offsets from the three pointers FlushIA is called with --------------------------------------------------------------------------------
 constexpr uint32_t kMaxSlots = 16;           // the arrays below hold sixteen slots each (the desired offsets start 0x80 bytes after the desired wrappers)

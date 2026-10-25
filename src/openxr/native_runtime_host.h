@@ -3421,19 +3421,45 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // compensation and the rotation calibration's yaw included) kept exactly, the look is rebased onto it (lookRebase: the new origin carries the turn, so the compensation is zero and
   // the base is the provider's total now; the alignment and the pitch overlays are applied again by eyePoll, rotPoll and adsPoll, called after this one), and the seated space is
   // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing, the seat memory is not asked and the stored seat never
-  // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The ask is consumed once. Refused, and said: the seat memory does not place the player on foot, a stored seat
+  // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The action succeeds once. A temporarily untracked head is retried for at most 0.5 s while the same ask
+  // stands in the same reference generation; withdrawal, a changed reference, and leaving on foot cancel it. Refused, and said: the seat memory does not place the player on foot, a stored seat
   // is due (a boarding), the rotation calibration is on (it would be applied twice), the head is not tracked. A frame open leaves the ask pending for the next poll.
   uint32_t positionRecentreHandled=0;uint64_t positionRecentres=0,positionRecentreRefusals=0;
+  static constexpr uint64_t kPositionRecentreRetryMs=500;
+  uint32_t positionRecentreRetry=0;uint64_t positionRecentreRetryMs=0,positionRecentreRetryOrigin=0,positionRecentreRetryGeometry=0;
+  bool positionRecentreRetryTraced=false;
   bool positionRecentrePoll() {
     if(!features.acquired()||!featureFrameKnown||!seated.space()||!changes.active())return false;
-    const uint32_t ask=featureFrame.positionRecentre;
-    if(ask==0||ask==positionRecentreHandled)return false;
-    if(state.frameOpen()||GetCurrentThreadId()!=ownerThread)return false;
-    positionRecentreHandled=ask;
-    return applyPositionRecentre(ask);
+    return positionRecentreDispatch(featureFrame.positionRecentre,GetTickCount64());
+  }
+  // Owner-side delivery, also driven by the rig: a transient locate refusal must not consume a contact latch's only request.
+  bool positionRecentreDispatch(uint32_t ask,uint64_t now) {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    if(ask==0) {
+      if(positionRecentreRetry)positionRecentreHandled=positionRecentreRetry;
+      positionRecentreRetry=0;
+      return false;
+    }
+    if(ask==positionRecentreHandled)return false;
+    if(ask!=positionRecentreRetry) {
+      positionRecentreRetry=ask;positionRecentreRetryMs=now;positionRecentreRetryOrigin=poses.read().originGeneration;
+      positionRecentreRetryGeometry=geometryGeneration;positionRecentreRetryTraced=false;
+    }
+    const bool expired=now>=positionRecentreRetryMs&&now-positionRecentreRetryMs>=kPositionRecentreRetryMs;
+    if(expired||positionRecentreRetryOrigin!=poses.read().originGeneration||positionRecentreRetryGeometry!=geometryGeneration) {
+      positionRecentreHandled=ask;positionRecentreRetry=0;
+      nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s\n",unsigned(ask),expired?"tracking retry expired":"reference changed before retry");
+      return false;
+    }
+    if(state.frameOpen())return false;
+    bool retry=false;
+    const bool applied=applyPositionRecentre(ask,&retry);
+    if(applied||!retry){positionRecentreHandled=ask;positionRecentreRetry=0;}
+    return applied;
   }
   // The action of an ask (owner thread, no frame open, the seated space there): the rig drives it directly.
-  bool applyPositionRecentre(uint32_t ask) {
+  bool applyPositionRecentre(uint32_t ask,bool* retry=nullptr) {
+    if(retry)*retry=false;
     const char* why=nullptr;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime t=0;
     if(seat.where()!=SeatWhere::OnFoot)why="the seat memory does not place the player on foot";
@@ -3442,7 +3468,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else {
       const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&t,counterNow,nullptr,boundary.estimateNow());
       constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked)why="the head is not tracked";
+      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked){why="the head is not tracked";if(retry)*retry=true;}
     }
     if(!why&&!lookSeatedKnown)lookRebase();
     const SeatPose beforeSeated=lookSeated;
@@ -3453,7 +3479,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(why) {
       ++positionRecentreRefusals;
-      nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s,refusals=%llu\n",unsigned(ask),why,(unsigned long long)positionRecentreRefusals);
+      if(!retry||!*retry||!positionRecentreRetryTraced)
+        nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s,refusals=%llu\n",unsigned(ask),why,(unsigned long long)positionRecentreRefusals);
+      if(retry&&*retry)positionRecentreRetryTraced=true;
       return false;
     }
     currentOrigin=next;

@@ -207,9 +207,10 @@ try {
 
 Write and review release notes before creating the draft. Generate the Thanks
 section from the previous tag, then write each contributor's sentence by hand.
-Only merged PR authors are named; issue and log reporters get the tool's
-general line. Review the final notes file, then attach the three verified ZIPs
-and `SHA256SUMS` to a draft release:
+Only merged PR authors are named, plus anyone the maintainer approved by name
+in `tools/release_credits_approved.json` for a commit in the release. Issue and
+log reporters get the tool's general line. Review the final notes file, then
+attach the three verified ZIPs and `SHA256SUMS` to a draft release:
 
 ```powershell
 python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out thanks.md

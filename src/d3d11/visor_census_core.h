@@ -159,7 +159,10 @@ inline Census cpuModel(const float* rgb, uint32_t width, uint32_t height, bool e
 
 // F121c: the replacement turns itself off on a sample that proves it broke the scene: taken right after a draw THROUGH the replacement vertex shader, with any
 // non-finite tap (a clean scene has none; the flight of 2026-10-25 15:11 had every tap NaN). A sample after a draw the game's own shader made proves nothing about us.
-inline bool selfOffVerdict(bool drawnThroughReplacement, const Census& c) noexcept { return drawnThroughReplacement && c.ok && c.nonFinite > 0u; }
+// A delayed sample from before the key was cycled belongs to the old attempt. Drain its GPU slot normally, but it cannot turn the retry off.
+inline bool selfOffVerdict(bool drawnThroughReplacement, const Census& c, uint64_t sampleAttempt, uint64_t currentAttempt) noexcept {
+    return sampleAttempt == currentAttempt && drawnThroughReplacement && c.ok && c.nonFinite > 0u;
+}
 
 // One second of samples, by the key's state (a sample under the other state closes the second).
 struct Window {
