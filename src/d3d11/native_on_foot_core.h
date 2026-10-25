@@ -2220,6 +2220,7 @@ struct NativePrimarySelectionInput {
 };
 struct NativePrimarySelectionDecision {
     bool readable = false, suspended = false, primary = false, identityChanged = false, terminate = false;
+    bool held = false;   // F99a: the selection is an item in any slot (not the holster, not 0xFFFFFFFF); readable selections only
     bool duplicate = false, reversed = false, frameGap = false, primaryIntent = false;
     uint64_t epoch = 0;
     uint32_t selectedId = 0;
@@ -2245,6 +2246,7 @@ class NativePrimarySelectionState {
         if (sameFrame) {
             out.duplicate = true;
             out.primary = primary_;
+            out.held = held_;
             out.selectedId = selected_;
             return out;
         }
@@ -2252,6 +2254,7 @@ class NativePrimarySelectionState {
             out.reversed = true;
             out.suspended = true;
             out.primary = primary_;
+            out.held = held_;
             out.selectedId = selected_;
             return out;
         }
@@ -2268,18 +2271,20 @@ class NativePrimarySelectionState {
         if (!have_ || keyChanged) ++epoch_;
         have_ = true;
         primary_ = uniquePrimary;
+        held_ = in.selectedId != in.holsterId && in.selectedId != 0xFFFFFFFFu;
         sink_ = in.sink;
         inventory_ = in.inventory;
         selected_ = in.selectedId;
         frame_ = in.renderFrame;
         qpc_ = in.qpc;
         out.primary = primary_;
+        out.held = held_;
         out.selectedId = selected_;
         out.epoch = epoch_;
         return out;
     }
     void reset() noexcept {
-        have_ = primary_ = false;
+        have_ = primary_ = held_ = false;
         sink_ = inventory_ = 0;
         selected_ = frame_ = 0;
         qpc_ = 0;
@@ -2287,7 +2292,7 @@ class NativePrimarySelectionState {
     }
 
   private:
-    bool have_ = false, primary_ = false;
+    bool have_ = false, primary_ = false, held_ = false;
     uintptr_t sink_ = 0, inventory_ = 0;
     uint32_t selected_ = 0, frame_ = 0;
     uint64_t qpc_ = 0, epoch_ = 0;

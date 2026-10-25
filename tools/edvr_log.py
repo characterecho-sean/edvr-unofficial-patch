@@ -11105,6 +11105,42 @@ def _hj_f98a_elbow(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f99a_draw(rows, ctx):
+    """F99a: one line per draw (the game's selection of an item while Status.json named none): when Status.json named it, where the hands' authority came from
+    and when, when the armed ramp was full, all from the game's selection. A draw the game selected 100 ms or more before Status.json named it whose hands waited
+    for Status.json is late; every such draw late is the bridge never arming the hands."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+
+    def ms(v):
+        m = re.match(r"at \+(\d+) ms", v)
+        return int(m.group(1)) if m else None
+
+    parts, late, fixed = [], [], 0
+    for r in sec:
+        if r["sel"] == "not seen":
+            parts.append("%s (%s): the game's selection not seen, the hands from %s" % (r["item"], r["body"], r["src"]))
+            continue
+        lead, at, full = ms(r["status"]), ms(r["at"]), ms(r["full"])
+        parts.append("%s (%s): Status.json %s, the hands from %s %s, full %s" % (
+            r["item"], r["body"], "+%d ms" % lead if lead is not None else "never", r["src"], "+%d ms" % at if at is not None else "never",
+            "+%d ms" % full if full is not None else "never"))
+        if r["src"] == "Status.json" and (lead is None or lead >= 100):
+            late.append("%s %s" % (r["item"], "+%d ms" % lead if lead is not None else "never named"))
+        elif r["src"] != "Status.json":
+            fixed += 1
+    last = sec[-1]
+    text = "%d draws: %s; bridges started %s, released unnamed %s, put away %s" % (len(sec), "; ".join(parts), last["started"], last["expired"], last["away"])
+    if late and not fixed:
+        return ("NEVER APPLIED", text + "; every draw's hands waited for Status.json (%s)" % ", ".join(late))
+    if late:
+        return ("PARTIAL", text + "; hands that waited for Status.json: %s" % ", ".join(late))
+    if not fixed:
+        return ("IDLE", text + "; no draw the game selected ahead of Status.json")
+    return ("OK", text)
+
+
 def _hj_f98c_eye(rows, ctx):
     """F98c: the settled targets by source, unarmed and armed, and the eye's height they put the view at. Armed, the eye stands over the stored unarmed neck of the
     stance; the starting raise is for a session with no unarmed stance stored. The starting raise taken after a second that closed with one stored, or unarmed
@@ -11426,6 +11462,12 @@ HEALTH_RULES = (
                 r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
                 r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)" % ((_HN,) * 6)),
     ), _hj_f98a_elbow),
+    _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
+        ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
+                r"named it (?P<status>at \+\d+ ms|never); the hands' authority from (?P<src>the game's selection|the native primary selection|Status\.json) "
+                r"(?P<at>at \+\d+ ms|never); the armed ramp full (?P<full>at \+\d+ ms|never); bridges started (?P<started>\d+), released unnamed (?P<expired>\d+), "
+                r"put away (?P<away>\d+)"),
+    ), _hj_f99a_draw),
     _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
         ("sec", r"native on foot eye level \(F98c\) 1 s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)\), armed (?P<ar>\d+): "
                 r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
@@ -12759,6 +12801,20 @@ def self_test_health():
         check("F98a elbow: the F97 flight's swung elbow", [elbow98(plane=92.0, over45=76)] * 3 + [elbow98()], 0, [("PARTIAL", F98)],
               has=["the elbow swung off the stance's plane (" + RIFLE97 + " 3 s)"])
         check("F98a elbow: the elbow jumped", [elbow98(over10=2, step=3.0)], 0, [("PARTIAL", F98)], has=["the elbow jumped (" + RIFLE97 + " 2)"])
+
+        # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
+        F99 = "draw onset (F99a)"
+        TOOL99 = "$humanoid_companalyser_name;"
+
+        def draw99(item=TOOL99, sel="id 00000005", body="moving", status="at +686 ms", src="the game's selection", at="at +0 ms", full="at +300 ms", n=1):
+            return R("native on foot draw onset (F99a): item %s", item, sel, body, status, src, at, full, n, 0, 0)
+
+        check("F99a draw: the hands from the game's selection", [draw99(), draw99("$humanoid_rechargetool_name;", "id 00000004", status="at +288 ms", n=2)], 0,
+              [("OK", F99)], has=[TOOL99 + " (moving): Status.json +686 ms, the hands from the game's selection +0 ms, full +300 ms"], lacks=["UNPARSED"])
+        check("F99a draw: the F98 build's draws (the hands waited for Status.json)", [draw99(src="Status.json", at="at +686 ms", full="at +983 ms", n=0)] * 2, 3,
+              [("NEVER APPLIED", F99)], has=["every draw's hands waited for Status.json (" + TOOL99 + " +686 ms"])
+        check("F99a draw: one draw late of two", [draw99(), draw99(status="at +432 ms", src="Status.json", at="at +432 ms", full="at +729 ms")], 0, [("PARTIAL", F99)],
+              has=["hands that waited for Status.json: " + TOOL99 + " +432 ms"])
 
         # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
         F98C = "eye level (F98c)"

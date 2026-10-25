@@ -43,6 +43,7 @@
 #include "native_on_foot_f97b.h"   // F97b: the interaction label sized like a panel in the world at its anchor (pure parts)
 #include "native_on_foot_f98b.h"   // F98b: the interaction label placed in the world, upright and facing the head's position (pure parts)
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
+#include "native_on_foot_f99.h"   // F99a: a drawn item's hands from the game's own selection, not from Status.json (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -5960,6 +5961,7 @@ struct F83SelectionSample {
     uintptr_t sink = 0, inventory = 0;
     uint64_t epoch = 0, epochQpc = 0, qpc = 0;
     bool readable = false, suspended = false, primary = false, followEligible = false;
+    bool held = false;   // F99a: an item in any slot is selected (readable selections only)
 };
 F83SelectionSample g_f83Selection;
 nofoot::NativePrimarySelectionState g_f83SelectionState;
@@ -5971,6 +5973,7 @@ struct F83SelectionRead {
     uintptr_t sink = 0, inventory = 0;
     uint64_t epoch = 0, epochQpc = 0, qpc = 0;
     bool readable = false, suspended = false, primary = false, followEligible = false;
+    bool held = false;
 };
 bool f83SelectionRead(F83SelectionRead* out) noexcept {
     if (!out) return false;
@@ -5982,6 +5985,7 @@ bool f83SelectionRead(F83SelectionRead* out) noexcept {
         out->epoch = g_f83Selection.epoch; out->epochQpc = g_f83Selection.epochQpc; out->qpc = g_f83Selection.qpc;
         out->readable = g_f83Selection.readable; out->suspended = g_f83Selection.suspended; out->primary = g_f83Selection.primary;
         out->followEligible = g_f83Selection.followEligible;
+        out->held = g_f83Selection.held;
         std::atomic_thread_fence(std::memory_order_acquire);
         if (g_f83Selection.seq.load(std::memory_order_relaxed) == s1) return true;
     }
@@ -6031,6 +6035,7 @@ void f83ObserveNativeSelection(void* activity) noexcept {
     g_f83Selection.epoch = d.epoch; g_f83Selection.epochQpc = g_f83SelectionEpochQpc; g_f83Selection.qpc = in.qpc;
     g_f83Selection.readable = d.readable; g_f83Selection.suspended = d.suspended; g_f83Selection.primary = publishedPrimary;
     g_f83Selection.followEligible = g_f83FollowEligible;
+    g_f83Selection.held = d.readable && d.held;
     g_f83Selection.seq.fetch_add(1, std::memory_order_release);
 }
 void __fastcall lookUpdateHooked(void* act) {
@@ -10482,6 +10487,29 @@ uint64_t g_f66aLineMs = 0, g_f66aPubLast = 0;
 uint32_t g_f66aN = 0, g_f66aArmedN = 0, g_f66aUnknownN = 0, g_f66aGateFreshN = 0, g_f66aGateHeldN = 0, g_f66aGateHeldUnarmedN = 0;
 uint32_t g_f66aArmedNoGripN = 0, g_f66aSamples = 0;
 double g_f66aGateSum = 0.0;
+// F99a (frame thread): the hands' bridge from the game's selection until Status.json names the item, its counts, and the draw-onset record (native_on_foot_f99.h).
+nofoot::f99::Bridge g_f99Bridge;
+nofoot::f99::Onset g_f99Onset;
+uint32_t g_f99Started = 0, g_f99Expired = 0, g_f99PutAway = 0;
+void f99OnsetLine(const nofoot::f99::OnsetRecord& r) noexcept {
+    char item[64] = {};
+    journalHeldItemName(item, sizeof(item));
+    if (!item[0]) std::snprintf(item, sizeof(item), "none");
+    char sel[24], st[24], at[24], full[24];
+    if (r.native) std::snprintf(sel, sizeof(sel), "id %08X", r.id);
+    else std::snprintf(sel, sizeof(sel), "not seen");
+    if (r.statusSeen) std::snprintf(st, sizeof(st), "at +%.0f ms", 1000.0 * r.tStatus);
+    else std::snprintf(st, sizeof(st), "never");
+    if (r.onsetSeen) std::snprintf(at, sizeof(at), "at +%.0f ms", 1000.0 * r.tOnset);
+    else std::snprintf(at, sizeof(at), "never");
+    if (r.fullSeen) std::snprintf(full, sizeof(full), "at +%.0f ms", 1000.0 * r.tFull);
+    else std::snprintf(full, sizeof(full), "never");
+    // Times from the record's opening: the game's selection when it was seen, else Status.json naming the item.
+    Log::get().note("native on foot draw onset (F99a): item %s; the game's selection %s; body %s; Status.json named it %s; the hands' authority from %s %s; the armed "
+                    "ramp full %s; bridges started %u, released unnamed %u, put away %u",
+                    item, sel, r.moving ? "moving" : "still", st, nofoot::f99::sourceName(r.onsetSeen ? r.source : nofoot::f99::kFromStatus), at, full,
+                    g_f99Started, g_f99Expired, g_f99PutAway);
+}
 // F66b (frame thread): the frame clock. The previous tick's QPC ticks and ms stamp, and the second's sums: ticks, ticks whose dt was 0 on the
 // QPC clock (the new one) and on the ms clock (the old one, counted beside it so the defect is measured, not assumed), ticks capped at 50 ms,
 // and dt's sum, minimum and maximum (s).
@@ -11083,12 +11111,47 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     journalWatchSetEagerStatusOnFoot(active);
     const JournalHeldItem kind = active ? journalHeldItem() : kHeldUnknown;
     F83SelectionRead f83{};
-    const bool nativePrimary = active && f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
-    g_armed = active && (kind == kHeldItem || nativePrimary);
+    const bool f83Read = active && f83SelectionRead(&f83) && f83SelectionFresh(f83);
+    const bool nativePrimary = f83Read && f83.readable && f83.primary && f83.followEligible;
+    // F99a: an item the game has just selected arms the hands at once, until Status.json names it (native_on_foot_f99.h): Status.json wrote a drawn tool's name
+    // 288-686 ms after the game's selection in the F98 flight, and the hands waited for it. A primary has its own native path (F83's draw follow). The draw's
+    // identity (the held item serial: the off hand's acquisition, the elbow's pole) starts with the game's selection and is kept when Status.json names the item.
+    const bool f99NativeOk = f83Read && f83.readable && !f83.suspended;
+    nofoot::f99::BridgeIn bi;
+    bi.active = active && kind != kHeldUnknown;   // Status.json read: a selection it never names is not bridged
+    bi.nativeOk = f99NativeOk;
+    bi.nativeId = f83.selectedId;
+    bi.nativeHeld = f83.held && !f83.primary;
+    bi.statusHeld = kind == kHeldItem;
+    bi.dt = dt;
+    const nofoot::f99::BridgeOut bo = g_f99Bridge.step(bi);
+    if (bo.started) {
+        ++g_f99Started;
+        g_heldItemChangedMs.store(now, std::memory_order_relaxed);
+        g_heldItemSerial.fetch_add(1, std::memory_order_release);   // the profile stays the fists' until Status.json names the item
+    }
+    if (bo.expired) ++g_f99Expired;
+    if (bo.putAway) ++g_f99PutAway;
+    g_armed = active && (kind == kHeldItem || nativePrimary || bo.armed);
     g_f68dFists.store(kind != kHeldItem, std::memory_order_relaxed);   // F68d: the detector's fists input (unknown counts as fists)
     if (!active) g_armedBlend.w = 0.0f;
     else g_armedBlend.step(g_armed, dt);
     g_armedW.store(g_armedBlend.w, std::memory_order_relaxed);
+    {   // F99a: the draw-onset record (the selection read again here, apart from the bridge: a build whose bridge never armed reads the authority from Status.json)
+        nofoot::f99::OnsetIn oi;
+        oi.active = active;
+        oi.nativeOk = f99NativeOk;
+        oi.nativeId = f83.selectedId;
+        oi.nativeHeld = f83.held;
+        oi.statusHeld = kind == kHeldItem;
+        oi.armed = g_armed;
+        oi.source = nativePrimary ? nofoot::f99::kFromPrimary : bo.armed ? nofoot::f99::kFromSelection : nofoot::f99::kFromStatus;
+        oi.w = static_cast<double>(g_armedBlend.w);
+        oi.moving = g_f95Moving.load(std::memory_order_relaxed);
+        oi.dt = dt;
+        nofoot::f99::OnsetRecord rec;
+        if (g_f99Onset.step(oi, &rec)) f99OnsetLine(rec);
+    }
     char name[64] = {};
     journalHeldItemName(name, sizeof(name));
     if (!active) {
@@ -11106,8 +11169,10 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
         if (g_f66aKindLast >= 0) f68dFlip(now, static_cast<int>(kind), name);   // F68d: the onset window (not for the first reading)
         g_f66aKindLast = static_cast<int>(kind);
         std::memcpy(g_f66aNameLast, name, sizeof(g_f66aNameLast));
-        g_heldItemChangedMs.store(now, std::memory_order_relaxed);
-        g_heldItemSerial.fetch_add(1, std::memory_order_release);   // F69b/F74: publish the new item only after its profile and onset time
+        if (!bo.confirmed) {   // F99a: a draw the bridge opened keeps its serial (and onset time) when Status.json names it; only its profile changes
+            g_heldItemChangedMs.store(now, std::memory_order_relaxed);
+            g_heldItemSerial.fetch_add(1, std::memory_order_release);   // F69b/F74: publish the new item only after its profile and onset time
+        }
     }
     g_opticHeldItem.seq.fetch_add(1, std::memory_order_acq_rel);
     g_opticHeldItem.serial = g_heldItemSerial.load(std::memory_order_relaxed);

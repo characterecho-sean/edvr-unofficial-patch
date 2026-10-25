@@ -27,6 +27,7 @@
 #include "f97b_checks.h"    // F97b: the interaction label sized like a panel at its anchor facing the eye
 #include "f98_checks.h"     // F98a: the left elbow's stable pole transported from its seed
 #include "f98b_checks.h"    // F98b: the interaction label placed in the world, upright and facing the neck's pivot
+#include "f99_checks.h"     // F99a: a drawn item's hands from the game's own selection, not from Status.json
 
 #include <array>
 #include <chrono>
@@ -7217,6 +7218,8 @@ int wmain(int argc, wchar_t** argv) {
     f98test::run98(check);
     // F98b: the label upright and facing the neck's pivot: still through head turns (F97b's eye-facing placement not), scaled by distance, the guards.
     f98btest::run98b(check);
+    // F99a: the hands' bridge from the game's selection until Status.json names the item, its releases, and the draw-onset instrument.
+    f99test::run99(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
