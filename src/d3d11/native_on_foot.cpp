@@ -1479,9 +1479,16 @@ void gateByteTick(bool wantByte, const char* restoreReason) {
 }
 
 // The avatar census (F1, log only): the local third-person avatar's parts and view masks, from the head-hiding capture (native_on_foot_hooks.cpp), read-only.
+// F125: read every 5 s as before; written when the AMC, the fade mode, the part list or which of a part's mask words are set differ from the last written
+// snapshot (at most once per 30 s), otherwise once a minute; every 5 s in the detail log. The masks' own bits come and go with the scene's views, so they
+// are not part of the signature.
 uint64_t g_lastAvatarMs = 0;   // frame thread only
+nofoot::logwin::Snapshot g_avatarSnap;   // frame thread only (F125)
 void avatarLine(uint64_t nowMs) {
-    if (!nativeOnFootActive()) return;
+    if (!nativeOnFootActive()) {
+        g_avatarSnap.clear();   // F125: the next time on foot starts with a written snapshot
+        return;
+    }
     if (nowMs - g_lastAvatarMs < 5000) return;
     g_lastAvatarMs = nowMs;
     int32_t fade = 0;
@@ -1491,6 +1498,16 @@ void avatarLine(uint64_t nowMs) {
     static LocalAvatarPart parts[64];
     uint64_t amc = 0;
     const uint32_t count = localAvatarParts(parts, 64, &amc);
+    {
+        namespace lw = nofoot::logwin;
+        uint64_t sig = lw::sigMix(lw::sigText(lw::kSigSeed, fadeText), amc);
+        for (uint32_t i = 0; i < count; ++i) {
+            const LocalAvatarPart& p = parts[i];
+            sig = lw::sigMix(lw::sigText(sig, p.name), (p.head ? 1u : 0u) | (p.ok ? 2u : 0u));
+            sig = lw::sigNonZero(sig, p.masks, 4);
+        }
+        if (!g_avatarSnap.due(lw::sigMix(sig, count), nowMs, lw::detail())) return;
+    }
     if (!amc) {
         Log::get().note("native on foot avatar: no local third-person avatar latched yet; fade mode %s (-1 auto, 0 off)", fadeText);
         return;
@@ -1548,6 +1565,10 @@ void neckLine(uint64_t nowMs) {
     if (nowMs - g_neckWindowMs < 1000) return;
     g_neckWindowMs = nowMs;
     if (!g_neckHave) return;
+    if (!nofoot::logwin::detail()) {   // F125: the detail log's line; the second still closes and its min and max start again
+        g_neckSamples = 0;
+        return;
+    }
     const bool headOk = g_neckLast.state == 5, camOk = g_neckLast.amcState == 1 && headOk;
     char head[64], cam[64], d[64], dmin[64], dmax[64];
     neckFormat(g_neckLast.head, headOk, head, sizeof(head));
@@ -1567,6 +1588,7 @@ void gateLine(uint64_t nowMs) {
     g_nativeOnFootGates[size_t(NativeOnFootGate::Frames)].fetch_add(1, std::memory_order_relaxed);
     if (nowMs - g_lastGateLineMs < 5000) return;
     g_lastGateLineMs = nowMs;
+    if (!nofoot::logwin::detail()) return;   // F125: counters since launch, the detail log's line (the frames counter above counts either way)
     uint64_t v[size_t(NativeOnFootGate::Count)];
     for (size_t i = 0; i < size_t(NativeOnFootGate::Count); ++i) v[i] = g_nativeOnFootGates[i].load(std::memory_order_relaxed);
     Log::get().note("native on foot gates: frames=%llu world_route=%llu ui_layer=%llu foot_split=%llu deferred_pacing=%llu panel_shape=%llu "
@@ -1625,6 +1647,7 @@ void hudStackDrain() {
         dropped = g_hudDropped;
         g_hudDropped = 0;
     }
+    if (!nofoot::logwin::detail()) return;   // F125: the captured stacks and the dropped count are the detail log's; the ring is drained either way
     if (dropped) {
         Log::get().note("native on foot hud stack: %llu capture(s) dropped (the ring of %zu was full)", static_cast<unsigned long long>(dropped), kHudRing);
     }
@@ -1701,15 +1724,31 @@ void logFpBodyReadback() {
                     static_cast<unsigned long long>(rb.amc), static_cast<unsigned long long>(rb.mode2Seen), text.c_str());
 }
 
+// F125: the window is taken every 5 s as before. The rows are written when their count or the modes among them differ from the last written ones (at most
+// once per 30 s), otherwise once a minute: the six AMCs kept of a full table change from one window to the next, and the distance moves every sample, so
+// neither the addresses nor the distance are signed. The count of AMCs not collected is said when it changes. All of it every 5 s in the detail log.
+nofoot::logwin::Snapshot g_fpCensusSnap;      // frame thread only (F125)
+nofoot::logwin::CountChange g_fpDroppedSay;   // frame thread only (F125)
 void avatarCensusLine(uint64_t nowMs) {
     if (nowMs - g_lastFpMs < 5000) return;
     g_lastFpMs = nowMs;
     static AvatarCensusRow rows[kFpRows];   // about 18 KB, frame thread only
     uint32_t seen = 0, dropped = 0;
     const uint32_t n = avatarCensusTake(rows, kFpRows, &seen, &dropped);   // clears the window even when the key is off
-    if (!nativeOnFootActive()) return;
-    if (g_fpKeyOn.load(std::memory_order_relaxed)) logFpBodyReadback();
-    if (dropped) Log::get().note("native on foot avatars: %u AMC(s) not collected in the last 5 s (eight slots were full)", dropped);
+    if (!nativeOnFootActive()) {
+        g_fpCensusSnap.clear();   // F125: the next time on foot starts with written rows
+        g_fpDroppedSay = nofoot::logwin::CountChange{};
+        return;
+    }
+    namespace lw = nofoot::logwin;
+    const bool detailOn = lw::detail();
+    if (g_fpKeyOn.load(std::memory_order_relaxed) && detailOn) logFpBodyReadback();   // F125: the detail log's line
+    if (g_fpDroppedSay.due(dropped, detailOn))
+        Log::get().note("native on foot avatars: %u AMC(s) not collected in the last 5 s (eight slots were full)", dropped);
+    uint64_t sig = lw::sigMix(lw::kSigSeed, n);
+    if (n == 0) sig = lw::sigMix(sig, seen);   // "none kept" says the count seen
+    for (uint32_t i = 0; i < n; ++i) sig = lw::sigSetAdd(sig, static_cast<uint32_t>(rows[i].mode));   // the modes, as a multiset
+    if (!g_fpCensusSnap.due(sig, nowMs, detailOn)) return;
     if (n == 0) {
         Log::get().note("native on foot avatars: none kept in the last 5 s (seen=%u)", seen);
         return;
@@ -1834,6 +1873,7 @@ std::string censusSlotText(const char* label, bool okW, uintptr_t slotAddr) {
 
 void hudCensusTick(uint64_t nowMs, bool session) {
     if (!session) return;
+    if (!nofoot::logwin::detail()) return;   // F125: the census is the detail log's line; its reads serve only the line
     const uint64_t sel = g_frozenSelector.load(std::memory_order_acquire);
     std::string text = "native on foot hud census:";
     if (!sel) {
@@ -4169,7 +4209,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
             float H[16] = {};
             f31NowMatrix(C, rp.render, lead, H);
             std::memcpy(C, H, sizeof(C));
-            if (now - g_f38LeadLineMs >= 5000 || g_f38LeadLineMs == 0) {
+            if ((now - g_f38LeadLineMs >= 5000 || g_f38LeadLineMs == 0) && nofoot::logwin::detail()) {   // F125: the detail log's line (cached key: game thread)
                 g_f38LeadLineMs = now;
                 const double perFrame = rp.ringCount >= 2 ? nofoot::rotDeltaDeg(rp.ringHead[i0], rp.ringHead[i1]) : 0.0;
                 const double leadDeg = nofoot::rotDeltaDeg(rp.ringHead[i0], lead);
@@ -4179,7 +4219,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
         }
     }
     // F40: M (the marker camera read at entry, F37) against this call's list-B view (C) and against the runtime's now answer, every 5 s.
-    if (sc.valid && sc.mOk && now - g_f40MarkerLogMs >= 5000) {
+    if (sc.valid && sc.mOk && now - g_f40MarkerLogMs >= 5000 && nofoot::logwin::detail()) {   // F125: the detail log's line; the read serves only it
         EdvrNativeNowPose q{};
         if (nativeFrameNowPose(q) && q.nowValid) {
             float nowM[16] = {};
@@ -4236,8 +4276,9 @@ void __fastcall reticleWorldPost(void* node) noexcept {
         g_f44Tagged.fetch_add(1, std::memory_order_relaxed);
         f53KeyTagged(key);
     }
-    if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
-        g_worldLineMs = now;
+    // F125: the 5 s lines are the detail log's (the cached key: this is a game thread); the window below closes and its sums start again either way.
+    const bool worldLineDue = now - g_worldLineMs >= 5000 || g_worldLineMs == 0;
+    if (worldLineDue && nofoot::logwin::detail()) {
         const float yawC = static_cast<float>(std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10])) * 180.0 / 3.14159265358979323846);
         Log::get().note("native on foot world markers: key %u: mode %s; t (game) (%.3f, %.3f, %.3f) -> t' (written) (%.3f, %.3f, %.3f); C yaw %.2f deg (row 2 x, z)",
                         static_cast<unsigned>(key), wmMode == 0 ? "fixed" : wmMode == 3 ? "forward_now" : "forward", static_cast<double>(t[0]), static_cast<double>(t[1]),
@@ -4282,6 +4323,9 @@ void __fastcall reticleWorldPost(void* node) noexcept {
                         static_cast<unsigned long long>(g_f37Hist[6]), static_cast<unsigned long long>(g_f37Hist[7]), static_cast<unsigned long long>(g_f37Fallback),
                         g_f37ResN ? g_f37ResSum / static_cast<double>(g_f37ResN) : 0.0, static_cast<unsigned long long>(g_f37ResN),
                         static_cast<unsigned long long>(g_f37AgePickMax), static_cast<unsigned long long>(g_f37AgeNewMax), wmMode);
+    }
+    if (worldLineDue) {
+        g_worldLineMs = now;
         for (uint64_t & h : g_f37Hist) h = 0;
         g_f37Fallback = g_f37ResN = 0;
         g_f37ResSum = 0.0;
@@ -4491,6 +4535,7 @@ void f14FrameTick(uint64_t nowMs) {
         for (size_t i = 0; i < kF14Keys; ++i) rows[i] = g_f14Keys[i];
         for (auto& r : g_f14Keys) r.n = 0;
     }
+    if (!nofoot::logwin::detail()) return;   // F125: the indicator rows are the detail log's; their counts were taken and cleared above as before
     for (const F14Key& r : rows) {
         if (!r.used || r.n == 0) continue;
         char pos[64];
@@ -6428,6 +6473,7 @@ void rigProbeB(void* amc, uint64_t now) {
     const size_t slot = mode - 2;
     if (g_rigBLastMs[slot] != 0 && now - g_rigBLastMs[slot] < 5000) return;
     g_rigBLastMs[slot] = now;
+    if (!nofoot::logwin::detail()) return;   // F125: the probe's line is the detail log's, and its reads (the root getter too) serve only the line (cached key)
     uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
     const bool okObj = guardedRead(a + 0x208, &obj, 8) && obj && guardedRead(obj, &vt, 8) && vt && guardedRead(vt + 0x20, &fn, 8) && fn;
     float m[16] = {};
@@ -9133,6 +9179,7 @@ void eyeProbeLine() {
     }
     if (!s.valid || !nofoot::f100::eyeLineDue(s.stamp, g_eyeLoggedStamp)) return;
     g_eyeLoggedStamp = s.stamp;
+    if (!nofoot::logwin::detail()) return;   // F125: the eye inputs and eye vs body lines are the detail log's; the gate above keeps its cadence
     // F21: the raw inputs, for a hand check of the derived line below. |cam - origin| is the camera's distance from the AMC origin (about the eye
     // height if both are in one frame); the row lengths are 1 for a plain rotation (anything else is a scale); |head model| is the head's height in
     // avatar-root space when the root sits at the feet, and it must equal |head world - origin| when the basis is orthonormal.
@@ -14362,6 +14409,9 @@ void tick(uint64_t now) noexcept {
         if (cr.calls) crow[nCallers++] = cr;
     }
     if (!live) return;
+    // F125: the census lines (and F56 probe 5's mapping lines, ikMappingLine) are the detail log's; the generation, the slot table and the counters above
+    // advance once a second either way.
+    if (!nofoot::logwin::detail()) return;
     Log::get().note("native on foot weapon (F54): MGMC submits %llu this second (%llu mask 0, %llu unreadable), %u tabled with mask != 0 (%llu "
                     "calls lost: table full); local FP weapon: %llu calls matched (read only; F66: nothing is shifted); handAttach (world) "
                     "FP R51 (%.3f, %.3f, %.3f) L52 (%.3f, %.3f, %.3f) %s; 3P R66 (%.3f, %.3f, %.3f) L67 (%.3f, %.3f, %.3f) %s",
@@ -19615,6 +19665,10 @@ void pfzIdentLine(int mode, bool ads, bool headFresh) noexcept {
         pfz::g_xTable[next][i].x.store(0, std::memory_order_relaxed);
     }
     pfz::g_xBank.store(next, std::memory_order_relaxed);
+    if (!nofoot::logwin::detail()) {   // F125: the identification lines are the detail log's; the banks above turn over every 5 s either way (the census reads them)
+        g_pfzOverflowLast = pfz::g_xOverflow.load(std::memory_order_relaxed);
+        return;
+    }
     uint64_t xs[pfz::kXSlots] = {}, ns[pfz::kXSlots] = {};
     uint32_t used = 0;
     for (uint32_t i = 0; i < pfz::kXSlots; ++i) {
@@ -19781,6 +19835,7 @@ void pfzTick(uint64_t now) {
     g_pfzLocalLast = local;
     g_pfzBusyLast = busy;
     pfzIdentLine(mode, ads, headFresh);   // F51: the local X's identification (candidates, the Animate X table), the gate's state
+    if (!nofoot::logwin::detail()) return;   // F125: the F49 statistics line is the detail log's; the window was taken and reset above as before
     if (!got || st.calls == 0) {
         Log::get().note("native on foot pose freeze (F49, %s): %llu Animate calls in 5 s, %llu for the local X %016llX (%llu skipped busy); %s",
                         kModeNames[mode], static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dLocal),
@@ -20520,6 +20575,13 @@ void armIkTick(uint64_t now) noexcept {
     static const char* const kModeNames[4] = {"off", "probe", "nudge", "on"};
     const uint64_t calls = g_ikCalls.load(std::memory_order_relaxed), gPub = g_ikGPublishes.load(std::memory_order_relaxed),
                    gRef = g_ikGRefusals.load(std::memory_order_relaxed);
+    if (!nofoot::logwin::detail()) {   // F125: the 5 s lines are the detail log's; the window was taken and reset above, and the 5 s deltas start again
+        for (uint32_t i = 0; i < kIkRefKinds; ++i) g_ikRefusedLast[i] = g_ikRefused[i].load(std::memory_order_relaxed);
+        g_ikCallsLast = calls;
+        g_ikGPubLast = gPub;
+        g_ikGRefLast = gRef;
+        return;
+    }
     char refusals[700] = {};
     size_t at = 0;
     for (uint32_t i = 0; i < kIkRefKinds; ++i) {
@@ -21205,6 +21267,9 @@ void f9ProbeTick(uint64_t nowMs) {
         else std::snprintf(caller, sizeof(caller), "?");
         Log::get().note("native on foot panel submit [%s]: caller=%s calls=%llu", g_f9StateName[r.st], caller, static_cast<unsigned long long>(r.window));
     }
+    // F125: the 5 s lines below (the HRC repeats, matrices and submit rows) are the detail log's; the window was cleared above as before, and the HRC
+    // line above is still written whenever its values change. The panel submit callers stay as they were.
+    if (!nofoot::logwin::detail()) return;
     for (uint8_t st = 0; st < 3; ++st) {
         if (!hrc[st].seen || hrcWritten[st]) continue;
         Log::get().note("native on foot hrc [%s]: %s calls=%llu", g_f9StateName[st], f9HrcValues(hrc[st]).c_str(),
@@ -21269,6 +21334,7 @@ void weaponUiTelemetryTick(uint64_t nowMs) {
     const bool patchActive = g_weaponUiPatchLive.load(std::memory_order_relaxed);
     if (!patchActive && getterState != 1 && !activated && !restored && !flag0 && !flag1 && !unmatched && !noTls && !refused && !overflow &&
         !getterEntered && !getterCaptured && !getterJoined && !getterRefused && !getterNoMatrix && !getterNoCamera) return;
+    if (!nofoot::logwin::detail()) return;   // F125: the weapon UI lines are the detail log's; the rows and counters were taken and cleared above as before
     const char* getterStateName = getterState == 1 ? "installed" : getterState == 2 ? "refused" : getterState == 3 ? "restored" : "untried";
     Log::get().note("native on foot weapon UI: branch=%s activated=%llu restored=%llu submit-original-facing0=%llu facing1=%llu unmatched=%llu no-TLS=%llu refused=%llu row-overflow=%llu submit-hook=%s; getter=%s entered=%llu captured=%llu joined=%llu refused=%llu missing-attachment=%llu missing-camera=%llu",
                     patchActive ? "active" : "inactive",

@@ -20,6 +20,7 @@
 #include "avatar_skeleton_core.h"
 #include "native_on_foot.h"   // nativeOnFootActive, nativeOnFootCameraExternal and the pose freeze's hand-off (pfz)
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
+#include "native_on_foot_logwin.h"   // F125: the detail key's cached value (the 5 s probe lines here are the detail log's)
 
 #include <windows.h>
 #include <intrin.h>
@@ -1812,6 +1813,7 @@ void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
         }
         return;
     }
+    if (!nofoot::logwin::detail()) return;   // F125: the cross-check's lines are the detail log's (GetModelMatrix and its fault note above run as before)
     float span[16] = {}, written[16] = {};
     bool wasWritten = false, got = false;
     uint64_t spanMs = 0;
@@ -2725,12 +2727,16 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
     if (s.stamp == 0 || s.stamp == g_clipLogStamp) return;
     g_clipLogStamp = s.stamp;
     g_clipLogMs = now;
+    // F125: the 5 s writes line and the per-part lines are the detail log's; the window is taken as before, and the flags line (once per AMC) and the
+    // on / off / not-reached lines above are written either way.
+    const bool say = nofoot::logwin::detail();
     if (unclipWant) {
         const uint64_t writes = g_clipWrites.exchange(0, std::memory_order_relaxed);
         const uint64_t faults = g_clipWriteFaults.load(std::memory_order_relaxed);
-        Log::get().note("native on foot body unclip: %llu modifier writes in the last 5 s (AMC 0x%llX, faults so far %llu)",
-                        static_cast<unsigned long long>(writes), static_cast<unsigned long long>(s.amc),
-                        static_cast<unsigned long long>(faults));
+        if (say)
+            Log::get().note("native on foot body unclip: %llu modifier writes in the last 5 s (AMC 0x%llX, faults so far %llu)",
+                            static_cast<unsigned long long>(writes), static_cast<unsigned long long>(s.amc),
+                            static_cast<unsigned long long>(faults));
     } else {
         g_clipWrites.store(0, std::memory_order_relaxed);
     }
@@ -2741,7 +2747,7 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
         else
             Log::get().note("native on foot body clip flags: not readable");
     }
-    for (size_t i = 0; i < kClipParts; ++i) {
+    for (size_t i = 0; i < kClipParts && say; ++i) {
         if (!s.part[i].named) continue;
         const ClipPart& p = s.part[i];
         if (i >= kClipUnclipParts && !p.present) continue;   // the comparison parts only where the AMC has them

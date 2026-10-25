@@ -17,6 +17,8 @@
 //   the line prints "N of M s" when due() says the window is full.
 // A flush closes a window early (a held-item change, a stance change, an ADS end, a changed setting the line echoes, the on-foot exit), so one line describes
 // one state. A flushed window prints its own length, 1 to 10 s.
+// A snapshot (a list that changes now and then) is written when its content changes, at most once per 30 s, and otherwise once a minute: a coarse signature
+// of the content, and Snapshot.
 //
 // Threads: detail() is a relaxed load any thread may make; a hook thread (the Animate job, the P1 callback, the render or HUD thread) reads it and nothing
 // else here. The windows and the counts belong to the frame thread that prints the line.
@@ -98,6 +100,70 @@ struct SecCount {
 // when the key was turned on is full at the next fold and prints its own length.
 inline bool due(uint32_t folded, bool detailOn) noexcept { return folded >= windowSeconds(detailOn); }
 inline bool due(uint32_t folded) noexcept { return due(folded, detail()); }
+
+// A snapshot line (the local avatar's parts and their view masks, the AMCs the fade hook collected near the player): collected every 5 s as before, written
+// when its content differs from the last written one, at most once per 30 s, and otherwise once a minute; in the detail log every time, as before. The content
+// is a coarse signature of what the line prints: the raw view masks gain bits as the scene's views come and go, and the six AMCs kept of a full table change
+// from one window to the next, so a signature of the raw values changed in about half the windows of a flight. sigMix folds in a value, sigText a name,
+// sigNonZero which of a part's mask words are set (not their bits), and sigSetAdd a member of a set or multiset whose order is not part of its content (the
+// modes of the AMCs the hook happened to take first), so the same members in another order sign the same.
+constexpr uint64_t kSnapshotChangeMs = 30000;          // a changed snapshot is written at most this often
+constexpr uint64_t kSnapshotRepeatMs = 60000;          // an unchanged snapshot is written again after this
+constexpr uint64_t kSigSeed = 0xCBF29CE484222325ull;   // FNV-1a's offset basis
+constexpr uint64_t kSigPrime = 0x100000001B3ull;
+inline uint64_t sigMix(uint64_t h, uint64_t v) noexcept {
+    for (int i = 0; i < 8; ++i) {
+        h ^= (v >> (8 * i)) & 0xFFu;
+        h *= kSigPrime;
+    }
+    return h;
+}
+inline uint64_t sigText(uint64_t h, const char* s) noexcept {
+    if (s)
+        for (; *s; ++s) {
+            h ^= static_cast<uint8_t>(*s);
+            h *= kSigPrime;
+        }
+    h ^= 0xFFu;   // an end mark, so "ab" then "c" does not sign as "a" then "bc"
+    return h * kSigPrime;
+}
+inline uint64_t sigNonZero(uint64_t h, const uint64_t* words, uint32_t n) noexcept {
+    uint64_t set = 0;
+    for (uint32_t i = 0; i < n && i < 32; ++i)
+        if (words[i]) set |= 1ull << i;
+    return sigMix(h, set | (static_cast<uint64_t>(n) << 32));
+}
+inline uint64_t sigSetAdd(uint64_t set, uint64_t member) noexcept { return set + sigMix(kSigSeed, member); }
+
+// Whether the snapshot with signature s is written now; when it is, it becomes the last written one. With the key off: the first one, a changed one 30 s or
+// more after the last written, any one a minute after it (or with the clock behind it); with the key on, every one. clear() makes the next one due: the line
+// clears it while it is not collecting (off foot), so each time on foot starts with a written snapshot.
+struct Snapshot {
+    uint64_t sig = 0, lastMs = 0;
+    bool have = false;
+    bool due(uint64_t s, uint64_t nowMs, bool detailOn) noexcept {
+        if (!detailOn && have && nowMs >= lastMs) {
+            const uint64_t since = nowMs - lastMs;
+            if (since < (s == sig ? kSnapshotRepeatMs : kSnapshotChangeMs)) return false;
+        }
+        have = true;
+        sig = s;
+        lastMs = nowMs;
+        return true;
+    }
+    void clear() noexcept { have = false; }
+};
+
+// A count said when it changes, where a 5 s line said it whenever it was not 0 (the AMCs the fade hook could not collect, its eight slots full); in the
+// detail log every time, as before. 0 is not said, and the count after a 0 is a change.
+struct CountChange {
+    uint32_t last = 0;
+    bool due(uint32_t n, bool detailOn) noexcept {
+        const bool say = n != 0 && (detailOn || n != last);
+        last = n;
+        return say;
+    }
+};
 
 }  // namespace logwin
 }  // namespace nofoot

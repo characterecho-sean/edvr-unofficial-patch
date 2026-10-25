@@ -4,7 +4,9 @@
 // 2. the window of a summary of sums: 10 s by default, 1 s in the detail log, opened by the first call (never at the clock's zero), its seconds capped at 10;
 // 3. the per-second fold: the 1 s gate unchanged by the key, SecCount's N of M s, due() at 10 folds (1 in the detail log);
 // 4. the flush: a window closed early prints its own length (1 to 10 s), and the next one opens fresh;
-// 5. the key turned on and off part way through a window.
+// 5. the key turned on and off part way through a window;
+// 6. a snapshot (step 3): its content's coarse signature, written on a change at most once per 30 s and otherwise once a minute, and a count said when it
+//    changes.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_logwin.h"
@@ -168,6 +170,80 @@ inline void run125(Check&& check) {
         for (int i = 0; i < 4; ++i) c.fold(true);
         check(!lw::due(c.m, false) && lw::due(c.m, true) && c.m == 4 && c.n == 4,
               "F125: four folds into a 10 s window are due once the key is on, and print 4 of 4 s");
+    }
+    // ---- 6. a snapshot: written on a change of content at most once per 30 s, otherwise once a minute (the avatar's parts, the AMCs near the player) ----
+    {
+        // A part signs its name, its flags and which of its four mask words are set, not their bits (the flight's masks gained view bits every few windows).
+        const auto part = [](const char* name, uint64_t m0, uint64_t m1) {
+            const uint64_t masks[4] = {m0, m1, 0, 0};
+            return lw::sigNonZero(lw::sigMix(lw::sigText(lw::kSigSeed, name), 1u), masks, 4);
+        };
+        check(part("Beard", 0x180000000ull, 0x180000000ull) == part("Beard", 0x105980000000ull, 0x6180000000ull),
+              "F125: a part's mask words gaining view bits (Beard 0x180000000 -> 0x105980000000, flight 10-25) sign the same");
+        check(part("Beard", 0x180000000ull, 0) != part("Beard", 0x180000000ull, 0x180000000ull) && part("Head", 1, 0) != part("Hair", 1, 0),
+              "F125: a mask word set or cleared, or another part name, signs differently");
+        check(lw::sigText(lw::sigText(lw::kSigSeed, "ab"), "c") != lw::sigText(lw::sigText(lw::kSigSeed, "a"), "bc"),
+              "F125: names are signed with an end mark (\"ab\", \"c\" is not \"a\", \"bc\")");
+        // The AMC rows sign their count and the multiset of their modes: no address, no distance.
+        const auto modes = [](std::vector<uint32_t> m) {
+            uint64_t s = lw::sigMix(lw::kSigSeed, m.size());
+            for (uint32_t v : m) s = lw::sigSetAdd(s, v);
+            return s;
+        };
+        check(modes({3, 3, 2}) == modes({2, 3, 3}) && modes({3, 3, 2}) != modes({3, 3, 3}) && modes({3, 3}) != modes({3, 3, 3}) &&
+                  modes({3, 2}) != modes({3, 3, 2}),
+              "F125: the AMC rows' modes sign the same in any order; another mode or another count of rows signs differently");
+
+        // The gate, every 5 s for 3 minutes: the same content throughout writes at 0, 60, 120 and 180 s with the key off, and every 5 s with it on.
+        const auto run = [](bool detailOn, uint64_t changeAtMs, std::vector<uint64_t>& at) {
+            lw::Snapshot snap;
+            for (uint64_t t = 100000; t <= 100000 + 180000; t += 5000) {
+                const uint64_t sig = t >= changeAtMs ? 2 : 1;
+                if (snap.due(sig, t, detailOn)) at.push_back(t - 100000);
+            }
+        };
+        std::vector<uint64_t> off, on, changed, early;
+        run(false, ~0ull, off);
+        run(true, ~0ull, on);
+        run(false, 100000 + 35000, changed);
+        run(false, 100000 + 15000, early);
+        check(off == std::vector<uint64_t>{0, 60000, 120000, 180000}, "F125: an unchanged snapshot is written at once, then once a minute (0, 60, 120, 180 s)");
+        check(on.size() == 37, "F125: ...and every 5 s in the detail log (37 lines in 180 s), as before");
+        check(changed == std::vector<uint64_t>{0, 35000, 95000, 155000},
+              "F125: a change of content at 35 s is written at once, and the minute counts again from it (95, 155 s)");
+        check(early == std::vector<uint64_t>{0, 30000, 90000, 150000},
+              "F125: a change of content 15 s after the last written snapshot waits for the 30 s limit, then the minute counts from it");
+        // Content that alternates (A, B, A, ...) every 5 s for 2 minutes: written at 0, 35, 70 and 105 s (a B or A differing from the last written, 30 s or
+        // more after it); content new every 5 s: written every 30 s.
+        lw::Snapshot alt, churn;
+        std::vector<uint64_t> altAt;
+        uint32_t churnLines = 0;
+        for (uint64_t t = 0; t < 120000; t += 5000) {
+            if (alt.due((t / 5000) % 2 ? 7u : 9u, 200000 + t, false)) altAt.push_back(t);
+            churnLines += churn.due(1000 + t, 200000 + t, false) ? 1u : 0u;
+        }
+        check(altAt == std::vector<uint64_t>{0, 35000, 70000, 105000}, "F125: alternating content is written at most once per 30 s (0, 35, 70, 105 s)");
+        check(churnLines == 4, "F125: content new every 5 s is written every 30 s (4 lines in 2 minutes, not 24)");
+        lw::Snapshot cleared;
+        const bool first = cleared.due(5, 300000, false);
+        const bool same = cleared.due(5, 305000, false);
+        cleared.clear();
+        check(first && !same && cleared.due(5, 310000, false), "F125: clear() (off foot) makes the next snapshot due, so each time on foot starts written");
+        lw::Snapshot back;
+        back.due(5, 400000, false);
+        check(back.due(5, 399000, false), "F125: a clock behind the last written snapshot writes it again rather than holding it for a minute");
+
+        // The count of AMCs not collected: said when it changes, never as 0, every time in the detail log.
+        lw::CountChange cc;
+        const uint32_t counts[] = {0, 3, 3, 3, 5, 5, 0, 5, 2};
+        std::vector<uint32_t> said;
+        for (uint32_t n : counts)
+            if (cc.due(n, false)) said.push_back(n);
+        lw::CountChange cd;
+        uint32_t saidDetail = 0;
+        for (uint32_t n : counts) saidDetail += cd.due(n, true) ? 1u : 0u;
+        check(said == std::vector<uint32_t>{3, 5, 5, 2}, "F125: the not-collected count is said at 3, 5, 5 after a 0, and 2; not repeated, never 0");
+        check(saidDetail == 7, "F125: ...and in the detail log at every window it is not 0, as before");
     }
     lw::setDetail(was);
 }
