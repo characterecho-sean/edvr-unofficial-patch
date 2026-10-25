@@ -11922,7 +11922,7 @@ void f66bNote(uint64_t nowMs, double dtQpc) noexcept {
     if (g_f66bLineMs == 0) g_f66bLineMs = nowMs;
     if (nowMs - g_f66bLineMs < 1000) return;
     g_f66bLineMs = nowMs;
-    if (g_f66bTicks && nativeOnFootActive()) {
+    if (g_f66bTicks && nativeOnFootActive() && nofoot::logwin::detail()) {   // F125: the detail log's line; the second still closes and resets below
         const double n = static_cast<double>(g_f66bTicks);
         Log::get().note("native on foot frame clock (F66b): ticks with dt 0: %u of %u on the QPC clock (the dt in use; expect 0; F65 read about 26 of 90 on "
                         "the ms clock), %u of %u on the ms clock (GetTickCount64, counted beside it, not used); dt mean %.2f ms (min %.2f, max %.2f); ticks "
@@ -12226,13 +12226,15 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     if (now - g_f66aLineMs < 1000) return;
     g_f66aLineMs = now;
     const uint32_t samples = journalStatusSamples();
-    const double gn = g_f66aGateFreshN ? static_cast<double>(g_f66aGateFreshN) : 1.0;
-    Log::get().note("native on foot armed (F66a): %s (SelectedWeapon \"%s\"); armed ramp %.2f; frames armed %u of %u (kind unknown %u); the distance gate "
-                    "said held N of M frames while unarmed: %u of %u (it said held %u of %u in all; mean grip gate %.2f); armed with the hands not at "
-                    "the grips (a holster that wrote no fists reads like this): %u frames; Status.json samples this second %u",
-                    g_armed ? "armed" : kind == kHeldUnknown ? "unarmed (unknown)" : "unarmed", kind == kHeldUnknown ? "-" : name,
-                    static_cast<double>(g_armedBlend.w), g_f66aArmedN, g_f66aN, g_f66aUnknownN, g_f66aGateHeldUnarmedN, g_f66aGateFreshN,
-                    g_f66aGateHeldN, g_f66aGateFreshN, g_f66aGateSum / gn, g_f66aArmedNoGripN, samples - g_f66aSamples);
+    if (nofoot::logwin::detail()) {   // F125: the 1 s window line is the detail log's (the held-item line above is said either way); the second still closes below
+        const double gn = g_f66aGateFreshN ? static_cast<double>(g_f66aGateFreshN) : 1.0;
+        Log::get().note("native on foot armed (F66a): %s (SelectedWeapon \"%s\"); armed ramp %.2f; frames armed %u of %u (kind unknown %u); the distance gate "
+                        "said held N of M frames while unarmed: %u of %u (it said held %u of %u in all; mean grip gate %.2f); armed with the hands not at "
+                        "the grips (a holster that wrote no fists reads like this): %u frames; Status.json samples this second %u",
+                        g_armed ? "armed" : kind == kHeldUnknown ? "unarmed (unknown)" : "unarmed", kind == kHeldUnknown ? "-" : name,
+                        static_cast<double>(g_armedBlend.w), g_f66aArmedN, g_f66aN, g_f66aUnknownN, g_f66aGateHeldUnarmedN, g_f66aGateFreshN,
+                        g_f66aGateHeldN, g_f66aGateFreshN, g_f66aGateSum / gn, g_f66aArmedNoGripN, samples - g_f66aSamples);
+    }
     g_f66aSamples = samples;
     g_f66aN = g_f66aArmedN = g_f66aUnknownN = g_f66aGateFreshN = g_f66aGateHeldN = g_f66aGateHeldUnarmedN = g_f66aArmedNoGripN = 0;
     g_f66aGateSum = 0.0;
@@ -13597,11 +13599,12 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             }
             if (now - vertLineMs >= 1000 && vertN) {
                 vertLineMs = now;
-                Log::get().note("native on foot body align (F50): vertical off: the up component d would have had (target, body axes, up trim "
-                                "excluded) %.3f m mean, %.3f..%.3f m over %llu frames; dropped per frame up to %.4f m (the filter's step along up); "
-                                "standing height %.3f m (%s), live 3P height %.3f m",
-                                vertSum / static_cast<double>(vertN), vertMin, vertMax, static_cast<unsigned long long>(vertN), dropMax,
-                                g_f48Stand.value, g_f48Stand.valid ? "captured, logged only" : "not captured", g_f48LiveUp);
+                if (nofoot::logwin::detail())   // F125: the old body path's 1 s lines are the detail log's; the second still closes and resets
+                    Log::get().note("native on foot body align (F50): vertical off: the up component d would have had (target, body axes, up trim "
+                                    "excluded) %.3f m mean, %.3f..%.3f m over %llu frames; dropped per frame up to %.4f m (the filter's step along up); "
+                                    "standing height %.3f m (%s), live 3P height %.3f m",
+                                    vertSum / static_cast<double>(vertN), vertMin, vertMax, static_cast<unsigned long long>(vertN), dropMax,
+                                    g_f48Stand.value, g_f48Stand.valid ? "captured, logged only" : "not captured", g_f48LiveUp);
                 vertN = 0;
                 vertSum = dropMax = 0.0;
             }
@@ -13611,6 +13614,9 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         }
         if (now - g_f41BodyLogMs >= 1000 || g_f41BodyLogMs == 0) {
             g_f41BodyLogMs = now;
+            // F125: the old body path's 1 s lines (clavicles, anchor, walking shift, body, hands, attach points) are the detail log's; the second still
+            // closes, and the FP snapshot's refusals below are named once either way.
+            const bool say = nofoot::logwin::detail();
             double dB[3] = {};
             for (size_t i = 0; i < 3; ++i)
                 for (size_t j = 0; j < 3; ++j) dB[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
@@ -13631,16 +13637,17 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             const double fwdUp = static_cast<double>(fp.rows[6]) * s.rows[3] + static_cast<double>(fp.rows[7]) * s.rows[4] +
                                  static_cast<double>(fp.rows[8]) * s.rows[5];
             const double pitchDeg = std::asin(std::max(-1.0, std::min(1.0, fwdUp))) * 180.0 / 3.14159265358979323846;
-            Log::get().note("native on foot body align: clavicles in body axes: FP %.3f %.3f %.3f m, 3P %.3f %.3f %.3f m; distance %.3f m before d, "
-                            "%.3f m after; d (right, up, forward) %.3f %.3f %.3f m; target %.3f %.3f %.3f m; head in body %.3f %.3f %.3f m; "
-                            "neck in body %.3f %.3f %.3f m; anchor %s (FP clavicles %s, 3P %s); FP root pitch vs the body's horizontal %.1f deg%s",
-                            fpClB[0], fpClB[1], fpClB[2], tpClB[0], tpClB[1], tpClB[2], std::sqrt(before), std::sqrt(after), dB[0], dB[1], dB[2],
-                            g_f41TgtB[0], g_f41TgtB[1], g_f41TgtB[2], hdB[0], hdB[1], hdB[2], ndB[0], ndB[1], ndB[2],
-                            shoulderAnchor ? "clavicles" : anchorMode == 2 ? "pov" : "neck", (s.shOkFp && fpFresh) ? "yes" : "no", s.shOk3P ? "yes" : "no",
-                            pitchDeg, anchorMode == 1 && !shoulderAnchor ? " (clavicles not resolved: neck anchor)" : "");
+            if (say)
+                Log::get().note("native on foot body align: clavicles in body axes: FP %.3f %.3f %.3f m, 3P %.3f %.3f %.3f m; distance %.3f m before d, "
+                                "%.3f m after; d (right, up, forward) %.3f %.3f %.3f m; target %.3f %.3f %.3f m; head in body %.3f %.3f %.3f m; "
+                                "neck in body %.3f %.3f %.3f m; anchor %s (FP clavicles %s, 3P %s); FP root pitch vs the body's horizontal %.1f deg%s",
+                                fpClB[0], fpClB[1], fpClB[2], tpClB[0], tpClB[1], tpClB[2], std::sqrt(before), std::sqrt(after), dB[0], dB[1], dB[2],
+                                g_f41TgtB[0], g_f41TgtB[1], g_f41TgtB[2], hdB[0], hdB[1], hdB[2], ndB[0], ndB[1], ndB[2],
+                                shoulderAnchor ? "clavicles" : anchorMode == 2 ? "pov" : "neck", (s.shOkFp && fpFresh) ? "yes" : "no", s.shOk3P ? "yes" : "no",
+                                pitchDeg, anchorMode == 1 && !shoulderAnchor ? " (clavicles not resolved: neck anchor)" : "");
             // F48: the pov anchor's two sides, the standing height (captured and live) and where the torso's neck lands against the FP root
             // after d (expected about (0, -0.156, -0.161) m when the FP root is the eye).
-            if (g_f48Have) {
+            if (say && g_f48Have) {
                 double neckAfter[3] = {};
                 for (size_t i = 0; i < 3; ++i) neckAfter[i] = ndB[i] + dB[i] - g_f48CamB[i];
                 Log::get().note("native on foot body align: anchor %s: 3P side (body) %.3f %.3f %.3f m (source %s), FP side %.3f %.3f %.3f m; "
@@ -13657,12 +13664,13 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                                 s.neckOk ? "" : " (no neck: the neck figure is not meaningful)");
             }
             // F55: the walking shift: the rest it holds, whether it is used, the live source, d's horizontal target.
-            Log::get().note("native on foot walking shift (F55): %s; rest %s x %.3f z %.3f m (%u idle captures), offset %.3f %.3f, source x %.3f z %.3f m; "
-                            "live %s x %.3f z %.3f m (live source x %.3f z %.3f m); target d_h (right, forward) %.3f %.3f m; speed %.2f m/s (%s)",
-                            g_f55Used ? "the captured rest is used" : !g_f48Stand.hValid ? "live (no idle capture yet)" : "live (the rest point's kind changed)",
-                            kF55KindNames[g_f55RestKind], g_f48Stand.hx, g_f48Stand.hz, static_cast<unsigned>(g_f48Stand.hCaptures), g_f55Off[0],
-                            g_f55Off[2], g_f48SrcB[0], g_f48SrcB[2], kF55KindNames[g_f55KindNow], g_f55Raw[0], g_f55Raw[2], g_f55Live[0], g_f55Live[2],
-                            g_f41TgtB[0], g_f41TgtB[2], g_f55Loco.speed, f55Moving ? "moving: no capture" : "idle");
+            if (say)
+                Log::get().note("native on foot walking shift (F55): %s; rest %s x %.3f z %.3f m (%u idle captures), offset %.3f %.3f, source x %.3f z %.3f m; "
+                                "live %s x %.3f z %.3f m (live source x %.3f z %.3f m); target d_h (right, forward) %.3f %.3f m; speed %.2f m/s (%s)",
+                                g_f55Used ? "the captured rest is used" : !g_f48Stand.hValid ? "live (no idle capture yet)" : "live (the rest point's kind changed)",
+                                kF55KindNames[g_f55RestKind], g_f48Stand.hx, g_f48Stand.hz, static_cast<unsigned>(g_f48Stand.hCaptures), g_f55Off[0],
+                                g_f55Off[2], g_f48SrcB[0], g_f48SrcB[2], kF55KindNames[g_f55KindNow], g_f55Raw[0], g_f55Raw[2], g_f55Live[0], g_f55Live[2],
+                                g_f41TgtB[0], g_f41TgtB[2], g_f55Loco.speed, f55Moving ? "moving: no capture" : "idle");
             // F55: per side, body axes after d: the FP clavicles and hands (the hook's span snapshot of joints 19/20 and 37/44 when
             // fresh, else the census by name; FP model to world through the FP root's yaw, as F45), the 3P clavicles and hands moved by d; the
             // freeze weight; d's up component (zero with vertical off).
@@ -13694,16 +13702,17 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                         tpBody(&s.ext3PW[3 * side], tH[side]);
                     }
                 }
-                Log::get().note("native on foot body (F55): body axes after d (right, up, forward), L: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P "
-                                "clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f; R: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P clavicle %.3f %.3f %.3f "
-                                "hand %.3f %.3f %.3f; FP from %s, 3P from %s; freeze weight %.2f; d up applied %.3f m (vertical %s); d (body) %.3f %.3f "
-                                "%.3f m",
-                                fC[0][0], fC[0][1], fC[0][2], fH[0][0], fH[0][1], fH[0][2], tC[0][0], tC[0][1], tC[0][2], tH[0][0], tH[0][1], tH[0][2],
-                                fC[1][0], fC[1][1], fC[1][2], fH[1][0], fH[1][1], fH[1][2], tC[1][0], tC[1][1], tC[1][2], tH[1][0], tH[1][1], tH[1][2],
-                                !fpOk ? "NOTHING (zeros: no fresh FP root or joints)" : snapFresh ? "the Animate span (19/37 L, 20/44 R)"
-                                                                                                  : "the census by name (L, R)",
-                                tpOk ? "the census by name (L, R) + d" : "NOTHING (zeros)", static_cast<double>(pfzWeightNow()), dB[1],
-                                vertical ? "ON" : "OFF", dB[0], dB[1], dB[2]);
+                if (say)
+                    Log::get().note("native on foot body (F55): body axes after d (right, up, forward), L: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P "
+                                    "clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f; R: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P clavicle %.3f %.3f %.3f "
+                                    "hand %.3f %.3f %.3f; FP from %s, 3P from %s; freeze weight %.2f; d up applied %.3f m (vertical %s); d (body) %.3f %.3f "
+                                    "%.3f m",
+                                    fC[0][0], fC[0][1], fC[0][2], fH[0][0], fH[0][1], fH[0][2], tC[0][0], tC[0][1], tC[0][2], tH[0][0], tH[0][1], tH[0][2],
+                                    fC[1][0], fC[1][1], fC[1][2], fH[1][0], fH[1][1], fH[1][2], tC[1][0], tC[1][1], tC[1][2], tH[1][0], tH[1][1], tH[1][2],
+                                    !fpOk ? "NOTHING (zeros: no fresh FP root or joints)" : snapFresh ? "the Animate span (19/37 L, 20/44 R)"
+                                                                                                      : "the census by name (L, R)",
+                                    tpOk ? "the census by name (L, R) + d" : "NOTHING (zeros)", static_cast<double>(pfzWeightNow()), dB[1],
+                                    vertical ? "ON" : "OFF", dB[0], dB[1], dB[2]);
                 // F55: the hook's refusals on the FP X (the arm IK's FP snapshot), each named once.
                 const uint64_t calls = g_fdCalls.load(std::memory_order_relaxed);
                 g_f55CallsLast = calls;
@@ -13715,7 +13724,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                 }
             }
             // F45: the hands and the attach points, world, on both skeletons: FP through the FP root's yaw, 3P through the AMC matrix.
-            if (s.extOk3P && s.extOkFp && fpFresh) {
+            if (say && s.extOk3P && s.extOkFp && fpFresh) {
                 const double rnY = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
                 const double cyY = rnY > 1e-6 ? fp.rows[8] / rnY : 1.0, syY = rnY > 1e-6 ? fp.rows[6] / rnY : 0.0;
                 const auto fpWorld = [&](const float* m, double out[3]) {
@@ -19829,11 +19838,13 @@ void f66dLine(uint64_t now, int mode) noexcept {
         got = g_hingeSeq.load(std::memory_order_relaxed) == s1;
     }
     g_hingeReset.store(true, std::memory_order_relaxed);
+    // F125: the F66d hinge lines are the detail log's (the second still closes: the reset above); F98a's left elbow below is said either way.
+    const bool sayHinge = nofoot::logwin::detail();
     if (!got) {
-        Log::get().note("native on foot arm IK (F66d): the hinge statistics were being written (retried next second)");
+        if (sayHinge) Log::get().note("native on foot arm IK (F66d): the hinge statistics were being written (retried next second)");
         return;
     }
-    for (int side = 0; side < 2; ++side) {
+    for (int side = 0; side < 2 && sayHinge; ++side) {
         const HingeSide& h = st.side[side];
         if (h.n == 0) {
             Log::get().note("native on foot arm IK (F66d): arm %s: no hinge solve this second (%llu Animate calls with the arm IK; see the F56 refusals)",
@@ -19939,6 +19950,11 @@ void f66gLine(uint64_t now) noexcept {
     if (g_f66gLineMs == 0) g_f66gLineMs = now;
     if (now - g_f66gLineMs < 1000) return;
     g_f66gLineMs = now;
+    if (!nofoot::logwin::detail()) {   // F125: the frame order lines are the detail log's; the second still closes (the rows drained, the parity window reset)
+        g_f66gRows.clear();
+        g_f66gReset.store(true, std::memory_order_relaxed);
+        return;
+    }
     std::sort(g_f66gRows.begin(), g_f66gRows.end(), [](const F66gRow& a, const F66gRow& b) { return a.t < b.t; });
     struct Hist {
         char s[8] = {};
@@ -20182,6 +20198,7 @@ void f68cLine(uint64_t now) noexcept {
         g_p1SpeedN = 0;
     }
     if (w.frames == 0 && w.pairs == 0) return;
+    if (!nofoot::logwin::detail()) return;   // F125: the detail log's line; the counters were taken and cleared above as before
     Log::get().note("native on foot G pairing (F68c): %llu game frames; G built from one frame's pair %llu times (F_root - M3P frame difference: 0 in %llu, "
                     "any other 0 by construction); frames without a pair %llu; pairs refused as far apart (over %.0f ms) %llu; the 3P call came first in "
                     "%llu frames (the F67 rule built G from the previous frame's root on those) and the FP call first in %llu; 3P AMC speed mean %.2f max "
@@ -20207,6 +20224,7 @@ void f67fLine(uint64_t now) noexcept {
     }
     g_f67fReset.store(true, std::memory_order_relaxed);
     if (!got || w.armedFull == 0) return;
+    if (!nofoot::logwin::detail()) return;   // F125: the F67f and F69h lines are the detail log's; the window was taken and reset above as before
     char why[2][200], wt[2][220];
     for (int k = 0; k < 2; ++k) {
         why[k][0] = '\0';
@@ -20693,26 +20711,28 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     const char* state = !key ? "off (the key)" : !full3P ? "idle: not full 3P (body mode with hide_fp_body and body_unclip on)"
                       : !sFresh ? "held: no fresh AMC sample" : !s.headOk ? "held: no head sample (neck census)" : ads ? "on (ADS: with the lean)" : "on";
     const double n = b.n ? static_cast<double>(b.n) : 1.0;
-    Log::get().note("native on foot spine bend (F59): ADS lean added mean %.1f deg, ADS weight mean %.2f; the bent joint is the neck "
-                    "(34) toward the eye target less the rest offset (0, -0.155, -0.09; F62a)", b.leanSum / n, b.adsWSum / n);
-    Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
-                    "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
-                    "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
-                    "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
-                    "pitch mean %.1f roll mean %.1f deg; clamp hits at the ramp's limits (F66c: forward 45 to 8, back 15 to 8, roll 20 to 6 by the armed "
-                    "ramp, mean %.2f) forward %u, back %u, roll %u; calls with the continuous weight below 1: %llu (mean weight %.2f; the F62a "
-                    "suspension is gone); bent joint %u (spine level %u); "
-                    "refusals: plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
-                    kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
-                    static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),
-                    static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), b.res0Sum / n, b.res0Max, b.res0B[0] / n,
-                    b.res0B[1] / n, b.res0B[2] / n, b.res1Sum / n, b.res1Max, b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n, b.pitchSum / n,
-                    b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.armedRampSum / n, b.clampFwd,
-                    b.clampBack, b.clampRoll, static_cast<unsigned long long>(b.weightedDown), b.bendWeightSum / n, b.pov,
-                    b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
-                    static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
-                    static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
-                    static_cast<unsigned long long>(ref[kBendRefSingular]));
+    if (nofoot::logwin::detail()) {   // F125: the F59 and F58 spine bend lines are the detail log's; the second still closes (the reset and the refusal bases above)
+        Log::get().note("native on foot spine bend (F59): ADS lean added mean %.1f deg, ADS weight mean %.2f; the bent joint is the neck "
+                        "(34) toward the eye target less the rest offset (0, -0.155, -0.09; F62a)", b.leanSum / n, b.adsWSum / n);
+        Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
+                        "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
+                        "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
+                        "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
+                        "pitch mean %.1f roll mean %.1f deg; clamp hits at the ramp's limits (F66c: forward 45 to 8, back 15 to 8, roll 20 to 6 by the armed "
+                        "ramp, mean %.2f) forward %u, back %u, roll %u; calls with the continuous weight below 1: %llu (mean weight %.2f; the F62a "
+                        "suspension is gone); bent joint %u (spine level %u); "
+                        "refusals: plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
+                        kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
+                        static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),
+                        static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), b.res0Sum / n, b.res0Max, b.res0B[0] / n,
+                        b.res0B[1] / n, b.res0B[2] / n, b.res1Sum / n, b.res1Max, b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n, b.pitchSum / n,
+                        b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.armedRampSum / n, b.clampFwd,
+                        b.clampBack, b.clampRoll, static_cast<unsigned long long>(b.weightedDown), b.bendWeightSum / n, b.pov,
+                        b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
+                        static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
+                        static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
+                        static_cast<unsigned long long>(ref[kBendRefSingular]));
+    }
     // F65c: the align's neck source this second (full 3P body mode ticks), the pre-bend minus census neck (body axes), the align's d (right,
     // forward), and the bend: |roll| and |pitch| mean with their ranges, the before-bend neck error (its right part is the lateral the align
     // should now take). Success standing unarmed: before-bend lateral |error| under 2 cm and mean |roll| under 3 deg.
@@ -20810,6 +20830,14 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
 // in cm, the vertical move (min, mean, max) and the horizontal move; one for the legs (re-planted, outward, lifted, per foot); one for the reach limit.
 uint64_t g_f67cLineMs = 0;
 void f67cPinLine(uint64_t now, bool scope) noexcept {
+    // F68e: the eye calibration's completion, an event: written at the first tick after it (F125: no longer held for the 1 s line, nor lost to a second the
+    // pin's statistics were torn or empty, and written whatever log.on_foot_detail says).
+    if (g_pinEyeCalDone.exchange(0, std::memory_order_relaxed) > 0 && g_pinEyeCal.have)
+        Log::get().note("native on foot body pin (F68e): the eye point in the head joint's frame is captured: e_h = (%.4f, %.4f, %.4f) m (head axes: forward = "
+                        "%sx[%d], up = %sx[%d]) from %u consecutive standing frames, the head joint %.3f m up; the standing target is the F67c rest offset "
+                        "(0, -0.155, -0.09) by construction; eye height is normalized for natural-LOCAL pitch, a crouch's animated head moves it back",
+                        g_pinEyeCal.e[0], g_pinEyeCal.e[1], g_pinEyeCal.e[2], g_pinEyeCal.axes.fSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.fAxis,
+                        g_pinEyeCal.axes.uSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.uAxis, nofoot::kPinEyeCalFrames, g_pinEyeCal.headY);
     if (g_f67cLineMs == 0) g_f67cLineMs = now;
     if (now - g_f67cLineMs < 1000) return;
     g_f67cLineMs = now;
@@ -20839,8 +20867,12 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                             static_cast<double>(ticks) / us / 1000.0);
     }
     if (!got || (!scope && st.calls == 0)) return;
-    Log::get().note("floor probe (F86g): two rays from eye 0 toward the model points (+-0.3, 0, 0.7) of the 3P body; %llu hits accepted (0.4-1.2 m horizontally from the 3P origin), %llu rays without a surface, "
-                    "%llu hits outside that range", static_cast<unsigned long long>(floorHits), static_cast<unsigned long long>(floorMiss), static_cast<unsigned long long>(floorRej));
+    // F125: the floor probe, the per-state lines (F67c, F68e, F69a, F73, F69d), F75's square-up and F82's line are the detail log's; the window above was
+    // taken and reset as before. The header line, the legs, the reach limit and F94a onward are said either way.
+    const bool sayPin = nofoot::logwin::detail();
+    if (sayPin)
+        Log::get().note("floor probe (F86g): two rays from eye 0 toward the model points (+-0.3, 0, 0.7) of the 3P body; %llu hits accepted (0.4-1.2 m horizontally from the 3P origin), %llu rays without a surface, "
+                        "%llu hits outside that range", static_cast<unsigned long long>(floorHits), static_cast<unsigned long long>(floorMiss), static_cast<unsigned long long>(floorRej));
     const double an = st.ageN ? static_cast<double>(st.ageN) : 1.0;
     const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
     const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
@@ -20861,7 +20893,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                     st.ageMaxPar[1], st.fresh[0], ne, st.fresh[1], no, st.cycRows, st.cycCached, st.cycNone, nofoot::kPinHorizCapM, st.hClamped,
                     nofoot::kPinVertCapM, st.vClamped, st.speedSum / an, st.speedMax);
     static const char* const kBinNames[6] = {"standing", "walking", "running", "jumping", "crouching", "armed (any movement)"};
-    for (int b = 0; b < 6; ++b) {
+    for (int b = 0; b < 6 && sayPin; ++b) {
         const PinBin& p = st.bin[b];
         if (!p.n) continue;
         const double n = static_cast<double>(p.n);
@@ -20939,7 +20971,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                             static_cast<unsigned long long>(p.inside), 100.0 * nofoot::kPinFeetHighM, static_cast<unsigned long long>(p.feetPre));
         }
     }
-    if (st.sqN) {
+    if (sayPin && st.sqN) {
         // F75: summarize the selected armed angle and its measured inputs and effect.
         char nm[64] = {};
         journalHeldItemName(nm, sizeof(nm));
@@ -20962,12 +20994,6 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponBothVertical]),
                         static_cast<unsigned long long>(st.sqWhy[nofoot::kSquareWeaponBadYaw]));
     }
-    if (g_pinEyeCalDone.exchange(0, std::memory_order_relaxed) > 0 && g_pinEyeCal.have)
-        Log::get().note("native on foot body pin (F68e): the eye point in the head joint's frame is captured: e_h = (%.4f, %.4f, %.4f) m (head axes: forward = "
-                        "%sx[%d], up = %sx[%d]) from %u consecutive standing frames, the head joint %.3f m up; the standing target is the F67c rest offset "
-                        "(0, -0.155, -0.09) by construction; eye height is normalized for natural-LOCAL pitch, a crouch's animated head moves it back",
-                        g_pinEyeCal.e[0], g_pinEyeCal.e[1], g_pinEyeCal.e[2], g_pinEyeCal.axes.fSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.fAxis,
-                        g_pinEyeCal.axes.uSign < 0.0 ? "-" : "+", g_pinEyeCal.axes.uAxis, nofoot::kPinEyeCalFrames, g_pinEyeCal.headY);
     if (st.legSolves) {
         char leg[2][300];
         for (int k = 0; k < 2; ++k)
@@ -20987,7 +21013,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                         st.reachWant, static_cast<unsigned long long>(st.pinned), st.reachActive, st.reachInfeasible, st.reachCorrSum / n, st.reachCorrMax,
                         st.d0Sum[0] / n, st.d0Sum[1] / n, st.dSum[0] / n, st.dSum[1] / n);
     }
-    if (st.neckYawCalls) {
+    if (sayPin && st.neckYawCalls) {
         Log::get().note("native on foot body pin (F82 laser rifle): %u protected frames; feasible %u, no candidate %u, runtime leg refusal %u; selected yaw mean %+.2f max %.2f deg; actual error vs T+detach*legacy-reach max %.2f cm; held-foot error max %.2f mm; no-candidate elbow shortfall max %.2f cm",
                         st.neckYawCalls, st.neckYawFeasible, st.neckYawNoCandidate, st.neckYawRefused,
                         st.neckYawDegSum / static_cast<double>(st.neckYawCalls), st.neckYawDegMax, st.neckErrorMaxCm,
