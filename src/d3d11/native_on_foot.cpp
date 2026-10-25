@@ -58,6 +58,7 @@
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
+#include "native_on_foot_f123.h"   // F123: head containment, the leash and the wall contact (the machine, the fade mix, the lines)
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -172,6 +173,11 @@ double g_f94EyeHeightLast = -1.0;                             // the value last 
 // and the HUD's motion against the eye (the HRC instance submit, under F9Lock; the frame thread prints and resets it with the pin's line).
 nofoot::f95::StanceSettle g_f95Settle;
 std::atomic<bool> g_f95Moving{false};
+// F123: the comfort fade has two publishers on the frame thread, F109's snap turn and the head containment (the leash and the wall contact); each sets its own level here and the
+// boundary publishes their max once a frame (nofoot::f123::FadeMix). The recentre's hold: the standing-height hold waits while the origin is about to move and starts again from the
+// new rest height when it has (frame thread).
+nofoot::f123::FadeMix g_fadeMix;
+bool g_f123HoldFreeze = false, g_f123HoldReset = false;
 nofoot::f94::EyeLevel g_f98Eye;   // F98c: the settled unarmed stances by class (the Animate post-hook; kept for the skeleton, cleared with the pin's calibration on another)
 struct F95ViewLast {
     bool have = false, pitchOk = false;
@@ -7368,7 +7374,7 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
             adsQueue(g_snapIn, t.input, 1e6);
         }
         if (level > 0.0 || t.faded) {
-            edvr::comfort::publish(static_cast<float>(level), now);
+            g_fadeMix.snap = level;   // F123: published with the containment's, as their max (the boundary's fadeMixPublish)
             t.faded = level > 0.0;
         }
         if (t.run.phase == f109::SnapRun::kIdle && t.injectMs != 0) {   // the run ended: its line
@@ -7387,7 +7393,7 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
             t.injectMs = 0;
         }
     } else if (t.faded) {
-        edvr::comfort::publish(0.0f, now);
+        g_fadeMix.snap = 0.0;
         t.faded = false;
     }
     if (t.adsCheckMs != 0 && now >= t.adsCheckMs) {
@@ -12261,8 +12267,12 @@ struct F119State {
     uint64_t lastMs = 0;
     double costUs = 0.0;       // the second's own cost: the sampling here and the depth side's dispatch, readback and line (microseconds)
     uint32_t costFrames = 0;
+    bool cameraOn = false;     // F123: native stereo on foot and the commander's first-person camera this frame (g_f115CameraOn, no third-person camera)
+    bool sampledNow = false;   // F123: this frame's tick took a head offset (lastMs is this frame)
+    bool ads = false;          // F123: ADS this frame (for the episode lines)
 };
 F119State g_f119;
+nofoot::f123::Machine g_f123;
 std::atomic<uint32_t> g_f119DrawThread{0};   // the thread of the game's draws (the first draw of each frame), for the Present boundary's GPU work to check against
 // ---- F87h: the standing-height hold, the frame thread's half ---------------------------------------------------------------------------------------------
 // See nofoot::f87 (native_on_foot_f87.h) for the filter. The measurement: the render head's height in the seated space (np.render) with the eye alignment taken out (the
@@ -12298,6 +12308,10 @@ uint64_t g_f87LineMs = 0;
 const char* g_f87State = "out of scope";
 nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool ads, bool weaponEyeSettling) noexcept {
     namespace f87 = nofoot::f87;
+    if (g_f123HoldReset) {   // F123: the seated origin was moved under the head: the standing height is the new rest height, so the hold starts again from it
+        g_f123HoldReset = false;
+        g_f87Hold.reset();
+    }
     const bool scope = g_pinScope.load(std::memory_order_relaxed);
     f87::HoldIn in;
     in.scope = scope;
@@ -12322,7 +12336,7 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
     // value a frame or two later, and a render head that has not caught up with the eye alignment would read as the head moving). Never true while that up is 0, and F89's
     // match makes it unnecessary when the serial is reported (the rig proves the input is the same with and without O moving). A serial the frame thread no longer has: the
     // filter waits on the last good input.
-    in.frozen = lockBusy || feed.wait || (feed.source == nofoot::f89::Source::kLegacy && weaponEyeSettling);
+    in.frozen = lockBusy || feed.wait || (feed.source == nofoot::f89::Source::kLegacy && weaponEyeSettling) || g_f123HoldFreeze;   // F123: ... or the origin is about to move
     if (haveFrame && pose) {
         g_f89AlignSec.generationSeen(np.referenceGeneration);
         g_f89AlignSec.add(feed.source, applied.lag);
@@ -12952,10 +12966,14 @@ void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ad
     namespace f119 = nofoot::f119;
     F119State& s = g_f119;
     const uint64_t t0 = f30Qpc();
+    s.sampledNow = false;
+    s.cameraOn = false;
     if (!nativeOnFootActive()) {
         s.wasOn = false;
         return;
     }
+    s.cameraOn = cameraOn;
+    s.ads = ads || g_adsState == kAdsActive;
     if (!s.wasOn) {   // native stereo on foot began: a new rest point history, a new second
         s.wasOn = true;
         s.genSeen = s.haveLast = false;
@@ -13018,6 +13036,7 @@ void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ad
     s.lastItem = item;
     s.lastAds = adsNow;
     s.lastMs = now;
+    s.sampledNow = true;
     s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
     ++s.costFrames;
 }
@@ -26287,11 +26306,17 @@ bool f119Views(ID3D11DeviceContext* ctx, int e, ID3D11Texture2D* tex) {
     }
     return ok;
 }
-// Two frames on: each answered dispatch's cells become the second's coverage.
+uint32_t g_f123Cells = 0;   // F123: the last read frame's world cells within the near plane + 3 cm (the larger eye), for the ask's line
+// Two frames on: each answered dispatch's cells become the second's coverage (and, in frame order, the wall contact rule's frames).
 void f119Poll(ID3D11DeviceContext* ctx, uint32_t ended) {
     namespace f119 = nofoot::f119;
     F119Gpu& g = g_f119g;
     f119::DepthSecond& d = g_f119.depth;
+    struct Ready {
+        uint32_t frame, cells, farCells;
+        bool read;
+    } ready[3];
+    int nReady = 0;
     for (int i = 0; i < 3; ++i) {
         F119Gpu::Slot& sl = g.slot[i];
         if (!sl.inFlight) continue;
@@ -26332,6 +26357,17 @@ void f119Poll(ID3D11DeviceContext* ctx, uint32_t ended) {
             have[e] = true;
         }
         d.addFrame(cov, have, sl.offsetKnown, sl.offsetCm);
+        // F123: the frame's wall contact (the larger world coverage of the eyes read within the near plane + 3 cm) and its far cells, for the contact rule; fed in frame order below
+        ready[nReady].frame = sl.frame;
+        ready[nReady].read = have[0] || have[1];
+        ready[nReady].cells = std::max(have[0] ? cov[0].within[3] : 0u, have[1] ? cov[1].within[3] : 0u);
+        ready[nReady].farCells = std::max(have[0] ? cov[0].far1m : 0u, have[1] ? cov[1].far1m : 0u);
+        ++nReady;
+    }
+    std::sort(ready, ready + nReady, [](const Ready& a, const Ready& b) { return a.frame < b.frame; });
+    for (int i = 0; i < nReady; ++i) {
+        g_f123.contactFrame(ready[i].frame, ready[i].read, ready[i].cells, ready[i].farCells);
+        if (ready[i].read) g_f123Cells = ready[i].cells;
     }
 }
 // The dispatch for the frame that ended: both eyes that drew their scene in it.
@@ -26434,6 +26470,54 @@ void f119Dispatch(ID3D11DeviceContext* ctx, uint32_t ended, ID3D11Texture2D* con
     sl.offsetKnown = s.haveLast && s.lastMs != 0 && nowMs >= s.lastMs && nowMs - s.lastMs <= 250;
     sl.offsetCm = s.haveLast ? s.last.horizontal() * 100.0 : 0.0;
 }
+// ---- F123: the leash and the wall contact, stepped once a frame at the Present boundary (nofoot::f123, native_on_foot_f123.h) -----------------------------------------
+// The machine takes the physical head offset F119's tick just sampled and the depth frames f119Poll fed it, and gives the level of black (the containment's half of the comfort fade;
+// fadeMixPublish sends the max with F109's), the position recentre's ask (a serial in the frame output, 0 when none stands) and the episodes. Nothing here when the camera is not the
+// commander's first-person one on foot: the machine is cleared, the fade is 0 and no ask stands (the boarding edge, F115, takes the same path).
+uint64_t g_f123Qpc = 0;
+uint32_t g_f123Word = 0;
+void f123Frame(uint64_t now, bool onFoot) {
+    namespace f123 = nofoot::f123;
+    (void)now;
+    F119State& s = g_f119;
+    const uint64_t q = f30Qpc();
+    const double dt = g_f123Qpc ? static_cast<double>(f30QpcUs(q - g_f123Qpc)) * 1e-6 : 0.0;
+    g_f123Qpc = q;
+    f123::In in;
+    in.dt = dt;
+    in.active = onFoot && s.cameraOn;
+    in.haveOffset = in.active && s.sampledNow && s.haveLast;
+    const double hCm = s.haveLast ? s.last.horizontal() * 100.0 : 0.0, upCm = s.haveLast ? s.last.up * 100.0 : 0.0;
+    if (in.haveOffset) {
+        in.hCm = hCm;
+        in.upCm = upCm;
+    }
+    const f123::Out o = g_f123.step(in);
+    char b[760];
+    if (o.asked) {
+        f123::formatAsk(b, sizeof(b), g_f123.serial(), o.askedBy, hCm, upCm, g_f123Cells);
+        Log::get().note("%s", b);
+    }
+    if (o.done || o.failed) {
+        f123::formatResult(b, sizeof(b), g_f123.serial(), o.done, o.waitedS, hCm, upCm);
+        Log::get().note("%s", b);
+        if (o.done) g_f123HoldReset = true;
+    }
+    if (o.contactAfter) {
+        f123::formatAfter(b, sizeof(b), g_f123.serial());
+        Log::get().note("%s", b);
+    }
+    for (int i = 0; i < o.ended; ++i) {
+        f123::formatEpisode(b, sizeof(b), o.episode[i], o.episode[i].startS, s.ads);
+        Log::get().note("%s", b);
+    }
+    g_fadeMix.contain = o.level;
+    g_f123HoldFreeze = in.active && g_f123.holdFrozen();
+    if (o.requestWord != g_f123Word) {
+        g_f123Word = o.requestWord;
+        nativeFrameSetPositionRecentre(g_f123Word);
+    }
+}
 // The Present boundary's call (nativeOnFootFrameBoundary, after alignTick): the readbacks, the dispatch, and the line once a second. frameNo is the frame now in progress.
 void f119Boundary(uint32_t frameNo, uint64_t now) {
     namespace f119 = nofoot::f119;
@@ -26444,11 +26528,16 @@ void f119Boundary(uint32_t frameNo, uint64_t now) {
         char b[800];
         f119::formatSession(b, sizeof(b));
         Log::get().note("%s", b);
+        nofoot::f123::formatSession(b, sizeof(b));
+        Log::get().note("%s", b);
     }
     if (!nativeOnFootActive()) {
         for (auto& sl : g.slot) sl.inFlight = false;
+        g_f123.gate(false);
+        f123Frame(now, false);
         return;
     }
+    g_f123.gate(s.cameraOn);   // the depth frames below are fed to a machine that is on, or are dropped by one that is not
     const uint64_t t0 = f30Qpc();
     const uint32_t ended = frameNo - 1u;
     f119::DepthSecond& d = s.depth;
@@ -26504,6 +26593,7 @@ void f119Boundary(uint32_t frameNo, uint64_t now) {
         }
         if (ctx) ctx->Release();
     }
+    f123Frame(now, true);
     s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
     if (now - s.lineMs < 1000 || !s.off.frames) return;
     s.lineMs = now;
@@ -29890,7 +29980,11 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
-    f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset
+    f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
+    {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
+        const double fade = g_fadeMix.next();
+        if (fade >= 0.0) edvr::comfort::publish(static_cast<float>(fade), GetTickCount64());
+    }
 }
 
 void nativeOnFootShutdown() {
@@ -29902,6 +29996,8 @@ void nativeOnFootShutdown() {
     g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
     f89AlignPublish(zeroEyeAlign);
     eyeshare::publish(0.0f, GetTickCount64());   // F106: no shared left eye past shutdown
+    nativeFrameSetPositionRecentre(0);           // F123: no recentre asked past shutdown, and no black left
+    edvr::comfort::publish(0.0f, GetTickCount64());
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
     nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
     g_adsHookOn.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown

@@ -104,6 +104,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10||!(out.reservedYaw==out.reservedYaw)) out.reservedYaw=0;
     // F106: the left eye's share (leftEyeShare, a float's bits; F89's darkening before) is zero unless a version 10 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.leftEyeShare=0;
+    // F123: the position-only recentre ask is none unless a version 10 answer carried it.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.positionRecentre=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {

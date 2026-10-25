@@ -10690,7 +10690,7 @@ def _hj_f119_containment(rows, ctx):
     """F119 (measure only): the head's offset from its rest point on foot, and how close world geometry gets to each eye, to set the radii of a head leash and a wall
     contact rule. Per class the p95 and max of the horizontal offset (the p95 from the pooled histogram, an upper bin edge), the pooled p99.5 of normal play (the seconds
     after the first recentre on foot, if any, and before the first second past 30 cm; else all of them), and radii from it: a soft one (p99.5 + 3 cm) and a hard one
-    (soft + 5 cm), kept 2 cm under a cap: the collision radius when the build read it, else the smallest head offset at which a world cell reached the near plane. The
+    (soft + 5 cm), kept 2 cm under a cap: the collision radius when the build read it, else the smallest head offset at which a wall filled 32 cells or more of 64 at the near plane (F123: one touching cell is a brush past a corner, not a clearance). The
     contact coverage is the largest of the second; the baseline is the coverage at a head offset under 3 cm, where the game's own camera is and the figure must be about 0.
     NEVER APPLIED when on-foot seconds passed (the F87h lines) with no line, or when every second sampled no head; PARTIAL when the depth grid was read in under half of the
     seconds or the baseline is not about 0 (4 cells of 64 or more within 20 cm with the player's body left out); IDLE with nothing on foot."""
@@ -10708,7 +10708,8 @@ def _hj_f119_containment(rows, ctx):
         return ("IDLE", "the instrument is armed (%s); no on-foot second in the window" % (rows["session"][-1]["radius"].strip() if rows.get("session") else "no session line"))
     classes, per_sec, eyes_read, eye_secs = {}, [], [0, 0], 0
     base_frames = base_max = base_body = 0
-    near_np, c1s, c8s = [], [], []
+    near_np, c1s, c8s, c32s = [], [], [], []
+    cframes, cweakest, cfar = 0, None, 0   # F123's proof of a peek: the frames with 32 cells or more at the near plane, the weakest, the most far cells seen on them
     hmax, upmin, upmax = 0.0, None, None
     sampled = 0
     for r in sec:
@@ -10752,6 +10753,12 @@ def _hj_f119_containment(rows, ctx):
             c1s.append((float(r["c1"]), r["_t"]))
         if r["c8"] != "none":
             c8s.append((float(r["c8"]), r["_t"]))
+        if r["c32"] != "none":
+            c32s.append((float(r["c32"]), r["_t"]))
+        if int(r["cf"]):
+            cframes += int(r["cf"])
+            cweakest = int(r["cw"]) if cweakest is None else min(cweakest, int(r["cw"]))
+            cfar = max(cfar, int(r["cfar"]))
     if not sampled:
         return ("NEVER APPLIED", "%d on-foot seconds and no head offset was ever sampled (no pose from the runtime, or the alignment it reported was never in the history)" % len(sec))
     # normal play: after the first recentre on foot (if the window holds one), before the first second past the lean line
@@ -10785,8 +10792,8 @@ def _hj_f119_containment(rows, ctx):
     mr = re.match(r"([\d.]+) m$", radius)
     if mr:
         radius_cm = float(mr.group(1)) * 100.0
-    contact = min(c1s)[0] if c1s else None
-    cap, cap_src = (radius_cm, "the collision radius") if radius_cm else (contact, "the smallest head offset at which a world cell reached the near plane") if contact else (None, "")
+    contact = min(c32s)[0] if c32s else None   # F123: the cap is where the wall FILLED the view (32 cells of 64 or more), not where one cell touched the near plane: a brush past a corner (13:59:24) is not a clearance
+    cap, cap_src = (radius_cm, "the collision radius") if radius_cm else (contact, "the smallest head offset at which a wall filled 32 cells or more at the near plane") if contact else (None, "")
     rec_text = ""
     if p995 is not None:
         soft = float(-(-int(round((p995 + _F119_SOFT_MARGIN_CM) * 10)) // 10))
@@ -10809,8 +10816,9 @@ def _hj_f119_containment(rows, ctx):
     depth_text = ("depth read in %d of %d s (eye L %d s, R %d s)%s; nearest world %s cm (with the body %s), cells within 20 cm max %d, within 3 cm of the near plane max %d%s" % (
         eye_secs, len(sec), eyes_read[0], eyes_read[1], ", near plane %.1f cm" % near if near is not None else "",
         "%.1f" % nearest if nearest is not None else "none", "%.1f" % body if body is not None else "none", c20, cnp, ""))
-    contact_text = "contact at the near plane: the smallest head offset %s (1 cell), %s (8 cells)" % (
-        "%.1f cm at %s" % (min(c1s)[0], _hclock(min(c1s)[1])) if c1s else "none", "%.1f cm at %s" % (min(c8s)[0], _hclock(min(c8s)[1])) if c8s else "none")
+    contact_text = "contact at the near plane: the smallest head offset %s (1 cell), %s (8 cells), %s (32 cells); contact frames (32 cells or more) %d, the weakest %s cells, far cells (over 1 m) on them up to %d" % (
+        "%.1f cm at %s" % (min(c1s)[0], _hclock(min(c1s)[1])) if c1s else "none", "%.1f cm at %s" % (min(c8s)[0], _hclock(min(c8s)[1])) if c8s else "none",
+        "%.1f cm at %s" % (min(c32s)[0], _hclock(min(c32s)[1])) if c32s else "none", cframes, "-" if cweakest is None else str(cweakest), cfar)
     text = ("%d s on foot, %d head samples; head offset by class (cm, horizontal): %s; normal play (%s): p95 <= %s cm, p99.5 <= %s cm; the rest point moved %d time(s) on foot; "
             "EDVR's own eye offsets (kept out of the head offset): horizontal max %.1f cm, up %+.1f..%+.1f cm; %s; baseline (head offset under 3 cm, %d frames): cells within 20 "
             "cm max %d (with the body %d); %s; the commander's collision radius: %s%s" % (
@@ -10830,6 +10838,49 @@ def _hj_f119_containment(rows, ctx):
     if base_max >= 4:
         return ("PARTIAL", text + "; the baseline is not about 0: %d cells of 64 within 20 cm at a head offset under 3 cm, with the player's body left out (a wall that near at rest, or the "
                 "world measure holding something that is not the world)" % base_max)
+    return ("OK", text)
+
+
+# F123: head containment, the leash and the wall contact (no key). Episodes: a leash soft one (the head past 18 cm horizontally or +3 cm up and back, never black), a leash hard
+# one (black at 23 cm / +8 cm; held 0.3 s: the position recentre), a wall contact one (32 of 64 world cells within the near plane + 3 cm in an eye for 3 frames: black at once,
+# latched; 0.3 s: the recentre; released when it has cleared and the head is inside soft). Each says whether it was recentred and how long the view was black.
+def _hj_f123_containment(rows, ctx):
+    """F123: the leash and the wall contact. IDLE when armed and nothing triggered; OK when the episodes behave: every hard episode held past 0.4 s was recentred, every recentre
+    asked brought the head inside soft, and the contact was gone 1 s after it. PARTIAL on a recentre that did not bring the head inside soft, or on a wall contact still present
+    1 s after a recentre. NEVER APPLIED on a leash hard episode that stayed past the hard radius 0.4 s or more with no recentre (the timer asks at 0.3 s). The contact
+    episodes carry the proof of a peek: the weakest contact frame's cells and the far cells (over 1 m) seen on contact frames; far cells on a contact frame mean the view had a
+    way out through the wall, none that the wall filled it."""
+    if not rows:
+        return None
+    eps = rows.get("episode", [])
+    asks, dones, fails, afters = rows.get("ask", []), rows.get("done", []), rows.get("failed", []), rows.get("after", [])
+    if not (eps or asks or dones or fails or afters):
+        return ("IDLE", "armed (the session line is there), nothing triggered: no episode, no recentre")
+    kinds = collections.OrderedDict((k, [e for e in eps if e["kind"] == k]) for k in ("leash soft", "leash hard", "wall contact"))
+    parts = []
+    soft = kinds["leash soft"]
+    if soft:
+        parts.append("leash soft %d (peak %.1f cm, black %.2f s)" % (len(soft), max(float(e["h"]) for e in soft), sum(float(e["black"]) for e in soft)))
+    hard = kinds["leash hard"]
+    if hard:
+        parts.append("leash hard %d (peak %.1f cm horizontal, %+.1f cm up; recentred %d; black %.2f s)" % (
+            len(hard), max(float(e["h"]) for e in hard), max(float(e["up"]) for e in hard), sum(1 for e in hard if e["rec"] == "yes"), sum(float(e["black"]) for e in hard)))
+    wall = kinds["wall contact"]
+    if wall:
+        parts.append("wall contact %d (peak coverage %d of 64 cells, the weakest contact frame %d, far cells (over 1 m) on contact frames up to %d, %d contact frames; recentred %d; black %.2f s)" % (
+            len(wall), max(int(e["cells"]) for e in wall), min(int(e["weak"]) for e in wall), max(int(e["far"]) for e in wall), sum(int(e["frames"]) for e in wall),
+            sum(1 for e in wall if e["rec"] == "yes"), sum(float(e["black"]) for e in wall)))
+    text = "%d episode(s): %s; position recentres asked %d (leash %d, contact %d), done %d%s, failed %d; the contact still present 1 s after a recentre %d" % (
+        len(eps), "; ".join(parts) if parts else "none", len(asks), sum(1 for a in asks if a["by"].startswith("the leash")), sum(1 for a in asks if a["by"].startswith("a latched")),
+        len(dones), " (mean wait %.2f s)" % (sum(float(d["w"]) for d in dones) / len(dones)) if dones else "", len(fails), len(afters))
+    never = [e for e in hard if float(e["past"]) >= 0.4 and e["rec"] == "no"]
+    if never:
+        return ("NEVER APPLIED", text + "; %d leash hard episode(s) stayed past the hard radius 0.4 s or more (longest %.2f s) and were never recentred: the timer asks at 0.3 s" % (
+            len(never), max(float(e["past"]) for e in never)))
+    if fails:
+        return ("PARTIAL", text + "; %d recentre(s) did not bring the head inside soft (the head still %s cm horizontal)" % (len(fails), ", ".join(f["h"] for f in fails[:3])))
+    if afters:
+        return ("PARTIAL", text + "; the wall contact was still present 1 s after %d recentre(s) (the camera itself is at the wall: a recentre cannot help)" % len(afters))
     return ("OK", text)
 
 
@@ -12306,10 +12357,11 @@ HEALTH_RULES = (
     ), _hj_f118_reticle),
     _hrule("head containment (F119)", ("F119",), ("head containment (F119)",), (
         ("sec", r"head containment \(F119\) 1 s: frames (?P<frames>\d+) \(no pose (?P<nopose>\d+), over limit (?P<over>\d+)\); rest point: generation (?P<gen>\d+), "
-                r"(?P<age>[\d.]+) s old, recentres (?P<rec>\d+); head offset cm: (?P<offs>.*?); EDVR eye offsets cm \(not in the head offset\): h max (?P<hmax>[\d.]+), "
+                r"(?P<age>[\d.]+) s old, recentres (?P<rec>\d+); head offset cm: (?P<offs>.*?); EDVR eye offsets cm: h max (?P<hmax>[\d.]+), "
                 r"up (?P<upmin>[+-][\d.]+)\.\.(?P<upmax>[+-][\d.]+) \[ADS lock\+sight (?P<lock>[\d.]+), weapon eye (?P<weapon>[\d.]+), view (?P<view>[\d.]+) horizontal; "
                 r"neck (?P<neck>[+-][\d.]+), hold (?P<hold>[+-][\d.]+) up\]; depth cm \([^)]*\): (?P<depth>.*?); skipped (?P<skipped>.*?); contact at the near plane, "
-                r"smallest head offset: 1 cell (?P<c1>[\d.]+|none), 8 cells (?P<c8>[\d.]+|none); at head offset under 3 cm: frames (?P<bframes>\d+), cells within 20 cm max "
+                r"smallest head offset: 1 cell (?P<c1>[\d.]+|none), 8 cells (?P<c8>[\d.]+|none), 32 cells (?P<c32>[\d.]+|none); contact frames \(32 cells or more\) (?P<cf>\d+), "
+                r"weakest (?P<cw>\d+) cells, far \(over 1 m\) up to (?P<cfar>\d+) cells; at head offset under 3 cm: frames (?P<bframes>\d+), cells within 20 cm max "
                 r"(?P<bcells>\d+) \(body (?P<bbody>\d+)\); cost (?P<cost>\d+) us a frame"),
         ("recentre", r"head containment \(F119\): the rest point moved \(reference generation (?P<from>\d+) to (?P<to>\d+); (?P<n>\d+) on foot this session\): (?P<what>.*)$"),
         ("session", r"head containment \(F119\): measure only, nothing drawn changes; the commander's collision radius: (?P<radius>[^;]*);"),
@@ -12318,6 +12370,20 @@ HEALTH_RULES = (
         ("note", r"head containment \(F119\): (?:eye \d's scene depth (?:cannot be viewed|\(format)|the Present boundary runs on thread)"),
         ("_", r"head containment \(F119\): precompiled compute shader"),
     ), _hj_f119_containment),
+    _hrule("head containment (F123)", ("F123",), ("head containment (F123)",), (
+        ("session", r"head containment \(F123\): the leash and the wall contact are on \(no key\)"),
+        ("episode", r"head containment \(F123\): (?P<kind>leash soft|leash hard|wall contact) episode: began (?P<began>[\d.]+) s into this on-foot spell, lasted (?P<len>[\d.]+) s, "
+                    r"black (?P<black>[\d.]+) s(?P<ads>, ADS at the end)?; (?:peak head offset (?P<h>[\d.]+) cm horizontal and (?P<up>[+-][\d.]+) cm up, (?P<past>[\d.]+) s past a hard "
+                    r"radius|peak coverage (?P<cells>\d+) of 64 cells \(world cells within the near plane \+ 3 cm\), weakest contact frame (?P<weak>\d+) cells, far cells \(over 1 m\) "
+                    r"up to (?P<far>\d+), contact frames (?P<frames>\d+)); recentred (?P<rec>yes|no)"),
+        ("ask", r"head containment \(F123\): position recentre (?P<n>\d+) asked by (?P<by>a latched wall contact|the leash past its hard radius): the head (?P<h>[\d.]+) cm "
+                r"horizontal and (?P<up>[+-][\d.]+) cm up from the rest point, contact (?P<cells>\d+) of 64 cells"),
+        ("done", r"head containment \(F123\): position recentre (?P<n>\d+) done after (?P<w>[\d.]+) s: the head is (?P<h>[\d.]+) cm horizontal and (?P<up>[+-][\d.]+) cm up from the "
+                 r"new rest point \(inside soft\)"),
+        ("failed", r"head containment \(F123\): position recentre (?P<n>\d+) DID NOT bring the head inside soft within (?P<w>[\d.]+) s: the head is still (?P<h>[\d.]+) cm horizontal "
+                   r"and (?P<up>[+-][\d.]+) cm up from the rest point"),
+        ("after", r"head containment \(F123\): wall contact still present (?P<s>[\d.]+) s after position recentre (?P<n>\d+)"),
+    ), _hj_f123_containment),
     _hrule("view height hold (F87h)", ("F87h",), ("view height hold (F87h)",), (
         ("sec", r"view height hold \(F87h\) 1 s: state (?P<state>[^;]+);"),
     ), _hj_f87h),
@@ -13499,6 +13565,7 @@ def self_test_health():
     f116_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f116.h")
     f121_path = os.path.join(repo_root(), "src", "d3d11", "visor_axis_math.h")
     f119_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f119.h")
+    f123_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f123.h")
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -13506,6 +13573,7 @@ def self_test_health():
         f116src = read_text(f116_path)
         f121src = read_text(f121_path)
         f119src = read_text(f119_path)
+        f123src = read_text(f123_path)
         f121bsrc = read_text(f121b_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -13581,6 +13649,15 @@ def self_test_health():
             fmts[key] = health_c_format(f121bsrc, needle)
         if fmts[key] is None:
             raise AssertionError("visor_census_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R123(needle, *vals):
+        """F123's lines (native_on_foot_f123.h builds them: formatSession, formatEpisode, formatAsk, formatResult, formatAfter), from their own format literals."""
+        key = "f123:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f123src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f123.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -13985,10 +14062,10 @@ def self_test_health():
         def eye119(eye="L", near=12.0, nw="63.3", na="21.0", cells=(0, 0, 0, 0), b20=0, read=1):
             return R119("%s near %.1f, nearest %s (body %s)", eye, near, nw, na, *cells, b20, read)
 
-        def sec119(offs=None, depth=None, frames=90, nopose=0, gen=7, age=12.4, rec=0, hmax=4.0, skipped="none", c1="none", c8="none", base=(80, 0, 0)):
+        def sec119(offs=None, depth=None, frames=90, nopose=0, gen=7, age=12.4, rec=0, hmax=4.0, skipped="none", c1="none", c8="none", c32="none", cf=0, cw=0, cfar=0, base=(80, 0, 0)):
             both = eye119("L") + "; " + eye119("R", nw="65.0", na="22.0")
             return R119("native on foot head containment (F119) 1 s", frames, nopose, 0, gen, age, rec, offs if offs is not None else cls119(), hmax, 17.1, 17.1, 0.0, 0.0, 0.0,
-                        17.1, 0.0, depth if depth is not None else both, skipped, c1, c8, *base, 41.0)
+                        17.1, 0.0, depth if depth is not None else both, skipped, c1, c8, c32, cf, cw, cfar, *base, 41.0)
 
         def ses119(radius="not read"):
             return R119("measure only, nothing drawn changes", radius, 8, 8, 8, 8, 0x10)
@@ -14001,18 +14078,22 @@ def self_test_health():
               has=["3 s on foot, 270 head samples; head offset by class (cm, horizontal): standing/unarmed/hip n 270, p95 <= 6, max 6.0",
                    "normal play (the 3 s from the start): p95 <= 6 cm, p99.5 <= 6 cm", "horizontal max 4.0 cm, up +17.1..+17.1 cm",
                    "depth read in 3 of 3 s (eye L 3 s, R 3 s), near plane 12.0 cm; nearest world 63.3 cm (with the body 21.0), cells within 20 cm max 0, within 3 cm of the near plane max 0",
-                   "baseline (head offset under 3 cm, 240 frames): cells within 20 cm max 0 (with the body 0)", "the smallest head offset none (1 cell), none (8 cells)",
+                   "baseline (head offset under 3 cm, 240 frames): cells within 20 cm max 0 (with the body 0)",
+                   "the smallest head offset none (1 cell), none (8 cells), none (32 cells); contact frames (32 cells or more) 0, the weakest - cells, far cells (over 1 m) on them up to 0",
                    "the commander's collision radius: not read; radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, no cap known)"], lacks=["UNPARSED"])
         contact = eye119("L", nw="0.0", na="0.0", cells=(6, 12, 30, 40), b20=30) + "; " + eye119("R", nw="0.0", na="0.0", cells=(2, 6, 28, 40), b20=28)
-        check("F119 containment: leans after normal play, the contact caps the hard radius", [ses119(), sec119(), sec119(), sec119(offs=lean),
-              sec119(offs=lean, depth=contact, c1="38.0", c8="40.5")], 0, [("OK", F119)],
+        check("F119 containment: leans after normal play, the wall filling the view caps the hard radius", [ses119(), sec119(), sec119(), sec119(offs=lean),
+              sec119(offs=lean, depth=contact, c1="38.0", c8="40.5", c32="45.0", cf=12, cw=36, cfar=2)], 0, [("OK", F119)],
               has=["normal play (the 2 s from the start and before the first second past 30 cm (10:00:04)): p95 <= 6 cm, p99.5 <= 6 cm",
-                   "the smallest head offset 38.0 cm at 10:00:05 (1 cell), 40.5 cm at 10:00:05 (8 cells)",
-                   "radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, under 36 cm: the smallest head offset at which a world cell reached the near plane)",
+                   "the smallest head offset 38.0 cm at 10:00:05 (1 cell), 40.5 cm at 10:00:05 (8 cells), 45.0 cm at 10:00:05 (32 cells); contact frames (32 cells or more) 12, the weakest 36 cells, "
+                   "far cells (over 1 m) on them up to 2",
+                   "radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, under 43 cm: the smallest head offset at which a wall filled 32 cells or more at the near plane)",
                    "cells within 20 cm max 30, within 3 cm of the near plane max 40"])
-        check("F119 containment: a cap under normal play leaves no room", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="8.0", c8="9.0")], 0, [("OK", F119)],
+        check("F119 containment: a brush past a corner (a few cells, one cell touching) is not a clearance: no cap", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="4.6", c8="4.6")], 0,
+              [("OK", F119)], has=["no cap known"])
+        check("F119 containment: a cap under normal play leaves no room", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="8.0", c8="9.0", c32="8.0")], 0, [("OK", F119)],
               has=["radii: soft 3 cm, hard 6 cm", "the cap leaves no room: normal play reaches 6 cm and the cap allows 6"])
-        check("F119 containment: the collision radius, when read, is the cap", [ses119("0.350 m"), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="38.0", c8="40.5")], 0,
+        check("F119 containment: the collision radius, when read, is the cap", [ses119("0.350 m"), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="38.0", c8="40.5", c32="45.0")], 0,
               [("OK", F119)], has=["the commander's collision radius: 0.350 m", "under 33 cm: the collision radius"])
         check("F119 containment: after a recentre the normal play is what follows it", [sec119(offs=cls119(mx=80.0, p95=79.0, hist=hist119((15, 90)))), sec119(gen=8, rec=1),
               sec119(gen=8, rec=1)], 0, [("OK", F119)], has=["normal play (the 2 s after the first recentre on foot): p95 <= 6 cm, p99.5 <= 6 cm", "the rest point moved 1 time(s) on foot"])
@@ -14030,6 +14111,44 @@ def self_test_health():
         check("F119 containment: the shader stood down", [ses119(), "head containment (F119): precompiled compute shader head_containment_cs creation FAILED; standing down (0x00000000, 0.100 ms).",
               sec119(depth="none read", skipped="no GPU 90")], 0, [("PARTIAL", F119)], has=["the depth grid stood down: creation FAILED; standing down"])
         check("F119 containment: a drifted line is unparsed", ["native on foot head containment (F119) 1 s: something else"], 4, [("UNPARSED", F119)])
+
+        # ---- head containment (F123): the leash and the wall contact; episodes, the recentres they asked for ----
+        F123 = "head containment (F123)"
+
+        def ses123():
+            return R123("the leash and the wall contact are on", 18.0, 23.0, 3.0, 8.0, 0.3, 0.3, 0.1, 0.2, 32, 3, 3)
+
+        def leash123(kind="leash hard", began=12.5, ln=1.25, black=0.9, h=31.4, up=-3.0, past=0.5, rec="yes", ads=""):
+            return R123("%s episode: began", kind, began, ln, black, ads, h, up, past, rec)
+
+        def wall123(began=40.0, ln=2.5, black=1.8, cells=58, weak=36, far=0, frames=140, rec="yes", ads=""):
+            return R123("wall contact episode: began", began, ln, black, ads, cells, weak, far, frames, rec)
+
+        def ask123(n=1, by="the leash past its hard radius", h=26.0, up=0.5, cells=0):
+            return R123("position recentre %u asked by", n, by, h, up, cells)
+
+        def done123(n=1, w=0.07, h=0.4, up=0.0):
+            return R123("position recentre %u done after", n, w, h, up)
+
+        def fail123(n=1, w=0.6, h=28.0, up=0.0):
+            return R123("position recentre %u DID NOT bring", n, w, h, up)
+
+        check("F123 containment: armed, nothing triggered", [ses123(), hold(), hold()], 0, [("IDLE", F123)], has=["armed (the session line is there), nothing triggered: no episode, no recentre"])
+        check("F123 containment: a soft episode, a hard one recentred", [ses123(), leash123("leash soft", h=20.1, black=0.0, past=0.0, rec="no", ln=0.4), ask123(), done123(), leash123()], 0,
+              [("OK", F123)], has=["2 episode(s): leash soft 1 (peak 20.1 cm, black 0.00 s); leash hard 1 (peak 31.4 cm horizontal, -3.0 cm up; recentred 1; black 0.90 s); "
+                                   "position recentres asked 1 (leash 1, contact 0), done 1 (mean wait 0.07 s), failed 0; the contact still present 1 s after a recentre 0"], lacks=["UNPARSED"])
+        check("F123 containment: a wall contact episode carries the proof of a peek", [ses123(), wall123(), ask123(2, "a latched wall contact", 12.0, 1.5, 55), done123(2), wall123(frames=60, weak=33, far=0, cells=64)], 0,
+              [("OK", F123)], has=["wall contact 2 (peak coverage 64 of 64 cells, the weakest contact frame 33, far cells (over 1 m) on contact frames up to 0, 200 contact frames; recentred 2; black 3.60 s)",
+                                   "asked 1 (leash 0, contact 1)"])
+        check("F123 containment: far cells on a contact frame are reported", [ses123(), wall123(far=14, weak=34)], 0, [("OK", F123)], has=["far cells (over 1 m) on contact frames up to 14"])
+        check("F123 containment: a recentre that left the head outside soft", [ses123(), leash123(), ask123(), fail123()], 0, [("PARTIAL", F123)],
+              has=["1 recentre(s) did not bring the head inside soft (the head still 28.0 cm horizontal)"])
+        check("F123 containment: the contact still present 1 s after a recentre", [ses123(), wall123(), ask123(3, "a latched wall contact"), done123(3), R123("wall contact still present", 1.0, 3)], 0,
+              [("PARTIAL", F123)], has=["the wall contact was still present 1 s after 1 recentre(s)"])
+        check("F123 containment: held past the hard radius and never recentred", [ses123(), leash123(past=0.8, rec="no")], 3, [("NEVER APPLIED", F123)],
+              has=["1 leash hard episode(s) stayed past the hard radius 0.4 s or more (longest 0.80 s) and were never recentred"])
+        check("F123 containment: a hard episode that ended inside 0.3 s needed no recentre", [ses123(), leash123(past=0.2, rec="no", black=0.2, ln=0.5)], 0, [("OK", F123)])
+        check("F123 containment: a drifted line is unparsed", ["native on foot head containment (F123): something else"], 4, [("UNPARSED", F123)])
 
         # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
         F111 = "panel pointer (F111)"

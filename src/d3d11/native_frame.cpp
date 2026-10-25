@@ -62,6 +62,7 @@ uint32_t g_eyeAlignSerial = 0;
 std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 render, 2 render_locked), carried in version 9 output
 float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
 float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians), version 10 output only (guarded by g_mutex)
+uint32_t g_positionRecentre = 0;  // F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only (guarded by g_mutex)
 // F62b: the latest version 3 input's head in natural LOCAL (guarded by g_mutex).
 float g_localHead[12] = {};
 bool g_localHeadValid = false;
@@ -374,6 +375,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         result.reservedOffset[1] = g_rotCal[1];
         // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
         if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
+        // F123: the position-only recentre asked of the runtime, in a version 10 answer only (0 while none stands).
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.positionRecentre = g_positionRecentre;
         // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 answer only: 0 unless the frame thread
         // published a fresh level.
         if (output->version == EDVR_NATIVE_FRAME_VERSION_10)
@@ -646,6 +649,11 @@ void nativeFrameSetRotCalibrate(float yawRad, float pitchRad) {
 void nativeFrameSetAdsPitch(float pitchRad) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_adsPitch = pitchRad == pitchRad ? pitchRad : 0.0f;
+}
+// F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only.
+void nativeFrameSetPositionRecentre(uint32_t serial) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_positionRecentre = serial;
 }
 // F115: the on-foot words as set, for the boarding reset's read-back.
 void nativeFrameOnFootWords(EdvrNativeOnFootWords& out) {

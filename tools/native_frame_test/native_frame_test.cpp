@@ -42,6 +42,7 @@
 #include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
 #include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
+#include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
 
 #include <array>
 #include <chrono>
@@ -6051,6 +6052,23 @@ int wmain(int argc, wchar_t** argv) {
         applied9Frame.eyeAlignApplied = 99u;
         const bool v2Applied = table.beginFrame(table.context, &applied9Frame, &applied9) == S_OK && edvr::nativeFrameNowPose(npApplied) && npApplied.eyeAlignApplied == 0u;
         check(v3Applied && v2Applied, "F89: the applied-alignment serial of a version 3 input reaches nativeFrameNowPose, and an older input reads 0 (the runtime does not say)");
+        // F123: the position-only recentre asked of the runtime rides a version 10 answer's positionRecentre (a serial; 0 when none stands); no other shape carries it
+        edvr::nativeFrameSetPositionRecentre(9u);
+        EdvrNativeFrameOutput recentre10{sizeof(recentre10), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput recentre10Frame = v3Input(37, 0.1f);
+        EdvrNativeFrameOutput recentre9{sizeof(recentre9), EDVR_NATIVE_FRAME_VERSION_9};
+        EdvrNativeFrameInput recentre9Frame = input(41, 7, 38);
+        recentre9Frame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        recentre9Frame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        recentre9.positionRecentre = 0xA5A5A5A5u;
+        const bool askOk = table.beginFrame(table.context, &recentre10Frame, &recentre10) == S_OK && recentre10.version == EDVR_NATIVE_FRAME_VERSION_10 && recentre10.positionRecentre == 9u;
+        const bool ask9Ok = table.beginFrame(table.context, &recentre9Frame, &recentre9) == S_OK && recentre9.version == EDVR_NATIVE_FRAME_VERSION_9 && recentre9.positionRecentre == 0u;
+        edvr::nativeFrameSetPositionRecentre(0u);
+        EdvrNativeFrameOutput recentreNone{sizeof(recentreNone), EDVR_NATIVE_FRAME_VERSION_10};
+        EdvrNativeFrameInput recentreNoneFrame = v3Input(39, 0.1f);
+        const bool noAskOk = table.beginFrame(table.context, &recentreNoneFrame, &recentreNone) == S_OK && recentreNone.positionRecentre == 0u;
+        check(askOk && ask9Ok && noAskOk && offsetof(EdvrNativeFrameOutput, positionRecentre) == offsetof(EdvrNativeFrameOutput, reservedTerrainGuard) - 4u,
+              "F123: a version 10 answer carries the position recentre's serial (9 as asked), a version 9 answer's word is 0, and with none asked it is 0; the word is the retired guard's first, layout unchanged");
         edvr::nativeFrameSetAdsPitch(0.0f);
     }
     edvr::g_nativeOnFootActive.store(false);
@@ -7319,6 +7337,9 @@ int wmain(int argc, wchar_t** argv) {
     // F119 (measure only): the physical head from the pose and its alignment, the second's percentiles and histogram by class, EDVR's own offsets kept apart, the depth
     // grid decoded from the shader's words (a wall, the player's weapon, the near plane, the sky), the baseline and contact tallies, and the lines within the log's limit.
     f119test::run119(check);
+    // F123: the leash on the physical offset (horizontal 18 to 23 cm, upward 3 to 8 cm), the hard timer, the recentre sequence, the wall contact (32 of 64 cells, 3 frames, latched,
+    // released with the head inside soft), the levels combined by max, everything cleared off foot, and the lines.
+    f123test::run123(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
