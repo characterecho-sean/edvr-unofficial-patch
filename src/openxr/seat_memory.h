@@ -278,7 +278,11 @@ enum class SeatWhere { Unknown, OnFoot, Aboard };
 // aboard (replaced inside a window, otherwise the player's own recentre). Native on-foot VR (standing, room scale) changes this in this one
 // place: false makes on foot a place where the game's resets pass through and no seat is applied, as the first build had it. Read by
 // seatHolds() and nothing else; deliberately not a config key.
-constexpr bool kOnFootIsSeated = true;
+// F115, the pilot's decision (2026-10-25): FALSE. Native on-foot VR is flown, and a recentre on foot made the cockpit's seat: the stale seat of log
+// edvr_gfx_20261025_071049 (the head 17.8 cm under it after boarding) was stored by an on-foot press in the session before. Now the seat comes only from
+// a recentre in a menu or the cockpit (classifyReset), an on-foot recentre or game reset recentres on foot only (PassThrough), entering on foot applies
+// nothing, and boarding is the transition that puts the stored seat back (applyWanted when the origin was moved on foot).
+constexpr bool kOnFootIsSeated = false;
 constexpr bool onFootIsSeated() { return kOnFootIsSeated; }
 // Is the commander somewhere the seat applies?
 constexpr bool seatHolds(SeatWhere w) { return w == SeatWhere::Aboard || (w == SeatWhere::OnFoot && onFootIsSeated()); }
@@ -319,11 +323,11 @@ inline PressInfo pressInfoFrom(const HmdResetPress& p, uint64_t lastPressTick, u
 // What to do with a ResetSeatedZeroPose the game just made.
 enum class SeatResetDecision {
   GameMode,          // the graphics half has not spoken (the word is 0), or the memory is switched off: honoured, nothing remembered (the old behaviour)
-  PassThrough,       // in a menu or a load (or on foot, when onFootIsSeated() is false): honoured, nothing remembered
-  ReplaceWithSeat,   // aboard or on foot, inside a transition window, a seat is stored: the stored seat replaces the head pose
+  PassThrough,       // in a menu or a load with no press seen (or on foot, when onFootIsSeated() is false): honoured, nothing remembered
+  ReplaceWithSeat,   // aboard (or on foot while onFootIsSeated()), inside a transition window, a seat is stored: the stored seat replaces the head pose
   HonourNoSeat,      // aboard, inside a window, nothing stored: honoured as today (an automatic reset is not evidence of where the player sits)
-  HonourStore,       // aboard or on foot, key not observable, outside a window: believed to be the player's after kRetroMs (written then, taken back by a transition)
-  HonourPress        // the player's key press was seen just before: honoured and remembered AT ONCE, in or out of a window, never held
+  HonourStore,       // aboard (or on foot while seated), key not observable, outside a window: believed to be the player's after kRetroMs (taken back by a transition)
+  HonourPress        // the player's key press was seen just before: honoured and remembered AT ONCE, in or out of a window, never held (F115: in a menu too)
 };
 inline const char* seatResetDecisionName(SeatResetDecision d) {
   switch (d) {
@@ -442,9 +446,17 @@ class SeatMemory {
                                                   : (prevWhere == SeatWhere::Aboard ? "disembarked" : "on_foot");
         return transition(ev, now, why, true);
       }
-      // Into a menu or a load: the window closes and a pending apply is cancelled, and the game's resets pass through.
+      // Into a menu or a load (F115: or on foot): the window closes and a pending apply is cancelled, and the game's resets pass through.
       windowOpen_ = false; pendingApply_ = false;
       ev.why = w == SeatWhere::OnFoot ? "left_seat" : "unknown_state";
+      // F115: a disembark was a transition until on foot stopped being a seat, and a transition takes back a player-looking recentre made less than
+      // kRetroMs before it (the game's reset on the way out); leaving the cockpit for on foot still does.
+      if (w == SeatWhere::OnFoot && prevWhere == SeatWhere::Aboard && pendingStore_) {
+        ev.discardedPending = true;
+        ev.discardAgeMs = now >= pendingAt_ ? now - pendingAt_ : 0;
+        ev.discardedSeat = seat_; ev.restoredSeat = pendingPrev_;
+        seat_ = pendingPrev_; originIsSeat_ = false; pendingStore_ = false;
+      }
       return ev;
     }
     if (seatHolds(w)) {
@@ -458,6 +470,10 @@ class SeatMemory {
 
   SeatResetDecision classifyReset(uint64_t now, const PressInfo& press = PressInfo{}) const {
     if (!keep()) return SeatResetDecision::GameMode;
+    // F115 (the pilot's decision, 2026-10-25): the player's own recentre anywhere but on foot is the seat they sit in, so a press seen in a menu or a load is
+    // honoured and remembered at once, as one aboard. Before, a menu press passed through unstored, and the next on-foot entry put back a seat from an earlier
+    // session over it (log edvr_gfx_20261025_071049: the head 17.8 cm under that seat in the cockpit). On foot (no longer a seat) a press passes through.
+    if (press.state == PressState::Seen && where_ != SeatWhere::OnFoot) return SeatResetDecision::HonourPress;
     if (!seatHolds(where_)) return SeatResetDecision::PassThrough;
     if (press.state == PressState::Seen) return SeatResetDecision::HonourPress;                 // the player's, whatever the window says
     if (press.state == PressState::None) return has_ ? SeatResetDecision::ReplaceWithSeat       // the game's own: the seat, in or out of a window,

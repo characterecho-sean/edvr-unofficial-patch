@@ -406,6 +406,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint32_t lookResetSeen=0;uint64_t lookResets=0;double lookYawBeforeDeg=0,lookYawAfterDeg=0;bool lookYawKnown=false;
   // F109: a reset waiting to return the seated space to its origin itself (a frame was open), and the returns made.
   bool lookRestorePending=false;uint64_t lookRestores=0;
+  uint64_t seatApplyFeatureMark=~0ull;   // F115: lookRuntimeFrames when the stored seat last landed (seatApplyAhead)
   // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
   // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
   double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
@@ -2906,7 +2907,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(ok) {
       // A player-looking recentre over a stored seat is held for SeatMemory::kRetroMs before the disk hears of it: a transition inside that time
       // takes it back (the ramp's reset lands before the boarding flip is visible).
-      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision==SeatResetDecision::HonourPress?"manual_reset_press":"manual_reset");
+      // F115: the press's place in the store's why (a menu or a load is stored since F115; aboard and on foot as before).
+      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision!=SeatResetDecision::HonourPress?"manual_reset":
+          seat.where()==SeatWhere::Aboard?"manual_reset_press_cockpit":seat.where()==SeatWhere::OnFoot?"manual_reset_press_on_foot":"manual_reset_press_menu");
       else if(decision==SeatResetDecision::HonourStore&&hadSeat)
         nativeTracePrintf("seat_store,action=defer,why=manual_reset,prev=%.3f/%.3f/%.3f/%.1f,new=%.3f/%.3f/%.3f/%.1f,commit_after_ms=%llu\n",
             previousSeat.x,previousSeat.y,previousSeat.z,seatRadToDeg(previousSeat.yaw),currentOrigin.x,currentOrigin.y,currentOrigin.z,
@@ -3212,6 +3215,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrPosef o{};
     const bool headOk=lastResetResult==XR_SUCCESS&&(head.locationFlags&tracked)==tracked&&seatedOriginFromHead(head.pose,head.locationFlags,o);
     const unsigned long long events=(unsigned long long)(referenceChanges-localHandled);
+    // F115: on foot is no longer a seat, so the runtime's recentre there recentres on foot only (the origin moves, nothing is stored; boarding puts the seat back).
+    if(headOk&&seat.where()==SeatWhere::OnFoot) {
+      seatTraceDecision="pass_through";seatTraceHasCall=false;
+      if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
+      seat.noteReset(SeatResetDecision::PassThrough,currentOrigin);
+      nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=recentre_on_foot,where=on_foot,stored=%u\n",events,unsigned(seat.has()));
+      localHandled=referenceChanges;return;
+    }
     if(headOk) {
       seatTraceDecision="honour_store";seatTraceHasCall=false;
       if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
@@ -3220,6 +3231,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const SeatPose& s=seat.seat();
       nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=store_as_manual,where=%s,window=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
           events,seatWhereName(seat.where()),unsigned(seat.inWindow(GetTickCount64())),s.x,s.y,s.z,seatRadToDeg(s.yaw));
+    } else if(seat.where()==SeatWhere::OnFoot) {
+      // F115: untracked on foot: no seat is made from LOCAL's origin there either (boarding puts the stored one back).
+      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=not_stored_on_foot,where=on_foot\n",events);
     } else {
       SeatPose fallback{};
       if(seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE) {
@@ -3256,9 +3270,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const XrPosef origin=xrFromSeatPose(seat.seat());
     seatTraceDecision=decision;
     const bool ok=applySeatedReset(head,reason,notifyGame,&origin);
-    if(ok){seat.noteOrigin(true);seat.applyDone();}
+    if(ok){seat.noteOrigin(true);seat.applyDone();seatApplyFeatureMark=lookRuntimeFrames;}
     return ok;
   }
+  // F115: the frame provider's words (the eye alignment, the look's reset, the pitches) wait while a stored seat is due, and after it lands until a frame
+  // answer newer than the apply arrives: the provider's words of the frame before were the on-foot ones, and the seat's new origin has just dropped them
+  // (lookRebase). So a boarding moves the cockpit once, onto the seat, whatever order the seat's word and the provider's zeros reach the runtime in.
+  bool seatApplyAhead() const { return (seat.keep()&&seat.applyPending())||seatApplyFeatureMark==lookRuntimeFrames; }
   // F22: a new seated origin (applySeatedResetCore) carries no look compensation: the base is the provider's total now.
   void lookRebase() {
     lookSeated=currentOrigin;lookSeatedKnown=true;
@@ -3298,13 +3316,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       lookBase=lookWanted;
       ++lookResets;
       lookWhy="reset: compensation returned to zero";
-      lookRestorePending=lookComp!=0.0;
+      // F115: always, not only while a compensation is left: turns that came back to a zero total about a head that moved between them leave the seated space
+      // off its origin, and the boarding reset sends this serial to put the cockpit back on the seat exactly.
+      lookRestorePending=true;
     }
     const uint64_t now=GetTickCount64();
     // F109: a reset returns the seated space to its origin itself. Turning it back by the total about the head where it is now (as before) left a translation
     // whenever the head had moved between the turns: after a look to aim session of a standing player, the cockpit's seat would have moved. The eye alignment's
     // folded offset goes with it (eyeApplied 0: eyePoll, next in this poll, applies the wanted offset again), as at a new origin (lookRebase).
-    if(lookRestorePending&&!state.frameOpen()) {
+    // F115: while the seat memory has a seat to put back (boarding with the origin moved on foot) the restore waits for it: the seat's new origin rebases the
+    // look (lookRebase), so the cockpit moves once, to the seat, and not first to the on-foot origin.
+    if(lookRestorePending&&!state.frameOpen()&&!seatApplyAhead()) {
       const XrResult r=seated.replace(seatedPoseFor(currentOrigin,rotApplied[1],adsApplied));
       if(r!=XR_SUCCESS) {
         ++lookRefusals;lookWhy="seated space replace refused (the reset to the origin)";
@@ -3367,7 +3389,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const uint64_t now=GetTickCount64();
     double delta[3]={eyeWanted[0]-eyeApplied[0],eyeWanted[1]-eyeApplied[1],eyeWanted[2]-eyeApplied[2]};
     const double biggest=std::fmax(std::fabs(delta[0]),std::fmax(std::fabs(delta[1]),std::fabs(delta[2])));
-    if(biggest>1e-6&&!state.frameOpen()) {
+    if(biggest>1e-6&&!state.frameOpen()&&!seatApplyAhead()) {   // F115: as lookPoll's restore, after the seat's apply
       if(!lookSeatedKnown) lookRebase();
       delta[0]=eyeWanted[0]-eyeApplied[0];delta[1]=eyeWanted[1]-eyeApplied[1];delta[2]=eyeWanted[2]-eyeApplied[2];   // lookRebase zeroes eyeApplied
       SeatPose next=lookSeated;
@@ -3413,7 +3435,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void rotPoll() {
     if(!features.acquired()||!seated.space()||!changes.active()) return;
     const uint64_t now=GetTickCount64();
-    if((std::fabs(rotWanted[0]-rotApplied[0])>1e-6||std::fabs(rotWanted[1]-rotApplied[1])>1e-6)&&!state.frameOpen()) {
+    if((std::fabs(rotWanted[0]-rotApplied[0])>1e-6||std::fabs(rotWanted[1]-rotApplied[1])>1e-6)&&!state.frameOpen()&&!seatApplyAhead()) {   // F115
       if(!lookSeatedKnown) lookRebase();   // lookRebase zeroes rotApplied
       const double dyaw=rotWanted[0]-rotApplied[0];
       XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime rotTime=0;
@@ -3471,7 +3493,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!features.acquired()||!seated.space()||!changes.active()) return;
     const uint64_t now=GetTickCount64();
     const bool change=std::fabs(adsWanted-adsApplied)>1e-6;
-    if((change||adsApplied!=0.0)&&!state.frameOpen()) {
+    if((change||adsApplied!=0.0)&&!state.frameOpen()&&!seatApplyAhead()) {   // F115
       if(!lookSeatedKnown) lookRebase();   // lookRebase zeroes adsApplied
       XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime adsTime=0;
       const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&adsTime,counterNow,nullptr,boundary.estimateNow());

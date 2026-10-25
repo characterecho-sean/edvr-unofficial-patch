@@ -34,6 +34,7 @@
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
+#include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
 
 #include <array>
 #include <chrono>
@@ -7293,6 +7294,8 @@ int wmain(int argc, wchar_t** argv) {
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
     f111test::run111(check);
+    // F115: native stereo on foot's exit edge: the flight's 34.6 cm raise an exact zero from the edge's frame (against the 0.5 s ramp), the read-back, the seat.
+    f115test::run115(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

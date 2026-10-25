@@ -647,6 +647,17 @@ void nativeFrameSetAdsPitch(float pitchRad) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_adsPitch = pitchRad == pitchRad ? pitchRad : 0.0f;
 }
+// F115: the on-foot words as set, for the boarding reset's read-back.
+void nativeFrameOnFootWords(EdvrNativeOnFootWords& out) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < 3; ++i) out.eyeAlign[i] = g_eyeAlign[i];
+    out.eyeAlignSerial = g_eyeAlignSerial;
+    out.lookYawTotal = g_lookYaw;
+    out.lookYawReset = g_lookReset;
+    out.adsPitch = g_adsPitch;
+    out.rotCal[0] = g_rotCal[0];
+    out.rotCal[1] = g_rotCal[1];
+}
 
 // F31: the latest frame's render head and "now" head (the d3d11 half's world markers).
 bool nativeFrameNowPose(EdvrNativeNowPose& out) {
