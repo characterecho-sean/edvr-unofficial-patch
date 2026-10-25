@@ -10631,11 +10631,15 @@ def _hj_f85b(rows, ctx):
 
 
 def _hj_f85c(rows, ctx):
-    draws, idle, fail = rows.get("draws", []), rows.get("idle", []), rows.get("fail", [])
-    if not draws and not idle and not fail:
+    draws, idle, fail, game = rows.get("draws", []), rows.get("idle", []), rows.get("fail", []), rows.get("game", [])
+    if not draws and not idle and not fail and not game:
         return None
     if fail:
         return ("NEVER APPLIED", "the compute pass could not run: %s" % fail[0]["why"])
+    # F101: with reticle follow = game nothing is patched by design: the reticle is the game's, not a failure
+    game_text = "the reticle is the game's (reticle follow = game) for %d s: %d key 10 draws left as the game placed them" % (len(game), _hsum(game, "n"))
+    if game and not _hsum(draws, "draws"):
+        return ("IDLE", game_text)
     if not draws:
         armed = _harmed_seconds(ctx)
         if armed:
@@ -10646,6 +10650,8 @@ def _hj_f85c(rows, ctx):
     for x in draws:
         refs.update(_hpairs(x["refs"]))
     text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), len(draws), reads, hit, sky, _htop(refs))
+    if game:
+        text += "; " + game_text
     if patched == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if patched * 2 < nd else "OK", text)
@@ -11306,6 +11312,8 @@ HEALTH_RULES = (
         ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
                   r"sky (?P<sky>\d+).*refusals: (?P<refs>.*)$"),
         ("idle", r"reticle depth \(F85c\): no key 10 composite draw this second"),
+        # F101: reticle follow game (fix.native_on_foot_reticle_follow): key 10 is the game's, so nothing is patched by design
+        ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
         ("_", r"reticle depth \(F85c\): precompiled"),
     ), _hj_f85c),
@@ -12896,6 +12904,13 @@ def self_test_health():
               [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
         check("F85c: the shader line of a good start is not a failure", ["reticle depth (F85c): precompiled compute shader reticle_depth_cs created (0x00000000, 0.057 ms).", retic()], 0,
               [("OK", F85C)])
+        # F101: reticle follow = game leaves key 10 to the game: nothing patched is the design, said as such, never NEVER APPLIED (a weapon drawn or not)
+        game = R("reticle depth (F85c): the reticle is the game's", 94)
+        check("F85c: reticle follow game, a weapon drawn", [game, game, eyeoff()], 0, [("IDLE", F85C)],
+              has=["the reticle is the game's (reticle follow = game) for 2 s: 188 key 10 draws left as the game placed them"])
+        check("F85c: reticle follow game, a readback in flight at the switch", [retic(draws=0, patched=0, reads=1), R("reticle depth (F85c): the reticle is the game's", 0)], 0, [("IDLE", F85C)],
+              has=["the reticle is the game's"])
+        check("F85c: aim, then reticle follow game", [retic()] * 2 + [game], 0, [("OK", F85C)], has=["patched 84 of 94", "the reticle is the game's (reticle follow = game) for 1 s"])
 
         # ---- view height hold (F87h) ----
         check("F87h: holding", [hold(), hold("holding (rate-limited)"), hold("ramping in")], 0, [("OK", F87H)], has=["3 s: holding 2, ramping 1"])

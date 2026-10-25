@@ -57,9 +57,9 @@ class NativeFrameClient final {
     const HRESULT result=beginLadder([&](EdvrNativeFrameOutput& o,uint32_t version){
       // A provider that refuses version 2 is sent the version 1 words, exactly as before (size = the version 1 prefix).
       // F62b: a provider that refuses version 10 is sent the version 2 words (size = the version 2 prefix), exactly as before.
+      // F101: the shapes are native_frame.h's (nativeFrameInputShape); version 1's size is the released struct's sizeof (88), which a released provider requires.
       EdvrNativeFrameInput sent=in;
-      if(version<EDVR_NATIVE_FRAME_VERSION_7){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_1;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_1;}
-      else if(version<EDVR_NATIVE_FRAME_VERSION_10){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_2;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_2;}
+      edvr::nativeFrameInputShape(version,sent);
       return table_.beginFrame(table_.context,&sent,&o);
     },providerVersion_,out);
     // F40: the live now-pose flag from the provider's answer (version 9 only; a version 8 answer carries none, so the default holds).
@@ -124,22 +124,7 @@ class NativeFrameClient final {
                         : mode == 1 ? "at the instant the frame draws at (the WaitGetPoses latch)" : "one display period ahead (today's behaviour)");
     }
   }
-  static EdvrNativeFrameOutput ask(uint32_t version) {
-    if(version>=EDVR_NATIVE_FRAME_VERSION_8)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),version>=EDVR_NATIVE_FRAME_VERSION_10?EDVR_NATIVE_FRAME_VERSION_10:
-                                   version>=EDVR_NATIVE_FRAME_VERSION_9?EDVR_NATIVE_FRAME_VERSION_9:EDVR_NATIVE_FRAME_VERSION_8};
-    if(version>=EDVR_NATIVE_FRAME_VERSION_6)
-      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,EDVR_NATIVE_FRAME_VERSION_6};
-    if(version==EDVR_NATIVE_FRAME_VERSION_5)
-      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5,EDVR_NATIVE_FRAME_VERSION_5};
-    if(version==EDVR_NATIVE_FRAME_VERSION_4)
-      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4,EDVR_NATIVE_FRAME_VERSION_4};
-    if(version==EDVR_NATIVE_FRAME_VERSION_3)
-      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3,EDVR_NATIVE_FRAME_VERSION_3};
-    if(version==EDVR_NATIVE_FRAME_VERSION_2)
-      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2,EDVR_NATIVE_FRAME_VERSION_2};
-    return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1,EDVR_NATIVE_FRAME_VERSION_1};
-  }
+  static EdvrNativeFrameOutput ask(uint32_t version) {return edvr::nativeFrameAsk(version);}   // F101: native_frame.h's, shared with the provider's rig
  private:
   template<class T>static bool owned(HMODULE provider,T address) {
     if(!address)return false;HMODULE actual=nullptr;

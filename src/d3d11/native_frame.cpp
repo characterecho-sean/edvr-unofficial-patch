@@ -301,8 +301,11 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // the full struct with the "now" head. Nothing past the version 1 words is read for a version 1 input.
     // F62b: version 3 is the full struct with the head in LOCAL; version 2 is the struct through ringCount (EDVR_NATIVE_FRAME_INPUT_SIZE_2, what
     // a version 2 runtime sends). A version 1 or 2 input of a larger size (the rigs send the full struct) is read for its own words only.
+    // F101: version 1's size is the released struct's sizeof (EDVR_NATIVE_FRAME_INPUT_SIZE_1, 88: a released runtime's); the unpadded words
+    // (EDVR_NATIVE_FRAME_INPUT_WORDS_1, 84: this branch's runtimes from F31 to F100) are taken too. Neither is read past valid.
     const bool inputV1 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_1 &&
-        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == EDVR_NATIVE_FRAME_INPUT_WORDS_1 ||
+         input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
     const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 &&
         (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
     const bool inputV3 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_3 && input->size == sizeof(*input);

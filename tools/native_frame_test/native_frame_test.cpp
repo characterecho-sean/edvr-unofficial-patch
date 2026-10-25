@@ -28,6 +28,7 @@
 #include "f98_checks.h"     // F98a: the left elbow's stable pole transported from its seed
 #include "f98b_checks.h"    // F98b: the interaction label placed in the world, upright and facing the neck's pivot
 #include "f99_checks.h"     // F99a: a drawn item's hands from the game's own selection, not from Status.json
+#include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
 
 #include <array>
 #include <chrono>
@@ -6106,6 +6107,57 @@ int wmain(int argc, wchar_t** argv) {
         edvr::clearGlitchFrame();
     }
 
+    // ---- F101: mixed DLL versions against this provider: a released (v0.21.1) runtime's shapes, F31 to F100's version 1 words, this runtime's ladder -----
+    {
+        uint64_t seq = 200;
+        const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        // A released runtime: its 88-byte version 1 input with each of its asks (5 down to 1); the answer is the shape asked, written only within it.
+        bool oldOk = true;
+        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_5; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+            f101test::ReleasedInput oldIn{sizeof(oldIn), EDVR_NATIVE_FRAME_INPUT_VERSION_1};
+            oldIn.generation = 41;
+            oldIn.referenceGeneration = 7;
+            oldIn.sequence = ++seq;
+            oldIn.valid = 1;
+            std::memcpy(oldIn.physicalHead, identity, sizeof(identity));
+            const EdvrNativeFrameOutput ask = f101test::releasedAsk(v);
+            alignas(EdvrNativeFrameOutput) unsigned char outBuf[sizeof(EdvrNativeFrameOutput) + 16];
+            std::memset(outBuf, 0xA5, sizeof(outBuf));
+            std::memcpy(outBuf, &ask, 8);
+            const HRESULT r = table.beginFrame(table.context, reinterpret_cast<const EdvrNativeFrameInput*>(&oldIn), reinterpret_cast<EdvrNativeFrameOutput*>(outBuf));
+            uint32_t gotSize = 0, gotVersion = 0;
+            std::memcpy(&gotSize, outBuf, 4);
+            std::memcpy(&gotVersion, outBuf + 4, 4);
+            bool untouched = true;
+            for (size_t i = ask.size; i < sizeof(outBuf); ++i) untouched = untouched && outBuf[i] == 0xA5;
+            oldOk = oldOk && r == S_OK && gotSize == ask.size && gotVersion == v && untouched;
+        }
+        check(oldOk, "F101: a released runtime's version 1 input (88 bytes) is accepted with each of its asks (5 to 1), answered in its own shape and nothing past it");
+        // F31 to F100's runtimes sent version 1 as the words alone (84 bytes): still taken. A version 1 input of another size is refused.
+        EdvrNativeFrameInput words = input(41, 7, ++seq);
+        words.size = EDVR_NATIVE_FRAME_INPUT_WORDS_1;
+        EdvrNativeFrameOutput wordsOut = edvr::nativeFrameAsk(EDVR_NATIVE_FRAME_VERSION_6);
+        const bool wordsOk = table.beginFrame(table.context, &words, &wordsOut) == S_OK && wordsOut.version == EDVR_NATIVE_FRAME_VERSION_6;
+        EdvrNativeFrameInput odd = input(41, 7, ++seq);
+        odd.size = EDVR_NATIVE_FRAME_INPUT_WORDS_1 - 4u;
+        EdvrNativeFrameOutput oddOut = edvr::nativeFrameAsk(EDVR_NATIVE_FRAME_VERSION_5);
+        EdvrNativeFrameInput odd2 = input(41, 7, ++seq);
+        odd2.size = EDVR_NATIVE_FRAME_INPUT_SIZE_1 + 8u;
+        EdvrNativeFrameOutput odd2Out = edvr::nativeFrameAsk(EDVR_NATIVE_FRAME_VERSION_5);
+        check(wordsOk && table.beginFrame(table.context, &odd, &oddOut) == E_INVALIDARG && table.beginFrame(table.context, &odd2, &odd2Out) == E_INVALIDARG,
+              "F101: F31 to F100's version 1 input (84 bytes, the words alone) is still accepted; a version 1 input of 80 or 96 bytes is refused");
+        // This runtime's every step (10 down to 1, the shapes native_frame.h gives the client) is taken by this provider in the shape asked.
+        bool newOk = true;
+        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_10; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            edvr::nativeFrameInputShape(v, f);
+            EdvrNativeFrameOutput o = edvr::nativeFrameAsk(v);
+            const EdvrNativeFrameOutput asked = o;
+            newOk = newOk && table.beginFrame(table.context, &f, &o) == S_OK && o.version == asked.version && o.size == asked.size;
+        }
+        check(newOk, "F101: this runtime's every ladder step (10 to 1) is accepted by this provider and answered in the shape asked");
+    }
+
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
@@ -7220,6 +7272,8 @@ int wmain(int argc, wchar_t** argv) {
     f98btest::run98b(check);
     // F99a: the hands' bridge from the game's selection until Status.json names the item, its releases, and the draw-onset instrument.
     f99test::run99(check);
+    // F101: this runtime's ladder against a released provider's shape checks, the frozen v0.21.1 layouts, reticle follow game in the render path.
+    f101test::run101(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

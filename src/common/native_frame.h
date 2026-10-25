@@ -86,12 +86,22 @@ struct EdvrNativeFrameInput {
     uint32_t eyeAlignApplied;
 };
 
-// The size of the version 1 input: the words through valid, which is what a version 1 caller's struct is.
-#define EDVR_NATIVE_FRAME_INPUT_SIZE_1 \
+// F101: an input version's size is the sizeof of the struct a caller of that version declares: its words, padded as sizeof pads them to the
+// struct's alignment (8, for the uint64_t members). The words alone are not that size when the last word is not on an 8-byte boundary.
+#define EDVR_NATIVE_FRAME_INPUT_PADDED(words) \
+    ((uint32_t)(((words) + alignof(EdvrNativeFrameInput) - 1) & ~(alignof(EdvrNativeFrameInput) - 1)))
+// The size of the version 1 input: the words through valid and the tail padding after them, which is what a version 1 caller's struct is (88 on
+// x64: what v0.21.1 and every release before F31 sends, and the only size its provider accepts). F101: from F31 this was the words alone (84),
+// so a released provider refused this branch's runtime and this branch's provider refused a released runtime. EDVR_NATIVE_FRAME_INPUT_WORDS_1
+// is that unpadded size: the runtimes of this branch from F31 to F100 sent it, and a provider still takes it.
+#define EDVR_NATIVE_FRAME_INPUT_WORDS_1 \
     ((uint32_t)offsetof(EdvrNativeFrameInput, nowHead))
+#define EDVR_NATIVE_FRAME_INPUT_SIZE_1 \
+    EDVR_NATIVE_FRAME_INPUT_PADDED(offsetof(EdvrNativeFrameInput, nowHead))
 // F62b: the size of the version 2 input: the words through ringCount, which is what a version 2 caller's struct is (the LOCAL head follows it).
+// F101: padded as version 1's is; ringCount ends on an 8-byte boundary (664 on x64), so the size is the words' own.
 #define EDVR_NATIVE_FRAME_INPUT_SIZE_2 \
-    ((uint32_t)offsetof(EdvrNativeFrameInput, localHead))
+    EDVR_NATIVE_FRAME_INPUT_PADDED(offsetof(EdvrNativeFrameInput, localHead))
 
 // F31: the render head and the "now" head the d3d11 half saw at its last beginFrame (nativeFrameNowPose). The frame sequence is the geometry
 // sequence of that frame; nowSequence counts the runtime's "now" answers.
@@ -267,5 +277,34 @@ void nativeFrameSetRotCalibrate(float yawRad, float pitchRad);
 void nativeFrameSetAdsPitch(float pitchRad);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
+
+// F101: what the runtime sends for each step of its version ladder (native_frame_client.h), here so the provider's rig drives the same shapes.
+// The output a version asks with: the whole struct for 8 to 10, each older version's own prefix below.
+inline EdvrNativeFrameOutput nativeFrameAsk(uint32_t version) {
+    if (version >= EDVR_NATIVE_FRAME_VERSION_8)
+        return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput), version >= EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10 :
+                                     version >= EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8};
+    if (version >= EDVR_NATIVE_FRAME_VERSION_6) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6, EDVR_NATIVE_FRAME_VERSION_6};
+    if (version == EDVR_NATIVE_FRAME_VERSION_5) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5, EDVR_NATIVE_FRAME_VERSION_5};
+    if (version == EDVR_NATIVE_FRAME_VERSION_4) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4, EDVR_NATIVE_FRAME_VERSION_4};
+    if (version == EDVR_NATIVE_FRAME_VERSION_3) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
+    if (version == EDVR_NATIVE_FRAME_VERSION_2) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2, EDVR_NATIVE_FRAME_VERSION_2};
+    return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1, EDVR_NATIVE_FRAME_VERSION_1};
+}
+// The input shape that rides an ask of that version: input version 3 (the whole struct) with 10, version 2 (the words through ringCount) with 7 to
+// 9, version 1 (the words through valid, padded as the released struct is) below 7. Only size and version change: a provider reads no word past
+// the shape it was told.
+inline void nativeFrameInputShape(uint32_t version, EdvrNativeFrameInput& in) {
+    if (version < EDVR_NATIVE_FRAME_VERSION_7) {
+        in.size = EDVR_NATIVE_FRAME_INPUT_SIZE_1;
+        in.version = EDVR_NATIVE_FRAME_INPUT_VERSION_1;
+    } else if (version < EDVR_NATIVE_FRAME_VERSION_10) {
+        in.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        in.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+    } else {
+        in.size = sizeof(EdvrNativeFrameInput);
+        in.version = EDVR_NATIVE_FRAME_INPUT_VERSION_3;
+    }
+}
 
 }  // namespace edvr

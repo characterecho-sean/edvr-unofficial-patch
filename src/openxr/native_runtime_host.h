@@ -1073,7 +1073,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // Owner, after a waitPoses published its frame (publishPoseGap has set latestPoseFrame). Locates the two instants an Elite "now" call can
   // be answered at (pose_cache.h) and publishes them under the keys they were made with. A failure to locate or to read the clock leaves no
   // publication, so every display call takes the hop, which is the answer the cache must equal.
-  void publishPoseCache() {
+  // F101: flatFrame is publishFlatHead's: a flat frame always locates `now` (and `next`), whatever fix.now_pose says; render_locked's latch is a VR frame's.
+  void publishPoseCache(bool flatFrame=false) {
     if(GetCurrentThreadId()!=ownerThread)return;
     // Every failure below invalidates. The previous publication is kept until publish replaces it: its `next` slot is what the in-wait
     // error is measured against.
@@ -1091,7 +1092,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     fresh.frameOrientationKnown=latestPoseFrame.orientationKnown;
     for(unsigned i=0;i<4;++i)fresh.frameOrientation[i]=latestPoseFrame.orientation[i];
     fresh.speedKnown=latestPoseFrame.speedKnown;fresh.speedDegPerSec=latestPoseFrame.speedDegPerSec;
-    const bool locked=g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked;
+    const bool locked=!flatFrame&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked;
     if(!locked&&!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
     if(locked) {
       // F42: the latched render pose of this frame is the one answer a render_locked display call takes (no locate for it).
@@ -1114,7 +1115,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(displayTime<=period||period<=0){poseCache.invalidate();return;}
     latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime-period;latestPoseFrame.period=period;
     latestPoseFrame.orientationKnown=false;latestPoseFrame.speedKnown=false;latestPoseFrame.speedDegPerSec=0.0;
-    publishPoseCache();
+    // F101: an empty frame latches no render pose: the last VR frame's latch is not this frame's, and is never published or served from here.
+    latestPoseFrame.latchedKnown=false;latestPoseFrame.latched={};
+    publishPoseCache(true);
   }
   bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
@@ -2683,7 +2686,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     t_nowAnsweredLocked=false;
     // F42 (now_pose render_locked): a display call is answered with the latched render pose of this frame, before the cache and the owner hop.
     // A call the latch cannot answer falls through unchanged and is counted.
-    if(call.display&&origin==vr::TrackingUniverseSeated&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked) {
+    // F101: VR frames only. While flat there is no render latch (publishFlatHead): a flat call takes the flat route below, never a VR frame's latch.
+    if(call.display&&origin==vr::TrackingUniverseSeated&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked&&!flatWaits->flatNow()) {
       PoseCacheAnswer latched;PoseCacheMiss latchWhy=PoseCacheMiss::Unpublished;
       if(poseCache.answerFrame(generation,poses.read().originGeneration,latched,latchWhy)) {
         t_nowAnsweredLocked=true;out=latched.pose;return true;
@@ -2741,7 +2745,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
     // F40 (live now_pose = render): the instant the frame draws at, the WaitGetPoses latch's own time, not one period on.
-    if(g_nowPoseMode.load(std::memory_order_relaxed)!=kNowPoseNext)
+    // F101: VR frames only. While flat latestPoseFrame is publishFlatHead's (recorded one period early), so the hop locates where its `now` slot does.
+    if(g_nowPoseMode.load(std::memory_order_relaxed)!=kNowPoseNext&&!flatWaits->flatNow())
       return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
         [](int64_t shown,int64_t,int64_t& out){out=shown;return true;},
         [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);

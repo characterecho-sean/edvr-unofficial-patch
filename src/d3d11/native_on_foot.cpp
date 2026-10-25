@@ -24154,6 +24154,7 @@ struct F85cState {
     double hitSum = 0.0, hitMin = 1e9, hitMax = 0.0, errSum = 0.0, errMax = 0.0, ageSum = 0.0, ageMax = 0.0, lineMax = 0.0;
     uint64_t errN = 0;
     uint64_t draws = 0;
+    uint64_t gameDraws = 0;   // F101: key 10 draws not taken (reticle follow game: the game's placement stands)
 };
 F85cState g_f85c;
 uint32_t g_f86LastReticle = 0;   // the frame key 10's eye 0 draw last came: while it comes each frame it owns the dispatch (its line is the freshest)
@@ -25395,7 +25396,15 @@ void f85Report(uint64_t nowMs) {
     w = F85Win{};
     // F85c
     F85cState& st = g_f85c;
-    if (st.draws || st.dispatched || st.reads) {
+    // F101: reticle follow game: the reticle is the game's, and the line says so (each second key 10 was drawn, else every 5 s on foot) in place of the depth
+    // line or the idle one. A readback still in flight at the switch is not reported.
+    if (g_reticleGame.load(std::memory_order_relaxed) && !st.draws) {
+        if (st.gameDraws || (nativeOnFootActive() && nowMs - lastIdleC >= 5000)) {
+            if (!st.gameDraws) lastIdleC = nowMs;
+            Log::get().note("reticle depth (F85c): the reticle is the game's (reticle follow = game, EDVR writes nothing to key 10): "
+                            "key 10 draws %llu left as the game placed them (no hit depth, no correction)", ull(st.gameDraws));
+        }
+    } else if (st.draws || st.dispatched || st.reads) {
         const double nr = st.reads ? static_cast<double>(st.reads) : 1.0;
         Log::get().note("reticle depth (F85c): key 10 draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
                         "off screen %llu); the game's 5 m was behind a surface in %llu; |D_f - D_hit| mean %.3f max %.3f m, D_f %.2f m; readback age mean %.1f max %.0f frames; dispatched %llu; "
@@ -25577,6 +25586,12 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         }
         ks = static_cast<int>(i);
         ++s.viaHold;
+    }
+    // F101: reticle follow game: key 10's draw is left exactly as the game placed it (no hit depth, no correction, no decision counted), as the
+    // instance hook leaves its placement (F21). Its hold above is kept, so a switch back to aim or head finds it matched. Counted for F85c's line.
+    if (ks >= 0 && !nofoot::f85::renderTakesKey(g_keyIdx.key[ks], g_reticleGame.load(std::memory_order_relaxed))) {
+        ++g_f85c.gameDraws;
+        return;
     }
     // F64: a key's match names this draw: the marker is visible in this eye-frame (counted once, as none until a bound patch upgrades it).
     if (ks >= 0) {
