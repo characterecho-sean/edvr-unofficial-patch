@@ -1,5 +1,6 @@
 #include "../../src/d3d11/object_classification_probe.h"
 #include "../../src/d3d11/object_record_writer_hook.h"
+#include "../../src/common/game_build.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <windows.h>
@@ -12,6 +13,17 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+// The rig links no resolver (src\common\game_build.cpp). These stand in for it as build 334925, the known build, for every probe
+// linked here: each binds its known RVAs unchanged and compares its pins exactly, as it does in the game on that build.
+namespace edvr {
+bool gameBuildIdentity(uint32_t* stamp,uint32_t* size) noexcept {if(stamp)*stamp=1792704584u;if(size)*size=104906752u;return true;}
+bool gameBuildKnown() noexcept {return true;}
+const char* gameBuildText() noexcept {return "build 334925";}
+uintptr_t gameRva(uint32_t knownRva) noexcept {return knownRva;}
+bool gameRvasFound(const uint32_t*,size_t,uint32_t* firstMissing) noexcept {if(firstMissing)*firstMissing=0;return true;}
+bool gamePinMatches(uint32_t,const uint8_t* got,const uint8_t* pin,size_t n) noexcept {return got&&pin&&std::memcmp(got,pin,n)==0;}
+bool gamePinProvenByMatch(uint32_t,size_t) noexcept {return false;}
+}
 namespace {
 unsigned checks=0;
 void check(bool ok,const char* what){++checks;if(!ok){std::printf("FAIL: %s\n",what);std::exit(1);}}
@@ -135,11 +147,11 @@ void recordWriterTests(){
     kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&ownershipProbe.recordsForTest().back().ownershipStatus=="linked","real nested unwind restores direct ancestor RBX/RDI and links ownership");
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE72,"direct ancestor return identifies 43245A0 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE72,"direct ancestor return identifies 43245A0 branch");
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431DE7F;
     kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
 
     edvr::ObjectRecordWriterProbe refusedProbe;refusedProbe.armForTest(91);refusedProbe.setOwnershipOpcodesValidForTest(false);writerUnwindProbe=&refusedProbe;
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DE72;
