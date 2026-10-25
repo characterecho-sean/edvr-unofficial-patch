@@ -21,6 +21,7 @@
 #include "../../src/d3d11/skin_join_shader.h"
 #include "../../src/d3d11/eye_jump_lattice_shader.h"
 #include "../../src/d3d11/reticle_depth_shader.h"   // F85c: the reticle's hit-depth march
+#include "../../src/d3d11/head_containment_shader.h"   // F119: the head containment depth grid
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_domain_marker_shader.h"
@@ -432,6 +433,8 @@ static int generateTemporal(const Options& o) {
         {"kEyeJumpLatticeBytecode", "eye_jump_lattice_cs", "main", nullptr, {}, false, edvr::kEyeJumpLatticeHlsl},
         // F85c: the reticle's hit depth (reticle_depth_shader.h): one thread marches the aim line through an eye's scene depth. Its own source, entry "main".
         {"kReticleDepthBytecode", "reticle_depth_cs", "main", nullptr, {}, false, edvr::kReticleDepthHlsl},
+        // F119: the head containment depth grid (head_containment_shader.h): one thread a cell nearest-depths 8 x 8 taps of an eye's scene depth and stencil. Entry "main".
+        {"kHeadContainmentBytecode", "head_containment_cs", "main", nullptr, {}, false, edvr::kHeadContainmentHlsl},
         // F105: the in-world screens' coverage stand-in (world_screen_coverage.h; its text is in fixed_shader_source.h), a pixel shader.
         {"kWorldScreenCoverageBytecode", "world_screen_coverage_ps", "main", nullptr, {}, false, edvr::kWorldScreenCoverageHlsl, "ps_5_0"},
         // F108: the tracked stand-in (held only where the interface changed), the census of the screens' state, and UiContent's array digest.
@@ -483,7 +486,7 @@ static int generateTemporal(const Options& o) {
     const auto fixed = fixedVariants(core);
     variants.insert(variants.end(), fixed.begin(), fixed.end());
     const std::string flat = core + edvr::kFlatMonoShaderSource;
-    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl + edvr::kEyeJumpLatticeHlsl + edvr::kReticleDepthHlsl;
+    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl + edvr::kEyeJumpLatticeHlsl + edvr::kReticleDepthHlsl + edvr::kHeadContainmentHlsl;
     const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
     if (outputCurrent(o.output, key)) {
         std::printf("temporal shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.output.c_str());

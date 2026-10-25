@@ -10658,6 +10658,181 @@ def _hj_f118_reticle(rows, ctx):
     return ("OK", text)
 
 
+# F119 (measure only): head containment. The 1 s line carries, per class (stance/item/ADS) present in the second, the head's horizontal offset from the rest point
+# (p50, p95, max, in cm, with a histogram of 17 bins whose upper edges are _F119_EDGES; the last is open), the ranges of its right, forward and up components, EDVR's own
+# eye offsets (kept out of the head offset), and per eye the depth grid's second: the near plane, the nearest world depth (and with the player's body), the cells of 64 within
+# 5/10/20 cm of the camera and 3 cm of the near plane, and at a head offset under 3 cm (the game's own camera) the baseline.
+_F119_EDGES = (1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 60, 100)
+_F119_LEAN_CM = 30.0        # the first second with a head offset past this is where the deliberate leans begin: normal play is what came before
+_F119_SOFT_MARGIN_CM = 3.0  # the soft radius: normal play's p99.5 plus this
+_F119_HARD_GAP_CM = 5.0     # the hard radius: the soft one plus this
+_F119_CAP_MARGIN_CM = 2.0   # kept under the cap (the collision radius, or where the eye first met the near plane)
+_F119_CLASS_RE = re.compile(r"\[(?P<name>[a-z]+/[a-z]+/(?:hip|ADS)) n (?P<n>\d+) h p50 (?P<p50>[\d.]+) p95 (?P<p95>[\d.]+) max (?P<max>[\d.]+), right (?P<r0>[+-][\d.]+)\.\.(?P<r1>[+-][\d.]+), "
+                            r"forward (?P<f0>[+-][\d.]+)\.\.(?P<f1>[+-][\d.]+), up (?P<u0>[+-][\d.]+)\.\.(?P<u1>[+-][\d.]+), hist (?P<hist>[\d,]+|-)\]")
+_F119_EYE_RE = re.compile(r"(?P<eye>[LR]) near (?P<near>[\d.]+), nearest (?P<nw>[\d.]+|none) \(body (?P<na>[\d.]+|none)\), cells (?P<c5>\d+)/(?P<c10>\d+)/(?P<c20>\d+)/(?P<cnp>\d+) "
+                          r"\(body 20 cm: (?P<b20>\d+)\), read (?P<read>\d+)")
+
+
+def _f119_upper(hist, q, top):
+    """The upper edge (cm) of the bin holding the nearest-rank q of a pooled histogram (17 counts); the open top bin gives top, the largest offset seen."""
+    total = sum(hist)
+    if not total:
+        return None
+    rank, cum = max(1, int(math.ceil(q * total - 1e-9))), 0
+    for i, c in enumerate(hist):
+        cum += c
+        if cum >= rank:
+            return float(_F119_EDGES[i]) if i < len(_F119_EDGES) else float(top)
+    return float(top)
+
+
+def _hj_f119_containment(rows, ctx):
+    """F119 (measure only): the head's offset from its rest point on foot, and how close world geometry gets to each eye, to set the radii of a head leash and a wall
+    contact rule. Per class the p95 and max of the horizontal offset (the p95 from the pooled histogram, an upper bin edge), the pooled p99.5 of normal play (the seconds
+    after the first recentre on foot, if any, and before the first second past 30 cm; else all of them), and radii from it: a soft one (p99.5 + 3 cm) and a hard one
+    (soft + 5 cm), kept 2 cm under a cap: the collision radius when the build read it, else the smallest head offset at which a world cell reached the near plane. The
+    contact coverage is the largest of the second; the baseline is the coverage at a head offset under 3 cm, where the game's own camera is and the figure must be about 0.
+    NEVER APPLIED when on-foot seconds passed (the F87h lines) with no line, or when every second sampled no head; PARTIAL when the depth grid was read in under half of the
+    seconds or the baseline is not about 0 (4 cells of 64 or more within 20 cm with the player's body left out); IDLE with nothing on foot."""
+    sec = rows.get("sec", [])
+    if not sec:
+        # the session line (written at the first Present boundary) says the build carries the instrument; the view height hold's lines say seconds were spent on foot
+        if not rows:
+            return None
+        on_foot = len(ctx.get("view height hold (F87h)", {}).get("sec", []))
+        if on_foot >= 3:
+            return ("NEVER APPLIED", "%d on-foot seconds (view height hold lines) and the instrument's session line, but no 1 s head containment line" % on_foot)
+        fail = rows.get("fail", [])
+        if fail:
+            return ("PARTIAL", "the depth grid stood down: %s; no on-foot second with a head" % fail[-1]["why"])
+        return ("IDLE", "the instrument is armed (%s); no on-foot second in the window" % (rows["session"][-1]["radius"].strip() if rows.get("session") else "no session line"))
+    classes, per_sec, eyes_read, eye_secs = {}, [], [0, 0], 0
+    base_frames = base_max = base_body = 0
+    near_np, c1s, c8s = [], [], []
+    hmax, upmin, upmax = 0.0, None, None
+    sampled = 0
+    for r in sec:
+        entries = list(_F119_CLASS_RE.finditer(r["offs"]))
+        sm = {"t": r["_t"], "max": 0.0, "n": 0}
+        for m in entries:
+            c = classes.setdefault(m.group("name"), {"n": 0, "max": 0.0, "hist": [0] * 17, "histn": 0, "p95max": 0.0})
+            n = int(m.group("n"))
+            c["n"] += n
+            c["max"] = max(c["max"], float(m.group("max")))
+            c["p95max"] = max(c["p95max"], float(m.group("p95")))
+            if m.group("hist") != "-":
+                h = [int(x) for x in m.group("hist").split(",")]
+                if len(h) == 17:
+                    c["hist"] = [a + b for a, b in zip(c["hist"], h)]
+                    c["histn"] += n
+            sm["max"] = max(sm["max"], float(m.group("max")))
+            sm["n"] += n
+        sm["hist"] = [0] * 17
+        for m in entries:
+            if m.group("hist") != "-":
+                sm["hist"] = [a + int(x) for a, x in zip(sm["hist"], m.group("hist").split(","))]
+        sm["gen"] = int(r["gen"])
+        sm["rec"] = int(r["rec"])
+        per_sec.append(sm)
+        sampled += sm["n"]
+        hmax = max(hmax, float(r["hmax"]))
+        upmin = float(r["upmin"]) if upmin is None else min(upmin, float(r["upmin"]))
+        upmax = float(r["upmax"]) if upmax is None else max(upmax, float(r["upmax"]))
+        for m in _F119_EYE_RE.finditer(r["depth"]):
+            e = 0 if m.group("eye") == "L" else 1
+            if int(m.group("read")):
+                eyes_read[e] += 1
+                near_np.append((float(m.group("near")), m.group("nw"), m.group("na"), int(m.group("c5")), int(m.group("c10")), int(m.group("c20")), int(m.group("cnp")),
+                                int(m.group("b20"))))
+        if _F119_EYE_RE.search(r["depth"]) and any(int(m.group("read")) for m in _F119_EYE_RE.finditer(r["depth"])):
+            eye_secs += 1
+        base_frames += int(r["bframes"])
+        base_max, base_body = max(base_max, int(r["bcells"])), max(base_body, int(r["bbody"]))
+        if r["c1"] != "none":
+            c1s.append((float(r["c1"]), r["_t"]))
+        if r["c8"] != "none":
+            c8s.append((float(r["c8"]), r["_t"]))
+    if not sampled:
+        return ("NEVER APPLIED", "%d on-foot seconds and no head offset was ever sampled (no pose from the runtime, or the alignment it reported was never in the history)" % len(sec))
+    # normal play: after the first recentre on foot (if the window holds one), before the first second past the lean line
+    start = 0
+    for i in range(1, len(per_sec)):
+        if per_sec[i]["gen"] != per_sec[0]["gen"]:
+            start = i
+            break
+    lean_at = next((i for i in range(start, len(per_sec)) if per_sec[i]["max"] > _F119_LEAN_CM), None)
+    normal = per_sec[start:lean_at] if lean_at is not None else per_sec[start:]
+    basis = "the %d s %s%s" % (len(normal), "after the first recentre on foot" if start else "from the start",
+                               " and before the first second past %d cm (%s)" % (_F119_LEAN_CM, _hclock(per_sec[lean_at]["t"])) if lean_at is not None else "")
+    if not normal:
+        normal, basis = per_sec, "all %d s (normal play could not be told from the leans)" % len(per_sec)
+    pool, pool_max = [0] * 17, 0.0
+    for sm in normal:
+        pool = [a + b for a, b in zip(pool, sm["hist"])]
+        pool_max = max(pool_max, sm["max"])
+    p995 = _f119_upper(pool, 0.995, pool_max)
+    p95 = _f119_upper(pool, 0.95, pool_max)
+    cls_text = []
+    for name in sorted(classes, key=lambda k: -classes[k]["n"]):
+        c = classes[name]
+        p = _f119_upper(c["hist"], 0.95, c["max"]) if c["histn"] >= 0.5 * c["n"] else None
+        cls_text.append("%s n %d, p95 %s, max %.1f" % (name, c["n"], "<= %.0f" % p if p is not None else "%.1f (a second's)" % c["p95max"], c["max"]))
+    recs = [sm["rec"] for sm in per_sec]
+    moves = recs[0] + sum(max(0, b - a) for a, b in zip(recs, recs[1:]))
+    ses = rows.get("session", [])
+    radius = ses[-1]["radius"].strip() if ses else "not logged"
+    radius_cm = None
+    mr = re.match(r"([\d.]+) m$", radius)
+    if mr:
+        radius_cm = float(mr.group(1)) * 100.0
+    contact = min(c1s)[0] if c1s else None
+    cap, cap_src = (radius_cm, "the collision radius") if radius_cm else (contact, "the smallest head offset at which a world cell reached the near plane") if contact else (None, "")
+    rec_text = ""
+    if p995 is not None:
+        soft = float(-(-int(round((p995 + _F119_SOFT_MARGIN_CM) * 10)) // 10))
+        hard = soft + _F119_HARD_GAP_CM
+        note = ""
+        if cap is not None:
+            hard_cap = cap - _F119_CAP_MARGIN_CM
+            if hard > hard_cap:
+                hard = hard_cap
+                soft = min(soft, hard - 3.0)
+            if soft < p995:
+                note = " -- the cap leaves no room: normal play reaches %.0f cm and the cap allows %.0f" % (p995, hard_cap)
+        rec_text = "; radii: soft %.0f cm, hard %.0f cm (normal play's p99.5 <= %.0f cm + %.0f, soft + %.0f%s%s)" % (
+            soft, hard, p995, _F119_SOFT_MARGIN_CM, _F119_HARD_GAP_CM, ", under %.0f cm: %s" % (cap - _F119_CAP_MARGIN_CM, cap_src) if cap is not None else ", no cap known", note)
+    near = near_np[0][0] if near_np else None
+    c20 = max((x[5] for x in near_np), default=0)
+    cnp = max((x[6] for x in near_np), default=0)
+    nearest = min((float(x[1]) for x in near_np if x[1] != "none"), default=None)
+    body = min((float(x[2]) for x in near_np if x[2] != "none"), default=None)
+    depth_text = ("depth read in %d of %d s (eye L %d s, R %d s)%s; nearest world %s cm (with the body %s), cells within 20 cm max %d, within 3 cm of the near plane max %d%s" % (
+        eye_secs, len(sec), eyes_read[0], eyes_read[1], ", near plane %.1f cm" % near if near is not None else "",
+        "%.1f" % nearest if nearest is not None else "none", "%.1f" % body if body is not None else "none", c20, cnp, ""))
+    contact_text = "contact at the near plane: the smallest head offset %s (1 cell), %s (8 cells)" % (
+        "%.1f cm at %s" % (min(c1s)[0], _hclock(min(c1s)[1])) if c1s else "none", "%.1f cm at %s" % (min(c8s)[0], _hclock(min(c8s)[1])) if c8s else "none")
+    text = ("%d s on foot, %d head samples; head offset by class (cm, horizontal): %s; normal play (%s): p95 <= %s cm, p99.5 <= %s cm; the rest point moved %d time(s) on foot; "
+            "EDVR's own eye offsets (kept out of the head offset): horizontal max %.1f cm, up %+.1f..%+.1f cm; %s; baseline (head offset under 3 cm, %d frames): cells within 20 "
+            "cm max %d (with the body %d); %s; the commander's collision radius: %s%s" % (
+                len(sec), sampled, "; ".join(cls_text[:8]) + ("; +%d more classes" % (len(cls_text) - 8) if len(cls_text) > 8 else ""), basis,
+                "%.0f" % p95 if p95 is not None else "-", "%.0f" % p995 if p995 is not None else "-", moves, hmax, upmin, upmax, depth_text, base_frames, base_max, base_body,
+                contact_text, radius, rec_text))
+    fail = rows.get("fail", [])
+    if fail:
+        return ("PARTIAL", text + "; the depth grid stood down: %s" % fail[-1]["why"])
+    if not eye_secs:
+        skips = collections.Counter()
+        for r in sec:
+            skips.update(_hpairs(r["skipped"]))
+        return ("PARTIAL", text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
+    if eye_secs * 2 < len(sec):
+        return ("PARTIAL", text + "; the depth grid was read in under half of the seconds")
+    if base_max >= 4:
+        return ("PARTIAL", text + "; the baseline is not about 0: %d cells of 64 within 20 cm at a head offset under 3 cm, with the player's body left out (a wall that near at rest, or the "
+                "world measure holding something that is not the world)" % base_max)
+    return ("OK", text)
+
+
 def _hj_f117_cursor(rows, ctx):
     """F117: the cursor's place on a turned on-foot panel, per setting of the temporary A/B key (panel, view, game). Per second: the 2D placements on
     turned and upright pick meshes, the cursor moved, the refusals, and whether the cursor on turned panels follows the true uv or moves against it.
@@ -11915,6 +12090,20 @@ HEALTH_RULES = (
                 r"frames, longest run (?P<run>\d+) ms, worst [\d.]+ deg; footprint \(\+-0\.6 deg\) read (?P<fread>\d+), over a depth edge (?P<edge>\d+) \(the centre on "
                 r"the far side (?P<far>\d+)\), largest span [\d.]+ deg, incomplete (?P<inc>\d+), not dispatched (?P<nodisp>\d+)"),
     ), _hj_f118_reticle),
+    _hrule("head containment (F119)", ("F119",), ("head containment (F119)",), (
+        ("sec", r"head containment \(F119\) 1 s: frames (?P<frames>\d+) \(no pose (?P<nopose>\d+), over limit (?P<over>\d+)\); rest point: generation (?P<gen>\d+), "
+                r"(?P<age>[\d.]+) s old, recentres (?P<rec>\d+); head offset cm: (?P<offs>.*?); EDVR eye offsets cm \(not in the head offset\): h max (?P<hmax>[\d.]+), "
+                r"up (?P<upmin>[+-][\d.]+)\.\.(?P<upmax>[+-][\d.]+) \[ADS lock\+sight (?P<lock>[\d.]+), weapon eye (?P<weapon>[\d.]+), view (?P<view>[\d.]+) horizontal; "
+                r"neck (?P<neck>[+-][\d.]+), hold (?P<hold>[+-][\d.]+) up\]; depth cm \([^)]*\): (?P<depth>.*?); skipped (?P<skipped>.*?); contact at the near plane, "
+                r"smallest head offset: 1 cell (?P<c1>[\d.]+|none), 8 cells (?P<c8>[\d.]+|none); at head offset under 3 cm: frames (?P<bframes>\d+), cells within 20 cm max "
+                r"(?P<bcells>\d+) \(body (?P<bbody>\d+)\); cost (?P<cost>\d+) us a frame"),
+        ("recentre", r"head containment \(F119\): the rest point moved \(reference generation (?P<from>\d+) to (?P<to>\d+); (?P<n>\d+) on foot this session\): (?P<what>.*)$"),
+        ("session", r"head containment \(F119\): measure only, nothing drawn changes; the commander's collision radius: (?P<radius>[^;]*);"),
+        ("fail", r"head containment \(F119\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be "
+                 r"made; the depth grid is not measured)"),
+        ("note", r"head containment \(F119\): (?:eye \d's scene depth (?:cannot be viewed|\(format)|the Present boundary runs on thread)"),
+        ("_", r"head containment \(F119\): precompiled compute shader"),
+    ), _hj_f119_containment),
     _hrule("view height hold (F87h)", ("F87h",), ("view height hold (F87h)",), (
         ("sec", r"view height hold \(F87h\) 1 s: state (?P<state>[^;]+);"),
     ), _hj_f87h),
@@ -13063,10 +13252,12 @@ def self_test_health():
     f105_path = os.path.join(repo_root(), "src", "d3d11", "world_screen_coverage.h")
     f105_note_path = os.path.join(repo_root(), "src", "d3d11", "ui_depth.cpp")
     f116_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f116.h")
+    f119_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f119.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
         f116src = read_text(f116_path)
+        f119src = read_text(f119_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -13114,6 +13305,15 @@ def self_test_health():
             fmts[key] = health_c_format(f116src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f116.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R119(needle, *vals):
+        """F119's lines (native_on_foot_f119.h builds them: formatLine, formatClass, formatEye, formatRecentre, formatSession), from their own format literals."""
+        key = "f119:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f119src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f119.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -13502,6 +13702,67 @@ def self_test_health():
         check("F118 reticle: a steady reticle", [ret118(steps=0, hithit=0, over=0, run=0.0, edge=0, far=0)] * 2, 0, [("OK", F118)], has=["leading cause: neither"])
         check("F118 reticle: readbacks but no footprint", [ret118(fread=0, edge=0, far=0, nodisp=80)] * 2, 0, [("PARTIAL", F118)],
               has=["no footprint was read (not dispatched 160, incomplete 0)"])
+
+        # ---- head containment (F119): the head's offset from the rest point on foot, and how close world geometry gets to each eye ----
+        F119 = "head containment (F119)"
+
+        def hist119(*pairs):
+            h = [0] * 17
+            for b, n in pairs:
+                h[b] = n
+            return ",".join(str(x) for x in h)
+
+        def cls119(name="standing/unarmed/hip", n=90, p50=3.1, p95=5.2, mx=6.0, hist=None, rng=(-2.2, 3.0, -4.0, 5.1, -1.0, 2.0)):
+            return R119("[%s n %u h p50", name, n, p50, p95, mx, *rng, hist if hist is not None else hist119((3, 40), (4, 40), (5, 10)))
+
+        def eye119(eye="L", near=12.0, nw="63.3", na="21.0", cells=(0, 0, 0, 0), b20=0, read=1):
+            return R119("%s near %.1f, nearest %s (body %s)", eye, near, nw, na, *cells, b20, read)
+
+        def sec119(offs=None, depth=None, frames=90, nopose=0, gen=7, age=12.4, rec=0, hmax=4.0, skipped="none", c1="none", c8="none", base=(80, 0, 0)):
+            both = eye119("L") + "; " + eye119("R", nw="65.0", na="22.0")
+            return R119("native on foot head containment (F119) 1 s", frames, nopose, 0, gen, age, rec, offs if offs is not None else cls119(), hmax, 17.1, 17.1, 0.0, 0.0, 0.0,
+                        17.1, 0.0, depth if depth is not None else both, skipped, c1, c8, *base, 41.0)
+
+        def ses119(radius="not read"):
+            return R119("measure only, nothing drawn changes", radius, 8, 8, 8, 8, 0x10)
+
+        def move119(frm=7, to=8, n=1):
+            return R119("the head was %.1f cm", frm, to, n, 15.0, -3.0, 12.0, -9.0, 41.5, "standing", "weapon", "hip")
+
+        lean = cls119(mx=45.0, p95=44.0, hist=hist119((14, 20), (15, 70)))
+        check("F119 containment: normal play, both eyes read, no contact", [ses119(), sec119(), sec119(), sec119()], 0, [("OK", F119)],
+              has=["3 s on foot, 270 head samples; head offset by class (cm, horizontal): standing/unarmed/hip n 270, p95 <= 6, max 6.0",
+                   "normal play (the 3 s from the start): p95 <= 6 cm, p99.5 <= 6 cm", "horizontal max 4.0 cm, up +17.1..+17.1 cm",
+                   "depth read in 3 of 3 s (eye L 3 s, R 3 s), near plane 12.0 cm; nearest world 63.3 cm (with the body 21.0), cells within 20 cm max 0, within 3 cm of the near plane max 0",
+                   "baseline (head offset under 3 cm, 240 frames): cells within 20 cm max 0 (with the body 0)", "the smallest head offset none (1 cell), none (8 cells)",
+                   "the commander's collision radius: not read; radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, no cap known)"], lacks=["UNPARSED"])
+        contact = eye119("L", nw="0.0", na="0.0", cells=(6, 12, 30, 40), b20=30) + "; " + eye119("R", nw="0.0", na="0.0", cells=(2, 6, 28, 40), b20=28)
+        check("F119 containment: leans after normal play, the contact caps the hard radius", [ses119(), sec119(), sec119(), sec119(offs=lean),
+              sec119(offs=lean, depth=contact, c1="38.0", c8="40.5")], 0, [("OK", F119)],
+              has=["normal play (the 2 s from the start and before the first second past 30 cm (10:00:04)): p95 <= 6 cm, p99.5 <= 6 cm",
+                   "the smallest head offset 38.0 cm at 10:00:05 (1 cell), 40.5 cm at 10:00:05 (8 cells)",
+                   "radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, under 36 cm: the smallest head offset at which a world cell reached the near plane)",
+                   "cells within 20 cm max 30, within 3 cm of the near plane max 40"])
+        check("F119 containment: a cap under normal play leaves no room", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="8.0", c8="9.0")], 0, [("OK", F119)],
+              has=["radii: soft 3 cm, hard 6 cm", "the cap leaves no room: normal play reaches 6 cm and the cap allows 6"])
+        check("F119 containment: the collision radius, when read, is the cap", [ses119("0.350 m"), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="38.0", c8="40.5")], 0,
+              [("OK", F119)], has=["the commander's collision radius: 0.350 m", "under 33 cm: the collision radius"])
+        check("F119 containment: after a recentre the normal play is what follows it", [sec119(offs=cls119(mx=80.0, p95=79.0, hist=hist119((15, 90)))), sec119(gen=8, rec=1),
+              sec119(gen=8, rec=1)], 0, [("OK", F119)], has=["normal play (the 2 s after the first recentre on foot): p95 <= 6 cm, p99.5 <= 6 cm", "the rest point moved 1 time(s) on foot"])
+        check("F119 containment: a move of the rest point is logged and not mistaken for an unparsed line", [ses119(), move119(), sec119(), sec119()], 0, [("OK", F119)], lacks=["UNPARSED"])
+        check("F119 containment: on-foot seconds and the session line, no 1 s line", [ses119(), hold(), hold(), hold(), hold()], 3, [("NEVER APPLIED", F119)],
+              has=["4 on-foot seconds (view height hold lines) and the instrument's session line, but no 1 s head containment line"])
+        check("F119 containment: a build without the instrument (no session line) has nothing to say", [hold(), hold(), hold(), hold()], 0, has=["not present"], lacks=["NEVER APPLIED  head containment", "IDLE           head containment"])
+        check("F119 containment: armed, nothing on foot", [ses119(), hold(), hold()], 0, [("IDLE", F119)], has=["the instrument is armed (not read); no on-foot second in the window"])
+        check("F119 containment: every second without a pose", [ses119(), sec119(offs="none (no pose this second)", nopose=90), sec119(offs="none (no pose this second)", nopose=90)], 3,
+              [("NEVER APPLIED", F119)], has=["no head offset was ever sampled"])
+        check("F119 containment: the depth grid never read", [ses119(), sec119(depth="none read", skipped="no scene rows 90"), sec119(depth="none read", skipped="no scene rows 90")], 0,
+              [("PARTIAL", F119)], has=["the depth grid was never read (skipped: no scene rows 180)"])
+        check("F119 containment: a baseline that is not about 0", [ses119(), sec119(base=(80, 9, 9)), sec119(base=(80, 9, 9))], 0, [("PARTIAL", F119)],
+              has=["the baseline is not about 0: 9 cells of 64 within 20 cm"])
+        check("F119 containment: the shader stood down", [ses119(), "head containment (F119): precompiled compute shader head_containment_cs creation FAILED; standing down (0x00000000, 0.100 ms).",
+              sec119(depth="none read", skipped="no GPU 90")], 0, [("PARTIAL", F119)], has=["the depth grid stood down: creation FAILED; standing down"])
+        check("F119 containment: a drifted line is unparsed", ["native on foot head containment (F119) 1 s: something else"], 4, [("UNPARSED", F119)])
 
         # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
         F111 = "panel pointer (F111)"
