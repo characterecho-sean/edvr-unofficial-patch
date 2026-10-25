@@ -230,7 +230,11 @@ REM held to; focus_watch is the guard run_jobs holds every rig to (no window, no
 REM console, no keyboard-focus move) and its self-test starts it on real
 REM processes; check_status_blocks (plain) checks the docs' Status blocks;
 REM check_config_contract (plain) holds the keys the code reads, edvr.ini and the
-REM log text to one another -- it reads only src\ and edvr.ini.
+REM log text to one another -- it reads only src\ and edvr.ini; hook_signatures
+REM audit (issue 124) fails the build when a hook outside the exact-only files
+REM uses a game address raw instead of through gameRva/gamePinMatches, keys on
+REM the PE identity itself, or names an address the signature table cannot place
+REM -- it reads only src\.
 python tools\run_jobs.py ^
     --gate "tools\fetch_openxr_loader.py --self-test" ^
     --gate "tools\fetch_xess.py --self-test" ^

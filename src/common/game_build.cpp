@@ -112,12 +112,6 @@ void ensureResolved() noexcept {
     g_resolved.store(true, std::memory_order_release);
 }
 
-int64_t targetIndex(uint32_t knownRva) noexcept {
-    for (uint32_t i = 0; i < kTargetCount; ++i)
-        if (sig::kTable.targets[i].rva == knownRva) return i;
-    return -1;
-}
-
 uint8_t firstByte(uintptr_t at) noexcept {
     __try {
         return *reinterpret_cast<const volatile uint8_t*>(at);
@@ -168,8 +162,17 @@ uintptr_t gameRva(uint32_t knownRva) noexcept {
     if (s == kKnown) return knownRva;
     if (s != kUnknown) return 0;
     ensureResolved();
-    const int64_t i = targetIndex(knownRva);
-    return i >= 0 && g_results[i].reason == gamesig::kFound ? g_results[i].rva : 0;
+    return gamesig::unitRva(sig::kTable, g_results, knownRva);
+}
+
+bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept {
+    if (firstMissing) *firstMissing = 0;
+    for (size_t i = 0; knownRvas && i < n; ++i)
+        if (gameRva(knownRvas[i]) == 0) {
+            if (firstMissing) *firstMissing = knownRvas[i];
+            return false;
+        }
+    return knownRvas != nullptr || n == 0;
 }
 
 bool gamePinMatches(uint32_t knownRva, const uint8_t* got, const uint8_t* pin, size_t n) noexcept {
@@ -178,19 +181,28 @@ bool gamePinMatches(uint32_t knownRva, const uint8_t* got, const uint8_t* pin, s
     if (s == kKnown) return std::memcmp(got, pin, n) == 0;
     if (s != kUnknown) return false;
     ensureResolved();
-    const int64_t ti = gamesig::coveringTarget(sig::kTable, g_results, knownRva, n);
-    return ti >= 0 && gamesig::maskedEqual(sig::kTable, static_cast<uint32_t>(ti), knownRva, got, pin, n);
+    return gamesig::maskedRangeEqual(sig::kTable, g_results, knownRva, got, pin, n);
 }
 
 bool gamePinProvenByMatch(uint32_t knownRva, size_t n) noexcept {
     if (identity() != kUnknown) return false;
     ensureResolved();
-    return gamesig::coveringTarget(sig::kTable, g_results, knownRva, n) >= 0;
+    return gamesig::coverRange(sig::kTable, g_results, knownRva, n);
 }
 
 void gameBuildStartup() noexcept {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) return;
+    // An unknown build: resolve now, on a thread of its own, so no hook pays the resolve on the thread that first asks (the render thread,
+    // for some). A hook that asks before it is done waits on the same lock. The known build starts nothing here.
+    if (identity() == kUnknown) {
+        try {
+            std::thread([] { ensureResolved(); }).detach();
+        } catch (...) {
+            Log::get().note("game build: %s: could not start the resolver's thread; the first hook that needs a game address resolves "
+                            "them on its own thread.", gameBuildText());
+        }
+    }
     try {
         // TEMPORARY (issue 124, docs\design-game-update-signatures-2026-10-25.md): remove with the arc.
         const std::string value = Config::get().getString("advanced.game_update_check", "off");

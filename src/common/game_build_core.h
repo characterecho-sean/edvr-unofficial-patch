@@ -675,6 +675,81 @@ inline bool maskedEqual(const Table& t, uint32_t ti, uint32_t knownRva, const ui
     return true;
 }
 
+// ---- Addresses inside a matched unit (hook_signatures.py unit_rva and pin_cover) -------------------------------------------------------
+// A unit matched whole has the same length and the same unmasked bytes as the known build's, so every instruction in it sits at the same
+// offset from its start: a call site, a return address or a site end inside it moves with it.
+
+// The found code target whose known unit holds knownRva, and that unit's start in the known build and in this one. Every found target
+// of the unit must agree on where it is now; false when none holds it or two disagree.
+inline bool unitAt(const Table& t, const Result* results, uint32_t knownRva, int64_t* index, uint32_t* knownStart, uint32_t* newStart,
+                   uint32_t* len) noexcept {
+    bool have = false;
+    for (uint32_t i = 0; results && i < t.targetCount; ++i) {
+        const Target& tg = t.targets[i];
+        if (tg.kind != kCode || tg.unit >= t.unitCount || results[i].reason != kFound || tg.off > tg.rva || tg.off > results[i].rva) continue;
+        const uint32_t start = tg.rva - tg.off, now = results[i].rva - tg.off, n = t.units[tg.unit].len;
+        if (knownRva < start || uint64_t(knownRva) >= uint64_t(start) + n) continue;
+        if (have && (*knownStart != start || *newStart != now)) return false;
+        have = true;
+        *index = i;
+        *knownStart = start;
+        *newStart = now;
+        *len = n;
+    }
+    return have;
+}
+
+// knownRva in the build results were resolved for: a table target's own answer (0 when it was not found); otherwise, inside a found code
+// target's unit, the same offset in the unit it was found as; 0 when neither.
+inline uint32_t unitRva(const Table& t, const Result* results, uint32_t knownRva) noexcept {
+    if (!results) return 0;
+    for (uint32_t i = 0; i < t.targetCount; ++i)
+        if (t.targets[i].rva == knownRva) return results[i].reason == kFound ? results[i].rva : 0;
+    int64_t index = -1;
+    uint32_t knownStart = 0, newStart = 0, len = 0;
+    if (!unitAt(t, results, knownRva, &index, &knownStart, &newStart, &len)) return 0;
+    return newStart + (knownRva - knownStart);
+}
+
+// Whether [knownRva, knownRva + n) lies wholly in found code units that follow one another in the known build and moved together (each
+// is where the first one's move puts it), so the range is in this build at unitRva(knownRva) with the same length. A range in one unit is
+// the usual case; a function whose .pdata splits it into chained fragments spans several. visit, when given, is called per piece with
+// the covering target's index, the piece's known start and its length; false from it ends the walk with false.
+template <class Visit>
+inline bool coverRange(const Table& t, const Result* results, uint32_t knownRva, size_t n, Visit&& visit) noexcept {
+    if (n == 0 || uint64_t(knownRva) + n > 0xFFFFFFFFull) return false;
+    const uint64_t end = uint64_t(knownRva) + n;
+    uint64_t at = knownRva;
+    int64_t shift = 0;
+    bool first = true;
+    while (at < end) {
+        int64_t index = -1;
+        uint32_t knownStart = 0, newStart = 0, len = 0;
+        if (!unitAt(t, results, static_cast<uint32_t>(at), &index, &knownStart, &newStart, &len)) return false;
+        const int64_t s = int64_t(newStart) - int64_t(knownStart);
+        if (!first && s != shift) return false;
+        first = false;
+        shift = s;
+        const uint64_t pieceEnd = std::min<uint64_t>(end, uint64_t(knownStart) + len);
+        if (!visit(static_cast<uint32_t>(index), static_cast<uint32_t>(at), static_cast<size_t>(pieceEnd - at))) return false;
+        at = pieceEnd;
+    }
+    return true;
+}
+inline bool coverRange(const Table& t, const Result* results, uint32_t knownRva, size_t n) noexcept {
+    return coverRange(t, results, knownRva, n, [](uint32_t, uint32_t, size_t) { return true; });
+}
+
+// got (read at the running build's copy of [knownRva, knownRva + n)) against pin (the known build's bytes there), over a covered range
+// (coverRange): in each piece the bytes its unit's signature masks are skipped, every other byte must be equal.
+inline bool maskedRangeEqual(const Table& t, const Result* results, uint32_t knownRva, const uint8_t* got, const uint8_t* pin, size_t n) noexcept {
+    if (!got || !pin) return false;
+    return coverRange(t, results, knownRva, n, [&](uint32_t ti, uint32_t pieceRva, size_t pieceLen) {
+        const size_t o = pieceRva - knownRva;
+        return maskedEqual(t, ti, pieceRva, got + o, pin + o, pieceLen);
+    });
+}
+
 // ---- Log lines (game_build.cpp writes them; tools\game_build_test holds their text) ---------------------------------------------------
 constexpr uint32_t kListCap = 16;   // addresses named per list
 

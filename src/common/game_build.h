@@ -2,7 +2,7 @@
 //
 // The hooks bind fixed RVAs of one build, the known build (the generated table src\common\game_signatures.inc names it). On the known
 // build nothing here does any work beyond reading the PE identity once: gameRva returns its argument unchanged and the resolver never
-// runs. On any other build the first gameRva call finds every table address at once, by whole-function masked signature
+// runs. On any other build every table address is found at once (from load, on a thread of its own), by whole-function masked signature
 // (game_build_core.h), from the running image's .pdata and code in memory, every read under SEH; an address that is not found uniquely
 // is 0 and the hook that needs it stands down as it does today.
 #pragma once
@@ -19,24 +19,29 @@ bool gameBuildKnown() noexcept;
 // For log lines: "build 334925", or "unknown build (PE stamp 0x6ACD513D, image size 0x640C000)", or "unreadable build (no PE header)".
 const char* gameBuildText() noexcept;
 
-// knownRva (an RVA of the known build that is in the table) in the running build. The known build: knownRva, always, with no lookup.
-// An unknown build: the address found by signature, or 0 when it was not found, the table does not hold it, or the image is unreadable.
-// Resolves once, on the first call, under a lock (a few tens of milliseconds); thread-safe.
+// knownRva (an RVA of the known build) in the running build. The known build: knownRva, always, with no lookup. An unknown build: for a
+// table address, the address found by signature; for an address inside the code unit (.pdata function or leaf stub) of a found table
+// address -- a call site, a return address, a site end -- the same offset in the unit found, which a whole-unit match keeps; 0 when it
+// was not found, the table holds neither, or the image is unreadable. Resolves once, under a lock (gameBuildStartup starts it at load on
+// an unknown build; a caller that comes first, or while it runs, waits); thread-safe.
 uintptr_t gameRva(uint32_t knownRva) noexcept;
+// Whether gameRva finds every one of knownRvas (true on the known build); the first that it does not in *firstMissing (0 when all are).
+bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept;
 
 // A hook's pin, the known build's bytes at [knownRva, knownRva + n), against got, read at the running build's copy of knownRva. The
-// known build: an exact compare. An unknown build: the bytes the signature masks inside the matched unit (rel32 and RIP-relative
-// fields, relocated pointers, jump-table RVAs) are skipped and every other byte must be equal; false when no found target's unit
-// holds the range whole.
+// known build: an exact compare. An unknown build: the bytes the signature masks inside the matched units (rel32 and RIP-relative
+// fields, relocated pointers, jump-table RVAs) are skipped and every other byte must be equal; false when the range is not wholly in
+// found units that moved together (one unit, or a function's chained fragments).
 bool gamePinMatches(uint32_t knownRva, const uint8_t* got, const uint8_t* pin, size_t n) noexcept;
-// True on an unknown build when [knownRva, knownRva + n) lies wholly inside a unit the resolver matched: the masked whole-unit match
-// already proves every byte of it a rebuild does not move, so a pinned range or body hash there is satisfied by the match. False on
-// the known build (nothing was matched; the hook checks its pin as it always has).
+// True on an unknown build when [knownRva, knownRva + n) lies wholly inside units the resolver matched, and they moved together: the
+// masked whole-unit match already proves every byte of it a rebuild does not move, so a pinned range or body hash there is satisfied by
+// the match. False on the known build (nothing was matched; the hook checks its pin as it always has).
 bool gamePinProvenByMatch(uint32_t knownRva, size_t n) noexcept;
 
-// Once, after the log opens: reads advanced.game_update_check (TEMPORARY, off by default). On, on the known build, a background
-// thread runs the resolver against the running executable and logs whether every address it finds equals the table's (the
-// "game update check:" line); nothing the hooks use changes. Off, or on an unknown build, it does nothing.
+// Once, after the log opens. An unknown build: starts the resolve on a background thread, so the hooks that ask later find it done.
+// Then reads advanced.game_update_check (TEMPORARY, off by default). On, on the known build, a background thread runs the resolver
+// against the running executable and logs whether every address it finds equals the table's (the "game update check:" line); nothing
+// the hooks use changes. Off, or on an unknown build, the key does nothing.
 void gameBuildStartup() noexcept;
 
 }  // namespace edvr

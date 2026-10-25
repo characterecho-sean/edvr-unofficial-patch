@@ -199,6 +199,7 @@ struct Expect {
     uint64_t table = 0;
     std::string file;
     std::vector<Row> rows;
+    std::vector<std::pair<uint32_t, int64_t>> probes;   // "u" lines: an RVA off the table and Python's unit_rva for it (-1: none)
     bool ok = false;
 };
 
@@ -237,10 +238,30 @@ Expect readExpect(const std::string& path) {
             r.gt = hexOrNone(gt);
             r.py = hexOrNone(py);
             e.rows.push_back(r);
+        } else if (w == "u") {
+            std::string rva, py;
+            in >> rva >> py;
+            e.probes.emplace_back(uint32_t(hexOrNone(rva)), hexOrNone(py));
         }
     }
     e.ok = !e.rows.empty();
     return e;
+}
+
+// Every unit probe's C++ answer (gamesig::unitRva: an RVA inside a found unit keeps its offset) against Python's unit_rva; returns how
+// many agree, prints the first few that do not.
+uint32_t unitAgreement(const gs::Table& t, const gs::Result* res, const Expect& e, const char* label) {
+    uint32_t agree = 0, shown = 0;
+    for (const auto& p : e.probes) {
+        const uint32_t got = gs::unitRva(t, res, p.first);
+        const int64_t mine = got ? int64_t(got) : -1;
+        if (mine == p.second) {
+            ++agree;
+        } else if (shown++ < 8) {
+            std::printf("  %s: unit probe 0x%X: C++ 0x%X, Python %lld\n", label, p.first, got, static_cast<long long>(p.second));
+        }
+    }
+    return agree;
 }
 
 // Every target's answer against Python's; returns how many agree, prints the first few that do not.
@@ -323,6 +344,9 @@ void fixtureChecks(const std::string& dir) {
         std::printf("game_build_test: fixture %-7s %u targets, %u found, C++ and Python agree on %u (%u units, %u leaf, %u candidates)\n",
                     exes[e], t.targetCount, st.found, agree, st.units, st.leaf, st.candidates);
         check(agree == t.targetCount, "(c) C++ and Python resolve the fixture alike");
+        const uint32_t unitAgree = unitAgreement(t, res[e].data(), ex, exes[e]);
+        std::printf("game_build_test: fixture %-7s %zu unit probes, C++ and Python agree on %u\n", exes[e], ex.probes.size(), unitAgree);
+        check(!ex.probes.empty() && unitAgree == ex.probes.size(), "(c) C++ and Python place RVAs inside a unit alike");
     }
     auto R = [&](int e, const char* name) -> const gs::Result& {
         static gs::Result none;
@@ -373,6 +397,41 @@ void fixtureChecks(const std::string& dir) {
     check(cover >= 0 && !gs::maskedEqual(t, uint32_t(cover), f1, got, pin, 16), "(a) pin: an unmasked byte must be equal");
     check(gs::coveringTarget(t, res[1].data(), f1 + 0x50, 32) < 0, "(a) pin: a range past the unit is not covered");
     check(gs::coveringTarget(t, res[1].data(), nm.k.at("F2"), 4) < 0, "(a) pin: a unit that was not matched covers nothing");
+    // Addresses inside a matched unit, off the table (gameRva's in-unit path) and the masked compare over the same range.
+    check(gs::unitRva(t, res[1].data(), f1 + 3) == at(1, "F1") + 3, "(a) an RVA inside a found unit keeps its offset");
+    check(gs::unitRva(t, res[1].data(), nm.k.at("F2") + 1) == 0 && gs::unitRva(t, res[1].data(), 0x10) == 0,
+          "(a) an RVA in a unit not found, or in none, has no answer");
+    std::memcpy(got, maps[1].base + R(1, "F1").rva, 16);
+    check(gs::maskedRangeEqual(t, res[1].data(), f1, got, pin, 16) && gs::coverRange(t, res[1].data(), f1, 16),
+          "(a) pin: the range compare accepts the moved F1");
+    {
+        // Two fragments of one function (chained .pdata units) and a unit with two targets.
+        const gs::Unit units[2] = {{16, 0, 0, 0}, {8, 0, 0, 0}};
+        const gs::Target targets[3] = {{0x1000, gs::kCode, gs::kNoSection, 0, 0, 0, 0},
+                                       {0x1010, gs::kCode, gs::kNoSection, 0, 0, 1, 0},
+                                       {0x1004, gs::kCode, gs::kNoSection, 0, 0, 0, 4}};
+        const uint32_t mask[2] = {0, 0};
+        gs::Table syn{};
+        syn.format = gs::kCppFormat;
+        syn.units = units;
+        syn.unitCount = 2;
+        syn.mask = mask;
+        syn.maskCount = 2;
+        syn.targets = targets;
+        syn.targetCount = 3;
+        auto found = [](uint32_t rva) { gs::Result r; r.rva = rva; r.reason = gs::kFound; return r; };
+        const gs::Result together[3] = {found(0x2000), found(0x2010), found(0x2004)};
+        const gs::Result apart[3] = {found(0x2000), found(0x3000), found(0x2004)};
+        const gs::Result split[3] = {found(0x2000), found(0x2010), found(0x5004)};
+        uint32_t pieces = 0;
+        const bool two = gs::coverRange(syn, together, 0x1008, 0x10, [&](uint32_t, uint32_t, size_t) { ++pieces; return true; });
+        check(two && pieces == 2, "(a) a range over two fragments that moved together is covered, in two pieces");
+        check(!gs::coverRange(syn, apart, 0x1008, 0x10), "(a) fragments that moved apart do not cover a range");
+        check(!gs::coverRange(syn, together, 0x1008, 0x11), "(a) a range past the last unit is not covered");
+        check(gs::unitRva(syn, together, 0x1014) == 0x2014 && gs::unitRva(syn, apart, 0x1014) == 0x3004,
+              "(a) the second fragment's RVAs follow it");
+        check(gs::unitRva(syn, split, 0x1002) == 0, "(a) targets of one unit that disagree give no answer");
+    }
 
     // An unreadable page: a refusal, never a crash. The fixture's code is all in its first .text page.
     DWORD old = 0;
@@ -578,6 +637,22 @@ void archivedChecks(const std::string& root) {
         check(wrong == 0, "(b) no WRONG address on an archived build");
         check(equal == pyEqual, "(b) the same EQUAL count as Python");
         check(agree == t.targetCount, "(b) C++ and Python give every target the same answer");
+        // An RVA inside a found unit, off the table: the byte after each found target with a ground truth must land on the byte after
+        // its ground truth (the in-unit path gameRva takes for call sites, return addresses and site ends).
+        uint32_t inUnit = 0, inUnitWrong = 0;
+        for (uint32_t i = 0; i < t.targetCount && i < e.rows.size(); ++i) {
+            const gs::Target& tg = t.targets[i];
+            if (tg.kind != gs::kCode || e.rows[i].gt < 0 || res[i].reason != gs::kFound || tg.off + 1 >= t.units[tg.unit].len ||
+                indexOf(t, tg.rva + 1) >= 0)
+                continue;
+            ++inUnit;
+            inUnitWrong += int64_t(gs::unitRva(t, res.data(), tg.rva + 1)) != e.rows[i].gt + 1;
+        }
+        const uint32_t unitAgree = unitAgreement(t, res.data(), e, name.c_str());
+        std::printf("game_build_test: %s: in-unit RVAs against the ground truth: %u checked, %u WRONG; %zu unit probes, C++ and Python "
+                    "agree on %u\n", name.c_str(), inUnit, inUnitWrong, e.probes.size(), unitAgree);
+        check(inUnit > 0 && inUnitWrong == 0, "(b) an RVA inside a found unit lands where the ground truth puts it");
+        check(unitAgree == e.probes.size(), "(b) C++ and Python place RVAs inside a unit alike");
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
