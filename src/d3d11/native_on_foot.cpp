@@ -9078,6 +9078,9 @@ struct AdsSightWin {
     // solved right eye and the F63 model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
     // and along, metres), the IPD, and (F67b) the last NDC of the points 0.5 m and 10 m along the sight from P14w in each eye's scene rows.
     uint32_t rowsBoth = 0, rowsOne = 0, rowsNone = 0, implausible = 0, usedSolved = 0, usedModel = 0;
+    // F110: the model's source on the frames the lock used it (nofoot::AdsModelSource), and the camera's model minus the solved right eye (body axes, m)
+    uint32_t modelFrom[nofoot::kAdsModelSources] = {}, modelDiffN = 0;
+    double modelDiffSum[3] = {}, modelDiffAbsSum = 0.0, modelDiffMax = 0.0;
     double eyeRel[2][3] = {}, perpEye[2] = {}, alongEye[2] = {}, ipdSum = 0.0, perpEyeMax[2] = {};
     uint32_t eyeN[2] = {}, ipdN = 0;
     double ndcNear[2][2] = {}, ndcFar[2][2] = {};
@@ -9170,7 +9173,7 @@ bool retNdcRead(int e, uint32_t* frame, double ndc[2], double* depth) noexcept {
 AdsSightWin g_adsSightWin;
 uint64_t g_adsSightLineMs = 0;
 nofoot::AdsSightGrowth g_adsSightGrowth;
-double g_adsSightHalfIpd = nofoot::kAdsSightHalfIpdFallback;
+double g_adsSightIpd = nofoot::kAdsSightIpdFallbackM;   // F110: the job camera (the left eye) to the right eye
 bool g_adsSightIpdMeasured = false;
 std::atomic<uint64_t> g_adsOpticGood{0}, g_adsOpticNoFp{0}, g_adsOpticNoRoot{0}, g_adsOpticNoSample{0}, g_adsOpticNoEye{0}, g_adsOpticBadBasis{0};
 void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
@@ -9284,14 +9287,15 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const double pT[3] = {adsOrigin[0] + eyeCap.kM * fUnit[0], adsOrigin[1] + eyeCap.kM * fUnit[1], adsOrigin[2] + eyeCap.kM * fUnit[2]};
             double rows[9];
             for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
-            float ex = 0.0f;
-            g_adsSightIpdMeasured = temporalPassEyeOffsetX(1, &ex);
-            g_adsSightHalfIpd = nofoot::adsSightHalfIpd(g_adsSightIpdMeasured, static_cast<double>(ex));
+            float exL = 0.0f, exR = 0.0f;
+            const bool haveExL = temporalPassEyeOffsetX(0, &exL), haveExR = temporalPassEyeOffsetX(1, &exR);
+            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured);
             double rHat[3] = {};
             bool flipped = false;
             // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
             // this frame's (at most one frame behind the boundary) and it lies within 0.5 m of the job camera, the lock's E_R is that eye, else the
-            // F63 model (the job camera + half the IPD along the FP root's right). The sight line's distance from each eye is logged either way.
+            // model (F110: the job camera, the left eye, or the solved left eye, plus the IPD along the FP root's right). The sight line's distance from
+            // each eye is logged either way.
             double eyeW[2][3] = {};
             float eyeRows[2][16] = {}, eyeO[2][4] = {};
             bool eyeOk[2] = {false, false};
@@ -9385,7 +9389,24 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const bool modelOk = nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped);
             bool lockOk = false;
             bool usedSolved = false;
-            const double modelEye[3] = {cam[0] + g_adsSightHalfIpd * rHat[0], cam[1] + g_adsSightHalfIpd * rHat[1], cam[2] + g_adsSightHalfIpd * rHat[2]};
+            // F110: the model right eye (native_on_foot_core.h): the solved left eye, else the job camera (the left eye), plus the IPD along R^. Whenever the right
+            // eye is solved too, the camera's model is measured against it: the model the lock falls back to with no rows at all.
+            double modelEye[3] = {};
+            const uint8_t modelSrc = nofoot::adsModelRightEye(cam, eyeOk[0], eyeW[0], rHat, g_adsSightIpd, modelEye);
+            if (modelOk && eyeOk[1]) {
+                double camModel[3] = {};
+                nofoot::adsModelRightEye(cam, false, eyeW[0], rHat, g_adsSightIpd, camModel);
+                double dBody[3] = {}, d2 = 0.0;
+                for (size_t i = 0; i < 3; ++i) {
+                    dBody[i] = (camModel[0] - eyeW[1][0]) * rows[3 * i] + (camModel[1] - eyeW[1][1]) * rows[3 * i + 1] + (camModel[2] - eyeW[1][2]) * rows[3 * i + 2];
+                    w.modelDiffSum[i] += dBody[i];
+                    d2 += dBody[i] * dBody[i];
+                }
+                const double dn = std::sqrt(d2);
+                w.modelDiffAbsSum += dn;
+                w.modelDiffMax = std::max(w.modelDiffMax, dn);
+                ++w.modelDiffN;
+            }
             if (eyeOk[1] && nofoot::adsSightErrorEyeK(adsOrigin, eyeW[1], f, rows, eyeCap.kM, E)) {
                 lockOk = true;
                 usedSolved = true;
@@ -9396,7 +9417,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             }
             if (lockOk) {
                 if (usedSolved) ++w.usedSolved;
-                else ++w.usedModel;
+                else {
+                    ++w.usedModel;
+                    ++w.modelFrom[modelSrc < nofoot::kAdsModelSources ? modelSrc : 0];
+                }
             }
             if (lockOk) {
                 have = true;
@@ -9526,13 +9550,13 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     if (now - g_adsSightLineMs < 1000) return;
     g_adsSightLineMs = now;
     const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
-    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
+    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
                     "e perpendicular (the right eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
                     "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
                     "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
                     "flipped to the body's right %u, held off by the guard %u%s",
-                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightHalfIpd,
-                    g_adsSightIpdMeasured ? "the right eye's offset" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
+                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
+                    g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
                     100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
@@ -9598,13 +9622,21 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     {
         const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
         const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
+        // F110: which source the model took on the frames the lock used it, and the job camera's model (the left eye plus the IPD) against the solved right eye
+        // whenever both were there: about 0 cm (F63's half-IPD model read the IPD's half, 3.1 cm, short: the nose)
+        const double nd = w.modelDiffN ? static_cast<double>(w.modelDiffN) : 1.0;
         Log::get().note("native on foot ADS sight check (F66e/F79): eye rows this second: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
-                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the F63 model (camera + half IPD along the FP "
-                        "right) in %u; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f R %.1f %.1f %.1f; IPD %.2f cm (%u "
+                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
+                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved right eye (body right, up, forward, cm, "
+                        "mean) %+.1f %+.1f %+.1f, %.1f cm mean, %.1f max over %u frames; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f "
+                        "R %.1f %.1f %.1f; IPD %.2f cm (%u "
                         "frames); eye to the raw-P14 reference sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
                         "of raw-P14 sight at 0.5 m and 10 m (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; these remain raw-P14 diagnostics "
                         "when the rifle anchor is active)%s",
-                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
+                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
+                        w.modelFrom[nofoot::kAdsModelFromLeftEye], g_adsSightIpd, g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback",
+                        100.0 * w.modelDiffSum[0] / nd, 100.0 * w.modelDiffSum[1] / nd, 100.0 * w.modelDiffSum[2] / nd, 100.0 * w.modelDiffAbsSum / nd,
+                        100.0 * w.modelDiffMax, w.modelDiffN, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
                         100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
                         100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
                         100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcNear[0][0], w.ndcNear[0][1], w.ndcFar[0][0],

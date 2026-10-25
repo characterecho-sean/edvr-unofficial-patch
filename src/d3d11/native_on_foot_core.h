@@ -2807,18 +2807,35 @@ inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3
 
 // ---- F63: the ADS sight lock (no key; the F62b head-aim's weight drives it) ------------------------------------------------------------
 // The sight line runs through P14w (the FP povCamera joint 14, model space through the full F_root, no minus d) along the FP root's forward f.
-// The right eye is E_R = cam + halfIpd R^ (R^ the FP root's right made perpendicular to f, signed to agree with the body's right row). The
+// The right eye E_R (F110: the job camera, the LEFT eye, plus the IPD along R^; see below; R^ the FP root's right made perpendicular to f, signed to agree with
+// the body's right row). The
 // error e = P14w - E_R with its component along f removed (right and up of the sight only), in body axes through the AMC rows (right, up,
 // forward), then seated = seatedFromBody(e_body, 0) (diag(-1, -1, +1) . body): the eye alignment's target-minus-camera convention, so the
 // view run's filter (gain 0.02 a frame, 5 cm a frame) moves the right eye onto the sight line. The applied lock is clamped to 12 cm.
 // F70 REPLACED this: the lock aims at P14w + k f (the along part too), is feed-forward, and is clamped to 40 cm (see the F70 section below).
-constexpr double kAdsSightHalfIpdFallback = 0.0315;   // metres, when the per-eye offsets are not known
-constexpr double kAdsSightHalfIpdMin = 0.02, kAdsSightHalfIpdMax = 0.045;
 constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye point is k ahead of P14 (up to 30 cm) plus the perpendicular and along offsets (about 7 cm each)
-// The half IPD from the right eye's head-space x offset (native_temporal's s->eyes[1][3]); the fallback outside 2..4.5 cm or unknown.
-inline double adsSightHalfIpd(bool have, double rightEyeX) noexcept {
-    const double a = std::fabs(rightEyeX);
-    return have && a >= kAdsSightHalfIpdMin && a <= kAdsSightHalfIpdMax ? a : kAdsSightHalfIpdFallback;
+// F110: the model of the right eye when its rows are not this frame's. F63 took the job camera for the eyes' midpoint and added half the IPD; F66e found the job
+// camera is the LEFT eye (both eyes solved in every ADS frame of the F102 flight over Virtual Desktop: L - cam 0.0 cm, R - cam +6.2 cm, IPD 6.18 cm), so that
+// model stood at the midpoint, the nose: a tester's sight on the nose whenever no scene draw gave the eyes' rows (log edvr_gfx_20261025_114257, Quest 3 over
+// VDXR: every one of 2248 ADS frames on the model, half IPD 0.0313 m). The right eye is the left eye plus the whole IPD: the right eye's head-space x less the
+// left's (native_temporal's s->eyes[e][3]); with only the right eye's offset, twice it; neither (or outside 4..9 cm), the fallback, twice F63's 0.0315.
+constexpr double kAdsSightIpdFallbackM = 0.063;   // metres, the left eye to the right when the per-eye offsets are not known
+constexpr double kAdsSightIpdMinM = 0.04, kAdsSightIpdMaxM = 0.09;
+// The IPD from the eyes' head-space x offsets (right less left, as a distance: the model's direction is R^); *measured false on the fallback.
+inline double adsSightIpd(bool haveLeft, double leftEyeX, bool haveRight, double rightEyeX, bool* measured) noexcept {
+    double ipd = -1.0;
+    if (haveLeft && haveRight && std::isfinite(leftEyeX) && std::isfinite(rightEyeX)) ipd = std::fabs(rightEyeX - leftEyeX);
+    else if (haveRight && std::isfinite(rightEyeX)) ipd = 2.0 * std::fabs(rightEyeX);
+    const bool ok = ipd >= kAdsSightIpdMinM && ipd <= kAdsSightIpdMaxM;
+    if (measured) *measured = ok;
+    return ok ? ipd : kAdsSightIpdFallbackM;
+}
+// Where the model put the right eye: the job camera (the left eye) or the solved left eye (its rows this frame's, the right's not), each plus the IPD along R^.
+enum AdsModelSource : uint8_t { kAdsModelFromCamera = 0, kAdsModelFromLeftEye = 1, kAdsModelSources = 2 };
+inline uint8_t adsModelRightEye(const double cam[3], bool leftSolved, const double leftEye[3], const double rHat[3], double ipdM, double out[3]) noexcept {
+    const double* base = leftSolved ? leftEye : cam;
+    for (int i = 0; i < 3; ++i) out[i] = base[i] + ipdM * rHat[i];
+    return leftSolved ? kAdsModelFromLeftEye : kAdsModelFromCamera;
 }
 // R^: row0 less its part along the unit f, unit; flipped (and *flipped set) when it points against bodyRight. False on a degenerate input.
 inline bool adsSightRight(const double row0[3], const double f[3], const double bodyRight[3], double out[3], bool* flipped) noexcept {
@@ -2865,11 +2882,11 @@ inline bool adsSightErrorEyeK(const double p14w[3], const double eye[3], const d
     seatedFromBody(out.eFullBody, 0.0, out.seatedFull);
     return true;
 }
-// F63's model of the right eye: the job camera + half the IPD along the FP root's right.
-inline bool adsSightError(const double p14w[3], const double cam[3], const double rHat[3], double halfIpd, const double f[3], const double rows[9],
+// The error from a model right eye: the job camera plus camToEyeM along the FP root's right (F110: the IPD, the job camera being the left eye).
+inline bool adsSightError(const double p14w[3], const double cam[3], const double rHat[3], double camToEyeM, const double f[3], const double rows[9],
                           AdsSightErr& out) noexcept {
     double eye[3];
-    for (int i = 0; i < 3; ++i) eye[i] = cam[i] + halfIpd * rHat[i];
+    for (int i = 0; i < 3; ++i) eye[i] = cam[i] + camToEyeM * rHat[i];
     return adsSightErrorEye(p14w, eye, f, rows, out);
 }
 // |v| at most maxM, the direction kept (the eye alignment's clamps: 0.6 m for the view run, kAdsSightClampM for the sight lock).
