@@ -1816,13 +1816,14 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_body_mode", "native_on_foot_body_cull", "native_on_foot_body_hybrid",
                                 "native_on_foot_look_to_aim_yaw_sign", "native_on_foot_look_to_aim_comp_delay",
                                 "native_on_foot_look_to_aim_comp_sign", "native_on_foot_body_align_trim_right_cm",
-                                "native_on_foot_body_align_trim_up_cm", "native_on_foot_body_align_trim_forward_cm"};
+                                "native_on_foot_body_align_trim_up_cm", "native_on_foot_body_align_trim_forward_cm",
+                                "native_on_foot_weapon_eye_right_cm"};
     // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
     // but cannot add rows back to this compiled table.
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 38, "the Native on foot page retains its other 38 settings (24, F88's three weapon eye rows (F98c retired Weapon eye up), F106's ADS: sight "
+    check(nativePageRows == 37, "the Native on foot page retains its other 37 settings (24, F88's two weapon eye rows (F98c retired Weapon eye up, F112 Weapon eye right), F106's ADS: sight "
                                 "in both eyes (in F89's ADS: close left eye's place), F90's four pistol readout rows, F92a's four rifle ADS readout rows, F92b's ADS: aim "
                                 "with head and F94a's Eye height)");
     for (const char* key : keys) {

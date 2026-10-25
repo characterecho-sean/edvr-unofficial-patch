@@ -102,10 +102,10 @@ inline void run89(Check&& check) {
 
     // ---- the built-in values --------------------------------------------------------------------------------------------------------------------------
     {
-        check(f88::kForwardDefaultCm == 8.5 && f88::kUpDefaultCm == 7.5 && f88::kRightDefaultCm == 2.0 && f87::kSettleDefaultS == 0.1 && f88::Keys{}.body == f88::kFollow,
-              "F98c: the built-in values are the pilot's: weapon eye forward 8.5, right 2.0 cm (up 7.5 is the retired key's last value), body follow, standing height settle 0.1 s");
+        check(f88::kForwardDefaultCm == 10.0 && f88::kUpDefaultCm == 7.5 && f88::kRightDefaultCm == 2.0 && f87::kSettleDefaultS == 0.1 && f88::Keys{}.body == f88::kFollow,
+              "F112: the built-in values are the pilot's: weapon eye forward 10.0 cm (right 2.0 and up 7.5 are the retired keys' last values), body follow, standing height settle 0.1 s");
         check(pilot.rightCm >= f88::kRightMinCm && pilot.rightCm <= f88::kRightMaxCm && pilot.upCm >= f88::kUpMinCm && pilot.upCm <= f88::kUpMaxCm &&
-                  pilot.forwardCm >= f88::kForwardMinCm && pilot.forwardCm <= f88::kForwardMaxCm && f88::clampCm(pilot.forwardCm, f88::kForwardMinCm, f88::kForwardMaxCm) == 8.5,
+                  pilot.forwardCm >= f88::kForwardMinCm && pilot.forwardCm <= f88::kForwardMaxCm && f88::clampCm(pilot.forwardCm, f88::kForwardMinCm, f88::kForwardMaxCm) == 10.0,
               "F89: the built-in values are inside the keys' ranges and the clamp leaves them as they are");
     }
 
