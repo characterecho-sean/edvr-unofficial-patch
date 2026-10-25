@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace f115test {
 
@@ -68,6 +69,15 @@ inline void run115(Check&& check) {
                   falseStart.onAgainAt <= 10300 + 3000 + 11,
               "F115: panels that draw on foot and stop with the flag still up are a false start: the camera changes resume 3 s after the last one");
         check(f115::kCockpitPanelVs == edvr::kHoloGuiFxOffVs, "F115: the edge's vertex shader is the cockpit holo panels' with Disable GUI effects on (holo_material.h)");
+    }
+    {   // F115b: what the exit was. The 08:51 flight (log edvr_gfx_20261025_085120): the on-foot training left for the menu, Status.json not seated, no panel, and
+        // the runtime's last frame (sequence 48976) was the one before the edge, so the read-back's pose still carried the on-foot raise (the head +9.0 cm)
+        check(f115::exitKind(false, false, false) == f115::Exit::kOther && f115::exitKind(true, false, false) == f115::Exit::kBoardingPanels &&
+                  f115::exitKind(false, true, false) == f115::Exit::kBoardingPanels && f115::exitKind(false, false, true) == f115::Exit::kBoardingSeated,
+              "F115b: a boarding is the cockpit's panels (at or after the edge) or Status.json seated; the 08:51 quit to the menu is neither");
+        check(!f115::frameSinceEdge(48976, 48976) && f115::frameSinceEdge(48976, 48977) &&
+                  std::string(f115::exitName(f115::Exit::kOther)).rfind("not a boarding", 0) == 0,
+              "F115b: no runtime frame since the edge is told apart (the quit's last pose is not judged), and the other exit is named as not a boarding");
     }
     {   // the flight's eye alignment through the edge, the hold and the neck reference stepped as alignTick steps them
         const double dt = 1.0 / 90.0;

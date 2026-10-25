@@ -12543,6 +12543,11 @@ void f115Exit(uint64_t now, bool fromPanels) noexcept {
     adsShiftPublish(zero3, zero3);
     g_f115Rec.armed = true;
     g_f115Rec.fromPanels = fromPanels;
+    g_f115Rec.panelsAfter = false;
+    {   // F115b: the runtime's frame the last frame input carried, so the read-back can tell whether any frame came after the edge
+        EdvrNativeNowPose atEdge{};
+        g_f115Rec.frameAtEdge = nativeFrameNowPose(atEdge) ? atEdge.frameSequence : 0;
+    }
     g_f115Rec.edgeMs = now;
     g_f115Rec.flagFellMs = fromPanels ? 0 : now;
     g_f115Rec.serial = g_align.serial;
@@ -12569,7 +12574,11 @@ void f115Followup(uint64_t now) noexcept {
     EdvrNativeNowPose np{};
     const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
     const double h = haveFrame ? f115::headHeightM(np.render) : 0.0, off = haveFrame ? f115::headOffsetM(np.render) : 0.0;
-    const char* carried = !haveFrame ? "no frame" : np.eyeAlignApplied == 0 ? "not reported" : np.eyeAlignApplied == g_f115Rec.serial + 1 ? "yes" : "no";
+    // F115b: no frame since the edge (a quit stops the game's frames): the last pose still carries the on-foot alignment, so neither it nor its head is judged
+    const bool fresh = haveFrame && f115::frameSinceEdge(g_f115Rec.frameAtEdge, np.frameSequence);
+    const char* carried = !haveFrame ? "no frame" : !fresh ? "no frame since the edge" : np.eyeAlignApplied == 0 ? "not reported"
+                        : np.eyeAlignApplied == g_f115Rec.serial + 1 ? "yes" : "no";
+    const f115::Exit exitIs = f115::exitKind(g_f115Rec.fromPanels, g_f115Rec.panelsAfter, journalSeatedKnown() && journalSeated());
     // The seat: the player's last recentre in a menu or the cockpit this session (the seat memory's stored seat from then on), or none; on-foot presses beside it.
     char seat[160];
     if (g_f115Press.any)
@@ -12581,14 +12590,16 @@ void f115Followup(uint64_t now) noexcept {
                     hmdPressStatusName(decodeHmdPress(hmdResetPressState()).status), static_cast<unsigned>(g_f115Press.onFoot));
     const long long panelsBefore = g_f115PanelsFirstMs == 0 ? -1 : g_f115Rec.edgeMs >= g_f115PanelsFirstMs ? static_cast<long long>(g_f115Rec.edgeMs - g_f115PanelsFirstMs)
                                                                                                         : -static_cast<long long>(g_f115PanelsFirstMs - g_f115Rec.edgeMs);
-    Log::get().note("boarding reset (F115) 1 s: the edge from %s, %lld ms before Status.json's on-foot bit (the cockpit's panels first drew %lld ms before the edge); "
-                    "published the eye alignment %+.1f %+.1f %+.1f cm (serial %u; the pose carries it: %s), the look's seated yaw %+.2f deg, the ADS pitch %+.2f deg, the "
-                    "rotation %+.2f %+.2f deg, the ADS shift %.1f cm, the share %.2f: %s; the head over the seated origin (the stored seat once boarded) %+.1f cm, %.1f "
-                    "cm off its vertical; the seat: %s%s",
-                    g_f115Rec.fromPanels ? "the cockpit's own panels" : "Status.json", g_f115Rec.leadMs(), panelsBefore, 100.0 * p.eyeM[0], 100.0 * p.eyeM[1],
-                    100.0 * p.eyeM[2], static_cast<unsigned>(g_f115Rec.serial), carried, p.lookDeg, p.pitchDeg, p.rotDeg[0], p.rotDeg[1], p.shiftCm(), p.share,
-                    p.zero() ? "all zero" : "NOT ZERO", 100.0 * h, 100.0 * off, seat,
+    Log::get().note("boarding reset (F115) 1 s: the exit: %s; the edge from %s, %lld ms before Status.json's on-foot bit (the cockpit's panels first drew %lld ms "
+                    "before the edge); published the eye alignment %+.1f %+.1f %+.1f cm (serial %u; the pose carries it: %s), the look's seated yaw %+.2f deg, the ADS "
+                    "pitch %+.2f deg, the rotation %+.2f %+.2f deg, the ADS shift %.1f cm, the share %.2f: %s; the head over the seated origin (the stored seat once "
+                    "boarded) %+.1f cm, %.1f cm off its vertical; the seat: %s%s",
+                    f115::exitName(exitIs), g_f115Rec.fromPanels ? "the cockpit's own panels" : "Status.json", g_f115Rec.leadMs(), panelsBefore, 100.0 * p.eyeM[0],
+                    100.0 * p.eyeM[1], 100.0 * p.eyeM[2], static_cast<unsigned>(g_f115Rec.serial), carried, p.lookDeg, p.pitchDeg, p.rotDeg[0], p.rotDeg[1], p.shiftCm(),
+                    p.share, p.zero() ? "all zero" : "NOT ZERO", 100.0 * h, 100.0 * off, seat,
                     !haveFrame ? " (no render head from the runtime)"
+                    : !fresh ? " (the last frame's, before the edge: not judged)"
+                    : exitIs == f115::Exit::kOther ? " (not a boarding: not judged)"
                     : !f115::seatOff(h) ? ""
                     : g_f115Press.any ? ": a recentre's worth off the seat the player set this session"
                     : p.zero() ? ": a recentre's worth, from the seated origin itself (nothing on foot is left in the pose; the seat stored before this session)"
@@ -12600,6 +12611,7 @@ void f115Tick(uint64_t now) noexcept {
     const bool flag = nativeOnFootActive();
     const bool panels = g_f115CockpitPanelDrew.exchange(false, std::memory_order_relaxed);
     if (flag && panels && g_f115PanelsFirstMs == 0 && g_f115Camera.armed) g_f115PanelsFirstMs = now;
+    if (panels && g_f115Rec.armed) g_f115Rec.panelsAfter = true;   // F115b: the cockpit drawn after the edge: a boarding
     if (!flag && g_f115FlagLast && g_f115Rec.armed && g_f115Rec.flagFellMs == 0) g_f115Rec.flagFellMs = now;   // the flag fell after the panels' edge
     if (!flag) g_f115BoardedEarly.store(false, std::memory_order_relaxed);   // Status.json says so itself from here
     g_f115FlagLast = flag;

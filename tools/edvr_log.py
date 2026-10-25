@@ -11218,26 +11218,35 @@ def _hj_f115_boarding(rows, ctx):
     the runtime's pose carries the zero alignment (else PARTIAL). The panels' lead over Status.json's bit is reported. The head's height against the stored seat
     (the seated origin once boarded) is reported per boarding: 10 cm or more is PARTIAL, named by where the seat came from (the player's recentre in a menu or
     the cockpit this session: the seat did not come back or the player sits otherwise; none this session: the seat stored before it), apart from the on-foot
-    changes. A false start is PARTIAL."""
-    ended, edges, secs, falses = rows.get("ended", []), rows.get("edge", []), rows.get("sec", []), rows.get("false", [])
-    if not ended and not edges and not secs and not falses:
+    changes. A false start is PARTIAL. F115b: an exit the read-back names "not a boarding" (a quit, a load or a menu) is counted apart and its pose and seat
+    are not judged; nor are those of a read-back with no runtime frame since the edge (the last pose still carries the on-foot alignment). F115's read-backs
+    have no exit field and count as boardings."""
+    ended, edges, allSecs, falses = rows.get("ended", []), rows.get("edge", []), rows.get("sec", []), rows.get("false", [])
+    if not ended and not edges and not allSecs and not falses:
         return None
     if len(edges) < len(ended):
         return ("NEVER APPLIED", "%d exit(s) of native stereo on foot, %d boarding reset(s): the reset did not run at %d" % (
             len(ended), len(edges), len(ended) - len(edges)))
     big = lambda rs, k: max(abs(float(r[k])) for r in rs) if rs else 0.0
+    others = [r for r in allSecs if (r.get("exit") or "").startswith("not a boarding")]
+    secs = [r for r in allSecs if r not in others]
+    judged = [r for r in secs if r["carried"] != "no frame since the edge"]
     panels = sum(1 for r in edges if r["src"].startswith("the cockpit"))
-    text = ("%d boarding(s) (the edge from the cockpit's panels %d, from Status.json %d): undone at once the eye alignment up to %.1f cm (the hold's raise up to "
-            "%.1f, the neck reference's up to %.1f), the look's seated yaw up to %.2f deg, the ADS pitch up to %.2f deg, the ADS shift up to %.1f cm") % (
-        len(edges), panels, len(edges) - panels, big(edges, "ey"), big(edges, "hold"), big(edges, "neck"), big(edges, "look"), big(edges, "pitch"), big(edges, "shift"))
+    text = ("%d boarding(s) and %d other exit(s) (a quit, a load or a menu; not judged) (the edge from the cockpit's panels %d, from Status.json %d): undone at "
+            "once the eye alignment up to %.1f cm (the hold's raise up to %.1f, the neck reference's up to %.1f), the look's seated yaw up to %.2f deg, the ADS "
+            "pitch up to %.2f deg, the ADS shift up to %.1f cm") % (
+        len(edges) - len(others), len(others), panels, len(edges) - panels, big(edges, "ey"), big(edges, "hold"), big(edges, "neck"), big(edges, "look"),
+        big(edges, "pitch"), big(edges, "shift"))
     leads = [int(r["lead"]) for r in secs if r["src"] == "the cockpit's own panels" and int(r["lead"]) >= 0]
     if leads:
         text += "; the panels led Status.json's bit by %s ms" % ", ".join(str(x) for x in leads)
-    text += "; a second later all zero in %d of %d" % (sum(1 for r in secs if r["zero"] == "all zero"), len(secs))
-    if secs:
-        text += "; the head against the stored seat %s cm" % ", ".join("%+.1f" % float(r["h"]) for r in secs)
+    text += "; a second later all zero in %d of %d" % (sum(1 for r in allSecs if r["zero"] == "all zero"), len(allSecs))
+    if judged:
+        text += "; the head against the stored seat %s cm" % ", ".join("%+.1f" % float(r["h"]) for r in judged)
+    if len(judged) < len(secs):
+        text += "; %d boarding(s) with no runtime frame since the edge (pose and seat not judged)" % (len(secs) - len(judged))
     notes = []
-    own = [r for r in secs if abs(float(r["h"])) >= 10.0 and r["seat"].startswith("the player's recentre")]
+    own = [r for r in judged if abs(float(r["h"])) >= 10.0 and r["seat"].startswith("the player's recentre")]
     if own:
         notes.append("the head %s cm from the seat the player set this session a second after boarding (the seat did not come back, or the player sits otherwise "
                      "than at that recentre)" % ", ".join("%+.1f" % float(r["h"]) for r in own))
@@ -11246,15 +11255,15 @@ def _hj_f115_boarding(rows, ctx):
     now_bad = sum(1 for r in edges if r["now"] != "all zero")
     if now_bad:
         notes.append("%d reset(s) published something other than zero at the edge" % now_bad)
-    late = sum(1 for r in secs if r["zero"] != "all zero")
+    late = sum(1 for r in allSecs if r["zero"] != "all zero")
     if late:
-        notes.append("NOT ZERO a second after %d boarding(s)" % late)
-    if len(secs) < len(edges):
-        notes.append("%d boarding(s) without the read-back a second later" % (len(edges) - len(secs)))
-    uncarried = sum(1 for r in secs if r["carried"] == "no")
+        notes.append("NOT ZERO a second after %d exit(s)" % late)
+    if len(allSecs) < len(edges):
+        notes.append("%d exit(s) without the read-back a second later" % (len(edges) - len(allSecs)))
+    uncarried = sum(1 for r in judged if r["carried"] == "no")
     if uncarried:
         notes.append("the runtime's pose did not carry the zero alignment after %d" % uncarried)
-    seat = [r for r in secs if abs(float(r["h"])) >= 10.0 and not r["seat"].startswith("the player's recentre")]
+    seat = [r for r in judged if abs(float(r["h"])) >= 10.0 and not r["seat"].startswith("the player's recentre")]
     if seat:
         notes.append("the head %s cm from the seated origin a second after boarding: a recentre's worth from the seated origin itself (the seat stored before this "
                      "session: no recentre in a menu or the cockpit this session), not an on-foot change" % ", ".join("%+.1f" % float(r["h"]) for r in seat))
@@ -11992,9 +12001,11 @@ HEALTH_RULES = (
                  r"(?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(the hold's raise (?P<hold>%s) cm, the neck reference's raise (?P<neck>%s) cm\), the look's seated yaw "
                  r"(?P<look>%s) deg \(reset serial (?P<rs>\d+)\), the ADS pitch (?P<pitch>%s) deg, the rotation calibration %s %s deg, the ADS shift "
                  r"(?P<shift>[\d.]+) cm, the left eye's share (?P<share>[\d.]+); published now: .*?: (?P<now>all zero|NOT ZERO); the avatar's last sample" % ((_HN,) * 9)),
-        ("sec", r"boarding reset \(F115\) 1 s: the edge from (?P<src>the cockpit's own panels|Status\.json), (?P<lead>-?\d+) ms before Status\.json's on-foot bit "
+        ("sec", r"boarding reset \(F115\) 1 s: (?:the exit: (?P<exit>boarding \([^)]*\)|not a boarding \([^)]*\)); )?the edge from (?P<src>the cockpit's own "
+                r"panels|Status\.json), (?P<lead>-?\d+) ms before Status\.json's on-foot bit "
                 r"\(the cockpit's panels first drew (?P<pfirst>-?\d+) ms before the edge\); published the eye alignment (?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(serial "
-                r"(?P<serial>\d+); the pose carries it: (?P<carried>yes|no|not reported|no frame)\), the look's seated yaw (?P<look>%s) deg, the ADS pitch "
+                r"(?P<serial>\d+); the pose carries it: (?P<carried>yes|no frame since the edge|no frame|not reported|no)\), the look's seated yaw (?P<look>%s) deg, "
+                r"the ADS pitch "
                 r"(?P<pitch>%s) deg, the rotation %s %s deg, the ADS shift (?P<shift>[\d.]+) cm, the share (?P<share>[\d.]+): (?P<zero>all zero|NOT ZERO); the head "
                 r"over the seated origin \(the stored seat once boarded\) (?P<h>%s) cm, (?P<off>[\d.]+) cm off its vertical; the seat: (?P<seat>[^:]*)"
                 % ((_HN,) * 8)),
@@ -13633,12 +13644,15 @@ def self_test_health():
             return R("boarding reset (F115): the on-foot camera ended at frame", 86241, src, 0, 0.0, -34.6, 0.0, 16.9, 17.7, -5.84, 10, 4.86, 0.0, 0.0, 0.0, 0.0,
                      0.0, nowEye, 0.0, 8577, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, now, 1806, 1889)
 
-        def sec115(zero="all zero", eye=0.0, carried="yes", h=-1.5, seat=MENU115, tail="", src="the cockpit's own panels", lead=984):
-            return R("boarding reset (F115) 1 s: the edge from", src, lead, 0 if src != "Status.json" else -1, 0.0, eye, 0.0, 8577, carried, 0.0, 0.0, 0.0, 0.0,
+        BOARD115, QUIT115 = "boarding (the cockpit's panels drew)", "not a boarding (no cockpit panel, not seated: a quit, a load or a menu)"
+
+        def sec115(zero="all zero", eye=0.0, carried="yes", h=-1.5, seat=MENU115, tail="", src="the cockpit's own panels", lead=984, kind=BOARD115):
+            return R("boarding reset (F115) 1 s: the exit:", kind, src, lead, 0 if src != "Status.json" else -1, 0.0, eye, 0.0, 8577, carried, 0.0, 0.0, 0.0, 0.0,
                      0.0, 0.0, zero, h, 3.1, seat, tail)
 
         check("F115 boarding: the panels' edge, undone at once, zero a second later, the cockpit on the seat", [BEGAN115, ENTRY115, edge115(), END115, sec115()], 0,
-              [("OK", B115)], has=["1 boarding(s) (the edge from the cockpit's panels 1, from Status.json 0): undone at once the eye alignment up to 34.6 cm (the "
+              [("OK", B115)], has=["1 boarding(s) and 0 other exit(s) (a quit, a load or a menu; not judged) (the edge from the cockpit's panels 1, from Status.json "
+                                   "0): undone at once the eye alignment up to 34.6 cm (the "
                                    "hold's raise up to 16.9, the neck reference's up to 17.7), the look's seated yaw up to 5.84 deg, the ADS pitch up to 4.86 deg",
                                    "the panels led Status.json's bit by 984 ms", "a second later all zero in 1 of 1; the head against the stored seat -1.5 cm"],
               lacks=["UNPARSED"])
@@ -13655,7 +13669,18 @@ def self_test_health():
         check("F115 boarding: native stereo on foot ended and no reset ran", [BEGAN115, END115], 3, [("NEVER APPLIED", B115)],
               has=["1 exit(s) of native stereo on foot, 0 boarding reset(s): the reset did not run at 1"])
         check("F115 boarding: something still published a second later", [edge115(), END115, sec115(zero="NOT ZERO", eye=-34.6, carried="no")], 0,
-              [("PARTIAL", B115)], has=["NOT ZERO a second after 1 boarding(s)", "the runtime's pose did not carry the zero alignment after 1"])
+              [("PARTIAL", B115)], has=["NOT ZERO a second after 1 exit(s)", "the runtime's pose did not carry the zero alignment after 1"])
+        # F115b: the flight of 08:51 (log edvr_gfx_20261025_085120): the on-foot training left for the menu, no frame came after the edge, the last pose's head +9.0
+        check("F115b: a quit to the menu is another exit, not judged", [BEGAN115, END115, edge115(src=FLAG115), sec115(src="Status.json", lead=0, kind=QUIT115,
+              carried="no frame since the edge", h=9.0, seat="the player's recentre 459 s before the edge, in a menu or a load (on foot 0, not the seat)",
+              tail=" (the last frame's, before the edge: not judged)")], 0, [("OK", B115)],
+              has=["0 boarding(s) and 1 other exit(s) (a quit, a load or a menu; not judged)", "a second later all zero in 1 of 1"],
+              lacks=["UNPARSED", "did not carry", "the head +9.0"])
+        check("F115b: a boarding with no runtime frame since the edge", [edge115(), END115, sec115(carried="no frame since the edge", h=12.0)], 0, [("OK", B115)],
+              has=["1 boarding(s) with no runtime frame since the edge (pose and seat not judged)"], lacks=["did not carry", "the head +12.0"])
+        check("F115b: the F115 build's read-back (no exit field) still parses, as a boarding", [edge115(), END115, R("boarding reset (F115) 1 s: the exit:", BOARD115,
+              "the cockpit's own panels", 984, 0, 0.0, 0.0, 0.0, 8577, "yes", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "all zero", -1.5, 3.1, MENU115, "").replace(
+              "the exit: " + BOARD115 + "; ", "")], 0, [("OK", B115)], has=["1 boarding(s) and 0 other exit(s)"], lacks=["UNPARSED"])
         check("F115 boarding: the edge published a non-zero alignment", [edge115(now="NOT ZERO", nowEye=-33.8), END115, sec115()], 0, [("PARTIAL", B115)],
               has=["1 reset(s) published something other than zero at the edge"])
         check("F115 boarding: a false start (the panels drew on foot)", [edge115(), FALSE115], 0, [("PARTIAL", B115)],
