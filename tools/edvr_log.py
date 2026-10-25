@@ -10701,6 +10701,71 @@ def _hj_f117_cursor(rows, ctx):
     return ("OK" if any_ok else "IDLE", text)
 
 
+def _hj_f120_follow(rows, ctx):
+    """F120: the cursor on a screen-space on-foot panel when the head turns, per setting of the temporary A/B key (panel, head). A second is judged when the
+    mouse was still (the same uv on the panel in consecutive placements) and the head turned more than 5 deg against the HUD frame while it was; the cursor's
+    drift on the panel in those seconds is under 5 mm when the cursor stays on the drawn panel. OK: the judged seconds under panel mostly drifted under 5 mm.
+    PARTIAL: most drifted 5 mm or more, or the HRC frame turned with the head in every judged second (E.Ht constant: the correction is near zero and the
+    drift cannot tell whether a panel seen to hold still is in that frame). NEVER APPLIED: panel met screen-space placements and corrected none. IDLE: no
+    screen-space panel, or none of the seconds could be judged."""
+    sec, pins = rows.get("sec", []), rows.get("pin", [])
+    if not sec and not pins:
+        return None
+    unpinned = [r for r in pins if r["state"].startswith("NOT pinned")]
+    if not sec:
+        return ("IDLE", "no 2D placement on a panel" + ("; the owner function's bytes are NOT pinned" if unpinned else ""))
+    order, groups = [], {}
+    for r in sec:
+        k = r["setting"].strip()
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(r)
+    kinds = (("rflat", "flat"), ("rnoeye", "no eye view"), ("rnohrc", "no HRC matrix"), ("rdeg", "degenerate row"), ("rnot", "not screen-space"),
+             ("rpin", "owner bytes not pinned"), ("rhead", "setting head"), ("rwrite", "write failed"))
+    parts, total_screen, never, partial, ok_any = [], 0, [], [], False
+    for k in order:
+        g = groups[k]
+        screen, corrected = sum(int(r["screen"]) for r in g), sum(int(r["corrected"]) for r in g)
+        judged = [r for r in g if int(r["still"]) > 0 and float(r["stt"]) > 5.0]
+        drifts = sorted(float(r["drift"]) for r in judged)
+        over = sum(1 for d in drifts if d >= 5.0)
+        turning = sum(1 for r in judged if "turns with the head" in r["frame"])
+        refused = ", ".join("%s %d" % (name, n) for name, n in ((name, sum(int(r[key]) for r in g)) for key, name in kinds) if n)
+        text = "%s: %d s, %d 2D placements, %d screen-space, corrected %d" % (k, len(g), sum(int(r["pl"]) for r in g), screen, corrected)
+        if refused:
+            text += " (refused: %s)" % refused
+        if judged:
+            text += "; %d judged second(s) (mouse still, head turn over 5 deg): cursor drift median %.1f mm, worst %.1f mm, %d at or over 5 mm" % (
+                len(judged), drifts[len(drifts) // 2], drifts[-1], over)
+            if turning:
+                text += ", the HUD frame turned with the head in %d of them" % turning
+        parts.append(text)
+        total_screen += screen
+        if k == "panel":
+            if screen and not corrected:
+                never.append(k)
+            elif judged and 2 * over > len(judged):
+                partial.append("%s drifted 5 mm or more in %d of %d judged seconds" % (k, over, len(judged)))
+            elif judged and turning == len(judged):
+                partial.append("the HRC frame turned with the head in all %d judged seconds under %s (E.Ht constant: the correction is near zero and the drift cannot "
+                               "show whether a panel seen to hold still is in that frame)" % (len(judged), k))
+            elif judged:
+                ok_any = True
+    text = "; ".join(parts)
+    if unpinned:
+        text += "; the owner function's bytes are NOT pinned (%s)" % unpinned[-1]["state"]
+    if never:
+        return ("NEVER APPLIED", text + "; %s met screen-space placements and corrected none" % ", ".join(never))
+    if not total_screen:
+        return ("IDLE", text + "; no screen-space panel")
+    if partial:
+        return ("PARTIAL", text + "; " + "; ".join(partial))
+    if ok_any:
+        return ("OK", text)
+    return ("IDLE", text + "; no mouse-still second with a head turn over 5 deg under panel to judge")
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -11978,6 +12043,17 @@ HEALTH_RULES = (
         ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
         ("_", r"panel cursor fix \(F117\) so far: "),
     ), _hj_f117_cursor),
+    _hrule("panel cursor follow (F120)", ("F120",), ("panel cursor follow (F120)",), (
+        ("sec", r"panel cursor follow \(F120\) 1 s: setting (?P<setting>[^;]+); 2D placements (?P<pl>\d+), screen-space (?P<screen>\d+), corrected (?P<corrected>\d+), "
+                r"references taken (?P<refs>\d+); refused: flat (?P<rflat>\d+), no eye view (?P<rnoeye>\d+), no HRC matrix (?P<rnohrc>\d+), degenerate row (?P<rdeg>\d+), "
+                r"not screen-space (?P<rnot>\d+), owner bytes not pinned (?P<rpin>\d+), setting head (?P<rhead>\d+), write failed (?P<rwrite>\d+); this second the head "
+                r"turned (?P<te>[\d.]+) deg, the HUD frame (?P<th>[\d.]+) deg, the head against the HUD frame (?P<teh>[\d.]+) deg \((?P<frame>[^)]*)\); E\.Ht \(det "
+                r"(?P<det>%s)\) yaw (?P<yaw>%s) pitch (?P<pitch>%s) roll (?P<roll>%s) deg; mouse still: (?P<still>\d+) placements, head against the HUD frame "
+                r"(?P<stt>[\d.]+) deg, cursor drift (?P<drift>[\d.]+) mm" % (_HN, _HN, _HN, _HN)),
+        ("setting", r"native on foot panel cursor follow \(F120\): (?P<to>panel|head) \(TEMPORARY"),
+        ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
+        ("_", r"panel cursor follow \(F120\) so far: "),
+    ), _hj_f120_follow),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13585,6 +13661,46 @@ def self_test_health():
               has=["still against the uv"])
         check("F117 cursor: only upright panels", [pcf(cursor="no turned panel", turned=0, upright=60, moved=0)], 0, [("IDLE", F117)],
               has=["no turned panel"])
+
+        # ---- panel cursor follow (F120): the cursor on a screen-space panel when the head turns, per setting ----
+        F120 = "panel cursor follow (F120)"
+        TURNS = "the HUD frame turns with the head, E.Ht holds constant, so the correction is near zero and a panel seen to hold still is not in the HRC frame"
+        STILL = "the HUD frame holds still, so the correction follows the head's turn"
+
+        def pcfo(setting="panel", pl=90, screen=90, corrected=90, refs=0, refused=(0, 0, 0, 0, 0, 0, 0, 0), te=20.0, th=0.0, teh=20.0, frame=STILL, det=1,
+                 ypr=(1.0, -2.0, 0.5), still=80, stt=18.0, drift=0.4):
+            return R("panel cursor follow (F120) 1 s", setting, pl, screen, corrected, refs, *refused, te, th, teh, frame, det, *ypr, still, stt, drift)
+
+        def pcfo_set(to="panel"):
+            return R("native on foot panel cursor follow (F120): %s (TEMPORARY", to)
+
+        def pcfo_pin(state="pinned (its first 16 bytes match build 334925)"):
+            return R("panel cursor follow (F120): the screen-space owner function", 0x47299F0, state)
+
+        check("F120 follow: panel holds the cursor on the panel, head lets it ride (the A/B)",
+              [pcfo_pin(), pcfo_set(), pcfo(), pcfo(), pcfo(), pcfo_set("head"), pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=113.3),
+               pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=108.0)], 0, [("OK", F120)],
+              has=["panel: 3 s, 270 2D placements, 270 screen-space, corrected 270; 3 judged second(s) (mouse still, head turn over 5 deg): cursor drift median 0.4 mm, "
+                   "worst 0.4 mm, 0 at or over 5 mm", "head: 2 s", "corrected 0 (refused: setting head 180); 2 judged second(s)", "cursor drift median 113.3 mm"],
+              lacks=["UNPARSED", "NOT pinned"])
+        check("F120 follow: the owner bytes do not match the pin, every panel refused", [pcfo_pin("NOT pinned (its first 16 bytes are 4C 8B DC 49 89 5B 18 57 48 81 EC "
+                                                                                              "40 01 00 00 42; every panel is refused)"),
+                                                                                  pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 0, 90, 0, 0), te=0.0, teh=0.0,
+                                                                                       frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0,
+              [("IDLE", F120)], has=["the owner function's bytes are NOT pinned", "owner bytes not pinned 180"])
+        check("F120 follow: drifted 5 mm or more under panel", [pcfo(drift=12.0), pcfo(drift=9.0), pcfo(drift=2.0)], 0, [("PARTIAL", F120)],
+              has=["2 at or over 5 mm", "panel drifted 5 mm or more in 2 of 3 judged seconds"])
+        check("F120 follow: the HRC frame turned with the head in every judged second", [pcfo(frame=TURNS, teh=0.2, drift=0.0)] * 3, 0, [("PARTIAL", F120)],
+              has=["the HUD frame turned with the head in 3 of them", "the HRC frame turned with the head in all 3 judged seconds under panel"])
+        check("F120 follow: screen-space placements, none corrected", [pcfo(corrected=0, refused=(0, 0, 0, 90, 0, 0, 0, 0))] * 2, 3, [("NEVER APPLIED", F120)],
+              has=["refused: degenerate row 180", "panel met screen-space placements and corrected none"])
+        check("F120 follow: only panels that are not screen-space", [pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 90, 0, 0, 0), te=0.0, teh=0.0,
+                                                                         frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0, [("IDLE", F120)],
+              has=["no screen-space panel", "refused: not screen-space 180"])
+        check("F120 follow: corrected, but no mouse-still second with a head turn to judge", [pcfo(still=0, stt=0.0, drift=0.0), pcfo(stt=3.0, drift=0.1)], 0,
+              [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
+        check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
+                                                          frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
