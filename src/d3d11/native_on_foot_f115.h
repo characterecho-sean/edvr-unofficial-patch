@@ -118,18 +118,36 @@ struct Published {
     double shiftCm() const noexcept { return 100.0 * std::sqrt(shiftM[0] * shiftM[0] + shiftM[1] * shiftM[1] + shiftM[2] * shiftM[2]); }
 };
 
-// One boarding: armed at the edge, due a second after the flag's fall (the edge itself when the flag made it).
+// One exit of the on-foot camera: armed at the edge, due a second after the flag's fall (the edge itself when the flag made it).
 struct Record {
     bool armed = false;
     bool fromPanels = false;    // the cockpit's panels made the edge (else the flag)
+    bool panelsAfter = false;   // F115b: the cockpit's panels drew between the edge and the read-back
     uint64_t edgeMs = 0;
     uint64_t flagFellMs = 0;    // 0 until the flag has fallen
+    uint64_t frameAtEdge = 0;   // F115b: the runtime's frame sequence the last frame input carried at the edge
     uint32_t serial = 0;        // the zero eye alignment's serial
     double lookTotalRad = 0.0;  // the look's published total at the reset serial (the runtime's base from then on)
     bool due(uint64_t nowMs) const noexcept { return armed && flagFellMs != 0 && nowMs >= flagFellMs && nowMs - flagFellMs >= kFollowupMs; }
     // How far the edge led Status.json's bit (ms; 0 when the flag made it, -1 while it has not fallen).
     long long leadMs() const noexcept { return flagFellMs == 0 ? -1 : flagFellMs >= edgeMs ? static_cast<long long>(flagFellMs - edgeMs) : 0; }
 };
+
+// F115b: what the exit was, read a second after the flag's fall. Native stereo on foot also ends when the commander quits to the menu, loads or leaves
+// a mode with no ship (log edvr_gfx_20261025_085120: the on-foot training left for the menu at 09:01:25.894, the game stopped submitting frames 0.5 s
+// earlier and shut down 30 s later, and F115 read it as a boarding). A boarding is known by the cockpit's own panels drawing (they made the edge or drew
+// after it) or by Status.json saying seated; anything else is another exit, whose seat and pose are not a boarding's to judge.
+enum class Exit : uint8_t { kBoardingPanels = 0, kBoardingSeated = 1, kOther = 2 };
+inline Exit exitKind(bool fromPanels, bool panelsAfter, bool statusSeated) noexcept {
+    return fromPanels || panelsAfter ? Exit::kBoardingPanels : statusSeated ? Exit::kBoardingSeated : Exit::kOther;
+}
+inline const char* exitName(Exit e) noexcept {
+    return e == Exit::kBoardingPanels ? "boarding (the cockpit's panels drew)" : e == Exit::kBoardingSeated ? "boarding (Status.json says seated)"
+                                                                               : "not a boarding (no cockpit panel, not seated: a quit, a load or a menu)";
+}
+// F115b: whether the runtime handed the d3d11 half a frame after the edge (a quit stops the game's frames, and the last pose still carries the on-foot
+// alignment: the head read from it is not the cockpit's).
+inline bool frameSinceEdge(uint64_t frameAtEdge, uint64_t frameNow) noexcept { return frameNow != frameAtEdge; }
 
 // The head in the seated space (a rigid 3x4, row-major, as EdvrNativeNowPose::render): its height over the origin and its distance from the origin's vertical.
 inline double headHeightM(const float m[12]) noexcept { return static_cast<double>(m[7]); }
