@@ -10629,6 +10629,35 @@ def _hj_f113_rows(rows, ctx):
     return ("OK", text)
 
 
+def _hclock(t):
+    t = int(t or 0)
+    return "%02d:%02d:%02d" % (t // 3600, t // 60 % 60, t % 60)
+
+
+def _hj_f118_reticle(rows, ctx):
+    """F118 (measure only): which of two causes makes the aim reticle look double. An edge second: at least 4 footprints read, a quarter or more over a
+    depth edge (the five lines more than 0.25 deg of disparity apart), and at most 2 steps. A speed second: a flip (a step undone), or the drawn depth more
+    than 0.25 deg from the target for 50 ms or more in a run. The leading cause is the kind with more seconds (both when equal, neither when none). Readbacks
+    with no footprint ever read is PARTIAL (the ring lines were not dispatched or came back unusable)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    tot = {k: sum(int(r[k]) for r in sec) for k in ("reads", "steps", "skyhit", "hithit", "flips", "over", "frames", "fread", "edge", "far", "inc", "nodisp")}
+    edge_s = [r for r in sec if int(r["fread"]) >= 4 and 4 * int(r["edge"]) >= int(r["fread"]) and int(r["steps"]) <= 2]
+    speed_s = [r for r in sec if int(r["flips"]) >= 1 or int(r["run"]) >= 50]
+    lead = "edge" if len(edge_s) > len(speed_s) else "speed" if len(speed_s) > len(edge_s) else "both" if edge_s else "neither"
+    text = ("%d s: readbacks %d; steps over 0.25 deg %d (sky-hit %d, hit-hit %d), flips %d; drawn more than 0.25 deg from the target in %s of %d frames, "
+            "longest run %d ms; footprints read %d, over a depth edge %s (the centre on the far side %d); edge seconds %d%s, speed seconds %d%s; leading cause: %s" % (
+                len(sec), tot["reads"], tot["steps"], tot["skyhit"], tot["hithit"], tot["flips"], _hpct(tot["over"], tot["frames"]), tot["frames"],
+                max(int(r["run"]) for r in sec), tot["fread"], _hpct(tot["edge"], tot["fread"]), tot["far"], len(edge_s),
+                " (first %s)" % _hclock(edge_s[0]["_t"]) if edge_s else "", len(speed_s), " (first %s)" % _hclock(speed_s[0]["_t"]) if speed_s else "", lead))
+    if not tot["reads"] and not tot["frames"]:
+        return ("IDLE", text + "; no readback and no drawn frame")
+    if tot["reads"] and not tot["fread"]:
+        return ("PARTIAL", text + "; no footprint was read (not dispatched %d, incomplete %d)" % (tot["nodisp"], tot["inc"]))
+    return ("OK", text)
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -11813,6 +11842,12 @@ HEALTH_RULES = (
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
         ("_", r"reticle depth \(F85c\): precompiled"),
     ), _hj_f85c),
+    _hrule("reticle depth (F118)", ("F118",), ("reticle depth (F118)",), (
+        ("sec", r"reticle depth \(F118\) 1 s: readbacks (?P<reads>\d+) \(hit or sky\); steps over 0\.25 deg (?P<steps>\d+) \(sky-hit (?P<skyhit>\d+), hit-hit "
+                r"(?P<hithit>\d+)\), flips (?P<flips>\d+), largest step [\d.]+ deg; drawn more than 0\.25 deg from the target in (?P<over>\d+) of (?P<frames>\d+) "
+                r"frames, longest run (?P<run>\d+) ms, worst [\d.]+ deg; footprint \(\+-0\.6 deg\) read (?P<fread>\d+), over a depth edge (?P<edge>\d+) \(the centre on "
+                r"the far side (?P<far>\d+)\), largest span [\d.]+ deg, incomplete (?P<inc>\d+), not dispatched (?P<nodisp>\d+)"),
+    ), _hj_f118_reticle),
     _hrule("view height hold (F87h)", ("F87h",), ("view height hold (F87h)",), (
         ("sec", r"view height hold \(F87h\) 1 s: state (?P<state>[^;]+);"),
     ), _hj_f87h),
@@ -13370,6 +13405,24 @@ def self_test_health():
         check("F113 rows: a source latched off", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF"])
         check("F113 rows: the sources never ran (the 07:10 flight's bare ground)", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0)] * 2, 3,
               [("NEVER APPLIED", F113)], has=["none 66.7%", "no source ever gave any"])
+
+        # ---- reticle depth (F118): the edge or the speed as the cause of a reticle seen double ----
+        F118 = "reticle depth (F118)"
+
+        def ret118(reads=80, steps=1, skyhit=0, hithit=1, flips=0, over=2, frames=90, run=22.0, fread=80, edge=40, far=30, inc=0, nodisp=0):
+            return R("reticle depth (F118) 1 s", reads, steps, skyhit, hithit, flips, 0.30, over, frames, run, 0.40, fread, edge, far, 1.10, inc, nodisp)
+
+        check("F118 reticle: a footprint over an edge, few steps", [ret118()] * 3, 0, [("OK", F118)],
+              has=["footprints read 240, over a depth edge 50% (the centre on the far side 90)", "edge seconds 3 (first 10:00:01), speed seconds 0",
+                   "leading cause: edge"], lacks=["UNPARSED"])
+        check("F118 reticle: flips and a long trailing run", [ret118(), ret118(steps=12, skyhit=8, hithit=4, flips=5, over=20, run=120.0, edge=5, far=2)] * 2, 0,
+              [("OK", F118)], has=["steps over 0.25 deg 26 (sky-hit 16, hit-hit 10), flips 10", "longest run 120 ms", "edge seconds 2 (first 10:00:01), speed seconds 2 "
+                                   "(first 10:00:02)", "leading cause: both"])
+        check("F118 reticle: the speed leads", [ret118(steps=6, skyhit=6, hithit=0, flips=2, edge=10, far=1)] * 2 + [ret118(steps=0, hithit=0, run=80.0, edge=0, far=0)],
+              0, [("OK", F118)], has=["edge seconds 0, speed seconds 3 (first 10:00:01)", "leading cause: speed"])
+        check("F118 reticle: a steady reticle", [ret118(steps=0, hithit=0, over=0, run=0.0, edge=0, far=0)] * 2, 0, [("OK", F118)], has=["leading cause: neither"])
+        check("F118 reticle: readbacks but no footprint", [ret118(fread=0, edge=0, far=0, nodisp=80)] * 2, 0, [("PARTIAL", F118)],
+              has=["no footprint was read (not dispatched 160, incomplete 0)"])
 
         # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
         F111 = "panel pointer (F111)"

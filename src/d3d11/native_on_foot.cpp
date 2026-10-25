@@ -54,6 +54,7 @@
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
+#include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -25181,7 +25182,7 @@ void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
 // the panel's centre and corners; measure only since F87) and the floor probe (F86g). The dispatch builds
 // its lines from the requests that are at most kF86Fresh frames old against eye 0's rows of the dispatching frame; the answers come back two frames later
 // (a 3-deep staging ring) and update the consumers' state, which both eyes' draws read.
-enum F86LineKind : uint8_t { kLineKReticle = 0, kLineKWeapon = 1, kLineKFloor = 3 };
+enum F86LineKind : uint8_t { kLineKReticle = 0, kLineKWeapon = 1, kLineKFloor = 3, kLineKReticleRing = 4 };
 struct F86Meta {
     uint8_t kind = 0, id = 0, idx = 0;
     double u[3] = {}, target[3] = {};
@@ -25229,6 +25230,14 @@ struct F85cState {
     uint64_t gameDraws = 0;   // F101: key 10 draws not taken (reticle follow game: the game's placement stands)
 };
 F85cState g_f85c;
+// F118 (measure only): the reticle's readback steps and flips, the drawn depth's trailing frames, and its footprint, a second at a time (the render thread,
+// as F85c's state).
+struct F118State {
+    nofoot::f118::Steps steps;
+    nofoot::f118::Trail trail;
+    nofoot::f118::FootSecond foot;
+};
+F118State g_f118;
 uint32_t g_f86LastReticle = 0;   // the frame key 10's eye 0 draw last came: while it comes each frame it owns the dispatch (its line is the freshest)
 
 // F86d: a weapon UI part's panel at the surface under it (per part slot).
@@ -25283,6 +25292,7 @@ void f85cRelease() {
     if (g_f85g.cs) g_f85g.cs->Release();
     g_f85g = F85cGpu{};
     g_f85c = F85cState{};
+    g_f118 = F118State{};
     g_f85Latch = nofoot::f85::KLatch{};
     for (F86dPart& p : g_f86d) p = F86dPart{};
     g_f86g = F86gFloor{};
@@ -25375,6 +25385,9 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
         }
         f86::LineOut weaponRay[kF85bParts][5];
         int weaponN[kF85bParts] = {};
+        f86::LineOut ringOut[nofoot::f118::kRing], centreOut;   // F118: the footprint's lines and line 0
+        int ringN = 0;
+        bool haveCentre = false;
         for (uint32_t k = 0; k < sl.n && k < kDepthLinesMax; ++k) {
             const F86Meta& mt = sl.meta[k];
             const uint32_t b = 8u + 8u * k;
@@ -25389,6 +25402,8 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
             lo.pixOk = lo.status == f86::kLineHit && lo.px >= 0.0 && lo.py >= 0.0;
             if (mt.kind == kLineKReticle) {
                 if (lo.status == f86::kLineUnused) continue;
+                centreOut = lo;
+                haveCentre = true;
                 ++st.reads;
                 st.ageSum += age;
                 st.ageMax = std::max(st.ageMax, static_cast<double>(age));
@@ -25406,10 +25421,16 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
                     st.hitSum += st.targetD;
                     st.hitMin = std::min(st.hitMin, st.targetD);
                     st.hitMax = std::max(st.hitMax, st.targetD);
+                    g_f118.steps.read(status == nofoot::f85::kMarchSky, st.targetD);   // F118
                 } else if (status == nofoot::f85::kMarchNear) {
                     ++st.nearSurf;   // a surface nearer than 0.5 m on the aim: ignored, the last value holds
                 } else {
                     ++st.offscreen;
+                }
+            } else if (mt.kind == kLineKReticleRing) {
+                if (mt.idx < nofoot::f118::kRing) {
+                    ringOut[mt.idx] = lo;
+                    ringN = std::max(ringN, static_cast<int>(mt.idx) + 1);
                 }
             } else if (mt.kind == kLineKWeapon) {
                 if (mt.id < kF85bParts && mt.idx < 5) {
@@ -25430,6 +25451,11 @@ void f86Poll(ID3D11DeviceContext* ctx, uint32_t frame) {
                     g_f86gRejected.fetch_add(1, std::memory_order_relaxed);
                 }
             }
+        }
+        // F118: the reticle's footprint (all four ring lines in the dispatch, or counted as not dispatched)
+        if (haveCentre) {
+            if (ringN == nofoot::f118::kRing) g_f118.foot.add(nofoot::f118::footprint(centreOut, ringOut));
+            else ++g_f118.foot.notDispatched;
         }
         for (uint32_t p = 0; p < kF85bParts; ++p) {
             if (!weaponN[p]) continue;
@@ -25483,9 +25509,11 @@ void f86FloorRequest(uint32_t frame) {
     g_f86g.ok = true;
     g_f86g.reqFrame = frame;
 }
-// The dispatch: line 0 is key 10's (reticleOrel = O - the rows' origin, reticleU: false when the caller has none), the others the consumers' current requests.
+// The dispatch: line 0 is key 10's (reticleOrel = O - the rows' origin, reticleU: false when the caller has none), the others the consumers' current requests,
+// and last F118's footprint (reticleRing: key 10's four ring directions from O, or null), so the footprint never displaces a consumer's line.
 // False when nothing was dispatched. The refusals of the reticle are F85c's (the 1 s line); the weapon parts are told "no depth view".
-bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD) {
+bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD,
+                 const double (*reticleRing)[3]) {
     namespace f86 = nofoot::f86;
     F85cGpu& g = g_f85g;
     F85cState& st = g_f85c;
@@ -25564,6 +25592,24 @@ bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticle
     }
     if (g_f86g.ok && frame - g_f86g.reqFrame <= kF86Fresh)
         for (int s = 0; s < 2; ++s) addRay(kLineKFloor, 0, static_cast<uint8_t>(s), g_f86g.pts[s], 2, 0.5, 1.6, nullptr);
+    // F118: the reticle's footprint, the same origin and range as line 0, all four or none
+    if (reticle && reticleRing && n + nofoot::f118::kRing <= kDepthLinesMax) {
+        for (int q = 0; q < nofoot::f118::kRing; ++q) {
+            Ln& l = lines[n];
+            F86Meta& m = meta[n];
+            for (int i = 0; i < 3; ++i) {
+                l.orel[i] = reticleOrel[i];
+                l.dir[i] = reticleRing[q][i];
+                m.u[i] = reticleRing[q][i];
+            }
+            l.dmin = nofoot::f85::kReticleMinM;
+            l.dmax = nofoot::f85::kReticleMaxM;
+            m.kind = kLineKReticleRing;
+            m.id = 0;
+            m.idx = static_cast<uint8_t>(q);
+            ++n;
+        }
+    }
     D3D11_TEXTURE2D_DESC td{};
     tex->GetDesc(&td);
     if (g.srvTex != tex || g.srvW != td.Width || g.srvH != td.Height || !g.srv) {
@@ -25689,13 +25735,13 @@ bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticle
 }
 // Called by the eye 0 draws of the consumers (key 10's, a weapon UI part's, a prompt key's): the poll, the floor probe's request, and the dispatch unless key 10 will
 // make it (it comes each frame while the reticle is drawn; its line is then the freshest).
-void f86Tick(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD) {
+void f86Tick(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticleOrel, const double* reticleU, double gameD, const double (*reticleRing)[3]) {
     f86Poll(ctx, frame);
     f86FloorRequest(frame);
     if (g_f85g.dispatchedFrame == frame) return;
     const bool fromReticle = reticleOrel && reticleU;
     if (!fromReticle && frame - g_f86LastReticle <= 3u) return;
-    f86Dispatch(ctx, frame, reticleOrel, reticleU, gameD);
+    f86Dispatch(ctx, frame, reticleOrel, reticleU, gameD, reticleRing);
 }
 // F86h: per render frame and eye, the marker composite draws the fix decided to patch and those whose patch was bound at the draw's issue: the eye dump's
 // decisions.json carries them per frame (the first-frame eye 1 composites of the F85 flight's dumps 001, 002, 003 and 005 were unpatched).
@@ -26222,7 +26268,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
                 for (int i = 0; i < 3; ++i) part.target[k][i] = pw[k][i] + s.ow[i];
             f86eNote(ctx, slot, panel, dPanel, u.U);
             f86eAdsCheck(slot);
-            f86Tick(ctx, frame, nullptr, nullptr, 0.0);
+            f86Tick(ctx, frame, nullptr, nullptr, 0.0, nullptr);
         }
         f86dSmooth(part, frame);
         // F87: measure only. The scale the panel would take is logged, never applied (the nearest of five rays read 0.264 m for the rifle against a surface median of
@@ -26336,7 +26382,11 @@ bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow
     if (e == 0) {
         g_f86LastReticle = frame;   // F86: key 10 owns the frame's dispatch while it comes
         const double Orel[3] = {O[0] - s.ow[0], O[1] - s.ow[1], O[2] - s.ow[2]};
-        f86Tick(ctx, frame, Orel, u, dGame);
+        // F118: the footprint's four lines about u, toward K's right and up (its x and y columns)
+        const double kRight[3] = {s.K.K3[0][0], s.K.K3[1][0], s.K.K3[2][0]}, kUp[3] = {s.K.K3[0][1], s.K.K3[1][1], s.K.K3[2][1]};
+        double ring[nofoot::f118::kRing][3];
+        const bool ringOk = nofoot::f118::ringDirs(u, kRight, kUp, ring);
+        f86Tick(ctx, frame, Orel, u, dGame, ringOk ? ring : nullptr);
     } else {
         f86Poll(ctx, frame);
     }
@@ -26352,6 +26402,7 @@ bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow
             st.errSum += err;
             st.errMax = std::max(st.errMax, err);
             ++st.errN;
+            g_f118.trail.frame(st.dF, st.targetD, dt * 1000.0);   // F118: the drawn depth against the newest target
         }
     }
     if (!st.haveTarget) {
@@ -26486,6 +26537,15 @@ void f85Report(uint64_t nowMs) {
                         ull(st.offscreen), ull(st.behindBefore), st.errN ? st.errSum / static_cast<double>(st.errN) : 0.0, st.errMax, st.dF, st.ageSum / nr, st.ageMax, ull(st.dispatched),
                         ull(st.noDepth), ull(st.noScene), ull(st.noSolve), ull(st.noZw), ull(st.offLine), st.lineMax, ull(st.noReadback), ull(st.late), ull(st.dropped), ull(st.ringFull),
                         ull(st.mapFail), ull(st.seqBad), ull(st.noGpu));
+        // F118 (measure only): which of the edge and the speed makes the reticle look double
+        static_assert(nofoot::f118::kStepDeg == 0.25 && nofoot::f118::kRingDeg == 0.6 && nofoot::f118::kIpdM == 0.063, "the F118 line states these in its text");
+        const F118State& q = g_f118;
+        Log::get().note("reticle depth (F118) 1 s: readbacks %llu (hit or sky); steps over 0.25 deg %llu (sky-hit %llu, hit-hit %llu), flips %llu, largest step %.2f deg; "
+                        "drawn more than 0.25 deg from the target in %llu of %llu frames, longest run %.0f ms, worst %.2f deg; footprint (+-0.6 deg) read %llu, over a depth "
+                        "edge %llu (the centre on the far side %llu), largest span %.2f deg, incomplete %llu, not dispatched %llu; at an IPD of 63 mm",
+                        ull(q.steps.reads), ull(q.steps.steps), ull(q.steps.skyHit), ull(q.steps.hitHit), ull(q.steps.flips), q.steps.largestDeg, ull(q.trail.over),
+                        ull(q.trail.frames), q.trail.longestMs, q.trail.worstDeg, ull(q.foot.read), ull(q.foot.edge), ull(q.foot.centreFar), q.foot.largestDeg,
+                        ull(q.foot.incomplete), ull(q.foot.notDispatched));
     } else if (nativeOnFootActive() && nowMs - lastIdleC >= 5000) {
         lastIdleC = nowMs;
         Log::get().note("reticle depth (F85c): no key 10 composite draw this second (no tool or weapon out, ADS, or the marker fix is off)");
@@ -26532,6 +26592,9 @@ void f85Report(uint64_t nowMs) {
         st.lastQpc = keep.lastQpc;
         st.smoothFrame = keep.smoothFrame;
         st.hitMin = 1e9;
+        g_f118.steps.second();   // F118: the second's tallies go; the last target, an open step and a trailing run carry over
+        g_f118.trail.second();
+        g_f118.foot.second();
     }
 }
 
