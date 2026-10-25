@@ -3416,6 +3416,56 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy);
     }
   }
+  // F123: WaitGetPoses, no frame open. The position-only recentre the provider asks for (a version 10 answer's positionRecentre: 0, or the request's serial; the head containment's
+  // leash and wall contact). The seated origin goes under the head: currentOrigin is the head's x, y and z in natural LOCAL with the seated space's own yaw (lookSeated's, the look
+  // compensation and the rotation calibration's yaw included) kept exactly, the look is rebased onto it (lookRebase: the new origin carries the turn, so the compensation is zero and
+  // the base is the provider's total now; the alignment and the pitch overlays are applied again by eyePoll, rotPoll and adsPoll, called after this one), and the seated space is
+  // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing, the seat memory is not asked and the stored seat never
+  // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The ask is consumed once. Refused, and said: the seat memory does not place the player on foot, a stored seat
+  // is due (a boarding), the rotation calibration is on (it would be applied twice), the head is not tracked. A frame open leaves the ask pending for the next poll.
+  uint32_t positionRecentreHandled=0;uint64_t positionRecentres=0,positionRecentreRefusals=0;
+  bool positionRecentrePoll() {
+    if(!features.acquired()||!featureFrameKnown||!seated.space()||!changes.active())return false;
+    const uint32_t ask=featureFrame.positionRecentre;
+    if(ask==0||ask==positionRecentreHandled)return false;
+    if(state.frameOpen()||GetCurrentThreadId()!=ownerThread)return false;
+    positionRecentreHandled=ask;
+    return applyPositionRecentre(ask);
+  }
+  // The action of an ask (owner thread, no frame open, the seated space there): the rig drives it directly.
+  bool applyPositionRecentre(uint32_t ask) {
+    const char* why=nullptr;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    if(seat.where()!=SeatWhere::OnFoot)why="the seat memory does not place the player on foot";
+    else if(seatApplyAhead())why="a stored seat is due";
+    else if(std::fabs(rotApplied[0])>1e-6||std::fabs(rotApplied[1])>1e-6||std::fabs(rotWanted[0])>1e-6||std::fabs(rotWanted[1])>1e-6)why="the rotation calibration is on";
+    else {
+      const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&t,counterNow,nullptr,boundary.estimateNow());
+      constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked)why="the head is not tracked";
+    }
+    if(!why&&!lookSeatedKnown)lookRebase();
+    const SeatPose beforeSeated=lookSeated;
+    SeatPose next{};
+    if(!why) {
+      next=SeatPose{head.pose.position.x,head.pose.position.y,head.pose.position.z,lookSeated.yaw};
+      if(seated.replace(xrFromSeatPose(next))!=XR_SUCCESS)why="the seated space replace was refused";
+    }
+    if(why) {
+      ++positionRecentreRefusals;
+      nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s,refusals=%llu\n",unsigned(ask),why,(unsigned long long)positionRecentreRefusals);
+      return false;
+    }
+    currentOrigin=next;
+    lookRebase();   // lookSeated = currentOrigin; the compensation, the alignment and the overlays are zero until their polls apply them again
+    dropPoseFrame(PoseInvalidation::Other);
+    fillPollRing();
+    ++positionRecentres;
+    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0\n",unsigned(ask),
+        (unsigned long long)positionRecentres,beforeSeated.x,beforeSeated.y,beforeSeated.z,beforeSeated.yaw,next.x,next.y,next.z,next.yaw,
+        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw));
+    return true;
+  }
   // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.
   bool rotSeatedHeadYawPitch(double* yawDeg,double* pitchDeg) {
     XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
@@ -3601,6 +3651,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       seatMeterNextPeriodic=now+30000;
       seatMeterLine("periodic");
     }
+    positionRecentrePoll();   // F123: the leash's and the wall contact's position-only recentre, before the polls that apply the look, the alignment and the overlays again
     lookPoll();   // F22: the look's compensation, applied with no frame open (never gives up the frame)
     eyePoll();    // F33: the body-align translation, applied the same way
     rotPoll();    // F61 (TEMPORARY): the rotation calibration, applied the same way (nothing while its key is off)

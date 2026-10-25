@@ -196,8 +196,28 @@ inline void run119(Check&& check) {
         d.addFrame(c, have, false, 2.0);   // no offset known: counted nowhere
         bool none[2] = {false, false};
         d.addFrame(c, none, true, 0.5);    // no eye read: counted nowhere
-        check(d.baseFrames == 1 && d.baseCells20 == 2 && d.baseOwn20 == 5 && std::fabs(d.contactMin1 - 30.0) < 1e-9 && std::fabs(d.contactMin8 - 34.0) < 1e-9,
-              "F119: one frame at a head offset under 3 cm (the baseline: 2 cells within 20 cm, 5 with the player's own); contact first at 30 cm for 1 cell and 34 cm for 8");
+        check(d.baseFrames == 1 && d.baseCells20 == 2 && d.baseOwn20 == 5 && std::fabs(d.contactMin1 - 30.0) < 1e-9 && std::fabs(d.contactMin8 - 34.0) < 1e-9 &&
+                  d.contactFrames == 0 && d.contactMin32 > 1e8,
+              "F119: one frame at a head offset under 3 cm (the baseline: 2 cells within 20 cm, 5 with the player's own); contact first at 30 cm for 1 cell and 34 cm for 8; no frame has 32 cells");
+        // F123's proof of a peek: the frames with 32 cells or more at the near plane, the weakest of them, the far cells seen on them
+        c[1].within[3] = 40;
+        c[1].far1m = 3;
+        d.addFrame(c, have, true, 47.0);
+        c[1].within[3] = 33;
+        c[1].far1m = 9;
+        c[0].within[3] = 2;
+        c[0].far1m = 20;
+        d.addFrame(c, have, true, 46.0);
+        c[1].within[3] = 5;   // under 32: not a contact frame, its far cells not counted
+        c[1].far1m = 50;
+        c[0].within[3] = 5;
+        c[0].far1m = 50;
+        d.addFrame(c, have, true, 45.0);
+        check(d.contactFrames == 2 && d.contactWeakest == 33 && d.contactFar == 20 && std::fabs(d.contactMin32 - 46.0) < 1e-9,
+              "F123: two contact frames (40 and 33 cells), the weakest 33, the most far cells on them 20, first at 46 cm; a frame under 32 cells is none");
+        f119::EyeGrid sky2;
+        for (uint32_t i = 0; i < f119::kCells; ++i) sky2.world[i] = i < 16 ? 0.05f : i < 24 ? 1.5f : 1e30f;
+        check(f119::coverage(sky2, 0.1).far1m == 48, "F123: far cells are the world's cells past 1 m, the sky included (16 cells at 5 cm, 8 at 1.5 m, 40 in the sky: 48 far)");
         f119::EyeSecond e;
         f119::Coverage k;
         k.nearestWorld = 0.4;
@@ -246,10 +266,10 @@ inline void run119(Check&& check) {
         const int n = f119::formatLine(line, sizeof(line), li);
         check(n > 0 && n <= f119::kLineLimit && has(line, "native on foot head containment (F119) 1 s: frames 90 (no pose 2, over limit 0); rest point: generation 7, 12.4 s old, recentres 1;") &&
                   has(line, "[standing/weapon/hip n 60 h p50 ") && has(line, "[crouched/unarmed/ADS n 30 h p50 ") && has(line, ", hist ") && has(line, "L near 12.0, nearest 63.3 (body 21.0), cells 0/0/0/0") &&
-                  has(line, "R near 12.0, nearest 65.0 (body 22.0)") && has(line, "skipped none;") && has(line, "smallest head offset: 1 cell none, 8 cells none;") &&
+                  has(line, "R near 12.0, nearest 65.0 (body 22.0)") && has(line, "skipped none;") && has(line, "smallest head offset: 1 cell none, 8 cells none, 32 cells none; contact frames (32 cells or more) 0, weakest 0 cells, far (over 1 m) up to 0 cells;") &&
                   has(line, "at head offset under 3 cm: frames 0, cells within 20 cm max 0 (body 0); cost 41 us a frame"),
-              "F119: the 1 s line holds the frames, the rest point, both classes with histograms, EDVR's eye offsets, both eyes' depth, the skips, the contact, the baseline and the cost");
-        check(n <= 1050, "F119: a usual second's line is about a thousand characters or less (the log's note holds 1200 with its stamp)");
+              "F119: the 1 s line holds the frames, the rest point, both classes with histograms, EDVR's eye offsets, both eyes' depth, the skips, the contact and its proof of a peek, the baseline and the cost");
+        check(n <= f119::kLineLimit, "F119: a usual second's line stays within the line limit with both classes' histograms (the log's note holds 1166 characters after its stamp)");
         // the worst case: three classes' worth of samples, every skip counted, large figures: the line stays within the log's limit, by dropping the histograms and then a class
         for (int i = 0; i < 40; ++i) {
             f119::Offset o;
@@ -266,18 +286,23 @@ inline void run119(Check&& check) {
         dep.baseOwn20 = 64;
         dep.eye[0].within[0] = dep.eye[0].within[1] = dep.eye[0].within[2] = dep.eye[0].within[3] = 64;
         dep.eye[1].within[0] = dep.eye[1].within[1] = dep.eye[1].within[2] = dep.eye[1].within[3] = 64;
-        li.frames = 4000000000u;
-        li.noPose = 4000000000u;
-        li.dropped = 4000000000u;
-        li.generation = 4000000000u;
-        li.recentres = 4000000000u;
+        li.frames = 123456u;
+        li.noPose = 123456u;
+        li.dropped = 123456u;
+        li.generation = 123456u;
+        li.recentres = 123456u;
         li.restAgeS = 99999.9;
         li.costUs = 123456.0;
+        dep.baseFrames = 123456u;
+        dep.contactFrames = 123456u;
+        dep.contactWeakest = 64;
+        dep.contactFar = 64;
+        dep.contactMin32 = 345.6;
         char big[1600];
         const int nb = f119::formatLine(big, sizeof(big), li);
-        check(nb > 0 && has(big, "native on foot head containment (F119) 1 s: frames 4000000000 (no pose 4000000000") && has(big, " classes (n "),
-              "F119: a crowded second (a third class, every skip, huge figures) still gives one line naming the classes left out");
-        check(nb <= 1150, "F119: the crowded line stays under the log's 1200-byte line with its stamp and mark");
+        check(nb > 0 && has(big, "native on foot head containment (F119) 1 s: frames 123456 (no pose 123456") && has(big, " classes (n "),
+              "F119: a crowded second (a third class, every skip, six-digit figures) still gives one line naming the classes left out");
+        check(nb <= 1166, "F119: the crowded line stays under the log's 1200-byte line with its stamp and mark");
     }
     {   // the once-per-session line and a move of the rest point
         char b[800];

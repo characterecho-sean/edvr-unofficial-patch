@@ -146,7 +146,12 @@ struct EdvrNativeFrameOutput {
     // struct, and the versions that name its prefixes, keep their layout --
     // the two DLLs are copied apart by hand, and a runtime from before the
     // removal then reads a guard that is off.
-    uint32_t reservedTerrainGuard[21];
+    // F123: the first of those 21 words is a request for a position-only recentre of the seated space, in a version 10 answer only: 0 when none stands, else the
+    // request's serial (it moves on for each request, and the runtime acts once on each). The runtime moves the seated origin under the head, keeping its yaw (the
+    // look compensation included) exactly, and never stores it as the seat. A runtime from before F123 reads a word it does not look at; a provider from before it
+    // leaves it zero. Offset, size and type unchanged; the other 20 words are the retired guard's.
+    uint32_t positionRecentre;
+    uint32_t reservedTerrainGuard[20];
     uint32_t sceneReady;
     uint32_t transitionEnabled;
     uint32_t resubmitEnabled;
@@ -277,6 +282,9 @@ void nativeFrameSetRotCalibrate(float yawRad, float pitchRad);
 // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians, nose up positive), carried in version 10 output's reservedYaw. Zero when
 // fix.native_on_foot_ads_head_aim is off or not engaged. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetAdsPitch(float pitchRad);
+// F123: the position-only recentre the frame thread asks the runtime for (0: none; else the request's serial), carried in a version 10 answer's positionRecentre. Set by the
+// d3d11 frame thread once a frame; read under the provider's lock by beginFrame.
+void nativeFrameSetPositionRecentre(uint32_t serial);
 // F115: the on-foot words the next beginFrame hands the runtime, as the frame thread last set them (the boarding reset reads them back: all zero from the edge
 // on). Taken under the provider's lock.
 struct EdvrNativeOnFootWords {

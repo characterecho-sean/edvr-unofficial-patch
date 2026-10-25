@@ -33,7 +33,7 @@ constexpr double kNearPlaneSlackM = 0.03; // the coverage against the near plane
 constexpr uint32_t kGrid = 8, kCells = 64, kTaps = 8;
 constexpr uint32_t kStencilMask = 0x10u;
 constexpr uint32_t kMaxSamples = 512;     // a second's pose samples (a frame each)
-constexpr int kLineLimit = 1090;          // the log's note() holds 1200 bytes with its stamp and a truncation mark
+constexpr int kLineLimit = 1150;          // the log's note() holds 1167 bytes after its stamp and a truncation mark
 
 // ---- the classes ------------------------------------------------------------------------------------------------------------------------------------------
 enum Stance : int { kStanding = 0, kCrouched = 1, kStanceUnknown = 2, kStances = 3 };
@@ -302,7 +302,9 @@ struct Coverage {
     uint32_t within[kThresholds] = {};               // the world's cells
     uint32_t all20 = 0;                              // all taps' cells within 20 cm
     uint32_t markedCells = 0;                        // cells with any tap carrying the mask
+    uint32_t far1m = 0;                              // the world's cells farther than 1 m (the sky included): a view through a wall shows them
 };
+constexpr double kFarM = 1.0;
 inline Coverage coverage(const EyeGrid& g, double nearM) noexcept {
     Coverage c;
     const double t[kThresholds] = {0.05, 0.10, 0.20, nearM + kNearPlaneSlackM};
@@ -314,6 +316,7 @@ inline Coverage coverage(const EyeGrid& g, double nearM) noexcept {
             if (w < t[i]) ++c.within[i];
         if (a < 0.20) ++c.all20;
         if (g.marked[k]) ++c.markedCells;
+        if (w > kFarM) ++c.far1m;
     }
     return c;
 }
@@ -342,10 +345,13 @@ struct DepthSecond {
     uint32_t skipped[kSkips] = {};
     // frames read at a head offset under kBaselineCm: the game's own camera, where the coverage must be about 0
     uint32_t baseFrames = 0, baseCells20 = 0, baseOwn20 = 0;
-    // the smallest horizontal offset (cm) of a frame that had at least 1 / 8 world cells within kNearPlaneSlackM of the near plane (1e9: none)
-    double contactMin1 = 1e9, contactMin8 = 1e9;
+    // the smallest horizontal offset (cm) of a frame that had at least 1 / 8 / 32 world cells within kNearPlaneSlackM of the near plane (1e9: none)
+    double contactMin1 = 1e9, contactMin8 = 1e9, contactMin32 = 1e9;
+    // F123's proof of a peek: the contact frames (32 world cells of 64 or more within the near plane + 3 cm in an eye), the weakest of them (the fewest such cells), and the most
+    // far cells (over 1 m) any eye showed on them. A view through the wall shows far cells; a wall filling the view shows none.
+    uint32_t contactFrames = 0, contactWeakest = 0, contactFar = 0;
     void addFrame(const Coverage c[2], const bool have[2], bool offsetKnown, double offsetCm) noexcept {
-        uint32_t w20 = 0, o20 = 0, np = 0;
+        uint32_t w20 = 0, o20 = 0, np = 0, farCells = 0;
         bool any = false;
         for (int e = 0; e < 2; ++e) {
             if (!have[e]) continue;
@@ -353,8 +359,15 @@ struct DepthSecond {
             w20 = std::max(w20, c[e].within[2]);
             o20 = std::max(o20, c[e].all20);
             np = std::max(np, c[e].within[3]);
+            farCells = std::max(farCells, c[e].far1m);
         }
-        if (!any || !offsetKnown) return;
+        if (!any) return;
+        if (np >= 32) {
+            ++contactFrames;
+            contactWeakest = contactFrames == 1u ? np : std::min(contactWeakest, np);
+            contactFar = std::max(contactFar, farCells);
+        }
+        if (!offsetKnown) return;
         if (offsetCm < kBaselineCm) {
             ++baseFrames;
             baseCells20 = std::max(baseCells20, w20);
@@ -362,6 +375,7 @@ struct DepthSecond {
         }
         if (np >= 1) contactMin1 = std::min(contactMin1, offsetCm);
         if (np >= 8) contactMin8 = std::min(contactMin8, offsetCm);
+        if (np >= 32) contactMin32 = std::min(contactMin32, offsetCm);
     }
     void reset() noexcept { *this = DepthSecond{}; }
 };
@@ -426,10 +440,19 @@ inline int formatLine(char* out, size_t cap, const LineIn& in) noexcept {
     char eyes[2][400], depthBlock[900], skipped[200];
     size_t sk = 0;
     skipped[0] = '\0';
-    for (int s = 0; s < kSkips; ++s) {
-        if (!dep.skipped[s]) continue;
-        const int n = std::snprintf(skipped + sk, sizeof(skipped) - sk, "%s%s %u", sk ? ", " : "", skipName(s), static_cast<unsigned>(dep.skipped[s]));
-        if (n > 0 && static_cast<size_t>(n) < sizeof(skipped) - sk) sk += static_cast<size_t>(n);
+    {   // the four commonest reasons, the others as a count
+        int idx[kSkips], m = 0;
+        for (int s = 0; s < kSkips; ++s)
+            if (dep.skipped[s]) idx[m++] = s;
+        std::sort(idx, idx + m, [&dep](int a, int b) { return dep.skipped[a] != dep.skipped[b] ? dep.skipped[a] > dep.skipped[b] : a < b; });
+        for (int i = 0; i < m && i < 4; ++i) {
+            const int n = std::snprintf(skipped + sk, sizeof(skipped) - sk, "%s%s %u", sk ? ", " : "", skipName(idx[i]), static_cast<unsigned>(dep.skipped[idx[i]]));
+            if (n > 0 && static_cast<size_t>(n) < sizeof(skipped) - sk) sk += static_cast<size_t>(n);
+        }
+        if (m > 4) {
+            const int n = std::snprintf(skipped + sk, sizeof(skipped) - sk, ", +%d more", m - 4);
+            if (n > 0 && static_cast<size_t>(n) < sizeof(skipped) - sk) sk += static_cast<size_t>(n);
+        }
     }
     formatEye(eyes[0], sizeof(eyes[0]), "L", dep.eye[0]);
     formatEye(eyes[1], sizeof(eyes[1]), "R", dep.eye[1]);
@@ -437,11 +460,13 @@ inline int formatLine(char* out, size_t cap, const LineIn& in) noexcept {
     else if (dep.eye[0].read) std::snprintf(depthBlock, sizeof(depthBlock), "%s", eyes[0]);
     else if (dep.eye[1].read) std::snprintf(depthBlock, sizeof(depthBlock), "%s", eyes[1]);
     else std::snprintf(depthBlock, sizeof(depthBlock), "none read");
-    char contact1[24], contact8[24];
+    char contact1[24], contact8[24], contact32[24];
     if (dep.contactMin1 < 1e8) std::snprintf(contact1, sizeof(contact1), "%.1f", dep.contactMin1);
     else std::snprintf(contact1, sizeof(contact1), "none");
     if (dep.contactMin8 < 1e8) std::snprintf(contact8, sizeof(contact8), "%.1f", dep.contactMin8);
     else std::snprintf(contact8, sizeof(contact8), "none");
+    if (dep.contactMin32 < 1e8) std::snprintf(contact32, sizeof(contact32), "%.1f", dep.contactMin32);
+    else std::snprintf(contact32, sizeof(contact32), "none");
     char offs[900];
     int n = 0;
     for (int variant = 0; variant < 4; ++variant) {
@@ -464,13 +489,14 @@ inline int formatLine(char* out, size_t cap, const LineIn& in) noexcept {
         }
         n = std::snprintf(out, cap,
                           "native on foot head containment (F119) 1 s: frames %u (no pose %u, over limit %u); rest point: generation %u, %.1f s old, recentres %u; "
-                          "head offset cm: %s; EDVR eye offsets cm (not in the head offset): h max %.1f, up %+.1f..%+.1f [ADS lock+sight %.1f, weapon eye %.1f, view %.1f "
-                          "horizontal; neck %+.1f, hold %+.1f up]; depth cm (cells of 64 within 5/10/20 cm of the camera and 3 cm of the near plane, the second's max): %s; "
-                          "skipped %s; contact at the near plane, smallest head offset: 1 cell %s, 8 cells %s; at head offset under 3 cm: frames %u, cells within 20 cm "
-                          "max %u (body %u); cost %.0f us a frame",
+                          "head offset cm: %s; EDVR eye offsets cm: h max %.1f, up %+.1f..%+.1f [ADS lock+sight %.1f, weapon eye %.1f, view %.1f "
+                          "horizontal; neck %+.1f, hold %+.1f up]; depth cm (cells of 64 within 5/10/20 cm and 3 cm of the near plane, max): %s; "
+                          "skipped %s; contact at the near plane, smallest head offset: 1 cell %s, 8 cells %s, 32 cells %s; contact frames (32 cells or more) %u, weakest %u cells, "
+                          "far (over 1 m) up to %u cells; at head offset under 3 cm: frames %u, cells within 20 cm max %u (body %u); cost %.0f us a frame",
                           static_cast<unsigned>(in.frames), static_cast<unsigned>(in.noPose), static_cast<unsigned>(in.dropped), static_cast<unsigned>(in.generation),
                           in.restAgeS, static_cast<unsigned>(in.recentres), offs, own.hMax * 100.0, own.upMin * 100.0, own.upMax * 100.0, own.lockH * 100.0, own.weaponH * 100.0,
-                          own.viewH * 100.0, own.neckUp * 100.0, own.holdUp * 100.0, depthBlock, sk ? skipped : "none", contact1, contact8,
+                          own.viewH * 100.0, own.neckUp * 100.0, own.holdUp * 100.0, depthBlock, sk ? skipped : "none", contact1, contact8, contact32,
+                          static_cast<unsigned>(dep.contactFrames), static_cast<unsigned>(dep.contactWeakest), static_cast<unsigned>(dep.contactFar),
                           static_cast<unsigned>(dep.baseFrames), static_cast<unsigned>(dep.baseCells20), static_cast<unsigned>(dep.baseOwn20), in.costUs);
         if (n >= 0 && n <= kLineLimit) break;
     }
