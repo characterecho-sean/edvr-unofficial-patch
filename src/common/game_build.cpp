@@ -28,18 +28,38 @@ static_assert(sig::kTable.format == gamesig::kCppFormat, "game_signatures.inc wa
 constexpr uint32_t kTargetCount = sig::kTable.targetCount;
 constexpr uint32_t kTargetSlots = kTargetCount ? kTargetCount : 1;
 
-enum : int { kUnread = 0, kKnown, kUnknown, kUnreadable };
+// kNotGame: the PE header reads, the identity is not the known build's, and the main module is not EliteDangerous64.exe.
+enum : int { kUnread = 0, kKnown, kUnknown, kUnreadable, kNotGame };
 std::atomic<int> g_identity{kUnread};
 std::mutex g_identityMutex;
 uint32_t g_stamp = 0, g_size = 0;   // written before g_identity is published
-char g_text[112] = "";
+char g_text[160] = "";
 
 std::mutex g_resolveMutex;
 std::atomic<bool> g_resolved{false};
 gamesig::Result g_results[kTargetSlots];
-// The "game build:" line of a resolve that ran before the log opened (a hook that installs from DllMain asked first); gameBuildStartup
-// writes it once the log is open. Under g_resolveMutex.
+gamesig::RvaIndex g_index;   // gameRva's lookup over g_results, built before g_resolved is published
+// The "game build:" line of a resolve that ran before the log opened (a hook asked before gameBuildStartup); gameBuildStartup writes it
+// once the log is open. Under g_resolveMutex.
 std::string g_pendingSummary;
+
+// The main module's file name (its last path component) as UTF-8 into out, and whether it is the game's executable. A name that does not
+// fit the buffer is not the game's.
+bool mainModuleIsGame(char* out, size_t cap) noexcept {
+    wchar_t path[1024] = {};
+    const DWORD n = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(sizeof(path) / sizeof(path[0])));
+    const bool whole = n > 0 && n < sizeof(path) / sizeof(path[0]);
+    if (!whole) path[0] = L'\0';
+    const wchar_t* leaf = path;
+    for (const wchar_t* p = path; *p; ++p)
+        if (*p == L'\\' || *p == L'/') leaf = p + 1;
+    if (cap) {
+        const int w = WideCharToMultiByte(CP_UTF8, 0, leaf, -1, out, static_cast<int>(cap), nullptr, nullptr);
+        if (w <= 0) std::snprintf(out, cap, "%s", whole ? "(a name that does not convert)" : "(no module name)");
+        out[cap - 1] = '\0';
+    }
+    return whole && gamesig::isGameExecutable(path);
+}
 
 // base+0x3C -> e_lfanew, then the TimeDateStamp at +8 and the SizeOfImage at +0x50 (the pair every build-keyed hook checks). Under
 // __try: an unreadable header is a refusal, not a crash.
@@ -64,8 +84,15 @@ int identity() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     uint32_t stamp = 0, size = 0;
     int next = kUnreadable;
-    if (base && readIdentity(base, &stamp, &size))
-        next = stamp == sig::kKnownStamp && size == sig::kKnownImageSize ? kKnown : kUnknown;
+    char name[96] = "";
+    if (base && readIdentity(base, &stamp, &size)) {
+        // The known build's identity is the game's whatever its file is called, so that path does not change. Any other identity is a
+        // build of the game only when the main module is EliteDangerous64.exe: a stranger's executable is never resolved.
+        if (stamp == sig::kKnownStamp && size == sig::kKnownImageSize)
+            next = kKnown;
+        else
+            next = mainModuleIsGame(name, sizeof(name)) ? kUnknown : kNotGame;
+    }
     g_stamp = next == kUnreadable ? 0 : stamp;
     g_size = next == kUnreadable ? 0 : size;
     if (next == kKnown)
@@ -73,6 +100,8 @@ int identity() noexcept {
     else if (next == kUnknown)
         std::snprintf(g_text, sizeof(g_text), "unknown build (PE stamp 0x%08X, image size 0x%X)", static_cast<unsigned>(stamp),
                       static_cast<unsigned>(size));
+    else if (next == kNotGame)
+        std::snprintf(g_text, sizeof(g_text), "not the game (the process is %s)", name);
     else
         std::snprintf(g_text, sizeof(g_text), "unreadable build (no PE header)");
     g_identity.store(next, std::memory_order_release);
@@ -108,6 +137,11 @@ void ensureResolved() noexcept {
     gamesig::Stats stats{};
     double ms = 0.0;
     const bool ok = resolveRunning(g_results, &stats, &ms);
+    try {
+        g_index.build(sig::kTable, g_results);
+    } catch (...) {
+        // Out of memory: gameRva falls back to unitRva's scan (g_index.built() is false).
+    }
     try {
         const std::string summary = gamesig::resolveSummaryText(sig::kTable, g_results, stats, ok, ms, gameBuildText());
         if (Log::get().isOpen())
@@ -170,6 +204,8 @@ bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept {
 
 bool gameBuildKnown() noexcept { return identity() == kKnown; }
 
+bool gameBuildUnknown() noexcept { return identity() == kUnknown; }
+
 const char* gameBuildText() noexcept {
     identity();
     return g_text;
@@ -180,7 +216,7 @@ uintptr_t gameRva(uint32_t knownRva) noexcept {
     if (s == kKnown) return knownRva;
     if (s != kUnknown) return 0;
     ensureResolved();
-    return gamesig::unitRva(sig::kTable, g_results, knownRva);
+    return g_index.built() ? g_index.rva(knownRva) : gamesig::unitRva(sig::kTable, g_results, knownRva);
 }
 
 bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept {
@@ -208,19 +244,27 @@ bool gamePinProvenByMatch(uint32_t knownRva, size_t n) noexcept {
     return gamesig::coverRange(sig::kTable, g_results, knownRva, n);
 }
 
-void gameBuildStartup() noexcept {
+void gameBuildStartup(void (*afterResolve)()) noexcept {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) return;
     // An unknown build: resolve now, on a thread of its own, so no hook pays the resolve on the thread that first asks (the render thread,
-    // for some). A hook that asks before it is done waits on the same lock. The known build starts nothing here.
+    // for some), and nothing pays it in DllMain under the loader lock (the VR Supersampling hold defers its install to afterResolve on
+    // an unknown build). A hook that asks before it is done waits on the same lock. The known build starts nothing here.
     if (identity() == kUnknown) {
         notePendingSummary();
         try {
-            std::thread([] { ensureResolved(); }).detach();
+            std::thread([afterResolve] {
+                ensureResolved();
+                if (afterResolve) afterResolve();
+            }).detach();
         } catch (...) {
             Log::get().note("game build: %s: could not start the resolver's thread; the first hook that needs a game address resolves "
                             "them on its own thread.", gameBuildText());
+            if (afterResolve) afterResolve();
         }
+    } else if (identity() == kNotGame) {
+        Log::get().note("game build: %s, not EliteDangerous64.exe: no game address is resolved, and every fix that hooks the game "
+                        "stands down.", gameBuildText());
     }
     try {
         // TEMPORARY (issue 124, docs\design-game-update-signatures-2026-10-25.md): remove with the arc.

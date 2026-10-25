@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -398,10 +399,16 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
 thread_local uintptr_t t_rigCurrent=0;
 
 using OffScreenCallFn = void (__fastcall*)(uintptr_t);
+// The branch's two callees in the running build, absolute, resolved once by kinematicEvalRigVetoAttach (0 until then, and on an unknown
+// build where the signature resolver did not find them: no emulation). The veto runs per rig evaluation, so nothing is looked up here.
+std::atomic<uintptr_t> g_offScreenOwnerCall{0},g_offScreenPipeCall{0};
+// The off-screen branch's field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2), all in the rig
+// eval's matched fragment [0x431DD7D, 0x431DECA): mov rbx,[rdi+0x348] (the collection), lea rcx,[rbx+0x300] (the owner-count call's
+// argument), mov byte [rbx+0x629],r13b (the byte the emulation writes), mov rcx,[rbx+0x2E0] (the pipe). The callees carry their own
+// (0x43509B0: mov dword [rcx+0x2A4],0; 0x42B8380: add rcx,0x78). On an unknown build each must be found before the veto attaches.
+constexpr uint32_t kOffScreenWitnessRvas[4]={0x431DD7Du,0x431DE81u,0x431DE88u,0x431DE94u};
 bool rigOffScreenEmulate(uintptr_t rig) noexcept {
-    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    // The branch's two callees in the running build (0 on an unknown build where the signature resolver did not find them: no emulation).
-    const uintptr_t ownerCall=gameRva(0x43509B0u),pipeCall=gameRva(0x42B8380u);
+    const uintptr_t ownerCall=g_offScreenOwnerCall.load(std::memory_order_acquire),pipeCall=g_offScreenPipeCall.load(std::memory_order_acquire);
     uintptr_t coll=0;
     uintptr_t pipe=0;
     bool ok=false;
@@ -412,7 +419,7 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         ok=false;
     }
-    if(!ok||!base||!ownerCall||!pipeCall) {
+    if(!ok||!ownerCall||!pipeCall) {
         rigEmulateFaults.fetch_add(1,std::memory_order_relaxed);
         return false;
     }
@@ -424,8 +431,8 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     __try {
         for(int i=0;i<steps;++i) {
             if(kinds[i]==1)      *reinterpret_cast<volatile uint8_t*>(args[i])=0;          // mov byte [rbx+0x629], r13b (0)
-            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(base+ownerCall)(args[i]);  // lea rcx,[rbx+0x300]; call 0x43509B0
-            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(base+pipeCall)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8380
+            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(ownerCall)(args[i]);  // lea rcx,[rbx+0x300]; call 0x43509B0
+            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(pipeCall)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8380
         }
         done=true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -924,18 +931,20 @@ bool targetValid(uintptr_t base) noexcept {
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
     const uintptr_t rva=gameRva(static_cast<uint32_t>(entry.rva));
-    noteUnknownBuild(entry,rva,nullptr);
-    if(!rva)return false;
+    // An unknown build's line comes after the outcome, so "found" never precedes a refusal (nothing is logged on build 334925).
+    if(!rva){noteUnknownBuild(entry,0,nullptr);return false;}
     entry.relay=allocateRelay(base+rva);
-    if(!entry.relay)return false;
+    if(!entry.relay){noteUnknownBuild(entry,rva,"no relay page could be reserved near it");return false;}
     buildRelay(entry.relay,entry.gate?entry.gate:static_cast<const void*>(&evalGate),entry.callback);
     if(!entry.hook.install(reinterpret_cast<void*>(base+rva),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
         entry.relay=nullptr;
+        noteUnknownBuild(entry,rva,"CodeHook refused it (its own line names why)");
         return false;
     }
     entry.ready.store(true,std::memory_order_release);
+    noteUnknownBuild(entry,rva,nullptr);
     return true;
     // Process-lifetime storage: do not free a relay or trampoline which an
     // in-flight call may already be executing. Captures only gate it.
@@ -943,7 +952,9 @@ bool installOne(HookEntry& entry,uintptr_t base) noexcept {
 
 bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     if(!entry.ready.load(std::memory_order_acquire) || !entry.relay)return false;
-    const uintptr_t target=base+gameRva(static_cast<uint32_t>(entry.rva));   // ready: installOne found it
+    const uintptr_t at=gameRva(static_cast<uint32_t>(entry.rva));   // ready: installOne found it
+    if(!at)return false;
+    const uintptr_t target=base+at;
     const intptr_t displacement=reinterpret_cast<intptr_t>(entry.relay)-intptr_t(target+5);
     // The evaluator's prologue past the five patch bytes, from the
     // hash-verified exe: 41 54 41 56 41 57 48 83.
@@ -1003,7 +1014,9 @@ const char* partTestSignature(uintptr_t base,const HookEntry& entry) noexcept {
 
 bool partPatchIsOurs(uintptr_t base) noexcept {
     if(!g_partEntry.ready.load(std::memory_order_acquire) || !g_partEntry.relay)return false;
-    const uintptr_t target=base+gameRva(static_cast<uint32_t>(kPartTestRva));   // ready: partTestSignature found it
+    const uintptr_t at=gameRva(static_cast<uint32_t>(kPartTestRva));   // ready: partTestSignature found it
+    if(!at)return false;
+    const uintptr_t target=base+at;
     const intptr_t displacement=reinterpret_cast<intptr_t>(g_partEntry.relay)-intptr_t(target+5);
     uint8_t bytes[sizeof(kPartPrologue)]{};
     __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
@@ -1071,7 +1084,13 @@ const char* primarySignature(uintptr_t base) noexcept {
 void ensurePrimaryEmit(uintptr_t base) noexcept {
     const char* why=primarySignature(base);
     if(why){g_primaryStatus.store(why,std::memory_order_release);return;}
-    g_primaryReturn.store(base+gameRva(0x42B7468u),std::memory_order_release);   // found: primarySignature checked it
+    const uintptr_t primaryReturn=gameRva(0x42B7468u);   // found: primarySignature checked it
+    if(!primaryReturn){
+        g_primaryStatus.store("an unknown build, and the primary emit's return (0x42B7468 in build 334925) was not found by signature",
+                              std::memory_order_release);
+        return;
+    }
+    g_primaryReturn.store(base+primaryReturn,std::memory_order_release);
     if(!g_primaryEntry.ready.load(std::memory_order_acquire) && !installOne(g_primaryEntry,base)) {
         g_primaryStatus.store("CodeHook refused primary emit",std::memory_order_release);return;
     }
@@ -1188,7 +1207,13 @@ void ensurePartTest(uintptr_t base) noexcept {
     }
     const char* why=partTestSignature(base,g_partEntry);
     if(why) {g_partStatus.store(why,std::memory_order_release);return;}
-    g_partReturn.store(base+gameRva(static_cast<uint32_t>(kPartCallReturnRva)),std::memory_order_release);   // found: partTestSignature checked it
+    const uintptr_t partReturn=gameRva(static_cast<uint32_t>(kPartCallReturnRva));   // found: partTestSignature checked it
+    if(!partReturn){
+        g_partStatus.store("an unknown build, and the part test's call return (in build 334925) was not found by signature",
+                           std::memory_order_release);
+        return;
+    }
+    g_partReturn.store(base+partReturn,std::memory_order_release);
     if(!installOne(g_partEntry,base)) {
         g_partStatus.store("CodeHook refused the patch (its cull-gate-part-test line says why)",
                            std::memory_order_release);
@@ -1221,8 +1246,18 @@ const char* kinematicEvalRigVetoAttach() noexcept {
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         if(!g_rigEvalEntry.ready.load(std::memory_order_acquire))
             return "CodeHook refused kinematic-rig-eval; its own line names why";
-        if(!gameRva(0x43509B0u)||!gameRva(0x42B8380u))
+        const uintptr_t ownerCall=gameRva(0x43509B0u),pipeCall=gameRva(0x42B8380u);
+        if(!ownerCall||!pipeCall)
             return "an unknown build, and the off-screen branch's callees (0x43509B0, 0x42B8380 in build 334925) were not found by signature";
+        uint32_t missing=0;
+        if(!gameRvasFound(kOffScreenWitnessRvas,4,&missing)) {
+            static char why[200];   // under g_installMutex; the same text on every call for one build
+            std::snprintf(why,sizeof(why),"an unknown build, and the off-screen branch's field witness 0x%X (in build 334925) was not found by "
+                          "signature",missing);
+            return why;
+        }
+        g_offScreenOwnerCall.store(base+ownerCall,std::memory_order_release);
+        g_offScreenPipeCall.store(base+pipeCall,std::memory_order_release);
         rigVetoWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
         return "installed";

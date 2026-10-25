@@ -711,6 +711,91 @@ inline uint32_t unitRva(const Table& t, const Result* results, uint32_t knownRva
     return newStart + (knownRva - knownStart);
 }
 
+// unitRva's answers from sorted arrays, built once after a resolve: a binary search per lookup instead of a scan of every target (gameRva
+// on an unknown build runs on hook paths). It answers exactly as unitRva does for every knownRva; tools\game_build_test holds the two to the
+// same answer on the fixtures and the archived builds.
+class RvaIndex {
+public:
+    void build(const Table& t, const Result* results) {
+        targets_.clear();
+        units_.clear();
+        if (!results) return;
+        targets_.reserve(t.targetCount);
+        for (uint32_t i = 0; i < t.targetCount; ++i)
+            targets_.push_back({t.targets[i].rva, results[i].reason == kFound ? results[i].rva : 0u});
+        // unitRva takes the first target with the RVA: a stable sort keeps the table's order among equal RVAs, and lookup takes the first.
+        std::stable_sort(targets_.begin(), targets_.end(), [](const Tgt& a, const Tgt& b) { return a.rva < b.rva; });
+        for (uint32_t i = 0; i < t.targetCount; ++i) {
+            const Target& tg = t.targets[i];
+            if (tg.kind != kCode || tg.unit >= t.unitCount || results[i].reason != kFound || tg.off > tg.rva || tg.off > results[i].rva) continue;
+            units_.push_back({tg.rva - tg.off, t.units[tg.unit].len, results[i].rva - tg.off, false});
+        }
+        std::sort(units_.begin(), units_.end(), [](const Span& a, const Span& b) {
+            return a.start != b.start ? a.start < b.start : a.len != b.len ? a.len < b.len : a.now < b.now;
+        });
+        // One entry per known unit; targets of one unit that disagree on where it is now leave it with no answer (unitAt's rule).
+        size_t w = 0;
+        for (size_t r = 0; r < units_.size(); ++r) {
+            if (w && units_[w - 1].start == units_[r].start && units_[w - 1].len == units_[r].len) {
+                if (units_[w - 1].now != units_[r].now) units_[w - 1].split = true;
+                continue;
+            }
+            units_[w++] = units_[r];
+        }
+        units_.resize(w);
+        // Overlapping known units (never in a table made from .pdata and leaf gaps, which are disjoint) would make a binary search unsound:
+        // the index then answers by scanning, as unitRva does.
+        overlap_ = false;
+        for (size_t i = 1; i < units_.size(); ++i)
+            overlap_ = overlap_ || uint64_t(units_[i - 1].start) + units_[i - 1].len > units_[i].start;
+        built_ = true;
+    }
+    bool built() const noexcept { return built_; }
+    uint32_t rva(uint32_t knownRva) const noexcept {
+        auto t = std::lower_bound(targets_.begin(), targets_.end(), knownRva, [](const Tgt& a, uint32_t v) { return a.rva < v; });
+        if (t != targets_.end() && t->rva == knownRva) return t->now;
+        if (overlap_) {
+            const Span* have = nullptr;
+            for (const Span& s : units_) {
+                if (knownRva < s.start || uint64_t(knownRva) >= uint64_t(s.start) + s.len) continue;
+                if (s.split || (have && (have->start != s.start || have->now != s.now))) return 0;
+                have = &s;
+            }
+            return have ? have->now + (knownRva - have->start) : 0;
+        }
+        auto u = std::upper_bound(units_.begin(), units_.end(), knownRva, [](uint32_t v, const Span& s) { return v < s.start; });
+        if (u == units_.begin()) return 0;
+        --u;
+        if (uint64_t(knownRva) >= uint64_t(u->start) + u->len || u->split) return 0;
+        return u->now + (knownRva - u->start);
+    }
+
+private:
+    struct Tgt { uint32_t rva, now; };
+    struct Span { uint32_t start, len, now; bool split; };
+    std::vector<Tgt> targets_;
+    std::vector<Span> units_;
+    bool overlap_ = false, built_ = false;
+};
+
+// ---- The process ---------------------------------------------------------------------------------------------------------------------
+// True when path's last component (after the last '\\' or '/') is the game's executable name, EliteDangerous64.exe, in any case. Any other
+// main module is a process that is not the game (the installer, a tool that loaded the proxy), whose image the resolver never reads.
+inline bool isGameExecutable(const wchar_t* path) noexcept {
+    if (!path) return false;
+    const wchar_t* leaf = path;
+    for (const wchar_t* p = path; *p; ++p)
+        if (*p == L'\\' || *p == L'/') leaf = p + 1;
+    static const char kName[] = "elitedangerous64.exe";
+    size_t i = 0;
+    for (; kName[i]; ++i) {
+        wchar_t c = leaf[i];
+        if (c >= L'A' && c <= L'Z') c = wchar_t(c - L'A' + L'a');
+        if (c != wchar_t(kName[i])) return false;
+    }
+    return leaf[i] == 0;
+}
+
 // Whether [knownRva, knownRva + n) lies wholly in found code units that follow one another in the known build and moved together (each
 // is where the first one's move puts it), so the range is in this build at unitRva(knownRva) with the same length. A range in one unit is
 // the usual case; a function whose .pdata splits it into chained fragments spans several. visit, when given, is called per piece with

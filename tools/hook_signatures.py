@@ -1832,6 +1832,7 @@ def self_test():
                 'E g_entry{"store", 0x4314C60u};\n'
                 'constexpr uintptr_t kVtables[2] = {0x5189070u, 0x4314C64u};\n'
                 'void f(uintptr_t base, E& e, uintptr_t v) {\n'
+                '    if (!gameRvasFound(kVtables, 2, nullptr)) return;\n'
                 '    const uintptr_t at = gameRva(static_cast<uint32_t>(kStoreRva));\n'
                 '    use(base + at, base + gameRva(0x4314C65) + 5, base + gameRva(uint32_t(e.rva)));\n'
                 '    if (v == base + gameRva(static_cast<uint32_t>(kVtables[0]))) Log::get().note("%x", kStoreRva);\n'
@@ -1866,8 +1867,70 @@ def self_test():
               "audit: a name for the identity fails outside the exact-only files")
         check(any(": routed: " in p for p in audited("c2.cpp", "uintptr_t f(uintptr_t b){ return b + ecm::kFooRva; }")),
               "audit: an exact-only file's address used raw elsewhere fails")
-        check(audited("c3.cpp", "uintptr_t f(uintptr_t b){ return b + gameRva(ecm::kFooRva); }") == [],
+        check(audited("c3.cpp", "uintptr_t f(uintptr_t b){ if (!gameRva(ecm::kFooRva)) return 0; "
+                                "return b + gameRva(ecm::kFooRva); }") == [],
               "audit: an exact-only file's address resolved elsewhere passes")
+        # The review's blind spots (2026-10-25 round 2), each a shape that passed the gate before: every one fails now.
+        gmh = "reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))"
+        for name, text, rule, what in (
+                ("r_a.cpp", "#include <cstdint>\nstruct Site { uint32_t call; uint8_t b[5]; };\n"
+                            "constexpr Site kSites[] = {{0x4314C60u,{0}}};\n"
+                            "uintptr_t f(uintptr_t base){ return base + kSites[0].call; }\n",
+                 "routed", "(a) a struct member not named *rva holding an address"),
+                ("r_b.cpp", "constexpr UINT64 kHook = 0x4314C60;\nuintptr_t g(uintptr_t b){ return b + kHook; }\n",
+                 "routed", "(b) a constant of a type the old list did not name"),
+                ("r_b2.cpp", "#include <array>\nconstexpr std::array<uint32_t,2> kA = {0x4314C60u, 0x4314C61u};\n"
+                             "uintptr_t j(uintptr_t b){ return b + kA[0]; }\n",
+                 "routed", "(b) a std::array of addresses"),
+                ("r_c.cpp", "uintptr_t i(){ const uintptr_t b = %s; return b + 0x8A3C0; }\n" % gmh,
+                 "base", "(c) an RVA below 0x100000 added to the module base"),
+                ("r_c2.cpp", "constexpr uint32_t kLow = 0x8A3C0u;\nuintptr_t i2(uintptr_t b){ return b + kLow; }\n"
+                             "uintptr_t i3(){ return i2(%s); }\n" % gmh,
+                 "base", "(c) a low RVA added to a parameter its caller passes the module base"),
+                ("r_d.cpp", "uintptr_t h(uintptr_t b){ return b + 70339680; }\n",
+                 "known", "(d) a game address written in decimal"),
+                ("r_d2.cpp", "uintptr_t h2(){ const uintptr_t b = %s; return b + 70340000; }\n" % gmh,
+                 "base", "(d) a decimal offset added to the module base"),
+                ("r_e.cpp", "uintptr_t gameRva(uint32_t);\nvoid patch(uintptr_t);\n"
+                            "void k(uintptr_t base){ const uintptr_t at = gameRva(0x4314C60u); patch(base + at); }\n",
+                 "zero", "(e) a gameRva result used in arithmetic with no zero test"),
+                ("r_e2.cpp", "void k2(){ const uintptr_t b = %s; patch(b + gameRva(0x4314C60u)); }\n" % gmh,
+                 "zero", "(e) a gameRva call added to the module base with no guard"),
+                ("r_e3.cpp", "uintptr_t k3(bool known){ const uintptr_t at = known ? gameRva(0x4314C60u) : 0; "
+                             "return at + 5; }\n",
+                 "zero", "(e) a conditional gameRva result used with no zero test"),
+                ("r_f.cpp", "struct G { uintptr_t gameBase; } g;\n"
+                            "void n(){ g.gameBase = %s; }\nuintptr_t o(uint32_t off){ return g.gameBase + off; }\n" % gmh,
+                 "base", "a member holding the module base, plus a value the audit cannot place"),
+                ("r_g.cpp", "constexpr uint32_t kHookRva = 0x4314C60u;\nuintptr_t m(uintptr_t b){ return b + kHookRva; }\n",
+                 "routed", "the control: a named constant added raw")):
+            got = audited(name, text)
+            check(any((": %s: " % rule) in p for p in got), "audit: %s fails as %s: %s" % (what, rule, got))
+        good2 = ("struct E2 { uint32_t call; uint8_t b[5]; };\n"
+                 "constexpr E2 kE[] = {{0x4314C60u, {0}}};\n"
+                 "uintptr_t p(bool known) {\n"
+                 "    const uintptr_t base = %s;\n"
+                 "    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);\n"
+                 "    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);\n"
+                 "    const uintptr_t at = known ? gameRva(0x4314C60u) : 0;\n"
+                 "    if (at == 0) return 0;\n"
+                 "    const uintptr_t site = gameRva(kE[0].call);\n"
+                 "    if (!site) return 0;\n"
+                 "    if (base + gameRva(0x4314C61u) == base + at) return 1;\n"
+                 "    Log::get().note(\"%%x\", kE[0].call);\n"
+                 "    return use(base + at + 5, base + site, nt, base + nt->OptionalHeader.SizeOfImage);\n"
+                 "}\n"
+                 "uintptr_t q(uintptr_t addr) {\n"
+                 "    static const uint32_t kAll[1] = {0x4314C60u};\n"
+                 "    if (!gameRvasFound(kAll, 1, nullptr)) return 0;\n"
+                 "    const uintptr_t base = %s;\n"
+                 "    return addr < base + 0x1000 ? 0 : base + gameRva(0x4314C60u);\n"
+                 "}\n") % (gmh, gmh)
+        check(audited("good3.cpp", "#include <array>\nconstexpr std::array<uint32_t,2> kA2 = {0x4314C60u, 0x4314C61u};\n") == [],
+              "audit: a std::array of addresses may be declared")
+        check(audited("good2.cpp", good2) == [],
+              "audit: PE fields, a tested conditional result, a member resolved, a comparison and a bound pass: %s"
+              % audited("good2.cpp", good2))
         check("inside the table unit" in where_text(tab, 0x4314C65) and "NOT PLACED" in where_text(tab, 0x4315000)
               and "lies in 1 table unit" in where_text(tab, 0x4314C60, 16)
               and "NOT covered" in where_text(tab, 0x4314C60, 0x40), "where: placement and cover")
@@ -2013,10 +2076,72 @@ def _decl_name(toks, match, i):
         return None
     k, type_toks = j - 1, []
     while k >= 0 and toks[k][1] not in (";", "{", "}", "(", ",", ")", "="):
+        if toks[k][1] in (">", ">>"):   # a template argument list (std::array<uint32_t, 2>): its commas are the type's
+            depth = 0
+            while k >= 0 and toks[k][1] not in (";", "{", "}"):
+                depth += {">": 1, ">>": 2, "<": -1}.get(toks[k][1], 0)
+                type_toks.append(toks[k][1])
+                k -= 1
+                if depth <= 0:
+                    break
+            continue
         type_toks.append(toks[k][1])
         k -= 1
     is_decl = bool(type_toks) and type_toks[0] not in ("return", "else", "case", "::", "<<", ">>")
-    return toks[j][1], any(t in _INT_TYPES for t in type_toks), is_decl
+    return toks[j][1], any(t in _INT_TYPES for t in type_toks), is_decl, type_toks[::-1]
+
+
+def _struct_members(toks, match, parent):
+    """{struct or class name: [data member names in declaration order]} for
+    every struct and class body in toks (member functions, nested types,
+    static members and using/typedef lines left out)."""
+    out = {}
+    for a, (_, t, _) in enumerate(toks):
+        if t != "{" or a not in match:
+            continue
+        k, head = a - 1, []
+        while k >= 0 and toks[k][1] not in (";", "{", "}", ")"):
+            head.append(toks[k][1])
+            k -= 1
+        head.reverse()
+        if len(head) < 2 or head[0] not in ("struct", "class") or not re.fullmatch(r"[A-Za-z_]\w*", head[1]):
+            continue
+        members, cur = [], []
+
+        def flush(stmt):
+            words = [toks[j][1] for j in stmt]
+            while len(words) >= 2 and words[1] == ":" and words[0] in ("public", "private", "protected"):
+                words, stmt = words[2:], stmt[2:]
+            if not words or words[0] in ("static", "using", "typedef", "friend", "enum", "struct", "class",
+                                         "template", "union") or "(" in words or "operator" in words:
+                return
+            piece = []
+            for j in stmt + [None]:
+                if j is None or toks[j][1] == ",":
+                    name = None
+                    for q in piece:
+                        if toks[q][1] in ("[", "=", "{", ":"):
+                            break
+                        if toks[q][0] == "id":
+                            name = toks[q][1]
+                    if name:
+                        members.append(name)
+                    piece = []
+                else:
+                    piece.append(j)
+
+        for j in range(a + 1, match[a]):
+            if parent[j] != a:
+                continue
+            if toks[j][1] == ";":
+                flush(cur)
+                cur = []
+            elif toks[j][1] == "}" and (j + 1 >= len(toks) or toks[j + 1][1] not in (";", ",")):
+                cur = []   # the end of a member function's body or a nested type: not a data member
+            else:
+                cur.append(j)
+        out.setdefault(head[1], members)
+    return out
 
 
 def _at_namespace_scope(toks, match, parent, i):
@@ -2052,6 +2177,12 @@ def _span(toks, match, i):
             break
     while hi + 1 < len(toks) and toks[hi + 1][1] == "[" and (hi + 1) in match:
         hi = match[hi + 1]
+    return _widen(toks, match, lo, hi)
+
+
+def _widen(toks, match, lo, hi):
+    """[lo, hi] widened over the parentheses and integer or pointer casts
+    around it (static_cast<T>(...), uintptr_t(...), (uint32_t)..., (...))."""
     while True:
         p, q = lo - 1, hi + 1
         if p >= 0 and q < len(toks) and toks[p][1] == "(" and toks[q][1] == ")" and match.get(p) == q:
@@ -2096,8 +2227,8 @@ def _context(toks, match, parent, i):
         a = parent[a]
     if prev == "(" and lo >= 2 and toks[lo - 2][1] in RESOLVER_CALLS and nxt in (",", ")"):
         return "ok", "resolver", None
-    if nxt == "=" and prev not in _OPERATORS:
-        return "ok", "assigned", None
+    if nxt == "=" and (prev not in _OPERATORS or prev in (">", ">>")):
+        return "ok", "assigned", None   # (after '>': the name a template type declares, std::array<T, N> name = ...)
     if prev in ("(", ",") and nxt in (",", ")") and parent[lo] >= 1 and toks[parent[lo] - 1][1] in _LOG_CALLS:
         return "ok", "log", None
     if prev == "=" and nxt in (";", ","):
@@ -2125,6 +2256,424 @@ def _context(toks, match, parent, i):
         return "bad", "%s is an operand of '%s'" % (what, op), None
     return "bad", "%s is used as something other than a resolver argument, an initializer, a table " \
                   "entry or a log argument (after '%s')" % (what, prev), None
+
+
+# The module base: what GetModuleHandle of the executable returns (nullptr, NULL or 0, or the game's
+# own name), and every name, member, parameter and function the audit can follow it into.
+_GMH_CALLS = {"GetModuleHandleW", "GetModuleHandleA", "GetModuleHandle"}
+_GAME_MODULE_ARGS = {"nullptr", "NULL", "0"}
+_RELATIONAL = {"<", "<=", ">", ">="}
+_NOT_TYPES = {"return", "case", "else", "do", "throw", "new", "delete", "sizeof", "co_return", "goto"}
+_KEYWORDS = _NOT_TYPES | {"if", "while", "for", "switch", "try", "catch", "const", "constexpr", "static", "operator"}
+# Operands added to the module base that are not game addresses, each a part of the PE layout: (path glob,
+# the operand's text, why). Anything else added to a module base must be a gameRva result.
+AUDIT_BASE_OPERANDS = (
+    ("d3d11/scheduler_stack_probe.cpp", "kRangeLo",
+     "the start of .text: the low bound of the return addresses a stack scan accepts (a range, never read)"),
+    ("d3d11/scheduler_stack_probe.cpp", "rangeHi_",
+     "the end of .text (the known build's kRangeHi, an unknown build's from its PE header): the scan's high bound"),
+)
+
+
+def _brace_is_scope(toks, a):
+    """True when the brace at a opens a namespace, class, struct, union,
+    enum or extern body."""
+    k, head = a - 1, []
+    while k >= 0 and toks[k][1] not in (";", "{", "}"):
+        head.append(toks[k][1])
+        k -= 1
+    return bool({"namespace", "struct", "class", "union", "enum"} & set(head)) or \
+        bool(head and head[-1] == "extern")
+
+
+def _primary(toks, match, s):
+    """(end, core) of the primary expression that starts at token s: casts
+    and parentheses taken off, then a name with its qualification, member
+    chain, subscripts and calls, or a literal.  end is its last token, core
+    the name or literal the casts wrap (for gameRva(...), the gameRva token;
+    for x[0].call, the call token).  None when s starts none."""
+    n = len(toks)
+    if s >= n:
+        return None
+    kind, t, _ = toks[s]
+    if t in _CASTS and s + 1 < n and toks[s + 1][1] == "<":
+        depth, c = 0, s + 1
+        while c < n:
+            depth += {"<": 1, ">": -1}.get(toks[c][1], 0)
+            if depth == 0:
+                break
+            c += 1
+        if c + 1 < n and toks[c + 1][1] == "(" and (c + 1) in match:
+            close = match[c + 1]
+            inner = _primary(toks, match, c + 2)
+            return close, inner[1] if inner and inner[0] == close - 1 else None
+        return None
+    if t == "(" and s in match:
+        close = match[s]
+        inner_toks = [x[1] for x in toks[s + 1:close]]
+        if inner_toks and all(x in _INT_TYPES or x in ("const", "unsigned", "long", "::", "std", "*", "char",
+                                                         "void", "uint8_t", "int8_t", "uint16_t", "int16_t")
+                              for x in inner_toks):
+            return _primary(toks, match, close + 1)   # a C-style cast
+        inner = _primary(toks, match, s + 1)
+        return close, inner[1] if inner and inner[0] == close - 1 else None
+    if kind == "num":
+        return s, s
+    if kind != "id":
+        return None
+    if t in _INT_TYPES and s + 1 < n and toks[s + 1][1] == "(" and (s + 1) in match:
+        close = match[s + 1]
+        inner = _primary(toks, match, s + 2)
+        return close, inner[1] if inner and inner[0] == close - 1 else None
+    e = core = s
+    while True:
+        if e + 2 < n and toks[e + 1][1] == "::" and toks[e + 2][0] == "id":
+            e = core = e + 2
+        elif e + 1 < n and toks[e + 1][1] in ("(", "[") and (e + 1) in match:
+            e = match[e + 1]
+        elif e + 2 < n and toks[e + 1][1] in (".", "->") and toks[e + 2][0] == "id":
+            e = core = e + 2
+        else:
+            return e, core
+
+
+def _functions(toks, match, parent, is_scope):
+    """{name: [(body brace, [parameter names])]} for the function bodies in
+    toks (a brace that is not a scope's, after a parameter list)."""
+    out = defaultdict(list)
+    for a, (_, t, _) in enumerate(toks):
+        if t != "{" or is_scope(a) or a not in match:
+            continue
+        p = parent[a]
+        if p >= 0 and toks[p][1] != "{":
+            continue
+        if p >= 0 and not is_scope(p):
+            continue   # a block or a lambda inside a function: its function is the outer one
+        k = a - 1
+        while k >= 0 and toks[k][1] in ("const", "noexcept", "override", "final", "volatile"):
+            k -= 1
+        if k < 1 or toks[k][1] != ")" or k not in match or toks[match[k] - 1][0] != "id":
+            continue
+        open_ = match[k]
+        pieces, cur = [], []
+        for j in range(open_ + 1, k):
+            if parent[j] == open_ and toks[j][1] == ",":
+                pieces.append(cur)
+                cur = []
+            else:
+                cur.append(j)
+        pieces.append(cur)
+        names = []
+        for piece in pieces:
+            last = None   # the parameter's name: its last name before a default argument
+            for j in piece:
+                if parent[j] != open_:
+                    continue
+                if toks[j][1] == "=":
+                    break
+                if toks[j][0] == "id":
+                    last = toks[j][1]
+            names.append(last)
+        out[toks[open_ - 1][1]].append((a, names))
+    return out
+
+
+def _base_problems(rel, toks, match, parent):
+    """The module-base rule of audit(): (problems, counts) for one file."""
+    n = len(toks)
+    scope_cache = {}
+
+    def is_scope(a):
+        if a not in scope_cache:
+            scope_cache[a] = _brace_is_scope(toks, a)
+        return scope_cache[a]
+
+    def body_of(i):
+        a, body = parent[i], None
+        while a >= 0:
+            if toks[a][1] == "{" and not is_scope(a):
+                body = a
+            a = parent[a]
+        return body
+
+    def in_body(i, body):
+        return body is not None and body < i < match.get(body, -1)
+
+    funcs = _functions(toks, match, parent, is_scope)
+    enclosing = {}
+
+    def function_of(i):
+        b = body_of(i)
+        if b not in enclosing:
+            enclosing[b] = next((name for name, defs in funcs.items() for body, _ in defs if body == b), None)
+        return enclosing[b]
+
+    def declared_in(name, body):
+        for k in range(body + 1, match.get(body, body)):
+            if toks[k][1] == name and toks[k][0] == "id" and k >= 1:
+                pv = toks[k - 1]
+                if (pv[0] == "id" and pv[1] not in _NOT_TYPES) or \
+                        (pv[1] in ("*", "&", ">") and k >= 2 and (toks[k - 2][0] == "id" or toks[k - 2][1] == ">")):
+                    if k + 1 < n and toks[k + 1][1] in ("=", ";", ",", "{", "[", ")"):
+                        return True
+        return False
+
+    class Names:
+        def __init__(self):
+            self.local, self.glob, self.members, self.funcs = set(), set(), set(), set()
+
+        def at(self, j):
+            """True when token j starts a reference to a tracked name."""
+            kind, t, _ = toks[j]
+            if kind != "id" or (j + 1 < n and toks[j + 1][1] in (".", "->", "::")):
+                return False   # dos->e_lfanew reads through the name; it is not the name's value
+            if j >= 1 and toks[j - 1][1] in (".", "->"):
+                return t in self.members
+            if j + 1 < n and toks[j + 1][1] == "(" and t in self.funcs:
+                return True
+            return (t, body_of(j)) in self.local or t in self.glob
+
+        def span(self, j):
+            if j + 1 < n and toks[j + 1][1] == "(" and toks[j][1] in self.funcs and (j + 1) in match:
+                return _widen(toks, match, j, match[j + 1])
+            return _span(toks, match, j)
+
+        def mark(self, lo, hi):
+            """The value [lo, hi] is tracked: follow it into what it initializes."""
+            prev = toks[lo - 1][1] if lo else ";"
+            nxt = toks[hi + 1][1] if hi + 1 < n else ";"
+            grew = False
+            if prev in ("?", ":") or nxt in ("?", ":"):
+                # A branch of a conditional (x = known ? gameRva(k) : 0): the whole conditional is the value.
+                a = parent[lo]
+                s = lo - 1
+                while s >= 0 and parent[s] == a and toks[s][1] not in ("=", ";", "{", "}", ",", "(", "return"):
+                    s -= 1
+                e = hi + 1
+                while e < n and parent[e] == a and toks[e][1] not in (";", ",", ")", "}"):
+                    e += 1
+                if s + 1 < lo or e - 1 > hi:
+                    return self.mark(s + 1, e - 1)
+                return False
+            if prev in ("=", "{") and nxt in (";", ",", ")", "}"):
+                j = lo - 2
+                if prev == "{":
+                    b = lo - 1   # an element of a brace list: what it initializes
+                    if not (b in match and match[b] == hi + 1 or nxt in (",", "}")):
+                        return False
+                    j = b - 1
+                    if j >= 0 and toks[j][1] == "=":
+                        j -= 1
+                while j >= 0 and toks[j][1] == "]" and j in match:
+                    j = match[j] - 1
+                if j < 0 or toks[j][0] != "id" or toks[j][1] in _KEYWORDS:
+                    return False
+                name = toks[j][1]
+                if j >= 1 and toks[j - 1][1] in (".", "->"):
+                    grew = name not in self.members
+                    self.members.add(name)
+                    return grew
+                body = body_of(j)
+                if body is not None and declared_in(name, body):
+                    grew = (name, body) not in self.local
+                    self.local.add((name, body))
+                else:
+                    grew = name not in self.glob
+                    self.glob.add(name)
+                return grew
+            if prev == "return" and nxt == ";":
+                f = function_of(lo)
+                if f and f not in self.funcs:
+                    self.funcs.add(f)
+                    return True
+                return False
+            if prev in ("(", ",") and nxt in (",", ")"):
+                a = parent[lo]
+                if a < 1 or toks[a][1] != "(" or toks[a - 1][0] != "id" or toks[a - 1][1] not in funcs:
+                    return False
+                pos = sum(1 for k in range(a + 1, lo) if toks[k][1] == "," and parent[k] == a)
+                for body, names in funcs[toks[a - 1][1]]:
+                    if pos < len(names) and names[pos] and (names[pos], body) not in self.local:
+                        self.local.add((names[pos], body))
+                        grew = True
+            return grew
+
+        def follow(self, seeds):
+            for lo, hi in seeds:
+                self.mark(lo, hi)
+            for _ in range(10):
+                grew = False
+                for j in range(n):
+                    if self.at(j):
+                        lo, hi = self.span(j)
+                        grew = self.mark(lo, hi) or grew
+                if not grew:
+                    break
+
+    # The module base, from GetModuleHandle of the executable.
+    bases, seeds = Names(), []
+    for i, (kind, t, _) in enumerate(toks):
+        if kind == "id" and t in _GMH_CALLS and i + 1 < n and toks[i + 1][1] == "(" and (i + 1) in match:
+            args = [x[1] for x in toks[i + 2:match[i + 1]]]
+            if len(args) == 1 and (args[0] in _GAME_MODULE_ARGS or
+                                   (args[0].startswith(('L"', '"')) and "elitedangerous64" in args[0].lower())):
+                seeds.append(_widen(toks, match, i, match[i + 1]))
+    bases.follow(seeds)
+    # gameRva's results, and every name, member and array that holds one.
+    resolved, seeds = Names(), []
+    for i, (kind, t, _) in enumerate(toks):
+        if kind == "id" and t == "gameRva" and i + 1 < n and toks[i + 1][1] == "(" and (i + 1) in match:
+            seeds.append(_widen(toks, match, i, match[i + 1]))
+    resolved.follow(seeds)
+
+    def zero_tested(core, body):
+        """Whether the name at token core is tested against zero in body (or,
+        for a member or a name outside any function, anywhere in the file)."""
+        name = toks[core][1]
+        member = core >= 1 and toks[core - 1][1] in (".", "->")
+        lo_b, hi_b = (body, match.get(body, n)) if body is not None and not member and \
+            (name, body) in resolved.local else (-1, n)
+        for k in range(max(lo_b, 0), hi_b):
+            if toks[k][1] != name or toks[k][0] != "id":
+                continue
+            lo, hi = _span(toks, match, k)
+            pv = toks[lo - 1][1] if lo else ";"
+            nx = toks[hi + 1][1] if hi + 1 < n else ";"
+            if pv == "!" or nx in ("&&", "||", "?") or pv in ("&&", "||"):
+                return True
+            if nx in ("==", "!=") and hi + 2 < n and toks[hi + 2][1] in ("0", "0u", "nullptr"):
+                return True
+            if pv in ("==", "!=") and lo >= 2 and toks[lo - 2][1] in ("0", "0u", "nullptr"):
+                return True
+            if pv == "(" and nx == ")" and lo >= 2 and toks[lo - 2][1] in ("if", "while"):
+                return True
+        return False
+
+    def guarded(body, member_or_global):
+        """A gameRvasFound call in the function (or, for a member or global, in the file)."""
+        lo_b, hi_b = (body, match.get(body, n)) if body is not None and not member_or_global else (0, n)
+        return any(toks[k][0] == "id" and toks[k][1] == "gameRvasFound" for k in range(lo_b, hi_b))
+
+    def call_tested(core, body):
+        """For base + gameRva(K): gameRva(K) itself tested against zero in the function."""
+        if body is None:
+            return False
+        arg = " ".join(x[1] for x in toks[core + 2:match[core + 1]])
+        for k in range(body + 1, match.get(body, n)):
+            if k == core or toks[k][1] != "gameRva" or k + 1 >= n or toks[k + 1][1] != "(" or (k + 1) not in match:
+                continue
+            if " ".join(x[1] for x in toks[k + 2:match[k + 1]]) != arg:
+                continue
+            lo, hi = _widen(toks, match, k, match[k + 1])
+            pv = toks[lo - 1][1] if lo else ";"
+            nx = toks[hi + 1][1] if hi + 1 < n else ";"
+            if pv == "!" or nx in ("&&", "||") or pv in ("&&", "||"):
+                return True
+            if nx in ("==", "!=") and hi + 2 < n and toks[hi + 2][1] in ("0", "0u", "nullptr"):
+                return True
+        return False
+
+    problems, counts = [], defaultdict(int)
+    allowed = {text for pat, text, _ in AUDIT_BASE_OPERANDS if pat == "*" or rel == pat or Path(rel).match(pat)}
+    seen = set()
+    for j in range(n):
+        if not bases.at(j):
+            continue
+        lo, hi = bases.span(j)
+        if (lo, hi) in seen:
+            continue
+        seen.add((lo, hi))
+        if hi + 1 < n and toks[hi + 1][1] in ("+", "+="):
+            s = hi + 2
+            p = _primary(toks, match, s)
+        elif lo >= 2 and toks[lo - 1][1] == "+" and toks[lo - 2][0] in ("id", "num") and \
+                (lo < 3 or toks[lo - 3][1] not in (".", "->", "::", "]", ")")):
+            s = lo - 2
+            p = _primary(toks, match, s)
+        else:
+            continue
+        where = "src/%s:%d" % (rel, toks[j][2])
+        base_text = " ".join(x[1] for x in toks[lo:hi + 1])
+        if not p:
+            problems.append("%s: base: %s + ... adds something the audit cannot read to the module base" % (where, base_text))
+            continue
+        end, core = p
+        operand = " ".join(x[1] for x in toks[s:end + 1])
+        counts["module-base sums"] += 1
+        after = toks[max(end, hi) + 1][1] if max(end, hi) + 1 < n else ";"
+        before = toks[min(lo, s) - 1][1] if min(lo, s) else ";"
+        if before in _RELATIONAL or after in _RELATIONAL or before in ("==", "!=") or after in ("==", "!="):
+            counts["module-base comparisons"] += 1
+            continue   # a range test or a comparison: nothing at that address is read or written
+        ct = toks[core][1] if core is not None else None
+        if (ct == "gameRva" and core + 1 < n and toks[core + 1][1] == "(") or (core is not None and resolved.at(core)):
+            counts["module-base sums resolved"] += 1
+            continue   # a gameRva result (its zero test is the rule below)
+        if ct == "e_lfanew" or (core is not None and core >= 1 and toks[core - 1][1] in (".", "->") and ct[:1].isupper()):
+            counts["module-base PE fields"] += 1
+            continue   # a field of the PE headers (IMAGE_DOS_HEADER.e_lfanew, IMAGE_SECTION_HEADER.VirtualAddress, ...)
+        if operand in allowed:
+            counts["module-base listed"] += 1
+            continue
+        problems.append("%s: base: %s + %s adds something other than a gameRva result to the module base "
+                        "(resolve it with gameRva, or list a PE-layout offset in AUDIT_BASE_OPERANDS)" % (
+                            where, base_text, operand))
+
+    def compared(lo, hi):
+        """Whether the arithmetic around [lo, hi] is an operand of a comparison (nothing is addressed then)."""
+        a = parent[lo]
+        stops = ("=", ";", "{", "}", ",", "(", "[", "return", "&&", "||", "?", ":")
+        s = lo - 1
+        while s >= 0 and toks[s][1] not in stops:
+            s = match[s] - 1 if toks[s][1] in (")", "]") and s in match else s - 1
+        e = hi + 1
+        while e < n and toks[e][1] not in stops + (")", "]"):
+            e = match[e] + 1 if toks[e][1] in ("(", "[") and e in match else e + 1
+        for k in range(s + 1, e):
+            if parent[k] != a:
+                continue
+            t = toks[k][1]
+            if t in ("==", "!=", "<=", ">="):
+                return True
+            if t == "<" and not (k >= 1 and toks[k - 1][1] in _CASTS) or \
+                    t == ">" and not (k + 1 < n and toks[k + 1][1] == "("):
+                return True
+        return False
+
+    # The zero rule: a gameRva result (a call, or a name, member or array that holds one) used in address
+    # arithmetic needs a zero test of it, or a gameRvasFound guard, in the same function (for a member or a
+    # name outside any function, in the file): on an unknown build 0 means "not found".
+    seen = set()
+    for j in range(n):
+        is_call = toks[j][1] == "gameRva" and j + 1 < n and toks[j + 1][1] == "(" and (j + 1) in match
+        if not is_call and not resolved.at(j):
+            continue
+        lo, hi = _widen(toks, match, j, match[j + 1]) if is_call else resolved.span(j)
+        if (lo, hi) in seen:
+            continue
+        seen.add((lo, hi))
+        prev = toks[lo - 1][1] if lo else ";"
+        nxt = toks[hi + 1][1] if hi + 1 < n else ";"
+        if prev not in ("+", "-", "+=", "-=") and nxt not in ("+", "-"):
+            continue
+        if compared(lo, hi):
+            counts["gameRva results compared"] += 1
+            continue
+        body = body_of(j)
+        where = "src/%s:%d" % (rel, toks[j][2])
+        text = " ".join(x[1] for x in toks[lo:hi + 1])
+        counts["gameRva results in arithmetic"] += 1
+        if is_call:
+            if not guarded(body, False) and not call_tested(j, body):
+                problems.append("%s: zero: %s is used in address arithmetic without a zero test or a gameRvasFound "
+                                "guard in the same function (0 means not found on an unknown build)" % (where, text))
+            continue
+        member = j >= 1 and toks[j - 1][1] in (".", "->")
+        outer = member or (toks[j][1], body) not in resolved.local
+        if not guarded(body, outer) and not zero_tested(j, body):
+            problems.append("%s: zero: %s holds a gameRva result and is used in address arithmetic with no zero test or "
+                            "gameRvasFound guard in %s" % (where, text, "the file" if outer else "the same function"))
+    return problems, counts
 
 
 def where_text(table, rva, n=1):
@@ -2175,8 +2724,26 @@ def audit(src_dir, table):
                 sizeof or static_assert, as a log argument, or as an
                 assignment's target.  Never as an operand: base + 0x4314C60
                 and base + entry.rva fail, base + gameRva(0x4314C60) passes.
+                A name is one whatever its type is spelled (UINT64, auto),
+                an array or std::array whose list holds addresses is one,
+                and a struct member that a table entry's list fills with an
+                address is tracked by name like *rva (Callsite::call).
+                A game address spelled in decimal fails as known.
+      base      the module base (a name, member or parameter that holds
+                GetModuleHandle of the executable, or a function that
+                returns one, followed through assignments and calls in the
+                file) plus anything other than a gameRva result fails,
+                whatever the value: base + 0x8A3C0, base + 70340000 and
+                base + off fail.  A field of the PE headers (e_lfanew,
+                VirtualAddress, ...), a range test or comparison (nothing
+                is addressed) and AUDIT_BASE_OPERANDS pass.
+      zero      a gameRva result (the call, or a name, member or array that
+                holds one) used in address arithmetic needs a zero test of
+                it or a gameRvasFound guard in the same function (for a
+                member or a name outside any function, in the file).
     Only a name defined at namespace or class scope in a header is shared by
-    every file; any other is its own file's."""
+    every file; any other is its own file's.  Not seen: a parameter whose
+    caller is in another file (base + 0x8A3C0 on such a parameter passes)."""
     root = Path(src_dir)
     stamp, size = table["stamp"], table["size"]
     targets = table["targets"]
@@ -2202,14 +2769,24 @@ def audit(src_dir, table):
     exact = lambda rel: any(matches(rel, p) for p, _ in AUDIT_EXACT_ONLY)
     in_range = lambda v: 0x100000 <= v < size or 0x140100000 <= v < 0x140000000 + size
     brackets = {rel: _brackets(toks) for rel, toks in files.items()}
-    shared = {"addr": set(), "id": set()}
-    own = {"addr": defaultdict(set), "id": defaultdict(set)}
+    shared = {"addr": set(), "id": set(), "member": set()}
+    own = {"addr": defaultdict(set), "id": defaultdict(set), "member": defaultdict(set)}
+    # Every struct's data members in order, for a table entry whose address is not in a member named *rva.
+    layouts, layout_shared = {}, set()
+    for rel, toks in files.items():
+        for name, members in _struct_members(toks, *brackets[rel]).items():
+            layouts.setdefault((rel, name), members)
+            if rel.endswith((".h", ".hpp", ".inl", ".inc")):
+                layout_shared.add(name)
+                layouts.setdefault(("*", name), members)
 
     def tracked(rel, toks):
-        """[(index, kind)]: kind 'addr' (a literal), 'id' (an identity literal),
-        'carrier', 'idcarrier' or 'member'. Members count only in a file that
-        holds a game address or a resolver call."""
+        """[(index, kind)]: kind 'addr' (a literal), 'dec' (a game address
+        written in decimal), 'id' (an identity literal), 'carrier',
+        'idcarrier' or 'member'. Members count only in a file that holds a
+        game address or a resolver call."""
         addr, ident = shared["addr"] | own["addr"][rel], shared["id"] | own["id"][rel]
+        member_names = shared["member"] | own["member"][rel]
         out, game_file = [], False
         for i, (kind, text, _) in enumerate(toks):
             if kind == "num":
@@ -2221,9 +2798,13 @@ def audit(src_dir, table):
                 elif text[:2] in ("0x", "0X") and in_range(v) and not not_address(rel, v):
                     out.append((i, "addr"))
                     game_file = True
+                elif text[:2] not in ("0x", "0X") and in_range(v) and v < 0x140000000 and known(v) and \
+                        not not_address(rel, v):
+                    out.append((i, "dec"))
+                    game_file = True
             elif kind == "id":
                 if i and toks[i - 1][1] in (".", "->"):
-                    if re.fullmatch(r"\w*(?:rva|Rva|RVA)", text):
+                    if re.fullmatch(r"\w*(?:rva|Rva|RVA)", text) or text in member_names:
                         out.append((i, "member"))
                 elif text in ident:
                     out.append((i, "idcarrier"))
@@ -2247,11 +2828,38 @@ def audit(src_dir, table):
                 verdict, how, d = _context(toks, match, parent, i)
                 if verdict != "ok" or not d:
                     continue
-                name, integral, is_decl = d
-                if is_decl and not integral:
+                name, integral, is_decl, type_toks = d
+                header = rel.endswith((".h", ".hpp", ".inl", ".inc"))
+                if how == "table" and is_decl and kind not in ("id", "idcarrier"):
+                    # An element of a brace list. A flat list of a scalar array (int x[] = {...}, std::array<T, N>
+                    # x = {...}) makes its name a carrier, whatever the element type is spelled; an entry of a
+                    # struct (or of an array of structs) makes the struct's member at that position one.
+                    lo, _ = _span(toks, match, i)
+                    lst = parent[lo]
+                    outer = lst
+                    while parent[outer] >= 0 and toks[parent[outer]][1] == "{" and outer >= 1 and \
+                            toks[outer - 1][1] in ("{", ","):
+                        outer = parent[outer]
+                    k = outer - 1
+                    if k >= 0 and toks[k][1] == "=":
+                        k -= 1
+                    is_array = (k >= 0 and toks[k][1] == "]") or "array" in type_toks
+                    if not (is_array and lst == outer):
+                        if not integral or lst != outer:
+                            struct = next((t for t in reversed(type_toks) if re.fullmatch(r"[A-Za-z_]\w*", t)
+                                           and t not in ("const", "constexpr", "static", "inline", "volatile",
+                                                         "std", "array", "extern", "thread_local")), None)
+                            members = layouts.get((rel, struct)) or layouts.get(("*", struct))
+                            pos = sum(1 for q in range(lst + 1, lo) if toks[q][1] == "," and parent[q] == lst)
+                            if members and pos < len(members):
+                                bucket = shared["member"] if struct in layout_shared else own["member"][rel]
+                                if members[pos] not in bucket:
+                                    bucket.add(members[pos])
+                                    grew = True
+                            continue   # a table entry or an object: its member is tracked by name
+                elif how != "init" and is_decl and not integral:
                     continue   # a table entry or an object: its *rva member is tracked by name
                 group = "id" if kind in ("id", "idcarrier") else "addr"
-                header = rel.endswith((".h", ".hpp", ".inl", ".inc"))
                 bucket = shared[group] if header and is_decl and _at_namespace_scope(toks, match, parent, i) \
                     else own[group][rel]
                 if name not in bucket:
@@ -2269,9 +2877,17 @@ def audit(src_dir, table):
         if exact(rel):
             continue
         match, parent = brackets[rel]
+        base_problems, base_counts = _base_problems(rel, toks, match, parent)
+        problems.extend(base_problems)
+        for k, v in base_counts.items():
+            counts[k] += v
         for i, kind in tracked(rel, toks):
             text, line = toks[i][1], toks[i][2]
             where = "src/%s:%d" % (rel, line)
+            if kind == "dec":
+                problems.append("%s: known: %s is the game address 0x%X written in decimal; write the RVA in hex "
+                                "and pass it to gameRva" % (where, text, _num_value(text)))
+                continue
             if kind in ("id", "idcarrier"):
                 problems.append("%s: identity: %s is the known build's PE %s; a hook does not key on the "
                                 "build (gameRva and gamePinMatches do)" % (
@@ -2429,9 +3045,10 @@ def main(argv=None):
             problems, counts = audit(args.src, table)
             for p in problems:
                 print(p)
-            print("hook_signatures audit: %d files, %d game addresses, %d resolver calls; %s" % (
-                counts["files"], counts["game addresses"], counts["resolver calls"],
-                "%d problem(s)" % len(problems) if problems else "ok"))
+            print("hook_signatures audit: %d files, %d game addresses, %d resolver calls, %d sums on the module base, "
+                  "%d gameRva results in address arithmetic; %s" % (
+                      counts["files"], counts["game addresses"], counts["resolver calls"], counts["module-base sums"],
+                      counts["gameRva results in arithmetic"], "%d problem(s)" % len(problems) if problems else "ok"))
             return 1 if problems else 0
         if args.command == "survey":
             _, details, lines = survey(args.exe, args.other, args.cache, args.random,

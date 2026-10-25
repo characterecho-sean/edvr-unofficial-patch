@@ -828,6 +828,24 @@ void installRefreshHook(bool observe, const char* vrAsked = nullptr) {
         g_inject.relay = reinterpret_cast<uint8_t*>(1); // do not retry
         return;
     }
+    // The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the game's own instructions
+    // that carry, unmasked, the camera fields this hook writes (the bounds +0x28C/+0x290, the flag word +0x250) and reads (the kind +0x264,
+    // aspect +0x260, vertical fov +0x280, near +0x254, far +0x258). The refresh itself: test byte [r8+0x250],8 (0x592344), then lea
+    // rcx,[r8+0x20] (0x59234E) -- the finalizers take camera+0x20, so their displacements are 0x20 less. The projection builder (the
+    // finalizer of bit 4, 0x4F30F0's body): the kind at +0x244 (0x4F3135), near +0x234 (0x4F312D), far +0x238 (0x4F3208), fov +0x260
+    // (0x4F3422), aspect +0x240 (0x4F343A), the bounds +0x270 and +0x26C (0x4F3499, 0x4F34A1), and its clear of bit 4 at +0x230
+    // (0x4F3845). On an unknown build each must be found, or the refresh hook stands down.
+    static constexpr uint32_t kCameraWitnessRvas[10] = {0x592344, 0x59234E, 0x4F3135, 0x4F312D, 0x4F3208,
+                                                        0x4F3422, 0x4F343A, 0x4F3499, 0x4F34A1, 0x4F3845};
+    uint32_t missingWitness = 0;
+    if (!gameRvasFound(kCameraWitnessRvas, 10, &missingWitness)) {
+        g_inject.failReason = "an unknown build, and a camera field witness was not found by signature";
+        Log::get().note("flat camera inject: %s, and the camera field witness 0x%X (in build 334925) was not found by signature, so the "
+                        "camera fields the hook writes are not proven on this build; the refresh hook stands down", gameBuildText(),
+                        missingWitness);
+        g_inject.relay = reinterpret_cast<uint8_t*>(1); // do not retry
+        return;
+    }
     // The census's call sites (diagnostic only: one not found counts as other).
     for (size_t i = 0; i < 4; ++i) g_inject.knownCallers[i] = gameRva(kFlatCameraKnownCallers[i]);
     g_inject.relay = allocateRelay(base + refreshRva);

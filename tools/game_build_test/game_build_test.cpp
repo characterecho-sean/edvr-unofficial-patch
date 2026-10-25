@@ -264,6 +264,41 @@ uint32_t unitAgreement(const gs::Table& t, const gs::Result* res, const Expect& 
     return agree;
 }
 
+// gameRva's sorted index (gamesig::RvaIndex) against unitRva's scan: the same answer for every target, the bytes either side of it, each
+// code unit's edges, the given probes and the image's ends. Returns how many RVAs were asked; *bad gets how many disagreed.
+uint32_t indexAgreement(const gs::Table& t, const gs::Result* res, const Expect* e, uint32_t* bad) {
+    gs::RvaIndex idx;
+    idx.build(t, res);
+    uint32_t asked = 0, shown = 0;
+    *bad = 0;
+    auto one = [&](uint32_t k) {
+        ++asked;
+        const uint32_t a = idx.rva(k), b = gs::unitRva(t, res, k);
+        if (a != b) {
+            ++*bad;
+            if (shown++ < 8) std::printf("  index 0x%X: RvaIndex 0x%X, unitRva 0x%X\n", k, a, b);
+        }
+    };
+    for (uint32_t i = 0; i < t.targetCount; ++i) {
+        const gs::Target& tg = t.targets[i];
+        one(tg.rva);
+        one(tg.rva + 1);
+        if (tg.rva) one(tg.rva - 1);
+        if (tg.kind == gs::kCode && tg.unit < t.unitCount && tg.off <= tg.rva) {
+            const uint32_t start = tg.rva - tg.off, len = t.units[tg.unit].len;
+            one(start);
+            if (start) one(start - 1);
+            if (len) one(start + len - 1);
+            one(start + len);
+        }
+    }
+    if (e)
+        for (const auto& p : e->probes) one(p.first);
+    one(0);
+    one(0xFFFFFFFFu);
+    return asked;
+}
+
 // Every target's answer against Python's; returns how many agree, prints the first few that do not.
 uint32_t agreement(const gs::Table& t, const gs::Result* res, const Expect& e, const char* label) {
     uint32_t agree = 0, shown = 0;
@@ -347,7 +382,18 @@ void fixtureChecks(const std::string& dir) {
         const uint32_t unitAgree = unitAgreement(t, res[e].data(), ex, exes[e]);
         std::printf("game_build_test: fixture %-7s %zu unit probes, C++ and Python agree on %u\n", exes[e], ex.probes.size(), unitAgree);
         check(!ex.probes.empty() && unitAgree == ex.probes.size(), "(c) C++ and Python place RVAs inside a unit alike");
+        uint32_t indexBad = 0;
+        const uint32_t indexAsked = indexAgreement(t, res[e].data(), &ex, &indexBad);
+        check(indexAsked > 0 && indexBad == 0, "(c) gameRva's sorted index answers as unitRva's scan does");
     }
+    // The process check: only a main module named EliteDangerous64.exe is the game (game_build.cpp resolves nothing anywhere else).
+    check(gs::isGameExecutable(L"C:\\Games\\Elite\\EliteDangerous64.exe") && gs::isGameExecutable(L"eLiTeDaNgErOuS64.EXE") &&
+              gs::isGameExecutable(L"D:/steam/EliteDangerous64.exe"),
+          "the game's executable is EliteDangerous64.exe, in any case, under any folder");
+    check(!gs::isGameExecutable(L"C:\\Games\\Elite\\EDVR-Setup.exe") && !gs::isGameExecutable(L"EliteDangerous64.exe.bak") &&
+              !gs::isGameExecutable(L"EliteDangerous64.ex") && !gs::isGameExecutable(L"C:\\EliteDangerous64.exe\\tool.exe") &&
+              !gs::isGameExecutable(L"") && !gs::isGameExecutable(nullptr),
+          "any other main module is not the game");
     auto R = [&](int e, const char* name) -> const gs::Result& {
         static gs::Result none;
         const int64_t i = indexOf(t, nm.k.at(name));
@@ -431,6 +477,14 @@ void fixtureChecks(const std::string& dir) {
         check(gs::unitRva(syn, together, 0x1014) == 0x2014 && gs::unitRva(syn, apart, 0x1014) == 0x3004,
               "(a) the second fragment's RVAs follow it");
         check(gs::unitRva(syn, split, 0x1002) == 0, "(a) targets of one unit that disagree give no answer");
+        uint32_t bad[3] = {};
+        indexAgreement(syn, together, nullptr, &bad[0]);
+        indexAgreement(syn, apart, nullptr, &bad[1]);
+        indexAgreement(syn, split, nullptr, &bad[2]);
+        gs::RvaIndex idx;
+        idx.build(syn, split);
+        check(bad[0] == 0 && bad[1] == 0 && bad[2] == 0 && idx.rva(0x1002) == 0 && idx.rva(0x1014) == 0x2014,
+              "(a) the sorted index: fragments, two targets of one unit and a unit split by its targets, as unitRva");
     }
 
     // An unreadable page: a refusal, never a crash. The fixture's code is all in its first .text page.
@@ -653,6 +707,11 @@ void archivedChecks(const std::string& root) {
                     "agree on %u\n", name.c_str(), inUnit, inUnitWrong, e.probes.size(), unitAgree);
         check(inUnit > 0 && inUnitWrong == 0, "(b) an RVA inside a found unit lands where the ground truth puts it");
         check(unitAgree == e.probes.size(), "(b) C++ and Python place RVAs inside a unit alike");
+        uint32_t indexBad = 0;
+        const uint32_t indexAsked = indexAgreement(t, res.data(), &e, &indexBad);
+        std::printf("game_build_test: %s: gameRva's sorted index against unitRva: %u RVAs asked, %u differ\n", name.c_str(), indexAsked,
+                    indexBad);
+        check(indexAsked > 0 && indexBad == 0, "(b) gameRva's sorted index answers as unitRva's scan does");
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }

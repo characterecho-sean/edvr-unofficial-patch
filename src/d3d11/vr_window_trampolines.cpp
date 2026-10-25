@@ -45,7 +45,17 @@ struct PinnedEntry {
 };
 constexpr PinnedEntry kRequest = {kRequestRva, kRequestBytes, sizeof(kRequestBytes)};
 constexpr PinnedEntry kCopy = {kCopyRva, kCopyBytes, sizeof(kCopyBytes)};
-constexpr uint32_t kEntryRvas[2] = {kRequestRva, kCopyRva};  // both (gameRvasFound)
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the game's own instructions
+// that carry, unmasked, the displacements these hooks write or follow. The mode request (rsi = rdx, the request, from 0x7E9E81) reads
+// every field of the block the rewrite restores: +0x08, +0x10, +0x18, +0x20 (the kind), +0x24 and +0x25. The copy W reads its render
+// context at the first argument's +0x1180, the settings object at ctx+0x33C8 and the 3D mode at +0x30 of it (vr_ssaa_hold.cpp's copy
+// hold reads the same two). On an unknown build each must be found, or the gate's instruments and both hooks stand down.
+constexpr uint32_t kRequestFieldRvas[6] = {0x7E9EC4, 0x7E9EDF, 0x7E9F1F, 0x7E9E8D, 0x7E9F6B, 0x7E9F72};
+constexpr uint32_t kCopyFieldRvas[3] = {0x281E678, 0x281E67F, 0x281E68D};
+constexpr uint32_t kEntryRvas[11] = {kRequestRva, kCopyRva,
+                                     kRequestFieldRvas[0], kRequestFieldRvas[1], kRequestFieldRvas[2], kRequestFieldRvas[3],
+                                     kRequestFieldRvas[4], kRequestFieldRvas[5],
+                                     kCopyFieldRvas[0], kCopyFieldRvas[1], kCopyFieldRvas[2]};  // all (gameRvasFound)
 
 constexpr uint32_t kRewriteCap = 64;
 
@@ -289,6 +299,9 @@ uint64_t requestReplacement(void* a, void* b, void* c, void* d, void* e, void* f
             bool ok = true;
             for (int i = 0; i < 4 && ok; ++i) ok = readU64(req + kReqBlockOff + 8u * i, &before[i]);
             for (int i = 0; i < 4; ++i) after[i] = g_block[i].load(std::memory_order_acquire);
+            // An unknown build: +0x26 and +0x27 are bytes the request's reader is not witnessed reading (kRequestFieldRvas stop at +0x25),
+            // so they keep the request's own value. Build 334925 writes the block whole, as it always has.
+            if (ok && !gameBuildKnown()) after[3] = (after[3] & 0x0000FFFFFFFFFFFFull) | (before[3] & 0xFFFF000000000000ull);
             for (int i = 0; ok && i < 4; ++i) ok = writeU64(req + kReqBlockOff + 8u * i, after[i]);
             action = ok ? ModeAction::Rewritten : ModeAction::LeftUnreadable;
             if (ok && g_rewrites.fetch_add(1, std::memory_order_relaxed) < kRewriteCap)
@@ -435,7 +448,9 @@ bool installOne(const uint8_t* base, const PinnedEntry& entry, void* replacement
 
 // For vr_ssaa_gate.cpp's build check: whether gameRva finds both entries (always on build 334925); the first it does not in
 // *firstMissing.
-bool vrWindowTrampolinesFound(uint32_t* firstMissing) { return gameRvasFound(kEntryRvas, 2, firstMissing); }
+bool vrWindowTrampolinesFound(uint32_t* firstMissing) {
+    return gameRvasFound(kEntryRvas, sizeof(kEntryRvas) / sizeof(kEntryRvas[0]), firstMissing);
+}
 
 void vrWindowTrampolinesInstall() {
     static bool done = false;

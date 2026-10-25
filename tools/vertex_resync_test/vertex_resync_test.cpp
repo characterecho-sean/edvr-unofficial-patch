@@ -45,6 +45,15 @@ bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *s
 bool gameBuildKnown() noexcept { return g_rigResolves; }
 const char* gameBuildText() noexcept { return g_rigResolves ? "build 334925" : "unknown build (rig)"; }
 uintptr_t gameRva(uint32_t knownRva) noexcept { return g_rigResolves ? knownRva : 0; }
+bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept {
+    if (firstMissing) *firstMissing = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (gameRva(knownRvas[i]) == 0) {
+            if (firstMissing) *firstMissing = knownRvas[i];
+            return false;
+        }
+    return true;
+}
 bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept { return std::memcmp(got, pin, n) == 0; }
 }  // namespace edvr
 

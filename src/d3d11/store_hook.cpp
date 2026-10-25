@@ -174,6 +174,21 @@ void installLocked() noexcept {
         }
         return;
     }
+    // The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the store's own instructions
+    // that carry, unmasked, the record fields optimized station writes back (optimized_station.cpp kRecMask, kRecAdmitted). The record is
+    // the store's fifth argument (mov rdi,[rbp+0x1F0], 0x4314C89); it reads the record's node at +0x18 (0x4314CBD) and ends by storing the
+    // admitted byte at +0x234 (0x4315227) and the view mask at +0x208 (0x431523D). On an unknown build each must be found, or the store hook
+    // stands down with everything that rides it.
+    static constexpr uint32_t kRecordWitnessRvas[4] = {0x4314C89, 0x4314CBD, 0x4315227, 0x431523D};
+    uint32_t missingWitness = 0;
+    if (!gameRvasFound(kRecordWitnessRvas, 4, &missingWitness)) {
+        g_store.refused.store(true, std::memory_order_release);
+        g_store.status.store("an unknown build, and a record field witness was not found by signature", std::memory_order_release);
+        Log::get().note("store hook: refused: %s, and the record field witness 0x%X (in build 334925) was not found by signature, so the "
+                        "record fields optimized station writes are not proven on this build; optimized station and flat world witness "
+                        "stand down.", gameBuildText(), missingWitness);
+        return;
+    }
     g_store.relay = allocateRelay(base + storeRva);
     if (!g_store.relay) {
         g_store.status.store("no relay within range", std::memory_order_release);

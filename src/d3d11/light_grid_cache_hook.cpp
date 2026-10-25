@@ -357,6 +357,20 @@ __declspec(noinline) uintptr_t __fastcall builderDetour(void* self, void* a2, vo
     return result;
 }
 
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the builder's own instructions
+// that carry, unmasked, the context layout the cache swaps whole and the view-block fields it reads. The key at +0x00..+0x77: the compares
+// of the rows +0x00, +0x10, +0x20, +0x30 (0x58B4D4, 0x58B4F2, 0x58B503, 0x58B515), of near and far +0x40, +0x44 (0x58B527, 0x58B535) and
+// of the six values +0x48..+0x70 (0x58B543, 0x58B549, 0x58B54F, 0x58B555, 0x58B55B, 0x58B561), and the stores of +0x48, +0x70 and +0x40
+// (0x58BE6B, 0x58BEC7, 0x58BECB). The vectors at +0x80, +0x110 and +0xA0 handed to the resize routines (0x58B583, 0x58B596, 0x58B5AA), and
+// those routines' header reads of the size at +0x10 and data at +0x18 (0x5955B0, 0x5955CC; 0x5956EA, 0x59571B). The four GPU pointers'
+// stores at +0x130, +0x138, +0x140, +0x148 (0x58BB78, 0x58BBEF, 0x58BB3B, 0x58BBB3). The first-call byte at +0xC0 (0x58B298). The view
+// block's flags +0x230, rows +0x1B0..+0x1EF, near +0x234 and far +0x238 (0x58B3EA, 0x58B3FC, 0x58B417, 0x58B420, 0x58B42A) and the loops'
+// near (0x58B6E4). On an unknown build each must be found, or the cache stands down.
+constexpr uint32_t kFieldWitnessRvas[] = {0x58B4D4, 0x58B4F2, 0x58B503, 0x58B515, 0x58B527, 0x58B535, 0x58B543, 0x58B549, 0x58B54F,
+                                            0x58B555, 0x58B55B, 0x58B561, 0x58BE6B, 0x58BEC7, 0x58BECB, 0x58B583, 0x58B596,
+                                            0x58B5AA, 0x5955B0, 0x5955CC, 0x5956EA, 0x59571B, 0x58BB78, 0x58BBEF, 0x58BB3B, 0x58BBB3,
+                                            0x58B298, 0x58B3EA, 0x58B3FC, 0x58B417, 0x58B420, 0x58B42A, 0x58B6E4};
+
 void installOnce() noexcept {
     if (g_detour.attempted.exchange(true, std::memory_order_acq_rel)) return;
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -378,6 +392,15 @@ void installOnce() noexcept {
         found.forceRebuild = gameRva(static_cast<uint32_t>(lg::kForceRebuildRva));
         found.overrideNear = gameRva(static_cast<uint32_t>(lg::kOverrideNearRva));
         found.overrideFar = gameRva(static_cast<uint32_t>(lg::kOverrideFarRva));
+    }
+    uint32_t missingWitness = 0;
+    if (lg::firstMissing(found) == nullptr &&
+        !gameRvasFound(kFieldWitnessRvas, sizeof(kFieldWitnessRvas) / sizeof(kFieldWitnessRvas[0]), &missingWitness)) {
+        g_detour.status.store("an unknown build, and a field witness of the context the cache swaps was not found by signature",
+                              std::memory_order_release);
+        Log::get().note("light grid cache: refused: %s, and the field witness 0x%X (in build 334925) was not found by signature, so the context "
+                        "layout the cache swaps is not proven on this build; nothing patched.", gameBuildText(), missingWitness);
+        return;
     }
     uint8_t got[lg::kPrologueBytes] = {};
     bool readOk = false;

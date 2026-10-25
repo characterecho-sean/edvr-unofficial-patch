@@ -180,12 +180,26 @@ __declspec(noinline) uintptr_t __fastcall flushIaObserved(uintptr_t pso, uintptr
 
 }  // namespace
 
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the game's own instructions that
+// carry, unmasked, the f3d offsets the repair reads and writes. FlushIA: mov rax,[rsi+0x188] (pso -> layout, 0x522BAB), mov ebp,[rax+0x60]
+// (the layout's slot count, 0x522C1E), and its own stores to the applied buffers at +0x168 (0x522C80) and offsets at +0x228 (0x522C88).
+// SetVertexBuffer: mov rax,[rax+0x140] (the wrapper's native buffer, 0x4E9EC0) and its store of the desired offset at list+0xE0, which
+// is desired+0x80 (0x4E9EA2). On an unknown build each must be found, or the repair stands down.
+constexpr uint32_t kFieldWitnessRvas[6] = {0x522BAB, 0x522C1E, 0x522C80, 0x522C88, 0x4E9EC0, 0x4E9EA2};
+
 void vertexResyncInstall() {
     bool expected = false;
     if (!g_attempted.compare_exchange_strong(expected, true)) return;   // once, ever: a refusal is final
     // Build 334925: kFlushIaRva itself. An unknown build (issue 124): where the signature resolver found FlushIA (src\common\game_build.h; 0 = not found).
     const bool identityRead = gameBuildIdentity(nullptr, nullptr);
     const uintptr_t flushIaRva = identityRead ? gameRva(static_cast<uint32_t>(vresync::kFlushIaRva)) : 0;
+    uint32_t missingWitness = 0;
+    if (flushIaRva != 0 && !gameRvasFound(kFieldWitnessRvas, sizeof(kFieldWitnessRvas) / sizeof(kFieldWitnessRvas[0]), &missingWitness)) {
+        sayf("vertex resync: NOT installed -- %s, and the field witness 0x%X (in build 334925) was not found by signature, so the f3d offsets "
+             "the repair writes are not proven on this build. The game's flush runs as it always did.",
+             gameBuildText(), missingWitness);
+        return;
+    }
     uintptr_t target = 0;
 #ifdef EDVR_VERTEX_RESYNC_TEST
     target = g_testTarget;

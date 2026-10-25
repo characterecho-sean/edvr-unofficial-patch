@@ -484,10 +484,11 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "found, and nothing it did not find is touched.",
             build.empty() ? "(unreadable)" : build.c_str(), verified.c_str());
     }
-    // An unknown build: the signature resolver starts here on a thread of its own (issue 124), so no hook pays it on the render thread.
+    // An unknown build: the signature resolver starts here on a thread of its own (issue 124), so no hook pays it on the render thread
+    // or in DllMain, and the VR Supersampling hold, which waited for it, installs on that thread when it is done.
     // The TEMPORARY instrument (advanced.game_update_check): off, nothing; on, on the known build, the resolver runs once on a background
     // thread and logs whether it finds every address where the hooks' constants put it.
-    edvr::gameBuildStartup();
+    edvr::gameBuildStartup(&edvr::vrSsaaHoldInstallAfterResolve);
 
     if (g_missingExports) {
         edvr::Log::get().note(
@@ -853,8 +854,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             edvr::oculusRouteInstallEarly(true);
             loaderPhase();
             edvr::inputGateInstallEarly();
-            // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first, so a
-            // stranger's process (the installer) refuses them silently. No config, file or log here.
+            // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first. In a
+            // process whose main module is not EliteDangerous64.exe (the installer, say) the resolver resolves nothing, so they
+            // refuse silently; on an unknown build of the game they wait for the signature resolve, which never runs here
+            // under the loader lock (gameBuildStartup's thread installs them). No config, file or log here.
             edvr::vrSsaaHoldEarlyInstall();
             break;
 
