@@ -10615,13 +10615,24 @@ def _hj_f111_pointer(rows, ctx):
     """F111: the panel pointer instrument. Its hooks' line, the 1 s lines (each with a verdict: the first stage of the game's pick that turns a mouse move the
     other way: the mouse NDC against the OS cursor K4, the unprojection K1, the direction behind the camera K5, the hit or the sprite K2, the cursor window K3,
     or none in the pick) and the 10 s line (the flight so far, which judges moves too few for any one second). NEVER APPLIED when no hook was armed, or when
-    the hooks were armed and never saw the pointer controller."""
+    the hooks were armed and never saw the pointer controller. F125: the 1 s lines are the detail log's; without them the flight-so-far lines are judged,
+    and with neither (under 10 s with the pointer) a log whose detail log was off cannot say the controller was never seen."""
     armed, sec, tot = rows.get("armed", []), rows.get("sec", []), rows.get("total", [])
     if not armed and not sec and not tot:
         return None
     n = max(int(r["n"]) for r in armed) if armed else None
     if n == 0 and not sec:
         return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
+    if not sec and tot:
+        stage = tot[-1]["verdict"].strip()
+        text = "the flight so far (%s s with the pointer): %s (no 1 s line: the detail log's)" % (tot[-1]["secs"], stage)
+        if stage == "too few moves":
+            return ("IDLE", text + "; the pointer never moved enough to judge")
+        if n is not None and n < 4:
+            return ("PARTIAL", text + "; only %d of 4 hooks armed" % n)
+        return ("OK", text)
+    if not sec and _hdetail(ctx) in ("off", "mixed"):
+        return ("IDLE", "the hooks were armed (%s of 4); no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with the pointer, or none)" % n)
     if not sec:
         return ("NEVER APPLIED", "the hooks were armed (%d of 4) and never saw the pointer controller: no panel with a mouse pointer was used while native stereo "
                                  "was on foot" % n)
@@ -10987,8 +10998,9 @@ def _hj_f120_follow(rows, ctx):
     if not sec and not pins:
         return None
     unpinned = [r for r in pins if r["state"].startswith("NOT pinned")]
-    if not sec:
-        return ("IDLE", "no 2D placement on a panel" + ("; the owner function's bytes are NOT pinned" if unpinned else ""))
+    if not sec:   # F125: the 1 s lines are the detail log's; without it no line says whether a panel was placed
+        return ("IDLE", ("no 1 s line (the detail log was off)" if _hdetail(ctx) in ("off", "mixed") else "no 2D placement on a panel") +
+                ("; the owner function's bytes are NOT pinned" if unpinned else ""))
     order, groups = [], {}
     for r in sec:
         k = r["setting"].strip()
@@ -11230,8 +11242,29 @@ def _hj_f114b_pointer(rows, ctx):
     if not armed and not sec and not tot and not owners:
         return None
     if not sec:
+        if tot:   # F125: the 1 s lines are the detail log's; the flight-so-far lines say the hooks saw a panel
+            parts, turns = [], []
+            for prof in ("vr", "flat"):
+                pt = [r for r in tot if r["profile"] == prof]
+                if pt:
+                    turns.append(pt[-1]["turn"].strip())
+                    parts.append("%s: %s s with a panel (the flight so far), mode %s; turn: %s; cursor draw: %s" % (
+                        prof, pt[-1]["secs"], pt[-1]["mode"].strip(), turns[-1], pt[-1]["draw"].strip()))
+            text = "; ".join(parts) + " (no 1 s line: the detail log's)"
+            stray = [r for r in owners if not r["what"].startswith("the hooked")]
+            if stray:
+                return ("PARTIAL", text + "; a panel's owner names exe+0x%s at vtable +0x10, not the hooked function: its transform was not read" % stray[-1]["rva"])
+            if armed and all(r["state"] == "NOT armed" for r in armed):
+                return ("PARTIAL", text + "; the owner transform hook was not armed: the turn cannot be placed")
+            if all(t in ("too few moves", "no panel") for t in turns):
+                return ("IDLE", text + "; the pointer never moved enough on a panel to judge")
+            return ("OK" if any(t not in ("too few moves", "no panel", "unclear") for t in turns) else "PARTIAL", text)
+        quiet = _hdetail(ctx) in ("off", "mixed")
         if armed and all(r["state"] == "NOT armed" for r in armed):
-            return ("NEVER APPLIED", "the owner transform hook was not armed%s, and no panel was seen" % armed[-1]["rest"])
+            return ("NEVER APPLIED", "the owner transform hook was not armed%s, and %s" % (
+                armed[-1]["rest"], "no 1 s line (the detail log was off)" if quiet else "no panel was seen"))
+        if quiet:
+            return ("IDLE", "no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with a panel, or none)")
         return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
     undecided = ("too few moves", "no panel", "unclear")
     parts, decided_any, all_few = [], False, True
@@ -11436,17 +11469,26 @@ def _hj_f88(rows, ctx):
 
 
 def _hj_f89_ads(rows, ctx):
-    st, fr, skip = rows.get("start", []), rows.get("frame", []), rows.get("skip", [])
-    if not st and not fr and not skip:
+    """F89: the ADS transition trace. NEVER APPLIED when ADS was engaged on traced frames and the lock weight never rose on them. From F125 each traced event
+    ends in its own line (its frames, those engaged, the lock weight's maximum over all and over the engaged ones), which the judge reads when the log has
+    any; the frame lines are the detail log's (a log written before F125 has only them, and is judged from them as before)."""
+    st, fr, skip, done = rows.get("start", []), rows.get("frame", []), rows.get("skip", []), rows.get("done", [])
+    if not st and not fr and not skip and not done:
         return None
     press, rel = sum(1 for r in st if r["dir"] == "press"), sum(1 for r in st if r["dir"] == "release")
-    engaged = [r for r in fr if r["state"] == "engaged"]
-    lock = max([float(r["lw"]) for r in fr] or [0.0])
-    text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, "; %d events not traced" % len(skip) if skip else "")
+    skipped = "; %d events not traced" % len(skip) if skip else ""
+    if done:
+        engaged_lw = [float(r["elw"]) for r in done if int(r["engaged"])]
+        text = "traced %d presses and %d releases, %d frames (%d with ADS engaged), lock weight max %.2f%s" % (
+            press, rel, sum(int(r["frames"]) for r in done), sum(int(r["engaged"]) for r in done), max(float(r["lw"]) for r in done), skipped)
+    else:
+        engaged_lw = [float(r["lw"]) for r in fr if r["state"] == "engaged"]
+        lock = max([float(r["lw"]) for r in fr] or [0.0])
+        text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, skipped)
     view = [r for r in fr if r.get("view")]
     if view:   # F91 B: the vibration instrument's fields; a frame line without them (from F91 on) means the fields never ran
         text += "; view (F91) fields on %d of %d frame lines (r shown on %d)" % (len(view), len(fr), sum(1 for r in view if r["rv"] != "-"))
-    if engaged and max(float(r["lw"]) for r in engaged) == 0.0:
+    if engaged_lw and max(engaged_lw) == 0.0:
         return ("NEVER APPLIED", text + " (ADS engaged, the lock weight never rose)")
     if not press or not rel:
         return ("PARTIAL", text + " (one direction only)")
@@ -12557,6 +12599,9 @@ HEALTH_RULES = (
     ), _hj_f88),
     _hrule(H_F89_ADS, ("F89",), ("ads transition (F89)",), (
         ("start", r"ads transition \(F89\) (?P<dir>press|release): tracing the next"),
+        # F125: each traced event's own line at its end (the frame lines below are the detail log's)
+        ("done", r"ads transition \(F89\) (?P<dir>press|release) traced: frames (?P<frames>\d+), engaged (?P<engaged>\d+), lock weight max (?P<lw>[\d.]+), "
+                 r"on the engaged frames (?P<elw>[\d.]+)"),
         ("frame", r"ads transition \(F89\) (?P<dir>press|release) frame (?P<frame>\d+): t %s s, journal ADS \d, ads state (?P<state>\w+), lock weight (?P<lw>[\d.]+)"
                   r"(?:.*(?P<view>; view \(F91\): r (?P<rv>-|yaw)))?" % _HN),
         ("skip", r"ads transition \(F89\): not traced"),
@@ -12568,7 +12613,7 @@ HEALTH_RULES = (
                 r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) \(\d+ of \d+ frames\)"
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
-    ), _hj_f91_fit),
+    ), _hj_f91_fit, needs_detail=True),   # F125: a press is fitted only when the detail log was on at its edge
     _hrule("eye rows (F113)", ("F113",), ("native on foot eye rows (F113)",), (
         ("sec", r"native on foot eye rows \(F113\) 1 s: eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
                 r"none (?P<n0>\d+); eye 1 (?P<f1>\d+) frames: the scene meshes (?P<m1>\d+), the depth prepass (?P<p1>\d+), the terrain (?P<t1>\d+), none (?P<n1>\d+); "
@@ -12592,7 +12637,7 @@ HEALTH_RULES = (
                 r"(?P<behind>\d+),"),
         ("total", r"panel pointer \(F111\) so far: verdict: (?P<verdict>[^;]+); (?P<secs>\d+) s with the pointer, cycles \d+, moves \d+"),
         ("_", r"panel pointer \(F111\) move: ndc "),
-    ), _hj_f111_pointer),
+    ), _hj_f111_pointer, needs_detail=True),   # F125: the 1 s and move lines are the detail log's (the flight-so-far line is said either way)
     _hrule("panel pointer (F114b)", ("F114b",), ("panel pointer (F114b)",), (
         ("armed", r"panel pointer \(F114b\): owner transform hook (?P<state>armed|NOT armed) at .*?, profile (?P<profile>vr|flat)(?P<rest>.*)$"),
         ("sec", r"panel pointer \(F114b\) 1 s: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
@@ -12602,7 +12647,7 @@ HEALTH_RULES = (
         ("total", r"panel pointer \(F114b\) so far: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
                   r"(?P<secs>\d+) s with a panel"),
         ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
-    ), _hj_f114b_pointer),
+    ), _hj_f114b_pointer, needs_detail=True),   # F125: as F111's
     _hrule("panel cursor fix (F117)", ("F117",), ("panel cursor fix (F117)",), (
         ("sec", r"panel cursor fix \(F117\) 1 s: setting (?P<setting>[^;]+); the cursor on turned panels (?P<cursor>[^;]+); 2D placements (?P<pl>\d+): turned "
                 r"(?P<turned>\d+), upright (?P<upright>\d+); moved (?P<moved>\d+); left: upright \d+, the game's setting (?P<gameset>\d+); refused: no triangle at "
@@ -12610,7 +12655,7 @@ HEALTH_RULES = (
                 r"panels right (?P<tr>%s) down (?P<td>%s)" % (_HN, _HN)),
         ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
         ("_", r"panel cursor fix \(F117\) so far: "),
-    ), _hj_f117_cursor),
+    ), _hj_f117_cursor, needs_detail=True),   # F125: as F111's
     _hrule("panel cursor follow (F120)", ("F120",), ("panel cursor follow (F120)",), (
         ("sec", r"panel cursor follow \(F120\) 1 s: setting (?P<setting>[^;]+); 2D placements (?P<pl>\d+), screen-space (?P<screen>\d+), corrected (?P<corrected>\d+), "
                 r"references taken (?P<refs>\d+); refused: flat (?P<rflat>\d+), no eye view (?P<rnoeye>\d+), no HRC matrix (?P<rnohrc>\d+), degenerate row (?P<rdeg>\d+), "
@@ -12621,7 +12666,7 @@ HEALTH_RULES = (
         ("setting", r"native on foot panel cursor follow \(F120\): (?P<to>panel|head) \(TEMPORARY"),
         ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
         ("_", r"panel cursor follow \(F120\) so far: "),
-    ), _hj_f120_follow),
+    ), _hj_f120_follow, needs_detail=True),   # F125: as F111's
     _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
         ("sec", r"panel mouse \(F122\) 1 s: setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)$"),
         ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
@@ -14003,6 +14048,10 @@ def self_test_health():
             """A frame line with F91's view fields (the last %s)."""
             return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "", view)
 
+        def ads_done(d="press", frames=360, engaged=340, lw=1.0, elw=1.0):
+            """F125: a traced event's own line at its end."""
+            return R("ads transition (F89) %s traced: frames", d, frames, engaged, lw, elw)
+
         def share_sec(w=0.44, key="on", state="engaged"):
             return R("ADS sight in both eyes (F106) 1 s: share", w, key, w, state)
 
@@ -14381,6 +14430,17 @@ def self_test_health():
               [("PARTIAL", F111)], has=["the inverting stage: the unprojection (K1", "only 3 of 4 hooks armed"])
         check("F111 pointer: updates without a placement", [ptr_armed(), ptr_sec(ray=0, behind=0, verdict="none in the pick (the inversion is after it)")], 0,
               [("PARTIAL", F111)], has=["no placement on a panel was seen"])
+        # F125: the 1 s and move lines are the detail log's; the flight-so-far line is judged without them, and with neither nothing is NEVER APPLIED
+        P_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        check("F125 F111: detail off, judged from the flight so far", [P_OFF, ptr_armed(), ptr_total(secs=20)], 0, [("OK", F111)],
+              has=["the flight so far (20 s with the pointer): " + K5 + " (no 1 s line: the detail log's)"], lacks=["UNPARSED", "never saw"])
+        check("F125 F111: detail off, the flight so far too few moves", [P_OFF, ptr_armed(), ptr_total("too few moves")], 0, [("IDLE", F111)], has=["never moved enough"])
+        check("F125 F111: detail off, armed and no line of the pointer", [P_OFF, ptr_armed()], 0, [("IDLE", F111)],
+              has=["no 1 s line (the detail log was off) and no flight-so-far line"], lacks=["NEVER APPLIED"])
+        check("F125 F111: detail off and no hook armed is still NEVER APPLIED", [P_OFF, ptr_armed(0, "update at EliteDangerous64.exe+0x454F520 NOT armed: x")], 3,
+              [("NEVER APPLIED", F111)], has=["no hook armed"])
+        check("F125 F111: detail on, armed and never saw the controller", [R("native on foot log (F125): detail %s", "on", 1), ptr_armed()], 3, [("NEVER APPLIED", F111)],
+              has=["never saw the pointer controller"])
 
         # ---- panel pointer (F114b): the turned transform, the cursor draw, the clicks and the mode, VR and flat ----
         F114B = "panel pointer (F114b)"
@@ -14413,6 +14473,15 @@ def self_test_health():
               [("PARTIAL", F114B)], has=["exe+0x4526D10 at vtable +0x10, not the hooked function"])
         check("F114b pointer: a still cursor", [p114_armed(), p114(turn="too few moves", presses=(0, 0, 0), puv=0)] * 2, 0, [("IDLE", F114B)],
               has=["never moved enough"])
+        # F125: as F111's
+        check("F125 F114b: detail off, judged from the flight so far", [P_OFF, p114_armed(), p114_owner(), p114_total(secs=20)], 0, [("OK", F114B)],
+              has=["vr: 20 s with a panel (the flight so far), mode 2D window; turn: " + CAM, "(no 1 s line: the detail log's)"], lacks=["UNPARSED", "never saw"])
+        check("F125 F114b: detail off, the flight so far and a stray owner", [P_OFF, p114_armed(), p114_owner(0x4526D10, "NOT the hooked function: not read"),
+                                                                             p114_total()], 0, [("PARTIAL", F114B)], has=["not the hooked function"])
+        check("F125 F114b: detail off, armed and no line of a panel", [P_OFF, p114_armed()], 0, [("IDLE", F114B)],
+              has=["no 1 s line (the detail log was off) and no flight-so-far line"], lacks=["NEVER APPLIED"])
+        check("F125 F114b: detail off and the hook not armed is still NEVER APPLIED", [P_OFF, p114_armed("NOT armed", why="x")], 3, [("NEVER APPLIED", F114B)],
+              has=["the owner transform hook was not armed: x, and no 1 s line (the detail log was off)"])
 
         # ---- panel cursor fix (F117): the cursor on a turned panel against the true uv, per setting ----
         F117 = "panel cursor fix (F117)"
@@ -14477,6 +14546,13 @@ def self_test_health():
               [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
         check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
                                                           frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
+        # F125: the 1 s lines are the detail log's (F117 and F120 have only those to judge: with the detail log off they are not judged, or idle beside a pin line)
+        check("F125 F120: detail off, the pin line alone", [P_OFF, pcfo_pin()], 0, [("IDLE", F120)], has=["no 1 s line (the detail log was off)"],
+              lacks=["no 2D placement"])
+        check("F125 F120: no F125 line, the pin line alone is as before", [pcfo_pin()], 0, [("IDLE", F120)], has=["no 2D placement on a panel"])
+        check("F125 F117/F120: detail off, only the flight-so-far lines", [P_OFF, R("panel cursor fix (F117) so far", "panel", "follows the uv", 20, 900, 0, 900, 0.98,
+                                                                                  0.97), R("panel cursor follow (F120) so far", "panel", 20, 900, 0, 20.0, 80, 18.0, 0.4)],
+              0, has=["  not judged (detail log off)  ", "panel cursor fix (F117), panel cursor follow (F120)"], lacks=["UNPARSED"])
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
@@ -15177,6 +15253,21 @@ def self_test_health():
               [("NEVER APPLIED", F89A)], has=["the lock weight never rose"])
         check("F89 trace: events past the minute's cap are counted", [ads_start("press"), ads_start("release"), ads_frame(), R("ads transition (F89): not traced, %d events", 4, 7)], 0,
               [("OK", F89A)], has=["1 events not traced"])
+        # F125: each trace's own line (the frame lines are the detail log's); a log with them judges from them, an older log from its frame lines (above)
+        F125_LOG_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        check("F125 F89: detail off, judged from each trace's own line", [F125_LOG_OFF, ads_start("press"), ads_done(), ads_start("release"),
+                                                                         ads_done("release", 135, 0, 0.98, 0.0)], 0, [("OK", F89A)],
+              has=["traced 1 presses and 1 releases, 495 frames (340 with ADS engaged), lock weight max 1.00", "  not judged (detail log off)  ADS press fit (F91)"],
+              lacks=["frame lines", "UNPARSED"])
+        check("F125 F89: detail off, engaged and the lock weight never rose", [F125_LOG_OFF, ads_start("press"), ads_done(lw=0.0, elw=0.0), ads_start("release"),
+                                                                              ads_done("release", 135, 0, 0.0, 0.0)], 3,
+              [("NEVER APPLIED", F89A)], has=["495 frames (340 with ADS engaged), lock weight max 0.00", "the lock weight never rose"])
+        check("F125 F89: a release's weight at 0 with nothing engaged is not a failure", [F125_LOG_OFF, ads_start("press"), ads_done(), ads_start("release"),
+                                                                                         ads_done("release", 135, 0, 0.0, 0.0)], 0, [("OK", F89A)])
+        check("F125 F89: detail on, the frame lines and the traces' own lines agree", [R("native on foot log (F125): detail %s", "on", 1), ads_start("press"),
+                                                                                      ads_frame(), ads_frame(), ads_done("press", 2, 2, 0.98, 0.98), ads_start("release"),
+                                                                                      ads_frame("release", "releasing", 0.5), ads_done("release", 1, 0, 0.5, 0.0)], 0,
+              [("OK", F89A)], has=["traced 1 presses and 1 releases, 3 frames (2 with ADS engaged), lock weight max 0.98"], lacks=["UNPARSED", "not judged"])
         # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
         check("F106: a press drawn at full weight", [share_key(), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_press()], 0, [("OK", S106)],
               has=["1 presses drawn by the runtime (1 at full weight, 1 with 30-100% of the left eye taken), coverage 74.1-74.1%, the eyes' yaw +21.50..+21.50 deg, "
@@ -15363,17 +15454,23 @@ def self_test_health():
         F125_ON = R("native on foot log (F125): detail %s", "on", 1)
         check("F125: a log with no F125 line reports as before (no log diet row, nothing not judged)", [f90_part(), f90_part()], 0, [("OK", F90S)],
               lacks=[H_F125, "not judged"])
+        ND = [r.name for r in HEALTH_RULES if r.needs_detail]   # the rules that read only the detail log's lines
         check("F125: detail off is the diet applied", [F125_OFF, f90_part(), f90_part()], 0, [("OK", H_F125), ("OK", F90S)],
-              has=["detail off: summary windows of 10 s"], lacks=["not judged (detail log off)", "set before the window"])
+              has=["detail off: summary windows of 10 s", "  not judged (detail log off)  %s" % ", ".join(ND)], lacks=["set before the window", "NEVER APPLIED"])
         check("F125: detail on is the diet idle", [F125_ON, f90_part()], 0, [("IDLE", H_F125)], has=["detail on: windows of 1 s"])
         check("F125: the key changed in the window", [F125_OFF, f90_part(), F125_ON], 0, [("OK", H_F125)], has=["detail changed 1 time(s) in the window, on at its end"])
         check("F125: the state set before a --since window is the state in it", [F125_OFF, (90, f90_part()), (91, f90_part())], 0, [("OK", H_F125)],
               has=["detail off (set before the window)"], extra=["--since", "10:01:00"])
         check("F125: a drifted announce line is UNPARSED, not a state", [F125_OFF.replace("detail off", "detail maybe")], 4, [("UNPARSED", H_F125)])
-        # needs_detail, on a variant of the table: no rule needs the detail log until the lines move (F125's later steps), so the self-test makes one that does.
+        # needs_detail, on a variant of the table: a synthetic rule whose judge finds a NEVER APPLIED in other rules' rows (a trigger the log proves) stands for
+        # one the summary log never meant to answer.
         syn = HealthRule("synthetic detail rule (F999)", ("F999",), ("synthetic detail rule (F999)",), (),
                          lambda rows, ctx: ("NEVER APPLIED", "a trigger the log proves, read from another rule's rows"), True)
-        d_rules = tuple(r._replace(needs_detail=True) if r.name == F91F else r for r in HEALTH_RULES) + (syn,)
+        d_rules = tuple(HEALTH_RULES) + (syn,)
+        checks += 1
+        if F91F not in ND or len(ND) < 5:
+            print("health: F125: ADS press fit (F91) and the four panel rules (F111, F114b, F117, F120) must need the detail log; needs_detail: %r" % ND)
+            ok = False
 
         def detail_report(name, msgs, rc, has=(), lacks=(), since=None):
             nonlocal ok, checks
@@ -15388,7 +15485,8 @@ def self_test_health():
                 ok = False
 
         detail_report("F125: detail off, a rule that needs the detail log and has no line is not judged (never NEVER APPLIED, never not present)",
-                      [F125_OFF, f90_part()], 0, has=["  not judged (detail log off)  %s, %s" % (F91F, syn.name), "; 2 not judged (detail log off); exit 0"],
+                      [F125_OFF, f90_part()], 0, has=["  not judged (detail log off)  %s" % ", ".join(ND + [syn.name]),
+                                                      "; %d not judged (detail log off); exit 0" % (len(ND) + 1)],
                       lacks=["NEVER APPLIED", "not present    %s" % F91F, ", %s" % F91F])
         detail_report("F125: detail on, the same rules are judged as before", [F125_ON, f90_part()], 3,
                       has=[row("NEVER APPLIED", syn.name), "not present    ", ", %s" % F91F], lacks=["not judged"])

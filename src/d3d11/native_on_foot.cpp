@@ -5480,22 +5480,24 @@ void f114bTick(uint64_t now) {
     if (!sec.panelCycles) return;
     ++g_f114bSecondsWith;
     g_f114bTotal.merge(sec);
-    uint8_t noteByte = 0;
-    if (g_base) guardedRead(g_base + q::kNoteByteRva, &noteByte, 1);
-    Log::get().note("panel pointer (F114b) 1 s: profile %s; turn: %s; cursor draw: %s; mode: %s; clicks: pressed %u %u %u released %u %u %u (with a uv %u, "
-                    "the last at %.3f %.3f), buttons live in %u of %u cycles; cycles with the ray %u, the window %u, neither %u; mode object vtable "
-                    "+0x%llX, its +0x40 +0x%llX is %s (%d), value %d, bytes %02X %02X %02X %02X %02X %02X %02X %02X; uv to sprite in the camera right "
-                    "%+.2f down %+.2f, in the owner's axes right %+.2f down %+.2f, as the eye sees it right %+.2f down %+.2f, mouse to the eye's view "
-                    "right %+.2f up %+.2f (%u moves); camera against the eye x %+.2f y %+.2f z %+.2f (%u), owner against the HUD canvas x %+.2f y %+.2f (%u); "
-                    "owner transforms %u, camera derived %u (orthogonality %.3f), eye %u; note byte %u; sink %s, init %u",
-                    profile, q::turnText(q::turn(sec)), q::drawText(sec), q::modeText(sec), sec.presses[0], sec.presses[1], sec.presses[2],
-                    sec.releases[0], sec.releases[1], sec.releases[2], sec.pressesWithUv, sec.lastPressUv[0], sec.lastPressUv[1], sec.liveCycles, sec.cycles,
-                    sec.rayPlacements, sec.windowPlacements, sec.neither, static_cast<unsigned long long>(modeVt), static_cast<unsigned long long>(modeFn),
-                    f114bGetterText(modeKind), modeArg, modeValue, modeBytes[0], modeBytes[1], modeBytes[2], modeBytes[3], modeBytes[4], modeBytes[5],
-                    modeBytes[6], modeBytes[7], sec.uvCam[0].r(), sec.uvCam[1].r(), sec.uvLocal[0].r(), sec.uvLocal[1].r(), sec.uvEye[0].r(),
-                    sec.uvEye[1].r(), sec.ndcEye[0].r(), sec.ndcEye[1].r(), sec.moves, sec.camEyeMean(0), sec.camEyeMean(1), sec.camEyeMean(2),
-                    sec.camEyeN, sec.ownerHudMean(0), sec.ownerHudMean(1), sec.ownerHudN, sec.ownerReads, sec.camReads, sec.orthoMax, sec.eyeReads,
-                    noteByte, sink ? "present" : "none", init);
+    if (nofoot::logwin::detail()) {   // F125: the 1 s line is the detail log's; the 10 s "so far" line below is said either way
+        uint8_t noteByte = 0;
+        if (g_base) guardedRead(g_base + q::kNoteByteRva, &noteByte, 1);
+        Log::get().note("panel pointer (F114b) 1 s: profile %s; turn: %s; cursor draw: %s; mode: %s; clicks: pressed %u %u %u released %u %u %u (with a uv %u, "
+                        "the last at %.3f %.3f), buttons live in %u of %u cycles; cycles with the ray %u, the window %u, neither %u; mode object vtable "
+                        "+0x%llX, its +0x40 +0x%llX is %s (%d), value %d, bytes %02X %02X %02X %02X %02X %02X %02X %02X; uv to sprite in the camera right "
+                        "%+.2f down %+.2f, in the owner's axes right %+.2f down %+.2f, as the eye sees it right %+.2f down %+.2f, mouse to the eye's view "
+                        "right %+.2f up %+.2f (%u moves); camera against the eye x %+.2f y %+.2f z %+.2f (%u), owner against the HUD canvas x %+.2f y %+.2f (%u); "
+                        "owner transforms %u, camera derived %u (orthogonality %.3f), eye %u; note byte %u; sink %s, init %u",
+                        profile, q::turnText(q::turn(sec)), q::drawText(sec), q::modeText(sec), sec.presses[0], sec.presses[1], sec.presses[2],
+                        sec.releases[0], sec.releases[1], sec.releases[2], sec.pressesWithUv, sec.lastPressUv[0], sec.lastPressUv[1], sec.liveCycles, sec.cycles,
+                        sec.rayPlacements, sec.windowPlacements, sec.neither, static_cast<unsigned long long>(modeVt), static_cast<unsigned long long>(modeFn),
+                        f114bGetterText(modeKind), modeArg, modeValue, modeBytes[0], modeBytes[1], modeBytes[2], modeBytes[3], modeBytes[4], modeBytes[5],
+                        modeBytes[6], modeBytes[7], sec.uvCam[0].r(), sec.uvCam[1].r(), sec.uvLocal[0].r(), sec.uvLocal[1].r(), sec.uvEye[0].r(),
+                        sec.uvEye[1].r(), sec.ndcEye[0].r(), sec.ndcEye[1].r(), sec.moves, sec.camEyeMean(0), sec.camEyeMean(1), sec.camEyeMean(2),
+                        sec.camEyeN, sec.ownerHudMean(0), sec.ownerHudMean(1), sec.ownerHudN, sec.ownerReads, sec.camReads, sec.orthoMax, sec.eyeReads,
+                        noteByte, sink ? "present" : "none", init);
+    }
     if (g_f114bSecondsWith % 10 == 0) {
         const q::Sec& t = g_f114bTotal;
         Log::get().note("panel pointer (F114b) so far: profile %s; turn: %s; cursor draw: %s; mode: %s; %llu s with a panel, moves %u, presses %u, with a uv "
@@ -5522,11 +5524,12 @@ void f117Tick(uint64_t now) {
     ++g_f117SecondsWith;
     g_f117Total.merge(sec);
     const char* setting = runtimeFlatProfile() ? "flat (the game's place)" : z::modeName(z::Mode::kPanel);
-    Log::get().note("panel cursor fix (F117) 1 s: setting %s; the cursor on turned panels %s; 2D placements %u: turned %u, upright %u; moved %u; left: "
-                    "upright %u, the game's setting %u; refused: no triangle at the uv %u, the sprite not at the uv %u, no triangle at the turned uv %u; "
-                    "the uv to the cursor on turned panels right %+.2f down %+.2f, on upright panels right %+.2f down %+.2f",
-                    setting, z::cursorText(sec), sec.placements, sec.turned, sec.upright, sec.moved, sec.refused[1], sec.refused[2], sec.refused[3],
-                    sec.refused[4], sec.refused[5], sec.turnedUv[0].r(), sec.turnedUv[1].r(), sec.uprightUv[0].r(), sec.uprightUv[1].r());
+    if (nofoot::logwin::detail())   // F125: the 1 s line is the detail log's; the 10 s "so far" line below is said either way
+        Log::get().note("panel cursor fix (F117) 1 s: setting %s; the cursor on turned panels %s; 2D placements %u: turned %u, upright %u; moved %u; left: "
+                        "upright %u, the game's setting %u; refused: no triangle at the uv %u, the sprite not at the uv %u, no triangle at the turned uv %u; "
+                        "the uv to the cursor on turned panels right %+.2f down %+.2f, on upright panels right %+.2f down %+.2f",
+                        setting, z::cursorText(sec), sec.placements, sec.turned, sec.upright, sec.moved, sec.refused[1], sec.refused[2], sec.refused[3],
+                        sec.refused[4], sec.refused[5], sec.turnedUv[0].r(), sec.turnedUv[1].r(), sec.uprightUv[0].r(), sec.uprightUv[1].r());
     if (g_f117SecondsWith % 10 == 0) {
         const z::Sec& t = g_f117Total;
         Log::get().note("panel cursor fix (F117) so far: setting %s; the cursor on turned panels %s; %llu s with a 2D placement, turned %u, upright %u, moved %u; "
@@ -5575,18 +5578,20 @@ void f120Tick(uint64_t now) {
     if (!sec.placements) return;
     g_f120Total.merge(sec);
     const char* setting = runtimeFlatProfile() ? "flat (refused)" : "panel";
-    double yaw = 0.0, pitch = 0.0, roll = 0.0, detR = 0.0;
-    if (sec.haveLast) {
-        w::ypr(sec.lastR, &yaw, &pitch, &roll);
-        detR = w::det(sec.lastR);
+    if (nofoot::logwin::detail()) {   // F125: the 1 s line is the detail log's; the 10 s "so far" line below is said either way
+        double yaw = 0.0, pitch = 0.0, roll = 0.0, detR = 0.0;
+        if (sec.haveLast) {
+            w::ypr(sec.lastR, &yaw, &pitch, &roll);
+            detR = w::det(sec.lastR);
+        }
+        const uint32_t* r = sec.refused;
+        Log::get().note("panel cursor follow (F120) 1 s: setting %s; 2D placements %u, screen-space %u, corrected %u, references taken %u; refused: flat %u, no eye view %u, "
+                        "no HRC matrix %u, degenerate row %u, not screen-space %u, owner bytes not pinned %u, setting head %u, write failed %u; this second the head "
+                        "turned %.1f deg, the HUD frame %.1f deg, the head against the HUD frame %.1f deg (%s); E.Ht (det %+.0f) yaw %+.1f pitch %+.1f roll %+.1f deg; "
+                        "mouse still: %u placements, head against the HUD frame %.1f deg, cursor drift %.1f mm",
+                        setting, sec.placements, sec.screen, sec.corrected, sec.refs, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], sec.turnE, sec.turnH, sec.turnEH,
+                        w::frameText(sec), detR, yaw, pitch, roll, sec.stillN, sec.stillTurn, sec.stillDrift);
     }
-    const uint32_t* r = sec.refused;
-    Log::get().note("panel cursor follow (F120) 1 s: setting %s; 2D placements %u, screen-space %u, corrected %u, references taken %u; refused: flat %u, no eye view %u, "
-                    "no HRC matrix %u, degenerate row %u, not screen-space %u, owner bytes not pinned %u, setting head %u, write failed %u; this second the head "
-                    "turned %.1f deg, the HUD frame %.1f deg, the head against the HUD frame %.1f deg (%s); E.Ht (det %+.0f) yaw %+.1f pitch %+.1f roll %+.1f deg; "
-                    "mouse still: %u placements, head against the HUD frame %.1f deg, cursor drift %.1f mm",
-                    setting, sec.placements, sec.screen, sec.corrected, sec.refs, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], sec.turnE, sec.turnH, sec.turnEH,
-                    w::frameText(sec), detR, yaw, pitch, roll, sec.stillN, sec.stillTurn, sec.stillDrift);
     if (!sec.screen) return;
     ++g_f120SecondsWith;
     if (g_f120SecondsWith % 10 == 0) {
@@ -5659,7 +5664,9 @@ void f111Tick(uint64_t now) {
     if (!sec.cycles) return;
     ++g_f111SecondsWith;
     g_f111Total.merge(sec);
-    for (uint32_t i = 0; i < moveCount; ++i) {
+    // F125: the move lines and the 1 s line are the detail log's (the second is taken and reset above either way); the 10 s "so far" line is said either way
+    const bool say = nofoot::logwin::detail();
+    for (uint32_t i = 0; say && i < moveCount; ++i) {
         const p::Cycle& c = moves[i].c;
         float u = 0.0f, v = 0.0f;
         const bool uv = p::cycleUv(c, &u, &v);
@@ -5671,28 +5678,30 @@ void f111Tick(uint64_t now) {
                         uv ? (c.hitUv ? "hit" : "window") : "none", static_cast<double>(u), static_cast<double>(v), c.movie, moves[i].osDelta[0],
                         moves[i].osDelta[1]);
     }
-    const p::Stage st = p::verdict(sec);
-    char camText[200] = {};
-    if (camOk) {
-        std::snprintf(camText, sizeof(camText), "position %.3f %.3f %.3f, right %+.3f %+.3f %+.3f, up %+.3f %+.3f %+.3f, forward %+.3f %+.3f %+.3f",
-                      static_cast<double>(cam[12]), static_cast<double>(cam[13]), static_cast<double>(cam[14]), static_cast<double>(cam[0]),
-                      static_cast<double>(cam[1]), static_cast<double>(cam[2]), static_cast<double>(cam[4]), static_cast<double>(cam[5]),
-                      static_cast<double>(cam[6]), static_cast<double>(cam[8]), static_cast<double>(cam[9]), static_cast<double>(cam[10]));
-    } else {
-        std::snprintf(camText, sizeof(camText), "not read (%s)", camWhy);
+    if (say) {
+        const p::Stage st = p::verdict(sec);
+        char camText[200] = {};
+        if (camOk) {
+            std::snprintf(camText, sizeof(camText), "position %.3f %.3f %.3f, right %+.3f %+.3f %+.3f, up %+.3f %+.3f %+.3f, forward %+.3f %+.3f %+.3f",
+                          static_cast<double>(cam[12]), static_cast<double>(cam[13]), static_cast<double>(cam[14]), static_cast<double>(cam[0]),
+                          static_cast<double>(cam[1]), static_cast<double>(cam[2]), static_cast<double>(cam[4]), static_cast<double>(cam[5]),
+                          static_cast<double>(cam[6]), static_cast<double>(cam[8]), static_cast<double>(cam[9]), static_cast<double>(cam[10]));
+        } else {
+            std::snprintf(camText, sizeof(camText), "not read (%s)", camWhy);
+        }
+        Log::get().note("panel pointer (F111) 1 s: verdict: %s; cycles %u (controllers %u), moves %u (more move lines %u), placements %u: ray %u (accepted %u, "
+                        "t mean %.4f), window %u; cycles with a hit %u, direction behind the camera %u, sprite behind %u, movie notes %u; correlations "
+                        "(r): NDC to direction right %+.2f up %+.2f; direction to sprite right %+.2f up %+.2f; NDC to sprite as seen right %+.2f up %+.2f; "
+                        "NDC to uv right %+.2f down %+.2f; OS cursor to NDC right %+.2f down %+.2f (OS moves %u); unprojection slope (tan per NDC unit) "
+                        "right %+.3f up %+.3f; signs %c%c %c%c %c%c %c%c %c%c; camera %s; slots full %u",
+                        p::stageText(st), sec.cycles, ctls, sec.moves, dropped, sec.placements, sec.rayCalls, sec.rayHits,
+                        sec.tN ? sec.tSum / sec.tN : 0.0, sec.windowCalls, sec.hitCycles, sec.behind, sec.spriteBehind, sec.movie, sec.ndcDir[0].r(),
+                        sec.ndcDir[1].r(), sec.dirSprite[0].r(), sec.dirSprite[1].r(), sec.ndcSeen[0].r(), sec.ndcSeen[1].r(), sec.ndcUv[0].r(),
+                        sec.ndcUv[1].r(), sec.osNdc[0].r(), sec.osNdc[1].r(), sec.osMoves, sec.slope(0), sec.slope(1), p::signChar(sec.ndcDir[0].sign()),
+                        p::signChar(sec.ndcDir[1].sign()), p::signChar(sec.dirSprite[0].sign()), p::signChar(sec.dirSprite[1].sign()),
+                        p::signChar(sec.ndcSeen[0].sign()), p::signChar(sec.ndcSeen[1].sign()), p::signChar(sec.ndcUv[0].sign()),
+                        p::signChar(sec.ndcUv[1].sign()), p::signChar(sec.osNdc[0].sign()), p::signChar(sec.osNdc[1].sign()), camText, slotsFull);
     }
-    Log::get().note("panel pointer (F111) 1 s: verdict: %s; cycles %u (controllers %u), moves %u (more move lines %u), placements %u: ray %u (accepted %u, "
-                    "t mean %.4f), window %u; cycles with a hit %u, direction behind the camera %u, sprite behind %u, movie notes %u; correlations "
-                    "(r): NDC to direction right %+.2f up %+.2f; direction to sprite right %+.2f up %+.2f; NDC to sprite as seen right %+.2f up %+.2f; "
-                    "NDC to uv right %+.2f down %+.2f; OS cursor to NDC right %+.2f down %+.2f (OS moves %u); unprojection slope (tan per NDC unit) "
-                    "right %+.3f up %+.3f; signs %c%c %c%c %c%c %c%c %c%c; camera %s; slots full %u",
-                    p::stageText(st), sec.cycles, ctls, sec.moves, dropped, sec.placements, sec.rayCalls, sec.rayHits,
-                    sec.tN ? sec.tSum / sec.tN : 0.0, sec.windowCalls, sec.hitCycles, sec.behind, sec.spriteBehind, sec.movie, sec.ndcDir[0].r(),
-                    sec.ndcDir[1].r(), sec.dirSprite[0].r(), sec.dirSprite[1].r(), sec.ndcSeen[0].r(), sec.ndcSeen[1].r(), sec.ndcUv[0].r(),
-                    sec.ndcUv[1].r(), sec.osNdc[0].r(), sec.osNdc[1].r(), sec.osMoves, sec.slope(0), sec.slope(1), p::signChar(sec.ndcDir[0].sign()),
-                    p::signChar(sec.ndcDir[1].sign()), p::signChar(sec.dirSprite[0].sign()), p::signChar(sec.dirSprite[1].sign()),
-                    p::signChar(sec.ndcSeen[0].sign()), p::signChar(sec.ndcSeen[1].sign()), p::signChar(sec.ndcUv[0].sign()),
-                    p::signChar(sec.ndcUv[1].sign()), p::signChar(sec.osNdc[0].sign()), p::signChar(sec.osNdc[1].sign()), camText, slotsFull);
     // Every 10 seconds with the pointer, the flight so far in one verdict (the 1 s windows can hold too few moves each).
     if (g_f111SecondsWith % 10 == 0) {
         const p::Sec& t = g_f111Total;
@@ -8656,7 +8665,9 @@ void f85Drain(uint64_t nowMs) noexcept {
                     sf.handWritten[s] = hd.written[s];
                 }
             }
-            const StepResult r = d.tracker.step(sf, freq);
+            // F125: the frame lines (F85a, F86a) are the detail log's; without it the tracker keeps no earlier frames to print and still finds and counts the events.
+            const bool frameLines = nofoot::logwin::detail();
+            const StepResult r = d.tracker.step(sf, freq, frameLines);
             if (sf.haveCarry && sf.carryWhy == nofoot::f86::kCarried) {   // F86a: the second's wrist error by speed bin, the carry's size
                 const int bin = speedBin(sf.speed);
                 for (int s = 0; s < 2; ++s) {
@@ -8673,60 +8684,57 @@ void f85Drain(uint64_t nowMs) noexcept {
                                 "+0x3DA4E62, read at the submit job's end), M3P the matrix G and the pin use; lengths in cm; the pose carry's line (F86a) follows each frame's",
                                 r.eventNo, f, t, static_cast<double>(sf.stepUp) * 100.0, static_cast<double>(sf.camMoveCm), static_cast<double>(sf.vy), static_cast<double>(sf.handLagCm),
                                 sf.vClamp ? " TRIPPED" : " ok", sf.hClamp ? " TRIPPED" : " ok", r.nPre, StepTracker::kPost);
-                for (int i = 0; i < r.nPre; ++i) {
+                for (int i = 0; frameLines && i < r.nPre; ++i) {
                     const StepFrame& pf = d.tracker.pre(i);
                     f85PrintFrame(pf, i - r.nPre, r.eventNo);
                 }
             }
-            if (r.printCur) f85PrintFrame(sf, r.offset, r.eventNo);
+            if (r.printCur && frameLines) f85PrintFrame(sf, r.offset, r.eventNo);
         }
         d.next = newest;
     }
-    // The 1 s line: always while on foot, so a trace that never triggers says so (and says what it saw).
+    // The 1 s line: always while on foot, so a trace that never triggers says so (and says what it saw). F125: it and the F86a and F87a lines below are the
+    // detail log's; without it the second still closes (the counters' bases move on, the sums reset) and nothing is formatted.
     if (!d.lastSecMs) d.lastSecMs = nowMs;
     if (nowMs - d.lastSecMs < 1000) return;
     d.lastSecMs = nowMs;
+    const bool say = nofoot::logwin::detail();
     StepSecond& s = d.tracker.sec;
-    const auto acc = [](const StepAcc& a, char* buf, size_t n) {
-        if (a.n) std::snprintf(buf, n, "%llu mean %.2f max %.2f", static_cast<unsigned long long>(a.n), a.sum / static_cast<double>(a.n), a.mx);
-        else std::snprintf(buf, n, "none");
-    };
-    char bins[5][64], trigBuf[160], supBuf[160], tr[64], org[64];
-    for (int b = 0; b < kStepBins; ++b) acc(s.rec[b], bins[b], sizeof(bins[b]));
-    acc(s.recTrig, tr, sizeof(tr));
-    acc(s.orgVsM3p, org, sizeof(org));
-    std::snprintf(trigBuf, sizeof(trigBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.trigSeen[0]),
-                  static_cast<unsigned long long>(s.trigSeen[1]), static_cast<unsigned long long>(s.trigSeen[2]), static_cast<unsigned long long>(s.trigSeen[3]));
-    std::snprintf(supBuf, sizeof(supBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.suppressedBy[0]),
-                  static_cast<unsigned long long>(s.suppressedBy[1]), static_cast<unsigned long long>(s.suppressedBy[2]), static_cast<unsigned long long>(s.suppressedBy[3]));
     if (!d.saidFpGone) {   // F86b: said once
         d.saidFpGone = true;
         Log::get().note("pin step (F85a): the first-person half is gone from this trace (F86b): the FP AMC's submit job never calls 0x4C86270 (the jobs 'without a record' of the F85 flight were all "
                         "its) and the MGMC hook saw no submit on 334925, so 'FP record minus F_root' and 'FP weapon record minus F_root' are no longer measured; the FP root of the FP P1 call "
                         "stays (the pose carry's F_i)");
     }
-    Log::get().note("pin step (F85a): %llu events (triggers seen: %s; %llu frames held back by the 8 a minute cap, per trigger: %s; %llu events in all): %llu frames joined (no writer record %llu, no pin %llu, no FP call %llu; "
-                    "frame gaps %llu, 3P P1 slots missing %llu); drawn record minus M3P (cm) by speed: still %s | walk %s | jog %s | sprint %s | step %s | at trigger frames %s; AMC origin minus "
-                    "M3P %s; largest M3P step along up %.1f cm; sites this run: 3P P1 %llu, FP P1 %llu, submit jobs %llu (%llu calls, %llu without a record), "
-                    "3P record posts %llu, pin %llu, hands %llu",
-                    static_cast<unsigned long long>(s.eventsStarted), trigBuf, static_cast<unsigned long long>(s.eventsSuppressed), supBuf, static_cast<unsigned long long>(d.tracker.totalEvents),
-                    static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.noRec), static_cast<unsigned long long>(s.noPin), static_cast<unsigned long long>(s.noFp),
-                    static_cast<unsigned long long>(d.gaps), static_cast<unsigned long long>(d.missing3P), bins[0], bins[1], bins[2], bins[3], bins[4], tr, org, s.maxStepUpCm,
-                    static_cast<unsigned long long>(posts), static_cast<unsigned long long>(g_f85FpPosts.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(g_f85JobsSeen.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85JobCalls.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(g_f85JobNoRecord.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85RecPosts.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(g_f85PinPosts.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85HandPosts.load(std::memory_order_relaxed)));
-    // F86a: the carry's second (always on foot, zeros included: a carry that never ran says "submits 0, carried 0")
+    const auto acc = [](const StepAcc& a, char* buf, size_t n) {
+        if (a.n) std::snprintf(buf, n, "%llu mean %.2f max %.2f", static_cast<unsigned long long>(a.n), a.sum / static_cast<double>(a.n), a.mx);
+        else std::snprintf(buf, n, "none");
+    };
+    if (say) {
+        char bins[5][64], trigBuf[160], supBuf[160], tr[64], org[64];
+        for (int b = 0; b < kStepBins; ++b) acc(s.rec[b], bins[b], sizeof(bins[b]));
+        acc(s.recTrig, tr, sizeof(tr));
+        acc(s.orgVsM3p, org, sizeof(org));
+        std::snprintf(trigBuf, sizeof(trigBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.trigSeen[0]),
+                      static_cast<unsigned long long>(s.trigSeen[1]), static_cast<unsigned long long>(s.trigSeen[2]), static_cast<unsigned long long>(s.trigSeen[3]));
+        std::snprintf(supBuf, sizeof(supBuf), "m3p-step %llu, pin-cap %llu, hand-lag %llu, vy %llu", static_cast<unsigned long long>(s.suppressedBy[0]),
+                      static_cast<unsigned long long>(s.suppressedBy[1]), static_cast<unsigned long long>(s.suppressedBy[2]), static_cast<unsigned long long>(s.suppressedBy[3]));
+        Log::get().note("pin step (F85a): %llu events (triggers seen: %s; %llu frames held back by the 8 a minute cap, per trigger: %s; %llu events in all): %llu frames joined (no writer record %llu, no pin %llu, no FP call %llu; "
+                        "frame gaps %llu, 3P P1 slots missing %llu); drawn record minus M3P (cm) by speed: still %s | walk %s | jog %s | sprint %s | step %s | at trigger frames %s; AMC origin minus "
+                        "M3P %s; largest M3P step along up %.1f cm; sites this run: 3P P1 %llu, FP P1 %llu, submit jobs %llu (%llu calls, %llu without a record), "
+                        "3P record posts %llu, pin %llu, hands %llu",
+                        static_cast<unsigned long long>(s.eventsStarted), trigBuf, static_cast<unsigned long long>(s.eventsSuppressed), supBuf, static_cast<unsigned long long>(d.tracker.totalEvents),
+                        static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.noRec), static_cast<unsigned long long>(s.noPin), static_cast<unsigned long long>(s.noFp),
+                        static_cast<unsigned long long>(d.gaps), static_cast<unsigned long long>(d.missing3P), bins[0], bins[1], bins[2], bins[3], bins[4], tr, org, s.maxStepUpCm,
+                        static_cast<unsigned long long>(posts), static_cast<unsigned long long>(g_f85FpPosts.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_f85JobsSeen.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85JobCalls.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_f85JobNoRecord.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85RecPosts.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_f85PinPosts.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_f85HandPosts.load(std::memory_order_relaxed)));
+    }
+    // F86a: the carry's second (always on foot, zeros included: a carry that never ran says "submits 0, carried 0"). F125: the counters' bases and the sums move on
+    // without the detail log too; only the formatting and the note are skipped.
     {
         using ull = unsigned long long;
-        char before[5][64], after[5][64], cm[64];
-        for (int b = 0; b < kStepBins; ++b) {
-            acc(d.sec86.before[b], before[b], sizeof(before[b]));
-            acc(d.sec86.after[b], after[b], sizeof(after[b]));
-        }
-        const nofoot::f86::CarrySecond& c = d.sec86;
-        if (c.carry.n) std::snprintf(cm, sizeof(cm), "mean %.2f max %.2f", c.carry.sum / static_cast<double>(c.carry.n), c.carry.mx);
-        else std::snprintf(cm, sizeof(cm), "mean 0.00 max 0.00");
         const uint64_t submits = g_f86Submits.load(std::memory_order_relaxed), carried = g_f86Carried.load(std::memory_order_relaxed);
         uint64_t why[nofoot::f86::kCarryWhyCount], age[4], pv[4];
         for (int k = 0; k < nofoot::f86::kCarryWhyCount; ++k) why[k] = g_f86Why[k].load(std::memory_order_relaxed);
@@ -8736,16 +8744,26 @@ void f85Drain(uint64_t nowMs) noexcept {
         }
         const uint64_t busy = g_f86Busy.load(std::memory_order_relaxed), noRecords = g_f86NoRecords.load(std::memory_order_relaxed), noInputs = g_f86NoInputs.load(std::memory_order_relaxed),
                        writeFaults = g_f86WriteFaults.load(std::memory_order_relaxed);
-        Log::get().note("pose carry (F86a): submits %llu, carried %llu [no pose %llu, over 3 frames %llu, over 1.5 m %llu, out of scope %llu]; pose age 0/1/2/3+ %llu/%llu/%llu/%llu; wrist error before (cm) "
-                        "still %s | walk %s | jog %s | sprint %s | step %s; after (same) still %s | walk %s | jog %s | sprint %s | step %s; |carry| %s; prev with pos %llu other %llu; "
-                        "also: no M3P_i or F_i for the frame %llu, no body records %llu, busy %llu, write faults %llu",
-                        ull(submits - d.prevSubmits), ull(carried - d.prevCarried), ull(why[nofoot::f86::kCarryNoPose] - d.prevWhy[nofoot::f86::kCarryNoPose]),
-                        ull(why[nofoot::f86::kCarryOld] - d.prevWhy[nofoot::f86::kCarryOld]), ull(why[nofoot::f86::kCarryHitch] - d.prevWhy[nofoot::f86::kCarryHitch]),
-                        ull(why[nofoot::f86::kCarryScope] - d.prevWhy[nofoot::f86::kCarryScope]), ull(age[0] - d.prevAge[0]), ull(age[1] - d.prevAge[1]), ull(age[2] - d.prevAge[2]),
-                        ull(age[3] - d.prevAge[3]), before[0], before[1], before[2], before[3], before[4], after[0], after[1], after[2], after[3], after[4], cm,
-                        ull(pv[nofoot::f86::kPrevWithPos] - d.prevPrev[nofoot::f86::kPrevWithPos]), ull(pv[nofoot::f86::kPrevOther] - d.prevPrev[nofoot::f86::kPrevOther]),
-                        ull(noInputs - d.prevNoInputs), ull(noRecords - d.prevNoRecords), ull(busy - d.prevBusy),
-                        ull(writeFaults - d.prevWriteFaults));
+        if (say) {
+            char before[5][64], after[5][64], cm[64];
+            for (int b = 0; b < kStepBins; ++b) {
+                acc(d.sec86.before[b], before[b], sizeof(before[b]));
+                acc(d.sec86.after[b], after[b], sizeof(after[b]));
+            }
+            const nofoot::f86::CarrySecond& c = d.sec86;
+            if (c.carry.n) std::snprintf(cm, sizeof(cm), "mean %.2f max %.2f", c.carry.sum / static_cast<double>(c.carry.n), c.carry.mx);
+            else std::snprintf(cm, sizeof(cm), "mean 0.00 max 0.00");
+            Log::get().note("pose carry (F86a): submits %llu, carried %llu [no pose %llu, over 3 frames %llu, over 1.5 m %llu, out of scope %llu]; pose age 0/1/2/3+ %llu/%llu/%llu/%llu; wrist error before (cm) "
+                            "still %s | walk %s | jog %s | sprint %s | step %s; after (same) still %s | walk %s | jog %s | sprint %s | step %s; |carry| %s; prev with pos %llu other %llu; "
+                            "also: no M3P_i or F_i for the frame %llu, no body records %llu, busy %llu, write faults %llu",
+                            ull(submits - d.prevSubmits), ull(carried - d.prevCarried), ull(why[nofoot::f86::kCarryNoPose] - d.prevWhy[nofoot::f86::kCarryNoPose]),
+                            ull(why[nofoot::f86::kCarryOld] - d.prevWhy[nofoot::f86::kCarryOld]), ull(why[nofoot::f86::kCarryHitch] - d.prevWhy[nofoot::f86::kCarryHitch]),
+                            ull(why[nofoot::f86::kCarryScope] - d.prevWhy[nofoot::f86::kCarryScope]), ull(age[0] - d.prevAge[0]), ull(age[1] - d.prevAge[1]), ull(age[2] - d.prevAge[2]),
+                            ull(age[3] - d.prevAge[3]), before[0], before[1], before[2], before[3], before[4], after[0], after[1], after[2], after[3], after[4], cm,
+                            ull(pv[nofoot::f86::kPrevWithPos] - d.prevPrev[nofoot::f86::kPrevWithPos]), ull(pv[nofoot::f86::kPrevOther] - d.prevPrev[nofoot::f86::kPrevOther]),
+                            ull(noInputs - d.prevNoInputs), ull(noRecords - d.prevNoRecords), ull(busy - d.prevBusy),
+                            ull(writeFaults - d.prevWriteFaults));
+        }
         d.prevSubmits = submits;
         d.prevCarried = carried;
         for (int k = 0; k < nofoot::f86::kCarryWhyCount; ++k) d.prevWhy[k] = why[k];
@@ -8769,20 +8787,22 @@ void f85Drain(uint64_t nowMs) noexcept {
             g_f87Hand.reset();
             g_f87HandBusy.store(false, std::memory_order_release);
         }
-        char handBins[5][64];
-        for (int b = 0; b < kStepBins; ++b) {
-            const uint64_t nb = hs.binN[b][0] + hs.binN[b][1];
-            if (!nb) std::snprintf(handBins[b], sizeof(handBins[b]), "-");
-            else std::snprintf(handBins[b], sizeof(handBins[b]), "%.2f/%.2f (%llu)", hs.binN[b][0] ? hs.binSum[b][0] / static_cast<double>(hs.binN[b][0]) : 0.0,
-                                hs.binN[b][1] ? hs.binSum[b][1] / static_cast<double>(hs.binN[b][1]) : 0.0, ull(nb));
-        }
         uint64_t fpb[4];
         for (int k = 0; k < 4; ++k) fpb[k] = g_f87FpBucket[k].exchange(0, std::memory_order_relaxed);
-        char fps[96];
-        std::snprintf(fps, sizeof(fps), "-1:%llu 0:%llu +1:%llu other:%llu", ull(fpb[0]), ull(fpb[1]), ull(fpb[2]), ull(fpb[3]));
-        Log::get().note("hand residual (F87a) 1 s: L/R mean %.2f/%.2f max %.2f/%.2f cm; still %s | walk %s | jog %s | sprint %s | step %s; FP frame - submit frame %s",
-                        hs.n[0] ? hs.sum[0] / static_cast<double>(hs.n[0]) : 0.0, hs.n[1] ? hs.sum[1] / static_cast<double>(hs.n[1]) : 0.0, hs.mx[0], hs.mx[1], handBins[0], handBins[1], handBins[2],
-                        handBins[3], handBins[4], fps);
+        if (say) {   // F125: the second is taken and reset above either way
+            char handBins[5][64];
+            for (int b = 0; b < kStepBins; ++b) {
+                const uint64_t nb = hs.binN[b][0] + hs.binN[b][1];
+                if (!nb) std::snprintf(handBins[b], sizeof(handBins[b]), "-");
+                else std::snprintf(handBins[b], sizeof(handBins[b]), "%.2f/%.2f (%llu)", hs.binN[b][0] ? hs.binSum[b][0] / static_cast<double>(hs.binN[b][0]) : 0.0,
+                                    hs.binN[b][1] ? hs.binSum[b][1] / static_cast<double>(hs.binN[b][1]) : 0.0, ull(nb));
+            }
+            char fps[96];
+            std::snprintf(fps, sizeof(fps), "-1:%llu 0:%llu +1:%llu other:%llu", ull(fpb[0]), ull(fpb[1]), ull(fpb[2]), ull(fpb[3]));
+            Log::get().note("hand residual (F87a) 1 s: L/R mean %.2f/%.2f max %.2f/%.2f cm; still %s | walk %s | jog %s | sprint %s | step %s; FP frame - submit frame %s",
+                            hs.n[0] ? hs.sum[0] / static_cast<double>(hs.n[0]) : 0.0, hs.n[1] ? hs.sum[1] / static_cast<double>(hs.n[1]) : 0.0, hs.mx[0], hs.mx[1], handBins[0], handBins[1],
+                            handBins[2], handBins[3], handBins[4], fps);
+        }
     }
     s = StepSecond{};
 }
@@ -12029,7 +12049,8 @@ void f68dTick(uint64_t nowMs) noexcept {
     if (pr.paced.active) {
         uint32_t first = 0;
         const uint32_t n = pr.paced.take(&first);
-        for (uint32_t k = first; k < first + n; ++k) {
+        const bool rowLines = nofoot::logwin::detail();   // F125: the frame rows are the detail log's; the header, the edges and the summary are said either way
+        for (uint32_t k = first; rowLines && k < first + n; ++k) {
             const F68dRow& r = pr.rows[k];
             Log::get().note("native on foot hands (F68d diagnostic) onset t=%+.3f s frame %u: attach %.1f cm from rest%s, parts %u, hands %s%s, diagnostic weight %.2f, Status.json %s%s",
                             r.t, r.p1, static_cast<double>(r.dist) * 100.0, (r.flags & 64u) ? "" : " (no rest yet)", r.parts, (r.flags & 1u) ? "UP" : "down",
@@ -12369,8 +12390,27 @@ nofoot::f89::AdsTrace g_f89Trace;
 nofoot::f89::EyeStep g_f89EyeStep;
 uint32_t g_f89EyeRowFrame = ~0u;
 uint64_t g_f89SuppressLogMs = 0;
+// F125: the frame lines and the press fits are the detail log's; each traced event ends in one line either way, "ads transition (F89) press|release traced: ...",
+// with what --health judges the trace by (its frames, those with ADS engaged, the lock weight's maximum over all of them and over the engaged ones). Frame thread.
+struct F89Tally {
+    bool open = false, press = false;
+    uint32_t frames = 0, engaged = 0;
+    double lwMax = 0.0, lwEngagedMax = 0.0;
+};
+F89Tally g_f89Tally;
+bool g_f91FitPress = false;   // F125: this press is fitted (the detail log was on at its edge)
+void f89TallyClose() noexcept {
+    F89Tally& k = g_f89Tally;
+    if (!k.open) return;
+    k.open = false;
+    Log::get().note("ads transition (F89) %s traced: frames %u, engaged %u, lock weight max %.2f, on the engaged frames %.2f", k.press ? "press" : "release", k.frames, k.engaged,
+                    k.lwMax, k.lwEngagedMax);
+}
 void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPose& np, bool haveFrame, bool ads, const EyeSample& s, const FpRootSnap& fp, bool fpFresh) noexcept {
-    if (!nativeOnFootActive()) return;
+    if (!nativeOnFootActive()) {
+        f89TallyClose();   // a trace cut by the on-foot exit says what it saw
+        return;
+    }
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
     float rows[2][16] = {}, o[2][4] = {};
     uint32_t fr[2] = {~0u, ~0u};
@@ -12398,6 +12438,21 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
             g_f89EyeRowFrame = fr[1];
         } else if (!eyeUsed) {
             g_f89EyeStep.drop();
+        }
+        if (tf.started || !tf.trace) f89TallyClose();   // the last trace ended on the frame before (its window, a new edge, or an edge the cap kept out)
+        if (tf.started) {
+            g_f89Tally = F89Tally{};
+            g_f89Tally.open = true;
+            g_f89Tally.press = tf.press;
+        }
+        if (tf.trace && g_f89Tally.open) {
+            F89Tally& k = g_f89Tally;
+            ++k.frames;
+            k.lwMax = std::max(k.lwMax, static_cast<double>(g_adsW));
+            if (g_adsState == kAdsActive) {
+                ++k.engaged;
+                k.lwEngagedMax = std::max(k.lwEngagedMax, static_cast<double>(g_adsW));
+            }
         }
         if (tf.started)
             Log::get().note("ads transition (F89) %s: tracing the next %.1f s, a line a frame (event %d of at most %d a minute; %u earlier events were not traced)",
@@ -12441,7 +12496,7 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
         // F92b: the cancel total is the published one (what the game applied plus this tick's ask, published ahead)
         const double cancelTotal[2] = {g_adsMap.yawPublished() / nofoot::kAdsDeg, g_adsMap.pitchPublished() / nofoot::kAdsDeg};
         const nofoot::f91::CancelHistory::Found f91Pose = g_f91Cancel.find(haveFrame ? np.eyeAlignApplied : 0u, f91Tick);
-        if (tf.trace) {
+        if (tf.trace && nofoot::logwin::detail()) {   // F125: the frame line (and its view and eye texts) only in the detail log
             nofoot::f91::ViewFields vf;
             vf.rShown = g_adsState == kAdsActive && g_adsResid.have;
             vf.r[0] = g_adsResid.res[0];
@@ -12490,8 +12545,10 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
                             eyeUsed ? g_f87EyeRoot.last[0] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[1] * 100.0 : 0.0, eyeUsed ? g_f87EyeRoot.last[2] * 100.0 : 0.0, stepCm,
                             !eyeUsed ? " (no eye sample this frame)" : !newRows ? " (the eye rows are the last frame's)" : "", viewText, eyeText);
         }
-        // F91 B: the fit, over each 0.5 s of a press's trace. A window cut short by the trace's end is fitted when it holds kFitMinFrames frames.
-        const bool fitFrame = tf.trace && tf.press;
+        // F91 B: the fit, over each 0.5 s of a press's trace. A window cut short by the trace's end is fitted when it holds kFitMinFrames frames. F125: a press is
+        // fitted when the detail log was on at its edge (the fit feeds only its own lines).
+        if (tf.started && tf.press) g_f91FitPress = nofoot::logwin::detail();
+        const bool fitFrame = tf.trace && tf.press && g_f91FitPress;
         const auto fitEmit = [&]() {
             const nofoot::f91::FitResult R = nofoot::f91::fitWindow(g_f91Fit);
             char fitText[2400];
@@ -16731,6 +16788,7 @@ void poseDeviationDrain() noexcept {
                 Log::get().note("armed pose deviation (F76): event %u, 8 pre + trigger + up to 8 post samples; S/E/H/target are 3P body-model axes in metres, thresholds are diagnostic only; item %u rig generation %u",
                                 r.event, r.sample.item, r.sample.generation);
             }
+            if (!nofoot::logwin::detail()) continue;   // F125: the samples (F76, F80) are the detail log's; the event's header above is said either way
             for (int side = 0; side < 2; ++side) {
                 const char* label = side == 0 ? "left" : "right";
                 if (!r.sample.valid[side]) {
@@ -16830,6 +16888,7 @@ void armMoveDrain() noexcept {
                 previousShoulderValid[side] = true;
             } else previousShoulderValid[side] = false;
         }
+        if (!nofoot::logwin::detail()) continue;   // F125: the frame lines are the detail log's (the shoulders above are kept for the next line's delta)
         Log::get().note("armed move (F68g) ev %u +%02u P1 frame %u dt %.1f ms: pin up %+.2f cm, d (right %+.2f, fwd %+.2f); neck %+.1f %+.1f %+.1f; shoulder L %s%+.1f %+.1f "
                         "%+.1f R %s%+.1f %+.1f %+.1f; shoulder frame delta from prior sample L %s%+.2f/%+.2f/%+.2f R %s%+.2f/%+.2f/%+.2f cm (eye-relative); "
                         "grip L %s%+.1f %+.1f %+.1f R %s%+.1f %+.1f %+.1f; FP root %s%+.1f %+.1f %+.1f; G age %u frames; reach "
@@ -20081,7 +20140,10 @@ void f67eDrain(uint64_t nowMs) noexcept {
                                 evNo, rate, static_cast<double>(r.armedW));
             }
         }
-        if (remaining > 0) {
+        if (remaining > 0 && !nofoot::logwin::detail()) {   // F125: the frame lines are the detail log's; the event still runs its 40 records
+            ++frameNo;
+            --remaining;
+        } else if (remaining > 0) {
             char l[200], rr[200];
             double dyaw = static_cast<double>(r.fpYaw) - static_cast<double>(r.rootYaw);
             while (dyaw > 180.0) dyaw -= 360.0;

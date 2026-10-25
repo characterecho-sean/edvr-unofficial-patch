@@ -546,7 +546,9 @@ struct StepTracker {
     // The i-th (0 = oldest) of the nPre frames before the one the last step() returned an event start for.
     const StepFrame& pre(int i) const noexcept { return hist[(histHead - 1 - lastNPre + i + kRing * 2) % kRing]; }
     // One frame, in order. freq: QPC ticks a second. Fills f's derived figures (f.camBody is the caller's) and returns what the caller prints.
-    StepResult step(StepFrame& f, uint64_t freq) noexcept {
+    // keepHistory (F125): false while the per-frame lines are not written (log.on_foot_detail off): the frame is not copied into the history of earlier frames,
+    // which is kept empty, so an event that starts then has no earlier frames (nPre 0). Everything else (the triggers, the cap, the counts) is the same.
+    StepResult step(StepFrame& f, uint64_t freq, bool keepHistory = true) noexcept {
         StepResult r;
         const double fr = freq ? static_cast<double>(freq) : 1.0;
         ++totalFrames;
@@ -639,9 +641,13 @@ struct StepTracker {
                 postLeft = kPost;
             }
         }
-        hist[histHead] = f;   // the history keeps the frame after the decision, so an event's earlier frames are the ones before it
-        histHead = (histHead + 1) % kRing;
-        if (histN < kRing - 1) ++histN;
+        if (keepHistory) {
+            hist[histHead] = f;   // the history keeps the frame after the decision, so an event's earlier frames are the ones before it
+            histHead = (histHead + 1) % kRing;
+            if (histN < kRing - 1) ++histN;
+        } else {
+            histN = 0;   // none kept: a later event with the history on prints only the frames kept since
+        }
         prev = f;
         have = true;
         return r;
