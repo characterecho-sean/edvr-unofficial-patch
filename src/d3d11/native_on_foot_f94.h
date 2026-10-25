@@ -60,21 +60,34 @@ inline double raiseTarget(double neckY, double eyeHeightM, double eyeLevelY) noe
 // the armed camera would not do it. Without a stored unarmed stance of the class: crouched, the standing unarmed raise (the game's camera carries the crouch);
 // with no unarmed stance stored at all (on foot with an item from the start), the starting raise puts the upright neck kCamOverUprightNeckM under the camera.
 constexpr double kCamOverUprightNeckM = 0.08;   // the game's camera over the upright unarmed neck, standing, the head level: 8.2 cm (F97 flight), 8.7 (F95), 6.5 (F96)
-enum EyeSource : uint8_t { kEyeUnarmed = 0, kEyeUnarmedNoClass = 1, kEyeStance = 2, kEyeStandingOverCrouch = 3, kEyeStart = 4, kEyeSourceN = 5 };
+//
+// F103: a hunched unarmed stance is not the standing reference. In the F102 flight (edvr_gfx_20261024_220128) the fists' stance changed at 22:12:33 in combat:
+// the animated neck went from 1.542 to 1.306 m and the head joint from 1.67-1.69 to 1.37-1.44 m while the game's camera stayed at 1.57-1.58 m (over the neck
+// +2.8 -> +27.0 cm). Settled and not crouched by the camera, it was stored as the standing unarmed neck (1.307 m), so the view came down 23.5 cm unarmed (eye
+// 1.455 against 1.692 m) and armed after it (1.458 m): the weapons, placed from the game's camera, stood over the eye. A standing stance is upright when its head
+// joint is at a standing commander's height (the pin's own standing gate, pinHeadUpright); an unarmed standing stance that is not is hunched: it stores nothing
+// and its target is the stored upright eye, as an armed stance's is (with nothing stored, the starting raise).
+enum EyeSource : uint8_t { kEyeUnarmed = 0, kEyeUnarmedNoClass = 1, kEyeStance = 2, kEyeStandingOverCrouch = 3, kEyeStart = 4, kEyeHunched = 5, kEyeSourceN = 6 };
 inline const char* eyeSourceName(int s) noexcept {
     return s == kEyeUnarmed ? "unarmed" : s == kEyeUnarmedNoClass ? "unarmed, the stance not known" : s == kEyeStance ? "the unarmed eye of the stance"
-         : s == kEyeStandingOverCrouch ? "the standing unarmed raise over the crouch" : "the starting raise";
+         : s == kEyeStandingOverCrouch ? "the standing unarmed raise over the crouch" : s == kEyeHunched ? "unarmed hunched: the upright eye" : "the starting raise";
 }
+// The sources whose eye is an armed one (the line's armed figures); kEyeHunched is unarmed.
+inline bool eyeSourceArmed(int s) noexcept { return s == kEyeStance || s == kEyeStandingOverCrouch || s == kEyeStart; }
 enum EyeClass : int { kClassUnknown = -1, kClassStanding = 0, kClassCrouched = 1 };
 struct EyeLevel {
     bool have[2] = {false, false};
     double neckY[2] = {0.0, 0.0}, camY[2] = {0.0, 0.0};   // the settled unarmed stance's animated neck and the game's camera (the model, the head level)
     void reset() noexcept { *this = EyeLevel{}; }
-    // One settled stance's target. armed: a weapon or tool (F88's weight above 0); cls: the stance class (kClassUnknown when the pin has no crouch reference).
-    double target(bool armed, int cls, double neckYNow, double camYNow, double eyeHeightM, uint8_t* source) noexcept {
+    // One settled stance's target. armed: a weapon or tool (F88's weight above 0); cls: the stance class (kClassUnknown when the pin has no crouch reference);
+    // upright: the head joint at a standing height (F103; read for an unarmed standing stance only).
+    double target(bool armed, int cls, double neckYNow, double camYNow, double eyeHeightM, uint8_t* source, bool upright = true) noexcept {
         uint8_t src = kEyeUnarmed;
         double t = 0.0;
-        if (!armed) {
+        if (!armed && cls == kClassStanding && !upright) {
+            src = kEyeHunched;
+            t = have[kClassStanding] ? raiseTarget(neckY[kClassStanding], eyeHeightM, camYNow) : eyeHeightM - kCamOverUprightNeckM;
+        } else if (!armed) {
             if (cls == kClassStanding || cls == kClassCrouched) {
                 have[cls] = true;
                 neckY[cls] = neckYNow;

@@ -13613,7 +13613,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 else if (g_f98Eye.have[f94::kClassStanding])
                     cls = nofoot::pinCrouchedWc(nofoot::pinCrouchWeight(true, g_f98Eye.camY[f94::kClassStanding], so.camY)) ? f94::kClassCrouched : f94::kClassStanding;
                 const bool itemDrawn = armed || f97W > 0.0;
-                pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src);
+                // F103: an unarmed standing stance whose head joint is under a standing commander's height (the fists' combat stance) is hunched, not the
+                // standing reference (native_on_foot_f94.h); a head not read counts as upright, as before
+                const bool upright = !headFinite || nofoot::pinHeadUpright(p44[1]);
+                pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src, upright);
                 pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
             }
@@ -14411,7 +14414,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         if (pc.f98Src < nofoot::f94::kEyeSourceN) {   // F98c
             ++st.f98Src[pc.f98Src];
-            const int a = pc.f98Src >= nofoot::f94::kEyeStance ? 1 : 0;
+            const int a = nofoot::f94::eyeSourceArmed(pc.f98Src) ? 1 : 0;   // F103: the hunched unarmed stances' eye is an unarmed one
             st.f98EyeSum[a] += pc.f98EyeY;
             st.f98EyeMin[a] = std::min(st.f98EyeMin[a], pc.f98EyeY);
             st.f98EyeMax[a] = std::max(st.f98EyeMax[a], pc.f98EyeY);
@@ -19163,17 +19166,18 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
             char eyeBuf[2][64], neckBuf[2][24];
             for (int a = 0; a < 2; ++a) {
                 const uint32_t na = a ? st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart]
-                                      : st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass];
+                                      : st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched];
                 if (na) std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "%.3f m (min %.3f max %.3f)", st.f98EyeSum[a] / static_cast<double>(na), st.f98EyeMin[a], st.f98EyeMax[a]);
                 else std::snprintf(eyeBuf[a], sizeof(eyeBuf[a]), "none");
                 if (st.f98Have[a]) std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "%.3f m", st.f98Neck[a]);
                 else std::snprintf(neckBuf[a], sizeof(neckBuf[a]), "none");
             }
-            Log::get().note("native on foot eye level (F98c) 1 s: item %s; settled targets: unarmed %u (the stance not known %u), armed %u: the unarmed eye of the stance %u, "
-                            "the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the unarmed neck "
-                            "stored: standing %s, crouched %s",
-                            item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass], st.f98Src[f94::kEyeUnarmedNoClass],
-                            st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
+            // F103: "hunched" counts the unarmed standing stances whose head joint was under a standing height: their eye from the stored upright neck.
+            Log::get().note("native on foot eye level (F98c) 1 s: item %s; settled targets: unarmed %u (the stance not known %u, hunched %u), armed %u: the unarmed eye of "
+                            "the stance %u, the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the "
+                            "unarmed neck stored: standing %s, crouched %s",
+                            item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeUnarmedNoClass],
+                            st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
                             st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1]);
         }
         // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC

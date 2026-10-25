@@ -275,6 +275,65 @@ inline void run94(Check&& check) {
               "F98c: no unarmed stance stored: the starting raise (the upright neck 8 cm under the camera); an unarmed stance of unknown class is not stored");
     }
 
+    // ---- F103: a hunched unarmed stance is not the standing reference -------------------------------------------------------------------------------------------
+    {
+        // The F102 flight at 22:12:33: the fists took their combat stance, the animated neck 1.542 -> 1.306 m and the head joint 1.67 -> 1.37 m, while the game's camera
+        // stayed (1.570 -> 1.576 m); then the rifle was drawn (its stance's neck 1.296 m, the camera 1.559 m). Targets from settled stances; the view is the game's
+        // camera plus the raise. With F103 the combat stance is hunched (the head under the pin's standing band); without it, it is stored as the standing neck.
+        struct Fly {
+            double combatView = 0.0, armedView = 0.0, storedNeck = 0.0;
+        };
+        const auto fly = [&](bool f103) {
+            Fly r;
+            f88::Weight wt;
+            f94::NeckRaise nr;
+            f94::EyeLevel eye;
+            edvr::nofoot::f95::StanceSettle settle;
+            f94::In in;
+            in.scope = true;
+            in.dt = kDt;
+            for (int i = 0; i < 540; ++i) {
+                const double t = i * kDt;
+                const double a = t < 2.0 ? 0.0 : std::fmin(1.0, (t - 2.0) / 0.4);   // into the combat stance
+                const bool draw = t >= 4.0;
+                const double d = t < 4.0 ? 0.0 : std::fmin(1.0, (t - 4.0) / 0.4);   // the rifle's stance
+                const double head = 1.67 - 0.30 * a;
+                double n = 1.542 - 0.236 * a, g = 1.570 + 0.006 * a;
+                n += (1.296 - n) * d;
+                g += (1.559 - g) * d;
+                const double w = wt.step(draw, kDt);
+                const double neckWritten = n + w * std::fmax((g - kH) - n, 0.0);
+                edvr::nofoot::f95::SettleIn si;
+                si.valid = si.still = true;
+                si.tS = t;
+                si.neckY = neckWritten;
+                si.camY = g;
+                const edvr::nofoot::f95::SettleOut so = settle.step(si);
+                in.targetFresh = so.settled;
+                const bool upright = !f103 || edvr::nofoot::pinHeadUpright(head);
+                if (so.settled) in.targetM = eye.target(draw || w > 0.0, f94::kClassStanding, so.neckY, so.camY, kH, nullptr, upright);
+                const f94::Out o = nr.step(in);
+                const double view = g - o.seatedY;
+                if (i == 355) r.combatView = view;
+                r.armedView = view;
+            }
+            r.storedNeck = eye.neckY[f94::kClassStanding];
+            return r;
+        };
+        const Fly fixed = fly(true), before = fly(false);
+        check(within(fixed.combatView, 1.542 + kH, 0.0015) && within(fixed.armedView, 1.542 + kH, 0.0015) && within(fixed.storedNeck, 1.542, 0.002),
+              "F103: the fists' combat stance (the head joint under a standing height) is not stored; the view stays at the upright eye through it and with the rifle after it");
+        check(before.combatView < 1.542 + kH - 0.2 && before.armedView < 1.542 + kH - 0.2 && within(before.storedNeck, 1.306, 0.002),
+              "F103 (control): stored as the standing neck (the F102 build), the view comes down 23.6 cm unarmed and stays down with the rifle drawn");
+        uint8_t src = f94::kEyeSourceN;
+        f94::EyeLevel e0;
+        const double r0 = e0.target(false, f94::kClassStanding, 1.306, 1.576, kH, &src, false);
+        const bool startHunched = src == f94::kEyeHunched && within(r0, kH - f94::kCamOverUprightNeckM, 1e-9) && !e0.have[f94::kClassStanding];
+        e0.target(false, f94::kClassCrouched, 0.950, 0.990, kH, &src, false);
+        check(startHunched && src == f94::kEyeUnarmed && e0.have[f94::kClassCrouched] && !f94::eyeSourceArmed(f94::kEyeHunched),
+              "F103: a hunched stance with nothing stored takes the starting raise and stores nothing; a crouch is stored whatever the head's height; hunched is an unarmed source");
+    }
+
     // ---- the hold never sees the neck term -------------------------------------------------------------------------------------------------------------------------
     {
         // The pose carries an alignment whose y includes the neck term (-0.116) and the hold's own (+0.03): the render head reads lower by it; the input takes the

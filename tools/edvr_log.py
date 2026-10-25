@@ -11168,13 +11168,20 @@ def _hj_f98c_eye(rows, ctx):
     ue, ae = eye_mean("ueye", "un"), eye_mean("aeye", "ar")
     stored = [r["ns"] for r in sec if r["ns"] != "none"]
     start_stored = sum(int(sec[i]["start"]) for i in range(1, len(sec)) if sec[i - 1]["ns"] != "none")
-    text = ("%d s: settled targets unarmed %d (the stance not known %d), armed %d (the unarmed eye of the stance %d, the standing raise over the crouch %d, the "
-            "starting raise %d)") % (len(sec), tot["un"], tot["unk"], tot["ar"], tot["stance"], tot["over"], tot["start"])
+    hunched = sum(int(r["hunch"] or 0) for r in sec)
+    # F103: the stored upright neck is the skeleton's; a move of 10 cm or more from one second to the next is a hunched stance stored as the standing one (the
+    # F102 flight: 1.543 -> 1.307 m when the fists took their combat stance, and every view after it 23.5 cm low)
+    vals = [float(v.split()[0]) for v in stored]
+    jumps = ["%.3f -> %.3f m" % (vals[i - 1], vals[i]) for i in range(1, len(vals)) if abs(vals[i] - vals[i - 1]) >= 0.10]
+    text = ("%d s: settled targets unarmed %d (the stance not known %d, hunched %d), armed %d (the unarmed eye of the stance %d, the standing raise over the crouch "
+            "%d, the starting raise %d)") % (len(sec), tot["un"], tot["unk"], hunched, tot["ar"], tot["stance"], tot["over"], tot["start"])
     if ue is not None:
         text += "; the unarmed eye %.3f m" % ue
     if ae is not None:
         text += "; the armed eye %.3f m" % ae
     text += "; the unarmed standing neck stored %s" % (stored[-1] if stored else "never")
+    if jumps:
+        return ("PARTIAL", text + "; the stored standing neck jumped (%s): a hunched stance stored as the upright one" % ", ".join(jumps))
     if not tot["ar"]:
         return ("IDLE", text + "; no armed settled stance")
     if start_stored:
@@ -11521,7 +11528,7 @@ HEALTH_RULES = (
                 r"put away (?P<away>\d+)"),
     ), _hj_f99a_draw),
     _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
-        ("sec", r"native on foot eye level \(F98c\) 1 s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)\), armed (?P<ar>\d+): "
+        ("sec", r"native on foot eye level \(F98c\) 1 s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)(?:, hunched (?P<hunch>\d+))?\), armed (?P<ar>\d+): "
                 r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
                 r"put the view at: unarmed (?P<ueye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none), armed (?P<aeye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none); the unarmed "
                 r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"),
@@ -12879,8 +12886,8 @@ def self_test_health():
         # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
         F98C = "eye level (F98c)"
 
-        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none"):
-            return R("native on foot eye level (F98c) 1 s: item %s", item, un, unk, ar, stance, over, start, ueye, aeye, ns, nc)
+        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0):
+            return R("native on foot eye level (F98c) 1 s: item %s", item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc)
 
         EYE = "1.693 m (min 1.693 max 1.693)"
         check("F98c eye: unarmed stored, then the rifle at the unarmed eye", [eye98("$humanoid_fists_name;", un=60, ueye=EYE)] + [eye98(ar=60, stance=60, aeye=EYE)] * 2,
@@ -12888,6 +12895,14 @@ def self_test_health():
         check("F98c eye: the starting raise with an unarmed stance stored", [eye98("$humanoid_fists_name;", un=60, ueye=EYE), eye98(ar=60, start=60, aeye="1.629 m "
               "(min 1.629 max 1.629)")], 0, [("PARTIAL", F98C)], has=["the starting raise taken 60 times with an unarmed stance stored"])
         check("F98c eye: fists only", [eye98("$humanoid_fists_name;", un=60, ueye=EYE)] * 2, 0, [("IDLE", F98C)], has=["no armed settled stance"])
+        # F103: the F102 flight's combat stance stored as the standing neck (no hunched count: the build before F103), against the fixed build's hunched seconds
+        LOW = "1.455 m (min 1.454 max 1.457)"
+        check("F103 eye: a hunched stance stored as the upright neck", [eye98("$humanoid_fists_name;", un=90, ueye=EYE, ns="1.542 m"),
+              eye98("$humanoid_fists_name;", un=70, ueye=LOW, ns="1.307 m"), eye98(ar=74, stance=74, aeye="1.458 m (min 1.458 max 1.458)", ns="1.308 m")], 0,
+              [("PARTIAL", F98C)], has=["the stored standing neck jumped (1.542 -> 1.307 m): a hunched stance stored as the upright one"])
+        check("F103 eye: the combat stance hunched, the upright neck kept", [eye98("$humanoid_fists_name;", un=90, ueye=EYE, ns="1.542 m"),
+              eye98("$humanoid_fists_name;", un=70, hunch=70, ueye=EYE, ns="1.542 m"), eye98(ar=74, stance=74, aeye=EYE, ns="1.542 m")], 0, [("OK", F98C)],
+              has=["unarmed 160 (the stance not known 0, hunched 70)", "the armed eye 1.693 m"], lacks=["jumped", "UNPARSED"])
 
         # ---- F98a: the F94a and F95a rules against the F97a design ----
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,

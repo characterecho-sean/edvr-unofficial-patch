@@ -4684,9 +4684,11 @@ struct PinEyeCal {
         return true;
     }
 };
+// The head joint at a standing commander's height (F103: also the F98c eye level's test of an upright unarmed stance).
+inline bool pinHeadUpright(double headY) noexcept { return headY >= kPinStandHeadMinM && headY <= kPinStandHeadMaxM; }
 // The standing gate of the calibration: unarmed and not in ADS, the AMC still, the head joint's height in range (its pitch is gated in add()).
 inline bool pinCalStanding(double speed, bool armed, bool ads, double headY) noexcept {
-    return !armed && !ads && speed < kPinWalkMps && headY >= kPinStandHeadMinM && headY <= kPinStandHeadMaxM;
+    return !armed && !ads && speed < kPinWalkMps && pinHeadUpright(headY);
 }
 // ---- F69a: the neck target follows the camera's crouch, not the stance's head -----------------------------------------------------------------------
 // F68 (log 152023, dump 152258): the animated neck-to-eye vector of the armed rifle stance is (5.3, 6.6, 15.4) cm, not the rest (0, 15.5, 9.0): the
