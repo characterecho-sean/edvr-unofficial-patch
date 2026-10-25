@@ -39,11 +39,15 @@ class UiContent {
         uint32_t frame=0, bytes=0;
         unsigned read=0;
         bool ready=false;
+        // F108: a Texture2DArray view's entry (the in-world screens' interface): the view's slices, each with its own blocks and ages.
+        bool array=false;
+        uint32_t firstSlice=0, slices=0;
     };
     Entry entries[24];
-    Ptr<ID3D11ComputeShader> shader;
+    Ptr<ID3D11ComputeShader> shader, arrayShader;
     Ptr<ID3D11Buffer> cb;
     bool failed=false;
+    bool arrayFailed=false;   // F108: the array digest's shader could not be made; 2D surfaces are unaffected
 public:
     static constexpr uint32_t kBudget=64*1024*1024;
     static constexpr uint32_t kBlock=4;
@@ -96,11 +100,12 @@ public:
         // Only GPU-rendered UI surfaces, never a static sprite/glyph atlas.
         if(!bpp) {lastDecision=Decision::kDeclinedFormat;++totals.declined;return nullptr;}
         if(!(td.BindFlags&D3D11_BIND_RENDER_TARGET)) {lastDecision=Decision::kDeclinedNoRenderTarget;++totals.declined;return nullptr;}
+        if(sd.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY) return prepareArray(ctx,surface,source.Get(),td,sd,frame,sample);
         if(td.ArraySize!=1 || td.SampleDesc.Count!=1 || sd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
            sd.Texture2D.MostDetailedMip!=0 || td.MipLevels!=1) {lastDecision=Decision::kDeclinedViewShape;++totals.declined;return nullptr;}
         if(bytes>kBudget) {lastDecision=Decision::kDeclinedBudget;++totals.declined;return nullptr;}
         Entry* found=nullptr;
-        for(auto& e:entries) if(e.source.Get()==source.Get() && e.format==sd.Format) {found=&e;break;}
+        for(auto& e:entries) if(!e.array && e.source.Get()==source.Get() && e.format==sd.Format) {found=&e;break;}
         if(found && found->ready && found->frame==frame) {lastDecision=Decision::kHit;++totals.hits;return found->view[found->read].Get();}
         const bool isNew=!found;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
@@ -167,13 +172,103 @@ public:
         if(sample)gpu.end(ctx);
         e.frame=frame;e.ready=true;return e.view[e.read].Get();
     }
+    // F108: a Texture2DArray view (the in-world screens' interface). The view's slices from its first, mip 0 (the view must start at it;
+    // the source may carry more mips, which follow mip 0 when the game makes them), each slice its own blocks and ages: the digest an
+    // R32_UINT array and the ages R8 arrays of the view's slice count, read by the tracked stand-in at the slice the game samples. The
+    // same decisions, totals, budget and entries as a 2D surface; an array entry is never a 2D one's.
+    ID3D11ShaderResourceView* prepareArray(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* surface,ID3D11Texture2D* source,
+                                          const D3D11_TEXTURE2D_DESC& td,const D3D11_SHADER_RESOURCE_VIEW_DESC& sd,uint32_t frame,bool sample) {
+        const uint32_t first=sd.Texture2DArray.FirstArraySlice;
+        const uint32_t slices=first<td.ArraySize ? (sd.Texture2DArray.ArraySize<td.ArraySize-first ? sd.Texture2DArray.ArraySize : td.ArraySize-first) : 0u;
+        if(td.SampleDesc.Count!=1 || sd.Texture2DArray.MostDetailedMip!=0 || !slices) {
+            lastDecision=Decision::kDeclinedViewShape;++totals.declined;return nullptr;
+        }
+        const uint32_t srcW=td.Width,srcH=td.Height;
+        const uint32_t blocksW=(srcW+kBlock-1)/kBlock,blocksH=(srcH+kBlock-1)/kBlock;
+        const uint64_t bytes=bytesFor(srcW,srcH)*slices;
+        if(bytes>kBudget) {lastDecision=Decision::kDeclinedBudget;++totals.declined;return nullptr;}
+        Entry* found=nullptr;
+        for(auto& e:entries) if(e.array && e.source.Get()==source && e.format==sd.Format && e.firstSlice==first && e.slices==slices) {found=&e;break;}
+        if(found && found->ready && found->frame==frame) {lastDecision=Decision::kHit;++totals.hits;return found->view[found->read].Get();}
+        const bool isNew=!found;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(!arrayShader && !arrayFailed) {
+            arrayShader.Attach(shaderSwapCreateCs(ctx,kUiContentArrayBytecode,sizeof(kUiContentArrayBytecode),"UI source edits (array)","ui content"));
+            if(!arrayShader) arrayFailed=true;
+        }
+        if(arrayShader && !cb) {
+            D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            dev->CreateBuffer(&bd,nullptr,&cb);
+        }
+        if(!arrayShader || !cb) {lastDecision=Decision::kDeclinedShaderFailed;++totals.declined;return nullptr;}
+        if(!found){
+            while(!found){
+                if(allocated+bytes<=kBudget) for(auto& e:entries) if(!e.source) {found=&e;break;}
+                if(found)break;
+                Entry* oldest=nullptr;
+                for(auto& e:entries) if(e.source && e.frame!=frame && (!oldest || frame-e.frame>frame-oldest->frame))oldest=&e;
+                if(!oldest){lastDecision=Decision::kDeclinedNoFreeEntry;++totals.declined;return nullptr;}
+                allocated-=oldest->bytes;*oldest={};++totals.evicted;++lastEvicted;
+            }
+            Entry e;e.source=source;e.format=sd.Format;e.bytes=uint32_t(bytes);e.array=true;e.firstSlice=first;e.slices=slices;
+            D3D11_TEXTURE2D_DESC dtd{};dtd.Width=blocksW;dtd.Height=blocksH;dtd.MipLevels=1;dtd.ArraySize=slices;dtd.SampleDesc.Count=1;
+            dtd.Usage=D3D11_USAGE_DEFAULT;dtd.Format=DXGI_FORMAT_R32_UINT;dtd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;ud.Texture2DArray.ArraySize=slices;
+            ud.Format=DXGI_FORMAT_R32_UINT;
+            if(FAILED(dev->CreateTexture2D(&dtd,nullptr,&e.digest)) ||
+               FAILED(dev->CreateUnorderedAccessView(e.digest.Get(),&ud,&e.digestUav))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
+            dtd.Format=DXGI_FORMAT_R8_UNORM;dtd.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;ud.Format=DXGI_FORMAT_R8_UNORM;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};vd.Format=DXGI_FORMAT_R8_UNORM;vd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            vd.Texture2DArray.MipLevels=1;vd.Texture2DArray.ArraySize=slices;
+            for(unsigned i=0;i<2;++i) if(FAILED(dev->CreateTexture2D(&dtd,nullptr,&e.age[i])) ||
+                FAILED(dev->CreateShaderResourceView(e.age[i].Get(),&vd,&e.view[i])) ||
+                FAILED(dev->CreateUnorderedAccessView(e.age[i].Get(),&ud,&e.out[i]))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
+            *found=std::move(e);allocated+=found->bytes;
+        }
+        auto& e=*found;
+        lastAge=isNew?0u:frame-e.frame;
+        const bool doReset=!e.ready || frame-e.frame!=1;
+        if(sample)gpu.begin(ctx);
+        {
+            Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;
+            ID3D11ShaderResourceView* savedSrv[2]{};
+            ID3D11UnorderedAccessView* savedUav[2]{};
+            Ptr<ID3D11Buffer> savedCb;
+            ctx->CSGetShader(&saved,classes,&nc);
+            ctx->CSGetShaderResources(0,2,savedSrv);
+            ctx->CSGetUnorderedAccessViews(0,2,savedUav);
+            ctx->CSGetConstantBuffers(0,1,&savedCb);
+            struct CsCb{uint32_t seed,srcW,srcH,pad0;};
+            const CsCb cbData{doReset?1u:0u,srcW,srcH,0u};
+            vScreenUpdateSubresourceRaw(ctx,cb.Get(),0,nullptr,&cbData,0,0);
+            ID3D11ShaderResourceView* in[2]={surface,e.view[e.read].Get()};
+            ID3D11UnorderedAccessView* outUav[2]={e.digestUav.Get(),e.out[1-e.read].Get()};
+            ctx->CSSetShader(arrayShader.Get(),nullptr,0);
+            ctx->CSSetShaderResources(0,2,in);
+            ctx->CSSetUnorderedAccessViews(0,2,outUav,nullptr);
+            ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+            ctx->Dispatch((blocksW+7)/8,(blocksH+7)/8,slices);
+            ID3D11UnorderedAccessView* zeroUav[2]{};ID3D11ShaderResourceView* zeroSrv[2]{};ID3D11Buffer* zeroCb=nullptr;
+            ctx->CSSetUnorderedAccessViews(0,2,zeroUav,nullptr);ctx->CSSetShaderResources(0,2,zeroSrv);ctx->CSSetConstantBuffers(0,1,&zeroCb);
+            ctx->CSSetShaderResources(0,2,savedSrv);ctx->CSSetUnorderedAccessViews(0,2,savedUav,nullptr);
+            ctx->CSSetConstantBuffers(0,1,savedCb.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
+            for(UINT i=0;i<nc;++i)classes[i]->Release();
+            for(auto* p:savedSrv)if(p)p->Release();
+            for(auto* p:savedUav)if(p)p->Release();
+        }
+        e.read=1-e.read;
+        if(doReset){++totals.resets;lastDecision=Decision::kReset;}
+        else{++totals.updates;lastDecision=Decision::kUpdated;}
+        if(sample)gpu.end(ctx);
+        e.frame=frame;e.ready=true;return e.view[e.read].Get();
+    }
     void retire(uint32_t frame){
         for(auto& e:entries) if(e.source && frame-e.frame>120){allocated-=e.bytes;e={};++totals.evicted;}
     }
     void reset() noexcept {
         gpu.reset();
         for(auto& e:entries) e={};
-        shader.Reset(); cb.Reset(); failed=false; totals={}; allocated=0;
+        shader.Reset(); arrayShader.Reset(); cb.Reset(); failed=false; arrayFailed=false; totals={}; allocated=0;
         lastDecision=Decision::kDeclinedNoSurface; lastAge=0; lastEvicted=0;
     }
 };
