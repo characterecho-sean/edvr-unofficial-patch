@@ -28,6 +28,7 @@
 #include "f98_checks.h"     // F98a: the left elbow's stable pole transported from its seed
 #include "f98b_checks.h"    // F98b: the interaction label placed in the world, upright and facing the neck's pivot
 #include "f99_checks.h"     // F99a: a drawn item's hands from the game's own selection, not from Status.json
+#include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the load sampler's want, the paced F68d window, the throttled lines
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
 
 #include <array>
@@ -7272,6 +7273,8 @@ int wmain(int argc, wchar_t** argv) {
     f98btest::run98b(check);
     // F99a: the hands' bridge from the game's selection until Status.json names the item, its releases, and the draw-onset instrument.
     f99test::run99(check);
+    // F100: the marker tee's prefilter leaves the draw serial and the decisions as the slow path does; the load sampler ends on foot; the paced and throttled lines.
+    f100test::run100(check);
     // F101: this runtime's ladder against a released provider's shape checks, the frozen v0.21.1 layouts, reticle follow game in the render path.
     f101test::run101(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
