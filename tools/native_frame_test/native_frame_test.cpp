@@ -36,6 +36,7 @@
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
 #include "f116_checks.h"    // F116: the HUD hidden while a terminal fills the view (hysteresis, frame order, the hook's skip, the lines)
+#include "f114b_checks.h"   // F114b: the panel pointer's turned transform, the click path, the mode getter
 
 #include <array>
 #include <chrono>
@@ -7300,6 +7301,8 @@ int wmain(int argc, wchar_t** argv) {
     // F116: the HUD hidden while a terminal fills the view: the footprint, the hysteresis (2 frames over 15% hide, 10 under 10% show), the frame order, the hook's
     // skip, the counters' read (logged only), the episodes and the lines.
     f116test::run116(check);
+    // F114b: the turned transform named from the owner's rows, its transform in the camera's frame and the eye's view; the click edges; the mode getter.
+    f114btest::run114b(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
