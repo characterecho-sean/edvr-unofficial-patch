@@ -61,6 +61,7 @@
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
 #include "native_on_foot_f123.h"   // F123: head containment, the leash and the wall contact (the machine, the fade mix, the lines)
+#include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -343,6 +344,7 @@ InstallState g_install = InstallState::NotTried;
 bool g_cfgRead = false;
 uint32_t g_cfgGeneration = 0;
 bool g_keyLast = false;
+bool g_logDetailLast = false;      // F125: log.on_foot_detail as last announced
 uint64_t g_lastGateLineMs = 0;
 bool g_methodLast = true;          // the method as last read (and logged)
 bool g_methodWasGate = true;       // the method on the previous frame boundary (a change clears the gate method's flag)
@@ -755,6 +757,25 @@ void readKey() {
                         on ? " (an on-foot Cinema request is answered as HMD stereo, by the method below, while a game session is live)"
                            : " (every natural mode request passes through unchanged)");
         g_keyLast = on;
+    }
+    // F125: the detailed on-foot log (log.on_foot_detail, live, off by default; [log] is plumbing, so no menu row). Off, an on-foot measurement writes one
+    // summary per 10 s and the per-frame traces and the settled features' lines are not written; on, every line is written as before F125. The lines read the
+    // value cached here (logwin::detail()), from any thread. Said at the first read and at each change, and --health takes the log's state from this line.
+    // The size cap is the log's own, decided when it opened (log.cpp: 64 MB with the key on and no max_mb), so a later change does not move it.
+    const bool logDetail = cfg.getBool("log.on_foot_detail", false);
+    nofoot::logwin::setDetail(logDetail);
+    if (first || logDetail != g_logDetailLast) {
+        const unsigned long long capMb = Log::get().maxBytes() / (1024ull * 1024ull);
+        char cap[64];
+        if (capMb) std::snprintf(cap, sizeof(cap), "a size cap of %llu MB", capMb);
+        else std::snprintf(cap, sizeof(cap), "no size cap");
+        Log::get().note("native on foot log (F125): detail %s, summary window %u s (live, log.on_foot_detail: %s); the log has %s, set when it opened",
+                        logDetail ? "on" : "off", nofoot::logwin::windowSeconds(logDetail),
+                        logDetail ? "every on-foot line as before, about 4 MB a minute on foot"
+                                  : "each on-foot measurement writes a summary, events as they happen; per-frame traces and the settled features' lines are not "
+                                    "written",
+                        cap);
+        g_logDetailLast = logDetail;
     }
     // F34: the method is the gate (the swap path is gone). The HUD override, the panel and HRC patches follow the master key (F34: they are one
     // feature now, each write still verified). Keys removed in F34 that a settings file may still carry are named once, by retiredKeysNote below.

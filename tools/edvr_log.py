@@ -10322,7 +10322,8 @@ def self_test_phase_failure():
 #
 # Statuses: OK; PARTIAL (it ran and applied, but not for everything or not every second); NEVER APPLIED (its lines are there and say it did nothing, or a trigger the
 # log proves happened found it idle); IDLE (its lines say there was nothing for it to act on, which is not a failure); UNPARSED (labelled lines that no pattern
-# matches: the rule is out of date, not the feature). A rule with no line at all in the window is listed as not present. Exit 3 when any rule says NEVER APPLIED, 4
+# matches: the rule is out of date, not the feature). A rule with no line at all in the window is listed as not present, and one that reads only the detailed
+# on-foot log's lines (needs_detail, F125) as not judged when the log's F125 line says that log was off. Exit 3 when any rule says NEVER APPLIED, 4
 # for an UNPARSED rule and no NEVER APPLIED, 0 otherwise (2 for a wrong build is main()'s, before any of this).
 # The self-test (self_test_health) renders its fixture lines from the C format strings in src\d3d11\native_on_foot.cpp, so a format that drifts from its rule fails the
 # build. The PARTIAL cut-offs (90% of the decisions scaled or bound, half the draws patched, half the seconds holding, 80%/50% elsewhere) are judgement calls from the
@@ -10334,12 +10335,60 @@ HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
 HEALTH_OTHER_TAGS = 8
 HEALTH_SELF_TEST_CHECKS = 0
 
-HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge")
+# needs_detail (F125): the rule reads lines that only the detailed on-foot log writes (log.on_foot_detail = on). In a log whose F125 line says the detail log was
+# off, such a rule with no line of its own is listed as not judged, never as NEVER APPLIED or not present; with the detail log on, or in a log written before
+# F125 (no F125 line), it is judged as any other rule.
+HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge needs_detail", defaults=(False,))
 
 H_F88 = "weapon eye offset (F88)"
 H_F89_ADS = "ads transition (F89)"
 H_F106 = "ADS sight in both eyes (F106)"
 H_ANCHOR = "prompt anchor (F87p)"
+H_F125 = "log diet (F125)"
+H_F125_LABEL = "native on foot log (F125)"
+H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
+# Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
+# line, and its report stays as it was.
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125,))
+
+# ---- F125: summary windows (the on-foot log diet) ----
+# By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
+# an ADS end, the on-foot exit). A line that printed "1 s" prints the window's seconds; one that said "this second" says "these N s". A rule reads the length
+# through the named group wl (H_WL, H_WL_THIS; not "win", which F91 and F111 use), and a row with no wl, from a log written before F125, covers one second.
+# A count of seconds with a flag is appended to its line as "label N of M s" (_hxs): optional, so an old log's row carries None there and its judge falls back to
+# the row itself (_hcount).
+H_WL = r"(?P<wl>\d+) s"
+H_WL_THIS = r"(?:this second|these (?P<wl>\d+) s)"
+
+
+def _hwl(row):
+    """The seconds a summary row covers: its window, or 1 for a row of a 1 s line (a log written before F125)."""
+    return int(row.get("wl") or 1)
+
+
+def _hsecs(rows):
+    """The seconds a list of summary rows covers. Use it wherever a count of rows is printed or judged as seconds."""
+    return sum(_hwl(r) for r in rows)
+
+
+def _hxs(label, n="xs", m="ws", sep="; "):
+    """An optional appended field `<sep><label> N of M s` (F125), groups n (seconds with the flag) and m (the window's folded seconds). Put it before a pattern's
+    final $ tail, never after it; a line without the field matches with both groups None."""
+    return r"(?:%s%s (?P<%s>\d+) of (?P<%s>\d+) s)?" % (re.escape(sep), re.escape(label), n, m)
+
+
+def _hcount(rows, n, fallback):
+    """Seconds with a flag over summary rows: the row's counted field n where the line carries one, else 1 or 0 by fallback(row) (a 1 s row of an older log)."""
+    return sum(int(r[n]) if r.get(n) is not None else (1 if fallback(r) else 0) for r in rows)
+
+
+def _hdetail(ctx):
+    """F125: the detailed on-foot log over the window: None (no F125 line: a log written before F125, or native on foot never armed), "off", "on", or "mixed"
+    (the key was changed inside the window). The state in force when a --since window opens is the last F125 line before it (health_scan's "entry" row)."""
+    states = {r["detail"] for r in _hrows(ctx, H_F125, "entry") + _hrows(ctx, H_F125, "state")}
+    if not states:
+        return None
+    return states.pop() if len(states) == 1 else "mixed"
 
 
 def _hrows(ctx, name, kind):
@@ -12392,11 +12441,32 @@ def _hj_f116_hud_hide(rows, ctx):
     return ("OK", text)
 
 
-def _hrule(name, tags, labels, kinds, judge):
-    return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
+def _hj_f125_diet(rows, ctx):
+    """F125: the on-foot log's own state, from its announce line (written when native on foot arms and at each change of log.on_foot_detail). OK while the
+    summary log is in force (the diet applied: 10 s summaries, the detail-only lines not written); IDLE while the detail log is (every on-foot line as before
+    F125, nothing for the diet to do). A window opened after the last line takes the state from it (the "entry" row)."""
+    seq = rows.get("entry", []) + rows.get("state", [])
+    if not seq:
+        return None
+    where = " (set before the window)" if not rows.get("state") else ""
+    state = _hdetail(ctx)
+    if state == "off":
+        return ("OK", "detail off%s: summary windows of %s s; per-frame traces and the settled features' detail lines are not written, and the rules that read only "
+                      "those are listed as not judged" % (where, seq[-1]["wl"]))
+    if state == "on":
+        return ("IDLE", "detail on%s: windows of %s s, every on-foot line as before F125 (about 4 MB a minute on foot)" % (where, seq[-1]["wl"]))
+    changes = sum(1 for a, b in zip(seq, seq[1:]) if a["detail"] != b["detail"])
+    return ("OK", "detail changed %d time(s) in the window, %s at its end: the detail-only lines are in the log only where it was on" % (changes, seq[-1]["detail"]))
+
+
+def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
+    return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
 
 HEALTH_RULES = (
+    _hrule(H_F125, ("F125",), (H_F125_LABEL,), (
+        ("state", H_F125_RE.pattern),
+    ), _hj_f125_diet),
     _hrule("weapon readout size (F90)", ("F90", "F91"), ("weapon readout size (F90)", "weapon readout size (F91)"), (
         ("part", r"weapon readout size \(F90\) 1 s: (?P<role>[a-zA-Z ]+?) \(slot (?P<slot>\d+) name (?P<name>\d+)\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), "
                  r"scaled (?P<scaled>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
@@ -12885,6 +12955,9 @@ def health_scan(text, since=None, until=None):
     unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
     tagged = 0
     first = last = None
+    # F125: the detail log's state is said when native on foot arms and at each change, often long before a --since window opens. The last F125 line read
+    # before the window's first line is the state in force as it opens: it goes to the log diet rule as an "entry" row.
+    carried, entered = None, False
     for raw in text.splitlines():
         if "(F" not in raw:
             continue
@@ -12893,7 +12966,16 @@ def health_scan(text, since=None, until=None):
             continue
         sm = HEALTH_STAMP_RE.match(raw)
         tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
-        if not _health_in_window(tod, since, until):
+        inside = _health_in_window(tod, since, until)
+        if inside and not entered:
+            entered = True
+            if carried is not None:
+                rows[H_F125].setdefault("entry", []).append(carried)
+        if H_F125_LABEL in raw:
+            g = H_F125_RE.search(raw)
+            if g:
+                carried = dict(g.groupdict(), _t=tod)
+        if not inside:
             continue
         stamp = "%s:%s:%s" % sm.group(1, 2, 3) if sm else ""
         tagged += 1
@@ -12934,34 +13016,43 @@ def health_scan(text, since=None, until=None):
     return {"census": census, "rows": rows, "unparsed": unparsed, "tagged": tagged, "first": first, "last": last}
 
 
-def health_verdicts(scan):
-    """[(rule, status, detail)] in table order for the rules with lines in the window, and the names of the rules with none."""
-    out, absent = [], []
-    for rule in HEALTH_RULES:
-        got = rule.judge(scan["rows"][rule.name], scan["rows"])
+def health_verdicts(scan, rules=None):
+    """[(rule, status, detail)] in table order for the rules with lines in the window, the names of the rules with none, and (F125) the names of the rules not
+    judged because they read only the detailed on-foot log's lines and the log says it was off. rules: HEALTH_RULES unless given (the self-test's variants)."""
+    out, absent, unjudged = [], [], []
+    detail_log = _hdetail(scan["rows"])
+    for rule in HEALTH_RULES if rules is None else rules:
+        own = scan["rows"][rule.name]
         count, example = scan["unparsed"][rule.name]
+        # Before the judge: a judge may find a NEVER APPLIED in other rules' rows (a trigger the log proves) that the summary log never meant to answer.
+        if rule.needs_detail and detail_log == "off" and not count and not any(own.values()):
+            unjudged.append(rule.name)
+            continue
+        got = rule.judge(own, scan["rows"])
         if got is None:
             if count:
                 out.append((rule, "UNPARSED", "%d line(s) carry the rule's label but no pattern matches (first: %s)" % (count, example)))
-            else:
+            elif rule.name not in HEALTH_QUIET_WHEN_ABSENT:
                 absent.append(rule.name)
             continue
         status, detail = got
         if count:
             detail += " [+%d line(s) the rule's patterns do not match: %s]" % (count, example[:80])
         out.append((rule, status, detail))
-    return out, absent
+    return out, absent, unjudged
 
 
-def health_report(scan, window=""):
-    """(lines, exit code) of the --health report for a health_scan result."""
-    verdicts, absent = health_verdicts(scan)
+def health_report(scan, window="", rules=None):
+    """(lines, exit code) of the --health report for a health_scan result. rules: as health_verdicts'."""
+    verdicts, absent, unjudged = health_verdicts(scan, rules)
     census = scan["census"]
     lines = ["[edvr] health%s: %d build-tagged lines, %d tags, %s to %s" % (window, scan["tagged"], len(census), scan["first"] or "-", scan["last"] or "-")]
     for rule, status, detail in verdicts:
         lines.append("  %-13s  %-26s %s" % (status, rule.name, detail))
     if absent:
         lines.append("  not present    %s" % ", ".join(absent))
+    if unjudged:
+        lines.append("  not judged (detail log off)  %s" % ", ".join(unjudged))
     covered = {t for rule in HEALTH_RULES for t in rule.tags}
     order = sorted(census, key=lambda t: (-int(re.match(r"F(\d+)", t).group(1)), t))
     shown = [t for t in order if t not in covered] if not scan.get("all") else order
@@ -12975,9 +13066,10 @@ def health_report(scan, window=""):
     bad = [rule.name for rule, status, _ in verdicts if status == "NEVER APPLIED"]
     drift = [rule.name for rule, status, _ in verdicts if status == "UNPARSED"]
     counts = collections.Counter(status for _, status, _ in verdicts)
-    lines.append("[edvr] health: %s%s; exit %d" % (
+    lines.append("[edvr] health: %s%s%s; exit %d" % (
         ", ".join("%d %s" % (counts[s], s) for s in ("OK", "PARTIAL", "NEVER APPLIED", "IDLE", "UNPARSED") if counts[s]) or "no rule had a line",
-        "; %d not present" % len(absent) if absent else "", 3 if bad else 4 if drift else 0))
+        "; %d not present" % len(absent) if absent else "", "; %d not judged (detail log off)" % len(unjudged) if unjudged else "",
+        3 if bad else 4 if drift else 0))
     return lines, (3 if bad else 4 if drift else 0)
 
 
@@ -15264,6 +15356,59 @@ def self_test_health():
         rc, out = cli(["--file", write(body([f90_idle()])), "--since", "10:00:00"])
         if rc != 1 or "belong to --health" not in out:
             print("health: --since without --health rc=%d:\n%s" % (rc, out))
+            ok = False
+
+        # ---- F125: the on-foot log diet: the detail state, the rules that need the detail log, the window helpers ----
+        F125_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        F125_ON = R("native on foot log (F125): detail %s", "on", 1)
+        check("F125: a log with no F125 line reports as before (no log diet row, nothing not judged)", [f90_part(), f90_part()], 0, [("OK", F90S)],
+              lacks=[H_F125, "not judged"])
+        check("F125: detail off is the diet applied", [F125_OFF, f90_part(), f90_part()], 0, [("OK", H_F125), ("OK", F90S)],
+              has=["detail off: summary windows of 10 s"], lacks=["not judged (detail log off)", "set before the window"])
+        check("F125: detail on is the diet idle", [F125_ON, f90_part()], 0, [("IDLE", H_F125)], has=["detail on: windows of 1 s"])
+        check("F125: the key changed in the window", [F125_OFF, f90_part(), F125_ON], 0, [("OK", H_F125)], has=["detail changed 1 time(s) in the window, on at its end"])
+        check("F125: the state set before a --since window is the state in it", [F125_OFF, (90, f90_part()), (91, f90_part())], 0, [("OK", H_F125)],
+              has=["detail off (set before the window)"], extra=["--since", "10:01:00"])
+        check("F125: a drifted announce line is UNPARSED, not a state", [F125_OFF.replace("detail off", "detail maybe")], 4, [("UNPARSED", H_F125)])
+        # needs_detail, on a variant of the table: no rule needs the detail log until the lines move (F125's later steps), so the self-test makes one that does.
+        syn = HealthRule("synthetic detail rule (F999)", ("F999",), ("synthetic detail rule (F999)",), (),
+                         lambda rows, ctx: ("NEVER APPLIED", "a trigger the log proves, read from another rule's rows"), True)
+        d_rules = tuple(r._replace(needs_detail=True) if r.name == F91F else r for r in HEALTH_RULES) + (syn,)
+
+        def detail_report(name, msgs, rc, has=(), lacks=(), since=None):
+            nonlocal ok, checks
+            checks += 1
+            scan = health_scan(body(msgs), parse_health_time(since) if since else None)
+            scan["rows"][syn.name], scan["unparsed"][syn.name] = {}, [0, ""]
+            lines, got_rc = health_report(scan, "", d_rules)
+            out = "\n".join(lines)
+            bad = [w for w in has if w not in out] + [x for x in lacks if x in out]
+            if got_rc != rc or bad:
+                print("health %s: rc=%d wanted %d; missing or unwanted %r:\n%s" % (name, got_rc, rc, bad, out))
+                ok = False
+
+        detail_report("F125: detail off, a rule that needs the detail log and has no line is not judged (never NEVER APPLIED, never not present)",
+                      [F125_OFF, f90_part()], 0, has=["  not judged (detail log off)  %s, %s" % (F91F, syn.name), "; 2 not judged (detail log off); exit 0"],
+                      lacks=["NEVER APPLIED", "not present    %s" % F91F, ", %s" % F91F])
+        detail_report("F125: detail on, the same rules are judged as before", [F125_ON, f90_part()], 3,
+                      has=[row("NEVER APPLIED", syn.name), "not present    ", ", %s" % F91F], lacks=["not judged"])
+        detail_report("F125: no F125 line (an older log), the same rules are judged as before", [f90_part()], 3,
+                      has=[row("NEVER APPLIED", syn.name), ", %s" % F91F], lacks=["not judged", H_F125])
+        detail_report("F125: off then on in the window, judged as with the detail log on", [F125_OFF, f90_part(), F125_ON], 3,
+                      has=[row("NEVER APPLIED", syn.name)], lacks=["not judged"])
+        detail_report("F125: the off state carried into a --since window", [F125_OFF, (90, f90_part())], 0, has=["not judged (detail log off)"],
+                      lacks=["NEVER APPLIED"], since="10:01:00")
+        # The window helpers the converted rules read with.
+        checks += 1
+        rows_wl = [{"wl": None}, {"wl": "10"}, {}, {"wl": "3"}]
+        wl_rx, this_rx = re.compile(r"line \(F999\) " + H_WL + r": n (?P<n>\d+)" + _hxs("armed")), re.compile(r"line \(F999\): (?P<n>\d+) " + H_WL_THIS + r"$")
+        old, new = wl_rx.search("line (F999) 1 s: n 4"), wl_rx.search("line (F999) 10 s: n 4; armed 7 of 10 s")
+        old2, new2 = this_rx.search("line (F999): 5 this second"), this_rx.search("line (F999): 5 these 10 s")
+        counted = [{"xs": None, "armed": "1"}, {"xs": None, "armed": "0"}, {"xs": "7", "armed": "1"}]
+        if not (_hsecs(rows_wl) == 15 and _hwl({}) == 1 and old and old.group("wl") == "1" and old.group("xs") is None and new and new.group("wl") == "10" and
+                new.group("xs") == "7" and new.group("ws") == "10" and old2 and old2.group("wl") is None and _hwl(old2.groupdict()) == 1 and new2 and
+                new2.group("wl") == "10" and _hcount(counted, "xs", lambda r: r["armed"] == "1") == 8):
+            print("health: the F125 window helpers (_hsecs, _hwl, H_WL, H_WL_THIS, _hxs, _hcount) do not read old and new lines alike")
             ok = False
 
         # ---- the build check comes first, and the help names the mode ----

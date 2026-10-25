@@ -45,6 +45,7 @@
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 #include "f126_checks.h"    // F126: the pin's eye pair from one frame, the arm IK's snapshot of the current FP rig, a nearly straight elbow reaching the grip
 #include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
+#include "f125_checks.h"    // F125: the on-foot log's windows (the detail gate, the summary window, the per-second fold, the flush)
 
 #include <array>
 #include <chrono>
@@ -7347,6 +7348,9 @@ int wmain(int argc, wchar_t** argv) {
     // F123: the leash on the physical offset (horizontal 18 to 23 cm, upward 3 to 8 cm), the hard timer, the recentre sequence, the wall contact (32 of 64 cells, 3 frames, latched,
     // released with the head inside soft), the levels combined by max, everything cleared off foot, and the lines.
     f123test::run123(check);
+    // F125: the on-foot log's windows: 10 s summaries by default and 1 s with the detail key on, a window opened by its first call and capped at 10 s, the fold
+    // tick's 1 s cadence whatever the key, N of M s, a flushed window printing its own length, and the key turned on and off part way through a window.
+    f125test::run125(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
