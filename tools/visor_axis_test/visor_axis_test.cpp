@@ -9,8 +9,11 @@
 //       measured (-720);
 //   V6  a symmetric frustum gives s = 0 exactly, and then the shipped shader is bit for bit the game's;
 //   V7  the math refuses what it was not written for;
-//   V8  the debug layer says nothing; and the wiring: the shipped bytes are the ones remlok_fix.cpp creates, bound only around the game's visor draw, no key.
-// The bytes under test are the build's (kVisorAxisVsBytecode from temporal_shader_build), not a compile made here. Output under obj\.
+//   V8  the debug layer says nothing; and the wiring: the shipped bytes are the ones remlok_fix.cpp creates, bound only around the game's visor draw, with the
+//       one temporary key (F121b, default off) gating the bind;
+//   V9  F121b's census compute shader (the build's kVisorCensusBytecode) against its CPU model and decode (census_checks.h): non-finite, NaN, Inf, black, the
+//       largest value, the mean luma, the box of the non-finite taps, the exposure texels, and the decode's refusals.
+// The bytes under test are the build's (kVisorAxisVsBytecode and kVisorCensusBytecode from temporal_shader_build), not a compile made here. Output under obj\.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11sdklayers.h>
@@ -31,6 +34,7 @@
 
 #include "temporal_shader_bytecode.h"
 #include "visor_axis_math.h"
+#include "visor_census_core.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -57,6 +61,7 @@ static int countOf(const std::string& s, const std::string& part) {
     for (size_t at = 0; (at = s.find(part, at)) != std::string::npos; at += part.size()) ++n;
     return n;
 }
+#include "census_checks.h"   // F121b: the census shader against its CPU model (its template takes check(); it needs the D3D headers and ComPtr above)
 // The project's shader content hash (device_hook.cpp: fnv1a64 over the bytecode, the offset basis with the last digit dropped).
 static uint64_t fnv1a64(const void* data, size_t bytes) {
     const uint8_t* p = static_cast<const uint8_t*>(data);
@@ -290,7 +295,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("visor_axis_test: V1-V8, WARP with the debug layer; reads the fixture and the sources, writes nothing");
+        std::puts("visor_axis_test: V1-V9, WARP with the debug layer; reads the fixture and the sources, writes nothing");
         return 0;
     }
     if (mode != "--self-test" || argc < 3) return 2;
@@ -443,9 +448,22 @@ int main(int argc, char** argv) {
         check(countOf(rf, "kVisorAxisVsBytecode") >= 1 && countOf(gen, "kVisorAxisVsBytecode") == 1, "V8.the-shipped-bytes-are-the-ones-remlok_fix.cpp-creates-and-the-generator-builds");
         check(countOf(rf, "visoraxis::kVisorPsHash") >= 1 && countOf(rf, "Refusal::kOtherPs") >= 1, "V8.a-pixel-shader-other-than-the-designed-one-is-refused");
         check(countOf(rf, "VSSetShader(g_axisVs") == 1 && countOf(rf, "VSSetShader(g_axisSaved") == 1, "V8.the-vertex-shader-is-bound-once-and-put-back-once");
-        check(countOf(ini, "visor_axis") == 0 && countOf(rf, "visor_axis\"") == 0 && countOf(rf, "getString(\"fix.visor") == 0, "V8.no-key");
+        // F121b: the one temporary key, default off, read where remlokConfigure reads fix.remlok_lines; the shift is bound only with it on.
+        check(countOf(ini, "\nnative_on_foot_visor_axis = off\n") == 1 && countOf(ini, "native_on_foot_visor_axis") == 1, "V8.F121b-the-ini-has-the-one-key-and-it-defaults-to-off");
+        check(countOf(rf, "getString(\"fix.native_on_foot_visor_axis\", \"off\")") == 1, "V8.F121b-the-code-reads-the-key-with-the-same-default");
+        check(countOf(rf, "g_axisKeyOn.load(") >= 2 && countOf(rf, "++g_axisCounts.keyOff") == 1, "V8.F121b-the-bind-is-gated-by-the-key-and-a-draw-with-it-off-is-counted");
+        // F121b: the census is measure only: it reads a copy, never takes the target off the output merger and never writes the game's resources.
+        check(countOf(rf, "kVisorCensusBytecode") >= 1 && countOf(slurp(root + "\\tools\\temporal_shader_build\\temporal_shader_build.cpp"), "kVisorCensusBytecode") == 1,
+              "V8.F121b-the-census-bytes-are-the-ones-remlok_fix.cpp-creates-and-the-generator-builds");
+        check(countOf(rf, "OMSetRenderTargets") == 0 && countOf(rf, "UpdateSubresource") == 0 && countOf(rf, "ctx->CopyResource(g.copy[e], tex)") == 1 &&
+                  countOf(rf, "censusRun(ctx);") == 1 && countOf(rf, "censusBegin(ctx, eye)") == 1,
+              "V8.F121b-the-census-copies-the-target-it-does-not-unbind-it-and-runs-once-after-the-draw");
     }
+
+    // V9: the census shader (F121b), the build's bytecode, against the CPU model and the decode.
+    censuschecks::census(rig.dev.Get(), rig.ctx.Get(), edvr::kVisorCensusBytecode, sizeof(edvr::kVisorCensusBytecode), [](bool ok, const char* label) { check(ok, label); });
+    check(rig.problems() == 0, "V9.debug-layer-clean");
     if (failures) { std::printf("visor_axis_test: %d FAILED of %u\n", failures, checks); return 1; }
-    std::printf("visor_axis_test: PASS V1-V8 (%u checks)\n", checks);
+    std::printf("visor_axis_test: PASS V1-V9 (%u checks)\n", checks);
     return 0;
 }

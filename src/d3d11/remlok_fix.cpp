@@ -5,6 +5,7 @@
 
 #include <d3d11.h>
 
+#include <atomic>
 #include <cmath>
 
 #include "../common/config.h"
@@ -16,6 +17,7 @@
 #include "shader_swap.h"      // F121: shaderSwapCreateVs
 #include "ui_depth.h"         // F27: uiDepthEyeOfTargetReadOnly, the bound target's eye
 #include "visor_axis_math.h"  // F121: the shift per eye, the counts and the log lines (pure; tools\visor_axis_test runs the same)
+#include "visor_census_core.h"   // F121b: the census of the HDR scene after the visor draw (pure; the rig runs the same decode and model)
 #include <cstring>
 #include <string>
 #include <vector>
@@ -51,6 +53,9 @@ static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
 float g_keep = 0.55f;
 bool  g_swap = false;
 bool  g_axisArmedNoted = false;   // F121: the once-per-session "armed" line (remlokConfigure)
+std::atomic<bool> g_axisKeyOn{false};   // F121b (TEMPORARY, live): fix.native_on_foot_visor_axis, "on" binds F121's vertex shader; default off
+bool  g_axisKeyKnown = false, g_axisKeyLast = false;
+bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure)
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
 inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
@@ -186,10 +191,28 @@ void remlokConfigure(Config& cfg) {
     if (ang != g_angleDeg) g_derivedNoted = false;   // re-announce the derivation
     g_angleDeg = ang;
 
+    // F121b (TEMPORARY, live A/B): the vertex shader of F121 is bound only with this key on. Default off: the pilot's scene went black with it on (the log of 2026-10-25 13:29-13:32).
+    {
+        const bool keyOn = cfg.getString("fix.native_on_foot_visor_axis", "off") == "on";
+        g_axisKeyOn.store(keyOn, std::memory_order_relaxed);
+        if (!g_axisKeyKnown || keyOn != g_axisKeyLast) {
+            g_axisKeyKnown = true;
+            g_axisKeyLast = keyOn;
+            char key[480];
+            visorcensus::formatKey(key, sizeof(key), keyOn);
+            Log::get().note("%s", key);
+        }
+    }
     if (detail::g_remlokMode == Mode::kOuter && !g_axisArmedNoted) {   // F121: said once, so a log with no visor draw reads IDLE and not "never ran"
         g_axisArmedNoted = true;
         char armed[320];
         visoraxis::formatArmed(armed, sizeof(armed));
+        Log::get().note("%s", armed);
+    }
+    if (detail::g_remlokMode == Mode::kOuter && !g_censusArmedNoted) {   // F121b: the census runs with the key on or off
+        g_censusArmedNoted = true;
+        char armed[400];
+        visorcensus::formatArmed(armed, sizeof(armed));
         Log::get().note("%s", armed);
     }
 
@@ -275,8 +298,8 @@ uint64_t g_visorWindowMs = 0;
 
 // ---- F121: the visor frame centred on each eye's optical axis (visor_axis_math.h says why) -----------------------------------------------
 // The game's visor vertex shader is replaced, for the visor draw only and per eye, by kVisorAxisVsBytecode: identical but for the interpolated uv,
-// which it moves by s (+a/2 left, -a/2 right, a from the headset's eye tangents). No key: a correction, not a choice. Anything it cannot be sure of
-// is refused and counted, and the draw runs the game's own shader.
+// which it moves by s (+a/2 left, -a/2 right, a from the headset's eye tangents). F121b: bound only with fix.native_on_foot_visor_axis on (TEMPORARY, default
+// off: with it on the pilot's scene went black). Anything it cannot be sure of is refused and counted, and the draw runs the game's own shader.
 static_assert(kOnFootVisorVs == visoraxis::kVisorVsHash && kOnFootVisorPs == visoraxis::kVisorPsHash,
               "the visor hashes in visor_axis_math.h (which the rig scans) are the ones the on-foot match uses");
 ID3D11VertexShader* g_axisVs = nullptr;           // the replacement, made once
@@ -320,6 +343,10 @@ void axisNoteWindow(uint64_t now) {
 // The begin: the replacement vertex shader and its shift at b3, around the game's visor draw, for the eye the filing named (0 left, 1 right).
 void axisBegin(ID3D11DeviceContext* ctx, int eye, bool gamesPs) {
     ++g_axisCounts.seen[eye];
+    if (!g_axisKeyOn.load(std::memory_order_relaxed)) {   // F121b: the test key is off (the default): the game's own visor vertex shader
+        ++g_axisCounts.keyOff;
+        return;
+    }
     // The shift is designed for this pixel shader's visor frame (its uv, from this vertex shader's o1.x): another one is not ours to move.
     if (!gamesPs) {
         axisRefuse(visoraxis::Refusal::kOtherPs);
@@ -402,6 +429,327 @@ void axisEnd(ID3D11DeviceContext* ctx) {
         g_axisSavedCb3 = nullptr;
     }
 }
+
+// ---- F121b: the census of the HDR scene after the visor draw (visor_census_core.h says why and what; visor_census_shader.h is the shader) ----------------
+// One sample every sixth visor draw an eye, right after the draw: a copy of the eye's HDR target (R11G11B10, the draw's own render target), one dispatch of the census
+// over the copy (a copy, because a target still bound for output cannot be bound for reading), the compute stage's shader, views, UAV and constants put back, the
+// output copied into a staging ring of three and read on a later sample (DO_NOT_WAIT, the F85c and F119 way). The game's exposure (the visor pixel shader's t0)
+// is read in the same dispatch where its view is a float 2D texture. Nothing the game reads is written. A second's line, by the key's state.
+struct CensusGpu {
+    ID3D11ComputeShader* cs = nullptr;
+    bool csTried = false, failed = false;
+    ID3D11Buffer* cb = nullptr;
+    ID3D11Buffer* out[2] = {};
+    ID3D11UnorderedAccessView* uav[2] = {};
+    ID3D11Buffer* stage[2][3] = {};
+    ID3D11Texture2D* copy[2] = {};
+    ID3D11ShaderResourceView* copySrv[2] = {};
+    uint32_t copyW[2] = {}, copyH[2] = {};
+    struct Slot {
+        bool inFlight = false, keyOn = false;
+        uint32_t seq = 0, w = 0, h = 0, age = 0;
+    };
+    Slot slot[2][3];
+    uint32_t seq = 0, draws[2] = {0, 0}, ring[2] = {0, 0};
+    bool pending = false;
+    int pendingEye = -1;
+    ID3D11ShaderResourceView* expo = nullptr;   // the game's exposure view at the draw (AddRef'd), until the census has run
+    bool saidFormat = false, saidResources = false;
+};
+CensusGpu g_cen;
+visorcensus::Window g_cenWin;
+uint64_t g_cenWinMs = 0;
+
+void censusRelease() {
+    CensusGpu& g = g_cen;
+    for (int e = 0; e < 2; ++e) {
+        if (g.copySrv[e]) g.copySrv[e]->Release();
+        if (g.copy[e]) g.copy[e]->Release();
+        if (g.uav[e]) g.uav[e]->Release();
+        if (g.out[e]) g.out[e]->Release();
+        for (auto* st : g.stage[e])
+            if (st) st->Release();
+    }
+    if (g.expo) g.expo->Release();
+    if (g.cb) g.cb->Release();
+    if (g.cs) g.cs->Release();
+    g = CensusGpu{};
+}
+
+bool censusEnsure(ID3D11DeviceContext* ctx) {
+    CensusGpu& g = g_cen;
+    if (g.failed) return false;
+    if (!g.csTried) {
+        g.csTried = true;
+        g.cs = shaderSwapCreateCs(ctx, kVisorCensusBytecode, sizeof(kVisorCensusBytecode), "visor_census_cs", "visor census (F121b)");
+    }
+    if (!g.cs) {
+        g.failed = true;
+        return false;
+    }
+    if (g.cb) return true;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = visorcensus::kWords * 4u;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bd.StructureByteStride = 4;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = visorcensus::kWords;
+    D3D11_BUFFER_DESC sd{};
+    sd.ByteWidth = visorcensus::kWords * 4u;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    D3D11_BUFFER_DESC cd{};
+    cd.ByteWidth = 16;
+    cd.Usage = D3D11_USAGE_DYNAMIC;
+    cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    bool made = SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g.cb));
+    for (int e = 0; e < 2 && made; ++e) {
+        made = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g.out[e])) && SUCCEEDED(dev->CreateUnorderedAccessView(g.out[e], &ud, &g.uav[e]));
+        for (int i = 0; i < 3 && made; ++i) made = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g.stage[e][i]));
+    }
+    dev->Release();
+    if (!made) {
+        Log::get().note("visor axis (F121b): the GPU resources of the census could not be made; the HDR scene after the visor draw is not measured");
+        censusRelease();
+        g_cen.csTried = true;
+        g_cen.failed = true;
+        return false;
+    }
+    return true;
+}
+
+// The copy of an eye's HDR target the census reads: made for its size, replaced when the size moves.
+bool censusCopyFor(ID3D11DeviceContext* ctx, int e, const D3D11_TEXTURE2D_DESC& td) {
+    CensusGpu& g = g_cen;
+    if (g.copy[e] && g.copyW[e] == td.Width && g.copyH[e] == td.Height) return true;
+    if (g.copySrv[e]) g.copySrv[e]->Release();
+    if (g.copy[e]) g.copy[e]->Release();
+    g.copySrv[e] = nullptr;
+    g.copy[e] = nullptr;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_TEXTURE2D_DESC cd{};
+    cd.Width = td.Width;
+    cd.Height = td.Height;
+    cd.MipLevels = 1;
+    cd.ArraySize = 1;
+    cd.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+    cd.SampleDesc.Count = 1;
+    cd.Usage = D3D11_USAGE_DEFAULT;
+    cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const bool ok = SUCCEEDED(dev->CreateTexture2D(&cd, nullptr, &g.copy[e])) && SUCCEEDED(dev->CreateShaderResourceView(g.copy[e], nullptr, &g.copySrv[e]));
+    dev->Release();
+    if (!ok) {
+        if (g.copySrv[e]) g.copySrv[e]->Release();
+        if (g.copy[e]) g.copy[e]->Release();
+        g.copySrv[e] = nullptr;
+        g.copy[e] = nullptr;
+        return false;
+    }
+    g.copyW[e] = td.Width;
+    g.copyH[e] = td.Height;
+    return true;
+}
+
+// The window's line (a second, or the key changed under it), then a new window.
+void censusLine() {
+    if (g_cenWin.samples || g_cenWin.skipped) {
+        char line[640];
+        visorcensus::formatLine(line, sizeof(line), g_cenWin);
+        Log::get().note("%s", line);
+    }
+    const bool key = g_cenWin.keyOn;
+    g_cenWin = visorcensus::Window();
+    g_cenWin.keyOn = key;
+}
+void censusAdd(int e, const visorcensus::Census& c, bool keyOn) {
+    if (g_cenWin.samples && g_cenWin.keyOn != keyOn) censusLine();
+    g_cenWin.keyOn = keyOn;
+    g_cenWin.add(e, c);
+}
+
+// Earlier samples: each answered readback becomes the second's.
+void censusPoll(ID3D11DeviceContext* ctx) {
+    CensusGpu& g = g_cen;
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 3; ++i) {
+            CensusGpu::Slot& sl = g.slot[e][i];
+            if (!sl.inFlight) continue;
+            if (++sl.age < 2u) continue;   // a sample is read on the run after the one that followed it
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(g.stage[e][i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+                if (sl.age > 8u) {
+                    sl.inFlight = false;
+                    ++g_cenWin.skipped;
+                }
+                continue;
+            }
+            if (FAILED(hr) || !m.pData) {
+                sl.inFlight = false;
+                ++g_cenWin.skipped;
+                continue;
+            }
+            uint32_t words[visorcensus::kWords];
+            std::memcpy(words, m.pData, sizeof(words));
+            ctx->Unmap(g.stage[e][i], 0);
+            sl.inFlight = false;
+            visorcensus::Census c;
+            if (!visorcensus::decode(words, sl.seq, sl.w, sl.h, &c)) {
+                ++g_cenWin.skipped;
+                continue;
+            }
+            censusAdd(e, c, sl.keyOn);
+        }
+    }
+}
+
+// The begin: decides whether this draw is a sample (the first, then every sixth, an eye) and keeps the game's exposure view while the game's state is bound.
+void censusBegin(ID3D11DeviceContext* ctx, int eye) {
+    CensusGpu& g = g_cen;
+    g.pending = false;
+    if (g.failed) return;
+    if ((g.draws[eye]++ % visorcensus::kEvery) != 0u) return;
+    g.pending = true;
+    g.pendingEye = eye;
+    if (g.expo) {
+        g.expo->Release();
+        g.expo = nullptr;
+    }
+    ctx->PSGetShaderResources(0, 1, &g.expo);   // AddRef'd, or null
+}
+
+// The end: after the visor draw, with the game's render target still bound.
+void censusRun(ID3D11DeviceContext* ctx) {
+    CensusGpu& g = g_cen;
+    if (!g.pending) return;
+    g.pending = false;
+    const int e = g.pendingEye;
+    ID3D11ShaderResourceView* expoView = g.expo;   // owned: released below
+    g.expo = nullptr;
+    struct Release {
+        ID3D11ShaderResourceView*& v;
+        ~Release() { if (v) { v->Release(); v = nullptr; } }
+    } releaseExpo{expoView};
+    if (e < 0 || e > 1 || !censusEnsure(ctx)) return;
+
+    // the second's line, and the readbacks of earlier samples
+    censusPoll(ctx);
+    const uint64_t now = GetTickCount64();
+    if (!g_cenWinMs) {
+        g_cenWinMs = now;
+    } else if (now - g_cenWinMs >= 1000) {
+        if (!g_cenWin.samples) g_cenWin.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);   // a second of samples keeps the state they were taken under
+        censusLine();
+        g_cenWinMs = now;
+    }
+
+    // the eye's HDR target: the draw's own render target
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return;
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    rtv->Release();
+    if (!res) return;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (!tex) return;
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (td.Format != DXGI_FORMAT_R11G11B10_FLOAT || td.MipLevels != 1 || td.ArraySize != 1 || td.SampleDesc.Count != 1 || !td.Width || !td.Height) {
+        if (!g.saidFormat) {
+            g.saidFormat = true;
+            char t[200], note[260];
+            std::snprintf(t, sizeof(t), "the visor's render target is %ux%u, format %u, %u mips, %u samples: not the R11G11B10 HDR target, so not measured", td.Width, td.Height,
+                          static_cast<unsigned>(td.Format), td.MipLevels, td.SampleDesc.Count);
+            visorcensus::formatNote(note, sizeof(note), t);
+            Log::get().note("%s", note);
+        }
+        tex->Release();
+        return;
+    }
+    const uint32_t si = g.ring[e] % 3u;
+    CensusGpu::Slot& sl = g.slot[e][si];
+    if (sl.inFlight || !censusCopyFor(ctx, e, td)) {
+        ++g_cenWin.skipped;
+        tex->Release();
+        return;
+    }
+    ctx->CopyResource(g.copy[e], tex);
+    tex->Release();
+
+    // the game's exposure: a float 2D texture view only
+    bool expoOk = false;
+    if (expoView) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        expoView->GetDesc(&vd);
+        expoOk = vd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D &&
+                 (vd.Format == DXGI_FORMAT_R32_FLOAT || vd.Format == DXGI_FORMAT_R16_FLOAT || vd.Format == DXGI_FORMAT_R32G32B32A32_FLOAT ||
+                  vd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    }
+
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(g.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
+        ++g_cenWin.skipped;
+        return;
+    }
+    ++g.seq;
+    const uint32_t cbv[4] = {td.Width, td.Height, g.seq, expoOk ? 1u : 0u};
+    std::memcpy(m.pData, cbv, sizeof(cbv));
+    ctx->Unmap(g.cb, 0);
+
+    ID3D11ComputeShader* savedCs = nullptr;
+    ID3D11ShaderResourceView* savedSrv[2] = {};
+    ID3D11UnorderedAccessView* savedUav = nullptr;
+    ID3D11Buffer* savedCb = nullptr;
+    ctx->CSGetShader(&savedCs, nullptr, nullptr);
+    ctx->CSGetShaderResources(0, 2, savedSrv);
+    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+    ctx->CSGetConstantBuffers(0, 1, &savedCb);
+    ID3D11ShaderResourceView* nullSrv[2] = {};
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ctx->CSSetShaderResources(0, 2, nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    const UINT zero[4] = {0, 0, 0, 0};
+    ctx->ClearUnorderedAccessViewUint(g.uav[e], zero);
+    ctx->CSSetShader(g.cs, nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, &g.cb);
+    ID3D11ShaderResourceView* views[2] = {g.copySrv[e], expoOk ? expoView : nullptr};
+    ctx->CSSetShaderResources(0, 2, views);
+    ctx->CSSetUnorderedAccessViews(0, 1, &g.uav[e], nullptr);
+    ctx->Dispatch(visorcensus::kThreads / 8u, visorcensus::kThreads / 8u, 1);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    ctx->CSSetShaderResources(0, 2, nullSrv);
+    ctx->CopyResource(g.stage[e][si], g.out[e]);
+    ctx->CSSetShader(savedCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 2, savedSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &savedCb);
+    if (savedCs) savedCs->Release();
+    for (ID3D11ShaderResourceView* v : savedSrv)
+        if (v) v->Release();
+    if (savedUav) savedUav->Release();
+    if (savedCb) savedCb->Release();
+
+    sl.inFlight = true;
+    sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);
+    sl.seq = g.seq;
+    sl.w = td.Width;
+    sl.h = td.Height;
+    sl.age = 0;
+    ++g.ring[e];
+}
 }  // namespace
 
 // Called from the device's pixel-shader creation hook: keeps the visor shader's bytecode (only that hash, once).
@@ -483,6 +831,7 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
         return;
     }
     const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
+    if (onFoot) censusBegin(ctx, eye);   // F121b: every sixth draw an eye is a sample (run at the end, with the game's state back)
     const bool right = (eye == 1) != g_swap;                   // the control (remlok_swap_eyes) swaps the two
     ID3D11PixelShader* variant = visorVariant(ctx, right);
     if (variant) {
@@ -505,11 +854,13 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
 
 void visorSwapEnd(ID3D11DeviceContext* ctx) {
     axisEnd(ctx);   // F121: the game's vertex shader and its b3 back (a no-op when ours was not bound)
-    if (!g_visorActive) return;
-    g_visorActive = false;
-    ctx->PSSetShader(g_visorSaved, nullptr, 0);
-    if (g_visorSaved) g_visorSaved->Release();
-    g_visorSaved = nullptr;
+    if (g_visorActive) {
+        g_visorActive = false;
+        ctx->PSSetShader(g_visorSaved, nullptr, 0);
+        if (g_visorSaved) g_visorSaved->Release();
+        g_visorSaved = nullptr;
+    }
+    censusRun(ctx);   // F121b: the census of the HDR target right after the draw (a no-op when this draw is not a sample)
 }
 
 // F26: the one-shot diagnostic for the on-foot visor draw (the flight: the match never fired). The first time per session, and every 30 s while
@@ -682,7 +1033,7 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
 }
 
 void remlokScissorEnd(ID3D11DeviceContext* ctx) {
-    if (g_visorActive || g_axisActive) {   // F27: restores the game's pixel shader after the visor draw; F121: and its vertex shader
+    if (g_visorActive || g_axisActive || g_cen.pending) {   // F27: restores the game's pixel shader after the visor draw; F121: and its vertex shader; F121b: the census
         visorSwapEnd(ctx);
         return;
     }
@@ -705,6 +1056,7 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
 void remlokFrameBoundary() { g_matchesThisFrame = 0; }
 
 void remlokShutdown() {
+    censusRelease();   // F121b
     if (g_clone) {
         g_clone->Release();
         g_clone = nullptr;

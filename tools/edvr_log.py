@@ -10947,7 +10947,8 @@ def _hj_f121_visor_axis(rows, ctx):
     and shifted per eye, the symmetric-frustum skips, the refusals by reason, and s with the tangents it came from. OK when both eyes' draws were shifted and s matches
     the tangents (or the frustum is symmetric and nothing needed shifting); NEVER APPLIED when visor draws were seen and none was shifted though the tangents ask
     for it; PARTIAL when only one eye was shifted, s does not match the tangents or a fifth of the draws were refused; IDLE when armed with no visor draw seen
-    (not on foot, or the visor not down). No line at all is the code never having run (a build before F121, or remlok_lines not outer)."""
+    (not on foot, or the visor not down), or when the draws were all left to the game by the test key (F121b, fix.native_on_foot_visor_axis off, the default). No
+    line at all is the code never having run (a build before F121, or remlok_lines not outer)."""
     armed, first, refused, sec = rows.get("armed", []), rows.get("first", []), rows.get("refused", []), rows.get("sec", [])
     if not (armed or first or refused or sec):
         return None
@@ -10959,7 +10960,7 @@ def _hj_f121_visor_axis(rows, ctx):
             return ("OK", "the visor frame was shifted (s left %s right %s from the tangents outer %s inner %s); the log ended before a 30 s window closed" % (
                 first[-1]["sl"], first[-1]["sr"], first[-1]["outer"], first[-1]["inner"]))
         return ("IDLE", "armed (remlok_lines outer); no visor draw seen (not on foot, or the helmet's visor is not down)")
-    keys = ("seen", "seenl", "seenr", "shifted", "shl", "shr", "sym", "refused", "r0", "r1", "r2", "r3")
+    keys = ("seen", "seenl", "seenr", "shifted", "shl", "shr", "sym", "keyoff", "refused", "r0", "r1", "r2", "r3")
     tot = {k: _hsum(sec, k) for k in keys}
     last = sec[-1]
     outer, inner = float(last["outer"]), float(last["inner"])
@@ -10968,10 +10969,12 @@ def _hj_f121_visor_axis(rows, ctx):
     a = (outer - inner) / (outer + inner) if published and outer > 0 and inner > 0 else 0.0
     want_l = 0.0 if abs(a / 2) < 1e-4 else a / 2
     want_r = -want_l
-    text = ("%d windows: visor draws %d (left %d, right %d), shifted %d (left %d, right %d), symmetric frustum %d, refused %d (no eye %d, no tangents %d, other pixel "
-            "shader %d, no replacement %d); s left %+.4f right %+.4f against the tangents outer %.3f inner %.3f (expected %+.4f %+.4f)%s") % (
-        len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"], tot["refused"], tot["r0"], tot["r1"], tot["r2"], tot["r3"],
-        sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+    text = ("%d windows: visor draws %d (left %d, right %d), shifted %d (left %d, right %d), symmetric frustum %d, test key off %d, refused %d (no eye %d, no tangents %d, "
+            "other pixel shader %d, no replacement %d); s left %+.4f right %+.4f against the tangents outer %.3f inner %.3f (expected %+.4f %+.4f)%s") % (
+        len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"], tot["keyoff"], tot["refused"], tot["r0"], tot["r1"], tot["r2"],
+        tot["r3"], sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+    if tot["keyoff"] and not tot["shifted"] and not tot["refused"]:
+        return ("IDLE", text + "; the test key fix.native_on_foot_visor_axis is off (the default): the game's own visor vertex shader drew all of them")
     if want_l == 0.0 and published and not tot["shifted"] and tot["sym"] and not tot["refused"]:
         return ("OK", text + "; a symmetric frustum: the game's frame is already on each eye's axis, nothing to shift")
     if not tot["shifted"]:
@@ -10987,6 +10990,65 @@ def _hj_f121_visor_axis(rows, ctx):
     if tot["refused"] * 5 >= tot["seen"]:
         return ("PARTIAL", text + "; a fifth or more of the visor draws were refused: %s" % (why or "see the counts"))
     return ("OK", text)
+
+
+def _hj_f121b_census(rows, ctx):
+    """F121b: the census of the HDR scene right after the visor draw, a line a second by the state of the test key fix.native_on_foot_visor_axis: samples of 65536 taps
+    an eye, the non-finite ones (NaN and Inf, with their box), the black ones, the largest finite value, the mean luma, and the game's exposure (the visor pixel
+    shader's t0, the first two texels). Measure only, to find why the scene went black with F121 on (a few NaN or Inf pixels poisoning the game's exposure, or the
+    multiply of the visor's blend going to zero). PARTIAL names what it finds: 'non-finite pixels after the visor draw', 'exposure non-finite', or an HDR scene that is
+    all black after the visor draw (with the key's state, so the on and off seconds of one flight read side by side). OK when it measured and found none of them; IDLE
+    when armed and no sample came; NEVER APPLIED when the census could not make its resources. No line at all is a build before F121b."""
+    armed, key, note, sec = rows.get("armed", []), rows.get("key", []), rows.get("note", []), rows.get("sec", [])
+    if not (armed or key or note or sec):
+        return None
+    broken = [r["what"] for r in note if "could not be made" in r["what"]]
+    if broken:
+        return ("NEVER APPLIED", "the census did not run: %s" % broken[0])
+    if not sec:
+        return ("IDLE", "census armed%s; no sample read (no visor draw on foot yet)%s" % (
+            "; key %s" % key[-1]["to"] if key else "", "; " + note[-1]["what"] if note else ""))
+    groups, order = {}, []
+    for r in sec:
+        if int(r["n"]) == 0:
+            continue
+        k = r["key"]
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(r)
+    if not groups:
+        return ("IDLE", "census armed; %d second(s) with no sample answered (dispatches dropped)" % len(sec))
+    parts, found, black_states, lit_states = [], [], [], []
+    for k in order:
+        g = groups[k]
+        n = sum(int(r["n"]) for r in g)
+        taps = n * int(g[0]["taps"])
+        nf = sum(int(r["nf"]) for r in g)
+        nan, inf = sum(int(r["nan"]) for r in g), sum(int(r["inf"]) for r in g)
+        black = sum(int(r["black"]) for r in g)
+        mean = sum(float(r["mean"]) * int(r["n"]) for r in g) / n
+        mx = max((float(r["max"]) for r in g if re.match(r"^[0-9.eE+-]+$", r["max"])), default=0.0)
+        exr, exn = sum(int(r["exr"]) for r in g), sum(int(r["exn"]) for r in g)
+        ex_last = "e0 %s e1 %s" % (g[-1]["ex0"], g[-1]["ex1"]) if exr else "not read"
+        where = next((r["where"].strip() for r in g if r["where"]), "")
+        share = 100.0 * black / taps if taps else 0.0
+        parts.append("key %s: %d s, %d samples, non-finite %d of %d taps (NaN %d, Inf %d)%s, black %.1f%%, mean luma %.4f, largest %.4g, exposure %s (read in %d, non-finite in %d)" % (
+            k, len(g), n, nf, taps, nan, inf, (" " + where) if where else "", share, mean, mx, ex_last, exr, exn))
+        if nf:
+            found.append("non-finite pixels after the visor draw with the key %s: %d of %d taps in %d of %d s (NaN %d, Inf %d%s)" % (
+                k, nf, taps, sum(1 for r in g if int(r["nf"])), len(g), nan, inf, (", " + where) if where else ""))
+        if exn:
+            found.append("exposure non-finite with the key %s: in %d of %d samples read (%s)" % (k, exn, exr, ex_last))
+        (black_states if share >= 99.0 else lit_states).append(k)
+    text = "; ".join(parts)
+    if black_states:
+        found.append("the HDR scene is all black right after the visor draw with the key %s" % " and ".join(black_states))
+        if lit_states:
+            found.append("lit with the key %s (the A/B)" % " and ".join(lit_states))
+    if found:
+        return ("PARTIAL", text + "; FOUND: " + "; ".join(found))
+    return ("OK", text + "; no non-finite pixel, no non-finite exposure, no black scene")
 
 
 def _hj_f114b_pointer(rows, ctx):
@@ -12337,10 +12399,18 @@ HEALTH_RULES = (
                   r"B553BB479B7C0B97 made \((?P<bytes>\d+) bytes of bytecode\)" % (_HN, _HN, _HN)),
         ("refused", r"visor axis \(F121\): NOT shifted -- (?P<why>.+?)\. The visor draws unchanged until that clears\."),
         ("sec", r"visor axis \(F121\) 30 s: visor draws seen (?P<seen>\d+) \(left (?P<seenl>\d+), right (?P<seenr>\d+)\), shifted (?P<shifted>\d+) \(left (?P<shl>\d+), "
-                r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+), refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
+                r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+), key off (?P<keyoff>\d+), refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
                 r"no replacement (?P<r3>\d+)\); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer (?P<outer>[\d.]+) inner (?P<inner>[\d.]+)"
                 r"(?P<np> \(not published\))?$" % (_HN, _HN)),
     ), _hj_f121_visor_axis),
+    _hrule("visor census (F121b)", ("F121b",), ("visor axis (F121b)",), (
+        ("armed", r"visor axis \(F121b\): census armed"),
+        ("key", r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY"),
+        ("note", r"visor axis \(F121b\): (?P<what>(?:the GPU resources|the visor's render target).+)$"),
+        ("sec", r"visor axis \(F121b\) 1 s: key (?P<key>on|off); samples (?P<n>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\) of (?P<taps>\d+) taps; nonfinite (?P<nf>\d+) "
+                r"\(NaN (?P<nan>\d+), Inf (?P<inf>\d+)\)(?P<where> at x \d+-\d+, y \d+-\d+ of \d+x\d+)?; black (?P<black>\d+); max (?P<max>\S+); mean (?P<mean>[\d.]+); "
+                r"exposure e0 (?P<ex0>\S+) e1 (?P<ex1>\S+) \(read in (?P<exr>\d+) samples, non-finite in (?P<exn>\d+)\); dropped (?P<drop>\d+)$"),
+    ), _hj_f121b_census),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13429,12 +13499,14 @@ def self_test_health():
     f116_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f116.h")
     f121_path = os.path.join(repo_root(), "src", "d3d11", "visor_axis_math.h")
     f119_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f119.h")
+    f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
         f116src = read_text(f116_path)
         f121src = read_text(f121_path)
         f119src = read_text(f119_path)
+        f121bsrc = read_text(f121b_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -13500,6 +13572,15 @@ def self_test_health():
             fmts[key] = health_c_format(f119src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f119.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R121b(needle, *vals):
+        """F121b's lines (visor_census_core.h builds them: formatLine, formatKey, ...), from their own format literals."""
+        key = "f121b:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f121bsrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("visor_census_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -14075,8 +14156,8 @@ def self_test_health():
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
-        def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, refused=0, r=(0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np=""):
-            return R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, refused, r[0], r[1], r[2], r[3], sl, sr, outer, inner, np)
+        def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, keyoff=0, refused=0, r=(0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np=""):
+            return R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, keyoff, refused, r[0], r[1], r[2], r[3], sl, sr, outer, inner, np)
 
         def vax_first(sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, axis=0.1784):
             return R121("visor axis (F121): the visor frame is centred", sl, sr, outer, inner, axis, 2828)
@@ -14103,9 +14184,42 @@ def self_test_health():
         check("F121 visor axis: the once-line's s against its own tangents", [vax_armed(), vax_first(sl=0.2), vax_win()], 0, [("PARTIAL", F121)], has=["the once-line's s"])
         check("F121 visor axis: a fifth of the draws refused", [vax_armed(), vax_win(refused=700, r=(700, 0, 0, 0))], 0, [("PARTIAL", F121)], has=["a fifth or more"])
         check("F121 visor axis: armed, no visor draw", [vax_armed()], 0, [("IDLE", F121)], has=["no visor draw seen"])
+        check("F121 visor axis: the test key off (the default), every draw left to the game", [vax_armed(), vax_win(shl=0, shr=0, keyoff=2700, sl=0.0, sr=0.0, outer=0.0, inner=0.0)] * 2,
+              0, [("IDLE", F121)], has=["test key off 5400", "the test key fix.native_on_foot_visor_axis is off (the default)"], lacks=["NEVER APPLIED"])
+        check("F121 visor axis: the key turned on mid-flight, shifted and left to the game both counted",
+              [vax_armed(), vax_win(shl=0, shr=0, keyoff=2700, sl=0.0, sr=0.0, outer=0.0, inner=0.0), vax_win()], 0, [("OK", F121)], has=["shifted 2700", "test key off 2700"])
         check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
         check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
               has=["the rule's patterns do not match"])
+
+        # ---- visor census (F121b): the HDR scene after the visor draw, by the test key's state ----
+        F121B = "visor census (F121b)"
+
+        def cen(key="on", n=15, e0=8, e1=7, nf=0, nan=0, inf=0, where="", black=0, mx="2.5", mean=0.12, ex0="1.2", ex1="9.6", exr=15, exn=0, dropped=0):
+            return R121b("visor axis (F121b) 1 s", key, n, e0, e1, 65536, nf, nan, inf, where, black, mx, mean, ex0, ex1, exr, exn, dropped)
+
+        def cen_key(to="off"):
+            return R121b("native on foot visor axis (F121b)", to)
+
+        def cen_armed():
+            return R121b("visor axis (F121b): census armed")
+
+        check("F121b census: a lit scene with the key off, nothing non-finite", [cen_armed(), cen_key("off"), cen(key="off"), cen(key="off")], 0, [("OK", F121B)],
+              has=["key off: 2 s, 30 samples, non-finite 0 of 1966080 taps", "no non-finite pixel, no non-finite exposure, no black scene"], lacks=["FOUND"])
+        check("F121b census: black with the key on, lit with it off (the A/B)",
+              [cen_key("on"), cen(key="on", black=983040, mx="0", mean=0.0, n=15), cen(key="on", black=983040, mx="0", mean=0.0, n=15), cen_key("off"), cen(key="off"), cen(key="off")],
+              0, [("PARTIAL", F121B)], has=["the HDR scene is all black right after the visor draw with the key on", "lit with the key off (the A/B)", "black 100.0%"])
+        check("F121b census: non-finite pixels after the visor draw, with their box",
+              [cen_armed(), cen(key="on", nf=12, nan=9, inf=3, where=" at x 0-70, y 1900-2016 of 2016x2017", black=0), cen(key="on")], 0, [("PARTIAL", F121B)],
+              has=["non-finite pixels after the visor draw with the key on: 12 of", "(NaN 9, Inf 3, at x 0-70, y 1900-2016 of 2016x2017)"])
+        check("F121b census: the exposure non-finite", [cen(key="on", ex0="NaN", ex1="9.6", exn=15)], 0, [("PARTIAL", F121B)], has=["exposure non-finite with the key on: in 15 of 15 samples read"])
+        check("F121b census: the exposure not read", [cen(key="off", ex0="0", ex1="0", exr=0)], 0, [("OK", F121B)], has=["exposure not read (read in 0, non-finite in 0)"])
+        check("F121b census: armed, no sample", [cen_armed(), cen_key("off")], 0, [("IDLE", F121B)], has=["no sample read"])
+        check("F121b census: the resources could not be made", [cen_armed(), R121b("visor axis (F121b): %s", "the GPU resources of the census could not be made; the HDR scene after the visor draw is not measured")],
+              3, [("NEVER APPLIED", F121B)], has=["the census did not run"])
+        check("F121b census: seconds with no answered sample are not a black scene", [cen(key="on", n=0, e0=0, e1=0, black=0, mx="0", mean=0.0, exr=0, dropped=15)], 0,
+              [("IDLE", F121B)], has=["no sample answered"])
+        check("F121b census: a line the rule does not parse", ["visor axis (F121b) 1 s: a format nobody wrote"], 4, [("UNPARSED", F121B)])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"

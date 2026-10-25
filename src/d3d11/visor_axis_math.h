@@ -59,6 +59,7 @@ struct Counts {
     unsigned long long seen[2] = {0, 0};      // visor draws that reached the swap, per eye (the eye the filing names; a draw with no eye counts in neither)
     unsigned long long shifted[2] = {0, 0};   // drawn through the replacement vertex shader
     unsigned long long symmetric = 0;         // s was zero (a symmetric frustum): the game's own shader, correctly
+    unsigned long long keyOff = 0;            // F121b: the test key fix.native_on_foot_visor_axis was off (the default): the game's own shader, by choice
     unsigned long long refused[static_cast<unsigned>(Refusal::kCount)] = {0, 0, 0, 0};
     unsigned long long seenAll = 0;           // every visor draw, with or without an eye
     unsigned long long refusedAll() const {
@@ -94,9 +95,9 @@ inline int formatRefused(char* out, size_t size, const char* why) noexcept {
 }
 inline int formatWindow(char* out, size_t size, const Counts& c, float sLeft, float sRight, float outer, float inner, bool tangents) noexcept {
     return std::snprintf(out, size,
-        "visor axis (F121) 30 s: visor draws seen %llu (left %llu, right %llu), shifted %llu (left %llu, right %llu), symmetric %llu, refused %llu "
+        "visor axis (F121) 30 s: visor draws seen %llu (left %llu, right %llu), shifted %llu (left %llu, right %llu), symmetric %llu, key off %llu, refused %llu "
         "(no eye %llu, no tangents %llu, other pixel shader %llu, no replacement %llu); s left %+.4f right %+.4f uv from the tangents outer %.3f inner %.3f%s",
-        c.seenAll, c.seen[0], c.seen[1], c.shifted[0] + c.shifted[1], c.shifted[0], c.shifted[1], c.symmetric, c.refusedAll(),
+        c.seenAll, c.seen[0], c.seen[1], c.shifted[0] + c.shifted[1], c.shifted[0], c.shifted[1], c.symmetric, c.keyOff, c.refusedAll(),
         c.refused[0], c.refused[1], c.refused[2], c.refused[3], sLeft, sRight, outer, inner, tangents ? "" : " (not published)");
 }
 
