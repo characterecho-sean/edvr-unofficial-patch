@@ -37,18 +37,34 @@ inline double clampd(double v, double lo, double hi) noexcept { return !(v == v)
 // One axis of one processor call. in: the head aim's input written into the mouse's action (game input units); mouse: the player's mouse value the call ran with
 // (after a drop); stick: the stick's value the call ran with (after a drop); springTerm: dt times the spring's rate (radians, the sign it enters the sum with);
 // d: the game's delta for the axis (comp+0x624 / +0x628).
+// gainLo, gainHi: the mouse path's gain at its two ends as the game holds them (comp+0x808 / +0x80C; 0 and 0: unread).
 struct SplitIn {
     double in = 0.0, mouse = 0.0, stick = 0.0, springTerm = 0.0, d = 0.0;
+    double gainLo = 0.0, gainHi = 0.0;
 };
 struct SplitOut {
     double ours = 0.0, player = 0.0;   // the game's delta, EDVR's share and the rest (radians, the game's sign)
     bool clean = false;                // no stick and no spring: the call's delta is the mouse path's alone
     bool gainTaken = false;            // ... and the gain was taken from it
+    bool foreign = false;              // F109c: a clean call whose delta / input is not a gain between the game's two ends (a term of the game's own): not taken
     bool blocked = false;              // EDVR wrote, the game applied nothing and no spring ran: the game's own look block (it zeroes the look in the update)
     bool unsplit = false;              // a call with a stick or a spring before any clean call: split by the mouse ratio (F62b's rule), counted
 };
-constexpr double kGainMin = 1e-3, kGainMax = 1e3;   // a measured gain outside this (or not finite) is not taken
+constexpr double kGainMin = 1e-3, kGainMax = 1e3;   // with the ends unread, a measured gain outside this (or not finite) is not taken
 constexpr double kSpringIdleRad = 1e-7;            // a spring term under this (radians a call) is idle
+// F109c. The mouse path's gain is lerp(comp+0x808, comp+0x80C, the zoom blend) (RE, verify_20261025_onfoot_look_input): it lies between those two ends and has
+// their sign. The F109b flight (edvr_gfx_20261025_085120, the Arc Cutter, 08:57:09-10) took -405.4 (yaw), 741.1 and 22.2 (pitch) from clean calls whose delta held
+// a term of the game's own, against 0.85 to 1.00 in every other second; the head aim's asks then went to the game divided by them. A measured gain is taken only
+// between the ends, kGainEndTol either side; with the ends unread (both 0, not finite, or of opposite signs), F109's window.
+constexpr double kGainEndTol = 0.05;
+inline bool gainWithinEnds(double g, double lo, double hi) noexcept {
+    if (!fin(g)) return false;
+    if (!fin(lo) || !fin(hi) || (lo == 0.0 && hi == 0.0) || lo * hi < 0.0) return std::fabs(g) >= kGainMin && std::fabs(g) <= kGainMax;
+    const double a = std::fabs(lo), b = std::fabs(hi);
+    const double mn = a == 0.0 ? b : b == 0.0 ? a : (a < b ? a : b), mx = a > b ? a : b;
+    const double sign = (lo != 0.0 ? lo : hi) > 0.0 ? 1.0 : -1.0;
+    return g * sign > 0.0 && std::fabs(g) >= mn * (1.0 - kGainEndTol) && std::fabs(g) <= mx * (1.0 + kGainEndTol);
+}
 struct Split {
     double gain = 0.0;   // the mouse path's gain (the game's radians per input unit, its sign included), from clean calls only; 0 = none measured yet
     void reset() noexcept { gain = 0.0; }
@@ -67,9 +83,11 @@ struct Split {
         o.clean = s.stick == 0.0 && springIdle && std::fabs(sum) > 1e-12 && s.d != 0.0;
         if (o.clean) {
             const double g = s.d / sum;
-            if (fin(g) && std::fabs(g) >= kGainMin && std::fabs(g) <= kGainMax) {
+            if (gainWithinEnds(g, s.gainLo, s.gainHi)) {
                 gain = g;
                 o.gainTaken = true;
+            } else {
+                o.foreign = true;
             }
             o.ours = s.d * (s.in / sum);
         } else if (s.in != 0.0) {

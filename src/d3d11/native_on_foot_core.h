@@ -3308,7 +3308,7 @@ constexpr double kAdsUnwindMaxRate = 60.0 * kAdsDeg;  // ... and no faster than 
                                                       // would show as a view offset of one frame of the swing (0.67 deg at 60 deg/s) ...
 constexpr double kAdsUnwindMaxSec = 1.5;              // ... but never longer than this (a very large carried turn swings back faster)
 constexpr double kAdsCatchUpSec = 0.2;                // after the unwind, the most time a remainder is chased before it is dropped
-constexpr double kAdsPitchClampRad = 60.0 * kAdsDeg;  // the seated pitch is held to +-60 deg
+constexpr double kAdsPitchClampRad = 60.0 * kAdsDeg;  // the seated pitch is held to +-60 deg (the asks and the publication; F109c: not the account)
 constexpr int kAdsFlightFrames = 8;                   // an ask counts as in flight for this many ticks (queued, applied by the game's next look update, seen)
 constexpr double kAdsUnwindDoneRad = 0.05 * kAdsDeg;  // an unwind this close to zero is done
 constexpr double kAdsResFloorDeg = 8.0;               // the guard: |view turn - head turn - the player's own| at least this, ...
@@ -3468,7 +3468,7 @@ struct AdsInFlight {
 struct AdsAimMap {
     double yawSeat = 0.0;      // the cancel of what the game applied, cumulative (never reset: the runtime re-bases at a reset serial)
     double yawCarried = 0.0;   // its part since the last reset serial
-    double pitchSeat = 0.0;    // the pitch cancel of what the game applied (+-60 deg)
+    double pitchSeat = 0.0;    // the pitch cancel of what the game applied, exact (F109c: only its publication is held to +-60 deg)
     AdsInFlight flightYaw, flightPitch;   // asked and not yet seen applied
     double yawInFlight() const noexcept { return flightYaw.sum(); }
     double pitchInFlight() const noexcept { return flightPitch.sum(); }
@@ -3489,7 +3489,7 @@ struct AdsAimMap {
     void cancelCentre() noexcept { centre.cancel(); }
     struct Out {
         double injYaw = 0.0, injPitch = 0.0;         // asked of the game this tick (seat radians; the caller converts to input)
-        double cancelYaw = 0.0, cancelPitch = 0.0;   // cancelled in the seated space this tick (the clamp can cut the pitch)
+        double cancelYaw = 0.0, cancelPitch = 0.0;   // cancelled in the seated space this tick (the account's; the publication's clamp can cut the pitch)
     };
     // A new press starts clean: nothing in flight, the release clock off. The seated yaw and pitch are the cancel of what the game really applied and
     // stay (a press that begins in the middle of a release continues from them).
@@ -3522,10 +3522,14 @@ struct AdsAimMap {
         yawSeat += aY;
         yawCarried += aY;
         o.cancelYaw = aY;
+        // F109c: the account is exact; the publication (pitchPublished) holds it to +-60 deg. F68a clamped the account itself, so a turn the game applied past 60
+        // deg was dropped from it and the account parted from the aim for good: the F109b flight (edvr_gfx_20261025_085120, 08:57:11) counted +39.69 deg of
+        // pitch while the account moved -20.49 (60.18 deg dropped at +60), and look to aim's follower, which keeps its own unclamped sum, then asked down
+        // into the clamp for 20 s. The asks are still held inside +-60 (adsPitchLimit), so only a turn the game makes of its own goes past it.
         const double want = pitchSeat + aP;
         if (std::fabs(want) > kAdsPitchClampRad) ++clampHits;
         const double before = pitchSeat;
-        pitchSeat = adsClampPitch(want);
+        pitchSeat = want;
         o.cancelPitch = pitchSeat - before;
         flightYaw.tick();   // the oldest slot leaves the account; this tick's applied turn is taken off the oldest asks
         flightPitch.tick();

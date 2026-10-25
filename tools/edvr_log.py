@@ -11331,6 +11331,17 @@ def _hj_f109_look(rows, ctx):
             max(len(held), sum(int(r["gheld"]) for r in gate)),
             (": largest %.1f deg" % max(math.hypot(float(r["ry"]), float(r["rp"])) for r in held)) if held else "",
             sum(int(r["guser"]) for r in gate), sum(int(r["ggap"]) for r in gate), sum(1 for r in trips if r.get("latched")), len(rearm))
+    # F109c: the longest run of seconds with the reported head 10 deg or more off the aim, head still or not (the F109b flight's cutter: 20 s, unflagged), the
+    # foreign calls, and the aim's pitch (the FP root) moving apart from the carried pitch
+    run = longest = 0
+    for r in sec:
+        run = run + 1 if math.hypot(float(r["oy"]), float(r["op"])) >= 10.0 else 0
+        longest = max(longest, run)
+    c109 = [r for r in sec if r.get("foreign") is not None]
+    drift = [abs(float(r["drift"])) for r in c109 if r["dread"] == "read"]
+    if c109:
+        text += ("; F109c: foreign calls %d (the gain's ends %s %s), the aim's pitch apart from the carried by 5 deg or more in %d of %d read seconds (largest %.1f)") % (
+            sum(int(r["foreign"]) for r in c109), c109[-1]["glo"], c109[-1]["ghi"], sum(1 for d in drift if d >= 5.0), len(drift), max(drift) if drift else 0.0)
     if head >= 5.0 and applied < 0.1 * head:
         return ("NEVER APPLIED", text + "; the game took none of the head's turn")
     notes = []
@@ -11338,6 +11349,10 @@ def _hj_f109_look(rows, ctx):
         notes.append("the guard tripped (%s)" % trips[0]["why"][:60])
     if still and len(off) * 5 > len(still):
         notes.append("the aim stood off the head with the head still")
+    if longest >= 3:
+        notes.append("the aim stood 10 deg or more off the head for %d s in a row" % longest)
+    if sum(1 for d in drift if d >= 5.0) >= 3:
+        notes.append("the aim's pitch parted from the carried pitch")
     if pitch > 0.5 * len(sec):
         notes.append("the player's pitch reached the game")
     if unsplit * 20 > max(clean + dirty, 1):
@@ -12057,7 +12072,9 @@ HEALTH_RULES = (
                 r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); F98c's settle refused (?P<gated>\d+) calls \(the aim "
                 r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
-                % ((_HN,) * 16)),
+                r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
+                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?"
+                % ((_HN,) * 19)),
         ("engaged", r"native on foot look to aim \(F109\): engaged: "),
         ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped(?P<latched> until)?"),
         ("held", r"native on foot look to aim \(F109b\): the guard held \((?P<mode>look to aim|an ADS press)\): the view parted from the head by yaw (?P<ry>%s) "
@@ -13743,10 +13760,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read"):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm)
+                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -13776,6 +13793,13 @@ def self_test_health():
         check("F109b look: the F109 build's 1 s line (no gate fields) still reads", [ENG109, R("native on foot look to aim (F109) 1 s:", "following", 0.0, 150, 12.0,
               -3.0, 12.0, -3.0, 12.0, -3.0, 0.0, 0.0, 0.2, -0.1, 0.5, "read", 30.0, -5.0, 0.3, 0, 2.0, 12.0, 88, 90, 0, 0, 0, 80, 2, 0, 0.85, 0.85, 0,
               "not holding", 0, 0, 0.0, 0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
+        # F109c: the F109b flight's cutter (08:57:13-32): the reported head 20-61 deg above the aim for 20 s, the aim's pitch 25 deg apart from the carried
+        check("F109c look: the aim held off the head, its pitch apart from the account", [ENG109, look109(foreign=12)] + [look109(hy=5.0, hp=10.0, ap=0.0, op=36.0,
+              drift=25.0)] * 4, 0, [("PARTIAL", L109)], has=["F109c: foreign calls 12 (the gain's ends 1.00000 0.85335), the aim's pitch apart from the carried by 5 deg "
+                                                              "or more in 4 of 5 read seconds (largest 25.0)", "the aim stood 10 deg or more off the head for 4 s in a row",
+                                                              "the aim's pitch parted from the carried pitch"], lacks=["UNPARSED"])
+        check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
+              has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
 
         def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
             return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)

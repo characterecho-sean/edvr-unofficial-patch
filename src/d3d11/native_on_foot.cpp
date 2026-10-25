@@ -139,6 +139,12 @@ std::atomic<double> g_f109SpringYaw{0.0};      // the springs' yaw term summed (
 std::atomic<double> g_snapApplied{0.0};        // the player's share of the calls that carried a snap, less the spring (radians, the game's sign)
 std::atomic<double> g_f109TotalYaw{0.0};       // F109b: the local processor's yaw delta summed, every call (radians, the game's sign): the avatar's turn
 std::atomic<uint32_t> g_snapCalls{0};          // the processor calls that carried a snap
+// F109c: the clean calls whose delta / input was no gain between the game's two ends (nofoot::f109::gainWithinEnds), and the ends as the last call read them
+// (comp+0x808 / +0x80C; 0 unread); the aim's pitch as the FP root shows it (degrees, up +; the pin hook writes it with its ms stamp, 0 never).
+std::atomic<uint32_t> g_f109Foreign{0};
+std::atomic<float> g_f109GainEndLo{0.0f}, g_f109GainEndHi{0.0f};
+std::atomic<float> g_f109RootPitch{0.0f};
+std::atomic<uint64_t> g_f109RootMs{0};
 bool g_nativeEdgeLast = false;                // F26: frame thread only
 // F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
 std::atomic<bool> g_alignKeyOn{true};
@@ -6551,7 +6557,13 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
     if (!comp || !guardedRead(c + kCompYawDeltaOff, &dy, 4) || !guardedRead(c + kCompPitchDeltaOff, &dp, 4) || !std::isfinite(dy) || !std::isfinite(dp)) return 0;
     if (!guardedRead(c + kCompSpringYawRateOff, &vy, 4) || !guardedRead(c + kCompSpringPitchRateOff, &vp, 4) || !std::isfinite(vy) || !std::isfinite(vp)) vy = vp = 0.0f;
     const double t = std::isfinite(dt) && dt > 0.0f ? static_cast<double>(dt) : 0.0;
+    float gLo = 0.0f, gHi = 0.0f;   // F109c: the mouse gain's two ends, the bounds of a measured gain
+    if (!guardedRead(c + kCompGainLoOff, &gLo, 4) || !guardedRead(c + kCompGainHiOff, &gHi, 4) || !std::isfinite(gLo) || !std::isfinite(gHi)) gLo = gHi = 0.0f;
+    g_f109GainEndLo.store(gLo, std::memory_order_relaxed);
+    g_f109GainEndHi.store(gHi, std::memory_order_relaxed);
     nofoot::f109::SplitIn sy, sp;
+    sy.gainLo = sp.gainLo = static_cast<double>(gLo);
+    sy.gainHi = sp.gainHi = static_cast<double>(gHi);
     sy.in = p.inYaw;
     sy.mouse = p.mouseYaw;
     sy.stick = p.stickYaw;
@@ -6578,6 +6590,7 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
     }
     if (oy.clean) g_f109Clean.fetch_add(1, std::memory_order_relaxed);
     else if (p.inYaw != 0.0) g_f109Dirty.fetch_add(1, std::memory_order_relaxed);
+    if (oy.foreign || op.foreign) g_f109Foreign.fetch_add(1, std::memory_order_relaxed);
     if (oy.unsplit || op.unsplit) g_f109Unsplit.fetch_add(1, std::memory_order_relaxed);
     if (std::fabs(sy.springTerm) >= nofoot::f109::kSpringIdleRad || std::fabs(sp.springTerm) >= nofoot::f109::kSpringIdleRad) {
         g_f109SpringCalls.fetch_add(1, std::memory_order_relaxed);
@@ -6832,6 +6845,9 @@ struct LtaState {
     uint64_t tripTimes[3] = {};  // F109b: the last trips' times (the latch's window)
     uint32_t trips = 0, rearms = 0;
     uint32_t holdsSeen = 0, userRebasesSeen = 0, gapsSeen = 0;   // F109b: the guard's gates as the 1 s line last printed them
+    uint32_t foreignSeen = 0;                                      // F109c: the foreign calls as the 1 s line last printed them
+    bool rootHave = false, driftRead = false;                      // F109c: the aim (FP root) against the carried pitch: the engage's offset, a read this second
+    double rootBase = 0.0, driftNow = 0.0, driftMax = 0.0;         // degrees: that offset, the change in it now and its largest this second
     bool init = false, keyLast = false, footLast = false;
     nofoot::f109::Follower follow;
     bool centrePending = false;  // the reported head's offset goes into the target at the first render head after an engage
@@ -6968,6 +6984,7 @@ void ltaEngage(uint64_t now) noexcept {
     g_lta.centrePending = true;
     g_lta.blocked = false;
     g_lta.engageMs = g_lta.baseMs = now;
+    g_lta.rootHave = false;
     g_adsResid.reset();
     g_turn.stick.reset();
     g_turn.flick.reset();
@@ -7675,6 +7692,21 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                 g_lta.offMax = std::max(g_lta.offMax, std::sqrt(g_lta.offNow[0] * g_lta.offNow[0] + g_lta.offNow[1] * g_lta.offNow[1]));
             }
         }
+        {   // F109c: the aim's pitch as the FP root shows it against the carried pitch (the account of what the game applied for the asks). Within an engagement
+            // they are apart by a constant; a change in it is turn the account holds that the aim did not take, or the reverse (the F109b flight: 25 deg after the
+            // aim went to +85 deg, which only the 1 s lines could reconstruct).
+            const uint64_t rootMs = g_f109RootMs.load(std::memory_order_acquire);
+            if (rootMs != 0 && now >= rootMs && now - rootMs <= 200) {
+                const double apart = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) - g_adsMap.pitchSeat / nofoot::kAdsDeg;
+                if (!g_lta.rootHave) {
+                    g_lta.rootHave = true;
+                    g_lta.rootBase = apart;
+                }
+                g_lta.driftNow = apart - g_lta.rootBase;
+                g_lta.driftRead = true;
+                g_lta.driftMax = std::max(g_lta.driftMax, std::fabs(g_lta.driftNow));
+            }
+        }
     }
     g_f109AimPitchAbsDeg.store(g_lta.engaged ? static_cast<float>(std::fabs(g_adsMap.pitchSeat) / nofoot::kAdsDeg) : 0.0f, std::memory_order_relaxed);
     f109TurnTick(now, mo.injYaw, headStep, dYaw, ySign);   // F109: the snaps and their fade, the per-second check of the player's own turn
@@ -7764,7 +7796,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                            mouse = g_f109MouseDropped.load(std::memory_order_relaxed), pitch = g_f109PitchDropped.load(std::memory_order_relaxed),
                            clean = g_f109Clean.load(std::memory_order_relaxed), dirty = g_f109Dirty.load(std::memory_order_relaxed),
                            unsplit = g_f109Unsplit.load(std::memory_order_relaxed), blocked = g_f109Blocked.load(std::memory_order_relaxed),
-                           spring = g_f109SpringCalls.load(std::memory_order_relaxed), settleGated = g_f109SettleGated.load(std::memory_order_relaxed);
+                           spring = g_f109SpringCalls.load(std::memory_order_relaxed), settleGated = g_f109SettleGated.load(std::memory_order_relaxed),
+                           foreign = g_f109Foreign.load(std::memory_order_relaxed);
             const double springYaw = g_f109SpringYaw.load(std::memory_order_relaxed);
             const double bodyOff = g_lta.bodyOffN ? g_lta.bodyOffSum / g_lta.bodyOffN : 0.0;
             Log::get().note("native on foot look to aim (F109) 1 s: %s, item weight %.2f, smoothing %.0f ms; head yaw %+.2f pitch %+.2f deg, asked %+.2f %+.2f, applied "
@@ -7773,7 +7806,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "(largest %.1f, %u frames); updates %u, dropped: stick %u, mouse %u, pitch %u; split: clean %u, dirty %u, unsplit %u, gain yaw %.5f "
                             "pitch %.5f; blocked %u (%s, held %u ticks), spring calls %u (%+.2f deg); F98c's settle refused %u calls (the aim pitched 10 deg or "
                             "more); centred %u; F109b's guard: held %u (the view moved past the asks), re-based %u (the player's own turn), growth restarted "
-                            "%u (a rows gap), trips %u, re-armed %u",
+                            "%u (a rows gap), trips %u, re-armed %u; F109c: the gain's ends %.5f %.5f, foreign calls %u (no gain taken); the aim's pitch (the FP "
+                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s)",
                             g_lta.blocked ? "blocked" : "following", g_lta.armedWLast, g_lta.tauLast * 1000.0, g_lta.sumHead[0] * kD, g_lta.sumHead[1] * kD,
                             g_lta.sumAsk[0] * kD, g_lta.sumAsk[1] * kD, g_lta.sumApplied[0] * kD, g_lta.sumApplied[1] * kD, g_lta.sumUser[0] * kD,
                             g_lta.sumUser[1] * kD, g_lta.offNow[0], g_lta.offNow[1], g_lta.offMax, g_lta.offHave ? "read" : "not read",
@@ -7783,7 +7817,12 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed)), blocked - g_lta.blockedSeen,
                             g_lta.blocked ? "holding" : "not holding", g_lta.heldTicks, spring - g_lta.springSeen, (springYaw - g_lta.springYawSeen) * kD,
                             settleGated - g_lta.gatedSeen, g_lta.centres, g_adsResid.holds - g_lta.holdsSeen, g_adsResid.userRebases - g_lta.userRebasesSeen,
-                            g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms);
+                            g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms,
+                            static_cast<double>(g_f109GainEndLo.load(std::memory_order_relaxed)), static_cast<double>(g_f109GainEndHi.load(std::memory_order_relaxed)),
+                            foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read");
+            g_lta.foreignSeen = foreign;
+            g_lta.driftMax = 0.0;
+            g_lta.driftRead = false;
             g_lta.holdsSeen = g_adsResid.holds;
             g_lta.userRebasesSeen = g_adsResid.userRebases;
             g_lta.gapsSeen = g_adsResid.gapRestarts;
@@ -14803,6 +14842,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.f86NeckY = N0[1];
             pc.f86AimPitch = std::atan2(fwd[1], std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2])) * 180.0 / nofoot::kIkPi;
             pc.f86Ok = std::isfinite(pc.f86FModelY) && std::isfinite(pc.f86CamOverF) && std::isfinite(pc.f86NeckY) && std::isfinite(pc.f86AimPitch);
+            if (std::isfinite(pc.f86AimPitch)) {   // F109c: the aim's pitch, against look to aim's account (the frame thread's 1 s line)
+                g_f109RootPitch.store(static_cast<float>(pc.f86AimPitch), std::memory_order_relaxed);
+                g_f109RootMs.store(now, std::memory_order_release);
+            }
         }
         // F68e: the animated head joint 44 (position, axis rows), the calibration of the eye point in its frame, and the target from the animated head.
         const float* hd = froze && g_ikFzSlot[44] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[44]] : g_pfzAnim[44];
