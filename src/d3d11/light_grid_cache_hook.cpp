@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "light_grid_cache_core.h"
 
@@ -39,6 +40,7 @@ struct Detour {
 Detour g_detour;
 
 uintptr_t g_base = 0;
+lg::Addresses g_found;                    // where each address is in the running build (RVAs), written once at install before the detour goes live
 std::atomic<uintptr_t> g_refresh{0};      // 0x4F30F0 when its prologue is the pinned one; 0: a dirty view block is forwarded whole
 std::atomic<uintptr_t> g_copy{0};         // 0x57A560 when its prologue is the pinned one; 0: the override path's rows cannot be derived (the call goes to the game whole)
 lg::Cache g_cache;                        // the render thread's alone
@@ -146,19 +148,6 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
     return true;
 }
 
-bool readIdentity(uintptr_t base, uint32_t* stamp, uint32_t* size) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return false;
-        std::memcpy(stamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(size, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // The call's inputs, every one the build reads that is not in the context. False when any read faulted.
 bool readInputs(const void* a2, const void* a4, uint32_t width, uint32_t height, lg::CallInputs* in) noexcept {
     __try {
@@ -169,10 +158,10 @@ bool readInputs(const void* a2, const void* a4, uint32_t width, uint32_t height,
         std::memcpy(&in->farBits, view + lg::kViewFar, 4);
         in->extraNearBits = in->nearBits;
         in->viewFlags = view[lg::kViewFlags];
-        in->overridePath = *reinterpret_cast<const volatile uint8_t*>(g_base + lg::kOverridePathRva);
-        in->forceRebuild = *reinterpret_cast<const volatile uint8_t*>(g_base + lg::kForceRebuildRva);
-        in->tile = *reinterpret_cast<const volatile uint32_t*>(g_base + lg::kTileRva);
-        in->slices = *reinterpret_cast<const volatile uint32_t*>(g_base + lg::kSlicesRva);
+        in->overridePath = *reinterpret_cast<const volatile uint8_t*>(g_base + g_found.overridePath);
+        in->forceRebuild = *reinterpret_cast<const volatile uint8_t*>(g_base + g_found.forceRebuild);
+        in->tile = *reinterpret_cast<const volatile uint32_t*>(g_base + g_found.tile);
+        in->slices = *reinterpret_cast<const volatile uint32_t*>(g_base + g_found.slices);
         in->width = width;
         in->height = height;
         in->renderer = a2 ? *static_cast<const volatile uint64_t*>(a2) : 0;
@@ -196,8 +185,8 @@ bool deriveOverride(const void* view, lg::CallInputs* in) noexcept {
         std::memcpy(&flags, local + lg::kViewFlags, 4);
         flags |= lg::kOverrideFlagBits;
         std::memcpy(local + lg::kViewFlags, &flags, 4);
-        std::memcpy(local + lg::kViewNear, reinterpret_cast<const void*>(g_base + lg::kOverrideNearRva), 4);
-        std::memcpy(local + lg::kViewFar, reinterpret_cast<const void*>(g_base + lg::kOverrideFarRva), 4);
+        std::memcpy(local + lg::kViewNear, reinterpret_cast<const void*>(g_base + g_found.overrideNear), 4);
+        std::memcpy(local + lg::kViewFar, reinterpret_cast<const void*>(g_base + g_found.overrideFar), 4);
         refresh(local);
         std::memcpy(in->rows, local + lg::kViewRowsOut, lg::kRowsBytes);
         std::memcpy(&in->nearBits, local + lg::kViewNear, 4);
@@ -375,65 +364,85 @@ void installOnce() noexcept {
         g_detour.status.store("the module base is unknown", std::memory_order_release);
         return;
     }
-    uint32_t stamp = 0, size = 0;
-    const bool identityRead = readIdentity(g_base, &stamp, &size);
+    const bool identityRead = gameBuildIdentity(nullptr, nullptr);
+    const bool knownBuild = identityRead && gameBuildKnown();
+    // Build 334925: every address is its constant. An unknown build (issue 124): each is where the signature resolver found it (src\common\game_build.h), 0 when it found none.
+    lg::Addresses found;
+    if (identityRead) {
+        found.builder = gameRva(static_cast<uint32_t>(lg::kBuilderRva));
+        found.refresh = gameRva(static_cast<uint32_t>(lg::kRefreshRva));
+        found.copy = gameRva(static_cast<uint32_t>(lg::kCopyRva));
+        found.overridePath = gameRva(static_cast<uint32_t>(lg::kOverridePathRva));
+        found.tile = gameRva(static_cast<uint32_t>(lg::kTileRva));
+        found.slices = gameRva(static_cast<uint32_t>(lg::kSlicesRva));
+        found.forceRebuild = gameRva(static_cast<uint32_t>(lg::kForceRebuildRva));
+        found.overrideNear = gameRva(static_cast<uint32_t>(lg::kOverrideNearRva));
+        found.overrideFar = gameRva(static_cast<uint32_t>(lg::kOverrideFarRva));
+    }
     uint8_t got[lg::kPrologueBytes] = {};
     bool readOk = false;
-    __try {
-        std::memcpy(got, reinterpret_cast<const void*>(g_base + lg::kBuilderRva), sizeof(got));
-        readOk = true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        readOk = false;
+    if (found.builder != 0) {
+        __try {
+            std::memcpy(got, reinterpret_cast<const void*>(g_base + found.builder), sizeof(got));
+            readOk = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            readOk = false;
+        }
     }
-    const lg::Install verdict = lg::installDecision(identityRead, stamp, size, readOk ? got : nullptr, sizeof(got));
+    const bool pinOk = readOk && gamePinMatches(static_cast<uint32_t>(lg::kBuilderRva), got, lg::kPrologue, sizeof(got));
+    const lg::Install verdict = lg::installDecision(identityRead, found, readOk ? got : nullptr, pinOk);
     if (verdict != lg::Install::kInstall) {
-        if (verdict == lg::Install::kWrongIdentity) {
-            g_detour.status.store("not build 334925 (PE timestamp or image size)", std::memory_order_release);
-            Log::get().note("light grid cache: refused: not build 334925 (PE timestamp %u, image size %u); nothing patched.", static_cast<unsigned>(stamp),
-                            static_cast<unsigned>(size));
+        if (verdict == lg::Install::kNotFound) {
+            g_detour.status.store("an unknown build, and an address the cache binds was not found by signature", std::memory_order_release);
+            Log::get().note("light grid cache: refused: %s, and %s was not found by signature; nothing patched.", gameBuildText(), lg::firstMissing(found));
         } else if (verdict == lg::Install::kUnreadable) {
             g_detour.status.store("the executable's PE header or the builder's prologue is unreadable", std::memory_order_release);
             Log::get().note("light grid cache: refused: the PE header or the cluster builder's prologue is unreadable; nothing patched.");
-        } else {
+        } else if (knownBuild) {
             g_detour.status.store("the builder's prologue does not match build 334925", std::memory_order_release);
             Log::get().note("light grid cache: refused: the cluster builder's sixteen prologue bytes are not build 334925's; nothing patched.");
+        } else {
+            g_detour.status.store("found by signature, but the builder's prologue does not match build 334925's", std::memory_order_release);
+            Log::get().note("light grid cache: refused: %s: the cluster builder was found by signature at 0x%llX, but its sixteen prologue bytes are not build 334925's "
+                            "outside the masked fields; nothing patched.", gameBuildText(), static_cast<unsigned long long>(found.builder));
         }
         return;
     }
+    g_found = found;
     uint8_t refreshGot[lg::kPrologueBytes] = {};
     bool refreshRead = false;
     __try {
-        std::memcpy(refreshGot, reinterpret_cast<const void*>(g_base + lg::kRefreshRva), sizeof(refreshGot));
+        std::memcpy(refreshGot, reinterpret_cast<const void*>(g_base + found.refresh), sizeof(refreshGot));
         refreshRead = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         refreshRead = false;
     }
-    if (refreshRead && lg::refreshPinMatches(refreshGot, sizeof(refreshGot))) {
-        g_refresh.store(g_base + lg::kRefreshRva, std::memory_order_release);
+    if (refreshRead && gamePinMatches(static_cast<uint32_t>(lg::kRefreshRva), refreshGot, lg::kRefreshPrologue, sizeof(refreshGot))) {
+        g_refresh.store(g_base + found.refresh, std::memory_order_release);
     } else {
         Log::get().note("light grid cache: the view-block refresh (0x4F30F0) is not the pinned function; a dirty view block and the override path go to the game whole.");
     }
     uint8_t copyGot[lg::kPrologueBytes] = {};
     bool copyRead = false;
     __try {
-        std::memcpy(copyGot, reinterpret_cast<const void*>(g_base + lg::kCopyRva), sizeof(copyGot));
+        std::memcpy(copyGot, reinterpret_cast<const void*>(g_base + found.copy), sizeof(copyGot));
         copyRead = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         copyRead = false;
     }
-    if (copyRead && lg::copyPinMatches(copyGot, sizeof(copyGot))) {
-        g_copy.store(g_base + lg::kCopyRva, std::memory_order_release);
+    if (copyRead && gamePinMatches(static_cast<uint32_t>(lg::kCopyRva), copyGot, lg::kCopyPrologue, sizeof(copyGot))) {
+        g_copy.store(g_base + found.copy, std::memory_order_release);
     } else {
         Log::get().note("light grid cache: the view-block copy constructor (0x57A560) is not the pinned function; the override path goes to the game whole.");
     }
-    g_detour.relay = allocateRelay(g_base + lg::kBuilderRva);
+    g_detour.relay = allocateRelay(g_base + found.builder);
     if (!g_detour.relay) {
         g_detour.status.store("no relay within range", std::memory_order_release);
         Log::get().note("light grid cache: refused: no memory for the relay within range of the game; nothing patched.");
         return;
     }
     buildRelay(g_detour.relay, &g_gate, reinterpret_cast<void*>(&builderDetour));
-    if (!g_detour.hook.install(reinterpret_cast<void*>(g_base + lg::kBuilderRva), g_detour.relay, nullptr, "light-grid-cache", &prepareRelay, &g_detour)) {
+    if (!g_detour.hook.install(reinterpret_cast<void*>(g_base + found.builder), g_detour.relay, nullptr, "light-grid-cache", &prepareRelay, &g_detour)) {
         VirtualFree(g_detour.relay, 0, MEM_RELEASE);
         g_detour.relay = nullptr;
         g_detour.status.store("CodeHook refused the builder (its own line says why)", std::memory_order_release);
@@ -443,9 +452,15 @@ void installOnce() noexcept {
     g_detour.status.store("installed", std::memory_order_release);
     g_installedMs.store(static_cast<uint64_t>(nowMs()), std::memory_order_release);
     g_gate.store(1, std::memory_order_release);
-    Log::get().note("light grid cache: the fragment-culling cluster builder (0x58B250) is detoured. Exact: a call whose inputs match a kept state bit for bit gets that state "
+    char where[220];
+    if (knownBuild)
+        std::snprintf(where, sizeof(where), "the fragment-culling cluster builder (0x58B250) is detoured");
+    else
+        std::snprintf(where, sizeof(where), "the fragment-culling cluster builder (0x58B250 in build 334925) was found by signature on %s at 0x%llX and is detoured",
+                      gameBuildText(), static_cast<unsigned long long>(found.builder));
+    Log::get().note("light grid cache: %s. Exact: a call whose inputs match a kept state bit for bit gets that state "
                     "swapped in; one hit in %llu is rebuilt by the game and compared byte for byte, and any difference turns the cache off. Up to %d states per context.",
-                    static_cast<unsigned long long>(lg::kVerifyEvery), lg::kSlotsPerContext);
+                    where, static_cast<unsigned long long>(lg::kVerifyEvery), lg::kSlotsPerContext);
 }
 
 }  // namespace

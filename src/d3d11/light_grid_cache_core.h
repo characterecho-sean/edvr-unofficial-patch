@@ -3,7 +3,7 @@
 // the real offsets, with a fake builder standing in for the game's. light_grid_cache_hook.cpp is the glue that finds the function, patches its entry, reads the call's inputs
 // under SEH and hands them here.
 //
-// THE FUNCTION. EliteDangerous64.exe (build 334925, PE stamp 1792704584, size 104906752) RVA 0x58B250, the owner of the .pdata chunks 0x58B250, 0x58B574, 0x58B630, 0x58BB2F
+// THE FUNCTION. EliteDangerous64.exe (build 334925) RVA 0x58B250, the owner of the .pdata chunks 0x58B250, 0x58B574, 0x58B630, 0x58BB2F
 // and 0x58BED7; one direct caller, 0x590468. It builds the fragment-culling cluster grid: rcx the cluster context (this, at owner+0x20), rdx (a2) the renderer holder
 // (*a2 the renderer), r8 (a3) a sub-block of the caller's, r9 (a4) the view block, then width and height as 32-bit stack arguments.
 //
@@ -45,20 +45,41 @@
 
 namespace edvr::lgc {
 
-// ---- identity: the pair every build-keyed hook here checks, and the sixteen bytes of the entry ---------------------------------------------------------------------
-constexpr uint32_t kExpectedTimestamp = 1792704584u;
-constexpr uint32_t kExpectedImageSize = 104906752u;
+// ---- the entry of the builder in build 334925, and the sixteen bytes there; another build finds it by signature (src\common\game_build.h, issue 124) ------------------
 constexpr uintptr_t kBuilderRva = 0x58B250u;
 constexpr size_t kPrologueBytes = 16;
 // mov rax,rsp; push rbp; push rbx; push rsi; push rdi; push r12; push r14; push r15; lea rbp,[rax-0x4D8]. CodeHook moves the first five bytes (no relative operand).
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8};
 
-enum class Install : uint8_t { kInstall = 0, kUnreadable, kWrongIdentity, kWrongPrologue };
-// Whether to patch: the identity first (a stamp or size that is not the build's is final), then the sixteen bytes. A refusal is final for the session.
-inline Install installDecision(bool identityRead, uint32_t stamp, uint32_t size, const uint8_t* got, size_t n) noexcept {
-    if (!identityRead || got == nullptr || n < kPrologueBytes) return Install::kUnreadable;
-    if (stamp != kExpectedTimestamp || size != kExpectedImageSize) return Install::kWrongIdentity;
-    if (std::memcmp(got, kPrologue, kPrologueBytes) != 0) return Install::kWrongPrologue;
+// Where each address the cache binds is in the running build: the constants below on build 334925, the address the signature resolver found on an unknown build, 0 for one it
+// found none of. The glue resolves and fills this in (this header calls no resolver). The builder, the two functions it calls and the six globals: every one must be found.
+struct Addresses {
+    uintptr_t builder = 0, refresh = 0, copy = 0;
+    uintptr_t overridePath = 0, tile = 0, slices = 0, forceRebuild = 0, overrideNear = 0, overrideFar = 0;
+};
+// What the first address that is 0 (not found) is, for the refusal's line; nullptr when every one was found.
+inline const char* firstMissing(const Addresses& a) noexcept {
+    if (a.builder == 0) return "the cluster builder (0x58B250 in build 334925)";
+    if (a.refresh == 0) return "the view-block refresh (0x4F30F0 in build 334925)";
+    if (a.copy == 0) return "the view-block copy constructor (0x57A560 in build 334925)";
+    if (a.overridePath == 0) return "the override-path byte (0x5E73F7E in build 334925)";
+    if (a.tile == 0) return "the tile size (0x5E73F80 in build 334925)";
+    if (a.slices == 0) return "the slice count (0x5E73F90 in build 334925)";
+    if (a.forceRebuild == 0) return "the force-rebuild byte (0x5F2A652 in build 334925)";
+    if (a.overrideNear == 0) return "the override near plane (0x5E73F94 in build 334925)";
+    if (a.overrideFar == 0) return "the override far plane (0x5E73F98 in build 334925)";
+    return nullptr;
+}
+
+enum class Install : uint8_t { kInstall = 0, kUnreadable, kNotFound, kWrongPrologue };
+// Whether to patch (issue 124, the same rule as the store hook): the PE header read, then every address found (any one at 0 is final: kNotFound), then the sixteen bytes read at
+// the builder (got null: unreadable) against the pin (pinMatches: gamePinMatches, an exact compare on build 334925; on an unknown build the bytes the signature masks are skipped
+// and every other byte must match). A refusal is final for the session.
+inline Install installDecision(bool identityRead, const Addresses& found, const uint8_t* got, bool pinMatches) noexcept {
+    if (!identityRead) return Install::kUnreadable;
+    if (firstMissing(found) != nullptr) return Install::kNotFound;
+    if (got == nullptr) return Install::kUnreadable;
+    if (!pinMatches) return Install::kWrongPrologue;
     return Install::kInstall;
 }
 
@@ -74,7 +95,6 @@ constexpr uint8_t kViewDirtyBit = 4;
 // reads no writable global. The glue runs it ahead of reading the rows when the bit is set: the block the builder then sees is the block it would have made itself.
 constexpr uintptr_t kRefreshRva = 0x4F30F0u;
 constexpr uint8_t kRefreshPrologue[kPrologueBytes] = {0x48, 0x8B, 0xC4, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x29, 0x70, 0xE8, 0x48};
-inline bool refreshPinMatches(const uint8_t* got, size_t n) noexcept { return got != nullptr && n >= kPrologueBytes && std::memcmp(got, kRefreshPrologue, kPrologueBytes) == 0; }
 // THE OVERRIDE PATH. The global byte at 0x5E73F7E is 1 in the exe's own data (and nothing in the code writes it: a capstone sweep of .text finds only reads), so the build's
 // usual path is this one (58B375..58B3E8): it copies the view block into a local with the game's copy constructor (0x57A560, 58B37F), ORs 0xD into the copy's flags (+0x230), puts
 // the two float globals 0x5E73F94 (1.0 in the file) and 0x5E73F98 (10000.0) in the copy's near and far (+0x234, +0x238), runs 0x4F30F0 on the copy (58B3B2) and keys on the copy's
@@ -83,7 +103,6 @@ inline bool refreshPinMatches(const uint8_t* got, size_t n) noexcept { return go
 constexpr uintptr_t kOverrideNearRva = 0x5E73F94u, kOverrideFarRva = 0x5E73F98u;
 constexpr uintptr_t kCopyRva = 0x57A560u;
 constexpr uint8_t kCopyPrologue[kPrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x0F, 0x10, 0x02, 0x48, 0x8B, 0xF9};
-inline bool copyPinMatches(const uint8_t* got, size_t n) noexcept { return got != nullptr && n >= kPrologueBytes && std::memcmp(got, kCopyPrologue, kPrologueBytes) == 0; }
 constexpr size_t kViewObjectBytes = 0x2F0;
 constexpr uint32_t kOverrideFlagBits = 0xD;
 constexpr size_t kViewRowsOut = 0x1B0;

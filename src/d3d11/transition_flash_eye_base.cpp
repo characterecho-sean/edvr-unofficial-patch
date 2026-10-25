@@ -2,6 +2,7 @@
 #include "transition_flash_eye_base_core.h"
 #include "glitch_frame.h"
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 
@@ -23,13 +24,6 @@
 
 namespace edvr {
 namespace {
-
-// --- Identity: build 334925, the same pair pose_reader_watch.cpp keys on (and
-// the transition_flash_prevent.cpp removed 2026-09-29 did). Kept as this
-// file's own copy rather than a shared constant -- the copy-culture rule -- so
-// neither is touched by a change in the other.
-constexpr uint32_t kExpectedTimestamp = 1792704584u;
-constexpr uint32_t kExpectedImageSize = 104906752u;
 
 // The consumer, FUN_142845730 (design doc, "Static round 6"). First 16 bytes
 // verified two ways: analysis\decomp\flash\r6\follow_28431D0.txt's own
@@ -56,30 +50,9 @@ __declspec(noinline) bool sehReadBlock64(uintptr_t address, float out[16]) noexc
     __try { std::memcpy(out, reinterpret_cast<const void*>(address), 16 * sizeof(float)); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-__declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expected, size_t n) noexcept {
-    __try { return std::memcmp(reinterpret_cast<const void*>(address), expected, n) == 0; }
+__declspec(noinline) bool sehReadBytes(uintptr_t address, uint8_t* out, size_t n) noexcept {
+    __try { std::memcpy(out, reinterpret_cast<const void*>(address), n); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-// PE TimeDateStamp + SizeOfImage, read the same way pose_reader_watch.cpp's
-// checkIdentity does (base+0x3C -> e_lfanew, +8 TimeDateStamp, +0x50
-// SizeOfImage).
-__declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) { *why = "PE header offset implausible"; return false; }
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != kExpectedTimestamp || imageSize != kExpectedImageSize) {
-            *why = "not build 334925 (PE timestamp/size mismatch)";
-            return false;
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        *why = "a read faulted while checking the PE header";
-        return false;
-    }
 }
 
 // --- Relay machinery, mirrored from pose_reader_watch.cpp (itself mirrored
@@ -165,17 +138,25 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
 std::atomic<uintptr_t> g_relayGate{0};
 
 bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) noexcept {
-    if (!sehCheckBytes(base + entry.rva, expectedBytes, 16)) {
+    // Build 334925: entry.rva itself. An unknown build: where the signature resolver found the consumer (0 = not found).
+    const uintptr_t at = gameRva(static_cast<uint32_t>(entry.rva));
+    if (at == 0) {
+        entry.failReason = "not found by signature";
+        return false;
+    }
+    uint8_t got[16] = {};
+    if (!sehReadBytes(base + at, got, sizeof(got)) ||
+        !gamePinMatches(static_cast<uint32_t>(entry.rva), got, expectedBytes, sizeof(got))) {
         entry.failReason = "prologue mismatch at this RVA (not build 334925's shape)";
         return false;
     }
-    entry.relay = allocateRelay(base + entry.rva);
+    entry.relay = allocateRelay(base + at);
     if (!entry.relay) {
         entry.failReason = "relay allocation failed (no free memory within 2GB)";
         return false;
     }
     buildRelay(entry.relay, &g_relayGate, entry.callback);
-    if (!entry.hook.install(reinterpret_cast<void*>(base + entry.rva), entry.relay, nullptr,
+    if (!entry.hook.install(reinterpret_cast<void*>(base + at), entry.relay, nullptr,
                             entry.name, &prepareRelay, &entry)) {
         VirtualFree(entry.relay, 0, MEM_RELEASE);
         entry.relay = nullptr;
@@ -413,11 +394,11 @@ const char* kNoProtection = "No frame will be held: there is no other transition
 
 void doInstall() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    const char* why = nullptr;
-    if (!base || !checkIdentity(base, &why)) {
+    uint32_t stamp = 0, imageSize = 0;
+    if (!base || !gameBuildIdentity(&stamp, &imageSize)) {
         Log::get().note(
             "transition flash: engine fix NOT armed (%s). Nothing installed, nothing changed. %s",
-            why ? why : "module base unavailable", kNoProtection);
+            base ? "the PE header is unreadable" : "module base unavailable", kNoProtection);
         g_armed.store(true, std::memory_order_release);
         glitchFrameNoteEngineFix(false);
         return;
@@ -440,10 +421,21 @@ void doInstall() noexcept {
     if (consumerOk) {
         g_engineOn.store(true, std::memory_order_release);
         glitchFrameNoteEngineFix(true);
+        if (gameBuildKnown())
+            Log::get().note(
+                "transition flash: engine fix armed. "
+                "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x2845730: installed.",
+                stamp, imageSize);
+        else
+            Log::get().note(
+                "transition flash: engine fix armed. The consumer (0x2845730 in build 334925) was found by signature on %s at 0x%llX "
+                "and is installed.", gameBuildText(),
+                static_cast<unsigned long long>(gameRva(static_cast<uint32_t>(kConsumerRva))));
+    } else if (!gameBuildKnown() && gameRva(static_cast<uint32_t>(kConsumerRva)) == 0) {
+        glitchFrameNoteEngineFix(false);
         Log::get().note(
-            "transition flash: engine fix armed. "
-            "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x2845730: installed.",
-            kExpectedTimestamp, kExpectedImageSize);
+            "transition flash: engine fix NOT armed -- %s, and the consumer (0x2845730 in build 334925) was not found by signature. "
+            "Nothing installed, nothing changed. %s", gameBuildText(), kNoProtection);
     } else {
         glitchFrameNoteEngineFix(false);
         Log::get().note(
