@@ -44,6 +44,7 @@
 #include "native_on_foot_f98b.h"   // F98b: the interaction label placed in the world, upright and facing the head's position (pure parts)
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
 #include "native_on_foot_f99.h"   // F99a: a drawn item's hands from the game's own selection, not from Status.json (pure parts)
+#include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -11247,6 +11248,36 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
 // included. For a runtime that reports no serial the hold also waits while this term moves (as for F88's up).
 nofoot::f94::NeckRaise g_f94Raise;
 nofoot::f88::Settle g_f94Settle;
+// F107: the game's camera away from the commander, published by the Animate post-hook (the pin refused the call): the episode, its calls and its distances.
+// The frame thread logs the edges (the hook does not log) and takes the neck reference's raise out while the camera is away.
+std::atomic<bool> g_f107AwayNow{false};
+std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0};
+std::atomic<float> g_f107NearestM{0.0f}, g_f107FarthestM{0.0f};
+std::atomic<uint64_t> g_f107LastMs{0};
+uint32_t g_f107EpisodesLogged = 0;
+bool g_f107AwayLogged = false;
+uint64_t g_f107LeftMs = 0;
+bool f107Tick(uint64_t now) noexcept {
+    const uint64_t last = g_f107LastMs.load(std::memory_order_relaxed);
+    const bool away = g_f107AwayNow.load(std::memory_order_acquire) && now >= last && now - last <= nofoot::f94::kTargetMaxAgeMs;
+    const uint32_t episodes = g_f107Episodes.load(std::memory_order_relaxed);
+    if (away && (!g_f107AwayLogged || episodes != g_f107EpisodesLogged)) {
+        g_f107AwayLogged = true;
+        g_f107EpisodesLogged = episodes;
+        g_f107LeftMs = now;
+        Log::get().note("native on foot camera away (F107): the game's camera left the commander (episode %u): %.1f m from the neck, over the %.1f m a commander's "
+                        "eye can be; the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
+                        "(the view is the game's own camera)", episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM);
+    } else if (!away && g_f107AwayLogged) {
+        g_f107AwayLogged = false;
+        Log::get().note("native on foot camera away (F107): the episode ended after %.1f s (episode %u): %u pinned calls refused, the camera "
+                        "%.1f to %.1f m from the neck, not a number in %u; the neck reference takes its target from the next settled stance",
+                        static_cast<double>(now - g_f107LeftMs) * 1e-3, episodes, g_f107Calls.load(std::memory_order_relaxed),
+                        static_cast<double>(g_f107NearestM.load(std::memory_order_relaxed)), static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)),
+                        g_f107NotNumber.load(std::memory_order_relaxed));
+    }
+    return away;
+}
 struct F94Tick {
     nofoot::f94::Out out;
     bool settling = false;
@@ -11255,7 +11286,10 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     namespace f94 = nofoot::f94;
     F94Tick t;
     f94::In in;
-    in.scope = pin && nativeOnFootActive();
+    // F107: out of scope while the game's camera is away from the commander: the raise ramps out over 0.5 s, so the view is the game's own camera (a screen's UI
+    // at its place), and back in from the next settled stance
+    const bool cameraAway = f107Tick(now);
+    in.scope = pin && nativeOnFootActive() && !cameraAway;
     in.dt = dt;
     in.settleS = nofoot::f95::settleS(static_cast<double>(g_f87SettleS.load(std::memory_order_relaxed)));   // F95a: the hold's settle time (the pilot's 0.1 s), 0.1 s at least
     const F94TargetPub tg = f94TargetRead();
@@ -13044,11 +13078,13 @@ inline void ikPos(const float m[16], double p[3]) noexcept {
 //     turned by the square-up) stays within l1 + l2 - 2 cm of its grip (nofoot::reachLimitDelta); the bend then closes what is left of the neck's gap.
 // The whole pose is written to the span here, so the stages after it (the bend, the square-up, the arms) work on the pinned pose with G at d = 0.
 // No allocation, logging or locks; every write under SEH.
-enum PinRefusal : uint32_t { kPinRefNoInput = 0, kPinRefStaleInput, kPinRefMatrix, kPinRefNoLegs, kPinRefLeg, kPinRefWrite, kPinRefKinds };
+enum PinRefusal : uint32_t { kPinRefNoInput = 0, kPinRefStaleInput, kPinRefMatrix, kPinRefNoLegs, kPinRefLeg, kPinRefWrite, kPinRefCameraAway, kPinRefKinds };
 const char* const kPinRefText[kPinRefKinds] = {
     "no P1 input yet (the local 3P AMC's visibility job has not run)", "the P1 input is older than 500 ms (the pose stays as animated)",
     "the AMC matrix is singular", "the legs' plan was refused (the census line says why): the pose is translated, the legs are not solved",
-    "a leg solve failed (a degenerate bone or a singular matrix): the pose is translated, not raised", "a span write faulted"};
+    "a leg solve failed (a degenerate bone or a singular matrix): the pose is translated, not raised", "a span write faulted",
+    "the game's camera is away from the commander (F107: a terminal's or a screen's own camera): the pose stays as animated"};
+nofoot::f107::Away g_f107Away;   // F107: the Animate post-hook's own (native_on_foot_f107.h); its atomics are published beside the neck reference's
 struct PinBin {
     uint64_t n = 0;
     // F68e: the neck-to-eye vector the target used (in the eye's heading axes: right, up, forward; cm), how often it was the animated one (else the F67c
@@ -13442,6 +13478,21 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];
         for (int i = 0; i < 3; ++i) N0[i] = static_cast<double>(nk[12 + i]);
+        {   // F107: the game's camera away from the commander (a terminal's or a screen's own camera): the pin, the neck reference and the standing calibration
+            // take nothing from this call (native_on_foot_f107.h); the edges and the episode go to the frame thread, which logs them
+            const double eyeNeckM = nofoot::f107::eyeNeckDistance(E, N0);
+            g_f107Away.step(eyeNeckM, static_cast<double>(f30QpcUs(in.qpc)) * 1e-6);
+            if (g_f107Away.away) {
+                refusal = kPinRefCameraAway;
+                g_f107Calls.store(g_f107Away.calls, std::memory_order_relaxed);
+                g_f107NotNumber.store(g_f107Away.notNumber, std::memory_order_relaxed);
+                g_f107NearestM.store(static_cast<float>(g_f107Away.nearestM), std::memory_order_relaxed);
+                g_f107FarthestM.store(static_cast<float>(g_f107Away.farthestM), std::memory_order_relaxed);
+                g_f107LastMs.store(now, std::memory_order_relaxed);
+            }
+            g_f107Episodes.store(g_f107Away.episodes, std::memory_order_relaxed);
+            g_f107AwayNow.store(g_f107Away.away, std::memory_order_release);
+        }
         pc.f86LocalOk = localPitchValid;   // F86g
         pc.f86LocalY = static_cast<double>(in.localHeadY);
         if (G) {
@@ -13476,7 +13527,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             g_pinEyeCalRefGenHave = true;
         }
         if (headFinite) {
-            const bool standing = nofoot::pinCalStanding(speed, armed, g_ikAdsW.load(std::memory_order_relaxed) > 0.05f, p44[1]) && hold87.calOk;   // F87h: and the view still
+            // F87h: and the view still; F107: and the game's camera on the commander (a screen's camera 174 m up was once taken as the standing eye)
+            const bool standing = nofoot::pinCalStanding(speed, armed, g_ikAdsW.load(std::memory_order_relaxed) > 0.05f, p44[1]) && hold87.calOk &&
+                                  refusal != kPinRefCameraAway;
             if ((localPitchValid || !g_pinEyeCalRefGenHave) && g_pinEyeCal.add(standing, p44, rows44, N0, pc.eyeYSelected, pc.rawEyeY))
                 g_pinEyeCalDone.fetch_add(1, std::memory_order_relaxed);
             nofoot::PinAnimTarget pa;
@@ -13540,7 +13593,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             }
             if (freshIn) {
                 g_f95View.yWorld = worldLevel;
-                g_f95View.have = std::isfinite(viewLevel);
+                g_f95View.have = std::isfinite(viewLevel) && refusal != kPinRefCameraAway;   // F107: no step measured from a camera away from the commander
                 g_f95View.p1 = in.p1;
                 g_f95View.y = viewLevel;
                 g_f95View.localY = static_cast<double>(in.localHeadY);
@@ -13598,7 +13651,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             nofoot::f95::SettleIn si;
             // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there, and the stance's raise is released with the detach, so a
             // target taken in the sights would lift the view after the release
-            si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected) && !(pc.detachW > 0.0);
+            // F107: nor from a camera away from the commander (the carrier management screen's settled at 174 m up and published -174 m, clamped to -50 cm)
+            si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected) && !(pc.detachW > 0.0) && refusal != kPinRefCameraAway;
             si.still = !pc.f95Moving;
             si.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
             si.neckY = N0[1] + f97W * std::max(pc.f97RaiseF93, 0.0);
@@ -18988,7 +19042,8 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
     const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
     Log::get().note("native on foot body pin (F67c, key %s): %llu hook calls, %llu pinned (refused: no P1 input %llu, input over 500 ms %llu, singular matrix "
-                    "%llu; pinned without the legs' plan %llu, without a leg solve %llu, span write %llu); P1 input age at the Animate call %.1f ms mean "
+                    "%llu, the game's camera away from the commander %llu (F107); pinned without the legs' plan %llu, without a leg solve %llu, span write %llu); "
+                    "P1 input age at the Animate call %.1f ms mean "
                     "(max %.1f): P1 frames even %.1f/%.1f ms (mean/max) odd %.1f/%.1f; a NEW publication since the last call: even %u of %.0f, odd %u of "
                     "%.0f (the bend's old target refreshed on a random subset of calls); the eyes' cyclopean offset from the scene rows %u, the cached "
                     "one %u, none (the body's forward, no IPD offset) %u; horizontal move clamped at %.1f m %u, vertical at %.1f m %u; AMC speed mean %.2f "
@@ -18996,6 +19051,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
                     g_standKeyOn.load(std::memory_order_relaxed) ? "on" : "off", static_cast<unsigned long long>(st.calls),
                     static_cast<unsigned long long>(st.pinned), static_cast<unsigned long long>(st.refused[kPinRefNoInput]),
                     static_cast<unsigned long long>(st.refused[kPinRefStaleInput]), static_cast<unsigned long long>(st.refused[kPinRefMatrix]),
+                    static_cast<unsigned long long>(st.refused[kPinRefCameraAway]),
                     static_cast<unsigned long long>(st.refused[kPinRefNoLegs]), static_cast<unsigned long long>(st.refused[kPinRefLeg]),
                     static_cast<unsigned long long>(st.refused[kPinRefWrite]), st.ageSum / an, st.ageMax,
                     st.fresh[0] + st.repeat[0] ? st.ageSumPar[0] / ne : 0.0, st.ageMaxPar[0], st.fresh[1] + st.repeat[1] ? st.ageSumPar[1] / no : 0.0,

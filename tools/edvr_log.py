@@ -11025,6 +11025,24 @@ def _hj_f94a_neck(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f107_away(rows, ctx):
+    """F107: the game's camera away from the commander (a terminal's or a screen's own camera, the carrier management screen 3367 m out): the episodes the pin
+    refused, and the neck reference's seconds whose game camera stood 3 m or more from the neck. Such seconds are the camera measured as the commander's eye:
+    with no episode line that is the gate never running (NEVER APPLIED), beside episode lines a camera the gate let through (PARTIAL)."""
+    left, ended = rows.get("left", []), rows.get("ended", [])
+    remote = [r for r in _hrows(ctx, "neck height (F94a)", "sec") if abs(float(r["game"])) >= 300.0]
+    if not left and not ended and not remote:
+        return None
+    text = "%d episodes" % len(left)
+    if ended:
+        text += " (%s)" % "; ".join("%.1f s, %s calls refused, the camera %s-%s m from the neck" % (float(r["s"]), r["calls"], r["near"], r["far"]) for r in ended)
+    if remote:
+        far = max(abs(float(r["game"])) for r in remote) / 100.0
+        note = "the game's camera %.1f m from the neck in %d neck reference seconds (taken as the commander's eye)" % (far, len(remote))
+        return ("PARTIAL" if left else "NEVER APPLIED", text + "; " + note)
+    return ("OK", text + "; the neck reference and the standing calibration held")
+
+
 def _hj_f95a_motion(rows, ctx):
     """F95a: the view's vertical step a game frame with the head still, the HUD's step against the eye (the eye in the HUD's frame less the head's own), how far the
     raise moved the view, standing and with the body moving, and how often the stance settled. A stance that never settles leaves the neck reference without a target."""
@@ -11522,6 +11540,11 @@ HEALTH_RULES = (
                 r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)" % ((_HN,) * 12)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
+    _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
+        ("left", r"native on foot camera away \(F107\): the game's camera left the commander \(episode (?P<ep>\d+)\): (?P<m>[\d.]+) m from the neck"),
+        ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
+                  r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
+    ), _hj_f107_away),
     _hrule("view motion (F95a)", ("F95a",), ("native on foot view motion (F95a)",), (
         ("sec", r"native on foot view motion \(F95a\) 1 s: the view a game frame, the head still: standing (?P<vsn>\d+) frames (?P<vs>[\d.]+) mm rms \(max [\d.]+\), moving "
                 r"(?P<vmn>\d+) frames (?P<vm>[\d.]+) mm rms \(max [\d.]+\); the HUD against the eye, the head still: standing (?P<hsn>\d+) frames (?P<hs>[\d.]+) mm rms "
@@ -12832,8 +12855,8 @@ def self_test_health():
         FISTS, RIFLE = "$humanoid_fists_name;", "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def neck(item=FISTS, bin_="standing", view=15.5, tgt=11.6, incam=11.6, matched=90, legacy=0, missed=0, weight=1.0, lowmax=0.0, la=0.996, lw=0.996, key=15.5,
-                 anim="+15.6 cm"):
-            return R("native on foot neck height (F94a) 1 s: item %s", item, bin_, 90, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, 3.9, anim, tgt, tgt - 0.2,
+                 anim="+15.6 cm", game=3.9):
+            return R("native on foot neck height (F94a) 1 s: item %s", item, bin_, 90, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, game, anim, tgt, tgt - 0.2,
                      tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, 90)
 
         def eye_key(cm=15.5):
@@ -12948,6 +12971,14 @@ def self_test_health():
               eye98("$humanoid_fists_name;", un=70, hunch=70, ueye=EYE, ns="1.542 m"), eye98(ar=74, stance=74, aeye=EYE, ns="1.542 m")], 0, [("OK", F98C)],
               has=["unarmed 160 (the stance not known 0, hunched 70)", "the armed eye 1.693 m"], lacks=["jumped", "UNPARSED"])
 
+        # ---- camera away (F107): the game's camera away from the commander ----
+        F107 = "camera away (F107)"
+        AWAY_LEFT = R("native on foot camera away (F107): the game's camera left", 1, 3367.4, 3.0)
+        AWAY_END = R("native on foot camera away (F107): the episode ended", 26.4, 1, 2290, 139.2, 3367.6, 0)
+        check("F107 away: the carrier management screen in the 1c26ea5f build (the camera taken as the eye)", [neck(view=17373.5, tgt=-50.0, incam=-50.0,
+              game=17423.5)] * 3 + [neck()], 3, [("NEVER APPLIED", F107)], has=["the game's camera 174.2 m from the neck in 3 neck reference seconds"])
+        check("F107 away: an episode refused, the neck reference clean", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)],
+              has=["1 episodes (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
         # ---- F98a: the F94a and F95a rules against the F97a design ----
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,
               [("OK", F94)], lacks=["the body was lowered or raised"])
