@@ -10658,6 +10658,49 @@ def _hj_f118_reticle(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f117_cursor(rows, ctx):
+    """F117: the cursor's place on a turned on-foot panel, per setting of the temporary A/B key (panel, view, game). Per second: the 2D placements on
+    turned and upright pick meshes, the cursor moved, the refusals, and whether the cursor on turned panels follows the true uv or moves against it.
+    NEVER APPLIED when a setting that moves (panel, view) met turned panels and moved none; PARTIAL when it moved them and the cursor still went against
+    the uv; IDLE with no turned panel."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    order, groups = [], {}
+    for r in sec:
+        k = r["setting"].strip()
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(r)
+    parts, never, partial, any_turned, any_ok = [], [], [], False, False
+    for k in order:
+        g = groups[k]
+        turned, moved = sum(int(r["turned"]) for r in g), sum(int(r["moved"]) for r in g)
+        follows = sum(1 for r in g if r["cursor"].strip() == "follows the uv")
+        against = sum(1 for r in g if r["cursor"].strip() == "against the uv")
+        refused = "no triangle at the uv %d, the sprite not at the uv %d, no triangle at the turned uv %d" % (
+            sum(int(r["notri"]) for r in g), sum(int(r["notat"]) for r in g), sum(int(r["noturn"]) for r in g))
+        parts.append("%s: %d s, turned %d, moved %d, the cursor follows the uv in %d s, against it in %d s (refused: %s)" % (
+            k, len(g), turned, moved, follows, against, refused))
+        any_turned |= turned > 0
+        if k in ("panel", "view") and turned:
+            if not moved:
+                never.append(k)
+            elif against > follows:
+                partial.append(k)
+            elif follows:
+                any_ok = True
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; %s met turned panels and moved none" % ", ".join(never))
+    if not any_turned:
+        return ("IDLE", text + "; no turned panel")
+    if partial:
+        return ("PARTIAL", text + "; %s moved the cursor and it is still against the uv" % ", ".join(partial))
+    return ("OK" if any_ok else "IDLE", text)
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -11927,6 +11970,14 @@ HEALTH_RULES = (
                   r"(?P<secs>\d+) s with a panel"),
         ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
     ), _hj_f114b_pointer),
+    _hrule("panel cursor fix (F117)", ("F117",), ("panel cursor fix (F117)",), (
+        ("sec", r"panel cursor fix \(F117\) 1 s: setting (?P<setting>[^;]+); the cursor on turned panels (?P<cursor>[^;]+); 2D placements (?P<pl>\d+): turned "
+                r"(?P<turned>\d+), upright (?P<upright>\d+); moved (?P<moved>\d+); left: upright \d+, the game's setting (?P<gameset>\d+); refused: no triangle at "
+                r"the uv (?P<notri>\d+), the sprite not at the uv (?P<notat>\d+), no triangle at the turned uv (?P<noturn>\d+); the uv to the cursor on turned "
+                r"panels right (?P<tr>%s) down (?P<td>%s)" % (_HN, _HN)),
+        ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
+        ("_", r"panel cursor fix \(F117\) so far: "),
+    ), _hj_f117_cursor),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13514,6 +13565,26 @@ def self_test_health():
               [("PARTIAL", F114B)], has=["exe+0x4526D10 at vtable +0x10, not the hooked function"])
         check("F114b pointer: a still cursor", [p114_armed(), p114(turn="too few moves", presses=(0, 0, 0), puv=0)] * 2, 0, [("IDLE", F114B)],
               has=["never moved enough"])
+
+        # ---- panel cursor fix (F117): the cursor on a turned panel against the true uv, per setting ----
+        F117 = "panel cursor fix (F117)"
+
+        def pcf(setting="panel", cursor="follows the uv", turned=80, upright=0, moved=80, gameset=0, notat=0, tr=0.98, td=0.97):
+            return R("panel cursor fix (F117) 1 s", setting, cursor, turned + upright, turned, upright, moved, upright, gameset, 0, notat, 0, tr, td, 0.0, 0.0)
+
+        def pcf_set(to="panel"):
+            return R("native on foot panel cursor fix (F117): %s (TEMPORARY", to)
+
+        check("F117 cursor: panel follows the uv, game against it (the A/B)",
+              [pcf_set(), pcf(), pcf(), pcf_set("game"), pcf("game", "against the uv", moved=0, gameset=80, tr=-0.99, td=-0.98)], 0, [("OK", F117)],
+              has=["panel: 2 s, turned 160, moved 160, the cursor follows the uv in 2 s, against it in 0 s", "game: 1 s, turned 80, moved 0, the cursor "
+                   "follows the uv in 0 s, against it in 1 s"], lacks=["UNPARSED"])
+        check("F117 cursor: turned panels, nothing moved", [pcf(moved=0, notat=80, cursor="against the uv", tr=-0.99, td=-0.98)], 3, [("NEVER APPLIED", F117)],
+              has=["the sprite not at the uv 80"])
+        check("F117 cursor: moved but still against the uv", [pcf(cursor="against the uv", tr=-0.9, td=-0.9)] * 2, 0, [("PARTIAL", F117)],
+              has=["still against the uv"])
+        check("F117 cursor: only upright panels", [pcf(cursor="no turned panel", turned=0, upright=60, moved=0)], 0, [("IDLE", F117)],
+              has=["no turned panel"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
