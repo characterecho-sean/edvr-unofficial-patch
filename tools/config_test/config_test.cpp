@@ -1374,7 +1374,8 @@ static void retiredKeyScan(const std::wstring& root) {
 // the training connect probe's key, retired in F100 (its hooks and lines removed; the connection retry keeps the hooks it reads), and the ADS left eye
 // close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_both_eyes), the old look to aim controller's three
 // test keys, retired in F109 (look to aim rides the ADS head aim's map), and the weapon eye's right key, retired in F112 (the eye offset is forward
-// alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), under native on foot's
+// alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), and F117's and F120's two panel cursor test keys, retired in F122 (the cursor
+// is hidden by default behind fix.native_on_foot_panel_mouse; drawn, both corrections run at their panel value), under native on foot's
 // convention for retired keys (its F34, F66 and F96 keys are the same): the shipped file keeps each at its last shipping value on a hidden retired line,
 // and native_on_foot.cpp's retiredKeysNote reads each once, to name a value that differs. Nothing else may spell them: no other line of the shipped
 // file, no other source, no other function.
@@ -1383,9 +1384,9 @@ static const char* const kRetiredNotedKeys[] = {
     "fix.explorer_cam_eye_trim_forward", "fix.explorer_cam_eye_trim_right", "fix.explorer_cam_follow_smoothing_ms", "hotkey.explorer_cam",
     "fix.native_on_foot_weapon_eye_up_cm", "fix.training_connect_probe", "fix.native_on_foot_ads_close_left_eye",
     "fix.native_on_foot_look_to_aim_yaw_sign", "fix.native_on_foot_look_to_aim_comp_delay", "fix.native_on_foot_look_to_aim_comp_sign",
-    "fix.native_on_foot_weapon_eye_right_cm",
+    "fix.native_on_foot_weapon_eye_right_cm", "fix.native_on_foot_panel_cursor_fix", "fix.native_on_foot_panel_cursor_follow",
 };
-// The marker line above each: "# ui: hidden -- retired (F98): ignored." (F98c's says F98c, F100's F100, F106's F106, F109's F109, F112's F112).
+// The marker line above each: "# ui: hidden -- retired (F98): ignored." (F98c's says F98c, F100's F100, F106's F106, F109's F109, F112's F112, F122's F122).
 static bool isRetiredNotedMarker(const std::string& line) {
     static const std::string head = "# ui: hidden -- retired (F", tail = "): ignored.";
     return line.size() >= head.size() + tail.size() && line.compare(0, head.size(), head) == 0 &&
@@ -1434,9 +1435,9 @@ static void retiredNotedKeyScan(const std::wstring& root) {
     }
     const int count = static_cast<int>(sizeof(kRetiredNotedKeys) / sizeof(kRetiredNotedKeys[0]));
     if (good == count)
-        ok("the shipped edvr.ini spells each of the fifteen retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
-           "F100, the ADS left eye close from F106, the old look to aim's three test keys from F109, the weapon eye's right from F112) once, as its own hidden "
-           "retired line, and nowhere else");
+        ok("the shipped edvr.ini spells each of the seventeen retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
+           "F100, the ADS left eye close from F106, the old look to aim's three test keys from F109, the weapon eye's right from F112, the two panel cursor test "
+           "keys from F122) once, as its own hidden retired line, and nowhere else");
     else
         fail("the shipped edvr.ini keeps each F98 retired key on one hidden retired line and nowhere else", why);
 
@@ -1467,8 +1468,8 @@ static void retiredNotedKeyScan(const std::wstring& root) {
         }
     }
     if (!bad && inNote >= 2 * count)
-        ok("the fifteen retired keys (F98, F98c, F100, F106, F109, F112) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and named "
-           "once)");
+        ok("the seventeen retired keys (F98, F98c, F100, F106, F109, F112, F122) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and "
+           "named once)");
     else if (!bad)
         fail("each F98 retired key is read and named in retiredKeysNote", std::to_string(inNote) + " spellings there, " + std::to_string(2 * count) + " wanted");
 }

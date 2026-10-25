@@ -10989,6 +10989,45 @@ def _hj_f121_visor_axis(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f122_mouse(rows, ctx):
+    """F122: the mouse cursor on on-foot panels, behind the advanced key fix.native_on_foot_panel_mouse (off hides the sprite the game draws, on draws it). Per
+    second with a panel reached: the key, the panels seen (a placement that set the hit byte), the sprites hidden and the hides whose write failed; once, whether
+    the placement hook that hides is armed. OK: off and every panel seen had its sprite hidden. PARTIAL: off, some hidden and some not (a write failed). NEVER
+    APPLIED: off and panels were seen with nothing hidden, or the placement hook was not armed. IDLE: the key on (nothing is hidden by design), or no panel reached."""
+    sec, sets, hooks = rows.get("sec", []), rows.get("setting", []), rows.get("hook", [])
+    if not sec and not sets and not hooks:
+        return None
+    key = sets[-1]["to"] if sets else (sec[-1]["setting"].strip() if sec else "off")
+    parts = ["key %s%s" % (key, " (%d change line(s))" % len(sets) if len(sets) > 1 else "")]
+    never, partial, hid_any = [], [], False
+    for k in ("off", "on"):
+        g = [r for r in sec if r["setting"].strip() == k]
+        if not g:
+            continue
+        seen, hidden, failed = (sum(int(r[f]) for r in g) for f in ("seen", "hidden", "failed"))
+        parts.append("%s: %d s with a panel, %d panels seen, %d sprites hidden, %d hide writes failed" % (k, len(g), seen, hidden, failed))
+        if k == "off":
+            if seen and not hidden:
+                never.append("panels were seen (%d) and nothing was hidden" % seen)
+            elif failed or hidden < seen:
+                partial.append("%d of %d sprites hidden, %d hide writes failed" % (hidden, seen, failed))
+            elif hidden:
+                hid_any = True
+    unarmed = [r for r in hooks if r["state"] == "NOT armed"]
+    if unarmed and key == "off":
+        never.append("the placement hook was not armed (EliteDangerous64.exe+0x%s), so the cursor cannot be hidden" % unarmed[-1]["rva"])
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if partial:
+        return ("PARTIAL", text + "; " + "; ".join(partial))
+    if hid_any:
+        return ("OK", text)
+    if key == "on" or any(r["setting"].strip() == "on" for r in sec):
+        return ("IDLE", text + "; the key is on: the game's cursor is drawn, nothing is hidden by design")
+    return ("IDLE", text + "; no panel was reached while the key was off")
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -12330,6 +12369,11 @@ HEALTH_RULES = (
         ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
         ("_", r"panel cursor follow \(F120\) so far: "),
     ), _hj_f120_follow),
+    _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
+        ("sec", r"panel mouse \(F122\) 1 s: setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)$"),
+        ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
+        ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
+    ), _hj_f122_mouse),
     _hrule("visor axis (F121)", ("F121",), ("visor axis (F121)",), (
         ("armed", r"visor axis \(F121\): armed \(remlok_lines outer\)"),
         ("first", r"visor axis \(F121\): the visor frame is centred on each eye's optical axis: s left (?P<sl>%s) right (?P<sr>%s) uv, from the tangents outer "
@@ -14020,7 +14064,9 @@ def self_test_health():
             return R("panel cursor fix (F117) 1 s", setting, cursor, turned + upright, turned, upright, moved, upright, gameset, 0, notat, 0, tr, td, 0.0, 0.0)
 
         def pcf_set(to="panel"):
-            return R("native on foot panel cursor fix (F117): %s (TEMPORARY", to)
+            # the change line an F117 to F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
+            return ("native on foot panel cursor fix (F117): %s (TEMPORARY, live; a turned panel's cursor: panel = at the panel's point for the click's place, "
+                    "view = mirrored through the view's centre, game = the game's own place)" % to)
 
         check("F117 cursor: panel follows the uv, game against it (the A/B)",
               [pcf_set(), pcf(), pcf(), pcf_set("game"), pcf("game", "against the uv", moved=0, gameset=80, tr=-0.99, td=-0.98)], 0, [("OK", F117)],
@@ -14043,7 +14089,9 @@ def self_test_health():
             return R("panel cursor follow (F120) 1 s", setting, pl, screen, corrected, refs, *refused, te, th, teh, frame, det, *ypr, still, stt, drift)
 
         def pcfo_set(to="panel"):
-            return R("native on foot panel cursor follow (F120): %s (TEMPORARY", to)
+            # the change line an F120 or F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
+            return ("native on foot panel cursor follow (F120): %s (TEMPORARY, live; a screen-space panel's cursor when the head turns: panel = stays on the drawn "
+                    "panel, head = the game's own place, riding with the head)" % to)
 
         def pcfo_pin(state="pinned (its first 16 bytes match build 334925)"):
             return R("panel cursor follow (F120): the screen-space owner function", 0x47299F0, state)
@@ -14106,6 +14154,32 @@ def self_test_health():
         check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
         check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
               has=["the rule's patterns do not match"])
+
+        # ---- panel mouse (F122): the cursor on on-foot panels hidden by default, behind one advanced key ----
+        F122 = "panel mouse (F122)"
+
+        def pm(setting="off", seen=90, hidden=90, failed=0):
+            return R("panel mouse (F122) 1 s", setting, seen, hidden, failed)
+
+        def pm_set(to="off"):
+            return R("native on foot panel mouse (F122): %s (live", to)
+
+        def pm_hook(state="armed", rest=""):
+            return R("panel mouse (F122): the placement hook is %s (EliteDangerous64.exe+0x%llX)%s", state, 0x4559C50, rest)
+
+        check("F122 mouse: off hides every sprite of the panels reached", [pm_set(), pm_hook(), pm(), pm(), pm()], 0, [("OK", F122)],
+              has=["key off", "off: 3 s with a panel, 270 panels seen, 270 sprites hidden, 0 hide writes failed"], lacks=["UNPARSED"])
+        check("F122 mouse: off, panels reached, nothing hidden", [pm_set(), pm_hook(), pm(hidden=0, failed=90), pm(hidden=0, failed=90)], 3, [("NEVER APPLIED", F122)],
+              has=["panels were seen (180) and nothing was hidden", "off: 2 s with a panel, 180 panels seen, 0 sprites hidden, 180 hide writes failed"])
+        check("F122 mouse: the placement hook was not armed", [pm_set(), pm_hook("NOT armed", ": the cursor cannot be hidden, the game draws it")], 3,
+              [("NEVER APPLIED", F122)], has=["the placement hook was not armed (EliteDangerous64.exe+0x4559C50)"])
+        check("F122 mouse: some writes failed", [pm_set(), pm_hook(), pm(hidden=80, failed=10), pm()], 0, [("PARTIAL", F122)],
+              has=["170 of 180 sprites hidden, 10 hide writes failed"])
+        check("F122 mouse: off, no panel reached", [pm_set(), pm_hook()], 0, [("IDLE", F122)], has=["key off", "no panel was reached while the key was off"])
+        check("F122 mouse: on draws the game's cursor", [pm_set("on"), pm_hook(), pm("on", hidden=0), pm("on", hidden=0)], 0, [("IDLE", F122)],
+              has=["key on", "on: 2 s with a panel, 180 panels seen, 0 sprites hidden", "nothing is hidden by design"])
+        check("F122 mouse: the key moved from off to on and back", [pm_set(), pm_hook(), pm(), pm_set("on"), pm("on", hidden=0), pm_set("off"), pm()], 0,
+              [("OK", F122)], has=["key off (3 change line(s))", "off: 2 s with a panel, 180 panels seen, 180 sprites hidden", "on: 1 s with a panel, 90 panels seen"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"

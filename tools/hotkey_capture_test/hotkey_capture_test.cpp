@@ -1823,9 +1823,10 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 41, "the Native on foot page retains its other 41 settings (24, F88's two weapon eye rows (F98c retired Weapon eye up, F112 Weapon eye right), F106's ADS: sight "
+    check(nativePageRows == 39, "the Native on foot page retains its other 39 settings (24, F88's two weapon eye rows (F98c retired Weapon eye up, F112 Weapon eye right), F106's ADS: sight "
                                 "in both eyes (in F89's ADS: close left eye's place), F90's four pistol readout rows, F92a's four rifle ADS readout rows, F92b's ADS: aim "
-                                "with head, F94a's Eye height, F109's Turn style and Snap turn step, F117's Panel cursor (test) and F120's Panel cursor follows (test))");
+                                "with head, F94a's Eye height, and F109's Turn style and Snap turn step; F122 retired F117's Panel cursor (test) and F120's Panel cursor follows (test), and its "
+                                "own key has no row)");
     for (const char* key : keys) {
         bool found = false;
         for (int i = 0; i < kCount; ++i)
