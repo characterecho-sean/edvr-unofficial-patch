@@ -10766,6 +10766,54 @@ def _hj_f120_follow(rows, ctx):
     return ("IDLE", text + "; no mouse-still second with a head turn over 5 deg under panel to judge")
 
 
+def _hj_f121_visor_axis(rows, ctx):
+    """F121: the on-foot helmet visor's frame (the breath fog, the condensation, the curvature) centred on each eye's optical axis by a replacement vertex
+    shader that moves the interpolated uv by s (+a/2 left, -a/2 right, a = (outer - inner) / (outer + inner) from the eye tangents). Every 30 s of visor draws: seen
+    and shifted per eye, the symmetric-frustum skips, the refusals by reason, and s with the tangents it came from. OK when both eyes' draws were shifted and s matches
+    the tangents (or the frustum is symmetric and nothing needed shifting); NEVER APPLIED when visor draws were seen and none was shifted though the tangents ask
+    for it; PARTIAL when only one eye was shifted, s does not match the tangents or a fifth of the draws were refused; IDLE when armed with no visor draw seen
+    (not on foot, or the visor not down). No line at all is the code never having run (a build before F121, or remlok_lines not outer)."""
+    armed, first, refused, sec = rows.get("armed", []), rows.get("first", []), rows.get("refused", []), rows.get("sec", [])
+    if not (armed or first or refused or sec):
+        return None
+    why = "; ".join(sorted({r["why"] for r in refused}))
+    if not sec:
+        if refused:
+            return ("NEVER APPLIED", "visor draws were refused before a window closed: %s" % why)
+        if first:
+            return ("OK", "the visor frame was shifted (s left %s right %s from the tangents outer %s inner %s); the log ended before a 30 s window closed" % (
+                first[-1]["sl"], first[-1]["sr"], first[-1]["outer"], first[-1]["inner"]))
+        return ("IDLE", "armed (remlok_lines outer); no visor draw seen (not on foot, or the helmet's visor is not down)")
+    keys = ("seen", "seenl", "seenr", "shifted", "shl", "shr", "sym", "refused", "r0", "r1", "r2", "r3")
+    tot = {k: _hsum(sec, k) for k in keys}
+    last = sec[-1]
+    outer, inner = float(last["outer"]), float(last["inner"])
+    sl, sr = float(last["sl"]), float(last["sr"])
+    published = not last["np"]
+    a = (outer - inner) / (outer + inner) if published and outer > 0 and inner > 0 else 0.0
+    want_l = 0.0 if abs(a / 2) < 1e-4 else a / 2
+    want_r = -want_l
+    text = ("%d windows: visor draws %d (left %d, right %d), shifted %d (left %d, right %d), symmetric frustum %d, refused %d (no eye %d, no tangents %d, other pixel "
+            "shader %d, no replacement %d); s left %+.4f right %+.4f against the tangents outer %.3f inner %.3f (expected %+.4f %+.4f)%s") % (
+        len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"], tot["refused"], tot["r0"], tot["r1"], tot["r2"], tot["r3"],
+        sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+    if want_l == 0.0 and published and not tot["shifted"] and tot["sym"] and not tot["refused"]:
+        return ("OK", text + "; a symmetric frustum: the game's frame is already on each eye's axis, nothing to shift")
+    if not tot["shifted"]:
+        return ("NEVER APPLIED", text + "; visor draws were seen and none was shifted%s" % ((": " + why) if why else ""))
+    if not tot["shl"] or not tot["shr"]:
+        return ("PARTIAL", text + "; only the %s eye was shifted" % ("left" if tot["shl"] else "right"))
+    if abs(sl - want_l) > 0.002 or abs(sr - want_r) > 0.002:
+        return ("PARTIAL", text + "; s does not match the tangents (the left eye's frame moves toward its nose, +a/2; the right eye's, -a/2)")
+    for f in first:
+        a1 = (float(f["outer"]) - float(f["inner"])) / (float(f["outer"]) + float(f["inner"]))
+        if abs(float(f["sl"]) - a1 / 2) > 0.002 or abs(float(f["sr"]) + a1 / 2) > 0.002:
+            return ("PARTIAL", text + "; the once-line's s (%s, %s) does not match its own tangents" % (f["sl"], f["sr"]))
+    if tot["refused"] * 5 >= tot["seen"]:
+        return ("PARTIAL", text + "; a fifth or more of the visor draws were refused: %s" % (why or "see the counts"))
+    return ("OK", text)
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -12093,6 +12141,17 @@ HEALTH_RULES = (
         ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
         ("_", r"panel cursor follow \(F120\) so far: "),
     ), _hj_f120_follow),
+    _hrule("visor axis (F121)", ("F121",), ("visor axis (F121)",), (
+        ("armed", r"visor axis \(F121\): armed \(remlok_lines outer\)"),
+        ("first", r"visor axis \(F121\): the visor frame is centred on each eye's optical axis: s left (?P<sl>%s) right (?P<sr>%s) uv, from the tangents outer "
+                  r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+) \(the axis (?P<axis>%s) NDC from the image centre\); replacement vertex shader for VS "
+                  r"B553BB479B7C0B97 made \((?P<bytes>\d+) bytes of bytecode\)" % (_HN, _HN, _HN)),
+        ("refused", r"visor axis \(F121\): NOT shifted -- (?P<why>.+?)\. The visor draws unchanged until that clears\."),
+        ("sec", r"visor axis \(F121\) 30 s: visor draws seen (?P<seen>\d+) \(left (?P<seenl>\d+), right (?P<seenr>\d+)\), shifted (?P<shifted>\d+) \(left (?P<shl>\d+), "
+                r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+), refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
+                r"no replacement (?P<r3>\d+)\); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer (?P<outer>[\d.]+) inner (?P<inner>[\d.]+)"
+                r"(?P<np> \(not published\))?$" % (_HN, _HN)),
+    ), _hj_f121_visor_axis),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13179,10 +13238,12 @@ def self_test_health():
     f105_path = os.path.join(repo_root(), "src", "d3d11", "world_screen_coverage.h")
     f105_note_path = os.path.join(repo_root(), "src", "d3d11", "ui_depth.cpp")
     f116_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f116.h")
+    f121_path = os.path.join(repo_root(), "src", "d3d11", "visor_axis_math.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
         f116src = read_text(f116_path)
+        f121src = read_text(f121_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -13230,6 +13291,15 @@ def self_test_health():
             fmts[key] = health_c_format(f116src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f116.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R121(needle, *vals):
+        """F121's lines (visor_axis_math.h builds them: formatWindow, formatFirst, ...), from their own format literals."""
+        key = "f121:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f121src, needle)
+        if fmts[key] is None:
+            raise AssertionError("visor_axis_math.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -13741,6 +13811,40 @@ def self_test_health():
               [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
         check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
                                                           frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
+        # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
+        F121 = "visor axis (F121)"
+
+        def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, refused=0, r=(0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np=""):
+            return R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, refused, r[0], r[1], r[2], r[3], sl, sr, outer, inner, np)
+
+        def vax_first(sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, axis=0.1784):
+            return R121("visor axis (F121): the visor frame is centred", sl, sr, outer, inner, axis, 2828)
+
+        def vax_refused(why="the headset's eye tangents are not published (or not ones this was written for)"):
+            return R121("visor axis (F121): NOT shifted", why)
+
+        def vax_armed():
+            return R121("visor axis (F121): armed")
+
+        check("F121 visor axis: both eyes shifted, s from the tangents", [vax_armed(), vax_first(), vax_win(), vax_win()], 0, [("OK", F121)],
+              has=["2 windows: visor draws 5400 (left 2700, right 2700), shifted 5400 (left 2700, right 2700)", "s left +0.0892 right -0.0892 against the tangents outer 1.255 inner 0.875"],
+              lacks=["UNPARSED"])
+        check("F121 visor axis: a symmetric frustum, nothing to shift",
+              [vax_armed(), vax_win(shl=0, shr=0, sym=2700, sl=0.0, sr=0.0, outer=1.0, inner=1.0)], 0, [("OK", F121)], has=["a symmetric frustum"])
+        check("F121 visor axis: visor draws seen and none shifted (no eye tangents)",
+              [vax_armed(), vax_refused(), vax_win(shl=0, shr=0, refused=2700, r=(0, 2700, 0, 0), sl=0.0, sr=0.0, outer=0.0, inner=0.0, np=" (not published)")], 3,
+              [("NEVER APPLIED", F121)], has=["none was shifted: the headset's eye tangents are not published", "the tangents were not published"])
+        check("F121 visor axis: refused before a window closed", [vax_armed(), vax_refused("the replacement vertex shader or its constant buffer could not be made")], 3,
+              [("NEVER APPLIED", F121)], has=["refused before a window closed"])
+        check("F121 visor axis: one eye only", [vax_armed(), vax_win(shr=0, refused=1350, r=(1350, 0, 0, 0))], 0, [("PARTIAL", F121)], has=["only the left eye was shifted"])
+        check("F121 visor axis: s against the tangents (the signs swapped)", [vax_armed(), vax_win(sl=-0.0892, sr=0.0892)], 0, [("PARTIAL", F121)],
+              has=["s does not match the tangents"])
+        check("F121 visor axis: the once-line's s against its own tangents", [vax_armed(), vax_first(sl=0.2), vax_win()], 0, [("PARTIAL", F121)], has=["the once-line's s"])
+        check("F121 visor axis: a fifth of the draws refused", [vax_armed(), vax_win(refused=700, r=(700, 0, 0, 0))], 0, [("PARTIAL", F121)], has=["a fifth or more"])
+        check("F121 visor axis: armed, no visor draw", [vax_armed()], 0, [("IDLE", F121)], has=["no visor draw seen"])
+        check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
+        check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
+              has=["the rule's patterns do not match"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"

@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"   // F121: kVisorAxisVsBytecode, the visor's axis-centred vertex shader
 #include "remlok_fix.h"
 
 #include <windows.h>
@@ -12,7 +13,9 @@
 #include "binding_shadow.h"
 #include "native_on_foot.h"   // F25: nativeOnFootActive for the on-foot visor match
 #include "dxbc_container.h"   // F27: the visor variant's checksum (ComputeHashRetail)
+#include "shader_swap.h"      // F121: shaderSwapCreateVs
 #include "ui_depth.h"         // F27: uiDepthEyeOfTargetReadOnly, the bound target's eye
+#include "visor_axis_math.h"  // F121: the shift per eye, the counts and the log lines (pure; tools\visor_axis_test runs the same)
 #include <cstring>
 #include <string>
 #include <vector>
@@ -47,6 +50,7 @@ static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
 
 float g_keep = 0.55f;
 bool  g_swap = false;
+bool  g_axisArmedNoted = false;   // F121: the once-per-session "armed" line (remlokConfigure)
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
 inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
@@ -182,6 +186,13 @@ void remlokConfigure(Config& cfg) {
     if (ang != g_angleDeg) g_derivedNoted = false;   // re-announce the derivation
     g_angleDeg = ang;
 
+    if (detail::g_remlokMode == Mode::kOuter && !g_axisArmedNoted) {   // F121: said once, so a log with no visor draw reads IDLE and not "never ran"
+        g_axisArmedNoted = true;
+        char armed[320];
+        visoraxis::formatArmed(armed, sizeof(armed));
+        Log::get().note("%s", armed);
+    }
+
     if (was != detail::g_remlokMode) {
         const char* names[] = {"stock", "outer", "hide"};
         Log::get().note("remlok lines: %s. The overlay is recognised by shape "
@@ -261,6 +272,136 @@ ID3D11PixelShader* g_visorSaved = nullptr;         // the game's pixel shader, r
 uint64_t g_visorUses[2] = {0, 0};                  // per 30 s window
 uint64_t g_visorRefusals = 0;
 uint64_t g_visorWindowMs = 0;
+
+// ---- F121: the visor frame centred on each eye's optical axis (visor_axis_math.h says why) -----------------------------------------------
+// The game's visor vertex shader is replaced, for the visor draw only and per eye, by kVisorAxisVsBytecode: identical but for the interpolated uv,
+// which it moves by s (+a/2 left, -a/2 right, a from the headset's eye tangents). No key: a correction, not a choice. Anything it cannot be sure of
+// is refused and counted, and the draw runs the game's own shader.
+static_assert(kOnFootVisorVs == visoraxis::kVisorVsHash && kOnFootVisorPs == visoraxis::kVisorPsHash,
+              "the visor hashes in visor_axis_math.h (which the rig scans) are the ones the on-foot match uses");
+ID3D11VertexShader* g_axisVs = nullptr;           // the replacement, made once
+bool g_axisVsTried = false;
+ID3D11Buffer* g_axisCb = nullptr;                 // its b3: one float4, x = s; dynamic, written per draw
+ID3D11VertexShader* g_axisSaved = nullptr;        // the game's vertex shader, put back after the draw (AddRef'd)
+ID3D11Buffer* g_axisSavedCb3 = nullptr;           // what the game had at b3 (null for this draw, but put back exactly)
+bool g_axisActive = false;                        // our shader is bound for the draw in flight
+bool g_axisFirstNoted = false;
+float g_axisNotedS[2] = {0.0f, 0.0f};             // the s the once-line last said (a new line when the tangents move it)
+float g_axisLastS[2] = {0.0f, 0.0f};              // the s last worked out for each eye
+float g_axisLastOuter = 0.0f, g_axisLastInner = 0.0f;
+bool g_axisLastTangents = false;
+bool g_axisRefusalNoted[static_cast<unsigned>(visoraxis::Refusal::kCount)] = {false, false, false, false};
+visoraxis::Counts g_axisCounts;                   // per 30 s window
+uint64_t g_axisWindowMs = 0;
+
+void axisRefuse(visoraxis::Refusal why) {
+    ++g_axisCounts.refused[static_cast<unsigned>(why)];
+    if (g_axisRefusalNoted[static_cast<unsigned>(why)]) return;
+    g_axisRefusalNoted[static_cast<unsigned>(why)] = true;   // said once a session, counted in every window
+    char line[512];
+    visoraxis::formatRefused(line, sizeof(line), visoraxis::refusalText(why));
+    Log::get().note("%s", line);
+}
+
+// The window's line (30 s of visor draws), then the counts start over.
+void axisNoteWindow(uint64_t now) {
+    if (!g_axisWindowMs) {
+        g_axisWindowMs = now;
+        return;
+    }
+    if (now - g_axisWindowMs < 30000) return;
+    char line[640];
+    visoraxis::formatWindow(line, sizeof(line), g_axisCounts, g_axisLastS[0], g_axisLastS[1], g_axisLastOuter, g_axisLastInner, g_axisLastTangents);
+    Log::get().note("%s", line);
+    g_axisCounts = visoraxis::Counts();
+    g_axisWindowMs = now;
+}
+
+// The begin: the replacement vertex shader and its shift at b3, around the game's visor draw, for the eye the filing named (0 left, 1 right).
+void axisBegin(ID3D11DeviceContext* ctx, int eye, bool gamesPs) {
+    ++g_axisCounts.seen[eye];
+    // The shift is designed for this pixel shader's visor frame (its uv, from this vertex shader's o1.x): another one is not ours to move.
+    if (!gamesPs) {
+        axisRefuse(visoraxis::Refusal::kOtherPs);
+        return;
+    }
+    float outer = 0.0f, inner = 0.0f, s = 0.0f;
+    if (!eyeTangents(&outer, &inner) || !visoraxis::shiftUv(outer, inner, eye, &s)) {
+        g_axisLastTangents = false;
+        axisRefuse(visoraxis::Refusal::kNoTangents);
+        return;
+    }
+    g_axisLastTangents = true;
+    g_axisLastOuter = outer;
+    g_axisLastInner = inner;
+    g_axisLastS[eye] = s;
+    if (s == 0.0f) {   // a symmetric frustum: the game's frame is already on the axis
+        ++g_axisCounts.symmetric;
+        return;
+    }
+    if (!g_axisVsTried) {
+        g_axisVsTried = true;
+        g_axisVs = shaderSwapCreateVs(ctx, kVisorAxisVsBytecode, sizeof(kVisorAxisVsBytecode), "visor_axis_vs", "visor axis (F121)");
+    }
+    if (g_axisVs && !g_axisCb) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 16;
+            bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            dev->CreateBuffer(&bd, nullptr, &g_axisCb);
+            dev->Release();
+        }
+    }
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (!g_axisVs || !g_axisCb || FAILED(ctx->Map(g_axisCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
+        axisRefuse(visoraxis::Refusal::kNoShader);
+        return;
+    }
+    float* f = static_cast<float*>(m.pData);
+    f[0] = s;
+    f[1] = f[2] = f[3] = 0.0f;
+    ctx->Unmap(g_axisCb, 0);
+
+    ctx->VSGetShader(&g_axisSaved, nullptr, nullptr);
+    ctx->VSGetConstantBuffers(3, 1, &g_axisSavedCb3);
+    ID3D11Buffer* ours = g_axisCb;
+    ctx->VSSetConstantBuffers(3, 1, &ours);
+    ctx->VSSetShader(g_axisVs, nullptr, 0);
+    g_axisActive = true;
+    ++g_axisCounts.shifted[eye];
+
+    float sL = 0.0f, sR = 0.0f, axis = 0.0f;
+    visoraxis::shiftUv(outer, inner, 0, &sL);
+    visoraxis::shiftUv(outer, inner, 1, &sR);
+    visoraxis::axisNdc(outer, inner, &axis);
+    if (!g_axisFirstNoted || std::fabs(sL - g_axisNotedS[0]) > 0.0005f || std::fabs(sR - g_axisNotedS[1]) > 0.0005f) {
+        g_axisFirstNoted = true;
+        g_axisNotedS[0] = sL;
+        g_axisNotedS[1] = sR;
+        char line[640];
+        visoraxis::formatFirst(line, sizeof(line), sL, sR, axis, outer, inner, static_cast<unsigned>(sizeof(kVisorAxisVsBytecode)));
+        Log::get().note("%s", line);
+    }
+}
+
+void axisEnd(ID3D11DeviceContext* ctx) {
+    if (!g_axisActive) return;
+    g_axisActive = false;
+    ctx->VSSetShader(g_axisSaved, nullptr, 0);
+    if (g_axisSaved) {
+        g_axisSaved->Release();
+        g_axisSaved = nullptr;
+    }
+    ctx->VSSetConstantBuffers(3, 1, &g_axisSavedCb3);
+    if (g_axisSavedCb3) {
+        g_axisSavedCb3->Release();
+        g_axisSavedCb3 = nullptr;
+    }
+}
 }  // namespace
 
 // Called from the device's pixel-shader creation hook: keeps the visor shader's bytecode (only that hash, once).
@@ -322,36 +463,48 @@ ID3D11PixelShader* visorVariant(ID3D11DeviceContext* ctx, bool right) {
 // The begin of the on-foot visor draw (outer mode): binds the variant for this draw's eye, and keeps the game's shader for the end.
 void visorSwapBegin(ID3D11DeviceContext* ctx) {
     g_visorPending = false;
+    const uint64_t now = GetTickCount64();
+    // F121 counts only the visor draws of native stereo on foot (a draw with no eye outside it is not a fault): every one of those passes here, with or without an eye.
+    const bool onFoot = nativeOnFootActive();
+    if (onFoot) {
+        axisNoteWindow(now);   // the 30 s line
+        ++g_axisCounts.seenAll;
+    }
     ResourceInfo rt{};
     if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt)) {
         ++g_visorRefusals;
+        if (onFoot) axisRefuse(visoraxis::Refusal::kNoEye);
         return;
     }
     const int eye = uiDepthEyeOfTargetReadOnly(rt.resource);   // never registers: the eye the filing gave this target (native order included)
     if (eye < 0) {
         ++g_visorRefusals;
+        if (onFoot) axisRefuse(visoraxis::Refusal::kNoEye);
         return;
     }
+    const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
     const bool right = (eye == 1) != g_swap;                   // the control (remlok_swap_eyes) swaps the two
     ID3D11PixelShader* variant = visorVariant(ctx, right);
-    if (!variant) return;
-    ctx->PSGetShader(&g_visorSaved, nullptr, nullptr);         // AddRef'd: released at the end
-    ctx->PSSetShader(variant, nullptr, 0);
-    g_visorActive = true;
-    ++g_visorUses[right ? 1 : 0];
-    const uint64_t now = GetTickCount64();
-    if (!g_visorWindowMs) {
-        g_visorWindowMs = now;
-    } else if (now - g_visorWindowMs >= 30000) {
-        Log::get().note("remlok lines (on foot): visor PS variants bound in the last 30 s: left eye %llu, right eye %llu (%llu refusals); eye rule %s",
-                        static_cast<unsigned long long>(g_visorUses[0]), static_cast<unsigned long long>(g_visorUses[1]),
-                        static_cast<unsigned long long>(g_visorRefusals), "cockpit (first = left)");
-        g_visorUses[0] = g_visorUses[1] = 0;
-        g_visorWindowMs = now;
+    if (variant) {
+        ctx->PSGetShader(&g_visorSaved, nullptr, nullptr);     // AddRef'd: released at the end
+        ctx->PSSetShader(variant, nullptr, 0);
+        g_visorActive = true;
+        ++g_visorUses[right ? 1 : 0];
+        if (!g_visorWindowMs) {
+            g_visorWindowMs = now;
+        } else if (now - g_visorWindowMs >= 30000) {
+            Log::get().note("remlok lines (on foot): visor PS variants bound in the last 30 s: left eye %llu, right eye %llu (%llu refusals); eye rule %s",
+                            static_cast<unsigned long long>(g_visorUses[0]), static_cast<unsigned long long>(g_visorUses[1]),
+                            static_cast<unsigned long long>(g_visorRefusals), "cockpit (first = left)");
+            g_visorUses[0] = g_visorUses[1] = 0;
+            g_visorWindowMs = now;
+        }
     }
+    if (onFoot) axisBegin(ctx, eye, gamesPs);   // F121: the true eye (not the swap control's): the frame goes onto THAT eye's axis
 }
 
 void visorSwapEnd(ID3D11DeviceContext* ctx) {
+    axisEnd(ctx);   // F121: the game's vertex shader and its b3 back (a no-op when ours was not bound)
     if (!g_visorActive) return;
     g_visorActive = false;
     ctx->PSSetShader(g_visorSaved, nullptr, 0);
@@ -529,7 +682,7 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
 }
 
 void remlokScissorEnd(ID3D11DeviceContext* ctx) {
-    if (g_visorActive) {   // F27: restores the game's pixel shader after the visor draw
+    if (g_visorActive || g_axisActive) {   // F27: restores the game's pixel shader after the visor draw; F121: and its vertex shader
         visorSwapEnd(ctx);
         return;
     }

@@ -3774,6 +3774,23 @@ if errorlevel 1 ( echo [edvr] ERROR: billboard facing test build failed & exit /
 "%OBJ%\billboardfacing\billboard_facing_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
+:rig_visor_axis_test
+echo [edvr] === visor_axis_test.exe ===
+REM F121: the on-foot helmet visor's axis-centred vertex shader (src\d3d11\visor_axis_vs.h, the build's bytecode kVisorAxisVsBytecode; src\d3d11\visor_axis_math.h) against the game's own
+REM bytecode (tools\visor_axis_test\fixtures, held to its hash name) on a WARP device with the D3D debug layer: signature blocks and every dcl line equal column for
+REM column (ours the one added b3), then both run through stream output on random constants: identical at shift zero (the uv and the position bit for bit), and at
+REM shift s only o1.x moves, by exactly s; the sign per eye from the production math and the dump's tangents (the left eye's frame centre lands on NDC +a, the right
+REM eye's on -a, 720 px apart on 4032); a symmetric frustum gives exactly zero; what the math refuses; the wiring scans. Output under obj\ and System32's d3d11.
+if not exist "%OBJ%\visoraxis" mkdir "%OBJ%\visoraxis"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\visoraxis\\" /Fe"%OBJ%\visoraxis\visor_axis_test.exe" ^
+    "tools\visor_axis_test\visor_axis_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: visor axis test build failed & exit /b 1 )
+"%OBJ%\visoraxis\visor_axis_test.exe" --dry-run || exit /b 1
+"%OBJ%\visoraxis\visor_axis_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===
 REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault
