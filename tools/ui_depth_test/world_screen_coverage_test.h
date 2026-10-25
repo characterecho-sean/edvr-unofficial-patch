@@ -1,13 +1,45 @@
-// F105: the in-world screens' coverage (src\d3d11\world_screen_coverage.h), on WARP with the production stand-in
-// (kWorldScreenCoverageBytecode), the production mask states (maskDepthState, maskBlend) and the production pass
-// (WorldScreenCoverage). Included by ui_depth_test.cpp after its helpers.
+// F105 and F108: the in-world screens' coverage (src\d3d11\world_screen_coverage.h), on WARP with the production stand-ins
+// (kWorldScreenCoverageBytecode, the held one; kWorldScreenTrackedBytecode, F108's), the production mask states (maskDepthState,
+// maskBlend), the production pass (WorldScreenCoverage), UiContent's array path, the census (WorldScreenCensusPass and
+// WorldScreenCensus) and the motion pass (kTemporalMvFastBytecode). Included by ui_depth_test.cpp after zscene_gate_test.h,
+// whose texture helpers it uses.
 //
-// What it holds: the classifier names the exact pair and nothing else; the line carries its counts; the stand-in's
+// What it holds. F105: the classifier names the exact pair and nothing else; the line carries its counts; each stand-in's
 // input signature is the game pixel shader's, element for element (PS EBA95E15B0A66102 as the 2026-10-03 shader dump
-// disassembles it), so the vertex stage that feeds the game's shader links to it (the debug layer, when installed,
-// fails the rig on a linkage warning); the second issue marks the masks exactly where the screen won the depth test,
-// with the values the UI resolve reads, writes no game target and no depth, and puts every binding back; and a draw
-// whose state could not be put back exactly is refused without a change.
+// disassembles it), so the vertex stage that feeds the game's shader links to it (the debug layer, when installed, fails the
+// rig on a linkage warning); the second issue marks the masks exactly where the screen won the depth test, writes no game
+// target and no depth, and puts every binding back; a draw whose state could not be put back exactly is refused without a
+// change. F108: the classification's refusals are named in order; a static slice gives no edit after the expiry; a changed
+// region is edited only there, in its own slice; a solid-colour instance gives no edit; the fresh-edit bit (6) appears only
+// on an edit's first frame; the census counts the states and classifies rest and change; the motion pass writes the
+// history-invalidate value only where the coverage carries the fresh bit.
+namespace wstest {
+// Every slice of a 2D or array texture of 1-byte texels (R8_UNORM), as floats in 0..1, slice by slice.
+std::vector<std::vector<float>> readSlices8(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* t) {
+    D3D11_TEXTURE2D_DESC td{}; t->GetDesc(&td);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> stage; hr(dev->CreateTexture2D(&td, nullptr, &stage));
+    ctx->CopyResource(stage.Get(), t);
+    std::vector<std::vector<float>> out(td.ArraySize);
+    for (UINT s = 0; s < td.ArraySize; ++s) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const UINT sub = D3D11CalcSubresource(0, s, td.MipLevels);
+        hr(ctx->Map(stage.Get(), sub, D3D11_MAP_READ, 0, &m));
+        out[s].resize(size_t(td.Width) * td.Height);
+        for (UINT y = 0; y < td.Height; ++y) for (UINT x = 0; x < td.Width; ++x)
+            out[s][size_t(y) * td.Width + x] = static_cast<const unsigned char*>(m.pData)[size_t(y) * m.RowPitch + x] / 255.0f;
+        ctx->Unmap(stage.Get(), sub);
+    }
+    return out;
+}
+std::vector<std::vector<float>> agesOf(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* v) {
+    check(v != nullptr, "F108: UiContent returned the array's ages");
+    ComPtr<ID3D11Resource> r; v->GetResource(&r);
+    ComPtr<ID3D11Texture2D> t; hr(r.As(&t));
+    return readSlices8(dev, ctx, t.Get());
+}
+}  // namespace wstest
+
 void testWorldScreenCoverage(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // ---- the classifier and the line ----
     check(worldScreenDraw(kWorldScreenVs, kWorldScreenPs, true, true, true), "F105: the pair, a composite in scene depth, trained");
@@ -30,41 +62,91 @@ void testWorldScreenCoverage(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         check(w.frames == 0 && w.seen == 0 && w.marked == 0 && w.refused[3] == 0, "F105: the window resets");
         check(std::strcmp(worldScreenRefusalName(WorldScreenRefusal::kShader), "no shader") == 0, "F105: refusal names");
     }
-
-    // ---- the stand-in's signature is the game shader's ----
+    // F108: the classification's refusals, the first failed test named.
+    check(worldScreenClassRefusal(true, true, true) == WorldScreenClassRefusal::kNone, "F108: a screen F105 takes is no refusal");
+    check(worldScreenClassRefusal(false, false, false) == WorldScreenClassRefusal::kNoSurface, "F108: no learned surface is named first");
+    check(worldScreenClassRefusal(true, false, false) == WorldScreenClassRefusal::kNotSceneDepth, "F108: then not the scene's depth");
+    check(worldScreenClassRefusal(true, true, false) == WorldScreenClassRefusal::kNotTrained, "F108: then no external upscaler");
+    check(std::strcmp(worldScreenClassRefusalName(WorldScreenClassRefusal::kNotSceneDepth), "not the scene's depth") == 0,
+          "F108: classification refusal names");
+    // F108: the census, frame by frame. Before any change every frame is at rest; a change's first frame and the 31 after it are
+    // during it; the 32nd after it is at rest again; a frame with no screen is not counted; the window boundary keeps the change.
     {
+        WorldScreenCensus c;
+        c.add(100, 1000, 0, 0);
+        c.add(101, 1000, 300, 300);
+        c.add(120, 1000, 300, 0);
+        c.add(132, 1000, 10, 0);
+        c.add(133, 1000, 0, 0);
+        c.add(134, 0, 0, 0);
+        check(c.frames == 5 && c.editFrames == 3 && c.changeFrames == 1 && c.freshPx == 300, "F108 census: frames, edits, changes, restarts");
+        check(c.restFrames == 2 && c.restScreen == 2000 && c.restEdited == 0, "F108 census: before the change and 32 frames after it, at rest");
+        check(c.duringFrames == 3 && c.duringScreen == 3000 && c.duringEdited == 610, "F108 census: a change's first frame and 31 after, during");
+        c.resetWindow();
+        check(c.frames == 0 && c.restFrames == 0 && c.freshPx == 0 && c.haveChange && c.lastChange == 101, "F108 census: a window keeps the last change");
+        c.add(110 + 1, 500, 50, 0);
+        check(c.duringFrames == 1 && c.restFrames == 0, "F108 census: a frame after the boundary within 32 of the change is during it");
+        WorldScreenCensus held;   // F105's rule: every screen pixel edited every frame, no change ever begins
+        for (uint64_t f = 200; f < 240; ++f) held.add(f, 1000, 1000, 0);
+        check(held.restFrames == 40 && held.restEdited == held.restScreen && held.changeFrames == 0,
+              "F108 census: F105's rule reads as every pixel edited at rest");
+        WorldScreenWindow w;
+        w.frames = 1800; w.tracked = 900; w.held = 2;
+        w.classRefused[static_cast<size_t>(WorldScreenClassRefusal::kNotSceneDepth)] = 7;
+        char line[900] = {};
+        const int n = worldScreenFormatF108(line, sizeof(line), w, held, "format 2");
+        check(n > 0 && n < static_cast<int>(sizeof(line)), "F108: the line fits its buffer");
+        check(std::strstr(line, "ui depth world screens (F108): 1800 frames; draws tracked 900, held without change tracking 2 (format 2); "
+                                "not taken at the classification: no learned surface 0, not the scene's depth 7, no external upscaler 0; "
+                                "census 40 frames with a screen (0 skipped): frames with an edit 40, a change began 0; at rest 40 frames, "
+                                "edited 40000 of 40000 px; during a change 0 frames, edited 0 of 0 px; history restarts 0 px in 0 frames.") == line,
+              "F108: the line's counts, in the order the reader parses them");
+    }
+
+    // ---- each stand-in's signature is the game shader's ----
+    struct Want { const char* name; UINT reg; BYTE mask; D3D_REGISTER_COMPONENT_TYPE type; };
+    // PS EBA95E15B0A66102's input signature (edvr_logs\shaders\ps_EBA95E15B0A66102.dxbc, 3616 bytes, disassembled).
+    const Want game[4] = {
+        {"__USER_VERTEX_FACEINVARIANT", 0, 0x3, D3D_REGISTER_COMPONENT_UINT32},
+        {"__USER_VERTEX_M_LIGHTINGNORMAL", 1, 0x7, D3D_REGISTER_COMPONENT_FLOAT32},
+        {"__USER_VERTEX_M_LIGHTINGTANGENT", 2, 0x7, D3D_REGISTER_COMPONENT_FLOAT32},
+        {"__USER_VERTEX_M_TEXCOORD", 3, 0x3, D3D_REGISTER_COMPONENT_FLOAT32},
+    };
+    const std::pair<const void*, size_t> standIns[2] = {{kWorldScreenCoverageBytecode, sizeof(kWorldScreenCoverageBytecode)},
+                                                        {kWorldScreenTrackedBytecode, sizeof(kWorldScreenTrackedBytecode)}};
+    for (int s = 0; s < 2; ++s) {
         ComPtr<ID3D11ShaderReflection> refl;
-        hr(D3DReflect(kWorldScreenCoverageBytecode, sizeof(kWorldScreenCoverageBytecode), __uuidof(ID3D11ShaderReflection),
-                      reinterpret_cast<void**>(refl.GetAddressOf())));
+        hr(D3DReflect(standIns[s].first, standIns[s].second, __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(refl.GetAddressOf())));
         D3D11_SHADER_DESC desc{};
         hr(refl->GetDesc(&desc));
-        struct Want { const char* name; UINT reg; BYTE mask; D3D_REGISTER_COMPONENT_TYPE type; };
-        // PS EBA95E15B0A66102's input signature (edvr_logs\shaders\ps_EBA95E15B0A66102.dxbc, 3616 bytes, disassembled).
-        const Want game[4] = {
-            {"__USER_VERTEX_FACEINVARIANT", 0, 0x3, D3D_REGISTER_COMPONENT_UINT32},
-            {"__USER_VERTEX_M_LIGHTINGNORMAL", 1, 0x7, D3D_REGISTER_COMPONENT_FLOAT32},
-            {"__USER_VERTEX_M_LIGHTINGTANGENT", 2, 0x7, D3D_REGISTER_COMPONENT_FLOAT32},
-            {"__USER_VERTEX_M_TEXCOORD", 3, 0x3, D3D_REGISTER_COMPONENT_FLOAT32},
-        };
-        check(desc.InputParameters == 4, "F105: the stand-in takes the game shader's four inputs");
+        check(desc.InputParameters == 4, "F105/F108: the stand-in takes the game shader's four inputs");
         for (UINT i = 0; i < 4 && i < desc.InputParameters; ++i) {
             D3D11_SIGNATURE_PARAMETER_DESC p{};
             hr(refl->GetInputParameterDesc(i, &p));
             check(std::strcmp(p.SemanticName, game[i].name) == 0 && p.SemanticIndex == 0 && p.Register == game[i].reg &&
                       p.Mask == game[i].mask && p.ComponentType == game[i].type && p.SystemValueType == D3D_NAME_UNDEFINED,
-                  "F105: each input element is the game shader's (name, index, register, mask, type)");
+                  "F105/F108: each input element is the game shader's (name, index, register, mask, type)");
         }
-        check(desc.OutputParameters == 2, "F105: the stand-in writes two targets");
-        for (UINT i = 0; i < 2 && i < desc.OutputParameters; ++i) {
+        check(desc.OutputParameters == 3, "F105/F108: the stand-in writes three targets");
+        for (UINT i = 0; i < 3 && i < desc.OutputParameters; ++i) {
             D3D11_SIGNATURE_PARAMETER_DESC p{};
             hr(refl->GetOutputParameterDesc(i, &p));
-            check(std::strcmp(p.SemanticName, "SV_Target") == 0 && p.SemanticIndex == (i ? 2u : 0u) && p.Register == (i ? 2u : 0u),
-                  "F105: the coverage mask at target 0, the edit mask at target 2");
+            check(std::strcmp(p.SemanticName, "SV_Target") == 0 && p.SemanticIndex == i && p.Register == i,
+                  "F105/F108: the coverage mask at target 0, the census state at 1, the edit mask at 2");
         }
-        check(desc.BoundResources == 0, "F105: the stand-in reads no resource");
+        if (s == 0) check(desc.BoundResources == 0, "F105: the held stand-in reads no resource");
+        if (s == 1) {
+            D3D11_SHADER_INPUT_BIND_DESC b{};
+            check(SUCCEEDED(refl->GetResourceBindingDescByName("Instances", &b)) && b.BindPoint == 1 && b.Type == D3D_SIT_STRUCTURED,
+                  "F108: the tracked stand-in reads the game's instance records at t1");
+            check(SUCCEEDED(refl->GetResourceBindingDescByName("Material", &b)) && b.BindPoint == 2, "F108: ...the game's cb2 at b2");
+            check(SUCCEEDED(refl->GetResourceBindingDescByName("UiEditAges", &b)) && b.BindPoint == WorldScreenCoverage::kAgesSlot &&
+                      b.Dimension == D3D_SRV_DIMENSION_TEXTURE2DARRAY,
+                  "F108: ...and the edit ages, an array, at t14");
+        }
     }
 
-    // ---- the pass on WARP ----
+    // ---- F105: the held pass on WARP ----
     ctx->ClearState();
     // The game's vertex stage, with VS 889A5279E68F0672's output signature: the four elements, then SV_POSITION.
     auto vsCode = compile(R"HLSL(
@@ -88,10 +170,11 @@ struct I {
 struct O { float4 a : SV_Target0; float4 b : SV_Target1; float4 c : SV_Target2; float4 d : SV_Target3; };
 O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c = float4(.7, .8, .9, 1); o.d = float4(.25, .5, .75, 1); return o; }
 )HLSL", "ps_5_0");
-    ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11PixelShader> gamePs, standIn;
+    ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11PixelShader> gamePs, standIn, tracked;
     hr(dev->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &vs));
     hr(dev->CreatePixelShader(gamePsCode->GetBufferPointer(), gamePsCode->GetBufferSize(), nullptr, &gamePs));
     hr(dev->CreatePixelShader(kWorldScreenCoverageBytecode, sizeof(kWorldScreenCoverageBytecode), nullptr, &standIn));
+    hr(dev->CreatePixelShader(kWorldScreenTrackedBytecode, sizeof(kWorldScreenTrackedBytecode), nullptr, &tracked));
     D3D11_INPUT_ELEMENT_DESC input{"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
     ComPtr<ID3D11InputLayout> layout;
     hr(dev->CreateInputLayout(&input, 1, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &layout));
@@ -103,15 +186,16 @@ O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c
     D3D11_BUFFER_DESC vbd{}; vbd.ByteWidth = sizeof(verts); vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     D3D11_SUBRESOURCE_DATA vinit{verts, 0, 0};
     ComPtr<ID3D11Buffer> vb; hr(dev->CreateBuffer(&vbd, &vinit, &vb));
-    auto colourTarget = [&](DXGI_FORMAT format, ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11RenderTargetView>& rtv) {
-        D3D11_TEXTURE2D_DESC td{}; td.Width = td.Height = 8; td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
+    auto colourTarget = [&](DXGI_FORMAT format, ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11RenderTargetView>& rtv, UINT w = 8) {
+        D3D11_TEXTURE2D_DESC td{}; td.Width = w; td.Height = 8; td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
         td.Format = format; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         hr(dev->CreateTexture2D(&td, nullptr, &tex)); hr(dev->CreateRenderTargetView(tex.Get(), nullptr, &rtv));
     };
-    ComPtr<ID3D11Texture2D> gbuf[4], maskTex, editTex; ComPtr<ID3D11RenderTargetView> gbufRtv[4], maskRtv, editRtv;
+    ComPtr<ID3D11Texture2D> gbuf[4], maskTex, editTex, stateTex; ComPtr<ID3D11RenderTargetView> gbufRtv[4], maskRtv, editRtv, stateRtv;
     for (int i = 0; i < 4; ++i) colourTarget(DXGI_FORMAT_R8G8B8A8_UNORM, gbuf[i], gbufRtv[i]);
     colourTarget(DXGI_FORMAT_R8_UNORM, maskTex, maskRtv);
     colourTarget(DXGI_FORMAT_R8_UNORM, editTex, editRtv);
+    colourTarget(DXGI_FORMAT_R8_UNORM, stateTex, stateRtv);
     auto scene = depth(dev, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT);
     D3D11_DEPTH_STENCIL_DESC dd{}; dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
     dd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
@@ -140,6 +224,7 @@ O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c
         const float zero[4] = {};
         for (auto& r : gbufRtv) ctx->ClearRenderTargetView(r.Get(), zero);
         ctx->ClearRenderTargetView(maskRtv.Get(), zero); ctx->ClearRenderTargetView(editRtv.Get(), zero);
+        ctx->ClearRenderTargetView(stateRtv.Get(), zero);
         ctx->ClearDepthStencilView(scene.dsv.Get(), D3D11_CLEAR_DEPTH, 0, 0);
         if (occluded) ctx->Draw(6, 0);   // the occluder, drawn first
         ctx->Draw(6, 6);                 // the screen: the game's draw
@@ -154,14 +239,15 @@ O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c
         check(premise, "F105: the rig's game draws wrote the screen's and the occluder's depth");
 
         WorldScreenCoverage pass;
-        check(pass.begin(ctx, standIn.Get(), maskRtv.Get(), editRtv.Get(), test, blend), "F105: the pass begins for the game's draw");
+        check(pass.begin(ctx, standIn.Get(), maskRtv.Get(), stateRtv.Get(), editRtv.Get(), nullptr, test, blend),
+              "F105: the pass begins for the game's draw");
         ctx->Draw(6, 6);                 // the second issue
         pass.end(ctx);
         check(!pass.active(), "F105: the pass ends");
 
         for (int i = 0; i < 4; ++i) check(before[i] == read(dev, ctx, gbuf[i].Get()), "F105: no game target is written");
         check(depthBefore == read(dev, ctx, scene.tex.Get()), "F105: the game's depth is not written");
-        const auto mask = read(dev, ctx, maskTex.Get()), edit = read(dev, ctx, editTex.Get());
+        const auto mask = read(dev, ctx, maskTex.Get()), edit = read(dev, ctx, editTex.Get()), state = read(dev, ctx, stateTex.Get());
         bool exact = true;
         for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
             const bool screen = x < (occluded ? 2u : 4u);
@@ -187,11 +273,13 @@ O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c
         }
         for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
             const bool screen = x < (occluded ? 2u : 4u);
-            const float m = mask[y * 8 + x] * 255.0f, e = edit[y * 8 + x] * 255.0f;
+            const float m = mask[y * 8 + x] * 255.0f, e = edit[y * 8 + x] * 255.0f, s = state[y * 8 + x] * 255.0f;
             check(std::fabs(m - (screen ? float(kWorldScreenMaskValue) : 0.0f)) < .5f,
                   "F105: the coverage mask holds the attached value exactly where the screen won the depth test");
             check(std::fabs(e - (screen ? float(kWorldScreenEditValue) : 0.0f)) < .5f,
                   "F105: the edit mask is marked exactly where the coverage mask is");
+            check(std::fabs(s - (screen ? float(kWorldScreenStateEdited) : 0.0f)) < .5f,
+                  "F108: the held stand-in's census state says edited wherever it marks (the old behaviour, counted as such)");
         }
         // The game's bindings, back.
         ComPtr<ID3D11PixelShader> ps; ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -221,17 +309,292 @@ O main(I i) { O o; o.a = float4(.1, .2, .3, 1); o.b = float4(.4, .5, .6, 1); o.c
         ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, &one, scene.dsv.Get(), 1, 1, uav.GetAddressOf(), nullptr);
         ctx->PSSetShader(gamePs.Get(), nullptr, 0);
         WorldScreenCoverage pass;
-        check(!pass.begin(ctx, standIn.Get(), maskRtv.Get(), editRtv.Get(), test, blend),
+        check(!pass.begin(ctx, standIn.Get(), maskRtv.Get(), stateRtv.Get(), editRtv.Get(), nullptr, test, blend),
               "F105: refused with an unordered-access view bound beside the targets");
         ComPtr<ID3D11PixelShader> ps; ctx->PSGetShader(&ps, nullptr, nullptr);
         ComPtr<ID3D11UnorderedAccessView> still;
         ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 1, 1, &still);
         check(ps == gamePs && still == uav && !pass.active(), "F105: a refusal changes nothing");
-        // ...and without a depth target.
+        // ...and without a depth target, a stand-in or a state target.
         ctx->ClearState();
         ctx->OMSetRenderTargets(1, &one, nullptr);
-        check(!pass.begin(ctx, standIn.Get(), maskRtv.Get(), editRtv.Get(), test, blend), "F105: refused without a depth target");
-        check(!pass.begin(ctx, nullptr, maskRtv.Get(), editRtv.Get(), test, blend), "F105: refused without the stand-in");
+        check(!pass.begin(ctx, standIn.Get(), maskRtv.Get(), stateRtv.Get(), editRtv.Get(), nullptr, test, blend),
+              "F105: refused without a depth target");
+        check(!pass.begin(ctx, nullptr, maskRtv.Get(), stateRtv.Get(), editRtv.Get(), nullptr, test, blend), "F105: refused without the stand-in");
+        check(!pass.begin(ctx, standIn.Get(), maskRtv.Get(), nullptr, editRtv.Get(), nullptr, test, blend), "F108: refused without the state target");
+    }
+
+    // ---- F108: UiContent's array path ----
+    auto makeArray = [&](UINT w, UINT h, UINT slices) {
+        D3D11_TEXTURE2D_DESC d{}; d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = slices; d.SampleDesc.Count = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        ComPtr<ID3D11Texture2D> t; hr(dev->CreateTexture2D(&d, nullptr, &t)); return t;
+    };
+    auto arrayView = [&](ID3D11Texture2D* t, UINT first, UINT count) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC v{}; v.Format = DXGI_FORMAT_R8G8B8A8_UNORM; v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        v.Texture2DArray.MipLevels = 1; v.Texture2DArray.FirstArraySlice = first; v.Texture2DArray.ArraySize = count;
+        ComPtr<ID3D11ShaderResourceView> s; hr(dev->CreateShaderResourceView(t, &v, &s)); return s;
+    };
+    // One texel of one slice set to a value (mip 0).
+    auto poke = [&](ID3D11Texture2D* t, UINT slice, UINT x, UINT y, unsigned char v) {
+        const unsigned char px[4] = {v, v, v, 255};
+        D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
+        ctx->UpdateSubresource(t, D3D11CalcSubresource(0, slice, 1), &box, px, 4, 0);
+    };
+    {
+        ctx->ClearState();
+        TestUiContent tracker;
+        auto t = makeArray(16, 8, 3);   // 4x2 blocks a slice
+        auto v = arrayView(t.Get(), 0, 3);
+        auto* a0 = tracker.prepare(ctx, v.Get(), 10);
+        check(tracker.lastDecision == UiContent::Decision::kReset, "F108: a new array is seeded");
+        D3D11_SHADER_RESOURCE_VIEW_DESC ad{}; a0->GetDesc(&ad);
+        check(ad.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY && ad.Texture2DArray.ArraySize == 3, "F108: the ages are an array of the view's slices");
+        for (auto& s : wstest::agesOf(dev, ctx, a0)) for (float a : s) check(a == 0, "F108: a seeded array has no edit");
+        for (auto& s : wstest::agesOf(dev, ctx, tracker.prepare(ctx, v.Get(), 11))) for (float a : s) check(a == 0, "F108: an unchanged array has no edit");
+        check(tracker.lastDecision == UiContent::Decision::kUpdated, "F108: an array's next frame is compared");
+        poke(t.Get(), 1, 5, 2, 200);   // slice 1, block (1, 0)
+        auto ages = wstest::agesOf(dev, ctx, tracker.prepare(ctx, v.Get(), 12));
+        check(ages.size() == 3 && ages[1].size() == 8, "F108: three slices of 4x2 blocks");
+        for (UINT s = 0; s < 3; ++s) for (UINT b = 0; b < 8; ++b)
+            check(ages[s][b] == ((s == 1 && b == 1) ? 1.f : 0.f), "F108: a changed region is edited only there, in its own slice");
+        for (uint32_t f = 13; f <= 44; ++f) ages = wstest::agesOf(dev, ctx, tracker.prepare(ctx, v.Get(), f));
+        for (auto& s : ages) for (float a : s) check(a == 0, "F108: a static slice gives no edit after the 32-frame expiry");
+        // A view on slices 1..2 is its own entry, and its slice 1 is the texture's slice 2.
+        auto v2 = arrayView(t.Get(), 1, 2);
+        tracker.prepare(ctx, v2.Get(), 44);
+        check(tracker.lastDecision == UiContent::Decision::kReset && tracker.inUse() == 2, "F108: a sub-range view is its own entry");
+        poke(t.Get(), 2, 0, 0, 90);
+        ages = wstest::agesOf(dev, ctx, tracker.prepare(ctx, v2.Get(), 45));
+        check(ages.size() == 2 && ages[0][0] == 0 && ages[1][0] == 1, "F108: the view's slice index is the texture's slice less the view's first");
+        // A 2D surface is not an array entry, and the 2D path still declines an array texture viewed as one slice of 2D... no such
+        // view exists in D3D11, so the declines that remain are format and binding.
+        D3D11_TEXTURE2D_DESC d{}; d.Width = 8; d.Height = 8; d.MipLevels = 1; d.ArraySize = 2; d.SampleDesc.Count = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> noRt; hr(dev->CreateTexture2D(&d, nullptr, &noRt));
+        check(tracker.prepare(ctx, arrayView(noRt.Get(), 0, 2).Get(), 46) == nullptr &&
+                  tracker.lastDecision == UiContent::Decision::kDeclinedNoRenderTarget,
+              "F108: an array that is not a render target is declined (a static atlas, not a rendered interface)");
+    }
+
+    // ---- F108: the tracked stand-in on WARP: two instances, the interface's slice 1 and a solid colour ----
+    {
+        ctx->ClearState();
+        auto trackVsCode = compile(R"HLSL(
+struct O {
+    nointerpolation uint2 f : __USER_VERTEX_FACEINVARIANT;
+    float3 n : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 t : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 uv : __USER_VERTEX_M_TEXCOORD;
+    float4 p : SV_POSITION;
+};
+O main(float2 q : POSITION, uint instance : SV_InstanceID) {
+    O o = (O)0; o.f = uint2(0, instance); o.uv = q; o.n = float3(0, 0, 1); o.t = float3(1, 0, 0);
+    o.p = float4(-1 + q.x + instance, 1 - 2 * q.y, .5, 1); return o;
+}
+)HLSL", "vs_5_0");
+        ComPtr<ID3D11VertexShader> tvs; hr(dev->CreateVertexShader(trackVsCode->GetBufferPointer(), trackVsCode->GetBufferSize(), nullptr, &tvs));
+        D3D11_INPUT_ELEMENT_DESC in2{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
+        ComPtr<ID3D11InputLayout> layout2; hr(dev->CreateInputLayout(&in2, 1, trackVsCode->GetBufferPointer(), trackVsCode->GetBufferSize(), &layout2));
+        const float quad[] = {0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1};
+        D3D11_BUFFER_DESC qb{}; qb.ByteWidth = sizeof(quad); qb.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA qi{quad, 0, 0}; ComPtr<ID3D11Buffer> quadVb; hr(dev->CreateBuffer(&qb, &qi, &quadVb));
+        // The game's instance records (t1, stride 96): word 4 the interface's slice, bit 31 a solid colour.
+        uint32_t records[2][24] = {};
+        records[0][4] = 1u;
+        records[1][4] = 0x80000000u | 1u;
+        D3D11_BUFFER_DESC sb{}; sb.ByteWidth = sizeof(records); sb.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sb.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; sb.StructureByteStride = 96;
+        D3D11_SUBRESOURCE_DATA si{records, 0, 0}; ComPtr<ID3D11Buffer> inst; hr(dev->CreateBuffer(&sb, &si, &inst));
+        ComPtr<ID3D11ShaderResourceView> instSrv; hr(dev->CreateShaderResourceView(inst.Get(), nullptr, &instSrv));
+        // The game's cb2: [1] the uv's scale and offset (the identity here).
+        const float material[24] = {0, 0, 0, 0, 1, 1, 0, 0};
+        D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(material); cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA ci{material, 0, 0}; ComPtr<ID3D11Buffer> cb2; hr(dev->CreateBuffer(&cbd, &ci, &cb2));
+        ComPtr<ID3D11Texture2D> tMask, tEdit, tState, tGb; ComPtr<ID3D11RenderTargetView> tMaskRtv, tEditRtv, tStateRtv, tGbRtv;
+        colourTarget(DXGI_FORMAT_R8_UNORM, tMask, tMaskRtv, 16);
+        colourTarget(DXGI_FORMAT_R8_UNORM, tEdit, tEditRtv, 16);
+        colourTarget(DXGI_FORMAT_R8_UNORM, tState, tStateRtv, 16);
+        colourTarget(DXGI_FORMAT_R8G8B8A8_UNORM, tGb, tGbRtv, 16);
+        auto tDepth = depth(dev, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, 16);
+        // The interface: 16x16, two slices, so 4x4 blocks a slice; the screen samples uv 0..1 over 8x8 pixels.
+        auto gui = makeArray(16, 16, 2);
+        auto guiView = arrayView(gui.Get(), 0, 2);
+        TestUiContent tracker;
+        // One frame: the game's draw, then the tracked pass, the masks read back. pixel(x, y): mask, state, edit in 0..255.
+        struct Read { std::vector<float> mask, state, edit; };
+        auto frame = [&](uint32_t f, bool draw) {
+            ID3D11ShaderResourceView* ages = tracker.prepare(ctx, guiView.Get(), f);
+            check(ages != nullptr, "F108: the interface array is tracked");
+            Read r;
+            if (!draw) return r;
+            ctx->ClearState();
+            UINT stride = 8, offset = 0;
+            ctx->IASetInputLayout(layout2.Get()); ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->IASetVertexBuffers(0, 1, quadVb.GetAddressOf(), &stride, &offset);
+            ctx->VSSetShader(tvs.Get(), nullptr, 0); ctx->PSSetShader(gamePs.Get(), nullptr, 0);
+            ctx->PSSetShaderResources(1, 1, instSrv.GetAddressOf()); ctx->PSSetShaderResources(2, 1, guiView.GetAddressOf());
+            ctx->PSSetConstantBuffers(2, 1, cb2.GetAddressOf());
+            ctx->RSSetState(raster.Get()); D3D11_VIEWPORT vp{0, 0, 16, 8, 0, 1}; ctx->RSSetViewports(1, &vp);
+            ID3D11RenderTargetView* gt[4] = {tGbRtv.Get(), nullptr, nullptr, nullptr};
+            ctx->OMSetRenderTargets(4, gt, tDepth.dsv.Get());
+            ctx->OMSetDepthStencilState(gameDepth.Get(), 0);
+            const float zero[4] = {};
+            for (auto* rtv : {tGbRtv.Get(), tMaskRtv.Get(), tEditRtv.Get(), tStateRtv.Get()}) ctx->ClearRenderTargetView(rtv, zero);
+            ctx->ClearDepthStencilView(tDepth.dsv.Get(), D3D11_CLEAR_DEPTH, 0, 0);
+            ctx->DrawInstanced(6, 2, 0, 0);   // the game's draw
+            WorldScreenCoverage pass;
+            check(pass.begin(ctx, tracked.Get(), tMaskRtv.Get(), tStateRtv.Get(), tEditRtv.Get(), ages, test, blend),
+                  "F108: the tracked pass begins");
+            ctx->DrawInstanced(6, 2, 0, 0);   // the second issue
+            pass.end(ctx);
+            ComPtr<ID3D11ShaderResourceView> t14; ctx->PSGetShaderResources(WorldScreenCoverage::kAgesSlot, 1, &t14);
+            check(!t14, "F108: the game's t14 (empty here) is put back");
+            r.mask = read(dev, ctx, tMask.Get()); r.state = read(dev, ctx, tState.Get()); r.edit = read(dev, ctx, tEdit.Get());
+            return r;
+        };
+        auto at = [](const std::vector<float>& v, unsigned x, unsigned y) { return v[y * 16 + x] * 255.0f; };
+        // The pixels whose 2x2 blocks about the uv include block (0, 0): x and y 0..2 of the interface's instance (left half).
+        auto inChange = [](unsigned x, unsigned y) { return x < 3 && y < 3; };
+        Read r = frame(20, true);   // seeded: no edit anywhere
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
+            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f && std::fabs(at(r.state, x, y) - kWorldScreenStateRest) < .5f &&
+                      at(r.edit, x, y) < .5f,
+                  "F108: at rest the tracked stand-in marks the screen (2), rest state, no edit");
+        }
+        for (unsigned ty = 0; ty < 4; ++ty) for (unsigned tx = 0; tx < 4; ++tx) poke(gui.Get(), 1, tx, ty, 77);   // slice 1, block (0, 0)
+        r = frame(21, true);   // the change's first frame
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
+            const bool fresh = x < 8 && inChange(x, y);   // the right half is the solid colour: never an edit
+            check(std::fabs(at(r.mask, x, y) - (fresh ? kWorldScreenFreshMaskValue : kWorldScreenMaskValue)) < .5f,
+                  "F108: the fresh bit (6) exactly where an edit begins; 2 elsewhere and on the solid colour");
+            check(std::fabs(at(r.state, x, y) - (fresh ? kWorldScreenStateFresh : kWorldScreenStateRest)) < .5f,
+                  "F108: the census state says first frame there, rest elsewhere");
+            check(std::fabs(at(r.edit, x, y) - (fresh ? 255.0f : 0.0f)) < .5f, "F108: the edit mask only where the interface changed");
+        }
+        r = frame(22, true);   // the change's second frame: edited, not fresh
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
+            const bool edited = x < 8 && inChange(x, y);
+            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f, "F108: the fresh bit only on an edit's first frame");
+            check(std::fabs(at(r.state, x, y) - (edited ? kWorldScreenStateEdited : kWorldScreenStateRest)) < .5f,
+                  "F108: the census state says edited while the edit lasts");
+            check(edited ? at(r.edit, x, y) > 200.0f : at(r.edit, x, y) < .5f, "F108: the edit decays and stays where it was");
+        }
+        for (uint32_t f = 23; f < 53; ++f) frame(f, false);
+        r = frame(53, true);   // 32 frames after the change: at rest
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x)
+            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f && std::fabs(at(r.state, x, y) - kWorldScreenStateRest) < .5f &&
+                      at(r.edit, x, y) < .5f,
+                  "F108: after the expiry the screen is at rest again, no edit");
+    }
+
+    // ---- F108: the census pass on WARP ----
+    {
+        ctx->ClearState();
+        std::vector<unsigned char> states(64, 0);
+        for (int i = 0; i < 10; ++i) states[i] = 1;
+        for (int i = 10; i < 15; ++i) states[i] = 2;
+        for (int i = 15; i < 18; ++i) states[i] = 3;
+        auto st = zgate::tex2d(dev, 8, 8, DXGI_FORMAT_R8_UNORM, D3D11_BIND_SHADER_RESOURCE, states.data(), 8);
+        auto sv = zgate::srvOf(dev, st.Get());
+        WorldScreenCensusPass census;
+        ID3D11ShaderResourceView* both[2] = {sv.Get(), sv.Get()};
+        check(census.count(ctx, both, 2, 7), "F108: the census counts");
+        uint64_t gotFrame = 0; uint32_t got[3] = {}; bool drained = false;
+        const auto deadline = GetTickCount64() + 2000;
+        while (!drained && GetTickCount64() < deadline) {
+            ctx->Flush();
+            census.drain(ctx, [&](uint64_t f, uint32_t s, uint32_t e, uint32_t fr) { gotFrame = f; got[0] = s; got[1] = e; got[2] = fr; drained = true; });
+            if (!drained) Sleep(1);
+        }
+        check(drained && gotFrame == 7 && got[0] == 36 && got[1] == 16 && got[2] == 6,
+              "F108: the census counts both eyes' screen, edited and first-frame pixels");
+        for (int i = 0; i < 4; ++i) check(census.count(ctx, both, 1, 8 + i), "F108: the ring takes four frames");
+        check(!census.count(ctx, both, 1, 12), "F108: a fifth frame in flight is skipped, not waited for");
+        census.reset();
     }
     ctx->ClearState();
+}
+
+// F108: the motion pass (the production temporal_mv_fast_cs) on WARP, with the coverage mask bound at t4 and probe.z set: the
+// history-invalidate value (size*2) and the reactive mask 1 exactly where the coverage carries the fresh bit (6); a screen at rest
+// (2) and an unmarked pixel get the motion they get with no mask at all.
+void testWorldScreenHistoryRestart(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const UINT w = 64, h = 64;
+    ComPtr<ID3D11ShaderReflection> refl;
+    hr(D3DReflect(edvr::kTemporalMvBytecode, sizeof(edvr::kTemporalMvBytecode), __uuidof(ID3D11ShaderReflection),
+                  reinterpret_cast<void**>(refl.GetAddressOf())));
+    auto* P = refl->GetConstantBufferByName("P");
+    D3D11_SHADER_BUFFER_DESC pd{};
+    hr(P->GetDesc(&pd));
+    std::vector<char> params(pd.Size, 0);
+    auto put = [&](const char* name, const void* v, UINT bytes) {
+        D3D11_SHADER_VARIABLE_DESC vd{};
+        check(SUCCEEDED(P->GetVariableByName(name)->GetDesc(&vd)) && bytes <= vd.Size && vd.StartOffset + bytes <= params.size(),
+              "F108 mv: cbuffer field");
+        std::memcpy(params.data() + vd.StartOffset, v, bytes);
+    };
+    auto f4 = [&](const char* name, float a, float b, float c, float d) { const float v[4] = {a, b, c, d}; put(name, v, 16); };
+    const int region[4] = {0, 0, int(w), int(h)}, sz[2] = {int(w), int(h)};
+    put("region", region, 16); put("size", sz, 8); put("texSize", sz, 8);
+    f4("tanNow", -1, 1, -1, 1); f4("tanPrev", -1, 1, -1, 1);
+    f4("dR0", 1, 0, 0, 0); f4("dR1", 0, 1, 0, 0); f4("dR2", 0, 0, 1, 0);
+    f4("knobs", 0, 1, .025f, 0); f4("jit", .25f, -.375f, 0, .5f); f4("holoJitter", .25f, -.375f, 1, 0);
+    f4("probe", 1, 0, 1, 0);   // probe.z: the coverage mask is bound; probe.w 0: no fixed bias, no adaptive UI
+    D3D11_BUFFER_DESC bd{}; bd.ByteWidth = pd.Size; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA init{params.data(), 0, 0};
+    ComPtr<ID3D11Buffer> cb; hr(dev->CreateBuffer(&bd, &init, &cb));
+    std::vector<float> sceneZ(size_t(w) * h);
+    for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x) sceneZ[size_t(y) * w + x] = .01f + float((x * 7 + y * 3) % 29) / 1000.0f;
+    std::vector<unsigned char> mark(size_t(w) * h, 0), none(size_t(w) * h, 0);
+    for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x) {
+        if (y < 16) mark[size_t(y) * w + x] = static_cast<unsigned char>(kWorldScreenMaskValue);            // a screen at rest
+        else if (y < 32) mark[size_t(y) * w + x] = static_cast<unsigned char>(kWorldScreenFreshMaskValue);  // an edit's first frame
+    }
+    auto scene = zgate::srvOf(dev, zgate::tex2d(dev, w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, sceneZ.data(), w * 4).Get());
+    auto um = zgate::srvOf(dev, zgate::tex2d(dev, w, h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_SHADER_RESOURCE, mark.data(), w).Get());
+    auto umNone = zgate::srvOf(dev, zgate::tex2d(dev, w, h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_SHADER_RESOURCE, none.data(), w).Get());
+    auto mv = zgate::tex2d(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    auto zc = zgate::tex2d(dev, w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    auto mk = zgate::tex2d(dev, w, h, DXGI_FORMAT_R8_UNORM, D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    auto mvU = zgate::uavOf(dev, mv.Get()), zcU = zgate::uavOf(dev, zc.Get()), mkU = zgate::uavOf(dev, mk.Get());
+    auto cs = zgate::makeCs(dev, edvr::kTemporalMvFastBytecode, sizeof(edvr::kTemporalMvFastBytecode));
+    D3D11_SAMPLER_DESC smp{}; smp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    ComPtr<ID3D11SamplerState> sampler; hr(dev->CreateSamplerState(&smp, &sampler));
+    auto run = [&](ID3D11ShaderResourceView* mask, std::vector<uint32_t>& motion, std::vector<float>& reactive) {
+        ctx->ClearState();
+        const float zero[4] = {};
+        for (auto* u : {mvU.Get(), zcU.Get(), mkU.Get()}) ctx->ClearUnorderedAccessViewFloat(u, zero);
+        ctx->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ID3D11ShaderResourceView* srvs[5] = {nullptr, nullptr, scene.Get(), nullptr, mask};
+        ctx->CSSetShaderResources(0, 5, srvs);
+        ID3D11UnorderedAccessView* uavs[3] = {mvU.Get(), zcU.Get(), mkU.Get()};
+        ctx->CSSetUnorderedAccessViews(3, 3, uavs, nullptr);
+        ctx->CSSetShader(cs.Get(), nullptr, 0);
+        ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        ctx->ClearState();
+        motion = zgate::readU32(dev, ctx, mv.Get());
+        reactive = wstest::readSlices8(dev, ctx, mk.Get())[0];
+    };
+    std::vector<uint32_t> base, marked; std::vector<float> baseMk, markedMk;
+    run(umNone.Get(), base, baseMk);
+    run(um.Get(), marked, markedMk);
+    // size*2 = (128, 128) in R16G16_FLOAT: 0x5800 each half.
+    const uint32_t invalidate = 0x58005800u;
+    uint32_t restarts = 0;
+    for (UINT y = 0; y < h; ++y) for (UINT x = 0; x < w; ++x) {
+        const size_t i = size_t(y) * w + x;
+        const bool fresh = y >= 16 && y < 32;
+        if (fresh) {
+            check(marked[i] == invalidate && markedMk[i] == 1.0f, "F108 mv: the invalidate value and the reactive mask 1 where an edit begins");
+            ++restarts;
+        } else {
+            check(marked[i] == base[i] && markedMk[i] == baseMk[i], "F108 mv: a screen at rest and an unmarked pixel keep their motion");
+        }
+        check(base[i] != invalidate, "F108 mv: the control writes no invalidate value");
+    }
+    check(restarts == 16 * w, "F108 mv: every fresh pixel restarted");
+    std::printf("PASS: F108 history restart: the motion pass writes the invalidate value at %u fresh pixels and nowhere else.\n", restarts);
 }

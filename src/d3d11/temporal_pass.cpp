@@ -1214,6 +1214,7 @@ void warmNoteFirstTreat() {
 }
 float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
 float    g_lastFar = 0.0f;
+float    g_lastUpscale[2] = {};    // the last trained treat's output over input, per axis (temporalPassUpscale)
 // This frame's rows are the view's own (its delta not carried), and the
 // frame of the last floating-origin jump (a camera move over 50 m in a
 // frame): the submission history carries both.
@@ -4735,6 +4736,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool probeNv = diagnostics && e.dlHaveHistory && (flags & 1u) == 0 &&
                                          e.dlOutSrv && g_statsUav != nullptr;
                     p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
+                    g_lastUpscale[0] = p.probe[0];
+                    g_lastUpscale[1] = static_cast<float>(oH) / static_cast<float>(h);
                     p.probe[1] = probeNv ? 1.0f : 0.0f;
                     ID3D11Texture2D* coverageMask = nullptr;
                     if (!uiDepthCoverageMask(w, h, eye, &coverageMask)) coverageMask = nullptr;
@@ -6921,6 +6924,13 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
     *nearZ = g_lastNear;
     *farZ = g_lastFar;
     return g_lastNear > 0.0f && g_lastFar > g_lastNear;
+}
+
+bool temporalPassUpscale(float* x, float* y) {
+    if (!x || !y) return false;
+    *x = g_lastUpscale[0];
+    *y = g_lastUpscale[1];
+    return g_lastUpscale[0] > 0.0f && g_lastUpscale[1] > 0.0f;
 }
 
 void temporalPassArmEyeDump() {
