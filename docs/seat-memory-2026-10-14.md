@@ -20,15 +20,32 @@ the arc's status, the log lines the build writes, and the flight checklist.
   origin on both runtimes); yaw-only or position-only handling as the primary fix; reading Elite's cockpit eye point as a prerequisite.
 - **Decisions, in force** (full text and dated notes in "Decisions and dated notes" below): the press of the HMD recentre key decides the player from the game
   when it is observable (Sean's F12 is; `honour_press` stored at once, a reset with no press is replaced by the seat in or out of a window); when it is not,
-  the 10 s window and the 5 s deferred store stand (`kRetroMs`); on foot is a seat (one constant, `kOnFootIsSeated`); a runtime recentre is the player's;
-  the order of a runtime recentre is fixed (the frame is given up, review finding 3). BUILT on `claude/seat-press` (the press), NOT FLOWN.
+  the 10 s window and the 5 s deferred store stand (`kRetroMs`); on foot is NOT a seat since F115 (one constant, `kOnFootIsSeated`); a runtime recentre is the
+  player's (aboard or in a menu); the order of a runtime recentre is fixed (the frame is given up, review finding 3). BUILT on `claude/seat-press` (the press), NOT FLOWN.
 - Assumptions the first flight tests: the first tracked pose may be a headset on its stand (captured only after a still window); the 10 s window; seated zero
   being the cockpit eye point; Status.json arriving about a second late; the frame poll beating the game's call to the press (`honour_press_late` counts the misses).
+- **The seat comes only from a menu or the cockpit (2026-10-25, the pilot's decisions; F115, branch `claude/onfoot-boarding-reset`, validated in the arc's
+  combined build, NOT FLOWN):** `classifyReset` takes a press seen anywhere but on foot as `honour_press` (`seat_store` names it `why=manual_reset_press_menu` or
+  `_cockpit`); `kOnFootIsSeated = false`: on foot every reset and a runtime recentre recentre on foot only and store nothing, entering on foot applies nothing,
+  boarding puts the stored seat back, at the native on-foot boarding edge (one origin change). Dated note below.
 - Next flight: the checklist at the end of this doc.
 
 ## Decisions and dated notes
 
-- **On foot is a seat (Sean, 2026-10-14: "assume for now that on foot everyone is sitting").** Game resets on foot are decided exactly as
+- **2026-10-25: a recentre in a menu or a load is the seat (F115; the native on-foot arc doc, 2026-10-25, F115).** Log `edvr_gfx_20261025_071049` (Pimax Crystal
+  Super on Pimax OpenXR, Epic): a seat stored by an on-foot press in the session before (y 0.436) was applied at the start (13:11:01 UTC, `intro_seat`); the pilot
+  recentred in the menu at 13:11:07 (press seen, head y 0.256), which passed through unstored (`where=unknown`: `PassThrough` came before the press); the first
+  on-foot entry (13:12:01, `transition_seat`) put the old seat back, and after boarding the head sat 17.8 cm under it (`seat_meter`, 13:27:32.813) until he
+  recentred again. That old seat itself came from a recentre on foot. Now: (1) a press seen while not on foot is `HonourPress` before the `PassThrough` return:
+  stored at once, as aboard always was; a game reset in a menu with no press still passes through. (2) `kOnFootIsSeated = false` (the switch below, as it was
+  built to be thrown): on foot a press, a game reset or an unobservable reset passes through and a runtime recentre there is applied and not stored, entering
+  on foot (from a menu or a disembark) applies nothing and opens no window, and boarding is the transition that puts the seat back whenever the origin moved
+  on foot. Kept from the old rule: a player-looking recentre aboard held for `kRetroMs` is still taken back when the commander leaves for on foot inside that
+  time. (3) Native on foot's boarding edge (the cockpit holo panels' first draw, about a second before Status.json) says "aboard" in the seat word from the next
+  tick, and the runtime's provider words (the look restore, the eye alignment, the pitches) wait while a seat apply is due and until a newer frame answer
+  arrives (`seatApplyAhead`): one origin change at the edge, one `seat_reset` line. Rig: seat_memory_test 282 checks.
+
+- **On foot is a seat (Sean, 2026-10-14: "assume for now that on foot everyone is sitting"; SUPERSEDED 2026-10-25 by F115, above: on foot is not a seat).** Game resets on foot are decided exactly as
   aboard, and disembarking is a seat transition like boarding. The rule is ONE named constant, `kOnFootIsSeated` / `onFootIsSeated()` in
   `src\openxr\seat_memory.h`, read through `seatHolds(where)` by the decision table, every transition, and the host's meter schedule.
   Native on-foot VR (standing, room scale) flips it in that one place: false makes on foot a pass-through again and applies no seat. Not a

@@ -11211,6 +11211,56 @@ def _hj_f107_away(rows, ctx):
     return ("OK", text + "; the neck reference and the standing calibration held")
 
 
+def _hj_f115_boarding(rows, ctx):
+    """F115: boarding undoes every on-foot camera change. Each fall of native stereo on foot's flag (the marker line, written where the flag is computed) has
+    a reset line (else NEVER APPLIED: the reset never ran); the edge comes from the cockpit's own panels when they draw first, else from the flag. The reset
+    line says what it undid and that what it published at once was zero; a second after the flag's fall the values read back from the provider are zero and
+    the runtime's pose carries the zero alignment (else PARTIAL). The panels' lead over Status.json's bit is reported. The head's height against the stored seat
+    (the seated origin once boarded) is reported per boarding: 10 cm or more is PARTIAL, named by where the seat came from (the player's recentre in a menu or
+    the cockpit this session: the seat did not come back or the player sits otherwise; none this session: the seat stored before it), apart from the on-foot
+    changes. A false start is PARTIAL."""
+    ended, edges, secs, falses = rows.get("ended", []), rows.get("edge", []), rows.get("sec", []), rows.get("false", [])
+    if not ended and not edges and not secs and not falses:
+        return None
+    if len(edges) < len(ended):
+        return ("NEVER APPLIED", "%d exit(s) of native stereo on foot, %d boarding reset(s): the reset did not run at %d" % (
+            len(ended), len(edges), len(ended) - len(edges)))
+    big = lambda rs, k: max(abs(float(r[k])) for r in rs) if rs else 0.0
+    panels = sum(1 for r in edges if r["src"].startswith("the cockpit"))
+    text = ("%d boarding(s) (the edge from the cockpit's panels %d, from Status.json %d): undone at once the eye alignment up to %.1f cm (the hold's raise up to "
+            "%.1f, the neck reference's up to %.1f), the look's seated yaw up to %.2f deg, the ADS pitch up to %.2f deg, the ADS shift up to %.1f cm") % (
+        len(edges), panels, len(edges) - panels, big(edges, "ey"), big(edges, "hold"), big(edges, "neck"), big(edges, "look"), big(edges, "pitch"), big(edges, "shift"))
+    leads = [int(r["lead"]) for r in secs if r["src"] == "the cockpit's own panels" and int(r["lead"]) >= 0]
+    if leads:
+        text += "; the panels led Status.json's bit by %s ms" % ", ".join(str(x) for x in leads)
+    text += "; a second later all zero in %d of %d" % (sum(1 for r in secs if r["zero"] == "all zero"), len(secs))
+    if secs:
+        text += "; the head against the stored seat %s cm" % ", ".join("%+.1f" % float(r["h"]) for r in secs)
+    notes = []
+    own = [r for r in secs if abs(float(r["h"])) >= 10.0 and r["seat"].startswith("the player's recentre")]
+    if own:
+        notes.append("the head %s cm from the seat the player set this session a second after boarding (the seat did not come back, or the player sits otherwise "
+                     "than at that recentre)" % ", ".join("%+.1f" % float(r["h"]) for r in own))
+    if falses:
+        notes.append("%d false start(s): the cockpit's panels drew on foot and stopped" % len(falses))
+    now_bad = sum(1 for r in edges if r["now"] != "all zero")
+    if now_bad:
+        notes.append("%d reset(s) published something other than zero at the edge" % now_bad)
+    late = sum(1 for r in secs if r["zero"] != "all zero")
+    if late:
+        notes.append("NOT ZERO a second after %d boarding(s)" % late)
+    if len(secs) < len(edges):
+        notes.append("%d boarding(s) without the read-back a second later" % (len(edges) - len(secs)))
+    uncarried = sum(1 for r in secs if r["carried"] == "no")
+    if uncarried:
+        notes.append("the runtime's pose did not carry the zero alignment after %d" % uncarried)
+    seat = [r for r in secs if abs(float(r["h"])) >= 10.0 and not r["seat"].startswith("the player's recentre")]
+    if seat:
+        notes.append("the head %s cm from the seated origin a second after boarding: a recentre's worth from the seated origin itself (the seat stored before this "
+                     "session: no recentre in a menu or the cockpit this session), not an on-foot change" % ", ".join("%+.1f" % float(r["h"]) for r in seat))
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
+
+
 def _hj_f109_look(rows, ctx):
     """F109: look to aim on foot. Engaged at all (else NEVER APPLIED with the last reason it gave); the game took the head's turn (applied against the head's own; none
     of it while the head turned is NEVER APPLIED); the guard's trips, the reported head standing off the aim with the head still, the player's pitch reaching the game
@@ -11934,6 +11984,23 @@ HEALTH_RULES = (
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
                   r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
     ), _hj_f107_away),
+    _hrule("boarding reset (F115)", ("F115",), ("boarding reset (F115)", "native on foot (F115)"), (
+        ("ended", r"native on foot \(F115\): native stereo on foot ended at frame (?P<frame>\d+)"),
+        ("_", r"native on foot \(F115\): native stereo on foot began at frame \d+"),
+        ("edge", r"boarding reset \(F115\): the on-foot camera ended at frame (?P<frame>\d+) \((?P<src>the cockpit's own panels drew with native stereo still on "
+                 r"foot|native stereo on foot ended); the stock panel shader drew (?P<stock>\d+) times on foot this stretch\); undone at once: the eye alignment "
+                 r"(?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(the hold's raise (?P<hold>%s) cm, the neck reference's raise (?P<neck>%s) cm\), the look's seated yaw "
+                 r"(?P<look>%s) deg \(reset serial (?P<rs>\d+)\), the ADS pitch (?P<pitch>%s) deg, the rotation calibration %s %s deg, the ADS shift "
+                 r"(?P<shift>[\d.]+) cm, the left eye's share (?P<share>[\d.]+); published now: .*?: (?P<now>all zero|NOT ZERO); the avatar's last sample" % ((_HN,) * 9)),
+        ("sec", r"boarding reset \(F115\) 1 s: the edge from (?P<src>the cockpit's own panels|Status\.json), (?P<lead>-?\d+) ms before Status\.json's on-foot bit "
+                r"\(the cockpit's panels first drew (?P<pfirst>-?\d+) ms before the edge\); published the eye alignment (?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(serial "
+                r"(?P<serial>\d+); the pose carries it: (?P<carried>yes|no|not reported|no frame)\), the look's seated yaw (?P<look>%s) deg, the ADS pitch "
+                r"(?P<pitch>%s) deg, the rotation %s %s deg, the ADS shift (?P<shift>[\d.]+) cm, the share (?P<share>[\d.]+): (?P<zero>all zero|NOT ZERO); the head "
+                r"over the seated origin \(the stored seat once boarded\) (?P<h>%s) cm, (?P<off>[\d.]+) cm off its vertical; the seat: (?P<seat>[^:]*)"
+                % ((_HN,) * 8)),
+        ("false", r"boarding reset \(F115\): a false start: the cockpit's own panels drew with native stereo on foot and stopped"),
+        ("_", r"boarding reset \(F115\): native stereo on foot began: the on-foot camera changes publish again"),
+    ), _hj_f115_boarding),
     _hrule("look to aim (F109)", ("F109", "F109b"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)"), (
         ("sec", r"native on foot look to aim \(F109\) 1 s: (?P<state>following|blocked), item weight (?P<w>[\d.]+), smoothing (?P<tau>\d+) ms; head yaw (?P<hy>%s) "
                 r"pitch (?P<hp>%s) deg, asked (?P<ky>%s) (?P<kp>%s), applied (?P<ay>%s) (?P<ap>%s), the player's own (?P<uy>%s) (?P<up>%s); the reported head from the aim "
@@ -13550,6 +13617,49 @@ def self_test_health():
               game=17423.5)] * 3 + [neck()], 3, [("NEVER APPLIED", F107)], has=["the game's camera 174.2 m from the neck in 3 neck reference seconds"])
         check("F107 away: an episode refused, the neck reference clean", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)],
               has=["1 episodes (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
+
+        # ---- boarding reset (F115): boarding undoes every on-foot camera change (the figures of the 33e05706 flight's boarding) ----
+        B115 = "boarding reset (F115)"
+        END115 = R("native on foot (F115): native stereo on foot", "ended", 86333)
+        BEGAN115 = R("native on foot (F115): native stereo on foot", "began", 13470)
+        ENTRY115 = R("boarding reset (F115): native stereo on foot began", 1, 2)
+
+        PANELS115, FLAG115 = "the cockpit's own panels drew with native stereo still on foot", "native stereo on foot ended"
+        MENU115 = "the player's recentre 980 s before the edge, in a menu or a load (on foot 2, not the seat)"
+        NOPRESS115 = "no recentre in a menu or the cockpit this session (the key observable; on foot 0, not the seat)"
+        FALSE115 = R("boarding reset (F115): a false start:", 3000, 1, 2)
+
+        def edge115(now="all zero", nowEye=0.0, src=PANELS115):
+            return R("boarding reset (F115): the on-foot camera ended at frame", 86241, src, 0, 0.0, -34.6, 0.0, 16.9, 17.7, -5.84, 10, 4.86, 0.0, 0.0, 0.0, 0.0,
+                     0.0, nowEye, 0.0, 8577, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, now, 1806, 1889)
+
+        def sec115(zero="all zero", eye=0.0, carried="yes", h=-1.5, seat=MENU115, tail="", src="the cockpit's own panels", lead=984):
+            return R("boarding reset (F115) 1 s: the edge from", src, lead, 0 if src != "Status.json" else -1, 0.0, eye, 0.0, 8577, carried, 0.0, 0.0, 0.0, 0.0,
+                     0.0, 0.0, zero, h, 3.1, seat, tail)
+
+        check("F115 boarding: the panels' edge, undone at once, zero a second later, the cockpit on the seat", [BEGAN115, ENTRY115, edge115(), END115, sec115()], 0,
+              [("OK", B115)], has=["1 boarding(s) (the edge from the cockpit's panels 1, from Status.json 0): undone at once the eye alignment up to 34.6 cm (the "
+                                   "hold's raise up to 16.9, the neck reference's up to 17.7), the look's seated yaw up to 5.84 deg, the ADS pitch up to 4.86 deg",
+                                   "the panels led Status.json's bit by 984 ms", "a second later all zero in 1 of 1; the head against the stored seat -1.5 cm"],
+              lacks=["UNPARSED"])
+        check("F115 boarding: the flag's edge (no panel drew)", [END115, edge115(src=FLAG115), sec115(src="Status.json", lead=0)], 0, [("OK", B115)],
+              has=["(the edge from the cockpit's panels 0, from Status.json 1)"], lacks=["UNPARSED", "led Status.json"])
+        check("F115 boarding: the flight's seat, 17.8 cm over the head with no recentre this session (the seat stored before it)", [edge115(), END115,
+              sec115(h=-17.8, seat=NOPRESS115, tail=": a recentre's worth, from the seated origin itself (nothing on foot is left in the pose; the seat stored "
+                                                    "before this session)")],
+              0, [("PARTIAL", B115)], has=["the head -17.8 cm from the seated origin a second after boarding: a recentre's worth from the seated origin itself (the "
+                                           "seat stored before this session: no recentre in a menu or the cockpit this session)"])
+        check("F115 boarding: 12 cm off the seat the player set this session", [edge115(), END115, sec115(h=-12.0,
+              tail=": a recentre's worth off the seat the player set this session")], 0, [("PARTIAL", B115)],
+              has=["the head -12.0 cm from the seat the player set this session a second after boarding (the seat did not come back"], lacks=["seat stored before"])
+        check("F115 boarding: native stereo on foot ended and no reset ran", [BEGAN115, END115], 3, [("NEVER APPLIED", B115)],
+              has=["1 exit(s) of native stereo on foot, 0 boarding reset(s): the reset did not run at 1"])
+        check("F115 boarding: something still published a second later", [edge115(), END115, sec115(zero="NOT ZERO", eye=-34.6, carried="no")], 0,
+              [("PARTIAL", B115)], has=["NOT ZERO a second after 1 boarding(s)", "the runtime's pose did not carry the zero alignment after 1"])
+        check("F115 boarding: the edge published a non-zero alignment", [edge115(now="NOT ZERO", nowEye=-33.8), END115, sec115()], 0, [("PARTIAL", B115)],
+              has=["1 reset(s) published something other than zero at the edge"])
+        check("F115 boarding: a false start (the panels drew on foot)", [edge115(), FALSE115], 0, [("PARTIAL", B115)],
+              has=["1 false start(s): the cockpit's panels drew on foot and stopped"], lacks=["UNPARSED"])
 
         # ---- F109: look to aim on foot, the snaps, the smooth turn, the player's own turn in ADS ----
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"

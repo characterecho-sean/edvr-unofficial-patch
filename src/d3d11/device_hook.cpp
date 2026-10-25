@@ -2228,8 +2228,11 @@ void seatContextPublish() {
         c.published = true;
         c.keep = true;     // the word's "active" bit; always set by this build
         c.gameplay = journalGameplay();
-        c.seatedKnown = journalSeatedKnown();
-        c.seated = c.seatedKnown && journalSeated();
+        // F115: the cockpit's own panels drew with Status.json still on foot (native_on_foot.h): the commander has boarded, a second before Status.json says
+        // so; seated now, so the stored seat goes back at the same edge as every on-foot camera change (a sample that says both is read as seated).
+        const bool boardedEarly = nativeOnFootBoardedEarly();
+        c.seatedKnown = journalSeatedKnown() || boardedEarly;
+        c.seated = (c.seatedKnown && journalSeated()) || boardedEarly;
         c.onFootKnown = journalOnFootKnown();
         c.onFoot = c.onFootKnown && journalOnFoot();
         c.cameraOpen = false;   // the word keeps the bit (seat_context.h); nothing in this build opens a camera session since Explorer Cam's removal

@@ -31,6 +31,7 @@
 
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
 #include "native_on_foot_f100.h"   // F100: the marker tee's prefilter (pure parts)
+#include "native_on_foot_f115.h"   // F115: the cockpit's own panels' vertex shaders (the boarding edge)
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
 struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
@@ -294,9 +295,19 @@ void nativeOnFootShutdown();
 // vertex shader here: the common case is one load and two compares. A match captures the call stack (the draw thread), at most once per
 // vertex shader per 10 s, into a ring of eight; the frame boundary resolves the frames and logs them. Not called on the flat profile.
 void nativeOnFootHudCapture(int index, uint64_t vs);   // native_on_foot.cpp
+// F115: the cockpit's own panels (nofoot::f115::kCockpitPanelVs) seen by the same probe: the draw thread raises the flag, the frame thread's f115Tick takes it
+// once a frame (the boarding's first cockpit frame ends the on-foot camera before Status.json does). The stock panel shader is only counted while on foot.
+inline std::atomic<bool> g_f115CockpitPanelDrew{false};
+inline std::atomic<uint32_t> g_f115StockPanelOnFoot{0};
+// F115: the panels made the boarding edge and Status.json still says on foot: the seat memory's word (device_hook.cpp seatContextPublish, at the next frame
+// tick) says seated from now, so the runtime puts the stored seat back at the same edge as the on-foot camera changes, not a second later. Frame thread writes.
+inline std::atomic<bool> g_f115BoardedEarly{false};
+inline bool nativeOnFootBoardedEarly() { return g_f115BoardedEarly.load(std::memory_order_relaxed); }
 inline void nativeOnFootHudProbe(uint64_t vs) {
     const int index = nofoot::hudIssuerIndex(vs);
     if (index >= 0) nativeOnFootHudCapture(index, vs);
+    if (vs == nofoot::f115::kCockpitPanelVs) g_f115CockpitPanelDrew.store(true, std::memory_order_relaxed);
+    else if (vs == nofoot::f115::kCockpitPanelStockVs && nativeOnFootActive()) g_f115StockPanelOnFoot.fetch_add(1, std::memory_order_relaxed);
 }
 
 // F18 (TEMPORARY, fix.native_on_foot_body_cull: game | none | front). The frame thread publishes the mode here (readKey: 0 game, 1 none,

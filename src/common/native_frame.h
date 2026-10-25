@@ -277,6 +277,17 @@ void nativeFrameSetRotCalibrate(float yawRad, float pitchRad);
 // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians, nose up positive), carried in version 10 output's reservedYaw. Zero when
 // fix.native_on_foot_ads_head_aim is off or not engaged. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetAdsPitch(float pitchRad);
+// F115: the on-foot words the next beginFrame hands the runtime, as the frame thread last set them (the boarding reset reads them back: all zero from the edge
+// on). Taken under the provider's lock.
+struct EdvrNativeOnFootWords {
+    float eyeAlign[3];
+    uint32_t eyeAlignSerial;
+    float lookYawTotal;
+    uint32_t lookYawReset;
+    float adsPitch;
+    float rotCal[2];
+};
+void nativeFrameOnFootWords(EdvrNativeOnFootWords& out);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 

@@ -23,6 +23,8 @@
 #include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
+#include "../common/frame_flag.h"     // F115: hmdResetPressState, hmdResetPressTick (the player's recentre presses, for the boarding's seat line)
+#include "../common/seat_context.h"   // F115: decodeHmdPress, hmdPressStatusName
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
 #include "depth_probe.h"   // F44: depthProbeCurrentSceneEyeOf, the eye of a draw by its depth view
 #include "draw_record_tag.h"   // F44: the marker probe's tag, find and match (after d3d11.h: its staging ring)
@@ -51,6 +53,7 @@
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
+#include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -284,6 +287,7 @@ uint64_t g_worldLineMs = 0;                    // frame thread and game thread: 
 bool g_lookOnLast = false;
 int g_lookSmoothLast = -1, g_ltaStyleLast = -1, g_ltaSnapDegLast = -1;
 std::atomic<uint32_t> g_lookResetSerial{0};    // F25: moves when the seated rotation must go back to zero (the runtime re-bases; F109: to the seated origin itself)
+bool g_f115CameraOn = false;   // F115 (frame thread): the on-foot camera: native stereo on foot, ended early by the cockpit's own panels (f115Tick, each frame boundary)
 float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
 std::atomic<float> g_hudRoomSetting{1.0f};                      // fix.native_on_foot_hud_room, live, 1.00..2.50 (F18)
 std::atomic<float> g_hudRoomEff{1.0f};                          // the room the mesh is built with now: 1 unless the room is applied (F18; game thread reads)
@@ -7217,7 +7221,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     ++g_f91.tick;   // F91 B: the frame thread's tick (this frame's figures carry it)
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
     const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
-    const bool onFoot = nativeOnFootActive();
+    const bool onFoot = g_f115CameraOn;   // F115: native stereo on foot, ended early by the cockpit's own panels at a boarding
     if (!g_adsLastInit) {
         g_adsLastInit = true;
         g_adsKeyLast = key;
@@ -11374,7 +11378,7 @@ void rotCalMeasure(int step, uint64_t now) noexcept {
 
 void rotCalTick(uint64_t now) noexcept {
     const bool key = g_rotCalKey.load(std::memory_order_relaxed);
-    const bool run = key && nativeOnFootActive();
+    const bool run = key && g_f115CameraOn;   // F115: the on-foot camera
     if (!run) {
         if (g_rcPublished) {
             nativeFrameSetRotCalibrate(0.0f, 0.0f);   // the runtime turns the seated origin back to no calibration rotation
@@ -12440,6 +12444,191 @@ void f106ShareTick(uint64_t now) noexcept {
     }
 }
 
+// ---- F115: boarding undoes every on-foot camera change (nofoot::f115, native_on_foot_f115.h) ----------------------------------------------------------------
+// One exit edge for the on-foot camera: the first frame the cockpit's own panels draw while native stereo is still on foot (the boarding's first cockpit frame,
+// about a second before Status.json's on-foot bit), or the flag's fall (Status.json, the instant the runtime's seat memory hears "boarded"), whichever comes
+// first. f115Tick runs once a frame at the frame boundary, before adsAimTick and lookPublishTick, and sets g_f115CameraOn, which adsAimTick, alignTick and
+// rotCalTick take as "on foot". At the edge every value the frame thread hands the runtime and the pin for the camera goes to an exact zero at once (no ramp)
+// and the filters behind them start again from zero; alignTick then gates the eye alignment and the ADS shift to zero until the camera is on foot again. The
+// runtime, at the reset serial, puts the seated space back on its origin. A second after the flag's fall the values are read back from the provider and the
+// head's place in the seated space is logged against the seated origin (the seat memory's, while it holds), with the player's last recentre press.
+nofoot::f115::ExitEdge g_f115Edge;
+nofoot::f115::CameraOnFoot g_f115Camera;
+nofoot::f115::Record g_f115Rec;
+bool g_f115FlagLast = false;
+uint64_t g_f115PanelsFirstMs = 0;   // the cockpit's panels' first draw since the latest entry (0: none)
+// The player's recentre presses as the graphics half sees them (hmd_reset_press.cpp publishes their count and the last one's tick), placed as the seat memory
+// places them (seated first, then on foot, else a menu or a load): the seat memory stores a press in a menu or a load or aboard as the seat (seat_memory.h
+// classifyReset), and since F115 one on foot recentres on foot only.
+struct F115Press {
+    uint32_t seqSeen = 0;
+    bool any = false;          // a press that became the seat (a menu or a load, or aboard) this session
+    uint64_t ms = 0;
+    const char* where = "";
+    uint32_t onFoot = 0;       // presses on foot this session (not the seat)
+};
+F115Press g_f115Press;
+void f115PressTick() noexcept {
+    const HmdResetPress p = decodeHmdPress(hmdResetPressState());
+    if (p.status == HmdPressStatus::Unpublished || p.seq == g_f115Press.seqSeen) return;
+    g_f115Press.seqSeen = p.seq;
+    const bool seated = (journalSeatedKnown() && journalSeated()) || nativeOnFootBoardedEarly();
+    if (!seated && journalOnFootKnown() && journalOnFoot()) {
+        ++g_f115Press.onFoot;
+        return;
+    }
+    g_f115Press.any = true;
+    g_f115Press.ms = hmdResetPressTick();
+    g_f115Press.where = seated ? "aboard" : "in a menu or a load";
+}
+void f115AlignRunZero(AlignRun& r) noexcept {
+    for (int i = 0; i < 3; ++i) r.pos[i] = r.vel[i] = r.intg[i] = r.applied[i] = r.target[i] = 0.0;
+    r.guardArmed = false;
+}
+// The eye alignment's terms from zero: the view run, the sight lock, the standing-height hold, the neck reference, the weapon eye's weight. At the edge, and at an
+// entry, so the camera changes come back by their own ramps after a false start too.
+void f115TermsZero() noexcept {
+    f115AlignRunZero(g_align);
+    f115AlignRunZero(g_adsSight);
+    g_f87Hold.reset();
+    g_f87LastRaise = 0.0;
+    g_f94Raise.reset();
+    g_f88W.w = 0.0;
+}
+// The camera values as published: the provider's words (what the next beginFrame hands the runtime), the look the runtime still carries, the ADS shift, the share.
+nofoot::f115::Published f115Snapshot(uint64_t now, bool sinceReset) noexcept {
+    nofoot::f115::Published p;
+    EdvrNativeOnFootWords w{};
+    nativeFrameOnFootWords(w);
+    for (int i = 0; i < 3; ++i) p.eyeM[i] = static_cast<double>(w.eyeAlign[i]);
+    p.lookDeg = (g_adsMap.yawCarried + g_adsMap.aheadYaw) / nofoot::kAdsDeg;
+    if (sinceReset) p.lookDeg += (static_cast<double>(w.lookYawTotal) - g_f115Rec.lookTotalRad) / nofoot::kAdsDeg;   // anything published after the reset
+    p.pitchDeg = static_cast<double>(w.adsPitch) / nofoot::kAdsDeg;
+    p.rotDeg[0] = static_cast<double>(w.rotCal[0]) / nofoot::kAdsDeg;
+    p.rotDeg[1] = static_cast<double>(w.rotCal[1]) / nofoot::kAdsDeg;
+    adsShiftRead(p.shiftM, p.weaponWorldM);
+    p.share = static_cast<double>(eyeshare::read(now));
+    return p;
+}
+void f115Exit(uint64_t now, bool fromPanels) noexcept {
+    namespace f115 = nofoot::f115;
+    const f115::Published before = f115Snapshot(now, false);
+    const double holdRaiseCm = 100.0 * g_f87LastRaise, neckRaiseCm = -100.0 * g_f94NeckSeatedPub;
+    long long avatarMs = -1, lookMs = -1;
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        if (g_eyeSample.valid && now >= g_eyeSample.stamp) avatarMs = static_cast<long long>(now - g_eyeSample.stamp);
+    }
+    const AdsActionSample act = adsActionRead();
+    const uint64_t q = f30Qpc();
+    if (act.qpc && q >= act.qpc) lookMs = static_cast<long long>(f30QpcUs(q - act.qpc) / 1000);
+    // The look: the head aim and look to aim stop here, as adsAimTick would stop them later in this frame (their lines keep the carried values); the seated yaw and
+    // pitch go to zero; the reset serial moves whatever adsStop did, so the runtime re-bases and puts its seated space on the origin.
+    if (g_adsState == kAdsActive || g_adsState == kAdsReleasing || std::fabs(g_adsMap.yawCarried) > 1e-9 || std::fabs(g_adsMap.pitchSeat) > 1e-9 || g_lta.engaged ||
+        g_lta.unwinding)
+        adsStop(fromPanels ? "the cockpit's own panels drew: boarding" : "native stereo on foot is not active", false);
+    g_adsMap.dropSeated();
+    const uint32_t resetSerial = g_lookResetSerial.fetch_add(1, std::memory_order_relaxed) + 1;
+    adsPublishPitch();
+    g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
+    nativeFrameSetRotCalibrate(0.0f, 0.0f);
+    eyeshare::publish(0.0f, now);
+    f115TermsZero();
+    // Published now: the zero alignment under its own serial (the hold's input finds it by the pose's reported serial), the zero ADS shift.
+    g_eyeAlignPub[0] = g_eyeAlignPub[1] = g_eyeAlignPub[2] = 0.0;
+    g_f94NeckSeatedPub = 0.0;
+    const float zeroEye[3] = {};
+    f89AlignPublish(zeroEye);
+    const double zero3[3] = {};
+    adsShiftPublish(zero3, zero3);
+    g_f115Rec.armed = true;
+    g_f115Rec.fromPanels = fromPanels;
+    g_f115Rec.edgeMs = now;
+    g_f115Rec.flagFellMs = fromPanels ? 0 : now;
+    g_f115Rec.serial = g_align.serial;
+    g_f115Rec.lookTotalRad = static_cast<double>(static_cast<float>(g_adsMap.yawPublished()));   // what lookPublishTick hands the provider from this frame on
+    const f115::Published after = f115Snapshot(now, false);
+    Log::get().note("boarding reset (F115): the on-foot camera ended at frame %u (%s; the stock panel shader drew %u times on foot this stretch); undone at once: "
+                    "the eye alignment %+.1f %+.1f %+.1f cm (the hold's raise %+.1f cm, "
+                    "the neck reference's raise %+.1f cm), the look's seated yaw %+.2f deg (reset serial %u), the ADS pitch %+.2f deg, the rotation calibration %+.2f "
+                    "%+.2f deg, the ADS shift %.1f cm, the left eye's share %.2f; published now: the eye alignment %+.1f %+.1f %+.1f cm (serial %u), the look's seated "
+                    "yaw %+.2f deg, the ADS pitch %+.2f deg, the rotation %+.2f %+.2f deg, the ADS shift %.1f cm, the share %.2f: %s; the avatar's last sample %lld ms "
+                    "before, the on-foot look's last input %lld ms before",
+                    g_f44Frame.load(std::memory_order_relaxed),
+                    fromPanels ? "the cockpit's own panels drew with native stereo still on foot" : "native stereo on foot ended",
+                    g_f115StockPanelOnFoot.load(std::memory_order_relaxed), 100.0 * before.eyeM[0], 100.0 * before.eyeM[1], 100.0 * before.eyeM[2], holdRaiseCm, neckRaiseCm,
+                    before.lookDeg, static_cast<unsigned>(resetSerial), before.pitchDeg, before.rotDeg[0], before.rotDeg[1], before.shiftCm(), before.share,
+                    100.0 * after.eyeM[0], 100.0 * after.eyeM[1], 100.0 * after.eyeM[2], static_cast<unsigned>(g_f115Rec.serial), after.lookDeg, after.pitchDeg,
+                    after.rotDeg[0], after.rotDeg[1], after.shiftCm(), after.share, after.zero() ? "all zero" : "NOT ZERO", avatarMs, lookMs);
+}
+// A second after the edge: the values read back, and the head's place in the seated space (the runtime's seated origin once nothing on foot moves it).
+void f115Followup(uint64_t now) noexcept {
+    namespace f115 = nofoot::f115;
+    g_f115Rec.armed = false;
+    const f115::Published p = f115Snapshot(now, true);
+    EdvrNativeNowPose np{};
+    const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
+    const double h = haveFrame ? f115::headHeightM(np.render) : 0.0, off = haveFrame ? f115::headOffsetM(np.render) : 0.0;
+    const char* carried = !haveFrame ? "no frame" : np.eyeAlignApplied == 0 ? "not reported" : np.eyeAlignApplied == g_f115Rec.serial + 1 ? "yes" : "no";
+    // The seat: the player's last recentre in a menu or the cockpit this session (the seat memory's stored seat from then on), or none; on-foot presses beside it.
+    char seat[160];
+    if (g_f115Press.any)
+        _snprintf_s(seat, sizeof(seat), _TRUNCATE, "the player's recentre %lld s before the edge, %s (on foot %u, not the seat)",
+                    static_cast<long long>(g_f115Rec.edgeMs >= g_f115Press.ms ? (g_f115Rec.edgeMs - g_f115Press.ms) / 1000 : 0), g_f115Press.where,
+                    static_cast<unsigned>(g_f115Press.onFoot));
+    else
+        _snprintf_s(seat, sizeof(seat), _TRUNCATE, "no recentre in a menu or the cockpit this session (the key %s; on foot %u, not the seat)",
+                    hmdPressStatusName(decodeHmdPress(hmdResetPressState()).status), static_cast<unsigned>(g_f115Press.onFoot));
+    const long long panelsBefore = g_f115PanelsFirstMs == 0 ? -1 : g_f115Rec.edgeMs >= g_f115PanelsFirstMs ? static_cast<long long>(g_f115Rec.edgeMs - g_f115PanelsFirstMs)
+                                                                                                        : -static_cast<long long>(g_f115PanelsFirstMs - g_f115Rec.edgeMs);
+    Log::get().note("boarding reset (F115) 1 s: the edge from %s, %lld ms before Status.json's on-foot bit (the cockpit's panels first drew %lld ms before the edge); "
+                    "published the eye alignment %+.1f %+.1f %+.1f cm (serial %u; the pose carries it: %s), the look's seated yaw %+.2f deg, the ADS pitch %+.2f deg, the "
+                    "rotation %+.2f %+.2f deg, the ADS shift %.1f cm, the share %.2f: %s; the head over the seated origin (the stored seat once boarded) %+.1f cm, %.1f "
+                    "cm off its vertical; the seat: %s%s",
+                    g_f115Rec.fromPanels ? "the cockpit's own panels" : "Status.json", g_f115Rec.leadMs(), panelsBefore, 100.0 * p.eyeM[0], 100.0 * p.eyeM[1],
+                    100.0 * p.eyeM[2], static_cast<unsigned>(g_f115Rec.serial), carried, p.lookDeg, p.pitchDeg, p.rotDeg[0], p.rotDeg[1], p.shiftCm(), p.share,
+                    p.zero() ? "all zero" : "NOT ZERO", 100.0 * h, 100.0 * off, seat,
+                    !haveFrame ? " (no render head from the runtime)"
+                    : !f115::seatOff(h) ? ""
+                    : g_f115Press.any ? ": a recentre's worth off the seat the player set this session"
+                    : p.zero() ? ": a recentre's worth, from the seated origin itself (nothing on foot is left in the pose; the seat stored before this session)"
+                    : ": a recentre's worth");
+}
+void f115Tick(uint64_t now) noexcept {
+    namespace f115 = nofoot::f115;
+    f115PressTick();
+    const bool flag = nativeOnFootActive();
+    const bool panels = g_f115CockpitPanelDrew.exchange(false, std::memory_order_relaxed);
+    if (flag && panels && g_f115PanelsFirstMs == 0 && g_f115Camera.armed) g_f115PanelsFirstMs = now;
+    if (!flag && g_f115FlagLast && g_f115Rec.armed && g_f115Rec.flagFellMs == 0) g_f115Rec.flagFellMs = now;   // the flag fell after the panels' edge
+    if (!flag) g_f115BoardedEarly.store(false, std::memory_order_relaxed);   // Status.json says so itself from here
+    g_f115FlagLast = flag;
+    const f115::CameraOnFoot::Out cam = g_f115Camera.step(flag, panels, now);
+    g_f115CameraOn = cam.on;
+    const f115::ExitEdge::Edge e = g_f115Edge.step(cam.on);
+    if (e == f115::ExitEdge::kExit) {
+        // The flag still up: the cockpit's panels made the edge, and the seat memory hears "aboard" from the next tick (the stored seat back at this edge).
+        if (flag) g_f115BoardedEarly.store(true, std::memory_order_relaxed);
+        f115Exit(now, flag);
+    } else if (e == f115::ExitEdge::kEntry) {
+        g_f115BoardedEarly.store(false, std::memory_order_relaxed);
+        if (g_f115Rec.armed && g_f115Rec.flagFellMs != 0) f115Followup(now);   // back on foot within the second: the read-back now, before anything on foot publishes
+        g_f115Rec.armed = false;
+        f115TermsZero();
+        if (cam.falseStart)
+            Log::get().note("boarding reset (F115): a false start: the cockpit's own panels drew with native stereo on foot and stopped %llu ms ago with it still on "
+                            "foot; the on-foot camera changes publish again (exits %u, entries %u)", static_cast<unsigned long long>(nofoot::f115::kFalseStartMs),
+                            static_cast<unsigned>(g_f115Edge.exits), static_cast<unsigned>(g_f115Edge.entries));
+        else
+            Log::get().note("boarding reset (F115): native stereo on foot began: the on-foot camera changes publish again (exits %u, entries %u)",
+                            static_cast<unsigned>(g_f115Edge.exits), static_cast<unsigned>(g_f115Edge.entries));
+        g_f115PanelsFirstMs = 0;
+        g_f115StockPanelOnFoot.store(0, std::memory_order_relaxed);
+    } else if (g_f115Rec.due(now)) {
+        f115Followup(now);
+    }
+}
+
 void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignClock); now (ms) is for staleness and the 1 s lines
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -13170,6 +13359,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         // F93d: the eye alignment (the hold, the weapon eye and view offsets, the ADS locks) is first-person: in the game's third-person camera the runtime
         // gets zero, so the suite's camera takes the head as it is; the terms keep running and come back whole on the first first-person tick.
         const bool camExternal = nativeOnFootCameraExternal();
+        const bool onFoot = g_f115CameraOn;   // F115: off the on-foot camera every term is an exact zero from the edge's frame on, not ramped out
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
@@ -13177,18 +13367,24 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
             if (i == 1) eye[i] += neckRef.out.seatedY;   // F94a/F98c: the neck reference's raise (with and without an item); the P1 hook takes it back out by serial
             if (camExternal) eye[i] = 0.0;
+            eye[i] = nofoot::f115::gate(onFoot, eye[i]);
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
             // F88: plus the share of w O the pin ignores (all of it with body stay, its up part with follow)
-            const double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.ignore[0], g_adsLock[1] + g_adsSight.applied[1] + weaponEye.out.ignore[1],
-                                      g_adsLock[2] + g_adsSight.applied[2] + weaponEye.out.ignore[2]};
-            adsShiftPublish(sShift, weaponView.world);
+            double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.ignore[0], g_adsLock[1] + g_adsSight.applied[1] + weaponEye.out.ignore[1],
+                                g_adsLock[2] + g_adsSight.applied[2] + weaponEye.out.ignore[2]};
+            double viewWorld[3] = {weaponView.world[0], weaponView.world[1], weaponView.world[2]};
+            for (size_t i = 0; i < 3; ++i) {   // F115
+                sShift[i] = nofoot::f115::gate(onFoot, sShift[i]);
+                viewWorld[i] = nofoot::f115::gate(onFoot, viewWorld[i]);
+            }
+            adsShiftPublish(sShift, viewWorld);
         }
         if (eyeChange > 1e-6) {
             for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
             const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
-            g_f94NeckSeatedPub = camExternal ? 0.0 : neckRef.out.seatedY;   // F94a: the neck reference's part of this alignment, kept under its serial
+            g_f94NeckSeatedPub = camExternal || !onFoot ? 0.0 : neckRef.out.seatedY;   // F94a: the neck reference's part of this alignment, kept under its serial
             f89AlignPublish(f);   // F89: the serial and the y under it are kept for the hold's input
         }
     }
@@ -28693,6 +28889,8 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     if (nativeOnFootActive() != g_nativeEdgeLast) {
         g_nativeEdgeLast = nativeOnFootActive();
         g_nativeOnFootEdges.fetch_add(1, std::memory_order_relaxed);
+        // F115: the edge as the flag made it, apart from the reset's own lines (an exit with no reset line after it is the reset never running)
+        Log::get().note("native on foot (F115): native stereo on foot %s at frame %u", g_nativeEdgeLast ? "began" : "ended", frameNo);
     }
     const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "fix.native_on_foot_method is swap" : "the game session ended";
     gateByteTick(keyOn && gate && session, byteWhy);
@@ -28744,6 +28942,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // head aim off too: in VR the hooks go in whatever the head aim's toggle says (it was on by default, so they did unless it was off before a session). The flat
     // profile is as before (it reads the head aim's key as off and installs them only for look to aim).
     if (g_lookKeyOn.load(std::memory_order_relaxed) || g_adsAimKey.load(std::memory_order_relaxed) || !runtimeFlatProfile()) installLookHooksOnce();
+    f115Tick(now);   // F115: native stereo on foot's exit edge undoes every on-foot camera change at once; before the head aim and the look's total
     adsAimTick(now, session);   // F62b: the ADS head-aim; F109: look to aim, the turns; before the look's total is published and before alignTick
     lookPublishTick();
     // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
