@@ -42,6 +42,7 @@
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
 #include "skin_join_gpu.h"      // F2: the join at the palette chain's dispatch, the pose table, the views the cloned vertex shaders read
 #include "vscreen.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "../common/timing.h"
@@ -598,23 +599,27 @@ constexpr uint8_t kAppendBytes[23] = {
 
 #ifndef EDVR_ENGINE_VELOCITY_RIG
 const char* verifyEngine(uintptr_t base) noexcept {
+    if (!gameBuildIdentity(nullptr, nullptr)) return "not build 334925 (no PE header)";
+    // Both in the running build: build 334925, themselves; an unknown build, found by signature (0: not found).
+    const uintptr_t lookup = gameRva(static_cast<uint32_t>(kLookupRva)), append = gameRva(static_cast<uint32_t>(kAppendRva));
+    if (!lookup || !append)
+        return "an unknown build, and the dictionary lookup or the append sequence (0x3699C00, 0x4315DA5 in build 334925) was not found by signature";
     __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return "not build 334925 (no PE header)";
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != KinematicEvalProbe::kExpectedTimestamp || imageSize != KinematicEvalProbe::kExpectedImageSize)
-            return "not build 334925 (PE timestamp/size)";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kLookupRva), kLookupPrologue, sizeof(kLookupPrologue)))
+        uint8_t got[sizeof(kLookupPrologue)] = {};
+        std::memcpy(got, reinterpret_cast<const void*>(base + lookup), sizeof(kLookupPrologue));
+        if (!gamePinMatches(static_cast<uint32_t>(kLookupRva), got, kLookupPrologue, sizeof(kLookupPrologue)))
             return "lookup mismatch at RVA 0x3699C00";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kAppendRva), kAppendBytes, sizeof(kAppendBytes)))
+        std::memcpy(got, reinterpret_cast<const void*>(base + append), sizeof(kAppendBytes));
+        if (!gamePinMatches(static_cast<uint32_t>(kAppendRva), got, kAppendBytes, sizeof(kAppendBytes)))
             return "append sequence mismatch at RVA 0x4315DA5";
-        return nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "engine image unreadable";
     }
+    if (!gameBuildKnown())
+        Log::get().note("engine motion: the dictionary lookup (0x3699C00 in build 334925) and the append sequence (0x4315DA5) were found by "
+                        "signature on %s at 0x%llX and 0x%llX.", gameBuildText(), static_cast<unsigned long long>(lookup),
+                        static_cast<unsigned long long>(append));
+    return nullptr;
 }
 #else
 // tools/engine_velocity_test drives this file's draw half on WARP: there is
@@ -2644,7 +2649,7 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetMergeObserver(nullptr,nullptr);
         kinematicEvalSetClearObserver(nullptr);
     } else {
-        g_lookup.store(reinterpret_cast<emit::LookupFn>(base + kLookupRva), std::memory_order_release);
+        g_lookup.store(reinterpret_cast<emit::LookupFn>(base + gameRva(static_cast<uint32_t>(kLookupRva))), std::memory_order_release);
         kinematicEvalSetEmitObserver(&observeEmit);
         kinematicEvalSetPrimaryEmitObserver(&observePrimaryEmit);
         kinematicEvalSetPoolCopyObserver(&observePoolCopy);

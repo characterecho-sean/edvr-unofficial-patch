@@ -1,5 +1,6 @@
 #include "kinematic_eval_probe.h"
 #include "kinematic_eval_hook.h"
+#include "../common/game_build.h"
 #include <cmath>
 #include <cstring>
 
@@ -240,7 +241,9 @@ uint64_t KinematicEvalProbe::vtableRvaLocked(uintptr_t object) noexcept {
     bool ok=true;
     const uint64_t vtable=read64(object,ok);
     if(!ok||!vtable){++summary_.readFaults;return 0;}
-    if(vtable>=imageBase_&&vtable<imageBase_+kExpectedImageSize)return vtable-imageBase_;
+    uint32_t imageSize=0;
+    gameBuildIdentity(nullptr,&imageSize);   // the running image's SizeOfImage (0 when its header is unreadable)
+    if(vtable>=imageBase_&&vtable<imageBase_+imageSize)return vtable-imageBase_;
     return 0; // foreign vtable: still a useful signal, recorded as 0 with the pointer kept
 }
 
