@@ -194,6 +194,49 @@ inline void run109(Check&& check) {
               "F109 check: a 10 deg player's turn agrees with a 9 deg view turn and not with none (the stick cancelled); 25% tolerance for large turns; the aim's step "
               "wraps across pi");
     }
+    {   // F124: the second's figures from the split's own player share. A call the game ran with its look blocked adds 0 to the avatar's turn and to the player's
+        // share, so a blocked second says nothing; the first F109 build took the player's turn as the avatar's less the head aim's asks, and read the asks the game
+        // dropped (20 deg here) as a player's turn of -20 against a view that never moved
+        f109::Split s;
+        s.gain = 0.85;
+        f109::SplitIn bl, st;
+        bl.in = 0.2;      // the head aim writes, the game applies nothing
+        bl.d = 0.0;
+        st.in = 0.01;     // the head's tremor, and the right stick held
+        st.stick = 0.8;
+        st.d = 0.85 * 0.01 + 0.002;
+        f109::TurnSecond blocked, stick;
+        for (int i = 0; i < 90; ++i) {
+            const f109::SplitOut o = s.step(bl);
+            blocked.add(bl.d / kD, o.player / kD, 0.2, 0.2);   // the head's own step reaches the view; the game's look adds none
+        }
+        for (int i = 0; i < 60; ++i) {
+            const f109::SplitOut o = s.step(st);
+            stick.add(st.d / kD, o.player / kD, o.player / kD + 0.1, 0.1);   // the player's turn, and the head's step, reach the view
+        }
+        const double oldPlayer = blocked.aim - 20.0;   // F109: the avatar's 0 less the asks
+        check(!blocked.says() && std::fabs(blocked.player()) < 1e-12 && std::fabs(blocked.headShare()) < 1e-12 && blocked.agrees() &&
+                  !f109::turnAgrees(oldPlayer, blocked.beyond()) && stick.says() && std::fabs(stick.player() - 0.12 / kD) < 1e-9 &&
+                  std::fabs(stick.headShare() - 0.51 / kD) < 1e-9 && std::fabs(stick.aim - 0.63 / kD) < 1e-9 && stick.agrees(),
+              "F124 turn: a second with the look blocked (avatar 0, head aim's share 0, player 0) says nothing and does not disagree, where the asks-based figure read -20 "
+              "against a still view; a stick's turn with the head aim writing reads the split's 6.9 deg as the player's and 29.2 deg as the head aim's, and agrees with "
+              "the view");
+    }
+    {   // F124: the F98a window prints once per counter value: the hook resets the window at its next solve, so a second with no solve left the last one to print again
+        nofoot::f124::SeqPrintGate g;
+        uint32_t printed = 0;
+        const bool none = g.take(true, 0);   // no solve yet
+        bool torn = false;
+        for (int sec = 0; sec < 100; ++sec) {
+            // solves in seconds 10, 11 and 60 only (the counter moves by 2 a write): the counter reads 0, then 2, 4 and 6
+            const uint32_t seq = sec < 10 ? 0u : sec < 11 ? 2u : sec < 60 ? 4u : 6u;
+            if (sec == 60) torn = g.take(false, seq);   // a torn read does not print and does not use the window up
+            if (g.take(true, seq)) ++printed;
+        }
+        check(!none && !torn && printed == 3,
+              "F124 F98a: a window prints once per hook counter value (3 prints over 100 seconds with solves in 3 of them, not 90), a torn read neither prints nor uses "
+              "the window up, and a counter of 0 (no solve yet) prints nothing");
+    }
     // F109b: the guard's three gates (nofoot::AdsResidual). Axes: yaw about the world's up (+ = left of +z), then pitch; forward (-sy cp, sp, cy cp), right
     // (cy, 0, sy), up (sy sp, cp, -cy sp).
     const auto axesAt = [](double yaw, double pitch, double r[3], double u[3], double f[3]) {

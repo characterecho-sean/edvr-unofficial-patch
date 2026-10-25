@@ -7115,14 +7115,15 @@ struct TurnState {
     uint64_t adsCheckMs = 0;
     uint32_t adsCheckSnap = 0;
     bool faded = false;          // a level other than 0 was published (one 0 follows at the run's end)
-    // the per-second check: the avatar's turn (F109b: the summed look delta), the head aim's asks, the view's turn beyond the head's (the right eye's rows less the
-    // LOCAL head), over the ticks with fresh rows in them and the tick before
+    // the per-second check: the avatar's turn (F109b: the summed look delta), the player's share of it (F124: the split's, g_adsUserYaw), the view's turn beyond the
+    // head's (the right eye's rows less the LOCAL head), over the ticks with fresh rows in them and the tick before
     bool aimHave = false;
     double aimLast = 0.0;        // F109b: the game's summed look delta (g_f109TotalYaw) at the last tick
+    double userLast = 0.0;       // F124: the split's player share (g_adsUserYaw, the game's sign) at the last tick
     uint32_t procLast = 0;       // F109b: the processor's calls at the last tick
     bool viewHave = false;
     nofoot::RotFrameSum viewLast;
-    double secAim = 0.0, secAsk = 0.0, secView = 0.0, secHead = 0.0;   // degrees, the seat convention
+    nofoot::f109::TurnSecond sec;   // degrees, the seat convention
     uint32_t secTicks = 0, secAdsTicks = 0, secNoView = 0, secNoAim = 0;
     uint64_t secMs = 0;
 };
@@ -7311,8 +7312,8 @@ void ltaTrip(uint64_t now, const char* why) noexcept {
     adsStop(why, false);
 }
 // The snaps (look to aim engaged, style snap), the comfort fade around each, and the per-second check that the player's own turn reached the view (in ADS, and
-// with the smooth style). ask: this tick's head aim ask (seat radians). ySign: the yaw sign key (the game's sign of a positive yaw).
-void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int ySign) noexcept {
+// with the smooth style). headStep, dYaw: the head's own step this tick (seat radians). ySign: the yaw sign key (the game's sign of a positive yaw).
+void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept {
     namespace f109 = nofoot::f109;
     TurnState& t = g_turn;
     const double nowS = static_cast<double>(now) / 1000.0;
@@ -7401,7 +7402,7 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
     if (!inAds && !smooth) {
         t.aimHave = t.viewHave = false;
         t.secTicks = t.secAdsTicks = t.secNoView = t.secNoAim = 0;
-        t.secAim = t.secAsk = t.secView = t.secHead = 0.0;
+        t.sec = f109::TurnSecond{};
         t.secMs = now;
         return;
     }
@@ -7409,11 +7410,16 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
     // comp+0x7B8, which did not follow the aim (the F109 flight: +0.00 deg in seconds where the game applied the head aim's 5-35 deg), so every smooth second read as
     // the player's own turn being the asks' opposite. A tick counts only when the view's rows are fresh in it and in the tick before, so a rows gap's turn is
     // neither the view's (a stale base) nor the avatar's (the F109 flight: a 67 deg turn landed in the next second as -146 deg against -79).
+    // F124: the player's own turn is the split's player share (g_adsUserYaw), not the avatar's less the head aim's asks: while the game blocked the look the asks were
+    // dropped and the difference read them as the player's turn (the 10-25 tester's log: a false NEVER APPLIED). A blocked call adds 0 to both sums.
     const double total = g_f109TotalYaw.load(std::memory_order_relaxed);
+    const double userTotal = g_adsUserYaw.load(std::memory_order_relaxed);
     const uint32_t procCalls = g_lookProcCalls.load(std::memory_order_relaxed);
     const double dTotal = t.aimHave ? total - t.aimLast : 0.0;
+    const double dUser = t.aimHave ? userTotal - t.userLast : 0.0;
     const bool procRan = t.aimHave && procCalls != t.procLast;
     t.aimLast = total;
+    t.userLast = userTotal;
     t.procLast = procCalls;
     t.aimHave = true;
     float rows[16] = {}, o4[4] = {};
@@ -7429,10 +7435,8 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
         cur.add(vr, vu, vf);
         double vy = 0.0, vp = 0.0;
         if (t.viewHave && nofoot::rotFrameDelta(t.viewLast, cur, &vy, &vp)) {   // a valid tick: every figure counts
-            t.secView += vy;
-            t.secAim += nofoot::adsSeatFromGameYaw(dTotal, sgn) / f109::kDeg;
-            if (headStep) t.secHead += dYaw / f109::kDeg;
-            t.secAsk += askYaw / f109::kDeg;
+            t.sec.add(nofoot::adsSeatFromGameYaw(dTotal, sgn) / f109::kDeg, nofoot::adsSeatFromGameYaw(dUser, sgn) / f109::kDeg, vy,
+                      headStep ? dYaw / f109::kDeg : 0.0);
             if (!procRan) ++t.secNoAim;
         }
         t.viewLast = cur;
@@ -7442,21 +7446,21 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
     if (inAds) ++t.secAdsTicks;
     if (t.secMs == 0) t.secMs = now;
     if (now - t.secMs < 1000) return;
-    const double player = t.secAim - t.secAsk, beyond = t.secView - t.secHead;
+    const double player = t.sec.player(), beyond = t.sec.beyond(), headShare = t.sec.headShare();
     const bool adsSec = t.secAdsTicks * 2 >= t.secTicks;
-    if (std::fabs(player) >= f109::kTurnMinDeg) {
-        const char* verdict = f109::turnAgrees(player, beyond) ? "agrees" : "DISAGREES";
+    if (t.sec.says()) {
+        const char* verdict = t.sec.agrees() ? "agrees" : "DISAGREES";
         if (adsSec)
-            Log::get().note("native on foot ADS player turn (F109) 1 s: look to aim %s; the avatar turned %+.2f deg (the game's aim), the head aim asked %+.2f, so the "
+            Log::get().note("native on foot ADS player turn (F109) 1 s: look to aim %s; the avatar turned %+.2f deg (the game's aim), the head aim's share %+.2f, so the "
                             "player's own %+.2f; the view turned %+.2f deg beyond the head's own (%u ticks, no rows %u, no aim %u): %s",
-                            g_lta.engaged ? "on" : "off", t.secAim, t.secAsk, player, beyond, t.secTicks, t.secNoView, t.secNoAim, verdict);
+                            g_lta.engaged ? "on" : "off", t.sec.aim, headShare, player, beyond, t.secTicks, t.secNoView, t.secNoAim, verdict);
         else
-            Log::get().note("native on foot smooth turn (F109) 1 s: the avatar turned %+.2f deg (the game's aim), the head aim asked %+.2f, so the player's own %+.2f; the "
+            Log::get().note("native on foot smooth turn (F109) 1 s: the avatar turned %+.2f deg (the game's aim), the head aim's share %+.2f, so the player's own %+.2f; the "
                             "view turned %+.2f deg beyond the head's own (%u ticks, no rows %u, no aim %u): %s",
-                            t.secAim, t.secAsk, player, beyond, t.secTicks, t.secNoView, t.secNoAim, verdict);
+                            t.sec.aim, headShare, player, beyond, t.secTicks, t.secNoView, t.secNoAim, verdict);
     }
     t.secTicks = t.secAdsTicks = t.secNoView = t.secNoAim = 0;
-    t.secAim = t.secAsk = t.secView = t.secHead = 0.0;
+    t.sec = f109::TurnSecond{};
     t.secMs = now;
 }
 
@@ -7773,7 +7777,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsHavePrev = false;
         g_adsAimMode = nofoot::f92::kAimOff;
-        f109TurnTick(now, 0.0, false, 0.0, ySign);   // F109: a snap's fade still running ends
+        f109TurnTick(now, false, 0.0, ySign);   // F109: a snap's fade still running ends
         return;
     }
     g_adsHookOn.store(true, std::memory_order_relaxed);   // engaged or releasing (the release's unwind is injected through the same hook); F109: or look to aim
@@ -7937,7 +7941,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         }
     }
     g_f109AimPitchAbsDeg.store(g_lta.engaged ? static_cast<float>(std::fabs(g_adsMap.pitchSeat) / nofoot::kAdsDeg) : 0.0f, std::memory_order_relaxed);
-    f109TurnTick(now, mo.injYaw, headStep, dYaw, ySign);   // F109: the snaps and their fade, the per-second check of the player's own turn
+    f109TurnTick(now, headStep, dYaw, ySign);   // F109: the snaps and their fade, the per-second check of the player's own turn
     // The position lock (natural LOCAL; zero until the entry is taken).
     // F93b: only while this press holds the eye (fix.native_on_foot_ads_eye_hold, latched at the engage). The lock reaches the eye through the eye alignment two frames
     // after the head's translation it takes out, so the head's translation tremor showed as the eye moving against the weapon (the F92 flight: 0.08 mm a frame, the
@@ -14707,6 +14711,11 @@ struct F98Left {
     uint32_t n = 0, aimN = 0, leanN = 0, steps = 0, stepsOver10 = 0, src[3] = {}, spanN = 0, twistLimited = 0;
     double aimSum = 0.0, aimMin = 1e9, aimMax = -1e9, leanSum = 0.0, leanAnimSum = 0.0, yawSum = 0.0, yawMax = 0.0, planeSum = 0.0, planeMax = 0.0, planeOver45 = 0.0;
     double stepSq = 0.0, stepMax = 0.0, spanSum = 0.0, spanMax = 0.0;
+    // F124: on the solves with a body-down pole (the pistol's, F84's rifle support): how many, the smallest angle between the shoulder-to-hand axis and the body's down,
+    // and at the largest elbow step among them the angle, and whether the hand's twist was past the forearm's limit then. A pole that degenerates with the arm
+    // pointing down shows as the flips at a small angle; the twist limit as the flips with it hit at a large one.
+    uint32_t downN = 0, downStepTwist = 0;
+    double downMin = 1e9, downStepMax = -1.0, downStepAng = 0.0;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -18713,6 +18722,18 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 if (step > 10.0) ++f.stepsOver10;
             }
             ++f.src[so[0].f98Source >= 0 && so[0].f98Source < 3 ? so[0].f98Source : 0];
+            if (so[0].f98Source == 2) {   // F124: the body's down is -y in the model axes (the pole's own up is +y)
+                const double downDeg = std::acos(std::fmax(-1.0, std::fmin(1.0, -so[0].f98Axis[1]))) * 180.0 / nofoot::kIkPi;
+                if (std::isfinite(downDeg)) {
+                    ++f.downN;
+                    f.downMin = std::min(f.downMin, downDeg);
+                    if (step >= 0.0 && step > f.downStepMax) {
+                        f.downStepMax = step;
+                        f.downStepAng = downDeg;
+                        f.downStepTwist = so[0].hTwistLimited ? 1u : 0u;
+                    }
+                }
+            }
             if (so[0].f98SeedKept) {
                 ++f.spanN;
                 f.spanSum += so[0].f98SeedSpanDeg;
@@ -19790,27 +19811,43 @@ void f66dLine(uint64_t now, int mode) noexcept {
     // F98a: the left arm with a weapon drawn, once a second (two tries at the counter; a torn second is skipped and reset)
     F98Left f98;
     bool got98 = false;
+    uint32_t seq98 = 0;
     for (int tries = 0; tries < 2 && !got98; ++tries) {
         const uint32_t s1 = g_f98Seq.load(std::memory_order_acquire);
         if (s1 & 1u) continue;
         std::memcpy(&f98, &g_f98, sizeof(f98));
         std::atomic_thread_fence(std::memory_order_acquire);
         got98 = g_f98Seq.load(std::memory_order_relaxed) == s1;
+        seq98 = s1;
     }
     g_f98Reset.store(true, std::memory_order_relaxed);
-    if (got98 && f98.n) {
+    // F124: the hook resets the window at its next solve, so a second with no solve left the last one in g_f98 and it printed again (one log had the same line 42 and 33
+    // times in a row, which the health rule counted as that many seconds). Print only when the counter has moved since the last print.
+    static nofoot::f124::SeqPrintGate gate98;
+    if (gate98.take(got98, seq98) && f98.n) {
         char item98[64] = "none";
         uint32_t serial98 = 0;
         if (!opticItemRead(&serial98, item98) || !item98[0]) std::snprintf(item98, sizeof(item98), "none");
         const double n98 = static_cast<double>(f98.n), an = f98.aimN ? static_cast<double>(f98.aimN) : 1.0, ln = f98.leanN ? static_cast<double>(f98.leanN) : 1.0;
+        // F124: the body-down solves' figures (none, and nothing printed, on a second with no such solve)
+        char down98[256] = "";
+        if (f98.downN) {
+            char at98[128];
+            if (f98.downStepMax >= 0.0)
+                std::snprintf(at98, sizeof(at98), "at the largest step (%.1f deg) the axis was %.1f deg from down, the twist limit %s", f98.downStepMax, f98.downStepAng,
+                              f98.downStepTwist ? "hit" : "not hit");
+            else
+                std::snprintf(at98, sizeof(at98), "no elbow step was measured");
+            std::snprintf(down98, sizeof(down98), "; on %u body-down solves the arm's axis came within %.1f deg of the body's down; %s", f98.downN, f98.downMin, at98);
+        }
         Log::get().note("native on foot left elbow (F98a) 1 s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
                         "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
                         "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
-                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u",
+                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u%s",
                         item98, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
                         f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
                         f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
-                        f98.twistLimited);
+                        f98.twistLimited, down98);
     }
 }
 // F66g: the frame order line, once a second while native stereo is on foot and the hooks run: drain the ring; between one local P1 and the next, the

@@ -306,14 +306,32 @@ struct SnapRun {
 };
 
 // ---- the player's turn reached the view ------------------------------------------------------------------------------------------------------------------
-// Over one second: the avatar's turn (the game's aim yaw, comp+0x7B8) less the head aim's asks is the player's own (stick, mouse, snap, spring); the view's turn less
-// the head's own (the right eye's rows less the LOCAL head) is what reached the view beyond the head. They agree within kAgreeDeg or a quarter of the turn. A second
-// whose player turn is under kTurnMinDeg says nothing.
+// Over one second: the split's player share of the avatar's turn (stick, mouse, snap, spring) is the player's own turn; the view's turn less the head's own (the
+// right eye's rows less the LOCAL head) is what reached the view beyond the head. They agree within kAgreeDeg or a quarter of the turn. A second whose player turn
+// is under kTurnMinDeg says nothing.
 constexpr double kTurnMinDeg = 3.0, kAgreeDeg = 1.0;
 inline bool turnAgrees(double playerDeg, double viewDeg) noexcept {
     const double tol = std::fabs(playerDeg) * 0.25 > kAgreeDeg ? std::fabs(playerDeg) * 0.25 : kAgreeDeg;
     return fin(playerDeg) && fin(viewDeg) && std::fabs(viewDeg - playerDeg) <= tol;
 }
+// One second of the check's figures (degrees, the seat convention), summed over the valid ticks. user is the split's own player share of the look calls (the stick,
+// the mouse, a snap and the spring, as the game applied them); the head aim's share is the rest of the avatar's turn. A call the game ran with its look blocked adds 0
+// to the avatar's turn and to the player's share (the split returns ours = player = 0), so a blocked second says nothing. The first F109 build took the player's turn
+// as the avatar's less the head aim's asks, which read the asks the game dropped as the player's own turn.
+struct TurnSecond {
+    double aim = 0.0, user = 0.0, view = 0.0, head = 0.0;
+    void add(double aimDeg, double userDeg, double viewDeg, double headDeg) noexcept {
+        aim += aimDeg;
+        user += userDeg;
+        view += viewDeg;
+        head += headDeg;
+    }
+    double player() const noexcept { return user; }
+    double headShare() const noexcept { return aim - user; }
+    double beyond() const noexcept { return view - head; }
+    bool says() const noexcept { return fin(user) && std::fabs(user) >= kTurnMinDeg; }
+    bool agrees() const noexcept { return turnAgrees(player(), beyond()); }
+};
 // The aim's yaw step between two reads of comp+0x7B8 (radians, wrapped to +-pi).
 inline double aimStep(double before, double now) noexcept {
     if (!fin(before) || !fin(now)) return 0.0;
@@ -324,5 +342,21 @@ inline double aimStep(double before, double now) noexcept {
 }
 
 }  // namespace f109
+
+namespace f124 {
+
+// A once-a-second print of a window that the hook resets lazily, at its next solve: a second with no solve leaves the last window in place, and it printed again
+// (one tester's log had the same F98a line 42 and 33 times in a row, which the health rule counted as that many seconds). The gate takes a window only when the
+// hook's counter (seq) has moved since the window last printed. got: the read of the window was whole (not torn).
+struct SeqPrintGate {
+    uint32_t last = 0;
+    bool take(bool got, uint32_t seq) noexcept {
+        if (!got || seq == last) return false;
+        last = seq;
+        return true;
+    }
+};
+
+}  // namespace f124
 }  // namespace nofoot
 }  // namespace edvr
