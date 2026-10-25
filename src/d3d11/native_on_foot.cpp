@@ -48,6 +48,7 @@
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
+#include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -4713,12 +4714,30 @@ bool g_f111GateLast = false;              // frame thread only
 uint64_t g_f111LastMs = 0;                // frame thread only
 uint64_t g_f111SecondsWith = 0;           // frame thread only: seconds with a cycle
 thread_local uintptr_t t_f111InPlace = 0; // the controller whose placement is running on this thread
+thread_local uint32_t t_f111PanelCalls = 0; // F114b: the ray hit and window calls made on this thread (a placement that reached its panel)
+thread_local bool t_f114bInRay = false;     // F114b: a ray hit is running on this thread (its mesh refresh reads the owner transform)
+thread_local bool t_f114bPend = false;      // F114b: the owner transform that ray hit read, pending its verdict
+thread_local float t_f114bPendOwner[16] = {}, t_f114bPendOut[16] = {};
 struct F111Slot {
     uintptr_t ctl = 0;
     nofoot::f111::Cycle cyc, prev;
     bool havePrev = false;
     uint32_t movieBase = 0;
+    nofoot::f114b::Extra ext, prevExt;   // F114b: the cycle's owner transform, camera, eye, buttons
 };
+// F114b: the owner transform hook (the pick mesh owner's vtable +0x10), the shared readings the frame thread prints, the flat profile's gate.
+F9Probe g_f114bProbe;
+bool g_f114bArmed = false;                 // frame thread only
+nofoot::f114b::Sec g_f114bSec, g_f114bTotal;   // g_f114bSec under g_f111Mu; g_f114bTotal frame thread only
+uint64_t g_f114bSecondsWith = 0;           // frame thread only
+uintptr_t g_f114bOwnerSlotRva[4] = {};     // under g_f111Mu: the owner +0x10 functions the placements' panels named (distinct, RVAs)
+uint32_t g_f114bOwnerSlotCount = 0, g_f114bOwnerSlotsPrinted = 0;
+uintptr_t g_f114bModeVt = 0, g_f114bModeFn = 0;   // under g_f111Mu: the mode object's vtable and +0x40 getter (RVAs)
+int g_f114bModeKind = 0;                   // nofoot::f114b::Getter
+int32_t g_f114bModeArg = 0, g_f114bModeValue = -1;
+uint8_t g_f114bModeBytes[8] = {};
+uint8_t g_f114bInit = 0, g_f114bLive = 0;  // +0x170, +0x171 at the last update
+uintptr_t g_f114bSink = 0;                 // +0x168 at the last update
 struct F111Move {
     nofoot::f111::Cycle c;
     int32_t osDelta[2] = {};
@@ -4805,6 +4824,32 @@ void f111ReadCamera(uintptr_t ctl) {
     g_f111CamOk = true;
 }
 
+// F114b: the eye's view as the F9 probe last read it: the HRC submit's view rows (+0x20..+0x4C) and position (+0x50), the left eye's (view 2)
+// when there is one, else any. False without one (the flat profile, or before the first HUD submit).
+bool f114bEyeView(double E[9], double e[3]) {
+    F9Lock lock;
+    const F9InstRow* pick = nullptr;
+    for (const auto& r : g_f9Insts) {
+        if (!r.used || !r.camOk || !r.viewOk) continue;
+        if (r.viewId == 2) {
+            pick = &r;
+            break;
+        }
+        if (!pick) pick = &r;
+    }
+    if (!pick) return false;
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) E[i * 3 + k] = pick->rot[i * 4 + k];
+    for (int k = 0; k < 3; ++k) e[k] = pick->cam[k];
+    return true;
+}
+
+// F114b: a cycle's close: the camera from the owner transform its placement read, the sprite in the owner's local axes and as the eye sees it, the
+// camera's axes against the eye's and the owner's against the HUD canvas's. Under g_f111Mu.
+void f114bClose(nofoot::f114b::Extra& x, const nofoot::f111::Cycle& c, const double* eyeR, const double eyeO[3], const double* hudR) {
+    nofoot::f114b::closeCycle(x, c, eyeR, eyeO, hudR);
+}
+
 // The controller's update: the cycle before it closes (the sprite as the placements left it), then the game's update runs, then the new cycle opens.
 uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[0].original);
@@ -4815,6 +4860,19 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
     uint32_t movie = 0;
     const bool endOk = ctl && guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) && guardedRead(ctl + nofoot::f111::kOffPos, pos, sizeof(pos)) &&
                        guardedRead(ctl + nofoot::f111::kOffMovie, &movie, 4);
+    // F114b: the eye's view and the HUD canvas's rows, read before the lock (the F9 lock is the probes').
+    double eyeR[9] = {}, eyeO[3] = {};
+    const bool eyeOk = ctl && f114bEyeView(eyeR, eyeO);
+    double hudR[9] = {};
+    bool hudOk = false;
+    if (ctl && g_f12Hrc) {
+        float m[16] = {};
+        if (guardedRead(g_f12Hrc + nofoot::kF9HrcMatrixOff, m, sizeof(m))) {
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) hudR[r * 3 + k] = m[r * 4 + k];
+            hudOk = true;
+        }
+    }
     if (ctl) {
         std::lock_guard<std::mutex> lock(g_f111Mu);
         F111Slot* s = f111SlotOf(ctl);
@@ -4823,6 +4881,10 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
             std::memcpy(s->cyc.pos, pos, sizeof(pos));
             s->cyc.movie = movie - s->movieBase;
             s->cyc.open = false;
+            f114bClose(s->ext, s->cyc, eyeOk ? eyeR : nullptr, eyeO, hudOk ? hudR : nullptr);
+            nofoot::f114b::addCycle(g_f114bSec, s->cyc, s->ext);
+            if (s->havePrev) nofoot::f114b::addStep(g_f114bSec, s->prev, s->prevExt, s->cyc, s->ext);
+            s->prevExt = s->ext;
             nofoot::f111::addCycle(g_f111Sec, s->cyc);
             if (s->havePrev) {
                 const uint32_t before = g_f111Sec.moves;
@@ -4853,6 +4915,42 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
         return result;
     POINT os{};
     const bool osOk = GetCursorPos(&os) != 0;
+    // F114b: the click path (the three button actions' state bytes, the live and init bytes, the sink) and the mode object, after the update.
+    nofoot::f114b::Extra ext;
+    for (uint32_t i = 0; i < nofoot::f114b::kButtons; ++i) {
+        uintptr_t btn = 0;
+        uint8_t now = 0, before = 0;
+        if (guardedRead(ctl + nofoot::f114b::kOffButtons + 8 * i, &btn, 8) && btn && guardedRead(btn + nofoot::f114b::kOffButtonNow, &now, 1) &&
+            guardedRead(btn + nofoot::f114b::kOffButtonBefore, &before, 1)) {
+            const int edge = nofoot::f114b::buttonEdge(now, before);
+            if (edge == 1) ext.pressed |= static_cast<uint8_t>(1u << i);
+            if (edge == 2) ext.released |= static_cast<uint8_t>(1u << i);
+        }
+    }
+    uint8_t live = 0, init = 0;
+    uintptr_t sink = 0, mode = 0;
+    guardedRead(ctl + nofoot::f114b::kOffLive, &live, 1);
+    guardedRead(ctl + nofoot::f114b::kOffInit, &init, 1);
+    guardedRead(ctl + nofoot::f114b::kOffSink, &sink, 8);
+    guardedRead(ctl + nofoot::f114b::kOffMode, &mode, 8);
+    ext.live = live != 0;
+    uintptr_t modeVt = 0, modeFn = 0;
+    uint8_t modeCode[8] = {};
+    int32_t modeArg = 0, modeValue = -1;
+    nofoot::f114b::Getter modeKind = nofoot::f114b::Getter::kUnknown;
+    if (mode && guardedRead(mode, &modeVt, 8) && modeVt && guardedRead(modeVt + nofoot::f114b::kModeGetter, &modeFn, 8) && modeFn &&
+        guardedRead(modeFn, modeCode, sizeof(modeCode))) {
+        modeKind = nofoot::f114b::decodeModeGetter(modeCode, sizeof(modeCode), &modeArg);
+        if (modeKind == nofoot::f114b::Getter::kConst) {
+            modeValue = modeArg;
+        } else if (modeKind == nofoot::f114b::Getter::kByteField) {
+            uint8_t v = 0;
+            if (guardedRead(mode + static_cast<intptr_t>(modeArg), &v, 1)) modeValue = v;
+        } else if (modeKind == nofoot::f114b::Getter::kDwordField) {
+            int32_t v = 0;
+            if (guardedRead(mode + static_cast<intptr_t>(modeArg), &v, 4)) modeValue = v;
+        }
+    }
     std::lock_guard<std::mutex> lock(g_f111Mu);
     F111Slot* s = f111SlotOf(ctl);
     if (!s) return result;
@@ -4865,7 +4963,17 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
     s->cyc.os[1] = os.y;
     s->cyc.osOk = osOk;
     s->movieBase = movieNow;
+    s->ext = ext;
     f111ReadCamera(ctl);
+    g_f114bInit = init;
+    g_f114bLive = live;
+    g_f114bSink = sink;
+    g_f114bModeVt = modeVt ? modeVt - g_base : 0;
+    g_f114bModeFn = modeFn ? modeFn - g_base : 0;
+    g_f114bModeKind = static_cast<int>(modeKind);
+    g_f114bModeArg = modeArg;
+    g_f114bModeValue = modeValue;
+    std::memcpy(g_f114bModeBytes, modeCode, sizeof(modeCode));
     return result;
 }
 
@@ -4875,10 +4983,25 @@ uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
     if (!original) return 0;
     const uintptr_t outer = t_f111InPlace;
     t_f111InPlace = reinterpret_cast<uintptr_t>(a);
+    const uint32_t panelCallsBefore = t_f111PanelCalls;
     const uint64_t result = original(a, b, c, d);
     t_f111InPlace = outer;
+    // F114b: a placement that reached the panel (its ray or its window): the function its pick mesh's owner names at vtable +0x10.
+    uintptr_t ownerFn = 0;
+    if (b && t_f111PanelCalls != panelCallsBefore) {
+        uintptr_t list = 0, owner = 0, vt = 0;
+        if (guardedRead(reinterpret_cast<uintptr_t>(b) + nofoot::f114b::kOffMeshList, &list, 8) && list && guardedRead(list, &owner, 8) && owner &&
+            guardedRead(owner, &vt, 8) && vt)
+            guardedRead(vt + 0x10, &ownerFn, 8);
+    }
     if (a) {
         std::lock_guard<std::mutex> lock(g_f111Mu);
+        if (ownerFn && g_base) {
+            const uintptr_t rva = ownerFn - g_base;
+            bool seen = false;
+            for (uint32_t i = 0; i < g_f114bOwnerSlotCount; ++i) seen |= g_f114bOwnerSlotRva[i] == rva;
+            if (!seen && g_f114bOwnerSlotCount < 4) g_f114bOwnerSlotRva[g_f114bOwnerSlotCount++] = rva;
+        }
         F111Slot* s = f111SlotOf(reinterpret_cast<uintptr_t>(a));
         if (s && s->cyc.open) ++s->cyc.placements;
     }
@@ -4889,9 +5012,14 @@ uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
 uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void* u, void* v, void* t, void* axA, void* axB) {
     const F111Fn8 original = reinterpret_cast<F111Fn8>(g_f111Probe[2].original);
     if (!original) return 0;
+    const bool outerRay = t_f114bInRay;
+    t_f114bInRay = true;
+    t_f114bPend = false;
     const uint64_t result = original(panel, origin, dir, u, v, t, axA, axB);
+    t_f114bInRay = outerRay;
     const uintptr_t ctl = t_f111InPlace;
     if (!ctl) return result;
+    ++t_f111PanelCalls;
     float fu = 0.0f, fv = 0.0f, ft = 0.0f;
     const bool accepted = (result & 0xFF) != 0;
     const bool read = accepted && guardedRead(reinterpret_cast<uintptr_t>(u), &fu, 4) && guardedRead(reinterpret_cast<uintptr_t>(v), &fv, 4) &&
@@ -4906,7 +5034,13 @@ uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void*
         s->cyc.u = fu;
         s->cyc.v = fv;
         s->cyc.hitUv = true;
+        if (t_f114bPend) {   // F114b: this panel's owner transform, the nearest accepted hit's
+            s->ext.owner = true;
+            std::memcpy(s->ext.owner16, t_f114bPendOwner, sizeof(t_f114bPendOwner));
+            std::memcpy(s->ext.out16, t_f114bPendOut, sizeof(t_f114bPendOut));
+        }
     }
+    t_f114bPend = false;
     return result;
 }
 
@@ -4917,6 +5051,7 @@ uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uin
     const uint64_t result = original(panel, out, index, point);
     const uintptr_t ctl = t_f111InPlace;
     if (!ctl) return result;
+    ++t_f111PanelCalls;
     float w[2] = {};
     const bool read = guardedRead(reinterpret_cast<uintptr_t>(out), w, sizeof(w));
     std::lock_guard<std::mutex> lock(g_f111Mu);
@@ -4930,11 +5065,38 @@ uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uin
     return result;
 }
 
+// F114b: the pick mesh owner's transform (vtable +0x10, rcx the owner, rdx the output): within a placement, the owner's world rows and position and
+// the transform it returned in the camera's frame, for the cycle's close.
+uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, uint64_t d) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f114bProbe.original);
+    if (!original) return 0;
+    const uint64_t result = original(owner, out, c, d);
+    const uintptr_t ctl = t_f111InPlace;
+    if (!ctl || !owner || !out) return result;
+    float o16[16] = {}, q16[16] = {};
+    if (!guardedRead(reinterpret_cast<uintptr_t>(owner) + nofoot::f114b::kOffOwnerRows, o16, sizeof(o16)) ||
+        !guardedRead(reinterpret_cast<uintptr_t>(out) + nofoot::f114b::kOutRows, q16, sizeof(q16)))
+        return result;
+    if (t_f114bInRay) {   // inside a ray hit: kept for that panel, taken only if its hit is the nearest accepted one
+        std::memcpy(t_f114bPendOwner, o16, sizeof(o16));
+        std::memcpy(t_f114bPendOut, q16, sizeof(q16));
+        t_f114bPend = true;
+        return result;
+    }
+    std::lock_guard<std::mutex> lock(g_f111Mu);
+    F111Slot* s = f111SlotOf(ctl);
+    if (!s || !s->cyc.open) return result;
+    s->ext.owner = true;
+    std::memcpy(s->ext.owner16, o16, sizeof(o16));
+    std::memcpy(s->ext.out16, q16, sizeof(q16));
+    return result;
+}
+
 // Frame thread, once: VR only, behind the identity check and each hook's vtable slot. One line for the four.
 void installF111Once() {
     if (g_f111Tried) return;
     g_f111Tried = true;
-    if (!runtimeVrProfile()) return;
+    // F114b: the flat profile too, so a flat session shows the stock path (read only in both).
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -4976,21 +5138,119 @@ void installF111Once() {
         }
     }
     Log::get().note("panel pointer (F111): hooks armed %zu of 4 (update +0x%llX, placement +0x%llX, ray hit +0x%llX, cursor window +0x%llX, build 334925, "
-                    "prologues and vtable slots verified; read only, open while native stereo is on foot)%s%s",
+                    "prologues and vtable slots verified; read only, open on foot: native stereo in VR, the journal in flat)%s%s",
                     armed, static_cast<unsigned long long>(p::kUpdateRva), static_cast<unsigned long long>(p::kPlaceRva),
                     static_cast<unsigned long long>(p::kRayHitRva), static_cast<unsigned long long>(p::kWindowRva), at ? ": " : "", why);
+    // F114b: the pick mesh owner's transform (vtable +0x10 of the owner's vtable at 0x55DBA10), behind its slot and prologue.
+    namespace q = nofoot::f114b;
+    const F9ProbeSpec ownerSpec{"native-on-foot-pick-owner-transform", q::kOwnerXformRva, q::kOwnerXformPrologue, sizeof(q::kOwnerXformPrologue),
+                                q::kOwnerXformStolen, reinterpret_cast<void*>(&f114bOwnerXformHooked), "owner transform"};
+    uintptr_t slot = 0;
+    std::string w;
+    size_t stolen = 0;
+    if (!guardedRead(base + q::kOwnerXformSlotRva, &slot, 8) || slot != base + q::kOwnerXformRva) {
+        w = "its vtable slot does not hold it";
+    } else if (installF9ProbeInto(g_f114bProbe, ownerSpec, base, &stolen, &w)) {
+        g_f114bProbe.gate.store(0, std::memory_order_seq_cst);
+        g_f114bArmed = true;
+    }
+    Log::get().note("panel pointer (F114b): owner transform hook %s at EliteDangerous64.exe+0x%llX (the pick mesh owner's vtable +0x10, build 334925, "
+                    "prologue and slot verified; read only), profile %s%s%s",
+                    g_f114bArmed ? "armed" : "NOT armed", static_cast<unsigned long long>(q::kOwnerXformRva), runtimeFlatProfile() ? "flat" : "vr",
+                    g_f114bArmed ? "" : ": ", g_f114bArmed ? "" : w.c_str());
+}
+
+// F114b: the hooks are open on foot: native stereo's on-foot flag in VR, the journal's on foot in the flat profile.
+bool f114bOpen() { return runtimeFlatProfile() ? (journalOnFootKnown() && journalOnFoot()) : nativeOnFootActive(); }
+
+uint64_t g_f114bLastMs = 0;   // frame thread only
+
+const char* f114bGetterText(int kind) {
+    switch (static_cast<nofoot::f114b::Getter>(kind)) {
+        case nofoot::f114b::Getter::kConst: return "a constant";
+        case nofoot::f114b::Getter::kByteField: return "a byte field";
+        case nofoot::f114b::Getter::kDwordField: return "a dword field";
+        default: return "not a plain accessor";
+    }
+}
+
+// Frame thread: F114b's lines, once a second with a panel (the turn, the cursor draw, the clicks, the mode), every 10 s with a panel the flight so
+// far, and each pick mesh owner function a placement named, once.
+void f114bTick(uint64_t now) {
+    if (now - g_f114bLastMs < 1000) return;
+    g_f114bLastMs = now;
+    namespace q = nofoot::f114b;
+    q::Sec sec;
+    uintptr_t ownerRva[4] = {};
+    uint32_t ownerCount = 0;
+    uintptr_t modeVt = 0, modeFn = 0, sink = 0;
+    int modeKind = 0;
+    int32_t modeArg = 0, modeValue = -1;
+    uint8_t modeBytes[8] = {}, init = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        sec = g_f114bSec;
+        g_f114bSec = q::Sec{};
+        ownerCount = g_f114bOwnerSlotCount;
+        for (uint32_t i = 0; i < ownerCount; ++i) ownerRva[i] = g_f114bOwnerSlotRva[i];
+        modeVt = g_f114bModeVt;
+        modeFn = g_f114bModeFn;
+        modeKind = g_f114bModeKind;
+        modeArg = g_f114bModeArg;
+        modeValue = g_f114bModeValue;
+        std::memcpy(modeBytes, g_f114bModeBytes, sizeof(modeBytes));
+        sink = g_f114bSink;
+        init = g_f114bInit;
+    }
+    const char* profile = runtimeFlatProfile() ? "flat" : "vr";
+    for (; g_f114bOwnerSlotsPrinted < ownerCount; ++g_f114bOwnerSlotsPrinted) {
+        const uintptr_t rva = ownerRva[g_f114bOwnerSlotsPrinted];
+        Log::get().note("panel pointer (F114b): a placed panel's pick mesh owner names EliteDangerous64.exe+0x%llX at vtable +0x10 (%s); profile %s",
+                        static_cast<unsigned long long>(rva), rva == q::kOwnerXformRva ? "the hooked owner transform" : "NOT the hooked function: not read",
+                        profile);
+    }
+    if (!sec.panelCycles) return;
+    ++g_f114bSecondsWith;
+    g_f114bTotal.merge(sec);
+    uint8_t noteByte = 0;
+    if (g_base) guardedRead(g_base + q::kNoteByteRva, &noteByte, 1);
+    Log::get().note("panel pointer (F114b) 1 s: profile %s; turn: %s; cursor draw: %s; mode: %s; clicks: pressed %u %u %u released %u %u %u (with a uv %u, "
+                    "the last at %.3f %.3f), buttons live in %u of %u cycles; cycles with the ray %u, the window %u, neither %u; mode object vtable "
+                    "+0x%llX, its +0x40 +0x%llX is %s (%d), value %d, bytes %02X %02X %02X %02X %02X %02X %02X %02X; uv to sprite in the camera right "
+                    "%+.2f down %+.2f, in the owner's axes right %+.2f down %+.2f, as the eye sees it right %+.2f down %+.2f, mouse to the eye's view "
+                    "right %+.2f up %+.2f (%u moves); camera against the eye x %+.2f y %+.2f z %+.2f (%u), owner against the HUD canvas x %+.2f y %+.2f (%u); "
+                    "owner transforms %u, camera derived %u (orthogonality %.3f), eye %u; note byte %u; sink %s, init %u",
+                    profile, q::turnText(q::turn(sec)), q::drawText(sec), q::modeText(sec), sec.presses[0], sec.presses[1], sec.presses[2],
+                    sec.releases[0], sec.releases[1], sec.releases[2], sec.pressesWithUv, sec.lastPressUv[0], sec.lastPressUv[1], sec.liveCycles, sec.cycles,
+                    sec.rayPlacements, sec.windowPlacements, sec.neither, static_cast<unsigned long long>(modeVt), static_cast<unsigned long long>(modeFn),
+                    f114bGetterText(modeKind), modeArg, modeValue, modeBytes[0], modeBytes[1], modeBytes[2], modeBytes[3], modeBytes[4], modeBytes[5],
+                    modeBytes[6], modeBytes[7], sec.uvCam[0].r(), sec.uvCam[1].r(), sec.uvLocal[0].r(), sec.uvLocal[1].r(), sec.uvEye[0].r(),
+                    sec.uvEye[1].r(), sec.ndcEye[0].r(), sec.ndcEye[1].r(), sec.moves, sec.camEyeMean(0), sec.camEyeMean(1), sec.camEyeMean(2),
+                    sec.camEyeN, sec.ownerHudMean(0), sec.ownerHudMean(1), sec.ownerHudN, sec.ownerReads, sec.camReads, sec.orthoMax, sec.eyeReads,
+                    noteByte, sink ? "present" : "none", init);
+    if (g_f114bSecondsWith % 10 == 0) {
+        const q::Sec& t = g_f114bTotal;
+        Log::get().note("panel pointer (F114b) so far: profile %s; turn: %s; cursor draw: %s; mode: %s; %llu s with a panel, moves %u, presses %u, with a uv "
+                        "%u, buttons live in %u of %u cycles; uv to sprite in the camera right %+.2f down %+.2f, in the owner's axes right %+.2f down %+.2f, "
+                        "as the eye sees it right %+.2f down %+.2f; camera against the eye x %+.2f y %+.2f z %+.2f",
+                        profile, q::turnText(q::turn(t)), q::drawText(t), q::modeText(t), static_cast<unsigned long long>(g_f114bSecondsWith), t.moves,
+                        t.presses[0] + t.presses[1] + t.presses[2], t.pressesWithUv, t.liveCycles, t.cycles, t.uvCam[0].r(), t.uvCam[1].r(),
+                        t.uvLocal[0].r(), t.uvLocal[1].r(), t.uvEye[0].r(), t.uvEye[1].r(), t.camEyeMean(0), t.camEyeMean(1), t.camEyeMean(2));
+    }
 }
 
 void f111Tick(uint64_t now) {
     installF111Once();
-    const bool open = nativeOnFootActive();
+    const bool open = f114bOpen();
     if (open != g_f111GateLast) {
         g_f111GateLast = open;
         std::lock_guard<std::mutex> lock(g_f111Mu);
         for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
         for (size_t i = 0; i < kF111Hooks; ++i)
             if (g_f111Armed[i]) g_f111Probe[i].gate.store(open ? 1u : 0u, std::memory_order_seq_cst);
+        if (g_f114bArmed) g_f114bProbe.gate.store(open ? 1u : 0u, std::memory_order_seq_cst);
     }
+    f114bTick(now);
     if (now - g_f111LastMs < 1000) return;
     g_f111LastMs = now;
     namespace p = nofoot::f111;

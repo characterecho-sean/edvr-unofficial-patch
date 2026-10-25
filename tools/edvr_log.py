@@ -10598,6 +10598,56 @@ def _hj_f111_pointer(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f114b_pointer(rows, ctx):
+    """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
+    pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
+    click path (presses at the controller, with a uv, the buttons live) and the mode (the 2D window or the ray). NEVER APPLIED when the hooks never saw a
+    panel; PARTIAL when the owner transform could not be read (its hook not armed, or a panel's owner names another function)."""
+    armed, sec, tot, owners = rows.get("armed", []), rows.get("sec", []), rows.get("total", []), rows.get("owner", [])
+    if not armed and not sec and not tot and not owners:
+        return None
+    if not sec:
+        if armed and all(r["state"] == "NOT armed" for r in armed):
+            return ("NEVER APPLIED", "the owner transform hook was not armed%s, and no panel was seen" % armed[-1]["rest"])
+        return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
+    undecided = ("too few moves", "no panel", "unclear")
+    parts, decided_any, all_few = [], False, True
+    for prof in ("vr", "flat"):
+        ps = [r for r in sec if r["profile"] == prof]
+        if not ps:
+            continue
+        pt = [r for r in tot if r["profile"] == prof]
+
+        def pick(key):
+            if pt and pt[-1][key].strip() not in undecided:
+                return pt[-1][key].strip()
+            c = collections.Counter(r[key].strip() for r in ps if r[key].strip() not in undecided)
+            return c.most_common(1)[0][0] if c else collections.Counter(r[key].strip() for r in ps).most_common(1)[0][0]
+        turn, draw = pick("turn"), pick("draw")
+        mode = collections.Counter(r["mode"].strip() for r in ps).most_common(1)[0][0]
+        presses = sum(int(r["p0"]) + int(r["p1"]) + int(r["p2"]) for r in ps)
+        puv = sum(int(r["puv"]) for r in ps)
+        live, cycles = sum(int(r["live"]) for r in ps), sum(int(r["cycles"]) for r in ps)
+        cn = sum(int(r["cn"]) for r in ps)
+        cam = (" camera against the eye x %+.2f y %+.2f z %+.2f;" % tuple(sum(float(r[k]) * int(r["cn"]) for r in ps) / cn for k in ("cx", "cy", "cz"))
+               if cn else "")
+        last = [r for r in ps if int(r["puv"])]
+        where = (" (the last at uv %s %s)" % (last[-1]["lu"], last[-1]["lv"])) if last else ""
+        parts.append("%s: %d s with a panel, mode %s; turn: %s; cursor draw: %s;%s clicks: %d presses, %d with a uv%s, buttons live in %d of %d cycles; note "
+                     "byte %s" % (prof, len(ps), mode, turn, draw, cam, presses, puv, where, live, cycles, ps[-1]["note"]))
+        decided_any |= turn not in undecided
+        all_few &= turn in ("too few moves", "no panel")
+    text = "; ".join(parts)
+    stray = [r for r in owners if not r["what"].startswith("the hooked")]
+    if stray:
+        return ("PARTIAL", text + "; a panel's owner names exe+0x%s at vtable +0x10, not the hooked function: its transform was not read" % stray[-1]["rva"])
+    if armed and all(r["state"] == "NOT armed" for r in armed):
+        return ("PARTIAL", text + "; the owner transform hook was not armed: the turn cannot be placed")
+    if all_few:
+        return ("IDLE", text + "; the pointer never moved enough on a panel to judge")
+    return ("OK" if decided_any else "PARTIAL", text)
+
+
 def _hj_f93_chain(rows, ctx):
     """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
     step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
@@ -11670,6 +11720,16 @@ HEALTH_RULES = (
         ("total", r"panel pointer \(F111\) so far: verdict: (?P<verdict>[^;]+); (?P<secs>\d+) s with the pointer, cycles \d+, moves \d+"),
         ("_", r"panel pointer \(F111\) move: ndc "),
     ), _hj_f111_pointer),
+    _hrule("panel pointer (F114b)", ("F114b",), ("panel pointer (F114b)",), (
+        ("armed", r"panel pointer \(F114b\): owner transform hook (?P<state>armed|NOT armed) at .*?, profile (?P<profile>vr|flat)(?P<rest>.*)$"),
+        ("sec", r"panel pointer \(F114b\) 1 s: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
+                r"clicks: pressed (?P<p0>\d+) (?P<p1>\d+) (?P<p2>\d+) released \d+ \d+ \d+ \(with a uv (?P<puv>\d+), the last at (?P<lu>[-\d.]+) (?P<lv>[-\d.]+)\), "
+                r"buttons live in (?P<live>\d+) of (?P<cycles>\d+) cycles; .*?camera against the eye x (?P<cx>%s) y (?P<cy>%s) z (?P<cz>%s) \((?P<cn>\d+)\)"
+                r".*; note byte (?P<note>\d+);" % (_HN, _HN, _HN)),
+        ("total", r"panel pointer \(F114b\) so far: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
+                  r"(?P<secs>\d+) s with a panel"),
+        ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
+    ), _hj_f114b_pointer),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13140,6 +13200,38 @@ def self_test_health():
               [("PARTIAL", F111)], has=["the inverting stage: the unprojection (K1", "only 3 of 4 hooks armed"])
         check("F111 pointer: updates without a placement", [ptr_armed(), ptr_sec(ray=0, behind=0, verdict="none in the pick (the inversion is after it)")], 0,
               [("PARTIAL", F111)], has=["no placement on a panel was seen"])
+
+        # ---- panel pointer (F114b): the turned transform, the cursor draw, the clicks and the mode, VR and flat ----
+        F114B = "panel pointer (F114b)"
+        CAM = "the pick camera (upright for the eye, turned in the pick's frame)"
+        FOLLOWS = "the sprite's pose, as the eye sees it, follows the mouse"
+
+        def p114_armed(state="armed", profile="vr", why=""):
+            return R("owner transform hook %s at", state, 0x4526E40, profile, ": " if why else "", why)
+
+        def p114_owner(rva=0x4526E40, what="the hooked owner transform"):
+            return R("a placed panel's pick mesh owner names", rva, what, "vr")
+
+        def p114(profile="vr", turn=CAM, draw=FOLLOWS, mode="2D window", presses=(1, 0, 0), puv=1, live=90, cycles=90, cam=(-1.0, -1.0, 1.0), cn=60, note=0):
+            return R("panel pointer (F114b) 1 s", profile, turn, draw, mode, presses[0], presses[1], presses[2], presses[0], 0, 0, puv, 0.612, 0.405, live,
+                     cycles, 0 if mode == "2D window" else cycles, cycles if mode == "2D window" else 0, 0, 0x55DC000, 0x4500000, "a byte field", 12, 1,
+                     0x0F, 0xB6, 0x41, 0x0C, 0xC3, 0, 0, 0, -0.9, -0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 20, cam[0], cam[1], cam[2], cn, 1.0, 1.0, cn, cycles,
+                     cycles, 0.001, cycles, note, "present", 1)
+
+        def p114_total(profile="vr", turn=CAM, draw=FOLLOWS, mode="2D window", secs=10):
+            return R("panel pointer (F114b) so far", profile, turn, draw, mode, secs, 200, 2, 2, 900, 900, -0.9, -0.9, 0.9, 0.9, 0.9, 0.9, -1.0, -1.0, 1.0)
+
+        check("F114b pointer: VR, the pick camera turned", [p114_armed(), p114_owner(), p114(), p114(), p114(), p114_total()], 0, [("OK", F114B)],
+              has=["vr: 3 s with a panel, mode 2D window; turn: " + CAM, "cursor draw: " + FOLLOWS, "camera against the eye x -1.00 y -1.00 z +1.00",
+                   "clicks: 3 presses, 3 with a uv (the last at uv 0.612 0.405), buttons live in 270 of 270 cycles"], lacks=["UNPARSED"])
+        check("F114b pointer: VR and flat side by side",
+              [p114_armed(), p114(), p114(), p114(profile="flat", turn="none (the sprite follows the uv)", mode="ray", cn=0)], 0, [("OK", F114B)],
+              has=["vr: 2 s with a panel", "flat: 1 s with a panel, mode ray; turn: none (the sprite follows the uv)"])
+        check("F114b pointer: armed, no panel", [p114_armed()], 3, [("NEVER APPLIED", F114B)], has=["never saw a panel"])
+        check("F114b pointer: the owner names another function", [p114_armed(), p114_owner(0x4526D10, "NOT the hooked function: not read"), p114()], 0,
+              [("PARTIAL", F114B)], has=["exe+0x4526D10 at vtable +0x10, not the hooked function"])
+        check("F114b pointer: a still cursor", [p114_armed(), p114(turn="too few moves", presses=(0, 0, 0), puv=0)] * 2, 0, [("IDLE", F114B)],
+              has=["never moved enough"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
