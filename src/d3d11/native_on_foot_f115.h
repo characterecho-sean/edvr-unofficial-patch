@@ -137,13 +137,23 @@ struct Record {
 // a mode with no ship (log edvr_gfx_20261025_085120: the on-foot training left for the menu at 09:01:25.894, the game stopped submitting frames 0.5 s
 // earlier and shut down 30 s later, and F115 read it as a boarding). A boarding is known by the cockpit's own panels drawing (they made the edge or drew
 // after it) or by Status.json saying seated; anything else is another exit, whose seat and pose are not a boarding's to judge.
-enum class Exit : uint8_t { kBoardingPanels = 0, kBoardingSeated = 1, kOther = 2 };
+enum class Exit : uint8_t { kBoardingPanels = 0, kBoardingSeated = 1, kOther = 2, kUnknown = 3 };
 inline Exit exitKind(bool fromPanels, bool panelsAfter, bool statusSeated) noexcept {
     return fromPanels || panelsAfter ? Exit::kBoardingPanels : statusSeated ? Exit::kBoardingSeated : Exit::kOther;
 }
 inline const char* exitName(Exit e) noexcept {
     return e == Exit::kBoardingPanels ? "boarding (the cockpit's panels drew)" : e == Exit::kBoardingSeated ? "boarding (Status.json says seated)"
+                                                                               : e == Exit::kUnknown ? "not yet known (read back a second later)"
                                                                                : "not a boarding (no cockpit panel, not seated: a quit, a load or a menu)";
+}
+// F115c: what the edge itself can say. The panels or Status.json's seated flag make a boarding at once, and a game session that has ended makes a quit or a
+// load (log edvr_gfx_20261025_113157: native on foot ended at 11:38:19.215 with "the game session ended", the game stopped presenting 1.5 s later, and
+// no read-back came, so the exit was left unclassified); otherwise the read-back a second later decides.
+inline Exit exitAtEdge(bool fromPanels, bool statusSeated, bool session) noexcept {
+    return fromPanels ? Exit::kBoardingPanels : statusSeated ? Exit::kBoardingSeated : !session ? Exit::kOther : Exit::kUnknown;
+}
+inline const char* exitNameAtEdge(Exit e) noexcept {
+    return e == Exit::kOther ? "not a boarding (the game session ended)" : exitName(e);
 }
 // F115b: whether the runtime handed the d3d11 half a frame after the edge (a quit stops the game's frames, and the last pose still carries the on-foot
 // alignment: the head read from it is not the cockpit's).

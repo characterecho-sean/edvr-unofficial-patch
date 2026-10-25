@@ -12684,18 +12684,22 @@ void f115Exit(uint64_t now, bool fromPanels) noexcept {
     g_f115Rec.serial = g_align.serial;
     g_f115Rec.lookTotalRad = static_cast<double>(static_cast<float>(g_adsMap.yawPublished()));   // what lookPublishTick hands the provider from this frame on
     const f115::Published after = f115Snapshot(now, false);
+    // F115c: what the edge itself says of the exit (the same session test as the frame boundary's, this frame); a quit's frames stop before the read-back is due
+    const bool session = nativeGameSession(), seated = journalSeatedKnown() && journalSeated();
+    const f115::Exit exitEdge = f115::exitAtEdge(fromPanels, seated, session);
     Log::get().note("boarding reset (F115): the on-foot camera ended at frame %u (%s; the stock panel shader drew %u times on foot this stretch); undone at once: "
                     "the eye alignment %+.1f %+.1f %+.1f cm (the hold's raise %+.1f cm, "
                     "the neck reference's raise %+.1f cm), the look's seated yaw %+.2f deg (reset serial %u), the ADS pitch %+.2f deg, the rotation calibration %+.2f "
                     "%+.2f deg, the ADS shift %.1f cm, the left eye's share %.2f; published now: the eye alignment %+.1f %+.1f %+.1f cm (serial %u), the look's seated "
                     "yaw %+.2f deg, the ADS pitch %+.2f deg, the rotation %+.2f %+.2f deg, the ADS shift %.1f cm, the share %.2f: %s; the avatar's last sample %lld ms "
-                    "before, the on-foot look's last input %lld ms before",
+                    "before, the on-foot look's last input %lld ms before; the exit at the edge: %s",
                     g_f44Frame.load(std::memory_order_relaxed),
                     fromPanels ? "the cockpit's own panels drew with native stereo still on foot" : "native stereo on foot ended",
                     g_f115StockPanelOnFoot.load(std::memory_order_relaxed), 100.0 * before.eyeM[0], 100.0 * before.eyeM[1], 100.0 * before.eyeM[2], holdRaiseCm, neckRaiseCm,
                     before.lookDeg, static_cast<unsigned>(resetSerial), before.pitchDeg, before.rotDeg[0], before.rotDeg[1], before.shiftCm(), before.share,
                     100.0 * after.eyeM[0], 100.0 * after.eyeM[1], 100.0 * after.eyeM[2], static_cast<unsigned>(g_f115Rec.serial), after.lookDeg, after.pitchDeg,
-                    after.rotDeg[0], after.rotDeg[1], after.shiftCm(), after.share, after.zero() ? "all zero" : "NOT ZERO", avatarMs, lookMs);
+                    after.rotDeg[0], after.rotDeg[1], after.shiftCm(), after.share, after.zero() ? "all zero" : "NOT ZERO", avatarMs, lookMs,
+                    f115::exitNameAtEdge(exitEdge));
 }
 // A second after the edge: the values read back, and the head's place in the seated space (the runtime's seated origin once nothing on foot moves it).
 void f115Followup(uint64_t now) noexcept {

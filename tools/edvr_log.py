@@ -11283,6 +11283,35 @@ def _hj_f107_away(rows, ctx):
     return ("OK", text + "; the neck reference and the standing calibration held")
 
 
+def _hj_f115_pair(edges, secs):
+    """[(edge, read-back or None)]: each edge with the first read-back not yet taken that comes at or after it and before the next edge (by the log's clock; in the
+    log's order when a line has no stamp)."""
+    taken, out = set(), []
+    for i, e in enumerate(edges):
+        t0 = e.get("_t")
+        t1 = edges[i + 1].get("_t") if i + 1 < len(edges) else None
+        hit = None
+        for j, s in enumerate(secs):
+            ts = s.get("_t")
+            if j in taken or (t0 is not None and ts is not None and (ts < t0 or (t1 is not None and ts >= t1))):
+                continue
+            hit = j
+            break
+        if hit is not None:
+            taken.add(hit)
+        out.append((e, secs[hit] if hit is not None else None))
+    return out
+
+
+def _hj_f115_kind(edge, sec):
+    """'boarding', 'other' or 'unknown': the read-back's exit when there is one (F115's read-backs have no exit field and count as boardings), else the edge's own
+    (F115c), else unknown (an F115b edge line, or one the game session had not ended on)."""
+    if sec is not None:
+        return "other" if (sec.get("exit") or "").startswith("not a boarding") else "boarding"
+    at = edge.get("edgeexit") or ""
+    return "other" if at.startswith("not a boarding") else "unknown" if not at or at.startswith("not yet known") else "boarding"
+
+
 def _hj_f115_boarding(rows, ctx):
     """F115: boarding undoes every on-foot camera change. Each fall of native stereo on foot's flag (the marker line, written where the flag is computed) has
     a reset line (else NEVER APPLIED: the reset never ran); the edge comes from the cockpit's own panels when they draw first, else from the flag. The reset
@@ -11292,7 +11321,9 @@ def _hj_f115_boarding(rows, ctx):
     the cockpit this session: the seat did not come back or the player sits otherwise; none this session: the seat stored before it), apart from the on-foot
     changes. A false start is PARTIAL. F115b: an exit the read-back names "not a boarding" (a quit, a load or a menu) is counted apart and its pose and seat
     are not judged; nor are those of a read-back with no runtime frame since the edge (the last pose still carries the on-foot alignment). F115's read-backs
-    have no exit field and count as boardings."""
+    have no exit field and count as boardings. F115c: each edge is paired with the next read-back, and an exit is what the read-back says, else what the edge says
+    (a game session that has ended is another exit, the panels or Status.json's seated flag a boarding), else unknown; a quit has no read-back, because the game
+    stops presenting before it is due. An exit without a read-back is PARTIAL only when it is a boarding; the others are reported."""
     ended, edges, allSecs, falses = rows.get("ended", []), rows.get("edge", []), rows.get("sec", []), rows.get("false", [])
     if not ended and not edges and not allSecs and not falses:
         return None
@@ -11304,11 +11335,16 @@ def _hj_f115_boarding(rows, ctx):
     secs = [r for r in allSecs if r not in others]
     judged = [r for r in secs if r["carried"] != "no frame since the edge"]
     panels = sum(1 for r in edges if r["src"].startswith("the cockpit"))
-    text = ("%d boarding(s) and %d other exit(s) (a quit, a load or a menu; not judged) (the edge from the cockpit's panels %d, from Status.json %d): undone at "
+    pairs = _hj_f115_pair(edges, allSecs)
+    kinds = [_hj_f115_kind(e, s) for e, s in pairs]
+    bare = [k for (e, s), k in zip(pairs, kinds) if s is None]   # the exits with no read-back
+    unknown = kinds.count("unknown")
+    text = ("%d boarding(s) and %d other exit(s) (a quit, a load or a menu; not judged)%s (the edge from the cockpit's panels %d, from Status.json %d): undone at "
             "once the eye alignment up to %.1f cm (the hold's raise up to %.1f, the neck reference's up to %.1f), the look's seated yaw up to %.2f deg, the ADS "
             "pitch up to %.2f deg, the ADS shift up to %.1f cm") % (
-        len(edges) - len(others), len(others), panels, len(edges) - panels, big(edges, "ey"), big(edges, "hold"), big(edges, "neck"), big(edges, "look"),
-        big(edges, "pitch"), big(edges, "shift"))
+        kinds.count("boarding"), kinds.count("other"),
+        (" and %d unknown exit(s) (no read-back, and the edge could not tell)" % unknown) if unknown else "", panels, len(edges) - panels, big(edges, "ey"),
+        big(edges, "hold"), big(edges, "neck"), big(edges, "look"), big(edges, "pitch"), big(edges, "shift"))
     leads = [int(r["lead"]) for r in secs if r["src"] == "the cockpit's own panels" and int(r["lead"]) >= 0]
     if leads:
         text += "; the panels led Status.json's bit by %s ms" % ", ".join(str(x) for x in leads)
@@ -11317,6 +11353,9 @@ def _hj_f115_boarding(rows, ctx):
         text += "; the head against the stored seat %s cm" % ", ".join("%+.1f" % float(r["h"]) for r in judged)
     if len(judged) < len(secs):
         text += "; %d boarding(s) with no runtime frame since the edge (pose and seat not judged)" % (len(secs) - len(judged))
+    if bare.count("other") or bare.count("unknown"):
+        text += "; %d exit(s) without the read-back a second later (%d other, %d unknown: reported, not judged)" % (
+            bare.count("other") + bare.count("unknown"), bare.count("other"), bare.count("unknown"))
     notes = []
     own = [r for r in judged if abs(float(r["h"])) >= 10.0 and r["seat"].startswith("the player's recentre")]
     if own:
@@ -11330,8 +11369,8 @@ def _hj_f115_boarding(rows, ctx):
     late = sum(1 for r in allSecs if r["zero"] != "all zero")
     if late:
         notes.append("NOT ZERO a second after %d exit(s)" % late)
-    if len(allSecs) < len(edges):
-        notes.append("%d exit(s) without the read-back a second later" % (len(edges) - len(allSecs)))
+    if bare.count("boarding"):
+        notes.append("%d exit(s) without the read-back a second later" % bare.count("boarding"))
     uncarried = sum(1 for r in judged if r["carried"] == "no")
     if uncarried:
         notes.append("the runtime's pose did not carry the zero alignment after %d" % uncarried)
@@ -12101,7 +12140,8 @@ HEALTH_RULES = (
                  r"foot|native stereo on foot ended); the stock panel shader drew (?P<stock>\d+) times on foot this stretch\); undone at once: the eye alignment "
                  r"(?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(the hold's raise (?P<hold>%s) cm, the neck reference's raise (?P<neck>%s) cm\), the look's seated yaw "
                  r"(?P<look>%s) deg \(reset serial (?P<rs>\d+)\), the ADS pitch (?P<pitch>%s) deg, the rotation calibration %s %s deg, the ADS shift "
-                 r"(?P<shift>[\d.]+) cm, the left eye's share (?P<share>[\d.]+); published now: .*?: (?P<now>all zero|NOT ZERO); the avatar's last sample" % ((_HN,) * 9)),
+                 r"(?P<shift>[\d.]+) cm, the left eye's share (?P<share>[\d.]+); published now: .*?: (?P<now>all zero|NOT ZERO); the avatar's last sample"
+                 r"(?:.*?; the exit at the edge: (?P<edgeexit>boarding \([^)]*\)|not a boarding \([^)]*\)|not yet known \([^)]*\)))?" % ((_HN,) * 9)),
         ("sec", r"boarding reset \(F115\) 1 s: (?:the exit: (?P<exit>boarding \([^)]*\)|not a boarding \([^)]*\)); )?the edge from (?P<src>the cockpit's own "
                 r"panels|Status\.json), (?P<lead>-?\d+) ms before Status\.json's on-foot bit "
                 r"\(the cockpit's panels first drew (?P<pfirst>-?\d+) ms before the edge\); published the eye alignment (?P<ex>%s) (?P<ey>%s) (?P<ez>%s) cm \(serial "
@@ -13781,11 +13821,15 @@ def self_test_health():
         NOPRESS115 = "no recentre in a menu or the cockpit this session (the key observable; on foot 0, not the seat)"
         FALSE115 = R("boarding reset (F115): a false start:", 3000, 1, 2)
 
-        def edge115(now="all zero", nowEye=0.0, src=PANELS115):
-            return R("boarding reset (F115): the on-foot camera ended at frame", 86241, src, 0, 0.0, -34.6, 0.0, 16.9, 17.7, -5.84, 10, 4.86, 0.0, 0.0, 0.0, 0.0,
-                     0.0, nowEye, 0.0, 8577, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, now, 1806, 1889)
-
         BOARD115, QUIT115 = "boarding (the cockpit's panels drew)", "not a boarding (no cockpit panel, not seated: a quit, a load or a menu)"
+        SEATED115, ENDED115, UNKNOWN115 = ("boarding (Status.json says seated)", "not a boarding (the game session ended)",
+                                           "not yet known (read back a second later)")
+
+        def edge115(now="all zero", nowEye=0.0, src=PANELS115, at=None):
+            """The edge line; at is the exit it names (F115c), by default what the edge could tell: the panels a boarding, else not yet known."""
+            return R("boarding reset (F115): the on-foot camera ended at frame", 86241, src, 0, 0.0, -34.6, 0.0, 16.9, 17.7, -5.84, 10, 4.86, 0.0, 0.0, 0.0, 0.0,
+                     0.0, nowEye, 0.0, 8577, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, now, 1806, 1889, at or (BOARD115 if src == PANELS115 else UNKNOWN115))
+
 
         def sec115(zero="all zero", eye=0.0, carried="yes", h=-1.5, seat=MENU115, tail="", src="the cockpit's own panels", lead=984, kind=BOARD115):
             return R("boarding reset (F115) 1 s: the exit:", kind, src, lead, 0 if src != "Status.json" else -1, 0.0, eye, 0.0, 8577, carried, 0.0, 0.0, 0.0, 0.0,
@@ -13822,6 +13866,26 @@ def self_test_health():
         check("F115b: the F115 build's read-back (no exit field) still parses, as a boarding", [edge115(), END115, R("boarding reset (F115) 1 s: the exit:", BOARD115,
               "the cockpit's own panels", 984, 0, 0.0, 0.0, 0.0, 8577, "yes", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "all zero", -1.5, 3.1, MENU115, "").replace(
               "the exit: " + BOARD115 + "; ", "")], 0, [("OK", B115)], has=["1 boarding(s) and 0 other exit(s)"], lacks=["UNPARSED"])
+        # F115c: the flight of 11:31 (log edvr_gfx_20261025_113157): a quit, native on foot ended with the game session ended, no tick after the edge, no read-back
+        check("F115c: a quit has no read-back, and the edge says the game session ended", [BEGAN115, END115, edge115(src=FLAG115, at=ENDED115)], 0, [("OK", B115)],
+              has=["0 boarding(s) and 1 other exit(s) (a quit, a load or a menu; not judged)", "1 exit(s) without the read-back a second later (1 other, 0 unknown: "
+                   "reported, not judged)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F115c: a seated boarding with no read-back is still PARTIAL", [BEGAN115, END115, edge115(src=FLAG115, at=SEATED115)], 0, [("PARTIAL", B115)],
+              has=["1 boarding(s) and 0 other exit(s)", "1 exit(s) without the read-back a second later"], lacks=["UNPARSED"])
+        check("F115c: an exit the edge could not tell and no read-back is reported, not judged", [BEGAN115, END115, edge115(src=FLAG115)], 0, [("OK", B115)],
+              has=["0 boarding(s) and 0 other exit(s) (a quit, a load or a menu; not judged) and 1 unknown exit(s)", "(0 other, 1 unknown: reported, not judged)"],
+              lacks=["UNPARSED"])
+        check("F115c: the read-back decides over the edge's unknown", [END115, edge115(src=FLAG115), sec115(src="Status.json", lead=0, kind=QUIT115,
+              carried="no frame since the edge")], 0, [("OK", B115)], has=["0 boarding(s) and 1 other exit(s)"], lacks=["UNPARSED", "without the read-back"])
+        check("F115c: a read-back belongs to the edge it follows, not the first one", [edge115(src=FLAG115, at=SEATED115), edge115(), sec115()], 0,
+              [("PARTIAL", B115)], has=["2 boarding(s) and 0 other exit(s)", "1 exit(s) without the read-back a second later"])
+        check("F115c: a boarding, then a quit", [edge115(), sec115(), edge115(src=FLAG115, at=ENDED115)], 0, [("OK", B115)],
+              has=["1 boarding(s) and 1 other exit(s)", "1 exit(s) without the read-back a second later (1 other, 0 unknown: reported, not judged)"],
+              lacks=["UNPARSED"])
+        check("F115c: the F115b build's edge line (no exit at the edge) still parses", [edge115().replace("; the exit at the edge: " + BOARD115, ""), END115,
+              sec115()], 0, [("OK", B115)], has=["1 boarding(s) and 0 other exit(s)"], lacks=["UNPARSED", "without the read-back"])
+        check("F115b: the edge line of the build before F115c, no read-back, is an unknown exit", [BEGAN115, END115, edge115(src=FLAG115).replace(
+              "; the exit at the edge: " + UNKNOWN115, "")], 0, [("OK", B115)], has=["0 boarding(s) and 0 other exit(s)", "and 1 unknown exit(s)"], lacks=["UNPARSED"])
         check("F115 boarding: the edge published a non-zero alignment", [edge115(now="NOT ZERO", nowEye=-33.8), END115, sec115()], 0, [("PARTIAL", B115)],
               has=["1 reset(s) published something other than zero at the edge"])
         check("F115 boarding: a false start (the panels drew on foot)", [edge115(), FALSE115], 0, [("PARTIAL", B115)],
