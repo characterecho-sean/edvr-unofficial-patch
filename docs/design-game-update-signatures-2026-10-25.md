@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** step 3 and the review round (round 2, below) built on a
-  branch, full build green, not merged, not flown. Step 1 was the offline
+  branch, full build green, not merged; flown once (VR, Frontier). Step 1 was the offline
   generator (`tools\hook_signatures.py`), step 2 the runtime resolver and the
   store hook pilot, step 3 every other hook on the resolver and a build gate
   (`hook_signatures.py audit`). Round 2: foreign processes, the loader lock,
@@ -34,11 +34,12 @@
   hidden. On, on the known build, a background thread runs the resolver once
   and logs one `game update check:` line; it changes nothing the hooks use.
   When the arc closes, propose removing it.
-- **Next flight:** the known build with the key on, VR then flat: every hook's
-  lines as before, and `game update check: 318 of 318 found, all equal`. A
-  not-found address that "now starts with a jmp" was hooked before the check
-  read it (a race in the check, not a resolver fault). An unknown build needs
-  a game update to test against; none is out yet.
+- **Flight 1** (2026-10-25, VR, Frontier, `edvr_gfx_20261025_114350.log`,
+  v0.21.1-41-gc041596b): `315 of 318 found, all equal`, 0 differ, in 90.4 ms.
+  The 3 not found (0x52EB4F8, 0x52EC240, 0x52EC248) are the pointer slots the
+  VR SSAA hold's DLL-load install rewrites before the check's thread starts
+  (entry below); every hook armed with its usual text. Next: flat with the
+  key on. An unknown build needs a game update; none is out yet.
 - **Open:** (1) `tools\object_classification.py` checks a capture's
   return RVAs against build 334925's; a capture from an unknown build carries
   that build's offsets and would be rejected (step 3 left the reader alone);
@@ -392,6 +393,36 @@ after the resolve and checked against `unitRva` by the rig). The kinematic
 "found by signature" line now follows a successful install, and engine
 motion's found line is written once. The stale comments in
 `scheduler_stack_hook.h` and `vr_window_trampolines.h` were rewritten.
+
+## Flight 1: the check in the game (2026-10-25)
+
+VR, Frontier, build 334925 (the resolver does not depend on the VR runtime), log
+`edvr_gfx_20261025_114350.log`, version v0.21.1-41-gc041596b (the log's
+version line matched `edvr_log.py --expect-build HEAD`), `advanced.game_update_check = on`.
+
+- `game update check: 315 of 318 found, all equal; not found: 0x52EB4F8
+  (data-ref-failed), 0x52EC240 (data-ref-failed), 0x52EC248 (data-ref-failed)
+  (resolve 90.4 ms over 301531 units, 183686 candidates, 10396271 bytes
+  hashed)`. The unit, candidate and byte counts are the rig's for 334925
+  within a few candidates, so the in-process image reads as the file does.
+- The three are pointer cells: the VR SSAA loader slot (`vr_ssaa_hold.cpp`
+  `kLoaderSlotRva`) and the Supersampling setter and getter vtable slots
+  (`ui_sizing_math.h`). A pointer cell is found as the one cell holding the
+  found function's address. On the known build DllMain runs
+  `vrSsaaHoldEarlyInstall`, which writes the loader slot and calls
+  `uiPanelScaleEarlyHooks` for the other two, so all three hold EDVR's thunks
+  before the check's thread starts at the proxy's init (11:43:50.430). The
+  hold's "installed at DLL load" line and the panels' slot line are reports
+  written later (11:43:50.950, .958). On an unknown build that DllMain path
+  does nothing and the hooks install after the resolve (round 2), which is the
+  order the rig tests (318 of 318 on both archived builds).
+- ruled out: the three misses as a resolver fault on an unknown build,
+  because each cell is one EDVR itself rewrote at DLL load on the known build
+  only, and the rig, reading unhooked images, finds all three.
+- Every hook armed with its usual text: transition flash, the kinematic set
+  (job-3's "a jump or a call" decline is in every Frontier log since 10-23),
+  skin join, vertex resync, light grid cache (97.8% hits), terrain cull
+  cover, the store hook, optimized station and the pad state probe.
 
 ## After each retarget
 
