@@ -2432,4 +2432,4 @@ ruled out: a gap in the eye alignment's publish path as "the pose did not carry 
 
 **Rig.** native_frame_test (run115): the exit kinds (this flight's quit is neither, the panels at or after the edge and Status.json seated are boardings), no frame since the edge, the other exit's name. `edvr_log --health` self-test +3 cases (this flight's read-back as the new build would write it: OK with one other exit; a boarding with no frame since the edge; an F115 read-back without the field).
 
-**Build.** See the commit. **For the flight:** as F115's card; a quit from on foot now reads "1 other exit(s)", not PARTIAL.
+**Build.** Full `build.bat --wait-lock` green on the first pass, receipt `50ac4bcae35d...`, 245.2 s (native_frame_test 1015 checks). Not installed, not flown. **For the flight:** as F115's card; a quit from on foot now reads "1 other exit(s)", not PARTIAL.
