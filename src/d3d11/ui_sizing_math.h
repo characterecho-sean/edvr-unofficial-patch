@@ -12,7 +12,9 @@
 // tagged `init` (0x45733A2) or `change` (0x45704E5) and `colour` (0x2816E29)
 // or `depth` (0x2816C06); `glyph-cache` when it holds Scaleform's raster
 // cache's texture maker's returns, 0x30FCBA (init) or 0x3124F0 (re-create);
-// `other` otherwise. Every RVA is EliteDangerous64.exe build 334925's.
+// `other` otherwise. Every RVA is EliteDangerous64.exe build 334925's; the
+// DLL passes the verdict their places in the running build (gameRva,
+// src\common\game_build.h), and this header calls no resolver.
 #pragma once
 
 #include <cmath>
@@ -27,7 +29,7 @@ namespace edvr {
 constexpr uint32_t kUiChainFrames = 12;  // game frames kept, innermost first
 
 struct UiChain {
-    uint32_t rva[kUiChainFrames] = {};
+    uint32_t frame[kUiChainFrames] = {};  // RVAs in the running build
     uint32_t n = 0;
 };
 
@@ -41,14 +43,14 @@ inline uint32_t uiChainFromFrames(const uintptr_t* frames, uint32_t count, uintp
     for (uint32_t i = 0; i < count && out->n < kUiChainFrames; ++i) {
         const uintptr_t a = frames[i];
         if (a < base || a - base >= size) continue;
-        out->rva[out->n++] = static_cast<uint32_t>(a - base);
+        out->frame[out->n++] = static_cast<uint32_t>(a - base);
     }
     return out->n;
 }
 
 inline bool uiChainHas(const UiChain& c, uint32_t rva) {
     for (uint32_t i = 0; i < c.n; ++i)
-        if (c.rva[i] == rva) return true;
+        if (c.frame[i] == rva) return true;
     return false;
 }
 
@@ -70,10 +72,12 @@ struct UiChainVerdict {
     uint32_t hits = 0;  // bit i: kUiChainKeys[i] is in the chain
 };
 
-inline UiChainVerdict uiChainVerdict(const UiChain& c) {
+// keys: kUiChainKeys in the running build, in the same order (the DLL's gameRva of each: on build 334925
+// the keys themselves; on an unknown build each found by signature, 0 when it was not: never a hit).
+inline UiChainVerdict uiChainVerdict(const UiChain& c, const uint32_t* keys) {
     UiChainVerdict v;
-    for (uint32_t i = 0; i < kUiChainKeyCount; ++i)
-        if (uiChainHas(c, kUiChainKeys[i])) v.hits |= 1u << i;
+    for (uint32_t i = 0; keys && i < kUiChainKeyCount; ++i)
+        if (keys[i] != 0 && uiChainHas(c, keys[i])) v.hits |= 1u << i;
     const bool rtt = (v.hits & 3u) == 3u;
     const bool glyph = (v.hits & (3u << 6)) != 0;
     v.kind = rtt ? UiChainKind::kRtt : glyph ? UiChainKind::kGlyphCache : UiChainKind::kOther;
@@ -90,7 +94,7 @@ inline void uiChainFormat(const UiChain& c, char* out, size_t n) {
     out[0] = '\0';
     size_t used = 0;
     for (uint32_t i = 0; i < c.n && used + 1 < n; ++i) {
-        const int m = std::snprintf(out + used, n - used, "%s0x%X", i ? "/" : "", c.rva[i]);
+        const int m = std::snprintf(out + used, n - used, "%s0x%X", i ? "/" : "", c.frame[i]);
         if (m < 0) break;
         used += static_cast<size_t>(m);
     }
@@ -180,8 +184,7 @@ constexpr uint32_t kUiPanelCmpDisp = 3, kUiPanelCmpNext = 7;
 constexpr uint32_t kUiPanel1080Disp = 13, kUiPanel1080Next = 17;
 constexpr uint32_t kUiPanel1920Disp = 26, kUiPanel1920Next = 30;
 
-// Build 334925 (EliteDangerous64.exe, PE stamp 1792704584, image 104906752).
-constexpr uint32_t kUiPanelStamp = 1792704584u, kUiPanelImageSize = 104906752u;
+// Build 334925's (EliteDangerous64.exe; the DLL finds them on another build with gameRva).
 constexpr uint32_t kUiPanelSiteRva[2] = {0x457319A, 0x4573CA5};  // init, view change
 constexpr uint8_t kUiPanelSiteBytes[2][30] = {
     {0x0F, 0x2F, 0x05, 0x73, 0x2D, 0xD8, 0x00, 0x72, 0x0A, 0xF3, 0x0F, 0x5E, 0x35, 0xFD, 0xE4,
