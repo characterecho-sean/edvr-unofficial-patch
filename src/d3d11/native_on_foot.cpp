@@ -54,6 +54,7 @@
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
+#include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_optic_capture.h"
@@ -310,6 +311,8 @@ std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_o
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
 std::atomic<uint8_t> g_panelCursorFix{1};          // F117 (TEMPORARY): fix.native_on_foot_panel_cursor_fix, live: 0 game, 1 panel, 2 view
 int g_panelCursorFixLast = -1;                     // frame thread only: as last logged
+std::atomic<uint8_t> g_panelCursorFollow{1};       // F120 (TEMPORARY): fix.native_on_foot_panel_cursor_follow, live: 0 head, 1 panel
+int g_panelCursorFollowLast = -1;                  // frame thread only: as last logged
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
 
 bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
@@ -793,7 +796,17 @@ void readKey() {
                         nofoot::f117::modeName(static_cast<nofoot::f117::Mode>(cursorMode)));
         g_panelCursorFixLast = cursorMode;
     }
-    int smooth = cfg.getInt("fix.native_on_foot_hud_follow_smoothing_ms", nofoot::kHudSmoothDefault);
+    // F120 (TEMPORARY, live A/B): the cursor on a screen-space panel when the head turns: panel (default) keeps it on the drawn panel, head is the game's place.
+    const std::string cursorFollow = cfg.getString("fix.native_on_foot_panel_cursor_follow", "panel");
+    const uint8_t followMode = cursorFollow == "head" ? 0 : 1;
+    g_panelCursorFollow.store(followMode, std::memory_order_relaxed);
+    if (first || followMode != g_panelCursorFollowLast) {
+        Log::get().note("native on foot panel cursor follow (F120): %s (TEMPORARY, live; a screen-space panel's cursor when the head turns: panel = stays on the "
+                        "drawn panel, head = the game's own place, riding with the head)",
+                        followMode ? "panel" : "head");
+        g_panelCursorFollowLast = followMode;
+    }
+    int smooth =cfg.getInt("fix.native_on_foot_hud_follow_smoothing_ms", nofoot::kHudSmoothDefault);
     if (smooth < nofoot::kHudSmoothMin) smooth = nofoot::kHudSmoothMin;
     if (smooth > nofoot::kHudSmoothMax) smooth = nofoot::kHudSmoothMax;
     g_followSmoothMs.store(smooth, std::memory_order_relaxed);
@@ -4917,6 +4930,14 @@ thread_local std::vector<nofoot::f117::Tri> t_f117Tris;
 nofoot::f117::Sec g_f117Sec, g_f117Total;   // g_f117Sec under g_f111Mu; g_f117Total frame thread only
 nofoot::f117::Last g_f117Last;              // under g_f111Mu
 uint64_t g_f117LastMs = 0, g_f117SecondsWith = 0;   // frame thread only
+// F120: the screen-space cursor correction (the reference, the mouse-still runs and this second's readings under g_f111Mu), the flight's totals (frame
+// thread only) and the pin of the owner function's bytes (0 not read yet, 1 pinned, 2 differ; the bytes are kept for the one line that says so).
+nofoot::f120::Tracker g_f120;
+nofoot::f120::Sec g_f120Total;
+uint64_t g_f120LastMs = 0, g_f120SecondsWith = 0;   // frame thread only
+std::atomic<int> g_f120Pin{0};
+uint8_t g_f120PinBytes[16] = {};                    // written before g_f120Pin is set
+bool g_f120PinLogged = false;                       // frame thread only
 struct F111Slot {
     uintptr_t ctl = 0;
     nofoot::f111::Cycle cyc, prev;
@@ -5176,37 +5197,89 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
     return result;
 }
 
-// F117: after a 2D placement on a panel (its window ran and its sprite is placed), the sprite's place on a turned pick mesh, as the setting asks; an
-// upright mesh, the flat profile and the setting game leave the game's place. Reads the panel's pick triangles (the ones the game just interpolated),
-// writes only the controller's sprite position (+0x140).
-void f117Apply(uintptr_t ctl, uintptr_t panel, float u, float v) {
+// F120: whether the panel's pick mesh owner is the screen-space kind: the pinned function at its vtable +0x10, a non-empty list and the first entry's flag.
+bool f120ScreenSpace(uintptr_t list) {
+    namespace w = nofoot::f120;
+    uintptr_t owner = 0, vt = 0, fn = 0, array = 0, first = 0;
+    uint64_t count = 0;
+    uint8_t flag = 0;
+    if (!g_base || !guardedRead(list, &owner, 8) || !owner || !guardedRead(owner, &vt, 8) || !vt || !guardedRead(vt + 0x10, &fn, 8) || fn != g_base + w::kOwnerRva ||
+        !guardedRead(owner + w::kOffOwnerCount, &count, 8) || !count || !guardedRead(owner + w::kOffOwnerArray, &array, 8) || !array ||
+        !guardedRead(array, &first, 8) || !first || !guardedRead(first + w::kOffScreenFlag, &flag, 1))
+        return false;
+    return w::screenSpace(fn - g_base, count, flag);
+}
+
+// After a 2D placement on a panel (its window ran and its sprite is placed), the sprite's place, written once at +0x140 and nowhere else (the clicks keep the
+// true uv): F117 first, the sprite on a turned pick mesh as its setting asks (an upright mesh, the flat profile and the setting game leave the game's place;
+// it reads the panel's pick triangles, the ones the game just interpolated), then F120, the point carried by what the head has turned against the HUD frame
+// since the panel opened (screen-space panels only), starting from F117's point where F117 moved the sprite.
+void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     namespace z = nofoot::f117;
-    const z::Mode mode = runtimeFlatProfile() ? z::Mode::kGame : static_cast<z::Mode>(g_panelCursorFix.load(std::memory_order_relaxed));
+    namespace w = nofoot::f120;
+    const bool flat = runtimeFlatProfile();
+    const z::Mode mode = flat ? z::Mode::kGame : static_cast<z::Mode>(g_panelCursorFix.load(std::memory_order_relaxed));
     uint8_t hit = 0;
     float sprite[3] = {};
+    if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite))) return;
     uintptr_t list = 0, tris = 0;
     uint64_t count = 0;
-    if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite)) ||
-        !guardedRead(panel + z::kOffList, &list, 8) || !list || !guardedRead(list + z::kListTris, &tris, 8) || !tris ||
-        !guardedRead(list + z::kListCount, &count, 8) || !count || count > z::kMaxTris)
-        return;
-    t_f117Tris.resize(static_cast<size_t>(count));
-    if (!guardedRead(tris, t_f117Tris.data(), static_cast<size_t>(count) * sizeof(z::Tri))) return;
-    const z::Decision dec = z::decide(t_f117Tris.data(), static_cast<size_t>(count), u, v, sprite, mode);
-    double shown[3] = {sprite[0], sprite[1], sprite[2]};
-    z::Decision d = dec;
-    if (d.why == z::Why::kMoved) {
-        const bool written = guardedWriteFloat(ctl + nofoot::f111::kOffPos, static_cast<float>(d.target[0])) &&
-                             guardedWriteFloat(ctl + nofoot::f111::kOffPos + 4, static_cast<float>(d.target[1])) &&
-                             guardedWriteFloat(ctl + nofoot::f111::kOffPos + 8, static_cast<float>(d.target[2]));
+    const bool listOk = guardedRead(panel + z::kOffList, &list, 8) && list;
+    bool have117 = false;
+    z::Decision d117;
+    if (listOk && guardedRead(list + z::kListTris, &tris, 8) && tris && guardedRead(list + z::kListCount, &count, 8) && count && count <= z::kMaxTris) {
+        t_f117Tris.resize(static_cast<size_t>(count));
+        if (guardedRead(tris, t_f117Tris.data(), static_cast<size_t>(count) * sizeof(z::Tri))) {
+            d117 = z::decide(t_f117Tris.data(), static_cast<size_t>(count), u, v, sprite, mode);
+            have117 = true;
+        }
+    }
+    const bool f117Moved = have117 && d117.why == z::Why::kMoved;
+    w::Input in;
+    in.frame = g_nativeOnFootTeeFrameNow.load(std::memory_order_relaxed);
+    in.flat = flat;
+    in.follow = g_panelCursorFollow.load(std::memory_order_relaxed) != 0;
+    in.u = u;
+    in.v = v;
+    in.key = panel;
+    for (int k = 0; k < 3; ++k) in.p[k] = f117Moved ? d117.target[k] : static_cast<double>(sprite[k]);
+    if (!flat) {
+        in.pinned = g_f120Pin.load(std::memory_order_relaxed) == 1;
+        in.screen = in.pinned && listOk && f120ScreenSpace(list);
+        if (in.screen) {
+            double eyeO[3] = {};
+            in.haveEye = f114bEyeView(in.E, eyeO);
+            float m[16] = {};
+            if (g_f12Hrc && guardedRead(g_f12Hrc + nofoot::kF9HrcMatrixOff, m, sizeof(m))) {
+                for (int r = 0; r < 3; ++r)
+                    for (int k = 0; k < 3; ++k) in.H[r * 3 + k] = m[r * 4 + k];
+                in.haveHrc = true;
+            }
+        }
+    }
+    w::Out out;
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        out = g_f120.place(in);
+    }
+    double target[3] = {};
+    const bool wantWrite = w::finalTarget(f117Moved, d117.target, out, target);
+    bool written = true;
+    if (wantWrite)
+        written = guardedWriteFloat(ctl + nofoot::f111::kOffPos, static_cast<float>(target[0])) &&
+                  guardedWriteFloat(ctl + nofoot::f111::kOffPos + 4, static_cast<float>(target[1])) &&
+                  guardedWriteFloat(ctl + nofoot::f111::kOffPos + 8, static_cast<float>(target[2]));
+    double shown[3] = {sprite[0], sprite[1], sprite[2]};   // F117's reading is of its own place, before F120's rotation
+    if (f117Moved) {
         if (written)
-            for (int k = 0; k < 3; ++k) shown[k] = d.target[k];
+            for (int k = 0; k < 3; ++k) shown[k] = d117.target[k];
         else
-            d.why = z::Why::kNotAtUv;   // counted as refused; the game's place stands
+            d117.why = z::Why::kNotAtUv;   // counted as refused; the game's place stands
     }
     const double uc = u < 0.0f ? 0.0 : u > 1.0f ? 1.0 : u, vc = v < 0.0f ? 0.0 : v > 1.0f ? 1.0 : v;
     std::lock_guard<std::mutex> lock(g_f111Mu);
-    z::add(g_f117Sec, g_f117Last, d, uc, vc, shown);
+    if (have117) z::add(g_f117Sec, g_f117Last, d117, uc, vc, shown);
+    if (wantWrite && !written && out.why == w::Why::kApplied && out.changes) g_f120.writeFailed();
 }
 
 // The placement on one panel: scopes the panel's ray hit and cursor window to this controller.
@@ -5219,7 +5292,7 @@ uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
     t_f117Win = false;
     const uint64_t result = original(a, b, c, d);
     t_f111InPlace = outer;
-    if (t_f117Win && a && b) f117Apply(reinterpret_cast<uintptr_t>(a), reinterpret_cast<uintptr_t>(b), t_f117WinUv[0], t_f117WinUv[1]);   // F117
+    if (t_f117Win && a && b) panelCursorApply(reinterpret_cast<uintptr_t>(a), reinterpret_cast<uintptr_t>(b), t_f117WinUv[0], t_f117WinUv[1]);   // F117, F120
     t_f117Win = false;
     // F114b: a placement that reached the panel (its ray or its window): the function its pick mesh's owner names at vtable +0x10.
     uintptr_t ownerFn = 0;
@@ -5508,6 +5581,67 @@ void f117Tick(uint64_t now) {
     }
 }
 
+// Frame thread: the screen-space owner function's first 16 bytes against the 334925 pin, once (the placement hook reads the verdict), and the one line that says it.
+void f120PinTick() {
+    namespace w = nofoot::f120;
+    if (g_f120Pin.load() == 0 && g_base) {
+        uint8_t b[16] = {};
+        if (guardedRead(g_base + w::kOwnerRva, b, sizeof(b))) {
+            std::memcpy(g_f120PinBytes, b, sizeof(b));
+            g_f120Pin.store(w::ownerPinned(b) ? 1 : 2);
+        }
+    }
+    const int pin = g_f120Pin.load();
+    if (g_f120PinLogged || !pin) return;
+    g_f120PinLogged = true;
+    char text[160] = {};
+    if (pin == 1)
+        std::snprintf(text, sizeof(text), "pinned (its first 16 bytes match build 334925)");
+    else
+        std::snprintf(text, sizeof(text), "NOT pinned (its first 16 bytes are %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X; every panel is refused)",
+                      g_f120PinBytes[0], g_f120PinBytes[1], g_f120PinBytes[2], g_f120PinBytes[3], g_f120PinBytes[4], g_f120PinBytes[5], g_f120PinBytes[6],
+                      g_f120PinBytes[7], g_f120PinBytes[8], g_f120PinBytes[9], g_f120PinBytes[10], g_f120PinBytes[11], g_f120PinBytes[12], g_f120PinBytes[13],
+                      g_f120PinBytes[14], g_f120PinBytes[15]);
+    Log::get().note("panel cursor follow (F120): the screen-space owner function at EliteDangerous64.exe+0x%llX is %s", static_cast<unsigned long long>(w::kOwnerRva), text);
+}
+
+// Frame thread: F120's line once a second with a 2D placement, and every 10 seconds with a screen-space one the flight so far.
+void f120Tick(uint64_t now) {
+    f120PinTick();
+    if (now - g_f120LastMs < 1000) return;
+    g_f120LastMs = now;
+    namespace w = nofoot::f120;
+    w::Sec sec;
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        sec = g_f120.sec;
+        g_f120.sec = w::Sec{};
+    }
+    if (!sec.placements) return;
+    g_f120Total.merge(sec);
+    const char* setting = runtimeFlatProfile() ? "flat (refused)" : g_panelCursorFollow.load(std::memory_order_relaxed) ? "panel" : "head";
+    double yaw = 0.0, pitch = 0.0, roll = 0.0, detR = 0.0;
+    if (sec.haveLast) {
+        w::ypr(sec.lastR, &yaw, &pitch, &roll);
+        detR = w::det(sec.lastR);
+    }
+    const uint32_t* r = sec.refused;
+    Log::get().note("panel cursor follow (F120) 1 s: setting %s; 2D placements %u, screen-space %u, corrected %u, references taken %u; refused: flat %u, no eye view %u, "
+                    "no HRC matrix %u, degenerate row %u, not screen-space %u, owner bytes not pinned %u, setting head %u, write failed %u; this second the head "
+                    "turned %.1f deg, the HUD frame %.1f deg, the head against the HUD frame %.1f deg (%s); E.Ht (det %+.0f) yaw %+.1f pitch %+.1f roll %+.1f deg; "
+                    "mouse still: %u placements, head against the HUD frame %.1f deg, cursor drift %.1f mm",
+                    setting, sec.placements, sec.screen, sec.corrected, sec.refs, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], sec.turnE, sec.turnH, sec.turnEH,
+                    w::frameText(sec), detR, yaw, pitch, roll, sec.stillN, sec.stillTurn, sec.stillDrift);
+    if (!sec.screen) return;
+    ++g_f120SecondsWith;
+    if (g_f120SecondsWith % 10 == 0) {
+        const w::Sec& t = g_f120Total;
+        Log::get().note("panel cursor follow (F120) so far: setting %s; %llu s with a screen-space placement, corrected %u, references taken %u; the head turned at "
+                        "most %.1f deg against the HUD frame; mouse still: %u placements, up to %.1f deg of head turn, cursor drift at most %.1f mm",
+                        setting, static_cast<unsigned long long>(g_f120SecondsWith), t.corrected, t.refs, t.turnEH, t.stillN, t.stillTurn, t.stillDrift);
+    }
+}
+
 void f111Tick(uint64_t now) {
     installF111Once();
     const bool open = f114bOpen();
@@ -5521,6 +5655,7 @@ void f111Tick(uint64_t now) {
     }
     f114bTick(now);
     f117Tick(now);
+    f120Tick(now);
     if (now - g_f111LastMs < 1000) return;
     g_f111LastMs = now;
     namespace p = nofoot::f111;

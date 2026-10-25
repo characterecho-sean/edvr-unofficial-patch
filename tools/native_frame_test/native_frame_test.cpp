@@ -40,6 +40,7 @@
 #include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
 #include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
 #include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
+#include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
 
 #include <array>
 #include <chrono>
@@ -7312,6 +7313,8 @@ int wmain(int argc, wchar_t** argv) {
     f118test::run118(check);
     // F117: a turned pick mesh read from its triangles; panel puts the cursor at the uv's drawn place, view mirrors it, an upright panel is left alone.
     f117test::run117(check);
+    // F120: a screen-space panel's cursor carried by the head's turn against the HUD frame since the panel opened; composed after F117's place.
+    f120test::run120(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
