@@ -186,6 +186,30 @@ inline unsigned run() {
         auto bare = prov.writer(nullptr, 0x200); bare.key.camera = nullptr; bare.key.cameraHash = 0; prov.see(bare);
         expect(!prov.donor(prov.lighting()).pairSelectable && !prov.donor(prov.lighting()).pairClean, "a camera-not-current conflict is no pair");
     }
+    {
+        // an explicit write to the depth between the second camera and the pass ends the pair, but the conflict keeps its reason
+        Scene s;
+        const auto a = s.writer(nullptr, 0x100);
+        s.see(a); s.see(s.writer(nullptr, 0x200, .0675f)); s.see(s.writer(nullptr, 0x101));
+        flatRuntimeWritten(*s.p, s.depth, true);
+        const auto d = s.donor(s.lighting());
+        expect(s.entry(s.gbuf)->conflict == FlatWitnessConflict::Camera && !s.entry(s.gbuf)->pairClean && s.entry(s.gbuf)->depthWritten,
+               "a depth write after the second camera keeps the Camera reason and ends the pair");
+        expect(!d && !d.pairClean && !d.pairSelectable, "a depth write ends pair selection");
+        expect(!flatRuntimeDeferredDonor(*s.p, s.lighting().key, s.p->sequence + 1, nullptr, a.camera) &&
+               !flatRuntimeDeferredDonor(*s.p, s.lighting().key, s.p->sequence + 1, nullptr, s.writer(nullptr, 0x200, .0675f).camera),
+               "neither camera is selected after the depth write");
+        s.see(s.writer(nullptr, 0x102));
+        expect(!s.entry(s.gbuf)->pairClean && s.entry(s.gbuf)->conflict == FlatWitnessConflict::Camera,
+               "a later agreeing writer does not revive the pair");
+        // a colour write restarts the entry, and the depth write outlives it
+        flatRuntimeWritten(*s.p, s.gbuf, true);
+        expect(s.entry(s.gbuf)->conflict == FlatWitnessConflict::Written, "a colour restart keeps the depth write");
+        Scene c;   // the colour write alone still restarts a pair (no depth write): unchanged
+        c.see(c.writer(nullptr, 0x100)); c.see(c.writer(nullptr, 0x200, .0675f));
+        flatRuntimeWritten(*c.p, c.gbuf, true);
+        expect(c.entry(c.gbuf)->conflict == FlatWitnessConflict::None && !c.entry(c.gbuf)->depthWritten, "a colour restart alone is unchanged");
+    }
     // ---- wiring ---------------------------------------------------------------------------------------------------------------------------
     std::ifstream in("src/d3d11/flat_runtime.cpp"); std::string source, line;
     while (std::getline(in, line)) source += line + '\n';

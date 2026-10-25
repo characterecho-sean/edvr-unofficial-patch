@@ -265,10 +265,14 @@ inline uint32_t kindOf(const std::array<uint8_t, 0x150>& r, uint32_t frame) {
     if (marker(r) == (ev::kMasked ^ h)) return 2;
     return 3;
 }
-// The decline path's second half, mirrored (the HLSL engineStaleStampKind):
-// a marker stamped within the last 64 frames still names its kind -- a
-// joined one is a stale pose pair (kind 6 at the compose frame), a masked
-// one keeps no history. 3: not a rig record, or older than the window.
+// The decline path's second half (the HLSL engineStaleStampKind): a marker
+// stamped within the last 64 frames still names its kind -- a joined one is
+// a stale pose pair (kind 6 at the compose frame), a masked one keeps no
+// history. 3: not a rig record, or older than the window. This is the
+// ORIGINAL 64-round search, kept as the oracle: the shader now recovers each
+// tag's stamp by inverting the hash rounds and compares its age against the
+// window, and math_tests (staleStampClosedForm) checks that closed form
+// against this loop on WARP, case by case.
 inline uint32_t staleKindOf(const std::array<uint8_t, 0x150>& r, uint32_t frame) {
     const uint32_t h = kindHash(blockNow(r), blockPrev(r));
     for (uint32_t age = 1; age <= 64; ++age) {

@@ -1731,6 +1731,26 @@ void testFlatLayerRules() {
               !flatUiMapFamiliesOpen(false, 9) && !flatUiMapFamiliesOpen(false, 10),
           "map families gate: exactly GuiFocus 6, 7 and 8 while the focus is known (neither the Full System Scanner (9) nor the Detailed "
           "Surface Scanner (10) is one)");
+    // The on-foot maps (2026-10-24): Status.json has no GuiFocus on foot, so the map's own canvas composite stands in for it.
+    {
+        FlatUiMapCanvasLatch latch;
+        check(!latch.open(1) && !latch.open(100), "on-foot map: a latch that never saw the canvas is never a map frame");
+        latch.note(10);
+        latch.note(10);
+        check(latch.draws == 2 && latch.open(11) && latch.open(10 + kFlatUiMapCanvasHoldFrames) &&
+                  !latch.open(10 + kFlatUiMapCanvasHoldFrames + 1) && !latch.open(10) && !latch.open(9),
+              "on-foot map: the frame after a canvas draw is a map frame, and so is each one up to the hold; the same frame asked about "
+              "(the draw is not yet over), an earlier one and a later one are not");
+        latch.note(30);
+        check(latch.open(31) && latch.open(30 + kFlatUiMapCanvasHoldFrames) && !latch.open(30 + kFlatUiMapCanvasHoldFrames + 1),
+              "on-foot map: a fresh canvas draw restarts the hold, so a map that is closed releases within the hold");
+        check(flatUiMapCanvasPair(kFlatUiMapCanvasVs, kFlatUiMapCanvasPs) && !flatUiMapCanvasPair(kFlatUiMapCanvasVs, kFlatUiMapSpritePsA) &&
+                  !flatUiMapCanvasPair(kFlatUiMapSpriteVs, kFlatUiMapCanvasPs) && !flatUiMapCanvasPair(0, 0),
+              "on-foot map: only the canvas pair (both its shaders) is the sign, not either half or a sprite pair");
+        // The inferred answer is a map the way GuiFocus 6 is: temporal AA off and the families open.
+        check(flatUiMapTemporalOff(true, kFlatUiMapCanvasInferredFocus) && flatUiMapFamiliesOpen(true, kFlatUiMapCanvasInferredFocus),
+              "on-foot map: the canvas's inferred focus turns temporal AA off and opens the map families");
+    }
     // The map line's temporal counts: a frame that armed the mechanism and never reached its copy is counted, not silent.
     {
         FlatUiMapAaTally t;
@@ -1941,6 +1961,17 @@ void testFlatLayerRules() {
                                "                flatUiMapTemporalName(mapFocusWatch().offFocus),") != std::string::npos,
               "wiring: the map focus answers temporal AA from flatUiMapTemporalOff and the map families from flatUiMapFamiliesOpen, and "
               "its transition and refusal lines name the screen entered, left or refused on");
+        // The on-foot answer (flat_runtime.cpp): the canvas pair is noted at the draw site before any UI decision, the frame boundary
+        // passes the next frame, GuiFocus present is never overridden, and the inferred branch comes after the watcher's own read.
+        check(!runtime.empty() && runtime.find("void flatRuntimeMapFocusFrame(uint64_t nextFrame) {") != std::string::npos &&
+                  runtime.find("flatRuntimeMapFocusFrame(frame + 1);") != std::string::npos &&
+                  runtime.find("w.inferred = !known && w.canvas.open(nextFrame);") != std::string::npos &&
+                  runtime.find("if (known) { w.focusKnown = true; w.focus = focus; }") < runtime.find("w.inferred = !known && w.canvas.open(nextFrame);") &&
+                  runtime.find("if (flatUiMapCanvasPair(k.vs, k.ps) && !copy) {") != std::string::npos &&
+                  runtime.find("flatRuntimeNoteMapCanvasDraw(s.prefix.frame);") != std::string::npos &&
+                  runtime.find("if (flatUiMapCanvasPair(k.vs, k.ps) && !copy) {") < runtime.find("ui.mapOpen = flatRuntimeMapOpenFrame();"),
+              "wiring: the canvas draw is noted before the UI layer's decision, and an absent GuiFocus is answered from it after the "
+              "watcher's own read");
         const size_t physicalShape = adapter.find("bool sourceTonePhysicalShape(");
         const size_t afterPhysicalShape = adapter.find("uint32_t g_candidateLines", physicalShape);
         const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");

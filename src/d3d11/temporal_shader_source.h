@@ -94,7 +94,7 @@ float3 engineTurn(float4 q, float3 v) {
     return (2.0 * q.w * q.w - 1.0) * v + 2.0 * dot(q.xyz, v) * q.xyz + 2.0 * q.w * cross(q.xyz, v);
 }
 // The marker's stamp-free hash: the two pose blocks alone (the first ten
-// words of the marker hash; the stale-stamp search below seeds from it).
+// words of the marker hash; the stale-stamp inverse below starts from it).
 uint engineKindHash(EnginePoolRecord r) {
     uint words[10] = {r.data[1].x, r.data[1].y, r.data[1].z, r.data[0].z, r.data[0].w,
                       r.data[18].y, r.data[18].z, r.data[18].w, r.data[19].z, r.data[19].w};
@@ -122,21 +122,35 @@ uint engineRecordKind(EnginePoolRecord r, uint token) {
 }
 // A marker that did not match this frame's token may still be a rig record
 // stamped within the last 64 frames (the emit table and census horizon): the
-// cull case, where the record kept an older frame's pose pair. One FNV round
-// per frame of age, seeded from the stamp-free hash -- paid only by pixels
-// whose fresh check failed. 6 STALE STAMP: a joined marker from an older
+// cull case, where the record kept an older frame's pose pair. Each hash round
+// is invertible (the XOR, the odd multiply, the xorshift), so each tag's one
+// matching stamp is recovered directly from the marker and the window test is
+// a compare on its age -- no loop, paid only by pixels whose fresh check
+// failed. When both tags land inside the window the smaller age wins; the two
+// ages can never be equal. 6 STALE STAMP: a joined marker from an older
 // frame -- its pose pair replays a phantom delta, so the camera term stands
 // (2026-09-25, the coriolis station hull); 2: an older masked marker keeps no
 // history, as masked always did; 3: not a rig record (or older than the
 // window -- still the camera term). A garbage marker false-matches a frame in
-// the window with probability ~64 * 2^-32.
+// the window with probability ~128 * 2^-32 (64 ages for each of the two tags).
+// engineStampAge undoes one round, last step first: the xorshift (y ^ y >> 13
+// ^ y >> 26, the right-hand y the ORIGINAL), the multiply (0x359C449B is the
+// inverse of 0x01000193 mod 2^32), the XOR with the stamp-free hash -- the
+// stamp the marker would have carried, returned as its age (token - stamp,
+// mod 2^32).
+uint engineStampAge(uint h, uint marker, uint tag, uint token) {
+    uint y = marker ^ tag;
+    y ^= (y >> 13) ^ (y >> 26);
+    return token - ((y * 0x359C449Bu) ^ h);
+}
 uint engineStaleStampKind(EnginePoolRecord r, uint token) {
     const uint h = engineKindHash(r);
-    [loop] for (uint age = 1; age <= 64; ++age) {
-        uint hs = (h ^ (token - age)) * 0x01000193u; hs ^= hs >> 13;
-        if (r.data[18].x == (0x7FC0ED01u ^ hs)) return 6u;
-        if (r.data[18].x == (0x7FC0ED02u ^ hs)) return 2u;
-    }
+    // age - 1, so ages 1..64 are exactly the values below 64 (age 0, the fresh
+    // stamp, and every age past the window wrap or land above it).
+    const uint joined = engineStampAge(h, r.data[18].x, 0x7FC0ED01u, token) - 1u;
+    const uint masked = engineStampAge(h, r.data[18].x, 0x7FC0ED02u, token) - 1u;
+    if (joined < 64u && joined < masked) return 6u;
+    if (masked < 64u) return 2u;
     return 3u;
 }
 // Did the record's pose change between the two blocks (scale, quaternion,

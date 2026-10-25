@@ -211,6 +211,17 @@ def deps_for(root):
     return [row for row in DEPS if (Path(root) / "tools" / row[1]).is_file()]
 
 
+def _sdk_header(layout):
+    return layout.kits / "Include" / SDK_VERSION / "um" / "d3d11.h"
+
+
+def _msvc_sdk_ready(layout):
+    """One download installs the compiler and the SDK, and an interrupted one can leave
+    cl.exe without the SDK headers or the redistributable d3dcompiler, so setup is
+    done only when all three are there."""
+    return layout.cl.is_file() and _sdk_header(layout).is_file() and layout.d3dcompiler.is_file()
+
+
 def checks(layout, root=REPO):
     """[(label, ok, required, detail)] for doctor and the build's precondition."""
     rows = []
@@ -221,7 +232,7 @@ def checks(layout, root=REPO):
         if (layout.msvc_wine / ".git").exists() else None
     rows.append(("msvc-wine", commit == MSVC_WINE_COMMIT, False, "%s (pinned %s)" % (commit, MSVC_WINE_COMMIT[:12])))
     rows.append(("MSVC " + MSVC_VERSION, layout.cl.is_file(), True, str(layout.cl)))
-    sdk = layout.kits / "Include" / SDK_VERSION / "um" / "d3d11.h"
+    sdk = _sdk_header(layout)
     rows.append(("Windows SDK " + SDK_VERSION, sdk.is_file(), True, str(sdk)))
     python_ok = (layout.python / "python.exe").is_file() and not list(layout.python.glob("python*._pth"))
     rows.append(("Windows Python " + PYTHON_VERSION, python_ok, True, str(layout.python)))
@@ -262,7 +273,7 @@ def setup(layout, root=REPO, accept_license=False, dry_run=False):
         print("linux_toolchain: %s not found. This tool never runs sudo; install them with:\n    %s"
               % (", ".join(missing), HOST_INSTALL))
         return 2
-    if not layout.cl.is_file() and not accept_license and not dry_run:
+    if not _msvc_sdk_ready(layout) and not accept_license and not dry_run:
         print("linux_toolchain: the compiler download is VS 2022's Build Tools, under\n    %s\n    %s\n"
               "Using them requires a valid Visual Studio licence, and the files must never be shared.\n"
               "Read the terms, then run setup again with --accept-license." % VS_LICENSE)
@@ -341,7 +352,7 @@ def setup(layout, root=REPO, accept_license=False, dry_run=False):
               _capture(["git", "-C", str(layout.msvc_wine), "rev-parse", "HEAD"]) == MSVC_WINE_COMMIT,
               clone_msvc_wine)
     rc = rc or step("MSVC %s and Windows SDK %s (VS %s, about 3 GB)" % (MSVC_VERSION, SDK_VERSION, VS_VERSION),
-                    layout.cl.is_file(), download_msvc)
+                    _msvc_sdk_ready(layout), download_msvc)
     rc = rc or step("Windows Python %s" % PYTHON_VERSION,
                     (layout.python / "python.exe").is_file() and not list(layout.python.glob("python*._pth")),
                     install_python)
@@ -553,6 +564,31 @@ def self_test():
             (root / "build.bat").write_bytes(b"@echo off\r\n")
             expect(build_dlls(layout, root) == 1, "a build.bat without --compile-only was run")
         expect(not calls, "build-dlls ran a step it should not have: %r" % calls)
+
+        # --dry-run belongs to setup: build-dlls refuses it before it removes or builds anything.
+        ran = []
+        globals()["_run_build"] = lambda *a, **k: ran.append(a) or 0
+        receipt.write_bytes(b"{}")
+        for command in ("build-dlls", "doctor"):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    main([command, "--root", str(root), "--clean", "--dry-run"])
+                refused = False
+            except SystemExit as stop:
+                refused = stop.code == 2
+            expect(refused and not ran and receipt.is_file(), "%s --dry-run was not refused before it acted" % command)
+
+        # setup is done only when the compiler and the SDK it came with are both there.
+        part = Layout(temporary / "partial")
+        part.cl.parent.mkdir(parents=True)
+        part.cl.write_bytes(b"cl")
+        expect(not _msvc_sdk_ready(part), "a compiler with no SDK counted as installed")
+        _sdk_header(part).parent.mkdir(parents=True)
+        _sdk_header(part).write_bytes(b"h")
+        expect(not _msvc_sdk_ready(part), "a missing d3dcompiler_47 counted as installed")
+        part.d3dcompiler.parent.mkdir(parents=True)
+        part.d3dcompiler.write_bytes(b"d")
+        expect(_msvc_sdk_ready(part), "a complete install was not recognised")
     finally:
         globals().update(saved)
         shutil.rmtree(temporary, ignore_errors=True)
@@ -567,13 +603,16 @@ def main(argv=None):
     parser.add_argument("--clean", action="store_true", help="build-dlls: remove the compile-build first")
     parser.add_argument("--accept-license", action="store_true",
                         help="setup: you have read and accept VS 2022's Build Tools licence (see the module docstring)")
-    parser.add_argument("--dry-run", action="store_true", help="setup: say what would be done, write nothing")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="setup: say what would be done, write nothing (refused for the other commands)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
     if not args.command:
         parser.error("a command or --self-test is required")
+    if args.dry_run and args.command != "setup":
+        parser.error("--dry-run is for setup only; %s has no dry run" % args.command)
     if os.name == "nt":
         print("linux_toolchain: on Windows, run build.bat itself")
         return 2

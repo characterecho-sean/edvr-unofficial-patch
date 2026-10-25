@@ -239,6 +239,7 @@ struct FlatRuntimeCameraWitness {
     // (flatRuntimeDeferredDonor's `select`). pairClean holds while every later writer was current, in the entry's layout, full viewport,
     // and bound exactly one of the two cameras; a third camera or any other fault ends it for the rest of the frame.
     bool pairClean = false;
+    bool depthWritten = false;    // an explicit write reached the depth while conflict was None or Camera (the first reason stays in `conflict`)
     uint32_t firstWriters = 0, offenderWriters = 0;
     uint64_t offenderLastWriteEpoch = 0; uint32_t offenderLastWriteSeq = 0;
     unsigned char camera[kFlatCameraBytes]{};
@@ -811,18 +812,20 @@ inline FlatRuntimeTarget* flatRuntimeTarget(FlatRuntimePrefix& p, const void* re
 // A write to a witnessed colour replaces what its writers drew there (a deferred renderer clears the
 // G-buffer after a depth prepass that bound it with colour writes off): the entry restarts empty, and
 // only writers after the write speak for the colour. A write to the witnessed depth is content no
-// writer drew, and a later colour write does not undo it: that conflict stays.
+// writer drew, and a later colour write does not undo it: that conflict stays. A Camera conflict keeps its reason (the log names it) but
+// the pair of cameras no longer describes the depth: pairClean ends, and the write outlives a colour restart.
 inline void flatRuntimeWitnessWritten(FlatRuntimePrefix& p, const void* resource) {
     for (uint32_t i = 0; i < p.witnessesUsed; ++i) {
         auto& w = p.witnesses[i];
         if (w.color == resource) {
             const void* const depth = w.depth;
-            const bool depthWritten = w.conflict == FlatWitnessConflict::Written;
+            const bool depthWritten = w.conflict == FlatWitnessConflict::Written || w.depthWritten;
             w = FlatRuntimeCameraWitness{};
             w.depth = depth; w.color = resource;
             if (depthWritten) w.conflict = FlatWitnessConflict::Written;
-        } else if (w.depth == resource && w.conflict == FlatWitnessConflict::None) {
-            w.conflict = FlatWitnessConflict::Written;
+        } else if (w.depth == resource) {
+            if (w.conflict == FlatWitnessConflict::None) w.conflict = FlatWitnessConflict::Written;
+            else if (w.conflict == FlatWitnessConflict::Camera) { w.pairClean = false; w.depthWritten = true; }
         }
     }
 }

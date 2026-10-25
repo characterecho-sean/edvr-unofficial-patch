@@ -789,14 +789,27 @@ struct MapFocusWatch {
     bool temporalOff = false;   // temporal AA is off this frame (GuiFocus 6, 7, 8 or 9: flat_ui_layer_math.h flatUiMapTemporalOff)
     uint32_t offFocus = 0;      // the GuiFocus the off answer was given for, while temporalOff (named when the screen is left)
     uint32_t aaNoted = 0;       // the temporal AA transition lines written
+    FlatUiMapCanvasLatch canvas;   // the map's GUI canvas draws (flatRuntimeNoteMapCanvasDraw): the on-foot answer while GuiFocus is absent
+    bool inferred = false;      // this frame's map answer came from the canvas, not from GuiFocus
+    uint64_t inferredFrames = 0;   // frames answered from the canvas, this 5 s window
 };
 MapFocusWatch& mapFocusWatch() { static MapFocusWatch* p = new MapFocusWatch; return *p; }
 constexpr uint32_t kMapFocusNoteCap = 64;
-void flatRuntimeMapFocusFrame() {
+// A map's canvas composite drew into the HDR target this frame (the draw site, before any UI layer decision, so the layer taking the
+// draw does not hide it from the next frame).
+void flatRuntimeNoteMapCanvasDraw(uint64_t frame) { mapFocusWatch().canvas.note(frame); }
+void flatRuntimeMapFocusFrame(uint64_t nextFrame) {
     MapFocusWatch& w = mapFocusWatch();
     uint32_t focus = 0;
-    const bool known = journalFlatGuiFocus(&focus);
+    bool known = journalFlatGuiFocus(&focus);
     if (known) { w.focusKnown = true; w.focus = focus; }
+    // GuiFocus absent (on foot): a map's own canvas draw stands in for it. GuiFocus, present, is authoritative.
+    w.inferred = !known && w.canvas.open(nextFrame);
+    if (w.inferred) {
+        known = true;
+        focus = kFlatUiMapCanvasInferredFocus;
+        ++w.inferredFrames;
+    }
     w.frameKnown = known;
     w.frameFocus = known ? focus : 0;
     const bool off = flatUiMapTemporalOff(known, focus);
@@ -807,7 +820,10 @@ void flatRuntimeMapFocusFrame() {
         w.offFocus = off ? focus : 0;
         if (w.aaNoted < kMapFocusNoteCap) {
             ++w.aaNoted;
-            if (off)
+            if (off && w.inferred)
+                Log::get().note("flat map aa: temporal AA off on a map (GuiFocus absent, as on foot: recognised by its canvas draw): "
+                                "no accumulation, no jitter; the UI layer keeps the screen's text and markers");
+            else if (off)
                 Log::get().note("flat map aa: temporal AA off on %s (GuiFocus %u): no accumulation, no jitter; the UI layer keeps the "
                                 "screen's text and markers", flatUiMapTemporalName(focus), focus);
             else if (known)
@@ -4664,7 +4680,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const FlatCameraRoute phaseRoute=flatCameraInjectRoute();
     // The frame's one GuiFocus read (flatRuntimeMapFocusFrame) comes first: on a map and on the Full System Scanner temporal AA is off, and
     // this frame's phase is zero (no jitter, the history restarts). A frame that would have jittered is counted jitter-zeroed.
-    flatRuntimeMapFocusFrame();
+    flatRuntimeMapFocusFrame(frame + 1);
     const bool phaseWanted = s.work==FlatWork::Full && flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr);
     const bool temporalOff = flatRuntimeMapTemporalOff();
     flatUiLayerMapAaFrame(temporalOff, phaseWanted);
@@ -4832,9 +4848,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 if(w.focusKnown)std::snprintf(focus,sizeof(focus),"%u",w.focus);
                 const JournalRawStatus raw=journalRawStatus();
                 Log::get().note("flat map focus 5s: focus=%s temporal-aa-off=%u watcher=%s status-samples=%u gui-known=%d gui=%u "
-                    "camera-conflict-spatial=%llu camera-conflict-kept=%llu",
+                    "camera-conflict-spatial=%llu camera-conflict-kept=%llu canvas-draws=%llu canvas-inferred-frames=%llu "
+                    "(a map's canvas draws; frames answered as a map by them while GuiFocus is absent, as on foot)",
                     focus,w.temporalOff?1u:0u,raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui,
-                    (unsigned long long)s.cameraConflictSpatialWindow,(unsigned long long)s.cameraConflictKeptWindow);
+                    (unsigned long long)s.cameraConflictSpatialWindow,(unsigned long long)s.cameraConflictKeptWindow,
+                    (unsigned long long)w.canvas.draws,(unsigned long long)w.inferredFrames);
+                mapFocusWatch().canvas.draws=0; mapFocusWatch().inferredFrames=0;
             }
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty
@@ -6898,6 +6917,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         } else if (starLive) {
             flatStarGlowNoteNoBloom();   // the trigger is not the bloom chain's first level: the game's Bloom is off, or the chain is another
         }
+    }
+    // A map's canvas composite into the HDR target: the on-foot maps' only sign (Status.json has no GuiFocus there). Noted whatever
+    // the UI layer does with the draw, and with fix.ui_quality off, since the temporal AA answer does not depend on the layer.
+    if (flatUiMapCanvasPair(k.vs, k.ps) && !copy) {
+        uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
+        flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
+        if (flatUiTargetClass(k.color && k.color == s.prefix.output, k.width, k.height, k.format,
+                              s.prefix.width, s.prefix.height, sceneRw, sceneRh) == FlatUiTarget::kHdr)
+            flatRuntimeNoteMapCanvasDraw(s.prefix.frame);
     }
     // fix.ui_quality's flat layer (flat_ui_layer.h): the cockpit HUD families out of H and into the shared layer as eye 0,
     // the game's tonemap re-issued over it, and at the output copy the door and the composite. Every decision is made
