@@ -6,7 +6,11 @@
 // declarations, every instruction. What holds it to the original:
 //   * the rig compares the input and output signatures column for column and every dcl line (ours the one added b3, one float4: the shift);
 //   * the rig runs the ORIGINAL bytecode and this one on the same inputs through stream output and compares every output register: identical with the
-//     shift at zero, and with the shift at s only o1.x differs, by exactly s.
+//     shift at zero, and with the shift at s only o1.x differs, by exactly s;
+//   * F121c: the same on the inputs the game's own shader survives only by its 1e-9 floors (a colour of zero, negative or tiny; an exposure of 0), bit for
+//     bit, and finite; and the float immediates of the two token streams audited against each other (every distinct 32-bit immediate of one is in the other).
+//     F121 and F121b were transcribed from the disassembler's text, which prints 1e-9 as l(0.000000): the floors went in as 0.0 and the scene went NaN. Take
+//     every constant from the token hex (tools\visor_axis_test\visor_axis_test.cpp, V11), never from the text.
 // The game's draw is a fullscreen triangle from SV_VertexID alone (no vertex buffer): vertex 0 at clip (-1, -1 + dy), vertex 1 at (-1, 3 + dy), vertex
 // 2 at (3, -1 + dy), uv (0, 1), (0, -1), (2, 1); dy = 2 * (1 - cb2[1].x), the visor's slide. The rest is the tint (cb2[0], the hue wheel; cb2[1].yz, the
 // HUD colour's saturation and gain) and the HUD colour read from the first element of t0 (the colour buffer), rotated about the grey axis. All of it is
@@ -56,8 +60,10 @@ void main(uint vid : SV_VERTEXID,
     o3.y = slide2 + lo4;
 
     // The HUD colour from the colour buffer, rotated about the grey axis, its saturation and gain.
-    r0.xyz = max(T0[0].xyz, 0.0);
-    r0.w = max(cb1[90].z, 0.0);
+    // F121c: both floors are 1e-9 (immediate 0x3089705f) in the game's shader, and the disassembler prints that as l(0.000000). F121 and F121b wrote 0.0 and went
+    // NaN everywhere on a real GPU whenever the colour buffer's first element was not positive or the frame block's exposure was 0 (rsq(0) * 0).
+    r0.xyz = max(T0[0].xyz, 1.0e-9);
+    r0.w = max(cb1[90].z, 1.0e-9);
     r0.xyz = r0.xyz / r0.w;
     r0.w = dot(r0.xyz, r0.xyz);
     r0.w = rsqrt(r0.w);
@@ -68,8 +74,8 @@ void main(uint vid : SV_VERTEXID,
     float3 t0z = r0.zxy * 0.557350;
     float3 t0w = float3(t0z.z, t0z.x, t0z.y);   // r1.wyz of the game's first product: (r0.y, r0.z, r0.x) * 0.55735
     float3 rot = r0.zxy * 0.557350 - t0w;
-    rot = rot * 0.707103;
-    r0.xyz = r0.xyz * -0.707111 + rot;
+    rot = rot * asfloat(0x3f3504b2);            // the game's immediates, bit for bit (the disassembler's 0.707103 and 0.707111 are 1 and 6 ULP off them)
+    r0.xyz = r0.xyz * asfloat(0xbf350534) + rot;
     r0.xyz = r1.x * 0.557350 + r0.xyz;
     r0.w = dot(r0.xyz, float3(0.299, 0.587, 0.114));
     r0.xyz = r0.xyz - r0.w;

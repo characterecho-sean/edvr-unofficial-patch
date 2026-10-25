@@ -6360,6 +6360,10 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
     g_eye[eye].submittedSeq = sequence;
 }
 
+const void* uiLayerSubmittedTarget(uint32_t eye) {
+    return eye <= 1 ? g_eye[eye].submitted : nullptr;
+}
+
 bool uiLayerDoorFromPass(uint32_t eye) {
     return eye <= 1 && g_eye[eye].doorFromPass;
 }

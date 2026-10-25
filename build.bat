@@ -3780,7 +3780,10 @@ REM F121: the on-foot helmet visor's axis-centred vertex shader (src\d3d11\visor
 REM bytecode (tools\visor_axis_test\fixtures, held to its hash name) on a WARP device with the D3D debug layer: signature blocks and every dcl line equal column for
 REM column (ours the one added b3), then both run through stream output on random constants: identical at shift zero (the uv and the position bit for bit), and at
 REM shift s only o1.x moves, by exactly s; the sign per eye from the production math and the dump's tangents (the left eye's frame centre lands on NDC +a, the right
-REM eye's on -a, 720 px apart on 4032); a symmetric frustum gives exactly zero; what the math refuses; the wiring scans. Output under obj\ and System32's d3d11.
+REM eye's on -a, 720 px apart on 4032); a symmetric frustum gives exactly zero; what the math refuses; the wiring scans. F121c: the inputs the game's shader survives only
+REM by its 1e-9 floors (a zero, negative or tiny HUD colour or exposure) bit for bit and finite, with a control that the floors at 0.0 go non-finite; the float
+REM immediates of the two token streams audited against each other; the eye-trust guard (pairs, one eye, one target, the submitted targets, a retarget, the lines);
+REM the census's self-off verdict. Output under obj\ and System32's d3d11.
 if not exist "%OBJ%\visoraxis" mkdir "%OBJ%\visoraxis"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\visoraxis\\" /Fe"%OBJ%\visoraxis\visor_axis_test.exe" ^

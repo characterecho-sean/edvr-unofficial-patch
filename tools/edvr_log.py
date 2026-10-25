@@ -10999,11 +10999,18 @@ def _hj_f121_visor_axis(rows, ctx):
     the tangents (or the frustum is symmetric and nothing needed shifting); NEVER APPLIED when visor draws were seen and none was shifted though the tangents ask
     for it; PARTIAL when only one eye was shifted, s does not match the tangents or a fifth of the draws were refused; IDLE when armed with no visor draw seen
     (not on foot, or the visor not down), or when the draws were all left to the game by the test key (F121b, fix.native_on_foot_visor_axis off, the default). No
-    line at all is the code never having run (a build before F121, or remlok_lines not outer)."""
+    line at all is the code never having run (a build before F121, or remlok_lines not outer). F121c: NEVER APPLIED on the SELF-OFF line (the HDR scene after the
+    replacement had non-finite taps and it turned itself off for the session: stop and read the census), and the eye-trust guard's refusals (eye filing) count with
+    the others (all of them refused: NEVER APPLIED with the reason; a fifth or more: PARTIAL)."""
     armed, first, refused, sec = rows.get("armed", []), rows.get("first", []), rows.get("refused", []), rows.get("sec", [])
-    if not (armed or first or refused or sec):
+    selfoff = rows.get("selfoff", [])
+    if not (armed or first or refused or sec or selfoff):
         return None
     why = "; ".join(sorted({r["why"] for r in refused}))
+    if selfoff:
+        s = selfoff[-1]
+        return ("NEVER APPLIED", "SELF-OFF: the HDR scene right after a draw through the replacement vertex shader had %s non-finite taps of %s (eye %s), so the replacement "
+                "turned itself off for the session%s" % (s["nf"], s["taps"], s["eye"], " (%d such line(s))" % len(selfoff) if len(selfoff) > 1 else ""))
     if not sec:
         if refused:
             return ("NEVER APPLIED", "visor draws were refused before a window closed: %s" % why)
@@ -11011,7 +11018,7 @@ def _hj_f121_visor_axis(rows, ctx):
             return ("OK", "the visor frame was shifted (s left %s right %s from the tangents outer %s inner %s); the log ended before a 30 s window closed" % (
                 first[-1]["sl"], first[-1]["sr"], first[-1]["outer"], first[-1]["inner"]))
         return ("IDLE", "armed (remlok_lines outer); no visor draw seen (not on foot, or the helmet's visor is not down)")
-    keys = ("seen", "seenl", "seenr", "shifted", "shl", "shr", "sym", "keyoff", "refused", "r0", "r1", "r2", "r3")
+    keys = ("seen", "seenl", "seenr", "shifted", "shl", "shr", "sym", "keyoff", "refused", "r0", "r1", "r2", "r3", "r4", "selfoffn")
     tot = {k: _hsum(sec, k) for k in keys}
     last = sec[-1]
     outer, inner = float(last["outer"]), float(last["inner"])
@@ -11021,9 +11028,9 @@ def _hj_f121_visor_axis(rows, ctx):
     want_l = 0.0 if abs(a / 2) < 1e-4 else a / 2
     want_r = -want_l
     text = ("%d windows: visor draws %d (left %d, right %d), shifted %d (left %d, right %d), symmetric frustum %d, test key off %d, refused %d (no eye %d, no tangents %d, "
-            "other pixel shader %d, no replacement %d); s left %+.4f right %+.4f against the tangents outer %.3f inner %.3f (expected %+.4f %+.4f)%s") % (
+            "other pixel shader %d, no replacement %d, eye filing %d), self-off %d; s left %+.4f right %+.4f against the tangents outer %.3f inner %.3f (expected %+.4f %+.4f)%s") % (
         len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"], tot["keyoff"], tot["refused"], tot["r0"], tot["r1"], tot["r2"],
-        tot["r3"], sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+        tot["r3"], tot["r4"], tot["selfoffn"], sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
     if tot["keyoff"] and not tot["shifted"] and not tot["refused"]:
         return ("IDLE", text + "; the test key fix.native_on_foot_visor_axis is off (the default): the game's own visor vertex shader drew all of them")
     if want_l == 0.0 and published and not tot["shifted"] and tot["sym"] and not tot["refused"]:
@@ -11057,6 +11064,9 @@ def _hj_f121b_census(rows, ctx):
     if broken:
         return ("NEVER APPLIED", "the census did not run: %s" % broken[0])
     if not sec:
+        if not armed:   # F121c: the census is armed only with the test key on, in outer mode; with the key off (the default) there is none, by design
+            return ("IDLE", "census not armed%s: F121c runs it only with fix.native_on_foot_visor_axis on, in outer mode%s" % (
+                "; key %s" % key[-1]["to"] if key else "", "; " + note[-1]["what"] if note else ""))
         return ("IDLE", "census armed%s; no sample read (no visor draw on foot yet)%s" % (
             "; key %s" % key[-1]["to"] if key else "", "; " + note[-1]["what"] if note else ""))
     groups, order = {}, []
@@ -11100,6 +11110,40 @@ def _hj_f121b_census(rows, ctx):
     if found:
         return ("PARTIAL", text + "; FOUND: " + "; ".join(found))
     return ("OK", text + "; no non-finite pixel, no non-finite exposure, no black scene")
+
+
+def _hj_f121c_eyes(rows, ctx):
+    """F121c: the eye-trust guard's tracker, which sees every visor draw on foot whatever remlok_lines is (stock included) and asks whether the draws arrive as one per
+    eye on two targets, each as the eye filing named it, and whether a draw's target is the one the game submitted for the eye the filing gave it. A line when the state
+    changes (paired; ONE EYE ONLY: consecutive draws came to one eye or one target; DISAGREES: a draw filed to one eye is on the other eye's submitted target), after 12
+    draws in the new state; a 10 s summary only for a window with an anomaly or the session's first. OK: paired, nothing else seen. PARTIAL names what it found (the
+    flight of 2026-10-25 15:11: one visor draw a frame, all filed left, on the right eye's submitted target) and whether the last state line says it recovered. IDLE:
+    nothing to judge. No line at all is the code never having run (not on foot, or a build before F121c)."""
+    events, sec = rows.get("event", []), rows.get("sec", [])
+    if not (events or sec):
+        return None
+    draws, ok, one, sub, moved = (_hsum(sec, k) for k in ("draws", "ok", "one", "sub", "moved"))
+    last = events[-1]["state"] if events else ""
+    text = "%d state line(s)%s, %d summary window(s): visor draws %d (paired %d, one eye only %d, submitted-eye mismatch %d, target moved %d)" % (
+        len(events), (" (last: %s)" % last) if last else "", len(sec), draws, ok, one, sub, moved)
+    bad = [e for e in events if e["state"] != "paired"]
+    if bad or one or sub:
+        found = []
+        if bad:
+            e = bad[-1]
+            other = (e["eye"] == "0" and e["tgt"] == e["sr"]) or (e["eye"] == "1" and e["tgt"] == e["sl"])
+            found.append("%s: a draw filed to the %s eye is on target %s, filed left %s right %s, submitted left %s right %s%s" % (
+                e["state"], "left" if e["eye"] == "0" else "right", e["tgt"], e["fl"], e["fr"], e["sl"], e["sr"],
+                " (the OTHER eye's submitted target)" if other else ""))
+        elif one or sub:
+            found.append("%d draw(s) came to one eye or one target and %d disagreed with the submitted targets, in windows shorter than a state line" % (one, sub))
+        if sec and sec[-1]["targets"]:
+            found.append("last window's targets %s" % sec[-1]["targets"])
+        found.append("the last state line says %s" % (last or "nothing"))
+        return ("PARTIAL", text + "; FOUND: " + "; ".join(found))
+    if last == "paired" or (sec and ok):
+        return ("OK", text + "; the visor draws arrive as one per eye on two targets")
+    return ("IDLE", text + "; no visor draw to judge")
 
 
 def _hj_f122_mouse(rows, ctx):
@@ -12561,17 +12605,26 @@ HEALTH_RULES = (
         ("sec", r"review fixes \(F126\) 10 s: pin eye pairs: (?P<calls>\d+) pin calls, (?P<taken>\d+) pairs taken, (?P<frames>\d+) refused for rows of two different frames; "
                 r"arm IK: (?P<ik>\d+) calls, (?P<rig>\d+) refused for an FP snapshot of an earlier rig$"),
     ), _hj_f126_review),
-    _hrule("visor axis (F121)", ("F121",), ("visor axis (F121)",), (
+    _hrule("visor axis (F121)", ("F121", "F121c"), ("visor axis (F121)", "visor axis (F121c)"), (
         ("armed", r"visor axis \(F121\): armed \(remlok_lines outer\)"),
+        ("selfoff", r"visor axis \(F121c\): SELF-OFF -- the HDR scene right after a draw through the replacement vertex shader had (?P<nf>\d+) non-finite taps of (?P<taps>\d+) "
+                    r"\(eye (?P<eye>-?\d+)\)"),
         ("first", r"visor axis \(F121\): the visor frame is centred on each eye's optical axis: s left (?P<sl>%s) right (?P<sr>%s) uv, from the tangents outer "
                   r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+) \(the axis (?P<axis>%s) NDC from the image centre\); replacement vertex shader for VS "
                   r"B553BB479B7C0B97 made \((?P<bytes>\d+) bytes of bytecode\)" % (_HN, _HN, _HN)),
         ("refused", r"visor axis \(F121\): NOT shifted -- (?P<why>.+?)\. The visor draws unchanged until that clears\."),
         ("sec", r"visor axis \(F121\) 30 s: visor draws seen (?P<seen>\d+) \(left (?P<seenl>\d+), right (?P<seenr>\d+)\), shifted (?P<shifted>\d+) \(left (?P<shl>\d+), "
                 r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+), key off (?P<keyoff>\d+), refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
-                r"no replacement (?P<r3>\d+)\); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer (?P<outer>[\d.]+) inner (?P<inner>[\d.]+)"
-                r"(?P<np> \(not published\))?$" % (_HN, _HN)),
+                r"no replacement (?P<r3>\d+), eye filing (?P<r4>\d+)\), self-off (?P<selfoffn>\d+); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer "
+                r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+)(?P<np> \(not published\))?$" % (_HN, _HN)),
     ), _hj_f121_visor_axis),
+    _hrule("visor eyes (F121c)", ("F121c",), ("visor eyes (F121c)",), (
+        ("event", r"visor eyes \(F121c\): (?P<state>paired|ONE EYE ONLY|DISAGREES).*? -- the filing names target (?P<fl>[0-9A-F]{16}) for the left eye and (?P<fr>[0-9A-F]{16}) "
+                  r"for the right; this draw is eye (?P<eye>-?\d+) on target (?P<tgt>[0-9A-F]{16}); the eyes' submitted targets: left (?P<sl>[0-9A-F]{16}), right "
+                  r"(?P<sr>[0-9A-F]{16}); (?P<draws>\d+) visor draws so far\.$"),
+        ("sec", r"visor eyes \(F121c\) 10 s: visor draws (?P<draws>\d+): paired (?P<ok>\d+), first (?P<first>\d+), one eye only (?P<one>\d+), target moved (?P<moved>\d+), "
+                r"submitted-eye mismatch (?P<sub>\d+); targets: (?P<targets>.*)$"),
+    ), _hj_f121c_eyes),
     _hrule("visor census (F121b)", ("F121b",), ("visor axis (F121b)",), (
         ("armed", r"visor axis \(F121b\): census armed"),
         ("key", r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY"),
@@ -13676,6 +13729,7 @@ def self_test_health():
     f119_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f119.h")
     f123_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f123.h")
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
+    f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -13684,6 +13738,7 @@ def self_test_health():
         f119src = read_text(f119_path)
         f123src = read_text(f123_path)
         f121bsrc = read_text(f121b_path)
+        f121csrc = read_text(f121c_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -13740,6 +13795,15 @@ def self_test_health():
             fmts[key] = health_c_format(f121src, needle)
         if fmts[key] is None:
             raise AssertionError("visor_axis_math.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R121c(needle, *vals):
+        """F121c's lines (visor_eye_trust.h builds them: formatEvent, formatWindow), from their own format literals."""
+        key = "f121c:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f121csrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("visor_eye_trust.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R119(needle, *vals):
@@ -14388,8 +14452,13 @@ def self_test_health():
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
-        def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, keyoff=0, refused=0, r=(0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np=""):
-            return R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, keyoff, refused, r[0], r[1], r[2], r[3], sl, sr, outer, inner, np)
+        def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, keyoff=0, refused=0, r=(0, 0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np="",
+                    selfoff=0):
+            r = tuple(r) + (0,) * (5 - len(r))
+            return R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, keyoff, refused, r[0], r[1], r[2], r[3], r[4], selfoff, sl, sr, outer, inner, np)
+
+        def vax_selfoff(nf=29753344, taps=29753344, eye=1):
+            return R121("visor axis (F121c): SELF-OFF", nf, taps, eye)
 
         def vax_first(sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, axis=0.1784):
             return R121("visor axis (F121): the visor frame is centred", sl, sr, outer, inner, axis, 2828)
@@ -14423,6 +14492,44 @@ def self_test_health():
         check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
         check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
               has=["the rule's patterns do not match"])
+        # F121c: the eye-trust guard's refusals count with the others, and the SELF-OFF line is the one thing that fails the rule outright.
+        eye_why = "the eye filing is not trusted: the visor draws do not arrive as one draw per eye on two targets, or the filing disagrees with the eyes' submitted targets"
+        check("F121c visor axis: the flight of 15:11, every draw refused for the eye filing", [vax_armed(), vax_refused(eye_why), vax_win(seen=2457, seenl=2457, seenr=0, shl=0, shr=0,
+              refused=2457, r=(0, 0, 0, 0, 2457))], 3, [("NEVER APPLIED", F121)], has=["eye filing 2457", "none was shifted: the eye filing is not trusted"])
+        check("F121c visor axis: a fifth or more refused for the eye filing", [vax_armed(), vax_win(refused=700, r=(0, 0, 0, 0, 700))], 0, [("PARTIAL", F121)], has=["eye filing 700", "a fifth or more"])
+        check("F121c visor axis: the first draw of a session counted as the eye filing's, a few of 2700", [vax_armed(), vax_win(refused=1, r=(0, 0, 0, 0, 1))], 0, [("OK", F121)],
+              has=["eye filing 1), self-off 0"])
+        check("F121c visor axis: SELF-OFF fails the rule and says what it found", [vax_armed(), vax_first(), vax_selfoff(), vax_win(shl=0, shr=0, selfoff=2400)], 3,
+              [("NEVER APPLIED", F121)], has=["SELF-OFF: the HDR scene right after a draw through the replacement vertex shader had 29753344 non-finite taps of 29753344 (eye 1)"])
+        check("F121c visor axis: the self-off count in a window", [vax_armed(), vax_win(shl=0, shr=0, selfoff=2400, refused=0)], 3, [("NEVER APPLIED", F121)],
+              has=["self-off 2400", "none was shifted"])
+
+        # ---- visor eyes (F121c): is the eye the filing names for a visor draw the eye it is ----
+        F121C = "visor eyes (F121c)"
+        PAIRED = "paired (one visor draw per eye, each on its own target)"
+        ONEEYE = "ONE EYE ONLY (consecutive visor draws came to one eye or to one target)"
+        DISAGREES = "DISAGREES with the submitted eye targets (a draw filed to one eye is on the other eye's target)"
+        LT, RT = 0x24B120C5B20, 0x24B11EB3120
+
+        def veye_ev(state=PAIRED, fl=LT, fr=RT, eye=0, tgt=LT, sl=LT, sr=RT, draws=1200):
+            return R121c("visor eyes (F121c): %s -- the filing names", state, fl, fr, eye, tgt, sl, sr, draws)
+
+        def veye_win(draws=900, ok=899, first=1, one=0, moved=0, sub=0, targets="0000024B120C5B20 eye 0 x 450, 0000024B11EB3120 eye 1 x 450"):
+            return R121c("visor eyes (F121c) 10 s", draws, ok, first, one, moved, sub, targets)
+
+        check("F121c eyes: paired, nothing else seen", [veye_ev(), veye_win()], 0, [("OK", F121C)],
+              has=["1 state line(s) (last: paired), 1 summary window(s): visor draws 900 (paired 899, one eye only 0", "arrive as one per eye on two targets"], lacks=["UNPARSED"])
+        check("F121c eyes: only a first-window summary, clean", [veye_win()], 0, [("OK", F121C)], has=["0 state line(s)"])
+        check("F121c eyes: the flight, one visor draw a frame filed left on the right eye's target", [veye_ev(DISAGREES, fl=RT, fr=0, eye=0, tgt=RT, sl=LT, sr=RT, draws=24),
+              veye_win(draws=840, ok=0, first=1, one=0, sub=839, targets="0000024B11EB3120 eye 0 x 840")], 0, [("PARTIAL", F121C)],
+              has=["FOUND: DISAGREES: a draw filed to the left eye is on target 0000024B11EB3120", "(the OTHER eye's submitted target)", "submitted-eye mismatch 839",
+                   "last window's targets 0000024B11EB3120 eye 0 x 840", "the last state line says DISAGREES"])
+        check("F121c eyes: one eye only, the submitted targets not known", [veye_ev(ONEEYE, fl=RT, fr=0, eye=0, tgt=RT, sl=0, sr=0, draws=24), veye_win(draws=840, ok=0, one=839, sub=0)],
+              0, [("PARTIAL", F121C)], has=["FOUND: ONE EYE ONLY: a draw filed to the left eye is on target 0000024B11EB3120", "one eye only 839"], lacks=["OTHER eye"])
+        check("F121c eyes: broken and recovered", [veye_ev(ONEEYE), veye_ev(PAIRED, draws=4000), veye_win(draws=900, ok=800, one=99)], 0, [("PARTIAL", F121C)],
+              has=["2 state line(s) (last: paired)", "the last state line says paired"])
+        check("F121c eyes: a short anomaly with no state line is still named", [veye_win(draws=900, ok=890, one=6, moved=3)], 0, [("PARTIAL", F121C)], has=["came to one eye or one target"])
+        check("F121c eyes: a line the rule does not parse", ["visor eyes (F121c) 10 s: a format nobody wrote"], 4, [("UNPARSED", F121C)])
 
         # ---- visor census (F121b): the HDR scene after the visor draw, by the test key's state ----
         F121B = "visor census (F121b)"

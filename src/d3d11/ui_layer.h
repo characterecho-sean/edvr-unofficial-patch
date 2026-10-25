@@ -362,6 +362,9 @@ void uiLayerNoteDepthClear(void* dsv, uint32_t flags, float depth, uint8_t stenc
 // could not be told. Identities only, never dereferenced.
 void uiLayerNoteCopy(const void* destination, const void* source);
 void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted);
+// F121c: what the game last submitted for an eye (0 left, 1 right), as uiLayerNoteSubmitted was told; null for none yet or an eye other than 0 or 1. An identity, never
+// dereferenced: remlok_fix.cpp's eye-trust guard asks which eye a visor draw's target was submitted for.
+const void* uiLayerSubmittedTarget(uint32_t eye);
 
 // The door, from the native runtime's submit chain (native_temporal.cpp and
 // native_sharpen.cpp, both on the thread the game submits from):

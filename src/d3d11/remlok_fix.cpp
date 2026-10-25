@@ -16,8 +16,11 @@
 #include "dxbc_container.h"   // F27: the visor variant's checksum (ComputeHashRetail)
 #include "shader_swap.h"      // F121: shaderSwapCreateVs
 #include "ui_depth.h"         // F27: uiDepthEyeOfTargetReadOnly, the bound target's eye
+#include "ui_layer.h"         // F121c: uiLayerSubmittedTarget, the eyes' submitted targets (the eye filing's cross-check)
 #include "visor_axis_math.h"  // F121: the shift per eye, the counts and the log lines (pure; tools\visor_axis_test runs the same)
 #include "visor_census_core.h"   // F121b: the census of the HDR scene after the visor draw (pure; the rig runs the same decode and model)
+#include "visor_eye_trust.h"  // F121c: the eye-trust guard and its instrument (pure; the rig runs the same)
+#include "vscreen.h"          // F121c: vScreenCopyResourceRaw, the census's copies past the copy hook (which reports a write to the UI layer's eye check)
 #include <cstring>
 #include <string>
 #include <vector>
@@ -55,7 +58,8 @@ bool  g_swap = false;
 bool  g_axisArmedNoted = false;   // F121: the once-per-session "armed" line (remlokConfigure)
 std::atomic<bool> g_axisKeyOn{false};   // F121b (TEMPORARY, live): fix.native_on_foot_visor_axis, "on" binds F121's vertex shader; default off
 bool  g_axisKeyKnown = false, g_axisKeyLast = false;
-bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure)
+bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure; F121c: said when the test key is on, in outer mode)
+std::atomic<bool> g_axisSelfOff{false};   // F121c: the replacement turned itself off (non-finite HDR after it); cleared when the key is turned off
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
 inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
@@ -195,6 +199,7 @@ void remlokConfigure(Config& cfg) {
     {
         const bool keyOn = cfg.getString("fix.native_on_foot_visor_axis", "off") == "on";
         g_axisKeyOn.store(keyOn, std::memory_order_relaxed);
+        if (!keyOn) g_axisSelfOff.store(false, std::memory_order_relaxed);   // F121c: off and on again is the way to try it once more
         if (!g_axisKeyKnown || keyOn != g_axisKeyLast) {
             g_axisKeyKnown = true;
             g_axisKeyLast = keyOn;
@@ -209,7 +214,7 @@ void remlokConfigure(Config& cfg) {
         visoraxis::formatArmed(armed, sizeof(armed));
         Log::get().note("%s", armed);
     }
-    if (detail::g_remlokMode == Mode::kOuter && !g_censusArmedNoted) {   // F121b: the census runs with the key on or off
+    if (detail::g_remlokMode == Mode::kOuter && g_axisKeyOn.load(std::memory_order_relaxed) && !g_censusArmedNoted) {   // F121b: the census; F121c: only with the test key on
         g_censusArmedNoted = true;
         char armed[400];
         visorcensus::formatArmed(armed, sizeof(armed));
@@ -313,7 +318,7 @@ float g_axisNotedS[2] = {0.0f, 0.0f};             // the s the once-line last sa
 float g_axisLastS[2] = {0.0f, 0.0f};              // the s last worked out for each eye
 float g_axisLastOuter = 0.0f, g_axisLastInner = 0.0f;
 bool g_axisLastTangents = false;
-bool g_axisRefusalNoted[static_cast<unsigned>(visoraxis::Refusal::kCount)] = {false, false, false, false};
+bool g_axisRefusalNoted[static_cast<unsigned>(visoraxis::Refusal::kCount)] = {false, false, false, false, false};
 visoraxis::Counts g_axisCounts;                   // per 30 s window
 uint64_t g_axisWindowMs = 0;
 
@@ -341,15 +346,27 @@ void axisNoteWindow(uint64_t now) {
 }
 
 // The begin: the replacement vertex shader and its shift at b3, around the game's visor draw, for the eye the filing named (0 left, 1 right).
-void axisBegin(ID3D11DeviceContext* ctx, int eye, bool gamesPs) {
+// F121c: trust says whether the draws prove that filing (visor_eye_trust.h); an untrusted draw runs the game's own shader.
+void axisBegin(ID3D11DeviceContext* ctx, int eye, bool gamesPs, const visoraxis::EyeTrust::Verdict& trust) {
     ++g_axisCounts.seen[eye];
     if (!g_axisKeyOn.load(std::memory_order_relaxed)) {   // F121b: the test key is off (the default): the game's own visor vertex shader
         ++g_axisCounts.keyOff;
         return;
     }
+    if (g_axisSelfOff.load(std::memory_order_relaxed)) {   // F121c: the HDR scene after the replacement was non-finite: the game's own shader until the key is cycled
+        ++g_axisCounts.selfOff;
+        return;
+    }
     // The shift is designed for this pixel shader's visor frame (its uv, from this vertex shader's o1.x): another one is not ours to move.
     if (!gamesPs) {
         axisRefuse(visoraxis::Refusal::kOtherPs);
+        return;
+    }
+    // F121c: the eye filing is used only when the draws prove it. The first draw and one after a retarget are counted without a line (a session starts that way);
+    // a run of draws that came to one eye or one target, or that disagree with the submitted targets, is said once.
+    if (!trust.trusted) {
+        if (trust.why == visoraxis::Why::kFirst || trust.why == visoraxis::Why::kMoved) ++g_axisCounts.refused[static_cast<unsigned>(visoraxis::Refusal::kOneEye)];
+        else axisRefuse(visoraxis::Refusal::kOneEye);
         return;
     }
     float outer = 0.0f, inner = 0.0f, s = 0.0f;
@@ -430,6 +447,42 @@ void axisEnd(ID3D11DeviceContext* ctx) {
     }
 }
 
+// ---- F121c: the eye-trust guard's tracker and its instrument (visor_eye_trust.h says why) ----------------------------------------------------------------
+// Every visor draw on foot goes through eyeWatchNote at the draw's first sight (remlokOnFootDiagnose, in every remlok_lines mode: the flight that found the one-eye
+// filing was stock), which asks the filing for the target's eye and the UI layer for the eyes' submitted targets, and keeps the verdict for visorSwapBegin. Lines:
+// when the state changes, and a 10 s summary only for a window with an anomaly (or the session's first); nothing otherwise.
+visoraxis::EyeTrust g_trust;
+visoraxis::EyeTrust::Verdict g_trustVerdict;   // for the visor draw in flight; untrusted unless eyeWatchNote proved it
+uint64_t g_trustWindowMs = 0;
+
+void eyeWatchNote() {
+    g_trustVerdict = visoraxis::EyeTrust::Verdict();   // a draw whose target or eye is not known proves nothing
+    ResourceInfo rt{};
+    if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt)) return;
+    const int eye = uiDepthEyeOfTargetReadOnly(rt.resource);   // never registers
+    if (eye < 0) return;
+    const void* subL = uiLayerSubmittedTarget(0);
+    const void* subR = uiLayerSubmittedTarget(1);
+    g_trustVerdict = g_trust.note(eye, rt.resource, visoraxis::submittedEyeOf(rt.resource, subL, subR));
+    if (g_trustVerdict.event) {
+        char line[640];
+        visoraxis::formatEvent(line, sizeof(line), g_trust.state(), g_trust.slot(0), g_trust.slot(1), eye, rt.resource, subL, subR, g_trust.total());
+        Log::get().note("%s", line);
+    }
+    const uint64_t now = GetTickCount64();
+    if (!g_trustWindowMs) {
+        g_trustWindowMs = now;
+    } else if (now - g_trustWindowMs >= 10000) {
+        g_trustWindowMs = now;
+        visoraxis::EyeWindow w;
+        if (g_trust.takeWindow(&w)) {
+            char line[640];
+            visoraxis::formatWindow(line, sizeof(line), w);
+            Log::get().note("%s", line);
+        }
+    }
+}
+
 // ---- F121b: the census of the HDR scene after the visor draw (visor_census_core.h says why and what; visor_census_shader.h is the shader) ----------------
 // One sample every sixth visor draw an eye, right after the draw: a copy of the eye's HDR target (R11G11B10, the draw's own render target), one dispatch of the census
 // over the copy (a copy, because a target still bound for output cannot be bound for reading), the compute stage's shader, views, UAV and constants put back, the
@@ -446,12 +499,13 @@ struct CensusGpu {
     ID3D11ShaderResourceView* copySrv[2] = {};
     uint32_t copyW[2] = {}, copyH[2] = {};
     struct Slot {
-        bool inFlight = false, keyOn = false;
+        bool inFlight = false, keyOn = false, shifted = false;   // F121c: shifted = taken right after a draw through the replacement vertex shader
         uint32_t seq = 0, w = 0, h = 0, age = 0;
     };
     Slot slot[2][3];
     uint32_t seq = 0, draws[2] = {0, 0}, ring[2] = {0, 0};
     bool pending = false;
+    bool pendingShifted = false;   // F121c: the draw in flight is going through the replacement (set at the end of the draw, read by censusRun)
     int pendingEye = -1;
     ID3D11ShaderResourceView* expo = nullptr;   // the game's exposure view at the draw (AddRef'd), until the census has run
     bool saidFormat = false, saidResources = false;
@@ -609,6 +663,11 @@ void censusPoll(ID3D11DeviceContext* ctx) {
                 continue;
             }
             censusAdd(e, c, sl.keyOn);
+            if (visorcensus::selfOffVerdict(sl.shifted, c) && !g_axisSelfOff.exchange(true, std::memory_order_relaxed)) {   // F121c: said once
+                char line[420];
+                visoraxis::formatSelfOff(line, sizeof(line), c.nonFinite, c.taps, e);
+                Log::get().note("%s", line);
+            }
         }
     }
 }
@@ -686,7 +745,7 @@ void censusRun(ID3D11DeviceContext* ctx) {
         tex->Release();
         return;
     }
-    ctx->CopyResource(g.copy[e], tex);
+    vScreenCopyResourceRaw(ctx, g.copy[e], tex);   // F121c: past the copy hook, which would tell the UI layer's eye check about a copy of the HDR target
     tex->Release();
 
     // the game's exposure: a float 2D texture view only
@@ -731,7 +790,7 @@ void censusRun(ID3D11DeviceContext* ctx) {
     ctx->Dispatch(visorcensus::kThreads / 8u, visorcensus::kThreads / 8u, 1);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
     ctx->CSSetShaderResources(0, 2, nullSrv);
-    ctx->CopyResource(g.stage[e][si], g.out[e]);
+    vScreenCopyResourceRaw(ctx, g.stage[e][si], g.out[e]);
     ctx->CSSetShader(savedCs, nullptr, 0);
     ctx->CSSetShaderResources(0, 2, savedSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
@@ -743,6 +802,7 @@ void censusRun(ID3D11DeviceContext* ctx) {
     if (savedCb) savedCb->Release();
 
     sl.inFlight = true;
+    sl.shifted = g.pendingShifted;
     sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);
     sl.seq = g.seq;
     sl.w = td.Width;
@@ -831,7 +891,13 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
         return;
     }
     const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
-    if (onFoot) censusBegin(ctx, eye);   // F121b: every sixth draw an eye is a sample (run at the end, with the game's state back)
+    // F121b: every sixth draw an eye is a sample (run at the end, with the game's state back). F121c: only with the test key on (and then only in outer mode, which is
+    // the only way here); with it off the last second's line is said and the census does nothing at all.
+    if (onFoot && g_axisKeyOn.load(std::memory_order_relaxed)) {
+        censusBegin(ctx, eye);
+    } else if (g_cenWin.samples || g_cenWin.skipped) {
+        censusLine();
+    }
     const bool right = (eye == 1) != g_swap;                   // the control (remlok_swap_eyes) swaps the two
     ID3D11PixelShader* variant = visorVariant(ctx, right);
     if (variant) {
@@ -849,10 +915,11 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
             g_visorWindowMs = now;
         }
     }
-    if (onFoot) axisBegin(ctx, eye, gamesPs);   // F121: the true eye (not the swap control's): the frame goes onto THAT eye's axis
+    if (onFoot) axisBegin(ctx, eye, gamesPs, g_trustVerdict);   // F121: the true eye (not the swap control's): the frame goes onto THAT eye's axis; F121c: if the draws prove it
 }
 
 void visorSwapEnd(ID3D11DeviceContext* ctx) {
+    g_cen.pendingShifted = g_axisActive;   // F121c: whether the draw that just ended went through the replacement (the census's sample says so)
     axisEnd(ctx);   // F121: the game's vertex shader and its b3 back (a no-op when ours was not bound)
     if (g_visorActive) {
         g_visorActive = false;
@@ -869,6 +936,7 @@ void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {
     if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs) return;
     static uint64_t draws = 0, lastMs = 0;
     ++draws;
+    if (nativeOnFootActive()) eyeWatchNote();   // F121c: the eye-trust guard's tracker and instrument, whatever remlok_lines is
     const uint64_t nowMs = GetTickCount64();
     if (lastMs && nowMs - lastMs < 30000) return;
     lastMs = nowMs;

@@ -157,6 +157,10 @@ inline Census cpuModel(const float* rgb, uint32_t width, uint32_t height, bool e
     return c;
 }
 
+// F121c: the replacement turns itself off on a sample that proves it broke the scene: taken right after a draw THROUGH the replacement vertex shader, with any
+// non-finite tap (a clean scene has none; the flight of 2026-10-25 15:11 had every tap NaN). A sample after a draw the game's own shader made proves nothing about us.
+inline bool selfOffVerdict(bool drawnThroughReplacement, const Census& c) noexcept { return drawnThroughReplacement && c.ok && c.nonFinite > 0u; }
+
 // One second of samples, by the key's state (a sample under the other state closes the second).
 struct Window {
     bool keyOn = false;
@@ -206,7 +210,7 @@ inline int formatKey(char* out, size_t size, bool on) noexcept {
 inline int formatArmed(char* out, size_t size) noexcept {
     return std::snprintf(out, size,
         "visor axis (F121b): census armed: a copy of the HDR target after the visor draw (every sixth draw an eye) read at 256 x 256 taps for non-finite pixels, black, the largest "
-        "value and the mean luma, and the visor's exposure texels; measure only; a line a second while visor draws come.");
+        "value and the mean luma, and the visor's exposure texels; measure only (F121c: it runs only with the test key on, in outer mode); a line a second while visor draws come.");
 }
 inline int formatNote(char* out, size_t size, const char* what) noexcept {
     return std::snprintf(out, size, "visor axis (F121b): %s", what);
