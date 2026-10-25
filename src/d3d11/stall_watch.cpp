@@ -133,17 +133,6 @@ void stallWatchWriteCounts(const char* reason) {
         c.longestStallMs);
 }
 
-bool stallWatchRenderTarget(void** handle, uint64_t* lo, uint64_t* hi, uint32_t* tid) {
-    stall::Watchdog* d = g_dog.load(std::memory_order_acquire);
-    if (!d || !handle || !lo || !hi || !tid) return false;
-    HANDLE h = nullptr;
-    DWORD t = 0;
-    if (!d->activeTarget(&h, lo, hi, &t)) return false;
-    *handle = h;
-    *tid = static_cast<uint32_t>(t);
-    return true;
-}
-
 void stallWatchShutdown() {
     if (stall::Watchdog* d = g_dog.load(std::memory_order_acquire)) d->stop();
 }

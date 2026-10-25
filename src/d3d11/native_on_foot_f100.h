@@ -2,8 +2,9 @@
 // and frame threads use. Journal: the arc doc, 2026-10-24, F100; the review: reviews\native-onfoot-perf-review-2026-10-24.md.
 //
 // The F98 flight (edvr_gfx_20261024_192353) measured the marker probe's draw tee at about 2.0M calls a second (17,000-19,300 draws a frame), with only the
-// part past the VS hash timed (8.9 ms a second); the load sampler stopping the render, runtime, driver and game threads ten times a second all session; the
-// F68d onset dump writing 360 lines in one frame; the eye probe's two lines every frame; and the F70b ADS input lines twice a tick off foot.
+// part past the VS hash timed (8.9 ms a second); the load sampler stopping the render, runtime, driver and game threads ten times a second all session (its
+// want rule lived here until F102 removed the sampler); the F68d onset dump writing 360 lines in one frame; the eye probe's two lines every frame; and the F70b
+// ADS input lines twice a tick off foot.
 #pragma once
 
 #include "native_on_foot_core.h"   // hudIssuerIndex, kMarkerCompositeVs
@@ -68,13 +69,7 @@ inline double teeNsPerCall(uint64_t ticks, uint64_t clocked, uint64_t qpcFreq) n
     return static_cast<double>(ticks) / static_cast<double>(clocked) / static_cast<double>(qpcFreq) * 1e9;
 }
 
-// ---- 2: the load sampler's want -----------------------------------------------------------------------------------------------------------------------
-// F24's rule was "in a menu (no Flags2 in Status.json) and while a load pipeline is running, until its summary". Its summary is written when the final step
-// starts running, and again when it is done; F98 saw the first and never the done edge, so the want held for the whole session. The pipeline now ends at
-// the first summary.
-inline bool loadSamplerWanted(bool menuLike, bool pipelineObj, bool summaryRunning, bool summaryDone) noexcept {
-    return menuLike || (pipelineObj && !summaryRunning && !summaryDone);
-}
+// ---- 2: the load sampler's want: removed with the load sampler in F102 ----------------------------------------------------------------------------------
 
 // ---- 3: the F68d onset window, printed a slice a tick -------------------------------------------------------------------------------------------------
 // The window's lines are taken whole at the dump (the same records, the same text, the same order); the frame thread prints at most kOnsetLinesPerTick of

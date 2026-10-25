@@ -30,7 +30,6 @@
 #include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
 #include "native_on_foot_hooks.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
-#include "load_sampler.h"   // F24: the load sampler's tick (read only, temporary)
 #include "native_on_foot_core.h"
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
 #include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
@@ -27547,25 +27546,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // and the total the runtime reads for its compensation (every frame).
     installF22ProbesOnce();
     loadStagesFrameTick(now);   // F23 (Part E): the no-call check for the stage hook
-
-    // F24 (TEMPORARY, read only): the load sampler runs in a menu (no Flags2 in Status.json) and while a load pipeline is running, until its summary.
-    // F100: until its FIRST summary (the final step running): F98's final step was never seen done, so the old rule held the sampler on all session,
-    // stopping the render, runtime, driver and game threads ten times a second on foot (nofoot::f100::loadSamplerWanted).
-    {
-        bool obj = false, sumRunning = false, sumDone = false;
-        {
-            std::lock_guard<std::mutex> lock(g_stMutex);
-            obj = g_stObj != 0;
-            sumRunning = g_stSumRunning;
-            sumDone = g_stSumDone;
-        }
-        const bool menuLike = !journalOnFootKnown();
-        const bool want = nofoot::f100::loadSamplerWanted(menuLike, obj, sumRunning, sumDone);
-        const bool pipeline = want && !menuLike;
-        loadSamplerTick(now, want, want ? (pipeline ? "a load pipeline is running (its summary has not printed)"
-                                                    : "no Flags2 in Status.json: a menu or a loading screen")
-                                       : "in gameplay: Status.json has Flags2 and no load pipeline is running");
-    }
+    // F102: the F24 load sampler (its thread census and the stops of the render thread and the busiest threads) is removed.
     // F62b: the ADS head-aim uses the same two hooks. F92b: so does the ADS press itself (F70b samples the bound HumanoidZoom in the update hook), which runs with the
     // head aim off too: in VR the hooks go in whatever the head aim's toggle says (it was on by default, so they did unless it was off before a session). The flat
     // profile is as before (it reads the head aim's key as off and installs them only for look to aim).

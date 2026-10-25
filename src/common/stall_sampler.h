@@ -572,20 +572,6 @@ public:
     // True once the watchdog thread has left its loop (a rig waits for it before it deletes the watchdog).
     bool exited() const noexcept { return exited_.load(std::memory_order_acquire); }
 
-    // F24 (load sampler, read only): the render thread's registered slot, the one the watchdog samples. False until the render thread has beaten
-    // (registered) or when its handle could not be duplicated. The handle is the watchdog's: never close it.
-    bool activeTarget(HANDLE* handle, uint64_t* lo, uint64_t* hi, DWORD* tid) const noexcept {
-        const int slot = activeSlot_.load(std::memory_order_acquire);
-        if (slot < 0 || slot >= static_cast<int>(kSlots)) return false;
-        const Slot& s = slots_[slot];
-        if (!s.handle) return false;
-        *handle = s.handle;
-        *lo = s.lo;
-        *hi = s.hi;
-        *tid = s.tid;
-        return true;
-    }
-
     Counts counts() const noexcept {
         Counts c;
         c.episodes = episodes_.load(std::memory_order_relaxed);

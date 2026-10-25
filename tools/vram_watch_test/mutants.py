@@ -130,7 +130,7 @@ H_BEAT = "    stallWatchBeat(presentT1, g_state->frameCounter);\n"
 H_TICK = "    vramWatchTick(presentT1, dev);\n"
 G_DUE = "    if (!g_watcher.due(qpc)) return;\n"
 G_BUDGET = "    guardedBudget(g_budget, [&] {\n"
-B_LIST = "\"src\\d3d11\\stall_watch.cpp\" \"src\\d3d11\\load_sampler.cpp\" \"src\\d3d11\\vram_tick.cpp\" ^\n"
+B_LIST = "\"src\\d3d11\\stall_watch.cpp\" \"src\\d3d11\\vram_tick.cpp\" ^\n"
 
 MUTANTS = [
     # ---- V1: constants and keys ------------------------------------------------------------------------------------------------

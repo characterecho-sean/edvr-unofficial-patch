@@ -179,13 +179,7 @@ inline void run100(Check&& check) {
         check(ns > 1999.0 && ns < 2001.0 && ms > 44.44 && ms < 44.45 && f100::teeMsPerFrame(0, 0, 1, 1, 1) < 0.0,
               "F100: the tee clock: the mean clocked call, times the second's calls over its frames (2 us x 22,222 calls a frame = 44.4 ms)");
     }
-    {   // the load sampler's want: F98's case (a pipeline whose summary printed when its final step ran, never seen done, Flags2 present) is off
-        const bool f98 = !f100::loadSamplerWanted(false, true, true, false);
-        const bool menu = f100::loadSamplerWanted(true, false, false, false) && f100::loadSamplerWanted(true, true, true, true);
-        const bool loading = f100::loadSamplerWanted(false, true, false, false) && !f100::loadSamplerWanted(false, true, false, true) &&
-                             !f100::loadSamplerWanted(false, false, false, false);
-        check(f98 && menu && loading, "F100: the load sampler ends at the pipeline's first summary (F98's never-done final step held it on all session), runs in a menu");
-    }
+    // (F102: the load sampler's want check went with the load sampler.)
     {   // F68d: 360 lines in slices of 24, in order, then the summary once
         f100::PacedLines p;
         p.begin(360);
