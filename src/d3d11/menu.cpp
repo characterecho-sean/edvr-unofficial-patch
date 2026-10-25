@@ -1706,10 +1706,11 @@ void buildPages() {
     }
     {
         // Native on foot (2026-10-14): the explicitly selected native on-foot settings. The rows are the
-        // `menu native_on_foot` rows of edvr.ini, in file order; compatibility settings without that tag stay out of the page.
+        // `menu native_on_foot` rows of edvr.ini, in file order (the switch first, the HUD last); compatibility settings without that tag stay out of the page.
+        // Grouped (F127): the headings are the ini's own heading blocks above the rows, as on the Fixes page.
         Page p;
         p.name = "Native on foot";
-        addSettingRows(p, MenuTier::Fix, "native_on_foot", false);
+        addSettingRows(p, MenuTier::Fix, "native_on_foot", true);
         firstSelectable(p);
         s.pages.push_back(p);
     }

@@ -1517,10 +1517,10 @@ void testCaptureWiringPins(const char* root) {
         check(pages.find("p.name = \"Explorer Cam\";") == std::string::npos && pages.find("\"explorer_cam\"") == std::string::npos,
               "menu.cpp: buildPages makes no Explorer Cam page (retired in F98)");
         const size_t at = pages.find("p.name = \"Native on foot\";");
-        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"native_on_foot\", false);", at);
+        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"native_on_foot\", true);", at);
         const size_t developer = pages.find("if (s.developer) {");
         check(at != std::string::npos && rows != std::string::npos && rows - at < 300 && developer != std::string::npos && at < developer,
-              "menu.cpp: buildPages makes the Native on foot page from the Fix-tier rows of the native_on_foot page, for everyone, before the developer pages");
+              "menu.cpp: buildPages makes the Native on foot page from the Fix-tier rows of the native_on_foot page, grouped under the ini's headings (F127), for everyone, before the developer pages");
         check(bodyOf("std::string displayValue(const MenuRowDef& d, const std::string& v) {").find("menuFormatNumber(d, atof(v.c_str()))") !=
                   std::string::npos,
               "menu.cpp: a number row is shown by menuFormatNumber (\"+0.15 m\", \"0 ms (exact)\")");
@@ -1817,16 +1817,70 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_look_to_aim_yaw_sign", "native_on_foot_look_to_aim_comp_delay",
                                 "native_on_foot_look_to_aim_comp_sign", "native_on_foot_body_align_trim_right_cm",
                                 "native_on_foot_body_align_trim_up_cm", "native_on_foot_body_align_trim_forward_cm",
-                                "native_on_foot_weapon_eye_right_cm"};
+                                "native_on_foot_weapon_eye_right_cm",
+                                // F127: the 21 rows taken off the page (the keys, their behaviour and their defaults stay: set in edvr.ini or the installer's window), and the
+                                // aim reticle's placement, retired (a hidden retired line; the reticle always sits on the aim axis)
+                                "native_on_foot_world_markers", "native_on_foot_spine_bend_amount", "native_on_foot_weapon_eye_body",
+                                "native_on_foot_pistol_readout_forward_cm", "native_on_foot_pistol_readout_left_cm", "native_on_foot_pistol_readout_up_cm",
+                                "native_on_foot_pistol_readout_toward_eye_cm", "native_on_foot_rifle_ads_readout_forward_cm",
+                                "native_on_foot_rifle_ads_readout_left_cm", "native_on_foot_rifle_ads_readout_up_cm",
+                                "native_on_foot_rifle_ads_readout_toward_eye_cm", "native_on_foot_hud_room", "native_on_foot_hud_left_x",
+                                "native_on_foot_hud_left_y", "native_on_foot_hud_top_x", "native_on_foot_hud_top_y", "native_on_foot_hud_right_x",
+                                "native_on_foot_hud_right_y", "native_on_foot_hud_centre_x", "native_on_foot_hud_centre_y",
+                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow"};
     // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
     // but cannot add rows back to this compiled table.
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 40, "the Native on foot page retains its other 40 settings (24, F88's two weapon eye rows (F98c retired Weapon eye up, F112 Weapon eye right), F106's ADS: sight "
-                                "in both eyes (in F89's ADS: close left eye's place), F90's four pistol readout rows, F92a's four rifle ADS readout rows, F92b's ADS: aim "
-                                "with head, F94a's Eye height, F109's Turn style and Snap turn step, and F121b's Visor axis (test); F122 retired F117's Panel cursor (test) and F120's Panel cursor follows (test), and its "
-                                "own key has no row)");
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F127: 40 before; 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "Visor axis (test) stays until its test flight)");
+    // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
+    // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
+    {
+        struct Want { const char* key; const char* group; };
+        static const Want want[] = {
+            {"native_on_foot", "Native on foot VR"},
+            {"native_on_foot_look_to_aim", "Look and aim"},
+            {"native_on_foot_turn_style", "Look and aim"},
+            {"native_on_foot_snap_turn_deg", "Look and aim"},
+            {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
+            {"native_on_foot_ads_eye_distance_cm", "Aiming down sights"},
+            {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
+            {"native_on_foot_ads_head_aim", "Aiming down sights"},
+            {"native_on_foot_eye_height_cm", "Body and view"},
+            {"native_on_foot_weapon_view_offset_cm", "Body and view"},
+            {"native_on_foot_weapon_eye_forward_cm", "Body and view"},
+            {"native_on_foot_breathable_visor", "Body and view"},
+            {"native_on_foot_visor_axis", "Body and view"},
+            {"native_on_foot_hud_distance", "HUD"},
+            {"native_on_foot_hud_size", "HUD"},
+            {"native_on_foot_hud_element_scale", "HUD"},
+            {"native_on_foot_hud_spread", "HUD"},
+            {"native_on_foot_hud_follow", "HUD"},
+        };
+        constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
+        int at = 0;
+        bool inOrder = true;
+        for (int i = 0; i < kCount; ++i) {
+            if (strcmp(kMenuRows[i].page, "native_on_foot") != 0) continue;
+            const bool match = at < kWant && strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 &&
+                               strcmp(kMenuRows[i].group, want[at].group) == 0;
+            if (!match) {
+                printf("  page row %d is fix.%s under \"%s\"; wanted %s under \"%s\"\n", at, kMenuRows[i].key, kMenuRows[i].group, at < kWant ? want[at].key : "(none)",
+                       at < kWant ? want[at].group : "");
+                inOrder = false;
+            }
+            ++at;
+        }
+        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, and the HUD last");
+        int firstPageRow = -1;
+        for (int i = 0; i < kCount && firstPageRow < 0; ++i)
+            if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) firstPageRow = i;
+        check(firstPageRow >= 0 && strcmp(kMenuRows[firstPageRow].section, "fix") == 0 && strcmp(kMenuRows[firstPageRow].key, "native_on_foot") == 0 &&
+                  strcmp(kMenuRows[firstPageRow].label, "Native on foot VR") == 0,
+              "the first row of the Native on foot page is the feature switch, labelled Native on foot VR");
+    }
     for (const char* key : keys) {
         bool found = false;
         for (int i = 0; i < kCount; ++i)
