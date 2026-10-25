@@ -1239,7 +1239,9 @@ const Golden kInjectGolden[] = {
     // reads its frustum and is counted by signature at every exit (five noteSignature calls), and the 5 s tick prints one more line.
     // Log-only; no write, no key, no change to what is injected. Re-pinned again 2026-10-14 (flat-switch fixes): the signature sample moved\n    // ahead of the observe-only return (reads only, ahead of every write), kind3Seen is set after the admission and not for an Observed call,\n    // and the flat frame step takes the detour over from the VR side (takeOverFromVr) and begins the ownership machine with the hook's mode.
     // flatPause was re-pinned for the gate fix: the original body is now flatCameraInjectPauseFlat (the flat runtime's own write), and\n    // flatCameraInjectPause is the VR side's guarded entry (a no-op while the flat profile is active).
-    {"preFlat", "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr, 0xE8749FAF6BB4D69Aull},
+    // preFlat re-pinned 2026-10-25 (issue 124): the census's call-site count takes the call sites resolved at install,
+    // census.noteCaller(callerRva, g_inject.knownCallers), equal to kFlatCameraKnownCallers on build 334925; nothing else changed.
+    {"preFlat", "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr, 0xA198A41E4B102E94ull},
     {"postFlat", "    if (g_refreshTls.observe) {\n", nullptr, 0xD8A87AE0BF95ACF3ull},
     {"flatFrame", "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {", nullptr, 0x730964946BE20D2Cull},
     {"flatPause", "void flatCameraInjectPauseFlat(bool paused) {", nullptr, 0xC9482D7BA404941Bull},

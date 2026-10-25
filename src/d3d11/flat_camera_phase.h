@@ -573,10 +573,12 @@ public:
     void noteKind(bool readable, uint32_t kind) {
         ++kinds_[!readable ? 7 : kind <= 5 ? kind : 6];
     }
-    // callerRva: the call site's offset from the game module, or 0 when unknown.
-    void noteCaller(uint64_t callerRva) {
+    // callerRva: the call site's offset from the game module, or 0 when unknown. known: kFlatCameraKnownCallers in the running
+    // build, as offsets from the module (the glue resolves them with gameRva; a rig passes the table itself); a 0 is a site not
+    // found, which no call matches.
+    void noteCaller(uint64_t callerRva, const uint64_t (&known)[4]) {
         size_t slot = 4;
-        for (size_t i = 0; i < 4; ++i) if (callerRva == kFlatCameraKnownCallers[i]) slot = i;
+        for (size_t i = 0; i < 4; ++i) if (known[i] != 0 && callerRva == known[i]) slot = i;
         ++callers_[slot];
     }
     void reset() { *this = FlatCameraCensus{}; }
@@ -650,12 +652,16 @@ inline int flatCameraFormatCensus(char* out, size_t size, const FlatCameraCensus
         put("%s0x%llx:%u:%llu:%llu", rank ? " " : "", (unsigned long long)c.at(best).camera,
             c.at(best).kind, (unsigned long long)c.at(best).calls, (unsigned long long)c.at(best).injected);
     }
-    put("] callers=[+0x%X=%llu,+0x%X=%llu,+0x%X=%llu,+0x%X=%llu,other=%llu]",
-        kFlatCameraKnownCallers[0], (unsigned long long)c.callerCount(0),
-        kFlatCameraKnownCallers[1], (unsigned long long)c.callerCount(1),
-        kFlatCameraKnownCallers[2], (unsigned long long)c.callerCount(2),
-        kFlatCameraKnownCallers[3], (unsigned long long)c.callerCount(3),
-        (unsigned long long)c.callerCount(4));
+    // The callers are labelled by their build-334925 offsets (log arguments of snprintf itself, which put() would hide).
+    if (n < size) {
+        const int w = std::snprintf(out + n, size - n, "] callers=[+0x%X=%llu,+0x%X=%llu,+0x%X=%llu,+0x%X=%llu,other=%llu]",
+            kFlatCameraKnownCallers[0], (unsigned long long)c.callerCount(0),
+            kFlatCameraKnownCallers[1], (unsigned long long)c.callerCount(1),
+            kFlatCameraKnownCallers[2], (unsigned long long)c.callerCount(2),
+            kFlatCameraKnownCallers[3], (unsigned long long)c.callerCount(3),
+            (unsigned long long)c.callerCount(4));
+        if (w > 0) n += static_cast<size_t>(w);
+    }
     return static_cast<int>(n);
 }
 
