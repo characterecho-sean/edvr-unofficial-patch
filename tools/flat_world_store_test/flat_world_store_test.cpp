@@ -82,15 +82,16 @@ int main(int argc,char** argv) {
     using namespace edvr;
     flatOriginCaptureInitialize(true); // this rig exercises the diagnostic store observer
     const uint8_t* pin=sealed::kStorePrologue;
-    const uint32_t stamp=ecm::kExpectedTimestamp,size=ecm::kExpectedImageSize;
-    check(sealed::storeInstallDecision(true,stamp,size,stamp,size,pin,pin,16)==sealed::StoreInstall::kInstall,
-          "flat world store: only pinned build and prologue admit hook");
-    check(sealed::storeInstallDecision(true,stamp+1,size,stamp,size,pin,pin,16)==sealed::StoreInstall::kWrongIdentity&&
-          sealed::storeInstallDecision(false,stamp,size,stamp,size,pin,pin,16)!=sealed::StoreInstall::kInstall,
-          "flat world store: wrong or unreadable PE refuses both consumers");
-    uint8_t wrong[16]{};std::memcpy(wrong,pin,sizeof(wrong));wrong[4]^=1;
-    check(sealed::storeInstallDecision(true,stamp,size,stamp,size,wrong,pin,16)!=sealed::StoreInstall::kInstall,
-          "flat world store: wrong prologue refuses both consumers");
+    // The store's address comes from the resolver (game_build.h): the constant on the known build, a signature match or 0 elsewhere.
+    const uintptr_t at=0x4314C60u;
+    check(sealed::storeInstallDecision(true,at,pin,true)==sealed::StoreInstall::kInstall,
+          "flat world store: a found store with its prologue admits the hook");
+    check(sealed::storeInstallDecision(true,0,pin,true)==sealed::StoreInstall::kNotFound&&
+          sealed::storeInstallDecision(false,at,pin,true)!=sealed::StoreInstall::kInstall,
+          "flat world store: a store not found, or an unreadable PE, refuses both consumers");
+    check(sealed::storeInstallDecision(true,at,pin,false)!=sealed::StoreInstall::kInstall&&
+          sealed::storeInstallDecision(true,at,nullptr,true)!=sealed::StoreInstall::kInstall,
+          "flat world store: a wrong or unreadable prologue refuses both consumers");
     {
         std::mutex installMutex;
         std::atomic<bool> ready{false},refused{false},start{false};

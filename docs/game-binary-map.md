@@ -177,6 +177,9 @@ branch, which sits beside the light grid's view-row refresh.
    for the doc-only addresses. A cold Ghidra import of the game took 39 min
    and about 2.5 GB of Java heap; set `GHIDRA_HEADLESS_MAXMEM=16G` and keep one
    session open rather than re-importing per question.
+4. **Signature table:** regenerate `src\common\game_signatures.inc` from the
+   new known exe, and the expectation files in `tools\game_build_test`
+   (`docs\design-game-update-signatures-2026-10-25.md`, "After each retarget").
 
 ## Not in this doc
 

@@ -23,6 +23,7 @@
 #include "../common/runtime_profile.h"
 #include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
+#include "../common/game_build.h"
 #include "../common/guard.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
@@ -482,6 +483,9 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "touched.",
             build.empty() ? "(unreadable)" : build.c_str(), verified.c_str());
     }
+    // TEMPORARY instrument (advanced.game_update_check, issue 124): off, nothing; on, on the known build, the signature resolver runs once
+    // on a background thread and logs whether it finds every address where the hooks' constants put it.
+    edvr::gameBuildStartup();
 
     if (g_missingExports) {
         edvr::Log::get().note(

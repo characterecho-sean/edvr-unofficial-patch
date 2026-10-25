@@ -632,7 +632,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
-    "src\common\frame_flag.cpp" ^
+    "src\common\frame_flag.cpp" "src\common\game_build.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
@@ -2407,6 +2407,24 @@ if not exist "%OBJ%\optimizedstation" mkdir "%OBJ%\optimizedstation"
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: optimized station test build failed & exit /b 1 )
 "%BUILD%\optimized_station_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_game_build_test
+echo [edvr] === game_build_test.exe ===
+REM The runtime signature resolver (src\common\game_build_core.h, issue 124) against its reference, tools\hook_signatures.py. Always: the
+REM self-test's synthetic exes (hook_signatures.py fixture writes them, their table as C++ and Python's answers) mapped as the loader maps
+REM an image, every target's answer equal to Python's, the named cases, the masked pin compare and an unreadable page. When the archived
+REM executables are at the main checkout's analysis\ (or EDVR_ANALYSIS_DIR): each mapped and resolved with the committed table against
+REM tools\game_build_test\expect_*.txt, 0 WRONG and Python's answer per target, and the known build resolving to itself; without them
+REM it prints "skipped: no archived exes" and passes. No DLL and no game.
+if not exist "%OBJ%\gamebuild" mkdir "%OBJ%\gamebuild"
+python tools\hook_signatures.py fixture --out-dir "%OBJ%\gamebuild" >nul || exit /b 1
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%OBJ%\gamebuild" /Fo"%OBJ%\gamebuild\\" ^
+    /Fe"%BUILD%\game_build_test.exe" "tools\game_build_test\game_build_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: game build test build failed & exit /b 1 )
+"%BUILD%\game_build_test.exe" --self-test "%OBJ%\gamebuild" "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_exposure_chain_test

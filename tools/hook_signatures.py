@@ -14,6 +14,14 @@ whether the matcher would have found every address on builds we hold.
     python tools/hook_signatures.py check --table build/hook_signatures.json --exe <exe> ^
         --expect <build_diff.py map --json output> [--invert] [--src src]
     python tools/hook_signatures.py survey --exe <known> --other <exe> --cache <map cache>
+    python tools/hook_signatures.py fixture --out-dir <dir> [--dry-run]
+
+generate --emit-cpp <path> also writes the table as a C++ include
+(src/common/game_signatures.inc, the runtime resolver's table; see
+src/common/game_build_core.h); check --emit-expect <path> writes what the
+runtime rig compares with (tools/game_build_test/expect_<build>.txt: the
+ground truth and this matcher's answer per target); fixture writes the
+self-test's synthetic exes with their table and answers for that rig.
 
 The unit.  The same code units tools/build_diff.py uses: each .pdata
 RUNTIME_FUNCTION range (chained fragments and funclets included), plus the
@@ -36,10 +44,18 @@ second witness:
   * a function whose masked bytes are shared by clones (tiny getters and
     thunks): the rel32 or RIP-relative operand of a caller that is itself a
     unique unit names it, and the named unit must be one of the clones ("ref");
-    so does the unit at a fixed distance, in address order, from a unique
-    neighbour ("nbr"), but neighbours alone are refused (layout-only) unless
-    --allow-layout, because a family of identical thunks that gained or lost
-    a member is mis-named by position;
+    the clone's own fingerprints pick it out ("fp"): what its masked fields
+    point at in the known build -- for a rel32 or RIP-relative operand that
+    lands in another code unit, that unit's length, masked hash and the
+    offset landed on; for a RIP-relative operand into a read-only data
+    section, the FNV-1a-64 of up to 16 bytes there (relocated bytes and the
+    import address table left out); and, for a unit whose last instruction
+    does not end the flow, the length and masked hash of the unit it falls
+    into -- and a candidate is accepted only when it is the one clone that
+    shows every fingerprint; the unit at a fixed distance, in address order,
+    from a unique neighbour ("nbr") names one too, but neighbours alone are
+    refused (layout-only) unless --allow-layout, because a family of
+    identical thunks that gained or lost a member is mis-named by position;
   * a data address, by any of these, all of which must agree when several
     apply: a RIP-relative operand in a unique unit names it, as unit start +
     next-instruction offset + the disp32 read from the new bytes ("ref"); it
@@ -79,8 +95,12 @@ except ImportError:  # Allows a repository-root import in unit tests.
     from tools.openxr_pe import Image, PEError
     from tools import build_diff as bd
 
-FORMAT = 1
+FORMAT = 2                # 2: clone fingerprints ("fp")
+CPP_FORMAT = 1            # the layout of the emitted C++ table (game_build_core.h)
 HASH_NAME = "fnv1a64-masked"
+SCN_WRITE = 0x80000000    # IMAGE_SCN_MEM_WRITE
+MAX_FPS = 8               # fingerprints recorded per clone target
+RODATA_FP_LEN = 16        # bytes hashed for a read-only data fingerprint
 MAX_REFS = 3              # reference units recorded per target (cross-checked)
 PREFERRED_REF_LEN = 24    # a reference unit shorter than this is a last resort
 MAX_REF_CANDIDATES = 60   # reference units examined per target
@@ -158,6 +178,59 @@ def read_relocs(im):
                 out.append((page + (entry & 0xFFF), width))
         off += block
     return sorted(out)
+
+
+def iat_range(im):
+    """[start, end) RVAs of the import address table: the loader writes the
+    imported functions' addresses there, so its bytes differ in memory."""
+    rva, size = im.directory(12)
+    return (rva, rva + size) if rva else (0, 0)
+
+
+def rodata_bytes(im, rva, n):
+    """The n bytes at rva when [rva, rva + n) lies in one section that is
+    neither executable nor writable and outside the import address table
+    (zero-filled past the raw data, as the loader maps it), else None."""
+    if n <= 0:
+        return None
+    lo, hi = iat_range(im)
+    if lo < hi and rva < hi and lo < rva + n:
+        return None
+    for start, span, _raw, _raw_size, flags in im.sections:
+        if start <= rva < start + span:
+            if rva + n > start + span or flags & (bd.SCN_EXEC | SCN_WRITE):
+                return None
+            return bd._read_rva(im, rva, n)
+    return None
+
+
+def unit_shows(U, ui, units, uid):
+    """True when unit ui has table unit uid's length and masked hash."""
+    u = units[uid]
+    return U.en[ui] - U.st[ui] == u["len"] and \
+        signature_hash(U.body(ui), u["mask"]) == int(u["hash"], 16)
+
+
+def fp_ok(fp, im, U, ui, units):
+    """True when unit ui of im shows the clone fingerprint fp.
+
+    fall: the unit that starts where ui ends is table unit fp["unit"].  code:
+    the rel32 or RIP-relative field at fp["at"] lands fp["off"] bytes into
+    another unit that is table unit fp["unit"].  rodata: it lands in a
+    read-only data section on fp["len"] bytes whose hash is fp["hash"]."""
+    if fp["kind"] == "fall":
+        k = ui + 1
+        return k < len(U) and U.st[k] == U.en[ui] and unit_shows(U, k, units, fp["unit"])
+    body = U.body(ui)
+    if fp["at"] + 4 > len(body):
+        return False
+    target = U.st[ui] + fp["next"] + struct.unpack_from("<i", body, fp["at"])[0]
+    if fp["kind"] == "code":
+        k = U.at(target)
+        return k >= 0 and k != ui and target - U.st[k] == fp["off"] \
+            and unit_shows(U, k, units, fp["unit"])
+    head = rodata_bytes(im, target, fp["len"])
+    return head is not None and "%016X" % bd.fnv1a64(head) == fp["hash"]
 
 
 # --------------------------------------------------------------------------
@@ -327,6 +400,26 @@ def decode_unit(md, cs, x86, body, start, data_spans=(), code_spans=()):
     return pairs, refs, bad, suspect
 
 
+def falls_through(md, x86, body, start):
+    """True when the unit's bytes decode to the end and the last instruction
+    does not end the flow (no ret, jmp, int3, ud2, hlt or int): execution
+    runs on into whatever unit starts at the unit's end, which is a code
+    relation and not a layout one."""
+    stops = {x86.X86_INS_JMP, x86.X86_INS_RET, x86.X86_INS_RETF, x86.X86_INS_INT3,
+             x86.X86_INS_UD2, x86.X86_INS_HLT, x86.X86_INS_INT, x86.X86_INS_IRET,
+             x86.X86_INS_IRETQ}
+    pos, n, last = 0, len(body), None
+    while pos < n:
+        end = pos
+        for ins in md.disasm(body[pos:], start + pos):
+            end = ins.address - start + ins.size
+            last = ins
+        if end == pos:
+            return False  # an undecodable byte: no claim about the flow
+        pos = end
+    return last is not None and pos == n and last.id not in stops
+
+
 # --------------------------------------------------------------------------
 # Target lists.
 # --------------------------------------------------------------------------
@@ -391,7 +484,7 @@ def scan_refs(im, wanted):
     return hits
 
 
-def generate(exe_path, targets, use_relocs=True, log=lambda s: None):
+def generate(exe_path, targets, use_relocs=True, log=lambda s: None, build=None):
     """Build the signature table of exe_path for [(rva, kind)] targets.
 
     Returns (table, report); the report lists what is not usable: targets in
@@ -406,7 +499,7 @@ def generate(exe_path, targets, use_relocs=True, log=lambda s: None):
     for i in range(len(U)):
         by_len[U.en[i] - U.st[i]].append(i)
 
-    units, uid_of, unit_refs = [], {}, {}
+    units, uid_of, unit_refs, clones_of = [], {}, {}, {}
     data_spans = [(rva, rva + len(buf)) for rva, buf in data_sections(im)]
     code_spans = [(rva, rva + n) for rva, n, _ in exec_sections(im)]
 
@@ -430,11 +523,56 @@ def generate(exe_path, targets, use_relocs=True, log=lambda s: None):
                       "same": 1 + len(same), "undecoded": bad, "suspect": suspect})
         uid_of[ui] = len(units) - 1
         unit_refs[uid_of[ui]] = refs
+        clones_of[uid_of[ui]] = sorted([ui] + same)
         return uid_of[ui]
+
+    lo_iat, hi_iat = iat_range(im)
+
+    def fingerprints(ui):
+        """The clone fingerprints of unit ui (see fp_ok), those that tell it
+        from at least one of its known clones first, at most MAX_FPS, or []
+        when together they do not single it out among the known clones."""
+        uid, start = unit_id(ui), U.st[ui]
+        found = []
+        for at, nxt, target in unit_refs[uid]:
+            k = U.at(target)
+            if k >= 0:
+                if k != ui:
+                    found.append({"kind": "code", "at": at, "next": nxt,
+                                  "unit": unit_id(k), "off": target - U.st[k]})
+                continue
+            n = RODATA_FP_LEN
+            for start_s, span, _raw, _rs, _fl in im.sections:
+                if start_s <= target < start_s + span:
+                    n = min(n, start_s + span - target)
+                    break
+            k = bisect.bisect_left(reloc_rvas, target - 7)
+            while k < len(reloc_rvas) and reloc_rvas[k] < target + n:
+                r = reloc_rvas[k]
+                if r + reloc_width[r] > target:
+                    n = r - target  # stop before the first relocated byte
+                    break
+                k += 1
+            if n < 4 or (lo_iat < hi_iat and target < hi_iat and lo_iat < target + n):
+                continue
+            head = rodata_bytes(im, target, n)
+            if head is not None:
+                found.append({"kind": "rodata", "at": at, "next": nxt, "len": n,
+                              "hash": "%016X" % bd.fnv1a64(head)})
+        if ui + 1 < len(U) and U.st[ui + 1] == U.en[ui] and \
+                falls_through(md, x86, U.body(ui), start):
+            found.append({"kind": "fall", "unit": unit_id(ui + 1)})
+        others = [c for c in clones_of[uid] if c != ui]
+        telling = [fp for fp in found if any(not fp_ok(fp, im, U, c, units) for c in others)]
+        chosen = (telling + [fp for fp in found if fp not in telling])[:MAX_FPS]
+        if not telling or any(all(fp_ok(fp, im, U, c, units) for fp in chosen) for c in others):
+            return []
+        return chosen
 
     report = {"no_unit": [], "non_unique": [], "leaf": [], "undecoded": [],
               "code_no_ref": [], "code_orphan": [], "data_no_ref": [],
-              "data_weak_ref": [], "data_orphan": []}
+              "data_weak_ref": [], "data_orphan": [], "code_fp": [],
+              "code_layout_only": []}
     out_targets, pending = [], []
     for rva, kind in targets:
         if kind != "code":
@@ -509,10 +647,16 @@ def generate(exe_path, targets, use_relocs=True, log=lambda s: None):
         nbr = neighbours(ui)
         if nbr:
             entry["nbr"] = nbr
-        if not refs and not nbr:
+        fps = fingerprints(ui)
+        if fps:
+            entry["fp"] = fps
+            report["code_fp"].append(entry["rva"])
+        if not refs and not nbr and not fps:
             report["code_orphan"].append(entry["rva"])
         elif not refs:
             report["code_no_ref"].append(entry["rva"])
+            if not fps:
+                report["code_layout_only"].append(entry["rva"])
     base = image_base(im)
     entry_index = {t["rva"]: i for i, t in enumerate(out_targets) if t["off"] == 0}
     for rva in data:
@@ -538,14 +682,184 @@ def generate(exe_path, targets, use_relocs=True, log=lambda s: None):
             report["data_weak_ref"].append(rva)
         out_targets.append(entry)
 
+    if build is None:
+        digits = re.findall(r"\d{5,}", Path(exe_path).stem)
+        build = digits[-1] if digits else ""
     table = {"format": FORMAT, "hash": HASH_NAME,
-             "known": {"timestamp": "0x%X" % stamp, "image_size": "0x%X" % image_size},
+             "known": {"timestamp": "0x%X" % stamp, "image_size": "0x%X" % image_size,
+                       "build": build},
              "units": units, "targets": out_targets}
     return table, report
 
 
 def table_text(table):
     return json.dumps(table, separators=(",", ":")) + "\n"
+
+
+def table_hash(table):
+    """FNV-1a-64 of the table's JSON text: names one table in the C++ table
+    and in the rig's expectation files."""
+    return bd.fnv1a64(table_text(table).encode("utf-8"))
+
+
+FP_KINDS = {"code": 1, "rodata": 2, "fall": 3}      # game_build_core.h kFpCode...
+GUARD_KINDS = {"str": 1, "code-ptr": 2}              # kGuardStr, kGuardCodePtr
+REASONS = ("no-candidate", "ambiguous", "layout-only", "data-ref-failed")
+CPP_TABLE_PATH = "src/common/game_signatures.inc"
+
+
+def emit_cpp(table, generated_by):
+    """The table as a C++ include for src/common/game_build_core.h's Table.
+
+    Lengths, offsets, mask ranges, hashes and the known build's identity;
+    never code bytes or strings (section names are the PE's own).  Every
+    array has at least one element, the counts say how many are real."""
+    known = table["known"]
+    mask, unit_rows = [], []
+    for u in table["units"]:
+        unit_rows.append("    {%du, %du, %du, 0x%sull}," % (
+            u["len"], len(mask) // 2, len(u["mask"]) // 2, u["hash"]))
+        mask += u["mask"]
+    sections, refs, nbrs, fps, rows = [], [], [], [], []
+
+    def sec_index(name):
+        if name is None:
+            return 0xFF
+        if name not in sections:
+            sections.append(name)
+        return sections.index(name)
+
+    for t in table["targets"]:
+        r0, n0, f0 = len(refs), len(nbrs), len(fps)
+        refs += ["    {%du, %du, %du}," % (r["unit"], r["at"], r["next"]) for r in t.get("refs", ())]
+        nbrs += ["    {%du, %d}," % (nb["unit"], nb["delta"]) for nb in t.get("nbr", ())]
+        for f in t.get("fp", ()):
+            fps.append("    {%d, %du, %du, %du, %du, %du, 0x%sull}," % (
+                FP_KINDS[f["kind"]], f.get("at", 0), f.get("next", 0), f.get("unit", 0),
+                f.get("off", 0), f.get("len", 0), f.get("hash", "0" * 16)))
+        guard, ptee = t.get("guard") or {}, t.get("ptee") or {}
+        if t["kind"] == "code":
+            kind, sec, unit, off, pk, pi, po = 0, 0xFF, t["unit"], t["off"], 0, 0, 0
+        else:
+            kind, sec, unit, off = 1, sec_index(t.get("sec")), 0, 0
+            pk, pi, po = (1, ptee["target"], 0) if "target" in ptee else \
+                (2, ptee["unit"], ptee["off"]) if "unit" in ptee else (0, 0, 0)
+        rows.append("    {0x%Xu, %d, %d, %d, %d, %du, %du, %du, %du, %du, %du, %du, %du, %du, %du, "
+                    "%du, 0x%sull}," % (
+                        t["rva"], kind, sec, GUARD_KINDS.get(guard.get("kind"), 0), pk, unit, off,
+                        r0, len(refs) - r0, n0, len(nbrs) - n0, f0, len(fps) - f0, pi, po,
+                        guard.get("len", 0), guard.get("hash", "0" * 16)))
+
+    def array(ctype, name, items, empty):
+        return ["constexpr %s %s[] = {" % (ctype, name)] + (items or ["    %s," % empty]) + ["};"]
+
+    mask_rows = ["    " + " ".join("%du," % v for v in mask[k:k + 16])
+                 for k in range(0, len(mask), 16)]
+    out = [
+        "// GENERATED by tools/hook_signatures.py; do not edit. The signature table of the game build EDVR",
+        "// binds (issue 124, docs/design-game-update-signatures-2026-10-25.md): build %s, PE stamp %s,"
+        % (known.get("build") or "unnamed", known["timestamp"]),
+        "// SizeOfImage %s. Lengths, offsets, mask ranges and hashes only: no code bytes, no strings."
+        % known["image_size"],
+        "// Regenerate after every retarget, from the new known executable:",
+        "//   " + generated_by,
+        "// Included inside a namespace that sees src/common/game_build_core.h's types.",
+        "constexpr uint32_t kFormat = %du;" % CPP_FORMAT,
+        "constexpr uint32_t kKnownStamp = %su;" % known["timestamp"],
+        "constexpr uint32_t kKnownImageSize = %su;" % known["image_size"],
+        "constexpr char kKnownBuild[] = \"%s\";" % (known.get("build") or ""),
+        "constexpr uint64_t kTableHash = 0x%016Xull;" % table_hash(table),
+        "// {length, first mask pair, mask pairs, masked FNV-1a-64}",
+    ] + array("Unit", "kUnits", unit_rows, "{0u, 0u, 0u, 0ull}") + [
+        "// Masked ranges inside the units: offset, length.",
+    ] + array("uint32_t", "kMask", mask_rows, "0u") + [
+        "// {known RVA, kind, section, guard, pointee kind, unit, offset, refs first/count, neighbours",
+        "//  first/count, fingerprints first/count, pointee index, pointee offset, string length, string hash}",
+    ] + array("Target", "kTargets", rows, "{}") + [
+        "// {unit, field offset, next-instruction offset}",
+    ] + array("Ref", "kRefs", refs, "{0u, 0u, 0u}") + [
+        "// {unit, units away}",
+    ] + array("Nbr", "kNbrs", nbrs, "{0u, 0}") + [
+        "// {kind, field offset, next-instruction offset, unit, offset in it, bytes, hash}",
+    ] + array("Fp", "kFps", fps, "{0, 0u, 0u, 0u, 0u, 0u, 0ull}") + \
+        array("Section", "kSections", ["    {\"%s\"}," % s for s in sections], "{\"\"}") + [
+        "constexpr Table kTable = {kFormat, kKnownStamp, kKnownImageSize, kKnownBuild, kTableHash,",
+        "    kUnits, %du, kMask, %du, kTargets, %du, kRefs, %du, kNbrs, %du, kFps, %du, kSections, %du};"
+        % (len(unit_rows), len(mask), len(rows), len(refs), len(nbrs), len(fps), len(sections)),
+    ]
+    return "\n".join(out) + "\n"
+
+
+def exe_identity(path):
+    im = Image(Path(path).read_bytes())
+    return bd.read_identity(im)
+
+
+def expect_text(table, identity, rows, label):
+    """The rig's expectation file for one exe: the known build and table it
+    was made with, the exe's identity, then per target the ground truth (or
+    -) and this matcher's answer, via and reason (or -)."""
+    known = table["known"]
+    out = ["# hook_signatures expectations (%s): generated by tools/hook_signatures.py; do not edit." % label,
+           "known %s %s" % (known["timestamp"], known["image_size"]),
+           "exe 0x%X 0x%X" % identity,
+           "table %016X" % table_hash(table)]
+    for r in rows:
+        want = r.get("want")
+        out.append("r 0x%X %s %s %s %s %s" % (
+            r["rva"], r["kind"], "0x%X" % want if want is not None else "-",
+            "0x%X" % r["new"] if r["new"] is not None else "-", r["via"] or "-",
+            r["reason"] or "-"))
+    return "\n".join(out) + "\n"
+
+
+def write_outputs(outputs, dry_run, say=print):
+    """Write {path: text}; with dry_run write nothing at all and say so."""
+    for path, data in outputs.items():
+        size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+        if dry_run:
+            say("dry run: would write %d bytes to %s; nothing written" % (size, path))
+            continue
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, bytes):
+            path.write_bytes(data)
+        else:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(data)
+        say("wrote %s" % path)
+
+
+def fixture_outputs(out_dir):
+    """{path: bytes or text} for the C++ rig: the self-test's three exes,
+    their table as C++, Python's answers for each and the fixture's names."""
+    out_dir = Path(out_dir)
+    known, K = _fixture(False)
+    unknown, N = _fixture(True)
+    broken, B = _fixture(True, break_data=True)
+    outputs = {out_dir / "known.exe": known, out_dir / "unknown.exe": unknown,
+               out_dir / "broken.exe": broken}
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        paths = {}
+        for name, data in (("known", known), ("unknown", unknown), ("broken", broken)):
+            paths[name] = td / (name + ".exe")
+            paths[name].write_bytes(data)
+        table, _ = generate(paths["known"], _fixture_targets(K), build="fixture")
+        outputs[out_dir / "fixture_signatures.inc"] = emit_cpp(
+            table, "python tools/hook_signatures.py fixture --out-dir <dir> (the self-test's fixture)")
+        for name in ("known", "unknown", "broken"):
+            results, _ = resolve(table, paths[name])
+            text = expect_text(table, exe_identity(paths[name]),
+                               [dict(r, want=None) for r in results], "fixture " + name)
+            outputs[out_dir / ("expect_%s.txt" % name)] = text.replace(
+                "\nexe ", "\nfile %s.exe\nexe " % name, 1)
+    names = ["# fixture names: name, RVA in the known, unknown and broken builds (- where it has none)"]
+    for name in sorted(set(K) | set(N) | set(B)):
+        names.append("name %s %s" % (name, " ".join(
+            "0x%X" % S[name] if name in S else "-" for S in (K, N, B))))
+    outputs[out_dir / "fixture_names.txt"] = "\n".join(names) + "\n"
+    return outputs
 
 
 # --------------------------------------------------------------------------
@@ -556,8 +870,8 @@ def resolve(table, exe_path, allow_layout=False):
     """Find every table target in exe_path.
 
     Returns (results, stats).  results has one dict per target: rva (known
-    build), kind, new (RVA or None), via (hash; ref, ptr, content, nbr or a
-    combination), reason (None, no-candidate, ambiguous, layout-only,
+    build), kind, new (RVA or None), via (hash; ref, fp, ptr, content, nbr or
+    a combination), reason (None, no-candidate, ambiguous, layout-only,
     data-ref-failed) and detail.  Only a unique answer, confirmed by every
     mechanism that has one, is accepted.  A clone told apart only by its
     neighbours (nbr) rests on the layout alone, which the survey found wrong
@@ -618,6 +932,17 @@ def resolve(table, exe_path, allow_layout=False):
                 why.append("neighbour " + state)
         return starts, why
 
+    def fp_values(fps, found):
+        """({the start of the one clone that shows every fingerprint}, why):
+        none, or several, name nothing (and are not a disagreement)."""
+        if not fps:
+            return set(), []
+        hits = [ui for ui in found
+                if all(fp_ok(fp, im, U, ui, table["units"]) for fp in fps)]
+        if len(hits) == 1:
+            return {U.st[hits[0]]}, []
+        return set(), ["%d of %d clones show the fingerprints" % (len(hits), len(found))]
+
     results = []
     for tg in table["targets"]:
         row = {"rva": tg["rva"], "kind": tg["kind"], "new": None, "via": None,
@@ -627,13 +952,14 @@ def resolve(table, exe_path, allow_layout=False):
             state, found = match(tg["unit"])
             if state == "ok":
                 row["new"], row["via"] = U.st[found[0]] + tg["off"], "hash"
-            elif state == "ambiguous" and (refs or tg.get("nbr")):
+            elif state == "ambiguous" and (refs or tg.get("nbr") or tg.get("fp")):
                 # The clones are identical, so a second witness picks one;
                 # every witness that answers must name one of the clones.
                 clone_starts = {U.st[ui] for ui in found}
                 answers, why, conflict = {}, [], False
                 for name, (values, w) in (("ref", ref_values(refs)),
-                                          ("nbr", neighbour_starts(tg.get("nbr", ())))):
+                                          ("nbr", neighbour_starts(tg.get("nbr", ()))),
+                                          ("fp", fp_values(tg.get("fp"), found))):
                     why += w
                     if len(values) == 1 and next(iter(values)) in clone_starts:
                         answers[name] = next(iter(values))
@@ -723,9 +1049,19 @@ def resolve(table, exe_path, allow_layout=False):
 def read_expect(path, invert=False):
     """{known-build rva: (expected rva or None, status)} from a build_diff map
     --json file.  Rows map rva -> new_rva; with invert the rows run the other
-    way (e.g. .agents/build-334925/map_all.json, 334473 -> 334925)."""
+    way (e.g. .agents/build-334925/map_all.json, 334473 -> 334925).  An
+    expectation file (check --emit-expect) is read too: its ground truth
+    column, so the file can be regenerated without the map."""
     out = {}
-    for row in json.loads(Path(path).read_text(encoding="utf-8-sig")):
+    text = Path(path).read_text(encoding="utf-8-sig")
+    if text.startswith("# hook_signatures expectations"):
+        for line in text.splitlines():
+            words = line.split()
+            if len(words) == 7 and words[0] == "r":
+                out[int(words[1], 16)] = (int(words[3], 16) if words[3] != "-" else None,
+                                          "expect-file" if words[3] != "-" else "expect-file-none")
+        return out
+    for row in json.loads(text):
         a, b = row.get("rva"), row.get("new_rva")
         if invert:
             a, b = b, a
@@ -771,6 +1107,8 @@ def source_files(src_dir, rvas):
     for path in sorted(root.rglob("*")):
         if path.suffix.lower() not in SRC_SUFFIXES or not path.is_file():
             continue
+        if path.name == Path(CPP_TABLE_PATH).name:
+            continue  # The generated table spells every address; it is not a user of one.
         text = path.read_text(encoding="utf-8", errors="replace")
         for value in hex_tokens(text):
             for cand in (value, value - bd.IMAGE_BASE):
@@ -908,6 +1246,9 @@ def survey(known, other, cache, n_random, per_status, seed, allow_layout=False):
     for row in wrong:
         lines.append("  WRONG 0x%X: map 0x%X, matcher 0x%X (via %s)" % row)
     lines.append("map says CHANGED and the matcher names another place: %d" % len(changed))
+    for rva, guess, new, via in changed:
+        lines.append("  CHANGED 0x%X: map %s, matcher 0x%X (via %s)" % (
+            rva, "0x%X" % guess if guess is not None else "none", new, via))
     return counts, {"wrong": wrong, "changed": changed}, lines
 
 
@@ -976,33 +1317,42 @@ def _reloc_block(page, rvas):
 def _fixture(new, break_data=False):
     """Known build (new False) or unknown build (new True): (exe bytes, names).
 
-    Known text: G F1 F2 C1 C2 LEAF H P1 P2 Q1 Q2 S1 S2 W1.  Unknown text: X G
-    F1 F2 C1 C2 LEAF H P1 P2 Q1 Q2 S1 S2 W1e W1c, everything shifted, data
-    moved.  F1 changes only in fields the mask covers (EQUAL); F2's struct
-    displacement changes (UNRESOLVED); C1 and C2 are identical clones that P1
-    and P2 call, and with break_data they swap places, so the caller and the
-    neighbours name different clones; LEAF has no .pdata entry; W1 is
-    edited in the unknown build and an exact copy of the old W1 sits beside
-    it, so the matcher resolves W1 to the wrong function.  Data: D1 and D2
-    are read by F1 and H; D3 nothing refers to; D4 is a cell holding P1's
-    address that nothing refers to; D5 a string read by S1; D6 a cell holding
-    G's address read by S2; D7 a string nothing refers to; D8 a cell holding
-    C1's address that nothing refers to.  Q1 and Q2 are clones that nothing
-    calls.  With break_data the unknown build's strings differ and its cells
-    are null."""
+    Known text: G F1 F2 C1 C2 LEAF H P1 P2 Q1 Q2 S1 S2 J T R1 R2 K1 K2 Z1 Z2
+    W1.  Unknown text: X G F1 F2 C1 C2 LEAF H P1 P2 Q1 Q2 S1 S2 J T R1 R2 K1
+    K2 Z1 Z2 W1e W1c, everything shifted, data moved.  F1 changes only in
+    fields the mask covers (EQUAL); F2's struct displacement changes
+    (UNRESOLVED); C1 and C2 are identical clones that P1 and P2 call, and with
+    break_data they swap places, so the caller and the neighbours name
+    different clones; LEAF has no .pdata entry; W1 is edited in the unknown
+    build and an exact copy of the old W1 sits beside it, so the matcher
+    resolves W1 to the wrong function.  Data: D1 and D2 are read by F1 and
+    H; D3 nothing refers to; D4 is a cell holding P1's address that nothing
+    refers to; D5 a string read by S1; D6 a cell holding G's address read by
+    S2; D7 a string nothing refers to; D8 a cell holding C1's address that
+    nothing refers to; D9 and D10 are 16-byte constants K1 and K2 load.  Q1
+    and Q2 are clones that nothing calls and nothing tells apart.  Clones
+    that nothing calls but their fingerprints tell apart: R1 calls G and R2
+    calls H; K1 loads D9 and K2 D10; Z1 and Z2 are nine-byte .pdata
+    fragments that fall into different second fragments (Z1b, Z2b).  With
+    break_data R1 and R2 swap places too (the neighbours then name R2), the
+    unknown build's strings differ and its cells are null."""
     text_rva, data_rva = 0x1000, 0x3200 if new else 0x3000
     pdata_rva, reloc_rva = 0x4200 if new else 0x4000, 0x5000
     S = {"D1": data_rva + 0x10, "D2": data_rva + 0x40, "D3": data_rva + 0x80,
          "D4": data_rva + 0x50, "D5": data_rva + 0x100, "D6": data_rva + 0x120,
-         "D7": data_rva + 0x140, "D8": data_rva + 0x160}
-    tail = ["LEAF", "H", "P1", "P2", "Q1", "Q2", "S1", "S2", "J", "T"]
+         "D7": data_rva + 0x140, "D8": data_rva + 0x160, "D9": data_rva + 0x180,
+         "D10": data_rva + 0x190}
+    tail = ["LEAF", "H", "P1", "P2", "Q1", "Q2", "S1", "S2", "J", "T"] \
+        + (["R2", "R1"] if break_data else ["R1", "R2"]) + ["K1", "K2", "Z1", "Z2"]
     order = (["X"] if new else []) + ["G", "F1", "F2"] \
         + (["C2", "C1"] if break_data else ["C1", "C2"]) + tail \
         + (["W1e", "W1c"] if new else ["W1"])
     sizes = {"X": 0x20, "G": 0x30, "F1": 0x60, "F2": 0x30, "C1": 0x30, "C2": 0x30,
              "LEAF": 0x10, "H": 0x40, "P1": 0x20, "P2": 0x20, "Q1": 0x20, "Q2": 0x20,
              "S1": 0x20, "S2": 0x20, "J": 0x30, "T": 0x20, "W1": 0x30, "W1e": 0x30,
-             "W1c": 0x30}
+             "W1c": 0x30, "R1": 0x20, "R2": 0x20, "K1": 0x10, "K2": 0x10, "Z1": 0x20,
+             "Z2": 0x20}
+    splits = {"Z1": 9, "Z2": 9}  # Units of two .pdata fragments: the first ends at this offset.
     cursor = text_rva
     for name in order:
         S[name] = cursor
@@ -1046,23 +1396,43 @@ def _fixture(new, break_data=False):
         a["W1c"].raw(*wbody(0xAB)).call(S["G"]).raw("4883C428", "C3")
     else:
         a["W1"].raw(*wbody(0xAB)).call(S["G"]).raw("4883C428", "C3")
+    # Fingerprinted clones: the same bytes once masked, told apart by what
+    # the masked field reaches (R, K) or by the fragment they fall into (Z).
+    a["R1"].raw("4883EC28", "B944000000").call(S["G"]).raw("4883C428", "C3")
+    a["R2"].raw("4883EC28", "B944000000").call(S["H"]).raw("4883C428", "C3")
+    a["K1"].rip("0F2805", S["D9"]).raw("0F1102", "C3")
+    a["K2"].rip("0F2805", S["D10"]).raw("0F1102", "C3")
+    for name, imm in (("Z1", 1), ("Z2", 2)):
+        a[name].raw("4053", "4883EC20", "4885D2", "B8%02X000000" % imm, "4883C420", "5B", "C3")
     funcs = [n for n in order if n != "LEAF"]
+    entries = []
+    for name in funcs:
+        cut = splits.get(name)
+        ends = [cut, len(a[name].buf)] if cut else [len(a[name].buf)]
+        begin = S[name]
+        for end in ends:
+            entries.append((begin, S[name] + end))
+            begin = S[name] + end
+    S["Z1b"], S["Z2b"] = S["Z1"] + splits["Z1"], S["Z2"] + splits["Z2"]
     raw_text, raw_data = 0x400, 0x400 + text_size
-    raw_pdata, raw_reloc = raw_data + 0x200, raw_data + 0x200 + 12 * len(funcs)
+    raw_pdata, raw_reloc = raw_data + 0x200, raw_data + 0x200 + 12 * len(entries)
     exe = bytearray(bd._fixture_pe(
         text_size=text_size, extra_sections=[
             (".rdata", data_rva, 0x200, raw_data, 0x40000040),
-            (".pdata", pdata_rva, 12 * len(funcs), raw_pdata, 0x40000040),
+            (".pdata", pdata_rva, 12 * len(entries), raw_pdata, 0x40000040),
             (".reloc", reloc_rva, 0x40, raw_reloc, 0x42000040)],
-        exception_dir=(pdata_rva, 12 * len(funcs))))
+        exception_dir=(pdata_rva, 12 * len(entries))))
     exe[raw_text:raw_text + text_size] = b"\xcc" * text_size
     for name in order:
         off = raw_text + S[name] - text_rva
         exe[off:off + len(a[name].buf)] = a[name].buf
         assert len(a[name].buf) <= sizes[name], name
-    for k, name in enumerate(funcs):
+    for k, (begin, end) in enumerate(entries):
         exe[raw_pdata + 12 * k:raw_pdata + 12 * k + 12] = struct.pack(
-            "<III", S[name], S[name] + len(a[name].buf), pdata_rva)
+            "<III", begin, end, pdata_rva)
+    for cell, fill in (("D9", 0x01), ("D10", 0x11)):
+        at = raw_data + S[cell] - data_rva
+        exe[at:at + 16] = bytes(range(fill, fill + 16))
     # Base relocations: the absolute pointer in F1 and the two code-pointer cells.
     cells = {"D4": "P1", "D6": "G", "D8": "C1"}
     blocks = _reloc_block(S["F1"] & ~0xFFF, a["F1"].relocs) \
@@ -1082,6 +1452,18 @@ def _fixture(new, break_data=False):
     return bytes(exe), S
 
 
+def _fixture_targets(K):
+    """The self-test's targets in the known fixture: [(rva, kind)]."""
+    return [(K["F1"], "code"), (K["F1+lea"], "code"), (K["F2"], "code"),
+            (K["C1"], "code"), (K["LEAF"], "code"), (K["G"], "code"),
+            (K["W1"], "code"), (K["D1"], "data"), (K["D2"], "data"),
+            (K["D3"], "data"), (K["D4"], "data"), (K["D5"], "data"),
+            (K["D6"], "data"), (K["D7"], "data"), (K["D8"], "data"),
+            (K["Q1"], "code"), (K["J"], "code"), (K["T"], "code"),
+            (K["R1"], "code"), (K["K1"], "code"), (K["Z1"], "code"),
+            (K["D1"] + 0x1000, "code")]
+
+
 def self_test():
     failures = []
 
@@ -1096,20 +1478,14 @@ def self_test():
 
     known, K = _fixture(False)
     unknown, N = _fixture(True)
-    broken, _ = _fixture(True, break_data=True)
+    broken, B = _fixture(True, break_data=True)
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         kp, np_, bp = td / "known.exe", td / "unknown.exe", td / "broken.exe"
         kp.write_bytes(known)
         np_.write_bytes(unknown)
         bp.write_bytes(broken)
-        targets = [(K["F1"], "code"), (K["F1+lea"], "code"), (K["F2"], "code"),
-                   (K["C1"], "code"), (K["LEAF"], "code"), (K["G"], "code"),
-                   (K["W1"], "code"), (K["D1"], "data"), (K["D2"], "data"),
-                   (K["D3"], "data"), (K["D4"], "data"), (K["D5"], "data"),
-                   (K["D6"], "data"), (K["D7"], "data"), (K["D8"], "data"),
-                   (K["Q1"], "code"), (K["J"], "code"), (K["T"], "code"),
-                   (K["D1"] + 0x1000, "code")]
+        targets = _fixture_targets(K)
         table, report = generate(kp, targets)
         by_rva = {t["rva"]: t for t in table["targets"]}
         u = table["units"]
@@ -1138,6 +1514,17 @@ def self_test():
         check(K["Q1"] in report["non_unique"] and K["Q1"] in report["code_no_ref"]
               and not report["code_orphan"] and "refs" not in by_rva[K["Q1"]]
               and len(by_rva[K["Q1"]]["nbr"]) == 2, "uncalled clone gets two neighbours")
+        check("fp" not in by_rva[K["Q1"]] and report["code_layout_only"] == [K["Q1"]],
+              "clones nothing tells apart get no fingerprint")
+        fps = {n: by_rva[K[n]].get("fp", []) for n in ("R1", "K1", "Z1")}
+        check([f["kind"] for f in fps["R1"]] == ["code"] and fps["R1"][0]["off"] == 0
+              and fps["R1"][0]["at"] == 10, "a clone's callee is its fingerprint: %s" % fps["R1"])
+        check([f["kind"] for f in fps["K1"]] == ["rodata"] and fps["K1"][0]["len"] == 16,
+              "a clone's read-only constant is its fingerprint: %s" % fps["K1"])
+        check([f["kind"] for f in fps["Z1"]] == ["fall"]
+              and u[fps["Z1"][0]["unit"]]["rva"] == K["Z1b"],
+              "a fragment that falls into the next is fingerprinted by it: %s" % fps["Z1"])
+        check(set(report["code_fp"]) == {K["R1"], K["K1"], K["Z1"]}, "fingerprinted clones reported")
         check(report["data_orphan"] == [K["D3"]], "only D3 has no way to be found")
         check({K["D3"], K["D4"], K["D7"], K["D8"]} == set(report["data_no_ref"]),
               "data without a reference reported")
@@ -1175,6 +1562,9 @@ def self_test():
         check(got[K["T"]]["new"] == N["T"], "function ending in a table of RVAs resolves")
         check(got[K["Q1"]]["new"] is None and got[K["Q1"]]["reason"] == "layout-only",
               "uncalled clone named only by its neighbours is refused")
+        for name in ("R1", "K1", "Z1"):
+            check(got[K[name]]["new"] == N[name] and got[K[name]]["via"] == "fp+nbr",
+                  "uncalled clone %s told apart by its fingerprints: %s" % (name, got[K[name]]))
         lenient = {r["rva"]: r for r in resolve(table, np_, allow_layout=True)[0]}
         check(lenient[K["Q1"]]["new"] == N["Q1"] and lenient[K["Q1"]]["via"] == "nbr",
               "uncalled clone told apart by its neighbours when layout is allowed")
@@ -1202,6 +1592,8 @@ def self_test():
               "guards reject changed content")
         check(got_b[K["C1"]]["reason"] == "ambiguous" and "disagree" in got_b[K["C1"]]["detail"],
               "witnesses that name different clones are refused")
+        check(got_b[K["R1"]]["reason"] == "ambiguous" and got_b[K["K1"]]["new"] == B["K1"],
+              "fingerprints that disagree with the neighbours are refused")
 
         # Without the relocation mask the absolute pointer breaks F1.
         table_nr, _ = generate(kp, targets, use_relocs=False)
@@ -1264,6 +1656,51 @@ def self_test():
         check(json.loads(out.read_text(encoding="utf-8"))["units"] == table["units"],
               "written table equals the in-memory table")
 
+        # The C++ table: what the runtime reads, and nothing the game's code is.
+        cpp = emit_cpp(table, "test")
+        check("kTable = {" in cpp and "0x%016Xull" % table_hash(table) in cpp
+              and "constexpr Fp kFps[] = {" in cpp, "C++ table emitted")
+        check(not re.search(r"[0-9A-Fa-f]{17,}", cpp), "C++ table holds no raw bytes")
+        check(all(s.decode() not in cpp for s in (_FX_STRING, _FX_ORPHAN)),
+              "C++ table holds no string content")
+        check(all(kunits.body(i).hex()[:16] not in cpp.lower()
+                  for i in range(len(kunits)) if len(kunits.body(i)) >= 8),
+              "C++ table leaks code bytes")
+        check(cpp.count("\n    {0x") == len(table["targets"]), "one C++ row per target")
+        inc = td / "inc" / "game_signatures.inc"
+        before = sorted(p.name for p in td.rglob("*"))
+        check(quiet(argv + ["--emit-cpp", str(inc), "--dry-run"]) == 0
+              and not inc.parent.exists() and sorted(p.name for p in td.rglob("*")) == before,
+              "generate --emit-cpp --dry-run wrote something")
+        check(quiet(argv + ["--emit-cpp", str(inc)]) == 0 and inc.is_file()
+              and "kTable" in inc.read_text(encoding="utf-8"), "generate --emit-cpp writes the include")
+
+        # The rig's inputs: fixture and check --emit-expect, both dry-run clean.
+        fx_dir = td / "fx"
+        before = sorted(p.name for p in td.rglob("*"))
+        check(quiet(["fixture", "--out-dir", str(fx_dir), "--dry-run"]) == 0
+              and not fx_dir.exists() and sorted(p.name for p in td.rglob("*")) == before,
+              "fixture --dry-run wrote something")
+        check(quiet(["fixture", "--out-dir", str(fx_dir)]) == 0
+              and all((fx_dir / n).is_file() for n in (
+                  "known.exe", "unknown.exe", "broken.exe", "fixture_signatures.inc",
+                  "expect_known.txt", "expect_unknown.txt", "expect_broken.txt",
+                  "fixture_names.txt")), "fixture writes the rig's files")
+        fx_unknown = (fx_dir / "expect_unknown.txt").read_text(encoding="utf-8")
+        check("r 0x%X code - 0x%X fp+nbr -" % (K["R1"], N["R1"]) in fx_unknown
+              and "file unknown.exe" in fx_unknown, "fixture expectations carry the answers")
+        exp = td / "exp" / "expect.txt"
+        chk_argv = ["check", "--table", str(out), "--exe", str(np_), "--expect",
+                    str(td / "truth.json"), "--src", str(td / "nosrc"), "--emit-expect", str(exp)]
+        before = sorted(p.name for p in td.rglob("*"))
+        quiet(chk_argv + ["--dry-run"])
+        check(not exp.parent.exists() and sorted(p.name for p in td.rglob("*")) == before,
+              "check --emit-expect --dry-run wrote something")
+        quiet(chk_argv)
+        back = read_expect(exp)
+        check(exp.is_file() and back[K["F1"]] == (N["F1"], "expect-file")
+              and back[K["F2"]][0] is None, "an expectation file is read back as a ground truth")
+
         # survey on build_diff's own fixture pair: A B C G and the leaf stub move
         # and must come out EQUAL, the edited D must be refused, nothing is WRONG.
         old_exe, _ = bd._map_fixture(False)
@@ -1287,6 +1724,8 @@ def self_test():
 
 def _load_table(path):
     table = json.loads(Path(path).read_text(encoding="utf-8"))
+    if table.get("format") == 1 and table.get("hash") == HASH_NAME:
+        table["format"] = FORMAT  # Format 1 is format 2 without fingerprints.
     if table.get("format") != FORMAT or table.get("hash") != HASH_NAME:
         raise ValueError("%s is not a format-%d %s table" % (path, FORMAT, HASH_NAME))
     return table
@@ -1309,9 +1748,13 @@ def _summary(table, report, text):
         "data targets: no usable reference %d (of those, no other way to find %d), "
         "references only outside the code targets' units %d" % (
             len(report["data_no_ref"]), len(report["data_orphan"]),
-            len(report["data_weak_ref"]))]
+            len(report["data_weak_ref"])),
+        "clone targets with fingerprints %d; named only by neighbours (layout-only) %d" % (
+            len(report["code_fp"]), len(report["code_layout_only"]))]
     for key, label in (("no_unit", "in no unit"), ("non_unique", "non-unique"),
                        ("code_no_ref", "non-unique, no caller"),
+                       ("code_fp", "non-unique, fingerprinted"),
+                       ("code_layout_only", "non-unique, layout-only"),
                        ("code_orphan", "non-unique, no caller, no neighbour"),
                        ("data_no_ref", "data, no reference"),
                        ("data_orphan", "data, no way in")):
@@ -1332,6 +1775,10 @@ def main(argv=None):
     gen.add_argument("--rva-field", default="new_rva",
                      help="JSON field holding the known build's RVA (default new_rva)")
     gen.add_argument("--out", required=True, help="table JSON to write")
+    gen.add_argument("--emit-cpp", default=None,
+                     help="also write the table as the runtime's C++ include (%s)" % CPP_TABLE_PATH)
+    gen.add_argument("--build", default=None,
+                     help="the known build's number for the log (default: digits in the exe's name)")
     gen.add_argument("--dry-run", action="store_true", help="write nothing")
     res = sub.add_parser("resolve", help="find the table's targets in an exe")
     res.add_argument("--table", required=True)
@@ -1347,6 +1794,14 @@ def main(argv=None):
                      help="the expect rows run exe -> known (map_all.json style)")
     chk.add_argument("--src", default=str(Path(__file__).resolve().parent.parent / "src"),
                      help="source tree searched for each address (per-file breakdown)")
+    chk.add_argument("--emit-expect", default=None,
+                     help="write the C++ rig's expectation file for this exe "
+                          "(tools/game_build_test/expect_<build>.txt)")
+    chk.add_argument("--dry-run", action="store_true", help="with --emit-expect: write nothing")
+    fx = sub.add_parser("fixture", help="write the self-test's synthetic exes, their C++ table "
+                                        "and this matcher's answers for tools/game_build_test")
+    fx.add_argument("--out-dir", required=True)
+    fx.add_argument("--dry-run", action="store_true", help="write nothing")
     sv = sub.add_parser("survey", help="run the matcher on a sample of ALL units and "
                                        "compare with build_diff's map")
     sv.add_argument("--exe", required=True, help="the known build's executable")
@@ -1370,23 +1825,25 @@ def main(argv=None):
                                        args.per_status, args.seed, args.allow_layout)
             print("\n".join(lines))
             return 1 if details["wrong"] else 0
+        if args.command == "fixture":
+            write_outputs(fixture_outputs(args.out_dir), args.dry_run)
+            return 0
         if args.command == "generate":
             targets = read_targets(args.rvas, args.rva_field)
             t0 = time.perf_counter()
             table, report = generate(args.exe, targets,
-                                     log=lambda s: print(s, flush=True))
+                                     log=lambda s: print(s, flush=True), build=args.build)
             text = table_text(table)
             for line in _summary(table, report, text):
                 print(line)
             print("generated in %.1fs" % (time.perf_counter() - t0))
-            if args.dry_run:
-                print("dry run: would write %d bytes to %s; nothing written"
-                      % (len(text.encode("utf-8")), args.out))
-            else:
-                out = Path(args.out)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(text, encoding="utf-8")
-                print("wrote " + str(out))
+            outputs = {Path(args.out): text}
+            if args.emit_cpp:
+                command = ("python tools/hook_signatures.py generate --exe <known exe> --rvas "
+                           "<map_all.json> --out build/hook_signatures.json --emit-cpp %s"
+                           % CPP_TABLE_PATH)
+                outputs[Path(args.emit_cpp)] = emit_cpp(table, command)
+            write_outputs(outputs, args.dry_run)
             return 0
         table = _load_table(args.table)
         results, stats = resolve(table, args.exe, args.allow_layout)
@@ -1404,6 +1861,9 @@ def main(argv=None):
             if Path(args.src).is_dir() else None
         for line in check_report(rows, files, stats):
             print(line)
+        if args.emit_expect:
+            write_outputs({Path(args.emit_expect): expect_text(
+                table, exe_identity(args.exe), rows, Path(args.exe).name)}, args.dry_run)
         return 1 if any(r["cls"] == "WRONG" for r in rows) else 0
     except (OSError, PEError, ValueError, KeyError) as exc:
         print("hook_signatures: " + str(exc), file=sys.stderr)
