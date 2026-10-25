@@ -467,24 +467,26 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                               "against (%s)",
                               build.c_str(), verified.c_str());
     } else {
-        // Not a warning. Every fix here identifies its target by what that
-        // target does or looks like, so an unfamiliar build is the expected
-        // case rather than a degraded one, and saying otherwise would send
-        // people chasing a problem they do not have.
-        //
-        // This line briefly said the resolution fix would refuse on an unknown
-        // build, which was true while it was pinned to one. It no longer is:
-        // it recognises the code it edits, and reports what it found.
+        // Not a warning, but not a promise either. The fixes that hook the
+        // game's code bind addresses of one build; on another, the signature
+        // resolver (src\common\game_build.h, issue 124) finds each by matching
+        // the known build's whole function, and a fix comes up only where it
+        // found every address it needs. The Oculus route profile and Explorer
+        // Cam stay off on any build but the known one. Until 2026-10-25 this
+        // line said every fix found its target by shape, which was never true
+        // of the hooks.
         edvr::Log::get().note(
-            "game build %s -- not one of the builds this was checked against (%s). Every "
-            "fix here finds its target by what that target does or looks like, not by "
-            "which build compiled it, so an unfamiliar build is expected rather than a "
-            "problem. If anything fails to match, the lines below say so and nothing is "
-            "touched.",
+            "game build %s -- not one of the builds this was checked against (%s). The "
+            "fixes that hook the game look for the code they edit by matching the known "
+            "build's functions (the \"game build:\" line says how many addresses were "
+            "found), and each comes up only where it found everything it needs; the "
+            "Oculus route profile and Explorer Cam stay off. The lines below say what each "
+            "found, and nothing it did not find is touched.",
             build.empty() ? "(unreadable)" : build.c_str(), verified.c_str());
     }
-    // TEMPORARY instrument (advanced.game_update_check, issue 124): off, nothing; on, on the known build, the signature resolver runs once
-    // on a background thread and logs whether it finds every address where the hooks' constants put it.
+    // An unknown build: the signature resolver starts here on a thread of its own (issue 124), so no hook pays it on the render thread.
+    // The TEMPORARY instrument (advanced.game_update_check): off, nothing; on, on the known build, the resolver runs once on a background
+    // thread and logs whether it finds every address where the hooks' constants put it.
     edvr::gameBuildStartup();
 
     if (g_missingExports) {

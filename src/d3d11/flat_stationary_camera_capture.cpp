@@ -217,7 +217,9 @@ bool install(State& s) noexcept {
     }
     for (unsigned i = 0; i < stationcam::kGameAddresses; ++i) s.game.at[i] = gameAddress(base, gameRva(stationcam::kGameRvas[i]));
     s.mainViewCaller = gameAddress(base, gameRva(static_cast<uint32_t>(kMainViewCallerRva)));
-    s.imageSize = imageSize;
+    // The bound on the RVAs the log prints: build 334925's, as it always was; another build's SizeOfImage.
+    constexpr uintptr_t kKnownLogBound = 0x6000000;
+    s.imageSize = knownBuild ? kKnownLogBound : imageSize;
     if (!s.game.found() || !s.mainViewCaller || !s.imageSize) { s.waitReason = "not-found-by-signature"; return false; }
     s.gameBase.store(base, std::memory_order_release);
     s.relay = allocateRelay(base + rendererRva);

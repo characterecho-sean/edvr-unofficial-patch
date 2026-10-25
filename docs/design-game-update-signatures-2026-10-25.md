@@ -2,45 +2,45 @@
 
 ## Status
 
-- **State:** step 2 built on a branch, full build green, not merged, not
-  flown. Step 1 was `tools\hook_signatures.py` (the offline generator and a
-  Python copy of the matcher). Step 2 adds clone fingerprints, the generated
-  C++ table, the runtime resolver, its rig, a temporary check key and one
-  pilot hook (the store hook).
-- **Rules (the maintainer's):** on the known build (334925) nothing changes:
-  every hook uses its constant and the resolver never runs. On an unknown
-  build a hook may come up, game-memory writers included, only when each
-  address it needs is found by a whole-function masked match; anything not
-  found means that hook stands down. The Oculus route profile
-  (`src\common\elite_oculus_profile.h`) stays exact-build only.
-- **Counts, 222 addresses** (`.agents\build-334925\map_all.json`): on 334473
-  and on 332841 the Python matcher and the C++ resolver both find 222 of 222,
-  all EQUAL to the build map, 0 WRONG, with the same answer, the same unit
-  count and the same candidate count per target. Step 1 found 215 of each.
-  The known build resolves to itself, 222 of 222.
-- **Survey** (about 3500 sampled units per build): WRONG 0 on both builds.
-  Units the map places in the new build and the matcher finds: 1832 of 2258
-  on 334473 (step 1: 1671), 1838 of 2252 on 332841 (step 1: 1682).
-- **Time:** the C++ resolve takes 65 to 125 ms (machine load) over a 100 MB
-  image mapped in memory by the rig (301,500 units, 157,000 candidates,
-  9.4 MB hashed); not yet measured in the game. Python: 2.2 s.
+- **State:** step 3 built on a branch, full build green, not merged, not
+  flown. Step 1 was the offline generator (`tools\hook_signatures.py`), step 2
+  the runtime resolver and the store hook pilot. Step 3 moves every other hook
+  onto the resolver and adds a build gate (`hook_signatures.py audit`).
+- **Rules (the maintainer's):** on the known build (334925) every hook keeps
+  its behaviour and its log text byte for byte: `gameRva(k)` returns k and the
+  pins compare exactly. On an unknown build a hook comes up, game-memory
+  writers included, only when every address it needs is found by a
+  whole-function masked match; anything not found means that hook stands down,
+  and its log says which.
+- **Exact-build only, by decision:** the Oculus route profile
+  (`elite_oculus_profile.h`, `oculus_route.cpp`), Explorer Cam (another arc
+  deletes it), `mem_tick.cpp` (a diagnostic, not in the table) and terrain cull
+  cover (its own scan finds its site on an unknown build).
+- **Counts, 231 addresses** (the 222 of `.agents\build-334925\map_all.json` plus
+  nine fragment starts in `signature_extra.txt`): on 334473 and on 332841 the
+  Python matcher and the C++ resolver both find 231 of 231, all EQUAL to the
+  build map, 0 WRONG, with the same answer per target. RVAs inside a found unit
+  (call sites, return addresses, site ends): 189 checked per build against the
+  ground truth, 0 WRONG; 488 unit probes, C++ and Python agree on every one.
+- **Survey** (step 2, about 3500 sampled units per build): WRONG 0 on both.
+- **Time:** the C++ resolve takes 65 to 125 ms in the rig (machine load); not
+  yet measured in the game. On an unknown build it now starts at load on a
+  thread of its own (`gameBuildStartup`).
 - **Temporary key:** `advanced.game_update_check`, `off` (default) or `on`,
-  hidden (commented out in `edvr.ini`, no menu row), read in VR and flat. On,
-  on the known build, a background thread runs the resolver once at start-up
-  and logs one `game update check:` line. It changes nothing the hooks use.
+  hidden. On, on the known build, a background thread runs the resolver once
+  and logs one `game update check:` line; it changes nothing the hooks use.
   When the arc closes, propose removing it.
-- **Next flight:** the known build with the key on, VR or flat. Expect
-  `game update check: 222 of 222 found, all equal (resolve N ms ...)`.
-  Anything else lists the addresses that differ or were not found. A
+- **Next flight:** the known build with the key on, VR then flat: every hook's
+  lines as before, and `game update check: 231 of 231 found, all equal`. A
   not-found address that "now starts with a jmp" was hooked before the check
-  read it, which is a race in the check, not a resolver fault.
-- **Open:** (1) migrate the other hooks (step 3), each replacing its
-  stamp/size check and `base + kRva` with `gameRva` and its pin with
-  `gamePinMatches`; (2) on an unknown build the first `gameRva` call
-  resolves on its own thread: for the store hook that is the first Present,
-  a one-time stall (65 to 125 ms in the rig; not measured in the game). A
-  start-up warm-up thread would remove it (not built, a proposal); (3) no
-  on-disk cache yet.
+  read it (a race in the check, not a resolver fault). An unknown build needs
+  a game update to test against; none is out yet.
+- **Open:** (1) `tools\object_classification.py` checks a capture's
+  return RVAs against build 334925's; a capture from an unknown build carries
+  that build's offsets and would be rejected (step 3 left the reader alone);
+  (2) `vrSsaaHoldEarlyInstall` asks for addresses from DllMain, so on an
+  unknown build the resolve runs there, under the loader lock (its log line is
+  held until the log opens); (3) no on-disk cache.
 - **Ruled out:** naming a clone by its neighbours' positions alone
   (layout-only), because it gave a WRONG answer in step 1's wider survey. It
   stays refused; a neighbour only counts when it agrees with a witness that is
@@ -198,6 +198,83 @@ world witness stand down as before. In both older builds the store moved
   `ecm::kExpectedTimestamp`/`kExpectedImageSize`. A retarget that moves the
   constants without the table fails to compile.
 
+## What step 3 built (2026-10-25)
+
+### The resolver
+
+- **Addresses inside a unit.** `gameRva(k)` for an RVA that is not in the
+  table but lies inside the code unit of a found table address returns the
+  same offset in the unit found. A whole-unit match keeps every instruction's
+  offset, so a call site, a return address or a site end moves with its
+  function (the list merge's `0x43513A5` re-check is one). If two found
+  targets of one unit disagree on where it is, there is no answer.
+  `hook_signatures.py` has the same rule (`unit_rva`); the expectation files
+  list 488 unit probes and the rig holds C++ to Python on each, and checks the
+  byte after every found code target against the ground truth.
+- **Fragments.** `gamePinMatches` and `gamePinProvenByMatch` accept a range
+  over several units when every unit was found and all moved by the same
+  amount: a function that `.pdata` splits into chained fragments. Three
+  kinematic body hashes span fragments, so their nine fragment starts joined
+  the table (`.agents\build-334925\signature_extra.txt`, the second `--rvas`
+  input). All nine resolve EQUAL on both older builds.
+- **`gameRvasFound(list, n, &missing)`** checks a hook's whole list at once.
+- **At load.** On an unknown build `gameBuildStartup` starts the resolve on a
+  thread of its own; a hook that asks first waits on the same lock. A resolve
+  that finishes before the log opens (the VR Supersampling hold asks from
+  DllMain) keeps its `game build:` line until `gameBuildStartup` writes it.
+
+### The hooks
+
+Each hook takes its identity from `gameBuildIdentity`/`gameBuildKnown`, its
+addresses from `gameRva` and its pins from `gamePinMatches`. Body hashes run
+exactly as before on the known build; on an unknown build they are satisfied
+by `gamePinProvenByMatch` over the same range. Where a pin held a call's rel32,
+which the masked compare skips, the hook now also checks that the call reaches
+the function found (true by construction on 334925). Before patching a field
+the signature masks, the hook checks that the original still points where it
+should. Every new log line is written only on an unknown build.
+
+| Hook | Addresses | Notes |
+|---|---|---|
+| Transition flash engine fix | consumer 0x2845730 | the armed line prints the identity `gameBuildIdentity` read |
+| Kinematic family (16 detours, part test, primary emit, pool copier, list merge, typed clear) | all table addresses; 0x43513A5 in-unit | five body hashes; each sub-hook stands down alone |
+| Engine motion lookup and append | 0x3699C00, 0x4315DA5 | |
+| Scheduler stack probe | 0x42E2560, 0x36A3BB0 | the scan bound comes from the PE header on an unknown build |
+| Object record writer probe | 18: the lookup, its call sites and returns | all or none (`gameRvasFound`); `*Rva` members became `*Offset` |
+| Cull gate probe | 0x4F4F10, data 0x5EA63E9 | |
+| Skin join, pad state, vertex resync | 0x4C56BA0; four readers; 0x522B50 | decision functions and rigs as the pilot's |
+| Light grid cache | builder, refresh, copy, six data globals | all nine needed on an unknown build |
+| UI quality panels | two sites, two functions, three constants, setter, getter, two slots | each disp32 must reach its constant before it is patched |
+| VR Supersampling gate, hold, window trampolines | slot 0x52EB4F8, wrapper, loader; 0x7E9E50, 0x281E650 | the hold's rel32 check is kept, on resolved addresses |
+| Flat camera inject, producer probe | 0x592300, 0x51B740; four known callers | these had only a pin before, no identity check |
+| Flat stationary capture | renderer, MainView return, 27 vtables and functions | the pure core takes resolved addresses from the glue |
+
+The store hook was step 2's pilot. Not migrated: the exact-build-only list in
+the Status block.
+
+### The gate
+
+`python tools\hook_signatures.py audit --src src` is one of build.bat's Python
+gates. Outside the resolver and the exact-only files (named in
+`AUDIT_EXACT_ONLY`), it fails the build when:
+
+- **identity:** a file uses the known build's PE stamp or image size, or a
+  name defined from one;
+- **known:** a hex literal in the image's range is neither a table address nor
+  inside the unit of one (`AUDIT_NOT_ADDRESSES` lists the masks, shader tokens
+  and the like that are not addresses, each with its reason);
+- **routed:** a game address, a name defined from one, or a member named
+  `*rva` is used other than as the first argument of a resolver call, a
+  constant's or a table entry's initializer, inside `sizeof` or
+  `static_assert`, as a log argument or as an assignment's target. `base +
+  0x4314C60` and `base + entry.rva` fail; `base + gameRva(0x4314C60)` passes.
+
+A future hook that skips the resolver fails the build rather than standing
+down in silence. `hook_signatures.py where --rva 0x...[:length]` says how
+`gameRva` places an RVA and whether a range lies in table units. The startup
+line for an unfamiliar build (`d3d11_proxy.cpp`) said every fix found its
+target by shape; it now says what the hooks do.
+
 ## After each retarget
 
 Regenerate the table from the new known exe, then the expectation files
@@ -205,14 +282,18 @@ against each archived older build (the ground truth comes from `build_diff.py
 map --json`, or from the previous expectation file):
 
     python tools\hook_signatures.py generate --exe analysis\EliteDangerous64-<new>.exe ^
-        --rvas .agents\build-<new>\map_all.json --out build\hook_signatures.json ^
-        --emit-cpp src\common\game_signatures.inc
+        --rvas .agents\build-<new>\map_all.json --rvas .agents\build-<new>\signature_extra.txt ^
+        --out build\hook_signatures.json --emit-cpp src\common\game_signatures.inc
     python tools\hook_signatures.py check --table build\hook_signatures.json ^
         --exe analysis\EliteDangerous64-<old>.exe --expect <build_diff map JSON> ^
         --emit-expect tools\game_build_test\expect_<old>.txt
 
-Both take `--dry-run`. Then run the full build: the rig holds C++ to Python
+`signature_extra.txt` (the fragment starts step 3 added) is mapped with the
+rest. `check` takes `--expect` more than once: a later file supplies the RVAs
+the earlier ones lack, so an old expectation file plus a `build_diff.py map
+--json` of only the new RVAs is enough. Both take `--dry-run`. Then run the full build: the rig holds C++ to Python
 on the new table.
+Then `hook_signatures.py audit --src src` must still pass.
 
 ## Environment
 

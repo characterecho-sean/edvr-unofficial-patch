@@ -1908,6 +1908,8 @@ AUDIT_NOT_ADDRESSES = (
     ("installer/logbundle.cpp", (0x4034B50, 0x2014B50, 0x6054B50), "ZIP record signatures"),
     ("d3d11/perf_monitor.cpp", (0x150E828,), "an NVAPI function id"),
     ("d3d11/kinematic_eval_probe.cpp", (0x4301234, 0x4305678), "the probe self-test's made-up vtable RVAs"),
+    ("d3d11/flat_stationary_camera_capture.cpp", (0x6000000,),
+     "the known build's bound on the RVAs the capture logs (an unknown build uses its SizeOfImage)"),
     ("d3d11/scheduler_stack_probe.h", (0x4DB6000,),
      "the known build's end of .text, a stack-scan bound (an unknown build reads its own from the PE header)"),
 )

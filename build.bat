@@ -249,6 +249,7 @@ python tools\run_jobs.py ^
     --gate "tools\worktree.py --self-test" ^
     --gate "tools\steam_library.py --self-test" ^
     --gate "tools\hook_signatures.py --self-test" ^
+    --gate "tools\hook_signatures.py audit --src src" ^
     --gate "tools\archive_game_exe.py --self-test" ^
     --gate "tools\release_credits.py --self-test" ^
     --gate "tools\flash_patch_residual.py --self-test" ^

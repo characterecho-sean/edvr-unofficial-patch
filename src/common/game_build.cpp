@@ -37,6 +37,9 @@ char g_text[112] = "";
 std::mutex g_resolveMutex;
 std::atomic<bool> g_resolved{false};
 gamesig::Result g_results[kTargetSlots];
+// The "game build:" line of a resolve that ran before the log opened (a hook that installs from DllMain asked first); gameBuildStartup
+// writes it once the log is open. Under g_resolveMutex.
+std::string g_pendingSummary;
 
 // base+0x3C -> e_lfanew, then the TimeDateStamp at +8 and the SizeOfImage at +0x50 (the pair every build-keyed hook checks). Under
 // __try: an unreadable header is a refusal, not a crash.
@@ -106,10 +109,25 @@ void ensureResolved() noexcept {
     double ms = 0.0;
     const bool ok = resolveRunning(g_results, &stats, &ms);
     try {
-        Log::get().note("game build: %s", gamesig::resolveSummaryText(sig::kTable, g_results, stats, ok, ms, gameBuildText()).c_str());
+        const std::string summary = gamesig::resolveSummaryText(sig::kTable, g_results, stats, ok, ms, gameBuildText());
+        if (Log::get().isOpen())
+            Log::get().note("game build: %s", summary.c_str());
+        else
+            g_pendingSummary = summary;
     } catch (...) {
     }
     g_resolved.store(true, std::memory_order_release);
+}
+
+// Writes the line of a resolve that finished before the log opened.
+void notePendingSummary() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_resolveMutex);
+        if (g_pendingSummary.empty()) return;
+        Log::get().note("game build: %s (resolved before the log opened)", g_pendingSummary.c_str());
+        g_pendingSummary.clear();
+    } catch (...) {
+    }
 }
 
 uint8_t firstByte(uintptr_t at) noexcept {
@@ -196,6 +214,7 @@ void gameBuildStartup() noexcept {
     // An unknown build: resolve now, on a thread of its own, so no hook pays the resolve on the thread that first asks (the render thread,
     // for some). A hook that asks before it is done waits on the same lock. The known build starts nothing here.
     if (identity() == kUnknown) {
+        notePendingSummary();
         try {
             std::thread([] { ensureResolved(); }).detach();
         } catch (...) {
