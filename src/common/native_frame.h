@@ -18,7 +18,7 @@
 #define EDVR_NATIVE_FRAME_VERSION_3 3u
 // Version 4 added one word to the END and nothing else, under the same
 // hand-copied-DLLs rule (the projection channel of the terrain guard, retired
-// 2026-10-09: the slot stays, see reservedProjectionChannel below).
+// 2026-10-09: the slot stays, see leftEyeShare below).
 #define EDVR_NATIVE_FRAME_VERSION_4 4u
 // Version 5 adds fadeAlpha to the END and nothing else (Explorer Cam's comfort
 // fade, comfort_fade.h), under the same hand-copied-DLLs rule: a version 1 to
@@ -161,10 +161,12 @@ struct EdvrNativeFrameOutput {
     // RETIRED 2026-10-09 (version 4's one word: which projection query channel
     // the terrain guard's widened frustum was told through). Always zero, never
     // read; the slot stays for the same reason as the 21 above.
-    // F89 (fix.native_on_foot_ads_close_left_eye): in a version 10 answer only, the slot carries the LEFT eye's darkening, a float's bits (left_eye_darken.h): 0 (the image
-    // as it is) to 1 (black). The runtime blends black over the left eye's finished image by it, after everything else is drawn into it. A provider or runtime from before
-    // F89 leaves it zero and reads nothing, so a mismatched pair darkens nothing; a version 9 or older answer's slot is not believed (native_frame_client.h).
-    uint32_t reservedProjectionChannel;
+    // F106 (fix.native_on_foot_ads_sight_both_eyes): in a version 10 answer only, the slot carries the LEFT eye's share of the right eye's image, a float's bits
+    // (left_eye_share.h): 0 (the left eye's own image) to 1 (the right eye's image, turned into the left eye's view). The runtime draws the right eye's image over the
+    // left eye's own by it, in that eye's scene pass. F89 to F105 carried the left eye's darkening here, with the same timing: a runtime from F106 on reads such a
+    // provider's level as the share, and a runtime from F89 to F105 darkens by this provider's share. A provider or runtime from before F89 leaves it zero and reads
+    // nothing; a version 9 or older answer's slot is not believed (native_frame_client.h). Named reservedProjectionChannel until F106; offset, size and type unchanged.
+    uint32_t leftEyeShare;
     // Version 5 and later. How black the projection layer is, 0 (clear, the
     // default and the only value an older provider can mean) to 1: the runtime
     // blends black over each eye image by this much when it composes. Already
@@ -201,10 +203,10 @@ struct EdvrNativeFrameOutput {
     ((uint32_t)offsetof(EdvrNativeFrameOutput, deferredPacing))
 // The size the fields through deferredPacing occupy, which is what a
 // version 3 caller's struct is, with no tail padding before
-// reservedProjectionChannel.
+// leftEyeShare (version 4's slot).
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, reservedProjectionChannel))
-// The size the fields through reservedProjectionChannel occupy, which is what a version 4
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, leftEyeShare))
+// The size the fields through leftEyeShare (version 4's slot) occupy, which is what a version 4
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))

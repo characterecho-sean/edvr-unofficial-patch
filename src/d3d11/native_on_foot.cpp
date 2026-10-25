@@ -19,7 +19,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
-#include "../common/left_eye_darken.h"   // F89: eyedarken::publish, the left eye's darkening the provider hands the runtime each frame
+#include "../common/left_eye_share.h"   // F106: eyeshare::publish, the left eye's share of the right eye's image the provider hands the runtime each frame
 #include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
@@ -164,8 +164,9 @@ int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 // F97a: F88's weight, published each align tick for the Animate post-hook (the armed body's blend)
 std::atomic<float> g_f88WPub{0.0f};
-// F89: fix.native_on_foot_ads_close_left_eye (live): the left eye fades to black by the ADS lock's weight while the sights are up. A USER key, default on.
-std::atomic<bool> g_f89CloseLeftKey{true};
+// F106: fix.native_on_foot_ads_sight_both_eyes (live): while the sights are up the left eye shows the right (aiming) eye's image, turned into its own view, by the ADS
+// lock's weight. A USER key, default on. It replaced F89's left eye close (its key retired: retiredKeysNote).
+std::atomic<bool> g_f106SightBothKey{true};
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
 // error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
 std::atomic<bool> g_f93SteadyKey{true};
@@ -664,6 +665,11 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.training_connect_probe", "on") != "on")
         Log::get().note("native on foot: fix.training_connect_probe is retired (F100): ignored (the probe's hooks and lines were removed; fix.connection_retry keeps "
                         "the hooks it needs)");
+    // F106: the left eye no longer closes in ADS; fix.native_on_foot_ads_sight_both_eyes shows it the aiming eye's view instead. The shipping file carries the old key at
+    // its last value (on).
+    if (cfg.getString("fix.native_on_foot_ads_close_left_eye", "on") != "on")
+        Log::get().note("native on foot: fix.native_on_foot_ads_close_left_eye is retired (F106): ignored (the left eye no longer closes in ADS; "
+                        "fix.native_on_foot_ads_sight_both_eyes shows both eyes the view from the aiming eye instead)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -896,16 +902,16 @@ void readKey() {
         g_f88RightCm.store(static_cast<float>(right), std::memory_order_relaxed);
         g_f88Body.store(body, std::memory_order_relaxed);
     }
-    // F89 (live, the Native on foot page's "ADS: close left eye"): while the sights are up the left eye fades to black by the ADS lock's weight and the right eye, the one the
-    // sight lock lines up, sees alone. A user key, default on.
+    // F106 (live, the Native on foot page's "ADS: sight in both eyes"): while the sights are up the left eye shows the right eye's image, the eye the sight lock lines
+    // up, turned into the left eye's view, so the sight sits centred in both eyes. A user key, default on; one line a session and one at each change.
     {
-        const bool on = cfg.getString("fix.native_on_foot_ads_close_left_eye", "on") != "off";
-        if (first || on != g_f89CloseLeftKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS close left eye (F89): fix.native_on_foot_ads_close_left_eye is %s -- %s", on ? "on" : "off",
-                            on ? "while you aim down sights the left eye fades to black as the sight lock comes in (the ADS lock's weight: 0.15 s in, 0.3 s out) and back as it "
-                                 "releases; the right eye is untouched; never outside ADS"
-                               : "both eyes stay open while you aim down sights");
-        g_f89CloseLeftKey.store(on, std::memory_order_relaxed);
+        const bool on = cfg.getString("fix.native_on_foot_ads_sight_both_eyes", "on") != "off";
+        if (first || on != g_f106SightBothKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s -- %s", on ? "on" : "off",
+                            on ? "while you aim down sights both eyes see the view from your aiming (right) eye, so the sights sit centred in both and neither eye is closed; "
+                                 "it comes in with the sight lock (0.15 s) and goes with it (0.3 s); depth flattens while you aim; never outside ADS"
+                               : "each eye keeps its own view while you aim down sights (normal stereo)");
+        g_f106SightBothKey.store(on, std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -11316,38 +11322,40 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     return t;
 }
 
-// ---- F89: the left eye closing in ADS (fix.native_on_foot_ads_close_left_eye) ----------------------------------------------------------------------------------
-// See nofoot::f89::darken (native_on_foot_f89.h). Once per align tick, after the ADS lock's weight is known (adsAimTick): with the key on, in native on foot, a weapon or tool
-// drawn, the level is the ADS lock's weight (0.15 s in, 0.3 s out); anything else is exactly 0, and a nonzero weight with the guard failing is logged. The level goes to the
-// provider (left_eye_darken.h), which hands it to the runtime in the version 10 answer; the runtime blends black over the left eye's finished image by it, as the last pass over
-// that image (d3d11_stereo.cpp). A level not republished within 0.2 s decays to 0 on the reading side, so a stalled frame thread never leaves the eye dark.
-bool g_f89DarkenOn = false;
-uint64_t g_f89DarkenLineMs = 0, g_f89GuardLineMs = 0;
-uint32_t g_f89GuardTrips = 0;
-void f89DarkenTick(uint64_t now) noexcept {
-    namespace f89 = nofoot::f89;
-    const bool key = g_f89CloseLeftKey.load(std::memory_order_relaxed);
+// ---- F106: ADS, the sight in both eyes (fix.native_on_foot_ads_sight_both_eyes) ------------------------------------------------------------------------------
+// See nofoot::f106::share (native_on_foot_f106.h). Once per align tick, after the ADS lock's weight is known (adsAimTick): with the key on, in native on foot, a weapon or
+// tool drawn, the share is the ADS lock's weight (0.15 s in, 0.3 s out); anything else is exactly 0, and a nonzero weight with the guard failing is logged. The level goes
+// to the provider (left_eye_share.h), which hands it to the runtime in the version 10 answer; the runtime draws the right eye's image, turned into the left view, over the
+// left eye's own image by it, in that eye's scene pass (d3d11_stereo.cpp). A level not republished within 0.2 s decays to 0 on the reading side, so a stalled frame
+// thread never leaves the left eye on the right eye's view. What the runtime drew comes back once a press through edvrNoteNativeEyeShare (the press line, at the end
+// of this file): these lines say what was asked, that one what was drawn.
+bool g_f106ShareOn = false;
+uint64_t g_f106ShareLineMs = 0, g_f106GuardLineMs = 0;
+uint32_t g_f106GuardTrips = 0;
+void f106ShareTick(uint64_t now) noexcept {
+    namespace f106 = nofoot::f106;
+    const bool key = g_f106SightBothKey.load(std::memory_order_relaxed);
     const bool onFoot = nativeOnFootActive();
-    const f89::Darken d = f89::darken(key, onFoot, g_armed, g_adsW);
-    eyedarken::publish(static_cast<float>(d.level), now);
-    if (d.tripped) {
-        ++g_f89GuardTrips;
-        if (now - g_f89GuardLineMs >= 5000) {
-            g_f89GuardLineMs = now;
-            Log::get().note("ads close left eye (F89): GUARD TRIPPED (%u so far): the ADS lock's weight is %.2f with the key on but %s: the left eye stays open",
-                            static_cast<unsigned>(g_f89GuardTrips), g_adsW, !onFoot ? "native stereo is not on foot" : "no weapon or tool is drawn");
+    const f106::Share s = f106::share(key, onFoot, g_armed, g_adsW);
+    eyeshare::publish(static_cast<float>(s.weight), now);
+    if (s.tripped) {
+        ++g_f106GuardTrips;
+        if (now - g_f106GuardLineMs >= 5000) {
+            g_f106GuardLineMs = now;
+            Log::get().note("ADS sight in both eyes (F106): GUARD TRIPPED (%u so far): the ADS lock's weight is %.2f with the key on but %s: each eye keeps its own view",
+                            static_cast<unsigned>(g_f106GuardTrips), g_adsW, !onFoot ? "native stereo is not on foot" : "no weapon or tool is drawn");
         }
     }
-    const bool closed = d.level > 0.0;
-    if (closed != g_f89DarkenOn) {
-        g_f89DarkenOn = closed;
-        Log::get().note("ads close left eye (F89): %s (key %s, lock weight %.2f)", closed ? "closed" : "open", key ? "on" : "off", g_adsW);
+    const bool shared = s.weight > 0.0;
+    if (shared != g_f106ShareOn) {
+        g_f106ShareOn = shared;
+        Log::get().note("ADS sight in both eyes (F106): %s (key %s, lock weight %.2f)", shared ? "shared" : "stereo", key ? "on" : "off", g_adsW);
     }
-    if ((closed || g_adsState != kAdsIdle) && now - g_f89DarkenLineMs >= 1000) {   // once a second in ADS (key off included: it reads darken 0.00 then) and while the eye is closed
-        g_f89DarkenLineMs = now;
-        Log::get().note("ads close left eye (F89) 1 s: darken %.2f (key %s, lock weight %.2f, ads state %s); path: the runtime's last pass over the left eye image, after the plugin overlay "
-                        "(the HUD and the menu are drawn into the eye image, and the runtime submits one projection layer and no other, so nothing is left floating on black)",
-                        d.level, key ? "on" : "off", g_adsW, kAdsStateNames[g_adsState]);
+    if ((shared || g_adsState != kAdsIdle) && now - g_f106ShareLineMs >= 1000) {   // once a second in ADS (key off included: it reads share 0.00 then) and while shared
+        g_f106ShareLineMs = now;
+        Log::get().note("ADS sight in both eyes (F106) 1 s: share %.2f (key %s, lock weight %.2f, ads state %s); path: the runtime's left eye scene pass (the right eye's "
+                        "image, turned into the left view, over the left eye's own; the fade and the plugin overlay over both)",
+                        s.weight, key ? "on" : "off", g_adsW, kAdsStateNames[g_adsState]);
     }
 }
 
@@ -12071,7 +12079,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
     const F88Tick weaponEye = f88Tick(now, dt, pin, ads);   // F88: the weapon eye offset (exact zeros unless a key is set and a weapon or tool is drawn at the hip)
     const F94Tick neckRef = f94Tick(now, dt, pin, g_f88W.w);   // F94a: the view's height from the animated neck, weighted by 1 - w (exact zeros outside the pin's scope)
-    f89DarkenTick(now);   // F89: the left eye's darkening (the ADS lock's weight with the key on and a weapon drawn; 0 otherwise)
+    f106ShareTick(now);   // F106: the left eye's share of the right eye's image (the ADS lock's weight with the key on and a weapon drawn; 0 otherwise)
     const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads, weaponEye.settling || neckRef.settling);   // F87h: the standing-height hold (zero outside the pin's scope)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
     // g_align's, as before. F68f removed F64's raise over the game's camera; F94a raises the view to the key's height over the animated neck instead
@@ -27720,7 +27728,7 @@ void nativeOnFootShutdown() {
     const float zeroEyeAlign[3] = {};
     g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
     f89AlignPublish(zeroEyeAlign);
-    eyedarken::publish(0.0f, GetTickCount64());   // F89: no darkened left eye past shutdown
+    eyeshare::publish(0.0f, GetTickCount64());   // F106: no shared left eye past shutdown
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
     nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
     g_adsHookOn.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown
@@ -27760,3 +27768,17 @@ void nativeOnFootShutdown() {
 
 
 }  // namespace edvr
+
+// F106: the runtime's report of one press of the sights (left_eye_share.h): what it drew for the left eye. Called on the runtime's render thread once a press, when the
+// share has come back to 0; writes the press line --health reads (ADS sight in both eyes (F106) press). E_INVALIDARG, and no line, for a report it cannot read.
+extern "C" HRESULT WINAPI edvrNoteNativeEyeShare(const EdvrNativeEyeShareReport* r) {
+    if (!edvr::eyeshare::reportReadable(r)) return E_INVALIDARG;
+    edvr::Log::get().note("ADS sight in both eyes (F106) press: peak %.2f, frames %u (at full weight %u, refused %u, replayed %u) over %.2f s; the eyes' rotation (left view "
+                          "against the right) yaw %+.2f pitch %+.2f roll %+.2f deg; tangents left %+.3f/%+.3f/%+.3f/%+.3f, right %+.3f/%+.3f/%+.3f/%+.3f (left, right, up, "
+                          "down); the left eye from the right at full weight %.1f%% (wholly %.1f%%); hidden area %s (%u triangles)",
+                          double(r->peak), r->frames, r->framesFull, r->refused, r->replayed, double(r->seconds), double(r->rotationDeg[0]), double(r->rotationDeg[1]),
+                          double(r->rotationDeg[2]), double(r->leftTangents[0]), double(r->leftTangents[1]), double(r->leftTangents[2]), double(r->leftTangents[3]),
+                          double(r->rightTangents[0]), double(r->rightTangents[1]), double(r->rightTangents[2]), double(r->rightTangents[3]), 100.0 * r->coverage,
+                          100.0 * r->coverageWhole, r->hiddenTriangles ? "used" : "none", r->hiddenTriangles);
+    return S_OK;
+}

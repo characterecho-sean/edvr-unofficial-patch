@@ -1,9 +1,9 @@
-// F89 checks (native on-foot VR): the weapon eye offset through the ADS release, the left eye closing in ADS, the ADS transition trace and the standing-height hold's open-loop
-// input (run89 below): the pure functions of src\d3d11\native_on_foot_f88.h and _f89.h and src\common\left_eye_darken.h, on the plants the production code uses. Header only,
-// run by native_frame_test.
+// F89 checks (native on-foot VR): the weapon eye offset through the ADS release, the left eye's share in ADS (F106, which replaced F89's close), the ADS transition trace and
+// the standing-height hold's open-loop input (run89 below): the pure functions of src\d3d11\native_on_foot_f88.h, _f89.h and _f106.h and src\common\left_eye_share.h, on the
+// plants the production code uses. Header only, run by native_frame_test.
 #pragma once
 
-#include "../../src/common/left_eye_darken.h"
+#include "../../src/common/left_eye_share.h"
 #include "../../src/d3d11/native_on_foot_core.h"
 
 #include <algorithm>
@@ -476,67 +476,68 @@ inline void run89(Check&& check) {
         check(sec.residN == 0 && sec.newSpreadMm() == 0.0, "F89: a new reference generation (the seated origin moved) starts the residual again");
     }
 
-    // ---- the left eye closing in ADS ---------------------------------------------------------------------------------------------------------------------
+    // ---- the left eye's share in ADS (F106; F89's close had the same decision and timing) ----------------------------------------------------------------
     {
+        namespace f106 = edvr::nofoot::f106;
         bool follows = true, outside = true, keyOff = true, exactZero = true;
         for (int i = 0; i <= 20; ++i) {
             const double lock = i / 20.0;
-            const f89::Darken on = f89::darken(true, true, true, lock);
-            follows = follows && on.level == lock && !on.tripped;
-            const f89::Darken off = f89::darken(false, true, true, lock);
-            keyOff = keyOff && isPlusZero(off.level) && !off.tripped;
+            const f106::Share on = f106::share(true, true, true, lock);
+            follows = follows && on.weight == lock && !on.tripped;
+            const f106::Share off = f106::share(false, true, true, lock);
+            keyOff = keyOff && isPlusZero(off.weight) && !off.tripped;
         }
         for (const bool key : {false, true}) {
-            const f89::Darken d0 = f89::darken(key, true, true, 0.0);   // outside ADS the lock weight is 0
-            outside = outside && isPlusZero(d0.level) && !d0.tripped;
-            exactZero = exactZero && isPlusZero(f89::darken(key, false, false, 0.0).level) && isPlusZero(f89::darken(key, true, false, -0.0).level);
+            const f106::Share d0 = f106::share(key, true, true, 0.0);   // outside ADS the lock weight is 0
+            outside = outside && isPlusZero(d0.weight) && !d0.tripped;
+            exactZero = exactZero && isPlusZero(f106::share(key, false, false, 0.0).weight) && isPlusZero(f106::share(key, true, false, -0.0).weight);
         }
         check(follows && outside && keyOff && exactZero,
-              "F89: the left eye's darkening is the ADS lock's weight with the key on, in native on foot with a weapon drawn; it is an exact 0 outside ADS (weight 0) and with the key off, whatever the weight");
+              "F106: the left eye's share is the ADS lock's weight with the key on, in native on foot with a weapon drawn; it is an exact 0 outside ADS (weight 0) and with the key off, whatever the weight");
         bool guard = true;
         for (const bool onFoot : {false, true})
             for (const bool armed : {false, true}) {
                 if (onFoot && armed) continue;
-                const f89::Darken d = f89::darken(true, onFoot, armed, 0.7);
-                guard = guard && isPlusZero(d.level) && d.tripped;
-                const f89::Darken quiet = f89::darken(true, onFoot, armed, 0.0);
-                guard = guard && isPlusZero(quiet.level) && !quiet.tripped;
+                const f106::Share d = f106::share(true, onFoot, armed, 0.7);
+                guard = guard && isPlusZero(d.weight) && d.tripped;
+                const f106::Share quiet = f106::share(true, onFoot, armed, 0.0);
+                guard = guard && isPlusZero(quiet.weight) && !quiet.tripped;
             }
         const double nan = std::numeric_limits<double>::quiet_NaN();
-        const f89::Darken nanW = f89::darken(true, true, true, nan), negW = f89::darken(true, true, true, -0.3), bigW = f89::darken(true, true, true, 4.0);
-        check(guard && isPlusZero(nanW.level) && isPlusZero(negW.level) && bigW.level == 1.0,
-              "F89: the guard forces 0 and reports a trip when the lock's weight is above 0 with no weapon drawn or off foot; a weight that is not a number or is negative reads 0, above 1 reads 1");
-        // the real ramp: 0.15 s in, 0.3 s out, monotone each way; the key off in the sights opens the eye at once
+        const f106::Share nanW = f106::share(true, true, true, nan), negW = f106::share(true, true, true, -0.3), bigW = f106::share(true, true, true, 4.0);
+        check(guard && isPlusZero(nanW.weight) && isPlusZero(negW.weight) && bigW.weight == 1.0,
+              "F106: the guard forces 0 and reports a trip when the lock's weight is above 0 with no weapon drawn or off foot; a weight that is not a number or is negative reads 0, above 1 reads 1");
+        // the real ramp: 0.15 s in, 0.3 s out, monotone each way; the key off in the sights gives the left eye its own view at once
         nf::AdsRamp ramp;
         double reachedAt = -1.0, prev = 0.0, outAt = -1.0;
         bool monotone = true, never = true;
         for (int i = 0; i < 90; ++i) {
             ramp.step(true, dt);
-            const double lv = f89::darken(true, true, true, ramp.w).level;
+            const double lv = f106::share(true, true, true, ramp.w).weight;
             monotone = monotone && lv >= prev;
             if (reachedAt < 0.0 && lv >= 1.0) reachedAt = (i + 1) * dt;
             prev = lv;
         }
         for (int i = 0; i < 90; ++i) {
             ramp.step(false, dt);
-            const double lv = f89::darken(true, true, true, ramp.w).level;
+            const double lv = f106::share(true, true, true, ramp.w).weight;
             monotone = monotone && lv <= prev;
             if (outAt < 0.0 && lv <= 0.0) outAt = (i + 1) * dt;
             prev = lv;
         }
         for (int i = 0; i < 90; ++i) {
             ramp.step(false, dt);
-            never = never && f89::darken(true, true, true, ramp.w).level == 0.0;
+            never = never && f106::share(true, true, true, ramp.w).weight == 0.0;
         }
         nf::AdsRamp held;
         held.w = 1.0;
-        const double keyDrop = f89::darken(false, true, true, held.w).level;
+        const double keyDrop = f106::share(false, true, true, held.w).weight;
         check(monotone && reachedAt > 0.14 && reachedAt < 0.17 && outAt > 0.29 && outAt < 0.32 && never && keyDrop == 0.0,
-              "F89: through a press and a release the darkening rises to 1 in 0.15 s and falls to 0 in 0.3 s, monotone each way, stays 0 afterwards, and the key switched off in the sights opens the eye at once");
+              "F106: through a press and a release the share rises to 1 in 0.15 s and falls to 0 in 0.3 s (F89's timing), monotone each way, stays 0 afterwards, and the key switched off in the sights gives the left eye its own view at once");
     }
     {
         // the signal between the halves: the level, its wire form and its staleness
-        namespace ed = edvr::eyedarken;
+        namespace ed = edvr::eyeshare;
         ed::clear();
         const float unpublished = ed::read(1000);
         ed::publish(0.6f, 1000);
@@ -553,10 +554,24 @@ inline void run89(Check&& check) {
         ed::clear();
         check(unpublished == 0.0f && fresh == 0.6f && staleHold == 0.6f && decaying > 0.0f && decaying < 0.6f && gone == 0.0f && nanLevel == 0.0f && negLevel == 0.0f && bigLevel == 1.0f &&
                   zeroLevel == 0.0f && ed::read(5000) == 0.0f,
-              "F89: the left eye's signal reads 0 until published, the level while fresh, decays to 0 when the frame thread goes quiet (0.2 s hold, 0.1 s decay), and reads NaN and negative as 0, above 1 as 1");
+              "F106: the left eye's share signal reads 0 until published, the level while fresh, decays to 0 when the frame thread goes quiet (0.2 s hold, 0.1 s decay), and reads NaN and negative as 0, above 1 as 1");
         check(ed::fromBits(ed::toBits(0.6f)) == 0.6f && ed::fromBits(ed::toBits(1.0f)) == 1.0f && ed::fromBits(0u) == 0.0f && ed::fromBits(0x7FC00000u) == 0.0f && ed::fromBits(0xBF800000u) == 0.0f &&
                   ed::fromBits(0x40000000u) == 1.0f && ed::toBits(std::numeric_limits<float>::quiet_NaN()) == 0u,
-              "F89: the wire form is the float's bits: 0.6 and 1 survive, a slot that is zero, NaN or negative reads 0, and 2.0 reads 1");
+              "F106: the wire form is the float's bits: 0.6 and 1 survive, a slot that is zero, NaN or negative reads 0, and 2.0 reads 1");
+        // the report the runtime sends back once a press: read only with its own size and version and every figure finite
+        EdvrNativeEyeShareReport good{};
+        good.size = sizeof(good);
+        good.version = EDVR_NATIVE_EYE_SHARE_REPORT_VERSION_1;
+        good.peak = 1.0f;
+        good.coverage = 0.8f;
+        EdvrNativeEyeShareReport cut = good, later = good, nanCov = good, infYaw = good;
+        cut.size = sizeof(good) - 4;
+        later.version = 2;
+        nanCov.coverage = std::numeric_limits<float>::quiet_NaN();
+        infYaw.rotationDeg[0] = std::numeric_limits<float>::infinity();
+        check(ed::reportReadable(&good) && !ed::reportReadable(nullptr) && !ed::reportReadable(&cut) && !ed::reportReadable(&later) && !ed::reportReadable(&nanCov) &&
+                  !ed::reportReadable(&infYaw),
+              "F106: the press report is read only at its own size and version with every figure finite (null, short, a later version, NaN or infinity refused)");
     }
 
     // ---- the transition trace ----------------------------------------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
-// F89 (native on-foot VR): the pure parts of the ADS transition trace, the left eye closing in ADS and the standing-height hold's open-loop input. Design: the arc doc, F89;
-// journal: the arc doc, 2026-10-24, F89.
+// F89 (native on-foot VR): the pure parts of the ADS transition trace and the standing-height hold's open-loop input. Design: the arc doc, F89; journal: the arc doc,
+// 2026-10-24, F89. (F89's left eye close moved out with F106, which replaced it: native_on_foot_f106.h.)
 //
 // Header only, no game or D3D11 state, so native_frame_test runs the very functions the hooks use.
 //
@@ -8,9 +8,8 @@
 // trace proves the sequence in the next flight: one line per frame for kTraceWindowS after each ADS release (F91: kTracePressWindowS after each press), with the journal flag,
 // the ADS state, the lock weight and the weight of the offset logged separately, and the eye's frame-to-frame step.
 //
-// Close left eye. In ADS the right eye is the eye the sight lock lines up; with fix.native_on_foot_ads_close_left_eye on, the left eye's final image fades to black by the
-// ADS lock's weight (0.15 s in, 0.3 s out) and the runtime applies it as the last pass over that eye's image (d3d11_stereo.cpp). darken() is the whole decision: never above 0
-// outside ADS, with the key off, unarmed or off foot (the guard, whose trip is logged).
+// Close left eye (F89 to F105). In ADS the left eye's final image faded to black by the ADS lock's weight. F106 replaced it: the left eye now shows the right eye's view
+// (native_on_foot_f106.h), and the close's key is retired.
 //
 // The hold's input. The hold measured dev = the render head's height + the eye alignment published last tick - the neck pivot's drop, which is the head's posture only if the
 // pose carries exactly that alignment. The runtime applies a published alignment a frame or two later, so dev carried the hold's own output as published less as applied,
@@ -97,25 +96,6 @@ struct EyeStep {
     }
     void drop() noexcept { have = false; }
 };
-
-// ---- the left eye closing in ADS -----------------------------------------------------------------------------------------------------------------------
-struct Darken {
-    double level = 0.0;     // 0 (the image as it is) to 1 (black): the left eye only
-    bool tripped = false;   // the guard forced 0 while the ADS lock's weight was above 0 (unarmed or off foot with the key on)
-};
-// lockWeight: the ADS lock's weight (the head-aim ramp, 0.15 s in and 0.3 s out), 0 outside ADS. The level is that weight with the key on, in native on foot, with a weapon
-// or tool drawn; anything else is exactly 0 (positive zero), and an armed/foot failure while the weight is above 0 is the guard's trip.
-inline Darken darken(bool keyOn, bool onFoot, bool armed, double lockWeight) noexcept {
-    Darken d;
-    const double w = lockWeight == lockWeight ? (lockWeight < 0.0 ? 0.0 : lockWeight > 1.0 ? 1.0 : lockWeight) : 0.0;
-    if (!keyOn || !(w > 0.0)) return d;
-    if (!onFoot || !armed) {
-        d.tripped = true;
-        return d;
-    }
-    d.level = w;
-    return d;
-}
 
 // ---- the hold's open-loop input ------------------------------------------------------------------------------------------------------------------------
 // The frame input's word: 0 = the runtime does not report (older than F89), else the serial of the alignment its seated origin carried, plus 1.

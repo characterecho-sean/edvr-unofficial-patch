@@ -15,6 +15,7 @@
 #include "graphics_bridge_client.h"
 #include "immediate_executor.h"
 #include "gpu_work_observer.h"
+#include "eye_share.h"
 #include <vector>
 
 namespace edvr::openxr {
@@ -28,6 +29,27 @@ namespace edvr::openxr {
 // trimmed image across the lens instead. Deliberately not the trim's own
 // bounds type -- this header stays free of the native feature headers.
 struct StereoPlacement { float left = 0, top = 0, right = 1, bottom = 1; };
+
+// F106: the RIGHT eye's hidden area, as OpenXR's visibility mask gives it for that view (XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR: triangles of points on
+// the view's z = -1 plane, x right, y up). Borrowed for the call. revision names the mesh: the renderer builds its mask again when it changes (or the right view's
+// fov does). No mesh (null, or no triangles): the share takes the whole of what the right eye drew.
+struct StereoHiddenArea {
+  const XrVector2f* vertices = nullptr;
+  uint32_t vertexCount = 0;
+  const uint32_t* indices = nullptr;
+  uint32_t indexCount = 0;
+  uint64_t revision = 0;
+};
+// F106: what the renderer did with the left eye's share in its last renderCaptured call, for the host's per-press line. coverage and coverageWhole (eye_share.h,
+// coverageOf) are computed again only when the relative rotation, a fov, a placement or the mask changes, not every frame.
+struct StereoShareFacts {
+  bool drawn = false;          // the last call drew the share pass (a share above 0, views it could map, not a fully black frame)
+  bool refused = false;        // ... it was asked to and could not map the views
+  float rotationDeg[3]{};      // the left view's turn against the right view's: yaw, pitch, roll
+  float leftTangents[4]{}, rightTangents[4]{};
+  float coverage = 0.0f, coverageWhole = 0.0f;
+  uint32_t hiddenTriangles = 0;   // the mask's triangles (0: no mask)
+};
 
 struct StereoDispatch {
   PFN_xrEnumerateSwapchainFormats enumerateSwapchainFormats = nullptr;
@@ -75,15 +97,19 @@ class D3D11Stereo final {
   // argument of each draw, not a property of the kept pixels.
   // headPose, when given, is the located head of this frame (geometry_locator.h's input.headPose, in the same origin as the views): it is what the plugin
   // API's onUpdate receives. Absent, or not a valid pose, the plugins' update is skipped for the frame; an eye pose is never passed in its place.
-  // leftEyeDarken, 0..1 (F89, native on foot: the left eye closes while the sights are up, left_eye_darken.h), blends black over the LEFT eye's finished image by that
-  // much, as the very last pass over that image, after the plugins' overlay: out = in * (1 - level), the same blend as the comfort fade. Exactly 0 (and anything that is
-  // not a number or is negative) runs no extra pass, so the image is the one this renderer has always drawn, bit for bit; 1 or more is plain black. The right eye never
-  // reads it. Like the fade it is an argument of each draw, not a state of the renderer.
+  // leftEyeShare, 0..1 (F106, native on foot: the sight in both eyes while the sights are up, left_eye_share.h, eye_share.h): the LEFT eye's image becomes
+  // lerp(own, the right eye's image turned into the left view, share * coverage), drawn in the left eye's scene pass, before the fade and the plugins' overlay, which
+  // apply over it as over any image. The right eye's capture is the source; where the right eye drew nothing for a left pixel (behind it, outside its fov or its
+  // placement, inside its hidden area, the mask built from rightHidden) the left pixel keeps its own image, over a band of eye_share.h's kBandDeg. Exactly 0 (and
+  // anything that is not a number or is negative) runs no extra pass, so the image is the one this renderer has always drawn, bit for bit. The layer's views stay each
+  // eye's own. Like the fade it is an argument of each draw, not a state of the renderer; shareFacts() says what the call did with it.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
-                          float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeDarken = 0.0f);
+                          float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
+                          const StereoHiddenArea* rightHidden = nullptr);
+  const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the
@@ -149,6 +175,20 @@ class D3D11Stereo final {
   Microsoft::WRL::ComPtr<ID3D11PixelShader> blitPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> blitConstants_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> blitSampler_;
+  // F106: the left eye's share: its pixel shader (run with the blit's vertex shader), constants, blend (rgb by the source's alpha, the left image's alpha kept), and the
+  // right eye's hidden-area mask with what it was built from.
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> sharePixelShader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> shareConstants_;
+  Microsoft::WRL::ComPtr<ID3D11BlendState> shareBlend_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shareMask_;
+  shareview::HiddenMask shareMaskCpu_;      // the mask as uploaded, for the coverage figure
+  uint64_t shareMaskRevision_ = 0;         // the mesh it was built from (0: none built)
+  XrFovf shareMaskFov_{};                  // the right view's fov it spans
+  uint32_t shareMaskPixels_[2]{};          // the right swapchain image's size it was built for
+  double shareCoverageKey_[25]{};          // what the coverage figure was last computed for (the relative rotation, the fovs, the placements)
+  bool shareCoverageKnown_ = false;
+  bool ensureShareMask(const XrFovf& rightFov, const StereoHiddenArea* hidden, bool& rebuilt);
+  StereoShareFacts shareFacts_{};
   Microsoft::WRL::ComPtr<ID3D11VertexShader> skyboxVertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> skyboxPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> skyboxConstants_;

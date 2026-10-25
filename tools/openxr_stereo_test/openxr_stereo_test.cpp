@@ -532,73 +532,6 @@ void fadeSelfTest(bool owned) {
   }
 }
 
-// ---- F89: the left eye closing in ADS (renderCaptured's leftEyeDarken) ---------------------------------------------------------------------------------------------
-// The last pass over the LEFT eye's finished image: black blended over it by the level, the same blend as the comfort fade; the right eye is never read against it. Exactly 0, a
-// negative level and NaN draw nothing more, so those frames are today's, bit for bit. Both eyes are read back and compared with a render made with no level.
-void leftDarkenSelfTest(bool owned) {
-  const unsigned xs[]={0,16,48,64,80,111,127},ys[]={0,16,48,64,80,111,127};
-  for(bool unorm:{false,true}) {
-    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"left darken initialize");
-    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"left darken capture owner");
-    auto source=pattern(f,false);const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
-    check(capture.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&texture)==vr::VRCompositorError_None,"left darken pattern capture");
-    // eye 0 first (49 pixels), then eye 1
-    auto render=[&](float fade,float dark,const StereoPlacement* placement=nullptr) {
-      XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
-      const XrResult r=f.renderer.renderCaptured(f.views,space,capture,layer,nullptr,nullptr,placement,fade,nullptr,dark);
-      check(r==XR_SUCCESS,"left darken render");
-      std::vector<uint32_t> out;
-      for(unsigned eye=0;eye<2;++eye)for(unsigned y:ys)for(unsigned x:xs)out.push_back(f.pixel(eye,image,x,y));
-      return out;
-    };
-    const auto near2=[](uint32_t got,uint32_t want,int tol) {
-      for(unsigned c=0;c<4;++c)if(std::abs(int((got>>(8*c))&255)-int((want>>(8*c))&255))>tol)return false;
-      return true;
-    };
-    const auto base=render(0,0);
-    bool pattern4=true;for(unsigned eye=0;eye<2;++eye)pattern4=pattern4&&base[eye*49+1*7+1]==0xff0000ffu&&base[eye*49+1*7+5]==0xff00ff00u;
-    check(pattern4,"(the baseline shows the pattern in both eyes: red top-left, green top-right)");
-    check(render(0,0.0f)==base&&render(0,-0.0f)==base&&render(0,-1.0f)==base&&render(0,std::numeric_limits<float>::quiet_NaN())==base,
-          "LEFT DARKEN 0 (or a negative level, or NaN) IS TODAY'S IMAGE, bit for bit: every sampled pixel of both eyes equals the render made with no level");
-    for(double a:{.25,.5,.75}) {
-      const auto dark=render(0,float(a));
-      bool left=true,right=true;
-      for(size_t i=0;i<49;++i)left=left&&near2(dark[i],fadedPixel(base[i],a,unorm),2);
-      for(size_t i=49;i<98;++i)right=right&&dark[i]==base[i];
-      char what[200];std::snprintf(what,sizeof(what),"LEFT DARKEN %.2f: the left eye is the image times %.2f (%s) at 49 sampled pixels, alpha untouched, and the right eye is today's image bit for bit",a,1-a,unorm?"on the encoded bytes":"in linear light");
-      check(left&&right,what);
-    }
-    {
-      bool left=true,right=true;
-      for(float level:{1.0f,1.0001f,2.0f,1e9f,std::numeric_limits<float>::infinity()}) {
-        const auto dark=render(0,level);
-        for(size_t i=0;i<49;++i)left=left&&dark[i]==0xff000000u;
-        for(size_t i=49;i<98;++i)right=right&&dark[i]==base[i];
-      }
-      check(left&&right,"LEFT DARKEN 1 (or more) IS BLACK on the left eye, corners included (exactly 0xff000000), and the right eye is not touched");
-    }
-    {   // with the comfort fade: the fade first (both eyes), then the left eye closes: the left is the image times (1 - fade)(1 - level), the right the image times (1 - fade)
-      const auto both=render(.5f,.5f);
-      bool left=true,right=true;
-      for(size_t i=0;i<49;++i)left=left&&near2(both[i],fadedPixel(fadedPixel(base[i],.5,unorm),.5,unorm),3);
-      for(size_t i=49;i<98;++i)right=right&&near2(both[i],fadedPixel(base[i],.5,unorm),2);
-      check(left&&right,"WITH THE COMFORT FADE: fade 0.5 and left darken 0.5 give the left eye the image times 0.25 and the right eye the image times 0.5 (the left closes over the faded image)");
-      check(render(1.0f,.5f)[0]==0xff000000u&&render(1.0f,.5f)[60]==0xff000000u,"...and a fully black frame (fade 1) is black in both eyes whatever the left level");
-    }
-    {   // a trimmed placement: the border stays black, the placed image darkens on the left only
-      const StereoPlacement place[2]={{.25f,.25f,.75f,.75f},{.25f,.25f,.75f,.75f}};
-      const auto placedBase=render(0,0,place),placedDark=render(0,.5f,place);
-      bool left=placedBase[0]==0xff000000u&&placedDark[0]==0xff000000u&&placedBase[3*7+3]!=0xff000000u,right=true;
-      for(size_t i=0;i<49;++i)left=left&&near2(placedDark[i],fadedPixel(placedBase[i],.5,unorm),2);
-      for(size_t i=49;i<98;++i)right=right&&placedDark[i]==placedBase[i];
-      const auto placedBlack=render(0,1.0f,place);
-      bool black=true;for(size_t i=0;i<49;++i)black=black&&placedBlack[i]==0xff000000u;
-      check(left&&right&&black,"A TRIMMED PLACEMENT with a left darken: the border stays black, the placed image is darkened on the left eye by the same amount, the right eye is today's, and level 1 blackens the whole left image");
-    }
-    check(render(0,0)==base,"A RENDER AFTER A DARKENED ONE is the plain image again: the level is an argument of each draw, not a state of the renderer");
-  }
-}
-
 // ---- B1: a fully black frame does no scene work -------------------------------------------------------------------------------------------------------------------
 // The pixels cannot tell a clear-only pass from one that drew the scene and cleared over it (fadeSelfTest checks them and both pass), so the work is counted: a
 // pipeline-statistics query on the device's immediate context around the render call sees the vertex and pixel shader invocations of everything executed in it,
@@ -694,6 +627,9 @@ void blackPassSelfTest(bool owned) {
     check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==2,what);
   }
 }
+
+// ---- F106: the left eye's share of the right eye's image: shareSelfTest, with the fixture and helpers above ----
+#include "share_cases.h"
 
 // The renderer is a diagnostic pass which must borrow the game's immediate
 // context without changing it.  Keep this probe deliberately independent of
@@ -1012,6 +948,15 @@ void embeddedShaderPin() {
     check(c.size>4&&!std::memcmp(c.bytes,"DXBC",4),(label+" embedded bytes are DXBC").c_str());
     check(code&&code->GetBufferSize()==c.size&&!std::memcmp(code->GetBufferPointer(),c.bytes,c.size),(label+" embedded bytes equal a compile made now with the former call's arguments").c_str());
   }
+  // F106's share shader is new: no former call to freeze, so its embedded bytes are held to a compile of its own text made now, with the same arguments as the others.
+  {
+    ComPtr<ID3DBlob> code,errors;
+    const char* text=edvr::openxr::kStereoShareHlsl;
+    const HRESULT hr=D3DCompile(text,std::strlen(text),"EDVR left eye share",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&code,&errors);
+    check(SUCCEEDED(hr)&&code&&code->GetBufferSize()==sizeof(edvr::kStereoSharePsBytecode)&&
+          !std::memcmp(code->GetBufferPointer(),edvr::kStereoSharePsBytecode,sizeof(edvr::kStereoSharePsBytecode)),
+          "F106: the share shader's embedded bytes equal a compile of kStereoShareHlsl made now (source name, entry, profile and flags as the build's)");
+  }
   // The control the pin stands on: one byte of the text changes the compiled bytes (or fails to compile), so equality above is not vacuous.
   std::string tweaked=frozenBlitHlsl;const size_t at=tweaked.find("0.0031308");check(at!=std::string::npos,"stereo pin control anchor");
   if(at!=std::string::npos){tweaked[at+2]='1';ComPtr<ID3DBlob> code,errors;
@@ -1056,10 +1001,10 @@ int selfTest(){
   skyboxSelfTest();
   fadeSelfTest(false);
   fadeSelfTest(true);
-  leftDarkenSelfTest(false);
-  leftDarkenSelfTest(true);
   blackPassSelfTest(false);
   blackPassSelfTest(true);
+  shareSelfTest(false);
+  shareSelfTest(true);
   desktopStateSelfTest();
   embeddedShaderPin();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;

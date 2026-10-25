@@ -58,7 +58,8 @@ static_assert(offsetof(EdvrNativeFrameOutput, sceneReady) == offsetof(ReleasedOu
                   offsetof(EdvrNativeFrameOutput, resubmitEnabled) == offsetof(ReleasedOutput, resubmitEnabled) &&
                   offsetof(EdvrNativeFrameOutput, trimOuterDeg) == offsetof(ReleasedOutput, trimOuterDeg) &&
                   offsetof(EdvrNativeFrameOutput, deferredPacing) == offsetof(ReleasedOutput, deferredPacing) &&
-                  offsetof(EdvrNativeFrameOutput, reservedProjectionChannel) == offsetof(ReleasedOutput, reservedProjectionChannel) &&
+                  offsetof(EdvrNativeFrameOutput, leftEyeShare) == offsetof(ReleasedOutput, reservedProjectionChannel) &&   // F106: renamed, same word
+                  sizeof(EdvrNativeFrameOutput::leftEyeShare) == sizeof(ReleasedOutput::reservedProjectionChannel) &&
                   offsetof(EdvrNativeFrameOutput, fadeAlpha) == offsetof(ReleasedOutput, fadeAlpha) &&
                   alignof(EdvrNativeFrameOutput) == 4,
               "the released output words are where they were, with no padding in play");

@@ -206,7 +206,7 @@ int wmain(int argc, wchar_t** argv) {
     // The terrain guard's slots are retired (2026-10-09): always zero, whatever an old ini says.
     const auto retiredGuardSlotsZero = [](const EdvrNativeFrameOutput& o) {
         for (uint32_t word : o.reservedTerrainGuard) if (word != 0) return false;
-        return o.reservedProjectionChannel == 0;
+        return o.leftEyeShare == 0;
     };
     check(retiredGuardSlotsZero(firstOutput),
           "the terrain guard's retired slots are zero although the ini still carries all six of its old keys");
@@ -360,13 +360,13 @@ int wmain(int argc, wchar_t** argv) {
     // caller: answered in exactly its own shape, pacing and all, with the
     // channel field never written into its (absent) tail.
     EdvrNativeFrameOutput defaultOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
-    defaultOutput.reservedProjectionChannel = 0xA5A5A5A5u;
+    defaultOutput.leftEyeShare = 0xA5A5A5A5u;
     EdvrNativeFrameInput defaultFrame = input(41, 7, 11);
     check(table.beginFrame(table.context, &defaultFrame, &defaultOutput) == S_OK &&
               defaultOutput.version == EDVR_NATIVE_FRAME_VERSION_3 &&
               defaultOutput.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 &&
               defaultOutput.deferredPacing == 0 &&
-              defaultOutput.reservedProjectionChannel == 0xA5A5A5A5u,
+              defaultOutput.leftEyeShare == 0xA5A5A5A5u,
           "a version 3 caller is answered in kind, its absent tail untouched");
 
     g_journalActive = g_onFootKnown = g_onFoot = true;
@@ -6005,25 +6005,25 @@ int wmain(int argc, wchar_t** argv) {
               "F62b: version 10 with a version 2 input, version 9 with a version 3 input, and a version 3 input of the version 2 size are refused");
         check(EDVR_NATIVE_FRAME_INPUT_SIZE_2 + 14u * 4u == sizeof(EdvrNativeFrameInput) && EDVR_NATIVE_FRAME_INPUT_SIZE_1 < EDVR_NATIVE_FRAME_INPUT_SIZE_2,
               "F62b: the version 3 input is the version 2 words plus the LOCAL head (12 floats), its flag and a word (F89: the applied alignment's serial)");
-        // F89: the left eye's darkening rides a version 10 answer's reservedProjectionChannel (the float's bits); no other shape carries it, and a stale or absent level reads 0.
-        edvr::eyedarken::clear();
+        // F106: the left eye's share (F89: its darkening) rides a version 10 answer's leftEyeShare (the float's bits); no other shape carries it, and a stale or absent level reads 0.
+        edvr::eyeshare::clear();
         EdvrNativeFrameOutput darkNone{sizeof(darkNone), EDVR_NATIVE_FRAME_VERSION_10};
         EdvrNativeFrameInput darkNoneFrame = v3Input(34, 0.1f);
-        edvr::eyedarken::publish(0.6f, GetTickCount64());
+        edvr::eyeshare::publish(0.6f, GetTickCount64());
         EdvrNativeFrameOutput darkSet{sizeof(darkSet), EDVR_NATIVE_FRAME_VERSION_10};
         EdvrNativeFrameInput darkSetFrame = v3Input(32, 0.1f);
         EdvrNativeFrameOutput dark9{sizeof(dark9), EDVR_NATIVE_FRAME_VERSION_9};
         EdvrNativeFrameInput dark9Frame = input(41, 7, 33);
         dark9Frame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
         dark9Frame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
-        dark9.reservedProjectionChannel = 0xA5A5A5A5u;
+        dark9.leftEyeShare = 0xA5A5A5A5u;
         const bool setOk = table.beginFrame(table.context, &darkSetFrame, &darkSet) == S_OK && darkSet.version == EDVR_NATIVE_FRAME_VERSION_10 &&
-                           edvr::eyedarken::fromBits(darkSet.reservedProjectionChannel) == 0.6f;
-        const bool v9Ok = table.beginFrame(table.context, &dark9Frame, &dark9) == S_OK && dark9.version == EDVR_NATIVE_FRAME_VERSION_9 && dark9.reservedProjectionChannel == 0u;
-        edvr::eyedarken::clear();
-        const bool noneOk = table.beginFrame(table.context, &darkNoneFrame, &darkNone) == S_OK && darkNone.reservedProjectionChannel == 0u;
+                           edvr::eyeshare::fromBits(darkSet.leftEyeShare) == 0.6f;
+        const bool v9Ok = table.beginFrame(table.context, &dark9Frame, &dark9) == S_OK && dark9.version == EDVR_NATIVE_FRAME_VERSION_9 && dark9.leftEyeShare == 0u;
+        edvr::eyeshare::clear();
+        const bool noneOk = table.beginFrame(table.context, &darkNoneFrame, &darkNone) == S_OK && darkNone.leftEyeShare == 0u;
         check(setOk && v9Ok && noneOk,
-              "F89: a version 10 answer carries the left eye's darkening in reservedProjectionChannel (0.6 as published), a version 9 answer's slot is 0, and with nothing published the slot is 0");
+              "F106: a version 10 answer carries the left eye's share in leftEyeShare (0.6 as published), a version 9 answer's slot is 0, and with nothing published the slot is 0");
         // F89: the applied alignment's serial rides the version 3 input's last word and arrives with the frame; a version 2 input has none (0: not reported)
         EdvrNativeFrameOutput appliedOut{sizeof(appliedOut), EDVR_NATIVE_FRAME_VERSION_10};
         EdvrNativeFrameInput appliedFrame = v3Input(35, 0.1f);
@@ -6076,10 +6076,10 @@ int wmain(int argc, wchar_t** argv) {
         check(table.beginFrame(table.context, &v4Frame, &v4) == S_OK && v4.version == EDVR_NATIVE_FRAME_VERSION_4 && v4.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 && v4.fadeAlpha == -123.0f,
               "A VERSION 4 CALLER is answered in its own shape and the fade slot past it is untouched (a runtime from before the fade cannot be blacked out)");
         EdvrNativeFrameOutput v3{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
-        v3.reservedProjectionChannel = 0xA5A5A5A5u;
+        v3.leftEyeShare = 0xA5A5A5A5u;
         v3.fadeAlpha = -123.0f;
         EdvrNativeFrameInput v3Frame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.reservedProjectionChannel == 0xA5A5A5A5u && v3.fadeAlpha == -123.0f, "...and a version 3 caller likewise");
+        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.leftEyeShare == 0xA5A5A5A5u && v3.fadeAlpha == -123.0f, "...and a version 3 caller likewise");
         EdvrNativeFrameOutput fullAsV4{sizeof(fullAsV4), EDVR_NATIVE_FRAME_VERSION_4};
         EdvrNativeFrameInput fullMismatchFrame = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &fullMismatchFrame, &fullAsV4) == E_INVALIDARG, "A FULL-SIZE STRUCT CLAIMING VERSION 4 is refused (the size contradicts the version)");

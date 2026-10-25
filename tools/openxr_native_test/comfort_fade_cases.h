@@ -3,7 +3,7 @@
 // (docs\design-explorer-cam-free-camera-2026-10-07.md, "Comfort fade"). A fade level that cannot be trusted reads 0: no fade, never black.
 #include "../../src/openxr/native_frame_client.h"
 #include "../../src/common/comfort_fade.h"
-#include "../../src/common/left_eye_darken.h"
+#include "../../src/common/left_eye_share.h"
 #include <cmath>
 #include <limits>
 
@@ -25,7 +25,7 @@ struct Provider {
     if(o.version>=6) {o.lookYawTotal=0.25f;o.lookYawGameFrame=7;}   // F22: the look's total rides the version 6 shape only
     if(o.version>=8) {o.eyeAlign[0]=0.1f;o.eyeAlign[1]=0.2f;o.eyeAlign[2]=-0.3f;o.eyeAlignSerial=5;}   // F33: the body-align translation rides the version 8 shape only
     if(o.version>=10||scribble)o.reservedYaw=0.4f;   // F62b: the ADS head-aim's pitch rides a version 10 answer only
-    if(o.version>=10||scribble)o.reservedProjectionChannel=0x3F19999Au;   // F89: the left eye's darkening (0.6f's bits) rides a version 10 answer only
+    if(o.version>=10||scribble)o.leftEyeShare=0x3F19999Au;   // F106: the left eye's share (0.6f's bits; F89's darkening before) rides a version 10 answer only
     return S_OK;
   }
 };
@@ -95,13 +95,13 @@ template<class Check> void runComfortFadeCases(Check&& check) {
     Provider old;old.maxVersion=9;old.scribble=true;uint32_t v9=10;EdvrNativeFrameOutput out9{};
     check(ladder(old,v9,out9)==S_OK&&out9.version==9&&v9==9&&old.calls==2&&out9.reservedYaw==0.0f&&out9.eyeAlign[0]==0.1f,
           "F62b: a version 9 d3d11.dll: the 10 ask is refused, 9 is answered, and a pitch it scribbles into reservedYaw is not believed");
-    // F89: the left eye's darkening (reservedProjectionChannel, a float's bits) arrives with a version 10 answer and reads 0 from any other shape or a failed frame
-    check(out.reservedProjectionChannel==0x3F19999Au&&edvr::eyedarken::fromBits(out.reservedProjectionChannel)==0.6f&&out9.reservedProjectionChannel==0u&&edvr::eyedarken::fromBits(out9.reservedProjectionChannel)==0.0f,
-          "F89: a version 10 d3d11.dll's left eye darkening (0.6) arrives; a version 9 d3d11.dll that scribbles the slot reads 0 (no darkening from a shape that has none)");
-    Provider failing;failing.maxVersion=10;failing.fail=E_FAIL;uint32_t vf=10;EdvrNativeFrameOutput outf{};outf.reservedProjectionChannel=0x3F800000u;
-    check(ladder(failing,vf,outf)==E_FAIL&&outf.reservedProjectionChannel==0u,"F89: a provider that fails the frame leaves no left eye darkening behind");
-    check(edvr::eyedarken::fromBits(0x7FC00000u)==0.0f&&edvr::eyedarken::fromBits(0xBF800000u)==0.0f&&edvr::eyedarken::fromBits(0x40000000u)==1.0f,
-          "F89: a slot that is NaN or negative reads 0 and one above 1 reads 1: never dark by accident");
+    // F106: the left eye's share (leftEyeShare, a float's bits; F89's darkening in the same word) arrives with a version 10 answer and reads 0 from any other shape or a failed frame
+    check(out.leftEyeShare==0x3F19999Au&&edvr::eyeshare::fromBits(out.leftEyeShare)==0.6f&&out9.leftEyeShare==0u&&edvr::eyeshare::fromBits(out9.leftEyeShare)==0.0f,
+          "F106: a version 10 d3d11.dll's left eye share (0.6) arrives, as an F89 d3d11.dll's darkening in the same word does; a version 9 d3d11.dll that scribbles the slot reads 0 (no share from a shape that has none)");
+    Provider failing;failing.maxVersion=10;failing.fail=E_FAIL;uint32_t vf=10;EdvrNativeFrameOutput outf{};outf.leftEyeShare=0x3F800000u;
+    check(ladder(failing,vf,outf)==E_FAIL&&outf.leftEyeShare==0u,"F106: a provider that fails the frame leaves no left eye share behind");
+    check(edvr::eyeshare::fromBits(0x7FC00000u)==0.0f&&edvr::eyeshare::fromBits(0xBF800000u)==0.0f&&edvr::eyeshare::fromBits(0x40000000u)==1.0f,
+          "F106: a slot that is NaN or negative reads 0 and one above 1 reads 1: never shared by accident");
   }
 }
 } // namespace edvr::openxr::test

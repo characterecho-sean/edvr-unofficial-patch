@@ -380,7 +380,7 @@ if not exist "%OBJ%\temporalshader" mkdir "%OBJ%\temporalshader"
     "tools\temporal_shader_build\temporal_shader_build.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: temporal shader compiler build failed & exit /b 1 )
-REM The native runtime's four stereo-renderer shaders (src\openxr\stereo_shader_source.h) are compiled here too, into a header of their own
+REM The native runtime's stereo-renderer shaders (src\openxr\stereo_shader_source.h; five from F106) are compiled here too, into a header of their own
 REM (--stereo-output), so edvr_openxr_runtime.dll creates them from bytes and carries no HLSL compiler: it imported d3dcompiler_47.dll until 2026-10-01
 REM for four D3DCompile calls. The runtime and the two rigs that compile d3d11_stereo.cpp find the header through /I"%GEN%"; the PE gate below fails the
 REM build if either DLL imports the compiler again.
@@ -449,7 +449,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrPluginDispatchUpdate ^
     --extra-export edvrPluginDispatchRenderEye ^
     --extra-export edvrPluginDispatchFilterInput ^
-    --extra-export edvrPluginHasActivePlugins
+    --extra-export edvrPluginHasActivePlugins ^
+    --extra-export edvrNoteNativeEyeShare
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build

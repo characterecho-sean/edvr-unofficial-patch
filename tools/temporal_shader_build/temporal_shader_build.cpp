@@ -1,5 +1,5 @@
-// Compile fixed temporal shaders during the build, never in the game -- and, with --stereo-output, the native runtime's four stereo-renderer shaders
-// (src/openxr/stereo_shader_source.h) into a header of their own, so the runtime DLL carries no compiler.
+// Compile fixed temporal shaders during the build, never in the game -- and, with --stereo-output, the native runtime's five stereo-renderer shaders
+// (src/openxr/stereo_shader_source.h; the fifth, the left eye's share, from F106) into a header of their own, so the runtime DLL carries no compiler.
 #include <windows.h>
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
@@ -365,19 +365,25 @@ static bool sameMacros(const D3D_SHADER_MACRO* a, const D3D_SHADER_MACRO* b) {
 // The native runtime's stereo renderer: a blit and a skybox, each a vertex and a pixel shader from one HLSL text (src/openxr/stereo_shader_source.h). The
 // parameters are the runtime's former D3DCompile calls, field for field: the source names, the entry points "vs" and "ps", the profiles, no macros, flags1 =
 // D3DCOMPILE_ENABLE_STRICTNESS, flags2 = 0. The self-test holds them to independently written copies of those calls and the text to the hash of the original.
+// F106 adds a fifth: the left eye's share pixel shader (kStereoShareHlsl), new, with the same profile and flags; it runs with the blit's vertex shader.
 static std::vector<Variant> stereoVariants() {
     return {
         {"kStereoBlitVsBytecode", "EDVR captured blit", "vs", nullptr, {}, false, edvr::openxr::kStereoBlitHlsl, "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
         {"kStereoBlitPsBytecode", "EDVR captured blit", "ps", nullptr, {}, false, edvr::openxr::kStereoBlitHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
         {"kStereoSkyboxVsBytecode", "EDVR skybox", "vs", nullptr, {}, false, edvr::openxr::kStereoSkyboxHlsl, "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
         {"kStereoSkyboxPsBytecode", "EDVR skybox", "ps", nullptr, {}, false, edvr::openxr::kStereoSkyboxHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
+        {"kStereoSharePsBytecode", "EDVR left eye share", "ps", nullptr, {}, false, edvr::openxr::kStereoShareHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
     };
+}
+// The texts the stereo key covers, in the variants' order.
+static std::string stereoSources() {
+    return std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl + edvr::openxr::kStereoShareHlsl;
 }
 
 // The stereo header: its own key over the text, the variant table (names, entries, profiles, flags) and the compiler DLL, reused when current.
 static int generateStereo(const Options& o) {
     auto variants = stereoVariants();
-    const std::string sources = std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl;
+    const std::string sources = stereoSources();
     const std::string key = sourceKey(sources.c_str(), variants, compilerPath());
     if (outputCurrent(o.stereoOutput, key)) {
         std::printf("stereo shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.stereoOutput.c_str());
@@ -493,7 +499,7 @@ static int generate(const Options& o) {
     if (o.dry) {
         std::puts("dry-run: compile mv and main (fast/diagnostic) plus capture-only mv trace; embed bytecode and the "
                   "fixed UI/hologram compute and night-vision pixel variants plus engine-motion core text; with --stereo-output, the native "
-                  "runtime's four stereo-renderer shaders into their own header; no files written");
+                  "runtime's five stereo-renderer shaders into their own header; no files written");
         return 0;
     }
     const int temporal = generateTemporal(o);
@@ -1028,8 +1034,8 @@ static void selfTest() {
             {"kStereoSkyboxPsBytecode", "EDVR skybox", "ps", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0x1F8D73118F42ED8Bull, false},
         };
         auto stereo = stereoVariants();
-        check(stereo.size() == 4 && sizeof(contracts) / sizeof(contracts[0]) == 4, "the four stereo shaders are registered");
-        for (size_t i = 0; i < stereo.size(); ++i) {
+        check(stereo.size() == 5 && sizeof(contracts) / sizeof(contracts[0]) == 4, "the four former stereo shaders and F106's share shader are registered");
+        for (size_t i = 0; i < 4 && i < stereo.size(); ++i) {
             auto& shader = stereo[i]; const auto& legacy = contracts[i];
             for (size_t j = 0; j < i; ++j) check(std::strcmp(stereo[j].symbol, shader.symbol) != 0, "stereo symbols do not collide");
             const char* text = legacy.blit ? edvr::openxr::kStereoBlitHlsl : edvr::openxr::kStereoSkyboxHlsl;
@@ -1054,11 +1060,35 @@ static void selfTest() {
                   D3D11_SHVER_GET_TYPE(desc.Version) == stage,
                   "stereo payload reflects its stage and SM5");
         }
+        // F106's share shader: new, so held to what d3d11_stereo.cpp binds rather than to a former call. Its own symbol, source name and text; ps_5_0 with the
+        // strictness flag and no macros; the share's constants at b0, the right eye's capture at t0, the hidden-area mask at t1, the blit's sampler at s0, and nothing else.
+        if (stereo.size() == 5) {
+            auto& share = stereo[4];
+            for (size_t j = 0; j < 4; ++j) check(std::strcmp(stereo[j].symbol, share.symbol) != 0, "stereo symbols do not collide");
+            check(!std::strcmp(share.symbol, "kStereoSharePsBytecode") && !std::strcmp(share.sourceName, "EDVR left eye share") && !std::strcmp(share.entry, "ps") &&
+                      !std::strcmp(share.profile, "ps_5_0") && share.macros == nullptr && share.flags1 == D3DCOMPILE_ENABLE_STRICTNESS && share.flags2 == 0 &&
+                      share.alternate && !std::strcmp(share.alternate, edvr::openxr::kStereoShareHlsl),
+                  "F106: the share shader's symbol, source name, entry, profile, flags and text");
+            check(compile(compiler.fn, share.alternate, share, true) && share.bytes.size() > 4 && !std::memcmp(share.bytes.data(), "DXBC", 4), "F106: the share shader compiles to DXBC");
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            bool ok = SUCCEEDED(reflect(share.bytes.data(), share.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
+                      reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_PIXEL_SHADER &&
+                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && desc.ConstantBuffers == 1 && desc.BoundResources == 4;
+            D3D11_SHADER_INPUT_BIND_DESC cb{}, right{}, mask{}, sampler{};
+            ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("Share", &cb)) && cb.Type == D3D_SIT_CBUFFER && cb.BindPoint == 0 &&
+                 SUCCEEDED(reflection->GetResourceBindingDescByName("rightEye", &right)) && right.Type == D3D_SIT_TEXTURE && right.BindPoint == 0 &&
+                 SUCCEEDED(reflection->GetResourceBindingDescByName("hiddenMask", &mask)) && mask.Type == D3D_SIT_TEXTURE && mask.BindPoint == 1 &&
+                 SUCCEEDED(reflection->GetResourceBindingDescByName("linearSampler", &sampler)) && sampler.Type == D3D_SIT_SAMPLER && sampler.BindPoint == 0;
+            D3D11_SHADER_BUFFER_DESC cbDesc{};
+            ok = ok && reflection->GetConstantBufferByName("Share") && SUCCEEDED(reflection->GetConstantBufferByName("Share")->GetDesc(&cbDesc)) && cbDesc.Size == 192;
+            check(ok, "F106: the share shader is SM5 pixel, binds the share's 192-byte constants at b0, the right eye at t0, the mask at t1 and the sampler at s0, and nothing else");
+        }
         // The text really is the old call's: a one-byte edit of either changes the hash (the control for the hashes above), and the two texts differ.
         Fnv1a64 edited; std::string tweaked = edvr::openxr::kStereoBlitHlsl; tweaked[tweaked.size() / 2] ^= 1; edited.add(tweaked.data(), tweaked.size());
         check(edited.hash != contracts[0].textHash && contracts[0].textHash != contracts[2].textHash, "a one-byte change to the text changes its hash");
-        // The stereo header: no engine-motion core, the key line, the four arrays by name, every byte round-tripped.
-        const std::string skey = sourceKey((std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl).c_str(), stereo, dll);
+        // The stereo header: no engine-motion core, the key line, the five arrays by name, every byte round-tripped.
+        const std::string skey = sourceKey(stereoSources().c_str(), stereo, dll);
         const std::string sheader = render(stereo, skey, std::string(), false);
         check(sheader.find("kEngineMotionCoreHlsl") == std::string::npos && sheader.find(std::string(kKeyPrefix) + skey + "\n") != std::string::npos &&
               render(stereo, skey, std::string(), true).find("kEngineMotionCoreHlsl") != std::string::npos,
@@ -1085,7 +1115,7 @@ static void selfTest() {
         auto flagChanged = stereo; flagChanged[0].flags1 = 0;
         auto profileChanged = stereo; profileChanged[1].profile = "ps_4_0";
         auto nameChanged = stereo; nameChanged[2].sourceName = "EDVR skybox 2";
-        const std::string textKey = (std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl);
+        const std::string textKey = stereoSources();
         check(skey != sourceKey(textKey.c_str(), flagChanged, dll) && skey != sourceKey(textKey.c_str(), profileChanged, dll) &&
               skey != sourceKey(textKey.c_str(), nameChanged, dll) && skey != sourceKey((textKey + " ").c_str(), stereo, dll),
               "the stereo key follows the flag word, the profile, the source name and the text");
@@ -1199,7 +1229,7 @@ static void selfTest() {
         const Options stereoOnly{false, false, target, stereoTarget};
         check(generateStereo(stereoOnly) == 0 && fs::exists(stereoTarget), "the stereo header is generated");
         const auto stereoNow = stereoVariants();
-        const std::string stereoText = std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl;
+        const std::string stereoText = stereoSources();
         const std::string stereoKey = sourceKey(stereoText.c_str(), stereoNow, dll);
         check(outputCurrent(stereoTarget, stereoKey), "the generated stereo header carries the current key");
         std::ifstream first(stereoTarget, std::ios::binary);

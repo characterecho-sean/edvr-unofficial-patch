@@ -10338,6 +10338,7 @@ HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge"
 
 H_F88 = "weapon eye offset (F88)"
 H_F89_ADS = "ads transition (F89)"
+H_F106 = "ADS sight in both eyes (F106)"
 H_ANCHOR = "prompt anchor (F87p)"
 
 
@@ -10710,21 +10711,39 @@ def _hj_f89_ads(rows, ctx):
     return ("OK", text)
 
 
-def _hj_f89_eye(rows, ctx):
-    sec, ev, guard = rows.get("sec", []), rows.get("event", []), rows.get("guard", [])
-    if not sec and not ev and not guard:
+def _hj_f106_share(rows, ctx):
+    """F106: ADS, the sight in both eyes (it replaced F89's left eye close). The d3d11 half's lines say what it asked the runtime for (the share, once a second in ADS);
+    the press lines, which the runtime sends back through edvrNoteNativeEyeShare at the end of each press, say what it drew. OK: a press reached full weight with 30 to
+    100% of the left eye taken from the right. NEVER APPLIED: ADS was up with the key on (a share asked for, or an F89 trace press under the key) and no press line came
+    back, so the share never ran (an openvr_api.dll from before F106 darkens instead). IDLE: the key off, or no ADS. PARTIAL: presses drawn, none at full weight with a
+    plausible coverage, or refused frames, or the guard tripped."""
+    press, sec, ev, guard, key = (rows.get(k, []) for k in ("press", "sec", "event", "guard", "key"))
+    if not (press or sec or ev or guard or key):
         return None
-    closed = sum(1 for r in ev if r["ev"] == "closed")
-    opened = sum(1 for r in ev if r["ev"] == "open")
     on = [r for r in sec if r["key"] == "on"]
-    dmax = max([float(r["d"]) for r in on] or [0.0])
+    asked = max([float(r["w"]) for r in on] or [0.0])
+    key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev)
+    traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "press")
     gn = max([int(r["n"]) for r in guard] or [0])
-    text = "closed %d, open %d, ADS seconds with the key on %d of %d, darken max %.2f%s" % (closed, opened, len(on), len(sec), dmax, ", guard tripped %d" % gn if gn else "")
-    if sec and not on and not ev:
-        return ("IDLE", text + " (key off)")
-    if on and dmax == 0.0:
-        return ("NEVER APPLIED", text)
-    if gn:
+    full = [r for r in press if float(r["peak"]) >= 0.99 and int(r["full"]) > 0]
+    plausible = [r for r in full if 30.0 <= float(r["cov"]) <= 100.0]
+    refused = sum(int(r["refused"]) for r in press)
+    text = "%d presses drawn by the runtime (%d at full weight, %d with 30-100%% of the left eye taken)" % (len(press), len(full), len(plausible))
+    if press:
+        covs, yaws = [float(r["cov"]) for r in press], [float(r["yaw"]) for r in press]
+        text += ", coverage %.1f-%.1f%%, the eyes' yaw %+.2f..%+.2f deg, hidden area %s, %d frames shared (%d refused)" % (
+            min(covs), max(covs), min(yaws), max(yaws), "/".join(sorted({r["hidden"] for r in press})), _hsum(press, "frames"), refused)
+    text += "; ADS seconds with the key on %d of %d, share asked max %.2f; F89 trace presses %d%s" % (len(on), len(sec), asked, traced, ", guard tripped %d" % gn if gn else "")
+    if not press:
+        if asked > 0.0 or (traced and key_on):
+            return ("NEVER APPLIED", text + " (the share was asked for and the runtime never reported drawing it: an openvr_api.dll from before F106, or one that "
+                                            "cannot reach this d3d11.dll's export)")
+        if not key_on and (sec or key or ev):
+            return ("IDLE", text + " (key off)")
+        return ("IDLE", text + " (no ADS press)")
+    if not plausible:
+        return ("PARTIAL", text + " (no press reached full weight with 30-100% of the left eye taken)")
+    if gn or refused:
         return ("PARTIAL", text)
     return ("OK", text)
 
@@ -11456,11 +11475,15 @@ HEALTH_RULES = (
         ("allowed", r"native on foot ADS item gate \(F91\): allowed: \"(?P<item>[^\"]*)\""),
         ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)"),
     ), _hj_f91_gate),
-    _hrule("ads close left eye (F89)", ("F89",), ("ads close left eye (F89)",), (
-        ("sec", r"ads close left eye \(F89\) 1 s: darken (?P<d>[\d.]+) \(key (?P<key>on|off), lock weight (?P<lw>[\d.]+), ads state \w+\)"),
-        ("event", r"ads close left eye \(F89\): (?P<ev>closed|open) \(key \w+, lock weight [\d.]+\)"),
-        ("guard", r"ads close left eye \(F89\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
-    ), _hj_f89_eye),
+    _hrule(H_F106, ("F106",), ("ADS sight in both eyes (F106)",), (
+        ("press", r"ADS sight in both eyes \(F106\) press: peak (?P<peak>[\d.]+), frames (?P<frames>\d+) \(at full weight (?P<full>\d+), refused (?P<refused>\d+), "
+                  r"replayed \d+\) over [\d.]+ s; the eyes' rotation \(left view against the right\) yaw (?P<yaw>%s) pitch %s roll %s deg; .*?the left eye from the "
+                  r"right at full weight (?P<cov>[\d.]+)%% \(wholly [\d.]+%%\); hidden area (?P<hidden>used|none) \(\d+ triangles\)" % (_HN, _HN, _HN)),
+        ("sec", r"ADS sight in both eyes \(F106\) 1 s: share (?P<w>[\d.]+) \(key (?P<key>on|off), lock weight [\d.]+, ads state \w+\)"),
+        ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off), lock weight [\d.]+\)"),
+        ("guard", r"ADS sight in both eyes \(F106\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
+        ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
+    ), _hj_f106_share),
     _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
         ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"),
         ("idle", r"marker fix \(F62c\): eye \d: no decision this second"),
@@ -11895,7 +11918,7 @@ def main(argv=None):
     ap.add_argument("--health", action="store_true",
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
-                         "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
+                         "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
                          "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
@@ -12513,9 +12536,9 @@ def self_test_health():
             ok = False
         return out
 
-    F90S, F90P, F85B, F85C, F87H, F88, F89A, F89E, MK, AN, LB, F91R, F91F, F91G = (
+    F90S, F90P, F85B, F85C, F87H, F88, F89A, S106, MK, AN, LB, F91R, F91F, F91G = (
         "weapon readout size (F90)", "pistol readout (F90)", "weapon UI pin (F85b)", "reticle depth (F85c)", "view height hold (F87h)", "weapon eye offset (F88)",
-        "ads transition (F89)", "ads close left eye (F89)", "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)", "weapon readout part (F91)",
+        "ads transition (F89)", H_F106, "marker fix (F62c/F64)", "prompt anchor (F87p)", "prompt label draws (F87p)", "weapon readout part (F91)",
         "ADS press fit (F91)", "ADS item gate (F91)")
     DO = "marker design offset (F93c)"
     D94 = "marker design offset (F94b)"
@@ -12611,14 +12634,21 @@ def self_test_health():
             """A frame line with F91's view fields (the last %s)."""
             return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "", view)
 
-        def eye_sec(d=0.44, key="on", state="engaged"):
-            return R("ads close left eye (F89) 1 s: darken", d, key, d, state)
+        def share_sec(w=0.44, key="on", state="engaged"):
+            return R("ADS sight in both eyes (F106) 1 s: share", w, key, w, state)
 
-        def eye_ev(ev="closed", key="on"):
-            return R("ads close left eye (F89): %s (key %s", ev, key, 0.08)
+        def share_ev(ev="shared", key="on"):
+            return R("ADS sight in both eyes (F106): %s (key %s", ev, key, 0.08)
 
-        def eye_guard(n=2):
-            return R("ads close left eye (F89): GUARD TRIPPED", n, 0.5, "no weapon or tool is drawn")
+        def share_guard(n=2):
+            return R("ADS sight in both eyes (F106): GUARD TRIPPED", n, 0.5, "no weapon or tool is drawn")
+
+        def share_key(key="on"):
+            return R("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s", key, "x")
+
+        def share_press(peak=1.0, frames=98, full=80, refused=0, cov=74.1, hidden=212, yaw=21.5):
+            return R("ADS sight in both eyes (F106) press: peak", peak, frames, full, refused, 0, 1.63, yaw, 0.0, 0.0, -1.428, 0.884, 1.0, -1.0, -0.884, 1.428, 1.0,
+                     -1.0, cov, cov - 4.0, "used" if hidden else "none", hidden)
 
         def mark(bound=23, dec=25, eye=0):
             return R("native on foot marker fix (F62c/F64): eye %d: patch applied", eye, 100.0 * bound / dec, bound, dec, 0)
@@ -13105,7 +13135,7 @@ def self_test_health():
         check("F88: the weight mostly low", [eyeoff(w=0.3)] * 3, 0, [("PARTIAL", F88)])
         check("F88: keys set and no weapon drawn", [eyeoff(w=0.0, armed=0, seated=(0.0, 0.0, 0.0))] * 2, 0, [("IDLE", F88)])
 
-        # ---- ads transition (F89) and ads close left eye (F89) ----
+        # ---- ads transition (F89) ----
         check("F89 trace: a press and a release", [ads_start("press"), ads_frame(), ads_frame(), ads_start("release"), ads_frame("release", "releasing", 0.5)], 0, [("OK", F89A)],
               has=["traced 1 presses and 1 releases, 3 frame lines, lock weight max 0.98"])
         check("F89 trace: a press with no release", [ads_start("press"), ads_frame()], 0, [("PARTIAL", F89A)], has=["one direction only"])
@@ -13113,11 +13143,22 @@ def self_test_health():
               [("NEVER APPLIED", F89A)], has=["the lock weight never rose"])
         check("F89 trace: events past the minute's cap are counted", [ads_start("press"), ads_start("release"), ads_frame(), R("ads transition (F89): not traced, %d events", 4, 7)], 0,
               [("OK", F89A)], has=["1 events not traced"])
-        check("F89 eye: closed and opened", [eye_ev("closed"), eye_sec(), eye_sec(0.9), eye_ev("open")], 0, [("OK", F89E)],
-              has=["closed 1, open 1, ADS seconds with the key on 2 of 2, darken max 0.90"])
-        check("F89 eye: key off", [eye_sec(0.0, "off")] * 3, 0, [("IDLE", F89E)], has=["(key off)"])
-        check("F89 eye: key on, ADS, darken never above zero", [eye_sec(0.0), eye_sec(0.0)], 3, [("NEVER APPLIED", F89E)])
-        check("F89 eye: the guard tripped", [eye_ev("closed"), eye_sec(), eye_guard(2)], 0, [("PARTIAL", F89E)], has=["guard tripped 2"])
+        # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
+        check("F106: a press drawn at full weight", [share_key(), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_press()], 0, [("OK", S106)],
+              has=["1 presses drawn by the runtime (1 at full weight, 1 with 30-100% of the left eye taken), coverage 74.1-74.1%, the eyes' yaw +21.50..+21.50 deg, "
+                   "hidden area used, 98 frames shared (0 refused)", "ADS seconds with the key on 2 of 2, share asked max 1.00"])
+        check("F106: the share asked for, never drawn (an older runtime)", [share_key(), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo")], 3,
+              [("NEVER APPLIED", S106)], has=["never reported drawing it"])
+        check("F106: F89 trace presses with the key on and no share line drawn", [share_key(), ads_start("press"), ads_frame(), ads_start("release")], 3,
+              [("NEVER APPLIED", S106)], has=["F89 trace presses 1"])
+        check("F106: key off", [share_key("off"), share_sec(0.0, "off"), share_sec(0.0, "off")], 0, [("IDLE", S106)], has=["(key off)"])
+        check("F106: key on, no ADS", [share_key()], 0, [("IDLE", S106)], has=["(no ADS press)"])
+        check("F106: a press that never reached full weight", [share_sec(0.6), share_press(peak=0.6, full=0)], 0, [("PARTIAL", S106)],
+              has=["no press reached full weight"])
+        check("F106: a press at full weight with an implausible coverage", [share_sec(1.0), share_press(cov=4.0)], 0, [("PARTIAL", S106)])
+        check("F106: the guard tripped", [share_ev("shared"), share_sec(), share_guard(2), share_press()], 0, [("PARTIAL", S106)], has=["guard tripped 2"])
+        check("F106: Quest 3 (parallel views, no hidden area)", [share_sec(1.0), share_press(cov=88.0, hidden=0, yaw=0.0)], 0, [("OK", S106)],
+              has=["the eyes' yaw +0.00..+0.00 deg, hidden area none"])
 
         # ---- marker fix ----
         check("marker fix: applied for most decisions", [mark(23, 25, 0), mark(23, 25, 1), mark_win()], 0, [("OK", MK)],

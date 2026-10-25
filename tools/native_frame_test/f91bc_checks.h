@@ -1,12 +1,12 @@
 // F91 checks (native on-foot VR), parts B and C, run91bc below: the pure functions of src\d3d11\native_on_foot_f91.h. B: the ADS vibration instrument's per-frame fields
 // (the "; view (F91)" suffix of the F89 trace, the cancel the pose carried, the view's step, the rifle in the view) and the fit that decides between H1 (the cancel lands d frames
 // late), the sight lock and H3 (the readout pin's lag), on synthetic series built to each answer, still (tremor) and moving. C: the ADS item gate on the names both flights logged,
-// and a tick sequence through the gate, adsAimTick's state edges, the head aim's weight, the left eye's darkening and the body detach. Part A's checks (the readout part's
+// and a tick sequence through the gate, adsAimTick's state edges, the head aim's weight, the left eye's share (F106; the darkening until then) and the body detach. Part A's checks (the readout part's
 // identity) are run90's and part A's own. Header only, run by native_frame_test.
 #pragma once
 
 #include "../../src/d3d11/journal_watch.h"
-#include "../../src/d3d11/native_on_foot_core.h"   // AdsRamp, f89::darken
+#include "../../src/d3d11/native_on_foot_core.h"   // AdsRamp, f106::share
 #include "../../src/d3d11/native_on_foot_f91.h"
 
 #include <algorithm>
@@ -89,11 +89,11 @@ inline void run91bc(Check&& check) {
             f91::GateEdges gate;
             int state = f91::kStateIdle;
             nf::AdsRamp ramp;
-            double w = 0.0, darken = 0.0;
+            double w = 0.0, share = 0.0;
             bool bodyDetach = false;
             std::vector<int> events;
             int maxState = 0;
-            double maxW = 0.0, maxDarken = 0.0;
+            double maxW = 0.0, maxShare = 0.0;
             bool anyDetach = false;
             void tick(bool asked, edvr::JournalHeldItem kind, const char* name, bool primary, double dt) {
                 const f91::ItemGate g = f91::adsItemGate(primary, kind, name);
@@ -109,10 +109,10 @@ inline void run91bc(Check&& check) {
                     if (state == f91::kStateReleasing && w <= 0.0) state = f91::kStateIdle;   // the unwind is done when the weight reaches 0 (the map's chase aside)
                 }
                 const bool armed = kind == edvr::kHeldItem || primary;
-                darken = f89::darken(true, true, armed, w).level;
+                share = edvr::nofoot::f106::share(true, true, armed, w).weight;
                 maxState = std::max(maxState, state);
                 maxW = std::max(maxW, w);
-                maxDarken = std::max(maxDarken, darken);
+                maxShare = std::max(maxShare, share);
                 anyDetach = anyDetach || bodyDetach;
             }
         };
@@ -126,22 +126,22 @@ inline void run91bc(Check&& check) {
             for (int i = 0; i < 135; ++i) tool.tick(true, edvr::kHeldItem, analyser, false, dt);
             for (int i = 0; i < 30; ++i) tool.tick(false, edvr::kHeldItem, analyser, false, dt);
         }
-        check(tool.maxState == f91::kStateIdle && tool.maxW == 0.0 && tool.maxDarken == 0.0 && !tool.anyDetach && tool.events.size() == 2 &&
+        check(tool.maxState == f91::kStateIdle && tool.maxW == 0.0 && tool.maxShare == 0.0 && !tool.anyDetach && tool.events.size() == 2 &&
                   tool.events[0] == f91::kGateRefused && tool.events[1] == f91::kGateRefused,
-              "F91 C: a Profile Analyser press leaves the head aim idle, its weight 0, the left eye's darkening 0 and the body detach off; each press logs one refusal");
+              "F91 C: a Profile Analyser press leaves the head aim idle, its weight 0, the left eye's share 0 and the body detach off; each press logs one refusal");
         Sim fists;
         for (int i = 0; i < 90; ++i) fists.tick(true, edvr::kHeldNone, "$humanoid_fists_name;", false, dt);
-        check(fists.maxState == f91::kStateIdle && fists.maxDarken == 0.0 && !fists.anyDetach && fists.events.size() == 1 && fists.events[0] == f91::kGateRefused,
+        check(fists.maxState == f91::kStateIdle && fists.maxShare == 0.0 && !fists.anyDetach && fists.events.size() == 1 && fists.events[0] == f91::kGateRefused,
               "F91 C: the fists with HumanoidZoom held never engage");
         // a rifle press engages; switched to the Arc Cutter mid-press it releases through the unwind, the body detach at once
         Sim sw;
         for (int i = 0; i < 90; ++i) sw.tick(true, edvr::kHeldItem, rifle, false, dt);
-        const bool engaged = sw.state == f91::kStateEngaged && sw.w == 1.0 && sw.darken == 1.0 && sw.bodyDetach && sw.events.empty();
+        const bool engaged = sw.state == f91::kStateEngaged && sw.w == 1.0 && sw.share == 1.0 && sw.bodyDetach && sw.events.empty();
         sw.tick(true, edvr::kHeldItem, "$humanoid_repairtool_name;", false, dt);
         const bool releasing = sw.state == f91::kStateReleasing && !sw.bodyDetach && sw.w < 1.0 && sw.w > 0.0 && sw.events.size() == 1 && sw.events[0] == f91::kGateStopped;
         for (int i = 0; i < 40; ++i) sw.tick(true, edvr::kHeldItem, "$humanoid_repairtool_name;", false, dt);
-        check(engaged && releasing && sw.state == f91::kStateIdle && sw.w == 0.0 && sw.darken == 0.0 && sw.events.size() == 1,
-              "F91 C: a rifle press engages (weight 1, the left eye closed, the body detached); switched to a tool mid-press it logs one stop and releases over 0.3 s to idle");
+        check(engaged && releasing && sw.state == f91::kStateIdle && sw.w == 0.0 && sw.share == 0.0 && sw.events.size() == 1,
+              "F91 C: a rifle press engages (weight 1, the left eye on the right eye's view, the body detached); switched to a tool mid-press it logs one stop and releases over 0.3 s to idle");
         // a pistol press while Status.json still says the fists: refused, then allowed when the name arrives (100 ms), and engaged
         Sim pis;
         for (int i = 0; i < 9; ++i) pis.tick(true, edvr::kHeldNone, "$humanoid_fists_name;", false, dt);
