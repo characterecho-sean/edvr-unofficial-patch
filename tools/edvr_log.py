@@ -11164,8 +11164,9 @@ def _hj_f107_away(rows, ctx):
 def _hj_f109_look(rows, ctx):
     """F109: look to aim on foot. Engaged at all (else NEVER APPLIED with the last reason it gave); the game took the head's turn (applied against the head's own; none
     of it while the head turned is NEVER APPLIED); the guard's trips, the reported head standing off the aim with the head still, the player's pitch reaching the game
-    (it is dropped in both turn styles), and calls split by the old ratio (no gain yet) are PARTIAL."""
-    sec, eng, trips, nots, stops = (rows.get(k, []) for k in ("sec", "engaged", "trip", "not", "stops"))
+    (it is dropped in both turn styles), and calls split by the old ratio (no gain yet) are PARTIAL. F109b: the guard's holds (the game moved the view past what the
+    head aim asked), its new bases for the player's own turn, its growth restarts after a rows gap and the re-arms after a trip are reported, not judged."""
+    sec, eng, trips, nots, stops, held, rearm = (rows.get(k, []) for k in ("sec", "engaged", "trip", "not", "stops", "held", "rearm"))
     if not sec and not eng and not trips and not nots and not stops:
         return None
     if not eng:
@@ -11185,6 +11186,13 @@ def _hj_f109_look(rows, ctx):
             "F98c refused %d calls; guard trips %d, the body's yaw from the aim at most %.1f deg") % (
         len(sec), len(eng), head, applied, len(off), len(still), pitch, _hsum(sec, "ds"), _hsum(sec, "dm"), _hsum(sec, "dp"), clean, dirty, unsplit,
         _hsum(sec, "blocked"), _hsum(sec, "spring"), _hsum(sec, "gated"), len(trips), max(float(r["bmax"]) for r in sec))
+    gate = [r for r in sec if r.get("gheld") is not None]
+    if gate or held or rearm:
+        text += ("; F109b's guard: held %d (the game moved the view%s), new bases for the player's own turn %d, growth restarted after a rows gap %d; latched trips "
+                 "%d, re-armed %d") % (
+            max(len(held), sum(int(r["gheld"]) for r in gate)),
+            (": largest %.1f deg" % max(math.hypot(float(r["ry"]), float(r["rp"])) for r in held)) if held else "",
+            sum(int(r["guser"]) for r in gate), sum(int(r["ggap"]) for r in gate), sum(1 for r in trips if r.get("latched")), len(rearm))
     if head >= 5.0 and applied < 0.1 * head:
         return ("NEVER APPLIED", text + "; the game took none of the head's turn")
     notes = []
@@ -11823,7 +11831,7 @@ HEALTH_RULES = (
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
                   r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
     ), _hj_f107_away),
-    _hrule("look to aim (F109)", ("F109",), ("native on foot look to aim (F109)",), (
+    _hrule("look to aim (F109)", ("F109", "F109b"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)"), (
         ("sec", r"native on foot look to aim \(F109\) 1 s: (?P<state>following|blocked), item weight (?P<w>[\d.]+), smoothing (?P<tau>\d+) ms; head yaw (?P<hy>%s) "
                 r"pitch (?P<hp>%s) deg, asked (?P<ky>%s) (?P<kp>%s), applied (?P<ay>%s) (?P<ap>%s), the player's own (?P<uy>%s) (?P<up>%s); the reported head from the aim "
                 r"yaw (?P<oy>%s) pitch (?P<op>%s) deg now \(largest (?P<omax>[\d.]+), (?:read|not read)\); seated yaw (?P<sy>%s) pitch (?P<sp>%s) deg carried; the "
@@ -11831,9 +11839,14 @@ HEALTH_RULES = (
                 r"(?P<bmax>[\d.]+), (?P<bn>\d+) frames\); updates (?P<upd>\d+), dropped: stick (?P<ds>\d+), mouse (?P<dm>\d+), pitch (?P<dp>\d+); split: clean "
                 r"(?P<clean>\d+), dirty (?P<dirty>\d+), unsplit (?P<unsplit>\d+), gain yaw (?P<gy>%s) pitch (?P<gp>%s); blocked (?P<blocked>\d+) \((?:holding|not "
                 r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); F98c's settle refused (?P<gated>\d+) calls \(the aim "
-                r"pitched 10 deg or more\); centred (?P<centred>\d+)" % ((_HN,) * 16)),
+                r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
+                r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
+                % ((_HN,) * 16)),
         ("engaged", r"native on foot look to aim \(F109\): engaged: "),
-        ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped"),
+        ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped(?P<latched> until)?"),
+        ("held", r"native on foot look to aim \(F109b\): the guard held \((?P<mode>look to aim|an ADS press)\): the view parted from the head by yaw (?P<ry>%s) "
+                 r"pitch (?P<rp>%s) deg, past what the head aim asked since the base \(yaw (?P<ky>%s) pitch (?P<kp>%s) deg" % ((_HN,) * 4)),
+        ("rearm", r"native on foot look to aim \(F109\): the guard is cleared \([\d.]+ s after trip (?P<n>\d+): it engages again\)"),
         ("not", r"native on foot look to aim \(F109\): not engaged: (?P<why>.+)$"),
         ("stops", r"native on foot look to aim \(F109\): stops \((?P<why>.+?)\): the seated yaw"),
         ("_", r"native on foot look to aim \(F109\): (?:keys: |centred: |the game's look is |the guard is cleared |an ADS press: |the ADS press ended |turned off |"
@@ -13380,10 +13393,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1)
+                     gated, 1, gheld, guser, ggap, gtrips, grearm)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -13402,6 +13415,17 @@ def self_test_health():
               has=["the guard tripped (GUARD TRIPPED: the view - head residual", "the player's pitch reached the game"], lacks=["UNPARSED"])
         check("F109 look: the aim stood off the head with the head still", [ENG109] + [look109(hy=0.5, hp=0.2, oy=6.0, op=1.0)] * 3, 0, [("PARTIAL", L109)],
               has=["the aim stood off the head with the head still"])
+        # F109b: the guard's gates on the 1 s line, a hold, a trip that re-arms 2 s after, and the third trip in a minute (latched)
+        HELD109 = R("native on foot look to aim (F109b): the guard held", "look to aim", 0.5, -17.9, 0.1, -0.1, 2.5, 4, 1)
+        TRIPR109 = R("GUARD TRIPPED (%s): stopped for", "GUARD TRIPPED: the view - head residual (the right eye's rows) grew for 0.5 s", 2, 1)
+        REARM109 = R("the guard is cleared (%.0f s after trip", 2, 1)
+        check("F109b look: a hold, a trip re-armed, a latched trip", [ENG109, look109(gheld=1, guser=3, ggap=1), HELD109, look109(guser=9, gtrips=1), TRIPR109,
+              REARM109, ENG109, look109(gtrips=3, grearm=1), TRIP109], 0, [("PARTIAL", L109)],
+              has=["guard trips 2", "F109b's guard: held 1 (the game moved the view: largest 17.9 deg), new bases for the player's own turn 12, growth restarted after a "
+                   "rows gap 1; latched trips 1, re-armed 1", "the guard tripped (GUARD TRIPPED: the view - head residual"], lacks=["UNPARSED"])
+        check("F109b look: the F109 build's 1 s line (no gate fields) still reads", [ENG109, R("native on foot look to aim (F109) 1 s:", "following", 0.0, 150, 12.0,
+              -3.0, 12.0, -3.0, 12.0, -3.0, 0.0, 0.0, 0.2, -0.1, 0.5, "read", 30.0, -5.0, 0.3, 0, 2.0, 12.0, 88, 90, 0, 0, 0, 80, 2, 0, 0.85, 0.85, 0,
+              "not holding", 0, 0, 0.0, 0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
 
         def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
             return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)

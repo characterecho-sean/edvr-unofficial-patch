@@ -3579,28 +3579,60 @@ struct AdsAimMap {
 // The guard's measurement: the rendered view's turn since the base (the right eye's rows: three axes, right / up / forward, as RotFrameSum reads them)
 // less the head's turn since the base and less the player's own aim turn. About 0: the view follows the head. A frame without fresh rows or a head sample
 // changes nothing (a stale source never trips it). Camera C is not a source: it is the left eye.
+// F109b (the F109 flight, edvr_gfx_20261025_071049, two trips while look to aim ran the guard all the time; reviews in the arc doc, 2026-10-25, F109b), three gates
+// on what the guard may judge, so it holds rather than trips where its measurement does not hold:
+//  - the yaw and pitch since the base are read in the base's own axes, which is exact only near the base: a turn of the player's own about the world's up (a
+//    smooth stick turn) reads in a base pitched p (down negative) as a pitch of about asin(sin(2p)/2 (1 - cos(turn))): 191 deg of turn from a view 6-8 deg down
+//    at the base is -12 to -15 deg of pitch, and the first trip read -12.2. A player's own turn past kAdsUserRebaseDeg since the base takes a new base;
+//  - the growth run restarts after kAdsResGapMs without a fresh measurement (the run's 0.5 s must be observed);
+//  - causal (the caller sets it): the head aim can only part the view from the head in proportion to what it asked (a sign inverted: about 2x the net ask on that
+//    axis; a camera that does not take the aim: about 1x). A residual past kAdsCausalK x |the net ask on its axis| + kAdsCausalSlackDeg is the game moving the view
+//    on its own (the second trip: -17.9 deg of pitch 0.6 s after a base, the head's pitch -0.1, the asks the head's): a new base, counted, not a trip.
+constexpr double kAdsUserRebaseDeg = 15.0;
+constexpr uint64_t kAdsResGapMs = 200;
+constexpr double kAdsCausalK = 2.5, kAdsCausalSlackDeg = 4.0;
 struct AdsResidual {
     bool haveBase = false;
     RotFrameSum viewBase, headBase, viewLast;
     double userYaw = 0.0, userPitch = 0.0;                         // the player's own aim turn since the base (seat radians)
+    double askYaw = 0.0, askPitch = 0.0;                           // F109b: the head aim's net asks since the base (seat radians)
     AdsResidualGrowth growth;
     double res[2] = {}, head[2] = {}, view[2] = {};                // degrees since the base: the residual, the head's turn, the view's turn
     bool have = false;
     double maxAbs = 0.0;                                           // the largest |residual| since the last clearWindow()
     uint32_t rebases = 0;
-    enum Result { kNone = 0, kBase = 1, kMeasured = 2, kRebased = 3, kTrip = 4 };
+    bool causal = false;                                           // F109b: a trip needs the head aim's asks to explain the residual (kept across reset())
+    uint64_t lastMs = 0;                                           // F109b: the last fresh measurement
+    uint32_t userRebases = 0, gapRestarts = 0, holds = 0;          // F109b: the gates' counts (cumulative)
+    double heldRes[2] = {}, heldAsk[2] = {};                       // F109b: the last hold's residual and net asks (degrees)
+    enum Result { kNone = 0, kBase = 1, kMeasured = 2, kRebased = 3, kTrip = 4, kHeld = 5 };
     void reset() noexcept {
         haveBase = false;
         viewBase = viewLast = headBase = RotFrameSum{};
         userYaw = userPitch = 0.0;
+        askYaw = askPitch = 0.0;
         growth = AdsResidualGrowth{};
         res[0] = res[1] = head[0] = head[1] = view[0] = view[1] = 0.0;
         have = false;
+        lastMs = 0;
     }
     void clearWindow() noexcept { maxAbs = 0.0; }
     void addUser(double yaw, double pitch) noexcept {
         userYaw += yaw == yaw ? yaw : 0.0;
         userPitch += pitch == pitch ? pitch : 0.0;
+    }
+    void addAsk(double yaw, double pitch) noexcept {
+        askYaw += yaw == yaw ? yaw : 0.0;
+        askPitch += pitch == pitch ? pitch : 0.0;
+    }
+    void rebaseAt(const RotFrameSum& cn, const RotFrameSum& hn) noexcept {
+        haveBase = true;
+        viewBase = viewLast = cn;
+        headBase = hn;
+        userYaw = userPitch = 0.0;
+        askYaw = askPitch = 0.0;
+        growth = AdsResidualGrowth{};
+        have = false;
     }
     Result step(uint64_t ms, bool viewOk, const double vr[3], const double vu[3], const double vf[3], bool headOk, const double hr[3], const double hu[3],
                 const double hf[3], bool yawOn, bool pitchOn) noexcept {
@@ -3613,17 +3645,24 @@ struct AdsResidual {
             viewBase = viewLast = cn;
             headBase = hn;
             userYaw = userPitch = 0.0;
+            askYaw = askPitch = 0.0;
+            lastMs = ms;
             return kBase;
+        }
+        if (lastMs != 0 && ms > lastMs + kAdsResGapMs && growth.growing) {   // F109b: the run's time was not all observed
+            growth = AdsResidualGrowth{};
+            ++gapRestarts;
+        }
+        lastMs = ms;
+        if (std::fabs(userYaw) > kAdsUserRebaseDeg * kAdsDeg || std::fabs(userPitch) > kAdsUserRebaseDeg * kAdsDeg) {   // F109b: near the base only
+            ++userRebases;
+            rebaseAt(cn, hn);
+            return kRebased;
         }
         double sy = 0.0, sp = 0.0;
         if (rotFrameDelta(viewLast, cn, &sy, &sp) && std::sqrt(sy * sy + sp * sp) > kAdsViewJumpDeg) {
             ++rebases;
-            haveBase = true;
-            viewBase = viewLast = cn;
-            headBase = hn;
-            userYaw = userPitch = 0.0;
-            growth = AdsResidualGrowth{};
-            have = false;
+            rebaseAt(cn, hn);
             return kRebased;
         }
         double cy = 0.0, cp = 0.0, hy = 0.0, hp = 0.0;
@@ -3643,7 +3682,21 @@ struct AdsResidual {
         have = true;
         const double absRes = std::sqrt(ry * ry + rp * rp), absHead = std::sqrt(hy * hy + hp * hp);
         if (absRes > maxAbs) maxAbs = absRes;
-        return growth.step(ms, absRes, absHead) ? kTrip : kMeasured;
+        if (!growth.step(ms, absRes, absHead)) return kMeasured;
+        if (causal) {   // F109b: a residual the head aim's asks cannot explain is the game moving the view: a new base, not a trip
+            const double ay = std::fabs(askYaw) / kAdsDeg, ap = std::fabs(askPitch) / kAdsDeg;
+            const bool explained = std::fabs(ry) <= kAdsCausalK * ay + kAdsCausalSlackDeg && std::fabs(rp) <= kAdsCausalK * ap + kAdsCausalSlackDeg;
+            if (!explained) {
+                ++holds;
+                heldRes[0] = ry;
+                heldRes[1] = rp;
+                heldAsk[0] = askYaw / kAdsDeg;
+                heldAsk[1] = askPitch / kAdsDeg;
+                rebaseAt(cn, hn);
+                return kHeld;
+            }
+        }
+        return kTrip;
     }
 };
 // A guard trip or a failed restore holds the feature off for the rest of that press only: the flag falling clears it, so every press re-arms.
