@@ -357,7 +357,7 @@ inline bool nativeOnFootMarkerMeasure() { return g_nativeOnFootMarkerMeasureKey.
 inline std::atomic<uint32_t> g_nativeOnFootTeeFastFrame{nofoot::f100::kNoFrame};
 inline std::atomic<uint32_t> g_nativeOnFootTeeFrameNow{0};
 inline uint64_t g_nativeOnFootDrawSerial = 0;     // render thread only
-inline uint64_t g_nativeOnFootTeeFastCalls = 0;   // render thread only; the probe's 1 s cost line takes and clears it
+inline uint64_t g_nativeOnFootTeeFastCalls = 0;   // render thread only; the probe's cost line takes and clears it at its window's close (F125: 10 s, 1 s detail)
 inline uint64_t g_nativeOnFootTeeClockTicks = 0, g_nativeOnFootTeeClockCalls = 0;   // F100: the tee's clock (vscreen.cpp), render thread only
 inline bool nativeOnFootTeeFast(uint64_t vs) {
     if (!nofoot::f100::teeFast(g_nativeOnFootTeeFastFrame.load(std::memory_order_relaxed), g_nativeOnFootTeeFrameNow.load(std::memory_order_relaxed), vs))

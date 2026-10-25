@@ -573,6 +573,45 @@ inline void run(Check&& check) {
             }
             check(starts == 8 && suppressed >= 1 && t.sec.eventsStarted == 8u, "F85a: at most 8 events start in a minute; the rest are counted as suppressed");
         }
+        // F125: with the per-frame lines off (keepHistory false) the tracker decides and counts exactly as with them on; only the earlier frames are not kept
+        {
+            f85::StepTracker on, off;
+            int startsOn = 0, startsOff = 0, suppOn = 0, suppOff = 0, printOn = 0, printOff = 0, nPreOff = -1;
+            bool same = true;
+            for (uint32_t i = 0; i < 90 * 20; ++i) {
+                f85::StepFrame f = mkFrame(i, (i >= 40 && i < 44) ? 0.9 : 0.0), g = f;
+                f.havePin = g.havePin = true;
+                f.vClamp = g.vClamp = (i % 45) == 0 && i > 0;
+                const f85::StepResult a = on.step(f, freq), b = off.step(g, freq, false);
+                same = same && a.eventStart == b.eventStart && a.suppressed == b.suppressed && a.printCur == b.printCur && a.eventNo == b.eventNo && a.offset == b.offset &&
+                       a.trig == b.trig;
+                startsOn += a.eventStart ? 1 : 0;
+                startsOff += b.eventStart ? 1 : 0;
+                suppOn += a.suppressed ? 1 : 0;
+                suppOff += b.suppressed ? 1 : 0;
+                printOn += a.printCur ? 1 : 0;
+                printOff += b.printCur ? 1 : 0;
+                if (b.eventStart && nPreOff < 0) nPreOff = b.nPre;
+            }
+            check(same && startsOn == startsOff && startsOn == 9 && suppOn == suppOff && suppOn >= 1 && printOn == printOff && on.totalEvents == off.totalEvents &&
+                      on.sec.eventsStarted == off.sec.eventsStarted && nPreOff == 0 && off.histN == 0,
+                  "F125: with the per-frame lines off the F85a tracker starts, caps and counts the same events (the cap counts events, not lines); no earlier frames are kept");
+            f85::StepTracker back;
+            for (uint32_t i = 0; i < 30; ++i) {
+                f85::StepFrame f = mkFrame(i, 0.0);
+                back.step(f, freq, false);
+            }
+            int nPre = -1;
+            for (uint32_t i = 30; i < 60; ++i) {
+                f85::StepFrame f = mkFrame(i, i == 50 ? 0.9 : 0.0);
+                const f85::StepResult r = back.step(f, freq, true);
+                if (r.eventStart) {
+                    nPre = r.nPre;
+                    check(back.pre(0).p1 == 34u && back.pre(nPre - 1).p1 == 49u, "F125: lines back on, an event's earlier frames are the ones kept since (oldest first)");
+                }
+            }
+            check(nPre == 16, "F125: with the lines back on the history refills: an event 20 frames later has its 16 earlier frames");
+        }
         // F86b: the cap is per trigger: a busy pin-cap does not use up the hand-lag's eight, and the suppressed count names the trigger
         {
             f85::StepTracker t;

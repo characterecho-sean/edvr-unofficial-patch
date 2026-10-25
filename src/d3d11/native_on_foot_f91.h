@@ -336,6 +336,12 @@ struct FitWindow {
         dur = 0.0;
     }
 };
+// F125: the fit is a live detail-only measurement. An off frame discards both the pending window and the history that would otherwise bridge the gap.
+// Turning detail back on during a press starts with its new frames; no partial window collected before off is emitted or carried into that fit.
+inline bool fitDetailFrame(FitWindow& w, bool detailOn, bool tracedPress) noexcept {
+    if (!detailOn) w.beginPress();
+    return detailOn && tracedPress;
+}
 namespace detail {
 inline double rmsAbout(const double* x, uint32_t n) noexcept {
     if (!n) return 0.0;

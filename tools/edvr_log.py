@@ -10322,7 +10322,8 @@ def self_test_phase_failure():
 #
 # Statuses: OK; PARTIAL (it ran and applied, but not for everything or not every second); NEVER APPLIED (its lines are there and say it did nothing, or a trigger the
 # log proves happened found it idle); IDLE (its lines say there was nothing for it to act on, which is not a failure); UNPARSED (labelled lines that no pattern
-# matches: the rule is out of date, not the feature). A rule with no line at all in the window is listed as not present. Exit 3 when any rule says NEVER APPLIED, 4
+# matches: the rule is out of date, not the feature). A rule with no line at all in the window is listed as not present, and one that reads only the detailed
+# on-foot log's lines (needs_detail, F125) as not judged when the log's F125 line says that log was off. Exit 3 when any rule says NEVER APPLIED, 4
 # for an UNPARSED rule and no NEVER APPLIED, 0 otherwise (2 for a wrong build is main()'s, before any of this).
 # The self-test (self_test_health) renders its fixture lines from the C format strings in src\d3d11\native_on_foot.cpp, so a format that drifts from its rule fails the
 # build. The PARTIAL cut-offs (90% of the decisions scaled or bound, half the draws patched, half the seconds holding, 80%/50% elsewhere) are judgement calls from the
@@ -10334,12 +10335,60 @@ HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
 HEALTH_OTHER_TAGS = 8
 HEALTH_SELF_TEST_CHECKS = 0
 
-HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge")
+# needs_detail (F125): the rule reads lines that only the detailed on-foot log writes (log.on_foot_detail = on). In a log whose F125 line says the detail log was
+# off, such a rule with no line of its own is listed as not judged, never as NEVER APPLIED or not present; with the detail log on, or in a log written before
+# F125 (no F125 line), it is judged as any other rule.
+HealthRule = collections.namedtuple("HealthRule", "name tags labels kinds judge needs_detail", defaults=(False,))
 
 H_F88 = "weapon eye offset (F88)"
 H_F89_ADS = "ads transition (F89)"
 H_F106 = "ADS sight in both eyes (F106)"
 H_ANCHOR = "prompt anchor (F87p)"
+H_F125 = "log diet (F125)"
+H_F125_LABEL = "native on foot log (F125)"
+H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
+# Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
+# line, and its report stays as it was.
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125,))
+
+# ---- F125: summary windows (the on-foot log diet) ----
+# By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
+# an ADS end, the on-foot exit). A line that printed "1 s" prints the window's seconds; one that said "this second" says "these N s". A rule reads the length
+# through the named group wl (H_WL, H_WL_THIS; not "win", which F91 and F111 use), and a row with no wl, from a log written before F125, covers one second.
+# A count of seconds with a flag is appended to its line as "label N of M s" (_hxs): optional, so an old log's row carries None there and its judge falls back to
+# the row itself (_hcount).
+H_WL = r"(?P<wl>\d+) s"
+H_WL_THIS = r"(?:this second|these (?P<wl>\d+) s)"
+
+
+def _hwl(row):
+    """The seconds a summary row covers: its window, or 1 for a row of a 1 s line (a log written before F125)."""
+    return int(row.get("wl") or 1)
+
+
+def _hsecs(rows):
+    """The seconds a list of summary rows covers. Use it wherever a count of rows is printed or judged as seconds."""
+    return sum(_hwl(r) for r in rows)
+
+
+def _hxs(label, n="xs", m="ws", sep="; "):
+    """An optional appended field `<sep><label> N of M s` (F125), groups n (seconds with the flag) and m (the window's folded seconds). Put it before a pattern's
+    final $ tail, never after it; a line without the field matches with both groups None."""
+    return r"(?:%s%s (?P<%s>\d+) of (?P<%s>\d+) s)?" % (re.escape(sep), re.escape(label), n, m)
+
+
+def _hcount(rows, n, fallback):
+    """Seconds with a flag over summary rows: the row's counted field n where the line carries one, else 1 or 0 by fallback(row) (a 1 s row of an older log)."""
+    return sum(int(r[n]) if r.get(n) is not None else (1 if fallback(r) else 0) for r in rows)
+
+
+def _hdetail(ctx):
+    """F125: the detailed on-foot log over the window: None (no F125 line: a log written before F125, or native on foot never armed), "off", "on", or "mixed"
+    (the key was changed inside the window). The state in force when a --since window opens is the last F125 line before it (health_scan's "entry" row)."""
+    states = {r["detail"] for r in _hrows(ctx, H_F125, "entry") + _hrows(ctx, H_F125, "state")}
+    if not states:
+        return None
+    return states.pop() if len(states) == 1 else "mixed"
 
 
 def _hrows(ctx, name, kind):
@@ -10566,13 +10615,24 @@ def _hj_f111_pointer(rows, ctx):
     """F111: the panel pointer instrument. Its hooks' line, the 1 s lines (each with a verdict: the first stage of the game's pick that turns a mouse move the
     other way: the mouse NDC against the OS cursor K4, the unprojection K1, the direction behind the camera K5, the hit or the sprite K2, the cursor window K3,
     or none in the pick) and the 10 s line (the flight so far, which judges moves too few for any one second). NEVER APPLIED when no hook was armed, or when
-    the hooks were armed and never saw the pointer controller."""
+    the hooks were armed and never saw the pointer controller. F125: the 1 s lines are the detail log's; without them the flight-so-far lines are judged,
+    and with neither (under 10 s with the pointer) a log whose detail log was off cannot say the controller was never seen."""
     armed, sec, tot = rows.get("armed", []), rows.get("sec", []), rows.get("total", [])
     if not armed and not sec and not tot:
         return None
     n = max(int(r["n"]) for r in armed) if armed else None
     if n == 0 and not sec:
         return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
+    if not sec and tot:
+        stage = tot[-1]["verdict"].strip()
+        text = "the flight so far (%s s with the pointer): %s (no 1 s line: the detail log's)" % (tot[-1]["secs"], stage)
+        if stage == "too few moves":
+            return ("IDLE", text + "; the pointer never moved enough to judge")
+        if n is not None and n < 4:
+            return ("PARTIAL", text + "; only %d of 4 hooks armed" % n)
+        return ("OK", text)
+    if not sec and _hdetail(ctx) in ("off", "mixed"):
+        return ("IDLE", "the hooks were armed (%s of 4); no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with the pointer, or none)" % n)
     if not sec:
         return ("NEVER APPLIED", "the hooks were armed (%d of 4) and never saw the pointer controller: no panel with a mouse pointer was used while native stereo "
                                  "was on foot" % n)
@@ -10619,7 +10679,7 @@ def _hj_f113_rows(rows, ctx):
                 short.append("eye %d without rows in %.1f%% of its frames" % (e, 100.0 * n / f))
     checked = sum(int(r["checked"]) for r in sec)
     diffs = [float(r["diff"]) for r in sec if int(r["checked"])]
-    text = "%d s: %s; checked against a scene mesh %d (max diff %.2e)" % (len(sec), "; ".join(parts), checked, max(diffs) if diffs else 0.0)
+    text = "%d s: %s; checked against a scene mesh %d (max diff %.2e)" % (_hsecs(sec), "; ".join(parts), checked, max(diffs) if diffs else 0.0)
     if any(r["lat"] for r in sec):
         return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's")
     if none_total and not src_total:
@@ -10938,8 +10998,9 @@ def _hj_f120_follow(rows, ctx):
     if not sec and not pins:
         return None
     unpinned = [r for r in pins if r["state"].startswith("NOT pinned")]
-    if not sec:
-        return ("IDLE", "no 2D placement on a panel" + ("; the owner function's bytes are NOT pinned" if unpinned else ""))
+    if not sec:   # F125: the 1 s lines are the detail log's; without it no line says whether a panel was placed
+        return ("IDLE", ("no 1 s line (the detail log was off)" if _hdetail(ctx) in ("off", "mixed") else "no 2D placement on a panel") +
+                ("; the owner function's bytes are NOT pinned" if unpinned else ""))
     order, groups = [], {}
     for r in sec:
         k = r["setting"].strip()
@@ -11225,8 +11286,29 @@ def _hj_f114b_pointer(rows, ctx):
     if not armed and not sec and not tot and not owners:
         return None
     if not sec:
+        if tot:   # F125: the 1 s lines are the detail log's; the flight-so-far lines say the hooks saw a panel
+            parts, turns = [], []
+            for prof in ("vr", "flat"):
+                pt = [r for r in tot if r["profile"] == prof]
+                if pt:
+                    turns.append(pt[-1]["turn"].strip())
+                    parts.append("%s: %s s with a panel (the flight so far), mode %s; turn: %s; cursor draw: %s" % (
+                        prof, pt[-1]["secs"], pt[-1]["mode"].strip(), turns[-1], pt[-1]["draw"].strip()))
+            text = "; ".join(parts) + " (no 1 s line: the detail log's)"
+            stray = [r for r in owners if not r["what"].startswith("the hooked")]
+            if stray:
+                return ("PARTIAL", text + "; a panel's owner names exe+0x%s at vtable +0x10, not the hooked function: its transform was not read" % stray[-1]["rva"])
+            if armed and all(r["state"] == "NOT armed" for r in armed):
+                return ("PARTIAL", text + "; the owner transform hook was not armed: the turn cannot be placed")
+            if all(t in ("too few moves", "no panel") for t in turns):
+                return ("IDLE", text + "; the pointer never moved enough on a panel to judge")
+            return ("OK" if any(t not in ("too few moves", "no panel", "unclear") for t in turns) else "PARTIAL", text)
+        quiet = _hdetail(ctx) in ("off", "mixed")
         if armed and all(r["state"] == "NOT armed" for r in armed):
-            return ("NEVER APPLIED", "the owner transform hook was not armed%s, and no panel was seen" % armed[-1]["rest"])
+            return ("NEVER APPLIED", "the owner transform hook was not armed%s, and %s" % (
+                armed[-1]["rest"], "no 1 s line (the detail log was off)" if quiet else "no panel was seen"))
+        if quiet:
+            return ("IDLE", "no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with a panel, or none)")
         return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
     undecided = ("too few moves", "no panel", "unclear")
     parts, decided_any, all_few = [], False, True
@@ -11431,17 +11513,32 @@ def _hj_f88(rows, ctx):
 
 
 def _hj_f89_ads(rows, ctx):
-    st, fr, skip = rows.get("start", []), rows.get("frame", []), rows.get("skip", [])
-    if not st and not fr and not skip:
+    """F89: the ADS transition trace. NEVER APPLIED when ADS was engaged on traced frames and the lock weight never rose on them. From F125 each traced event
+    ends in its own line (its frames, those engaged, the lock weight's maximum over all and over the engaged ones), which the judge reads when the log has
+    any. Frame lines also remain evidence: a later trace may still be open when the log or a selected time window ends. A log written before F125 has only
+    frame lines, and is judged from them as before."""
+    st, fr, skip, done = rows.get("start", []), rows.get("frame", []), rows.get("skip", []), rows.get("done", [])
+    if not st and not fr and not skip and not done:
         return None
     press, rel = sum(1 for r in st if r["dir"] == "press"), sum(1 for r in st if r["dir"] == "release")
-    engaged = [r for r in fr if r["state"] == "engaged"]
-    lock = max([float(r["lw"]) for r in fr] or [0.0])
-    text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, "; %d events not traced" % len(skip) if skip else "")
+    skipped = "; %d events not traced" % len(skip) if skip else ""
+    frame_lw = [float(r["lw"]) for r in fr]
+    engaged_lw = [float(r["lw"]) for r in fr if r["state"] == "engaged"]
+    if done:
+        # Maxima can include both sources without double counting a completed trace's frames. In particular, a completed release with no engaged frames
+        # must not hide an unfinished press whose frame lines show an engaged state with no lock weight.
+        engaged_lw += [float(r["elw"]) for r in done if int(r["engaged"])]
+        text = "traced %d presses and %d releases, %d frames (%d with ADS engaged), lock weight max %.2f%s" % (
+            press, rel, sum(int(r["frames"]) for r in done), sum(int(r["engaged"]) for r in done), max([float(r["lw"]) for r in done] + frame_lw), skipped)
+        if fr:
+            text += "; %d frame lines also read (the frame counts above cover completed traces)" % len(fr)
+    else:
+        lock = max(frame_lw or [0.0])
+        text = "traced %d presses and %d releases, %d frame lines, lock weight max %.2f%s" % (press, rel, len(fr), lock, skipped)
     view = [r for r in fr if r.get("view")]
     if view:   # F91 B: the vibration instrument's fields; a frame line without them (from F91 on) means the fields never ran
         text += "; view (F91) fields on %d of %d frame lines (r shown on %d)" % (len(view), len(fr), sum(1 for r in view if r["rv"] != "-"))
-    if engaged and max(float(r["lw"]) for r in engaged) == 0.0:
+    if engaged_lw and max(engaged_lw) == 0.0:
         return ("NEVER APPLIED", text + " (ADS engaged, the lock weight never rose)")
     if not press or not rel:
         return ("PARTIAL", text + " (one direction only)")
@@ -11489,6 +11586,15 @@ def _hj_marker(rows, ctx):
     ap, idle, win = rows.get("applied", []), rows.get("idle", []), rows.get("win", [])
     if not ap and not idle and not win:
         return None
+    if not ap and not idle:
+        # F125: F87c's window lines with no F62c line beside them (a log cut short, or a --since window that holds only those): the draws the CPU identification
+        # named or found outside every window say whether marker composite draws reached the fix; the applied share is not in the log.
+        named, outside = _hsum(win, "named"), _hsum(win, "outside")
+        text = "no F62c line: the CPU identification named %d of %d marker composite draws over %d s (F87c); the applied share is not in the log" % (
+            named, named + outside, max(_hsecs([r for r in win if r["eye"] == e]) for e in ("0", "1")))
+        if not named + outside:
+            return ("IDLE", text + "; no marker composite draw reached the fix")
+        return ("PARTIAL" if named * 2 < named + outside else "OK", text)
     dec, bound = _hsum(ap, "dec"), _hsum(ap, "bound")
     per = []
     for e in ("0", "1"):
@@ -11497,7 +11603,7 @@ def _hj_marker(rows, ctx):
             per.append("eye %s %s (%d of %d)" % (e, _hpct(_hsum(er, "bound"), _hsum(er, "dec")), _hsum(er, "bound"), _hsum(er, "dec")))
     text = "patch applied %s; named %d, outside %d (F87c)" % (", ".join(per) or "no decision line", _hsum(win, "named"), _hsum(win, "outside"))
     if dec == 0:
-        return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % len(idle))
+        return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % _hsecs(idle))
     if bound == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if bound * 2 < dec else "OK", text)
@@ -12264,9 +12370,10 @@ def _hj_f95c_head_shadow(rows, ctx):
     return ("OK", text)
 
 def _hj_f100_tee(rows, ctx):
-    """F100: the marker probe's draw tee. Per second (its cost line): the calls, the share the prefilter took, the frames, and the tee's clock (a mean call from
-    one call in 64 on the perf monitor's sample frames, and the estimate a frame). Calls and no prefilter hit is NEVER APPLIED, unless the probe key's
-    measurement families are on (the prefilter stands aside for them: IDLE); no clocked second is PARTIAL (the cost is not measured)."""
+    """F100: the marker probe's draw tee. Per window (its cost line; 1 s before F125 and in the detail log, 10 s otherwise): the calls, the share the prefilter
+    took, the frames, and the tee's clock (a mean call from one call in 64 on the perf monitor's sample frames, and the estimate a frame). Calls and no prefilter
+    hit is NEVER APPLIED, unless the probe key's measurement families are on (the prefilter stands aside for them: IDLE); no clocked window is PARTIAL (the cost
+    is not measured). The median is of the clocked lines: seconds in a log of 1 s lines, windows otherwise."""
     sec, fam = rows.get("sec", []), rows.get("families", [])
     if not sec:
         return None
@@ -12274,9 +12381,10 @@ def _hj_f100_tee(rows, ctx):
     clocked = [r for r in sec if r.get("clocked")]
     ms = sorted(float(r["ms"]) for r in clocked)
     ns = sorted(float(r["ns"]) for r in clocked)
-    text = "%d s: the prefilter took %s of %d draw tee calls (%d a frame over %d frames)" % (len(sec), _hpct(fast, calls), calls, calls // frames if frames else 0, frames)
+    text = "%d s: the prefilter took %s of %d draw tee calls (%d a frame over %d frames)" % (_hsecs(sec), _hpct(fast, calls), calls, calls // frames if frames else 0, frames)
     if ms:
-        text += "; the tee %.3f ms a frame (median of %d clocked seconds, max %.3f), %.1f ns a call" % (ms[len(ms) // 2], len(ms), ms[-1], ns[len(ns) // 2])
+        unit = "seconds" if all(_hwl(r) == 1 for r in clocked) else "windows"
+        text += "; the tee %.3f ms a frame (median of %d clocked %s, max %.3f), %.1f ns a call" % (ms[len(ms) // 2], len(ms), unit, ms[-1], ns[len(ns) // 2])
     else:
         text += "; the tee's clock took no call (no perf sample frame on foot)"
     if not calls:
@@ -12436,11 +12544,32 @@ def _hj_f116_hud_hide(rows, ctx):
     return ("OK", text)
 
 
-def _hrule(name, tags, labels, kinds, judge):
-    return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
+def _hj_f125_diet(rows, ctx):
+    """F125: the on-foot log's own state, from its announce line (written when native on foot arms and at each change of log.on_foot_detail). OK while the
+    summary log is in force (the diet applied: 10 s summaries, the detail-only lines not written); IDLE while the detail log is (every on-foot line as before
+    F125, nothing for the diet to do). A window opened after the last line takes the state from it (the "entry" row)."""
+    seq = rows.get("entry", []) + rows.get("state", [])
+    if not seq:
+        return None
+    where = " (set before the window)" if not rows.get("state") else ""
+    state = _hdetail(ctx)
+    if state == "off":
+        return ("OK", "detail off%s: summary windows of %s s; per-frame traces and the settled features' detail lines are not written, and the rules that read only "
+                      "those are listed as not judged" % (where, seq[-1]["wl"]))
+    if state == "on":
+        return ("IDLE", "detail on%s: windows of %s s, every on-foot line as before F125 (about 4 MB a minute on foot)" % (where, seq[-1]["wl"]))
+    changes = sum(1 for a, b in zip(seq, seq[1:]) if a["detail"] != b["detail"])
+    return ("OK", "detail changed %d time(s) in the window, %s at its end: the detail-only lines are in the log only where it was on" % (changes, seq[-1]["detail"]))
+
+
+def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
+    return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
 
 HEALTH_RULES = (
+    _hrule(H_F125, ("F125",), (H_F125_LABEL,), (
+        ("state", H_F125_RE.pattern),
+    ), _hj_f125_diet),
     _hrule("weapon readout size (F90)", ("F90", "F91"), ("weapon readout size (F90)", "weapon readout size (F91)"), (
         ("part", r"weapon readout size \(F90\) 1 s: (?P<role>[a-zA-Z ]+?) \(slot (?P<slot>\d+) name (?P<name>\d+)\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), "
                  r"scaled (?P<scaled>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
@@ -12531,6 +12660,9 @@ HEALTH_RULES = (
     ), _hj_f88),
     _hrule(H_F89_ADS, ("F89",), ("ads transition (F89)",), (
         ("start", r"ads transition \(F89\) (?P<dir>press|release): tracing the next"),
+        # F125: each traced event's own line at its end (the frame lines below are the detail log's)
+        ("done", r"ads transition \(F89\) (?P<dir>press|release) traced: frames (?P<frames>\d+), engaged (?P<engaged>\d+), lock weight max (?P<lw>[\d.]+), "
+                 r"on the engaged frames (?P<elw>[\d.]+)"),
         ("frame", r"ads transition \(F89\) (?P<dir>press|release) frame (?P<frame>\d+): t %s s, journal ADS \d, ads state (?P<state>\w+), lock weight (?P<lw>[\d.]+)"
                   r"(?:.*(?P<view>; view \(F91\): r (?P<rv>-|yaw)))?" % _HN),
         ("skip", r"ads transition \(F89\): not traced"),
@@ -12542,9 +12674,9 @@ HEALTH_RULES = (
                 r"(?:\([^)]*\), head aim (?P<aim>on|off|mixed) \(\d+ of \d+ frames\)"
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
-    ), _hj_f91_fit),
+    ), _hj_f91_fit, needs_detail=True),   # F125: a press is fitted only when the detail log was on at its edge
     _hrule("eye rows (F113)", ("F113",), ("native on foot eye rows (F113)",), (
-        ("sec", r"native on foot eye rows \(F113\) 1 s: eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
+        ("sec", r"native on foot eye rows \(F113\) " + H_WL + r": eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
                 r"none (?P<n0>\d+); eye 1 (?P<f1>\d+) frames: the scene meshes (?P<m1>\d+), the depth prepass (?P<p1>\d+), the terrain (?P<t1>\d+), none (?P<n1>\d+); "
                 r"checked against a scene mesh (?P<checked>\d+) \(max diff (?P<diff>\S+)\); source draws with no scene depth eye (?P<noeye>\d+), no b1 shadow "
                 r"(?P<norows>\d+), latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?$"),
@@ -12566,7 +12698,7 @@ HEALTH_RULES = (
                 r"(?P<behind>\d+),"),
         ("total", r"panel pointer \(F111\) so far: verdict: (?P<verdict>[^;]+); (?P<secs>\d+) s with the pointer, cycles \d+, moves \d+"),
         ("_", r"panel pointer \(F111\) move: ndc "),
-    ), _hj_f111_pointer),
+    ), _hj_f111_pointer, needs_detail=True),   # F125: the 1 s and move lines are the detail log's (the flight-so-far line is said either way)
     _hrule("panel pointer (F114b)", ("F114b",), ("panel pointer (F114b)",), (
         ("armed", r"panel pointer \(F114b\): owner transform hook (?P<state>armed|NOT armed) at .*?, profile (?P<profile>vr|flat)(?P<rest>.*)$"),
         ("sec", r"panel pointer \(F114b\) 1 s: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
@@ -12576,7 +12708,7 @@ HEALTH_RULES = (
         ("total", r"panel pointer \(F114b\) so far: profile (?P<profile>vr|flat); turn: (?P<turn>[^;]+); cursor draw: (?P<draw>[^;]+); mode: (?P<mode>[^;]+); "
                   r"(?P<secs>\d+) s with a panel"),
         ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
-    ), _hj_f114b_pointer),
+    ), _hj_f114b_pointer, needs_detail=True),   # F125: as F111's
     _hrule("panel cursor fix (F117)", ("F117",), ("panel cursor fix (F117)",), (
         ("sec", r"panel cursor fix \(F117\) 1 s: setting (?P<setting>[^;]+); the cursor on turned panels (?P<cursor>[^;]+); 2D placements (?P<pl>\d+): turned "
                 r"(?P<turned>\d+), upright (?P<upright>\d+); moved (?P<moved>\d+); left: upright \d+, the game's setting (?P<gameset>\d+); refused: no triangle at "
@@ -12584,7 +12716,7 @@ HEALTH_RULES = (
                 r"panels right (?P<tr>%s) down (?P<td>%s)" % (_HN, _HN)),
         ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
         ("_", r"panel cursor fix \(F117\) so far: "),
-    ), _hj_f117_cursor),
+    ), _hj_f117_cursor, needs_detail=True),   # F125: as F111's
     _hrule("panel cursor follow (F120)", ("F120",), ("panel cursor follow (F120)",), (
         ("sec", r"panel cursor follow \(F120\) 1 s: setting (?P<setting>[^;]+); 2D placements (?P<pl>\d+), screen-space (?P<screen>\d+), corrected (?P<corrected>\d+), "
                 r"references taken (?P<refs>\d+); refused: flat (?P<rflat>\d+), no eye view (?P<rnoeye>\d+), no HRC matrix (?P<rnohrc>\d+), degenerate row (?P<rdeg>\d+), "
@@ -12595,7 +12727,7 @@ HEALTH_RULES = (
         ("setting", r"native on foot panel cursor follow \(F120\): (?P<to>panel|head) \(TEMPORARY"),
         ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
         ("_", r"panel cursor follow \(F120\) so far: "),
-    ), _hj_f120_follow),
+    ), _hj_f120_follow, needs_detail=True),   # F125: as F111's
     _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
         ("sec", r"panel mouse \(F122\) 1 s: setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)$"),
         ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
@@ -12666,9 +12798,11 @@ HEALTH_RULES = (
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
     ), _hj_f106_share),
     _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
-        ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"),
-        ("idle", r"marker fix \(F62c\): eye \d: no decision this second"),
-        ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)"),
+        # F125: the applied and F87c lines end in "; over N s" (their window); a line without it (a log written before F125) covers one second.
+        ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"
+                    r"(?:.*; over " + H_WL + r"$)?"),
+        ("idle", r"marker fix \(F62c\): eye \d: no decision " + H_WL_THIS),
+        ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)(?:.*; over " + H_WL + r"$)?"),
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
         ("sec", r"prompt anchor \(F87p\) 1 s: SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
@@ -12863,7 +12997,7 @@ HEALTH_RULES = (
     ), _hj_f95c_head_shadow),
     _hrule("marker tee (F100)", ("F100",), ("tee (F100)",), (
         ("sec", r"tee \(F100\): fast path (?P<fast>\d+) of (?P<calls>\d+) calls, (?P<frames>\d+) frames, tee clock: (?:(?P<clocked>\d+) calls clocked, (?P<ns>-?[\d.]+) ns a "
-                r"call, est\. (?P<ms>-?[\d.]+) ms a frame|none)"),
+                r"call, est\. (?P<ms>-?[\d.]+) ms a frame|none)(?:; over " + H_WL + r")?"),   # F125: the window's seconds; none before F125 (1 s)
         ("families", r"marker probe \(F100\): measurement families (?P<state>ON|off) "),
     ), _hj_f100_tee),
     _hrule("pose hook CPU (F100)", ("F100",), ("pose hook CPU (F100)",), (
@@ -12938,6 +13072,9 @@ def health_scan(text, since=None, until=None):
     unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
     tagged = 0
     first = last = None
+    # F125: the detail log's state is said when native on foot arms and at each change, often long before a --since window opens. The last F125 line read
+    # before the window's first line is the state in force as it opens: it goes to the log diet rule as an "entry" row.
+    carried, entered = None, False
     for raw in text.splitlines():
         if "(F" not in raw:
             continue
@@ -12946,7 +13083,16 @@ def health_scan(text, since=None, until=None):
             continue
         sm = HEALTH_STAMP_RE.match(raw)
         tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
-        if not _health_in_window(tod, since, until):
+        inside = _health_in_window(tod, since, until)
+        if inside and not entered:
+            entered = True
+            if carried is not None:
+                rows[H_F125].setdefault("entry", []).append(carried)
+        if H_F125_LABEL in raw:
+            g = H_F125_RE.search(raw)
+            if g:
+                carried = dict(g.groupdict(), _t=tod)
+        if not inside:
             continue
         stamp = "%s:%s:%s" % sm.group(1, 2, 3) if sm else ""
         tagged += 1
@@ -12987,34 +13133,43 @@ def health_scan(text, since=None, until=None):
     return {"census": census, "rows": rows, "unparsed": unparsed, "tagged": tagged, "first": first, "last": last}
 
 
-def health_verdicts(scan):
-    """[(rule, status, detail)] in table order for the rules with lines in the window, and the names of the rules with none."""
-    out, absent = [], []
-    for rule in HEALTH_RULES:
-        got = rule.judge(scan["rows"][rule.name], scan["rows"])
+def health_verdicts(scan, rules=None):
+    """[(rule, status, detail)] in table order for the rules with lines in the window, the names of the rules with none, and (F125) the names of the rules not
+    judged because they read only the detailed on-foot log's lines and the log says it was off. rules: HEALTH_RULES unless given (the self-test's variants)."""
+    out, absent, unjudged = [], [], []
+    detail_log = _hdetail(scan["rows"])
+    for rule in HEALTH_RULES if rules is None else rules:
+        own = scan["rows"][rule.name]
         count, example = scan["unparsed"][rule.name]
+        # Before the judge: a judge may find a NEVER APPLIED in other rules' rows (a trigger the log proves) that the summary log never meant to answer.
+        if rule.needs_detail and detail_log == "off" and not count and not any(own.values()):
+            unjudged.append(rule.name)
+            continue
+        got = rule.judge(own, scan["rows"])
         if got is None:
             if count:
                 out.append((rule, "UNPARSED", "%d line(s) carry the rule's label but no pattern matches (first: %s)" % (count, example)))
-            else:
+            elif rule.name not in HEALTH_QUIET_WHEN_ABSENT:
                 absent.append(rule.name)
             continue
         status, detail = got
         if count:
             detail += " [+%d line(s) the rule's patterns do not match: %s]" % (count, example[:80])
         out.append((rule, status, detail))
-    return out, absent
+    return out, absent, unjudged
 
 
-def health_report(scan, window=""):
-    """(lines, exit code) of the --health report for a health_scan result."""
-    verdicts, absent = health_verdicts(scan)
+def health_report(scan, window="", rules=None):
+    """(lines, exit code) of the --health report for a health_scan result. rules: as health_verdicts'."""
+    verdicts, absent, unjudged = health_verdicts(scan, rules)
     census = scan["census"]
     lines = ["[edvr] health%s: %d build-tagged lines, %d tags, %s to %s" % (window, scan["tagged"], len(census), scan["first"] or "-", scan["last"] or "-")]
     for rule, status, detail in verdicts:
         lines.append("  %-13s  %-26s %s" % (status, rule.name, detail))
     if absent:
         lines.append("  not present    %s" % ", ".join(absent))
+    if unjudged:
+        lines.append("  not judged (detail log off)  %s" % ", ".join(unjudged))
     covered = {t for rule in HEALTH_RULES for t in rule.tags}
     order = sorted(census, key=lambda t: (-int(re.match(r"F(\d+)", t).group(1)), t))
     shown = [t for t in order if t not in covered] if not scan.get("all") else order
@@ -13028,9 +13183,10 @@ def health_report(scan, window=""):
     bad = [rule.name for rule, status, _ in verdicts if status == "NEVER APPLIED"]
     drift = [rule.name for rule, status, _ in verdicts if status == "UNPARSED"]
     counts = collections.Counter(status for _, status, _ in verdicts)
-    lines.append("[edvr] health: %s%s; exit %d" % (
+    lines.append("[edvr] health: %s%s%s; exit %d" % (
         ", ".join("%d %s" % (counts[s], s) for s in ("OK", "PARTIAL", "NEVER APPLIED", "IDLE", "UNPARSED") if counts[s]) or "no rule had a line",
-        "; %d not present" % len(absent) if absent else "", 3 if bad else 4 if drift else 0))
+        "; %d not present" % len(absent) if absent else "", "; %d not judged (detail log off)" % len(unjudged) if unjudged else "",
+        3 if bad else 4 if drift else 0))
     return lines, (3 if bad else 4 if drift else 0)
 
 
@@ -13975,6 +14131,10 @@ def self_test_health():
             """A frame line with F91's view fields (the last %s)."""
             return R("ads transition (F89) %s frame %u", d, 15326, 0.136, 0, state, lw, 1.0, 5.4, -0.4, 21.2, 1.12, "", view)
 
+        def ads_done(d="press", frames=360, engaged=340, lw=1.0, elw=1.0):
+            """F125: a traced event's own line at its end."""
+            return R("ads transition (F89) %s traced: frames", d, frames, engaged, lw, elw)
+
         def share_sec(w=0.44, key="on", state="engaged"):
             return R("ADS sight in both eyes (F106) 1 s: share", w, key, w, state)
 
@@ -13991,14 +14151,22 @@ def self_test_health():
             return R("ADS sight in both eyes (F106) press: peak", peak, frames, full, refused, 0, 1.63, yaw, 0.0, 0.0, -1.428, 0.884, 1.0, -1.0, -0.884, 1.428, 1.0,
                      -1.0, cov, cov - 4.0, "used" if hidden else "none", hidden)
 
-        def mark(bound=23, dec=25, eye=0):
-            return R("native on foot marker fix (F62c/F64): eye %d: patch applied", eye, 100.0 * bound / dec, bound, dec, 0)
+        def mark(bound=23, dec=25, eye=0, wl=1):
+            """F125: wl is the window's seconds, the line's last field (1 in the detail log)."""
+            return R("native on foot marker fix (F62c/F64): eye %d: patch applied", eye, 100.0 * bound / dec, bound, dec, 0, *([None] * 12), wl)
 
-        def mark_idle(eye=0):
-            return R("native on foot marker fix (F62c): eye %d: no decision", eye)
+        def mark_idle(eye=0, span="this second"):
+            return R("native on foot marker fix (F62c): eye %d: no decision", eye, span)
 
-        def mark_win(named=113, outside=8, eye=1):
-            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, "first 1 last 2")
+        def mark_win(named=113, outside=8, eye=1, wl=1):
+            return R("marker fix (F87c) eye %d: windows", eye, 2, 1, 1, 13, named, outside, 2806, "first 1 last 2", wl)
+
+        # F125: lines as a build before F125 wrote them (1 s, no window field), from the 10-25 flight
+        MARK_OLD = ("native on foot marker fix (F62c/F64): eye 0: patch applied 95.7% (45 of 47 decisions bound at the issue, 0 through the newest rows); decided: "
+                    "applied 45 (newest rows 0); refused: scene rows stale (none within 1 frame) 0, record not matched 1 (eye-frames), both-eyes rule not met 1, w not "
+                    "positive 0, |d| over 0.40 NDC 0, no P 0, other (ranged b0, no CPU b0 rows, no CPU o_hud) 0; bind refused 0")
+        MARK_IDLE_OLD = "native on foot marker fix (F62c): eye 1: no decision this second (no marker composite draw of the eye reached the fix)"
+        MARK_WIN_OLD = "marker fix (F87c) eye 0: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); eye-1 first/last ring -"
 
         def anchor(s=11, u=0, i=1, key=-1):
             return R("prompt anchor (F87p) 1 s: SetMarker", s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10)
@@ -14191,9 +14359,9 @@ def self_test_health():
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
 
-        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False):
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1):
             f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
-            return R("native on foot eye rows (F113) 1 s: eye 0", f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, 0,
+            return R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, 0,
                      " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" if latched else "")
 
         check("F113 rows: bare ground, the prepass gives the rows", [rows113()] * 3, 0, [("OK", F113)],
@@ -14201,6 +14369,15 @@ def self_test_health():
         check("F113 rows: a source latched off", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF"])
         check("F113 rows: the sources never ran (the 07:10 flight's bare ground)", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0)] * 2, 3,
               [("NEVER APPLIED", F113)], has=["none 66.7%", "no source ever gave any"])
+        ROWS113_OLD = ("native on foot eye rows (F113) 1 s: eye 0 90 frames: the scene meshes 10, the depth prepass 80, the terrain 0, none 0; eye 1 90 frames: "
+                       "the scene meshes 10, the depth prepass 80, the terrain 0, none 0; checked against a scene mesh 2 (max diff 0.00e+00); source draws "
+                       "with no scene depth eye 0, no b1 shadow 0, latched 0")
+        check("F113 rows: legacy 1 s line", [ROWS113_OLD], 0, [("OK", F113)], has=["1 s: eye 0 90 frames"], lacks=["UNPARSED"])
+        check("F113 rows: 10 s and a flushed short window", [rows113(m=(100, 100), p=(800, 800), wl=10), rows113(m=(30, 30), p=(240, 240), wl=3)], 0,
+              [("OK", F113)], has=["13 s: eye 0 1170 frames", "checked against a scene mesh 4"], lacks=["UNPARSED"])
+        check("F113 rows: 10 s latch tail", [rows113(wl=10, diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["10 s:", "LATCHED OFF"], lacks=["UNPARSED"])
+        check("F113 rows: 10 s sources never ran", [rows113(m=(300, 300), p=(0, 0), n=(600, 600), wl=10)], 3,
+              [("NEVER APPLIED", F113)], has=["10 s:", "no source ever gave any"], lacks=["UNPARSED"])
 
         # ---- reticle depth (F118): the edge or the speed as the cause of a reticle seen double ----
         F118 = "reticle depth (F118)"
@@ -14353,6 +14530,17 @@ def self_test_health():
               [("PARTIAL", F111)], has=["the inverting stage: the unprojection (K1", "only 3 of 4 hooks armed"])
         check("F111 pointer: updates without a placement", [ptr_armed(), ptr_sec(ray=0, behind=0, verdict="none in the pick (the inversion is after it)")], 0,
               [("PARTIAL", F111)], has=["no placement on a panel was seen"])
+        # F125: the 1 s and move lines are the detail log's; the flight-so-far line is judged without them, and with neither nothing is NEVER APPLIED
+        P_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        check("F125 F111: detail off, judged from the flight so far", [P_OFF, ptr_armed(), ptr_total(secs=20)], 0, [("OK", F111)],
+              has=["the flight so far (20 s with the pointer): " + K5 + " (no 1 s line: the detail log's)"], lacks=["UNPARSED", "never saw"])
+        check("F125 F111: detail off, the flight so far too few moves", [P_OFF, ptr_armed(), ptr_total("too few moves")], 0, [("IDLE", F111)], has=["never moved enough"])
+        check("F125 F111: detail off, armed and no line of the pointer", [P_OFF, ptr_armed()], 0, [("IDLE", F111)],
+              has=["no 1 s line (the detail log was off) and no flight-so-far line"], lacks=["NEVER APPLIED"])
+        check("F125 F111: detail off and no hook armed is still NEVER APPLIED", [P_OFF, ptr_armed(0, "update at EliteDangerous64.exe+0x454F520 NOT armed: x")], 3,
+              [("NEVER APPLIED", F111)], has=["no hook armed"])
+        check("F125 F111: detail on, armed and never saw the controller", [R("native on foot log (F125): detail %s", "on", 1), ptr_armed()], 3, [("NEVER APPLIED", F111)],
+              has=["never saw the pointer controller"])
 
         # ---- panel pointer (F114b): the turned transform, the cursor draw, the clicks and the mode, VR and flat ----
         F114B = "panel pointer (F114b)"
@@ -14385,6 +14573,15 @@ def self_test_health():
               [("PARTIAL", F114B)], has=["exe+0x4526D10 at vtable +0x10, not the hooked function"])
         check("F114b pointer: a still cursor", [p114_armed(), p114(turn="too few moves", presses=(0, 0, 0), puv=0)] * 2, 0, [("IDLE", F114B)],
               has=["never moved enough"])
+        # F125: as F111's
+        check("F125 F114b: detail off, judged from the flight so far", [P_OFF, p114_armed(), p114_owner(), p114_total(secs=20)], 0, [("OK", F114B)],
+              has=["vr: 20 s with a panel (the flight so far), mode 2D window; turn: " + CAM, "(no 1 s line: the detail log's)"], lacks=["UNPARSED", "never saw"])
+        check("F125 F114b: detail off, the flight so far and a stray owner", [P_OFF, p114_armed(), p114_owner(0x4526D10, "NOT the hooked function: not read"),
+                                                                             p114_total()], 0, [("PARTIAL", F114B)], has=["not the hooked function"])
+        check("F125 F114b: detail off, armed and no line of a panel", [P_OFF, p114_armed()], 0, [("IDLE", F114B)],
+              has=["no 1 s line (the detail log was off) and no flight-so-far line"], lacks=["NEVER APPLIED"])
+        check("F125 F114b: detail off and the hook not armed is still NEVER APPLIED", [P_OFF, p114_armed("NOT armed", why="x")], 3, [("NEVER APPLIED", F114B)],
+              has=["the owner transform hook was not armed: x, and no 1 s line (the detail log was off)"])
 
         # ---- panel cursor fix (F117): the cursor on a turned panel against the true uv, per setting ----
         F117 = "panel cursor fix (F117)"
@@ -14449,6 +14646,13 @@ def self_test_health():
               [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
         check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
                                                           frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
+        # F125: the 1 s lines are the detail log's (F117 and F120 have only those to judge: with the detail log off they are not judged, or idle beside a pin line)
+        check("F125 F120: detail off, the pin line alone", [P_OFF, pcfo_pin()], 0, [("IDLE", F120)], has=["no 1 s line (the detail log was off)"],
+              lacks=["no 2D placement"])
+        check("F125 F120: no F125 line, the pin line alone is as before", [pcfo_pin()], 0, [("IDLE", F120)], has=["no 2D placement on a panel"])
+        check("F125 F117/F120: detail off, only the flight-so-far lines", [P_OFF, R("panel cursor fix (F117) so far", "panel", "follows the uv", 20, 900, 0, 900, 0.98,
+                                                                                  0.97), R("panel cursor follow (F120) so far", "panel", 20, 900, 0, 20.0, 80, 18.0, 0.4)],
+              0, has=["  not judged (detail log off)  ", "panel cursor fix (F117), panel cursor follow (F120)"], lacks=["UNPARSED"])
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
@@ -15011,9 +15215,9 @@ def self_test_health():
         # ---- marker tee (F100): the draw tee's prefilter and its clock; pose hook CPU (F100): the local avatar's Animate work ----
         T100, P100 = "marker tee (F100)", "pose hook CPU (F100)"
 
-        def tee100(fast=1800000, calls=2000000, frames=90, clocked=350, ns=25.0, ms=0.556):
+        def tee100(fast=1800000, calls=2000000, frames=90, clocked=350, ns=25.0, ms=0.556, wl=1):
             head = R("native on foot marker probe: cost: draw tee calls %llu", calls, 300000, 1000, 900, 298100, 8900, 960, 44640, 0)
-            tail = R(", tee clock: %llu calls clocked", clocked, ns, ms) if clocked else R(", tee clock: none")
+            tail = R(", tee clock: %llu calls clocked", clocked, ns, ms, wl) if clocked else R(", tee clock: none", wl)
             return head + R("; tee (F100): fast path %llu", fast, calls, frames) + tail
 
         def pose100(calls=90, mean=42.5, mx=120.0, ms=3.825):
@@ -15026,6 +15230,14 @@ def self_test_health():
         check("F100 tee: no fast call with the measurement families on", [R("native on foot marker probe (F100): measurement families", "ON", "on", ""),
               tee100(fast=0)], 0, [("IDLE", T100)], has=["the prefilter stands aside"])
         check("F100 tee: the clock took no call", [tee100(clocked=0)] * 2, 0, [("PARTIAL", T100)], has=["the tee's clock took no call"])
+        TEE100_OLD = ("native on foot marker probe: cost: draw tee calls 2000000, draws scanned past the VS hash 300000 (on-foot HUD 1000, marker composite 900, "
+                      "world 298100), 8900 us in them; records 960, staged 44640 bytes; refused 0:; read-backs lost 0; tee (F100): fast path 1800000 of 2000000 calls, "
+                      "90 frames, tee clock: 350 calls clocked, 25.0 ns a call, est. 0.556 ms a frame")
+        check("F100 tee: legacy 1 s cost line", [TEE100_OLD], 0, [("OK", T100)], has=["1 s:", "median of 1 clocked seconds"], lacks=["UNPARSED"])
+        check("F100 tee: 10 s and flushed short cost windows", [tee100(wl=10), tee100(wl=4)], 0, [("OK", T100)],
+              has=["14 s:", "median of 2 clocked windows"], lacks=["UNPARSED"])
+        check("F100 tee: 10 s without a clock sample", [tee100(clocked=0, wl=10)], 0, [("PARTIAL", T100)],
+              has=["10 s:", "the tee's clock took no call"], lacks=["UNPARSED"])
         check("F100 pose: the local Animate work clocked", [pose100(), pose100(ms=4.1)], 0, [("OK", P100)],
               has=["2 s: 180 calls (90 a second), 42.5 us a call (median second), max 120.0 us"], lacks=["UNPARSED"])
         check("F100 pose: no local work", [pose100(0, 0.0, 0.0, 0.0)] * 2, 0, [("IDLE", P100)], has=["no local Animate work clocked"])
@@ -15192,6 +15404,27 @@ def self_test_health():
               [("NEVER APPLIED", F89A)], has=["the lock weight never rose"])
         check("F89 trace: events past the minute's cap are counted", [ads_start("press"), ads_start("release"), ads_frame(), R("ads transition (F89): not traced, %d events", 4, 7)], 0,
               [("OK", F89A)], has=["1 events not traced"])
+        # F125: each trace's own line (the frame lines are the detail log's); a log with them judges from them, an older log from its frame lines (above)
+        F125_LOG_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        check("F125 F89: detail off, judged from each trace's own line", [F125_LOG_OFF, ads_start("press"), ads_done(), ads_start("release"),
+                                                                         ads_done("release", 135, 0, 0.98, 0.0)], 0, [("OK", F89A)],
+              has=["traced 1 presses and 1 releases, 495 frames (340 with ADS engaged), lock weight max 1.00", "  not judged (detail log off)  ADS press fit (F91)"],
+              lacks=["frame lines", "UNPARSED"])
+        check("F125 F89: detail off, engaged and the lock weight never rose", [F125_LOG_OFF, ads_start("press"), ads_done(lw=0.0, elw=0.0), ads_start("release"),
+                                                                              ads_done("release", 135, 0, 0.0, 0.0)], 3,
+              [("NEVER APPLIED", F89A)], has=["495 frames (340 with ADS engaged), lock weight max 0.00", "the lock weight never rose"])
+        check("F125 F89: a release's weight at 0 with nothing engaged is not a failure", [F125_LOG_OFF, ads_start("press"), ads_done(), ads_start("release"),
+                                                                                         ads_done("release", 135, 0, 0.0, 0.0)], 0, [("OK", F89A)])
+        check("F125 F89: detail on, the frame lines and the traces' own lines agree", [R("native on foot log (F125): detail %s", "on", 1), ads_start("press"),
+                                                                                      ads_frame(), ads_frame(), ads_done("press", 2, 2, 0.98, 0.98), ads_start("release"),
+                                                                                      ads_frame("release", "releasing", 0.5), ads_done("release", 1, 0, 0.5, 0.0)], 0,
+              [("OK", F89A)], has=["traced 1 presses and 1 releases, 3 frames (2 with ADS engaged), lock weight max 0.98"], lacks=["UNPARSED", "not judged"])
+        check("F125 F89: a completed release cannot hide an unfinished press with no lock", [R("native on foot log (F125): detail %s", "on", 1),
+              ads_start("release"), ads_done("release", 90, 0, 0.5, 0.0), ads_start("press"), ads_frame(lw=0.0)], 3, [("NEVER APPLIED", F89A)],
+              has=["the lock weight never rose", "1 frame lines also read (the frame counts above cover completed traces)"], lacks=["UNPARSED"])
+        check("F125 F89: an unfinished press contributes its lock weight beside a completed release", [R("native on foot log (F125): detail %s", "on", 1),
+              ads_start("release"), ads_done("release", 90, 0, 0.0, 0.0), ads_start("press"), ads_frame(lw=0.98)], 0, [("OK", F89A)],
+              has=["lock weight max 0.98", "1 frame lines also read (the frame counts above cover completed traces)"], lacks=["NEVER APPLIED", "UNPARSED"])
         # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
         check("F106: a press drawn at full weight", [share_key(), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_press()], 0, [("OK", S106)],
               has=["1 presses drawn by the runtime (1 at full weight, 1 with 30-100% of the left eye taken), coverage 74.1-74.1%, the eyes' yaw +21.50..+21.50 deg, "
@@ -15215,6 +15448,25 @@ def self_test_health():
         check("marker fix: decisions and none bound", [mark(0, 25)] * 2, 3, [("NEVER APPLIED", MK)])
         check("marker fix: under half bound", [mark(10, 25)], 0, [("PARTIAL", MK)])
         check("marker fix: no decision at all", [mark_idle(0), mark_idle(1)], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"])
+        # F125: a build before F125 (1 s lines with no window field) parses as before
+        check("marker fix: the 1 s lines of a build before F125", [MARK_OLD, MARK_IDLE_OLD, MARK_WIN_OLD], 0, [("OK", MK)],
+              has=["patch applied eye 0 96% (45 of 47); named 40, outside 2 (F87c)"], lacks=["UNPARSED"])
+        check("marker fix: no decision, a build before F125", [MARK_IDLE_OLD] * 3, 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 3 s"],
+              lacks=["UNPARSED"])
+        # F125: the 10 s windows of the default log
+        F125_MK_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        check("marker fix: 10 s windows, applied", [F125_MK_OFF, mark(230, 250, 0, 10), mark(225, 250, 1, 10), mark_win(1130, 80, 0, 10), mark_win(1100, 90, 1, 10)], 0,
+              [("OK", MK)], has=["patch applied eye 0 92% (230 of 250), eye 1 90% (225 of 250); named 2230, outside 170 (F87c)"], lacks=["UNPARSED"])
+        check("marker fix: 10 s windows, none bound", [F125_MK_OFF, mark(0, 250, 0, 10), mark(0, 250, 1, 10)], 3, [("NEVER APPLIED", MK)], lacks=["UNPARSED"])
+        check("marker fix: 10 s windows with no decision (one line an eye a window)", [F125_MK_OFF, mark_idle(0, "these 10 s"), mark_idle(1, "these 10 s"),
+              mark_idle(0, "these 4 s"), mark_idle(1, "these 4 s")], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 28 s"], lacks=["UNPARSED"])
+        check("marker fix: only F87c's windows (no F62c line)", [F125_MK_OFF, mark_win(1130, 80, 0, 10), mark_win(1100, 90, 1, 10), mark_win(900, 0, 0, 6),
+              mark_win(880, 0, 1, 6)], 0, [("OK", MK)], has=["no F62c line: the CPU identification named 4010 of 4180 marker composite draws over 16 s (F87c)"],
+              lacks=["IDLE", "UNPARSED"])
+        check("marker fix: only F87c's windows, nothing named or outside", [F125_MK_OFF, mark_win(0, 0, 0, 10), mark_win(0, 0, 1, 10)], 0, [("IDLE", MK)],
+              has=["no marker composite draw reached the fix"])
+        check("marker fix: only F87c's windows, mostly outside", [mark_win(10, 80, 0, 10), mark_win(10, 90, 1, 10)], 0, [("PARTIAL", MK)],
+              has=["named 20 of 190"])
 
         # ---- prompt anchor and label (F87p) ----
         check("F87p anchor: the hooks fired", [anchor_hooked(), anchor(), anchor(12, 1, 1, 3)], 0, [("OK", AN)],
@@ -15371,6 +15623,66 @@ def self_test_health():
         rc, out = cli(["--file", write(body([f90_idle()])), "--since", "10:00:00"])
         if rc != 1 or "belong to --health" not in out:
             print("health: --since without --health rc=%d:\n%s" % (rc, out))
+            ok = False
+
+        # ---- F125: the on-foot log diet: the detail state, the rules that need the detail log, the window helpers ----
+        F125_OFF = R("native on foot log (F125): detail %s", "off", 10)
+        F125_ON = R("native on foot log (F125): detail %s", "on", 1)
+        check("F125: a log with no F125 line reports as before (no log diet row, nothing not judged)", [f90_part(), f90_part()], 0, [("OK", F90S)],
+              lacks=[H_F125, "not judged"])
+        ND = [r.name for r in HEALTH_RULES if r.needs_detail]   # the rules that read only the detail log's lines
+        check("F125: detail off is the diet applied", [F125_OFF, f90_part(), f90_part()], 0, [("OK", H_F125), ("OK", F90S)],
+              has=["detail off: summary windows of 10 s", "  not judged (detail log off)  %s" % ", ".join(ND)], lacks=["set before the window", "NEVER APPLIED"])
+        check("F125: detail on is the diet idle", [F125_ON, f90_part()], 0, [("IDLE", H_F125)], has=["detail on: windows of 1 s"])
+        check("F125: the key changed in the window", [F125_OFF, f90_part(), F125_ON], 0, [("OK", H_F125)], has=["detail changed 1 time(s) in the window, on at its end"])
+        check("F125: the state set before a --since window is the state in it", [F125_OFF, (90, f90_part()), (91, f90_part())], 0, [("OK", H_F125)],
+              has=["detail off (set before the window)"], extra=["--since", "10:01:00"])
+        check("F125: a drifted announce line is UNPARSED, not a state", [F125_OFF.replace("detail off", "detail maybe")], 4, [("UNPARSED", H_F125)])
+        # needs_detail, on a variant of the table: a synthetic rule whose judge finds a NEVER APPLIED in other rules' rows (a trigger the log proves) stands for
+        # one the summary log never meant to answer.
+        syn = HealthRule("synthetic detail rule (F999)", ("F999",), ("synthetic detail rule (F999)",), (),
+                         lambda rows, ctx: ("NEVER APPLIED", "a trigger the log proves, read from another rule's rows"), True)
+        d_rules = tuple(HEALTH_RULES) + (syn,)
+        checks += 1
+        if F91F not in ND or len(ND) < 5:
+            print("health: F125: ADS press fit (F91) and the four panel rules (F111, F114b, F117, F120) must need the detail log; needs_detail: %r" % ND)
+            ok = False
+
+        def detail_report(name, msgs, rc, has=(), lacks=(), since=None):
+            nonlocal ok, checks
+            checks += 1
+            scan = health_scan(body(msgs), parse_health_time(since) if since else None)
+            scan["rows"][syn.name], scan["unparsed"][syn.name] = {}, [0, ""]
+            lines, got_rc = health_report(scan, "", d_rules)
+            out = "\n".join(lines)
+            bad = [w for w in has if w not in out] + [x for x in lacks if x in out]
+            if got_rc != rc or bad:
+                print("health %s: rc=%d wanted %d; missing or unwanted %r:\n%s" % (name, got_rc, rc, bad, out))
+                ok = False
+
+        detail_report("F125: detail off, a rule that needs the detail log and has no line is not judged (never NEVER APPLIED, never not present)",
+                      [F125_OFF, f90_part()], 0, has=["  not judged (detail log off)  %s" % ", ".join(ND + [syn.name]),
+                                                      "; %d not judged (detail log off); exit 0" % (len(ND) + 1)],
+                      lacks=["NEVER APPLIED", "not present    %s" % F91F, ", %s" % F91F])
+        detail_report("F125: detail on, the same rules are judged as before", [F125_ON, f90_part()], 3,
+                      has=[row("NEVER APPLIED", syn.name), "not present    ", ", %s" % F91F], lacks=["not judged"])
+        detail_report("F125: no F125 line (an older log), the same rules are judged as before", [f90_part()], 3,
+                      has=[row("NEVER APPLIED", syn.name), ", %s" % F91F], lacks=["not judged", H_F125])
+        detail_report("F125: off then on in the window, judged as with the detail log on", [F125_OFF, f90_part(), F125_ON], 3,
+                      has=[row("NEVER APPLIED", syn.name)], lacks=["not judged"])
+        detail_report("F125: the off state carried into a --since window", [F125_OFF, (90, f90_part())], 0, has=["not judged (detail log off)"],
+                      lacks=["NEVER APPLIED"], since="10:01:00")
+        # The window helpers the converted rules read with.
+        checks += 1
+        rows_wl = [{"wl": None}, {"wl": "10"}, {}, {"wl": "3"}]
+        wl_rx, this_rx = re.compile(r"line \(F999\) " + H_WL + r": n (?P<n>\d+)" + _hxs("armed")), re.compile(r"line \(F999\): (?P<n>\d+) " + H_WL_THIS + r"$")
+        old, new = wl_rx.search("line (F999) 1 s: n 4"), wl_rx.search("line (F999) 10 s: n 4; armed 7 of 10 s")
+        old2, new2 = this_rx.search("line (F999): 5 this second"), this_rx.search("line (F999): 5 these 10 s")
+        counted = [{"xs": None, "armed": "1"}, {"xs": None, "armed": "0"}, {"xs": "7", "armed": "1"}]
+        if not (_hsecs(rows_wl) == 15 and _hwl({}) == 1 and old and old.group("wl") == "1" and old.group("xs") is None and new and new.group("wl") == "10" and
+                new.group("xs") == "7" and new.group("ws") == "10" and old2 and old2.group("wl") is None and _hwl(old2.groupdict()) == 1 and new2 and
+                new2.group("wl") == "10" and _hcount(counted, "xs", lambda r: r["armed"] == "1") == 8):
+            print("health: the F125 window helpers (_hsecs, _hwl, H_WL, H_WL_THIS, _hxs, _hcount) do not read old and new lines alike")
             ok = False
 
         # ---- the build check comes first, and the help names the mode ----

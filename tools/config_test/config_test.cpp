@@ -2424,9 +2424,34 @@ int main(int argc, char** argv) {
         } else {
             check(iniText.find("\n#max_mb = 16") != std::string::npos && iniText.find("\n#max_mb = 4") == std::string::npos,
                   "the shipped edvr.ini documents log.max_mb at 16, commented out (the code's fallback is the default)");
-            check(logSource.find("getInt(\"log.max_mb\", 16)") != std::string::npos &&
+            check(logSource.find("getInt(\"log.max_mb\", onFootDetail ? 64 : 16)") != std::string::npos &&
                       logSource.find("getInt(\"log.max_mb\", 4)") == std::string::npos,
-                  "the log's fallback for log.max_mb is 16");
+                  "the log's fallback for log.max_mb is 16 (64 with log.on_foot_detail on, F125)");
+        }
+    }
+    // --- log.on_foot_detail (F125): the detailed on-foot log, off by default, live -------------------------------------------------------------------
+    //
+    // Off, each on-foot measurement writes a 10 s summary; on, every line as before, about 4 MB a minute on foot. The shipped edvr.ini documents the key
+    // commented out at off, and both readers fall back to off: the log (for the cap it opens with, below) and the on-foot code's readKey (for the lines,
+    // re-read on each configuration change). Two readers with two defaults would make the cap and the lines disagree about one setting.
+    {
+        const std::string iniText = readRepoFile(dir, L"edvr.ini");
+        const std::string logSource = readRepoFile(dir, L"src\\common\\log.cpp");
+        const std::string onFootSource = readRepoFile(dir, L"src\\d3d11\\native_on_foot.cpp");
+        if (iniText.empty() || logSource.empty() || onFootSource.empty()) {
+            fail("log.on_foot_detail pins", "could not read edvr.ini, src\\common\\log.cpp or src\\d3d11\\native_on_foot.cpp from the repo root");
+        } else {
+            const size_t logSection = iniText.find("\n[log]");
+            const size_t keyLine = iniText.find("\n#on_foot_detail = off");
+            const size_t nextSection = logSection == std::string::npos ? std::string::npos : iniText.find("\n[", logSection + 1);
+            check(logSection != std::string::npos && keyLine > logSection && (nextSection == std::string::npos || keyLine < nextSection) &&
+                      iniText.find("\non_foot_detail = on") == std::string::npos,
+                  "the shipped edvr.ini documents log.on_foot_detail in [log], commented out at off");
+            check(logSource.find("getBool(\"log.on_foot_detail\", false)") != std::string::npos,
+                  "the log reads log.on_foot_detail with the default off");
+            check(onFootSource.find("getBool(\"log.on_foot_detail\", false)") != std::string::npos &&
+                      onFootSource.find("native on foot log (F125): detail %s") != std::string::npos,
+                  "readKey reads log.on_foot_detail with the default off and announces it (the line --health reads)");
         }
     }
     if (argc >= 3) {
@@ -2544,6 +2569,23 @@ int main(int argc, char** argv) {
         check(four.opened && four.maxBytes == 4 * kMiB, "an ini that says max_mb = 4 keeps 4 MB", std::to_string(four.maxBytes) + " bytes");
         const CapRun none = session("max_mb = 0\r\n", L"capnone", false);
         check(none.opened && none.maxBytes == 0, "max_mb = 0 is no cap", std::to_string(none.maxBytes) + " bytes");
+        // F125: with the detailed on-foot log on when the log opens, a cap nobody set is 64 MB; one written down wins, 16 included.
+        const CapRun detail = session("on_foot_detail = on\r\n", L"capdetail", false);
+        check(detail.opened && detail.maxBytes == 64 * kMiB, "on_foot_detail = on with no max_mb line is a 64 MB cap (F125)",
+              std::to_string(detail.maxBytes) + " bytes");
+        const CapRun detailOff = session("on_foot_detail = off\r\n", L"capdetailoff", false);
+        check(detailOff.opened && detailOff.maxBytes == 16 * kMiB, "on_foot_detail = off keeps the 16 MB default",
+              std::to_string(detailOff.maxBytes) + " bytes");
+        const CapRun detailFour = session("on_foot_detail = on\r\nmax_mb = 4\r\n", L"capdetailfour", false);
+        check(detailFour.opened && detailFour.maxBytes == 4 * kMiB, "on_foot_detail = on with max_mb = 4 keeps 4 MB (a cap written down wins)",
+              std::to_string(detailFour.maxBytes) + " bytes");
+        const CapRun detailSixteen = session("on_foot_detail = on\r\nmax_mb = 16\r\n", L"capdetail16", false);
+        check(detailSixteen.opened && detailSixteen.maxBytes == 16 * kMiB,
+              "on_foot_detail = on with max_mb = 16 written down keeps 16 MB (the 64 is only for a cap nobody set)",
+              std::to_string(detailSixteen.maxBytes) + " bytes");
+        const CapRun detailEmpty = session("on_foot_detail = on\r\nmax_mb =\r\n", L"capdetailempty", false);
+        check(detailEmpty.opened && detailEmpty.maxBytes == 64 * kMiB, "on_foot_detail = on with an empty max_mb line is 64 MB (an empty value is not set)",
+              std::to_string(detailEmpty.maxBytes) + " bytes");
         Log::get().close();
 
         // --- Log::noteReserved: a line that outlives the cap, from a reserve of 1 MiB (2026-10-22, the memory watch's mem: lines) ----------
