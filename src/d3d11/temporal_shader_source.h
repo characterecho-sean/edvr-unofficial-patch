@@ -1025,10 +1025,16 @@ R"HLSL(
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
         float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
+        // F108: an in-world screen's coverage carries bit 2 on the first frame
+        // of an interface edit (world_screen_coverage.h): the history there is
+        // the old content, so it is invalidated like a hidden background and
+        // NVIDIA accumulates the new content afresh while the UI resolve
+        // rebuilds it. A screen at rest (2) keeps its history.
+        bool freshEdit = kind == 2u && (mark & 4u) != 0u;
         // A masked engine pixel invalidates NVIDIA's history lookup the way a
         // hidden background does (modern presets honour only this), and sets
         // the reactive mask for the presets and FSR that read it.
-        bool hidden = engineMasked || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
+        bool hidden = engineMasked || freshEdit || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
@@ -1052,7 +1058,7 @@ R"HLSL(
 #endif
 )HLSL"
 R"HLSL(
-        MK[id.xy] = engineMasked ? 1.0 : max(adaptive, ui);
+        MK[id.xy] = (engineMasked || freshEdit) ? 1.0 : max(adaptive, ui);
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place

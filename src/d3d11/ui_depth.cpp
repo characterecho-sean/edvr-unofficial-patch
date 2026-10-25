@@ -192,6 +192,24 @@ WorldScreenCoverage g_worldScreenCoverage;
 Microsoft::WRL::ComPtr<ID3D11PixelShader> g_worldScreenPs;
 bool g_worldScreenPsTried = false, g_worldScreenNoted = false;
 WorldScreenWindow g_worldScreenWindow;
+// F108: the tracked stand-in, the census and its window, the first note per held reason, and the once-per-surface lines (each
+// with an occlusion query over its first pass, so the line carries the screen's footprint).
+Microsoft::WRL::ComPtr<ID3D11PixelShader> g_worldScreenTrackedPs;
+bool g_worldScreenTrackedTried = false, g_worldScreenTrackedNoted = false;
+WorldScreenCensusPass g_worldScreenCensusPass;
+WorldScreenCensus g_worldScreenCensus;
+uint32_t g_worldScreenHeldNoted = 0;        // bits: UiContent decisions already named once as a held reason
+uint32_t g_worldScreenClassNoted = 0;       // bits: classification refusals already named once
+struct WorldScreenSurfaceNote {
+    const void* res = nullptr;              // the interface texture (identity only)
+    Microsoft::WRL::ComPtr<ID3D11Query> query;
+    bool pending = false;
+    char text[480] = {};
+};
+constexpr uint32_t kWorldScreenSurfaceNotes = 8;
+WorldScreenSurfaceNote g_worldScreenSurfaces[kWorldScreenSurfaceNotes];
+uint32_t g_worldScreenSurfaceCount = 0;
+ID3D11Query* g_worldScreenQueryOpen = nullptr;   // the query between this pass's begin and end, if any
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
 bool g_coronaPending=false, g_coronaMotion=false, g_coronaNoted=false;
@@ -509,6 +527,7 @@ struct Mask {
 };
 Mask     g_mask[2];
 Mask     g_edits[2];
+Mask     g_screenState[2];   // F108: the in-world screens' census state (world_screen_coverage.h), cleared with the masks
 UiContent g_uiContent;
 bool g_contentNoted=false;
 // UI CONTENT CENSUS: one log line per surfaceComposite draw that calls
@@ -2639,11 +2658,26 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // composite this file has a depth stand-in for and not one the layer can take: marked into the eye's coverage and edit
     // masks after the game's draw (uiDepthWorldScreenBegin), and nothing else. Learned like the planets: its colour target
     // is the G-buffer's, which must not join the eye-target table, so Begin finds the eye from the scene depth.
-    if (composite && h == kWorldScreenVs &&
-        worldScreenDraw(h, boundPsHash(ctx), composite, dsvIsSceneDepth(dsv), g_trained)) {
-        ++g_worldScreenWindow.seen;
-        detail::g_uiDepthWorldScreenPending = true;
-        return false;
+    // F108: a draw of the pair that fails F105's test is counted by the first test it failed (and named once), then left
+    // to the paths below as before.
+    if (h == kWorldScreenVs && boundPsHash(ctx) == kWorldScreenPs) {
+        const WorldScreenClassRefusal why = worldScreenClassRefusal(composite, dsvIsSceneDepth(dsv), g_trained);
+        if (why == WorldScreenClassRefusal::kNone) {
+            ++g_worldScreenWindow.seen;
+            detail::g_uiDepthWorldScreenPending = true;
+            return false;
+        }
+        ++g_worldScreenWindow.classRefused[static_cast<size_t>(why)];
+        const uint32_t bit = 1u << static_cast<uint32_t>(why);
+        if (!(g_worldScreenClassNoted & bit)) {
+            g_worldScreenClassNoted |= bit;
+            ResourceInfo rt;
+            const bool haveRt = bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D;
+            Log::get().note("ui depth world screens (F108): a draw of the pair (vs %016llX ps %016llX) into %ux%u DXGI format %u "
+                            "was not taken: %s; it is left to DLSS alone. Said once for this reason; the 20 s line counts them.",
+                            static_cast<unsigned long long>(kWorldScreenVs), static_cast<unsigned long long>(kWorldScreenPs),
+                            haveRt ? rt.a : 0u, haveRt ? rt.b : 0u, haveRt ? rt.fmt : 0u, worldScreenClassRefusalName(why));
+        }
     }
     const bool stellar=h==kRingVs || h==kOrbitalVs;
     if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
@@ -2878,6 +2912,90 @@ bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
 }
 void uiDepthPlanetEnd(ID3D11DeviceContext* ctx) { g_planetCoverage.end(ctx); }
 
+// F108: the interface texture of an in-world screen (the game's t2), described once a texture: its size, slices, mips, format
+// and binding, the view's mips and slices, and UiContent's decision; an occlusion query over the pass that described it gives
+// the screen's footprint, logged when it is ready (worldScreenPollNotes). Up to kWorldScreenSurfaceNotes textures.
+void worldScreenDescribe(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* gui, UiContent::Decision decision, int eye) {
+    Microsoft::WRL::ComPtr<ID3D11Resource> res;
+    gui->GetResource(&res);
+    if (!res) return;
+    for (uint32_t i = 0; i < g_worldScreenSurfaceCount; ++i)
+        if (g_worldScreenSurfaces[i].res == res.Get()) return;
+    if (g_worldScreenSurfaceCount >= kWorldScreenSurfaceNotes) return;
+    WorldScreenSurfaceNote& n = g_worldScreenSurfaces[g_worldScreenSurfaceCount++];
+    n.res = res.Get();
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    gui->GetDesc(&sd);
+    D3D11_TEXTURE2D_DESC td{};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+    if (SUCCEEDED(res.As(&tex))) tex->GetDesc(&td);
+    uint32_t mip0 = 0, mips = 0, first = 0, slices = 1;
+    const char* dim = "other";
+    if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+        dim = "Texture2DArray";
+        mip0 = sd.Texture2DArray.MostDetailedMip; mips = sd.Texture2DArray.MipLevels;
+        first = sd.Texture2DArray.FirstArraySlice; slices = sd.Texture2DArray.ArraySize;
+    } else if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D) {
+        dim = "Texture2D";
+        mip0 = sd.Texture2D.MostDetailedMip; mips = sd.Texture2D.MipLevels;
+    }
+    const uint32_t viewMips = mips == 0xFFFFFFFFu ? (td.MipLevels > mip0 ? td.MipLevels - mip0 : 0u) : mips;
+    const uint32_t viewSlices = slices == 0xFFFFFFFFu ? (td.ArraySize > first ? td.ArraySize - first : 0u) : slices;
+    std::snprintf(n.text, sizeof(n.text),
+                  "ui depth world screens (F108): interface texture %u: %ux%u, %u slice(s), %u mip(s), DXGI format %u, bind 0x%X; "
+                  "the view (%s, format %u) mips %u..%u, slices %u..%u; UiContent: %s (%s)",
+                  g_worldScreenSurfaceCount, td.Width, td.Height, td.ArraySize, td.MipLevels, static_cast<unsigned>(td.Format),
+                  td.BindFlags, dim, static_cast<unsigned>(sd.Format), mip0, mip0 + (viewMips ? viewMips - 1 : 0), first,
+                  first + (viewSlices ? viewSlices - 1 : 0), uiContentDecisionWord(decision), uiContentReason(decision, 0));
+    Microsoft::WRL::ComPtr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    D3D11_QUERY_DESC qd{};
+    qd.Query = D3D11_QUERY_OCCLUSION;
+    if (dev && !g_worldScreenQueryOpen && SUCCEEDED(dev->CreateQuery(&qd, &n.query))) {
+        ctx->Begin(n.query.Get());
+        g_worldScreenQueryOpen = n.query.Get();
+        n.pending = true;
+        std::snprintf(n.text + std::strlen(n.text), sizeof(n.text) - std::strlen(n.text), "; the screen's first pass in eye %d", eye);
+    } else {
+        Log::get().note("%s; the screen's footprint not measured (no occlusion query).", n.text);
+    }
+}
+
+// F108: the described textures' footprints, read without a flush and logged once each (called at the frame boundary).
+void worldScreenPollNotes(ID3D11DeviceContext* ctx) {
+    for (uint32_t i = 0; i < g_worldScreenSurfaceCount; ++i) {
+        WorldScreenSurfaceNote& n = g_worldScreenSurfaces[i];
+        if (!n.pending || !n.query || n.query.Get() == g_worldScreenQueryOpen) continue;
+        UINT64 samples = 0;
+        if (ctx->GetData(n.query.Get(), &samples, sizeof(samples), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        n.pending = false;
+        float ux = 0.0f, uy = 0.0f;
+        const bool scaled = temporalPassUpscale(&ux, &uy);
+        const double out = scaled ? static_cast<double>(samples) * ux * uy : 0.0;
+        if (scaled)
+            Log::get().note("%s covered %llu render px (%.0f output px at x%.2f by x%.2f).", n.text,
+                            static_cast<unsigned long long>(samples), out, static_cast<double>(ux), static_cast<double>(uy));
+        else
+            Log::get().note("%s covered %llu render px (output size unknown: no trained treat yet).", n.text,
+                            static_cast<unsigned long long>(samples));
+        n.query.Reset();
+    }
+}
+
+// F108: the held draws' UiContent decisions as the 20 s line names them ("none" when every marked draw was tracked).
+void worldScreenHeldText(char* out, size_t size) {
+    out[0] = 0;
+    size_t used = 0;
+    for (uint32_t i = 0; i < 16; ++i) {
+        if (!g_worldScreenWindow.heldWhy[i]) continue;
+        const int n = std::snprintf(out + used, size - used, "%s%s %u", used ? ", " : "",
+                                    uiContentReason(static_cast<UiContent::Decision>(i), 0), g_worldScreenWindow.heldWhy[i]);
+        if (n < 0 || static_cast<size_t>(n) >= size - used) break;
+        used += static_cast<size_t>(n);
+    }
+    if (!used) std::snprintf(out, size, "none");
+}
+
 // F105 (world_screen_coverage.h): the draw uiDepthOnEyeDraw classified as an in-world screen, issued once more into the
 // eye's coverage and edit masks over the game's own depth. Every decline is counted by its reason on the 20 s line.
 bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
@@ -2915,7 +3033,8 @@ bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
     }
     Mask* mask = maskFor(ctx, eye, td.Width, td.Height);
     Mask* edits = maskFor(ctx, eye, td.Width, td.Height, g_edits);
-    if (!mask || !mask->rtv || !edits || !edits->rtv) {
+    Mask* state = maskFor(ctx, eye, td.Width, td.Height, g_screenState);
+    if (!mask || !mask->rtv || !edits || !edits->rtv || !state || !state->rtv) {
         g_worldScreenWindow.refuse(WorldScreenRefusal::kNoMask);
         return false;
     }
@@ -2924,20 +3043,66 @@ bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
         g_worldScreenPs.Attach(shaderSwapCreatePs(ctx, kWorldScreenCoverageBytecode, sizeof(kWorldScreenCoverageBytecode),
                                                   "world_screen_coverage_ps", "ui depth world screens (F105)"));
     }
-    if (!g_worldScreenPs) {
+    if (!g_worldScreenTrackedPs && !g_worldScreenTrackedTried) {
+        g_worldScreenTrackedTried = true;
+        g_worldScreenTrackedPs.Attach(shaderSwapCreatePs(ctx, kWorldScreenTrackedBytecode, sizeof(kWorldScreenTrackedBytecode),
+                                                         "world_screen_tracked_ps", "ui depth world screens (F108)"));
+    }
+    // F108: the interface texture (the game's t2) and UiContent's edit ages for it. With them the screen is held only where its
+    // interface changed; without (a texture UiContent declines, or the tracked stand-in missing) F105's rule holds it everywhere.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gui;
+    ctx->PSGetShaderResources(2, 1, &gui);
+    ID3D11ShaderResourceView* ages = nullptr;
+    UiContent::Decision decision = UiContent::Decision::kDeclinedNoSurface;
+    if (gui && g_worldScreenTrackedPs) {
+        ages = g_uiContent.prepare(ctx, gui.Get(), g_frame, (g_frame & 15u) == 0u);
+        decision = g_uiContent.lastDecision;
+        // F108b: the stand-in reads the ages as a Texture2DArray, as the game's shader reads the interface; a 2D interface's
+        // 2D ages are given as a one-slice array view, not bound to the array register as they are.
+        if (ages) {
+            ages = g_uiContent.arrayView(ctx, ages);
+            if (!ages) decision = UiContent::Decision::kDeclinedCreateFailed;
+        }
+    } else if (gui) {
+        decision = UiContent::Decision::kDeclinedShaderFailed;
+    }
+    ID3D11PixelShader* standIn = ages ? g_worldScreenTrackedPs.Get() : g_worldScreenPs.Get();
+    if (!standIn) {
         g_worldScreenWindow.refuse(WorldScreenRefusal::kShader);
         return false;
     }
     ID3D11DepthStencilState* test = maskDepthState(ctx);
     ID3D11BlendState* blend = maskBlend(ctx);
-    if (!test || !blend || !g_worldScreenCoverage.begin(ctx, g_worldScreenPs.Get(), mask->rtv, edits->rtv, test, blend)) {
+    if (!test || !blend || !g_worldScreenCoverage.begin(ctx, standIn, mask->rtv, state->rtv, edits->rtv, ages, test, blend)) {
         g_worldScreenWindow.refuse(WorldScreenRefusal::kState);
         return false;
     }
     mask->marked = true;
     edits->marked = true;
+    state->marked = true;
     ++g_worldScreenWindow.marked;
     ++g_worldScreenWindow.eye[eye];
+    if (ages) {
+        ++g_worldScreenWindow.tracked;
+        if (!g_worldScreenTrackedNoted) {
+            g_worldScreenTrackedNoted = true;
+            Log::get().note("ui depth world screens (F108): an in-world screen's interface is tracked by UiContent from this draw on: "
+                            "it is held only where its texels changed in the last 32 frames, and NVIDIA's history is restarted "
+                            "where a change begins; at rest the screen is DLSS's. Said once.");
+        }
+    } else {
+        ++g_worldScreenWindow.held;
+        const uint32_t why = static_cast<uint32_t>(decision);
+        ++g_worldScreenWindow.heldWhy[why & 15u];
+        if (!(g_worldScreenHeldNoted & (1u << (why & 15u)))) {
+            g_worldScreenHeldNoted |= 1u << (why & 15u);
+            Log::get().note("ui depth world screens (F108): an in-world screen is held everywhere (F105's rule) because its interface "
+                            "texture is not tracked: %s (%s). Said once for this reason; the 20 s line counts these draws.",
+                            uiContentDecisionWord(decision), uiContentReason(decision, 0));
+        }
+    }
+    // F108: the interface texture described once, with an occlusion query over this pass for the screen's footprint.
+    if (gui) worldScreenDescribe(ctx, gui.Get(), decision, eye);
     if (!g_worldScreenNoted) {
         g_worldScreenNoted = true;
         Log::get().note("ui depth world screens (F105): an in-world screen (vs %016llX ps %016llX, the interface drawn as a lit "
@@ -2948,7 +3113,13 @@ bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
     }
     return true;
 }
-void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx) { g_worldScreenCoverage.end(ctx); }
+void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx) {
+    if (g_worldScreenQueryOpen && ctx) {
+        ctx->End(g_worldScreenQueryOpen);
+        g_worldScreenQueryOpen = nullptr;
+    }
+    g_worldScreenCoverage.end(ctx);
+}
 
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_stellarCpuActive=-1;
@@ -4112,10 +4283,23 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     detail::g_holoGeometryTracked.store(g_holoMotion[0].tracksGeometry() || g_holoMotion[1].tracksGeometry(),
                                         std::memory_order_relaxed);
     g_frameTargetCount = 0;
+    // F108: the in-world screens' census, before the clear below: the frame's state targets counted (both eyes one row), the
+    // rows that are ready read back in frame order, and the described textures' footprints.
+    if (ctx) {
+        if (g_screenState[0].marked || g_screenState[1].marked) {
+            ID3D11ShaderResourceView* states[2] = {g_screenState[0].marked ? g_screenState[0].srv : nullptr,
+                                                   g_screenState[1].marked ? g_screenState[1].srv : nullptr};
+            if (!g_worldScreenCensusPass.count(ctx, states, 2, g_frame)) ++g_worldScreenCensus.skipped;
+        }
+        g_worldScreenCensusPass.drain(ctx, [](uint64_t frame, uint32_t screen, uint32_t edited, uint32_t fresh) {
+            g_worldScreenCensus.add(frame, screen, edited, fresh);
+        });
+        worldScreenPollNotes(ctx);
+    }
     // The masks are marked during the frame and read at its submits, so
     // the clear belongs here, after both.
     if (ctx) {
-        for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+        for(auto* masks:{g_mask,g_edits,g_screenState}) for(unsigned eye=0;eye<2;++eye) {
             Mask& m=masks[eye];
             if (!m.rtv || !m.marked) continue;
             const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -4164,8 +4348,15 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
             char line[600];
             worldScreenFormatWindow(line, sizeof(line), g_worldScreenWindow);
             Log::get().note("%s", line);
+            // F108: the hold's own line, beside F105's (world_screen_coverage.h worldScreenFormatF108).
+            char held[200];
+            worldScreenHeldText(held, sizeof(held));
+            char f108[900];
+            worldScreenFormatF108(f108, sizeof(f108), g_worldScreenWindow, g_worldScreenCensus, held);
+            Log::get().note("%s", f108);
         }
         g_worldScreenWindow.reset();
+        g_worldScreenCensus.resetWindow();
         const auto& edits=g_uiContent.totals;
         if(g_trained) Log::get().note("UI content totals: compared=%u reused=%u declined=%u reset=%u evicted=%u history=%.2f MiB (session totals; zero comparisons means inactive).",
             edits.updates,edits.hits,edits.declined,edits.resets,edits.evicted,double(g_uiContent.allocated)/(1024*1024));
@@ -4248,7 +4439,7 @@ void uiDepthShutdown() {
     releaseSavedOm();
     for (UiDepthLayer& layer : g_uiDepth) layer.release();
     releaseStates();
-    for(auto* masks:{g_mask,g_edits}) for(unsigned eye=0;eye<2;++eye) {
+    for(auto* masks:{g_mask,g_edits,g_screenState}) for(unsigned eye=0;eye<2;++eye) {
         Mask& m=masks[eye];
         if (m.rtv) m.rtv->Release();
         if (m.srv) m.srv->Release();
@@ -4292,6 +4483,14 @@ void uiDepthShutdown() {
     detail::g_uiDepthWorldScreenPending = false;
     g_worldScreenPs.Reset();
     g_worldScreenPsTried = g_worldScreenNoted = false;
+    g_worldScreenTrackedPs.Reset();
+    g_worldScreenTrackedTried = g_worldScreenTrackedNoted = false;
+    g_worldScreenCensusPass.reset();
+    g_worldScreenCensus = WorldScreenCensus{};
+    g_worldScreenHeldNoted = g_worldScreenClassNoted = 0;
+    for (auto& n : g_worldScreenSurfaces) n = WorldScreenSurfaceNote{};
+    g_worldScreenSurfaceCount = 0;
+    g_worldScreenQueryOpen = nullptr;
     g_worldScreenWindow.reset();
 }
 

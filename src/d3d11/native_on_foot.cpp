@@ -47,6 +47,7 @@
 #include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
+#include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
 #include "shader_swap.h"   // F85c: shaderSwapCreateCs
@@ -170,12 +171,12 @@ struct F95Hud {
     uint32_t frames = 0, notStill = 0;
 };
 F95Hud g_f95Hud;
-// F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_right_cm / _up_cm / _forward_cm and _body (follow | stay).
-// F90: the built-in values are the pilot's from the F89 flight (forward 9.0, up 7.5, right 0.0 cm, follow).
-std::atomic<float> g_f88RightCm{static_cast<float>(nofoot::f88::kRightDefaultCm)}, g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)},
-    g_f88ForwardCm{static_cast<float>(nofoot::f88::kForwardDefaultCm)};
+// F88 (TEMPORARY, live): the weapon eye offset in the character's axes, fix.native_on_foot_weapon_eye_forward_cm and _body (follow | stay). F98c retired its up and F112 its
+// right: the runtime reads neither, and the right of the eye offset is always 0.
+// F112: the built-in forward is the pilot's flown value, 10.0 cm, with follow.
+std::atomic<float> g_f88UpCm{static_cast<float>(nofoot::f88::kUpDefaultCm)}, g_f88ForwardCm{static_cast<float>(nofoot::f88::kForwardDefaultCm)};
 std::atomic<int> g_f88Body{nofoot::f88::kFollow};
-double g_f88RightLast = 0.0, g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
+double g_f88UpLast = 0.0, g_f88ForwardLast = 0.0;   // the values last logged (frame thread)
 int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 // F97a: F88's weight, published each align tick for the Animate post-hook (the armed body's blend)
@@ -690,6 +691,11 @@ void retiredKeysNote(const Config& cfg, bool first) {
         Log::get().note("native on foot: fix.native_on_foot_look_to_aim_comp_delay is retired (F109): ignored (the cancel is published with the ask, F92b)");
     if (cfg.getInt("fix.native_on_foot_look_to_aim_comp_sign", 1) != 1)
         Log::get().note("native on foot: fix.native_on_foot_look_to_aim_comp_sign is retired (F109): ignored (the cancel's sign is the ADS head aim's, measured)");
+    // F112: the weapon eye offset's right; the eye offset is forward alone now. The shipping file carries the key at its last value (2). The sideways setting that stays is
+    // fix.native_on_foot_weapon_view_offset_cm.
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", static_cast<float>(nofoot::f88::kRightDefaultCm)) - static_cast<float>(nofoot::f88::kRightDefaultCm)) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_weapon_eye_right_cm is retired (F112): ignored (the eye offset has no sideways part; "
+                        "fix.native_on_foot_weapon_view_offset_cm is the sideways setting)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -856,7 +862,7 @@ void readKey() {
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
     }
-    // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default shifts view/body 2.0 cm right (F90; 2.5 before).
+    // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default is 0: no shift (F112; F90 had 2.0 cm right, 2.5 before).
     {
         const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm));
         const float cm = std::isfinite(rawCm) ? std::clamp(rawCm, -10.0f, 10.0f) : 0.0f;
@@ -889,25 +895,21 @@ void readKey() {
         g_f94EyeHeightLast = cm;
         g_f94EyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
-    // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward / up / right" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
-    // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn (F89: in ADS too), 0 unarmed, ramped over 0.25 s. 0, 0, 0 and follow leave the view as F87's.
-    // F90: the built-in values are the pilot's from the F89 flight: forward 9.0, up 7.5, right 0.0 cm, follow.
+    // F88 (TEMPORARY, live, the Native on foot page's "Weapon eye forward" and "Body follows weapon eye offset"): where the eye sits relative to a weapon or tool
+    // drawn at the hip, in the character's axes. Weight 1 with a weapon or tool drawn (F89: in ADS too), 0 unarmed, ramped over 0.25 s. 0 and follow leave the view as F87's.
+    // F112: the built-in forward is the pilot's flown value, 10.0 cm, with follow.
     {
         namespace f88 = nofoot::f88;
         const double fwd = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_forward_cm", static_cast<float>(f88::kForwardDefaultCm))), f88::kForwardMinCm,
                                         f88::kForwardMaxCm);
         const double up = 0.0;   // F98c: the weapon eye's up key is retired (the eye height places the eye with and without an item; retiredKeysNote)
-        const double right = f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", static_cast<float>(f88::kRightDefaultCm))), f88::kRightMinCm,
-                                          f88::kRightMaxCm);
+        // F112: the weapon eye's right key is retired too (retiredKeysNote); the sideways setting that stays is fix.native_on_foot_weapon_view_offset_cm. f88Tick feeds Keys::rightCm 0.
         bool bodyKnown = true;
         const std::string bodyText = cfg.getString("fix.native_on_foot_weapon_eye_body", "follow");
         const int body = f88::bodyFromText(bodyText.c_str(), &bodyKnown);
         if (first || fwd != g_f88ForwardLast)
             Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_forward_cm = %+.1f cm -- positive moves your eye toward the weapon "
                             "or tool drawn at the hip, along the character's forward (range %.0f..%.0f)", fwd, f88::kForwardMinCm, f88::kForwardMaxCm);
-        if (first || right != g_f88RightLast)
-            Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_right_cm = %+.1f cm -- positive moves your eye right of the weapon "
-                            "or tool drawn at the hip, along the character's right (range %.0f..%.0f)", right, f88::kRightMinCm, f88::kRightMaxCm);
         if (first || body != g_f88BodyLast)
             Log::get().note("native on foot weapon eye offset (F88, TEMPORARY): fix.native_on_foot_weapon_eye_body = %s%s -- %s", f88::bodyName(body),
                             bodyKnown ? "" : " (the value is not follow or stay; follow is used)",
@@ -915,11 +917,9 @@ void readKey() {
                                                : "follow: the body moves with the eye forward, back and sideways, as when you lean; it never stands taller for the up offset");
         g_f88ForwardLast = fwd;
         g_f88UpLast = up;
-        g_f88RightLast = right;
         g_f88BodyLast = body;
         g_f88ForwardCm.store(static_cast<float>(fwd), std::memory_order_relaxed);
         g_f88UpCm.store(static_cast<float>(up), std::memory_order_relaxed);
-        g_f88RightCm.store(static_cast<float>(right), std::memory_order_relaxed);
         g_f88Body.store(body, std::memory_order_relaxed);
     }
     // F106 (live, the Native on foot page's "ADS: sight in both eyes"): while the sights are up the left eye shows the right eye's image, the eye the sight lock lines
@@ -1208,7 +1208,7 @@ void readKey() {
     }
     // F18: the HUD room (a user setting, live): 1.00..2.50. Elements keep their angular size; the element scale is divided by the room and the
     // mesh is multiplied by it (the room is applied only when the game's scale is known; see hudRoomTick).
-    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.25f);
+    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.0f);   // F112: the pilot's flown value is 1.00, the game's own room (1.25 before)
     if (room < 1.0f) room = 1.0f;
     if (room > 2.5f) room = 2.5f;
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
@@ -4697,6 +4697,373 @@ void installF9ProbesOnce() {
                         static_cast<unsigned long long>(arSpec.rva), arWhy.c_str());
     }
 }
+
+// ---- F111: the panel pointer instrument (read only; native_on_foot_f111.h holds the pure parts and the build's addresses) ----------------------------
+// Four F9-pattern hooks: the pointer controller's update (the mouse NDC and the ray's direction), its placement on a panel (scopes the next two), the
+// panel's ray hit (t, uv, accepted) and the panel's cursor window (the 2D mode's uv). Each callback runs the original first or around it and only reads.
+// A controller's cycle opens after its update and closes when its next update starts, with the sprite as the placements left it; the frame thread prints
+// up to five move lines and one summary a second, and the verdict names the first stage that turns a move the other way.
+namespace {
+using F111Fn8 = uint64_t(__fastcall*)(void*, void*, void*, void*, void*, void*, void*, void*);
+constexpr size_t kF111Hooks = 4, kF111Slots = 4, kF111MoveLines = 5;
+F9Probe g_f111Probe[kF111Hooks];
+bool g_f111Tried = false;                 // frame thread only
+bool g_f111Armed[kF111Hooks] = {};        // frame thread only
+bool g_f111GateLast = false;              // frame thread only
+uint64_t g_f111LastMs = 0;                // frame thread only
+uint64_t g_f111SecondsWith = 0;           // frame thread only: seconds with a cycle
+thread_local uintptr_t t_f111InPlace = 0; // the controller whose placement is running on this thread
+struct F111Slot {
+    uintptr_t ctl = 0;
+    nofoot::f111::Cycle cyc, prev;
+    bool havePrev = false;
+    uint32_t movieBase = 0;
+};
+struct F111Move {
+    nofoot::f111::Cycle c;
+    int32_t osDelta[2] = {};
+};
+std::mutex g_f111Mu;
+F111Slot g_f111Slots[kF111Slots];
+nofoot::f111::Sec g_f111Sec, g_f111Total;
+F111Move g_f111Moves[kF111MoveLines];
+uint32_t g_f111MoveCount = 0, g_f111MoveDropped = 0, g_f111SlotsFull = 0, g_f111Ctls = 0;
+float g_f111Cam[16] = {};
+bool g_f111CamOk = false;
+char g_f111CamWhy[160] = "no update seen";
+
+// The slot of a controller (a new one takes a free slot); null when all four hold other controllers. Under g_f111Mu.
+F111Slot* f111SlotOf(uintptr_t ctl) {
+    for (auto& s : g_f111Slots)
+        if (s.ctl == ctl) return &s;
+    for (auto& s : g_f111Slots) {
+        if (!s.ctl) {
+            s = F111Slot{};
+            s.ctl = ctl;
+            ++g_f111Ctls;
+            return &s;
+        }
+    }
+    ++g_f111SlotsFull;
+    return nullptr;
+}
+
+// One getter followed without calling it: its code must be a plain accessor (nofoot::f111::decodeAccessor).
+bool f111Follow(uintptr_t self, uint32_t slotOff, uintptr_t* out, char* why, size_t whyCap) {
+    uintptr_t vt = 0, fn = 0;
+    if (!self || !guardedRead(self, &vt, 8) || !vt || !guardedRead(vt + slotOff, &fn, 8) || !fn) {
+        std::snprintf(why, whyCap, "the object or its vtable +0x%X could not be read", slotOff);
+        return false;
+    }
+    uint8_t code[8] = {};
+    if (!guardedRead(fn, code, sizeof(code))) {
+        std::snprintf(why, whyCap, "the getter at vtable +0x%X could not be read", slotOff);
+        return false;
+    }
+    int32_t disp = 0;
+    bool deref = false;
+    if (!nofoot::f111::decodeAccessor(code, sizeof(code), &disp, &deref)) {
+        std::snprintf(why, whyCap, "the getter at vtable +0x%X (exe+0x%llX) is not a plain accessor: %02X %02X %02X %02X %02X %02X %02X %02X", slotOff,
+                      static_cast<unsigned long long>(fn - g_base), code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
+        return false;
+    }
+    const uintptr_t at = self + static_cast<intptr_t>(disp);
+    if (!deref) {
+        *out = at;
+        return true;
+    }
+    uintptr_t v = 0;
+    if (!guardedRead(at, &v, 8) || !v) {
+        std::snprintf(why, whyCap, "the getter at vtable +0x%X returned a field that could not be read", slotOff);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+// The pick's camera: (*[ctl+0xA0])->vtable+0x58() -> vtable+0x30(); its rows and position (16 floats). Under g_f111Mu (writes the shared copy).
+void f111ReadCamera(uintptr_t ctl) {
+    uintptr_t obj = 0, mid = 0, cam = 0;
+    char why[160] = {};
+    if (!guardedRead(ctl + nofoot::f111::kOffCamObj, &obj, 8) || !obj) {
+        std::snprintf(g_f111CamWhy, sizeof(g_f111CamWhy), "the controller's +0xA0 object could not be read");
+        g_f111CamOk = false;
+        return;
+    }
+    if (!f111Follow(obj, nofoot::f111::kCamGetter1, &mid, why, sizeof(why)) || !f111Follow(mid, nofoot::f111::kCamGetter2, &cam, why, sizeof(why))) {
+        std::snprintf(g_f111CamWhy, sizeof(g_f111CamWhy), "%s", why);
+        g_f111CamOk = false;
+        return;
+    }
+    float m[16] = {};
+    if (!guardedRead(cam, m, sizeof(m))) {
+        std::snprintf(g_f111CamWhy, sizeof(g_f111CamWhy), "the camera state could not be read");
+        g_f111CamOk = false;
+        return;
+    }
+    std::memcpy(g_f111Cam, m, sizeof(m));
+    g_f111CamOk = true;
+}
+
+// The controller's update: the cycle before it closes (the sprite as the placements left it), then the game's update runs, then the new cycle opens.
+uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[0].original);
+    if (!original) return 0;
+    const uintptr_t ctl = reinterpret_cast<uintptr_t>(a);
+    uint8_t hit = 0;
+    float pos[3] = {};
+    uint32_t movie = 0;
+    const bool endOk = ctl && guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) && guardedRead(ctl + nofoot::f111::kOffPos, pos, sizeof(pos)) &&
+                       guardedRead(ctl + nofoot::f111::kOffMovie, &movie, 4);
+    if (ctl) {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        F111Slot* s = f111SlotOf(ctl);
+        if (s && s->cyc.open && endOk) {
+            s->cyc.hit = hit != 0;
+            std::memcpy(s->cyc.pos, pos, sizeof(pos));
+            s->cyc.movie = movie - s->movieBase;
+            s->cyc.open = false;
+            nofoot::f111::addCycle(g_f111Sec, s->cyc);
+            if (s->havePrev) {
+                const uint32_t before = g_f111Sec.moves;
+                nofoot::f111::addStep(g_f111Sec, s->prev, s->cyc);
+                if (g_f111Sec.moves != before) {
+                    if (g_f111MoveCount < kF111MoveLines) {
+                        F111Move& m = g_f111Moves[g_f111MoveCount++];
+                        m.c = s->cyc;
+                        m.osDelta[0] = s->cyc.os[0] - s->prev.os[0];
+                        m.osDelta[1] = s->cyc.os[1] - s->prev.os[1];
+                    } else {
+                        ++g_f111MoveDropped;
+                    }
+                }
+            }
+            s->prev = s->cyc;
+            s->havePrev = true;
+        }
+    }
+    const uint64_t result = original(a, b, c, d);
+    if (!ctl) return result;
+    uint8_t source = 0;
+    float mouse[2] = {}, other[2] = {}, dir[3] = {};
+    uint32_t movieNow = 0;
+    if (!guardedRead(ctl + nofoot::f111::kOffSource, &source, 1) || !guardedRead(ctl + nofoot::f111::kOffMouse, mouse, sizeof(mouse)) ||
+        !guardedRead(ctl + nofoot::f111::kOffOther, other, sizeof(other)) || !guardedRead(ctl + nofoot::f111::kOffDir, dir, sizeof(dir)) ||
+        !guardedRead(ctl + nofoot::f111::kOffMovie, &movieNow, 4))
+        return result;
+    POINT os{};
+    const bool osOk = GetCursorPos(&os) != 0;
+    std::lock_guard<std::mutex> lock(g_f111Mu);
+    F111Slot* s = f111SlotOf(ctl);
+    if (!s) return result;
+    s->cyc = nofoot::f111::Cycle{};
+    s->cyc.open = true;
+    s->cyc.source = source ? 1 : 0;
+    std::memcpy(s->cyc.ndc, source ? mouse : other, sizeof(mouse));
+    std::memcpy(s->cyc.dir, dir, sizeof(dir));
+    s->cyc.os[0] = os.x;
+    s->cyc.os[1] = os.y;
+    s->cyc.osOk = osOk;
+    s->movieBase = movieNow;
+    f111ReadCamera(ctl);
+    return result;
+}
+
+// The placement on one panel: scopes the panel's ray hit and cursor window to this controller.
+uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[1].original);
+    if (!original) return 0;
+    const uintptr_t outer = t_f111InPlace;
+    t_f111InPlace = reinterpret_cast<uintptr_t>(a);
+    const uint64_t result = original(a, b, c, d);
+    t_f111InPlace = outer;
+    if (a) {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        F111Slot* s = f111SlotOf(reinterpret_cast<uintptr_t>(a));
+        if (s && s->cyc.open) ++s->cyc.placements;
+    }
+    return result;
+}
+
+// The panel's ray against its triangles (rcx panel, rdx origin, r8 direction, r9 &u, then &v, &t and the two axes): accepted or not, and the nearest hit.
+uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void* u, void* v, void* t, void* axA, void* axB) {
+    const F111Fn8 original = reinterpret_cast<F111Fn8>(g_f111Probe[2].original);
+    if (!original) return 0;
+    const uint64_t result = original(panel, origin, dir, u, v, t, axA, axB);
+    const uintptr_t ctl = t_f111InPlace;
+    if (!ctl) return result;
+    float fu = 0.0f, fv = 0.0f, ft = 0.0f;
+    const bool accepted = (result & 0xFF) != 0;
+    const bool read = accepted && guardedRead(reinterpret_cast<uintptr_t>(u), &fu, 4) && guardedRead(reinterpret_cast<uintptr_t>(v), &fv, 4) &&
+                      guardedRead(reinterpret_cast<uintptr_t>(t), &ft, 4);
+    std::lock_guard<std::mutex> lock(g_f111Mu);
+    F111Slot* s = f111SlotOf(ctl);
+    if (!s || !s->cyc.open) return result;
+    ++s->cyc.rayCalls;
+    if (accepted) ++s->cyc.rayHits;
+    if (read && (!s->cyc.hitUv || ft < s->cyc.t)) {
+        s->cyc.t = ft;
+        s->cyc.u = fu;
+        s->cyc.v = fv;
+        s->cyc.hitUv = true;
+    }
+    return result;
+}
+
+// The panel's cursor window (rcx panel, rdx &out, r8 index, r9 the point): the 2D mode's point inside the window.
+uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uint64_t point) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[3].original);
+    if (!original) return 0;
+    const uint64_t result = original(panel, out, index, point);
+    const uintptr_t ctl = t_f111InPlace;
+    if (!ctl) return result;
+    float w[2] = {};
+    const bool read = guardedRead(reinterpret_cast<uintptr_t>(out), w, sizeof(w));
+    std::lock_guard<std::mutex> lock(g_f111Mu);
+    F111Slot* s = f111SlotOf(ctl);
+    if (!s || !s->cyc.open) return result;
+    ++s->cyc.windowCalls;
+    if (read) {
+        std::memcpy(s->cyc.win, w, sizeof(w));
+        s->cyc.winUv = true;
+    }
+    return result;
+}
+
+// Frame thread, once: VR only, behind the identity check and each hook's vtable slot. One line for the four.
+void installF111Once() {
+    if (g_f111Tried) return;
+    g_f111Tried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("panel pointer (F111): hooks armed 0 of 4 -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    namespace p = nofoot::f111;
+    const F9ProbeSpec specs[kF111Hooks] = {
+        {"native-on-foot-pointer-update", p::kUpdateRva, p::kUpdatePrologue, sizeof(p::kUpdatePrologue), p::kStolen,
+         reinterpret_cast<void*>(&f111UpdateHooked), "update"},
+        {"native-on-foot-pointer-place", p::kPlaceRva, p::kPlacePrologue, sizeof(p::kPlacePrologue), p::kStolen, reinterpret_cast<void*>(&f111PlaceHooked),
+         "placement"},
+        {"native-on-foot-panel-ray-hit", p::kRayHitRva, p::kRayHitPrologue, sizeof(p::kRayHitPrologue), p::kStolen,
+         reinterpret_cast<void*>(&f111RayHitHooked), "ray hit"},
+        {"native-on-foot-panel-cursor-window", p::kWindowRva, p::kWindowPrologue, sizeof(p::kWindowPrologue), p::kStolen,
+         reinterpret_cast<void*>(&f111WindowHooked), "cursor window"},
+    };
+    const uintptr_t slots[kF111Hooks] = {p::kUpdateSlotRva, p::kPlaceSlotRva, p::kRayHitSlotRva, p::kWindowSlotRva};
+    char why[640] = {};
+    size_t at = 0;
+    size_t armed = 0;
+    for (size_t i = 0; i < kF111Hooks; ++i) {
+        uintptr_t slot = 0;
+        std::string w;
+        size_t stolen = 0;
+        if (!guardedRead(base + slots[i], &slot, 8) || slot != base + specs[i].rva) {
+            w = "its vtable slot does not hold it";
+        } else if (installF9ProbeInto(g_f111Probe[i], specs[i], base, &stolen, &w)) {
+            g_f111Probe[i].gate.store(0, std::memory_order_seq_cst);   // opened by the frame thread while native stereo is on foot
+            g_f111Armed[i] = true;
+            ++armed;
+            continue;
+        }
+        if (at < sizeof(why)) {
+            const int n = std::snprintf(why + at, sizeof(why) - at, "%s%s at EliteDangerous64.exe+0x%llX NOT armed: %s", at ? "; " : "", specs[i].label,
+                                        static_cast<unsigned long long>(specs[i].rva), w.c_str());
+            if (n > 0) at += static_cast<size_t>(n);
+        }
+    }
+    Log::get().note("panel pointer (F111): hooks armed %zu of 4 (update +0x%llX, placement +0x%llX, ray hit +0x%llX, cursor window +0x%llX, build 334925, "
+                    "prologues and vtable slots verified; read only, open while native stereo is on foot)%s%s",
+                    armed, static_cast<unsigned long long>(p::kUpdateRva), static_cast<unsigned long long>(p::kPlaceRva),
+                    static_cast<unsigned long long>(p::kRayHitRva), static_cast<unsigned long long>(p::kWindowRva), at ? ": " : "", why);
+}
+
+void f111Tick(uint64_t now) {
+    installF111Once();
+    const bool open = nativeOnFootActive();
+    if (open != g_f111GateLast) {
+        g_f111GateLast = open;
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
+        for (size_t i = 0; i < kF111Hooks; ++i)
+            if (g_f111Armed[i]) g_f111Probe[i].gate.store(open ? 1u : 0u, std::memory_order_seq_cst);
+    }
+    if (now - g_f111LastMs < 1000) return;
+    g_f111LastMs = now;
+    namespace p = nofoot::f111;
+    p::Sec sec;
+    F111Move moves[kF111MoveLines];
+    uint32_t moveCount = 0, dropped = 0, slotsFull = 0, ctls = 0;
+    float cam[16] = {};
+    bool camOk = false;
+    char camWhy[160] = {};
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        sec = g_f111Sec;
+        g_f111Sec = p::Sec{};
+        moveCount = g_f111MoveCount;
+        for (uint32_t i = 0; i < moveCount; ++i) moves[i] = g_f111Moves[i];
+        dropped = g_f111MoveDropped;
+        g_f111MoveCount = g_f111MoveDropped = 0;
+        slotsFull = g_f111SlotsFull;
+        g_f111SlotsFull = 0;
+        ctls = g_f111Ctls;
+        std::memcpy(cam, g_f111Cam, sizeof(cam));
+        camOk = g_f111CamOk;
+        std::memcpy(camWhy, g_f111CamWhy, sizeof(camWhy));
+    }
+    if (!sec.cycles) return;
+    ++g_f111SecondsWith;
+    g_f111Total.merge(sec);
+    for (uint32_t i = 0; i < moveCount; ++i) {
+        const p::Cycle& c = moves[i].c;
+        float u = 0.0f, v = 0.0f;
+        const bool uv = p::cycleUv(c, &u, &v);
+        Log::get().note("panel pointer (F111) move: ndc %+.4f %+.4f (%s), direction %+.4f %+.4f %+.4f, placements %u (ray %u, accepted %u, t %.4f; window %u), "
+                        "hit %d, sprite %+.4f %+.4f %+.4f, uv %s %.4f %.4f, movie notes %u, OS cursor %+d %+d",
+                        static_cast<double>(c.ndc[0]), static_cast<double>(c.ndc[1]), c.source ? "mouse" : "other", static_cast<double>(c.dir[0]),
+                        static_cast<double>(c.dir[1]), static_cast<double>(c.dir[2]), c.placements, c.rayCalls, c.rayHits, static_cast<double>(c.t),
+                        c.windowCalls, c.hit ? 1 : 0, static_cast<double>(c.pos[0]), static_cast<double>(c.pos[1]), static_cast<double>(c.pos[2]),
+                        uv ? (c.hitUv ? "hit" : "window") : "none", static_cast<double>(u), static_cast<double>(v), c.movie, moves[i].osDelta[0],
+                        moves[i].osDelta[1]);
+    }
+    const p::Stage st = p::verdict(sec);
+    char camText[200] = {};
+    if (camOk) {
+        std::snprintf(camText, sizeof(camText), "position %.3f %.3f %.3f, right %+.3f %+.3f %+.3f, up %+.3f %+.3f %+.3f, forward %+.3f %+.3f %+.3f",
+                      static_cast<double>(cam[12]), static_cast<double>(cam[13]), static_cast<double>(cam[14]), static_cast<double>(cam[0]),
+                      static_cast<double>(cam[1]), static_cast<double>(cam[2]), static_cast<double>(cam[4]), static_cast<double>(cam[5]),
+                      static_cast<double>(cam[6]), static_cast<double>(cam[8]), static_cast<double>(cam[9]), static_cast<double>(cam[10]));
+    } else {
+        std::snprintf(camText, sizeof(camText), "not read (%s)", camWhy);
+    }
+    Log::get().note("panel pointer (F111) 1 s: verdict: %s; cycles %u (controllers %u), moves %u (more move lines %u), placements %u: ray %u (accepted %u, "
+                    "t mean %.4f), window %u; cycles with a hit %u, direction behind the camera %u, sprite behind %u, movie notes %u; correlations "
+                    "(r): NDC to direction right %+.2f up %+.2f; direction to sprite right %+.2f up %+.2f; NDC to sprite as seen right %+.2f up %+.2f; "
+                    "NDC to uv right %+.2f down %+.2f; OS cursor to NDC right %+.2f down %+.2f (OS moves %u); unprojection slope (tan per NDC unit) "
+                    "right %+.3f up %+.3f; signs %c%c %c%c %c%c %c%c %c%c; camera %s; slots full %u",
+                    p::stageText(st), sec.cycles, ctls, sec.moves, dropped, sec.placements, sec.rayCalls, sec.rayHits,
+                    sec.tN ? sec.tSum / sec.tN : 0.0, sec.windowCalls, sec.hitCycles, sec.behind, sec.spriteBehind, sec.movie, sec.ndcDir[0].r(),
+                    sec.ndcDir[1].r(), sec.dirSprite[0].r(), sec.dirSprite[1].r(), sec.ndcSeen[0].r(), sec.ndcSeen[1].r(), sec.ndcUv[0].r(),
+                    sec.ndcUv[1].r(), sec.osNdc[0].r(), sec.osNdc[1].r(), sec.osMoves, sec.slope(0), sec.slope(1), p::signChar(sec.ndcDir[0].sign()),
+                    p::signChar(sec.ndcDir[1].sign()), p::signChar(sec.dirSprite[0].sign()), p::signChar(sec.dirSprite[1].sign()),
+                    p::signChar(sec.ndcSeen[0].sign()), p::signChar(sec.ndcSeen[1].sign()), p::signChar(sec.ndcUv[0].sign()),
+                    p::signChar(sec.ndcUv[1].sign()), p::signChar(sec.osNdc[0].sign()), p::signChar(sec.osNdc[1].sign()), camText, slotsFull);
+    // Every 10 seconds with the pointer, the flight so far in one verdict (the 1 s windows can hold too few moves each).
+    if (g_f111SecondsWith % 10 == 0) {
+        const p::Sec& t = g_f111Total;
+        Log::get().note("panel pointer (F111) so far: verdict: %s; %llu s with the pointer, cycles %u, moves %u, ray %u (accepted %u), window %u, direction "
+                        "behind the camera %u; NDC to direction right %+.2f up %+.2f, NDC to sprite as seen right %+.2f up %+.2f, NDC to uv right %+.2f down "
+                        "%+.2f, OS cursor to NDC right %+.2f down %+.2f",
+                        p::stageText(p::verdict(t)), static_cast<unsigned long long>(g_f111SecondsWith), t.cycles, t.moves, t.rayCalls, t.rayHits,
+                        t.windowCalls, t.behind, t.ndcDir[0].r(), t.ndcDir[1].r(), t.ndcSeen[0].r(), t.ndcSeen[1].r(), t.ndcUv[0].r(), t.ndcUv[1].r(),
+                        t.osNdc[0].r(), t.osNdc[1].r());
+    }
+}
+}  // namespace
 
 // ---- F22: the training load wait (read only), camera rig probes A and B (read only), and look to aim -----------------------------------
 // Every hook here follows the F9 probe pattern: the prologue bytes are verified before any write, a near relay carries the callback, and an
@@ -9263,6 +9630,9 @@ struct AdsSightWin {
     // solved right eye and the F63 model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
     // and along, metres), the IPD, and (F67b) the last NDC of the points 0.5 m and 10 m along the sight from P14w in each eye's scene rows.
     uint32_t rowsBoth = 0, rowsOne = 0, rowsNone = 0, implausible = 0, usedSolved = 0, usedModel = 0;
+    // F110: the model's source on the frames the lock used it (nofoot::AdsModelSource), and the camera's model minus the solved right eye (body axes, m)
+    uint32_t modelFrom[nofoot::kAdsModelSources] = {}, modelDiffN = 0;
+    double modelDiffSum[3] = {}, modelDiffAbsSum = 0.0, modelDiffMax = 0.0;
     double eyeRel[2][3] = {}, perpEye[2] = {}, alongEye[2] = {}, ipdSum = 0.0, perpEyeMax[2] = {};
     uint32_t eyeN[2] = {}, ipdN = 0;
     double ndcNear[2][2] = {}, ndcFar[2][2] = {};
@@ -9355,7 +9725,7 @@ bool retNdcRead(int e, uint32_t* frame, double ndc[2], double* depth) noexcept {
 AdsSightWin g_adsSightWin;
 uint64_t g_adsSightLineMs = 0;
 nofoot::AdsSightGrowth g_adsSightGrowth;
-double g_adsSightHalfIpd = nofoot::kAdsSightHalfIpdFallback;
+double g_adsSightIpd = nofoot::kAdsSightIpdFallbackM;   // F110: the job camera (the left eye) to the right eye
 bool g_adsSightIpdMeasured = false;
 std::atomic<uint64_t> g_adsOpticGood{0}, g_adsOpticNoFp{0}, g_adsOpticNoRoot{0}, g_adsOpticNoSample{0}, g_adsOpticNoEye{0}, g_adsOpticBadBasis{0};
 void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
@@ -9469,14 +9839,15 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const double pT[3] = {adsOrigin[0] + eyeCap.kM * fUnit[0], adsOrigin[1] + eyeCap.kM * fUnit[1], adsOrigin[2] + eyeCap.kM * fUnit[2]};
             double rows[9];
             for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
-            float ex = 0.0f;
-            g_adsSightIpdMeasured = temporalPassEyeOffsetX(1, &ex);
-            g_adsSightHalfIpd = nofoot::adsSightHalfIpd(g_adsSightIpdMeasured, static_cast<double>(ex));
+            float exL = 0.0f, exR = 0.0f;
+            const bool haveExL = temporalPassEyeOffsetX(0, &exL), haveExR = temporalPassEyeOffsetX(1, &exR);
+            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured);
             double rHat[3] = {};
             bool flipped = false;
             // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
             // this frame's (at most one frame behind the boundary) and it lies within 0.5 m of the job camera, the lock's E_R is that eye, else the
-            // F63 model (the job camera + half the IPD along the FP root's right). The sight line's distance from each eye is logged either way.
+            // model (F110: the job camera, the left eye, or the solved left eye, plus the IPD along the FP root's right). The sight line's distance from
+            // each eye is logged either way.
             double eyeW[2][3] = {};
             float eyeRows[2][16] = {}, eyeO[2][4] = {};
             bool eyeOk[2] = {false, false};
@@ -9570,7 +9941,24 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const bool modelOk = nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped);
             bool lockOk = false;
             bool usedSolved = false;
-            const double modelEye[3] = {cam[0] + g_adsSightHalfIpd * rHat[0], cam[1] + g_adsSightHalfIpd * rHat[1], cam[2] + g_adsSightHalfIpd * rHat[2]};
+            // F110: the model right eye (native_on_foot_core.h): the solved left eye, else the job camera (the left eye), plus the IPD along R^. Whenever the right
+            // eye is solved too, the camera's model is measured against it: the model the lock falls back to with no rows at all.
+            double modelEye[3] = {};
+            const uint8_t modelSrc = nofoot::adsModelRightEye(cam, eyeOk[0], eyeW[0], rHat, g_adsSightIpd, modelEye);
+            if (modelOk && eyeOk[1]) {
+                double camModel[3] = {};
+                nofoot::adsModelRightEye(cam, false, eyeW[0], rHat, g_adsSightIpd, camModel);
+                double dBody[3] = {}, d2 = 0.0;
+                for (size_t i = 0; i < 3; ++i) {
+                    dBody[i] = (camModel[0] - eyeW[1][0]) * rows[3 * i] + (camModel[1] - eyeW[1][1]) * rows[3 * i + 1] + (camModel[2] - eyeW[1][2]) * rows[3 * i + 2];
+                    w.modelDiffSum[i] += dBody[i];
+                    d2 += dBody[i] * dBody[i];
+                }
+                const double dn = std::sqrt(d2);
+                w.modelDiffAbsSum += dn;
+                w.modelDiffMax = std::max(w.modelDiffMax, dn);
+                ++w.modelDiffN;
+            }
             if (eyeOk[1] && nofoot::adsSightErrorEyeK(adsOrigin, eyeW[1], f, rows, eyeCap.kM, E)) {
                 lockOk = true;
                 usedSolved = true;
@@ -9581,7 +9969,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             }
             if (lockOk) {
                 if (usedSolved) ++w.usedSolved;
-                else ++w.usedModel;
+                else {
+                    ++w.usedModel;
+                    ++w.modelFrom[modelSrc < nofoot::kAdsModelSources ? modelSrc : 0];
+                }
             }
             if (lockOk) {
                 have = true;
@@ -9711,13 +10102,13 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     if (now - g_adsSightLineMs < 1000) return;
     g_adsSightLineMs = now;
     const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
-    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
+    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
                     "e perpendicular (the right eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
                     "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
                     "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
                     "flipped to the body's right %u, held off by the guard %u%s",
-                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightHalfIpd,
-                    g_adsSightIpdMeasured ? "the right eye's offset" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
+                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
+                    g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
                     100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
@@ -9783,13 +10174,21 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     {
         const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
         const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
+        // F110: which source the model took on the frames the lock used it, and the job camera's model (the left eye plus the IPD) against the solved right eye
+        // whenever both were there: about 0 cm (F63's half-IPD model read the IPD's half, 3.1 cm, short: the nose)
+        const double nd = w.modelDiffN ? static_cast<double>(w.modelDiffN) : 1.0;
         Log::get().note("native on foot ADS sight check (F66e/F79): eye rows this second: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
-                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the F63 model (camera + half IPD along the FP "
-                        "right) in %u; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f R %.1f %.1f %.1f; IPD %.2f cm (%u "
+                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
+                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved right eye (body right, up, forward, cm, "
+                        "mean) %+.1f %+.1f %+.1f, %.1f cm mean, %.1f max over %u frames; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f "
+                        "R %.1f %.1f %.1f; IPD %.2f cm (%u "
                         "frames); eye to the raw-P14 reference sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
                         "of raw-P14 sight at 0.5 m and 10 m (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; these remain raw-P14 diagnostics "
                         "when the rifle anchor is active)%s",
-                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
+                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
+                        w.modelFrom[nofoot::kAdsModelFromLeftEye], g_adsSightIpd, g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback",
+                        100.0 * w.modelDiffSum[0] / nd, 100.0 * w.modelDiffSum[1] / nd, 100.0 * w.modelDiffSum[2] / nd, 100.0 * w.modelDiffAbsSum / nd,
+                        100.0 * w.modelDiffMax, w.modelDiffN, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
                         100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
                         100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
                         100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcNear[0][0], w.ndcNear[0][1], w.ndcFar[0][0],
@@ -11423,7 +11822,7 @@ F88Tick f88Tick(uint64_t now, double dt, bool pin, bool ads) noexcept {
     namespace f88 = nofoot::f88;
     F88Tick t;
     f88::Keys k;
-    k.rightCm = static_cast<double>(g_f88RightCm.load(std::memory_order_relaxed));
+    k.rightCm = 0.0;   // F112: the weapon eye's right key is retired; the sideways eye offset is fix.native_on_foot_weapon_view_offset_cm alone
     k.upCm = static_cast<double>(g_f88UpCm.load(std::memory_order_relaxed));
     k.forwardCm = static_cast<double>(g_f88ForwardCm.load(std::memory_order_relaxed));
     k.body = g_f88Body.load(std::memory_order_relaxed);
@@ -27810,6 +28209,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         g_weaponUiPatchRestoreEvents.fetch_add(g_weaponUiPatch.restoreSerial - weaponUiRestoreSerial, std::memory_order_relaxed);
 
     f9ProbeTick(now);
+    f111Tick(now);   // F111: the panel pointer instrument (read only): its hooks once, their gate, its lines
     weaponUiTelemetryTick(now);
     f13FrameTick(now);
     // F22: the training load wait and probe A (read only, VR, once); the look's two hooks (once, when its key first reads on); the look controller;

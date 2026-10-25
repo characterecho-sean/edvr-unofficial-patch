@@ -10530,6 +10530,74 @@ def _hj_f91_fit(rows, ctx):
     return ("PARTIAL" if len(few) * 2 > len(w) or cut * 2 > len(allw) else "OK", text)
 
 
+def _hj_f110_model_eye(rows, ctx):
+    """F110: the ADS sight lock's right eye per second: solved from its rows, or the model (the job camera, the left eye, or the solved left eye, plus the IPD). The
+    share of ADS frames on the model, and the job camera's model against the solved right eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
+    model stood 3.1 cm short, at the nose). A build before F110 writes the old line: any frame on its model is PARTIAL."""
+    new, old = rows.get("sec", []), rows.get("old", [])
+    if not new and not old:
+        return None
+    if old and not new:
+        solved, model = sum(int(r["solved"]) for r in old), sum(int(r["model"]) for r in old)
+        if not solved + model:
+            return ("IDLE", "%d s, no ADS frame drove the lock" % len(old))
+        text = "%d s: the solved right eye %d frames, F63's model %d (%.0f%%)" % (len(old), solved, model, 100.0 * model / (solved + model))
+        if model:
+            return ("PARTIAL", text + "; F63's model is the job camera (the left eye) plus half the IPD: the nose (the build before F110)")
+        return ("OK", text)
+    solved, model = sum(int(r["solved"]) for r in new), sum(int(r["model"]) for r in new)
+    fromcam, fromleft = sum(int(r["fromcam"]) for r in new), sum(int(r["fromleft"]) for r in new)
+    dn = sum(int(r["dn"]) for r in new)
+    if not solved + model:
+        return ("IDLE", "%d s, no ADS frame drove the lock" % len(new))
+    text = "%d s: the solved right eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
+        len(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
+    if not dn:
+        return ("OK", text + "; no frame had the model and the solved right eye together")
+    dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
+    dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
+    text += "; the job camera's model against the solved right eye %.1f cm mean, %.1f max over %d frames" % (dmean, dmax, dn)
+    if dmean > 0.5:
+        return ("PARTIAL", text + ": the model is off the right eye")
+    return ("OK", text)
+
+
+def _hj_f111_pointer(rows, ctx):
+    """F111: the panel pointer instrument. Its hooks' line, the 1 s lines (each with a verdict: the first stage of the game's pick that turns a mouse move the
+    other way: the mouse NDC against the OS cursor K4, the unprojection K1, the direction behind the camera K5, the hit or the sprite K2, the cursor window K3,
+    or none in the pick) and the 10 s line (the flight so far, which judges moves too few for any one second). NEVER APPLIED when no hook was armed, or when
+    the hooks were armed and never saw the pointer controller."""
+    armed, sec, tot = rows.get("armed", []), rows.get("sec", []), rows.get("total", [])
+    if not armed and not sec and not tot:
+        return None
+    n = max(int(r["n"]) for r in armed) if armed else None
+    if n == 0 and not sec:
+        return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
+    if not sec:
+        return ("NEVER APPLIED", "the hooks were armed (%d of 4) and never saw the pointer controller: no panel with a mouse pointer was used while native stereo "
+                                 "was on foot" % n)
+    verdicts = collections.Counter(r["verdict"].strip() for r in sec)
+    text = "%d s with the pointer: cycles %d, moves %d, ray %d (accepted %d), window %d, direction behind the camera in %d of %d cycles; 1 s verdicts: %s" % (
+        len(sec), sum(int(r["cycles"]) for r in sec), sum(int(r["moves"]) for r in sec), sum(int(r["ray"]) for r in sec), sum(int(r["acc"]) for r in sec),
+        sum(int(r["win"]) for r in sec), sum(int(r["behind"]) for r in sec), sum(int(r["cycles"]) for r in sec),
+        ", ".join("%s %d" % kv for kv in verdicts.most_common()))
+    decided = collections.Counter({v: c for v, c in verdicts.items() if v != "too few moves"})
+    stage = None
+    if tot and tot[-1]["verdict"].strip() != "too few moves":
+        stage = tot[-1]["verdict"].strip()
+        text += "; the flight so far (%s s): %s" % (tot[-1]["secs"], stage)
+    elif decided:
+        stage = decided.most_common(1)[0][0]
+    if stage is None:
+        return ("IDLE", text + "; the pointer never moved enough to judge")
+    text += "; the inverting stage: %s" % stage
+    if n is not None and n < 4:
+        return ("PARTIAL", text + "; only %d of 4 hooks armed" % n)
+    if not sum(int(r["pl"]) for r in sec):
+        return ("PARTIAL", text + "; no placement on a panel was seen (the update ran, the pick did not reach a panel)")
+    return ("OK", text)
+
+
 def _hj_f93_chain(rows, ctx):
     """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
     step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
@@ -11453,6 +11521,65 @@ def _hj_f105_screens(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f108_hold(rows, ctx):
+    """F108: an in-world screen held only while its interface changes. The 20 s line prints zeros. No marked draw is IDLE. Draws held everywhere and none tracked
+    is NEVER APPLIED, the OLD BEHAVIOUR (F105's rule: every screen pixel edited every frame), with UiContent's reasons; so is a census whose frames at rest have
+    every screen pixel edited. Tracked draws with no census row read back is PARTIAL (the hold ran; how much it held is unknown), as are some draws held
+    everywhere, and edits lingering at rest (over 5% of the screen's pixels in frames 32 or more after the last change). The three figures: frames with an edit,
+    the fraction of screen pixels edited at rest against during a change, and history restarts (pixels and frames). No line at all is the code never having run
+    (no external upscaler, or a build before F108). F108b: the hold in frames from a block's last change (the line's, or 32 for an F108 line, which held for
+    UiContent's whole expiry), and the mean frames a change held the screen: frames with an edit over the changes that began from rest (an F108 line does not
+    count those, so its mean is not given). A frame is at rest from the hold's end, so a hold that outlives it shows as edits at rest."""
+    win = rows.get("win", [])
+    if not win:
+        return None
+    tracked, held = _hsum(win, "tracked"), _hsum(win, "held")
+    cframes, editf, changef = _hsum(win, "cframes"), _hsum(win, "editf"), _hsum(win, "changef")
+    restf, reste, rests = _hsum(win, "restf"), _hsum(win, "reste"), _hsum(win, "rests")
+    durf, dure, durs = _hsum(win, "durf"), _hsum(win, "dure"), _hsum(win, "durs")
+    fresh, freshf, skipped = _hsum(win, "fresh"), _hsum(win, "freshf"), _hsum(win, "skipped")
+    holds = sorted({int(r["hold"]) for r in win if r.get("hold") is not None})
+    hold = ("/".join(str(h) for h in holds) + " frames") if holds else "32 frames (F108's expiry, not in the line)"
+    counted = [r for r in win if r.get("changes") is not None]
+    changes = sum(int(r["changes"]) for r in counted)
+    counted_edits = sum(int(r["editf"]) for r in counted)
+    if not counted:
+        per_change = "not counted in this build's line"
+    elif changes:
+        per_change = "%.1f (%d frames with an edit over %d changes from rest)" % (counted_edits / changes, counted_edits, changes)
+    else:
+        per_change = "- (no change from rest)"
+    why = collections.Counter()
+    for r in win:
+        why.update(_hpairs(r["why"]))
+    taken = collections.Counter()
+    for r in win:
+        for key, name in (("nosurf", "no learned surface"), ("nodepth", "not the scene's depth"), ("notrained", "no external upscaler")):
+            taken[name] += int(r[key])
+    rest_frac = (reste / rests) if rests else 0.0
+    text = ("%d windows: draws tracked %d, held everywhere %d (%s); a change held %s, held frames per change %s; census %d frames (%d skipped): "
+            "frames with an edit %d; edited at rest %s (%d of %d px in %d frames), during a change %s (%d of %d px in %d frames); history restarts %d px in "
+            "%d frames; not taken at the classification: %s") % (
+        len(win), tracked, held, _htop(why, 4), hold, per_change, cframes, skipped, editf, _hpct(reste, rests), reste, rests, restf, _hpct(dure, durs),
+        dure, durs, durf, fresh, freshf, _htop(taken, 3))
+    for n in rows.get("surface", []):
+        text += "; interface texture %s: %sx%s, %s slice(s), %s mip(s), format %s%s" % (
+            n["n"], n["w"], n["h"], n["slices"], n["mips"], n["fmt"], (", footprint %s render px" % n["px"]) if n["px"] else "")
+    if not tracked and not held:
+        return ("IDLE", text + "; no in-world screen marked")
+    if not tracked:
+        return ("NEVER APPLIED", text + "; OLD BEHAVIOUR: every screen pixel held every frame (F105's rule), the interface texture not tracked")
+    if restf and rests and rest_frac >= 0.99:
+        return ("NEVER APPLIED", text + "; OLD BEHAVIOUR: every screen pixel edited at rest")
+    if not cframes:
+        return ("PARTIAL", text + "; the census read nothing back")
+    if held:
+        return ("PARTIAL", text + "; some screens held everywhere (F105's rule)")
+    if restf and rest_frac > 0.05:
+        return ("PARTIAL", text + "; edits linger at rest")
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
 
@@ -11525,6 +11652,24 @@ HEALTH_RULES = (
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit),
+    _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
+        ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
+                r"(?P<model>\d+) \(F110: from the job camera, the left eye, (?P<fromcam>\d+), from the solved left eye (?P<fromleft>\d+); IPD (?P<ipd>[\d.]+) m, "
+                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved right eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
+                r"(?P<du>%s) (?P<df>%s), (?P<dmean>[\d.]+) cm mean, (?P<dmax>[\d.]+) max over (?P<dn>\d+) frames" % (_HN, _HN, _HN)),
+        ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
+                r"\(camera \+ half IPD along the FP right\) in (?P<model>\d+);"),
+    ), _hj_f110_model_eye),
+    _hrule("panel pointer (F111)", ("F111",), ("panel pointer (F111)",), (
+        ("armed", r"panel pointer \(F111\): hooks armed (?P<n>\d) of 4(?P<rest>.*)$"),
+        ("sec", r"panel pointer \(F111\) 1 s: verdict: (?P<verdict>[^;]+); cycles (?P<cycles>\d+) \(controllers \d+\), moves (?P<moves>\d+) \(more move lines \d+\), "
+                r"placements (?P<pl>\d+): ray (?P<ray>\d+) \(accepted (?P<acc>\d+), t mean [\d.]+\), window (?P<win>\d+); cycles with a hit \d+, direction behind the camera "
+                r"(?P<behind>\d+),"),
+        ("total", r"panel pointer \(F111\) so far: verdict: (?P<verdict>[^;]+); (?P<secs>\d+) s with the pointer, cycles \d+, moves \d+"),
+        ("_", r"panel pointer \(F111\) move: ndc "),
+    ), _hj_f111_pointer),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -11734,6 +11879,18 @@ HEALTH_RULES = (
         ("note", r"ui depth world screens \(F105\): an in-world screen \(vs [0-9A-F]+ ps [0-9A-F]+, [^)]*\) is marked into eye \d's coverage and edit masks at "
                  r"(?P<w>\d+)x(?P<h>\d+) from this draw on"),
     ), _hj_f105_screens),
+    _hrule("terminal hold (F108)", ("F108",), ("ui depth world screens (F108)",), (
+        ("win", r"ui depth world screens \(F108\): (?P<frames>\d+) frames(?:, a change held (?P<hold>\d+) frames)?; draws tracked (?P<tracked>\d+), held without change tracking (?P<held>\d+) "
+                r"\((?P<why>[^)]*)\); not taken at the classification: no learned surface (?P<nosurf>\d+), not the scene's depth (?P<nodepth>\d+), no external "
+                r"upscaler (?P<notrained>\d+); census (?P<cframes>\d+) frames with a screen \((?P<skipped>\d+) skipped\): frames with an edit (?P<editf>\d+), a "
+                r"change began (?P<changef>\d+)(?:, changes from rest (?P<changes>\d+))?; at rest (?P<restf>\d+) frames, edited (?P<reste>\d+) of (?P<rests>\d+) px; during a change (?P<durf>\d+) "
+                r"frames, edited (?P<dure>\d+) of (?P<durs>\d+) px; history restarts (?P<fresh>\d+) px in (?P<freshf>\d+) frames\."),
+        ("surface", r"ui depth world screens \(F108\): interface texture (?P<n>\d+): (?P<w>\d+)x(?P<h>\d+), (?P<slices>\d+) slice\(s\), (?P<mips>\d+) mip\(s\), "
+                    r"DXGI format (?P<fmt>\d+)(?:.*? covered (?P<px>\d+) render px)?"),
+        ("tracked", r"ui depth world screens \(F108\): an in-world screen's interface is tracked by UiContent from this draw on"),
+        ("heldnote", r"ui depth world screens \(F108\): an in-world screen is held everywhere \(F105's rule\) because its interface texture is not tracked"),
+        ("class", r"ui depth world screens \(F108\): a draw of the pair \(vs [0-9A-F]+ ps [0-9A-F]+\) into \d+x\d+ DXGI format \d+ was not taken: "),
+    ), _hj_f108_hold),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -12025,7 +12182,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -12932,6 +13089,58 @@ def self_test_health():
         check("F92b aim: off in ADS and nothing unwound", [aim_switch("off", "yes")], 3, [("NEVER APPLIED", F92A)])
         check("F92b aim: a remainder dropped", [aim_switch("off"), aim_off(), aim_unwound(0.4, True)], 0, [("PARTIAL", F92A)], has=["1 with a DROPPED remainder"])
 
+        # ---- ADS model eye (F110): the sight lock's right eye solved or modelled ----
+        F110 = "ADS model eye (F110)"
+
+        def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
+                        dmax=0.3, dn=87):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                     dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
+
+        # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
+        OLD_TESTER = ("native on foot ADS sight check (F66e/F79): eye rows this second: both eyes 0, one eye 0, none/implausible 72 (0 implausible: over 0.5 m from the "
+                      "job camera); the lock's right eye: the solved rendered eye in 0 frames, the F63 model (camera + half IPD along the FP right) in 72; eye minus job "
+                      "camera (body right, up, forward, cm, mean) L 0.0 0.0 0.0 R 0.0 0.0 0.0; IPD 0.00 cm (0 frames)")
+        check("F110 model eye: the right eye solved, the camera's model on it", [sight_check()] * 3, 0, [("OK", F110)],
+              has=["the model 0 (0%", "against the solved right eye 0.1 cm mean, 0.3 max over 261 frames"], lacks=["UNPARSED"])
+        check("F110 model eye: the tester's 3.1 cm (the model at the nose)", [sight_check(d=(-3.1, 0.0, 0.0), dmean=3.1, dmax=3.2)] * 2, 0, [("PARTIAL", F110)],
+              has=["3.1 cm mean, 3.2 max over 174 frames: the model is off the right eye"])
+        check("F110 model eye: no rows, every frame on the camera's model", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 0,
+              [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
+        check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
+              has=["F63's model 216 (100%)", "half the IPD: the nose"])
+
+        # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
+        F111 = "panel pointer (F111)"
+        K5 = "the direction behind the camera (K5: no hit, the sprite on the far side)"
+
+        def ptr_armed(n=4, why=""):
+            return R("hooks armed %zu of 4 (update", n, 0x454F520, 0x4559C50, 0x452B6A0, 0x4541A20, ": " if why else "", why)
+
+        def ptr_sec(verdict=K5, cycles=90, moves=20, ray=180, acc=0, win=0, behind=90):
+            return R("panel pointer (F111) 1 s", verdict, cycles, 1, moves, 15, ray * 2 // 3, ray, acc, 0.0, win, acc and cycles, behind, behind, 0, 0.9, 0.9,
+                     0.0, 0.0, -0.9, -0.9, 0.0, 0.0, 0.0, 0.0, 0, 0.8, 0.9, "+", "+", "0", "0", "-", "-", "0", "0", "0", "0",
+                     "position 0.000 1.570 0.000, right +1.000 +0.000 +0.000, up +0.000 +1.000 +0.000, forward +0.000 +0.000 +1.000", 0)
+
+        def ptr_move():
+            return R("panel pointer (F111) move", 0.1, -0.2, "mouse", 0.07, 0.17, -0.98, 2, 2, 0, 0.0, 0, 0, 0.07, 0.17, -0.98, "none", 0.0, 0.0, 0, 0, 0)
+
+        def ptr_total(verdict=K5, secs=10):
+            return R("panel pointer (F111) so far", verdict, secs, 900, 200, 1800, 0, 0, 900, 0.9, 0.9, -0.9, -0.9, 0.0, 0.0, 0.0, 0.0)
+
+        check("F111 pointer: the direction behind the camera, the flight so far agrees", [ptr_armed(), ptr_move(), ptr_sec(), ptr_sec(), ptr_total()], 0,
+              [("OK", F111)], has=["2 s with the pointer: cycles 180, moves 40, ray 360 (accepted 0)", "direction behind the camera in 180 of 180 cycles",
+                                   "the inverting stage: " + K5], lacks=["UNPARSED"])
+        check("F111 pointer: armed, never saw the controller", [ptr_armed()], 3, [("NEVER APPLIED", F111)], has=["never saw the pointer controller"])
+        check("F111 pointer: no hook armed", [ptr_armed(0, "update at EliteDangerous64.exe+0x454F520 NOT armed: its vtable slot does not hold it")], 3,
+              [("NEVER APPLIED", F111)], has=["no hook armed", "update at EliteDangerous64.exe+0x454F520 NOT armed"])
+        check("F111 pointer: the cursor still", [ptr_armed(), ptr_sec("too few moves", moves=0)] * 2, 0, [("IDLE", F111)], has=["never moved enough"])
+        check("F111 pointer: three hooks, the unprojection named", [ptr_armed(3, "cursor window at EliteDangerous64.exe+0x4541A20 NOT armed: x"),
+                                                                    ptr_sec("the unprojection (K1: the direction against the NDC)", behind=0)], 0,
+              [("PARTIAL", F111)], has=["the inverting stage: the unprojection (K1", "only 3 of 4 hooks armed"])
+        check("F111 pointer: updates without a placement", [ptr_armed(), ptr_sec(ray=0, behind=0, verdict="none in the pick (the inversion is after it)")], 0,
+              [("PARTIAL", F111)], has=["no placement on a panel was seen"])
+
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
 
@@ -13237,6 +13446,52 @@ def self_test_health():
               has=["refused no eye 14400", "screens drawn and none marked"])
         check("F105 screens: one eye only", [screens(marked=3600, e0=3600, e1=0, noeye=3600)], 0, [("PARTIAL", W105)], has=["one eye only"])
         check("F105 screens: a fifth refused", [screens(marked=5760, e0=2880, e1=2880, state=1440)], 0, [("PARTIAL", W105)], has=["80% of the draws marked", "state 1440"])
+
+        # ---- terminal hold (F108): held only while the interface changes; the census's three figures; the old behaviour flagged ----
+        T108 = "terminal hold (F108)"
+
+        def hold108(frames=1800, hold=7, tracked=3600, held=0, why="none", nosurf=0, nodepth=0, notrained=0, cframes=1700, skipped=0, editf=120, changef=3,
+                 changes=3, restf=1600, reste=0, rests=1600000, durf=100, dure=30000, durs=100000, fresh=3000, freshf=3):
+            return R105("ui depth world screens (F108): %u frames, a change held %u frames; draws tracked", frames, hold, tracked, held, why, nosurf, nodepth,
+                        notrained, cframes, skipped, editf, changef, changes, restf, reste, rests, durf, dure, durs, fresh, freshf)
+
+        tracked108 = R105("ui depth world screens (F108): an in-world screen's interface is tracked")
+        held108 = R105("ui depth world screens (F108): an in-world screen is held everywhere", "declined", "format")
+        class108 = R105("ui depth world screens (F108): a draw of the pair", 0, 0, 2016, 2017, 23, "not the scene's depth")
+        surface108 = R105("%s covered %llu render px", R105("ui depth world screens (F108): interface texture %u", 1, 1024, 512, 4, 1, 28, 0x28, "Texture2DArray",
+                                                            28, 0, 0, 0, 3, "updated", "compared") + R105("; the screen's first pass in eye %d", 0),
+                          68621, 274484.0, 2.0, 2.0)
+        check("F108 hold: held only where the interface changed", [tracked108, class108, surface108, hold108(), hold108()], 0, [("OK", T108)],
+              has=["draws tracked 7200, held everywhere 0 (none)", "a change held 7 frames, held frames per change 40.0 (240 frames with an edit over 6 "
+                   "changes from rest)", "frames with an edit 240", "edited at rest 0% (0 of 3200000 px in 3200 frames), during a "
+                   "change 30% (60000 of 200000 px in 200 frames)", "history restarts 6000 px in 6 frames", "not taken at the classification: none",
+                   "interface texture 1: 1024x512, 4 slice(s), 1 mip(s), format 28, footprint 68621 render px"],
+              lacks=["UNPARSED"])
+        check("F108 hold: the classification's refusals named", [class108, hold108(nodepth=12)], 0, [("OK", T108)], has=["not the scene's depth 12"])
+        # F108b: the hold's length and the mean a change held the screen; an F108 line (no hold, no changes from rest) still reads, its hold UiContent's 32
+        check("F108b hold: a short hold, a keystroke animating over two frames", [hold108(editf=24, changef=6, changes=3)], 0, [("OK", T108)],
+              has=["a change held 7 frames, held frames per change 8.0 (24 frames with an edit over 3 changes from rest)"], lacks=["UNPARSED"])
+        check("F108b hold: no change began from rest", [hold108(editf=0, changef=0, changes=0, durf=0, dure=0, durs=0, fresh=0, freshf=0)], 0,
+              [("OK", T108)], has=["held frames per change - (no change from rest)"])
+        old108 = "ui depth world screens (F108): 1800 frames; draws tracked 1944, held without change tracking 0 (none); not taken at the classification: no learned surface 45, not the scene's depth 0, no external upscaler 0; census 621 frames with a screen (0 skipped): frames with an edit 96, a change began 24; at rest 521 frames, edited 0 of 764467289 px; during a change 100 frames, edited 88886913 of 205009022 px; history restarts 11947231 px in 24 frames."
+        check("F108b hold: an F108 line, before the hold was shortened", [old108], 0, [("OK", T108)],
+              has=["a change held 32 frames (F108's expiry, not in the line), held frames per change not counted in this build's line", "frames with an edit 96",
+                   "history restarts 11947231 px in 24 frames"], lacks=["UNPARSED"])
+        check("F108b hold: two builds' holds in one log", [hold108(hold=5), hold108()], 0, [("OK", T108)], has=["a change held 5/7 frames"])
+        check("F108 hold: the old behaviour, the interface not tracked", [held108, hold108(tracked=0, held=3600, why="array/MSAA/mips/view 3600", editf=1700,
+              changef=0, restf=1700, reste=1700000, rests=1700000, durf=0, dure=0, durs=0, fresh=0, freshf=0)] * 2, 3, [("NEVER APPLIED", T108)],
+              has=["OLD BEHAVIOUR: every screen pixel held every frame", "held everywhere 7200 (array/MSAA/mips/view 7200)"])
+        check("F108 hold: the old behaviour, every pixel edited at rest", [hold108(editf=1700, changef=0, restf=1700, reste=1700000, rests=1700000, durf=0,
+              dure=0, durs=0, fresh=0, freshf=0)], 3, [("NEVER APPLIED", T108)], has=["OLD BEHAVIOUR: every screen pixel edited at rest",
+              "edited at rest 100%"])
+        check("F108 hold: ran, no screen marked", [hold108(tracked=0, cframes=0, editf=0, changef=0, restf=0, rests=0, durf=0, dure=0, durs=0, fresh=0, freshf=0)],
+              0, [("IDLE", T108)], has=["no in-world screen marked"])
+        check("F108 hold: never ran (no F108 line at all)", [screens()], 0, [("OK", W105)], has=[T108],
+              lacks=[row(s, T108) for s in ("OK", "PARTIAL", "IDLE", "NEVER APPLIED", "UNPARSED")])
+        check("F108 hold: tracked, the census read nothing", [hold108(cframes=0, editf=0, changef=0, restf=0, rests=0, durf=0, dure=0, durs=0, fresh=0,
+              freshf=0)], 0, [("PARTIAL", T108)], has=["the census read nothing back"])
+        check("F108 hold: some screens held everywhere", [hold108(held=40, why="format 40")], 0, [("PARTIAL", T108)], has=["some screens held everywhere"])
+        check("F108 hold: edits linger at rest", [hold108(reste=160000)], 0, [("PARTIAL", T108)], has=["edits linger at rest", "edited at rest 10%"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],

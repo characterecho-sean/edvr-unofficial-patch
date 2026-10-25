@@ -32,6 +32,8 @@
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
+#include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
+#include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 
 #include <array>
 #include <chrono>
@@ -1516,7 +1518,7 @@ int wmain(int argc, wchar_t** argv) {
                 double E2[3];
                 t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
                 check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::kIkSwivelTrimDeg == 2.0 && nf::kIkSquareAmount == 0.75 &&
-                          nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 2.0,
+                          nf::kIkAdsTrimDeg == 3.0 && nf::kIkAdsRaiseCm == 5.5 && nf::kWeaponViewOffsetDefaultCm == 0.0,
                       "F57: the clamp keeps the elbow out by the distance (25 cm); the arm IK's shipped values are the constants");
             }
             // F76: a transported anatomical elbow pole chooses the physical branch, independent of the solver frame and animated wrist.
@@ -2899,7 +2901,7 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(E.eBody[1] + 0.02) < 1e-12 && std::fabs(E.eBody[2]) < 1e-12 && std::fabs(E.seated[0] + 0.018) < 1e-12 &&
                           std::fabs(E.seated[1] - 0.02) < 1e-12 && std::fabs(E.seated[2]) < 1e-12 &&
                           std::fabs(E.perpNorm - std::sqrt(0.018 * 0.018 + 0.02 * 0.02)) < 1e-12,
-                      "F63: the sight lock's e: P14w - E_R (E_R = cam + half IPD x right) with the forward part removed, in body axes (right 1.8, up "
+                      "F63: the sight lock's e: P14w - E_R (E_R = cam + an offset x right) with the forward part removed, in body axes (right 1.8, up "
                       "-2 cm) and seated (-1.8, +2, 0 cm)");
                 // (2) The sight pitched 30 deg down: P14w = E_R + 0.3 f + 0.02 u (u the sight's up): only 0.02 u is left, perpendicular to f;
                 // in body axes (0, 0.01732, 0.01), seated (0, -0.01732, 0.01).
@@ -2925,11 +2927,14 @@ int wmain(int argc, wchar_t** argv) {
                 const bool okFlip = nf::adsSightRight(leftRow, f, bodyRight, rF, &fl);
                 double rZ[3] = {};
                 const bool degenerate = !nf::adsSightRight(row0, zero, bodyRight, rZ, nullptr);
-                check(okFlip && fl && std::fabs(rF[0] - 1.0) < 1e-12 && degenerate && nf::adsSightHalfIpd(false, 0.0) == 0.0315 &&
-                          nf::adsSightHalfIpd(true, 0.0325) == 0.0325 && nf::adsSightHalfIpd(true, -0.031) == 0.031 &&
-                          nf::adsSightHalfIpd(true, 0.06) == 0.0315 && nf::adsSightHalfIpd(true, 0.001) == 0.0315,
-                      "F63: the eye's right axis follows the body's right (a mirrored FP row is flipped); the half IPD from the right eye's offset, "
-                      "3.15 cm when unknown or out of range");
+                bool measured = true;
+                const double ipdNone = nf::adsSightIpd(false, 0.0, false, 0.0, &measured);
+                const bool noneFallback = ipdNone == nf::kAdsSightIpdFallbackM && !measured;
+                check(okFlip && fl && std::fabs(rF[0] - 1.0) < 1e-12 && degenerate && noneFallback &&
+                          std::fabs(nf::adsSightIpd(true, -0.0325, true, 0.0325, nullptr) - 0.065) < 1e-12 &&
+                          nf::adsSightIpd(true, 0.0, true, 0.001, nullptr) == nf::kAdsSightIpdFallbackM,
+                      "F63/F110: the eye's right axis follows the body's right (a mirrored FP row is flipped); the IPD from the eyes' offsets, "
+                      "6.3 cm when unknown or out of range");
                 // (4) The 40 cm clamp (F70: it was 12 cm; the filter's clamp, nofoot::clampNorm3): 50 cm along x to 40; 5 cm untouched; (30, 40) to (24, 32);
                 // the F63 integral driven 200 frames by a 60 cm error at gain 0.02 (5 cm a frame cap) stops at 40 cm.
                 double a[3] = {0.5, 0.0, 0.0}, b[3] = {0.03, 0.04, 0.0}, c[3] = {0.30, 0.40, 0.0}, intg[3] = {};
@@ -7284,6 +7289,10 @@ int wmain(int argc, wchar_t** argv) {
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
     // snap's fade, the smoothing, the follower against the real map, the per-second check.
     f109test::run109(check);
+    // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
+    f110test::run110(check);
+    // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
+    f111test::run111(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

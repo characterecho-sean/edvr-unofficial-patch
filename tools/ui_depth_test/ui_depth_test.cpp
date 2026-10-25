@@ -72,6 +72,7 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx, const char* sou
 }
 float temporalPassDepthAt(float metres) { return 0.025f / metres; }
 bool temporalPassPlanes(float* nearZ, float* farZ) { *nearZ = .025f; *farZ = 10000; return true; }
+bool temporalPassUpscale(float* x, float* y) { *x = 2.0f; *y = 2.0f; return true; }   // F108's surface line; not exercised here
 bool depthProbeSceneDepthFormat(uint32_t, uint32_t, int, ID3D11Texture2D** tex, uint32_t* fmt) {
     *tex = testScene; *fmt = DXGI_FORMAT_D32_FLOAT; return testScene != nullptr;
 }
@@ -165,9 +166,9 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     ctx->Unmap(stage.Get(), 0); return values;
 }
 #include "planet_coverage_test.h"
-#include "world_screen_coverage_test.h"
 #include "corona_coverage_test.h"
 #include "zscene_gate_test.h"
+#include "world_screen_coverage_test.h"   // after zscene_gate_test.h: F108's motion-pass check uses its texture helpers
 #include "main_depth_tile_test.h"
 int main(int argc, char** argv) {
     // The motion prep's absent-layer gate alone, on the adapter asked for (zscene_gate_test.h); never the build's run.
@@ -889,14 +890,20 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             ComPtr<ID3D11ShaderResourceView> bufV;hr(dev->CreateShaderResourceView(buf.Get(),&bufSd,&bufV));
             check(reasons.prepare(ctx.Get(),bufV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedNotTexture2D,
                   "census: a non-Texture2D resource declines as not-Texture2D");
-            D3D11_TEXTURE2D_DESC arrDesc{};arrDesc.Width=arrDesc.Height=4;arrDesc.MipLevels=1;arrDesc.ArraySize=2;arrDesc.SampleDesc.Count=1;
+            // F108: an array view is tracked (its own path, world_screen_coverage_test.h); one that does not start at mip 0 still
+            // declines as view-shape.
+            D3D11_TEXTURE2D_DESC arrDesc{};arrDesc.Width=arrDesc.Height=4;arrDesc.MipLevels=2;arrDesc.ArraySize=2;arrDesc.SampleDesc.Count=1;
             arrDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;arrDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
             ComPtr<ID3D11Texture2D> arrTex;hr(dev->CreateTexture2D(&arrDesc,nullptr,&arrTex));
             D3D11_SHADER_RESOURCE_VIEW_DESC arrSd{};arrSd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
             arrSd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;arrSd.Texture2DArray.MipLevels=1;arrSd.Texture2DArray.ArraySize=2;
             ComPtr<ID3D11ShaderResourceView> arrV;hr(dev->CreateShaderResourceView(arrTex.Get(),&arrSd,&arrV));
-            check(reasons.prepare(ctx.Get(),arrV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedViewShape,
-                  "census: an array view declines as view-shape");
+            check(reasons.prepare(ctx.Get(),arrV.Get(),1)!=nullptr&&reasons.lastDecision==UiContent::Decision::kReset,
+                  "census: an array view from mip 0 is tracked (F108)");
+            arrSd.Texture2DArray.MostDetailedMip=1;
+            ComPtr<ID3D11ShaderResourceView> arrMip1;hr(dev->CreateShaderResourceView(arrTex.Get(),&arrSd,&arrMip1));
+            check(reasons.prepare(ctx.Get(),arrMip1.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedViewShape,
+                  "census: an array view that does not start at mip 0 declines as view-shape");
         }
         // End-to-end source -> existing coverage draw -> borrowed eye SRV.
         // t14 must be restored and erased glyphs must keep their edit mark
@@ -1305,6 +1312,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     UiDepthLayer declined; check(!declined.acquire(ctx.Get(),msaa.tex.Get()),"MSAA safely declined");
     testPlanetCoverage(dev.Get(),ctx.Get());
     testWorldScreenCoverage(dev.Get(),ctx.Get());
+    testWorldScreenHistoryRestart(dev.Get(),ctx.Get());
     testCoronaCoverage(dev.Get(),ctx.Get());
     zgate::parity(dev.Get(),ctx.Get(),driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");
     maintile::abTest(dev.Get(),ctx.Get());

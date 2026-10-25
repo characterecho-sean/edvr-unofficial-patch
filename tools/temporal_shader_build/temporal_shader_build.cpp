@@ -434,6 +434,10 @@ static int generateTemporal(const Options& o) {
         {"kReticleDepthBytecode", "reticle_depth_cs", "main", nullptr, {}, false, edvr::kReticleDepthHlsl},
         // F105: the in-world screens' coverage stand-in (world_screen_coverage.h; its text is in fixed_shader_source.h), a pixel shader.
         {"kWorldScreenCoverageBytecode", "world_screen_coverage_ps", "main", nullptr, {}, false, edvr::kWorldScreenCoverageHlsl, "ps_5_0"},
+        // F108: the tracked stand-in (held only where the interface changed), the census of the screens' state, and UiContent's array digest.
+        {"kWorldScreenTrackedBytecode", "world_screen_tracked_ps", "main", nullptr, {}, false, edvr::kWorldScreenTrackedHlsl, "ps_5_0"},
+        {"kWorldScreenCensusBytecode", "world_screen_census_cs", "main", nullptr, {}, false, edvr::kWorldScreenCensusCs, "cs_5_0"},
+        {"kUiContentArrayBytecode", "UI source edits (array)", "main", nullptr, {}, false, edvr::kUiContentArrayCs, "cs_5_0"},
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
         {"kXessR11ToFp16Bytecode", "xess_r11_to_fp16_cs", "main", nullptr, {}, false, edvr::kXessR11ToFp16Cs},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
