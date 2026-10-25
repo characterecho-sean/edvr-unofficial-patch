@@ -130,6 +130,7 @@ std::atomic<uint32_t> g_f109Updates{0}, g_f109StickDropped{0}, g_f109MouseDroppe
 std::atomic<uint32_t> g_f109Clean{0}, g_f109Dirty{0}, g_f109Unsplit{0}, g_f109Blocked{0}, g_f109BlockedRun{0}, g_f109SpringCalls{0};
 std::atomic<double> g_f109SpringYaw{0.0};      // the springs' yaw term summed (radians, the game's sign)
 std::atomic<double> g_snapApplied{0.0};        // the player's share of the calls that carried a snap, less the spring (radians, the game's sign)
+std::atomic<double> g_f109TotalYaw{0.0};       // F109b: the local processor's yaw delta summed, every call (radians, the game's sign): the avatar's turn
 std::atomic<uint32_t> g_snapCalls{0};          // the processor calls that carried a snap
 bool g_nativeEdgeLast = false;                // F26: frame thread only
 // F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
@@ -5082,10 +5083,10 @@ constexpr uintptr_t kLookUpdPitchOff = 0x198, kLookUpdRotOff = 0x190, kLookActVa
 // F109 (RE analysis\decomp\verify_20261025_onfoot_look_input.txt, build 334925): the right stick's look is its own pair of actions, read by the same update
 // (act+0x180 yaw, act+0x188 pitch, value +0x18; 0x19992C9 / 0x19992AD), curved and handed to the sink beside the mouse's; the processor adds it as
 // dt * rate * stick. The springs' rates (comp+0x770 / +0x78C, critically damped, their velocities at +0x780 / +0x79C) enter the sum as dt * yaw rate and
-// -dt * pitch rate (0x1A9F097 / 0x1A9F0B1); the aim takes the whole delta in the call (comp+0x7B8: [obj] += delta, 0x18FF1E6), the yaw this file reads as
-// the avatar's.
+// -dt * pitch rate (0x1A9F097 / 0x1A9F0B1); the aim takes the whole delta in the call (0x18FF1E0 on comp+0x7B8). F109b: the float at comp+0x7B8 itself does
+// not follow the aim (the F109 flight read +0.00 deg where the game applied 5-35 deg), so the avatar's turn is the summed delta (g_f109TotalYaw), not that field.
 constexpr uintptr_t kLookUpdStickYawOff = 0x180, kLookUpdStickPitchOff = 0x188;
-constexpr uintptr_t kCompSpringYawRateOff = 0x780, kCompSpringPitchRateOff = 0x79C, kCompAimYawOff = 0x7B8;
+constexpr uintptr_t kCompSpringYawRateOff = 0x780, kCompSpringPitchRateOff = 0x79C;
 // Build 334925: the processor's component grew 0x30 bytes ahead of +0x4A8, so every field the code reads here moved by +0x30 (332841: yaw
 // delta 0x5F4, pitch delta 0x5F8, basis 0x5B0, gains 0x7D8 / 0x7DC). The proof is the aligned processor: its one qword store of the yaw/pitch
 // pair is `movsd [rdi+0x5F4], xmm0` in 332841 and `movsd [rdi+0x624], xmm0` in 334473 and 334925.
@@ -6154,6 +6155,7 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
     g_adsAppPitch.store(g_adsAppPitch.load(std::memory_order_relaxed) + op.ours, std::memory_order_relaxed);
     g_adsUserYaw.store(g_adsUserYaw.load(std::memory_order_relaxed) + oy.player, std::memory_order_relaxed);
     g_adsUserPitch.store(g_adsUserPitch.load(std::memory_order_relaxed) + op.player, std::memory_order_relaxed);
+    g_f109TotalYaw.store(g_f109TotalYaw.load(std::memory_order_relaxed) + static_cast<double>(dy), std::memory_order_relaxed);   // F109b: the avatar's turn (one writer)
     if (oy.gainTaken) g_adsGainYaw.store(static_cast<float>(g_f109SplitYaw.gain), std::memory_order_relaxed);
     if (op.gainTaken) g_adsGainPitch.store(static_cast<float>(g_f109SplitPitch.gain), std::memory_order_relaxed);
     if (p.snapYaw != 0.0) {   // the snap's call: the player's share less the spring is the snap the game applied
@@ -6392,7 +6394,12 @@ uint32_t g_f91GateRefusedTicks = 0;
 struct LtaState {
     bool engaged = false;        // the map runs the follower: the head is the look on foot
     bool unwinding = false;      // turned off on foot: the carried turn unwinds through the map's release
-    bool tripped = false;        // the guard (or a refused restore) stopped it: held off until the key toggles or native on foot re-enters
+    bool tripped = false;        // the guard (or a refused restore) stopped it: off kRearmMs, then again (F109b); latched after kLatchTrips in kLatchWindowMs
+    bool latched = false;        // F109b: held off until the key toggles or native on foot re-enters
+    uint64_t trippedMs = 0;      // F109b: the last trip
+    uint64_t tripTimes[3] = {};  // F109b: the last trips' times (the latch's window)
+    uint32_t trips = 0, rearms = 0;
+    uint32_t holdsSeen = 0, userRebasesSeen = 0, gapsSeen = 0;   // F109b: the guard's gates as the 1 s line last printed them
     bool init = false, keyLast = false, footLast = false;
     nofoot::f109::Follower follow;
     bool centrePending = false;  // the reported head's offset goes into the target at the first render head after an engage
@@ -6432,9 +6439,11 @@ struct TurnState {
     uint64_t adsCheckMs = 0;
     uint32_t adsCheckSnap = 0;
     bool faded = false;          // a level other than 0 was published (one 0 follows at the run's end)
-    // the per-second check: the avatar's turn (comp+0x7B8), the head aim's asks, the view's turn beyond the head's (the right eye's rows less the LOCAL head)
+    // the per-second check: the avatar's turn (F109b: the summed look delta), the head aim's asks, the view's turn beyond the head's (the right eye's rows less the
+    // LOCAL head), over the ticks with fresh rows in them and the tick before
     bool aimHave = false;
-    double aimLast = 0.0;
+    double aimLast = 0.0;        // F109b: the game's summed look delta (g_f109TotalYaw) at the last tick
+    uint32_t procLast = 0;       // F109b: the processor's calls at the last tick
     bool viewHave = false;
     nofoot::RotFrameSum viewLast;
     double secAim = 0.0, secAsk = 0.0, secView = 0.0, secHead = 0.0;   // degrees, the seat convention
@@ -6603,10 +6612,25 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         ++g_lta.heldTicks;
     }
 }
-// The guard tripped under look to aim: stop it (the seated rotation to zero) until the key toggles or native on foot re-enters.
-void ltaTrip(const char* why) noexcept {
+// The guard tripped under look to aim: stop it (the seated rotation to zero). F109b: for kRearmMs, then it engages again by itself (a fresh centring); the
+// kLatchTrips-th trip within kLatchWindowMs holds it off until the key toggles or native on foot re-enters (F109 held it off after every trip: the pilot read that
+// as look to aim losing its function until he toggled it).
+constexpr uint64_t kLtaRearmMs = 2000, kLtaLatchWindowMs = 60000;
+constexpr uint32_t kLtaLatchTrips = 3;
+void ltaTrip(uint64_t now, const char* why) noexcept {
     g_lta.tripped = true;
-    Log::get().note("native on foot look to aim (F109): GUARD TRIPPED (%s): stopped until the key is toggled or native on foot re-enters", why);
+    g_lta.trippedMs = now;
+    ++g_lta.trips;
+    g_lta.tripTimes[0] = g_lta.tripTimes[1];
+    g_lta.tripTimes[1] = g_lta.tripTimes[2];
+    g_lta.tripTimes[2] = now;
+    g_lta.latched = g_lta.tripTimes[0] != 0 && now - g_lta.tripTimes[0] <= kLtaLatchWindowMs;
+    if (g_lta.latched)
+        Log::get().note("native on foot look to aim (F109): GUARD TRIPPED (%s): stopped until the key is toggled or native on foot re-enters (%u trips within %.0f s)", why,
+                        kLtaLatchTrips, static_cast<double>(kLtaLatchWindowMs) / 1000.0);
+    else
+        Log::get().note("native on foot look to aim (F109): GUARD TRIPPED (%s): stopped for %.0f s, then it engages again (trip %u)", why,
+                        static_cast<double>(kLtaRearmMs) / 1000.0, g_lta.trips);
     adsStop(why, false);
 }
 // The snaps (look to aim engaged, style snap), the comfort fade around each, and the per-second check that the player's own turn reached the view (in ADS, and
@@ -6704,30 +6728,39 @@ void f109TurnTick(uint64_t now, double askYaw, bool headStep, double dYaw, int y
         t.secMs = now;
         return;
     }
-    float aim = 0.0f;
-    if (comp && guardedRead(comp + kCompAimYawOff, &aim, 4) && std::isfinite(aim)) {
-        if (t.aimHave) t.secAim += nofoot::adsSeatFromGameYaw(f109::aimStep(t.aimLast, static_cast<double>(aim)), sgn) / f109::kDeg;
-        t.aimLast = static_cast<double>(aim);
-        t.aimHave = true;
-    } else {
-        ++t.secNoAim;
-    }
+    // F109b: the avatar's turn is the game's own look delta summed (comp+0x624, every call of the local processor: the aim takes it whole, RE 0x18FF1E6). F109 read
+    // comp+0x7B8, which did not follow the aim (the F109 flight: +0.00 deg in seconds where the game applied the head aim's 5-35 deg), so every smooth second read as
+    // the player's own turn being the asks' opposite. A tick counts only when the view's rows are fresh in it and in the tick before, so a rows gap's turn is
+    // neither the view's (a stale base) nor the avatar's (the F109 flight: a 67 deg turn landed in the next second as -146 deg against -79).
+    const double total = g_f109TotalYaw.load(std::memory_order_relaxed);
+    const uint32_t procCalls = g_lookProcCalls.load(std::memory_order_relaxed);
+    const double dTotal = t.aimHave ? total - t.aimLast : 0.0;
+    const bool procRan = t.aimHave && procCalls != t.procLast;
+    t.aimLast = total;
+    t.procLast = procCalls;
+    t.aimHave = true;
     float rows[16] = {}, o4[4] = {};
     uint32_t rf = ~0u;
     double vr[3], vu[3], vf[3];
-    if (eyeRowsRead(1, &rf, rows, o4, nullptr) && nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed)) &&
-        nofoot::rotAxesFromClip(rows, vr, vu, vf)) {
+    const bool fresh = eyeRowsRead(1, &rf, rows, o4, nullptr) && nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed)) &&
+                       nofoot::rotAxesFromClip(rows, vr, vu, vf);
+    if (!fresh) {
+        ++t.secNoView;
+        t.viewHave = false;
+    } else {
         nofoot::RotFrameSum cur;
         cur.add(vr, vu, vf);
         double vy = 0.0, vp = 0.0;
-        if (t.viewHave && nofoot::rotFrameDelta(t.viewLast, cur, &vy, &vp)) t.secView += vy;
+        if (t.viewHave && nofoot::rotFrameDelta(t.viewLast, cur, &vy, &vp)) {   // a valid tick: every figure counts
+            t.secView += vy;
+            t.secAim += nofoot::adsSeatFromGameYaw(dTotal, sgn) / f109::kDeg;
+            if (headStep) t.secHead += dYaw / f109::kDeg;
+            t.secAsk += askYaw / f109::kDeg;
+            if (!procRan) ++t.secNoAim;
+        }
         t.viewLast = cur;
         t.viewHave = true;
-    } else {
-        ++t.secNoView;
     }
-    if (headStep) t.secHead += dYaw / f109::kDeg;
-    t.secAsk += askYaw / f109::kDeg;
     ++t.secTicks;
     if (inAds) ++t.secAdsTicks;
     if (t.secMs == 0) t.secMs = now;
@@ -6907,8 +6940,14 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             g_lta.footLast = onFoot;
         }
         if (g_lta.tripped && (ltaKey != g_lta.keyLast || (onFoot && !g_lta.footLast))) {
-            g_lta.tripped = false;
+            g_lta.tripped = g_lta.latched = false;
+            g_lta.tripTimes[0] = g_lta.tripTimes[1] = g_lta.tripTimes[2] = 0;
             Log::get().note("native on foot look to aim (F109): the guard is cleared (%s)", ltaKey != g_lta.keyLast ? "the key was toggled" : "native on foot re-entered");
+        } else if (g_lta.tripped && !g_lta.latched && now - g_lta.trippedMs >= kLtaRearmMs) {   // F109b: engages again by itself
+            g_lta.tripped = false;
+            ++g_lta.rearms;
+            Log::get().note("native on foot look to aim (F109): the guard is cleared (%.0f s after trip %u: it engages again)", static_cast<double>(kLtaRearmMs) / 1000.0,
+                            g_lta.trips);
         }
         g_lta.keyLast = ltaKey;
         g_lta.footLast = onFoot;
@@ -6919,7 +6958,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         if (ltaKey && onFoot && !g_lta.engaged && now - notLineMs >= 5000) {
             notLineMs = now;
             Log::get().note("native on foot look to aim (F109): not engaged: %s",
-                            off ? off : g_lta.tripped ? "the guard tripped (toggle the key or re-enter on foot)" : "starting");
+                            off ? off : g_lta.latched ? "the guard tripped three times in a minute (toggle the key or re-enter on foot)"
+                                      : g_lta.tripped ? "the guard tripped (it engages again 2 s after)" : "starting");
         }
         g_ltaDrop.store(g_lta.engaged, std::memory_order_relaxed);
     }
@@ -7146,6 +7186,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     }
     const nofoot::AdsAimMap::Out mo = g_adsMap.step(mapEng, mapRel, dt, mapW, askStep, askY, askP, aY, aP, ySign != 0, pSign != 0);
     adsPublishPitch();
+    g_adsResid.causal = true;                     // F109b: a trip needs the head aim's asks to explain the residual (nofoot::AdsResidual)
+    g_adsResid.addAsk(mo.injYaw, mo.injPitch);
     {   // F91 B: this tick's head aim figures for the trace (degrees, the seat convention), stamped with the tick and the head sample (g_adsHeadSeq)
         const double kD = 1.0 / nofoot::kAdsDeg;
         g_f91.mapTick = g_f91.tick;
@@ -7298,7 +7340,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "%+.2f pitch %+.2f deg carried; the guard: residual largest %.2f deg (base re-taken %u); the body's yaw from the aim %+.1f deg mean "
                             "(largest %.1f, %u frames); updates %u, dropped: stick %u, mouse %u, pitch %u; split: clean %u, dirty %u, unsplit %u, gain yaw %.5f "
                             "pitch %.5f; blocked %u (%s, held %u ticks), spring calls %u (%+.2f deg); F98c's settle refused %u calls (the aim pitched 10 deg or "
-                            "more); centred %u",
+                            "more); centred %u; F109b's guard: held %u (the view moved past the asks), re-based %u (the player's own turn), growth restarted "
+                            "%u (a rows gap), trips %u, re-armed %u",
                             g_lta.blocked ? "blocked" : "following", g_lta.armedWLast, g_lta.tauLast * 1000.0, g_lta.sumHead[0] * kD, g_lta.sumHead[1] * kD,
                             g_lta.sumAsk[0] * kD, g_lta.sumAsk[1] * kD, g_lta.sumApplied[0] * kD, g_lta.sumApplied[1] * kD, g_lta.sumUser[0] * kD,
                             g_lta.sumUser[1] * kD, g_lta.offNow[0], g_lta.offNow[1], g_lta.offMax, g_lta.offHave ? "read" : "not read",
@@ -7307,7 +7350,11 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             dirty - g_lta.dirtySeen, unsplit - g_lta.unsplitSeen, static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed)),
                             static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed)), blocked - g_lta.blockedSeen,
                             g_lta.blocked ? "holding" : "not holding", g_lta.heldTicks, spring - g_lta.springSeen, (springYaw - g_lta.springYawSeen) * kD,
-                            settleGated - g_lta.gatedSeen, g_lta.centres);
+                            settleGated - g_lta.gatedSeen, g_lta.centres, g_adsResid.holds - g_lta.holdsSeen, g_adsResid.userRebases - g_lta.userRebasesSeen,
+                            g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms);
+            g_lta.holdsSeen = g_adsResid.holds;
+            g_lta.userRebasesSeen = g_adsResid.userRebases;
+            g_lta.gapsSeen = g_adsResid.gapRestarts;
             g_lta.updSeen = upd;
             g_lta.stickSeen = stick;
             g_lta.mouseSeen = mouse;
@@ -10274,7 +10321,18 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
         }
         if (r == nofoot::AdsResidual::kBase) ++aw.bases;
         else if (r == nofoot::AdsResidual::kRebased) ++aw.rebases;
-        else if (r == nofoot::AdsResidual::kTrip && g_adsAimMode != nofoot::f92::kAimOn) {
+        else if (r == nofoot::AdsResidual::kHeld) {   // F109b: the game moved the view past what the head aim asked: a new base, not a trip
+            ++aw.rebases;
+            static uint64_t heldLineMs = 0;
+            if (now - heldLineMs >= 1000) {
+                heldLineMs = now;
+                Log::get().note("native on foot look to aim (F109b): the guard held (%s): the view parted from the head by yaw %+.1f pitch %+.1f deg, past what the "
+                                "head aim asked since the base (yaw %+.1f pitch %+.1f deg; a runaway of its cancel stays within %.1f x that + %.0f deg): the game moved "
+                                "the view on its own, a new base (holds %u)",
+                                g_lta.engaged ? "look to aim" : "an ADS press", g_adsResid.heldRes[0], g_adsResid.heldRes[1], g_adsResid.heldAsk[0], g_adsResid.heldAsk[1], nofoot::kAdsCausalK,
+                                nofoot::kAdsCausalSlackDeg, g_adsResid.holds);
+            }
+        } else if (r == nofoot::AdsResidual::kTrip && g_adsAimMode != nofoot::f92::kAimOn) {
             g_adsResid.reset();   // F92b: the guard guards the head aim's injection; with the head aim off or unwinding (as in a release) it stops nothing
         } else if (r == nofoot::AdsResidual::kTrip) {
             ++aw.trips;
@@ -10285,7 +10343,7 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
                         "there)",
                         g_adsResid.res[0], g_adsResid.res[1], g_adsResid.head[0], g_adsResid.head[1],
                         nofoot::adsResidualRatio(g_adsResid.res[0], g_adsResid.head[0]), nofoot::adsResidualRatio(g_adsResid.res[1], g_adsResid.head[1]));
-            if (g_lta.engaged) ltaTrip(why);   // F109: look to aim stops (held off until the key toggles or on foot re-enters)
+            if (g_lta.engaged) ltaTrip(now, why);   // F109: look to aim stops (F109b: for 2 s; held off after three trips in a minute)
             else adsStop(why, true);
             return;
         }

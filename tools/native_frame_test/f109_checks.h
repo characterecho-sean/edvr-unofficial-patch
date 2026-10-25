@@ -6,6 +6,7 @@
 #include "../../src/d3d11/native_on_foot_core.h"
 #include "../../src/d3d11/native_on_foot_f109.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -192,6 +193,112 @@ inline void run109(Check&& check) {
                   std::fabs(f109::aimStep(3.1, -3.1) - (2.0 * f109::kPi - 6.2)) < 1e-12 && f109::aimStep(0.5, std::numeric_limits<double>::quiet_NaN()) == 0.0,
               "F109 check: a 10 deg player's turn agrees with a 9 deg view turn and not with none (the stick cancelled); 25% tolerance for large turns; the aim's step "
               "wraps across pi");
+    }
+    // F109b: the guard's three gates (nofoot::AdsResidual). Axes: yaw about the world's up (+ = left of +z), then pitch; forward (-sy cp, sp, cy cp), right
+    // (cy, 0, sy), up (sy sp, cp, -cy sp).
+    const auto axesAt = [](double yaw, double pitch, double r[3], double u[3], double f[3]) {
+        const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+        f[0] = -sy * cp; f[1] = sp; f[2] = cy * cp;
+        r[0] = cy; r[1] = 0.0; r[2] = sy;
+        u[0] = sy * sp; u[1] = cp; u[2] = -cy * sp;
+    };
+    {   // the first trip: a smooth stick turn of 191 deg from a base pitched -8 deg, the head still. Read in the base's axes that turn is about -16 deg of pitch
+        // (the F109 flight's -12.2 at 07:19:25); the player's own turn past 15 deg takes a new base, so it never trips
+        nofoot::AdsResidual res;
+        res.causal = true;
+        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+        const double p = -8.0 * kD;
+        axesAt(0.0, p, hr, hu, hf);
+        nofoot::RotFrameSum base;
+        axesAt(0.0, p, vr, vu, vf);
+        base.add(vr, vu, vf);
+        bool trip = false;
+        uint64_t ms = 10000;
+        const int n = 270;   // 3 s at 90 Hz
+        for (int i = 0; i <= n; ++i, ms += 11) {
+            if (i > 0) res.addUser(191.0 * kD / n, 0.0);
+            axesAt(191.0 * kD * i / n, p, vr, vu, vf);
+            trip = trip || res.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true) == nofoot::AdsResidual::kTrip;
+        }
+        nofoot::RotFrameSum now;
+        now.add(vr, vu, vf);
+        double ay = 0.0, ap = 0.0;
+        nofoot::rotFrameDelta(base, now, &ay, &ap);
+        check(!trip && res.userRebases >= 10 && ap < -15.0 && ap > -17.0 && res.maxAbs < 0.5,
+              "F109b guard: a 191 deg turn of the player's own from a base pitched -8 deg reads about -16 deg of pitch in the base's axes (the first F109 trip); "
+              "a new base every 15 deg of the player's own turn keeps the residual under 0.5 deg, and it never trips");
+    }
+    {   // the second trip: the game pitches the view 18 deg down in 0.3 s (a jump) with the head still and next to nothing asked: causal holds it, a new base
+        nofoot::AdsResidual res, old;
+        res.causal = true;
+        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+        axesAt(0.0, 0.0, hr, hu, hf);
+        bool tripRes = false, tripOld = false, held = false;
+        uint64_t ms = 10000;
+        for (int i = 0; i <= 120; ++i, ms += 11) {
+            const double pitch = -18.0 * kD * std::min(1.0, i / 27.0);
+            axesAt(0.0, pitch, vr, vu, vf);
+            res.addAsk(0.01 * kD, -0.01 * kD);
+            const nofoot::AdsResidual::Result r = res.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true);
+            tripRes = tripRes || r == nofoot::AdsResidual::kTrip;
+            held = held || r == nofoot::AdsResidual::kHeld;
+            tripOld = tripOld || old.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true) == nofoot::AdsResidual::kTrip;
+        }
+        check(tripOld && !tripRes && held && res.holds == 1 && res.heldRes[1] < -17.0 && std::fabs(res.heldAsk[1]) < 1.0 && res.maxAbs > 17.0,
+              "F109b guard: a view pitched 18 deg by the game with next to nothing asked trips the guard without the causal gate (F109's second trip) and is held "
+              "with it (one hold, residual pitch under -17 deg against asks under 1 deg), then measured from a new base");
+    }
+    {   // a real runaway still trips with causal on: the camera does not take the aim (the view stays, the residual is minus the asks), or the sign is inverted
+        // (the view turns against the head, the residual about twice the asks)
+        for (int mode = 0; mode < 2; ++mode) {
+            nofoot::AdsResidual res;
+            res.causal = true;
+            double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+            bool trip = false;
+            uint64_t ms = 10000, tripMs = 0;
+            double head = 0.0, asked = 0.0;
+            for (int i = 0; i <= 720; ++i, ms += 11) {
+                const double step = 0.35 * kD;   // 31.5 deg/s to the left
+                if (i > 0) {
+                    head += step;
+                    asked += step;
+                    res.addAsk(step, 0.0);
+                }
+                axesAt(head, 0.0, hr, hu, hf);
+                axesAt(mode == 0 ? head - asked : head - 2.0 * asked, 0.0, vr, vu, vf);
+                const nofoot::AdsResidual::Result r = res.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                if (!trip && r == nofoot::AdsResidual::kTrip) {
+                    trip = true;
+                    tripMs = ms;
+                }
+            }
+            check(trip && tripMs < 10000 + 2000 && res.holds == 0,
+                  mode == 0 ? "F109b guard: with the causal gate on, a camera that does not take the aim (the residual minus the asks) still trips within 2 s, never held"
+                            : "F109b guard: with the causal gate on, an inverted sign (the residual twice the asks) still trips within 2 s, never held");
+        }
+    }
+    {   // a rows gap restarts the growth run: a run 300 ms in, then 300 ms without fresh rows, does not trip on the first fresh row (the run's 0.5 s was not seen)
+        nofoot::AdsResidual res;
+        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+        axesAt(0.0, 0.0, vr, vu, vf);   // the camera does not take the aim: the view stays, the residual is minus the head
+        uint64_t ms = 10000, runAt = 0, gapFrom = 0, gapEnd = 0, tripMs = 0;
+        double head = 0.0;
+        for (int i = 0; i <= 400; ++i, ms += 11) {
+            head += 0.35 * kD;
+            axesAt(head, 0.0, hr, hu, hf);
+            bool rowsOk = true;
+            if (runAt != 0 && ms >= runAt + 300 && gapEnd == 0) {
+                if (gapFrom == 0) gapFrom = ms;
+                if (ms < gapFrom + 300) rowsOk = false;
+                else gapEnd = ms;
+            }
+            const nofoot::AdsResidual::Result r = res.step(ms, rowsOk, vr, vu, vf, true, hr, hu, hf, true, true);
+            if (runAt == 0 && res.growth.growing) runAt = ms;
+            if (tripMs == 0 && r == nofoot::AdsResidual::kTrip) tripMs = ms;
+        }
+        check(res.gapRestarts == 1 && gapEnd != 0 && tripMs >= gapEnd + 500 && tripMs <= gapEnd + 520,
+              "F109b guard: a growth run with 300 ms of no fresh rows in it restarts at the first fresh row (gap restarts 1) and trips only 0.5 s after it, not on "
+              "the time it did not see");
     }
 }
 
