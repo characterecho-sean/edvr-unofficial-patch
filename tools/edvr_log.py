@@ -11618,6 +11618,49 @@ def _hj_f108_hold(rows, ctx):
         return ("PARTIAL", text + "; edits linger at rest")
     return ("OK", text)
 
+def _hj_f116_hud_hide(rows, ctx):
+    """F116: the on-foot HUD hidden while a terminal fills the view (the F105 screens over 15% of an eye's render pixels for 2 frames hide it, 10 frames under 10%
+    show it). The 30 s line prints zeros. No HRC call at all is NEVER APPLIED (the hook never decided). A terminal over 15% for 2 s or more with the HUD submitted is
+    PARTIAL. No census row of an in-world screen is IDLE, named by whether an external upscaler ran (the footprint comes from F105's census, which marks screens only
+    with one; F105-pair terminals only). The hide held with nothing skipped is NEVER APPLIED; no hide (no terminal over 15% for 2 frames) is IDLE. The episodes give
+    each one's length, footprint peak and frames hidden; the game's hide counters are read and logged only (their rises, and how many began with a terminal over 15%).
+    No line at all is the code never having run (not VR, or a build before F116)."""
+    win = rows.get("win", [])
+    if not win:
+        return None
+    calls, skipped, stepped, crow = _hsum(win, "calls"), _hsum(win, "skipped"), _hsum(win, "stepped"), _hsum(win, "rows")
+    over, hidden, began = _hsum(win, "over"), _hsum(win, "hidden"), _hsum(win, "tb")
+    ups = any(r["ups"] == "ran" for r in win)
+    subt, subl = sum(float(r["subt"]) for r in win), max(float(r["subl"]) for r in win)
+    ends = rows.get("tend", [])
+    eps = "; ".join("%s s, peak %s, %s frames hidden" % (r["len"], r["peak"], r["skipped"]) for r in ends[:4])
+    if len(ends) > 4:
+        eps += "; +%d more" % (len(ends) - 4)
+    rises = rows.get("cbegin", [])
+    at_terminal = sum(1 for r in rises if r["fp"].endswith("%") and float(r["fp"][:-1]) > 15.0)
+    notread = rows.get("notread", [])
+    if notread:
+        counters = "not read (%s)" % notread[-1]["why"]
+    else:
+        counters = "read %d calls (refused %d), +0x380 set in %d, +0x384 set in %d; rises %d, %d of them with a terminal over 15%%" % (
+            _hsum(win, "read"), _hsum(win, "refused"), _hsum(win, "hset"), _hsum(win, "sset"), len(rises), at_terminal)
+    text = ("%d windows: HRC calls %d, skipped %d (the HUD hidden); terminal frames %d (census rows %d, an external upscaler %s): over 15%% %d, hidden %d; "
+            "terminal episodes %d (%s); submitted with a terminal over 15%% %.1f s, longest %.1f s; the game's counters (logged only): %s; limits: F105-pair "
+            "terminals only, needs an external upscaler") % (
+        len(win), calls, skipped, stepped, crow, "ran" if ups else "did not run", over, hidden, began, eps or "none", subt, subl, counters)
+    if not calls:
+        return ("NEVER APPLIED", text + "; the hook never decided (no HRC call)")
+    if subl >= 2.0:
+        return ("PARTIAL", text + "; a terminal over 15% for 2 s or more with the HUD submitted")
+    if not crow:
+        return ("IDLE", text + ("; no census of an in-world screen: no external upscaler ran (the footprint needs one)" if not ups
+                                else "; no census of an in-world screen (no F105-pair terminal drawn)"))
+    if hidden and not skipped:
+        return ("NEVER APPLIED", text + "; the hide held and no HUD submit was skipped")
+    if not hidden:
+        return ("IDLE", text + "; no terminal filled the view (over 15% for 2 frames)")
+    return ("OK", text)
+
 
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
@@ -11941,7 +11984,23 @@ HEALTH_RULES = (
         ("heldnote", r"ui depth world screens \(F108\): an in-world screen is held everywhere \(F105's rule\) because its interface texture is not tracked"),
         ("class", r"ui depth world screens \(F108\): a draw of the pair \(vs [0-9A-F]+ ps [0-9A-F]+\) into \d+x\d+ DXGI format \d+ was not taken: "),
     ), _hj_f108_hold),
-)
+    _hrule("HUD hide (F116)", ("F116",), ("HUD hide (F116)",), (
+        ("win", r"HUD hide \(F116\) 30 s: HRC calls (?P<calls>\d+), skipped (?P<skipped>\d+) \(the HUD hidden\); terminal frames (?P<stepped>\d+) \(census rows "
+                r"(?P<rows>\d+), an external upscaler (?P<ups>ran|did not run)\): over 15% (?P<over>\d+), hidden (?P<hidden>\d+); terminal episodes began "
+                r"(?P<tb>\d+), ended (?P<te>\d+); submitted with a terminal over 15% (?P<subt>[\d.]+) s, longest (?P<subl>[\d.]+) s; footprint now "
+                r"(?P<fpnow>[\d.]+%|unknown); the game's counters \(logged only\): calls read (?P<read>\d+), refused (?P<refused>\d+) \(not verified \d+, no "
+                r"controller \d+, wrong class \d+, unreadable \d+\), with \+0x380 set (?P<hset>\d+), with \+0x384 set (?P<sset>\d+), rises (?P<rises>\d+), falls "
+                r"(?P<falls>\d+)\."),
+        ("tend", r"HUD hide \(F116\): terminal episode (?P<n>\d+) ended after (?P<len>[\d.]+) s, (?P<frames>\d+) frames: footprint peak (?P<peak>[\d.]+%|unknown); "
+                 r"HRC calls (?P<calls>\d+), skipped (?P<skipped>\d+)"),
+        ("tbegin", r"HUD hide \(F116\): terminal episode (?P<n>\d+) began: the HUD hidden, terminal footprint (?P<fp>[\d.]+%|unknown)"),
+        ("cbegin", r"HUD hide \(F116\): the game's counter rose \(episode (?P<n>\d+)\): \+0x380 (?P<h>\d+), \+0x384 (?P<s>\d+); terminal footprint "
+                   r"(?P<fp>[\d.]+%|unknown)"),
+        ("cend", r"HUD hide \(F116\): the game's counter fell \(episode (?P<n>\d+)\) after (?P<len>[\d.]+) s"),
+        ("verified", r"HUD hide \(F116\): the game's hide counters are read \(logged only\)"),
+        ("notread", r"HUD hide \(F116\): the game's hide counters are NOT read -- (?P<why>.*?) \(the hide on the terminal footprint is unaffected\)"),
+        ("refread", r"HUD hide \(F116\): a counter read refused -- (?P<why>.*?) \(said once per reason\)"),
+    ), _hj_f116_hud_hide),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -12232,7 +12291,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -12762,9 +12821,11 @@ def self_test_health():
     f91_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f91.h")
     f105_path = os.path.join(repo_root(), "src", "d3d11", "world_screen_coverage.h")
     f105_note_path = os.path.join(repo_root(), "src", "d3d11", "ui_depth.cpp")
+    f116_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f116.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
+        f116src = read_text(f116_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -12803,6 +12864,15 @@ def self_test_health():
             fmts[key] = health_c_format(f105src, needle) or health_c_format(f105note, needle)
         if fmts[key] is None:
             raise AssertionError("world_screen_coverage.h and ui_depth.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R116(needle, *vals):
+        """F116's lines (native_on_foot_f116.h builds them: formatWindow, formatTerminalEnded, ...), from their own format literals."""
+        key = "f116:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f116src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f116.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -13567,6 +13637,41 @@ def self_test_health():
               freshf=0)], 0, [("PARTIAL", T108)], has=["the census read nothing back"])
         check("F108 hold: some screens held everywhere", [hold108(held=40, why="format 40")], 0, [("PARTIAL", T108)], has=["some screens held everywhere"])
         check("F108 hold: edits linger at rest", [hold108(reste=160000)], 0, [("PARTIAL", T108)], has=["edits linger at rest", "edited at rest 10%"])
+
+        # ---- HUD hide (F116): the HUD hidden while a terminal fills the view; the game's hide counters read and logged only ----
+        H116 = "HUD hide (F116)"
+
+        def hud116(calls=2700, skipped=1200, stepped=2690, rows=1500, ups="ran", over=1210, hidden=1205, tb=1, te=1, subt=0.0, subl=0.0, fpnow="0.4%",
+                   read=2700, refused=0, rnv=0, rnc=0, rwc=0, unr=0, hset=0, sset=0, rises=0, falls=0):
+            return R116("HUD hide (F116) 30 s: HRC calls %llu", calls, skipped, stepped, rows, ups, over, hidden, tb, te, subt, subl, fpnow, read, refused, rnv,
+                        rnc, rwc, unr, hset, sset, rises, falls)
+
+        verified116 = R116("the game's hide counters are read")
+        notread116 = R116("the game's hide counters are NOT read", "the counter's push (+0x1A4A9F0) is not build 334925's")
+        tbegin116 = R116("HUD hide (F116): terminal episode %u began", 1, "31.2%")
+        tend116 = R116("HUD hide (F116): terminal episode %u ended", 1, 1.52, 137, "34.5%", 137, 137)
+        cbegin116 = R116("the game's counter rose", 1, 1, 0, "31.2%")
+        cend116 = R116("the game's counter fell", 1, 0.5, 45, 1, 0, "31.2%", "33.0%")
+        idle116 = dict(skipped=0, over=0, hidden=0, tb=0, te=0)
+        check("F116 HUD hide: hidden while a terminal filled the view", [verified116, tbegin116, tend116, hud116(), hud116(**idle116)], 0, [("OK", H116)],
+              has=["2 windows: HRC calls 5400, skipped 1200 (the HUD hidden)", "terminal episodes 1 (1.52 s, peak 34.5%, 137 frames hidden)",
+                   "read 5400 calls (refused 0), +0x380 set in 0, +0x384 set in 0; rises 0, 0 of them with a terminal over 15%",
+                   "limits: F105-pair terminals only, needs an external upscaler"], lacks=["UNPARSED"])
+        check("F116 HUD hide: a terminal over 15% for 2 s with the HUD submitted", [hud116(subt=3.1, subl=2.4)], 0, [("PARTIAL", H116)],
+              has=["submitted with a terminal over 15% 3.1 s, longest 2.4 s", "a terminal over 15% for 2 s or more with the HUD submitted"])
+        check("F116 HUD hide: the hook never decided", [hud116(calls=0, skipped=0, read=0)] * 2, 3, [("NEVER APPLIED", H116)],
+              has=["the hook never decided (no HRC call)"])
+        check("F116 HUD hide: no external upscaler", [hud116(rows=0, ups="did not run", **idle116)], 0, [("IDLE", H116)],
+              has=["an external upscaler did not run", "no external upscaler ran (the footprint needs one)"])
+        check("F116 HUD hide: no terminal filled the view", [hud116(rows=300, **idle116)], 0, [("IDLE", H116)], has=["no terminal filled the view"])
+        check("F116 HUD hide: the hide held and nothing was skipped", [hud116(skipped=0)], 3, [("NEVER APPLIED", H116)],
+              has=["the hide held and no HUD submit was skipped"])
+        check("F116 HUD hide: the game's counter rose at a terminal (logged only)", [cbegin116, cend116, hud116(hset=40, rises=1, falls=1)], 0, [("OK", H116)],
+              has=["+0x380 set in 40", "rises 1, 1 of them with a terminal over 15%"], lacks=["UNPARSED"])
+        check("F116 HUD hide: the counters not read", [notread116, hud116(read=0, refused=2700, rnv=2700)], 0, [("OK", H116)],
+              has=["the game's counters (logged only): not read (the counter's push (+0x1A4A9F0) is not build 334925's)"])
+        check("F116 HUD hide: never ran (no F116 line at all)", [hold108()], 0, [("OK", T108)], has=[H116],
+              lacks=[row(s, H116) for s in ("OK", "PARTIAL", "IDLE", "NEVER APPLIED", "UNPARSED")])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],

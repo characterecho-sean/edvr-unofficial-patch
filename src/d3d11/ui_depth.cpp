@@ -18,6 +18,7 @@
 #include <d3d11.h>
 
 #include <algorithm>  // std::sort: the hologram depth census's pixel-count p50
+#include <atomic>     // F116: the terminal hide the HRC submit hook reads
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -33,6 +34,7 @@
 #include "binding_shadow.h"
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
+#include "native_on_foot_f116.h"   // F116: the terminal hide's frame order and hysteresis (pure)
 #include "object_probe.h"   // objectProbeLedgerActive: the UI content census's eye-run signal
 #include "shader_swap.h"    // shaderSwapCompilePs: the alpha-aware depth shaders
 #include "temporal_pass.h"  // temporalPassPlanes: the scene's encoding
@@ -198,6 +200,14 @@ Microsoft::WRL::ComPtr<ID3D11PixelShader> g_worldScreenTrackedPs;
 bool g_worldScreenTrackedTried = false, g_worldScreenTrackedNoted = false;
 WorldScreenCensusPass g_worldScreenCensusPass;
 WorldScreenCensus g_worldScreenCensus;
+// F116: the HUD hidden while a terminal fills the view (native_on_foot_f116.h). The frames in order (a frame with a screen waits for
+// its census row), the hysteresis on the larger eye's footprint, and what the HRC submit hook and the frame thread read
+// (uiDepthTerminalState). Render thread only, but for the atomics.
+nofoot::f116::FrameOrder g_terminalOrder;
+nofoot::f116::Hysteresis g_terminalHide;
+std::atomic<bool> g_terminalHidden{false}, g_terminalUpscaler{false};
+std::atomic<uint64_t> g_terminalStepMs{0}, g_terminalStepped{0}, g_terminalOver{0}, g_terminalHiddenFrames{0}, g_terminalRows{0};
+std::atomic<float> g_terminalFootprint{-1.0f};
 uint32_t g_worldScreenHeldNoted = 0;        // bits: UiContent decisions already named once as a held reason
 uint32_t g_worldScreenClassNoted = 0;       // bits: classification refusals already named once
 struct WorldScreenSurfaceNote {
@@ -3121,6 +3131,19 @@ void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx) {
     g_worldScreenCoverage.end(ctx);
 }
 
+UiDepthTerminalState uiDepthTerminalState() {
+    UiDepthTerminalState s;
+    s.stepMs = g_terminalStepMs.load(std::memory_order_acquire);
+    s.hidden = g_terminalHidden.load(std::memory_order_relaxed);
+    s.footprint = g_terminalFootprint.load(std::memory_order_relaxed);
+    s.stepped = g_terminalStepped.load(std::memory_order_relaxed);
+    s.over = g_terminalOver.load(std::memory_order_relaxed);
+    s.hiddenFrames = g_terminalHiddenFrames.load(std::memory_order_relaxed);
+    s.rows = g_terminalRows.load(std::memory_order_relaxed);
+    s.upscaler = g_terminalUpscaler.load(std::memory_order_relaxed);
+    return s;
+}
+
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_stellarCpuActive=-1;
     g_reissueOn = false;
@@ -4286,14 +4309,39 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     // F108: the in-world screens' census, before the clear below: the frame's state targets counted (both eyes one row), the
     // rows that are ready read back in frame order, and the described textures' footprints.
     if (ctx) {
+        // F116: every frame takes a place in the hide's frame order: one with a screen waits for its census row, one with none is 0
+        // at once, one whose census was skipped is unknown (the hysteresis holds).
         if (g_screenState[0].marked || g_screenState[1].marked) {
             ID3D11ShaderResourceView* states[2] = {g_screenState[0].marked ? g_screenState[0].srv : nullptr,
                                                    g_screenState[1].marked ? g_screenState[1].srv : nullptr};
-            if (!g_worldScreenCensusPass.count(ctx, states, 2, g_frame)) ++g_worldScreenCensus.skipped;
+            if (!g_worldScreenCensusPass.count(ctx, states, 2, g_frame)) {
+                ++g_worldScreenCensus.skipped;
+                g_terminalOrder.unknown(g_frame);
+            } else {
+                const auto pixels = [](const Mask& m) { return m.marked ? static_cast<uint64_t>(m.w) * m.h : 0ull; };
+                g_terminalOrder.waiting(g_frame, pixels(g_screenState[0]), pixels(g_screenState[1]));
+            }
+        } else {
+            g_terminalOrder.none(g_frame);
         }
-        g_worldScreenCensusPass.drain(ctx, [](uint64_t frame, uint32_t screen, uint32_t edited, uint32_t fresh) {
-            g_worldScreenCensus.add(frame, screen, edited, fresh);
+        g_worldScreenCensusPass.drain(ctx, [](const WorldScreenCensusRow& r) {
+            if (r.ok) {
+                g_worldScreenCensus.add(r.frame, r.screen, r.edited, r.fresh);
+                g_terminalRows.fetch_add(1, std::memory_order_relaxed);
+            }
+            g_terminalOrder.row(r.frame, r.ok, r.eye[0], r.eye[1]);
         });
+        g_terminalOrder.pop([](uint64_t, bool known, float footprint) {
+            if (!known) return;
+            const bool hidden = g_terminalHide.step(footprint);
+            g_terminalFootprint.store(footprint, std::memory_order_relaxed);
+            g_terminalStepped.fetch_add(1, std::memory_order_relaxed);
+            if (footprint > nofoot::f116::kHideOver) g_terminalOver.fetch_add(1, std::memory_order_relaxed);
+            if (hidden) g_terminalHiddenFrames.fetch_add(1, std::memory_order_relaxed);
+        });
+        g_terminalHidden.store(g_terminalHide.hidden, std::memory_order_relaxed);
+        g_terminalUpscaler.store(g_trained, std::memory_order_relaxed);
+        g_terminalStepMs.store(GetTickCount64(), std::memory_order_release);
         worldScreenPollNotes(ctx);
     }
     // The masks are marked during the frame and read at its submits, so
@@ -4487,6 +4535,10 @@ void uiDepthShutdown() {
     g_worldScreenTrackedTried = g_worldScreenTrackedNoted = false;
     g_worldScreenCensusPass.reset();
     g_worldScreenCensus = WorldScreenCensus{};
+    g_terminalOrder.clear();
+    g_terminalHide = nofoot::f116::Hysteresis{};
+    g_terminalHidden.store(false, std::memory_order_relaxed);
+    g_terminalStepMs.store(0, std::memory_order_release);
     g_worldScreenHeldNoted = g_worldScreenClassNoted = 0;
     for (auto& n : g_worldScreenSurfaces) n = WorldScreenSurfaceNote{};
     g_worldScreenSurfaceCount = 0;

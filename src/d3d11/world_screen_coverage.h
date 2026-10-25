@@ -285,9 +285,19 @@ public:
     }
 };
 
-// F108's census on the GPU: each eye's screen-state target counted by kWorldScreenCensusCs into three words (screen
-// pixels, edited, an edit's first frame), copied into a ring of four staging buffers and read back in frame order with
-// no wait. A frame whose slot is still in flight skips its census (counted). The compute state it touches is put back.
+// One frame's census row: both eyes' screen, edited and first-frame pixels, and each eye's screen pixels (F116: the hide reads
+// the larger eye's footprint). ok is false for a row lost on read-back (its counts are zero).
+struct WorldScreenCensusRow {
+    uint64_t frame = 0;
+    bool ok = false;
+    uint32_t screen = 0, edited = 0, fresh = 0;
+    uint32_t eye[2] = {};
+};
+
+// F108's census on the GPU: each eye's screen-state target counted by kWorldScreenCensusCs into three words of its own
+// four-word range (screen pixels, edited, an edit's first frame; F116: eye 0 at words 0-2, eye 1 at words 4-6, so each eye's
+// footprint is known), copied into a ring of four staging buffers and read back in frame order with no wait. A frame whose
+// slot is still in flight skips its census (counted). The compute state it touches is put back.
 class WorldScreenCensusPass {
     template <class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 public:
@@ -295,7 +305,7 @@ public:
 private:
     Ptr<ID3D11ComputeShader> cs_;
     Ptr<ID3D11Buffer> counts_, staging_[kSlots];
-    Ptr<ID3D11UnorderedAccessView> uav_;
+    Ptr<ID3D11UnorderedAccessView> uav_[2];   // F116: eye 0's words 0-3, eye 1's words 4-7
     uint64_t frame_[kSlots] = {};
     bool pending_[kSlots] = {};
     unsigned next_ = 0, oldest_ = 0;
@@ -312,19 +322,22 @@ private:
                                       "ui depth world screens (F108)"));
         if (!cs_) return false;
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 16;
+        bd.ByteWidth = 32;
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
         if (FAILED(dev->CreateBuffer(&bd, nullptr, &counts_))) return false;
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-        ud.Format = DXGI_FORMAT_R32_TYPELESS;
-        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = 4;
-        ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-        if (FAILED(dev->CreateUnorderedAccessView(counts_.Get(), &ud, &uav_))) return false;
+        for (unsigned e = 0; e < 2; ++e) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = DXGI_FORMAT_R32_TYPELESS;
+            ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            ud.Buffer.FirstElement = 4 * e;
+            ud.Buffer.NumElements = 4;
+            ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+            if (FAILED(dev->CreateUnorderedAccessView(counts_.Get(), &ud, &uav_[e]))) return false;
+        }
         D3D11_BUFFER_DESC sd{};
-        sd.ByteWidth = 16;
+        sd.ByteWidth = 32;
         sd.Usage = D3D11_USAGE_STAGING;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         for (auto& s : staging_) if (FAILED(dev->CreateBuffer(&sd, nullptr, &s))) return false;
@@ -349,13 +362,13 @@ public:
         ctx->CSGetShaderResources(0, 1, &savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
         const UINT zero[4] = {};
-        ctx->ClearUnorderedAccessViewUint(uav_.Get(), zero);
+        for (auto& u : uav_) ctx->ClearUnorderedAccessViewUint(u.Get(), zero);
         ctx->CSSetShader(cs_.Get(), nullptr, 0);
-        ID3D11UnorderedAccessView* uav = uav_.Get();
-        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
         for (unsigned i = 0; i < n; ++i) {
             ID3D11ShaderResourceView* s = states[i];
             if (!s) continue;
+            ID3D11UnorderedAccessView* uav = uav_[i < 2 ? i : 1].Get();   // F116: each eye into its own range (a third would add to eye 1's)
+            ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
             Ptr<ID3D11Resource> r;
             s->GetResource(&r);
             Ptr<ID3D11Texture2D> t;
@@ -382,19 +395,27 @@ public:
         return true;
     }
 
-    // Read back what is ready, oldest first, stopping at the first slot still in flight: sink(frame, screen, edited, fresh).
+    // Read back what is ready, oldest first, stopping at the first slot still in flight: sink(const WorldScreenCensusRow&), a
+    // row lost on read-back included (ok false), so a reader waiting on its frame is told.
     template <class Sink>
     void drain(ID3D11DeviceContext* ctx, Sink&& sink) {
         while (ctx && pending_[oldest_]) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const HRESULT hr = ctx->Map(staging_[oldest_].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
+            WorldScreenCensusRow row;
+            row.frame = frame_[oldest_];
             if (SUCCEEDED(hr) && m.pData) {
                 const uint32_t* v = static_cast<const uint32_t*>(m.pData);
-                const uint32_t screen = v[0], edited = v[1], fresh = v[2];
+                row.ok = true;
+                row.eye[0] = v[0];
+                row.eye[1] = v[4];
+                row.screen = v[0] + v[4];
+                row.edited = v[1] + v[5];
+                row.fresh = v[2] + v[6];
                 ctx->Unmap(staging_[oldest_].Get(), 0);
-                sink(frame_[oldest_], screen, edited, fresh);
             }
+            sink(row);
             pending_[oldest_] = false;
             oldest_ = (oldest_ + 1) % kSlots;
         }
@@ -403,7 +424,7 @@ public:
     void reset() {
         cs_.Reset();
         counts_.Reset();
-        uav_.Reset();
+        for (auto& u : uav_) u.Reset();
         for (auto& s : staging_) s.Reset();
         for (auto& p : pending_) p = false;
         next_ = oldest_ = 0;

@@ -35,6 +35,7 @@
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
+#include "f116_checks.h"    // F116: the HUD hidden while a terminal fills the view (hysteresis, frame order, the hook's skip, the lines)
 
 #include <array>
 #include <chrono>
@@ -7296,6 +7297,9 @@ int wmain(int argc, wchar_t** argv) {
     f111test::run111(check);
     // F113: the row sources, a second's accounting by source, the check's schedule and its hold on the tee's fast path, the latch.
     f113test::run113(check);
+    // F116: the HUD hidden while a terminal fills the view: the footprint, the hysteresis (2 frames over 15% hide, 10 under 10% show), the frame order, the hook's
+    // skip, the counters' read (logged only), the episodes and the lines.
+    f116test::run116(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
