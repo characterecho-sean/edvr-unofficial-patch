@@ -6,6 +6,7 @@
 #include "stellar_coverage.h"
 #include "orbital_width.h"    // the orbit lines' factor and the twin's private b13 (fix.ui_quality)
 #include "planet_motion.h"
+#include "world_screen_coverage.h"   // F105: the in-world screens' coverage
 #include "gpu_interval.h"
 #include "gpu_census.h"     // the hologram resolve's three sub-sections (DoorHoloDepthCopy, DoorHoloNearLight, DoorHoloResolveDraw)
 #include "ui_content.h"
@@ -47,7 +48,8 @@ UiDepthMode g_uiDepthMode = UiDepthMode::kNone;
 bool g_uiDepthOn = false;          // the key and the pass, both
 bool g_uiDepthStoodDown = false;
 bool g_uiDepthPlanetPending = false, g_uiDepthPlanetSolarPending = false;
-bool g_holoDepthOn = false;        // the hologram depth pass (on whenever the temporal pass runs)
+bool g_uiDepthWorldScreenPending = false;   // F105 (world_screen_coverage.h)
+bool g_holoDepthOn = false;       // the hologram depth pass (on whenever the temporal pass runs)
 bool g_uiDepthDrawComposite = false;  // the last eye draw sampled a learned interface surface (ui_depth.h)
 }  // namespace detail
 
@@ -185,6 +187,11 @@ float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as tem
 HoloMotion g_holoMotion[2];
 PlanetCoverage g_planetCoverage;
 bool g_planetNoted=false,g_solarNoted=false;
+// F105: the in-world screens' coverage (world_screen_coverage.h): the pass, its stand-in, its window and its once-only note.
+WorldScreenCoverage g_worldScreenCoverage;
+Microsoft::WRL::ComPtr<ID3D11PixelShader> g_worldScreenPs;
+bool g_worldScreenPsTried = false, g_worldScreenNoted = false;
+WorldScreenWindow g_worldScreenWindow;
 HoloDraw g_holoDraw;
 bool g_holoBound=false, g_holoNoted=false;
 bool g_coronaPending=false, g_coronaMotion=false, g_coronaNoted=false;
@@ -2584,6 +2591,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     detail::g_uiDepthDrawComposite = false;   // this draw's answer, set below; false on every early return
     detail::g_uiDepthPlanetPending=false;detail::g_uiDepthPlanetSolarPending=false;
+    detail::g_uiDepthWorldScreenPending=false;
     g_coronaPending=false;g_coronaMotion=false;
     g_holoDraw=draw;
     detail::g_uiDepthMode = Mode::kNone;
@@ -2626,6 +2634,16 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         if((h==kPlanetSurfaceVs && ps==kPlanetSurfacePs) || (h==kSolarSurfaceVs && ps==kSolarSurfacePs)) {
             detail::g_uiDepthPlanetPending=true;detail::g_uiDepthPlanetSolarPending=h==kSolarSurfaceVs;return false;
         }
+    }
+    // F105: an in-world screen, the interface drawn as a lit surface in the G-buffer pass (world_screen_coverage.h). Not a
+    // composite this file has a depth stand-in for and not one the layer can take: marked into the eye's coverage and edit
+    // masks after the game's draw (uiDepthWorldScreenBegin), and nothing else. Learned like the planets: its colour target
+    // is the G-buffer's, which must not join the eye-target table, so Begin finds the eye from the scene depth.
+    if (composite && h == kWorldScreenVs &&
+        worldScreenDraw(h, boundPsHash(ctx), composite, dsvIsSceneDepth(dsv), g_trained)) {
+        ++g_worldScreenWindow.seen;
+        detail::g_uiDepthWorldScreenPending = true;
+        return false;
     }
     const bool stellar=h==kRingVs || h==kOrbitalVs;
     if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
@@ -2859,6 +2877,78 @@ bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
     return true;
 }
 void uiDepthPlanetEnd(ID3D11DeviceContext* ctx) { g_planetCoverage.end(ctx); }
+
+// F105 (world_screen_coverage.h): the draw uiDepthOnEyeDraw classified as an in-world screen, issued once more into the
+// eye's coverage and edit masks over the game's own depth. Every decline is counted by its reason on the 20 s line.
+bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx) {
+    const bool pending = detail::g_uiDepthWorldScreenPending;
+    detail::g_uiDepthWorldScreenPending = false;
+    if (!pending || !detail::g_uiDepthOn || detail::g_uiDepthStoodDown || !g_trained || !ctx ||
+        ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        return false;
+    // The pair still bound: a flag left by a draw this path never reached must not mark another draw.
+    if (boundVsHash(ctx) != kWorldScreenVs || boundPsHash(ctx) != kWorldScreenPs) {
+        g_worldScreenWindow.refuse(WorldScreenRefusal::kState);
+        return false;
+    }
+    // The eye from the scene depth bound for the draw, as uiDepthPlanetBegin finds it.
+    auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> scene;
+    if (dsv) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        dsv->GetResource(&resource);
+        if (resource) resource.As(&scene);
+    }
+    int eye = -1;
+    D3D11_TEXTURE2D_DESC td{};
+    if (scene) {
+        scene->GetDesc(&td);
+        for (int i = 0; i < 2 && eye < 0; ++i) {
+            ID3D11Texture2D* candidate = nullptr;
+            uint32_t format = 0;
+            if (depthProbeSceneDepthFormat(td.Width, td.Height, i, &candidate, &format) && candidate == scene.Get()) eye = i;
+        }
+    }
+    if (eye < 0) {
+        g_worldScreenWindow.refuse(WorldScreenRefusal::kNoEye);
+        return false;
+    }
+    Mask* mask = maskFor(ctx, eye, td.Width, td.Height);
+    Mask* edits = maskFor(ctx, eye, td.Width, td.Height, g_edits);
+    if (!mask || !mask->rtv || !edits || !edits->rtv) {
+        g_worldScreenWindow.refuse(WorldScreenRefusal::kNoMask);
+        return false;
+    }
+    if (!g_worldScreenPs && !g_worldScreenPsTried) {
+        g_worldScreenPsTried = true;
+        g_worldScreenPs.Attach(shaderSwapCreatePs(ctx, kWorldScreenCoverageBytecode, sizeof(kWorldScreenCoverageBytecode),
+                                                  "world_screen_coverage_ps", "ui depth world screens (F105)"));
+    }
+    if (!g_worldScreenPs) {
+        g_worldScreenWindow.refuse(WorldScreenRefusal::kShader);
+        return false;
+    }
+    ID3D11DepthStencilState* test = maskDepthState(ctx);
+    ID3D11BlendState* blend = maskBlend(ctx);
+    if (!test || !blend || !g_worldScreenCoverage.begin(ctx, g_worldScreenPs.Get(), mask->rtv, edits->rtv, test, blend)) {
+        g_worldScreenWindow.refuse(WorldScreenRefusal::kState);
+        return false;
+    }
+    mask->marked = true;
+    edits->marked = true;
+    ++g_worldScreenWindow.marked;
+    ++g_worldScreenWindow.eye[eye];
+    if (!g_worldScreenNoted) {
+        g_worldScreenNoted = true;
+        Log::get().note("ui depth world screens (F105): an in-world screen (vs %016llX ps %016llX, the interface drawn as a lit "
+                        "surface) is marked into eye %d's coverage and edit masks at %ux%u from this draw on; the UI resolve "
+                        "holds its pixels to the current frame after DLSS. Said once.",
+                        static_cast<unsigned long long>(kWorldScreenVs), static_cast<unsigned long long>(kWorldScreenPs),
+                        eye, td.Width, td.Height);
+    }
+    return true;
+}
+void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx) { g_worldScreenCoverage.end(ctx); }
 
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_stellarCpuActive=-1;
@@ -4060,6 +4150,7 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     }
     g_uiContentCensusLedgerWasOn = ledgerActive;
     ++g_wFrames;
+    ++g_worldScreenWindow.frames;
     if (!g_announced && g_wWrote > 0) {
         g_announced = true;
         Log::get().note("ui depth: engaged -- %u interface draws wrote their depth "
@@ -4068,6 +4159,13 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                         g_wWrote, g_wComposite, g_surfaceCount, g_wDirect, g_wReissued);
     }
     if (g_wFrames >= kTotalsFrames) {
+        // F105: every window while an external upscaler runs, zeros included (world_screen_coverage.h says how to read it).
+        if (g_trained) {
+            char line[600];
+            worldScreenFormatWindow(line, sizeof(line), g_worldScreenWindow);
+            Log::get().note("%s", line);
+        }
+        g_worldScreenWindow.reset();
         const auto& edits=g_uiContent.totals;
         if(g_trained) Log::get().note("UI content totals: compared=%u reused=%u declined=%u reset=%u evicted=%u history=%.2f MiB (session totals; zero comparisons means inactive).",
             edits.updates,edits.hits,edits.declined,edits.resets,edits.evicted,double(g_uiContent.allocated)/(1024*1024));
@@ -4191,6 +4289,10 @@ void uiDepthShutdown() {
     g_familyLoggedCount = 0;
     detail::g_uiDepthOn = false;
     detail::g_uiDepthPlanetPending=detail::g_uiDepthPlanetSolarPending=g_planetNoted=g_solarNoted=false;g_planetCoverage=PlanetCoverage{};
+    detail::g_uiDepthWorldScreenPending = false;
+    g_worldScreenPs.Reset();
+    g_worldScreenPsTried = g_worldScreenNoted = false;
+    g_worldScreenWindow.reset();
 }
 
 }  // namespace edvr

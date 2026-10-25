@@ -11310,6 +11310,32 @@ def _hj_f100_pose(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f105_screens(rows, ctx):
+    """F105: the in-world screens (a terminal's interface drawn as a lit surface) marked into the eyes' coverage and edit masks, so the UI resolve holds them to the
+    current frame after DLSS. Its 20 s line prints zeros: no screen seen is IDLE; screens seen and none marked is NEVER APPLIED (the refusals say why); marked in
+    under 90% of the draws seen, or in one eye only, is PARTIAL. No line at all is the code never having run (no external upscaler, or a build before F105)."""
+    win = rows.get("win", [])
+    if not win:
+        return None
+    seen, marked = _hsum(win, "seen"), _hsum(win, "marked")
+    e0, e1 = _hsum(win, "e0"), _hsum(win, "e1")
+    refused = collections.Counter()
+    for r in win:
+        for key, name in (("noeye", "no eye"), ("nomask", "no mask"), ("noshader", "no shader"), ("state", "state")):
+            refused[name] += int(r[key])
+    text = "%d windows, %d frames: screen draws seen %d, marked %d (eye 0 %d, eye 1 %d); refused %s" % (
+        len(win), _hsum(win, "frames"), seen, marked, e0, e1, _htop(refused, 4))
+    if rows.get("note"):
+        text += "; first marked at %dx%d" % (int(rows["note"][0]["w"]), int(rows["note"][0]["h"]))
+    if not seen:
+        return ("IDLE", text + "; no in-world screen drawn")
+    if not marked:
+        return ("NEVER APPLIED", text + "; screens drawn and none marked")
+    if marked < 0.9 * seen or not e0 or not e1:
+        return ("PARTIAL", text + ("; one eye only" if not e0 or not e1 else "; %s of the draws marked" % _hpct(marked, seen)))
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge)
 
@@ -11543,6 +11569,12 @@ HEALTH_RULES = (
     _hrule("pose hook CPU (F100)", ("F100",), ("pose hook CPU (F100)",), (
         ("sec", r"pose hook CPU \(F100\) 1 s: (?P<calls>\d+) calls \([^)]*\), (?P<mean>[\d.]+) us mean, (?P<max>[\d.]+) us max, (?P<ms>[\d.]+) ms in all"),
     ), _hj_f100_pose),
+    _hrule("world screens (F105)", ("F105",), ("ui depth world screens (F105)",), (
+        ("win", r"ui depth world screens \(F105\): (?P<frames>\d+) frames, seen (?P<seen>\d+), marked (?P<marked>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\); "
+                r"refused: no eye (?P<noeye>\d+), no mask (?P<nomask>\d+), no shader (?P<noshader>\d+), state (?P<state>\d+)\."),
+        ("note", r"ui depth world screens \(F105\): an in-world screen \(vs [0-9A-F]+ ps [0-9A-F]+, [^)]*\) is marked into eye \d's coverage and edit masks at "
+                 r"(?P<w>\d+)x(?P<h>\d+) from this draw on"),
+    ), _hj_f105_screens),
 )
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -11834,7 +11866,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition and left eye F89, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -12362,8 +12394,11 @@ def self_test_health():
     swap_path = os.path.join(repo_root(), "src", "d3d11", "shader_swap.cpp")
     f90_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f90.h")
     f91_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f91.h")
+    f105_path = os.path.join(repo_root(), "src", "d3d11", "world_screen_coverage.h")
+    f105_note_path = os.path.join(repo_root(), "src", "d3d11", "ui_depth.cpp")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
+        f105src, f105note = read_text(f105_path), read_text(f105_note_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -12393,6 +12428,15 @@ def self_test_health():
             fmts[key] = health_c_format(f91src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f91.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R105(needle, *vals):
+        """F105's lines: the 20 s window (world_screen_coverage.h worldScreenFormatWindow) and the once-only note (ui_depth.cpp), from their own format literals."""
+        key = "f105:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f105src, needle) or health_c_format(f105note, needle)
+        if fmts[key] is None:
+            raise AssertionError("world_screen_coverage.h and ui_depth.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -12946,6 +12990,22 @@ def self_test_health():
         check("F100 pose: the local Animate work clocked", [pose100(), pose100(ms=4.1)], 0, [("OK", P100)],
               has=["2 s: 180 calls (90 a second), 42.5 us a call (median second), max 120.0 us"], lacks=["UNPARSED"])
         check("F100 pose: no local work", [pose100(0, 0.0, 0.0, 0.0)] * 2, 0, [("IDLE", P100)], has=["no local Animate work clocked"])
+
+        # ---- world screens (F105): the in-world screens marked into the coverage and edit masks ----
+        W105 = "world screens (F105)"
+
+        def screens(frames=1800, seen=7200, marked=7200, e0=3600, e1=3600, noeye=0, nomask=0, noshader=0, state=0):
+            return R105("ui depth world screens (F105): %u frames", frames, seen, marked, e0, e1, noeye, nomask, noshader, state)
+
+        note105 = R105("ui depth world screens (F105): an in-world screen", 0, 0, 0, 1536, 1632)
+        check("F105 screens: marked in both eyes", [note105, screens(), screens()], 0, [("OK", W105)],
+              has=["2 windows, 3600 frames: screen draws seen 14400, marked 14400 (eye 0 7200, eye 1 7200); refused none", "first marked at 1536x1632"],
+              lacks=["UNPARSED"])
+        check("F105 screens: none drawn", [screens(seen=0, marked=0, e0=0, e1=0)] * 2, 0, [("IDLE", W105)], has=["no in-world screen drawn"])
+        check("F105 screens: drawn and none marked", [screens(marked=0, e0=0, e1=0, noeye=7200)] * 2, 3, [("NEVER APPLIED", W105)],
+              has=["refused no eye 14400", "screens drawn and none marked"])
+        check("F105 screens: one eye only", [screens(marked=3600, e0=3600, e1=0, noeye=3600)], 0, [("PARTIAL", W105)], has=["one eye only"])
+        check("F105 screens: a fifth refused", [screens(marked=5760, e0=2880, e1=2880, state=1440)], 0, [("PARTIAL", W105)], has=["80% of the draws marked", "state 1440"])
 
         # ---- pistol readout (F90) ----
         check("F90 pistol: held, nothing moved", [pistol()] * 4, 3, [("NEVER APPLIED", F90P)],

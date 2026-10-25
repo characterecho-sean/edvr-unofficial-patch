@@ -55,6 +55,9 @@ extern bool g_uiDepthOn;
 extern bool g_uiDepthStoodDown;
 extern bool g_uiDepthPlanetPending;
 extern bool g_uiDepthPlanetSolarPending;
+// F105: the draw uiDepthOnEyeDraw just classified is an in-world screen (world_screen_coverage.h); cleared at the top of
+// every call, so it only ever answers for that draw.
+extern bool g_uiDepthWorldScreenPending;
 // The generic contribution-based
 // coverage below, independent of g_uiDepthOn's own per-family shaders.
 extern bool g_holoDepthOn;
@@ -72,6 +75,9 @@ inline bool uiDepthWantsDraws() {
 }
 inline bool uiDepthPlanetPending() {
     return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
+}
+inline bool uiDepthWorldScreenPending() {
+    return detail::g_uiDepthWorldScreenPending;
 }
 // True when the draw uiDepthOnEyeDraw has just classified samples a learned
 // interface surface. Read right after that call, for the same draw.
@@ -212,6 +218,11 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
 // Opaque planet motion coverage, separate from UI classification/depth.
 bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx);
 void uiDepthPlanetEnd(ID3D11DeviceContext* ctx);
+// F105: an in-world screen's coverage into the eye's coverage and edit masks (world_screen_coverage.h). Begin clears
+// the pending flag and returns true only when the masks are bound for the draw's second issue; End puts the game's
+// state back.
+bool uiDepthWorldScreenBegin(ID3D11DeviceContext* ctx);
+void uiDepthWorldScreenEnd(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
 // Coverage supports UI history decisions. The temporal pass keeps per-eye

@@ -4518,6 +4518,12 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
         pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
     }
+    // F105: an in-world screen (world_screen_coverage.h), the same draw once more into the eye's coverage and edit masks,
+    // while the game's state for it is still bound. The pending test is inline, like the planets' above.
+    if (owner && !layered && uiDepthWorldScreenPending() && uiDepthWorldScreenBegin(self)) {
+        GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
+        pureDrawReissue(self,kind,count,instances,args);uiDepthWorldScreenEnd(self);
+    }
     if (v != DrawVerdict::kNone) {
         if (v == DrawVerdict::kBackdrop) backdropEnd(self);
         // The splash screen's dim under the loader's dialogs (splash_dim.h):
