@@ -11418,7 +11418,9 @@ def _hj_f108_hold(rows, ctx):
     every screen pixel edited. Tracked draws with no census row read back is PARTIAL (the hold ran; how much it held is unknown), as are some draws held
     everywhere, and edits lingering at rest (over 5% of the screen's pixels in frames 32 or more after the last change). The three figures: frames with an edit,
     the fraction of screen pixels edited at rest against during a change, and history restarts (pixels and frames). No line at all is the code never having run
-    (no external upscaler, or a build before F108)."""
+    (no external upscaler, or a build before F108). F108b: the hold in frames from a block's last change (the line's, or 32 for an F108 line, which held for
+    UiContent's whole expiry), and the mean frames a change held the screen: frames with an edit over the changes that began from rest (an F108 line does not
+    count those, so its mean is not given). A frame is at rest from the hold's end, so a hold that outlives it shows as edits at rest."""
     win = rows.get("win", [])
     if not win:
         return None
@@ -11427,6 +11429,17 @@ def _hj_f108_hold(rows, ctx):
     restf, reste, rests = _hsum(win, "restf"), _hsum(win, "reste"), _hsum(win, "rests")
     durf, dure, durs = _hsum(win, "durf"), _hsum(win, "dure"), _hsum(win, "durs")
     fresh, freshf, skipped = _hsum(win, "fresh"), _hsum(win, "freshf"), _hsum(win, "skipped")
+    holds = sorted({int(r["hold"]) for r in win if r.get("hold") is not None})
+    hold = ("/".join(str(h) for h in holds) + " frames") if holds else "32 frames (F108's expiry, not in the line)"
+    counted = [r for r in win if r.get("changes") is not None]
+    changes = sum(int(r["changes"]) for r in counted)
+    counted_edits = sum(int(r["editf"]) for r in counted)
+    if not counted:
+        per_change = "not counted in this build's line"
+    elif changes:
+        per_change = "%.1f (%d frames with an edit over %d changes from rest)" % (counted_edits / changes, counted_edits, changes)
+    else:
+        per_change = "- (no change from rest)"
     why = collections.Counter()
     for r in win:
         why.update(_hpairs(r["why"]))
@@ -11435,10 +11448,11 @@ def _hj_f108_hold(rows, ctx):
         for key, name in (("nosurf", "no learned surface"), ("nodepth", "not the scene's depth"), ("notrained", "no external upscaler")):
             taken[name] += int(r[key])
     rest_frac = (reste / rests) if rests else 0.0
-    text = ("%d windows: draws tracked %d, held everywhere %d (%s); census %d frames (%d skipped): frames with an edit %d; edited at rest %s (%d of %d px "
-            "in %d frames), during a change %s (%d of %d px in %d frames); history restarts %d px in %d frames; not taken at the classification: %s") % (
-        len(win), tracked, held, _htop(why, 4), cframes, skipped, editf, _hpct(reste, rests), reste, rests, restf, _hpct(dure, durs), dure, durs, durf,
-        fresh, freshf, _htop(taken, 3))
+    text = ("%d windows: draws tracked %d, held everywhere %d (%s); a change held %s, held frames per change %s; census %d frames (%d skipped): "
+            "frames with an edit %d; edited at rest %s (%d of %d px in %d frames), during a change %s (%d of %d px in %d frames); history restarts %d px in "
+            "%d frames; not taken at the classification: %s") % (
+        len(win), tracked, held, _htop(why, 4), hold, per_change, cframes, skipped, editf, _hpct(reste, rests), reste, rests, restf, _hpct(dure, durs),
+        dure, durs, durf, fresh, freshf, _htop(taken, 3))
     for n in rows.get("surface", []):
         text += "; interface texture %s: %sx%s, %s slice(s), %s mip(s), format %s%s" % (
             n["n"], n["w"], n["h"], n["slices"], n["mips"], n["fmt"], (", footprint %s render px" % n["px"]) if n["px"] else "")
@@ -11716,10 +11730,10 @@ HEALTH_RULES = (
                  r"(?P<w>\d+)x(?P<h>\d+) from this draw on"),
     ), _hj_f105_screens),
     _hrule("terminal hold (F108)", ("F108",), ("ui depth world screens (F108)",), (
-        ("win", r"ui depth world screens \(F108\): (?P<frames>\d+) frames; draws tracked (?P<tracked>\d+), held without change tracking (?P<held>\d+) "
+        ("win", r"ui depth world screens \(F108\): (?P<frames>\d+) frames(?:, a change held (?P<hold>\d+) frames)?; draws tracked (?P<tracked>\d+), held without change tracking (?P<held>\d+) "
                 r"\((?P<why>[^)]*)\); not taken at the classification: no learned surface (?P<nosurf>\d+), not the scene's depth (?P<nodepth>\d+), no external "
                 r"upscaler (?P<notrained>\d+); census (?P<cframes>\d+) frames with a screen \((?P<skipped>\d+) skipped\): frames with an edit (?P<editf>\d+), a "
-                r"change began (?P<changef>\d+); at rest (?P<restf>\d+) frames, edited (?P<reste>\d+) of (?P<rests>\d+) px; during a change (?P<durf>\d+) "
+                r"change began (?P<changef>\d+)(?:, changes from rest (?P<changes>\d+))?; at rest (?P<restf>\d+) frames, edited (?P<reste>\d+) of (?P<rests>\d+) px; during a change (?P<durf>\d+) "
                 r"frames, edited (?P<dure>\d+) of (?P<durs>\d+) px; history restarts (?P<fresh>\d+) px in (?P<freshf>\d+) frames\."),
         ("surface", r"ui depth world screens \(F108\): interface texture (?P<n>\d+): (?P<w>\d+)x(?P<h>\d+), (?P<slices>\d+) slice\(s\), (?P<mips>\d+) mip\(s\), "
                     r"DXGI format (?P<fmt>\d+)(?:.*? covered (?P<px>\d+) render px)?"),
@@ -13206,10 +13220,10 @@ def self_test_health():
         # ---- terminal hold (F108): held only while the interface changes; the census's three figures; the old behaviour flagged ----
         T108 = "terminal hold (F108)"
 
-        def hold108(frames=1800, tracked=3600, held=0, why="none", nosurf=0, nodepth=0, notrained=0, cframes=1700, skipped=0, editf=120, changef=3,
-                 restf=1600, reste=0, rests=1600000, durf=100, dure=30000, durs=100000, fresh=3000, freshf=3):
-            return R105("ui depth world screens (F108): %u frames; draws tracked", frames, tracked, held, why, nosurf, nodepth, notrained, cframes,
-                        skipped, editf, changef, restf, reste, rests, durf, dure, durs, fresh, freshf)
+        def hold108(frames=1800, hold=7, tracked=3600, held=0, why="none", nosurf=0, nodepth=0, notrained=0, cframes=1700, skipped=0, editf=120, changef=3,
+                 changes=3, restf=1600, reste=0, rests=1600000, durf=100, dure=30000, durs=100000, fresh=3000, freshf=3):
+            return R105("ui depth world screens (F108): %u frames, a change held %u frames; draws tracked", frames, hold, tracked, held, why, nosurf, nodepth,
+                        notrained, cframes, skipped, editf, changef, changes, restf, reste, rests, durf, dure, durs, fresh, freshf)
 
         tracked108 = R105("ui depth world screens (F108): an in-world screen's interface is tracked")
         held108 = R105("ui depth world screens (F108): an in-world screen is held everywhere", "declined", "format")
@@ -13218,11 +13232,22 @@ def self_test_health():
                                                             28, 0, 0, 0, 3, "updated", "compared") + R105("; the screen's first pass in eye %d", 0),
                           68621, 274484.0, 2.0, 2.0)
         check("F108 hold: held only where the interface changed", [tracked108, class108, surface108, hold108(), hold108()], 0, [("OK", T108)],
-              has=["draws tracked 7200, held everywhere 0 (none)", "frames with an edit 240", "edited at rest 0% (0 of 3200000 px in 3200 frames), during a "
+              has=["draws tracked 7200, held everywhere 0 (none)", "a change held 7 frames, held frames per change 40.0 (240 frames with an edit over 6 "
+                   "changes from rest)", "frames with an edit 240", "edited at rest 0% (0 of 3200000 px in 3200 frames), during a "
                    "change 30% (60000 of 200000 px in 200 frames)", "history restarts 6000 px in 6 frames", "not taken at the classification: none",
                    "interface texture 1: 1024x512, 4 slice(s), 1 mip(s), format 28, footprint 68621 render px"],
               lacks=["UNPARSED"])
         check("F108 hold: the classification's refusals named", [class108, hold108(nodepth=12)], 0, [("OK", T108)], has=["not the scene's depth 12"])
+        # F108b: the hold's length and the mean a change held the screen; an F108 line (no hold, no changes from rest) still reads, its hold UiContent's 32
+        check("F108b hold: a short hold, a keystroke animating over two frames", [hold108(editf=24, changef=6, changes=3)], 0, [("OK", T108)],
+              has=["a change held 7 frames, held frames per change 8.0 (24 frames with an edit over 3 changes from rest)"], lacks=["UNPARSED"])
+        check("F108b hold: no change began from rest", [hold108(editf=0, changef=0, changes=0, durf=0, dure=0, durs=0, fresh=0, freshf=0)], 0,
+              [("OK", T108)], has=["held frames per change - (no change from rest)"])
+        old108 = "ui depth world screens (F108): 1800 frames; draws tracked 1944, held without change tracking 0 (none); not taken at the classification: no learned surface 45, not the scene's depth 0, no external upscaler 0; census 621 frames with a screen (0 skipped): frames with an edit 96, a change began 24; at rest 521 frames, edited 0 of 764467289 px; during a change 100 frames, edited 88886913 of 205009022 px; history restarts 11947231 px in 24 frames."
+        check("F108b hold: an F108 line, before the hold was shortened", [old108], 0, [("OK", T108)],
+              has=["a change held 32 frames (F108's expiry, not in the line), held frames per change not counted in this build's line", "frames with an edit 96",
+                   "history restarts 11947231 px in 24 frames"], lacks=["UNPARSED"])
+        check("F108b hold: two builds' holds in one log", [hold108(hold=5), hold108()], 0, [("OK", T108)], has=["a change held 5/7 frames"])
         check("F108 hold: the old behaviour, the interface not tracked", [held108, hold108(tracked=0, held=3600, why="array/MSAA/mips/view 3600", editf=1700,
               changef=0, restf=1700, reste=1700000, rests=1700000, durf=0, dure=0, durs=0, fresh=0, freshf=0)] * 2, 3, [("NEVER APPLIED", T108)],
               has=["OLD BEHAVIOUR: every screen pixel held every frame", "held everywhere 7200 (array/MSAA/mips/view 7200)"])

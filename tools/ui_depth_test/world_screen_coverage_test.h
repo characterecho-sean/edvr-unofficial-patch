@@ -12,7 +12,10 @@
 // change. F108: the classification's refusals are named in order; a static slice gives no edit after the expiry; a changed
 // region is edited only there, in its own slice; a solid-colour instance gives no edit; the fresh-edit bit (6) appears only
 // on an edit's first frame; the census counts the states and classifies rest and change; the motion pass writes the
-// history-invalidate value only where the coverage carries the fresh bit.
+// history-invalidate value only where the coverage carries the fresh bit. F108b: a block is held exactly kWorldScreenHoldFrames
+// frames from its last change and at rest after, while UiContent's age still lasts; a block that changes again is held again, and a
+// change within the hold restarts it; the census counts a burst of changes once; a 2D interface's ages reach the stand-in as a
+// one-slice array view.
 namespace wstest {
 // Every slice of a 2D or array texture of 1-byte texels (R8_UNORM), as floats in 0..1, slice by slice.
 std::vector<std::vector<float>> readSlices8(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* t) {
@@ -69,23 +72,35 @@ void testWorldScreenCoverage(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     check(worldScreenClassRefusal(true, true, false) == WorldScreenClassRefusal::kNotTrained, "F108: then no external upscaler");
     check(std::strcmp(worldScreenClassRefusalName(WorldScreenClassRefusal::kNotSceneDepth), "not the scene's depth") == 0,
           "F108: classification refusal names");
-    // F108: the census, frame by frame. Before any change every frame is at rest; a change's first frame and the 31 after it are
-    // during it; the 32nd after it is at rest again; a frame with no screen is not counted; the window boundary keeps the change.
+    // F108: the census, frame by frame. Before any change every frame is at rest; a change's first frame and the N - 1 after it are
+    // during it (N = kWorldScreenHoldFrames, F108b); the Nth after it is at rest again; a frame with no screen is not counted; the
+    // window boundary keeps the change.
     {
+        constexpr uint64_t N = kWorldScreenHoldFrames;
         WorldScreenCensus c;
         c.add(100, 1000, 0, 0);
         c.add(101, 1000, 300, 300);
-        c.add(120, 1000, 300, 0);
-        c.add(132, 1000, 10, 0);
-        c.add(133, 1000, 0, 0);
-        c.add(134, 0, 0, 0);
-        check(c.frames == 5 && c.editFrames == 3 && c.changeFrames == 1 && c.freshPx == 300, "F108 census: frames, edits, changes, restarts");
-        check(c.restFrames == 2 && c.restScreen == 2000 && c.restEdited == 0, "F108 census: before the change and 32 frames after it, at rest");
-        check(c.duringFrames == 3 && c.duringScreen == 3000 && c.duringEdited == 610, "F108 census: a change's first frame and 31 after, during");
+        c.add(101 + N - 2, 1000, 300, 0);
+        c.add(101 + N - 1, 1000, 300, 0);
+        c.add(101 + N, 1000, 10, 0);
+        c.add(102 + N, 1000, 0, 0);
+        c.add(103 + N, 0, 0, 0);
+        check(c.frames == 6 && c.editFrames == 4 && c.changeFrames == 1 && c.freshPx == 300 && c.changes == 1,
+              "F108 census: frames, edits, changes, restarts");
+        check(c.restFrames == 3 && c.restScreen == 3000 && c.restEdited == 10, "F108b census: before the change and from the hold's end, at rest");
+        check(c.duringFrames == 3 && c.duringScreen == 3000 && c.duringEdited == 900, "F108b census: a change's first frame and N - 1 after, during");
         c.resetWindow();
-        check(c.frames == 0 && c.restFrames == 0 && c.freshPx == 0 && c.haveChange && c.lastChange == 101, "F108 census: a window keeps the last change");
-        c.add(110 + 1, 500, 50, 0);
-        check(c.duringFrames == 1 && c.restFrames == 0, "F108 census: a frame after the boundary within 32 of the change is during it");
+        check(c.frames == 0 && c.restFrames == 0 && c.freshPx == 0 && c.changes == 0 && c.haveChange && c.lastChange == 101,
+              "F108 census: a window keeps the last change");
+        c.add(101 + N - 1, 500, 50, 0);
+        check(c.duringFrames == 1 && c.restFrames == 0, "F108 census: a frame after the boundary within the hold of the change is during it");
+        // F108b: changes from rest. A keystroke whose interface animates three frames in a row is one change; a change within the hold
+        // of the last is the same change; one that begins N or more frames after the last begins another.
+        WorldScreenCensus k;
+        k.add(300, 1000, 100, 100); k.add(301, 1000, 100, 100); k.add(302, 1000, 100, 100);
+        k.add(302 + N - 1, 1000, 100, 100);
+        k.add(302 + N - 1 + N, 1000, 100, 100);
+        check(k.changeFrames == 5 && k.changes == 2, "F108b census: changes from rest count a burst once, and a change after the hold again");
         WorldScreenCensus held;   // F105's rule: every screen pixel edited every frame, no change ever begins
         for (uint64_t f = 200; f < 240; ++f) held.add(f, 1000, 1000, 0);
         check(held.restFrames == 40 && held.restEdited == held.restScreen && held.changeFrames == 0,
@@ -96,10 +111,14 @@ void testWorldScreenCoverage(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         char line[900] = {};
         const int n = worldScreenFormatF108(line, sizeof(line), w, held, "format 2");
         check(n > 0 && n < static_cast<int>(sizeof(line)), "F108: the line fits its buffer");
-        check(std::strstr(line, "ui depth world screens (F108): 1800 frames; draws tracked 900, held without change tracking 2 (format 2); "
-                                "not taken at the classification: no learned surface 0, not the scene's depth 7, no external upscaler 0; "
-                                "census 40 frames with a screen (0 skipped): frames with an edit 40, a change began 0; at rest 40 frames, "
-                                "edited 40000 of 40000 px; during a change 0 frames, edited 0 of 0 px; history restarts 0 px in 0 frames.") == line,
+        char want[900] = {};
+        std::snprintf(want, sizeof(want), "ui depth world screens (F108): 1800 frames, a change held %u frames; draws tracked 900, held without "
+                                          "change tracking 2 (format 2); not taken at the classification: no learned surface 0, not the scene's depth 7, "
+                                          "no external upscaler 0; census 40 frames with a screen (0 skipped): frames with an edit 40, a change began 0, "
+                                          "changes from rest 0; at rest 40 frames, edited 40000 of 40000 px; during a change 0 frames, edited 0 of 0 px; "
+                                          "history restarts 0 px in 0 frames.", kWorldScreenHoldFrames);
+        check(std::strcmp(line, want) == 0 &&
+              std::strstr(line, "ui depth world screens (F108): 1800 frames, a change held ") == line,
               "F108: the line's counts, in the order the reader parses them");
     }
 
@@ -417,23 +436,23 @@ O main(float2 q : POSITION, uint instance : SV_InstanceID) {
         colourTarget(DXGI_FORMAT_R8_UNORM, tState, tStateRtv, 16);
         colourTarget(DXGI_FORMAT_R8G8B8A8_UNORM, tGb, tGbRtv, 16);
         auto tDepth = depth(dev, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, 16);
-        // The interface: 16x16, two slices, so 4x4 blocks a slice; the screen samples uv 0..1 over 8x8 pixels.
-        auto gui = makeArray(16, 16, 2);
-        auto guiView = arrayView(gui.Get(), 0, 2);
-        TestUiContent tracker;
-        // One frame: the game's draw, then the tracked pass, the masks read back. pixel(x, y): mask, state, edit in 0..255.
+        // One frame: UiContent's ages for the interface, as ui_depth.cpp hands them to the stand-in (an array view, a 2D interface's
+        // ages given as a one-slice array), the game's draw, then the tracked pass, the masks read back.
         struct Read { std::vector<float> mask, state, edit; };
-        auto frame = [&](uint32_t f, bool draw) {
-            ID3D11ShaderResourceView* ages = tracker.prepare(ctx, guiView.Get(), f);
-            check(ages != nullptr, "F108: the interface array is tracked");
+        auto frame = [&](TestUiContent& tracker, ID3D11ShaderResourceView* guiView, uint32_t f) {
+            ID3D11ShaderResourceView* ages = tracker.prepare(ctx, guiView, f);
+            check(ages != nullptr, "F108: the interface is tracked");
+            ID3D11ShaderResourceView* asArray = tracker.arrayView(ctx, ages);
+            D3D11_SHADER_RESOURCE_VIEW_DESC ad{};
+            if (asArray) asArray->GetDesc(&ad);
+            check(asArray && ad.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY, "F108b: the stand-in's ages are an array view");
             Read r;
-            if (!draw) return r;
             ctx->ClearState();
             UINT stride = 8, offset = 0;
             ctx->IASetInputLayout(layout2.Get()); ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             ctx->IASetVertexBuffers(0, 1, quadVb.GetAddressOf(), &stride, &offset);
             ctx->VSSetShader(tvs.Get(), nullptr, 0); ctx->PSSetShader(gamePs.Get(), nullptr, 0);
-            ctx->PSSetShaderResources(1, 1, instSrv.GetAddressOf()); ctx->PSSetShaderResources(2, 1, guiView.GetAddressOf());
+            ctx->PSSetShaderResources(1, 1, instSrv.GetAddressOf()); ctx->PSSetShaderResources(2, 1, &guiView);
             ctx->PSSetConstantBuffers(2, 1, cb2.GetAddressOf());
             ctx->RSSetState(raster.Get()); D3D11_VIEWPORT vp{0, 0, 16, 8, 0, 1}; ctx->RSSetViewports(1, &vp);
             ID3D11RenderTargetView* gt[4] = {tGbRtv.Get(), nullptr, nullptr, nullptr};
@@ -444,7 +463,7 @@ O main(float2 q : POSITION, uint instance : SV_InstanceID) {
             ctx->ClearDepthStencilView(tDepth.dsv.Get(), D3D11_CLEAR_DEPTH, 0, 0);
             ctx->DrawInstanced(6, 2, 0, 0);   // the game's draw
             WorldScreenCoverage pass;
-            check(pass.begin(ctx, tracked.Get(), tMaskRtv.Get(), tStateRtv.Get(), tEditRtv.Get(), ages, test, blend),
+            check(pass.begin(ctx, tracked.Get(), tMaskRtv.Get(), tStateRtv.Get(), tEditRtv.Get(), asArray, test, blend),
                   "F108: the tracked pass begins");
             ctx->DrawInstanced(6, 2, 0, 0);   // the second issue
             pass.end(ctx);
@@ -456,36 +475,85 @@ O main(float2 q : POSITION, uint instance : SV_InstanceID) {
         auto at = [](const std::vector<float>& v, unsigned x, unsigned y) { return v[y * 16 + x] * 255.0f; };
         // The pixels whose 2x2 blocks about the uv include block (0, 0): x and y 0..2 of the interface's instance (left half).
         auto inChange = [](unsigned x, unsigned y) { return x < 3 && y < 3; };
-        Read r = frame(20, true);   // seeded: no edit anywhere
-        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
-            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f && std::fabs(at(r.state, x, y) - kWorldScreenStateRest) < .5f &&
-                      at(r.edit, x, y) < .5f,
-                  "F108: at rest the tracked stand-in marks the screen (2), rest state, no edit");
+        // A frame k frames after the block's last change: on k = 0 the fresh bit (6), the first-frame state and the full edit; for
+        // k = 1..N-1 (N = kWorldScreenHoldFrames) the edited state and UiContent's age (255 - 8k); from k = N the screen is at rest,
+        // although UiContent's age is still above zero (it lasts 32 frames). Outside the change, and on the solid colour, rest.
+        auto expect = [&](const Read& r, int k, const char* what) {
+            bool ok = true;
+            for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
+                const bool changed = k >= 0 && x < 8 && inChange(x, y);
+                const bool fresh = changed && k == 0;
+                const bool held = changed && k < static_cast<int>(kWorldScreenHoldFrames);
+                const float wantMask = float(fresh ? kWorldScreenFreshMaskValue : kWorldScreenMaskValue);
+                const float wantState = float(fresh ? kWorldScreenStateFresh : (held ? kWorldScreenStateEdited : kWorldScreenStateRest));
+                const float wantEdit = held ? float(255 - 8 * k) : 0.0f;
+                ok = ok && std::fabs(at(r.mask, x, y) - wantMask) < .5f && std::fabs(at(r.state, x, y) - wantState) < .5f &&
+                     std::fabs(at(r.edit, x, y) - wantEdit) < 1.5f;
+            }
+            check(ok, what);
+        };
+        // run: one interface (gui, viewed by guiView; the instance samples slice 1, clamped to the last), poked at `slice`.
+        auto run = [&](ID3D11Texture2D* gui, ID3D11ShaderResourceView* guiView, UINT slice, const char* kind) {
+            TestUiContent tracker;
+            char what[200];
+            auto say = [&](const char* s) { std::snprintf(what, sizeof(what), "%s (%s)", s, kind); return what; };
+            uint32_t f = 20;
+            expect(frame(tracker, guiView, f++), -1, say("F108: seeded, the screen is marked (2) at rest with no edit"));
+            unsigned char value = 77;
+            auto change = [&]() { for (unsigned ty = 0; ty < 4; ++ty) for (unsigned tx = 0; tx < 4; ++tx) poke(gui, slice, tx, ty, value); ++value; };
+            // A change, then the hold: held exactly N frames counting the change's own, at rest on the Nth after it.
+            change();
+            const uint32_t first = f;
+            for (int k = 0; k <= static_cast<int>(kWorldScreenHoldFrames); ++k)
+                expect(frame(tracker, guiView, f++), k, say(k == 0 ? "F108: the fresh bit, the first-frame state and the edit exactly where the interface changed"
+                                                         : k < static_cast<int>(kWorldScreenHoldFrames) ? "F108b: held on each frame of the hold after the change"
+                                                         : "F108b: at rest on the hold's end"));
+            auto ages = wstest::agesOf(dev, ctx, tracker.prepare(ctx, guiView, f - 1));
+            const UINT agedSlice = UINT(ages.size()) > slice ? slice : 0;
+            check(!ages.empty() && std::fabs(ages[agedSlice][0] * 255.0f - float(255 - 8 * kWorldScreenHoldFrames)) < 1.5f,
+                  say("F108b: the hold ends while UiContent's own age still lasts (its 32-frame expiry is unchanged)"));
+            for (int k = int(kWorldScreenHoldFrames) + 1; k < 32; ++k)
+                expect(frame(tracker, guiView, f++), k, say("F108b: at rest for the rest of UiContent's expiry"));
+            // The block changes again: held again for N frames from the new change.
+            change();
+            for (int k = 0; k <= static_cast<int>(kWorldScreenHoldFrames); ++k)
+                expect(frame(tracker, guiView, f++), k, say("F108b: a block that changes again is held again for the hold"));
+            // A change inside the hold restarts it: the block is held N frames from its LAST change.
+            change();
+            expect(frame(tracker, guiView, f++), 0, say("F108b: a change begins"));
+            expect(frame(tracker, guiView, f++), 1, say("F108b: ...held"));
+            expect(frame(tracker, guiView, f++), 2, say("F108b: ...held"));
+            change();
+            for (int k = 0; k <= static_cast<int>(kWorldScreenHoldFrames); ++k)
+                expect(frame(tracker, guiView, f++), k, say("F108b: a change within the hold holds the block N frames from its last change"));
+            check(f > first, "F108b: the timeline ran");
+        };
+        // The interface as an array: 16x16, two slices, 4x4 blocks a slice; the instance samples slice 1 over 8x8 pixels.
+        auto guiArray = makeArray(16, 16, 2);
+        run(guiArray.Get(), arrayView(guiArray.Get(), 0, 2).Get(), 1, "a Texture2DArray interface");
+        // The interface as a 2D texture with a Texture2D view, as the 2026-10-25 flight's terminals were (3760x2115, one slice, a
+        // Texture2D view): its ages are 2D, given to the stand-in as a one-slice array; the instance's slice 1 clamps to slice 0.
+        auto gui2d = makeArray(16, 16, 1);
+        D3D11_SHADER_RESOURCE_VIEW_DESC v2d{}; v2d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; v2d.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        v2d.Texture2D.MipLevels = 1;
+        ComPtr<ID3D11ShaderResourceView> gui2dView; hr(dev->CreateShaderResourceView(gui2d.Get(), &v2d, &gui2dView));
+        run(gui2d.Get(), gui2dView.Get(), 0, "a Texture2D interface");
+        {
+            TestUiContent tracker;
+            ID3D11ShaderResourceView* ages2d = tracker.prepare(ctx, gui2dView.Get(), 5);
+            D3D11_SHADER_RESOURCE_VIEW_DESC ad{};
+            if (ages2d) ages2d->GetDesc(&ad);
+            check(ages2d && ad.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D, "F108b: a 2D interface's ages are 2D");
+            ID3D11ShaderResourceView* asArray = tracker.arrayView(ctx, ages2d);
+            ID3D11ShaderResourceView* again = tracker.arrayView(ctx, ages2d);
+            D3D11_SHADER_RESOURCE_VIEW_DESC arr{};
+            if (asArray) asArray->GetDesc(&arr);
+            check(asArray && asArray == again && arr.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY && arr.Texture2DArray.ArraySize == 1,
+                  "F108b: ...given as one one-slice array view, made once");
+            ID3D11ShaderResourceView* arrayAges = tracker.prepare(ctx, arrayView(guiArray.Get(), 0, 2).Get(), 5);
+            check(arrayAges && tracker.arrayView(ctx, arrayAges) == arrayAges, "F108b: an array interface's ages are given as they are");
+            check(tracker.arrayView(ctx, gui2dView.Get()) == nullptr, "F108b: a view that is not this cache's ages is refused");
         }
-        for (unsigned ty = 0; ty < 4; ++ty) for (unsigned tx = 0; tx < 4; ++tx) poke(gui.Get(), 1, tx, ty, 77);   // slice 1, block (0, 0)
-        r = frame(21, true);   // the change's first frame
-        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
-            const bool fresh = x < 8 && inChange(x, y);   // the right half is the solid colour: never an edit
-            check(std::fabs(at(r.mask, x, y) - (fresh ? kWorldScreenFreshMaskValue : kWorldScreenMaskValue)) < .5f,
-                  "F108: the fresh bit (6) exactly where an edit begins; 2 elsewhere and on the solid colour");
-            check(std::fabs(at(r.state, x, y) - (fresh ? kWorldScreenStateFresh : kWorldScreenStateRest)) < .5f,
-                  "F108: the census state says first frame there, rest elsewhere");
-            check(std::fabs(at(r.edit, x, y) - (fresh ? 255.0f : 0.0f)) < .5f, "F108: the edit mask only where the interface changed");
-        }
-        r = frame(22, true);   // the change's second frame: edited, not fresh
-        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
-            const bool edited = x < 8 && inChange(x, y);
-            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f, "F108: the fresh bit only on an edit's first frame");
-            check(std::fabs(at(r.state, x, y) - (edited ? kWorldScreenStateEdited : kWorldScreenStateRest)) < .5f,
-                  "F108: the census state says edited while the edit lasts");
-            check(edited ? at(r.edit, x, y) > 200.0f : at(r.edit, x, y) < .5f, "F108: the edit decays and stays where it was");
-        }
-        for (uint32_t f = 23; f < 53; ++f) frame(f, false);
-        r = frame(53, true);   // 32 frames after the change: at rest
-        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x)
-            check(std::fabs(at(r.mask, x, y) - kWorldScreenMaskValue) < .5f && std::fabs(at(r.state, x, y) - kWorldScreenStateRest) < .5f &&
-                      at(r.edit, x, y) < .5f,
-                  "F108: after the expiry the screen is at rest again, no edit");
     }
 
     // ---- F108: the census pass on WARP ----
