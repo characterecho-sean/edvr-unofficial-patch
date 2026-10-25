@@ -351,9 +351,12 @@ inline Getter decodeModeGetter(const uint8_t* code, size_t n, int32_t* value) no
         *value = v;
         return Getter::kDwordField;
     }
-    if (n >= 5 && ((code[0] == 0x0F && code[1] == 0xB6 && code[2] == 0x41 && code[4] == 0xC3) ||   // movzx eax,byte [rcx+d8]; ret
-                   (code[0] == 0x8A && code[1] == 0x41 && code[3] == 0xC3))) {                     // mov al,[rcx+d8]; ret
-        *value = static_cast<int8_t>(code[0] == 0x0F ? code[3] : code[2]);
+    if (n >= 5 && code[0] == 0x0F && code[1] == 0xB6 && code[2] == 0x41 && code[4] == 0xC3) {   // movzx eax,byte [rcx+d8]; ret (5 bytes)
+        *value = static_cast<int8_t>(code[3]);
+        return Getter::kByteField;
+    }
+    if (n >= 4 && code[0] == 0x8A && code[1] == 0x41 && code[3] == 0xC3) {   // mov al,[rcx+d8]; ret (4 bytes, its own length guard)
+        *value = static_cast<int8_t>(code[2]);
         return Getter::kByteField;
     }
     if (n >= 8 && code[0] == 0x0F && code[1] == 0xB6 && code[2] == 0x81 && code[7] == 0xC3) {   // movzx eax,byte [rcx+d32]; ret
