@@ -34,6 +34,7 @@
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
+#include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
 
 #include <array>
 #include <chrono>
@@ -7293,6 +7294,8 @@ int wmain(int argc, wchar_t** argv) {
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
     f111test::run111(check);
+    // F113: the row sources, a second's accounting by source, the check's schedule and its hold on the tee's fast path, the latch.
+    f113test::run113(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

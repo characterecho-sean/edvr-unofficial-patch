@@ -45,6 +45,7 @@
 #include "native_on_foot_f95c.h"   // F95c: the head kept in the shadows: the swap record around the visibility call (pure parts)
 #include "native_on_foot_f99.h"   // F99a: a drawn item's hands from the game's own selection, not from Status.json (pure parts)
 #include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
+#include "native_on_foot_f113.h"   // F113: each eye's scene rows whenever the world is drawn (pure parts)
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
@@ -22887,89 +22888,108 @@ void v2Report() {
     w = V2Window{};
 }
 
-// F87f: THE SCENE ROWS' FALLBACK. An eye-frame whose world draws include no scene-geometry vertex shader (bare ground, the head down: 1,089 frames of the F86 flight,
-// present in F85 too) has no scene rows, and every consumer of them (the marker patch, the weapon UI pin, the depth lines) refuses it: the 80 "head-down" refusals. The
-// depth prepass (drawtag::kFbVs / kFbPs) carries the same constants in all 1,089 of those frames and was the main content in 12,858 of 12,858 scene frames. Its
-// rows are kept per eye-frame as they come and stand in at the first marker composite draw of an eye-frame that has no scene rows. A frame that has both compares them:
-// one difference over 1e-5 latches the fallback off for the session (logged). Fix key and native stereo on foot only; render thread.
-struct FbRows {
-    uint32_t frame = ~0u, w = 0, h = 0;
-    float rows[16] = {}, o[4] = {};
-    const void* cb1 = nullptr;   // identity only
-};
-FbRows g_fb[2];
-nofoot::f87::FbGuard g_fbGuard;
-uint32_t g_fbCounted[2] = {~0u, ~0u};
-struct FbSecond {
-    uint64_t noMain = 0, fromFb = 0, both = 0;
+// F113: EACH EYE'S SCENE ROWS WHENEVER THE WORLD IS DRAWN (native_on_foot_f113.h). Besides the scene meshes (drawtag::kSceneVs, through worldDraw) the depth
+// prepass and the terrain patch give an eye its rows: they carry the same constants (the F57 census: the main content in every frame both drew) and draw where no
+// mesh does (bare ground, the sky). F87f named the prepass but captured it behind the engine families' filter, so it never ran; its fallback is replaced here.
+// The first of them to draw into an eye's scene depth this frame publishes the rows; once a second per eye whose rows came from a source, that eye's next scene
+// mesh draw checks them, and a difference over f87::kFbTolerance latches the sources off for the session (logged). Render thread.
+nofoot::f87::FbGuard g_rowsGuard;
+nofoot::f113::CheckClock g_rowsClock;
+uint8_t g_rowsFrom[2] = {nofoot::f113::kFromMeshes, nofoot::f113::kFromMeshes};   // where the eye's rows of g_worldOk[e]'s frame came from
+uint32_t g_rowsCheckFrame[2] = {~0u, ~0u};   // the frame a scene mesh draw of the eye should check the source's rows in
+bool g_rowsLatchNoted = false;
+struct RowsSecond {
+    nofoot::f113::EyeSecond eye[2];
+    uint64_t checked = 0, noEye = 0, noRows = 0, latchedDraws = 0;
     double maxDiff = 0.0;
 };
-FbSecond g_fbSec[2];
-bool g_fbLatchNoted = false;
-// A scene-VS draw gave the eye's rows this frame: compare them with the prepass's when it came first.
-void f87FallbackCompare(int e, uint32_t frame) {
-    if (g_fb[e].frame != frame || g_cpuWorld[e].frame != frame) return;
-    float a[20], b[20];
-    std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
-    std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
-    std::memcpy(b, g_fb[e].rows, 16 * sizeof(float));
-    std::memcpy(b + 16, g_fb[e].o, 4 * sizeof(float));
-    const double diff = nofoot::f87::rowsMaxDiff(a, b);
-    const bool wasOn = !g_fbGuard.latchedOff;
-    g_fbGuard.compare(diff);
-    FbSecond& s = g_fbSec[e];
-    ++s.both;
-    s.maxDiff = std::max(s.maxDiff, diff);
-    if (wasOn && g_fbGuard.latchedOff && !g_fbLatchNoted) {
-        g_fbLatchNoted = true;
-        Log::get().note("native on foot scene rows fallback (F87f): LATCHED OFF -- eye %d frame %u: the depth prepass's rows differ from the scene rows by %.3e (over %.0e); no "
-                        "frame uses the fallback from here", e, frame, diff, nofoot::f87::kFbTolerance);
-    }
+RowsSecond g_rowsSec;
+uint32_t g_rowsLastFrame = ~0u;
+// The frame that ended: each eye's rows and where they came from (native stereo on foot only).
+void rowsFrameTurn(uint32_t frame) {
+    if (g_rowsLastFrame != ~0u && g_rowsLastFrame != frame && nativeOnFootActive())
+        for (int e = 0; e < 2; ++e) g_rowsSec.eye[e].frameEnd(g_worldOk[e] == g_rowsLastFrame, g_rowsFrom[e]);
+    g_rowsLastFrame = frame;
 }
-// The prepass draw's rows, once per eye-frame (the CB shadow's copy only: the rows are the constants already shadowed for the scene VS).
-void f87FallbackCapture(ID3D11DeviceContext* ctx, int e, uint32_t frame, const WorldTarget* t) {
-    if (g_fbGuard.latchedOff || g_fb[e].frame == frame) return;
+bool rowsCheckPending(uint32_t frame) { return g_rowsCheckFrame[0] == frame || g_rowsCheckFrame[1] == frame; }
+// A scene mesh draw of an eye whose rows this frame came from a source: compare its rows with them (once, when the check is due).
+void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame) {
+    if (g_rowsCheckFrame[e] != frame) return;
+    g_rowsCheckFrame[e] = ~0u;
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
     float shadow[6][4] = {};
-    if (cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow)) {
-        FbRows& f = g_fb[e];
-        f.frame = frame;
-        std::memcpy(f.rows, shadow, sizeof(f.rows));
-        std::memcpy(f.o, shadow[5], sizeof(f.o));
-        f.cb1 = cb1;
-        f.w = t->w;
-        f.h = t->h;
-        f87FallbackCompare(e, frame);
-    }
+    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
     if (cb1) cb1->Release();
-}
-// The first marker composite draw of an eye-frame: counted when the frame has no scene rows, and given the prepass's when it has them.
-void f87FallbackPromote(int e, uint32_t frame) {
-    if (e != 0 && e != 1) return;
-    const bool have = g_cpuWorld[e].frame == frame;
-    if (g_fbCounted[e] != frame) {
-        g_fbCounted[e] = frame;
-        if (!have) ++g_fbSec[e].noMain;
+    if (!ok) return;
+    float a[20], b[20];
+    std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
+    std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
+    std::memcpy(b, shadow, 16 * sizeof(float));
+    std::memcpy(b + 16, shadow[5], 4 * sizeof(float));
+    const double diff = nofoot::f87::rowsMaxDiff(a, b);
+    const bool wasOn = !g_rowsGuard.latchedOff;
+    g_rowsGuard.compare(diff);
+    ++g_rowsSec.checked;
+    g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, diff);
+    if (wasOn && g_rowsGuard.latchedOff && !g_rowsLatchNoted) {
+        g_rowsLatchNoted = true;
+        Log::get().note("native on foot eye rows (F113): LATCHED OFF -- eye %d frame %u: %s's rows differ from the scene meshes' by %.3e (over %.0e); the scene meshes alone "
+                        "give the rows from here", e, frame, nofoot::f113::rowSourceName(g_rowsFrom[e]), diff, nofoot::f87::kFbTolerance);
     }
-    if (have || g_fbGuard.latchedOff || g_fb[e].frame != frame) return;
-    FbRows& f = g_fb[e];
+}
+// A draw outside the engine families that is a row source (the depth prepass, the terrain patch): the eye's rows from its b1, when the eye has none this frame.
+// The eye is the scene depth view's (eyeOfDraw), so the source must draw into an eye's scene depth.
+void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
+    if (g_rowsGuard.latchedOff) {
+        ++g_rowsSec.latchedDraws;
+        return;
+    }
+    const int e = eyeOfDraw(frame);
+    if (e != 0 && e != 1) {
+        ++g_rowsSec.noEye;
+        return;
+    }
+    if (g_worldOk[e] == frame) return;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f1 = 0;
+    vsConstants(ctx, 1, &cb1, &f1);
+    float shadow[6][4] = {};
+    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    if (!ok) {
+        if (cb1) cb1->Release();
+        ++g_rowsSec.noRows;
+        return;
+    }
     WorldView v;
     v.frame = frame;
     v.eye = e;
-    std::memcpy(v.rows, f.rows, sizeof(v.rows));
-    std::memcpy(v.o, f.o, sizeof(v.o));
+    std::memcpy(v.rows, shadow, sizeof(v.rows));
+    std::memcpy(v.o, shadow[5], sizeof(v.o));
     worldPut(v);
     g_cpuWorld[e].frame = frame;
-    std::memcpy(g_cpuWorld[e].rows, f.rows, sizeof(f.rows));
-    std::memcpy(g_cpuWorld[e].o, f.o, sizeof(f.o));
-    g_cpuWorld[e].cb1 = f.cb1;
+    std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
+    std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
+    g_cpuWorld[e].cb1 = cb1;   // identity only (the b1 Unmap stamp)
+    cb1->Release();
     eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
-    g_f85SceneW[e] = f.w;
-    g_f85SceneH[e] = f.h;
+    // the eye's scene target for the depth probe's pick: the bound colour target when it is eye-sized (a depth-only pass keeps the last)
+    if (void* view = bindingGet(BindSlot::Rtv0)) {
+        ResourceInfo ri;
+        if (bindingResolveProbe(view, &ri) && ri.isTexture2D && vScreenIsEyeSized(ri.a, ri.b)) {
+            g_f85SceneW[e] = ri.a;
+            g_f85SceneH[e] = ri.b;
+        }
+    }
     g_worldOk[e] = frame;
-    ++g_fbSec[e].fromFb;
+    g_rowsFrom[e] = source;
+    // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
+    const uint64_t nowMs = GetTickCount64();
+    if (g_rowsClock.due(e, nowMs)) {
+        g_rowsCheckFrame[e] = frame;
+        g_rowsClock.done(e, nowMs);
+    }
 }
 
 // F46: a world pool draw (render thread, the game's bindings): its target's eye (the UI layer's; else ui depth's rule over the frame's
@@ -23052,9 +23072,10 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     // F100: a census frame still sends every world draw here (the F87f capture below sees the same draws as before); only the census's own note, its
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
-    if (sceneWhy == drawtag::kSceneNotSceneVs && nofoot::f87::fallbackPair(vs, ps) && g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootActive())
-        f87FallbackCapture(ctx, e, frame, t);   // F87f: kept, used only by an eye-frame that has no scene rows
-    if (g_worldOk[e] == frame) return;
+    if (g_worldOk[e] == frame) {   // F113: rows already in (a source's, perhaps): the first scene mesh draw checks a source's when the check is due
+        if (sceneWhy == drawtag::kSceneOk && g_rowsFrom[e] != nofoot::f113::kFromMeshes) rowsCheck(ctx, e, frame);
+        return;
+    }
     if (sceneWhy != drawtag::kSceneOk) {
         ++g_win.sceneRefused[sceneWhy];
         if (sceneWhy > 0 && sceneWhy < 4) ++rn.refused[sceneWhy];
@@ -23086,7 +23107,6 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
         eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
         ++g_win.worldShadow;
-        f87FallbackCompare(e, frame);   // F87f: the prepass came first
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
         ++g_win.worldNoRows;
@@ -23128,6 +23148,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     if (cb1) cb1->Release();   // identity only from here
     if (!ok) return;
     g_worldOk[e] = frame;
+    g_rowsFrom[e] = nofoot::f113::kFromMeshes;   // F113
     // F52 item A: which draw gave the eye's world rows: its shaders, target, depth view, viewport and b1 (once per eye a frame).
     {
         WorldSrc& ws = g_win.wsrc[e];
@@ -26517,7 +26538,6 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         }
     }
     if (r.eye == 0 || r.eye == 1) r.ordEye = g_ordEye[r.eye]++;
-    if ((r.eye == 0 || r.eye == 1) && g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed)) f87FallbackPromote(r.eye, frame);   // F87f
     SrvInfo t33;
     const bool haveT33 = t33Of(ctx, frame, t33);
     if (!haveT33) ++g_win.b10bNoT33;
@@ -26683,8 +26703,15 @@ void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t
     const bool marker = vs == nofoot::kMarkerCompositeVs;
     const bool census = g_rowCensus.active && g_rowCensus.frame == frame;   // F53: a census frame looks at every world draw
     if (!hud && !marker) {
-        if (!census && g_worldOk[0] == frame && g_worldOk[1] == frame) return;
-        if (engine_velocity_family::familyOfVs(vs) < 0) return;
+        if (!census && g_worldOk[0] == frame && g_worldOk[1] == frame && !rowsCheckPending(frame)) return;
+        if (engine_velocity_family::familyOfVs(vs) < 0) {
+            // F113: the row sources outside the engine families (the depth prepass, the terrain patch; native_on_foot_f113.h)
+            if (nofoot::f113::rowSourceVs(vs)) {
+                const uint8_t src = nofoot::f113::rowSourceOf(vs, bindingShaderHash(BindSlot::Ps));
+                if (src < nofoot::f113::kRowSources) rowSourceDraw(ctx, frame, src);
+            }
+            return;
+        }
     }
     ++g_win.scanned;
     const uint64_t t0 = f30Qpc();
@@ -27443,15 +27470,25 @@ void report(uint64_t nowMs) {
                                 pl.windows, pl.f85, pl.history, static_cast<unsigned>(ss.escCopies), ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest, ring);
                 ss = StreamSecond{};
             }
-        // F87f, per eye: the eye-frames with a marker composite draw and no scene rows, those given the depth prepass's rows, those that had both (compared) and the largest
-        // difference of the compared rows (the guard latches the fallback off past 1e-5).
-        if (fixOn)
-            for (int e = 0; e < 2; ++e) {
-                FbSecond& fs = g_fbSec[e];
-                Log::get().note("scene rows fallback (F87f) eye %d: no-main frames %llu, from F516BF02 %llu; both %llu, max diff %.2e%s", e, ull(fs.noMain), ull(fs.fromFb), ull(fs.both),
-                                fs.maxDiff, g_fbGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5)" : "");
-                fs = FbSecond{};
+        // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks
+        // of a source's rows against a scene mesh's that second, their largest difference, and the source draws refused (no scene depth eye, no b1 shadow, latched).
+        // A build before F113 has no such line; one whose sources never give rows reads the prepass and the terrain at 0 with frames at none.
+        {
+            RowsSecond& rs = g_rowsSec;
+            if (rs.eye[0].frames || rs.eye[1].frames) {
+                using nofoot::f113::kFromMeshes;
+                using nofoot::f113::kFromPrepass;
+                using nofoot::f113::kFromTerrain;
+                Log::get().note("native on foot eye rows (F113) 1 s: eye 0 %u frames: the scene meshes %u, the depth prepass %u, the terrain %u, none %u; eye 1 %u frames: "
+                                "the scene meshes %u, the depth prepass %u, the terrain %u, none %u; checked against a scene mesh %llu (max diff %.2e); source draws "
+                                "with no scene depth eye %llu, no b1 shadow %llu, latched %llu%s",
+                                rs.eye[0].frames, rs.eye[0].from[kFromMeshes], rs.eye[0].from[kFromPrepass], rs.eye[0].from[kFromTerrain], rs.eye[0].none,
+                                rs.eye[1].frames, rs.eye[1].from[kFromMeshes], rs.eye[1].from[kFromPrepass], rs.eye[1].from[kFromTerrain], rs.eye[1].none,
+                                ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.latchedDraws),
+                                g_rowsGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" : "");
             }
+            rs = RowsSecond{};
+        }
         // F50, per key and eye (F52: each key has its own baseline): the baseline c and its spread, |m - c| against the head's speed, the
         // patched draws, the residual after the patch by the head's speed, and the honesty check (c by head pitch and roll on slow-head frames,
         // since the last reset). A key-eye with no read and no decision this second is not printed.
@@ -27918,6 +27955,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     if (measure) f44::v2Draw(frame);   // F57 part 2, before frameTurn's head sample (a frame that ends is binned by its own head speed); F100: the probe key alone
     if (frame != f44::g_polledFrame) {
         f44::g_polledFrame = frame;
+        f44::rowsFrameTurn(frame);   // F113: the frame that ended, each eye's rows and their source
         f44::frameTurn(ctx, frame);
     }
     const f44::MarkerDrawArgs args{count, start, base};
@@ -27931,6 +27969,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     st.polledFrame = f44::g_polledFrame;
     st.worldOk[0] = f44::g_worldOk[0];
     st.worldOk[1] = f44::g_worldOk[1];
+    st.check = f44::rowsCheckPending(frame);   // F113: a source's rows wait for a scene mesh's check this frame
     g_nativeOnFootTeeFastFrame.store(nofoot::f100::teeFastFrame(st, frame), std::memory_order_relaxed);
 }
 
