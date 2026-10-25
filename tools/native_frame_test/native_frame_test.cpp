@@ -32,6 +32,7 @@
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
+#include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 
 #include <array>
 #include <chrono>
@@ -7286,6 +7287,8 @@ int wmain(int argc, wchar_t** argv) {
     f107test::run107(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
+    // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
+    f111test::run111(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

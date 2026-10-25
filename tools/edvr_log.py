@@ -10562,6 +10562,42 @@ def _hj_f110_model_eye(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f111_pointer(rows, ctx):
+    """F111: the panel pointer instrument. Its hooks' line, the 1 s lines (each with a verdict: the first stage of the game's pick that turns a mouse move the
+    other way: the mouse NDC against the OS cursor K4, the unprojection K1, the direction behind the camera K5, the hit or the sprite K2, the cursor window K3,
+    or none in the pick) and the 10 s line (the flight so far, which judges moves too few for any one second). NEVER APPLIED when no hook was armed, or when
+    the hooks were armed and never saw the pointer controller."""
+    armed, sec, tot = rows.get("armed", []), rows.get("sec", []), rows.get("total", [])
+    if not armed and not sec and not tot:
+        return None
+    n = max(int(r["n"]) for r in armed) if armed else None
+    if n == 0 and not sec:
+        return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
+    if not sec:
+        return ("NEVER APPLIED", "the hooks were armed (%d of 4) and never saw the pointer controller: no panel with a mouse pointer was used while native stereo "
+                                 "was on foot" % n)
+    verdicts = collections.Counter(r["verdict"].strip() for r in sec)
+    text = "%d s with the pointer: cycles %d, moves %d, ray %d (accepted %d), window %d, direction behind the camera in %d of %d cycles; 1 s verdicts: %s" % (
+        len(sec), sum(int(r["cycles"]) for r in sec), sum(int(r["moves"]) for r in sec), sum(int(r["ray"]) for r in sec), sum(int(r["acc"]) for r in sec),
+        sum(int(r["win"]) for r in sec), sum(int(r["behind"]) for r in sec), sum(int(r["cycles"]) for r in sec),
+        ", ".join("%s %d" % kv for kv in verdicts.most_common()))
+    decided = collections.Counter({v: c for v, c in verdicts.items() if v != "too few moves"})
+    stage = None
+    if tot and tot[-1]["verdict"].strip() != "too few moves":
+        stage = tot[-1]["verdict"].strip()
+        text += "; the flight so far (%s s): %s" % (tot[-1]["secs"], stage)
+    elif decided:
+        stage = decided.most_common(1)[0][0]
+    if stage is None:
+        return ("IDLE", text + "; the pointer never moved enough to judge")
+    text += "; the inverting stage: %s" % stage
+    if n is not None and n < 4:
+        return ("PARTIAL", text + "; only %d of 4 hooks armed" % n)
+    if not sum(int(r["pl"]) for r in sec):
+        return ("PARTIAL", text + "; no placement on a panel was seen (the update ran, the pick did not reach a panel)")
+    return ("OK", text)
+
+
 def _hj_f93_chain(rows, ctx):
     """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
     step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
@@ -11553,6 +11589,14 @@ HEALTH_RULES = (
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
                 r"\(camera \+ half IPD along the FP right\) in (?P<model>\d+);"),
     ), _hj_f110_model_eye),
+    _hrule("panel pointer (F111)", ("F111",), ("panel pointer (F111)",), (
+        ("armed", r"panel pointer \(F111\): hooks armed (?P<n>\d) of 4(?P<rest>.*)$"),
+        ("sec", r"panel pointer \(F111\) 1 s: verdict: (?P<verdict>[^;]+); cycles (?P<cycles>\d+) \(controllers \d+\), moves (?P<moves>\d+) \(more move lines \d+\), "
+                r"placements (?P<pl>\d+): ray (?P<ray>\d+) \(accepted (?P<acc>\d+), t mean [\d.]+\), window (?P<win>\d+); cycles with a hit \d+, direction behind the camera "
+                r"(?P<behind>\d+),"),
+        ("total", r"panel pointer \(F111\) so far: verdict: (?P<verdict>[^;]+); (?P<secs>\d+) s with the pointer, cycles \d+, moves \d+"),
+        ("_", r"panel pointer \(F111\) move: ndc "),
+    ), _hj_f111_pointer),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -12959,6 +13003,37 @@ def self_test_health():
               [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
+
+        # ---- panel pointer (F111): the stage of the game's pick that turns a mouse move the other way ----
+        F111 = "panel pointer (F111)"
+        K5 = "the direction behind the camera (K5: no hit, the sprite on the far side)"
+
+        def ptr_armed(n=4, why=""):
+            return R("hooks armed %zu of 4 (update", n, 0x454F520, 0x4559C50, 0x452B6A0, 0x4541A20, ": " if why else "", why)
+
+        def ptr_sec(verdict=K5, cycles=90, moves=20, ray=180, acc=0, win=0, behind=90):
+            return R("panel pointer (F111) 1 s", verdict, cycles, 1, moves, 15, ray * 2 // 3, ray, acc, 0.0, win, acc and cycles, behind, behind, 0, 0.9, 0.9,
+                     0.0, 0.0, -0.9, -0.9, 0.0, 0.0, 0.0, 0.0, 0, 0.8, 0.9, "+", "+", "0", "0", "-", "-", "0", "0", "0", "0",
+                     "position 0.000 1.570 0.000, right +1.000 +0.000 +0.000, up +0.000 +1.000 +0.000, forward +0.000 +0.000 +1.000", 0)
+
+        def ptr_move():
+            return R("panel pointer (F111) move", 0.1, -0.2, "mouse", 0.07, 0.17, -0.98, 2, 2, 0, 0.0, 0, 0, 0.07, 0.17, -0.98, "none", 0.0, 0.0, 0, 0, 0)
+
+        def ptr_total(verdict=K5, secs=10):
+            return R("panel pointer (F111) so far", verdict, secs, 900, 200, 1800, 0, 0, 900, 0.9, 0.9, -0.9, -0.9, 0.0, 0.0, 0.0, 0.0)
+
+        check("F111 pointer: the direction behind the camera, the flight so far agrees", [ptr_armed(), ptr_move(), ptr_sec(), ptr_sec(), ptr_total()], 0,
+              [("OK", F111)], has=["2 s with the pointer: cycles 180, moves 40, ray 360 (accepted 0)", "direction behind the camera in 180 of 180 cycles",
+                                   "the inverting stage: " + K5], lacks=["UNPARSED"])
+        check("F111 pointer: armed, never saw the controller", [ptr_armed()], 3, [("NEVER APPLIED", F111)], has=["never saw the pointer controller"])
+        check("F111 pointer: no hook armed", [ptr_armed(0, "update at EliteDangerous64.exe+0x454F520 NOT armed: its vtable slot does not hold it")], 3,
+              [("NEVER APPLIED", F111)], has=["no hook armed", "update at EliteDangerous64.exe+0x454F520 NOT armed"])
+        check("F111 pointer: the cursor still", [ptr_armed(), ptr_sec("too few moves", moves=0)] * 2, 0, [("IDLE", F111)], has=["never moved enough"])
+        check("F111 pointer: three hooks, the unprojection named", [ptr_armed(3, "cursor window at EliteDangerous64.exe+0x4541A20 NOT armed: x"),
+                                                                    ptr_sec("the unprojection (K1: the direction against the NDC)", behind=0)], 0,
+              [("PARTIAL", F111)], has=["the inverting stage: the unprojection (K1", "only 3 of 4 hooks armed"])
+        check("F111 pointer: updates without a placement", [ptr_armed(), ptr_sec(ray=0, behind=0, verdict="none in the pick (the inversion is after it)")], 0,
+              [("PARTIAL", F111)], has=["no placement on a panel was seen"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
