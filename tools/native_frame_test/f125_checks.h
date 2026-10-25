@@ -10,6 +10,7 @@
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_logwin.h"
+#include "../../src/d3d11/native_on_foot_f125ui.h"
 #include "../../src/d3d11/native_on_foot_f91.h"
 
 #include <cstdint>
@@ -329,6 +330,101 @@ inline void run125(Check&& check) {
               "F125 F91: turning detail on during the same press resumes with only fresh frame measurements, never the off interval");
         check(!fit::fitDetailFrame(w, true, false) && w.n == 1,
               "F125 F91: a trace ending with detail on keeps the original partial-window close path");
+    }
+    // ---- 10. reticle summaries classify each functional second, retaining state across both second and print boundaries ----
+    {
+        lw::ReticleWindow window;
+        edvr::nofoot::f118::Steps steps;
+        edvr::nofoot::f118::Trail trail;
+        edvr::nofoot::f118::FootSecond foot;
+        steps.have = steps.open = true;
+        steps.prevD = 8.0;
+        steps.openFrom = 4.0;
+        steps.openAge = 2;
+        trail.runMs = 35.0;
+        for (uint32_t second = 0; second < 10; ++second) {
+            steps.reads = 80;
+            steps.steps = 1;
+            steps.flips = second < 3 ? 1 : 0;
+            trail.frames = 90;
+            trail.longestMs = second < 3 ? 120.0 : 22.0;
+            foot.read = 40;
+            foot.edge = 30;
+            window.take(steps, trail, foot, true);
+            steps.second();
+            trail.second();
+            foot.second();
+        }
+        check(window.steps.reads == 800 && window.steps.steps == 10 && window.foot.read == 400 && window.trail.frames == 900 && window.trail.longestMs == 120.0,
+              "F125 UI: ten functional reticle seconds sum counts once and retain the window's largest trailing run");
+        check(window.edgeSeconds.n == 10 && window.speedSeconds.n == 3 && window.edgeSeconds.m == 10,
+              "F125 UI: classify edge/speed per second (10 edge, 3 speed), never from a window's ten combined steps or largest run");
+        check(steps.have && steps.open && steps.prevD == 8.0 && steps.openFrom == 4.0 && steps.openAge == 2 && trail.runMs == 35.0,
+              "F125 UI: reporting does not change the reticle's open step, previous target or current trailing run");
+        window.clearWindow();
+        steps.reads = 3;
+        foot.read = 3;
+        foot.edge = 1;
+        window.take(steps, trail, foot, false);
+        const uint64_t first = window.steps.reads;
+        window.clearWindow();
+        steps.reads = 5;
+        steps.steps = 1;
+        foot.read = 5;
+        foot.edge = 2;
+        window.take(steps, trail, foot, true);
+        check(first == 3 && window.steps.reads == 2 && window.foot.read == 2 && window.foot.edge == 1 && window.edgeSeconds.n == 1,
+              "F125 UI: an immediate partial flush takes three reads; the next functional fold takes only two new reads and still classifies the whole second");
+        steps.second();
+        foot.second();
+        window.clearWindow();
+        steps.reads = 7;
+        window.take(steps, trail, foot, true);
+        check(window.steps.reads == 7 && window.edgeSeconds.m == 1 && window.edgeSeconds.n == 0,
+              "F125 UI: after the flushed second closes, fresh reads and fresh flag counts begin at zero");
+        steps.second();
+        trail.second();
+        foot.second();
+        window.clearWindow();
+        steps.reads = 1;
+        steps.largestDeg = 2.0;
+        trail.longestMs = 120.0;
+        trail.worstDeg = 1.5;
+        foot.read = 1;
+        foot.largestDeg = 3.0;
+        window.take(steps, trail, foot, false);
+        window.clearWindow();
+        window.take(steps, trail, foot, false);
+        check(window.steps.reads == 0 && window.steps.largestDeg == 0.0 && window.trail.longestMs == 0.0 && window.trail.worstDeg == 0.0 && window.foot.largestDeg == 0.0,
+              "F125 UI: flushing with no new samples never repeats the previous reporting window's maxima");
+        auto noSamples = window;
+        auto noSteps = steps;
+        auto noTrail = trail;
+        auto noFoot = foot;
+        noSamples.take(noSteps, noTrail, noFoot, true);
+        check(noSamples.steps.reads == 0 && noSamples.steps.largestDeg == 0.0 && noSamples.trail.longestMs == 0.0 && noSamples.trail.worstDeg == 0.0 &&
+                  noSamples.foot.largestDeg == 0.0 && noSamples.speedSeconds.n == 1,
+              "F125 UI: after repeated between-fold flushes a no-new-sample fold prints no old extrema while classifying the complete second");
+        steps.reads = 2;
+        steps.largestDeg = 0.2;
+        trail.longestMs = 20.0;
+        trail.worstDeg = 0.1;
+        foot.read = 2;
+        foot.largestDeg = 0.3;
+        window.take(steps, trail, foot, true);
+        check(window.steps.reads == 1 && window.steps.largestDeg == 0.2 && window.trail.longestMs == 20.0 && window.trail.worstDeg == 0.1 &&
+                  window.foot.largestDeg == 0.3 && window.speedSeconds.n == 1,
+              "F125 UI: the next print window records its smaller peaks while classification retains the whole second's earlier 120 ms run");
+    }
+    {
+        struct Meta { uint32_t item = 0, setting = 0; };
+        lw::WindowMetadata<Meta> metadata;
+        metadata.prime(Meta{1, 10});   // report's initial call, before any 1 s fold
+        const Meta before = metadata.prime(Meta{2, 20});   // an item/setting change just before the first fold
+        metadata.next(Meta{2, 20});
+        const Meta after = metadata.prime(Meta{2, 20});
+        check(before.item == 1 && before.setting == 10 && after.item == 2 && after.setting == 20,
+              "F125 UI: metadata primed before the first fold labels an immediate flush with the old item/settings, then starts the new metadata");
     }
     lw::setDetail(was);
 }

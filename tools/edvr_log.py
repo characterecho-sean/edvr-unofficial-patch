@@ -10422,7 +10422,7 @@ def _harmed_seconds(ctx):
 
 
 def _hfocus_seconds(ctx):
-    return sum(1 for r in _hrows(ctx, H_ANCHOR, "sec") if int(r["key"]) >= 0)
+    return _hcount(_hrows(ctx, H_ANCHOR, "sec"), "xs", lambda r: int(r["key"]) >= 0)
 
 
 def _hj_f90_size(rows, ctx):
@@ -10440,16 +10440,16 @@ def _hj_f90_size(rows, ctx):
     if not scal:
         if idle:
             return ("NEVER APPLIED", "no table part among the decided parts in all %d s (names %s)%s" % (
-                len(idle), ", ".join(seen) or "-", "; the tool readout was named in %d s" % len(tool) if tool else ""))
-        return ("IDLE", "only the tool readout was decided (%d s, %d decisions): it is named, never scaled" % (len(tool), _hsum(tool, "decided")))
+                _hsecs(idle), ", ".join(seen) or "-", "; the tool readout was named in %d s" % _hsecs(tool) if tool else ""))
+        return ("IDLE", "only the tool readout was decided (%d s, %d decisions): it is named, never scaled" % (_hsecs(tool), _hsum(tool, "decided")))
     decided, scaled, mism = _hsum(scal, "decided"), _hsum(scal, "scaled"), _hsum(scal, "mismatch")
     names = sorted({("%s %s" % (r["role"], r["name"])) if r.get("role") else "part %s" % r["part"] for r in scal}, key=lambda s: (len(s), s))
     text = "%s: scaled %d of %d decided (eye 0 %d, eye 1 %d), table mismatch %d, %d s" % (
-        ", ".join(names), scaled, decided, _hsum(scal, "e0"), _hsum(scal, "e1"), mism, len(scal))
+        ", ".join(names), scaled, decided, _hsum(scal, "e0"), _hsum(scal, "e1"), mism, _hsecs(scal))
     if tool:
-        text += "; the tool readout named in %d s" % len(tool)
+        text += "; the tool readout named in %d s" % _hsecs(tool)
     if idle:
-        text += "; %d s with no table part (names %s)" % (len(idle), ", ".join(seen) or "-")
+        text += "; %d s with no table part (names %s)" % (_hsecs(idle), ", ".join(seen) or "-")
     if scaled == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if scaled * 10 < decided * 9 else "OK", text)
@@ -10506,15 +10506,15 @@ def _hj_f92_rifle(rows, ctx):
     for x in r:
         why.update(_hpairs(x["why"]))
     last = r[-1]
-    ads = [x for x in r if float(x["amax"]) >= 0.99 and int(x["moved"]) > 0]
+    ads = [x for x in r if _hcount([x], "adsxs", lambda z: float(z["amax"]) >= 0.99 and int(z["moved"]) > 0)]
     text = ("item %s, keys forward %s left %s up %s toward eye %s cm; held %d s: weapon frame attach %d, F_root only %d, none %d; latched %d; moved %d (%d s in ADS); "
-            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], len(r), attach, root, none, latched, moved, len(ads), refused, _htop(why)))
+            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], _hsecs(r), attach, root, none, latched, moved, _hcount(r, "adsxs", lambda x: float(x["amax"]) >= 0.99 and int(x["moved"]) > 0), refused, _htop(why)))
     if ads:
         a = ads[-1]
         text += "; last ADS second: content %s m from eye 0, surface on its rays %s m (%s)" % (a["cm"], a["ds"], a["surf"])
     if moved == 0:
         return ("NEVER APPLIED", text)
-    if sum(1 for x in r if int(x["moved"]) > 0) * 2 < len(r):
+    if _hcount(r, "xs", lambda x: int(x["moved"]) > 0) * 2 < _hsecs(r):
         return ("PARTIAL", text)
     return ("OK", text)
 
@@ -10705,12 +10705,16 @@ def _hj_f118_reticle(rows, ctx):
     tot = {k: sum(int(r[k]) for r in sec) for k in ("reads", "steps", "skyhit", "hithit", "flips", "over", "frames", "fread", "edge", "far", "inc", "nodisp")}
     edge_s = [r for r in sec if int(r["fread"]) >= 4 and 4 * int(r["edge"]) >= int(r["fread"]) and int(r["steps"]) <= 2]
     speed_s = [r for r in sec if int(r["flips"]) >= 1 or int(r["run"]) >= 50]
-    lead = "edge" if len(edge_s) > len(speed_s) else "speed" if len(speed_s) > len(edge_s) else "both" if edge_s else "neither"
+    edge_n = _hcount(sec, "es", lambda r: int(r["fread"]) >= 4 and 4 * int(r["edge"]) >= int(r["fread"]) and int(r["steps"]) <= 2)
+    speed_n = _hcount(sec, "ss", lambda r: int(r["flips"]) >= 1 or int(r["run"]) >= 50)
+    edge_s = [r for r in sec if _hcount([r], "es", lambda z: int(z["fread"]) >= 4 and 4 * int(z["edge"]) >= int(z["fread"]) and int(z["steps"]) <= 2)]
+    speed_s = [r for r in sec if _hcount([r], "ss", lambda z: int(z["flips"]) >= 1 or int(z["run"]) >= 50)]
+    lead = "edge" if edge_n > speed_n else "speed" if speed_n > edge_n else "both" if edge_s else "neither"
     text = ("%d s: readbacks %d; steps over 0.25 deg %d (sky-hit %d, hit-hit %d), flips %d; drawn more than 0.25 deg from the target in %s of %d frames, "
             "longest run %d ms; footprints read %d, over a depth edge %s (the centre on the far side %d); edge seconds %d%s, speed seconds %d%s; leading cause: %s" % (
-                len(sec), tot["reads"], tot["steps"], tot["skyhit"], tot["hithit"], tot["flips"], _hpct(tot["over"], tot["frames"]), tot["frames"],
-                max(int(r["run"]) for r in sec), tot["fread"], _hpct(tot["edge"], tot["fread"]), tot["far"], len(edge_s),
-                " (first %s)" % _hclock(edge_s[0]["_t"]) if edge_s else "", len(speed_s), " (first %s)" % _hclock(speed_s[0]["_t"]) if speed_s else "", lead))
+                _hsecs(sec), tot["reads"], tot["steps"], tot["skyhit"], tot["hithit"], tot["flips"], _hpct(tot["over"], tot["frames"]), tot["frames"],
+                max(int(r["run"]) for r in sec), tot["fread"], _hpct(tot["edge"], tot["fread"]), tot["far"], edge_n,
+                " (first %s)" % _hclock(edge_s[0]["_t"]) if edge_s else "", speed_n, " (first %s)" % _hclock(speed_s[0]["_t"]) if speed_s else "", lead))
     if not tot["reads"] and not tot["frames"]:
         return ("IDLE", text + "; no readback and no drawn frame")
     if tot["reads"] and not tot["fread"]:
@@ -11418,10 +11422,10 @@ def _hj_f90_pistol(rows, ctx):
         why.update(_hpairs(x["why"]))
     last = r[-1]
     text = ("item %s, keys forward %s left %s up %s toward eye %s cm; held %d s: weapon frame attach %d, F_root only %d, none %d; latched %d; moved %d (hip part %d, ADS part %d); "
-            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], len(r), attach, root, none, latched, moved, hip, ads, refused, _htop(why)))
+            "refused %d [%s]" % (last["item"], last["fwd"], last["left"], last["up"], last["toward"], _hsecs(r), attach, root, none, latched, moved, hip, ads, refused, _htop(why)))
     if moved == 0:
         return ("NEVER APPLIED", text)
-    if sum(1 for x in r if int(x["hip"]) + int(x["ads"]) > 0) * 2 < len(r):
+    if _hcount(r, "xs", lambda x: int(x["hip"]) + int(x["ads"]) > 0) * 2 < _hsecs(r):
         return ("PARTIAL", text)
     return ("OK", text)
 
@@ -11437,13 +11441,13 @@ def _hj_f85b(rows, ctx):
             return ("NEVER APPLIED", "no weapon UI part submitted in %d lines, though the weapon eye offset line says a weapon was drawn for %d s" % (len(sec), armed))
         return ("IDLE", "no weapon UI part submitted (%d idle lines: no weapon or tool out, or the submit hook sees none)" % len(sec))
     submits, ftag, fval = (_hsum(active, k) for k in ("submits", "ftag", "fval"))
-    path = active[-1]["path"] if active else "none"
+    path = active[-1]["path"] if active else ("not logged" if part else "none")
     found, decided, bound, refused = (_hsum(part, k) for k in ("found", "decided", "bound", "refused"))
     why = collections.Counter()
     for x in part:
         why.update(_hpairs(x["why"]))
     text = "%d matched submits in %d s, path %s, found %d (pool: by tag %d, by translation %d), decided %d, bound %d, refused %d [%s]" % (
-        submits, len(active), path, found, ftag, fval, decided, bound, refused, _htop(why, 2))
+        submits, _hcount(active, "xs", lambda r: int(r["submits"]) > 0), path, found, ftag, fval, decided, bound, refused, _htop(why, 2))
     if path == "none" or found == 0 or decided == 0 or bound == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided else "OK", text)
@@ -11457,7 +11461,7 @@ def _hj_f85c(rows, ctx):
         return ("NEVER APPLIED", "the compute pass could not run: %s" % fail[0]["why"])
     # F101: with reticle follow = game nothing is patched by design: the reticle is the game's, not a failure. The setting is retired (F127) and the line is no
     # longer printed; a log of an older build still carries it, so it is still read.
-    game_text = "the reticle is the game's (reticle follow = game) for %d s: %d key 10 draws left as the game placed them" % (len(game), _hsum(game, "n"))
+    game_text = "the reticle is the game's (reticle follow = game) for %d s: %d key 10 draws left as the game placed them" % (_hsecs(game), _hsum(game, "n"))
     if game and not _hsum(draws, "draws"):
         return ("IDLE", game_text)
     if not draws:
@@ -11469,7 +11473,7 @@ def _hj_f85c(rows, ctx):
     refs = collections.Counter()
     for x in draws:
         refs.update(_hpairs(x["refs"]))
-    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), len(draws), reads, hit, sky, _htop(refs))
+    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
     if game:
         text += "; " + game_text
     if patched == 0:
@@ -11616,10 +11620,10 @@ def _hj_anchor(rows, ctx):
     if nothook:
         return ("NEVER APPLIED", "NOT hooked: %s" % nothook[0]["why"])
     if not sec:
-        return ("NEVER APPLIED", "the slots are hooked but no 1 s line was written")
+        return ("IDLE" if _hdetail(ctx) == "off" else "NEVER APPLIED", "the slots are hooked but no summary line was written" if _hdetail(ctx) == "off" else "the slots are hooked but no 1 s line was written")
     s, u, i = (_hsum(sec, k) for k in ("set", "upd", "ind"))
     text = "SetMarker %d UpdateMarker %d UpdateIndicator %d in %d s; focus key set in %d s; roles nearby %d target %d list %d hidden %d other %d%s" % (
-        s, u, i, len(sec), _hfocus_seconds(ctx), _hsum(sec, "nearby"), _hsum(sec, "target"), _hsum(sec, "list"), _hsum(sec, "hidden"), _hsum(sec, "other"),
+        s, u, i, _hsecs(sec), _hfocus_seconds(ctx), _hsum(sec, "nearby"), _hsum(sec, "target"), _hsum(sec, "list"), _hsum(sec, "hidden"), _hsum(sec, "other"),
         "" if hooked else " (no hook line)")
     ind = [r for r in sec if r.get("ifocus") is not None]
     if ind:
@@ -11693,7 +11697,7 @@ def _hj_f95b_label(rows, ctx):
 
     def mx(key):
         return max(float(r[key]) for r in sec)
-    offered = sum(1 for r in sec if r.get("offkeys") and r["offkeys"] != "none")
+    offered = _hcount(sec, "xs", lambda r: r.get("offkeys") and r["offkeys"] != "none")
     rest = wmean("rest", "restn")
     text = ("label draws %d: moved %d, refused %d (no record scale %d, rows stale %d, no P %d, behind %d, gate %d, other %d) over %d eye-seconds; the anchor at rest "
             "against P %.2f mean %.2f max px (%d draws), record scale over depth %.4f; the label against its anchor a frame %.2f mean %.2f max px, its anchor in the "
@@ -11790,7 +11794,7 @@ def _hj_label(rows, ctx):
     if not sec and not refuse:
         return None
     groups, draws, ours, game = (_hsum(sec, k) for k in ("groups", "draws", "ours", "game"))
-    text = "groups %d, draws %d, b0 at issue ours %d game %d (%d eye-seconds)" % (groups, draws, ours, game, len(sec))
+    text = "groups %d, draws %d, b0 at issue ours %d game %d (%d eye-seconds)" % (groups, draws, ours, game, _hsecs(sec))
     if refuse:
         text += "; the label mesh was NOT decoded %d time(s) (%s)" % (len(refuse), refuse[0]["why"])
     if groups == 0 and draws == 0:
@@ -12571,13 +12575,13 @@ HEALTH_RULES = (
         ("state", H_F125_RE.pattern),
     ), _hj_f125_diet),
     _hrule("weapon readout size (F90)", ("F90", "F91"), ("weapon readout size (F90)", "weapon readout size (F91)"), (
-        ("part", r"weapon readout size \(F90\) 1 s: (?P<role>[a-zA-Z ]+?) \(slot (?P<slot>\d+) name (?P<name>\d+)\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), "
+        ("part", r"weapon readout size \(F90\) " + H_WL + r": (?P<role>[a-zA-Z ]+?) \(slot (?P<slot>\d+) name (?P<name>\d+)\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), "
                  r"scaled (?P<scaled>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
-        ("idle", r"weapon readout size \(F91\) 1 s: no table part among the decided parts \((?P<parts>slot .*)\)$"),
+        ("idle", r"weapon readout size \(F91\) " + H_WL + r": no table part among the decided parts \((?P<parts>slot .*)\)$"),
         # the F90 build's lines (part names as the identity), for that build's logs
-        ("part90", r"weapon readout size \(F90\) 1 s: part (?P<part>\d+) \(slot \d+\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), scaled (?P<scaled>\d+) "
+        ("part90", r"weapon readout size \(F90\) " + H_WL + r": part (?P<part>\d+) \(slot \d+\) x[\d.]+ about mesh \([^)]*\): decided (?P<decided>\d+), scaled (?P<scaled>\d+) "
                    r"\(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
-        ("idle90", r"weapon readout size \(F90\) 1 s: no table part among the decided parts \(names (?P<names>[^)]*)\)"),
+        ("idle90", r"weapon readout size \(F90\) " + H_WL + r": no table part among the decided parts \(names (?P<names>[^)]*)\)"),
     ), _hj_f90_size),
     _hrule("weapon readout part (F91)", ("F91",), ("weapon readout part (F91)",), (
         ("role", r"weapon readout part \(F91\): item (?P<item>\S+) serial (?P<serial>\d+), slot (?P<slot>\d+) name (?P<name>\d+): mesh (?P<mx>[\d.]+) x (?P<mz>[\d.]+), "
@@ -12585,42 +12589,42 @@ HEALTH_RULES = (
         ("_", r"weapon readout part \(F91\): slot \d+ name \d+: its role changed"),
     ), _hj_f91_role),
     _hrule("pistol readout (F90)", ("F90",), ("pistol readout (F90)",), (
-        ("line", r"pistol readout \(F90\) 1 s: item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) cm[^;]*; "
+        ("line", r"pistol readout \(F90\) " + H_WL + r": item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) cm[^;]*; "
                  r"frame: attach \d+ (?P<attach>\d+), F_root only (?P<root>\d+), none (?P<none>\d+) \([^)]*\); target latched (?P<latched>\d+) frames; "
                  r"moved: (?:\d+|hip readout) (?P<hip>\d+), (?:\d+|pistol ADS readout) (?P<ads>\d+) \([^)]*\), previous-frame target \d+, refused (?P<refused>\d+) "
-                 r"\[(?P<why>[^\]]*)\]" % (_HN, _HN, _HN, _HN)),
+                 r"\[(?P<why>[^\]]*)\](?:.*; moved in (?P<xs>\d+) of (?P<ws>\d+) s$)?" % (_HN, _HN, _HN, _HN)),
     ), _hj_f90_pistol),
     _hrule("rifle ADS readout (F92)", ("F92",), ("rifle ADS readout placement (F92)",), (
-        ("line", r"rifle ADS readout placement \(F92\) 1 s: item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) "
+        ("line", r"rifle ADS readout placement \(F92\) " + H_WL + r": item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) "
                  r"cm[^;]*; frame: attach \d+ (?P<attach>\d+), F_root only (?P<root>\d+), none (?P<none>\d+) \([^)]*\); target latched (?P<latched>\d+) frames; "
                  r"moved (?P<moved>\d+) \(ADS weight at the moved draws min (?P<amin>[\d.]+) max (?P<amax>[\d.]+)\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]; "
-                 r"content shift mean [\d.]+ cm; content (?P<cm>[\d.]+) m from eye 0, nearest surface on its rays (?P<ds>[\d.]+) m \((?P<surf>[^)]*)\)" % (_HN, _HN, _HN, _HN)),
+                 r"content shift mean [\d.]+ cm; content (?P<cm>[\d.]+) m from eye 0, nearest surface on its rays (?P<ds>[\d.]+) m \((?P<surf>[^)]*)\)(?:; moved in (?P<xs>\d+) of (?P<ws>\d+) s; ADS moved in (?P<adsxs>\d+) of \d+ s)?" % (_HN, _HN, _HN, _HN)),
     ), _hj_f92_rifle),
     _hrule("readout swap (F93a)", ("F93a",), ("readout swap (F93a)",), (
         ("placed", r"readout swap \(F93a\): item (?P<from>\S+) -> (?P<to>\S+), first draw frame (?P<first>\d+), first placed frame (?P<placed>\d+), gap (?P<gap>\d+)"),
         ("never", r"readout swap \(F93a\): item (?P<from>\S+) -> (?P<to>\S+), first draw frame (?P<first>\d+), NOT PLACED in 3 s"),
     ), _hj_f93_swap),
     _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
-        ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits this second \((?P<tagged>\d+) tagged; [^)]*\); "
-                r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)"),
+        ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits (?:this second|over (?P<wl>\d+) s) \((?P<tagged>\d+) tagged; [^)]*\); "
+                r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)(?:.*; matched submits in (?P<xs>\d+) of (?P<ws>\d+) s$)?"),
         ("part", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): tagged (?P<tagged>\d+) in all \(all eyes\), found (?P<found>\d+), "
-                 r"matched (?P<matched>\d+), decided (?P<decided>\d+), bound (?P<bound>\d+) \([^)]*\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\]"),
+                 r"matched (?P<matched>\d+), decided (?P<decided>\d+), bound (?P<bound>\d+) \([^)]*\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\](?:.*; over " + H_WL + r"$)?"),
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
         ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
-                  r"sky (?P<sky>\d+).*refusals: (?P<refs>.*)$"),
-        ("idle", r"reticle depth \(F85c\): no key 10 composite draw this second"),
+                  r"sky (?P<sky>\d+).*refusals: (?P<refs>.*?)(?:; over " + H_WL + r"; draws in (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
+        ("idle", r"reticle depth \(F85c\): no key 10 composite draw (?:this second|over (?P<wl>\d+) s)"),
         # F101: the reticle's game placement (a setting until F127; this build never prints the line, an older log may): key 10 is the game's, so nothing is patched by design
         ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
         ("_", r"reticle depth \(F85c\): precompiled"),
     ), _hj_f85c),
     _hrule("reticle depth (F118)", ("F118",), ("reticle depth (F118)",), (
-        ("sec", r"reticle depth \(F118\) 1 s: readbacks (?P<reads>\d+) \(hit or sky\); steps over 0\.25 deg (?P<steps>\d+) \(sky-hit (?P<skyhit>\d+), hit-hit "
+        ("sec", r"reticle depth \(F118\) " + H_WL + r": readbacks (?P<reads>\d+) \(hit or sky\); steps over 0\.25 deg (?P<steps>\d+) \(sky-hit (?P<skyhit>\d+), hit-hit "
                 r"(?P<hithit>\d+)\), flips (?P<flips>\d+), largest step [\d.]+ deg; drawn more than 0\.25 deg from the target in (?P<over>\d+) of (?P<frames>\d+) "
                 r"frames, longest run (?P<run>\d+) ms, worst [\d.]+ deg; footprint \(\+-0\.6 deg\) read (?P<fread>\d+), over a depth edge (?P<edge>\d+) \(the centre on "
-                r"the far side (?P<far>\d+)\), largest span [\d.]+ deg, incomplete (?P<inc>\d+), not dispatched (?P<nodisp>\d+)"),
+                r"the far side (?P<far>\d+)\), largest span [\d.]+ deg, incomplete (?P<inc>\d+), not dispatched (?P<nodisp>\d+)(?:; at an IPD of 63 mm; edge in (?P<es>\d+) of (?P<ews>\d+) s; speed in (?P<ss>\d+) of (?P<sws>\d+) s)?"),
     ), _hj_f118_reticle),
     _hrule("head containment (F119)", ("F119",), ("head containment (F119)",), (
         ("sec", r"head containment \(F119\) 1 s: frames (?P<frames>\d+) \(no pose (?P<nopose>\d+), over limit (?P<over>\d+)\); rest point: generation (?P<gen>\d+), "
@@ -12805,17 +12809,17 @@ HEALTH_RULES = (
         ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)(?:.*; over " + H_WL + r"$)?"),
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
-        ("sec", r"prompt anchor \(F87p\) 1 s: SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
+        ("sec", r"prompt anchor \(F87p\) " + H_WL + r": SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
                 r"\[keys [^\]]*\] target (?P<target>\d+) list (?P<list>\d+) hidden (?P<hidden>\d+) other (?P<other>\d+)"
                 # F92c: the indicator owner's calls by type and where the focus came from (absent from older builds' lines)
                 r"(?: \(last \+0x[0-9A-Fa-f]+\); indicators \(F92c\): focus (?P<ifocus>\d+) \(key -?\d+\) (?:interactable|type 1001) (?P<iint>\d+) \[keys [^\]]*\] "
-                r"unknown caller (?P<iunk>\d+) \(last \+0x[0-9A-Fa-f]+\); focus from (?P<src>[a-z ]+);)?"),
+                r"unknown caller (?P<iunk>\d+) \(last \+0x[0-9A-Fa-f]+\); focus from (?P<src>[a-z ]+);)?(?:.*; focus key set (?P<xs>\d+) of (?P<ws>\d+) s$)?"),
         ("hooked", r"prompt anchor \(F87p\): slots .* hooked"),
         ("nothook", r"prompt anchor \(F87p\): NOT hooked -- (?P<why>.*?)\. The game's code"),
         ("_", r"prompt anchor \(F87p\): slots and getter calls (?:restored|NOT all restored)"),
     ), _hj_anchor),
     _hrule("prompt label draws (F87p)", ("F87p",), ("prompt label draws (F87p)",), (
-        ("sec", r"prompt label draws \(F87p\) eye \d 1 s: groups (?P<groups>\d+) \(draws (?P<draws>\d+), index counts [^)]*\), layered \d+, b0 at issue game (?P<game>\d+) ours (?P<ours>\d+)"),
+        ("sec", r"prompt label draws \(F87p\) eye \d " + H_WL + r": groups (?P<groups>\d+) \(draws (?P<draws>\d+), index counts [^)]*\), layered \d+, b0 at issue game (?P<game>\d+) ours (?P<ours>\d+)"),
         ("refuse", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh was NOT decoded \((?P<why>[^)]*)\)"),
         ("_", r"prompt label draws \(F87p\) eye \d: the \d+-index draw's mesh decoded"),
     ), _hj_label),
@@ -12840,22 +12844,22 @@ HEALTH_RULES = (
                 r"(?P<restmax>[\d.]+) max px over (?P<restn>\d+) draws \(record scale over depth (?P<scale>[\d.]+)\); over the moved: the label from its anchor \S+ \S+ "
                 r"px mean, its step a frame (?P<step>[\d.]+) mean (?P<stepmax>[\d.]+) max px over (?P<steps>\d+) steps, the anchor's in the world (?P<pstep>[\d.]+) mean "
                 r"(?P<pstepmax>[\d.]+) max mm, the eyes' difference (?P<eyed>[\d.]+) mean (?P<eyedmax>[\d.]+) max px over (?P<eyen>\d+) frames"
-                r"(?:; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?"),
-    ), _hj_f95b_label),
+                r"(?:; px at \d+x\d+; keys with an offset this second: (?P<offkeys>.*?); offset argument not read \d+)?(?:; offset offered (?P<xs>\d+) of (?P<ws>\d+) s)?"),
+    ), _hj_f95b_label, needs_detail=True),
     _hrule("label size (F97b)", ("F97b",), ("label size (F97b)",), (
         ("sec", r"label size \(F97b\) eye (?P<eye>\d) 1 s: labels moved (?P<moved>\d+), sized (?P<sized>\d+), refused (?P<refused>\d+) \(no projection (?P<proj>\d+), out "
                 r"of range (?P<range>\d+)\); by the angle off the eye's axis 0-10/10-20/20-30/30\+ deg: draws (?P<n0>\d+)/(?P<n1>\d+)/(?P<n2>\d+)/(?P<n3>\d+); the game's "
                 r"size against the panel's: width (?P<gw0>[\d.]+)/(?P<gw1>[\d.]+)/(?P<gw2>[\d.]+)/(?P<gw3>[\d.]+) height (?P<gh0>[\d.]+)/(?P<gh1>[\d.]+)/(?P<gh2>[\d.]+)/"
                 r"(?P<gh3>[\d.]+); as drawn: width (?P<dw0>[\d.]+)/(?P<dw1>[\d.]+)/(?P<dw2>[\d.]+)/(?P<dw3>[\d.]+) height (?P<dh0>[\d.]+)/(?P<dh1>[\d.]+)/(?P<dh2>[\d.]+)/"
                 r"(?P<dh3>[\d.]+); the record's depth over its distance [\d./]+; widest (?P<widest>[\d.]+) deg"),
-    ), _hj_f97b_size),
+    ), _hj_f97b_size, needs_detail=True),
     _hrule("label world (F98b)", ("F98b",), ("label world (F98b)",), (
         ("sec", r"label world \(F98b\) eye (?P<eye>\d) 1 s: placed in the world (?P<placed>\d+), refused: no head frame (?P<nohead>\d+), no panel (?P<nopanel>\d+) "
                 r"\(F97b's eye-facing panel drawn\); the label's own world point a frame against its anchor \(the anchor still\), by the head's turning speed under "
                 r"3/3-30/30-90/90\+ deg/s: steps (?P<n0>\d+)/(?P<n1>\d+)/(?P<n2>\d+)/(?P<n3>\d+); as placed (?P<now0>[\d.]+)/(?P<now1>[\d.]+)/(?P<now2>[\d.]+)/"
                 r"(?P<now3>[\d.]+) mean (?P<nowmax0>[\d.]+)/(?P<nowmax1>[\d.]+)/(?P<nowmax2>[\d.]+)/(?P<nowmax3>[\d.]+) max mm; as F97b placed it (?P<old0>[\d.]+)/"
                 r"(?P<old1>[\d.]+)/(?P<old2>[\d.]+)/(?P<old3>[\d.]+) mean [\d./]+ max mm; anchor moving (?P<moving>\d+)"),
-    ), _hj_f98b_world),
+    ), _hj_f98b_world, needs_detail=True),
     _hrule("game camera (F93d)", ("F93d",), ("native on foot camera (F93d)",), (
         ("watch", r"native on foot camera \(F93d\): watching the game's camera: the camera controller 0x[0-9A-Fa-f]+ reads mode (?P<mode>\d+) "),
         ("change", r"native on foot camera \(F93d\): (?P<cam>external|first person) \(mode (?P<mode>\d+), .*?\) -- body changes (?P<on>on|off); controller 0x[0-9A-Fa-f]+, "
@@ -13908,6 +13912,15 @@ def self_test_health():
             raise AssertionError("native_on_foot.cpp has no log format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[needle], vals)
 
+    def RWindowTail(needle, *vals, tail):
+        """Source-rendered leading fields and appended window/count fields, with neutral values between them."""
+        fmt = health_c_format(source, needle)
+        if fmt is None:
+            raise AssertionError("native_on_foot.cpp has no log format holding %r" % needle)
+        count = sum(m.group(0) != "%%" for m in re.finditer(r"%%|%[-+ #0]*\d*(?:\.\d+)?(?:ll|l|z|h)?[diuxXsfFeEgGc]", fmt))
+        assert count >= len(vals) + len(tail), (needle, count, len(vals), len(tail))
+        return R(needle, *vals, *([None] * (count - len(vals) - len(tail))), *tail)
+
     def R90(needle, *vals):
         """A piece of the role line's text, which native_on_foot_f90.h builds (roleText), from its own format literal."""
         key = "f90:" + needle
@@ -14045,13 +14058,13 @@ def self_test_health():
 
     try:
         # ---- the line builders: each is the DLL's own format with the fields its rule reads ----
-        def f90_idle(names="29510, 29526"):
+        def f90_idle(names="29510, 29526", wl=1):
             """F91's idle form: each decided part's slot, name, mesh and scale (the names given; a 2x1 mesh at 0.06, which no row has)."""
             parts = "; ".join("slot %d name %s mesh 2.00 x 1.00 scale 0.060000" % (i, n.strip()) for i, n in enumerate(names.split(",")))
-            return R("weapon readout size (F91) 1 s: no table part", parts)
+            return R("weapon readout size (F91) %u s: no table part", wl, parts)
 
-        def f90_part(part=29526, decided=120, scaled=120, mismatch=0, role="rifle ADS readout"):
-            return R("weapon readout size (F90) 1 s: %s (slot %u", role, 1, part, 1.7778, -0.96, 0.02, decided, scaled, scaled // 2, scaled - scaled // 2, mismatch)
+        def f90_part(part=29526, decided=120, scaled=120, mismatch=0, role="rifle ADS readout", wl=1):
+            return R("weapon readout size (F90) %u s: %s (slot %u", wl, role, 1, part, 1.7778, -0.96, 0.02, decided, scaled, scaled // 2, scaled - scaled // 2, mismatch)
 
         def role_line(item="$wpn_m_assaultrifle_laser_fauto_name;", serial=4, slot=1, name=29526, mesh=(3.0, 1.0), scale=0.050098, what="rifle ADS readout (x1.7778)"):
             return R("weapon readout part (F91): item %s", item, serial, slot, name, mesh[0], mesh[1], scale, 0.667969, 0.222656, 0.225, what)
@@ -14066,9 +14079,10 @@ def self_test_health():
                 return R90("%s (x%.4f): %s; %s refused", role, k, head, refused[0], refused[1])
             return R90('%s (x%.4f): %s"', role, k, head)
 
-        def rifle(moved=0, amax=0.0, attach=0, latched=0, refused=0, why="none", cm=0.0, ds=0.0, surf="no eye 0 placement this second"):
-            return R("rifle ADS readout placement (F92) 1 s: item %s", "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
-                     moved, 0.0, amax, refused, why, 5.0, cm, ds, surf)
+        def rifle(moved=0, amax=0.0, attach=0, latched=0, refused=0, why="none", cm=0.0, ds=0.0, surf="no eye 0 placement this second", wl=1, moved_secs=None, ads_secs=None):
+            return R("rifle ADS readout placement (F92) %u s: item %s", wl, "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
+                     moved, 0.0, amax, refused, why, 5.0, cm, ds, surf, int(bool(moved)) if moved_secs is None else moved_secs, wl,
+                     int(bool(moved) and amax >= 0.99) if ads_secs is None else ads_secs, wl)
 
         def fit(win=0, head="MOVING", verdict="h1", d=2, aim=None, steady=None, hold=None, form="head"):
             """aim (F92b), steady and hold (F93b): the window's head aim, steady eye and eye hold, on, off or mixed; None renders the field as an earlier build wrote none
@@ -14099,21 +14113,22 @@ def self_test_health():
         def gate_ticks(ticks=0, held="$wpn_m_assaultrifle_laser_fauto_name;", state="allowed", why="weapon"):
             return R("native on foot ADS input (F70b): source %s; request", "bound HumanoidZoom", "on", "fresh", 12, 800, "off", 3, "clear", 400, 0, ticks, held, state, why)
 
-        def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none"):
-            return R("pistol readout (F90) 1 s: item %s", "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why)
+        def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none", wl=1, moved_secs=None):
+            return RWindowTail("pistol readout (F90) %u s: item %s", wl, "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why,
+                      tail=(int(bool(hip + ads)) if moved_secs is None else moved_secs, wl))
 
-        def pin_sec(submits=540, path="tag"):
+        def pin_sec(submits=540, path="tag", wl=1, submit_secs=None):
             return R("weapon UI pin (F85b): %s%llu matched", "" if submits else "no weapon UI part this second (no tool or weapon out, or the submit hook sees none); ",
-                     submits, submits * 2 // 3, 0, path, submits * 2 // 3 if path == "tag" else 0, submits * 2 // 3 if path == "value" else 0, 540, 100, 0)
+                     submits, wl, submits * 2 // 3, 0, path, submits * 2 // 3 if path == "tag" else 0, submits * 2 // 3 if path == "value" else 0, 540, 100, 0, None, None, "none", int(bool(submits)) if submit_secs is None else submit_secs, wl)
 
-        def pin_part(found=88, decided=88, bound=88, refused=0, why="none"):
-            return R("weapon UI pin (F85b) part slot %u", 0, 29510, 0, 400, found, found, decided, bound, 0, 0, refused, why)
+        def pin_part(found=88, decided=88, bound=88, refused=0, why="none", wl=1):
+            return RWindowTail("weapon UI pin (F85b) part slot %u", 0, 29510, 0, 400, found, found, decided, bound, 0, 0, refused, why, tail=(wl,))
 
-        def retic(draws=47, patched=42, reads=21, refs=()):
+        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
             for i, n in enumerate(refs):
                 v[17 + i] = n
-            return R("reticle depth (F85c): key 10 draws", *v)
+            return R("reticle depth (F85c): key 10 draws", *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
 
         def hold(state="holding"):
             return R("view height hold (F87h) 1 s: state %s", state)
@@ -14168,13 +14183,14 @@ def self_test_health():
         MARK_IDLE_OLD = "native on foot marker fix (F62c): eye 1: no decision this second (no marker composite draw of the eye reached the fix)"
         MARK_WIN_OLD = "marker fix (F87c) eye 0: windows 2 (F85 1, history 1, escalated 0), named 40, outside 2 (nearest 12); eye-1 first/last ring -"
 
-        def anchor(s=11, u=0, i=1, key=-1):
-            return R("prompt anchor (F87p) 1 s: SetMarker", s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10)
+        def anchor(s=11, u=0, i=1, key=-1, wl=1, focus_secs=None):
+            return RWindowTail("prompt anchor (F87p) %u s: SetMarker", wl, s, u, i, key, 0.0, 0.0, 0.0, 0.0, 0, "none", 0, 0, 1, 10,
+                      tail=(int(key >= 0) if focus_secs is None else focus_secs, wl))
 
         def anchor_ind(ifocus=83, ikey=45, iint=166, iunk=0, src="focus indicator", i=249):
             # F92c: the line with the indicator fields (the F91 flight's second at the charge port, with the focus now typed)
-            return R("prompt anchor (F87p) 1 s: SetMarker", 1079, 83, i, ikey, 0.1, 0.2, 1.4, 0.0, 166, "45,46", 0, 83, 83, 580, 0x1AA8000, ifocus, ikey, iint, "46,47", iunk,
-                     0x1A00000, src, 2.0, 1.25, 0.04, "held", 0.01, "body")
+            return R("prompt anchor (F87p) %u s: SetMarker", 1, 1079, 83, i, ikey, 0.1, 0.2, 1.4, 0.0, 166, "45,46", 0, 83, 83, 580, 0x1AA8000, ifocus, ikey, iint, "46,47", iunk,
+                     0x1A00000, src, 2.0, 1.25, 0.04, "held", 0.01, "body", 1 if ikey >= 0 else 0, 1)
 
         # F93c's line, which F94b retired: its format as the f358d3ce build printed it, for that build's logs
         f93c_fmt = ("marker design offset (F93c) eye %d 1 s: designed-offset draws %llu (last key %d, offset %.4f %.4f): moved with the nearest dot's correction %llu "
@@ -14205,13 +14221,13 @@ def self_test_health():
             # F95b: the label's decision on its anchor taken back from the designed offset, by its verdict
             return R("marker design offset (F95b) eye %d 1 s: label draws", eye, draws, "1" if draws else "none", moved, 0, draws - moved, noscale, stale, nop, behind,
                      gate, gmax, 0.0, 0.0, other, rest, restmax, restn, scale, 127.0, -86.5, step, stepmax, steps, pstep, pstepmax, eyed, eyedmax, eyen, 1536, 1632,
-                     offkeys, 0)
+                     offkeys, 0, 1 if offkeys != "none" else 0)
 
         def anchor_hooked():
             return R("prompt anchor (F87p): slots +0x48/+0x50/+0x60 hooked", 24)
 
-        def label(groups=3, draws=6, ours=6, game=0, eye=0):
-            return R("prompt label draws (F87p) eye %d 1 s: groups", eye, groups, draws, "624", 0, game, ours)
+        def label(groups=3, draws=6, ours=6, game=0, eye=0, wl=1):
+            return R("prompt label draws (F87p) eye %d %u s: groups", eye, wl, groups, draws, "624", 0, game, ours)
 
         # ---- weapon readout size (F90): the flight that started this mode ----
         check("F90 size: no table part in any second", [f90_idle()] * 5, 3, [("NEVER APPLIED", F90S)], has=["no table part among the decided parts in all 5 s (names 29510, 29526)", "exit 3"])
@@ -14382,8 +14398,11 @@ def self_test_health():
         # ---- reticle depth (F118): the edge or the speed as the cause of a reticle seen double ----
         F118 = "reticle depth (F118)"
 
-        def ret118(reads=80, steps=1, skyhit=0, hithit=1, flips=0, over=2, frames=90, run=22.0, fread=80, edge=40, far=30, inc=0, nodisp=0):
-            return R("reticle depth (F118) 1 s", reads, steps, skyhit, hithit, flips, 0.30, over, frames, run, 0.40, fread, edge, far, 1.10, inc, nodisp)
+        def ret118(reads=80, steps=1, skyhit=0, hithit=1, flips=0, over=2, frames=90, run=22.0, fread=80, edge=40, far=30, inc=0, nodisp=0,
+                   wl=1, edge_secs=None, speed_secs=None):
+            return R("reticle depth (F118) %u s", wl, reads, steps, skyhit, hithit, flips, 0.30, over, frames, run, 0.40, fread, edge, far, 1.10, inc, nodisp,
+                     int(fread >= 4 and edge * 4 >= fread and steps <= 2) if edge_secs is None else edge_secs, wl,
+                     int(flips >= 1 or run >= 50) if speed_secs is None else speed_secs, wl)
 
         check("F118 reticle: a footprint over an edge, few steps", [ret118()] * 3, 0, [("OK", F118)],
               has=["footprints read 240, over a depth edge 50% (the centre on the far side 90)", "edge seconds 3 (first 10:00:01), speed seconds 0",
@@ -15623,6 +15642,90 @@ def self_test_health():
         rc, out = cli(["--file", write(body([f90_idle()])), "--since", "10:00:00"])
         if rc != 1 or "belong to --health" not in out:
             print("health: --since without --health rc=%d:\n%s" % (rc, out))
+            ok = False
+
+        # F125 step 5: frozen 1 s text from the verified 2026-10-25 flight, independently of current C formats.
+        STEP5_LEGACY = [
+            'weapon readout size (F90) 1 s: rifle ADS readout (slot 1 name 28697) x1.7778 about mesh (-0.96, +0.02): decided 62, scaled 58 (eye 0 29, eye 1 29), table mismatch 4 (mesh 0.00 x 0.00 scale 0.05010); ADS weight at the scaled draws min 0.00 max 0.00; content centre 0.353 m from eye 0',
+            'pistol readout (F90) 1 s: item $wpn_s_pistol_kinetic_sauto_name; serial 3; keys forward +13.0 left +3.5 up -3.0 toward eye +3.0 cm (TEMPORARY); frame: attach 51 11, F_root only 0, none 0 (barrel vs aim mean 24.9 max 41.0 deg); target latched 11 frames; moved: hip readout 21, pistol ADS readout 21 (x0.5714), previous-frame target 0, refused 1 [no target this frame or the last 1]; content shift mean 11.2 cm; content 0.419 m from eye 0, nearest surface on its rays 0.468 m (in front by 5.0 cm)',
+            'rifle ADS readout placement (F92) 1 s: item $humanoid_fists_name; serial 1; keys forward +0.0 left +3.5 up +0.0 toward eye +0.0 cm (TEMPORARY); frame: attach 51 29, F_root only 0, none 0 (barrel vs aim mean 10.9 max 34.8 deg); target latched 29 frames; moved 58 (ADS weight at the moved draws min 0.00 max 0.00), refused 0 [none]; content shift mean 3.5 cm; content 0.353 m from eye 0, nearest surface on its rays 0.187 m (behind a surface by 16.6 cm)',
+            'weapon UI pin (F85b): 186 matched submits this second (124 tagged; space 0 or other 62 in all); path tag; finds in the pool: by the tag 124, by the translation 0; K solves 302, eye pairs 842 (2 disagreed; last pair: origin 0.002 mm, rotation 0.0000 deg); slot 0 name 28698: tagged 62, no getter row 0, no camera 0, untaggable 0; slot 1 name 28697: tagged 62, no getter row 0, no camera 0, untaggable 0',
+            "weapon UI pin (F85b) part slot 0 (name 28698) eye 0: tagged 62 in all (all eyes), found 31, matched 31, decided 31, bound 31 (0 through the eye's newest rows; 0 draws of more than one instance), refused 0 [none]; unpatched anchor error mean 452.8 max 1246.8 px / 22.42 deg beside the K-to-U angle 13.85 deg (the head's yaw +3.17, pitch -13.31 from the aim); corrected residual max 0.0058 px; K origin to U origin mean 8.2 max 10.5 cm; K agreement (both eyes) origin max 0.024 mm, rotation max 0.0081 deg",
+            "reticle depth (F85c): key 10 draws 91, patched at the hit depth 86; D_hit mean 50.00 min 50.00 max 50.00 m over 43 readbacks (hit 0, sky 43, a surface under 0.5 m ignored 0, off screen 0); the game's 5 m was behind a surface in 0; |D_f - D_hit| mean 0.000 max 0.000 m, D_f 50.00 m; readback age mean 2.0 max 2 frames; dispatched 45; refusals: no depth view 0, no scene rows 0, no K 0, rows not a depth fit 0, off the line 0 (largest 0.009 deg), no readback yet 5, late 0, dropped 0, ring full 0, map failed 0, wrong sequence 0, no GPU 0",
+            'reticle depth (F118) 1 s: readbacks 43 (hit or sky); steps over 0.25 deg 0 (sky-hit 0, hit-hit 0), flips 0, largest step 0.00 deg; drawn more than 0.25 deg from the target in 0 of 43 frames, longest run 0 ms, worst 0.00 deg; footprint (+-0.6 deg) read 43, over a depth edge 0 (the centre on the far side 0), largest span 0.00 deg, incomplete 0, not dispatched 0; at an IPD of 63 mm',
+            'prompt anchor (F87p) 1 s: SetMarker 1205 UpdateMarker 0 UpdateIndicator 161; focus key 0 P (-145.082 313.005 286.802) range 401.8 mm; nearby 226 [keys 49,50,51,52,53] target 0 list 0 hidden 17 other 801 (last +0x1AB3E47); indicators (F92c): focus 0 (key -1) type 1001 89 [keys 10] unknown caller 0 (last +0x0); focus from focus prompt; HUD placement: size 1.00 x room 1.00, spread 0.030, element override held, distance 0.190 m, follow body',
+            'prompt label draws (F87p) eye 0 1 s: groups 0 (draws 0, index counts none), layered 0, b0 at issue game 0 ours 0; record (0.0000 0.0000 0.0000); leader NDC +0.0000 +0.0000 (decoded 0, age 0 fr); focus key -1 target +0.0000 +0.0000, game +0.0000 +0.0000; leader - target +0.0 +0.0 px (sd 0.0 0.0); non-layered eye-frames 0',
+        ]
+        check("F125 UI: all legacy 1 s families", STEP5_LEGACY, 3,
+              [("OK", F90S), ("OK", F90P), ("OK", "rifle ADS readout (F92)"), ("OK", F85B), ("OK", F85C), ("OK", F118), ("OK", AN), ("NEVER APPLIED", LB)],
+              lacks=["UNPARSED"])
+
+        # F125 step 5: sums and per-second evidence survive ten-second windows and immediate short flushes.
+        check("F125 UI: readout size 10 s and a 3 s flush", [f90_part(wl=10), f90_part(wl=3)], 0, [("OK", F90S)],
+              has=["table mismatch 0, 13 s"], lacks=["UNPARSED"])
+        check("F125 UI: readout size idle 10 s", [f90_idle(wl=10)], 3, [("NEVER APPLIED", F90S)], has=["in all 10 s"], lacks=["UNPARSED"])
+        check("F125 UI: pistol moves in only four of ten seconds", [pistol(hip=400, wl=10, moved_secs=4)], 0, [("PARTIAL", F90P)],
+              has=["held 10 s", "moved 400"], lacks=["UNPARSED"])
+        check("F125 UI: pistol 10 s and a moving 3 s flush", [pistol(hip=400, wl=10, moved_secs=10), pistol(ads=120, wl=3, moved_secs=3)], 0,
+              [("OK", F90P)], has=["held 13 s", "moved 520"], lacks=["UNPARSED"])
+        check("F125 UI: rifle counts moved and ADS seconds separately", [rifle(moved=400, amax=1.0, wl=10, moved_secs=4, ads_secs=2)], 0,
+              [("PARTIAL", "rifle ADS readout (F92)")], has=["held 10 s", "moved 400 (2 s in ADS)"], lacks=["UNPARSED"])
+        check("F125 UI: rifle a 3 s flush after ten moving seconds", [rifle(moved=400, amax=1.0, wl=10, moved_secs=10, ads_secs=6),
+              rifle(moved=100, amax=0.5, wl=3, moved_secs=3, ads_secs=0)], 0, [("OK", "rifle ADS readout (F92)")],
+              has=["held 13 s", "moved 500 (6 s in ADS)"], lacks=["UNPARSED"])
+        check("F125 UI: pin 10 s and a short flush", [pin_sec(wl=10, submit_secs=7), pin_part(wl=10), pin_sec(wl=3, submit_secs=2), pin_part(wl=3)], 0,
+              [("OK", F85B)], has=["1080 matched submits in 9 s"], lacks=["UNPARSED"])
+        check("F125 UI: pin part rows alone prove applied", [pin_part(wl=10)], 0, [("OK", F85B)], has=["path not logged", "bound 88"], lacks=["UNPARSED"])
+        check("F125 UI: pin part rows alone never bound", [pin_part(bound=0, wl=10)], 3, [("NEVER APPLIED", F85B)], lacks=["UNPARSED"])
+        check("F125 UI: reticle draws in five of ten seconds", [retic(wl=10, draw_secs=5)], 0, [("OK", F85C)], has=["in 5 s; readbacks"], lacks=["UNPARSED"])
+        check("F125 UI: reticle 10 s and a short flush", [retic(wl=10, draw_secs=10), retic(wl=3, draw_secs=2)], 0,
+              [("OK", F85C)], has=["in 12 s; readbacks"], lacks=["UNPARSED"])
+        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [R("reticle depth (F85c): no key 10 composite", 10), eyeoff()], 3,
+              [("NEVER APPLIED", F85C)], lacks=["UNPARSED"])
+        check("F125 UI: reticle cause uses second counts, never window thresholds", [ret118(reads=800, steps=10, flips=3, frames=900, run=120,
+              fread=800, edge=400, wl=10, edge_secs=10, speed_secs=3)], 0, [("OK", F118)],
+              has=["10 s: readbacks 800", "edge seconds 10", "speed seconds 3", "leading cause: edge"], lacks=["UNPARSED"])
+        check("F125 UI: reticle cause a short flushed window", [ret118(wl=3, edge_secs=1, speed_secs=2)], 0, [("OK", F118)],
+              has=["3 s:", "edge seconds 1", "speed seconds 2", "leading cause: speed"], lacks=["UNPARSED"])
+        check("F125 UI: prompt counts focus seconds even when the last key is clear", [anchor(wl=10, key=-1, focus_secs=8),
+              label(groups=0, draws=0, ours=0, wl=10)], 3, [("OK", AN), ("NEVER APPLIED", LB)],
+              has=["in 10 s; focus key set in 8 s", "a focus key was set in 8 s", "10 eye-seconds"], lacks=["UNPARSED"])
+        check("F125 UI: prompt key snapshot alone is not ten focused seconds", [anchor(wl=10, key=45, focus_secs=0),
+              label(groups=0, draws=0, ours=0, wl=10)], 0, [("IDLE", LB)], has=["focus key set in 0 s", "no focus key was set"], lacks=["UNPARSED"])
+        check("F125 UI: prompt and label ten-second window plus short flush", [anchor(wl=10, focus_secs=8), label(wl=10), anchor(wl=3, focus_secs=2),
+              label(wl=3)], 0, [("OK", AN), ("OK", LB)], has=["in 13 s; focus key set in 10 s", "13 eye-seconds"], lacks=["UNPARSED"])
+        check("F125 UI: hooked prompt before its first summary is idle with detail off", [P_OFF, anchor_hooked()], 0, [("IDLE", AN)],
+              has=["no summary line"], lacks=["UNPARSED"])
+        check("F125 UI: settled label measurements need detail", [P_OFF, f90_part()], 0, [("OK", F90S)],
+              has=["not judged (detail log off)", D95, S97, W98], lacks=[row("NEVER APPLIED", D95), row("NEVER APPLIED", S97), row("NEVER APPLIED", W98)])
+
+        # Every new summary tail must fit the logger's 1200-byte line buffer. Billion-count fields, all bounded text buffers full and 1000-valued floats
+        # exceed practical ten-second windows; keep even those below 1100 bytes, leaving room for the timestamp and logger prefix.
+        UI_BUDGETS = (
+            ("weapon UI pin (F85b) part slot %u", ["r" * 399]),
+            ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
+            ("reticle depth (F85c): key 10 draws", []),
+            ("reticle depth (F118) %u s", []),
+            ("weapon readout size (F90) %u s", ["pistol ADS readout"]),
+            ("weapon readout size (F91) %u s", ["p" * 599]),
+            ("pistol readout (F90) %u s", ["i" * 63, "r" * 359, "s" * 79]),
+            ("rifle ADS readout placement (F92) %u s", ["i" * 63, "r" * 359, "s" * 79]),
+            ("prompt anchor (F87p) %u s", ["k" * 159, "k" * 159, "focus indicator", "held", "body"]),
+            ("prompt label draws (F87p) eye %d %u s", ["i" * 95]),
+        )
+        for needle, strings in UI_BUDGETS:
+            checks += 1
+            fmt = health_c_format(source, needle)
+            texts = iter(strings)
+            values = [next(texts) if m.group(1) == "s" else 1000.0 if m.group(1) in "fFeEgG" else 1000000000
+                      for m in re.finditer(r"%%|%[-+ #0]*\d*(?:\.\d+)?(?:ll|l|z|h)?([diuxXsfFeEgGc])", fmt) if m.group(0) != "%%"]
+            size = len(health_render(fmt, values).encode("utf-8"))
+            if size >= 1100:
+                print("health: F125 UI format exceeds its log budget: %s: %d bytes" % (needle, size))
+                ok = False
+        checks += 1
+        if not all(next(r for r in HEALTH_RULES if r.name == name).needs_detail for name in (D95, S97, W98)):
+            print("health: F125: F95b, F97b and F98b must need the detailed on-foot log")
             ok = False
 
         # ---- F125: the on-foot log diet: the detail state, the rules that need the detail log, the window helpers ----

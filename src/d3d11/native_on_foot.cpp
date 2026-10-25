@@ -61,6 +61,7 @@
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
 #include "native_on_foot_f123.h"   // F123: head containment, the leash and the wall contact (the machine, the fade mix, the lines)
+#include "native_on_foot_f125ui.h"
 #include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
@@ -12670,16 +12671,20 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
     }
     if (now - g_f87EyeLineMs < 1000) return;
     g_f87EyeLineMs = now;
-    char item[64] = "none";
-    uint32_t serial = 0;
-    if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
-    nofoot::f87::EyeRootSecond& er = g_f87EyeRoot;
-    Log::get().note("eye to weapon root (F87h) 1 s: right eye - F_root (character axes) right %+.1f up %+.1f forward %+.1f cm (up min %+.1f max %+.1f, n %u), item %s, ADS %d",
-                    er.last[0] * 100.0, er.last[1] * 100.0, er.last[2] * 100.0, er.n ? er.upMin * 100.0 : 0.0, er.n ? er.upMax * 100.0 : 0.0, static_cast<unsigned>(er.n), item, ads ? 1 : 0);
-    er.reset();
-    const double n = g_f87CamN;
-    Log::get().note("camera path (F87p) 1 s: scene eye vs job camera pitch sd %.3f deg, y sd %.2f mm (n %u)", n > 1.0 ? std::sqrt(g_f87CamM2P / (n - 1.0)) : 0.0,
-                    n > 1.0 ? std::sqrt(g_f87CamM2Y / (n - 1.0)) : 0.0, static_cast<unsigned>(n));
+    if (nofoot::logwin::detail()) {
+        char item[64] = "none";
+        uint32_t serial = 0;
+        if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
+        nofoot::f87::EyeRootSecond& er = g_f87EyeRoot;
+        Log::get().note("eye to weapon root (F87h) 1 s: right eye - F_root (character axes) right %+.1f up %+.1f forward %+.1f cm (up min %+.1f max %+.1f, n %u), item %s, ADS %d",
+                        er.last[0] * 100.0, er.last[1] * 100.0, er.last[2] * 100.0, er.n ? er.upMin * 100.0 : 0.0, er.n ? er.upMax * 100.0 : 0.0, static_cast<unsigned>(er.n), item, ads ? 1 : 0);
+    }
+    g_f87EyeRoot.reset();
+    if (nofoot::logwin::detail()) {
+        const double n = g_f87CamN;
+        Log::get().note("camera path (F87p) 1 s: scene eye vs job camera pitch sd %.3f deg, y sd %.2f mm (n %u)", n > 1.0 ? std::sqrt(g_f87CamM2P / (n - 1.0)) : 0.0,
+                        n > 1.0 ? std::sqrt(g_f87CamM2Y / (n - 1.0)) : 0.0, static_cast<unsigned>(n));
+    }
     g_f87CamN = g_f87CamMeanP = g_f87CamM2P = g_f87CamMeanY = g_f87CamM2Y = 0.0;
 }
 
@@ -22989,6 +22994,7 @@ uint64_t g_blockMs = 0;
 bool g_blockOnFoot = false;
 bool g_blockEnabled = false, g_blockDetail = false, g_blockMeasure = false, g_blockFix = false, g_blockAds = false;
 uint32_t g_blockItem = 0;
+uint32_t g_blockConfig = 0;
 nofoot::logwin::SecondShare g_unmapsTaggedFold;
 uint64_t g_unmapsTaggedSecond = 0;
 nofoot::logwin::EventCap g_f50NoteCap;   // F125: the F50 baseline-reset notes, across every key slot (render thread)
@@ -25551,20 +25557,33 @@ void labTally(uint32_t cur) {
     g_labTallied = upto;
 }
 // Render thread, once a second: the interface probe's counts, the getter probes posted since, and the label draws.
-void f87PromptLines(uint64_t nowMs) {
+void f87PromptLines(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog) {
     (void)nowMs;
     namespace f87 = nofoot::f87;
     const auto ull = [](uint64_t v) { return static_cast<unsigned long long>(v); };
-    if (!nativeOnFootActive()) return;
+    if (!nativeOnFootActive() && !windowSecs) return;
+    fold = fold && nativeOnFootActive();
+    static nofoot::logwin::SecCount focusSeconds;
+    static uint64_t nearbyWindow = 0, interactWindow = 0;
+    static double windowRange = 0.0;
+    struct HudState { double size, room, spread, distance; bool element, follow; };
+    const auto hudState = []() {
+        return HudState{g_hudSize.load(std::memory_order_relaxed), g_hudRoomEff.load(std::memory_order_relaxed),
+                        g_hudSpread.load(std::memory_order_relaxed), g_hudDistance.load(std::memory_order_relaxed),
+                        g_elemOverrideOn.load(std::memory_order_relaxed), g_followHead.load(std::memory_order_relaxed)};
+    };
+    static nofoot::logwin::WindowMetadata<HudState> hudWindow;
+    const HudState& hud = hudWindow.prime(hudState());
     // the focus marker's points of the second: the last key, its point and the extent of its points
     uint32_t to = f87p::g_focusN.load(std::memory_order_acquire), from = f87p::g_focusDrained;
     if (to - from > 256u) from = to - 256u;
-    f87p::g_focusDrained = to;
+    if (fold) f87p::g_focusDrained = to;
     int32_t key = f87p::g_focusKey.load(std::memory_order_relaxed);
-    float lastP[3] = {}, lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    static float lastP[3] = {};
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     uint32_t n = 0;
     int32_t lastKey = key;
-    for (uint32_t i = from; i != to; ++i) {
+    for (uint32_t i = from; fold && i != to; ++i) {
         f87p::FocusSample smp;
         if (!f87p::g_focusRing.get(i, &smp)) continue;
         if (n && smp.key != lastKey) {   // the focus moved to another interactable: the range is the new one's
@@ -25588,7 +25607,10 @@ void f87PromptLines(uint64_t nowMs) {
         const double d[3] = {static_cast<double>(hi[0]) - lo[0], static_cast<double>(hi[1]) - lo[1], static_cast<double>(hi[2]) - lo[2]};
         range = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * 1000.0;
     }
-    const uint64_t mask = f87p::g_nearbyMask.exchange(0, std::memory_order_relaxed);
+    windowRange = std::max(windowRange, range);
+    const uint64_t nearby = fold ? f87p::g_nearbyMask.exchange(0, std::memory_order_relaxed) : f87p::g_nearbyMask.load(std::memory_order_relaxed);
+    nearbyWindow |= nearby;
+    const uint64_t mask = nearbyWindow;
     char keys[160];
     size_t at = 0;
     keys[0] = 0;
@@ -25603,10 +25625,17 @@ void f87PromptLines(uint64_t nowMs) {
     static uint64_t prevIndF = 0, prevIndI = 0, prevIndU = 0;
     const uint64_t indF = f87p::g_indFocusN.load(std::memory_order_relaxed), indI = f87p::g_indInteractN.load(std::memory_order_relaxed),
                    indU = f87p::g_indUnknownN.load(std::memory_order_relaxed);
-    if (indF == prevIndF) f87p::focusEvent(f87::kFocusEvQuietSecond, -1);
+    static uint64_t prevQuietFocus = 0;
+    if (fold) {
+        if (indF == prevQuietFocus) f87p::focusEvent(f87::kFocusEvQuietSecond, -1);
+        prevQuietFocus = indF;
+    }
     const uint64_t focusState = f87p::g_focusState.load(std::memory_order_relaxed);
     if (!n) key = f87::focusKeyOf(focusState);
-    const uint64_t indMask = f87p::g_indInteractMask.exchange(0, std::memory_order_relaxed);
+    if (fold) focusSeconds.fold(key >= 0);
+    const uint64_t interact = fold ? f87p::g_indInteractMask.exchange(0, std::memory_order_relaxed) : f87p::g_indInteractMask.load(std::memory_order_relaxed);
+    interactWindow |= interact;
+    const uint64_t indMask = interactWindow;
     char indKeys[160];
     size_t ia = 0;
     indKeys[0] = 0;
@@ -25615,29 +25644,34 @@ void f87PromptLines(uint64_t nowMs) {
     if (!ia) std::snprintf(indKeys, sizeof(indKeys), "none");
     // F92c: the on-foot HUD placement EDVR applies to the game's HUD (the label is laid out by the game's HUD, which this placement moves): the mesh size with
     // the room in effect, the spread, whether the element-scale override is held, the distance and the follow mode.
-    Log::get().note("prompt anchor (F87p) 1 s: SetMarker %llu UpdateMarker %llu UpdateIndicator %llu; focus key %d P (%.3f %.3f %.3f) range %.1f mm; nearby %llu [keys %s] target %llu list %llu hidden %llu "
-                    "other %llu (last +0x%llX); indicators (F92c): focus %llu (key %d) type 1001 %llu [keys %s] unknown caller %llu (last +0x%llX); focus from %s; "
-                    "HUD placement: size %.2f x room %.2f, spread %.3f, element override %s, distance %.3f m, follow %s",
-                    ull(set - prevSet), ull(upd - prevUpd), ull(ind - prevInd), static_cast<int>(key), static_cast<double>(lastP[0]), static_cast<double>(lastP[1]), static_cast<double>(lastP[2]), range,
-                    ull(role[f87::kRoleNearby] - prevRole[f87::kRoleNearby]), keys, ull(role[f87::kRoleTarget] - prevRole[f87::kRoleTarget]), ull(role[f87::kRoleList] - prevRole[f87::kRoleList]),
-                    ull(role[f87::kRoleFocusHidden] - prevRole[f87::kRoleFocusHidden]), ull(role[f87::kRoleOther] - prevRole[f87::kRoleOther]), ull(f87p::g_otherLast.load(std::memory_order_relaxed)),
-                    ull(indF - prevIndF), static_cast<int>(f87p::g_indFocusKeyLast.load(std::memory_order_relaxed)), ull(indI - prevIndI), indKeys, ull(indU - prevIndU),
-                    ull(f87p::g_indUnknownLast.load(std::memory_order_relaxed)), f87::focusSrcText(f87::focusSrcOf(focusState)),
-                    static_cast<double>(g_hudSize.load(std::memory_order_relaxed)), static_cast<double>(g_hudRoomEff.load(std::memory_order_relaxed)),
-                    static_cast<double>(g_hudSpread.load(std::memory_order_relaxed)), g_elemOverrideOn.load(std::memory_order_relaxed) ? "held" : "off",
-                    static_cast<double>(g_hudDistance.load(std::memory_order_relaxed)), g_followHead.load(std::memory_order_relaxed) ? "head" : "body");
-    prevSet = set;
-    prevUpd = upd;
-    prevInd = ind;
-    prevIndF = indF;
-    prevIndI = indI;
-    prevIndU = indU;
-    for (int r = 0; r < f87::kRoleCount; ++r) prevRole[r] = role[r];
+    if (windowSecs) {
+        Log::get().note("prompt anchor (F87p) %u s: SetMarker %llu UpdateMarker %llu UpdateIndicator %llu; focus key %d P (%.3f %.3f %.3f) range %.1f mm; nearby %llu [keys %s] target %llu list %llu hidden %llu "
+                        "other %llu (last +0x%llX); indicators (F92c): focus %llu (key %d) type 1001 %llu [keys %s] unknown caller %llu (last +0x%llX); focus from %s; "
+                        "HUD placement: size %.2f x room %.2f, spread %.3f, element override %s, distance %.3f m, follow %s; focus key set %u of %u s",
+                        windowSecs, ull(set - prevSet), ull(upd - prevUpd), ull(ind - prevInd), static_cast<int>(key), static_cast<double>(lastP[0]), static_cast<double>(lastP[1]), static_cast<double>(lastP[2]), windowRange,
+                        ull(role[f87::kRoleNearby] - prevRole[f87::kRoleNearby]), keys, ull(role[f87::kRoleTarget] - prevRole[f87::kRoleTarget]), ull(role[f87::kRoleList] - prevRole[f87::kRoleList]),
+                        ull(role[f87::kRoleFocusHidden] - prevRole[f87::kRoleFocusHidden]), ull(role[f87::kRoleOther] - prevRole[f87::kRoleOther]), ull(f87p::g_otherLast.load(std::memory_order_relaxed)),
+                        ull(indF - prevIndF), static_cast<int>(f87p::g_indFocusKeyLast.load(std::memory_order_relaxed)), ull(indI - prevIndI), indKeys, ull(indU - prevIndU),
+                        ull(f87p::g_indUnknownLast.load(std::memory_order_relaxed)), f87::focusSrcText(f87::focusSrcOf(focusState)),
+                        hud.size, hud.room, hud.spread, hud.element ? "held" : "off", hud.distance, hud.follow ? "head" : "body",
+                        std::min(focusSeconds.n, windowSecs), windowSecs);
+        prevSet = set;
+        prevUpd = upd;
+        prevInd = ind;
+        prevIndF = indF;
+        prevIndI = indI;
+        prevIndU = indU;
+        for (int r = 0; r < f87::kRoleCount; ++r) prevRole[r] = role[r];
+        focusSeconds.clear();
+        nearbyWindow = interactWindow = 0;
+        windowRange = 0.0;
+        hudWindow.next(hudState());
+    }
     // the getters' posts: one line per entity, the first time it is seen at a site
     uint32_t gTo = f87p::g_getterN.load(std::memory_order_acquire), gFrom = f87p::g_getterDrained;
     if (gTo - gFrom > 32u) gFrom = gTo - 32u;
-    f87p::g_getterDrained = gTo;
-    for (uint32_t i = gFrom; i != gTo; ++i) {
+    if (fold) f87p::g_getterDrained = gTo;
+    for (uint32_t i = gFrom; fold && i != gTo; ++i) {
         f87p::GetterRec r;
         if (!f87p::g_getterRing.get(i, &r)) continue;
         const char* branch = r.q.fault ? "fault (the model query faulted)" : !r.haveQuery ? "not queried (the model type id could not be read)" : !r.q.haveComp ? "no model component"
@@ -25649,86 +25683,104 @@ void f87PromptLines(uint64_t nowMs) {
                         static_cast<double>(r.q.mn[1]), static_cast<double>(r.q.mn[2]), static_cast<double>(r.q.mx[0]), static_cast<double>(r.q.mx[1]), static_cast<double>(r.q.mx[2]),
                         r.front[0], r.front[1], r.front[2], r.delta * 100.0, r.nView);
     }
-    // F95b: the label decisions, per eye (zeros print: a second with no label says so): moved, or refused by which condition with the values that failed the gate,
-    // the anchor's lag at rest, and over the moved draws the label against its anchor.
-    {
-        const uint64_t lo = f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed), hi = f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
-        const uint64_t readFail = f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
-        char offKeys[200];
-        size_t oa = 0;
-        offKeys[0] = 0;
-        for (uint32_t k = 0; k < 128 && oa + 40 < sizeof(offKeys); ++k) {
-            if (!((k < 64 ? lo : hi) & (1ull << (k & 63u)))) continue;
-            const float ox = drawtag::floatOf(f87p::g_keyOffX[k].load(std::memory_order_relaxed)), oy = drawtag::floatOf(f87p::g_keyOffY[k].load(std::memory_order_relaxed));
-            oa += static_cast<size_t>(std::snprintf(offKeys + oa, sizeof(offKeys) - oa, "%s%u (%.4f %.4f)", oa ? ", " : "", k, static_cast<double>(ox), static_cast<double>(oy)));
+    if (fold) {
+        if (!detailLog) {
+            f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed);
+            f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
+            f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
+            for (int e = 0; e < 2; ++e) {
+                g_f95b[e] = F95bEye{};
+                g_f97b[e] = nofoot::f97b::Sec{};
+                g_f97bMoved[e] = 0;
+                g_f98b[e] = nofoot::f98b::Sec{};
+            }
+        } else {
+            // F95b: the label decisions, per eye (zeros print: a second with no label says so): moved, or refused by which condition with the values that failed the gate,
+            // the anchor's lag at rest, and over the moved draws the label against its anchor.
+            {
+                const uint64_t lo = f87p::g_keyOffMaskLo.exchange(0, std::memory_order_relaxed), hi = f87p::g_keyOffMaskHi.exchange(0, std::memory_order_relaxed);
+                const uint64_t readFail = f87p::g_offReadFail.exchange(0, std::memory_order_relaxed);
+                char offKeys[200];
+                size_t oa = 0;
+                offKeys[0] = 0;
+                for (uint32_t k = 0; k < 128 && oa + 40 < sizeof(offKeys); ++k) {
+                    if (!((k < 64 ? lo : hi) & (1ull << (k & 63u)))) continue;
+                    const float ox = drawtag::floatOf(f87p::g_keyOffX[k].load(std::memory_order_relaxed)), oy = drawtag::floatOf(f87p::g_keyOffY[k].load(std::memory_order_relaxed));
+                    oa += static_cast<size_t>(std::snprintf(offKeys + oa, sizeof(offKeys) - oa, "%s%u (%.4f %.4f)", oa ? ", " : "", k, static_cast<double>(ox), static_cast<double>(oy)));
+                }
+                if (!oa) std::snprintf(offKeys, sizeof(offKeys), "none");
+                for (int e = 0; e < 2; ++e) {
+                    F95bEye& de = g_f95b[e];
+                    const nofoot::f94b::Sec& q = de.sec;
+                    char drawn[96];
+                    size_t da = 0;
+                    drawn[0] = 0;
+                    for (uint32_t k = 0; k < 128 && da + 8 < sizeof(drawn); ++k)
+                        if ((k < 64 ? de.keysLo : de.keysHi) & (1ull << (k & 63u))) da += static_cast<size_t>(std::snprintf(drawn + da, sizeof(drawn) - da, "%s%u", da ? " " : "", k));
+                    if (!da) std::snprintf(drawn, sizeof(drawn), "none");
+                    const uint64_t* vd = de.verdict;
+                    const uint64_t moved = vd[drawtag::kPatchApplied], refused = de.draws > moved ? de.draws - moved : 0,
+                                   other = vd[drawtag::kPatchUnmatched] + vd[drawtag::kPatchBothEyes] + vd[drawtag::kPatchNoIcon];
+                    const double nq = q.n ? static_cast<double>(q.n) : 1.0, st = q.steps ? static_cast<double>(q.steps) : 1.0;
+                    if (detailLog && (de.draws || de.noScale || de.restN || de.sec.n || lo || hi || readFail))
+                    Log::get().note("marker design offset (F95b) eye %d 1 s: label draws %llu (keys %s): moved %llu (record behind its camera %llu); refused %llu: no record scale %llu, "
+                                    "scene rows stale %llu, no P %llu, behind %llu, gate %llu (|d| max %.3f NDC, last %+.3f %+.3f), other %llu; the anchor at rest against P %.2f mean "
+                                    "%.2f max px over %llu draws (record scale over depth %.4f); over the moved: the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f "
+                                    "mean %.2f max px over %llu steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; px "
+                                    "at %ux%u; keys with an offset this second: %s; offset argument not read %llu; offset offered %u of 1 s",
+                                    e, ull(de.draws), drawn, ull(moved), ull(de.recBehind), ull(refused), ull(de.noScale), ull(vd[drawtag::kPatchStale]), ull(vd[drawtag::kPatchNoP]),
+                                    ull(vd[drawtag::kPatchW]), ull(vd[drawtag::kPatchGate]), de.gateMax, de.gateLast[0], de.gateLast[1], ull(other),
+                                    de.restN ? de.restSum / static_cast<double>(de.restN) : 0.0, de.restMax, ull(de.restN),
+                                    de.scaleN ? de.scaleSum / static_cast<double>(de.scaleN) : 0.0, q.offSum[0] / nq, q.offSum[1] / nq, q.stepSum / st, q.stepMax,
+                                    ull(q.steps), q.pStepSum / st, q.pStepMax, q.eyeN ? q.eyeSum / static_cast<double>(q.eyeN) : 0.0, q.eyeMax, ull(q.eyeN), de.tw, de.th, offKeys,
+                                    ull(readFail), (lo || hi) ? 1u : 0u);
+                    de = F95bEye{};
+                }
+            }
+            // F97b: the label's size against a panel at its anchor facing the eye (1 = the panel's), per eye, by the angle off the eye's axis; zeros print
+            for (int e = 0; e < 2; ++e) {
+                nofoot::f97b::Sec& z = g_f97b[e];
+                const auto m = [&z](const double* v, int b) { return z.mean(v, b); };
+                if (detailLog && (g_f97bMoved[e] || z.sized || z.refusedProj || z.refusedRange))
+                Log::get().note("label size (F97b) eye %d 1 s: labels moved %llu, sized %llu, refused %llu (no projection %llu, out of range %llu); by the angle off the eye's "
+                                "axis 0-10/10-20/20-30/30+ deg: draws %llu/%llu/%llu/%llu; the game's size against the panel's: width %.3f/%.3f/%.3f/%.3f height "
+                                "%.3f/%.3f/%.3f/%.3f; as drawn: width %.3f/%.3f/%.3f/%.3f height %.3f/%.3f/%.3f/%.3f; the record's depth over its distance "
+                                "%.3f/%.3f/%.3f/%.3f; widest %.1f deg",
+                                e, ull(g_f97bMoved[e]), ull(z.sized), ull(z.refusedProj + z.refusedRange), ull(z.refusedProj), ull(z.refusedRange), ull(z.n[0]), ull(z.n[1]),
+                                ull(z.n[2]), ull(z.n[3]), m(z.gameW, 0), m(z.gameW, 1), m(z.gameW, 2), m(z.gameW, 3), m(z.gameH, 0), m(z.gameH, 1), m(z.gameH, 2), m(z.gameH, 3),
+                                m(z.drawnW, 0), m(z.drawnW, 1), m(z.drawnW, 2), m(z.drawnW, 3), m(z.drawnH, 0), m(z.drawnH, 1), m(z.drawnH, 2), m(z.drawnH, 3),
+                                m(z.depthOverDist, 0), m(z.depthOverDist, 1), m(z.depthOverDist, 2), m(z.depthOverDist, 3), z.maxAngle);
+                z = nofoot::f97b::Sec{};
+                g_f97bMoved[e] = 0;
+            }
+            // F98b: the label placed in the world, per eye: placed or refused, and its own world point's step a frame against its anchor (the anchor still) by the head's
+            // turning speed, as placed and as F97b's eye-facing panel would have placed it; zeros print
+            for (int e = 0; e < 2; ++e) {
+                nofoot::f98b::Sec& q = g_f98b[e];
+                if (detailLog && (q.placed || q.refusedNoHead || q.refusedPanel || q.anchorMoving || q.upN))
+                Log::get().note("label world (F98b) eye %d 1 s: placed in the world %llu, refused: no head frame %llu, no panel %llu (F97b's eye-facing panel drawn); the label's "
+                                "own world point a frame against its anchor (the anchor still), by the head's turning speed under 3/3-30/30-90/90+ deg/s: steps "
+                                "%llu/%llu/%llu/%llu; as placed %.2f/%.2f/%.2f/%.2f mean %.2f/%.2f/%.2f/%.2f max mm; as F97b placed it %.2f/%.2f/%.2f/%.2f mean "
+                                "%.2f/%.2f/%.2f/%.2f max mm; anchor moving %llu; the world's up against the eye's up %.1f deg mean (%llu draws, %llu samples)",
+                                e, ull(q.placed), ull(q.refusedNoHead), ull(q.refusedPanel), ull(q.steps[0]), ull(q.steps[1]), ull(q.steps[2]), ull(q.steps[3]), q.mean(q.nowSum, 0),
+                                q.mean(q.nowSum, 1), q.mean(q.nowSum, 2), q.mean(q.nowSum, 3), q.nowMax[0], q.nowMax[1], q.nowMax[2], q.nowMax[3], q.meanOld(0), q.meanOld(1),
+                                q.meanOld(2), q.meanOld(3), q.oldMax[0], q.oldMax[1], q.oldMax[2], q.oldMax[3], ull(q.anchorMoving),
+                                q.upN ? q.upTiltSum / static_cast<double>(q.upN) : 0.0, ull(q.upN), ull(g_f98bUp.samples));
+                q = nofoot::f98b::Sec{};
+            }
         }
-        if (!oa) std::snprintf(offKeys, sizeof(offKeys), "none");
-        for (int e = 0; e < 2; ++e) {
-            F95bEye& de = g_f95b[e];
-            const nofoot::f94b::Sec& q = de.sec;
-            char drawn[96];
-            size_t da = 0;
-            drawn[0] = 0;
-            for (uint32_t k = 0; k < 128 && da + 8 < sizeof(drawn); ++k)
-                if ((k < 64 ? de.keysLo : de.keysHi) & (1ull << (k & 63u))) da += static_cast<size_t>(std::snprintf(drawn + da, sizeof(drawn) - da, "%s%u", da ? " " : "", k));
-            if (!da) std::snprintf(drawn, sizeof(drawn), "none");
-            const uint64_t* vd = de.verdict;
-            const uint64_t moved = vd[drawtag::kPatchApplied], refused = de.draws > moved ? de.draws - moved : 0,
-                           other = vd[drawtag::kPatchUnmatched] + vd[drawtag::kPatchBothEyes] + vd[drawtag::kPatchNoIcon];
-            const double nq = q.n ? static_cast<double>(q.n) : 1.0, st = q.steps ? static_cast<double>(q.steps) : 1.0;
-            Log::get().note("marker design offset (F95b) eye %d 1 s: label draws %llu (keys %s): moved %llu (record behind its camera %llu); refused %llu: no record scale %llu, "
-                            "scene rows stale %llu, no P %llu, behind %llu, gate %llu (|d| max %.3f NDC, last %+.3f %+.3f), other %llu; the anchor at rest against P %.2f mean "
-                            "%.2f max px over %llu draws (record scale over depth %.4f); over the moved: the label from its anchor %+.1f %+.1f px mean, its step a frame %.2f "
-                            "mean %.2f max px over %llu steps, the anchor's in the world %.2f mean %.2f max mm, the eyes' difference %.2f mean %.2f max px over %llu frames; px "
-                            "at %ux%u; keys with an offset this second: %s; offset argument not read %llu",
-                            e, ull(de.draws), drawn, ull(moved), ull(de.recBehind), ull(refused), ull(de.noScale), ull(vd[drawtag::kPatchStale]), ull(vd[drawtag::kPatchNoP]),
-                            ull(vd[drawtag::kPatchW]), ull(vd[drawtag::kPatchGate]), de.gateMax, de.gateLast[0], de.gateLast[1], ull(other),
-                            de.restN ? de.restSum / static_cast<double>(de.restN) : 0.0, de.restMax, ull(de.restN),
-                            de.scaleN ? de.scaleSum / static_cast<double>(de.scaleN) : 0.0, q.offSum[0] / nq, q.offSum[1] / nq, q.stepSum / st, q.stepMax,
-                            ull(q.steps), q.pStepSum / st, q.pStepMax, q.eyeN ? q.eyeSum / static_cast<double>(q.eyeN) : 0.0, q.eyeMax, ull(q.eyeN), de.tw, de.th, offKeys,
-                            ull(readFail));
-            de = F95bEye{};
-        }
-    }
-    // F97b: the label's size against a panel at its anchor facing the eye (1 = the panel's), per eye, by the angle off the eye's axis; zeros print
-    for (int e = 0; e < 2; ++e) {
-        nofoot::f97b::Sec& z = g_f97b[e];
-        const auto m = [&z](const double* v, int b) { return z.mean(v, b); };
-        Log::get().note("label size (F97b) eye %d 1 s: labels moved %llu, sized %llu, refused %llu (no projection %llu, out of range %llu); by the angle off the eye's "
-                        "axis 0-10/10-20/20-30/30+ deg: draws %llu/%llu/%llu/%llu; the game's size against the panel's: width %.3f/%.3f/%.3f/%.3f height "
-                        "%.3f/%.3f/%.3f/%.3f; as drawn: width %.3f/%.3f/%.3f/%.3f height %.3f/%.3f/%.3f/%.3f; the record's depth over its distance "
-                        "%.3f/%.3f/%.3f/%.3f; widest %.1f deg",
-                        e, ull(g_f97bMoved[e]), ull(z.sized), ull(z.refusedProj + z.refusedRange), ull(z.refusedProj), ull(z.refusedRange), ull(z.n[0]), ull(z.n[1]),
-                        ull(z.n[2]), ull(z.n[3]), m(z.gameW, 0), m(z.gameW, 1), m(z.gameW, 2), m(z.gameW, 3), m(z.gameH, 0), m(z.gameH, 1), m(z.gameH, 2), m(z.gameH, 3),
-                        m(z.drawnW, 0), m(z.drawnW, 1), m(z.drawnW, 2), m(z.drawnW, 3), m(z.drawnH, 0), m(z.drawnH, 1), m(z.drawnH, 2), m(z.drawnH, 3),
-                        m(z.depthOverDist, 0), m(z.depthOverDist, 1), m(z.depthOverDist, 2), m(z.depthOverDist, 3), z.maxAngle);
-        z = nofoot::f97b::Sec{};
-        g_f97bMoved[e] = 0;
-    }
-    // F98b: the label placed in the world, per eye: placed or refused, and its own world point's step a frame against its anchor (the anchor still) by the head's
-    // turning speed, as placed and as F97b's eye-facing panel would have placed it; zeros print
-    for (int e = 0; e < 2; ++e) {
-        nofoot::f98b::Sec& q = g_f98b[e];
-        Log::get().note("label world (F98b) eye %d 1 s: placed in the world %llu, refused: no head frame %llu, no panel %llu (F97b's eye-facing panel drawn); the label's "
-                        "own world point a frame against its anchor (the anchor still), by the head's turning speed under 3/3-30/30-90/90+ deg/s: steps "
-                        "%llu/%llu/%llu/%llu; as placed %.2f/%.2f/%.2f/%.2f mean %.2f/%.2f/%.2f/%.2f max mm; as F97b placed it %.2f/%.2f/%.2f/%.2f mean "
-                        "%.2f/%.2f/%.2f/%.2f max mm; anchor moving %llu; the world's up against the eye's up %.1f deg mean (%llu draws, %llu samples)",
-                        e, ull(q.placed), ull(q.refusedNoHead), ull(q.refusedPanel), ull(q.steps[0]), ull(q.steps[1]), ull(q.steps[2]), ull(q.steps[3]), q.mean(q.nowSum, 0),
-                        q.mean(q.nowSum, 1), q.mean(q.nowSum, 2), q.mean(q.nowSum, 3), q.nowMax[0], q.nowMax[1], q.nowMax[2], q.nowMax[3], q.meanOld(0), q.meanOld(1),
-                        q.meanOld(2), q.meanOld(3), q.oldMax[0], q.oldMax[1], q.oldMax[2], q.oldMax[3], ull(q.anchorMoving),
-                        q.upN ? q.upTiltSum / static_cast<double>(q.upN) : 0.0, ull(q.upN), ull(g_f98bUp.samples));
-        q = nofoot::f98b::Sec{};
-    }
+    }   // the detail measurements still close each functional second
     // the label's draws, per eye
     const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
-    labTally(cur);
+    if (fold) labTally(cur);   // the 250-frame ring must be consumed each second, even between printed windows
+    if (!windowSecs) return;
     for (int e = 0; e < 2; ++e) {
         LabSec& s = g_labSec[e];
         char idx[96];
         s.idx.text(idx, sizeof(idx));
-        Log::get().note("prompt label draws (F87p) eye %d 1 s: groups %llu (draws %llu, index counts %s), layered %llu, b0 at issue game %llu ours %llu; record (%.4f %.4f %.4f); leader NDC %+.4f %+.4f "
+        Log::get().note("prompt label draws (F87p) eye %d %u s: groups %llu (draws %llu, index counts %s), layered %llu, b0 at issue game %llu ours %llu; record (%.4f %.4f %.4f); leader NDC %+.4f %+.4f "
                         "(decoded %llu, age %u fr); focus key %d target %+.4f %+.4f, game %+.4f %+.4f; leader - target %+.1f %+.1f px (sd %.1f %.1f); non-layered eye-frames %llu",
-                        e, ull(s.groups), ull(s.draws), idx, ull(s.layered), ull(s.game), ull(s.ours), static_cast<double>(s.haveRec ? s.rec[0] : 0.0f), static_cast<double>(s.haveRec ? s.rec[1] : 0.0f),
+                        e, windowSecs, ull(s.groups), ull(s.draws), idx, ull(s.layered), ull(s.game), ull(s.ours), static_cast<double>(s.haveRec ? s.rec[0] : 0.0f), static_cast<double>(s.haveRec ? s.rec[1] : 0.0f),
                         static_cast<double>(s.haveRec ? s.rec[2] : 0.0f), s.haveLeader ? s.leader[0] : 0.0, s.haveLeader ? s.leader[1] : 0.0, ull(s.decoded),
                         static_cast<unsigned>(g_labLeader[e].have ? cur - g_labLeader[e].frame : 0u), static_cast<int>(s.haveFocus ? s.focusKey : key), s.haveFocus ? s.target[0] : 0.0,
                         s.haveFocus ? s.target[1] : 0.0, s.haveFocus ? s.gameNdc[0] : 0.0, s.haveFocus ? s.gameNdc[1] : 0.0, s.n > 0.0 ? s.mx : 0.0, s.n > 0.0 ? s.my : 0.0,
@@ -26975,6 +27027,7 @@ struct F90Place {   // a placement's second: the pistol's (F90) and the rifle's 
     double contentM = 0.0;   // the placed part's content after the move, from eye 0 (the last eye 0 decision of the second)
     bool haveAds = false;
     double adsMin = 0.0, adsMax = 0.0;   // the ADS weight at the moved draws
+    uint64_t fullAdsMoved = 0;   // F125: per-fold ADS evidence, independent of the reporting window's maximum weight
 };
 F90Place g_f90Pistol, g_f92Rifle;
 int g_f90SlotHip = -1;     // the hip readout's slot (its F86d rays give the surface under the moved readout)
@@ -27165,14 +27218,55 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         ps.adsMin = ps.haveAds ? std::min(ps.adsMin, in.adsW) : in.adsW;
         ps.adsMax = ps.haveAds ? std::max(ps.adsMax, in.adsW) : in.adsW;
         ps.haveAds = true;
+        if (in.adsW >= 0.99) ++ps.fullAdsMoved;
     }
     return o;
 }
 // The 1 s lines: A per decided part with a role other than the hip's (F91: the role, its slot and name), or the idle form naming each decided part's slot,
 // name, mesh and scale when none matched a row; B while a pistol is held.
-void f90Report() {
+void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
     namespace f90 = nofoot::f90;
     using ull = unsigned long long;
+    // F93a: a swap whose class was never placed within 3 s says so
+    if (fold && g_f93Swap.open && GetTickCount64() - g_f93SwapOpenMs > 3000) {
+        f93SwapLog(0, 0, false);
+        g_f93Swap.open = false;
+    }
+    struct Meta {
+        bool pistol = false, primary = false;
+        char item[64] = "none";
+        uint32_t serial = 0;
+        double pistolKeys[4] = {}, rifleKeys[4] = {};
+    };
+    static nofoot::logwin::WindowMetadata<Meta> metadataWindow;
+    const auto metadata = []() {
+        Meta m;
+        const bool read = opticItemRead(&m.serial, m.item);
+        const bool held = read && m.serial == g_heldItemSerial.load(std::memory_order_acquire);
+        m.pistol = held && nofoot::supportItem(m.item) == nofoot::kSupportPistol;
+        m.primary = held && std::strncmp(m.item, "$wpn_m_", 7) == 0;
+        m.pistolKeys[0] = g_f90ForwardCm.load(std::memory_order_relaxed);
+        m.pistolKeys[1] = g_f90LeftCm.load(std::memory_order_relaxed);
+        m.pistolKeys[2] = g_f90UpCm.load(std::memory_order_relaxed);
+        m.pistolKeys[3] = g_f90TowardCm.load(std::memory_order_relaxed);
+        m.rifleKeys[0] = g_f92ForwardCm.load(std::memory_order_relaxed);
+        m.rifleKeys[1] = g_f92LeftCm.load(std::memory_order_relaxed);
+        m.rifleKeys[2] = g_f92UpCm.load(std::memory_order_relaxed);
+        m.rifleKeys[3] = g_f92TowardCm.load(std::memory_order_relaxed);
+        return m;
+    };
+    const Meta& meta = metadataWindow.prime(metadata());
+    static nofoot::logwin::SecCount rifleMoved, rifleAds, pistolMoved;
+    static nofoot::logwin::SecondShare moveShare;
+    static nofoot::logwin::SecondShare adsMoveShare;
+    static nofoot::logwin::SecondShare pistolMoveShare;
+    if (fold) {
+        const uint64_t moved = moveShare.take(g_f92Rifle.movedAds);
+        rifleMoved.fold(moved > 0);
+        rifleAds.fold(adsMoveShare.take(g_f92Rifle.fullAdsMoved) > 0);
+        pistolMoved.fold(pistolMoveShare.take(g_f90Pistol.movedHip + g_f90Pistol.movedAds) > 0);
+    }
+    if (!windowSecs) return;
     bool anyDecided = false, anyRole = false;
     char parts[600];
     size_t nl = 0;
@@ -27186,25 +27280,18 @@ void f90Report() {
         if (pt.role != f90::kRoleNone) anyRole = true;
         const f90::Part* tp = f90::partOfRole(pt.role);
         if (tp && pt.role != f90::kRoleHip) {
-            Log::get().note("weapon readout size (F90) 1 s: %s (slot %u name %u) x%.4f about mesh (%+.2f, %+.2f): decided %llu, scaled %llu (eye 0 %llu, eye 1 %llu), table mismatch %llu "
+            Log::get().note("weapon readout size (F90) %u s: %s (slot %u name %u) x%.4f about mesh (%+.2f, %+.2f): decided %llu, scaled %llu (eye 0 %llu, eye 1 %llu), table mismatch %llu "
                             "(mesh %.2f x %.2f scale %.5f); ADS weight at the scaled draws min %.2f max %.2f; content centre %.3f m from eye 0",
-                            f90::roleName(pt.role), p, pt.name, f90::scaledRole(pt.role) ? f90::sizeFactor(pt.role) : 1.0, tp->centre[0], tp->centre[1], ull(pt.decided),
+                            windowSecs, f90::roleName(pt.role), p, pt.name, f90::scaledRole(pt.role) ? f90::sizeFactor(pt.role) : 1.0, tp->centre[0], tp->centre[1], ull(pt.decided),
                             ull(pt.scaled), ull(pt.scaledEye[0]), ull(pt.scaledEye[1]), ull(pt.mismatch), pt.mesh[0], pt.mesh[1], pt.scale, pt.haveAds ? pt.adsMin : 0.0,
                             pt.haveAds ? pt.adsMax : 0.0, pt.haveContent ? pt.contentM : 0.0);
         }
         pt = F90Part{};
     }
-    if (anyDecided && !anyRole) Log::get().note("weapon readout size (F91) 1 s: no table part among the decided parts (%s)", parts);
-    // F93a: a swap whose class was never placed within 3 s says so
-    if (g_f93Swap.open && GetTickCount64() - g_f93SwapOpenMs > 3000) {
-        f93SwapLog(0, 0, false);
-        g_f93Swap.open = false;
-    }
+    if (anyDecided && !anyRole) Log::get().note("weapon readout size (F91) %u s: no table part among the decided parts (%s)", windowSecs, parts);
     // B: the placements' lines (the pistol's, F90; the rifle's ADS readout's, F92)
-    uint32_t serial = 0;
-    char item[64] = {};
-    const bool read = opticItemRead(&serial, item);
-    const bool heldNow = read && serial == g_heldItemSerial.load(std::memory_order_acquire);
+    const uint32_t serial = meta.serial;
+    const char* item = meta.item;
     // the refusals by name, and the content against the surface on its F86d rays
     const auto whyText = [&](const F90Place& pl, char* why, size_t cap) {
         static const char* const kWhy[f90::kBCount] = {"", "", "", "Status.json names the other weapon class", "no weapon frame", "no eye origin",
@@ -27229,44 +27316,53 @@ void f90Report() {
         else std::snprintf(surf, cap, "behind a surface by %.1f cm", (pl.contentM - ds) * 100.0);
     };
     F90Place& ps = g_f90Pistol;
-    const bool pistolHeld = heldNow && nofoot::supportItem(item) == nofoot::kSupportPistol;
+    const bool pistolHeld = meta.pistol;
     const bool anyB = ps.latched || ps.movedHip || ps.movedAds || ps.refused || ps.frames[0] || ps.frames[1] || ps.frames[2];
-    if ((pistolHeld && nativeOnFootActive()) || anyB) {
+    if ((pistolHeld && onFootWindow) || anyB) {
         char why[360], surf[80];
         double ds = 0.0;
         whyText(ps, why, sizeof(why));
         surfText(ps, g_f90SlotHip, surf, sizeof(surf), &ds);
-        Log::get().note("pistol readout (F90) 1 s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, F_root only "
+        Log::get().note("pistol readout (F90) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, F_root only "
                         "%llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved: hip readout %llu, pistol ADS readout %llu (x%.4f), previous-frame target %llu, "
-                        "refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s)",
-                        item[0] ? item : "none", serial, static_cast<double>(g_f90ForwardCm.load(std::memory_order_relaxed)),
-                        static_cast<double>(g_f90LeftCm.load(std::memory_order_relaxed)), static_cast<double>(g_f90UpCm.load(std::memory_order_relaxed)),
-                        static_cast<double>(g_f90TowardCm.load(std::memory_order_relaxed)), ull(ps.frames[f90::kFrameAttach]), ull(ps.frames[f90::kFrameRoot]),
+                        "refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s); moved in %u of %u s",
+                        windowSecs, item[0] ? item : "none", serial, meta.pistolKeys[0],
+                        meta.pistolKeys[1], meta.pistolKeys[2],
+                        meta.pistolKeys[3], ull(ps.frames[f90::kFrameAttach]), ull(ps.frames[f90::kFrameRoot]),
                         ull(ps.frames[f90::kFrameNone]), ps.barrelN ? ps.barrelSum / static_cast<double>(ps.barrelN) : 0.0, ps.barrelMax, ull(ps.latched), ull(ps.movedHip),
                         ull(ps.movedAds), f90::sizeFactor(f90::kRolePistolAds), ull(ps.movedPrev), ull(ps.refused), why,
-                        ps.latched ? ps.shiftSum / static_cast<double>(ps.latched) * 100.0 : 0.0, ps.haveContent ? ps.contentM : 0.0, ds, surf);
+                        ps.latched ? ps.shiftSum / static_cast<double>(ps.latched) * 100.0 : 0.0, ps.haveContent ? ps.contentM : 0.0, ds, surf,
+                        std::min(pistolMoved.n, windowSecs), windowSecs);
     }
+    pistolMoveShare.reset(ps.movedHip + ps.movedAds);
     ps = F90Place{};
     // F92: the rifle's ADS readout, while a primary weapon is held on foot (zeros then mean nothing ran) or while any of its counters moved
     F90Place& rs = g_f92Rifle;
-    const bool primaryHeld = heldNow && std::strncmp(item, "$wpn_m_", 7) == 0;
+    const bool primaryHeld = meta.primary;
     const bool anyR = rs.latched || rs.movedAds || rs.refused || rs.frames[0] || rs.frames[1] || rs.frames[2];
-    if ((primaryHeld && nativeOnFootActive()) || anyR) {
+    if ((primaryHeld && onFootWindow) || anyR) {
         char why[360], surf[80];
         double ds = 0.0;
         whyText(rs, why, sizeof(why));
         surfText(rs, g_f92SlotRifle, surf, sizeof(surf), &ds);
-        Log::get().note("rifle ADS readout placement (F92) 1 s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, "
+        Log::get().note("rifle ADS readout placement (F92) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, "
                         "F_root only %llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved %llu (ADS weight at the moved draws min %.2f max "
-                        "%.2f), refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s)",
-                        item[0] ? item : "none", serial, static_cast<double>(g_f92ForwardCm.load(std::memory_order_relaxed)),
-                        static_cast<double>(g_f92LeftCm.load(std::memory_order_relaxed)), static_cast<double>(g_f92UpCm.load(std::memory_order_relaxed)),
-                        static_cast<double>(g_f92TowardCm.load(std::memory_order_relaxed)), ull(rs.frames[f90::kFrameAttach]), ull(rs.frames[f90::kFrameRoot]),
+                        "%.2f), refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s); moved in %u of %u s; ADS moved in %u of %u s",
+                        windowSecs, item[0] ? item : "none", serial, meta.rifleKeys[0],
+                        meta.rifleKeys[1], meta.rifleKeys[2],
+                        meta.rifleKeys[3], ull(rs.frames[f90::kFrameAttach]), ull(rs.frames[f90::kFrameRoot]),
                         ull(rs.frames[f90::kFrameNone]), rs.barrelN ? rs.barrelSum / static_cast<double>(rs.barrelN) : 0.0, rs.barrelMax, ull(rs.latched), ull(rs.movedAds),
                         rs.haveAds ? rs.adsMin : 0.0, rs.haveAds ? rs.adsMax : 0.0, ull(rs.refused), why,
-                        rs.latched ? rs.shiftSum / static_cast<double>(rs.latched) * 100.0 : 0.0, rs.haveContent ? rs.contentM : 0.0, ds, surf);
+                        rs.latched ? rs.shiftSum / static_cast<double>(rs.latched) * 100.0 : 0.0, rs.haveContent ? rs.contentM : 0.0, ds, surf,
+                        std::min(rifleMoved.n, windowSecs), windowSecs, std::min(rifleAds.n, windowSecs), windowSecs);
     }
+    moveShare.reset(rs.movedAds);
+    adsMoveShare.reset(rs.fullAdsMoved);
     rs = F90Place{};
+    rifleMoved.clear();
+    rifleAds.clear();
+    pistolMoved.clear();
+    metadataWindow.next(metadata());
 }
 
 // The decision for a draw whose record carries a weapon UI tag (the CPU identification named it): sets g_fix.pending with the rewritten rows, or counts why not.
@@ -27484,21 +27580,34 @@ bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow
     return true;
 }
 // The 1 s lines (F85b per part and eye, the path and the tag census; F85c).
-void f85Report(uint64_t nowMs) {
+void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, bool onFootWindow) {
     using ull = unsigned long long;
     static uint64_t lastIdleB = 0, lastIdleC = 0;
     static uint64_t prevSeen = 0, prevTagged = 0;
     F85Win& w = g_f85w;
     const uint64_t seen = g_f85bSeen.load(std::memory_order_relaxed), taggedAll = g_f85bTaggedAll.load(std::memory_order_relaxed);
+    static nofoot::logwin::SecCount submitSeconds, drawSeconds;
+    static nofoot::logwin::SecondShare submitsFold, findsFold, drawsFold;
+    static nofoot::logwin::ReticleWindow reticle;
+    if (fold) {
+        submitSeconds.fold(submitsFold.take(seen) > 0);
+        drawSeconds.fold(drawsFold.take(g_f85c.draws) > 0);
+    }
+    reticle.take(g_f118.steps, g_f118.trail, g_f118.foot, fold);
+    if (fold) {
+        g_f118.steps.second();
+        g_f118.trail.second();
+        g_f118.foot.second();
+        g_f85c.keyFrame = ~0u;
+    }
     const uint64_t dSeen = seen - prevSeen, dTagged = taggedAll - prevTagged;
-    prevSeen = seen;
-    prevTagged = taggedAll;
+
     // The path decision: tags written and none found in the pool after 3 s: the packer does not carry the tag -> the value path; then none either -> idle.
-    {
+    if (fold) {
         const int path = g_f85bPath.load(std::memory_order_relaxed);
         static uint64_t pathSinceMs = 0, pathTags0 = 0, pathFinds0 = 0, unmapsSince = 0;
         unmapsSince += g_unmapsTaggedSecond;   // the pool was scanned with tags in flight (the last second's unmaps; F125: report takes the second's share of g_win's)
-        const uint64_t finds = w.tagFinds + w.valueFinds;
+        const uint64_t finds = findsFold.take(w.tagFinds + w.valueFinds);
         static uint64_t findsTotal = 0;
         findsTotal += finds;
         if (path != kF85bPathNone && taggedAll > 0) {
@@ -27530,116 +27639,89 @@ void f85Report(uint64_t nowMs) {
             }
         }
     }
-    bool any = false;
-    for (uint32_t p = 0; p < kF85bParts; ++p) {
-        for (int e = 0; e < 2; ++e) {
-            const F85bPe& pe = w.pe[p][e];
-            if (!pe.found && !pe.refused) continue;
-            any = true;
-            char why[400];
-            size_t len = 0;
-            why[0] = '\0';
-            for (int k = 0; k < kF85WhyCount; ++k)
-                if (pe.why[k]) {
-                    const int n = std::snprintf(why + len, sizeof(why) - len, "%s%s %llu", len ? ", " : "", kF85WhyName[k], ull(pe.why[k]));
-                    if (n > 0 && static_cast<size_t>(n) < sizeof(why) - len) len += static_cast<size_t>(n);
-                }
-            if (!len) std::snprintf(why, sizeof(why), "none");
-            const double nn = pe.n ? static_cast<double>(pe.n) : 1.0;
-            const uint32_t nameId = g_f85bSlotName[p].load(std::memory_order_relaxed);
-            Log::get().note("weapon UI pin (F85b) part slot %u (name %u) eye %d: tagged %llu in all (all eyes), found %llu, matched %llu, decided %llu, bound %llu (%llu through the eye's newest rows; %llu draws of more than one instance), "
-                            "refused %llu [%s]; unpatched anchor error mean %.1f max %.1f px / %.2f deg beside the K-to-U angle %.2f deg (the head's yaw %+.2f, pitch %+.2f from the aim); "
-                            "corrected residual max %.4f px; K origin to U origin mean %.1f max %.1f cm; K agreement (both eyes) origin max %.3f mm, rotation max %.4f deg",
-                            p, nameId ? nameId - 1u : 0u, e, ull(g_f85bTagged[p].load(std::memory_order_relaxed)), ull(pe.found), ull(pe.matched), ull(pe.decided), ull(pe.corrected),
-                            ull(pe.newest), ull(pe.multi), ull(pe.refused), why, pe.errPxSum / nn, pe.errPxMax, pe.errDegSum / nn, pe.angleSum / nn, pe.yawSum / nn, pe.pitchSum / nn, pe.resPxMax,
-                            pe.originCmSum / nn, pe.originCmMax, w.agreeMmMax, w.agreeDegMax);
-        }
-    }
-    // The tag census, every second a part was submitted (and an idle line every 5 s while on foot with the fix on, so a silent instrument is told from a working one)
-    if (dSeen || any || nativeOnFootActive()) {
-        if (dSeen || any || nowMs - lastIdleB >= 5000) {
-            if (!dSeen && !any) lastIdleB = nowMs;
-            char perPart[300];
-            size_t len = 0;
-            perPart[0] = '\0';
-            for (uint32_t p = 0; p < kF85bParts; ++p) {
-                const uint64_t t = g_f85bTagged[p].load(std::memory_order_relaxed);
-                if (!t && !g_f85bNoGetter[p].load(std::memory_order_relaxed)) continue;
-                const int n = std::snprintf(perPart + len, sizeof(perPart) - len, "%sslot %u name %u: tagged %llu, no getter row %llu, no camera %llu, untaggable %llu", len ? "; " : "", p,
-                                            g_f85bSlotName[p].load(std::memory_order_relaxed) - 1u, ull(t), ull(g_f85bNoGetter[p].load(std::memory_order_relaxed)),
-                                            ull(g_f85bNoCamera[p].load(std::memory_order_relaxed)), ull(g_f85bUntaggable[p].load(std::memory_order_relaxed)));
-                if (n > 0 && static_cast<size_t>(n) < sizeof(perPart) - len) len += static_cast<size_t>(n);
-            }
-            if (!len) std::snprintf(perPart, sizeof(perPart), "no part tagged yet");
-            const int path = g_f85bPath.load(std::memory_order_relaxed);
-            Log::get().note("weapon UI pin (F85b): %s%llu matched submits this second (%llu tagged; space 0 or other %llu in all); path %s; finds in the pool: by the tag %llu, by the translation %llu; "
-                            "K solves %llu, eye pairs %llu (%llu disagreed; last pair: origin %.3f mm, rotation %.4f deg); %s",
-                            (dSeen || any) ? "" : "no weapon UI part this second (no tool or weapon out, or the submit hook sees none); ", ull(dSeen), ull(dTagged),
-                            ull(g_f85bNotSpace1.load(std::memory_order_relaxed)), path == kF85bPathTag ? "tag" : path == kF85bPathValue ? "value" : "none",
-                            ull(w.tagFinds), ull(w.valueFinds), ull(w.solves), ull(g_f85Latch.pairs), ull(g_f85Latch.disagreed), g_f85Latch.last.distM * 1000.0,
-                            g_f85Latch.last.angleDeg, perPart);
-        }
-    }
-    w = F85Win{};
-    // F85c
-    F85cState& st = g_f85c;
-    if (st.draws || st.dispatched || st.reads) {
-        const double nr = st.reads ? static_cast<double>(st.reads) : 1.0;
-        Log::get().note("reticle depth (F85c): key 10 draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
-                        "off screen %llu); the game's 5 m was behind a surface in %llu; |D_f - D_hit| mean %.3f max %.3f m, D_f %.2f m; readback age mean %.1f max %.0f frames; dispatched %llu; "
-                        "refusals: no depth view %llu, no scene rows %llu, no K %llu, rows not a depth fit %llu, off the line %llu (largest %.3f deg), no readback yet %llu, late %llu, dropped %llu, "
-                        "ring full %llu, map failed %llu, wrong sequence %llu, no GPU %llu",
-                        ull(st.draws), ull(st.patched), st.reads ? st.hitSum / nr : 0.0, st.reads ? st.hitMin : 0.0, st.hitMax, ull(st.reads), ull(st.hit), ull(st.sky), ull(st.nearSurf),
-                        ull(st.offscreen), ull(st.behindBefore), st.errN ? st.errSum / static_cast<double>(st.errN) : 0.0, st.errMax, st.dF, st.ageSum / nr, st.ageMax, ull(st.dispatched),
-                        ull(st.noDepth), ull(st.noScene), ull(st.noSolve), ull(st.noZw), ull(st.offLine), st.lineMax, ull(st.noReadback), ull(st.late), ull(st.dropped), ull(st.ringFull),
-                        ull(st.mapFail), ull(st.seqBad), ull(st.noGpu));
-        // F118 (measure only): which of the edge and the speed makes the reticle look double
-        static_assert(nofoot::f118::kStepDeg == 0.25 && nofoot::f118::kRingDeg == 0.6 && nofoot::f118::kIpdM == 0.063, "the F118 line states these in its text");
-        const F118State& q = g_f118;
-        Log::get().note("reticle depth (F118) 1 s: readbacks %llu (hit or sky); steps over 0.25 deg %llu (sky-hit %llu, hit-hit %llu), flips %llu, largest step %.2f deg; "
-                        "drawn more than 0.25 deg from the target in %llu of %llu frames, longest run %.0f ms, worst %.2f deg; footprint (+-0.6 deg) read %llu, over a depth "
-                        "edge %llu (the centre on the far side %llu), largest span %.2f deg, incomplete %llu, not dispatched %llu; at an IPD of 63 mm",
-                        ull(q.steps.reads), ull(q.steps.steps), ull(q.steps.skyHit), ull(q.steps.hitHit), ull(q.steps.flips), q.steps.largestDeg, ull(q.trail.over),
-                        ull(q.trail.frames), q.trail.longestMs, q.trail.worstDeg, ull(q.foot.read), ull(q.foot.edge), ull(q.foot.centreFar), q.foot.largestDeg,
-                        ull(q.foot.incomplete), ull(q.foot.notDispatched));
-    } else if (nativeOnFootActive() && nowMs - lastIdleC >= 5000) {
-        lastIdleC = nowMs;
-        Log::get().note("reticle depth (F85c): no key 10 composite draw this second (no tool or weapon out, ADS, or the marker fix is off)");
-    }
-    // F86d: per weapon UI part that was decided this second (one line a second with a weapon out, whatever it did)
-    {
-        static uint64_t lastIdleD = 0;
-        bool anyPart = false;
+    if (windowSecs) {
+        bool any = false;
         for (uint32_t p = 0; p < kF85bParts; ++p) {
-            F86dPart& pt = g_f86d[p];
-            if (!pt.seen) continue;
-            anyPart = true;
-            Log::get().note("weapon UI depth (F86d, measure only) part slot %u: D_s %.3f centre %.3f m, panel %.3f m, would scale %.3f (not applied); rays: hits %llu, misses %llu, held %llu, "
-                            "no depth view %llu, no hit yet %llu", p, pt.sm.have ? pt.sm.depth() : 0.0, pt.haveCentre ? pt.centreD : 0.0, pt.panel, pt.wouldScale, ull(pt.hits), ull(pt.misses),
-                            ull(pt.held), ull(pt.noView), ull(pt.noHit));
-            pt.hits = pt.misses = pt.held = pt.noView = pt.noHit = pt.decisions = 0;
-            pt.seen = false;
-        }
-        if (!anyPart && nativeOnFootActive() && nowMs - lastIdleD >= 5000) {
-            lastIdleD = nowMs;
-            Log::get().note("weapon UI depth (F86d, measure only): no weapon UI part decided this second (no tool or weapon out, or the marker fix is off, or no part was tagged)");
-        }
-        // F86e: the panel's size, hip and ADS apart, per part (eye 0, the second's latest)
-        for (uint32_t p = 0; p < kF85bParts; ++p)
-            for (int ads = 0; ads < 2; ++ads) {
-                F86eFig& fg = g_f86e[p][ads];
-                if (!fg.have) continue;
-                Log::get().note("weapon UI size (F86e) part slot %u %s: quad %.2f x %.2f cm in K space at %.3f m (mesh %.4f x %.4f, scale %.5f), |U rows| %.4f %.4f %.4f, t0 %ux%u, angular %.2f x %.2f deg%s",
-                                p, ads ? "ADS" : "hip", fg.quadCm[0], fg.quadCm[1], fg.atM, fg.mesh[0], fg.mesh[1], fg.scale, fg.urows[0], fg.urows[1], fg.urows[2], fg.t0w, fg.t0h, fg.angDeg[0],
-                                fg.angDeg[1], fg.meshRead ? "" : " (the mesh was not read: the anchor alone)");
-                fg.have = false;
-                fg.t0 = false;
-                fg.n = 0;
+            for (int e = 0; e < 2; ++e) {
+                const F85bPe& pe = w.pe[p][e];
+                if (!pe.found && !pe.refused) continue;
+                any = true;
+                char why[400];
+                size_t len = 0;
+                why[0] = '\0';
+                for (int k = 0; k < kF85WhyCount; ++k)
+                    if (pe.why[k]) {
+                        const int n = std::snprintf(why + len, sizeof(why) - len, "%s%s %llu", len ? ", " : "", kF85WhyName[k], ull(pe.why[k]));
+                        if (n > 0 && static_cast<size_t>(n) < sizeof(why) - len) len += static_cast<size_t>(n);
+                    }
+                if (!len) std::snprintf(why, sizeof(why), "none");
+                const double nn = pe.n ? static_cast<double>(pe.n) : 1.0;
+                const uint32_t nameId = g_f85bSlotName[p].load(std::memory_order_relaxed);
+                Log::get().note("weapon UI pin (F85b) part slot %u (name %u) eye %d: tagged %llu in all (all eyes), found %llu, matched %llu, decided %llu, bound %llu (%llu through the eye's newest rows; %llu draws of more than one instance), "
+                                "refused %llu [%s]; unpatched anchor error mean %.1f max %.1f px / %.2f deg beside the K-to-U angle %.2f deg (the head's yaw %+.2f, pitch %+.2f from the aim); "
+                                "corrected residual max %.4f px; K origin to U origin mean %.1f max %.1f cm; K agreement (both eyes) origin max %.3f mm, rotation max %.4f deg; over %u s",
+                                p, nameId ? nameId - 1u : 0u, e, ull(g_f85bTagged[p].load(std::memory_order_relaxed)), ull(pe.found), ull(pe.matched), ull(pe.decided), ull(pe.corrected),
+                                ull(pe.newest), ull(pe.multi), ull(pe.refused), why, pe.errPxSum / nn, pe.errPxMax, pe.errDegSum / nn, pe.angleSum / nn, pe.yawSum / nn, pe.pitchSum / nn, pe.resPxMax,
+                                pe.originCmSum / nn, pe.originCmMax, w.agreeMmMax, w.agreeDegMax, windowSecs);
             }
-    }
-    f87PromptLines(nowMs);   // F87p: the marker interface probe, the getter probe and the label census (read only)
-    {
-        const F85cState keep = st;   // the smoother and the held target stay; the second's sums go
+        }
+        // The tag census, every second a part was submitted (and an idle line every 5 s while on foot with the fix on, so a silent instrument is told from a working one)
+        if (dSeen || any || onFootWindow) {
+            if (dSeen || any || nowMs - lastIdleB >= 5000) {
+                if (!dSeen && !any) lastIdleB = nowMs;
+                char perPart[300];
+                size_t len = 0;
+                perPart[0] = '\0';
+                for (uint32_t p = 0; p < kF85bParts; ++p) {
+                    const uint64_t t = g_f85bTagged[p].load(std::memory_order_relaxed);
+                    if (!t && !g_f85bNoGetter[p].load(std::memory_order_relaxed)) continue;
+                    const int n = std::snprintf(perPart + len, sizeof(perPart) - len, "%sslot %u name %u: tagged %llu, no getter row %llu, no camera %llu, untaggable %llu", len ? "; " : "", p,
+                                                g_f85bSlotName[p].load(std::memory_order_relaxed) - 1u, ull(t), ull(g_f85bNoGetter[p].load(std::memory_order_relaxed)),
+                                                ull(g_f85bNoCamera[p].load(std::memory_order_relaxed)), ull(g_f85bUntaggable[p].load(std::memory_order_relaxed)));
+                    if (n > 0 && static_cast<size_t>(n) < sizeof(perPart) - len) len += static_cast<size_t>(n);
+                }
+                if (!len) std::snprintf(perPart, sizeof(perPart), "no part tagged yet");
+                const int path = g_f85bPath.load(std::memory_order_relaxed);
+                Log::get().note("weapon UI pin (F85b): %s%llu matched submits over %u s (%llu tagged; space 0 or other %llu in all); path %s; finds in the pool: by the tag %llu, by the translation %llu; "
+                                "K solves %llu, eye pairs %llu (%llu disagreed; last pair: origin %.3f mm, rotation %.4f deg); %s; matched submits in %u of %u s",
+                                (dSeen || any) ? "" : "no weapon UI part this second (no tool or weapon out, or the submit hook sees none); ", ull(dSeen), windowSecs, ull(dTagged),
+                                ull(g_f85bNotSpace1.load(std::memory_order_relaxed)), path == kF85bPathTag ? "tag" : path == kF85bPathValue ? "value" : "none",
+                                ull(w.tagFinds), ull(w.valueFinds), ull(w.solves), ull(g_f85Latch.pairs), ull(g_f85Latch.disagreed), g_f85Latch.last.distM * 1000.0,
+                                g_f85Latch.last.angleDeg, perPart, std::min(submitSeconds.n, windowSecs), windowSecs);
+            }
+        }
+        findsFold.reset(w.tagFinds + w.valueFinds);
+        w = F85Win{};
+        prevSeen = seen;
+        prevTagged = taggedAll;
+        // F85c
+        F85cState& st = g_f85c;
+        if (st.draws || st.dispatched || st.reads) {
+            const double nr = st.reads ? static_cast<double>(st.reads) : 1.0;
+            Log::get().note("reticle depth (F85c): key 10 draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
+                            "off screen %llu); the game's 5 m was behind a surface in %llu; |D_f - D_hit| mean %.3f max %.3f m, D_f %.2f m; readback age mean %.1f max %.0f frames; dispatched %llu; "
+                            "refusals: no depth view %llu, no scene rows %llu, no K %llu, rows not a depth fit %llu, off the line %llu (largest %.3f deg), no readback yet %llu, late %llu, dropped %llu, "
+                            "ring full %llu, map failed %llu, wrong sequence %llu, no GPU %llu; over %u s; draws in %u of %u s",
+                            ull(st.draws), ull(st.patched), st.reads ? st.hitSum / nr : 0.0, st.reads ? st.hitMin : 0.0, st.hitMax, ull(st.reads), ull(st.hit), ull(st.sky), ull(st.nearSurf),
+                            ull(st.offscreen), ull(st.behindBefore), st.errN ? st.errSum / static_cast<double>(st.errN) : 0.0, st.errMax, st.dF, st.ageSum / nr, st.ageMax, ull(st.dispatched),
+                            ull(st.noDepth), ull(st.noScene), ull(st.noSolve), ull(st.noZw), ull(st.offLine), st.lineMax, ull(st.noReadback), ull(st.late), ull(st.dropped), ull(st.ringFull),
+                            ull(st.mapFail), ull(st.seqBad), ull(st.noGpu), windowSecs, std::min(drawSeconds.n, windowSecs), windowSecs);
+            // F118 (measure only): which of the edge and the speed makes the reticle look double
+            static_assert(nofoot::f118::kStepDeg == 0.25 && nofoot::f118::kRingDeg == 0.6 && nofoot::f118::kIpdM == 0.063, "the F118 line states these in its text");
+            const nofoot::logwin::ReticleWindow& q = reticle;
+            Log::get().note("reticle depth (F118) %u s: readbacks %llu (hit or sky); steps over 0.25 deg %llu (sky-hit %llu, hit-hit %llu), flips %llu, largest step %.2f deg; "
+                            "drawn more than 0.25 deg from the target in %llu of %llu frames, longest run %.0f ms, worst %.2f deg; footprint (+-0.6 deg) read %llu, over a depth "
+                            "edge %llu (the centre on the far side %llu), largest span %.2f deg, incomplete %llu, not dispatched %llu; at an IPD of 63 mm; edge in %u of %u s; speed in %u of %u s",
+                            windowSecs, ull(q.steps.reads), ull(q.steps.steps), ull(q.steps.skyHit), ull(q.steps.hitHit), ull(q.steps.flips), q.steps.largestDeg, ull(q.trail.over),
+                            ull(q.trail.frames), q.trail.longestMs, q.trail.worstDeg, ull(q.foot.read), ull(q.foot.edge), ull(q.foot.centreFar), q.foot.largestDeg,
+                            ull(q.foot.incomplete), ull(q.foot.notDispatched), std::min(q.edgeSeconds.n, windowSecs), windowSecs,
+                            std::min(q.speedSeconds.n, windowSecs), windowSecs);
+        } else if (onFootWindow && nowMs - lastIdleC >= 5000) {
+            lastIdleC = nowMs;
+            Log::get().note("reticle depth (F85c): no key 10 composite draw over %u s (no tool or weapon out, ADS, or the marker fix is off)", windowSecs);
+        }
+        drawsFold.reset(st.draws);
+        const F85cState keep = st;
         st = F85cState{};
         st.sm = keep.sm;
         st.haveTarget = keep.haveTarget;
@@ -27647,11 +27729,45 @@ void f85Report(uint64_t nowMs) {
         st.dF = keep.dF;
         st.lastQpc = keep.lastQpc;
         st.smoothFrame = keep.smoothFrame;
-        st.hitMin = 1e9;
-        g_f118.steps.second();   // F118: the second's tallies go; the last target, an open step and a trailing run carry over
-        g_f118.trail.second();
-        g_f118.foot.second();
+        st.keyFrame = keep.keyFrame;
+        reticle.clearWindow();
+        submitSeconds.clear();
+        drawSeconds.clear();
     }
+    if (fold) {
+        // F86d: per weapon UI part that was decided this second (one line a second with a weapon out, whatever it did)
+        {
+            static uint64_t lastIdleD = 0;
+            bool anyPart = false;
+            for (uint32_t p = 0; p < kF85bParts; ++p) {
+                F86dPart& pt = g_f86d[p];
+                if (!pt.seen) continue;
+                anyPart = true;
+                if (detailLog) Log::get().note("weapon UI depth (F86d, measure only) part slot %u: D_s %.3f centre %.3f m, panel %.3f m, would scale %.3f (not applied); rays: hits %llu, misses %llu, held %llu, "
+                                "no depth view %llu, no hit yet %llu", p, pt.sm.have ? pt.sm.depth() : 0.0, pt.haveCentre ? pt.centreD : 0.0, pt.panel, pt.wouldScale, ull(pt.hits), ull(pt.misses),
+                                ull(pt.held), ull(pt.noView), ull(pt.noHit));
+                pt.hits = pt.misses = pt.held = pt.noView = pt.noHit = pt.decisions = 0;
+                pt.seen = false;
+            }
+            if (!anyPart && nativeOnFootActive() && nowMs - lastIdleD >= 5000) {
+                lastIdleD = nowMs;
+                if (detailLog) Log::get().note("weapon UI depth (F86d, measure only): no weapon UI part decided this second (no tool or weapon out, or the marker fix is off, or no part was tagged)");
+            }
+            // F86e: the panel's size, hip and ADS apart, per part (eye 0, the second's latest)
+            for (uint32_t p = 0; p < kF85bParts; ++p)
+                for (int ads = 0; ads < 2; ++ads) {
+                    F86eFig& fg = g_f86e[p][ads];
+                    if (!fg.have) continue;
+                    if (detailLog) Log::get().note("weapon UI size (F86e) part slot %u %s: quad %.2f x %.2f cm in K space at %.3f m (mesh %.4f x %.4f, scale %.5f), |U rows| %.4f %.4f %.4f, t0 %ux%u, angular %.2f x %.2f deg%s",
+                                    p, ads ? "ADS" : "hip", fg.quadCm[0], fg.quadCm[1], fg.atM, fg.mesh[0], fg.mesh[1], fg.scale, fg.urows[0], fg.urows[1], fg.urows[2], fg.t0w, fg.t0h, fg.angDeg[0],
+                                    fg.angDeg[1], fg.meshRead ? "" : " (the mesh was not read: the anchor alone)");
+                    fg.have = false;
+                    fg.t0 = false;
+                    fg.n = 0;
+                }
+        }
+    }   // the detail measurements retain their 1 s reset cadence
+    f87PromptLines(nowMs, fold, onFootWindow ? windowSecs : 0, detailLog);
 }
 
 // The value path (F85b): the pool searched for a record whose position is bit-equal to a published weapon UI translation. Called from unmapPool after
@@ -29024,9 +29140,10 @@ void report(uint64_t nowMs) {
     const bool fixNow = g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed), onFoot = nativeOnFootActive();
     const bool ads = journalAds() || g_adsState == kAdsActive;
     const uint32_t item = g_heldItemSerial.load(std::memory_order_relaxed);
+    const uint32_t config = Config::get().generation();
     const bool wasOnFoot = g_blockOnFoot, detailLog = g_blockDetail, measure = g_blockMeasure, fixOn = g_blockFix;
     const bool edge = g_winMs != 0 && (onFoot != wasOnFoot || enabled != g_blockEnabled || detailNow != g_blockDetail ||
-                                      measureNow != g_blockMeasure || fixNow != g_blockFix || item != g_blockItem || (g_blockAds && !ads));
+                                      measureNow != g_blockMeasure || fixNow != g_blockFix || item != g_blockItem || config != g_blockConfig || (g_blockAds && !ads));
     g_blockOnFoot = onFoot;
     g_blockEnabled = enabled;
     g_blockDetail = detailNow;
@@ -29034,32 +29151,35 @@ void report(uint64_t nowMs) {
     g_blockFix = fixNow;
     g_blockAds = ads;
     g_blockItem = item;
+    g_blockConfig = config;
     if (g_winMs == 0) {
         g_winMs = nowMs;
         g_blockMs = nowMs;   // F125: the block's first window opens with the first second
+        f85Report(nowMs, false, 0, detailNow, onFoot);
+        f90Report(false, 0, onFoot);   // prime the initial window's metadata before a setting/item can change ahead of its first fold
         return;
     }
     const bool secondDue = nowMs - g_winMs >= 1000;
     if (!secondDue && !edge) return;
+    const bool oneSecond = detailLog || measure;
+    const uint32_t windowSecs = nofoot::logwin::gateWindow(g_blockMs, nowMs, edge, oneSecond);
     if (secondDue) {
         g_winMs = nowMs;
         if (measureNow) v2Report();   // F57 part 2: the cb1 version census's second (F100: the probe key alone)
         // F125: f85Report's identification path still consumes only this second's unmaps, including any carried across a partial-window flush.
         g_unmapsTaggedSecond = g_unmapsTaggedFold.take(g_win.unmapsTagged);
-        f85Report(nowMs);   // F85b/F85c: the weapon UI pin and the reticle depth
-        f90Report();        // F90: the weapon readout's size in ADS and the pistol's readout
         g_burstLeft = kBurstFrames;
         g_rowCensusLeft = kRowCensusFrames;   // F53: the next second's census frames
     }
     // F125: the lines below print once a window, 10 s in the default log, and the window's figures (g_win, g_streamSec, g_rowsSec, the tee's counters) reset
     // with the print; everything above keeps the 1 s gate. The window is 1 s in the detail log, and while the probe key (measure) is on: its `marker probe:`
     // lines are 1 s lines. State edges close the previous window immediately; the functional gate above still runs only once a second.
-    const bool oneSecond = detailLog || measure;
-    const uint32_t ws = nofoot::logwin::gateWindow(g_blockMs, nowMs, edge, oneSecond);
-    if (!ws) return;
+    f85Report(nowMs, secondDue, windowSecs, detailLog, wasOnFoot);
+    f90Report(secondDue, windowSecs, wasOnFoot);
+    if (!windowSecs) return;
     char span[24];   // F125: "this second", or the window's "these N s"
-    if (ws == 1) std::snprintf(span, sizeof(span), "this second");
-    else std::snprintf(span, sizeof(span), "these %u s", ws);
+    if (windowSecs == 1) std::snprintf(span, sizeof(span), "this second");
+    else std::snprintf(span, sizeof(span), "these %u s", windowSecs);
     Window& w = g_win;
     using ull = unsigned long long;
     const uint64_t taggedAll = g_f44Tagged.load(std::memory_order_relaxed);
@@ -29195,7 +29315,7 @@ void report(uint64_t nowMs) {
                                     ull(s.pWhy[drawtag::kPatchApplied]), ull(s.pNewest), drawtag::kSceneRowsMaxAge, ull(s.pWhy[drawtag::kPatchStale]),
                                     ull(s.pWhy[drawtag::kPatchUnmatched]), ull(s.pWhy[drawtag::kPatchBothEyes]), ull(s.pWhy[drawtag::kPatchW]),
                                     drawtag::kPatchGateNdc, ull(s.pWhy[drawtag::kPatchGate]), ull(s.pWhy[drawtag::kPatchNoP]), ull(s.pOther),
-                                    ull(s.fBind), ws);
+                                    ull(s.fBind), windowSecs);
                 else
                     Log::get().note("native on foot marker fix (F62c): eye %d: no decision %s (no marker composite draw of the eye reached "
                                     "the fix)", e, span);
@@ -29308,7 +29428,7 @@ void report(uint64_t nowMs) {
                 else std::snprintf(ring, sizeof(ring), "%s", e == 1 ? "none yet" : "-");
                 Log::get().note("marker fix (F87c) eye %d: windows %u (F85 %u, history %u, escalated %u), named %llu, outside %llu (nearest %u); eye-1 first/last ring %s; over %u s",
                                 e, pl.windows, pl.f85, pl.history, static_cast<unsigned>(ss.escCopies), ull(ss.named), ull(ss.outside), ss.nearest == ~0u ? 0u : ss.nearest,
-                                ring, ws);
+                                ring, windowSecs);
                 ss = StreamSecond{};
             }
         // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks
@@ -29324,7 +29444,7 @@ void report(uint64_t nowMs) {
                 Log::get().note("native on foot eye rows (F113) %u s: eye 0 %u frames: the scene meshes %u, the depth prepass %u, the terrain %u, none %u; eye 1 %u frames: "
                                 "the scene meshes %u, the depth prepass %u, the terrain %u, none %u; checked against a scene mesh %llu (max diff %.2e); source draws "
                                 "with no scene depth eye %llu, no b1 shadow %llu, latched %llu%s",
-                                ws, rs.eye[0].frames, rs.eye[0].from[kFromMeshes], rs.eye[0].from[kFromPrepass], rs.eye[0].from[kFromTerrain], rs.eye[0].none,
+                                windowSecs, rs.eye[0].frames, rs.eye[0].from[kFromMeshes], rs.eye[0].from[kFromPrepass], rs.eye[0].from[kFromTerrain], rs.eye[0].none,
                                 rs.eye[1].frames, rs.eye[1].from[kFromMeshes], rs.eye[1].from[kFromPrepass], rs.eye[1].from[kFromTerrain], rs.eye[1].none,
                                 ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.latchedDraws),
                                 g_rowsGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" : "");
@@ -29567,9 +29687,9 @@ void report(uint64_t nowMs) {
         if (clockCalls)
             appendf(buf, sizeof(buf), len, ", tee clock: %llu calls clocked, %.1f ns a call, est. %.3f ms a frame; over %u s", ull(clockCalls),
                     nofoot::f100::teeNsPerCall(clockTicks, clockCalls, freq),
-                    nofoot::f100::teeMsPerFrame(clockTicks, clockCalls, w.hookCalls + fastCalls, w.teeFrames, freq), ws);
+                    nofoot::f100::teeMsPerFrame(clockTicks, clockCalls, w.hookCalls + fastCalls, w.teeFrames, freq), windowSecs);
         else
-            appendf(buf, sizeof(buf), len, ", tee clock: none; over %u s", ws);
+            appendf(buf, sizeof(buf), len, ", tee clock: none; over %u s", windowSecs);
         Log::get().note("%s", buf);
     }
     g_unmapsTaggedFold.reset(w.unmapsTagged);
