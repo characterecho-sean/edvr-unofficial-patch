@@ -10530,6 +10530,38 @@ def _hj_f91_fit(rows, ctx):
     return ("PARTIAL" if len(few) * 2 > len(w) or cut * 2 > len(allw) else "OK", text)
 
 
+def _hj_f110_model_eye(rows, ctx):
+    """F110: the ADS sight lock's right eye per second: solved from its rows, or the model (the job camera, the left eye, or the solved left eye, plus the IPD). The
+    share of ADS frames on the model, and the job camera's model against the solved right eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
+    model stood 3.1 cm short, at the nose). A build before F110 writes the old line: any frame on its model is PARTIAL."""
+    new, old = rows.get("sec", []), rows.get("old", [])
+    if not new and not old:
+        return None
+    if old and not new:
+        solved, model = sum(int(r["solved"]) for r in old), sum(int(r["model"]) for r in old)
+        if not solved + model:
+            return ("IDLE", "%d s, no ADS frame drove the lock" % len(old))
+        text = "%d s: the solved right eye %d frames, F63's model %d (%.0f%%)" % (len(old), solved, model, 100.0 * model / (solved + model))
+        if model:
+            return ("PARTIAL", text + "; F63's model is the job camera (the left eye) plus half the IPD: the nose (the build before F110)")
+        return ("OK", text)
+    solved, model = sum(int(r["solved"]) for r in new), sum(int(r["model"]) for r in new)
+    fromcam, fromleft = sum(int(r["fromcam"]) for r in new), sum(int(r["fromleft"]) for r in new)
+    dn = sum(int(r["dn"]) for r in new)
+    if not solved + model:
+        return ("IDLE", "%d s, no ADS frame drove the lock" % len(new))
+    text = "%d s: the solved right eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
+        len(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
+    if not dn:
+        return ("OK", text + "; no frame had the model and the solved right eye together")
+    dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
+    dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
+    text += "; the job camera's model against the solved right eye %.1f cm mean, %.1f max over %d frames" % (dmean, dmax, dn)
+    if dmean > 0.5:
+        return ("PARTIAL", text + ": the model is off the right eye")
+    return ("OK", text)
+
+
 def _hj_f93_chain(rows, ctx):
     """The ADS eye chain's 1 s lines: the sight lock's input (matched by the alignment serial when the steady eye is on) and, per steady/hold setting, the along error's
     step and its lag-2 autocorrelation (the head's translation taken out two frames late reads about -0.4), the position lock's and the head's translation steps."""
@@ -11497,6 +11529,16 @@ HEALTH_RULES = (
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit),
+    _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
+        ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
+                r"(?P<model>\d+) \(F110: from the job camera, the left eye, (?P<fromcam>\d+), from the solved left eye (?P<fromleft>\d+); IPD (?P<ipd>[\d.]+) m, "
+                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved right eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
+                r"(?P<du>%s) (?P<df>%s), (?P<dmean>[\d.]+) cm mean, (?P<dmax>[\d.]+) max over (?P<dn>\d+) frames" % (_HN, _HN, _HN)),
+        ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows this second: both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
+                r"\(camera \+ half IPD along the FP right\) in (?P<model>\d+);"),
+    ), _hj_f110_model_eye),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) 1 s: steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -12882,6 +12924,27 @@ def self_test_health():
         check("F92b aim: switched outside ADS only", [aim_switch("off", "no"), aim_switch("on", "no")], 0, [("IDLE", F92A)])
         check("F92b aim: off in ADS and nothing unwound", [aim_switch("off", "yes")], 3, [("NEVER APPLIED", F92A)])
         check("F92b aim: a remainder dropped", [aim_switch("off"), aim_off(), aim_unwound(0.4, True)], 0, [("PARTIAL", F92A)], has=["1 with a DROPPED remainder"])
+
+        # ---- ADS model eye (F110): the sight lock's right eye solved or modelled ----
+        F110 = "ADS model eye (F110)"
+
+        def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
+                        dmax=0.3, dn=87):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                     dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
+
+        # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
+        OLD_TESTER = ("native on foot ADS sight check (F66e/F79): eye rows this second: both eyes 0, one eye 0, none/implausible 72 (0 implausible: over 0.5 m from the "
+                      "job camera); the lock's right eye: the solved rendered eye in 0 frames, the F63 model (camera + half IPD along the FP right) in 72; eye minus job "
+                      "camera (body right, up, forward, cm, mean) L 0.0 0.0 0.0 R 0.0 0.0 0.0; IPD 0.00 cm (0 frames)")
+        check("F110 model eye: the right eye solved, the camera's model on it", [sight_check()] * 3, 0, [("OK", F110)],
+              has=["the model 0 (0%", "against the solved right eye 0.1 cm mean, 0.3 max over 261 frames"], lacks=["UNPARSED"])
+        check("F110 model eye: the tester's 3.1 cm (the model at the nose)", [sight_check(d=(-3.1, 0.0, 0.0), dmean=3.1, dmax=3.2)] * 2, 0, [("PARTIAL", F110)],
+              has=["3.1 cm mean, 3.2 max over 174 frames: the model is off the right eye"])
+        check("F110 model eye: no rows, every frame on the camera's model", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 0,
+              [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
+        check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
+              has=["F63's model 216 (100%)", "half the IPD: the nose"])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
