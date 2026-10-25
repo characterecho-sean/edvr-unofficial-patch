@@ -43,8 +43,8 @@ def self_test():
             sig=f'0x{0x1111111100000000 + i * 0x100000000 + 0xAAAA:x}',
             depth=3, count=900 + i * 10 + 1,
             stack=[f'0x{0x1462B4A0 + i:x}',
-                   f'0x{0x1443245A0 + i:x}',
-                   f'0x{0x1436A1000 + i:x}']), sigs[0]
+                   f'0x{0x1A1A1A1A0 + i:x}',
+                   f'0x{0x1B1B1B1B0 + i:x}']), sigs[0]
         assert sigs[1] == dict(
             sig=f'0x{0x2222222200000000 + i * 0x100000000 + 0xBBBB:x}',
             depth=1, count=80 + i * 10 + 2,
