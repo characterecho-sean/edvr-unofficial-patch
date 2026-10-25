@@ -43,6 +43,7 @@
 #include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
 #include "f122_checks.h"    // F122: the on-foot panel mouse cursor hidden by default (the key, the one write, the counts, the hooks it opens)
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
+#include "f126_checks.h"    // F126: the pin's eye pair from one frame, the arm IK's snapshot of the current FP rig, a nearly straight elbow reaching the grip
 
 #include <array>
 #include <chrono>
@@ -7322,6 +7323,9 @@ int wmain(int argc, wchar_t** argv) {
     f119test::run119(check);
     // F122: the hide: the key, what a placement does, the one write against a controller's memory, the counts and the hooks the key opens.
     f122test::run122(check);
+    // F126: the review's three findings: the eye pair only from one frame (4 m/s, 90 Hz: 22 mm), the arm IK's snapshot only of the rig the plan names, a bend just under
+    // the hinge window reaching the grip as exactly as one just over it.
+    f126test::run126(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -11090,6 +11090,37 @@ def _hj_f122_mouse(rows, ctx):
     return ("IDLE", text + "; no panel was reached while the key was off")
 
 
+def _hj_f126_review(rows, ctx):
+    """F126: the review fixes' two guards, counted every 10 s on foot (a window with no pin call and no arm IK call prints nothing). The pin takes the midpoint of the eyes
+    only from two eyes' rows of one frame and keeps its last pair otherwise (the refused count); the arm IK refuses a call whose FP snapshot is of an earlier FP rig than the
+    plan's, a skeleton change, and leaves the hands to the game until the next FP call replaces the snapshot (the second count). OK: a guard that had calls to judge refused
+    under a tenth of the eye pairs and under 5% of the IK calls. PARTIAL: a tenth or more of the eye pairs refused, or 5% or more of the IK calls (the rows or the rig out of
+    step for long). IDLE: no eye pair read and no IK call (nothing for either guard to judge). No line at all is the code never having run (not on foot, or a build before
+    F126)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    calls, taken, frames, ik, rig = (_hsum(sec, f) for f in ("calls", "taken", "frames", "ik", "rig"))
+    pairs = taken + frames
+    text = ("%d windows of 10 s: pin eye pairs: %d pin calls, %d pairs taken, %d refused for rows of two different frames (%s of the %d pairs read); arm IK: %d calls, "
+            "%d refused for an FP snapshot of an earlier rig (%s)") % (len(sec), calls, taken, frames, _hpct(frames, pairs), pairs, ik, rig, _hpct(rig, ik))
+    partial = []
+    if pairs and frames * 10 >= pairs:
+        partial.append("a tenth or more of the eye pairs were refused, so the pin kept its last pair on those calls")
+    if ik and rig * 20 >= ik:
+        partial.append("5% or more of the arm IK calls were refused for an FP snapshot of an earlier rig")
+    if partial:
+        return ("PARTIAL", text + "; " + "; ".join(partial))
+    if not pairs and not ik:
+        return ("IDLE", text + "; no eye pair was read and no arm IK call was made: nothing for either guard to judge")
+    notes = []
+    if not pairs:
+        notes.append("no eye pair was read (the pin used its cached offset or none)")
+    if not ik:
+        notes.append("no arm IK call")
+    return ("OK", text + ("; " + "; ".join(notes) if notes else ""))
+
+
 def _hj_f114b_pointer(rows, ctx):
     """F114b: the panel pointer's second instrument, per profile (VR, and the flat profile on foot): which transform turns the sprite against the uv (the
     pick camera, the owner's world transform, the mesh data, or none), what the eye would see of the sprite's pose (the cursor's draw against it), the
@@ -12436,6 +12467,10 @@ HEALTH_RULES = (
         ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
         ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
     ), _hj_f122_mouse),
+    _hrule("review fixes (F126)", ("F126",), ("review fixes (F126)",), (
+        ("sec", r"review fixes \(F126\) 10 s: pin eye pairs: (?P<calls>\d+) pin calls, (?P<taken>\d+) pairs taken, (?P<frames>\d+) refused for rows of two different frames; "
+                r"arm IK: (?P<ik>\d+) calls, (?P<rig>\d+) refused for an FP snapshot of an earlier rig$"),
+    ), _hj_f126_review),
     _hrule("visor axis (F121)", ("F121",), ("visor axis (F121)",), (
         ("armed", r"visor axis \(F121\): armed \(remlok_lines outer\)"),
         ("first", r"visor axis \(F121\): the visor frame is centred on each eye's optical axis: s left (?P<sl>%s) right (?P<sr>%s) uv, from the tangents outer "
@@ -14293,6 +14328,24 @@ def self_test_health():
               has=["key on", "on: 2 s with a panel, 180 panels seen, 0 sprites hidden", "nothing is hidden by design"])
         check("F122 mouse: the key moved from off to on and back", [pm_set(), pm_hook(), pm(), pm_set("on"), pm("on", hidden=0), pm_set("off"), pm()], 0,
               [("OK", F122)], has=["key off (3 change line(s))", "off: 2 s with a panel, 180 panels seen, 180 sprites hidden", "on: 1 s with a panel, 90 panels seen"])
+
+        # ---- review fixes (F126): the pin's eye pairs refused for rows of two frames, the arm IK calls refused for an FP snapshot of an earlier rig ----
+        F126 = "review fixes (F126)"
+
+        def rf(calls=900, taken=900, frames=0, ik=900, rig=0):
+            return R("review fixes (F126) 10 s", calls, taken, frames, ik, rig)
+
+        check("F126 review fixes: both guards ran and refused nothing", [rf(), rf(), rf()], 0, [("OK", F126)], lacks=["UNPARSED"],
+              has=["3 windows of 10 s", "2700 pairs taken, 0 refused for rows of two different frames (0% of the 2700 pairs read)", "arm IK: 2700 calls, 0 refused"])
+        check("F126 review fixes: a few pairs and a few calls refused", [rf(taken=890, frames=10, rig=3), rf(taken=895, frames=5)], 0, [("OK", F126)],
+              has=["15 refused for rows of two different frames (1% of the 1800 pairs read)", "3 refused for an FP snapshot of an earlier rig (0%)"])
+        check("F126 review fixes: a tenth of the eye pairs refused", [rf(taken=780, frames=120)], 0, [("PARTIAL", F126)],
+              has=["a tenth or more of the eye pairs were refused", "120 refused for rows of two different frames (13% of the 900 pairs read)"])
+        check("F126 review fixes: the arm IK refused for an earlier rig for long", [rf(rig=60)], 0, [("PARTIAL", F126)],
+              has=["5% or more of the arm IK calls were refused for an FP snapshot of an earlier rig", "60 refused for an FP snapshot of an earlier rig (7%)"])
+        check("F126 review fixes: no eye pair read, no IK call", [rf(taken=0, ik=0)], 0, [("IDLE", F126)], has=["nothing for either guard to judge"])
+        check("F126 review fixes: IK calls only", [rf(taken=0, ik=900)], 0, [("OK", F126)], has=["no eye pair was read (the pin used its cached offset or none)"])
+        check("F126 review fixes: a line the rule does not parse", ["review fixes (F126) 10 s: a format nobody wrote"], 4, [("UNPARSED", F126)])
 
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"

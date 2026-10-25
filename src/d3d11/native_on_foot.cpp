@@ -56,6 +56,7 @@
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
 #include "native_on_foot_f122.h"   // F122: the on-foot panel mouse cursor hidden by default (pure parts)
+#include "native_on_foot_f126.h"   // F126: the pin's eye pair, the arm IK's snapshot rig, three review findings (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
@@ -14613,7 +14614,7 @@ std::atomic<float> g_ikWeight{0.0f};        // the frame thread's base weight (0
 std::atomic<bool> g_ikWriteDown{false};     // a failed write stands the IK's writes down for the session
 std::atomic<uint32_t> g_ikFailBits{0};      // refusals the hook met; the frame thread names each once
 enum IkRefusal : uint32_t {
-    kIkRefBuffer = 0, kIkRefPlanTorn, kIkRefPlan, kIkRefFpTorn, kIkRefFpStale, kIkRefGTorn, kIkRefGStale, kIkRefSide, kIkRefSingular, kIkRefWrite,
+    kIkRefBuffer = 0, kIkRefPlanTorn, kIkRefPlan, kIkRefFpTorn, kIkRefFpStale, kIkRefGTorn, kIkRefGStale, kIkRefSide, kIkRefSingular, kIkRefWrite, kIkRefFpRig,
     kIkRefKinds
 };
 const char* const kIkRefText[kIkRefKinds] = {
@@ -14626,7 +14627,8 @@ const char* const kIkRefText[kIkRefKinds] = {
     "G is older than 100 ms",
     "an arm's plan was refused by the census (its side is not solved)",
     "a singular or non-finite matrix (the side is skipped this call)",
-    "an arm write faulted: the IK's writes stand down for the session"};
+    "an arm write faulted: the IK's writes stand down for the session",
+    "the FP snapshot is of an earlier FP rig than the plan's (a skeleton change: its grips are not used until the next FP call replaces it)"};
 std::atomic<uint64_t> g_ikRefused[kIkRefKinds];
 std::atomic<uint64_t> g_ikCalls{0};
 void ikRefuse(uint32_t k) noexcept {
@@ -14909,39 +14911,28 @@ struct PinCyc {
 };
 PinCyc g_pinCyc;
 enum PinCycSrc : int { kCycRows = 0, kCycCached = 1, kCycNone = 2 };
+// F126 (nofoot::f126), counted for its 10 s line: the pin's calls, the eye pairs it took, and the pairs it refused because the two eyes' rows were of different frames.
+std::atomic<uint64_t> g_f126PairCalls{0}, g_f126PairUsed{0}, g_f126PairFrames{0};
 int pinCycloUpdate(uint64_t now) noexcept {
     float rows[2][16] = {}, o[2][4] = {};
     uint32_t fr[2] = {~0u, ~0u};
-    double eye[2][3] = {}, up[2][3] = {}, fw[2][3] = {};
-    const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
-    bool ok = true;
-    for (int e = 0; e < 2 && ok; ++e) {
-        double r[3];
-        ok = eyeRowsRead(e, &fr[e], rows[e], o[e]);
-        if (ok) {
-            const int32_t age = static_cast<int32_t>(cur - fr[e]);
-            ok = age >= 0 && age <= 8;
+    bool read[2] = {};
+    for (int e = 0; e < 2; ++e) read[e] = eyeRowsRead(e, &fr[e], rows[e], o[e]);
+    nofoot::f126::Cyclo c;
+    const nofoot::f126::Pair pair = nofoot::f126::cycloFromRows(read, fr, rows, o, g_f44Frame.load(std::memory_order_relaxed), &c);
+    g_f126PairCalls.fetch_add(1, std::memory_order_relaxed);
+    if (pair == nofoot::f126::Pair::kUse) {
+        for (int i = 0; i < 3; ++i) {
+            g_pinCyc.off[i] = c.off[i];
+            g_pinCyc.fwd[i] = c.fwd[i];
+            g_pinCyc.up[i] = c.up[i];
         }
-        const double od[3] = {o[e][0], o[e][1], o[e][2]};
-        ok = ok && nofoot::eyeFromRows(rows[e], od, eye[e]) && nofoot::rotAxesFromClip(rows[e], r, up[e], fw[e]);
+        g_pinCyc.ok = true;
+        g_pinCyc.ms = now;
+        g_f126PairUsed.fetch_add(1, std::memory_order_relaxed);
+        return kCycRows;
     }
-    if (ok) {
-        const double d[3] = {eye[1][0] - eye[0][0], eye[1][1] - eye[0][1], eye[1][2] - eye[0][2]};
-        const double ipd = nofoot::ikLen(d);
-        const double mf[3] = {fw[0][0] + fw[1][0], fw[0][1] + fw[1][1], fw[0][2] + fw[1][2]};
-        const double mu[3] = {up[0][0] + up[1][0], up[0][1] + up[1][1], up[0][2] + up[1][2]};
-        double uf[3], uu[3];
-        if (ipd > 0.05 && ipd < 0.08 && nofoot::ikUnit(mf, uf) && nofoot::ikUnit(mu, uu)) {
-            for (int i = 0; i < 3; ++i) {
-                g_pinCyc.off[i] = 0.5 * d[i];
-                g_pinCyc.fwd[i] = uf[i];
-                g_pinCyc.up[i] = uu[i];
-            }
-            g_pinCyc.ok = true;
-            g_pinCyc.ms = now;
-            return kCycRows;
-        }
-    }
+    if (pair == nofoot::f126::Pair::kFrames) g_f126PairFrames.fetch_add(1, std::memory_order_relaxed);
     return g_pinCyc.ok && now - g_pinCyc.ms < 1000 ? kCycCached : kCycNone;
 }
 // One pin call's figures, filled by pinStage0 and closed by armIkAfterAnimate (the neck as finally written, after the bend).
@@ -16961,6 +16952,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // skips the arms and the square-up but not the bend; F67c: nor the pin.
     static float s_fpm[nofoot::kIkFpSlots][16];
     static uint64_t s_fpMs = 0;
+    static uint64_t s_fpmX = 0;          // F126: the FP rig (its X and the plan generation) the matrices in s_fpm were taken from
+    static uint32_t s_fpmGeneration = 0;
     static bool s_fpHave = false, s_gHave = false;
     static IkFpHands s_fpHands;
     static IkFpMeta s_fpMeta;
@@ -17028,6 +17021,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (ikFpRead(tmp, &tmpMs, &tmpHands, &tmpMeta)) {
                 std::memcpy(s_fpm, tmp, sizeof(s_fpm));
                 s_fpHands = tmpHands;
+                s_fpmX = tmpHands.x;
+                s_fpmGeneration = tmpHands.generation;
                 s_fpMeta = tmpMeta;
                 s_fpMs = tmpMs;
                 s_fpHave = true;
@@ -17044,7 +17039,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         gAge = s_gHave ? (now > s_G.ms ? now - s_G.ms : 0) : 0;
         fpStale = s_fpHave && fpAge > nofoot::kIkFreshMs;
         gStale = s_gHave && gAge > nofoot::kIkFreshMs;
-        if (!nofoot::ikSnapshotUsable(s_fpHave, fpAge, armedNow)) ref = s_fpHave ? kIkRefFpStale : kIkRefFpTorn;
+        // F126: the snapshot's matrices are read by the anatomical retarget and by the attach fallback alike, so the snapshot has to be of the FP rig that is current
+        // (the plan's generation) for either: after a skeleton change the earlier rig's grips stay in s_fpm until the next FP call replaces them.
+        const bool fpAgeUsable = nofoot::ikSnapshotUsable(s_fpHave, fpAge, armedNow);
+        const bool fpRigCurrent = nofoot::f126::snapshotRigCurrent(pfz::g_fdSeq.load(std::memory_order_acquire), pfz::g_fdX.load(std::memory_order_acquire),
+                                                                   s_fpmX, s_fpmGeneration);
+        if (!nofoot::f126::armsMayUseSnapshot(fpAgeUsable, fpRigCurrent)) ref = !fpAgeUsable ? (s_fpHave ? kIkRefFpStale : kIkRefFpTorn) : kIkRefFpRig;
         else if (!nofoot::ikGUsable(s_gHave, gAge, armedNow)) ref = s_gHave ? kIkRefGStale : kIkRefGTorn;
         if (ref != kIkRefKinds) {
             ikRefuse(ref);
@@ -17069,7 +17069,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const bool writeOk = armsOk && (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
     const IkFpHands& fpHands = s_fpHands;
     const uint32_t currentFpPlan = pfz::g_fdSeq.load(std::memory_order_acquire);
-    const bool fpHandsGenerationOk = !(currentFpPlan & 1u) && fpHands.x == pfz::g_fdX.load(std::memory_order_acquire) && fpHands.generation == currentFpPlan;
+    const bool fpHandsGenerationOk = nofoot::f126::snapshotRigCurrent(currentFpPlan, pfz::g_fdX.load(std::memory_order_acquire), fpHands.x, fpHands.generation);
     struct SideOut {
         bool solved = false, clamped = false, wrote = false, poleFp = false, limited = false;
         bool assisted = false, assistCapped = false, saved = false;   // F59: the clavicle assist turned the groups (saved: M0 kept in g_ikM0Save)
@@ -20354,6 +20354,29 @@ const char* g_ikWhyLast = "(none)";
 uint32_t g_ikFailNamed = 0;
 uint64_t g_ikCallsLast = 0, g_ikGPubLast = 0, g_ikGRefLast = 0;
 uint64_t g_ikRefusedLast[kIkRefKinds] = {};
+// F126 (frame thread): every 10 s on foot, whether the two guards ran and refused anything: the pin's eye pairs refused for rows of two frames, and the arm IK's calls
+// refused for a snapshot of an earlier FP rig. A window with no pin call and no IK call prints nothing; a window with calls prints its counts, zeros included.
+void f126Line(uint64_t now) noexcept {
+    static uint64_t lineMs = 0;
+    static uint64_t lastCalls = 0, lastUsed = 0, lastFrames = 0, lastIk = 0, lastRig = 0;
+    if (lineMs == 0) lineMs = now;
+    if (now - lineMs < 10000) return;
+    lineMs = now;
+    const uint64_t calls = g_f126PairCalls.load(std::memory_order_relaxed), used = g_f126PairUsed.load(std::memory_order_relaxed),
+                   frames = g_f126PairFrames.load(std::memory_order_relaxed), ik = g_ikCalls.load(std::memory_order_relaxed),
+                   rig = g_ikRefused[kIkRefFpRig].load(std::memory_order_relaxed);
+    const uint64_t dCalls = calls - lastCalls, dUsed = used - lastUsed, dFrames = frames - lastFrames, dIk = ik - lastIk, dRig = rig - lastRig;
+    lastCalls = calls;
+    lastUsed = used;
+    lastFrames = frames;
+    lastIk = ik;
+    lastRig = rig;
+    if (dCalls == 0 && dIk == 0) return;
+    Log::get().note("native on foot review fixes (F126) 10 s: pin eye pairs: %llu pin calls, %llu pairs taken, %llu refused for rows of two different frames; "
+                    "arm IK: %llu calls, %llu refused for an FP snapshot of an earlier rig",
+                    static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dUsed), static_cast<unsigned long long>(dFrames),
+                    static_cast<unsigned long long>(dIk), static_cast<unsigned long long>(dRig));
+}
 void armIkTick(uint64_t now) noexcept {
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
     static QpcDt ikClock;   // F66b
@@ -20421,6 +20444,7 @@ void armIkTick(uint64_t now) noexcept {
     f67fLine(now);         // F67f: the armed invariants, once a second (and F69h's off hand line)
     gripTick();            // F69g: the grip frames, once per item and side after 0.5 s steady
     f68cLine(now);         // F68c: how G was built (same-frame pairs), once a second
+    f126Line(now);         // F126: the eye pairs refused and the arm IK calls refused for an earlier FP rig, every 10 s
     if (mode == 0 || !active || !g_pfzArmed) return;
     if (g_ikLineMs == 0) g_ikLineMs = now;
     if (now - g_ikLineMs < 5000) return;
@@ -20445,7 +20469,7 @@ void armIkTick(uint64_t now) noexcept {
         const uint64_t dn = n - g_ikRefusedLast[i];
         g_ikRefusedLast[i] = n;
         static const char* const kShort[kIkRefKinds] = {"buffer", "plan torn", "plan", "FP torn", "FP stale", "G torn", "G stale", "side", "singular",
-                                                        "write"};
+                                                        "write", "FP rig"};
         const int w = std::snprintf(refusals + at, sizeof(refusals) - at, "%s%s %llu", i ? ", " : "", kShort[i], static_cast<unsigned long long>(dn));
         if (w > 0 && static_cast<size_t>(w) < sizeof(refusals) - at) at += static_cast<size_t>(w);
     }
