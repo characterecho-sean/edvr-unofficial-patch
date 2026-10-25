@@ -342,10 +342,6 @@ inline uint32_t scanRecordsValue(const uint8_t* base, uint32_t bytes, const Valu
 constexpr double kReticleMinM = 0.5, kReticleMaxM = 50.0;
 constexpr uint32_t kReticleKey = 10u;   // the aim reticle's tag key: the only key the hit depth moves
 inline bool isReticleKey(uint32_t key) noexcept { return key == kReticleKey; }
-// F101: whether the render path (the marker fix's decision: the hit depth and the correction) takes a marker draw of this key. Reticle follow game
-// (fix.native_on_foot_reticle_follow, F21) leaves key 10 to the game entirely, so its draws are left as the game placed them; every other key is
-// decided whatever the reticle mode.
-inline bool renderTakesKey(uint32_t key, bool reticleGame) noexcept { return !(reticleGame && isReticleKey(key)); }
 constexpr int kMarchSteps = 32, kMarchBisect = 10;
 enum MarchStatus : uint32_t { kMarchSky = 0, kMarchHit = 1, kMarchNear = 2, kMarchOffscreen = 3 };
 // The scene rows' depth column as depth = A + B / w (reversed-Z with an infinite far plane: A = 0, B = near). False when the z column is not

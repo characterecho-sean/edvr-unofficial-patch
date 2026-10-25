@@ -1,4 +1,5 @@
-// F101 checks: the frame ABI against the released one (v0.21.1), and reticle follow game in the render path. Header only, run by native_frame_test (run101).
+// F101 checks: the frame ABI against the released one (v0.21.1). Header only, run by native_frame_test (run101). (Its second part, the reticle's game placement
+// in the render path, went with that setting in F127.)
 // The released provider requires a version 1 input of its struct's sizeof (88 on x64); from F31 this branch sent and accepted the words through valid
 // alone (84), so neither mixed pair negotiated.
 #pragma once
@@ -123,15 +124,6 @@ inline void run101(Check&& check) {
             same = same && a.size == b.size && a.version == b.version;
         }
         check(same, "F101: output versions 1 to 5 are asked with the released runtime's sizes");
-    }
-    {   // reticle follow game: the render path takes no key 10 draw; every other key, and key 10 in aim or head, is taken as before
-        namespace f85 = edvr::nofoot::f85;
-        const bool game10 = f85::renderTakesKey(f85::kReticleKey, true), aim10 = f85::renderTakesKey(f85::kReticleKey, false);
-        bool others = true;
-        for (uint32_t k = 0; k < 256; ++k)
-            if (!f85::isReticleKey(k)) others = others && f85::renderTakesKey(k, true) && f85::renderTakesKey(k, false);
-        check(!game10 && aim10 && others,
-              "F101: with reticle follow game the render path leaves key 10's draws as the game placed them (no hit depth, no correction); every other marker is decided as before");
     }
 }
 

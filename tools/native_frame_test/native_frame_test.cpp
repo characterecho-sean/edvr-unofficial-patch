@@ -29,7 +29,7 @@
 #include "f98b_checks.h"    // F98b: the interaction label placed in the world, upright and facing the neck's pivot
 #include "f99_checks.h"     // F99a: a drawn item's hands from the game's own selection, not from Status.json
 #include "f100_checks.h"    // F100: the marker tee's prefilter against its slow path, the paced F68d window, the throttled lines
-#include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1), reticle follow game in the render path
+#include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1)
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
@@ -7292,7 +7292,7 @@ int wmain(int argc, wchar_t** argv) {
     f99test::run99(check);
     // F100: the marker tee's prefilter leaves the draw serial and the decisions as the slow path does; the paced and throttled lines.
     f100test::run100(check);
-    // F101: this runtime's ladder against a released provider's shape checks, the frozen v0.21.1 layouts, reticle follow game in the render path.
+    // F101: this runtime's ladder against a released provider's shape checks, the frozen v0.21.1 layouts.
     f101test::run101(check);
     // F107: the carrier management screen's camera away from the commander: the gate, the episode, the neck reference held out, the calibration's consequence.
     f107test::run107(check);

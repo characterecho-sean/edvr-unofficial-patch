@@ -111,14 +111,11 @@ std::atomic<bool> g_visorUpSetting{true};                       // fix.native_on
 float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
 bool g_followHeadLast = true, g_visorUpLast = true;   // frame thread only (F13, F16)
 bool g_visorBreathLast = false;                                 // frame thread only: the breathable air state as last logged, on foot (F16)
-std::atomic<bool> g_reticleHead{false};                         // fix.native_on_foot_reticle_follow is head (F16)
-std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: head, on foot, session (frame thread; the probe reads it, F16)
-bool g_reticleHeadLast = false, g_reticleWriteLast = false;     // frame thread only (F16)
-std::atomic<bool> g_reticleGame{false};                          // fix.native_on_foot_reticle_follow is game (F21): EDVR writes nothing to key 10
-bool g_reticleGameLast = false;                                  // frame thread only: as last logged (F21)
+std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: on foot, session (frame thread; the probe reads it, F16)
+bool g_reticleWriteLast = false;                                // frame thread only (F16)
 std::atomic<bool> g_hybridKeyOn{false};                          // fix.native_on_foot_body_hybrid, as the frame thread last read it (F21, temporary)
 bool g_hybridKeyLast = false;                                    // frame thread only: as last logged (F21)
-std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread on a switch to head; the probe consumes it once and queues the line (F17)
+std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread when the centring starts; the probe consumes it once and queues the line (F17)
 std::atomic<float> g_hudElemScale{0.0f};                        // fix.native_on_foot_hud_element_scale, live: 0 = the game's own (F17)
 // ---- F22: the look hooks and the read-only probes; the block is below the F9 probes. F109: look to aim (fix.native_on_foot_look_to_aim) rides the ADS head
 // aim's map (adsAimTick); F22-F25's controller and its three test keys are retired (retiredKeysNote) ----
@@ -727,6 +724,11 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_panel_cursor_follow", "panel") != "panel")
         Log::get().note("native on foot: fix.native_on_foot_panel_cursor_follow is retired (F122): ignored (the cursor is kept on the panel as the head turns; "
                         "fix.native_on_foot_panel_mouse chooses whether the cursor is drawn)");
+    // F127: the aim reticle's placement (aim, head or game) is gone; key 10 always sits on the mouse-aim axis, where the game aims it, which was the default. The shipping
+    // file carries the key at its last value (aim).
+    if (cfg.getString("fix.native_on_foot_reticle_follow", "aim") != "aim")
+        Log::get().note("native on foot: fix.native_on_foot_reticle_follow is retired (F127): ignored (the reticle always sits on the mouse-aim axis, where the game "
+                        "aims it; the head and game placements were removed)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -821,18 +823,8 @@ void readKey() {
         Log::get().note("native on foot visor in breathable air: %s", visorUp ? "up" : "game");
         g_visorUpLast = visorUp;
     }
-    // F16: the reticle follows aim (the game's own position, the default) or head (key 10 placed along the head direction, F17).
-    // F21: "game" leaves key 10 to the game entirely (no aim centring, no head placement; a head placement made before the switch is handed back once).
-    const std::string reticleMode = cfg.getString("fix.native_on_foot_reticle_follow", "aim");
-    const bool reticleHead = reticleMode == "head";
-    const bool reticleGame = reticleMode == "game";
-    g_reticleHead.store(reticleHead, std::memory_order_relaxed);
-    g_reticleGame.store(reticleGame, std::memory_order_relaxed);
-    if (first || reticleHead != g_reticleHeadLast || reticleGame != g_reticleGameLast) {
-        Log::get().note("native on foot reticle follows: %s", reticleGame ? "game (EDVR writes nothing to the reticle)" : reticleHead ? "head" : "aim");
-        g_reticleHeadLast = reticleHead;
-        g_reticleGameLast = reticleGame;
-    }
+    // F127: the reticle's placement is no longer a setting: key 10 sits on the mouse-aim axis (reticleAimCentre), as the former default did. The old head
+    // and game placements and their setting are retired (retiredKeysNote).
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     {
         const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_lead");
@@ -3531,7 +3523,8 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
 }
 
 // RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
-// EliteDangerous64.exe+0x1A17BE4 (the call to 0x4351920, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
+// EliteDangerous64.exe+0x1A17BE4 (the call to 0x4351920, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: its translation x and y are zeroed (F18), so the reticle sits on the aim axis. F127 removed
+// the head placement (F17) and the game's own (F21) with their setting.
 
 struct F14Key {
     bool used = false;
@@ -3546,90 +3539,8 @@ struct F14Key {
 constexpr size_t kF14Keys = 16;
 F14Key g_f14Keys[kF14Keys];         // guarded by g_f9Lock
 
-// ---- F17: the reticle follows head (key 10 only; game thread, from the probe) --------------------------------------------------------
-// The aim reticle is an instance matrix in the body camera space: basis rows 0-2 at +0x10, +0x20, +0x30 (xyz each; w is not written) and the
-// translation at +0x40..+0x48. While `want`, with C = the smoothed head transform the HUD follows (g_f13Smooth, under g_f9Lock):
-//   translation t' = d * row2(C) + row3(C), where d = |t| is the game's own distance (the point (0, 0, d) of head space, taken into body space);
-//   each basis row b' = b . R(C), R the rotation of C.
-// rec.base keeps the game's own values. A call that finds our values in place (the game has not recomputed the instance) composes from that base
-// again, so nothing compounds. Without a head transform, or once `want` ends, the game's own values are put back.
-struct F17Reticle {
-    bool have = false;          // our values are in place in the instance at `inst`
-    uintptr_t inst = 0;
-    float base[12] = {};        // the game's values before our last write: basis rows 0-2 (xyz each), then the translation (xyz)
-    float written[12] = {};     // what we last wrote, in the same order
-};
-F17Reticle g_f17Ret;                // game thread only
-bool g_f17WriteFailNoted = false;   // game thread only
-
-// Value k (0..11) of the instance: matrix rows 0-3 start at +0x10 and are 0x10 apart; the w of each row is not one of the twelve.
-inline uintptr_t f17Addr(uintptr_t ia, size_t k) noexcept { return ia + 0x10 + (k / 3) * 0x10 + (k % 3) * 4; }
-
-bool f17WriteAll(uintptr_t ia, const float* v) noexcept {
-    for (size_t k = 0; k < 12; ++k)
-        if (!guardedWriteFloat(f17Addr(ia, k), v[k])) return false;
-    return true;
-}
-
-void reticleFollowHead(uintptr_t ia, bool want, bool announce) noexcept {
-    F17Reticle& rec = g_f17Ret;
-    float cur[12] = {};
-    for (size_t k = 0; k < 12; ++k)
-        if (!guardedRead(f17Addr(ia, k), &cur[k], 4)) return;
-    const bool ours = rec.have && rec.inst == ia && std::memcmp(cur, rec.written, sizeof(cur)) == 0;
-    if (!ours) {
-        // The game's own values (its first call, or a fresh recompute of the instance): these are the base.
-        std::memcpy(rec.base, cur, sizeof(cur));
-        rec.have = false;
-        rec.inst = ia;
-    }
-    float C[16] = {};
-    bool pose = false;
-    if (want) {
-        F9Lock lock;
-        if (g_followHead.load(std::memory_order_relaxed) && g_f13Smooth.valid) {
-            std::memcpy(C, g_f13Smooth.C, sizeof(C));
-            pose = true;
-        }
-    }
-    if (!pose) {
-        if (ours) {   // back to the game's own values, once
-            if (!f17WriteAll(ia, rec.base) && !g_f17WriteFailNoted) {
-                g_f17WriteFailNoted = true;
-                f14Queue("native on foot reticle: the game's values could not be put back; key 10 may stay where it was placed");
-            }
-            rec.have = false;
-        }
-        if (want && announce) f14Queue("native on foot reticle: no head pose yet (the HUD follow is body, or the head views are not read); key 10 stays at the game's aim");
-        return;
-    }
-    const float* rows[3] = {rec.base, rec.base + 3, rec.base + 6};
-    const float* tb = rec.base + 9;
-    const float d = std::sqrt(tb[0] * tb[0] + tb[1] * tb[1] + tb[2] * tb[2]);
-    float target[12] = {};
-    for (size_t r = 0; r < 3; ++r)
-        for (size_t j = 0; j < 3; ++j) target[3 * r + j] = rows[r][0] * C[j] + rows[r][1] * C[4 + j] + rows[r][2] * C[8 + j];
-    for (size_t j = 0; j < 3; ++j) target[9 + j] = d * C[8 + j] + C[12 + j];
-    if (!f17WriteAll(ia, target)) {
-        rec.have = false;
-        if (!g_f17WriteFailNoted) {
-            g_f17WriteFailNoted = true;
-            f14Queue("native on foot reticle: NOT written -- the instance could not be written; key 10 stays at the game's aim");
-        }
-        return;
-    }
-    std::memcpy(rec.written, target, sizeof(target));
-    rec.have = true;
-    rec.inst = ia;
-    if (announce) {
-        char line[160];
-        std::snprintf(line, sizeof(line), "native on foot reticle: follows head (placed along the head direction at d=%.2fm)", static_cast<double>(d));
-        f14Queue(line);
-    }
-}
-
-// F18: reticle follows aim (the default, key 10 only): the translation's x and y are zeroed, so the dot sits on the mouse-aim axis. That is the
-// F16 centring, which the head mode used to be; z, w, the basis and the scale stay. Written only while g_reticleWriteOn (frame thread). Guarded.
+// F18: the reticle on the aim axis (key 10 only, the one placement since F127): the translation's x and y are zeroed, so the dot sits on the mouse-aim
+// axis. That is the F16 centring; z, w, the basis and the scale stay. Written only while g_reticleWriteOn (frame thread). Guarded.
 bool g_f18AimFailNoted = false;     // game thread only
 void reticleAimCentre(uintptr_t ia, bool announce) noexcept {
     const bool ok = guardedWriteFloat(ia + 0x40, 0.0f) && guardedWriteFloat(ia + 0x44, 0.0f);
@@ -3654,21 +3565,11 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     guardedRead(ia + 0x50, &scale, 4);
     const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
     if (!okKey || !okB) return;
-    // Key 10 (the aim reticle), while g_reticleWriteOn (the frame thread's flag). F18: reticle follows head (F17) places it along the head; aim
-    // (the default) zeroes its x and y. The head placement is handed back first when the mode is aim, so a switch leaves no residue.
+    // Key 10 (the aim reticle), while g_reticleWriteOn (the frame thread's flag): its x and y are zeroed, so it sits on the aim axis (F18; the only placement since F127).
     if (key == 10) {
         const bool writeOn = g_reticleWriteOn.load(std::memory_order_relaxed);
         const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
-        if (g_reticleGame.load(std::memory_order_relaxed)) {
-            // F21: the game places key 10. A head placement made before the switch is handed back once (a no-op when there is none); nothing else is written.
-            reticleFollowHead(ia, false, false);
-            if (writeOn && announce) f14Queue("native on foot reticle: the game places key 10 (EDVR writes nothing to it)");
-        } else if (g_reticleHead.load(std::memory_order_relaxed)) {
-            reticleFollowHead(ia, writeOn, announce);
-        } else {
-            reticleFollowHead(ia, false, false);
-            if (writeOn) reticleAimCentre(ia, announce);
-        }
+        if (writeOn) reticleAimCentre(ia, announce);
     }
     F9Lock lock;
     F14Key* row = nullptr;
@@ -3753,7 +3654,7 @@ double f31AngleDeg(const float a[16], const float b[16]) {
     if (c < -1.0) c = -1.0;
     return std::acos(c) * 180.0 / 3.14159265358979323846;
 }
-// The forward map of the world markers: t' = t . R + row3 (the reticle head mode's map), for a given C.
+// The forward map of the world markers: t' = t . R + row3 (the map of the reticle's retired head placement, F17), for a given C.
 void f31ForwardMap(const float t[3], const float C[16], float out[3]) {
     for (int j = 0; j < 3; ++j) {
         float acc = 0.0f;
@@ -4102,7 +4003,7 @@ void f85bTagSubmit(uintptr_t inst, const WeaponUiPartSample& sample) noexcept {
 // F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
 // writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
 // The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
-// (p . C for a row-vector C: the same map the reticle head mode writes, t' = d*row2 + row3), cancels the second application. Read the node's key
+// (p . C for a row-vector C: the same map the reticle's retired head placement wrote, t' = d*row2 + row3), cancels the second application. Read the node's key
 // and its instance (node+0x60) after the real call; nothing else is written.
 void __fastcall reticleWorldPost(void* node) noexcept {
     const uintptr_t na = reinterpret_cast<uintptr_t>(node);
@@ -4274,7 +4175,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     float t[3] = {};
     if (!guardedRead(ia + 0x40, t, sizeof(t))) return;
     // F27: fixed = the inverse, t' = (t - row3) . R^T (the flight ruled it out as the cure: it applied an extra -C yaw);
-    // forward = t' = t . R + row3, the map the reticle head mode uses for its direction (the default).
+    // forward = t' = t . R + row3, the map the reticle's retired head placement used for its direction (the default).
     float tp[3] = {};
     for (size_t j = 0; j < 3; ++j) {
         float acc = 0.0f;
@@ -25736,7 +25637,6 @@ struct F85cState {
     double hitSum = 0.0, hitMin = 1e9, hitMax = 0.0, errSum = 0.0, errMax = 0.0, ageSum = 0.0, ageMax = 0.0, lineMax = 0.0;
     uint64_t errN = 0;
     uint64_t draws = 0;
-    uint64_t gameDraws = 0;   // F101: key 10 draws not taken (reticle follow game: the game's placement stands)
 };
 F85cState g_f85c;
 // F118 (measure only): the reticle's readback steps and flips, the drawn depth's trailing frames, and its footprint, a second at a time (the render thread,
@@ -27409,15 +27309,7 @@ void f85Report(uint64_t nowMs) {
     w = F85Win{};
     // F85c
     F85cState& st = g_f85c;
-    // F101: reticle follow game: the reticle is the game's, and the line says so (each second key 10 was drawn, else every 5 s on foot) in place of the depth
-    // line or the idle one. A readback still in flight at the switch is not reported.
-    if (g_reticleGame.load(std::memory_order_relaxed) && !st.draws) {
-        if (st.gameDraws || (nativeOnFootActive() && nowMs - lastIdleC >= 5000)) {
-            if (!st.gameDraws) lastIdleC = nowMs;
-            Log::get().note("reticle depth (F85c): the reticle is the game's (reticle follow = game, EDVR writes nothing to key 10): "
-                            "key 10 draws %llu left as the game placed them (no hit depth, no correction)", ull(st.gameDraws));
-        }
-    } else if (st.draws || st.dispatched || st.reads) {
+    if (st.draws || st.dispatched || st.reads) {
         const double nr = st.reads ? static_cast<double>(st.reads) : 1.0;
         Log::get().note("reticle depth (F85c): key 10 draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
                         "off screen %llu); the game's 5 m was behind a surface in %llu; |D_f - D_hit| mean %.3f max %.3f m, D_f %.2f m; readback age mean %.1f max %.0f frames; dispatched %llu; "
@@ -27611,12 +27503,6 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         }
         ks = static_cast<int>(i);
         ++s.viaHold;
-    }
-    // F101: reticle follow game: key 10's draw is left exactly as the game placed it (no hit depth, no correction, no decision counted), as the
-    // instance hook leaves its placement (F21). Its hold above is kept, so a switch back to aim or head finds it matched. Counted for F85c's line.
-    if (ks >= 0 && !nofoot::f85::renderTakesKey(g_keyIdx.key[ks], g_reticleGame.load(std::memory_order_relaxed))) {
-        ++g_f85c.gameDraws;
-        return;
     }
     // F64: a key's match names this draw: the marker is visible in this eye-frame (counted once, as none until a bound patch upgrades it).
     if (ks >= 0) {
@@ -29943,7 +29829,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
             g_roomLastK = elemK;
             g_roomLastS = sizeEff;
         }
-        // F18: the reticle stub is in place whenever native stereo is on foot (both modes write key 10), or while the probe key is on.
+        // F18: the reticle stub is in place whenever native stereo is on foot (it writes key 10).
         const bool reticleWant = nativeOnFootActive() && session;
         reticleTick(reticleWant, !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
         // F87p (read only): the marker interface's slots and the point getters' calls, while native stereo is on foot and the marker fix key is on.
@@ -29952,7 +29838,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         const bool writeNow = nativeOnFootActive() && session;
         g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
         if (writeNow != g_reticleWriteLast) {
-            if (writeNow) g_reticleLogWanted.store(true, std::memory_order_relaxed);   // the probe queues the line on its next call (aim or head)
+            if (writeNow) g_reticleLogWanted.store(true, std::memory_order_relaxed);   // the probe queues the line on its next call
             else
                 Log::get().note("native on foot reticle: writes stop (%s)",
                                 !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");

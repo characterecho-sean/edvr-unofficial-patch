@@ -11278,7 +11278,8 @@ def _hj_f85c(rows, ctx):
         return None
     if fail:
         return ("NEVER APPLIED", "the compute pass could not run: %s" % fail[0]["why"])
-    # F101: with reticle follow = game nothing is patched by design: the reticle is the game's, not a failure
+    # F101: with reticle follow = game nothing is patched by design: the reticle is the game's, not a failure. The setting is retired (F127) and the line is no
+    # longer printed; a log of an older build still carries it, so it is still read.
     game_text = "the reticle is the game's (reticle follow = game) for %d s: %d key 10 draws left as the game placed them" % (len(game), _hsum(game, "n"))
     if game and not _hsum(draws, "draws"):
         return ("IDLE", game_text)
@@ -12386,7 +12387,7 @@ HEALTH_RULES = (
         ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
                   r"sky (?P<sky>\d+).*refusals: (?P<refs>.*)$"),
         ("idle", r"reticle depth \(F85c\): no key 10 composite draw this second"),
-        # F101: reticle follow game (fix.native_on_foot_reticle_follow): key 10 is the game's, so nothing is patched by design
+        # F101: the reticle's game placement (a setting until F127; this build never prints the line, an older log may): key 10 is the game's, so nothing is patched by design
         ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
         ("_", r"reticle depth \(F85c\): precompiled"),
@@ -14931,11 +14932,16 @@ def self_test_health():
               [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
         check("F85c: the shader line of a good start is not a failure", ["reticle depth (F85c): precompiled compute shader reticle_depth_cs created (0x00000000, 0.057 ms).", retic()], 0,
               [("OK", F85C)])
-        # F101: reticle follow = game leaves key 10 to the game: nothing patched is the design, said as such, never NEVER APPLIED (a weapon drawn or not)
-        game = R("reticle depth (F85c): the reticle is the game's", 94)
+        # F101: reticle follow = game leaves key 10 to the game: nothing patched is the design, said as such, never NEVER APPLIED (a weapon drawn or not).
+        # F127 retired the setting and the DLL no longer prints the line, so these cases carry it as a frozen line of a build before F127 (R() renders a line
+        # from the DLL's own format and would refuse): an old log still parses.
+        def oldGame(n):
+            return ("reticle depth (F85c): the reticle is the game's (reticle follow = game, EDVR writes nothing to key 10): "
+                    "key 10 draws %d left as the game placed them (no hit depth, no correction)" % n)
+        game = oldGame(94)
         check("F85c: reticle follow game, a weapon drawn", [game, game, eyeoff()], 0, [("IDLE", F85C)],
               has=["the reticle is the game's (reticle follow = game) for 2 s: 188 key 10 draws left as the game placed them"])
-        check("F85c: reticle follow game, a readback in flight at the switch", [retic(draws=0, patched=0, reads=1), R("reticle depth (F85c): the reticle is the game's", 0)], 0, [("IDLE", F85C)],
+        check("F85c: reticle follow game, a readback in flight at the switch", [retic(draws=0, patched=0, reads=1), oldGame(0)], 0, [("IDLE", F85C)],
               has=["the reticle is the game's"])
         check("F85c: aim, then reticle follow game", [retic()] * 2 + [game], 0, [("OK", F85C)], has=["patched 84 of 94", "the reticle is the game's (reticle follow = game) for 1 s"])
 

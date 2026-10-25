@@ -897,7 +897,24 @@ they were there (flown 2026-09-07).
    added between Fixes and Monitor, without renumbering this list:
    - **Native on foot** (everyone, 2026-10-14): the rows tagged
      `menu native_on_foot`. (The Explorer Cam page stood here from 2026-10-08
-     until F98.)
+     until F98.) Since F127 (2026-10-25) the page is 18 rows under five headings,
+     in `edvr.ini` order, the switch first and the HUD last: **Native on foot VR**
+     (the feature switch, `fix.native_on_foot`); **Look and aim** (Look to aim,
+     Turn style, Snap turn step, Look to aim smoothing); **Aiming down sights**
+     (ADS eye distance, ADS: sight in both eyes, ADS: aim with head); **Body and
+     view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
+     breathable air, Visor axis (test)); **HUD** (HUD distance, HUD size, HUD
+     element scale, HUD spread, HUD follow). The headings are the ini's own
+     heading blocks above the rows, as on the Fixes page, and the page is built
+     grouped. The row order is the order of the keys in `edvr.ini`, so a row moves
+     by moving its block there; `hotkey_capture_test` pins the 18 keys, their
+     headings and the switch first. The 21 settings F127 took off the page (World
+     markers, Spine bend amount, Body follows weapon eye offset, the four Pistol
+     and four Rifle ADS readout sliders, HUD room, the eight HUD group offsets and
+     HUD follow smoothing) keep their keys, behaviour and defaults: their `ui:`
+     lines have no `menu` token, so they are set in `edvr.ini` or in the
+     installer's settings window, under the last heading ("Native on foot: other
+     settings"). Visor axis (test) stays on the page until its test flight.
    - **Hotkeys**: the rows of "Hotkeys page (2026-10-08)" above.
 3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
    where each number comes from:
