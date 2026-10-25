@@ -426,6 +426,8 @@ static int generateTemporal(const Options& o) {
         {"kEyeJumpLatticeBytecode", "eye_jump_lattice_cs", "main", nullptr, {}, false, edvr::kEyeJumpLatticeHlsl},
         // F85c: the reticle's hit depth (reticle_depth_shader.h): one thread marches the aim line through an eye's scene depth. Its own source, entry "main".
         {"kReticleDepthBytecode", "reticle_depth_cs", "main", nullptr, {}, false, edvr::kReticleDepthHlsl},
+        // F105: the in-world screens' coverage stand-in (world_screen_coverage.h; its text is in fixed_shader_source.h), a pixel shader.
+        {"kWorldScreenCoverageBytecode", "world_screen_coverage_ps", "main", nullptr, {}, false, edvr::kWorldScreenCoverageHlsl, "ps_5_0"},
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
         {"kXessR11ToFp16Bytecode", "xess_r11_to_fp16_cs", "main", nullptr, {}, false, edvr::kXessR11ToFp16Cs},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.

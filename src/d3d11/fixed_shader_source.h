@@ -411,6 +411,25 @@ const char kScreenDepthHlsl[] = EDVR_UI_CHANGE_INPUT
     "    return floorAndStrength.w;\n"
     "}\n";
 
+// The in-world screens' coverage (world_screen_coverage.h, F105): the stand-in for PS EBA95E15B0A66102, the G-buffer
+// shader that draws a terminal's interface as the emissive term of a lit surface. Its input signature is the game
+// shader's, element for element (names, registers, masks, types), so whatever vertex stage feeds the game's shader
+// feeds this one; the private UI depth rig holds the signature to the game's. It reads nothing: every pixel the screen
+// covers is marked in the eye's coverage mask as an attached stroke (2/255: the low bits 2, the pixel keeps its own
+// surface's motion) and in the eye's edit mask (1), so the UI resolve holds it to the current frame.
+const char kWorldScreenCoverageHlsl[] = R"HLSL(
+struct In {
+    nointerpolation uint2 faceInvariant : __USER_VERTEX_FACEINVARIANT;
+    float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 lightingTangent : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 texcoord : __USER_VERTEX_M_TEXCOORD;
+};
+float4 main(In i, out float edit : SV_Target2) : SV_Target0 {
+    edit = 1.0;
+    return 2.0 / 255.0;
+}
+)HLSL";
+
 const char kSpriteDepthHlsl[] = EDVR_UI_CHANGE_INPUT R"HLSL(
 Texture2D<float4> Surf : register(t0);
 Texture2D<float> SceneDeviceDepth : register(t2);

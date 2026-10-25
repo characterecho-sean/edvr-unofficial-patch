@@ -165,6 +165,7 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     ctx->Unmap(stage.Get(), 0); return values;
 }
 #include "planet_coverage_test.h"
+#include "world_screen_coverage_test.h"
 #include "corona_coverage_test.h"
 #include "zscene_gate_test.h"
 #include "main_depth_tile_test.h"
@@ -1303,6 +1304,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     auto msaa=depth(dev.Get(),DXGI_FORMAT_R32_TYPELESS,DXGI_FORMAT_D32_FLOAT,8,4);
     UiDepthLayer declined; check(!declined.acquire(ctx.Get(),msaa.tex.Get()),"MSAA safely declined");
     testPlanetCoverage(dev.Get(),ctx.Get());
+    testWorldScreenCoverage(dev.Get(),ctx.Get());
     testCoronaCoverage(dev.Get(),ctx.Get());
     zgate::parity(dev.Get(),ctx.Get(),driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");
     maintile::abTest(dev.Get(),ctx.Get());
