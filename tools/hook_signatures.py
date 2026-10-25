@@ -1868,6 +1868,9 @@ def self_test():
               "audit: an exact-only file's address used raw elsewhere fails")
         check(audited("c3.cpp", "uintptr_t f(uintptr_t b){ return b + gameRva(ecm::kFooRva); }") == [],
               "audit: an exact-only file's address resolved elsewhere passes")
+        check("inside the table unit" in where_text(tab, 0x4314C65) and "NOT PLACED" in where_text(tab, 0x4315000)
+              and "lies in 1 table unit" in where_text(tab, 0x4314C60, 16)
+              and "NOT covered" in where_text(tab, 0x4314C60, 0x40), "where: placement and cover")
         check(table_from_cpp(Path(__file__).resolve().parent.parent.joinpath(CPP_TABLE_PATH).read_text(
             encoding="utf-8"))["targets"], "audit: the committed C++ table parses")
 
@@ -2120,6 +2123,37 @@ def _context(toks, match, parent, i):
                   "entry or a log argument (after '%s')" % (what, prev), None
 
 
+def where_text(table, rva, n=1):
+    """One line: how gameRva places rva on an unknown build (a table address,
+    or inside the unit of one), and whether [rva, rva + n) lies in table units
+    end to end (what gamePinMatches and gamePinProvenByMatch need; the units
+    must also be found and have moved together on the build in hand)."""
+    targets = table["targets"]
+    units = sorted({(t[2], t[3]) for t in targets if t[1] == "code"})
+    hit = [t for t in targets if t[0] == rva]
+    holder = [u for u in units if u[0] <= rva < u[1]]
+    if hit:
+        how = "a table %s address" % hit[0][1]
+    elif holder:
+        how = "inside the table unit [0x%X, 0x%X) at +0x%X" % (holder[0][0], holder[0][1], rva - holder[0][0])
+    else:
+        how = "NOT PLACED: neither a table address nor inside a table unit"
+    at, pieces = rva, []
+    while at < rva + n:
+        u = next((u for u in units if u[0] <= at < u[1]), None)
+        if u is None:
+            break
+        pieces.append(u)
+        at = u[1]
+    if n <= 1:
+        cover = ""
+    elif at >= rva + n:
+        cover = "; [0x%X, 0x%X) lies in %d table unit(s)" % (rva, rva + n, len(pieces))
+    else:
+        cover = "; [0x%X, 0x%X) is NOT covered: 0x%X is in no table unit" % (rva, rva + n, at)
+    return "0x%X: %s%s" % (rva, how, cover)
+
+
 def audit(src_dir, table):
     """Check every C/C++ file under src_dir; returns (problems, counts).
 
@@ -2363,6 +2397,10 @@ def main(argv=None):
     au.add_argument("--src", default=str(Path(__file__).resolve().parent.parent / "src"))
     au.add_argument("--table", default=None,
                     help="the table: generate's JSON, or the emitted C++ (default %s)" % CPP_TABLE_PATH)
+    wh = sub.add_parser("where", help="say how gameRva places a known-build RVA, and whether a "
+                                      "range lies in table units (what gamePinMatches needs)")
+    wh.add_argument("--rva", required=True, action="append", help="RVA[:length] (repeatable)")
+    wh.add_argument("--table", default=None, help="as for audit")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
@@ -2371,12 +2409,19 @@ def main(argv=None):
         ap.error("a subcommand is required (generate, resolve, check, survey, fixture, audit, "
                  "or --self-test)")
     try:
-        if args.command == "audit":
+        if args.command in ("audit", "where"):
             path = Path(args.table) if args.table else \
                 Path(__file__).resolve().parent.parent / CPP_TABLE_PATH
             text = path.read_text(encoding="utf-8")
             table = table_for_audit(json.loads(text)) if text.lstrip().startswith("{") \
                 else table_from_cpp(text)
+        if args.command == "where":
+            for item in args.rva:
+                rva_text, _, n_text = item.partition(":")
+                rva, n = int(rva_text, 0), int(n_text, 0) if n_text else 1
+                print(where_text(table, rva, n))
+            return 0
+        if args.command == "audit":
             problems, counts = audit(args.src, table)
             for p in problems:
                 print(p)
