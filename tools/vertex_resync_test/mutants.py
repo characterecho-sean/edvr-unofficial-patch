@@ -34,6 +34,8 @@ FILES = {
 }
 COMMON = ["code_hook.h", "code_hook.cpp", "guard.h", "guard.cpp", "log.h", "config.h", "config.cpp", "ini_name.h", "proxy.h", "game_call_probe.h",
           "call_probe_budget.h", "runtime_profile.h"]
+# every header of src\common (the headers chain: log.h -> log_reserve.h, runtime_profile.h -> install_scope.h -> ..., game_build.h)
+COMMON += sorted(p.name for p in (ROOT / "src" / "common").glob("*.h") if p.name not in COMMON)
 TREE_EXTRA = [("src/common/" + name, ROOT / "src" / "common" / name) for name in COMMON] + [
     ("src/d3d11/vertex_resync_hook.h", ROOT / "src" / "d3d11" / "vertex_resync_hook.h"),
 ]
@@ -72,12 +74,10 @@ MUTANTS = [
     M("first-sighting-overwritten", "V1", "core", [("        if (!r.hasFirst) {\n", "        if (true) {\n")], "the report names the last repaired slot, not the first"),
     # ---- V2: the gate and the prologue ----
     M("prologue-byte-wrong", "V2", "core", [(PROLOGUE, PROLOGUE.replace("0xF8}", "0xF9}"))], "the hook's idea of FlushIA's prologue differs from the exe's in the last byte"),
-    M("prologue-check-shortened", "V2", "core", [("std::memcmp(bytes, kFlushIaPrologue, kPrologueBytes) == 0", "std::memcmp(bytes, kFlushIaPrologue, kPrologueBytes - 1) == 0")],
-      "the last byte of the prologue is not compared"),
-    M("timestamp-ignored", "V2", "core", [("return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize;", "return imageSize == kExpectedImageSize;")],
-      "a build with the right size and another timestamp passes the gate"),
-    M("image-size-ignored", "V2", "core", [("return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize;", "return timestamp == kExpectedTimestamp;")],
-      "a build with the right timestamp and another size passes the gate"),
+    M("pin-ignored", "V2", "core", [("    if (!pinMatches) return Install::kWrongPrologue;\n", "")], "a found FlushIA whose prologue is not the pin passes the gate"),
+    M("not-found-ignored", "V2", "core", [("    if (flushIaRva == 0) return Install::kNotFound;\n", "")], "an unknown build whose FlushIA was not found by signature passes the gate"),
+    M("unreadable-header-ignored", "V2", "core", [("    if (!identityRead) return Install::kUnreadable;\n", "")], "an unreadable PE header passes the gate"),
+    M("unreadable-prologue-ignored", "V2", "core", [("    if (got == nullptr) return Install::kUnreadable;\n", "")], "a prologue that could not be read is reported as a mismatch"),
     M("rva-moved", "V2", "core", [("constexpr uintptr_t kFlushIaRva = 0x522B50u;", "constexpr uintptr_t kFlushIaRva = 0x522A51u;")], "the hook aims one byte into the function"),
     # ---- V3: the instruments ----
     M("window-shortened", "V3", "core", [("constexpr uint64_t kWindowMs = 60000;", "constexpr uint64_t kWindowMs = 6000;")], "the running count is said every 6 s"),
@@ -107,8 +107,12 @@ MUTANTS = [
     M("original-not-called", "V4", "hook", [("    return forward(pso, context, desired, applied);\n}", "    return 0;\n}")], "the game's flush never runs"),
     M("repair-never-run", "V4", "hook", [("    if (pso && desired && applied) {\n        vresync::Report r;", "    if (false) {\n        vresync::Report r;")],
       "the callback forwards without repairing"),
-    M("prologue-unchecked", "V4", "hook", [("if (!sehCheckBytes(target, vresync::kFlushIaPrologue, vresync::kPrologueBytes)) {", "if (false) {")],
+    M("prologue-unchecked", "V4", "hook", [("    if (verdict != vresync::Install::kInstall) {\n        char line[400];", "    if (false) {\n        char line[400];")],
       "a function whose prologue is not build 334925's is patched"),
+    M("pin-compare-skipped", "V4", "hook", [("readOk && gamePinMatches(static_cast<uint32_t>(vresync::kFlushIaRva), got, vresync::kFlushIaPrologue, sizeof(got))", "readOk")],
+      "the sixteen bytes are read and never compared with the pin"),
+    M("not-found-said-as-a-mismatch", "V4", "hook", [("        else if (verdict == vresync::Install::kNotFound)\n", "        else if (false)\n")],
+      "an unknown build whose FlushIA is not found by signature is refused without saying why"),
     M("refusal-retried", "V4", "hook", [("    if (!g_attempted.compare_exchange_strong(expected, true)) return;   // once, ever: a refusal is final\n", "")],
       "a second call tries again"),
     M("sighting-cap-dropped", "V4", "hook", [("if (!r.hasFirst || !g_sightings.take()) return;", "if (!r.hasFirst) return;")], "every repair writes a sighting line"),

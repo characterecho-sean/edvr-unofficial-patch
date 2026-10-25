@@ -21,11 +21,21 @@
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_eye_base.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/common/game_build.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,failures=0,dumps=0;
 void check(bool x,const char* why){++checks;if(!x){++failures;std::printf("FAIL: %s\n",why);}}
 void require(bool x,const char* why){check(x,why);if(!x)throw std::runtime_error(why);}
+// Linker stubs for the game-build resolver (src\common\game_build.h): this rig links the production transition_flash_eye_base.cpp but not
+// game_build.cpp. The test process is an unknown build whose every address the resolver does not find, so the engine fix stands down.
+namespace edvr{
+bool gameBuildIdentity(uint32_t* stamp,uint32_t* size) noexcept{if(stamp)*stamp=0;if(size)*size=0;return true;}
+bool gameBuildKnown() noexcept{return false;}
+const char* gameBuildText() noexcept{return "unknown build (rig)";}
+uintptr_t gameRva(uint32_t) noexcept{return 0;}
+bool gamePinMatches(uint32_t,const uint8_t*,const uint8_t*,size_t) noexcept{return false;}
+}
 bool closeFloat(float a,float b,float epsilon=1e-5f){return std::fabs(a-b)<=epsilon;}
 struct Call {
   unsigned eye=0,flags=0,outW=0,outH=0;float jx=0,jy=0,nearZ=0,farZ=0,headDeg=0;
@@ -272,7 +282,7 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
     edvr::transitionFlashEyeBaseArmForTest();
   }
   { // The install path reads no setting: the hold is always on in the VR profile. Run for real (the test process is not
-    // build 334925, so the identity check refuses and nothing is hooked; what is asserted is that install RAN).
+    // build 334925 and the consumer is not found by signature, so nothing is hooked; what is asserted is that install RAN).
     edvr::transitionFlashEyeBaseResetForTest();
     check(!edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: the reset leaves a process that never installed");
     edvr::Config::get().set("fix.transition_flash","0");

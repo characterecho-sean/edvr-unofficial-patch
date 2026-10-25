@@ -11,7 +11,7 @@
 //   V1  the failing sequence replayed (resolve binds Q; two zero-slot draws zero the applied slot; the second eye's SetVertexBuffer(Q) is skipped): stock binds (NULL, 20, 0);
 //       repaired it binds Q with the desired offset; slots at or above the layout's count, a null desired slot, a count above 16, a null pointer anywhere, and a healthy list
 //       are left alone
-//   V2  the gate and the prologue: the PE pair, the 16 bytes (every position), the length
+//   V2  the gate and the prologue: the PE header read, FlushIA found (the constant on build 334925, by signature on another build), the 16 bytes
 //   V3  the instruments: the exact lines (60 s, heartbeat, session, first sighting), the windows (60 s and 10 min, zero counts included), the flush counter, the sighting cap
 //   V4  the hook end to end on a synthetic FlushIA: a wrong prologue is refused with a line and nothing patched, and nothing armed says nothing at all; the right one arms
 //       (stolen = 5); the original sees the repaired cache; flushes are counted; the sightings are capped
@@ -31,12 +31,21 @@
 #include <vector>
 
 #include "config.h"
+#include "game_build.h"
 #include "log.h"
 #include "vertex_resync_core.h"
 #include "vertex_resync_hook.h"
 
+// The rig links no resolver (src\common\game_build.cpp); these stand in for it. They play build 334925 (an address is where it is, a pin is an exact compare) until a
+// check clears g_rigResolves to play an unknown build in which nothing is found by signature.
+static bool g_rigResolves = true;
 namespace edvr {
 void breadcrumb(const char*) {}   // production guard.cpp's crash-channel dependency (proxy.cpp), as the other rigs stub it
+bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *stamp = 0; if (size) *size = 0; return true; }
+bool gameBuildKnown() noexcept { return g_rigResolves; }
+const char* gameBuildText() noexcept { return g_rigResolves ? "build 334925" : "unknown build (rig)"; }
+uintptr_t gameRva(uint32_t knownRva) noexcept { return g_rigResolves ? knownRva : 0; }
+bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept { return std::memcmp(got, pin, n) == 0; }
 }  // namespace edvr
 
 namespace vr = edvr::vresync;
@@ -298,20 +307,18 @@ void caseReplay() {
 void caseGate() {
     // The bytes spelled out again here, not copied from the header: build 334925's FlushIA at EliteDangerous64.exe+0x522B50, read from the exe.
     const uint8_t exe[16] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B, 0xF8};
-    check(vr::prologueMatches(exe, 16), "V2.a the 16 bytes read from the exe are the prologue the hook checks");
-    bool everyByteMatters = true;
-    for (size_t i = 0; i < 16; ++i) {
-        uint8_t wrong[16];
-        std::memcpy(wrong, exe, 16);
-        wrong[i] ^= 0x01;
-        everyByteMatters = everyByteMatters && !vr::prologueMatches(wrong, 16);
-    }
-    check(everyByteMatters, "V2.b a prologue that differs in any one of the 16 bytes is refused");
-    check(!vr::prologueMatches(exe, 15) && !vr::prologueMatches(nullptr, 16), "V2.c a short or missing buffer is refused");
+    check(vr::kPrologueBytes == 16 && std::memcmp(exe, vr::kFlushIaPrologue, 16) == 0, "V2.a the 16 bytes read from the exe are the prologue the hook checks");
     check(vr::kFlushIaRva == 0x522B50u && vr::kPrologueBytes == 16, "V2.d the RVA is 0x522B50 (0x140522B50) and the check covers 16 bytes");
-    check(vr::identityMatches(1792704584u, 104906752u), "V2.e the PE pair of build 334925 passes");
-    check(!vr::identityMatches(1788384821u, 104906752u) && !vr::identityMatches(1792704584u, 104894465u) && !vr::identityMatches(0, 0),
-          "V2.f a different timestamp, a different image size or neither is refused");
+    // The install decision (issue 124, the same rule as the store hook): the PE header read, FlushIA's address (the constant on build 334925, the signature match on an
+    // unknown build, 0 when none was found), the prologue read there, and the pin compare (gamePinMatches).
+    check(vr::installDecision(true, vr::kFlushIaRva, exe, true) == vr::Install::kInstall, "V2.e build 334925's FlushIA with its pin installs the hook");
+    check(vr::installDecision(true, 0x523B50u, exe, true) == vr::Install::kInstall,
+          "V2.g an unknown build's FlushIA found by signature, its pin matching, installs the hook");
+    check(vr::installDecision(true, 0, exe, true) == vr::Install::kNotFound && vr::installDecision(true, 0, nullptr, false) == vr::Install::kNotFound,
+          "V2.h an unknown build whose FlushIA was not found by signature is refused, whatever was read");
+    check(vr::installDecision(true, vr::kFlushIaRva, exe, false) == vr::Install::kWrongPrologue, "V2.b a found FlushIA whose prologue is not the pin is refused");
+    check(vr::installDecision(false, vr::kFlushIaRva, exe, true) == vr::Install::kUnreadable && vr::installDecision(true, vr::kFlushIaRva, nullptr, false) == vr::Install::kUnreadable,
+          "V2.f an unreadable PE header or prologue is refused");
 }
 
 // ---- V3 ----------------------------------------------------------------------------------------------------------------------------------------------------
@@ -458,6 +465,18 @@ void caseHook() {
         check(countLinesWith("vertex resync: armed;") == 0 && countLinesWith("stale vertex-buffer bindings") == 0 && vertexResyncTestLineCount() == linesAfterRefusal &&
                   vertexResyncTestExitLine(out, sizeof(out)) == 0,
               "V4.d a hook that never armed says no heartbeat, no session line and no exit line: the heartbeat is for an armed hook only");
+    }
+
+    {
+        // V4.k an unknown build in which FlushIA is not found by signature (the test target off, so the resolver is asked): one line, not installed, nothing patched
+        g_rigResolves = false;
+        vertexResyncTestReset();
+        vertexResyncTestSetTarget(0);
+        vertexResyncInstall();
+        check(!vertexResyncTestState().installed && vertexResyncTestLineCount() == 1 && countLinesWith("NOT installed -- unknown build (rig), and Frontier's input-assembler flush "
+              "(0x522B50 in build 334925) was not found by signature") == 1,
+              "V4.k an unknown build whose FlushIA is not found by signature is refused with one line and nothing patched");
+        g_rigResolves = true;
     }
 
     // V4.e the right function arms (stolen = the first instruction, 5 bytes)

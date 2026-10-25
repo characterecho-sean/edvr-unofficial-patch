@@ -1,6 +1,7 @@
 #include "vertex_resync_hook.h"
 #include "vertex_resync_core.h"
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/game_call_probe.h"
 #include "../common/log.h"
 
@@ -117,24 +118,9 @@ void sayf(const char* fmt, ...) {
 }
 
 // --- SEH-guarded reads of the game's memory. Each is its own small function (no destructors in a __try body), the discipline CodeHook's neighbours keep. ------------
-__declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expected, size_t n) noexcept {
-    __try { return std::memcmp(reinterpret_cast<const void*>(address), expected, n) == 0; }
+__declspec(noinline) bool sehReadBytes(uintptr_t address, uint8_t* out, size_t n) noexcept {
+    __try { std::memcpy(out, reinterpret_cast<const void*>(address), n); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-__declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) { *why = "the PE header offset is implausible"; return false; }
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (!vresync::identityMatches(timestamp, imageSize)) { *why = "not build 334925 (PE timestamp or image size differs)"; return false; }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        *why = "a read faulted while checking the PE header";
-        return false;
-    }
 }
 // The repair itself, under SEH: the pointers it follows (the layout object, the wrapper) are the game's.
 __declspec(noinline) bool guardedResync(uintptr_t pso, uintptr_t desired, uintptr_t applied, vresync::Report* out) noexcept {
@@ -197,6 +183,9 @@ __declspec(noinline) uintptr_t __fastcall flushIaObserved(uintptr_t pso, uintptr
 void vertexResyncInstall() {
     bool expected = false;
     if (!g_attempted.compare_exchange_strong(expected, true)) return;   // once, ever: a refusal is final
+    // Build 334925: kFlushIaRva itself. An unknown build (issue 124): where the signature resolver found FlushIA (src\common\game_build.h; 0 = not found).
+    const bool identityRead = gameBuildIdentity(nullptr, nullptr);
+    const uintptr_t flushIaRva = identityRead ? gameRva(static_cast<uint32_t>(vresync::kFlushIaRva)) : 0;
     uintptr_t target = 0;
 #ifdef EDVR_VERTEX_RESYNC_TEST
     target = g_testTarget;
@@ -207,17 +196,28 @@ void vertexResyncInstall() {
             say("vertex resync: NOT installed -- the game's module could not be resolved. The game's flush runs as it always did.");
             return;
         }
-        const char* why = nullptr;
-        if (!checkIdentity(base, &why)) {
-            sayf("vertex resync: NOT installed -- the game build differs (%s); EliteDangerous64.exe+0x%llX was not touched. The game's flush runs as it always did.",
-                 why ? why : "?", static_cast<unsigned long long>(vresync::kFlushIaRva));
-            return;
-        }
-        target = base + vresync::kFlushIaRva;
+        if (flushIaRva != 0) target = base + flushIaRva;
     }
-    if (!sehCheckBytes(target, vresync::kFlushIaPrologue, vresync::kPrologueBytes)) {
-        sayf("vertex resync: NOT installed -- the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's flush prologue. The game's flush runs as it always did.",
-             vresync::kPrologueBytes, static_cast<unsigned long long>(vresync::kFlushIaRva));
+    uint8_t got[vresync::kPrologueBytes] = {};
+    const bool readOk = target != 0 && sehReadBytes(target, got, sizeof(got));
+    const bool pinOk = readOk && gamePinMatches(static_cast<uint32_t>(vresync::kFlushIaRva), got, vresync::kFlushIaPrologue, sizeof(got));
+    const vresync::Install verdict = vresync::installDecision(identityRead, flushIaRva, readOk ? got : nullptr, pinOk);
+    if (verdict != vresync::Install::kInstall) {
+        char line[400];
+        if (!identityRead)
+            std::snprintf(line, sizeof(line), "vertex resync: NOT installed -- the game build differs (the PE header is unreadable); EliteDangerous64.exe+0x%llX was not touched. The game's flush runs as it always did.",
+                          static_cast<unsigned long long>(vresync::kFlushIaRva));
+        else if (verdict == vresync::Install::kNotFound)
+            std::snprintf(line, sizeof(line), "vertex resync: NOT installed -- %s, and Frontier's input-assembler flush (0x522B50 in build 334925) was not found by signature. The game's flush runs as it always did.",
+                          gameBuildText());
+        else if (gameBuildKnown())
+            std::snprintf(line, sizeof(line), "vertex resync: NOT installed -- the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's flush prologue. The game's flush runs as it always did.",
+                          vresync::kPrologueBytes, static_cast<unsigned long long>(vresync::kFlushIaRva));
+        else
+            std::snprintf(line, sizeof(line), "vertex resync: NOT installed -- %s: Frontier's input-assembler flush was found by signature at 0x%llX, but its %zu bytes are not build 334925's flush prologue "
+                          "outside the masked fields. The game's flush runs as it always did.",
+                          gameBuildText(), static_cast<unsigned long long>(flushIaRva), vresync::kPrologueBytes);
+        say(line);
         return;
     }
     g_relay = allocateRelay(target);
@@ -235,10 +235,16 @@ void vertexResyncInstall() {
     g_relayGate.store(1, std::memory_order_release);
     g_installed.store(true, std::memory_order_release);
     Log::get().setExitLine(&exitLine);   // the game never unloads this DLL: its process exit says the session line
-    sayf("vertex resync: hook armed at EliteDangerous64.exe+0x%llX (Frontier's input-assembler flush, build 334925), stolen=%zu bytes, prologue %zu/%zu bytes verified. Before each "
+    char where[220];
+    if (gameBuildKnown())
+        std::snprintf(where, sizeof(where), "armed at EliteDangerous64.exe+0x%llX (Frontier's input-assembler flush, build 334925)", static_cast<unsigned long long>(vresync::kFlushIaRva));
+    else
+        std::snprintf(where, sizeof(where), "armed: Frontier's input-assembler flush (0x522B50 in build 334925) was found by signature on %s at 0x%llX", gameBuildText(),
+                      static_cast<unsigned long long>(flushIaRva));
+    sayf("vertex resync: hook %s, stolen=%zu bytes, prologue %zu/%zu bytes verified. Before each "
          "flush the applied vertex-buffer cache is made to agree with the desired state for the slots the draw's layout uses; the first %u sightings are logged, then a count every "
          "60 s while it is non-zero, a heartbeat every 10 min (zero counts included) and a line when the session ends.",
-         static_cast<unsigned long long>(vresync::kFlushIaRva), g_hook.stolenBytes(), vresync::kPrologueBytes, vresync::kPrologueBytes, vresync::kMaxSightings);
+         where, g_hook.stolenBytes(), vresync::kPrologueBytes, vresync::kPrologueBytes, vresync::kMaxSightings);
 }
 
 void vertexResyncPoll(uint64_t nowMs) {
