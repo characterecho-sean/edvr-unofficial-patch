@@ -1,0 +1,13 @@
+# Build 334925 RVAs added to the signature table (tools\hook_signatures.py generate --rvas, after map_all.json) for issue 124 step 3.
+# They are not hook targets: each is the start of a chained .pdata fragment inside a range a hook hashes whole, so that
+# gamePinProvenByMatch can cover the range on an unknown build (every fragment found, all moved together).
+# Map them with the rest at the next retarget.
+0x42B7098 code   # the outer builder FUN_1442B7040's body hash [0x42B7045, 0x42B7CD6) (kinematic_eval_hook.cpp primarySignature)
+0x42B7C77 code
+0x42B7C7F code
+0x42B7CB9 code
+0x43513BA code   # the list merge FUN_1443513A0's body hash [0x43513A8, 0x4351640) (ensurePoolMerge)
+0x435162A code
+0x4351632 code
+0x368465E code   # the typed clear FUN_143684630's body hash [0x3684635, 0x3684782) (ensurePoolClear)
+0x3684772 code
