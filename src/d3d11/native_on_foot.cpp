@@ -55,6 +55,7 @@
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
+#include "native_on_foot_f122.h"   // F122: the on-foot panel mouse cursor hidden by default (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
@@ -311,10 +312,8 @@ bool g_hudOffsetOn = false;                                     // under g_f9Loc
 uintptr_t g_layoutHrc = 0;                                      // under g_f9Lock: the HRC the layout hook last ran for (F16)
 std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
-std::atomic<uint8_t> g_panelCursorFix{1};          // F117 (TEMPORARY): fix.native_on_foot_panel_cursor_fix, live: 0 game, 1 panel, 2 view
-int g_panelCursorFixLast = -1;                     // frame thread only: as last logged
-std::atomic<uint8_t> g_panelCursorFollow{1};       // F120 (TEMPORARY): fix.native_on_foot_panel_cursor_follow, live: 0 head, 1 panel
-int g_panelCursorFollowLast = -1;                  // frame thread only: as last logged
+std::atomic<bool> g_panelMouse{false};             // F122: fix.native_on_foot_panel_mouse is on, live: the game's cursor is drawn on on-foot panels (F117 and F120, panel); off hides it
+int g_panelMouseLast = -1;                         // frame thread only: as last logged
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
 
 bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
@@ -719,6 +718,14 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (std::fabs(cfg.getFloat("fix.native_on_foot_weapon_eye_right_cm", static_cast<float>(nofoot::f88::kRightDefaultCm)) - static_cast<float>(nofoot::f88::kRightDefaultCm)) > 1e-6f)
         Log::get().note("native on foot: fix.native_on_foot_weapon_eye_right_cm is retired (F112): ignored (the eye offset has no sideways part; "
                         "fix.native_on_foot_weapon_view_offset_cm is the sideways setting)");
+    // F122: F117's and F120's two test keys; with the cursor drawn, a turned panel's cursor is placed at the panel's point and kept on the panel as the head turns.
+    // fix.native_on_foot_panel_mouse chooses whether it is drawn at all. The shipping file carries each at its last value (panel).
+    if (cfg.getString("fix.native_on_foot_panel_cursor_fix", "panel") != "panel")
+        Log::get().note("native on foot: fix.native_on_foot_panel_cursor_fix is retired (F122): ignored (a turned panel's cursor is placed at the panel's point; "
+                        "fix.native_on_foot_panel_mouse chooses whether the cursor is drawn)");
+    if (cfg.getString("fix.native_on_foot_panel_cursor_follow", "panel") != "panel")
+        Log::get().note("native on foot: fix.native_on_foot_panel_cursor_follow is retired (F122): ignored (the cursor is kept on the panel as the head turns; "
+                        "fix.native_on_foot_panel_mouse chooses whether the cursor is drawn)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -788,25 +795,18 @@ void readKey() {
         Log::get().note("native on foot hud follow: %s", followHead ? "head" : "body");
         g_followHeadLast = followHead;
     }
-    // F117 (TEMPORARY, live A/B): the cursor's place on an on-foot panel whose pick mesh the game turned: panel (default), view or game.
-    const std::string cursorFix = cfg.getString("fix.native_on_foot_panel_cursor_fix", "panel");
-    const uint8_t cursorMode = cursorFix == "game" ? 0 : cursorFix == "view" ? 2 : 1;
-    g_panelCursorFix.store(cursorMode, std::memory_order_relaxed);
-    if (first || cursorMode != g_panelCursorFixLast) {
-        Log::get().note("native on foot panel cursor fix (F117): %s (TEMPORARY, live; a turned panel's cursor: panel = at the panel's point for the click's "
-                        "place, view = mirrored through the view's centre, game = the game's own place)",
-                        nofoot::f117::modeName(static_cast<nofoot::f117::Mode>(cursorMode)));
-        g_panelCursorFixLast = cursorMode;
-    }
-    // F120 (TEMPORARY, live A/B): the cursor on a screen-space panel when the head turns: panel (default) keeps it on the drawn panel, head is the game's place.
-    const std::string cursorFollow = cfg.getString("fix.native_on_foot_panel_cursor_follow", "panel");
-    const uint8_t followMode = cursorFollow == "head" ? 0 : 1;
-    g_panelCursorFollow.store(followMode, std::memory_order_relaxed);
-    if (first || followMode != g_panelCursorFollowLast) {
-        Log::get().note("native on foot panel cursor follow (F120): %s (TEMPORARY, live; a screen-space panel's cursor when the head turns: panel = stays on the "
-                        "drawn panel, head = the game's own place, riding with the head)",
-                        followMode ? "panel" : "head");
-        g_panelCursorFollowLast = followMode;
+    // F122 (an advanced setting, ini only, live): the mouse cursor on on-foot panels (a locker's inventory, a terminal's menus). off (the default) hides the
+    // sprite the game draws; on draws it, placed by F117 and F120. The clicks go where the game's pointer is either way.
+    const std::string panelMouse = cfg.getString("fix.native_on_foot_panel_mouse", "off");
+    if (first && panelMouse != "on" && panelMouse != "off")
+        Log::get().note("native on foot: fix.native_on_foot_panel_mouse = %s is not on or off; the cursor is hidden (off)", panelMouse.c_str());
+    const bool mouseOn = nofoot::f122::keyOn(panelMouse.c_str());
+    g_panelMouse.store(mouseOn, std::memory_order_relaxed);
+    if (first || static_cast<int>(mouseOn) != g_panelMouseLast) {
+        Log::get().note("native on foot panel mouse (F122): %s (live; off hides the mouse cursor on on-foot panels such as lockers, clicks still go where the game's "
+                        "pointer is; on draws it, which may not line up with the panel in VR)",
+                        mouseOn ? "on" : "off");
+        g_panelMouseLast = mouseOn ? 1 : 0;
     }
     int smooth =cfg.getInt("fix.native_on_foot_hud_follow_smoothing_ms", nofoot::kHudSmoothDefault);
     if (smooth < nofoot::kHudSmoothMin) smooth = nofoot::kHudSmoothMin;
@@ -4917,7 +4917,7 @@ constexpr size_t kF111Hooks = 4, kF111Slots = 4, kF111MoveLines = 5;
 F9Probe g_f111Probe[kF111Hooks];
 bool g_f111Tried = false;                 // frame thread only
 bool g_f111Armed[kF111Hooks] = {};        // frame thread only
-bool g_f111GateLast = false;              // frame thread only
+int g_f111GateState = 0;                  // frame thread only: bit 0 the instruments' hooks are open, bit 1 the placement hook (F122)
 uint64_t g_f111LastMs = 0;                // frame thread only
 uint64_t g_f111SecondsWith = 0;           // frame thread only: seconds with a cycle
 thread_local uintptr_t t_f111InPlace = 0; // the controller whose placement is running on this thread
@@ -4940,6 +4940,10 @@ uint64_t g_f120LastMs = 0, g_f120SecondsWith = 0;   // frame thread only
 std::atomic<int> g_f120Pin{0};
 uint8_t g_f120PinBytes[16] = {};                    // written before g_f120Pin is set
 bool g_f120PinLogged = false;                       // frame thread only
+// F122: this second's panels seen (a placement that set the hit byte), sprites hidden and hides whose write failed (the hook threads add, the frame thread takes).
+std::atomic<uint32_t> g_f122Seen{0}, g_f122Hidden{0}, g_f122Failed{0};
+uint64_t g_f122LastMs = 0;                          // frame thread only
+bool g_f122ArmNoted = false;                        // frame thread only
 struct F111Slot {
     uintptr_t ctl = 0;
     nofoot::f111::Cycle cyc, prev;
@@ -5199,6 +5203,20 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
     return result;
 }
 
+// F122, the key off: after the game's placement on a panel set the hit byte, the controller's sprite goes where it cannot be seen. Only the sprite's position
+// (+0x140) is written; the mouse NDC, the cursor window's output and the uv the movie takes are never touched, so the clicks land where the game's pointer is.
+void panelMouseHide(uintptr_t ctl) {
+    namespace h = nofoot::f122;
+    uint8_t hit = 0;
+    if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1)) return;
+    const h::Act act = h::decide(false, runtimeFlatProfile(), hit != 0);
+    const bool wrote = act != h::Act::kHide || h::writeHidden(ctl, guardedWriteFloat);
+    const h::Delta d = h::delta(act, wrote);
+    if (d.seen) g_f122Seen.fetch_add(1, std::memory_order_relaxed);
+    if (d.hidden) g_f122Hidden.fetch_add(1, std::memory_order_relaxed);
+    if (d.failed) g_f122Failed.fetch_add(1, std::memory_order_relaxed);
+}
+
 // F120: whether the panel's pick mesh owner is the screen-space kind: the pinned function at its vtable +0x10, a non-empty list and the first entry's flag.
 bool f120ScreenSpace(uintptr_t list) {
     namespace w = nofoot::f120;
@@ -5220,10 +5238,11 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     namespace z = nofoot::f117;
     namespace w = nofoot::f120;
     const bool flat = runtimeFlatProfile();
-    const z::Mode mode = flat ? z::Mode::kGame : static_cast<z::Mode>(g_panelCursorFix.load(std::memory_order_relaxed));
+    const z::Mode mode = flat ? z::Mode::kGame : z::Mode::kPanel;   // F122: panel, fixed (the retired test key chose between panel, view and game)
     uint8_t hit = 0;
     float sprite[3] = {};
     if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite))) return;
+    g_f122Seen.fetch_add(1, std::memory_order_relaxed);   // F122: a panel reached (the key on: the game's cursor is drawn, placed below)
     uintptr_t list = 0, tris = 0;
     uint64_t count = 0;
     const bool listOk = guardedRead(panel + z::kOffList, &list, 8) && list;
@@ -5240,7 +5259,7 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     w::Input in;
     in.frame = g_nativeOnFootTeeFrameNow.load(std::memory_order_relaxed);
     in.flat = flat;
-    in.follow = g_panelCursorFollow.load(std::memory_order_relaxed) != 0;
+    in.follow = true;   // F122: panel, fixed (the retired test key chose between panel and head)
     in.u = u;
     in.v = v;
     in.key = panel;
@@ -5288,6 +5307,11 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
 uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[1].original);
     if (!original) return 0;
+    if (!g_panelMouse.load(std::memory_order_relaxed)) {   // F122: the cursor hidden; the instruments are idle, the one write is the sprite's hide
+        const uint64_t hidden = original(a, b, c, d);
+        if (a) panelMouseHide(reinterpret_cast<uintptr_t>(a));
+        return hidden;
+    }
     const uintptr_t outer = t_f111InPlace;
     t_f111InPlace = reinterpret_cast<uintptr_t>(a);
     const uint32_t panelCallsBefore = t_f111PanelCalls;
@@ -5568,7 +5592,7 @@ void f117Tick(uint64_t now) {
     if (!sec.placements) return;
     ++g_f117SecondsWith;
     g_f117Total.merge(sec);
-    const char* setting = runtimeFlatProfile() ? "flat (the game's place)" : z::modeName(static_cast<z::Mode>(g_panelCursorFix.load(std::memory_order_relaxed)));
+    const char* setting = runtimeFlatProfile() ? "flat (the game's place)" : z::modeName(z::Mode::kPanel);
     Log::get().note("panel cursor fix (F117) 1 s: setting %s; the cursor on turned panels %s; 2D placements %u: turned %u, upright %u; moved %u; left: "
                     "upright %u, the game's setting %u; refused: no triangle at the uv %u, the sprite not at the uv %u, no triangle at the turned uv %u; "
                     "the uv to the cursor on turned panels right %+.2f down %+.2f, on upright panels right %+.2f down %+.2f",
@@ -5609,7 +5633,7 @@ void f120PinTick() {
 
 // Frame thread: F120's line once a second with a 2D placement, and every 10 seconds with a screen-space one the flight so far.
 void f120Tick(uint64_t now) {
-    f120PinTick();
+    if (g_panelMouse.load(std::memory_order_relaxed)) f120PinTick();   // F122: idle with the key off
     if (now - g_f120LastMs < 1000) return;
     g_f120LastMs = now;
     namespace w = nofoot::f120;
@@ -5621,7 +5645,7 @@ void f120Tick(uint64_t now) {
     }
     if (!sec.placements) return;
     g_f120Total.merge(sec);
-    const char* setting = runtimeFlatProfile() ? "flat (refused)" : g_panelCursorFollow.load(std::memory_order_relaxed) ? "panel" : "head";
+    const char* setting = runtimeFlatProfile() ? "flat (refused)" : "panel";
     double yaw = 0.0, pitch = 0.0, roll = 0.0, detR = 0.0;
     if (sec.haveLast) {
         w::ypr(sec.lastR, &yaw, &pitch, &roll);
@@ -5644,20 +5668,41 @@ void f120Tick(uint64_t now) {
     }
 }
 
+// Frame thread: once, whether the placement hook (the one that hides) is armed, then F122's line once a second with a panel reached.
+void f122Tick(uint64_t now) {
+    if (!g_f122ArmNoted && g_f111Tried) {
+        g_f122ArmNoted = true;
+        const bool armed = g_f111Armed[1];
+        Log::get().note("panel mouse (F122): the placement hook is %s (EliteDangerous64.exe+0x%llX)%s", armed ? "armed" : "NOT armed",
+                        static_cast<unsigned long long>(nofoot::f111::kPlaceRva), armed ? "" : ": the cursor cannot be hidden, the game draws it");
+    }
+    if (now - g_f122LastMs < 1000) return;
+    g_f122LastMs = now;
+    const uint32_t seen = g_f122Seen.exchange(0, std::memory_order_relaxed), hidden = g_f122Hidden.exchange(0, std::memory_order_relaxed),
+                   failed = g_f122Failed.exchange(0, std::memory_order_relaxed);
+    if (!seen) return;
+    Log::get().note("panel mouse (F122) 1 s: setting %s; panels seen %u, sprites hidden %u, hide write failed %u", g_panelMouse.load(std::memory_order_relaxed) ? "on" : "off",
+                    seen, hidden, failed);
+}
+
 void f111Tick(uint64_t now) {
     installF111Once();
     const bool open = f114bOpen();
-    if (open != g_f111GateLast) {
-        g_f111GateLast = open;
+    // F122: with the key off the instruments' hooks stay closed and only the placement hook (the sprite's hide) opens, in VR.
+    const nofoot::f122::Gates gates = nofoot::f122::gates(open, g_panelMouse.load(std::memory_order_relaxed), runtimeFlatProfile());
+    const int gateState = (gates.instruments ? 1 : 0) | (gates.placement ? 2 : 0);
+    if (gateState != g_f111GateState) {
+        g_f111GateState = gateState;
         std::lock_guard<std::mutex> lock(g_f111Mu);
         for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
         for (size_t i = 0; i < kF111Hooks; ++i)
-            if (g_f111Armed[i]) g_f111Probe[i].gate.store(open ? 1u : 0u, std::memory_order_seq_cst);
-        if (g_f114bArmed) g_f114bProbe.gate.store(open ? 1u : 0u, std::memory_order_seq_cst);
+            if (g_f111Armed[i]) g_f111Probe[i].gate.store((i == 1 ? gates.placement : gates.instruments) ? 1u : 0u, std::memory_order_seq_cst);
+        if (g_f114bArmed) g_f114bProbe.gate.store(gates.instruments ? 1u : 0u, std::memory_order_seq_cst);
     }
     f114bTick(now);
     f117Tick(now);
     f120Tick(now);
+    f122Tick(now);
     if (now - g_f111LastMs < 1000) return;
     g_f111LastMs = now;
     namespace p = nofoot::f111;

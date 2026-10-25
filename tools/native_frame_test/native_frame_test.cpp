@@ -41,6 +41,7 @@
 #include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
 #include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
 #include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
+#include "f122_checks.h"    // F122: the on-foot panel mouse cursor hidden by default (the key, the one write, the counts, the hooks it opens)
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 
 #include <array>
@@ -7319,6 +7320,8 @@ int wmain(int argc, wchar_t** argv) {
     // F119 (measure only): the physical head from the pose and its alignment, the second's percentiles and histogram by class, EDVR's own offsets kept apart, the depth
     // grid decoded from the shader's words (a wall, the player's weapon, the near plane, the sky), the baseline and contact tallies, and the lines within the log's limit.
     f119test::run119(check);
+    // F122: the hide: the key, what a placement does, the one write against a controller's memory, the counts and the hooks the key opens.
+    f122test::run122(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
