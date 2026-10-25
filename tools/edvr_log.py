@@ -11850,8 +11850,10 @@ def _hj_f109_snap(rows, ctx):
 
 
 def _hj_f109_turn(rows, ctx):
-    """F109: the player's own turn reached the view (the smooth turn, and the stick or mouse in ADS): per second, the avatar's turn less the head aim's asks against the
-    view's turn beyond the head's. No second agreeing, the view taking under a third of the turn, is the turn cancelled as the head aim's (NEVER APPLIED)."""
+    """F109: the player's own turn reached the view (the smooth turn, and the stick or mouse in ADS): per second, the player's own turn against the view's turn beyond
+    the head's. F124: the player's own turn is the split's player share (the avatar's turn less the head aim's share); the first F109 build printed the avatar's
+    turn less the head aim's asks, which read the asks the game dropped (a blocked look) as the player's turn. No second agreeing, the view taking under a third of
+    the turn, is the turn cancelled as the head aim's (NEVER APPLIED)."""
     sec = rows.get("sec", [])
     if not sec:
         return None
@@ -11947,6 +11949,27 @@ def _hj_f98a_elbow(rows, ctx):
     if not parts:
         return ("IDLE", "no left-arm solve with a weapon drawn")
     notes = (["the elbow swung off the stance's plane (%s)" % ", ".join(swung)] if swung else []) + (["the elbow jumped (%s)" % ", ".join(jumped)] if jumped else [])
+    # F124: the seconds that carry the body-down figures (lines from before F124 carry none and are skipped): how close the arm's axis came to the body's down, and at
+    # a flip (the largest step over 10 deg) the angle and the twist limit. A flip with the axis under 15 deg from the vertical (down, or up: the pole's other singular
+    # direction) says the body-down pole degenerates; a flip with the twist limit hit at a larger angle says the twist limit.
+    down_rows = [r for r in sec if r.get("dn") and int(r["dn"])]
+    if down_rows:
+        dn = sum(int(r["dn"]) for r in down_rows)
+        text += "; the body-down pole: %d solves, the arm's axis came within %.1f deg of the body's down" % (dn, min(float(r["dmin"]) for r in down_rows))
+        flips = [r for r in down_rows if r.get("dstep") and float(r["dstep"]) > 10.0]
+        if flips:
+            near = [r for r in flips if float(r["dang"]) < 15.0 or float(r["dang"]) > 165.0]
+            twisted = [r for r in flips if r["dtwist"] == "hit" and 15.0 <= float(r["dang"]) <= 165.0]
+            angles = ", ".join("%.1f" % float(r["dang"]) for r in flips[:6]) + (", ..." if len(flips) > 6 else "")
+            text += "; %d flip second(s) (the largest step over 10 deg): the axis was %s deg from down, the twist limit hit in %d" % (
+                len(flips), angles, sum(1 for r in flips if r["dtwist"] == "hit"))
+            if near and len(near) >= len(twisted):
+                notes.append("leading hypothesis: the body-down pole degenerates with the arm near vertical (%d of %d flip seconds with the axis within 15 deg of down or up)" % (
+                    len(near), len(flips)))
+            elif twisted:
+                notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (len(twisted), len(flips)))
+            else:
+                notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % len(flips))
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
@@ -12622,12 +12645,14 @@ HEALTH_RULES = (
         ("skipped", r"native on foot snap turn \(F109\): (?P<src>the stick|a mouse flick) asked a snap (?:right|left), but no gain is known yet"),
     ), _hj_f109_snap),
     _hrule("smooth turn (F109)", ("F109",), ("native on foot smooth turn (F109)",), (
-        ("sec", r"native on foot smooth turn \(F109\) 1 s: the avatar turned (?P<aim>%s) deg \(the game's aim\), the head aim asked (?P<ask>%s), so the player's own "
+        ("sec", r"native on foot smooth turn \(F109\) 1 s: the avatar turned (?P<aim>%s) deg \(the game's aim\), "
+                r"the head aim(?: asked|'s share) (?P<ask>%s), so the player's own "
                 r"(?P<player>%s); the view turned (?P<view>%s) deg beyond the head's own \((?P<ticks>\d+) ticks, no rows (?P<norows>\d+), no aim (?P<noaim>\d+)\): "
                 r"(?P<verdict>agrees|DISAGREES)" % ((_HN,) * 4)),
     ), _hj_f109_turn),
     _hrule("ADS player turn (F109)", ("F109",), ("native on foot ADS player turn (F109)",), (
-        ("sec", r"native on foot ADS player turn \(F109\) 1 s: look to aim (?P<lta>on|off); the avatar turned (?P<aim>%s) deg \(the game's aim\), the head aim asked "
+        ("sec", r"native on foot ADS player turn \(F109\) 1 s: look to aim (?P<lta>on|off); the avatar turned (?P<aim>%s) deg \(the game's aim\), "
+                r"the head aim(?: asked|'s share) "
                 r"(?P<ask>%s), so the player's own (?P<player>%s); the view turned (?P<view>%s) deg beyond the head's own \((?P<ticks>\d+) ticks, no rows (?P<norows>\d+), "
                 r"no aim (?P<noaim>\d+)\): (?P<verdict>agrees|DISAGREES)" % ((_HN,) * 4)),
     ), _hj_f109_turn),
@@ -12654,7 +12679,11 @@ HEALTH_RULES = (
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
                 r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
                 r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
-                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)" % ((_HN,) * 6)),
+                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)"
+                # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
+                r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
+                r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
+                r"|no elbow step was measured))?" % ((_HN,) * 6)),
     ), _hj_f98a_elbow),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
@@ -14425,14 +14454,42 @@ def self_test_health():
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"
 
-        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76):
+        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail=""):
             return R("native on foot left elbow (F98a) 1 s: item %s", item, n, aim, aim - 0.5, aim + 0.5, 2.0, 1.5, 3.0, 7.0, plane, plane + 4.0, over45, step, step * 3,
-                     over10, n - 1, seed, 25.0, 31.0, down, legacy, 0)
+                     over10, n - 1, seed, 25.0, 31.0, down, legacy, 0, tail)
+
+        PISTOL98 = "$wpn_m_pistol_laser_name;"
+
+        def down98(n=76, closest=40.0, step=None, ang=0.0, twist=False):
+            """F124: the trailing body-down figures, from the DLL's own two format literals (the largest step's angle and twist limit, or no step measured)."""
+            at = (R("at the largest step (%.1f deg) the axis was", step, ang, "hit" if twist else "not hit") if step is not None else R("no elbow step was measured"))
+            return R("body-down solves the arm's axis came within", n, closest, at)
 
         check("F98a elbow: aimed down, the elbow on the stance's plane", [elbow98()] * 3, 0, [("OK", F98)], has=[RIFLE97 + " 3 s: aim -23.9 deg"], lacks=["UNPARSED"])
         check("F98a elbow: the F97 flight's swung elbow", [elbow98(plane=92.0, over45=76)] * 3 + [elbow98()], 0, [("PARTIAL", F98)],
               has=["the elbow swung off the stance's plane (" + RIFLE97 + " 3 s)"])
-        check("F98a elbow: the elbow jumped", [elbow98(over10=2, step=3.0)], 0, [("PARTIAL", F98)], has=["the elbow jumped (" + RIFLE97 + " 2)"])
+        check("F98a elbow: the elbow jumped", [elbow98(over10=2, step=3.0)], 0, [("PARTIAL", F98)], has=["the elbow jumped (" + RIFLE97 + " 2)"],
+              lacks=["UNPARSED", "the body-down pole:"])
+        # F124: the pistol's flips (a tester's log: the left elbow stepped 85.8 deg in one frame, every solve on the body-down pole): the arm's closest approach to the
+        # body's down, and at the largest step the angle and the twist limit
+        check("F124 elbow: the flips with the arm near the body's down (the degenerate pole)",
+              [elbow98(PISTOL98, over10=3, step=40.0, tail=down98(closest=4.0, step=85.8, ang=9.0))] + [elbow98(PISTOL98, tail=down98(closest=38.0, step=1.0, ang=44.0))] * 2,
+              0, [("PARTIAL", F98)], has=["the body-down pole: 228 solves, the arm's axis came within 4.0 deg of the body's down", "1 flip second(s) (the largest step over 10 deg): "
+              "the axis was 9.0 deg from down, the twist limit hit in 0", "leading hypothesis: the body-down pole degenerates with the arm near vertical (1 of 1 flip "
+              "seconds"], lacks=["UNPARSED", "twist limit (1"])
+        check("F124 elbow: the flips with the arm straight up (the pole's other singular direction)",
+              [elbow98(PISTOL98, over10=1, step=20.0, tail=down98(closest=60.0, step=30.0, ang=172.0))], 0, [("PARTIAL", F98)],
+              has=["the axis was 172.0 deg from down", "leading hypothesis: the body-down pole degenerates"], lacks=["UNPARSED"])
+        check("F124 elbow: the flips at a large angle with the twist limit hit",
+              [elbow98(PISTOL98, over10=2, step=30.0, tail=down98(closest=50.0, step=60.0, ang=70.0, twist=True))], 0, [("PARTIAL", F98)],
+              has=["the twist limit hit in 1", "leading hypothesis: the forearm's twist limit (1 of 1 flip seconds hit it with the axis 15 deg or more from down)"],
+              lacks=["UNPARSED", "degenerates"])
+        check("F124 elbow: the flips at a large angle with the twist limit not hit",
+              [elbow98(PISTOL98, over10=2, step=30.0, tail=down98(closest=50.0, step=60.0, ang=70.0))], 0, [("PARTIAL", F98)],
+              has=["neither hypothesis fits the 1 flip seconds"], lacks=["UNPARSED", "leading hypothesis"])
+        check("F124 elbow: body-down solves with no flip, and a second with no step measured",
+              [elbow98(PISTOL98, tail=down98(closest=30.0, step=2.0, ang=50.0)), elbow98(PISTOL98, tail=down98(closest=35.0))], 0, [("OK", F98)],
+              has=["the body-down pole: 152 solves, the arm's axis came within 30.0 deg of the body's down"], lacks=["UNPARSED", "flip second", "hypothesis"])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"
@@ -14625,6 +14682,16 @@ def self_test_health():
               [("NEVER APPLIED", A109)], has=["the player's turn did not reach the view (cancelled as the head aim's)"])
         check("F109 ADS: the stick's turn reached the view with the head aiming", [turn109(20.0, 0.3, 19.7, 19.1, "agrees", "off"), turn109(-8.0, 1.2, -9.2, 6.0,
               "DISAGREES", "on")], 0, [("PARTIAL", A109)], has=["agreed 1, disagreed 1"], lacks=["UNPARSED"])
+        # F124: the line says the head aim's share (the split's), not the asks; the lines of the builds before it still read
+        check("F124 turn: the head aim's share in both lines", [turn109(20.0, 0.3, 19.7, 19.1, "agrees"), turn109(20.0, 0.3, 19.7, 19.1, "agrees", "off")], 0,
+              [("OK", M109), ("OK", A109)], has=["agreed 1, disagreed 0"], lacks=["UNPARSED"])
+        old_turn = [turn109(20.0, 0.3, 19.7, 19.1, "agrees").replace("the head aim's share", "the head aim asked"),
+                    turn109(20.0, 0.3, 19.7, 19.1, "agrees", "off").replace("the head aim's share", "the head aim asked")]
+        check("F124 turn: the F109 builds' lines (the head aim asked) still read", old_turn, 0, [("OK", M109), ("OK", A109)], lacks=["UNPARSED"])
+        # a second with the look blocked (the avatar 0, the head aim's share 0, the player 0; the DLL prints no such second, its player turn is under 3 deg) disagrees with
+        # nothing: the F109 build read the dropped asks as a player's turn of -20 deg against a still view
+        check("F124 turn: a blocked second (avatar 0, share 0, player 0) is no disagreement", [turn109(0.0, 0.0, 0.0, 0.0, "agrees", "off"), turn109(20.0, 0.3, 19.7, 19.1,
+              "agrees", "off")], 0, [("OK", A109)], has=["agreed 2, disagreed 0"], lacks=["UNPARSED", "DISAGREES"])
         # ---- F98a: the F94a and F95a rules against the F97a design ----
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,
               [("OK", F94)], lacks=["the body was lowered or raised"])
