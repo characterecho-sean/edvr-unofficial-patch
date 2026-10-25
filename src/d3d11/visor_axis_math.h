@@ -52,15 +52,18 @@ inline bool shiftUv(float outer, float inner, int eye, float* s) noexcept {
 // The CPU model of the shifted vertex shader's interpolated uv: the fullscreen triangle's u along a clip-space x (u = (x + 1) / 2 before the shift).
 inline float uvAtClipX(float clipX, float s) noexcept { return (clipX + 1.0f) * 0.5f - s; }
 
-// Why a visor draw was not shifted, counted per window.
-enum class Refusal : unsigned { kNoEye = 0, kNoTangents, kOtherPs, kNoShader, kCount };
+// Why a visor draw was not shifted, counted per window. F121c: kOneEye is the eye-trust guard (visor_eye_trust.h): the filing's eye is used only when the visor
+// draws arrive as one draw per eye on two targets, each as filed (and the eyes' submitted targets, where known, agree). The flight of 2026-10-25 15:11 had one
+// visor draw a frame, all filed left on the RIGHT eye's target, and the shift went onto the wrong eye.
+enum class Refusal : unsigned { kNoEye = 0, kNoTangents, kOtherPs, kNoShader, kOneEye, kCount };
 
 struct Counts {
     unsigned long long seen[2] = {0, 0};      // visor draws that reached the swap, per eye (the eye the filing names; a draw with no eye counts in neither)
     unsigned long long shifted[2] = {0, 0};   // drawn through the replacement vertex shader
     unsigned long long symmetric = 0;         // s was zero (a symmetric frustum): the game's own shader, correctly
     unsigned long long keyOff = 0;            // F121b: the test key fix.native_on_foot_visor_axis was off (the default): the game's own shader, by choice
-    unsigned long long refused[static_cast<unsigned>(Refusal::kCount)] = {0, 0, 0, 0};
+    unsigned long long selfOff = 0;           // F121c: the replacement turned itself off (the HDR scene after it was non-finite): the game's own shader since
+    unsigned long long refused[static_cast<unsigned>(Refusal::kCount)] = {0, 0, 0, 0, 0};
     unsigned long long seenAll = 0;           // every visor draw, with or without an eye
     unsigned long long refusedAll() const {
         unsigned long long n = 0;
@@ -75,6 +78,7 @@ inline const char* refusalText(Refusal r) noexcept {
         case Refusal::kNoTangents: return "the headset's eye tangents are not published (or not ones this was written for)";
         case Refusal::kOtherPs: return "the bound pixel shader is not 68ABCB9FEF6CA66C, the one the visor frame shift was designed for";
         case Refusal::kNoShader: return "the replacement vertex shader or its constant buffer could not be made";
+        case Refusal::kOneEye: return "the eye filing is not trusted: the visor draws do not arrive as one draw per eye on two targets, or the filing disagrees with the eyes' submitted targets";
         default: return "?";
     }
 }
@@ -96,9 +100,17 @@ inline int formatRefused(char* out, size_t size, const char* why) noexcept {
 inline int formatWindow(char* out, size_t size, const Counts& c, float sLeft, float sRight, float outer, float inner, bool tangents) noexcept {
     return std::snprintf(out, size,
         "visor axis (F121) 30 s: visor draws seen %llu (left %llu, right %llu), shifted %llu (left %llu, right %llu), symmetric %llu, key off %llu, refused %llu "
-        "(no eye %llu, no tangents %llu, other pixel shader %llu, no replacement %llu); s left %+.4f right %+.4f uv from the tangents outer %.3f inner %.3f%s",
+        "(no eye %llu, no tangents %llu, other pixel shader %llu, no replacement %llu, eye filing %llu), self-off %llu; s left %+.4f right %+.4f uv from the tangents "
+        "outer %.3f inner %.3f%s",
         c.seenAll, c.seen[0], c.seen[1], c.shifted[0] + c.shifted[1], c.shifted[0], c.shifted[1], c.symmetric, c.keyOff, c.refusedAll(),
-        c.refused[0], c.refused[1], c.refused[2], c.refused[3], sLeft, sRight, outer, inner, tangents ? "" : " (not published)");
+        c.refused[0], c.refused[1], c.refused[2], c.refused[3], c.refused[4], c.selfOff, sLeft, sRight, outer, inner, tangents ? "" : " (not published)");
+}
+// F121c: the once-per-session line when the replacement turns itself off. taps non-finite of taps read, in the eye's sample after a draw through the replacement.
+inline int formatSelfOff(char* out, size_t size, unsigned nonFinite, unsigned taps, int eye) noexcept {
+    return std::snprintf(out, size,
+        "visor axis (F121c): SELF-OFF -- the HDR scene right after a draw through the replacement vertex shader had %u non-finite taps of %u (eye %d): the game's own visor "
+        "vertex shader draws until fix.native_on_foot_visor_axis is turned off and on again.",
+        nonFinite, taps, eye);
 }
 
 }  // namespace visoraxis
