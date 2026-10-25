@@ -27,7 +27,7 @@
 #include <memory>
 #include <mutex>
 #include "../common/comfort_fade.h"
-#include "../common/left_eye_darken.h"
+#include "../common/left_eye_share.h"
 #include "../common/frame_flag.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/periodic_work.h"
@@ -2615,11 +2615,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The comfort fade (comfort_fade.h), on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
-    // F89: the left eye's darkening (fix.native_on_foot_ads_close_left_eye), also on a replayed pair: it is this frame's level, an argument of each draw.
-    const float leftDark=leftEyeDarken();
+    // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), also on a replayed pair: it is this frame's level, an argument of
+    // each draw, mapped with the views the pair was drawn with. The right eye's hidden area (the visibility mask the game's hidden-area mesh is made from) goes with it
+    // while it is above 0.
+    const float leftShare=leftEyeShare();
+    StereoHiddenArea hidden{};std::shared_ptr<const NativeHiddenMasks> masks;
+    if(leftShare>0.f) {
+      masks=geometry.read().hiddenMasks;
+      if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
+    }
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr,leftDark):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftDark);
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden);
+    sharePress(leftShare,r==XR_SUCCESS,frameWithheld);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -2657,19 +2665,58 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
   float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
-  // F89: how black the LEFT eye is (fix.native_on_foot_ads_close_left_eye in the d3d11 half): a version 10 answer's reservedProjectionChannel, else 0. Traced at each edge between
-  // clear and darkened, and once a second while darkened.
-  float leftEyeDarken() {
+  // F106: the LEFT eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes in the d3d11 half): a version 10 answer's leftEyeShare, else 0. A d3d11.dll
+  // from F89 to F105 sends its left eye darkening in the same slot with the same timing (the ADS lock's weight), which this reads as the share. Traced at each edge between
+  // stereo and shared, and once a second while shared.
+  float leftEyeShare() {
     const float level=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10?
-      eyedarken::fromBits(featureFrame.reservedProjectionChannel):0.f;
+      eyeshare::fromBits(featureFrame.leftEyeShare):0.f;
     const uint64_t now=GetTickCount64();
-    if((level>0.f)!=leftDarkenOn||(level>0.f&&now-leftDarkenLineMs>=1000)) {
-      leftDarkenOn=level>0.f;leftDarkenLineMs=now;
-      nativeTracePrintf("left_eye_darken,level=%.3f,state=%s,path=runtime_final_pass\n",double(level),level>0.f?"darkened":"clear");
+    if((level>0.f)!=leftShareOn||(level>0.f&&now-leftShareLineMs>=1000)) {
+      leftShareOn=level>0.f;leftShareLineMs=now;
+      nativeTracePrintf("left_eye_share,level=%.3f,state=%s,path=left_scene_pass\n",double(level),level>0.f?"shared":"stereo");
     }
     return level;
   }
-  bool leftDarkenOn=false;uint64_t leftDarkenLineMs=0;
+  bool leftShareOn=false;uint64_t leftShareLineMs=0;
+  // F106: one press of the sights, from the first frame with a share above 0 to the first back at 0. Counted here; at its end traced (eye_share_press) and told to the
+  // d3d11 half (edvrNoteNativeEyeShare), which writes the graphics log's "ADS sight in both eyes (F106) press" line. A d3d11.dll without the export is not told.
+  struct SharePressState {
+    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,full=0,refused=0,replayed=0;StereoShareFacts facts{};
+  } sharePressState;
+  void sharePress(float level,bool rendered,bool replayed) {
+    auto& p=sharePressState;
+    const StereoShareFacts& f=stereo.shareFacts();
+    if(level>0.f) {
+      if(!p.open){p=SharePressState{};p.open=true;p.firstUs=p.lastUs=frameCycleUs();}
+      p.peak=(std::max)(p.peak,level);
+      if(rendered&&f.drawn) {
+        ++p.frames;if(level>=1.f)++p.full;if(replayed)++p.replayed;
+        p.facts=f;p.lastUs=frameCycleUs();
+      } else if(f.refused) ++p.refused;
+      return;
+    }
+    if(!p.open)return;
+    p.open=false;
+    EdvrNativeEyeShareReport report{};report.size=sizeof(report);report.version=EDVR_NATIVE_EYE_SHARE_REPORT_VERSION_1;
+    report.peak=p.peak;report.frames=p.frames;report.framesFull=p.full;report.refused=p.refused;report.replayed=p.replayed;
+    report.seconds=float(double(p.lastUs-p.firstUs)/1e6);
+    for(int k=0;k<3;++k)report.rotationDeg[k]=p.facts.rotationDeg[k];
+    for(int k=0;k<4;++k){report.leftTangents[k]=p.facts.leftTangents[k];report.rightTangents[k]=p.facts.rightTangents[k];}
+    report.coverage=p.facts.coverage;report.coverageWhole=p.facts.coverageWhole;report.hiddenTriangles=p.facts.hiddenTriangles;
+    HRESULT told=S_FALSE;
+    if(graphicsProxy) {
+      const auto note=reinterpret_cast<EdvrNoteNativeEyeShare>(GetProcAddress(graphicsProxy,"edvrNoteNativeEyeShare"));
+      if(note)told=note(&report);
+    }
+    nativeTracePrintf("eye_share_press,peak=%.3f,frames=%u,full=%u,refused=%u,replayed=%u,seconds=%.3f,rotation_deg=%+.3f/%+.3f/%+.3f,"
+                      "left_tan=%.4f/%.4f/%.4f/%.4f,right_tan=%.4f/%.4f/%.4f/%.4f,coverage=%.4f,whole=%.4f,hidden_triangles=%u,told_graphics=%s\n",
+      double(report.peak),report.frames,report.framesFull,report.refused,report.replayed,double(report.seconds),
+      double(report.rotationDeg[0]),double(report.rotationDeg[1]),double(report.rotationDeg[2]),
+      double(report.leftTangents[0]),double(report.leftTangents[1]),double(report.leftTangents[2]),double(report.leftTangents[3]),
+      double(report.rightTangents[0]),double(report.rightTangents[1]),double(report.rightTangents[2]),double(report.rightTangents[3]),
+      double(report.coverage),double(report.coverageWhole),report.hiddenTriangles,told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
+  }
   SystemRead read() const override {return geometry.read();}
   void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
     temporal.noteProjection(sequence,eye,nearZ,farZ); // CPU only; never dispatch/wait on the XR owner

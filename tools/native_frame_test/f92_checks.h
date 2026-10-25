@@ -1,6 +1,6 @@
 // F92b checks (native on-foot VR), run92 below: the ADS head aim's cancel published ahead (AdsAimMap::yawPublished / pitchPublished, native_on_foot_core.h) on a plant
 // with the F91 flight's timing, and the head aim as a live toggle within a press (native_on_foot_f92.h) composed with the press's state edges, its weight, the left eye's
-// darkening and the same plant. Header only, run by native_frame_test.
+// share (F106; the darkening until then) and the same plant. Header only, run by native_frame_test.
 //
 // The plant (one axis, degrees in the seat convention): the head h(F) at frame F; tick F steps the real map with the head's step and the turn the game applied, which is
 // the ask of tick F - 1 (the F91 flight: applied(N) = asked(N - 1) to 0.0028 deg rms); the game's aim Look(F) is the sum of what it applied; the pose of frame F carries
@@ -8,7 +8,7 @@
 // r(F) = Look(F) - P(F - 1), and the weapon against the eye is P(F - 1) - h(F).
 #pragma once
 
-#include "../../src/d3d11/native_on_foot_core.h"   // AdsAimMap, AdsRamp, f89::darken
+#include "../../src/d3d11/native_on_foot_core.h"   // AdsAimMap, AdsRamp, f106::share
 #include "../../src/d3d11/native_on_foot_f92.h"
 
 #include <cmath>
@@ -33,7 +33,7 @@ struct Lcg {
 // One press through the plant. key(i) is the toggle at frame i, ads(i) the resolved request; refuse(i) makes the game apply nothing at frame i. published: true for
 // F92b's published cancel, false for the cancel as published before it (what the game applied only).
 struct Frame {
-    double head = 0.0, look = 0.0, pose = 0.0, r = 0.0, weaponEye = 0.0, ask = 0.0, w = 0.0, darken = 0.0;
+    double head = 0.0, look = 0.0, pose = 0.0, r = 0.0, weaponEye = 0.0, ask = 0.0, w = 0.0, share = 0.0;
     int state = 0, mode = 0;
 };
 template <class Key, class Ads, class Head, class Refuse>
@@ -87,7 +87,7 @@ inline std::vector<Frame> runPlant(int n, Key key, Ads ads, Head headAt, Refuse 
         f.weaponEye = pubPrev - f.head;
         f.ask = lastAsk;
         f.w = state == f91::kStateIdle ? 0.0 : ramp.w;
-        f.darken = f89::darken(true, true, true, f.w).level;
+        f.share = edvr::nofoot::f106::share(true, true, true, f.w).weight;
         f.state = state;
         f.mode = mode;
         pubPrev = (published ? map.yawPublished() : map.yawSeat) / kD;
@@ -182,7 +182,7 @@ inline void run92(Check&& check) {
             const int frame = static_cast<int>(i) + 1;
             if (frame >= 15 && frame < 700) engaged = engaged && t[i].state == f91::kStateEngaged;
             viewHead = viewHead && std::fabs(t[i].r) < 1e-9;
-            eyeSame = eyeSame && t[i].w == on[i].w && t[i].darken == on[i].darken;
+            eyeSame = eyeSame && t[i].w == on[i].w && t[i].share == on[i].share;
             if (frame == 299) carriedAt300 = t[i].look;
             if (offAt < 0 && frame > 300 && t[i].mode == f92::kAimOff) offAt = frame;
         }
@@ -199,7 +199,7 @@ inline void run92(Check&& check) {
         // off for the whole press: nothing asked, nothing published, the press's weight and the left eye exactly as with it on
         bool silent = true;
         for (size_t i = 0; i < off.size(); ++i) {
-            silent = silent && off[i].ask == 0.0 && off[i].pose == 0.0 && off[i].look == 0.0 && off[i].w == on[i].w && off[i].darken == on[i].darken;
+            silent = silent && off[i].ask == 0.0 && off[i].pose == 0.0 && off[i].look == 0.0 && off[i].w == on[i].w && off[i].share == on[i].share;
             if (i < 700) silent = silent && off[i].state == on[i].state;   // (the release's end waits for the unwind with it on: a frame later)
         }
         check(silent, "F92b: with the head aim off the press asks the game nothing and publishes nothing, and its weight, the left eye and its state are those of a press with it on");

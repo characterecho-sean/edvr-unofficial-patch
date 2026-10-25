@@ -29,7 +29,8 @@
 #include "native_on_foot_f86.h"          // F86: the pose carry, the weapon UI depth (measure only since F87) and the floor probe (pure parts)
 #include "native_on_foot_f87.h"          // F87: the standing-height hold, the stream windows' history, the scene rows' fallback, the prompt probes, the hand residual (pure parts)
 #include "native_on_foot_f88.h"          // F88: the weapon eye offset, its weight, the pin's share and the hold's wait (pure parts)
-#include "native_on_foot_f89.h"          // F89: the ADS transition trace, the left eye closing in ADS, the hold's open-loop input (pure parts)
+#include "native_on_foot_f89.h"          // F89: the ADS transition trace, the hold's open-loop input (pure parts)
+#include "native_on_foot_f106.h"         // F106: ADS, the sight in both eyes: the share's decision (pure parts; it replaced F89's left eye close)
 
 namespace edvr {
 namespace nofoot {

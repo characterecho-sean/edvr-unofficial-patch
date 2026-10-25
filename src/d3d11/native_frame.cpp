@@ -1,7 +1,7 @@
 #include "../common/native_frame.h"
 
 #include "../common/comfort_fade.h"
-#include "../common/left_eye_darken.h"
+#include "../common/left_eye_share.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
@@ -374,9 +374,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         result.reservedOffset[1] = g_rotCal[1];
         // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
         if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
-        // F89: the left eye's darkening (fix.native_on_foot_ads_close_left_eye), in a version 10 answer only: 0 unless the frame thread published a fresh level.
+        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 answer only: 0 unless the frame thread
+        // published a fresh level.
         if (output->version == EDVR_NATIVE_FRAME_VERSION_10)
-            result.reservedProjectionChannel = edvr::eyedarken::toBits(edvr::eyedarken::read(GetTickCount64()));
+            result.leftEyeShare = edvr::eyeshare::toBits(edvr::eyeshare::read(GetTickCount64()));
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a

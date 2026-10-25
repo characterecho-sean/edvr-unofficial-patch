@@ -102,8 +102,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_9) out.nowPoseRender=0;
     // F62b: the ADS head-aim's pitch (reservedYaw) is zero unless a version 10 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10||!(out.reservedYaw==out.reservedYaw)) out.reservedYaw=0;
-    // F89: the left eye's darkening (reservedProjectionChannel, a float's bits) is zero unless a version 10 answer carried it.
-    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.reservedProjectionChannel=0;
+    // F106: the left eye's share (leftEyeShare, a float's bits; F89's darkening before) is zero unless a version 10 answer carried it.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.leftEyeShare=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {

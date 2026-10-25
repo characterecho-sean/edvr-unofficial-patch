@@ -3,7 +3,7 @@
 //
 // Header only, no game or D3D11 state, so native_frame_test runs the very functions the hooks use.
 //
-// The ADS press (adsAimTick's state: idle, engaged, releasing) runs whatever the toggle says: the sight eye lock (F70), the position lock, the left eye's close (F89), the
+// The ADS press (adsAimTick's state: idle, engaged, releasing) runs whatever the toggle says: the sight eye lock (F70), the position lock, the left eye's share (F106; F89's close before), the
 // body detach (F73) and the item gate (F91) follow the press as before. The toggle decides only the head aim within an engaged press: the head's turn sent to the game as
 // look input and the game's turn cancelled in the seated space (F62b/F68a), the guard on it and the press's centring snap (F69i).
 //  - The press engages with the toggle on: the head aim engages with it (a fresh press, as before).

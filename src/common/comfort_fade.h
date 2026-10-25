@@ -1,6 +1,6 @@
 #pragma once
 // The comfort fade's signal between EDVR's two halves (first written for Explorer Cam, docs\design-explorer-cam-free-camera-2026-10-07.md, "Comfort fade";
-// Explorer Cam, its only publisher, was removed in F98, so nothing publishes a level now and every reader reads 0; left_eye_darken.h shares the packing).
+// Explorer Cam, its only publisher, was removed in F98, so nothing publishes a level now and every reader reads 0; left_eye_share.h shares the packing).
 //
 // A d3d11 half that owns a timeline publishes one number a frame: how black the view is, 0 (clear) to 1 (black). The
 // OpenXR runtime half blends black over each eye image by that amount when it composes (src\openxr\d3d11_stereo.cpp), and reads the number through
