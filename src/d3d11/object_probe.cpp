@@ -10,6 +10,7 @@
 #include <d3d11.h>
 
 #include "../common/config.h"
+#include "../common/game_build.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/temporal_mode.h"
@@ -238,14 +239,34 @@ void armGateProbe() {
     g_gatePartStatus = "off";
     g_gateGeoFrame = 0;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    // The plane test and the visibility global through the signature resolver (src\common\game_build.h): build
+    // 334925's RVAs there; another build's only when both were found, or the probe stands down.
+    const uint32_t gateRvas[] = {static_cast<uint32_t>(CullGateProbe::kFrustumRva),
+                                 static_cast<uint32_t>(CullGateProbe::kVisGlobalRva)};
+    uint32_t missing = 0;
+    if (!gameRvasFound(gateRvas, std::size(gateRvas), &missing)) {
+        g_gateHookStatus = "not_found";
+        Log::get().note("cull gate probe: refused: %s, and 0x%X (an address it needs in build 334925) was not found by "
+                        "signature; nothing will be captured for eye run %ls (advanced.cull_gate_capture).",
+                        gameBuildText(), missing, g_ledgerStamp);
+        return;
+    }
+    const uintptr_t frustumRva = gameRva(static_cast<uint32_t>(CullGateProbe::kFrustumRva));
+    const uintptr_t visGlobalRva = gameRva(static_cast<uint32_t>(CullGateProbe::kVisGlobalRva));
     uint8_t prologue[sizeof(kFrustumPrologue)] = {};
-    g_gateFrustumOk = base && gateReadImage(prologue, base + CullGateProbe::kFrustumRva, sizeof(prologue)) &&
-                      std::memcmp(prologue, kFrustumPrologue, sizeof(prologue)) == 0;
+    g_gateFrustumOk = base && gateReadImage(prologue, base + frustumRva, sizeof(prologue)) &&
+                      gamePinMatches(static_cast<uint32_t>(CullGateProbe::kFrustumRva), prologue, kFrustumPrologue,
+                                     sizeof(prologue));
     g_gateVisGlobal = 0;
-    if (base) gateReadImage(&g_gateVisGlobal, base + CullGateProbe::kVisGlobalRva, 1);
+    if (base) gateReadImage(&g_gateVisGlobal, base + visGlobalRva, 1);
+    if (!gameBuildKnown())
+        Log::get().note("cull gate probe: the builder's plane test FUN_1404F4F10 (0x4F4F10 in build 334925) and the "
+                        "visibility global DAT_145ea63e9 (0x5EA63E9 in build 334925) were found by signature on %s at "
+                        "0x%llX and 0x%llX (advanced.cull_gate_capture).", gameBuildText(),
+                        static_cast<unsigned long long>(frustumRva), static_cast<unsigned long long>(visGlobalRva));
     const uint32_t first = g_ledgerFrame0 + 1;   // the run's first complete frame (its first is partial)
     const auto frustum = g_gateFrustumOk
-        ? reinterpret_cast<CullGateProbe::FrustumFn>(base + CullGateProbe::kFrustumRva) : nullptr;
+        ? reinterpret_cast<CullGateProbe::FrustumFn>(base + frustumRva) : nullptr;
     if (!cullGateProbe.arm(first, frustum, g_gateVisGlobal)) {
         g_gateHookStatus = "no_memory";
         Log::get().note("cull gate probe: could not allocate its window buffers for eye run %ls; "

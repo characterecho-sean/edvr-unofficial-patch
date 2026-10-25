@@ -1,5 +1,7 @@
 #include "object_record_writer_probe.h"
 #include "object_record_writer_hook.h"
+#include "../common/game_build.h"
+#include "../common/log.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -8,14 +10,16 @@
 
 namespace edvr {
 namespace {
-constexpr uint64_t kManagementReturn=0x4350F76u;
-constexpr uint64_t kWriterReturns[]={0x369FAF1u,0x42B6F0Fu,0x42B7AF6u,0x4315CCAu,0x434FDA9u};
-constexpr uint64_t kOwnershipDirectReturn=0x431DE72u;
-constexpr uint64_t kOwnershipVirtualReturn=0x431DE7Fu;
-constexpr uint64_t kOwnershipDirectTarget=0x43245A0u;
-constexpr uint64_t kOwnershipOpcodeWindowRva=0x431DE60u;
+// Build 334925's RVAs. Every one goes through the signature resolver (src\common\game_build.h): unchanged on that build, the address
+// found by signature (or the same offset in the function found) on another, where the probe stands down unless all of kNeeded are found.
+constexpr uint32_t kManagementReturn=0x4350F76u;
+constexpr uint32_t kWriterReturns[]={0x369FAF1u,0x42B6F0Fu,0x42B7AF6u,0x4315CCAu,0x434FDA9u};
+constexpr uint32_t kOwnershipDirectReturn=0x431DE72u;
+constexpr uint32_t kOwnershipVirtualReturn=0x431DE7Fu;
+constexpr uint32_t kOwnershipDirectTarget=0x43245A0u;
+constexpr uint32_t kOwnershipOpcodeWindowRva=0x431DE60u;
 constexpr size_t kOwnershipOpcodeWindowBytes=40;
-struct Callsite {uintptr_t call;uint8_t bytes[5];};
+struct Callsite {uint32_t call;uint8_t bytes[5];};
 constexpr Callsite kCalls[]={
     {0x369FAECu,{0xE8,0x0F,0xA1,0xFF,0xFF}},
     {0x42B6F0Au,{0xE8,0xF1,0x2C,0x3E,0xFF}},
@@ -26,11 +30,21 @@ constexpr Callsite kCalls[]={
     // The outer 42B7040 call preserves R12 for the primary writer recipe.
     {0x42B7463u,{0xE8,0xE8,0xF8,0xFF,0xFF}},
 };
+// Every address the probe binds, all found or the probe stands down.
+constexpr uint32_t kNeeded[]={uint32_t(ObjectRecordWriterProbe::kLookupRva),kManagementReturn,
+    kWriterReturns[0],kWriterReturns[1],kWriterReturns[2],kWriterReturns[3],kWriterReturns[4],
+    kOwnershipDirectReturn,kOwnershipVirtualReturn,kOwnershipDirectTarget,kOwnershipOpcodeWindowRva,
+    kCalls[0].call,kCalls[1].call,kCalls[2].call,kCalls[3].call,kCalls[4].call,kCalls[5].call,kCalls[6].call};
+static_assert(std::size(kWriterReturns)==5&&std::size(kCalls)==7,"kNeeded names every writer return and call site");
 constexpr uint8_t kLookupPrologue[16]={0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x56,0x57,0x41,0x56,0x48,0x83};
 constexpr uint8_t kOwnershipVirtualCall[3]={0xFF,0x50,0x50};
+// windowRva and the calls in it are the running build's: the resolver keeps their offsets in the function it found.
 bool ownershipOpcodeWindowMatches(uint64_t windowRva,const uint8_t* bytes,size_t byteCount) noexcept {
-    constexpr uint64_t directCallRva=kOwnershipDirectReturn-5;
-    constexpr uint64_t virtualCallRva=kOwnershipVirtualReturn-sizeof(kOwnershipVirtualCall);
+    const uint64_t directReturn=gameRva(kOwnershipDirectReturn),virtualReturn=gameRva(kOwnershipVirtualReturn);
+    const uint64_t directTarget=gameRva(kOwnershipDirectTarget);
+    if(!directReturn||!virtualReturn||!directTarget)return false;
+    const uint64_t directCallRva=directReturn-5;
+    const uint64_t virtualCallRva=virtualReturn-sizeof(kOwnershipVirtualCall);
     if(!bytes||windowRva>directCallRva||windowRva>virtualCallRva)return false;
     const uint64_t directOffset=directCallRva-windowRva,virtualOffset=virtualCallRva-windowRva;
     if(directOffset>byteCount||byteCount-directOffset<5||
@@ -38,7 +52,7 @@ bool ownershipOpcodeWindowMatches(uint64_t windowRva,const uint8_t* bytes,size_t
     if(bytes[directOffset]!=0xE8||std::memcmp(bytes+virtualOffset,kOwnershipVirtualCall,sizeof(kOwnershipVirtualCall))!=0)return false;
     int32_t displacement=0;std::memcpy(&displacement,bytes+directOffset+1,sizeof(displacement));
     const int64_t target=int64_t(windowRva+directOffset+5)+int64_t(displacement);
-    return target==int64_t(kOwnershipDirectTarget);
+    return target==int64_t(directTarget);
 }
 bool subtract(uintptr_t value,uintptr_t amount,uintptr_t& out) noexcept {
     if(value<amount)return false;out=value-amount;return true;
@@ -48,8 +62,10 @@ bool add(uintptr_t value,uintptr_t amount,uintptr_t& out) noexcept {
 }
 void jsonAddress(std::ostringstream& j,uint64_t value){j<<"\"0x"<<std::hex<<value<<std::dec<<'\"';}
 bool ownershipWriter(uint64_t rva) noexcept {
-    return rva==0x42B6F0Fu||rva==0x42B7AF6u||rva==0x4315CCAu;
+    return rva==gameRva(0x42B6F0Fu)||rva==gameRva(0x42B7AF6u)||rva==gameRva(0x4315CCAu);
 }
+// The image's size, for the module-relative tests (the resolver's identity read).
+uintptr_t imageSize() noexcept {uint32_t size=0;gameBuildIdentity(nullptr,&size);return size;}
 }
 
 ObjectRecordWriterProbe objectRecordWriterProbe;
@@ -68,26 +84,38 @@ void ObjectRecordWriterProbe::clearLocked() {
 
 bool ObjectRecordWriterProbe::validateExecutableBaseLocked(uintptr_t imageBase) noexcept {
     imageBase_=imageBase;
-    IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS nt{};
-    if(!guardedRead(imageBase_,&dos,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<=0||
-       !guardedRead(imageBase_+uintptr_t(dos.e_lfanew),&nt,sizeof(nt))||nt.Signature!=IMAGE_NT_SIGNATURE||
-       nt.FileHeader.TimeDateStamp!=kExpectedTimestamp||nt.OptionalHeader.SizeOfImage!=kExpectedImageSize) {
+    // The identity is the resolver's: build 334925 binds every address unchanged; another build only when all of kNeeded were found.
+    uint32_t missing=0;
+    if(!gameBuildIdentity(nullptr,nullptr)||!gameRvasFound(kNeeded,std::size(kNeeded),&missing)) {
+        if(missing)Log::get().note("object classification: CPU record-writer probe refused: %s, and 0x%X (an address it needs in build 334925) "
+                                   "was not found by signature; the record-writer and ownership capture stands down.",gameBuildText(),missing);
         hookStatus_=HookStatus::IdentityMismatch;return false;
     }
+    const uintptr_t lookup=gameRva(uint32_t(kLookupRva));
     std::array<uint8_t,sizeof(kLookupPrologue)> prologue{};
-    if(!guardedRead(imageBase_+kLookupRva,prologue.data(),prologue.size())||
-       (std::memcmp(prologue.data(),kLookupPrologue,prologue.size())!=0 &&
-        !objectRecordWriterHookMatches(imageBase_+kLookupRva))) {
+    if(!guardedRead(imageBase_+lookup,prologue.data(),prologue.size())||
+       (!gamePinMatches(uint32_t(kLookupRva),prologue.data(),kLookupPrologue,prologue.size()) &&
+        !objectRecordWriterHookMatches(imageBase_+lookup))) {
+        if(!gameBuildKnown())Log::get().note("object classification: CPU record-writer probe refused: %s: the record-writer lookup was found by "
+                                             "signature at 0x%llX, but its prologue is not build 334925's outside the masked fields; the "
+                                             "record-writer and ownership capture stands down.",gameBuildText(),static_cast<unsigned long long>(lookup));
         hookStatus_=HookStatus::OpcodeMismatch;return false;
     }
     for(const auto& c:kCalls) {
-        uint8_t got[5]{};if(!guardedRead(imageBase_+c.call,got,sizeof(got))||std::memcmp(got,c.bytes,sizeof(got))!=0) {
+        uint8_t got[5]{};if(!guardedRead(imageBase_+gameRva(c.call),got,sizeof(got))||!gamePinMatches(c.call,got,c.bytes,sizeof(got))) {
+            if(!gameBuildKnown())Log::get().note("object classification: CPU record-writer probe refused: %s: the lookup call at 0x%X in build "
+                                                 "334925 was found by signature at 0x%llX, but its bytes are not that build's outside the masked "
+                                                 "fields; the record-writer and ownership capture stands down.",gameBuildText(),c.call,
+                                                 static_cast<unsigned long long>(gameRva(c.call)));
             hookStatus_=HookStatus::OpcodeMismatch;return false;
         }
     }
     std::array<uint8_t,kOwnershipOpcodeWindowBytes> ownershipWindow{};
-    ownershipOpcodesValid_=guardedRead(imageBase_+kOwnershipOpcodeWindowRva,ownershipWindow.data(),ownershipWindow.size())&&
-        ownershipOpcodeWindowMatches(kOwnershipOpcodeWindowRva,ownershipWindow.data(),ownershipWindow.size());
+    ownershipOpcodesValid_=guardedRead(imageBase_+gameRva(kOwnershipOpcodeWindowRva),ownershipWindow.data(),ownershipWindow.size())&&
+        ownershipOpcodeWindowMatches(gameRva(kOwnershipOpcodeWindowRva),ownershipWindow.data(),ownershipWindow.size());
+    if(!gameBuildKnown())Log::get().note("object classification: CPU record-writer probe: the record-writer lookup (0x3699C00 in build 334925) "
+                                         "and its call sites were found by signature on %s, the lookup at 0x%llX; ownership opcodes %s.",
+                                         gameBuildText(),static_cast<unsigned long long>(lookup),ownershipOpcodesValid_?"matched":"MISMATCHED");
     return true;
 }
 
@@ -131,7 +159,7 @@ void ObjectRecordWriterProbe::reset() noexcept {
 }
 void ObjectRecordWriterProbe::setFrame(uint32_t meshFrame) noexcept {frame_.store(meshFrame,std::memory_order_relaxed);}
 bool ObjectRecordWriterProbe::ready() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return imageBase_&&hookStatus_==HookStatus::NotRun;}
-void* ObjectRecordWriterProbe::targetAddress() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return imageBase_?reinterpret_cast<void*>(imageBase_+kLookupRva):nullptr;}
+void* ObjectRecordWriterProbe::targetAddress() const noexcept {std::lock_guard<std::mutex> lock(mutex_);const uintptr_t lookup=gameRva(uint32_t(kLookupRva));return imageBase_&&lookup?reinterpret_cast<void*>(imageBase_+lookup):nullptr;}
 
 ObjectRecordWriterProbe::Snapshot ObjectRecordWriterProbe::captureLocked(uintptr_t address,size_t bytes,bool applicable,bool ownership) {
     Snapshot out;if(!applicable){out.status="not_applicable";return out;}if(!address){out.status="null_pointer";return out;}
@@ -170,13 +198,13 @@ ObjectRecordWriterProbe::OwnershipCandidate ObjectRecordWriterProbe::unwindOwner
     for(uint32_t depth=1;depth<=kOwnershipUnwindDepth;++depth) {
         if(!unwindOne(c)){out.status="unwind_failed";return out;}
         AncestorFrame frame;frame.address=c.Rip;
-        if(c.Rip>=imageBase_&&c.Rip<imageBase_+kExpectedImageSize){frame.moduleRelative=true;frame.moduleRva=c.Rip-imageBase_;}
+        if(c.Rip>=imageBase_&&c.Rip<imageBase_+imageSize()){frame.moduleRelative=true;frame.moduleOffset=c.Rip-imageBase_;}
         if(out.frameCount<out.frames.size())out.frames[out.frameCount++]=frame;
         uint64_t matched=0;
         if(fixtureReturn) {if(c.Rip==fixtureReturn)matched=fixtureRva;}
-        else if(c.Rip==imageBase_+kOwnershipDirectReturn)matched=kOwnershipDirectReturn;
-        else if(c.Rip==imageBase_+kOwnershipVirtualReturn)matched=kOwnershipVirtualReturn;
-        if(matched){out.status="matched";out.returnRva=matched;out.depth=depth;out.context=c;return out;}
+        else if(c.Rip==imageBase_+gameRva(kOwnershipDirectReturn))matched=gameRva(kOwnershipDirectReturn);
+        else if(c.Rip==imageBase_+gameRva(kOwnershipVirtualReturn))matched=gameRva(kOwnershipVirtualReturn);
+        if(matched){out.status="matched";out.returnOffset=matched;out.depth=depth;out.context=c;return out;}
     }
     out.status="ancestor_missing";return out;
 }
@@ -236,7 +264,7 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginLookupOwnershipRv
     uint64_t writerReturnRva,uintptr_t callerRsp,uintptr_t dictionary,uintptr_t key,
     const CONTEXT& caller,uint64_t ownerReturnRva,const CONTEXT& owner,uint32_t unwindDepth) noexcept {
     if(!active_.load(std::memory_order_acquire))return {};
-    OwnershipCandidate ownership;ownership.status="matched";ownership.returnRva=ownerReturnRva;
+    OwnershipCandidate ownership;ownership.status="matched";ownership.returnOffset=ownerReturnRva;
     ownership.depth=unwindDepth;ownership.context=owner;
     std::lock_guard<std::mutex> lock(mutex_);
     try {return beginRvaLocked(writerReturnRva,callerRsp,dictionary,key,caller,&ownership);}
@@ -253,28 +281,27 @@ ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginLookupRvaForTest(
 ObjectRecordWriterProbe::Pending ObjectRecordWriterProbe::beginRvaLocked(
     uint64_t rva,uintptr_t callerRsp,uintptr_t dictionary,uintptr_t key,const CONTEXT& c,
     const OwnershipCandidate* ownership) {
-    if(rva==kManagementReturn){++summary_.declinedManagement;return {};}
-    bool known=false;for(auto value:kWriterReturns)known=known||rva==value;if(!known){++summary_.declinedUnknown;return {};}
+    // rva is the running build's (gameRva: build 334925's own RVAs there).
+    if(rva==gameRva(kManagementReturn)){++summary_.declinedManagement;return {};}
+    bool known=false;for(size_t i=0;i<std::size(kWriterReturns);++i)known=known||rva==gameRva(kWriterReturns[i]);if(!known){++summary_.declinedUnknown;return {};}
     ++summary_.observed;if(records_.size()>=kRecordCap){++summary_.recordOverflow;return {};}
-    Record r;r.id=uint32_t(records_.size());r.sequence=++eventSequence_;r.returnRva=rva;r.threadId=GetCurrentThreadId();
+    Record r;r.id=uint32_t(records_.size());r.sequence=++eventSequence_;r.returnOffset=rva;r.threadId=GetCurrentThreadId();
     r.observedFrame=frame_.load(std::memory_order_relaxed);r.key=key;
     uintptr_t owner=0,record=0;bool contextOk=subtract(dictionary,0x260,owner);r.owner=owner;
     size_t builderBytes=0,objectBytes=0;
-    switch(rva) {
-    case 0x369FAF1u:r.writer="direct_369faf1";contextOk=add(callerRsp,0x50,record)&&contextOk;break;
-    case 0x42B6F0Fu: {
+    if(rva==gameRva(0x369FAF1u)){r.writer="direct_369faf1";contextOk=add(callerRsp,0x50,record)&&contextOk;}
+    else if(rva==gameRva(0x42B6F0Fu)) {
         r.writer="primary_42b6f0f";uintptr_t builder=0;
         contextOk=add(callerRsp,0x30,record)&&subtract(key,0x40,builder)&&contextOk;
-        r.builder=builder;r.object=uintptr_t(c.R12);builderBytes=0x60;objectBytes=kContextBytes;break;
+        r.builder=builder;r.object=uintptr_t(c.R12);builderBytes=0x60;objectBytes=kContextBytes;
     }
-    case 0x42B7AF6u: {
+    else if(rva==gameRva(0x42B7AF6u)) {
         r.writer="inline_42b7af6";contextOk=add(uintptr_t(c.Rbp),0x1C0,record)&&contextOk;uintptr_t objectAt=0;
         if(subtract(uintptr_t(c.Rbp),0x68,objectAt))contextOk=guardedRead(objectAt,&r.object,sizeof(r.object))&&contextOk;else contextOk=false;
-        objectBytes=kContextBytes;break;
+        objectBytes=kContextBytes;
     }
-    case 0x4315CCAu:r.writer="direct_4315cca";contextOk=add(callerRsp,0x60,record)&&contextOk;break;
-    case 0x434FDA9u:r.writer="helper_434fda9";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;break;
-    }
+    else if(rva==gameRva(0x4315CCAu)){r.writer="direct_4315cca";contextOk=add(callerRsp,0x60,record)&&contextOk;}
+    else if(rva==gameRva(0x434FDA9u)){r.writer="helper_434fda9";record=uintptr_t(c.Rbx);r.object=uintptr_t(c.Rdi);objectBytes=0x1A0;}
     if(!contextOk||!record){++summary_.contextFailures;r.contextStatus="unavailable";}
     r.record=captureLocked(record,kRecordBytes,contextOk&&record);
     r.keySnapshot=captureLocked(uintptr_t(r.key),0x20,contextOk);
@@ -304,7 +331,7 @@ ObjectRecordWriterProbe::PointerIdentity ObjectRecordWriterProbe::identifyPointe
     PointerIdentity out;out.address=address;if(!address)return out;
     uintptr_t vtable=0;if(!guardedRead(address,&vtable,sizeof(vtable))){out.status="read_fault";++ownershipSummary_.readFaults;return out;}
     out.vtable=vtable;
-    if(vtable>=imageBase_&&vtable<imageBase_+kExpectedImageSize){out.status="module_relative";out.vtableRva=vtable-imageBase_;}
+    if(vtable>=imageBase_&&vtable<imageBase_+imageSize()){out.status="module_relative";out.vtableOffset=vtable-imageBase_;}
     else out.status="outside_image";
     return out;
 }
@@ -312,13 +339,13 @@ ObjectRecordWriterProbe::PointerIdentity ObjectRecordWriterProbe::identifyPointe
 void ObjectRecordWriterProbe::retainAncestorTraceLocked(const Record& record,const OwnershipCandidate& candidate) {
     std::vector<AncestorFrame> frames(candidate.frames.begin(),candidate.frames.begin()+candidate.frameCount);
     for(const auto& trace:ancestorTraces_) {
-        if(trace.status!=candidate.status||trace.returnRva!=record.returnRva||trace.frames.size()!=frames.size())continue;
+        if(trace.status!=candidate.status||trace.returnOffset!=record.returnOffset||trace.frames.size()!=frames.size())continue;
         bool same=true;for(size_t i=0;i<frames.size();++i)
-            same=same&&trace.frames[i].address==frames[i].address&&trace.frames[i].moduleRva==frames[i].moduleRva&&trace.frames[i].moduleRelative==frames[i].moduleRelative;
+            same=same&&trace.frames[i].address==frames[i].address&&trace.frames[i].moduleOffset==frames[i].moduleOffset&&trace.frames[i].moduleRelative==frames[i].moduleRelative;
         if(same)return;
     }
     if(ancestorTraces_.size()>=kAncestorTraceCap){++ownershipSummary_.ancestorTraceOverflow;return;}
-    ancestorTraces_.push_back({record.id,record.returnRva,candidate.status,std::move(frames)});
+    ancestorTraces_.push_back({record.id,record.returnOffset,candidate.status,std::move(frames)});
     ownershipSummary_.ancestorTraces=ancestorTraces_.size();
 }
 
@@ -334,9 +361,9 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
         return;
     }
     Ownership o;o.firstSequence=r.sequence;o.observedFrame=r.observedFrame;o.threadId=r.threadId;
-    o.unwindDepth=candidate.depth;o.ancestorReturnRva=candidate.returnRva;
-    if(candidate.returnRva==kOwnershipDirectReturn)o.branch="direct_43245A0";
-    else if(candidate.returnRva==kOwnershipVirtualReturn)o.branch="virtual_50";
+    o.unwindDepth=candidate.depth;o.ancestorReturnOffset=candidate.returnOffset;
+    if(candidate.returnOffset==gameRva(kOwnershipDirectReturn))o.branch="direct_43245A0";
+    else if(candidate.returnOffset==gameRva(kOwnershipVirtualReturn))o.branch="virtual_50";
     else {r.ownershipStatus="ancestor_missing";++ownershipSummary_.ancestorMissing;retainAncestorTraceLocked(r,candidate);return;}
     o.writerOwner=r.owner;o.outer=uintptr_t(candidate.context.Rdi);o.collectionOwner=uintptr_t(candidate.context.Rbx);
     uintptr_t tupleCollection=0;
@@ -349,7 +376,7 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
         r.ownershipStatus="registry_read_fault";++ownershipSummary_.registryReadFault;return;
     }
     uintptr_t contextRegistryAt=0,contextRegistry=0;
-    if(r.returnRva==0x42B6F0Fu||r.returnRva==0x42B7AF6u) {
+    if(r.returnOffset==gameRva(0x42B6F0Fu)||r.returnOffset==gameRva(0x42B7AF6u)) {
         o.writerRelation="inline_registry_plus_78";o.context=r.object;
         uintptr_t expectedRegistry=0;
         if(!subtract(uintptr_t(r.owner),0x78,expectedRegistry)||!add(uintptr_t(o.context),0x30,contextRegistryAt)||
@@ -357,7 +384,7 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
             r.ownershipStatus="registry_read_fault";++ownershipSummary_.registryReadFault;return;
         }
         if(expectedRegistry!=o.registry||contextRegistry!=o.registry){r.ownershipStatus="registry_mismatch";++ownershipSummary_.registryMismatch;return;}
-    } else if(r.returnRva==0x4315CCAu) {
+    } else if(r.returnOffset==gameRva(0x4315CCAu)) {
         o.writerRelation="direct_collection_plus_300";uintptr_t expectedCollection=0;
         if(!subtract(uintptr_t(r.owner),0x300,expectedCollection)||expectedCollection!=o.collectionOwner) {
             r.ownershipStatus="tuple_mismatch";++ownershipSummary_.tupleMismatch;return;
@@ -405,11 +432,11 @@ void ObjectRecordWriterProbe::captureOwnershipLocked(Record& r,const OwnershipCa
 
     uint64_t hash=1469598103934665603ull;
     auto mix=[&](uint64_t value){hash^=value;hash*=1099511628211ull;};
-    for(uint64_t value:{o.writerOwner,uint64_t(o.observedFrame),uint64_t(o.threadId),o.ancestorReturnRva,o.outer,o.collectionOwner,o.registry,o.context,o.collectionRecord,o.gameObject,o.descriptor,o.provider,o.parent,uint64_t(o.parentToken)})mix(value);
+    for(uint64_t value:{o.writerOwner,uint64_t(o.observedFrame),uint64_t(o.threadId),o.ancestorReturnOffset,o.outer,o.collectionOwner,o.registry,o.context,o.collectionRecord,o.gameObject,o.descriptor,o.provider,o.parent,uint64_t(o.parentToken)})mix(value);
     const auto range=ownershipIndex_.equal_range(hash);
     for(auto it=range.first;it!=range.second;++it) {
         const Ownership& x=ownerships_[it->second];
-        if(x.writerOwner==o.writerOwner&&x.observedFrame==o.observedFrame&&x.threadId==o.threadId&&x.ancestorReturnRva==o.ancestorReturnRva&&
+        if(x.writerOwner==o.writerOwner&&x.observedFrame==o.observedFrame&&x.threadId==o.threadId&&x.ancestorReturnOffset==o.ancestorReturnOffset&&
            x.outer==o.outer&&x.collectionOwner==o.collectionOwner&&x.registry==o.registry&&x.context==o.context&&x.collectionRecord==o.collectionRecord&&
            x.gameObject==o.gameObject&&x.descriptor==o.descriptor&&x.provider==o.provider&&x.parent==o.parent&&x.parentToken==o.parentToken) {
             r.ownershipId=x.id;r.ownershipStatus="linked";++ownershipSummary_.linked;++ownershipSummary_.deduplicated;return;
@@ -522,22 +549,22 @@ void ObjectRecordWriterProbe::writeJson(std::ostringstream& j) const {
       <<",\"cache_conflicts\":"<<ownershipSummary_.cacheConflicts<<",\"record_overflow\":"<<ownershipSummary_.recordOverflow<<",\"byte_budget_declines\":"<<ownershipSummary_.byteBudgetDeclines
       <<",\"read_faults\":"<<ownershipSummary_.readFaults<<",\"ancestor_traces\":"<<ownershipSummary_.ancestorTraces<<",\"ancestor_trace_overflow\":"<<ownershipSummary_.ancestorTraceOverflow<<"},\"records\":[";
     auto snapshot=[&](const Snapshot& s){j<<"{\"status\":\""<<s.status<<"\",\"offset\":"<<s.offset<<",\"bytes\":"<<(s.status=="available"?s.data.size():0)<<'}';};
-    for(size_t i=0;i<records_.size();++i){if(i)j<<',';const auto& r=records_[i];j<<"{\"id\":"<<r.id<<",\"sequence\":"<<r.sequence<<",\"writer\":\""<<r.writer<<"\",\"return_rva\":";jsonAddress(j,r.returnRva);
+    for(size_t i=0;i<records_.size();++i){if(i)j<<',';const auto& r=records_[i];j<<"{\"id\":"<<r.id<<",\"sequence\":"<<r.sequence<<",\"writer\":\""<<r.writer<<"\",\"return_rva\":";jsonAddress(j,r.returnOffset);
         j<<",\"thread_id\":"<<r.threadId<<",\"observed_frame\":"<<r.observedFrame<<",\"completion_sequence\":"<<r.completionSequence<<",\"lookup_status\":\""<<r.lookupStatus<<"\",\"owner\":";jsonAddress(j,r.owner);j<<",\"key\":";jsonAddress(j,r.key);j<<",\"builder\":";jsonAddress(j,r.builder);j<<",\"object\":";jsonAddress(j,r.object);j<<",\"entry\":";jsonAddress(j,r.entry);
         j<<",\"ownership_id\":";if(r.ownershipId==kNone)j<<"null";else j<<r.ownershipId;j<<",\"ownership_status\":\""<<r.ownershipStatus<<'\"';
         j<<",\"context_status\":\""<<r.contextStatus<<"\",\"record\":";snapshot(r.record);j<<",\"key_snapshot\":";snapshot(r.keySnapshot);j<<",\"builder_snapshot\":";snapshot(r.builderSnapshot);j<<",\"object_snapshot\":";snapshot(r.objectSnapshot);j<<",\"entry_snapshot\":";snapshot(r.entrySnapshot);j<<'}';}
     j<<"],\"ownerships\":[";
-    auto identity=[&](const PointerIdentity& x){j<<"{\"address\":";jsonAddress(j,x.address);j<<",\"vtable\":";jsonAddress(j,x.vtable);j<<",\"status\":\""<<x.status<<"\",\"vtable_rva\":";if(x.status=="module_relative")jsonAddress(j,x.vtableRva);else j<<"null";j<<'}';};
+    auto identity=[&](const PointerIdentity& x){j<<"{\"address\":";jsonAddress(j,x.address);j<<",\"vtable\":";jsonAddress(j,x.vtable);j<<",\"status\":\""<<x.status<<"\",\"vtable_rva\":";if(x.status=="module_relative")jsonAddress(j,x.vtableOffset);else j<<"null";j<<'}';};
     for(size_t i=0;i<ownerships_.size();++i){if(i)j<<',';const auto& o=ownerships_[i];
         j<<"{\"id\":"<<o.id<<",\"first_sequence\":"<<o.firstSequence<<",\"observed_frame\":"<<o.observedFrame<<",\"thread_id\":"<<o.threadId<<",\"status\":\""<<o.status
-         <<"\",\"branch\":\""<<o.branch<<"\",\"ancestor_return_rva\":";jsonAddress(j,o.ancestorReturnRva);j<<",\"unwind_depth\":"<<o.unwindDepth<<",\"writer_relation\":\""<<o.writerRelation
+         <<"\",\"branch\":\""<<o.branch<<"\",\"ancestor_return_rva\":";jsonAddress(j,o.ancestorReturnOffset);j<<",\"unwind_depth\":"<<o.unwindDepth<<",\"writer_relation\":\""<<o.writerRelation
          <<"\",\"writer_owner\":";jsonAddress(j,o.writerOwner);j<<",\"outer\":";jsonAddress(j,o.outer);j<<",\"collection_owner\":";jsonAddress(j,o.collectionOwner);j<<",\"registry\":";jsonAddress(j,o.registry);j<<",\"context\":";jsonAddress(j,o.context);j<<",\"collection_record\":";jsonAddress(j,o.collectionRecord);
         j<<",\"record_index\":";if(o.hasRecordIndex)j<<o.recordIndex;else j<<"null";j<<",\"record_status\":\""<<o.recordStatus<<"\",\"game_object\":";jsonAddress(j,o.gameObject);j<<",\"descriptor\":";jsonAddress(j,o.descriptor);j<<",\"provider\":";jsonAddress(j,o.provider);j<<",\"parent\":";jsonAddress(j,o.parent);
         j<<",\"parent_token\":"<<o.parentToken<<",\"parent_status\":\""<<o.parentStatus<<"\",\"outer_identity\":";identity(o.outerIdentity);j<<",\"game_object_identity\":";identity(o.gameObjectIdentity);j<<",\"descriptor_identity\":";identity(o.descriptorIdentity);j<<",\"provider_identity\":";identity(o.providerIdentity);j<<",\"parent_identity\":";identity(o.parentIdentity);
         j<<",\"outer_snapshot\":";snapshot(o.outerSnapshot);j<<",\"collection_snapshot\":";snapshot(o.collectionSnapshot);j<<",\"context_snapshot\":";snapshot(o.contextSnapshot);j<<",\"record_tail_snapshot\":";snapshot(o.recordTailSnapshot);j<<",\"game_object_prefix\":";snapshot(o.gameObjectPrefix);j<<",\"descriptor_prefix\":";snapshot(o.descriptorPrefix);j<<",\"provider_prefix\":";snapshot(o.providerPrefix);j<<",\"parent_prefix\":";snapshot(o.parentPrefix);j<<'}';}
     j<<"],\"ancestor_traces\":[";
-    for(size_t i=0;i<ancestorTraces_.size();++i){if(i)j<<',';const auto& t=ancestorTraces_[i];j<<"{\"status\":\""<<t.status<<"\",\"writer_record\":"<<t.writerRecord<<",\"return_rva\":";jsonAddress(j,t.returnRva);j<<",\"frames\":[";
-        for(size_t n=0;n<t.frames.size();++n){if(n)j<<',';const auto& f=t.frames[n];j<<"{\"address\":";jsonAddress(j,f.address);j<<",\"status\":\""<<(f.moduleRelative?"module_relative":"outside_image")<<"\",\"module_rva\":";if(f.moduleRelative)jsonAddress(j,f.moduleRva);else j<<"null";j<<'}';}j<<"]}";}
+    for(size_t i=0;i<ancestorTraces_.size();++i){if(i)j<<',';const auto& t=ancestorTraces_[i];j<<"{\"status\":\""<<t.status<<"\",\"writer_record\":"<<t.writerRecord<<",\"return_rva\":";jsonAddress(j,t.returnOffset);j<<",\"frames\":[";
+        for(size_t n=0;n<t.frames.size();++n){if(n)j<<',';const auto& f=t.frames[n];j<<"{\"address\":";jsonAddress(j,f.address);j<<",\"status\":\""<<(f.moduleRelative?"module_relative":"outside_image")<<"\",\"module_rva\":";if(f.moduleRelative)jsonAddress(j,f.moduleOffset);else j<<"null";j<<'}';}j<<"]}";}
     j<<"]}";
 }
 

@@ -147,11 +147,11 @@ void recordWriterTests(){
     kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&ownershipProbe.recordsForTest().back().ownershipStatus=="linked","real nested unwind restores direct ancestor RBX/RDI and links ownership");
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE72,"direct ancestor return identifies 43245A0 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE72,"direct ancestor return identifies 43245A0 branch");
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431DE7F;
     kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
 
     edvr::ObjectRecordWriterProbe refusedProbe;refusedProbe.armForTest(91);refusedProbe.setOwnershipOpcodesValidForTest(false);writerUnwindProbe=&refusedProbe;
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DE72;
