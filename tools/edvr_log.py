@@ -11062,6 +11062,79 @@ def _hj_f107_away(rows, ctx):
     return ("OK", text + "; the neck reference and the standing calibration held")
 
 
+def _hj_f109_look(rows, ctx):
+    """F109: look to aim on foot. Engaged at all (else NEVER APPLIED with the last reason it gave); the game took the head's turn (applied against the head's own; none
+    of it while the head turned is NEVER APPLIED); the guard's trips, the reported head standing off the aim with the head still, the player's pitch reaching the game
+    (it is dropped in both turn styles), and calls split by the old ratio (no gain yet) are PARTIAL."""
+    sec, eng, trips, nots, stops = (rows.get(k, []) for k in ("sec", "engaged", "trip", "not", "stops"))
+    if not sec and not eng and not trips and not nots and not stops:
+        return None
+    if not eng:
+        return ("NEVER APPLIED", "never engaged (%d not-engaged line(s); the last: %s)" % (len(nots), nots[-1]["why"] if nots else "none"))
+    if not sec:
+        return ("NEVER APPLIED", "engaged %d time(s), but no 1 s line followed" % len(eng))
+    f = lambda k: [float(r[k]) for r in sec]
+    hy, ay, up = f("hy"), f("ay"), f("up")
+    head = sum(abs(v) for v in hy) + sum(abs(v) for v in f("hp"))
+    applied = sum(abs(v) for v in ay) + sum(abs(v) for v in f("ap"))
+    still = [r for r in sec if abs(float(r["hy"])) < 2.0 and abs(float(r["hp"])) < 2.0]
+    off = [r for r in still if math.hypot(float(r["oy"]), float(r["op"])) >= 3.0]
+    pitch = sum(abs(v) for v in up)
+    clean, dirty, unsplit = _hsum(sec, "clean"), _hsum(sec, "dirty"), _hsum(sec, "unsplit")
+    text = ("%d s engaged (%d engage(s)): the head turned %.1f deg, the game applied %.1f for it; the reported head off the aim 3 deg or more in %d of %d still "
+            "seconds; the player's own pitch %.1f deg; dropped stick %d, mouse %d, pitch %d calls; split clean %d, dirty %d, unsplit %d; blocked %d, spring calls %d; "
+            "F98c refused %d calls; guard trips %d, the body's yaw from the aim at most %.1f deg") % (
+        len(sec), len(eng), head, applied, len(off), len(still), pitch, _hsum(sec, "ds"), _hsum(sec, "dm"), _hsum(sec, "dp"), clean, dirty, unsplit,
+        _hsum(sec, "blocked"), _hsum(sec, "spring"), _hsum(sec, "gated"), len(trips), max(float(r["bmax"]) for r in sec))
+    if head >= 5.0 and applied < 0.1 * head:
+        return ("NEVER APPLIED", text + "; the game took none of the head's turn")
+    notes = []
+    if trips:
+        notes.append("the guard tripped (%s)" % trips[0]["why"][:60])
+    if still and len(off) * 5 > len(still):
+        notes.append("the aim stood off the head with the head still")
+    if pitch > 0.5 * len(sec):
+        notes.append("the player's pitch reached the game")
+    if unsplit * 20 > max(clean + dirty, 1):
+        notes.append("calls split by the old ratio (no gain measured)")
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
+
+
+def _hj_f109_snap(rows, ctx):
+    """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
+    Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
+    snaps, skipped, ads = rows.get("snap", []), rows.get("skipped", []), rows.get("ads", [])
+    if not snaps and not skipped:
+        return None
+    good = [r for r in snaps if abs(abs(float(r["applied"])) - float(r["step"])) <= 0.1 * float(r["step"]) and int(r["calls"]) <= 2]
+    text = "%d snap(s) (the stick %d, a mouse flick %d; in ADS %d): %d applied within 10%% of the step in at most 2 calls%s; skipped (no gain) %d; ADS after a snap: held %d, ended %d" % (
+        len(snaps), sum(1 for r in snaps if r["src"] == "the stick"), sum(1 for r in snaps if r["src"] != "the stick"), sum(1 for r in snaps if r["ads"]), len(good),
+        (" (applied %s deg)" % ", ".join("%+.1f" % float(r["applied"]) for r in snaps[:6])) if snaps else "", len(skipped),
+        sum(1 for r in ads if r["how"] == "held"), sum(1 for r in ads if r["how"] != "held"))
+    if snaps and all(abs(float(r["applied"])) < 0.5 * float(r["step"]) for r in snaps):
+        return ("NEVER APPLIED", text + "; no snap turned the player")
+    if len(good) < len(snaps) or skipped:
+        return ("PARTIAL", text)
+    return ("OK", text)
+
+
+def _hj_f109_turn(rows, ctx):
+    """F109: the player's own turn reached the view (the smooth turn, and the stick or mouse in ADS): per second, the avatar's turn less the head aim's asks against the
+    view's turn beyond the head's. No second agreeing, the view taking under a third of the turn, is the turn cancelled as the head aim's (NEVER APPLIED)."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    agree = [r for r in sec if r["verdict"] == "agrees"]
+    cancelled = [r for r in sec if abs(float(r["view"])) < abs(float(r["player"])) / 3.0]
+    text = "%d s with a player's turn of 3 deg or more: agreed %d, disagreed %d (the view took under a third in %d); the player turned %.1f deg, the view %.1f" % (
+        len(sec), len(agree), len(sec) - len(agree), len(cancelled), sum(abs(float(r["player"])) for r in sec), sum(abs(float(r["view"])) for r in sec))
+    if not agree and len(cancelled) == len(sec):
+        return ("NEVER APPLIED", text + "; the player's turn did not reach the view (cancelled as the head aim's)")
+    if len(agree) < len(sec):
+        return ("PARTIAL", text)
+    return ("OK", text)
+
+
 def _hj_f95a_motion(rows, ctx):
     """F95a: the view's vertical step a game frame with the head still, the HUD's step against the eye (the eye in the HUD's frame less the head's own), how far the
     raise moved the view, standing and with the body moving, and how often the stance settled. A stance that never settles leaves the neck reference without a target."""
@@ -11568,6 +11641,39 @@ HEALTH_RULES = (
         ("ended", r"native on foot camera away \(F107\): the episode ended after (?P<s>[\d.]+) s \(episode (?P<ep>\d+)\): (?P<calls>\d+) pinned calls refused, the "
                   r"camera (?P<near>[\d.]+) to (?P<far>[\d.]+) m from the neck, not a number in (?P<nan>\d+)"),
     ), _hj_f107_away),
+    _hrule("look to aim (F109)", ("F109",), ("native on foot look to aim (F109)",), (
+        ("sec", r"native on foot look to aim \(F109\) 1 s: (?P<state>following|blocked), item weight (?P<w>[\d.]+), smoothing (?P<tau>\d+) ms; head yaw (?P<hy>%s) "
+                r"pitch (?P<hp>%s) deg, asked (?P<ky>%s) (?P<kp>%s), applied (?P<ay>%s) (?P<ap>%s), the player's own (?P<uy>%s) (?P<up>%s); the reported head from the aim "
+                r"yaw (?P<oy>%s) pitch (?P<op>%s) deg now \(largest (?P<omax>[\d.]+), (?:read|not read)\); seated yaw (?P<sy>%s) pitch (?P<sp>%s) deg carried; the "
+                r"guard: residual largest (?P<res>[\d.]+) deg \(base re-taken (?P<reb>\d+)\); the body's yaw from the aim (?P<body>%s) deg mean \(largest "
+                r"(?P<bmax>[\d.]+), (?P<bn>\d+) frames\); updates (?P<upd>\d+), dropped: stick (?P<ds>\d+), mouse (?P<dm>\d+), pitch (?P<dp>\d+); split: clean "
+                r"(?P<clean>\d+), dirty (?P<dirty>\d+), unsplit (?P<unsplit>\d+), gain yaw (?P<gy>%s) pitch (?P<gp>%s); blocked (?P<blocked>\d+) \((?:holding|not "
+                r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); F98c's settle refused (?P<gated>\d+) calls \(the aim "
+                r"pitched 10 deg or more\); centred (?P<centred>\d+)" % ((_HN,) * 16)),
+        ("engaged", r"native on foot look to aim \(F109\): engaged: "),
+        ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped"),
+        ("not", r"native on foot look to aim \(F109\): not engaged: (?P<why>.+)$"),
+        ("stops", r"native on foot look to aim \(F109\): stops \((?P<why>.+?)\): the seated yaw"),
+        ("_", r"native on foot look to aim \(F109\): (?:keys: |centred: |the game's look is |the guard is cleared |an ADS press: |the ADS press ended |turned off |"
+              r"unwound after )"),
+    ), _hj_f109_look),
+    _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
+        ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
+                 r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
+                 r"the run (?P<user>%s) deg\), dark (?P<dark>\d+) ms" % ((_HN,) * 4)),
+        ("ads", r"native on foot snap turn \(F109\): snap (?P<n>\d+) in ADS: 0\.5 s after it the press (?P<how>held|ENDED)"),
+        ("skipped", r"native on foot snap turn \(F109\): (?P<src>the stick|a mouse flick) asked a snap (?:right|left), but no gain is known yet"),
+    ), _hj_f109_snap),
+    _hrule("smooth turn (F109)", ("F109",), ("native on foot smooth turn (F109)",), (
+        ("sec", r"native on foot smooth turn \(F109\) 1 s: the avatar turned (?P<aim>%s) deg \(the game's aim\), the head aim asked (?P<ask>%s), so the player's own "
+                r"(?P<player>%s); the view turned (?P<view>%s) deg beyond the head's own \((?P<ticks>\d+) ticks, no rows (?P<norows>\d+), no aim (?P<noaim>\d+)\): "
+                r"(?P<verdict>agrees|DISAGREES)" % ((_HN,) * 4)),
+    ), _hj_f109_turn),
+    _hrule("ADS player turn (F109)", ("F109",), ("native on foot ADS player turn (F109)",), (
+        ("sec", r"native on foot ADS player turn \(F109\) 1 s: look to aim (?P<lta>on|off); the avatar turned (?P<aim>%s) deg \(the game's aim\), the head aim asked "
+                r"(?P<ask>%s), so the player's own (?P<player>%s); the view turned (?P<view>%s) deg beyond the head's own \((?P<ticks>\d+) ticks, no rows (?P<norows>\d+), "
+                r"no aim (?P<noaim>\d+)\): (?P<verdict>agrees|DISAGREES)" % ((_HN,) * 4)),
+    ), _hj_f109_turn),
     _hrule("view motion (F95a)", ("F95a",), ("native on foot view motion (F95a)",), (
         ("sec", r"native on foot view motion \(F95a\) 1 s: the view a game frame, the head still: standing (?P<vsn>\d+) frames (?P<vs>[\d.]+) mm rms \(max [\d.]+\), moving "
                 r"(?P<vmn>\d+) frames (?P<vm>[\d.]+) mm rms \(max [\d.]+\); the HUD against the eye, the head still: standing (?P<hsn>\d+) frames (?P<hs>[\d.]+) mm rms "
@@ -13009,6 +13115,55 @@ def self_test_health():
               game=17423.5)] * 3 + [neck()], 3, [("NEVER APPLIED", F107)], has=["the game's camera 174.2 m from the neck in 3 neck reference seconds"])
         check("F107 away: an episode refused, the neck reference clean", [neck(), AWAY_LEFT, AWAY_END, neck()], 0, [("OK", F107)],
               has=["1 episodes (26.4 s, 2290 calls refused, the camera 139.2-3367.6 m from the neck)"], lacks=["UNPARSED"])
+
+        # ---- F109: look to aim on foot, the snaps, the smooth turn, the player's own turn in ADS ----
+        L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
+
+        def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0):
+            return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
+                     0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
+                     gated, 1)
+
+        KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
+        ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
+        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, "the aim turns onto the head through the follower (the view stays)")
+        NOT109 = R("native on foot look to aim (F109): not engaged:", "body align is off (fix.native_on_foot_body_align = off; the full-3P body needs body)")
+        TRIP109 = R("native on foot look to aim (F109): GUARD TRIPPED", "GUARD TRIPPED: the view - head residual (the right eye's rows) grew for 0.5 s: yaw +9.0 pitch "
+                    "+0.1 deg against the head's yaw +18.0 pitch +0.2; ratio yaw +0.50 pitch +0.50 (about -2: that axis's sign is inverted; about -1: the view does "
+                    "not take the aim there)")
+        check("F109 look: engaged, the game took the head's turn, the aim on the head", [KEYS109, ENG109, CEN109] + [look109()] * 3, 0, [("OK", L109)],
+              has=["3 s engaged (1 engage(s)): the head turned 45.0 deg, the game applied 45.0 for it"], lacks=["UNPARSED"])
+        check("F109 look: the key on, never engaged", [KEYS109, NOT109, NOT109], 3, [("NEVER APPLIED", L109)],
+              has=["never engaged (2 not-engaged line(s); the last: body align is off"])
+        check("F109 look: the game took none of the head's turn", [ENG109] + [look109(ay=0.0, ap=0.0)] * 3, 3, [("NEVER APPLIED", L109)],
+              has=["the game took none of the head's turn"])
+        check("F109 look: the guard tripped, the player's pitch reached the game", [ENG109, look109(up=3.0), look109(up=3.0), TRIP109], 0, [("PARTIAL", L109)],
+              has=["the guard tripped (GUARD TRIPPED: the view - head residual", "the player's pitch reached the game"], lacks=["UNPARSED"])
+        check("F109 look: the aim stood off the head with the head still", [ENG109] + [look109(hy=0.5, hp=0.2, oy=6.0, op=1.0)] * 3, 0, [("PARTIAL", L109)],
+              has=["the aim stood off the head with the head still"])
+
+        def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
+            return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)
+
+        check("F109 snap: the stick and a flick in ADS, each one step in one call, ADS held",
+              [snap109(1), snap109(2, "a mouse flick", "left", " in ADS", -44.6), R("native on foot snap turn (F109): snap %u in ADS", 2, "held")], 0,
+              [("OK", S109)], has=["2 snap(s) (the stick 1, a mouse flick 1; in ADS 1): 2 applied within 10% of the step in at most 2 calls", "held 1, ended 0"],
+              lacks=["UNPARSED"])
+        check("F109 snap: the game took none", [snap109(1, applied=0.0), snap109(2, applied=0.2)], 3, [("NEVER APPLIED", S109)], has=["no snap turned the player"])
+        check("F109 snap: one spread over four calls", [snap109(1), snap109(2, applied=30.0, calls=4)], 0, [("PARTIAL", S109)], has=["1 applied within 10%"])
+
+        def turn109(aim, ask, player, view, verdict, ads=None):
+            if ads is None:
+                return R("native on foot smooth turn (F109) 1 s:", aim, ask, player, view, 88, 0, 0, verdict)
+            return R("native on foot ADS player turn (F109) 1 s:", ads, aim, ask, player, view, 88, 0, 0, verdict)
+
+        check("F109 smooth: the stick's turn reached the view", [turn109(60.2, 0.5, 59.7, 58.9, "agrees")] * 2, 0, [("OK", M109)],
+              has=["2 s with a player's turn of 3 deg or more: agreed 2"], lacks=["UNPARSED"])
+        check("F109 ADS: the tester's report, the stick's turn cancelled as the head aim's", [turn109(20.0, 0.3, 19.7, 0.4, "DISAGREES", "off")] * 3, 3,
+              [("NEVER APPLIED", A109)], has=["the player's turn did not reach the view (cancelled as the head aim's)"])
+        check("F109 ADS: the stick's turn reached the view with the head aiming", [turn109(20.0, 0.3, 19.7, 19.1, "agrees", "off"), turn109(-8.0, 1.2, -9.2, 6.0,
+              "DISAGREES", "on")], 0, [("PARTIAL", A109)], has=["agreed 1, disagreed 1"], lacks=["UNPARSED"])
         # ---- F98a: the F94a and F95a rules against the F97a design ----
         check("F98a: an armed raise is F97a's, not F94a's", [neck(view=15.5), neck(RIFLE97, view=32.0, tgt=-13.0, incam=0.0, weight=0.0, lowmax=10.8, la=0.894, lw=0.998)], 0,
               [("OK", F94)], lacks=["the body was lowered or raised"])

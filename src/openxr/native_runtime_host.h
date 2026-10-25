@@ -404,6 +404,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t lookAppliedFrame=0;const char* lookWhy="";
   // F25: the reset serial last acted on, the resets taken, and the head's seated yaw (degrees) before and after the last step.
   uint32_t lookResetSeen=0;uint64_t lookResets=0;double lookYawBeforeDeg=0,lookYawAfterDeg=0;bool lookYawKnown=false;
+  // F109: a reset waiting to return the seated space to its origin itself (a frame was open), and the returns made.
+  bool lookRestorePending=false;uint64_t lookRestores=0;
   // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
   // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
   double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
@@ -3261,7 +3263,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void lookRebase() {
     lookSeated=currentOrigin;lookSeatedKnown=true;
     lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
-    lookWanted=lookBase;lookComp=0;
+    lookWanted=lookBase;lookComp=0;lookRestorePending=false;   // F109: a new origin carries no look turn to return
     eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;   // F33: the new origin carries no body-align translation either
     eyeAppliedSerial=0;                            // F89: ... which is serial 0, the zero alignment
     rotApplied[0]=rotApplied[1]=0;                 // F61: nor the calibration rotation (rotPoll applies the wanted value again)
@@ -3296,11 +3298,27 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       lookBase=lookWanted;
       ++lookResets;
       lookWhy="reset: compensation returned to zero";
+      lookRestorePending=lookComp!=0.0;
+    }
+    const uint64_t now=GetTickCount64();
+    // F109: a reset returns the seated space to its origin itself. Turning it back by the total about the head where it is now (as before) left a translation
+    // whenever the head had moved between the turns: after a look to aim session of a standing player, the cockpit's seat would have moved. The eye alignment's
+    // folded offset goes with it (eyeApplied 0: eyePoll, next in this poll, applies the wanted offset again), as at a new origin (lookRebase).
+    if(lookRestorePending&&!state.frameOpen()) {
+      const XrResult r=seated.replace(seatedPoseFor(currentOrigin,rotApplied[1],adsApplied));
+      if(r!=XR_SUCCESS) {
+        ++lookRefusals;lookWhy="seated space replace refused (the reset to the origin)";
+      } else {
+        lookSeated=currentOrigin;lookComp=0;lookRestorePending=false;
+        eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;eyeAppliedSerial=0;
+        dropPoseFrame(PoseInvalidation::Other);
+        fillPollRing();
+        ++lookApplies;++lookRestores;lookWhy="reset: back to the seated origin";
+      }
     }
     const double target=lookWanted-lookBase;
     const double delta=target-lookComp;
-    const uint64_t now=GetTickCount64();
-    if(std::fabs(delta)>1e-6&&!state.frameOpen()) {
+    if(!lookRestorePending&&std::fabs(delta)>1e-6&&!state.frameOpen()) {
       XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime lookTime=0;
       const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lookTime,counterNow,nullptr,boundary.estimateNow());
       if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
@@ -3335,9 +3353,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(now-lookLineMs>=5000||lookLineMs==0) {
       lookLineMs=now;
       nativeTracePrintf("look_to_aim_runtime,frame=%llu,game_frame=%u,applies=%llu,window_deg=%.3f,comp_deg=%.3f,wanted_deg=%.3f,base_deg=%.3f,refusals=%llu,resets=%llu,"
-          "head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,yaw_known=%u,why=%s\n",
+          "restores=%llu,head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,yaw_known=%u,why=%s\n",
           (unsigned long long)lookRuntimeFrames,unsigned(lookAppliedGameFrame),(unsigned long long)lookApplies,lookWindowDeg,seatRadToDeg(lookComp),
-          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,(unsigned long long)lookResets,
+          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,(unsigned long long)lookResets,(unsigned long long)lookRestores,
           lookYawBeforeDeg,lookYawAfterDeg,unsigned(lookYawKnown),lookWhy);
       lookWindowDeg=0;
     }
