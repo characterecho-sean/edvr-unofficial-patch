@@ -38,6 +38,7 @@
 #include "f116_checks.h"    // F116: the HUD hidden while a terminal fills the view (hysteresis, frame order, the hook's skip, the lines)
 #include "f114b_checks.h"   // F114b: the panel pointer's turned transform, the click path, the mode getter
 #include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
+#include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
 
 #include <array>
 #include <chrono>
@@ -7306,6 +7307,8 @@ int wmain(int argc, wchar_t** argv) {
     f114btest::run114b(check);
     // F115: native stereo on foot's exit edge: the flight's 34.6 cm raise an exact zero from the edge's frame (against the 0.5 s ramp), the read-back, the seat.
     f115test::run115(check);
+    // F118 (measure only): the readback steps and flips, the trailing frames, the footprint's directions and its decode from lines marched over an edge and a wall.
+    f118test::run118(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
