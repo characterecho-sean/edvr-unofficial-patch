@@ -11,14 +11,17 @@ cannot be skipped.
 Usage:
     python tools\\pr_post.py --repo OWNER/REPO --pr N --since 2026-10-16T00:00:00Z
         [--me LOGIN] [--reply COMMENT_ID=FILE ...] [--comment FILE]
-        [--ack-new ID,ID,...] [--dry-run]
+        [--ack-new ID@REV,ID@REV,...] [--dry-run]
 
 Flow:
     1. Fetch the PR's reviews, issue comments and inline review comments.
        List every item newer than --since whose author is not --me (default:
        the authenticated gh user). If there is any, print them and exit 1
        without posting. The only way past is --ack-new naming exactly those
-       ids, so acknowledging requires writing down what you saw.
+       items as ID@REV, where REV is the revision printed beside each item
+       (a digest of its text and edit time). An edited comment keeps its id
+       but gets a new REV, so an edit made after you read it trips the guard
+       again. A bare id is refused: it cannot say which text you read.
     2. Otherwise post each --reply as a reply to that inline comment, then
        post --comment as an issue comment. Bodies are read from files as UTF-8
        (a BOM is stripped; an empty body is refused) and sent as JSON on
@@ -36,19 +39,29 @@ something newer. A cursor at the newest item would skip it for good. The slack
 covers GitHub's whole-second timestamps and clock skew; items inside it may be
 listed again on the next run, which is harmless.
 
+A POST's outcome is UNKNOWN unless the response proves it. gh is run with
+--include, so a response GitHub actually returned begins with its status line
+(`HTTP/2.0 422 Unprocessable Entity`); a 2xx is success and a 4xx (other than
+408) is a proven rejection. Everything else is unknown: a timeout, EOF or a
+reset (gh prints `Post "url": EOF` and exits 1 with no status line, even when
+the server had read the whole body), a 5xx or 408 (a gateway can fail after
+GitHub accepted the request), or output with no status line.
+
 Exit codes: 0 done (or dry-run plan printed); 1 guard tripped, nothing posted;
-2 usage or gh read error, nothing posted; 3 a post was rejected, see the report;
-4 a post timed out and its outcome is UNKNOWN: GitHub may have accepted it, so
-read the PR back before posting again (a retry can duplicate it).
+2 usage or gh read error, nothing posted; 3 a post was rejected by a 4xx
+response, see the report; 4 a post's outcome is UNKNOWN: GitHub may have
+accepted it, so read the PR back before posting again (a retry can duplicate it).
 
     python tools\\pr_post.py --self-test
 """
 
 import argparse
 import datetime
+import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -64,7 +77,11 @@ class RunnerTimeout(ToolError):
 
 
 class PostOutcomeUnknown(ToolError):
-    pass
+    """The response does not prove whether GitHub accepted the POST."""
+
+
+class PostRejected(ToolError):
+    """GitHub returned a 4xx status: the request was refused, nothing was created."""
 
 
 # GitHub timestamps have whole-second precision and its clock is not ours.
@@ -160,6 +177,14 @@ def comment_time(item):
     return (updated, True) if updated > created else (created, False)
 
 
+def revision(kind, item, stamp):
+    """Short digest of what a reader sees of an item: its text, its state and
+    the time it last changed. An edit changes it; the id never does."""
+    raw = json.dumps([kind, item.get("id"), stamp or "", item.get("state") or "", item.get("body") or ""],
+                     ensure_ascii=True)
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()[:8]
+
+
 def read_activity(gh, repo, pr):
     """Every review, issue comment and inline comment, normalised."""
     base = "repos/%s" % repo
@@ -170,13 +195,14 @@ def read_activity(gh, repo, pr):
             continue  # a PENDING review has no submit time and is not visible
         out.append(dict(kind="review", id=int(item["id"]), author=login_of(item), when=parse_ts(ts),
                         where="", body=item.get("body") or "", url=item.get("html_url", ""),
-                        state=item.get("state", ""), edited=False,
+                        state=item.get("state", ""), edited=False, rev=revision("review", item, ts),
                         api="repos/%s/pulls/%d/reviews/%d" % (repo, pr, int(item["id"]))))
     for item in gh_get(gh, "%s/issues/%d/comments?per_page=100" % (base, pr), "issue comments"):
         when, edited = comment_time(item)
         out.append(dict(kind="comment", id=int(item["id"]), author=login_of(item),
                         when=when, where="", body=item.get("body") or "",
                         url=item.get("html_url", ""), state="", edited=edited,
+                        rev=revision("comment", item, item.get("updated_at") or item["created_at"]),
                         api="repos/%s/issues/comments/%d" % (repo, int(item["id"]))))
     for item in gh_get(gh, "%s/pulls/%d/comments?per_page=100" % (base, pr), "review comments"):
         line = item.get("line") or item.get("original_line")
@@ -185,6 +211,7 @@ def read_activity(gh, repo, pr):
         out.append(dict(kind="inline", id=int(item["id"]), author=login_of(item),
                         when=when, where=where, body=item.get("body") or "",
                         url=item.get("html_url", ""), state="", edited=edited,
+                        rev=revision("inline", item, item.get("updated_at") or item["created_at"]),
                         api="repos/%s/pulls/comments/%d" % (repo, int(item["id"]))))
     return out
 
@@ -197,7 +224,7 @@ def find_unseen(items, since, me):
 
 
 def describe(item):
-    head = "  #%d  %s  %s  %s" % (item["id"], fmt_ts(item["when"]), item["author"], item["kind"])
+    head = "  #%d@%s  %s  %s  %s" % (item["id"], item["rev"], fmt_ts(item["when"]), item["author"], item["kind"])
     if item["state"]:
         head += " (%s)" % item["state"]
     if item["edited"]:
@@ -234,32 +261,59 @@ def parse_replies(specs):
 
 
 def parse_ack(text):
+    """{id: revision} from ID@REV,ID@REV. A bare id is a usage error: it cannot
+    name which version of the text was read."""
     if text is None:
-        return set()
-    ids = set()
+        return {}
+    acked = {}
     for part in text.split(","):
         part = part.strip().lstrip("#")
         if not part:
             continue
-        if not part.isdigit():
-            raise ToolError("--ack-new wants comma-separated numeric ids, got %r" % part)
-        ids.add(int(part))
-    return ids
+        cid, sep, rev = part.partition("@")
+        if not cid.isdigit() or not sep or not rev.strip():
+            raise ToolError("--ack-new wants ID@REV (the revision the guard printed beside the id), got %r" % part)
+        acked[int(cid)] = rev.strip().lower()
+    return acked
+
+
+STATUS_LINE = re.compile(r"HTTP/\d(?:\.\d)?[ \t]+(\d{3})\b")
+
+
+def split_response(out):
+    """(status, body) from `gh api --include` stdout, or (None, out) when GitHub
+    returned no response. gh prints resp.Proto + resp.Status first, then the
+    headers, a blank line, then the body (cli/cli pkg/cmd/api/api.go,
+    processResponse); an error before any response prints nothing to stdout."""
+    m = STATUS_LINE.match(out or "")
+    if not m:
+        return None, out or ""
+    rest = out[m.end():]
+    k = rest.find("\r\n\r\n")
+    return int(m.group(1)), (rest[k + 4:] if k >= 0 else "")
 
 
 def post_json(gh, path, body):
-    """POST {"body": body} via stdin. ASCII-only JSON, so no encoding hazard."""
+    """POST {"body": body} via stdin. ASCII-only JSON, so no encoding hazard.
+    The outcome is unknown unless the response proves it: 2xx accepted, 4xx
+    (not 408) rejected, anything else unknown."""
     payload = json.dumps({"body": body})
     try:
-        rc, out, err = gh(["api", "-X", "POST", path, "--input", "-"], payload)
+        rc, out, err = gh(["api", "--include", "-X", "POST", path, "--input", "-"], payload)
     except RunnerTimeout as e:
         raise PostOutcomeUnknown(str(e))
-    if rc != 0:
-        raise ToolError("POST %s failed (exit %d): %s" % (path, rc, (err or out).strip()[:300]))
-    try:
-        return json.loads(out).get("html_url", "(no url returned)")
-    except ValueError:
-        return "(unparseable response)"
+    status, text = split_response(out)
+    detail = (err or text).strip()[:300]
+    if status is None:
+        raise PostOutcomeUnknown("POST %s: no HTTP response from gh (exit %d): %s" % (path, rc, detail))
+    if 200 <= status < 300:
+        try:
+            return json.loads(text).get("html_url", "(no url returned)")
+        except (ValueError, AttributeError):
+            return "(unparseable response)"
+    if 400 <= status < 500 and status != 408:
+        raise PostRejected("POST %s rejected (HTTP %d): %s" % (path, status, detail))
+    raise PostOutcomeUnknown("POST %s: HTTP %d does not show whether it was accepted: %s" % (path, status, detail))
 
 
 def utc_now():
@@ -309,17 +363,19 @@ def run(args, gh, out, err, clock=utc_now):
     if new:
         for i in new:
             print(describe(i), file=out)
-        new_ids = {i["id"] for i in new}
-        if ack != new_ids:
+        want = {i["id"]: i["rev"] for i in new}
+        if ack != want:
             print("\nGUARD: unseen activity. Nothing was posted.", file=out)
             print("Read the items above in full (bodies are cut to %d characters; open each full-text"
                   % SNIPPET_LIMIT, file=out)
             print("link or run its gh api command; `gh pr view --comments` omits inline comments), then rerun",
                   file=out)
-            print("with --ack-new %s" % ",".join(str(i) for i in sorted(new_ids)), file=out)
+            print("with --ack-new %s" % ",".join("%d@%s" % (k, want[k]) for k in sorted(want)), file=out)
+            print("(the @REV changes when an item is edited, so an edit after you read it trips this again)",
+                  file=out)
             if ack:
                 print("(the --ack-new you gave, %s, does not match exactly)"
-                      % ",".join(str(i) for i in sorted(ack)), file=out)
+                      % ",".join("%d@%s" % (k, ack[k]) for k in sorted(ack)), file=out)
             print("Next --since once you have read them: %s" % fmt_ts(resume), file=out)
             return 1
         print("--ack-new matches exactly; proceeding.", file=out)
@@ -346,15 +402,16 @@ def run(args, gh, out, err, clock=utc_now):
             url = post_json(gh, path, body)
         except PostOutcomeUnknown as e:
             print("pr_post: %s" % e, file=err)
-            print("Posted before the timeout: %s" % (", ".join(done) or "nothing"), file=out)
-            print("OUTCOME UNKNOWN: %s. GitHub may have accepted it." % what, file=out)
+            print("Posted before this one: %s" % (", ".join(done) or "nothing"), file=out)
+            print("OUTCOME UNKNOWN: %s. GitHub may have accepted it (a timeout, dropped connection or"
+                  " 5xx does not show it did not)." % what, file=out)
             print("Read the PR back before posting again (a retry can duplicate it):", file=out)
             readback = path.split("/comments/")[0] + "/comments" if path.endswith("/replies") else path
             print("  gh api --paginate %s" % readback, file=out)
             rest = [w for w, _, _, _ in plan[n + 1:]]
             print("Not attempted: %s" % (", ".join(rest) or "nothing"), file=out)
             return 4
-        except ToolError as e:
+        except PostRejected as e:
             print("pr_post: %s" % e, file=err)
             print("Posted before the failure: %s" % (", ".join(done) or "nothing"), file=out)
             print("NOT posted: %s" % ", ".join(w for w, _, _, _ in plan[n:]), file=out)
@@ -374,8 +431,9 @@ def build_parser():
     p.add_argument("--reply", action="append", metavar="COMMENT_ID=FILE",
                    help="reply to an inline review comment with the contents of FILE (repeatable)")
     p.add_argument("--comment", metavar="FILE", help="post FILE as an issue comment, after the replies")
-    p.add_argument("--ack-new", metavar="ID,ID,...",
-                   help="proceed past the guard; must list exactly the ids the guard printed")
+    p.add_argument("--ack-new", metavar="ID@REV,ID@REV,...",
+                   help="proceed past the guard; must list exactly the ID@REV pairs the guard printed "
+                        "(REV is a digest of the item's text and edit time; an edit changes it)")
     p.add_argument("--dry-run", action="store_true", help="run the guard and print the plan; post nothing")
     p.add_argument("--self-test", action="store_true", help="run the built-in tests and exit")
     return p
@@ -402,13 +460,33 @@ NOW = datetime.datetime(2026, 10, 16, 10, 0, 0, tzinfo=datetime.timezone.utc)  #
 EM = "—"
 
 
+def http_response(status, body):
+    """What `gh api --include` writes to stdout for a response GitHub returned:
+    resp.Proto + resp.Status, headers, a blank line, the body (captured from real
+    gh 2.101.0 against api.github.com: `HTTP/2.0 404 Not Found`, headers, body)."""
+    return "HTTP/2.0 %s\nContent-Type: application/json; charset=utf-8\r\nServer: github.com\r\n\r\n%s" % (status, body)
+
+
+# Captured from real gh 2.101.0: a 4xx prints the status line and body on stdout and
+# `gh: <message> (HTTP <code>)` on stderr, exit 1.
+HTTP_422 = (1, http_response("422 Unprocessable Entity", '{"message":"Validation Failed","status":"422"}'),
+            "gh: Validation Failed (HTTP 422)\n")
+HTTP_502 = (1, http_response("502 Bad Gateway", "<html>Bad Gateway</html>"), "gh: HTTP 502\n")
+# Captured from real gh 2.101.0 pointed at a local server that read the TLS hello and closed:
+# exit 1, nothing on stdout, no status line.
+EOF_DROP = (1, "", 'Post "https://localhost:18555/api/v3/repos/o/r/issues/7/comments": EOF\n')
+REFUSED = (1, "", 'Post "https://localhost:1/api/v3/repos/o/r/issues/7/comments": dial tcp [::1]:1: connectex: '
+                  'No connection could be made because the target machine actively refused it.\n')
+
+
 class FakeGh:
     def __init__(self, reviews=(), comments=(), inline=(), me="sean", fail_post_at=None, pages=1,
-                 timeout_post_at=None, on_get=None):
+                 timeout_post_at=None, on_get=None, post_fault=None):
         self.reviews, self.comments, self.inline = list(reviews), list(comments), list(inline)
         self.me, self.fail_post_at, self.pages = me, fail_post_at, pages
         self.timeout_post_at = timeout_post_at  # accept the POST, then raise the runner timeout
         self.on_get = on_get                    # called with the path before each list is served
+        self.post_fault = post_fault or {}      # {post index: (rc, stdout, stderr)}: what real gh printed
         self.calls = []      # (args, stdin_text)
         self.posts = []      # (path, decoded body)
 
@@ -428,8 +506,12 @@ class FakeGh:
             if self.timeout_post_at is not None and len(self.posts) - 1 == self.timeout_post_at:
                 raise RunnerTimeout("gh timed out (api -X POST)")
             if self.fail_post_at is not None and len(self.posts) - 1 == self.fail_post_at:
-                return 1, "", "HTTP 422"
-            return 0, json.dumps({"html_url": "https://example/%d" % len(self.posts)}), ""
+                return HTTP_422
+            if len(self.posts) - 1 in self.post_fault:
+                return self.post_fault[len(self.posts) - 1]
+            ok = json.dumps({"html_url": "https://example/%d" % len(self.posts)})
+            # Like real gh: the status line is printed only when asked for with --include.
+            return 0, (http_response("201 Created", ok) if "--include" in args else ok), ""
         path = args[-1]
         if self.on_get:
             self.on_get(path)
@@ -456,6 +538,11 @@ def _ic(id_, who, when, body="i", path="a.py", line=3, updated=None, url="https:
     d = {"id": id_, "user": {"login": who}, "created_at": when, "updated_at": updated or when, "body": body,
          "path": path, "line": line, "html_url": url % id_ if "%d" in url else url}
     return d
+
+
+def guard_revs(text):
+    """{id: rev} from the `#ID@REV` markers in the guard listing."""
+    return {int(i): r for i, r in re.findall(r"^  #(\d+)@([0-9a-f]+) ", text, re.M)}
 
 
 def self_test():
@@ -490,7 +577,7 @@ def self_test():
         check(rc == 1, "guard: exit 1 on unseen review, got %r" % rc)
         check(not f.posts, "guard: nothing posted")
         check("bob" in o and "needs work" in o and "11" in o, "guard: item listed with author, body, id")
-        check("--ack-new 11" in o, "guard: tells how to acknowledge")
+        check("--ack-new 11@" in o, "guard: tells how to acknowledge")
 
         # Guard ignores --me and old items; passes and posts.
         f = FakeGh(reviews=[_rv(1, "bob", old), _rv(2, "sean", new)],
@@ -506,11 +593,21 @@ def self_test():
 
         # --ack-new: exact ids proceed; wrong, partial or extra still refuse.
         items = dict(reviews=[_rv(11, "bob", new)], inline=[_ic(12, "bob", new)])
-        for ack, want in (("11,12", 0), ("12,11", 0), ("11", 1), ("11,99", 1), ("99", 1), ("11,12,99", 1)):
+        revs = guard_revs(go(FakeGh(**items), base + ["--comment", summ])[1])
+        check(set(revs) == {11, 12}, "ack: guard prints id@rev for each item, got %r" % revs)
+        a11, a12 = "11@%s" % revs.get(11), "12@%s" % revs.get(12)
+        for ack, want in ((a11 + "," + a12, 0), (a12 + "," + a11, 0), (a11, 1), (a11 + ",99@abcd1234", 1),
+                          ("99@abcd1234", 1), (a11 + "," + a12 + ",99@abcd1234", 1),
+                          ("11@00000000," + a12, 1), (a11 + ",12@00000000", 1)):
             f = FakeGh(**items)
             rc, o, e = go(f, base + ["--comment", summ, "--ack-new", ack])
             check(rc == want, "ack %s: want exit %d got %r" % (ack, want, rc))
             check(bool(f.posts) == (want == 0), "ack %s: posts iff accepted" % ack)
+        # A bare id (the old form) or a missing revision is refused as usage: it cannot name what was read.
+        for ack in ("11,12", "11@", "@abcd1234", "x@abcd1234"):
+            f = FakeGh(**items)
+            rc, o, e = go(f, base + ["--comment", summ, "--ack-new", ack])
+            check(rc == 2 and not f.posts and "ID@REV" in e, "ack %r: refused as usage (rc=%r)" % (ack, rc))
 
         # --dry-run: zero POSTs, still guards, prints the plan.
         f = FakeGh()
@@ -581,7 +678,7 @@ def self_test():
         # the reviews list was served, then a comment lands before the comments
         # list is served. The cursor must stay behind the review nobody saw.
         t_scan = "2026-10-16T10:00:01Z"
-        for label, extra in (("guard trip", []), ("successful post", ["--ack-new", "31"]), ("dry run", ["--dry-run"])):
+        for label, extra in (("guard trip", []), ("successful post", ["--ack-new", "31@" + revision("comment", _cm(31, "bob", "2026-10-16T10:00:02Z", "seen by this scan"), "2026-10-16T10:00:02Z")]), ("dry run", ["--dry-run"])):
             late_review = _rv(30, "bob", t_scan, "arrived after the reviews list was read")
             f = FakeGh()
             seen = {"reviews": False}
@@ -617,8 +714,10 @@ def self_test():
         check(rc == 1 and "#41" in o and "#42" in o and "#43" not in o, "edited comments: only post-since edits listed")
         check("(edited)" in o, "edited comments: marked as edited")
         f = FakeGh(comments=[_cm(41, "bob", old, updated=new)], inline=[_ic(42, "bob", old, updated=new)])
-        rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "41,42"])
-        check(rc == 0 and len(f.posts) == 1, "edited comments: acknowledged by id")
+        revs = guard_revs(go(f, base + ["--comment", summ])[1])
+        f = FakeGh(comments=[_cm(41, "bob", old, updated=new)], inline=[_ic(42, "bob", old, updated=new)])
+        rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "41@%s,42@%s" % (revs.get(41), revs.get(42))])
+        check(rc == 0 and len(f.posts) == 1, "edited comments: acknowledged by id@rev")
         f = FakeGh(comments=[_cm(44, "sean", old, updated=new)])
         rc, o, e = go(f, base + ["--comment", summ])
         check(rc == 0, "edited comments: my own edit is not unseen")
@@ -630,7 +729,7 @@ def self_test():
         check(rc == 4, "timeout: exit 4, got %r" % rc)
         check(len(f.posts) == 2, "timeout: nothing posted after the timed-out request, got %d" % len(f.posts))
         check("OUTCOME UNKNOWN: reply to inline comment 6" in o and "may have accepted" in o, "timeout: outcome reported unknown")
-        check("Posted before the timeout: reply to inline comment 5" in o, "timeout: earlier posts reported")
+        check("Posted before this one: reply to inline comment 5" in o, "timeout: earlier posts reported")
         check("Not attempted: issue comment" in o, "timeout: untried posts reported as not attempted")
         check("NOT posted" not in o, "timeout: never claims the timed-out post was not posted")
         check("Read the PR back before posting again" in o and "gh api --paginate repos/o/r/pulls/7/comments" in o,
@@ -644,6 +743,58 @@ def self_test():
         f = FakeGh(on_get=boom)
         rc, o, e = go(f, base + ["--comment", summ])
         check(rc == 2 and not f.posts, "read timeout: exit 2, nothing posted")
+
+        # Review 2, finding 2: an edit keeps the id. Sean's two runs: list #41, stop; then #41's
+        # body and updated_at change; rerunning with the first run's --ack-new must trip again.
+        t1, t2 = "2026-10-16T08:00:00Z", "2026-10-16T09:30:00Z"
+        f = FakeGh(comments=[_cm(41, "bob", old, "first text", updated=t1)])
+        rc, o, e = go(f, base + ["--comment", summ])
+        rev1 = guard_revs(o).get(41)
+        check(rc == 1 and rev1, "revision: first run lists #41 with a revision")
+        f = FakeGh(comments=[_cm(41, "bob", old, "first text", updated=t1)])
+        rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "41@%s" % rev1])
+        check(rc == 0 and len(f.posts) == 1, "revision: unedited item with its revision passes")
+        f = FakeGh(comments=[_cm(41, "bob", old, "REVISED text", updated=t2)])
+        rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "41@%s" % rev1])
+        check(rc == 1 and not f.posts, "revision: edited item (new body, new updated_at) trips again, rc=%r" % rc)
+        check("REVISED text" in o and guard_revs(o).get(41) not in (None, rev1),
+              "revision: new text shown with a new revision to acknowledge")
+        f = FakeGh(comments=[_cm(41, "bob", old, "silent edit", updated=t1)])
+        check(guard_revs(go(f, base + ["--comment", summ])[1]).get(41) != rev1, "revision: body change alone changes it")
+        f = FakeGh(comments=[_cm(41, "bob", old, "first text", updated=t2)])
+        check(guard_revs(go(f, base + ["--comment", summ])[1]).get(41) != rev1, "revision: updated_at change alone changes it")
+        for label, mk in (("review", lambda b, t: dict(reviews=[_rv(61, "bob", t, b)])),
+                          ("inline", lambda b, t: dict(inline=[_ic(61, "bob", t, b, updated=t)]))):
+            rv1 = guard_revs(go(FakeGh(**mk("one", new)), base + ["--comment", summ])[1]).get(61)
+            f = FakeGh(**mk("two", new))
+            rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "61@%s" % rv1])
+            check(rc == 1 and not f.posts, "revision %s: edited body trips again" % label)
+
+        # Review 2, finding 1: a POST's outcome is unknown unless the response proves a rejection.
+        for label, fault in (("dropped response (EOF)", EOF_DROP), ("connection refused", REFUSED),
+                             ("502", HTTP_502), ("504", (1, http_response("504 Gateway Timeout", ""), "gh: HTTP 504\n")),
+                             ("408", (1, http_response("408 Request Timeout", ""), "gh: HTTP 408\n")),
+                             ("exit 0 with no status line", (0, "", "")),
+                             ("garbage output", (1, "<<<not http>>>", "boom"))):
+            f = FakeGh(post_fault={1: fault})
+            rc, o, e = go(f, base + ["--reply", "5=" + r1, "--reply", "6=" + r2, "--comment", summ])
+            check(rc == 4, "%s: exit 4 (unknown), got %r" % (label, rc))
+            check("NOT posted" not in o, "%s: must not claim NOT posted" % label)
+            check("OUTCOME UNKNOWN: reply to inline comment 6" in o and "Not attempted: issue comment" in o,
+                  "%s: unknown outcome and untried posts reported" % label)
+            check("gh api --paginate repos/o/r/pulls/7/comments" in o, "%s: read-back named" % label)
+            check(len(f.posts) == 2, "%s: stopped after it, got %d posts" % (label, len(f.posts)))
+        for label, fault in (("422", HTTP_422), ("404", (1, http_response("404 Not Found", '{"message":"Not Found"}'),
+                                                         "gh: Not Found (HTTP 404)\n")),
+                             ("403", (1, http_response("403 Forbidden", '{"message":"x"}'), "gh: x (HTTP 403)\n"))):
+            f = FakeGh(post_fault={1: fault})
+            rc, o, e = go(f, base + ["--reply", "5=" + r1, "--reply", "6=" + r2, "--comment", summ])
+            check(rc == 3, "%s: proven rejection exit 3, got %r" % (label, rc))
+            check("NOT posted: reply to inline comment 6, issue comment" in o and "OUTCOME UNKNOWN" not in o,
+                  "%s: reported as not posted" % label)
+        f = FakeGh(post_fault={0: (0, http_response("201 Created", "not json"), "")})
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 0 and "unparseable response" in o, "2xx with a bad body is posted, rc=%r" % rc)
 
         # Finding 4: every listed item carries a full-text route that works for inline comments.
         f = FakeGh(inline=[_ic(51, "bob", new, "x" * 500, url="https://github.com/o/r/pull/7#discussion_r51")],
