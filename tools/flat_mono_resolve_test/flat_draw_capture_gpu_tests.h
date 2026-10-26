@@ -43,16 +43,22 @@ inline int flatDrawCaptureDirectoryTests() {
     if(bad)std::printf("FAIL: flat draw capture: %d of 200 back-to-back arms got an empty or repeated directory\n",bad);
     // Fail closed (#105): a name that already exists on disk is never reused; the next id is taken.
     namespace fs=std::filesystem;
-    const fs::path base=fs::temp_directory_path()/(L"edvr_capture_dir_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount64()));
+    // The scratch root sits under a parent whose name contains "taken", so the assertions below must
+    // judge the new directory by its leaf and parent, never by a substring of the whole path.
+    const fs::path scratch=fs::temp_directory_path()/(L"edvr_capture_dir_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount64()));
+    const fs::path base=scratch/L"taken-tests"/L"root";
     std::error_code ec;fs::create_directories(base,ec);
     fs::create_directories(base/L"taken",ec);
     unsigned calls=0;std::wstring made;
     const bool created=edvr::createFreshCaptureDirectory(base.wstring(),[&](uint64_t id){return ++calls<3?std::wstring(L"taken"):L"fresh_"+std::to_wstring(id);},made);
-    const bool failClosed=created && calls==3 && fs::is_directory(made,ec) && made.find(L"taken")==std::wstring::npos;
+    const fs::path madePath(made);
+    const bool failClosed=created && calls==3 && fs::is_directory(madePath,ec) &&
+        madePath.filename()!=L"taken" && madePath.filename().wstring().rfind(L"fresh_",0)==0 &&
+        madePath.parent_path()==base && base.wstring().find(L"taken")!=std::wstring::npos;
     // Bounded: a leaf that always collides must fail, never reuse the directory.
     std::wstring none;
     const bool bounded=!edvr::createFreshCaptureDirectory(base.wstring(),[](uint64_t){return std::wstring(L"taken");},none,5);
-    fs::remove_all(base,ec);
+    fs::remove_all(scratch,ec);
     if(!failClosed)std::puts("FAIL: capture directory creation did not skip an existing directory");
     if(!bounded)std::puts("FAIL: capture directory creation reused an existing directory after exhausting its attempts");
     return (unique?0:1)+(bad?1:0)+(failClosed?0:1)+(bounded?0:1);
