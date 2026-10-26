@@ -28,8 +28,18 @@ Flow:
 
 --dry-run runs the guard (reads only) and prints the plan; it posts nothing.
 
+"Newer" means created or edited after --since (an edited comment counts again).
+The printed next --since is the scan's start time minus CURSOR_SLACK_SECONDS,
+never the newest item seen: the three activity lists are read one after the
+other, so an item can appear in a list already read while a later list shows
+something newer. A cursor at the newest item would skip it for good. The slack
+covers GitHub's whole-second timestamps and clock skew; items inside it may be
+listed again on the next run, which is harmless.
+
 Exit codes: 0 done (or dry-run plan printed); 1 guard tripped, nothing posted;
-2 usage or gh read error, nothing posted; 3 a post failed, see the report.
+2 usage or gh read error, nothing posted; 3 a post was rejected, see the report;
+4 a post timed out and its outcome is UNKNOWN: GitHub may have accepted it, so
+read the PR back before posting again (a retry can duplicate it).
 
     python tools\\pr_post.py --self-test
 """
@@ -46,6 +56,19 @@ import tempfile
 
 class ToolError(Exception):
     pass
+
+
+class RunnerTimeout(ToolError):
+    """gh did not answer in time. For a read that is just a failure; for a POST
+    the request may still have been accepted, so the outcome is unknown."""
+
+
+class PostOutcomeUnknown(ToolError):
+    pass
+
+
+# GitHub timestamps have whole-second precision and its clock is not ours.
+CURSOR_SLACK_SECONDS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +90,7 @@ def make_gh_runner():
         except FileNotFoundError:
             raise ToolError("gh was not found on PATH")
         except subprocess.TimeoutExpired:
-            raise ToolError("gh timed out (%s)" % " ".join(args[:3]))
+            raise RunnerTimeout("gh timed out (%s)" % " ".join(args[:3]))
         return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
     return gh
 
@@ -121,9 +144,20 @@ def login_of(item):
     return u.get("login") or "(unknown)"
 
 
-def snippet(body, limit=200):
+SNIPPET_LIMIT = 200
+
+
+def snippet(body, limit=SNIPPET_LIMIT):
     s = " ".join((body or "").split())
     return s if len(s) <= limit else s[:limit - 3] + "..."
+
+
+def comment_time(item):
+    """(when, edited): the later of created_at and updated_at. A comment created
+    before --since and edited after it is new text the reader has not seen."""
+    created = parse_ts(item["created_at"])
+    updated = parse_ts(item["updated_at"]) if item.get("updated_at") else created
+    return (updated, True) if updated > created else (created, False)
 
 
 def read_activity(gh, repo, pr):
@@ -136,17 +170,22 @@ def read_activity(gh, repo, pr):
             continue  # a PENDING review has no submit time and is not visible
         out.append(dict(kind="review", id=int(item["id"]), author=login_of(item), when=parse_ts(ts),
                         where="", body=item.get("body") or "", url=item.get("html_url", ""),
-                        state=item.get("state", "")))
+                        state=item.get("state", ""), edited=False,
+                        api="repos/%s/pulls/%d/reviews/%d" % (repo, pr, int(item["id"]))))
     for item in gh_get(gh, "%s/issues/%d/comments?per_page=100" % (base, pr), "issue comments"):
+        when, edited = comment_time(item)
         out.append(dict(kind="comment", id=int(item["id"]), author=login_of(item),
-                        when=parse_ts(item["created_at"]), where="", body=item.get("body") or "",
-                        url=item.get("html_url", ""), state=""))
+                        when=when, where="", body=item.get("body") or "",
+                        url=item.get("html_url", ""), state="", edited=edited,
+                        api="repos/%s/issues/comments/%d" % (repo, int(item["id"]))))
     for item in gh_get(gh, "%s/pulls/%d/comments?per_page=100" % (base, pr), "review comments"):
         line = item.get("line") or item.get("original_line")
         where = "%s:%s" % (item.get("path", "?"), line if line is not None else "?")
+        when, edited = comment_time(item)
         out.append(dict(kind="inline", id=int(item["id"]), author=login_of(item),
-                        when=parse_ts(item["created_at"]), where=where, body=item.get("body") or "",
-                        url=item.get("html_url", ""), state=""))
+                        when=when, where=where, body=item.get("body") or "",
+                        url=item.get("html_url", ""), state="", edited=edited,
+                        api="repos/%s/pulls/comments/%d" % (repo, int(item["id"]))))
     return out
 
 
@@ -161,9 +200,12 @@ def describe(item):
     head = "  #%d  %s  %s  %s" % (item["id"], fmt_ts(item["when"]), item["author"], item["kind"])
     if item["state"]:
         head += " (%s)" % item["state"]
+    if item["edited"]:
+        head += " (edited)"
     if item["where"]:
         head += "  " + item["where"]
-    return head + "\n      " + snippet(item["body"])
+    full = item["url"] or "gh api " + item["api"]
+    return head + "\n      " + snippet(item["body"]) + "\n      full text: " + full
 
 
 def read_body(path):
@@ -208,7 +250,10 @@ def parse_ack(text):
 def post_json(gh, path, body):
     """POST {"body": body} via stdin. ASCII-only JSON, so no encoding hazard."""
     payload = json.dumps({"body": body})
-    rc, out, err = gh(["api", "-X", "POST", path, "--input", "-"], payload)
+    try:
+        rc, out, err = gh(["api", "-X", "POST", path, "--input", "-"], payload)
+    except RunnerTimeout as e:
+        raise PostOutcomeUnknown(str(e))
     if rc != 0:
         raise ToolError("POST %s failed (exit %d): %s" % (path, rc, (err or out).strip()[:300]))
     try:
@@ -217,8 +262,11 @@ def post_json(gh, path, body):
         return "(unparseable response)"
 
 
-def run(args, gh, out, err):
-    start = datetime.datetime.now(datetime.timezone.utc)
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def run(args, gh, out, err, clock=utc_now):
     try:
         since = parse_ts(args.since)
     except ValueError:
@@ -244,12 +292,16 @@ def run(args, gh, out, err):
             if not me:
                 raise ToolError("gh api user returned no login; pass --me")
 
+        # Taken before the first request: nothing created after this can be
+        # in a list already read, so it bounds what a scan may have missed.
+        scan_start = clock()
         items = read_activity(gh, repo, args.pr)
     except ToolError as e:
         print("pr_post: %s" % e, file=err)
         return 2
 
-    newest = max([i["when"] for i in items], default=since)
+    # Never behind --since (that would re-list what the reader already saw).
+    resume = max(since, scan_start - datetime.timedelta(seconds=CURSOR_SLACK_SECONDS))
     new = find_unseen(items, since, me)
     print("PR %s#%d: %d item(s) read, %d newer than %s by someone other than %s"
           % (repo, args.pr, len(items), len(new), fmt_ts(since), me), file=out)
@@ -260,13 +312,15 @@ def run(args, gh, out, err):
         new_ids = {i["id"] for i in new}
         if ack != new_ids:
             print("\nGUARD: unseen activity. Nothing was posted.", file=out)
-            print("Read the items above (full text: `gh pr view %d --repo %s --comments`), then rerun"
-                  % (args.pr, repo), file=out)
+            print("Read the items above in full (bodies are cut to %d characters; open each full-text"
+                  % SNIPPET_LIMIT, file=out)
+            print("link or run its gh api command; `gh pr view --comments` omits inline comments), then rerun",
+                  file=out)
             print("with --ack-new %s" % ",".join(str(i) for i in sorted(new_ids)), file=out)
             if ack:
                 print("(the --ack-new you gave, %s, does not match exactly)"
                       % ",".join(str(i) for i in sorted(ack)), file=out)
-            print("Next --since once you have read them: %s" % fmt_ts(max(i["when"] for i in new)), file=out)
+            print("Next --since once you have read them: %s" % fmt_ts(resume), file=out)
             return 1
         print("--ack-new matches exactly; proceeding.", file=out)
     elif ack:
@@ -277,7 +331,7 @@ def run(args, gh, out, err):
     if comment_body is not None:
         plan.append(("issue comment", "repos/%s/issues/%d/comments" % (repo, args.pr), args.comment, comment_body))
 
-    nxt = fmt_ts(max(newest, start))
+    nxt = fmt_ts(resume)
     if args.dry_run:
         print("\nDRY RUN: would post %d item(s), posting nothing:" % len(plan), file=out)
         for what, path, src, body in plan:
@@ -290,6 +344,16 @@ def run(args, gh, out, err):
     for n, (what, path, src, body) in enumerate(plan):
         try:
             url = post_json(gh, path, body)
+        except PostOutcomeUnknown as e:
+            print("pr_post: %s" % e, file=err)
+            print("Posted before the timeout: %s" % (", ".join(done) or "nothing"), file=out)
+            print("OUTCOME UNKNOWN: %s. GitHub may have accepted it." % what, file=out)
+            print("Read the PR back before posting again (a retry can duplicate it):", file=out)
+            readback = path.split("/comments/")[0] + "/comments" if path.endswith("/replies") else path
+            print("  gh api --paginate %s" % readback, file=out)
+            rest = [w for w, _, _, _ in plan[n + 1:]]
+            print("Not attempted: %s" % (", ".join(rest) or "nothing"), file=out)
+            return 4
         except ToolError as e:
             print("pr_post: %s" % e, file=err)
             print("Posted before the failure: %s" % (", ".join(done) or "nothing"), file=out)
@@ -317,7 +381,7 @@ def build_parser():
     return p
 
 
-def main(argv=None, gh=None, stdout=None, stderr=None):
+def main(argv=None, gh=None, stdout=None, stderr=None, clock=utc_now):
     out = stdout or sys.stdout
     err = stderr or sys.stderr
     args = build_parser().parse_args(argv)
@@ -326,7 +390,7 @@ def main(argv=None, gh=None, stdout=None, stderr=None):
     if not (args.repo and args.pr and args.since):
         print("pr_post: --repo, --pr and --since are required", file=err)
         return 2
-    return run(args, gh or make_gh_runner(), out, err)
+    return run(args, gh or make_gh_runner(), out, err, clock)
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +398,17 @@ def main(argv=None, gh=None, stdout=None, stderr=None):
 # ---------------------------------------------------------------------------
 
 REPO = "o/r"
+NOW = datetime.datetime(2026, 10, 16, 10, 0, 0, tzinfo=datetime.timezone.utc)  # the fake scan start
 EM = "—"
 
 
 class FakeGh:
-    def __init__(self, reviews=(), comments=(), inline=(), me="sean", fail_post_at=None, pages=1):
+    def __init__(self, reviews=(), comments=(), inline=(), me="sean", fail_post_at=None, pages=1,
+                 timeout_post_at=None, on_get=None):
         self.reviews, self.comments, self.inline = list(reviews), list(comments), list(inline)
         self.me, self.fail_post_at, self.pages = me, fail_post_at, pages
+        self.timeout_post_at = timeout_post_at  # accept the POST, then raise the runner timeout
+        self.on_get = on_get                    # called with the path before each list is served
         self.calls = []      # (args, stdin_text)
         self.posts = []      # (path, decoded body)
 
@@ -357,10 +425,14 @@ class FakeGh:
         if "-X" in args and args[args.index("-X") + 1] == "POST":
             path = args[args.index("-X") + 2]
             self.posts.append((path, json.loads(stdin_text)["body"]))
+            if self.timeout_post_at is not None and len(self.posts) - 1 == self.timeout_post_at:
+                raise RunnerTimeout("gh timed out (api -X POST)")
             if self.fail_post_at is not None and len(self.posts) - 1 == self.fail_post_at:
                 return 1, "", "HTTP 422"
             return 0, json.dumps({"html_url": "https://example/%d" % len(self.posts)}), ""
         path = args[-1]
+        if self.on_get:
+            self.on_get(path)
         if "/pulls/7/reviews" in path:
             return 0, self._paged(self.reviews), ""
         if "/issues/7/comments" in path:
@@ -374,12 +446,16 @@ def _rv(id_, who, when, body="r"):
     return {"id": id_, "user": {"login": who}, "submitted_at": when, "body": body, "state": "COMMENTED"}
 
 
-def _cm(id_, who, when, body="c"):
-    return {"id": id_, "user": {"login": who}, "created_at": when, "body": body}
+def _cm(id_, who, when, body="c", updated=None, url="https://example/c%d"):
+    d = {"id": id_, "user": {"login": who}, "created_at": when, "updated_at": updated or when, "body": body,
+         "html_url": url % id_ if "%d" in url else url}
+    return d
 
 
-def _ic(id_, who, when, body="i", path="a.py", line=3):
-    return {"id": id_, "user": {"login": who}, "created_at": when, "body": body, "path": path, "line": line}
+def _ic(id_, who, when, body="i", path="a.py", line=3, updated=None, url="https://example/i%d"):
+    d = {"id": id_, "user": {"login": who}, "created_at": when, "updated_at": updated or when, "body": body,
+         "path": path, "line": line, "html_url": url % id_ if "%d" in url else url}
+    return d
 
 
 def self_test():
@@ -391,7 +467,7 @@ def self_test():
 
     def go(fake, argv):
         o, e = io.StringIO(), io.StringIO()
-        rc = main(argv, gh=fake, stdout=o, stderr=e)
+        rc = main(argv, gh=fake, stdout=o, stderr=e, clock=lambda: NOW)
         return rc, o.getvalue(), e.getvalue()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -498,7 +574,85 @@ def self_test():
         # Next --since: newest item when the guard trips; never earlier than --since.
         f = FakeGh(reviews=[_rv(11, "bob", new)])
         rc, o, e = go(f, base + ["--comment", summ])
-        check("Next --since once you have read them: 2026-10-16T09:00:00Z" in o, "next since on trip")
+        check("Next --since once you have read them: 2026-10-16T09:59:30Z" in o,
+              "next since on trip is the scan start less the slack, not the newest item")
+
+        # Finding 1: the lists are read one after another. A review lands after
+        # the reviews list was served, then a comment lands before the comments
+        # list is served. The cursor must stay behind the review nobody saw.
+        t_scan = "2026-10-16T10:00:01Z"
+        for label, extra in (("guard trip", []), ("successful post", ["--ack-new", "31"]), ("dry run", ["--dry-run"])):
+            late_review = _rv(30, "bob", t_scan, "arrived after the reviews list was read")
+            f = FakeGh()
+            seen = {"reviews": False}
+
+            def on_get(path, f=f, late_review=late_review, seen=seen):
+                if "/pulls/7/reviews" in path:
+                    seen["reviews"] = True
+                elif "/issues/7/comments" in path and seen["reviews"] and not f.comments:
+                    f.reviews.append(late_review)  # missed by this scan
+                    f.comments.append(_cm(31, "bob", "2026-10-16T10:00:02Z", "seen by this scan"))
+            f.on_get = on_get
+            rc, o, e = go(f, base + ["--comment", summ] + extra)
+            m = [ln for ln in o.splitlines() if "Next --since" in ln]
+            check(len(m) == 1, "interleave %s: one cursor line, got %r" % (label, m))
+            cursor = m[0].rsplit(": ", 1)[1].strip() if m else ""
+            check(cursor and cursor < t_scan,
+                  "interleave %s: cursor %r must stay behind the unlisted review at %s" % (label, cursor, t_scan))
+            check("#30" not in o, "interleave %s: the late review was not in this scan" % label)
+            f2 = FakeGh(reviews=[late_review], comments=[_cm(31, "bob", "2026-10-16T10:00:02Z")])
+            rc2, o2, e2 = go(f2, ["--repo", REPO, "--pr", "7", "--since", cursor, "--me", "sean", "--comment", summ])
+            check(rc2 == 1 and "#30" in o2, "interleave %s: rerun from the cursor lists the review" % label)
+        # --since later than the scan start (a future cursor) is never moved backwards.
+        f = FakeGh()
+        rc, o, e = go(f, ["--repo", REPO, "--pr", "7", "--since", "2026-10-16T11:00:00Z", "--me", "sean", "--comment", summ])
+        check("Next --since: 2026-10-16T11:00:00Z" in o, "cursor never earlier than --since")
+
+        # Finding 2: a comment created before --since and edited after it is unseen,
+        # for both issue and inline comments; an edit before --since is not.
+        f = FakeGh(comments=[_cm(41, "bob", old, "edited text", updated=new)],
+                   inline=[_ic(42, "bob", old, "edited inline", updated=new),
+                           _ic(43, "bob", old, "old edit", updated="2026-10-15T13:00:00Z")])
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 1 and "#41" in o and "#42" in o and "#43" not in o, "edited comments: only post-since edits listed")
+        check("(edited)" in o, "edited comments: marked as edited")
+        f = FakeGh(comments=[_cm(41, "bob", old, updated=new)], inline=[_ic(42, "bob", old, updated=new)])
+        rc, o, e = go(f, base + ["--comment", summ, "--ack-new", "41,42"])
+        check(rc == 0 and len(f.posts) == 1, "edited comments: acknowledged by id")
+        f = FakeGh(comments=[_cm(44, "sean", old, updated=new)])
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 0, "edited comments: my own edit is not unseen")
+
+        # Finding 3: a timed-out POST may have been accepted. Distinct report and
+        # exit code, never "NOT posted" for it, no further posts, read-back named.
+        f = FakeGh(timeout_post_at=1)
+        rc, o, e = go(f, base + ["--reply", "5=" + r1, "--reply", "6=" + r2, "--comment", summ])
+        check(rc == 4, "timeout: exit 4, got %r" % rc)
+        check(len(f.posts) == 2, "timeout: nothing posted after the timed-out request, got %d" % len(f.posts))
+        check("OUTCOME UNKNOWN: reply to inline comment 6" in o and "may have accepted" in o, "timeout: outcome reported unknown")
+        check("Posted before the timeout: reply to inline comment 5" in o, "timeout: earlier posts reported")
+        check("Not attempted: issue comment" in o, "timeout: untried posts reported as not attempted")
+        check("NOT posted" not in o, "timeout: never claims the timed-out post was not posted")
+        check("Read the PR back before posting again" in o and "gh api --paginate repos/o/r/pulls/7/comments" in o,
+              "timeout: read-back required and named")
+        f = FakeGh(timeout_post_at=0)
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 4 and "gh api --paginate repos/o/r/issues/7/comments" in o, "timeout: issue comment read-back path")
+        # A timeout while reading is an ordinary read error: nothing was posted.
+        def boom(path):
+            raise RunnerTimeout("gh timed out (api --paginate)")
+        f = FakeGh(on_get=boom)
+        rc, o, e = go(f, base + ["--comment", summ])
+        check(rc == 2 and not f.posts, "read timeout: exit 2, nothing posted")
+
+        # Finding 4: every listed item carries a full-text route that works for inline comments.
+        f = FakeGh(inline=[_ic(51, "bob", new, "x" * 500, url="https://github.com/o/r/pull/7#discussion_r51")],
+                   comments=[_cm(52, "bob", new, url="")])
+        rc, o, e = go(f, base + ["--comment", summ])
+        check("full text: https://github.com/o/r/pull/7#discussion_r51" in o, "full text: inline html_url printed")
+        check("full text: gh api repos/o/r/issues/comments/52" in o, "full text: api command when there is no url")
+        check("x" * 300 not in o, "full text: body still cut in the list")
+        check("gh pr view" in o and "omits inline comments" in o, "full text: warns --comments omits inline")
 
     if fails:
         for m in fails:
