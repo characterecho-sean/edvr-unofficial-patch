@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
 #include "native_on_foot_f100.h"   // F100: the marker tee's prefilter (pure parts)
@@ -465,6 +466,11 @@ struct NativeOnFootCameraEvidence {
     float froot[16] = {}, m3p[16] = {}, G[16] = {}, bodyOffset[3] = {}, pinEyeTarget[3] = {}, pinTarget[3] = {};
 };
 bool nativeOnFootCameraEvidence(uint32_t nativeRenderFrame, NativeOnFootCameraEvidence* out);
+// Eye-run-only observation of existing panel input calls; independent of the cursor drawing setting. No game getters or writes.
+void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t firstLedgerFrame,uint32_t lastLedgerFrame);
+void nativeOnFootMenuInputBoundary(uint32_t ledgerFrame);
+std::string nativeOnFootMenuInputEnd();
+void nativeOnFootMenuInputDiscard();
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).

@@ -81,6 +81,8 @@ def read(path):
         d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance'), unpack('<6I')))
         if version >= 12:
             d['render_frame'], eye_bits, d['mesh_selected'] = unpack('<3I')
+            if d['mesh_selected'] not in (0,1,2):raise ValueError('Invalid body mesh selection class')
+            d['mesh_selection']='observed_body_family_candidate_not_proven_part' if d['mesh_selected']==2 else 'known_body_selector' if d['mesh_selected']==1 else 'not_body_selected'
             d['eye'] = struct.unpack('<i', struct.pack('<I', eye_bits))[0]
             join = dict(zip(('scene_frame','epoch','scheduled_index','scheduled_render_frame','fp_frame','fp_sequence',
                              'g_game_frame','item_serial','rig_generation'),unpack('<9I')))
@@ -177,7 +179,18 @@ def read(path):
             expected=set(range(mesh_capture['first_frame'],mesh_capture['first_frame']+mesh_capture['frames']))
             observed={d['frame'] for d in draws if d.get('mesh_selected',0)}
             mesh_capture['missing_ledger_frames']=sorted(expected-observed)
-            mesh_capture['missing_body_ledger_frames']=sorted(expected-observed)
+            mesh_capture['missing_body_ledger_frames']=sorted(expected-{d['frame'] for d in draws if d.get('mesh_selected')==1})
+            mesh_capture['candidate_coverage']=[]
+            for count in (10050,3216):
+                for eye in (0,1):
+                    candidates=[d for d in draws if d.get('mesh_selected')==2 and d['count']==count and d['eye']==eye]
+                    admitted=[d for d in candidates if d['mesh_status'][:3]==[1,1,1]]
+                    copied=[d for d in admitted if candidate_body_payload_available(d,mesh_buffers)]
+                    mesh_capture['candidate_coverage'].append(dict(count=count,eye=eye,identity='unproven_body_family_candidate',
+                        observed_rows=len(candidates),draw_time_palette_frames=[d['frame'] for d in copied],
+                        clip_constant_rows=sum(bool(d['buffers'][3]['data']) for d in candidates),
+                        geometry_rows=sum(bool(d['streams'][1]['data']) and bool(d['streams'][2]['data']) for d in candidates),
+                        status='draw_time_palettes_copied' if copied else 'staged_readback_unavailable' if admitted else 'metadata_only' if candidates else 'absent'))
         for i,d in enumerate(draws):
             for role,ref in enumerate(d['mesh']):
                 if ref == 0xffffffff:
@@ -374,7 +387,7 @@ def empty_candidates():
 def read_menu(path, capture=None):
     """Join the bounded menu companion to its v16 binary; missing copies remain explicit."""
     path=Path(path)
-    if path.stat().st_size>1024*1024:
+    if path.stat().st_size>4*1024*1024:
         raise ValueError('Menu metadata exceeds its bounded schema')
     meta=json.loads(path.read_text(encoding='utf-8'))
     binary=meta.get('binary','')
@@ -495,8 +508,63 @@ def read_menu(path, capture=None):
     meta['outcomes']=dict(Counter(r['outcome'] for r in meta['rows']))
     meta['eye_mappings']=dict(Counter(r['eye_mapping'] for r in meta['rows']))
     meta['menu_geometry']=dict(Counter(issues[r['draw']]['index_status'] for r in meta['rows'] if r['role']==1))
+    meta['input_summary']=validate_menu_input(meta.get('input_observer'),meta['selected_frame'])
     c['late_menu']=meta
     return c
+
+
+def validate_menu_input(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (data.get('schema')!='edvr_menu_input_v1' or not isinstance(data.get('capture_id'),str) or
+            not data['capture_id'].isdigit() or data.get('getter_calls')!=0 or data.get('update_capture_gate') is not False or
+            not isinstance(data.get('first_ledger_frame'),int) or not isinstance(data.get('last_ledger_frame'),int) or
+            not data['first_ledger_frame']<=selected_frame<=data['last_ledger_frame'] or
+            data['last_ledger_frame']-data['first_ledger_frame']>=20 or len(data.get('rows',[]))>160 or len(data.get('meshes',[]))>8):
+        raise ValueError('Invalid bounded menu input observer header')
+    for field in ('hooks_armed','qpc_frequency','row_quota','mesh_quota','read_faults','contended','placements_begun','in_flight_at_close'):
+        if not isinstance(data.get(field),int) or data[field]<0:
+            raise ValueError('Invalid menu input observer counter')
+    def floats(values,size):
+        return isinstance(values,list) and len(values)==size and all(v is None or isinstance(v,(int,float)) and math.isfinite(v) for v in values)
+    for mesh in data['meshes']:
+        if (mesh.get('ledger_frame')!=data['first_ledger_frame']+1 or mesh.get('space')!='cached_pick_camera_frame' or
+                not 1<=len(mesh.get('triangles',[]))<=256):raise ValueError('Invalid menu input mesh frame/capacity')
+        for tri in mesh['triangles']:
+            if len(tri)!=6 or not all(floats(v,3 if i<3 else 2) for i,v in enumerate(tri)):
+                raise ValueError('Invalid cached input triangle/UV payload')
+    counts=[0,0];mesh_counts=[0,0]
+    for mesh in data['meshes']:mesh_counts[0 if len(mesh['triangles'])==120 else 1]+=1
+    if max(mesh_counts)>4:raise ValueError('Menu input mesh reservation overflow')
+    for row in data['rows']:
+        if (not isinstance(row.get('ledger_frame'),int) or not data['first_ledger_frame']<=row['ledger_frame']<=data['last_ledger_frame'] or
+                not isinstance(row.get('before_qpc'),int) or not isinstance(row.get('after_qpc'),int) or row['after_qpc']<row['before_qpc'] or
+                row.get('mesh_status') not in range(1,8) or not isinstance(row.get('triangle_count'),int) or row['triangle_count']<0):
+            raise ValueError('Invalid menu input row stamps/status')
+        counts[0 if row['triangle_count']==120 else 1]+=1
+        for field,size in (('mouse',2),('other',2),('direction',3),('uv',2),('ray_origin',3),('ray_direction',3),('ray_t',1),('sprite',3),('owner_world',16),('owner_output',16)):
+            if not floats(row.get(field),size):raise ValueError('Invalid menu input numeric payload')
+        for field in ('ray_calls','window_calls','owner_calls','accepted_ray','read_flags','button_valid','mode_kind'):
+            if not isinstance(row.get(field),int) or row[field]<0:raise ValueError('Invalid menu input callback count')
+        if row['mesh_status'] in (6,7):
+            if not isinstance(row.get('mesh'),int) or not 0<=row['mesh']<len(data['meshes']):raise ValueError('Invalid menu input mesh association')
+            mesh=data['meshes'][row['mesh']]
+            if any(row[k]!=mesh[k] for k in ('panel','list','owner','ledger_frame')) or row['triangle_count']!=len(mesh['triangles']):
+                raise ValueError('Menu input row disagrees with cached mesh provenance')
+        elif row.get('mesh')!=0xffffffff:raise ValueError('Unavailable menu input mesh has a live association')
+        row['branch']=('ray_and_2d' if row['ray_calls'] and row['window_calls'] else 'ray' if row['ray_calls'] else '2d_window' if row['window_calls'] else 'no_callback')
+        row['callback_payload_status']='multiple_calls_last_payload_not_a_unique_geometric_join' if row['ray_calls']+row['window_calls']>1 else 'single_call' if row['ray_calls']+row['window_calls'] else 'absent'
+        row['mode_status']='plain_accessor_read' if row['read_flags']&16 else 'unavailable_without_calling_getter'
+        row['owner_transform_status']=('mixed_observed_owners' if row.get('observed_owner_mixed') else
+            'matching_panel_owner' if row['read_flags']&1024 and row.get('observed_owner') and row['observed_owner']==row.get('owner') else
+            'owner_mismatch' if row['read_flags']&1024 else 'not_observed')
+        row['mesh_availability']={1:'absent',2:'triangle_cap',3:'read_fault_or_changed',4:'not_selected_complete_frame',5:'mesh_quota',6:'first_copy_in_same_frame',7:'copied_after_original'}[row['mesh_status']]
+    if max(counts)>80 or len(data['rows'])+data['in_flight_at_close']>data['placements_begun']:
+        raise ValueError('Menu input row reservation/count mismatch')
+    return dict(status='observed' if data['rows'] else 'no_placement_callbacks',rows=len(data['rows']),meshes=len(data['meshes']),
+                branches=dict(Counter(r['branch'] for r in data['rows'])),hooks_armed=data['hooks_armed'],
+                row_quota=data['row_quota'],mesh_quota=data['mesh_quota'],read_faults=data['read_faults'],
+                contended=data['contended'],in_flight_at_close=data['in_flight_at_close'],
+                association='time_and_geometry_only_not_proven_GPU_owner')
 
 
 def read_candidates(unpack,take,draws,effect_images,version=11):
@@ -1019,6 +1087,11 @@ def verify_candidate_capacity_fixture(capture):
     assert sum((capture['draws'][row['draw']]['vs'],capture['draws'][row['draw']]['ps'])==(ui_vs,ui_ps) for row in c['frames'])==768
 
 
+def candidate_body_payload_available(draw,buffers):
+    refs=draw.get('mesh',[])[:3]
+    return len(refs)==3 and all(isinstance(ref,int) and 0<=ref<len(buffers) and buffers[ref].get('readback_status')==1 and bool(buffers[ref].get('data')) for ref in refs)
+
+
 def menu_self_test():
     import copy
     c=dict(version=16,draws=[],mesh_buffers=[],candidates=dict(frames=[]))
@@ -1059,6 +1132,12 @@ def menu_self_test():
 
 def self_test():
     menu_self_test()
+    available=[dict(readback_status=1,data=b'x') for _ in range(3)]
+    assert candidate_body_payload_available(dict(mesh=[0,1,2]),available)
+    available[1]=dict(readback_status=2,data=b'')
+    assert not candidate_body_payload_available(dict(mesh=[0,1,2]),available), 'Staging admission incorrectly reported a failed readback as available'
+    available[1]=dict(readback_status=1,data=b'')
+    assert not candidate_body_payload_available(dict(mesh=[0,1,2]),available), 'Empty retained palette incorrectly reported as available'
     def candidate_reader(blob, draws=None, effects=None, version=11):
         stream=io.BytesIO(blob)
         def take(n):
@@ -1380,6 +1459,9 @@ def main():
         avatar=menu['late_menu']['rows'][1]['avatar']
         assert avatar['source_status']=='cached_not_exact' and not avatar['sources_exact'] and not avatar['pin_targets_available']
         assert avatar['qpc_age_ms']==100 and avatar['root_qpc_age_ms']==200
+        assert menu['late_menu']['input_summary']['branches']=={'2d_window':1}
+        assert menu['late_menu']['input_summary']['in_flight_at_close']==1
+        assert len(menu['late_menu']['input_observer']['meshes'][0]['triangles'])==120
         assert menu['draws'][1]['buffers'][1]['data']==bytes([0x35])*4608
         assert menu['draws'][1]['streams'][1]['data']==bytes([0xA7])*160
         t33=[menu['mesh_buffers'][d['mesh'][0]]['data'] for d in menu['draws'] if d['mesh'][0]!=0xffffffff]
@@ -1439,6 +1521,18 @@ def main():
                     value=51+frame*2+eye+(30 if role==3 else role*10)
                     assert b['data'] == bytes([value])*b['whole'], 'Selected body draw snapshot was not exact'
         assert len({d['target'] for d in eye_mesh['draws']}) == 2
+        body_candidates=read(str(a.path)+'.bodycandidates')
+        assert body_candidates['failures']==body_candidates['mesh_declined']==0
+        assert len(body_candidates['draws'])==5
+        assert len(body_candidates['mesh_capture']['missing_body_ledger_frames'])==16
+        assert all(c['status']=='draw_time_palettes_copied' and c['draw_time_palette_frames']==[951] and c['clip_constant_rows']==c['geometry_rows']==1 for c in body_candidates['mesh_capture']['candidate_coverage'])
+        assert body_candidates['draws'][0]['eye']==-1 and body_candidates['draws'][0]['mesh_status'][0]==10
+        assert {(d['count'],d['eye']) for d in body_candidates['draws'][1:]}=={(n,e) for n in (10050,3216) for e in (0,1)}
+        for d in body_candidates['draws'][1:]:
+            assert d['mesh_selection']=='observed_body_family_candidate_not_proven_part' and d['mesh_selected']==2
+            assert d['frame']==951 and d['mesh_status']==[1]*4 and all(x!=0xffffffff for x in d['mesh'])
+            assert len(d['buffers'][3]['data'])==192, 'Candidate clip PSb2 missing'
+            assert d['mesh'][2]!=0xffffffff and all(s['data'] for s in d['streams'][1:]), 'Candidate VB/IB geometry missing'
         # Version 9 geometry (the rig's armed frame 710): two meshes, two states, three map rows.
         geo = eye_mesh['geometry']
         assert geo['frame'] == 710 and len(geo['meshes']) == 2 and len(geo['states']) == 2 and geo['declined'] == 0
@@ -1510,6 +1604,7 @@ def main():
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
+                          body_evidence=c['mesh_capture'],
                           source_buffers=len(c['mesh_buffers']), source_bytes=sum(b['size'] for b in c['mesh_buffers']), source_declined=c['mesh_declined'],
                           vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
                           vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
@@ -1524,7 +1619,7 @@ def main():
                                   'first_slice','slices','bytes')} for i in c['candidates']['inputs']],
                               refusals=c['candidates']['refusals'],input_declined=c['candidates']['input_declined'],
                               mip_declined=c['candidates']['mip_declined']),
-                          late_menu=({k:c['late_menu'][k] for k in ('selected_frame','anchor_status','eyes','camera_context','outcomes','eye_mappings','menu_geometry','avatar_sources')} if 'late_menu' in c else None),
+                          late_menu=({k:c['late_menu'][k] for k in ('selected_frame','anchor_status','eyes','camera_context','outcomes','eye_mappings','menu_geometry','avatar_sources','input_summary')} if 'late_menu' in c else None),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):

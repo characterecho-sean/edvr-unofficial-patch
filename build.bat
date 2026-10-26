@@ -1762,6 +1762,13 @@ if not exist "%OBJ%\flatstationarycamera" mkdir "%OBJ%\flatstationarycamera"
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat stationary camera test build failed & exit /b 1 )
 "%BUILD%\flat_stationary_camera_test.exe" --self-test || exit /b 1
+REM Exercise the actual passive camera writer with synthetic callbacks, without a game or hook install.
+%CC% /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /Fo"%OBJ%\flatstationarycamera\\" ^
+    /Fe"%BUILD%\eye_camera_writer_test.exe" "tools\flat_stationary_camera_test\eye_camera_writer_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: eye camera writer test build failed & exit /b 1 )
+"%BUILD%\eye_camera_writer_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_c2_coexist_test

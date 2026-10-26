@@ -593,6 +593,7 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
     // set of injected cameras belong to the thread that runs Present; a call
     // on any other thread touches none of them (counted, passed through).
     const FlatCameraGateVerdict gate = g_inject.gate.check(GetCurrentThreadId(), GetTickCount64());
+    flatStationaryCameraEyeRefreshPre(r0,camera,ctx,p2,callNo,gate==FlatCameraGateVerdict::OffThread);
     // THE VR WORLD ROUTE (flatCameraVrFrame): once it has stepped a frame, its per-frame mode classifies the call and everything
     // below is skipped. The word is zero for the flat profile's whole life and for a VR process the route never drives, and
     // those keep the code below exactly as it was.
@@ -758,6 +759,8 @@ void refreshPost() noexcept {
     if (!g_refreshTls.armed) return; // defensive: stubB only fires after a redirect
     g_refreshTls.armed = 0;
     const uintptr_t camera = g_refreshTls.camera;
+    flatStationaryCameraEyeRefreshPost(camera,g_refreshTls.callNo,
+        g_refreshTls.vr ? g_refreshTls.vrRestore!=0 : g_refreshTls.observe==0);
     if (g_refreshTls.vr) { // the VR world route's call: its own post half (the census, then the restore)
         g_refreshTls.vr = 0;
         refreshPostVr(camera);

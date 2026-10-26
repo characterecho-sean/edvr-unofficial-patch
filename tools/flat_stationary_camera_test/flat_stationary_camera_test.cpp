@@ -1,5 +1,6 @@
 #include "src/d3d11/flat_origin_capture.h"
 #include "src/d3d11/flat_stationary_camera_core.h"
+#include "src/d3d11/eye_camera_capture_core.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -696,9 +697,36 @@ bool testReportMarkers() {
         source.find("selected GPU donor UNPROVED") != std::string::npos;
 }
 
+bool testManualEyeWindow() {
+    edvr::eyecamera::Window w;
+    if(w.boundary(1))return false;
+    w.arm(42); // frame0+1, the same complete frame selected by the menu observer
+    if(w.boundary(41) || w.sampled || w.closed)return false;
+    if(!w.boundary(42) || !w.sampled || w.closed)return false;
+    if(w.boundary(42))return false; // cannot restart or spend the budget twice
+    if(w.boundary(43) || !w.closed || w.boundary(42))return false;
+    w.arm(60);if(w.boundary(61) || w.sampled || !w.closed)return false; // missed, not healthy
+    w.arm(70);w.end();if(w.boundary(70) || w.armed)return false; // abort cannot reactivate
+    w.arm(80);if(!w.boundary(80) || !w.sampled)return false; // independent replacement run
+    const auto source=sourceText("src/d3d11/flat_stationary_camera_capture.cpp");
+    const auto inject=sourceText("src/d3d11/flat_camera_inject.cpp");
+    const auto arm=source.find("void flatStationaryCameraEyeArm(");
+    const auto boundary=source.find("void flatStationaryCameraEyeBoundary(");
+    const auto pre=inject.find("flatStationaryCameraEyeRefreshPre(");
+    const auto post=inject.find("flatStationaryCameraEyeRefreshPost(");
+    return arm!=std::string::npos && boundary!=std::string::npos &&
+        source.substr(arm,boundary-arm).find("install(")==std::string::npos &&
+        source.find("if(!install(*s))",boundary)!=std::string::npos &&
+        pre<inject.find("const uint32_t vrBits =",pre) &&
+        post<inject.find("sehWriteF32(camera",post) &&
+        source.find("manual-frame-overlap")!=std::string::npos &&
+        source.find("previous callback still inflight")!=std::string::npos &&
+        source.find("source_overflow")!=std::string::npos && source.find("post_seen")!=std::string::npos &&
+        source.find("zero rows explicitly unavailable")!=std::string::npos;
+}
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testResolved() || !testCaptureWiring() || !testReportMarkers()) {
+    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testResolved() || !testCaptureWiring() || !testReportMarkers() || !testManualEyeWindow()) {
         std::fprintf(stderr, "flat stationary camera test failed\n"); return 1;
     }
     std::puts("flat stationary camera test passed");

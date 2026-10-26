@@ -187,9 +187,13 @@ public:
     }
     static bool bodyMeshSelector(uint64_t vs,uint64_t ps,uint32_t stencilRef,uint32_t count) noexcept {
         const bool bodyCount=count==13260 || count==30216 || count==23784 || count==7692 || count==37080;
-        return stencilRef==21 && bodyCount &&
+        return bodyMeshCandidate(vs,ps,stencilRef,count) || (stencilRef==21 && bodyCount &&
             ((vs==0x9D800F45B12A6AACull && ps==0x194DD6A677084A74ull) ||
-             (vs==0x7B0DC42D383F694Cull && ps==0x0DF03E64DF9DBEF1ull));
+             (vs==0x7B0DC42D383F694Cull && ps==0x0DF03E64DF9DBEF1ull)));
+    }
+    static bool bodyMeshCandidate(uint64_t vs,uint64_t ps,uint32_t stencilRef,uint32_t count) noexcept {
+        // Observed body-material draws in the 05:27:44 census; their part identity is not established.
+        return vs==0x7B0DC42D383F694Cull && ps==0x0DF03E64DF9DBEF1ull && stencilRef==21 && (count==10050 || count==3216);
     }
     static int otherTrackedPaletteIndex(uint32_t count,ID3D11Buffer* const* palettes,ID3D11Buffer* bound) noexcept {
         if(count!=2 || !palettes || !bound || !palettes[0] || !palettes[1] || palettes[0]==palettes[1])return -1;
@@ -292,6 +296,18 @@ public:
     static constexpr uint32_t kMeshBudget=256*1024*1024;
     static constexpr uint32_t kEyeMeshBudget=768*1024*1024;
     static constexpr uint32_t kEyeMeshSnapshotBudget=24*1024*1024;
+    static constexpr uint32_t kBodyCandidateMeshReserve=4*kEyeMeshSnapshotBudget;
+    static constexpr uint32_t kBodyCandidateVertexReserve=4*3*256*1024;
+    static constexpr const char* kBodyCaptureReport="object probe: eye body snapshots %ls: %u selected draws, %u exact body snapshots, %u other source draws rejected, "
+        "%u draws outside window, %u frame/target-local buffers, %u bytes, %u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
+        "First %u body-ledger frames; VS/PS/count/ref21 selector. Per-draw frames/eye/camera/PSb2; quota-selected t33/t38/VB0/other-palette. "
+        "Geometry first body frame plus candidate complete frame: %u bytes, %u declines. Bounds4096 rows, ordinary24MiB/eye-frame, total768MiB structured+32MiB streams. Native frame is not GPU completion.";
+    static constexpr const char* kBodyCandidateReport="object probe: observed body-family candidates %ls: counts10050/3216, class2 part identity UNPROVEN; complete ledger frame %u, "
+        "%u/4 count/eye slots attempted (%u absent), %u non-slot rows; %u structured/%u stream bytes. Reserved96MiB structured/3MiB streams WITHIN whole-run caps. "
+        "PSb2/VB/IB/t33/t38 at candidate draw; per-row status reports unavailable/capped copies. Other-palette relationship unknown; no rendering changes.";
+    bool bodyCandidateSeen[2][2]{};
+    uint32_t bodyCandidateMeshBytes=0,bodyCandidateVertexBytes=0,bodyCandidateFrame=0,bodyCandidateSlots=0,bodyCandidateDeclined=0;
+    void armBodyCandidates(uint32_t selectedCompleteFrame) noexcept {bodyCandidateFrame=selectedCompleteFrame;}
     uint32_t meshBudgetLimit=kMeshBudget;
     uint32_t vertexBudgetLimit=32*1024*1024;
     bool lateMenuEvidence=false;
@@ -445,6 +461,8 @@ public:
         nightSampling.clear();
         meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;meshBudgetLimit=kMeshBudget;
         meshCaptureFirstFrame=meshCaptureDeclined=meshCaptureSnapshots=meshNonBodyDraws=0;
+        std::memset(bodyCandidateSeen,0,sizeof(bodyCandidateSeen));bodyCandidateMeshBytes=bodyCandidateVertexBytes=0;
+        bodyCandidateFrame=bodyCandidateSlots=bodyCandidateDeclined=0;
         for(uint32_t i=0;i<kEyeMeshSnapshots;++i){meshSnapshotRenderFrame[i]=meshSnapshotLedgerFrame[i]=0;meshSnapshotNativeValid[i]=false;meshSnapshotEye[i]=-1;}
         candidateFrames.clear();candidateInputs.clear();candidateRefusals.clear();candidateSamplers.clear();candidateDropped=candidateMissingRenderFrame=candidateOutsideFrameWindow=candidateInputDeclined=candidateMipDeclined=candidateRoiIncomplete=0;
         candidateInputBytes=candidateOtherInputBytes=candidateOpticDraws=candidateRenderFirstFrame=candidateUiFirstLedgerFrame=candidateNonUiDraws=0;std::memset(candidateUiCounts,0,sizeof(candidateUiCounts));std::memset(candidateUiDropped,0,sizeof(candidateUiDropped));std::memset(candidateUiInputBytes,0,sizeof(candidateUiInputBytes));candidateRoiDraw=pendingCandidateRoi=pendingCandidateDraw=UINT32_MAX;
@@ -489,28 +507,41 @@ public:
                         char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
         if(!sourceMesh(vs))return;
         const bool selected=bodyMeshSelector(vs,ps,stencilRef,count);
+        const bool candidate=bodyMeshCandidate(vs,ps,stencilRef,count);
         if(!selected){++meshNonBodyDraws;return;}
         if(!meshCaptureFirstFrame)meshCaptureFirstFrame=frame;
         if(frame<meshCaptureFirstFrame || frame-meshCaptureFirstFrame>=kEyeMeshFrames) {
             ++meshCaptureDeclined; return;
         }
         bool snapshotPermit=false,seenSnapshot=false;
-        if(selected&&eye>=0)for(uint32_t i=0;i<meshCaptureSnapshots;++i) {
+        if(candidate && eye>=0 && eye<2 && bodyCandidateFrame && frame==bodyCandidateFrame) {
+            auto& seen=bodyCandidateSeen[count==10050?0:1][eye];snapshotPermit=!seen;seen=true;
+        }
+        if(candidate){if(snapshotPermit)++bodyCandidateSlots;else ++bodyCandidateDeclined;}
+        if(!candidate&&selected&&eye>=0)for(uint32_t i=0;i<meshCaptureSnapshots;++i) {
             if(meshSnapshotNativeValid[i]!=(renderFrame!=0) || meshSnapshotEye[i]!=eye)continue;
             if(renderFrame ? meshSnapshotRenderFrame[i]==renderFrame : meshSnapshotLedgerFrame[i]==frame){seenSnapshot=true;break;}
         }
-        if(selected&&eye>=0&&!seenSnapshot&&meshCaptureSnapshots<kEyeMeshSnapshots){
+        if(!candidate&&selected&&eye>=0&&!seenSnapshot&&meshCaptureSnapshots<kEyeMeshSnapshots){
             meshSnapshotRenderFrame[meshCaptureSnapshots]=renderFrame;
             meshSnapshotLedgerFrame[meshCaptureSnapshots]=frame;
             meshSnapshotNativeValid[meshCaptureSnapshots]=renderFrame!=0;
             meshSnapshotEye[meshCaptureSnapshots]=eye;
             ++meshCaptureSnapshots;snapshotPermit=true;
         }
-        if(snapshotPermit)meshBudgetLimit=std::min(kEyeMeshBudget,meshBytes+kEyeMeshSnapshotBudget);
+        // The first complete frame has four observed candidate/eye slots, independently reserved from earlier body draws; run caps stay unchanged.
+        const uint32_t used=candidate?bodyCandidateMeshBytes:meshBytes-bodyCandidateMeshBytes;
+        const uint32_t cap=candidate?kBodyCandidateMeshReserve:kEyeMeshBudget-kBodyCandidateMeshReserve;
+        meshBudgetLimit=meshBytes+(snapshotPermit?(std::min)(kEyeMeshSnapshotBudget,cap-(std::min)(used,cap)):0);
+        const uint32_t vertexUsed=candidate?bodyCandidateVertexBytes:vertexBytes-bodyCandidateVertexBytes;
+        const uint32_t vertexCap=candidate?kBodyCandidateVertexReserve:32*1024*1024-kBodyCandidateVertexReserve;
+        vertexBudgetLimit=vertexBytes+(candidate&&!snapshotPermit?0:vertexCap-(std::min)(vertexUsed,vertexCap));
+        const uint32_t oldMeshBytes=meshBytes,oldVertexBytes=vertexBytes;
         const uint32_t before=uint32_t(draws.size());
         capture(ctx,frame,ordinal,vs,ps,kind,count,instances,startInstance,start,base,true,true,false,renderFrame,eye,snapshotPermit,selected,otherPaletteCandidate);
+        if(candidate){bodyCandidateMeshBytes+=meshBytes-oldMeshBytes;bodyCandidateVertexBytes+=vertexBytes-oldVertexBytes;}
         if(draws.size()==before)++meshCaptureDeclined;
-        else draws.back().join=join;
+        else {draws.back().join=join;if(candidate)draws.back().meshSelected=2;}
     }
 
     void armF77Candidates(uint32_t firstLedgerFrame=0) {
@@ -1028,7 +1059,7 @@ public:
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
         if(lateEvidenceRole!=2 && (((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || f77CandidateDraw ||
-           ((mesh || night || planet) && (f77CandidateDraw || frame==firstFrame)) || effect || fireGeometryPair)) {
+           ((mesh || night || planet) && (f77CandidateDraw || frame==firstFrame || (eyeMesh&&meshSnapshotPermit&&bodyMeshCandidate(vs,ps,21,count)))) || effect || fireGeometryPair)) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             uint32_t opticMinIndex=0,opticMaxIndex=0;

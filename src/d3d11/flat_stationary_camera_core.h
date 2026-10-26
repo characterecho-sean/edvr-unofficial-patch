@@ -243,8 +243,9 @@ struct PlacedDetail {
 };
 struct Snapshot {
     uintptr_t owner = 0, source = 0, helper = 0, rootChild = 0;
-    uintptr_t caller = 0; // the return address; callerRva is its offset, for the log
-    uint64_t callerRva = 0;
+    uintptr_t caller = 0; // observed return address, not a build binding
+    // Offset from the loaded module base, or 0 outside its image. Serialized as caller_rva.
+    uint64_t observedCallerOffset = 0;
     float sourceBefore[4]{}, sourceAfter[4]{}, helperAfter[4]{};
     bool sourceBeforeRead = false, sourceAfterRead = false, helperAfterRead = false;
     bool validSource = false, consistent = true, complete = true;

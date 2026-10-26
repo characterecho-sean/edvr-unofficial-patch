@@ -189,6 +189,8 @@ void setTargets(const NativeOnFootHooksTestTargets& targets);
 void setFadeGlobal(int32_t* mode, float* amount);   // the synthetic dither-fade global and its amount float (null: the build's real addresses)
 void setHeadImage(uintptr_t base, size_t size);     // the rig's synthetic game image for the skeleton reads' arming (base 0: the real module)
 void boundary(NativeOnFootHooksSinkFn fn, void* ctx);   // nativeOnFootHooksFrameBoundary, its lines to the sink
+void clipProbeClock(uint64_t now);                    // the existing 5 s probe's clock, zero restores the system clock
+void clipProbeSink(NativeOnFootHooksSinkFn fn, void* ctx); // capture the bounded gear diagnostic's actual formatter
 void shutdown();                                    // nativeOnFootHooksShutdown()
 bool fadeOurs();                                    // EDVR holds the global at 0 for native stereo's body
 size_t stolenBytes(int hook);

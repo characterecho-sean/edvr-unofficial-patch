@@ -35,6 +35,7 @@
 #include "../../src/d3d11/avatar_hooks_core.h"
 #include "../../src/d3d11/avatar_skeleton_core.h"
 #include "../../src/d3d11/native_on_foot.h"   // the native flag and the camera signal the controller hook publishes (F93d)
+#include "../../src/d3d11/native_on_foot_logwin.h"
 
 using namespace edvr;
 
@@ -1199,6 +1200,100 @@ void testFpBodyHideGlue(const CtlPages& p) {
     t::reset();
 }
 
+void testGearClipProbeGlue(const CtlPages& p) {
+    std::printf("glue: bounded third-person gear clip evidence, without gear writes\n");
+    namespace t = edvr::nofoothookstest;
+    static AmcBuf local, fp, npc;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100], armMod[32], gearMod[32];
+    Rig rig;
+    t::reset();
+    nofoot::logwin::setDetail(false);
+    edvr::g_nativeOnFootActive.store(false);
+    cimgInit(-1);
+    installTargets(p);
+    nativeOnFootHooksBody(true, false, "rig: install");
+    rig.boundary(); rig.boundary();
+    imgInvoke(skelA, skelB, g_cimg + avh::kPovNameRva);
+    local.init(reinterpret_cast<uint64_t>(skelA), 3);
+    fp.init(reinterpret_cast<uint64_t>(skelB), 2);
+    npc.init(reinterpret_cast<uint64_t>(skelB), 3);
+    edvr::g_nativeOnFootActive.store(true);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    nativeOnFootHooksBody(true, true, ""); rig.boundary();
+    t::clipProbeSink(&Capture::add, &rig.cap);
+    std::memset(armMod, 0, sizeof(armMod)); std::memset(gearMod, 0, sizeof(gearMod));
+    const float amount = .6f;
+    std::memcpy(gearMod + avh::kClipModAmount, &amount, 4);
+    armMod[avh::kClipModEnable] = gearMod[avh::kClipModEnable] = 1;
+    const auto modifier = [&](uint32_t part, uint64_t ptr) {
+        std::memcpy(local.b + avh::kOffAmcParts + part * avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+    };
+    modifier(28, reinterpret_cast<uint64_t>(armMod));
+    modifier(39, reinterpret_cast<uint64_t>(gearMod));
+    const int32_t gearItem = 678, gearState = 1;
+    std::memcpy(local.b + avh::kOffAmcPartCurrent + 39 * avh::kPartStride, &gearItem, 4);
+    std::memcpy(local.b + avh::kOffAmcPartState + 39 * avh::kPartStride, &gearState, 4);
+    local.b[avh::kOffAmcPartFlags + 39 * avh::kPartStride] = 5;
+    for (uint32_t k = 0; k < 4; ++k) {
+        const uint64_t inst = 0x9000 + k, mask = 0xA000 + k;
+        std::memcpy(local.b + avh::kOffAmcInstances + 39 * avh::kPartStride + 8*k, &inst, 8);
+        std::memcpy(local.b + avh::kOffAmcMasks + 39 * avh::kPartStride + 8*k, &mask, 8);
+    }
+    const uint64_t rightInst = 0xB000;
+    std::memcpy(local.b + avh::kOffAmcInstances + 40 * avh::kPartStride, &rightInst, 8);
+    nativeOnFootBodyClipTick(1000, true, true, "rig");
+    t::clipProbeClock(2000); imgFade(fp.b); imgFade(npc.b);
+    nativeOnFootBodyClipTick(6000, true, true, "rig");
+    check(rig.cap.count("gear clip: armed") == 1 && rig.cap.count("no new local mode-3 fade sample") == 1 && rig.cap.count("prewrite=1") == 0,
+          "GEAR PROBE: FP and other-avatar fades cannot supply local 3P evidence; armed and never-ran are explicit");
+    t::clipProbeClock(7000); imgFade(local.b);
+    nativeOnFootBodyClipTick(7000, true, true, "rig");
+    const std::string left = rig.cap.nth("gear clip: EVASuit_Gear_LowerArmL ", 0);
+    char owner[128];
+    std::snprintf(owner, sizeof(owner), "amc=0x%llX avatarPose=0x%llX skeleton=0x%llX",
+                  reinterpret_cast<uint64_t>(local.b), reinterpret_cast<uint64_t>(skelA)+0x30, reinterpret_cast<uint64_t>(skelA));
+    check(has(left, "status=available prewrite=1") && has(left, owner) && has(left, "gpuSkinOwner=unavailable") &&
+          has(left, "item=678 state=1 flags=0x05") && has(left, "enable=1 dirty=0 amount=0.6000") &&
+          has(left, "instances=9000,9001,9002,9003 masks=A000,A001,A002,A003"),
+          "...the actual row preserves modifier bytes, all four instance/mask pairs and the validated owner, without guessing a GPU skin job");
+    check(rig.cap.count("LowerArms status=no-instance") == 1 && rig.cap.count("LowerArmR status=no-modifier") == 1,
+          "...missing combined gear and present gear without a clip modifier are distinct results");
+    check(armMod[avh::kClipModEnable] == 0 && armMod[avh::kClipModDirty] == 1 && gearMod[avh::kClipModEnable] == 1 &&
+          gearMod[avh::kClipModDirty] == 0 && local.mask(39, 3) == 0xA003,
+          "...existing arm unclip still runs, while the observed gear modifier and masks remain untouched");
+    t::clipProbeClock(8000); imgFade(local.b); nativeOnFootBodyClipTick(8000, true, true, "rig");
+    check(rig.cap.count("prewrite=1") == 3, "...a second fade inside the five-second interval does not duplicate evidence");
+    nativeOnFootBodyClipTick(8000, false, false, "rig: off");
+    nativeOnFootBodyClipTick(9000, false, true, "rig: probe only reentry");
+    nativeOnFootBodyClipTick(15000, false, true, "rig");
+    check(rig.cap.count("no new local mode-3 fade sample") == 2 && rig.cap.count("prewrite=1") == 3,
+          "...reentry cannot reuse the previous activation's snapshot as fresh evidence, even with unclip off");
+    void* unreadable = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    check(unreadable != nullptr, "...a protected page supplies the unreadable modifier fixture");
+    modifier(40, reinterpret_cast<uint64_t>(unreadable));
+    edvr::nativeOnFootCameraPublish(1, 0);
+    t::clipProbeClock(16000); imgFade(local.b); nativeOnFootBodyClipTick(16000, false, true, "rig");
+    check(rig.cap.count("LowerArmR status=read-fault") == 1 && rig.cap.count("prewrite=1") == 6,
+          "...external-camera probe remains read-only and reports unreadable modifier memory explicitly");
+    modifier(40, 1);
+    for (uint64_t now : {22000ull, 28000ull}) {
+        t::clipProbeClock(now); imgFade(local.b); nativeOnFootBodyClipTick(now, false, true, "rig");
+    }
+    check(rig.cap.count("prewrite=1") == 9 && rig.cap.count("default snapshot limit reached") == 1 &&
+          rig.cap.count("LowerArmR status=modifier-unreadable") == 1,
+          "...default logging stops after three snapshots across reentry and reports the limit");
+    nofoot::logwin::setDetail(true);
+    t::clipProbeClock(34000); imgFade(local.b); nativeOnFootBodyClipTick(34000, false, true, "rig");
+    check(rig.cap.count("prewrite=1") == 12, "...detail logging continues the same bounded-cadence probe after the default limit");
+    nativeOnFootBodyClipTick(35000, false, false, "rig: off");
+    t::clipProbeClock(40000); imgFade(local.b); nativeOnFootBodyClipTick(40000, false, false, "rig");
+    check(rig.cap.count("prewrite=1") == 12, "...probe off produces no further gear report");
+    if (unreadable) VirtualFree(unreadable, 0, MEM_RELEASE);
+    nofoot::logwin::setDetail(false);
+    edvr::g_nativeOnFootActive.store(false);
+    t::reset();
+}
+
 // F93d: native on foot's camera signal. The native key on: the controller hook is installed for the signal, its gate opens only on foot, its post-call reads
 // the mode byte the update left and publishes it (native_on_foot.h), presses nothing and changes nothing; native stereo's head hiding zeroes the local head parts
 // in the game's first-person camera only (mode 0), and leaves them to the game in its third-person camera suite (1..6).
@@ -1431,6 +1526,7 @@ void testGlue() {
     testNativeFadeGlue(p);
     testHeadHideGlue(p);
     testFpBodyHideGlue(p);
+    testGearClipProbeGlue(p);
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
     t::reset();

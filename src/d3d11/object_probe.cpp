@@ -25,6 +25,7 @@
 #include "supercruise_lines.h"   // kUiVsSupercruiseBars: the bars' vertex capture
 #include "eye_draw_snapshot.h"
 #include "eye_late_menu_capture.h"
+#include "flat_stationary_camera_capture.h"
 #include "object_classification_probe.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
@@ -345,7 +346,7 @@ void noteGeometryRelease(EyeDrawSnapshot::GeoRelease r) {
 }
 
 void ledgerRelease() {
-    if(!detail::g_objectProbeLedgerOn)g_lateMenuSnapshot.release(); // retain only across an active run's pool relearn
+    if(!detail::g_objectProbeLedgerOn){g_lateMenuSnapshot.release();nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();} // retain only across an active run's pool relearn
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
     g_panelSnapshot.reset();
@@ -362,6 +363,7 @@ void ledgerRelease() {
         noteGeometryRelease(g_eyeMeshSnapshot.resetKeepingGeometry(g_frame + 1));
     else
         g_eyeMeshSnapshot.reset();
+    if(detail::g_objectProbeLedgerOn)g_eyeMeshSnapshot.armBodyCandidates(g_ledgerFrame0+1);
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
@@ -1346,17 +1348,14 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<unsigned long long>(ownership.ancestorTraces),
                     static_cast<unsigned long long>(ownership.ancestorTraceOverflow));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
-    Log::get().note("object probe: eye body snapshots %ls: %u selected draws, %u exact body snapshots, %u other source draws rejected, "
-                    "%u draws outside window, %u frame/target-local buffers, %u bytes, %u buffer declines, %u capped draws, "
-                    "%u failed copies, %u missing shaders; %s. First %u ledger frames; selector is the recorded body VS/PS, "
-                    "draw count and stencil ref 21. Each selected draw records ledger/native render frame, eye, ordinal, arguments, "
-                    "camera, t33 instance record, t38 current palette, VB0 IDs and a tracked other-palette candidate when unambiguous. "
-                    "Candidate relationship remains unknown until exact offline join; native frame is not GPU completion. "
-                    "Geometry first frame, %u vertex bytes, %u vertex declines. Bounded 4096 rows, 24 MiB per selected eye/frame and 768 MiB total, plus 32 MiB vertex pool; no rendering changes.",
+    Log::get().note(EyeDrawSnapshot::kBodyCaptureReport,
                     path,g_eyeMeshSnapshot.meshDraws,g_eyeMeshSnapshot.meshCaptureSnapshots,g_eyeMeshSnapshot.meshNonBodyDraws,
                     g_eyeMeshSnapshot.meshCaptureDeclined,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
                     g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
                     eyeMeshOk?"written":"WRITE FAILED",EyeDrawSnapshot::kEyeMeshFrames,g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
+    Log::get().note(EyeDrawSnapshot::kBodyCandidateReport,g_ledgerStamp,
+                    g_eyeMeshSnapshot.bodyCandidateFrame,g_eyeMeshSnapshot.bodyCandidateSlots,4-g_eyeMeshSnapshot.bodyCandidateSlots,g_eyeMeshSnapshot.bodyCandidateDeclined,
+                    g_eyeMeshSnapshot.bodyCandidateMeshBytes,g_eyeMeshSnapshot.bodyCandidateVertexBytes);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\candidates_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool candidateOk=g_f77CandidateSnapshot.write(ctx,path);
     const uint32_t candidateMissingShaders=g_f77CandidateSnapshot.writeShaders(dir.c_str());
@@ -1380,7 +1379,11 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     wchar_t menuMetadata[MAX_PATH];
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     _snwprintf_s(menuMetadata,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.json",dir.c_str(),g_ledgerStamp);
-    const bool menuOk=g_lateMenuSnapshot.write(ctx,path,menuMetadata);
+    const std::string menuInput=nativeOnFootMenuInputEnd();
+    const bool menuOk=g_lateMenuSnapshot.write(ctx,path,menuMetadata,menuInput);
+    wchar_t cameraPath[MAX_PATH];_snwprintf_s(cameraPath,MAX_PATH,_TRUNCATE,L"%s\\camera_%s.json",dir.c_str(),g_ledgerStamp);
+    const bool cameraOk=flatStationaryCameraEyeWrite(cameraPath);
+    Log::get().note("eye-run camera companion %ls: %s; absent/refused callbacks are reported in the companion, not an inferred preview camera",cameraPath,cameraOk?"written":"WRITE FAILED");
     const uint32_t menuMissingShaders=g_lateMenuSnapshot.evidence.writeShaders(dir.c_str());
     Log::get().note("late menu snapshots %ls: selected complete ledger frame %u, %u rows, %u structured bytes, %u stream bytes, %u buffer declines, %u stream declines, %u copy failures, %u missing shaders; %s. Selection, per-eye anchor/sibling quotas, scene-before-menu availability and binding identities are in the JSON companion; a six-index-only family is not a complete menu. Independent whole-run caps 128 MiB structured and 8 MiB streams; diagnostic only, shared menu families are not object identity.",
         path,g_lateMenuSnapshot.window.frame,unsigned(g_lateMenuSnapshot.rows.size()),g_lateMenuSnapshot.evidence.meshBytes,
@@ -1721,6 +1724,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             releasePool();
             detail::g_objectProbeLedgerOn = false;
             g_lateMenuSnapshot.release();
+            nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
             g_wasOn = false;
             g_noted = false;
         }
@@ -1728,6 +1732,8 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
     g_wasOn = true;
     ++g_frame;
+    nativeOnFootMenuInputBoundary(g_frame+1);
+    flatStationaryCameraEyeBoundary(g_frame+1,nativeOnFootRenderFrame());
     // The cull gate probe stamps the jobs it observes with the ledger frame
     // the draws submitted from now on belong to (ledgerNoteDraw's g_frame+1),
     // and lets go of the relays one frame after its window.
@@ -1786,6 +1792,9 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     ledgerRelease();
     g_f77CandidateSnapshot.armF77Candidates(g_ledgerFrame0);
     g_lateMenuSnapshot.arm(g_ledgerFrame0);
+    g_eyeMeshSnapshot.armBodyCandidates(g_lateMenuSnapshot.window.frame);
+    nativeOnFootMenuInputArm(g_ledgerStamp,g_ledgerFrame0,g_ledgerLastFrame);
+    flatStationaryCameraEyeArm(g_lateMenuSnapshot.window.frame,g_ledgerStamp);
     detail::g_objectProbeLedgerOn = true;
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
@@ -1843,6 +1852,7 @@ void objectProbeShutdown() {
     detail::g_objectProbeLedgerOn = false;
     detail::g_objectProbeOn = false;
     g_lateMenuSnapshot.release();
+    nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
     g_wasOn = false;
 }
 

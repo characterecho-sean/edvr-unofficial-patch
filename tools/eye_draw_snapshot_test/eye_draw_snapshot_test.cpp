@@ -17,6 +17,7 @@ void check(bool ok, const char* why) {
     if (!ok) { std::printf("FAIL: %s\n", why); std::exit(1); }
 }
 void hr(HRESULT v) { check(SUCCEEDED(v), "D3D operation"); }
+#include "menu_input_checks.h"
 void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     check(ctx && dev, "GPU wait inputs");
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
@@ -30,6 +31,7 @@ void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 int wmain(int argc, wchar_t** argv) {
     check(argc == 2, "output path required");
+    const std::string menuInputFixture=menuInputChecks();
     {
         using S=edvr::EyeDrawSnapshot;edvr::LateMenuWindow menu;menu.arm(100);
         check(!menu.take(100,0,1,S::kLateMenuVs,360)&&menu.take(101,0,2,S::kScene,900)&&
@@ -756,7 +758,17 @@ int wmain(int argc, wchar_t** argv) {
     UINT meshStride=8;ctx->IASetVertexBuffers(0,1,meshIds.GetAddressOf(),&meshStride,&zero);
     constexpr uint64_t meshVs=0x7B0DC42D383F694Cull;
     constexpr uint64_t meshPs=0x0DF03E64DF9DBEF1ull;
+    wchar_t longestPath[MAX_PATH];for(auto& ch:longestPath)ch=L'x';longestPath[MAX_PATH-1]=0;char bodyReport[1200]{};
+    const int bodyLength=std::snprintf(bodyReport,sizeof(bodyReport),edvr::EyeDrawSnapshot::kBodyCaptureReport,longestPath,
+        UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,"WRITE FAILED",UINT32_MAX,UINT32_MAX,UINT32_MAX);
+    const int candidateLength=std::snprintf(bodyReport,sizeof(bodyReport),edvr::EyeDrawSnapshot::kBodyCandidateReport,L"123456789012345",
+        UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX);
+    check(bodyLength>0&&bodyLength<1150&&candidateLength>0&&candidateLength<1150,"worst-case body/candidate reports fit1200-byte logger with prefix headroom");
     check(edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,37080) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,10050) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,3216) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,20,10050) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(0x9D800F45B12A6AACull,0x194DD6A677084A74ull,21,3216) &&
           edvr::EyeDrawSnapshot::bodyMeshSelector(0x9D800F45B12A6AACull,0x194DD6A677084A74ull,21,13260) &&
           !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,20,37080) &&
           !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,6) &&
@@ -847,6 +859,36 @@ int wmain(int argc, wchar_t** argv) {
     unknownEyeMesh.captureEyeMesh(ctx.Get(),800,0,0,{},1,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,0,0,0);
     check(unknownEyeMesh.meshCaptureSnapshots==1 && unknownEyeMesh.draws[1].mesh[0]!=UINT32_MAX,
           "known eye can still receive a full snapshot after unknown-eye metadata");
+    edvr::EyeDrawSnapshot candidateBody;
+    candidateBody.armBodyCandidates(901);
+    candidateBody.captureEyeMesh(ctx.Get(),900,1000,0,{},0,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,0,0,0);
+    // Simulate all regular-body reserved capacity consumed before the candidate draws, without allocating hundreds of MiB in the rig.
+    candidateBody.meshBytes=edvr::EyeDrawSnapshot::kEyeMeshBudget-edvr::EyeDrawSnapshot::kBodyCandidateMeshReserve;
+    candidateBody.vertexBytes=32*1024*1024-edvr::EyeDrawSnapshot::kBodyCandidateVertexReserve;
+    for(int eye=0;eye<2;++eye)for(uint32_t count:{10050u,3216u}) {
+        candidateBody.captureEyeMesh(ctx.Get(),901,1001,eye,{},count,meshVs,meshPs,21,meshOtherPalette.Get(),'X',count,1,0,0,0);
+        check(candidateBody.draws.back().meshSelected==2&&candidateBody.draws.back().meshStatus[0]==1&&candidateBody.draws.back().meshStatus[1]==1&&candidateBody.draws.back().meshStatus[3]==1,
+              "earlier regular-body saturation cannot consume either observed candidate's reserved per-eye draw-time palettes");
+    }
+    check(candidateBody.meshBytes<=edvr::EyeDrawSnapshot::kEyeMeshBudget&&candidateBody.vertexBytes<=32*1024*1024,
+          "candidate reservations preserve whole-run structured and geometry byte caps");
+    candidateBody.captureEyeMesh(ctx.Get(),901,1001,0,{},99,meshVs,meshPs,21,meshOtherPalette.Get(),'X',10050,1,0,0,0);
+    check(candidateBody.draws.back().meshStatus[0]==7,"repeated candidate refuses another palette copy explicitly");
+    edvr::EyeDrawSnapshot bodyCandidateFixture;
+    bodyCandidateFixture.armBodyCandidates(951);
+    bodyCandidateFixture.captureEyeMesh(ctx.Get(),950,0,-1,{},0,meshVs,meshPs,21,nullptr,'X',10050,1,0,0,0);
+    check(bodyCandidateFixture.draws.back().meshSelected==2&&bodyCandidateFixture.draws.back().meshStatus[0]==10,"candidate unknown-eye metadata remains explicit and consumes no reserved slot");
+    edvr::EyeDrawSnapshot firstCandidate;firstCandidate.armBodyCandidates(1001);
+    firstCandidate.captureEyeMesh(ctx.Get(),1001,0,0,{},0,meshVs,meshPs,21,meshOtherPalette.Get(),'X',10050,1,0,0,0);
+    check(firstCandidate.draws.back().meshStatus[0]==1&&firstCandidate.bodyCandidateSlots==1,
+          "first body arrival on the selected complete ledger frame gets candidate palettes without needing a partial-frame predecessor");
+    ctx->PSSetConstantBuffers(2,1,cb.GetAddressOf());
+    ctx->IASetVertexBuffers(1,1,meshIds.GetAddressOf(),&meshStride,&zero);
+    for(int eye=0;eye<2;++eye)for(uint32_t count:{10050u,3216u})
+        bodyCandidateFixture.captureEyeMesh(ctx.Get(),951,0,eye,{},count,meshVs,meshPs,21,meshOtherPalette.Get(),'X',count,1,0,0,0);
+    check(bodyCandidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".bodycandidates").c_str())&&!bodyCandidateFixture.failures,"candidate geometry, PSb2 and palettes serialize");
+    ID3D11Buffer* noPsBuffer=nullptr;ctx->PSSetConstantBuffers(2,1,&noPsBuffer);
+    ctx->IASetVertexBuffers(1,1,&noPsBuffer,&meshStride,&zero);
     std::vector<uint8_t> geometryVertices(32,76);
     ctx->UpdateSubresource(meshIds.Get(),0,nullptr,geometryVertices.data(),0,0);
     // Version 9: the cull gate probe's armed-frame geometry. Every pool draw
@@ -1354,7 +1396,7 @@ int wmain(int argc, wchar_t** argv) {
         auto& cachedAvatar=menu.rows[1].avatar;cachedAvatar.status=2;cachedAvatar.validFlags=1;cachedAvatar.sourceFrame=123;
         cachedAvatar.sampleQpc=1000;cachedAvatar.qpc=900;cachedAvatar.rootQpc=800;cachedAvatar.qpcFrequency=1000;
         for(unsigned i=0;i<4;++i)cachedAvatar.froot[i*5]=cachedAvatar.m3p[i*5]=cachedAvatar.G[i*5]=1.0f;
-        check(menu.write(ctx.Get(),(std::wstring(argv[1])+L".menu.bin").c_str(),(std::wstring(argv[1])+L".menu.json").c_str()),
+        check(menu.write(ctx.Get(),(std::wstring(argv[1])+L".menu.bin").c_str(),(std::wstring(argv[1])+L".menu.json").c_str(),menuInputFixture),
               "menu binary and bounded binding/selection companion write");
         menu.release();check(menu.evidence.draws.empty()&&menu.evidence.meshBuffers.empty()&&menu.rows.empty()&&menu.window.frame==0,
               "closing or aborting a menu run releases staging and source references before another manual capture");

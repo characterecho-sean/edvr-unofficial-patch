@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
 #include <intrin.h>
 #include <iterator>
@@ -16,6 +17,12 @@
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "flat_stationary_camera_core.h"
+#include "flat_camera_inject.h"
+#include "eye_camera_capture_core.h"
+#include "vr_camera_census_core.h"
+#include "native_on_foot.h"
+#include "ui_layer.h"
+#include "../common/native_frame.h"
 #include "journal_watch.h"
 
 namespace edvr { namespace {
@@ -50,11 +57,44 @@ struct RefreshSlot {
     std::atomic<uintptr_t> key{0};
     std::atomic<bool> ready{false};
     uintptr_t camera = 0, ctx = 0;
-    uint64_t callNo = 0, callerRva = 0;
+    uint64_t callNo = 0, observedCallerOffset = 0;
     uint32_t kind = 0;
     float origin[4]{};
     bool originRead = false;
 };
+
+struct EyeSource {
+    std::atomic<bool> ready{false};
+    uint64_t epoch=0, beginQpc=0, endQpc=0;
+    uint32_t ledgerFrame=0, nativeFrame=0, endNativeFrame=0, thread=0;
+    stationcam::Snapshot snapshot;
+};
+struct EyeRefresh {
+    uintptr_t camera=0, ctx=0, view=0;
+    uint64_t call=0, observedCallerOffset=0, preQpc=0, postQpc=0, sourceEpoch=0;
+    uint32_t thread=0, sourceOrdinal=UINT32_MAX, nativeFrame=0, postNativeFrame=0;
+    bool preRead=false, postRead=false, postSeen=false, injected=false;
+    VrCensusSnap pre{}, post{};
+};
+struct EyeCapture {
+    eyecamera::Window window;
+    wchar_t stamp[32]{};
+    std::atomic<uint64_t> live{0};
+    uint64_t epoch=0, frequency=0, beginQpc=0, endQpc=0;
+    uint32_t ledgerFrame=0, nativeFrame=0, ownerThread=0;
+    std::atomic<uint32_t> sources{0}, inflight{0}, foreignRefresh{0};
+    uint32_t refreshes=0;
+    EyeSource source[eyecamera::kSources];
+    EyeRefresh refresh[eyecamera::kRefresh];
+    const char* status="not-armed";
+    uint32_t gui=0, suite=0, effective=0;
+    bool guiKnown=false, onFoot=false, screenHeld=false, screenNamed=false, poseAvailable=false;
+    bool armRefused=false;
+    EdvrNativeNowPose pose{};
+};
+static_assert(sizeof(EyeCapture) <= 8*1024*1024, "manual camera storage must stay bounded");
+thread_local uint64_t g_eyeSourceEpoch=0;
+thread_local uint32_t g_eyeSourceOrdinal=UINT32_MAX;
 enum class Phase : uint8_t { Waiting, Capturing, Done, Refused };
 struct State {
     CodeHook hook;
@@ -62,6 +102,7 @@ struct State {
     std::atomic<uintptr_t> gate{0};
     std::atomic<uintptr_t> forward{0};
     std::atomic<uintptr_t> gameBase{0};
+    std::atomic<bool> automaticLive{false};
     // The resolved addresses (install fills them before it stores gameBase): the decoder's, the MainView call site, the image size.
     stationcam::Game game;
     uintptr_t mainViewCaller = 0, imageSize = 0;
@@ -82,17 +123,21 @@ struct State {
     const char* sceneRefusal = "no-trigger-or-camera-witness";
     const char* captureRefusal = nullptr;
     bool selectedReset = true;
+    EyeCapture eye;
 };
 std::atomic<State*> g_state{nullptr};
 State* stateOrNull() noexcept { return g_state.load(std::memory_order_acquire); }
-State* ensureState() noexcept {
-    if (!flatOriginCaptureEnabled()) return nullptr;
+State* allocateState() noexcept {
     State* p = stateOrNull();
     if (!p) {
         p = new (std::nothrow) State;
         if (p) g_state.store(p, std::memory_order_release); // Present owns initialization
     }
     return p;
+}
+State* ensureState() noexcept {
+    if (!flatOriginCaptureEnabled()) return nullptr;
+    return allocateState();
 }
 
 uint8_t* allocateRelay(uintptr_t target) noexcept {
@@ -129,24 +174,12 @@ bool prepareRelay(void* trampoline, void* opaque) noexcept {
     return true;
 }
 
-void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_t caller,
-                   const float before[4], bool beforeRead, uint64_t epoch) noexcept {
-    State& s = *stateOrNull(); // install is Present-owned, after publication
+void fillSource(State& s, stationcam::Snapshot& out, uintptr_t owner, uintptr_t source,
+                uintptr_t helper, uintptr_t caller, const float before[4], bool beforeRead) noexcept {
     const uintptr_t base = s.gameBase.load(std::memory_order_acquire);
-    const uintptr_t key = source ? source : 1;
-    SourceSlot* chosen = nullptr;
-    for (auto& slot : s.sources) {
-        uintptr_t expected = 0;
-        if (slot.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel)) {
-            chosen = &slot; break;
-        }
-        if (expected == key) return; // one bounded snapshot per renderer source
-    }
-    if (!chosen) { s.sourceOverflow.fetch_add(1, std::memory_order_relaxed); return; }
-    auto& out = chosen->snapshot;
     out.owner = owner; out.source = source; out.helper = helper;
     out.caller = caller;
-    out.callerRva = stationcam::rva(caller, base, s.imageSize);
+    out.observedCallerOffset = stationcam::rva(caller, base, s.imageSize);
     out.sourceBeforeRead = beforeRead;
     if (beforeRead) std::memcpy(out.sourceBefore, before, sizeof(out.sourceBefore));
     out.sourceAfterRead = sehCopy(nullptr, source + 0x70, out.sourceAfter, sizeof(out.sourceAfter));
@@ -160,6 +193,20 @@ void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_
         out.consistent = false; stationcam::fail(out, "helper-copy-mismatch");
     }
     stationcam::capture(&sehCopy, nullptr, s.game, out);
+}
+void observeSource(uintptr_t owner, uintptr_t source, uintptr_t helper, uintptr_t caller,
+                   const float before[4], bool beforeRead, uint64_t epoch) noexcept {
+    State& s = *stateOrNull();
+    const uintptr_t key = source ? source : 1;
+    SourceSlot* chosen = nullptr;
+    for (auto& slot : s.sources) {
+        uintptr_t expected = 0;
+        if (slot.key.compare_exchange_strong(expected, key, std::memory_order_acq_rel)) { chosen=&slot; break; }
+        if (expected == key) return; // automatic capture retains its original per-source policy
+    }
+    if (!chosen) { s.sourceOverflow.fetch_add(1, std::memory_order_relaxed); return; }
+    auto& out=chosen->snapshot;
+    fillSource(s,out,owner,source,helper,caller,before,beforeRead);
     if (s.armFrame != epoch) { out.consistent = false; stationcam::fail(out, "frame-overlap"); }
     chosen->ready.store(true, std::memory_order_release);
     s.captures.fetch_add(1, std::memory_order_relaxed);
@@ -169,20 +216,49 @@ void rendererDetour(uintptr_t owner, uintptr_t source, uintptr_t helper) {
     State& s = *stateOrNull(); // this callback exists only after install
     s.rendererCalls.fetch_add(1, std::memory_order_relaxed);
     const auto original = reinterpret_cast<Renderer>(s.forward.load(std::memory_order_acquire));
-    if (!runtimeFlatProfile()) {
+    EyeCapture& e=s.eye;
+    const uint64_t manual=e.live.load(std::memory_order_acquire);
+    const bool automatic=s.automaticLive.load(std::memory_order_acquire);
+    if (!automatic && !manual) {
         s.profileDropped.store(true, std::memory_order_release);
         s.gate.store(0, std::memory_order_release);
         original(owner, source, helper);
         return;
     }
     const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    const uint64_t epoch = s.armFrame;
+    const uint64_t epoch = automatic ? s.armFrame : 0;
     s.inflight.fetch_add(1, std::memory_order_acq_rel);
     float before[4]{};
     const bool beforeRead = source && sehCopy(nullptr, source + 0x70, before, sizeof(before));
+    EyeSource* row=nullptr;
+    const uint64_t previousEpoch=g_eyeSourceEpoch;
+    const uint32_t previousOrdinal=g_eyeSourceOrdinal;
+    if (manual) {
+        e.inflight.fetch_add(1,std::memory_order_acq_rel);
+        if (e.live.load(std::memory_order_acquire)==manual) {
+            const uint32_t ordinal=e.sources.fetch_add(1,std::memory_order_relaxed);
+            g_eyeSourceEpoch=manual; g_eyeSourceOrdinal=ordinal;
+            if (ordinal<eyecamera::kSources) {
+                row=&e.source[ordinal]; row->epoch=manual; row->ledgerFrame=e.ledgerFrame;
+                row->nativeFrame=nativeOnFootRenderFrame(); row->thread=GetCurrentThreadId();
+                LARGE_INTEGER q; QueryPerformanceCounter(&q); row->beginQpc=q.QuadPart;
+            }
+        }
+    }
     original(owner, source, helper);
-    if (runtimeFlatProfile()) observeSource(owner, source, helper, caller, before, beforeRead, epoch);
-    else {
+    if (row) {
+        fillSource(s,row->snapshot,owner,source,helper,caller,before,beforeRead);
+        row->endNativeFrame=nativeOnFootRenderFrame();
+        if(row->nativeFrame!=row->endNativeFrame || e.live.load(std::memory_order_acquire)!=manual) {
+            row->snapshot.consistent=false;stationcam::fail(row->snapshot,"manual-frame-overlap");
+        }
+        LARGE_INTEGER q; QueryPerformanceCounter(&q); row->endQpc=q.QuadPart;
+        row->ready.store(true,std::memory_order_release);
+    }
+    g_eyeSourceEpoch=previousEpoch; g_eyeSourceOrdinal=previousOrdinal;
+    if (manual) e.inflight.fetch_sub(1,std::memory_order_acq_rel);
+    if (automatic && runtimeFlatProfile()) observeSource(owner, source, helper, caller, before, beforeRead, epoch);
+    else if (automatic) {
         s.profileDropped.store(true, std::memory_order_release);
         s.gate.store(0, std::memory_order_release);
     }
@@ -190,6 +266,7 @@ void rendererDetour(uintptr_t owner, uintptr_t source, uintptr_t helper) {
 }
 
 bool install(State& s) noexcept {
+    if (s.hook.installed()) return true;
     const HMODULE game = GetModuleHandleW(L"EliteDangerous64.exe");
     if (!game) { s.waitReason = "game-module-unavailable"; return false; }
     const uintptr_t base = reinterpret_cast<uintptr_t>(game);
@@ -324,7 +401,7 @@ void report(State& s, uint64_t frame) noexcept {
                 if (!a.stateKnown) ++unknownStates;
             }
         Log::get().note("flat stationary source[%u]: caller=+0x%llX owner=%p S=%p helper=%p C=%p source-valid=%u consistent=%u topology-complete=%u unknown-weight=%u unknown-state=%u reason=%s S-before=(%.7g %.7g %.7g) S-after=(%.7g %.7g %.7g) helper-after=(%.7g %.7g %.7g); helper is stack-local",
-            i, static_cast<unsigned long long>(q.callerRva), reinterpret_cast<void*>(q.owner),
+            i, static_cast<unsigned long long>(q.observedCallerOffset), reinterpret_cast<void*>(q.owner),
             reinterpret_cast<void*>(q.source), reinterpret_cast<void*>(q.helper), reinterpret_cast<void*>(q.rootChild),
             q.validSource ? 1u : 0u, q.consistent ? 1u : 0u, q.complete ? 1u : 0u,
             unknownWeights,unknownStates,q.failure,
@@ -410,7 +487,7 @@ void report(State& s, uint64_t frame) noexcept {
         ++emitted;
         Log::get().note("flat stationary refresh[%u]: camera=%p ctx=%p call=%llu caller=+0x%llX kind=%u camera+50=%s(%.7g %.7g %.7g); address/order join to renderer source UNPROVED",
             i,reinterpret_cast<void*>(slot.camera),reinterpret_cast<void*>(slot.ctx),
-            static_cast<unsigned long long>(slot.callNo),static_cast<unsigned long long>(slot.callerRva),
+            static_cast<unsigned long long>(slot.callNo),static_cast<unsigned long long>(slot.observedCallerOffset),
             slot.kind,slot.originRead?"":"UNKNOWN:",slot.origin[0],slot.origin[1],slot.origin[2]);
     }
 }
@@ -455,7 +532,8 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
             }
         }
         if (!s.closingFrame && (s.captureRefusal || s.witnessFrame >= s.armFrame || completedFrame > s.armFrame + kCaptureFrames)) {
-            s.gate.store(0, std::memory_order_release);
+            s.automaticLive.store(false,std::memory_order_release);
+            if (!s.eye.live.load(std::memory_order_acquire)) s.gate.store(0, std::memory_order_release);
             s.closingFrame = completedFrame;
         }
         if (s.closingFrame && completedFrame > s.closingFrame &&
@@ -472,6 +550,7 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
             return;
         }
         s.armFrame = completedFrame + 1;
+        s.automaticLive.store(true,std::memory_order_release);
         s.gate.store(1, std::memory_order_release);
         s.phase = Phase::Capturing;
         Log::get().note("flat stationary camera: armed automatically for parked cockpit passive-scene candidate after %u consecutive qualified-scene frames and %u fresh Status samples; arm-frame=%llu; selected GPU donor unproved; bounded one-shot source/refresh capture",
@@ -528,7 +607,7 @@ void flatStationaryCameraSelected(uint64_t frame, const float camera[6][4], bool
 }
 
 void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callNo,
-                                 uint64_t callerRva, uint32_t kind) noexcept {
+                                 uint64_t observedCallerOffset, uint32_t kind) noexcept {
     if (!flatOriginCaptureEnabled()) return;
     State* state = stateOrNull();
     if (!state) return; // existing refresh hook can precede this instrument's first Present
@@ -546,7 +625,7 @@ void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callN
         uintptr_t expected = 0;
         if (slot.key.compare_exchange_strong(expected, camera, std::memory_order_acq_rel)) {
             slot.camera = camera; slot.ctx = ctx; slot.callNo = callNo;
-            slot.callerRva = callerRva; slot.kind = kind;
+            slot.observedCallerOffset = observedCallerOffset; slot.kind = kind;
             slot.originRead = sehCopy(nullptr, camera + 0x50, slot.origin, sizeof(slot.origin));
             slot.ready.store(true, std::memory_order_release);
             return;
@@ -554,6 +633,167 @@ void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callN
         if (expected == camera) return;
     }
     s.refreshOverflow.fetch_add(1, std::memory_order_relaxed);
+}
+
+namespace {
+uint64_t eyeQpc() noexcept { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
+struct EyeJson {
+    FILE* file=nullptr;
+    size_t bytes=0;
+    bool ok=true;
+    void put(const char* format, ...) noexcept {
+        if (!ok) return;
+        char text[2048]; va_list args; va_start(args,format);
+        const int count=vsnprintf(text,sizeof(text),format,args); va_end(args);
+        if (count<0 || size_t(count)>=sizeof(text) || bytes+size_t(count)>16*1024*1024) { ok=false; return; }
+        if (fwrite(text,1,size_t(count),file)!=size_t(count)) { ok=false; return; }
+        bytes+=size_t(count);
+    }
+    void floats(const float* p,unsigned n,bool available=true) noexcept {
+        if (!available) { put("null"); return; }
+        put("["); for (unsigned i=0;i<n;++i) { if(i)put(","); if(std::isfinite(p[i]))put("%.9g",p[i]); else put("null"); } put("]");
+    }
+    void string(const char* p) noexcept {
+        put("\"");for(;*p;++p) {if(*p=='\"' || *p=='\\')put("\\%c",*p);else put("%c",*p);}put("\"");
+    }
+    void pose(const char* name,const float* p,bool available) noexcept { put(",\"%s\":",name); floats(p,16,available); }
+};
+void eyeSnapshotJson(EyeJson& j,const stationcam::Snapshot& s,unsigned& stages,unsigned& activities,unsigned& placed) noexcept {
+    j.put("\"owner\":\"%p\",\"source\":\"%p\",\"helper\":\"%p\",\"caller_rva\":%llu,\"valid_source\":%u,\"consistent\":%u,\"complete\":%u,\"failure\":\"%s\",\"source_before\":",
+        reinterpret_cast<void*>(s.owner),reinterpret_cast<void*>(s.source),reinterpret_cast<void*>(s.helper),
+        s.observedCallerOffset,unsigned(s.validSource),unsigned(s.consistent),unsigned(s.complete),s.failure);
+    j.floats(s.sourceBefore,4,s.sourceBeforeRead); j.put(",\"source_after\":"); j.floats(s.sourceAfter,4,s.sourceAfterRead);
+    j.put(",\"helper_after\":"); j.floats(s.helperAfter,4,s.helperAfterRead);
+    j.put(",\"stage_count\":%u,\"stages\":[",s.stageCount);
+    unsigned emitted=0;
+    for(unsigned i=0;i<s.stageCount && stages<eyecamera::kStagesWritten;++i,++stages) {
+        const auto& a=s.stages[i]; if(emitted++)j.put(",");
+        j.put("{\"index\":%u,\"child\":\"%p\",\"stack\":\"%p\",\"predecessor\":\"%p\",\"parent\":%d,\"edge\":\"%c\",\"mode\":%u,\"name\":",i,
+            reinterpret_cast<void*>(a.child),reinterpret_cast<void*>(a.stack),reinterpret_cast<void*>(a.predecessor),a.parent,a.edge,a.mode);
+        if(a.nameRead)j.string(a.stackName); else j.put("null");
+        j.pose("base_pose",a.basePose,a.baseRead); j.pose("output_pose",a.outputPose,a.outputRead);
+        j.put(",\"activity_count\":%llu,\"activities\":[",a.activityCount);
+        unsigned wrote=0;
+        for(unsigned k=0;k<a.activityCount && k<stationcam::kActivities && activities<eyecamera::kActivitiesWritten;++k,++activities) {
+            const auto& b=a.activities[k]; if(wrote++)j.put(",");
+            j.put("{\"index\":%u,\"iface\":\"%p\",\"vtable\":\"%p\",\"concrete_vtable\":\"%p\",\"weight_fn\":\"%p\",\"state_fn\":\"%p\",\"state\":\"%p\",\"name\":",k,
+                reinterpret_cast<void*>(b.iface),reinterpret_cast<void*>(b.vtable),reinterpret_cast<void*>(b.concreteVtable),
+                reinterpret_cast<void*>(b.weightFn),reinterpret_cast<void*>(b.stateFn),reinterpret_cast<void*>(b.state));
+            if(b.nameRead)j.string(b.name); else j.put("null");
+            j.put(",\"weight_known\":%u,\"state_known\":%u,\"weight\":",unsigned(b.weightKnown),unsigned(b.stateKnown));
+            j.floats(&b.weight,1,b.weightKnown); j.pose("pose",b.pose,b.poseRead); j.put("}");
+        }
+        j.put("],\"activities_written\":%u}",wrote);
+    }
+    j.put("],\"stages_written\":%u,\"placed_count\":%u,\"placed_overflow\":%u,\"placed\":[",emitted,s.placedCount,unsigned(s.placedOverflow));
+    emitted=0;
+    for(unsigned i=0;i<s.placedCount && placed<eyecamera::kPlacedWritten;++i,++placed) {
+        const auto& p=s.placed[i]; if(emitted++)j.put(",");
+        j.put("{\"stage\":%u,\"activity\":%u,\"object\":\"%p\",\"record\":\"%p\",\"provider\":\"%p\",\"provider_vtable\":\"%p\",\"provider_fn\":\"%p\",\"identity_complete\":%u,\"provider_known\":%u,\"override_eligible_known\":%u,\"override_eligible\":%u,\"pose_stable\":%u,\"reason\":\"%s\"",p.stage,p.activity,
+            reinterpret_cast<void*>(p.object),reinterpret_cast<void*>(p.record),reinterpret_cast<void*>(p.provider),reinterpret_cast<void*>(p.providerVtable),reinterpret_cast<void*>(p.providerFn),
+            unsigned(p.identityComplete),unsigned(p.providerKnown),unsigned(p.eligibilityKnown),unsigned(p.overrideEligible),unsigned(p.poseStable),p.reason);
+        j.put(",\"config\":\"%p\",\"override_object\":\"%p\",\"override_vtable\":\"%p\",\"override_fn\":\"%p\",\"target_ref\":\"%p\",\"override_handle\":%d,\"config14\":%d,\"config18\":%d,\"target_state\":%d,\"target_state_read\":%u,\"validator_known\":%u,\"record_read\":%u,\"provider_present\":%u,\"override_present\":%u,\"valid5\":%u,\"valid8\":%u,\"pose_reread_complete\":%u",
+            reinterpret_cast<void*>(p.config),reinterpret_cast<void*>(p.overrideObject),reinterpret_cast<void*>(p.overrideVtable),reinterpret_cast<void*>(p.overrideFn),reinterpret_cast<void*>(p.targetRef),p.overrideHandle,p.config14,p.config18,p.targetState,
+            unsigned(p.targetStateRead),unsigned(p.validatorKnown),unsigned(p.recordRead),unsigned(p.providerPresent),unsigned(p.overridePresent),unsigned(p.valid5),unsigned(p.valid8),unsigned(p.poseRereadComplete));
+        j.pose("local",p.local,p.localRead); j.pose("cache",p.cache,p.cacheRead); j.pose("final",p.final,p.finalRead); j.put("}");
+    }
+    j.put("],\"placed_written\":%u",emitted);
+}
+void eyeCameraJson(EyeJson& j,const VrCensusSnap& s,bool read) noexcept {
+    if(!read) { j.put("null"); return; }
+    float origin[4]{},axes[12]{},rows[16]{},view[16]{},projection[16]{},vp[16]{};
+    memcpy(origin,s.bytes+(0x50-kVrCensusSnapFrom),sizeof(origin));
+    memcpy(axes,s.bytes+(0x20-kVrCensusSnapFrom),sizeof(axes));
+    memcpy(view,s.bytes+(0x190-kVrCensusSnapFrom),sizeof(view));
+    memcpy(projection,s.bytes+(0x1D0-kVrCensusSnapFrom),sizeof(projection));
+    memcpy(vp,s.bytes+(0x210-kVrCensusSnapFrom),sizeof(vp));
+    const bool composed=vrCensusComposeRows(s,rows);
+    j.put("{\"kind\":%u,\"flags\":%u,\"stored_negative_origin\":",s.u(0x264),s.u(0x250));
+    j.floats(origin,4); j.put(",\"axes\":");j.floats(axes,12);
+    j.pose("cached_view",view,true);j.pose("cached_projection",projection,true);j.pose("cached_vp",vp,true);j.pose("composed_orientation_projection",rows,composed);j.put("}");
+}
+}
+
+void flatStationaryCameraEyeArm(uint32_t selectedLedgerFrame,const wchar_t* stamp) noexcept {
+    State* s=allocateState();
+    if(!s) { Log::get().note("eye camera: arm unavailable (storage allocation failed)"); return; }
+    EyeCapture& e=s->eye;
+    e.live.store(0,std::memory_order_release);
+    e.armRefused=e.inflight.load(std::memory_order_acquire)!=0;
+    if(e.armRefused) { Log::get().note("eye camera: arm run=%ls unavailable (previous callback still inflight)",stamp?stamp:L"unknown");return; }
+    e.window.arm(selectedLedgerFrame); ++e.epoch;
+    wcsncpy_s(e.stamp,stamp?stamp:L"unknown",_TRUNCATE);
+    e.sources.store(0);e.foreignRefresh.store(0);e.refreshes=0;e.ledgerFrame=0;e.nativeFrame=0;
+    e.beginQpc=0;e.endQpc=0;e.status="queued";
+    e.gui=0;e.suite=0;e.effective=0;e.guiKnown=false;e.onFoot=false;e.screenHeld=false;e.screenNamed=false;e.poseAvailable=false;e.pose={};
+    for(auto& r:e.source) {r.ready.store(false);r.snapshot=stationcam::Snapshot{};}
+    for(auto& r:e.refresh)r=EyeRefresh{};
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);e.frequency=f.QuadPart;
+    Log::get().note("eye camera: armed run=%ls selected-ledger-frame=%u; passive existing source renderer and refresh taps, caps %u source calls/%u refresh calls/8 MiB storage; install at Present only",e.stamp,selectedLedgerFrame,eyecamera::kSources,eyecamera::kRefresh);
+}
+void flatStationaryCameraEyeBoundary(uint32_t ledgerFrame,uint32_t nativeRenderFrame) noexcept {
+    State* s=stateOrNull();if(!s || s->eye.armRefused || !s->eye.window.armed)return;
+    EyeCapture& e=s->eye;
+    if(e.live.exchange(0,std::memory_order_acq_rel)) {e.endQpc=eyeQpc();e.status="closed";}
+    if(!s->automaticLive.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
+    if(!e.window.boundary(ledgerFrame))return;
+    if(!install(*s)) {e.status=s->waitReason;return;}
+    e.ledgerFrame=ledgerFrame;e.nativeFrame=nativeRenderFrame;e.ownerThread=GetCurrentThreadId();e.beginQpc=eyeQpc();
+    e.guiKnown=journalGuiFocus(&e.gui);e.onFoot=nativeOnFootActive();
+    e.suite=g_nativeOnFootCamMode.load(std::memory_order_relaxed);e.effective=g_nativeLastEffective.load(std::memory_order_relaxed);
+    e.screenHeld=uiLayerWorldScreenHeld();e.screenNamed=uiLayerLastFrameNamed();e.poseAvailable=nativeFrameNowPose(e.pose);
+    e.status="sampling";e.live.store(e.epoch,std::memory_order_release);s->gate.store(1,std::memory_order_release);
+}
+void flatStationaryCameraEyeRefreshPre(uintptr_t returnSlot,uintptr_t camera,uintptr_t ctx,uintptr_t view,uint64_t callNo,bool offThread) noexcept {
+    State* s=stateOrNull();if(!s)return;EyeCapture& e=s->eye;
+    if(!e.live.load(std::memory_order_acquire))return;
+    if(offThread || GetCurrentThreadId()!=e.ownerThread) {e.foreignRefresh.fetch_add(1,std::memory_order_relaxed);return;}
+    const uint32_t index=e.refreshes++;if(index>=eyecamera::kRefresh)return;
+    auto& r=e.refresh[index];r.camera=camera;r.ctx=ctx;r.view=view;r.call=callNo;r.thread=GetCurrentThreadId();r.preQpc=eyeQpc();r.nativeFrame=nativeOnFootRenderFrame();
+    r.sourceEpoch=g_eyeSourceEpoch;r.sourceOrdinal=g_eyeSourceOrdinal;
+    uintptr_t ret=0;const uintptr_t base=s->gameBase.load(std::memory_order_acquire);
+    if(sehCopy(nullptr,returnSlot,&ret,sizeof(ret)))r.observedCallerOffset=stationcam::rva(ret,base,s->imageSize);
+    r.preRead=camera && sehCopy(nullptr,camera+kVrCensusSnapFrom,r.pre.bytes,sizeof(r.pre.bytes));
+}
+void flatStationaryCameraEyeRefreshPost(uintptr_t camera,uint64_t callNo,bool injected) noexcept {
+    State* s=stateOrNull();if(!s)return;EyeCapture& e=s->eye;
+    if(!e.live.load(std::memory_order_acquire) || GetCurrentThreadId()!=e.ownerThread)return;
+    const unsigned count=(e.refreshes<eyecamera::kRefresh)?e.refreshes:eyecamera::kRefresh;
+    for(unsigned i=count;i>0;--i) {auto& r=e.refresh[i-1];if(r.call!=callNo || r.camera!=camera)continue;
+        r.postSeen=true;r.injected=injected;r.postQpc=eyeQpc();r.postNativeFrame=nativeOnFootRenderFrame();r.postRead=sehCopy(nullptr,camera+kVrCensusSnapFrom,r.post.bytes,sizeof(r.post.bytes));return;}
+}
+void flatStationaryCameraEyeEnd() noexcept {
+    State* s=stateOrNull();if(!s)return;
+    auto& e=s->eye;if(e.live.exchange(0,std::memory_order_acq_rel)){e.endQpc=eyeQpc();e.status="ended-before-boundary";}
+    e.window.end();if(!s->automaticLive.load(std::memory_order_acquire))s->gate.store(0,std::memory_order_release);
+}
+bool flatStationaryCameraEyeWrite(const wchar_t* path) noexcept {
+    State* s=stateOrNull();if(!s || s->eye.armRefused || !path)return false;
+    auto& e=s->eye;flatStationaryCameraEyeEnd();
+    FILE* file=nullptr;if(_wfopen_s(&file,path,L"wb") || !file)return false;
+    EyeJson j;j.file=file;char stamp[32]{};for(unsigned i=0;i<31 && e.stamp[i];++i)stamp[i]=(e.stamp[i]>=32 && e.stamp[i]<127)?char(e.stamp[i]):'?';
+    const unsigned inflight=e.inflight.load(std::memory_order_acquire),calls=e.sources.load(std::memory_order_acquire);
+    const unsigned sourceCount=calls<eyecamera::kSources?calls:eyecamera::kSources;
+    const unsigned refreshCount=e.refreshes<eyecamera::kRefresh?e.refreshes:eyecamera::kRefresh;
+    j.put("{\"version\":1,\"capture_id\":\"%s\",\"status\":\"%s\",\"sampled\":%u,\"selected_ledger_frame\":%u,\"ledger_frame\":%u,\"native_render_frame\":%u,\"epoch\":%llu,\"qpc_frequency\":%llu,\"begin_qpc\":%llu,\"end_qpc\":%llu,\"refresh_hook\":\"%s\",\"inflight\":%u,\"source_calls\":%u,\"source_overflow\":%u,\"refresh_calls\":%u,\"refresh_overflow\":%u,\"foreign_refresh_unavailable\":%u,",
+        stamp,e.status,unsigned(e.window.sampled),e.window.selected,e.ledgerFrame,e.nativeFrame,e.epoch,e.frequency,e.beginQpc,e.endQpc,flatCameraInjectObserveStatus(),inflight,calls,calls-sourceCount,e.refreshes,e.refreshes-refreshCount,e.foreignRefresh.load());
+    j.put("\"source_hook_installed\":%u,\"resolved_mainview_caller_rva\":%llu,",unsigned(s->hook.installed()),stationcam::rva(s->mainViewCaller,s->gameBase.load(std::memory_order_acquire),s->imageSize));
+    j.put("\"limits\":{\"sources\":16,\"refreshes\":640,\"stages_written\":192,\"activities_written\":1024,\"placed_written\":64,\"file_bytes\":16777216},\"notes\":\"Original game camera pre-copy precedes EDVR injection/flush. Cached derived pre matrices can be stale. Post is collected only when the existing hook already redirected the return; absent post is unavailable. Source topology is post-original guarded memory, not proof of which activity executed. Same-thread source span is an actual nesting witness; absent span has no direct source join. Parent getter/override execution and HMD activity internals remain unavailable. EDVR pose is separate cached runtime evidence; applied alignment vector is unavailable here. All base/output poses use positive origin; camera+0x50 stores negative origin. Serialization quotas are independent of capture quotas.\",\"context\":{\"gui_known\":%u,\"gui\":%u,\"on_foot\":%u,\"suite_raw_known_bit_256\":%u,\"effective_render_mode\":%u,\"screen_held\":%u,\"previous_frame_screen_named\":%u},\"runtime_pose\":{\"available\":%u,\"frame_sequence\":%llu,\"now_sequence\":%u,\"reference_generation\":%u,\"eye_align_applied_serial\":%u,\"render\":",
+        unsigned(e.guiKnown),e.gui,unsigned(e.onFoot),e.suite,e.effective,unsigned(e.screenHeld),unsigned(e.screenNamed),unsigned(e.poseAvailable),e.pose.frameSequence,e.pose.nowSequence,e.pose.referenceGeneration,e.pose.eyeAlignApplied);
+    j.floats(e.pose.render,12,e.poseAvailable&&e.pose.renderValid);j.put(",\"now\":");j.floats(e.pose.now,12,e.poseAvailable&&e.pose.nowValid);j.put(",\"natural_local\":");j.floats(e.pose.local,12,e.poseAvailable&&e.pose.localValid);j.put("},\"sources\":[");
+    unsigned stages=0,activities=0,placed=0;
+    for(unsigned i=0;i<sourceCount;++i) {if(i)j.put(",");const auto& r=e.source[i];const bool ready=r.ready.load(std::memory_order_acquire);
+        j.put("{\"ordinal\":%u,\"available\":%u",i,unsigned(ready));
+        if(ready) {j.put(",\"epoch\":%llu,\"ledger_frame\":%u,\"native_render_frame\":%u,\"end_native_render_frame\":%u,\"thread\":%u,\"begin_qpc\":%llu,\"end_qpc\":%llu,",r.epoch,r.ledgerFrame,r.nativeFrame,r.endNativeFrame,r.thread,r.beginQpc,r.endQpc);eyeSnapshotJson(j,r.snapshot,stages,activities,placed);}j.put("}");}
+    j.put("],\"refreshes\":[");
+    for(unsigned i=0;i<refreshCount;++i) {if(i)j.put(",");const auto& r=e.refresh[i];
+        j.put("{\"ordinal\":%u,\"call\":%llu,\"camera\":\"%p\",\"ctx\":\"%p\",\"view\":\"%p\",\"caller_rva\":%llu,\"thread\":%u,\"source_epoch\":%llu,\"source_ordinal\":%u,\"pre_qpc\":%llu,\"post_qpc\":%llu,\"post_seen\":%u,\"post_injected\":%u,\"pre\":",i,r.call,reinterpret_cast<void*>(r.camera),reinterpret_cast<void*>(r.ctx),reinterpret_cast<void*>(r.view),r.observedCallerOffset,r.thread,r.sourceEpoch,r.sourceOrdinal,r.preQpc,r.postQpc,unsigned(r.postSeen),unsigned(r.injected));
+        eyeCameraJson(j,r.pre,r.preRead);j.put(",\"post\":");eyeCameraJson(j,r.post,r.postRead);j.put(",\"native_render_frame\":%u,\"post_native_render_frame\":%u}",r.nativeFrame,r.postNativeFrame);}
+    j.put("],\"serialization\":{\"stages_written\":%u,\"activities_written\":%u,\"placed_written\":%u},\"empty\":%u}",stages,activities,placed,unsigned(!calls&&!e.refreshes));
+    const bool flushed=fflush(file)==0;const bool closed=fclose(file)==0;
+    const bool ok=j.ok&&flushed&&closed;
+    Log::get().note("eye camera: run=%ls ledger=%u native=%u status=%s sources=%u/%u refreshes=%u/%u inflight=%u foreign=%u bytes=%zu %s; zero rows explicitly unavailable, post requires an existing return callback",e.stamp,e.ledgerFrame,e.nativeFrame,e.status,sourceCount,calls,refreshCount,e.refreshes,inflight,e.foreignRefresh.load(),j.bytes,ok?"written":"WRITE FAILED");
+    return ok;
 }
 
 } // namespace edvr

@@ -2,6 +2,7 @@
 #include "eye_draw_snapshot.h"
 #include <cwchar>
 #include <cmath>
+#include <string>
 
 namespace edvr {
 // Diagnostic families shared by several game menus. They are not a menu identity or a picking mesh.
@@ -95,7 +96,7 @@ public:
         meshUsed[e]+=evidence.meshBytes-meshBefore;vertexUsed[e]+=evidence.vertexBytes-vertexBefore;
         if(evidence.draws.size()>row.draw){evidence.draws.back().join=join;evidence.candidateFrames.back().eye=eye;rows.push_back(row);}
     }
-    bool write(ID3D11DeviceContext* ctx,const wchar_t* binary,const wchar_t* metadata) {
+    bool write(ID3D11DeviceContext* ctx,const wchar_t* binary,const wchar_t* metadata,const std::string& inputObserver={}) {
         const bool binaryOk=evidence.write(ctx,binary);FILE* f=nullptr;if(_wfopen_s(&f,metadata,L"wb")||!f)return false;
         const wchar_t* leaf=wcsrchr(binary,L'\\');leaf=leaf?leaf+1:binary;
         std::fprintf(f,"{\"schema\":\"edvr_late_menu_v1\",\"binary\":\"%ls\",\"binary_written\":%s,\"selected_frame\":%u,\"mesh_limit\":%u,\"vertex_limit\":%u,\"partial_draws\":%u,\"outside_draws\":%u,\"binding_phase\":\"requested_pre_overrides\",\"ps_input_slots\":[0,15],\"texture_pixels\":\"not_captured\",\"cpu_picking\":\"unavailable\",\"eyes\":[",
@@ -118,7 +119,8 @@ public:
             const auto floats=[&](const char* name,const float* values,unsigned count){std::fprintf(f,",\"%s\":[",name);for(unsigned i=0;i<count;++i){if(i)std::fputc(',',f);if(std::isfinite(values[i]))std::fprintf(f,"%.9g",static_cast<double>(values[i]));else std::fputs("null",f);}std::fputc(']',f);};
             floats("froot",a.froot,16);floats("m3p",a.m3p,16);floats("G",a.G,16);floats("body_offset",a.bodyOffset,3);floats("pin_eye_target",a.pinEyeTarget,3);floats("pin_target",a.pinTarget,3);
             std::fputs("}}",f);}
-        std::fputs("]}\n",f);const bool ok=!std::ferror(f);return std::fclose(f)==0&&ok&&binaryOk;
+        std::fputs("],\"input_observer\":",f);std::fputs(inputObserver.empty()?"null":inputObserver.c_str(),f);
+        std::fputs("}\n",f);const bool ok=!std::ferror(f);return std::fclose(f)==0&&ok&&binaryOk;
     }
 };
 } // namespace edvr
