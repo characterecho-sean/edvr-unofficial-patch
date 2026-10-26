@@ -47,6 +47,14 @@ jobs:
           python -m pip install -r tools\requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'Python requirements install failed' }
 
+      - name: Name the runner image for cache keys
+        id: image
+        run: |
+          # The compiler and SDK come with the image; a new image starts a new cache.
+          $image = if ($env:ImageVersion) { "$env:ImageOS-$env:ImageVersion" } else { 'unknown-image' }
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "key=$image`n", (New-Object Text.UTF8Encoding($false)))
+          Write-Output "Runner image: $image"
+
       - name: Select package version
         run: |
           $headCommit = git rev-parse HEAD
@@ -75,7 +83,12 @@ jobs:
               $kind = 'existing-tag-proof'
             } else {
               # This tag exists only in this checkout. It is never pushed or released.
-              $version = "0.0.0-ci.$env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT"
+              # It is the same on every run on purpose: the version is stamped into
+              # build\gen\edvr_version.h, which log.cpp, menu.cpp and others include, so a
+              # stamp that changed per run made every one of those compiles miss the compile
+              # cache (docs/building.md, "The compile cache in CI"). The run is named by the
+              # artifacts, not the stamp.
+              $version = '0.0.0-ci'
               $tag = "v$version"
               git tag $tag HEAD
               if ($LASTEXITCODE -ne 0) { throw "Cannot make local proof tag $tag" }
@@ -90,7 +103,21 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_ENV, "PACKAGE_KIND=$kind`n", (New-Object Text.UTF8Encoding($false)))
           Write-Output "Packaging $tag ($kind) at $headCommit"
 
+      - name: Restore pinned dependency cache
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # The pins are constants in the fetch tools, so the key is their hash. The
+          # verify step below runs on a restored copy as well as a fetched one.
+          path: |
+            third_party/ngx
+            third_party/ffx-dx11
+            third_party/xess
+            third_party/openxr/loader
+          key: edvr-deps-${{ steps.image.outputs.key }}-${{ hashFiles('tools/fetch_ngx.py', 'tools/fetch_ffx_dx11.py', 'tools/fetch_xess.py', 'tools/fetch_openxr_loader.py') }}
+
       - name: Fetch pinned public dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
         run: |
           python tools\fetch_ngx.py --into third_party\ngx
           if ($LASTEXITCODE -ne 0) { throw 'NVIDIA DLSS SDK fetch failed' }
@@ -100,6 +127,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Intel XeSS SDK fetch failed' }
           python tools\fetch_openxr_loader.py
           if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader fetch failed' }
+
+      - name: Verify pinned public dependencies
+        run: |
           python tools\fetch_ngx.py --verify third_party\ngx
           if ($LASTEXITCODE -ne 0) { throw 'NVIDIA DLSS SDK verification failed' }
           python tools\fetch_ffx_dx11.py --verify third_party\ffx-dx11
@@ -109,7 +139,41 @@ jobs:
           python tools\fetch_openxr_loader.py --verify
           if ($LASTEXITCODE -ne 0) { throw 'OpenXR loader verification failed' }
 
+      - name: Save pinned dependency cache
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/ngx
+            third_party/ffx-dx11
+            third_party/xess
+            third_party/openxr/loader
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      # Release tags compile from scratch: a tag's packages are the release, and
+      # nothing about them should depend on what an earlier run left behind.
+      - name: Restore compile cache
+        id: compile_cache
+        if: github.ref_type != 'tag'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/edvr-compile-store
+          key: edvr-cc-${{ steps.image.outputs.key }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            edvr-cc-${{ steps.image.outputs.key }}-${{ github.ref_name }}-
+            edvr-cc-${{ steps.image.outputs.key }}-
+
+      - name: Put the restored compile cache back under build
+        if: github.ref_type != 'tag'
+        run: |
+          # Verifies every restored output against the sha256 its manifest recorded, then
+          # sets its time back; the shader headers and rig times verify themselves.
+          python tools\compile_cache.py --unpack "$env:RUNNER_TEMP\edvr-compile-store" --root build `
+            --extra gen\temporal_shader_bytecode.h --extra gen\openxr_stereo_shader_bytecode.h --extra rig_times.json
+          if ($LASTEXITCODE -ne 0) { throw 'Compile cache unpack failed' }
+
       - name: Run full Windows validation build
+        id: build
         run: |
           $batch = Join-Path $env:GITHUB_WORKSPACE 'build.bat'
           if (-not (Test-Path -LiteralPath $batch)) { throw "Missing $batch" }
@@ -123,6 +187,32 @@ jobs:
           if ($code -ne 0) { throw "Full build failed with exit code $code" }
           $receipt = Join-Path $env:GITHUB_WORKSPACE 'build\full_build_receipt.json'
           if (-not (Test-Path -LiteralPath $receipt)) { throw 'Full build did not write its receipt' }
+
+      - name: Read the compile cache's hits and misses
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'edvr-build.stdout.log'
+          if (Test-Path -LiteralPath $log) {
+            python tools\compile_cache.py --summary $log --markdown $env:GITHUB_STEP_SUMMARY
+          }
+          $phases = 'build\phase_times.json'
+          if (Test-Path -LiteralPath $phases) { Get-Content -LiteralPath $phases }
+
+      - name: Pack the compile cache
+        id: pack
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' && github.ref_type != 'tag' && steps.compile_cache.outputs.cache-hit != 'true' }}
+        run: |
+          # Taken even when a rig failed: the outputs of a compile that succeeded are good.
+          python tools\compile_cache.py --pack "$env:RUNNER_TEMP\edvr-compile-store" --root build `
+            --extra gen\temporal_shader_bytecode.h --extra gen\openxr_stereo_shader_bytecode.h --extra rig_times.json
+          if ($LASTEXITCODE -ne 0) { throw 'Compile cache pack failed' }
+
+      - name: Save compile cache
+        if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/edvr-compile-store
+          key: ${{ steps.compile_cache.outputs.cache-primary-key }}
 
       - name: Package the validated build
         run: |

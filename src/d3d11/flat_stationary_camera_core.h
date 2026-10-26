@@ -243,7 +243,9 @@ struct PlacedDetail {
 };
 struct Snapshot {
     uintptr_t owner = 0, source = 0, helper = 0, rootChild = 0;
-    uint64_t callerRva = 0;
+    uintptr_t caller = 0; // observed return address, not a build binding
+    // Offset from the loaded module base, or 0 outside its image. Serialized as caller_rva.
+    uint64_t observedCallerOffset = 0;
     float sourceBefore[4]{}, sourceAfter[4]{}, helperAfter[4]{};
     bool sourceBeforeRead = false, sourceAfterRead = false, helperAfterRead = false;
     bool validSource = false, consistent = true, complete = true;
@@ -268,27 +270,61 @@ inline bool finitePose(const float pose[16]) noexcept {
     for (unsigned i = 0; i < 16; ++i) if (!std::isfinite(pose[i])) return false;
     return true;
 }
+// CameraState stores four SIMD rows. The renderer consumes their XYZ lanes;
+// fourth lanes need not form a homogeneous matrix and may be nonfinite.
+inline bool finitePoseXYZ(const float pose[16]) noexcept {
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned lane = 0; lane < 3; ++lane)
+            if (!std::isfinite(pose[4 * row + lane])) return false;
+    return true;
+}
+inline bool finitePoseFourth(const float pose[16]) noexcept {
+    for (unsigned row = 0; row < 4; ++row) if (!std::isfinite(pose[4 * row + 3])) return false;
+    return true;
+}
 inline bool pose(Read read, void* context, uintptr_t state, float out[16]) noexcept {
-    return state && bytes(read, context, state + 0x40, out, sizeof(float) * 16) && finitePose(out);
+    // Readability and numeric validity are separate: retain bytes even when a
+    // meaningful lane is invalid, so the diagnostic can explain its refusal.
+    return spanFits(state, 0x40, sizeof(float) * 16) && bytes(read, context, state + 0x40, out, sizeof(float) * 16);
 }
-inline uintptr_t rva(uintptr_t address, uintptr_t base) noexcept {
-    return address >= base && address - base < 0x6000000 ? address - base : 0;
+// address as an offset from the module, for the log; 0 outside [base, base + imageSize) (the PE SizeOfImage, gameBuildIdentity's).
+inline uintptr_t rva(uintptr_t address, uintptr_t base, uintptr_t imageSize) noexcept {
+    return address >= base && address - base < imageSize ? address - base : 0;
 }
-inline bool knownPlacedProvider(uintptr_t base, uintptr_t vtable, uintptr_t fn) noexcept {
-    constexpr uintptr_t known[][2] = {
-        {0x51245B8,0x4899EF4}, {0x5124928,0x1F2370},
-        {0x530B340,0x5293E0}, {0x5355318,0x30B9160},
-        {0x5372368,0xF82590}, {0x5538640,0x5CB1F0},
-        {0x553A8D8,0x3CB93F0}, {0x553AD70,0xF8D000}
-    };
-    const uintptr_t vt = rva(vtable, base), code = rva(fn, base);
-    for (const auto& item : known) if (vt == item[0] && code == item[1]) return true;
+// The game addresses the decoder compares with (issue 124, src\common\game_build.h): kGameRvas holds them as build 334925's RVAs, a
+// Game in the running image, absolute. The glue (flat_stationary_camera_capture.cpp) fills each with base + gameRva(its RVA) once, a
+// rig with base + the RVA; a pure header does not resolve. 0 is an address the resolver did not find, and found() false: the capture
+// does not arm.
+enum GameAddress : unsigned {
+    kChildVtable = 0, kChildVtable10, kStackVtable, kNestedStackVtable, kNestedActivityVtable,
+    kLeafWeightFn, kNestedWeightFn, kLeafStateFn, kNestedStateFn, kPlacedIfaceVtable, kPlacedObjectVtable,
+    kPlacedProviders, // knownPlacedProvider's eight (vtable, function) pairs, in order
+    kGameAddresses = kPlacedProviders + 16
+};
+constexpr uint32_t kGameRvas[kGameAddresses] = {
+    0x5189070, 0x5189078, 0x5189370, 0x5189A18, 0x5189A90,
+    0x8BEA20, 0x108BE80, 0x5294E0, 0x108BA2C, 0x518CF88, 0x518CF18,
+    0x51275F8,0x489C994, 0x5127968,0x1F2410,
+    0x530E500,0x5294E0, 0x53584E8,0x30BBBC0,
+    0x5375518,0xF83630, 0x553B830,0x5CB2F0,
+    0x553DAC8,0x3CBC010, 0x553DF60,0xF8E0A0
+};
+struct Game {
+    uintptr_t at[kGameAddresses] = {};
+    bool found() const noexcept {
+        for (unsigned i = 0; i < kGameAddresses; ++i) if (!at[i]) return false;
+        return true;
+    }
+};
+inline bool knownPlacedProvider(const Game& g, uintptr_t vtable, uintptr_t fn) noexcept {
+    for (unsigned i = 0; i < 8; ++i)
+        if (vtable == g.at[kPlacedProviders + 2 * i] && fn == g.at[kPlacedProviders + 2 * i + 1]) return true;
     return false;
 }
-inline bool childGuard(Read read, void* context, uintptr_t base, uintptr_t child) noexcept {
+inline bool childGuard(Read read, void* context, const Game& g, uintptr_t child) noexcept {
     uintptr_t v0 = 0, v1 = 0;
     return child && get(read, context, child, v0) && get(read, context, child + 0x10, v1) &&
-        v0 == base + 0x5185F90 && v1 == base + 0x5185F98;
+        v0 == g.at[kChildVtable] && v1 == g.at[kChildVtable10];
 }
 inline void fail(Snapshot& out, const char* why) noexcept {
     out.complete = false;
@@ -317,7 +353,7 @@ inline bool readCString(Read read, void* context, uintptr_t at, char out[kNameBy
     return false;
 }
 
-inline void activity(Read read, void* context, uintptr_t base, uintptr_t iface, Activity& out,
+inline void activity(Read read, void* context, const Game& g, uintptr_t iface, Activity& out,
                      Snapshot& snapshot) noexcept {
     out.iface = iface;
     if (!iface || !get(read, context, iface, out.vtable) || !out.vtable ||
@@ -325,49 +361,50 @@ inline void activity(Read read, void* context, uintptr_t base, uintptr_t iface, 
         !get(read, context, out.vtable + 0x28, out.stateFn)) {
         fail(snapshot, "activity-vtable-read"); return;
     }
-    if (out.weightFn == base + 0x8BE920) {
+    if (out.weightFn == g.at[kLeafWeightFn]) {
         uint8_t enabled = 0;
         if (iface < 4 || !get(read, context, iface - 4, enabled)) fail(snapshot, "leaf-weight-read");
         else { out.weightKnown = true; out.weight = enabled ? 1.0f : 0.0f; }
-    } else if (out.weightFn == base + 0x108ADE0) {
+    } else if (out.weightFn == g.at[kNestedWeightFn]) {
         uintptr_t config = 0;
         if (iface < 0xA0 || !get(read, context, iface - 0xA0, config) ||
             !get(read, context, config + 0x34, out.weight) || !std::isfinite(out.weight))
             fail(snapshot, "nested-weight-read");
         else out.weightKnown = true;
     }
-    if (out.stateFn == base + 0x5293E0) {
+    if (out.stateFn == g.at[kLeafStateFn]) {
         out.state = iface + 0x10;
         out.stateKnown = true;
         uintptr_t name = 0;
         if (get(read, context, iface + 8, name)) out.nameRead = readCString(read, context, name, out.name);
         if (iface >= 0x20) get(read, context, iface - 0x20, out.concreteVtable);
-    } else if (out.stateFn == base + 0x108A98C) {
-        if (out.vtable != base + 0x51869B0) { fail(snapshot, "nested-activity-vtable"); return; }
+    } else if (out.stateFn == g.at[kNestedStateFn]) {
+        if (out.vtable != g.at[kNestedActivityVtable]) { fail(snapshot, "nested-activity-vtable"); return; }
         uintptr_t nestedChild = 0;
         if (iface < 0x98 || !get(read, context, iface - 0x98 + 0x78, nestedChild) ||
-            !childGuard(read, context, base, nestedChild)) fail(snapshot, "nested-state-read");
+            !childGuard(read, context, g, nestedChild)) fail(snapshot, "nested-state-read");
         else { out.state = nestedChild + 0x70; out.stateKnown = true; }
     }
     if (out.stateKnown) {
         out.poseRead = pose(read, context, out.state, out.pose);
         if (!out.poseRead) fail(snapshot, "activity-pose-read");
+        else if (!finitePoseXYZ(out.pose)) fail(snapshot, "activity-pose-xyz-nonfinite");
     }
 }
 
 // This is a passive snapshot of Placed's parent-provider identities and raw
 // poses. A second read detects identity changes; pose drift is reported on its
 // own because a parked camera can still animate between the two reads.
-inline void placedDetail(Read read, void* context, uintptr_t base, const Activity& a,
+inline void placedDetail(Read read, void* context, const Game& g, const Activity& a,
                          unsigned stage, unsigned activityIndex, Snapshot& snapshot) noexcept {
-    if (a.vtable != base + 0x5189EA8) return;
+    if (a.vtable != g.at[kPlacedIfaceVtable]) return;
     ++snapshot.placedSeen;
     if (snapshot.placedCount == kPlacedDetails) { snapshot.placedOverflow = true; return; }
     PlacedDetail& d = snapshot.placed[snapshot.placedCount++];
     d.stage = stage; d.activity = activityIndex; d.iface = a.iface;
     if (a.iface < 0x20) { d.reason = "object-underflow"; return; }
     d.object = a.iface - 0x20;
-    if (a.concreteVtable != base + 0x5189E38 || a.stateFn != base + 0x5293E0) {
+    if (a.concreteVtable != g.at[kPlacedObjectVtable] || a.stateFn != g.at[kLeafStateFn]) {
         d.reason = "placed-root-guard-refused"; return;
     }
     if (!spanFits(d.object, 0x1E8, sizeof(uintptr_t)) ||
@@ -375,9 +412,9 @@ inline void placedDetail(Read read, void* context, uintptr_t base, const Activit
         d.reason = "address-overflow"; return;
     }
     uintptr_t objectVtable = 0, ifaceVtable = 0, stateFn = 0;
-    if (!get(read, context, d.object, objectVtable) || objectVtable != base + 0x5189E38 ||
-        !get(read, context, d.iface, ifaceVtable) || ifaceVtable != base + 0x5189EA8 ||
-        !get(read, context, ifaceVtable + 0x28, stateFn) || stateFn != base + 0x5293E0) {
+    if (!get(read, context, d.object, objectVtable) || objectVtable != g.at[kPlacedObjectVtable] ||
+        !get(read, context, d.iface, ifaceVtable) || ifaceVtable != g.at[kPlacedIfaceVtable] ||
+        !get(read, context, ifaceVtable + 0x28, stateFn) || stateFn != g.at[kLeafStateFn]) {
         d.reason = "placed-guard-read"; return;
     }
     if (!get(read, context, d.object + 0x1E8, d.record)) {
@@ -474,7 +511,7 @@ inline void placedDetail(Read read, void* context, uintptr_t base, const Activit
         d.reason = "identity-changed"; return;
     }
     d.identityComplete = true;
-    d.providerKnown = d.providerPresent && knownPlacedProvider(base, d.providerVtable, d.providerFn);
+    d.providerKnown = d.providerPresent && knownPlacedProvider(g, d.providerVtable, d.providerFn);
     d.reason = !d.record ? "record-null" : d.providerPresent ? "none" : "provider-null";
     float localAgain[16]{}, cacheAgain[16]{}, finalAgain[16]{};
     const bool localAgainRead = !d.record || bytes(read, context, d.record + 0x20, localAgain, sizeof(localAgain));
@@ -487,9 +524,9 @@ inline void placedDetail(Read read, void* context, uintptr_t base, const Activit
         std::memcmp(d.final, finalAgain, sizeof(d.final)) == 0;
 }
 
-inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int parent,
+inline void walk(Read read, void* context, const Game& g, uintptr_t child, int parent,
                  char edge, Snapshot& out) noexcept {
-    if (!childGuard(read, context, base, child)) { fail(out, "child-guard"); return; }
+    if (!childGuard(read, context, g, child)) { fail(out, "child-guard"); return; }
     for (unsigned i = 0; i < out.stageCount; ++i) if (out.stages[i].child == child) {
         for (int p = parent; p >= 0; p = out.stages[p].parent)
             if (p == static_cast<int>(i)) { fail(out, "cycle"); return; }
@@ -502,8 +539,8 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
     uintptr_t terminal = 0;
     if (!get(read, context, child + 0x30, stage.stack) || !stage.stack ||
         !get(read, context, stage.stack, stage.stackVtable) ||
-        (stage.stackVtable != base + 0x5186290 && stage.stackVtable != base + 0x5186938) ||
-        !get(read, context, stage.stack + 0x78, terminal) || !childGuard(read, context, base, terminal)) {
+        (stage.stackVtable != g.at[kStackVtable] && stage.stackVtable != g.at[kNestedStackVtable]) ||
+        !get(read, context, stage.stack + 0x78, terminal) || !childGuard(read, context, g, terminal)) {
         fail(out, "stack-identity"); return;
     }
     unsigned membership = 0;
@@ -529,6 +566,7 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
     stage.outputRead = pose(read, context, child + 0x70, stage.outputPose);
     stage.baseRead = pose(read, context, stage.predecessor, stage.basePose);
     if (!stage.outputRead || !stage.baseRead) fail(out, "stage-pose-read");
+    else if (!finitePoseXYZ(stage.outputPose) || !finitePoseXYZ(stage.basePose)) fail(out, "stage-pose-xyz-nonfinite");
     if (stage.activityCount > kActivities) { fail(out, "activity-bound"); return; }
     if (stage.activityCount && !stage.activityArray) { fail(out, "activity-array-null"); return; }
     for (unsigned j = 0; j < stage.activityCount; ++j) {
@@ -536,8 +574,8 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
         if (!get(read, context, stage.activityArray + 8 * j, iface)) {
             fail(out, "activity-pointer-read"); continue;
         }
-        activity(read, context, base, iface, stage.activities[j], out);
-        placedDetail(read, context, base, stage.activities[j], index, j, out);
+        activity(read, context, g, iface, stage.activities[j], out);
+        placedDetail(read, context, g, stage.activities[j], index, j, out);
         if (!get(read, context, stage.activityArray + 8 * j, again) || again != iface) {
             out.consistent = false; fail(out, "activity-pointer-changed");
         }
@@ -559,18 +597,18 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
     // that selected child, then the inherited predecessor edge below.
     for (unsigned j = 0; j < stage.activityCount; ++j) {
         const Activity& a = stage.activities[j];
-        if (a.stateFn == base + 0x108A98C && a.stateKnown) {
+        if (a.stateFn == g.at[kNestedStateFn] && a.stateKnown) {
             if (a.weightKnown && a.weight <= 0.0f) ++stage.inactiveNestedOmitted;
-            else walk(read, context, base, a.state - 0x70, static_cast<int>(index), 'N', out);
+            else walk(read, context, g, a.state - 0x70, static_cast<int>(index), 'N', out);
         }
     }
-    if (stage.predecessor == stage.stack + 0xB8 && stage.stackVtable == base + 0x5186290) return;
-    if (stage.predecessor >= 0x70 && childGuard(read, context, base, stage.predecessor - 0x70))
-        walk(read, context, base, stage.predecessor - 0x70, static_cast<int>(index), 'P', out);
-    else if (stage.stackVtable == base + 0x5186938) {
+    if (stage.predecessor == stage.stack + 0xB8 && stage.stackVtable == g.at[kStackVtable]) return;
+    if (stage.predecessor >= 0x70 && childGuard(read, context, g, stage.predecessor - 0x70))
+        walk(read, context, g, stage.predecessor - 0x70, static_cast<int>(index), 'P', out);
+    else if (stage.stackVtable == g.at[kNestedStackVtable]) {
         uintptr_t parentChild = 0, parentBase = 0;
         if (!get(read, context, stage.stack + 0x1B8, parentChild) ||
-            !childGuard(read, context, base, parentChild) ||
+            !childGuard(read, context, g, parentChild) ||
             !get(read, context, parentChild + 0x40, parentBase) ||
             parentBase != stage.predecessor) fail(out, "nested-parent-base");
         else {
@@ -578,18 +616,18 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
             uintptr_t parentStack = 0, parentStackVtable = 0;
             if (!get(read, context, parentChild + 0x30, parentStack) ||
                 !get(read, context, parentStack, parentStackVtable) ||
-                parentStackVtable != base + 0x5186290 || parentBase != parentStack + 0xB8)
+                parentStackVtable != g.at[kStackVtable] || parentBase != parentStack + 0xB8)
                 fail(out, "nested-parent-baseline-unknown");
         }
     } else fail(out, "predecessor-unresolved");
 }
 
-inline void capture(Read read, void* context, uintptr_t base, Snapshot& out) noexcept {
+inline void capture(Read read, void* context, const Game& g, Snapshot& out) noexcept {
     if (!out.source || out.source < 0x70) { fail(out, "source-null"); return; }
     out.rootChild = out.source - 0x70;
-    if (!childGuard(read, context, base, out.rootChild)) { fail(out, "source-child-guard"); return; }
+    if (!childGuard(read, context, g, out.rootChild)) { fail(out, "source-child-guard"); return; }
     out.validSource = true;
-    walk(read, context, base, out.rootChild, -1, 'R', out);
+    walk(read, context, g, out.rootChild, -1, 'R', out);
 }
 
 } } // namespace edvr::stationcam

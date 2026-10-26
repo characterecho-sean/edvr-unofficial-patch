@@ -45,6 +45,18 @@ struct PluginBridge {
 static PluginBridge g_pluginBridge;
 
 struct BlitConstants { float bounds[4], clampUV[4]; float encodeSRGB=0, pad[3]{}; };
+// F106: the share shader's constants (kStereoShareHlsl's cbuffer Share, in its order).
+struct ShareConstants {
+  float bounds[4], clampUV[4];   // the right eye's blit: the capture's crop and clamp
+  float misc[4];                 // encode sRGB, the share weight, 1 with a hidden-area mask, 0
+  float rot[3][4];               // a left view direction to the right view, row-major
+  float leftTan[4], rightTan[4]; // left, right, up, down
+  float rightPlace[4];           // the right eye's viewport as fractions of its swapchain image: u0, v0, u1, v1
+  float rightAng[4];             // that rectangle as axis angles: x min, x max, y min, y max (radians)
+  float leftSize[4];             // the left swapchain image: width, height
+  float band[4];                 // the margin inside the edge, 1 / the band (radians)
+};
+static_assert(sizeof(ShareConstants)==192,"share HLSL constant-buffer packing");
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
 static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
@@ -159,6 +171,8 @@ XrResult D3D11Stereo::shutdown() {
   // Never clear the caller's immediate pipeline state during cleanup.
   context_.Reset();
   blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();fadeBlend_.Reset();
+  sharePixelShader_.Reset();shareConstants_.Reset();shareBlend_.Reset();shareMask_.Reset();shareMaskCpu_=shareview::HiddenMask{};shareMaskRevision_=0;shareMaskFov_={};
+  shareMaskPixels_[0]=shareMaskPixels_[1]=0;shareCoverageKnown_=false;shareFacts_={};
   for(auto& eye:eyes_){
     eye.rtvs.clear();eye.images.clear();
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
@@ -257,6 +271,8 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   if(FAILED(device->CreateSamplerState(&sampler,&blitSampler_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   if(FAILED(device->CreateVertexShader(kStereoSkyboxVsBytecode,sizeof(kStereoSkyboxVsBytecode),nullptr,&skyboxVertexShader_))||
      FAILED(device->CreatePixelShader(kStereoSkyboxPsBytecode,sizeof(kStereoSkyboxPsBytecode),nullptr,&skyboxPixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  // F106: the left eye's share (kStereoShareHlsl), drawn with the blit's vertex shader.
+  if(FAILED(device->CreatePixelShader(kStereoSharePsBytecode,sizeof(kStereoSharePsBytecode),nullptr,&sharePixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   initShaderMs_=msSince(stretch);
   bd={sizeof(SkyConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
   if(FAILED(device->CreateBuffer(&bd,nullptr,&skyboxConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
@@ -272,14 +288,53 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   fadeDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ZERO;fadeDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;fadeDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
   fadeDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN|D3D11_COLOR_WRITE_ENABLE_BLUE;
   if(FAILED(device->CreateBlendState(&fadeDesc,&fadeBlend_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  // F106: the share over the left eye's own image: src * a + dest * (1 - a) on red, green and blue, with a the shader's alpha (exactly the source at a = 1, exactly the
+  // destination at a = 0, which the shader never writes: it discards). Alpha is left as drawn.
+  D3D11_BLEND_DESC shareDesc{};
+  shareDesc.RenderTarget[0].BlendEnable=TRUE;
+  shareDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;shareDesc.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;shareDesc.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+  shareDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ZERO;shareDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;shareDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+  shareDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN|D3D11_COLOR_WRITE_ENABLE_BLUE;
+  if(FAILED(device->CreateBlendState(&shareDesc,&shareBlend_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  bd={sizeof(ShareConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
+  if(FAILED(device->CreateBuffer(&bd,nullptr,&shareConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   ready_=true;return XR_SUCCESS;
+}
+// F106: the right eye's hidden-area mask (eye_share.h, buildHiddenMask) as an R8 texture over the right view's fov, built again when the mesh, the fov (by more than
+// 1e-4 rad on any edge) or the right swapchain image's size changes. No mesh: no mask (the shader's mask flag is 0). False when the mesh cannot be used or the texture
+// cannot be made: the caller then draws no share this frame, rather than one that could show a masked corner.
+bool D3D11Stereo::ensureShareMask(const XrFovf& fov,const StereoHiddenArea* hidden,bool& rebuilt) {
+  rebuilt=false;
+  const bool have=hidden&&hidden->vertices&&hidden->indices&&hidden->vertexCount&&hidden->indexCount>=3;
+  if(!have) {
+    if(shareMask_||shareMaskRevision_){shareMask_.Reset();shareMaskCpu_=shareview::HiddenMask{};shareMaskRevision_=0;rebuilt=true;}
+    return true;
+  }
+  const auto sameAngle=[](float a,float b){return std::fabs(double(a)-double(b))<=1e-4;};
+  if(shareMask_&&shareMaskRevision_==hidden->revision&&sameAngle(shareMaskFov_.angleLeft,fov.angleLeft)&&sameAngle(shareMaskFov_.angleRight,fov.angleRight)&&
+     sameAngle(shareMaskFov_.angleUp,fov.angleUp)&&sameAngle(shareMaskFov_.angleDown,fov.angleDown)&&shareMaskPixels_[0]==eyes_[1].width&&
+     shareMaskPixels_[1]==eyes_[1].height)
+    return true;
+  shareMask_.Reset();shareMaskCpu_=shareview::HiddenMask{};shareMaskRevision_=0;rebuilt=true;
+  shareview::HiddenMask mask;
+  if(!shareview::buildHiddenMask(hidden->vertices,hidden->vertexCount,hidden->indices,hidden->indexCount,shareview::tangentsOf(fov),eyes_[1].width,eyes_[1].height,mask))
+    return false;
+  D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=mask.size;td.MipLevels=td.ArraySize=1;td.Format=DXGI_FORMAT_R8_UNORM;td.SampleDesc.Count=1;
+  td.Usage=D3D11_USAGE_IMMUTABLE;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+  const D3D11_SUBRESOURCE_DATA data{mask.texels.data(),mask.size,0};
+  ComPtr<ID3D11Texture2D> texture;
+  if(FAILED(device_->CreateTexture2D(&td,&data,&texture))||FAILED(device_->CreateShaderResourceView(texture.Get(),nullptr,&shareMask_))){shareMask_.Reset();return false;}
+  shareMaskCpu_=std::move(mask);shareMaskRevision_=hidden->revision;shareMaskFov_=fov;shareMaskPixels_[0]=eyes_[1].width;shareMaskPixels_[1]=eyes_[1].height;
+  return true;
 }
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose) {
+                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
+  leftEyeShare=comfort::sanitize(leftEyeShare);
+  shareFacts_.drawn=shareFacts_.refused=false;
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -334,6 +389,44 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     viewports[i]={x,y,right-x,bottom-y,0,1};
     clearFirst[i]=x>0.f||y>0.f||right<w||bottom<h;
   }
+  // F106: the left eye's share of the right eye's image, set up before any runtime image is acquired (eye_share.h has the mapping). Views it cannot map, or a mask it
+  // cannot build, refuse it for this frame: the left eye keeps its own image. A fully black frame draws no scene, so no share either.
+  ShareConstants share{};bool shareOn=false;
+  if(leftEyeShare>0.f&&fade<1.f) {
+    const double place[4]={double(viewports[1].TopLeftX)/eyes_[1].width,double(viewports[1].TopLeftY)/eyes_[1].height,
+                           double(viewports[1].TopLeftX+viewports[1].Width)/eyes_[1].width,double(viewports[1].TopLeftY+viewports[1].Height)/eyes_[1].height};
+    const shareview::Mapping m=shareview::makeMapping(views[0].fov,views[0].pose.orientation,views[1].fov,views[1].pose.orientation,place);
+    bool rebuilt=false;
+    if(!m.valid||!ensureShareMask(views[1].fov,rightHidden,rebuilt)) shareFacts_.refused=true;
+    else {
+      std::memcpy(share.bounds,constants[1].bounds,sizeof(share.bounds));std::memcpy(share.clampUV,constants[1].clampUV,sizeof(share.clampUV));
+      share.misc[0]=constants[1].encodeSRGB;share.misc[1]=leftEyeShare;share.misc[2]=shareMask_?1.f:0.f;
+      for(int r=0;r<3;++r)for(int c=0;c<3;++c)share.rot[r][c]=float(m.rot[r][c]);
+      const double lt[4]={m.left.left,m.left.right,m.left.up,m.left.down},rt[4]={m.right.left,m.right.right,m.right.up,m.right.down};
+      for(int k=0;k<4;++k){share.leftTan[k]=float(lt[k]);share.rightTan[k]=float(rt[k]);share.rightPlace[k]=float(m.place[k]);share.rightAng[k]=float(m.ang[k]);}
+      share.leftSize[0]=float(eyes_[0].width);share.leftSize[1]=float(eyes_[0].height);
+      share.band[0]=float(m.marginRad);share.band[1]=float(1.0/m.bandRad);
+      shareOn=true;
+      double ypr[3];shareview::yawPitchRollDeg(m.rot,ypr);
+      for(int k=0;k<3;++k)shareFacts_.rotationDeg[k]=float(ypr[k]);
+      for(int k=0;k<4;++k){shareFacts_.leftTangents[k]=float(lt[k]);shareFacts_.rightTangents[k]=float(rt[k]);}
+      shareFacts_.hiddenTriangles=shareMask_?shareMaskCpu_.triangles:0u;
+      // The left eye's part taken from the right at full weight: computed again only when what decides it changes (the relative rotation, either fov, either
+      // placement, by more than 1e-5; or the mask), so not every frame of a press.
+      const double leftPlace[4]={double(viewports[0].TopLeftX)/eyes_[0].width,double(viewports[0].TopLeftY)/eyes_[0].height,
+                                 double(viewports[0].TopLeftX+viewports[0].Width)/eyes_[0].width,double(viewports[0].TopLeftY+viewports[0].Height)/eyes_[0].height};
+      double key[25];int n=0;
+      for(int r=0;r<3;++r)for(int c=0;c<3;++c)key[n++]=m.rot[r][c];
+      for(int k=0;k<4;++k){key[n++]=lt[k];key[n++]=rt[k];key[n++]=m.place[k];key[n++]=leftPlace[k];}
+      bool same=shareCoverageKnown_&&!rebuilt;
+      for(int k=0;k<n&&same;++k)same=std::fabs(key[k]-shareCoverageKey_[k])<=1e-5;
+      if(!same) {
+        const auto c=shareview::coverageOf(m,leftPlace,shareMask_?&shareMaskCpu_:nullptr);
+        shareFacts_.coverage=float(c.mean);shareFacts_.coverageWhole=float(c.whole);
+        std::memcpy(shareCoverageKey_,key,sizeof(key));shareCoverageKnown_=true;
+      }
+    }
+  }
   auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
   auto* drawContext=ownedImmediateScene_?immediateContext_.Get():context_.Get();
   for(unsigned i=0;i<2;++i) {
@@ -375,6 +468,23 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       drawContext->RSSetViewports(1,&viewports[i]);
       drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
       drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+      // F106 (native on foot, fix.native_on_foot_ads_sight_both_eyes): the LEFT eye takes the RIGHT eye's image, turned into the left view, by the share times its
+      // coverage, over the left eye's own image just drawn. The source is the right eye's capture (srvs[1]): complete before this call (both eyes are captured and
+      // any shared transfer completed before compose), never written by it (the passes here write only the swapchain images), and it already holds the scene, the HUD
+      // and the menu. Same viewport as the left eye's own image, so a trimmed border stays black; the fade and the plugins' overlay below apply over it.
+      if(i==0&&shareOn) {
+        ID3D11ShaderResourceView* shareViews[2]={srvs[1].Get(),shareMask_.Get()};
+        drawContext->PSSetShader(sharePixelShader_.Get(),nullptr,0);
+        drawContext->PSSetShaderResources(0,2,shareViews);
+        drawContext->PSSetConstantBuffers(0,1,shareConstants_.GetAddressOf());
+        drawContext->UpdateSubresource(shareConstants_.Get(),0,nullptr,&share,0,0);
+        drawContext->OMSetBlendState(shareBlend_.Get(),nullptr,~0u);drawContext->Draw(3,0);
+        drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+        drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
+        drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
+        ID3D11ShaderResourceView* ownViews[2]={srvs[i].Get(),nullptr};drawContext->PSSetShaderResources(0,2,ownViews);
+        shareFacts_.drawn=true;
+      }
       if(fade>0.f) {
         // The same triangle again under the fade blend: the source is multiplied by zero, so what it samples does not matter, and the destination keeps 1-fade.
         const float factor[4]={fade,fade,fade,fade};

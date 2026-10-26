@@ -25,11 +25,32 @@
 //     price, pinned in section 82 too: the check cannot see sub-texel motion, and this is what separates four texels from sixteen). A depth 1.1%
 //     off, 1.1% off the other way, a sky, and a surface twice as near are all a different surface: reset; 0.9% off either way, and 5e-7 off at a
 //     depth where the 1e-6 floor is wider than 1%, are the same surface: kept; 2e-6 off at that depth is not.
+//  3. A slope keeps its history (design doc section 104, 2026-10-22: a still camera lost the history of the far floor in a band about 33 rows below the
+//     horizon, because the best of four texels is a point test and a plane's depth changes by delta / y of itself across delta pixels). When the point
+//     test refuses, historyDepthMatches also passes a footprint of four texels that is planar (the cross difference d00 + d11 - d10 - d01 within the
+//     tolerance) and whose bilinear value at the exact position is within the tolerance of the expected depth; only a footprint wholly inside the image
+//     with four finite, non-zero texels is asked. The scenes are tools\flat_temporal_test\flat_history_depth_model.h's rig16 plan, each under a previous
+//     phase that is a shipped Halton point (the current phase is 0, so the colour a pixel samples is its texel's): a still floor and a still tilted
+//     plane (kept wherever the footprint is inside, where the point test alone refused up to the whole frame), a floor 2% deeper last frame (a mover
+//     receding 2% a frame: refused as before), a near object that moved away and a roof against the sky (decided as before wherever the footprint holds the
+//     object or the sky), a surface that is a checker's interpolation (not planar: refused), and a horizon on a texel row (the zero texel is not asked).
+//     The kernel is compared pixel for pixel with the CPU model of the rule, which tools\flat_temporal_test holds to the HLSL's text and to those scenes
+//     (a pixel within 0.2% of a threshold is left out). The new rule's own mutants are run against this test alone.
+//  4. A junction that is still there keeps its history, one that left does not (design doc section 104, 2026-10-22, "Junctions: the residual band, and the
+//     persistence test"). When the point test and the footprint test both refuse, historyDepthMatches asks junctionPersists: one of the four quads of texels
+//     edge-adjacent to the footprint (right, left, down, up) is planar and its plane at the exact position has the expected depth (the pixel's own surface),
+//     and every footprint texel off that plane is carried into this frame (cameraAfter) onto a current depth texel within 1% (floor 1e-6) of its depth. taa()
+//     reads the current depth at t1 (the prep's output) and the camera rows from the same constants as the prep. The same rig's scenes add a floor meeting a
+//     wall and a floor under a parked hull (kept where the footprint test refuses), a hull that moved 2 pixels (the floor it uncovered is refused, and the
+//     refusal is the persistence half's: the ghost guard is reached), and a two-texel tilted patch (kept by the footprint test, which no quad beside it
+//     replaces). The rig's camera is still and its rows carry no jitter, so the camera-origin and NDC-shift mutants are the CPU cases' alone
+//     (tools\flat_temporal_test\flat_history_junction_tests.h).
 #pragma once
 #include <d3dcompiler.h>
 #include <string>
 #include <vector>
 #include "flat_steady_depth_gpu_tests.h"   // steadygpu::Rig, and the shaders' source and bytecode
+#include "../flat_temporal_test/flat_history_depth_model.h"   // the CPU model of the rule and the 16x16 scenes
 
 namespace edvr {
 // flat_mono_resolve.cpp, at its foot: the TAA kernel the next initialisation makes is this bytecode instead of the shipped one. Test-only.
@@ -193,6 +214,38 @@ inline void disocclusionTest(Rig& r) {
     }
 }
 
+// ---- 3. a slope keeps its history, a step does not ----------------------------------------------------------------------------------------
+static_assert(histdepth::rig16::N == int(steadygpu::W) && histdepth::rig16::N == int(steadygpu::H), "the model's scenes are the rig's size");
+inline void slopeTest(Rig& r) {
+    startRun(r);
+    size_t count = 0;
+    const histdepth::rig16::Plan* plan = histdepth::rig16::plan(&count);
+    for (size_t i = 0; i < count; ++i) {
+        const histdepth::rig16::Scene scene = histdepth::rig16::build(plan[i]);
+        const std::vector<int> red = runPair(r, scene.before, scene.now, scene.px, scene.py);
+        const std::vector<histdepth::Verdict> want = histdepth::rig16::predict(scene, histdepth::Rule());
+        unsigned compared = 0, wrong = 0, unreadable = 0;
+        char first[80] = "";
+        for (UINT y = 0; y < H; ++y)
+            for (UINT x = 0; x < W; ++x) {
+                const size_t k = size_t(y) * W + x;
+                if (!(scene.now[k] > 0) || want[k].margin < 2e-3f) continue;   // a sky pixel has no camera term; a threshold's edge is not the model's to call
+                ++compared;
+                const int s = state(red, x, y);
+                if (s < 0) { ++unreadable; continue; }
+                if ((s == 1) != want[k].kept) {
+                    if (wrong == 0) std::snprintf(first, sizeof(first), ", first at (%u, %u): the kernel %s it, the model %s it", x, y, s == 1 ? "kept" : "reset", want[k].kept ? "keeps" : "resets");
+                    ++wrong;
+                }
+            }
+        char what[400];
+        std::snprintf(what, sizeof(what),
+                      "taa history depth: %s, previous phase %u (%+.3f, %+.3f): of the %u pixels the model is sure of, %u differ%s and %u are neither kept nor reset",
+                      scene.name, plan[i].n, scene.px, scene.py, compared, wrong, first, unreadable);
+        check(compared > 0 && wrong == 0 && unreadable == 0, what);
+    }
+}
+
 // ---- the kernel's source, one rule flipped at a time ----------------------------------------------------------------------------------
 inline bool compileTaa(const std::string& hlsl, std::vector<unsigned char>& bytes) {
     const std::string full = std::string(edvr::kEngineMotionCoreHlsl) + hlsl;
@@ -239,10 +292,41 @@ inline void mutationChecks(Rig& r) {
         {"the tolerance is the smaller of the floor and the relative term", "max(kStaleDepthFloor,expected*kStaleDepthRel)",
          "min(kStaleDepthFloor,expected*kStaleDepthRel)", nullptr},
     };
+    // The footprint test's and the junction test's own mutants (the second half of historyDepthMatches and junctionPersists): each must fail the slope test, which is
+    // the only test that asks them.
+    static const char* const kFootprintKeep = "if(abs(planeDepth-expected)<=tol && abs(d00+d11-d10-d01)<=tol)return true;";
+    static const char* const kJunctionCall = "return junctionPersists(base,raster,footprint,expected,tol);";
+    static const char* const kOwnTests =
+        "if(!(abs(quad.x+quad.w-quad.y-quad.z)<=tol) || !(abs(quadDepthAt(quad,raster-float2(at))-expected)<=tol))continue;";
+    static const Mutant footprintMutants[] = {
+        {"the footprint and junction tests are gone: the point test alone, the rule as it was",
+         "if(abs(planeDepth-expected)<=tol && abs(d00+d11-d10-d01)<=tol)return true;\n    return junctionPersists(base,raster,footprint,expected,tol);", "return false;", nullptr},
+        {"the footprint test is gone (the junction test stays)", kFootprintKeep, "", nullptr},
+        {"the junction test is gone (the rule as it was before it)", kJunctionCall, "return false;", nullptr},
+        {"the junction test has no persistence half: the pixel's own surface beside the footprint is enough", "[loop]for(int k=0;k<4;++k) {", "[loop]for(int k=0;k<0;++k) {", nullptr},
+        {"a footprint texel that lands outside the image reads the current depth's edge texels",
+         "if(!isfinite(e) || !all(cur>=0) || !all(cur<float2(hi)))return false;\n        const int2 curBase=int2(floor(cur));",
+         "if(!isfinite(e))return false;\n        const int2 curBase=clamp(int2(floor(clamp(cur,-1.0,float2(hi)+1.0))),0,hi-1);", nullptr},
+        {"the adjacent quad's cross difference is not asked", kOwnTests, "if(!(abs(quadDepthAt(quad,raster-float2(at))-expected)<=tol))continue;", nullptr},
+        {"the adjacent quad's plane at the exact position is not compared with the expected depth", kOwnTests, "if(!(abs(quad.x+quad.w-quad.y-quad.z)<=tol))continue;", nullptr},
+        {"a footprint texel is another surface only 8 tolerances off the plane", "if(abs(depthThen-quadDepthAt(own,float2(texel-ownBase)))<=tol)continue;",
+         "if(abs(depthThen-quadDepthAt(own,float2(texel-ownBase)))<=8.0*tol)continue;", nullptr},
+        {"the footprint's cross difference is not asked", "&& abs(d00+d11-d10-d01)<=tol)return true;", ")return true;", nullptr},
+        {"the footprint's cross difference may be 8 tolerances", "abs(d00+d11-d10-d01)<=tol", "abs(d00+d11-d10-d01)<=8.0*tol", nullptr},
+        {"the mean of the four texels stands for the value at the exact position", "lerp(lerp(d00,d10,at.x),lerp(d01,d11,at.x),at.y)", "(d00+d10+d01+d11)*.25", nullptr},
+        {"the horizontal fraction weights the rows and the vertical one the columns", "lerp(lerp(d00,d10,at.x),lerp(d01,d11,at.x),at.y)",
+         "lerp(lerp(d00,d10,at.y),lerp(d01,d11,at.y),at.x)", nullptr},
+        {"a footprint outside the image is asked, its edge texels repeated",
+         "if(any(base<0) || any(base>=hi))return false;\n    const float d00=HistoryDepth.Load(int3(base,0)), d10=HistoryDepth.Load(int3(base+int2(1,0),0));\n"
+         "    const float d01=HistoryDepth.Load(int3(base+int2(0,1),0)), d11=HistoryDepth.Load(int3(base+int2(1,1),0));",
+         "const float d00=HistoryDepth.Load(int3(clamp(base,0,hi),0)), d10=HistoryDepth.Load(int3(clamp(base+int2(1,0),0,hi),0));\n"
+         "    const float d01=HistoryDepth.Load(int3(clamp(base+int2(0,1),0,hi),0)), d11=HistoryDepth.Load(int3(clamp(base+int2(1,1),0,hi),0));", nullptr},
+        {"a zero or non-finite texel does not bar the footprint", "if(!all(isfinite(footprint)) || !all(footprint>0))return false;", "", nullptr},
+    };
     const std::string shipped = edvr::kFlatMonoShaderSource;
     int caught = 0;
-    struct Outcome { bool ran = false; int silhouette = 0, disocclusion = 0; std::string firstSilhouette, firstDisocclusion; };
-    auto runMutated = [&](const std::string& hlsl) {
+    struct Outcome { bool ran = false; int silhouette = 0, disocclusion = 0, slope = 0; std::string firstSilhouette, firstDisocclusion, firstSlope; };
+    auto runMutated = [&](const std::string& hlsl, bool oldTests, bool slopeToo) {
         Outcome o;
         std::vector<unsigned char> bytes;
         if (!compileTaa(hlsl, bytes)) return o;
@@ -250,12 +334,19 @@ inline void mutationChecks(Rig& r) {
         if (FAILED(r.device->CreateComputeShader(bytes.data(), bytes.size(), nullptr, probe.GetAddressOf()))) return o;
         edvr::flatMonoResolveTestTaaBytecode(bytes.data(), bytes.size());
         o.ran = true;
-        mutationFailures = &o.silhouette; mutationFirst.clear();
-        silhouetteTest(r);
-        o.firstSilhouette = mutationFirst;
-        mutationFailures = &o.disocclusion; mutationFirst.clear();
-        disocclusionTest(r);
-        o.firstDisocclusion = mutationFirst;
+        if (oldTests) {
+            mutationFailures = &o.silhouette; mutationFirst.clear();
+            silhouetteTest(r);
+            o.firstSilhouette = mutationFirst;
+            mutationFailures = &o.disocclusion; mutationFirst.clear();
+            disocclusionTest(r);
+            o.firstDisocclusion = mutationFirst;
+        }
+        if (slopeToo) {
+            mutationFailures = &o.slope; mutationFirst.clear();
+            slopeTest(r);
+            o.firstSlope = mutationFirst;
+        }
         mutationFailures = nullptr;
         return o;
     };
@@ -267,9 +358,9 @@ inline void mutationChecks(Rig& r) {
                                !std::memcmp(bytes.data(), edvr::kFlatMonoTaaBytecode, bytes.size());
         std::printf("flat mono resolve: taa history-depth mutation harness: the shipped taa source compiled here is %s the generated bytecode (%zu bytes)\n",
                     sameBytes ? "byte-for-byte" : "NOT byte-for-byte", bytes.size());
-        const Outcome o = runMutated(shipped);
-        check(o.ran && o.silhouette == 0 && o.disocclusion == 0,
-              "taa history depth mutations: control: the unmutated kernel, compiled here and run through the test seam, passes both tests");
+        const Outcome o = runMutated(shipped, true, true);
+        check(o.ran && o.silhouette == 0 && o.disocclusion == 0 && o.slope == 0,
+              "taa history depth mutations: control: the unmutated kernel, compiled here and run through the test seam, passes all three tests");
     }
     for (const Mutant& m : mutants) {
         bool once = false;
@@ -277,7 +368,7 @@ inline void mutationChecks(Rig& r) {
         char what[300];
         std::snprintf(what, sizeof(what), "taa history depth mutations: \"%s\": its anchor is in the shader source exactly once (a moved anchor tests nothing)", m.name);
         check(once, what);
-        const Outcome o = once ? runMutated(hlsl) : Outcome{};
+        const Outcome o = once ? runMutated(hlsl, true, false) : Outcome{};
         std::snprintf(what, sizeof(what), "taa history depth mutations: \"%s\" compiles and makes a compute shader", m.name);
         check(o.ran, what);
         if (!o.ran) continue;
@@ -291,10 +382,28 @@ inline void mutationChecks(Rig& r) {
             check(o.silhouette > 0 && o.disocclusion > 0,
                   "taa history depth mutations: the old single-texel rule fails BOTH the silhouette test and the disocclusion test");
     }
+    int footprintCaught = 0;
+    for (const Mutant& m : footprintMutants) {
+        bool once = false;
+        const std::string hlsl = fpgpu::replaceOnce(shipped, m.from, m.to, &once);
+        char what[300];
+        std::snprintf(what, sizeof(what), "taa history depth mutations: \"%s\": its anchor is in the shader source exactly once (a moved anchor tests nothing)", m.name);
+        check(once, what);
+        const Outcome o = once ? runMutated(hlsl, false, true) : Outcome{};
+        std::snprintf(what, sizeof(what), "taa history depth mutations: \"%s\" compiles and makes a compute shader", m.name);
+        check(o.ran, what);
+        if (!o.ran) continue;
+        std::snprintf(what, sizeof(what), "taa history depth mutations: \"%s\" is caught by the slope test", m.name);
+        check(o.slope > 0, what);
+        if (o.slope > 0) ++footprintCaught;
+        std::printf("flat mono resolve: taa history-depth mutation \"%s\": slope test %d scenes fail%s%s\n", m.name, o.slope, o.slope ? ", first: " : "", o.firstSlope.c_str());
+    }
     edvr::flatMonoResolveTestTaaBytecode(nullptr, 0);
     edvr::flatMonoResolveReset();
-    std::printf("flat mono resolve: taa history-depth mutations: %d of %zu caught by the tests\n", caught, sizeof(mutants) / sizeof(mutants[0]));
+    std::printf("flat mono resolve: taa history-depth mutations: %d of %zu caught by the tests, %d of %zu footprint-test mutations caught by the slope test\n", caught,
+                sizeof(mutants) / sizeof(mutants[0]), footprintCaught, sizeof(footprintMutants) / sizeof(footprintMutants[0]));
     check(size_t(caught) == sizeof(mutants) / sizeof(mutants[0]), "taa history depth mutations: every mutation was caught");
+    check(size_t(footprintCaught) == sizeof(footprintMutants) / sizeof(footprintMutants[0]), "taa history depth mutations: every footprint-test mutation was caught");
 }
 
 // ---- the contract on the shader source itself -----------------------------------------------------------------------------------------
@@ -307,17 +416,24 @@ inline void sourceTests() {
           "taa history depth: taa() asks the shared history depth check (the best of four texels, 1% with a 1e-6 floor) before it trusts history");
     check(!taa.empty() && taa.find("HistoryDepth.Load") == std::string::npos && taa.find("oldQ") == std::string::npos,
           "taa history depth: taa() no longer reads one history depth texel itself");
+    check(source.find("if(abs(planeDepth-expected)<=tol && abs(d00+d11-d10-d01)<=tol)return true;\n    return junctionPersists(base,raster,footprint,expected,tol);") != std::string::npos,
+          "taa history depth: the shared check also passes a planar footprint whose bilinear value is within the tolerance, and then a junction that persists (tools\\flat_temporal_test holds the whole text)");
+    check(!taa.empty() && taa.find("SceneDepth") == std::string::npos,
+          "taa history depth: taa() itself reads no depth; the shared check reads the current depth (t1, which the resolver binds for it) and the rows from the constants every kernel shares");
 }
 }  // namespace taadepth
 
 inline void taaHistoryDepthGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     taadepth::sourceTests();
     steadygpu::Rig rig(device, context);
-    // 1 and 2. The two tests on the shipped kernel, for real.
+    // 1 and 2. The first two tests on the shipped kernel, for real.
     taadepth::silhouetteTest(rig);
     taadepth::disocclusionTest(rig);
     edvr::flatMonoResolveReset();
-    // 3. The same two tests against the kernel with one rule flipped at a time, the old single-texel rule first: each must fail.
+    // 3. The slope test on the shipped kernel, for real.
+    taadepth::slopeTest(rig);
+    edvr::flatMonoResolveReset();
+    // 4. The same tests against the kernel with one rule flipped at a time, the old single-texel rule first: each must fail.
     taadepth::mutationChecks(rig);
     edvr::flatMonoResolveReset();
 }

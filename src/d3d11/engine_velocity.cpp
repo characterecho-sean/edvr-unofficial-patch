@@ -1,7 +1,6 @@
 #include "flat_origin_capture.h"
 #include "flat_forward_light.h"
 #include "engine_velocity.h"
-#include "engine_motion_ready.h"
 #include "temporal_shader_bytecode.h"
 #include "dxbc_flat_overlay.h"
 
@@ -42,6 +41,7 @@
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
 #include "skin_join_gpu.h"      // F2: the join at the palette chain's dispatch, the pose table, the views the cloned vertex shaders read
 #include "vscreen.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "../common/timing.h"
@@ -238,20 +238,6 @@ struct SkinStats {
     bool hookLogged = false;
     uint32_t windowStart = 0;
 } g_skinStats;
-
-// What Explorer Cam's entry fade waits for (engine_motion_ready.h, explorer_cam_fade_core.h "MOTION"), kept at every frame boundary: whether BOTH eyes were
-// handed the engine-motion views since the boundary before (a run of such frames), and whether the palette chain ran with jobs since then and the second
-// skin's join was live for it. Under g_mutex.
-constexpr uint32_t kMotionNeverAsked = 1u << 30, kMotionAskWindow = 30;
-struct MotionReadyState {
-    uint64_t viewsGiven[2] = {0, 0}, viewsSeen[2] = {0, 0};   // views handed out per eye, ever / at the last boundary
-    uint32_t viewsRun = 0;                                    // consecutive boundaries at which both eyes had been given views since the one before
-    uint64_t chainCalls = 0, chainSeen = 0;                   // chain dispatches the join took (with jobs), ever / at the last boundary
-    bool skinJobs = false, skinLive = false;                  // as of the last boundary
-    uint64_t asked = 0, askedSeen = 0;                        // engineVelocityViews calls (either eye), ever / at the last boundary: somebody is consuming the views
-    uint32_t sinceAsk = kMotionNeverAsked;                    // boundaries since the last one at which the views were asked for
-    bool consumer = false;                                    // asked within the last kMotionAskWindow boundaries
-} g_motion;
 
 // The derived blend states, one per game state (held, so a pointer is an
 // identity). A few in practice; cleared past the cap.
@@ -581,40 +567,82 @@ void pollCaptures(ID3D11DeviceContext* ctx) {
 }
 
 // --- The build-keyed engine side ----------------------------------------------
-// FUN_143696FA0's first 32 bytes (the dictionary lookup the bracket calls) and
-// FUN_144312E00's append sequence at 0x144313185 (the node count at +0x18,
+// FUN_143699C00's first 32 bytes (the dictionary lookup the bracket calls) and
+// FUN_144315A20's append sequence at 0x144315DA5 (the node count at +0x18,
 // the mask store at +0xAA0+i*8, the owner count at +0x2A4): the layout the
-// bracket's reads and writes rest on, in the hash-verified exe (332841).
-constexpr uintptr_t kLookupRva = 0x3696FA0u;
+// bracket's reads and writes rest on, in the hash-verified exe (334925).
+constexpr uintptr_t kLookupRva = 0x3699C00u;
 constexpr uint8_t kLookupPrologue[32] = {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83,
     0xEC, 0x40, 0x8B, 0x42, 0x18, 0x48, 0x8B, 0xDA, 0x33, 0xD2, 0x4C, 0x8B, 0xF1, 0x48, 0xF7, 0x71};
-constexpr uintptr_t kAppendRva = 0x4313185u;
+constexpr uintptr_t kAppendRva = 0x4315DA5u;
 constexpr uint8_t kAppendBytes[23] = {
     0x48, 0x8B, 0x42, 0x18,                                // mov rax,[rdx+18h]      the node's count
     0x4C, 0x89, 0xBC, 0xC2, 0xA0, 0x0A, 0x00, 0x00,        // mov [rdx+rax*8+0AA0h],r15  the record's mask
     0x48, 0xFF, 0x42, 0x18,                                // inc qword [rdx+18h]
     0x41, 0xFF, 0x85, 0xA4, 0x02, 0x00, 0x00};             // inc dword [r13+2A4h]   the owner's count
 
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the producer's own instructions
+// that carry, unmasked, the layout the secondary path writes (an item's +0x124 previous position, +0x138 previous rotation, +0x120
+// marker) and the fields it follows to find the item. In FUN_144315A20: the frame (0x4315A29: rbp = rsp+0x100 once 0x4315A31 subtracts
+// 0x1C8), the local item at rsp+0x60 built by the item constructor (the call at 0x4315A5C), its pose at +0x10 (0x4315AA6) and +0x08
+// (0x4315AC8), its second pose block at +0x124 (0x4315AAC, rbp+0x84) and +0x138 (0x4315AD4, rbp+0x98), the record's pose at +0x170
+// (0x4315A6D) and +0x17C (0x4315A7C) and key at +0x250 (0x4315CA3), the owner's dictionary at +0x260 (0x4315CBA) and count at +0x2A4
+// (0x4315DB5), the entry's list at +0x28 (0x4315CCA) with its tail at +0x30 (0x4315CD3), the node's count at +0x18 (0x4315CD7), and the
+// copy of the local into the node's records at +0x20, 0x150 bytes each (0x4315D14, 0x4315D22, 0x4315D27). The marker's dword is one no
+// game code here writes: the item constructor FUN_144C86090 stores +0x118 (0x4C861D6) and then +0x124 (0x4C861F4), nothing between.
+// On an unknown build every one must be found, and the producer's call must reach the constructor found, or engine motion stands down.
+constexpr uint32_t kItemCtorCallRva = 0x4315A5Cu;
+constexpr uint32_t kItemCtorRva = 0x4C86090u;
+constexpr uint32_t kEngineWitnessRvas[20] = {0x4315A29u, 0x4315A31u, kItemCtorCallRva, 0x4315A6Du, 0x4315A7Cu, 0x4315AA6u, 0x4315AACu,
+                                             0x4315AC8u, 0x4315AD4u, 0x4315CA3u, 0x4315CBAu, 0x4315CCAu, 0x4315CD3u, 0x4315CD7u,
+                                             0x4315D14u, 0x4315D22u, 0x4315D27u, 0x4315DB5u, 0x4C861D6u, 0x4C861F4u};
+std::atomic<bool> g_unknownBuildNoted{false};   // the unknown build's "found by signature" line, once per session
+
 #ifndef EDVR_ENGINE_VELOCITY_RIG
 const char* verifyEngine(uintptr_t base) noexcept {
+    if (!gameBuildIdentity(nullptr, nullptr)) return "not build 334925 (no PE header)";
+    // Both in the running build: build 334925, themselves; an unknown build, found by signature (0: not found).
+    const uintptr_t lookup = gameRva(static_cast<uint32_t>(kLookupRva)), append = gameRva(static_cast<uint32_t>(kAppendRva));
+    if (!lookup || !append)
+        return "an unknown build, and the dictionary lookup or the append sequence (0x3699C00, 0x4315DA5 in build 334925) was not found by signature";
+    uint32_t missing = 0;
+    if (!gameRvasFound(kEngineWitnessRvas, sizeof(kEngineWitnessRvas) / sizeof(kEngineWitnessRvas[0]), &missing)) {
+        static char why[160];
+        std::snprintf(why, sizeof(why), "an unknown build, and the record layout's field witness 0x%X (in build 334925) was not found by signature",
+                      missing);
+        return why;
+    }
+    if (!gameBuildKnown()) {
+        // The constructor call's rel32 is masked by the signature: its target is computed here and must be the constructor found.
+        const uintptr_t callAt = gameRva(kItemCtorCallRva), ctorAt = gameRva(kItemCtorRva);
+        uint8_t call[5] = {};
+        int32_t rel = 0;
+        __try {
+            std::memcpy(call, reinterpret_cast<const void*>(base + callAt), sizeof(call));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return "engine image unreadable";
+        }
+        std::memcpy(&rel, call + 1, 4);
+        if (!callAt || !ctorAt || call[0] != 0xE8 || uint64_t(callAt) + 5u + uint64_t(int64_t(rel)) != uint64_t(ctorAt))
+            return "an unknown build: the producer's call found by signature does not reach the item constructor found by signature";
+    }
     __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return "not build 332841 (no PE header)";
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != KinematicEvalProbe::kExpectedTimestamp || imageSize != KinematicEvalProbe::kExpectedImageSize)
-            return "not build 332841 (PE timestamp/size)";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kLookupRva), kLookupPrologue, sizeof(kLookupPrologue)))
-            return "lookup mismatch at RVA 0x3696FA0";
-        if (std::memcmp(reinterpret_cast<const void*>(base + kAppendRva), kAppendBytes, sizeof(kAppendBytes)))
-            return "append sequence mismatch at RVA 0x4313185";
-        return nullptr;
+        uint8_t got[sizeof(kLookupPrologue)] = {};
+        std::memcpy(got, reinterpret_cast<const void*>(base + lookup), sizeof(kLookupPrologue));
+        if (!gamePinMatches(static_cast<uint32_t>(kLookupRva), got, kLookupPrologue, sizeof(kLookupPrologue)))
+            return "lookup mismatch at RVA 0x3699C00";
+        std::memcpy(got, reinterpret_cast<const void*>(base + append), sizeof(kAppendBytes));
+        if (!gamePinMatches(static_cast<uint32_t>(kAppendRva), got, kAppendBytes, sizeof(kAppendBytes)))
+            return "append sequence mismatch at RVA 0x4315DA5";
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "engine image unreadable";
     }
+    if (!gameBuildKnown() && !g_unknownBuildNoted.exchange(true))
+        Log::get().note("engine motion: the dictionary lookup (0x3699C00 in build 334925) and the append sequence (0x4315DA5) were found by "
+                        "signature on %s at 0x%llX and 0x%llX; the record fields it writes are witnessed.", gameBuildText(),
+                        static_cast<unsigned long long>(lookup), static_cast<unsigned long long>(append));
+    return nullptr;
 }
 #else
 // tools/engine_velocity_test drives this file's draw half on WARP: there is
@@ -2281,7 +2309,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
             Log::get().note("%s", lockLine);
         }
     }
-    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
+    Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144315A20 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "
                     "this call unproven %llu, table full %llu; same-frame repeats %llu; pose disagreements %llu (must be 0), "
@@ -2561,7 +2589,6 @@ void clearLocked() {
     g_skinPoseFrame = ~0u;
     g_skinPoseEye = -1;
     g_skinRefs = SkinRefCollector{};
-    g_motion = MotionReadyState{};
     g_skinStats = SkinStats{};
     for (auto& d : familyDraws) d = 0;
     g_guardedFast = 0;
@@ -2644,7 +2671,8 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetMergeObserver(nullptr,nullptr);
         kinematicEvalSetClearObserver(nullptr);
     } else {
-        g_lookup.store(reinterpret_cast<emit::LookupFn>(base + kLookupRva), std::memory_order_release);
+        const uintptr_t lookupAt = gameRva(static_cast<uint32_t>(kLookupRva));   // found: verifyEngine checked it
+        g_lookup.store(lookupAt ? reinterpret_cast<emit::LookupFn>(base + lookupAt) : nullptr, std::memory_order_release);
         kinematicEvalSetEmitObserver(&observeEmit);
         kinematicEvalSetPrimaryEmitObserver(&observePrimaryEmit);
         kinematicEvalSetPoolCopyObserver(&observePoolCopy);
@@ -2652,13 +2680,13 @@ void engineVelocityConfigure(bool on) {
         kinematicEvalSetClearObserver(&observeDictionaryClear);
     }
     refreshEmitStatus(true);
-    Log::get().note("engine motion: primary rigid producer 42B4130 %s; canonical collection-record history, "
+    Log::get().note("engine motion: primary rigid producer 42B6D50 %s; canonical collection-record history, "
                     "unit-scale unskinned records only; unsupported records remain native.",kinematicEvalPrimaryEmitStatus());
     g_windowStartMs = nowMs();
     live.store(true, std::memory_order_release);
     if (!g_emitLive.load(std::memory_order_acquire)) { logStoodDown(); return; }
     armSkinLocked();
-    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144312E00's records carry "
+    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144315A20's records carry "
                     "their previous engine pose when it is continuous and proven; the pool families' own draws write the "
                     "pool slot and depth at MRT6 under an unblended state; the temporal pass takes exact record motion "
                     "there, masks rig records it cannot follow, and keeps the camera term elsewhere. Per-30 s lines "
@@ -3296,20 +3324,6 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     // The frame's palette-chain dispatches are joined once: at the first skinned draw that needed the views, or here when no draw did (the history chain must
     // not skip a frame because a character was out of view).
     if (ctx) g_skin.flushPending(ctx);
-    {
-        // The entry fade's signals for the frame that just ended (engineMotionReady): both eyes handed the views since the last boundary, and the skinned jobs.
-        const bool both = g_motion.viewsGiven[0] != g_motion.viewsSeen[0] && g_motion.viewsGiven[1] != g_motion.viewsSeen[1];
-        g_motion.viewsRun = both ? g_motion.viewsRun + 1u : 0u;
-        g_motion.viewsSeen[0] = g_motion.viewsGiven[0];
-        g_motion.viewsSeen[1] = g_motion.viewsGiven[1];
-        g_motion.skinJobs = g_motion.chainCalls != g_motion.chainSeen;
-        g_motion.skinLive = g_motion.skinJobs && g_skin.lastJoinLive();   // (the frame's join has run: a draw needed it, or the flush above)
-        g_motion.chainSeen = g_motion.chainCalls;
-        if (g_motion.asked != g_motion.askedSeen) g_motion.sinceAsk = 0;
-        else if (g_motion.sinceAsk < kMotionNeverAsked) ++g_motion.sinceAsk;
-        g_motion.askedSeen = g_motion.asked;
-        g_motion.consumer = g_motion.sinceAsk <= kMotionAskWindow;
-    }
     skinBuildPoseLocked(ctx);     // F2: the frame's pose table, now that every draw has said which records it read
     if (ctx) pollCaptures(ctx);   // the eye-pass capture's GPU timers, without waiting
     // The on-foot source's slot target lives only while the source is drawn:
@@ -3385,24 +3399,10 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    ++g_motion.asked;
     const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
                                        {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                                         g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);
-    if (given) ++g_motion.viewsGiven[eye];
     return given;
-}
-
-EngineMotionReady engineMotionReady() {
-    EngineMotionReady r;
-    if (!live.load(std::memory_order_acquire) || !g_emitLive.load(std::memory_order_acquire)) return r;   // the engine's motion is not running: nothing to wait for
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    if (!g_motion.consumer) return r;   // the temporal pass is not asking for the views (it is off, or this is not a scene it runs in): nothing to wait for
-    r.armed = true;
-    r.viewsRun = g_motion.viewsRun;
-    r.skinJobs = g_skinWanted.load(std::memory_order_relaxed) && g_motion.skinJobs;
-    r.skinLive = g_motion.skinLive;
-    return r;
 }
 
 bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
@@ -3580,6 +3580,29 @@ bool engineVelocitySourceCameraRows(float (&rows)[6][4]) {
     std::memcpy(rows, c.rows, sizeof(rows));
     return true;
 }
+bool engineVelocityLastSourceCameraRows(float (&rows)[6][4], uint32_t* frame, uint32_t* frameNowOut) {
+    static_assert(sizeof(rows) == kRowsBytes, "the resolver's camera rows are the watch's rows 270..275");
+    if (!frame || !frameNowOut || !live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const SourceCamera& c = g_sourceCamera;
+    if (!c.scene || !c.rowsKnown) return false;
+    std::memcpy(rows, c.rows, sizeof(rows));
+    *frame = c.frame;
+    *frameNowOut = frameNow();
+    return true;
+}
+bool engineVelocityShadowSceneRows(const ID3D11Buffer* scene, float (&rows)[6][4]) {
+    static_assert(sizeof(rows) == kRowsBytes, "the shadow's rows are the watch's rows 270..275");
+    if (!scene || !live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    for (unsigned i = 1; i < kWatchSlots; i += 2) {   // the scene slots (odd)
+        const WatchInfo& w = g_watchInfo[i];
+        if (w.resource != static_cast<const ID3D11Resource*>(scene) || !w.rowsKnown || w.mapped) continue;
+        std::memcpy(rows, w.rows, kRowsBytes);
+        return true;
+    }
+    return false;
+}
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
                                    uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride, uint32_t skinned) {
@@ -3609,9 +3632,8 @@ bool engineVelocitySkinWanted() noexcept { return g_skinWanted.load(std::memory_
 void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups) {
     if (!g_skinWanted.load(std::memory_order_acquire) || !live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    // One dispatch of the frame's palette chain (the game makes one or two a frame): noted here, joined once per present frame (SkinJoinGpu::noteChain). A
-    // dispatch the join took is the fade's "a character is loaded"; "its join is live" is read at the boundary, after the frame's one join.
-    if (g_skin.noteChain(ctx, frameNow(), groups)) ++g_motion.chainCalls;
+    // One dispatch of the frame's palette chain (the game makes one or two a frame): noted here, joined once per present frame (SkinJoinGpu::noteChain).
+    g_skin.noteChain(ctx, frameNow(), groups);
 }
 
 ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth) {

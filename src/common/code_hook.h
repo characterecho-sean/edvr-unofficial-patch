@@ -97,13 +97,21 @@ public:
     // instructions is worth noticing.
     size_t stolenBytes() const { return m_stolen; }
 
+    // The reason the last install() refused, as the same sentence it logged ("" when it did not refuse). A caller that stands
+    // down quotes it, so its own log line says what CodeHook said and not only that it refused.
+    const char* refusal() const { return m_refusal; }
+
 private:
+    // Logs a refusal exactly as before and keeps the text for refusal().
+    void refusedf(const char* fmt, ...);
+
     void*    m_target = nullptr;
     void*    m_replacement = nullptr;
     uint8_t* m_trampoline = nullptr;
     uint8_t  m_original[16] = {};
     size_t   m_stolen = 0;
     bool     m_installed = false;
+    char     m_refusal[320] = {};
 };
 
 // Length of the x86-64 instruction at `code`, or 0 if this decoder does not

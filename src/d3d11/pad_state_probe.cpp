@@ -1,10 +1,10 @@
-// The pad-state probe (TEMPORARY, 2026-10-13). Four detours on the docking-state readers of build 332841 (0x12C3C20, 0x12CAF80, 0x12CADE0,
-// 0x12CB320). Each reader takes its object (this) in rcx. The detour calls the ORIGINAL FIRST and keeps its return code, then makes plain reads
+// The pad-state probe (TEMPORARY, 2026-10-13). Four detours on the docking-state readers of build 334925 (0x12C4CC0, 0x12CC020, 0x12CBE80,
+// 0x12CC3C0). Each reader takes its object (this) in rcx. The detour calls the ORIGINAL FIRST and keeps its return code, then makes plain reads
 // of the object (this+0x3C8, [this-8] and its owner's +0x10, +0x2C, +0x2F) under __try. It calls no Elite function and logs nothing; the tick
 // (the station's frame, on the render thread) prints. The relays are the store hook's: a gate word, closed means the original runs alone.
 //
-// Install: the PE TimeDateStamp and SizeOfImage first (the build's pair), then each reader's six-byte prologue pin. A refusal logs one line and is
-// final. The pure rules and the line texts are in pad_state_core.h.
+// Install: every reader found (build 334925's constants; on another build, by signature, src\common\game_build.h), then each reader's six-byte
+// prologue pin. A refusal logs one line and is final. The pure rules and the line texts are in pad_state_core.h.
 #include "pad_state_probe.h"
 
 #include <windows.h>
@@ -14,8 +14,8 @@
 #include <cstring>
 
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
-#include "explorer_cam_core.h"
 #include "pad_state_core.h"
 
 namespace edvr {
@@ -97,20 +97,6 @@ bool readBytes(uintptr_t address, uint8_t* out, size_t n) noexcept {
     }
 }
 
-// The PE TimeDateStamp and SizeOfImage, read as the other build-keyed hooks read them (base+0x3C -> e_lfanew, +8, +0x50). POD only.
-bool readIdentity(uintptr_t base, uint32_t* stamp, uint32_t* size) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return false;
-        std::memcpy(stamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(size, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // Records one reader's call: the reading (plain reads, outside the lock), the QPC time, then the table under the spinlock. Never logs.
 __declspec(noinline) void recordCall(size_t reader, uintptr_t self, uintptr_t result) noexcept {
     pad::PadReading r;
@@ -133,8 +119,8 @@ __declspec(noinline) uintptr_t __fastcall readerObserved(uintptr_t self) noexcep
 
 void* const kObservers[pad::kReaders] = {reinterpret_cast<void*>(&readerObserved<0>), reinterpret_cast<void*>(&readerObserved<1>),
                                          reinterpret_cast<void*>(&readerObserved<2>), reinterpret_cast<void*>(&readerObserved<3>)};
-const char* const kReaderNames[pad::kReaders] = {"state-reader-FUN_12C3C20", "state-reader-FUN_12CAF80", "state-reader-FUN_12CADE0",
-                                                 "state-reader-FUN_12CB320"};
+const char* const kReaderNames[pad::kReaders] = {"state-reader-FUN_12C4CC0", "state-reader-FUN_12CC020", "state-reader-FUN_12CBE80",
+                                                 "state-reader-FUN_12CC3C0"};
 
 // ---- relays (the store hook's layout: mov rax,&gate; cmp qword ptr[rax],0; je original; jmp [callback]; original: jmp [trampoline]) ----------
 
@@ -189,33 +175,45 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
     return true;
 }
 
-// Installs the four readers once: the identity (one refusal for all), then each reader's prologue pin. Each refusal is final and logged once.
+// Installs the four readers once: the PE header read and every reader found (build 334925: the constants; an unknown build: by signature,
+// src\common\game_build.h; one refusal for all), then each reader's prologue pin. Each refusal is final and logged once.
 void installReaders(uintptr_t base) {
-    uint32_t stamp = 0;
-    uint32_t size = 0;
-    const bool identityRead = readIdentity(base, &stamp, &size);
-    if (!identityRead || stamp != ecm::kExpectedTimestamp || size != ecm::kExpectedImageSize) {
+    const bool identityRead = gameBuildIdentity(nullptr, nullptr);
+    uintptr_t found[pad::kReaders] = {};
+    size_t firstMissing = pad::kReaders;
+    for (size_t i = 0; i < pad::kReaders; ++i) {
+        found[i] = identityRead ? gameRva(static_cast<uint32_t>(pad::kReaderRva[i])) : 0;
+        if (found[i] == 0 && firstMissing == pad::kReaders) firstMissing = i;
+    }
+    if (firstMissing != pad::kReaders) {
         for (size_t i = 0; i < pad::kReaders; ++i) {
             g_readers[i].refused.store(true, std::memory_order_release);
             g_readers[i].name = kReaderNames[i];
-            g_readers[i].status = "not build 332841 (PE timestamp or image size)";
+            g_readers[i].status = identityRead ? "not found by signature" : "the PE header is unreadable";
         }
-        Log::get().note("pad state probe: refused: not build 332841 (PE timestamp %u, image size %u); the probe stands down.",
-                        static_cast<unsigned>(stamp), static_cast<unsigned>(size));
+        if (!identityRead)
+            Log::get().note("pad state probe: refused: the PE header is unreadable; the probe stands down.");
+        else
+            Log::get().note("pad state probe: refused: %s, and reader %s (in build 334925) was not found by signature; the probe stands down.",
+                            gameBuildText(), kReaderNames[firstMissing]);
         return;
     }
+    if (!gameBuildKnown())
+        Log::get().note("pad state probe: the four docking-state readers (in build 334925) were found by signature on %s at 0x%llX 0x%llX 0x%llX 0x%llX.",
+                        gameBuildText(), static_cast<unsigned long long>(found[0]), static_cast<unsigned long long>(found[1]),
+                        static_cast<unsigned long long>(found[2]), static_cast<unsigned long long>(found[3]));
     for (size_t i = 0; i < pad::kReaders; ++i) {
         Reader& r = g_readers[i];
         r.name = kReaderNames[i];
-        const uintptr_t target = base + static_cast<uintptr_t>(pad::kReaderRva[i]);
+        const uintptr_t target = base + found[i];
         uint8_t got[sizeof(pad::kReaderPin)] = {};
         const bool readOk = readBytes(target, got, sizeof(got));
-        const pad::PadInstall verdict = pad::padInstallDecision(identityRead, stamp, size, ecm::kExpectedTimestamp, ecm::kExpectedImageSize,
-                                                                readOk ? got : nullptr, pad::kReaderPin, sizeof(got));
+        const bool pinOk = readOk && gamePinMatches(static_cast<uint32_t>(pad::kReaderRva[i]), got, pad::kReaderPin, sizeof(got));
+        const pad::PadInstall verdict = pad::padInstallDecision(identityRead, found[i], readOk ? got : nullptr, pinOk);
         if (verdict != pad::PadInstall::kInstall) {
             r.refused.store(true, std::memory_order_release);
-            r.status = "prologue does not match build 332841";
-            Log::get().note("pad state probe: refused: reader %s prologue is not build 332841's; that reader is not observed.", r.name);
+            r.status = "prologue does not match build 334925";
+            Log::get().note("pad state probe: refused: reader %s prologue is not build 334925's; that reader is not observed.", r.name);
             continue;
         }
         r.relay = allocateRelay(target);

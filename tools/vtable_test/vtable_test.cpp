@@ -1176,9 +1176,9 @@ int main() {
         // lea rbp, [rsp-0x17B0] -- SIB with a disp32 base (mod=10, rm=100), not
         // rip-relative: eight bytes (REX, opcode, ModRM, SIB, disp32), no
         // fixup needed since the operand does not move with the instruction.
-        // The actual fourth instruction of FUN_1428431d0 (docs\design-
+        // The actual fourth instruction of FUN_142845730 (docs\design-
         // transition-flash-engine-fix-2026-09-23.md's round 6 consumer hook,
-        // RVA 0x28431D0): three one-byte pushes steal 4 bytes, so this LEA is
+        // RVA 0x2845730): three one-byte pushes steal 4 bytes, so this LEA is
         // the one that has to be decoded and relocated to clear the 5-byte
         // patch, taking the steal to CodeHook's actual 12 bytes there.
         const uint8_t spBaseLea[] = {0x48, 0x8D, 0xAC, 0x24, 0x50, 0xE8, 0xFF, 0xFF};
@@ -1186,12 +1186,12 @@ int main() {
                   disp == 0,
               "...and a SIB-with-disp32 lea off rsp, reporting no rip-relative "
               "displacement",
-              "FUN_1428431d0's own prologue would misdecode: either refused "
+              "FUN_142845730's own prologue would misdecode: either refused "
               "(no hook) or stolen at the wrong length (a corrupted trampoline)");
 
-        // FreeCameraActivity's update (EliteDangerous64.exe+0x1071980, build 332841), the
-        // Explorer Cam placement's first target (hotkey.explorer_cam, explorer_cam.cpp
-        // in the d3d11 half): `mov [rsp+20h], rbx` is its first instruction, FIVE
+        // FreeCameraActivity's update (EliteDangerous64.exe+0x1072A20, build 334925; a
+        // CodeHook target until Explorer Cam was removed in F98, kept here as decoder
+        // coverage): `mov [rsp+20h], rbx` is its first instruction, FIVE
         // bytes with no rip-relative displacement, so CodeHook steals exactly five and
         // the 28-byte prologue's later instructions (pushes, a SIB lea, a sub with an
         // imm32) never have to be decoded or moved.
@@ -1200,59 +1200,58 @@ int main() {
         check(codeInstructionLength(freeCamera, sizeof(freeCamera), &disp) == 5 && disp == 0,
               "...and FreeCameraActivity's update prologue: its first instruction is 5 bytes, "
               "no displacement, so 5 are stolen",
-              "Explorer Cam's free-camera hook target would be refused or stolen at the "
+              "a prologue that begins mov [rsp+20h],rbx would be refused or stolen at the "
               "wrong length");
 
-        // The free camera's collision step (EliteDangerous64.exe+0x1091140, build 332841), Explorer
-        // Cam's second target (hotkey.explorer_cam, explorer_cam.cpp in the d3d11 half): it begins
+        // The free camera's collision step (EliteDangerous64.exe+0x10921E0, build 334925; a
+        // CodeHook target until F98, kept as decoder coverage): it begins
         // `40 55` -- push rbp WITH a REX prefix -- then three one-byte pushes, so the first four
         // instructions are 2+1+1+1 = five bytes with no rip-relative displacement, and CodeHook
         // steals exactly five. A decoder that took `40` for the start of a different instruction
-        // would refuse the hook (placement stands down) or steal a wrong length.
+        // would refuse the hook or steal a wrong length.
         const uint8_t collisionStep[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
                                          0xAC, 0x24, 0xB0, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x50, 0x02, 0x00, 0x00};
         check(codeInstructionLength(collisionStep, sizeof(collisionStep), &disp) == 2 && disp == 0,
               "...and the free camera's collision step: `40 55` (REX push rbp) is a 2-byte "
               "instruction with no displacement",
-              "Explorer Cam's collision hook would be refused and placement would stand down");
+              "a prologue that begins with a REX push would be refused");
         check(codeInstructionLength(collisionStep + 2, sizeof(collisionStep) - 2, &disp) == 1 &&
                   codeInstructionLength(collisionStep + 3, sizeof(collisionStep) - 3, &disp) == 1 &&
                   codeInstructionLength(collisionStep + 4, sizeof(collisionStep) - 4, &disp) == 1,
               "...followed by three one-byte pushes, so five bytes are stolen",
-              "the collision hook would steal a wrong length");
+              "a REX push and three one-byte pushes would be stolen at a wrong length");
 
-        // Explorer Cam's other three targets (explorer_cam.cpp in the d3d11 half), build 332841.
-        // The commander's box push (EliteDangerous64.exe+0x108F1B0): `48 8B C4` is `mov rax, rsp` (REX.W 8B /r with a register
-        // ModRM, three bytes, no displacement), then `push rbp` and `push rbx`: 3+1+1 = five bytes. The trampoline re-runs the
-        // `mov rax, rsp`, which is why the bypass relay may clobber RAX.
+        // Two more former targets (until F98), build 334925, kept as decoder coverage.
+        // The commander's box push (EliteDangerous64.exe+0x1090250): `48 8B C4` is `mov rax, rsp` (REX.W 8B /r with a register
+        // ModRM, three bytes, no displacement), then `push rbp` and `push rbx`: 3+1+1 = five bytes.
         const uint8_t boxPush[] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x41, 0x56, 0x41, 0x57,
                                    0x48, 0x8B, 0xEC, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
         check(codeInstructionLength(boxPush, sizeof(boxPush), &disp) == 3 && disp == 0 &&
                   codeInstructionLength(boxPush + 3, sizeof(boxPush) - 3, &disp) == 1 && codeInstructionLength(boxPush + 4, sizeof(boxPush) - 4, &disp) == 1,
               "...and the commander's box push: `mov rax,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
-              "Explorer Cam's box-push hook would be refused or stolen at the wrong length");
-        // The camera UI's update (+0x47C7640): two REX/push pairs, then `lea rbp,[rsp-0B8h]` with a SIB and a disp32 (8 bytes, not
+              "a prologue that begins mov rax,rsp would be refused or stolen at the wrong length");
+        // The camera UI's update (+0x47CA0E0): two REX/push pairs, then `lea rbp,[rsp-0B8h]` with a SIB and a disp32 (8 bytes, not
         // rip-relative): the five-byte patch lands inside the lea, so twelve bytes are stolen.
         const uint8_t cameraUi[] = {0x40, 0x55, 0x41, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x48, 0xFF, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xB8, 0x01, 0x00, 0x00};
         check(codeInstructionLength(cameraUi, sizeof(cameraUi), &disp) == 2 && codeInstructionLength(cameraUi + 2, sizeof(cameraUi) - 2, &disp) == 2 &&
                   codeInstructionLength(cameraUi + 4, sizeof(cameraUi) - 4, &disp) == 8 && disp == 0,
               "...and the camera UI's update: `push rbp`, `push r14`, then an 8-byte `lea rbp,[rsp-0B8h]` with no displacement to rewrite: twelve bytes stolen",
-              "Explorer Cam's camera-UI hook would be refused or stolen at the wrong length");
-        // The camera controller's update (+0x2DF14C0): the free camera's first instruction again, `mov [rsp+8], rbx`, five bytes.
+              "a prologue whose patch lands inside a SIB lea would be refused or stolen at the wrong length");
+        // The camera controller's update (+0x2DF3EA0, native on foot's camera signal): `mov [rsp+8], rbx`, five bytes.
         const uint8_t cameraController[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18};
         check(codeInstructionLength(cameraController, sizeof(cameraController), &disp) == 5 && disp == 0,
               "...and the camera controller's update: `mov [rsp+8],rbx` is 5 bytes, no displacement",
-              "Explorer Cam's controller hook would be refused or stolen at the wrong length");
-        // AvatarModelComponent's dither-fade update (+0x3DD6040, the head hiding's target): `4C 8B DC` is
+              "native on foot's controller hook would be refused or stolen at the wrong length");
+        // AvatarModelComponent's dither-fade update (+0x3DD8C60, the head hiding's target): `4C 8B DC` is
         // `mov r11,rsp` (REX.WR 8B /r, register ModRM, three bytes, no displacement), then `push rbx` and `push rsi`: 3+1+1 = five bytes. The
         // `mov rax,[rip+d32]` that ends the 16-byte prologue lies beyond the patch, so the rip-relative displacement is never rewritten.
         const uint8_t avatarFade[] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
         check(codeInstructionLength(avatarFade, sizeof(avatarFade), &disp) == 3 && disp == 0 &&
                   codeInstructionLength(avatarFade + 3, sizeof(avatarFade) - 3, &disp) == 1 && codeInstructionLength(avatarFade + 4, sizeof(avatarFade) - 4, &disp) == 1,
               "...and the avatar dither-fade update: `mov r11,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
-              "Explorer Cam's avatar-fade hook would be refused or stolen at the wrong length");
+              "native on foot's avatar-fade hook would be refused or stolen at the wrong length");
 
-        // The skeleton interface's FindJoint (+0xFDDB10, shared by RuntimeRigComponent and AnimatedObject; Explorer Cam's skeleton capture): `mov [rsp+8],rbx`
+        // The skeleton interface's FindJoint (+0xFDEBB0, shared by RuntimeRigComponent and AnimatedObject; native on foot's skeleton capture): `mov [rsp+8],rbx`
         // is its first instruction, five bytes with no rip-relative displacement, so CodeHook steals exactly five.
         const uint8_t findJoint[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
         check(codeInstructionLength(findJoint, sizeof(findJoint), &disp) == 5 && disp == 0,

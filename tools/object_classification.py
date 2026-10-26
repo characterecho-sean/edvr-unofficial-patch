@@ -40,6 +40,7 @@ MAX_ITEMS = 1_000_000
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
 RECORD_WRITER_LIMITS = {"records": 65536, "bytes": 64 * 1024 * 1024}
+RECORD_WRITER_UI_LIMITS = {"ui_record_reserve": 1024, "ui_byte_reserve": 1024 * 0x150}
 RECORD_OWNERSHIP_LIMITS = {
     "ownership_records": 8192, "ownership_unwind_depth": 32,
     "ownership_traces": 32, "ownership_trace_frames": 32,
@@ -48,8 +49,8 @@ RECORD_OWNERSHIP_LIMITS = {
     "ownership_opaque_prefix_bytes": 0x80,
 }
 RECORD_WRITERS = {
-    "direct_369ce91", "primary_42b42ef", "inline_42b4ed6",
-    "direct_43130aa", "helper_434d149",
+    "direct_369faf1", "primary_42b6f0f", "inline_42b7af6",
+    "direct_4315cca", "helper_434fda9",
 }
 RECORD_OWNERSHIP_STATUSES = {
     "linked", "unsupported_writer", "ancestor_missing", "unwind_failed",
@@ -140,7 +141,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
         return None, [], [], [], [], packed_bytes
     diagnostic = _dict(diagnostic, "record_writers")
     version = _u32(diagnostic.get("version"), "record_writers.version")
-    if version not in {1, 2, 3}:
+    if version not in {1, 2, 3, 4}:
         raise CaptureError("record_writers.version is unsupported")
     # Version 2 added the KinematicRig ownership; version 3 keeps it and
     # drops the upload join.
@@ -160,12 +161,17 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
     limits = _dict(diagnostic.get("limits"), "record_writers.limits")
     limit_bounds = dict(RECORD_WRITER_LIMITS)
+    if version >= 4:
+        limit_bounds.update(RECORD_WRITER_UI_LIMITS)
     if ownership:
         limit_bounds.update(RECORD_OWNERSHIP_LIMITS)
     for field, maximum in limit_bounds.items():
         value = _uint(limits.get(field), "record_writers.limits.%s" % field)
         if not value or value > maximum:
             raise CaptureError("record_writers.limits.%s exceeds reader safety bound" % field)
+    if version >= 4 and (limits["ui_record_reserve"] != 1024 or
+                         limits["ui_byte_reserve"] != limits["ui_record_reserve"] * 0x150):
+        raise CaptureError("record_writers UI reserve does not match the packed record size")
     summary = _dict(diagnostic.get("summary"), "record_writers.summary")
     summary_fields = ("observed", "stored", "completed", "retained_bytes", "record_overflow",
                       "byte_budget_declines", "read_faults", "context_failures",
@@ -173,6 +179,9 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
                       "completion_failures")
     for field in summary_fields:
         _uint(summary.get(field), "record_writers.summary.%s" % field)
+    if version >= 4:
+        for field in ("ui_join_attempted", "ui_join_matched", "ui_join_unmatched", "ui_reserve_overflow"):
+            _uint(summary.get(field), "record_writers.summary.%s" % field)
 
     ownership_status = None
     ownership_summary = None
@@ -244,6 +253,37 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
             raise CaptureError("%s return RVA disagrees with writer" % label)
         _u32(record.get("thread_id"), label + ".thread_id")
         _u32(record.get("observed_frame"), label + ".observed_frame")
+        if version >= 4:
+            ui_status = _string(record.get("ui_join_status"), label + ".ui_join_status", 32)
+            if ui_status not in {"not_candidate", "matched_instance_tls", "unmatched_instance_tls"}:
+                raise CaptureError("%s UI join status is unknown" % label)
+            ui = _dict(record.get("ui_submit"), label + ".ui_submit")
+            _u32(ui.get("render_frame"), label + ".ui_submit.render_frame")
+            _u32(ui.get("item_serial"), label + ".ui_submit.item_serial")
+            ordinal = ui.get("ordinal")
+            if ordinal is not None:
+                _u32(ordinal, label + ".ui_submit.ordinal")
+            ui_thread = _u32(ui.get("thread_id"), label + ".ui_submit.thread_id")
+            submit_qpc = _uint(ui.get("submit_qpc"), label + ".ui_submit.submit_qpc")
+            capture_qpc = _uint(ui.get("capture_qpc"), label + ".ui_submit.capture_qpc")
+            renderer = _address(ui.get("renderer"), label + ".ui_submit.renderer")
+            part = _address(ui.get("part"), label + ".ui_submit.part")
+            instance = _address(ui.get("instance"), label + ".ui_submit.instance")
+            _u32(ui.get("name_id"), label + ".ui_submit.name_id")
+            _u32(ui.get("facing"), label + ".ui_submit.facing")
+            space = ui.get("space")
+            if type(space) is not int or space < -(1 << 31) or space > (1 << 31) - 1:
+                raise CaptureError("%s.ui_submit.space must be a signed 32-bit integer" % label)
+            for field in ("item_read", "fields_valid", "instance_valid"):
+                if not isinstance(ui.get(field), bool):
+                    raise CaptureError("%s.ui_submit.%s is not boolean" % (label, field))
+            if ui_status == "matched_instance_tls":
+                if (writer != "helper_434fda9" or ordinal is None or not submit_qpc or capture_qpc < submit_qpc or
+                        ui_thread != record.get("thread_id") or instance != record.get("object") or
+                        renderer == "0x0" or part == "0x0"):
+                    raise CaptureError("%s claims an invalid exact UI submit join" % label)
+            elif ordinal is not None or submit_qpc or renderer != "0x0" or part != "0x0" or instance != "0x0":
+                raise CaptureError("%s has UI identity without a matched TLS join" % label)
         addresses = {}
         for field in ("owner", "key", "builder", "object", "entry"):
             addresses[field] = _address(record.get(field), label + "." + field)
@@ -272,12 +312,12 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
                 raise CaptureError("%s ownership link and status disagree" % label)
 
         applicable = {"record": True, "key_snapshot": True,
-                      "builder_snapshot": writer == "primary_42b42ef",
-                      "object_snapshot": writer in {"primary_42b42ef", "inline_42b4ed6", "helper_434d149"},
+                      "builder_snapshot": writer == "primary_42b6f0f",
+                      "object_snapshot": writer in {"primary_42b6f0f", "inline_42b7af6", "helper_434fda9"},
                       "entry_snapshot": lookup_status != "pending"}
         sizes = {"record": POOL_STRIDE, "key_snapshot": 32,
                  "builder_snapshot": 96,
-                 "object_snapshot": (416 if writer == "helper_434d149" else
+                 "object_snapshot": (416 if writer == "helper_434fda9" else
                                      192 if ownership else 176),
                  "entry_snapshot": 0x38}
         snapshots = {}
@@ -354,10 +394,10 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
             "provider_prefix": limits["ownership_opaque_prefix_bytes"],
             "parent_prefix": limits["ownership_opaque_prefix_bytes"],
         }
-        branch_rvas = {"direct_4321940": 0x431B212, "virtual_50": 0x431B21F}
+        branch_rvas = {"direct_43245A0": 0x431DE72, "virtual_50": 0x431DE7F}
         relation_writers = {
-            "inline_registry_plus_78": {"inline_42b4ed6", "primary_42b42ef"},
-            "direct_collection_plus_300": {"direct_43130aa"},
+            "inline_registry_plus_78": {"inline_42b7af6", "primary_42b6f0f"},
+            "direct_collection_plus_300": {"direct_4315cca"},
         }
         for oi, ownership in enumerate(ownerships):
             label = "record_writers.ownerships[%u]" % oi
@@ -607,7 +647,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
     if summary["completed"] != sum(record["lookup_status"] != "pending" for record in records):
         raise CaptureError("record_writers completed count disagrees with record lifecycle")
     retained_bytes = cursor - packed_bytes
-    if retained_bytes != summary["retained_bytes"] or retained_bytes > limits["bytes"]:
+    if retained_bytes != summary["retained_bytes"] or retained_bytes > limits["bytes"] + (limits.get("ui_byte_reserve", 0) if version >= 4 else 0):
         raise CaptureError("record_writers retained byte count is invalid")
     complete_capture = (bool(records) and summary["observed"] == summary["stored"] and
                         summary["completed"] == summary["stored"] and
@@ -847,7 +887,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
     not content."""
     root = {
         "schema": SCHEMA_V3, "binary": binary_name,
-        "executable": {"pe_timestamp": 1788384820, "image_size": 104894464},
+        "executable": {"pe_timestamp": 1792704584, "image_size": 104906752},
         "summary": {"binary_ok": True},
     }
     source = bytes((slot * 31 + i) & 0xFF for slot in (1, 2) for i in range(POOL_STRIDE))
@@ -855,7 +895,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
     contexts = (("0x920078", "0x820000", "0x830000", "0x930000"),
                 ("0xa10300", "0xa40250", "0x831000", "0x0"),
                 ("0x920078", "0x820000", "0x830000", "0x930000"))
-    writers = ("inline_42b4ed6", "direct_43130aa", "inline_42b4ed6")
+    writers = ("inline_42b7af6", "direct_4315cca", "inline_42b7af6")
     chunks = []
     cursor = 0
     records = []
@@ -873,7 +913,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
         chunks.append(key_bytes)
         cursor += len(key_bytes)
         builder_span = {"status": "not_applicable", "offset": cursor, "bytes": 0}
-        if writer == "inline_42b4ed6":
+        if writer == "inline_42b7af6":
             object_bytes = bytes([0x40]) * 176 + bytes(object_size - 176)
             object_span = {"status": "available", "offset": cursor, "bytes": len(object_bytes)}
             chunks.append(object_bytes)
@@ -937,7 +977,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
             struct.pack_into("<Q", record_tail, 0x10, context)
         else:
             record_tail = None
-        ancestor_rva = 0x431B212 if branch == "direct_4321940" else 0x431B21F
+        ancestor_rva = 0x431DE72 if branch == "direct_43245A0" else 0x431DE7F
         writer_owner = registry + 0x78 if not direct else collection + 0x300
         result = {
             "id": index, "first_sequence": 1 if index == 0 else 3,
@@ -978,7 +1018,7 @@ def _writer_fixture(binary_name="classification_fixture.bin"):
         return result
 
     ownerships = [
-        make_ownership(0, "inline_registry_plus_78", "direct_4321940",
+        make_ownership(0, "inline_registry_plus_78", "direct_43245A0",
                        0x900000, 0x910000, 0x920000, 0x930000, 0,
                        0x940000, 0x950000, 0x960000, 0x970000, UINT32_MAX, None),
         make_ownership(1, "direct_collection_plus_300", "virtual_50",
@@ -1069,6 +1109,20 @@ def self_test():
             raise AssertionError("%s accepted" % what)
 
         capture = load(root)
+        v4 = copy.deepcopy(root)
+        v4section = v4["record_writers"]
+        v4section["version"] = 4
+        v4section["limits"].update(RECORD_WRITER_UI_LIMITS)
+        v4section["summary"].update(ui_join_attempted=0, ui_join_matched=0,
+                                     ui_join_unmatched=0, ui_reserve_overflow=0)
+        for record in v4section["records"]:
+            record.update(ui_join_status="not_candidate", ui_submit={
+                "render_frame": 0, "item_serial": 0, "ordinal": None, "thread_id": 0,
+                "submit_qpc": 0, "capture_qpc": 0, "renderer": "0x0", "part": "0x0",
+                "instance": "0x0", "name_id": 0, "facing": 0, "space": 0,
+                "item_read": False, "fields_valid": False, "instance_valid": False})
+        assert len(load(v4, binary)["writer_records"]) == 3
+        rejected("a malformed UI byte reserve", lambda value: value["record_writers"]["limits"].update(ui_byte_reserve=1), base=v4)
         report = analyse(capture, include_records=True)
         assert report["status"] == "draw_capture_retired"
         assert report["missing"] == [{"scope": "capture", "reason": "draw_capture_retired"}]
@@ -1140,7 +1194,7 @@ def self_test():
         rejected("an ownership item whose first sequence is not its earliest writer's",
                  lambda value: value["record_writers"]["ownerships"][0].update(first_sequence=2))
         rejected("a writer whose return RVA is another's",
-                 lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b42ef"))
+                 lambda value: value["record_writers"]["records"][0].update(return_rva="0x42b6f0f"))
         rejected("a snapshot off the packed cursor",
                  lambda value: value["record_writers"]["records"][1]["record"].update(
                      offset=value["record_writers"]["records"][1]["record"]["offset"] + 1))
@@ -1149,7 +1203,7 @@ def self_test():
                      retained_bytes=value["record_writers"]["summary"]["retained_bytes"] + 1))
         rejected("a captured status beside an overflow counter",
                  lambda value: value["record_writers"]["summary"].update(record_overflow=1))
-        rejected("an unknown section version", lambda value: value["record_writers"].update(version=4))
+        rejected("an unknown section version", lambda value: value["record_writers"].update(version=5))
         rejected("a version 3 section carrying the retired uploads array",
                  lambda value: value["record_writers"].update(uploads=[]))
         rejected("a capture status that disagrees with its hook",
@@ -1162,7 +1216,7 @@ def self_test():
                  lambda value: value["record_writers"]["records"][0].update(ownership_id=None))
         rejected("an ancestor RVA that is not its branch's",
                  lambda value: value["record_writers"]["ownerships"][0].update(
-                     ancestor_return_rva="0x431b21f"))
+                     ancestor_return_rva="0x431de7f"))
         rejected("a record index that is not the writer's",
                  lambda value: value["record_writers"]["ownerships"][1].update(record_index=1))
         rejected("a context snapshot that lost its bytes",
@@ -1182,7 +1236,7 @@ def self_test():
             "status": "unwind_failed", "writer_record": 2,
             "return_rva": unwind_record["return_rva"],
             "frames": [
-                {"address": "0x431b21f", "status": "module_relative",
+                {"address": "0x431de7f", "status": "module_relative",
                  "module_rva": "0x31b21f"},
                 {"address": "0x0", "status": "outside_image",
                  "module_rva": None},

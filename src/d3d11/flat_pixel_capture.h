@@ -2,6 +2,7 @@
 #include "flat_pixel_capture_policy.h"
 #include "flat_capture_directory.h"
 #include "../common/config.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
 #include <array>
 #include <algorithm>
@@ -190,8 +191,9 @@ public:
         manifest+=cameraJson(frame_.previousCamera);manifest+="\n}\n";
         const auto manifestPath=directory_+L"\\frame_"+std::to_wstring(frame_.frame)+L".json";
         if(ok)ok=write(manifestPath+L".tmp",manifest.data(),manifest.size());
-        if(ok)ok=MoveFileExW((manifestPath+L".tmp").c_str(),manifestPath.c_str(),0)!=FALSE;
-        if(!ok) {fail("write-failed");return;}
+        // Retried while a scanner holds the staged file; frame_N.json is new, so nothing is replaced here.
+        if(ok)ok=replaceFileAtomic(manifestPath+L".tmp",manifestPath);
+        if(!ok) {DeleteFileW((manifestPath+L".tmp").c_str());fail("write-failed");return;}
         Log::get().note("flat pixels: completed frame=%llu resources=%u engine-complete=%u directory=%ls",static_cast<unsigned long long>(frame_.frame),used_,complete?1u:0u,directory_.c_str());
         policy_.finish(true);pending_.pop_front();
         if(policy_.copied>=FlatPixelCapturePolicy::maxSamples && pending_.empty())stop("complete");

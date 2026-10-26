@@ -112,6 +112,9 @@ struct Stubs {
     uint32_t eyeDraws = 0;
     bool depthKnown = false;
     uint32_t depthDraws = 0;
+    // the binding shadow's resolver: how many times it was asked, and whether the next asks fail (a view that is no longer live)
+    unsigned resolveCalls = 0;
+    bool resolveFails = false;
     // raw entries: did any run with the route's internal scope up / down
     unsigned rawCalls = 0, rawInternal = 0;
 };
@@ -174,6 +177,8 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
 }
 // The binding shadow's resolver, from the views themselves.
 bool bindingResolve(void* view, ResourceInfo* out) {
+    ++g_stubs.resolveCalls;
+    if (g_stubs.resolveFails) return false;
     if (!view || !out) return false;
     ComPtr<ID3D11Resource> res;
     static_cast<ID3D11View*>(view)->GetResource(&res);
@@ -1446,7 +1451,7 @@ void testMapsGate(Rig& r) {
     }
 }
 
-// ================================================================ what the 5 s window says across the transitions of the first flight
+// ================================================================ what the ten-second window says across the transitions of the first flight
 // The first flight of the maps gate (docs/design-world-camera-motion-2026-09-30.md, 8.10; Frontier, 2026-10-01 08:32:55.975) ended its
 // second panel period in a boarding: on foot with the route owning the world, then the ship's cockpit. The naming stopped with the last
 // 2D screen composite, three unnamed frames released the gate, the route let go on the same boundary (RELEASED on-foot-gate-lost), and
@@ -1459,7 +1464,7 @@ void testMapsGate(Rig& r) {
 //   and no composite follows. The first window is every one of those frames and its numbers are checked against the rig's own count of
 //   what it drew and what the layer did with it; the second is the cockpit alone -- the flight's windows: panel frames, nothing drawn,
 //   nothing taken, no door.
-// Two real 5 s windows, so the rig sleeps twice (the window's length is the layer's own constant).
+// Two real ten-second windows; the first also checks that the old five-second boundary writes no summary or resets counters.
 static unsigned windowNumber(const std::string& line, const char* key) {
     const std::string needle = std::string(" ") + key + "=";
     const size_t at = line.find(needle);
@@ -1542,7 +1547,29 @@ void testMapsTransitions(Rig& r) {
     check(!held, "windows: (setup) the boarding: three frames with no composite and no naming release the gate");
     g_stubs.mayTake = false;
     for (int i = 0; i < 5; ++i) cockpitFrame();
-    Sleep(5100);                                     // the window is 5 s of the wall clock
+    Sleep(5100);
+    cockpitFrame();                                  // the old five-second boundary must keep accumulating
+    // The log is asynchronous. A marker queued after the boundary proves its earlier lines have drained before checking for an early summary.
+    const char* checkpoint = "on foot maps sharp: test five-second checkpoint";
+    Log::get().note("%s", checkpoint);
+    bool drained = false;
+    std::vector<std::string> halfway;
+    for (int attempt = 0; attempt < 40 && !drained; ++attempt) {
+        Sleep(50);
+        halfway = mapsLines(dir);
+        for (const auto& line : halfway) if (line == checkpoint) drained = true;
+    }
+    unsigned earlyWindows = 0, immediateTakes = 0, immediateHandbacks = 0;
+    for (const auto& line : halfway) {
+        earlyWindows += line.rfind("on foot maps sharp 5s:", 0) == 0;
+        immediateTakes += line.find("the layer TAKES the 2D screen at frame=") != std::string::npos;
+        immediateHandbacks += line.find("the layer HANDS BACK the 2D screen at frame=") != std::string::npos;
+    }
+    check(drained && earlyWindows == 0,
+          "windows: the five-second boundary emits no summary; its counters remain for the ten-second window");
+    check(drained && immediateTakes == 2 && immediateHandbacks == 1,
+          "windows: both TAKES and the HANDS BACK event were written before the summary window closed");
+    Sleep(5000);
     cockpitFrame();                                  // this boundary writes the first window's line
     const unsigned w1Reissued = reissued, w1Taken = taken, w1Frames = worldFrames + panelFrames, w1World = worldFrames, w1Panel = panelFrames;
     const unsigned w1Wrong = wrong, w1DoorMissed = doorMissed, w1DoorWrong = doorWrong;
@@ -1550,7 +1577,7 @@ void testMapsTransitions(Rig& r) {
 
     // The cockpit alone, a whole window of it: the flight's windows after the boarding.
     for (int i = 0; i < 30; ++i) cockpitFrame();
-    Sleep(5100);
+    Sleep(10100);
     cockpitFrame();                                  // the second window's line
     const unsigned w2Frames = worldFrames + panelFrames, w2World = worldFrames, w2Panel = panelFrames, w2Wrong = wrong, w2DoorWrong = doorWrong;
 
@@ -1571,10 +1598,14 @@ void testMapsTransitions(Rig& r) {
     std::vector<std::string> win;
     for (const auto& l : lines)
         if (l.rfind("on foot maps sharp 5s:", 0) == 0) win.push_back(l);
-    check(win.size() == 2, "windows: the real layer wrote one line for each of the two 5 s windows");
+    check(win.size() == 2, "windows: the real layer wrote one line for each of the two ten-second windows");
     if (win.size() == 2) {
         const std::string& a = win[0];
         const std::string& b = win[1];
+        double aSeconds = 0.0, bSeconds = 0.0;
+        check(std::sscanf(a.c_str(), "on foot maps sharp 5s: key=on %lf s", &aSeconds) == 1 && aSeconds >= 10.0 &&
+                  std::sscanf(b.c_str(), "on foot maps sharp 5s: key=on %lf s", &bSeconds) == 1 && bSeconds >= 10.0,
+              "windows: both summaries retain the historical parser prefix and label their elapsed ten-second windows");
         // The first window: every composite counted once, taken or not; only the layer's own takes are takes; the door only for those.
         check(windowNumber(a, "screen-draws") == w1Reissued + w1Taken,
               "windows: the first window's screen-draws is every composite the decision saw (re-issued ones and taken ones): the layer counts what it was asked, not what it took");
@@ -1585,7 +1616,8 @@ void testMapsTransitions(Rig& r) {
               "windows: ... it counts the frames of the run and which gate each ended in");
         check(windowNumber(a, "holds") == 1 && windowNumber(a, "releases") == 2, "windows: ... one hold (the map closing) and two releases (the map opening, the boarding)");
         // The second window: the flight's own shape.
-        check(windowNumber(b, "world-frames") == 0 && windowNumber(b, "panel-frames") == w2Panel && w2World == 0 && w2Frames == w2Panel,
+        check(windowNumber(b, "frames") == w2Frames && windowNumber(b, "world-frames") == 0 && windowNumber(b, "panel-frames") == w2Panel &&
+                  w2World == 0 && w2Frames == w2Panel && windowNumber(b, "holds") == 0 && windowNumber(b, "releases") == 0,
               "windows: the cockpit window is whole-panel: panel frames and no world frame");
         check(windowNumber(b, "screen-takes") == 0 && windowNumber(b, "door-layer-only") == 0 && windowNumber(b, "door-not-empty") == 0,
               "windows: ... nothing taken, no eye through the layer-only door (what the first flight's windows said)");
@@ -1606,6 +1638,108 @@ void testMapsTransitions(Rig& r) {
         }
         RemoveDirectoryW(dir.c_str());
     }
+}
+
+// The bound depth view's resolve memo (resolveBoundDsv, 2026-10-23 review CPU-06), the production function through
+// uiLayerResolveBoundDsvForTest. A resolve is asked again only when the view or the Dsv0 binding's generation moved; a failed resolve
+// is never remembered. The rig has no binding_shadow.cpp, so the shadow's moves are written the way it writes them: bindingSet (a
+// rebind, to the same pointer too) and bindingFrameBoundary (every slot) each add one to the generation. tools\ui_quality_test pins
+// that seedWritersCheck goes through the memo and that a result is stored only after a successful resolve.
+void testDsvMemo(Rig& r) {
+    ComPtr<ID3D11Texture2D> depth2;
+    ComPtr<ID3D11DepthStencilView> dsv2;
+    D3D11_TEXTURE2D_DESC dd{};
+    dd.Width = kEyeW / 2;
+    dd.Height = kEyeH / 2;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.SampleDesc.Count = 1;
+    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    const bool made = SUCCEEDED(r.dev->CreateTexture2D(&dd, nullptr, &depth2)) &&
+                      SUCCEEDED(r.dev->CreateDepthStencilView(depth2.Get(), nullptr, &dsv2));
+    check(made, "dsv memo: a second depth view over a texture of another size");
+    if (!made) return;
+    auto& slot = detail::g_bindingSlots[static_cast<size_t>(BindSlot::Dsv0)];
+    auto rebind = [&](ID3D11DepthStencilView* v) { slot.ptr = v; ++slot.gen; };    // bindingSet
+    auto boundary = [&] { for (auto& s : detail::g_bindingSlots) ++s.gen; };       // bindingFrameBoundary
+    auto same = [](const ResourceInfo& x, const ResourceInfo& y) {
+        return x.isBuffer == y.isBuffer && x.isTexture2D == y.isTexture2D && x.a == y.a && x.b == y.b && x.fmt == y.fmt &&
+               x.resource == y.resource;
+    };
+    uint64_t hits = 0, misses = 0;
+    ResourceInfo info;
+    g_stubs.resolveFails = false;
+    rebind(r.dsv.Get());
+    const uint64_t baseline = [&] {   // the counts are the window's running ones: every case below is a difference from here
+        g_stubs.resolveFails = true;
+        uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses);
+        return misses;
+    }();
+    const uint64_t h0 = hits;
+    unsigned calls = g_stubs.resolveCalls;
+    // A failing resolve is never remembered: the next ask is a miss again and the resolver is charged again, as before the memo.
+    check(!uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 1 &&
+              misses == baseline + 1 && hits == h0,
+          "dsv memo: a resolve that fails is a miss and charges the resolver");
+    check(!uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 2 &&
+              misses == baseline + 2 && hits == h0,
+          "dsv memo: ... and asked again at the same view and generation it is a miss again, never a hit (a failure is not remembered)");
+    g_stubs.resolveFails = false;
+    ResourceInfo first;
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &first, &hits, &misses) && g_stubs.resolveCalls == calls + 3 &&
+              misses == baseline + 3 && hits == h0,
+          "dsv memo: the first successful resolve after those failures is a miss that resolves");
+    check(first.isTexture2D && first.resource == r.depth.Get() && first.a == kEyeW && first.b == kEyeH &&
+              first.fmt == static_cast<uint32_t>(DXGI_FORMAT_D32_FLOAT),
+          "dsv memo: ... and names the depth texture behind the view");
+    // The same view at the same generation: answered from the memo, the resolver not asked, the answer identical.
+    for (unsigned i = 1; i <= 2; ++i) {
+        info = ResourceInfo{};
+        check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 3 &&
+                  hits == h0 + i && misses == baseline + 3 && same(info, first),
+              "dsv memo: the same view at the same generation is a hit with the identical ResourceInfo and no resolve");
+    }
+    // The binding set again, to the same view: the generation moved, so it is a miss (an identical address after a rebind is not
+    // evidence of an identical object).
+    rebind(r.dsv.Get());
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 4 &&
+              hits == h0 + 2 && misses == baseline + 4 && same(info, first),
+          "dsv memo: bindingSet to the same view moves the generation: a miss, the resolver asked, the same answer");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 4 &&
+              hits == h0 + 3 && misses == baseline + 4,
+          "dsv memo: ... and the next ask at the new generation is a hit");
+    // Another view: a miss with that view's own texture, then a hit; the first view at that generation is a miss (the view is the key's
+    // other half), and its answer is its own.
+    rebind(dsv2.Get());
+    ResourceInfo second;
+    check(uiLayerResolveBoundDsvForTest(dsv2.Get(), &second, &hits, &misses) && g_stubs.resolveCalls == calls + 5 &&
+              hits == h0 + 3 && misses == baseline + 5 && second.resource == depth2.Get() && second.a == kEyeW / 2 &&
+              second.b == kEyeH / 2 && !same(second, first),
+          "dsv memo: a different view is a miss that resolves to its own texture");
+    check(uiLayerResolveBoundDsvForTest(dsv2.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 5 &&
+              hits == h0 + 4 && misses == baseline + 5 && same(info, second),
+          "dsv memo: ... and that view at that generation is then a hit");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 6 &&
+              hits == h0 + 4 && misses == baseline + 6 && same(info, first),
+          "dsv memo: the first view at the second view's generation is a miss (the memo holds one view, and the view is part of the key)");
+    // The frame boundary moves every generation: a miss on the next ask though the view did not change, then a hit.
+    boundary();
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 7 &&
+              hits == h0 + 4 && misses == baseline + 7 && same(info, first),
+          "dsv memo: bindingFrameBoundary moves the generation: a miss on the next ask though the view is the same");
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 7 &&
+              hits == h0 + 5 && misses == baseline + 7,
+          "dsv memo: ... and the ask after it is a hit");
+    // A failure after a good memo at the same generation changes nothing the memo holds: the failing view is not stored.
+    g_stubs.resolveFails = true;
+    check(!uiLayerResolveBoundDsvForTest(dsv2.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 8 &&
+              misses == baseline + 8,
+          "dsv memo: another view whose resolve fails is a miss and answers false");
+    g_stubs.resolveFails = false;
+    check(uiLayerResolveBoundDsvForTest(r.dsv.Get(), &info, &hits, &misses) && g_stubs.resolveCalls == calls + 8 &&
+              hits == h0 + 6 && same(info, first),
+          "dsv memo: ... and the remembered view is still a hit afterwards (a failure leaves the memo as it was)");
+    slot.ptr = nullptr;
 }
 
 // --bench (not part of the gate): what the on-foot maps gate costs the CPU, measured against the real boundary and the real door
@@ -1725,6 +1859,7 @@ int main(int argc, char** argv) {
     testAccessors(r);
     testMapsGate(r);
     testMapsTransitions(r);
+    testDsvMemo(r);
     uiLayerShutdown();
     std::printf("ui_layer_world_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

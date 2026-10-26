@@ -5,8 +5,11 @@
 #include "draw_census.h"
 #include "eye_engine_capture.h"
 #include "eye_final_capture.h"
+#include "eye_jump_lattice.h"
+#include "eye_airborne_capture.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
+#include <atomic>     // F63: the eye offsets for the native on-foot sight lock
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -46,6 +49,9 @@
 #include "engine_velocity.h"
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
 #include "scheduler_stack_probe.h"
+#include "native_on_foot.h"  // the F0 gate counters (log only)
+#include "native_on_foot_optic_capture.h"
+#include "draw_record_tag.h"   // F62c: the waypoint series' crop rule (markerCropPick, markerCropCentre, cropOrigin)
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -61,7 +67,8 @@
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
-static void beginEyeRun();
+static bool beginEyeRun(bool companion=false,const edvr::NativeOnFootAirborneSnapshot* trigger=nullptr,uint64_t triggerAgeQpc=0);
+static void pollAirborneCompanion();
 
 // temporalPassWantsFssChrome reads this from the header with no call:
 // asked by vscreen.cpp's beginPanelOverride, and the build has no /GL to
@@ -1060,6 +1067,8 @@ ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
 ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
+ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
+bool                       g_csEyeJumpLatticeTried = false;
 
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     auto*& shader = diagnostics ? g_csMv : g_csMvFast;
@@ -1097,6 +1106,11 @@ ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tole
 static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
 static bool                g_uiResolveUnboundNoted[8] = {};   // one line for each combination of unbound inputs the resolve has run with
 static uint64_t            g_uiResolveDispatches = 0, g_uiResolveLacked[3] = {};   // the full-frame path's dispatches, and how many lacked coverage / source edits / history
+// The motion prep's scene-depth layers (zSceneAt, temporal_shader_source.h): mv dispatches by which of t6 (the smoke's depth) and t7
+// (the private UI depth) were bound -- [0] both, [1] the smoke's only, [2] the UI's only, [3] neither.
+static uint64_t            g_mvDepthLayers[4] = {};
+// probe.w bits 64 and 256 (t6 / t7 not bound): depthLayersAbsentBits, temporal_pass.h. The rig's zscene_gate_test.h (cpuHalf)
+// holds it to the slots, and holds both dispatches below to reading it off the array they bind, before setParams.
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 // The refusal line, ONE PER ENGINE. It was a single session-lifetime flag,
@@ -1200,6 +1214,7 @@ void warmNoteFirstTreat() {
 }
 float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
 float    g_lastFar = 0.0f;
+float    g_lastUpscale[2] = {};    // the last trained treat's output over input, per axis (temporalPassUpscale)
 // This frame's rows are the view's own (its delta not carried), and the
 // frame of the last floating-origin jump (a camera move over 50 m in a
 // frame): the submission history carries both.
@@ -1252,10 +1267,34 @@ ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
+uint32_t g_eyeStampSerial=0;
 bool             g_eyeRunReady = false;
 eye_final_capture::Run g_eyeFinalRun;
 eye_final_capture::Clock g_eyeFinalClock; // boundary clock also advances with AA off
+eye_jump_lattice::Run g_eyeJumpLatticeRun;
 wchar_t g_eyeFinalStamp[16]=L"";
+struct AirborneCompanionRequest {
+    edvr::eye_airborne_capture::Request request;
+    wchar_t parentStamp[16]=L"";
+};
+AirborneCompanionRequest g_airborneCompanion;
+bool g_eyeRunCompanion=false;
+wchar_t g_eyeRunParentStamp[16]=L"";
+edvr::NativeOnFootAirborneSnapshot g_eyeRunTrigger{};
+uint64_t g_eyeRunTriggerAgeQpc=0;
+const char* airborneCompanionStateName(edvr::eye_airborne_capture::State state) {
+    switch(state){case edvr::eye_airborne_capture::State::Waiting:return "waiting";case edvr::eye_airborne_capture::State::Deferred:return "deferred_busy";
+        case edvr::eye_airborne_capture::State::Triggered:return "triggered";case edvr::eye_airborne_capture::State::Expired:return "expired";
+        case edvr::eye_airborne_capture::State::Cancelled:return "cancelled";default:return "idle";}
+}
+bool freshAirborneSnapshot(edvr::NativeOnFootAirborneSnapshot* snapshot,uint64_t* ageQpc=nullptr) {
+    if(!snapshot||!snapshot->valid||!snapshot->sampleQpc)return false;
+    LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+    if(frequency.QuadPart<=0||now.QuadPart<0||uint64_t(now.QuadPart)<snapshot->sampleQpc)return false;
+    const uint64_t age=uint64_t(now.QuadPart)-snapshot->sampleQpc;
+    if(ageQpc)*ageQpc=age;
+    return age<=uint64_t(frequency.QuadPart/10);
+}
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
 bool             g_eyeTreatedWritten[kEyeRun] = {};
@@ -1281,6 +1320,7 @@ uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before t
 enum class EyeUiMode : uint8_t { None, Legacy };
 struct EyeDecisionFrame {
     uint32_t frame = 0, diagnosticFrame = 0;
+    uint32_t renderFrame = 0;   // F86h: the native on-foot render frame of the capture, which the marker composite counts are kept by
     uint32_t inputW = 0, inputH = 0, outputW = 0, outputH = 0;
     uint32_t decisionCrop[4] = {}, outputCrop[4] = {};
     bool diagnostic = false, preUi = false, dlssSuccess = false;
@@ -1291,10 +1331,11 @@ struct EyeDecisionFrame {
 EyeDecisionFrame g_eyeDecisions[kEyeRun] = {};
 struct EyeMotionTrace {
     uint32_t frame, eye, flags, outputWidth, outputHeight;
-    bool rowsOk, jumped, dlHistory;
+    bool rowsOk, rowsValid, jumped, dlHistory;
     bool rowsBound;
     int rowsFollow;
     uint32_t sceneDraws;
+    uint64_t rowsQpc;
     float prevRows[12], nowRows[12];
     PassParams params;
     // The nearest body's planet-patch record (celestial_motion.h): records bound, bodies and patches the eye drew, patches matched to
@@ -1304,6 +1345,17 @@ struct EyeMotionTrace {
 };
 EyeMotionTrace g_eyeMotionTrace[kEyeRun * 4] = {};
 uint32_t g_eyeMotionTraceCount = 0;
+bool eyeMotionTraceFind(uint32_t sceneFrame, uint32_t eye, EyeMotionTrace* out) noexcept {
+    if (!out || eye > 1) return false;
+    const uint32_t count = g_eyeMotionTraceCount < kEyeRun * 4 ? g_eyeMotionTraceCount : kEyeRun * 4;
+    for (uint32_t i = count; i > 0; --i) {
+        const EyeMotionTrace& row = g_eyeMotionTrace[i - 1];
+        if (row.frame != sceneFrame || row.eye != eye) continue;
+        *out = row;
+        return true;
+    }
+    return false;
+}
 void writeEyeMotionTrace(const std::wstring& dir) {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_motion.csv", dir.c_str(), g_eyeRunStamp);
@@ -1566,7 +1618,17 @@ constexpr uint32_t kFootNoteCap = 40;                        // changes the log 
 bool footSplitNow() {
     TemporalFoot f;
     f.watching = journalWatchActive();
-    f.gameplay = journalGameplay();
+    // F24: the on-foot split only. A training scenario writes no LoadGame, so the session is also Status.json on foot (journalSessionOrOnFoot,
+    // the same fallback as native on foot, F22). No other user of journalGameplay() changes.
+    bool viaFoot = false;
+    f.gameplay = journalSessionOrOnFoot(&viaFoot);
+    if (viaFoot) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            Log::get().note("temporal aa: game session from Status.json on foot (no LoadGame: a training scenario); the on-foot ship split uses it");
+        }
+    }
     f.known = journalOnFootKnown();
     f.onFoot = journalOnFoot();
     f.vehicleKnown = journalSeatedKnown();
@@ -1590,6 +1652,7 @@ bool footSplitNow() {
             }
         }
     }
+    if (g_foot.on) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::FootSplit);   // F0 gate counter (log only)
     if (g_foot.srvChanged && g_foot.srvChanges <= kFootNoteCap) {
         if (g_foot.srv) {
             Log::get().note(
@@ -1686,6 +1749,22 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
     g_eyeInputCaptureAttempted=true; // only after ownership and every other input attempted
+}
+void stageEyeJumpLattice(ID3D11DeviceContext* ctx,EyeState& e,bool engineBound,
+                         const EngineVelocityViews& engineViews,ID3D11ShaderResourceView* skinView) {
+    if(!g_eyeJumpLatticeRun.armed()||g_eyeRunLeft<=0||g_eyeRunTaken<0||g_eyeRunTaken>=int(eye_jump_lattice::Count))return;
+    const uint32_t index=static_cast<uint32_t>(g_eyeRunTaken),scene=g_rowsFrame;
+    const uint32_t render=nativeOnFootRenderFrame(),epoch=g_eyeFinalClock.epoch;
+    if(!nativeOnFootActive()){
+        g_eyeJumpLatticeRun.refuse(index,scene,render,epoch,eye_jump_lattice::NativeInactive);return;
+    }
+    if(!g_csEyeJumpLattice&&!g_csEyeJumpLatticeTried){
+        g_csEyeJumpLatticeTried=true;
+        g_csEyeJumpLattice=shaderSwapCreateCs(ctx,kEyeJumpLatticeBytecode,sizeof(kEyeJumpLatticeBytecode),
+            "eye_jump_lattice_cs","native on-foot jump trace");
+    }
+    g_eyeJumpLatticeRun.stage(ctx,g_csEyeJumpLattice,index,scene,render,epoch,engineBound,
+                              skinView,e.dlMvSrv,engineViews.slots);
 }
 ID3D11ComputeShader* motionTraceShader(ID3D11DeviceContext* ctx) {
     if (!g_csMvTrace && !g_csMvTraceTried) {
@@ -1784,7 +1863,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
                   uint32_t* chOut, const uint32_t* region = nullptr,
                   uint32_t wantW = kEyeCrop, uint32_t wantH = kEyeCrop,
-                  uint32_t* xOut = nullptr, uint32_t* yOut = nullptr) {
+                  uint32_t* xOut = nullptr, uint32_t* yOut = nullptr, const double* centre = nullptr) {
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
     const uint32_t width = region ? region[2] - region[0] : d.Width;
@@ -1824,6 +1903,14 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
     D3D11_BOX box{};
     box.left = (region ? region[0] : 0) + (width - cw) / 2;
     box.top = (region ? region[1] : 0) + (height - ch) / 2;
+    if (centre) {
+        // F53: about a given point (texture pixels), kept inside the region. F62c: the rule is drawtag::cropOrigin (rig-checked).
+        const uint32_t lo[2] = {region ? region[0] : 0u, region ? region[1] : 0u}, span[2] = {width, height};
+        uint32_t at[2] = {};
+        drawtag::cropOrigin(centre, lo, span, cw, ch, at);
+        box.left = at[0];
+        box.top = at[1];
+    }
     box.right = box.left + cw;
     box.bottom = box.top + ch;
     box.front = 0;
@@ -1834,6 +1921,362 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
     if (xOut) *xOut = box.left;
     if (yOut) *yOut = box.top;
     return true;
+}
+
+// F53 (TEMPORARY, with fix.native_on_foot_marker_probe): the eye dump's marker crop. When the probe is on and gave the eye a projected
+// marker position in the last 500 ms (native_on_foot.h, g_markerCropNdc: P through the eye's scene rows), the run's overview of that eye is
+// joined by a second file, eye_<stamp>_L0_marker.bmp / _R0_marker.bmp: kEyeMarkerCrop square about that point, so a fast turn's marker can be
+// measured against its ground point. The overview is not replaced. Staged with the overview (same frame), written with it.
+constexpr uint32_t kEyeMarkerCrop = 512;
+ID3D11Texture2D* g_eyeMarkerStaging[2] = {};
+bool g_eyeMarkerTaken[2] = {};
+float g_eyeMarkerNdc[2][4] = {};     // P's ndc, the drawn marker's ndc (read back 2..3 frames late; NaN when none fresh)
+uint32_t g_eyeMarkerBox[2][4] = {};  // the crop's left, top, width, height in the texture
+uint32_t g_eyeMarkerTex[2][2] = {};  // the eye's region size the ndc maps onto
+void stageMarkerCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, const uint32_t* region) {
+    if (!ctx || !tex || eye < 0 || eye > 1 || g_eyeMarkerTaken[eye] || !nativeOnFootMarkerProbeLive()) return;
+    const MarkerCropNdc& m = g_markerCropNdc[eye];
+    const uint64_t now = GetTickCount64(), pMs = m.pMs.load(std::memory_order_relaxed), dMs = m.drawnMs.load(std::memory_order_relaxed);
+    if (!pMs || now - pMs > 500) return;
+    const float nx = m.p[0].load(std::memory_order_relaxed), ny = m.p[1].load(std::memory_order_relaxed);
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    const uint32_t x0 = region ? region[0] : 0, y0 = region ? region[1] : 0;
+    const uint32_t w = region ? region[2] - region[0] : d.Width, h = region ? region[3] - region[1] : d.Height;
+    const double centre[2] = {x0 + (static_cast<double>(nx) + 1.0) * 0.5 * w, y0 + (1.0 - static_cast<double>(ny)) * 0.5 * h};
+    uint32_t cw = 0, ch = 0, bx = 0, by = 0;
+    if (!stageEyeCrop(ctx, tex, &g_eyeMarkerStaging[eye], &cw, &ch, region, kEyeMarkerCrop, kEyeMarkerCrop, &bx, &by, centre)) return;
+    g_eyeMarkerTaken[eye] = true;
+    const bool drawnFresh = dMs && now - dMs <= 500;
+    g_eyeMarkerNdc[eye][0] = nx;
+    g_eyeMarkerNdc[eye][1] = ny;
+    g_eyeMarkerNdc[eye][2] = drawnFresh ? m.drawn[0].load(std::memory_order_relaxed) : NAN;
+    g_eyeMarkerNdc[eye][3] = drawnFresh ? m.drawn[1].load(std::memory_order_relaxed) : NAN;
+    g_eyeMarkerBox[eye][0] = bx;
+    g_eyeMarkerBox[eye][1] = by;
+    g_eyeMarkerBox[eye][2] = cw;
+    g_eyeMarkerBox[eye][3] = ch;
+    g_eyeMarkerTex[eye][0] = w;
+    g_eyeMarkerTex[eye][1] = h;
+}
+void writeMarkerCrops(ID3D11DeviceContext* ctx, const std::wstring& dir) {
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!g_eyeMarkerTaken[eye] || !g_eyeMarkerStaging[eye]) continue;
+        g_eyeMarkerTaken[eye] = false;
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_%c0_marker.bmp", dir.c_str(), g_eyeRunStamp, eye ? L'R' : L'L');
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeMarkerStaging[eye]->GetDesc(&sd);
+        const bool ok = writeEyeBmp(ctx, g_eyeMarkerStaging[eye], sd, eye, path);
+        const float* n = g_eyeMarkerNdc[eye];
+        const uint32_t* b = g_eyeMarkerBox[eye];
+        const double px = (static_cast<double>(n[0]) + 1.0) * 0.5 * g_eyeMarkerTex[eye][0], py = (1.0 - static_cast<double>(n[1])) * 0.5 * g_eyeMarkerTex[eye][1];
+        char drawn[128];
+        if (n[2] == n[2])
+            std::snprintf(drawn, sizeof(drawn), "(%.5f, %.5f), at (%.1f, %.1f) px in the eye", static_cast<double>(n[2]), static_cast<double>(n[3]),
+                          (static_cast<double>(n[2]) + 1.0) * 0.5 * g_eyeMarkerTex[eye][0], (1.0 - static_cast<double>(n[3])) * 0.5 * g_eyeMarkerTex[eye][1]);
+        else
+            std::snprintf(drawn, sizeof(drawn), "none in the last 500 ms");
+        Log::get().note("eye capture (F53): marker crop eye %d %ls: %ux%u at (%u, %u) in the texture; P through the eye's scene rows ndc (%.5f, %.5f), "
+                        "at (%.1f, %.1f) px in the eye's %ux%u (the crop's centre unless clamped at an edge); the drawn marker (read back, 2..3 "
+                        "frames older) %s; %s", eye, path, b[2], b[3], b[0], b[1], static_cast<double>(n[0]), static_cast<double>(n[1]), px, py,
+                        g_eyeMarkerTex[eye][0], g_eyeMarkerTex[eye][1], drawn, ok ? "written" : "the write FAILED");
+    }
+}
+
+// F59 (TEMPORARY, with fix.native_on_foot_marker_probe): the waypoint dump, measure only. The eye dump key, while the marker probe is on,
+// also takes kMkFrames consecutive frames of BOTH eyes: per frame and eye a kEyeMarkerCrop square about the marker's projected position
+// (the probe's ndc_marker, the drawn marker read back 2..3 frames late, when it is under 500 ms old; else P through the eye's scene rows),
+// of the final eye after the interface layer (temporalPassCaptureFinalEye) and of the same frame before the layer's composite
+// (temporalPassMarkerPre, native_sharpen.cpp), both crops about the same ndc. F53's single crop missed the marker. Files:
+// eye_<stamp>_mk_eye<e>_f<kk>.bmp, eye_<stamp>_mk_pre_eye<e>_f<kk>.bmp and eye_<stamp>_mk.csv (the centre's source and both ndc values per
+// crop). Copies only: nothing drawn, bound or submitted changes. Render thread only.
+// F62a: the marker dump series. The F60 flight (log 034818) did write all three of its runs (035139, 035256, 035828: 62 of 64 crops each),
+// but as eye_<stamp>_mk_*.bmp under a log line that said "waypoint dump", so a search for "marker" found only F53's single eye_<stamp>_L0_
+// marker.bmp. Each run lost the last frame's right eye (final and pre-composite) as "no fresh marker projection": the projection's age was
+// taken on the wall clock at the capture, and the eye run's own synchronous write (writeEyeRun, about 1.8 s) sits in that frame's right-eye
+// pass, so the projection read 1.6..1.8 s old. Now: files eye_<stamp>_marker_eye<e>_f<kk>.bmp, eye_<stamp>_marker_pre_eye<e>_f<kk>.bmp and
+// eye_<stamp>_marker.csv; the ages are taken at the frame's first capture (a stall inside the frame no longer ages it); the deadline is 10 s;
+// one line at the start and one at the end name the files, and when fewer than 32 final crops were written a line says why, per crop.
+// F62c: each crop is 1024x1024 (drawtag::kMarkerDumpCrop; the marker moves about 55 px a frame at 4032) centred on THIS frame's P through
+// the eye's scene rows (published in the same probe frame as the capture: age 0), never on the drawn marker (read back 31..156 ms late). A
+// frame whose P is off the eye (w <= 0 or the NDC outside -1..1), or that has no P this frame, is skipped and counted (the end line, the
+// self-check). The CSV carries per frame and eye: the head's speed, ndc_P with its w, key and age, ndc_marker as drawn (the game's rows,
+// read back) with its age in ms and frames, whether the fix patched the eye this frame (fresh or, F64, newest rows), its key, draws and dx, dy.
+constexpr int kMkFrames = 16;
+constexpr uint32_t kMkCrop = drawtag::kMarkerDumpCrop;
+constexpr uint64_t kMkFreshMs = 500, kMkDeadlineMs = 10000;
+enum MkWhy : uint8_t { kMkOk = 0, kMkNotTried, kMkNoMarker, kMkStageFail, kMkStaged, kMkWriteFail, kMkNotThisFrame, kMkOffScreen };
+struct MkShot {
+    ID3D11Texture2D* st = nullptr;
+    bool tried = false, taken = false;
+    uint8_t why = kMkNotTried;   // F62a: the crop's outcome (MkWhy)
+    uint32_t box[4] = {};     // the crop's left, top, width, height in the texture
+    uint32_t eyeWH[2] = {};   // the eye's region size the ndc maps onto
+    uint64_t lateMs = 0;      // F62a: the capture's ms after the frame's first capture
+};
+struct MkFrame {
+    uint64_t seq = 0;
+    uint64_t t0Ms = 0;                                // F62a: the frame's first capture (either eye, pre or final)
+    bool centred[2] = {};
+    int src[2] = {};                                  // 0 none (skipped: pick[] says why), 2 P through the scene rows (F62c: the only centre)
+    int pick[2] = {-1, -1};                           // F62c: drawtag::CropPick at the eye's first capture
+    float ndc[2][2] = {}, ndcP[2][2] = {}, ndcDrawn[2][2] = {};
+    int64_t ageP[2] = {-1, -1}, ageDrawn[2] = {-1, -1};   // ms at the frame's first capture (F62a); -1 none
+    // F62c: the probe frame at the capture, P's w, key, head speed (deg/s) and age in frames, the drawn marker's age in frames; the patch.
+    uint32_t frameNow[2] = {}, pKey[2] = {}, patchKey[2] = {}, patchDraws[2] = {};
+    float pW[2] = {}, head[2] = {-1.0f, -1.0f}, patchDx[2] = {}, patchDy[2] = {};
+    int64_t pAgeFrames[2] = {-1, -1}, drawnAgeFrames[2] = {-1, -1};
+    int patch[2] = {};                                // 0 not patched this frame, 1 patched (fresh rows), 2 patched (F64: newest rows)
+    bool fixLive[2] = {};
+    MkShot post[2], pre[2];
+};
+MkFrame g_mk[kMkFrames];
+int g_mkCount = 0;
+bool g_mkArmed = false;
+uint64_t g_mkArmMs = 0;
+uint32_t g_mkNoMarker = 0, g_mkStageFail = 0;
+wchar_t g_mkStamp[16] = L"";
+void mkRelease() {
+    for (MkFrame& f : g_mk) {
+        for (int e = 0; e < 2; ++e) {
+            if (f.post[e].st) f.post[e].st->Release();
+            if (f.pre[e].st) f.pre[e].st->Release();
+        }
+        f = MkFrame{};
+    }
+    g_mkCount = 0;
+}
+void mkArm(const wchar_t* stamp) {
+    if (g_mkArmed || !nativeOnFootMarkerProbeLive()) return;
+    mkRelease();
+    g_mkArmed = true;
+    g_mkArmMs = GetTickCount64();
+    g_mkNoMarker = g_mkStageFail = 0;
+    wcscpy_s(g_mkStamp, stamp);
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    Log::get().note("eye capture (F62c): marker dump series armed (run %ls): the next %d consecutive frames of both eyes, per frame and eye a "
+                    "%ux%u crop centred on THIS frame's P through the eye's scene rows (age 0; a frame with P off the eye or no P this frame is "
+                    "skipped and counted), after the interface layer and before its composite; files %ls\\eye_%ls_marker_eye{0,1}_f00..f15.bmp, "
+                    "eye_%ls_marker_pre_eye{0,1}_f00..f15.bmp, eye_%ls_marker.csv", g_mkStamp, kMkFrames, kMkCrop, kMkCrop,
+                    dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp);
+}
+void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
+    g_mkArmed = false;
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    if (!g_eyeDumpDirMade) {
+        g_eyeDumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    int wrote = 0, failed = 0, prePosts = 0, finals = 0;
+    for (int k = 0; k < g_mkCount; ++k)
+        for (int e = 0; e < 2; ++e)
+            for (int pre = 0; pre < 2; ++pre) {
+                MkShot& s = pre ? g_mk[k].pre[e] : g_mk[k].post[e];
+                if (!s.taken || !s.st || !ctx) continue;
+                wchar_t path[MAX_PATH];
+                _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_marker_%seye%d_f%02d.bmp", dir.c_str(), g_mkStamp, pre ? L"pre_" : L"", e, k);
+                D3D11_TEXTURE2D_DESC sd{};
+                s.st->GetDesc(&sd);
+                if (writeEyeBmp(ctx, s.st, sd, e, path)) {
+                    ++wrote;
+                    s.why = kMkOk;
+                    if (pre) ++prePosts;
+                    else ++finals;
+                } else {
+                    s.taken = false;
+                    s.why = kMkWriteFail;
+                    ++failed;
+                }
+            }
+    wchar_t csv[MAX_PATH];
+    _snwprintf_s(csv, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_marker.csv", dir.c_str(), g_mkStamp);
+    FILE* f = nullptr;
+    _wfopen_s(&f, csv, L"wb");
+    if (f) {
+        // F62c: ndc (the crop's centre) is ndcP whenever centre_src is P; skip names a skipped eye-frame; ndc_marker is the game's own
+        // projection of the record (read back, unpatched rows); patch: none, fresh or held, with the eye's last bound delta (NDC, y up; px
+        // at the eye's size).
+        fprintf(f, "frame,sequence,eye,image,written,centre_src,skip,ndc_x,ndc_y,head_dps,ndcP_x,ndcP_y,P_w,P_key,P_age_frames,ageP_ms,"
+                   "ndc_marker_x,ndc_marker_y,ndc_marker_age_ms,ndc_marker_age_frames,fix,patch,patch_key,patch_draws,dx_ndc,dy_ndc,dx_px,dy_px,"
+                   "box_left,box_top,box_w,box_h,eye_w,eye_h,late_ms,resid_x_px,resid_y_px,e_used_x_px,e_used_y_px\n");
+        for (int k = 0; k < g_mkCount; ++k)
+            for (int e = 0; e < 2; ++e)
+                for (int pre = 0; pre < 2; ++pre) {
+                    const MkFrame& m = g_mk[k];
+                    const MkShot& s = pre ? m.pre[e] : m.post[e];
+                    static const char* const kSrc[3] = {"none", "ndc_marker", "P"};
+                    static const char* const kPick[4] = {"", "no P yet", "no P this frame", "off-screen"};
+                    static const char* const kPatch[3] = {"none", "fresh", "newest-rows"};   // F64: 2 = the eye's newest rows (was held)
+                    const char* skip = m.pick[e] > 0 && m.pick[e] < 4 ? kPick[m.pick[e]] : m.pick[e] < 0 ? "not reached" : "";
+                    const double ew = static_cast<double>(s.eyeWH[0]), eh = static_cast<double>(s.eyeWH[1]);   // set at every tried capture
+                    // F63: the fix's per-frame residual against P + e (the fixed e) and the e it aimed at, from the read-back of a fresh
+                    // patched frame (nan: that frame was not one, or its read-back had not landed when the series was written).
+                    float res[4] = {std::nanf(""), std::nanf(""), std::nanf(""), std::nanf("")};
+                    if (!nativeOnFootMarkerResidual(m.frameNow[e], e, res))
+                        for (float& v : res) v = std::nanf("");
+                    fprintf(f, "%d,%llu,%d,%s,%d,%s,%s,%.5f,%.5f,%.1f,%.5f,%.5f,%.5f,%u,%lld,%lld,%.5f,%.5f,%lld,%lld,%s,%s,%u,%u,%.5f,%.5f,%.1f,%.1f,"
+                               "%u,%u,%u,%u,%u,%u,%llu,%.2f,%.2f,%.2f,%.2f\n",
+                            k, static_cast<unsigned long long>(m.seq), e, pre ? "pre" : "post", s.taken ? 1 : 0,
+                            kSrc[m.src[e] >= 0 && m.src[e] < 3 ? m.src[e] : 0], skip, static_cast<double>(m.ndc[e][0]),
+                            static_cast<double>(m.ndc[e][1]), static_cast<double>(m.head[e]), static_cast<double>(m.ndcP[e][0]),
+                            static_cast<double>(m.ndcP[e][1]), static_cast<double>(m.pW[e]), m.pKey[e], static_cast<long long>(m.pAgeFrames[e]),
+                            static_cast<long long>(m.ageP[e]), static_cast<double>(m.ndcDrawn[e][0]), static_cast<double>(m.ndcDrawn[e][1]),
+                            static_cast<long long>(m.ageDrawn[e]), static_cast<long long>(m.drawnAgeFrames[e]), m.fixLive[e] ? "on" : "off",
+                            kPatch[m.patch[e] >= 0 && m.patch[e] < 3 ? m.patch[e] : 0], m.patchKey[e], m.patchDraws[e],
+                            static_cast<double>(m.patchDx[e]), static_cast<double>(m.patchDy[e]), static_cast<double>(m.patchDx[e]) * ew * 0.5,
+                            static_cast<double>(m.patchDy[e]) * eh * 0.5, s.box[0], s.box[1], s.box[2], s.box[3], s.eyeWH[0], s.eyeWH[1],
+                            static_cast<unsigned long long>(s.lateMs), static_cast<double>(res[0]), static_cast<double>(res[1]),
+                            static_cast<double>(res[2]), static_cast<double>(res[3]));
+                }
+        fclose(f);
+    }
+    // Consecutive frames: every slot's sequence one past the one before it.
+    int gaps = 0;
+    for (int k = 1; k < g_mkCount; ++k)
+        if (g_mk[k].seq != g_mk[k - 1].seq + 1) ++gaps;
+    const unsigned long long seq0 = g_mkCount ? static_cast<unsigned long long>(g_mk[0].seq) : 0ull,
+                             seq1 = g_mkCount ? static_cast<unsigned long long>(g_mk[g_mkCount - 1].seq) : 0ull;
+    // F62c: the skipped eye-frames (P off the eye, no P this frame, no P yet) and the patched ones, logged with the run.
+    int offScreen = 0, notThisFrame = 0, noP = 0, patchedFresh = 0, patchedNewest = 0;
+    for (int k = 0; k < g_mkCount; ++k)
+        for (int e = 0; e < 2; ++e) {
+            const MkFrame& m = g_mk[k];
+            if (m.pick[e] == drawtag::kCropOffScreen) ++offScreen;
+            else if (m.pick[e] == drawtag::kCropNotThisFrame) ++notThisFrame;
+            else if (m.pick[e] == drawtag::kCropNoP) ++noP;
+            if (m.patch[e] == 1) ++patchedFresh;
+            else if (m.patch[e] == 2) ++patchedNewest;
+        }
+    Log::get().note("eye capture (F62c): marker dump series %ls (%s): %d frames (sequences %llu..%llu, %s), %d of %d final crops and %d of %d "
+                    "pre-composite crops written (%ux%u about this frame's P), %d write failures; eye-frames skipped: %d off-screen (P with w <= 0 "
+                    "or outside the eye's NDC), %d with no P this frame, %d with no P yet; eye-frames the fix patched: %d fresh, %d newest rows; files "
+                    "%ls\\eye_%ls_marker_eye{0,1}_fNN.bmp, eye_%ls_marker_pre_eye{0,1}_fNN.bmp; eye_%ls_marker.csv %s", g_mkStamp, why,
+                    g_mkCount, seq0, seq1, gaps ? "NOT consecutive" : "consecutive", finals, 2 * kMkFrames, prePosts, 2 * kMkFrames, kMkCrop,
+                    kMkCrop, failed, offScreen, notThisFrame, noP, patchedFresh, patchedNewest, dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp,
+                    f ? "written" : "NOT written");
+    // The self-check: fewer than 32 final crops says why, per reason, and names the first missing ones.
+    if (finals < 2 * kMkFrames) {
+        int notReached = 2 * (kMkFrames - g_mkCount), notTried = 0, noMarker = 0, stageFail = 0, writeFail = 0;
+        char list[480] = "";
+        size_t used = 0;
+        int listed = 0;
+        for (int k = 0; k < g_mkCount; ++k)
+            for (int e = 0; e < 2; ++e) {
+                const MkFrame& m = g_mk[k];
+                const MkShot& s = m.post[e];
+                if (s.why == kMkOk) continue;
+                const char* r = "not tried (the frame's final eye never arrived)";
+                switch (s.why) {
+                    case kMkNoMarker: ++noMarker; r = "no P projected yet"; break;
+                    case kMkNotThisFrame: ++noMarker; r = "no P this frame (age 0 required)"; break;
+                    case kMkOffScreen: ++noMarker; r = "skipped: P off the eye (w <= 0 or outside the NDC range)"; break;
+                    case kMkStageFail: ++stageFail; r = "staging failed"; break;
+                    case kMkStaged: ++writeFail; r = "staged, not written"; break;
+                    case kMkWriteFail: ++writeFail; r = "write failed"; break;
+                    default: ++notTried; break;
+                }
+                if (listed < 6 && used < sizeof(list) - 1) {
+                    const int w = std::snprintf(list + used, sizeof(list) - used, "%sf%02d eye%d: %s (P %lld ms, drawn %lld ms old at the frame's "
+                                                "first capture; %llu ms after it)", listed ? "; " : "", k, e, r,
+                                                static_cast<long long>(m.ageP[e]), static_cast<long long>(m.ageDrawn[e]),
+                                                static_cast<unsigned long long>(s.lateMs));
+                    if (w > 0) used = std::min(sizeof(list) - 1, used + static_cast<size_t>(w));
+                    ++listed;
+                }
+            }
+        Log::get().note("eye capture (F62c): marker dump series %ls self-check: %d of %d final crops written; missing: %d not reached (the series "
+                        "ended %s after %d frames), %d not tried, %d skipped for P (off the eye, not this frame's, or none yet; the end line "
+                        "splits them), %d staging failures, %d write failures; first: %s", g_mkStamp, finals, 2 * kMkFrames, notReached, why,
+                        g_mkCount, notTried, noMarker, stageFail, writeFail, list[0] ? list : "none");
+    }
+    mkRelease();
+}
+// One capture (pre: before the interface layer's composite; else the final eye). The frame's slot by its sequence; the eye's centre chosen
+// at its first capture this frame and kept for the other. Writes the run when the last frame's final right eye was tried, when a 17th
+// sequence arrives, or 10 s after arming (F62a; it was 3 s, and the eye run's own write takes about 1.8 s inside the series).
+// F62a: the projection's age is taken at the frame's first capture (m.t0Ms), not at this capture: a projection updated after that moment is
+// this frame's (age 0). A stall between the two eyes of one frame (the eye run's write) no longer reads the frame's projection as stale.
+void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Texture2D* tex, const uint32_t region[4], bool flipU, bool flipV,
+               bool pre) {
+    if (!g_mkArmed || !ctx || !tex || !region || eye > 1) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_mkArmMs > kMkDeadlineMs) return mkWrite(ctx, "10 s after arming");
+    int k = -1;
+    for (int i = 0; i < g_mkCount; ++i)
+        if (g_mk[i].seq == seq) k = i;
+    if (k < 0) {
+        if (g_mkCount >= kMkFrames) return mkWrite(ctx, "the frames are taken");
+        k = g_mkCount++;
+        g_mk[k].seq = seq;
+        g_mk[k].t0Ms = now;
+    }
+    MkFrame& m = g_mk[k];
+    MkShot& s = pre ? m.pre[eye] : m.post[eye];
+    if (s.tried) return;
+    s.tried = true;
+    s.lateMs = now >= m.t0Ms ? now - m.t0Ms : 0;
+    const uint32_t w = region[2] - region[0], h = region[3] - region[1];
+    s.eyeWH[0] = w;
+    s.eyeWH[1] = h;
+    if (!m.centred[eye]) {
+        // F62c: the centre is THIS frame's P through the eye's scene rows (published in the probe frame the capture is in: the frame's
+        // draws and its submits come before its Present), never the drawn marker; P off the eye, or no P this frame, skips the eye-frame.
+        m.centred[eye] = true;
+        const MarkerCropNdc& c = g_markerCropNdc[eye];
+        const uint64_t pMs = c.pMs.load(std::memory_order_relaxed), dMs = c.drawnMs.load(std::memory_order_relaxed), ref = m.t0Ms;
+        const uint32_t frameNow = nativeOnFootMarkerFrameNow(), sFrame = c.sFrame.load(std::memory_order_relaxed);
+        const uint32_t dFrame = c.drawnFrame.load(std::memory_order_relaxed);
+        const bool sHave = c.sHave.load(std::memory_order_relaxed);
+        m.frameNow[eye] = frameNow;
+        m.ageP[eye] = pMs ? (pMs >= ref ? 0 : static_cast<int64_t>(ref - pMs)) : -1;
+        m.ageDrawn[eye] = dMs ? (dMs >= ref ? 0 : static_cast<int64_t>(ref - dMs)) : -1;
+        m.pAgeFrames[eye] = sHave ? static_cast<int64_t>(static_cast<int32_t>(frameNow - sFrame)) : -1;
+        m.drawnAgeFrames[eye] = dMs ? static_cast<int64_t>(static_cast<int32_t>(frameNow - dFrame)) : -1;
+        m.ndcP[eye][0] = c.sNdc[0].load(std::memory_order_relaxed);
+        m.ndcP[eye][1] = c.sNdc[1].load(std::memory_order_relaxed);
+        m.pW[eye] = c.sW.load(std::memory_order_relaxed);
+        m.pKey[eye] = c.sKey.load(std::memory_order_relaxed);
+        m.head[eye] = c.sHead.load(std::memory_order_relaxed);
+        m.ndcDrawn[eye][0] = c.drawn[0].load(std::memory_order_relaxed);
+        m.ndcDrawn[eye][1] = c.drawn[1].load(std::memory_order_relaxed);
+        m.fixLive[eye] = nativeOnFootMarkerFixLive();
+        if (c.patchDraws.load(std::memory_order_relaxed) > 0 && c.patchFrame.load(std::memory_order_relaxed) == frameNow) {
+            m.patch[eye] = c.patchNewest.load(std::memory_order_relaxed) ? 2 : 1;
+            m.patchKey[eye] = c.patchKey.load(std::memory_order_relaxed);
+            m.patchDraws[eye] = c.patchDraws.load(std::memory_order_relaxed);
+            m.patchDx[eye] = c.patchDx.load(std::memory_order_relaxed);
+            m.patchDy[eye] = c.patchDy.load(std::memory_order_relaxed);
+        }
+        const double ndcP[2] = {static_cast<double>(m.ndcP[eye][0]), static_cast<double>(m.ndcP[eye][1])};
+        m.pick[eye] = drawtag::markerCropPick(sHave, sFrame, frameNow, static_cast<double>(m.pW[eye]), ndcP);
+        if (m.pick[eye] == drawtag::kCropOk) {
+            m.src[eye] = 2;
+            m.ndc[eye][0] = m.ndcP[eye][0];
+            m.ndc[eye][1] = m.ndcP[eye][1];
+        }
+    }
+    if (m.src[eye] == 0) {
+        ++g_mkNoMarker;
+        s.why = m.pick[eye] == drawtag::kCropOffScreen ? kMkOffScreen : m.pick[eye] == drawtag::kCropNotThisFrame ? kMkNotThisFrame : kMkNoMarker;
+    } else {
+        const double ndc[2] = {static_cast<double>(m.ndc[eye][0]), static_cast<double>(m.ndc[eye][1])};
+        double centre[2];
+        drawtag::markerCropCentre(ndc, region, flipU, flipV, centre);
+        uint32_t cw = 0, ch = 0, bx = 0, by = 0;
+        if (stageEyeCrop(ctx, tex, &s.st, &cw, &ch, region, kMkCrop, kMkCrop, &bx, &by, centre)) {
+            s.taken = true;
+            s.why = kMkStaged;   // kMkOk once mkWrite has written it
+            s.box[0] = bx;
+            s.box[1] = by;
+            s.box[2] = cw;
+            s.box[3] = ch;
+        } else {
+            ++g_mkStageFail;
+            s.why = kMkStageFail;
+        }
+    }
+    if (!pre && eye == 1 && k == kMkFrames - 1) mkWrite(ctx, "complete");
 }
 
 void eyeOutputCropSize(int k, ID3D11Texture2D* output, uint32_t* wantW, uint32_t* wantH) {
@@ -1916,12 +2359,37 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         }
         return;
     }
-    fprintf(f, "{\n  \"schema\": 1,\n  \"engine_kind_shift\": 12,\n  \"engine_kind_mask\": 7,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n  \"frames\": [\n",
-            g_eyeRunStamp, kEyeRun);
+    // F86h: the native on-foot marker composites of each frame, per eye: the draws the fix decided to patch and those whose patch was bound at the issue. In the
+    // F85 flight eye 1's composites were unpatched in frame 0 of four dumps (the first frame with both eyes bound is where a reader starts).
+    uint32_t markerPatched[kEyeRun][2] = {}, markerBound[kEyeRun][2] = {};
+    bool markerHave[kEyeRun] = {};
+    int firstBoth = -1, haveCount = 0;
+    for (int k = 0; k < g_eyeRunTaken && k < kEyeRun; ++k) {
+        markerHave[k] = nativeOnFootMarkerFrameCounts(g_eyeDecisions[k].renderFrame, markerPatched[k], markerBound[k]);
+        if (markerHave[k]) ++haveCount;
+        if (markerHave[k] && firstBoth < 0 && markerBound[k][0] > 0 && markerBound[k][1] > 0) firstBoth = k;
+    }
+    fprintf(f, "{\n  \"schema\": 1,\n  \"engine_kind_shift\": 12,\n  \"engine_kind_mask\": 7,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n", g_eyeRunStamp, kEyeRun);
+    if (firstBoth >= 0) fprintf(f, "  \"first_frame_both_eyes_bound\": %d,\n", firstBoth);
+    else fputs("  \"first_frame_both_eyes_bound\": null,\n", f);
+    fputs("  \"frames\": [\n", f);
+    Log::get().note("eye capture (F86h): marker composites per frame, patched / bound (eye 0 | eye 1): %d of %d frames have counts; first frame with both eyes bound: %d%s.", haveCount,
+                    g_eyeRunTaken, firstBoth, haveCount ? "" : " (none: the marker fix saw no draw in them, or it is off)");
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         const EyeDecisionFrame& d = g_eyeDecisions[k];
-        fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, ",
-                k, d.frame, d.diagnosticFrame);
+        fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, \"render_frame\": %u, ",
+                k, d.frame, d.diagnosticFrame, d.renderFrame);
+        if (k < kEyeRun && markerHave[k])
+            fprintf(f, "\"marker_patched\": [%u, %u], \"marker_bound\": [%u, %u], \"marker_both_eyes_bound\": %s, ", markerPatched[k][0], markerPatched[k][1], markerBound[k][0],
+                    markerBound[k][1], markerBound[k][0] > 0 && markerBound[k][1] > 0 ? "true" : "false");
+        else
+            fputs("\"marker_patched\": null, \"marker_bound\": null, \"marker_both_eyes_bound\": null, ", f);
+        {   // F87p: the interaction label's draws of the frame, per eye (index count, layered, b0, record, leader NDC)
+            static char labelJson[8192];
+            const size_t labelLen = nativeOnFootLabelDrawsJson(d.renderFrame, labelJson, sizeof(labelJson));
+            if (labelLen) fprintf(f, "\"label_draws\": %s, ", labelJson);
+            else fputs("\"label_draws\": null, ", f);
+        }
         fprintf(f, "\"input_size\": [%u, %u], \"decision_crop\": [%u, %u, %u, %u], ",
                 d.inputW, d.inputH, d.decisionCrop[0], d.decisionCrop[1],
                 d.decisionCrop[2], d.decisionCrop[3]);
@@ -1956,12 +2424,96 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
 
 // The run's write after its last crop: the sixteen crops (raw C00.., or
 // treated T00..) and the first treated frame whole.
+void writeEyeJumpLattice(ID3D11DeviceContext* ctx,const std::wstring& dir,const char* reason) {
+    using namespace eye_jump_lattice;
+    if(!g_eyeJumpLatticeRun.armed())return;
+    wchar_t binPath[MAX_PATH],jsonPath[MAX_PATH];
+    _snwprintf_s(binPath,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_JumpLattice.bin",dir.c_str(),g_eyeFinalStamp);
+    _snwprintf_s(jsonPath,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_JumpLattice.json",dir.c_str(),g_eyeFinalStamp);
+    FILE* bin=nullptr;_wfopen_s(&bin,binPath,L"wb");
+    bool binOk=bin!=nullptr;
+    if(bin){
+        const char magic[8]={'E','D','V','R','J','M','P','1'};const uint32_t header[7]={1,Count,Stride,20,SkinFormat,MotionFormat,SlotFormat};
+        binOk=fwrite(magic,1,sizeof(magic),bin)==sizeof(magic)&&fwrite(header,sizeof(header),1,bin)==1&&
+              fwrite(&Budget,sizeof(Budget),1,bin)==1;
+    }
+    FILE* json=nullptr;_wfopen_s(&json,jsonPath,L"wb");bool manifestOk=json!=nullptr;
+    if(json)fprintf(json,"{\"schema\":2,\"stamp\":\"%ls\",\"capture_type\":\"%s\",\"parent_stamp\":\"%ls\",\"trigger_status\":\"%s\",\"trigger_generation\":%llu,\"trigger_source_frame\":%u,\"trigger_qpc\":%llu,\"trigger_age_qpc\":%llu,\"trigger_root\":[%.6f,%.6f,%.6f],\"trigger_raw_vy_mps\":%.6f,\"trigger_filtered_vy_mps\":%.6f,\"reason\":\"%s\",\"data_file\":\"eye_%ls_JumpLattice.bin\",\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y), valid sampled points only\",\"sample_record_bytes\":20,\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"frames\":[\n",
+        g_eyeFinalStamp,g_eyeRunCompanion?"airborne_companion":"manual",g_eyeRunParentStamp,
+        g_eyeRunTrigger.valid?(g_eyeRunCompanion?"airborne_companion_trigger":"airborne_at_manual_request"):
+            (g_eyeRunCompanion?"missing_trigger_snapshot":"manual_no_airborne_snapshot"),
+        (unsigned long long)g_eyeRunTrigger.generation,g_eyeRunTrigger.sourceFrame,(unsigned long long)g_eyeRunTrigger.sampleQpc,(unsigned long long)g_eyeRunTriggerAgeQpc,
+        g_eyeRunTrigger.root[0],g_eyeRunTrigger.root[1],g_eyeRunTrigger.root[2],g_eyeRunTrigger.rawVerticalVelocityMps,g_eyeRunTrigger.verticalVelocityMps,
+        reason,g_eyeFinalStamp,Stride,(unsigned long long)Budget,(unsigned long long)g_eyeJumpLatticeRun.bytes);
+    unsigned staged=0,written=0,refused=0,notReached=0;bool first=true;
+    struct PackedSample {uint32_t skin[2],motion,slots[2];};static_assert(sizeof(PackedSample)==20,"jump lattice sample layout");
+    for(uint32_t i=0;i<Count;++i){
+        Row& row=g_eyeJumpLatticeRun.rows[i];uint64_t sequence=0;
+        const auto& final=g_eyeFinalRun.rows[i];
+        if(row.status==NotReached&&final.scheduled){row.sceneFrame=final.scene;row.renderFrame=final.renderFrame;row.epoch=final.epoch;}
+        if(row.status==Staged){
+            if(!finalSequenceMatch(row,final.scheduled,final.scene,final.renderFrame,final.epoch,
+                                   final.eye[0].sequence,final.eye[1].sequence,sequence))
+                row.status=JoinMismatch;
+        }
+        std::vector<PackedSample> payload;
+        D3D11_MAPPED_SUBRESOURCE mapped[3]{};
+        if(row.status==Staged){
+            ++staged;
+            if(!binOk||!ctx)row.status=WriteFailed;
+            else {
+                ID3D11Texture2D* sources[3]={row.skin.Get(),row.motion.Get(),row.slots.Get()};unsigned maps=0;
+                for(;maps<3;++maps)if(FAILED(ctx->Map(sources[maps],0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped[maps])))break;
+                if(maps!=3){for(unsigned k=0;k<maps;++k)ctx->Unmap(sources[k],0);row.status=MapNotReady;}
+                else {
+                    payload.resize(size_t(row.sampleWidth)*row.sampleHeight);
+                    for(uint32_t y=0;y<row.sampleHeight;++y){
+                        const auto* skin=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[0].pData)+size_t(y)*mapped[0].RowPitch);
+                        const auto* motion=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[1].pData)+size_t(y)*mapped[1].RowPitch);
+                        const auto* slots=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped[2].pData)+size_t(y)*mapped[2].RowPitch);
+                        for(uint32_t x=0;x<row.sampleWidth;++x){auto& out=payload[size_t(y)*row.sampleWidth+x];
+                            out.skin[0]=skin[x*2];out.skin[1]=skin[x*2+1];out.motion=motion[x];out.slots[0]=slots[x*2];out.slots[1]=slots[x*2+1];}
+                    }
+                    for(unsigned k=0;k<3;++k)ctx->Unmap(sources[k],0);
+                    const uint32_t rowHeader[9]={i,row.sceneFrame,row.renderFrame,row.epoch,row.width,row.height,row.sampleWidth,row.sampleHeight,Written};
+                    const uint64_t sampleCount=payload.size(),payloadBytes=sampleCount*sizeof(PackedSample);
+                    binOk=fwrite(rowHeader,sizeof(rowHeader),1,bin)==1&&fwrite(&sequence,sizeof(sequence),1,bin)==1&&
+                          fwrite(&payloadBytes,sizeof(payloadBytes),1,bin)==1&&
+                          fwrite(payload.data(),sizeof(PackedSample),payload.size(),bin)==payload.size();
+                    if(binOk){row.status=Written;++written;}else row.status=WriteFailed;
+                }
+            }
+        }
+        if(row.status==NotReached)++notReached;
+        else if(row.status!=Written)++refused;
+        if(json){
+            const uint64_t payloadBytes=row.status==Written?uint64_t(row.sampleWidth)*row.sampleHeight*sizeof(PackedSample):0;
+            fprintf(json,"%s{\"index\":%u,\"scheduled\":%s,\"scene_frame\":%u,\"render_frame\":%u,\"capture_epoch\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"sample_size\":[%u,%u],\"stride\":%u,\"coordinate_rule\":\"source=(2*x,2*y)\",\"status\":\"%s\",\"payload_bytes\":%llu,\"binary_layout\":\"row_header_then_interleaved_skin_mv_slots\"}",
+                first?"":",\n",i,final.scheduled?"true":"false",row.sceneFrame,row.renderFrame,row.epoch,(unsigned long long)(row.status==Written?sequence:0),row.width,row.height,row.sampleWidth,row.sampleHeight,Stride,resultName(row.status),(unsigned long long)payloadBytes);
+            first=false;
+        }
+    }
+    if(bin){if(fclose(bin)!=0)binOk=false;}
+    if(json){fprintf(json,"\n],\"data_status\":\"%s\"}\n",binOk?"complete":"write_failed");const bool clean=!ferror(json);const int closed=fclose(json);if(!clean||closed!=0)manifestOk=false;}
+    Log::get().note("native on-foot jump lattice (F83): run %ls reason=%s stride=%u scheduled=%u staged=%u written=%u refused=%u not-reached=%u bytes=%llu/%llu; data=%s manifest=%s. Exact stride-two points sample SkinE/MV half values and preserve EngineSlots float bits; no per-frame CPU readback.",
+        g_eyeFinalStamp,reason,Stride,g_eyeJumpLatticeRun.count,staged,written,refused,notReached,
+        (unsigned long long)g_eyeJumpLatticeRun.bytes,(unsigned long long)Budget,binOk?"complete":"write_failed",manifestOk?"written":"write_failed");
+    g_eyeJumpLatticeRun.reset();
+}
 void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     if(!g_eyeFinalRun.armed)return;
+    nofoot::optic_capture::RowDescriptor opticRows[eye_final_capture::Count]{};
+    for(unsigned i=0;i<eye_final_capture::Count;++i){
+        const auto& row=g_eyeFinalRun.rows[i];const auto& image=row.eye[1];auto& out=opticRows[i];
+        out.scheduled=row.scheduled;out.sceneFrame=row.scene;out.renderFrame=row.renderFrame;out.epoch=row.epoch;out.sequence=image.sequence;
+        strncpy_s(out.imageStatus,image.status?image.status:"unknown",_TRUNCATE);
+    }
+    nativeOnFootOpticCaptureEnd(reason, opticRows, eye_final_capture::Count, g_eyeFinalRun.unmatched);
     ID3D11DeviceContext* ownedContext=nullptr;
     if(g_eyeFinalRun.captureDevice){const bool ran=guarded("eye capture/final flush context",[&]{g_eyeFinalRun.captureDevice->GetImmediateContext(&ownedContext);});ctx=ran?ownedContext:nullptr;}
     const std::wstring dir=Log::get().dir()+L"\\eyes";
     CreateDirectoryW(dir.c_str(),nullptr);
+    writeEyeJumpLattice(ctx,dir,reason);
     unsigned copied=0,written=0,missing=0;
     auto write=[&](eye_final_capture::Image& image,const wchar_t* suffix,int eye) {
         if(!image.sequence){++missing;return;}
@@ -1981,11 +2533,17 @@ void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
     wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_FinalCrisp.json",dir.c_str(),g_eyeFinalStamp);
     FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool manifest=false;
     if(f){
-        fprintf(f,"{\"schema\":1,\"stage\":\"after_ui_layer_composite_before_runtime_menu\",\"stamp\":\"%ls\",\"reason\":\"%s\",\"requested\":16,\"crop_policy\":\"centre_1400_native_pixels_per_eye\",\"crop_coordinates\":\"unflipped_texture_x0_y0_x1_y1\",\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"blob_cap_bytes\":%llu,\"unmatched\":%u,\"duplicates\":%u,\"images\":[\n",g_eyeFinalStamp,reason,(unsigned long long)eye_final_capture::Budget,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::BlobCap,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates);
+        fprintf(f,"{\"schema\":2,\"stage\":\"after_ui_layer_composite_before_runtime_menu\",\"stamp\":\"%ls\",\"capture_type\":\"%s\",\"parent_stamp\":\"%ls\",\"companion_request_state\":\"%s\",\"trigger_status\":\"%s\",\"trigger_generation\":%llu,\"trigger_source_frame\":%u,\"trigger_qpc\":%llu,\"trigger_age_qpc\":%llu,\"trigger_root\":[%.6f,%.6f,%.6f],\"trigger_raw_vy_mps\":%.6f,\"trigger_filtered_vy_mps\":%.6f,\"reason\":\"%s\",\"requested\":16,\"crop_policy\":\"centre_1400_native_pixels_per_eye\",\"crop_coordinates\":\"unflipped_texture_x0_y0_x1_y1\",\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"blob_cap_bytes\":%llu,\"unmatched\":%u,\"duplicates\":%u,\"images\":[\n",
+            g_eyeFinalStamp,g_eyeRunCompanion?"airborne_companion":"manual",g_eyeRunParentStamp,airborneCompanionStateName(g_airborneCompanion.request.state),
+            g_eyeRunTrigger.valid?(g_eyeRunCompanion?"airborne_companion_trigger":"airborne_at_manual_request"):
+                (g_eyeRunCompanion?"missing_trigger_snapshot":"manual_no_airborne_snapshot"),
+            (unsigned long long)g_eyeRunTrigger.generation,g_eyeRunTrigger.sourceFrame,(unsigned long long)g_eyeRunTrigger.sampleQpc,(unsigned long long)g_eyeRunTriggerAgeQpc,
+            g_eyeRunTrigger.root[0],g_eyeRunTrigger.root[1],g_eyeRunTrigger.root[2],g_eyeRunTrigger.rawVerticalVelocityMps,g_eyeRunTrigger.verticalVelocityMps,
+            reason,(unsigned long long)eye_final_capture::Budget,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::BlobCap,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates);
         bool first=true;
         auto record=[&](const eye_final_capture::Image& image,int index,unsigned eye,uint32_t scene,const wchar_t* suffix){
             const unsigned k=index<0?0u:unsigned(index);const EyeDecisionFrame& temporal=g_eyeDecisions[k];
-            fprintf(f,"%s{\"index\":%d,\"scheduled\":%s,\"eye\":%u,\"frame\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"format\":%u,\"crop\":[%u,%u,%u,%u],\"composite_applied\":%s,\"flip_u\":%s,\"flip_v\":%s,\"status\":\"%s\",\"file\":",first?"":",\n",index,(index<0?g_eyeFinalRun.rows[0].scheduled:g_eyeFinalRun.rows[index].scheduled)?"true":"false",eye,scene,(unsigned long long)image.sequence,image.width,image.height,image.format,image.crop[0],image.crop[1],image.crop[2],image.crop[3],image.composite?"true":"false",image.flipU?"true":"false",image.flipV?"true":"false",image.status);
+            fprintf(f,"%s{\"index\":%d,\"scheduled\":%s,\"eye\":%u,\"frame\":%u,\"render_frame\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"format\":%u,\"crop\":[%u,%u,%u,%u],\"composite_applied\":%s,\"flip_u\":%s,\"flip_v\":%s,\"status\":\"%s\",\"file\":",first?"":",\n",index,(index<0?g_eyeFinalRun.rows[0].scheduled:g_eyeFinalRun.rows[index].scheduled)?"true":"false",eye,scene,g_eyeFinalRun.rows[k].renderFrame,(unsigned long long)image.sequence,image.width,image.height,image.format,image.crop[0],image.crop[1],image.crop[2],image.crop[3],image.composite?"true":"false",image.flipU?"true":"false",image.flipV?"true":"false",image.status);
             if(!strcmp(image.status,"written"))fprintf(f,"\"eye_%ls_FinalCrisp_%ls.bmp\"",g_eyeFinalStamp,suffix);else fputs("null",f);
             fprintf(f,",\"capture_epoch\":%u,\"submit_region\":[%u,%u,%u,%u],\"temporal_input_size\":[%u,%u],\"temporal_output_size\":[%u,%u],\"temporal_output_crop\":[%u,%u,%u,%u],\"temporal_reference_eye\":0,\"temporal_mapping\":\"temporal_xy=(native_xy-submit_region_xy0)*temporal_output_size/submit_region_size; P/T_local_xy=temporal_xy-temporal_output_crop_xy; unflipped\"}",g_eyeFinalRun.rows[k].epoch,image.submitRegion[0],image.submitRegion[1],image.submitRegion[2],image.submitRegion[3],temporal.inputW,temporal.inputH,temporal.outputW,temporal.outputH,temporal.outputCrop[0],temporal.outputCrop[1],temporal.outputCrop[2],temporal.outputCrop[3]);first=false;
         };
@@ -2040,6 +2598,7 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         g_eyeRunStaging[0]->GetDesc(&sd);
         if (writeEyeBmp(ctx, g_eyeRunStaging[0], sd, 0, path)) ++wroteTreated;
     }
+    writeMarkerCrops(ctx, dir);   // F53: the marker crops staged with the overviews (none unless the marker probe was on)
     if (g_eyeRunUntreated) {
         if (g_eyeOverviewTaken[1] && g_eyeRunStaging[1]) {
             wchar_t path[MAX_PATH];D3D11_TEXTURE2D_DESC sd{};
@@ -2080,15 +2639,18 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
     tex->GetDevice(&dev);if(!dev)return;dev->GetImmediateContext(&ctx);dev->Release();if(!ctx)return;
     g_eyeRunUntreated=true;
     if(eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
-        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
     const uint32_t w=region[2]-region[0],h=region[3]-region[1];uint32_t cw=0,ch=0;
-    if(!g_eyeOverviewTaken[eye])g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
+    if(!g_eyeOverviewTaken[eye]){
+        g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
+        if(g_eyeOverviewTaken[eye])stageMarkerCrop(ctx,tex,eye,region);   // F53: the marker crop beside the overview (probe on only)
+    }
     if(eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken<kEyeRun) {
         const int k=g_eyeRunTaken;
         if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
             g_eyeRawTaken[k]=true;g_eyeRawInputW[k]=w;g_eyeRawInputH[k]=h;
             g_eyeRunFrames[k]=g_rowsFrame;objectProbeLedgerMark(k);
-            g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame);
+            g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
             ++g_eyeRunTaken;--g_eyeRunLeft;
             if(g_eyeRunLeft==0){g_eyeRunReady=true;g_eyeRunWidth=cw;g_eyeRunHeight=ch;}
         }
@@ -2101,12 +2663,15 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
 // compositor receives it, and the sixteen treated crops beside the raw ones.
 void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
     const int k = g_eyeRunTaken;
-    if(k>=0&&k<kEyeRun)g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_eyeCaptureFrame);
+    if(k>=0&&k<kEyeRun)g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_eyeCaptureFrame,nativeOnFootRenderFrame());
     if (!tex || k < 0 || k >= kEyeRun) {
         if (k >= 0 && k < kEyeRun) ++g_eyeRunTaken;
         g_eyeRunLeft = 0; g_eyeRunReady = g_eyeRunTaken > 0; return;
     }
-    if (k == 0) stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
+    if (k == 0) {
+        stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
+        stageMarkerCrop(ctx, tex, 0, nullptr);   // F53: the treated left eye's marker crop beside its overview (probe on only)
+    }
     uint32_t cw = 0, ch = 0;
     uint32_t wantW=0, wantH=0, cropX=0, cropY=0;
     eyeOutputCropSize(k, tex, &wantW, &wantH);
@@ -3506,7 +4071,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // from a usable scene row, else the game's infinite-far scene
         // encoding. The camera rows can arrive without a projection row;
         // the runtime's finite far plane is not a valid fallback for it.
-        // The scene row on build 332841 says A = 0,
+        // The scene row on build 334473 says A = 0,
         // B = 0.025 -- no far plane -- where the runtime's 0.025..50000 m
         // decoded 10 km as 8.3 km, 3 km as 2.8 km, and the body's grid
         // missed the station beyond a few hundred metres (19:52).
@@ -3644,6 +4209,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                 decision = {};
                 decision.frame = g_rowsFrame;
+                decision.renderFrame = nativeOnFootRenderFrame();   // F86h
                 g_eyeRunFrames[g_eyeRunTaken] = g_rowsFrame;
                 decision.inputW = w; decision.inputH = h;
                 decision.outputW = outW ? outW : w; decision.outputH = outH ? outH : h;
@@ -3659,8 +4225,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 t = {};
                 t.frame = g_rowsFrame; t.eye = eye; t.flags = flags;
                 t.outputWidth = outW ? outW : w; t.outputHeight = outH ? outH : h;
-                t.rowsOk = g_rowsDeltaOwn; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
+                t.rowsOk = g_rowsDeltaOwn; t.rowsValid = g_curValid; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
                 t.rowsBound = g_curRowsBound; t.rowsFollow = g_rowsFollow; t.sceneDraws = sceneDraws;
+                LARGE_INTEGER rowsQpc{};
+                QueryPerformanceCounter(&rowsQpc);
+                t.rowsQpc = static_cast<uint64_t>(rowsQpc.QuadPart);
                 t.celestialRecords = celestial.records; t.celestialBodies = celestial.bodies; t.celestialPatches = celestial.patches;
                 t.celestialMatched = celestial.matched; t.celestialRotDeg = static_cast<float>(celestial.rotationDeg);
                 t.celestialDistance = static_cast<float>(celestial.distance);
@@ -4167,6 +4736,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool probeNv = diagnostics && e.dlHaveHistory && (flags & 1u) == 0 &&
                                          e.dlOutSrv && g_statsUav != nullptr;
                     p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
+                    g_lastUpscale[0] = p.probe[0];
+                    g_lastUpscale[1] = static_cast<float>(oH) / static_cast<float>(h);
                     p.probe[1] = probeNv ? 1.0f : 0.0f;
                     ID3D11Texture2D* coverageMask = nullptr;
                     if (!uiDepthCoverageMask(w, h, eye, &coverageMask)) coverageMask = nullptr;
@@ -4199,7 +4770,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // presets and FSR that read it (modern DLSS honours the
                     // history-invalidate vector the same pixel also gets).
                     if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
-                    setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[24] = {};
                     // t19..t23 are touched only while engine-record velocity is bound.
                     const UINT srvCountM = engineBound ? 24u : 19u;
@@ -4221,6 +4791,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr,
                                                           engineBound ? engineSkinSrv.Get() : nullptr};   // t23: target 7, the skinned characters' E (probe.w 16384)
+                    // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch). The constants are written
+                    // here, after the views are known, and before the dispatch.
+                    const uint32_t layersAbsentM = depthLayersAbsentBits(srvsM);
+                    p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | layersAbsentM);
+                    ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
+                    setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
@@ -4282,7 +4858,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
-                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews,engineSkinSrv.Get());
+                    if(eye==0){
+                        stageEyeJumpLattice(ctx,e,engineBound,engineViews,engineSkinSrv.Get());
+                        stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews,engineSkinSrv.Get());
+                    }
                     // What NVIDIA is handed: the interface's mask and engine-record
                     // velocity's masked pixels, else nothing.
                     ID3D11Texture2D* biasMask = ((uiTrack || engineBound) && e.dlMask) ? e.dlMask : nullptr;
@@ -4557,7 +5136,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // trained path was running without diagnostics.
         if (ran && !usedDlaa && !leanOwn && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
         if (ran && !usedDlaa) {
-            setParams(ctx, p);
             ID3D11ShaderResourceView* nullSrv[24] = {};
             const UINT srvCount = engineOwn ? 24u : 19u;
             ID3D11UnorderedAccessView* nullUav[7] = {};
@@ -4582,6 +5160,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                       engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                       engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr,
                                                       engineOwn ? engineSkinSrv.Get() : nullptr};   // t23: the second skin
+            // Bits 64/256: t6/t7 absent, off the array just built (zSceneAt skips the null fetch), then the constants.
+            p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | depthLayersAbsentBits(srvs));
+            setParams(ctx, p);
             ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav, nullptr,
                                                   nullptr, nullptr,
@@ -4759,7 +5340,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         captureEyeRun(ctx, static_cast<ID3D11Texture2D*>(result));
     }
     if(result&&ctx&&eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
-        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
     if(eye==1 && ctx && g_eyeRunReady) {
         writeEyeRun(ctx,g_eyeRunWidth,g_eyeRunHeight);g_eyeRunReady=false;
     }
@@ -4772,22 +5353,75 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
 }  // namespace
 
+bool temporalPassDrawStamp(TemporalDrawStamp* out) {
+    if(!out)return false;
+    *out={};
+    out->sceneFrame=g_rowsFrame;out->sceneFrameValid=(g_rowsFrame!=0);
+    if(g_eyeFinalRun.armed) {
+        out->epoch=g_eyeFinalClock.epoch;out->epochValid=true;
+        const int index=g_eyeFinalRun.find(out->epoch);
+        if(index>=0 && g_eyeFinalRun.rows[index].scheduled) {
+            out->scheduledIndex=static_cast<uint32_t>(index);
+            out->scheduledRenderFrame=g_eyeFinalRun.rows[index].renderFrame;
+            out->scheduledIndexValid=true;
+        }
+    }
+    return true;
+}
+
+// F59: the waypoint dump's pre-composite crop (native_sharpen.cpp, before the interface layer's composite). Copies only.
+void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV) {
+    if (!g_mkArmed || !texture || eye > 1) return;
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    guarded("eye capture/waypoint dump pre", [&] {
+        texture->GetDevice(&device);
+        if (device) device->GetImmediateContext(&ctx);
+        if (ctx) mkCapture(ctx, sequence, eye, texture, region, flipU, flipV, true);
+    });
+    if (ctx) ctx->Release();
+    if (device) device->Release();
+}
+
 void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D* texture,
                                  const uint32_t region[4],bool composite,bool flipU,bool flipV) {
+    if (g_mkArmed && texture && eye <= 1) {   // F59: the waypoint dump's final-eye crop (marker probe on, armed by the eye dump key)
+        ID3D11Device* device = nullptr;
+        ID3D11DeviceContext* ctx = nullptr;
+        guarded("eye capture/waypoint dump", [&] {
+            texture->GetDevice(&device);
+            if (device) device->GetImmediateContext(&ctx);
+            if (ctx) mkCapture(ctx, sequence, eye, texture, region, flipU, flipV, false);
+        });
+        if (ctx) ctx->Release();
+        if (device) device->Release();
+    }
     if(!g_eyeFinalRun.armed||eye>1)return;
     const uint32_t epoch=g_eyeFinalClock.epoch;
     const int index=g_eyeFinalRun.find(epoch);
     // An unmatched callback is evidence of a door/scene mismatch, not permission
     // to capture a different frame into the queued temporal slot.
     if(index<0){++g_eyeFinalRun.unmatched;return;}
+    auto sampleNativeOptic = [&](const char* status) {
+        float sceneRows[12] = {};
+        EyeMotionTrace sceneEye{};
+        const bool rowsRead = eyeMotionTraceFind(g_eyeFinalRun.rows[index].scene, 1, &sceneEye);
+        if (rowsRead) memcpy(sceneRows, sceneEye.nowRows, sizeof(sceneRows));
+        nativeOnFootOpticCaptureSample(static_cast<uint32_t>(index), g_eyeFinalRun.rows[index].scene, g_eyeFinalRun.rows[index].renderFrame,
+                                       epoch, sequence, status, rowsRead, rowsRead && sceneEye.rowsValid, rowsRead && sceneEye.rowsOk,
+                                       rowsRead && sceneEye.rowsBound, rowsRead ? sceneEye.rowsFollow : -1,
+                                       rowsRead ? sceneEye.frame : ~uint32_t(0), rowsRead ? sceneEye.rowsQpc : 0, sceneRows);
+    };
     ID3D11Device* device=nullptr;ID3D11DeviceContext* ctx=nullptr;
     const bool ran=guarded("eye capture/final crisp",[&]{
         if(texture){texture->GetDevice(&device);if(device)device->GetImmediateContext(&ctx);}
         g_eyeFinalRun.capture(epoch,sequence,eye,ctx,texture,region,composite,flipU,flipV);
+        if(eye==1)sampleNativeOptic(g_eyeFinalRun.rows[index].eye[eye].status);
         if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
     });
     if(!ran&&g_eyeFinalRun.armed){
         auto& image=g_eyeFinalRun.rows[index].eye[eye];image.sequence=sequence;image.status="capture_fault";
+        if(eye==1)sampleNativeOptic(image.status);
     }
     if(g_eyeFinalRun.pendingOwner)guarded("eye capture/final pending owner release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingOwner);});
     if(g_eyeFinalRun.pendingDevice)guarded("eye capture/final pending device release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingDevice);});
@@ -5047,20 +5681,19 @@ void temporalPassConfigure(Config& cfg) {
     // it observes the engine, not the renderer, so it arms on its own key.
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
     applyEngineMotionDiagnostics();
-    // K is the default in every mode. The legacy "steady" alias uses K for the
-    // full frame in every mode; quality = K everywhere; responsive = J everywhere (NVIDIA: slightly less
-    // ghosting, a little more flicker); auto = the driver's own choice per
-    // mode (K for DLAA, Quality and Balanced, M for Performance, L for Ultra
-    // Performance). The letters are silent aliases for one model everywhere
-    // (L and M are never applied under DLAA: five times the price). Live: a
-    // change recreates the features.
+    // K is the default in every mode; the legacy "steady" and "quality" aliases
+    // are K too. The letters are silent aliases for one model everywhere (L and
+    // M are never applied under DLAA: five times the price). J, its alias
+    // "responsive", and the driver's own choice ("auto", "default") were
+    // removed 2026-10-21 and run K through the unknown-name note below. Live:
+    // a change recreates the features.
     const std::string model = cfg.getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
     // The letters stop here, and deliberately. NVSDK_NGX_DLSS_Hint_Render_
     // Preset (nvsdk_ngx_defs.h, DLSS SDK 310.4) has no A, B, C or D at all
     // -- they were removed, with the header saying to use J or K instead --
     // and it marks G, H, I, N and O as reverting to default behaviour if
-    // asked for. E and F are deprecated; this UI exposes J, K, L and M.
+    // asked for. E and F are deprecated; this UI exposes K, L and M.
     // A tidier-looking letter range would offer four presets that no
     // longer exist.
     if (!preset.known) {
@@ -5072,7 +5705,7 @@ void temporalPassConfigure(Config& cfg) {
             modelWarned = true;
             Log::get().note(
                 "temporal aa: fix.temporal_aa_model = \"%s\" is not a model this build knows "
-                "(k, j, l, m, auto, or legacy steady/quality/responsive). Running preset K.",
+                "(k, l, m, or legacy steady/quality; j, auto and responsive were removed). Running preset K.",
                 model.c_str());
         }
     }
@@ -5291,6 +5924,7 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
+    pollAirborneCompanion();
     if(ctx&&g_eyeFinalRun.armed&&g_eyeFinalRun.ready&&g_eyeFinalRun.count&&
        g_eyeFinalClock.epoch>g_eyeFinalRun.rows[g_eyeFinalRun.count-1].epoch)writeFinalEyeRun(ctx,"next_boundary_missing_final");
     if (!ctx || (!detail::g_temporalPassWantedFssChrome && !g_eyeRunReady)) return;
@@ -5370,7 +6004,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // The projection's z row sits at row 198 of the same block (float
     // offset 792), read the column-vector way the x and y rows' off-centre
     // terms confirm: clip z = A * view z + B with the view z as clip w, so
-    // the depth the game writes is A + B / z. On build 332841 it reads
+    // the depth the game writes is A + B / z. On build 334473 it reads
     // A = 0, B = 0.025 -- reversed-Z with NO far plane, depth = 0.025 / z.
     // The 0.025..50000 m the game asks the runtime for is the runtime's
     // projection, not this one, and decoding with those planes read 10 km
@@ -5536,12 +6170,37 @@ void temporalPassNoteOmSet(unsigned colours) {
     detail::g_cameraDrawWatch = mini || g_pendingTagIdx >= 0;
 }
 
+// F63: the eye offsets' x for the native on-foot ADS sight lock (temporalPassEyeOffsetX), kept apart from g_eye (render thread only).
+static std::atomic<float> g_eyeOffX[2];
+static std::atomic<bool> g_eyeOffHave[2];
+bool temporalPassEyeOffsetX(int eye, float* x) {
+    if (eye < 0 || eye > 1 || !x || !g_eyeOffHave[eye].load(std::memory_order_relaxed)) return false;
+    *x = g_eyeOffX[eye].load(std::memory_order_relaxed);
+    return true;
+}
+// F66f: the eye's tangents {L, R, D, U} as the runtime last passed them to edvrTemporalAa (the texture's own frustum, unjittered).
+static std::atomic<float> g_eyeTan[2][4];
+static std::atomic<bool> g_eyeTanHave[2];
+bool temporalPassEyeTan(int eye, float tan[4]) {
+    if (eye < 0 || eye > 1 || !tan || !g_eyeTanHave[eye].load(std::memory_order_acquire)) return false;
+    for (int i = 0; i < 4; ++i) tan[i] = g_eyeTan[eye][i].load(std::memory_order_relaxed);
+    return true;
+}
+void temporalPassNoteEyeTan(int eye, const float* tan) {
+    if (eye < 0 || eye > 1 || !tan) return;
+    for (int i = 0; i < 4; ++i) g_eyeTan[eye][i].store(tan[i], std::memory_order_relaxed);
+    g_eyeTanHave[eye].store(true, std::memory_order_release);
+}
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
                           const float* eyeOffset) {
     if (eye < 0 || eye > 1) return;
     EyeState& e = g_eye[eye];
     e.headNoted = false;
     e.headNotedFrame = UINT32_MAX;
+    if (eyeOffset) {
+        g_eyeOffX[eye].store(eyeOffset[0], std::memory_order_relaxed);
+        g_eyeOffHave[eye].store(true, std::memory_order_relaxed);
+    }
     if (!prevPose || !nowPose || !eyeOffset) return;
     memcpy(e.headPrev, prevPose, sizeof(e.headPrev));
     memcpy(e.headNow, nowPose, sizeof(e.headNow));
@@ -5671,6 +6330,16 @@ bool temporalPassChosenRows(float rows[12], bool* bound) {
     if (!detail::g_temporalPassWantedFssChrome || !g_chosenThisFrame || !g_curValid || !rows) return false;
     memcpy(rows, g_curRows, sizeof(g_curRows));
     if (bound) *bound = g_curRowsBound;
+    return true;
+}
+
+bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash) {
+    if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1 || !rows) return false;
+    const RigidDrawRows& r = g_rigidDraw[eye];
+    if (!r.seen || !r.valid || r.frame != g_rowsFrame) return false;
+    memcpy(rows, r.rows, sizeof(r.rows));
+    if (resource) *resource = r.resource;
+    if (vsHash) *vsHash = r.vsHash;
     return true;
 }
 
@@ -6000,6 +6669,13 @@ bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]) {
     return true;
 }
 
+bool temporalPassMvDepthLayerTotals(uint64_t byLayers[4]) {
+    const uint64_t dispatches = g_mvDepthLayers[0] + g_mvDepthLayers[1] + g_mvDepthLayers[2] + g_mvDepthLayers[3];
+    if (dispatches == 0) return false;
+    if (byLayers) for (int k = 0; k < 4; ++k) byLayers[k] = g_mvDepthLayers[k];
+    return true;
+}
+
 bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
                                const char** engineLabel, bool* amd) {
     // The CURRENT engine's price, not "whichever one has a count". Both
@@ -6060,20 +6736,24 @@ bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
     return true;
 }
 
-static void beginEyeRun() {
-    if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot* trigger,uint64_t triggerAgeQpc) {
+    if (g_eyeRunLeft > 0 || g_eyeRunReady) return false;
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
     // census starts here and can begin with its following frame.
-    drawCensusAutoRequest();
-    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census for LOD investigation; AA-independent, an already active census keeps its current coverage.");
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
-    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
-                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
-    g_eyeFinalRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
+    const uint32_t serial=++g_eyeStampSerial;
+    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u%03u%03u", static_cast<unsigned>(stm.wHour),
+                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond),static_cast<unsigned>(stm.wMilliseconds),serial%1000);
+    drawCensusAutoRequestForCapture(g_eyeRunStamp);
+    Log::get().note("eye capture: requested accompanying eye/offscreen/compute census capture_id=%ls; AA-independent, an already active census keeps its current coverage.",g_eyeRunStamp);
+    g_eyeRunCompanion=companion;g_eyeRunTrigger=trigger?*trigger:edvr::NativeOnFootAirborneSnapshot{};g_eyeRunTriggerAgeQpc=triggerAgeQpc;
+    if(companion)wcscpy_s(g_eyeRunParentStamp,g_airborneCompanion.parentStamp);else g_eyeRunParentStamp[0]=L'\0';
+    g_eyeFinalRun.arm();g_eyeJumpLatticeRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
+    nativeOnFootOpticCaptureBegin(g_eyeFinalStamp);
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
     applyEngineMotionDiagnostics();   // the census runs for the run
@@ -6085,6 +6765,7 @@ static void beginEyeRun() {
     g_eyeInputCaptureAttempted=false;
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    memset(g_eyeMarkerTaken,0,sizeof(g_eyeMarkerTaken));   // F53: the marker crops
     memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
     memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
     memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
@@ -6106,10 +6787,66 @@ static void beginEyeRun() {
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
+    mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
+    if(!companion) {
+        g_airborneCompanion=AirborneCompanionRequest{};
+        if(edvr::nativeOnFootActive()) {
+            edvr::NativeOnFootAirborneSnapshot snapshot{};uint64_t age=0;
+            const bool snapshotRead=edvr::nativeOnFootAirborneSnapshot(&snapshot);
+            if(freshAirborneSnapshot(&snapshot,&age)&&snapshot.airborne) {
+                g_eyeRunTrigger=snapshot;g_eyeRunTriggerAgeQpc=age;
+            Log::get().note("eye capture: manual run %ls already overlaps fresh native airborne state generation=%llu source_frame=%u vy=%.3f m/s age_qpc=%llu; no duplicate jump run armed.",g_eyeRunStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.verticalVelocityMps,(unsigned long long)age);
+            } else {
+                LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+                g_airborneCompanion.request.arm(now.QuadPart>0?uint64_t(now.QuadPart):0,snapshotRead?snapshot.generation:0);
+                wcscpy_s(g_airborneCompanion.parentStamp,g_eyeRunStamp);
+                Log::get().note("eye capture: armed one-shot airborne companion parent=%ls state=waiting timeout=30s baseline_generation=%llu snapshot=%s; manual dump remains immediate.",g_airborneCompanion.parentStamp,(unsigned long long)(snapshotRead?snapshot.generation:0),snapshotRead?(snapshot.valid?"grounded_or_stale":"not_yet_valid"):"unavailable");
+            }
+        } else {
+            Log::get().note("eye capture: airborne companion not armed because native on-foot mode is inactive; manual eye dump remains immediate.");
+        }
+    } else {
+        g_airborneCompanion=AirborneCompanionRequest{};
+    }
+    return true;
+}
+
+static void pollAirborneCompanion() {
+    using namespace edvr::eye_airborne_capture;
+    if(g_airborneCompanion.request.state==State::Idle)return;
+    LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+    edvr::NativeOnFootAirborneSnapshot snapshot{};uint64_t sampleAge=0;
+    const bool read=edvr::nativeOnFootAirborneSnapshot(&snapshot);
+    const bool fresh=read&&freshAirborneSnapshot(&snapshot,&sampleAge);
+    const bool busy=g_eyeRunLeft>0||g_eyeRunReady||g_eyeFinalRun.armed||g_eyeJumpLatticeRun.armed()||drawCensusArmed()||objectProbeLedgerActive();
+    const Decision decision=g_airborneCompanion.request.poll(now.QuadPart>0?uint64_t(now.QuadPart):0,
+        frequency.QuadPart>0?uint64_t(frequency.QuadPart):0,edvr::nativeOnFootActive(),read&&snapshot.valid,fresh,
+        snapshot.generation,snapshot.airborne,busy);
+    if(decision==Decision::Stale)Log::get().note("eye capture: airborne companion parent=%ls waiting; native sample generation=%llu source_frame=%u age_qpc=%llu is stale or unavailable (freshness limit 100ms).",g_airborneCompanion.parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,(unsigned long long)sampleAge);
+    if(decision==Decision::DeferredBusy)Log::get().note("eye capture: airborne companion parent=%ls deferred reason=active_capture_or_census generation=%llu source_frame=%u vy=%.3f m/s sample_age_qpc=%llu; waiting for a fresh airborne sample after the current run.",g_airborneCompanion.parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.verticalVelocityMps,(unsigned long long)sampleAge);
+    if(decision==Decision::Expired||decision==Decision::Cancelled) {
+        Log::get().note("eye capture: airborne companion parent=%ls %s state=%s; no companion files written",g_airborneCompanion.parentStamp,decision==Decision::Expired?"expired after 30s":"cancelled because native on-foot became inactive or QPC was unavailable",airborneCompanionStateName(g_airborneCompanion.request.state));
+        g_airborneCompanion=AirborneCompanionRequest{};return;
+    }
+    if(decision!=Decision::Trigger)return;
+    const uint64_t requestAge=now.QuadPart>0&&g_airborneCompanion.request.requestQpc?uint64_t(now.QuadPart)-g_airborneCompanion.request.requestQpc:0;
+    wchar_t parentStamp[16]{};wcscpy_s(parentStamp,g_airborneCompanion.parentStamp);
+    if(!beginEyeRun(true,&snapshot,sampleAge)) {
+        g_airborneCompanion.request.retryAfterStartRefusal(snapshot.generation);
+        Log::get().note("eye capture: airborne companion start refused parent=%ls generation=%llu source_frame=%u; request retained and waiting for a newer fresh airborne sample.",parentStamp,(unsigned long long)snapshot.generation,snapshot.sourceFrame);
+        return;
+    }
+    Log::get().note("eye capture: airborne companion start accepted parent=%ls request_age_qpc=%llu sample_age_qpc=%llu generation=%llu source_frame=%u raw_vy=%.3f filtered_vy=%.3f m/s root=[%.3f,%.3f,%.3f].",parentStamp,(unsigned long long)requestAge,(unsigned long long)sampleAge,(unsigned long long)snapshot.generation,snapshot.sourceFrame,snapshot.rawVerticalVelocityMps,snapshot.verticalVelocityMps,snapshot.root[0],snapshot.root[1],snapshot.root[2]);
 }
 
 void temporalPassShutdown() {
+    if(g_airborneCompanion.request.state!=edvr::eye_airborne_capture::State::Idle)
+        Log::get().note("eye capture: airborne companion parent=%ls cancelled reason=shutdown state=%s",g_airborneCompanion.parentStamp,airborneCompanionStateName(g_airborneCompanion.request.state));
+    g_airborneCompanion=AirborneCompanionRequest{};
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"shutdown_missing_final");
+    g_eyeJumpLatticeRun.reset();
+    if(g_csEyeJumpLattice){g_csEyeJumpLattice->Release();g_csEyeJumpLattice=nullptr;}
+    g_csEyeJumpLatticeTried=false;
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     skyRingShutdown();   // stops the dispatches and drops the waiting dumps; the ring itself is left to the process (sky_ring.cpp)
     dlaaShutdown();
@@ -6127,6 +6864,7 @@ void temporalPassShutdown() {
     g_coronaHoldNoted=false;
     for (bool& noted : g_uiResolveUnboundNoted) noted=false;
     g_uiResolveDispatches=0; for (uint64_t& n : g_uiResolveLacked) n=0;
+    for (uint64_t& n : g_mvDepthLayers) n=0;
     // Stage 0 price report: any eye still waiting for its stereo twin at
     // shutdown is never going to get one -- drop it and count it (F2)
     // rather than price it alone, before the window it would have landed
@@ -6144,6 +6882,8 @@ void temporalPassShutdown() {
     for (EyeState& e : g_eye) releaseEye(e);
     for (Slot& q : g_slots) releaseSlot(q);
     for(auto& overview:g_eyeRunStaging)if(overview){overview->Release();overview=nullptr;}
+    for(auto& crop:g_eyeMarkerStaging)if(crop){crop->Release();crop=nullptr;}   // F53
+    memset(g_eyeMarkerTaken,0,sizeof(g_eyeMarkerTaken));
     for (int k = 0; k < kEyeRun; ++k) {
         if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
         if (g_eyeTreatedStaging[k]) { g_eyeTreatedStaging[k]->Release(); g_eyeTreatedStaging[k] = nullptr; }
@@ -6186,6 +6926,13 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
     return g_lastNear > 0.0f && g_lastFar > g_lastNear;
 }
 
+bool temporalPassUpscale(float* x, float* y) {
+    if (!x || !y) return false;
+    *x = g_lastUpscale[0];
+    *y = g_lastUpscale[1];
+    return g_lastUpscale[0] > 0.0f && g_lastUpscale[1] > 0.0f;
+}
+
 void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why); a run already
     // under way is left alone.
@@ -6214,6 +6961,7 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     float farZ, float headDeg, int motion, float blend, float clampSigma,
     unsigned outW, unsigned outH, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow || edvr::deviceHookRecoveryDisabled()) return nullptr;
+    edvr::temporalPassNoteEyeTan(eye, tanNow);   // F66f: the texture's frustum, for the native on-foot marker's affine patch
     void* out = nullptr;
     // The door census's whole-pass span (gpu_census.h): timed at this outer
     // boundary, not inside temporalInner -- that function has many early

@@ -291,7 +291,15 @@ void testSeat() {
     check("R2f", beside2, "of Flags2's 32 bits exactly 1 and 2 seat the commander (OnFoot 0, on foot in a station 3, on a planet 4, exterior 15 do not)");
     check("R2g", !journalSeatedFromFlags(0, 0x8011u) && !journalSeatedFromFlags(0x40000010u, 1) && !journalSeatedFromFlags(0, 0),
           "Explorer Cam's own Flags2 (0x8011, measured holding through the whole camera window) and a jump in supercruise seat nobody");
-    std::printf("(R2) the seat: Flags bits 24-26 and Flags2 bits 1-2, and no other of 64 bits\n");
+    // F16: the breathable-air bit of Flags2 (the native visor's condition), with the rest of the word beside it.
+    using edvr::journalBreathableFromFlags2;
+    check("R2h", edvr::kStatusFlags2Breathable == 0x10000u && journalBreathableFromFlags2(0x10000u) && journalBreathableFromFlags2(0x10001u),
+          "Flags2 bit 16 (BreathableAtmosphere, 0x10000) is breathable air, with OnFoot beside it");
+    bool onlyBit16 = true;
+    for (unsigned b = 0; b < 32; ++b) onlyBit16 = onlyBit16 && (journalBreathableFromFlags2(1u << b) == (b == 16));
+    check("R2i", onlyBit16 && !journalBreathableFromFlags2(0x8011u) && !journalBreathableFromFlags2(0),
+          "of Flags2's 32 bits exactly 16 is breathable air (Explorer Cam's 0x8011 and the menu's 0 are not)");
+    std::printf("(R2) the seat: Flags bits 24-26 and Flags2 bits 1-2, and no other of 64 bits; breathable air: Flags2 bit 16\n");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -1089,7 +1097,7 @@ void testPins(const std::string& root) {
         {&pass, "const bool footSplit = footSplitNow();", 1, "R5c", "the mode is asked once, where the constants are built"},
         {&pass, "bool footSplitNow() {", 1, "R5d", "the mode has one definition"},
         {&pass, "f.watching = journalWatchActive();", 1, "R5e", "the verdict's input: the journal is read"},
-        {&pass, "f.gameplay = journalGameplay();", 1, "R5e", "the verdict's input: LoadGame"},
+        {&pass, "f.gameplay = journalSessionOrOnFoot(&viaFoot);", 1, "R5e", "the verdict's input: LoadGame, or Status.json on foot (F24: a training scenario)"},
         {&pass, "f.known = journalOnFootKnown();", 1, "R5e", "the verdict's input: Flags2 is in the file"},
         {&pass, "f.onFoot = journalOnFoot();", 1, "R5e", "the verdict's input: Flags2 bit 0"},
         {&pass, "f.vehicleKnown = journalSeatedKnown();", 1, "R5e", "the verdict's input: Flags is in the file"},
@@ -1105,7 +1113,7 @@ void testPins(const std::string& root) {
         {&journal, "s.pub.seatedKnown = sawFlags;", 1, "R5j", "the seat is known whenever Flags is"},
         {&journal, "s.pub.seatedKnown = false;", 1, "R5j", "three missed reads drop the seat with the rest"},
         // the shader's reading of split.x, which a millimetre relies on: > 0 turns the world path on, z > split picks a pixel
-        {&shader, "split.x > 0.0", 3, "R5k", "the shader reads split.x > 0 as the world path being available (the history fetch, the motion entry, the flag)"},
+        {&shader, "split.x > 0.0", 4, "R5k", "the shader reads split.x > 0 as the world path being available (the history fetch, main's depth tile fill, the motion entry, the flag)"},
         {&shader, "(far || z > split.x)", 2, "R5k", "the shader sends a pixel to the world path when it is far or farther than split.x"},
     };
     runPins(pins);

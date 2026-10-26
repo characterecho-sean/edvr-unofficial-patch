@@ -319,6 +319,13 @@ def check_hashes(recorded, label, memo, current=None):
     return None
 
 
+def output_hashes(paths):
+    """{path: sha256} of the outputs now on disk.  Recorded beside their size and mtime so that
+    unpack_store can tell a restored file is byte for byte the one cl wrote."""
+    memo = {}
+    return {path: value for path in paths for value in [file_hash(path, memo)] if value is not None}
+
+
 def check_outputs(recorded):
     for path, pair in recorded.items():
         now = stat_pair(path)
@@ -473,7 +480,7 @@ def run_compile_only(ctx, p, prune, keep):
                 write_manifest(objs[s] + ".ccm", {
                     "schema": SCHEMA, "kind": "obj", "source": s, "parts": decisions[s][2],
                     "key": digest([decisions[s][2], deps]), "deps": deps,
-                    "outputs": {objs[s]: out_pair}})
+                    "outputs": {objs[s]: out_pair}, "hashes": output_hashes([objs[s]])})
                 stored += 1
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -606,7 +613,7 @@ def run_link(ctx, p):
                 write_manifest(manifest, {
                     "schema": SCHEMA, "kind": "link", "parts": expect,
                     "key": digest([expect, deps, inputs]), "deps": deps, "inputs": inputs,
-                    "outputs": recorded})
+                    "outputs": recorded, "hashes": output_hashes(recorded)})
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     ctx.out("[edvr] compile_cache: %s: built (%.1f s)%s" % (name, time.time() - started,
@@ -635,12 +642,283 @@ def execute(argv, environ, runner, out=say, dry_run=False, off=False, prune=Fals
     return run_link(ctx, p)
 
 
+# ---------------------------------------------------------------- carrying the cache between machines
+#
+# A manifest hits only while its outputs still have the size and mtime it recorded, and a file
+# restored from an archive has neither guarantee (tar keeps a time, but to a coarser unit than the
+# file system's).  pack_store and unpack_store move the cache through a directory an archive
+# service (actions/cache) can carry, and re-establish the mtime from the manifest only for a file
+# whose bytes are the ones cl wrote: the manifest records a sha256 of every output.  Nothing else
+# about a hit changes: the key (sources, headers, flags, compiler identity, INCLUDE) is still
+# compared on every use, so a restored entry for an input that has changed is simply a miss.
+#
+# store/m/<path>.ccm   a manifest, at its place under the root
+# store/f/<path>       an output a manifest names, at its place under the root
+# store/x/<path>       a file a caller asked for with --extra, carried as it is
+STORE_MANIFESTS, STORE_FILES, STORE_EXTRA = "m", "f", "x"
+
+
+def under(root, path):
+    """`path` relative to `root`, or None when it is not inside it."""
+    try:
+        r = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    except ValueError:
+        return None
+    if r == "." or r == ".." or r.startswith(".." + os.sep) or os.path.isabs(r):
+        return None
+    return r
+
+
+def manifests_under(folder, skip=None):
+    """Every *.ccm under `folder`, sorted; `skip` is a directory not to descend into."""
+    found = []
+    skip = os.path.normcase(os.path.abspath(skip)) if skip else None
+    for here, dirs, files in os.walk(folder):
+        if skip:
+            dirs[:] = [d for d in dirs if os.path.normcase(os.path.abspath(os.path.join(here, d))) != skip]
+        found.extend(os.path.join(here, n) for n in files if n.endswith(".ccm"))
+    return sorted(found)
+
+
+def place_file(src, dst, link=False):
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    remove_quiet(dst)
+    if link:
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+        shutil.copy2(src, dst)
+        return
+    try:
+        os.replace(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+        remove_quiet(src)
+
+
+def tidy_reasons(reasons):
+    return ", ".join("%d %s" % (n, why) for why, n in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def pack_store(root, store, extras=(), dry_run=False, out=say):
+    """Copy every manifest under `root` whose outputs are still exactly what it recorded, and
+    those outputs, into `store` (emptied first).  Files are hard-linked when the volume allows.
+    Returns {"packed": n, "files": n, "skipped": {reason: n}}."""
+    root = os.path.abspath(root)
+    packed = files = size = 0
+    skipped = {}
+    if not dry_run:
+        shutil.rmtree(store, ignore_errors=True)
+        os.makedirs(store, exist_ok=True)
+    for path in manifests_under(root, skip=store):
+        data, why = load_manifest(path)
+        reason = None
+        names = []
+        if data is None:
+            reason = why
+        elif not isinstance(data.get("outputs"), dict) or not isinstance(data.get("hashes"), dict):
+            reason = "recorded before outputs were hashed"
+        else:
+            for name, pair in data["outputs"].items():
+                if under(root, name) is None:
+                    reason = "an output outside the root"
+                elif stat_pair(name) != pair:
+                    reason = "an output no longer as recorded"
+                elif output_hashes([name]).get(name) != data["hashes"].get(name):
+                    reason = "an output whose bytes changed"
+                if reason:
+                    break
+                names.append(name)
+        if reason:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        packed += 1
+        files += len(names)
+        size += sum(data["outputs"][n][0] for n in names)
+        if dry_run:
+            continue
+        for name in names:
+            place_file(name, os.path.join(store, STORE_FILES, under(root, name)), link=True)
+        place_file(path, os.path.join(store, STORE_MANIFESTS, under(root, path)), link=True)
+    carried = 0
+    for extra in extras:
+        if os.path.isfile(os.path.join(root, extra)):
+            carried += 1
+            if not dry_run:
+                place_file(os.path.join(root, extra), os.path.join(store, STORE_EXTRA, extra), link=True)
+    out("[edvr] compile_cache: %s%d entries (%d files, %.1f MB) from %s into %s%s%s" % (
+        "dry run, would pack " if dry_run else "packed ", packed, files, size / 1e6, rel_or_abs(root), rel_or_abs(store),
+        (", %d extra file(s)" % carried) if extras else "",
+        ("; skipped " + tidy_reasons(skipped)) if skipped else ""))
+    return {"packed": packed, "files": files, "skipped": skipped, "extra": carried}
+
+
+def rel_or_abs(path):
+    return rel(os.path.abspath(path))
+
+
+def unpack_store(root, store, extras=(), dry_run=False, out=say):
+    """Put the entries of `store` (made by pack_store) back under `root`.  An entry is installed
+    only if every output it names is in the store with the recorded size and sha256; its mtime is
+    set to the recorded one and its manifest is written last.  An entry that does not verify, or
+    that names a path outside `root`, is left out.  Files are moved out of the store.
+    Returns {"restored": n, "files": n, "rejected": {reason: n}}."""
+    root = os.path.abspath(root)
+    restored = files = size = 0
+    rejected = {}
+    manifest_dir = os.path.join(store, STORE_MANIFESTS)
+    for path in manifests_under(manifest_dir) if os.path.isdir(manifest_dir) else []:
+        data, why = load_manifest(path)
+        reason = None
+        plan = []
+        if data is None:
+            reason = why
+        elif not isinstance(data.get("outputs"), dict) or not isinstance(data.get("hashes"), dict) or not data["outputs"]:
+            reason = "recorded before outputs were hashed"
+        else:
+            for name, pair in data["outputs"].items():
+                inside = under(root, name)
+                held = os.path.join(store, STORE_FILES, inside) if inside else None
+                if inside is None:
+                    reason = "an output outside the root"
+                elif not isinstance(pair, list) or len(pair) != 2:
+                    reason = "an output with no size and time recorded"
+                elif not os.path.isfile(held):
+                    reason = "an output missing from the store"
+                elif os.path.getsize(held) != pair[0]:
+                    reason = "an output of the wrong size"
+                elif output_hashes([held]).get(held) != data["hashes"].get(name):
+                    reason = "an output whose bytes differ from what cl wrote"
+                if reason:
+                    break
+                plan.append((name, held, pair))
+        if reason:
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+        restored += 1
+        files += len(plan)
+        size += sum(pair[0] for _, _, pair in plan)
+        if dry_run:
+            continue
+        for name, held, pair in plan:
+            place_file(held, name)
+            os.utime(name, ns=(pair[1], pair[1]))
+        if all(stat_pair(name) == pair for name, _, pair in plan):
+            target = os.path.join(root, os.path.relpath(path, manifest_dir))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            write_manifest(target, data)
+        else:
+            for name, _, _ in plan:
+                remove_quiet(name)
+            restored -= 1
+            files -= len(plan)
+            size -= sum(pair[0] for _, _, pair in plan)
+            rejected["a restored output that would not take its recorded time"] = \
+                rejected.get("a restored output that would not take its recorded time", 0) + 1
+    carried = 0
+    for extra in extras:
+        held, dest = os.path.join(store, STORE_EXTRA, extra), os.path.join(root, extra)
+        if os.path.isfile(held) and not os.path.exists(dest):
+            carried += 1
+            if not dry_run:
+                place_file(held, dest)
+    out("[edvr] compile_cache: %s%d entries (%d files, %.1f MB) from %s under %s%s%s" % (
+        "dry run, would restore " if dry_run else "restored ", restored, files, size / 1e6, rel_or_abs(store), rel_or_abs(root),
+        (", %d extra file(s)" % carried) if extras else "",
+        ("; left out " + tidy_reasons(rejected)) if rejected else ""))
+    return {"restored": restored, "files": files, "rejected": rejected, "extra": carried}
+
+
+# ---------------------------------------------------------------- reading a build log back
+
+SUMMARY_GROUP = re.compile(r"^\[edvr\] compile_cache: (\S+): (\d+) compiled, (\d+) reused \(([\d.]+) s\)")
+SUMMARY_LINK = re.compile(r"^\[edvr\] compile_cache: (\S+): (built|reused) \(([\d.]+) s\)")
+SUMMARY_MISS = re.compile(r"^\[edvr\] compile_cache:\s+miss(?: \S+)?: (.*)$")
+
+
+def summarize_log(text):
+    """Totals from the compile_cache lines of a build's stdout: how many compiles ran and how
+    many were reused, the seconds the compiles took, and why the first misses of each group
+    missed (the tool names only the first three of a group).  Returns a dict."""
+    groups = [0, 0, 0.0]      # sources compiled, reused, seconds
+    links = {"built": [0, 0.0], "reused": [0, 0.0]}
+    reasons = {}
+    seen = False
+    for line in text.splitlines():
+        m = SUMMARY_GROUP.match(line)
+        if m:
+            seen = True
+            groups[0] += int(m.group(2))
+            groups[1] += int(m.group(3))
+            groups[2] += float(m.group(4))
+            continue
+        m = SUMMARY_LINK.match(line)
+        if m:
+            seen = True
+            links[m.group(2)][0] += 1
+            links[m.group(2)][1] += float(m.group(3))
+            continue
+        m = SUMMARY_MISS.match(line)
+        if m:
+            reason = re.sub(r"\S+\.(?:cpp|cc|cxx|c|h|hpp|inc|lib|obj|exe|dll|def|res)\b", "<file>", m.group(1))
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return {"seen": seen, "sources_compiled": groups[0], "sources_reused": groups[1], "group_seconds": groups[2],
+            "links_built": links["built"][0], "links_built_seconds": links["built"][1],
+            "links_reused": links["reused"][0], "links_reused_seconds": links["reused"][1], "reasons": reasons}
+
+
+def summary_text(totals):
+    if not totals["seen"]:
+        return "compile_cache: no compile_cache lines in the log (the cache was off, or this is not a build log)"
+    lines = ["compile_cache: per-source compiles: %d compiled, %d reused (%.0f s inside those invocations)" % (
+                 totals["sources_compiled"], totals["sources_reused"], totals["group_seconds"]),
+             "compile_cache: compile+link invocations: %d built (%.0f s), %d reused (%.0f s)" % (
+                 totals["links_built"], totals["links_built_seconds"], totals["links_reused"], totals["links_reused_seconds"])]
+    if totals["reasons"]:
+        lines.append("compile_cache: why the misses missed (first three of each invocation): " + tidy_reasons(totals["reasons"]))
+    return "\n".join(lines)
+
+
 def real_runner(command, environ):
     return subprocess.call(command, env=environ)
 
 
+def store_main(argv):
+    """--pack STORE / --unpack STORE [--root DIR] [--extra FILE]... [--dry-run], and --summary LOG
+    [--markdown FILE]: the commands around a cache archive, not a compiler wrapper."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="compile_cache.py", add_help=True)
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--pack", metavar="STORE", help="copy the valid cache entries under --root into STORE (emptied first)")
+    mode.add_argument("--unpack", metavar="STORE", help="restore the entries in STORE under --root, verified")
+    mode.add_argument("--summary", metavar="LOG", help="print the hit/miss totals of a build's stdout log")
+    ap.add_argument("--root", default="build", help="the build directory (default: build)")
+    ap.add_argument("--extra", action="append", default=[], metavar="FILE",
+                    help="a file under --root to carry as it is (it must validate itself); repeatable")
+    ap.add_argument("--markdown", metavar="FILE", help="with --summary, append the totals to FILE (a job summary)")
+    ap.add_argument("--dry-run", action="store_true", help="say what would happen; write nothing")
+    args = ap.parse_args(argv)
+    if args.summary:
+        with open(args.summary, "r", encoding="utf-8", errors="replace") as handle:
+            text = summary_text(summarize_log(handle.read()))
+        say(text)
+        if args.markdown and not args.dry_run:
+            with open(args.markdown, "a", encoding="utf-8") as handle:
+                handle.write("### Compile cache\n\n```\n%s\n```\n" % text)
+        return 0
+    if args.pack:
+        pack_store(args.root, args.pack, args.extra, args.dry_run)
+    else:
+        unpack_store(args.root, args.unpack, args.extra, args.dry_run)
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--pack", "--unpack", "--summary"):
+        return store_main(argv)
     opts = {"dry_run": False, "off": False, "prune": False, "keep": []}
     while argv and argv[0].startswith("--"):
         flag = argv.pop(0)
@@ -660,7 +938,9 @@ def main(argv=None):
             print("compile_cache: unknown option %s" % flag, file=sys.stderr)
             return 64
     if not argv:
-        print("usage: compile_cache.py [--dry-run|--off|--prune|--keep NAME] cl.exe <cl arguments>", file=sys.stderr)
+        print("usage: compile_cache.py [--dry-run|--off|--prune|--keep NAME] cl.exe <cl arguments>\n"
+              "       compile_cache.py --pack|--unpack STORE [--root DIR] [--extra FILE]... [--dry-run]\n"
+              "       compile_cache.py --summary LOG [--markdown FILE]", file=sys.stderr)
         return 64
     return execute(argv, dict(os.environ), real_runner, **opts)
 
@@ -783,14 +1063,15 @@ def _write(path, text):
 
 
 def self_test():
-    root = tempfile.mkdtemp(prefix="edvr-compile-cache-")
     here = os.getcwd()
-    os.chdir(root)
-    try:
-        _self_test_body()
-    finally:
-        os.chdir(here)
-        shutil.rmtree(root, ignore_errors=True)
+    for body in (_self_test_body, _store_self_test_body):
+        root = tempfile.mkdtemp(prefix="edvr-compile-cache-")
+        os.chdir(root)
+        try:
+            body()
+        finally:
+            os.chdir(here)
+            shutil.rmtree(root, ignore_errors=True)
     print("compile_cache: self-test passed")
     return 0
 
@@ -815,7 +1096,7 @@ def _self_test_body():
         del lines[:]
         fake.compiled = []
         before = len(fake.calls)
-        args = ["fake_cl.exe", "/nologo", "/c", "/EHsc", "/Fo" + "obj" + "\\"] + list(extra) + list(srcs)
+        args = ["fake_cl.exe", "/nologo", "/c", "/EHsc", "/Fo" + "obj" + os.sep] + list(extra) + list(srcs)
         rc = execute(args, dict(env or environ), fake, out=lines.append, **opts)
         return rc, sorted(fake.compiled), len(fake.calls) - before
 
@@ -912,7 +1193,7 @@ def _self_test_body():
     fake.exit_code = None
     unsigned_fake = FakeCl()
     unsigned_fake.exit_code = 3221225477
-    rc = execute(["fake_cl.exe", "/c", "/Foobj\\", "src/c.cpp"], dict(inc2), unsigned_fake, out=lines.append)
+    rc = execute(["fake_cl.exe", "/c", "/Foobj" + os.sep, "src/c.cpp"], dict(inc2), unsigned_fake, out=lines.append)
     expect(rc == -1073741819, "an unsigned NTSTATUS from the runner becomes the signed code")
     run([], env=inc2)
 
@@ -987,7 +1268,7 @@ def _self_test_body():
     _write("rig/lib.lib", "lib v1")
     _write("rig/x.def", "EXPORTS")
     os.makedirs("out")
-    link = ["fake_cl.exe", "/nologo", "/O2", "/Foobj\\", "/Feout\\rig.exe", "src/a.cpp", "src/b.cpp",
+    link = ["fake_cl.exe", "/nologo", "/O2", "/Foobj" + os.sep, "/Fe" + os.path.join("out", "rig.exe"), "src/a.cpp", "src/b.cpp",
             "/link", "/INCREMENTAL:NO", "rig/lib.lib", "/DEF:rig/x.def", "kernel32.lib"]
 
     def run_link_case(**opts):
@@ -1043,6 +1324,174 @@ def _self_test_body():
     fake.exit_code = None
     rc, calls = run_link_case()
     expect(calls == 1 and rc == 0, "retry after failure rebuilds")
+
+
+def _store_self_test_body():
+    """pack_store / unpack_store / summarize_log: a cache carried to an empty build directory
+    still hits, and anything that is not exactly what cl wrote does not come back."""
+    os.makedirs("sys")
+    os.makedirs("src")
+    os.makedirs("build/obj")
+    os.makedirs("build/out")
+    os.makedirs("elsewhere")
+    _write("fake_cl.exe", "x")
+    _write("src/h.h", "#define H 1\n")
+    _write("src/a.cpp", '#include "h.h"\nint a;\n')
+    _write("src/b.cpp", '#include "h.h"\nint b;\n')
+    environ = {"INCLUDE": os.path.abspath("sys"), "LIB": "L", "CL": "/MP"}
+    fake = FakeCl()
+    lines = []
+
+    def expect(condition, message):
+        if not condition:
+            raise AssertionError("compile_cache store self-test: " + message + "\n" + "\n".join(lines))
+
+    def compile_objects(fo=os.path.join("build", "obj") + os.sep):
+        del lines[:]
+        fake.compiled = []
+        rc = execute(["fake_cl.exe", "/nologo", "/c", "/Fo" + fo, "src/a.cpp", "src/b.cpp"], dict(environ), fake,
+                     out=lines.append)
+        return rc, sorted(fake.compiled)
+
+    def link_rig():
+        del lines[:]
+        before = len(fake.calls)
+        rc = execute(["fake_cl.exe", "/nologo", "/Fe" + os.path.join("build", "out", "rig.exe"), "src/a.cpp", "/link", "kernel32.lib"],
+                     dict(environ), fake, out=lines.append)
+        return rc, len(fake.calls) - before
+
+    def quiet(function, *args, **kwargs):
+        del lines[:]
+        return function(*args, out=lines.append, **kwargs)
+
+    rc, compiled = compile_objects()
+    expect(rc == 0 and compiled == ["a.cpp", "b.cpp"], "objects compile")
+    rc, calls = link_rig()
+    expect(rc == 0 and calls == 1, "the rig links")
+    for name in ("build/obj/a.obj.ccm", "build/out/rig.exe.ccm"):
+        with open(name, encoding="utf-8") as handle:
+            recorded = json.load(handle)
+        expect(set(recorded["hashes"]) == set(recorded["outputs"]) and all(len(h) == 64 for h in recorded["hashes"].values()),
+               "%s records a sha256 of each output" % name)
+
+    # An output outside the root and an entry written before hashes were recorded are not packed.
+    rc, compiled = compile_objects("elsewhere" + os.sep)
+    expect(rc == 0, "objects outside the root compile")
+    legacy = "build/obj/b.obj.ccm"
+    with open(legacy, encoding="utf-8") as handle:
+        legacy_data = json.load(handle)
+    del legacy_data["hashes"]
+    with open(legacy, "w", encoding="utf-8") as handle:
+        json.dump(legacy_data, handle)
+    _write("build/gen/shader.h", "// key: 1\n")
+    _write("build/times.json", "{}")
+    with forbid_writes():
+        result = quiet(pack_store, "build", "store", extras=("gen/shader.h",), dry_run=True)
+    expect(result["packed"] == 2 and not os.path.exists("store"), "a dry run counts and writes nothing: %r" % result)
+    result = quiet(pack_store, "build", "store", extras=("gen/shader.h", "gen/absent.h"))
+    expect(result["packed"] == 2 and result["files"] == 2 and result["extra"] == 1,
+           "pack takes the object and the exe, and one extra file: %r" % result)
+    expect(list(result["skipped"]) == ["recorded before outputs were hashed"],
+           "an entry with no hashes is skipped, by name: %r" % result["skipped"])
+    expect(os.path.isfile("store/m/obj/a.obj.ccm") and os.path.isfile("store/f/obj/a.obj")
+           and os.path.isfile("store/f/out/rig.exe") and os.path.isfile("store/x/gen/shader.h"),
+           "the store has manifests, outputs and extras at their places")
+    expect(not os.path.exists("store/m/obj/b.obj.ccm"), "the unhashed entry is not in the store")
+
+    # A fresh machine: empty build directory, store whose files carry times a tar would round.
+    shutil.rmtree("build")
+    os.makedirs("build")
+    for folder, _, names in os.walk("store/f"):
+        for name in names:
+            stamp = os.stat(os.path.join(folder, name)).st_mtime_ns + 123456789
+            os.utime(os.path.join(folder, name), ns=(stamp, stamp))
+    with forbid_writes():
+        result = quiet(unpack_store, "build", "store", extras=("gen/shader.h",), dry_run=True)
+    expect(result["restored"] == 2 and not os.path.exists("build/obj"), "a dry-run unpack writes nothing: %r" % result)
+    result = quiet(unpack_store, "build", "store", extras=("gen/shader.h",))
+    expect(result["restored"] == 2 and result["files"] == 2 and not result["rejected"] and result["extra"] == 1,
+           "unpack restores both entries: %r" % result)
+    expect(os.path.isfile("build/gen/shader.h") and not os.path.exists("store/f/obj/a.obj"),
+           "extras come back, and the store's files were moved out of it")
+    rc, compiled = compile_objects()
+    expect(rc == 0 and compiled == ["b.cpp"], "restored object is a hit (its time put back), the unhashed one compiles: %s" % compiled)
+    rc, calls = link_rig()
+    expect(rc == 0 and calls == 0 and "reused" in lines[-1], "restored exe is a hit")
+
+    # A restored entry for an input that has changed is a miss: the key is still compared.
+    _write("src/h.h", "#define H 2\n")
+    rc, compiled = compile_objects()
+    expect(compiled == ["a.cpp", "b.cpp"], "a changed header misses restored objects: %s" % compiled)
+    _write("src/h.h", "#define H 1\n")
+    rc, compiled = compile_objects()
+    rc, calls = link_rig()
+
+    # Anything that is not what cl wrote stays out.
+    quiet(pack_store, "build", "store")
+    for variant in ("flipped", "short", "missing"):
+        shutil.rmtree("store")
+        quiet(pack_store, "build", "store")
+        victim = "store/f/obj/a.obj"
+        if variant == "flipped":
+            with open(victim, "rb") as handle:
+                body = handle.read()
+            os.remove(victim)
+            with open(victim, "wb") as handle:
+                handle.write(bytes([body[0] ^ 1]) + body[1:])
+        elif variant == "short":
+            with open(victim, "rb") as handle:
+                body = handle.read()
+            os.remove(victim)
+            with open(victim, "wb") as handle:
+                handle.write(body[:-1])
+        else:
+            os.remove(victim)
+        shutil.rmtree("build")
+        os.makedirs("build")
+        result = quiet(unpack_store, "build", "store")
+        expect(result["restored"] == 2 and sum(result["rejected"].values()) == 1
+               and not os.path.exists("build/obj/a.obj") and not os.path.exists("build/obj/a.obj.ccm"),
+               "a %s output is rejected whole, with no manifest left behind: %r" % (variant, result))
+        expect(os.path.isfile("build/out/rig.exe.ccm"), "the intact entry still comes back (%s)" % variant)
+        rc, compiled = compile_objects()
+        expect(compiled == ["a.cpp"], "only the rejected entry is recompiled (%s): %s" % (variant, compiled))
+        rc, calls = link_rig()
+        expect(calls == 0, "and the intact one is reused (%s)" % variant)
+
+    # pack leaves out an output that changed after its manifest was written.
+    with open("build/obj/a.obj", "a", encoding="utf-8") as handle:
+        handle.write("tampered")
+    result = quiet(pack_store, "build", "store")
+    expect("an output no longer as recorded" in result["skipped"] and result["packed"] == 2,
+           "a replaced output is not packed: %r" % result)
+
+    # An existing, valid file is left in place; an extra never overwrites.
+    _write("build/gen/shader.h", "// key: newer\n")
+    quiet(unpack_store, "build", "store", extras=("gen/shader.h",))
+    with open("build/gen/shader.h", encoding="utf-8") as handle:
+        expect(handle.read() == "// key: newer\n", "an existing extra file is not overwritten")
+    expect(quiet(unpack_store, "build", "nowhere")["restored"] == 0, "no store is no entries, not an error")
+
+    # The log reader.
+    log = "\n".join([
+        "[edvr] compile_cache: d3d11: 141 compiled, 0 reused (123.6 s)",
+        "[edvr] compile_cache:   miss src\\common\\log.cpp: no manifest",
+        "[edvr] compile_cache:   miss src\\common\\config.cpp: header build\\gen\\edvr_version.h changed",
+        "[edvr] compile_cache: a_test.exe: built (12.5 s)",
+        "[edvr] compile_cache:   miss: input rig\\x.lib changed",
+        "[edvr] compile_cache: b_test.exe: reused (0.4 s)",
+        "[edvr] compile_cache: c: 3 compiled, 40 reused (2.0 s)",
+        "unrelated line"])
+    totals = summarize_log(log)
+    expect(totals["sources_compiled"] == 144 and totals["sources_reused"] == 40 and totals["links_built"] == 1
+           and totals["links_reused"] == 1 and abs(totals["group_seconds"] - 125.6) < 1e-9, "summary adds up: %r" % totals)
+    expect(totals["reasons"] == {"no manifest": 1, "header <file> changed": 1, "input <file> changed": 1},
+           "summary groups the miss reasons without file names: %r" % totals["reasons"])
+    expect("144 compiled, 40 reused" in summary_text(totals) and "no compile_cache lines" in summary_text(summarize_log("x")),
+           "summary text")
+    _write("build.log", log)
+    expect(store_main(["--summary", "build.log", "--markdown", "summary.md"]) == 0
+           and "144 compiled" in open("summary.md", encoding="utf-8").read(), "--summary writes a job summary")
 
 
 if __name__ == "__main__":

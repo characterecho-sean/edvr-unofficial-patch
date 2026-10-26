@@ -155,6 +155,8 @@ struct EyeState {
     StageSlot stages[kStages];
     LARGE_INTEGER lastReportQpc{};
     bool haveLastReport = false;
+    uint64_t lastSummaryMs = 0;
+    bool haveSummary = false;
     // Sentinel distinct from every real outcome (-1 = "none", 0..2 = a
     // stage index), so the confirming line fires on the very first
     // report even when that report's answer is "none".
@@ -250,10 +252,19 @@ void formatStage(const StageSlot& slot, char* out, size_t outSize) {
     }
 }
 
+bool lumaSummaryDue(EyeState& es, uint64_t nowMs) {
+    if (es.haveSummary && nowMs >= es.lastSummaryMs && nowMs - es.lastSummaryMs < 10000) return false;
+    es.haveSummary = true;
+    es.lastSummaryMs = nowMs;
+    return true;
+}
 void reportRound(int eye, EyeState& es) {
-    char bufs[kStages][32];
-    for (int s = 0; s < kStages; ++s) formatStage(es.stages[s], bufs[s], sizeof(bufs[s]));
-    Log::get().note("luma probe: eye=%d game=%s dlss_out=%s final=%s", eye, bufs[0], bufs[1], bufs[2]);
+    // Sampling and first-black-stage edges stay at the original two-second cadence; only the plain summary is throttled.
+    if (lumaSummaryDue(es, GetTickCount64())) {
+        char bufs[kStages][32];
+        for (int s = 0; s < kStages; ++s) formatStage(es.stages[s], bufs[s], sizeof(bufs[s]));
+        Log::get().note("luma probe: eye=%d game=%s dlss_out=%s final=%s", eye, bufs[0], bufs[1], bufs[2]);
+    }
 
     int firstBlack = -1;
     for (int s = 0; s < kStages; ++s) {

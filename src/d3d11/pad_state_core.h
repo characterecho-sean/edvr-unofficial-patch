@@ -1,6 +1,6 @@
 #pragma once
 // The pad-state probe's pure half (pad_state_probe.cpp). TEMPORARY (2026-10-13): it reads the docking state Elite's pad objects report, through
-// the four docking-state readers (virtuals at RVAs 0x12C3C20, 0x12CAF80, 0x12CADE0, 0x12CB320, build 332841). Each reader takes its object in rcx.
+// the four docking-state readers (virtuals at RVAs 0x12C4CC0, 0x12CC020, 0x12CBE80, 0x12CC3C0, build 334925). Each reader takes its object in rcx.
 // The probe records, per object, the code each reader returned, the state byte at this+0x3C8, and the owner's occupancy and two bytes (owner =
 // [this-8]: dword at owner+0x10, bytes at owner+0x2C and +0x2F). No Windows, no engine memory: this header decides and formats only.
 //
@@ -17,24 +17,21 @@ namespace edvr::padstate {
 constexpr size_t kReaders = 4;
 constexpr size_t kObjects = 64;
 constexpr uint32_t kChangeLineCap = 200;   // built v14.31 (was 2000): the own pad only, and few
-constexpr uintptr_t kReaderRva[kReaders] = {0x12C3C20u, 0x12CAF80u, 0x12CADE0u, 0x12CB320u};
-// push rbx; sub rsp,20h: the same six bytes in all four readers (build 332841).
+constexpr uintptr_t kReaderRva[kReaders] = {0x12C4CC0u, 0x12CC020u, 0x12CBE80u, 0x12CC3C0u};
+// push rbx; sub rsp,20h: the same six bytes in all four readers (build 334925).
 constexpr uint8_t kReaderPin[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
 
-// ---- identity and prologue gate (the same rule as the store hook: the PE pair first, then the pin) ------------------------------------------
-enum class PadInstall : uint8_t { kInstall = 0, kUnreadable, kWrongIdentity, kWrongPrologue };
+// ---- install gate (the same rule as the store hook, issue 124's signature resolver, src\common\game_build.h: the PE header read, the reader
+// found, then the pin) ------------------------------------------------------------------------------------------------------------------
+// readerRva: where the reader is in the running build -- kReaderRva[i] itself on build 334925, the address the resolver found on an unknown
+// build, 0 when it found none (kNotFound). got null: the prologue was unreadable. pinMatches: gamePinMatches of the six bytes read there.
+enum class PadInstall : uint8_t { kInstall = 0, kUnreadable, kNotFound, kWrongPrologue };
 
-inline bool padPinMatches(const uint8_t* got, const uint8_t* want, size_t n) noexcept {
-    return got != nullptr && want != nullptr && std::memcmp(got, want, n) == 0;
-}
-
-// Identity first (a PE header that cannot be read, or another build's stamp or size, refuses whatever the prologue is), then the pin.
-inline PadInstall padInstallDecision(bool identityRead, uint32_t stamp, uint32_t size, uint32_t wantStamp, uint32_t wantSize, const uint8_t* got,
-                                     const uint8_t* pin, size_t n) noexcept {
+inline PadInstall padInstallDecision(bool identityRead, uintptr_t readerRva, const uint8_t* got, bool pinMatches) noexcept {
     if (!identityRead) return PadInstall::kUnreadable;
-    if (stamp != wantStamp || size != wantSize) return PadInstall::kWrongIdentity;
-    if (got == nullptr || pin == nullptr) return PadInstall::kUnreadable;
-    if (!padPinMatches(got, pin, n)) return PadInstall::kWrongPrologue;
+    if (readerRva == 0) return PadInstall::kNotFound;
+    if (got == nullptr) return PadInstall::kUnreadable;
+    if (!pinMatches) return PadInstall::kWrongPrologue;
     return PadInstall::kInstall;
 }
 

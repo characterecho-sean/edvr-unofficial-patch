@@ -29,7 +29,7 @@ struct ID3D11Texture2D;
 
 namespace edvr {
 
-// From uiLayerConfigure: the key's target (0 off, 1.0, 1.25). The
+// From uiLayerConfigure: the key's target (0 off, 1.0, 1.25, 1.5, 2.0). The
 // instruments run while it is on.
 void uiSurfacesSetTarget(float target);
 

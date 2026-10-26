@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
+"""Read drawstate_<stamp>.bin from an eye run (eye_draw_snapshot.h).
 
 The E508/63ABD targeting sprite source has a bounded 32 MiB per-texture
 capture exception within the unchanged 64 MiB normal texture budget.
@@ -35,7 +35,7 @@ On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
 the screen composite runs, alongside its source colour; depth surfaces
 use DSV format IDs 20/40/45/55. Only colour surfaces export to PNG.
 The explicit on-foot dump permits 128 MiB per surface / 256 MiB total.
-Frames/ordinals join draws_HHMMSS.bin, whose crop map joins the eye images.
+Frames/ordinals join draws_<stamp>.bin, whose crop map joins the eye images.
 Holo t2 surfaces are copied once per resource; their alpha is diagnostic,
 not a per-frame history. No resource address is a persistent object ID.
 Version 8 adds bounded paired before/after central crops for exact
@@ -50,6 +50,10 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import math
+
+MENU_FAMILIES=(0x5DAD41AA66757CE3,0xC4B4B334B26E81A9)
+MENU_SCENES=(0x4435F2E50020E7F3,0xDE545DC8EE4FBB87,0xAACFDCF2FB9AD809,0x61AE8EB05FDC18DD)
 
 
 def read(path):
@@ -68,14 +72,27 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
     for _ in range(nd):
         d = dict(zip(('vs', 'ps', 'target'), unpack('<3Q')))
-        d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance',
-                      'width', 'height', 'texture'), unpack('<9I')))
+        d.update(zip(('frame', 'ordinal', 'kind', 'count', 'instances', 'start_instance'), unpack('<6I')))
+        if version >= 12:
+            d['render_frame'], eye_bits, d['mesh_selected'] = unpack('<3I')
+            if d['mesh_selected'] not in (0,1,2):raise ValueError('Invalid body mesh selection class')
+            d['mesh_selection']='observed_body_family_candidate_not_proven_part' if d['mesh_selected']==2 else 'known_body_selector' if d['mesh_selected']==1 else 'not_body_selected'
+            d['eye'] = struct.unpack('<i', struct.pack('<I', eye_bits))[0]
+            join = dict(zip(('scene_frame','epoch','scheduled_index','scheduled_render_frame','fp_frame','fp_sequence',
+                             'g_game_frame','item_serial','rig_generation'),unpack('<9I')))
+            join['arm_joints']=unpack('<6H')
+            join['rig'],join['pose_qpc'],join['draw_qpc'],join['capture_sequence']=unpack('<4Q')
+            join['valid_flags'],=unpack('<I')
+            join['source_job_lookup_status'],=unpack('<I')
+            join['source_job_lookup']='offline_t33_palette_base_join' if join['source_job_lookup_status']==1 else 'unknown'
+            d['join']=join
+        d.update(zip(('width', 'height', 'texture'), unpack('<3I')))
         if d['texture'] != 0xffffffff and d['texture'] >= ns:
             raise ValueError('Invalid surface index')
         d['buffers'] = []
@@ -97,7 +114,16 @@ def read(path):
                 if vertex_bytes > 32*1024*1024:
                     raise ValueError('Vertex payload budget exceeded')
                 d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
-        d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
+        if version >= 12:
+            d['mesh'], d['mesh_sources'], d['mesh_views'], d['mesh_range'] = [], [], [], []
+            d['mesh_status'] = []
+            for _ in range(4):
+                ref, identity, view, start, count, status = unpack('<IQQIII')
+                d['mesh'].append(ref);d['mesh_sources'].append(identity);d['mesh_views'].append(view);d['mesh_range'].append((start,count));d['mesh_status'].append(status)
+            d['mesh_role_names']=['t33_instance_record','t38_current_palette','vb0_instance_ids','other_palette_candidate']
+            d['other_palette_relation']='unknown' if d['mesh_sources'][3] else 'unavailable'
+        else:
+            d['mesh'] = list(unpack('<3I')) if version >= 4 else [0xffffffff]*3
         d['layout'] = []
         if version >= 5:
             elements, = unpack('<I')
@@ -128,16 +154,43 @@ def read(path):
     mesh_buffers, mesh_declined = [], 0
     if version >= 4:
         nb, mesh_declined = unpack('<2I')
-        if nb > nd*3:
+        if nb > nd*4:
             raise ValueError('Invalid source buffer count')
         total = 0
         for _ in range(nb):
-            b = dict(zip(('frame', 'first_draw', 'whole', 'stride', 'size'), unpack('<5I')))
+            if version >= 12:
+                b = dict(zip(('frame', 'first_draw', 'whole', 'stride'), unpack('<4I')))
+                b['identity'], b['scope'] = unpack('<2Q')
+                b['size'], = unpack('<I')
+            else:
+                b = dict(zip(('frame', 'first_draw', 'whole', 'stride', 'size'), unpack('<5I')))
             total += b['whole']
-            if not 0 < b['whole'] <= 16*1024*1024 or total > 256*1024*1024 or b['size'] not in (0,b['whole']) or b['first_draw'] >= nd or b['stride'] not in (8,48,336):
+            mesh_budget=768*1024*1024 if version>=12 else 256*1024*1024
+            if not 0 < b['whole'] <= 16*1024*1024 or total > mesh_budget or b['size'] not in (0,b['whole']) or b['first_draw'] >= nd or b['stride'] not in (8,48,336):
                 raise ValueError('Invalid source buffer descriptor')
             b['data'] = take(b['size'])
+            if version >= 12:
+                b['readback_status'], = unpack('<I')
             mesh_buffers.append(b)
+        mesh_capture = dict(first_frame=0, frames=0, declined=0, snapshots=0, rejected_source_draws=0)
+        if version >= 12:
+            (mesh_capture['first_frame'], mesh_capture['frames'], mesh_capture['declined'],
+             mesh_capture['snapshots'],mesh_capture['rejected_source_draws']) = unpack('<5I')
+            expected=set(range(mesh_capture['first_frame'],mesh_capture['first_frame']+mesh_capture['frames']))
+            observed={d['frame'] for d in draws if d.get('mesh_selected',0)}
+            mesh_capture['missing_ledger_frames']=sorted(expected-observed)
+            mesh_capture['missing_body_ledger_frames']=sorted(expected-{d['frame'] for d in draws if d.get('mesh_selected')==1})
+            mesh_capture['candidate_coverage']=[]
+            for count in (10050,3216):
+                for eye in (0,1):
+                    candidates=[d for d in draws if d.get('mesh_selected')==2 and d['count']==count and d['eye']==eye]
+                    admitted=[d for d in candidates if d['mesh_status'][:3]==[1,1,1]]
+                    copied=[d for d in admitted if candidate_body_payload_available(d,mesh_buffers)]
+                    mesh_capture['candidate_coverage'].append(dict(count=count,eye=eye,identity='unproven_body_family_candidate',
+                        observed_rows=len(candidates),draw_time_palette_frames=[d['frame'] for d in copied],
+                        clip_constant_rows=sum(bool(d['buffers'][3]['data']) for d in candidates),
+                        geometry_rows=sum(bool(d['streams'][1]['data']) and bool(d['streams'][2]['data']) for d in candidates),
+                        status='draw_time_palettes_copied' if copied else 'staged_readback_unavailable' if admitted else 'metadata_only' if candidates else 'absent'))
         for i,d in enumerate(draws):
             for role,ref in enumerate(d['mesh']):
                 if ref == 0xffffffff:
@@ -145,8 +198,10 @@ def read(path):
                 if ref >= nb:
                     raise ValueError('Invalid source buffer reference')
                 b = mesh_buffers[ref]
-                if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8)[role]:
+                if b['frame'] != d['frame'] or b['first_draw'] > i or b['stride'] != (336,48,8,48)[role]:
                     raise ValueError('Source buffer belongs to a different frame, role, or later draw')
+    else:
+        mesh_capture = dict(first_frame=0, frames=0, declined=0, snapshots=0, rejected_source_draws=0)
     effect_images, effect_image_declined = [], 0
     if version >= 6:
         ni, effect_image_declined = unpack('<2I')
@@ -156,6 +211,10 @@ def read(path):
         for _ in range(ni):
             e = dict(zip(('draw', 'after', 'x', 'y', 'width', 'height', 'source_width', 'source_height', 'format', 'size'), unpack('<10I')))
             night = e['draw'] < nd and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0xFCF7BD2896751D96, 0xF786D34B5E118D5E)
+            roi_family = version >= 10 and e['draw'] < nd and (
+                (draws[e['draw']]['vs'], draws[e['draw']]['ps']) == (0x025B4B9FF54622ED, 0x46F92DC71BF8DFA5) or
+                (version >= 14 and (draws[e['draw']]['vs'], draws[e['draw']]['ps']) ==
+                 (0xB10B032BDFD46700, 0xDB899F4BD577F2E5)))
             inputs = version >= 7 and night and 2 <= e['after'] <= 6
             bc4 = inputs and e['format'] == 80
             formats = {10: 8, 26: 4, 28: 4, 29: 4}
@@ -165,11 +224,14 @@ def read(path):
             expected = ((e['width']+3)//4)*((e['height']+3)//4)*8 if bc4 else e['width']*e['height']*bpp
             total += expected
             x, y = (e['source_width']-e['width'])//2, (e['source_height']-e['height'])//3
+            if roi_family:
+                y = (e['source_height']-e['height'])//2
             if bc4:
                 x, y = x & ~3, y & ~3
-            origin = ((e['x'],e['y']) == (x,y) if night else
+            origin = ((e['x'],e['y']) == (x,y) if night or roi_family else
                       (e['x']+e['width'],e['y']+e['height']) == (e['source_width'],e['source_height']))
-            if (e['draw'] >= nd or (not night and draws[e['draw']]['ordinal'] != 0xfffffffd) or (e['after'] > 1 and not inputs) or
+            if (e['draw'] >= nd or (not night and not roi_family and draws[e['draw']]['ordinal'] != 0xfffffffd) or
+                    (roi_family and e['after'] > 1) or (e['after'] > 1 and not inputs) or
                     not 0 < e['width'] <= 1024 or not 0 < e['height'] <= 1024 or
                     not origin or e['x']+e['width']>e['source_width'] or e['y']+e['height']>e['source_height'] or
                     (not bpp and not bc4) or total > 64*1024*1024 or e['size'] not in (0, expected)):
@@ -304,13 +366,629 @@ def read(path):
                 depth_desc=depth, raster=raster, layout=layout,
                 before=before_data, after=after_data, depth=depth_data, ps_b1_data=ps_b1_data))
     geometry = read_geometry(unpack, take) if version >= 9 else empty_geometry()
+    candidate = empty_candidates()
+    if version >= 10:
+        candidate = read_candidates(unpack,take,draws,effect_images,version)
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
-                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
+                mesh_buffers=mesh_buffers, mesh_declined=mesh_declined, mesh_capture=mesh_capture,
                 effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling,
-                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry)
+                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry,
+                candidates=candidate)
+
+
+def empty_candidates():
+    return dict(dropped=0,missing_render_frame=0,outside_frame_window=0,input_declined=0,mip_declined=0,input_bytes=0,
+                optic_draws=0,roi_incomplete=0,roi_draw=0xffffffff,frames=[],inputs=[],samplers=[])
+
+
+def read_menu(path, capture=None):
+    """Join the bounded menu companion to its v16 binary; missing copies remain explicit."""
+    path=Path(path)
+    if path.stat().st_size>4*1024*1024:
+        raise ValueError('Menu metadata exceeds its bounded schema')
+    meta=json.loads(path.read_text(encoding='utf-8'))
+    binary=meta.get('binary','')
+    if (meta.get('schema')!='edvr_late_menu_v1' or not isinstance(binary,str) or not binary or
+            Path(binary).name!=binary or '/' in binary or '\\' in binary or not meta.get('binary_written')):
+        raise ValueError('Invalid menu metadata header')
+    c=read(path.with_name(binary)) if capture is None else capture
+    if (c['version']!=16 or meta.get('mesh_limit')!=128*1024*1024 or meta.get('vertex_limit')!=8*1024*1024 or
+            not isinstance(meta.get('selected_frame'),int) or meta['selected_frame']<=0 or
+            len(meta.get('rows',[]))>50 or len(meta.get('rows',[]))!=len(c['draws']) or
+            [e.get('eye') for e in meta.get('eyes',[])]!=[0,1,-1]):
+        raise ValueError('Invalid menu selection or capacity')
+    issues={f['draw']:f for f in c['candidates']['frames']}
+    seen=set();counts=[[[0,0] for _ in range(2)] for _ in range(3)];scene_ord=[None,None];menu_ord=[None,None]
+    family_ids=MENU_FAMILIES
+    identities=lambda v:isinstance(v,str) and len(v)==16 and all(z in '0123456789abcdefABCDEF' for z in v)
+    for row in meta['rows']:
+        n=row.get('draw');role=row.get('role')
+        if not isinstance(n,int) or n in seen or n<0 or n>=len(c['draws']) or role not in (1,2):
+            raise ValueError('Invalid menu row association')
+        seen.add(n);d=c['draws'][n]
+        if d['frame']!=meta['selected_frame'] or n not in issues or (role==2)!=(d['vs'] in MENU_SCENES):
+            raise ValueError('Menu row does not belong to selected frame/family')
+        if role==1:
+            if d['vs'] not in family_ids:
+                raise ValueError('Unknown menu diagnostic family')
+            e=d['eye'] if d['eye'] in (0,1) else 2
+            counts[e][family_ids.index(d['vs'])][0 if d['count']==360 else 1]+=1
+            if e<2:menu_ord[e]=d['ordinal'] if menu_ord[e] is None else min(menu_ord[e],d['ordinal'])
+        elif d['eye'] not in (0,1) or scene_ord[d['eye']] is not None:
+            raise ValueError('Menu scene reference has unknown/duplicate eye')
+        else:
+            scene_ord[d['eye']]=d['ordinal']
+        if len(row.get('constants',[]))!=3 or len(row.get('streams',[]))!=3 or len(row.get('ps_inputs',[]))!=16:
+            raise ValueError('Menu row binding count differs')
+        for slot,binding in enumerate(row['constants']):
+            if (not identities(binding.get('identity')) or binding.get('range_known') not in (0,1) or
+                    any(not isinstance(binding.get(k),int) or binding[k]<0 or binding[k]>4096 for k in ('first','count'))):
+                raise ValueError('Invalid menu constant-buffer binding')
+            if int(binding['identity'],16)!=d['buffers'][slot]['identity']:
+                raise ValueError('Menu constant identity disagrees with binary')
+            payload=d['buffers'][slot]['data']
+            binding['status']='absent' if not int(binding['identity'],16) else ('available' if payload else 'copy_unavailable')
+            binding['payload_origin_bytes']=binding['first']*16 if binding['range_known'] else 0
+            binding['bounded']=bool(payload) and binding['range_known'] and len(payload)<binding['count']*16
+        if not all(identities(v) for v in row['streams']):
+            raise ValueError('Invalid menu stream identity')
+        for slot,input_ in enumerate(row['ps_inputs']):
+            if (input_.get('slot')!=slot or not identities(input_.get('view')) or not identities(input_.get('resource')) or
+                    len(input_.get('descriptor',[]))!=6 or any(not isinstance(v,int) or not 0<=v<=0xffffffff for v in input_['descriptor'])):
+                raise ValueError('Invalid menu texture binding descriptor')
+            input_['status']='absent' if not int(input_['view'],16) else 'identity_only'
+        row['outcome']=('skipped','issued','unavailable')[issues[n]['issued']]
+        avatar=row.get('avatar',dict(status=0,valid_flags=0))
+        if avatar.get('status') not in (0,1,2) or not isinstance(avatar.get('valid_flags'),int) or not 0<=avatar['valid_flags']<=63:
+            raise ValueError('Invalid avatar camera evidence status')
+        if avatar['status']:
+            for key in ('requested_frame','source_frame','fp_frame','root_read_render_frame','g_game_frame','item_serial',
+                        'sample_qpc','qpc','fp_qpc','root_qpc','ms','root_ms','qpc_frequency'):
+                if not isinstance(avatar.get(key),int) or avatar[key]<0:
+                    raise ValueError('Invalid avatar camera evidence stamp')
+            if avatar['requested_frame']!=d['render_frame'] or (avatar['status']==2 and avatar['valid_flags']&(2|8)):
+                raise ValueError('Cached avatar evidence mislabeled exact or pinned')
+            for key,size in (('froot',16),('m3p',16),('G',16),('body_offset',3),('pin_eye_target',3),('pin_target',3)):
+                values=avatar.get(key,[])
+                if len(values)!=size or any(v is not None and (not isinstance(v,(int,float)) or not math.isfinite(v)) for v in values):
+                    raise ValueError('Invalid avatar camera numeric payload')
+                if avatar['valid_flags']&1 and key in ('froot','m3p','G') and any(v is None for v in values):
+                    raise ValueError('Valid avatar matrices contain unavailable numbers')
+            for key in ('qpc','fp_qpc','root_qpc'):
+                avatar[key+'_age_ms']=(1000*(avatar['sample_qpc']-avatar[key])/avatar['qpc_frequency']
+                    if avatar['qpc_frequency'] and avatar[key] and avatar['sample_qpc']>=avatar[key] else None)
+        avatar['source_status']=('unavailable','hook_frame_match','cached_not_exact')[avatar['status']]
+        avatar['sources_exact']=bool(avatar['valid_flags']&2)
+        avatar['times_fresh']=bool(avatar['valid_flags']&4)
+        avatar['pin_targets_available']=bool(avatar['valid_flags']&8)
+        avatar['coordinate_spaces']='froot/m3p model-to-world; G FP-to-3P; body offset in world metres; pin targets in 3P model metres'
+        row['avatar']=avatar
+        if row.get('eye_source',0) not in (0,1,2,3):
+            raise ValueError('Invalid menu eye mapping source')
+        row['eye_mapping']=('unknown','scene_depth','current_registered_ui_target','cached_redirected_ui_target')[row.get('eye_source',0)]
+        if role==1:
+            try:issues[n]['index_status']=_validate_candidate_indices(d)
+            except ValueError as exc:issues[n]['index_status']='invalid: '+str(exc)
+        else:issues[n]['index_status']='not_requested_scene_reference'
+        row['layout_status']='available' if d['layout'] else 'unavailable'
+        row['stream_status']=['absent' if not int(identity,16) else
+                              ('available' if stream['data'] else 'copy_unavailable_or_not_requested')
+                              for identity,stream in zip(row['streams'],d['streams'])]
+        row['structured_status']=[{0:'absent',1:'copy_issued',2:'unsupported_view',3:'unsupported_offset',4:'unsupported_stride',
+                                   5:'size_or_quota',6:'allocation_failed',7:'quota',8:'not_selected',9:'unavailable',10:'unknown_eye',11:'instance_stream_window'}.get(s,'unknown')
+                                  for s in d['mesh_status'][:3]]
+        for slot,ref in enumerate(d['mesh'][:2]):
+            if row['structured_status'][slot]=='copy_issued':
+                row['structured_status'][slot]='available' if ref<len(c['mesh_buffers']) and c['mesh_buffers'][ref]['data'] else 'copy_unavailable'
+    for e,eye in enumerate(meta['eyes']):
+        if (not isinstance(eye.get('scene_before_menu'),bool) or len(eye.get('families',[]))!=2 or
+                not isinstance(eye.get('mesh_bytes'),int) or not 0<=eye['mesh_bytes']<=(16 if e==2 else 56)*1024*1024 or
+                not isinstance(eye.get('vertex_bytes'),int) or not 0<=eye['vertex_bytes']<=(2 if e==2 else 3)*1024*1024):
+            raise ValueError('Invalid menu eye reservation')
+        if (eye['scene_before_menu']!=(e<2 and scene_ord[e] is not None) or
+                (e<2 and scene_ord[e] is not None and menu_ord[e] is not None and scene_ord[e]>=menu_ord[e])):
+            raise ValueError('Menu scene reference did not precede its menu')
+        for family,recorded in zip(eye['families'],counts[e]):
+            for k in ('anchor_seen','siblings_seen','anchor_kept','siblings_kept','anchor_quota','siblings_quota'):
+                if not isinstance(family.get(k),int) or family[k]<0:
+                    raise ValueError('Invalid menu family counter')
+            if ([family['anchor_kept'],family['siblings_kept']]!=recorded or max(recorded)>4 or
+                    family['anchor_seen']!=family['anchor_kept']+family['anchor_quota'] or
+                    family['siblings_seen']!=family['siblings_kept']+family['siblings_quota']):
+                raise ValueError('Menu family count disagrees with retained draws')
+        for family,vs in zip(eye['families'],MENU_FAMILIES):family['vs']=f'{vs:016X}'
+        eye['anchor_status']='present' if eye['families'][0]['anchor_kept'] else 'absent'
+        eye['scene_status']='present_before_menu' if eye['scene_before_menu'] else 'unavailable'
+    meta['anchor_status']='both_eyes' if all(e['anchor_status']=='present' for e in meta['eyes'][:2]) else 'absent_or_one_eye'
+    meta['camera_context']='bound draw constants plus existing F81/cached IkG avatar reference and freshness; no game camera getter or picking mesh captured'
+    meta['avatar_sources']=dict(Counter(r['avatar']['source_status'] for r in meta['rows']))
+    meta['outcomes']=dict(Counter(r['outcome'] for r in meta['rows']))
+    meta['eye_mappings']=dict(Counter(r['eye_mapping'] for r in meta['rows']))
+    meta['menu_geometry']=dict(Counter(issues[r['draw']]['index_status'] for r in meta['rows'] if r['role']==1))
+    meta['input_summary']=validate_menu_input(meta.get('input_observer'),meta['selected_frame'])
+    for row in meta['rows']:row['input_bridge_summary']=validate_draw_input_bridge(row.get('input_bridge'),meta['selected_frame'])
+    c['late_menu']=meta
+    return c
+
+
+def validate_menu_input(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (data.get('schema')!='edvr_menu_input_v1' or not isinstance(data.get('capture_id'),str) or
+            not data['capture_id'].isdigit() or data.get('getter_calls')!=0 or data.get('update_capture_gate') not in (False,True) or
+            not isinstance(data.get('first_ledger_frame'),int) or not isinstance(data.get('last_ledger_frame'),int) or
+            not data['first_ledger_frame']<=selected_frame<=data['last_ledger_frame'] or
+            data['last_ledger_frame']-data['first_ledger_frame']>=20 or len(data.get('rows',[]))>160 or len(data.get('meshes',[]))>8):
+        raise ValueError('Invalid bounded menu input observer header')
+    for field in ('hooks_armed','qpc_frequency','row_quota','mesh_quota','read_faults','contended','placements_begun','in_flight_at_close'):
+        if not isinstance(data.get(field),int) or data[field]<0:
+            raise ValueError('Invalid menu input observer counter')
+    def floats(values,size):
+        return isinstance(values,list) and len(values)==size and all(v is None or isinstance(v,(int,float)) and math.isfinite(v) for v in values)
+    for mesh in data['meshes']:
+        if (mesh.get('ledger_frame')!=data['first_ledger_frame']+1 or mesh.get('space')!='cached_pick_camera_frame' or
+                not 1<=len(mesh.get('triangles',[]))<=256):raise ValueError('Invalid menu input mesh frame/capacity')
+        for tri in mesh['triangles']:
+            if len(tri)!=6 or not all(floats(v,3 if i<3 else 2) for i,v in enumerate(tri)):
+                raise ValueError('Invalid cached input triangle/UV payload')
+    counts=[0,0];mesh_counts=[0,0]
+    for mesh in data['meshes']:mesh_counts[0 if len(mesh['triangles'])==120 else 1]+=1
+    if max(mesh_counts)>4:raise ValueError('Menu input mesh reservation overflow')
+    for row in data['rows']:
+        if (not isinstance(row.get('ledger_frame'),int) or not data['first_ledger_frame']<=row['ledger_frame']<=data['last_ledger_frame'] or
+                not isinstance(row.get('before_qpc'),int) or not isinstance(row.get('after_qpc'),int) or row['after_qpc']<row['before_qpc'] or
+                row.get('mesh_status') not in range(1,8) or not isinstance(row.get('triangle_count'),int) or row['triangle_count']<0):
+            raise ValueError('Invalid menu input row stamps/status')
+        counts[0 if row['triangle_count']==120 else 1]+=1
+        for field,size in (('mouse',2),('other',2),('direction',3),('uv',2),('ray_origin',3),('ray_direction',3),('ray_t',1),('sprite',3),('owner_world',16),('owner_output',16)):
+            if not floats(row.get(field),size):raise ValueError('Invalid menu input numeric payload')
+        for field in ('ray_calls','window_calls','owner_calls','accepted_ray','read_flags','button_valid','mode_kind'):
+            if not isinstance(row.get(field),int) or row[field]<0:raise ValueError('Invalid menu input callback count')
+        if row['mesh_status'] in (6,7):
+            if not isinstance(row.get('mesh'),int) or not 0<=row['mesh']<len(data['meshes']):raise ValueError('Invalid menu input mesh association')
+            mesh=data['meshes'][row['mesh']]
+            if any(row[k]!=mesh[k] for k in ('panel','list','owner','ledger_frame')) or row['triangle_count']!=len(mesh['triangles']):
+                raise ValueError('Menu input row disagrees with cached mesh provenance')
+        elif row.get('mesh')!=0xffffffff:raise ValueError('Unavailable menu input mesh has a live association')
+        row['branch']=('ray_and_2d' if row['ray_calls'] and row['window_calls'] else 'ray' if row['ray_calls'] else '2d_window' if row['window_calls'] else 'no_callback')
+        row['callback_payload_status']='multiple_calls_last_payload_not_a_unique_geometric_join' if row['ray_calls']+row['window_calls']>1 else 'single_call' if row['ray_calls']+row['window_calls'] else 'absent'
+        row['mode_status']='plain_accessor_read' if row['read_flags']&16 else 'unavailable_without_calling_getter'
+        row['owner_transform_status']=('mixed_observed_owners' if row.get('observed_owner_mixed') else
+            'matching_panel_owner' if row['read_flags']&1024 and row.get('observed_owner') and row['observed_owner']==row.get('owner') else
+            'owner_mismatch' if row['read_flags']&1024 else 'not_observed')
+        row['mesh_availability']={1:'absent',2:'triangle_cap',3:'read_fault_or_changed',4:'not_selected_complete_frame',5:'mesh_quota',6:'first_copy_in_same_frame',7:'copied_after_original'}[row['mesh_status']]
+    if max(counts)>80 or len(data['rows'])+data['in_flight_at_close']>data['placements_begun']:
+        raise ValueError('Menu input row reservation/count mismatch')
+    bridge=validate_input_update_bridge(data.get('update_bridge'),selected_frame)
+    if data['update_capture_gate'] is True and bridge['status']=='not_captured':raise ValueError('Update observer gate lacks bounded bridge schema')
+    return dict(status='observed' if data['rows'] else 'no_placement_callbacks',rows=len(data['rows']),meshes=len(data['meshes']),update_bridge=bridge,
+                surface_evidence=validate_menu_surface(data.get('surface_evidence'),selected_frame),
+                branches=dict(Counter(r['branch'] for r in data['rows'])),hooks_armed=data['hooks_armed'],
+                row_quota=data['row_quota'],mesh_quota=data['mesh_quota'],read_faults=data['read_faults'],
+                contended=data['contended'],in_flight_at_close=data['in_flight_at_close'],
+                association='time_and_geometry_only_not_proven_GPU_owner')
+
+
+def validate_menu_surface(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (not isinstance(data,dict) or data.get('schema')!='edvr_menu_surface_v1' or
+            data.get('selected_frame')!=selected_frame or data.get('getter_calls')!=0 or
+            data.get('gpu_draw_owner_proven') is not False or
+            data.get('association')!='shared_model_pick_pair_construction_not_actual_GPU_draw_identity' or
+            (data.get('max_owners'),data.get('max_triangles'),data.get('max_vertices'),data.get('max_map_nodes'))!=(4,255,256,32) or
+            not isinstance(data.get('known_layout'),bool) or not isinstance(data.get('rows'),list) or len(data['rows'])>4):
+        raise ValueError('Invalid bounded menu surface header')
+    for field in ('expected_model_vtable','callbacks','type_declined','non_menu','quota','duplicate','crossed_frame','layout_declined','contended'):
+        if type(data.get(field)) is not int or data[field]<0:raise ValueError('Invalid menu surface counter/identity')
+    if data['rows'] and (not data['known_layout'] or not data['expected_model_vtable']):
+        raise ValueError('Surface rows lack known typed layout')
+    def numbers(values,n):
+        return isinstance(values,list) and len(values)==n and all(v is None or type(v) in (int,float) and math.isfinite(v) for v in values)
+    copied=0;usable=0;models=0;incomplete=0;owners=set()
+    for row in data['rows']:
+        if (not isinstance(row,dict) or row.get('ledger_frame')!=selected_frame or row.get('path') not in range(4) or
+                row.get('status') not in range(6) or row.get('map_status') not in range(6) or
+                type(row.get('map_steps')) is not int or not 0<=row['map_steps']<=32 or
+                row.get('transform_valid') not in (0,1) or not numbers(row.get('owner_world'),16) or not numbers(row.get('owner_output'),16) or
+                not isinstance(row.get('pairs'),list) or len(row['pairs'])!=2):raise ValueError('Invalid menu surface row')
+        for field in ('render_frame','placement_render_frame','thread','qpc','ctl','panel','list','owner','full_panel','entry','entry_flag','definition','map_head','map_count','map_key'):
+            if type(row.get(field)) is not int or row[field]<0:raise ValueError('Invalid menu surface provenance')
+        count_read=row.get('pre_rebuild_count_read')
+        count=row.get('pre_rebuild_triangle_count')
+        if count_read is None and count is None:
+            row['pre_rebuild_count_status']='not_recorded_in_earlier_capture'
+        elif (type(count_read) is not bool or type(count) is not int or count<0 or count>0xffffffffffffffff or
+              not count_read and count!=0):
+            raise ValueError('Invalid callback-time menu triangle count')
+        else:
+            row['pre_rebuild_count_status']='read_before_pick_rebuild' if count_read else 'unavailable_before_pick_rebuild'
+        if row['owner'] in owners or row['owner']!=row['full_panel']+16:raise ValueError('Invalid menu surface owner association')
+        owners.add(row['owner']);incomplete+=row['map_status']!=4
+        for pair in row['pairs']:
+            if (not isinstance(pair,dict) or pair.get('status') not in range(6) or pair.get('model_status') not in range(6) or
+                    pair.get('key_status') not in range(6) or not numbers(pair.get('model_basis'),16) or not numbers(pair.get('scale'),1)):
+                raise ValueError('Invalid menu surface pair')
+            for field in ('handle','handle_vtable','observed_getter_address','pair','model','model_vtable','resource_key','constructor_resource_f0','constructor_source_150'):
+                if type(pair.get(field)) is not int or pair[field]<0:raise ValueError('Invalid menu surface pair identity')
+            if pair['resource_key']>65535 or (pair['key_status'] in (1,4) and row['map_status']!=4):
+                raise ValueError('Incomplete map cannot prove a key present or absent')
+            if pair['model_status']==4 and (not pair['model'] or pair['model_vtable']!=data['expected_model_vtable']):
+                raise ValueError('Unverified model claims typed fields')
+            mesh=pair.get('mesh',{})
+            vertices=mesh.get('vertices');indices=mesh.get('indices')
+            if (mesh.get('status') not in range(6) or mesh.get('space')!='model_local_xyz_uv' or
+                    not isinstance(vertices,list) or len(vertices)%5 or len(vertices)>256*5 or not numbers(vertices,len(vertices)) or
+                    not isinstance(indices,list) or len(indices)%3 or len(indices)>255*3 or
+                    any(type(i) is not int or not 0<=i<min(256,len(vertices)//5) for i in indices)):
+                raise ValueError('Invalid authored menu mesh payload')
+            for field in ('address','vertices_address','indices_address','raw_header0'):
+                if type(mesh.get(field)) is not int or mesh[field]<0:raise ValueError('Invalid authored mesh identity')
+            if mesh['status']!=4 and (vertices or indices):raise ValueError('Unavailable mesh retains a live payload')
+            if mesh['status']==4 and (not vertices or not indices or not all(mesh[k] for k in ('address','vertices_address','indices_address'))):
+                raise ValueError('Copied mesh lacks payload')
+            valid=row['status']==4 and pair['status']==4
+            copied+=valid and mesh['status']==4
+            usable+=valid and mesh['status']==4 and all(v is not None for v in vertices)
+            models+=valid and pair['model_status']==4
+            pair['model_availability']='typed_callback_copy' if valid and pair['model_status']==4 else 'unavailable_or_identity_changed'
+            mesh['availability']='copied_finite_xyz_uv' if valid and mesh['status']==4 and all(v is not None for v in vertices) else 'copied_with_nonfinite_lanes' if valid and mesh['status']==4 else 'unavailable_or_identity_changed'
+    if len(data['rows'])>data['callbacks']:raise ValueError('Surface row/callback count mismatch')
+    status=('unknown_layout' if not data['known_layout'] else 'no_owner_callbacks' if not data['callbacks'] else
+            'captured' if data['rows'] else 'callbacks_without_accepted_owner')
+    return dict(status=status,owners=len(data['rows']),copied_meshes=copied,finite_meshes=usable,typed_models=models,
+                incomplete_maps=incomplete,gpu_draw_owner_proven=False,
+                counters={k:data[k] for k in ('callbacks','type_declined','non_menu','quota','duplicate','crossed_frame','layout_declined','contended')})
+
+
+def _input_mode(mode):
+    if not isinstance(mode,dict) or mode.get('status') not in (0,1,2,3) or not isinstance(mode.get('value'),int) or len(mode.get('code',[]))!=21:
+        raise ValueError('Invalid update mode evidence')
+    for key in ('object','vtable','observed_function_address','value_address'):
+        if not isinstance(mode.get(key),int) or mode[key]<0:raise ValueError('Invalid mode identity')
+    if any(not isinstance(v,int) or not 0<=v<=255 for v in mode['code']):raise ValueError('Invalid mode accessor bytes')
+    if mode['status']==3 and bytes(mode['code'])!=bytes.fromhex('488b81180200004885c074038b00c3b802000000c3'):
+        raise ValueError('Unverified indirect mode accessor claimed valid')
+    mode['availability']='verified_callback_lifetime_read' if mode['status']==3 else 'unavailable'
+
+
+def _input_update(row):
+    for key in ('sequence','ledger_frame','render_frame','end_render_frame','thread','ctl','before_qpc','after_qpc'):
+        if not isinstance(row.get(key),int) or row[key]<0:raise ValueError('Invalid update callback identity/stamp')
+    if not isinstance(row.get('completed'),bool) or not isinstance(row.get('original_returned'),bool):raise ValueError('Invalid update completion status')
+    if row['completed'] and row['after_qpc']<row['before_qpc']:raise ValueError('Update callback times reversed')
+    _input_mode(row['before_mode']);_input_mode(row['after_mode'])
+
+
+def validate_input_update_bridge(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (data.get('schema')!='edvr_menu_input_bridge_v1' or data.get('selected_frame')!=selected_frame or
+            data.get('getter_calls')!=0 or data.get('legacy_update_instrument_enabled_by_capture') is not False or
+            data.get('association')!='timing_and_callback_identity_only_not_GPU_owner_proof' or len(data.get('updates',[]))>64):
+        raise ValueError('Invalid bounded update bridge')
+    for key in ('first_frame','last_frame','update_gate_frame','update_gate_qpc','contended','slot_overflow','update_overflow','in_flight_upper_bound'):
+        if not isinstance(data.get(key),int) or data[key]<0:raise ValueError('Invalid update bridge counter')
+    if data['first_frame']+1!=selected_frame or data['last_frame']-data['first_frame']>=20:raise ValueError('Invalid update bridge window')
+    controllers=set()
+    for row in data['updates']:
+        _input_update(row);controllers.add(row['ctl'])
+        if not row['completed'] or not data['first_frame']<=row['ledger_frame']<=data['last_frame']:raise ValueError('Invalid retained update window/completion')
+    if len(controllers)>4:raise ValueError('Update bridge controller cap exceeded')
+    return dict(status=data.get('status'),updates=len(data['updates']),controllers=len(controllers),slot_overflow=data['slot_overflow'],
+                update_overflow=data['update_overflow'],in_flight_upper_bound=data['in_flight_upper_bound'],update_gate_qpc=data['update_gate_qpc'],
+                association='timing_and_callback_identity_only_not_GPU_owner_proof')
+
+
+def validate_draw_input_bridge(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if data.get('status') in ('contended','outside_selected_frame'):return dict(status=data['status'])
+    if (data.get('status')!='sampled' or data.get('ledger_frame')!=selected_frame or data.get('gpu_owner_proven') is not False or
+            data.get('pointer_rereads')!=0 or len(data.get('controllers',[]))>4):raise ValueError('Invalid draw input bridge')
+    enclosing=data.get('enclosing_update')
+    if enclosing is not None:
+        _input_update(enclosing)
+        if enclosing['completed']:raise ValueError('Completed update cannot enclose a draw')
+    if data.get('snapshot_qpc')!=data.get('qpc') or not isinstance(data.get('draw_marker_qpc'),int):raise ValueError('Invalid draw/snapshot clock provenance')
+    seen=set();current=0;after_marker=0
+    for slot in data['controllers']:
+        if slot.get('ctl') in seen:raise ValueError('Ambiguous duplicate controller slot')
+        seen.add(slot.get('ctl'));update=slot.get('latest_update')
+        if update is not None:
+            _input_update(update)
+            if update['ctl']!=slot['ctl']:raise ValueError('Update/controller mismatch')
+            current+=update['ledger_frame']==selected_frame
+        for key in ('prior_placement_only','prior_120_triangle_candidate_only'):
+            p=slot.get(key)
+            if p is not None:
+                if p.get('ctl')!=slot['ctl'] or (data['qpc'] and p.get('after_qpc',0)>data['qpc']):raise ValueError('Invalid prior placement identity/time')
+                if key=='prior_placement_only':after_marker+=p.get('after_qpc',0)>data['draw_marker_qpc']
+                _input_mode(p['mode'])
+                if key=='prior_120_triangle_candidate_only' and p.get('triangles')!=120:raise ValueError('Wrong candidate triangle count')
+    return dict(status='sampled',controllers=len(seen),same_ledger_frame_updates=current,enclosing_update=enclosing is not None,placements_after_draw_marker=after_marker,
+                gpu_owner_proven=False,association='prior_placement_is_not_current_GPU_owner_proof')
+
+
+def read_candidates(unpack,take,draws,effect_images,version=11):
+    dropped,missing,outside,input_declined,mip_declined,input_bytes,optic_draws,roi_incomplete,roi_draw=unpack('<9I')
+    if version>=13:
+        ui_counts=unpack('<48I');ui_dropped=unpack('<48I')
+    else:
+        ui_counts=ui_dropped=(0,)*48
+    ui_image_bytes=unpack('<16I') if version>=15 else (0,)*16
+    nf,=unpack('<I')
+    max_candidates=1152 if version>=15 else 384
+    max_input_bytes=128*1024*1024 if version>=15 else 24*1024*1024
+    if nf>max_candidates or input_bytes>max_input_bytes or any(x>6*1024*1024 for x in ui_image_bytes) or (roi_draw!=0xffffffff and roi_draw>=len(draws)):
+        raise ValueError('Invalid targeted candidate header')
+    frames=[];seen=set()
+    for _ in range(nf):
+        draw,ledger_frame,render_frame=unpack('<3I');eye,issued,roi_captured,roi_complete=unpack('<i3I')
+        issue = None
+        if version>=13:
+            issue_status, actual_vs, actual_ps, b0_id, target_id, width, height, rtv_format, b0_first, b0_count, b0_range = unpack('<I4Q6I')
+            camera_cb_slot,=unpack('<I') if version>=15 else (0,)
+            rtv_size,=unpack('<I');rtv=take(rtv_size)
+            nv,ns=unpack('<2I')
+            if rtv_size not in (0,20) or nv>16 or ns>16:
+                raise ValueError('Invalid issued UI draw state descriptors')
+            if nv:
+                viewport_size,=unpack('<I')
+                if viewport_size!=nv*24:
+                    raise ValueError('Invalid issued UI viewport blob length')
+                viewports=take(viewport_size)
+            else:
+                viewports=b''
+            if ns:
+                scissor_size,=unpack('<I')
+                if scissor_size!=ns*16:
+                    raise ValueError('Invalid issued UI scissor blob length')
+                scissors=take(scissor_size)
+            else:
+                scissors=b''
+            b0_expected,=unpack('<I');b0_size,=unpack('<I')
+            if issue_status not in (0,1,2,3,4,5) or b0_range not in (0,1) or b0_expected>65536 or b0_size not in (0,b0_expected) or (b0_range and b0_count>4096) or camera_cb_slot not in (0,1):
+                raise ValueError('Invalid issued UI draw state status')
+            b0=take(b0_size)
+            if issue_status==2 and (issued!=1 or not b0_id or not target_id or not width or not height or not b0_expected):
+                raise ValueError('Issued UI state lacks its bound b0/target payload')
+            if issue_status==2 and version>=15 and camera_cb_slot==1 and (
+                    b0_expected < (b0_first+276)*16 or (b0_range and b0_count<276)):
+                raise ValueError('025B issued camera b1 does not cover declared cb1[270..275]')
+            if issue_status!=2 and (b0_size or b0_expected):
+                raise ValueError('Unmatched/refused issued UI state carries b0 bytes')
+            issue=dict(status=issue_status,b0_identity=b0_id,camera_cb_identity=b0_id,camera_cb_slot=camera_cb_slot,
+                       b0_status='unused' if version>=15 and camera_cb_slot==1 else ('available' if b0_size else 'map_not_ready'),
+                       camera_cb_status='available' if b0_size else 'map_not_ready',
+                       target_identity=target_id,width=width,height=height,
+                       actual_vs=actual_vs,actual_ps=actual_ps,
+                       rtv_format=rtv_format,b0_first_constant=b0_first,b0_num_constants=b0_count,
+                       b0_range_known=bool(b0_range),rtv=rtv,viewports=viewports,scissors=scissors,
+                       b0_expected=b0_expected,b0_payload_status=('available' if b0_size else 'map_not_ready'),b0=b0)
+        menu_family=version>=16 and draw<len(draws) and draws[draw]['vs'] in MENU_FAMILIES+MENU_SCENES
+        if (draw>=len(draws) or draw in seen or (not render_frame and not menu_family) or draws[draw]['frame']!=ledger_frame or
+                eye not in (-1,0,1) or issued not in (0,1,2) or roi_captured not in (0,1) or roi_complete not in (0,1) or
+                roi_complete and (issued!=1 or roi_captured!=1) or
+                (not menu_family and draws[draw]['vs']!=0x154FB5A453F3D2E9 and
+                 (draws[draw]['vs'],draws[draw]['ps']) not in ((0x025B4B9FF54622ED,0x46F92DC71BF8DFA5),
+                                                               (0xB10B032BDFD46700,0xDB899F4BD577F2E5)))):
+            raise ValueError('Invalid targeted candidate frame association')
+        if version>=13:
+            expected=(draws[draw]['vs'],draws[draw]['ps'])
+            actual=(issue['actual_vs'],issue['actual_ps'])
+            if (issue['status']==2 and actual!=expected) or (issue['status']==5 and actual==expected):
+                raise ValueError('Issued UI state shader identity disagrees with the candidate')
+            if version>=15 and issue['camera_cb_slot']!=(1 if menu_family or expected[0]==0x025B4B9FF54622ED else 0):
+                raise ValueError('Issued UI camera constant-buffer slot disagrees with the shader family')
+        seen.add(draw);frames.append(dict(draw=draw,ledger_frame=ledger_frame,render_frame=render_frame,eye=eye,
+                                          issued=issued,roi_captured=roi_captured,roi_complete=roi_complete,issue=issue))
+    ni,=unpack('<I')
+    if ni>(4608 if version>=15 else 1536):
+        raise ValueError('Invalid targeted candidate input count')
+    inputs=[];total=0
+    for _ in range(ni):
+        fields=unpack('<23I' if version>=11 else '<22I')
+        names=('draw','slot','kind','view_dimension','format','width','height','source_width','source_height',
+               'source_mip_levels','source_array_size','mip','requested_mip','mip_levels','requested_mip_levels','first_slice',
+               'slices','first_element','elements','stride','row_bytes','rows','bytes')
+        if version<11:
+            fields=fields[:12]+(fields[12],)+fields[13:]
+            names=names[:12]+names[13:]
+        item=dict(zip(names,fields))
+        if version>=14:
+            item['source_resource'],item['source_view']=unpack('<2Q')
+            if not item['source_resource'] or not item['source_view']:
+                raise ValueError('Missing targeted PS source identity')
+        if version>=15:
+            item['sample_mode'],item['source_format']=unpack('<2I')
+            if item['sample_mode'] not in (0,1,2):
+                raise ValueError('Invalid targeted texture sample mode')
+        ui_family=(draws[item['draw']]['vs'],draws[item['draw']]['ps'])==(0xB10B032BDFD46700,0xDB899F4BD577F2E5) if item['draw'] in seen else False
+        optic_family=(draws[item['draw']]['vs'],draws[item['draw']]['ps'])==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5) if item['draw'] in seen else False
+        if (item['draw'] not in seen or not (ui_family or optic_family) or item['slot'] not in ((0,1,2,3) if ui_family else (1,2,3)) or
+                item['kind'] not in (0,1) or item['bytes']>max_input_bytes):
+            raise ValueError('Invalid targeted PS input descriptor')
+        expected=item['bytes']
+        total+=expected
+        if total>max_input_bytes:
+            raise ValueError('Targeted input budget exceeded')
+        if item['kind']==0:
+            if item['view_dimension'] not in (1,11):
+                raise ValueError('Invalid targeted buffer view')
+            size,=unpack('<I')
+            if size not in (0,expected):
+                raise ValueError('Invalid targeted buffer payload')
+            item['data']=take(size)
+        else:
+            if item['view_dimension'] not in (4,5):
+                raise ValueError('Invalid targeted texture view')
+            if (not item['width'] or not item['height'] or not item['source_width'] or not item['source_height'] or
+                    not item['source_mip_levels'] or not item['source_array_size'] or not item['slices'] or
+                    not item['mip_levels'] or item['mip_levels']>item['requested_mip_levels'] or
+                    item['mip']<item.get('requested_mip',item['mip']) or
+                    item.get('requested_mip',item['mip'])+item['requested_mip_levels']>item['source_mip_levels'] or
+                    item['mip']+item['mip_levels']>item['source_mip_levels'] or
+                    item['first_slice']+item['slices']>item['source_array_size'] or
+                    (item.get('sample_mode',0)!=2 and (item['width']!=max(1,item['source_width']>>item['mip']) or
+                     item['height']!=max(1,item['source_height']>>item['mip'])))):
+                raise ValueError('Invalid targeted texture dimensions')
+            if item.get('sample_mode',0)==1 and (version<15 or max(item['width'],item['height'])>384):
+                raise ValueError('Invalid whole-image mip sample descriptor')
+            ui_texture_slot=2 if optic_family else 0
+            if item.get('sample_mode',0)==2 and (version<15 or item['slot']!=ui_texture_slot or item['source_format'] not in (28,29) or
+                    item['format']!=28 or item['width']!=384 or item['height']!=384 or item['mip']!=item['requested_mip']):
+                raise ValueError('Invalid full-image point sample descriptor')
+            if item.get('sample_mode',0)==2:
+                item['sample_mapping']='full-image-center-point'
+                item['sample_color_semantics']='srgb-decoded-linear-unorm8' if item['source_format']==29 else 'linear-unorm8'
+            elif item.get('sample_mode',0)==1:
+                item['sample_mapping']='whole-image-source-mip'
+                item['sample_color_semantics']='source-format-preserved'
+            else:
+                item['sample_mapping']='source-mip-chain'
+                item['sample_color_semantics']='source-format-preserved'
+            subresources=[];actual=0
+            for mip in range(item['mip_levels']):
+                w=max(1,item['width']>>mip);h=max(1,item['height']>>mip)
+                row_bytes,rows=_candidate_texture_layout(item['format'],w,h)
+                if not row_bytes:
+                    raise ValueError('Unsupported targeted texture format')
+                for _ in range(item['slices']):
+                    size,=unpack('<I');sub_bytes=row_bytes*rows
+                    if size not in (0,sub_bytes):
+                        raise ValueError('Invalid targeted texture mip payload')
+                    subresources.append(take(size));actual+=sub_bytes
+            if actual!=expected or item['row_bytes']*item['rows']>expected:
+                raise ValueError('Targeted texture byte count mismatch')
+            item['data_subresources']=subresources
+        inputs.append(item)
+    refusals=[]
+    if version>=11:
+        refusal_count,=unpack('<I')
+        if refusal_count>(4608 if version>=15 else 96):
+            raise ValueError('Invalid targeted PS input refusal count')
+        for _ in range(refusal_count):
+            fields=unpack('<14I')
+            names=('draw','slot','kind','view_dimension','format','source_width','source_height','source_mip_levels',
+                   'source_array_size','requested_mip','requested_mip_levels','first_slice','slices','reason')
+            item=dict(zip(names,fields))
+            if version>=14:
+                item['source_resource'],item['source_view']=unpack('<2Q')
+                if not item['source_resource'] or not item['source_view']:
+                    raise ValueError('Missing refused PS source identity')
+            family=(draws[item['draw']]['vs'],draws[item['draw']]['ps']) if item['draw'] in seen else None
+            if (item['draw'] not in seen or family not in ((0x025B4B9FF54622ED,0x46F92DC71BF8DFA5),(0xB10B032BDFD46700,0xDB899F4BD577F2E5)) or
+                    item['slot'] not in ((1,2,3) if family==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5) else (0,1,2,3)) or
+                    item['kind']!=1 or item['reason'] not in (1,2,3,4) or item['view_dimension'] not in (4,5) or
+                    not item['source_width'] or not item['source_height'] or not item['source_mip_levels'] or
+                    not item['source_array_size'] or not item['requested_mip_levels'] or not item['slices'] or
+                    item['requested_mip']+item['requested_mip_levels']>item['source_mip_levels'] or
+                    item['first_slice']+item['slices']>item['source_array_size']):
+                raise ValueError('Invalid targeted PS input refusal descriptor')
+            refusals.append(item)
+    sampler_count,=unpack('<I')
+    if sampler_count>(1152 if version>=15 else 384):
+        raise ValueError('Invalid targeted sampler count')
+    samplers=[]
+    for _ in range(sampler_count):
+        draw,present=unpack('<2I');size,=unpack('<I')
+        if draw not in seen or (draws[draw]['vs'],draws[draw]['ps']) not in ((0x025B4B9FF54622ED,0x46F92DC71BF8DFA5),(0xB10B032BDFD46700,0xDB899F4BD577F2E5)) or present>1 or size!=52:
+            raise ValueError('Invalid targeted sampler descriptor')
+        samplers.append(dict(draw=draw,present=present,descriptor=take(size)))
+    optic_rows=[f for f in frames if (draws[f['draw']]['vs'],draws[f['draw']]['ps'])==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5)]
+    roi_rows=[f for f in frames if (draws[f['draw']]['vs'],draws[f['draw']]['ps'])==
+        (0x025B4B9FF54622ED,0x46F92DC71BF8DFA5) or
+        (version>=14 and (draws[f['draw']]['vs'],draws[f['draw']]['ps'])==
+         (0xB10B032BDFD46700,0xDB899F4BD577F2E5))]
+    if optic_draws!=len(optic_rows):
+        raise ValueError('Targeted optic draw count mismatch')
+    index_missing=0
+    for frame in optic_rows:
+        try:
+            frame['index_status']=_validate_candidate_indices(draws[frame['draw']])
+        except ValueError as exc:
+            # One incomplete candidate must remain inspectable alongside
+            # successful captures from the same run.
+            frame['index_status']='invalid: '+str(exc)
+        index_missing+=frame['index_status']!='validated'
+    roi_bytes=0
+    roi_payload_missing=0
+    for frame in roi_rows:
+        if not frame['roi_captured']:
+            continue
+        roi=[e for e in effect_images if e['draw']==frame['draw'] and e['after']<=1]
+        if len(roi)!=2 or {e['after'] for e in roi}!={0,1} or sum(e['width']*e['height']*({10:8,26:4,28:4,29:4}.get(e['format'],0)) for e in roi)>8*1024*1024:
+            raise ValueError('Invalid targeted before/after ROI pair')
+        for e in roi:
+            if (e['width']>512 or e['height']>512 or e['x']!=(e['source_width']-e['width'])//2 or
+                    e['y']!=(e['source_height']-e['height'])//2):
+                raise ValueError('Targeted ROI is not centered or exceeds its bound')
+            roi_bytes+=e['width']*e['height']*({10:8,26:4,28:4,29:4}.get(e['format'],0))
+        if frame['roi_complete'] and not next(e for e in roi if e['after']==1)['data']:
+            roi_payload_missing+=1
+    matched_roi=[e for e in effect_images if e['after']<=1 and (
+        (draws[e['draw']]['vs'],draws[e['draw']]['ps'])==(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5) or
+        (version>=14 and (draws[e['draw']]['vs'],draws[e['draw']]['ps'])==
+         (0xB10B032BDFD46700,0xDB899F4BD577F2E5)))]
+    if any(e['draw'] not in {f['draw'] for f in roi_rows if f['roi_captured']} for e in matched_roi) or roi_bytes>8*1024*1024:
+        raise ValueError('Unassociated targeted ROI image or budget exceeded')
+    if roi_draw!=0xffffffff and not any(f['draw']==roi_draw and f['roi_captured'] for f in optic_rows):
+        raise ValueError('Targeted ROI summary draw missing from candidate ledger')
+    if version>=15 and total!=input_bytes:
+        raise ValueError('Targeted input payload descriptors disagree with the header byte total')
+    ui_coverage=[dict(index=i,eye=e if e<2 else None,domain='unknown_eye' if e==2 else 'eye',
+                      candidate_count=ui_counts[i*3+e],refused_count=ui_dropped[i*3+e],
+                      status=('refused' if ui_dropped[i*3+e] else 'observed' if ui_counts[i*3+e] else 'not_observed'))
+                 for i in range(16) for e in range(3)] if version>=13 else []
+    return dict(dropped=dropped,missing_render_frame=missing,outside_frame_window=outside,
+                input_declined=input_declined,mip_declined=mip_declined,input_bytes=input_bytes,optic_draws=optic_draws,
+                roi_incomplete=roi_incomplete,roi_payload_missing=roi_payload_missing,index_missing=index_missing,
+                roi_draw=roi_draw,frames=frames,inputs=inputs,refusals=refusals,samplers=samplers,ui_coverage=ui_coverage,
+                ui_image_bytes=ui_image_bytes)
+
+
+def _candidate_texture_layout(fmt,width,height):
+    bpp={61:1,65:1,49:2,54:2,56:2,28:4,29:4,87:4,91:4,34:4,35:4,41:4,24:4,26:4,10:8,11:8,16:8,2:16}.get(fmt)
+    if bpp:
+        return width*bpp,height
+    if fmt in (71,72,80):
+        return ((width+3)//4)*8,(height+3)//4
+    if fmt in (74,75,77,78,83,95,98,99):
+        return ((width+3)//4)*16,(height+3)//4
+    return 0,0
+
+
+def _validate_candidate_indices(draw):
+    index=draw['streams'][2]
+    if draw['kind'] not in (ord('X'),ord('I')) or index['stride'] not in (2,4) or draw['count']<1:
+        raise ValueError('Targeted optic draw has no bounded indexed window')
+    index_begin=index['offset']+draw['start']*index['stride']-index['capture_offset']
+    needed=draw['count']*index['stride']
+    if index_begin<0 or index_begin+needed>len(index['data']):
+        if not index['data']:
+            return 'index_readback_missing'
+        raise ValueError('Targeted optic index window does not cover the draw range')
+    if not index['data']:
+        return 'index_readback_missing'
+    code='H' if index['stride']==2 else 'I'
+    indices=struct.unpack('<'+code*draw['count'],index['data'][index_begin:index_begin+needed])
+    per_vertex=[e for e in draw['layout'] if e['classification']==0]
+    if not per_vertex:
+        return 'vertex_layout_missing'
+    missing=False
+    for element in per_vertex:
+        stream=draw['streams'][element['slot']]
+        if not stream['data'] or not stream['stride']:
+            missing=True;continue
+        element_bytes={2:16,3:16,6:12,10:8,16:8,17:8,24:4,28:4,34:4,41:4,49:2,54:2,56:2}.get(element['format'])
+        if not element_bytes:
+            raise ValueError('Unsupported targeted optic vertex format')
+        for value in indices:
+            vertex=value+draw['base']
+            offset=stream['offset']+vertex*stream['stride']+element['offset']-stream['capture_offset']
+            if vertex<0 or offset<0 or offset+element_bytes>len(stream['data']):
+                raise ValueError('Targeted optic index escapes retained vertex window')
+    return 'vertex_readback_missing' if missing else 'validated'
 
 
 def empty_geometry():
@@ -508,7 +1186,7 @@ def verify_fixture(capture):
 
 
 def verify_sprite_fixture(capture):
-    assert capture['version'] == 9 and capture['failures'] == 0
+    assert capture['version'] == 15 and capture['failures'] == 0
     assert len(capture['sprite_diagnostics']) == 1 and capture['sprite_declined'] >= 2
     d = capture['sprite_diagnostics'][0]
     assert d['draw'] == 2 and (d['width'], d['height']) == (1400, 1400)
@@ -526,7 +1204,229 @@ def verify_sprite_fixture(capture):
     assert d['ps_b1_data'] == struct.pack('<f', 31.0) * 48
 
 
+def verify_candidate_fixture(capture):
+    c=capture['candidates']
+    assert capture['version']==15 and capture['failures']==0
+    assert c['optic_draws']==1 and len(c['frames'])==1
+    frame=c['frames'][0]
+    assert (frame['draw'],frame['ledger_frame'],frame['render_frame'],frame['eye'])==(0,101,501,1)
+    assert (frame['issued'],frame['roi_captured'],frame['roi_complete'],frame['index_status'])==(1,1,1,'validated')
+    assert len(c['inputs'])==1 and c['inputs'][0]['slot']==1 and c['inputs'][0]['data']==bytes([0x5a])*96
+    assert len(c['samplers'])==1 and c['samplers'][0]['present']==1 and len(c['samplers'][0]['descriptor'])==52
+    roi=[e for e in capture['effect_images'] if e['draw']==0 and e['after']<=1]
+    assert len(roi)==2 and {e['after'] for e in roi}=={0,1}
+    assert all((e['x'],e['y'],e['width'],e['height'],e['source_width'],e['source_height'])==(0,0,512,512,512,512) for e in roi)
+    assert len(roi[0]['data'])==len(roi[1]['data'])==512*512*4 and roi[0]['data']!=roi[1]['data']
+
+
+def verify_candidate_capacity_fixture(capture):
+    c=capture['candidates']
+    assert capture['version']==15 and len(capture['draws'])==1152 and c['dropped']==0
+    assert len(c['frames'])==1152 and c['optic_draws']==0
+    assert sum(row['candidate_count'] for row in c['ui_coverage'])==768
+    assert all(row['candidate_count']==16 and row['refused_count']==0 for row in c['ui_coverage'])
+    ui_vs=0xB10B032BDFD46700;ui_ps=0xDB899F4BD577F2E5
+    assert sum((capture['draws'][row['draw']]['vs'],capture['draws'][row['draw']]['ps'])==(ui_vs,ui_ps) for row in c['frames'])==768
+
+
+def candidate_body_payload_available(draw,buffers):
+    refs=draw.get('mesh',[])[:3]
+    return len(refs)==3 and all(isinstance(ref,int) and 0<=ref<len(buffers) and buffers[ref].get('readback_status')==1 and bool(buffers[ref].get('data')) for ref in refs)
+
+
+def menu_self_test():
+    import copy
+    c=dict(version=16,draws=[],mesh_buffers=[],candidates=dict(frames=[]))
+    meta=dict(schema='edvr_late_menu_v1',binary='menu.bin',binary_written=True,selected_frame=11,
+              mesh_limit=128*1024*1024,vertex_limit=8*1024*1024,eyes=[],rows=[])
+    for e in (0,1,-1):
+        family=dict(anchor_seen=0,siblings_seen=0,anchor_kept=0,siblings_kept=0,anchor_quota=0,siblings_quota=0)
+        meta['eyes'].append(dict(eye=e,scene_before_menu=False,mesh_bytes=0,vertex_bytes=0,families=[copy.copy(family),copy.copy(family)]))
+    for eye in (0,1):
+        c['draws'].append(dict(frame=11,ordinal=eye,vs=0x5DAD41AA66757CE3,eye=eye,count=6,kind=ord('I'),start=0,base=0,
+                               buffers=[dict(identity=0,data=b'') for _ in range(3)],layout=[],
+                               streams=[dict(data=b'',stride=0) for _ in range(3)],mesh_status=[0,0,0,0],mesh=[0xffffffff]*4))
+        c['candidates']['frames'].append(dict(draw=eye,issued=2))
+        meta['rows'].append(dict(draw=eye,role=1,constants=[dict(identity='0'*16,first=0,count=0,range_known=1) for _ in range(3)],
+            streams=['0'*16]*3,ps_inputs=[dict(slot=i,view='0'*16,resource='0'*16,descriptor=[0]*6) for i in range(16)]))
+        meta['eyes'][eye]['families'][0].update(siblings_seen=1,siblings_kept=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        path=Path(tmp)/'menu.json'
+        def check(value,capture=c):
+            path.write_text(json.dumps(value),encoding='utf-8');return read_menu(path,copy.deepcopy(capture))
+        parsed=check(meta)['late_menu']
+        assert parsed['anchor_status']=='absent_or_one_eye' and all(e['anchor_status']=='absent' for e in parsed['eyes'])
+        assert parsed['rows'][0]['outcome']=='unavailable' and parsed['rows'][0]['constants'][0]['status']=='absent'
+        bad=[]
+        x=copy.deepcopy(meta);x['eyes'][0]['families'][0]['anchor_kept']=1;bad.append(x)
+        x=copy.deepcopy(meta);x['eyes'][0]['scene_before_menu']=True;bad.append(x)
+        x=copy.deepcopy(meta);x['binary']='../escape.bin';bad.append(x)
+        x=copy.deepcopy(meta);x['rows'][0]['constants'][0]['identity']='1'*16;bad.append(x)
+        x=copy.deepcopy(meta);x['eyes'][0]['mesh_bytes']=57*1024*1024;bad.append(x)
+        for x in bad:
+            try:check(x)
+            except ValueError:pass
+            else:raise AssertionError('Malformed menu metadata accepted')
+        try:check(meta,dict(c,version=15))
+        except ValueError:pass
+        else:raise AssertionError('Old binary mislabeled as menu evidence')
+
+
 def self_test():
+    surface=dict(schema='edvr_menu_surface_v1',selected_frame=10,getter_calls=0,gpu_draw_owner_proven=False,
+                 association='shared_model_pick_pair_construction_not_actual_GPU_draw_identity',max_owners=4,max_triangles=255,
+                 max_vertices=256,max_map_nodes=32,known_layout=True,expected_model_vtable=100,rows=[],callbacks=0,
+                 type_declined=0,non_menu=0,quota=0,duplicate=0,crossed_frame=0,layout_declined=0,contended=0)
+    assert validate_menu_surface(None,10)['status']=='not_captured'
+    assert validate_menu_surface(surface,10)['status']=='no_owner_callbacks'
+    surface['known_layout']=False
+    assert validate_menu_surface(surface,10)['status']=='unknown_layout'
+    surface['known_layout']=True;surface['callbacks']=1;surface['layout_declined']=1
+    assert validate_menu_surface(surface,10)['status']=='callbacks_without_accepted_owner'
+    for field,value in [('selected_frame',11),('getter_calls',1),('gpu_draw_owner_proven',True),('max_owners',5),('max_map_nodes',33)]:
+        bad=dict(surface);bad[field]=value
+        try:validate_menu_surface(bad,10)
+        except ValueError:pass
+        else:raise AssertionError('Malformed menu surface header accepted: '+field)
+    menu_self_test()
+    available=[dict(readback_status=1,data=b'x') for _ in range(3)]
+    assert candidate_body_payload_available(dict(mesh=[0,1,2]),available)
+    available[1]=dict(readback_status=2,data=b'')
+    assert not candidate_body_payload_available(dict(mesh=[0,1,2]),available), 'Staging admission incorrectly reported a failed readback as available'
+    available[1]=dict(readback_status=1,data=b'')
+    assert not candidate_body_payload_available(dict(mesh=[0,1,2]),available), 'Empty retained palette incorrectly reported as available'
+    def candidate_reader(blob, draws=None, effects=None, version=11):
+        stream=io.BytesIO(blob)
+        def take(n):
+            value=stream.read(n)
+            if len(value)!=n:raise ValueError('Truncated draw snapshot')
+            return value
+        def unpack(fmt):return struct.unpack(fmt,take(struct.calcsize(fmt)))
+        return read_candidates(unpack,take,draws or [],effects or [],version)
+    empty_candidate=struct.pack('<8I',0,0,0,0,0,0,0,0)+struct.pack('<I',0xffffffff)+struct.pack('<I',0)+struct.pack('<3I',0,0,0)
+    assert candidate_reader(empty_candidate)['frames']==[]
+    try:
+        malformed_candidate=struct.pack('<8I',0,0,0,0,0,0,1,0)+struct.pack('<I',0xffffffff)+struct.pack('<3I',0,0,0)
+        candidate_reader(malformed_candidate)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Optic draw count without candidate rows accepted')
+    # F83 v14's centered B10 ROI and length-prefixed issued-state blobs.
+    ui_vs,ui_ps=0xB10B032BDFD46700,0xDB899F4BD577F2E5
+    ui_draw=dict(frame=18192,vs=ui_vs,ps=ui_ps,kind=ord('I'),count=2,start=3,base=4,layout=[],
+                 streams=[{},dict(offset=0,stride=48,capture_offset=0,data=bytes(96)),
+                          dict(offset=0,stride=2,capture_offset=0,data=struct.pack('<2H',0,1))])
+    viewport=struct.pack('<6f',0.25,0.5,512,512,0,1)
+    scissor=struct.pack('<4i',0,0,512,512)
+    b0=bytes(range(16))
+    def ui_candidate(viewport_size=24,scissor_size=16):
+        out=struct.pack('<9I',0,0,0,0,0,0,0,0,0xffffffff)
+        out+=struct.pack('<48I',*([0]*48))+struct.pack('<48I',*([0]*48))
+        out+=struct.pack('<I',1)+struct.pack('<3I',0,18192,501)+struct.pack('<i3I',1,1,1,1)
+        out+=struct.pack('<I4Q6I',2,ui_vs,ui_ps,0x44,0x101,512,512,26,0,1,1)
+        out+=struct.pack('<I',0)+struct.pack('<2I',1,1)
+        out+=struct.pack('<I',viewport_size)+viewport+struct.pack('<I',scissor_size)+scissor
+        out+=struct.pack('<2I',len(b0),len(b0))+b0
+        out+=struct.pack('<I',0)+struct.pack('<I',0)+struct.pack('<I',0)
+        return out
+    roi=[dict(draw=0,after=phase,x=255,y=255,width=2,height=2,source_width=512,source_height=512,
+              format=26,size=16,data=bytes([phase+1])*16) for phase in (0,1)]
+    parsed=candidate_reader(ui_candidate(),[ui_draw],roi,14)
+    assert parsed['frames'][0]['issue']['viewports']==viewport and parsed['frames'][0]['issue']['scissors']==scissor
+    assert parsed['frames'][0]['issue']['b0']==b0 and parsed['frames'][0]['issue']['b0_payload_status']=='available'
+    assert parsed['roi_payload_missing']==0
+    for bad in (ui_candidate(viewport_size=23),ui_candidate(scissor_size=15)):
+        try:
+            candidate_reader(bad,[ui_draw],roi,14)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Mismatched issued-state blob length accepted')
+    off_center=[dict(roi[0],x=254),roi[1]]
+    try:
+        candidate_reader(ui_candidate(),[ui_draw],off_center,14)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Off-center B10 ROI accepted')
+    def ui_candidate_v15():
+        vsps=((ui_vs,ui_ps,0),(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5,1))
+        out=struct.pack('<9I',0,0,0,0,0,1179648,1,0,0xffffffff)
+        out+=struct.pack('<48I',*([0]*48))+struct.pack('<48I',*([0]*48))
+        out+=struct.pack('<16I',589824,589824,*([0]*14))+struct.pack('<I',2)
+        frames=[];draws=[];inputs=[];samplers=[]
+        for i,(vs,ps,camera_slot) in enumerate(vsps):
+            frame_no=18192+i;target=0x101+i;camera_id=0x44+i
+            draws.append(dict(frame=frame_no,vs=vs,ps=ps,kind=ord('I'),count=2,start=0,base=0,layout=[],
+                              streams=[{}, {}, dict(offset=0,stride=2,capture_offset=0,data=struct.pack('<2H',0,1))]))
+            frames.append(struct.pack('<3I',i,frame_no,501+i)+struct.pack('<i3I',i,1,0,0))
+            cb=bytes(16 if camera_slot==0 else 276*16)
+            frames.append(struct.pack('<I4Q6I',2,vs,ps,camera_id,target,512,512,26,0,276 if camera_slot else 1,1))
+            frames.append(struct.pack('<I',camera_slot)+struct.pack('<I',20)+bytes(20)+struct.pack('<2I',1,1))
+            frames.append(struct.pack('<I',24)+viewport+struct.pack('<I',16)+scissor)
+            frames.append(struct.pack('<2I',len(cb),len(cb))+cb)
+            slot=2 if camera_slot else 0
+            source_format=29
+            fields=(i,slot,1,4,28,384,384,1024,768,1,1,0,0,1,1,0,1,0,0,0,1536,384,589824)
+            inputs.append(struct.pack('<23I',*fields)+struct.pack('<2Q2I',0x400+i,0x500+i,2,source_format))
+            inputs.append(struct.pack('<I',589824)+bytes(589824))
+            samplers.append(struct.pack('<2I',i,1)+struct.pack('<I',52)+bytes(52))
+        out+=b''.join(frames)+struct.pack('<I',2)+b''.join(inputs)+struct.pack('<I',0)
+        out+=struct.pack('<I',2)+b''.join(samplers)
+        parsed=candidate_reader(out,draws,[],15)
+        assert [f['issue']['camera_cb_slot'] for f in parsed['frames']]==[0,1]
+        assert parsed['frames'][1]['issue']['b0_status']=='unused' and parsed['frames'][1]['issue']['camera_cb_status']=='available'
+        assert [x['slot'] for x in parsed['inputs']]==[0,2]
+        assert all(x['sample_mapping']=='full-image-center-point' for x in parsed['inputs'])
+        assert all(x['sample_color_semantics']=='srgb-decoded-linear-unorm8' for x in parsed['inputs'])
+        assert parsed['input_bytes']==1179648 and parsed['ui_image_bytes'][:2]==(589824,589824)
+        return out,draws
+    good_v15,v15_draws=ui_candidate_v15()
+    for bad_v15 in (good_v15[:-1],good_v15.replace(struct.pack('<I',16)+scissor,struct.pack('<I',15)+scissor,1)):
+        try:
+            candidate_reader(bad_v15,v15_draws,[],15)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Malformed v15 full-source UI trace accepted')
+    def runtime_ui_snapshot(x=255,version=14):
+        pair=b''.join(struct.pack('<10I',0,phase,x,255,2,2,512,512,26,16)+bytes([phase+1])*16
+                      for phase in (0,1))
+        draw=struct.pack('<3Q6I',ui_vs,ui_ps,0x101,18192,7,ord('I'),2,1,0)
+        draw+=struct.pack('<3I',501,1,0)+struct.pack('<9I',*([0]*9))+struct.pack('<6H',*([0]*6))
+        draw+=struct.pack('<4Q2I',0,0,0,0,0,0)+struct.pack('<3I',512,512,0xffffffff)
+        draw+=struct.pack('<QII',0,0,0)*4
+        draw+=struct.pack('<Ii',3,4)+struct.pack('<5I',0,0,0,0,0)*3
+        draw+=struct.pack('<IQQIII',0xffffffff,0,0,0,0,0)*4+struct.pack('<I',0)
+        body=draw+struct.pack('<2I',0,0)+struct.pack('<5I',0,0,0,0,0)
+        body+=struct.pack('<2I',2,0)+pair+struct.pack('<I',0)+struct.pack('<2I',0,0)
+        body+=struct.pack('<4I',0,0,0,0)+struct.pack('<I',0)+struct.pack('<I',0)
+        return b'EDVRDRW1'+struct.pack('<4I',version,1,0,0)+body+ui_candidate()+struct.pack('<I',0)
+    optic_fixture=dict(kind=ord('I'),count=2,start=3,base=4,layout=[
+        dict(classification=0,slot=1,format=3,offset=0),dict(classification=0,slot=1,format=17,offset=16)],
+        streams=[{},dict(offset=16,stride=48,capture_offset=208,data=bytes(144)),
+                 dict(offset=8,stride=2,capture_offset=14,data=struct.pack('<2H',0,2))])
+    assert _validate_candidate_indices(optic_fixture)=='validated', 'Packed optic formats and shifted capture windows'
+    large_base=2_955_444
+    optic_fixture['base']=large_base
+    optic_fixture['streams'][1].update(offset=16,stride=40,capture_offset=16+large_base*40,data=bytes(256*1024))
+    optic_fixture['streams'][2].update(offset=8,stride=2,capture_offset=14,data=struct.pack('<2H',0,2))
+    assert _validate_candidate_indices(optic_fixture)=='validated', 'Large indexed base vertex is covered by the retained window'
+    optic_fixture['base']=-1
+    try:
+        _validate_candidate_indices(optic_fixture)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Negative base vertex escaping the binding origin accepted')
+    optic_fixture['streams'][1]['capture_offset']=400
+    try:
+        _validate_candidate_indices(optic_fixture)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Index outside retained vertex window accepted')
     head = b'EDVRDRW1' + struct.pack('<4I', 1, 0, 0, 0)
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)/'sample.bin'
@@ -667,6 +1567,18 @@ def self_test():
             assert packed_float_channel(15 << bits,bits) == 255
             assert packed_float_channel(14 << bits,bits) == 128
             assert packed_float_channel((31 << bits)+1,bits) == 0
+        p.write_bytes(runtime_ui_snapshot())
+        runtime_capture=read(p)
+        assert runtime_capture['version']==14 and runtime_capture['candidates']['frames'][0]['issue']['b0']==b0
+        assert len(runtime_capture['effect_images'])==2 and runtime_capture['effect_images'][0]['x']==255
+        for bad in (runtime_ui_snapshot(x=254),runtime_ui_snapshot(version=13)):
+            p.write_bytes(bad)
+            try:
+                read(p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Invalid or version-incompatible B10 ROI accepted by top-level reader')
     print('eye draw snapshot self-test passed')
 
 
@@ -684,44 +1596,134 @@ def main():
         return
     if not a.path:
         ap.error('Name a drawstate capture')
-    c = read(a.path)
+    c = read_menu(a.path) if Path(a.path).suffix.lower()=='.json' else read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
         sprite_path = Path(str(a.path) + '.sprite')
         assert sprite_path.exists(), 'sprite diagnostic fixture is required'
         verify_sprite_fixture(read(sprite_path))
+        candidate_path=Path(str(a.path)+'.candidate')
+        assert candidate_path.exists(),'nonempty targeted-candidate fixture is required'
+        verify_candidate_fixture(read(candidate_path))
+        capacity_path=Path(str(a.path)+'.capacity')
+        assert capacity_path.exists(),'full-window targeted-candidate fixture is required'
+        verify_candidate_capacity_fixture(read(capacity_path))
+        menu=read_menu(str(a.path)+'.menu.json')
+        assert len(menu['draws'])==8 and menu['late_menu']['anchor_status']=='both_eyes'
+        assert [r['outcome'] for r in menu['late_menu']['rows']]==['issued','skipped','issued','issued']*2
+        assert all(e['scene_status']=='present_before_menu' for e in menu['late_menu']['eyes'][:2])
+        assert menu['late_menu']['rows'][1]['constants'][1]['payload_origin_bytes']==256
+        avatar=menu['late_menu']['rows'][1]['avatar']
+        assert avatar['source_status']=='cached_not_exact' and not avatar['sources_exact'] and not avatar['pin_targets_available']
+        assert avatar['qpc_age_ms']==100 and avatar['root_qpc_age_ms']==200
+        assert menu['late_menu']['input_summary']['branches']=={'2d_window':1}
+        assert menu['late_menu']['input_summary']['in_flight_at_close']==1
+        surface=menu['late_menu']['input_summary']['surface_evidence']
+        assert surface['status']=='captured' and surface['copied_meshes']==2 and surface['typed_models']==2
+        assert not surface['gpu_draw_owner_proven'] and surface['incomplete_maps']==0
+        authored=menu['late_menu']['input_observer']['surface_evidence']
+        assert [p['resource_key'] for p in authored['rows'][0]['pairs']]==[10,30]
+        assert authored['rows'][0]['render_frame']==901 and authored['rows'][0]['placement_render_frame']==900
+        assert authored['rows'][0]['pre_rebuild_count_read'] and authored['rows'][0]['pre_rebuild_triangle_count']==0
+        assert authored['rows'][0]['pre_rebuild_count_status']=='read_before_pick_rebuild'
+        import copy
+        older=copy.deepcopy(authored);older['rows'][0].pop('pre_rebuild_count_read');older['rows'][0].pop('pre_rebuild_triangle_count')
+        assert validate_menu_surface(older,801)['status']=='captured'
+        assert older['rows'][0]['pre_rebuild_count_status']=='not_recorded_in_earlier_capture'
+        unavailable=copy.deepcopy(authored);unavailable['rows'][0]['pre_rebuild_count_read']=False
+        assert validate_menu_surface(unavailable,801)['status']=='captured'
+        assert unavailable['rows'][0]['pre_rebuild_count_status']=='unavailable_before_pick_rebuild'
+        for mutation in ('incomplete_key','wrong_type','bad_index','unavailable_payload','wrong_frame','bad_callback_count'):
+            bad=copy.deepcopy(authored);row=bad['rows'][0];pair=row['pairs'][0]
+            if mutation=='incomplete_key':row['map_status']=5
+            elif mutation=='wrong_type':pair['model_vtable']+=1
+            elif mutation=='bad_index':pair['mesh']['indices'][0]=255
+            elif mutation=='unavailable_payload':pair['mesh']['status']=2
+            elif mutation=='bad_callback_count':row['pre_rebuild_count_read']=False;row['pre_rebuild_triangle_count']=2
+            else:row['ledger_frame']+=1
+            try:validate_menu_surface(bad,801)
+            except ValueError:pass
+            else:raise AssertionError('Invalid authored surface accepted: '+mutation)
+        invalidated=copy.deepcopy(authored);invalidated['rows'][0]['status']=3
+        assert validate_menu_surface(invalidated,801)['copied_meshes']==0
+        nonfinite=copy.deepcopy(authored);nonfinite['rows'][0]['pairs'][0]['mesh']['vertices'][2]=None
+        assert validate_menu_surface(nonfinite,801)['finite_meshes']==1
+        assert menu['late_menu']['input_summary']['update_bridge']['status']=='observed' and menu['late_menu']['input_summary']['update_bridge']['updates']==1
+        assert menu['late_menu']['rows'][1]['input_bridge_summary']['same_ledger_frame_updates']==1
+        assert menu['late_menu']['rows'][1]['input_bridge_summary']['placements_after_draw_marker']==1
+        assert not menu['late_menu']['rows'][1]['input_bridge_summary']['gpu_owner_proven']
+        assert len(menu['late_menu']['input_observer']['meshes'][0]['triangles'])==120
+        assert menu['draws'][1]['buffers'][1]['data']==bytes([0x35])*4608
+        assert menu['draws'][1]['streams'][1]['data']==bytes([0xA7])*160
+        t33=[menu['mesh_buffers'][d['mesh'][0]]['data'] for d in menu['draws'] if d['mesh'][0]!=0xffffffff]
+        assert [z[0] for z in t33]==[0x47,0x48,0x49,0x4a,0x4b,0x4c], 'Menu structured copies were deduplicated across rewritten inputs'
+        t2=read(str(a.path)+'.t2')['candidates']['inputs']
+        assert len(t2)==2 and all((i['slot'],i['mip'],i['requested_mip'],i['mip_levels'],
+                                   i['requested_mip_levels'],i['source_array_size'],i['slices'])==(2,1,0,10,11,8,8) for i in t2)
+        assert t2[0]['bytes']==t2[1]['bytes'] and sum(i['bytes'] for i in t2)<=24*1024*1024
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 9 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 15 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
-            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
+            assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*4
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
             assert bool(d['streams'][0]['data']) == (i < 4) and bool(d['streams'][1]['data']) == (i < 4)
         mesh = read(str(a.path)+'.mesh')
         assert mesh['failures'] == mesh['mesh_declined'] == 0 and len(mesh['draws']) == 4 and len(mesh['mesh_buffers']) == 6
         for i,d in enumerate(mesh['draws']):
-            assert d['ordinal'] == 0xfffffffe and d['mesh'] == [i//2*3+j for j in range(3)]
-            for role,ref in enumerate(d['mesh']):
+            assert d['ordinal'] == 0xfffffffe and d['mesh'] == [i//2*3+j for j in range(3)]+[0xffffffff]
+            for role,ref in enumerate(d['mesh'][:3]):
                 b = mesh['mesh_buffers'][ref]
                 assert b['first_draw'] == i//2*2 and b['frame'] == 300+i//2
                 assert b['data'] == bytes([21+role*10+i//2])*b['whole'], 'Source buffer copied after reuse or truncated'
         assert mesh['mesh_buffers'][1]['whole'] > 1024*1024, 'High bone indices lost'
         eye_mesh = read(str(a.path)+'.eyemesh')
         assert eye_mesh['failures'] == eye_mesh['mesh_declined'] == eye_mesh['dropped'] == 0
-        assert len(eye_mesh['draws']) == 12 and len(eye_mesh['mesh_buffers']) == 18
+        assert len(eye_mesh['draws']) == 64 and len(eye_mesh['mesh_buffers']) == 128
+        assert eye_mesh['mesh_capture']['first_frame'] == 700 and eye_mesh['mesh_capture']['frames'] == 16
+        assert eye_mesh['mesh_capture']['declined'] == 2 and eye_mesh['mesh_capture']['snapshots'] == 32
+        assert eye_mesh['mesh_capture']['rejected_source_draws'] == 1
+        assert eye_mesh['mesh_capture']['missing_body_ledger_frames'] == []
         for i, d in enumerate(eye_mesh['draws']):
             group, draw = divmod(i, 2)
             frame, eye = divmod(group, 2)
-            assert d['frame'] == 700+frame and d['ordinal'] == eye*100+draw
+            assert d['frame'] == 700+frame and d['render_frame'] == 900+frame and d['eye'] == eye and d['ordinal'] == eye*100+draw
+            assert d['mesh_selected'] == 1
+            j=d['join']
+            assert (j['scene_frame'],j['epoch'],j['scheduled_index'],j['scheduled_render_frame'])==(1200+frame,44,draw,900+frame)
+            assert (j['fp_frame'],j['fp_sequence'],j['g_game_frame'],j['item_serial'],j['rig_generation'])==(d['frame'],7000+d['frame'],8000+d['frame'],eye+1,9)
+            assert j['arm_joints'] == (24,34,35,36,37,38)
+            assert (j['rig'],j['pose_qpc'],j['draw_qpc'],j['capture_sequence'],j['valid_flags'])==(0x12340000+eye,100000+d['frame'],200000+d['frame'],0,0xBF)
+            assert j['source_job_lookup_status'] == 1 and j['source_job_lookup'] == 'offline_t33_palette_base_join'
+            if draw==0:
+                assert d['mesh_status'] == [1,1,1,1] and d['mesh'] == [i//2*4+j for j in range(4)]
+            else:
+                assert d['mesh_status'] == [7,7,7,7] and d['mesh'] == [0xffffffff]*4
+            assert d['mesh_range'] == [(0,2),(0,24000),(0,32),(0,24000)]
+            assert d['mesh_role_names'][3] == 'other_palette_candidate' and d['other_palette_relation'] == 'unknown'
+            assert d['mesh_views'][0] and d['mesh_views'][1] and not d['mesh_views'][2] and not d['mesh_views'][3]
             assert len(d['layout']) == 1 and d['layout'][0]['semantic'] == 'POSITION'
             assert d['start'] == 150000 and d['base'] == 8000 and d['start_instance'] == 2+draw
             constants = struct.unpack('<48f', d['buffers'][0]['data'])
             assert all(v == (700+frame)*10+eye*2+draw for v in constants), 'Eye draw camera copied after reuse'
-            assert d['mesh'] == [group*3+j for j in range(3)]
-            for role, ref in enumerate(d['mesh']):
-                b = eye_mesh['mesh_buffers'][ref]
-                assert b['first_draw'] == group*2 and b['frame'] == d['frame']
-                assert b['data'] == bytes([51+group+role*10])*b['whole'], 'Eye pool copy came from the other eye/frame'
+            if draw==0:
+                for role, ref in enumerate(d['mesh']):
+                    b = eye_mesh['mesh_buffers'][ref]
+                    assert b['first_draw'] == i and b['frame'] == d['frame'] and b['identity'] == d['mesh_sources'][role] and b['readback_status'] == 1
+                    value=51+frame*2+eye+(30 if role==3 else role*10)
+                    assert b['data'] == bytes([value])*b['whole'], 'Selected body draw snapshot was not exact'
         assert len({d['target'] for d in eye_mesh['draws']}) == 2
+        body_candidates=read(str(a.path)+'.bodycandidates')
+        assert body_candidates['failures']==body_candidates['mesh_declined']==0
+        assert len(body_candidates['draws'])==5
+        assert len(body_candidates['mesh_capture']['missing_body_ledger_frames'])==16
+        assert all(c['status']=='draw_time_palettes_copied' and c['draw_time_palette_frames']==[951] and c['clip_constant_rows']==c['geometry_rows']==1 for c in body_candidates['mesh_capture']['candidate_coverage'])
+        assert body_candidates['draws'][0]['eye']==-1 and body_candidates['draws'][0]['mesh_status'][0]==10
+        assert {(d['count'],d['eye']) for d in body_candidates['draws'][1:]}=={(n,e) for n in (10050,3216) for e in (0,1)}
+        for d in body_candidates['draws'][1:]:
+            assert d['mesh_selection']=='observed_body_family_candidate_not_proven_part' and d['mesh_selected']==2
+            assert d['frame']==951 and d['mesh_status']==[1]*4 and all(x!=0xffffffff for x in d['mesh'])
+            assert len(d['buffers'][3]['data'])==192, 'Candidate clip PSb2 missing'
+            assert d['mesh'][2]!=0xffffffff and all(s['data'] for s in d['streams'][1:]), 'Candidate VB/IB geometry missing'
         # Version 9 geometry (the rig's armed frame 710): two meshes, two states, three map rows.
         geo = eye_mesh['geometry']
         assert geo['frame'] == 710 and len(geo['meshes']) == 2 and len(geo['states']) == 2 and geo['declined'] == 0
@@ -739,7 +1741,7 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 9 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 15 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
@@ -758,7 +1760,7 @@ def main():
                     path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
                     assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 9 and night['failures'] == 0 and len(night['draws']) == 3
+        assert night['version'] == 15 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E
@@ -793,11 +1795,22 @@ def main():
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],
+                          body_evidence=c['mesh_capture'],
                           source_buffers=len(c['mesh_buffers']), source_bytes=sum(b['size'] for b in c['mesh_buffers']), source_declined=c['mesh_declined'],
                           vertex_draws=sum(any(s['data'] for s in d['streams']) for d in c['draws']),
                           vertex_bytes=sum(len(s['data']) for d in c['draws'] for s in d['streams']),
                           effect_images=sum(e['after'] <= 1 for e in c['effect_images']), effect_image_declined=c['effect_image_declined'],
                           night_input_images=sum(e['after'] >= 2 for e in c['effect_images']), night_sampling=len(c['night_sampling']),
+                          candidate_evidence=dict(optic_draws=c['candidates']['optic_draws'],
+                              frames=[dict(draw=f['draw'],ledger_frame=f['ledger_frame'],render_frame=f['render_frame'],eye=f['eye'],
+                                           issued=f['issued'],roi_captured=f['roi_captured'],roi_complete=f['roi_complete'],index_status=f.get('index_status','not_requested'))
+                                      for f in c['candidates']['frames']],
+                              inputs=[{k:i[k] for k in ('draw','slot','kind','view_dimension','format','width','height','source_width','source_height',
+                                  'source_mip_levels','source_array_size','mip','requested_mip','mip_levels','requested_mip_levels',
+                                  'first_slice','slices','bytes')} for i in c['candidates']['inputs']],
+                              refusals=c['candidates']['refusals'],input_declined=c['candidates']['input_declined'],
+                              mip_declined=c['candidates']['mip_declined']),
+                          late_menu=({k:c['late_menu'][k] for k in ('selected_frame','anchor_status','eyes','camera_context','outcomes','eye_mappings','menu_geometry','avatar_sources','input_summary')} if 'late_menu' in c else None),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):

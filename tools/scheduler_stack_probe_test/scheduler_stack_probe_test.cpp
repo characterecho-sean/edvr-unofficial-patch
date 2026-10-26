@@ -63,7 +63,7 @@ void caseCaptureCollectsInRangeWithGaps() {
     uint64_t image[64]{};
     image[0] = kLo + 0x100;          // immediate caller (the stub)
     image[1] = 0xDEADBEEFull;        // local, not a return address
-    image[2] = kBase + 0x4321940ull; // scheduler candidate (.text, in range)
+    image[2] = kBase + 0x43245A0ull; // scheduler candidate (.text, in range)
     image[3] = 0x1234ull;
     image[4] = 0x1235ull;
     image[5] = kHi - 0x10;           // deepest frame
@@ -213,6 +213,108 @@ void caseNoteEntryOverflow() {
               "overflow: the surviving first signature still aggregates");
     }
 }
+
+// The scan's upper bound is build 334925's by default and moves with setScanHi:
+// an unknown build's hook sets it from that build's own executable section.
+void caseScanBound() {
+    SchedulerStackProbe p;
+    check(p.rangeHi_ == SchedulerStackProbe::kRangeHi, "scan bound: defaults to build 334925's");
+    seed(p);
+    uint64_t image[SchedulerStackProbe::kScanSlots]{};
+    image[0] = kBase + 0x2000; // past a rebuilt image's end below
+    image[1] = kBase + 0x1200;
+    const uintptr_t rsp = reinterpret_cast<uintptr_t>(&image[0]);
+    p.noteEntry(0, rsp);
+    p.setScanHi(0x1800);
+    check(p.rangeHi_ == 0x1800, "scan bound: setScanHi takes effect");
+    p.noteEntry(1, rsp);
+    std::lock_guard<std::mutex> lock(p.mutex_);
+    check(p.targets_[0].sigs[0].depth == 2, "scan bound: the default keeps both frames");
+    check(p.targets_[1].sigs[0].depth == 1 && p.targets_[1].sigs[0].stack[0] == image[1],
+          "scan bound: a lower bound drops the frame above it");
+}
+
+// A minimal AMD64 PE header block with only the fields executableEndRva reads.
+struct FakeSection { uint32_t va, vsize, chars; };
+void fakeHeaders(uint8_t* h, size_t len, uint32_t baseOfCode, uint32_t align, uint32_t imageSize,
+                 const FakeSection* secs, uint32_t count) {
+    std::memset(h, 0, len);
+    auto put = [&](size_t at, uint32_t v, size_t n) {
+        for (size_t i = 0; i < n; ++i) h[at + i] = uint8_t(v >> (8 * i));
+    };
+    const size_t nt = 0x80, opt = nt + 24, optSize = 240;
+    put(0, 0x5A4D, 2); put(0x3C, uint32_t(nt), 4);
+    put(nt, 0x4550, 4); put(nt + 4, 0x8664, 2); put(nt + 6, count, 2); put(nt + 20, uint32_t(optSize), 2);
+    put(opt, 0x20B, 2); put(opt + 20, baseOfCode, 4); put(opt + 32, align, 4); put(opt + 56, imageSize, 4);
+    for (uint32_t i = 0; i < count; ++i) {
+        const size_t at = opt + optSize + size_t(i) * 40;
+        put(at + 8, secs[i].vsize, 4); put(at + 12, secs[i].va, 4); put(at + 36, secs[i].chars, 4);
+    }
+}
+
+void caseExecutableEnd() {
+    constexpr uint32_t kExec = 0x60000020u, kData = 0x40000040u;
+    uint8_t h[4096];
+    // Build 334925's headers (read from the archived exe): .text at 0x1000 with a virtual size of 0x4DB498E, then
+    // .rdata at 0x4DB6000; the end rounds up to the section alignment, and is kRangeHi.
+    const FakeSection known[] = {{0x1000, 0x4DB498E, kExec}, {0x4DB6000, 0x10AF5EC, kData}};
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x640C000, known, 2);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == SchedulerStackProbe::kRangeHi,
+          "pe end: build 334925's headers give kRangeHi");
+    // Already a multiple of the alignment: no extra page.
+    const FakeSection exact[] = {{0x1000, 0x4DB5000, kExec}, {0x4DB6000, 0x1000, kData}};
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x640C000, exact, 2);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0x4DB6000,
+          "pe end: an exact multiple stays");
+    // A rebuilt, larger .text.
+    const FakeSection bigger[] = {{0x1000, 0x4F00001, kExec}, {0x4F02000, 0x1000, kData}};
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x6500000, bigger, 2);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0x4F02000,
+          "pe end: a larger .text rounds up");
+    // An earlier executable section that does not hold the code start is skipped.
+    const FakeSection two[] = {{0x1000, 0x800, kExec}, {0x2000, 0x3000, kExec}};
+    fakeHeaders(h, sizeof(h), 0x2000, 0x1000, 0x8000, two, 2);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0x5000,
+          "pe end: the section holding BaseOfCode");
+    // Refusals: not executable, no section holds the code start, the end past the image, a bad alignment.
+    const FakeSection data[] = {{0x1000, 0x2000, kData}};
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x8000, data, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: not executable -> 0");
+    const FakeSection text[] = {{0x1000, 0x2000, kExec}};
+    fakeHeaders(h, sizeof(h), 0x9000, 0x1000, 0x8000, text, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: no section holds the code start -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x2000, text, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: end past SizeOfImage -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0, 0x8000, text, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: zero alignment -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1800, 0x8000, text, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: non-power-of-two alignment -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x8000, text, 1);
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0x3000, "pe end: the plain case holds");
+    // Damaged headers.
+    check(SchedulerStackProbe::executableEndRva(nullptr, 0) == 0, "pe end: no buffer -> 0");
+    check(SchedulerStackProbe::executableEndRva(h, 0x20) == 0, "pe end: truncated before e_lfanew -> 0");
+    check(SchedulerStackProbe::executableEndRva(h, 0x120) == 0, "pe end: truncated section table -> 0");
+    h[0] = 'X';
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: bad MZ -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x8000, text, 1);
+    h[0x80] = 'Q';
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: bad PE signature -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x8000, text, 1);
+    h[0x80 + 4] = 0x4C; h[0x80 + 5] = 0x01; // i386
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: not AMD64 -> 0");
+    fakeHeaders(h, sizeof(h), 0x1000, 0x1000, 0x8000, text, 1);
+    h[0x80 + 6] = 97; // NumberOfSections
+    check(SchedulerStackProbe::executableEndRva(h, sizeof(h)) == 0, "pe end: 97 sections -> 0");
+}
+
+// The same parse on a real image: this test executable's own headers place this function inside its code section.
+void caseExecutableEndOfThisImage() {
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const uintptr_t end = SchedulerStackProbe::executableEndRva(base, 4096);
+    const uintptr_t here = reinterpret_cast<uintptr_t>(&caseExecutableEndOfThisImage) - reinterpret_cast<uintptr_t>(base);
+    check(end != 0 && here < end, "pe end: this image's own code lies below its executable end");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -229,6 +331,9 @@ int wmain(int argc, wchar_t** argv) {
     caseFnvGolden();
     caseNoteEntryAggregates();
     caseNoteEntryOverflow();
+    caseScanBound();
+    caseExecutableEnd();
+    caseExecutableEndOfThisImage();
     std::fprintf(stderr, "scheduler_stack_probe_test: %u checks, %u failures\n",
                  checks, failures);
     return failures ? 1 : 0;

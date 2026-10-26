@@ -82,6 +82,8 @@ constexpr uint32_t kFlatTraceDeferredHdrVerified = 1u << 14;
 constexpr uint32_t kFlatTraceDeferredInverseRepaired = 1u << 15;
 // A pool family's vertex shader left stock, drawn into the scene's depth (FlatRuntimeDraw::poolFamilyVs, section 104). Appended the same way.
 constexpr uint32_t kFlatTracePoolFamilyVs = 1u << 12;
+// The depth-of-field composite's verification (FlatRuntimeDraw::dofCompositeVerified). An appended bit, zero in every committed trace.
+constexpr uint32_t kFlatTraceDofCompositeVerified = 1u << 18;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -107,6 +109,7 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.firstPersonCohort ? kFlatTraceFirstPersonCohort : 0;
     e.flags |= d.alternateHdr ? kFlatTraceAlternateHdr : 0;
     e.flags |= d.poolFamilyVs ? kFlatTracePoolFamilyVs : 0;
+    e.flags |= d.dofCompositeVerified ? kFlatTraceDofCompositeVerified : 0;
     e.kind = kFlatTraceEventDraw;
     return e;
 }
@@ -150,6 +153,7 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.firstPersonCohort = (e.flags & kFlatTraceFirstPersonCohort) != 0;
     d.alternateHdr = (e.flags & kFlatTraceAlternateHdr) != 0;
     d.poolFamilyVs = (e.flags & kFlatTracePoolFamilyVs) != 0;
+    d.dofCompositeVerified = (e.flags & kFlatTraceDofCompositeVerified) != 0;
     d.instances = e.instances;
     return d;
 }

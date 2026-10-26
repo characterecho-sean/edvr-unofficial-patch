@@ -11,6 +11,7 @@
 # changes no stored content.
 *.cpp text eol=lf
 *.h text eol=lf
+*.inl text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
 
@@ -35,3 +36,12 @@ third_party/openxr/LOADER-NOTICES.txt text eol=lf
 # The vendored SMAA sources (MIT, iryoku/smaa at commit 71c806a8) are stored and checked out byte-for-byte, as upstream ships them (CRLF):
 # tools/gen_smaa_hlsl.py pins SMAA.hlsl's SHA-256 and the build refuses any other bytes.
 src/d3d11/smaa/** -text
+
+# Agent material: text addressed to coding agents, not people (AGENTS.md "Agent
+# material"). Left out of `git archive` and GitHub's source zips; these lines are
+# the list a clone strips. tools/check_agent_material.py fails the build when
+# a recognized agent path is missing export-ignore.
+AGENTS.md export-ignore
+CLAUDE.md export-ignore
+.agents export-ignore
+.agents/** export-ignore

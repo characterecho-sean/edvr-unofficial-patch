@@ -11,7 +11,8 @@
 #include <vector>
 
 #include "../common/code_hook.h"
-#include "explorer_cam_core.h"
+#include "../common/game_build.h"
+#include "avatar_hooks_core.h"
 #include "skin_entity_walk.h"
 
 namespace edvr {
@@ -19,10 +20,10 @@ namespace {
 
 using namespace skinjoin;
 
-constexpr uintptr_t kSkinJobsRva = 0x4C540E0;
+constexpr uintptr_t kSkinJobsRva = 0x4C56BA0;
 constexpr size_t kPrologueBytes = 28;
-// `mov rax,rsp; push rbp; push rbx; push r13; lea rbp,[rax-5Fh]; sub rsp,0C0h; mov r13,[rcx+0A8h]; mov rbx,rcx`, read from the build-332841
-// executable with the PE headers (timestamp 1788384820, image 104894464). No rip-relative byte; the boundaries are 3, 4, 5, 7, 11, 18, 25, 28,
+// `mov rax,rsp; push rbp; push rbx; push r13; lea rbp,[rax-5Fh]; sub rsp,0C0h; mov r13,[rcx+0A8h]; mov rbx,rcx`, read from the build-334925
+// executable with the PE headers. No rip-relative byte; the boundaries are 3, 4, 5, 7, 11, 18, 25, 28,
 // so CodeHook steals 5 (`mov rax,rsp`, `push rbp`, `push rbx`) and the trampoline re-runs them.
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x41, 0x55, 0x48, 0x8D, 0x68, 0xA1, 0x48, 0x81, 0xEC,
                                                0xC0, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0xA9, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9};
@@ -82,30 +83,11 @@ struct Reader {
     bool operator()(uint64_t address, void* out, size_t bytes) const noexcept { return guardedRead(static_cast<uintptr_t>(address), out, bytes); }
 };
 
+// The prologue is read under SEH and compared outside it (gamePinMatches: an exact compare on build 334925, the masked fields skipped elsewhere).
 __declspec(noinline) bool checkBytes(uintptr_t address, const uint8_t* expected, size_t n) noexcept {
-    __try {
-        return std::memcmp(reinterpret_cast<const void*>(address), expected, n) == 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-__declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) { *why = "the PE header offset is implausible"; return false; }
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != ecm::kExpectedTimestamp || imageSize != ecm::kExpectedImageSize) {
-            *why = "the PE timestamp or image size is not build 332841's";
-            return false;
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        *why = "a read faulted while checking the PE header";
-        return false;
-    }
+    uint8_t got[kPrologueBytes] = {};
+    if (n > sizeof(got) || !guardedRead(address, got, n)) return false;
+    return gamePinMatches(static_cast<uint32_t>(kSkinJobsRva), got, expected, n);
 }
 
 // A list of no entries and a plain end row (the first free row, 1): the assembler had nobody to skin (a menu, a loading screen). It says nothing
@@ -246,9 +228,9 @@ uint8_t* allocateRelay(uintptr_t target) noexcept {
 bool prepareRelay(void* trampoline, void* context) noexcept {
     auto& s = *static_cast<State*>(context);
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(s.relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(s.relay + avh::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(s.relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), s.relay, ecm::kCallbackRelayBytes)) return false;
+    if (!VirtualProtect(s.relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), s.relay, avh::kCallbackRelayBytes)) return false;
     s.forward.store(address, std::memory_order_release);
     return true;
 }
@@ -272,30 +254,38 @@ SkinHookState skinEntityHookArm(char* whyOut, size_t cap) {
         if (whyOut && cap) std::snprintf(whyOut, cap, "%s", s->why);
         return SkinHookState::StoodDown;
     };
-    uintptr_t target = 0;
+    uintptr_t target = 0, at = 0;
 #ifdef EDVR_SKIN_HOOK_TEST
     target = g_testTarget;
 #endif
     if (!target) {
         const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if (!base) return stood("the game module could not be resolved");
-        const char* peWhy = nullptr;
-        if (!checkIdentity(base, &peWhy)) {
-            char b[200];
-            std::snprintf(b, sizeof(b), "the game build differs (%s); EliteDangerous64.exe+0x%llX was not touched", peWhy ? peWhy : "?", static_cast<unsigned long long>(kSkinJobsRva));
+        // Build 334925: kSkinJobsRva itself. An unknown build: where the signature resolver found the job assembly (0 = not found).
+        const bool identityRead = gameBuildIdentity(nullptr, nullptr);
+        at = identityRead ? gameRva(static_cast<uint32_t>(kSkinJobsRva)) : 0;
+        if (at == 0) {
+            char b[260];
+            if (!identityRead)
+                std::snprintf(b, sizeof(b), "the game build differs (the PE header is unreadable); EliteDangerous64.exe+0x%llX was not touched", static_cast<unsigned long long>(kSkinJobsRva));
+            else
+                std::snprintf(b, sizeof(b), "%s, and the skinning job assembly (0x4C56BA0 in build 334925) was not found by signature; nothing was touched", gameBuildText());
             return stood(b);
         }
-        target = base + kSkinJobsRva;
+        target = base + at;
     }
     if (!checkBytes(target, kPrologue, kPrologueBytes)) {
-        char b[260];
-        std::snprintf(b, sizeof(b), "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 332841's job-assembly prologue)", kPrologueBytes, static_cast<unsigned long long>(kSkinJobsRva));
+        char b[320];
+        if (gameBuildKnown())
+            std::snprintf(b, sizeof(b), "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 334925's job-assembly prologue)", kPrologueBytes, static_cast<unsigned long long>(kSkinJobsRva));
+        else
+            std::snprintf(b, sizeof(b), "%s: the skinning job assembly was found by signature at 0x%llX, but its %zu bytes are not build 334925's job-assembly prologue outside the masked fields", gameBuildText(), static_cast<unsigned long long>(at), kPrologueBytes);
         return stood(b);
     }
     s->target = target;
     s->relay = allocateRelay(target);
     if (!s->relay) return stood("no executable memory could be placed within two gigabytes of the target");
-    ecm::buildCallbackRelay(s->relay, &s->gate, reinterpret_cast<const void*>(&skinJobsHooked));
+    avh::buildCallbackRelay(s->relay, &s->gate, reinterpret_cast<const void*>(&skinJobsHooked));
     // the gate opens only after the patch is live and the forward pointer is published
     if (!s->hook.install(reinterpret_cast<void*>(target), s->relay, nullptr, "skin-jobs", &prepareRelay, s)) {
         VirtualFree(s->relay, 0, MEM_RELEASE);
@@ -304,12 +294,19 @@ SkinHookState skinEntityHookArm(char* whyOut, size_t cap) {
     }
     s->state.store(int(SkinHookState::Armed));
     s->gate.store(1, std::memory_order_seq_cst);
-    char b[400];
-    std::snprintf(b, sizeof(b),
-                  "skin join: hook armed: EliteDangerous64.exe+0x%llX (the skinning job assembly, build 332841) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "
-                  "READ ONLY: the original runs first, then the entry list is read under SEH, nothing is written in game memory",
-                  static_cast<unsigned long long>(kSkinJobsRva), static_cast<unsigned long long>(target), s->hook.stolenBytes(), kPrologueBytes, kPrologueBytes,
-                  static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s->relay)));
+    char b[480];
+    if (gameBuildKnown())
+        std::snprintf(b, sizeof(b),
+                      "skin join: hook armed: EliteDangerous64.exe+0x%llX (the skinning job assembly, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "
+                      "READ ONLY: the original runs first, then the entry list is read under SEH, nothing is written in game memory",
+                      static_cast<unsigned long long>(kSkinJobsRva), static_cast<unsigned long long>(target), s->hook.stolenBytes(), kPrologueBytes, kPrologueBytes,
+                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s->relay)));
+    else
+        std::snprintf(b, sizeof(b),
+                      "skin join: hook armed: the skinning job assembly (0x4C56BA0 in build 334925) was found by signature on %s at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "
+                      "READ ONLY: the original runs first, then the entry list is read under SEH, nothing is written in game memory",
+                      gameBuildText(), static_cast<unsigned long long>(at), s->hook.stolenBytes(), kPrologueBytes, kPrologueBytes,
+                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(s->relay)));
     std::snprintf(s->why, sizeof(s->why), "%s", b);
     if (whyOut && cap) std::snprintf(whyOut, cap, "%s", b);
     return SkinHookState::Armed;
@@ -389,6 +386,14 @@ bool skinEntityHookNextEvent(char* line, size_t cap) {
 
 #ifdef EDVR_SKIN_HOOK_TEST
 // ---- the self-test: a synthetic game function with the real prologue, a fake heap laid out as the decompile says ------------------------
+// The rig links no resolver (src\common\game_build.cpp); these stand in for it. They play build 334925 (an address is where it is, a pin is an
+// exact compare) until the H2 check clears g_rigResolves to play an unknown build in which nothing is found by signature.
+bool g_rigResolves = true;
+bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *stamp = 0; if (size) *size = 0; return true; }
+bool gameBuildKnown() noexcept { return g_rigResolves; }
+const char* gameBuildText() noexcept { return g_rigResolves ? "build 334925" : "unknown build (rig)"; }
+uintptr_t gameRva(uint32_t knownRva) noexcept { return g_rigResolves ? knownRva : 0; }
+bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept { return std::memcmp(got, pin, n) == 0; }
 namespace {
 struct Heap {
     uint8_t* base = nullptr;
@@ -461,7 +466,7 @@ unsigned skinEntityHookSelfTest(char* detail, size_t cap) {
     if (g_state.load() != nullptr) fail("H1.a", "a state exists before arming");
     skinjoin::Snapshot snap;
     if (skinEntityHookLatest(snap)) fail("H1.b", "a snapshot before arming");
-    // a build that is not 332841 stands down: the test target bypasses the PE check, so check the prologue refusal instead
+    // a build that is not 334925 stands down: the test target bypasses the PE check, so check the prologue refusal instead
     {
         auto* wrong = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         std::memcpy(wrong, kPrologue, kPrologueBytes);
@@ -471,6 +476,13 @@ unsigned skinEntityHookSelfTest(char* detail, size_t cap) {
         if (r != SkinHookState::StoodDown || !std::strstr(text, "prologue")) fail("H2.a", "a wrong prologue did not stand the hook down");
         delete g_state.exchange(nullptr);
         VirtualFree(wrong, 0, MEM_RELEASE);
+        // an unknown build whose job assembly is not found by signature (the test target off, so the resolver is asked) stands the hook down, nothing patched
+        g_testTarget = 0;
+        g_rigResolves = false;
+        const SkinHookState nf = skinEntityHookArm(text, sizeof(text));
+        if (nf != SkinHookState::StoodDown || !std::strstr(text, "not found by signature")) fail("H2.b", "a job assembly the resolver did not find did not stand the hook down");
+        delete g_state.exchange(nullptr);
+        g_rigResolves = true;
         g_testTarget = reinterpret_cast<uintptr_t>(code);
     }
     const SkinHookState armed = skinEntityHookArm(text, sizeof(text));

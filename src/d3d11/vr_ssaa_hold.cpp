@@ -4,9 +4,9 @@
 #include "vr_ssaa_gate.h"       // vrSsaaGateFrame: the frame number the instrument line carries
 #include "vr_ssaa_hold_math.h"
 #include "ui_panel_scale.h"  // uiPanelScaleEarlyHooks: the setter and getter hooks, installed at DLL load
-#include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
 
 #include "../common/elite_graphics_folder.h"       // the Options\Graphics folder under %LOCALAPPDATA%
+#include "../common/game_build.h"                  // gameRva, gamePinMatches: build 334925's addresses, or an unknown build's by signature
 #include "../common/log.h"
 #include "../common/native_render_settings.h"      // edvrQueryNativeRenderSizing: the runtime's live VR session (eye sizes valid)
 #include "../common/runtime_profile.h"             // runtimeFlatProfile, runtimeFeaturesAllowed
@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 // d3d11_proxy.cpp: the graphics DLL's one-time setup (config, log, module pin), the same work the first device creation does.
@@ -26,10 +27,21 @@ void edvrGraphicsEnsureInitialised();
 namespace edvr {
 namespace {
 
-// Build 332841's addresses (RVAs). The wrapper calls the fxcfg loader with the loader's object in r8; the slot holds the wrapper.
-constexpr uint32_t kLoaderSlotRva = 0x52E8368;
-constexpr uint32_t kWrapperRva = 0x2862780;
-constexpr uint32_t kLoaderRva = 0x2855A50;
+// Build 334925's addresses (RVAs). The wrapper calls the fxcfg loader with the loader's object in r8; the slot holds the wrapper.
+constexpr uint32_t kLoaderSlotRva = 0x52EB4F8;
+constexpr uint32_t kWrapperRva = 0x2864CE0;
+constexpr uint32_t kLoaderRva = 0x2857FB0;
+// The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): instructions of the game that
+// carry, in bytes the signature does not mask, the displacements the hold writes. On an unknown build each must be found, or the hold
+// stands down; on build 334925 they are where they are.
+constexpr uint32_t kSetterCtxRva = 0x2878D40;         // the setter: mov rax,[rcx+0x18] -- this+0x18 is the render context
+constexpr uint32_t kSetterSsStoreRva = 0x2878D5D;     // the setter: movss [rax+0x3564],xmm0 -- the context's Supersampling field
+constexpr uint32_t kLoaderFloatStoreRva = 0x285813F;  // the loader: movss [rsi+rcx*4+0x124],xmm0, rcx = 3*entry -- entry 2 is +0x13C
+constexpr uint32_t kLoaderSsNameRva = 0x28580F0;      // the loader: lea rcx,[rip+d32], the name of entry 2 (d32 masked: checked below)
+constexpr uint32_t kSsNameRva = 0x52EEB60;            // that name, a string the resolver finds by its content
+constexpr uint32_t kHoldRvas[8] = {kLoaderSlotRva, kWrapperRva, kLoaderRva, kSetterCtxRva, kSetterSsStoreRva, kLoaderFloatStoreRva,
+                                   kLoaderSsNameRva, kSsNameRva};  // every address the hold needs (gameRvasFound)
+constexpr size_t kHoldRvaCount = sizeof(kHoldRvas) / sizeof(kHoldRvas[0]);
 constexpr uint32_t kSsFieldOff = 0x13C;     // the loader object's SS field (a stack temporary the game copies from)
 constexpr uintptr_t kCtxSsOff = 0x3564;     // the render context's Supersampling field, the one every sizing consumer reads
 constexpr uint32_t kNoneBits = 0xFFFFFFFFu;  // "no value yet" in the float-bits atomics below
@@ -102,32 +114,30 @@ bool writeFloatGuarded(uintptr_t at, float v) {
 
 bool readFloatGuarded(uintptr_t at, float* out) { return readGame(reinterpret_cast<const uint8_t*>(at), out, sizeof(float)); }
 
-// The game's PE header: build 332841's stamp and image size (the gate ui_panel_scale.cpp applies).
-bool buildChecked(const uint8_t* base, char* why, size_t whyLen) {
-    uint32_t stamp = 0, size = 0;
-    __try {
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-            std::snprintf(why, whyLen, "the game's PE headers are not readable");
-            return false;
-        }
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) {
-            std::snprintf(why, whyLen, "the game's PE signature is not readable");
-            return false;
-        }
-        stamp = nt->FileHeader.TimeDateStamp;
-        size = nt->OptionalHeader.SizeOfImage;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        std::snprintf(why, whyLen, "the game's PE headers faulted");
+// The game build: its PE header readable, and the slot, the wrapper, the loader and the field witnesses found (gameRva: build 334925's
+// own addresses; an unknown build's by signature).
+bool buildChecked(char* why, size_t whyLen) {
+    if (!gameBuildIdentity(nullptr, nullptr)) {
+        std::snprintf(why, whyLen, "the game's PE headers are not readable");
         return false;
     }
-    if (stamp != kUiPanelStamp || size != kUiPanelImageSize) {
-        std::snprintf(why, whyLen, "game build not checked (PE stamp %u, image %u bytes; build 332841's are %u, %u)", stamp,
-                      size, kUiPanelStamp, kUiPanelImageSize);
+    uint32_t missing = 0;
+    if (!gameRvasFound(kHoldRvas, kHoldRvaCount, &missing)) {
+        std::snprintf(why, whyLen, "%s, and 0x%X in build 334925 was not found by signature", gameBuildText(), missing);
         return false;
     }
     return true;
+}
+
+// An unknown build only: the loader's entry 2 (the field at +0x13C the startup hold writes) is named by the Supersampling string. The
+// lea's displacement is masked by the signature, so its target is computed here and must be the string the resolver found.
+bool loaderEntryNamed(const uint8_t* base) {
+    const uintptr_t leaAt = gameRva(kLoaderSsNameRva), nameAt = gameRva(kSsNameRva);
+    uint8_t lea[7] = {};
+    if (!leaAt || !nameAt || !readGame(base + leaAt, lea, sizeof(lea)) || lea[0] != 0x48 || lea[1] != 0x8D || lea[2] != 0x0D) return false;
+    int32_t d = 0;
+    std::memcpy(&d, lea + 3, 4);
+    return uint64_t(leaAt) + 7u + uint64_t(int64_t(d)) == uint64_t(nameAt);
 }
 
 // Writes one 8-byte slot in the game's .rdata (ui_panel_scale.cpp's writeSlot). False, with GetLastError in g_slotErr, when the page
@@ -242,45 +252,66 @@ void afterLoader(uintptr_t obj) {
 
 }  // namespace
 
-void vrSsaaHoldEarlyInstall() {
+// For vr_ssaa_gate.cpp's build check: whether gameRva finds every address the hold needs (always on build 334925); the first it does
+// not in *firstMissing.
+bool vrSsaaHoldFound(uint32_t* firstMissing) { return gameRvasFound(kHoldRvas, kHoldRvaCount, firstMissing); }
+
+namespace {
+
+// The install: the build gate, the loader's slot, the setter and getter hooks. Every path leaves g_slotState at 1 or 2. Build 334925 and
+// a process that is not the game: from DllMain. An unknown build: once, after the signature resolve (vrSsaaHoldInstallAfterResolve).
+void installHold() {
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     if (!base) {
         std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the game module could not be found");
         g_slotState.store(2, std::memory_order_release);
         return;
     }
-    if (!buildChecked(base, g_slotWhy, sizeof(g_slotWhy))) {
+    if (!buildChecked(g_slotWhy, sizeof(g_slotWhy))) {
         g_slotState.store(2, std::memory_order_release);
         return;
     }
-    // The wrapper: its bytes, and that its call lands on the loader.
+    if (!gameBuildKnown() && !loaderEntryNamed(base)) {
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "%s: the loader's entry 2 (the Supersampling field at +0x13C) is not named by the string "
+                      "0x%X in build 334925 found by signature", gameBuildText(), kSsNameRva);
+        g_slotState.store(2, std::memory_order_release);
+        return;
+    }
+    const uintptr_t wrapperAt = gameRva(kWrapperRva), loaderAt = gameRva(kLoaderRva), slotAt = gameRva(kLoaderSlotRva);
+    if (!wrapperAt || !loaderAt || !slotAt) {   // buildChecked found all three; this keeps a 0 from ever addressing the image
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "%s, and the hold's addresses were not found by signature", gameBuildText());
+        g_slotState.store(2, std::memory_order_release);
+        return;
+    }
+    // The wrapper: its bytes, and that its call lands on the loader (on an unknown build the signature masks the call's rel32, so
+    // this compare is what proves its target).
     uint8_t got[sizeof(kWrapperBytes)] = {};
-    if (!readGame(base + kWrapperRva, got, sizeof(got)) || std::memcmp(got, kWrapperBytes, sizeof(got)) != 0) {
-        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper at 0x%X is not build 332841's", kWrapperRva);
+    if (!readGame(base + wrapperAt, got, sizeof(got)) || !gamePinMatches(kWrapperRva, got, kWrapperBytes, sizeof(got))) {
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper at 0x%X is not build 334925's", static_cast<unsigned>(wrapperAt));
         g_slotState.store(2, std::memory_order_release);
         return;
     }
     int32_t rel = 0;
     std::memcpy(&rel, got + 8, 4);
-    if (base + kWrapperRva + 12 + rel != base + kLoaderRva) {
-        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper's call does not land on the loader at 0x%X", kLoaderRva);
+    if (base + wrapperAt + 12 + rel != base + loaderAt) {
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the wrapper's call does not land on the loader at 0x%X", static_cast<unsigned>(loaderAt));
         g_slotState.store(2, std::memory_order_release);
         return;
     }
     // The slot: it must hold the wrapper now, before anything has swapped it.
     uint64_t slot = 0;
-    if (!readGame(base + kLoaderSlotRva, &slot, sizeof(slot)) || slot != reinterpret_cast<uint64_t>(base + kWrapperRva)) {
-        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the slot at 0x%X does not hold the wrapper", kLoaderSlotRva);
+    if (!readGame(base + slotAt, &slot, sizeof(slot)) || slot != reinterpret_cast<uint64_t>(base + wrapperAt)) {
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "the slot at 0x%X does not hold the wrapper", static_cast<unsigned>(slotAt));
         g_slotState.store(2, std::memory_order_release);
         return;
     }
     // The loader's hold: the replacement is written only once the page can be made writable; on failure nothing is installed.
-    if (!writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(&loaderHoldThunk))) {
+    if (!writeSlot(const_cast<uint8_t*>(base) + slotAt, reinterpret_cast<uint64_t>(&loaderHoldThunk))) {
         std::snprintf(g_slotWhy, sizeof(g_slotWhy), "VirtualProtect failed (%lu)", static_cast<unsigned long>(g_slotErr));
         g_slotState.store(2, std::memory_order_release);
         return;
     }
-    g_wrapperOrig.store(reinterpret_cast<WrapperFn>(const_cast<uint8_t*>(base + kWrapperRva)), std::memory_order_release);
+    g_wrapperOrig.store(reinterpret_cast<WrapperFn>(const_cast<uint8_t*>(base + wrapperAt)), std::memory_order_release);
     g_slotWritten = true;
     g_slotState.store(1, std::memory_order_release);
     // The setter and getter hooks: the same build gate and the same slots ui_panel_scale.cpp uses, once and for all.
@@ -289,15 +320,58 @@ void vrSsaaHoldEarlyInstall() {
     if (!g_setterIn) std::snprintf(g_setterWhy, sizeof(g_setterWhy), "%s", why);
 }
 
+std::mutex g_lateMutex;  // an unknown build: the resolver's thread and vrSsaaHoldReport, whichever comes first, install once
+
+}  // namespace
+
+void vrSsaaHoldEarlyInstall() {
+    // An unknown build of the game: the hold's addresses come from the signature resolve (65 to 125 ms), which is kept out of DllMain and
+    // the loader lock. gameBuildStartup's thread installs the hold once the resolve is done (vrSsaaHoldInstallAfterResolve), about 0.1 s
+    // after the first device; the fxcfg loader's first run came 4 to 8 s after it in every flight log read (2026-10-23 and 2026-10-25).
+    // A loader run before the install would not be held at startup; the copy, the setter and the live paths hold the field as before.
+    if (gameBuildUnknown()) {
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "not installed: on %s it waits for the signature resolve, which never finished",
+                      gameBuildText());
+        return;
+    }
+    installHold();
+}
+
+void vrSsaaHoldInstallAfterResolve() {
+    if (!gameBuildUnknown()) return;
+    try {
+        std::lock_guard<std::mutex> lock(g_lateMutex);
+        if (g_slotState.load(std::memory_order_acquire) == 0) installHold();
+    } catch (...) {
+    }
+}
+
 void vrSsaaHoldReport() {
+    vrSsaaHoldInstallAfterResolve();  // an unknown build: installs it now if the resolver's thread has not yet (a no-op otherwise)
     if (g_slotState.load(std::memory_order_acquire) == 1) {
-        if (g_setterIn)
+        if (!gameBuildKnown())
+            Log::get().note("vr ssaa gate: the hold's loader wrapper 0x%X, its slot 0x%X and the loader 0x%X (in build 334925) were "
+                            "found by signature on %s at 0x%llX, 0x%llX and 0x%llX",
+                            kWrapperRva, kLoaderSlotRva, kLoaderRva, gameBuildText(),
+                            static_cast<unsigned long long>(gameRva(kWrapperRva)),
+                            static_cast<unsigned long long>(gameRva(kLoaderSlotRva)),
+                            static_cast<unsigned long long>(gameRva(kLoaderRva)));
+        if (g_setterIn && gameBuildKnown())
             Log::get().note("vr ssaa gate: hold installed at DLL load: loader wrapper 0x%X (slot 0x%X) and the Supersampling setter, "
-                            "build 332841 checked",
+                            "build 334925 checked",
                             kWrapperRva, kLoaderSlotRva);
-        else
+        else if (g_setterIn)
+            Log::get().note("vr ssaa gate: hold installed after the signature resolve (an unknown build keeps it out of DllMain): "
+                            "loader wrapper 0x%X (slot 0x%X) and the Supersampling setter, found by signature on %s, the fields it "
+                            "writes witnessed",
+                            kWrapperRva, kLoaderSlotRva, gameBuildText());
+        else if (gameBuildKnown())
             Log::get().note("vr ssaa gate: hold installed at DLL load: loader wrapper 0x%X (slot 0x%X); the setter hook refused, "
                             "so menu changes are not held: %s",
+                            kWrapperRva, kLoaderSlotRva, g_setterWhy);
+        else
+            Log::get().note("vr ssaa gate: hold installed after the signature resolve: loader wrapper 0x%X (slot 0x%X); the setter "
+                            "hook refused, so menu changes are not held: %s",
                             kWrapperRva, kLoaderSlotRva, g_setterWhy);
     } else {
         Log::get().note("vr ssaa gate: hold refused, nothing written: %s; the game's Supersampling is not held", g_slotWhy);
@@ -307,8 +381,9 @@ void vrSsaaHoldReport() {
 void vrSsaaHoldShutdown() {
     if (!g_slotWritten) return;
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const uintptr_t slotAt = gameRva(kLoaderSlotRva), wrapperAt = gameRva(kWrapperRva);   // found: the install wrote the slot
     // The slot goes back only if the write lands; if it does not, the flag stays set (the game's own slot is still ours).
-    if (base && writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(base + kWrapperRva)))
+    if (base && slotAt && wrapperAt && writeSlot(const_cast<uint8_t*>(base) + slotAt, reinterpret_cast<uint64_t>(base + wrapperAt)))
         g_slotWritten = false;
 }
 
@@ -408,7 +483,7 @@ void vrSsaaHoldProfileChanged() {
 
 // The copy's source block, for the instrument only (log): W copies 0x160 bytes of the active preset entry, [[ctx+0x33C8]+0x230] +
 // index*0x178 + 0x14 (index [obj+0x258], count [obj+0x228]), to ctx+0x3428, and a small header of the object (+0x30, +0x58..+0x80) to
-// ctx+0x33D0.. (read from 0x281C0D0..0x281C3EB, build 332841). Nothing in it is proven to hold the 3D mode; this logs which dwords change
+// ctx+0x33D0.. (read from 0x281E650..0x281C32B, build 334925). Nothing in it is proven to hold the 3D mode; this logs which dwords change
 // between copies, so a 3D-on apply shows the mode field if it is there. Never written.
 constexpr uintptr_t kCtxSettingsObjOff = 0x33C8;
 constexpr uint32_t kBlockBytes = 0x160, kHeadFrom = 0x30, kHeadBytes = 0x54;  // object +0x30 .. +0x84
@@ -523,7 +598,7 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
         if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
         char modeText[24] = "unreadable";
         if (modeKnown) std::snprintf(modeText, sizeof(modeText), "%u%s", blockMode, modeRose ? " (rose from 0)" : "");
-        Log::get().note("vr ssaa gate: copy call %u (W 0x281C0D0), frame %u: profile %s, block 3D mode %s, hold %d (VR profile %d, arriving "
+        Log::get().note("vr ssaa gate: copy call %u (W 0x281E650), frame %u: profile %s, block 3D mode %s, hold %d (VR profile %d, arriving "
                         "%d), VR live %d; copied %s, %s; ctx 0x%llX",
                         call, vrSsaaGateFrame(), runtimeProfileName(), modeText, allowed ? 1 : 0, profileAllows ? 1 : 0, arriving ? 1 : 0,
                         live ? 1 : 0, copiedText,
@@ -540,7 +615,7 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
     if (wrote == 1 && (!g_copyHeld.load(std::memory_order_acquire) || bits != g_copyBits.load(std::memory_order_acquire))) {
         g_copyHeld.store(true, std::memory_order_release);
         g_copyBits.store(bits, std::memory_order_release);
-        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281C0D0): copied %s, held 1.0, "
+        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281E650): copied %s, held 1.0, "
                         "VR live 1",
                         haveCopied ? "(see the copy call line)" : "unknown");
     }

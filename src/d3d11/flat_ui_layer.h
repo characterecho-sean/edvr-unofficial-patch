@@ -37,6 +37,8 @@ struct ID3D11ShaderResourceView;
 
 namespace edvr {
 
+struct UiGlowStar;   // ui_layer.h: the star layer input of the bloom feed (visual.star_glow)
+
 // fix.ui_quality on, the flat anti-aliasing on, the flat profile, and the HDR HUD path not stood down. One load or two.
 bool flatUiLayerOn();
 
@@ -131,13 +133,26 @@ void flatUiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t
 void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, uint32_t outW, uint32_t outH,
                        ID3D11ShaderResourceView** original, bool* replaced);
 
+// The HUD's bloom (ui_layer.h UiGlowFeed). The HDR route's trigger draw -- the first draw that reads the scene H after its last write -- is the
+// bloom chain's first level when it writes a target of half H's size, and the HUD the layer took is not in H. flatUiGlowWanted: this trigger
+// is that draw and the layer is live (the scope then sets uiGlow). flatUiGlowBegin, right before that draw's issue: H' = H + the HUD's light is
+// bound at `slot` in place of the game's H (true; `*original` then holds the game's view, one reference, for flatUiGlowEnd), or the draw
+// reads H as always (false, the reason counted). flatUiGlowEnd, right after the issue: the game's view back, the reference released.
+// visual.star_glow (flat_star_glow.h) asks for the same draw with `starLive` (the setting is above 100 and the star layer holds light this frame):
+// the HUD layer need not be live then, and flatUiGlowBegin's `star` input is added to H' (null: no star input; the HUD feed alone, as ever).
+bool flatUiGlowWanted(bool triggerSrvKnown, bool triggerAmbiguous, uint32_t srvSlot, uint32_t hdrW, uint32_t hdrH, uint32_t targetW,
+                      uint32_t targetH, bool starLive = false);
+bool flatUiGlowBegin(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, uint64_t vs, uint64_t ps, uint32_t hdrW,
+                     uint32_t hdrH, uint32_t targetW, uint32_t targetH, ID3D11ShaderResourceView** original, UiGlowStar* star = nullptr);
+void flatUiGlowEnd(ID3D11DeviceContext* ctx, uint32_t slot, ID3D11ShaderResourceView* original);
+
 // ResizeBuffers on the same device: every per-size reference the layer holds, released (shaders and contexts kept).
 void flatUiLayerRelease();
 // Once a frame with the device the flat runtime adopted: when it is not the device the layer last saw, the shared
 // layer's device children are all released first (uiLayerDeviceReset). The device is held for identity until then.
 void flatUiLayerNoteDevice(ID3D11Device* device);
 
-// Temporal AA off on the Galaxy Map and the Orrery (2026-10-10, flat_ui_layer_math.h FlatUiMapAaTally): once per frame at the
+// Temporal AA off on the maps and the Full System Scanner (2026-10-10, flat_ui_layer_math.h FlatUiMapAaTally): once per frame at the
 // boundary (engaged: the mechanism is armed; jitterWanted: the frame would have jittered), and once per copy that ran it (ok:
 // the spatial recovery produced the frame). The map line prints the counts.
 void flatUiLayerMapAaFrame(bool engaged, bool jitterWanted);

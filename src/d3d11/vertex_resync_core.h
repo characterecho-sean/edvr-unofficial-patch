@@ -3,21 +3,21 @@
 // f3d state cache"). Everything here is pure -- raw pointers, bytes and numbers, no Windows -- so a rig can drive it on a synthetic list laid out at the real offsets
 // (tools\vertex_resync_test). vertex_resync_hook.cpp is the glue that finds the function, patches it, and calls this under SEH.
 //
-// THE MECHANISM, as read from build 332841 (analysis\decomp\scanner_vb_dump_*; READ = a disassembled instruction, INFERRED = the sequence it implies):
+// THE MECHANISM, as read from build 334473 (analysis\decomp\scanner_vb_dump_*; READ = a disassembled instruction, INFERRED = the sequence it implies):
 //
 //   Elite's D3D11 goes through Frontier's "f3d" layer. A command list (the immediate context's, or a deferred one) holds two copies of the input-assembler vertex-buffer
 //   state, at fixed offsets from the list:
 //     DESIRED   list+0x60 + 8*slot  wrapper (an f3d buffer object, refcounted)      list+0xE0 + 4*slot  offset      list+0x120 + 4*slot  stride override
 //     APPLIED   list+0x408 + 8*slot native ID3D11Buffer*   list+0x488 + 4*slot stride   list+0x4C8 + 4*slot offset            (the cache of what was last BOUND)
 //
-//   SetVertexBuffer (0x1404E9D70; READ) compares ONLY the desired state -- [list+8*slot+0x60], [list+4*slot+0xE0], [list+4*slot+0x120] against the arguments -- and
-//   returns at 0x1404E9DAF when they are equal. When they differ it writes the desired state and the applied cache together: applied buffer = [wrapper+0x140] (the
+//   SetVertexBuffer (0x1404E9E10; READ) compares ONLY the desired state -- [list+8*slot+0x60], [list+4*slot+0xE0], [list+4*slot+0x120] against the arguments -- and
+//   returns at 0x1404E9E4F when they are equal. When they differ it writes the desired state and the applied cache together: applied buffer = [wrapper+0x140] (the
 //   native buffer), applied offset = the offset, applied stride = 0, and sets bit 0x20 of the dirty word at list+0x1E8.
 //
-//   FlushIA (0x140522A50; READ), called before a draw with rcx = the pipeline state, r8 = list+0x60 (DESIRED), r9 = list+0x2A0 (so r9+0x168 = APPLIED buffers,
+//   FlushIA (0x140522B50; READ), called before a draw with rcx = the pipeline state, r8 = list+0x60 (DESIRED), r9 = list+0x2A0 (so r9+0x168 = APPLIED buffers,
 //   r9+0x228 = offsets, r9+0x1E8 = strides), computes each slot's stride from the desired state, and when the draw's layout has FEWER slots than the previous draw's it
-//   zeroes applied buffer, offset and stride for the slots from the new count up to the old (0x140522B7C..0x140522BA0). It never touches the desired state. It then
-//   binds from the APPLIED arrays (the call at 0x140522BF5 is IASetVertexBuffers with [r9+0x168], strides, offsets).
+//   zeroes applied buffer, offset and stride for the slots from the new count up to the old (0x140522C7C..0x140522CA0). It never touches the desired state. It then
+//   binds from the APPLIED arrays (the call at 0x140522CF5 is IASetVertexBuffers with [r9+0x168], strides, offsets).
 //
 //   The failing sequence (INFERRED from those, and consistent with 38 of 38 field frames): the first eye's deferred-lighting resolve binds buffer Q (desired = applied
 //   = Q); two zero-slot full-screen draws follow, whose FlushIA zeroes APPLIED[0] and binds (NULL, 0, 0) while DESIRED[0] stays Q; the second eye's resolve calls
@@ -38,23 +38,31 @@
 namespace edvr {
 namespace vresync {
 
-// ---- identity: build 332841 (EliteDangerous64.exe, SHA-256 e6be8bbe...4e988), the pair every build-keyed hook here checks --------------------------------------
-constexpr uint32_t kExpectedTimestamp = 1788384820u;
-constexpr uint32_t kExpectedImageSize = 104894464u;
-constexpr uintptr_t kFlushIaRva = 0x522A50u;   // 0x140522A50
+// ---- FlushIA in build 334925 (EliteDangerous64.exe, SHA-256 ed5a8f8c...e264b63); other builds find it by signature (src\common\game_build.h, issue 124) ----------
+constexpr uintptr_t kFlushIaRva = 0x522B50u;   // 0x140522B50
 // The first 16 bytes of FlushIA, read from the exe (Epic and the analysis copy agree): mov [rsp+18h],rbx / push rsi / push rdi / push r14 / sub rsp,30h / mov rdi,r8.
 // CodeHook steals the first instruction (5 bytes, no relative operand) and nothing else.
 constexpr size_t kPrologueBytes = 16;
 constexpr uint8_t kFlushIaPrologue[kPrologueBytes] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B, 0xF8};
 
-inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) { return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize; }
-inline bool prologueMatches(const uint8_t* bytes, size_t n) { return bytes && n >= kPrologueBytes && std::memcmp(bytes, kFlushIaPrologue, kPrologueBytes) == 0; }
+// The install decision (vertex_resync_hook.cpp vertexResyncInstall). identityRead false: the PE header was unreadable. flushIaRva: where FlushIA is in the running
+// build -- kFlushIaRva itself on build 334925, the address the signature resolver found on an unknown build, 0 when it found none (kNotFound: the hook stands down).
+// got null: the prologue was unreadable. pinMatches: the sixteen bytes read there are the pin (gamePinMatches: an exact compare on build 334925; on an unknown build the
+// bytes the signature masks are skipped and every other byte must match). The glue resolves and passes the answers in; this header calls no resolver.
+enum class Install : uint8_t { kInstall = 0, kUnreadable, kNotFound, kWrongPrologue };
+inline Install installDecision(bool identityRead, uintptr_t flushIaRva, const uint8_t* got, bool pinMatches) {
+    if (!identityRead) return Install::kUnreadable;
+    if (flushIaRva == 0) return Install::kNotFound;
+    if (got == nullptr) return Install::kUnreadable;
+    if (!pinMatches) return Install::kWrongPrologue;
+    return Install::kInstall;
+}
 
 // ---- the f3d layout, as offsets from the three pointers FlushIA is called with --------------------------------------------------------------------------------
 constexpr uint32_t kMaxSlots = 16;           // the arrays below hold sixteen slots each (the desired offsets start 0x80 bytes after the desired wrappers)
-constexpr size_t kPsoLayout = 0x188;         // pso -> the input-layout object ([rsi+0x188] at 0x140522AAB)
-constexpr size_t kLayoutSlots = 0x60;        // layout -> dword: the slots the layout declares ([rax+0x60] at 0x140522B1E)
-constexpr size_t kWrapperNative = 0x140;     // wrapper -> the native ID3D11Buffer* (SetVertexBuffer: [rax+0x140] at 0x1404E9E20)
+constexpr size_t kPsoLayout = 0x188;         // pso -> the input-layout object ([rsi+0x188] at 0x140522BAB)
+constexpr size_t kLayoutSlots = 0x60;        // layout -> dword: the slots the layout declares ([rax+0x60] at 0x140522C1E)
+constexpr size_t kWrapperNative = 0x140;     // wrapper -> the native ID3D11Buffer* (SetVertexBuffer: [rax+0x140] at 0x1404E9EC0)
 constexpr size_t kDesiredWrappers = 0;       // desired + 8*slot
 constexpr size_t kDesiredOffsets = 0x80;     // desired + 0x80 + 4*slot  (list+0xE0)
 constexpr size_t kAppliedBuffers = 0x168;    // applied + 0x168 + 8*slot (list+0x408)

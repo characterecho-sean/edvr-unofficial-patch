@@ -50,8 +50,11 @@ def flat_ini_bytes():
             b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr, xess. Game SS controls render scale.\r\n'
             b'# XeSS-SR needs libxess.dll beside the game; the flat installer includes it when built with the SDK.\r\n'
             b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
+            b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n'
+            b'[visual]\r\n'
             b'# intro_video: screen plays the launch movie as the game makes it; skip refuses it at launch.\r\n'
-            b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\nintro_video = screen\r\n\r\n'
+            b'# moved-from: fix.intro_video (default screen)\r\n'
+            b'intro_video = screen\r\n\r\n'
             b'# compare_aa: F7 turns AA off to compare and back; runtime only, nothing is written.\r\n'
             b'[hotkey]\r\nmenu = F8\r\ncompare_aa = F7\r\ndump_draws = NUMLOCK\r\n\r\n'
             b'[diag]\r\n'
@@ -548,6 +551,12 @@ def self_test():
                 assert b'dump_draws = NUMLOCK' in flat_ini and b'dump_draws = F10' not in flat_ini
                 assert b'compare_aa = F7' in flat_ini and b'nothing is written' in flat_ini
                 assert b'intro_video = screen' in flat_ini and b'skip refuses it at launch' in flat_ini
+                # The key lives in [visual] (2026-10-22), and the annotation sits directly above it so the installer's merge
+                # carries a flat user's old [fix] intro_video to the new name (iniedit.cpp movedKeys: a section line or a blank
+                # clears a pending annotation).
+                assert (b'[visual]\r\n# intro_video: screen plays the launch movie as the game makes it; skip refuses it at launch.\r\n'
+                        b'# moved-from: fix.intro_video (default screen)\r\nintro_video = screen\r\n') in flat_ini
+                assert b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n' in flat_ini
             with open(os.path.join(build, 'edvr_profile_vr.ini'), 'rb') as stream:
                 assert stream.read() == descriptor_bytes()
             assert descriptor_bytes() == b'[install]\r\nschema = 2\r\nscope = both\r\n'

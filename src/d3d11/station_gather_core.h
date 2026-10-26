@@ -132,7 +132,8 @@ public:
         const uint32_t now = stamp_.load(std::memory_order_seq_cst);
         d.lost = lost_.exchange(0, std::memory_order_relaxed);
         if (static_cast<uint32_t>(now - next_) > kPasses - 1) {
-            // Passes older than the ring holds were overwritten (their entries were counted lost by the writers that overwrote them).
+            // Passes older than the ring holds are not read. Their entries are lost: counted by the writer that overwrites the buffer, or, when no
+            // writer has come back to it, by the loop below, which finds the buffer still holding the skipped pass.
             next_ = now - (kPasses - 1);
         }
         if (next_ == now) return d;   // no pass closed since the last drain
@@ -151,7 +152,20 @@ public:
             const uint32_t idx = s % kPasses;
             for (size_t i = 0; i < kSlots; ++i) {
                 Slot& sl = slots_[i];
-                if (sl.passStamp[idx] != s) continue;
+                if (sl.passStamp[idx] != s) {
+                    // The buffer still holds an older pass the tick skipped (two unfinished drains in a row put it more than the ring behind) and
+                    // no writer has overwritten it since. No writer can touch it now: the ones that began before the advance have left, and the
+                    // ones after it write the current stamp's buffer, which is never one of these. Its entries are lost; counting them is what
+                    // makes the station keep every record (an uncounted loss reads as an informative pass that silently misses records).
+                    const uint32_t stale = sl.count[idx].load(std::memory_order_relaxed);
+                    if (stale != 0) {
+                        d.lost += stale;
+                        sl.count[idx].store(0, std::memory_order_relaxed);
+                        sl.calls[idx].store(0, std::memory_order_relaxed);
+                        sl.ctx[idx].store(0, std::memory_order_relaxed);
+                    }
+                    continue;
+                }
                 const uint32_t n = sl.count[idx].load(std::memory_order_relaxed);
                 const uint64_t c = sl.calls[idx].load(std::memory_order_relaxed);
                 for (uint32_t k = 0; k < n; ++k) visit(sl.items[idx][k]);

@@ -51,7 +51,7 @@ struct MenuRowDef {
     bool        headset;
     int         applies;   // 0 not documented, 1 live, 2 needs a game restart
     MenuTier    tier;
-    const char* page;      // "performance" | "fixes" | "explorer_cam" | "debug" (the flat panel's Debug tab) | "hotkeys" | the section for developer rows
+    const char* page;      // "performance" | "fixes" | "native_on_foot" | "visual" (the flat panel's Visual tab) | "debug" (the flat panel's Debug tab) | "hotkeys" | the section for developer rows
     const char* group;     // the ini's heading above it
     // How a NUMBER row is stepped and shown (the ui: line's `step`, `unit`, `zero`, `signed`; empty / false for every other row).
     const char* step;      // the arrow keys' step, in place of the range's twentieth
@@ -61,7 +61,7 @@ struct MenuRowDef {
 };
 
 // The arrow keys' step for a number row: the row's own `step` when it has one, else the range in about twenty steps, rounded to 1, 2 or 5 times a power
-// of ten, else one (a tenth for a decimal). Pure, so a rig can hold the Explorer Cam page's 0.01 m and 10 ms to what the ini says.
+// of ten, else one (a tenth for a decimal). Pure, so a rig can hold a row's 0.01 m and 10 ms to what the ini says.
 inline double menuStepOf(const MenuRowDef& d) {
     if (d.step && d.step[0]) {
         const double s = std::atof(d.step);

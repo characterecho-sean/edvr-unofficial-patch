@@ -25,6 +25,9 @@ namespace edvr {
 // cross-TU getter.
 namespace detail {
 bool     g_drawCensusPending = false;
+bool     g_drawCensusCaptureIdPending = false;
+bool     g_drawCensusCaptureIdActive = false;
+wchar_t  g_drawCensusCaptureId[16] = L"";
 uint32_t g_drawCensusFramesLeft = 0;
 bool     g_drawCensusOffscreen = false;
 }  // namespace detail
@@ -700,10 +703,10 @@ void dumpInternTable() {
 void finish() {
     dumpInternTable();
     Log::get().note("DC end census=%u draws=%u off=%u copies=%u disp=%u "
-                    "unseen=%u lines=%u interned=%u overflow=%u truncated=%u",
+                    "unseen=%u lines=%u interned=%u overflow=%u truncated=%u capture_id=%ls",
                     g_censusNo, g_draws, g_offDraws, g_copies, g_dispatches,
                     g_unseen, g_lines, g_tabCount, g_overflow,
-                    g_draws > g_lines ? g_draws - g_lines : 0);
+                    g_draws > g_lines ? g_draws - g_lines : 0,detail::g_drawCensusCaptureIdActive?detail::g_drawCensusCaptureId:L"");
     if (g_unseen) {
         Log::get().note(
             "DC unseen: %u draws this census returned from the verdict chain "
@@ -714,6 +717,8 @@ void finish() {
             "DC line above. Enable the withheld effects for a census of their draws.",
             g_unseen, g_unseenBy[0], g_unseenBy[1], g_unseenBy[2], g_unseenBy[3]);
     }
+    detail::g_drawCensusCaptureIdActive=false;
+    detail::g_drawCensusCaptureId[0]=L'\0';
 }
 
 }  // namespace
@@ -766,6 +771,20 @@ void drawCensusAutoRequest() {
     drawGateArm();   // the trigger is a draw, so this is mid-frame (draw_gate.h)
     // The caller logs WHY (the size that tripped it); this side owns only the
     // census mechanics, which the begin line below reports as it always has.
+}
+
+void drawCensusAutoRequestForCapture(const wchar_t* captureId) {
+    if(detail::g_drawCensusFramesLeft>0) {
+        Log::get().note("DC eye capture link: capture_id=%ls census=%u state=active_reused",captureId?captureId:L"",g_censusNo);
+        return;
+    }
+    wcsncpy_s(detail::g_drawCensusCaptureId,sizeof(detail::g_drawCensusCaptureId)/sizeof(detail::g_drawCensusCaptureId[0]),captureId?captureId:L"",_TRUNCATE);
+    detail::g_drawCensusCaptureIdPending=true;
+    const bool alreadyPending=detail::g_drawCensusPending;
+    detail::g_drawCensusPending = true;
+    g_forceOffscreen = true;
+    drawGateArm();
+    Log::get().note("DC eye capture link: capture_id=%ls census=%u state=%s",captureId?captureId:L"",g_censusNo+1,alreadyPending?"pending_linked":"new_request");
 }
 
 // The shared body. The only thing the two entry points disagree about is the
@@ -1648,6 +1667,8 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
                 static_cast<int>(kMaxLinesCeiling)));
         }
         detail::g_drawCensusFramesLeft = g_framesWanted;
+        detail::g_drawCensusCaptureIdActive=detail::g_drawCensusCaptureIdPending;
+        detail::g_drawCensusCaptureIdPending=false;
         g_frameOrdinal = 0;
         g_draws = 0;
         g_drawsThisFrame = 0;
@@ -1690,9 +1711,9 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         }
         g_cbDumps = 0;
         for (Interned& e : g_tab) e = Interned();
-        Log::get().note("DC begin census=%u frames=%u frame=%u offscreen=%s",
+        Log::get().note("DC begin census=%u frames=%u frame=%u offscreen=%s capture_id=%ls",
                         g_censusNo, g_framesWanted, frameNo,
-                        detail::g_drawCensusOffscreen ? "yes" : "no");
+                        detail::g_drawCensusOffscreen ? "yes" : "no",detail::g_drawCensusCaptureIdActive?detail::g_drawCensusCaptureId:L"");
         if (g_cbWatchHash) {
             Log::get().note("DCW watching vs=%016llX -- every recorded draw "
                             "running that shader dumps its b%u constants "

@@ -2,6 +2,7 @@
 #include "flat_projection_runtime.h"
 #include "flat_deferred_camera.h"
 #include "engine_velocity_families.h"
+#include "flat_inert_pairs.h"
 
 namespace edvr {
 // Exact-bytecode recipes, not authorization to jitter a frame. The runtime
@@ -15,27 +16,8 @@ struct FlatProjectionRecipes {
         request.patchCount = 1; request.patches[0] = {layout, row * 16, {}};
     }
 };
-// Verified inert pairs from the Epic f1ea02fe outcome census. This is an
-// explicit classification, not a projection patch or a jitter admission.
-inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
-    return (vs == 0xFC1193AFFC596F74ull && ps == 0x258B95AC99520C1Full) ||
-           (vs == 0xE8FDC0D92EEBA6D7ull && ps == 0x258B95AC99520C1Full) ||
-           (vs == 0x53211E8C072CD02Eull && ps == 0xB403F48CB35D9739ull) ||
-           // Epic 6e9bde74: VS passes v0 straight to SV_Position; PS has
-           // only CB2[7] UV/filter constants and t0/t1/t2 samples.
-           (vs == 0xCFA91824129ECBBCull && ps == 0xFCFAD73924BF45B9ull) ||
-           // Epic 85bf7652: VS maps packed UV directly to clip space without
-           // a CB; PS filters texture neighbors with no projection consumer.
-           (vs == 0x525D47E3D5E2EFF4ull && ps == 0xF0BAE053476F8730ull) ||
-           // Epic 20260925_173622, EDHM chain: the same inert packed-UV clip
-           // VS; the mod-patched PS variant filters screen colour and samples
-           // a vPos-scaled mask. No projection consumer on either side.
-           (vs == 0x525D47E3D5E2EFF4ull && ps == 0x0D617929FED842F0ull) ||
-           // Epic ad7607c6: fullscreen color/effect composition. VS derives
-           // clip coordinates from vertex ID; PS samples/distorts screen
-           // color without scene-depth reconstruction or a camera matrix.
-           (vs == 0xB553BB479B7C0B97ull && ps == 0x68ABCB9FEF6CA66Cull);
-}
+// flatProjectionDrawUnchanged (the verified inert pairs) lives in flat_inert_pairs.h, which the
+// runtime model shares without the D3D headers this file needs.
 // The empty set, copied rather than constructed: the requests' patches have member initializers, so
 // constructing a set runs a constructor for each of its 24 patches, on every scene draw that asks.
 // The copy is a plain 1 KB memcpy with the same zero bytes.

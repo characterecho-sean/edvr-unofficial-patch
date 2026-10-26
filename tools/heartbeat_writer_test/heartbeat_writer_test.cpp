@@ -107,15 +107,16 @@ std::vector<Call> calls() {
     return g_calls;
 }
 
-void checkWriter(bool ok, const char* label, HeartbeatWriter* w) {
+void checkWriter(bool ok, const char* label, HeartbeatWriter* w, const char* extra = nullptr) {
     if (ok) { check(true, label); return; }
     const auto c = calls();
     std::ostringstream detail;
-    detail << "posts=" << w->posts() << " written=" << w->written() << " writing=" << w->writing()
+    detail << "posts=" << w->posts() << " written=" << w->written() << " closed=" << w->closed() << " writing=" << w->writing()
            << " exited=" << w->exited() << " inSink=" << g_inSink.load()
            << " gateWaitFailed=" << g_sinkWaitFailed.load() << " calls=" << c.size() << " frames=";
     for (size_t i = 0; i < c.size() && i < 24; ++i) detail << ' ' << c[i].frame;
     if (c.size() > 24) detail << " ... " << c.back().frame;
+    if (extra) detail << ' ' << extra;
     check(false, label, detail.str().c_str());
 }
 
@@ -337,12 +338,25 @@ void closeCases() {
     // writing. The rig closes the writer from a hook placed exactly there.
     {
         HeartbeatWriter* w = fresh();
-        w->setBetweenChecksHook([](void* a) { static_cast<HeartbeatWriter*>(a)->close(); }, w);
+        struct LateClose {
+            HeartbeatWriter* writer;
+            std::atomic<bool> hookFinished{false};
+        } lateClose{w};
+        w->setBetweenChecksHook([](void* a) {
+            auto* state = static_cast<LateClose*>(a);
+            state->writer->close();
+            state->hookFinished.store(true, std::memory_order_release);
+        }, &lateClose);
         w->post(1, 10);
-        Sleep(300);
-        check(calls().empty() && w->written() == 0 && w->closed(),
-              "H6.late-close: a close that lands between the writer's last look and the moment it marks itself writing still stops the write");
+        // Wait for this exact hook, then for the worker to finish its inner close check. A fixed sleep can sample
+        // before the worker is scheduled, or before a broken worker reaches its sink.
+        const bool hookFinished = waitFor([](void* a) {
+            return static_cast<LateClose*>(a)->hookFinished.load(std::memory_order_acquire);
+        }, &lateClose, 20000);
         stopAndWait(w);
+        checkWriter(hookFinished && calls().empty() && w->written() == 0 && w->closed(),
+                    "H6.late-close: a close that lands between the writer's last look and the moment it marks itself writing still stops the write",
+                    w, hookFinished ? "hookFinished=1" : "hookFinished=0");
     }
     // closeAndDrain waits for a write that has begun, and returns only when it is over.
     {

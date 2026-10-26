@@ -6,17 +6,16 @@
   game FPS claim. Complete cache deferred pending full invalidation proof. P-B
   early receipt discard verified; full build PASS, 170.6 s. Entry below.
 
-- **State: Feature 2 (variable-rate shading) retired 2026-09-29 (code removed,
-  184eee7f).** foveation.cpp, `experimental.foveation` and the seven
-  `advanced.foveation_*` keys are gone. The Feature 2 and Feature 3 text below
-  (rings, distance, passes, outer rate) is history. DLSS where you look
-  (Feature 6, `temporal_aa_fovea_*`) was removed in the 2026-10 key cull: the
-  feature shipped off, and its keys and code are gone.
-- **State: the desk probes retired 2026-09-29 (code removed, 72247cdf).**
-  `dlaaMotionProbe`, `dlaaCropProbe` and `edvrDlaaCostProbe`, which the smoke
-  harness ran and the Feature 6 entries below cite, are deleted with
-  tools/smoke's trained-pass block. The fovea geometry they exercised stays.
-- **State (older entries):** moved to Status detail below (2026-10-15), unchanged.
+- **2026-10-21 render thread on the P cores, ruled out as an EDVR fix (flat,
+  Panther Lake handheld, Proton):** pinned from outside the game, no build.
+  The result depends on the scene: concourse +13% (32.9 -> 37.3 fps),
+  station no change, settlement about -4% (29.8 -> 28.5-28.8 fps, `Render`
+  alone or with `dxvk-cs`). The CPU and GPU share one power limit, and the
+  P cores' extra power comes out of the GPU's clock (1824 -> 1539 MHz at the
+  settlement). Entries at the end.
+
+- **State (older entries):** moved to Status detail below (2026-10-15; the
+  Feature 2 and desk-probe retirements 2026-10-21), unchanged.
 - **Open:**
   - Feature 6's seam blend-band width: "a headset-on judgement" not yet
     made (under "What must be measured first").
@@ -62,6 +61,17 @@ Nothing here is implemented yet.*
 
 ## Status detail (moved out of Status 2026-09-29)
 
+- **State: Feature 2 (variable-rate shading) retired 2026-09-29 (code removed,
+  184eee7f).** foveation.cpp, `experimental.foveation` and the seven
+  `advanced.foveation_*` keys are gone. The Feature 2 and Feature 3 text below
+  (rings, distance, passes, outer rate) is history. DLSS where you look
+  (Feature 6, `temporal_aa_fovea_*`) was removed in the 2026-10 key cull: the
+  feature shipped off, and its keys and code are gone. (Moved out of Status 2026-10-21.)
+- **State: the desk probes retired 2026-09-29 (code removed, 72247cdf).**
+  `dlaaMotionProbe`, `dlaaCropProbe` and `edvrDlaaCostProbe`, which the smoke
+  harness ran and the Feature 6 entries below cite, are deleted with
+  tools/smoke's trained-pass block. The fovea geometry they exercised stays.
+  (Moved out of Status 2026-10-21.)
 - **Older State entries (moved out of Status 2026-10-15):** A pre-implementation design doc, mostly
   historical (the older State bullet and the 2026-09-23 entry: Status detail
   below). Feature 1's sharpening shipped in 0.14.0 as `render_sharpness`;
@@ -1875,3 +1885,152 @@ Local evidence is in the primary checkout's ignored
 `build/rc3-latest-review/forward_outputs_hardware_audit.txt`, its benchmark
 source and six raw result files. The audit starts with its current Status and
 records remaining cache contracts and fixture requirements.
+
+## 2026-10-21 render thread on the P cores (Linux handheld, flat)
+
+**Question:** on a CPU with two P cores, would putting Elite's render thread on
+them raise the frame rate? No build and no EDVR change: the test pins threads
+from outside the game.
+
+**Environment:** Intel Arc G3 Extreme (Panther Lake), no SMT: CPU 0-1 are P
+cores at 4.7 GHz, 2-9 E cores at 3.6 GHz, 10-13 LP-E cores at 3.1 GHz in their
+own cluster. Arc B390 iGPU. Proton Experimental with DXVK. Scheduler sched_ext
+`scx_lavd --performance --pinned-slice-us 500`. Flat profile (`/novr`), log
+v0.20.1-13-gdb52d367, parked at a station.
+
+**Method:** each thread's time on CPU (`/proc/<pid>/task/<tid>/schedstat`) and
+the CPU it last ran on (`stat` field 39), sampled every 20 ms over 88-90 s;
+`taskset -p -c 0,1 <tid>` to pin and `-c 0-13` to undo; frame rate from `engine
+motion: draw side over 30 s, N frames`. Elite and DXVK name their threads, so
+Linux tools show `Render`, `RunLoop`, `Worker 1`-`6` and `dxvk-cs` by name.
+
+**Placement as LAVD left it:** `Render` 52% of a core, 13-15% of its running
+samples on a P core, 83-84% on an E core, 0-1% on LP-E. `RunLoop` 33-36%.
+`dxvk-cs` 16%, 32-36% on LP-E. Workers 13% each, 30-50% on LP-E. Process total
+about 210% of one CPU of 14.
+
+| Leg | Pinned to CPU 0-1 | Frames per 30 s (clean windows) |
+|---|---|---|
+| A | none | 1288, 1216, 1053 |
+| B | `Render` | 1225, 1283, 1195 |
+| C | `Render` and `dxvk-cs` | 1400, 1571 |
+| A' | none | 1381, 1402 |
+
+Windows that straddle a change are left out. Pinned, `Render` ran on a P core
+in 100% of samples and its share fell to 42-44% of a core, but per frame it was
+about 11 ms either way (10.7 pinned, 11.1-12.7 unpinned). Under the power limit
+below, CPU 1 was sampled at 2.35 GHz, so the P core's speed advantage was
+small. The frame rate drifted with the scene from 1053 to 1571 frames a window
+while parked, and no pinned leg separates from the baselines on either side: B
+sits inside A, and C's 1400 matches A' at 1381-1402.
+
+**Why:** `Render` is busy about 11 ms of a 19-28 ms frame, so it is not the
+limit at this spot. The GPU is: it requests 2300 MHz and runs at 1650-1800,
+with throttle reason `pl2` (package power limit, `tile0/gt0/freq0/throttle`),
+and its work span is 15-22 ms a frame. The CPU and GPU share one package
+budget, so a faster render thread buys nothing here, and a P core at 4.6 GHz
+spends more of that budget.
+
+ruled out: pinning the render thread, alone or with `dxvk-cs`, to the P cores
+on the Panther Lake handheld at a station in flat, because the GPU is
+power-limited there and `Render` is idle about half of each frame; the frame
+rate did not move above the scene's drift.
+
+**Open:** a CPU-bound spot is not tested. On the RTX 5090 rig the settlement
+limit was the render thread's draw submission
+(engine-render-performance-2026-09-19.md). Check the signature first: `Render`
+near 100% of a core, and the GPU's throttle `reasons` not a power limit. Only
+then is a pin worth an A/B there, with legs of at least three windows in
+A-B-A-B order.
+
+### 2026-10-21 the concourse: the pin raises the frame rate 13%
+
+Same device, process and build as the station entry above, on foot in the
+station concourse, standing still. LAVD ran in scx_loader's Gaming mode
+(`scx_lavd --performance --pinned-slice-us 500`). Signature first: `Render`
+used 72% of a core at 26-33 fps, and the GPU requested 1650 MHz of its 2300
+maximum. The GPU was not asking for full clock, so it was not the limit.
+`Render` was not near 100% of a core, as the entry above asked for; the GPU
+requesting less than its maximum was the better sign.
+
+Legs A-B-A-B-A, each exactly three 30 s windows, switched 0.3 s after a window
+boundary so that no window straddles a change. B pins `Render` and `dxvk-cs`
+together to CPU 0-1; A leaves both on all CPUs. Each leg sampled the threads
+every 20 ms and the GPU every 0.5 s.
+
+| Leg | Frames per 30 s | `Render`, % of a core | GPU actual / requested MHz | `pl1` samples |
+|---|---|---|---|---|
+| A | 1002, 927, 896 | 70.7 | 1520 / 1640 | 15% |
+| B | 1128, 1102, 1059 | 61.7 | 1412 / 1595 | 69% |
+| A | 1055, 984, 937 | 68.6 | 1556 / 1610 | 11% |
+| B | 1085, 1145, 1197 | 59.3 | 1372 / 1765 | 78% |
+| A | 1000, 1042, 1037 | 70.2 | 1424 / 1413 | 0% |
+
+All six B windows are above all nine A windows: A means 987 frames (32.9 fps,
+30.4 ms), B 1119 (37.3 fps, 26.8 ms), +13%. Each B leg is above the A legs on
+both sides of it. `Render`'s own work fell from about 21.2 ms a frame to 16.2.
+The P cores ran at 3.6-4.0 GHz while pinned, not 4.7, because the package was
+at its power limit (`pl1` in 69-78% of B samples). The GPU ran slower in B
+(1372-1412 MHz against 1424-1556) and the frame rate still rose, so on the
+concourse the render path is the limit and the GPU is not.
+
+The station result above is not contradicted: there the GPU was the limit and
+the pin had nothing to gain. One rule covers both: the P cores help where
+`Render` is the frame's critical path.
+
+**Open, in order:**
+- Attribution: B moved two threads. A leg pinning `Render` alone says how much
+  of the gain is its own.
+- The root cause is placement: LAVD in Gaming mode leaves `Render` on an E core
+  about 88% of the time. Compare the stock kernel scheduler (`scxctl stop`;
+  ITMT is enabled and prefers CPU 1 then 0) and LAVD's Auto mode on the
+  concourse, unpinned. If either keeps `Render` on a P core by itself without
+  losing elsewhere, the fix is system configuration and EDVR needs no code.
+- Only if no scheduler does it: EDVR pinning its own render thread on Proton.
+  EDVR knows that thread, because its hooks run on it. It would need the CPU's
+  core types from inside Wine (whether Wine reports `EfficiencyClass` is
+  unchecked) and a Windows A/B before it runs there, where Thread Director
+  already places threads.
+
+### 2026-10-21 a settlement: the pin costs about 4%
+
+Same device, build and scheduler (LAVD Gaming mode), after a game restart, at a
+settlement, standing still. Before the run, `Render` used 72% of a core at
+30-34 fps. Legs A-B-C-A-C-B-A, three 30 s windows each, aligned as on the
+concourse: A unpinned, B `Render` and `dxvk-cs` on CPU 0-1, C `Render` alone on
+CPU 0-1.
+
+| Leg | Frames per 30 s | `Render`, % of a core | GPU actual / requested MHz | `pl1` samples |
+|---|---|---|---|---|
+| A | 883, 912, 924 | 70.3 | 1914 / 2058 | 39% |
+| B | 833, 853, 825 | 49.7 | 1486 / 1762 | 44% |
+| C | 867, 906, 905 | 52.0 | 1589 / 1882 | 40% |
+| A | 919, 901, 895 | 70.6 | 1907 / 2082 | 11% |
+| C | 821, 827, 861 | 47.9 | 1426 / 1836 | 68% |
+| B | 889, 857, 880 | 51.7 | 1655 / 2021 | 72% |
+| A | 886, 829, 896 | 67.0 | 1651 / 1891 | 44% |
+
+A means 894 frames (29.8 fps), B 856 (28.5 fps, -4%), C 864 (28.8 fps, -3%).
+Three of the four pinned legs are below the A legs beside them and the fourth
+(the last B) equals its neighbour. `Render`'s own work fell from about 23.5 ms
+a frame to 17.5, the same speed-up as on the concourse, but the GPU's actual
+clock fell from 1824 MHz (A mean) to 1539 (pinned mean). Unpinned, the GPU here
+requested 1891-2082 MHz of its 2300, against 1413-1640 on the concourse: it had
+little headroom, so the power the P cores took came out of the GPU's clock.
+`Render` alone (C) and `Render` with `dxvk-cs` (B) did the same.
+
+The three spots fit one mechanism: the CPU and GPU share the package power
+limit, and a P core spends more of it per unit of work. Pinning gives the
+render thread speed and takes GPU clock in exchange. That gains where the GPU
+has headroom (concourse, +13%), does nothing where the GPU was the limit
+(station), and loses where both are near their limit (settlement, -4%).
+
+ruled out: a static P-core pin of the render thread as an EDVR fix on the
+Panther Lake handheld, because it trades GPU clock for render-thread speed
+under the shared power limit: +13% on the concourse, about -4% at a settlement,
+nothing at a station.
+
+The scheduler comparison in the concourse entry loses its point for the same
+reason: a scheduler that put `Render` on a P core would make the same trade.
+Splitting the power budget between CPU and GPU belongs to the platform's power
+management, not to EDVR.

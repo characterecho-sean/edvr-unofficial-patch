@@ -49,7 +49,7 @@ than the middle does; if they look softer than the middle at
 
 **The intro movie and the splash screen follow the same setting** (design:
 intro-video.md, 2026-10-01). EDVR places the movie's quad itself
-(`fix.intro_video = screen`), so above 0 it is drawn as the same bent strip,
+(`visual.intro_video = screen`), so above 0 it is drawn as the same bent strip,
 with the depth axis added to the placement it builds. The splash is the game's
 own world-space panel: EDVR copies its placement constants (again every 60
 frames while they read as anything but a world-space panel), reads from them the

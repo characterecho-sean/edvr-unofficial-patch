@@ -4,14 +4,14 @@
 //   --dry-run    the same run except the one check that writes a log file in the temp folder (V5.m-p), for the gate's --dry-run convention
 //   --self-test  every check; the optional argument is the repository root, where the glue is read as text (the mutation tool hands it a temp root holding an edited copy)
 //
-// The pure half runs on a fake command list laid out at the real offsets (a model of SetVertexBuffer 0x1404E9D70 and of FlushIA's slot loop 0x140522A50, written from the
+// The pure half runs on a fake command list laid out at the real offsets (a model of SetVertexBuffer 0x1404E9E10 and of FlushIA's slot loop 0x140522B50, written from the
 // disassembly in analysis\decomp\scanner_vb_dump_*). The hook half is the production hook.cpp compiled with EDVR_VERTEX_RESYNC_TEST: the real CodeHook patches a synthetic
 // function that begins with the real 16-byte prologue of FlushIA, the real relay runs, the real SEH-guarded repair runs before the original. The repair has no key: there is
 // no off to test. Cases ("V<case>.<what>"; mutants.py names the case that must catch each mutation):
 //   V1  the failing sequence replayed (resolve binds Q; two zero-slot draws zero the applied slot; the second eye's SetVertexBuffer(Q) is skipped): stock binds (NULL, 20, 0);
 //       repaired it binds Q with the desired offset; slots at or above the layout's count, a null desired slot, a count above 16, a null pointer anywhere, and a healthy list
 //       are left alone
-//   V2  the gate and the prologue: the PE pair, the 16 bytes (every position), the length
+//   V2  the gate and the prologue: the PE header read, FlushIA found (the constant on build 334925, by signature on another build), the 16 bytes
 //   V3  the instruments: the exact lines (60 s, heartbeat, session, first sighting), the windows (60 s and 10 min, zero counts included), the flush counter, the sighting cap
 //   V4  the hook end to end on a synthetic FlushIA: a wrong prologue is refused with a line and nothing patched, and nothing armed says nothing at all; the right one arms
 //       (stolen = 5); the original sees the repaired cache; flushes are counted; the sightings are capped
@@ -31,12 +31,30 @@
 #include <vector>
 
 #include "config.h"
+#include "game_build.h"
 #include "log.h"
 #include "vertex_resync_core.h"
 #include "vertex_resync_hook.h"
 
+// The rig links no resolver (src\common\game_build.cpp); these stand in for it. They play build 334925 (an address is where it is, a pin is an exact compare) until a
+// check clears g_rigResolves to play an unknown build in which nothing is found by signature.
+static bool g_rigResolves = true;
 namespace edvr {
 void breadcrumb(const char*) {}   // production guard.cpp's crash-channel dependency (proxy.cpp), as the other rigs stub it
+bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *stamp = 0; if (size) *size = 0; return true; }
+bool gameBuildKnown() noexcept { return g_rigResolves; }
+const char* gameBuildText() noexcept { return g_rigResolves ? "build 334925" : "unknown build (rig)"; }
+uintptr_t gameRva(uint32_t knownRva) noexcept { return g_rigResolves ? knownRva : 0; }
+bool gameRvasFound(const uint32_t* knownRvas, size_t n, uint32_t* firstMissing) noexcept {
+    if (firstMissing) *firstMissing = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (gameRva(knownRvas[i]) == 0) {
+            if (firstMissing) *firstMissing = knownRvas[i];
+            return false;
+        }
+    return true;
+}
+bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept { return std::memcmp(got, pin, n) == 0; }
 }  // namespace edvr
 
 namespace vr = edvr::vresync;
@@ -108,7 +126,7 @@ struct FakeList {
     }
     uint8_t* wrapperPtr(int i) { return i < 0 ? nullptr : wrappers[i].bytes; }
 
-    // SetVertexBuffer (0x1404E9D70): compares ONLY the desired state; on a change writes desired and applied together and sets dirty bit 0x20.
+    // SetVertexBuffer (0x1404E9E10): compares ONLY the desired state; on a change writes desired and applied together and sets dirty bit 0x20.
     void setVertexBuffer(uint32_t slot, uint8_t* wrapper, uint32_t offset, uint32_t over = 0xFFFFFFFFu) {
         const uint64_t w = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(wrapper));
         if (vr::load64(list + 0x60 + 8 * slot) == w && vr::load32(list + 0xE0 + 4 * slot) == offset && vr::load32(list + 0x120 + 4 * slot) == over) return;   // skipped
@@ -125,7 +143,7 @@ struct FakeList {
         }
         vr::store32(list + 0x488 + 4 * slot, 0);
     }
-    // FlushIA's vertex-buffer half (0x140522A50): strides from the desired state, the "fewer slots" zeroing of the applied arrays, then the bind from the applied arrays.
+    // FlushIA's vertex-buffer half (0x140522B50): strides from the desired state, the "fewer slots" zeroing of the applied arrays, then the bind from the applied arrays.
     // `dirty` is the word at list+0x1E8: with none of the mask's bits the function returns without binding.
     bool flush() {
         uint8_t* d = desired();
@@ -296,22 +314,20 @@ void caseReplay() {
 
 // ---- V2 ----------------------------------------------------------------------------------------------------------------------------------------------------
 void caseGate() {
-    // The bytes spelled out again here, not copied from the header: build 332841's FlushIA at EliteDangerous64.exe+0x522A50, read from the exe.
+    // The bytes spelled out again here, not copied from the header: build 334925's FlushIA at EliteDangerous64.exe+0x522B50, read from the exe.
     const uint8_t exe[16] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B, 0xF8};
-    check(vr::prologueMatches(exe, 16), "V2.a the 16 bytes read from the exe are the prologue the hook checks");
-    bool everyByteMatters = true;
-    for (size_t i = 0; i < 16; ++i) {
-        uint8_t wrong[16];
-        std::memcpy(wrong, exe, 16);
-        wrong[i] ^= 0x01;
-        everyByteMatters = everyByteMatters && !vr::prologueMatches(wrong, 16);
-    }
-    check(everyByteMatters, "V2.b a prologue that differs in any one of the 16 bytes is refused");
-    check(!vr::prologueMatches(exe, 15) && !vr::prologueMatches(nullptr, 16), "V2.c a short or missing buffer is refused");
-    check(vr::kFlushIaRva == 0x522A50u && vr::kPrologueBytes == 16, "V2.d the RVA is 0x522A50 (0x140522A50) and the check covers 16 bytes");
-    check(vr::identityMatches(1788384820u, 104894464u), "V2.e the PE pair of build 332841 passes");
-    check(!vr::identityMatches(1788384821u, 104894464u) && !vr::identityMatches(1788384820u, 104894465u) && !vr::identityMatches(0, 0),
-          "V2.f a different timestamp, a different image size or neither is refused");
+    check(vr::kPrologueBytes == 16 && std::memcmp(exe, vr::kFlushIaPrologue, 16) == 0, "V2.a the 16 bytes read from the exe are the prologue the hook checks");
+    check(vr::kFlushIaRva == 0x522B50u && vr::kPrologueBytes == 16, "V2.d the RVA is 0x522B50 (0x140522B50) and the check covers 16 bytes");
+    // The install decision (issue 124, the same rule as the store hook): the PE header read, FlushIA's address (the constant on build 334925, the signature match on an
+    // unknown build, 0 when none was found), the prologue read there, and the pin compare (gamePinMatches).
+    check(vr::installDecision(true, vr::kFlushIaRva, exe, true) == vr::Install::kInstall, "V2.e build 334925's FlushIA with its pin installs the hook");
+    check(vr::installDecision(true, 0x523B50u, exe, true) == vr::Install::kInstall,
+          "V2.g an unknown build's FlushIA found by signature, its pin matching, installs the hook");
+    check(vr::installDecision(true, 0, exe, true) == vr::Install::kNotFound && vr::installDecision(true, 0, nullptr, false) == vr::Install::kNotFound,
+          "V2.h an unknown build whose FlushIA was not found by signature is refused, whatever was read");
+    check(vr::installDecision(true, vr::kFlushIaRva, exe, false) == vr::Install::kWrongPrologue, "V2.b a found FlushIA whose prologue is not the pin is refused");
+    check(vr::installDecision(false, vr::kFlushIaRva, exe, true) == vr::Install::kUnreadable && vr::installDecision(true, vr::kFlushIaRva, nullptr, false) == vr::Install::kUnreadable,
+          "V2.f an unreadable PE header or prologue is refused");
 }
 
 // ---- V3 ----------------------------------------------------------------------------------------------------------------------------------------------------
@@ -329,9 +345,9 @@ void caseInstruments() {
     check(std::strcmp(line, "vertex resync: armed; 12 stale vertex-buffer bindings repaired this session (5000000000 flushes seen)") == 0, "V3.d the session line is exactly the one asked for");
     vr::Sighting s;
     s.slot = 2; s.wrapper = 0xABC0; s.native = 0xDEF0; s.applied = 0x0;
-    vr::formatSightingLine(line, sizeof(line), 3, s, 0x7F0000, 1, 4242, 2, "0x522A50/0x510404");
+    vr::formatSightingLine(line, sizeof(line), 3, s, 0x7F0000, 1, 4242, 2, "0x522B50/0x5103A4");
     check(has(line, "vertex resync: stale binding 3 of 8: slot 2, list 0x7F0000, desired wrapper 0xABC0, native buffer 0xDEF0, applied buffer 0x0, layout slots 1, thread 4242, repaired; "
-                    "game stack (2 frames) 0x522A50/0x510404"),
+                    "game stack (2 frames) 0x522B50/0x5103A4"),
           "V3.e a first-sighting line carries the slot, the list, the desired wrapper, the native buffer, the applied value, the layout count, the thread and the game stack");
     vr::formatSightingLine(line, sizeof(line), 1, s, 1, 1, 1, 0, "");
     check(has(line, "(none in the game's image)"), "V3.f ...and the empty stack is said so");
@@ -434,7 +450,7 @@ void caseHook() {
         stale(f);
         check(p && callFlush(reinterpret_cast<FlushFn>(p), f) == 0, "V4.a before the hook the synthetic flush sees the stale cache (applied[0] = NULL): the control");
     }
-    // V4.b a function whose prologue is not build 332841's is refused: one line, nothing patched, and it is not retried
+    // V4.b a function whose prologue is not build 334925's is refused: one line, nothing patched, and it is not retried
     uint8_t wrongBytes[16];
     std::memcpy(wrongBytes, exe, 16);
     wrongBytes[6] ^= 0x01;
@@ -445,7 +461,7 @@ void caseHook() {
     std::memcpy(before, wrongFn, 64);
     vertexResyncInstall();
     check(wrongFn && std::memcmp(before, wrongFn, 64) == 0 && !vertexResyncTestState().installed && countLinesWith("NOT installed -- the 16 bytes") == 1,
-          "V4.b a function whose prologue is not build 332841's is refused: one line, nothing patched, not installed");
+          "V4.b a function whose prologue is not build 334925's is refused: one line, nothing patched, not installed");
     const size_t linesAfterRefusal = vertexResyncTestLineCount();
     vertexResyncInstall();
     check(vertexResyncTestLineCount() == linesAfterRefusal && vertexResyncTestState().attempted, "V4.c a refusal is final: asking again says nothing and tries nothing");
@@ -458,6 +474,18 @@ void caseHook() {
         check(countLinesWith("vertex resync: armed;") == 0 && countLinesWith("stale vertex-buffer bindings") == 0 && vertexResyncTestLineCount() == linesAfterRefusal &&
                   vertexResyncTestExitLine(out, sizeof(out)) == 0,
               "V4.d a hook that never armed says no heartbeat, no session line and no exit line: the heartbeat is for an armed hook only");
+    }
+
+    {
+        // V4.k an unknown build in which FlushIA is not found by signature (the test target off, so the resolver is asked): one line, not installed, nothing patched
+        g_rigResolves = false;
+        vertexResyncTestReset();
+        vertexResyncTestSetTarget(0);
+        vertexResyncInstall();
+        check(!vertexResyncTestState().installed && vertexResyncTestLineCount() == 1 && countLinesWith("NOT installed -- unknown build (rig), and Frontier's input-assembler flush "
+              "(0x522B50 in build 334925) was not found by signature") == 1,
+              "V4.k an unknown build whose FlushIA is not found by signature is refused with one line and nothing patched");
+        g_rigResolves = true;
     }
 
     // V4.e the right function arms (stolen = the first instruction, 5 bytes)

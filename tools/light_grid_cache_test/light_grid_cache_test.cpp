@@ -60,7 +60,7 @@ struct Ctx {
 uint64_t ld64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
 void st64(uint8_t* p, uint64_t v) { std::memcpy(p, &v, 8); }
 
-// The game's vector (0x5954A0): capacity at +0, size at +0x10, data at +0x18; growth past the capacity reallocates, new 32-byte elements are filled with the default.
+// The game's vector (0x5955A0): capacity at +0, size at +0x10, data at +0x18; growth past the capacity reallocates, new 32-byte elements are filled with the default.
 void vecResize(Heap& h, uint8_t* hdr, uint64_t newSize, size_t elem) {
     const uint64_t cap = ld64(hdr), size = ld64(hdr + 0x10);
     auto* data = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(ld64(hdr + 0x18)));
@@ -334,34 +334,45 @@ void plant(lg::Cache& c, int g, const uint8_t* key, bool populated = true) {
 }
 
 void testIdentityAndPin() {
+    // The install decision (issue 124, the same rule as the store hook): the PE header read, every address the cache binds found (the constants on build 334925, the signature
+    // resolver's answers on an unknown build, 0 for one it found none of), the sixteen bytes read at the builder, and the pin compare (gamePinMatches).
     uint8_t good[16];
     std::memcpy(good, lg::kPrologue, 16);
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 16) == lg::Install::kInstall, "the pinned build and prologue install");
-    check(lg::installDecision(false, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 16) == lg::Install::kUnreadable, "an unreadable header refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, nullptr, 16) == lg::Install::kUnreadable, "an unreadable entry refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 8) == lg::Install::kUnreadable, "a short read of the entry refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp + 1, lg::kExpectedImageSize, good, 16) == lg::Install::kWrongIdentity, "another PE stamp refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize + 4096, good, 16) == lg::Install::kWrongIdentity, "another image size refuses");
-    uint8_t moved[16];
-    std::memcpy(moved, good, 16);
-    moved[15] ^= 1;
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, moved, 16) == lg::Install::kWrongPrologue, "one wrong prologue byte refuses");
-    // the identity is judged before the bytes: a wrong build whose bytes also differ is a wrong build
-    check(lg::installDecision(true, 1, 2, moved, 16) == lg::Install::kWrongIdentity, "the identity is judged first");
-    check(lg::kExpectedTimestamp == 1788384820u && lg::kExpectedImageSize == 104894464u && lg::kBuilderRva == 0x58B150u, "the pinned constants are build 332841's");
+    lg::Addresses known;   // build 334925: every address its constant
+    known.builder = lg::kBuilderRva; known.refresh = lg::kRefreshRva; known.copy = lg::kCopyRva; known.overridePath = lg::kOverridePathRva; known.tile = lg::kTileRva;
+    known.slices = lg::kSlicesRva; known.forceRebuild = lg::kForceRebuildRva; known.overrideNear = lg::kOverrideNearRva; known.overrideFar = lg::kOverrideFarRva;
+    check(lg::firstMissing(known) == nullptr && lg::installDecision(true, known, good, true) == lg::Install::kInstall, "build 334925's addresses and the builder's pin install");
+    lg::Addresses moved9;   // an unknown build: every address found, none where it was
+    moved9.builder = 0x59B250u; moved9.refresh = 0x4F40F0u; moved9.copy = 0x57B560u; moved9.overridePath = 0x5E83F7Eu; moved9.tile = 0x5E83F80u; moved9.slices = 0x5E83F90u;
+    moved9.forceRebuild = 0x5F3A652u; moved9.overrideNear = 0x5E83F94u; moved9.overrideFar = 0x5E83F98u;
+    check(lg::installDecision(true, moved9, good, true) == lg::Install::kInstall, "an unknown build with every address found by signature and the pin matching installs");
+    check(lg::installDecision(false, known, good, true) == lg::Install::kUnreadable, "an unreadable header refuses");
+    check(lg::installDecision(true, known, nullptr, false) == lg::Install::kUnreadable, "an unreadable entry refuses");
+    check(lg::installDecision(true, known, good, false) == lg::Install::kWrongPrologue, "one wrong prologue byte refuses");
+    // every address is needed: one the resolver did not find, whichever it is, refuses (and says which), whatever else is right
+    uint8_t refusals = 0;
+    for (int which = 0; which < 9; ++which) {
+        lg::Addresses a = moved9;
+        uintptr_t* fields[9] = {&a.builder, &a.refresh, &a.copy, &a.overridePath, &a.tile, &a.slices, &a.forceRebuild, &a.overrideNear, &a.overrideFar};
+        *fields[which] = 0;
+        if (lg::installDecision(true, a, good, true) == lg::Install::kNotFound && lg::firstMissing(a) != nullptr) ++refusals;
+    }
+    check(refusals == 9, "an unknown build in which any one of the builder, the refresh, the copy constructor or the six globals was not found refuses");
+    check(lg::installDecision(true, lg::Addresses{}, good, true) == lg::Install::kNotFound && lg::installDecision(true, lg::Addresses{}, nullptr, false) == lg::Install::kNotFound,
+          "nothing found: refused as not found, whatever was read");
+    check(lg::installDecision(false, lg::Addresses{}, good, true) == lg::Install::kUnreadable, "the header is judged before the addresses");
+    check(lg::kBuilderRva == 0x58B250u, "the builder's constant is build 334925's");
     const uint8_t pin[16] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8};
     check(std::memcmp(pin, lg::kPrologue, 16) == 0, "the prologue is the sixteen bytes read from the exe");
     // the view-block refresh the glue may run ahead of the rows is pinned the same way
-    uint8_t refresh[16];
-    std::memcpy(refresh, lg::kRefreshPrologue, 16);
-    check(lg::refreshPinMatches(refresh, 16) && lg::kRefreshRva == 0x4F2FF0u, "the refresh function's sixteen bytes match the pin");
-    refresh[7] ^= 1;
-    check(!lg::refreshPinMatches(refresh, 16) && !lg::refreshPinMatches(nullptr, 16) && !lg::refreshPinMatches(refresh, 8), "a changed byte, a null read or a short read does not");
+    check(lg::kRefreshRva == 0x4F30F0u && lg::kCopyRva == 0x57A560u, "the refresh and copy constants are build 334925's");
     const uint8_t refreshPin[16] = {0x48, 0x8B, 0xC4, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x29, 0x70, 0xE8, 0x48};
     check(std::memcmp(refreshPin, lg::kRefreshPrologue, 16) == 0, "the refresh pin is the sixteen bytes read from the exe");
+    const uint8_t copyPin[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x0F, 0x10, 0x02, 0x48, 0x8B, 0xF9};
+    check(std::memcmp(copyPin, lg::kCopyPrologue, 16) == 0, "the copy constructor's pin is the sixteen bytes read from the exe");
 }
 
-// The routine at 0x48AAAE8, transcribed instruction by instruction with the registers as variables (edx, eax, ecx, r8d), as an independent reading to hold the core's gameCeilf to.
+// The routine at 0x48AD588, transcribed instruction by instruction with the registers as variables (edx, eax, ecx, r8d), as an independent reading to hold the core's gameCeilf to.
 float asmCeilf(float xmm0) {
     uint32_t r8d = 0, edx, eax, ecx;
     std::memcpy(&edx, &xmm0, 4);   // movss [rsp+8], xmm0 / mov edx, [rsp+8]
@@ -369,23 +380,23 @@ float asmCeilf(float xmm0) {
     eax &= 0x7FFFFFFFu;            // btr eax, 0x1f
     r8d = edx != eax ? 1u : 0u;    // cmp edx, eax / setne r8b
     auto fromBits = [](uint32_t b) { float f; std::memcpy(&f, &b, 4); return f; };
-    if (eax >= 0x4B800000u) return xmm0;               // jb not taken: 48AAB08 jbe 48AAB6E (infinity, NaN excepted) returns xmm0
-    if (eax < 0x3F800000u) {                           // 48AAB16 jae 48AAB40 not taken
-        if (eax == 0) return xmm0;                     // je 48AAB6E
-        if (r8d != 0) return fromBits(0x80000000u);    // 48AAB26
-        return 1.0f;                                   // 48AAB36: movss xmm0, [0x4DDE614]
+    if (eax >= 0x4B800000u) return xmm0;               // jb not taken: 48AD648 jbe 48AD6AE (infinity, NaN excepted) returns xmm0
+    if (eax < 0x3F800000u) {                           // 48AD656 jae 48AD680 not taken
+        if (eax == 0) return xmm0;                     // je 48AD6AE
+        if (r8d != 0) return fromBits(0x80000000u);    // 48AD666
+        return 1.0f;                                   // 48AD676: movss xmm0, [0x4DE165C]
     }
-    eax = edx;                                         // 48AAB40
+    eax = edx;                                         // 48AD680
     ecx = 0x96;
     eax >>= 0x17;                                      // shr eax, 0x17
     ecx -= eax;                                        // sub ecx, eax
     eax = 0xFFFFFFFFu;                                 // or eax, -1
     eax <<= (ecx & 31u);                               // shl eax, cl
     eax &= edx;                                        // and eax, edx
-    xmm0 = fromBits(eax);                              // 48AAB53..57
+    xmm0 = fromBits(eax);                              // 48AD693..57
     if (r8d != 0) return xmm0;                         // test r8d, r8d / jne
     if (edx == eax) return xmm0;                       // cmp edx, eax / je
-    return xmm0 + 1.0f;                                // addss xmm0, [0x4DDE614]
+    return xmm0 + 1.0f;                                // addss xmm0, [0x4DE165C]
 }
 
 void testGridCeil() {
@@ -437,7 +448,7 @@ void testGridCeil() {
         sameAsCeil = sameAsCeil && (a == std::ceil(x) || (a == 0.0f && std::ceil(x) == 0.0f));
         ++compared;
     }
-    check(compared > 100000 && same, "gameCeilf equals the transcription of 0x48AAAE8 on every quotient and 400000 bit patterns, bit for bit");
+    check(compared > 100000 && same, "gameCeilf equals the transcription of 0x48AD588 on every quotient and 400000 bit patterns, bit for bit");
     check(sameAsCeil, "and both equal ceilf (the routine is ceilf)");
     check(lg::gameCeilf(0.5f) == 1.0f && lg::gameCeilf(16.0f) == 16.0f && lg::gameCeilf(16.0001f) == 17.0f && lg::gameCeilf(-0.5f) == 0.0f && lg::gameCeilf(0.0f) == 0.0f,
           "spot values: 0.5 gives 1, 16 gives 16, 16.0001 gives 17, -0.5 gives -0, 0 gives 0");

@@ -658,12 +658,12 @@ int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpec
   return failures?1:0;
 }
 
-// Explorer Cam's frame tick through the real proxy in the MINIMAL configuration (review 2026-10-08, finding 3). With fix.black_void off, fix.panel_distance 1,
+// device_hook.cpp's own frame ticks through the real proxy in the MINIMAL configuration (review 2026-10-08, finding 3, first written for Explorer Cam's tick). With fix.black_void off, fix.panel_distance 1,
 // the camera-buffer tap off (the test-only variable EDVR_TEST_NO_CAMERA_TAP=1, set by tools\test_openxr_transport.py), app_gpu_timing off and panel_hooks_always off vScreen installs transport-only: it has no State and vScreenFrameBoundary never runs, so a tick
-// carried by it never ran and F5 did nothing, whatever hotkey.explorer_cam held. This presents ordinary frames and leaves the DLL's own log to the driver
-// (tools\test_openxr_transport.py), which asks for the tick's lines. With a replacement ini, edvr.ini beside the proxy is rewritten with a fresh timestamp
-// after the first phase: hotkey.explorer_cam starting EMPTY and bound while the game runs.
-int explorerLive(const std::wstring& proxyPath,const std::wstring& replacement) {
+// carried by it never ran (Explorer Cam's F5 did nothing, until its tick moved). This presents ordinary frames and leaves the DLL's own log to the driver
+// (tools\test_openxr_transport.py), which asks for the ticks' lines (native on foot's first boundary, the AA comparison key's binding). With a replacement ini, edvr.ini beside the proxy is
+// rewritten with a fresh timestamp after the first phase: hotkey.compare_aa starting EMPTY and bound while the game runs.
+int tickLive(const std::wstring& proxyPath,const std::wstring& replacement) {
   Watchdog watchdog;
   check(edvr::reportNoD3D11Mapped("openxr_present_test"),"no d3d11.dll is mapped before the rig loads the proxy");
   HMODULE proxy=LoadLibraryExW(proxyPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); check(proxy!=nullptr,"load built graphics proxy"); if (!proxy) return 1;
@@ -684,7 +684,7 @@ int explorerLive(const std::wstring& proxyPath,const std::wstring& replacement) 
   Sleep(700);   // the log's flusher (250 ms)
   const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
   check(hooks&&hooks()==0,"vScreen installed no optional hooks: its frame boundary does not exist in this configuration");
-  if (!failures) std::puts("explorer_live: PASS (real WARP graphics, vScreen transport-only)");
+  if (!failures) std::puts("tick_live: PASS (real WARP graphics, vScreen transport-only)");
   return failures?1:0;
 }
 }
@@ -697,8 +697,8 @@ int wmain(int argc, wchar_t** argv) {
     const auto mode=!std::wcscmp(argv[3],L"--transport-only")?HookExpectation::TransportOnly:HookExpectation::Unavailable;
     const int r=selfTest(argv[2],mode); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
   }
-  if ((argc==4||argc==5) && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2]) && !std::wcscmp(argv[3],L"--explorer-live") && (argc==4||absolute(argv[4]))) {
-    const int r=explorerLive(argv[2],argc==5?std::wstring(argv[4]):std::wstring()); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
+  if ((argc==4||argc==5) && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2]) && !std::wcscmp(argv[3],L"--tick-live") && (argc==4||absolute(argv[4]))) {
+    const int r=tickLive(argv[2],argc==5?std::wstring(argv[4]):std::wstring()); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
   }
-  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL [--transport-only|--unavailable|--explorer-live [ABSOLUTE_REPLACEMENT_INI]]\n",stderr); return 2;
+  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL [--transport-only|--unavailable|--tick-live [ABSOLUTE_REPLACEMENT_INI]]\n",stderr); return 2;
 }

@@ -3,6 +3,7 @@
 #include "flat_compute_readback.h"
 #include "flat_capture_directory.h"
 #include "../common/config.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
 #include <wrl/client.h>
 #include <array>
@@ -88,7 +89,11 @@ class FlatResolveInputCapture {
         if(_wfopen_s(&file,(name+L".tmp").c_str(),L"wb") || !file)return false;
         bool ok=std::fwrite(body.data(),1,body.size(),file)==body.size();
         ok=std::fclose(file)==0 && ok;
-        if(ok)ok=MoveFileExW((name+L".tmp").c_str(),name.c_str(),MOVEFILE_REPLACE_EXISTING)!=FALSE;
+        // The classic replace is refused while any handle to the target is open (a scanner or reader on the
+        // just-written "queued" body); the shared POSIX-semantics replace gets past one that shares DELETE
+        // and waits out one that does not.
+        if(ok)ok=replaceFileAtomic(name+L".tmp",name);
+        if(!ok)DeleteFileW((name+L".tmp").c_str());
         return ok;
     }
     bool session(const char* status) {

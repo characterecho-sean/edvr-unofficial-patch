@@ -559,7 +559,7 @@ void caseR2andR4Movie(Gpu& g) {
     MovieGame game;
     game.cb[0] = makeCb(g, kStockL);
     game.cb[1] = makeCb(g, kStockR);
-    c.set("fix.intro_video", "screen");
+    c.set("visual.intro_video", "screen");
     setYaw(0.0);
     setCurvature("0.3");
     // The settle frames: the first composite of each buffer starts the readback of the game's constants, and four frame edges later the module binds.

@@ -240,7 +240,7 @@ refuses keeps running the pass's own history, but the refusal line gains
 "set temporal_aa = fsr for AMD's upscaler, which runs on any GPU". No
 `auto` until the field has judged FSR a safe default (D1).
 
-`fix.temporal_aa_model` (k, j, l, m, auto) stays NVIDIA's; under `fsr` it
+`fix.temporal_aa_model` (k, l, m; j and auto removed 2026-10-21) stays NVIDIA's; under `fsr` it
 is ignored and the panel hides the preset row. The fovea and periphery keys
 (`advanced.temporal_aa_fovea*`, `_periphery*`) belong to NGX's subrect crop
 path (dlaa.cpp:665-793); under `fsr` the full-frame path runs and one line

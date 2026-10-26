@@ -628,6 +628,9 @@ void blackPassSelfTest(bool owned) {
   }
 }
 
+// ---- F106: the left eye's share of the right eye's image: shareSelfTest, with the fixture and helpers above ----
+#include "share_cases.h"
+
 // The renderer is a diagnostic pass which must borrow the game's immediate
 // context without changing it.  Keep this probe deliberately independent of
 // the renderer's shaders and resources: it catches both missing state restore
@@ -945,6 +948,15 @@ void embeddedShaderPin() {
     check(c.size>4&&!std::memcmp(c.bytes,"DXBC",4),(label+" embedded bytes are DXBC").c_str());
     check(code&&code->GetBufferSize()==c.size&&!std::memcmp(code->GetBufferPointer(),c.bytes,c.size),(label+" embedded bytes equal a compile made now with the former call's arguments").c_str());
   }
+  // F106's share shader is new: no former call to freeze, so its embedded bytes are held to a compile of its own text made now, with the same arguments as the others.
+  {
+    ComPtr<ID3DBlob> code,errors;
+    const char* text=edvr::openxr::kStereoShareHlsl;
+    const HRESULT hr=D3DCompile(text,std::strlen(text),"EDVR left eye share",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&code,&errors);
+    check(SUCCEEDED(hr)&&code&&code->GetBufferSize()==sizeof(edvr::kStereoSharePsBytecode)&&
+          !std::memcmp(code->GetBufferPointer(),edvr::kStereoSharePsBytecode,sizeof(edvr::kStereoSharePsBytecode)),
+          "F106: the share shader's embedded bytes equal a compile of kStereoShareHlsl made now (source name, entry, profile and flags as the build's)");
+  }
   // The control the pin stands on: one byte of the text changes the compiled bytes (or fails to compile), so equality above is not vacuous.
   std::string tweaked=frozenBlitHlsl;const size_t at=tweaked.find("0.0031308");check(at!=std::string::npos,"stereo pin control anchor");
   if(at!=std::string::npos){tweaked[at+2]='1';ComPtr<ID3DBlob> code,errors;
@@ -991,6 +1003,8 @@ int selfTest(){
   fadeSelfTest(true);
   blackPassSelfTest(false);
   blackPassSelfTest(true);
+  shareSelfTest(false);
+  shareSelfTest(true);
   desktopStateSelfTest();
   embeddedShaderPin();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;

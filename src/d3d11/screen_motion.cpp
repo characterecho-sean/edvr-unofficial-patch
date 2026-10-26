@@ -1,4 +1,5 @@
 #include "screen_motion.h"
+#include "native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -426,9 +427,12 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     }
     if(clearTimed)g_gpu.eyeClear.timer.end(ctx);
     e.written=false;
+    // F36: the weapon's motion vectors follow fix.weapon_stability, except while native on foot is active (the key is untouched). Re-applied
+    // every frame: native on foot starts and stops between configure sweeps, and weaponMotionConfigure only resets on a change.
+    weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon && !edvr::nativeOnFootActive());
     if(consecutive) {
         bool ui=g.uiFrame==g.frame && g.uiDraws && g.uiTarget.Get()==cr.Get();
-        bool weapon=g.weapon && g.stencilSrv;
+        bool weapon=g.weapon && !edvr::nativeOnFootActive() && g.stencilSrv;   // F36
         // The source pass's engine data (engine_velocity.h): its MRT6 slot
         // target, pool snapshot and scene constants this frame and last, or
         // nothing -- the shader then keeps today's camera term everywhere.

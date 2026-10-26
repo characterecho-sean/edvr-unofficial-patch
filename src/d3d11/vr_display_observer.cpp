@@ -28,6 +28,18 @@ void vrDisplayObserveWindow(void* hwnd) {
 
 void* vrDisplayGameWindow() { return g_hwnd.load(std::memory_order_acquire); }
 
+bool vrDisplayReadGameWindow(unsigned long long* style, long* clientWidth, long* clientHeight) {
+    void* h = g_hwnd.load(std::memory_order_acquire);
+    if (!h) return false;
+    const HWND hwnd = static_cast<HWND>(h);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    *style = static_cast<unsigned long long>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    *clientWidth = rc.right - rc.left;
+    *clientHeight = rc.bottom - rc.top;
+    return true;
+}
+
 void vrDisplayObserveFrame() {
     void* h = g_hwnd.load(std::memory_order_acquire);
     if (!h) return;

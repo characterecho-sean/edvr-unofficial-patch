@@ -8,10 +8,10 @@ Restates the journal below; update it whenever this doc changes. The old
 State, Open and Ruled-out bullets are verbatim in "Status detail".*
 
 - **State:**
-  - `fix.intro_video` defaults to `screen` (world-lock + FSR on the
+  - `visual.intro_video` defaults to `screen` (world-lock + FSR on the
     splash's screen), shipped since 2026-08-28 (f908be2); `skip` is the
     off-by-default alternative, SHIPPED v0.16.2, ~6 s saved not ~20 s.
-    Flat reads the key too (2026-10-14, BUILT, NOT FLOWN): only `skip` acts.
+    Flat reads it too (2026-10-14, NOT FLOWN): only `skip` acts. Formerly `fix.intro_video`.
   - Native OpenXR builds its session once inside `VR_InitInternal`, so the
     removed `fix.vr_handover = early` has no analogue; the movie already
     plays on the splash's screen, world-locked (2026-09-15 18:30 flight).
@@ -41,7 +41,7 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   viewport counter-move, exe-imports-only skip, resample cache key, the
   "DRAWING anyway" line, early handover natively, Phase A = 6.4 s, on-foot
   panel as a vscreen regression), reasons in "Status detail".
-- **Next flight:** Steam, `fix.intro_video = screen`, reading `intro video
+- **Next flight:** Steam, `visual.intro_video = screen`, reading `intro video
   lock: holding` and the surviving startup lines. The 2026-10 key cull
   deleted `advanced.intro_probe` and its `intro probe:` lines, so the
   ident-open -> first-composite latency cannot be measured again until a probe
@@ -65,7 +65,7 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
 *Verbatim from the Status block as it stood before 2026-09-29; the
 Status block above summarises it.*
 
-- **State:** (1) `fix.intro_video` defaults to `screen` (world-lock + FSR
+- **State:** (1) `visual.intro_video` defaults to `screen` (world-lock + FSR
   on the splash's screen), shipped since 2026-08-28 (f908be2); `skip` is
   the off-by-default alternative, SHIPPED v0.16.2, ~6 s saved not ~20 s.
   (2) The native OpenXR runtime builds its whole session once inside
@@ -783,7 +783,7 @@ The physics was read correctly at every stage -- from the shader
 disassembly, the constants, the frustum tangents. What went wrong was
 assumed: a handedness, a lifetime, a threshold, a mode string.
 
-## Not playing it at all: `fix.intro_video = skip` (built 2026-09-13, unflown)
+## Not playing it at all: `visual.intro_video = skip` (built 2026-09-13, unflown)
 
 Sean's ask: a fix option that skips the intro video completely, with the
 default left as the movie playing. `skip` is the third value of the existing
@@ -842,7 +842,7 @@ redirect rather than a refusal: answer the open with a one-frame WebM of
 EDVR's own, so the game plays a movie that is over at once.
 
 The flight can be a flat launch -- the intro plays without a headset and the
-d3d11 half loads regardless -- with `fix.intro_video = skip` in the ini
+d3d11 half loads regardless -- with `visual.intro_video = skip` in the ini
 before launch. The number to compare the WORKED line's seconds against is,
 from a `screen` session, the `intro video size: a rendered scene arrived`
 line's timestamp less the log's first line's.
@@ -1290,7 +1290,7 @@ manual recentre hotkey uses (`notifyGame=true`, so Elite gets the usual
 recentre VREvent) -- reusing rather than duplicating the mechanism. A
 poll that cannot act this frame (a frame open, or the reset-event queue
 full) leaves the request set and retries next frame rather than losing
-it. Known gap: `fix.intro_video = stock` (world-lock AND upscale both
+it. Known gap: `visual.intro_video = stock` (world-lock AND upscale both
 off) never calls `introPanelOnComposite` at all -- its caller gates on
 `introPanelWants()` -- so stock-mode users keep today's behaviour; not
 folded in, since stock is an explicit opt-out of the whole treatment.
@@ -1327,7 +1327,7 @@ today). Whoever writes those 80 bytes decides what can bend:
 
 | surface | placement | here |
 |---|---|---|
-| movie, `fix.intro_video = screen` (default) | EDVR's own (`buildWorldCb`), `cb2[3]` zero | bent: the z column is written, above 0 only |
+| movie, `visual.intro_video = screen` (default) | EDVR's own (`buildWorldCb`), `cb2[3]` zero | bent: the z column is written, above 0 only |
 | splash still; the menu's loops until a scene renders | the game's world-space constants (measured 2026-08-28: `cb2[0]` = (4.44444, 2.5), `cb2[3]` a unit column whose `w` has the opposite sign to `cb2[4].w`: +z' is toward the viewer) | bent once EDVR has read them, flat until then |
 | movie in `stock` / `head` mode | the game's SCREEN-space constants (`cb2[3]` = 0, w = 1) | flat: nothing to bend through |
 | loader dialogs | the game's own curved mesh, 5760 or 360 indices | out of scope |
@@ -1448,7 +1448,7 @@ tables: 16 (constants buffer, surface) pairs in the splash module, one
 cull-off state per distinct rasterizer state of the game (4 kept).
 
 **Next flight (one session, two launches):** Steam or Frontier, default
-`fix.intro_video = screen`, `fix.panel_curvature = 0.3`, then 0. Read
+`visual.intro_video = screen`, `fix.panel_curvature = 0.3`, then 0. Read
 `python tools\edvr_log.py --target steam --expect-build HEAD --grep
 "intro video curve|splash curve|intro curve|SURFACE strip|intro video
 size"` first. At 0.3 watch the movie, the splash, the loading dialogs
@@ -1592,7 +1592,7 @@ Request: skip the launch movie in flat, as VR can. The skip is profile-independe
 answers an `Ident_*.webm` open "not found"), so flat reuses it unchanged. What
 changed:
 
-- **Key:** the same `fix.intro_video`, now on the flat allow-list
+- **Key:** the same `visual.intro_video`, now on the flat allow-list
   (`flat_profile_keys.h`) and a sixth row on the flat F8 page (`menu_flat_rows.h`;
   `kMenuMaxLines` 16 -> 17 so the page, its blank line and the ten-line warning
   still fit). In flat only `skip` acts: `introVideoParseFor` turns `screen`
@@ -1615,3 +1615,32 @@ changed:
 
 Next flight: Steam or Epic flat, `intro_video = skip` in edvr-flat.ini (or the F8
 row, then relaunch); read the three lines above and time launch to menu.
+
+## 2026-10-22: the key moved to [visual] (BUILT, NOT FLOWN)
+
+Request (Sean): visual options get their own section and, in the flat F8 panel, their own
+tab, beside the star glow (docs/star-glow-2026-10-22.md). `fix.intro_video` is now
+`visual.intro_video`; the values (`screen`, `stock`, `skip`), the default (`screen`) and the
+behaviour are unchanged. The entries above were renamed in place: the key was `fix.intro_video`
+when they were written.
+
+- **Where it is:** flat, the first row of the new Visual tab (Performance, Visual, Debug; it left
+  Performance). VR, unchanged for the player: still the Intro movie row on the Fixes page of the
+  F8 menu. The headset's menu builds no Visual page, so the row keeps its bare `menu` token; a
+  `menu visual` token would have taken it out of the headset.
+- **An existing file keeps its choice.** edvr.ini and the flat template carry
+  `# moved-from: fix.intro_video (default screen)` above the key, beside the three older
+  `intro_video_size` / `_lock` / `_upscale` lines that already named it. The runtime reads an old
+  `[fix] intro_video` as `visual.intro_video` while the new line is absent (config audit); a line
+  still carrying the retired default, `screen`, is ignored, and the new default is the same. The
+  installer's merge moves a chosen value (`skip`) into `[visual]` and consumes a stale `screen`;
+  its settings window reads an old line the same way. The %LOCALAPPDATA% mirror copies the ini
+  byte for byte, so a restored old file is resolved by the paths above.
+- **Gate:** `visual.intro_video` replaces `fix.intro_video` on the flat allow-list
+  (`flat_profile_keys.h`); the old name is refused there, so only the moved-from map reads it.
+- **Rigs:** config_test (shipped tables, old layout, stale default, both spellings, control),
+  installer_test (merge, flat and VR windows), flat_sharpen_test (tabs, rows, gate controls),
+  the generator's and the contract check's self-tests.
+
+Next flight: the flat F8 panel's Visual tab shows the Intro movie row; `skip` there, relaunch, and
+the log says `intro skip: ARMED (flat) -- visual.intro_video = skip`.

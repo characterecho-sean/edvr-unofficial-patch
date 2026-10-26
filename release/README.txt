@@ -31,9 +31,10 @@ experimental; their visual quality is not yet qualified.
 - [fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or xess (default off).
 - XeSS-SR needs libxess.dll beside the game; the installer includes it when built with the SDK.
 - Game supersampling controls render scale; DLAA requires native SS.
-- [fix] intro_video = skip leaves out the launch movie (the F8 menu's Intro
-  movie row does the same; it applies at the next launch). The default,
-  screen, plays it as the game makes it.
+- [visual] intro_video = skip leaves out the launch movie (the F8 menu's Visual
+  tab, Intro movie row, does the same; it applies at the next launch). The
+  default, screen, plays it as the game makes it. It was [fix] intro_video
+  before; an existing edvr-flat.ini keeps its choice.
 - Press F7 to turn EDVR's anti-aliasing off for a side-by-side look, and again
   to put your setting back. It writes nothing; [hotkey] compare_aa changes the
   key and empty turns it off. The same key works in VR.
