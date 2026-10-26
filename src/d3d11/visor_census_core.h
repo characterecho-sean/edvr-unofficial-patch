@@ -159,14 +159,13 @@ inline Census cpuModel(const float* rgb, uint32_t width, uint32_t height, bool e
 
 // F121c: the replacement turns itself off on a sample that proves it broke the scene: taken right after a draw THROUGH the replacement vertex shader, with any
 // non-finite tap (a clean scene has none; the flight of 2026-10-25 15:11 had every tap NaN). A sample after a draw the game's own shader made proves nothing about us.
-// A delayed sample from before the key was cycled belongs to the old attempt. Drain its GPU slot normally, but it cannot turn the retry off.
+// A delayed sample from released GPU resources belongs to an older generation. It cannot disable the correction for the current resources.
 inline bool selfOffVerdict(bool drawnThroughReplacement, const Census& c, uint64_t sampleAttempt, uint64_t currentAttempt) noexcept {
     return sampleAttempt == currentAttempt && drawnThroughReplacement && c.ok && c.nonFinite > 0u;
 }
 
-// One second of samples, by the key's state (a sample under the other state closes the second).
+// One second of samples.
 struct Window {
-    bool keyOn = false;
     uint64_t samples = 0, eyeSamples[2] = {0, 0}, nonFinite = 0, nan = 0, inf = 0, black = 0, taps = 0;
     float maxFinite = 0.0f;
     double lumaSum = 0.0;                               // the sum of the samples' mean luma
@@ -205,15 +204,10 @@ inline void floatText(char* out, size_t size, float f) noexcept {
     else std::snprintf(out, size, "%.4g", static_cast<double>(f));
 }
 
-inline int formatKey(char* out, size_t size, bool on) noexcept {
-    return std::snprintf(out, size,
-        "native on foot visor axis (F121b): %s (TEMPORARY, live; on = F121's vertex shader moves the visor's frame onto each eye's axis (the pilot's scene went black with it), off = "
-        "the game's own visor vertex shader; remlok_lines outer and the F27 pixel shader variants run either way)", on ? "on" : "off");
-}
 inline int formatArmed(char* out, size_t size) noexcept {
     return std::snprintf(out, size,
         "visor axis (F121b): census armed: a copy of the HDR target after the visor draw (every sixth draw an eye) read at 256 x 256 taps for non-finite pixels, black, the largest "
-        "value and the mean luma, and the visor's exposure texels; measure only (F121c: it runs only with the test key on, in outer mode); a line a second while visor draws come.");
+        "value and the mean luma, and the visor's exposure texels; in outer mode, independent of detailed logging; a line a second while visor draws come.");
 }
 inline int formatNote(char* out, size_t size, const char* what) noexcept {
     return std::snprintf(out, size, "visor axis (F121b): %s", what);
@@ -226,9 +220,9 @@ inline int formatLine(char* out, size_t size, const Window& w) noexcept {
     floatText(e1, sizeof(e1), w.expo1);
     floatText(mx, sizeof(mx), w.maxFinite);
     return std::snprintf(out, size,
-        "visor axis (F121b) 1 s: key %s; samples %llu (eye 0 %llu, eye 1 %llu) of %u taps; nonfinite %llu (NaN %llu, Inf %llu)%s; black %llu; max %s; mean %.4f; "
+        "visor axis (F121b) 1 s: samples %llu (eye 0 %llu, eye 1 %llu) of %u taps; nonfinite %llu (NaN %llu, Inf %llu)%s; black %llu; max %s; mean %.4f; "
         "exposure e0 %s e1 %s (read in %u samples, non-finite in %u); dropped %u",
-        w.keyOn ? "on" : "off", static_cast<unsigned long long>(w.samples), static_cast<unsigned long long>(w.eyeSamples[0]),
+        static_cast<unsigned long long>(w.samples), static_cast<unsigned long long>(w.eyeSamples[0]),
         static_cast<unsigned long long>(w.eyeSamples[1]), kSamples, static_cast<unsigned long long>(w.nonFinite), static_cast<unsigned long long>(w.nan),
         static_cast<unsigned long long>(w.inf), where, static_cast<unsigned long long>(w.black), mx, w.meanLuma(), e0, e1, w.expoRead, w.expoNonFinite, w.skipped);
 }

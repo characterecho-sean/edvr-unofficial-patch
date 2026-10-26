@@ -741,6 +741,10 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_reticle_follow", "aim") != "aim")
         Log::get().note("native on foot: fix.native_on_foot_reticle_follow is retired (F127): ignored (the reticle always sits on the mouse-aim axis, where the game "
                         "aims it; the head and game placements were removed)");
+    // F128: the successful visor-axis correction is permanent in outer mode; the old test switch cannot disable it.
+    if (cfg.getString("fix.native_on_foot_visor_axis", "on") != "on")
+        Log::get().note("native on foot: fix.native_on_foot_visor_axis is retired (F128): ignored (the visor frame always follows each eye's optical axis in outer mode; "
+                        "eye-trust checks and invalid-output protection remain active)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {

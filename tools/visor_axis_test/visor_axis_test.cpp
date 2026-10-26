@@ -10,7 +10,7 @@
 //   V6  a symmetric frustum gives s = 0 exactly, and then the shipped shader is bit for bit the game's;
 //   V7  the math refuses what it was not written for;
 //   V8  the debug layer says nothing; and the wiring: the shipped bytes are the ones remlok_fix.cpp creates, bound only around the game's visor draw, with the
-//       one temporary key (F121b, default off) gating the bind;
+//       correction always enabled in outer mode (F128), with eye-trust and invalid-output protection;
 //   V9  F121b's census compute shader (the build's kVisorCensusBytecode) against its CPU model and decode (census_checks.h): non-finite, NaN, Inf, black, the
 //       largest value, the mean luma, the box of the non-finite taps, the exposure texels, and the decode's refusals;
 //   V10 F121c: the inputs the game's shader survives only by its 1e-9 floors (a colour of zero, negative or tiny; an exposure of 0): every output bit for bit the
@@ -721,17 +721,17 @@ int main(int argc, char** argv) {
                   !edvr::visorcensus::selfOffVerdict(true, notOk, 0, 0),
               "V13.self-off-only-on-a-sample-after-a-draw-through-the-replacement-with-a-non-finite-tap");
         const uint64_t oldAttempt = 7, retryAttempt = oldAttempt + 1;
-        bool selfOff = false;   // key off cleared the latch; two older GPU readbacks are still in flight
+        bool selfOff = false;   // two readbacks belong to an older GPU resource generation
         for (int pending = 0; pending < 2; ++pending)
             selfOff = selfOff || edvr::visorcensus::selfOffVerdict(true, bad, oldAttempt, retryAttempt);
         check(!selfOff && !edvr::visorcensus::selfOffVerdict(true, clean, retryAttempt, retryAttempt) &&
                   edvr::visorcensus::selfOffVerdict(true, bad, retryAttempt, retryAttempt),
-              "V13.key-cycle-retry-ignores-pending-old-NaN-samples-and-still-guards-new-draws");
+              "V13.released-resource-generation-ignores-old-NaN-samples-and-still-guards-new-draws");
         char line[480];
         edvr::visoraxis::formatSelfOff(line, sizeof line, 29753344u, 29753344u, 1);
         const std::string s = line;
         check(s.find("visor axis (F121c): SELF-OFF -- the HDR scene right after a draw through the replacement vertex shader had 29753344 non-finite taps of 29753344 (eye 1)") == 0 &&
-                  s.find("until fix.native_on_foot_visor_axis is turned off and on again.") != std::string::npos,
+                  s.find("until the game is restarted.") != std::string::npos,
               "V13.the-self-off-line-reads");
         edvr::visoraxis::Counts counts;
         counts.refused[static_cast<unsigned>(edvr::visoraxis::Refusal::kOneEye)] = 7;
@@ -754,10 +754,11 @@ int main(int argc, char** argv) {
         check(countOf(rf, "kVisorAxisVsBytecode") >= 1 && countOf(gen, "kVisorAxisVsBytecode") == 1, "V8.the-shipped-bytes-are-the-ones-remlok_fix.cpp-creates-and-the-generator-builds");
         check(countOf(rf, "visoraxis::kVisorPsHash") >= 1 && countOf(rf, "Refusal::kOtherPs") >= 1, "V8.a-pixel-shader-other-than-the-designed-one-is-refused");
         check(countOf(rf, "VSSetShader(g_axisVs") == 1 && countOf(rf, "VSSetShader(g_axisSaved") == 1, "V8.the-vertex-shader-is-bound-once-and-put-back-once");
-        // F121b: the one temporary key, default off, read where remlokConfigure reads fix.remlok_lines; the shift is bound only with it on.
-        check(countOf(ini, "\nnative_on_foot_visor_axis = off\n") == 1 && countOf(ini, "native_on_foot_visor_axis") == 1, "V8.F121b-the-ini-has-the-one-key-and-it-defaults-to-off");
-        check(countOf(rf, "getString(\"fix.native_on_foot_visor_axis\", \"off\")") == 1, "V8.F121b-the-code-reads-the-key-with-the-same-default");
-        check(countOf(rf, "g_axisKeyOn.load(") >= 2 && countOf(rf, "++g_axisCounts.keyOff") == 1, "V8.F121b-the-bind-is-gated-by-the-key-and-a-draw-with-it-off-is-counted");
+        // F128: the proven correction is behaviour. Old settings remain only as ignored retired lines.
+        check(countOf(ini, "# ui: hidden -- retired (F128): ignored.\nnative_on_foot_visor_axis = on\n") == 1 &&
+                  countOf(ini, "native_on_foot_visor_axis") == 1, "V8.F128-the-ini-keeps-only-the-hidden-retired-key-at-on");
+        check(countOf(rf, "native_on_foot_visor_axis") == 0 && countOf(rf, "g_axisKey") == 0 && countOf(rf, "keyOff") == 0,
+              "V8.F128-the-render-path-has-no-manual-key-or-key-off-branch");
         // F121b: the census is measure only: it reads a copy, never takes the target off the output merger and never writes the game's resources.
         check(countOf(rf, "kVisorCensusBytecode") >= 1 && countOf(slurp(root + "\\tools\\temporal_shader_build\\temporal_shader_build.cpp"), "kVisorCensusBytecode") == 1,
               "V8.F121b-the-census-bytes-are-the-ones-remlok_fix.cpp-creates-and-the-generator-builds");
@@ -766,23 +767,21 @@ int main(int argc, char** argv) {
                   countOf(rf, "vScreenCopyResourceRaw(ctx, g.stage[e][si], g.out[e])") == 1 && countOf(rf, "ctx->CopyResource(") == 0 && countOf(rf, "CopySubresourceRegion") == 0 &&
                   countOf(rf, "censusRun(ctx);") == 1 && countOf(rf, "censusBegin(ctx, eye)") == 1,
               "V8.F121b-the-census-copies-the-target-it-does-not-unbind-it-and-runs-once-after-the-draw-and-F121c-its-copies-skip-the-copy-hook");
-        // F125: an axis attempt or detailed logging enables the on-foot census. Detailed logging alone measures the game's unshifted draw; the replacement
-        // still requires the axis key, eye trust and a live attempt, and only a shifted sample from that attempt may turn it off.
-        check(countOf(rf, "if (onFoot && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail())) {\n        censusBegin(ctx, eye);") == 1 &&
-                  countOf(rf, "if (detail::g_remlokMode == Mode::kOuter && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail()) && !g_censusArmedNoted)") == 1,
-              "V8.F125-the-census-is-armed-and-begun-for-axis-on-or-detail-on-and-samples-only-on-foot");
-        check(countOf(rf, "if (!g_axisKeyOn.load(std::memory_order_relaxed)) {") == 1 &&
-                  countOf(rf, "sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);") == 1 &&
-                  countOf(rf, "if (sl.attempt == g_axisAttempt) censusAdd(e, c, sl.keyOn);") == 1 &&
+        // F128: the census guards the correction regardless of the detailed-log setting. Readbacks retain the sampled resource generation and shift state.
+        check(countOf(rf, "if (onFoot) {\n        censusBegin(ctx, eye);") == 1 &&
+                  countOf(rf, "if (detail::g_remlokMode == Mode::kOuter && !g_censusArmedNoted)") == 1 && countOf(rf, "nofoot::logwin::detail()") == 0,
+              "V8.F128-the-census-is-armed-in-outer-mode-and-samples-on-foot-independently-of-detail-logging");
+        check(countOf(rf, "if (sl.attempt == g_axisAttempt) censusAdd(e, c);") == 1 &&
                   countOf(rf, "g_cen.pendingShifted = g_axisActive;") == 1,
-              "V8.F125-detail-only-census-keeps-the-axis-bind-key-gated-and-preserves-the-sampled-key-attempt-and-shift-state");
+              "V8.F128-census-preserves-the-sampled-resource-generation-and-shift-state");
         check(countOf(rf, "axisBegin(ctx, eye, gamesPs, g_trustVerdict)") == 1 && countOf(rf, "if (nativeOnFootActive()) eyeWatchNote();") == 1 &&
                   countOf(rf, "Refusal::kOneEye") >= 2 && countOf(rf, "uiLayerSubmittedTarget(0)") == 1 && countOf(rf, "uiLayerSubmittedTarget(1)") == 1,
               "V8.F121c-the-bind-takes-the-eye-trust-verdict-and-the-tracker-sees-every-visor-draw-on-foot");
         check(countOf(rf, "selfOffVerdict(sl.shifted, c, sl.attempt, g_axisAttempt)") == 1 && countOf(rf, "formatSelfOff(") == 1 && countOf(rf, "g_axisSelfOff.load(") == 1 &&
-                  countOf(rf, "g_axisSelfOff.store(false") == 1 && countOf(rf, "sl.shifted = g.pendingShifted;") == 1 &&
-                  countOf(rf, "if (g_axisKeyKnown && g_axisKeyLast) ++g_axisAttempt;") == 1 && countOf(rf, "sl.attempt = g_axisAttempt;") == 1,
-              "V8.F121c-a-sample-after-a-draw-through-the-replacement-with-a-non-finite-tap-turns-it-off-and-the-key-cycled-turns-it-back");
+                  countOf(rf, "g_axisSelfOff.store(") == 0 && countOf(rf, "sl.shifted = g.pendingShifted;") == 1 &&
+                  countOf(rf, "++g_axisAttempt;") == 1 && countOf(rf, "sl.attempt = g_axisAttempt;") == 1 &&
+                  countOf(rf, "g_axisSelfOff.exchange(true") == 1,
+              "V8.F128-a-shifted-non-finite-sample-latches-self-off-for-the-session-and-resource-release-fences-old-readbacks");
     }
 
     // V9: the census shader (F121b), the build's bytecode, against the CPU model and the decode.

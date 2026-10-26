@@ -18,6 +18,12 @@
       "approved": "2026-10-25",
       "for": "finding the flat UI route's discarded GPU timers (measured on DXMT, macOS) and the guard that stops them",
       "commits": ["361dddbe"]
+    },
+    {
+      "login": "pixel-565",
+      "approved": "2026-10-25",
+      "for": "the initial investigation and research that made native on-foot VR possible; approval recorded in 66d476b2",
+      "commits": ["c3a99013", "1535fb59"]
     }
   ]
 }

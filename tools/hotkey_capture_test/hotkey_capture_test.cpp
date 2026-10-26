@@ -1827,14 +1827,14 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_rifle_ads_readout_toward_eye_cm", "native_on_foot_hud_room", "native_on_foot_hud_left_x",
                                 "native_on_foot_hud_left_y", "native_on_foot_hud_top_x", "native_on_foot_hud_top_y", "native_on_foot_hud_right_x",
                                 "native_on_foot_hud_right_y", "native_on_foot_hud_centre_x", "native_on_foot_hud_centre_y",
-                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow"};
+                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis"};
     // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
     // but cannot add rows back to this compiled table.
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 18, "the Native on foot page has 18 rows (F127: 40 before; 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "Visor axis (test) stays until its test flight)");
+    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1852,7 +1852,6 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_weapon_view_offset_cm", "Body and view"},
             {"native_on_foot_weapon_eye_forward_cm", "Body and view"},
             {"native_on_foot_breathable_visor", "Body and view"},
-            {"native_on_foot_visor_axis", "Body and view"},
             {"native_on_foot_hud_distance", "HUD"},
             {"native_on_foot_hud_size", "HUD"},
             {"native_on_foot_hud_element_scale", "HUD"},

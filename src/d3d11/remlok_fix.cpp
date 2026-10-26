@@ -12,7 +12,6 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
-#include "native_on_foot_logwin.h"
 #include "native_on_foot.h"   // F25: nativeOnFootActive for the on-foot visor match
 #include "dxbc_container.h"   // F27: the visor variant's checksum (ComputeHashRetail)
 #include "shader_swap.h"      // F121: shaderSwapCreateVs
@@ -57,11 +56,9 @@ static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
 float g_keep = 0.55f;
 bool  g_swap = false;
 bool  g_axisArmedNoted = false;   // F121: the once-per-session "armed" line (remlokConfigure)
-std::atomic<bool> g_axisKeyOn{false};   // F121b (TEMPORARY, live): fix.native_on_foot_visor_axis, "on" binds F121's vertex shader; default off
-bool  g_axisKeyKnown = false, g_axisKeyLast = false;
-bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure; F121c: said when the test key is on, in outer mode)
-std::atomic<bool> g_axisSelfOff{false};   // F121c: the replacement turned itself off (non-finite HDR after it); cleared when the key is turned off
-uint64_t g_axisAttempt = 0;             // render thread: a key-off edge retires every outstanding census sample from the previous attempt
+bool  g_censusArmedNoted = false;   // F121b: the once-per-session "census armed" line (remlokConfigure, in outer mode)
+std::atomic<bool> g_axisSelfOff{false};   // F121c: non-finite HDR after the replacement disables it until the game restarts
+uint64_t g_axisAttempt = 0;             // render thread: a GPU resource release retires samples from the previous resource generation
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
 inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
@@ -197,29 +194,13 @@ void remlokConfigure(Config& cfg) {
     if (ang != g_angleDeg) g_derivedNoted = false;   // re-announce the derivation
     g_angleDeg = ang;
 
-    // F121b (TEMPORARY, live A/B): the vertex shader of F121 is bound only with this key on. Default off: the pilot's scene went black with it on (the log of 2026-10-25 13:29-13:32).
-    {
-        const bool keyOn = cfg.getString("fix.native_on_foot_visor_axis", "off") == "on";
-        g_axisKeyOn.store(keyOn, std::memory_order_relaxed);
-        if (!keyOn) {
-            if (g_axisKeyKnown && g_axisKeyLast) ++g_axisAttempt;
-            g_axisSelfOff.store(false, std::memory_order_relaxed);   // off and on again retries without an older readback turning it off again
-        }
-        if (!g_axisKeyKnown || keyOn != g_axisKeyLast) {
-            g_axisKeyKnown = true;
-            g_axisKeyLast = keyOn;
-            char key[480];
-            visorcensus::formatKey(key, sizeof(key), keyOn);
-            Log::get().note("%s", key);
-        }
-    }
     if (detail::g_remlokMode == Mode::kOuter && !g_axisArmedNoted) {   // F121: said once, so a log with no visor draw reads IDLE and not "never ran"
         g_axisArmedNoted = true;
         char armed[320];
         visoraxis::formatArmed(armed, sizeof(armed));
         Log::get().note("%s", armed);
     }
-    if (detail::g_remlokMode == Mode::kOuter && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail()) && !g_censusArmedNoted) {   // F125: the census is wanted for an axis attempt or the detailed A/B log
+    if (detail::g_remlokMode == Mode::kOuter && !g_censusArmedNoted) {   // the census guards the always-on correction, including when detailed logging is off
         g_censusArmedNoted = true;
         char armed[400];
         visorcensus::formatArmed(armed, sizeof(armed));
@@ -308,8 +289,7 @@ uint64_t g_visorWindowMs = 0;
 
 // ---- F121: the visor frame centred on each eye's optical axis (visor_axis_math.h says why) -----------------------------------------------
 // The game's visor vertex shader is replaced, for the visor draw only and per eye, by kVisorAxisVsBytecode: identical but for the interpolated uv,
-// which it moves by s (+a/2 left, -a/2 right, a from the headset's eye tangents). F121b: bound only with fix.native_on_foot_visor_axis on (TEMPORARY, default
-// off: with it on the pilot's scene went black). Anything it cannot be sure of is refused and counted, and the draw runs the game's own shader.
+// which it moves by s (+a/2 left, -a/2 right, a from the headset's eye tangents). Anything it cannot be sure of is refused and counted, and the draw runs the game's own shader.
 static_assert(kOnFootVisorVs == visoraxis::kVisorVsHash && kOnFootVisorPs == visoraxis::kVisorPsHash,
               "the visor hashes in visor_axis_math.h (which the rig scans) are the ones the on-foot match uses");
 ID3D11VertexShader* g_axisVs = nullptr;           // the replacement, made once
@@ -354,11 +334,7 @@ void axisNoteWindow(uint64_t now) {
 // F121c: trust says whether the draws prove that filing (visor_eye_trust.h); an untrusted draw runs the game's own shader.
 void axisBegin(ID3D11DeviceContext* ctx, int eye, bool gamesPs, const visoraxis::EyeTrust::Verdict& trust) {
     ++g_axisCounts.seen[eye];
-    if (!g_axisKeyOn.load(std::memory_order_relaxed)) {   // F121b: the test key is off (the default): the game's own visor vertex shader
-        ++g_axisCounts.keyOff;
-        return;
-    }
-    if (g_axisSelfOff.load(std::memory_order_relaxed)) {   // F121c: the HDR scene after the replacement was non-finite: the game's own shader until the key is cycled
+    if (g_axisSelfOff.load(std::memory_order_relaxed)) {   // F121c: non-finite HDR after the replacement: the game's own shader until the game restarts
         ++g_axisCounts.selfOff;
         return;
     }
@@ -492,7 +468,7 @@ void eyeWatchNote() {
 // One sample every sixth visor draw an eye, right after the draw: a copy of the eye's HDR target (R11G11B10, the draw's own render target), one dispatch of the census
 // over the copy (a copy, because a target still bound for output cannot be bound for reading), the compute stage's shader, views, UAV and constants put back, the
 // output copied into a staging ring of three and read on a later sample (DO_NOT_WAIT, the F85c and F119 way). The game's exposure (the visor pixel shader's t0)
-// is read in the same dispatch where its view is a float 2D texture. Nothing the game reads is written. A second's line, by the key's state.
+// is read in the same dispatch where its view is a float 2D texture. Nothing the game reads is written. A line a second.
 struct CensusGpu {
     ID3D11ComputeShader* cs = nullptr;
     bool csTried = false, failed = false;
@@ -504,7 +480,7 @@ struct CensusGpu {
     ID3D11ShaderResourceView* copySrv[2] = {};
     uint32_t copyW[2] = {}, copyH[2] = {};
     struct Slot {
-        bool inFlight = false, keyOn = false, shifted = false;   // F121c: shifted = taken right after a draw through the replacement vertex shader
+        bool inFlight = false, shifted = false;   // F121c: shifted = taken right after a draw through the replacement vertex shader
         uint64_t attempt = 0;
         uint32_t seq = 0, w = 0, h = 0, age = 0;
     };
@@ -521,6 +497,7 @@ visorcensus::Window g_cenWin;
 uint64_t g_cenWinMs = 0;
 
 void censusRelease() {
+    ++g_axisAttempt;   // outstanding readbacks from the released resources cannot affect a later resource generation
     CensusGpu& g = g_cen;
     for (int e = 0; e < 2; ++e) {
         if (g.copySrv[e]) g.copySrv[e]->Release();
@@ -620,20 +597,16 @@ bool censusCopyFor(ID3D11DeviceContext* ctx, int e, const D3D11_TEXTURE2D_DESC& 
     return true;
 }
 
-// The window's line (a second, or the key changed under it), then a new window.
+// The window's line (a second), then a new window.
 void censusLine() {
     if (g_cenWin.samples || g_cenWin.skipped) {
         char line[640];
         visorcensus::formatLine(line, sizeof(line), g_cenWin);
         Log::get().note("%s", line);
     }
-    const bool key = g_cenWin.keyOn;
     g_cenWin = visorcensus::Window();
-    g_cenWin.keyOn = key;
 }
-void censusAdd(int e, const visorcensus::Census& c, bool keyOn) {
-    if (g_cenWin.samples && g_cenWin.keyOn != keyOn) censusLine();
-    g_cenWin.keyOn = keyOn;
+void censusAdd(int e, const visorcensus::Census& c) {
     g_cenWin.add(e, c);
 }
 
@@ -668,7 +641,7 @@ void censusPoll(ID3D11DeviceContext* ctx) {
                 ++g_cenWin.skipped;
                 continue;
             }
-            if (sl.attempt == g_axisAttempt) censusAdd(e, c, sl.keyOn);
+            if (sl.attempt == g_axisAttempt) censusAdd(e, c);
             if (visorcensus::selfOffVerdict(sl.shifted, c, sl.attempt, g_axisAttempt) && !g_axisSelfOff.exchange(true, std::memory_order_relaxed)) {   // F121c: said once
                 char line[420];
                 visoraxis::formatSelfOff(line, sizeof(line), c.nonFinite, c.taps, e);
@@ -713,7 +686,6 @@ void censusRun(ID3D11DeviceContext* ctx) {
     if (!g_cenWinMs) {
         g_cenWinMs = now;
     } else if (now - g_cenWinMs >= 1000) {
-        if (!g_cenWin.samples) g_cenWin.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);   // a second of samples keeps the state they were taken under
         censusLine();
         g_cenWinMs = now;
     }
@@ -810,7 +782,6 @@ void censusRun(ID3D11DeviceContext* ctx) {
     sl.inFlight = true;
     sl.attempt = g_axisAttempt;
     sl.shifted = g.pendingShifted;
-    sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);
     sl.seq = g.seq;
     sl.w = td.Width;
     sl.h = td.Height;
@@ -898,9 +869,8 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
         return;
     }
     const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
-    // F125: the census runs with the axis key on, or with detailed logging on (including the stock-axis A/B). Attempt-generation and shifted-draw guards below
-    // remain in force: an older or unshifted sample cannot stand down this axis attempt. With both keys off, close the last line and take no new samples.
-    if (onFoot && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail())) {
+    // The census guards every on-foot correction in outer mode. An older resource generation or an unshifted draw cannot disable it.
+    if (onFoot) {
         censusBegin(ctx, eye);
     } else if (g_cenWin.samples || g_cenWin.skipped) {
         censusLine();
