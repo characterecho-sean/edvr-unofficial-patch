@@ -9326,7 +9326,7 @@ void bodyOffsetRead(float d[3]) noexcept {
         if (g_bodySeq.load(std::memory_order_relaxed) == s1) return;
     }
 }
-std::atomic<uint64_t> g_bodyShifted{0}, g_bodySkipped{0}, g_bodyCalls{0};   // this second (the frame thread reads and resets them)
+std::atomic<uint64_t> g_bodyCalls{0};
 
 // The third-person AMC's render records (F35, from the static RE of the submit job 0x3DA4A00): 54 blocks of 0x680 bytes; each block holds four
 // 0x150-byte records, the masks right after them. The offsets are the RE's; the flight checks them (the skipped count and the eye dump).
@@ -9357,11 +9357,10 @@ F9Probe g_bodyShift;
 using F35Fn = uint64_t(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 std::atomic<bool> g_f37TableWanted{false};   // set on each entry to body mode: the per-part table prints on the next shift pass
 struct F37First {
-    bool valid = false;
-    float pre[3] = {}, post[3] = {};
+    float post[3] = {};
     uintptr_t addr = 0;
 };
-F37First g_f37First;   // the first shifted record of the latest pass (the 1 s line prints it)
+F37First g_f37First;   // the first shifted record of the latest pass, used by the post-hook check
 void bodyShiftApply(uint64_t amc) noexcept {
     uint8_t flags = 0;
     if (!guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) return;
@@ -9408,10 +9407,8 @@ void bodyShiftApply(uint64_t amc) noexcept {
             movedAt[idx][k] = true;
             if (firstThisPass) {
                 firstThisPass = false;
-                g_f37First.valid = true;
                 g_f37First.addr = rec + bodyrec::kRecPos;
                 for (int i = 0; i < 3; ++i) {
-                    g_f37First.pre[i] = pos[i];
                     g_f37First.post[i] = pos[i] + d[i];
                 }
                 if (g_f37CheckArm.exchange(false, std::memory_order_relaxed)) {
@@ -9423,8 +9420,6 @@ void bodyShiftApply(uint64_t amc) noexcept {
             ++shifted;
         }
     }
-    g_bodyShifted.fetch_add(shifted, std::memory_order_relaxed);
-    g_bodySkipped.fetch_add(skipped, std::memory_order_relaxed);
     if (table) {
         uint32_t partsPresent = 0, partsShifted = 0;
         for (int idx = 0; idx < bodyrec::kBlocks; ++idx)
@@ -11550,17 +11545,11 @@ uint64_t g_f58RunUntilMs = 0, g_f58LineMs = 0;
 void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, const EyeSample& s) noexcept;
 
 // F59b (frame thread only): the full-3P head follow's body frame. The last good sample (fresh, with the head census and the pov), the
-// source this tick (nofoot::FollowSrc), the ramp between sources, and the 1 s line's counts (frames per source, the oldest frame used).
+// source this tick (nofoot::FollowSrc), and the ramp between sources.
 EyeSample g_f59bLast;
 bool g_f59bHave = false;
 int g_f59bSrc = nofoot::kFollowNone;
-uint64_t g_f59bAge = 0;
 nofoot::FollowBlend g_f59bBlend;
-uint32_t g_f59bN[4] = {};
-uint64_t g_f59bAgeMax = 0;
-// F59b: the eye - neck residual from the census neck (plus d) in body axes, summed per frame for the 1 s line.
-double g_f59bCenSum[3] = {}, g_f59bCenNorm = 0.0;
-uint32_t g_f59bCenN = 0;
 // F66a (frame thread): the armed flag from the game (journalHeldItem: Status.json SelectedWeapon, not the fists) and its 0.3 s ramp (g_armedW,
 // for the Animate hook). The hook's last reach publication (a torn read keeps the last). The distance gate's old reading of "held"
 // (nofoot::distanceGateHeld of the smaller grip gate) is kept as a measure only: how often it said held while the game said unarmed.
@@ -11603,14 +11592,6 @@ void f99OnsetLine(const nofoot::f99::OnsetRecord& r) noexcept {
 uint64_t g_f66bLastTicks = 0, g_f66bLastMs = 0, g_f66bLineMs = 0;
 uint32_t g_f66bTicks = 0, g_f66bQpcZero = 0, g_f66bMsZero = 0, g_f66bCapped = 0;
 double g_f66bDtSum = 0.0, g_f66bDtMin = 0.0, g_f66bDtMax = 0.0;
-// F66c (frame thread): the second's window for the body solve line (printed with the bend's statistics): align ticks in body mode, d before
-// and after the reach correction (right, forward, metres), the correction's largest horizontal size, the reach constraint's frames (constrained
-// and infeasible), the reach publications read, and per arm the post-bend shoulder minus U* (cm).
-struct F66cWin {
-    uint32_t ticks = 0, constrained = 0, infeasible = 0, pubs = 0, gapN[2] = {};
-    double dHeadSum[2] = {}, dAfterSum[2] = {}, corrMax = 0.0, gapSum[2] = {}, gapMax[2] = {};
-};
-F66cWin g_f66c;
 void f66ArmedStep(uint64_t now, double dt) noexcept;
 // F59b: the AMC matrix source: this fresh sample's matrix, job camera and root, with the 3P joints of the last good frame carried into this
 // frame through their body coordinates (the head's body coordinates are unchanged by that), and the FP joints (model space) from this
@@ -11872,11 +11853,9 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
         ++g_f65Want;
         if (active) {
             ++g_f65Constrained;
-            ++g_f66c.constrained;
         }
         if (!feasible) {
             ++g_f65Infeasible;
-            ++g_f66c.infeasible;
         }
     }
     double corrB[3] = {};
@@ -11980,12 +11959,9 @@ bool preNeckRead(PreBendNeck* out) noexcept {
     }
     return false;
 }
-// The frame thread's side: the last sequence seen and the ticks since it changed; the 1 s line's sums (source counts, pre-bend minus census
-// in body axes, the align's d right and forward).
+// The frame thread's side: the last sequence seen and the ticks since it changed, used to reject a stale pre-bend neck.
 uint64_t g_f65cLastSeq = 0;
 uint32_t g_f65cTicksSince = 0xFFFFFFFFu;
-uint32_t g_f65cSrcN[3] = {}, g_f65cDiffN = 0, g_f65cDN = 0;
-double g_f65cDiffSum[3] = {}, g_f65cDSum[2] = {}, g_f65cDAbsMax[2] = {};
 bool f67cPinTick(uint64_t now, int mode, bool full3P) noexcept {
     const bool key = g_standKeyOn.load(std::memory_order_relaxed);
     const bool active = nativeOnFootActive();
@@ -12225,15 +12201,6 @@ void f68dTick(uint64_t nowMs) noexcept {
 void f66ArmedStep(uint64_t now, double dt) noexcept {
     ReachPub rp;
     if (reachRead(&rp)) {
-        if (rp.ms != g_reachLast.ms || !g_reachHave) {
-            ++g_f66c.pubs;
-            for (int k = 0; k < 2; ++k) {
-                if (!rp.reachOk[k]) continue;
-                g_f66c.gapSum[k] += rp.shoulderGap[k];
-                g_f66c.gapMax[k] = std::max(g_f66c.gapMax[k], rp.shoulderGap[k]);
-                ++g_f66c.gapN[k];
-            }
-        }
         g_reachLast = rp;
         g_reachHave = true;
     }
@@ -13352,15 +13319,13 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     // or the last good frame itself, never one older than 0.5 s; past that, none (the waits below, as before). The bend gets the sample as read.
     const EyeSample sIn = s;
     g_f59bSrc = nofoot::kFollowNone;
-    g_f59bAge = 0;
     if (f58Full3P) {
         const bool sFresh = s.valid && now - s.stamp <= static_cast<uint64_t>(align::kStaleMs);   // the wait's own staleness test
         const bool liveOk = sFresh && s.headOk && s.povOk;
-        g_f59bSrc = nofoot::followPick(liveOk, sFresh, g_f59bHave, g_f59bLast.stamp, now, &g_f59bAge);
+        g_f59bSrc = nofoot::followPick(liveOk, sFresh, g_f59bHave, g_f59bLast.stamp, now, nullptr);
         if (liveOk) {
             g_f59bLast = s;
             g_f59bHave = true;
-            g_f59bAge = 0;
         } else if (g_f59bSrc == nofoot::kFollowMatrix) {
             f59bFromMatrix(g_f59bLast, s);
         } else if (g_f59bSrc == nofoot::kFollowLast) {
@@ -13479,7 +13444,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         // do not lag. The means are frozen after the first second. The camera minus the FP root is logged, not applied.
         double neckB[3] = {}, jobB[3] = {}, fpB[3] = {};
         // F65c: the neck source: the hook's pre-bend neck while fresh (model space through this sample's matrix, as the census neck goes),
-        // else the census neck (read after the hook wrote the bent pose), else none. Counted, with the pre-bend minus census difference.
+        // else the census neck (read after the hook wrote the bent pose), else none.
         bool neckHave = false;
         {
             PreBendNeck pre;
@@ -13500,24 +13465,9 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                     w[j] = pre.neck[0] * s.rows[j] + pre.neck[1] * s.rows[3 + j] + pre.neck[2] * s.rows[6 + j] + s.origin[j];
                 body(w, neckB);
                 neckHave = true;
-                if (s.neckOk) {
-                    for (size_t i = 0; i < 3; ++i) g_f65cDiffSum[i] += neckB[i] - censusB[i];
-                    ++g_f65cDiffN;
-                }
             } else if (src == nofoot::kNeckCensus) {
                 for (size_t i = 0; i < 3; ++i) neckB[i] = censusB[i];
                 neckHave = true;
-            }
-            if (mode == 2 && f58Full3P) {
-                ++g_f65cSrcN[src >= 0 && src < 3 ? src : 2];
-                double dB[3] = {};
-                for (size_t i = 0; i < 3; ++i)
-                    for (size_t j = 0; j < 3; ++j) dB[i] += a.applied[j] * static_cast<double>(s.rows[3 * i + j]);
-                g_f65cDSum[0] += dB[0];
-                g_f65cDSum[1] += dB[2];
-                g_f65cDAbsMax[0] = std::max(g_f65cDAbsMax[0], std::fabs(dB[0]));
-                g_f65cDAbsMax[1] = std::max(g_f65cDAbsMax[1], std::fabs(dB[2]));
-                ++g_f65cDN;
             }
         }
         body(camUnlocked, jobB);
@@ -13746,12 +13696,9 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         double blended[3] = {};
         g_f59bBlend.step(src, err, dt, blended);
         for (size_t i = 0; i < 3; ++i) err[i] = blended[i];
-        if (src >= 0 && src < 4) ++g_f59bN[src];
-        if (src == nofoot::kFollowMatrix || src == nofoot::kFollowLast) g_f59bAgeMax = std::max(g_f59bAgeMax, g_f59bAge);
     } else {
         g_f59bBlend = nofoot::FollowBlend{};
     }
-    const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
 
     // F37 sign check (view): the cam's motion since the last step, against the step the applied offset took (mapped to body axes the way the
     // error is). "toward" is the component toward the pov; positive means the cam moved toward it. Along the applied step: positive means the cam
@@ -13980,21 +13927,6 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     double reachCorr[3] = {};
     if (mode == 2 && !pin) f65ReachLimit(now, dt, f58Full3P, a, s, reachCorr);   // F67c: in the pin's scope the hook applies the reach rule
     else g_f65Ramp.w = 0.0f;
-    // F66c: the second's window for the body solve line: d before (the filter's) and after (the reach-corrected) in body axes, right and forward.
-    if (mode == 2 && f58Full3P && s.valid && !pin) {
-        double dHead[3] = {}, dAfter[3] = {};
-        for (size_t i = 0; i < 3; ++i)
-            for (size_t j = 0; j < 3; ++j) {
-                dHead[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
-                dAfter[i] += (a.pos[j] + reachCorr[j]) * static_cast<double>(s.rows[3 * i + j]);
-            }
-        ++g_f66c.ticks;
-        g_f66c.dHeadSum[0] += dHead[0];
-        g_f66c.dHeadSum[1] += dHead[2];
-        g_f66c.dAfterSum[0] += dAfter[0];
-        g_f66c.dAfterSum[1] += dAfter[2];
-        g_f66c.corrMax = std::max(g_f66c.corrMax, std::sqrt(reachCorr[0] * reachCorr[0] + reachCorr[1] * reachCorr[1] + reachCorr[2] * reachCorr[2]));
-    }
     double change = 0.0;
     for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] + reachCorr[i] - a.applied[i]));
     if (change > 1e-6) {
@@ -14063,24 +13995,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     if (on && !wait && now - a.lineMs >= 1000) {
         a.lineMs = now;
         g_f37CheckArm.store(true, std::memory_order_relaxed);   // F37: the post-hook check on the next shift
-        if (mode == 2) {
-            const uint64_t shifted = g_bodyShifted.exchange(0, std::memory_order_relaxed);
-            const uint64_t skipped = g_bodySkipped.exchange(0, std::memory_order_relaxed);
-            const F37First first = g_f37First;
-            const double jf[3] = {fpFresh ? static_cast<double>(s.cam[0]) - fp.origin[0] : 0.0, fpFresh ? static_cast<double>(s.cam[1]) - fp.origin[1] : 0.0,
-                                  fpFresh ? static_cast<double>(s.cam[2]) - fp.origin[2] : 0.0};
-            const double am[3] = {s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[0]) - s.root[0] : 0.0,
-                                  s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[1]) - s.root[1] : 0.0,
-                                  s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[2]) - s.root[2] : 0.0};
-            Log::get().note("native on foot body align: mode body (F37), d=(%.1f,%.1f,%.1f) cm (world), records shifted %llu, skipped %llu this second, "
-                            "guard off, ads %s, error %.1f cm; fp_root=(%.3f,%.3f,%.3f) %s; job_cam_minus_fp_root=(%.3f,%.3f,%.3f) m; "
-                            "amc_pos_minus_root=(%.4f,%.4f,%.4f) m (expect 0); first shifted record %s: pos before (%.3f,%.3f,%.3f) after (%.3f,%.3f,%.3f)",
-                            a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0, static_cast<unsigned long long>(shifted),
-                            static_cast<unsigned long long>(skipped), ads ? "yes" : "no", errMag * 100.0, static_cast<double>(fp.origin[0]),
-                            static_cast<double>(fp.origin[1]), static_cast<double>(fp.origin[2]), fpFresh ? "fresh" : "stale", jf[0], jf[1], jf[2],
-                            am[0], am[1], am[2], first.valid ? "yes" : "none", first.pre[0], first.pre[1], first.pre[2], first.post[0], first.post[1],
-                            first.post[2]);
-        } else {
+        if (mode != 2) {
             const double ap[3] = {a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0};
             Log::get().note("native on foot body align: mode view (F37 head motion): tS=(%.3f,%.3f,%.3f) tS0=(%.3f,%.3f,%.3f) m (seated x,y,z); "
                             "cam_world=(%.3f,%.3f,%.3f) pov_world=(%.3f,%.3f,%.3f) m; cam_body=(%.3f,%.3f,%.3f) pov_body=(%.3f,%.3f,%.3f) hmd_body=(%.3f,%.3f,%.3f) m "
@@ -14934,17 +14849,12 @@ struct BendStats {
     double solvedPitchSum = 0.0, solvedRollSum = 0.0;                    // the solve before the clamps, degrees
     double wSum = 0.0;                                                   // the weight times the amount
     double leanSum = 0.0, adsWSum = 0.0;                                 // F59: the ADS lean added to the pitch (deg) and the ADS weight
-    // F66c: calls whose continuous weight (1 - smoothstep(0.30, 0.45, |T - N0|)) was below 1; the weight's sum; the applied angles' per-call change
-    // (degrees): the largest |delta| and the calls whose change flipped sign from the call before (the judder count: F65 alternated every call).
+    // F58: calls whose continuous weight (1 - smoothstep(0.30, 0.45, |T - N0|)) was below 1, its sum, and the armed ramp.
     uint64_t weightedDown = 0;
-    double bendWeightSum = 0.0, dRollMax = 0.0, dPitchMax = 0.0, armedRampSum = 0.0;
-    uint32_t flipRoll = 0, flipPitch = 0, flipEither = 0;
-    double pitchAbsSum = 0.0, rollAbsSum = 0.0;   // F65c: |pitch| and |roll| applied, degrees (the success test: mean |roll| under 3 deg)
+    double bendWeightSum = 0.0, armedRampSum = 0.0;
 };
 std::atomic<uint32_t> g_bendStatSeq{0};
 BendStats g_bendStats;
-// F66c (the hook's own, under g_pfzBusy): the previous call's applied angles and the sign-flip counters.
-nofoot::AltCount g_bendAltRoll, g_bendAltPitch;
 std::atomic<bool> g_bendStatReset{false};
 
 // F66d (hook state under g_pfzBusy): the forearm joint's hinge row, learned per side. The row of F's matrix most parallel to the animated hinge
@@ -18657,8 +18567,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
             b.pitchSum += pd;
             b.rollSum += rd;
-            b.pitchAbsSum += std::fabs(pd);
-            b.rollAbsSum += std::fabs(rd);
             b.pitchMin = first || pd < b.pitchMin ? pd : b.pitchMin;
             b.pitchMax = first || pd > b.pitchMax ? pd : b.pitchMax;
             b.rollMin = first || rd < b.rollMin ? rd : b.rollMin;
@@ -18671,21 +18579,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (bendCl.fwd) ++b.clampFwd;
             if (bendCl.back) ++b.clampBack;
             if (bendCl.roll) ++b.clampRoll;
-            // F66c: the weight, the armed ramp, the per-call change of the applied angles and the sign flips (the judder count).
+            // F58: the continuous weight and the armed ramp.
             if (bendResW < 1.0) ++b.weightedDown;
             b.bendWeightSum += bendResW;
             b.armedRampSum += static_cast<double>(armedW);
-            {
-                const double prevP = g_bendAltPitch.haveLast ? g_bendAltPitch.last : pd, prevR = g_bendAltRoll.haveLast ? g_bendAltRoll.last : rd;
-                b.dPitchMax = std::max(b.dPitchMax, std::fabs(pd - prevP));
-                b.dRollMax = std::max(b.dRollMax, std::fabs(rd - prevR));
-                const uint32_t fp0 = g_bendAltPitch.flips, fr0 = g_bendAltRoll.flips;
-                g_bendAltPitch.step(pd, 0.05);
-                g_bendAltRoll.step(rd, 0.05);
-                if (g_bendAltPitch.flips != fp0) ++b.flipPitch;
-                if (g_bendAltRoll.flips != fr0) ++b.flipRoll;
-                if (g_bendAltPitch.flips != fp0 || g_bendAltRoll.flips != fr0) ++b.flipEither;
-            }
             b.povLevel = bendLevel;
             b.pov = bendPov;
             if (bendWrite) ++b.wrote;
@@ -20939,30 +20836,6 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     }
     g_bendWeight.store(g_f58BendBlend.w, std::memory_order_relaxed);
     g_bendRun.store(run, std::memory_order_relaxed);
-    // F59b: full 3P: the eye (the job camera, as the head follow and the bend's target) less the census neck moved by the published d, body
-    // axes of this sample, summed per frame. Whether the census's GetModelMatrix sees the hook's bent pose is not verified (the 1 s line says so).
-    if (full3P && active && sFresh && s.neckOk) {
-        double eye[3], neck[3], rows[9], r[3];
-        float camU[3];
-        camUnlockedFrom(s, camU);   // F70: the head follow's eye is the unlocked head
-        for (size_t j = 0; j < 3; ++j) {
-            eye[j] = static_cast<double>(camU[j]);
-            neck[j] = static_cast<double>(s.neck[j]) + g_alignBody.applied[j];
-        }
-        for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
-        const double nrm = nofoot::eyeNeckBody(eye, neck, rows, r);
-        if (std::isfinite(nrm)) {
-            for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] += r[i];
-            g_f59bCenNorm += nrm;
-            ++g_f59bCenN;
-        }
-    } else if (!full3P && (g_f59bCenN || g_f59bAgeMax || g_f59bN[0] || g_f59bN[1] || g_f59bN[2] || g_f59bN[3])) {
-        for (size_t i = 0; i < 4; ++i) g_f59bN[i] = 0;   // outside full 3P nothing is counted; the next entry's first line starts clean
-        g_f59bAgeMax = 0;
-        for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] = 0.0;
-        g_f59bCenNorm = 0.0;
-        g_f59bCenN = 0;
-    }
     if (!(mode == 2 || run) || !active) return;
     if (g_f58LineMs != 0 && now - g_f58LineMs < 1000) return;
     g_f58LineMs = now;
@@ -21010,95 +20883,7 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
                         static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
                         static_cast<unsigned long long>(ref[kBendRefSingular]));
     }
-    // F65c: the align's neck source this second (full 3P body mode ticks), the pre-bend minus census neck (body axes), the align's d (right,
-    // forward), and the bend: |roll| and |pitch| mean with their ranges, the before-bend neck error (its right part is the lateral the align
-    // should now take). Success standing unarmed: before-bend lateral |error| under 2 cm and mean |roll| under 3 deg.
-    if (full3P) {
-        const double dn = g_f65cDiffN ? static_cast<double>(g_f65cDiffN) : 1.0, an = g_f65cDN ? static_cast<double>(g_f65cDN) : 1.0;
-        Log::get().note("native on foot neck source (F65c): align ticks: pre-bend %u, census %u, none %u (pre-bend fresh: at most %u ticks since its "
-                        "sequence changed, under %llu ms; %u ticks now); pre-bend minus census neck (right, up, forward) %.1f %.1f %.1f cm over %u ticks; "
-                        "align d right %.1f (|max| %.1f) forward %.1f (|max| %.1f) cm; bend |roll| mean %.1f deg (%.1f..%.1f), |pitch| mean %.1f deg "
-                        "(%.1f..%.1f); before-bend neck error right %.1f up %.1f forward %.1f cm (mean, %llu bent)",
-                        g_f65cSrcN[0], g_f65cSrcN[1], g_f65cSrcN[2], nofoot::kPreNeckMaxTicks, static_cast<unsigned long long>(nofoot::kPreNeckMaxMs),
-                        g_f65cTicksSince == 0xFFFFFFFFu ? 0u : g_f65cTicksSince, 100.0 * g_f65cDiffSum[0] / dn, 100.0 * g_f65cDiffSum[1] / dn,
-                        100.0 * g_f65cDiffSum[2] / dn, g_f65cDiffN, 100.0 * g_f65cDSum[0] / an, 100.0 * g_f65cDAbsMax[0], 100.0 * g_f65cDSum[1] / an,
-                        100.0 * g_f65cDAbsMax[1], b.rollAbsSum / n, b.rollMin, b.rollMax, b.pitchAbsSum / n, b.pitchMin, b.pitchMax, b.res0B[2] / n,
-                        b.res0B[1] / n, b.res0B[0] / n, static_cast<unsigned long long>(b.n));
-    }
-    g_f65cSrcN[0] = g_f65cSrcN[1] = g_f65cSrcN[2] = 0;
-    g_f65cDiffN = g_f65cDN = 0;
-    g_f65cDiffSum[0] = g_f65cDiffSum[1] = g_f65cDiffSum[2] = 0.0;
-    g_f65cDSum[0] = g_f65cDSum[1] = g_f65cDAbsMax[0] = g_f65cDAbsMax[1] = 0.0;
-    // F66c: the body solve this second (full 3P): d before and after the reach correction (right, forward; cm means) and the correction's largest
-    // size; the reach constraint's frames; the bend's largest per-call |delta roll| and |delta pitch| and the calls whose change flipped sign from
-    // the call before (the judder count: F65 alternated roll -20.0 / -14.3 deg on 45 of 90 calls); the post-bend shoulder minus U* per arm.
-    // Flight proof standing: judder count under 2 a second, |delta roll| max under 1 deg.
-    if (full3P) {
-        const F66cWin& w = g_f66c;
-        const double tn = w.ticks ? static_cast<double>(w.ticks) : 1.0;
-        const double gl = w.gapN[0] ? static_cast<double>(w.gapN[0]) : 1.0, gr = w.gapN[1] ? static_cast<double>(w.gapN[1]) : 1.0;
-        Log::get().note("native on foot body solve (F66c): %sd before the reach (right, forward) %.1f %.1f cm, after %.1f %.1f cm (means over %u align ticks; "
-                        "the reach correction's largest horizontal size %.1f cm); reach constraint frames: constrained %u, infeasible %u (armed ramp %.2f); "
-                        "bend: %llu calls, judder count %u (roll flips %u, pitch flips %u; F65 alternated on 45 of 90), per-call |delta roll| max %.2f deg, "
-                        "|delta pitch| max %.2f deg; post-bend shoulder minus U* (cm, mean/max) L %.1f/%.1f R %.1f/%.1f over %u reach publications",
-                        g_pinScope.load(std::memory_order_relaxed) ? "[F67c: d is zero here; the pin's move and its reach correction are in the body pin "
-                                                                       "(F67c) lines] " : "",
-                        100.0 * w.dHeadSum[0] / tn, 100.0 * w.dHeadSum[1] / tn, 100.0 * w.dAfterSum[0] / tn, 100.0 * w.dAfterSum[1] / tn, w.ticks,
-                        100.0 * w.corrMax, w.constrained, w.infeasible, static_cast<double>(g_armedBlend.w), static_cast<unsigned long long>(b.n),
-                        b.flipEither, b.flipRoll, b.flipPitch, b.dRollMax, b.dPitchMax, w.gapSum[0] / gl, w.gapMax[0], w.gapSum[1] / gr, w.gapMax[1],
-                        w.pubs);
-    }
-    g_f66c = F66cWin{};
-    // F59b: full 3P: the head follow's source and the eye - neck residual after the corrections, once a second.
-    if (full3P) {
-        static const char* const kF59bSrc[4] = {"none", "job camera", "amc matrix", "last good frame"};
-        char cur[48];
-        if (g_f59bSrc == nofoot::kFollowLast)
-            std::snprintf(cur, sizeof(cur), "last good frame (%llu ms)", static_cast<unsigned long long>(g_f59bAge));
-        else
-            std::snprintf(cur, sizeof(cur), "%s", kF59bSrc[g_f59bSrc >= 0 && g_f59bSrc < 4 ? g_f59bSrc : 0]);
-        Log::get().note("native on foot head follow (F59b): head follow source: %s; this second (frames): job camera %u, amc matrix %u, last good "
-                        "frame %u (oldest %llu ms; never past %llu ms), none %u; source ramp %.2f (%.2f s); ADS %s (full 3P: ADS no longer holds "
-                        "the body target)",
-                        cur, g_f59bN[nofoot::kFollowLive], g_f59bN[nofoot::kFollowMatrix], g_f59bN[nofoot::kFollowLast],
-                        static_cast<unsigned long long>(g_f59bAgeMax), static_cast<unsigned long long>(nofoot::kFollowHoldMs),
-                        g_f59bN[nofoot::kFollowNone], g_f59bBlend.w, nofoot::kFollowBlendSec, ads ? "yes" : "no");
-        for (size_t i = 0; i < 4; ++i) g_f59bN[i] = 0;
-        g_f59bAgeMax = 0;
-        // The hook's post-correction neck: the bend's N1 (joint 34 at the applied angles; the square-up turns about 34's vertical, so it leaves
-        // 34 where the bend put it) plus d, against the eye, from the published (T - N1) means: eye - neck = (T - N1) - the rest offset.
-        if (b.n) {
-            const double split[3] = {b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n};
-            double hk[3] = {}, rr[3] = {};
-            const double hn = nofoot::eyeNeckFromBend(split, 100.0, hk);
-            const double rn = std::sqrt(split[0] * split[0] + split[1] * split[1] + split[2] * split[2]);
-            rr[0] = split[2];
-            rr[1] = split[1];
-            rr[2] = split[0];
-            Log::get().note("native on foot head follow (F59b): eye - neck residual after the shift, the bend and the square-up (body axes right, up, "
-                            "forward; eye = the job camera): from the hook's post-bend neck 34 plus d: %.1f %.1f %.1f cm, norm %.1f cm (of the means; "
-                            "%llu bend calls, %llu written); less the rest offset (0, 15.5, 9.0; F62a): %.1f %.1f %.1f cm, norm %.1f cm",
-                            hk[0], hk[1], hk[2], hn, static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), rr[0], rr[1],
-                            rr[2], rn);
-        } else {
-            Log::get().note("native on foot head follow (F59b): eye - neck residual after the corrections: the hook's post-correction neck is "
-                            "not available this second (no bend call measured it: the bend key off, refused, or not running); not inferred");
-        }
-        if (g_f59bCenN) {
-            const double cn = static_cast<double>(g_f59bCenN);
-            Log::get().note("native on foot head follow (F59b): eye - neck residual from the census neck (%s, through the AMC matrix) plus d, body "
-                            "axes right, up, forward: %.1f %.1f %.1f cm, norm mean %.1f cm over %u frames (GetModelMatrix, 10 Hz: whether it reads "
-                            "the hook's bent pose is not verified; equal to the hook's figure above means it does)",
-                            s.neckName ? s.neckName : "by name", 100.0 * g_f59bCenSum[0] / cn, 100.0 * g_f59bCenSum[1] / cn,
-                            100.0 * g_f59bCenSum[2] / cn, 100.0 * g_f59bCenNorm / cn, g_f59bCenN);
-        } else {
-            Log::get().note("native on foot head follow (F59b): eye - neck residual from the census neck: no frame this second (no fresh AMC "
-                            "sample with the neck)");
-        }
-        for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] = 0.0;
-        g_f59bCenNorm = 0.0;
-        g_f59bCenN = 0;
-    }
+
 }
 
 // F67c: the pin's 1 s line (frame thread; in scope, or while the hook still counts calls): the hook's statistics read under their sequence counter
