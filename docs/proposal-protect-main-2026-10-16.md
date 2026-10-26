@@ -67,19 +67,30 @@ Or the classic protection API:
 
 ```
 gh api -X PUT repos/characterecho-sean/edvr-unofficial-patch/branches/main/protection \
-  -F required_status_checks.strict=false \
-  -f "required_status_checks.contexts[]=changes" \
-  -f "required_status_checks.contexts[]=light-gates" \
-  -f "required_status_checks.contexts[]=build" \
+  -F 'required_status_checks[strict]=false' \
+  -f 'required_status_checks[contexts][]=changes' \
+  -f 'required_status_checks[contexts][]=light-gates' \
+  -f 'required_status_checks[contexts][]=build' \
   -F enforce_admins=false \
-  -F required_pull_request_reviews.required_approving_review_count=0 \
+  -F 'required_pull_request_reviews[required_approving_review_count]=0' \
   -F restrictions=null -F allow_force_pushes=false -F allow_deletions=false
 ```
 
+`gh api` nests a field only with brackets (`key[sub]=`); a dotted name is
+sent as a literal key and the API would not get the objects it requires.
+
 ## Alternatives
 
-- **CI required, PRs optional:** not possible. Required checks apply only to
-  PR merges, so direct pushes would still skip them.
+- **CI required, PRs optional:** turn on "Require status checks to pass"
+  without "Require a pull request before merging" (in the API command, pass
+  `-F required_pull_request_reviews=null` instead). Required checks also gate
+  direct pushes: a commit can be pushed straight to `main` once its checks
+  have passed on it
+  ([GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)).
+  Sean keeps pushing to `main`: push the branch, run
+  `gh workflow run release.yml --ref <branch>`, and push to `main` when it is
+  green. This enforces the gate but not the PR, so a change landed this way
+  has no pull request to review or comment on.
 - **Keep pushing to `main` and just watch CI:** better than today, but a
   check nobody is required to pass gets ignored. The manual workflow's four
   red runs were never followed up on `main`.

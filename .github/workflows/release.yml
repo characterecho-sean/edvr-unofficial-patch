@@ -66,7 +66,8 @@ jobs:
             echo "build=false" >> "$GITHUB_OUTPUT"; echo "light=false" >> "$GITHUB_OUTPUT"
             echo "release branch: its push builds this commit"; exit 0
           fi
-          files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          # --no-renames: a rename lists only its destination, so a build input moved to docs/ would skip the build.
+          files="$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")"
           printf '%s\n' "$files"
           build=false
           while IFS= read -r f; do
