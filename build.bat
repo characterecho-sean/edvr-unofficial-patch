@@ -1776,6 +1776,13 @@ REM Native preview correction: exact production wrappers and owned synthetic Cam
     /link /INCREMENTAL:NO /OPT:REF kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native preview camera test build failed & exit /b 1 )
 "%BUILD%\native_preview_camera_test.exe" --self-test || exit /b 1
+REM Actual installer boundary: far executable entries, real CodeHook, all four relay forwards and partial refusal.
+%CC% /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /Fo"%OBJ%\flatstationarycamera\\" ^
+    /Fe"%BUILD%\native_preview_install_test.exe" "tools\flat_stationary_camera_test\native_preview_install_test.cpp" ^
+    "src\common\code_hook.cpp" /link /INCREMENTAL:NO /OPT:REF kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native preview installer test build failed & exit /b 1 )
+"%BUILD%\native_preview_install_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_c2_coexist_test

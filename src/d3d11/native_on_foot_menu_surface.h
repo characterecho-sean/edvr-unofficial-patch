@@ -23,6 +23,7 @@ struct SurfacePair {
 struct SurfaceRow {
     uint32_t ledgerFrame=0,renderFrame=0,placementRenderFrame=0,thread=0,path=0,status=0,entryFlag=0,mapSteps=0,mapKey=0,mapStatus=0;
     uint64_t qpc=0,ctl=0,panel=0,list=0,owner=0,fullPanel=0,entry=0,definition=0,mapHead=0,count=0;
+    uint64_t preRebuildTriangleCount=0;uint32_t preRebuildCountRead=0;
     float ownerWorld[16]{},ownerOutput[16]{};uint32_t transformValid=0;SurfacePair pairs[2];
 };
 class SurfaceCapture {
@@ -100,9 +101,10 @@ public:
            !read(r.panel+f117::kOffList,&r.list,8)||!r.list||!same(read,r.list,owner)){++typeDeclined;return;}
         for(const auto& old:rows)if(old.owner==owner){++duplicate;return;}
         if(rows.size()>=kMaxOwners){++quota;return;}
-        uint64_t cachedCount=0;
-        if(!read(r.list+f117::kListCount,&cachedCount,8)){++typeDeclined;return;}
-        if(cachedCount!=120){++nonMenu;return;}
+        // The game's mesh refresh clears this count before calling the owner's
+        // transform and populates its triangles after this callback returns.
+        // It is callback-time evidence, never a surface identity gate.
+        if(read(r.list+f117::kListCount,&r.preRebuildTriangleCount,8))r.preRebuildCountRead=1;
         if(!read(r.fullPanel+0x828,&r.count,8)||!read(r.fullPanel+0x830,&r.mapHead,8)||
            !read(r.fullPanel+0x860,&r.definition,8)||!read(r.fullPanel+0x868,&r.entry,8)){r.status=2;rows.push_back(std::move(r));return;}
         uint64_t fallbackNodes[kMaxWalk]{},fallbackLeft[kMaxWalk]{};unsigned fallbackCount=0;
@@ -135,8 +137,8 @@ public:
         if((scope.reads&1024)&&scope.observedOwner==owner&&!scope.observedOwnerMixed){r.transformValid=1;
             std::memcpy(r.ownerWorld,scope.ownerWorld,sizeof(r.ownerWorld));std::memcpy(r.ownerOutput,scope.ownerOut,sizeof(r.ownerOutput));}
         if(!same(read,owner,ownerVtable)||!same(read,r.fullPanel,fullVtable)||!same(read,ownerVtable+16,fn)||!same(read,r.panel+f117::kOffList,r.list)||!same(read,r.list,owner)||
-           !same(read,r.fullPanel+0x828,r.count)||!same(read,r.fullPanel+0x830,r.mapHead)||!same(read,r.fullPanel+0x860,r.definition)||!same(read,r.fullPanel+0x868,r.entry)||
-           !same(read,r.list+f117::kListCount,cachedCount))r.status=3;
+            !same(read,r.fullPanel+0x828,r.count)||!same(read,r.fullPanel+0x830,r.mapHead)||!same(read,r.fullPanel+0x860,r.definition)||!same(read,r.fullPanel+0x868,r.entry)||
+            (r.preRebuildCountRead&&!same(read,r.list+f117::kListCount,r.preRebuildTriangleCount)))r.status=3;
         if(r.path==1&&r.status==4){uint32_t flag=0;
             if(!read(r.entry,&flag,4)||flag!=r.entryFlag||!same(read,r.entry+24,r.fullPanel)||
                !same(read,r.entry+8,r.pairs[0].handle)||!same(read,r.entry+16,r.pairs[1].handle))r.status=3;}
@@ -147,7 +149,7 @@ public:
         s<<"{\"schema\":\"edvr_menu_surface_v1\",\"selected_frame\":"<<selected<<",\"known_layout\":"<<(bindings.ready()?"true":"false")<<",\"expected_model_vtable\":"<<bindings.modelVtable
             <<",\"getter_calls\":0,\"gpu_draw_owner_proven\":false,\"association\":\"shared_model_pick_pair_construction_not_actual_GPU_draw_identity\",\"max_owners\":4,\"max_triangles\":255,\"max_vertices\":256,\"max_map_nodes\":32,\"callbacks\":"<<callbacks<<",\"type_declined\":"<<typeDeclined<<",\"non_menu\":"<<nonMenu<<",\"quota\":"<<quota<<",\"duplicate\":"<<duplicate<<",\"crossed_frame\":"<<crossed<<",\"layout_declined\":"<<layoutDeclined<<",\"contended\":"<<contended.load()<<",\"rows\":[";
         for(size_t j=0;j<rows.size();++j){if(j)s<<',';const auto&r=rows[j];
-            s<<"{\"ledger_frame\":"<<r.ledgerFrame<<",\"render_frame\":"<<r.renderFrame<<",\"placement_render_frame\":"<<r.placementRenderFrame<<",\"thread\":"<<r.thread<<",\"qpc\":"<<r.qpc<<",\"ctl\":"<<r.ctl<<",\"panel\":"<<r.panel<<",\"list\":"<<r.list<<",\"owner\":"<<r.owner<<",\"full_panel\":"<<r.fullPanel<<",\"path\":"<<r.path<<",\"status\":"<<r.status<<",\"entry\":"<<r.entry<<",\"entry_flag\":"<<r.entryFlag<<",\"definition\":"<<r.definition<<",\"map_head\":"<<r.mapHead<<",\"map_count\":"<<r.count<<",\"map_steps\":"<<r.mapSteps<<",\"map_status\":"<<r.mapStatus<<",\"map_key\":"<<r.mapKey<<",\"transform_valid\":"<<r.transformValid<<",\"owner_world\":";floats(r.ownerWorld,16);s<<",\"owner_output\":";floats(r.ownerOutput,16);s<<",\"pairs\":[";
+            s<<"{\"ledger_frame\":"<<r.ledgerFrame<<",\"render_frame\":"<<r.renderFrame<<",\"placement_render_frame\":"<<r.placementRenderFrame<<",\"thread\":"<<r.thread<<",\"qpc\":"<<r.qpc<<",\"ctl\":"<<r.ctl<<",\"panel\":"<<r.panel<<",\"list\":"<<r.list<<",\"owner\":"<<r.owner<<",\"full_panel\":"<<r.fullPanel<<",\"pre_rebuild_count_read\":"<<(r.preRebuildCountRead?"true":"false")<<",\"pre_rebuild_triangle_count\":"<<r.preRebuildTriangleCount<<",\"path\":"<<r.path<<",\"status\":"<<r.status<<",\"entry\":"<<r.entry<<",\"entry_flag\":"<<r.entryFlag<<",\"definition\":"<<r.definition<<",\"map_head\":"<<r.mapHead<<",\"map_count\":"<<r.count<<",\"map_steps\":"<<r.mapSteps<<",\"map_status\":"<<r.mapStatus<<",\"map_key\":"<<r.mapKey<<",\"transform_valid\":"<<r.transformValid<<",\"owner_world\":";floats(r.ownerWorld,16);s<<",\"owner_output\":";floats(r.ownerOutput,16);s<<",\"pairs\":[";
             for(unsigned k=0;k<2;++k){if(k)s<<',';const auto&p=r.pairs[k];const auto&m=p.mesh;
                 s<<"{\"status\":"<<p.status<<",\"handle\":"<<p.handle<<",\"handle_vtable\":"<<p.handleVtable<<",\"observed_getter_address\":"<<p.getter<<",\"pair\":"<<p.pair<<",\"model\":"<<p.model<<",\"model_vtable\":"<<p.modelVtable<<",\"model_status\":"<<p.modelStatus<<",\"key_status\":"<<p.keyStatus<<",\"resource_key\":"<<p.resourceKey<<",\"constructor_resource_f0\":"<<p.renderResource<<",\"constructor_source_150\":"<<p.source<<",\"model_basis\":";floats(p.basis,16);s<<",\"scale\":";floats(&p.scale,1);
                 s<<",\"mesh\":{\"status\":"<<m.status<<",\"address\":"<<m.address<<",\"vertices_address\":"<<m.verticesAddress<<",\"indices_address\":"<<m.indicesAddress<<",\"raw_header0\":"<<m.rawHeader0<<",\"space\":\"model_local_xyz_uv\",\"vertices\":";floats(m.vertices.data(),m.vertices.size());s<<",\"indices\":[";

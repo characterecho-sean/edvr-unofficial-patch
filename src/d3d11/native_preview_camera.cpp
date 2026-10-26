@@ -28,6 +28,7 @@ previewcam::Engine g_previewEngine;
 previewcam::Game g_previewGame;
 CodeHook g_previewHooks[4];
 std::atomic<void*> g_previewOriginal[4]{};
+uint8_t* g_previewRelays[4]{};
 bool g_previewAttempted=false,g_previewInstalled=false,g_previewLastActive=false;
 uint64_t g_previewReportAt=0,g_previewLastApplied=0;
 
@@ -64,6 +65,33 @@ uintptr_t previewFinalizerHook(uintptr_t child) {
 bool previewPrepare(void* trampoline,void* context) noexcept {
     static_cast<std::atomic<void*>*>(context)->store(trampoline,std::memory_order_release);return true;
 }
+uint8_t* previewRelay(uintptr_t target,void* callback) noexcept {
+    // Game entries and this DLL can be farther apart than rel32. Keep the
+    // atomic five-byte entry patch; an adjacent, immutable indirect jump
+    // reaches the ordinary callback without changing registers or the stack.
+    constexpr uintptr_t granularity=64*1024,span=0x7FFE0000;
+    const uintptr_t aligned=target&~(granularity-1);
+    uint8_t* relay=nullptr;
+    for(uintptr_t distance=granularity;distance<=span&&!relay;distance+=granularity) {
+        const uintptr_t candidates[]={aligned>=distance?aligned-distance:0,
+            aligned<=UINTPTR_MAX-distance?aligned+distance:0};
+        for(auto candidate:candidates)if(candidate) {
+            relay=static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate),4096,
+                MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+            if(relay)break;
+        }
+    }
+    if(!relay)return nullptr;
+    const uint8_t jump[]={0xFF,0x25,0,0,0,0};
+    const uintptr_t destination=reinterpret_cast<uintptr_t>(callback);
+    std::memcpy(relay,jump,sizeof(jump));std::memcpy(relay+6,&destination,sizeof(destination));
+    DWORD oldProtect=0;
+    if(!VirtualProtect(relay,4096,PAGE_EXECUTE_READ,&oldProtect)||
+       !FlushInstructionCache(GetCurrentProcess(),relay,14)) {
+        VirtualFree(relay,0,MEM_RELEASE);return nullptr;
+    }
+    return relay;
+}
 bool previewInstall() {
     // The resolver carries addresses across builds; it does not establish the
     // CameraState offsets or scheduler ownership contract on a new layout.
@@ -71,7 +99,8 @@ bool previewInstall() {
         Log::get().note("native preview camera: unavailable; CameraState/task layout is verified only on build 334925 (%s)",gameBuildText());
         return false;
     }
-    const auto module=GetModuleHandleW(L"EliteDangerous64.exe");if(!module)return false;
+    const auto module=GetModuleHandleW(L"EliteDangerous64.exe");
+    if(!module){Log::get().note("native preview camera: unavailable; game module not loaded");return false;}
     uint32_t missing=0;
     if(!gameRvasFound(kHooks,std::size(kHooks),&missing)||
        !gameRvasFound(previewcam::kRvas,previewcam::AddressCount,&missing)) {
@@ -89,11 +118,19 @@ bool previewInstall() {
         reinterpret_cast<void*>(&previewFinalizerHook),reinterpret_cast<void*>(&previewManagerHook)};
     const char* names[]={"native-preview-hmd","native-preview-source","native-preview-finalizer","native-preview-manager"};
     for(unsigned i=0;i<4;++i) {
-        if(!g_previewHooks[i].install(reinterpret_cast<void*>(targets[i]),replacements[i],nullptr,names[i],
+        g_previewRelays[i]=previewRelay(targets[i],replacements[i]);
+        if(!g_previewRelays[i]) {
+            Log::get().note("native preview camera: unavailable; %s near relay allocation/seal failed; no camera writes enabled",names[i]);return false;
+        }
+        if(!g_previewHooks[i].install(reinterpret_cast<void*>(targets[i]),g_previewRelays[i],nullptr,names[i],
                                      previewPrepare,&g_previewOriginal[i])) {
+            // This entry was not published. Previous successful entries and
+            // their relays remain process-lifetime passive forwarders.
+            VirtualFree(g_previewRelays[i],0,MEM_RELEASE);g_previewRelays[i]=nullptr;
+            g_previewOriginal[i].store(nullptr,std::memory_order_release);
             // Already-installed forwarders remain passive. Never tear down a
             // trampoline while a scheduler thread may still be inside it.
-            Log::get().note("native preview camera: unavailable; %s install refused; no camera writes enabled",names[i]);return false;
+            Log::get().note("native preview camera: unavailable; %s install refused; no camera writes enabled; %s",names[i],g_previewHooks[i].refusal());return false;
         }
     }
     Log::get().note("native preview camera: armed on %s; four pinned callbacks, 16 child slots per synchronous evaluation; "

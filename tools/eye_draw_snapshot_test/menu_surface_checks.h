@@ -35,14 +35,31 @@ inline std::string menuSurfaceChecks() {
         put(vertices,std::array<float,15>{{0,0,0,0,0,1,0,0,1,0,0,1,float(i),0,1}});put(indices,std::array<uint8_t,3>{{0,1,2}});
         const uint64_t node=i?right:left;put(node+0x20,uint16_t(10+i*20));put(node+0x28,pair);
     }
-    SurfaceCapture capture;auto scope=owner(0);capture.arm(7,801,bindings);
-    unsigned originals=0;afterOriginal([&](){++originals;return 17ull;},[&](uint64_t){capture.observe(scope,base+0x1010,1000,801,901,read);});
+    SurfaceCapture capture;auto scope=owner(0);
+    Capture placement;placement.arm(L"menu",800,819);placement.frame.store(801);Row placed;
+    check(placement.before(placed,scope.ctl,scope.panel,scope.renderFrame,scope.thread,990,read),"placement fixture begins before mesh rebuild");
+    capture.arm(placed.generation,801,bindings);
+    const uint64_t pickList=base+0xc000,pickTris=base+0x15000;
+    put(pickTris,std::array<f117::Tri,120>{});put(pickList+f117::kListTris,pickTris);
+    unsigned originals=0;
+    afterOriginal([&](){
+        ++originals;put(pickList+f117::kListCount,uint64_t(0));
+        observeOwner(placed,base+0x1010,base+0x18000,read);
+        capture.observe(placed,base+0x1010,1000,801,901,read);
+        put(pickList+f117::kListCount,uint64_t(120));return 17ull;
+    },[&](uint64_t){placement.finish(placed,1010,read);});
     check(originals==1&&capture.rows.size()==1&&capture.rows[0].status==4,"surface observer forwards original once and captures paired owner");
+    check(capture.rows[0].preRebuildCountRead==1&&capture.rows[0].preRebuildTriangleCount==0&&
+          capture.rows[0].pairs[0].mesh.status==4&&capture.rows[0].pairs[1].mesh.status==4,
+          "reset-zero owner callback copies both authored pairs before pick triangles are populated");
+    check(placement.rows.size()==1&&placement.rows[0].triCount==120&&placement.rows[0].owner==capture.rows[0].owner&&
+          placement.rows[0].observedOwner==capture.rows[0].owner&&placement.rows[0].meshStatus==7,
+          "post-original placement independently joins 120 cached triangles to the same owner");
     const auto& row=capture.rows[0];
     check(row.mapStatus==4&&row.mapSteps==3&&row.pairs[0].resourceKey==10&&row.pairs[1].resourceKey==30,"bounded key walk visits both tree branches");
     check(row.pairs[0].mesh.vertices.size()==15&&row.pairs[1].mesh.vertices[12]==1&&row.pairs[0].modelStatus==4&&row.pairs[1].modelStatus==4,"both typed authored meshes and model bases survive independent copies");
     check(row.renderFrame==901&&row.placementRenderFrame==900&&row.transformValid==1,"surface stamps identify actual callback separately from placement");
-    capture.observe(scope,base+0x1010,1001,801,901,read);check(capture.duplicate==1,"same owner deduplicated before payload reads");
+    capture.observe(placed,base+0x1010,1001,801,901,read);check(capture.duplicate==1,"same owner deduplicated before payload reads");
     const std::string fixture=capture.close();
     capture.arm(7,801,bindings);put(base+0x1868,uint64_t(0));put(base+0x1830,left);put(base+0x1828,uint64_t(1));
     capture.observe(scope,base+0x1010,1010,801,901,read);
@@ -63,10 +80,20 @@ inline std::string menuSurfaceChecks() {
     walk={};walk.mapHead=left;walk.pairs[0].pair=base+0xd300;unsigned keyReads=0;
     const auto changed=[&](uintptr_t at,void* out,size_t bytes){const bool ok=read(at,out,bytes);if(at==left+0x20&&++keyReads==2)*static_cast<uint16_t*>(out)=99;return ok;};
     SurfaceCapture::keys(walk,changed);check(walk.mapStatus==3&&walk.pairs[0].keyStatus==3,"changed tree identity invalidates key attribution");
-    capture.arm(7,801,bindings);for(unsigned i=0;i<5;++i){auto s=owner(i);put(entry+24,base+0x1000+i*0x1000);capture.observe(s,base+0x1010+i*0x1000,1040+i,801,901,read);}
-    check(capture.rows.size()==4&&capture.quota==1,"whole-run expensive owner captures bounded to four including failed attempts");
+    capture.arm(7,801,bindings);for(unsigned i=0;i<5;++i){auto s=owner(i);put(entry+24,base+0x1000+i*0x1000);
+        put(base+0xc000+i*0x100+f117::kListCount,uint64_t(i==0?2:i==1?0:120));
+        capture.observe(s,base+0x1010+i*0x1000,1040+i,801,901,read);}
+    check(capture.rows.size()==4&&capture.quota==1&&capture.rows[0].preRebuildTriangleCount==2&&
+          capture.rows[1].preRebuildTriangleCount==0&&capture.rows[2].preRebuildTriangleCount==120,
+          "typed quad and pre-rebuild-zero owners are captured with the unchanged four-owner quota");
     scope=owner(0);put(entry+24,base+0x1000);capture.arm(7,801,bindings);put(base+0xc000+f117::kListCount,uint64_t(2));capture.observe(scope,base+0x1010,1050,801,901,read);
-    check(capture.nonMenu==1&&capture.rows.empty(),"ordinary cached quad filtered before authored payload allocation");
+    check(capture.rows.size()==1&&capture.rows[0].preRebuildTriangleCount==2&&capture.nonMenu==0,
+          "ordinary cached quad count is evidence, not a callback-time identity claim");
+    capture.arm(7,801,bindings);
+    const auto unreadCount=[&](uintptr_t at,void* out,size_t bytes){return at!=base+0xc000+f117::kListCount&&read(at,out,bytes);};
+    capture.observe(scope,base+0x1010,1051,801,901,unreadCount);
+    check(capture.rows.size()==1&&capture.rows[0].status==4&&!capture.rows[0].preRebuildCountRead&&
+          capture.rows[0].pairs[0].mesh.status==4,"unreadable pre-rebuild count does not suppress typed authored evidence");
     capture.arm(8,801,bindings);reads=0;capture.observe(scope,base+0x1010,1060,801,901,read);check(reads==0&&capture.callbacks==0,"old generation performs no reads after rearm");
     capture.arm(7,801,bindings);capture.observe(scope,base+0x1010,1070,802,902,read);check(reads==0&&capture.crossed==1,"callback crossing selected frame is explicit and performs no game reads");
     capture.arm(7,801,{});capture.observe(scope,base+0x1010,1080,801,901,read);check(reads==0&&capture.layoutDeclined==1,"unknown build layout is unavailable without pointer reads");

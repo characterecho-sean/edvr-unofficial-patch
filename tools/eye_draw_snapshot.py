@@ -595,6 +595,15 @@ def validate_menu_surface(data,selected_frame):
                 not isinstance(row.get('pairs'),list) or len(row['pairs'])!=2):raise ValueError('Invalid menu surface row')
         for field in ('render_frame','placement_render_frame','thread','qpc','ctl','panel','list','owner','full_panel','entry','entry_flag','definition','map_head','map_count','map_key'):
             if type(row.get(field)) is not int or row[field]<0:raise ValueError('Invalid menu surface provenance')
+        count_read=row.get('pre_rebuild_count_read')
+        count=row.get('pre_rebuild_triangle_count')
+        if count_read is None and count is None:
+            row['pre_rebuild_count_status']='not_recorded_in_earlier_capture'
+        elif (type(count_read) is not bool or type(count) is not int or count<0 or count>0xffffffffffffffff or
+              not count_read and count!=0):
+            raise ValueError('Invalid callback-time menu triangle count')
+        else:
+            row['pre_rebuild_count_status']='read_before_pick_rebuild' if count_read else 'unavailable_before_pick_rebuild'
         if row['owner'] in owners or row['owner']!=row['full_panel']+16:raise ValueError('Invalid menu surface owner association')
         owners.add(row['owner']);incomplete+=row['map_status']!=4
         for pair in row['pairs']:
@@ -1615,19 +1624,28 @@ def main():
         authored=menu['late_menu']['input_observer']['surface_evidence']
         assert [p['resource_key'] for p in authored['rows'][0]['pairs']]==[10,30]
         assert authored['rows'][0]['render_frame']==901 and authored['rows'][0]['placement_render_frame']==900
+        assert authored['rows'][0]['pre_rebuild_count_read'] and authored['rows'][0]['pre_rebuild_triangle_count']==0
+        assert authored['rows'][0]['pre_rebuild_count_status']=='read_before_pick_rebuild'
         import copy
-        for mutation in ('incomplete_key','wrong_type','bad_index','unavailable_payload','wrong_frame'):
+        older=copy.deepcopy(authored);older['rows'][0].pop('pre_rebuild_count_read');older['rows'][0].pop('pre_rebuild_triangle_count')
+        assert validate_menu_surface(older,801)['status']=='captured'
+        assert older['rows'][0]['pre_rebuild_count_status']=='not_recorded_in_earlier_capture'
+        unavailable=copy.deepcopy(authored);unavailable['rows'][0]['pre_rebuild_count_read']=False
+        assert validate_menu_surface(unavailable,801)['status']=='captured'
+        assert unavailable['rows'][0]['pre_rebuild_count_status']=='unavailable_before_pick_rebuild'
+        for mutation in ('incomplete_key','wrong_type','bad_index','unavailable_payload','wrong_frame','bad_callback_count'):
             bad=copy.deepcopy(authored);row=bad['rows'][0];pair=row['pairs'][0]
             if mutation=='incomplete_key':row['map_status']=5
             elif mutation=='wrong_type':pair['model_vtable']+=1
             elif mutation=='bad_index':pair['mesh']['indices'][0]=255
             elif mutation=='unavailable_payload':pair['mesh']['status']=2
+            elif mutation=='bad_callback_count':row['pre_rebuild_count_read']=False;row['pre_rebuild_triangle_count']=2
             else:row['ledger_frame']+=1
             try:validate_menu_surface(bad,801)
             except ValueError:pass
             else:raise AssertionError('Invalid authored surface accepted: '+mutation)
-        unavailable=copy.deepcopy(authored);unavailable['rows'][0]['status']=3
-        assert validate_menu_surface(unavailable,801)['copied_meshes']==0
+        invalidated=copy.deepcopy(authored);invalidated['rows'][0]['status']=3
+        assert validate_menu_surface(invalidated,801)['copied_meshes']==0
         nonfinite=copy.deepcopy(authored);nonfinite['rows'][0]['pairs'][0]['mesh']['vertices'][2]=None
         assert validate_menu_surface(nonfinite,801)['finite_meshes']==1
         assert menu['late_menu']['input_summary']['update_bridge']['status']=='observed' and menu['late_menu']['input_summary']['update_bridge']['updates']==1
