@@ -98,6 +98,14 @@ class Engine {
         void reset() noexcept {child.store(0);cycle.store(0);closed.store(false);for(auto& p:phase)p.store(0);for(auto& p:owner)p.store(0);}
     } rows_[Slots];
     std::atomic<uint64_t> state_{0};std::atomic<bool> enabled_{false};
+    // The kind-5 eye cameras are built after this evaluation, from a copy of
+    // the HMD primary made before the finalizer. The copy is what becomes
+    // camera+0x50 and then cb1 row 275. Location child+0xB0 is a different store.
+    struct EyeHead {
+        std::atomic<uint32_t> serial{0};
+        Pose composed{};
+        float raw[3]{};
+    } eye_;
     Row* row(uintptr_t child,bool create) noexcept {
         if(!child)return nullptr;
         for(unsigned i=0;i<Slots;++i) {
@@ -125,6 +133,7 @@ public:
         }
         if(!(old&CountMask)) {
             for(auto& r:rows_)r.reset();
+            eye_.serial.store(0,std::memory_order_release);
             evaluations.fetch_add(1,std::memory_order_relaxed);
             if(enabled_.load()&&uint32_t(next>>32))state_.compare_exchange_strong(next,next&~Initial);
         }
@@ -135,6 +144,20 @@ public:
     // stores remain inside the game's exclusive child-finalizer callback;
     // this is not an atomic multiword pose or a repair for invalid concurrent
     // dispatch of the same game subscriber collection.
+    // Publish the head the later eye-camera builder multiplies. Cleared when
+    // the next evaluation starts, so a missed builder cannot reuse a stale head.
+    void publishEye(uint32_t epoch,const Pose& composed,const Pose& raw) noexcept {
+        eye_.composed=composed;
+        eye_.raw[0]=raw.v[12];eye_.raw[1]=raw.v[13];eye_.raw[2]=raw.v[14];
+        eye_.serial.store(epoch,std::memory_order_release);
+    }
+    bool loadEye(Pose& composed,float raw[3]) const noexcept {
+        const uint32_t serial=eye_.serial.load(std::memory_order_acquire);
+        if(!serial)return false;
+        composed=eye_.composed;
+        raw[0]=eye_.raw[0];raw[1]=eye_.raw[1];raw[2]=eye_.raw[2];
+        return eye_.serial.load(std::memory_order_acquire)==serial;
+    }
     template<class Store> bool commit(uint32_t epoch,Store store) noexcept {
         if(!epoch||!enabled_.load())return false;
         uint64_t expected=(uint64_t(epoch)<<32)|1;
@@ -233,12 +256,38 @@ template<class Original> uintptr_t finalizer(Engine& e,const Memory& m,const Gam
         hmdSample(m,after,hc)&&previewSample(m,after,pc)&&equal(h.primary,hc.primary)&&equal(h.local,hc.local)&&
         equal(h.base,hc.base)&&equal(p.primary,pc.primary)&&get(m,child+0xB0,output)&&finite(output)&&equal(output,h.primary);
     if(good) {
-        const Pose changed=compose(h.local,p.primary,output);
-        if(finite(changed)&&e.commit(epoch,[&]{return m.write(m.context,child+0xB0,&changed,sizeof(changed));})) {
+        // The preview pose is the stable exterior camera. Composing the local
+        // headset onto it makes the ship follow the head. The 13:48 flight's
+        // scene eyes were this pose, and a second kind-5 pair stayed at the
+        // origin with the headset's orientation: the head-locked menu.
+        const Pose changed=p.primary;
+        const bool finiteChanged=finite(changed);
+        const bool wrote=finiteChanged&&e.commit(epoch,[&]{
+            return m.write(m.context,after.hmd+0x50,&changed,sizeof(changed))&&
+                m.write(m.context,child+0xB0,&changed,sizeof(changed));
+        });
+        if(wrote) {
+            e.publishEye(epoch,changed,h.primary);
             e.applied.fetch_add(1,std::memory_order_relaxed);return result;
         }
     }
     if(eligible)e.refused.fetch_add(1,std::memory_order_relaxed);
     return result;
+}
+// The eye-camera producer multiplies this head by the per-eye offset and
+// stores the product at the kind-5 camera's +0x50, which the view-constant
+// refresh loads into cb1 row 275. Replace a head that is still the raw HMD
+// primary, and a head sitting on the tracking origin: the ship-menu cameras
+// on the 13:48 frame were a stereo pair there, 36 m from the preview. A pose
+// tens of metres from both is another camera and is left alone.
+inline bool applyEyeHead(Engine& e,const Memory& m,uintptr_t pose) noexcept {
+    Pose composed;float raw[3]{};
+    if(!e.loadEye(composed,raw))return false;
+    Pose current;
+    if(!get(m,pose,current)||!finite(current))return false;
+    const float dx=current.v[12]-raw[0],dy=current.v[13]-raw[1],dz=current.v[14]-raw[2];
+    const float ox=current.v[12],oy=current.v[13],oz=current.v[14];
+    if(dx*dx+dy*dy+dz*dz>0.25f&&ox*ox+oy*oy+oz*oz>1.f)return false;
+    return m.write(m.context,pose,&composed,sizeof(composed));
 }
 }} // namespace edvr::previewcam

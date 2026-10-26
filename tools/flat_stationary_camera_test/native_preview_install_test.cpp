@@ -13,14 +13,14 @@ static HMODULE fixtureGetModule(const wchar_t*) {return fixtureModule;}
 #include <vector>
 
 namespace edvr {
-bool fixtureKnown=true;uintptr_t fixtureOffsets[4]={0x100,0x200,0x300,0x400};
+bool fixtureKnown=true;uintptr_t fixtureOffsets[5]={0x100,0x200,0x300,0x400,0x500};
 unsigned resolverCalls=0,guardFaults=0;std::string messages;
 Log& Log::get(){static Log log;return log;}Log::~Log()=default;
 void Log::note(const char* fmt,...){char text[1400];va_list args;va_start(args,fmt);std::vsnprintf(text,sizeof(text),fmt,args);va_end(args);messages+=text;messages+='\n';}
 int guardFilter(unsigned long,const char*){++guardFaults;return EXCEPTION_EXECUTE_HANDLER;}
 bool gameBuildKnown() noexcept{return fixtureKnown;}
 const char* gameBuildText() noexcept{return "fixture334925";}
-uintptr_t gameRva(uint32_t rva) noexcept{++resolverCalls;for(unsigned i=0;i<4;++i)if(rva==kHooks[i])return fixtureOffsets[i];return 0x1000;}
+uintptr_t gameRva(uint32_t rva) noexcept{++resolverCalls;for(unsigned i=0;i<5;++i)if(rva==kHooks[i])return fixtureOffsets[i];return 0x1000;}
 bool gameRvasFound(const uint32_t*,size_t,uint32_t*) noexcept{++resolverCalls;return true;}
 bool gamePinMatches(uint32_t,const uint8_t* actual,const uint8_t* expected,size_t bytes) noexcept{return !std::memcmp(actual,expected,bytes);}
 }
@@ -49,8 +49,9 @@ void functions(uint8_t* memory) {
         {0x41,0x5e,0x5f,0x5d}, // HMD: r14, rdi, rbp
         {0x48,0x83,0xc4,0x20,0x5d},
         {0x48,0x81,0xc4,0x18,0x02,0,0,0x41,0x5c,0x5f,0x5b,0x5d},
-        {0x48,0x83,0xc4,0x48}};
-    for(unsigned i=0;i<4;++i) {
+        {0x48,0x83,0xc4,0x48},
+        {}};
+    for(unsigned i=0;i<5;++i) {
         uint8_t* p=memory+fixtureOffsets[i];size_t at=0;
         std::memcpy(p,kPins[i],kLengths[i]);at+=kLengths[i];
         // Increment a counter in the same allocation without changing args.
@@ -69,16 +70,20 @@ void cleanup(uint8_t* memory) {
     using namespace edvr;
     // Fixture is single-threaded and every call has returned. Production never
     // frees a successful relay, including after partial installation or stop.
-    nativePreviewCameraStop();for(unsigned i=0;i<4;++i){g_previewHooks[i].uninstall();
+    nativePreviewCameraStop();for(unsigned i=0;i<5;++i){g_previewHooks[i].uninstall();
         if(g_previewRelays[i])VirtualFree(g_previewRelays[i],0,MEM_RELEASE);g_previewRelays[i]=nullptr;g_previewOriginal[i].store(nullptr);}
     if(memory)VirtualFree(memory,0,MEM_RELEASE);
     fixtureModule=nullptr;g_previewAttempted=g_previewInstalled=g_previewLastActive=false;g_previewReportAt=g_previewLastApplied=0;
-    for(unsigned i=0;i<4;++i)fixtureOffsets[i]=0x100+i*0x100;
+    for(unsigned i=0;i<5;++i)fixtureOffsets[i]=0x100+i*0x100;
 }
 uintptr_t call(uint8_t* memory,unsigned i) {
     using namespace edvr;
     if(i==1)return reinterpret_cast<Two>(memory+fixtureOffsets[i])(0,0);
     return reinterpret_cast<One>(memory+fixtureOffsets[i])(0);
+}
+uintptr_t callEye(uint8_t* memory,uintptr_t pose) {
+    using namespace edvr;
+    return reinterpret_cast<Two>(memory+fixtureOffsets[4])(0x10,pose);
 }
 }
 int main(int argc,char** argv) {
@@ -96,24 +101,37 @@ int main(int argc,char** argv) {
         if(scenario==2){DWORD old=0;VirtualProtect(memory,4096,PAGE_READWRITE,&old);memory[fixtureOffsets[3]]=0x90;VirtualProtect(memory,4096,PAGE_EXECUTE_READ,&old);}
         nativePreviewCameraBoundary(false,true);check(!g_previewAttempted,"wanted=false never installs");
         nativePreviewCameraBoundary(true,true);
-        const unsigned installed=scenario==0?4:scenario==1?2:0;
+        const unsigned installed=scenario==0?5:scenario==1?2:0;
         check(g_previewInstalled==(scenario==0),"only complete installation enables correction");
-        for(unsigned i=0;i<4;++i)check(g_previewHooks[i].installed()==(i<installed),"actual installed count matches complete/partial/pin refusal");
+        for(unsigned i=0;i<5;++i)check(g_previewHooks[i].installed()==(i<installed),"actual installed count matches complete/partial/pin refusal");
         if(scenario==0){
-            for(unsigned i=0;i<4;++i){
+            for(unsigned i=0;i<5;++i){
                 check(executable(g_previewRelays[i]),"successful relay is executable read-only");
                 const intptr_t distance=reinterpret_cast<intptr_t>(g_previewRelays[i])-(reinterpret_cast<intptr_t>(memory+fixtureOffsets[i])+5);
-                check(distance>=INT32_MIN&&distance<=INT32_MAX,"all four patched entries reach nearby relays");
+                check(distance>=INT32_MIN&&distance<=INT32_MAX,"all five patched entries reach nearby relays");
                 check(call(memory,i)==0x12340000+i,"far relay reaches actual wrapper and preserves original result");
                 check(reinterpret_cast<uint32_t*>(memory+0x8000)[i]==1,"each installed wrapper calls original exactly once");
             }
+            {
+                previewcam::Pose raw{};raw.v[0]=raw.v[5]=raw.v[10]=1;raw.v[12]=13.3f;raw.v[13]=10.6f;raw.v[14]=-46.8f;
+                previewcam::Pose composed=raw;composed.v[12]=103;composed.v[13]=202;composed.v[14]=299;
+                auto* pose=reinterpret_cast<previewcam::Pose*>(memory+0xA000);
+                *pose=raw;
+                g_previewEngine.publishEye(1,composed,raw);
+                check(callEye(memory,reinterpret_cast<uintptr_t>(pose))==0x12340004,"published head still returns the original eye body");
+                check(reinterpret_cast<uint32_t*>(memory+0x8000)[4]==2,"published head runs the original eye body once more");
+                check(pose->v[12]==composed.v[12]&&pose->v[13]==composed.v[13]&&pose->v[14]==composed.v[14],
+                    "shipped eye stub stores the composed pose when a head is published");
+                g_previewEngine.enter();g_previewEngine.leave();
+            }
             nativePreviewCameraBoundary(true,false);nativePreviewCameraStop();
-            for(unsigned i=0;i<4;++i){check(executable(g_previewRelays[i]),"stop retains successful executable relay");
-                check(call(memory,i)==0x12340000+i&&reinterpret_cast<uint32_t*>(memory+0x8000)[i]==2,"inactive wrapper remains original-once forwarder");}
+            for(unsigned i=0;i<5;++i){check(executable(g_previewRelays[i]),"stop retains successful executable relay");
+                const unsigned forwards=i==4?3u:2u;
+                check(call(memory,i)==0x12340000+i&&reinterpret_cast<uint32_t*>(memory+0x8000)[i]==forwards,"inactive wrapper remains original-once forwarder");}
         }else if(scenario==1){
             check(!g_previewEngine.current()&&g_previewEngine.applied.load()==0,"partial install cannot enable camera writes");
             for(unsigned i=0;i<2;++i)check(executable(g_previewRelays[i])&&call(memory,i)==0x12340000+i&&reinterpret_cast<uint32_t*>(memory+0x8000)[i]==1,"partial success retains live original-once passive relay");
-            check(!g_previewRelays[2]&&!g_previewOriginal[2].load()&&!g_previewRelays[3],"failed/unattempted entry retains no executable relay or dangling forward");
+            check(!g_previewRelays[2]&&!g_previewOriginal[2].load()&&!g_previewRelays[3]&&!g_previewRelays[4],"failed/unattempted entry retains no executable relay or dangling forward");
             check(messages.find("eight-byte aligned")!=std::string::npos,"actual CodeHook refusal preserved in diagnostics");
         }else check(messages.find("entry pin")!=std::string::npos,"all entry pins validated before publishing any hook");
         const auto attempts=resolverCalls;nativePreviewCameraBoundary(true,true);check(resolverCalls==attempts,"boundary never silently retries or duplicates installation");

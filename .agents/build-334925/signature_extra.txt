@@ -107,3 +107,14 @@
 0x4F3499 code    #   mulss xmm1,[rbx+0x270] (bound y)
 0x4F34A1 code    #   mulss xmm0,[rbx+0x26C] (bound x)
 0x4F3845 code    #   and dword [rbx+0x230],~4 (clears bit 4)
+0x106D8E0 code   # on-foot ship preview: the synchronous manager (native_preview_camera.cpp)
+0x1074140 code   #   the HMD update
+0x1261680 code   #   the CustomisationVisual preview callback
+0x1070980 code   #   the Location finalizer
+0xF81910 code    #   ConstantWeight
+0x283FA20 code   #   the eye-camera producer; its head becomes the kind-5 camera origin
+0x518C920 data   #   HmdIface
+0x518C8B0 data   #   HmdObject
+0x51AA500 data   #   PreviewIface
+0x51AA388 data   #   PreviewObject
+0x55999C0 data   # completed-mission surface model vtable (native_on_foot_menu_surface.h)

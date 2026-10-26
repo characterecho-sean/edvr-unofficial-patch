@@ -334,6 +334,27 @@ inline void run94(Check&& check) {
               "F103: a hunched stance with nothing stored takes the starting raise and stores nothing; a crouch is stored whatever the head's height; hunched is an unarmed source");
     }
 
+    // ---- a seat follows its neck; a hunch whose camera stays up does not ----------------------------------------------------------------------
+    {
+        // edvr_gfx_20261026_160722 at 16:11: standing neck stored 1.532 m, camera 1.557 m; seated neck 1.084 m, camera 1.249 m, head under the standing band,
+        // crouch weight under 0.5 so the class stayed standing. The view was held at 1.682 m and the head floated. A deeper hunch whose camera does not drop stays hunched.
+        f94::EyeLevel seat;
+        uint8_t src = f94::kEyeSourceN;
+        seat.target(false, f94::kClassStanding, 1.532, 1.557, kH, &src, true);
+        const double sit = seat.target(false, f94::kClassStanding, 1.084, 1.249, kH, &src, false);
+        const bool sat = src == f94::kEyeUnarmed && within(1.249 + sit, 1.084 + kH, 1e-9) && within(seat.neckY[f94::kClassStanding], 1.532, 1e-9) &&
+                         seat.have[f94::kClassCrouched] && within(seat.neckY[f94::kClassCrouched], 1.084, 1e-9);
+        const double deep = seat.target(false, f94::kClassStanding, 1.200, 1.560, kH, &src, false);
+        const bool hunchHeld = src == f94::kEyeHunched && within(deep, 1.532 + kH - 1.560, 1e-9) && within(seat.neckY[f94::kClassStanding], 1.532, 1e-9);
+        const double armed = seat.target(true, f94::kClassStanding, 1.070, 1.240, kH, &src, false);
+        const bool armedSat = src == f94::kEyeStance && within(1.240 + armed, 1.084 + kH, 1e-9);
+        // 16:44: the camera reading jumps back to the standing height for a frame while the neck is still seated. The view must not pop up to the standing eye.
+        const double flick = seat.target(false, f94::kClassStanding, 1.086, 1.557, kH, &src, false);
+        const bool flickerHeld = src == f94::kEyeUnarmed && within(1.557 + flick, 1.086 + kH, 1e-9) && within(seat.neckY[f94::kClassStanding], 1.532, 1e-9);
+        check(sat && hunchHeld && armedSat && flickerHeld,
+              "seat: neck and camera both 25 cm under the stored standing ones, the view follows the seated neck and a later armed eye stays there; a camera flicker while still seated does not pop the view; a hunch whose camera stays up keeps the standing eye");
+    }
+
     // ---- the hold never sees the neck term -------------------------------------------------------------------------------------------------------------------------
     {
         // The pose carries an alignment whose y includes the neck term (-0.116) and the hold's own (+0.03): the render head reads lower by it; the input takes the

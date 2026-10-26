@@ -67,6 +67,16 @@ constexpr double kCamOverUprightNeckM = 0.08;   // the game's camera over the up
 // 1.455 against 1.692 m) and armed after it (1.458 m): the weapons, placed from the game's camera, stood over the eye. A standing stance is upright when its head
 // joint is at a standing commander's height (the pin's own standing gate, pinHeadUpright); an unarmed standing stance that is not is hunched: it stores nothing
 // and its target is the stored upright eye, as an armed stance's is (with nothing stored, the starting raise).
+//
+// A seat is not that hunch. In edvr_gfx_20261026_160722 at 16:11 the seated neck was 1.084 m and the game's camera had come down with it (about 1.25 m, 32 cm
+// under the standing camera) while the crouch weight stayed under 0.5, so the class was still standing and the head was under the standing band. F103 then held
+// the view at the stored upright eye (1.682 m): the drawn raise was +43 cm, the skeleton's own eye stayed 17 cm over the neck, and the head floated above the
+// body. The legs were folded (hip-to-foot 0.77 against 0.996 standing). The combat hunch left the camera where it was. A stance whose neck and camera are both
+// kSeatDropM under the stored standing ones is a seat: it is the crouch, the view follows that neck, and the standing eye is not replaced.
+// Once that crouch is stored, a neck still within kSeatHoldM of it stays seated. In edvr_gfx_20261026_164041 at 16:44 the crouch weight sat on 0.5, so
+// calls alternated between the seated eye and the standing eye and the drawn view popped between them (the game's camera itself held +16 cm over the neck).
+constexpr double kSeatDropM = 0.25;
+constexpr double kSeatHoldM = 0.08;
 enum EyeSource : uint8_t { kEyeUnarmed = 0, kEyeUnarmedNoClass = 1, kEyeStance = 2, kEyeStandingOverCrouch = 3, kEyeStart = 4, kEyeHunched = 5, kEyeSourceN = 6 };
 inline const char* eyeSourceName(int s) noexcept {
     return s == kEyeUnarmed ? "unarmed" : s == kEyeUnarmedNoClass ? "unarmed, the stance not known" : s == kEyeStance ? "the unarmed eye of the stance"
@@ -84,6 +94,13 @@ struct EyeLevel {
     double target(bool armed, int cls, double neckYNow, double camYNow, double eyeHeightM, uint8_t* source, bool upright = true) noexcept {
         uint8_t src = kEyeUnarmed;
         double t = 0.0;
+        // The caller still says standing when the crouch weight is under 0.5. A seat has already dropped the camera with the neck; the fists' hunch has not.
+        // A stored seat is kept while the neck is still there, so one frame of the camera reading jumping back up does not pop the view to the standing eye.
+        if (cls == kClassStanding && have[kClassCrouched] && std::fabs(neckYNow - neckY[kClassCrouched]) < kSeatHoldM)
+            cls = kClassCrouched;
+        else if (cls == kClassStanding && have[kClassStanding] &&
+                 neckYNow < neckY[kClassStanding] - kSeatDropM && camYNow < camY[kClassStanding] - kSeatDropM)
+            cls = kClassCrouched;
         if (!armed && cls == kClassStanding && !upright) {
             src = kEyeHunched;
             t = have[kClassStanding] ? raiseTarget(neckY[kClassStanding], eyeHeightM, camYNow) : eyeHeightM - kCamOverUprightNeckM;
