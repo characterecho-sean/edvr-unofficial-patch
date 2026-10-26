@@ -44,6 +44,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace edvr {
 
@@ -100,15 +101,42 @@ bool journalFlatSupercruise(bool* supercruise);
 
 // DIAGNOSTIC, ungated by profile: what the watcher holds right now, for the flat map line's 5 s report (flat_runtime.cpp). Not a consumer's
 // answer: the accessors above are the answers. active is the watcher's own state; statusSamples counts Status.json reads that parsed;
+// statusContentRevision changes only when the observed bytes change, not on identical rereads. Its time is when EDVR first observed that
+// content, not the game's write time: an unrelated field or the JSON timestamp may change while ADS is still false.
 // guiKnown and gui are the last parsed sample's GuiFocus field.
+struct JournalStatusContentRevision {
+    static constexpr size_t kCapacity = 8192;
+    char previous[kCapacity] = {};
+    size_t size = 0;
+    uint64_t revision = 0;
+    uint64_t observe(const char* bytes, size_t length) noexcept {
+        if (!bytes || !length || length >= kCapacity) return revision;
+        if (!revision || length != size || std::memcmp(previous, bytes, length) != 0) {
+            std::memcpy(previous, bytes, length);
+            size = length;
+            ++revision;
+        }
+        return revision;
+    }
+};
 struct JournalRawStatus {
     bool active = false;
     bool gameplay = false; // diagnostic, ungated by profile: LoadGame seen in this process
     uint32_t statusSamples = 0;
+    uint64_t statusContentRevision = 0, statusContentMs = 0;
     bool guiKnown = false;
     uint32_t gui = 0;
 };
 JournalRawStatus journalRawStatus();
+
+// The ADS fields from the publication last taken by journalWatchTick. Like the accessors above, callers read this on the Present thread,
+// between its publication boundaries. Profile/active gating matches journalAdsKnown/journalAds; poll-count semantics are unchanged.
+struct JournalAdsStatus {
+    bool known = false, value = false;
+    uint32_t polls = 0;
+    uint64_t contentRevision = 0, contentMs = 0;
+};
+JournalAdsStatus journalAdsStatus();
 
 // Flags bit 4: supercruise, where the FSS keys actually do something.
 bool journalSupercruiseKnown();

@@ -74,6 +74,12 @@ public:
     static constexpr uint64_t kF77HeldCandidateVs=0x154FB5A453F3D2E9ull;
     static constexpr uint64_t kF77OpticVs=0x025B4B9FF54622EDull,kF77OpticPs=0x46F92DC71BF8DFA5ull;
     static constexpr uint64_t kWeaponUiVs=0xB10B032BDFD46700ull,kWeaponUiPs=0xDB899F4BD577F2E5ull;
+    static constexpr uint64_t kLateMenuVs=0x5DAD41AA66757CE3ull,kLateMenuPs=0x25D5F73A4616093Bull;
+    static constexpr uint64_t kLateMenuBaseVs=0xC4B4B334B26E81A9ull,kLateMenuBasePs=0x0146ABCC53240479ull;
+    static bool lateMenuFamily(uint64_t vs) noexcept {return vs==kLateMenuVs || vs==kLateMenuBaseVs;}
+    static bool lateMenuSceneReference(uint64_t vs) noexcept {
+        return vs==kScene || vs==0xDE545DC8EE4FBB87ull || vs==0xAACFDCF2FB9AD809ull || vs==0x61AE8EB05FDC18DDull;
+    }
     static bool f77Candidate(uint64_t vs,uint64_t ps) noexcept {
         return vs==kF77HeldCandidateVs || (vs==kF77OpticVs && ps==kF77OpticPs) || (vs==kWeaponUiVs && ps==kWeaponUiPs);
     }
@@ -142,7 +148,7 @@ public:
     }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
         if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight && vs!=kSprite && vs!=kBoltVs &&
-            !poolLayout(e,n)) || !layout || !e || !n || n>32)return;
+            !lateMenuFamily(vs) && !poolLayout(e,n)) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
             if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -249,7 +255,8 @@ public:
         // 0 absent, 1 staged copy issued, 2 unsupported view, 3 nonzero
         // first element/binding offset, 4 unexpected stride, 5 size/budget refusal, 6 stage
         // creation failure, 7 body snapshot quota already used, 8 not selected,
-        // 9 no unambiguous other-palette candidate was tracked, 10 unknown eye.
+        // 9 no unambiguous other-palette candidate was tracked, 10 unknown eye,
+        // 11 menu instance IDs requested through the exact bounded IA stream window instead of a whole VB copy.
         uint32_t meshStatus[4]={};
         uint32_t meshSelected=0;
         std::vector<Layout> layout; // source effects; version 7 also night vision
@@ -286,6 +293,8 @@ public:
     static constexpr uint32_t kEyeMeshBudget=768*1024*1024;
     static constexpr uint32_t kEyeMeshSnapshotBudget=24*1024*1024;
     uint32_t meshBudgetLimit=kMeshBudget;
+    uint32_t vertexBudgetLimit=32*1024*1024;
+    bool lateMenuEvidence=false;
     uint32_t meshCaptureFirstFrame=0,meshCaptureDeclined=0,meshNonBodyDraws=0;
     uint32_t meshCaptureSnapshots=0;
     static constexpr uint32_t kEyeMeshFrames=16;
@@ -386,7 +395,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kF77HeldCandidateVs && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs && hash!=kUnknownAPs && hash!=kUnknownBPs && hash!=kF77OpticPs && hash!=kWeaponUiVs && hash!=kWeaponUiPs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && !lateMenuFamily(hash) && hash!=kLateMenuPs && hash!=kLateMenuBasePs && hash!=kScene && hash!=kF77HeldCandidateVs && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs && hash!=kUnknownAPs && hash!=kUnknownBPs && hash!=kF77OpticPs && hash!=kWeaponUiVs && hash!=kWeaponUiPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -399,7 +408,7 @@ public:
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
-            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:((d.vs==kUnknownA || d.vs==kUnknownB || (d.vs==kF77OpticVs && d.ps==kF77OpticPs) || (d.vs==kWeaponUiVs&&d.ps==kWeaponUiPs))?d.ps:(solarDraw(d.vs)?d.ps:0))));
+            const uint64_t pixel=lateMenuFamily(d.vs)?d.ps:(d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:((d.vs==kUnknownA || d.vs==kUnknownB || (d.vs==kF77OpticVs && d.ps==kF77OpticPs) || (d.vs==kWeaponUiVs&&d.ps==kWeaponUiPs))?d.ps:(solarDraw(d.vs)?d.ps:0)))));
             if(pixel && seen.emplace(pixel,true).second) {
                 const auto ps=shaders.find(pixel);
                 if(ps==shaders.end())++missing;
@@ -428,6 +437,7 @@ public:
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
         firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
+        vertexBudgetLimit=32*1024*1024;lateMenuEvidence=false;
         fireGeometrySeen=fireGeometryCaptured=fireGeometryMissingLayout=fireGeometryRefusedBytes=0;
         effectImages.clear();effectImageBytes=effectImageDeclined=0;pendingEffectImage=UINT32_MAX;
         spriteDiagnostics.clear();spriteImageBytes=spriteDepthBytes=spriteImageDeclined=0;pendingSpriteDiagnostic=UINT32_MAX;
@@ -540,8 +550,9 @@ public:
         if(pendingCandidateDraw>=candidateFrames.size())return;
         CandidateFrame& c=candidateFrames[pendingCandidateDraw];c.issued=issued?1u:0u;c.actualVs=actualVs;c.actualPs=actualPs;
         if(!issued)c.issueStatus=1; // original candidate was not issued
-        else if(c.draw>=draws.size() || !weaponUiCandidate(draws[c.draw].vs,draws[c.draw].ps))c.issueStatus=4; // outside measured UI shader families
-        else if((actualVs!=kWeaponUiVs||actualPs!=kWeaponUiPs) && (actualVs!=kF77OpticVs||actualPs!=kF77OpticPs))c.issueStatus=5; // effective shader changed
+        else if(c.draw>=draws.size() || (!lateMenuEvidence && !weaponUiCandidate(draws[c.draw].vs,draws[c.draw].ps)))c.issueStatus=4; // outside measured UI shader families
+        else if(lateMenuEvidence?(actualVs!=draws[c.draw].vs || actualPs!=draws[c.draw].ps):
+                ((actualVs!=kWeaponUiVs||actualPs!=kWeaponUiPs) && (actualVs!=kF77OpticVs||actualPs!=kF77OpticPs)))c.issueStatus=5; // effective shader changed
         else if(!ctx)c.issueStatus=3;
         else {
             Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rt;ctx->OMGetRenderTargets(1,&rt,nullptr);
@@ -549,7 +560,7 @@ public:
                 c.targetIdentity=reinterpret_cast<uint64_t>(resource.Get());Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
                 if(SUCCEEDED(resource.As(&texture))){D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);c.width=td.Width;c.height=td.Height;c.rtvFormat=td.Format;}}
             UINT nv=16,ns=16;ctx->RSGetViewports(&nv,c.viewports);ctx->RSGetScissorRects(&ns,c.scissors);c.viewportCount=(std::min)(nv,16u);c.scissorCount=(std::min)(ns,16u);
-            const UINT cameraSlot=actualVs==kF77OpticVs?1u:0u;c.cameraCbSlot=cameraSlot;
+            const UINT cameraSlot=lateMenuEvidence || actualVs==kF77OpticVs?1u:0u;c.cameraCbSlot=cameraSlot;
             Microsoft::WRL::ComPtr<ID3D11Buffer> b0;Microsoft::WRL::ComPtr<ID3D11DeviceContext1> ctx1;
             if(SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))){UINT first=0,count=0;ctx1->VSGetConstantBuffers1(cameraSlot,1,&b0,&first,&count);c.b0FirstConstant=first;c.b0NumConstants=count;c.b0RangeKnown=1;}
             else ctx->VSGetConstantBuffers(cameraSlot,1,&b0);
@@ -888,7 +899,7 @@ public:
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
                  uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false,bool eyeMesh=false,
-                 bool f77CandidateDraw=false,uint32_t renderFrame=0,int32_t eye=-1,bool meshSnapshotPermit=true,bool meshSelected=false,ID3D11Buffer* otherPaletteCandidate=nullptr) {
+                 bool f77CandidateDraw=false,uint32_t renderFrame=0,int32_t eye=-1,bool meshSnapshotPermit=true,bool meshSelected=false,ID3D11Buffer* otherPaletteCandidate=nullptr,uint32_t lateEvidenceRole=0) {
         const bool fireGeometryPair=fireGeometry(vs,ps);
         if (!ctx || (!watches(vs) && !(source && (sourceMesh(vs) || sourceEffect(vs))) && !fireGeometryPair && !f77CandidateDraw)) return;
         const bool candidateOptic=f77CandidateDraw && vs==kF77OpticVs && ps==kF77OpticPs;
@@ -918,6 +929,14 @@ public:
         ID3D11Buffer* buffers[4] = {};
         ctx->VSGetConstantBuffers(0, 3, buffers);
         ctx->PSGetConstantBuffers(2, 1, buffers + 3);
+        UINT constantFirst[3]{},constantCount[3]{};
+        if(lateEvidenceRole) {
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext1> ranged;
+            if(SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&ranged)))) {
+                for(unsigned i=0;i<3;++i){if(buffers[i])buffers[i]->Release();buffers[i]=nullptr;}
+                ranged->VSGetConstantBuffers1(0,3,buffers,constantFirst,constantCount);
+            }
+        }
         if(vs==kNight && ps==kNightPs) {
             if(buffers[1])buffers[1]->Release();buffers[1]=nullptr;
             ctx->PSGetConstantBuffers(1,1,buffers+1);
@@ -929,11 +948,14 @@ public:
             D3D11_BUFFER_DESC bd{}; src->GetDesc(&bd);
             d.whole[i] = bd.ByteWidth;
             const uint32_t cap = i == 0 ? 1024u : 8192u;
-            bd.ByteWidth = bd.ByteWidth < cap ? bd.ByteWidth : cap;
+            const uint64_t begin=lateEvidenceRole&&i<3?uint64_t(constantFirst[i])*16u:0;
+            if(begin>=bd.ByteWidth){++failures;continue;}
+            bd.ByteWidth = (std::min)(bd.ByteWidth-static_cast<uint32_t>(begin),cap);
+            if(lateEvidenceRole&&i<3&&constantCount[i])bd.ByteWidth=(std::min)(bd.ByteWidth,constantCount[i]*16u);
             bd.Usage = D3D11_USAGE_STAGING; bd.BindFlags = bd.MiscFlags = bd.StructureByteStride = 0;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             if (FAILED(dev->CreateBuffer(&bd, nullptr, &d.stage[i]))) { ++failures; continue; }
-            D3D11_BOX box{0, 0, 0, bd.ByteWidth, 1, 1};
+            D3D11_BOX box{static_cast<UINT>(begin), 0, 0, static_cast<UINT>(begin)+bd.ByteWidth, 1, 1};
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
@@ -950,7 +972,7 @@ public:
                 bytes<=sizeof(elements) && bytes%sizeof(Layout)==0)d.layout.assign(elements,elements+bytes/sizeof(Layout));
         }
         if(fireGeometryPair && d.layout.empty() && fireGeometryMissingLayout<kMaxDraws)++fireGeometryMissingLayout;
-        if(mesh || f77CandidateDraw) {
+        if(mesh || (f77CandidateDraw && lateEvidenceRole!=2)) {
             ++meshDraws;
             for(unsigned i=0;i<2;++i) {
                 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;ctx->VSGetShaderResources(i?38:33,1,&srv);
@@ -968,14 +990,15 @@ public:
                 if(eyeMesh&&eye<0){d.meshStatus[i]=10;continue;}
                 if(eyeMesh&&!meshSelected){d.meshStatus[i]=8;continue;}
                 if(eyeMesh&&!meshSnapshotPermit){d.meshStatus[i]=7;continue;}
-                d.mesh[i]=captureMeshBuffer(ctx,dev.Get(),b.Get(),frame,bd.StructureByteStride,eyeMesh?d.target:0,eyeMesh&&!f77CandidateDraw,&d.meshStatus[i]);
+                d.mesh[i]=captureMeshBuffer(ctx,dev.Get(),b.Get(),frame,bd.StructureByteStride,eyeMesh?d.target:0,lateEvidenceRole || (eyeMesh&&!f77CandidateDraw),&d.meshStatus[i]);
             }
             Buffer ids;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(0,1,&ids,&stride,&offset);
             d.meshSource[2]=reinterpret_cast<uint64_t>(ids.Get());
             if(ids){D3D11_BUFFER_DESC idDesc{};ids->GetDesc(&idDesc);d.meshRangeStart[2]=offset;d.meshRangeCount[2]=offset<idDesc.ByteWidth?idDesc.ByteWidth-offset:0;}
             const uint32_t vb0Status=eyeMeshVb0BindingStatus(ids.Get()!=nullptr,stride,offset);
-            if(vb0Status==4 || vb0Status==3){d.meshStatus[2]=vb0Status;++meshDeclined;}
-            else if(vb0Status==1){if(eyeMesh&&eye<0)d.meshStatus[2]=10;else if(eyeMesh&&!meshSelected)d.meshStatus[2]=8;else if(eyeMesh&&!meshSnapshotPermit)d.meshStatus[2]=7;else d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride,eyeMesh?d.target:0,eyeMesh&&!f77CandidateDraw,&d.meshStatus[2]);}
+            if(lateEvidenceRole)d.meshStatus[2]=ids?11u:0u;
+            else if(vb0Status==4 || vb0Status==3){d.meshStatus[2]=vb0Status;++meshDeclined;}
+            else if(vb0Status==1){if(eyeMesh&&eye<0)d.meshStatus[2]=10;else if(eyeMesh&&!meshSelected)d.meshStatus[2]=8;else if(eyeMesh&&!meshSnapshotPermit)d.meshStatus[2]=7;else d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride,eyeMesh?d.target:0,lateEvidenceRole || (eyeMesh&&!f77CandidateDraw),&d.meshStatus[2]);}
             if(eyeMesh) {
                 if(eye<0)d.meshStatus[3]=10;
                 else if(!otherPaletteCandidate)d.meshStatus[3]=9;
@@ -1004,8 +1027,8 @@ public:
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if(((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || f77CandidateDraw ||
-           ((mesh || night || planet) && (f77CandidateDraw || frame==firstFrame)) || effect || fireGeometryPair) {
+        if(lateEvidenceRole!=2 && (((vs==kHud || vs==kSprite || vs==kVscreen || solar) && frame-firstFrame<3) || f77CandidateDraw ||
+           ((mesh || night || planet) && (f77CandidateDraw || frame==firstFrame)) || effect || fireGeometryPair)) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             uint32_t opticMinIndex=0,opticMaxIndex=0;
@@ -1094,9 +1117,23 @@ public:
                     begin+=uint64_t(base)*s.stride;
                 }
                 if(vs==kVscreen && i==1)begin+=uint64_t(startInstance)*s.stride;
+                uint32_t menuInstanceBytes=0;
+                if(lateEvidenceRole && i<2 && !d.layout.empty()) {
+                    bool used=false,perInstance=true;uint32_t step=0;bool sameStep=true;
+                    for(const auto& element:d.layout)if(element.slot==uint32_t(i)) {
+                        used=true;perInstance=perInstance&&element.classification==D3D11_INPUT_PER_INSTANCE_DATA;
+                        if(!step)step=element.step;else sameStep=sameStep&&step==element.step;
+                    }
+                    if(used&&perInstance&&sameStep&&step) {
+                        const uint64_t bytes=((uint64_t(instances)+step-1u)/step)*s.stride;
+                        begin=uint64_t(s.offset)+uint64_t(startInstance)*s.stride;
+                        if(!bytes || bytes>256*1024 || begin>s.whole || bytes>s.whole-begin){++vertexDeclined;continue;}
+                        menuInstanceBytes=static_cast<uint32_t>(bytes);
+                    }
+                }
                 if(begin>=s.whole){++vertexDeclined;continue;}
                 s.captureOffset=static_cast<uint32_t>(begin);
-                UINT bytes=indexedOpticBytes?indexedOpticBytes:s.whole-s.captureOffset;if(bytes>256*1024)bytes=256*1024;
+                UINT bytes=menuInstanceBytes?menuInstanceBytes:indexedOpticBytes?indexedOpticBytes:s.whole-s.captureOffset;if(bytes>256*1024)bytes=256*1024;
                 if(i==2 && indexed && uint64_t(count)*s.stride<bytes)bytes=count*s.stride;
                 if(unpacked && i<2 && !d.layout.empty()) {
                     bool used=false,perInstance=true,knownStep=true;uint64_t instanceElements=0;
@@ -1116,7 +1153,7 @@ public:
                     if(elements && elements*s.stride<bytes)bytes=static_cast<UINT>(elements*s.stride);
                 }
                 if(!bytes)continue;
-                if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;if(fireGeometryPair)fireGeometryRefusedBytes=bytes>UINT32_MAX-fireGeometryRefusedBytes?UINT32_MAX:fireGeometryRefusedBytes+bytes;continue;}
+                if(vertexBytes+bytes>vertexBudgetLimit){++vertexDeclined;if(fireGeometryPair)fireGeometryRefusedBytes=bytes>UINT32_MAX-fireGeometryRefusedBytes?UINT32_MAX:fireGeometryRefusedBytes+bytes;continue;}
                 bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
                 if(FAILED(dev->CreateBuffer(&bd,nullptr,&s.stage))){++failures;if(fireGeometryPair)fireGeometryRefusedBytes=bytes>UINT32_MAX-fireGeometryRefusedBytes?UINT32_MAX:fireGeometryRefusedBytes+bytes;continue;}
                 D3D11_BOX box{s.captureOffset,0,0,s.captureOffset+bytes,1,1};ctx->CopySubresourceRegion(s.stage.Get(),0,0,0,0,src.Get(),0,&box);
@@ -1150,7 +1187,7 @@ public:
         draws.push_back(std::move(d));
         if(f77CandidateDraw) {
             CandidateFrame c;c.draw=candidateDrawIndex;c.ledgerFrame=frame;c.renderFrame=renderFrame;
-            c.roiCaptured=candidateRoiAfter!=UINT32_MAX?1u:0u;c.cameraCbSlot=vs==kF77OpticVs?1u:0u;
+            c.roiCaptured=candidateRoiAfter!=UINT32_MAX?1u:0u;c.cameraCbSlot=lateMenuEvidence || vs==kF77OpticVs?1u:0u;
             candidateFrames.push_back(c);pendingCandidateDraw=uint32_t(candidateFrames.size()-1);
         }
         if(((effect && effectImage(vs)) || night) && frame==firstFrame && rt) {
@@ -1171,7 +1208,8 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(15); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        // Version 16 uses the same bounded binary layout as 15, with late-menu/scene candidate associations and optional native frame.
+        u32(lateMenuEvidence?16u:15u); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,

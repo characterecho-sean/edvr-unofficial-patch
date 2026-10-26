@@ -453,6 +453,18 @@ struct NativeWeaponUiSubmitIdentity {
 bool nativeOnFootWeaponUiCurrentSubmit(uintptr_t instance, NativeWeaponUiSubmitIdentity* out) noexcept;
 // Copy the newest completed after-write pose stamp for this exact native render frame.
 bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out);
+// Capture-only companion data; never part of the eye dump's binary record layout. This copies completed existing publications, with no game calls.
+// Froot/M3p are row-vector model-to-world matrices, G is the existing offset-adjusted FP-to-3P mapping, bodyOffset is world metres,
+// and the pin targets are 3P model coordinates.
+struct NativeOnFootCameraEvidence {
+    enum : uint32_t { kMatricesValid = 1, kSourcesExact = 2, kTimesFresh = 4, kPinTargetsValid = 8, kPoseSourcesFresh = 16, kM3pCanonicalized = 32 };
+    uint32_t status = 0; // 0 unavailable, 1 completed F81 row for the requested hook frame, 2 cached IkG (never an exact draw claim)
+    uint32_t validFlags = 0, requestedFrame = 0, sourceFrame = 0, fpFrame = 0, rootReadRenderFrame = 0, gGameFrame = 0, itemSerial = 0;
+    uint64_t sampleQpc = 0, qpc = 0, fpQpc = 0, rootQpc = 0, ms = 0, rootMs = 0, qpcFrequency = 0;
+    // ms/rootMs exist only in cached IkG; F81 has QPC stamps instead. kTimesFresh means all available source stamps are non-future and <=100 ms old.
+    float froot[16] = {}, m3p[16] = {}, G[16] = {}, bodyOffset[3] = {}, pinEyeTarget[3] = {}, pinTarget[3] = {};
+};
+bool nativeOnFootCameraEvidence(uint32_t nativeRenderFrame, NativeOnFootCameraEvidence* out);
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
 // was not a fresh patched frame read back (or the ring has moved on).

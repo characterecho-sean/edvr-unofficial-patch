@@ -16,6 +16,7 @@
 // writes no log line: it talks to the frame thread through atomics and small rings of its own.
 #include <cstddef>
 #include <cstdint>
+#include "avatar_hooks_core.h"
 
 namespace edvr {
 
@@ -91,7 +92,7 @@ uint32_t avatarCensusTake(AvatarCensusRow* out, uint32_t cap, uint32_t* seen, ui
 void nativeOnFootHooksBody(bool wanted, bool body, const char* reason);
 
 // F15 (native on foot, TEMPORARY, fix.native_on_foot_hide_fp_body; frame thread). `want`: the key is on and native stereo is on foot. While it holds,
-// the fade hook's post-call zeroes the four view masks of the three first-person body parts (avh::kFpBodyPartNames) on the local first-person AMC
+// the fade hook's post-call zeroes the four view masks of the first-person body parts and bracers (avh::kFpBodyPartNames) on the local first-person AMC
 // (mode 2), with the head hiding's SEH method. Nothing is restored: the game rewrites the masks every frame. Alpha, the view filter and flag bytes are
 // not touched. Logs the transitions once; `reason` (a literal) says why it ends.
 void nativeOnFootFpBody(bool want, const char* reason);
@@ -102,11 +103,11 @@ void nativeOnFootBodyClipTick(uint64_t nowMs, bool unclipWant, bool probeWant, c
 // first-person skeleton's masks on the first-person AMC. Logs the transitions and a 5 s census line.
 void nativeOnFootHybridTick(uint64_t nowMs, bool want, const char* reason);
 struct FpBodyReadback {
-    uint64_t amc = 0;               // the first-person AMC last zeroed (0 = none yet this session)
-    uint32_t parts = 0;             // how many of the three names were found in the table
-    const char* name[3] = {};       // their names, in avh::kFpBodyPartNames order
-    uint64_t masks[3][4] = {};      // the four view masks of each, read straight after the zero (the frame thread's own read can see the next frame's)
-    uint64_t mode2Seen = 0;         // first-person AMC calls while the body was wanted
+    uint64_t amc = 0;                                 // the first-person AMC last zeroed (0 = none yet this session)
+    uint32_t parts = 0;                               // how many names were found in the table
+    const char* name[avh::kFpBodyPartCount] = {};       // their names, in avh::kFpBodyPartNames order
+    uint64_t masks[avh::kFpBodyPartCount][4] = {};      // four view masks each, read straight after the zero
+    uint64_t mode2Seen = 0;                           // first-person AMC calls while the body was wanted
 };
 FpBodyReadback nativeOnFootFpBodyReadback();
 

@@ -3023,26 +3023,34 @@ struct AdsInputChoice {
 struct AdsActionReject {
     bool latched = false;
     uint64_t edgeMs = 0;
-    uint32_t statusSamplesAtEdge = 0;
+    uint64_t statusRevisionAtEdge = 0;
 };
-// A game-status veto must come from a Status.json sample observed after the bound action turned on and survive a 1.5 s acceptance grace. Once rejected, the held
-// action stays off until its actual logical value becomes false; stale journal state cannot repeatedly re-engage it.
-inline bool adsActionRejectStep(AdsActionReject& s, bool actionAds, uint64_t nowMs, bool journalKnown, bool journalAds, uint32_t statusSamples) noexcept {
+// A veto needs changed Status.json content observed after the request and a 1.5 s acceptance grace. Repeated reads of identical content are not fresh evidence.
+// Changed content can still report a slow transition: a later authoritative ADS=true clears the veto while held. It also starts a new grace, so a later game
+// rejection (for example a reload) can still veto the held request after a new false status. Content freshness is not proof of native weapon readiness.
+inline bool adsActionRejectStep(AdsActionReject& s, bool actionAds, uint64_t nowMs, bool journalKnown, bool journalAds, uint64_t statusRevision) noexcept {
     if (!actionAds) {
         s = AdsActionReject{};
+        return false;
+    }
+    if (journalKnown && journalAds) {
+        s.latched = false;
+        s.edgeMs = nowMs ? nowMs : 1;
+        s.statusRevisionAtEdge = statusRevision;
         return false;
     }
     if (s.latched) return true;
     if (!s.edgeMs) {
         s.edgeMs = nowMs ? nowMs : 1;
-        s.statusSamplesAtEdge = statusSamples;
+        s.statusRevisionAtEdge = statusRevision;
         return false;
     }
-    if (journalKnown && !journalAds && statusSamples > s.statusSamplesAtEdge && nowMs >= s.edgeMs && nowMs - s.edgeMs >= kAdsActionRejectGraceMs) s.latched = true;
+    if (journalKnown && !journalAds && statusRevision != 0 && statusRevision != s.statusRevisionAtEdge && nowMs >= s.edgeMs &&
+        nowMs - s.edgeMs >= kAdsActionRejectGraceMs) s.latched = true;
     return s.latched;
 }
 // The bound logical action is the prompt request; the journal is fallback when the action sample is absent/stale. `eligible` is restricted by the caller to an
-// active session/on-foot context. A veto latch holds ADS off until the logical action is actually released.
+// active session/on-foot context. A veto holds ADS off until logical release or a later authoritative acceptance.
 inline AdsInputChoice adsInputChoice(bool eligible, bool journalKnown, bool journalAds, bool actionValid, bool actionAds, uint64_t actionAgeUs, bool journalVeto) noexcept {
     AdsInputChoice c;
     c.actionFresh = eligible && actionValid && actionAgeUs <= kAdsActionFreshUs;

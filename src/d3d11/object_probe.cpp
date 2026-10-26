@@ -20,8 +20,11 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "depth_probe.h"
+#include "ui_layer.h"
+#include "ui_depth.h"
 #include "supercruise_lines.h"   // kUiVsSupercruiseBars: the bars' vertex capture
 #include "eye_draw_snapshot.h"
+#include "eye_late_menu_capture.h"
 #include "object_classification_probe.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
@@ -201,6 +204,7 @@ struct PanelCaptureArgs {
 uint32_t g_panelSkipped = 0;
 EyeDrawSnapshot g_eyeMeshSnapshot;
 EyeDrawSnapshot g_f77CandidateSnapshot;
+EyeLateMenuCapture g_lateMenuSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 
 // The cull gate probe (advanced.cull_gate_capture) rides the eye run like
@@ -341,6 +345,7 @@ void noteGeometryRelease(EyeDrawSnapshot::GeoRelease r) {
 }
 
 void ledgerRelease() {
+    if(!detail::g_objectProbeLedgerOn)g_lateMenuSnapshot.release(); // retain only across an active run's pool relearn
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
     g_panelSnapshot.reset();
@@ -793,6 +798,14 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     ctx->OMGetRenderTargets(1, &rtv, &dsv);
     int candidateEye=-1;
     if(dsv)depthProbeSceneEyeOf(dsv,&candidateEye,nullptr);
+    int menuEye=candidateEye;
+    uint32_t menuEyeSource=menuEye>=0?1u:0u;
+    if(menuEye<0 && rtv && g_lateMenuSnapshot.wants(frame,d.vs)) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> menuTarget;rtv->GetResource(&menuTarget);
+        menuEye=uiDepthEyeOfTargetReadOnly(menuTarget.Get());
+        if(menuEye>=0)menuEyeSource=2; // this frame's already registered target; observer never registers
+        else {menuEye=uiLayerEyeOfGameTarget(menuTarget.Get());if(menuEye>=0)menuEyeSource=3;}
+    }
     d.rt = drawCensusIntern(rtv);
     if (rtv) rtv->Release();
     if (g_panelCaptureArgs.ctx) {
@@ -835,7 +848,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         if(otherIndex>=0)otherPaletteCandidate=g_palette[otherIndex];
     }
     EyeMeshJoinStamp eyeJoin{};
-    if(g_eyeMeshSnapshot.wantsEyeMeshCapture(frame,d.vs,eyeMeshPs,eyeMeshStencilRef,count)) {
+    if(g_eyeMeshSnapshot.wantsEyeMeshCapture(frame,d.vs,eyeMeshPs,eyeMeshStencilRef,count) || g_lateMenuSnapshot.wants(frame,d.vs)) {
         TemporalDrawStamp temporalStamp{};
         if(temporalPassDrawStamp(&temporalStamp)) {
             eyeJoin.sceneFrame=temporalStamp.sceneFrame;eyeJoin.epoch=temporalStamp.epoch;
@@ -863,6 +876,14 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
                                    d.vs,eyeMeshPs,eyeMeshStencilRef,otherPaletteCandidate.Get(),kind,count,instances,startInstance,start,base);
     g_f77CandidateSnapshot.captureF77Candidate(ctx,frame,nativeFrame,candidateEye,
         static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base);
+    const size_t menuRowsBefore=g_lateMenuSnapshot.rows.size();
+    g_lateMenuSnapshot.capture(ctx,frame,nativeFrame,menuEye,eyeJoin,
+        static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base,menuEyeSource);
+    if(g_lateMenuSnapshot.rows.size()>menuRowsBefore) {
+        NativeOnFootCameraEvidence avatar;
+        nativeOnFootCameraEvidence(nativeFrame,&avatar); // existing exact-frame F81 record or explicitly cached IkG; no game getter
+        g_lateMenuSnapshot.rows.back().avatar.copy(avatar);
+    }
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -1356,6 +1377,15 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     candidateRoiPairs,candidateRoiPairs-g_f77CandidateSnapshot.candidateRoiIncomplete,g_f77CandidateSnapshot.candidateRoiIncomplete,
                     g_f77CandidateSnapshot.effectImageDeclined,g_f77CandidateSnapshot.effectImageBytes,
                     g_f77CandidateSnapshot.failures,candidateMissingShaders,candidateOk?"written":"WRITE FAILED");
+    wchar_t menuMetadata[MAX_PATH];
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    _snwprintf_s(menuMetadata,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.json",dir.c_str(),g_ledgerStamp);
+    const bool menuOk=g_lateMenuSnapshot.write(ctx,path,menuMetadata);
+    const uint32_t menuMissingShaders=g_lateMenuSnapshot.evidence.writeShaders(dir.c_str());
+    Log::get().note("late menu snapshots %ls: selected complete ledger frame %u, %u rows, %u structured bytes, %u stream bytes, %u buffer declines, %u stream declines, %u copy failures, %u missing shaders; %s. Selection, per-eye anchor/sibling quotas, scene-before-menu availability and binding identities are in the JSON companion; a six-index-only family is not a complete menu. Independent whole-run caps 128 MiB structured and 8 MiB streams; diagnostic only, shared menu families are not object identity.",
+        path,g_lateMenuSnapshot.window.frame,unsigned(g_lateMenuSnapshot.rows.size()),g_lateMenuSnapshot.evidence.meshBytes,
+        g_lateMenuSnapshot.evidence.vertexBytes,g_lateMenuSnapshot.evidence.meshDeclined,g_lateMenuSnapshot.evidence.vertexDeclined,
+        g_lateMenuSnapshot.evidence.failures,menuMissingShaders,menuOk?"written":"WRITE FAILED");
     uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
         ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();
@@ -1455,6 +1485,7 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
     if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
     g_f77CandidateSnapshot.candidateDrawEnd();
+    g_lateMenuSnapshot.evidence.candidateDrawEnd();
     g_tonemapSnapshot.end(ctx);
 }
 
@@ -1463,6 +1494,7 @@ void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
         ID3D11VertexShader* vs=nullptr;ID3D11PixelShader* ps=nullptr;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
         const uint64_t vsHash=vs?lookupShaderHash(vs):0,psHash=ps?lookupShaderHash(ps):0;if(vs)vs->Release();if(ps)ps->Release();
         g_f77CandidateSnapshot.candidateDrawIssued(ctx,issued,vsHash,psHash);
+        g_lateMenuSnapshot.evidence.candidateDrawIssued(ctx,issued,vsHash,psHash);
     }
 }
 
@@ -1688,6 +1720,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             releaseRing();
             releasePool();
             detail::g_objectProbeLedgerOn = false;
+            g_lateMenuSnapshot.release();
             g_wasOn = false;
             g_noted = false;
         }
@@ -1752,6 +1785,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     g_f77CandidateSnapshot.armF77Candidates(g_ledgerFrame0);
+    g_lateMenuSnapshot.arm(g_ledgerFrame0);
     detail::g_objectProbeLedgerOn = true;
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
@@ -1808,6 +1842,7 @@ void objectProbeShutdown() {
     releasePool();
     detail::g_objectProbeLedgerOn = false;
     detail::g_objectProbeOn = false;
+    g_lateMenuSnapshot.release();
     g_wasOn = false;
 }
 

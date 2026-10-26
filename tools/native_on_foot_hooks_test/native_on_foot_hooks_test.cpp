@@ -1126,6 +1126,79 @@ void testHeadHideGlue(const CtlPages& p) {
     t::reset();
 }
 
+void testFpBodyHideGlue(const CtlPages& p) {
+    std::printf("glue: first-person cosmetic bracers follow the body hide\n");
+    namespace t = edvr::nofoothookstest;
+    static AmcBuf fp, local, other;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100];
+    Rig rig;
+    t::reset();
+    edvr::g_nativeOnFootActive.store(false);
+    cimgInit(-1);
+    installTargets(p);
+    nativeOnFootHooksBody(true, false, "rig: not on foot yet");
+    rig.boundary();
+    rig.boundary();
+    imgInvoke(skelA, skelB, g_cimg + avh::kPovNameRva);
+    fp.init(reinterpret_cast<uint64_t>(skelB), 2);
+    local.init(reinterpret_cast<uint64_t>(skelA), 3);
+    other.init(reinterpret_cast<uint64_t>(skelB), 1);
+    edvr::g_nativeOnFootActive.store(true);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    nativeOnFootHooksBody(true, true, "");
+    rig.boundary();
+    nativeOnFootFpBody(true, "rig: full third-person body");
+    imgFade(fp.b);
+    // Spell the expected slots independently: both split bracers and the combined cosmetic asset, plus the original body hide.
+    const auto fpMasksMatch = [&](bool hybrid) {
+        for (uint32_t part = 0; part < avh::kPartCount; ++part)
+            for (uint32_t variant = 0; variant < avh::kPartVariants; ++variant) {
+                const bool hidden = part == 49 || (!hybrid && (part == 28 || part == 29 || part == 38 || part == 39 || part == 40));
+                const uint64_t expected = hidden ? 0 : 0x8000000000000001ull + part;
+                if (fp.mask(part, variant) != expected) return false;
+            }
+        return true;
+    };
+    check(fpMasksMatch(false), "FULL 3P: FP arms, hands, skeleton and combined/L/R bracers hidden in all four views; every unrelated mask unchanged");
+    const FpBodyReadback rb = nativeOnFootFpBodyReadback();
+    bool bracerReadback = rb.parts == 6 && rb.amc == reinterpret_cast<uint64_t>(fp.b);
+    for (uint32_t slot = 3; slot < 6; ++slot)
+        for (uint32_t variant = 0; variant < 4; ++variant)
+            bracerReadback = bracerReadback && rb.name[slot] != nullptr && rb.masks[slot][variant] == 0;
+    check(bracerReadback, "...the post-write readback includes all three cosmetic bracer slots, so a hide that never ran is visible");
+    imgFade(local.b);
+    imgFade(other.b);
+    check(local.onlyHeadZeroed() && other.allMasksIntact(), "...the local 3P arm and bracer masks and every non-FP component remain unchanged");
+
+    // The FP hide must not rewrite the instance fields that refer to any renderable.
+    const uint64_t renderableInstance = 0x123456789ABCull;
+    std::memcpy(fp.b + avh::kOffAmcInstances + 28 * avh::kPartStride, &renderableInstance, sizeof(renderableInstance));
+    imgFade(fp.b);
+    uint64_t instanceAfter = 0;
+    std::memcpy(&instanceAfter, fp.b + avh::kOffAmcInstances + 28 * avh::kPartStride, sizeof(instanceAfter));
+    check(instanceAfter == renderableInstance, "...the hide changes visibility masks only, preserving renderable instance fields");
+
+    edvr::nativeOnFootCameraPublish(1, 0);
+    fp.refillMasks();
+    imgFade(fp.b);
+    check(fp.allMasksIntact(), "EXTERNAL CAMERA: the game rewrites every FP body/bracer mask and the hide leaves them intact");
+    edvr::nativeOnFootCameraPublish(0, 0);
+    imgFade(fp.b);
+    check(fpMasksMatch(false), "...returning to first person hides the FP bracers on the next fade call");
+
+    nativeOnFootHybridTick(0, true, "rig: hybrid");
+    fp.refillMasks();
+    imgFade(fp.b);
+    check(fpMasksMatch(true), "HYBRID: only FirstPersonSkeleton is hidden; FP arms, hands and their cosmetic bracers stay visible");
+    nativeOnFootHybridTick(0, false, "rig: full third-person body again");
+    nativeOnFootFpBody(false, "rig: native on foot ended");
+    fp.refillMasks();
+    imgFade(fp.b);
+    check(fp.allMasksIntact(), "BODY HIDE OFF: the game's next visibility rewrite restores all FP body/bracer masks");
+    edvr::g_nativeOnFootActive.store(false);
+    t::reset();
+}
+
 // F93d: native on foot's camera signal. The native key on: the controller hook is installed for the signal, its gate opens only on foot, its post-call reads
 // the mode byte the update left and publishes it (native_on_foot.h), presses nothing and changes nothing; native stereo's head hiding zeroes the local head parts
 // in the game's first-person camera only (mode 0), and leaves them to the game in its third-person camera suite (1..6).
@@ -1357,6 +1430,7 @@ void testGlue() {
     testStandDowns(p);
     testNativeFadeGlue(p);
     testHeadHideGlue(p);
+    testFpBodyHideGlue(p);
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
     t::reset();

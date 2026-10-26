@@ -263,7 +263,10 @@ inline bool isHeadPart(uint32_t idx) {
 }
 // F15 (native on foot, TEMPORARY E1): the first-person body's parts, hidden on the local first-person AMC (mode 2). Looked up by name in the part-name
 // table, never by index; -1 when the name is not in the table.
-inline constexpr const char* kFpBodyPartNames[3] = {"EVASuit_Arms", "EVASuit_Hands", "FirstPersonSkeleton"};
+inline constexpr const char* kFpBodyPartNames[] = {"EVASuit_Arms", "EVASuit_Hands", "FirstPersonSkeleton",
+                                                "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
+constexpr uint32_t kFpBodyPartCount = sizeof(kFpBodyPartNames) / sizeof(kFpBodyPartNames[0]);
+constexpr uint32_t kFpSkeletonPartSlot = 2;
 inline int partIndexByName(const char* name) {
     for (uint32_t i = 0; i < kPartCount; ++i)
         if (std::strcmp(kPartNames[i], name) == 0) return static_cast<int>(i);

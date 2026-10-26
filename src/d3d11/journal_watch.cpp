@@ -145,6 +145,7 @@ struct Published {
     bool     supercruiseKnown = false;
     bool     supercruise = false;
     uint32_t statusSamples = 0;       // successful Status.json parses
+    uint64_t statusContentRevision = 0, statusContentMs = 0;
 };
 
 struct Visible {
@@ -182,6 +183,7 @@ struct Visible {
     std::atomic<bool>     supercruiseKnown{false};
     std::atomic<bool>     supercruise{false};
     std::atomic<uint32_t> statusSamples{0};
+    std::atomic<uint64_t> statusContentRevision{0}, statusContentMs{0};
 };
 Visible g_v;
 
@@ -225,6 +227,8 @@ void applyPublished(const Published& p) {
     g_v.supercruiseKnown.store(p.supercruiseKnown, kRelaxed);
     g_v.supercruise.store(p.supercruise, kRelaxed);
     g_v.statusSamples.store(p.statusSamples, kRelaxed);
+    g_v.statusContentRevision.store(p.statusContentRevision, kRelaxed);
+    g_v.statusContentMs.store(p.statusContentMs, kRelaxed);
     g_v.active.store(p.active, std::memory_order_release);
 }
 
@@ -283,6 +287,7 @@ struct Session {
     // the player teleporting off their feet, so `known` only drops after a
     // few misses in a row.
     uint32_t     statusMisses = 0;
+    JournalStatusContentRevision statusContent;
     // The flat profile's GuiFocus note (pollStatus): the last value noted, and how many notes were written (capped).
     bool         guiNoted = false;
     bool         guiNotedPresent = false;
@@ -462,12 +467,17 @@ void pollStatus(Session& s) {
     JournalHeldItem heldKind = kHeldUnknown;   // F66a
     char heldName[64] = {};
     if (f != INVALID_HANDLE_VALUE) {
-        char buf[8192];   // F66a: was 2048; SelectedWeapon sits near the end of the file, after the destination and the pips
+        char buf[JournalStatusContentRevision::kCapacity];   // SelectedWeapon sits near the end, after the destination and the pips
         DWORD got = 0;
         if (ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
             buf[got] = '\0';
             bytesRead = got;
             parsed = true;
+            const uint64_t revision = s.statusContent.observe(buf, got);
+            if (revision != s.pub.statusContentRevision) {
+                s.pub.statusContentRevision = revision;
+                s.pub.statusContentMs = stampMs();
+            }
             heldKind = journalParseSelectedWeapon(buf, got, heldName, sizeof(heldName));
             const char* p = strstr(buf, "\"Flags2\":");
             if (p) {
@@ -1142,6 +1152,16 @@ bool journalBreathableKnown() { return journalWatchActive() && peek(g_v.breathab
 bool journalBreathable() { return !runtimeFlatProfile() && peek(g_v.breathable); }
 bool journalAdsKnown() { return journalWatchActive() && peek(g_v.adsKnown); }
 bool journalAds() { return !runtimeFlatProfile() && peek(g_v.ads); }
+JournalAdsStatus journalAdsStatus() {
+    if (runtimeFlatProfile()) return JournalAdsStatus{};
+    JournalAdsStatus r;
+    r.known = peek(g_v.active) && peek(g_v.adsKnown);
+    r.value = peek(g_v.ads);
+    r.polls = peek(g_v.statusSamples);
+    r.contentRevision = peek(g_v.statusContentRevision);
+    r.contentMs = peek(g_v.statusContentMs);
+    return r;
+}
 uint32_t journalFlags2() { return peek(g_v.flags2); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
 bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
@@ -1163,6 +1183,8 @@ JournalRawStatus journalRawStatus() {
     r.active = g_v.active.load(std::memory_order_acquire);
     r.gameplay = peek(g_v.gameplay);
     r.statusSamples = peek(g_v.statusSamples);
+    r.statusContentRevision = peek(g_v.statusContentRevision);
+    r.statusContentMs = peek(g_v.statusContentMs);
     r.guiKnown = peek(g_v.fssFocusKnown);
     r.gui = peek(g_v.guiFocus);
     return r;

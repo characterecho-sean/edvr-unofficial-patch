@@ -11,6 +11,7 @@
 // Every hook thread takes no lock it can wait on (a try-flag keeps a second concurrent caller out where one matters), allocates nothing and
 // writes no log line. Every access to the game's memory is under SEH.
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <vector>
 #include <mutex>
@@ -105,7 +106,11 @@ std::atomic<bool> g_hybridWant{false};        // F21: the hybrid body is wanted 
 std::atomic<uint64_t> g_hybridMaskWrites{0};  // F21: third-person mask words zeroed since the frame thread last logged (hook thread)
 std::atomic<uint64_t> g_fpMode2Seen{0};
 std::mutex g_fpBodyMutex;
-int g_fpIdx[3] = {-1, -1, -1};                         // guarded by g_fpBodyMutex: the part index of each kFpBodyPartNames entry, -1 when absent
+std::array<int, avh::kFpBodyPartCount> g_fpIdx = [] {
+    std::array<int, avh::kFpBodyPartCount> idx;
+    idx.fill(-1);
+    return idx;
+}();   // guarded by g_fpBodyMutex: the part index of each kFpBodyPartNames entry, -1 when absent
 FpBodyReadback g_fpReadback;                           // guarded by g_fpBodyMutex (its parts, names and mode2Seen fields are filled on read)
 std::atomic<uint64_t> g_ctlCalls{0};                   // the controller hook's calls (the gate open)
 
@@ -670,11 +675,12 @@ void headHideStep(void* amcPtr) noexcept {
 
 // ---- F15: the first-person body (E1, TEMPORARY) --------------------------------------------------------------------------------------
 // The local first-person AMC is the one at mode 2 (its creation parameters say first person): only the local player has one (isLocalPair, above).
-// Its three body parts get the same zeroing headHideStep gives the head parts, after the fade, on the same thread. Nothing is restored.
+// Its arms, hands, skeleton and lower-arm cosmetics get the same zeroing headHideStep gives the head parts, after the fade, on the same thread.
+// The cosmetics have their own visibility masks: keeping them would draw FP bracers beside the solved 3P arms. Nothing is restored.
 __declspec(noinline) bool sehZeroFpMasks(uint8_t* amc, const int* idx, uint32_t* zeroed, uint64_t (*readback)[avh::kPartVariants]) noexcept {
     __try {
         uint32_t n = 0;
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) {
             if (idx[i] < 0) continue;
             volatile uint64_t* masks = reinterpret_cast<volatile uint64_t*>(amc + avh::kOffAmcMasks + static_cast<uint32_t>(idx[i]) * avh::kPartStride);
             for (uint32_t k = 0; k < avh::kPartVariants; ++k) {
@@ -702,17 +708,19 @@ void fpBodyStep(void* amcPtr) noexcept {
     }
     if (id.mode != 2) return;
     g_fpMode2Seen.fetch_add(1, std::memory_order_relaxed);
-    int idx[3] = {-1, -1, -1};
+    int idx[avh::kFpBodyPartCount];
     {
         std::lock_guard<std::mutex> lock(g_fpBodyMutex);
-        for (int i = 0; i < 3; ++i) idx[i] = g_fpIdx[i];
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) idx[i] = g_fpIdx[i];
     }
     if (g_hybridWant.load(std::memory_order_acquire)) {   // F21: the hybrid body hides the first-person skeleton only; its arms and hands hold the weapon
-        idx[0] = -1;
-        idx[1] = -1;
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i)
+            if (i != avh::kFpSkeletonPartSlot) idx[i] = -1;
     }
-    if (idx[0] < 0 && idx[1] < 0 && idx[2] < 0) return;   // no name resolved: nothing to zero (the frame thread logs why)
-    uint64_t masks[3][avh::kPartVariants] = {};
+    bool any = false;
+    for (int i : idx) any = any || i >= 0;
+    if (!any) return;   // no name resolved: nothing to zero (the frame thread logs why)
+    uint64_t masks[avh::kFpBodyPartCount][avh::kPartVariants] = {};
     uint32_t zeroed = 0;
     if (!sehZeroFpMasks(amc, idx, &zeroed, masks)) {
         hideFault();
@@ -2602,7 +2610,7 @@ void nativeOnFootHooksBody(bool wanted, bool body, const char* reason) {
     g_nativeReason = reason ? reason : "";
 }
 
-// F15 (E1, TEMPORARY): the first-person body hide, frame thread. Logs the transitions and resolves the three names once the exe's part-name table
+// F15 (E1, TEMPORARY): the first-person body hide, frame thread. Logs the transitions and resolves the names once the exe's part-name table
 // is verified (g_partNames == 1, checkPartNames). The hook (fpBodyStep) does the zeroing.
 namespace {
 bool g_fpWantLast = false;           // the body was wanted on the last frame
@@ -2636,9 +2644,9 @@ void nativeOnFootFpBody(bool want, const char* reason) {
         g_fpNoMode2Noted = false;
     }
     if (!g_fpResolved && g_partNames.load(std::memory_order_relaxed) == 1) {
-        int found[3] = {-1, -1, -1};
+        int found[avh::kFpBodyPartCount];
         std::string names, missing;
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) {
             found[i] = avh::partIndexByName(avh::kFpBodyPartNames[i]);
             std::string& list = found[i] >= 0 ? names : missing;
             if (!list.empty()) list += ", ";
@@ -2646,7 +2654,7 @@ void nativeOnFootFpBody(bool want, const char* reason) {
         }
         {
             std::lock_guard<std::mutex> lock(g_fpBodyMutex);
-            for (uint32_t i = 0; i < 3; ++i) g_fpIdx[i] = found[i];
+            for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) g_fpIdx[i] = found[i];
         }
         g_fpNamesText = names;
         g_fpResolved = true;
@@ -2820,7 +2828,7 @@ FpBodyReadback nativeOnFootFpBodyReadback() {
         std::lock_guard<std::mutex> lock(g_fpBodyMutex);
         out.amc = g_fpReadback.amc;
         std::memcpy(out.masks, g_fpReadback.masks, sizeof(out.masks));
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) {
             if (g_fpIdx[i] < 0) continue;
             out.name[i] = avh::kFpBodyPartNames[i];
             ++out.parts;

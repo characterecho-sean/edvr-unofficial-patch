@@ -7,6 +7,7 @@
 #include "../../src/d3d11/journal_watch.h"
 #include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
+#include "../../src/d3d11/native_on_foot_ads_incident.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -4639,19 +4640,86 @@ int wmain(int argc, wchar_t** argv) {
                 check(freshLifecycle && !oldLifecycle && !futureStamp && !inactiveSample && oldLifecycleChoice.ads && oldLifecycleChoice.source == nf::kAdsInputJournal &&
                           !futureStampChoice.ads && futureStampChoice.source == nf::kAdsInputJournal,
                       "F70b: only a valid, non-future action sample from the current eligible lifecycle can override journal state");
-                nf::AdsActionReject reject;
-                const bool earlyReject = nf::adsActionRejectStep(reject, true, 1000, true, false, 7);
-                const bool oldJournal = nf::adsActionRejectStep(reject, true, 2600, true, false, 7);
-                const bool freshJournal = nf::adsActionRejectStep(reject, true, 2600, true, false, 8);
-                const nf::AdsInputChoice veto = nf::adsInputChoice(true, true, true, true, true, 100, freshJournal);
-                const bool heldLatch = nf::adsActionRejectStep(reject, true, 4000, true, true, 9);
-                const nf::AdsInputChoice latched = nf::adsInputChoice(true, true, true, true, true, 100, heldLatch);
-                const bool staleLatchHeld = reject.latched; // runtime skips reject-step on stale samples and carries this latch into the chooser
-                const nf::AdsInputChoice staleLatched = nf::adsInputChoice(true, true, true, false, true, nf::kAdsActionFreshUs + 1, staleLatchHeld);
-                const bool releasedLatch = nf::adsActionRejectStep(reject, false, 4001, true, false, 9);
-                check(!earlyReject && !oldJournal && freshJournal && veto.journalVeto && !veto.ads &&
-                          !latched.ads && latched.journalVeto && staleLatchHeld && !staleLatched.ads && staleLatched.journalVeto && !releasedLatch && !reject.latched,
-                      "F70b: a post-action journal sample after the 1.5 s grace vetoes a rejected held action until logical release");
+                {
+                    edvr::JournalStatusContentRevision content;
+                    const char hip[] = "{\"timestamp\":\"2026-10-26T04:15:55Z\",\"Flags2\":1}";
+                    const char next[] = "{\"timestamp\":\"2026-10-26T04:15:56Z\",\"Flags2\":1}";
+                    const uint64_t first = content.observe(hip, sizeof(hip) - 1);
+                    bool identical = true;
+                    for (int poll = 0; poll < 30; ++poll) identical &= content.observe(hip, sizeof(hip) - 1) == first;
+                    const uint64_t changed = content.observe(next, sizeof(next) - 1);
+                    check(first == 1 && identical && changed == 2 && content.observe(next, sizeof(next) - 1) == changed,
+                          "ADS status: identical eager polls do not advance content revision; changed bytes (including only timestamp) do");
+                    check(content.observe(nullptr, 1) == changed && content.observe(hip, 0) == changed &&
+                              content.observe(hip, edvr::JournalStatusContentRevision::kCapacity) == changed,
+                          "ADS status: invalid/oversize observations cannot manufacture a fresh revision");
+                }
+                {
+                    nf::AdsActionReject reject;
+                    const bool early = nf::adsActionRejectStep(reject, true, 1000, true, false, 7);
+                    const bool identical = nf::adsActionRejectStep(reject, true, 2508, true, false, 7);
+                    const bool vetoed = nf::adsActionRejectStep(reject, true, 2508, true, false, 8);
+                    const nf::AdsInputChoice veto = nf::adsInputChoice(true, true, false, true, true, 100, vetoed);
+                    const bool stillBlocked = nf::adsActionRejectStep(reject, true, 3000, true, false, 8);
+                    const nf::AdsInputChoice stale = nf::adsInputChoice(true, true, false, false, true, nf::kAdsActionFreshUs + 1, reject.latched);
+                    check(!early && !identical && vetoed && stillBlocked && !veto.ads && veto.journalVeto && !stale.ads && stale.journalVeto,
+                          "F70b: changed false status after 1.5 s still rejects a blocked held request; identical rereads and stale action cannot rearm it");
+                    const bool recovered = nf::adsActionRejectStep(reject, true, 3713, true, true, 9);
+                    const nf::AdsInputChoice accepted = nf::adsInputChoice(true, true, true, true, true, 100, recovered);
+                    check(!recovered && !reject.latched && accepted.ads && !accepted.journalVeto,
+                          "RC1 sniper replay: veto at +1.508 s recovers on authoritative ADS acceptance at +2.713 s while the same request stays held");
+                    const bool reloadEarly = nf::adsActionRejectStep(reject, true, 3714, true, false, 10);
+                    const bool reloadBefore = nf::adsActionRejectStep(reject, true, 5212, true, false, 10);
+                    const bool reloadVeto = nf::adsActionRejectStep(reject, true, 5213, true, false, 10);
+                    check(!reloadEarly && !reloadBefore && reloadVeto,
+                          "F70b: acceptance starts a new grace; a later changed false status (reload/rejection) can still reject the held request");
+                    const bool released = nf::adsActionRejectStep(reject, false, 5300, true, false, 10);
+                    const bool repress = nf::adsActionRejectStep(reject, true, 6000, true, false, 10);
+                    const bool old = nf::adsActionRejectStep(reject, true, 8000, true, false, 10);
+                    const bool newBlocked = nf::adsActionRejectStep(reject, true, 8001, true, false, 11);
+                    check(!released && !repress && !old && newBlocked,
+                          "F70b: logical release resets the veto and revision baseline; a new press requires its own changed false status");
+                    const bool acceptedWithoutFreshAction = nf::adsActionRejectStep(reject, true, 8100, true, true, 12);
+                    const nf::AdsInputChoice acceptedJournal = nf::adsInputChoice(true, true, true, false, true, nf::kAdsActionFreshUs + 1, acceptedWithoutFreshAction);
+                    check(!acceptedWithoutFreshAction && acceptedJournal.ads && acceptedJournal.source == nf::kAdsInputJournal,
+                          "F70b: authoritative acceptance also clears a veto when the action sample is stale and the journal is the fallback");
+                }
+                {
+                    nf::AdsIncidentHistory history;
+                    nf::AdsIncidentSample sample;
+                    sample.itemSerial = 22; sample.press = 3; sample.selectionEpoch = 8;
+                    for (uint32_t i = 0; i < 20; ++i) { sample.ms = 1000 + i * 100; sample.tick = i; history.push(sample); }
+                    check(history.count == 16 && history.at(0).ms == 1400 && history.at(15).ms == 2900,
+                          "ADS incident: bounded 16-sample history stays chronological after wrapping");
+                    sample.ms = 2901;
+                    const bool decimated = !history.push(sample);
+                    sample.ms = 2902;
+                    nf::AdsAimMap beforeStop;
+                    beforeStop.yawCarried = 0.25; beforeStop.pitchSeat = -0.1;
+                    sample.carried[0] = beforeStop.yawCarried; sample.carried[1] = beforeStop.pitchSeat; sample.residual[0] = -12.2;
+                    const bool forced = history.push(sample, true);
+                    beforeStop.dropSeated(); sample.carried[0] = 0.0; sample.residual[0] = 0.0;
+                    check(decimated && forced && history.at(15).ms == 2902 && history.at(15).carried[0] == 0.25 && history.at(15).residual[0] == -12.2,
+                          "ADS incident: trigger bypasses decimation and snapshots the fault before stop resets the live map/residual");
+                    const bool budget = history.beginDump(3000) && history.beginDump(3001) && history.beginDump(3002) && !history.beginDump(3003);
+                    history.clearSamples();
+                    const bool resetBudgetHeld = !history.beginDump(3004);
+                    check(budget && history.count == 0 && resetBudgetHeld && history.beginDump(63000),
+                          "ADS incident: lifecycle/history reset cannot reset three-dumps-per-minute budget; budget renews after a minute");
+                    nf::AdsIncidentHistory boundary;
+                    check(boundary.beginDump(1000) && boundary.beginDump(2000) && boundary.beginDump(60999) && boundary.beginDump(61000) &&
+                              !boundary.beginDump(61001) && boundary.beginDump(62000),
+                          "ADS incident: a minute boundary cannot permit a burst of more than three dumps in a rolling minute");
+                    history.push(sample, true); ++sample.press; history.push(sample, true);
+                    const bool pressReset = history.count == 1;
+                    ++sample.selectionEpoch; history.push(sample, true);
+                    const bool epochReset = history.count == 1;
+                    ++sample.configGeneration; history.push(sample, true);
+                    const bool configReset = history.count == 1;
+                    sample.item[0] = 'x'; history.push(sample, true);
+                    check(pressReset && epochReset && configReset && history.count == 1,
+                          "ADS incident: another press, native selection epoch, settings generation or item name cannot inherit the previous context's samples");
+                }
                 check(opticOk && opticTranslationInvariant && opticDegenerateRefused && std::fabs(opticRot.yawDeg - 30.0) < 1e-4,
                       "F70c: joint 14's full rigid basis composes with root rotation, root translation cannot alter directions, and degenerate basis is refused");
                 {

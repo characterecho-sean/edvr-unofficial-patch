@@ -66,6 +66,7 @@
 #include "native_on_foot_logpin.h"
 #include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
 #include "native_on_foot_ads_log.h"
+#include "native_on_foot_ads_incident.h"
 #include "head_containment_shader.h"   // F119: (the HLSL text and the grid's sizes; the bytecode is built from it)
 #include "native_on_foot_optic_capture.h"
 #include "reticle_depth_shader.h"   // F85c: (the HLSL text; the bytecode below is built from it)
@@ -771,6 +772,8 @@ void readKey() {
     // value cached here (logwin::detail()), from any thread. Said at the first read and at each change, and --health takes the log's state from this line.
     // The size cap is the log's own, decided when it opened (log.cpp: 64 MB with the key on and no max_mb), so a later change does not move it.
     const bool logDetail = cfg.getBool("log.on_foot_detail", false);
+    if (first) Log::get().note("ADS incident: armed independently of detail logging; up to 16 samples at 100 ms, at most 3 fault dumps a minute; "
+                              "no samples collected yet (the first record is announced); native zoom blend unavailable");
     nofoot::logwin::setDetail(logDetail);
     if (first || logDetail != g_logDetailLast) {
         const unsigned long long capMb = Log::get().maxBytes() / (1024ull * 1024ull);
@@ -1720,7 +1723,7 @@ void logFpBodyReadback() {
         return;
     }
     std::string text;
-    for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i) {
         if (!rb.name[i]) continue;
         char item[160];
         std::snprintf(item, sizeof(item), "%s 0x%llX,0x%llX,0x%llX,0x%llX", rb.name[i], static_cast<unsigned long long>(rb.masks[i][0]),
@@ -7021,7 +7024,7 @@ uint64_t g_adsAimUnwindMs = 0;
 bool g_adsHoldThisPress = false, g_adsHoldKeyLast = false, g_adsHoldKeyInit = false;
 nofoot::AdsRamp g_adsRamp;
 double g_adsW = 0.0;                  // the weight this tick
-nofoot::AdsActionReject g_adsActionReject; // frame thread only: rejected held action stays off until a fresh logical false sample
+nofoot::AdsActionReject g_adsActionReject; // frame thread only: rejected held action recovers on logical release or authoritative ADS acceptance
 int g_adsActionSourceLast = -1;
 int g_adsActionCompareLast = -1;
 bool g_adsActionEligibleLast = false;
@@ -7103,7 +7106,7 @@ struct F91View {
     uint32_t tick = 0;
     uint32_t mapTick = ~0u;                 // adsAimTick's map step ran in this tick
     bool headOk = false;                    // ... with a new head sample (the step is real)
-    double head[2] = {}, applied[2] = {}, asked[2] = {}, cancelNow[2] = {}, ahead[2] = {};   // degrees, the seat convention (ahead: F92b's published ask)
+    double head[2] = {}, applied[2] = {}, asked[2] = {}, cancelNow[2] = {}, ahead[2] = {}, player[2] = {}, queued[2] = {}; // queued: game input units; the rest degrees
     uint32_t rTick = ~0u, rBase = 0, rowsFrame = 0;   // the residual measured in this tick; the bases taken; the right eye's rows it was measured on
     bool rowsKnown = false;
     uint32_t sightTick = ~0u;
@@ -7117,6 +7120,65 @@ struct F91View {
     double rifleLast[2] = {};
 };
 F91View g_f91;
+nofoot::AdsIncidentHistory g_adsIncidents;
+nofoot::AdsIncidentSample g_adsIncidentInput;
+bool g_adsIncidentEverSampled = false;
+
+void adsIncidentRecord(uint64_t now, bool force = false) noexcept {
+    if (!force && g_adsIncidents.count && now >= g_adsIncidents.lastSampleMs && now - g_adsIncidents.lastSampleMs < nofoot::AdsIncidentHistory::kSampleMs) return;
+    nofoot::AdsIncidentSample s = g_adsIncidentInput;
+    s.ms = now; s.tick = g_f91.tick; s.mapTick = g_f91.mapTick; s.headSeq = g_adsHeadSeq;
+    s.press = g_adsCentrePresses; s.configGeneration = g_cfgGeneration;
+    s.rowsFrame = g_f91.rowsFrame; s.rowsKnown = g_f91.rowsKnown && g_f91.rTick == g_f91.tick;
+    s.residualKnown = g_adsResid.have; s.headKnown = g_f91.headOk;
+    s.state = g_adsState; s.weight = g_adsW;
+    for (int a = 0; a < 2; ++a) {
+        s.head[a] = g_f91.head[a]; s.asked[a] = g_f91.asked[a]; s.queued[a] = g_f91.queued[a];
+        s.applied[a] = g_f91.applied[a]; s.player[a] = g_f91.player[a]; s.cancel[a] = g_f91.cancelNow[a]; s.ahead[a] = g_f91.ahead[a];
+        s.residual[a] = g_adsResid.res[a];
+    }
+    s.carried[0] = g_adsMap.yawCarried / nofoot::kAdsDeg; s.carried[1] = g_adsMap.pitchSeat / nofoot::kAdsDeg;
+    const uint64_t rootMs = g_f109RootMs.load(std::memory_order_acquire);
+    s.rootKnown = rootMs != 0 && now >= rootMs;
+    s.rootAgeMs = s.rootKnown ? now - rootMs : 0;
+    s.rootPitch = g_f109RootPitch.load(std::memory_order_relaxed);
+    s.gain[0] = g_adsGainYaw.load(std::memory_order_relaxed); s.gain[1] = g_adsGainPitch.load(std::memory_order_relaxed);
+    s.gainEnds[0] = g_f109GainEndLo.load(std::memory_order_relaxed); s.gainEnds[1] = g_f109GainEndHi.load(std::memory_order_relaxed);
+    s.clean = g_f109Clean.load(std::memory_order_relaxed); s.dirty = g_f109Dirty.load(std::memory_order_relaxed);
+    s.unsplit = g_f109Unsplit.load(std::memory_order_relaxed); s.foreign = g_f109Foreign.load(std::memory_order_relaxed);
+    s.blocked = g_f109Blocked.load(std::memory_order_relaxed); s.writes = g_adsWrites.load(std::memory_order_relaxed);
+    s.procs = g_adsProcCalls.load(std::memory_order_relaxed); s.refusals = g_adsRefusals.load(std::memory_order_relaxed);
+    if (g_adsIncidents.push(s, force) && !g_adsIncidentEverSampled) {
+        g_adsIncidentEverSampled = true;
+        Log::get().note("ADS incident: first record collected, tick %u map tick %u; map data %s; no fault dump means no trigger, not proof that the guard passed",
+                        s.tick, s.mapTick, s.tick == s.mapTick ? "current" : "not current/never collected");
+    }
+}
+
+void adsIncidentDump(uint64_t now, const char* why) noexcept {
+    adsIncidentRecord(now, true);
+    if (!g_adsIncidents.beginDump(now)) return;
+    Log::get().note("ADS incident: %.320s; %zu samples (%zu before trigger; prior history %s) at about 100 ms; %u dumps suppressed; map and rows stamps expose stale/not-collected values; "
+                    "content revision means changed observed bytes, not producer write time; native zoom blend unavailable; split counters are cumulative; "
+                    "hook atomics sampled independently (root age approximate)", why,
+                    g_adsIncidents.count, g_adsIncidents.count ? g_adsIncidents.count - 1 : 0,
+                    g_adsIncidents.count > 1 ? "collected" : "unavailable in this context", g_adsIncidents.suppressed);
+    for (size_t i = 0; i < g_adsIncidents.count; ++i) {
+        const nofoot::AdsIncidentSample& s = g_adsIncidents.at(i);
+        Log::get().note("ADS incident %zu: age %llu ms tick %u map %u head %llu/%d rows %u/%d residual %d; item %.63s serial %u epoch %llu cfg %llu press %u state %s w %.2f; request %d fresh %d age %llu us journal %d/%d "
+                        "veto %d polls %u content %llu age %llu ms",
+                        i, static_cast<unsigned long long>(now >= s.ms ? now - s.ms : 0), s.tick, s.mapTick, static_cast<unsigned long long>(s.headSeq), s.headKnown, s.rowsFrame, s.rowsKnown,
+                        s.residualKnown, s.item, s.itemSerial, static_cast<unsigned long long>(s.selectionEpoch), static_cast<unsigned long long>(s.configGeneration), s.press, kAdsStateNames[s.state], s.weight, s.request, s.requestFresh, static_cast<unsigned long long>(s.actionAgeUs), s.journalKnown, s.journal,
+                        s.veto, s.polls, static_cast<unsigned long long>(s.revision), static_cast<unsigned long long>(s.contentAgeMs));
+        Log::get().note("ADS incident %zu motion: head %+.6g/%+.6g asked %+.6g/%+.6g queued %+.6g/%+.6g; applied %+.6g/%+.6g player %+.6g/%+.6g "
+                        "cancel %+.6g/%+.6g ahead %+.6g/%+.6g carried %+.6g/%+.6g residual %+.6g/%+.6g; root pitch independent %+.6g stamp known %d stamp age %llu ms (unpaired); gain %.6g/%.6g ends %.6g/%.6g (independent); "
+                        "split clean %u dirty %u unsplit %u foreign %u blocked %u; writes %u processor %u refused %u", i,
+                        s.head[0], s.head[1], s.asked[0], s.asked[1], s.queued[0], s.queued[1], s.applied[0], s.applied[1], s.player[0], s.player[1],
+                        s.cancel[0], s.cancel[1], s.ahead[0], s.ahead[1], s.carried[0], s.carried[1], s.residual[0], s.residual[1], s.rootPitch, s.rootKnown,
+                        static_cast<unsigned long long>(s.rootAgeMs), s.gain[0], s.gain[1], s.gainEnds[0], s.gainEnds[1],
+                        s.clean, s.dirty, s.unsplit, s.foreign, s.blocked, s.writes, s.procs, s.refusals);
+    }
+}
 nofoot::f91::CancelHistory g_f91Cancel;   // the cancel total at every eye alignment serial published (f89AlignPublish)
 nofoot::f91::FitWindow g_f91Fit;          // the press's fit windows (f87EyeLines)
 // F91 C: the ADS item gate's edges and the F70b 1 s line's count of refused ticks (frame thread).
@@ -7557,8 +7619,9 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (signChanged && (g_adsState == kAdsActive || g_adsState == kAdsReleasing || g_lta.engaged || g_lta.unwinding)) adsStop("a sign key changed", false);
     const bool full3P = g_alignMode.load(std::memory_order_relaxed) == 2 && g_fpKeyOn.load(std::memory_order_relaxed) &&
                         g_unclipKeyOn.load(std::memory_order_relaxed);
-    const bool journalKnown = journalAdsKnown();
-    const bool journalValue = journalAds();
+    const JournalAdsStatus status = journalAdsStatus();
+    const bool journalKnown = status.known;
+    const bool journalValue = status.value;
     const bool actionEligible = session && onFoot && full3P;
     AdsActionSample action = adsActionRead();
     const uint64_t nowQpc = f30Qpc();
@@ -7575,14 +7638,16 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsActionEligibleLast = false;
         g_adsActionEligibleQpc = 0;
         g_adsActionReject = nofoot::AdsActionReject{};
+        g_adsIncidents.clearSamples();
     } else if (!g_adsActionEligibleLast) {
         g_adsActionEligibleLast = true;
         g_adsActionEligibleQpc = nowQpc;
     }
     const bool actionFresh = actionAgeKnown && nofoot::adsActionSampleFresh(actionEligible, action.valid, action.qpc, nowQpc, g_adsActionEligibleQpc, actionAgeUs);
-    uint32_t statusSamples = 0;
-    if (actionEligible && actionFresh && action.value) statusSamples = journalRawStatus().statusSamples;
-    const bool actionVeto = actionEligible && actionFresh ? nofoot::adsActionRejectStep(g_adsActionReject, action.value, now, journalKnown, journalValue, statusSamples)
+    const uint32_t statusSamples = actionEligible && actionFresh && action.value ? status.polls : 0;
+    const bool vetoBefore = g_adsActionReject.latched;
+    const bool actionVeto = actionEligible && (actionFresh || (journalKnown && journalValue))
+                                ? nofoot::adsActionRejectStep(g_adsActionReject, actionFresh ? action.value : true, now, journalKnown, journalValue, status.contentRevision)
                                                          : actionEligible && g_adsActionReject.latched;
     const nofoot::AdsInputChoice adsChoice = nofoot::adsInputChoice(actionEligible, journalKnown, journalValue, actionFresh, action.value, actionAgeUs, actionVeto);
     const bool asked = adsChoice.ads;
@@ -7594,6 +7659,25 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (heldKind != kHeldUnknown) journalHeldItemName(heldName, sizeof(heldName));
     F83SelectionRead f83{};
     const bool nativePrimary = onFoot && f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
+    g_adsIncidentInput.request = action.value; g_adsIncidentInput.requestFresh = actionFresh; g_adsIncidentInput.actionAgeUs = actionAgeUs;
+    g_adsIncidentInput.journalKnown = journalKnown; g_adsIncidentInput.journal = journalValue; g_adsIncidentInput.veto = actionVeto;
+    g_adsIncidentInput.polls = status.polls; g_adsIncidentInput.revision = status.contentRevision;
+    g_adsIncidentInput.contentAgeMs = status.contentMs && now >= status.contentMs ? now - status.contentMs : 0;
+    g_adsIncidentInput.selectionEpoch = f83.epoch;
+    std::memcpy(g_adsIncidentInput.item, heldName, sizeof(heldName));
+    g_adsIncidentInput.itemSerial = 0;
+    if (!opticItemRead(&g_adsIncidentInput.itemSerial, g_adsIncidentInput.item)) {
+        g_adsIncidentInput.itemSerial = 0;
+        std::memcpy(g_adsIncidentInput.item, heldName, sizeof(heldName));
+    }
+    if (actionVeto != vetoBefore) {
+        Log::get().note("native on foot ADS request (F70b): %s; held request %s, journal %s; polls %u, content revision %llu (changed observed bytes, not producer time), "
+                        "content observed %llu ms ago; item %.63s; blocked requests remain rejected while the journal stays false",
+                        actionVeto ? "rejected after grace" : journalKnown && journalValue ? "recovered on authoritative late acceptance" : "rearmed on logical release",
+                        action.value ? "on" : "off", journalKnown ? (journalValue ? "on" : "off") : "unknown", status.polls,
+                        static_cast<unsigned long long>(status.contentRevision), static_cast<unsigned long long>(g_adsIncidentInput.contentAgeMs), heldName);
+        if (actionVeto) adsIncidentDump(now, "held request rejected by changed false Status content after grace");
+    }
     const nofoot::f91::ItemGate itemGate = nofoot::f91::adsItemGate(nativePrimary, heldKind, heldName);
     struct InputSnapshot {
         int source = 0; bool value = false, fresh = false, valid = false, journalKnown = false, journalValue = false, veto = false, allow = false;
@@ -7654,13 +7738,13 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                         adsChoice.source == nofoot::kAdsInputAction ? "bound HumanoidZoom" : adsChoice.source == nofoot::kAdsInputJournal ? "journal" : "none",
                         asked ? "on" : "off", actionFresh ? "fresh" : action.valid ? "stale" : "absent/invalid", action.seq,
                         static_cast<unsigned long long>(actionAgeUs), journalKnown ? (journalValue ? "on" : "off") : "unknown",
-                        adsChoice.journalVeto ? " (held request rejected; latched until logical release)" : "",
+                        adsChoice.journalVeto ? " (held request rejected; until logical release or authoritative ADS acceptance)" : "",
                         g_adsActionReads.load(std::memory_order_relaxed), g_adsActionInvalid.load(std::memory_order_relaxed));
     }
     const int actionCompare = !actionFresh ? 0 : !journalKnown ? 1 : action.value != journalValue ? 3 : 2;
     if (actionCompare != g_adsActionCompareLast) {
         g_adsActionCompareLast = actionCompare;
-        Log::get().note("native on foot ADS input (F70b): %s; action %s, journal %s, sample age %llu us, Status.json samples %u (rejection requires a post-action sample and %.1f s)",
+        Log::get().note("native on foot ADS input (F70b): %s; action %s, journal %s, sample age %llu us, Status.json samples %u (rejection requires changed post-action content and %.1f s)",
                         actionCompare == 3 ? "bound request and game state diverged" : actionCompare == 2 ? "bound request and game state agree" : actionCompare == 1 ? "journal state unknown" : "no fresh action comparison",
                         action.value ? "on" : "off", journalKnown ? (journalValue ? "on" : "off") : "unknown", static_cast<unsigned long long>(actionAgeUs), statusSamples,
                         static_cast<double>(nofoot::kAdsActionRejectGraceMs) / 1000.0);
@@ -7955,6 +8039,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_f91.cancelNow[1] = mo.cancelPitch * kD;
         g_f91.ahead[0] = g_adsMap.aheadYaw * kD;   // F92b
         g_f91.ahead[1] = g_adsMap.aheadPitch * kD;
+        g_f91.player[0] = uY * kD; g_f91.player[1] = uP * kD;
+        g_f91.queued[0] = g_f91.queued[1] = 0.0;
     }
     g_adsSumApplied[0] += aY;
     g_adsSumApplied[1] += aP;
@@ -7968,6 +8054,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         const double gainP = static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed));
         const double iY = nofoot::adsInput(nofoot::adsGameFromSeatYaw(mo.injYaw, ySign), gainY);
         const double iP = nofoot::adsInput(nofoot::adsGameFromSeatPitch(mo.injPitch, pSign), gainP);
+        g_f91.queued[0] = iY; g_f91.queued[1] = iP;
         if (iY != 0.0) adsQueue(g_adsInYaw, iY, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainY)));
         if (iP != 0.0) adsQueue(g_adsInPitch, iP, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainP)));
         g_adsSumIn[0] += mo.injYaw;
@@ -11137,11 +11224,14 @@ void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
                         "there)",
                         g_adsResid.res[0], g_adsResid.res[1], g_adsResid.head[0], g_adsResid.head[1],
                         nofoot::adsResidualRatio(g_adsResid.res[0], g_adsResid.head[0]), nofoot::adsResidualRatio(g_adsResid.res[1], g_adsResid.head[1]));
+            g_f91.rTick = g_f91.tick; g_f91.rowsFrame = rf; g_f91.rowsKnown = true;
+            adsIncidentDump(now, why);   // preserve the fault and preceding samples before either stop resets the residual and map
             if (g_lta.engaged) ltaTrip(now, why);   // F109: look to aim stops (F109b: for 2 s; held off after three trips in a minute)
             else adsStop(why, true);
             return;
         }
     }
+    adsIncidentRecord(now);
     if (!axesOk) {
         // nothing to compare: the instruments below need the view as well
     } else if (!gOk) {
@@ -30008,6 +30098,66 @@ bool nativeOnFootPoseStamp(uint32_t renderFrame, NativeOnFootPoseStamp* out) {
         return true;
     }
     return false;
+}
+
+bool nativeOnFootCameraEvidence(uint32_t nativeRenderFrame, NativeOnFootCameraEvidence* out) {
+    if (!out) return false;
+    *out = NativeOnFootCameraEvidence{};
+    out->requestedFrame = nativeRenderFrame;
+    if (!nativeRenderFrame || nativeRenderFrame == ~uint32_t(0)) return false;
+    out->sampleQpc = f30Qpc();
+    LARGE_INTEGER frequency{};
+    if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) out->qpcFrequency = static_cast<uint64_t>(frequency.QuadPart);
+    const auto fresh = [&](uint64_t stamp) {
+        return stamp && out->qpcFrequency && stamp <= out->sampleQpc && out->sampleQpc - stamp <= out->qpcFrequency / 10;
+    };
+    const uint32_t head = g_f81PoseCaptureHead.load(std::memory_order_acquire);
+    const uint32_t begin = head > kF81PoseCaptureRows ? head - kF81PoseCaptureRows : 0;
+    for (uint32_t n = head; n > begin;) {
+        nofoot::optic_capture::Record row{};
+        if (!f81PoseCaptureCopy(--n, &row) || row.poseKey.hookRenderFrame != nativeRenderFrame) continue;
+        out->status = 1;
+        out->sourceFrame = row.poseKey.hookRenderFrame;
+        out->fpFrame = row.poseKey.renderFrame;
+        out->rootReadRenderFrame = row.poseKey.rootReadFrame;
+        out->gGameFrame = row.poseKey.gGameFrame;
+        out->itemSerial = row.poseKey.itemSerial;
+        out->qpc = row.poseQpc; out->fpQpc = row.poseFpQpc; out->rootQpc = row.poseGQpc;
+        std::memcpy(out->froot, row.poseFroot, sizeof(out->froot));
+        std::memcpy(out->m3p, row.poseM3p, sizeof(out->m3p));
+        std::memcpy(out->G, row.poseRoot, sizeof(out->G));
+        std::memcpy(out->bodyOffset, row.poseBodyOffset, sizeof(out->bodyOffset));
+        std::memcpy(out->pinEyeTarget, row.posePinEyeTarget, sizeof(out->pinEyeTarget));
+        std::memcpy(out->pinTarget, row.posePinTarget, sizeof(out->pinTarget));
+        if (row.poseMatricesValid) out->validFlags |= NativeOnFootCameraEvidence::kMatricesValid;
+        if (out->fpFrame == nativeRenderFrame && out->rootReadRenderFrame == nativeRenderFrame) out->validFlags |= NativeOnFootCameraEvidence::kSourcesExact;
+        if (fresh(out->qpc) && fresh(out->fpQpc) && fresh(out->rootQpc)) out->validFlags |= NativeOnFootCameraEvidence::kTimesFresh;
+        bool pinValid = row.posePinValid;
+        for (int i = 0; i < 3; ++i) pinValid = pinValid && std::isfinite(out->pinEyeTarget[i]) && std::isfinite(out->pinTarget[i]);
+        if (pinValid) out->validFlags |= NativeOnFootCameraEvidence::kPinTargetsValid;
+        if (row.poseWriteFresh) out->validFlags |= NativeOnFootCameraEvidence::kPoseSourcesFresh;
+        if (row.poseM3pPaddingCanonicalized) out->validFlags |= NativeOnFootCameraEvidence::kM3pCanonicalized;
+        return true;
+    }
+    IkGData cached{};
+    if (!ikGRead(&cached)) return false;
+    out->status = 2;
+    out->sourceFrame = out->rootReadRenderFrame = cached.rootReadRenderFrame;
+    out->gGameFrame = cached.frame;
+    out->qpc = cached.frootQpc; out->rootQpc = cached.rootReadQpc;
+    out->ms = cached.ms; out->rootMs = cached.frootMs;
+    std::memcpy(out->froot, cached.froot, sizeof(out->froot));
+    std::memcpy(out->m3p, cached.m3p, sizeof(out->m3p));
+    std::memcpy(out->G, cached.g, sizeof(out->G));
+    std::memcpy(out->bodyOffset, cached.d, sizeof(out->bodyOffset));
+    bool matricesValid = nofoot::pfzCanonicalizeAffineMatrix(cached.m3p, out->m3p);
+    if (matricesValid) out->validFlags |= NativeOnFootCameraEvidence::kM3pCanonicalized;
+    for (float v : out->froot) matricesValid = matricesValid && std::isfinite(v);
+    for (float v : out->G) matricesValid = matricesValid && std::isfinite(v);
+    for (float v : out->bodyOffset) matricesValid = matricesValid && std::isfinite(v);
+    if (matricesValid) out->validFlags |= NativeOnFootCameraEvidence::kMatricesValid;
+    if (fresh(out->qpc) && fresh(out->rootQpc)) out->validFlags |= NativeOnFootCameraEvidence::kTimesFresh;
+    return true; // explicitly cached, without exact-frame or pin-target flags, even if its root frame happens to match
 }
 
 bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]) {

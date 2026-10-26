@@ -1,4 +1,5 @@
 #include "../../src/d3d11/eye_draw_snapshot.h"
+#include "../../src/d3d11/eye_late_menu_capture.h"
 #include "../../src/d3d11/gui_draw_snapshot.h"
 #include "../../src/d3d11/eye_depth_capture.h"
 #include "../../src/d3d11/eye_jump_lattice.h"
@@ -29,6 +30,21 @@ void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 int wmain(int argc, wchar_t** argv) {
     check(argc == 2, "output path required");
+    {
+        using S=edvr::EyeDrawSnapshot;edvr::LateMenuWindow menu;menu.arm(100);
+        check(!menu.take(100,0,1,S::kLateMenuVs,360)&&menu.take(101,0,2,S::kScene,900)&&
+              menu.take(101,0,3,S::kLateMenuVs,6)&&menu.take(101,0,4,S::kLateMenuBaseVs,360)&&
+              menu.take(101,0,5,S::kLateMenuVs,360),
+              "menu frame fixed after partial arm frame; earlier scene and siblings before either anchor retained");
+        check(!menu.take(101,0,6,S::kScene,900)&&!menu.take(102,1,7,S::kLateMenuVs,360)&&
+              menu.take(101,1,8,S::kScene,900),"scene reference precedes menu per eye and capture never moves to a later frame");
+        for(uint32_t i=0;i<20;++i)menu.take(101,-1,10+i,S::kLateMenuVs,6);
+        check(menu.take(101,0,40,S::kLateMenuVs,360)&&menu.take(101,1,41,S::kLateMenuVs,6)&&
+              menu.take(101,1,42,S::kLateMenuVs,360)&&menu.declined[2][0][1]==16,
+              "unknown-eye sibling saturation cannot consume either eye or either reserved 360-index anchor");
+        edvr::LateMenuWindow astra;astra.arm(10);astra.take(11,0,0,S::kLateMenuVs,6);astra.take(11,1,1,S::kLateMenuVs,6);
+        check(astra.seen[0][0][0]==0&&astra.seen[1][0][0]==0,"six-index-only stock station menu never claims a 360-index anchor");
+    }
     check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77HeldCandidateVs,0),
           "bounded held family admits only the allowlisted VS");
     check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
@@ -1287,5 +1303,61 @@ int wmain(int argc, wchar_t** argv) {
     cropSnap.reset();check(cropSnap.effectImages.empty() && !cropSnap.effectImageBytes &&
         !cropSnap.effectImageDeclined && cropSnap.pendingEffectImage==UINT32_MAX,"effect capture reset releases images and pending work");
     night.reset();check(night.nightSampling.empty() && night.effectImages.empty() && !night.vertexBytes,"night reset releases sampling and geometry");
+    {
+        using S=edvr::EyeDrawSnapshot;edvr::EyeLateMenuCapture menu;menu.arm(800);
+        D3D11_INPUT_ELEMENT_DESC menuElements[3]={opticElements[0],opticElements[1],
+            {"INSTANCEANDMODELDATAINDEX",0,DXGI_FORMAT_R32G32_UINT,0,0,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+        ComPtr<ID3D11InputLayout> menuLayout;hr(dev->CreateInputLayout(menuElements,3,opticBlob->GetBufferPointer(),opticBlob->GetBufferSize(),&menuLayout));
+        edvr::EyeDrawSnapshot::rememberLayout(menuLayout.Get(),menuElements,3,S::kLateMenuVs);
+        ctx->IASetInputLayout(menuLayout.Get());UINT menuStride=opticStride,menuOffset=opticBindingOffset;
+        ctx->IASetVertexBuffers(1,1,opticVb.GetAddressOf(),&menuStride,&menuOffset);
+        std::vector<uint16_t> menuIndices(364,2);for(size_t i=4;i<menuIndices.size();++i)menuIndices[i]=static_cast<uint16_t>(2+(i%4));
+        D3D11_BUFFER_DESC mid{};mid.ByteWidth=static_cast<UINT>(menuIndices.size()*2);mid.Usage=D3D11_USAGE_DEFAULT;mid.BindFlags=D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA mi{menuIndices.data(),0,0};ComPtr<ID3D11Buffer> menuIb;hr(dev->CreateBuffer(&mid,&mi,&menuIb));
+        ctx->IASetIndexBuffer(menuIb.Get(),DXGI_FORMAT_R16_UINT,4);
+        ComPtr<ID3D11Buffer> tables[2];ComPtr<ID3D11ShaderResourceView> views[2];
+        std::vector<uint8_t> tableBytes[2]={std::vector<uint8_t>(672,0x47),std::vector<uint8_t>(192,0x58)};
+        for(unsigned i=0;i<2;++i){D3D11_BUFFER_DESC menuTableDesc{};menuTableDesc.ByteWidth=static_cast<UINT>(tableBytes[i].size());menuTableDesc.Usage=D3D11_USAGE_DEFAULT;
+            menuTableDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;menuTableDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;menuTableDesc.StructureByteStride=i?48:336;
+            D3D11_SUBRESOURCE_DATA data{tableBytes[i].data(),0,0};hr(dev->CreateBuffer(&menuTableDesc,&data,&tables[i]));
+            D3D11_SHADER_RESOURCE_VIEW_DESC menuViewDesc{};menuViewDesc.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;menuViewDesc.Buffer.NumElements=menuTableDesc.ByteWidth/menuTableDesc.StructureByteStride;
+            hr(dev->CreateShaderResourceView(tables[i].Get(),&menuViewDesc,&views[i]));ctx->VSSetShaderResources(i?38:33,1,views[i].GetAddressOf());}
+        const uint32_t menuIds[4]={0,0,1,0};D3D11_BUFFER_DESC idDesc{};idDesc.ByteWidth=sizeof(menuIds);idDesc.Usage=D3D11_USAGE_DEFAULT;idDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA idData{menuIds,0,0};ComPtr<ID3D11Buffer> ids;hr(dev->CreateBuffer(&idDesc,&idData,&ids));
+        UINT idStride=8,idOffset=0;ctx->IASetVertexBuffers(0,1,ids.GetAddressOf(),&idStride,&idOffset);
+        ComPtr<ID3D11DeviceContext1> ranged;hr(ctx.As(&ranged));
+        D3D11_BUFFER_DESC cd{};cd.ByteWidth=5120;cd.Usage=D3D11_USAGE_DEFAULT;cd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> camera;hr(dev->CreateBuffer(&cd,nullptr,&camera));
+        std::vector<uint8_t> cameraBytes(cd.ByteWidth,0x35);ctx->UpdateSubresource(camera.Get(),0,nullptr,cameraBytes.data(),0,0);
+        UINT first=16,num=288;ranged->VSSetConstantBuffers1(1,1,camera.GetAddressOf(),&first,&num);
+        edvr::EyeMeshJoinStamp join;join.sceneFrame=799;join.validFlags=1;
+        for(int eye=0;eye<2;++eye) {
+            menu.capture(ctx.Get(),801,0,eye,join,eye*10,0xDE545DC8EE4FBB87ull,0,'I',900,1,0,2,static_cast<int32_t>(opticBase),1);
+            menu.evidence.candidateDrawIssued(ctx.Get(),true,0xDE545DC8EE4FBB87ull,0);
+            for(unsigned family=0;family<3;++family) {
+                const uint64_t vs=family==1?S::kLateMenuBaseVs:S::kLateMenuVs,ps=family==1?S::kLateMenuBasePs:S::kLateMenuPs;
+                menu.capture(ctx.Get(),801,0,eye,join,eye*10+family+1,vs,ps,'I',family==0?6u:360u,1,1,2,static_cast<int32_t>(opticBase),2);
+                menu.evidence.candidateDrawIssued(ctx.Get(),family!=0,vs,ps);
+                std::fill(tableBytes[0].begin(),tableBytes[0].end(),static_cast<uint8_t>(0x48+eye*3+family));
+                ctx->UpdateSubresource(tables[0].Get(),0,nullptr,tableBytes[0].data(),0,0);
+            }
+        }
+        check(menu.rows.size()==8&&menu.evidence.draws.size()==8&&menu.window.scene[0]&&menu.window.scene[1],
+              "independent menu snapshot retains both eyes, earlier scene references, skipped siblings and both menu families with zero native frame");
+        check(menu.rows[1].constants[1].first==16&&menu.evidence.draws[1].copied[1]==288*16&&
+              menu.evidence.draws[1].streams[1].captureOffset==opticVertexBegin,
+              "menu capture preserves ranged camera CB origin and large indexed geometry base");
+        check(menu.evidence.meshBuffers.size()==12&&menu.evidence.draws[1].mesh[0]!=menu.evidence.draws[2].mesh[0]&&
+              menu.evidence.draws[1].streams[0].captureOffset==8&&menu.evidence.draws[1].streams[0].copied==8,
+              "menu structured inputs are copied per draw; instance IDs retain only the exact start-instance window without whole-VB duplication");
+        wait_gpu(ctx.Get(),dev.Get());
+        auto& cachedAvatar=menu.rows[1].avatar;cachedAvatar.status=2;cachedAvatar.validFlags=1;cachedAvatar.sourceFrame=123;
+        cachedAvatar.sampleQpc=1000;cachedAvatar.qpc=900;cachedAvatar.rootQpc=800;cachedAvatar.qpcFrequency=1000;
+        for(unsigned i=0;i<4;++i)cachedAvatar.froot[i*5]=cachedAvatar.m3p[i*5]=cachedAvatar.G[i*5]=1.0f;
+        check(menu.write(ctx.Get(),(std::wstring(argv[1])+L".menu.bin").c_str(),(std::wstring(argv[1])+L".menu.json").c_str()),
+              "menu binary and bounded binding/selection companion write");
+        menu.release();check(menu.evidence.draws.empty()&&menu.evidence.meshBuffers.empty()&&menu.rows.empty()&&menu.window.frame==0,
+              "closing or aborting a menu run releases staging and source references before another manual capture");
+    }
     std::puts("GPU draw snapshot capture passed");
 }

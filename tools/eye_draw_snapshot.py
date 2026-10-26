@@ -50,6 +50,10 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import math
+
+MENU_FAMILIES=(0x5DAD41AA66757CE3,0xC4B4B334B26E81A9)
+MENU_SCENES=(0x4435F2E50020E7F3,0xDE545DC8EE4FBB87,0xAACFDCF2FB9AD809,0x61AE8EB05FDC18DD)
 
 
 def read(path):
@@ -68,7 +72,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -367,6 +371,134 @@ def empty_candidates():
                 optic_draws=0,roi_incomplete=0,roi_draw=0xffffffff,frames=[],inputs=[],samplers=[])
 
 
+def read_menu(path, capture=None):
+    """Join the bounded menu companion to its v16 binary; missing copies remain explicit."""
+    path=Path(path)
+    if path.stat().st_size>1024*1024:
+        raise ValueError('Menu metadata exceeds its bounded schema')
+    meta=json.loads(path.read_text(encoding='utf-8'))
+    binary=meta.get('binary','')
+    if (meta.get('schema')!='edvr_late_menu_v1' or not isinstance(binary,str) or not binary or
+            Path(binary).name!=binary or '/' in binary or '\\' in binary or not meta.get('binary_written')):
+        raise ValueError('Invalid menu metadata header')
+    c=read(path.with_name(binary)) if capture is None else capture
+    if (c['version']!=16 or meta.get('mesh_limit')!=128*1024*1024 or meta.get('vertex_limit')!=8*1024*1024 or
+            not isinstance(meta.get('selected_frame'),int) or meta['selected_frame']<=0 or
+            len(meta.get('rows',[]))>50 or len(meta.get('rows',[]))!=len(c['draws']) or
+            [e.get('eye') for e in meta.get('eyes',[])]!=[0,1,-1]):
+        raise ValueError('Invalid menu selection or capacity')
+    issues={f['draw']:f for f in c['candidates']['frames']}
+    seen=set();counts=[[[0,0] for _ in range(2)] for _ in range(3)];scene_ord=[None,None];menu_ord=[None,None]
+    family_ids=MENU_FAMILIES
+    identities=lambda v:isinstance(v,str) and len(v)==16 and all(z in '0123456789abcdefABCDEF' for z in v)
+    for row in meta['rows']:
+        n=row.get('draw');role=row.get('role')
+        if not isinstance(n,int) or n in seen or n<0 or n>=len(c['draws']) or role not in (1,2):
+            raise ValueError('Invalid menu row association')
+        seen.add(n);d=c['draws'][n]
+        if d['frame']!=meta['selected_frame'] or n not in issues or (role==2)!=(d['vs'] in MENU_SCENES):
+            raise ValueError('Menu row does not belong to selected frame/family')
+        if role==1:
+            if d['vs'] not in family_ids:
+                raise ValueError('Unknown menu diagnostic family')
+            e=d['eye'] if d['eye'] in (0,1) else 2
+            counts[e][family_ids.index(d['vs'])][0 if d['count']==360 else 1]+=1
+            if e<2:menu_ord[e]=d['ordinal'] if menu_ord[e] is None else min(menu_ord[e],d['ordinal'])
+        elif d['eye'] not in (0,1) or scene_ord[d['eye']] is not None:
+            raise ValueError('Menu scene reference has unknown/duplicate eye')
+        else:
+            scene_ord[d['eye']]=d['ordinal']
+        if len(row.get('constants',[]))!=3 or len(row.get('streams',[]))!=3 or len(row.get('ps_inputs',[]))!=16:
+            raise ValueError('Menu row binding count differs')
+        for slot,binding in enumerate(row['constants']):
+            if (not identities(binding.get('identity')) or binding.get('range_known') not in (0,1) or
+                    any(not isinstance(binding.get(k),int) or binding[k]<0 or binding[k]>4096 for k in ('first','count'))):
+                raise ValueError('Invalid menu constant-buffer binding')
+            if int(binding['identity'],16)!=d['buffers'][slot]['identity']:
+                raise ValueError('Menu constant identity disagrees with binary')
+            payload=d['buffers'][slot]['data']
+            binding['status']='absent' if not int(binding['identity'],16) else ('available' if payload else 'copy_unavailable')
+            binding['payload_origin_bytes']=binding['first']*16 if binding['range_known'] else 0
+            binding['bounded']=bool(payload) and binding['range_known'] and len(payload)<binding['count']*16
+        if not all(identities(v) for v in row['streams']):
+            raise ValueError('Invalid menu stream identity')
+        for slot,input_ in enumerate(row['ps_inputs']):
+            if (input_.get('slot')!=slot or not identities(input_.get('view')) or not identities(input_.get('resource')) or
+                    len(input_.get('descriptor',[]))!=6 or any(not isinstance(v,int) or not 0<=v<=0xffffffff for v in input_['descriptor'])):
+                raise ValueError('Invalid menu texture binding descriptor')
+            input_['status']='absent' if not int(input_['view'],16) else 'identity_only'
+        row['outcome']=('skipped','issued','unavailable')[issues[n]['issued']]
+        avatar=row.get('avatar',dict(status=0,valid_flags=0))
+        if avatar.get('status') not in (0,1,2) or not isinstance(avatar.get('valid_flags'),int) or not 0<=avatar['valid_flags']<=63:
+            raise ValueError('Invalid avatar camera evidence status')
+        if avatar['status']:
+            for key in ('requested_frame','source_frame','fp_frame','root_read_render_frame','g_game_frame','item_serial',
+                        'sample_qpc','qpc','fp_qpc','root_qpc','ms','root_ms','qpc_frequency'):
+                if not isinstance(avatar.get(key),int) or avatar[key]<0:
+                    raise ValueError('Invalid avatar camera evidence stamp')
+            if avatar['requested_frame']!=d['render_frame'] or (avatar['status']==2 and avatar['valid_flags']&(2|8)):
+                raise ValueError('Cached avatar evidence mislabeled exact or pinned')
+            for key,size in (('froot',16),('m3p',16),('G',16),('body_offset',3),('pin_eye_target',3),('pin_target',3)):
+                values=avatar.get(key,[])
+                if len(values)!=size or any(v is not None and (not isinstance(v,(int,float)) or not math.isfinite(v)) for v in values):
+                    raise ValueError('Invalid avatar camera numeric payload')
+                if avatar['valid_flags']&1 and key in ('froot','m3p','G') and any(v is None for v in values):
+                    raise ValueError('Valid avatar matrices contain unavailable numbers')
+            for key in ('qpc','fp_qpc','root_qpc'):
+                avatar[key+'_age_ms']=(1000*(avatar['sample_qpc']-avatar[key])/avatar['qpc_frequency']
+                    if avatar['qpc_frequency'] and avatar[key] and avatar['sample_qpc']>=avatar[key] else None)
+        avatar['source_status']=('unavailable','hook_frame_match','cached_not_exact')[avatar['status']]
+        avatar['sources_exact']=bool(avatar['valid_flags']&2)
+        avatar['times_fresh']=bool(avatar['valid_flags']&4)
+        avatar['pin_targets_available']=bool(avatar['valid_flags']&8)
+        avatar['coordinate_spaces']='froot/m3p model-to-world; G FP-to-3P; body offset in world metres; pin targets in 3P model metres'
+        row['avatar']=avatar
+        if row.get('eye_source',0) not in (0,1,2,3):
+            raise ValueError('Invalid menu eye mapping source')
+        row['eye_mapping']=('unknown','scene_depth','current_registered_ui_target','cached_redirected_ui_target')[row.get('eye_source',0)]
+        if role==1:
+            try:issues[n]['index_status']=_validate_candidate_indices(d)
+            except ValueError as exc:issues[n]['index_status']='invalid: '+str(exc)
+        else:issues[n]['index_status']='not_requested_scene_reference'
+        row['layout_status']='available' if d['layout'] else 'unavailable'
+        row['stream_status']=['absent' if not int(identity,16) else
+                              ('available' if stream['data'] else 'copy_unavailable_or_not_requested')
+                              for identity,stream in zip(row['streams'],d['streams'])]
+        row['structured_status']=[{0:'absent',1:'copy_issued',2:'unsupported_view',3:'unsupported_offset',4:'unsupported_stride',
+                                   5:'size_or_quota',6:'allocation_failed',7:'quota',8:'not_selected',9:'unavailable',10:'unknown_eye',11:'instance_stream_window'}.get(s,'unknown')
+                                  for s in d['mesh_status'][:3]]
+        for slot,ref in enumerate(d['mesh'][:2]):
+            if row['structured_status'][slot]=='copy_issued':
+                row['structured_status'][slot]='available' if ref<len(c['mesh_buffers']) and c['mesh_buffers'][ref]['data'] else 'copy_unavailable'
+    for e,eye in enumerate(meta['eyes']):
+        if (not isinstance(eye.get('scene_before_menu'),bool) or len(eye.get('families',[]))!=2 or
+                not isinstance(eye.get('mesh_bytes'),int) or not 0<=eye['mesh_bytes']<=(16 if e==2 else 56)*1024*1024 or
+                not isinstance(eye.get('vertex_bytes'),int) or not 0<=eye['vertex_bytes']<=(2 if e==2 else 3)*1024*1024):
+            raise ValueError('Invalid menu eye reservation')
+        if (eye['scene_before_menu']!=(e<2 and scene_ord[e] is not None) or
+                (e<2 and scene_ord[e] is not None and menu_ord[e] is not None and scene_ord[e]>=menu_ord[e])):
+            raise ValueError('Menu scene reference did not precede its menu')
+        for family,recorded in zip(eye['families'],counts[e]):
+            for k in ('anchor_seen','siblings_seen','anchor_kept','siblings_kept','anchor_quota','siblings_quota'):
+                if not isinstance(family.get(k),int) or family[k]<0:
+                    raise ValueError('Invalid menu family counter')
+            if ([family['anchor_kept'],family['siblings_kept']]!=recorded or max(recorded)>4 or
+                    family['anchor_seen']!=family['anchor_kept']+family['anchor_quota'] or
+                    family['siblings_seen']!=family['siblings_kept']+family['siblings_quota']):
+                raise ValueError('Menu family count disagrees with retained draws')
+        for family,vs in zip(eye['families'],MENU_FAMILIES):family['vs']=f'{vs:016X}'
+        eye['anchor_status']='present' if eye['families'][0]['anchor_kept'] else 'absent'
+        eye['scene_status']='present_before_menu' if eye['scene_before_menu'] else 'unavailable'
+    meta['anchor_status']='both_eyes' if all(e['anchor_status']=='present' for e in meta['eyes'][:2]) else 'absent_or_one_eye'
+    meta['camera_context']='bound draw constants plus existing F81/cached IkG avatar reference and freshness; no game camera getter or picking mesh captured'
+    meta['avatar_sources']=dict(Counter(r['avatar']['source_status'] for r in meta['rows']))
+    meta['outcomes']=dict(Counter(r['outcome'] for r in meta['rows']))
+    meta['eye_mappings']=dict(Counter(r['eye_mapping'] for r in meta['rows']))
+    meta['menu_geometry']=dict(Counter(issues[r['draw']]['index_status'] for r in meta['rows'] if r['role']==1))
+    c['late_menu']=meta
+    return c
+
+
 def read_candidates(unpack,take,draws,effect_images,version=11):
     dropped,missing,outside,input_declined,mip_declined,input_bytes,optic_draws,roi_incomplete,roi_draw=unpack('<9I')
     if version>=13:
@@ -423,10 +555,11 @@ def read_candidates(unpack,take,draws,effect_images,version=11):
                        rtv_format=rtv_format,b0_first_constant=b0_first,b0_num_constants=b0_count,
                        b0_range_known=bool(b0_range),rtv=rtv,viewports=viewports,scissors=scissors,
                        b0_expected=b0_expected,b0_payload_status=('available' if b0_size else 'map_not_ready'),b0=b0)
-        if (draw>=len(draws) or draw in seen or not render_frame or draws[draw]['frame']!=ledger_frame or
+        menu_family=version>=16 and draw<len(draws) and draws[draw]['vs'] in MENU_FAMILIES+MENU_SCENES
+        if (draw>=len(draws) or draw in seen or (not render_frame and not menu_family) or draws[draw]['frame']!=ledger_frame or
                 eye not in (-1,0,1) or issued not in (0,1,2) or roi_captured not in (0,1) or roi_complete not in (0,1) or
                 roi_complete and (issued!=1 or roi_captured!=1) or
-                (draws[draw]['vs']!=0x154FB5A453F3D2E9 and
+                (not menu_family and draws[draw]['vs']!=0x154FB5A453F3D2E9 and
                  (draws[draw]['vs'],draws[draw]['ps']) not in ((0x025B4B9FF54622ED,0x46F92DC71BF8DFA5),
                                                                (0xB10B032BDFD46700,0xDB899F4BD577F2E5)))):
             raise ValueError('Invalid targeted candidate frame association')
@@ -435,7 +568,7 @@ def read_candidates(unpack,take,draws,effect_images,version=11):
             actual=(issue['actual_vs'],issue['actual_ps'])
             if (issue['status']==2 and actual!=expected) or (issue['status']==5 and actual==expected):
                 raise ValueError('Issued UI state shader identity disagrees with the candidate')
-            if version>=15 and issue['camera_cb_slot']!=(1 if expected[0]==0x025B4B9FF54622ED else 0):
+            if version>=15 and issue['camera_cb_slot']!=(1 if menu_family or expected[0]==0x025B4B9FF54622ED else 0):
                 raise ValueError('Issued UI camera constant-buffer slot disagrees with the shader family')
         seen.add(draw);frames.append(dict(draw=draw,ledger_frame=ledger_frame,render_frame=render_frame,eye=eye,
                                           issued=issued,roi_captured=roi_captured,roi_complete=roi_complete,issue=issue))
@@ -886,7 +1019,46 @@ def verify_candidate_capacity_fixture(capture):
     assert sum((capture['draws'][row['draw']]['vs'],capture['draws'][row['draw']]['ps'])==(ui_vs,ui_ps) for row in c['frames'])==768
 
 
+def menu_self_test():
+    import copy
+    c=dict(version=16,draws=[],mesh_buffers=[],candidates=dict(frames=[]))
+    meta=dict(schema='edvr_late_menu_v1',binary='menu.bin',binary_written=True,selected_frame=11,
+              mesh_limit=128*1024*1024,vertex_limit=8*1024*1024,eyes=[],rows=[])
+    for e in (0,1,-1):
+        family=dict(anchor_seen=0,siblings_seen=0,anchor_kept=0,siblings_kept=0,anchor_quota=0,siblings_quota=0)
+        meta['eyes'].append(dict(eye=e,scene_before_menu=False,mesh_bytes=0,vertex_bytes=0,families=[copy.copy(family),copy.copy(family)]))
+    for eye in (0,1):
+        c['draws'].append(dict(frame=11,ordinal=eye,vs=0x5DAD41AA66757CE3,eye=eye,count=6,kind=ord('I'),start=0,base=0,
+                               buffers=[dict(identity=0,data=b'') for _ in range(3)],layout=[],
+                               streams=[dict(data=b'',stride=0) for _ in range(3)],mesh_status=[0,0,0,0],mesh=[0xffffffff]*4))
+        c['candidates']['frames'].append(dict(draw=eye,issued=2))
+        meta['rows'].append(dict(draw=eye,role=1,constants=[dict(identity='0'*16,first=0,count=0,range_known=1) for _ in range(3)],
+            streams=['0'*16]*3,ps_inputs=[dict(slot=i,view='0'*16,resource='0'*16,descriptor=[0]*6) for i in range(16)]))
+        meta['eyes'][eye]['families'][0].update(siblings_seen=1,siblings_kept=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        path=Path(tmp)/'menu.json'
+        def check(value,capture=c):
+            path.write_text(json.dumps(value),encoding='utf-8');return read_menu(path,copy.deepcopy(capture))
+        parsed=check(meta)['late_menu']
+        assert parsed['anchor_status']=='absent_or_one_eye' and all(e['anchor_status']=='absent' for e in parsed['eyes'])
+        assert parsed['rows'][0]['outcome']=='unavailable' and parsed['rows'][0]['constants'][0]['status']=='absent'
+        bad=[]
+        x=copy.deepcopy(meta);x['eyes'][0]['families'][0]['anchor_kept']=1;bad.append(x)
+        x=copy.deepcopy(meta);x['eyes'][0]['scene_before_menu']=True;bad.append(x)
+        x=copy.deepcopy(meta);x['binary']='../escape.bin';bad.append(x)
+        x=copy.deepcopy(meta);x['rows'][0]['constants'][0]['identity']='1'*16;bad.append(x)
+        x=copy.deepcopy(meta);x['eyes'][0]['mesh_bytes']=57*1024*1024;bad.append(x)
+        for x in bad:
+            try:check(x)
+            except ValueError:pass
+            else:raise AssertionError('Malformed menu metadata accepted')
+        try:check(meta,dict(c,version=15))
+        except ValueError:pass
+        else:raise AssertionError('Old binary mislabeled as menu evidence')
+
+
 def self_test():
+    menu_self_test()
     def candidate_reader(blob, draws=None, effects=None, version=11):
         stream=io.BytesIO(blob)
         def take(n):
@@ -1188,7 +1360,7 @@ def main():
         return
     if not a.path:
         ap.error('Name a drawstate capture')
-    c = read(a.path)
+    c = read_menu(a.path) if Path(a.path).suffix.lower()=='.json' else read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
         sprite_path = Path(str(a.path) + '.sprite')
@@ -1200,6 +1372,18 @@ def main():
         capacity_path=Path(str(a.path)+'.capacity')
         assert capacity_path.exists(),'full-window targeted-candidate fixture is required'
         verify_candidate_capacity_fixture(read(capacity_path))
+        menu=read_menu(str(a.path)+'.menu.json')
+        assert len(menu['draws'])==8 and menu['late_menu']['anchor_status']=='both_eyes'
+        assert [r['outcome'] for r in menu['late_menu']['rows']]==['issued','skipped','issued','issued']*2
+        assert all(e['scene_status']=='present_before_menu' for e in menu['late_menu']['eyes'][:2])
+        assert menu['late_menu']['rows'][1]['constants'][1]['payload_origin_bytes']==256
+        avatar=menu['late_menu']['rows'][1]['avatar']
+        assert avatar['source_status']=='cached_not_exact' and not avatar['sources_exact'] and not avatar['pin_targets_available']
+        assert avatar['qpc_age_ms']==100 and avatar['root_qpc_age_ms']==200
+        assert menu['draws'][1]['buffers'][1]['data']==bytes([0x35])*4608
+        assert menu['draws'][1]['streams'][1]['data']==bytes([0xA7])*160
+        t33=[menu['mesh_buffers'][d['mesh'][0]]['data'] for d in menu['draws'] if d['mesh'][0]!=0xffffffff]
+        assert [z[0] for z in t33]==[0x47,0x48,0x49,0x4a,0x4b,0x4c], 'Menu structured copies were deduplicated across rewritten inputs'
         t2=read(str(a.path)+'.t2')['candidates']['inputs']
         assert len(t2)==2 and all((i['slot'],i['mip'],i['requested_mip'],i['mip_levels'],
                                    i['requested_mip_levels'],i['source_array_size'],i['slices'])==(2,1,0,10,11,8,8) for i in t2)
@@ -1333,13 +1517,14 @@ def main():
                           night_input_images=sum(e['after'] >= 2 for e in c['effect_images']), night_sampling=len(c['night_sampling']),
                           candidate_evidence=dict(optic_draws=c['candidates']['optic_draws'],
                               frames=[dict(draw=f['draw'],ledger_frame=f['ledger_frame'],render_frame=f['render_frame'],eye=f['eye'],
-                                           issued=f['issued'],roi_captured=f['roi_captured'],roi_complete=f['roi_complete'],index_status=f['index_status'])
+                                           issued=f['issued'],roi_captured=f['roi_captured'],roi_complete=f['roi_complete'],index_status=f.get('index_status','not_requested'))
                                       for f in c['candidates']['frames']],
                               inputs=[{k:i[k] for k in ('draw','slot','kind','view_dimension','format','width','height','source_width','source_height',
                                   'source_mip_levels','source_array_size','mip','requested_mip','mip_levels','requested_mip_levels',
                                   'first_slice','slices','bytes')} for i in c['candidates']['inputs']],
                               refusals=c['candidates']['refusals'],input_declined=c['candidates']['input_declined'],
                               mip_declined=c['candidates']['mip_declined']),
+                          late_menu=({k:c['late_menu'][k] for k in ('selected_frame','anchor_status','eyes','camera_context','outcomes','eye_mappings','menu_geometry','avatar_sources')} if 'late_menu' in c else None),
                           failures=c['failures'], shaders=Counter(f"{d['vs']:016X}" for d in c['draws'])), indent=2))
     if a.surfaces:
         for path in export_surfaces(c, a.surfaces, a.dry_run):
