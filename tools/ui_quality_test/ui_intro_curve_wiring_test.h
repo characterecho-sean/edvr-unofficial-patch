@@ -6,8 +6,8 @@
 // recognised by intro_curve.h) are drawn as the bent surface strip (panel_curve.h panelCurveSurfaceDraw) IN THE PLACE of the game's flat quad. What
 // matters, and what each pin below holds:
 //   * AT CURVATURE 0 EVERY CALL AND ITS ORDER IS TODAY'S. The recogniser is asked only behind introCurveWants() (one load); the strip's site is
-//     two cheap tests that an ordinary draw fails, and the game's own issue (observedDraw), the dim's own draw and their order are the text they
-//     were -- the only additions on that path are `if (stripIssued) return true;` in the lambda and the strip's fallback in the dim;
+//     two cheap tests that an ordinary draw fails, and the game's own issue (observedDraw), the dim's own draw and their order are preserved.
+//     The lambda reports whether an original draw was issued to the candidate observer and returns early when the strip replaced it;
 //   * a strip that cannot be drawn leaves the game's own draw to be issued, flat, never missing (stripIssued is only ever panelCurveSurfaceDraw's
 //     answer), and `originalIssued` still means "something was issued";
 //   * the strip sits AFTER the verdict's Begin (kBackdrop's slot swap is in place) and INSIDE the layer's bracket, replaces the game's issue and not
@@ -48,7 +48,8 @@ const char* const kStripCall =
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
 const char* const kLambda =
-    "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked())returnfalse;if(stripIssued)returntrue;constboolissued=draw(altered);"
+    "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
+    "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}constboolissued=draw(altered);objectProbeCandidateDrawIssued(self,issued);"
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
     "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){if(!(stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,"
@@ -127,8 +128,8 @@ std::vector<WirePin> wiringPins(const std::string& text) {
     // The unarmed path is today's text: the game's own issue, the lambda it goes through (one early return added), and the dim's own draw.
     pins.push_back({"unarmed-text",
                     has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim),
-                    "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` is the text it was, the lambda only gains `if (stripIssued) return true;` "
-                    "after its refusal, and the dim still draws the game's own `draw(AlteredDrawClass::None)` when the strip did not draw"});
+                    "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` remains the game's issue result; the refusal precedes the strip replacement return, "
+                    "observer calls report false for refused/replaced draws and the actual issued result otherwise, and the dim retains the game's fallback"});
     // The candidate test: two cheap tests first (the verdict, the flag), the cross-TU question last, so an ordinary draw pays nothing.
     pins.push_back({"candidate", has(fwd, kCandidate),
                     "intro curve wiring [candidate]: the strip is a candidate only for the movie's verdict or the splash's flag, on the owner context, and panelCurveSurfaceWanted() "
@@ -280,13 +281,13 @@ void testIntroCurveControls(const std::string& text) {
         {"the u direction starts true", {{"bool stripReverseU = false;", "bool stripReverseU = true;"}}, "strip-site"},
         // ---- unarmed-text
         {"observedDraw's early return comes before its refusal",
-         {{"        if (owner && uiLayerIssueBlocked()) return false;\n        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n",
-           "        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n        if (owner && uiLayerIssueBlocked()) return false;\n"}},
+         {{"        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n",
+           "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n"}},
          "unarmed-text"},
-        {"the game's draw is issued a second time", {{"        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n", ""}}, "unarmed-text"},
+        {"the game's draw is issued a second time", {{"        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n", ""}}, "unarmed-text"},
         {"originalIssued is no longer observedDraw's answer",
          {{"const bool originalIssued=observedDraw(alteredClass", "const bool originalIssued = stripIssued || observedDraw(alteredClass"}}, "unarmed-text"},
-        {"the strip's early return answers false", {{"if (stripIssued) return true;   // the strip", "if (stripIssued) return false;   // the strip"}}, "unarmed-text"},
+        {"the strip's early return answers false", {{"if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }", "if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return false; }"}}, "unarmed-text"},
         // ---- candidate
         {"the cross-TU question is asked first",
          {{"if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {",

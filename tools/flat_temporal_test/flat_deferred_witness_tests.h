@@ -581,8 +581,8 @@ inline unsigned run() {
         const std::string binding = between(runtime, "        if(!deferredProjection->active()) {", "    // Typed light authority");
         const std::string qualified = between(model, "inline bool flatRuntimeQualifiedDeferredCamera(", "// Runtime's exact-resource/used-transform attestation");
         const std::string observe = between(model, "if(flatRuntimeQualifiedDeferredCamera(p,*t,d,q)) {", "if (k.camera) {");
-        expect(countOf(verifier, "flatRuntimeDeferredDonor(") == 1 && countOf(binding, "flatRuntimeDeferredDonor(") == 1 && countOf(runtime, "flatRuntimeDeferredDonor(") == 2,
-               "the verifier and its binding-failure path ask the shared resolver, once each, and nothing else in the runtime does");
+        expect(countOf(verifier, "flatRuntimeDeferredDonor(") == 2 && countOf(binding, "flatRuntimeDeferredDonor(") == 1 && countOf(runtime, "flatRuntimeDeferredDonor(") == 3,
+               "the verifier (to resolve, and once more to name the second camera the pass uses) and its binding-failure path ask the shared resolver, and nothing else in the runtime does");
         expect(countOf(qualified, "flatRuntimeDeferredDonor(") == 1 && countOf(observe, "flatRuntimeDeferredDonor(") == 1 && countOf(model, "flatRuntimeDeferredDonor(") == 3,
                "the model's qualification and the donor it records ask the same resolver (a definition and two uses)");
         expect(model.find("inline FlatDeferredDonor flatRuntimeDeferredDonor(") != std::string::npos &&
@@ -633,9 +633,9 @@ inline unsigned run() {
         const std::string hook = between(model, "} else if (!d.supported && k.kind == kFlatContractScreen", "return out;");
         expect(!hook.empty() && hook.find("k.depth && k.dsv && k.rtv") != std::string::npos && hook.find("flatRuntimeNoteWitness(p, d, q)") != std::string::npos,
                "the reducer notes Screen-kind unsupported writers with a depth, a dsv and an RTV");
-        expect(model.find("if (e && e->conflict != FlatWitnessConflict::None) { ++e->writers; e->last = q; return; }") != std::string::npos &&
+        expect(model.find("if (e && e->conflict != FlatWitnessConflict::None) {\n        ++e->writers; e->last = q;\n        if (e->conflict == FlatWitnessConflict::Camera && e->pairClean) flatRuntimeWitnessPairWriter(*e, d, q, p.frame);\n        return;\n    }") != std::string::npos &&
                model.find("for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == k.depth) return;") != std::string::npos,
-               "a source record on the depth ends the noting, and a conflicted entry costs two stores");
+               "a source record on the depth ends the noting, and a conflicted entry costs two stores (a Camera conflict also classifies the writer by camera)");
     }
     std::printf("flat deferred witness resolver: %u checks, %u failure(s)\n", checks, failures);
     return failures;

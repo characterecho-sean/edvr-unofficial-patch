@@ -191,20 +191,6 @@ BindCheck hotkeyCheckBinding(const HotkeyBinding& b, const HotkeyOther* others, 
     return r;
 }
 
-bool hotkeyRowLocked(const char* rowKey, bool explorerCamSession) {
-    return explorerCamSession && rowKey && strcmp(rowKey, "explorer_cam") == 0;
-}
-
-size_t hotkeyLockedText(const char* keyText, char* out, size_t cap) {
-    if (!out || cap == 0) return 0;
-    snprintf(out, cap, "Leave Explorer Cam (%s) to change its key", keyText && keyText[0] ? keyText : "its key");
-    return strlen(out);
-}
-
-bool hotkeyCaptureMayBegin(const HotkeyRowContext& ctx) {
-    return !hotkeyRowLocked(ctx.rowKey, ctx.explorerCamSession);
-}
-
 CaptureDecision hotkeyDecide(const CaptureStep& step, const HotkeyRowContext& ctx) {
     CaptureDecision d;
     switch (step.kind) {
@@ -217,10 +203,6 @@ CaptureDecision hotkeyDecide(const CaptureStep& step, const HotkeyRowContext& ct
             break;
     }
     // Everything below would change the row, or says why it will not.
-    if (hotkeyRowLocked(ctx.rowKey, ctx.explorerCamSession)) {
-        d.outcome = CaptureOutcome::Locked;
-        return d;
-    }
     if (step.kind == CaptureKind::ClearRefused ||
         (step.kind == CaptureKind::Cleared && ctx.rowKey && strcmp(ctx.rowKey, "menu") == 0)) {
         d.outcome = CaptureOutcome::ClearRefusedMenu;

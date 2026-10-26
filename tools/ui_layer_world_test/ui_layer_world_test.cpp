@@ -1451,7 +1451,7 @@ void testMapsGate(Rig& r) {
     }
 }
 
-// ================================================================ what the 5 s window says across the transitions of the first flight
+// ================================================================ what the ten-second window says across the transitions of the first flight
 // The first flight of the maps gate (docs/design-world-camera-motion-2026-09-30.md, 8.10; Frontier, 2026-10-01 08:32:55.975) ended its
 // second panel period in a boarding: on foot with the route owning the world, then the ship's cockpit. The naming stopped with the last
 // 2D screen composite, three unnamed frames released the gate, the route let go on the same boundary (RELEASED on-foot-gate-lost), and
@@ -1464,7 +1464,7 @@ void testMapsGate(Rig& r) {
 //   and no composite follows. The first window is every one of those frames and its numbers are checked against the rig's own count of
 //   what it drew and what the layer did with it; the second is the cockpit alone -- the flight's windows: panel frames, nothing drawn,
 //   nothing taken, no door.
-// Two real 5 s windows, so the rig sleeps twice (the window's length is the layer's own constant).
+// Two real ten-second windows; the first also checks that the old five-second boundary writes no summary or resets counters.
 static unsigned windowNumber(const std::string& line, const char* key) {
     const std::string needle = std::string(" ") + key + "=";
     const size_t at = line.find(needle);
@@ -1547,7 +1547,29 @@ void testMapsTransitions(Rig& r) {
     check(!held, "windows: (setup) the boarding: three frames with no composite and no naming release the gate");
     g_stubs.mayTake = false;
     for (int i = 0; i < 5; ++i) cockpitFrame();
-    Sleep(5100);                                     // the window is 5 s of the wall clock
+    Sleep(5100);
+    cockpitFrame();                                  // the old five-second boundary must keep accumulating
+    // The log is asynchronous. A marker queued after the boundary proves its earlier lines have drained before checking for an early summary.
+    const char* checkpoint = "on foot maps sharp: test five-second checkpoint";
+    Log::get().note("%s", checkpoint);
+    bool drained = false;
+    std::vector<std::string> halfway;
+    for (int attempt = 0; attempt < 40 && !drained; ++attempt) {
+        Sleep(50);
+        halfway = mapsLines(dir);
+        for (const auto& line : halfway) if (line == checkpoint) drained = true;
+    }
+    unsigned earlyWindows = 0, immediateTakes = 0, immediateHandbacks = 0;
+    for (const auto& line : halfway) {
+        earlyWindows += line.rfind("on foot maps sharp 5s:", 0) == 0;
+        immediateTakes += line.find("the layer TAKES the 2D screen at frame=") != std::string::npos;
+        immediateHandbacks += line.find("the layer HANDS BACK the 2D screen at frame=") != std::string::npos;
+    }
+    check(drained && earlyWindows == 0,
+          "windows: the five-second boundary emits no summary; its counters remain for the ten-second window");
+    check(drained && immediateTakes == 2 && immediateHandbacks == 1,
+          "windows: both TAKES and the HANDS BACK event were written before the summary window closed");
+    Sleep(5000);
     cockpitFrame();                                  // this boundary writes the first window's line
     const unsigned w1Reissued = reissued, w1Taken = taken, w1Frames = worldFrames + panelFrames, w1World = worldFrames, w1Panel = panelFrames;
     const unsigned w1Wrong = wrong, w1DoorMissed = doorMissed, w1DoorWrong = doorWrong;
@@ -1555,7 +1577,7 @@ void testMapsTransitions(Rig& r) {
 
     // The cockpit alone, a whole window of it: the flight's windows after the boarding.
     for (int i = 0; i < 30; ++i) cockpitFrame();
-    Sleep(5100);
+    Sleep(10100);
     cockpitFrame();                                  // the second window's line
     const unsigned w2Frames = worldFrames + panelFrames, w2World = worldFrames, w2Panel = panelFrames, w2Wrong = wrong, w2DoorWrong = doorWrong;
 
@@ -1576,10 +1598,14 @@ void testMapsTransitions(Rig& r) {
     std::vector<std::string> win;
     for (const auto& l : lines)
         if (l.rfind("on foot maps sharp 5s:", 0) == 0) win.push_back(l);
-    check(win.size() == 2, "windows: the real layer wrote one line for each of the two 5 s windows");
+    check(win.size() == 2, "windows: the real layer wrote one line for each of the two ten-second windows");
     if (win.size() == 2) {
         const std::string& a = win[0];
         const std::string& b = win[1];
+        double aSeconds = 0.0, bSeconds = 0.0;
+        check(std::sscanf(a.c_str(), "on foot maps sharp 5s: key=on %lf s", &aSeconds) == 1 && aSeconds >= 10.0 &&
+                  std::sscanf(b.c_str(), "on foot maps sharp 5s: key=on %lf s", &bSeconds) == 1 && bSeconds >= 10.0,
+              "windows: both summaries retain the historical parser prefix and label their elapsed ten-second windows");
         // The first window: every composite counted once, taken or not; only the layer's own takes are takes; the door only for those.
         check(windowNumber(a, "screen-draws") == w1Reissued + w1Taken,
               "windows: the first window's screen-draws is every composite the decision saw (re-issued ones and taken ones): the layer counts what it was asked, not what it took");
@@ -1590,7 +1616,8 @@ void testMapsTransitions(Rig& r) {
               "windows: ... it counts the frames of the run and which gate each ended in");
         check(windowNumber(a, "holds") == 1 && windowNumber(a, "releases") == 2, "windows: ... one hold (the map closing) and two releases (the map opening, the boarding)");
         // The second window: the flight's own shape.
-        check(windowNumber(b, "world-frames") == 0 && windowNumber(b, "panel-frames") == w2Panel && w2World == 0 && w2Frames == w2Panel,
+        check(windowNumber(b, "frames") == w2Frames && windowNumber(b, "world-frames") == 0 && windowNumber(b, "panel-frames") == w2Panel &&
+                  w2World == 0 && w2Frames == w2Panel && windowNumber(b, "holds") == 0 && windowNumber(b, "releases") == 0,
               "windows: the cockpit window is whole-panel: panel frames and no world frame");
         check(windowNumber(b, "screen-takes") == 0 && windowNumber(b, "door-layer-only") == 0 && windowNumber(b, "door-not-empty") == 0,
               "windows: ... nothing taken, no eye through the layer-only door (what the first flight's windows said)");

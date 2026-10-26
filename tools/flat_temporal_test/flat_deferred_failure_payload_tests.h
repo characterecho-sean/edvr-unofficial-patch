@@ -109,7 +109,7 @@ inline unsigned run() {
         verifier.find("const uint64_t requestedApplied=s.phase.applied")<lambda&&verifier.find("requestedFrame=s.prefix.frame")<lambda&&
         verifier.find("const uint32_t requestedQ=s.prefix.sequence+1;")<lambda&&
         builder.find("witness.phaseX=requestedPhaseX;witness.phaseY=requestedPhaseY;witness.applied=requestedApplied;")!=std::string::npos&&
-        builder.find("witness.frame=requestedFrame;witness.q=requestedQ;")!=std::string::npos&&lambda<verifier.find("flatRepairDeferredMissingPhase("),
+        builder.find("witness.frame=requestedFrame;witness.q=requestedQ;")!=std::string::npos&&lambda<verifier.find("const bool missingPhase=repairable && flatRepairDeferredMissingPhase("),
         "verifier snapshots requested phase/count/event before repair and preparation and passes those values to failure report");
     for(const char* reason:{"deferred-inverse-preparation-failed","deferred-whole-preparation-failed","deferred-inverse-unproven"}) {
         const auto report=verifier.find(std::string("reportFailure(\"")+reason+"\")");

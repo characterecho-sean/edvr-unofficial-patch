@@ -127,8 +127,7 @@ bool eliteBindsLookupSlots(const char* element, unsigned flags,
 bool eliteBindsLookupSlotsDir(const wchar_t* dir, const char* element,
                               unsigned flags, EliteKeySlots* out);
 
-// EVERY keyboard binding in the active preset, for a clash check. Explorer Cam's own hotkey (hotkey.explorer_cam) is checked
-// against the player's live bindings at launch and on every rebind, and a key the game also acts on is named in the log. The
+// EVERY keyboard binding in the active preset, for a clash check (the AA comparison key's, aa_compare.cpp): a key the game also acts on is named in the log. The
 // maintained file (the newest candidate that can be read) answers alone, as for every other lookup here. `binding` is the EDVR
 // form the other lookups produce ("F5", "SHIFT+E"); a slot that is not on the keyboard, is empty, or is a key this build has no
 // name for is left out. Returns the number of uses written (at most `max`), or -1 when there is no preset or no readable file.

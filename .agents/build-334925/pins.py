@@ -442,7 +442,7 @@ def id_rva(literal):
 # is read from the source file, never typed in here.
 # ---------------------------------------------------------------------------
 OCULUS_H = "src/common/elite_oculus_profile.h"
-EXPLORER_H = "src/d3d11/explorer_cam_core.h"
+AVH_H = "src/d3d11/avatar_hooks_core.h"   # native on foot's avatar hooks (Explorer Cam's core until F98)
 UI_H = "src/d3d11/ui_sizing_math.h"
 KIN_CPP = "src/d3d11/kinematic_eval_hook.cpp"
 KIN_PROBE_H = "src/d3d11/kinematic_eval_probe.h"
@@ -501,15 +501,11 @@ B("oc-falseReturn", OCULUS_H, 428, "falseReturn", 0x4E47B1, 441, "LibOVR false r
 B("oc-nullModule", OCULUS_H, 429, "nullModule", 0x4E720E, 442, "null module path")
 B("oc-continuation", OCULUS_H, 452, "continuation", 0x4E71BC, 48, "SDK loader continuation")
 
-# --- explorer cam prologues -------------------------------------------------
-B("ec-freeCamera", EXPLORER_H, 53, "kFreeCameraPrologue", 0x1072A80, 38, "FreeCameraActivity update")
-B("ec-collision", EXPLORER_H, 61, "kCollisionPrologue", 0x1092240, 39, "collision step")
-B("ec-boxPush", EXPLORER_H, 69, "kBoxPushPrologue", 0x10902B0, 40, "commander box push")
-B("ec-cameraUi", EXPLORER_H, 76, "kCameraUiPrologue", 0x47CA180, 41, "VanityCameraUIActivity update")
-B("ec-controller", EXPLORER_H, 81, "kControllerPrologue", 0x2DF3F60, 42, "VesselCameraMountControl update")
-B("ec-avatarFade", EXPLORER_H, 87, "kAvatarFadePrologue", 0x3DD8D00, 43, "AvatarModelComponent fade")
-B("ec-findJoint", EXPLORER_H, 95, "kFindJointPrologue", 0xFDEC10, 93, "skeleton FindJoint")
-B("ec-zoomDof", EXPLORER_H, 103, "kZoomDofPrologue", 0x1079A90, 101, "zoom/DOF controls update")
+# --- native on foot's avatar hook prologues (avatar_hooks_core.h; F98 removed Explorer Cam's free camera, collision, box push,
+# camera UI and zoom/DOF hooks and their five pins) -------------------------------------------------------------------------
+B("ec-controller", AVH_H, 30, "kControllerPrologue", 0x2DF3F60, 20, "VesselCameraMountControl update")
+B("ec-avatarFade", AVH_H, 36, "kAvatarFadePrologue", 0x3DD8D00, 21, "AvatarModelComponent fade")
+B("ec-findJoint", AVH_H, 44, "kFindJointPrologue", 0xFDEC10, 42, "skeleton FindJoint")
 
 # --- UI panel scale (ui_sizing_math.h) --------------------------------------
 B("ui-shape-site0", UI_H, 174, "kUiPanelShape", 0x457323A, 185, "panel shape @ site 0")
@@ -567,8 +563,8 @@ B("ssaa-wrapper", SSAA_CPP, 37, "kWrapperBytes", 0x2864DA0, 31, "SSAA wrapper by
 B("vrt-request", VRT_CPP, 29, "kRequestBytes", 0x7E9EB0, 28, "window request bytes")
 B("vrt-copy", VRT_CPP, 36, "kCopyBytes", 0x281E710, 35, "window copy bytes")
 B("tfeb-consumer", TFEB_CPP, 43, "kConsumerBytes", 0x28457F0, 42, "transition flash consumer")
-B("eng-lookup", ENGV_CPP, 589, "kLookupPrologue", 0x3699CA0, 588, "engine lookup prologue (32)")
-B("eng-append", ENGV_CPP, 593, "kAppendBytes", 0x4315E45, 592, "engine append bytes")
+B("eng-lookup", ENGV_CPP, 574, "kLookupPrologue", 0x3699CA0, 573, "engine lookup prologue (32)")
+B("eng-append", ENGV_CPP, 578, "kAppendBytes", 0x4315E45, 577, "engine append bytes")
 B("fci-refresh", FCI_CPP, 107, "kRefreshPrologue", 0x592360, 99, "flat camera refresh prologue")
 B("fcpp-upload", FCPP_CPP, 50, "kUploadPrologue", 0x51B7A0, 49, "flat camera upload prologue")
 B("fsc-renderer", FSC_CPP, 25, "kPrologue", 0x2874350, 24, "flat stationary renderer prologue")

@@ -1036,7 +1036,7 @@ constexpr uint64_t kBayStillMs = 2000;   // the latch's movers window (the recor
 // The camera has left the held box by more than this: the seal is released (riding the elevator down, an external camera flying out).
 constexpr float kCameraLeaveM = 2.0f;
 // The camera counts in both directions over this many consecutive frames: it must be outside the held box for this long to release, and inside the
-// bay for this long to re-seal. Explorer Cam is no condition.
+// bay for this long to re-seal.
 constexpr uint32_t kCameraFrames = 10;
 // Built v14.24: a mechanism release (the Lift, a hatch) is not a launch unless the bay stays away. The latched records must be back within these of
 // their sealed poses for kPoseBackFrames consecutive frames (with r1 1) before the seal may come back without the r1 0 to 1 edge.
@@ -1286,10 +1286,10 @@ inline bool rigMayVeto(uint32_t slotEpoch, uint32_t epoch, bool bounded, uint8_t
     return slotEpoch == epoch && bounded && verdict == static_cast<uint8_t>(RigVerdict::kOutside);
 }
 
-// Review 7c: the view's centre is ready when the origin the station prefers is read, or the explorer cam's rows are (the only case the rows are
-// preferred). A missing eye pose alone is not a reason to resolve the view again.
-inline bool viewCentreReady(bool originOk, bool poseOk, bool explorerCam) noexcept {
-    return originOk || (poseOk && explorerCam);
+// Review 7c: the view's centre is ready when the origin the station prefers is read. A missing eye pose alone is not a reason to resolve
+// the view again.
+inline bool viewCentreReady(bool originOk) noexcept {
+    return originOk;
 }
 
 // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight): the rig association per rig, the mechanism pose, the cost summary, the log gate ----
@@ -1386,15 +1386,17 @@ inline uint64_t textKey(const char* s) noexcept {
 // FUN_144314C60 by them, and the identity check comes first.
 inline constexpr uint8_t kStorePrologue[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE, 0xFF};
 
-// The store hook's install decision (store_hook.cpp installOnce). The identity (the PE TimeDateStamp and SizeOfImage the other build-keyed hooks
-// check) is read first; a mismatch refuses whatever the prologue is. identityRead false: the PE header was unreadable. got null: the prologue was
-// unreadable. The caller passes the expected pair from the build's constants (explorer_cam_core.h's ecm::kExpectedTimestamp and ecm::kExpectedImageSize).
-enum class StoreInstall : uint8_t { kInstall = 0, kUnreadable, kWrongIdentity, kWrongPrologue };
-inline StoreInstall storeInstallDecision(bool identityRead, uint32_t stamp, uint32_t size, uint32_t wantStamp, uint32_t wantSize,
-                                         const uint8_t* got, const uint8_t* pin, size_t n) noexcept {
-    if (!identityRead || got == nullptr || pin == nullptr) return StoreInstall::kUnreadable;
-    if (stamp != wantStamp || size != wantSize) return StoreInstall::kWrongIdentity;
-    if (std::memcmp(got, pin, n) != 0) return StoreInstall::kWrongPrologue;
+// The store hook's install decision (store_hook.cpp installOnce), issue 124's pilot of the signature resolver (src\common\game_build.h).
+// identityRead false: the PE header was unreadable. storeRva: where the store is in the running build -- kStoreRva itself on build 334925,
+// the address the signature resolver found on an unknown build, 0 when it found none (kNotFound: the hook stands down as it did on any
+// other build before). got null: the prologue was unreadable. pinMatches: the sixteen bytes read there are the pin (gamePinMatches: an
+// exact compare on build 334925; on an unknown build the bytes the signature masks are skipped and every other byte must match).
+enum class StoreInstall : uint8_t { kInstall = 0, kUnreadable, kNotFound, kWrongPrologue };
+inline StoreInstall storeInstallDecision(bool identityRead, uintptr_t storeRva, const uint8_t* got, bool pinMatches) noexcept {
+    if (!identityRead) return StoreInstall::kUnreadable;
+    if (storeRva == 0) return StoreInstall::kNotFound;
+    if (got == nullptr) return StoreInstall::kUnreadable;
+    if (!pinMatches) return StoreInstall::kWrongPrologue;
     return StoreInstall::kInstall;
 }
 

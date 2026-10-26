@@ -220,6 +220,28 @@ inline const char* flatUiMapTemporalName(uint32_t focus) {
 // pairs, and no scanner draw has been identified as one of them (its log windows name no such pair).
 inline bool flatUiMapFamiliesOpen(bool known, uint32_t focus) { return known && (focus == 6 || focus == 7 || focus == 8); }
 
+// THE ON-FOOT MAPS (Steam log edvr_gfx_20261024_210032, census 2, 2026-10-24): on foot, Status.json carries no GuiFocus at all
+// (journal: "GuiFocus present=0" for the whole stretch), so the Galaxy Map and the System Map drew with temporal AA on and the map
+// families unasked, and ghosted. The ship's maps, which do report GuiFocus, did not. The maps' own GUI canvas composite is the
+// same pair on foot (80 draws in the two census frames), and no flight census without a map has it. While GuiFocus is absent, a
+// frame is a map frame when that pair was drawn into the HDR target within the last few frames. GuiFocus, when present, is
+// authoritative and this is never asked. The answer is the Galaxy Map's number: the three maps behave alike (temporal AA off, the
+// families open), and the canvas does not say which.
+constexpr uint32_t kFlatUiMapCanvasHoldFrames = 8;   // frames the answer outlasts the last canvas draw (a frame that skips it)
+constexpr uint32_t kFlatUiMapCanvasInferredFocus = 6;
+inline bool flatUiMapCanvasPair(uint64_t vs, uint64_t ps) { return vs == kFlatUiMapCanvasVs && ps == kFlatUiMapCanvasPs; }
+struct FlatUiMapCanvasLatch {
+    bool seen = false;
+    uint64_t lastFrame = 0;
+    uint64_t draws = 0;       // canvas draws noted, for the 5 s line
+    void note(uint64_t frame) { seen = true; lastFrame = frame; ++draws; }
+    // The frame about to run: a map frame by its canvas when the last canvas draw was this recent. A draw noted in the frame
+    // that just ended counts (distance 1); one noted for a later frame than asked about never does.
+    bool open(uint64_t nextFrame) const {
+        return seen && nextFrame > lastFrame && nextFrame - lastFrame <= kFlatUiMapCanvasHoldFrames;
+    }
+};
+
 // The map line's temporal-AA counts (2026-10-10), as pure state so the rig pins them. A frame is `temporalOff` when the
 // mechanism is armed at the frame boundary; `jitterZeroed` when that frame would otherwise have jittered. A frame whose copy
 // ran the spatial recovery counts `spatial`, one whose copy refused it counts `spatialRefused`, and one that armed the

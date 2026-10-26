@@ -23,6 +23,7 @@
 // as they always were, at the wall clock plus the prediction.
 #include "exe_module.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,12 @@
 namespace edvr::openxr {
 
 // A prediction this close to zero is a request for "now". The bound is exclusive: exactly 5 ms is a prediction.
+// F40/F42 (live, fix.now_pose): the mode of Elite's "now" answer. next (0): one display period past the latest frame's display time, as
+// before. render (1): at that display time itself, the WaitGetPoses latch's instant. render_locked (2): the latched render pose of the
+// frame, the same sample the game array and GetLastPoses carry (pose_cache.h's frame slot, locateHeadFor). Set from the d3d11 half
+// through the native frame output (version 9).
+inline constexpr uint32_t kNowPoseNext = 0, kNowPoseRender = 1, kNowPoseRenderLocked = 2;
+inline std::atomic<uint32_t> g_nowPoseMode{kNowPoseNext};
 constexpr float kNowPredictionLimitSeconds = 0.005f;
 
 inline bool isNowRequest(float predictionSeconds) {

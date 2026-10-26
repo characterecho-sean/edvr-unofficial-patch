@@ -165,7 +165,7 @@ void hotkeySetNonKeyboardReader(HotkeyHeldFn fn) { g_nonKeyboardReader = fn; }
 
 // Every live Hotkey, so a suspension that lifts can prime them all (hotkey.h). A fixed array of
 // pointers and a lock, both constant-initialised: a Hotkey in another file's static storage
-// (Explorer Cam's F5) registers itself from its constructor whatever the order the files
+// (any file-scope Hotkey) registers itself from its constructor whatever the order the files
 // initialise in, and the registry needs nothing from the CRT to be ready.
 constexpr int kLiveMax = 128;
 static Hotkey*  g_live[kLiveMax];

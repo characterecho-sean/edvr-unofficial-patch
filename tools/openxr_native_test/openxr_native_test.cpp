@@ -23,7 +23,9 @@
 #include "seat_order_cases.h"
 #include "pose_cache_cases.h"
 #include "pose_cache_invalidation_cases.h"
+#include "position_recentre_cases.h"   // F123: the runtime's position-only recentre (the origin under the head, its yaw kept exactly, no reset, the stored seat untouched)
 #include "pose_cache_lock_cases.h"
+#include "rot_calibrate_cases.h"   // F61 (TEMPORARY): the rotation calibration's pitch overlay
 #include "flat_head_cache_cases.h"
 #include <cstdio>
 #include <cstring>
@@ -700,8 +702,10 @@ int selfTest() {
   edvr::openxr::test::runSeatOrderCases(check);
   edvr::openxr::test::runPoseCacheCases(check);
   edvr::openxr::test::runPoseCacheInvalidationCases(check);
+  edvr::openxr::test::runPositionRecentreCases(check);
   edvr::openxr::test::runFlatHeadCacheCases(check);
   edvr::openxr::test::runPoseCacheLockCases(check);
+  edvr::openxr::test::runRotCalibrateCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");

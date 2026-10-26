@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The turn of a region between consecutive eye-run frames, by a rigid fit:
-python eye_run_fit.py eye_HHMMSS_C00.bmp ... --centre X Y --annulus R0 R1 [--blur 2.0] [--label hub]
+python eye_run_fit.py eye_<stamp>_C00.bmp ... --centre X Y --annulus R0 R1 [--blur 2.0] [--label hub]
 
 Each frame is fitted to the one before it over the annulus (R0..R1 about the centre) with three
 numbers -- a shift (dx, dy) and a turn about the centre -- by Gauss-Newton on the blurred

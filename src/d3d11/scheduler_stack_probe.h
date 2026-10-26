@@ -13,9 +13,9 @@
 // (the caller above the stub is then the scheduler); a named .text VA is a
 // scheduler candidate directly. READ-ONLY: no engine memory is written,
 // nothing is allocated on the capture path (fixed arrays only), and the
-// whole probe no-ops when the executable's identity (PE timestamp + image
-// size + target prologues) does not match the hash-verified build
-// (SHA-256 ed5a8f8c...e264b63).
+// whole probe no-ops unless both hooked addresses are found (build 334925's
+// by its identity, another build's by signature, src\common\game_build.h)
+// and their prologues match (SHA-256 of build 334925 ed5a8f8c...e264b63).
 //
 // Targets (index: RVA, role):
 //   0: 0x43245A0 worker entry (UpdateRenderDataJob)   -- observed through
@@ -27,6 +27,7 @@
 //   3: 0x36A3BB0 reset+repopulate
 // Targets 2/3 carry this probe's own CodeHooks (scheduler_stack_hook.cpp).
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <sstream>
@@ -35,8 +36,6 @@ namespace edvr {
 
 class SchedulerStackProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1792704584u;
-    static constexpr uint32_t kExpectedImageSize=104906752u;
     static constexpr uint32_t kTargetCount=4u;
     static constexpr uint32_t kStackCap=24u;   // return addresses per signature
     static constexpr uint32_t kSigCap=64u;     // distinct signatures per target
@@ -45,6 +44,8 @@ public:
     // Return addresses accepted in [imageBase+kRangeLo, imageBase+kRangeHi];
     // at the exe's preferred base 0x140000000 this is [0x140001000,
     // 0x144DB6000] -- all of .text plus the callback tables' neighbourhood.
+    // That is build 334925's bound; the hook sets another build's from its own
+    // PE header (setScanHi, executableEndRva).
     static constexpr uintptr_t kRangeLo=0x1000u;
     static constexpr uintptr_t kRangeHi=0x4DB6000u;
     // The two RVAs this probe hooks itself. Prologues verified against the
@@ -122,10 +123,22 @@ public:
 
     static const char* targetName(uint32_t target) noexcept;
 
+    // The scan's upper bound, an RVA (the hook sets it before the probe goes
+    // active; it defaults to kRangeHi, build 334925's). Another build's
+    // bound is executableEndRva() of its own PE header.
+    void setScanHi(uintptr_t hiRva) noexcept{rangeHi_=hiRva;}
+    // Pure parse of the PE headers in `headers` (the image's first page):
+    // the end RVA of the executable section that holds the code (the one
+    // containing BaseOfCode), rounded up to the section alignment -- for
+    // build 334925, .text 0x1000 + 0x4DB498E rounds to 0x4DB6000, which is
+    // kRangeHi. 0 when the headers are not a usable AMD64 PE image.
+    static uintptr_t executableEndRva(const uint8_t* headers,size_t len) noexcept;
+
 private:
     mutable std::mutex mutex_;
     std::atomic<bool> active_{false};
     uintptr_t imageBase_=0;
+    uintptr_t rangeHi_=kRangeHi;
     HookStatus hookStatus_=HookStatus::NotRun;
     TargetStat targets_[kTargetCount];
     uint32_t frame_=0;

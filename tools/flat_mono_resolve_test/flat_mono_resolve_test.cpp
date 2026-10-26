@@ -89,7 +89,7 @@ const ShardUnit kUnits[]={
     {"sdkForeground:shipped",3},{"sdkForeground:control",3},
     {"sdkForeground:mutant1",4},{"sdkForeground:mutant2",4},{"sdkForeground:mutant3",4},{"sdkForeground:mutant4",5},
     {"sdkForeground:mutant5",5},{"sdkForeground:mutant6",5},{"sdkForeground:mutant7",5},{"sdkForeground:mutant8",5},
-    {"mapEasuGpuTests",4},{"mapSmaaLookupLeakTests",3},{"sdkForegroundSupersampleGpuTests",5},
+    {"mapEasuGpuTests",4},{"mapSmaaLookupLeakTests",3},{"uiLayerSmaaGpuTests",3},{"sdkForegroundSupersampleGpuTests",5},
     {"upscalerSlotGpuTests",2},{"firstPersonGpuTests",1},{"firstPersonPhaseGpuTests",1},
     {"refusalGpuTests",2},{"skinGpuTests",5},{"copyRefusalViewGpuTests",2},{"copyForegroundGpuTests",2},
     {"steadyDepthGpuTests",4},{"taaHistoryDepthGpuTests",5},{"contextIsolationGpuTests",2},
@@ -289,6 +289,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_map_easu_gpu_tests.h"   // the map temporal-off frames' EASU, against the bilinear tap (2026-10-10)
 #include "flat_map_smaa_lookup_gpu_tests.h"   // the map SMAA lookup textures: no leak after a failed view, retry, reset (review 0.19.1 finding 2)
+#include "flat_ui_layer_smaa_gpu_tests.h"   // the HUD layer's edge smoothing: the production SMAA passes on a layer in its own convention (2026-10-24)
 #include "flat_sdk_foreground_gpu_tests.h"
 #include "flat_copy_refusal_view_gpu_tests.h"
 #include "flat_copy_foreground_gpu_tests.h"
@@ -349,6 +350,7 @@ int main(int argc,char** argv) {
         timedSuite("sdkForegroundGpuTests",[&]{return sdkForegroundGpuTests(device.Get(),context.Get());});   // gated case by case inside (the "sdkForeground:*" units)
         if(shardRuns("mapEasuGpuTests"))timedSuite("mapEasuGpuTests",[&]{return mapEasuGpuTests(device.Get(),context.Get());});
         if(shardRuns("mapSmaaLookupLeakTests"))timedSuite("mapSmaaLookupLeakTests",[&]{return mapSmaaLookupLeakTests(device.Get(),context.Get());});
+        if(shardRuns("uiLayerSmaaGpuTests"))timedSuite("uiLayerSmaaGpuTests",[&]{return uiLayerSmaaGpuTests(device.Get(),context.Get());});
         // The same SDK foreground contract above the output (the supersampled on-foot frame), and the untrusted-coverage clause's other two sides.
         if(shardRuns("sdkForegroundSupersampleGpuTests"))timedSuite("sdkForegroundSupersampleGpuTests",[&]{return sdkForegroundSupersampleGpuTests(device.Get(),context.Get());});
         // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term

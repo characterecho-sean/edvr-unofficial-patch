@@ -14,6 +14,43 @@ namespace {
 // bracket a short flight, rare enough that
 // four target lines per tick stay bounded.
 constexpr uint64_t kReportMs=20000;
+
+// A little-endian read of `n` (<=4) bytes at `at`, false when it runs past `len`.
+bool readLe(const uint8_t* h,size_t len,size_t at,size_t n,uint32_t* v) noexcept {
+    if(at>len||n>len-at)return false;
+    uint32_t r=0;
+    for(size_t i=0;i<n;++i)r|=uint32_t(h[at+i])<<(8*i);
+    *v=r;
+    return true;
+}
+}
+
+uintptr_t SchedulerStackProbe::executableEndRva(const uint8_t* h,size_t len) noexcept {
+    uint32_t mz=0,peOff=0,sig=0,machine=0,count=0,optSize=0,magic=0;
+    uint32_t baseOfCode=0,align=0,imageSize=0;
+    if(!h||!readLe(h,len,0,2,&mz)||mz!=0x5A4Du)return 0;
+    if(!readLe(h,len,0x3C,4,&peOff)||peOff>0x1000u)return 0;
+    const size_t nt=peOff;
+    if(!readLe(h,len,nt,4,&sig)||sig!=0x4550u)return 0;
+    if(!readLe(h,len,nt+4,2,&machine)||machine!=0x8664u)return 0;
+    if(!readLe(h,len,nt+6,2,&count)||!readLe(h,len,nt+20,2,&optSize))return 0;
+    const size_t opt=nt+24;
+    if(!readLe(h,len,opt,2,&magic)||magic!=0x20Bu)return 0;
+    if(!readLe(h,len,opt+20,4,&baseOfCode)||!readLe(h,len,opt+32,4,&align)||
+       !readLe(h,len,opt+56,4,&imageSize))return 0;
+    if(align==0||(align&(align-1))!=0||count==0||count>96)return 0;
+    const size_t table=opt+optSize;
+    for(uint32_t i=0;i<count;++i) {
+        const size_t at=table+size_t(i)*40;
+        uint32_t vsize=0,va=0,chars=0;
+        if(!readLe(h,len,at+8,4,&vsize)||!readLe(h,len,at+12,4,&va)||
+           !readLe(h,len,at+36,4,&chars))return 0;
+        // The executable section that holds the code start (.text).
+        if((chars&0x20000000u)==0||baseOfCode<va||baseOfCode>=uint64_t(va)+vsize)continue;
+        const uint64_t end=(uint64_t(va)+vsize+align-1)&~uint64_t(align-1);
+        return end>baseOfCode&&end<=imageSize?uintptr_t(end):0;
+    }
+    return 0;
 }
 
 const char* SchedulerStackProbe::targetName(uint32_t target) noexcept {
@@ -125,7 +162,7 @@ void SchedulerStackProbe::noteEntry(uint32_t target,uintptr_t entryRsp) noexcept
     if(target>=kTargetCount||!entryRsp)return;
     uint64_t stack[kStackCap];
     bool faulted=false;
-    const uint32_t n=captureStack(entryRsp,imageBase_+kRangeLo,imageBase_+kRangeHi,
+    const uint32_t n=captureStack(entryRsp,imageBase_+kRangeLo,imageBase_+rangeHi_,
                                   stack,kStackCap,&faulted);
     targets_[target].calls.fetch_add(1,std::memory_order_relaxed);
     if(faulted)targets_[target].faults.fetch_add(1,std::memory_order_relaxed);
@@ -290,8 +327,8 @@ void SchedulerStackProbe::selfTestPopulateForJson() noexcept {
         a.count=900+i*10+1;
         a.depth=3;
         a.stack[0]=0x1462B4A0ull+uint64_t(i);
-        a.stack[1]=0x1443245A0ull+uint64_t(i);
-        a.stack[2]=0x1436A1000ull+uint64_t(i);
+        a.stack[1]=0x1A1A1A1A0ull+uint64_t(i);
+        a.stack[2]=0x1B1B1B1B0ull+uint64_t(i);
         SigEntry& b=t.sigs[1];
         b.fnv=0x2222222200000000ull+uint64_t(i)*0x100000000ull+0xBBBBull;
         b.count=80+i*10+2;

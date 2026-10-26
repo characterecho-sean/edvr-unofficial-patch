@@ -67,6 +67,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // image when the pass declined). The door is noted first, for every eye,
   // so the next frame's draws know it is there to composite them.
   edvr::uiLayerDoorSeen(seq,eye,source);
+  edvr::temporalPassMarkerPre(seq,eye,source,region,flipU,flipV);   // F59: the waypoint dump's pre-composite crop (armed only; copies)
   // The layer's rectangle: this input region (rounded, unflipped) over the
   // source's size -- the same whether the frame is the source or the
   // sharpened copy of that region.

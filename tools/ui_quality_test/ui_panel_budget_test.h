@@ -784,7 +784,7 @@ std::vector<Pin> pins(const std::string& scale, const std::string& surfaces, con
                                    inOrder(frame, {"if(ssMoved){", "g_settle=kSettleFrames;", "}else{"}) &&
                                    has(frame, "g_pubReady.store(true,std::memory_order_release);"),
                    "a move of the Supersampling is written past the settle, and the plan is published for the setter thunk"});
-    out.push_back({"hook-checks", has(install, "std::memcmp(got,want[i],len[i])!=0") && has(install, "value!=reinterpret_cast<uint64_t>(fn[i])") &&
+    out.push_back({"hook-checks", has(install, "!gamePinMatches(pinRva[i],got,want[i],len[i])") && has(install, "value!=reinterpret_cast<uint64_t>(fn[i])") &&
                                       inOrder(apply, {"g_patch.store(kApplied,std::memory_order_release);", "installLiveHooks(base);"}),
                    "the two slots are hooked only after the build is checked, and only when the functions' bytes and the slots' values are 334925's"});
     out.push_back({"thunk-forwards", inOrder(setterThunk, {"guardedRun(setterBeforeThunk,self,x);", "orig(self,x);", "guardedRun(setterAfterThunk,self,x);"}) &&
@@ -855,7 +855,7 @@ void testWiring() {
         {"fallback", 0, "uiPickSupersampling(read, cur, lo, hi, fxcfg)", "UiSsPick{cur, UiSsSource::kLive, UiSsWhy::kNone}"},
         {"fallback", 0, "readLiveSupersampling(&cur, &lo, &hi)", "UiSsRead::kNone"},
         {"ss-moved", 0, "g_settle = kSettleFrames;", "g_settle = 0;"},
-        {"hook-checks", 0, "std::memcmp(got, want[i], len[i]) != 0", "false"},
+        {"hook-checks", 0, "!gamePinMatches(pinRva[i], got, want[i], len[i])", "false"},
         {"thunk-forwards", 0, "if (orig) orig(self, x);", ""},
         {"shutdown-restores", 0, "writeSlot(g_slotAt[i], g_slotOrig[i]);", ""},
         {"net-wired", 3, "if (shrunk) desc = &netDesc;", ""},

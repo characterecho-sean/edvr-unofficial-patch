@@ -173,6 +173,74 @@ bool sourceGatesSharpenRow(const std::string& menuCpp) {
            menuCpp.find("if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {") != std::string::npos;
 }
 
+// The body of the function `head` opens in menu.cpp (up to the first closing brace at the start of a line); empty when it is not there.
+std::string functionBody(const std::string& menuCpp, const char* head) {
+    const size_t def = menuCpp.find(head);
+    if (def == std::string::npos) return std::string();
+    const size_t defEnd = menuCpp.find("\n}", def);
+    return defEnd == std::string::npos ? std::string() : menuCpp.substr(def, defEnd - def);
+}
+
+// The HUD Anti-Aliasing row's dimming (2026-10-24), the same shape: one question (hudAntiAliasingRowDim, whose truth table is checked below), asked in the profile's
+// own terms -- fix.ui_quality read as the layer reads it, the flat anti-aliasing as the Sharp weapons row's flat branch reads it (the row is flat only) -- from the
+// row's drawing and from a step. (A switch is never typed, so there is no third site.) The hint and the refused step name the cause that applies.
+bool sourceGatesHudAaRow(const std::string& menuCpp) {
+    const std::string quality = functionBody(menuCpp, "bool hudAntiAliasingUiQualityOn() {");
+    const std::string mode = functionBody(menuCpp, "bool hudAntiAliasingModeOn() {");
+    const std::string disabled = functionBody(menuCpp, "bool hudAntiAliasingRowDisabled() {");
+    const std::string hint = functionBody(menuCpp, "const char* hudAntiAliasingHint() {");
+    const std::string refusal = functionBody(menuCpp, "const char* hudAntiAliasingRefusal() {");
+    return quality.find("getString(\"fix.ui_quality\", \"100\")") != std::string::npos &&
+           quality.find("uiQualityParse(quality.c_str(), nullptr) > 0.0f") != std::string::npos &&
+           mode.find("temporalModeEnabledFor(Config::get().requestedTemporalMode(), true)") != std::string::npos &&
+           disabled.find("hudAntiAliasingRowDim(hudAntiAliasingUiQualityOn(), hudAntiAliasingModeOn())") != std::string::npos &&
+           hint.find("hudAntiAliasingUiQualityOn() ? \"Needs anti-aliasing: turn it on to use this.\" : \"Needs UI quality: turn it on to use this.\"") != std::string::npos &&
+           refusal.find("hudAntiAliasingUiQualityOn() ? \"HUD Anti-Aliasing is inactive: turn anti-aliasing on first.\"") != std::string::npos &&
+           refusal.find("\"HUD Anti-Aliasing is inactive: turn UI quality on above first.\"") != std::string::npos &&
+           menuCpp.find("(hudAaRow && hudAntiAliasingRowDisabled())") != std::string::npos &&
+           menuCpp.find("snprintf(c.hint, sizeof(c.hint), \"%s\", hudAntiAliasingHint());") != std::string::npos &&
+           menuCpp.find("if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {") != std::string::npos &&
+           menuCpp.find("g_s.lastWrite = hudAntiAliasingRefusal();") != std::string::npos;
+}
+
+// The flat Performance tab is built from kFlatPageRows whatever page a row's `menu` token names (the page token is what keeps a flat-only row off VR's page), and
+// VR's Performance page is the rows whose token is `menu performance`: the two ends of the HUD Anti-Aliasing row's placement.
+bool sourceFlatTabIgnoresPageToken(const std::string& menuCpp) {
+    const size_t at = menuCpp.find("p.name = kFlatTabNames[0];");
+    if (at == std::string::npos) return false;
+    const size_t end = menuCpp.find("firstSelectable(p);", at);
+    if (end == std::string::npos) return false;
+    const std::string region = menuCpp.substr(at, end - at);
+    return region.find("flatPageHasRow(") != std::string::npos && region.find("d.page") == std::string::npos;
+}
+
+bool sourceVrPerformancePageIsTheToken(const std::string& menuCpp) {
+    const size_t add = menuCpp.find("void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {");
+    if (add == std::string::npos) return false;
+    const size_t addEnd = menuCpp.find("\n}", add);
+    const std::string addBody = addEnd == std::string::npos ? std::string() : menuCpp.substr(add, addEnd - add);
+    if (addBody.find("if (page && _stricmp(d.page, page) != 0) continue;") == std::string::npos) return false;
+    const size_t name = menuCpp.find("p.name = \"Performance\";");
+    if (name == std::string::npos) return false;
+    const size_t end = menuCpp.find("firstSelectable(p);", name);
+    if (end == std::string::npos) return false;
+    return menuCpp.substr(name, end - name).find("addSettingRows(p, MenuTier::Fix, \"performance\", false);") != std::string::npos;
+}
+
+// The HUD Anti-Aliasing row of the generated schema is the flat Performance tab's own: a Fix-tier on/off choice shipped off and live, on the page
+// `flat_performance` -- not `performance`, the page VR's menu builds -- once, directly under UI quality's row.
+bool schemaHudRowIsFlatOnly(const std::string& schema) {
+    const std::string row = schemaRow(schema, "fix", "hud_antialiasing");
+    if (row.empty()) return false;
+    const size_t quality = schema.find("{\"fix\", \"ui_quality\",");
+    const size_t hud = schema.find("{\"fix\", \"hud_antialiasing\",");
+    if (quality == std::string::npos || hud == std::string::npos || schema.find("{\"fix\", \"hud_antialiasing\",", hud + 1) != std::string::npos) return false;
+    const size_t afterQuality = schema.find("\n    {\"", quality + 1);
+    return afterQuality != std::string::npos && afterQuality + 5 == hud && row.find("\"HUD Anti-Aliasing\"") != std::string::npos &&
+           row.find("MenuKind::Choice, \"off\", \"\", \"\", 0, \"on|off\", false, false, 1,") != std::string::npos &&
+           row.find("MenuTier::Fix, \"flat_performance\",") != std::string::npos && row.find("MenuTier::Fix, \"performance\",") == std::string::npos;
+}
+
 // The one line that hands the resolve's output to the sharpening: flat_runtime.cpp, where the
 // game's output copy's first input is swapped for it. The rig cannot run the flat runtime, and
 // without this line the wrapper is never reached (a flat log would say so after 30 s, in the
@@ -195,8 +263,8 @@ void panelTable(const std::string& root, const std::string& gen) {
     using namespace edvr;
     check(kFlatPageRowCount >= 4 && flatPageHasRow("fix", "temporal_aa") &&
               flatPageHasRow("fix", "temporal_aa_model") && flatPageHasRow("fix", "render_sharpness") &&
-              flatPageHasRow("fix", "ui_quality"),
-          "the flat page has the mode, the DLSS preset, the sharpening and the UI quality");
+              flatPageHasRow("fix", "ui_quality") && flatPageHasRow("fix", "hud_antialiasing"),
+          "the flat page has the mode, the DLSS preset, the sharpening, the UI quality and the HUD Anti-Aliasing");
     check(!flatPageHasRow("fix", "black_void") && !flatPageHasRow("fix", "panel_distance"),
           "no unrelated fix is a row of the flat page");
 
@@ -238,6 +306,13 @@ void panelTable(const std::string& root, const std::string& gen) {
     const FlatPageRow* m3 = flatPageFirstRefused(lacksUiQuality);
     check(m3 && std::strcmp(m3->key, "ui_quality") == 0,
           "control: a gate without fix.ui_quality is caught, by name");
+    const auto lacksHudAa = [](const char* dotted) {
+        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "fix.hud_antialiasing") != 0;
+    };
+    const FlatPageRow* m3b = flatPageFirstRefused(lacksHudAa);
+    check(m3b && std::strcmp(m3b->key, "hud_antialiasing") == 0,
+          "control: a gate without fix.hud_antialiasing is caught, by name (unlisted, the row could never turn the smoothing on)");
+    check(runtimeProfileAllowsKey("fix.hud_antialiasing"), "the flat gate reads fix.hud_antialiasing");
     const auto lacksIntro = [](const char* dotted) {
         return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "visual.intro_video") != 0;
     };
@@ -316,6 +391,44 @@ void panelTable(const std::string& root, const std::string& gen) {
     check(!noEdit.empty() && !sourceGatesSharpenRow(noEdit), "control: a dimmed row that still takes typing is caught");
     check(!vrDims.empty() && !sourceGatesSharpenRow(vrDims), "control: a row asking about a profile other than the running one is caught");
 
+    // The HUD Anti-Aliasing row's dimming (UI quality off, or the flat anti-aliasing off) is asked in both places, in the layer's own reading of fix.ui_quality and
+    // the Sharp weapons row's flat reading of the mode, and the hint and the refused step name the cause that applies.
+    check(sourceGatesHudAaRow(menuCpp),
+          "menu.cpp dims the HUD Anti-Aliasing row and refuses its steps through hudAntiAliasingRowDim, reading fix.ui_quality as the layer does and the flat mode as the weapons row does");
+    const std::string hudNoDraw = mutated("(hudAaRow && hudAntiAliasingRowDisabled())", "false");
+    const std::string hudNoStep = mutated("if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {", "if (false) {");
+    const std::string hudInverted = mutated("uiQualityParse(quality.c_str(), nullptr) > 0.0f", "uiQualityParse(quality.c_str(), nullptr) <= 0.0f");
+    const std::string hudOtherKey = mutated("getString(\"fix.ui_quality\", \"100\")", "getString(\"fix.temporal_aa\", \"100\")");
+    const std::string hudModeIgnored = mutated("hudAntiAliasingRowDim(hudAntiAliasingUiQualityOn(), hudAntiAliasingModeOn())", "hudAntiAliasingRowDim(hudAntiAliasingUiQualityOn(), true)");
+    const std::string hudModeVrRead = mutated("temporalModeEnabledFor(Config::get().requestedTemporalMode(), true)",
+                                              "temporalModeEnabledFor(Config::get().getString(\"fix.temporal_aa\", \"off\"), true)");
+    const std::string hudHintOneCause = mutated("hudAntiAliasingUiQualityOn() ? \"Needs anti-aliasing: turn it on to use this.\" : \"Needs UI quality: turn it on to use this.\"",
+                                                "\"Needs UI quality: turn it on to use this.\"");
+    const std::string hudRefusalOneCause = mutated("hudAntiAliasingUiQualityOn() ? \"HUD Anti-Aliasing is inactive: turn anti-aliasing on first.\"",
+                                                   "true ? \"HUD Anti-Aliasing is inactive: turn anti-aliasing on first.\"");
+    check(!hudNoDraw.empty() && !sourceGatesHudAaRow(hudNoDraw), "control: a HUD Anti-Aliasing row that never dims when drawn is caught");
+    check(!hudNoStep.empty() && !sourceGatesHudAaRow(hudNoStep), "control: a dimmed HUD Anti-Aliasing row that still takes a step is caught");
+    check(!hudInverted.empty() && !sourceGatesHudAaRow(hudInverted), "control: a row that dims with UI quality on is caught");
+    check(!hudOtherKey.empty() && !sourceGatesHudAaRow(hudOtherKey), "control: a row that reads some other key for UI quality is caught");
+    check(!hudModeIgnored.empty() && !sourceGatesHudAaRow(hudModeIgnored), "control: a row that does not dim with the anti-aliasing off is caught");
+    check(!hudModeVrRead.empty() && !sourceGatesHudAaRow(hudModeVrRead),
+          "control: a row that reads the mode through the flat gate's fix.temporal_aa (it reads off there) is caught");
+    check(!hudHintOneCause.empty() && !sourceGatesHudAaRow(hudHintOneCause), "control: a hint that always blames UI quality is caught");
+    check(!hudRefusalOneCause.empty() && !sourceGatesHudAaRow(hudRefusalOneCause), "control: a refused step that does not name the anti-aliasing is caught");
+
+    // THE FLAT-ONLY PLACEMENT (2026-10-24). The flat Performance tab ignores the page token; VR's Performance page is exactly the rows whose token is `menu performance`.
+    check(sourceFlatTabIgnoresPageToken(menuCpp), "menu.cpp builds the flat Performance tab from flatPageHasRow alone, whatever page a row's token names");
+    check(sourceVrPerformancePageIsTheToken(menuCpp), "menu.cpp builds VR's Performance page from the rows whose page is `performance`");
+    {
+        const std::string byPage = mutated("if (!flatPageHasRow(d.section, d.key)) continue;",
+                                           "if (!flatPageHasRow(d.section, d.key) || _stricmp(d.page, \"performance\") != 0) continue;");
+        check(!byPage.empty() && !sourceFlatTabIgnoresPageToken(byPage), "control: a flat tab that also asks the page token (it would drop a flat_performance row) is caught");
+        const std::string allPages = mutated("addSettingRows(p, MenuTier::Fix, \"performance\", false);", "addSettingRows(p, MenuTier::Fix, nullptr, false);");
+        check(!allPages.empty() && !sourceVrPerformancePageIsTheToken(allPages), "control: a VR Performance page that takes every page's rows is caught");
+        const std::string noFilter = mutated("if (page && _stricmp(d.page, page) != 0) continue;", "");
+        check(!noFilter.empty() && !sourceVrPerformancePageIsTheToken(noFilter), "control: an addSettingRows that does not filter by page is caught");
+    }
+
     // THE TABS (Debug 2026-10-16, Visual 2026-10-22). Exactly three, Performance, Visual, Debug, Debug last; the Performance rows are the ones the
     // panel always had bar the Intro movie, in their order; the Visual rows are the two [visual] options; the Debug rows are the two toggles, each
     // read through the gate and built from the table.
@@ -323,13 +436,12 @@ void panelTable(const std::string& root, const std::string& gen) {
               std::strcmp(kFlatTabNames[kFlatTabCount - 1], "Debug") == 0,
           "the flat panel has exactly three tabs: Performance, Visual, then Debug last");
     {
-        const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"},
-                                        {"fix", "render_sharpness"}, {"fix", "ui_quality"}, {"fix", "sharp_weapons"}, {"fix", "optimized_stations"}};
-        bool same = kFlatPageRowCount == 6;
-        for (size_t i = 0; same && i < 6; ++i)
+        const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"}, {"fix", "render_sharpness"}, {"fix", "ui_quality"},
+                                        {"fix", "hud_antialiasing"}, {"fix", "sharp_weapons"}, {"fix", "optimized_stations"}};
+        bool same = kFlatPageRowCount == 7;
+        for (size_t i = 0; same && i < 7; ++i)
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
-        check(same, "the Performance tab keeps the flat page's six rows in their order (Sharp weapons directly under UI quality)");
-    }
+        check(same, "the Performance tab has the flat page's seven rows in their order (HUD Anti-Aliasing directly under UI quality, Sharp weapons under it)");    }
     check(kFlatVisualRowCount == 2 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
               std::strcmp(kFlatVisualRows[1].section, "visual") == 0 && std::strcmp(kFlatVisualRows[1].key, "star_glow") == 0 &&
               flatVisualHasRow("visual", "star_glow") && !flatVisualHasRow("fix", "temporal_aa"),
@@ -417,6 +529,24 @@ void panelTable(const std::string& root, const std::string& gen) {
               "each Visual row appears once, Intro movie before Star glow");
         check(!schemaHasRow(schema, "fix", "intro_video"), "control: the retired [fix] name has no row");
     }
+    // The HUD Anti-Aliasing row as generated (2026-10-24): on the page `flat_performance`, which VR's menu builds none of, so it is on the flat Performance tab
+    // (kFlatPageRows lists it; the tab ignores the page token) and not on VR's Performance page (the rows whose page is `performance`, pinned above).
+    check(schemaHudRowIsFlatOnly(schema), "the generated HUD Anti-Aliasing row is a Fix-tier on/off choice, shipped off, live, on the flat-only page 'flat_performance', directly under UI quality");
+    check(flatPageHasRow("fix", "hud_antialiasing") && schemaRow(schema, "fix", "hud_antialiasing").find("MenuTier::Fix, \"performance\",") == std::string::npos,
+          "the flat Performance tab has the HUD Anti-Aliasing row and VR's Performance page (page 'performance') has not");
+    {
+        std::string onVrPage = schema;
+        const char* flatPage = "MenuTier::Fix, \"flat_performance\",";
+        const size_t onFlatPage = onVrPage.find(flatPage);
+        if (onFlatPage != std::string::npos) onVrPage.replace(onFlatPage, std::strlen(flatPage), "MenuTier::Fix, \"performance\",");
+        check(onFlatPage != std::string::npos && !schemaHudRowIsFlatOnly(onVrPage), "control: a HUD Anti-Aliasing row on the page VR builds is caught");
+        std::string apart = schema;
+        const size_t h = apart.find("{\"fix\", \"hud_antialiasing\",");
+        if (h != std::string::npos) apart.insert(h, "{\"fix\", \"other\", \"Other\"},\n    ");
+        check(h != std::string::npos && !schemaHudRowIsFlatOnly(apart), "control: a HUD Anti-Aliasing row not directly under UI quality is caught");
+        const size_t sharp = schema.find("{\"fix\", \"sharp_weapons\",");
+        check(sharp != std::string::npos && h != std::string::npos && h < sharp, "Sharp weapons comes after the HUD Anti-Aliasing row in the table");
+    }
     check(!schemaHasRow("", "fix", "render_sharpness"),
           "control: a schema without the row is caught");
     // The Debug rows as generated: label, a switch, shipped off, applies live, Fix tier, page `debug`, one row each.
@@ -452,6 +582,25 @@ void sharpenRowDim() {
           "control: a row that dims in VR too is caught");
     check(truthTableMisses([](bool flat, bool) { return flat; }) > 0,
           "control: a row that dims with anti-aliasing on is caught");
+}
+
+// The HUD Anti-Aliasing row (2026-10-24): dimmed unless both fix.ui_quality is on and the flat anti-aliasing is on (the layer it smooths is live only then).
+int hudAaTruthTableMisses(bool (*dim)(bool, bool)) {
+    struct Case { bool uiQualityOn, antiAliasingOn, want; };
+    const Case cases[] = {{false, false, true}, {false, true, true}, {true, false, true}, {true, true, false}};
+    int wrong = 0;
+    for (const Case& c : cases) wrong += dim(c.uiQualityOn, c.antiAliasingOn) != c.want;
+    return wrong;
+}
+
+void hudAntiAliasingRowDimTable() {
+    check(hudAaTruthTableMisses(edvr::hudAntiAliasingRowDim) == 0,
+          "the HUD Anti-Aliasing row dims with UI quality off or the anti-aliasing off, and with both on does not");
+    check(hudAaTruthTableMisses([](bool, bool) { return false; }) > 0, "control: a row that never dims is caught");
+    check(hudAaTruthTableMisses([](bool, bool) { return true; }) > 0, "control: a row that always dims is caught");
+    check(hudAaTruthTableMisses([](bool uiQualityOn, bool) { return !uiQualityOn; }) > 0, "control: a row that ignores the anti-aliasing being off is caught");
+    check(hudAaTruthTableMisses([](bool, bool antiAliasingOn) { return !antiAliasingOn; }) > 0, "control: a row that ignores UI quality being off is caught");
+    check(hudAaTruthTableMisses([](bool uiQualityOn, bool antiAliasingOn) { return uiQualityOn && antiAliasingOn; }) > 0, "control: a row that dims with both on is caught");
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +862,7 @@ int main(int argc, char** argv) {
     panelTable(argv[2], argv[3]);
     swapChainProbeGuard();
     sharpenRowDim();
+    hudAntiAliasingRowDimTable();
     wrapperContract();
     std::printf("flat_sharpen_test: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

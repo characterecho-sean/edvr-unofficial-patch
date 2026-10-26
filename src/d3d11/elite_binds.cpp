@@ -271,7 +271,7 @@ void walkSlots(const std::string& text, Emit emit) {
     flush();
 }
 
-// The keyboard bindings alone (Explorer Cam's launch-time clash check reads these).
+// The keyboard bindings alone (the AA comparison key's clash check reads these).
 int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) {
     int n = 0;
     walkSlots(text, [&](const std::string& element, const std::string& device, const std::string& key,

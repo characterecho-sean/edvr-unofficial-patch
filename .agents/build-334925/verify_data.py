@@ -94,7 +94,7 @@ def main(argv):
         print(f"  {o:#x} -> {n:#x}: {count} slots, {len(bad)} not confirmed" + (f" ({note})" if bad else ""))
 
     print("== 2. the slots EDVR reads")
-    follow = "src/d3d11/explorer_cam_follow_core.h"
+    follow = "src/d3d11/avatar_skeleton_core.h"
     rr, ao = const(follow, "kRrVtableRva"), const(follow, "kAoVtableRva")
     idx = array_const(follow, "kHeadSlotIndex")
     rr_fn, ao_fn = array_const(follow, "kRrFunctions"), array_const(follow, "kAoFunctions")
@@ -135,17 +135,17 @@ def main(argv):
         raw = pe.read(rva, n)
         return raw.split(b"\0", 1)[0].decode("ascii", "replace")
 
-    core = (REPO / "src/d3d11/explorer_cam_core.h").read_text(encoding="utf-8")
+    core = (REPO / "src/d3d11/avatar_hooks_core.h").read_text(encoding="utf-8")
     block = re.search(r"kPartNames\[kPartCount\] = \{([^}]*)\}", core).group(1)
     names = re.findall(r'"([^"]+)"', block)
-    table = const("src/d3d11/explorer_cam_core.h", "kPartNameTableRva")
+    table = const("src/d3d11/avatar_hooks_core.h", "kPartNameTableRva")
     wrong = [(i, cstring(new_pe, u64(new_pe, table + 8 * i) - IMAGE_BASE)) for i, nm in enumerate(names)
              if cstring(new_pe, u64(new_pe, table + 8 * i) - IMAGE_BASE) != nm]
     print(f"  part name table {table:#x}: {len(names)} entries, {len(wrong)} wrong {wrong[:3]}")
     count = int(re.search(r"\bkPartCount = (\d+);", core).group(1))
     if wrong or len(names) != count:
         fail("part name table")
-    lits = {"kHeadNameRva": ("kHeadName", follow), "kPovNameRva": ("kPovName", "src/d3d11/explorer_cam_core.h"),
+    lits = {"kHeadNameRva": ("kHeadName", follow), "kPovNameRva": ("kPovName", "src/d3d11/avatar_hooks_core.h"),
             "kFootLNameRva": ("kFootLName", follow), "kFootRNameRva": ("kFootRName", follow)}
     ftext = (REPO / follow).read_text(encoding="utf-8")
     for rva_name, (lit_name, where) in lits.items():

@@ -161,11 +161,13 @@ inline bool runtimeScopeIncludesVr() {
 // menu_flat_rows.h, and tools\flat_sharpen_test fails the build for any of
 // them this function refuses.
 // The list itself is flat_profile_keys.h's, shared with the installer's Flat view. The log.* and advanced.real_dll keys are read by
-// every profile; the rest only by flat.
+// every profile; the rest only by flat. advanced.game_update_check (TEMPORARY, issue 124: docs\design-game-update-signatures-2026-10-25.md)
+// is read by every profile too and is not in the installer's view: a hidden instrument, off by default, removed with its arc.
 inline bool runtimeProfileAllowsKey(const char* key) {
     if (runtimeVrProfile()) return true;
     if (!key) return false;
-    if (std::strncmp(key, "log.", 4) == 0 || std::strcmp(key, "advanced.real_dll") == 0)
+    if (std::strncmp(key, "log.", 4) == 0 || std::strcmp(key, "advanced.real_dll") == 0 ||
+        std::strcmp(key, "advanced.game_update_check") == 0)
         return true;
     return runtimeFlatProfile() && flatProfileReadsKey(key);
 }

@@ -142,8 +142,8 @@ std::string armed(const MemFigures& f, const MemUnavailable& missing = MemUnavai
 
 // ---- M1 ----------------------------------------------------------------------------------------------------
 void constantCases() {
-    check(kMemWakeEveryMs == 5000 && kMemLineEveryMs == 60000 && kMemPressureEveryMs == 5000 && kMemPressurePercent == 90,
-          "M1.constants: woken every 5 s, a line every 60 s, every 5 s from 90% of the commit limit");
+    check(kMemWakeEveryMs == 5000 && kMemLineEveryMs == 60000 && kMemPressureEveryMs == 30000 && kMemPressurePercent == 90,
+          "M1.constants: woken every 5 s, a line every 60 s, every 30 s from 90% of the commit limit");
     check(kMemSanityBytes == 64 * kGiB && kMemGpuKinds == 12 && kMemGpuHeapMax == 256 && kMemCpuHeapMax == 16,
           "M1.constants: the sanity limits are 64 GiB, twelve counters, 256 GPU heaps, 16 CPU heaps");
     check(std::string(memReasonKey(MemReason::Armed)) == "armed" && std::string(memReasonKey(MemReason::Periodic)) == "periodic" &&
@@ -245,15 +245,14 @@ void pressureCases() {
             kinds.push_back(k);
         }
     }
-    check(lines == std::vector<unsigned>({25, 30, 35, 40, 45, 105}),
-          "M4.pressure: a line at the first wake that sees 95% (25 s), one every 5 s while it stays, none once it eases, and the "
-          "next 60 s after the last (105 s)");
-    check(kinds.size() == 6 && kinds[0] == MemReason::Pressure && kinds[4] == MemReason::Pressure && kinds[5] == MemReason::Periodic,
+    check(lines == std::vector<unsigned>({30, 90}),
+          "M4.pressure: pressure starting at 25 s writes when the 30 s interval is due; after it eases the next line is 60 s later (90 s)");
+    check(kinds.size() == 2 && kinds[0] == MemReason::Pressure && kinds[1] == MemReason::Periodic,
           "M4.kinds: the lines under pressure are pressure lines; the one after it eases is periodic");
 
     MemPolicy edge;
     edge.observe(0, machineAt(50));
-    check(edge.observe(5000, machineAt(90)) == MemReason::Pressure, "M4.edge: exactly 90% is pressure");
+    check(edge.observe(5000, machineAt(90)) == MemReason::None && edge.observe(30000, machineAt(90)) == MemReason::Pressure, "M4.edge: exactly 90% is pressure");
     MemPolicy below;
     below.observe(0, machineMiB(35999, 40000));
     check(below.observe(5000, machineMiB(35999, 40000)) == MemReason::None && below.observe(60000, machineMiB(35999, 40000)) == MemReason::Periodic,
@@ -264,20 +263,20 @@ void pressureCases() {
 
     MemPolicy staying;
     staying.observe(0, machineAt(95));
-    check(staying.observe(1000, machineAt(95)) == MemReason::None && staying.observe(5000, machineAt(95)) == MemReason::Pressure,
-          "M4.armed-at-pressure: a machine already at 95% when the watch arms writes its first pressure line 5 s after the armed line");
+    check(staying.observe(5000, machineAt(95)) == MemReason::None && staying.observe(29500, machineAt(95)) == MemReason::Pressure,
+          "M4.armed-at-pressure: a machine already at 95% when the watch arms writes its first pressure line at the 30 s boundary (including the existing 500 ms wake slack)");
 
-    // A thread woken every 5 s by Sleep gets 5001 or 4990 ms on a clock with 15 ms steps; the 5 s cadence must not skip a wake.
+    // A thread woken every 5 s by Sleep has timer jitter; the 30 s pressure cadence must take each sixth wake.
     MemPolicy jitter;
     jitter.observe(0, machineAt(95));
     uint64_t t = 0;
     unsigned fired = 0;
     const int jitterMs[] = {5001, 4990, 5016, 4985, 5000, 5031, 4969, 5000};
-    for (int step : jitterMs) {
-        t += static_cast<uint64_t>(step);
+    for (int i = 0; i < 24; ++i) {
+        t += static_cast<uint64_t>(jitterMs[i % 8]);
         if (jitter.observe(t, machineAt(95)) == MemReason::Pressure) ++fired;
     }
-    check(fired == 8, "M4.jitter: eight wakes within 30 ms of 5 s under pressure are eight lines, none skipped");
+    check(fired == 4, "M4.jitter: twenty-four five-second wakes under pressure write four thirty-second lines, none skipped");
 
     MemPolicy backwards;
     backwards.observe(100000, machineAt(50));
@@ -383,7 +382,7 @@ void armedCases() {
     check(count(a, "commit is this process's") == 1 && count(a, "egpu is Elite's own accounting") == 1 && count(a, "eheap is a first reading") == 1 &&
               count(a, "The runtime fields cover") == 1,
           "M6.explain: and only once");
-    check(contains(a, "A line every 60 s, every 5 s while the machine's commit is at or over 90% of its limit."),
+    check(contains(a, "A line every 60 s, every 30 s while the machine's commit is at or over 90% of its limit."),
           "M6.cadence: the cadence is said, from the constants");
     check(contains(a, "egpu=unread is a game with no device yet and egpu=implausible values that failed their checks"),
           "M6.explain: what egpu=unread and egpu=implausible mean");

@@ -5,10 +5,8 @@
 // created, cleared, bound and read back through the view the compose gets. Nothing here is a model of the engine: the engine runs. Cases (every
 // check carries a label "L<case>.<what>"; tools\skin_engine_test\mutants.py names the case that must catch each mutation):
 //   L1  arming: configure arms the second skin (the hook asked once, its gate opened), and before any frame nothing is bound
-//   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels; the entry
-//       fade's signal (engineMotionReady) says skinned jobs with the join not live
-//   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes; the signal says the
-//       join is live
+//   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels
+//   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes
 //   L4  the character moves: E = 100 x (previous - current position) in centimetres
 //   L5  the job table changes shape: no history for that frame, then the next frame has it again
 //   L6  what the draw binds and what is put back: target 7 and the three views while the patched pair draws, the blend state's mask for target 7
@@ -17,7 +15,7 @@
 //   L7  the hook's list as the identity (the stubbed hook hands the join the entry list): the same frames join by the hook, a list that disagrees
 //       with the job table falls back to the prefix and says so
 //   L8  the periodic lines: the join's counters read back from the GPU, the second-skin line, the hook's line; the two halves of the join line describe the
-//       same frames; the entry fade's signal (armed only while the compose asks for the views, a run needs both eyes)
+//       same frames
 //   L9  a previous palette buffer too small to hold a job's previous rows: no history for those jobs, with no list at all
 //   L10 which record of the character's base is the live one: the pool also holds a stale second record (above or below the live one, read by no draw),
 //       both records read, a draw list that cannot be exact; the instance stream at an IA offset; the pose witness line
@@ -44,7 +42,6 @@
 #include <string>
 #include <vector>
 
-#include "engine_motion_ready.h"
 #include "lifecycle_tests.h"
 #include "skin_clone_tests.h"
 #include "../skin_clone_test/synthetic_skin.h"
@@ -549,7 +546,7 @@ inline void run(const lt::Harness& h) {
 
     // L2: the first frame
     Fixture::Eye first0, first1;
-    f.frame([&] { first0 = f.read(0); first1 = f.read(1); f.g.views(0); f.g.views(1); });   // (the compose asks for both eyes' views: the entry fade's signal is armed from here)
+    f.frame([&] { first0 = f.read(0); first1 = f.read(1); f.g.views(0); f.g.views(1); });   // (the compose asks for both eyes' views)
     h.check(f.seen.rt7 && f.seen.vsPatched, "L6.a the first skinned draw has target 7 bound and its patched vertex shader");
     h.check(first0.given && first1.given, "L2.a both eyes give the compose a target-7 view after a frame that wrote E");
     {
@@ -557,9 +554,6 @@ inline void run(const lt::Harness& h) {
         h.check(a.drawn > 20 && b.drawn > 20, "L2.b the triangle is drawn in both eyes");
         h.check(a.valid == 0 && b.valid == 0 && a.worst == 0.0 && b.worst == 0.0, "L2.c with no history every drawn pixel carries valid 0 and E 0 (no stale answer)");
         h.check(a.outside == 0.0 && b.outside == 0.0, "L2.d target 7 is zero where nothing was drawn (cleared with the eye-frame)");
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.skinJobs && !m.skinLive, "L2.e the entry fade's signal for that frame: skinned jobs, the join not live (no history yet: the fade waits for it)");
-        if (!(m.armed && m.skinJobs && !m.skinLive)) std::fprintf(stderr, "  signal: armed %d views run %u skin jobs %d live %d\n", int(m.armed), m.viewsRun, int(m.skinJobs), int(m.skinLive));
     }
 
     // L3: a steady second frame, the prefix join
@@ -570,8 +564,6 @@ inline void run(const lt::Harness& h) {
         h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L3.a a steady frame: valid 1 at every drawn pixel in both eyes");
         h.check(a.worst == 0.0 && b.worst == 0.0, "L3.b and E is exactly zero (previous state = current state through the whole engine path)");
         h.check(a.outside == 0.0, "L3.c and still zero outside the drawn pixels");
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 1, "L3.d the entry fade's signal for that frame: skinned jobs, the join live, the views given to both eyes");
     }
     // a smaller triangle: the pixels the larger one wrote are zero again (target 7 is cleared with every eye-frame)
     {
@@ -785,25 +777,10 @@ inline void run(const lt::Harness& h) {
         if (!last.empty() && (n("frames=") < 3 || n("frames=") != n("offered ") + declined)) std::fprintf(stderr, "  join line: %s\n", last.c_str());
     }
 
-    // L8.i-k: the signals the entry fade waits on (engineMotionReady). The compose asks for the views of both eyes each frame: after a few such frames the
-    // engine's motion is armed with a run of live views and the join live for the skinned jobs. A temporal pass that asks for one eye only never builds a
-    // run, and one that never asks leaves the signal unarmed (there is nothing to wait for; a pass that does not consume the views would never satisfy it).
+    // Frames with both eyes' views asked for, then one eye's, then none: the engine runs on through them (what follows starts from that state).
     for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.viewsRun >= 3 && m.skinJobs && m.skinLive,
-                "L8.i the entry fade's signal after four frames in which both eyes were given the views: armed, a run of at least 3 frames, skinned jobs, the join live");
-    }
     for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); }, false, false);
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.viewsRun == 0, "L8.j a pass that asks for one eye's views only never builds a run (armed: it consumes them, but both eyes are needed)");
-    }
     for (int i = 0; i < 34; ++i) f.frame(true, [&] {}, false, false);
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(!m.armed && m.viewsRun == 0 && !m.skinJobs && !m.skinLive, "L8.k a pass that has not asked for the views in 34 frames leaves the signal unarmed: nothing is waited for");
-    }
 
     // L10: which record of the character's base is the live one. The pool also holds a stale second record of the same base and another pose (the F12
     // flight's shape); the draws' own instance-stream entries say which record they read, and nothing else does. The stream is bound at an IA offset of
@@ -994,26 +971,12 @@ inline void run(const lt::Harness& h) {
     }
     single();
     for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 3, "L12.j (control) the entry fade's signal after single-dispatch frames: skinned jobs, the join live");
-    }
     doubled();
     for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 3,
-                "L12.k the entry fade's signal after double-dispatch frames: skinned jobs and the join live (the frame's one join, not the second dispatch's)");
-    }
-    // a frame whose chain no skinned draw needed (a character out of view) is joined at the frame boundary all the same, so the signal describes THIS frame: a
-    // chain-only frame whose two dispatches wrote two palette buffers has no history, and the entry fade must not read the frame before's join as live
+    // a frame whose chain no skinned draw needed (a character out of view) is joined at the frame boundary all the same
     f.secondOnOtherPalette = true;
     f.chainOnlyFrame();
     f.secondOnOtherPalette = false;
-    {
-        const edvr::EngineMotionReady m = edvr::engineMotionReady();
-        h.check(m.armed && m.skinJobs && !m.skinLive, "L12.o a frame whose chain no skinned draw needed is joined at the frame boundary: the signal says its join has no history, not the frame before's");
-    }
     single();
     for (int i = 0; i < 3; ++i) f.frame([&] {});
     // the counters, in a window of nothing else: every frame has two dispatches, the hook's one list covers both tables

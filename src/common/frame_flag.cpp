@@ -212,8 +212,8 @@ struct Shared {
 // unified-install section 12).
 // _v37 because the external-camera pair left the layout (externalCam and
 // externalCamStamp) with the old Explorer Cam route, whose gate wrote them
-// and whose pose offset read them; Explorer Cam is now the free-camera
-// placement (explorer_cam.cpp), which uses no channel.
+// and whose pose offset read them; Explorer Cam's redesign (removed in F98)
+// used no channel either.
 // _v36 because the end-frame hold joined (endFrameHold), the test trigger of
 // the end-frame episode and slow-regime instruments (advanced.slow_test_ms,
 // docs/headset-lock-vdxr-2026-10-02.md).

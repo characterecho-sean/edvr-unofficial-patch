@@ -19,10 +19,12 @@ namespace edvr {
 class SchedulerStackProbe;
 
 // Installs process-lifetime hooks on first call. Same return vocabulary as
-// attachKinematicEvalHooks: "installed", "identity_mismatch" (the
-// executable is not the hash-verified build), "opcode_mismatch" (a target
-// does not carry the expected prologue or our own patch),
-// "install_failed", "observer_busy".
+// attachKinematicEvalHooks: "installed", "identity_mismatch" (no module
+// base, a target the signature resolver did not find on an unknown build,
+// src\common\game_build.h, or an executable section whose end the PE header
+// does not give), "opcode_mismatch" (a target does not carry the expected
+// prologue -- outside the masked fields on an unknown build -- or our own
+// patch), "install_failed", "observer_busy".
 const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept;
 // Stops new callbacks into this probe. Hooks and relays stay installed for
 // the process lifetime; the probe itself is a global, so a callback that

@@ -1,8 +1,7 @@
 #pragma once
 // The view the sealed rule centres on (view_source.cpp). Resolves which camera renders
-// the frame and where it is: the explorer cam (its session on) and the seated view read the rows the temporal pass chose (the game's
-// view-to-world [R | c]); on foot, without the explorer cam, no pose is read (the on-foot camera's rows are not read yet), and the view 0
-// origin is the only position. Read-only: nothing is written and nothing is chosen.
+// the frame and where it is: the seated view reads the rows the temporal pass chose (the game's view-to-world [R | c]); on foot no pose
+// is read (the on-foot camera's rows are not read yet), and the view 0 origin is the only position. Read-only: nothing is written and nothing is chosen.
 #include <cstdint>
 
 #include "view_source_core.h"
@@ -23,11 +22,11 @@ struct Resolved {
 // nor the origin can be read.
 bool resolveView(uintptr_t ctx, Resolved* out) noexcept;
 
-// The centre the sphere rules use (the sealed trial and the asset census): the explorer cam's rows in the explorer cam; otherwise the
-// view 0 origin, which the flights proved; otherwise the rows. False when none can be read. fromRows (optional) says whether the rows
+// The centre the sphere rules use (the sealed trial and the asset census): the view 0 origin, which the flights proved; otherwise the
+// rows. False when none can be read. fromRows (optional) says whether the rows
 // were the source.
 inline bool sphereCentre(const Resolved& v, float out[3], bool* fromRows = nullptr) noexcept {
-    const bool rows = v.poseOk && (v.source == Source::kExplorerCam || !v.originOk);
+    const bool rows = v.poseOk && !v.originOk;
     const float* src = nullptr;
     if (rows) src = v.pose.pos;
     else if (v.originOk) src = v.origin;

@@ -20,7 +20,6 @@
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
-#include "explorer_cam.h"   // explorerCamSessionActive(): the Explorer Cam key row locks while a session is on
 #include "flat_notice_queue.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
@@ -55,6 +54,7 @@
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 #include "terrain_checkerboard.h"   // Elite's terrain checkerboard rendering in VR: the worker's tick and the word it publishes
+#include "ui_layer_math.h"  // uiQualityParse: the HUD Anti-Aliasing row dims while fix.ui_quality is off (or the anti-aliasing is), UI quality read as the layer reads it
 #include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vr_ssaa_hold.h"       // vrSsaaHoldNoticeDue: the Supersampling hold's toast (a requested value held at 1.0)
 #include "vr_ssaa_hold_math.h"  // ssaahold::formatHoldToast
@@ -306,7 +306,6 @@ struct State {
     std::string   noteFooter;             // fits the footer's second line
     bool          clashStale = true;      // Elite's bindings changed (or have not been read) since the last check
     uint32_t      registeredSig = 0;      // the live hotkey registry, to notice a rebind elsewhere
-    bool          explorerSessionShown = false;   // what the last raster said about Explorer Cam's key row's lock
 
     bool aimParked = false;
     int  aimSameCount = 0;
@@ -380,12 +379,6 @@ FaultBudget g_budget("menuTick", 6);
 
 std::string dottedOf(const MenuRowDef& d) {
     return std::string(d.section) + "." + d.key;
-}
-
-// Is this row Explorer Cam's KEY (hotkey.explorer_cam, a Hotkey row) while a session is on?
-// Only a Hotkey row: [fix] explorer_cam shares the key name and is not this.
-bool rowLocked(int def) {
-    return kMenuRows[def].kind == MenuKind::Hotkey && hotkeyRowLocked(kMenuRows[def].key, explorerCamSessionActive());
 }
 
 std::string rowValue(const MenuRowDef& d) {
@@ -471,6 +464,37 @@ bool weaponsRowDisabled() {
     const bool flat = runtimeFlatProfile();
     const Config& cfg = Config::get();
     return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString("fix.temporal_aa", "off"), flat));
+}
+
+// fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24; the flat panel only: its `menu flat_performance` page is one VR's menu builds none of). It smooths
+// the HUD layer, which is live only while fix.ui_quality is not off AND the flat anti-aliasing is on (flat_ui_layer.cpp), so with either off the row stays on the
+// page, dimmed, and stops responding. UI quality is read as the layer reads it (uiQualityParse, the shipped 100 for a missing line) and the anti-aliasing as
+// weaponsRowDisabled's flat branch reads it (the row is flat only), live, every time the page is drawn or a row is touched. The hint and the refused step name
+// the cause that applies: UI quality first when it is off, else the anti-aliasing.
+bool isHudAntiAliasingRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "hud_antialiasing") == 0;
+}
+
+bool hudAntiAliasingUiQualityOn() {
+    const std::string quality = Config::get().getString("fix.ui_quality", "100");
+    return uiQualityParse(quality.c_str(), nullptr) > 0.0f;
+}
+
+bool hudAntiAliasingModeOn() {
+    return temporalModeEnabledFor(Config::get().requestedTemporalMode(), true);
+}
+
+bool hudAntiAliasingRowDisabled() {
+    return hudAntiAliasingRowDim(hudAntiAliasingUiQualityOn(), hudAntiAliasingModeOn());
+}
+
+const char* hudAntiAliasingHint() {
+    return hudAntiAliasingUiQualityOn() ? "Needs anti-aliasing: turn it on to use this." : "Needs UI quality: turn it on to use this.";
+}
+
+const char* hudAntiAliasingRefusal() {
+    return hudAntiAliasingUiQualityOn() ? "HUD Anti-Aliasing is inactive: turn anti-aliasing on first."
+                                        : "HUD Anti-Aliasing is inactive: turn UI quality on above first.";
 }
 
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
@@ -1038,7 +1062,7 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
             return v.empty() ? "(empty)" : v;
         }
         case MenuKind::Hotkey:
-            // An empty hotkey is an unbound one -- and for Explorer Cam's key, Explorer Cam off.
+            // An empty hotkey is an unbound one.
             if (v.empty()) return "(none)";
             return v.size() > 28 ? v.substr(0, 27) + "~" : v;
         case MenuKind::Text:
@@ -1681,11 +1705,12 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
-        // Explorer Cam (2026-10-08): the eye trims and the follow smoothing, personal preference, live, for everyone.
-        // The rows are the `menu explorer_cam` rows of edvr.ini; no group headings, the page is the group.
+        // Native on foot (2026-10-14): the explicitly selected native on-foot settings. The rows are the
+        // `menu native_on_foot` rows of edvr.ini, in file order (the switch first, the HUD last); compatibility settings without that tag stay out of the page.
+        // Grouped (F127): the headings are the ini's own heading blocks above the rows, as on the Fixes page.
         Page p;
-        p.name = "Explorer Cam";
-        addSettingRows(p, MenuTier::Fix, "explorer_cam", false);
+        p.name = "Native on foot";
+        addSettingRows(p, MenuTier::Fix, "native_on_foot", true);
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -2341,9 +2366,11 @@ void buildContent(MenuContent& c) {
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
             const bool weaponsRow = isWeaponsRow(d);
+            const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
-                             (weaponsRow && weaponsRowDisabled());
+                             (weaponsRow && weaponsRowDisabled()) ||
+                             (hudAaRow && hudAntiAliasingRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             if (dlssRow) {
@@ -2384,15 +2411,9 @@ void buildContent(MenuContent& c) {
                 // A hotkey row speaks for itself: waiting for the input, then (for a few
                 // seconds) what became of it; and while it stands, a badge when Elite's own
                 // bindings use the same press. The words that did not fit are the footer's.
-                char lockedText[96];
                 if (capturingThis) v = "press a key / button...";
                 else if (noteOnThis) v = s.noteRow;
-                else if (rowLocked(e.def)) {
-                    // Explorer Cam is on: its key row is locked, and says so on the row (the
-                    // footer, while the row is highlighted, has the whole sentence).
-                    hotkeyLockedText(r.value.c_str(), lockedText, sizeof(lockedText));
-                    v = lockedText;
-                } else if (r.clashCount) l.badge = kBadgeClash;
+                else if (r.clashCount) l.badge = kBadgeClash;
             }
             strncpy(l.right, v.c_str(), sizeof(l.right) - 1);
             // Anything with two states is a switch, drawn where the value
@@ -2420,6 +2441,8 @@ void buildContent(MenuContent& c) {
                                   : kMenuRow;
             if (hi && dim && weaponsRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", "Needs temporal AA: turn anti-aliasing on to use it.");
+            else if (hi && dim && hudAaRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
@@ -2630,19 +2653,8 @@ void buildContent(MenuContent& c) {
         in.editing = s.editEntry >= 0;
         in.capturing = s.captureEntry >= 0;
         in.canClear = in.capturing && s.captureDef >= 0 && strcmp(kMenuRows[s.captureDef].key, "menu") != 0;
-        // A locked hotkey row, highlighted, says so in full (the row has what fits). A note from
-        // something just done comes first.
-        std::string lockedNote;
-        if (!p.status && p.highlight >= 0 && p.highlight < static_cast<int>(p.entries.size()) &&
-            p.entries[p.highlight].kind == EntryKind::Setting) {
-            const int hd = p.entries[p.highlight].def;
-            if (rowLocked(hd)) {
-                char lt[96];
-                hotkeyLockedText(g_rows[hd].value.c_str(), lt, sizeof(lt));
-                lockedNote = lt;
-            }
-        }
-        in.note = (!p.status && s.noteUntilMs > s.tickMs) ? s.noteFooter.c_str() : lockedNote.c_str();
+        // A note from something just done.
+        in.note = (!p.status && s.noteUntilMs > s.tickMs) ? s.noteFooter.c_str() : "";
         in.statusPage = p.status;
         in.pageName = p.name;
         in.privateWanted = s.privateWanted;
@@ -2871,6 +2883,11 @@ void stepRow(int defIndex, int dir, int mult) {
     }
     if (isWeaponsRow(d) && weaponsRowDisabled()) {
         g_s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
+        g_s.contentDirty = true;
+        return;
+    }
+    if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {
+        g_s.lastWrite = hudAntiAliasingRefusal();
         g_s.contentDirty = true;
         return;
     }
@@ -3354,9 +3371,9 @@ HotkeyBinding hotkeyOfRow(int def) {
     return b;
 }
 
-ClashScope clashScopeOf(const MenuRowDef& d) {
-    // Explorer Cam is entered on foot; the other keys work wherever the player is.
-    return strcmp(d.key, "explorer_cam") == 0 ? ClashScope::OnFoot : ClashScope::AnyContext;
+ClashScope clashScopeOf(const MenuRowDef&) {
+    // Every EDVR key works wherever the player is.
+    return ClashScope::AnyContext;
 }
 
 // Every hotkey row but one, for the duplicate check. The developer rows are in it
@@ -3484,7 +3501,7 @@ void startCapture(int entryIndex, int defIndex) {
 }
 
 // What a row's decision is made from: the row, its value now, every other hotkey, Elite's
-// bindings, and whether Explorer Cam's key is locked. `others` and `names` outlive the call.
+// bindings. `others` and `names` outlive the call.
 struct RowDecisionInput {
     HotkeyOthers others;
     std::vector<EliteBindUse> uses;
@@ -3506,32 +3523,15 @@ void buildRowContext(int def, RowDecisionInput* in) {
     in->ctx.uses = in->uses.data();
     in->ctx.nUses = static_cast<int>(in->uses.size());
     in->ctx.scope = clashScopeOf(kMenuRows[def]);
-    in->ctx.explorerCamSession = explorerCamSessionActive();
     in->ctx.flatPadNavigation = runtimeFlatProfile();
 }
 
-// A locked row says so on the row, in the footer and in the log, and nothing is written.
-void noteLocked(int def) {
-    char text[96];
-    hotkeyLockedText(g_rows[def].value.c_str(), text, sizeof(text));
-    Log::get().note("menu: %s is locked while Explorer Cam is on: %s.", dottedOf(kMenuRows[def]).c_str(), text);
-    setHotkeyNote(def, text, text);
-}
-
-// Enter on a hotkey row. Explorer Cam's key is locked while a session is on (the key being
-// edited is the key that gets the player out): the row says so and nothing starts.
+// Enter on a hotkey row.
 void beginCapture(int entryIndex, int defIndex) {
     if (runtimeFlatProfile() && !g_s.flatKeysReadyShown) {
         const char* note = "Hotkey capture needs the keyboard gate";
         Log::get().note("menu: %s; the game's keyboard has not reached the gate.", note);
         setHotkeyNote(defIndex, "capture unavailable", note);
-        return;
-    }
-    HotkeyRowContext c;
-    c.rowKey = kMenuRows[defIndex].key;
-    c.explorerCamSession = explorerCamSessionActive();
-    if (kMenuRows[defIndex].kind == MenuKind::Hotkey && !hotkeyCaptureMayBegin(c)) {
-        noteLocked(defIndex);
         return;
     }
     startCapture(entryIndex, defIndex);
@@ -3550,9 +3550,6 @@ void applyDecision(int def, const CaptureDecision& dec) {
             Log::get().note("menu: %s left as it was (Esc).", dotted.c_str());
             setHotkeyNote(def, "cancelled", std::string(), 2000);
             return;
-        case CaptureOutcome::Locked:
-            noteLocked(def);
-            return;
         case CaptureOutcome::ClearAlready:
             setHotkeyNote(def, "already empty", std::string(), 2500);
             return;
@@ -3566,10 +3563,7 @@ void applyDecision(int def, const CaptureDecision& dec) {
             g_rows[def].clashCount = 0;
             g_rows[def].clashList[0] = 0;
             applyChange(def, std::string());
-            setHotkeyNote(def, "cleared",
-                          strcmp(d.key, "explorer_cam") == 0
-                              ? "hotkey.explorer_cam cleared -- Explorer Cam is off until a key is set."
-                              : dotted + " cleared.");
+            setHotkeyNote(def, "cleared", dotted + " cleared.");
             return;
         case CaptureOutcome::Reserved:
             Log::get().note("menu: %s: %s refused -- it is one of the menu's own navigation keys.", dotted.c_str(),
@@ -3694,14 +3688,6 @@ void dispatchNav(MenuNav nav, uint64_t now) {
             break;
         case kNavReset:
             if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
-                {
-                    // Explorer Cam's key row is locked while a session is on: a reset is a change.
-                    const int lockedDef = p.entries[p.highlight].def;
-                    if (rowLocked(lockedDef)) {
-                        noteLocked(lockedDef);
-                        break;
-                    }
-                }
                 if (s.resetArmedEntry == p.highlight && now - s.resetArmedMs < kResetArmMs) {
                     const int def = p.entries[p.highlight].def;
                     const MenuRowDef& d = kMenuRows[def];
@@ -4714,11 +4700,6 @@ void menuTick(ID3D11Device* dev) {
         // A belt for the suspension of EDVR's hotkeys (hotkey.h): it is only ever on while a row waits.
         if (s.captureEntry < 0 && hotkeysSuspended()) hotkeysSuspend(false);
         if (s.open) {
-            const bool sessionNow = explorerCamSessionActive();
-            if (sessionNow != s.explorerSessionShown) {
-                s.explorerSessionShown = sessionNow;
-                s.contentDirty = true;   // Explorer Cam's key row locks and unlocks
-            }
             const Page& page = s.pages[s.page];
             if (s.clashStale && !page.entries.empty() && page.entries[0].kind == EntryKind::Setting &&
                 kMenuRows[page.entries[0].def].kind == MenuKind::Hotkey) {
