@@ -25,7 +25,12 @@ session and a log. Everything below exists to spend fewer of them.
 Use the **PowerShell tool**, not Bash. Windows PowerShell 5.1: no `&&` or
 `||` (use `;` and `if ($?)`), no ternary, no `??`. Don't redirect a native
 exe's stderr with `2>&1` — 5.1 wraps each line in an ErrorRecord and sets
-`$?` false on a clean exit.
+`$?` false on a clean exit. Send a file-writing tool's output to `*> $null`
+or a log file and read that: `| Select-Object -First N` stops the pipeline
+and kills the tool mid-write (an install died that way, #100). Pass paths
+to a native exe as arguments: piping strings into one (`$files | git
+checkout --pathspec-from-file=-`) prepends a BOM to the first item, which
+then matches nothing.
 
 `build.bat` must be launched **by absolute path**; a `cmd` invocation that
 never ran the batch still exits 0, which has read as a successful build.
@@ -186,10 +191,9 @@ minutes after a flight finally reproduced the effect being chased.
   passes that check vacuously.
 - For C++ changes on a non-native host, commit and push the candidate
   branch so Actions can validate that exact commit. The `release.yml`
-  workflow is active on `main`; dispatch it with `gh workflow run
-  release.yml --ref <branch>` (a push to `codex/release-*` already
-  triggers the full build and package path, so do not dispatch a
-  duplicate run). Find the branch run with `gh run list --workflow
+  workflow runs the full build and package path on every pull request
+  and every push to `main` or `codex/release-*`; for a branch with none
+  of those, dispatch it with `gh workflow run release.yml --ref <branch>`. Find the branch run with `gh run list --workflow
   release.yml --branch <branch>`, verify its `headSha` matches the
   candidate with `gh run view <run-id> --json headSha`, then require `gh
   run watch <run-id> --exit-status` to pass before merging or releasing.
@@ -291,6 +295,21 @@ minutes after a flight finally reproduced the effect being chased.
 - Do the work asked for. If something adjacent is worth fixing, say so;
   don't fold it in.
 
+## Tracking work
+
+- **Work is tracked in GitHub issues** on
+  `characterecho-sean/edvr-unofficial-patch` (`gh issue list`). A finding
+  to act on later — a review follow-up, a retro item, a bug noticed in
+  passing — becomes an issue. Commits and PRs name it (`(#97)`,
+  `Closes #97`). A plan or task list that only hands one session's work
+  to the next can stay a file; anything meant to outlive the session is
+  an issue.
+- `docs\` holds the evidence: an investigation doc carries an arc's
+  journal, and its `## Status` block links the arc's issues.
+- **Re-fetch a PR's reviews and comments right before posting** replies
+  or a summary to it. A review that landed while you worked otherwise
+  goes unanswered (PR #92, twice).
+
 ## Git
 
 - Solo project: **branch, commit, merge to main, push.** No pull requests.
@@ -369,6 +388,7 @@ the Ghidra scripts, and, kept local and never committed, the game executables fo
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `CODING_STANDARDS.md` | review: the judgement rules for every diff, applied by its author before pushing and by its reviewer |
 | `GLOSSARY.md` | the project's terms: game builds, binding, build-map statuses; use them, add a term when one is settled |
 | `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `analysis\` | main checkout only: the private `elite-analysis` repository (git-ignored here), see above |
