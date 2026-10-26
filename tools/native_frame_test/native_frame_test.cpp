@@ -47,6 +47,7 @@
 #include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
 #include "f125_ads_checks.h"
 #include "f125_checks.h"    // F125: the on-foot log's windows (the detail gate, the summary window, the per-second fold, the flush)
+#include "f125containment_checks.h"
 
 #include <array>
 #include <chrono>
@@ -7353,6 +7354,7 @@ int wmain(int argc, wchar_t** argv) {
     // tick's 1 s cadence whatever the key, N of M s, a flushed window printing its own length, and the key turned on and off part way through a window.
     f125test::run125(check);
     f125adstest::run125Ads(check);
+    f125containmenttest::run(check);
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -12,6 +12,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "native_on_foot_logwin.h"
 #include "native_on_foot.h"   // F25: nativeOnFootActive for the on-foot visor match
 #include "dxbc_container.h"   // F27: the visor variant's checksum (ComputeHashRetail)
 #include "shader_swap.h"      // F121: shaderSwapCreateVs
@@ -218,7 +219,7 @@ void remlokConfigure(Config& cfg) {
         visoraxis::formatArmed(armed, sizeof(armed));
         Log::get().note("%s", armed);
     }
-    if (detail::g_remlokMode == Mode::kOuter && g_axisKeyOn.load(std::memory_order_relaxed) && !g_censusArmedNoted) {   // F121b: the census; F121c: only with the test key on
+    if (detail::g_remlokMode == Mode::kOuter && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail()) && !g_censusArmedNoted) {   // F125: the census is wanted for an axis attempt or the detailed A/B log
         g_censusArmedNoted = true;
         char armed[400];
         visorcensus::formatArmed(armed, sizeof(armed));
@@ -897,9 +898,9 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
         return;
     }
     const bool gamesPs = bindingShaderHash(BindSlot::Ps) == visoraxis::kVisorPsHash;   // read before our own pixel shader goes on
-    // F121b: every sixth draw an eye is a sample (run at the end, with the game's state back). F121c: only with the test key on (and then only in outer mode, which is
-    // the only way here); with it off the last second's line is said and the census does nothing at all.
-    if (onFoot && g_axisKeyOn.load(std::memory_order_relaxed)) {
+    // F125: the census runs with the axis key on, or with detailed logging on (including the stock-axis A/B). Attempt-generation and shifted-draw guards below
+    // remain in force: an older or unshifted sample cannot stand down this axis attempt. With both keys off, close the last line and take no new samples.
+    if (onFoot && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail())) {
         censusBegin(ctx, eye);
     } else if (g_cenWin.samples || g_cenWin.skipped) {
         censusLine();

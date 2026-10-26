@@ -59,6 +59,7 @@
 #include "native_on_foot_f126.h"   // F126: the pin's eye pair, the arm IK's snapshot rig, three review findings (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
+#include "native_on_foot_f125containment.h"
 #include "native_on_foot_f119.h"   // F119: head containment, measure only (pure parts)
 #include "native_on_foot_f123.h"   // F123: head containment, the leash and the wall contact (the machine, the fade mix, the lines)
 #include "native_on_foot_f125ui.h"
@@ -5652,6 +5653,21 @@ void f120Tick(uint64_t now) {
 }
 
 // Frame thread: once, whether the placement hook (the one that hides) is armed, then F122's line once a second with a panel reached.
+using F125PanelWindow = nofoot::logwin::PanelWindow;
+F125PanelWindow g_f125Panel;
+void f125PanelClose() noexcept {
+    F125PanelWindow& w = g_f125Panel;
+    if (w.seen || w.hidden || w.failed)
+        Log::get().note("panel mouse (F122) %u s: setting %s; panels seen %u, sprites hidden %u, hide write failed %u; panels active %u of %u s",
+                        w.seconds, w.key ? "on" : "off", w.seen, w.hidden, w.failed, w.active, w.seconds);
+    w.clear();
+}
+void f125PanelTake(bool fold) noexcept {
+    F125PanelWindow& w = g_f125Panel;
+    const uint32_t seen = g_f122Seen.exchange(0, std::memory_order_relaxed), hidden = g_f122Hidden.exchange(0, std::memory_order_relaxed),
+                   failed = g_f122Failed.exchange(0, std::memory_order_relaxed);
+    w.take(seen, hidden, failed, fold);
+}
 void f122Tick(uint64_t now) {
     if (!g_f122ArmNoted && g_f111Tried) {
         g_f122ArmNoted = true;
@@ -5659,13 +5675,19 @@ void f122Tick(uint64_t now) {
         Log::get().note("panel mouse (F122): the placement hook is %s (EliteDangerous64.exe+0x%llX)%s", armed ? "armed" : "NOT armed",
                         static_cast<unsigned long long>(nofoot::f111::kPlaceRva), armed ? "" : ": the cursor cannot be hidden, the game draws it");
     }
+    F125PanelWindow& w = g_f125Panel;
+    const bool key = g_panelMouse.load(std::memory_order_relaxed), onFoot = nativeOnFootActive(), detailLog = nofoot::logwin::detail();
+    if (!w.known) w.state(key, onFoot, detailLog);
+    if (w.changed(key, onFoot, detailLog)) {
+        // Drain a partial reporting window under its OLD state without advancing the functional one-second gate.
+        f125PanelTake(false);
+        f125PanelClose();
+        w.state(key, onFoot, detailLog);
+    }
     if (now - g_f122LastMs < 1000) return;
     g_f122LastMs = now;
-    const uint32_t seen = g_f122Seen.exchange(0, std::memory_order_relaxed), hidden = g_f122Hidden.exchange(0, std::memory_order_relaxed),
-                   failed = g_f122Failed.exchange(0, std::memory_order_relaxed);
-    if (!seen) return;
-    Log::get().note("panel mouse (F122) 1 s: setting %s; panels seen %u, sprites hidden %u, hide write failed %u", g_panelMouse.load(std::memory_order_relaxed) ? "on" : "off",
-                    seen, hidden, failed);
+    f125PanelTake(true);
+    if (nofoot::logwin::due(w.seconds)) f125PanelClose();
 }
 
 void f111Tick(uint64_t now) {
@@ -12327,6 +12349,9 @@ nofoot::f119::AlignHistory3 g_f119Hist;
 std::atomic<int> g_f119StancePub{2};
 std::atomic<uint64_t> g_f119StanceMs{0};
 struct F119State {
+    nofoot::f119::HeadWindow logWindow;
+    nofoot::f119::RestContext logRest;
+    bool logDetail = false;
     nofoot::f119::OffsetSecond off;
     nofoot::f119::OwnSecond own;
     nofoot::f119::DepthSecond depth;
@@ -12345,6 +12370,65 @@ struct F119State {
     bool ads = false;          // F123: ADS this frame (for the episode lines)
 };
 F119State g_f119;
+// F125: reporting consumes only measurement state. The containment machine uses sampledNow/last, which these functions never change.
+uint64_t g_f125HeadWindowId = 0;
+uint64_t g_f125HeadEpoch = 0;
+void f119LogContext() noexcept {
+    const auto& c = g_f119.logRest;
+    Log::get().note("native on foot head containment (F119): report context: reference %u (%s), epoch %llu, %s", c.reference,
+                    c.known ? "known" : "not read", static_cast<unsigned long long>(c.epoch), c.mixed ? "mixed rest" : "steady");
+}
+void f119LogResetSecond() noexcept {
+    F119State& s = g_f119;
+    s.off.reset(); s.own.reset(); s.depth.reset(); s.costUs = 0.0; s.costFrames = 0;
+}
+void f119LogFold() noexcept {
+    F119State& s = g_f119;
+    if (!s.off.frames && !s.own.n && !s.depth.eye[0].read && !s.depth.eye[1].read) return;
+    s.logWindow.fold(s.off, s.own, s.depth, s.costUs, s.costFrames);
+    f119LogResetSecond();
+}
+void f119LogClose(uint64_t now, bool takePartial) noexcept {
+    namespace f119 = nofoot::f119;
+    F119State& s = g_f119;
+    if (s.logDetail) {
+        if (!s.off.frames) return;
+    f119::LineIn li;
+    li.frames = s.off.frames;
+    li.noPose = s.off.noPose;
+    li.dropped = s.off.dropped;
+    li.generation = s.generation;
+    li.recentres = s.recentres;
+    li.restAgeS = static_cast<double>(now - s.restMs) * 1e-3;
+    li.off = &s.off;
+    li.own = &s.own;
+    li.depth = &s.depth;
+    li.costUs = s.costFrames ? s.costUs / static_cast<double>(s.costFrames) : 0.0;
+    char b[1400];
+    f119::formatLine(b, sizeof(b), li);
+    Log::get().note("%s", b);
+        f119LogResetSecond();
+        return;
+    }
+    if (takePartial) f119LogFold();
+    if (!s.logWindow.seconds) return;
+    const uint64_t id = ++g_f125HeadWindowId;
+    char line[1400];
+    bool any = false;
+    for (int cls = 0; cls < f119::kClasses; ++cls) {
+        if (!s.logWindow.cls[cls].n) continue;
+        any = true;
+        f119::formatHeadWindow(line, sizeof(line), s.logWindow, cls, s.logRest.reference, s.recentres, static_cast<double>(now - s.restMs) * 1e-3, id,
+                               s.logRest.epoch, s.logRest.mixed);
+        Log::get().note("%s", line);
+    }
+    if (!any) {
+        f119::formatHeadWindow(line, sizeof(line), s.logWindow, -1, s.logRest.reference, s.recentres, static_cast<double>(now - s.restMs) * 1e-3, id,
+                               s.logRest.epoch, s.logRest.mixed);
+        Log::get().note("%s", line);
+    }
+    s.logWindow.clear();
+}
 nofoot::f123::Machine g_f123;
 std::atomic<uint32_t> g_f119DrawThread{0};   // the thread of the game's draws (the first draw of each frame), for the Present boundary's GPU work to check against
 // ---- F87h: the standing-height hold, the frame thread's half ---------------------------------------------------------------------------------------------
@@ -13111,9 +13195,14 @@ void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ad
     namespace f119 = nofoot::f119;
     F119State& s = g_f119;
     const uint64_t t0 = f30Qpc();
+    if (s.logDetail != nofoot::logwin::detail()) {
+        f119LogClose(now, true);
+        s.logDetail = nofoot::logwin::detail();
+    }
     s.sampledNow = false;
     s.cameraOn = false;
     if (!nativeOnFootActive()) {
+        f119LogClose(now, true);
         s.wasOn = false;
         return;
     }
@@ -13124,6 +13213,10 @@ void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ad
         s.genSeen = s.haveLast = false;
         s.recentres = 0;
         s.restMs = s.startMs = s.lineMs = now;
+        s.logWindow.clear();
+        s.logRest = f119::RestContext{};
+        s.logRest.settled(++g_f125HeadEpoch);
+        f119LogContext();
         s.off.reset();
         s.own.reset();
         s.depth.reset();
@@ -13160,6 +13253,14 @@ void f119Tick(uint64_t now, const EdvrNativeNowPose& np, bool haveFrame, bool ad
     const bool nativePrimary = f83SelectionRead(&f83) && f83SelectionFresh(f83) && f83.readable && f83.primary && f83.followEligible;
     const int item = f119::itemOf(nofoot::f91::adsItemGate(nativePrimary, kind, heldName).allow, g_armed);
     const bool adsNow = ads || g_adsState == kAdsActive;
+    if (s.logRest.different(np.referenceGeneration)) {
+        // The report remembers its reference through no-pose gaps, independently of genSeen/last used by the feature. This new pose is not added yet.
+        if (s.off.frames) --s.off.frames;
+        f119LogClose(now, true);
+        ++s.off.frames;
+        s.logRest.observe(np.referenceGeneration, ++g_f125HeadEpoch);
+        f119LogContext();
+    }
     if (!s.genSeen) {
         s.genSeen = true;
         s.generation = np.referenceGeneration;
@@ -26964,6 +27065,21 @@ void f123Frame(uint64_t now, bool onFoot) {
         in.upCm = upCm;
     }
     const f123::Out o = g_f123.step(in);
+    if (s.logRest.needsCancellation(in.active)) {
+        f119LogClose(now, true);
+        s.logRest.settled(++g_f125HeadEpoch);
+        f119LogContext();
+    }
+    if (o.asked) {
+        f119LogClose(now, true);
+        s.logRest.pending(++g_f125HeadEpoch);
+        f119LogContext();
+    }
+    if (o.done || o.failed) {
+        f119LogClose(now, true);
+        s.logRest.settled(++g_f125HeadEpoch);
+        f119LogContext();
+    }
     char b[760];
     if (o.asked) {
         f123::formatAsk(b, sizeof(b), g_f123.serial(), o.askedBy, hCm, upCm, g_f123Cells);
@@ -27068,25 +27184,12 @@ void f119Boundary(uint32_t frameNo, uint64_t now) {
     s.costUs += static_cast<double>(f30QpcUs(f30Qpc() - t0));
     if (now - s.lineMs < 1000 || !s.off.frames) return;
     s.lineMs = now;
-    f119::LineIn li;
-    li.frames = s.off.frames;
-    li.noPose = s.off.noPose;
-    li.dropped = s.off.dropped;
-    li.generation = s.generation;
-    li.recentres = s.recentres;
-    li.restAgeS = static_cast<double>(now - s.restMs) * 1e-3;
-    li.off = &s.off;
-    li.own = &s.own;
-    li.depth = &s.depth;
-    li.costUs = s.costFrames ? s.costUs / static_cast<double>(s.costFrames) : 0.0;
-    char b[1400];
-    f119::formatLine(b, sizeof(b), li);
-    Log::get().note("%s", b);
-    s.off.reset();
-    s.own.reset();
-    s.depth.reset();
-    s.costUs = 0.0;
-    s.costFrames = 0;
+    if (s.logDetail) f119LogClose(now, true);
+    else {
+        f119LogFold();
+        if (nofoot::logwin::due(s.logWindow.seconds)) f119LogClose(now, false);
+    }
+
 }
 // F86h: per render frame and eye, the marker composite draws the fix decided to patch and those whose patch was bound at the draw's issue: the eye dump's
 // decisions.json carries them per frame (the first-frame eye 1 composites of the F85 flight's dumps 001, 002, 003 and 005 were unpatched).

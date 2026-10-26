@@ -10623,6 +10623,8 @@ def _hj_f111_pointer(rows, ctx):
     n = max(int(r["n"]) for r in armed) if armed else None
     if n == 0 and not sec:
         return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
+    if not sec and not tot and _hpanel_mouse_off(ctx, armed):
+        return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
     if not sec and tot:
         stage = tot[-1]["verdict"].strip()
         text = "the flight so far (%s s with the pointer): %s (no 1 s line: the detail log's)" % (tot[-1]["secs"], stage)
@@ -10750,6 +10752,50 @@ def _f119_upper(hist, q, top):
     return float(top)
 
 
+
+# F125: a compact F119 line carries one class, while common depth/contact values repeat under a process-wide monotonically increasing window id.
+def _f119_windows(rows):
+    windows = collections.OrderedDict()
+    for row in rows:
+        key = row["wid"]
+        if key not in windows:
+            windows[key] = dict(row, _classes=[], _class_seconds={})
+        dst = windows[key]
+        entries = list(_F119_CLASS_RE.finditer(row["offs"]))
+        for entry in entries:
+            name = entry.group("name")
+            if name in dst["_class_seconds"]:
+                continue
+            dst["_classes"].append(entry.group(0))
+            dst["_class_seconds"][name] = int(row["cs"])
+    for row in windows.values():
+        row["offs"] = "; ".join(row.pop("_classes")) or "none"
+    return list(windows.values())
+
+
+def _hpanel_mouse_off(ctx, triggers):
+    """Known off throughout the relevant window, including its carried entry state; a late off observation cannot erase earlier unknown/on time."""
+    rows = ctx.get("panel mouse (F122)", {})
+    states = [(r.get("to") or r.get("setting"), r.get("_t")) for kind in ("entry", "setting", "sec") for r in rows.get(kind, [])]
+    if not states or any(state != "off" for state, _ in states):
+        return False
+    since = ctx.get("_health_window", {}).get("since")
+    if since is not None and not rows.get("entry") and not any(t == since for _, t in states):
+        return False   # unknown at the selected window's start; an off line later cannot prove the whole interval off
+    first = min((r["_t"] for r in triggers if r.get("_t") is not None), default=None)
+    known = min((t for _, t in states if t is not None), default=None)
+    return first is not None and known is not None and known <= first
+
+
+def _hvisor_census_needed(ctx):
+    rows = ctx.get("visor census (F121b)", {})
+    keys = [r["to"] for kind in ("entry", "key") for r in rows.get(kind, [])]
+    if "on" in keys:
+        return True
+    # A draw that was shifted/symmetric/refused under an axis attempt proves the key was active even if its setting line was outside the saved log.
+    return any(int(r["seen"]) > int(r["keyoff"]) for r in _hrows(ctx, "visor axis (F121)", "sec"))
+
+
 def _hj_f119_containment(rows, ctx):
     """F119 (measure only): the head's offset from its rest point on foot, and how close world geometry gets to each eye, to set the radii of a head leash and a wall
     contact rule. Per class the p95 and max of the horizontal offset (the p95 from the pooled histogram, an upper bin edge), the pooled p99.5 of normal play (the seconds
@@ -10758,12 +10804,14 @@ def _hj_f119_containment(rows, ctx):
     contact coverage is the largest of the second; the baseline is the coverage at a head offset under 3 cm, where the game's own camera is and the figure must be about 0.
     NEVER APPLIED when on-foot seconds passed (the F87h lines) with no line, or when every second sampled no head; PARTIAL when the depth grid was read in under half of the
     seconds or the baseline is not about 0 (4 cells of 64 or more within 20 cm with the player's body left out); IDLE with nothing on foot."""
-    sec = rows.get("sec", [])
+    sec = rows.get("sec", []) + _f119_windows(rows.get("window", []))
+    # Physical file order preserves epoch transitions even across timestamp ties or a wall-clock rollback. Direct/legacy constructed rows use timestamps.
+    sec.sort(key=(lambda r: r["_order"]) if all("_order" in r for r in sec) else (lambda r: r["_t"] or 0))
     if not sec:
         # the session line (written at the first Present boundary) says the build carries the instrument; the view height hold's lines say seconds were spent on foot
         if not rows:
             return None
-        on_foot = len(ctx.get("view height hold (F87h)", {}).get("sec", []))
+        on_foot = _hsecs(ctx.get("view height hold (F87h)", {}).get("sec", []))
         if on_foot >= 3:
             return ("NEVER APPLIED", "%d on-foot seconds (view height hold lines) and the instrument's session line, but no 1 s head containment line" % on_foot)
         fail = rows.get("fail", [])
@@ -10778,11 +10826,12 @@ def _hj_f119_containment(rows, ctx):
     sampled = 0
     for r in sec:
         entries = list(_F119_CLASS_RE.finditer(r["offs"]))
-        sm = {"t": r["_t"], "max": 0.0, "n": 0}
+        sm = {"t": r["_t"], "max": 0.0, "n": 0, "wl": _hwl(r), "mixed": r.get("context") == "mixed rest"}
         for m in entries:
-            c = classes.setdefault(m.group("name"), {"n": 0, "max": 0.0, "hist": [0] * 17, "histn": 0, "p95max": 0.0})
+            c = classes.setdefault(m.group("name"), {"n": 0, "max": 0.0, "hist": [0] * 17, "histn": 0, "p95max": 0.0, "seconds": 0})
             n = int(m.group("n"))
             c["n"] += n
+            c["seconds"] += r.get("_class_seconds", {}).get(m.group("name"), _hwl(r) if rows.get("window") else 0)
             c["max"] = max(c["max"], float(m.group("max")))
             c["p95max"] = max(c["p95max"], float(m.group("p95")))
             if m.group("hist") != "-":
@@ -10796,7 +10845,7 @@ def _hj_f119_containment(rows, ctx):
         for m in entries:
             if m.group("hist") != "-":
                 sm["hist"] = [a + int(x) for a, x in zip(sm["hist"], m.group("hist").split(","))]
-        sm["gen"] = int(r["gen"])
+        sm["gen"] = int(r.get("epoch") or r["gen"])
         sm["rec"] = int(r["rec"])
         per_sec.append(sm)
         sampled += sm["n"]
@@ -10806,11 +10855,11 @@ def _hj_f119_containment(rows, ctx):
         for m in _F119_EYE_RE.finditer(r["depth"]):
             e = 0 if m.group("eye") == "L" else 1
             if int(m.group("read")):
-                eyes_read[e] += 1
+                eyes_read[e] += int(r["dl" if e == 0 else "dr"]) if r.get("dl" if e == 0 else "dr") is not None else 1
                 near_np.append((float(m.group("near")), m.group("nw"), m.group("na"), int(m.group("c5")), int(m.group("c10")), int(m.group("c20")), int(m.group("cnp")),
                                 int(m.group("b20"))))
         if _F119_EYE_RE.search(r["depth"]) and any(int(m.group("read")) for m in _F119_EYE_RE.finditer(r["depth"])):
-            eye_secs += 1
+            eye_secs += int(r["da"]) if r.get("da") is not None else 1
         base_frames += int(r["bframes"])
         base_max, base_body = max(base_max, int(r["bcells"])), max(base_body, int(r["bbody"]))
         if r["c1"] != "none":
@@ -10824,19 +10873,21 @@ def _hj_f119_containment(rows, ctx):
             cweakest = int(r["cw"]) if cweakest is None else min(cweakest, int(r["cw"]))
             cfar = max(cfar, int(r["cfar"]))
     if not sampled:
-        return ("NEVER APPLIED", "%d on-foot seconds and no head offset was ever sampled (no pose from the runtime, or the alignment it reported was never in the history)" % len(sec))
-    # normal play: after the first recentre on foot (if the window holds one), before the first second past the lean line
+        return ("NEVER APPLIED", "%d on-foot seconds and no head offset was ever sampled (no pose from the runtime, or the alignment it reported was never in the history)" % _hsecs(sec))
+    # Mixed-rest request cohorts keep every measurement, including the first geometry-ACK frame, but cannot set normal-play radii.
+    steady = [sm for sm in per_sec if not sm["mixed"]]
     start = 0
-    for i in range(1, len(per_sec)):
-        if per_sec[i]["gen"] != per_sec[0]["gen"]:
+    for i in range(1, len(steady)):
+        if steady[i]["gen"] != steady[0]["gen"]:
             start = i
             break
-    lean_at = next((i for i in range(start, len(per_sec)) if per_sec[i]["max"] > _F119_LEAN_CM), None)
-    normal = per_sec[start:lean_at] if lean_at is not None else per_sec[start:]
-    basis = "the %d s %s%s" % (len(normal), "after the first recentre on foot" if start else "from the start",
-                               " and before the first second past %d cm (%s)" % (_F119_LEAN_CM, _hclock(per_sec[lean_at]["t"])) if lean_at is not None else "")
+    lean_at = next((i for i in range(start, len(steady)) if steady[i]["max"] > _F119_LEAN_CM), None)
+    normal = steady[start:lean_at] if lean_at is not None else steady[start:]
+    basis = "the %d s %s%s" % (_hsecs(normal), "after the first recentre on foot" if start else "from the start",
+                               " and before the first second past %d cm (%s)" % (_F119_LEAN_CM, _hclock(steady[lean_at]["t"])) if lean_at is not None else "")
     if not normal:
-        normal, basis = per_sec, "all %d s (normal play could not be told from the leans)" % len(per_sec)
+        normal = steady
+        basis = "all %d s (normal play could not be told from the leans)" % _hsecs(steady) if steady else "none (only mixed-rest transition measurements)"
     pool, pool_max = [0] * 17, 0.0
     for sm in normal:
         pool = [a + b for a, b in zip(pool, sm["hist"])]
@@ -10847,7 +10898,7 @@ def _hj_f119_containment(rows, ctx):
     for name in sorted(classes, key=lambda k: -classes[k]["n"]):
         c = classes[name]
         p = _f119_upper(c["hist"], 0.95, c["max"]) if c["histn"] >= 0.5 * c["n"] else None
-        cls_text.append("%s n %d, p95 %s, max %.1f" % (name, c["n"], "<= %.0f" % p if p is not None else "%.1f (a second's)" % c["p95max"], c["max"]))
+        cls_text.append("%s n %d, p95 %s, max %.1f" % (name, c["n"], "<= %.0f" % p if p is not None else "%.1f (a second's)" % c["p95max"], c["max"]) + (", in %d s" % c["seconds"] if c["seconds"] else ""))
     recs = [sm["rec"] for sm in per_sec]
     moves = recs[0] + sum(max(0, b - a) for a, b in zip(recs, recs[1:]))
     ses = rows.get("session", [])
@@ -10878,7 +10929,7 @@ def _hj_f119_containment(rows, ctx):
     nearest = min((float(x[1]) for x in near_np if x[1] != "none"), default=None)
     body = min((float(x[2]) for x in near_np if x[2] != "none"), default=None)
     depth_text = ("depth read in %d of %d s (eye L %d s, R %d s)%s; nearest world %s cm (with the body %s), cells within 20 cm max %d, within 3 cm of the near plane max %d%s" % (
-        eye_secs, len(sec), eyes_read[0], eyes_read[1], ", near plane %.1f cm" % near if near is not None else "",
+        eye_secs, _hsecs(sec), eyes_read[0], eyes_read[1], ", near plane %.1f cm" % near if near is not None else "",
         "%.1f" % nearest if nearest is not None else "none", "%.1f" % body if body is not None else "none", c20, cnp, ""))
     contact_text = "contact at the near plane: the smallest head offset %s (1 cell), %s (8 cells), %s (32 cells); contact frames (32 cells or more) %d, the weakest %s cells, far cells (over 1 m) on them up to %d" % (
         "%.1f cm at %s" % (min(c1s)[0], _hclock(min(c1s)[1])) if c1s else "none", "%.1f cm at %s" % (min(c8s)[0], _hclock(min(c8s)[1])) if c8s else "none",
@@ -10886,9 +10937,12 @@ def _hj_f119_containment(rows, ctx):
     text = ("%d s on foot, %d head samples; head offset by class (cm, horizontal): %s; normal play (%s): p95 <= %s cm, p99.5 <= %s cm; the rest point moved %d time(s) on foot; "
             "EDVR's own eye offsets (kept out of the head offset): horizontal max %.1f cm, up %+.1f..%+.1f cm; %s; baseline (head offset under 3 cm, %d frames): cells within 20 "
             "cm max %d (with the body %d); %s; the commander's collision radius: %s%s" % (
-                len(sec), sampled, "; ".join(cls_text[:8]) + ("; +%d more classes" % (len(cls_text) - 8) if len(cls_text) > 8 else ""), basis,
+                _hsecs(sec), sampled, "; ".join(cls_text[:8]) + ("; +%d more classes" % (len(cls_text) - 8) if len(cls_text) > 8 else ""), basis,
                 "%.0f" % p95 if p95 is not None else "-", "%.0f" % p995 if p995 is not None else "-", moves, hmax, upmin, upmax, depth_text, base_frames, base_max, base_body,
                 contact_text, radius, rec_text))
+    if rows.get("window") or any(r.get("context") is not None for r in sec):
+        mixed_secs = _hsecs([sm for sm in per_sec if sm["mixed"]])
+        text += "; report epochs preserve actual reference generations; mixed-rest transition %d s excluded from normal-play radii; clean lean boundaries have summary-window resolution (at most 10 s)" % mixed_secs
     fail = rows.get("fail", [])
     if fail:
         return ("PARTIAL", text + "; the depth grid stood down: %s" % fail[-1]["why"])
@@ -10897,7 +10951,7 @@ def _hj_f119_containment(rows, ctx):
         for r in sec:
             skips.update(_hpairs(r["skipped"]))
         return ("PARTIAL", text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
-    if eye_secs * 2 < len(sec):
+    if eye_secs * 2 < _hsecs(sec):
         return ("PARTIAL", text + "; the depth grid was read in under half of the seconds")
     if base_max >= 4:
         return ("PARTIAL", text + "; the baseline is not about 0: %d cells of 64 within 20 cm at a head offset under 3 cm, with the player's body left out (a wall that near at rest, or the "
@@ -11122,9 +11176,13 @@ def _hj_f121b_census(rows, ctx):
     multiply of the visor's blend going to zero). PARTIAL names what it finds: 'non-finite pixels after the visor draw', 'exposure non-finite', or an HDR scene that is
     all black after the visor draw (with the key's state, so the on and off seconds of one flight read side by side). OK when it measured and found none of them; IDLE
     when armed and no sample came; NEVER APPLIED when the census could not make its resources. No line at all is a build before F121b."""
-    armed, key, note, sec = rows.get("armed", []), rows.get("key", []), rows.get("note", []), rows.get("sec", [])
+    armed, key, note, sec = rows.get("armed", []), rows.get("entry", []) + rows.get("key", []), rows.get("note", []), rows.get("sec", [])
+    needed = _hdetail(ctx) is not None and _hvisor_census_needed(ctx)
+    draws = sum(int(r["seen"]) for r in _hrows(ctx, "visor axis (F121)", "sec"))
+    if needed and not sec and draws >= 6:
+        return ("NEVER APPLIED", "the axis key was on and %d visor draws ran, but no census sample was reported" % draws)
     if not (armed or key or note or sec):
-        return None
+        return ("IDLE", "the axis key was on; no visor draw on foot to sample yet") if needed else None
     broken = [r["what"] for r in note if "could not be made" in r["what"]]
     if broken:
         return ("NEVER APPLIED", "the census did not run: %s" % broken[0])
@@ -11219,7 +11277,7 @@ def _hj_f122_mouse(rows, ctx):
     sec, sets, hooks = rows.get("sec", []), rows.get("setting", []), rows.get("hook", [])
     if not sec and not sets and not hooks:
         return None
-    key = sets[-1]["to"] if sets else (sec[-1]["setting"].strip() if sec else "off")
+    key = sets[-1]["to"] if sets else (sec[-1]["setting"].strip() if sec else (rows["entry"][-1]["to"] if rows.get("entry") else "off"))
     parts = ["key %s%s" % (key, " (%d change line(s))" % len(sets) if len(sets) > 1 else "")]
     never, partial, hid_any = [], [], False
     for k in ("off", "on"):
@@ -11227,7 +11285,7 @@ def _hj_f122_mouse(rows, ctx):
         if not g:
             continue
         seen, hidden, failed = (sum(int(r[f]) for r in g) for f in ("seen", "hidden", "failed"))
-        parts.append("%s: %d s with a panel, %d panels seen, %d sprites hidden, %d hide writes failed" % (k, len(g), seen, hidden, failed))
+        parts.append("%s: %d s with a panel, %d panels seen, %d sprites hidden, %d hide writes failed" % (k, _hcount(g, "xs", lambda r: int(r["seen"]) > 0), seen, hidden, failed))
         if k == "off":
             if seen and not hidden:
                 never.append("panels were seen (%d) and nothing was hidden" % seen)
@@ -11311,6 +11369,8 @@ def _hj_f114b_pointer(rows, ctx):
         if armed and all(r["state"] == "NOT armed" for r in armed):
             return ("NEVER APPLIED", "the owner transform hook was not armed%s, and %s" % (
                 armed[-1]["rest"], "no 1 s line (the detail log was off)" if quiet else "no panel was seen"))
+        if _hpanel_mouse_off(ctx, armed + owners):
+            return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
         if quiet:
             return ("IDLE", "no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with a panel, or none)")
         return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
@@ -12677,6 +12737,11 @@ HEALTH_RULES = (
                 r"the far side (?P<far>\d+)\), largest span [\d.]+ deg, incomplete (?P<inc>\d+), not dispatched (?P<nodisp>\d+)(?:; at an IPD of 63 mm; edge in (?P<es>\d+) of (?P<ews>\d+) s; speed in (?P<ss>\d+) of (?P<sws>\d+) s)?"),
     ), _hj_f118_reticle),
     _hrule("head containment (F119)", ("F119",), ("head containment (F119)",), (
+        ("context", r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$"),
+        ("window", r"head containment \(F119\) " + H_WL + r": frames (?P<frames>\d+) \(no pose (?P<nopose>\d+), over limit (?P<over>\d+)\); rest (?P<gen>\d+) age (?P<age>[\d.]+) recentres (?P<rec>\d+); "
+                   r"head offset cm: (?P<offs>.*?); own cm h (?P<hmax>[\d.]+) up (?P<upmin>[+-][\d.]+)\.\.(?P<upmax>[+-][\d.]+) lock/weapon/view [\d.]+/[\d.]+/[\d.]+ neck/hold [+-][\d.]+/[+-][\d.]+; "
+                   r"depth cm: (?P<depth>.*?); skipped (?P<skipped>.*?); contact cm 1/8/32 (?P<c1>[\d.]+|none)/(?P<c8>[\d.]+|none)/(?P<c32>[\d.]+|none) frames/weakest/far (?P<cf>\d+)/(?P<cw>\d+)/(?P<cfar>\d+); "
+                   r"baseline frames/world/body (?P<bframes>\d+)/(?P<bcells>\d+)/(?P<bbody>\d+); cost [\d.]+ us/frame; depth s L/R/any (?P<dl>\d+)/(?P<dr>\d+)/(?P<da>\d+) of \d+; class s (?P<cs>\d+); window (?P<wid>\d+); epoch (?P<epoch>\d+); (?P<context>steady|mixed rest)$"),
         ("sec", r"head containment \(F119\) 1 s: frames (?P<frames>\d+) \(no pose (?P<nopose>\d+), over limit (?P<over>\d+)\); rest point: generation (?P<gen>\d+), "
                 r"(?P<age>[\d.]+) s old, recentres (?P<rec>\d+); head offset cm: (?P<offs>.*?); EDVR eye offsets cm: h max (?P<hmax>[\d.]+), "
                 r"up (?P<upmin>[+-][\d.]+)\.\.(?P<upmax>[+-][\d.]+) \[ADS lock\+sight (?P<lock>[\d.]+), weapon eye (?P<weapon>[\d.]+), view (?P<view>[\d.]+) horizontal; "
@@ -12786,7 +12851,7 @@ HEALTH_RULES = (
         ("_", r"panel cursor follow \(F120\) so far: "),
     ), _hj_f120_follow, needs_detail=True),   # F125: as F111's
     _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
-        ("sec", r"panel mouse \(F122\) 1 s: setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)$"),
+        ("sec", r"panel mouse \(F122\) " + H_WL + r": setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)(?:; panels active (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
         ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
         ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
     ), _hj_f122_mouse),
@@ -12821,7 +12886,7 @@ HEALTH_RULES = (
         ("sec", r"visor axis \(F121b\) 1 s: key (?P<key>on|off); samples (?P<n>\d+) \(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\) of (?P<taps>\d+) taps; nonfinite (?P<nf>\d+) "
                 r"\(NaN (?P<nan>\d+), Inf (?P<inf>\d+)\)(?P<where> at x \d+-\d+, y \d+-\d+ of \d+x\d+)?; black (?P<black>\d+); max (?P<max>\S+); mean (?P<mean>[\d.]+); "
                 r"exposure e0 (?P<ex0>\S+) e1 (?P<ex1>\S+) \(read in (?P<exr>\d+) samples, non-finite in (?P<exn>\d+)\); dropped (?P<drop>\d+)$"),
-    ), _hj_f121b_census),
+    ), _hj_f121b_census, needs_detail=True),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
         ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
@@ -13131,12 +13196,19 @@ def health_scan(text, since=None, until=None):
     """One pass over the log: the tag census, the rows each rule extracts, and the labelled lines no pattern of a rule matched."""
     census = {}
     rows = {rule.name: {} for rule in HEALTH_RULES}
+    rows["_health_window"] = {"since": since, "until": until}
     unparsed = {rule.name: [0, ""] for rule in HEALTH_RULES}
     tagged = 0
     first = last = None
     # F125: the detail log's state is said when native on foot arms and at each change, often long before a --since window opens. The last F125 line read
     # before the window's first line is the state in force as it opens: it goes to the log diet rule as an "entry" row.
     carried, entered = None, False
+    settings = {}
+    setting_rules = (
+        ("panel mouse (F122)", re.compile(r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;")),
+        ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
+        ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
+    )
     for raw in text.splitlines():
         if "(F" not in raw:
             continue
@@ -13148,8 +13220,14 @@ def health_scan(text, since=None, until=None):
         inside = _health_in_window(tod, since, until)
         if inside and not entered:
             entered = True
+            for name, state in settings.items():
+                rows[name].setdefault("entry", []).append(dict(state))
             if carried is not None:
                 rows[H_F125].setdefault("entry", []).append(carried)
+        for name, regex in setting_rules:
+            match = regex.search(raw)
+            if match:
+                settings[name] = dict(match.groupdict(), _t=tod)
         if H_F125_LABEL in raw:
             g = H_F125_RE.search(raw)
             if g:
@@ -13184,6 +13262,9 @@ def health_scan(text, since=None, until=None):
                     if g:
                         if kind != "_":
                             d = g.groupdict()
+                            d["_order"] = tagged   # stable physical log order when compact/detail records share a millisecond
+                            if rule.name == "head containment (F119)" and kind == "sec" and rule.name in settings:
+                                d.update({k: settings[rule.name][k] for k in ("epoch", "context")})
                             d["_t"] = tod
                             rows[rule.name].setdefault(kind, []).append(d)
                         break
@@ -13204,7 +13285,7 @@ def health_verdicts(scan, rules=None):
         own = scan["rows"][rule.name]
         count, example = scan["unparsed"][rule.name]
         # Before the judge: a judge may find a NEVER APPLIED in other rules' rows (a trigger the log proves) that the summary log never meant to answer.
-        if rule.needs_detail and detail_log == "off" and not count and not any(own.values()):
+        if rule.needs_detail and detail_log == "off" and not count and not any(own.values()) and not (rule.name == "visor census (F121b)" and _hvisor_census_needed(scan["rows"])):
             unjudged.append(rule.name)
             continue
         got = rule.judge(own, scan["rows"])
@@ -13954,6 +14035,7 @@ def self_test_health():
         f116src = read_text(f116_path)
         f121src = read_text(f121_path)
         f119src = read_text(f119_path)
+        f125headsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f125containment.h"))
         f123src = read_text(f123_path)
         f121bsrc = read_text(f121b_path)
         f121csrc = read_text(f121c_path)
@@ -14050,6 +14132,12 @@ def self_test_health():
         if fmts[key] is None:
             raise AssertionError("visor_census_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
+
+    def RHead(needle, *vals):
+        fmt = health_c_format(f125headsrc, needle)
+        if fmt is None:
+            raise AssertionError("F125 containment header has no format holding %r" % needle)
+        return health_render(fmt, vals)
 
     def R123(needle, *vals):
         """F123's lines (native_on_foot_f123.h builds them: formatSession, formatEpisode, formatAsk, formatResult, formatAfter), from their own format literals."""
@@ -14496,6 +14584,14 @@ def self_test_health():
             return R119("native on foot head containment (F119) 1 s", frames, nopose, 0, gen, age, rec, offs if offs is not None else cls119(), hmax, 17.1, 17.1, 0.0, 0.0, 0.0,
                         17.1, 0.0, depth if depth is not None else both, skipped, c1, c8, c32, cf, cw, cfar, *base, 41.0)
 
+        def head119(wl=10, wid=1, offs=None, gen=7, epoch=1, context="steady", rec=0, clssecs=None, dl=None, dr=None, da=None,
+                    frames=None, nopose=0, cf=0, cw=0, cfar=0):
+            both = eye119("L", read=90 * wl) + "; " + eye119("R", read=90 * wl)
+            return RHead("native on foot head containment (F119) %u s", wl, 90 * wl if frames is None else frames, nopose, 0, gen, 12.4, rec,
+                         offs if offs is not None else cls119(n=90 * wl, hist=hist119((3, 40 * wl), (4, 40 * wl), (5, 10 * wl))),
+                         4.0, 17.1, 17.1, 0.0, 0.0, 0.0, 17.1, 0.0, both, "none", "none", "none", "none", cf, cw, cfar, 80 * wl, 0, 0, 41.0,
+                         wl if dl is None else dl, wl if dr is None else dr, wl if da is None else da, wl, wl if clssecs is None else clssecs, wid, epoch, context)
+
         def ses119(radius="not read"):
             return R119("measure only, nothing drawn changes", radius, 8, 8, 8, 8, 0x10)
 
@@ -14845,8 +14941,8 @@ def self_test_health():
         # ---- panel mouse (F122): the cursor on on-foot panels hidden by default, behind one advanced key ----
         F122 = "panel mouse (F122)"
 
-        def pm(setting="off", seen=90, hidden=90, failed=0):
-            return R("panel mouse (F122) 1 s", setting, seen, hidden, failed)
+        def pm(setting="off", seen=90, hidden=90, failed=0, wl=1, active=None):
+            return R("panel mouse (F122) %u s", wl, setting, seen, hidden, failed, int(bool(seen)) if active is None else active, wl)
 
         def pm_set(to="off"):
             return R("native on foot panel mouse (F122): %s (live", to)
@@ -15869,6 +15965,91 @@ def self_test_health():
               [("OK", F95C)], has=["13 s:"], lacks=["UNPARSED"])
         check("F125 F100: per-second cost divides by window length", [pose100(calls=900, ms=38.25, wl=10)], 0,
               [("OK", P100)], has=["10 s: 900 calls (90 a second)", "3.825 ms a second"], lacks=["UNPARSED"])
+
+        # F125 step 8: compact class lines share one window; reference/epoch and transition context remain distinct.
+        two_classes = [head119(offs=cls119(n=720, hist=hist119((3, 320), (4, 320), (5, 80))), clssecs=8, dl=7, dr=5, da=8, cf=3, cw=40, cfar=2),
+                       head119(offs=cls119(name="crouched/tool/ADS", n=180, hist=hist119((5, 180))), clssecs=2, dl=7, dr=5, da=8, cf=3, cw=40, cfar=2)]
+        check("F125 containment: common fields count once across two classes", two_classes, 0, [("OK", F119)],
+              has=["10 s on foot, 900 head samples", "standing/unarmed/hip n 720", "in 8 s", "crouched/tool/ADS n 180", "in 2 s",
+                   "depth read in 8 of 10 s (eye L 7 s, R 5 s)", "baseline (head offset under 3 cm, 800 frames)", "contact frames (32 cells or more) 3"],
+              lacks=["UNPARSED", "1600 frames", "20 s on foot"])
+        all_classes = [head119(wid=3, offs=cls119(name="%s/%s/%s" % (stance, item, ads), n=50, hist=hist119((5, 50))), clssecs=1)
+                       for stance in ("standing", "crouched", "unknown") for item in ("unarmed", "weapon", "tool") for ads in ("hip", "ADS")]
+        check("F125 containment: all eighteen class histograms survive", all_classes, 0, [("OK", F119)],
+              has=["10 s on foot, 900 head samples", "+10 more classes", "p99.5 <= 6 cm"], lacks=["UNPARSED"])
+        check("F125 containment: short flushed window", [head119(wl=3)], 0, [("OK", F119)],
+              has=["3 s on foot, 270 head samples", "depth read in 3 of 3 s"], lacks=["UNPARSED"])
+        check("F125 containment: repeated class on reentry uses fresh window ids", [head119(wid=20, epoch=10), head119(wid=21, epoch=11)], 0,
+              [("OK", F119)], has=["20 s on foot, 1800 head samples", "baseline (head offset under 3 cm, 1600 frames)"], lacks=["UNPARSED"])
+        huge_lean = cls119(n=90, mx=80.0, p95=80.0, hist=hist119((15, 90)))
+        transition = head119(wl=1, wid=31, epoch=2, context="mixed rest", offs=huge_lean)
+        check("F125 containment: same-reference ask and done keep boundary samples mixed", [head119(wid=30, gen=7, epoch=1), transition,
+              head119(wid=32, gen=7, epoch=3)], 0, [("OK", F119)],
+              has=["21 s on foot, 1890 head samples", "mixed-rest transition 1 s excluded", "normal play (the 10 s after the first recentre on foot)",
+                   "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"])
+        check("F125 containment: failed ask also excludes its uncertain cohort", [head119(wid=40, gen=7, epoch=4),
+              head119(wl=1, wid=41, gen=7, epoch=5, context="mixed rest", offs=huge_lean), head119(wid=42, gen=7, epoch=6)], 0, [("OK", F119)],
+              has=["21 s on foot", "mixed-rest transition 1 s excluded", "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"])
+        check("F125 containment: only uncertain measurements recommend no radius", [transition], 0, [("OK", F119)],
+              has=["only mixed-rest transition measurements", "mixed-rest transition 1 s excluded"], lacks=["radii: soft", "UNPARSED"])
+        check("F125 containment: a no-pose gap cannot merge two references", [head119(wl=5, wid=50, gen=7, epoch=7),
+              head119(wl=1, wid=51, gen=7, epoch=7, offs="none", frames=1, nopose=1), head119(wl=3, wid=52, gen=8, epoch=8)], 0, [("OK", F119)],
+              has=["9 s on foot", "normal play (the 3 s after the first recentre on foot)"], lacks=["UNPARSED"])
+        check("F125 containment: no head in a ten-second window", [head119(offs="none", nopose=900)], 3, [("NEVER APPLIED", F119)],
+              has=["10 on-foot seconds and no head offset"], lacks=["UNPARSED"])
+        check("F125 containment: camera-gate cancellation ends its pending cohort before resume", [head119(wid=50, epoch=1),
+              head119(wl=1, wid=51, epoch=2, context="mixed rest", offs=huge_lean), head119(wid=52, epoch=3)], 0, [("OK", F119)],
+              has=["21 s on foot", "mixed-rest transition 1 s excluded", "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"])
+        def context119(epoch=1, mixed=False):
+            return R("native on foot head containment (F119): report context: reference %u", 7, "known", epoch, "mixed rest" if mixed else "steady")
+        check("F125 containment: same-millisecond summary-detail transition keeps physical log order", [(1, head119(wid=60, epoch=1)),
+              (1, context119(2)), (1, sec119())], 0, [("OK", F119)],
+              has=["normal play (the 1 s after the first recentre on foot)", "11 s on foot, 990 head samples", "in 11 s"], lacks=["UNPARSED"])
+        check("F125 containment: wall-clock rollback cannot reorder summary-detail report epochs", [(10, head119(wid=61, epoch=1)),
+              (9, context119(2)), (9, sec119())], 0, [("OK", F119)],
+              has=["normal play (the 1 s after the first recentre on foot)", "11 s on foot, 990 head samples", "in 11 s"], lacks=["UNPARSED"])
+        check("F125 containment: unchanged detail lines inherit explicit report context", [context119(1), sec119(), context119(2, True),
+              sec119(offs=huge_lean), context119(3), sec119()], 0, [("OK", F119)],
+              has=["3 s on foot, 270 head samples", "mixed-rest transition 1 s excluded", "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"])
+        check("F125 containment: pending detail context carries into since window", [(0, context119(2, True)), (90, sec119(offs=huge_lean)),
+              (91, context119(3)), (92, sec119())], 0, [("OK", F119)], has=["2 s on foot, 180 head samples", "mixed-rest transition 1 s excluded",
+              "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
+        checks += 1
+        weighted = _hj_f119_containment({"session": [{"radius": "not read"}]}, {"view height hold (F87h)": {"sec": [{"wl": "10"}]}})
+        if weighted[0] != "NEVER APPLIED" or "10 on-foot seconds" not in weighted[1]:
+            print("health: F125 containment did not weight its F87h on-foot evidence", weighted)
+            ok = False
+
+        legacy_mouse = "panel mouse (F122) 1 s: setting off; panels seen 90, sprites hidden 90, hide write failed 0"
+        check("F125 panel: old one-second mouse line", [legacy_mouse], 0, [("OK", F122)], has=["off: 1 s with a panel"], lacks=["UNPARSED"])
+        check("F125 panel: active seconds in ten-second windows", [pm(wl=10, seen=900, hidden=900, active=3), pm(wl=3, seen=90, hidden=90, active=1)], 0,
+              [("OK", F122)], has=["off: 4 s with a panel, 990 panels seen"], lacks=["UNPARSED"])
+        check("F125 panel: key off throughout makes its closed instruments idle", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(), p114_armed()], 0,
+              [("IDLE", F111), ("IDLE", F114B)], has=["the panel mouse key is off: the instruments are idle by design"], lacks=["UNPARSED"])
+        check("F125 panel: key off never hides a real installation failure", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(0), p114_armed("NOT armed", why="x")], 3,
+              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["UNPARSED"])
+        check("F125 panel: an on interval cannot be erased by a later off line", [R("native on foot log (F125): detail %s", "on", 1), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
+              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
+        check("F125 panel: off-on-off still contains an active interval", [R("native on foot log (F125): detail %s", "on", 1), pm_set("off"), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
+              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
+        check("F125 panel: a later off observation cannot prove earlier unknown state", [R("native on foot log (F125): detail %s", "on", 1), ptr_armed(), p114_armed(), pm_set()], 3,
+              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
+        check("F125 panel: setting carried into a since window", [(0, R("native on foot log (F125): detail %s", "on", 1)), (1, pm_set()), (90, ptr_armed()), (91, p114_armed())], 0,
+              [("IDLE", F111), ("IDLE", F114B)], has=["idle by design"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
+        check("F125 panel: unknown-to-off mid-selected-window is not known off throughout", [(0, R("native on foot log (F125): detail %s", "on", 1)), (90, f90_part()), (100, pm_set()),
+              (101, ptr_armed()), (102, p114_armed())], 3, [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)],
+              lacks=["idle by design", "UNPARSED"], extra=["--since", "10:01:00"])
+        check("F125 visor: default census absence needs detail", [R("native on foot log (F125): detail %s", "off", 10), f90_part()], 0, [("OK", F90S)],
+              has=["not judged (detail log off)", F121B], lacks=[row("NEVER APPLIED", F121B)])
+        check("F125 visor: active axis with detail off still judges missing census", [R("native on foot log (F125): detail %s", "off", 10), cen_key("on"), vax_win()], 3,
+              [("NEVER APPLIED", F121B)], has=["axis key was on", "no census sample"], lacks=["UNPARSED"])
+        check("F125 visor: axis draw evidence prevents absent-rule suppression", [R("native on foot log (F125): detail %s", "off", 10), vax_win()], 3,
+              [("NEVER APPLIED", F121B)], lacks=["UNPARSED"])
+        check("F125 visor: axis on without a draw is idle", [R("native on foot log (F125): detail %s", "off", 10), cen_key("on")], 0, [("IDLE", F121B)], lacks=["UNPARSED"])
+        check("F125 visor: stock-axis detailed A/B still measures", [R("native on foot log (F125): detail %s", "on", 1), cen_key("off"), cen_armed(), cen(key="off")], 0,
+              [("OK", F121B)], lacks=["UNPARSED"])
+        check("F125 visor: axis key carried into a since window", [(0, R("native on foot log (F125): detail %s", "off", 10)), (1, cen_key("on")), (90, vax_win())], 3,
+              [("NEVER APPLIED", F121B)], has=["axis key was on"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
 
         # ---- F125: the on-foot log diet: the detail state, the rules that need the detail log, the window helpers ----
         F125_OFF = R("native on foot log (F125): detail %s", "off", 10)

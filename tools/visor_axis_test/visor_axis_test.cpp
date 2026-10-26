@@ -766,9 +766,16 @@ int main(int argc, char** argv) {
                   countOf(rf, "vScreenCopyResourceRaw(ctx, g.stage[e][si], g.out[e])") == 1 && countOf(rf, "ctx->CopyResource(") == 0 && countOf(rf, "CopySubresourceRegion") == 0 &&
                   countOf(rf, "censusRun(ctx);") == 1 && countOf(rf, "censusBegin(ctx, eye)") == 1,
               "V8.F121b-the-census-copies-the-target-it-does-not-unbind-it-and-runs-once-after-the-draw-and-F121c-its-copies-skip-the-copy-hook");
-        // F121c: the census runs only with the test key on (the sample is begun only inside that test), the eye-trust verdict gates the bind, and the self-off.
-        check(countOf(rf, "if (onFoot && g_axisKeyOn.load(std::memory_order_relaxed)) {\n        censusBegin(ctx, eye);") == 1,
-              "V8.F121c-the-census-is-begun-only-with-the-test-key-on");
+        // F125: an axis attempt or detailed logging enables the on-foot census. Detailed logging alone measures the game's unshifted draw; the replacement
+        // still requires the axis key, eye trust and a live attempt, and only a shifted sample from that attempt may turn it off.
+        check(countOf(rf, "if (onFoot && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail())) {\n        censusBegin(ctx, eye);") == 1 &&
+                  countOf(rf, "if (detail::g_remlokMode == Mode::kOuter && (g_axisKeyOn.load(std::memory_order_relaxed) || nofoot::logwin::detail()) && !g_censusArmedNoted)") == 1,
+              "V8.F125-the-census-is-armed-and-begun-for-axis-on-or-detail-on-and-samples-only-on-foot");
+        check(countOf(rf, "if (!g_axisKeyOn.load(std::memory_order_relaxed)) {") == 1 &&
+                  countOf(rf, "sl.keyOn = g_axisKeyOn.load(std::memory_order_relaxed);") == 1 &&
+                  countOf(rf, "if (sl.attempt == g_axisAttempt) censusAdd(e, c, sl.keyOn);") == 1 &&
+                  countOf(rf, "g_cen.pendingShifted = g_axisActive;") == 1,
+              "V8.F125-detail-only-census-keeps-the-axis-bind-key-gated-and-preserves-the-sampled-key-attempt-and-shift-state");
         check(countOf(rf, "axisBegin(ctx, eye, gamesPs, g_trustVerdict)") == 1 && countOf(rf, "if (nativeOnFootActive()) eyeWatchNote();") == 1 &&
                   countOf(rf, "Refusal::kOneEye") >= 2 && countOf(rf, "uiLayerSubmittedTarget(0)") == 1 && countOf(rf, "uiLayerSubmittedTarget(1)") == 1,
               "V8.F121c-the-bind-takes-the-eye-trust-verdict-and-the-tracker-sees-every-visor-draw-on-foot");
