@@ -745,15 +745,23 @@ int runEpisodes(Gpu& gpu) {
         check(has(p3, "frame=31 valid=1 bound=1 rows=[") && has(p3, " axes-match=7,8,9,10 how=identity nearest=7 diff=0.000e+00"),
               "EPISODE 3's pass rows: the left eye's view axes, which equal those of both eyes' four kind-5 calls (the eyes turn together): 7, 8, 9 and 10, read as they are");
     }
-    check(occurrences(log, "vr camera census: episodes windows=1 taken=4/10 triggers=7 skipped=3 state=idle") == 1,
+    // The window is wall-clock (5 s from the key going on), and the 77 frames above run real WARP readbacks: on a loaded machine they can take 5 s by themselves, and then a
+    // window prints mid-episodes and the Sleep's boundary prints another. So read the windows the way the reader does: the counters are cumulative (the last line), the
+    // runs lines are per window (a run is counted in the window it ended in), so the 9-30 bin is summed over every runs line.
+    check(has(lastLineWith(log, "vr camera census: episodes windows="), " taken=4/10 triggers=7 skipped=3 state=idle"),
           "the window's counters line: 4 episodes taken, 7 triggers (the key going on three times in the session, the journal's flip, GuiFocus, the naming), 3 skipped, nothing armed now");
     {
-        const std::string runs = lastLineWith(log, "vr camera census: runs windows=1 ");
-        check(has(runs, " unnamed=1:0,2:0,3:0,4-8:0,9-30:1,31-89:0,90+:0 ") && has(runs, " open=named:"),
-              "the naming runs: on foot from frame 40, ten unnamed frames (a run in the 9-30 bin) and then named, the named run still open when the window printed");
-        const std::string detour = lastLineWith(log, "vr camera census: detour windows=1 ");
-        check(has(detour, " every=16 timed=observer-halves ") && !has(detour, " sampled=0 ") && !has(detour, " est-ms-frame=- ") && has(detour, " inj-calls=0 ") &&
-                  !has(detour, " obs-pre-us=- ") && !has(detour, " obs-post-us=- "),
+        const std::string runs = lastLineWith(log, "vr camera census: runs windows=");
+        check(occurrences(log, " unnamed=1:0,2:0,3:0,4-8:0,9-30:1,31-89:0,90+:0 ") == 1 && has(runs, " open=named:"),
+              "the naming runs: on foot from frame 40, ten unnamed frames (a run in the 9-30 bin, counted in one window) and then named, the named run still open when the last window printed");
+        // Any one window that timed calls will do: a window that fell between the last frame and the boundary has none to time.
+        bool detourOk = false;
+        for (size_t at = log.find("vr camera census: detour windows="); at != std::string::npos; at = log.find("vr camera census: detour windows=", at + 1)) {
+            const std::string detour = lastLineWith(log.substr(0, log.find('\n', at)), "vr camera census: detour windows=");
+            detourOk = detourOk || (has(detour, " every=16 timed=observer-halves ") && !has(detour, " sampled=0 ") && !has(detour, " est-ms-frame=- ") &&
+                                    has(detour, " inj-calls=0 ") && !has(detour, " obs-pre-us=- ") && !has(detour, " obs-post-us=- "));
+        }
+        check(detourOk,
               "the detour's CPU line: observer halves timed on one call in sixteen, both halves measured (neither says a dash), an estimate made, no injected call in this scenario");
     }
     check(occurrences(log, "vr camera census: off (advanced.vr_camera_census)") == 1, "the key-off said so once");
