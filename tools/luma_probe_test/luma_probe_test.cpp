@@ -198,9 +198,37 @@ void submissionBenchmark(ID3D11Device* dev, ID3D11DeviceContext* ctx, UINT w, UI
            w, h, ms[0][15], ms[0][30], ms[1][15], ms[1][30]);
 }
 
+void reportCadenceCases() {
+    EyeState clock;
+    check(lumaSummaryDue(clock, 0) && !lumaSummaryDue(clock, 9999) && lumaSummaryDue(clock, 10000) && !lumaSummaryDue(clock, 10001),
+          "luma summary: first report and the exact ten-second boundary; intermediate samples stay quiet");
+    EyeState es;
+    for (auto& slot : es.stages) { slot.status = SlotStatus::Read; slot.mean = slot.maxLuma = 1.0f; }
+    testLog.clear();
+    reportRound(0, es);
+    const auto summaries = [] { return std::count_if(testLog.begin(), testLog.end(), [](const std::string& line) { return line.find(" game=") != std::string::npos; }); };
+    check(summaries() == 1 && testLog.size() == 2, "luma report: first summary and confirming no-black edge are both written");
+    es.stages[0].mean = es.stages[0].maxLuma = 0.0f;
+    reportRound(0, es);
+    check(summaries() == 1 && testLog.size() == 3 && testLog.back().find("first black stage is game") != std::string::npos,
+          "luma report: a black edge inside the suppressed summary window is immediate");
+    reportRound(0, es);
+    check(testLog.size() == 3, "luma report: unchanged black state inside that window does not repeat");
+    es.stages[0].mean = es.stages[0].maxLuma = 1.0f;
+    reportRound(0, es);
+    check(summaries() == 1 && testLog.size() == 4 && testLog.back().find("first black stage is none") != std::string::npos,
+          "luma report: recovery is an immediate edge too");
+    EyeState second = es;
+    second.haveSummary = false;
+    reportRound(1, second);
+    check(summaries() == 2 && testLog.back().find("eye=1 game=") != std::string::npos,
+          "luma report: the second eye has its own summary cadence");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "--dry-run") == 0) { puts("luma_probe_test: dry-run writes nothing"); return 0; }
     if (argc > 1 && strcmp(argv[1], "--self-test") != 0) { puts("usage: luma_probe_test [--self-test|--dry-run]"); return 2; }
+    reportCadenceCases();
     Ptr<ID3D11Device> dev; Ptr<ID3D11DeviceContext> ctx;
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                          D3D11_SDK_VERSION, &dev, nullptr, &ctx));

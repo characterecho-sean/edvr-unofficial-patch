@@ -765,7 +765,7 @@ struct Maps {
 };
 Maps g_maps;
 uint32_t g_frameTakenDraws = 0;           // draws taken into either layer since the last frame boundary (the door's emptiness test)
-constexpr uint64_t kMapsWindowMs = 5000;
+constexpr uint64_t kMapsWindowMs = 10000;
 
 // ------------------------------------------------------------ the price
 //
@@ -2884,7 +2884,7 @@ void mapsNoteNotLive(const char* why) {
     Log::get().note("%s", line);
 }
 
-// The 5 s window, zeros included while the key is on: an absent line is what "the code never ran" looks like.
+// The 10 s window (the historical 5s line kind), zeros included while the key is on: an absent line is what "the code never ran" looks like.
 void mapsWindowTick(uint64_t now, bool held) {
     Maps& m = g_maps;
     if (!m.windowStartMs) {

@@ -9,7 +9,7 @@
 //     and the published state the eye shift and the layer read;
 //   - every refusal the selector names: no resolver call, the eye route serves the frame, the reason in the log;
 //   - a CURVED screen (fix.panel_curvature above 0) does not hold the route off: it resolves, owns and may take frames as a flat screen
-//     does, its 5 s line names the curve (pending, stood-down, or curvature/columns/gain) and each window's strips (a delta of
+//     does, its ten-second summary names the curve (pending, stood-down, or curvature/columns/gain) and each window's strips (a delta of
 //     panel_curve's cumulative count), and its OWNS line says so; with the key off the curve changes nothing; with curvature 0 the
 //     lines are what they were (curve=off);
 //   - the route's own calls pass the hooks' internal flags, and leave the game's pipeline state as they found it;
@@ -388,11 +388,24 @@ size_t countLines(const char* needle) {
     for (const auto& l : g_log) if (l.find(needle) != std::string::npos) ++n;
     return n;
 }
-// The last 5 s line the route logged ("" when it has logged none).
-std::string lastWindowLine() {
+// The historical 5s prefixes remain parser-compatible; the reporting window is now ten seconds.
+std::string lastReportLine(const char* prefix) {
     std::string out;
-    for (const auto& l : g_log) if (l.find("vr world route 5s:") != std::string::npos) out = l;
+    for (const auto& l : g_log) if (l.find(prefix) != std::string::npos) out = l;
     return out;
+}
+std::string lastWindowLine() { return lastReportLine("vr world route 5s:"); }
+bool tenSecondReport(const std::string& line) {
+    const size_t at = line.find("; window ");
+    return at != std::string::npos && std::strtod(line.c_str() + at + 9, nullptr) >= 10.0;
+}
+uint64_t refusalDepthChecks(const std::string& line) {
+    const char field[] = " depth-check=";
+    const size_t at = line.find(field);
+    if (at == std::string::npos) return UINT64_MAX;
+    char* end = nullptr;
+    const uint64_t ran = std::strtoull(line.c_str() + at + sizeof(field) - 1, &end, 10);
+    return end && *end == '/' ? ran + std::strtoull(end + 1, nullptr, 10) : UINT64_MAX;
 }
 // The one line that says the route took the world (the OWNS line), "" when there is none or more than one.
 std::string ownsLine() {
@@ -490,11 +503,16 @@ void scenarios(World& w) {
     check(vrWorldRouteDoorLayerOnly(0, 77) && !vrWorldRouteDoorLayerOnly(1, 77) && !vrWorldRouteDoorLayerOnly(0, 78),
           "owned: the layer's take of eye 0 in sequence 77 is what makes the door layer-only, for that eye and sequence only");
     // The temporal door and then the sharpen pass both ask, so the same eye and sequence is asked twice: the answer is the
-    // same and the 5 s line counts it once. The window prints at the first boundary after five seconds (real time).
+    // same and the summary counts it once. Five seconds must not print or consume any window counters; ten seconds must.
     check(vrWorldRouteDoorLayerOnly(0, 77), "owned: the door's second question about the same eye and sequence gets the same answer");
     Sleep(5100);
     vrWorldRouteFrameBoundary();
     bindingFrameBoundary();
+    check(countLines("vr world route 5s:") == 0 && countLines("vr world route inject 5s:") == 0 && countLines("vr world route refusal 5s:") == 0 &&
+              vrWorldRouteOwnsNextFrame() && !vrWorldRouteTreatedThisFrame() && !vrWorldRouteDoorLayerOnly(0, 77),
+          "owned: after five seconds no summary or census is consumed, while ownership and per-frame tag clearing still run");
+    Sleep(5000);
+    frame(w);
     {
         bool lineOk = false, stateOk = false;
         for (const auto& l : g_log) {
@@ -502,12 +520,16 @@ void scenarios(World& w) {
             lineOk = l.find("eye-takes=1 door-layer-only=1 ") != std::string::npos;
             stateOk = l.find("state=owned") != std::string::npos && l.find("selection=selected") != std::string::npos;
         }
-        check(lineOk, "owned: the 5 s line counts the eye's take once and the layer-only door once (asked twice)");
-        check(stateOk, "owned: the 5 s line names the state (owned) and the selection (selected)");
+        check(lineOk, "owned: the ten-second summary preserves the eye's take and layer-only door count across the quiet five-second boundary (asked twice)");
+        check(stateOk, "owned: the ten-second summary names the state (owned) and the selection (selected)");
+        check(countLines("vr world route 5s:") == 1 && countLines("vr world route inject 5s:") == 1 && countLines("vr world route refusal 5s:") == 1 &&
+                  tenSecondReport(lastWindowLine()) && tenSecondReport(lastReportLine("vr world route inject 5s:")) &&
+                  tenSecondReport(lastReportLine("vr world route refusal 5s:")),
+              "owned: route, injector and refusal summaries each print once after ten seconds and label their elapsed window");
         // With fix.panel_curvature 0 nothing about the flat route changes: the line says curve=off and no strips, the OWNS line has no word about a curve.
         check(lastWindowLine().find(" curve=off curve-reissues=0 ") != std::string::npos && !ownsLine().empty() &&
                   ownsLine().find("curved") == std::string::npos && countLines("fix.panel_curvature") == 0,
-              "owned: a flat screen: the 5 s line says curve=off curve-reissues=0, and the OWNS line and the log say nothing about a curve");
+              "owned: a flat screen: the ten-second summary says curve=off curve-reissues=0, and the OWNS line and the log say nothing about a curve");
         // THE STEADY DETAIL IS ALWAYS ON (its key retired 2026-10-01): the route hands the resolver steadyDetail = true, so the resolver's
         // depth check counted the route's non-reset resolves although the census key is off, and the window printed the refusal line for
         // those frames alone, saying steady-detail=on. A route that left the steady detail off would count none and print no such line.
@@ -522,8 +544,11 @@ void scenarios(World& w) {
             ran = std::strtoull(refusal.c_str() + at + sizeof(kCheck) - 1, &end, 10);
             if (end && *end == '/') { skipped = std::strtoull(end + 1, nullptr, 10); parsed = true; }
         }
-        check(parsed && ran + skipped >= 1 && refusal.find(" census=off ") != std::string::npos && refusal.find(" steady-detail=on view=off") != std::string::npos,
-              "owned: the steady detail is on with no key: the resolver's depth check counted the route's resolves (the census key is off) and the 5 s window printed them on its refusal line");
+        uint64_t nonResetResolves = 0;
+        for (const auto& call : g_calls) if (!call.reset) ++nonResetResolves;
+        check(parsed && nonResetResolves > 1 && ran + skipped == nonResetResolves && refusal.find(" census=off ") != std::string::npos &&
+                  refusal.find(" steady-detail=on view=off") != std::string::npos,
+              "owned: the ten-second refusal window keeps every non-reset resolve's depth check, including those before the quiet five-second boundary");
     }
     check(!vrWorldRouteDoorLayerOnly(0, 77), "owned: the per-frame tags are cleared at the boundary");
     const auto stats = flatMonoResolveStats();
@@ -639,7 +664,7 @@ void scenarios(World& w) {
         check(g_backendCalls >= 1, "curved screen, layer live again: the route treats");
     }
     {   // THE CURVED SCREEN (fix.panel_curvature above 0) no longer holds the route off. The layer re-issues the game's own strip, so the route
-        // resolves, owns and takes frames as it does for a flat screen, and says which curve (the OWNS line, the 5 s line's curve= and curve-reissues=).
+        // resolves, owns and takes frames as it does for a flat screen, and says which curve (the OWNS line, the summary's curve= and curve-reissues=).
         reset(w);
         configure(true);
         edvr::detail::g_panelCurveCurvature = 0.3f;   // asked for, no strip drawn yet: the substitution is still learning the panel's SIZE
@@ -662,27 +687,37 @@ void scenarios(World& w) {
         check(vrWorldRouteLayerMayTake() && vrWorldRouteTreatedThisFrame(), "curved screen: once the route treated the frame the layer may take the (curved) screen draw");
         vrWorldRouteFrameBoundary();
         bindingFrameBoundary();
-        // The 5 s line: three windows of real time. Pending and no strips; then the strip's numbers and the window's strips; then the next
+        // Three ten-second windows of real time. Pending and no strips; then the strip's numbers and the window's strips; then the next
         // window's own count (a delta of panel_curve's cumulative count, not the count itself).
-        Sleep(5100);
+        Sleep(10100);
         frame(w);
         std::string window = lastWindowLine();
         check(window.find(" curve=pending curve-reissues=0 ") != std::string::npos && window.find("state=owned") != std::string::npos,
-              "curved screen: the 5 s line names the curve before its strip is drawn: curve=pending curve-reissues=0");
+              "curved screen: the ten-second summary names the curve before its strip is drawn: curve=pending curve-reissues=0");
+        check(countLines("vr world route 5s:") == 1 && tenSecondReport(window) && window.find("eye-takes=0 door-layer-only=0 ") != std::string::npos,
+              "curved screen: the first ten-second window is new and contains no eye or door counts from the previous scenario");
         edvr::detail::g_panelCurveReady = true;
         edvr::detail::g_panelCurveGain = 35.556f;
         edvr::detail::g_panelCurveReissues += 12;
-        Sleep(5100);
+        Sleep(10100);
         frame(w);
         window = lastWindowLine();
         check(window.find(" curve=0.300/64/35.556 curve-reissues=12 ") != std::string::npos,
-              "curved screen: once the strip is ready the 5 s line names curvature/columns/gain (curve=0.300/64/35.556) and the strips the window re-issued (12)");
+              "curved screen: once the strip is ready the ten-second summary names curvature/columns/gain (curve=0.300/64/35.556) and the strips the window re-issued (12)");
+        std::string refusal = lastReportLine("vr world route refusal 5s:");
+        check(countLines("vr world route 5s:") == 2 && countLines("vr world route refusal 5s:") == 2 && tenSecondReport(window) &&
+                  refusal.find(" treated=1 ") != std::string::npos && refusalDepthChecks(refusal) == 1,
+              "curved screen: the second window reports only its one resolve and depth check, after the first window consumed the census");
         edvr::detail::g_panelCurveReissues += 18;
-        Sleep(5100);
+        Sleep(10100);
         frame(w);
         window = lastWindowLine();
         check(window.find(" curve=0.300/64/35.556 curve-reissues=18 ") != std::string::npos && window.find("curve-reissues=30") == std::string::npos,
               "curved screen: curve-reissues is each window's own count (30 strips in all, 18 of them in this window)");
+        refusal = lastReportLine("vr world route refusal 5s:");
+        check(countLines("vr world route 5s:") == 3 && countLines("vr world route refusal 5s:") == 3 && tenSecondReport(window) &&
+                  refusal.find(" treated=1 ") != std::string::npos && refusalDepthChecks(refusal) == 1,
+              "curved screen: the third window is a fresh report with its own one resolve and depth check, not a stale or cumulative census");
         check(vrWorldRouteState() == VrWorldState::Owned && g_backendCalls >= int(kVrWorldWarmFrames) + 3,
               "curved screen: and the route stayed Owned and kept resolving through the three windows");
     }

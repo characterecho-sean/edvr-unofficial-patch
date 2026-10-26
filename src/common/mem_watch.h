@@ -41,11 +41,10 @@ namespace edvr {
 
 constexpr uint64_t kMemWakeEveryMs = 5000;
 constexpr uint64_t kMemLineEveryMs = 60000;
-constexpr uint64_t kMemPressureEveryMs = 5000;
+constexpr uint64_t kMemPressureEveryMs = 30000;
 constexpr uint64_t kMemPressurePercent = 90;
 // A wake that comes a few milliseconds before the interval is up (a sleep rounded down by the timer, a clock with 15 ms
-// steps) is taken as the interval being up: without this a 5 s pressure cadence woken every 5 s would write every
-// second wake.
+// steps) is taken as the interval being up: without this a pressure interval ending just before the next 5 s wake would skip that wake.
 constexpr uint64_t kMemWakeSlackMs = 500;
 
 // The room a formatted line has. The log gives a reserved line (log_reserve.h) more than this plus its stamp.
@@ -119,7 +118,7 @@ class MemPolicy {
 public:
     // One wake. `nowMs` is any millisecond clock that only moves forward. The first wake is always the armed line,
     // even when the machine could not be read; afterwards a line is due when the interval for the machine's state
-    // (a minute, or five seconds under pressure) has gone by since the last one. A machine that could not be read is
+    // (a minute, or thirty seconds under pressure) has gone by since the last one. A machine that could not be read is
     // not under pressure, so it keeps the slow cadence.
     MemReason observe(uint64_t nowMs, const MemMachine& machine) {
         if (!armed_) {

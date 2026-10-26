@@ -357,7 +357,7 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
         c->applicationSegments == kApplicationSegments;
     c->published = true;
     queueCompletion(*c, frame->sequence, false);
-    if (++c->publishedCount == 1 || !c->lastLogMs || snapshot.capturedAtMs - c->lastLogMs >= 5000) {
+    if (++c->publishedCount == 1 || !c->lastLogMs || snapshot.capturedAtMs - c->lastLogMs >= 10000) {
         c->lastLogMs = snapshot.capturedAtMs;
         // The game's time inside Map since the last line, per published
         // frame (map_wait.h): a stall on the GPU that the benchmark's CPU
@@ -367,7 +367,7 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
         mapFramesSeen = c->publishedCount;
         const edvr::MapWaitTotals mw = edvr::mapWaitTake();
         edvr::Log::get().note("native timing CPU: seq %llu, wait %.3f ms, submits %.3f ms, "
-            "temporal %.3f menu %.3f transfer %.3f compose %.3f ms; wall elapsed includes waits, "
+            "temporal %.3f menu %.3f transfer %.3f compose %.3f ms (last-frame sample); wall elapsed includes waits, "
             "not exclusive CPU or GPU; valid waits %llu invalid waits %llu. Game Map over %llu frames, "
             "sampled 1 in %u (calls exact; the ms and the past-0.1 ms count are scaled from the sampled Maps): "
             "reads %llu calls %.3f ms/frame, writes %llu calls %.3f ms/frame, longest %.3f ms, %llu past 0.1 ms.",

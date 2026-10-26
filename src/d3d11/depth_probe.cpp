@@ -39,6 +39,7 @@ constexpr int      kMaxTargets = 32;   // the cockpit binds shadow maps by the h
 constexpr uint64_t kSampleIntervalMs = 10000;
 constexpr uint64_t kSampleIntervalEyeMs = 2000;   // eye-sized targets: the census line wants them fresh
 constexpr int      kMaxSampleLines = 6;
+inline bool depthSampleLogDue(uint64_t candidate) noexcept { return candidate > 0 && (candidate <= 6 || candidate % 30 == 0); }
 
 // The near plane the game names when it asks for its projection (0.025,
 // every session's receiver line), for turning a reversed-Z value into
@@ -81,6 +82,7 @@ struct Target {
     int         sampleFar = 0, sampleNear = 0;
     bool        sampledOnce = false;
     int         sampleLines = 0;
+    uint64_t    sampleLogCandidates = 0;   // print cadence only; sampleLines still controls sampling
     float       clearValue = -1.0f;     // what the game clears it to; -1 = not seen
     bool        boundThisFrame = false;
     bool        announced = false;
@@ -1339,6 +1341,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             const int tIdx = g_stagingTarget >= 0 ? g_stagingTarget : 0;
             Target& t = g_targets[tIdx];
             ++t.sampleLines;
+            const bool logSample = depthSampleLogDue(++t.sampleLogCandidates);
             const float clear = t.clearValue;
             char part[2][520];
             for (int s = 0; s < 2; ++s) {
@@ -1364,6 +1367,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                     t.sampleNear = g.bandM + g.bandNear;
                     t.sampledOnce = true;
                 }
+                if (!logSample) continue;   // statistics above stay fresh even when this sample is quiet
                 const bool reversed = clear >= 0.0f ? clear < 0.5f : (g.mx < 0.5f);
                 const float nearest = reversed ? g.mx : g.mn;
                 char map[200] = "";
@@ -1380,7 +1384,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                          map[0] ? "; nearest per 4x4 block, top row first, in m: " : "",
                          map);
             }
-            Log::get().note(
+            if (logSample) Log::get().note(
                 "depth probe: target #%d (%u draws/frame, %u with no colour "
                 "target) sampled on a 16x16 grid %s (clear value %.3f%s; "
                 "metres read as reversed-Z with near %.3f m) -- %s; %s.",
