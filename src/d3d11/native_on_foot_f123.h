@@ -7,8 +7,9 @@
 //
 //  * The leash, on the physical head's offset from the rest point (EDVR's own eye offsets out, as F119 measures it). Horizontal: the view fades linearly from kSoftCm to
 //    black at kHardCm; past kHardCm for kHardHoldS the position is recentred. Vertical, upward only (a crouched character with the player standing up to look over
-//    cover): kUpSoftCm to kUpHardCm the same way. The bands come from F119's flight: horizontal normal play p99.5 <= 15 cm (soft 18 = +3, hard 23 = soft + 5, the pilot's
-//    numbers); vertical, the p99.5 of the per-second largest upward offset over the 607 seconds outside the leans -0.2 cm, so soft +3 (-0.2 + 3 = 2.8) and hard +8.
+//    cover): kUpSoftCm to kUpHardCm the same way. The wider comfort bands were requested after the 2026-10-26 flight: normal play p99.5 <= 20 cm, ADS excursions
+//    25.3/29.8 cm and ordinary upward peaks through 4.7 cm. Horizontal soft 25 leaves 5 cm above normal play, hard 35 allows those ADS excursions without a recentre;
+//    upward soft 5 and hard 10 leave small standing rises clear. Wall contact remains independent of these distances.
 //    The ADS eye shift and the other terms of EDVR's alignment are not in the offset: the leash is the head's own motion.
 //  * Wall contact, a backstop for any wall: the world's cells (the stencil-marked player cells left out) within the near plane + 3 cm on kContactCells of 64 or more in
 //    either eye for kContactFrames consecutive frames. It goes black at once and latches; after kContactHoldS the position is recentred; it releases when the contact has
@@ -29,8 +30,8 @@ namespace edvr {
 namespace nofoot {
 namespace f123 {
 
-constexpr double kSoftCm = 18.0, kHardCm = 23.0;     // the horizontal leash: fade from kSoftCm, black at kHardCm
-constexpr double kUpSoftCm = 3.0, kUpHardCm = 8.0;   // the vertical leash, upward only: the head this far above the rest point
+constexpr double kSoftCm = 25.0, kHardCm = 35.0;     // the horizontal leash: fade from kSoftCm, black at kHardCm
+constexpr double kUpSoftCm = 5.0, kUpHardCm = 10.0;  // the vertical leash, upward only: the head this far above the rest point
 constexpr double kHardHoldS = 0.3;                   // past a hard radius this long: the recentre
 constexpr double kFadeOutS = 0.1, kFadeInS = 0.2;    // the recentre's fades
 constexpr double kWaitMaxS = 0.6;                    // the head must be inside soft by then, or the recentre is said not to have brought it

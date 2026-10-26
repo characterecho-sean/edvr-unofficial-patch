@@ -667,7 +667,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\native_on_foot_hooks.cpp" "src\d3d11\native_on_foot.cpp" ^
+    "src\d3d11\native_on_foot_hooks.cpp" "src\d3d11\native_preview_camera.cpp" "src\d3d11\native_on_foot.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -1769,6 +1769,13 @@ REM Exercise the actual passive camera writer with synthetic callbacks, without 
     /link /INCREMENTAL:NO /OPT:REF kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: eye camera writer test build failed & exit /b 1 )
 "%BUILD%\eye_camera_writer_test.exe" --self-test || exit /b 1
+REM Native preview correction: exact production wrappers and owned synthetic CameraState memory.
+%CC% /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /Fo"%OBJ%\flatstationarycamera\\" ^
+    /Fe"%BUILD%\native_preview_camera_test.exe" "tools\flat_stationary_camera_test\native_preview_camera_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: native preview camera test build failed & exit /b 1 )
+"%BUILD%\native_preview_camera_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_c2_coexist_test

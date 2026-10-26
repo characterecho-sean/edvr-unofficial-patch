@@ -86,7 +86,7 @@ template <class Check> inline void run(Check&& check) {
     rest.pending(6);
     edvr::nofoot::f123::Machine machine;
     edvr::nofoot::f123::In input;
-    input.active = input.haveOffset = true; input.hCm = 30.0; input.dt = 0.01;
+    input.active = input.haveOffset = true; input.hCm = edvr::nofoot::f123::kHardCm + 1.0; input.dt = 0.01;
     bool asked = false;
     for (int i = 0; i < 200 && !asked; ++i) asked = machine.step(input).asked;
     machine.gate(false);

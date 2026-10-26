@@ -1,4 +1,5 @@
 #include "native_on_foot.h"
+#include "native_preview_camera.h"
 
 #include <windows.h>
 #include <d3d11.h>   // F18: the body cull's rasterizer-state clones
@@ -19,6 +20,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
+#include "../common/game_build.h"
 #include "../common/left_eye_share.h"   // F106: eyeshare::publish, the left eye's share of the right eye's image the provider hands the runtime each frame
 #include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
@@ -54,6 +56,7 @@
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_menu_input.h"
+#include "native_on_foot_menu_surface.h"
 #include "native_on_foot_menu_bridge.h"
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
@@ -4909,6 +4912,7 @@ std::atomic<bool> g_f111LegacyUpdateEnabled{false}; // published before relay ga
 int g_f111GateState = 0;                  // frame thread only: bit 0 the instruments' hooks are open, bit 1 the placement hook (F122)
 nofoot::menu_input::Capture g_menuInput;
 nofoot::menu_input::BridgeCapture g_menuBridge;
+nofoot::menu_input::SurfaceCapture g_menuSurface;
 thread_local nofoot::menu_input::Row* t_menuInput=nullptr;
 thread_local nofoot::menu_input::BridgeUpdate* t_menuUpdate=nullptr;
 uint64_t menuInputQpc(){LARGE_INTEGER q{};return QueryPerformanceCounter(&q)?static_cast<uint64_t>(q.QuadPart):0;}
@@ -5445,6 +5449,7 @@ uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, ui
     const uint64_t result = original(owner, out, c, d);
     if(t_menuInput && owner && out) {
         nofoot::menu_input::observeOwner(*t_menuInput,reinterpret_cast<uintptr_t>(owner),reinterpret_cast<uintptr_t>(out),guardedRead);
+        g_menuSurface.observe(*t_menuInput,reinterpret_cast<uintptr_t>(owner),menuInputQpc(),g_menuInput.frame.load(),nativeOnFootRenderFrame(),guardedRead);
     }
     const uintptr_t ctl = t_f111InPlace;
     if (!ctl || !owner || !out) return result;
@@ -29979,15 +29984,25 @@ __declspec(noinline) bool shadowCopyGuarded(void* dst, const void* src, size_t b
 }  // namespace f44
 }  // namespace
 
-void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t first,uint32_t last){g_menuInput.arm(stamp,first,last);g_menuBridge.arm(first,last,g_menuInput.generation.load());f111RefreshGates();}
+void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t first,uint32_t last){
+    g_menuInput.arm(stamp,first,last);g_menuBridge.arm(first,last,g_menuInput.generation.load());
+    nofoot::menu_input::SurfaceBindings surface;
+    if(gameBuildKnown()&&g_base){
+        const uintptr_t slot=gameRva(static_cast<uint32_t>(nofoot::f114b::kOwnerXformSlotRva));
+        const uintptr_t fn=gameRva(static_cast<uint32_t>(nofoot::f114b::kOwnerXformRva));
+        const uintptr_t model=gameRva(nofoot::menu_input::kSurfaceModelVtableRva);
+        if(slot>=24&&fn&&model)surface={g_base+slot-16,g_base+slot-24,g_base+fn,g_base+model,true};
+    }
+    g_menuSurface.arm(g_menuInput.generation.load(),first+1,surface);f111RefreshGates();
+}
 void nativeOnFootMenuInputBoundary(uint32_t frame){g_menuInput.frame.store(frame,std::memory_order_relaxed);f111RefreshGates();}
-void nativeOnFootMenuInputDiscard(){g_menuInput.discard();g_menuBridge.discard();f111RefreshGates();}
+void nativeOnFootMenuInputDiscard(){g_menuInput.discard();g_menuBridge.discard();g_menuSurface.discard();f111RefreshGates();}
 std::string nativeOnFootMenuInputDrawBridge(uint32_t frame,uint32_t render,uint64_t qpc){return g_menuBridge.draw(frame,render,qpc,t_menuUpdate,menuInputQpc);}
 std::string nativeOnFootMenuInputEnd(){
     LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);uint32_t hooks=0;
     for(unsigned i=0;i<kF111Hooks;++i)if(g_f111Armed[i])hooks|=1u<<i;if(g_f114bArmed)hooks|=16u;
     const auto input=g_menuInput.close(hooks,static_cast<uint64_t>(frequency.QuadPart),g_base);const auto bridge=g_menuBridge.close();f111RefreshGates();
-    return nofoot::menu_input::attachBridge(input,bridge);
+    return nofoot::menu_input::attachSurface(nofoot::menu_input::attachBridge(input,bridge),g_menuSurface.close());
 }
 
 void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {
@@ -30524,6 +30539,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
     nativeOnFootHooksBody(keyOn, nativeOnFootActive(), bodyWhy);
     cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
+    nativePreviewCameraBoundary(keyOn && session, nativeOnFootActive() && !nativeOnFootCameraExternal());
     headShadowTick(now);   // F95c: the head kept in the shadows; its lines
     gateLine(now);
     avatarLine(now);
@@ -30671,6 +30687,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
 }
 
 void nativeOnFootShutdown() {
+    nativePreviewCameraStop();
     // F74: the next runtime session must never inherit a published live view offset.
     const double zeroShift[3] = {};
     adsShiftPublish(zeroShift, zeroShift);

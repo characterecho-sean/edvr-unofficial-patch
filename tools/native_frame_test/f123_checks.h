@@ -20,6 +20,7 @@ struct Sim {
     double t = 0.0;
     std::vector<f123::Episode> episodes;
     unsigned asks = 0, dones = 0, fails = 0, afters = 0;
+    int askedBy = -1;
     double askedAt = -1.0, doneAt = -1.0, maxLevel = 0.0;
     uint32_t lastWord = 0;
     f123::Out last;
@@ -37,6 +38,7 @@ struct Sim {
         if (last.asked) {
             ++asks;
             askedAt = t;
+            askedBy = last.askedBy;
         }
         if (last.done) {
             ++dones;
@@ -65,36 +67,36 @@ inline bool has(const char* text, const char* needle) { return std::strstr(text,
 template <class Check>
 inline void run123(Check&& check) {
     {   // the fade: linear from soft to hard on the horizontal offset, upward only on the vertical one, the larger of the two
-        check(f123::ramp(18.0, 18.0, 23.0) == 0.0 && std::fabs(f123::ramp(20.5, 18.0, 23.0) - 0.5) < 1e-12 && f123::ramp(23.0, 18.0, 23.0) == 1.0 && f123::ramp(40.0, 18.0, 23.0) == 1.0 &&
-                  f123::ramp(5.0, 18.0, 23.0) == 0.0,
-              "F123: the horizontal fade is 0 up to 18 cm, 0.5 at 20.5, black from 23");
-        check(std::fabs(f123::leashLevel(10.0, 5.5) - 0.5) < 1e-12 && f123::leashLevel(10.0, 8.0) == 1.0 && f123::leashLevel(10.0, -20.0) == 0.0 && f123::leashLevel(10.0, 3.0) == 0.0 &&
-                  std::fabs(f123::leashLevel(21.0, 5.5) - 0.6) < 1e-12 && f123::leashLevel(23.0, -5.0) == 1.0,
-              "F123: the vertical band is up only (+3 cm soft, +8 cm hard; the head lower than the rest point is not limited) and the level is the larger of the two");
-        check(f123::ramp(NAN, 18.0, 23.0) == 0.0 && f123::insideSoft(17.9, 2.9) && !f123::insideSoft(18.0, 0.0) && !f123::insideSoft(5.0, 3.0) && f123::pastHard(23.0, 0.0) && f123::pastHard(0.0, 8.0) &&
-                  !f123::pastHard(22.9, 7.9),
-              "F123: not a number is no fade; inside soft is under 18 cm and under +3 cm; past hard is 23 cm or +8 cm");
+        check(f123::ramp(25.0, 25.0, 35.0) == 0.0 && std::fabs(f123::ramp(30.0, 25.0, 35.0) - 0.5) < 1e-12 && f123::ramp(35.0, 25.0, 35.0) == 1.0 && f123::ramp(40.0, 25.0, 35.0) == 1.0 &&
+                  f123::ramp(5.0, 25.0, 35.0) == 0.0,
+              "F123: the horizontal fade is 0 up to 25 cm, 0.5 at 30, black from 35");
+        check(std::fabs(f123::leashLevel(10.0, 7.5) - 0.5) < 1e-12 && f123::leashLevel(10.0, 10.0) == 1.0 && f123::leashLevel(10.0, -20.0) == 0.0 && f123::leashLevel(10.0, 5.0) == 0.0 &&
+                  std::fabs(f123::leashLevel(31.0, 7.5) - 0.6) < 1e-12 && f123::leashLevel(35.0, -5.0) == 1.0,
+              "F123: the vertical band is up only (+5 cm soft, +10 cm hard; the head lower than the rest point is not limited) and the level is the larger of the two");
+        check(f123::ramp(NAN, 25.0, 35.0) == 0.0 && f123::insideSoft(24.9, 4.9) && !f123::insideSoft(25.0, 0.0) && !f123::insideSoft(5.0, 5.0) && f123::pastHard(35.0, 0.0) && f123::pastHard(0.0, 10.0) &&
+                  !f123::pastHard(34.9, 9.9),
+              "F123: not a number is no fade; inside soft is under 25 cm and under +5 cm; past hard is 35 cm or +10 cm");
         Sim s;
         bool exact = true;
         for (int i = 0; i <= 100; ++i) {
-            const double h = 15.0 + 0.1 * i;   // a slow lean through the band
+            const double h = 20.0 + 0.2 * i;   // a slow lean through the band
             s.step(h, 0.0);
-            exact = exact && std::fabs(s.last.level - f123::ramp(h, 18.0, 23.0)) < 1e-12;
+            exact = exact && std::fabs(s.last.level - f123::ramp(h, 25.0, 35.0)) < 1e-12;
         }
-        check(exact && s.last.level == 1.0, "F123: a slow lean from 15 to 25 cm fades the view exactly along the ramp, black from 23 cm");
+        check(exact && s.last.level == 1.0, "F123: a slow lean from 20 to 40 cm fades the view exactly along the ramp, black from 35 cm");
     }
-    {   // the hard timer: 0.3 s past 23 cm, then the recentre (fade out 0.1 s, the ask), the wait, the fade in
+    {   // the hard timer: 0.3 s past 35 cm, then the recentre (fade out 0.1 s, the ask), the wait, the fade in
         Sim s;
-        s.run(Sim::frames(0.25), 24.0, 0.0);
+        s.run(Sim::frames(0.25), 36.0, 0.0);
         check(s.asks == 0 && s.last.level == 1.0, "F123: 0.25 s past the hard radius: black, no recentre yet");
-        s.run(Sim::frames(0.05) + 1, 22.0, 0.0);   // back inside hard: the timer starts again
-        s.run(Sim::frames(0.25), 24.0, 0.0);
+        s.run(Sim::frames(0.05) + 1, 34.0, 0.0);   // back inside hard: the timer starts again
+        s.run(Sim::frames(0.25), 36.0, 0.0);
         check(s.asks == 0, "F123: coming back under the hard radius restarts the 0.3 s");
-        s.run(Sim::frames(0.35), 24.0, 0.0);
+        s.run(Sim::frames(0.35), 36.0, 0.0);
         const bool askedWhen = s.asks == 1 && s.askedAt > 0.0;
-        check(askedWhen && s.lastWord == 1u && s.last.askedBy == -1, "F123: held past 23 cm for 0.3 s and the fade out's 0.1 s, the position recentre is asked once, as request 1");
+        check(askedWhen && s.lastWord == 1u && s.last.askedBy == -1, "F123: held past 35 cm for 0.3 s and the fade out's 0.1 s, the position recentre is asked once, as request 1");
         // the runtime moves the origin: the head comes inside soft a few frames later
-        s.run(4, 24.0, 0.0);
+        s.run(4, 36.0, 0.0);
         check(s.lastWord == 1u && s.dones == 0 && s.m.pending() && s.m.holdFrozen(), "F123: while the ask stands the word stays 1 and the standing-height hold waits");
         s.step(1.0, 0.0);
         s.step(1.0, 0.0);
@@ -109,32 +111,53 @@ inline void run123(Check&& check) {
             ++fadeFrames;
         }
         check(monotone && fadeFrames >= 16 && fadeFrames <= 20 && s.last.level == 0.0, "F123: the fade in takes 0.2 s (about 18 frames) down from black to clear, never up");
-        check(s.episodes.size() == 1 && s.episodes[0].kind == f123::kLeashHard && s.episodes[0].recentred && s.episodes[0].peakCm == 24.0 && s.episodes[0].blackS > 0.7 && s.episodes[0].blackS < 1.2 &&
+        check(s.episodes.size() == 1 && s.episodes[0].kind == f123::kLeashHard && s.episodes[0].recentred && s.episodes[0].peakCm == 36.0 && s.episodes[0].blackS > 0.7 && s.episodes[0].blackS < 1.2 &&
                   s.episodes[0].pastHardS >= 0.3,
-              "F123: one leash hard episode, recentred, peak 24 cm, black about a second (0.3 held + 0.1 fade out + the wait + the start of the fade in)");
+              "F123: one leash hard episode, recentred, peak 36 cm, black about a second (0.3 held + 0.1 fade out + the wait + the start of the fade in)");
     }
     {   // a lean past hard that ends in time: an episode, no recentre; soft only: a soft episode
         Sim s;
-        s.run(Sim::frames(0.2), 24.0, 0.0);
+        s.run(Sim::frames(0.2), 36.0, 0.0);
         s.run(Sim::frames(0.3), 10.0, 0.0);
         check(s.asks == 0 && s.episodes.size() == 1 && s.episodes[0].kind == f123::kLeashHard && !s.episodes[0].recentred && s.episodes[0].pastHardS < 0.3,
               "F123: past the hard radius for 0.2 s and back: a hard episode with no recentre");
         Sim q;
-        q.run(30, 20.0, 0.0);
+        q.run(30, 30.0, 0.0);
         q.run(30, 5.0, 0.0);
-        check(q.asks == 0 && q.episodes.size() == 1 && q.episodes[0].kind == f123::kLeashSoft && q.episodes[0].blackS == 0.0 && std::fabs(q.episodes[0].peakCm - 20.0) < 1e-12 && q.maxLevel < 1.0,
-              "F123: 20 cm for a third of a second: a soft episode, never black");
+        check(q.asks == 0 && q.episodes.size() == 1 && q.episodes[0].kind == f123::kLeashSoft && q.episodes[0].blackS == 0.0 && std::fabs(q.episodes[0].peakCm - 30.0) < 1e-12 && q.maxLevel < 1.0,
+              "F123: 30 cm for a third of a second: a soft episode, never black");
         Sim v;
-        v.run(Sim::frames(0.5), 5.0, 9.0);
-        check(v.asks == 1 && v.maxLevel == 1.0, "F123: 9 cm above the rest point for half a second (standing up to look over cover) is past the vertical hard radius: black, then the recentre");
+        v.run(Sim::frames(0.5), 5.0, 11.0);
+        check(v.asks == 1 && v.maxLevel == 1.0, "F123: 11 cm above the rest point for half a second (standing up to look over cover) is past the vertical hard radius: black, then the recentre");
+    }
+    {   // The measured ADS excursions get a partial fade, without a hard-timer recenter.
+        bool excursions=true;
+        for(double h:{25.3,29.8}) {
+            Sim s;s.run(Sim::frames(1.0),h,0.0);s.run(2,0.0,0.0);
+            const double expected=h==25.3?0.03:0.48;
+            excursions=excursions&&s.asks==0&&s.episodes.size()==1&&s.episodes[0].kind==f123::kLeashSoft&&s.episodes[0].blackS==0.0&&std::fabs(s.maxLevel-expected)<1e-12;
+        }
+        check(excursions,"F123 comfort: the measured 25.3/29.8 cm ADS excursions fade by 3/48 percent and never black out or request a recenter");
+        Sim normal;normal.run(Sim::frames(1.0),20.0,4.7);
+        check(normal.maxLevel==0.0&&normal.asks==0&&normal.episodes.empty(),"F123 comfort: normal horizontal p99.5 at 20 cm and the measured 4.7 cm upward rise stay clear");
+        Sim boundary;boundary.run(Sim::frames(0.25),35.0,0.0);
+        const bool held=boundary.last.level==1.0&&boundary.asks==0;
+        boundary.run(Sim::frames(0.2),35.0,0.0);
+        check(held&&boundary.asks==1&&boundary.askedBy==f123::kLeashHard,"F123 comfort: exactly 35 cm is black immediately and still asks after the original 0.3 s hold plus 0.1 s fade-out");
+        Sim farLean;farLean.run(Sim::frames(0.5),61.3,-19.1);
+        check(farLean.maxLevel==1.0&&farLean.asks==1&&farLean.askedBy==f123::kLeashHard,"F123 comfort: the measured 61.3 cm excursion still blacks out and requests a recenter");
+        Sim contact;contact.run(3,20.0,4.7,32);
+        const bool immediate=contact.m.contactLatched()&&contact.last.level==1.0;
+        contact.run(Sim::frames(0.5),20.0,4.7,32);
+        check(immediate&&contact.asks==1&&contact.askedBy==f123::kContact,"F123 comfort: below both new soft limits, wall contact at 32/64 cells for three frames remains black and recenters after its unchanged hold");
     }
     {   // the recentre that does not bring the head inside soft: said failed after 0.6 s, the fade in goes on, a second ask only after the gap
         Sim s;
-        s.run(Sim::frames(0.3) + 12, 30.0, 0.0);
+        s.run(Sim::frames(0.3) + 12, 40.0, 0.0);
         check(s.asks == 1, "(the ask stands)");
-        s.run(Sim::frames(0.65), 30.0, 0.0);
-        check(s.fails == 1 && s.dones == 0 && s.lastWord == 0u, "F123: a recentre that left the head 30 cm out: failed after 0.6 s, the word withdrawn");
-        s.run(Sim::frames(0.6), 30.0, 0.0);
+        s.run(Sim::frames(0.65), 40.0, 0.0);
+        check(s.fails == 1 && s.dones == 0 && s.lastWord == 0u, "F123: a recentre that left the head 40 cm out: failed after 0.6 s, the word withdrawn");
+        s.run(Sim::frames(0.6), 40.0, 0.0);
         check(s.asks == 2, "F123: the head still out: it is asked again after the fade in and the gap");
     }
     {   // the contact: 3 consecutive frames of 32 cells or more latch it, black at once
@@ -167,8 +190,8 @@ inline void run123(Check&& check) {
     }
     {   // latched: recentre after 0.3 s, once; released only when it has cleared AND the head is inside soft
         Sim s;
-        s.run(3, 20.0, 0.0, 50, 0);       // latched, the head 20 cm out (past soft, short of hard: the leash does not ask)
-        s.run(Sim::frames(0.3) + 14, 20.0, 0.0, 60, 2);
+        s.run(3, 30.0, 0.0, 50, 0);       // latched, the head 30 cm out (past soft, short of hard: the leash does not ask)
+        s.run(Sim::frames(0.3) + 14, 30.0, 0.0, 60, 2);
         check(s.asks == 1 && s.m.contactLatched() && s.m.pending(), "F123: a contact held 0.3 s asks for the recentre, once");
         s.step(1.0, 0.0);
         s.step(1.0, 0.0);   // the origin moved: the head inside soft, but the wall is still there
@@ -193,12 +216,12 @@ inline void run123(Check&& check) {
     }
     {   // levels combine by max; the camera leaving foot clears everything and withdraws an ask, the serial goes on
         Sim s;
-        s.run(Sim::frames(0.3) + 10, 24.0, 0.0);
+        s.run(Sim::frames(0.3) + 10, 36.0, 0.0);
         check(s.m.pending() || s.m.holdFrozen(), "(the recentre is under way)");
         const uint32_t serial = s.m.serial();
-        s.step(24.0, 0.0, true, false);
+        s.step(36.0, 0.0, true, false);
         check(s.last.level == 0.0 && s.last.requestWord == 0u && !s.m.pending() && s.m.serial() == serial, "F123: the camera off foot (the boarding edge): clear at once, any ask withdrawn, the serial kept");
-        s.run(Sim::frames(0.8), 24.0, 0.0);
+        s.run(Sim::frames(0.8), 36.0, 0.0);
         check(s.lastWord == serial + 1u || s.asks == 2, "F123: a later ask carries the next serial (the runtime acts once on each)");
         f123::FadeMix mix;
         mix.snap = 0.4;
@@ -218,13 +241,13 @@ inline void run123(Check&& check) {
         Sim t;
         t.step(5.0, 0.0, false);
         t.run(1, 5.0, 0.0);
-        for (int i = 0; i < 30; ++i) t.step(24.0, 0.0, false);   // no offset for a third of a second: the last one stands 0.2 s, then none
+        for (int i = 0; i < 30; ++i) t.step(36.0, 0.0, false);   // no offset for a third of a second: the last one stands 0.2 s, then none
         check(t.last.level == 0.0, "F123: an offset unsampled for more than 0.2 s is no offset: never black by accident");
     }
     {   // the lines
         char b[900];
         f123::formatSession(b, sizeof(b));
-        check(has(b, "the leash and the wall contact are on (no key), native on foot only; leash on the physical head offset from the rest point: horizontal fade from 18 cm to black at 23 cm, upward from 3 cm to black at 8 cm;") &&
+        check(has(b, "the leash and the wall contact are on (no key), native on foot only; leash on the physical head offset from the rest point: horizontal fade from 25 cm to black at 35 cm, upward from 5 cm to black at 10 cm;") &&
                   has(b, "a position-only recentre (fade out 0.1 s, the origin under the head with its yaw kept, fade in 0.2 s)") && has(b, "on 32 of 64 or more in either eye for 3 frames") && std::strlen(b) < 900,
               "F123: the session line states the bands, the timers, the recentre and the contact rule");
         f123::Episode e;

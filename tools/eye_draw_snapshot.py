@@ -564,10 +564,73 @@ def validate_menu_input(data,selected_frame):
     bridge=validate_input_update_bridge(data.get('update_bridge'),selected_frame)
     if data['update_capture_gate'] is True and bridge['status']=='not_captured':raise ValueError('Update observer gate lacks bounded bridge schema')
     return dict(status='observed' if data['rows'] else 'no_placement_callbacks',rows=len(data['rows']),meshes=len(data['meshes']),update_bridge=bridge,
+                surface_evidence=validate_menu_surface(data.get('surface_evidence'),selected_frame),
                 branches=dict(Counter(r['branch'] for r in data['rows'])),hooks_armed=data['hooks_armed'],
                 row_quota=data['row_quota'],mesh_quota=data['mesh_quota'],read_faults=data['read_faults'],
                 contended=data['contended'],in_flight_at_close=data['in_flight_at_close'],
                 association='time_and_geometry_only_not_proven_GPU_owner')
+
+
+def validate_menu_surface(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (not isinstance(data,dict) or data.get('schema')!='edvr_menu_surface_v1' or
+            data.get('selected_frame')!=selected_frame or data.get('getter_calls')!=0 or
+            data.get('gpu_draw_owner_proven') is not False or
+            data.get('association')!='shared_model_pick_pair_construction_not_actual_GPU_draw_identity' or
+            (data.get('max_owners'),data.get('max_triangles'),data.get('max_vertices'),data.get('max_map_nodes'))!=(4,255,256,32) or
+            not isinstance(data.get('known_layout'),bool) or not isinstance(data.get('rows'),list) or len(data['rows'])>4):
+        raise ValueError('Invalid bounded menu surface header')
+    for field in ('expected_model_vtable','callbacks','type_declined','non_menu','quota','duplicate','crossed_frame','layout_declined','contended'):
+        if type(data.get(field)) is not int or data[field]<0:raise ValueError('Invalid menu surface counter/identity')
+    if data['rows'] and (not data['known_layout'] or not data['expected_model_vtable']):
+        raise ValueError('Surface rows lack known typed layout')
+    def numbers(values,n):
+        return isinstance(values,list) and len(values)==n and all(v is None or type(v) in (int,float) and math.isfinite(v) for v in values)
+    copied=0;usable=0;models=0;incomplete=0;owners=set()
+    for row in data['rows']:
+        if (not isinstance(row,dict) or row.get('ledger_frame')!=selected_frame or row.get('path') not in range(4) or
+                row.get('status') not in range(6) or row.get('map_status') not in range(6) or
+                type(row.get('map_steps')) is not int or not 0<=row['map_steps']<=32 or
+                row.get('transform_valid') not in (0,1) or not numbers(row.get('owner_world'),16) or not numbers(row.get('owner_output'),16) or
+                not isinstance(row.get('pairs'),list) or len(row['pairs'])!=2):raise ValueError('Invalid menu surface row')
+        for field in ('render_frame','placement_render_frame','thread','qpc','ctl','panel','list','owner','full_panel','entry','entry_flag','definition','map_head','map_count','map_key'):
+            if type(row.get(field)) is not int or row[field]<0:raise ValueError('Invalid menu surface provenance')
+        if row['owner'] in owners or row['owner']!=row['full_panel']+16:raise ValueError('Invalid menu surface owner association')
+        owners.add(row['owner']);incomplete+=row['map_status']!=4
+        for pair in row['pairs']:
+            if (not isinstance(pair,dict) or pair.get('status') not in range(6) or pair.get('model_status') not in range(6) or
+                    pair.get('key_status') not in range(6) or not numbers(pair.get('model_basis'),16) or not numbers(pair.get('scale'),1)):
+                raise ValueError('Invalid menu surface pair')
+            for field in ('handle','handle_vtable','observed_getter_address','pair','model','model_vtable','resource_key','constructor_resource_f0','constructor_source_150'):
+                if type(pair.get(field)) is not int or pair[field]<0:raise ValueError('Invalid menu surface pair identity')
+            if pair['resource_key']>65535 or (pair['key_status'] in (1,4) and row['map_status']!=4):
+                raise ValueError('Incomplete map cannot prove a key present or absent')
+            if pair['model_status']==4 and (not pair['model'] or pair['model_vtable']!=data['expected_model_vtable']):
+                raise ValueError('Unverified model claims typed fields')
+            mesh=pair.get('mesh',{})
+            vertices=mesh.get('vertices');indices=mesh.get('indices')
+            if (mesh.get('status') not in range(6) or mesh.get('space')!='model_local_xyz_uv' or
+                    not isinstance(vertices,list) or len(vertices)%5 or len(vertices)>256*5 or not numbers(vertices,len(vertices)) or
+                    not isinstance(indices,list) or len(indices)%3 or len(indices)>255*3 or
+                    any(type(i) is not int or not 0<=i<min(256,len(vertices)//5) for i in indices)):
+                raise ValueError('Invalid authored menu mesh payload')
+            for field in ('address','vertices_address','indices_address','raw_header0'):
+                if type(mesh.get(field)) is not int or mesh[field]<0:raise ValueError('Invalid authored mesh identity')
+            if mesh['status']!=4 and (vertices or indices):raise ValueError('Unavailable mesh retains a live payload')
+            if mesh['status']==4 and (not vertices or not indices or not all(mesh[k] for k in ('address','vertices_address','indices_address'))):
+                raise ValueError('Copied mesh lacks payload')
+            valid=row['status']==4 and pair['status']==4
+            copied+=valid and mesh['status']==4
+            usable+=valid and mesh['status']==4 and all(v is not None for v in vertices)
+            models+=valid and pair['model_status']==4
+            pair['model_availability']='typed_callback_copy' if valid and pair['model_status']==4 else 'unavailable_or_identity_changed'
+            mesh['availability']='copied_finite_xyz_uv' if valid and mesh['status']==4 and all(v is not None for v in vertices) else 'copied_with_nonfinite_lanes' if valid and mesh['status']==4 else 'unavailable_or_identity_changed'
+    if len(data['rows'])>data['callbacks']:raise ValueError('Surface row/callback count mismatch')
+    status=('unknown_layout' if not data['known_layout'] else 'no_owner_callbacks' if not data['callbacks'] else
+            'captured' if data['rows'] else 'callbacks_without_accepted_owner')
+    return dict(status=status,owners=len(data['rows']),copied_meshes=copied,finite_meshes=usable,typed_models=models,
+                incomplete_maps=incomplete,gpu_draw_owner_proven=False,
+                counters={k:data[k] for k in ('callbacks','type_declined','non_menu','quota','duplicate','crossed_frame','layout_declined','contended')})
 
 
 def _input_mode(mode):
@@ -1201,6 +1264,21 @@ def menu_self_test():
 
 
 def self_test():
+    surface=dict(schema='edvr_menu_surface_v1',selected_frame=10,getter_calls=0,gpu_draw_owner_proven=False,
+                 association='shared_model_pick_pair_construction_not_actual_GPU_draw_identity',max_owners=4,max_triangles=255,
+                 max_vertices=256,max_map_nodes=32,known_layout=True,expected_model_vtable=100,rows=[],callbacks=0,
+                 type_declined=0,non_menu=0,quota=0,duplicate=0,crossed_frame=0,layout_declined=0,contended=0)
+    assert validate_menu_surface(None,10)['status']=='not_captured'
+    assert validate_menu_surface(surface,10)['status']=='no_owner_callbacks'
+    surface['known_layout']=False
+    assert validate_menu_surface(surface,10)['status']=='unknown_layout'
+    surface['known_layout']=True;surface['callbacks']=1;surface['layout_declined']=1
+    assert validate_menu_surface(surface,10)['status']=='callbacks_without_accepted_owner'
+    for field,value in [('selected_frame',11),('getter_calls',1),('gpu_draw_owner_proven',True),('max_owners',5),('max_map_nodes',33)]:
+        bad=dict(surface);bad[field]=value
+        try:validate_menu_surface(bad,10)
+        except ValueError:pass
+        else:raise AssertionError('Malformed menu surface header accepted: '+field)
     menu_self_test()
     available=[dict(readback_status=1,data=b'x') for _ in range(3)]
     assert candidate_body_payload_available(dict(mesh=[0,1,2]),available)
@@ -1531,6 +1609,27 @@ def main():
         assert avatar['qpc_age_ms']==100 and avatar['root_qpc_age_ms']==200
         assert menu['late_menu']['input_summary']['branches']=={'2d_window':1}
         assert menu['late_menu']['input_summary']['in_flight_at_close']==1
+        surface=menu['late_menu']['input_summary']['surface_evidence']
+        assert surface['status']=='captured' and surface['copied_meshes']==2 and surface['typed_models']==2
+        assert not surface['gpu_draw_owner_proven'] and surface['incomplete_maps']==0
+        authored=menu['late_menu']['input_observer']['surface_evidence']
+        assert [p['resource_key'] for p in authored['rows'][0]['pairs']]==[10,30]
+        assert authored['rows'][0]['render_frame']==901 and authored['rows'][0]['placement_render_frame']==900
+        import copy
+        for mutation in ('incomplete_key','wrong_type','bad_index','unavailable_payload','wrong_frame'):
+            bad=copy.deepcopy(authored);row=bad['rows'][0];pair=row['pairs'][0]
+            if mutation=='incomplete_key':row['map_status']=5
+            elif mutation=='wrong_type':pair['model_vtable']+=1
+            elif mutation=='bad_index':pair['mesh']['indices'][0]=255
+            elif mutation=='unavailable_payload':pair['mesh']['status']=2
+            else:row['ledger_frame']+=1
+            try:validate_menu_surface(bad,801)
+            except ValueError:pass
+            else:raise AssertionError('Invalid authored surface accepted: '+mutation)
+        unavailable=copy.deepcopy(authored);unavailable['rows'][0]['status']=3
+        assert validate_menu_surface(unavailable,801)['copied_meshes']==0
+        nonfinite=copy.deepcopy(authored);nonfinite['rows'][0]['pairs'][0]['mesh']['vertices'][2]=None
+        assert validate_menu_surface(nonfinite,801)['finite_meshes']==1
         assert menu['late_menu']['input_summary']['update_bridge']['status']=='observed' and menu['late_menu']['input_summary']['update_bridge']['updates']==1
         assert menu['late_menu']['rows'][1]['input_bridge_summary']['same_ledger_frame_updates']==1
         assert menu['late_menu']['rows'][1]['input_bridge_summary']['placements_after_draw_marker']==1

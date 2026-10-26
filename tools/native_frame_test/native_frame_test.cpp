@@ -7415,7 +7415,7 @@ int wmain(int argc, wchar_t** argv) {
     // F126: the review's three findings: the eye pair only from one frame (4 m/s, 90 Hz: 22 mm), the arm IK's snapshot only of the rig the plan names, a bend just under
     // the hinge window reaching the grip as exactly as one just over it.
     f126test::run126(check);
-    // F123: the leash on the physical offset (horizontal 18 to 23 cm, upward 3 to 8 cm), the hard timer, the recentre sequence, the wall contact (32 of 64 cells, 3 frames, latched,
+    // F123: the leash on the physical offset (horizontal 25 to 35 cm, upward 5 to 10 cm), the hard timer, the recentre sequence, the wall contact (32 of 64 cells, 3 frames, latched,
     // released with the head inside soft), the levels combined by max, everything cleared off foot, and the lines.
     f123test::run123(check);
     // F125: the on-foot log's windows: 10 s summaries by default and 1 s with the detail key on, a window opened by its first call and capped at 10 s, the fold

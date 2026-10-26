@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/d3d11/native_on_foot_menu_input.h"
 #include "../../src/d3d11/native_on_foot_menu_bridge.h"
+#include "menu_surface_checks.h"
 #include <array>
 #include <thread>
 #include <condition_variable>
@@ -108,5 +109,5 @@ inline std::string menuInputChecks() {
     check(bridge.draw(801,901,401,nullptr)=="{\"status\":\"contended\"}","render read never waits/spins on callback publication");
     {std::lock_guard<std::mutex> l(barrier);release=true;}cv.notify_one();producer.join();
     check(bridge.close().find("\"in_flight_upper_bound\":1")!=std::string::npos,"close explicitly reports incomplete update callbacks");
-    return attachBridge(fixture,bridgeFixture);
+    return attachSurface(attachBridge(fixture,bridgeFixture),menuSurfaceChecks());
 }

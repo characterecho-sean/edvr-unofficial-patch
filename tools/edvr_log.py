@@ -10921,7 +10921,7 @@ def _hj_f119_containment(rows, ctx):
                 soft = min(soft, hard - 3.0)
             if soft < p995:
                 note = " -- the cap leaves no room: normal play reaches %.0f cm and the cap allows %.0f" % (p995, hard_cap)
-        rec_text = "; radii: soft %.0f cm, hard %.0f cm (normal play's p99.5 <= %.0f cm + %.0f, soft + %.0f%s%s)" % (
+        rec_text = "; recommended radii: soft %.0f cm, hard %.0f cm (normal play's p99.5 <= %.0f cm + %.0f, soft + %.0f%s%s)" % (
             soft, hard, p995, _F119_SOFT_MARGIN_CM, _F119_HARD_GAP_CM, ", under %.0f cm: %s" % (cap - _F119_CAP_MARGIN_CM, cap_src) if cap is not None else ", no cap known", note)
     near = near_np[0][0] if near_np else None
     c20 = max((x[5] for x in near_np), default=0)
@@ -14611,19 +14611,19 @@ def self_test_health():
                    "depth read in 3 of 3 s (eye L 3 s, R 3 s), near plane 12.0 cm; nearest world 63.3 cm (with the body 21.0), cells within 20 cm max 0, within 3 cm of the near plane max 0",
                    "baseline (head offset under 3 cm, 240 frames): cells within 20 cm max 0 (with the body 0)",
                    "the smallest head offset none (1 cell), none (8 cells), none (32 cells); contact frames (32 cells or more) 0, the weakest - cells, far cells (over 1 m) on them up to 0",
-                   "the commander's collision radius: not read; radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, no cap known)"], lacks=["UNPARSED"])
+                   "the commander's collision radius: not read; recommended radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, no cap known)"], lacks=["UNPARSED"])
         contact = eye119("L", nw="0.0", na="0.0", cells=(6, 12, 30, 40), b20=30) + "; " + eye119("R", nw="0.0", na="0.0", cells=(2, 6, 28, 40), b20=28)
         check("F119 containment: leans after normal play, the wall filling the view caps the hard radius", [ses119(), sec119(), sec119(), sec119(offs=lean),
               sec119(offs=lean, depth=contact, c1="38.0", c8="40.5", c32="45.0", cf=12, cw=36, cfar=2)], 0, [("OK", F119)],
               has=["normal play (the 2 s from the start and before the first second past 30 cm (10:00:04)): p95 <= 6 cm, p99.5 <= 6 cm",
                    "the smallest head offset 38.0 cm at 10:00:05 (1 cell), 40.5 cm at 10:00:05 (8 cells), 45.0 cm at 10:00:05 (32 cells); contact frames (32 cells or more) 12, the weakest 36 cells, "
                    "far cells (over 1 m) on them up to 2",
-                   "radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, under 43 cm: the smallest head offset at which a wall filled 32 cells or more at the near plane)",
+                   "recommended radii: soft 9 cm, hard 14 cm (normal play's p99.5 <= 6 cm + 3, soft + 5, under 43 cm: the smallest head offset at which a wall filled 32 cells or more at the near plane)",
                    "cells within 20 cm max 30, within 3 cm of the near plane max 40"])
         check("F119 containment: a brush past a corner (a few cells, one cell touching) is not a clearance: no cap", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="4.6", c8="4.6")], 0,
               [("OK", F119)], has=["no cap known"])
         check("F119 containment: a cap under normal play leaves no room", [ses119(), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="8.0", c8="9.0", c32="8.0")], 0, [("OK", F119)],
-              has=["radii: soft 3 cm, hard 6 cm", "the cap leaves no room: normal play reaches 6 cm and the cap allows 6"])
+              has=["recommended radii: soft 3 cm, hard 6 cm", "the cap leaves no room: normal play reaches 6 cm and the cap allows 6"])
         check("F119 containment: the collision radius, when read, is the cap", [ses119("0.350 m"), sec119(), sec119(), sec119(offs=lean, depth=contact, c1="38.0", c8="40.5", c32="45.0")], 0,
               [("OK", F119)], has=["the commander's collision radius: 0.350 m", "under 33 cm: the collision radius"])
         check("F119 containment: after a recentre the normal play is what follows it", [sec119(offs=cls119(mx=80.0, p95=79.0, hist=hist119((15, 90)))), sec119(gen=8, rec=1),
@@ -16011,7 +16011,7 @@ def self_test_health():
               head119(wl=1, wid=41, gen=7, epoch=5, context="mixed rest", offs=huge_lean), head119(wid=42, gen=7, epoch=6)], 0, [("OK", F119)],
               has=["21 s on foot", "mixed-rest transition 1 s excluded", "normal play's p99.5 <= 6 cm"], lacks=["UNPARSED"])
         check("F125 containment: only uncertain measurements recommend no radius", [transition], 0, [("OK", F119)],
-              has=["only mixed-rest transition measurements", "mixed-rest transition 1 s excluded"], lacks=["radii: soft", "UNPARSED"])
+              has=["only mixed-rest transition measurements", "mixed-rest transition 1 s excluded"], lacks=["recommended radii: soft", "UNPARSED"])
         check("F125 containment: a no-pose gap cannot merge two references", [head119(wl=5, wid=50, gen=7, epoch=7),
               head119(wl=1, wid=51, gen=7, epoch=7, offs="none", frames=1, nopose=1), head119(wl=3, wid=52, gen=8, epoch=8)], 0, [("OK", F119)],
               has=["9 s on foot", "normal play (the 3 s after the first recentre on foot)"], lacks=["UNPARSED"])
