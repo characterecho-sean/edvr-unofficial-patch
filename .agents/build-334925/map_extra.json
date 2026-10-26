@@ -1,0 +1,1394 @@
+[
+{
+"rva": "0x100000",
+"kind": "code",
+"new_rva": "0x100000",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100012",
+"kind": "code",
+"new_rva": "0x100012",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100022",
+"kind": "code",
+"new_rva": "0x100022",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100032",
+"kind": "code",
+"new_rva": "0x100032",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100046",
+"kind": "code",
+"new_rva": "0x100046",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100072",
+"kind": "code",
+"new_rva": "0x100072",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x1000C2",
+"kind": "code",
+"new_rva": "0x1000C2",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x1000F2",
+"kind": "code",
+"new_rva": "0x1000F2",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100406",
+"kind": "code",
+"new_rva": "0x100406",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100AE6",
+"kind": "code",
+"new_rva": "0x100AE6",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100E46",
+"kind": "code",
+"new_rva": "0x100E46",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100EA6",
+"kind": "code",
+"new_rva": "0x100EA6",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x100FF6",
+"kind": "code",
+"new_rva": "0x100FF6",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x10103A",
+"kind": "code",
+"new_rva": "0x10103A",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x101046",
+"kind": "code",
+"new_rva": "0x101046",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x101406",
+"kind": "code",
+"new_rva": "0x101406",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x101E46",
+"kind": "code",
+"new_rva": "0x101E46",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x101FF6",
+"kind": "code",
+"new_rva": "0x101FF6",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x1020F2",
+"kind": "code",
+"new_rva": "0x1020F2",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x106000",
+"kind": "code",
+"new_rva": "0x106000",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x107000",
+"kind": "code",
+"new_rva": "0x107000",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x107E46",
+"kind": "code",
+"new_rva": "0x107E46",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x111111",
+"kind": "code",
+"new_rva": "0x111111",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x123456",
+"kind": "code",
+"new_rva": "0x123456",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x155543",
+"kind": "code",
+"new_rva": "0x155543",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x199983",
+"kind": "code",
+"new_rva": "0x199983",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1A2B3C",
+"kind": "code",
+"new_rva": "0x1A2B3C",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1B8803",
+"kind": "code",
+"new_rva": "0x1B8803",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x208006",
+"kind": "code",
+"new_rva": "0x208006",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x208046",
+"kind": "code",
+"new_rva": "0x208046",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x208EA6",
+"kind": "code",
+"new_rva": "0x208EA6",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x30C0AA",
+"kind": "code",
+"new_rva": "0x30C07A",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x30F9E0",
+"kind": "code",
+"new_rva": "0x30F9B0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x31B21F",
+"kind": "code",
+"new_rva": "0x31B1EF",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4D5E6F",
+"kind": "code",
+"new_rva": "0x4D5E0F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4E3881",
+"kind": "code",
+"new_rva": "0x4E3821",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4E3882",
+"kind": "code",
+"new_rva": "0x4E3822",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4E3981",
+"kind": "code",
+"new_rva": "0x4E3921",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4E9E70",
+"kind": "code",
+"new_rva": "0x4E9E10",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4E9EAF",
+"kind": "code",
+"new_rva": "0x4E9E4F",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x50EC69",
+"kind": "code",
+"new_rva": "0x50EC09",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x50EDC9",
+"kind": "code",
+"new_rva": "0x50ED69",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x510404",
+"kind": "code",
+"new_rva": "0x5103A4",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5185B3",
+"kind": "code",
+"new_rva": "0x518553",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x519160",
+"kind": "code",
+"new_rva": "0x519100",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x519D52",
+"kind": "code",
+"new_rva": "0x519CF2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x519D5C",
+"kind": "code",
+"new_rva": "0x519CFC",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x519D88",
+"kind": "code",
+"new_rva": "0x519D28",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x519E0B",
+"kind": "code",
+"new_rva": "0x519DAB",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51A0EB",
+"kind": "code",
+"new_rva": "0x51A08B",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51AF6B",
+"kind": "code",
+"new_rva": "0x51AF0B",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51B0CB",
+"kind": "code",
+"new_rva": "0x51B06B",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51D740",
+"kind": "code",
+"new_rva": "0x51D6E0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51D746",
+"kind": "code",
+"new_rva": "0x51D6E6",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51D755",
+"kind": "code",
+"new_rva": "0x51D6F5",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51FA70",
+"kind": "code",
+"new_rva": "0x51FA10",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51FB32",
+"kind": "code",
+"new_rva": "0x51FAD2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51FB9C",
+"kind": "code",
+"new_rva": "0x51FB3C",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x51FBA9",
+"kind": "code",
+"new_rva": "0x51FB49",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x522CDC",
+"kind": "code",
+"new_rva": "0x522C7C",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x522D00",
+"kind": "code",
+"new_rva": "0x522CA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x522D55",
+"kind": "code",
+"new_rva": "0x522CF5",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x537320",
+"kind": "code",
+"new_rva": "0x5372C0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x537385",
+"kind": "code",
+"new_rva": "0x537325",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5373A0",
+"kind": "code",
+"new_rva": "0x537340",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x53A6F0",
+"kind": "code",
+"new_rva": "0x53A690",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x540370",
+"kind": "code",
+"new_rva": "0x540310",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5404AE",
+"kind": "code",
+"new_rva": "0x54044E",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5404D1",
+"kind": "code",
+"new_rva": "0x540471",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x543F90",
+"kind": "code",
+"new_rva": "0x543F30",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x543FED",
+"kind": "code",
+"new_rva": "0x543F8D",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x54C9DF",
+"kind": "code",
+"new_rva": "0x54C97F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x553480",
+"kind": "code",
+"new_rva": "0x553420",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5536B3",
+"kind": "code",
+"new_rva": "0x553653",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x55B695",
+"kind": "code",
+"new_rva": "0x55B635",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x55B880",
+"kind": "code",
+"new_rva": "0x55B820",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x55B970",
+"kind": "code",
+"new_rva": "0x55B910",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x55F780",
+"kind": "code",
+"new_rva": "0x55F720",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x58B5D4",
+"kind": "code",
+"new_rva": "0x58B574",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x58B690",
+"kind": "code",
+"new_rva": "0x58B630",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x58BB8F",
+"kind": "code",
+"new_rva": "0x58BB2F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x58BF37",
+"kind": "code",
+"new_rva": "0x58BED7",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5904C8",
+"kind": "code",
+"new_rva": "0x590468",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x594E00",
+"kind": "code",
+"new_rva": "0x594DA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x595740",
+"kind": "code",
+"new_rva": "0x5956E0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5988A0",
+"kind": "code",
+"new_rva": "0x598840",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x598A50",
+"kind": "code",
+"new_rva": "0x5989F0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x598E20",
+"kind": "code",
+"new_rva": "0x598DC0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x599070",
+"kind": "code",
+"new_rva": "0x599010",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x59A010",
+"kind": "code",
+"new_rva": "0x599FB0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D42A1",
+"kind": "code",
+"new_rva": "0x5D4241",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D6906",
+"kind": "code",
+"new_rva": "0x5D68A6",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D6C1D",
+"kind": "code",
+"new_rva": "0x5D6BBD",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D6C80",
+"kind": "code",
+"new_rva": "0x5D6C20",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5D6D7F",
+"kind": "code",
+"new_rva": "0x5D6D1F",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5D6EDF",
+"kind": "code",
+"new_rva": "0x5D6E7F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D6F2D",
+"kind": "code",
+"new_rva": "0x5D6ECD",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x5D7260",
+"kind": "code",
+"new_rva": "0x5D7200",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x5EA030",
+"kind": "code",
+"new_rva": "0x5E9FD0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x710000",
+"kind": "code",
+"new_rva": "0x70FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x777777",
+"kind": "code",
+"new_rva": "0x777717",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x7F0000",
+"kind": "code",
+"new_rva": "0x7EFFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x7FA060",
+"kind": "code",
+"new_rva": "0x7FA000",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x7FFFFE",
+"kind": "code",
+"new_rva": "0x7FFF9E",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x7FFFFF",
+"kind": "code",
+"new_rva": "0x7FFF9F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x800000",
+"kind": "code",
+"new_rva": "0x7FFFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x820000",
+"kind": "code",
+"new_rva": "0x81FFA0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x830000",
+"kind": "code",
+"new_rva": "0x82FFA0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x831000",
+"kind": "code",
+"new_rva": "0x830FA0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x86DF55",
+"kind": "code",
+"new_rva": "0x86DEF5",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x900000",
+"kind": "code",
+"new_rva": "0x8FFFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x910000",
+"kind": "code",
+"new_rva": "0x90FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x920000",
+"kind": "code",
+"new_rva": "0x91FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x920078",
+"kind": "code",
+"new_rva": "0x920018",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x930000",
+"kind": "code",
+"new_rva": "0x92FFA0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x940000",
+"kind": "code",
+"new_rva": "0x93FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x950000",
+"kind": "code",
+"new_rva": "0x94FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x960000",
+"kind": "code",
+"new_rva": "0x95FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x970000",
+"kind": "code",
+"new_rva": "0x96FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x99C0F4",
+"kind": "code",
+"new_rva": "0x99C094",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA00000",
+"kind": "code",
+"new_rva": "0x9FFFC0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA10000",
+"kind": "code",
+"new_rva": "0xA0FFC0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA10300",
+"kind": "code",
+"new_rva": "0xA102C0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA40000",
+"kind": "code",
+"new_rva": "0xA3FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA40250",
+"kind": "code",
+"new_rva": "0xA401F0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA50000",
+"kind": "code",
+"new_rva": "0xA4FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xA60000",
+"kind": "code",
+"new_rva": "0xA5FFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xABCDE0",
+"kind": "code",
+"new_rva": "0xABCD80",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xABCDE1",
+"kind": "code",
+"new_rva": "0xABCD81",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xABCDEF",
+"kind": "code",
+"new_rva": "0xABCD8F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xC0FFEE",
+"kind": "code",
+"new_rva": "0xC0FF8E",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xFF0000",
+"kind": "code",
+"new_rva": "0xFEFFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xFFFF00",
+"kind": "code",
+"new_rva": "0xFFFEA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xFFFFFE",
+"kind": "code",
+"new_rva": "0xFFFF9E",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0xFFFFFF",
+"kind": "code",
+"new_rva": "0xFFFF9F",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1000000",
+"kind": "code",
+"new_rva": "0xFFFFA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1000193",
+"kind": "code",
+"new_rva": "0x1000133",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1030CE0",
+"kind": "code",
+"new_rva": "0x1030C80",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x10739B6",
+"kind": "code",
+"new_rva": "0x1073956",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x12D231D",
+"kind": "code",
+"new_rva": "0x12D227D",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x150E828",
+"kind": "code",
+"new_rva": "0x150E748",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x19B4092",
+"kind": "code",
+"new_rva": "0x19B3FD2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x19B4116",
+"kind": "code",
+"new_rva": "0x19B4056",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1A00000",
+"kind": "code",
+"new_rva": "0x19FFF40",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1A00008",
+"kind": "code",
+"new_rva": "0x19FFF48",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x1A2B3C4",
+"kind": "code",
+"new_rva": "0x1A2B304",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2000000",
+"kind": "code",
+"new_rva": "0x1FFFF40",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x200231D",
+"kind": "code",
+"new_rva": "0x200225D",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x200C321",
+"kind": "code",
+"new_rva": "0x200C261",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2014B50",
+"kind": "code",
+"new_rva": "0x2014A90",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x281C3EB",
+"kind": "code",
+"new_rva": "0x281C32B",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2833883",
+"kind": "code",
+"new_rva": "0x28337C3",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x28338B0",
+"kind": "code",
+"new_rva": "0x28337F0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2A03F51",
+"kind": "code",
+"new_rva": "0x2A03E91",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2D4A1C3",
+"kind": "code",
+"new_rva": "0x2D4A103",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2D4A2F0",
+"kind": "code",
+"new_rva": "0x2D4A230",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2D4A300",
+"kind": "code",
+"new_rva": "0x2D4A240",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x2D4B000",
+"kind": "code",
+"new_rva": "0x2D4AF40",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x3000000",
+"kind": "code",
+"new_rva": "0x2FFFF40",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x3000100",
+"kind": "code",
+"new_rva": "0x3000040",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x34C9322",
+"kind": "code",
+"new_rva": "0x34C92C2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x36A1000",
+"kind": "code",
+"new_rva": "0x36A0F60",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x36A3D00",
+"kind": "code",
+"new_rva": "0x36A3C60",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x3DA4AFB",
+"kind": "code",
+"new_rva": "0x3DA4A5B",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x3DA4D9E",
+"kind": "code",
+"new_rva": "0x3DA4CFE",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x3DD8E62",
+"kind": "code",
+"new_rva": "0x3DD8DC2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x3DD8E6F",
+"kind": "code",
+"new_rva": "0x3DD8DCF",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4000059",
+"kind": "code",
+"new_rva": "0x3FFFFB9",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x402044F",
+"kind": "code",
+"new_rva": "0x40203AF",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4034B50",
+"kind": "code",
+"new_rva": "0x4034AB0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42B6D26",
+"kind": "code",
+"new_rva": "0x42B6C86",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42B71C0",
+"kind": "code",
+"new_rva": "0x42B7120",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42B7851",
+"kind": "code",
+"new_rva": "0x42B77B1",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42B80E0",
+"kind": "code",
+"new_rva": "0x42B8040",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42E21E0",
+"kind": "code",
+"new_rva": "0x42E2140",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x42E2200",
+"kind": "code",
+"new_rva": "0x42E2160",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x42E2660",
+"kind": "code",
+"new_rva": "0x42E25C0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x42E27B0",
+"kind": "code",
+"new_rva": "0x42E2710",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x42E2860",
+"kind": "code",
+"new_rva": "0x42E27C0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4301234",
+"kind": "code",
+"new_rva": "0x4301194",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4305678",
+"kind": "code",
+"new_rva": "0x43055D8",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x430EFE0",
+"kind": "code",
+"new_rva": "0x430EF40",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4315E51",
+"kind": "code",
+"new_rva": "0x4315DB1",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4315E55",
+"kind": "code",
+"new_rva": "0x4315DB5",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x431DD17",
+"kind": "code",
+"new_rva": "0x431DC77",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x431DEFF",
+"kind": "code",
+"new_rva": "0x431DE5F",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x431DF21",
+"kind": "code",
+"new_rva": "0x431DE81",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x431DF2E",
+"kind": "code",
+"new_rva": "0x431DE8E",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x431DF2F",
+"kind": "code",
+"new_rva": "0x431DE8F",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x431DF40",
+"kind": "code",
+"new_rva": "0x431DEA0",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4334008",
+"kind": "code",
+"new_rva": "0x4333F68",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4334009",
+"kind": "code",
+"new_rva": "0x4333F69",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4351445",
+"kind": "code",
+"new_rva": "0x43513A5",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4400000",
+"kind": "code",
+"new_rva": "0x43FFF60",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4441000",
+"kind": "code",
+"new_rva": "0x4440F60",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4441680",
+"kind": "code",
+"new_rva": "0x44415E0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4458000",
+"kind": "code",
+"new_rva": "0x4457F60",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4458D88",
+"kind": "code",
+"new_rva": "0x4458CE8",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x445BA40",
+"kind": "code",
+"new_rva": "0x445B9A0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x445CF40",
+"kind": "code",
+"new_rva": "0x445CEA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4462E80",
+"kind": "code",
+"new_rva": "0x4462DE0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4463A83",
+"kind": "code",
+"new_rva": "0x44639E3",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x44FB10A",
+"kind": "code",
+"new_rva": "0x44FB06A",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x456D910",
+"kind": "code",
+"new_rva": "0x456D870",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4573247",
+"kind": "code",
+"new_rva": "0x45731A7",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4573254",
+"kind": "code",
+"new_rva": "0x45731B4",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4573D52",
+"kind": "code",
+"new_rva": "0x4573CB2",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4573D5F",
+"kind": "code",
+"new_rva": "0x4573CBF",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x48AD628",
+"kind": "code",
+"new_rva": "0x48AD588",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x48C85F0",
+"kind": "code",
+"new_rva": "0x48C8550",
+"status": "IDENTICAL"
+},
+{
+"rva": "0x4C57600",
+"kind": "code",
+"new_rva": "0x4C574E0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4DB4C00",
+"kind": "code",
+"new_rva": "0x4DB4AA0",
+"status": "RELOC-ONLY"
+},
+{
+"rva": "0x4DB6000",
+"kind": "data",
+"new_rva": "0x4DB6000",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x4DB7000",
+"kind": "data",
+"new_rva": "0x4DB7000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DB8000",
+"kind": "data",
+"new_rva": "0x4DB8000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DBA000",
+"kind": "data",
+"new_rva": "0x4DBA000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DBC000",
+"kind": "data",
+"new_rva": "0x4DBC000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DBE000",
+"kind": "data",
+"new_rva": "0x4DBE000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DDEFB0",
+"kind": "data",
+"new_rva": "0x4DDEFB0",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DE165C",
+"kind": "data",
+"new_rva": "0x4DE165C",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x4DE2000",
+"kind": "data",
+"new_rva": "0x4DE2000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x4DE28B8",
+"kind": "data",
+"new_rva": "0x4DE28B8",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x500001B",
+"kind": "data",
+"new_rva": "0x500001B",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x52EC1E0",
+"kind": "data",
+"new_rva": "0x52EC1B0",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x5310000",
+"kind": "data",
+"new_rva": "0x530FFD0",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x5E9D000",
+"kind": "data",
+"new_rva": "0x5E9D000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x5F1DCA8",
+"kind": "data",
+"new_rva": "0x5F1DCA8",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x5F1DE58",
+"kind": "data",
+"new_rva": "0x5F1DE58",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x5F28120",
+"kind": "data",
+"new_rva": "0x5F28120",
+"status": "XREF-EXACT"
+},
+{
+"rva": "0x5F30000",
+"kind": "data",
+"new_rva": "0x5F30000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x6000000",
+"kind": "data",
+"new_rva": "0x6000000",
+"status": "XREF-BRACKET"
+},
+{
+"rva": "0x6054B50",
+"kind": "data",
+"new_rva": "0x6054B50",
+"status": "XREF-BRACKET"
+}
+]

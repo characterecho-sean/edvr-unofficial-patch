@@ -107,6 +107,7 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* s
 }
 float temporalPassDepthAt(float metres) { return 0.025f / metres; }
 bool temporalPassPlanes(float* nearZ, float* farZ) { *nearZ = .025f; *farZ = 10000; return true; }
+bool temporalPassUpscale(float* x, float* y) { *x = 2.0f; *y = 2.0f; return true; }   // F108's surface line; not exercised here
 bool depthProbeSceneDepthFormat(uint32_t, uint32_t, int, ID3D11Texture2D** tex, uint32_t* fmt) {
     *tex = testScene; *fmt = DXGI_FORMAT_D32_FLOAT; return testScene != nullptr;
 }

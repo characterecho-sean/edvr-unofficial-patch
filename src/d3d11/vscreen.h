@@ -32,6 +32,7 @@ struct ID3D11ClassInstance;
 struct ID3D11Buffer;
 struct ID3D11Resource;
 struct ID3D11BlendState;
+struct ID3D11DepthStencilState;
 struct ID3D11ShaderResourceView;
 struct D3D11_BOX;
 struct D3D11_VIEWPORT;
@@ -148,6 +149,10 @@ void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch);
+// The depth-stencil state, past the issue epoch's hook: visual.star_glow replays a star draw with the game's own state but its depth and stencil
+// writes off, and puts the game's state back (flat_star_glow.cpp). The binding shadow does not track this state; the epoch (flat_issue_epoch.h)
+// only guards a certificate that is revoked when the game sets its own state again.
+void vScreenOMSetDepthStencilStateRaw(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* state, uint32_t stencilRef);
 // And the two fix.ui_quality's layer needs (ui_layer.cpp): its viewports
 // set around a redirected draw -- the RSSetViewports hook would scale them
 // again for a tracked surface and count them -- and its per-frame clear,

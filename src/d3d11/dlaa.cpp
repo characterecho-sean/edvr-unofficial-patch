@@ -117,7 +117,8 @@ static_assert(flatDlssCreateFlags(false, true) == static_cast<uint32_t>(NVSDK_NG
 // config and applied to the shared parameter block before each feature is
 // created: g_preset, every mode. 0 = the driver's own choice per mode (K
 // for DLAA, Quality and Balanced, M for Performance, L for Ultra
-// Performance). A change bumps the generation, so live features are
+// Performance); no config name selects it since 2026-10-21, nor J (10).
+// A change bumps the generation, so live features are
 // recreated. The desk (2026-09-05): M is far behind K at rest on fine detail
 // (a rest error 2.7x K's); under motion L softens least while K reconstructs
 // most at rest; and the cost probe priced the models at the Crystal Super's

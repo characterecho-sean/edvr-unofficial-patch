@@ -176,7 +176,7 @@ inline unsigned run() {
         motion.find("r.currentPsGeneration=bindingGeneration(BindSlot::Ps)")!=std::string::npos&&
         motion.find("marker.context.Get()==ctx")!=std::string::npos,"actual clone receipt requires held original/replacement generation and context");
     expect(adapter.find("a.affected(s.prefix.frame,resource)")!=std::string::npos&&
-        adapter.find("target.hdrBad=true;target.hdrCamera=false")!=std::string::npos&&
+        adapter.find("flatRuntimeNoteBad(target,FlatRuntimeConflict::None);target.hdrCamera=false")!=std::string::npos&&
         adapter.find("forwardRevoke(s,0,forward_light::Reason::Ownership)")!=std::string::npos&&
         runtime.find("if(forwardIssue.donated)forwardAttest(s,forwardIssue)")!=std::string::npos,"typed H dependencies revoke without waiting for another light");
     const auto phaseRuntime=read("src/d3d11/flat_phase_failure_runtime.inl");

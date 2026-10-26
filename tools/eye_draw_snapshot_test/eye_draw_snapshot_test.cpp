@@ -1,6 +1,10 @@
 #include "../../src/d3d11/eye_draw_snapshot.h"
+#include "../../src/d3d11/eye_late_menu_capture.h"
 #include "../../src/d3d11/gui_draw_snapshot.h"
 #include "../../src/d3d11/eye_depth_capture.h"
+#include "../../src/d3d11/eye_jump_lattice.h"
+#include "../../src/d3d11/eye_jump_lattice_shader.h"
+#include "../../src/d3d11/eye_airborne_capture.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstdlib>
@@ -8,10 +12,12 @@
 #include <string>
 
 using Microsoft::WRL::ComPtr;
+namespace edvr { thread_local bool g_vrWorldInternal=false; thread_local bool g_flatComputeInternal=false; }
 void check(bool ok, const char* why) {
     if (!ok) { std::printf("FAIL: %s\n", why); std::exit(1); }
 }
 void hr(HRESULT v) { check(SUCCEEDED(v), "D3D operation"); }
+#include "menu_input_checks.h"
 void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     check(ctx && dev, "GPU wait inputs");
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
@@ -25,9 +31,176 @@ void wait_gpu(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 int wmain(int argc, wchar_t** argv) {
     check(argc == 2, "output path required");
+    const std::string menuInputFixture=menuInputChecks();
+    {
+        using S=edvr::EyeDrawSnapshot;edvr::LateMenuWindow menu;menu.arm(100);
+        check(!menu.take(100,0,1,S::kLateMenuVs,360)&&menu.take(101,0,2,S::kScene,900)&&
+              menu.take(101,0,3,S::kLateMenuVs,6)&&menu.take(101,0,4,S::kLateMenuBaseVs,360)&&
+              menu.take(101,0,5,S::kLateMenuVs,360),
+              "menu frame fixed after partial arm frame; earlier scene and siblings before either anchor retained");
+        check(!menu.take(101,0,6,S::kScene,900)&&!menu.take(102,1,7,S::kLateMenuVs,360)&&
+              menu.take(101,1,8,S::kScene,900),"scene reference precedes menu per eye and capture never moves to a later frame");
+        for(uint32_t i=0;i<20;++i)menu.take(101,-1,10+i,S::kLateMenuVs,6);
+        check(menu.take(101,0,40,S::kLateMenuVs,360)&&menu.take(101,1,41,S::kLateMenuVs,6)&&
+              menu.take(101,1,42,S::kLateMenuVs,360)&&menu.declined[2][0][1]==16,
+              "unknown-eye sibling saturation cannot consume either eye or either reserved 360-index anchor");
+        edvr::LateMenuWindow astra;astra.arm(10);astra.take(11,0,0,S::kLateMenuVs,6);astra.take(11,1,1,S::kLateMenuVs,6);
+        check(astra.seen[0][0][0]==0&&astra.seen[1][0][0]==0,"six-index-only stock station menu never claims a 360-index anchor");
+    }
+    check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77HeldCandidateVs,0),
+          "bounded held family admits only the allowlisted VS");
+    check(edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
+          edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kWeaponUiVs,edvr::EyeDrawSnapshot::kWeaponUiPs) &&
+          edvr::EyeDrawSnapshot::weaponUiCandidate(edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs) &&
+          !edvr::EyeDrawSnapshot::f77Candidate(edvr::EyeDrawSnapshot::kF77OpticVs,0x1234ull) &&
+          !edvr::EyeDrawSnapshot::f77Candidate(0x1234ull,edvr::EyeDrawSnapshot::kF77OpticPs),
+          "optic family requires exact VS and PS pair");
+    check(edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,100) &&
+          edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,102) &&
+          !edvr::EyeDrawSnapshot::f77RenderFrameEligible(100,103) &&
+          !edvr::EyeDrawSnapshot::f77RenderFrameEligible(0,100),
+          "candidate capture is limited to first three nonzero render frames");
+    check(edvr::eyeMeshVb0BindingStatus(false,0,0)==0 &&
+          edvr::eyeMeshVb0BindingStatus(true,16,0)==4 &&
+          edvr::eyeMeshVb0BindingStatus(true,8,16)==3 &&
+          edvr::eyeMeshVb0BindingStatus(true,8,0)==1,
+          "VB0 capture distinguishes absent binding, unsupported stride and offset, and a supported binding");
+    check(edvr::EyeDrawSnapshot::kCandidateMaxDraws==1152 && edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye==16 &&
+          edvr::EyeDrawSnapshot::kCandidateUiReserve==16*3*16 && edvr::EyeDrawSnapshot::kCandidateNonUiMax==384 &&
+          edvr::EyeDrawSnapshot::kCandidateMeshBudget==64*1024*1024 &&
+          edvr::EyeDrawSnapshot::kCandidateInputBudget+edvr::EyeDrawSnapshot::kCandidateRoiBudget==136*1024*1024 &&
+          edvr::EyeDrawSnapshot::kCandidateMaxOpticDraws==2,
+          "candidate evidence reserves stay within approved independent bounds");
+    {
+        using Capture=edvr::EyeDrawSnapshot;
+        uint32_t total=0,nonUi=0,ui[16][3]{};
+        for(uint32_t i=0;i<Capture::kCandidateNonUiMax;++i){
+            check(Capture::candidateCapacityAvailable(false,0,nonUi,total),"non-UI rows fit their isolated reservation");
+            ++total;++nonUi;
+        }
+        for(uint32_t frame=0;frame<16;++frame)for(uint32_t eye=0;eye<3;++eye)for(uint32_t n=0;n<Capture::kCandidateUiPerFrameEye;++n){
+            check(Capture::candidateCapacityAvailable(true,ui[frame][eye],nonUi,total),"each UI frame/eye bucket retains full capacity after non-UI saturation");
+            ++ui[frame][eye];++total;
+        }
+        check(total==Capture::kCandidateMaxDraws&&
+              !Capture::candidateCapacityAvailable(true,ui[0][0],nonUi,total)&&
+              !Capture::candidateCapacityAvailable(false,0,nonUi,total),
+              "bounded candidate window fills exactly all 384 non-UI plus 768 UI rows");
+        check(!Capture::candidateCapacityAvailable(true,Capture::kCandidateUiPerFrameEye,nonUi,0)&&
+              Capture::candidateCapacityAvailable(true,0,nonUi,0),
+              "an overfull early UI bucket cannot consume another frame/eye reservation");
+    }
+    {
+        using namespace edvr::eye_airborne_capture;
+        Request request;
+        check(request.poll(1000,1000,true,true,true,90,true,false)==Decision::None,
+              "manual already-airborne run does not arm an automatic duplicate");
+        request.arm(1000,90);
+        check(request.poll(1100,1000,true,false,false,0,false,false)==Decision::Stale&&
+              request.poll(1200,1000,true,false,false,0,false,false)==Decision::None,
+              "first invalid or stale snapshot is reported once and never triggers");
+        check(request.poll(1300,1000,true,true,true,90,false,false)==Decision::None&&
+              request.poll(1400,1000,true,true,true,90,true,false)==Decision::None,
+              "grounded and duplicate-generation samples cannot trigger");
+        check(request.poll(1500,1000,true,true,true,91,true,true)==Decision::DeferredBusy&&
+              request.state==State::Deferred,
+              "airborne edge during a run is explicitly deferred");
+        check(request.poll(1600,1000,true,true,true,92,false,false)==Decision::None&&
+              request.poll(1700,1000,true,true,true,93,true,false)==Decision::Trigger&&
+              request.poll(1800,1000,true,true,true,94,true,false)==Decision::None,
+              "busy jump that lands waits for the next fresh jump and triggers exactly once");
+        request.arm(1900,20);
+        check(request.poll(2000,1000,true,true,true,21,true,false)==Decision::Trigger,
+              "fresh airborne sample requests one companion start");
+        request.retryAfterStartRefusal(21);
+        check(request.state==State::Deferred&&
+              request.poll(2100,1000,true,true,true,21,true,false)==Decision::None&&
+              request.poll(2200,1000,true,true,true,22,true,false)==Decision::Trigger,
+              "begin refusal retains the request and requires a newer airborne sample");
+        request.arm(2000,10);
+        check(request.poll(32000,1000,true,true,true,11,true,false)==Decision::Expired&&request.state==State::Expired,
+              "airborne companion expires at its fixed 30-second bound");
+        request.arm(40000,10);
+        check(request.poll(40100,1000,false,true,true,11,true,false)==Decision::Cancelled&&request.state==State::Cancelled,
+              "native on-foot exit cancels the one-shot request");
+    }
     ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx;
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
                          D3D11_SDK_VERSION, &dev, nullptr, &ctx));
+    {
+        constexpr UINT sw=1024,sh=768;
+        std::vector<uint8_t> grid(size_t(sw)*sh*4);
+        for(UINT y=0;y<sh;++y)for(UINT x=0;x<sw;++x){const size_t at=(size_t(y)*sw+x)*4;grid[at]=uint8_t(x);grid[at+1]=uint8_t(y);grid[at+2]=0xa5;grid[at+3]=0xff;}
+        D3D11_TEXTURE2D_DESC td{};td.Width=sw;td.Height=sh;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initial{grid.data(),sw*4,0};ComPtr<ID3D11Texture2D> source;hr(dev->CreateTexture2D(&td,&initial,&source));
+        ComPtr<ID3D11ShaderResourceView> sourceView;hr(dev->CreateShaderResourceView(source.Get(),nullptr,&sourceView));
+        D3D11_TEXTURE2D_DESC sentinelDesc=td;sentinelDesc.Width=sentinelDesc.Height=1;const uint8_t sentinelPixel[4]={9,8,7,6};D3D11_SUBRESOURCE_DATA sentinelInit{sentinelPixel,4,0};
+        ComPtr<ID3D11Texture2D> sentinelTexture;hr(dev->CreateTexture2D(&sentinelDesc,&sentinelInit,&sentinelTexture));ComPtr<ID3D11ShaderResourceView> sentinelSrv;hr(dev->CreateShaderResourceView(sentinelTexture.Get(),nullptr,&sentinelSrv));
+        const char* sentinelSource="[numthreads(1,1,1)]void main(){}";ComPtr<ID3DBlob> sentinelCode;hr(D3DCompile(sentinelSource,strlen(sentinelSource),nullptr,nullptr,nullptr,"main","cs_5_0",0,0,&sentinelCode,nullptr));
+        ComPtr<ID3D11ComputeShader> sentinelShader;hr(dev->CreateComputeShader(sentinelCode->GetBufferPointer(),sentinelCode->GetBufferSize(),nullptr,&sentinelShader));
+        D3D11_BUFFER_DESC counterDesc{};counterDesc.ByteWidth=16*4;counterDesc.Usage=D3D11_USAGE_DEFAULT;counterDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;counterDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;counterDesc.StructureByteStride=4;
+        ComPtr<ID3D11Buffer> counterBuffer;hr(dev->CreateBuffer(&counterDesc,nullptr,&counterBuffer));D3D11_UNORDERED_ACCESS_VIEW_DESC counterViewDesc{};counterViewDesc.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;counterViewDesc.Format=DXGI_FORMAT_UNKNOWN;counterViewDesc.Buffer.NumElements=16;counterViewDesc.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_APPEND;
+        ComPtr<ID3D11UnorderedAccessView> counterUav;hr(dev->CreateUnorderedAccessView(counterBuffer.Get(),&counterViewDesc,&counterUav));
+        ID3D11ShaderResourceView* oldSrv=sentinelSrv.Get();ID3D11UnorderedAccessView* oldUav=counterUav.Get();UINT initialCounter=7;
+        ctx->CSSetShader(sentinelShader.Get(),nullptr,0);ctx->CSSetShaderResources(0,1,&oldSrv);ctx->CSSetUnorderedAccessViews(0,1,&oldUav,&initialCounter);
+        ComPtr<ID3D11Texture2D> sampled;check(edvr::EyeDrawSnapshot::pointSampleUiTextureForTest(ctx.Get(),dev.Get(),sourceView.Get(),sw,sh,&sampled),"bounded full-image point sampler runs on WARP");wait_gpu(ctx.Get(),dev.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};hr(ctx->Map(sampled.Get(),0,D3D11_MAP_READ,0,&mapped));
+        auto pixel=[&](UINT x,UINT y){return static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+size_t(x)*4;};
+        bool gridMatches=true;for(const auto xy:{std::pair<UINT,UINT>{0,0},{127,91},{383,383}}){const UINT sx=((xy.first*2+1)*sw)/768,sy=((xy.second*2+1)*sh)/768;const uint8_t* got=pixel(xy.first,xy.second);gridMatches=gridMatches&&got[0]==uint8_t(sx)&&got[1]==uint8_t(sy)&&got[2]==0xa5&&got[3]==0xff;}
+        ctx->Unmap(sampled.Get(),0);check(gridMatches,"full-source center-point mapping preserves synthetic UV-grid coordinates");
+        ComPtr<ID3D11ComputeShader> restoredShader;ComPtr<ID3D11ShaderResourceView> restoredSrv;ComPtr<ID3D11UnorderedAccessView> restoredUav;
+        ctx->CSGetShader(&restoredShader,nullptr,nullptr);ctx->CSGetShaderResources(0,1,&restoredSrv);ctx->CSGetUnorderedAccessViews(0,1,&restoredUav);
+        check(restoredShader.Get()==sentinelShader.Get()&&restoredSrv.Get()==sentinelSrv.Get()&&restoredUav.Get()==counterUav.Get(),"point sampler restores compute shader/SRV/UAV bindings");
+        D3D11_BUFFER_DESC countDesc{};countDesc.ByteWidth=4;countDesc.Usage=D3D11_USAGE_STAGING;countDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Buffer> countStage;hr(dev->CreateBuffer(&countDesc,nullptr,&countStage));
+        ctx->CopyStructureCount(countStage.Get(),0,counterUav.Get());wait_gpu(ctx.Get(),dev.Get());D3D11_MAPPED_SUBRESOURCE countMap{};hr(ctx->Map(countStage.Get(),0,D3D11_MAP_READ,0,&countMap));const uint32_t preservedCounter=*static_cast<const uint32_t*>(countMap.pData);ctx->Unmap(countStage.Get(),0);
+        check(preservedCounter==7,"point sampler preserves the prebound UAV append counter");
+        check(!edvr::g_vrWorldInternal&&!edvr::g_flatComputeInternal,"point sampler leaves internal render scopes balanced");
+    }
+    check(edvr::eye_jump_lattice::runFits(5,3) && !edvr::eye_jump_lattice::runFits(4032,3896),
+          "jump lattice admits irregular input and refuses over-budget production dimensions");
+    {
+        using namespace edvr::eye_jump_lattice;
+        Run refusal;refusal.arm();refusal.refuse(0,11,22,33,BudgetRefused);
+        check(refusal.rows[0].status==BudgetRefused&&refusal.bytes==0&&!refusal.rows[0].skin,
+              "budget refusal records status and allocates/writes no payload");
+        Row ready{};ready.status=Staged;ready.sceneFrame=11;ready.renderFrame=22;ready.epoch=33;
+        uint64_t sequence=0;
+        check(finalSequenceMatch(ready,true,11,22,33,71,71,sequence)&&sequence==71,
+              "lattice finalizes only after a matching two-eye sequence and schedule identity");
+        check(!finalSequenceMatch(ready,true,11,22,33,71,72,sequence)&&sequence==0&&
+              !finalSequenceMatch(ready,false,11,22,33,71,71,sequence)&&
+              !finalSequenceMatch(ready,true,11,22,34,71,71,sequence),
+              "sequence mismatch, absent schedule, and epoch mismatch remain unfinalized");
+    }
+    {
+        ComPtr<ID3DBlob> code,errors;hr(D3DCompile(edvr::kEyeJumpLatticeHlsl,sizeof(edvr::kEyeJumpLatticeHlsl)-1,
+            "eye_jump_lattice_test",nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&code,&errors));
+        ComPtr<ID3D11ComputeShader> shader;hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader));
+        auto source=[&](DXGI_FORMAT format,const void* data,UINT pitch,ComPtr<ID3D11ShaderResourceView>& view){
+            D3D11_TEXTURE2D_DESC desc{};desc.Width=5;desc.Height=3;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.Format=format;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA initial{data,pitch,0};ComPtr<ID3D11Texture2D> texture;hr(dev->CreateTexture2D(&desc,&initial,&texture));hr(dev->CreateShaderResourceView(texture.Get(),nullptr,&view));};
+        uint16_t skin[5*3*4],motion[5*3*2];float slots[5*3*2];
+        for(unsigned i=0;i<15;++i){skin[i*4]=0x3c00;skin[i*4+1]=0x4000;skin[i*4+2]=0x4200;skin[i*4+3]=0x3c00;motion[i*2]=0x3800;motion[i*2+1]=0xb800;slots[i*2]=float(i);slots[i*2+1]=float(i)+0.25f;}
+        skin[14*4]=0x4b40;skin[14*4+1]=0x4b80;motion[14*2]=0x4300;motion[14*2+1]=0xc700;
+        uint32_t slotBits[2]={0x7fc12345u,0x80000000u};std::memcpy(slots+((2*5+4)*2),slotBits,sizeof(slotBits));
+        ComPtr<ID3D11ShaderResourceView> skinView,motionView,slotView;source(DXGI_FORMAT_R16G16B16A16_FLOAT,skin,sizeof(uint16_t)*5*4,skinView);source(DXGI_FORMAT_R16G16_FLOAT,motion,sizeof(uint16_t)*5*2,motionView);source(DXGI_FORMAT_R32G32_FLOAT,slots,sizeof(float)*5*2,slotView);
+        edvr::eye_jump_lattice::Run run;run.arm();
+        ID3D11ShaderResourceView* originalSrv=slotView.Get();ctx->CSSetShaderResources(0,1,&originalSrv);ctx->CSSetShader(nullptr,nullptr,0);
+        bool allRows=true;for(uint32_t i=0;i<edvr::eye_jump_lattice::Count;++i)
+            allRows=run.stage(ctx.Get(),shader.Get(),i,11+i,22+i,33,true,skinView.Get(),motionView.Get(),slotView.Get())==edvr::eye_jump_lattice::Staged&&allRows;
+        check(allRows&&run.count==edvr::eye_jump_lattice::Count&&run.bytes==uint64_t(edvr::eye_jump_lattice::Count)*120,
+              "jump lattice stages sixteen consecutive rows while reusing scratch dimensions");wait_gpu(ctx.Get(),dev.Get());
+        ComPtr<ID3D11ShaderResourceView> restoredSrv;ctx->CSGetShaderResources(0,1,&restoredSrv);ComPtr<ID3D11ComputeShader> restoredShader;ctx->CSGetShader(&restoredShader,nullptr,nullptr);
+        check(restoredSrv.Get()==slotView.Get()&&!restoredShader,"jump lattice restores compute SRV and shader bindings");
+        const auto& row=run.rows[0];check(row.width==5&&row.height==3&&row.sampleWidth==3&&row.sampleHeight==2&&row.bytes==120,
+              "irregular odd dimensions use ceil-half sample shape");
+        D3D11_MAPPED_SUBRESOURCE a{},b{},c{};hr(ctx->Map(row.skin.Get(),0,D3D11_MAP_READ,0,&a));hr(ctx->Map(row.motion.Get(),0,D3D11_MAP_READ,0,&b));hr(ctx->Map(row.slots.Get(),0,D3D11_MAP_READ,0,&c));
+        const auto* es=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(a.pData)+a.RowPitch);const auto* ms=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(b.pData)+b.RowPitch);const auto* ss=reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(c.pData)+c.RowPitch);
+        check(es[4]==0x4b804b40u && ms[2]==0xc7004300u && ss[4]==slotBits[0]&&ss[5]==slotBits[1],
+              "lattice includes last valid pixel and preserves slot NaN/sign bits");
+        ctx->Unmap(row.skin.Get(),0);ctx->Unmap(row.motion.Get(),0);ctx->Unmap(row.slots.Get(),0);
+        run.reset();
+    }
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth = 192; bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     ComPtr<ID3D11Buffer> cb; hr(dev->CreateBuffer(&bd, nullptr, &cb));
@@ -212,6 +385,77 @@ int wmain(int argc, wchar_t** argv) {
         check(captured.streams[1].offset==16&&captured.streams[2].offset==4,"binding offsets remain distinct from capture offsets");
     }
     const uint32_t capturedBytes=snap.vertexBytes;
+    // Exercise the production candidate capture branch with the observed
+    // multi-megabyte base vertex, nonzero IA offsets and a nonzero start index.
+    ComPtr<ID3D11InputLayout> savedOpticLayout;ctx->IAGetInputLayout(&savedOpticLayout);
+    ID3D11Buffer* savedVbRaw=nullptr;UINT savedStride=0,savedOffset=0;ctx->IAGetVertexBuffers(1,1,&savedVbRaw,&savedStride,&savedOffset);
+    ComPtr<ID3D11Buffer> savedVb;savedVb.Attach(savedVbRaw);
+    ID3D11Buffer* savedIbRaw=nullptr;DXGI_FORMAT savedIndexFormat{};UINT savedIndexOffset=0;ctx->IAGetIndexBuffer(&savedIbRaw,&savedIndexFormat,&savedIndexOffset);
+    ComPtr<ID3D11Buffer> savedIb;savedIb.Attach(savedIbRaw);
+    ID3D11ShaderResourceView* savedSrvs[3]{};ctx->PSGetShaderResources(1,3,savedSrvs);
+    ComPtr<ID3D11ShaderResourceView> savedSrv1,savedSrv2,savedSrv3;savedSrv1.Attach(savedSrvs[0]);savedSrv2.Attach(savedSrvs[1]);savedSrv3.Attach(savedSrvs[2]);
+    const char* opticCode="float4 main(uint4 a:PACKEDVERTEXDATAA,uint2 c:PACKEDVERTEXDATAC):SV_Position{return float4(asfloat(a.xy),0,1)+float4(asfloat(c),0,0);}";
+    ComPtr<ID3DBlob> opticBlob;hr(D3DCompile(opticCode,strlen(opticCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&opticBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC opticElements[2]={{"PACKEDVERTEXDATAA",0,DXGI_FORMAT_R32G32B32A32_UINT,1,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"PACKEDVERTEXDATAC",0,DXGI_FORMAT_R32G32_UINT,1,16,D3D11_INPUT_PER_VERTEX_DATA,0}};
+    ComPtr<ID3D11InputLayout> opticLayout;hr(dev->CreateInputLayout(opticElements,2,opticBlob->GetBufferPointer(),opticBlob->GetBufferSize(),&opticLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(opticLayout.Get(),opticElements,2,edvr::EyeDrawSnapshot::kF77OpticVs);
+    ctx->IASetInputLayout(opticLayout.Get());
+    const uint32_t opticBase=2'955'444,opticStride=40,opticBindingOffset=24;UINT opticStrideBinding=opticStride;
+    const uint64_t opticVertexBegin=uint64_t(opticBindingOffset)+uint64_t(opticBase+2)*opticStride;
+    const UINT opticVertexSize=static_cast<UINT>(opticVertexBegin+4*opticStride);
+    D3D11_BUFFER_DESC opticVbDesc{};opticVbDesc.ByteWidth=opticVertexSize;opticVbDesc.Usage=D3D11_USAGE_DEFAULT;opticVbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    ComPtr<ID3D11Buffer> opticVb;hr(dev->CreateBuffer(&opticVbDesc,nullptr,&opticVb));
+    uint8_t opticVertexBytes[4*opticStride];std::memset(opticVertexBytes,0xA7,sizeof(opticVertexBytes));
+    D3D11_BOX opticVbBox{static_cast<UINT>(opticVertexBegin),0,0,static_cast<UINT>(opticVertexBegin+sizeof(opticVertexBytes)),1,1};
+    ctx->UpdateSubresource(opticVb.Get(),0,&opticVbBox,opticVertexBytes,0,0);
+    const uint16_t opticIndexValues[18]={9,9,9,9,5,2,5,4,2,5,9,9,9,9,9,9,9,9};
+    D3D11_BUFFER_DESC opticIbDesc{};opticIbDesc.ByteWidth=sizeof(opticIndexValues);opticIbDesc.Usage=D3D11_USAGE_DEFAULT;opticIbDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+    ComPtr<ID3D11Buffer> opticIb;hr(dev->CreateBuffer(&opticIbDesc,nullptr,&opticIb));
+    ctx->UpdateSubresource(opticIb.Get(),0,nullptr,opticIndexValues,0,0);
+    UINT opticOffset=opticBindingOffset;ctx->IASetVertexBuffers(1,1,opticVb.GetAddressOf(),&opticStrideBinding,&opticOffset);
+    ctx->IASetIndexBuffer(opticIb.Get(),DXGI_FORMAT_R16_UINT,4);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    edvr::EyeDrawSnapshot opticCapture;
+    opticCapture.capture(ctx.Get(),91,7,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,700);
+    check(opticCapture.draws.size()==1 && opticCapture.draws[0].streams[1].captureOffset==opticVertexBegin &&
+          opticCapture.draws[0].streams[1].copied==4*opticStride && opticCapture.draws[0].streams[2].captureOffset==8 &&
+          opticCapture.draws[0].streams[2].copied==12,"production optic capture resolves indexed min/max vertex window from actual WARP buffers");
+    wait_gpu(ctx.Get(),dev.Get());D3D11_MAPPED_SUBRESOURCE opticMapped{};
+    hr(ctx->Map(opticCapture.draws[0].streams[1].stage.Get(),0,D3D11_MAP_READ,0,&opticMapped));
+    check(opticMapped.pData && static_cast<const uint8_t*>(opticMapped.pData)[0]==0xA7 &&
+          static_cast<const uint8_t*>(opticMapped.pData)[sizeof(opticVertexBytes)-1]==0xA7,"WARP indexed optic vertex bytes match the selected large-base window");
+    ctx->Unmap(opticCapture.draws[0].streams[1].stage.Get(),0);
+    const uint16_t negativeBaseIndices[18]={9,9,9,9,1,2,3,2,1,4,9,9,9,9,9,9,9,9};
+    ComPtr<ID3D11Buffer> negativeBaseIb;hr(dev->CreateBuffer(&opticIbDesc,nullptr,&negativeBaseIb));
+    ctx->UpdateSubresource(negativeBaseIb.Get(),0,nullptr,negativeBaseIndices,0,0);ctx->IASetIndexBuffer(negativeBaseIb.Get(),DXGI_FORMAT_R16_UINT,4);
+    edvr::EyeDrawSnapshot negativeBaseCapture;
+    negativeBaseCapture.capture(ctx.Get(),91,8,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,-1,false,false,true,700);
+    check(negativeBaseCapture.draws.size()==1 && negativeBaseCapture.draws[0].streams[1].captureOffset==opticBindingOffset &&
+          negativeBaseCapture.draws[0].streams[1].copied==4*opticStride,"negative base with positive indices resolves a valid WARP vertex window");
+    D3D11_TEXTURE2D_DESC opticMaterialDesc{};opticMaterialDesc.Width=opticMaterialDesc.Height=1024;opticMaterialDesc.MipLevels=0;
+    opticMaterialDesc.ArraySize=8;opticMaterialDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;opticMaterialDesc.SampleDesc.Count=1;
+    opticMaterialDesc.Usage=D3D11_USAGE_DEFAULT;opticMaterialDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> opticMaterial;hr(dev->CreateTexture2D(&opticMaterialDesc,nullptr,&opticMaterial));
+    ComPtr<ID3D11ShaderResourceView> opticMaterialSrv;hr(dev->CreateShaderResourceView(opticMaterial.Get(),nullptr,&opticMaterialSrv));
+    ID3D11ShaderResourceView* opticMaterialSrvRaw=opticMaterialSrv.Get();ctx->PSSetShaderResources(2,1,&opticMaterialSrvRaw);
+    ID3D11ShaderResourceView* noSrv=nullptr;ctx->PSSetShaderResources(1,1,&noSrv);ctx->PSSetShaderResources(3,1,&noSrv);
+    edvr::EyeDrawSnapshot opticMaterialCapture;
+    opticMaterialCapture.capture(ctx.Get(),91,7,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,700);
+    opticMaterialCapture.capture(ctx.Get(),92,9,edvr::EyeDrawSnapshot::kF77OpticVs,edvr::EyeDrawSnapshot::kF77OpticPs,'I',6,1,0,2,static_cast<int32_t>(opticBase),false,false,true,701);
+    check(opticMaterialCapture.candidateInputs.size()==2 && opticMaterialCapture.candidateInputs[0].slot==2 && opticMaterialCapture.candidateInputs[1].slot==2 &&
+          opticMaterialCapture.candidateInputs[0].requestedMip==0 && opticMaterialCapture.candidateInputs[0].mip==1 &&
+          opticMaterialCapture.candidateInputs[0].sourceArraySize==8 && opticMaterialCapture.candidateInputs[0].slices==8 &&
+          opticMaterialCapture.candidateInputs[1].requestedMip==0 && opticMaterialCapture.candidateInputs[1].mip==1 &&
+          opticMaterialCapture.candidateInputs[1].sourceArraySize==8 && opticMaterialCapture.candidateInputs[1].slices==8 &&
+          opticMaterialCapture.candidateInputs[0].bytes<=edvr::EyeDrawSnapshot::kCandidateInputBudget/2 &&
+          opticMaterialCapture.candidateInputs[0].bytes==opticMaterialCapture.candidateInputs[1].bytes &&
+          opticMaterialCapture.candidateInputBytes<=edvr::EyeDrawSnapshot::kCandidateInputBudget,
+          "WARP t2 capture retains full view slices from the highest fitting mip chain within equal per optic budgets");
+    ctx->IASetInputLayout(savedOpticLayout.Get());ID3D11Buffer* restoreVb=savedVb.Get();
+    ctx->IASetVertexBuffers(1,1,&restoreVb,&savedStride,&savedOffset);ctx->IASetIndexBuffer(savedIb.Get(),savedIndexFormat,savedIndexOffset);
+    ID3D11ShaderResourceView* restoreSrvs[3]={savedSrv1.Get(),savedSrv2.Get(),savedSrv3.Get()};ctx->PSSetShaderResources(1,3,restoreSrvs);
+    wait_gpu(ctx.Get(),dev.Get());
+    check(opticMaterialCapture.write(ctx.Get(),(std::wstring(argv[1])+L".t2").c_str()),"bounded T2 mip fallback snapshot write");
     edvr::EyeDrawSnapshot effects;
     const char* effectCode="float4 main(float2 p:POSITION,float4 b:TEXCOORD):SV_Position{return float4(p,0,1)+b;}";
     ComPtr<ID3DBlob> effectBlob;hr(D3DCompile(effectCode,strlen(effectCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&effectBlob,nullptr));
@@ -236,6 +480,71 @@ int wmain(int argc, wchar_t** argv) {
     effects.vertexBytes=32*1024*1024;
     effects.captureSourceMesh(ctx.Get(),119,0x9AEC596A2B036EA6ull,0,'X',6,1,0,0,0);
     check(effects.vertexDeclined>0 && effects.draws.size()==5,"effect vertex budget declines explicitly but retains constants");
+
+    // The exact rifle bolt pair reads two endpoint positions plus a stepped
+    // per-instance record. Preserve its original binding origins and draw
+    // window in the existing bounded geometry capture.
+    const char* boltCode="struct I{float3 a:POSITION0;float3 b:POSITION1;float4 p:TEXCOORD0;};float4 main(I i):SV_Position{return float4(i.a+i.b+i.p.xyz*0.001,1);}";
+    ComPtr<ID3DBlob> boltBlob;hr(D3DCompile(boltCode,strlen(boltCode),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&boltBlob,nullptr));
+    D3D11_INPUT_ELEMENT_DESC boltElements[3]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"POSITION",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,4,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+    ComPtr<ID3D11InputLayout> boltLayout;hr(dev->CreateInputLayout(boltElements,3,boltBlob->GetBufferPointer(),boltBlob->GetBufferSize(),&boltLayout));
+    edvr::EyeDrawSnapshot::rememberLayout(boltLayout.Get(),boltElements,3,edvr::EyeDrawSnapshot::kBoltVs);
+    bd.ByteWidth=128;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;bd.CPUAccessFlags=bd.MiscFlags=bd.StructureByteStride=0;
+    ComPtr<ID3D11Buffer> boltVertices,boltInstances;hr(dev->CreateBuffer(&bd,nullptr,&boltVertices));hr(dev->CreateBuffer(&bd,nullptr,&boltInstances));
+    uint8_t boltVertexBytes[128],boltInstanceBytes[128];for(UINT i=0;i<128;++i){boltVertexBytes[i]=static_cast<uint8_t>(0x20+i);boltInstanceBytes[i]=static_cast<uint8_t>(0x80+i);}
+    ctx->UpdateSubresource(boltVertices.Get(),0,nullptr,boltVertexBytes,0,0);ctx->UpdateSubresource(boltInstances.Get(),0,nullptr,boltInstanceBytes,0,0);
+    D3D11_BUFFER_DESC boltIndexDesc{};boltIndexDesc.ByteWidth=64;boltIndexDesc.Usage=D3D11_USAGE_DEFAULT;boltIndexDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+    ComPtr<ID3D11Buffer> boltIndices;hr(dev->CreateBuffer(&boltIndexDesc,nullptr,&boltIndices));
+    UINT boltStrides[2]={24,16},boltOffsets[2]={12,8};ID3D11Buffer* boltBindings[2]={boltVertices.Get(),boltInstances.Get()};
+    ctx->IASetVertexBuffers(0,2,boltBindings,boltStrides,boltOffsets);ctx->IASetIndexBuffer(boltIndices.Get(),DXGI_FORMAT_R16_UINT,4);
+    ctx->IASetInputLayout(boltLayout.Get());ID3D11Buffer* boltCb=cb.Get();ctx->VSSetConstantBuffers(1,1,&boltCb);
+    float boltCbData[48];for(UINT i=0;i<48;++i)boltCbData[i]=static_cast<float>(i)+0.25f;ctx->UpdateSubresource(cb.Get(),0,nullptr,boltCbData,0,0);
+    edvr::EyeDrawSnapshot boltSnap;
+    boltSnap.capture(ctx.Get(),500,0,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    const auto& boltDraw=boltSnap.draws.back();
+    check(edvr::EyeDrawSnapshot::watches(edvr::EyeDrawSnapshot::kBoltVs) && boltDraw.layout.size()==3 &&
+              std::strcmp(boltDraw.layout[0].semantic,"POSITION")==0 && boltDraw.layout[0].index==0 &&
+              std::strcmp(boltDraw.layout[1].semantic,"POSITION")==0 && boltDraw.layout[1].index==1 &&
+              boltDraw.streams[0].offset==12 && boltDraw.streams[0].captureOffset==12 && boltDraw.streams[0].copied==116 &&
+              boltDraw.streams[1].offset==8 && boltDraw.streams[1].captureOffset==8 && boltDraw.streams[1].copied==80 &&
+              boltDraw.streams[2].captureOffset==10 && boltDraw.streams[2].copied==8,
+          "exact bolt pair captures the indexed VB0 tail and stepped instance window from nonzero bindings");
+    // Indexed VB0 is retained from its binding offset to the stream cap: the
+    // current reader does not decode indices to infer the maximum vertex.
+    uint8_t boltVertexExpected[116];std::memcpy(boltVertexExpected,boltVertexBytes+12,sizeof(boltVertexExpected));
+    uint8_t boltInstanceExpected[80];std::memcpy(boltInstanceExpected,boltInstanceBytes+8,sizeof(boltInstanceExpected));
+    float boltCbLater[48];for(float& v:boltCbLater)v=-17.f;ctx->UpdateSubresource(cb.Get(),0,nullptr,boltCbLater,0,0);
+    std::memset(boltVertexBytes,0,sizeof(boltVertexBytes));std::memset(boltInstanceBytes,0,sizeof(boltInstanceBytes));
+    ctx->UpdateSubresource(boltVertices.Get(),0,nullptr,boltVertexBytes,0,0);ctx->UpdateSubresource(boltInstances.Get(),0,nullptr,boltInstanceBytes,0,0);wait_gpu(ctx.Get(),dev.Get());
+    D3D11_MAPPED_SUBRESOURCE boltMapped{};hr(ctx->Map(boltDraw.streams[0].stage.Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltVertexSnapshot=std::memcmp(boltMapped.pData,boltVertexExpected,sizeof(boltVertexExpected))==0;ctx->Unmap(boltDraw.streams[0].stage.Get(),0);
+    hr(ctx->Map(boltDraw.streams[1].stage.Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltInstanceSnapshot=std::memcmp(boltMapped.pData,boltInstanceExpected,sizeof(boltInstanceExpected))==0;ctx->Unmap(boltDraw.streams[1].stage.Get(),0);
+    hr(ctx->Map(boltDraw.stage[1].Get(),0,D3D11_MAP_READ,0,&boltMapped));
+    const bool boltConstantSnapshot=boltDraw.copied[1]==sizeof(boltCbData) && std::memcmp(boltMapped.pData,boltCbData,sizeof(boltCbData))==0;ctx->Unmap(boltDraw.stage[1].Get(),0);
+    ComPtr<ID3D11InputLayout> boltLayoutBound;ctx->IAGetInputLayout(&boltLayoutBound);
+    ID3D11Buffer* boltVbAfter[2]{};UINT boltStrideAfter[2]{},boltOffsetAfter[2]{};ctx->IAGetVertexBuffers(0,2,boltVbAfter,boltStrideAfter,boltOffsetAfter);
+    ID3D11Buffer* boltIbAfter=nullptr;DXGI_FORMAT boltFmtAfter{};UINT boltIbOffsetAfter=0;ctx->IAGetIndexBuffer(&boltIbAfter,&boltFmtAfter,&boltIbOffsetAfter);
+    ID3D11Buffer* boltCbAfter=nullptr;ctx->VSGetConstantBuffers(1,1,&boltCbAfter);
+    check(boltVertexSnapshot && boltInstanceSnapshot && boltConstantSnapshot && boltLayoutBound.Get()==boltLayout.Get() && boltVbAfter[0]==boltVertices.Get() && boltVbAfter[1]==boltInstances.Get() &&
+              boltStrideAfter[0]==24 && boltStrideAfter[1]==16 && boltOffsetAfter[0]==12 && boltOffsetAfter[1]==8 && boltIbAfter==boltIndices.Get() &&
+              boltFmtAfter==DXGI_FORMAT_R16_UINT && boltIbOffsetAfter==4 && boltCbAfter==cb.Get(),
+          "bolt stream and constant copies retain draw-time data without changing pipeline bindings");
+    if(boltVbAfter[0])boltVbAfter[0]->Release();if(boltVbAfter[1])boltVbAfter[1]->Release();if(boltIbAfter)boltIbAfter->Release();if(boltCbAfter)boltCbAfter->Release();
+    boltSnap.capture(ctx.Get(),501,1,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==2 && boltSnap.fireGeometryCaptured==2,
+          "bolt geometry remains captured after the eye dump's first frame");
+    boltSnap.capture(ctx.Get(),501,2,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs^1ull,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==2 && boltSnap.draws.back().layout.empty() && !boltSnap.draws.back().streams[0].copied,
+          "a neighboring pixel shader does not activate bolt geometry capture");
+    ctx->IASetInputLayout(nullptr);boltSnap.capture(ctx.Get(),502,3,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    ctx->IASetInputLayout(boltLayout.Get());
+    boltSnap.vertexBytes=32*1024*1024;boltSnap.capture(ctx.Get(),503,4,edvr::EyeDrawSnapshot::kBoltVs,edvr::EyeDrawSnapshot::kBoltPs,'X',4,3,2,3,0);
+    check(boltSnap.fireGeometrySeen==4 && boltSnap.fireGeometryCaptured==2 && boltSnap.fireGeometryMissingLayout==1 && boltSnap.fireGeometryRefusedBytes>0,
+          "bounded bolt summary distinguishes observed draws, captured geometry, missing layouts, and refused bytes");
+
     // A real HDR target changed between the two capture boundaries. The
     // Python fixture checks exact packed pixels after subsequent overwrites.
     edvr::EyeDrawSnapshot cropSnap;
@@ -431,22 +740,51 @@ int wmain(int argc, wchar_t** argv) {
     edvr::GuiDrawSnapshot::rememberLayout(layout.Get(),&element,1,guiHash);ctx->IASetInputLayout(layout.Get());
     edvr::GuiDrawSnapshot::rememberShader(guiHash,code->GetBufferPointer(),code->GetBufferSize());edvr::GuiDrawSnapshot::rememberShader(guiPs,code->GetBufferPointer(),code->GetBufferSize());
     ctx->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,4);
-    for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,guiHash,guiPs,'X',6,1,150000,0,0);}
-    gui.capture(ctx.Get(),201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
+    for(int i=0;i<2;++i){float values[48];for(float& v:values)v=float(7+i);ctx->UpdateSubresource(cb.Get(),0,nullptr,values,0,0);gui.capture(ctx.Get(),200,200,guiHash,guiPs,'X',6,1,150000,0,0);}
+    gui.capture(ctx.Get(),201,201,guiHash,guiPs,'X',6,1,0,0,0);check(gui.count()==2,"GUI captures one source frame only");
     ctx->ClearRenderTargetView(rtv.Get(),bg);ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
     edvr::EyeDrawSnapshot meshSnap;
-    ComPtr<ID3D11Buffer> meshPool,meshBones,meshIds;
+    ComPtr<ID3D11Buffer> meshPool,meshBones,meshOtherPalette,meshIds;
     ComPtr<ID3D11ShaderResourceView> meshPoolView,meshBoneView;
     bd={};bd.ByteWidth=672;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.StructureByteStride=336;
     hr(dev->CreateBuffer(&bd,nullptr,&meshPool));hr(dev->CreateShaderResourceView(meshPool.Get(),nullptr,&meshPoolView));
     bd.ByteWidth=48*24000;bd.StructureByteStride=48; // palette extends past the old 1 MiB cap
     hr(dev->CreateBuffer(&bd,nullptr,&meshBones));hr(dev->CreateShaderResourceView(meshBones.Get(),nullptr,&meshBoneView));
+    hr(dev->CreateBuffer(&bd,nullptr,&meshOtherPalette));
     bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_VERTEX_BUFFER;bd.MiscFlags=bd.StructureByteStride=0;
     hr(dev->CreateBuffer(&bd,nullptr,&meshIds));
     ctx->VSSetShaderResources(33,1,meshPoolView.GetAddressOf());ctx->VSSetShaderResources(38,1,meshBoneView.GetAddressOf());
     UINT meshStride=8;ctx->IASetVertexBuffers(0,1,meshIds.GetAddressOf(),&meshStride,&zero);
     constexpr uint64_t meshVs=0x7B0DC42D383F694Cull;
+    constexpr uint64_t meshPs=0x0DF03E64DF9DBEF1ull;
+    wchar_t longestPath[MAX_PATH];for(auto& ch:longestPath)ch=L'x';longestPath[MAX_PATH-1]=0;char bodyReport[1200]{};
+    const int bodyLength=std::snprintf(bodyReport,sizeof(bodyReport),edvr::EyeDrawSnapshot::kBodyCaptureReport,longestPath,
+        UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,"WRITE FAILED",UINT32_MAX,UINT32_MAX,UINT32_MAX);
+    const int candidateLength=std::snprintf(bodyReport,sizeof(bodyReport),edvr::EyeDrawSnapshot::kBodyCandidateReport,L"123456789012345",
+        UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX);
+    check(bodyLength>0&&bodyLength<1150&&candidateLength>0&&candidateLength<1150,"worst-case body/candidate reports fit1200-byte logger with prefix headroom");
+    check(edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,37080) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,10050) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,3216) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,20,10050) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(0x9D800F45B12A6AACull,0x194DD6A677084A74ull,21,3216) &&
+          edvr::EyeDrawSnapshot::bodyMeshSelector(0x9D800F45B12A6AACull,0x194DD6A677084A74ull,21,13260) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,20,37080) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,meshPs,21,6) &&
+          !edvr::EyeDrawSnapshot::bodyMeshSelector(meshVs,0x1234,21,37080),
+          "body capture selector requires the measured VS/PS, draw count, and stencil ref");
+    ID3D11Buffer* paletteSet[4]={meshBones.Get(),meshOtherPalette.Get(),meshPool.Get(),meshIds.Get()};
+    ID3D11Buffer* duplicatePalette[2]={meshBones.Get(),meshBones.Get()};
+    check(edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(0,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(1,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshBones.Get())==1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshOtherPalette.Get())==0 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,paletteSet,meshPool.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(3,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(4,paletteSet,meshBones.Get())==-1 &&
+          edvr::EyeDrawSnapshot::otherTrackedPaletteIndex(2,duplicatePalette,meshBones.Get())==-1,
+          "other-palette identity is available only for exactly two tracked palettes and an exact bound match");
     for(unsigned i=0;i<2;++i) {
         std::vector<uint8_t> pool(672,uint8_t(21+i)),bones(48*24000,uint8_t(31+i)),ids(32,uint8_t(41+i));
         ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
@@ -455,7 +793,7 @@ int wmain(int argc, wchar_t** argv) {
         meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,2,0,0);
         meshSnap.captureSourceMesh(ctx.Get(),300+i,meshVs,0,'X',6,1,3,0,0);
     }
-    check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"source buffer deduplication is per frame");
+    check(meshSnap.draws.size()==4 && meshSnap.meshBuffers.size()==6 && !meshSnap.meshDeclined,"ordinary source snapshots retain their existing per-frame deduplication");
     ComPtr<ID3D11ShaderResourceView> checkPool;ctx->VSGetShaderResources(33,1,&checkPool);
     check(checkPool.Get()==meshPoolView.Get(),"source capture changed SRV binding");
     edvr::EyeDrawSnapshot eyeMesh;
@@ -466,28 +804,106 @@ int wmain(int argc, wchar_t** argv) {
     eyeDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;eyeDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> otherEye;ComPtr<ID3D11RenderTargetView> otherEyeRtv;
     hr(dev->CreateTexture2D(&eyeDesc,nullptr,&otherEye));hr(dev->CreateRenderTargetView(otherEye.Get(),nullptr,&otherEyeRtv));
-    eyeMesh.captureEyeMesh(ctx.Get(),699,0,edvr::EyeDrawSnapshot::kHud,0,'X',6,1,0,0,0);
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,edvr::EyeDrawSnapshot::kHud,0,0,nullptr,'X',6,1,0,0,0);
     check(eyeMesh.draws.empty() && !eyeMesh.firstFrame,"non-mesh does not start eye mesh window");
-    for(unsigned frame=700;frame<703;++frame)for(unsigned eye=0;eye<2;++eye) {
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,meshVs,meshPs,21,nullptr,'X',6,1,0,0,0);
+    check(eyeMesh.draws.empty() && eyeMesh.meshNonBodyDraws==1,"body-family draw with nonmatching count is aggregated, not retained");
+    for(unsigned frame=700;frame<716;++frame)for(unsigned eye=0;eye<2;++eye) {
         ID3D11RenderTargetView* target=eye?otherEyeRtv.Get():rtv.Get();ctx->OMSetRenderTargets(1,&target,nullptr);
         const uint8_t value=uint8_t(51+(frame-700)*2+eye);
-        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),ids(32,uint8_t(value+20));
+        std::vector<uint8_t> pool(672,value),bones(48*24000,uint8_t(value+10)),otherBones(48*24000,uint8_t(value+30)),ids(32,uint8_t(value+20));
         ctx->UpdateSubresource(meshPool.Get(),0,nullptr,pool.data(),0,0);
         ctx->UpdateSubresource(meshBones.Get(),0,nullptr,bones.data(),0,0);
+        ctx->UpdateSubresource(meshOtherPalette.Get(),0,nullptr,otherBones.data(),0,0);
         ctx->UpdateSubresource(meshIds.Get(),0,nullptr,ids.data(),0,0);
         for(unsigned draw=0;draw<2;++draw) {
             float constants[48];for(float& v:constants)v=float(frame*10+eye*2+draw);
             ctx->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);
-            eyeMesh.captureEyeMesh(ctx.Get(),frame,eye*100+draw,meshVs,0,'X',6,1,2+draw,150000,8000);
+            std::vector<uint8_t> drawPool(672,uint8_t(value+draw)),drawBones(48*24000,uint8_t(value+10+draw)),drawOtherBones(48*24000,uint8_t(value+30+draw)),drawIds(32,uint8_t(value+20+draw));
+            ctx->UpdateSubresource(meshPool.Get(),0,nullptr,drawPool.data(),0,0);
+            ctx->UpdateSubresource(meshBones.Get(),0,nullptr,drawBones.data(),0,0);
+            ctx->UpdateSubresource(meshOtherPalette.Get(),0,nullptr,drawOtherBones.data(),0,0);
+            ctx->UpdateSubresource(meshIds.Get(),0,nullptr,drawIds.data(),0,0);
+            edvr::EyeMeshJoinStamp join{};join.sceneFrame=1200+(frame-700);join.epoch=44;
+            join.scheduledIndex=draw;join.scheduledRenderFrame=900+(frame-700);
+            join.fpFrame=frame;join.fpSequence=7000+frame;join.gGameFrame=8000+frame;join.itemSerial=eye+1;
+            join.rig=0x12340000ull+eye;join.rigGeneration=9;join.poseQpc=100000+frame;join.drawQpc=200000+frame;
+            join.armJoints[0][0]=24;join.armJoints[0][1]=34;join.armJoints[0][2]=35;
+            join.armJoints[1][0]=36;join.armJoints[1][1]=37;join.armJoints[1][2]=38;
+            join.validFlags=(1u<<0)|(1u<<1)|(1u<<2)|(1u<<3)|(1u<<4)|(1u<<5)|(1u<<7);
+            eyeMesh.captureEyeMesh(ctx.Get(),frame,900+(frame-700),int32_t(eye),join,eye*100+draw,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,2+draw,150000,8000);
         }
         ctx->OMGetRenderTargets(1,&boundRt,nullptr);check(boundRt.Get()==target,"eye capture preserves target binding");
     }
-    check(eyeMesh.draws.size()==12 && eyeMesh.meshBuffers.size()==18 && !eyeMesh.meshDeclined,
-          "eye pools deduplicate within a frame and target, never across eyes");
-    for(const auto& d:eyeMesh.draws)check(d.layout.size()==1,"eye mesh input layout retained");
+    check(eyeMesh.draws.size()==64 && eyeMesh.meshBuffers.size()==128 && eyeMesh.meshCaptureSnapshots==32 && !eyeMesh.meshDeclined,
+          "sixteen frames retain every eye draw and one body plus other-palette snapshot per eye and frame");
+    check(eyeMesh.draws.front().frame==700 && eyeMesh.draws.front().renderFrame==900 && eyeMesh.draws.front().eye==0 &&
+          eyeMesh.draws.back().frame==715 && eyeMesh.draws.back().renderFrame==915 && eyeMesh.draws.back().eye==1,
+          "ledger and native render frames remain separate and each row carries its eye");
+    for(size_t i=0;i<eyeMesh.draws.size();++i) {
+        check(eyeMesh.draws[i].layout.size()==1,"eye mesh input layout retained");
+        check(eyeMesh.draws[i].meshSelected==1,"body selector retained on every actual draw row");
+        if(i%2==0)check(eyeMesh.draws[i].mesh[3]!=UINT32_MAX,"first body draw carries other palette candidate");
+        else check(eyeMesh.draws[i].mesh[3]==UINT32_MAX && eyeMesh.draws[i].meshStatus[3]==7,"later body draw records explicit quota status");
+    }
     const auto eyeBytes=eyeMesh.meshBytes;
-    for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
-    check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
+    eyeMesh.captureEyeMesh(ctx.Get(),699,899,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    eyeMesh.captureEyeMesh(ctx.Get(),716,916,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    check(eyeMesh.draws.size()==64 && eyeMesh.meshBytes==eyeBytes && eyeMesh.meshCaptureDeclined==2,
+          "pre-window and post-sixteen-frame attempts are explicit declines");
+    edvr::EyeDrawSnapshot unknownEyeMesh;
+    unknownEyeMesh.captureEyeMesh(ctx.Get(),800,0,-1,{},0,meshVs,meshPs,21,nullptr,'X',37080,1,0,0,0);
+    check(unknownEyeMesh.draws.size()==1 && unknownEyeMesh.meshCaptureSnapshots==0 &&
+          unknownEyeMesh.draws[0].meshStatus[0]==10 && unknownEyeMesh.draws[0].eye==-1,
+          "unknown-eye body metadata is retained without consuming a snapshot quota");
+    unknownEyeMesh.captureEyeMesh(ctx.Get(),800,0,0,{},1,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,0,0,0);
+    check(unknownEyeMesh.meshCaptureSnapshots==1 && unknownEyeMesh.draws[1].mesh[0]!=UINT32_MAX,
+          "known eye can still receive a full snapshot after unknown-eye metadata");
+    edvr::EyeDrawSnapshot candidateBody;
+    candidateBody.armBodyCandidates(901);
+    candidateBody.captureEyeMesh(ctx.Get(),900,1000,0,{},0,meshVs,meshPs,21,meshOtherPalette.Get(),'X',37080,1,0,0,0);
+    // Simulate all regular-body reserved capacity consumed before the candidate draws, without allocating hundreds of MiB in the rig.
+    candidateBody.meshBytes=edvr::EyeDrawSnapshot::kEyeMeshBudget-edvr::EyeDrawSnapshot::kBodyCandidateMeshReserve;
+    candidateBody.vertexBytes=32*1024*1024-edvr::EyeDrawSnapshot::kBodyCandidateVertexReserve;
+    for(int eye=0;eye<2;++eye)for(uint32_t count:{10050u,3216u}) {
+        candidateBody.captureEyeMesh(ctx.Get(),901,1001,eye,{},count,meshVs,meshPs,21,meshOtherPalette.Get(),'X',count,1,0,0,0);
+        check(candidateBody.draws.back().meshSelected==2&&candidateBody.draws.back().meshStatus[0]==1&&candidateBody.draws.back().meshStatus[1]==1&&candidateBody.draws.back().meshStatus[3]==1,
+              "earlier regular-body saturation cannot consume either observed candidate's reserved per-eye draw-time palettes");
+    }
+    check(candidateBody.meshBytes<=edvr::EyeDrawSnapshot::kEyeMeshBudget&&candidateBody.vertexBytes<=32*1024*1024,
+          "candidate reservations preserve whole-run structured and geometry byte caps");
+    candidateBody.captureEyeMesh(ctx.Get(),901,1001,0,{},99,meshVs,meshPs,21,meshOtherPalette.Get(),'X',10050,1,0,0,0);
+    check(candidateBody.draws.back().meshStatus[0]==7,"repeated candidate refuses another palette copy explicitly");
+    edvr::EyeDrawSnapshot bodyCandidateFixture;
+    bodyCandidateFixture.armBodyCandidates(951);
+    bodyCandidateFixture.captureEyeMesh(ctx.Get(),950,0,-1,{},0,meshVs,meshPs,21,nullptr,'X',10050,1,0,0,0);
+    check(bodyCandidateFixture.draws.back().meshSelected==2&&bodyCandidateFixture.draws.back().meshStatus[0]==10,"candidate unknown-eye metadata remains explicit and consumes no reserved slot");
+    edvr::EyeDrawSnapshot firstCandidate;firstCandidate.armBodyCandidates(1001);
+    firstCandidate.captureEyeMesh(ctx.Get(),1001,0,0,{},0,meshVs,meshPs,21,meshOtherPalette.Get(),'X',10050,1,0,0,0);
+    check(firstCandidate.draws.back().meshStatus[0]==1&&firstCandidate.bodyCandidateSlots==1,
+          "first body arrival on the selected complete ledger frame gets candidate palettes without needing a partial-frame predecessor");
+    ctx->PSSetConstantBuffers(2,1,cb.GetAddressOf());
+    ctx->IASetVertexBuffers(1,1,meshIds.GetAddressOf(),&meshStride,&zero);
+    for(int eye=0;eye<2;++eye)for(uint32_t count:{10050u,3216u})
+        bodyCandidateFixture.captureEyeMesh(ctx.Get(),951,0,eye,{},count,meshVs,meshPs,21,meshOtherPalette.Get(),'X',count,1,0,0,0);
+    check(!bodyCandidateFixture.failures,"candidate resources stage without allocation/copy setup failures");
+    unsigned candidatePending=0,candidateReady=0;HRESULT candidateFirstPending=S_OK;
+    const auto candidateReadiness=[&](ID3D11Resource* resource,uint32_t bytes){
+        if(!resource||!bytes)return;D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT result=ctx->Map(resource,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+        if(result==DXGI_ERROR_WAS_STILL_DRAWING){++candidatePending;candidateFirstPending=result;return;}
+        hr(result);++candidateReady;ctx->Unmap(resource,0);
+    };
+    for(const auto& draw:bodyCandidateFixture.draws){for(unsigned i=0;i<4;++i)candidateReadiness(draw.stage[i].Get(),draw.copied[i]);for(const auto& stream:draw.streams)candidateReadiness(stream.stage.Get(),stream.copied);}
+    for(const auto& buffer:bodyCandidateFixture.meshBuffers)candidateReadiness(buffer.stage.Get(),buffer.bytes);
+    std::printf("candidate fixture pre-fence: %u ready/%u pending, first pending HRESULT=0x%08X\n",candidateReady,candidatePending,unsigned(candidateFirstPending));
+    // The production writer deliberately never waits. This early fixture write needs the same explicit GPU completion as the later fixtures.
+    wait_gpu(ctx.Get(),dev.Get());
+    check(bodyCandidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".bodycandidates").c_str())&&!bodyCandidateFixture.failures,"candidate geometry, PSb2 and palettes serialize");
+    ID3D11Buffer* noPsBuffer=nullptr;ctx->PSSetConstantBuffers(2,1,&noPsBuffer);
+    ctx->IASetVertexBuffers(1,1,&noPsBuffer,&meshStride,&zero);
+    std::vector<uint8_t> geometryVertices(32,76);
+    ctx->UpdateSubresource(meshIds.Get(),0,nullptr,geometryVertices.data(),0,0);
     // Version 9: the cull gate probe's armed-frame geometry. Every pool draw
     // of the armed frame gets a map row; a mesh drawn twice is copied once;
     // a second blend state is a second state row; other frames are ignored.
@@ -833,6 +1249,85 @@ int wmain(int argc, wchar_t** argv) {
     check(spriteSnap.write(ctx.Get(),(std::wstring(argv[1])+L".sprite").c_str()),"sprite boundary diagnostic writes complete");
     check(cropSnap.write(ctx.Get(),(std::wstring(argv[1])+L".crops").c_str()) && cropSnap.failures==0,"effect colour crop write");
     check(night.write(ctx.Get(),(std::wstring(argv[1])+L".night").c_str()) && night.failures==0,"night-vision draw-time data writes without missing copies");
+    // A nonempty v10 candidate record pins the C++ writer to the Python reader:
+    // exact optic identity, shifted VB/IB windows, material bytes, s0, and a
+    // draw-issued before/after ROI pair all share the same draw id.
+    edvr::EyeDrawSnapshot candidateFixture;
+    auto stageBufferWindow=[&](const void* bytes,UINT whole,UINT begin,UINT length,ComPtr<ID3D11Buffer>& stage) {
+        D3D11_BUFFER_DESC sourceDesc{};sourceDesc.ByteWidth=whole;sourceDesc.Usage=D3D11_USAGE_DEFAULT;
+        ComPtr<ID3D11Buffer> source;hr(dev->CreateBuffer(&sourceDesc,nullptr,&source));
+        ctx->UpdateSubresource(source.Get(),0,nullptr,bytes,0,0);
+        D3D11_BUFFER_DESC stageDesc{};stageDesc.ByteWidth=length;stageDesc.Usage=D3D11_USAGE_STAGING;stageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        hr(dev->CreateBuffer(&stageDesc,nullptr,&stage));D3D11_BOX box{begin,0,0,begin+length,1,1};
+        ctx->CopySubresourceRegion(stage.Get(),0,0,0,0,source.Get(),0,&box);
+    };
+    edvr::EyeDrawSnapshot::Draw candidateDraw{};
+    candidateDraw.vs=edvr::EyeDrawSnapshot::kF77OpticVs;candidateDraw.ps=edvr::EyeDrawSnapshot::kF77OpticPs;
+    candidateDraw.frame=101;candidateDraw.ordinal=17;candidateDraw.kind='I';candidateDraw.count=2;candidateDraw.instances=1;
+    candidateDraw.start=1;candidateDraw.base=2;
+    uint8_t candidateVertices[192];for(UINT i=0;i<sizeof(candidateVertices);++i)candidateVertices[i]=static_cast<uint8_t>(i);
+    ComPtr<ID3D11Buffer> candidateVertexStage;
+    stageBufferWindow(candidateVertices,sizeof(candidateVertices),96,96,candidateVertexStage);
+    candidateDraw.streams[1].offset=0;candidateDraw.streams[1].stride=48;candidateDraw.streams[1].whole=sizeof(candidateVertices);
+    candidateDraw.streams[1].captureOffset=96;candidateDraw.streams[1].copied=96;candidateDraw.streams[1].stage=candidateVertexStage;
+    const uint16_t candidateIndices[8]={7,7,0,1,7,7,7,7};ComPtr<ID3D11Buffer> candidateIndexStage;
+    stageBufferWindow(candidateIndices,sizeof(candidateIndices),4,4,candidateIndexStage);
+    candidateDraw.streams[2].offset=2;candidateDraw.streams[2].stride=2;candidateDraw.streams[2].whole=sizeof(candidateIndices);
+    candidateDraw.streams[2].captureOffset=4;candidateDraw.streams[2].copied=4;candidateDraw.streams[2].stage=candidateIndexStage;
+    edvr::EyeDrawSnapshot::Layout candidateLayout0{},candidateLayout1{};
+    std::strcpy(candidateLayout0.semantic,"PACKEDVERTEXDATAA");candidateLayout0.format=DXGI_FORMAT_R32G32B32A32_UINT;candidateLayout0.slot=1;candidateLayout0.offset=0;
+    std::strcpy(candidateLayout1.semantic,"PACKEDVERTEXDATAC");candidateLayout1.format=DXGI_FORMAT_R32G32_UINT;candidateLayout1.slot=1;candidateLayout1.offset=16;
+    candidateDraw.layout={candidateLayout0,candidateLayout1};
+    candidateFixture.draws.push_back(std::move(candidateDraw));
+    edvr::EyeDrawSnapshot::CandidateFrame candidateFrame{};candidateFrame.draw=0;candidateFrame.ledgerFrame=101;candidateFrame.renderFrame=501;
+    candidateFrame.eye=1;candidateFrame.issued=1;candidateFrame.roiCaptured=1;candidateFrame.roiComplete=1;candidateFrame.cameraCbSlot=1;
+    candidateFixture.candidateFrames.push_back(candidateFrame);candidateFixture.candidateOpticDraws=1;candidateFixture.candidateRoiDraw=0;
+    edvr::EyeDrawSnapshot::CandidateInput candidateMaterial{};candidateMaterial.draw=0;candidateMaterial.slot=1;candidateMaterial.kind=0;
+    candidateMaterial.viewDimension=D3D11_SRV_DIMENSION_BUFFER;candidateMaterial.bytes=96;candidateMaterial.width=96;
+    candidateMaterial.sourceResource=0x12340000;candidateMaterial.sourceView=0x56780000;
+    candidateMaterial.sourceWidth=96;candidateMaterial.elements=24;candidateMaterial.stride=4;
+    uint8_t materialBytes[96];std::memset(materialBytes,0x5a,sizeof(materialBytes));
+    stageBufferWindow(materialBytes,sizeof(materialBytes),0,sizeof(materialBytes),candidateMaterial.bufferStage);
+    candidateFixture.candidateInputs.push_back(std::move(candidateMaterial));candidateFixture.candidateInputBytes=sizeof(materialBytes);
+    edvr::EyeDrawSnapshot::CandidateSampler candidateSampler{};candidateSampler.draw=0;candidateSampler.present=1;
+    candidateSampler.desc.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;candidateSampler.desc.AddressU=D3D11_TEXTURE_ADDRESS_WRAP;
+    candidateSampler.desc.AddressV=D3D11_TEXTURE_ADDRESS_WRAP;candidateSampler.desc.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+    candidateSampler.desc.MaxLOD=D3D11_FLOAT32_MAX;candidateFixture.candidateSamplers.push_back(candidateSampler);
+    D3D11_TEXTURE2D_DESC roiDesc{};roiDesc.Width=roiDesc.Height=512;roiDesc.MipLevels=roiDesc.ArraySize=roiDesc.SampleDesc.Count=1;
+    roiDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;roiDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> roiSource;ComPtr<ID3D11RenderTargetView> roiRtv;hr(dev->CreateTexture2D(&roiDesc,nullptr,&roiSource));
+    hr(dev->CreateRenderTargetView(roiSource.Get(),nullptr,&roiRtv));D3D11_TEXTURE2D_DESC roiStageDesc=roiDesc;
+    roiStageDesc.Usage=D3D11_USAGE_STAGING;roiStageDesc.BindFlags=0;roiStageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    for(uint32_t phase=0;phase<2;++phase) {
+        const FLOAT colour[4]={phase?0.7f:0.1f,0.2f,phase?0.1f:0.3f,1.f};ctx->ClearRenderTargetView(roiRtv.Get(),colour);
+        edvr::EyeDrawSnapshot::EffectImage image{};image.source=roiSource;image.draw=0;image.after=phase;
+        image.width=image.height=image.sourceWidth=image.sourceHeight=512;image.format=DXGI_FORMAT_R8G8B8A8_UNORM;image.bytes=512*512*4;
+        hr(dev->CreateTexture2D(&roiStageDesc,nullptr,&image.stage));ctx->CopyResource(image.stage.Get(),roiSource.Get());
+        candidateFixture.effectImages.push_back(std::move(image));candidateFixture.effectImageBytes+=512*512*4;
+    }
+    wait_gpu(ctx.Get(),dev.Get());
+    check(candidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".candidate").c_str()),"nonempty candidate snapshot write");
+    edvr::EyeDrawSnapshot capacityFixture;capacityFixture.candidateUiFirstLedgerFrame=100;
+    uint32_t capacityTotal=0,capacityNonUi=0,capacityUi[16][3]{};
+    auto appendCapacityDraw=[&](bool ui,uint32_t frame,uint32_t eye) {
+        check(edvr::EyeDrawSnapshot::candidateCapacityAvailable(ui,ui?capacityUi[frame-100][eye]:0,capacityNonUi,capacityTotal),
+              "candidate capture admission accepts reserved full-window row");
+        const uint32_t drawIndex=uint32_t(capacityFixture.draws.size());edvr::EyeDrawSnapshot::Draw d{};
+        d.vs=ui?edvr::EyeDrawSnapshot::kWeaponUiVs:edvr::EyeDrawSnapshot::kF77HeldCandidateVs;
+        d.ps=ui?edvr::EyeDrawSnapshot::kWeaponUiPs:0;d.frame=frame;d.ordinal=drawIndex;d.kind='I';d.count=3;d.instances=1;
+        capacityFixture.draws.push_back(std::move(d));edvr::EyeDrawSnapshot::CandidateFrame c{};
+        c.draw=drawIndex;c.ledgerFrame=frame;c.renderFrame=frame+1000;c.eye=ui?(eye==0?0:eye==1?1:-1):-1;
+        c.issued=2;c.cameraCbSlot=0;capacityFixture.candidateFrames.push_back(c);
+        if(ui){++capacityUi[frame-100][eye];++capacityFixture.candidateUiCounts[frame-100][eye];}
+        else {++capacityNonUi;++capacityFixture.candidateNonUiDraws;}
+        ++capacityTotal;
+    };
+    for(uint32_t n=0;n<edvr::EyeDrawSnapshot::kCandidateNonUiMax;++n)appendCapacityDraw(false,1,0);
+    for(uint32_t frame=100;frame<116;++frame)for(uint32_t eye=0;eye<3;++eye)
+        for(uint32_t n=0;n<edvr::EyeDrawSnapshot::kCandidateUiPerFrameEye;++n)appendCapacityDraw(true,frame,eye);
+    check(capacityTotal==1152&&capacityNonUi==384&&capacityFixture.candidateFrames.size()==1152,
+          "candidate fixture fills every independently reserved row");
+    check(capacityFixture.write(ctx.Get(),(std::wstring(argv[1])+L".capacity").c_str()),"full-window candidate snapshot write");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
@@ -863,5 +1358,62 @@ int wmain(int argc, wchar_t** argv) {
     cropSnap.reset();check(cropSnap.effectImages.empty() && !cropSnap.effectImageBytes &&
         !cropSnap.effectImageDeclined && cropSnap.pendingEffectImage==UINT32_MAX,"effect capture reset releases images and pending work");
     night.reset();check(night.nightSampling.empty() && night.effectImages.empty() && !night.vertexBytes,"night reset releases sampling and geometry");
+    {
+        using S=edvr::EyeDrawSnapshot;edvr::EyeLateMenuCapture menu;menu.arm(800);
+        D3D11_INPUT_ELEMENT_DESC menuElements[3]={opticElements[0],opticElements[1],
+            {"INSTANCEANDMODELDATAINDEX",0,DXGI_FORMAT_R32G32_UINT,0,0,D3D11_INPUT_PER_INSTANCE_DATA,1}};
+        ComPtr<ID3D11InputLayout> menuLayout;hr(dev->CreateInputLayout(menuElements,3,opticBlob->GetBufferPointer(),opticBlob->GetBufferSize(),&menuLayout));
+        edvr::EyeDrawSnapshot::rememberLayout(menuLayout.Get(),menuElements,3,S::kLateMenuVs);
+        ctx->IASetInputLayout(menuLayout.Get());UINT menuStride=opticStride,menuOffset=opticBindingOffset;
+        ctx->IASetVertexBuffers(1,1,opticVb.GetAddressOf(),&menuStride,&menuOffset);
+        std::vector<uint16_t> menuIndices(364,2);for(size_t i=4;i<menuIndices.size();++i)menuIndices[i]=static_cast<uint16_t>(2+(i%4));
+        D3D11_BUFFER_DESC mid{};mid.ByteWidth=static_cast<UINT>(menuIndices.size()*2);mid.Usage=D3D11_USAGE_DEFAULT;mid.BindFlags=D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA mi{menuIndices.data(),0,0};ComPtr<ID3D11Buffer> menuIb;hr(dev->CreateBuffer(&mid,&mi,&menuIb));
+        ctx->IASetIndexBuffer(menuIb.Get(),DXGI_FORMAT_R16_UINT,4);
+        ComPtr<ID3D11Buffer> tables[2];ComPtr<ID3D11ShaderResourceView> views[2];
+        std::vector<uint8_t> tableBytes[2]={std::vector<uint8_t>(672,0x47),std::vector<uint8_t>(192,0x58)};
+        for(unsigned i=0;i<2;++i){D3D11_BUFFER_DESC menuTableDesc{};menuTableDesc.ByteWidth=static_cast<UINT>(tableBytes[i].size());menuTableDesc.Usage=D3D11_USAGE_DEFAULT;
+            menuTableDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;menuTableDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;menuTableDesc.StructureByteStride=i?48:336;
+            D3D11_SUBRESOURCE_DATA data{tableBytes[i].data(),0,0};hr(dev->CreateBuffer(&menuTableDesc,&data,&tables[i]));
+            D3D11_SHADER_RESOURCE_VIEW_DESC menuViewDesc{};menuViewDesc.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;menuViewDesc.Buffer.NumElements=menuTableDesc.ByteWidth/menuTableDesc.StructureByteStride;
+            hr(dev->CreateShaderResourceView(tables[i].Get(),&menuViewDesc,&views[i]));ctx->VSSetShaderResources(i?38:33,1,views[i].GetAddressOf());}
+        const uint32_t menuIds[4]={0,0,1,0};D3D11_BUFFER_DESC idDesc{};idDesc.ByteWidth=sizeof(menuIds);idDesc.Usage=D3D11_USAGE_DEFAULT;idDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA idData{menuIds,0,0};ComPtr<ID3D11Buffer> ids;hr(dev->CreateBuffer(&idDesc,&idData,&ids));
+        UINT idStride=8,idOffset=0;ctx->IASetVertexBuffers(0,1,ids.GetAddressOf(),&idStride,&idOffset);
+        ComPtr<ID3D11DeviceContext1> ranged;hr(ctx.As(&ranged));
+        D3D11_BUFFER_DESC cd{};cd.ByteWidth=5120;cd.Usage=D3D11_USAGE_DEFAULT;cd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> camera;hr(dev->CreateBuffer(&cd,nullptr,&camera));
+        std::vector<uint8_t> cameraBytes(cd.ByteWidth,0x35);ctx->UpdateSubresource(camera.Get(),0,nullptr,cameraBytes.data(),0,0);
+        UINT first=16,num=288;ranged->VSSetConstantBuffers1(1,1,camera.GetAddressOf(),&first,&num);
+        edvr::EyeMeshJoinStamp join;join.sceneFrame=799;join.validFlags=1;
+        for(int eye=0;eye<2;++eye) {
+            menu.capture(ctx.Get(),801,0,eye,join,eye*10,0xDE545DC8EE4FBB87ull,0,'I',900,1,0,2,static_cast<int32_t>(opticBase),1);
+            menu.evidence.candidateDrawIssued(ctx.Get(),true,0xDE545DC8EE4FBB87ull,0);
+            for(unsigned family=0;family<3;++family) {
+                const uint64_t vs=family==1?S::kLateMenuBaseVs:S::kLateMenuVs,ps=family==1?S::kLateMenuBasePs:S::kLateMenuPs;
+                menu.capture(ctx.Get(),801,0,eye,join,eye*10+family+1,vs,ps,'I',family==0?6u:360u,1,1,2,static_cast<int32_t>(opticBase),2);
+                menu.evidence.candidateDrawIssued(ctx.Get(),family!=0,vs,ps);
+                std::fill(tableBytes[0].begin(),tableBytes[0].end(),static_cast<uint8_t>(0x48+eye*3+family));
+                ctx->UpdateSubresource(tables[0].Get(),0,nullptr,tableBytes[0].data(),0,0);
+            }
+        }
+        check(menu.rows.size()==8&&menu.evidence.draws.size()==8&&menu.window.scene[0]&&menu.window.scene[1],
+              "independent menu snapshot retains both eyes, earlier scene references, skipped siblings and both menu families with zero native frame");
+        check(menu.rows[1].constants[1].first==16&&menu.evidence.draws[1].copied[1]==288*16&&
+              menu.evidence.draws[1].streams[1].captureOffset==opticVertexBegin,
+              "menu capture preserves ranged camera CB origin and large indexed geometry base");
+        check(menu.evidence.meshBuffers.size()==12&&menu.evidence.draws[1].mesh[0]!=menu.evidence.draws[2].mesh[0]&&
+              menu.evidence.draws[1].streams[0].captureOffset==8&&menu.evidence.draws[1].streams[0].copied==8,
+              "menu structured inputs are copied per draw; instance IDs retain only the exact start-instance window without whole-VB duplication");
+        wait_gpu(ctx.Get(),dev.Get());
+        auto& cachedAvatar=menu.rows[1].avatar;cachedAvatar.status=2;cachedAvatar.validFlags=1;cachedAvatar.sourceFrame=123;
+        menu.rows[1].inputBridge=menuInputDrawBridgeFixture;
+        cachedAvatar.sampleQpc=1000;cachedAvatar.qpc=900;cachedAvatar.rootQpc=800;cachedAvatar.qpcFrequency=1000;
+        for(unsigned i=0;i<4;++i)cachedAvatar.froot[i*5]=cachedAvatar.m3p[i*5]=cachedAvatar.G[i*5]=1.0f;
+        check(menu.write(ctx.Get(),(std::wstring(argv[1])+L".menu.bin").c_str(),(std::wstring(argv[1])+L".menu.json").c_str(),menuInputFixture),
+              "menu binary and bounded binding/selection companion write");
+        menu.release();check(menu.evidence.draws.empty()&&menu.evidence.meshBuffers.empty()&&menu.rows.empty()&&menu.window.frame==0,
+              "closing or aborting a menu run releases staging and source references before another manual capture");
+    }
     std::puts("GPU draw snapshot capture passed");
 }

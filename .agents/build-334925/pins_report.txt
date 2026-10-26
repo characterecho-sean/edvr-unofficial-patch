@@ -1,0 +1,327 @@
+# pins report, 2026-10-23. Part 1: --mode pre, the source still at build 334473 (what each pin becomes on 334925). Part 2: --mode post after the edit pass (every pin equals the 334925 bytes and the 334473 exe reproduces the baseline).
+
+## Part 1: pre
+KEEP          oc-selKinds                src/common/elite_oculus_profile.h:413 selectorKinds  selector kind 1                old=0x8d546b new=0x8d540b n=8  old-exe-reproduces
+KEEP          oc-selKind2                src/common/elite_oculus_profile.h:416 selectorKind2  selector kind 2                old=0x8d5478 new=0x8d5418 n=8  old-exe-reproduces
+KEEP          oc-selKind3                src/common/elite_oculus_profile.h:419 selectorKind3  selector kind 3                old=0x8d5480 new=0x8d5420 n=8  old-exe-reproduces
+KEEP          oc-exitsOnSuccess          src/common/elite_oculus_profile.h:422 exitsOnSuccess selector exit                  old=0x8d5488 new=0x8d5428 n=4  old-exe-reproduces
+KEEP          oc-advances                src/common/elite_oculus_profile.h:423 advances       selector loop advance          old=0x8d549c new=0x8d543c n=11  old-exe-reproduces
+KEEP          oc-virtualInit             src/common/elite_oculus_profile.h:426 virtualInit    factory virtual init           old=0x4e4e50 new=0x4e4df0 n=3  old-exe-reproduces
+KEEP          oc-initFailure             src/common/elite_oculus_profile.h:427 initFailure    LibOVR init failure            old=0x4e477c new=0x4e471c n=4  old-exe-reproduces
+KEEP          oc-falseReturn             src/common/elite_oculus_profile.h:428 falseReturn    LibOVR false return            old=0x4e47b1 new=0x4e4751 n=2  old-exe-reproduces
+KEEP          oc-nullModule              src/common/elite_oculus_profile.h:429 nullModule     null module path               old=0x4e720e new=0x4e71ae n=10  old-exe-reproduces
+KEEP          oc-continuation            src/common/elite_oculus_profile.h:452 continuation   SDK loader continuation        old=0x4e71bc new=0x4e715c n=6  old-exe-reproduces
+KEEP          ec-freeCamera              src/d3d11/explorer_cam_core.h:53 kFreeCameraPrologue FreeCameraActivity update      old=0x1072a80 new=0x1072a20 n=28  old-exe-reproduces
+KEEP          ec-collision               src/d3d11/explorer_cam_core.h:61 kCollisionPrologue  collision step                 old=0x1092240 new=0x10921e0 n=26  old-exe-reproduces
+KEEP          ec-boxPush                 src/d3d11/explorer_cam_core.h:69 kBoxPushPrologue    commander box push             old=0x10902b0 new=0x1090250 n=20  old-exe-reproduces
+KEEP          ec-cameraUi                src/d3d11/explorer_cam_core.h:76 kCameraUiPrologue   VanityCameraUIActivity update  old=0x47ca180 new=0x47ca0e0 n=19  old-exe-reproduces
+KEEP          ec-controller              src/d3d11/explorer_cam_core.h:81 kControllerPrologue VesselCameraMountControl updat old=0x2df3f60 new=0x2df3ea0 n=15  old-exe-reproduces
+KEEP          ec-avatarFade              src/d3d11/explorer_cam_core.h:87 kAvatarFadePrologue AvatarModelComponent fade      old=0x3dd8d00 new=0x3dd8c60 n=16  old-exe-reproduces
+KEEP          ec-findJoint               src/d3d11/explorer_cam_core.h:95 kFindJointPrologue  skeleton FindJoint             old=0xfdec10 new=0xfdebb0 n=16  old-exe-reproduces
+KEEP          ec-zoomDof                 src/d3d11/explorer_cam_core.h:103 kZoomDofPrologue   zoom/DOF controls update       old=0x1079a90 new=0x1079a30 n=16  old-exe-reproduces
+KEEP          ui-shape-site0             src/d3d11/ui_sizing_math.h:174 kUiPanelShape         panel shape @ site 0           old=0x457323a new=0x457319a n=30  old-exe-reproduces
+KEEP          ui-shape-site1             src/d3d11/ui_sizing_math.h:174 kUiPanelShape         panel shape @ site 1           old=0x4573d45 new=0x4573ca5 n=30  old-exe-reproduces
+NEW           ui-siteBytes0              src/d3d11/ui_sizing_math.h:186 kUiPanelSiteBytes     panel site bytes row 0         old=0x457323a new=0x457319a n=30 NEWBYTES=0F 2F 05 73 2D D8 00 72 0A F3 0F 5E 35 FD E4 86 00 EB 0B 0F 28 F1 F3 0F 5E 35 F4 E4 86 00  old-exe-reproduces
+      +3:03->73[rip->0x1452f5f14] +13:5D->FD[rip->0x144de16a8] +26:54->F4[rip->0x144de16ac]
+NEW           ui-siteBytes1              src/d3d11/ui_sizing_math.h:186 kUiPanelSiteBytes     panel site bytes row 1         old=0x4573d45 new=0x4573ca5 n=30 NEWBYTES=0F 2F 05 68 22 D8 00 72 0A F3 0F 5E 35 F2 D9 86 00 EB 0B 0F 28 F1 F3 0F 5E 35 E9 D9 86 00  old-exe-reproduces
+      +3:F8->68[rip->0x1452f5f14] +4:21->22[rip->0x1452f5f14] +13:52->F2[rip->0x144de16a8] +26:49->E9[rip->0x144de16ac]
+KEEP          ui-prolog0                 src/d3d11/ui_sizing_math.h:194 kUiPanelProlog0       panel function 0 prologue      old=0x4573040 new=0x4572fa0 n=11  old-exe-reproduces
+KEEP          ui-prolog1                 src/d3d11/ui_sizing_math.h:195 kUiPanelProlog1       panel function 1 prologue      old=0x4573cc0 new=0x4573c20 n=13  old-exe-reproduces
+KEEP          ui-ssSetter                src/d3d11/ui_sizing_math.h:657 kUiSsSetterBytes      scale setter                   old=0x2878e00 new=0x2878d40 n=38  old-exe-reproduces
+KEEP          ui-ssGetter                src/d3d11/ui_sizing_math.h:660 kUiSsGetterBytes      scale getter                   old=0x2843b00 new=0x2843a40 n=13  old-exe-reproduces
+KEEP          kin-eval-prologue          src/d3d11/kinematic_eval_hook.cpp:896 kPrologue      targetValid evaluator prologue old=0x4311ca0 new=0x4311c00 n=14  old-exe-reproduces
+KEEP          kin-eval-tail              src/d3d11/kinematic_eval_hook.cpp:928 tail           evaluator bytes after our patc old=0x4311ca5 new=0x4311c05 n=8  old-exe-reproduces
+KEEP          kin-part-prologue          src/d3d11/kinematic_eval_hook.cpp:314 kPartPrologue  part-test prologue             old=0x42b6c80 new=0x42b6be0 n=21  old-exe-reproduces
+KEEP          kin-partframe@0x42b70e9    src/d3d11/kinematic_eval_hook.cpp:318                part-test frame (kPartFrame)   old=0x42b70e9 new=0x42b7049 n=7  old-exe-reproduces
+KEEP          kin-partframe@0x42b7115    src/d3d11/kinematic_eval_hook.cpp:320                part-test frame (kPartFrame)   old=0x42b7115 new=0x42b7075 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b711c    src/d3d11/kinematic_eval_hook.cpp:322                part-test frame (kPartFrame)   old=0x42b711c new=0x42b707c n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7528    src/d3d11/kinematic_eval_hook.cpp:324                part-test frame (kPartFrame)   old=0x42b7528 new=0x42b7488 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7578    src/d3d11/kinematic_eval_hook.cpp:326                part-test frame (kPartFrame)   old=0x42b7578 new=0x42b74d8 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b758d    src/d3d11/kinematic_eval_hook.cpp:328                part-test frame (kPartFrame)   old=0x42b758d new=0x42b74ed n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b764b    src/d3d11/kinematic_eval_hook.cpp:330                part-test frame (kPartFrame)   old=0x42b764b new=0x42b75ab n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7cab    src/d3d11/kinematic_eval_hook.cpp:332                part-test frame (kPartFrame)   old=0x42b7cab new=0x42b7c0b n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7cb7    src/d3d11/kinematic_eval_hook.cpp:334                part-test frame (kPartFrame)   old=0x42b7cb7 new=0x42b7c17 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b76a3    src/d3d11/kinematic_eval_hook.cpp:336                part-test frame (kPartFrame)   old=0x42b76a3 new=0x42b7603 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b76b4    src/d3d11/kinematic_eval_hook.cpp:338                part-test frame (kPartFrame)   old=0x42b76b4 new=0x42b7614 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b77dd    src/d3d11/kinematic_eval_hook.cpp:340                part-test frame (kPartFrame)   old=0x42b77dd new=0x42b773d n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b77e1    src/d3d11/kinematic_eval_hook.cpp:342                part-test frame (kPartFrame)   old=0x42b77e1 new=0x42b7741 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7827    src/d3d11/kinematic_eval_hook.cpp:344                part-test frame (kPartFrame)   old=0x42b7827 new=0x42b7787 n=7  old-exe-reproduces
+KEEP          kin-partframe@0x42b7845    src/d3d11/kinematic_eval_hook.cpp:346                part-test frame (kPartFrame)   old=0x42b7845 new=0x42b77a5 n=17  old-exe-reproduces
+KEEP          kin-primary-prologue       src/d3d11/kinematic_eval_hook.cpp:982 prologue       primary prologue               old=0x42b6df0 new=0x42b6d50 n=21  old-exe-reproduces
+KEEP          kin-primary-call           src/d3d11/kinematic_eval_hook.cpp:984 call           primary caller call            old=0x42b7503 new=0x42b7463 n=5  old-exe-reproduces
+KEEP          kin-primary-append         src/d3d11/kinematic_eval_hook.cpp:985 append         primary append sequence        old=0x42b7098 new=0x42b6ff8 n=10  old-exe-reproduces
+KEEP          kin-primary-key            src/d3d11/kinematic_eval_hook.cpp:986 key            primary key load               old=0x42b6e1b new=0x42b6d7b n=4  old-exe-reproduces
+KEEP          kin-primary-owner          src/d3d11/kinematic_eval_hook.cpp:987 owner          primary owner load             old=0x42b6f9c new=0x42b6efc n=4  old-exe-reproduces
+KEEP          kin-pool-prologue          src/d3d11/kinematic_eval_hook.cpp:1029 prologue      pool copier prologue           old=0x4c847c0 new=0x4c846a0 n=28  old-exe-reproduces
+KEEP          kin-pool-layout            src/d3d11/kinematic_eval_hook.cpp:1031 layout        pool copier layout             old=0x4c847dc new=0x4c846bc n=35  old-exe-reproduces
+KEEP          kin-merge-prologue         src/d3d11/kinematic_eval_hook.cpp:1062 prologue      list merge prologue            old=0x4351440 new=0x43513a0 n=8  old-exe-reproduces
+KEEP          kin-clear-prologue         src/d3d11/kinematic_eval_hook.cpp:1088 prologue      typed clear prologue           old=0x36846d0 new=0x3684630 n=5  old-exe-reproduces
+NEW           kin-primary-hash           src/d3d11/kinematic_eval_hook.cpp:1006               primary body FNV               old=0x42b6df5 new=0x42b6d55 n=725 hash pin=C73F259B7CFB42BD old=C73F259B7CFB42BD new=7C7152F32F46C674 reloc(old/new)=0/0 NEWHASH=7C7152F32F46C674  old-exe-reproduces
+      +19:AC->4C[rip->0x145ea99b8] +20:2B->2C[rip->0x145ea99b8] +108:4B->CB[rel32->0x144c86090] +109:F3->F2[rel32->0x144c86090] +131:44->E4[rip->0x144e328c0] +162:55->F5[rip->0x146054bf0] +185:8E->FE[rip->0x145289610] +465:A6->46[rip->0x145f00d70] +466:9D->9E[rip->0x145f00d70] +470:41->81[rel32->0x140540eb0]
+NEW           kin-outer-hash             src/d3d11/kinematic_eval_hook.cpp:1007               outer builder body FNV         old=0x42b70e5 new=0x42b7045 n=3217 hash pin=B8DD5BFF8D968DD4 old=B8DD5BFF8D968DD4 new=D7B91C22824F5886 reloc(old/new)=0/0 NEWHASH=D7B91C22824F5886  old-exe-reproduces
+      +21:BA->5A[rip->0x145ea99b8] +22:28->29[rip->0x145ea99b8] +37:D9->79[rip->0x145ea63e8] +38:F2->F3[rip->0x145ea63e8] +255:38->D8[rip->0x144e32920] +369:16->56[rel32->0x1404f4f10] +381:83->23[rip->0x145ea63e9] +382:F1->F2[rip->0x145ea63e9] +410:2D->0D[rel32->0x1428453f0] +428:EB->CB[rel32->0x14288d1c0] +733:DA->BA[rel32->0x1428197e0] +1503:88->28[rip->0x1450cb350] +1504:3C->3D[rip->0x1450cb350] +1549:6A->0A[rip->0x1450cb360] +1550:3C->3D[rip->0x1450cb360] +1571:34->D4[rip->0x1450cb340]
+NEW           kin-pool-hash              src/d3d11/kinematic_eval_hook.cpp:1046               pool copier body FNV           old=0x4c847c5 new=0x4c846a5 n=638 hash pin=2D6210EBAEAC7BF7 old=2D6210EBAEAC7BF7 new=9786D5F14E4CCA55 reloc(old/new)=0/0 NEWHASH=9786D5F14E4CCA55  old-exe-reproduces
+      +302:99->19[rel32->0x14489c9f0] +303:81->82[rel32->0x14489c9f0] +578:85->05[rel32->0x14489c9f0] +579:80->81[rel32->0x14489c9f0]
+NEW           kin-merge-hash             src/d3d11/kinematic_eval_hook.cpp:1074               list merge body FNV            old=0x4351448 new=0x43513a8 n=664 hash pin=B00C8ABA97918542 old=B00C8ABA97918542 new=70748E8D5FFA83CC reloc(old/new)=0/0 NEWHASH=70748E8D5FFA83CC  old-exe-reproduces
+      +653:97->37[rip->0x145f00d70] +654:F6->F7[rip->0x145f00d70] +658:F2->32[rel32->0x140549f70] +659:88->89[rel32->0x140549f70]
+NEW           kin-clear-hash             src/d3d11/kinematic_eval_hook.cpp:1097               typed clear body FNV           old=0x36846d5 new=0x3684635 n=333 hash pin=6EB91F357CEF84E0 old=6EB91F357CEF84E0 new=EEC934673BEEED00 reloc(old/new)=0/0 NEWHASH=EEC934673BEEED00  old-exe-reproduces
+      +131:14->B4[rip->0x145f00d70] +136:6F->AF[rel32->0x140549f70] +238:09->49[rel32->0x140549f70]
+KEEP          orwp-calls@0x369fb8c       src/d3d11/object_record_writer_probe.cpp:20          object record writer call site old=0x369fb8c new=0x369faec n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b6faa       src/d3d11/object_record_writer_probe.cpp:21          object record writer call site old=0x42b6faa new=0x42b6f0a n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b7b91       src/d3d11/object_record_writer_probe.cpp:22          object record writer call site old=0x42b7b91 new=0x42b7af1 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x4315d65       src/d3d11/object_record_writer_probe.cpp:23          object record writer call site old=0x4315d65 new=0x4315cc5 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x434fe44       src/d3d11/object_record_writer_probe.cpp:24          object record writer call site old=0x434fe44 new=0x434fda4 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x4351011       src/d3d11/object_record_writer_probe.cpp:25          object record writer call site old=0x4351011 new=0x4350f71 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b7503       src/d3d11/object_record_writer_probe.cpp:27          object record writer call site old=0x42b7503 new=0x42b7463 n=5  old-exe-reproduces
+KEEP          orwp-lookup                src/d3d11/object_record_writer_probe.cpp:29 kLookupPrologue object lookup prologue         old=0x3699ca0 new=0x3699c00 n=16  old-exe-reproduces
+KEEP          orwp-ownership-virtual     src/d3d11/object_record_writer_probe.cpp:30 kOwnershipVirtualCall ownership virtual call (base = old=0x431df1c new=0x431de7c n=3  old-exe-reproduces
+KEEP          cgp-frustum                src/d3d11/object_probe.cpp:221 kFrustumPrologue      cull frustum prologue          old=0x4f4f70 new=0x4f4f10 n=16  old-exe-reproduces
+KEEP          store-prologue             src/d3d11/optimized_station_core.h:1361 kStorePrologue store prologue                 old=0x4314d00 new=0x4314c60 n=16  old-exe-reproduces
+KEEP          pad-reader0                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 0 pin               old=0x12c4d60 new=0x12c4cc0 n=6  old-exe-reproduces
+KEEP          pad-reader1                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 1 pin               old=0x12cc0c0 new=0x12cc020 n=6  old-exe-reproduces
+KEEP          pad-reader2                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 2 pin               old=0x12cbf20 new=0x12cbe80 n=6  old-exe-reproduces
+KEEP          pad-reader3                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 3 pin               old=0x12cc460 new=0x12cc3c0 n=6  old-exe-reproduces
+KEEP          sched-drain                src/d3d11/scheduler_stack_hook.cpp:30 kDrainPrologue scheduler drain prologue       old=0x42e2600 new=0x42e2560 n=14  old-exe-reproduces
+KEEP          sched-reset                src/d3d11/scheduler_stack_hook.cpp:32 kResetPrologue scheduler reset prologue       old=0x36a3c50 new=0x36a3bb0 n=14  old-exe-reproduces
+KEEP          skin-prologue              src/d3d11/skin_entity_hook.cpp:27 kPrologue          skin job assembly prologue     old=0x4c56cc0 new=0x4c56ba0 n=28  old-exe-reproduces
+KEEP          lg-builder                 src/d3d11/light_grid_cache_core.h:54 kPrologue       light grid builder prologue    old=0x58b2b0 new=0x58b250 n=16  old-exe-reproduces
+KEEP          lg-refresh                 src/d3d11/light_grid_cache_core.h:76 kRefreshPrologue light grid refresh prologue    old=0x4f3150 new=0x4f30f0 n=16  old-exe-reproduces
+KEEP          lg-copy                    src/d3d11/light_grid_cache_core.h:85 kCopyPrologue   light grid copy prologue       old=0x57a5c0 new=0x57a560 n=16  old-exe-reproduces
+KEEP          vr-flushIa                 src/d3d11/vertex_resync_core.h:48 kFlushIaPrologue   FlushIA prologue               old=0x522bb0 new=0x522b50 n=16  old-exe-reproduces
+KEEP          ssaa-wrapper               src/d3d11/vr_ssaa_hold.cpp:37 kWrapperBytes          SSAA wrapper bytes             old=0x2864da0 new=0x2864ce0 n=19  old-exe-reproduces
+KEEP          vrt-request                src/d3d11/vr_window_trampolines.cpp:29 kRequestBytes window request bytes           old=0x7e9eb0 new=0x7e9e50 n=11  old-exe-reproduces
+KEEP          vrt-copy                   src/d3d11/vr_window_trampolines.cpp:36 kCopyBytes    window copy bytes              old=0x281e710 new=0x281e650 n=11  old-exe-reproduces
+KEEP          tfeb-consumer              src/d3d11/transition_flash_eye_base.cpp:43 kConsumerBytes transition flash consumer      old=0x28457f0 new=0x2845730 n=16  old-exe-reproduces
+KEEP          eng-lookup                 src/d3d11/engine_velocity.cpp:589 kLookupPrologue    engine lookup prologue (32)    old=0x3699ca0 new=0x3699c00 n=32  old-exe-reproduces
+KEEP          eng-append                 src/d3d11/engine_velocity.cpp:593 kAppendBytes       engine append bytes            old=0x4315e45 new=0x4315da5 n=23  old-exe-reproduces
+KEEP          fci-refresh                src/d3d11/flat_camera_inject.cpp:107 kRefreshPrologue flat camera refresh prologue   old=0x592360 new=0x592300 n=16  old-exe-reproduces
+KEEP          fcpp-upload                src/d3d11/flat_camera_producer_probe.cpp:50 kUploadPrologue flat camera upload prologue    old=0x51b7a0 new=0x51b740 n=16  old-exe-reproduces
+KEEP          fsc-renderer               src/d3d11/flat_stationary_camera_capture.cpp:25 kPrologue flat stationary renderer prolo old=0x2874350 new=0x2874290 n=15  old-exe-reproduces
+KEEP          mem-gpu@0x51fb32           src/d3d11/mem_tick.cpp:113                           GPU resource accounting pins ( old=0x51fb32 new=0x51fad2 n=8  old-exe-reproduces
+KEEP          mem-gpu@0x51fb9c           src/d3d11/mem_tick.cpp:114                           GPU resource accounting pins ( old=0x51fb9c new=0x51fb3c n=7  old-exe-reproduces
+KEEP          mem-gpu@0x51fba9           src/d3d11/mem_tick.cpp:115                           GPU resource accounting pins ( old=0x51fba9 new=0x51fb49 n=8  old-exe-reproduces
+NEW           mem-gpu@0x51d746           src/d3d11/mem_tick.cpp:116                           GPU resource accounting pins ( old=0x51d746 new=0x51d6e6 n=7 NEWBYTES=48 8B 05 BB 05 A0 05  old-exe-reproduces
+      +3:5B->BB[rip->0x145f1dca8]
+KEEP          mem-gpu@0x51d755           src/d3d11/mem_tick.cpp:117                           GPU resource accounting pins ( old=0x51d755 new=0x51d6f5 n=4  old-exe-reproduces
+KEEP          mem-gpu@0x519d52           src/d3d11/mem_tick.cpp:118                           GPU resource accounting pins ( old=0x519d52 new=0x519cf2 n=7  old-exe-reproduces
+KEEP          mem-gpu@0x519d5c           src/d3d11/mem_tick.cpp:119                           GPU resource accounting pins ( old=0x519d5c new=0x519cfc n=11  old-exe-reproduces
+KEEP          mem-gpu@0x519d88           src/d3d11/mem_tick.cpp:120                           GPU resource accounting pins ( old=0x519d88 new=0x519d28 n=7  old-exe-reproduces
+KEEP          mem-gpu@0x519e0b           src/d3d11/mem_tick.cpp:121                           GPU resource accounting pins ( old=0x519e0b new=0x519dab n=7  old-exe-reproduces
+KEEP          mem-gpu@0x51a0eb           src/d3d11/mem_tick.cpp:122                           GPU resource accounting pins ( old=0x51a0eb new=0x51a08b n=7  old-exe-reproduces
+NEW           mem-cpu@0x537385           src/d3d11/mem_tick.cpp:130                           CPU heap manager pins (kCpuPin old=0x537385 new=0x537325 n=7 NEWBYTES=48 8B 1D 2C 6B 9E 05  old-exe-reproduces
+      +3:CC->2C[rip->0x145f1de58] +4:6A->6B[rip->0x145f1de58]
+KEEP          mem-cpu@0x5373a0           src/d3d11/mem_tick.cpp:131                           CPU heap manager pins (kCpuPin old=0x5373a0 new=0x537340 n=36  old-exe-reproduces
+NEW           mem-cpu@0x543fed           src/d3d11/mem_tick.cpp:133                           CPU heap manager pins (kCpuPin old=0x543fed new=0x543f8d n=14 NEWBYTES=48 8B 05 C4 9E 9D 05 48 8B 88 00 15 00 00  old-exe-reproduces
+      +3:64->C4[rip->0x145f1de58]
+KEEP          mem-cpu@0x5536b3           src/d3d11/mem_tick.cpp:134                           CPU heap manager pins (kCpuPin old=0x5536b3 new=0x553653 n=4  old-exe-reproduces
+KEEP          mem-cpu@0x5404ae           src/d3d11/mem_tick.cpp:135                           CPU heap manager pins (kCpuPin old=0x5404ae new=0x54044e n=10  old-exe-reproduces
+KEEP          mem-cpu@0x5404d1           src/d3d11/mem_tick.cpp:136                           CPU heap manager pins (kCpuPin old=0x5404d1 new=0x540471 n=21  old-exe-reproduces
+KEEP          mem-cpu@0x54c9df           src/d3d11/mem_tick.cpp:137                           CPU heap manager pins (kCpuPin old=0x54c9df new=0x54c97f n=4  old-exe-reproduces
+KEEP          mem-cpu@0x55b695           src/d3d11/mem_tick.cpp:138                           CPU heap manager pins (kCpuPin old=0x55b695 new=0x55b635 n=7  old-exe-reproduces
+KEEP          tc-head                    src/d3d11/terrain_cull_cover_core.h:50 kHead         cull-plane builder head        old=0x4441580 new=0x44414e0 n=32  old-exe-reproduces
+KEEP          tc-fragA                   src/d3d11/terrain_cull_cover_core.h:57 kFragA        call-site fragment A           old=0x4458d5d new=0x4458cbd n=6  old-exe-reproduces
+NEW           oc-fp-401                  src/common/elite_oculus_profile.h:401                Oculus fingerprint             old=0x8d5400 new=0x8d53a0 n=243 hash pin=17629A1FD3828894 old=17629A1FD3828894 new=FF6BF29E3788FC3C reloc(old/new)=0/0 NEWHASH=FF6BF29E3788FC3C  old-exe-reproduces
+      +18:A2->02[rip->0x145ea99b8] +19:45->46[rip->0x145ea99b8] +90:3E->FE[rel32->0x14489b5fc] +91:62->61[rel32->0x14489b5fc] +197:D3->93[rel32->0x14489b5fc] +223:FD->BD[rel32->0x14489b940]
+NEW           oc-fp-402                  src/common/elite_oculus_profile.h:402                Oculus fingerprint             old=0x4e4ba0 new=0x4e4b40 n=711 hash pin=98376EDD435B9D9C old=98376EDD435B9D9C new=60262CD96F885F66 reloc(old/new)=0/0 NEWHASH=60262CD96F885F66  old-exe-reproduces
+      +124:D8->38[rip->0x144e275f8] +125:29->2A[rip->0x144e275f8] +141:E7->47[rip->0x144e27418] +142:27->28[rip->0x144e27418] +156:90->F0[rip->0x1450cb0d0] +163:A9->09[rip->0x1450cb0f0] +164:64->65[rip->0x1450cb0f0] +170:92->F2[rip->0x1450cb0e0] +215:55->B5[rip->0x1450cb0d0] +250:32->92[rip->0x1450cb0d0] +370:1A->7A[rip->0x144e27430] +451:B1->11[rip->0x144e27418] +452:26->27[rip->0x144e27418]
+NEW           oc-fp-403                  src/common/elite_oculus_profile.h:403                Oculus fingerprint             old=0x4e4730 new=0x4e46d0 n=572 hash pin=22A172BD9B250448 old=22A172BD9B250448 new=E72D36967A10BFA8 reloc(old/new)=0/0 NEWHASH=E72D36967A10BFA8  old-exe-reproduces
+      +18:72->D2[rip->0x145ea99b8] +489:43->A3[rip->0x145f1d860] +517:27->87[rip->0x145f1d860] +551:85->45[rel32->0x14489b940]
+NEW           oc-fp-404                  src/common/elite_oculus_profile.h:404                Oculus fingerprint             old=0x4e4970 new=0x4e4910 n=560 hash pin=21CB0709FCF55236 old=21CB0709FCF55236 new=7B3B4C4070FB007A reloc(old/new)=0/0 NEWHASH=7B3B4C4070FB007A  old-exe-reproduces
+      +13:67->C7[rip->0x144e277e8] +19:89->E9[rip->0x144db6210] +47:2D->8D[rip->0x145eff5d0] +69:E7->47[rip->0x145f1d8a0] +70:8E->8F[rip->0x145f1d8a0] +77:EF->4F[rip->0x145f1d8b0] +78:8E->8F[rip->0x145f1d8b0] +85:F7->57[rip->0x145f1d8c0] +86:8E->8F[rip->0x145f1d8c0] +93:FF->5F[rip->0x145f1d8d0] +94:8E->8F[rip->0x145f1d8d0] +99:BD->1D[rip->0x145f1d894] +100:8E->8F[rip->0x145f1d894] +106:FE->5E[rip->0x145f1d8e0] +107:8E->8F[rip->0x145f1d8e0] +123:A1->01[rip->0x144e27590]
+NEW           oc-fp-405                  src/common/elite_oculus_profile.h:405                Oculus fingerprint             old=0x4e8630 new=0x4e85d0 n=341 hash pin=2A9E2DBBAEDDE2BB old=2A9E2DBBAEDDE2BB new=1BEB5B69C7BF932E reloc(old/new)=0/0 NEWHASH=1BEB5B69C7BF932E  old-exe-reproduces
+      +7:7D->DD[rip->0x145ea99b8] +23:45->A5[rip->0x144e27990] +41:43->A3[rip->0x144e279a0] +127:2D->ED[rel32->0x14489b940] +128:33->32[rel32->0x14489b940] +144:F4->54[rip->0x144e279b8] +145:F2->F3[rip->0x144e279b8] +151:FD->5D[rip->0x144e279c8] +152:F2->F3[rip->0x144e279c8] +235:19->79[rip->0x145f1d938] +265:E3->43[rip->0x145f1db20] +266:53->54[rip->0x145f1db20] +272:6C->CC[rip->0x144e280b0] +278:CE->2E[rip->0x144db6218] +279:DA->DB[rip->0x144db6218] +332:60->20[rel32->0x14489b940]
+NEW           oc-fp-406                  src/common/elite_oculus_profile.h:406                Oculus fingerprint             old=0x4e71d0 new=0x4e7170 n=2436 hash pin=5D9DFCB146397878 old=5D9DFCB146397878 new=66B422313A80E9AE reloc(old/new)=0/0 NEWHASH=66B422313A80E9AE  old-exe-reproduces
+      +10:DA->3A[rip->0x145ea99b8] +11:27->28[rip->0x145ea99b8] +28:2F->8F[rip->0x145f1db20] +58:12->72[rip->0x145f1db20] +84:B8->78[rel32->0x14489b940] +99:F8->58[rip->0x145f1d930] +100:66->67[rip->0x145f1d930] +109:7F->DF[rip->0x144e27ac0] +118:CE->2E[rip->0x144db6218] +119:EF->F0[rip->0x144db6218] +125:DF->3F[rip->0x145f1d930] +126:66->67[rip->0x145f1d930] +132:C8->28[rip->0x145f1db20] +133:68->69[rip->0x145f1db20] +139:D8->38[rip->0x145f1d938] +140:66->67[rip->0x145f1d938]
+NEW           oc-fp-407                  src/common/elite_oculus_profile.h:407                Oculus fingerprint             old=0x4e6e40 new=0x4e6de0 n=912 hash pin=C724029334737635 old=C724029334737635 new=B9F0AF721320C54D reloc(old/new)=0/0 NEWHASH=B9F0AF721320C54D  old-exe-reproduces
+      +34:52->B2[rip->0x145ea99b8] +73:B3->73[rel32->0x14489d0a0] +92:D8->38[rip->0x144e27a78] +93:0B->0C[rip->0x144e27a78] +97:3F->FF[rel32->0x1448b8344] +98:15->14[rel32->0x1448b8344] +423:9D->FD[rip->0x144e27a88] +440:74->D4[rip->0x144e27a70] +455:85->E5[rip->0x144e27a90] +502:06->C6[rel32->0x14489d0a0] +503:61->60[rel32->0x14489d0a0] +539:69->C9[rip->0x144db62c8] +613:E7->A7[rel32->0x14489c9f0] +751:0D->CD[rel32->0x14489d0a0] +752:60->5F[rel32->0x14489d0a0] +775:8D->ED[rip->0x144db62d8]
+NEW           oc-fp-408                  src/common/elite_oculus_profile.h:408                Oculus fingerprint             old=0x4e0f60 new=0x4e0f00 n=199 hash pin=FD358E07FA8A2868 old=FD358E07FA8A2868 new=AEE1539FB5BE2968 reloc(old/new)=0/0 NEWHASH=AEE1539FB5BE2968  old-exe-reproduces
+      +16:44->A4[rip->0x145ea99b8] +83:91->F1[rip->0x145e73348] +119:9D->FD[rip->0x144e27778] +143:95->F5[rip->0x144e27788] +178:CA->8A[rel32->0x14489b940]
+NEW           oc-fp-409                  src/common/elite_oculus_profile.h:409                Oculus fingerprint             old=0x4e8330 new=0x4e82d0 n=58 hash pin=46C9815E81B0DF4A old=46C9815E81B0DF4A new=B69AB25FEC7A1F6A reloc(old/new)=0/0 NEWHASH=B69AB25FEC7A1F6A  old-exe-reproduces
+      +9:13->73[rip->0x145f1d950] +34:EA->AA[rel32->0x14489d0a0]
+NEW           oc-fp-410                  src/common/elite_oculus_profile.h:410                Oculus fingerprint             old=0x4e5da0 new=0x4e5d40 n=101 hash pin=A54979C6EB0CC47D old=A54979C6EB0CC47D new=9F6C59F05E0A6390 reloc(old/new)=0/0 NEWHASH=9F6C59F05E0A6390  old-exe-reproduces
+      +12:B0->10[rip->0x145f1d860] +13:7A->7B[rip->0x145f1d860] +35:95->F5[rip->0x145f1d860]
+NEW           oc-fp-411                  src/common/elite_oculus_profile.h:411                Oculus fingerprint             old=0x4e87b0 new=0x4e8750 n=32 hash pin=61126C9627CB6C61 old=61126C9627CB6C61 new=72BD38A6D3FB9681 reloc(old/new)=0/0 NEWHASH=72BD38A6D3FB9681  old-exe-reproduces
+      +7:85->E5[rip->0x145f1d940]
+KEEP          py-byte-0x4e477c           tools\elite_oculus.py:41                             python _BYTE_CHECKS (old-build old=0x4e477c new=0x4e471c n=4  old-exe-reproduces
+KEEP          py-byte-0x4e47b1           tools\elite_oculus.py:42                             python _BYTE_CHECKS (old-build old=0x4e47b1 new=0x4e4751 n=2  old-exe-reproduces
+KEEP          py-byte-0x4e4e50           tools\elite_oculus.py:40                             python _BYTE_CHECKS (old-build old=0x4e4e50 new=0x4e4df0 n=3  old-exe-reproduces
+KEEP          py-byte-0x4e720e           tools\elite_oculus.py:43                             python _BYTE_CHECKS (old-build old=0x4e720e new=0x4e71ae n=10  old-exe-reproduces
+KEEP          py-byte-0x4e8356           tools\elite_oculus.py:44                             python _BYTE_CHECKS (old-build old=0x4e8356 new=0x4e82f6 n=6  old-exe-reproduces
+KEEP          py-byte-0x4e87bb           tools\elite_oculus.py:45                             python _BYTE_CHECKS (old-build old=0x4e87bb new=0x4e875b n=7  old-exe-reproduces
+KEEP          py-byte-0x8d546b           tools\elite_oculus.py:34                             python _BYTE_CHECKS (old-build old=0x8d546b new=0x8d540b n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5478           tools\elite_oculus.py:35                             python _BYTE_CHECKS (old-build old=0x8d5478 new=0x8d5418 n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5480           tools\elite_oculus.py:36                             python _BYTE_CHECKS (old-build old=0x8d5480 new=0x8d5420 n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5488           tools\elite_oculus.py:37                             python _BYTE_CHECKS (old-build old=0x8d5488 new=0x8d5428 n=4  old-exe-reproduces
+KEEP          py-byte-0x8d549c           tools\elite_oculus.py:38                             python _BYTE_CHECKS (old-build old=0x8d549c new=0x8d543c n=11  old-exe-reproduces
+NEW           py-fp-0x8d5400             tools\elite_oculus.py:49                             python _FINGERPRINTS           old=0x8d5400 new=0x8d53a0 n=243 hash pin=17629A1FD3828894 old=17629A1FD3828894 new=FF6BF29E3788FC3C reloc(old/new)=0/0 NEWHASH=FF6BF29E3788FC3C  old-exe-reproduces
+      +18:A2->02[rip->0x145ea99b8] +19:45->46[rip->0x145ea99b8] +90:3E->FE[rel32->0x14489b5fc] +91:62->61[rel32->0x14489b5fc] +197:D3->93[rel32->0x14489b5fc] +223:FD->BD[rel32->0x14489b940]
+NEW           py-fp-0x4e4ba0             tools\elite_oculus.py:50                             python _FINGERPRINTS           old=0x4e4ba0 new=0x4e4b40 n=711 hash pin=98376EDD435B9D9C old=98376EDD435B9D9C new=60262CD96F885F66 reloc(old/new)=0/0 NEWHASH=60262CD96F885F66  old-exe-reproduces
+      +124:D8->38[rip->0x144e275f8] +125:29->2A[rip->0x144e275f8] +141:E7->47[rip->0x144e27418] +142:27->28[rip->0x144e27418] +156:90->F0[rip->0x1450cb0d0] +163:A9->09[rip->0x1450cb0f0] +164:64->65[rip->0x1450cb0f0] +170:92->F2[rip->0x1450cb0e0] +215:55->B5[rip->0x1450cb0d0] +250:32->92[rip->0x1450cb0d0] +370:1A->7A[rip->0x144e27430] +451:B1->11[rip->0x144e27418] +452:26->27[rip->0x144e27418]
+NEW           py-fp-0x4e4730             tools\elite_oculus.py:51                             python _FINGERPRINTS           old=0x4e4730 new=0x4e46d0 n=572 hash pin=22A172BD9B250448 old=22A172BD9B250448 new=E72D36967A10BFA8 reloc(old/new)=0/0 NEWHASH=E72D36967A10BFA8  old-exe-reproduces
+      +18:72->D2[rip->0x145ea99b8] +489:43->A3[rip->0x145f1d860] +517:27->87[rip->0x145f1d860] +551:85->45[rel32->0x14489b940]
+NEW           py-fp-0x4e4970             tools\elite_oculus.py:52                             python _FINGERPRINTS           old=0x4e4970 new=0x4e4910 n=560 hash pin=21CB0709FCF55236 old=21CB0709FCF55236 new=7B3B4C4070FB007A reloc(old/new)=0/0 NEWHASH=7B3B4C4070FB007A  old-exe-reproduces
+      +13:67->C7[rip->0x144e277e8] +19:89->E9[rip->0x144db6210] +47:2D->8D[rip->0x145eff5d0] +69:E7->47[rip->0x145f1d8a0] +70:8E->8F[rip->0x145f1d8a0] +77:EF->4F[rip->0x145f1d8b0] +78:8E->8F[rip->0x145f1d8b0] +85:F7->57[rip->0x145f1d8c0] +86:8E->8F[rip->0x145f1d8c0] +93:FF->5F[rip->0x145f1d8d0] +94:8E->8F[rip->0x145f1d8d0] +99:BD->1D[rip->0x145f1d894] +100:8E->8F[rip->0x145f1d894] +106:FE->5E[rip->0x145f1d8e0] +107:8E->8F[rip->0x145f1d8e0] +123:A1->01[rip->0x144e27590]
+NEW           py-fp-0x4e8630             tools\elite_oculus.py:53                             python _FINGERPRINTS           old=0x4e8630 new=0x4e85d0 n=341 hash pin=2A9E2DBBAEDDE2BB old=2A9E2DBBAEDDE2BB new=1BEB5B69C7BF932E reloc(old/new)=0/0 NEWHASH=1BEB5B69C7BF932E  old-exe-reproduces
+      +7:7D->DD[rip->0x145ea99b8] +23:45->A5[rip->0x144e27990] +41:43->A3[rip->0x144e279a0] +127:2D->ED[rel32->0x14489b940] +128:33->32[rel32->0x14489b940] +144:F4->54[rip->0x144e279b8] +145:F2->F3[rip->0x144e279b8] +151:FD->5D[rip->0x144e279c8] +152:F2->F3[rip->0x144e279c8] +235:19->79[rip->0x145f1d938] +265:E3->43[rip->0x145f1db20] +266:53->54[rip->0x145f1db20] +272:6C->CC[rip->0x144e280b0] +278:CE->2E[rip->0x144db6218] +279:DA->DB[rip->0x144db6218] +332:60->20[rel32->0x14489b940]
+NEW           py-fp-0x4e71d0             tools\elite_oculus.py:54                             python _FINGERPRINTS           old=0x4e71d0 new=0x4e7170 n=2436 hash pin=5D9DFCB146397878 old=5D9DFCB146397878 new=66B422313A80E9AE reloc(old/new)=0/0 NEWHASH=66B422313A80E9AE  old-exe-reproduces
+      +10:DA->3A[rip->0x145ea99b8] +11:27->28[rip->0x145ea99b8] +28:2F->8F[rip->0x145f1db20] +58:12->72[rip->0x145f1db20] +84:B8->78[rel32->0x14489b940] +99:F8->58[rip->0x145f1d930] +100:66->67[rip->0x145f1d930] +109:7F->DF[rip->0x144e27ac0] +118:CE->2E[rip->0x144db6218] +119:EF->F0[rip->0x144db6218] +125:DF->3F[rip->0x145f1d930] +126:66->67[rip->0x145f1d930] +132:C8->28[rip->0x145f1db20] +133:68->69[rip->0x145f1db20] +139:D8->38[rip->0x145f1d938] +140:66->67[rip->0x145f1d938]
+NEW           py-fp-0x4e6e40             tools\elite_oculus.py:55                             python _FINGERPRINTS           old=0x4e6e40 new=0x4e6de0 n=912 hash pin=C724029334737635 old=C724029334737635 new=B9F0AF721320C54D reloc(old/new)=0/0 NEWHASH=B9F0AF721320C54D  old-exe-reproduces
+      +34:52->B2[rip->0x145ea99b8] +73:B3->73[rel32->0x14489d0a0] +92:D8->38[rip->0x144e27a78] +93:0B->0C[rip->0x144e27a78] +97:3F->FF[rel32->0x1448b8344] +98:15->14[rel32->0x1448b8344] +423:9D->FD[rip->0x144e27a88] +440:74->D4[rip->0x144e27a70] +455:85->E5[rip->0x144e27a90] +502:06->C6[rel32->0x14489d0a0] +503:61->60[rel32->0x14489d0a0] +539:69->C9[rip->0x144db62c8] +613:E7->A7[rel32->0x14489c9f0] +751:0D->CD[rel32->0x14489d0a0] +752:60->5F[rel32->0x14489d0a0] +775:8D->ED[rip->0x144db62d8]
+NEW           py-fp-0x4e0f60             tools\elite_oculus.py:56                             python _FINGERPRINTS           old=0x4e0f60 new=0x4e0f00 n=199 hash pin=FD358E07FA8A2868 old=FD358E07FA8A2868 new=AEE1539FB5BE2968 reloc(old/new)=0/0 NEWHASH=AEE1539FB5BE2968  old-exe-reproduces
+      +16:44->A4[rip->0x145ea99b8] +83:91->F1[rip->0x145e73348] +119:9D->FD[rip->0x144e27778] +143:95->F5[rip->0x144e27788] +178:CA->8A[rel32->0x14489b940]
+NEW           py-fp-0x4e8330             tools\elite_oculus.py:57                             python _FINGERPRINTS           old=0x4e8330 new=0x4e82d0 n=58 hash pin=46C9815E81B0DF4A old=46C9815E81B0DF4A new=B69AB25FEC7A1F6A reloc(old/new)=0/0 NEWHASH=B69AB25FEC7A1F6A  old-exe-reproduces
+      +9:13->73[rip->0x145f1d950] +34:EA->AA[rel32->0x14489d0a0]
+NEW           py-fp-0x4e5da0             tools\elite_oculus.py:58                             python _FINGERPRINTS           old=0x4e5da0 new=0x4e5d40 n=101 hash pin=A54979C6EB0CC47D old=A54979C6EB0CC47D new=9F6C59F05E0A6390 reloc(old/new)=0/0 NEWHASH=9F6C59F05E0A6390  old-exe-reproduces
+      +12:B0->10[rip->0x145f1d860] +13:7A->7B[rip->0x145f1d860] +35:95->F5[rip->0x145f1d860]
+NEW           py-fp-0x4e87b0             tools\elite_oculus.py:59                             python _FINGERPRINTS           old=0x4e87b0 new=0x4e8750 n=32 hash pin=61126C9627CB6C61 old=61126C9627CB6C61 new=72BD38A6D3FB9681 reloc(old/new)=0/0 NEWHASH=72BD38A6D3FB9681  old-exe-reproduces
+      +7:85->E5[rip->0x145f1d940]
+SITE-OK       tc-site                    src/d3d11/terrain_cull_cover_core.h:42-57            cull-plane call-site chain     old=0x4458d5d new=0x4458cbd  old-exe-reproduces
+      fragment gaps (7, 0, 0) (same in both); E8 at 0x4458d87->0x4441580 old, 0x4458ce7->0x44414e0 new (rel32 moved, target kTargetRva)
+SUMMARY pins=143 KEEP=110, NEW=32, SITE-OK=1
+
+## Part 2: post
+KEEP          oc-selKinds                src/common/elite_oculus_profile.h:413 selectorKinds  selector kind 1                old=0x8d546b new=0x8d540b n=8  old-exe-reproduces
+KEEP          oc-selKind2                src/common/elite_oculus_profile.h:416 selectorKind2  selector kind 2                old=0x8d5478 new=0x8d5418 n=8  old-exe-reproduces
+KEEP          oc-selKind3                src/common/elite_oculus_profile.h:419 selectorKind3  selector kind 3                old=0x8d5480 new=0x8d5420 n=8  old-exe-reproduces
+KEEP          oc-exitsOnSuccess          src/common/elite_oculus_profile.h:422 exitsOnSuccess selector exit                  old=0x8d5488 new=0x8d5428 n=4  old-exe-reproduces
+KEEP          oc-advances                src/common/elite_oculus_profile.h:423 advances       selector loop advance          old=0x8d549c new=0x8d543c n=11  old-exe-reproduces
+KEEP          oc-virtualInit             src/common/elite_oculus_profile.h:426 virtualInit    factory virtual init           old=0x4e4e50 new=0x4e4df0 n=3  old-exe-reproduces
+KEEP          oc-initFailure             src/common/elite_oculus_profile.h:427 initFailure    LibOVR init failure            old=0x4e477c new=0x4e471c n=4  old-exe-reproduces
+KEEP          oc-falseReturn             src/common/elite_oculus_profile.h:428 falseReturn    LibOVR false return            old=0x4e47b1 new=0x4e4751 n=2  old-exe-reproduces
+KEEP          oc-nullModule              src/common/elite_oculus_profile.h:429 nullModule     null module path               old=0x4e720e new=0x4e71ae n=10  old-exe-reproduces
+KEEP          oc-continuation            src/common/elite_oculus_profile.h:452 continuation   SDK loader continuation        old=0x4e71bc new=0x4e715c n=6  old-exe-reproduces
+KEEP          ec-freeCamera              src/d3d11/explorer_cam_core.h:53 kFreeCameraPrologue FreeCameraActivity update      old=0x1072a80 new=0x1072a20 n=28  old-exe-reproduces
+KEEP          ec-collision               src/d3d11/explorer_cam_core.h:61 kCollisionPrologue  collision step                 old=0x1092240 new=0x10921e0 n=26  old-exe-reproduces
+KEEP          ec-boxPush                 src/d3d11/explorer_cam_core.h:69 kBoxPushPrologue    commander box push             old=0x10902b0 new=0x1090250 n=20  old-exe-reproduces
+KEEP          ec-cameraUi                src/d3d11/explorer_cam_core.h:76 kCameraUiPrologue   VanityCameraUIActivity update  old=0x47ca180 new=0x47ca0e0 n=19  old-exe-reproduces
+KEEP          ec-controller              src/d3d11/explorer_cam_core.h:81 kControllerPrologue VesselCameraMountControl updat old=0x2df3f60 new=0x2df3ea0 n=15  old-exe-reproduces
+KEEP          ec-avatarFade              src/d3d11/explorer_cam_core.h:87 kAvatarFadePrologue AvatarModelComponent fade      old=0x3dd8d00 new=0x3dd8c60 n=16  old-exe-reproduces
+KEEP          ec-findJoint               src/d3d11/explorer_cam_core.h:95 kFindJointPrologue  skeleton FindJoint             old=0xfdec10 new=0xfdebb0 n=16  old-exe-reproduces
+KEEP          ec-zoomDof                 src/d3d11/explorer_cam_core.h:103 kZoomDofPrologue   zoom/DOF controls update       old=0x1079a90 new=0x1079a30 n=16  old-exe-reproduces
+KEEP          ui-shape-site0             src/d3d11/ui_sizing_math.h:174 kUiPanelShape         panel shape @ site 0           old=0x457323a new=0x457319a n=30  old-exe-reproduces
+KEEP          ui-shape-site1             src/d3d11/ui_sizing_math.h:174 kUiPanelShape         panel shape @ site 1           old=0x4573d45 new=0x4573ca5 n=30  old-exe-reproduces
+KEEP          ui-siteBytes0              src/d3d11/ui_sizing_math.h:186 kUiPanelSiteBytes     panel site bytes row 0         old=0x457323a new=0x457319a n=30  old-exe-reproduces
+KEEP          ui-siteBytes1              src/d3d11/ui_sizing_math.h:186 kUiPanelSiteBytes     panel site bytes row 1         old=0x4573d45 new=0x4573ca5 n=30  old-exe-reproduces
+KEEP          ui-prolog0                 src/d3d11/ui_sizing_math.h:194 kUiPanelProlog0       panel function 0 prologue      old=0x4573040 new=0x4572fa0 n=11  old-exe-reproduces
+KEEP          ui-prolog1                 src/d3d11/ui_sizing_math.h:195 kUiPanelProlog1       panel function 1 prologue      old=0x4573cc0 new=0x4573c20 n=13  old-exe-reproduces
+KEEP          ui-ssSetter                src/d3d11/ui_sizing_math.h:657 kUiSsSetterBytes      scale setter                   old=0x2878e00 new=0x2878d40 n=38  old-exe-reproduces
+KEEP          ui-ssGetter                src/d3d11/ui_sizing_math.h:660 kUiSsGetterBytes      scale getter                   old=0x2843b00 new=0x2843a40 n=13  old-exe-reproduces
+KEEP          kin-eval-prologue          src/d3d11/kinematic_eval_hook.cpp:896 kPrologue      targetValid evaluator prologue old=0x4311ca0 new=0x4311c00 n=14  old-exe-reproduces
+KEEP          kin-eval-tail              src/d3d11/kinematic_eval_hook.cpp:928 tail           evaluator bytes after our patc old=0x4311ca5 new=0x4311c05 n=8  old-exe-reproduces
+KEEP          kin-part-prologue          src/d3d11/kinematic_eval_hook.cpp:314 kPartPrologue  part-test prologue             old=0x42b6c80 new=0x42b6be0 n=21  old-exe-reproduces
+KEEP          kin-partframe@0x42b70e9    src/d3d11/kinematic_eval_hook.cpp:318                part-test frame (kPartFrame)   old=0x42b70e9 new=0x42b7049 n=7  old-exe-reproduces
+KEEP          kin-partframe@0x42b7115    src/d3d11/kinematic_eval_hook.cpp:320                part-test frame (kPartFrame)   old=0x42b7115 new=0x42b7075 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b711c    src/d3d11/kinematic_eval_hook.cpp:322                part-test frame (kPartFrame)   old=0x42b711c new=0x42b707c n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7528    src/d3d11/kinematic_eval_hook.cpp:324                part-test frame (kPartFrame)   old=0x42b7528 new=0x42b7488 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7578    src/d3d11/kinematic_eval_hook.cpp:326                part-test frame (kPartFrame)   old=0x42b7578 new=0x42b74d8 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b758d    src/d3d11/kinematic_eval_hook.cpp:328                part-test frame (kPartFrame)   old=0x42b758d new=0x42b74ed n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b764b    src/d3d11/kinematic_eval_hook.cpp:330                part-test frame (kPartFrame)   old=0x42b764b new=0x42b75ab n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7cab    src/d3d11/kinematic_eval_hook.cpp:332                part-test frame (kPartFrame)   old=0x42b7cab new=0x42b7c0b n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7cb7    src/d3d11/kinematic_eval_hook.cpp:334                part-test frame (kPartFrame)   old=0x42b7cb7 new=0x42b7c17 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b76a3    src/d3d11/kinematic_eval_hook.cpp:336                part-test frame (kPartFrame)   old=0x42b76a3 new=0x42b7603 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b76b4    src/d3d11/kinematic_eval_hook.cpp:338                part-test frame (kPartFrame)   old=0x42b76b4 new=0x42b7614 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b77dd    src/d3d11/kinematic_eval_hook.cpp:340                part-test frame (kPartFrame)   old=0x42b77dd new=0x42b773d n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b77e1    src/d3d11/kinematic_eval_hook.cpp:342                part-test frame (kPartFrame)   old=0x42b77e1 new=0x42b7741 n=4  old-exe-reproduces
+KEEP          kin-partframe@0x42b7827    src/d3d11/kinematic_eval_hook.cpp:344                part-test frame (kPartFrame)   old=0x42b7827 new=0x42b7787 n=7  old-exe-reproduces
+KEEP          kin-partframe@0x42b7845    src/d3d11/kinematic_eval_hook.cpp:346                part-test frame (kPartFrame)   old=0x42b7845 new=0x42b77a5 n=17  old-exe-reproduces
+KEEP          kin-primary-prologue       src/d3d11/kinematic_eval_hook.cpp:982 prologue       primary prologue               old=0x42b6df0 new=0x42b6d50 n=21  old-exe-reproduces
+KEEP          kin-primary-call           src/d3d11/kinematic_eval_hook.cpp:984 call           primary caller call            old=0x42b7503 new=0x42b7463 n=5  old-exe-reproduces
+KEEP          kin-primary-append         src/d3d11/kinematic_eval_hook.cpp:985 append         primary append sequence        old=0x42b7098 new=0x42b6ff8 n=10  old-exe-reproduces
+KEEP          kin-primary-key            src/d3d11/kinematic_eval_hook.cpp:986 key            primary key load               old=0x42b6e1b new=0x42b6d7b n=4  old-exe-reproduces
+KEEP          kin-primary-owner          src/d3d11/kinematic_eval_hook.cpp:987 owner          primary owner load             old=0x42b6f9c new=0x42b6efc n=4  old-exe-reproduces
+KEEP          kin-pool-prologue          src/d3d11/kinematic_eval_hook.cpp:1029 prologue      pool copier prologue           old=0x4c847c0 new=0x4c846a0 n=28  old-exe-reproduces
+KEEP          kin-pool-layout            src/d3d11/kinematic_eval_hook.cpp:1031 layout        pool copier layout             old=0x4c847dc new=0x4c846bc n=35  old-exe-reproduces
+KEEP          kin-merge-prologue         src/d3d11/kinematic_eval_hook.cpp:1062 prologue      list merge prologue            old=0x4351440 new=0x43513a0 n=8  old-exe-reproduces
+KEEP          kin-clear-prologue         src/d3d11/kinematic_eval_hook.cpp:1088 prologue      typed clear prologue           old=0x36846d0 new=0x3684630 n=5  old-exe-reproduces
+KEEP          kin-primary-hash           src/d3d11/kinematic_eval_hook.cpp:1006               primary body FNV               old=0x42b6df5 new=0x42b6d55 n=725 hash pin=7C7152F32F46C674 old=C73F259B7CFB42BD new=7C7152F32F46C674 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          kin-outer-hash             src/d3d11/kinematic_eval_hook.cpp:1007               outer builder body FNV         old=0x42b70e5 new=0x42b7045 n=3217 hash pin=D7B91C22824F5886 old=B8DD5BFF8D968DD4 new=D7B91C22824F5886 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          kin-pool-hash              src/d3d11/kinematic_eval_hook.cpp:1046               pool copier body FNV           old=0x4c847c5 new=0x4c846a5 n=638 hash pin=9786D5F14E4CCA55 old=2D6210EBAEAC7BF7 new=9786D5F14E4CCA55 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          kin-merge-hash             src/d3d11/kinematic_eval_hook.cpp:1074               list merge body FNV            old=0x4351448 new=0x43513a8 n=664 hash pin=70748E8D5FFA83CC old=B00C8ABA97918542 new=70748E8D5FFA83CC reloc(old/new)=0/0  old-exe-reproduces
+KEEP          kin-clear-hash             src/d3d11/kinematic_eval_hook.cpp:1097               typed clear body FNV           old=0x36846d5 new=0x3684635 n=333 hash pin=EEC934673BEEED00 old=6EB91F357CEF84E0 new=EEC934673BEEED00 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          orwp-calls@0x369fb8c       src/d3d11/object_record_writer_probe.cpp:20          object record writer call site old=0x369fb8c new=0x369faec n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b6faa       src/d3d11/object_record_writer_probe.cpp:21          object record writer call site old=0x42b6faa new=0x42b6f0a n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b7b91       src/d3d11/object_record_writer_probe.cpp:22          object record writer call site old=0x42b7b91 new=0x42b7af1 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x4315d65       src/d3d11/object_record_writer_probe.cpp:23          object record writer call site old=0x4315d65 new=0x4315cc5 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x434fe44       src/d3d11/object_record_writer_probe.cpp:24          object record writer call site old=0x434fe44 new=0x434fda4 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x4351011       src/d3d11/object_record_writer_probe.cpp:25          object record writer call site old=0x4351011 new=0x4350f71 n=5  old-exe-reproduces
+KEEP          orwp-calls@0x42b7503       src/d3d11/object_record_writer_probe.cpp:27          object record writer call site old=0x42b7503 new=0x42b7463 n=5  old-exe-reproduces
+KEEP          orwp-lookup                src/d3d11/object_record_writer_probe.cpp:29 kLookupPrologue object lookup prologue         old=0x3699ca0 new=0x3699c00 n=16  old-exe-reproduces
+KEEP          orwp-ownership-virtual     src/d3d11/object_record_writer_probe.cpp:30 kOwnershipVirtualCall ownership virtual call (base = old=0x431df1c new=0x431de7c n=3  old-exe-reproduces
+KEEP          cgp-frustum                src/d3d11/object_probe.cpp:221 kFrustumPrologue      cull frustum prologue          old=0x4f4f70 new=0x4f4f10 n=16  old-exe-reproduces
+KEEP          store-prologue             src/d3d11/optimized_station_core.h:1361 kStorePrologue store prologue                 old=0x4314d00 new=0x4314c60 n=16  old-exe-reproduces
+KEEP          pad-reader0                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 0 pin               old=0x12c4d60 new=0x12c4cc0 n=6  old-exe-reproduces
+KEEP          pad-reader1                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 1 pin               old=0x12cc0c0 new=0x12cc020 n=6  old-exe-reproduces
+KEEP          pad-reader2                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 2 pin               old=0x12cbf20 new=0x12cbe80 n=6  old-exe-reproduces
+KEEP          pad-reader3                src/d3d11/pad_state_core.h:22 kReaderPin             pad reader 3 pin               old=0x12cc460 new=0x12cc3c0 n=6  old-exe-reproduces
+KEEP          sched-drain                src/d3d11/scheduler_stack_hook.cpp:30 kDrainPrologue scheduler drain prologue       old=0x42e2600 new=0x42e2560 n=14  old-exe-reproduces
+KEEP          sched-reset                src/d3d11/scheduler_stack_hook.cpp:32 kResetPrologue scheduler reset prologue       old=0x36a3c50 new=0x36a3bb0 n=14  old-exe-reproduces
+KEEP          skin-prologue              src/d3d11/skin_entity_hook.cpp:27 kPrologue          skin job assembly prologue     old=0x4c56cc0 new=0x4c56ba0 n=28  old-exe-reproduces
+KEEP          lg-builder                 src/d3d11/light_grid_cache_core.h:54 kPrologue       light grid builder prologue    old=0x58b2b0 new=0x58b250 n=16  old-exe-reproduces
+KEEP          lg-refresh                 src/d3d11/light_grid_cache_core.h:76 kRefreshPrologue light grid refresh prologue    old=0x4f3150 new=0x4f30f0 n=16  old-exe-reproduces
+KEEP          lg-copy                    src/d3d11/light_grid_cache_core.h:85 kCopyPrologue   light grid copy prologue       old=0x57a5c0 new=0x57a560 n=16  old-exe-reproduces
+KEEP          vr-flushIa                 src/d3d11/vertex_resync_core.h:48 kFlushIaPrologue   FlushIA prologue               old=0x522bb0 new=0x522b50 n=16  old-exe-reproduces
+KEEP          ssaa-wrapper               src/d3d11/vr_ssaa_hold.cpp:37 kWrapperBytes          SSAA wrapper bytes             old=0x2864da0 new=0x2864ce0 n=19  old-exe-reproduces
+KEEP          vrt-request                src/d3d11/vr_window_trampolines.cpp:29 kRequestBytes window request bytes           old=0x7e9eb0 new=0x7e9e50 n=11  old-exe-reproduces
+KEEP          vrt-copy                   src/d3d11/vr_window_trampolines.cpp:36 kCopyBytes    window copy bytes              old=0x281e710 new=0x281e650 n=11  old-exe-reproduces
+KEEP          tfeb-consumer              src/d3d11/transition_flash_eye_base.cpp:43 kConsumerBytes transition flash consumer      old=0x28457f0 new=0x2845730 n=16  old-exe-reproduces
+KEEP          eng-lookup                 src/d3d11/engine_velocity.cpp:589 kLookupPrologue    engine lookup prologue (32)    old=0x3699ca0 new=0x3699c00 n=32  old-exe-reproduces
+KEEP          eng-append                 src/d3d11/engine_velocity.cpp:593 kAppendBytes       engine append bytes            old=0x4315e45 new=0x4315da5 n=23  old-exe-reproduces
+KEEP          fci-refresh                src/d3d11/flat_camera_inject.cpp:107 kRefreshPrologue flat camera refresh prologue   old=0x592360 new=0x592300 n=16  old-exe-reproduces
+KEEP          fcpp-upload                src/d3d11/flat_camera_producer_probe.cpp:50 kUploadPrologue flat camera upload prologue    old=0x51b7a0 new=0x51b740 n=16  old-exe-reproduces
+KEEP          fsc-renderer               src/d3d11/flat_stationary_camera_capture.cpp:25 kPrologue flat stationary renderer prolo old=0x2874350 new=0x2874290 n=15  old-exe-reproduces
+KEEP          mem-gpu@0x51fb32           src/d3d11/mem_tick.cpp:113                           GPU resource accounting pins ( old=0x51fb32 new=0x51fad2 n=8  old-exe-reproduces
+KEEP          mem-gpu@0x51fb9c           src/d3d11/mem_tick.cpp:114                           GPU resource accounting pins ( old=0x51fb9c new=0x51fb3c n=7  old-exe-reproduces
+KEEP          mem-gpu@0x51fba9           src/d3d11/mem_tick.cpp:115                           GPU resource accounting pins ( old=0x51fba9 new=0x51fb49 n=8  old-exe-reproduces
+KEEP          mem-gpu@0x51d746           src/d3d11/mem_tick.cpp:116                           GPU resource accounting pins ( old=0x51d746 new=0x51d6e6 n=7  old-exe-reproduces
+KEEP          mem-gpu@0x51d755           src/d3d11/mem_tick.cpp:117                           GPU resource accounting pins ( old=0x51d755 new=0x51d6f5 n=4  old-exe-reproduces
+KEEP          mem-gpu@0x519d52           src/d3d11/mem_tick.cpp:118                           GPU resource accounting pins ( old=0x519d52 new=0x519cf2 n=7  old-exe-reproduces
+KEEP          mem-gpu@0x519d5c           src/d3d11/mem_tick.cpp:119                           GPU resource accounting pins ( old=0x519d5c new=0x519cfc n=11  old-exe-reproduces
+KEEP          mem-gpu@0x519d88           src/d3d11/mem_tick.cpp:120                           GPU resource accounting pins ( old=0x519d88 new=0x519d28 n=7  old-exe-reproduces
+KEEP          mem-gpu@0x519e0b           src/d3d11/mem_tick.cpp:121                           GPU resource accounting pins ( old=0x519e0b new=0x519dab n=7  old-exe-reproduces
+KEEP          mem-gpu@0x51a0eb           src/d3d11/mem_tick.cpp:122                           GPU resource accounting pins ( old=0x51a0eb new=0x51a08b n=7  old-exe-reproduces
+KEEP          mem-cpu@0x537385           src/d3d11/mem_tick.cpp:130                           CPU heap manager pins (kCpuPin old=0x537385 new=0x537325 n=7  old-exe-reproduces
+KEEP          mem-cpu@0x5373a0           src/d3d11/mem_tick.cpp:131                           CPU heap manager pins (kCpuPin old=0x5373a0 new=0x537340 n=36  old-exe-reproduces
+KEEP          mem-cpu@0x543fed           src/d3d11/mem_tick.cpp:133                           CPU heap manager pins (kCpuPin old=0x543fed new=0x543f8d n=14  old-exe-reproduces
+KEEP          mem-cpu@0x5536b3           src/d3d11/mem_tick.cpp:134                           CPU heap manager pins (kCpuPin old=0x5536b3 new=0x553653 n=4  old-exe-reproduces
+KEEP          mem-cpu@0x5404ae           src/d3d11/mem_tick.cpp:135                           CPU heap manager pins (kCpuPin old=0x5404ae new=0x54044e n=10  old-exe-reproduces
+KEEP          mem-cpu@0x5404d1           src/d3d11/mem_tick.cpp:136                           CPU heap manager pins (kCpuPin old=0x5404d1 new=0x540471 n=21  old-exe-reproduces
+KEEP          mem-cpu@0x54c9df           src/d3d11/mem_tick.cpp:137                           CPU heap manager pins (kCpuPin old=0x54c9df new=0x54c97f n=4  old-exe-reproduces
+KEEP          mem-cpu@0x55b695           src/d3d11/mem_tick.cpp:138                           CPU heap manager pins (kCpuPin old=0x55b695 new=0x55b635 n=7  old-exe-reproduces
+KEEP          tc-head                    src/d3d11/terrain_cull_cover_core.h:50 kHead         cull-plane builder head        old=0x4441580 new=0x44414e0 n=32  old-exe-reproduces
+KEEP          tc-fragA                   src/d3d11/terrain_cull_cover_core.h:57 kFragA        call-site fragment A           old=0x4458d5d new=0x4458cbd n=6  old-exe-reproduces
+KEEP          oc-fp-401                  src/common/elite_oculus_profile.h:401                Oculus fingerprint             old=0x8d5400 new=0x8d53a0 n=243 hash pin=FF6BF29E3788FC3C old=17629A1FD3828894 new=FF6BF29E3788FC3C reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-402                  src/common/elite_oculus_profile.h:402                Oculus fingerprint             old=0x4e4ba0 new=0x4e4b40 n=711 hash pin=60262CD96F885F66 old=98376EDD435B9D9C new=60262CD96F885F66 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-403                  src/common/elite_oculus_profile.h:403                Oculus fingerprint             old=0x4e4730 new=0x4e46d0 n=572 hash pin=E72D36967A10BFA8 old=22A172BD9B250448 new=E72D36967A10BFA8 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-404                  src/common/elite_oculus_profile.h:404                Oculus fingerprint             old=0x4e4970 new=0x4e4910 n=560 hash pin=7B3B4C4070FB007A old=21CB0709FCF55236 new=7B3B4C4070FB007A reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-405                  src/common/elite_oculus_profile.h:405                Oculus fingerprint             old=0x4e8630 new=0x4e85d0 n=341 hash pin=1BEB5B69C7BF932E old=2A9E2DBBAEDDE2BB new=1BEB5B69C7BF932E reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-406                  src/common/elite_oculus_profile.h:406                Oculus fingerprint             old=0x4e71d0 new=0x4e7170 n=2436 hash pin=66B422313A80E9AE old=5D9DFCB146397878 new=66B422313A80E9AE reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-407                  src/common/elite_oculus_profile.h:407                Oculus fingerprint             old=0x4e6e40 new=0x4e6de0 n=912 hash pin=B9F0AF721320C54D old=C724029334737635 new=B9F0AF721320C54D reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-408                  src/common/elite_oculus_profile.h:408                Oculus fingerprint             old=0x4e0f60 new=0x4e0f00 n=199 hash pin=AEE1539FB5BE2968 old=FD358E07FA8A2868 new=AEE1539FB5BE2968 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-409                  src/common/elite_oculus_profile.h:409                Oculus fingerprint             old=0x4e8330 new=0x4e82d0 n=58 hash pin=B69AB25FEC7A1F6A old=46C9815E81B0DF4A new=B69AB25FEC7A1F6A reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-410                  src/common/elite_oculus_profile.h:410                Oculus fingerprint             old=0x4e5da0 new=0x4e5d40 n=101 hash pin=9F6C59F05E0A6390 old=A54979C6EB0CC47D new=9F6C59F05E0A6390 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          oc-fp-411                  src/common/elite_oculus_profile.h:411                Oculus fingerprint             old=0x4e87b0 new=0x4e8750 n=32 hash pin=72BD38A6D3FB9681 old=61126C9627CB6C61 new=72BD38A6D3FB9681 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-byte-0x4e477c           tools\elite_oculus.py:41                             python _BYTE_CHECKS            old=0x4e477c new=0x4e471c n=4  old-exe-reproduces
+KEEP          py-byte-0x4e47b1           tools\elite_oculus.py:42                             python _BYTE_CHECKS            old=0x4e47b1 new=0x4e4751 n=2  old-exe-reproduces
+KEEP          py-byte-0x4e4e50           tools\elite_oculus.py:40                             python _BYTE_CHECKS            old=0x4e4e50 new=0x4e4df0 n=3  old-exe-reproduces
+KEEP          py-byte-0x4e720e           tools\elite_oculus.py:43                             python _BYTE_CHECKS            old=0x4e720e new=0x4e71ae n=10  old-exe-reproduces
+KEEP          py-byte-0x4e8356           tools\elite_oculus.py:44                             python _BYTE_CHECKS            old=0x4e8356 new=0x4e82f6 n=6  old-exe-reproduces
+KEEP          py-byte-0x4e87bb           tools\elite_oculus.py:45                             python _BYTE_CHECKS            old=0x4e87bb new=0x4e875b n=7  old-exe-reproduces
+KEEP          py-byte-0x8d546b           tools\elite_oculus.py:34                             python _BYTE_CHECKS            old=0x8d546b new=0x8d540b n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5478           tools\elite_oculus.py:35                             python _BYTE_CHECKS            old=0x8d5478 new=0x8d5418 n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5480           tools\elite_oculus.py:36                             python _BYTE_CHECKS            old=0x8d5480 new=0x8d5420 n=8  old-exe-reproduces
+KEEP          py-byte-0x8d5488           tools\elite_oculus.py:37                             python _BYTE_CHECKS            old=0x8d5488 new=0x8d5428 n=4  old-exe-reproduces
+KEEP          py-byte-0x8d549c           tools\elite_oculus.py:38                             python _BYTE_CHECKS            old=0x8d549c new=0x8d543c n=11  old-exe-reproduces
+KEEP          py-fp-0x8d5400             tools\elite_oculus.py:49                             python _FINGERPRINTS           old=0x8d5400 new=0x8d53a0 n=243 hash pin=FF6BF29E3788FC3C old=17629A1FD3828894 new=FF6BF29E3788FC3C reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e4ba0             tools\elite_oculus.py:50                             python _FINGERPRINTS           old=0x4e4ba0 new=0x4e4b40 n=711 hash pin=60262CD96F885F66 old=98376EDD435B9D9C new=60262CD96F885F66 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e4730             tools\elite_oculus.py:51                             python _FINGERPRINTS           old=0x4e4730 new=0x4e46d0 n=572 hash pin=E72D36967A10BFA8 old=22A172BD9B250448 new=E72D36967A10BFA8 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e4970             tools\elite_oculus.py:52                             python _FINGERPRINTS           old=0x4e4970 new=0x4e4910 n=560 hash pin=7B3B4C4070FB007A old=21CB0709FCF55236 new=7B3B4C4070FB007A reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e8630             tools\elite_oculus.py:53                             python _FINGERPRINTS           old=0x4e8630 new=0x4e85d0 n=341 hash pin=1BEB5B69C7BF932E old=2A9E2DBBAEDDE2BB new=1BEB5B69C7BF932E reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e71d0             tools\elite_oculus.py:54                             python _FINGERPRINTS           old=0x4e71d0 new=0x4e7170 n=2436 hash pin=66B422313A80E9AE old=5D9DFCB146397878 new=66B422313A80E9AE reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e6e40             tools\elite_oculus.py:55                             python _FINGERPRINTS           old=0x4e6e40 new=0x4e6de0 n=912 hash pin=B9F0AF721320C54D old=C724029334737635 new=B9F0AF721320C54D reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e0f60             tools\elite_oculus.py:56                             python _FINGERPRINTS           old=0x4e0f60 new=0x4e0f00 n=199 hash pin=AEE1539FB5BE2968 old=FD358E07FA8A2868 new=AEE1539FB5BE2968 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e8330             tools\elite_oculus.py:57                             python _FINGERPRINTS           old=0x4e8330 new=0x4e82d0 n=58 hash pin=B69AB25FEC7A1F6A old=46C9815E81B0DF4A new=B69AB25FEC7A1F6A reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e5da0             tools\elite_oculus.py:58                             python _FINGERPRINTS           old=0x4e5da0 new=0x4e5d40 n=101 hash pin=9F6C59F05E0A6390 old=A54979C6EB0CC47D new=9F6C59F05E0A6390 reloc(old/new)=0/0  old-exe-reproduces
+KEEP          py-fp-0x4e87b0             tools\elite_oculus.py:59                             python _FINGERPRINTS           old=0x4e87b0 new=0x4e8750 n=32 hash pin=72BD38A6D3FB9681 old=61126C9627CB6C61 new=72BD38A6D3FB9681 reloc(old/new)=0/0  old-exe-reproduces
+SITE-OK       tc-site                    src/d3d11/terrain_cull_cover_core.h:42-57            cull-plane call-site chain     old=0x4458d5d new=0x4458cbd  old-exe-reproduces
+      fragment gaps (7, 0, 0) (same in both); E8 at 0x4458d87->0x4441580 old, 0x4458ce7->0x44414e0 new (rel32 moved, target kTargetRva)
+SUMMARY pins=143 KEEP=142, SITE-OK=1

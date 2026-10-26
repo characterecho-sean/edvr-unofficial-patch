@@ -3,9 +3,9 @@
 // The file users edit is the one asserted here. Two properties of the parser
 // that edvr.ini's own layout depends on are proven rather than assumed:
 //
-//   1. a section header may REPEAT -- edvr.ini opens with the settings most
-//      people touch under [fix] and [hotkey], then returns to both further
-//      down for the Explorer Cam block. If a repeat were a parse error, or
+//   1. a section header may REPEAT -- a settings file may return to [fix] or
+//      [hotkey] further down (an installer merge or a hand edit leaves one
+//      that way). If a repeat were a parse error, or
 //      silently discarded everything after it, half the file would do
 //      nothing while still looking perfectly valid in an editor.
 //   2. a key set twice takes the LAST value, because parse() assigns into a
@@ -42,6 +42,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -53,9 +54,9 @@
 #include "../../src/common/ini_name.h"
 #include "../../src/common/real_dll_choice.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/common/star_glow.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
-#include "../../src/d3d11/explorer_cam_follow_core.h"   // the Explorer Cam trims' and smoothing defaults: header-only, no link
 #include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
@@ -600,9 +601,11 @@ static void shareDeleteCase(const std::wstring& scratch) {
     std::thread probe(probeMain, &path, &st);
 
     // At least 300 reloads, and on until the probe has landed 300 times inside
-    // them: a probe thread that is starved by a busy machine (the rigs run in a
-    // pool) gets the time it needs rather than failing the run for want of it.
-    // The cap is what ends a probe that never runs.
+    // them: a probe thread that is starved by a busy machine gets the time it
+    // needs rather than failing the run for want of it. The cap is what ends a
+    // probe that never runs. build.bat runs this rig alone, after the pool (it is
+    // --quiet): a reload holds the file for tens of microseconds, and a pool of
+    // four busy rigs on four cores let one run make 78 landings in 20000 reloads.
     int  reloads = 0;
     int  unparsed = 0;
     bool writeFailed = false;
@@ -1209,9 +1212,10 @@ static const char* const kRetiredKeys[] = {
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
-// Retired by EXACT name, because the bare name is a substring of live keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
-// 2026-10-08: Explorer Cam is armed exactly when hotkey.explorer_cam is set. Its qualified name "fix.explorer_cam" is also the beginning of every live
-// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...), so a match counts only when the next character is not part of a name. A hotkey
+// Retired by EXACT name, because the bare name is a substring of other keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
+// 2026-10-08: Explorer Cam was then armed exactly when hotkey.explorer_cam was set. Its qualified name "fix.explorer_cam" is also the beginning of every
+// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...; retired in F98 and held by kRetiredNotedKeys), so a match counts only when the
+// next character is not part of a name. A hotkey
 // line spells "hotkey.explorer_cam", which never contains "fix.". The shipped file's [fix] section is held out by the key lookup in main (expectStr, "<unset>"),
 // because there the key is the bare "explorer_cam", which sits in [hotkey] too.
 static const char* const kRetiredExactKeys[] = {
@@ -1279,7 +1283,7 @@ static void retiredKeyScan(const std::wstring& root) {
                                                        " names found, or a live key was flagged");
 
     // The exact-name scan's own control: it finds the retired switch in a read, a message, a comment and at the end of a sentence or of the text, and passes
-    // every live key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing).
+    // every key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing: retired in F98, held by kRetiredNotedKeys).
     {
         const std::string retired[] = {
             "Config::get().getBool(\"fix.explorer_cam\", true)",
@@ -1302,7 +1306,7 @@ static void retiredKeyScan(const std::wstring& root) {
         for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
         if (foundAll && passedAll && kRetiredExactKeyCount == 6)
             ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
-               "fix.explorer_cam_eye_*, the trims and the smoothing beside it");
+               "fix.explorer_cam_eye_*, the trims and the smoothing beside it (their own list holds them)");
         else
             fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
     }
@@ -1364,6 +1368,114 @@ static void retiredKeyScan(const std::wstring& root) {
             " sources under src (the installer's included) spells a retired key: no reader, no allow-list entry, no message")
                .c_str());
     }
+}
+
+// Explorer Cam's eight keys, retired in F98 with Explorer Cam, the weapon eye's up key, retired in F98c (one eye height with and without an item), and
+// the training connect probe's key, retired in F100 (its hooks and lines removed; the connection retry keeps the hooks it reads), and the ADS left eye
+// close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_both_eyes), the old look to aim controller's three
+// test keys, retired in F109 (look to aim rides the ADS head aim's map), and the weapon eye's right key, retired in F112 (the eye offset is forward
+// alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), and F117's and F120's two panel cursor test keys, retired in F122 (the cursor
+// is hidden by default behind fix.native_on_foot_panel_mouse; drawn, both corrections run at their panel value), and the aim reticle's placement key,
+// retired in F127 (the reticle always sits on the mouse-aim axis, the former default; its head and game placements were removed),
+// and the visor-axis test key, retired in F128 (the correction is always on in outer mode), under native on foot's convention for retired keys (its F34, F66 and
+// F96 keys are the same): the shipped file keeps each at its retired value on a hidden retired line,
+// and native_on_foot.cpp's retiredKeysNote reads each once, to name a value that differs. Nothing else may spell them: no other line of the shipped
+// file, no other source, no other function.
+static const char* const kRetiredNotedKeys[] = {
+    "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right", "fix.explorer_cam_eye_trim_up",
+    "fix.explorer_cam_eye_trim_forward", "fix.explorer_cam_eye_trim_right", "fix.explorer_cam_follow_smoothing_ms", "hotkey.explorer_cam",
+    "fix.native_on_foot_weapon_eye_up_cm", "fix.training_connect_probe", "fix.native_on_foot_ads_close_left_eye",
+    "fix.native_on_foot_look_to_aim_yaw_sign", "fix.native_on_foot_look_to_aim_comp_delay", "fix.native_on_foot_look_to_aim_comp_sign",
+    "fix.native_on_foot_weapon_eye_right_cm", "fix.native_on_foot_panel_cursor_fix", "fix.native_on_foot_panel_cursor_follow",
+    "fix.native_on_foot_reticle_follow",
+    "fix.native_on_foot_visor_axis",
+};
+// The marker line above each: "# ui: hidden -- retired (F98): ignored." (later keys name their own retirement's F number).
+static bool isRetiredNotedMarker(const std::string& line) {
+    static const std::string head = "# ui: hidden -- retired (F", tail = "): ignored.";
+    return line.size() >= head.size() + tail.size() && line.compare(0, head.size(), head) == 0 &&
+           line.compare(line.size() - tail.size(), tail.size(), tail) == 0;
+}
+
+static void retiredNotedKeyScan(const std::wstring& root) {
+    // The shipped file: each key's bare name is spelled on exactly one line, that line is the key in its own section, and the line above it is the marker.
+    const std::string ini = readRepoFile(root, L"edvr.ini");
+    if (ini.empty()) {
+        fail("edvr.ini is readable from the repo root (F98 retired keys)", "could not read it");
+        return;
+    }
+    std::vector<std::string> lines;
+    {
+        size_t at = 0;
+        while (at <= ini.size()) {
+            const size_t nl = ini.find('\n', at);
+            std::string l = ini.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            lines.push_back(l);
+            if (nl == std::string::npos) break;
+            at = nl + 1;
+        }
+    }
+    int good = 0;
+    std::string why;
+    for (const char* qualified : kRetiredNotedKeys) {
+        const std::string q(qualified);
+        const std::string section = q.substr(0, q.find('.')), bare = q.substr(q.find('.') + 1);
+        std::string current;
+        int keyed = 0, elsewhere = 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const std::string& l = lines[i];
+            if (!l.empty() && l[0] == '[') {
+                current = l.substr(1, l.find(']') == std::string::npos ? std::string::npos : l.find(']') - 1);
+                continue;
+            }
+            if (!spellsExactKey(l, bare.c_str())) continue;
+            const bool isKey = l.compare(0, bare.size() + 2, bare + " =") == 0 && current == section && i > 0 && isRetiredNotedMarker(lines[i - 1]);
+            if (isKey) ++keyed;
+            else ++elsewhere;
+        }
+        if (keyed == 1 && elsewhere == 0) ++good;
+        else if (why.empty()) why = q + ": " + std::to_string(keyed) + " retired line(s), " + std::to_string(elsewhere) + " other line(s)";
+    }
+    const int count = static_cast<int>(sizeof(kRetiredNotedKeys) / sizeof(kRetiredNotedKeys[0]));
+    if (good == count)
+        ok("the shipped edvr.ini spells each of the nineteen retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
+           "F100, the ADS left eye close from F106, the old look to aim's three test keys from F109, the weapon eye's right from F112, the two panel cursor test "
+           "keys from F122, the aim reticle's placement from F127, the visor-axis test key from F128) once, as its own hidden retired line, and nowhere else");
+    else
+        fail("the shipped edvr.ini keeps each F98 retired key on one hidden retired line and nowhere else", why);
+
+    // The sources: only native_on_foot.cpp, and only inside retiredKeysNote.
+    std::vector<std::wstring> files;
+    collectSources(root + L"\\src", L"", &files, true);
+    int bad = 0, inNote = 0;
+    for (const std::wstring& rel : files) {
+        const std::string text = readRepoFile(root, (L"src\\" + rel).c_str());
+        const bool noteFile = rel == L"d3d11\\native_on_foot.cpp";
+        size_t lo = std::string::npos, hi = std::string::npos;
+        if (noteFile) {
+            lo = text.find("void retiredKeysNote(");
+            if (lo != std::string::npos) hi = text.find("\n}\n", lo);
+        }
+        for (const char* qualified : kRetiredNotedKeys) {
+            const size_t n = std::strlen(qualified);
+            for (size_t at = text.find(qualified); at != std::string::npos; at = text.find(qualified, at + 1)) {
+                const char next = at + n < text.size() ? text[at + n] : '\0';
+                if (std::isalnum(static_cast<unsigned char>(next)) || next == '_') continue;   // a longer name
+                if (noteFile && lo != std::string::npos && hi != std::string::npos && at > lo && at < hi) {
+                    ++inNote;
+                    continue;
+                }
+                ++bad;
+                fail("a production source spells an F98 retired key outside native on foot's retired-key note", narrow(rel) + " spells " + qualified);
+            }
+        }
+    }
+    if (!bad && inNote >= 2 * count)
+        ok("the nineteen retired keys (F98, F98c, F100, F106, F109, F112, F122, F127, F128) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and "
+           "named once)");
+    else if (!bad)
+        fail("each F98 retired key is read and named in retiredKeysNote", std::to_string(inNote) + " spellings there, " + std::to_string(2 * count) + " wanted");
 }
 
 // switchProfile (2026-10-12): the settings file follows the profile the frame boundary has set, and a switch reads that
@@ -1786,69 +1898,21 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The Explorer Cam switch reads from the shipped file, and the keys of the
-    // old route it replaced are not defined there (kRetiredKeys, above).
-    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file (Explorer Cam is armed by its hotkey alone)");
-    expectStr("hotkey.explorer_cam", "F5", "...and the hotkey that arms Explorer Cam ships as F5");
-    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the fallback eye keys ship at 1.68 up,");
+    // Explorer Cam's eight keys, retired in F98 with Explorer Cam (native on foot is the on-foot VR mode). The shipped file carries each at its last
+    // shipping value as a hidden retired line, so a stock file reads clean; retiredNotedKeyScan holds their names to that block and to the one log note.
+    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file");
+    expectStr("hotkey.explorer_cam", "F5", "the retired Explorer Cam key's line keeps its last shipping value, F5");
+    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the retired fallback eye lines keep 1.68 up,");
     expectFloat("fix.explorer_cam_eye_forward", 0.10f, "...0.10 forward,");
     expectFloat("fix.explorer_cam_eye_right", 0.0f, "...and 0.0 right");
-    // The trims and the smoothing are PERMANENT user settings (Sean, 2026-10-08) and ship with his own tuning. Three places must say the same three numbers: the
-    // shipped file, the constants in explorer_cam_follow_core.h, and the code's fallback for an ini that lacks the keys (which must USE those constants).
-    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "the Explorer Cam eye trims ship at Sean's tuning: up 0.15,");
+    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "...the retired trims keep up 0.15,");
     expectFloat("fix.explorer_cam_eye_trim_forward", -0.08f, "...forward -0.08,");
     expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
-    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the retired follow smoothing 0");
     expectStr("advanced.explorer_cam_probe", "<unset>", "the retired Explorer Cam probe key is absent from the shipped file (removed 2026-10-09; kRetiredKeys holds its name out of every source)");
     // The transition-flash switch (removed 2026-10-13) is a bare [fix] key like fix.explorer_cam was: the exact-name scan holds its qualified name out of the
     // sources and the file's text, and this lookup holds the [fix] line itself out.
     expectStr("fix.transition_flash", "<unset>", "the retired transition-flash switch is absent from the shipped file (the hold is always on in the VR profile and has no setting)");
-    expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
-    expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
-    expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");
-    expectFloat("fix.explorer_cam_follow_smoothing_ms", static_cast<float>(ecm::kSmoothingMsDefault), "...the shipped smoothing is ecm::kSmoothingMsDefault");
-    {
-        const float trims[3] = {ecm::kTrimUpDefault, ecm::kTrimForwardDefault, ecm::kTrimRightDefault};
-        bool inside = true;
-        for (float v : trims) inside = inside && v >= -ecm::kTrimLimit && v <= ecm::kTrimLimit && ecm::clampTrim(v) == v;
-        if (inside && static_cast<float>(ecm::kSmoothingMsDefault) >= 0.0f && static_cast<float>(ecm::kSmoothingMsDefault) <= ecm::kSmoothingMsMax)
-            ok("every shipped Explorer Cam default is inside its clamp (+-0.5 m, 0..1000 ms)");
-        else
-            fail("every shipped Explorer Cam default is inside its clamp", "a default sits outside what the code would let through");
-    }
-    {
-        // The code's fallback must be the constant, not a number that happens to match today. The control rewrites each call to a literal that
-        // differs and must be caught. The reads are in the settings cache (explorer_cam_settings_core.h), which explorerCamFrameBoundary reads them through once per
-        // configuration change; explorer_cam_fade_test pins that the frame boundary reads none of these keys itself.
-        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam_settings_core.h");
-        struct Read { const char* key; const char* call; const char* expr; };
-        const Read reads[] = {
-            {"fix.explorer_cam_eye_trim_up", "getFloat", "kTrimUpDefault"},
-            {"fix.explorer_cam_eye_trim_forward", "getFloat", "kTrimForwardDefault"},
-            {"fix.explorer_cam_eye_trim_right", "getFloat", "kTrimRightDefault"},
-            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "kSmoothingMsDefault"},
-        };
-        auto usesConstant = [](const std::string& text, const Read& r) {
-            return text.find(std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")") != std::string::npos;
-        };
-        if (source.empty()) {
-            fail("explorer_cam_settings_core.h is readable from the repo root", "could not read it");
-        } else {
-            bool all = true, controlsCaught = true;
-            for (const Read& r : reads) {
-                all = all && usesConstant(source, r);
-                std::string flipped = source;
-                const std::string from = std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")";
-                const size_t at = flipped.find(from);
-                if (at != std::string::npos) flipped.replace(at, from.size(), std::string(r.call) + "(\"" + r.key + "\", 0.0f)");
-                controlsCaught = controlsCaught && at != std::string::npos && !usesConstant(flipped, r);
-            }
-            if (all) ok("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
-            else fail("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
-            if (controlsCaught) ok("control: a read rewritten to a literal fallback is caught");
-            else fail("control: a read rewritten to a literal fallback is caught", "the rewritten source still passed, or the call was not found");
-        }
-    }
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 
@@ -2095,6 +2159,106 @@ int main(int argc, char** argv) {
             Config::get().setAuditTables(nullptr, 0, nullptr, 0);
         }
 
+        // --- fix.intro_video moved to visual.intro_video (2026-10-22), over the SHIPPED tables ----
+        //
+        // The same proof as the trims: the tables the DLLs register come from the real edvr.ini, so what is shown is that an old-layout
+        // [fix] line is read as the new key, that the retired default is not a choice, and that it is the shipped annotation doing it.
+        {
+            using contractgen::kKnownKeys;
+            using contractgen::kMovedKeys;
+            constexpr size_t kKnownCount = sizeof(kKnownKeys) / sizeof(kKnownKeys[0]);
+            constexpr size_t kMovedCount = sizeof(kMovedKeys) / sizeof(kMovedKeys[0]);
+            static const char* filtered[kMovedCount][3];
+            size_t filteredCount = 0;
+            bool carriesIntro = false;
+            int olderIntro = 0;
+            for (size_t i = 0; i < kMovedCount; ++i) {
+                const std::string oldKey = kMovedKeys[i][0], newKey = kMovedKeys[i][1];
+                if (oldKey == "fix.intro_video" && newKey == "visual.intro_video" && std::string(kMovedKeys[i][2]) == "screen") {
+                    carriesIntro = true;
+                    continue;   // the control's tables lose this one move
+                }
+                if (newKey == "visual.intro_video") ++olderIntro;
+                for (int c = 0; c < 3; ++c) filtered[filteredCount][c] = kMovedKeys[i][c];
+                ++filteredCount;
+            }
+            check(carriesIntro, "the shipped moved-from map carries fix.intro_video to visual.intro_video, its shipped default screen");
+            check(olderIntro == 3, "...and the three older intro keys still land on the same key");
+            int known = 0, retired = 0;
+            for (size_t i = 0; i < kKnownCount; ++i) {
+                if (strcmp(kKnownKeys[i], "visual.intro_video") == 0 || strcmp(kKnownKeys[i], "visual.star_glow") == 0) ++known;
+                if (strcmp(kKnownKeys[i], "fix.intro_video") == 0) ++retired;
+            }
+            check(known == 2 && retired == 0, "visual.intro_video and visual.star_glow are known keys, and fix.intro_video is not one any more",
+                  std::to_string(known) + " known, " + std::to_string(retired) + " retired still known");
+
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, kMovedKeys, kMovedCount);
+            if (!writeIni(scratch, "[fix]\r\nintro_video = skip\r\n")) {
+                fail("old-layout intro_video ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("visual.intro_video", "skip", "an old-layout [fix] intro_video is read as visual.intro_video");
+                // The retired default is not a choice: nothing is synthesized, so the key's own default (the caller's) rules.
+                if (!rewriteIni(scratch, "[fix]\r\nintro_video = screen\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("old-layout stale intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "<unset>", "an old-layout line still carrying the shipped default is ignored, not read");
+                }
+                // Both spellings: the new name wins.
+                if (!rewriteIni(scratch, "[fix]\r\nintro_video = skip\r\n[visual]\r\nintro_video = stock\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("both-layout intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "stock", "when both spellings are set, visual.intro_video wins");
+                }
+                // A new-layout file is read as it stands.
+                if (!rewriteIni(scratch, "[visual]\r\nintro_video = skip\r\nstar_glow = 150\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("new-layout intro_video reload", "the edit did not reload");
+                } else {
+                    expectStr("visual.intro_video", "skip", "a new-layout visual.intro_video is read as it stands");
+                    check(edvr::starGlowPercent(Config::get()) == 150, "visual.star_glow = 150 reads as 150 percent");
+                }
+            }
+            // CONTROL: the same old-layout file over the same tables minus that one move: the value is stranded under the old name.
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, reinterpret_cast<const char* const(*)[3]>(filtered), filteredCount);
+            if (!writeIni(scratch, "[fix]\r\nintro_video = skip\r\n")) {
+                fail("control intro_video ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("visual.intro_video", "<unset>", "control: without the annotation an old-layout intro_video is NOT read as the new name");
+            }
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+        }
+
+        // --- visual.star_glow: the percentages, read exactly ---------------------
+        {
+            struct Case { const char* text; int percent; bool recognised; };
+            const Case cases[] = {{"100", 100, true}, {"125", 125, true}, {"150", 150, true}, {"175", 175, true}, {"200", 200, true},
+                                  {"", 100, false}, {"off", 100, false}, {"110", 100, false}, {"225", 100, false}, {"150%", 100, false},
+                                  {"1.5", 100, false}, {"150.0", 100, false}, {" 150", 100, false}, {"-150", 100, false}};
+            for (const Case& c : cases) {
+                bool recognised = false;
+                const int got = edvr::starGlowParse(c.text, &recognised);
+                check(got == c.percent && recognised == c.recognised,
+                      (std::string("star glow \"") + c.text + "\" reads as " + std::to_string(c.percent) + (c.recognised ? "" : " (unrecognised)")).c_str(),
+                      "got " + std::to_string(got) + (recognised ? " recognised" : " unrecognised"));
+            }
+            bool recognised = true;
+            check(edvr::starGlowParse(nullptr, &recognised) == 100 && !recognised, "a null value is the stock 100, unrecognised");
+            // Through the Config accessor, absent and set. The key is flat-listed (flat_profile_keys.h); in VR it reads whatever the file says.
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+            if (!writeIni(scratch, "[fix]\r\nblack_void = on\r\n")) {
+                fail("star glow absent ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                check(edvr::starGlowPercent(Config::get(), &recognised) == 100 && recognised, "an absent visual.star_glow is the stock 100, recognised");
+                Config::get().set("visual.star_glow", "175");
+                check(edvr::starGlowPercent(Config::get()) == 175, "a set visual.star_glow = 175 reads as 175 percent");
+                Config::get().set("visual.star_glow", "banana");
+                check(edvr::starGlowPercent(Config::get(), &recognised) == 100 && !recognised, "a typo is the stock 100, unrecognised: it must not strengthen the picture");
+            }
+        }
+
         // --- the log directory, and the environment's say over it ----------
         //
         // build.bat's test runner gives each rig's proxies their own log
@@ -2262,9 +2426,34 @@ int main(int argc, char** argv) {
         } else {
             check(iniText.find("\n#max_mb = 16") != std::string::npos && iniText.find("\n#max_mb = 4") == std::string::npos,
                   "the shipped edvr.ini documents log.max_mb at 16, commented out (the code's fallback is the default)");
-            check(logSource.find("getInt(\"log.max_mb\", 16)") != std::string::npos &&
+            check(logSource.find("getInt(\"log.max_mb\", onFootDetail ? 64 : 16)") != std::string::npos &&
                       logSource.find("getInt(\"log.max_mb\", 4)") == std::string::npos,
-                  "the log's fallback for log.max_mb is 16");
+                  "the log's fallback for log.max_mb is 16 (64 with log.on_foot_detail on, F125)");
+        }
+    }
+    // --- log.on_foot_detail (F125): the detailed on-foot log, off by default, live -------------------------------------------------------------------
+    //
+    // Off, each on-foot measurement writes a 10 s summary; on, every line as before, about 4 MB a minute on foot. The shipped edvr.ini documents the key
+    // commented out at off, and both readers fall back to off: the log (for the cap it opens with, below) and the on-foot code's readKey (for the lines,
+    // re-read on each configuration change). Two readers with two defaults would make the cap and the lines disagree about one setting.
+    {
+        const std::string iniText = readRepoFile(dir, L"edvr.ini");
+        const std::string logSource = readRepoFile(dir, L"src\\common\\log.cpp");
+        const std::string onFootSource = readRepoFile(dir, L"src\\d3d11\\native_on_foot.cpp");
+        if (iniText.empty() || logSource.empty() || onFootSource.empty()) {
+            fail("log.on_foot_detail pins", "could not read edvr.ini, src\\common\\log.cpp or src\\d3d11\\native_on_foot.cpp from the repo root");
+        } else {
+            const size_t logSection = iniText.find("\n[log]");
+            const size_t keyLine = iniText.find("\n#on_foot_detail = off");
+            const size_t nextSection = logSection == std::string::npos ? std::string::npos : iniText.find("\n[", logSection + 1);
+            check(logSection != std::string::npos && keyLine > logSection && (nextSection == std::string::npos || keyLine < nextSection) &&
+                      iniText.find("\non_foot_detail = on") == std::string::npos,
+                  "the shipped edvr.ini documents log.on_foot_detail in [log], commented out at off");
+            check(logSource.find("getBool(\"log.on_foot_detail\", false)") != std::string::npos,
+                  "the log reads log.on_foot_detail with the default off");
+            check(onFootSource.find("getBool(\"log.on_foot_detail\", false)") != std::string::npos &&
+                      onFootSource.find("native on foot log (F125): detail %s") != std::string::npos,
+                  "readKey reads log.on_foot_detail with the default off and announces it (the line --health reads)");
         }
     }
     if (argc >= 3) {
@@ -2355,7 +2544,7 @@ int main(int argc, char** argv) {
             }
             return n;
         };
-        const char* const kCapLine = "log size cap reached; nothing further will be written";
+        const char* const kCapLine = "log size cap reached; only lines noted as reserved";
         const uint64_t kMiB = 1024ull * 1024ull;
 
         const CapRun byDefault = session("", L"capdefault", true);
@@ -2382,6 +2571,138 @@ int main(int argc, char** argv) {
         check(four.opened && four.maxBytes == 4 * kMiB, "an ini that says max_mb = 4 keeps 4 MB", std::to_string(four.maxBytes) + " bytes");
         const CapRun none = session("max_mb = 0\r\n", L"capnone", false);
         check(none.opened && none.maxBytes == 0, "max_mb = 0 is no cap", std::to_string(none.maxBytes) + " bytes");
+        // F125: with the detailed on-foot log on when the log opens, a cap nobody set is 64 MB; one written down wins, 16 included.
+        const CapRun detail = session("on_foot_detail = on\r\n", L"capdetail", false);
+        check(detail.opened && detail.maxBytes == 64 * kMiB, "on_foot_detail = on with no max_mb line is a 64 MB cap (F125)",
+              std::to_string(detail.maxBytes) + " bytes");
+        const CapRun detailOff = session("on_foot_detail = off\r\n", L"capdetailoff", false);
+        check(detailOff.opened && detailOff.maxBytes == 16 * kMiB, "on_foot_detail = off keeps the 16 MB default",
+              std::to_string(detailOff.maxBytes) + " bytes");
+        const CapRun detailFour = session("on_foot_detail = on\r\nmax_mb = 4\r\n", L"capdetailfour", false);
+        check(detailFour.opened && detailFour.maxBytes == 4 * kMiB, "on_foot_detail = on with max_mb = 4 keeps 4 MB (a cap written down wins)",
+              std::to_string(detailFour.maxBytes) + " bytes");
+        const CapRun detailSixteen = session("on_foot_detail = on\r\nmax_mb = 16\r\n", L"capdetail16", false);
+        check(detailSixteen.opened && detailSixteen.maxBytes == 16 * kMiB,
+              "on_foot_detail = on with max_mb = 16 written down keeps 16 MB (the 64 is only for a cap nobody set)",
+              std::to_string(detailSixteen.maxBytes) + " bytes");
+        const CapRun detailEmpty = session("on_foot_detail = on\r\nmax_mb =\r\n", L"capdetailempty", false);
+        check(detailEmpty.opened && detailEmpty.maxBytes == 64 * kMiB, "on_foot_detail = on with an empty max_mb line is 64 MB (an empty value is not set)",
+              std::to_string(detailEmpty.maxBytes) + " bytes");
+        Log::get().close();
+
+        // --- Log::noteReserved: a line that outlives the cap, from a reserve of 1 MiB (2026-10-22, the memory watch's mem: lines) ----------
+        //
+        // Before the cap it is an ordinary line. After it, the lines go on from the reserve, in order, until the reserve cannot take the
+        // next one; the log says so once and writes no more of them. The reserve's arithmetic is held by tools\mem_watch_test; this is
+        // the file: that the lines are on disk, in order, that an ordinary line after the cap still is not, that the notice is the end.
+        const auto readLog = [&](const wchar_t* tag) {
+            std::string body;
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((scratch + L"\\edvr_" + tag + L"_*.log").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return body;
+            const std::wstring name = fd.cFileName;
+            FindClose(h);
+            HANDLE f = CreateFileW((scratch + L"\\" + name).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f == INVALID_HANDLE_VALUE) return body;
+            char chunk[65536];
+            DWORD got = 0;
+            while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) && got) body.append(chunk, got);
+            CloseHandle(f);
+            return body;
+        };
+        const auto openLog = [&](const char* maxMbLine, const wchar_t* tag) {
+            std::string ini = "[log]\r\nenabled = 1\r\nbuffer_mb = 16\r\n";
+            ini += maxMbLine;
+            if (!writeIni(scratch, ini.c_str())) return false;
+            Config::get().init(scratch);
+            Log::get().close();
+            WIN32_FIND_DATAW old{};
+            HANDLE oh = FindFirstFileW((scratch + L"\\edvr_" + tag + L"_*.log").c_str(), &old);
+            if (oh != INVALID_HANDLE_VALUE) {
+                do {
+                    DeleteFileW((scratch + L"\\" + old.cFileName).c_str());
+                } while (FindNextFileW(oh, &old));
+                FindClose(oh);
+            }
+            return Log::get().open(scratch, tag);
+        };
+
+        // Under the default cap a reserved line is an ordinary line: written, timestamped, in order with the notes around it, no cap notice.
+        if (!openLog("", L"resdefault")) {
+            fail("log reserve default", "the log would not open in the scratch dir");
+        } else {
+            Log::get().note("resdefault plain before");
+            Log::get().noteReserved("resdefault reserved %d", 7);
+            Log::get().note("resdefault plain after");
+            Log::get().close();
+            const std::string body = readLog(L"resdefault");
+            const size_t a = body.find("resdefault plain before"), b = body.find("resdefault reserved 7"), c = body.find("resdefault plain after");
+            check(a != std::string::npos && b != std::string::npos && c != std::string::npos && a < b && b < c && count(body, kCapLine) == 0,
+                  "noteReserved under the cap is note(): the line is written in order with the ordinary ones, and no cap is mentioned");
+            const size_t lineStart = b == std::string::npos ? 0 : body.rfind('\n', b) + 1;
+            check(b != std::string::npos && body.size() > lineStart + 14 && body[lineStart] == '[' && body[lineStart + 3] == ':' && body[lineStart + 13] == ']',
+                  "...and it is stamped like the others ([hh:mm:ss.mmm])");
+        }
+
+        // Past a 1 MB cap: the burst crosses it; once the cap notice is on disk, a reserved line, then 1.3 MB of them.
+        if (!openLog("max_mb = 1\r\n", L"respast")) {
+            fail("log reserve past the cap", "the log would not open in the scratch dir");
+        } else {
+            const std::string filler(1000, 'y');
+            for (int i = 0; i < 1300; ++i) Log::get().note("capfill %d %s", i, filler.c_str());
+            const auto waitForBody = [&](const char* needle, const char* why) {
+                const ULONGLONG started = GetTickCount64();
+                while (readLog(L"respast").find(needle) == std::string::npos) {
+                    if (GetTickCount64() - started > 120000ull) {
+                        fail("log reserve wait", std::string("never reached disk in 120 s: ") + why);
+                        return false;
+                    }
+                    Sleep(20);
+                }
+                return true;
+            };
+            // The burst is on disk, then one ordinary line gives the next pass something to write, and that pass finds the cap.
+            const bool burstWritten = waitForBody("capfill 1299 ", "the burst");
+            Log::get().note("resmarker the pass that finds the cap");
+            const bool capSeen = burstWritten && waitForBody(kCapLine, "the cap notice");
+            Log::get().noteReserved("resfirst reserved line after the cap");
+            Log::get().note("resplain ordinary line after the cap");
+            for (int i = 0; i < 1300; ++i) Log::get().noteReserved("resflood %05d %s", i, filler.c_str());
+            Log::get().noteReserved("resnever a line after the flood");
+            Log::get().close();   // joins the flusher and runs the last passes: everything noted is decided before the file is read
+            const std::string body = readLog(L"respast");
+            if (capSeen) {
+                const size_t capAt = body.find(kCapLine), firstAt = body.find("resfirst reserved line after the cap"), floodAt = body.find("resflood 00000 ");
+                check(count(body, kCapLine) == 1 && firstAt != std::string::npos && floodAt != std::string::npos && capAt < firstAt && firstAt < floodAt,
+                      "a reserved line noted after the cap is still written, once, after the cap notice and before the lines that follow it");
+                check(count(body, "resplain ordinary line after the cap") == 0 && count(body, "resmarker") == 0 && count(body, "resnever") == 0,
+                      "...while an ordinary line after the cap is not (the cap is still the cap)");
+                // The reserved lines on disk: whole, consecutive from 0, in order, adding up to no more than 1 MiB.
+                size_t floodLines = 0, reservedBytes = 0;
+                bool consecutive = true;
+                for (size_t at = body.find("resflood "); at != std::string::npos; at = body.find("resflood ", at + 1)) {
+                    const size_t lineStart = body.rfind('\n', at) + 1;
+                    const size_t lineEnd = body.find('\n', at);
+                    if (lineEnd == std::string::npos || body.find(filler, at) == std::string::npos || body.find(filler, at) > lineEnd) consecutive = false;
+                    if (std::atoi(body.c_str() + at + 9) != static_cast<int>(floodLines)) consecutive = false;
+                    reservedBytes += lineEnd - lineStart + 1;
+                    ++floodLines;
+                }
+                const size_t firstBytes = body.find('\n', firstAt) + 1 - (body.rfind('\n', firstAt) + 1);
+                reservedBytes += firstBytes;
+                check(floodLines > 900 && floodLines < 1300 && consecutive,
+                      "the flood is cut off partway (a whole number of lines, consecutive from 0, none missing), not written to its end",
+                      std::to_string(floodLines) + " lines");
+                check(reservedBytes <= kMiB && reservedBytes + 1100 > kMiB,
+                      "...at the reserve: no more than 1 MiB of reserved lines, and not a line's width short of it",
+                      std::to_string(reservedBytes) + " bytes");
+                const char* const spent = "[edvr] the post-cap reserve of 1 MiB for reserved lines is spent; nothing further will be written.";
+                const size_t spentAt = body.find(spent);
+                check(count(body, spent) == 1 && spentAt != std::string::npos && body.size() == spentAt + std::strlen(spent) + 2,
+                      "the reserve says it is spent exactly once, and that notice is the end of the file");
+            }
+        }
         Log::get().close();
     }
 
@@ -2392,6 +2713,7 @@ int main(int argc, char** argv) {
     iniNameScan(dir);
     realDllChoiceCases(dir);
     retiredKeyScan(dir);
+    retiredNotedKeyScan(dir);
     if (argc >= 3) {
         const std::wstring scratch = widen(argv[2]);
         floatCases(scratch);
@@ -2435,6 +2757,20 @@ int main(int argc, char** argv) {
             if (Config::get().getString("fix.ui_quality", "100") == "100")
                 ok("flat ui_quality uses the 100 default when absent");
             else fail("flat ui_quality default", "missing key was not 100");
+            // The Visual tab's two keys (2026-10-22): read in flat. Refused, the star glow would read "off" (the stock 100 anyway, but never the
+            // 150 somebody chose) and the movie's skip could never arm; the retired [fix] name is refused, so the one place that reads it is the
+            // moved-from map.
+            if (Config::get().getString("visual.intro_video", "screen") == "screen" && edvr::starGlowPercent(Config::get()) == 100)
+                ok("flat visual.intro_video and visual.star_glow use their defaults when absent");
+            else fail("flat visual defaults", "an absent [visual] key did not read its default");
+            if (!rewriteIni(scratch, "[fix]\r\nintro_video = skip\r\n[visual]\r\nintro_video = skip\r\nstar_glow = 150\r\n") ||
+                !Config::get().reloadIfChanged()) {
+                fail("flat visual scratch ini", "the edit did not reload");
+            } else {
+                expectStr("visual.intro_video", "skip", "flat reads visual.intro_video");
+                check(edvr::starGlowPercent(Config::get()) == 150, "flat reads visual.star_glow = 150 as 150 percent");
+                expectStr("fix.intro_video", "off", "flat refuses the retired fix.intro_video name");
+            }
         }
     }
     Config::get().set("advanced.input_gate", "off");
@@ -2459,7 +2795,7 @@ int main(int argc, char** argv) {
     expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
-    Config::get().set("fix.explorer_cam_eye_forward", "12");
+    Config::get().set("fix.native_on_foot_world_markers_lead", "12");
     Config::get().set("experimental.night_vision_realistic", "on");
     Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
     expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
@@ -2483,9 +2819,9 @@ int main(int argc, char** argv) {
     Config::get().set("advanced.eye_depth_capture", "on");
     expectBool("advanced.eye_depth_capture", false,
                "flat profile: eye depth capture reads off, so it cannot arm the depth probe or hold the draw gate open");
-    expectInt("fix.explorer_cam_eye_forward", 0, "flat profile suppresses numeric fix");
-    expectFloat("fix.explorer_cam_eye_forward", 0.0f, "flat profile suppresses float fix");
-    if (Config::get().getIntInRange("fix.explorer_cam_eye_forward", 12, 1, 100) != 0)
+    expectInt("fix.native_on_foot_world_markers_lead", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.native_on_foot_world_markers_lead", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.native_on_foot_world_markers_lead", 12, 1, 100) != 0)
         fail("flat bounded getter", "minimum reactivated disabled feature");
     else ok("flat scope precedes bounded numeric defaults");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");
@@ -2500,9 +2836,11 @@ int main(int argc, char** argv) {
     expectFloat("fix.render_sharpness", 0.3f, "flat scope permits the sharpening setting");
     expectStr("hotkey.dump_camera", "", "flat menu exception leaves unrelated hotkeys suppressed");
     const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
-        {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
         {"K",11,11,true},{"l",12,12,true},{"m",13,13,true},
-        {"quality",11,11,true},{"steady",11,12,true},{"responsive",10,10,true},
+        {"quality",11,11,true},{"steady",11,12,true},{"",11,11,true},
+        // J, its alias responsive and the driver's choice (auto, default) were removed
+        // 2026-10-21: unknown, so K with the once-per-session note.
+        {"j",11,11,false},{"auto",11,11,false},{"default",11,11,false},{"responsive",11,11,false},
         {"removed-preset",11,11,false}
     };
     for (const auto& p : presets) {

@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <vector>
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <string>
@@ -17,13 +18,18 @@ class GuiDrawSnapshot {
     template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
     struct Blob {Ptr<ID3D11Resource> stage;uint32_t bytes=0,row=0,rows=0,subresource=0;std::string meta;};
     struct Draw {uint64_t vs=0,ps=0;std::string meta;};
+    struct Route {uint64_t vs=0,ps=0;std::string meta;};
     std::vector<Blob> blobs;
     std::vector<Draw> draws;
+    std::vector<Route> routes;
     std::map<ID3D11Resource*,std::vector<unsigned>> textures;
     std::vector<Ptr<ID3D11Resource>> retained;
-    uint32_t frame=0,bytes=0;
+    std::vector<Ptr<ID3D11Resource>> guiTargets;
+    uint8_t routeCounts[16][3]{};
+    uint32_t frame=0,sourceRenderFrame=0,bytes=0;
     static constexpr uint32_t budget=96*1024*1024;
     static std::map<uint64_t,std::vector<uint8_t>>& shaders(){static std::map<uint64_t,std::vector<uint8_t>> m;return m;}
+    static size_t& routeShaderBytes(){static size_t n=0;return n;}
     static std::mutex& mutex(){static std::mutex m;return m;}
     static const GUID& layoutKey(){static const GUID k={0x3fb76dd8,0x86df,0x4128,{0x93,0x91,0x23,0x95,0x9d,0x46,0x14,0xb2}};return k;}
     template<class T>static std::string words(const T& value){
@@ -83,7 +89,7 @@ class GuiDrawSnapshot {
         for(size_t i=0;i<found->second.size();++i){if(i)s<<',';s<<found->second[i];}s<<"]}";return s.str();
     }
 public:
-    uint32_t declined=0,failures=0,missingLayouts=0;
+    uint32_t declined=0,failures=0,missingLayouts=0,routeDeclines=0;
     struct Layout {char semantic[64]{};UINT index=0,format=0,slot=0,offset=0,classification=0,step=0;};
     static bool gui(uint64_t vs){return vs==0x666EF0C4C616F67Eull || vs==0x1012E00B3CB44469ull || vs==0xA3E5D3FCBC1165F8ull;}
     static bool guiPs(uint64_t ps){return ps==0xC0C4E6413DF14E9Aull || ps==0x5A887A688EA10D50ull || ps==0xDE0E1C56AAE678C5ull;}
@@ -92,6 +98,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex());if(shaders().count(hash))return;
         auto* p=static_cast<const uint8_t*>(data);shaders()[hash]=std::vector<uint8_t>(p,p+n);
     }
+    static void rememberRouteShader(uint64_t hash,const void* data,size_t n){
+        if(!hash||!data||!n||n>512*1024)return;std::lock_guard<std::mutex> lock(mutex());
+        if(shaders().count(hash))return;if(shaders().size()>=256||n>8*1024*1024-routeShaderBytes())return;
+        const auto* p=static_cast<const uint8_t*>(data);shaders()[hash]=std::vector<uint8_t>(p,p+n);routeShaderBytes()+=n;
+    }
+    static bool hasShader(uint64_t hash){std::lock_guard<std::mutex> lock(mutex());return shaders().count(hash)!=0;}
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t shader){
         if(!layout || !e || !n || n>32 || !gui(shader))return;std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i){if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -100,7 +112,19 @@ public:
     }
     void reset(){*this=GuiDrawSnapshot{};}
     size_t count()const{return draws.size();}
-    void capture(ID3D11DeviceContext* c,uint32_t f,uint64_t vs,uint64_t ps,char kind,UINT count,UINT instances,UINT start,int base,UINT firstInstance){
+    size_t routeCount()const{return routes.size();}
+    const char* routeStatus()const{return routeDeclines?"refused":routes.empty()?"not_observed":"discovered";}
+    bool routeNeeded()const{return !guiTargets.empty() && routes.size()<96;}
+    bool sourceResourceBound(ID3D11DeviceContext* c)const{
+        if(!c||guiTargets.empty())return false;
+        for(UINT i=0;i<16;++i){Ptr<ID3D11ShaderResourceView> view;c->PSGetShaderResources(i,1,&view);if(!view)continue;
+            Ptr<ID3D11Resource> resource;view->GetResource(&resource);
+            for(const auto& source:guiTargets)if(resource.Get()==source.Get())return true;
+        }
+        return false;
+    }
+    void noteRouteRefusal(){++routeDeclines;}
+    void capture(ID3D11DeviceContext* c,uint32_t f,uint32_t renderFrame,uint64_t vs,uint64_t ps,char kind,UINT count,UINT instances,UINT start,int base,UINT firstInstance){
         if(!gui(vs) || (frame && frame!=f) || (kind!='X' && kind!='I') || c->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
         Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> depth;c->OMGetRenderTargets(1,&rt,&depth);if(!rt)return;
         Ptr<ID3D11Resource> res;rt->GetResource(&res);Ptr<ID3D11Texture2D> target;if(FAILED(res.As(&target)))return;
@@ -108,7 +132,8 @@ public:
         // The square flight ladder and wide animation strip, recognized
         // together with the actual GUI VS. Capture-only shape selection.
         if(td.Width>2048 || td.Height>2048 || !(td.Width==td.Height || (td.Width>td.Height*3 && td.Width<td.Height*6)))return;
-        if(draws.size()>=512 || bytes>=budget){++declined;return;}frame=f;
+        if(draws.size()>=512 || bytes>=budget){++declined;return;}frame=f;sourceRenderFrame=renderFrame;
+        if(std::none_of(guiTargets.begin(),guiTargets.end(),[&](const Ptr<ID3D11Resource>& x){return x.Get()==res.Get();}))guiTargets.push_back(res);
         Ptr<ID3D11Device> dev;c->GetDevice(&dev);std::ostringstream s;
         s<<"{\"frame\":"<<f<<",\"vs\":\""<<std::hex<<vs<<"\",\"ps\":\""<<ps<<"\",\"target\":\""<<reinterpret_cast<uint64_t>(res.Get())<<std::dec<<"\",\"width\":"<<td.Width<<",\"height\":"<<td.Height<<",\"kind\":\""<<kind<<"\",\"count\":"<<count<<",\"instances\":"<<instances<<",\"start\":"<<start<<",\"base\":"<<base<<",\"first_instance\":"<<firstInstance;
         D3D11_RENDER_TARGET_VIEW_DESC targetView{};rt->GetDesc(&targetView);
@@ -141,20 +166,52 @@ public:
         for(UINT i=0;i<2;++i){Ptr<ID3D11SamplerState> sampler;c->PSGetSamplers(i,1,&sampler);D3D11_SAMPLER_DESC desc{};if(sampler)sampler->GetDesc(&desc);if(i)s<<',';s<<(sampler?words(desc):"null");}s<<"]}";
         draws.push_back({vs,ps,s.str()});
     }
+    void captureEyeCandidate(ID3D11DeviceContext* c,int eye,char kind,UINT count,UINT instances,UINT start,int base,UINT firstInstance,uint64_t vs,uint64_t ps,
+                             uint32_t sceneFrame,uint32_t renderFrame,uint32_t epoch,uint32_t coverageIndex,int scheduledIndex,uint32_t scheduledRenderFrame,uint64_t qpc){
+        if(!c||guiTargets.empty()||c->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+        if(routes.size()>=96||coverageIndex>=16){++routeDeclines;return;}
+        const unsigned eyeBucket=eye==0?0u:eye==1?1u:2u;
+        if(routeCounts[coverageIndex][eyeBucket]>=2){++routeDeclines;return;}
+        Ptr<ID3D11Device> dev;c->GetDevice(&dev);Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> depth;c->OMGetRenderTargets(1,&rt,&depth);if(!rt)return;
+        Ptr<ID3D11Resource> eyeResource;rt->GetResource(&eyeResource);bool matched=false;unsigned slotFound=0;uint64_t source=0;D3D11_SHADER_RESOURCE_VIEW_DESC sourceView{};
+        for(UINT i=0;i<16;++i){Ptr<ID3D11ShaderResourceView> view;c->PSGetShaderResources(i,1,&view);if(!view)continue;Ptr<ID3D11Resource> resource;view->GetResource(&resource);
+            for(const auto& gui:guiTargets)if(resource.Get()==gui.Get()){matched=true;slotFound=i;source=reinterpret_cast<uint64_t>(gui.Get());view->GetDesc(&sourceView);break;}if(matched)break;}
+        if(!matched)return;
+        D3D11_RENDER_TARGET_VIEW_DESC rv{};rt->GetDesc(&rv);Ptr<ID3D11Texture2D> eyeTexture;eyeResource.As(&eyeTexture);D3D11_TEXTURE2D_DESC eyeDesc{};if(eyeTexture)eyeTexture->GetDesc(&eyeDesc);std::ostringstream s;
+        UINT nvp=16,nsc=16;D3D11_VIEWPORT viewports[16]{};D3D11_RECT scissors[16]{};c->RSGetViewports(&nvp,viewports);c->RSGetScissorRects(&nsc,scissors);
+        s<<"{\"route\":\"source_resource_candidate\",\"source_resource\":\""<<std::hex<<source<<"\",\"eye_target_resource\":\""<<reinterpret_cast<uint64_t>(eyeResource.Get())<<"\",\"vs\":\""<<vs<<"\",\"ps\":\""<<ps<<std::dec<<"\",\"source_scene_frame\":"<<frame<<",\"source_render_frame\":"<<sourceRenderFrame<<",\"scene_frame\":"<<sceneFrame<<",\"render_frame\":"<<renderFrame<<",\"capture_epoch\":"<<epoch<<",\"coverage_index\":"<<coverageIndex<<",\"coverage_domain\":\"object_probe_ledger_offset\",\"scheduled_index\":"<<scheduledIndex<<",\"scheduled_index_valid\":"<<(scheduledIndex>=0?"true":"false")<<",\"scheduled_render_frame\":"<<scheduledRenderFrame<<",\"draw_qpc\":"<<qpc<<",\"candidate_eye\":"<<eye<<",\"ps_srv_slot\":"<<slotFound<<",\"ps_source_view\":"<<words(sourceView)<<",\"shader_bytecode\":{\"vs\":\""<<(hasShader(vs)?"available":"unavailable")<<"\",\"ps\":\""<<(hasShader(ps)?"available":"unavailable")<<"\"},\"eye_target_size\":["<<eyeDesc.Width<<','<<eyeDesc.Height<<"],\"eye_target_format\":"<<unsigned(eyeDesc.Format)<<",\"eye_rtv_view\":"<<words(rv)<<",\"viewports\":[";
+        for(UINT i=0;i<nvp&&i<16;++i){if(i)s<<',';s<<words(viewports[i]);}s<<"],\"scissors\":[";for(UINT i=0;i<nsc&&i<16;++i){if(i)s<<',';s<<words(scissors[i]);}
+        s<<"],\"kind\":\""<<kind<<"\",\"count\":"<<count<<",\"instances\":"<<instances<<",\"start\":"<<start<<",\"base\":"<<base<<",\"first_instance\":"<<firstInstance<<",\"native_part_join\":\"unmatched\",\"vs_constants\":[";
+        for(UINT i=0;i<4;++i){Ptr<ID3D11Buffer> cb;c->VSGetConstantBuffers(i,1,&cb);if(i)s<<',';s<<buffer(c,dev.Get(),cb.Get(),0,4096,0,"eye_vs_cb");}
+        s<<"],\"ps_constants\":[";for(UINT i=0;i<4;++i){Ptr<ID3D11Buffer> cb;c->PSGetConstantBuffers(i,1,&cb);if(i)s<<',';s<<buffer(c,dev.Get(),cb.Get(),0,4096,0,"eye_ps_cb");}s<<"],\"vs_srvs\":[";
+        for(UINT i=0;i<=33;++i){Ptr<ID3D11ShaderResourceView> view;c->VSGetShaderResources(i,1,&view);if(i)s<<',';if(!view){s<<"null";continue;}D3D11_SHADER_RESOURCE_VIEW_DESC vd{};view->GetDesc(&vd);Ptr<ID3D11Resource> resource;view->GetResource(&resource);Ptr<ID3D11Buffer> bufferResource;resource.As(&bufferResource);
+            int blob=-1;const char* payload="view_only";if(bufferResource&&(i==0||i==33)){blob=buffer(c,dev.Get(),bufferResource.Get(),0,65536,0,i==0?"eye_vs_t0":"eye_vs_t33");payload=blob>=0?"bounded_buffer":"unavailable_or_truncated";}
+            s<<"{\"slot\":"<<i<<",\"resource\":\""<<std::hex<<reinterpret_cast<uint64_t>(resource.Get())<<std::dec<<"\",\"view\":"<<words(vd)<<",\"blob\":"<<blob<<",\"payload\":\""<<payload<<"\"}";
+        }
+        s<<"],\"streams\":[";
+        for(UINT i=0;i<4;++i){Ptr<ID3D11Buffer> vb;UINT stride=0,offset=0;c->IAGetVertexBuffers(i,1,&vb,&stride,&offset);int blob=buffer(c,dev.Get(),vb.Get(),offset,65536,stride,"eye_vertex_stream");if(i)s<<',';s<<"{\"blob\":"<<blob<<",\"stride\":"<<stride<<",\"offset\":"<<offset<<'}';}
+        Ptr<ID3D11Buffer> ib;DXGI_FORMAT indexFormat{};UINT indexOffset=0;c->IAGetIndexBuffer(&ib,&indexFormat,&indexOffset);const UINT indexStride=indexFormat==DXGI_FORMAT_R16_UINT?2:indexFormat==DXGI_FORMAT_R32_UINT?4:0;
+        const uint64_t indexStart=uint64_t(indexOffset)+uint64_t(start)*indexStride;int indexBlob=indexStride&&indexStart<=UINT32_MAX?buffer(c,dev.Get(),ib.Get(),UINT(indexStart),UINT(std::min<uint64_t>(uint64_t(count)*indexStride,65536)),indexStride,"eye_indices"):-1;
+        s<<"],\"indices\":{\"blob\":"<<indexBlob<<",\"format\":"<<unsigned(indexFormat)<<",\"offset\":"<<indexOffset<<"}}";
+        routes.push_back({vs,ps,s.str()});
+        ++routeCounts[coverageIndex][eyeBucket];
+    }
     bool write(ID3D11DeviceContext* c,const wchar_t* path,const wchar_t* directory){
         FILE* file=nullptr;if(_wfopen_s(&file,path,L"wb") || !file)return false;bool ok=fwrite("EDVRGUI1",1,8,file)==8;
         auto u32=[&](uint32_t v){ok=fwrite(&v,4,1,file)==1 && ok;};auto text=[&](const std::string& s){u32(UINT(s.size()));ok=fwrite(s.data(),1,s.size(),file)==s.size()&&ok;};
-        u32(1);u32(UINT(draws.size()));u32(UINT(blobs.size()));u32(declined);u32(missingLayouts);
+        u32(2);u32(UINT(draws.size()));u32(UINT(blobs.size()));u32(declined);u32(missingLayouts);u32(UINT(routes.size()));
         for(const auto& d:draws)text(d.meta);
+        for(const auto& r:routes)text(r.meta);
         for(auto& b:blobs){text(b.meta);D3D11_MAPPED_SUBRESOURCE m{};bool mapped=SUCCEEDED(c->Map(b.stage.Get(),b.subresource,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m));bool valid=mapped && m.pData && (!b.row || m.RowPitch>=b.row);u32(valid?b.bytes:0);
             if(valid){if(!b.row)ok=fwrite(m.pData,1,b.bytes,file)==b.bytes&&ok;else for(UINT row=0;row<b.rows;++row)ok=fwrite(static_cast<const char*>(m.pData)+row*m.RowPitch,1,b.row,file)==b.row&&ok;}else ++failures;
             if(mapped)c->Unmap(b.stage.Get(),b.subresource);
         }
         std::lock_guard<std::mutex> lock(mutex());std::map<uint64_t,bool> seen;
-        for(const auto& d:draws)for(uint64_t hash:{d.vs,d.ps})if(seen.emplace(hash,true).second){auto it=shaders().find(hash);if(it==shaders().end()){++failures;continue;}
-            wchar_t name[MAX_PATH];_snwprintf_s(name,MAX_PATH,_TRUNCATE,L"%s\\%s_%016llX.dxbc",directory,gui(hash)?L"vs":L"ps",static_cast<unsigned long long>(hash));FILE* shader=nullptr;
-            if(_wfopen_s(&shader,name,L"wb") || !shader){++failures;continue;}bool wrote=fwrite(it->second.data(),1,it->second.size(),shader)==it->second.size();if(fclose(shader)!=0 || !wrote)++failures;
-        }
+        auto dump=[&](uint64_t hash,const wchar_t* stage){if(!hash||!seen.emplace(hash,true).second)return;auto it=shaders().find(hash);if(it==shaders().end())return;
+            wchar_t name[MAX_PATH];_snwprintf_s(name,MAX_PATH,_TRUNCATE,L"%s\\%s_%016llX.dxbc",directory,stage,static_cast<unsigned long long>(hash));FILE* shader=nullptr;
+            if(_wfopen_s(&shader,name,L"wb") || !shader){++failures;return;}bool wrote=fwrite(it->second.data(),1,it->second.size(),shader)==it->second.size();if(fclose(shader)!=0 || !wrote)++failures;};
+        for(const auto& d:draws){dump(d.vs,L"vs");dump(d.ps,L"ps");}
+        for(const auto& r:routes){dump(r.vs,L"vs");dump(r.ps,L"ps");}
         u32(failures);ok=!ferror(file)&&ok;return fclose(file)==0&&ok;
     }
 };

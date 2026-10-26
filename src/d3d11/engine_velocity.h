@@ -5,7 +5,7 @@
 // Exact per-pixel motion for the game's rigid movers from the engine's own
 // kinematic records, with no estimation anywhere:
 //
-//  1. EMIT (job threads). FUN_144312E00 builds each kinematic rig record's
+//  1. EMIT (job threads). FUN_144315A20 builds each kinematic rig record's
 //     0x150-byte pool record -- byte-for-byte the t33 record the vertex shader
 //     reads -- and appends it to the owner's node lists, from which the
 //     engine's copier fills the mapped pool. A bracket on that call (the
@@ -18,7 +18,7 @@
 //     validated pose, masked otherwise (engine_velocity_emit.h has the rules).
 //     The engine's own copy then carries it to the GPU: no slot map, no
 //     matching, no readback of write-combined memory.
-//     Primary rigid 42B4130 emissions use the same canonical history through
+//     Primary rigid 42B6D50 emissions use the same canonical history through
 //     an emission sink: native records stay unchanged. Verified CPU list
 //     relocation/upload joins certify only EDVR's private clone for patching.
 //  2. DRAW (render thread). The pool families' pixel shaders are substituted
@@ -436,6 +436,14 @@ uint64_t engineVelocitySourceFreeFrames();
 // depth is another, or the rows were not seen. Pure reads under the module's own lock: no GPU work, no allocation.
 bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth);
 bool engineVelocitySourceCameraRows(float (&rows)[6][4]);
+// F61 (TEMPORARY, the native on-foot rotation calibration): the same rows without the this-frame test, with the present frame they were named
+// in and the present frame now (the native on-foot frame boundary runs after the present frame has moved on, so it reads them one frame late).
+// False when nothing was named yet or the rows were not seen. A pure read under the module's lock: no GPU work, no allocation.
+bool engineVelocityLastSourceCameraRows(float (&rows)[6][4], uint32_t* frame, uint32_t* frameNow);
+// F45 (TEMPORARY, the native on-foot marker probe): rows 270..275 of `scene` (a scene constants buffer read from constant 0) as the watch last
+// saw them written at an Unmap, when a scene watch slot follows that buffer and its rows are known. False otherwise. A pure read under the
+// module's lock: no GPU work, nothing staged.
+bool engineVelocityShadowSceneRows(const ID3D11Buffer* scene, float (&rows)[6][4]);
 // The screen shader's panel counts without diagnostics: one present frame in
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on
 // the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).

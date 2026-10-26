@@ -2,26 +2,31 @@
 
 ## Status
 
-- State: full native Windows validation and packaging passed in run
-  `39134563542`; the downloaded receipt and all three ZIP checksums were
-  verified on the Linux device. GitHub CLI authentication is working.
-- Latest failed run: `38990816615`, source
-  `e700f005ef390e1c17c207f422c9118784209948`.
-- Actual failing gate: `flat_mono_resolve_shard2`, specifically the final
-  Python motion-fixture verifier. The C++ suites reported PASS.
-- Confirmed cause: separate `FlatDrawCapture` instances reused the same
-  timestamp/PID/per-instance serial directory. A production-header no-GPU
-  harness reproduced the collision; a process-wide atomic suffix fixes it.
-- Ruled-out pointer: the seven first-person `FAIL:` lines belong to mutation
-  children whose failures are required; their parent suite reports PASS.
-- Next release: tag the chosen version on clean `main`, let the Windows
-  workflow validate and package that tag, then create a reviewed draft from the
-  device. No validation gates are bypassed.
-- Initial proof `39133903189` was cancelled after local tests exposed an
-  annotated-tag selection edge case; the corrected run passed.
-- Release scope: create validated ZIP artifacts; release notes and draft
-  creation remain explicit device-side steps. No public release is requested
-  now.
+- State: current `main` is `de80be5d`. Prior full validation and packaging run
+  `39134563542` at `8d5d25c` remains valid prior proof; the flat draw collision
+  is resolved.
+- Native candidate run `39179472024` at `c4bf683a` passed all 46 heartbeat
+  checks, then stopped in `flat_temporal_test` after 73 of 176 jobs. Its only
+  failing assertion searched a source file for a literal LF newline.
+- Confirmed cause: `.gitattributes` omitted `*.inl` from its LF source rules. A
+  scratch checkout with `core.autocrlf=true` reproduced CRLF in the scanned
+  file and the failed match. Adding `*.inl text eol=lf` made all three inline
+  sources LF and the unchanged assertion matched in that same checkout.
+- The production guard and its ordering are present. Neither this line-ending
+  correction nor the prior heartbeat synchronization changes production logic
+  or weakens assertions. The exact new candidate still needs full native CI.
+- Prior heartbeat evidence: fixed 300 ms sampling failed with a temporary 700
+  ms hook delay; synchronized sampling passed and caught a write-after-close
+  mutant. Original failures and diagnostics are retained under
+  `.toolchains/windows/ci-39138326218/`; the next failure is under
+  `.toolchains/windows/ci-39179472024/`.
+- Next: validate the corrected commit and retain its verified artifact paths;
+  then install flat + XeSS on the Linux device without `--ini` and verify it.
+  Preserve the existing flat settings and device setup. No public release is
+  requested.
+- Prior resolved pointers: the flat capture collision and annotated-tag
+  selection edge case are documented below; neither explains the current H6
+  failure.
 
 ## October 18: evidence before the proving run
 
@@ -94,3 +99,48 @@ device; the Linux scripts retain executable ZIP attributes.
 Logs, receipt and proof packages are retained locally under the Git-ignored
 `.toolchains/windows/ci-39134563542/`. The proof tag exists only on the runner;
 no release version tag or public release was created.
+
+## October 18: heartbeat writer retry failure
+
+Current `main` at `de80be5d` failed native workflow run `39138326218` in H6's
+late-close assertion in `heartbeat_writer_test`; retry attempt 2 failed the
+same way at the same commit. One of 46 heartbeat checks failed in each run; the
+build stopped after 49 of 176 jobs had run. H5 scheduling was 821 ms on attempt
+1 and 829 ms on attempt 2. The downloaded diagnostics and failed logs are under
+`.toolchains/windows/ci-39138326218/`, including `failed-job.log` and
+`failed-attempt-2.log`.
+
+The fixture posted to the heartbeat, slept a fixed 300 ms, then asserted that
+there were no calls, no writes, and the writer was closed. Only the worker hook
+sets the closed flag. The heartbeat writer, its test, and `build.bat` are
+unchanged from the previously validated `8d5d25c` commit to `de80be5d`. The
+logs have no counters that reveal the observed fixture state, so they cannot
+prove that either native failure was only scheduling.
+
+A temporary rig delayed the hook by 700 ms: the old H6 check failed before the
+hook closed the writer. The candidate waits for the hook to finish and the
+writer to exit before checking the same no-call, zero-write, closed conditions.
+That delayed case passed with the candidate. With the inner close check removed
+from a temporary header, the same case failed as intended: one call and one
+write after close. The repository rig compiled with local MSVC and passed all
+46 checks under Wine; `mutants.py --self-test` passed its 25 source anchors.
+Production code is unchanged. Full native Windows validation of the candidate
+commit is still required before installing its artifacts for flat XeSS testing.
+
+## October 18: native checkout line endings
+
+Run `39179472024` passed the corrected heartbeat gate (`PASS: 46 heartbeat
+writer checks`) and stopped at the source-contract assertion in
+`flat_temporal_test.cpp:2883`. It searched `flat_forward_light_runtime.inl` in
+binary mode for `counts.add(flatcpu::kCopyGuardSkipped);` followed by an LF and
+`return;`. The production demand guard, skipped counter and return precede the
+actual output queries as expected. The other policy checks passed.
+
+Unlike `.cpp` and `.h`, `.inl` lacked an explicit LF rule. A scratch `git -c
+core.autocrlf=true checkout-index` produced 485 CRLF lines in the inline source
+while preserving LF in the test source; the exact literal needle did not match.
+Adding `*.inl text eol=lf` produced LF-only checkouts for all three tracked
+inline sources and made the unchanged needle match. The scratch proof is
+retained under `/tmp/edvr-line-proof-fixed-39179472024/`. No production source
+or test assertion was changed for this correction. Full native validation
+remains required before merge and installation.

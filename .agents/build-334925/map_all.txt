@@ -1,0 +1,232 @@
+﻿old EliteDangerous64-334473.exe: 301535 code units; new EliteDangerous64-334925.exe: 301531 code units; map built in 12s
+old RVA      new RVA      status      detail
+0x1F2410     0x1F2410     IDENTICAL   in-order
+0x30FCEA     0x30FCBA     RELOC-ONLY  in-order; 7 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs
+0x312520     0x3124F0     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4E0F60     0x4E0F00     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4E4730     0x4E46D0     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x4E4766     0x4E4706     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x4E477C     0x4E471C     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x4E47B1     0x4E4751     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x4E4970     0x4E4910     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 24 data refs, 0 image-base refs
+0x4E4BA0     0x4E4B40     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 8 data refs, 0 image-base refs
+0x4E4E50     0x4E4DF0     IDENTICAL   in-order
+0x4E5DA0     0x4E5D40     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x4E5DF3     0x4E5D93     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x4E6E40     0x4E6DE0     RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x4E71B6     0x4E7156     RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x4E71BC     0x4E715C     RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x4E71D0     0x4E7170     RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs
+0x4E7202     0x4E71A2     RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs
+0x4E720E     0x4E71AE     RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs
+0x4E8330     0x4E82D0     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4E8630     0x4E85D0     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 6 data refs, 0 image-base refs
+0x4E870F     0x4E86AF     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 6 data refs, 0 image-base refs
+0x4E87B0     0x4E8750     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4F3150     0x4F30F0     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4F4F70     0x4F4F10     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x51B7A0     0x51B740     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x522BB0     0x522B50     IDENTICAL   in-order
+0x529540     0x5294E0     IDENTICAL   in-order
+0x57A5C0     0x57A560     RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x58B2B0     0x58B250     RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x58DFD3     0x58DF73     IDENTICAL   in-order
+0x592360     0x592300     IDENTICAL   in-order
+0x594F73     0x594F13     IDENTICAL   in-order
+0x59500B     0x594FAB     IDENTICAL   in-order
+0x595141     0x5950E1     IDENTICAL   in-order
+0x5CB350     0x5CB2F0     IDENTICAL   in-order
+0x7E9EB0     0x7E9E50     IDENTICAL   in-order
+0x8BEA80     0x8BEA20     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D5400     0x8D53A0     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D546B     0x8D540B     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D5478     0x8D5418     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D5480     0x8D5420     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D5488     0x8D5428     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D5497     0x8D5437     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x8D549C     0x8D543C     RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0xF83690     0xF83630     IDENTICAL   in-order
+0xF8E100     0xF8E0A0     IDENTICAL   in-order
+0xFDEC10     0xFDEBB0     IDENTICAL   in-order
+0xFDEE10     0xFDEDB0     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0xFDEFB0     0xFDEF50     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0xFDF410     0xFDF3B0     IDENTICAL   in-order
+0x1072A80    0x1072A20    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x1079A90    0x1079A30    IDENTICAL   in-order
+0x108BA8C    0x108BA2C    IDENTICAL   in-order
+0x108BEE0    0x108BE80    IDENTICAL   in-order
+0x10902B0    0x1090250    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x1092240    0x10921E0    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x12C4D60    0x12C4CC0    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x12CBF20    0x12CBE80    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x12CC0C0    0x12CC020    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x12CC460    0x12CC3C0    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x19B4000    0x19B3F40    IDENTICAL   in-order
+0x19B4095    0x19B3FD5    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x19B4119    0x19B4059    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x2816CC6    0x2816C06    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x2816EE9    0x2816E29    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x281D319    0x281D259    RELOC-ONLY  in-order; 9 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x281E710    0x281E650    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x2843B00    0x2843A40    IDENTICAL   in-order
+0x28457F0    0x2845730    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x2858070    0x2857FB0    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x2864DA0    0x2864CE0    IDENTICAL   in-order
+0x2874350    0x2874290    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x2878E00    0x2878D40    IDENTICAL   in-order
+0x2DF3F60    0x2DF3EA0    RELOC-ONLY  in-order; 12 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x30BBC80    0x30BBBC0    IDENTICAL   in-order
+0x36846D0    0x3684630    IDENTICAL   in-order
+0x3699CA0    0x3699C00    IDENTICAL   in-order
+0x369F6C0    0x369F620    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x369FB8C    0x369FAEC    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x369FB91    0x369FAF1    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x36A3C50    0x36A3BB0    IDENTICAL   in-order
+0x3CBC0B0    0x3CBC010    IDENTICAL   in-order
+0x3DD8D00    0x3DD8C60    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x42B6C80    0x42B6BE0    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42B6DF0    0x42B6D50    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B6E1B    0x42B6D7B    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B6F9C    0x42B6EFC    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B6FAA    0x42B6F0A    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B6FAF    0x42B6F0F    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B7098    0x42B6FF8    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B70E0    0x42B7040    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42B70E9    0x42B7049    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42B7115    0x42B7075    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42B711C    0x42B707C    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42B7503    0x42B7463    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x42B7508    0x42B7468    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x42B7528    0x42B7488    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x42B7578    0x42B74D8    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B758D    0x42B74ED    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B764B    0x42B75AB    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B76A3    0x42B7603    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B76B4    0x42B7614    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B77DD    0x42B773D    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B77E1    0x42B7741    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7827    0x42B7787    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7845    0x42B77A5    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7856    0x42B77B6    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7B91    0x42B7AF1    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7B96    0x42B7AF6    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7CAB    0x42B7C0B    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B7CB7    0x42B7C17    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs
+0x42B8420    0x42B8380    IDENTICAL   in-order
+0x42E21F0    0x42E2150    IDENTICAL   in-order
+0x42E2210    0x42E2170    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x42E2600    0x42E2560    IDENTICAL   in-order
+0x4311CA0    0x4311C00    RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x4314D00    0x4314C60    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4315AC0    0x4315A20    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4315D65    0x4315CC5    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4315D6A    0x4315CCA    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4315E45    0x4315DA5    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x431DCE0    0x431DC40    IDENTICAL   in-order
+0x431DF00    0x431DE60    IDENTICAL   in-order
+0x431DF12    0x431DE72    IDENTICAL   in-order
+0x431DF1F    0x431DE7F    IDENTICAL   in-order
+0x4323040    0x4322FA0    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4324510    0x4324470    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x4324640    0x43245A0    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x432DFA0    0x432DF00    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x434FE44    0x434FDA4    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x434FE49    0x434FDA9    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4350A50    0x43509B0    IDENTICAL   in-order
+0x4351011    0x4350F71    IDENTICAL   in-order
+0x4351016    0x4350F76    IDENTICAL   in-order
+0x4351440    0x43513A0    IDENTICAL   in-order
+0x43F9C30    0x43F9B90    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x43F9F00    0x43F9E60    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs
+0x43FE680    0x43FE5E0    IDENTICAL   in-order
+0x4441580    0x44414E0    RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x4458D5D    0x4458CBD    RELOC-ONLY  in-order; 7 code refs exact, 0 code refs in span, 10 data refs, 0 image-base refs
+0x4458D87    0x4458CE7    RELOC-ONLY  in-order; 7 code refs exact, 0 code refs in span, 10 data refs, 0 image-base refs
+0x4554336    0x4554296    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x45547BD    0x455471D    RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs
+0x4570585    0x45704E5    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4573040    0x4572FA0    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x457323A    0x457319A    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs
+0x4573442    0x45733A2    RELOC-ONLY  in-order; 5 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x4573CC0    0x4573C20    IDENTICAL   in-order
+0x4573D45    0x4573CA5    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs
+0x47CA180    0x47CA0E0    IDENTICAL   in-order
+0x489CA34    0x489C994    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4C56CC0    0x4C56BA0    IDENTICAL   in-order
+0x4C847C0    0x4C846A0    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x4C847DC    0x4C846BC    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x4DB62E0    0x4DB62E0    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new
+0x4DE16A8    0x4DE16A8    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x4DE16AC    0x4DE16AC    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x4E27438    0x4E27438    XREF-BRACKET delta 0x0 from both neighbours; content: 27/32 bytes equal at new; vtable: 43 slots, 42 map to new code, 42 confirmed at new
+0x4E27440    0x4E27440    XREF-BRACKET delta 0x0 from both neighbours; content: 28/32 bytes equal at new; vtable: 42 slots, 41 map to new code, 41 confirmed at new
+0x4E27600    0x4E27600    XREF-BRACKET delta 0x0 from both neighbours; content: 27/32 bytes equal at new; vtable: 43 slots, 43 map to new code, 43 confirmed at new
+0x51275F8    0x51275F8    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 144 slots, 139 map to new code, 139 confirmed at new
+0x5127968    0x5127968    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 34 slots, 33 map to new code, 33 confirmed at new
+0x5180D40    0x5180D00    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 24 slots, 22 map to new code, 22 confirmed at new
+0x51890B0    0x5189070    XREF-EXACT  referenced from code in both builds; content: 28/32 bytes equal at new; vtable: 3 slots, 3 map to new code, 3 confirmed at new
+0x51890B8    0x5189078    XREF-EXACT  referenced from code in both builds; content: 30/32 bytes equal at new; vtable: 2 slots, 2 map to new code, 2 confirmed at new
+0x51893B0    0x5189370    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 15 slots, 13 map to new code, 13 confirmed at new
+0x5189A58    0x5189A18    XREF-EXACT  referenced from code in both builds; content: 28/32 bytes equal at new; vtable: 23 slots, 18 map to new code, 18 confirmed at new
+0x5189AD0    0x5189A90    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 8 slots, 5 map to new code, 5 confirmed at new
+0x518CF58    0x518CF18    XREF-EXACT  referenced from code in both builds; content: 30/32 bytes equal at new; vtable: 22 slots, 21 map to new code, 21 confirmed at new
+0x518CFC8    0x518CF88    XREF-EXACT  referenced from code in both builds; content: 26/32 bytes equal at new; vtable: 8 slots, 7 map to new code, 7 confirmed at new
+0x51FCB00    0x51FCAD0    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x52EB528    0x52EB4F8    XREF-BRACKET delta 0x-30 from both neighbours; content: 26/32 bytes equal at new; vtable: 59 slots, 54 map to new code, 54 confirmed at new
+0x52EC270    0x52EC240    XREF-BRACKET delta 0x-30 from both neighbours; content: 25/32 bytes equal at new; vtable: 256 slots+, 243 map to new code, 243 confirmed at new
+0x52EC278    0x52EC248    XREF-BRACKET delta 0x-30 from both neighbours; content: 26/32 bytes equal at new; vtable: 256 slots+, 243 map to new code, 243 confirmed at new
+0x52F5F44    0x52F5F14    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x530E530    0x530E500    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 149 slots, 145 map to new code, 145 confirmed at new
+0x5358518    0x53584E8    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 256 slots+, 242 map to new code, 242 confirmed at new
+0x5375548    0x5375518    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 34 slots, 32 map to new code, 32 confirmed at new
+0x553B860    0x553B830    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 69 slots, 66 map to new code, 66 confirmed at new
+0x553DAF8    0x553DAC8    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 34 slots, 32 map to new code, 32 confirmed at new
+0x553DF90    0x553DF60    XREF-EXACT  referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 39 slots, 36 map to new code, 36 confirmed at new
+0x5552030    0x5552000    XREF-BRACKET delta 0x-30 from both neighbours; content: 31/32 bytes equal at new
+0x5567338    0x5567308    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5567350    0x5567320    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x55A01B0    0x55A0180    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 130 slots, 116 map to new code, 115 confirmed at new, pointer search found 0x51809F8,0x5180D00,0x51907C8,0x55A0180
+0x5E73F7E    0x5E73F7E    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5E73F80    0x5E73F80    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5E73F90    0x5E73F90    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5E73F94    0x5E73F94    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5E73F98    0x5E73F98    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5E9F820    0x5E9F820    XREF-EXACT  referenced from code in both builds; content: 28/32 bytes equal at new
+0x5EA0C78    0x5EA0C78    XREF-EXACT  referenced from code in both builds; content: 27/32 bytes equal at new
+0x5EA63E9    0x5EA63E9    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x5F2A652    0x5F2A652    XREF-EXACT  referenced from code in both builds; content: zero fill (uninformative)
+0x60211F8    0x60211F8    XREF-EXACT  referenced from code in both builds; content: zero fill (uninformative)
+0x4E9F20     0x4E9EC0     IDENTICAL   in-order
+0x522C0B     0x522BAB     IDENTICAL   in-order
+0x522C7E     0x522C1E     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x595600     0x5955A0     IDENTICAL   in-order
+0xFDF1D0     0xFDF170     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x36846D5    0x3684635    IDENTICAL   in-order
+0x42B6DF5    0x42B6D55    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x42B70E5    0x42B7045    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x431DF0D    0x431DE6D    IDENTICAL   in-order
+0x431DF1C    0x431DE7C    IDENTICAL   in-order
+0x4351448    0x43513A8    IDENTICAL   in-order
+0x43516E0    0x4351640    RELOC-ONLY  in-order; 3 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x44587C0    0x4458720    RELOC-ONLY  in-order; 5 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4C847C5    0x4C846A5    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x50CB0D0    0x50CB0D0    XREF-EXACT  referenced from code in both builds; content: 32/32 bytes equal at new
+0x4E8356     0x4E82F6     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4E87BB     0x4E875B     RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4311CA0    0x4311C00    RELOC-ONLY  in-order; 6 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs
+0x4334000    0x4333F60    IDENTICAL   in-order
+0x4324640    0x43245A0    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4323040    0x4322FA0    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x42B70E0    0x42B7040    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+0x431DCE0    0x431DC40    IDENTICAL   in-order
+0x4314D00    0x4314C60    RELOC-ONLY  in-order; 0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x36A3C50    0x36A3BB0    IDENTICAL   in-order
+0x4350F0E    0x4350E6E    RELOC-ONLY  in-order; 2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4350F8F    0x4350EEF    IDENTICAL   in-order
+0x4C81B50    0x4C81A30    RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs
+0x4C86390    0x4C86270    IDENTICAL   in-order
+0x4350490    0x43503F0    IDENTICAL   in-order
+0x42B8330    0x42B8290    IDENTICAL   in-order
+0x4E3050     0x4E2FF0     RELOC-ONLY  in-order; 4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs
+0x4E2E30     0x4E2DD0     RELOC-ONLY  in-order; 1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs
+units: IDENTICAL 121390, RELOC-ONLY 172178, CHANGED 1077, AMBIGUOUS 5080, NOT-FOUND 1810; new-only 2865

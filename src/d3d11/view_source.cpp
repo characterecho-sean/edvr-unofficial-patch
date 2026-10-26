@@ -1,8 +1,7 @@
-// The view the aim comes from (view_source.h; TEMPORARY). In order: the explorer cam's free camera, from its activity's world pose while its
-// placement stands (explorer_cam.cpp, explorerCamWorldPose); seated, the rows the temporal pass chose for the frame (the game's view-to-world
-// [R | c], view_source_core.h), which exist only after the eye treat, so the admission store often finds none; otherwise the origin: the
-// render context's view 0 origin (ctx + 0x40 + 0x540), with no pose. On foot without a placement no pose is read, because the chosen rows
-// are not the on-foot camera and the on-foot camera's rows are not read yet. Every result names its reason, so a log says why there is no aim.
+// The view the aim comes from (view_source.h; TEMPORARY). In order: seated, the rows the temporal pass chose for the frame (the game's
+// view-to-world [R | c], view_source_core.h), which exist only after the eye treat, so the admission store often finds none; otherwise the
+// origin: the render context's view 0 origin (ctx + 0x40 + 0x540), with no pose. On foot no pose is read, because the chosen rows are not
+// the on-foot camera and the on-foot camera's rows are not read yet. Every result names its reason, so a log says why there is no aim.
 #include "view_source.h"
 
 #include <windows.h>
@@ -48,9 +47,6 @@ bool resolveView(uintptr_t ctx, Resolved* out) noexcept {
     *out = Resolved{};
     out->originOk = ctx != 0 && readMem(out->origin, ctx + kCtxView0 + kViewOrigin, sizeof(out->origin));
 
-    // The explorer cam is not read by the product: the station releases while it is on (optimized_station.cpp).
-    const bool explorerPose = false;
-    const bool explorerOn = false;
     const bool foot = onFootNow();
 
     // 2. Seated: the rows the temporal pass chose for this frame. They exist only after the eye treat, so a call made before it finds none.
@@ -69,14 +65,14 @@ bool resolveView(uintptr_t ctx, Resolved* out) noexcept {
         }
     }
 
-    const bool poseOk = explorerPose || rowsOk;
-    out->source = chooseSource(explorerPose, foot, poseOk);
+    const bool poseOk = rowsOk;
+    out->source = chooseSource(foot, poseOk);
     out->poseOk = poseOk;
     if (rowsOk) {
         out->pose = rowPose;
         out->reason = "eye rows: the chosen rows of this frame";
     } else if (foot) {
-        out->reason = "on foot without an explorer cam placement: the on-foot camera's rows are not read yet";
+        out->reason = "on foot: the on-foot camera's rows are not read yet";
     } else {
         out->reason = rowsReason;
     }

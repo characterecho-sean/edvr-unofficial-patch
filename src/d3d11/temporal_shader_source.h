@@ -29,8 +29,8 @@ RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, 
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
 Texture2D<float> ZP : register(t3);      // last frame's ZC; holoJitter.w validates it
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
-Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
-Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
+Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value; probe.w bit 64 = not bound, not fetched (zSceneAt)
+Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws; probe.w bit 256 = not bound, not fetched (zSceneAt; before 319c1c5a the bit was per-object motion's)
 Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha is coverage, not opacity
 // t9..t11 were the terrain patch index, its depth and its transform records (retired 2026-10-01: terrain takes the camera's motion).
 Texture2D<float2> HC : register(t12);
@@ -40,6 +40,11 @@ StructuredBuffer<HoloRecord> HR : register(t13);
 // the outputs of this one, with no records bound, byte for byte to the other's.
 #ifndef EDVR_CELESTIAL
 #define EDVR_CELESTIAL 1
+#endif
+// EDVR_MAIN_DEPTH_TILE 0 compiles main's 3x3 depth fetch as it was before its group tile (fetchHistoryT): the private UI
+// depth rig (main_depth_tile_test.h) builds it and holds every output of the production main to it, byte for byte.
+#ifndef EDVR_MAIN_DEPTH_TILE
+#define EDVR_MAIN_DEPTH_TILE 1
 #endif
 )HLSL"
 R"HLSL(
@@ -89,7 +94,7 @@ float3 engineTurn(float4 q, float3 v) {
     return (2.0 * q.w * q.w - 1.0) * v + 2.0 * dot(q.xyz, v) * q.xyz + 2.0 * q.w * cross(q.xyz, v);
 }
 // The marker's stamp-free hash: the two pose blocks alone (the first ten
-// words of the marker hash; the stale-stamp search below seeds from it).
+// words of the marker hash; the stale-stamp inverse below starts from it).
 uint engineKindHash(EnginePoolRecord r) {
     uint words[10] = {r.data[1].x, r.data[1].y, r.data[1].z, r.data[0].z, r.data[0].w,
                       r.data[18].y, r.data[18].z, r.data[18].w, r.data[19].z, r.data[19].w};
@@ -117,21 +122,35 @@ uint engineRecordKind(EnginePoolRecord r, uint token) {
 }
 // A marker that did not match this frame's token may still be a rig record
 // stamped within the last 64 frames (the emit table and census horizon): the
-// cull case, where the record kept an older frame's pose pair. One FNV round
-// per frame of age, seeded from the stamp-free hash -- paid only by pixels
-// whose fresh check failed. 6 STALE STAMP: a joined marker from an older
+// cull case, where the record kept an older frame's pose pair. Each hash round
+// is invertible (the XOR, the odd multiply, the xorshift), so each tag's one
+// matching stamp is recovered directly from the marker and the window test is
+// a compare on its age -- no loop, paid only by pixels whose fresh check
+// failed. When both tags land inside the window the smaller age wins; the two
+// ages can never be equal. 6 STALE STAMP: a joined marker from an older
 // frame -- its pose pair replays a phantom delta, so the camera term stands
 // (2026-09-25, the coriolis station hull); 2: an older masked marker keeps no
 // history, as masked always did; 3: not a rig record (or older than the
 // window -- still the camera term). A garbage marker false-matches a frame in
-// the window with probability ~64 * 2^-32.
+// the window with probability ~128 * 2^-32 (64 ages for each of the two tags).
+// engineStampAge undoes one round, last step first: the xorshift (y ^ y >> 13
+// ^ y >> 26, the right-hand y the ORIGINAL), the multiply (0x359C449B is the
+// inverse of 0x01000193 mod 2^32), the XOR with the stamp-free hash -- the
+// stamp the marker would have carried, returned as its age (token - stamp,
+// mod 2^32).
+uint engineStampAge(uint h, uint marker, uint tag, uint token) {
+    uint y = marker ^ tag;
+    y ^= (y >> 13) ^ (y >> 26);
+    return token - ((y * 0x359C449Bu) ^ h);
+}
 uint engineStaleStampKind(EnginePoolRecord r, uint token) {
     const uint h = engineKindHash(r);
-    [loop] for (uint age = 1; age <= 64; ++age) {
-        uint hs = (h ^ (token - age)) * 0x01000193u; hs ^= hs >> 13;
-        if (r.data[18].x == (0x7FC0ED01u ^ hs)) return 6u;
-        if (r.data[18].x == (0x7FC0ED02u ^ hs)) return 2u;
-    }
+    // age - 1, so ages 1..64 are exactly the values below 64 (age 0, the fresh
+    // stamp, and every age past the window wrap or land above it).
+    const uint joined = engineStampAge(h, r.data[18].x, 0x7FC0ED01u, token) - 1u;
+    const uint masked = engineStampAge(h, r.data[18].x, 0x7FC0ED02u, token) - 1u;
+    if (joined < 64u && joined < masked) return 6u;
+    if (masked < 64u) return 2u;
     return 3u;
 }
 // Did the record's pose change between the two blocks (scale, quaternion,
@@ -305,7 +324,7 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -380,9 +399,21 @@ R"HLSL(
 // copy is seeded once per eye/frame; reading the latest scene here also
 // lets later nearer geometry win. The game's live depth is never modified
 // by these coverage passes. Reversed-Z; unbound layer SRVs read far (zero).
+// An absent layer is not fetched: probe.w bit 64 says t6 (the smoke's depth)
+// is not bound, bit 256 that t7 (the private UI depth) is not, read off the
+// very views the dispatch binds (temporal_pass.cpp). A fetch from a null view
+// returns +0.0 and costs the pass on an RTX 5090 (ui_resolve.h: 0.04 ms an eye
+// per null 9-tap input), and the trail's smoke is absent on most frames. The
+// absent operand is that same +0.0, so the max chain and its result are the
+// fetch's to the bit (NaN, -0, denormals and negatives included); a clear bit
+// -- a rig, or a caller that does not say -- fetches as it always did.
 float zSceneAt(int2 q) {
     if((uint(probe.w+.5)&32u)!=0u) { float4 s=Screen.Load(int3(q,0));if(s.w>0)return s.z; }
-    return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0)));
+    float z = Z.Load(int3(q, 0)), zs = 0.0, zu = 0.0;   // what a null view returns: +0.0
+    [branch] if ((uint(probe.w + 0.5) & 64u) == 0u) zs = ZS.Load(int3(q, 0));
+    z = max(z, zs);
+    [branch] if ((uint(probe.w + 0.5) & 256u) == 0u) zu = ZUI.Load(int3(q, 0));
+    return max(z, zu);
 }
 float zAt(int2 q) { return zSceneAt(q); }
 // The interface's pixel, by ui_depth's coverage mask when it is bound
@@ -677,6 +708,16 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
 }
 )HLSL"
 R"HLSL(
+#if EDVR_MAIN_DEPTH_TILE
+// main's tile of this frame's scene depth: the group's 8x8 with a one-texel
+// apron, entry (x, y) = zSceneAt at the group's origin + (x - 1, y - 1),
+// clamped to the image as the 3x3 below clamps, filled at the top of main()
+// whenever the 3x3 can run. fetchHistoryT's 3x3 reads it where main set
+// gMainDepthTile; any other entry (a rig's) never sets it and fetches as before.
+groupshared float mainDepthTile[100];
+static bool gMainDepthTile = false;
+static int2 gMainDepthTileOrigin = int2(0, 0);   // the group's first pixel (main sets it)
+#endif
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres -- 0 when the pixel took no real depth (the far plane, no
 // depth bound).
@@ -724,8 +765,20 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         float zr = 0.0;
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
+#if EDVR_MAIN_DEPTH_TILE
+                // The same texel from main's tile: clamp(p + o) is the entry
+                // (p - origin + o + 1), filled as clamp(origin + entry - 1).
+                float zs;
+                if (gMainDepthTile) {
+                    const int2 t = int2(p) - gMainDepthTileOrigin + int2(ox, oy) + 1;
+                    zs = mainDepthTile[t.y * 10 + t.x];
+                } else {
+                    zs = zSceneAt(region.xy + clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1));
+                }
+#else
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
                 float zs = zSceneAt(region.xy + q);
+#endif
                 zr = max(zr, zs);
                 if (zs > 0.0) ++depthN;
             }
@@ -972,10 +1025,16 @@ R"HLSL(
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
         float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
+        // F108: an in-world screen's coverage carries bit 2 on the first frame
+        // of an interface edit (world_screen_coverage.h): the history there is
+        // the old content, so it is invalidated like a hidden background and
+        // NVIDIA accumulates the new content afresh while the UI resolve
+        // rebuilds it. A screen at rest (2) keeps its history.
+        bool freshEdit = kind == 2u && (mark & 4u) != 0u;
         // A masked engine pixel invalidates NVIDIA's history lookup the way a
         // hidden background does (modern presets honour only this), and sets
         // the reactive mask for the presets and FSR that read it.
-        bool hidden = engineMasked || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
+        bool hidden = engineMasked || freshEdit || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
@@ -999,7 +1058,7 @@ R"HLSL(
 #endif
 )HLSL"
 R"HLSL(
-        MK[id.xy] = engineMasked ? 1.0 : max(adaptive, ui);
+        MK[id.xy] = (engineMasked || freshEdit) ? 1.0 : max(adaptive, ui);
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -1104,8 +1163,32 @@ R"HLSL(
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+#if EDVR_MAIN_DEPTH_TILE
+    // The history fetch's 3x3 of the scene depth, once a group: 100 fetches
+    // where the pixels' own 3x3s were 576 (and twice that again for the
+    // instrument's depth candidates). Filled whenever fetchHistoryT can run
+    // its 3x3, by the constants alone (the same for every group): a history
+    // to blend, depth bound, and the head's depth term or the world split
+    // (its useDepth || worldOn from main's call), or, in the instrument, a
+    // depth candidate (1 or 3). Then whatever the group's pixels do, the 3x3
+    // never reads an entry it did not write; threads past the image fill
+    // clamped entries. On a history reset or with no depth nothing is
+    // fetched. The barrier stays outside the branch, met by every thread.
+    gMainDepthTile = true;
+    gMainDepthTileOrigin = int2(id.xy) - int2(gi & 7u, gi >> 3u);
+    bool depthTileRead = tvUsed.w != 0.0 || (tvCam.w != 0.0 && split.x > 0.0);
+#if EDVR_TEMPORAL_DIAGNOSTICS
+    depthTileRead = depthTileRead || (candMask & 10) != 0;
+#endif
+    [branch] if (haveHistory != 0 && knobs.y != 0.0 && depthTileRead) {
+        for (uint tk = gi; tk < 100u; tk += 64u)
+            mainDepthTile[tk] = zSceneAt(region.xy + clamp(gMainDepthTileOrigin + int2(tk % 10u, tk / 10u) - 1, int2(0, 0), size - 1));
+    }
+#endif
 #if EDVR_TEMPORAL_DIAGNOSTICS
     if (gi < 48) gCount[gi] = 0;
+#endif
+#if EDVR_TEMPORAL_DIAGNOSTICS || EDVR_MAIN_DEPTH_TILE
     GroupMemoryBarrierWithGroupSync();
 #endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};

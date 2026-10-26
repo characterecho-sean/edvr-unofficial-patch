@@ -28,6 +28,7 @@
 #include "flat_light_payload_capture_tests.h"
 #include "flat_forward_light_tests.h"
 #include "flat_forward_light_cache_tests.h"
+#include "flat_issue_epoch_gate_tests.h"
 #include "flat_forward_watch_tests.h"
 #include "flat_texture_description_tests.h"
 #include "flat_forward_light_integration_tests.h"
@@ -50,8 +51,12 @@
 #include "flat_deferred_camera_tests.h"
 #include "flat_deferred_failure_capture_tests.h"
 #include "flat_deferred_failure_payload_tests.h"
+#include "flat_deferred_witness_tests.h"
+#include "flat_deferred_empty_gbuffer_tests.h"
 #include "flat_copy_structure_tests.h"
 #include "flat_copy_weapon_tests.h"
+#include "flat_noscene_spatial_tests.h"
+#include "flat_camera_spatial_tests.h"
 #include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "flat_no_candidate_tests.h"
@@ -61,6 +66,7 @@
 #include "flat_sibling_policy_tests.h"
 #include "flat_shadow_model_tests.h"
 #include "flat_log_line_tests.h"
+#include "flat_history_depth_tests.h"
 #include "flat_owner_gate_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
@@ -1346,18 +1352,21 @@ void flatRuntimeImageCopyTests() {
           "unrecognized depthless HDR shader pair remains refused by ordinary HDR rules");
 }
 
-void flatRuntimeMenuCopyTests() {
+// The menu copy (DEF19B03/DED87960, dof=false) and the depth-of-field composite (20F383BB/BF2302BC, dof=true) are the same shape to the
+// reducer: a depthless writer of the tone's input that reads a verified scene HDR, whose depth and camera the output inherits. The
+// composite is not the menu's static-scene policy (menuInherited stays false) and a compute write into its output invalidates it.
+static void flatRuntimeInheritedCopyTests(bool dof) {
     using namespace edvr;
     enum Scenario { Valid, CopyCameraUnused, PreCopySourceCompute, PostCopyDestinationCompute,
         SourceDepth, SourceViewport, SourceStale, SourceLayout,
         SourceCameraChange,
         SourceExplicitWrite, MissingSource, MissingCamera, WrongFormat, Unverified,
         WrongPair, Alias, PriorDestinationWrite, PriorDestinationBad, PriorAndSourceBad };
-    auto replay = [](Scenario scenario) {
+    auto replay = [dof](Scenario scenario) {
         MonoFixture fixture;
         FlatContractRecord menuCopy{};
         fixture.fill(menuCopy, kFlatContractScreen, 0x2600, 26, 500, 500, 1,
-            0xDEF19B035D5EDEDCull, 0xDED8796049C7BB4Aull, 0, 0, false);
+            dof ? 0x20F383BBAC05C031ull : 0xDEF19B035D5EDEDCull, dof ? 0xBF2302BCC7B434DBull : 0xDED8796049C7BB4Aull, 0, 0, false);
         menuCopy.key.depth = menuCopy.key.dsv = nullptr;
         menuCopy.key.depthWidth = menuCopy.key.depthHeight = menuCopy.key.depthFormat = 0;
         menuCopy.key.srvView[0] = MonoFixture::token(0x2802);
@@ -1412,7 +1421,9 @@ void flatRuntimeMenuCopyTests() {
                 d.key.b1 = MonoFixture::token(0xBAAD); d.key.camera = d.camera;
                 d.key.cameraHash = 0xBAD; d.key.writeEpoch = 0;
             }
-            d.menuHdrCopyVerified = events[i].r == &menuCopy && scenario != Unverified;
+            const bool verified = events[i].r == &menuCopy && scenario != Unverified;
+            d.menuHdrCopyVerified = !dof && verified;
+            d.dofCompositeVerified = dof && verified;
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
             d.instances = r.firstInstances;
             if (scenario == SourceExplicitWrite && events[i].r == &menuCopy)
@@ -1425,6 +1436,8 @@ void flatRuntimeMenuCopyTests() {
         }
         return std::make_pair(std::move(prefix), selected);
     };
+    const auto accepted = [dof](const FlatRuntimePrefix& p) { return dof ? p.dofCompositesAccepted : p.menuCopiesAccepted; };
+    const auto refused = [dof](const FlatRuntimePrefix& p) { return dof ? p.dofCompositesRefused : p.menuCopiesRefused; };
     MonoFixture baseline;
     for (Scenario s : {Valid, CopyCameraUnused, PreCopySourceCompute}) {
         auto result = replay(s);
@@ -1433,12 +1446,12 @@ void flatRuntimeMenuCopyTests() {
               result.second.sceneConstants == MonoFixture::token(0xB100) &&
               result.second.cameraHash == baseline.world[19].key.cameraHash &&
               std::memcmp(result.second.camera, baseline.rows, sizeof(result.second.camera)) == 0 &&
-              result.first->menuCopiesAccepted == 1 && result.first->menuCopiesRefused == 0,
+              accepted(*result.first) == 1 && refused(*result.first) == 0,
               "verified menu copy transfers current scene lineage independently of copy b1");
         // The menu-scoped stale-slot policy asks exactly this: the selected HDR is the copy's inherited
         // destination. The copy's SOURCE (0x2800, an ordinary scene HDR) and no pointer at all are not.
-        check(flatFrameThroughMenuCopy(*result.first, result.second.hdr),
-              "a frame selected through a verified menu copy qualifies for the menu's stale-slot policy");
+        check(flatFrameThroughMenuCopy(*result.first, result.second.hdr) == !dof,
+              "a frame selected through a verified menu copy qualifies for the menu's stale-slot policy, and one through the depth-of-field composite does not");
         check(!flatFrameThroughMenuCopy(*result.first, MonoFixture::token(0x2800)) &&
               !flatFrameThroughMenuCopy(*result.first, nullptr),
               "the copy's source HDR and a null HDR do not qualify: it is the inherited destination that does");
@@ -1448,8 +1461,8 @@ void flatRuntimeMenuCopyTests() {
                        MissingSource, MissingCamera, WrongFormat, Unverified, Alias,
                        PriorDestinationWrite, PriorDestinationBad, PriorAndSourceBad}) {
         auto result = replay(s);
-        check(!result.second.selected() && result.first->menuCopiesAccepted == 0 &&
-              result.first->menuCopiesRefused == 1 &&
+        check(!result.second.selected() && accepted(*result.first) == 0 &&
+              refused(*result.first) == 1 &&
               result.second.reason == FlatMonoReason::ConflictingHdr &&
               result.first->selectedConflict.cause != FlatRuntimeConflict::None,
               "menu copy refuses invalid source, prior destination, alias and unverified views");
@@ -1458,7 +1471,7 @@ void flatRuntimeMenuCopyTests() {
               "a refused menu copy never qualifies a frame for the menu's stale-slot policy");
     }
     auto overwritten = replay(PostCopyDestinationCompute);
-    check(!overwritten.second.selected() && overwritten.first->menuCopiesAccepted == 1 &&
+    check(!overwritten.second.selected() && accepted(*overwritten.first) == 1 &&
           overwritten.first->selectedConflict.cause == FlatRuntimeConflict::ExplicitWrite,
           "compute overwrite after accepted menu copy invalidates inherited HDR before tone");
     check(!flatFrameThroughMenuCopy(*overwritten.first, overwritten.second.hdr),
@@ -1468,16 +1481,18 @@ void flatRuntimeMenuCopyTests() {
           depth.first->selectedConflict.current.dsv == MonoFixture::token(0xDEAD),
           "menu copy reports original source depth witness");
     auto absent = replay(MissingSource);
-    check(absent.first->selectedConflict.cause == FlatRuntimeConflict::MenuCopySource,
+    check(absent.first->selectedConflict.cause == (dof ? FlatRuntimeConflict::DofCompositeSource : FlatRuntimeConflict::MenuCopySource),
           "untracked menu copy source is visible as a specific HDR conflict");
     auto prior = replay(PriorAndSourceBad);
     check(prior.first->selectedConflict.cause == FlatRuntimeConflict::Viewport &&
           prior.first->selectedConflict.current.viewport[0] == 1,
           "prior destination conflict wins over later invalid source");
     auto wrong = replay(WrongPair);
-    check(!wrong.second.selected() && !wrong.first->menuCopiesAccepted && !wrong.first->menuCopiesRefused,
+    check(!wrong.second.selected() && !accepted(*wrong.first) && !refused(*wrong.first),
           "unknown depthless shader pair does not enter menu copy path");
 }
+void flatRuntimeMenuCopyTests() { flatRuntimeInheritedCopyTests(false); }
+void flatRuntimeDofCompositeTests() { flatRuntimeInheritedCopyTests(true); }
 
 void testFrameContractTrace() {
     using namespace edvr;
@@ -2914,7 +2929,7 @@ void testFlatCpuWiring() {
     check(runtimeCpp.find("flatcpu::formatCopyWindow(window,frame,&lines);")!=std::string::npos&&
           runtimeCpp.find("flatcpu::formatDrawSplit(window, splitLine, sizeof splitLine);")!=std::string::npos&&
           runtimeCpp.find("flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));")!=std::string::npos&&
-          count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==4,
+          count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==5,
           "same completed window emits the partition and capture/filter scopes respect their work gates");
     const auto beginAt=runtimeCpp.find("void FlatRuntimeDrawScope::beginActualDraw(");
     const auto endAt=runtimeCpp.find("void FlatRuntimeDrawScope::endActualDraw()",beginAt);
@@ -3525,7 +3540,7 @@ void testFlatOverlayMutationWiring() {
     };
     check(clearTyped(rtvClear) &&
           written.find("FlatMutationDetails::named(provenance,entry)")!=std::string::npos &&
-          written.find("flatRuntimeWritten(s.prefix,res);")!=std::string::npos &&
+          written.find("flatRuntimeWritten(s.prefix,res,constantFill);")!=std::string::npos &&
           written.find("flatHdrObserveExplicitWrite(s.hdr,res);")!=std::string::npos &&
           written.find("s.cameras.invalidate(*c);")!=std::string::npos &&
           written.find("s.projection->invalidate(res);")!=std::string::npos &&
@@ -4071,6 +4086,7 @@ int main(int argc, char** argv) {
     failures += light_payload_test::run();
     failures += forward_light_test::run();
     failures += forward_light_cache_test::run();
+    failures += issue_epoch_gate_test::run();
     failures += forward_watch_test::run();
     failures += texture_description_test::run();
     failures += forward_light_integration_test::run();
@@ -4093,8 +4109,11 @@ int main(int argc, char** argv) {
     check(deferred_camera_test::run() == 0, "actual deferred HDR camera proof");
     check(flatDeferredFailureCaptureTests() == 0, "completed failure-frame diagnostic snapshot");
     failures += deferred_failure_payload_test::run();
+    failures += deferred_witness_test::run();
+    failures += deferred_empty_gbuffer_test::run();
     check(laser_scene_tone_test::run() == 0, "qualified laser scene tone preserves guarded HDR lineage");
     flatRuntimeMenuCopyTests();
+    flatRuntimeDofCompositeTests();
     testFrameContractTrace();
     testFrameContractCorpus();
     testFrameContractOutcomes();
@@ -4131,6 +4150,8 @@ int main(int argc, char** argv) {
     failures += flatCopyStructureTests();
     failures += flatCopyWeaponTests();
     failures += flatCopyWeaponWiringTests();
+    failures += flatNoSceneSpatialTests();
+    failures += flatCameraSpatialTests();
     failures += flatCoveredDrawWiringTests();
     failures += flatHdrCrumbTests();
     failures += flatHdrCrumbWiringTests();
@@ -4149,6 +4170,7 @@ int main(int argc, char** argv) {
     failures += flatShadowAccumulateTests();
     failures += flatShadowWiringTests();
     failures += flatLogLineTests();
+    failures += flatHistoryDepthTests();
     flat_discovery_policy_tests::run(check);
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");

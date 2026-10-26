@@ -111,5 +111,78 @@ bool hudFrame(ID3D11DeviceContext* ctx, uint64_t seq, const float ldr[4], const 
     return true;
 }
 
+bool failedCoverageRetiresWithoutPublishing() {
+    Eye& e = g_eye[0];
+    const uint64_t oldSeq = e.hdrSeq, oldToneSeq = e.hdrToneSeq;
+    const uint32_t oldDraws = e.hdrDraws, oldMiss = e.hdrMissStreak;
+    const uint64_t oldLost = g_win.hdrLost;
+    e.hdrSeq = 10187;
+    e.hdrToneSeq = 10186;
+    e.hdrDraws = 13;
+    e.hdrMissStreak = 1;
+    retireFailedCrispCoverage(e, 10188);  // another frame must not retire this one
+    const bool wrongFrameUntouched = e.hdrDraws == 13 && e.hdrToneSeq == 10186 &&
+        e.hdrMissStreak == 1 && g_win.hdrLost == oldLost;
+    retireFailedCrispCoverage(e, 10187);
+    const bool retired = e.hdrDraws == 0 && e.hdrToneSeq == 10186 &&
+        e.hdrMissStreak == 0 && g_win.hdrLost == oldLost + 1;
+    retireFailedCrispCoverage(e, 10187);  // repeated cleanup must not count twice
+    const bool once = g_win.hdrLost == oldLost + 1;
+    e.hdrSeq = oldSeq;
+    e.hdrToneSeq = oldToneSeq;
+    e.hdrDraws = oldDraws;
+    e.hdrMissStreak = oldMiss;
+    g_win.hdrLost = oldLost;
+    return wrongFrameUntouched && retired && once;
+}
+
+bool missingConsumerLeavesCurrentDrawStock(ID3D11DeviceContext* ctx) {
+    if (!ctx) return false;
+    Eye& e = g_eye[0];
+    ID3D11BlendState* blend = rgbOnlyBlend(ctx);
+    if (!blend || !e.rtv || !e.hdrRtv || g_crispStoodDown) return false;
+    UiBlendRt game{}, converted{};
+    const UiBlendShape shape = shapeOf(blend, &game);
+    if (!uiLayerConvertBlend(game, &converted)) return false;
+    ID3D11RenderTargetView* stock = e.rtv.Get();
+    ctx->OMSetRenderTargets(1, &stock, nullptr);
+    ctx->OMSetBlendState(blend, nullptr, 0xffffffffu);
+    const ULONG before = blend->AddRef(); blend->Release();
+
+    g_draw = Draw{};
+    g_draw.decided = true;
+    g_draw.eye = 0;
+    g_draw.hdr = true;
+    g_draw.seq = 41;
+    g_draw.shape = shape;
+    e.hdrSeq = 40;
+    e.hdrToneSeq = 39;
+    e.hdrDraws = 1;
+    const uint32_t missLimit = runtimeFlatProfile() ? 1u : kCrispHdrMissFrames;
+    e.hdrMissStreak = missLimit - 1;
+    const uint64_t lostBefore = g_win.hdrLost;
+    const uint64_t refusedBefore = g_win.refusedAtIssue;
+    const bool taken = beginInner(ctx, 0);
+
+    ID3D11RenderTargetView* bound = nullptr;
+    ctx->OMGetRenderTargets(1, &bound, nullptr);
+    const bool stockStillBound = bound == stock;
+    if (bound) bound->Release();
+    ID3D11BlendState* boundBlend = nullptr;
+    FLOAT factor[4]{}; UINT sampleMask = 0;
+    ctx->OMGetBlendState(&boundBlend, factor, &sampleMask);
+    const bool blendStillBound = boundBlend == blend;
+    if (boundBlend) boundBlend->Release();
+    const ULONG after = blend->AddRef(); blend->Release();
+    const bool ok = !taken && stockStillBound && blendStillBound && before == after &&
+        !g_draw.active && !g_draw.saved && !g_draw.blend &&
+        g_crispStoodDown && e.hdrSeq == 40 && e.hdrDraws == 0 &&
+        e.hdrMissStreak == missLimit && g_win.hdrLost == lostBefore + 1 &&
+        g_win.refusedAtIssue == refusedBefore + 1;
+    ctx->ClearState();
+    g_draw = Draw{};
+    return ok;
+}
+
 }  // namespace devtest
 }  // namespace edvr

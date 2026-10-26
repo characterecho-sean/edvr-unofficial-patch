@@ -3,21 +3,24 @@
 
 Maintainer's rule (2026-10-02): every release's notes carry a Thanks section
 built from sources and not from memory. It NAMES, by public GitHub handle,
-only the authors of pull requests merged in the release; everyone who opened
-an issue or sent logs gets one general line and is not named. This tool reads
-the commits, the pull requests, the issues and the docs diff of a range and
-lists WHO appears WHERE (the full report keeps every reporter and commenter as
-reference data). It never writes a description of anyone's contribution: a
-human writes the sentence.
+only the authors of pull requests merged in the release and the people the
+maintainer has approved by name in tools\\release_credits_approved.json;
+everyone who opened an issue or sent logs gets one general line and is not
+named. This tool reads the commits, the pull requests, the issues and the docs
+diff of a range and lists WHO appears WHERE (the full report keeps every
+reporter and commenter as reference data). It never writes a description of
+anyone's contribution: a human writes the sentence.
 
     python tools\\release_credits.py --from v0.18.0 --thanks
     python tools\\release_credits.py --from v0.18.0 --to origin/main
     python tools\\release_credits.py --from v0.18.0 --format markdown --out credits.md
     python tools\\release_credits.py --from v0.18.0 --format json
+    python tools\\release_credits.py --from v0.18.0 --thanks --approved other.json
     python tools\\release_credits.py --self-test
 
-Sources (all read-only; git through `git log` / `git diff` / `git rev-list`,
-GitHub through `gh api` / `gh pr` / `gh issue` / `gh repo view`):
+Sources (all read-only; git through `git log` / `git diff` / `git rev-list` /
+`git rev-parse`, GitHub through `gh api` / `gh pr` / `gh issue` / `gh repo view`,
+and one tracked file):
 
   1. CODE      Authors and `Co-authored-by:` trailers of the non-merge commits
                in <from>..<to>. AI identities (email noreply@anthropic.com, or
@@ -50,29 +53,45 @@ GitHub through `gh api` / `gh pr` / `gh issue` / `gh repo view`):
   4. DOCS      Lines added under docs\\ that mention `user N`, supporter,
                tester or the reporter: people known only by an anonymised
                label. Informational, never a credit.
+  5. APPROVED  tools\\release_credits_approved.json (or --approved FILE): the
+               maintainer's exceptions, for people who are not the author of
+               a merged PR. An entry is {login, approved (YYYY-MM-DD), for,
+               commits}; it names its login in a release whose range holds
+               one of its commits (merge commits count), so an exception made
+               for one release does not print for a later one. A commit that
+               does not resolve in the repository is a warning and credits
+               nobody. Add an entry only on the maintainer's word, with the
+               date it was given. A missing or malformed file is a tool
+               failure (exit 1), so a bad edit fails the build gate.
 
 The Thanks skeleton (--thanks) names one person per pull request author
 merged in the range: `- @handle: TODO describe (sources: PR #N, N commits)`.
-A code author with no merged PR, an issue reporter, an issue commenter and the
-author of an unmerged PR are not named. The maintainer is shown in the code
-summary but left out of the skeleton unless --include-maintainer. After the
-named lines comes a blank line and one fixed general line thanking everyone
-who opened an issue or sent logs (it has no TODO). AI co-authors are listed
-in the full report as reference data and never produce a Thanks line, a TODO
-or an exit code. No email address is ever printed.
+A person with an approved entry in range is named too, with an
+`approved DATE: reason (commit SHA)` source. One who is also a merged-PR
+author keeps a single line carrying both kinds of source; anyone else is
+added after the PR authors, in order of approval date. A code author with no merged PR and no
+approved entry, an issue reporter, an issue commenter and the author of an
+unmerged PR are not named. The maintainer is shown in the code summary but
+left out of the skeleton unless --include-maintainer. After the named lines
+comes a blank line and one fixed general line thanking everyone who opened an
+issue or sent logs (it has no TODO). AI co-authors are listed in the full
+report as reference data and never produce a Thanks line, a TODO or an exit
+code. No email address is ever printed.
 
 --thanks prints only that skeleton. What the maintainer may want to look at
 (unmapped authors, docs mentions of reporters with no handle, PRs not merged)
 goes to stderr so stdout stays pasteable. --format json always carries the
-whole report, with a `thanks` array of the named people and the general line.
+whole report, with a `thanks` array of the named people and the general line,
+and an `approved_credits` array of the approved entries found in the range.
 
 --out FILE writes the report as UTF-8 without BOM, LF endings. With --dry-run
 it prints what it would write and creates no file and no directory.
 
 Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad
-rev); 2 when --thanks finds a human code author with no resolved handle (so a
-script can notice; the skeleton is still printed). Docs mentions of reporters
-and unmerged PRs are informational and never force exit 2.
+rev, a missing or malformed approved-credits file); 2 when --thanks finds a
+human code author with no resolved handle (so a script can notice; the
+skeleton is still printed). Docs mentions of reporters and unmerged PRs are
+informational and never force exit 2.
 """
 import argparse
 import contextlib
@@ -114,6 +133,15 @@ REPORTER_RE = re.compile(r"(?i)\buser ?\d+\b|\bsupporter\b|\btester\b|\bthe repo
 NOT_FOUND_RE = re.compile(r"could not resolve|not found|\b404\b", re.I)
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 FIELD_SEP, RECORD_SEP = "\x1f", "\x1e"
+
+# The maintainer's approved credits (source 5): a tracked file beside this script.
+APPROVED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release_credits_approved.json")
+APPROVED_TOP_KEYS = ("about", "credits")
+APPROVED_KEYS = ("login", "approved", "for", "commits")
+HANDLE_MAX = 39
+HANDLE_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")   # no leading, trailing or doubled hyphen
+APPROVED_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+COMMIT_ID_RE = re.compile(r"[0-9A-Fa-f]{7,40}")
 
 
 class ToolError(Exception):
@@ -291,6 +319,88 @@ def read_range_shas(git, from_sha, to_sha):
     return set(out.split())
 
 
+def resolve_commit(git, commit_id):
+    """The full SHA of a commit named by a (short) hex id, or None when this
+    repository has no such commit (or the short id is ambiguous)."""
+    rc, out, err = git(["rev-parse", "--verify", "--quiet", commit_id + "^{commit}"])
+    sha = out.strip()
+    return sha if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
+# ---------------------------------------------------------------------------
+# The maintainer's approved credits
+# ---------------------------------------------------------------------------
+
+def load_approved(path):
+    """Read and validate the approved-credits file. Returns its entries in file
+    order, each {login, approved, for, commits}. A missing file is an error: the
+    default one is tracked, so a missing one means a broken checkout."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise ToolError("approved credits file %s is missing" % path)
+    except OSError as e:
+        raise ToolError("approved credits file %s could not be read: %s" % (path, e.strerror or e))
+    try:
+        data = json.loads(raw.decode("utf-8"))   # utf-8, not utf-8-sig: a BOM is refused
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ToolError("approved credits file %s is not valid JSON: %s" % (path, e))
+
+    def bad(where, problem):
+        raise ToolError("approved credits file %s: %s %s" % (path, where, problem))
+
+    if not isinstance(data, dict):
+        bad("top level", "must be an object with a credits list")
+    for key in data:
+        if key not in APPROVED_TOP_KEYS:
+            bad("top level", "has unknown key %r (allowed: %s)" % (key, ", ".join(APPROVED_TOP_KEYS)))
+    if "about" in data and not isinstance(data["about"], str):
+        bad("about", "must be a string")
+    credits = data.get("credits")
+    if not isinstance(credits, list):
+        bad("credits", "must be a list")
+
+    entries = []
+    for i, entry in enumerate(credits):
+        ref = "credits[%d]" % i
+        if not isinstance(entry, dict):
+            bad(ref, "must be an object with the keys " + ", ".join(APPROVED_KEYS))
+        for key in entry:
+            if key not in APPROVED_KEYS:
+                bad(ref, "has unknown key %r (allowed: %s)" % (key, ", ".join(APPROVED_KEYS)))
+        for key in APPROVED_KEYS:
+            if key not in entry:
+                bad(ref, "is missing the key %r" % key)
+        login = entry["login"]
+        if not (isinstance(login, str) and len(login) <= HANDLE_MAX and HANDLE_RE.fullmatch(login)):
+            bad(ref + ".login", "%r is not a GitHub handle (letters, digits and single hyphens, "
+                                "at most %d characters)" % (login, HANDLE_MAX))
+        when = entry["approved"]
+        valid_date = isinstance(when, str) and APPROVED_DATE_RE.fullmatch(when) is not None
+        if valid_date:
+            try:
+                datetime.date(int(when[:4]), int(when[5:7]), int(when[8:]))
+            except ValueError:
+                valid_date = False
+        if not valid_date:
+            bad(ref + ".approved", "%r is not a date written YYYY-MM-DD" % (when,))
+        reason = entry["for"]
+        if not (isinstance(reason, str) and reason.strip()):
+            bad(ref + ".for", "must be a non-empty string")
+        if any(ord(ch) < 32 for ch in reason):
+            bad(ref + ".for", "must be one line of text")
+        commits = entry["commits"]
+        if not (isinstance(commits, list) and commits):
+            bad(ref + ".commits", "must be a non-empty list of commit ids")
+        for j, c in enumerate(commits):
+            if not (isinstance(c, str) and COMMIT_ID_RE.fullmatch(c)):
+                bad("%s.commits[%d]" % (ref, j), "%r is not a commit id (7 to 40 hex characters)" % (c,))
+        entries.append({"login": login, "approved": when, "for": reason.strip(),
+                        "commits": [c.lower() for c in commits]})
+    return entries
+
+
 def issue_refs(message):
     nums = set()
     for rx in (ISSUE_HASH_RE, ISSUE_WORD_RE):
@@ -452,7 +562,14 @@ GENERAL_THANKS = ("Thanks as well to everyone who opened an issue or sent logs f
                   "Those reports are how the fixes above were found and checked.")
 
 
-def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer):
+def approved_source(row):
+    """The Thanks source for one approved entry found in the range."""
+    return "approved %s: %s (%s %s)" % (
+        row["approved"], row["for"], "commit" if len(row["commits"]) == 1 else "commits",
+        ", ".join(row["commits"]))
+
+
+def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer, approved=None):
     warnings = []
     from_sha = resolve_rev(git, from_rev)
     to_sha = resolve_rev(git, to_rev)
@@ -616,10 +733,33 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
             "found_by": found_by,
         })
 
+    # -- approved credits ---------------------------------------------------
+    # The maintainer's word, from the file beside this script: an entry names
+    # its login when one of its commits is in the range (a merge commit counts).
+    # A commit this repository does not have credits nobody.
+    approved_rows = []
+    for entry in approved or ():
+        in_range = []
+        for cid in entry["commits"]:
+            sha = resolve_commit(git, cid)
+            if sha is None:
+                w = ("approved credit for %s: commit %s does not resolve in this repository; "
+                     "it is not counted" % (entry["login"], cid))
+                if w not in warnings:
+                    warnings.append(w)
+            elif sha in range_shas and sha[:8] not in in_range:
+                in_range.append(sha[:8])
+        if in_range:
+            approved_rows.append({"login": entry["login"], "approved": entry["approved"],
+                                  "for": scrub(entry["for"]), "commits": in_range,
+                                  "maintainer": entry["login"].lower() == maint})
+    approved_rows.sort(key=lambda r: (r["approved"], r["login"].lower()))
+
     # -- the Thanks skeleton ------------------------------------------------
-    # Policy: only the authors of PRs merged in the range are named. Issue
-    # reporters and commenters, and code authors with no merged PR, stay in
-    # the reference sections above and get the general line instead.
+    # Policy: only the authors of PRs merged in the range, and the people the
+    # maintainer approved by name, are named. Issue reporters and commenters,
+    # and code authors with no merged PR, stay in the reference sections above
+    # and get the general line instead.
     authors = {}  # casefolded login -> {login, prs}
     for p in prs_merged:
         if p["author"] and not p["bot"]:
@@ -634,6 +774,27 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
         if commit_count:
             sources.append(plural(commit_count, "commit"))
         thanks.append({"login": slot["login"], "sources": sources, "commits": commit_count})
+
+    # Approved credits join the list case-insensitively. A merged-PR author
+    # gets the extra source on the line they already have; anyone else is
+    # appended after the PR authors, by approval date and then login.
+    grouped = {}  # casefolded login -> its rows, oldest approval first
+    for row in approved_rows:
+        if row["login"].lower() == maint and not include_maintainer:
+            continue
+        grouped.setdefault(row["login"].lower(), []).append(row)
+    named_by = {t["login"].lower(): t for t in thanks}
+    added = []
+    for key, rows in grouped.items():
+        extra = [approved_source(r) for r in rows]
+        if key in named_by:
+            named_by[key]["sources"].extend(extra)
+            continue
+        commit_count = len(by_login.get(key, {}).get("shas", ()))
+        sources = ([plural(commit_count, "commit")] if commit_count else []) + extra
+        added.append(((rows[0]["approved"], key),
+                      {"login": rows[0]["login"], "sources": sources, "commits": commit_count}))
+    thanks.extend(t for _, t in sorted(added, key=lambda kv: kv[0]))
 
     code = sorted(
         ({"login": s["login"], "commits": len(s["shas"]), "maintainer": s["login"].lower() == maint}
@@ -660,6 +821,7 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
         "unmapped_authors": named(unmapped),
         "prs_merged": [{k: v for k, v in p.items() if k != "bot"} for p in prs_merged],
         "prs_not_merged": prs_not_merged,
+        "approved_credits": approved_rows,
         "issues": [{k: v for k, v in it.items() if k != "reporter_bot"} for it in issues],
         "docs_reporter_mentions": docs_mentions,
         "thanks": thanks,
@@ -700,6 +862,10 @@ def sections(report):
               for p in report["prs_merged"]]
     notmerged = [("#%d  [%s]  %s  by %s" % (p["number"], p["state"], p["title"], at(p["author"])), [])
                  for p in report["prs_not_merged"]]
+    approved = [("%s  approved %s: %s%s" % (at(a["login"]), a["approved"], a["for"],
+                                            " (maintainer)" if a["maintainer"] else ""),
+                 ["commits in range: " + ", ".join(a["commits"])])
+                for a in report["approved_credits"]]
     issues = []
     for it in report["issues"]:
         head = "#%d  [%s]%s  %s" % (it["number"], it["state"], " (PR)" if it["kind"] == "pr" else "",
@@ -720,6 +886,7 @@ def sections(report):
         ("AI co-authors, not credited as people", ai),
         ("unmapped authors (needs a handle)", unmapped),
         ("PRs merged in range", merged),
+        ("Approved credits in range (the maintainer's word; named in Thanks)", approved),
         ("PRs not merged (credit needs a decision)", notmerged),
         ("Issues (cited by commits or docs, or active in the window)", issues),
         ("docs mention reporters with no handle (needs a name or consent)", docs),
@@ -834,9 +1001,12 @@ def build_parser():
     p = Parser(
         prog="release_credits.py",
         description="Build the contributor-credit list for a release, from sources.",
-        epilog="The Thanks skeleton names only the authors of PRs merged in the range; everyone "
-               "who opened an issue or sent logs gets one general line and is not named. "
-               "Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad rev); "
+        epilog="The Thanks skeleton names only the authors of PRs merged in the range and the "
+               "people the maintainer approved by name (tools\\release_credits_approved.json, "
+               "whose entries print only for a range holding one of their commits); everyone who "
+               "opened an issue or sent logs gets one general line and is not named. "
+               "Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad rev, "
+               "a missing or malformed approved-credits file); "
                "2 when --thanks finds a human code author with no resolved handle (the skeleton is "
                "still printed; docs mentions of reporters and unmerged PRs never force it). "
                "No email address is ever printed.",
@@ -849,10 +1019,14 @@ def build_parser():
     p.add_argument("--maintainer", help="maintainer login (default: the repo owner)")
     p.add_argument("--include-maintainer", action="store_true",
                    help="keep the maintainer in the Thanks skeleton")
+    p.add_argument("--approved", metavar="FILE",
+                   help="the maintainer-approved credits file (default: release_credits_approved.json "
+                        "beside this script)")
     p.add_argument("--format", choices=("text", "markdown", "json"), default="text")
     p.add_argument("--thanks", action="store_true",
-                   help="print only the ## Thanks skeleton: merged-PR authors by name, one general "
-                        "line for issue and log submitters (json: the full report as usual)")
+                   help="print only the ## Thanks skeleton: merged-PR authors and maintainer-approved "
+                        "people by name, one general line for issue and log submitters "
+                        "(json: the full report as usual)")
     p.add_argument("--out", help="write the report to FILE (UTF-8, no BOM, LF)")
     p.add_argument("--dry-run", action="store_true",
                    help="with --out: print what would be written; create no file and no directory")
@@ -871,6 +1045,7 @@ def main(argv=None, git=None, gh=None, stdout=None, stderr=None):
     git = git or make_git_runner(ROOT)
     gh = gh or make_gh_runner(ROOT)
     try:
+        approved = load_approved(args.approved or APPROVED_FILE)  # before any git or gh call
         repo = args.repo
         if not repo:
             rc, out, err = gh(["repo", "view", "--json", "nameWithOwner"])
@@ -881,7 +1056,7 @@ def main(argv=None, git=None, gh=None, stdout=None, stderr=None):
             raise ToolError("bad repo %r, expected owner/name" % repo)
         maintainer = args.maintainer or repo.split("/")[0]
         report = build_report(git, gh, repo, args.from_rev, args.to_rev, maintainer,
-                              args.include_maintainer)
+                              args.include_maintainer, approved)
         if args.format == "json":
             text = render_json(report)
         elif args.thanks:
@@ -1091,15 +1266,36 @@ def self_test():
     check(comment_in_window(None, start) and not comment_in_window("2026-10-01T10:29:41Z", start),
           "a comment before the window does not count; one with no time cannot be shown to predate it")
 
+    # The shipped approved-credits file: a bad edit to it fails the build gate here.
+    check(APPROVED_FILE == os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "release_credits_approved.json"),
+          "the default approved file sits beside the script")
+    shipped = load_approved(APPROVED_FILE)
+    check(all(e["login"] and e["commits"] for e in shipped), "the shipped approved file loads and validates")
+
     with tempfile.TemporaryDirectory() as tmp:
         repo_dir = os.path.join(tmp, "repo")
         os.makedirs(repo_dir)
         shas = _make_repo(repo_dir)
         git = make_git_runner(repo_dir)
 
-        def run(argv, calls=None, gh=None):
+        def write_file(name, text):
+            path = os.path.join(tmp, name)
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-8"))
+            return path
+
+        def approved_file(name, entries):
+            return write_file(name, json.dumps({"credits": entries}, indent=2) + "\n")
+
+        # The shipped approved file names commits the fixture repo does not have, so every
+        # run reads an empty one unless a test passes its own.
+        empty_approved = approved_file("approved-empty.json", [])
+
+        def run(argv, calls=None, gh=None, approved=empty_approved):
             calls = calls if calls is not None else []
             out, err = io.StringIO(), io.StringIO()
+            argv = list(argv) + (["--approved", approved] if approved else [])
             rc = main(argv, git=git, gh=gh or _make_fake_gh(shas, calls), stdout=out, stderr=err)
             return rc, out.getvalue(), err.getvalue()
 
@@ -1235,6 +1431,178 @@ def self_test():
               and rep3["unmapped_authors"] == [] and "ai_disclosure_needed" not in rep3,
               "the AI author is reference data in the full report: %r" % rep3["ai_coauthors"])
 
+        # -- approved credits: the maintainer's word, from a file ----------------
+        def short(label):
+            return shas[label][:8]
+
+        def entry(login, when, why, *commit_ids):
+            return {"login": login, "approved": when, "for": why, "commits": list(commit_ids)}
+
+        ap_full = approved_file("approved-full.json", [
+            entry("zed-gh", "2026-10-24", "the idea behind the tweak", short("c2")),
+            entry("amy-gh", "2026-10-24", "the notes", shas["c9"]),           # a full 40-character id
+            entry("zed-gh", "2026-10-20", "the first report", short("c4")),   # one login, two entries
+            entry("alice-gh", "2026-10-22", "the second look", short("c9")),  # a code author, no merged PR
+            entry("CAROL-GH", "2026-10-21", "the squash", short("c9")),       # a merged-PR author, other case
+            entry("bea-gh", "2026-10-24", "a fix", short("c1")),
+            entry("past-gh", "2026-10-01", "an earlier release", short("base")),  # its commit is the range start
+        ])
+        ap_expected = (
+            "## Thanks\n"
+            "- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit, "
+            "approved 2026-10-21: the squash (commit %s))\n"
+            "- @zed-gh: TODO describe (sources: approved 2026-10-20: the first report (commit %s), "
+            "approved 2026-10-24: the idea behind the tweak (commit %s))\n"
+            "- @alice-gh: TODO describe (sources: 1 commit, approved 2026-10-22: the second look (commit %s))\n"
+            "- @amy-gh: TODO describe (sources: approved 2026-10-24: the notes (commit %s))\n"
+            "- @bea-gh: TODO describe (sources: approved 2026-10-24: a fix (commit %s))\n"
+            % (short("c9"), short("c4"), short("c2"), short("c9"), short("c9"), short("c1"))
+        ) + "\n" + general + "\n"
+
+        def approved_ok(text):
+            return text == ap_expected
+
+        rc, ap_th, ap_err = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"], approved=ap_full)
+        check(rc == 2 and approved_ok(ap_th),
+              "(n) approved entries in range are named after the PR authors, by approval date then login, "
+              "a PR author keeps one line with both kinds of source, one login with two entries gets one "
+              "line, an entry whose commit is the range start is not named: %r" % ap_th)
+        check(all("TODO" in l for l in ap_th.splitlines() if l.startswith("- ")) and ap_th.count(general) == 1,
+              "(n) an approved line is a TODO for a human, and the general line is unchanged")
+        check("approved credit" not in ap_err, "(n) no warning when every approved commit resolves: %r" % ap_err)
+        rc, ap_js, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "json"], approved=ap_full)
+        ap_rep = json.loads(ap_js)
+        check([(a["login"], a["approved"]) for a in ap_rep["approved_credits"]]
+              == [("zed-gh", "2026-10-20"), ("CAROL-GH", "2026-10-21"), ("alice-gh", "2026-10-22"),
+                  ("amy-gh", "2026-10-24"), ("bea-gh", "2026-10-24"), ("zed-gh", "2026-10-24")]
+              and ap_rep["approved_credits"][2] == {"login": "alice-gh", "approved": "2026-10-22",
+                                                    "for": "the second look", "commits": [short("c9")],
+                                                    "maintainer": False},
+              "(n) json carries the approved entries found in range: %r" % ap_rep["approved_credits"])
+        check(all(sorted(t) == ["commits", "login", "sources"] for t in ap_rep["thanks"])
+              and [t["login"] for t in ap_rep["thanks"]] == ["carol-gh", "zed-gh", "alice-gh", "amy-gh", "bea-gh"]
+              and [t["commits"] for t in ap_rep["thanks"]] == [1, 0, 1, 0, 0],
+              "(n) thanks entries keep their shape and the code-commit count: %r" % ap_rep["thanks"])
+        for fmt in ("text", "markdown"):
+            rc, ap_body, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", fmt], approved=ap_full)
+            check("Approved credits in range (the maintainer's word; named in Thanks)" in ap_body
+                  and "@zed-gh  approved 2026-10-20: the first report" in ap_body
+                  and "commits in range: " + short("c4") in ap_body and "past-gh" not in ap_body,
+                  "(n) the %s report lists the approved entries in range, with their commits" % fmt)
+        rc, ap_none, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "markdown"])
+        check("### Approved credits in range (the maintainer's word; named in Thanks)\n\n- (none)\n" in ap_none,
+              "(n) no approved entry in range reads (none)")
+
+        ap_one = approved_file("approved-one.json", [entry("zed-gh", "2026-10-24", "the idea", short("c2"))])
+        one_line = "- @zed-gh: TODO describe (sources: approved 2026-10-24: the idea (commit %s))\n" % short("c2")
+        rc, th_in, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"], approved=ap_one)
+        rc, th_base, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"])
+        check(th_in == th_base.replace("\n\n" + general, "\n" + one_line + "\n" + general),
+              "(o) an entry whose commit is in the range is named: %r" % th_in)
+        for frm in ("c2", "c5"):   # c2 is the entry's own commit, so excluded; c5 is after it
+            rc, th_out, err_out = run(["--from", shas[frm], "--to", "HEAD", "--thanks"], approved=ap_one)
+            rc, th_ref, _ = run(["--from", shas[frm], "--to", "HEAD", "--thanks"])
+            check(th_out == th_ref and "zed-gh" not in th_out and "approved" not in err_out,
+                  "(o) the same entry is not named, and not warned about, for a range without its "
+                  "commit (--from %s): %r" % (frm, th_out))
+
+        # an unresolvable commit warns and credits nobody; a resolvable one on the same entry still does
+        ap_lost = approved_file("approved-lost.json", [
+            entry("ghost-gh", "2026-10-24", "a lost commit", "deadbeef"),
+            entry("zed-gh", "2026-10-24", "mixed", "cafe1234", short("c9")),
+        ])
+        rc, th_lost, err_lost = run(["--from", shas["c5"], "--to", "HEAD", "--thanks"], approved=ap_lost)
+        check(rc == 0 and th_lost == "## Thanks\n- @carol-gh: TODO describe (sources: PR #22)\n"
+                                     "- @zed-gh: TODO describe (sources: approved 2026-10-24: mixed (commit %s))\n"
+                                     "\n%s\n" % (short("c9"), general),
+              "(p) an entry with a commit that does not resolve credits nobody from it: %d %r" % (rc, th_lost))
+        check("warning: approved credit for ghost-gh: commit deadbeef does not resolve" in err_lost
+              and "approved credit for zed-gh: commit cafe1234 does not resolve" in err_lost
+              and "ghost-gh" not in th_lost,
+              "(p) the unresolvable commit is a warning naming the login and the commit: %r" % err_lost)
+        rc, js_lost, err_lost_js = run(["--from", shas["c5"], "--to", "HEAD", "--format", "json"], approved=ap_lost)
+        check(rc == 0 and len([w for w in json.loads(js_lost)["warnings"] if w.startswith("approved credit")]) == 2
+              and "deadbeef" in err_lost_js, "(p) json run carries the warnings")
+
+        # the maintainer is skipped, like a PR author, unless --include-maintainer
+        ap_maint = approved_file("approved-maint.json", [entry("Maint-GH", "2026-10-24", "the idea", short("c9"))])
+        rc, th_mref, _ = run(["--from", shas["c6"], "--to", "HEAD", "--thanks"])
+        rc, th_ms, _ = run(["--from", shas["c6"], "--to", "HEAD", "--thanks"], approved=ap_maint)
+        check(rc == 0 and th_ms == th_mref,
+              "(q) the maintainer in the approved list is not named: %r" % th_ms)
+        rc, js_ms, _ = run(["--from", shas["c6"], "--to", "HEAD", "--format", "json"], approved=ap_maint)
+        check([(a["login"], a["maintainer"]) for a in json.loads(js_ms)["approved_credits"]] == [("Maint-GH", True)],
+              "(q) the full report still lists the maintainer's approved entry, flagged")
+        rc, th_mi, _ = run(["--from", shas["c6"], "--to", "HEAD", "--thanks", "--include-maintainer"],
+                           approved=ap_maint)
+        check(rc == 0 and th_mi == th_mref.replace(
+                  "\n\n" + general, "\n- @Maint-GH: TODO describe (sources: approved 2026-10-24: the idea (commit %s))\n\n%s"
+                  % (short("c9"), general)),
+              "(q) --include-maintainer names them: %r" % th_mi)
+
+        # a malformed file is a tool failure that names the entry and the field
+        good = entry("zed-gh", "2026-10-24", "why", "abcdef0")
+
+        def doc(*entries, **extra):
+            return json.dumps(dict({"credits": list(entries)}, **extra))
+
+        def without(d, key):
+            return {k: v for k, v in d.items() if k != key}
+
+        refusals = [
+            ("login with a space", doc(dict(good, login="a b")), "credits[0].login"),
+            ("login with a doubled hyphen", doc(dict(good, login="a--b")), "credits[0].login"),
+            ("login with a leading hyphen", doc(dict(good, login="-ab")), "credits[0].login"),
+            ("login with a trailing hyphen", doc(dict(good, login="ab-")), "credits[0].login"),
+            ("login of 40 characters", doc(dict(good, login="a" * 40)), "credits[0].login"),
+            ("login with brackets", doc(dict(good, login="bot[bot]")), "credits[0].login"),
+            ("empty login", doc(dict(good, login="")), "credits[0].login"),
+            ("a month of 13", doc(dict(good, approved="2026-13-01")), "credits[0].approved"),
+            ("a day of 32", doc(dict(good, approved="2026-10-32")), "credits[0].approved"),
+            ("a date written day first", doc(dict(good, approved="24-10-2026")), "credits[0].approved"),
+            ("a date without zero padding", doc(dict(good, approved="2026-1-5")), "credits[0].approved"),
+            ("a date that is a number", doc(dict(good, approved=20261024)), "credits[0].approved"),
+            ("an empty reason", doc(dict(good, **{"for": ""})), "credits[0].for"),
+            ("a blank reason", doc(dict(good, **{"for": "  "})), "credits[0].for"),
+            ("a reason that is a number", doc(dict(good, **{"for": 5})), "credits[0].for"),
+            ("a two-line reason", doc(dict(good, **{"for": "a\nb"})), "credits[0].for"),
+            ("no commits", doc(dict(good, commits=[])), "credits[0].commits"),
+            ("commits that is a string", doc(dict(good, commits="abcdef0")), "credits[0].commits"),
+            ("a commit that is not hex", doc(dict(good, commits=["xyz1234"])), "credits[0].commits[0]"),
+            ("a commit of 6 characters", doc(dict(good, commits=["abcdef0", "abcdef"])), "credits[0].commits[1]"),
+            ("a commit of 41 characters", doc(dict(good, commits=["a" * 41])), "credits[0].commits[0]"),
+            ("an unknown key", doc(dict(good, extra=1)), "unknown key 'extra'"),
+            ("a missing key", doc(without(good, "for")), "missing the key 'for'"),
+            ("an entry that is not an object", doc("zed-gh"), "credits[0]"),
+            ("a bad second entry", doc(good, dict(good, login="")), "credits[1].login"),
+            ("a top level list", "[]", "top level"),
+            ("credits that is not a list", '{"credits": {}}', "credits must be a list"),
+            ("no credits", "{}", "credits must be a list"),
+            ("an unknown top level key", doc(good, credit=[]), "unknown key 'credit'"),
+            ("an about that is not a string", doc(good, about=3), "about must be a string"),
+            ("text that is not JSON", "not json", "not valid JSON"),
+            ("an empty file", "", "not valid JSON"),
+            ("a byte order mark", chr(0xFEFF) + doc(good), "not valid JSON"),
+        ]
+        for label, text, needle in refusals:
+            rc, out_bad, err_bad = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"],
+                                       approved=write_file("approved-bad.json", text))
+            check(rc == 1 and out_bad == "" and "approved credits file" in err_bad and needle in err_bad,
+                  "(r) %s exits 1 naming %r: %d %r" % (label, needle, rc, err_bad))
+        rc, out_bad, err_bad = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"],
+                                   approved=os.path.join(tmp, "no-such-approved.json"))
+        check(rc == 1 and out_bad == "" and "is missing" in err_bad, "(r) a missing file exits 1: %r" % err_bad)
+        check(load_approved(write_file("approved-ok.json", doc(good, about="x")))
+              == [dict(good, commits=["abcdef0"])], "(r) a good file loads, with or without about")
+
+        # -- --dry-run writes nothing, approved credits or not -------------------
+        dry_out = os.path.join(tmp, "dry", "thanks.md")
+        rc, dry_text, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks", "--out", dry_out, "--dry-run"],
+                              approved=ap_full)
+        check(rc == 2 and "[dry-run]" in dry_text and approved_ok(dry_text[dry_text.index("## Thanks"):])
+              and not os.path.exists(dry_out) and not os.path.exists(os.path.dirname(dry_out)),
+              "(s) --dry-run --out with approved credits prints the skeleton and creates nothing")
+
         # -- never an email ------------------------------------------------
         for fmt in ("text", "markdown", "json"):
             rc, body, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", fmt])
@@ -1289,8 +1657,13 @@ def self_test():
         # (A bot is filtered twice: by identity, and again by the login it
         # resolves to. The mutation breaks both layers.)
         saved = {k: globals()[k] for k in ("is_ai_identity", "scrub", "is_bot_identity", "is_bot_login",
-                                           "comment_in_window")}
+                                           "comment_in_window", "resolve_commit")}
         try:
+            globals()["resolve_commit"] = lambda git, commit_id: None
+            _, th_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"], approved=ap_full)
+            check(not approved_ok(th_m),
+                  "mutation: approved commits that never resolve must fail the approved-credit assertion")
+            globals()["resolve_commit"] = saved["resolve_commit"]
             globals()["comment_in_window"] = lambda stamp, start: True
             _, js_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "json"])
             check(not window_ok(json.loads(js_m)),

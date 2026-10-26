@@ -24,7 +24,7 @@ bool           g_keyApplied = false;
 unsigned       g_missedNotes = 0;
 constexpr unsigned kMissedNotesMax = 3;
 
-// The player's own bindings, once per bind: a key Elite also acts on does both on one press. Same rule as Explorer Cam's check.
+// The player's own bindings, once per bind: a key Elite also acts on does both on one press.
 void checkAgainstEliteBindings(const std::string& text) {
     uint32_t mods = 0;
     const int vk = virtualKeyFromName(text.c_str(), &mods);

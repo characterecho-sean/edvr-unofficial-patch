@@ -43,7 +43,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.intro_video (this module's slice is the resample). Install
+// Reads visual.intro_video (this module's slice is the resample). Install
 // and reload; live.
 void introUpscaleConfigure(Config& cfg);
 

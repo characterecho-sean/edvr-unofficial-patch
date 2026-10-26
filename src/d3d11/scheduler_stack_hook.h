@@ -3,9 +3,9 @@
 // so test rigs can link the probe with stub hook functions (the pattern set
 // by kinematic_eval_probe/hook).
 //
-// Targets 2/3 (per-record drain 0x42DF940, reset+repopulate 0x36A0F50)
+// Targets 2/3 (per-record drain 0x42E2560, reset+repopulate 0x36A3BB0)
 // carry this file's own CodeHooks. Targets 0/1 (the worker entries
-// 0x4321940/0x4320340) already carry the kinematic eval hook's patch --
+// 0x43245A0/0x4322FA0) already carry the kinematic eval hook's patch --
 // CodeHook refuses to patch a function whose first instruction is a jump --
 // so they are observed through that hook's job-0/1 relays instead; the
 // attach below holds the eval gate open via kinematicEvalSchedulerAttach()
@@ -19,10 +19,12 @@ namespace edvr {
 class SchedulerStackProbe;
 
 // Installs process-lifetime hooks on first call. Same return vocabulary as
-// attachKinematicEvalHooks: "installed", "identity_mismatch" (the
-// executable is not the hash-verified build), "opcode_mismatch" (a target
-// does not carry the expected prologue or our own patch),
-// "install_failed", "observer_busy".
+// attachKinematicEvalHooks: "installed", "identity_mismatch" (no module
+// base, a target the signature resolver did not find on an unknown build,
+// src\common\game_build.h, or an executable section whose end the PE header
+// does not give), "opcode_mismatch" (a target does not carry the expected
+// prologue -- outside the masked fields on an unknown build -- or our own
+// patch), "install_failed", "observer_busy".
 const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept;
 // Stops new callbacks into this probe. Hooks and relays stay installed for
 // the process lifetime; the probe itself is a global, so a callback that

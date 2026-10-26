@@ -57,7 +57,7 @@ EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.
 
 # A section we know about followed by a dotted name, anywhere in a string. Used
 # to catch key names mentioned in log text that nothing actually reads.
-SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'd3d11',
+SECTIONS = ('fix', 'visual', 'advanced', 'hotkey', 'log', 'd3d11',
             'experimental', 'luminance', 'menu', 'diag')
 # A dotted name INSIDE a string literal. The literals are pulled out first and
 # searched separately, because scanning the raw line let a match start at a
@@ -137,7 +137,7 @@ def keys_documented(duplicate_sections=None):
         return found
     with open(INI, encoding='utf-8', errors='replace') as f:
         for i, raw in enumerate(f, 1):
-            line = raw.strip().lstrip('﻿')
+            line = raw.strip().lstrip('\ufeff')
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
@@ -171,7 +171,7 @@ def keys_moved():
         return out
     with open(INI, encoding='utf-8', errors='replace') as f:
         for raw in f:
-            line = raw.strip().lstrip('﻿')
+            line = raw.strip().lstrip('\ufeff')
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
@@ -446,6 +446,17 @@ def self_test():
         expect_in(name, said, 'NAMED IN A MESSAGE BUT NEVER READ: fix.ghost_key')
         expect_in(name, said, 'src/a.cpp:4')
         expect(name, 'comment_ghost' not in said, 'a comment was reported as a message')
+
+        # [visual] (2026-10-22) is a section the mention scan knows: a message that tells a user to set a visual.* key nothing reads
+        # is reported, and one naming a key that is read is not.
+        name = 'named-in-a-message-visual'
+        code, said = run(lay(name, '[visual]\nglow = 100\n',
+                             {'a.cpp': 'cfg.getString("visual.glow", "100");\n'
+                                       'log("set visual.glow to 150");\n'
+                                       'log("set visual.ghost_glow to fix it");\n'}))
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'NAMED IN A MESSAGE BUT NEVER READ: visual.ghost_glow')
+        expect(name, 'NAMED IN A MESSAGE BUT NEVER READ: visual.glow' not in said, 'a key that is read was reported as a ghost')
 
         # One header per section.
         name = 'duplicate-section'

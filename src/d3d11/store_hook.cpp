@@ -1,5 +1,6 @@
-// The admission store's detour (store_hook.h). A CodeHook on FUN_144312040, pinned by its sixteen bytes in build 332841
-// (concourse-culling doc, P11). The prologue's first five bytes are three pushes and a two-byte push, which the CodeHook
+// The admission store's detour (store_hook.h). A CodeHook on FUN_144314C60, pinned by its sixteen bytes in build 334925
+// (concourse-culling doc, P11); on another build, found by its whole-function signature (src\common\game_build.h, issue
+// 124's pilot). The prologue's first five bytes are three pushes and a two-byte push, which the CodeHook
 // decoder steals (push rbp, push rbx, push rsi, push rdi: 2+1+1+1). The observer takes the store's five arguments:
 // four in registers and the record on the stack, which the relay leaves where the store's caller put it. The observer
 // returns whatever the original returns (RAX), so the caller sees the same value with or without the detour.
@@ -13,8 +14,8 @@
 #include <mutex>
 
 #include "../common/code_hook.h"
+#include "../common/game_build.h"
 #include "../common/log.h"
-#include "explorer_cam_core.h"
 #include "flat_world_store.h"
 #include "flat_world_witness.h"
 #include "optimized_station.h"
@@ -23,7 +24,7 @@
 namespace edvr {
 namespace {
 
-constexpr uintptr_t kStoreRva = 0x4312040u;
+constexpr uintptr_t kStoreRva = 0x4314C60u;
 constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
 
 using StoreFn = uintptr_t(__fastcall*)(uintptr_t bucket, uintptr_t mask, uintptr_t out, uintptr_t lod, uintptr_t record);
@@ -123,66 +124,78 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
         });
 }
 
-// The PE identity the other build-keyed hooks read (kinematic_eval_hook.cpp targetValid): base+0x3C -> e_lfanew, then the TimeDateStamp at +8
-// and the SizeOfImage at +0x50. Under __try: an unreadable header is a refusal, not a crash.
-bool readIdentity(uintptr_t base, uint32_t* stamp, uint32_t* size) noexcept {
+// The store's sixteen prologue bytes, read under __try: false when the page is unreadable.
+bool readPrologue(uintptr_t at, uint8_t* got, size_t n) noexcept {
     __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) return false;
-        std::memcpy(stamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(size, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
+        std::memcpy(got, reinterpret_cast<const void*>(at), n);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
 
-// Installs the detour once: the PE identity must be build 332841's, the prologue must match the pin, and the CodeHook must accept it.
-// A refusal is final and logged once; with the detour refused nothing is written to the game (the observer that writes is never reached).
+// Installs the detour once. Build 334925 (the resolver's known build): the store is at kStoreRva and its prologue must be the pin, exactly,
+// as it always was. An unknown build (issue 124's pilot): the store's address comes from the signature resolver (src\common\game_build.h),
+// which found its whole function by masked match or did not; the prologue is then compared with the bytes the signature masks skipped. Then
+// the CodeHook must accept it. A refusal is final and logged once; with the detour refused nothing is written to the game (the observer that
+// writes is never reached).
 void installLocked() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base) {
         g_store.status.store("the module base is unknown", std::memory_order_release);
         return;
     }
-    uint32_t stamp = 0;
-    uint32_t size = 0;
-    const bool identityRead = readIdentity(base, &stamp, &size);
+    const bool identityRead = gameBuildIdentity(nullptr, nullptr);
+    const bool knownBuild = identityRead && gameBuildKnown();
+    const uintptr_t storeRva = identityRead ? gameRva(static_cast<uint32_t>(kStoreRva)) : 0;
     uint8_t got[sizeof(sealed::kStorePrologue)] = {};
-    bool readOk = false;
-    __try {
-        std::memcpy(got, reinterpret_cast<const void*>(base + kStoreRva), sizeof(got));
-        readOk = true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        readOk = false;
-    }
-    const sealed::StoreInstall verdict = sealed::storeInstallDecision(identityRead, stamp, size, ecm::kExpectedTimestamp, ecm::kExpectedImageSize,
-                                                                     readOk ? got : nullptr, sealed::kStorePrologue, sizeof(got));
+    const bool readOk = storeRva != 0 && readPrologue(base + storeRva, got, sizeof(got));
+    const bool pinOk = readOk && gamePinMatches(static_cast<uint32_t>(kStoreRva), got, sealed::kStorePrologue, sizeof(got));
+    const sealed::StoreInstall verdict = sealed::storeInstallDecision(identityRead, storeRva, readOk ? got : nullptr, pinOk);
     if (verdict != sealed::StoreInstall::kInstall) {
         g_store.refused.store(true, std::memory_order_release);
-        if (verdict == sealed::StoreInstall::kWrongIdentity) {
-            g_store.status.store("not build 332841 (PE timestamp or image size)", std::memory_order_release);
-            Log::get().note("store hook: refused: not build 332841 (PE timestamp %u, image size %u); optimized station and flat world witness stand down.",
-                            static_cast<unsigned>(stamp), static_cast<unsigned>(size));
+        if (verdict == sealed::StoreInstall::kNotFound) {
+            g_store.status.store("an unknown build, and the store was not found by signature", std::memory_order_release);
+            Log::get().note("store hook: refused: %s, and the admission store (0x4314C60 in build 334925) was not found by signature; "
+                            "optimized station and flat world witness stand down.", gameBuildText());
         } else if (verdict == sealed::StoreInstall::kUnreadable) {
             g_store.status.store("the executable's PE header or the store's prologue is unreadable", std::memory_order_release);
             Log::get().note("store hook: refused: the PE header or the admission store's prologue is unreadable; "
                             "optimized station and flat world witness stand down.");
-        } else {
-            g_store.status.store("the store's prologue does not match build 332841", std::memory_order_release);
-            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 332841's; "
+        } else if (knownBuild) {
+            g_store.status.store("the store's prologue does not match build 334925", std::memory_order_release);
+            Log::get().note("store hook: refused: the admission store's sixteen prologue bytes are not build 334925's; "
                             "optimized station and flat world witness stand down.");
+        } else {
+            g_store.status.store("found by signature, but the store's prologue does not match build 334925's", std::memory_order_release);
+            Log::get().note("store hook: refused: %s: the admission store was found by signature at 0x%llX, but its sixteen prologue bytes "
+                            "are not build 334925's outside the masked fields; optimized station and flat world witness stand down.",
+                            gameBuildText(), static_cast<unsigned long long>(storeRva));
         }
         return;
     }
-    g_store.relay = allocateRelay(base + kStoreRva);
+    // The field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2): the store's own instructions
+    // that carry, unmasked, the record fields optimized station writes back (optimized_station.cpp kRecMask, kRecAdmitted). The record is
+    // the store's fifth argument (mov rdi,[rbp+0x1F0], 0x4314C89); it reads the record's node at +0x18 (0x4314CBD) and ends by storing the
+    // admitted byte at +0x234 (0x4315227) and the view mask at +0x208 (0x431523D). On an unknown build each must be found, or the store hook
+    // stands down with everything that rides it.
+    static constexpr uint32_t kRecordWitnessRvas[4] = {0x4314C89, 0x4314CBD, 0x4315227, 0x431523D};
+    uint32_t missingWitness = 0;
+    if (!gameRvasFound(kRecordWitnessRvas, 4, &missingWitness)) {
+        g_store.refused.store(true, std::memory_order_release);
+        g_store.status.store("an unknown build, and a record field witness was not found by signature", std::memory_order_release);
+        Log::get().note("store hook: refused: %s, and the record field witness 0x%X (in build 334925) was not found by signature, so the "
+                        "record fields optimized station writes are not proven on this build; optimized station and flat world witness "
+                        "stand down.", gameBuildText(), missingWitness);
+        return;
+    }
+    g_store.relay = allocateRelay(base + storeRva);
     if (!g_store.relay) {
         g_store.status.store("no relay within range", std::memory_order_release);
         return;
     }
     buildRelay(g_store.relay, &g_storeGate, reinterpret_cast<void*>(&storeObserved));
-    if (!g_store.hook.install(reinterpret_cast<void*>(base + kStoreRva), g_store.relay, nullptr,
+    if (!g_store.hook.install(reinterpret_cast<void*>(base + storeRva), g_store.relay, nullptr,
                               "admission-store", &prepareRelay, &g_store)) {
         VirtualFree(g_store.relay, 0, MEM_RELEASE);
         g_store.relay = nullptr;
@@ -190,8 +203,13 @@ void installLocked() noexcept {
         return;
     }
     g_store.ready.store(true, std::memory_order_release);
-    g_store.status.store("installed", std::memory_order_release);
-    Log::get().note("store hook: the admission store (0x4312040) is detoured; the gate opens for station gathering or the passive flat world witness.");
+    g_store.status.store(knownBuild ? "installed" : "installed (found by signature on an unknown build)", std::memory_order_release);
+    if (knownBuild)
+        Log::get().note("store hook: the admission store (0x4314C60) is detoured; the gate opens for station gathering or the passive flat world witness.");
+    else
+        Log::get().note("store hook: the admission store (0x4314C60 in build 334925) was found by signature on %s at 0x%llX and is detoured; "
+                        "the gate opens for station gathering or the passive flat world witness.",
+                        gameBuildText(), static_cast<unsigned long long>(storeRva));
 }
 
 void installOnce() noexcept {

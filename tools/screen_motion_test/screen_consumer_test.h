@@ -438,5 +438,115 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
               "mode5 tracked foreground skips background-hidden rejection with affine motion");
         check(std::fabs(coronaDepth[coronaAt]-.000025f)<1e-6f,"mode5 rejection preserves current merged depth");
     }
+    // The absent-layer gate (zSceneAt: probe.w bit 64 = t6 not bound, 256 = t7 not bound, skipped rather than fetched
+    // as the +0.0 a null view returns). Every shipping blob, mv and main, with t6 and/or t7 null, writes the same bytes
+    // to every output it has (MV, ZC, MK, DT; O, N; Stats) with the bits clear -- the null views fetched, as before --
+    // and set. The control: t7 BOUND with a panel nearer than the scene and the ship's radius, and bit 256 set anyway,
+    // must change both entries' outputs: the blob honours the bit (one built before the gate would pass the parity
+    // vacuously). Depth is bound and the world/ship split is on, so the merged depth decides the path and ZC.
+    {
+        auto colourTex=texture(16,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+        auto historyTex=texture(8,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_SHADER_RESOURCE);
+        auto outTex=texture(8,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
+        auto nextTex=texture(8,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_UNORDERED_ACCESS);
+        ComPtr<ID3D11ShaderResourceView> colourView,historyView;ComPtr<ID3D11UnorderedAccessView> outUav,nextUav;
+        hr(dev->CreateShaderResourceView(colourTex.Get(),nullptr,&colourView));hr(dev->CreateShaderResourceView(historyTex.Get(),nullptr,&historyView));
+        hr(dev->CreateUnorderedAccessView(outTex.Get(),nullptr,&outUav));hr(dev->CreateUnorderedAccessView(nextTex.Get(),nullptr,&nextUav));
+        std::vector<float> colour(16*16*4),history(8*8*4);
+        for(int i=0;i<16*16;++i){colour[4*i]=float(i%16)/15.f;colour[4*i+1]=float(i/16)/15.f;colour[4*i+2]=float((i*7)%16)/15.f;colour[4*i+3]=1;}
+        for(int i=0;i<8*8;++i){history[4*i]=float(i%8)/7.f;history[4*i+1]=1-float(i/8)/7.f;history[4*i+2]=float((i*5)%8)/7.f;history[4*i+3]=1;}
+        ctx->UpdateSubresource(colourTex.Get(),0,nullptr,colour.data(),16*16,0);ctx->UpdateSubresource(historyTex.Get(),0,nullptr,history.data(),8*16,0);
+        D3D11_BUFFER_DESC sb{};sb.ByteWidth=128*4;sb.BindFlags=D3D11_BIND_UNORDERED_ACCESS;sb.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;sb.StructureByteStride=4;
+        ComPtr<ID3D11Buffer> statsBuf;hr(dev->CreateBuffer(&sb,nullptr,&statsBuf));
+        ComPtr<ID3D11UnorderedAccessView> statsUav;hr(dev->CreateUnorderedAccessView(statsBuf.Get(),nullptr,&statsUav));
+        sb.ByteWidth=128*4;sb.BindFlags=0;sb.MiscFlags=0;sb.StructureByteStride=0;sb.Usage=D3D11_USAGE_STAGING;sb.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> statsStage;hr(dev->CreateBuffer(&sb,nullptr,&statsStage));
+        // Sky on the left, a surface 5 m out (past the 1 m radius: the camera's path) on the right, a hull 0.5 m away
+        // in one corner; the smoke a patch at 0.3 m; the UI depth the scene with a panel at 0.6 m stamped across rows 4-6.
+        std::vector<float> sceneZ(16*16),smokeZ(16*16,0.f),uiZ(16*16),priorZ(8*8,.025f/5);
+        for(int y=0;y<16;++y)for(int x=0;x<16;++x){int i=y*16+x;sceneZ[i]=x<7?0.f:.025f/5;if(x>10&&y>9)sceneZ[i]=.025f/.5f;
+            if(x>4&&x<9&&y>5&&y<9)smokeZ[i]=.025f/.3f;uiZ[i]=(y>=7&&y<=9)?.025f/.6f:sceneZ[i];}
+        ctx->UpdateSubresource(scene.Get(),0,nullptr,sceneZ.data(),16*4,0);
+        ctx->UpdateSubresource(smokeDepth.Get(),0,nullptr,smokeZ.data(),16*4,0);
+        ctx->UpdateSubresource(privateUiDepth.Get(),0,nullptr,uiZ.data(),16*4,0);
+        ctx->UpdateSubresource(previous.Get(),0,nullptr,priorZ.data(),8*4,0);
+        // The head turns one way, the camera the other, each with a translation; the box wide enough never to clip, so a
+        // changed path shows in N and O. Every candidate of the registration instrument runs (diagnostic main).
+        floats("tanNow",-1,1,-1,1);floats("tanPrev",-1,1,-1,1);floats("jit",.25f,-.375f,0,.5f);
+        for(const char* r:{"dR","c0R","c1R","c3R"}){std::string n(r);floats((n+"0").c_str(),1,0,-.1f,0);floats((n+"1").c_str(),0,1,0,0);floats((n+"2").c_str(),.1f,0,1,0);}
+        floats("c2R0",1,0,.15f,0);floats("c2R1",0,1,0,0);floats("c2R2",-.15f,0,1,0);
+        floats("knobs",0,1,.025f,0);floats("tvUsed",.01f,0,0,1);floats("tvCand",-.01f,0,0,0);floats("tvCam",.02f,0,0,1);floats("split",1,0,0,0);
+        floats("holoJitter",.25f,-.375f,1,1);
+        const float blend=.9f,gamma=100.f;const int haveHistory=1,candMask=15;
+        set("blend",&blend,4);set("gamma",&gamma,4);set("haveHistory",&haveHistory,4);set("candMask",&candMask,4);
+        auto statsRead=[&](){ctx->CopyResource(statsStage.Get(),statsBuf.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(statsStage.Get(),0,D3D11_MAP_READ,0,&m));
+            std::vector<float> v(128);std::memcpy(v.data(),m.pData,128*4);ctx->Unmap(statsStage.Get(),0);return v;};
+        ComPtr<ID3D11ComputeShader> blobs[5];
+        for(int variant=0;variant<5;++variant)hr(dev->CreateComputeShader(embedded[variant].data,embedded[variant].size,nullptr,&blobs[variant]));
+        // Every output of one dispatch, concatenated: mv's MV, ZC, MK (and DT for the trace blob), main's O and N; then Stats.
+        auto run=[&](int variant,bool t6,bool t7,UINT bits){
+            const bool isMv=variant<3,traced=variant==2;
+            floats("probe",1,0,0,float(bits));ctx->UpdateSubresource(cb.Get(),0,nullptr,data.data(),0,0);
+            ID3D11ComputeShader* tested=blobs[variant].Get();
+            const UINT zero[4]={};const float nothing[4]={};
+            ctx->ClearUnorderedAccessViewUint(statsUav.Get(),zero);
+            for(auto* u:{mu.Get(),zu.Get(),ku.Get(),du.Get(),outUav.Get(),nextUav.Get()})ctx->ClearUnorderedAccessViewFloat(u,nothing);
+            ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+            ID3D11ShaderResourceView* in[8]={colourView.Get(),historyView.Get(),zs.Get(),previousView.Get(),nullptr,nullptr,
+                                            t6?smokeDepthView.Get():nullptr,t7?privateUiDepthView.Get():nullptr};
+            ctx->CSSetShaderResources(0,8,in);ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
+            ID3D11UnorderedAccessView* out[8]={isMv?nullptr:outUav.Get(),isMv?nullptr:nextUav.Get(),statsUav.Get(),isMv?mu.Get():nullptr,
+                                               isMv?zu.Get():nullptr,isMv?ku.Get():nullptr,nullptr,traced?du.Get():nullptr};
+            ctx->CSSetUnorderedAccessViews(0,8,out,nullptr);ctx->CSSetShader(tested,nullptr,0);ctx->Dispatch(1,1,1);
+            std::vector<float> all;
+            auto add=[&](const std::vector<float>& v){all.insert(all.end(),v.begin(),v.end());};
+            if(isMv){add(read(dev,ctx,motion.Get()));add(read(dev,ctx,depth.Get()));add(read(dev,ctx,mask.Get()));if(traced)add(read(dev,ctx,decision.Get()));}
+            else{add(read(dev,ctx,outTex.Get()));add(read(dev,ctx,nextTex.Get()));}
+            add(statsRead());ctx->ClearState();return all;
+        };
+        auto same=[](const std::vector<float>& a,const std::vector<float>& b){return a.size()==b.size() && std::memcmp(a.data(),b.data(),a.size()*4)==0;};
+        for(int variant=0;variant<5;++variant){
+            for(int combo=0;combo<3;++combo){   // t6 and t7 null, t6 null, t7 null
+                const bool t6=combo==2,t7=combo==1;
+                const UINT absent=(t6?0u:64u)|(t7?0u:256u);
+                const auto fetched=run(variant,t6,t7,0),skipped=run(variant,t6,t7,absent);
+                if(!same(fetched,skipped))std::printf("absent-layer gate: %s, t6 %s, t7 %s: outputs differ\n",embedded[variant].name,t6?"bound":"null",t7?"bound":"null");
+                check(same(fetched,skipped),"absent-layer gate: a shipping blob writes the same bytes to every output with an absent layer's bit clear (fetched) or set (skipped)");
+            }
+            // The control: t7 bound and nearer, bit 256 set anyway (t6 null, bit 64 as it should be).
+            const auto honest=run(variant,false,true,64u),lie=run(variant,false,true,64u|256u),nothingBound=run(variant,false,false,64u|256u);
+            check(!same(honest,lie),"absent-layer gate control: a shipping blob honours bit 256 (a bound, nearer UI depth skipped changes the outputs)");
+            check(same(lie,nothingBound),"absent-layer gate control: bit 256 over a bound UI depth reads exactly as no UI depth");
+        }
+        // The same fetched-versus-skipped parity over the depth classes the max chain must carry bit for bit: -0, +0,
+        // both quiet NaNs, the smallest and largest denormals and a negative one, -1 and -0.01, with ordinary depths
+        // between, in Z and in whichever of ZS / ZUI is bound, the patterns staggered so the three layers' classes meet
+        // in many pairings. Both arms run the same shipping blob (the null-view fetch against the literal +0.0 the bit
+        // substitutes, through the same max instruction), so this proves skipping a layer equals fetching a null one for
+        // those inputs. It does NOT prove the new max operand order matches the old shader's: that comparison, the
+        // production zSceneAt against the expression it replaced, is the zscene gate harness
+        // (tools\ui_depth_test\zscene_gate_test.h). WARP (this rig's device).
+        {
+            const uint32_t kClasses[]={0x80000000u,0x7FC00000u,0xFFC00000u,0x00000001u,0x007FFFFFu,0x80000001u,
+                                       0xBF800000u,0xBC23D70Au,0x00000000u,0x3BA3D70Au,0x3D4CCCCDu};
+            constexpr int kN=int(sizeof(kClasses)/sizeof(kClasses[0]));
+            std::vector<uint32_t> sceneC(16*16),smokeC(16*16),uiC(16*16);
+            for(int i=0;i<16*16;++i){const int row=i/16;
+                sceneC[i]=kClasses[(i*7+row)%kN];smokeC[i]=kClasses[(i*5+3+row*2)%kN];uiC[i]=kClasses[(i*3+7+row*3)%kN];}
+            ctx->UpdateSubresource(scene.Get(),0,nullptr,sceneC.data(),16*4,0);
+            ctx->UpdateSubresource(smokeDepth.Get(),0,nullptr,smokeC.data(),16*4,0);
+            ctx->UpdateSubresource(privateUiDepth.Get(),0,nullptr,uiC.data(),16*4,0);
+            for(int variant=0;variant<5;++variant)
+                for(int combo=0;combo<3;++combo){   // t6 and t7 null, t6 null (t7 bound), t7 null (t6 bound)
+                    const bool t6=combo==2,t7=combo==1;
+                    const UINT absent=(t6?0u:64u)|(t7?0u:256u);
+                    const auto fetched=run(variant,t6,t7,0),skipped=run(variant,t6,t7,absent);
+                    if(!same(fetched,skipped))std::printf("absent-layer gate, special depths: %s, t6 %s, t7 %s: outputs differ\n",embedded[variant].name,t6?"bound":"null",t7?"bound":"null");
+                    check(same(fetched,skipped),"absent-layer gate: a shipping blob writes the same bytes with -0, NaN, denormal and negative depths in Z and the bound layer, bits clear or set");
+                }
+        }
+        std::printf("PASS: absent-layer gate: the five shipping temporal blobs are byte-identical with t6/t7 null and the bits clear or set "
+                    "(ordinary depths, and -0/NaN/denormal/negative in Z and the bound layer), and honour bit 256\n");
+    }
     ctx->ClearState();
 }

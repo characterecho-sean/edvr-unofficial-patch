@@ -76,7 +76,7 @@ void decisionTable() {
         const uint64_t at = inWin ? 2000 + 9000 : 2000 + 10001;   // inside (9 s after the flip) or just past 10 s
         SeatResetDecision expect;
         if (mode != 2) expect = SeatResetDecision::GameMode;
-        else if (where == SeatWhere::Unknown) expect = SeatResetDecision::PassThrough;    // a menu or a load; on foot is a seat (kOnFootIsSeated)
+        else if (where != SeatWhere::Aboard) expect = SeatResetDecision::PassThrough;     // a menu or a load, and on foot (F115: not a seat)
         else if (inWin) expect = stored ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
         else expect = SeatResetDecision::HonourStore;
         const SeatResetDecision got = m.classifyReset(at);
@@ -85,8 +85,8 @@ void decisionTable() {
                       seatResetDecisionName(expect), seatResetDecisionName(got));
         check(got == expect, text);
     }
-    check(kOnFootIsSeated && onFootIsSeated(), "the rule on foot is: everyone sits");
-    check(seatHolds(SeatWhere::Aboard) && seatHolds(SeatWhere::OnFoot) && !seatHolds(SeatWhere::Unknown), "the seat applies aboard and on foot, not in a menu");
+    check(!kOnFootIsSeated && !onFootIsSeated(), "F115: the rule on foot is: not a seat (the pilot, 2026-10-25)");
+    check(seatHolds(SeatWhere::Aboard) && !seatHolds(SeatWhere::OnFoot) && !seatHolds(SeatWhere::Unknown), "the seat applies aboard only, not on foot or in a menu");
     // The window is ten seconds from the flip, inclusive, aboard or on foot.
     SeatMemory m; m.setSeat(seat);
     m.onContext(ctx(true, SeatWhere::OnFoot), 0);
@@ -129,28 +129,28 @@ void transitions() {
     SeatEvents ev = m.onContext(ctx(true, SeatWhere::Unknown), 100);
     check(!ev.windowOpened && !ev.applyWanted, "the first sight in a menu does nothing");
     ev = m.onContext(ctx(true, SeatWhere::OnFoot), 200);
-    check(ev.windowOpened && ev.applyWanted && std::string(ev.why) == "on_foot" && m.where() == SeatWhere::OnFoot,
-          "on foot, from a menu, is a seat transition: window and apply, like boarding");
-    check(m.inWindow(200) && m.classifyReset(250) == SeatResetDecision::ReplaceWithSeat, "...and its resets are replaced");
-    m.applyDone(); m.noteOrigin(true);
+    check(!ev.windowOpened && !ev.applyWanted && std::string(ev.why) == "left_seat" && m.where() == SeatWhere::OnFoot,
+          "F115: on foot, from a menu, applies nothing (on foot is not a seat)");
+    check(!m.inWindow(200) && m.classifyReset(250) == SeatResetDecision::PassThrough && m.classifyReset(250, PressInfo{PressState::Seen, 20, "edge"}) ==
+          SeatResetDecision::PassThrough, "F115: ...and its resets pass through, the player's press too (it recentres on foot only)");
+    m.noteOrigin(true);
     m.noteReset(SeatResetDecision::PassThrough, SeatPose{});      // walking about, the origin has been moved off the seat
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 300);
     check(ev.windowOpened && ev.applyWanted && std::string(ev.why) == "boarded" && m.applyPending(), "boarding from foot applies the seat");
     check(m.inWindow(300), "...and opens the window");
     m.applyDone(); m.noteOrigin(true);
     check(!m.applyPending(), "applyDone settles the apply");
-    // Disembarking is a transition like boarding: a window, and the seat back if the game's reset moved it.
+    // F115: disembarking is no transition: no window, no seat put back (an on-foot origin is the player's or the game's, on foot only).
     ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 350);
-    check(ev.windowOpened && !ev.applyWanted && std::string(ev.why) == "disembarked" && m.inWindow(350),
-          "disembarking opens the window (the origin is already the seat: nothing to put back)");
+    check(!ev.windowOpened && !ev.applyWanted && std::string(ev.why) == "left_seat" && !m.inWindow(350), "F115: disembarking opens no window and applies nothing");
     m.noteReset(SeatResetDecision::PassThrough, SeatPose{});
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 360);
     check(ev.applyWanted && std::string(ev.why) == "boarded", "boarding again puts the seat back");
     m.applyDone(); m.noteOrigin(true);
     m.noteReset(SeatResetDecision::PassThrough, SeatPose{});
     ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 370);
-    check(ev.applyWanted && std::string(ev.why) == "disembarked" && m.applyPending(), "disembarking with the origin off the seat puts it back");
-    m.applyDone(); m.noteOrigin(true);
+    check(!ev.applyWanted && std::string(ev.why) == "left_seat" && !m.applyPending(), "F115: disembarking with the origin off the seat leaves it there");
+    m.noteOrigin(true);
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 380);
     m.applyDone(); m.noteOrigin(true);
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 400);
@@ -178,13 +178,13 @@ void transitions() {
     check(m.applyPending(), "...and coming back re-arms");
     m.onContext(ctx(true, SeatWhere::Unknown, 0, 3), 1200);
     check(!m.applyPending(), "a pending apply does not survive a load");
-    // Explorer Cam on foot is the same as aboard
-    SeatMemory cam; cam.setSeat(seat); cam.onContext(ctx(true, SeatWhere::OnFoot), 0); cam.applyDone(); cam.noteOrigin(true);
+    // F115: a camera on foot is on foot: no window, no seat
+    SeatMemory cam; cam.setSeat(seat); cam.onContext(ctx(true, SeatWhere::OnFoot), 0); cam.noteOrigin(true);
     ev = cam.onContext(ctx(true, SeatWhere::OnFoot, 0, 0, true), 100);
-    check(ev.windowOpened && !ev.applyWanted && std::string(ev.why) == "camera_opened", "Explorer Cam opening on foot opens a window");
+    check(!ev.windowOpened && !ev.applyWanted, "F115: a camera opening on foot opens no window");
     cam.noteReset(SeatResetDecision::PassThrough, SeatPose{});
     ev = cam.onContext(ctx(true, SeatWhere::OnFoot, 0, 0, false), 200);
-    check(ev.applyWanted && std::string(ev.why) == "camera_closed", "...and closing it puts the seat back");
+    check(!ev.applyWanted, "F115: ...and closing it puts nothing back");
     // seat kind only means something aboard
     SeatMemory kind; kind.setSeat(seat); kind.onContext(ctx(true, SeatWhere::OnFoot, 0), 0); kind.applyDone(); kind.noteOrigin(true);
     ev = kind.onContext(ctx(true, SeatWhere::OnFoot, 7), 10);
@@ -341,9 +341,10 @@ void runtimeRecentre() {
     check(off.has() && off.applyPending(), "...with nothing stored before");
     // next boarding uses it
     SeatMemory nb; nb.setSeat(seat);
-    nb.onContext(ctx(true, SeatWhere::OnFoot), 0); nb.applyDone(); nb.noteOrigin(true);
-    nb.noteRuntimeRecentre(head);
-    nb.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 5000);
+    nb.onContext(ctx(true, SeatWhere::Aboard), 0); nb.applyDone(); nb.noteOrigin(true);
+    nb.noteRuntimeRecentre(head);   // aboard (F115: the host does not store one made on foot)
+    nb.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 3000);
+    nb.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 5000);
     check(nb.classifyReset(5100) == SeatResetDecision::ReplaceWithSeat && nearPose(nb.seat(), head), "the next boarding's replacement is the runtime-recentred seat");
 }
 
@@ -358,6 +359,9 @@ void meter() {
 
 // ---- persistence
 void bookText() {
+    const std::string key="steamvr-openxr/steamvr-openxr-aapvr";
+    check(seatKeyForNaturalSpace(key,false)==key&&seatKeyForNaturalSpace(key,true)==key+"-stage",
+          "STAGE seat key is separate from old LOCAL seat key");
     std::vector<SeatRecord> book;
     seatBookPut(book, "pimax-openxr/pimax-crystal", SeatPose{-0.53, 0.0, -1.11, seatDegToRad(-28)});
     seatBookPut(book, "steamvr-openxr/steamvr-openxr-aapvr", SeatPose{-0.53, 0.45, -1.11, seatDegToRad(-28.5)});
@@ -474,37 +478,48 @@ void files() {
 // ---- a reset outside any window is held for five seconds before it is believed
 void retroWindow() {
     const SeatPose seat{-0.53, 0.45, -1.11, seatDegToRad(-28)}, ramp{-0.20, 0.05, -0.40, seatDegToRad(20)};
-    // the ramp's reset 3 s before the boarding flip is dropped and the old seat applied
+    // F115: the ramp's reset 3 s before the boarding flip is on foot: it passes through, nothing is held, and boarding puts the stored seat back
     {
         SeatMemory m; m.setSeat(seat);
         m.onContext(ctx(true, SeatWhere::Unknown), 0);
         m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 1000);
-        m.applyDone(); m.noteOrigin(true);
-        const uint64_t t = 30000;                 // long after the on-foot window
-        check(m.classifyReset(t) == SeatResetDecision::HonourStore, "the ramp's reset is outside a window");
-        check(!m.noteReset(SeatResetDecision::HonourStore, ramp, t) && nearPose(m.seat(), ramp) && m.storePending() && nearPose(m.previousSeat(), seat),
-              "...honoured, held, with the old seat kept beside it");
-        uint64_t w = 0;
-        check(!m.takeCommit(t + 2999, w), "...not written yet");
+        m.noteOrigin(true);
+        const uint64_t t = 30000;
+        const SeatResetDecision d = m.classifyReset(t);
+        check(d == SeatResetDecision::PassThrough && !m.noteReset(d, ramp, t) && !m.storePending() && nearPose(m.seat(), seat) && !m.originIsSeat(),
+              "F115: the ramp's reset on foot passes through: the origin moves, the seat stays, nothing is held");
         const SeatEvents ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), t + 3000);
-        check(ev.discardedPending && ev.discardAgeMs == 3000, "boarding 3 s later discards it, saying how long it had waited");
-        check(nearPose(ev.discardedSeat, ramp) && nearPose(ev.restoredSeat, seat) && nearPose(m.seat(), seat), "...the old seat is back");
-        check(ev.applyWanted && m.applyPending() && !m.originIsSeat() && std::string(ev.why) == "boarded", "...and applied, as a transition (the origin is on the ramp pose)");
-        check(!m.storePending() && !m.takeCommit(t + 99999, w), "...and nothing is left to commit");
+        check(!ev.discardedPending && ev.applyWanted && m.applyPending() && std::string(ev.why) == "boarded" && nearPose(m.seat(), seat),
+              "F115: ...and boarding 3 s later puts the stored seat back");
         m.applyDone(); m.noteOrigin(true);
     }
-    // a reset 6 s before boarding was committed a second ago
+    // a player-looking reset aboard 3 s before a disembark is taken back as a transition would (F115: leaving for on foot is no transition, but discards it)
     {
         SeatMemory m; m.setSeat(seat);
-        m.onContext(ctx(true, SeatWhere::Unknown), 0);
-        m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 1000);
+        m.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 0);
+        m.applyDone(); m.noteOrigin(true);
+        const uint64_t t = 30000;
+        check(m.classifyReset(t) == SeatResetDecision::HonourStore && !m.noteReset(SeatResetDecision::HonourStore, ramp, t) && m.storePending(),
+              "aboard, outside a window, the key not observable: honoured and held");
+        const SeatEvents ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 2), t + 3000);
+        uint64_t w = 0;
+        check(ev.discardedPending && ev.discardAgeMs == 3000 && nearPose(ev.discardedSeat, ramp) && nearPose(m.seat(), seat) && !m.originIsSeat() &&
+                  !ev.applyWanted && !m.takeCommit(t + 99999, w),
+              "F115: disembarking 3 s later discards it (the old seat stands) and applies nothing on foot");
+        const SeatEvents board = m.onContext(ctx(true, SeatWhere::Aboard, 1, 3), t + 60000);
+        check(board.applyWanted && nearPose(m.seat(), seat), "F115: ...and the next boarding puts the old seat back");
+    }
+    // a reset aboard 6 s before a journal event was committed a second ago
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(true, SeatWhere::Aboard, 1, 1), 0);
         m.applyDone(); m.noteOrigin(true);
         const uint64_t t = 30000;
         m.noteReset(SeatResetDecision::HonourStore, ramp, t);
         uint64_t w = 0;
         check(m.takeCommit(t + 5000, w) && w == 5000, "five seconds on, it commits");
         const SeatEvents ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), t + 6000);
-        check(!ev.discardedPending && nearPose(m.seat(), ramp), "boarding 6 s after is too late to take it back: it is the seat");
+        check(!ev.discardedPending && nearPose(m.seat(), ramp), "a transition 6 s after is too late to take it back: it is the seat");
         check(ev.windowOpened && !ev.applyWanted, "...and the origin is already on it");
     }
     // aboard, no transition: commits at exactly five seconds, once
@@ -576,8 +591,9 @@ void pressRules() {
         const uint64_t at = inWin ? 2000 + 9000 : 2000 + 10001;
         const PressInfo press = p == 0 ? seen() : p == 1 ? none() : unobs();
         SeatResetDecision expect;
-        if (where == SeatWhere::Unknown) expect = SeatResetDecision::PassThrough;
-        else if (p == 0) expect = SeatResetDecision::HonourPress;
+        if (where == SeatWhere::OnFoot) expect = SeatResetDecision::PassThrough;   // F115: on foot is not a seat, a press there recentres on foot only
+        else if (p == 0) expect = SeatResetDecision::HonourPress;                  // F115: a press in a menu or a load is the player's seat too
+        else if (where == SeatWhere::Unknown) expect = SeatResetDecision::PassThrough;
         else if (p == 1) expect = stored ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
         else if (inWin) expect = stored ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
         else expect = SeatResetDecision::HonourStore;
@@ -586,6 +602,33 @@ void pressRules() {
         std::snprintf(text, sizeof text, "press table: where=%d window=%d stored=%d press=%s -> %s (got %s)", w, inWin, stored, pressStateName(press.state),
                       seatResetDecisionName(expect), seatResetDecisionName(got));
         check(got == expect, text);
+    }
+    // F115: the flight of 2026-10-25 (log edvr_gfx_20261025_071049): a seat stored in an earlier session is put at the origin at the start; the player recentres
+    // in the menu (stored); a game reset in the load passes through; on foot nothing is applied, and the player's recentre there moves the origin and is not
+    // stored; the boarding puts the menu seat back.
+    {
+        const SeatPose old{0.055, 0.436, -0.555, seatDegToRad(27.5)}, menu{0.057, 0.256, -0.563, seatDegToRad(30.2)}, onFoot{0.047, 0.340, -0.648, seatDegToRad(27.1)};
+        SeatMemory m; m.setSeat(old);
+        m.onContext(ctx(true, SeatWhere::Unknown), 0);
+        m.noteOrigin(true);
+        const SeatResetDecision d = m.classifyReset(6500, seen(15));
+        const bool stored = d == SeatResetDecision::HonourPress && m.noteReset(d, menu, 6500) && nearPose(m.seat(), menu) && m.originIsSeat() && !m.storePending();
+        const SeatResetDecision load = m.classifyReset(30000, none());
+        m.noteReset(load, SeatPose{});
+        const SeatEvents foot = m.onContext(ctx(true, SeatWhere::OnFoot, 1, 1), 60000);
+        const bool footNothing = load == SeatResetDecision::PassThrough && !foot.applyWanted && !foot.windowOpened && nearPose(m.seat(), menu);
+        const SeatResetDecision press = m.classifyReset(300000, seen(20));
+        const bool footPress = press == SeatResetDecision::PassThrough && !m.noteReset(press, onFoot, 300000) && nearPose(m.seat(), menu) && !m.originIsSeat();
+        const SeatEvents board = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 990000);
+        check(stored && footNothing && footPress && std::string(board.why) == "boarded" && board.applyWanted && m.applyPending() && nearPose(m.seat(), menu),
+              "F115: a press in the menu is stored at once; a load's reset passes through; on foot nothing is applied and a press there is not stored; "
+              "boarding puts the menu seat back");
+        SeatMemory f; f.setSeat(old);
+        f.onContext(ctx(true, SeatWhere::Unknown), 0);
+        f.onContext(ctx(true, SeatWhere::OnFoot), 1000);
+        check(f.classifyReset(20000, seen()) == SeatResetDecision::PassThrough && f.classifyReset(20000, none()) == SeatResetDecision::PassThrough &&
+                  f.classifyReset(20000) == SeatResetDecision::PassThrough && !f.noteReset(SeatResetDecision::PassThrough, onFoot, 20000) && nearPose(f.seat(), old),
+              "F115: on foot a press, a game reset and an unobservable reset all pass through, and the stored seat is untouched");
     }
     // Without the graphics half (no argument) the old rules stand exactly.
     {
@@ -619,11 +662,11 @@ void pressRules() {
         check(h.storePending(), "(a timing-rule store is held)");
         check(h.noteReset(SeatResetDecision::HonourPress, mine, 61000) && !h.storePending() && nearPose(h.seat(), mine), "a press-confirmed recentre cancels a hold and is written");
     }
-    // The game's own reset, press observable and none seen: the seat, with no hold and no window needed
+    // The game's own reset aboard, press observable and none seen: the seat, with no hold and no window needed
     {
         SeatMemory m; m.setSeat(seat);
-        m.onContext(ctx(true, SeatWhere::OnFoot), 0); m.applyDone(); m.noteOrigin(true);
-        check(m.classifyReset(60000, none()) == SeatResetDecision::ReplaceWithSeat, "the ramp's reset 30 s into a walk, no press: replaced, not held");
+        m.onContext(ctx(true, SeatWhere::Aboard), 0); m.applyDone(); m.noteOrigin(true);
+        check(m.classifyReset(60000, none()) == SeatResetDecision::ReplaceWithSeat, "a game reset a minute aboard, no press: replaced, not held");
         check(!m.noteReset(SeatResetDecision::ReplaceWithSeat, seat, 60000) && !m.storePending() && nearPose(m.seat(), seat), "...nothing to store, nothing to commit");
     }
     // pressInfoFrom: the words to a verdict, and the edges of the one-second window
@@ -680,11 +723,12 @@ void pressRules() {
     {
         SeatMemory m; m.setSeat(seat);
         m.onContext(ctx(true, SeatWhere::Unknown), 0);
-        m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 1000); m.applyDone(); m.noteOrigin(true);
-        check(m.classifyReset(30000, none()) == SeatResetDecision::ReplaceWithSeat, "the ramp's reset, no press: the stored seat");
-        m.noteReset(SeatResetDecision::ReplaceWithSeat, seat, 30000);
+        m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 1000); m.noteOrigin(true);
+        check(m.classifyReset(30000, none()) == SeatResetDecision::PassThrough, "F115: the ramp's reset on foot, no press: passes through");
+        m.noteReset(SeatResetDecision::PassThrough, SeatPose{}, 30000);
         SeatEvents ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 33000);
-        check(ev.windowOpened && !ev.applyWanted && !ev.discardedPending && nearPose(m.seat(), seat), "boarding 3 s later: the seat stands, nothing to take back");
+        check(ev.windowOpened && ev.applyWanted && !ev.discardedPending && nearPose(m.seat(), seat), "F115: boarding 3 s later puts the stored seat back");
+        m.applyDone(); m.noteOrigin(true);
         check(m.classifyReset(60000, seen(120)) == SeatResetDecision::HonourPress, "a press then a reset, a minute later: the player's");
         m.noteReset(SeatResetDecision::HonourPress, mine, 60000);
         ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 3), 62000);
@@ -701,18 +745,18 @@ void story() {
     check(seatStartPlan(m.keep(), m.has()) == SeatStartPlan::CaptureLate, "launch 1: start as today");
     check(seatIntroPlan(m.keep(), m.has(), m.originIsSeat()) == SeatIntroPlan::Capture, "launch 1: the splash captures");
     m.setSeat(seat); m.noteOrigin(true);
-    // 2. on foot in the station: everyone sits, so the spawn reset is replaced by the seat
+    // 2. on foot in the station (F115: not a seat): no window, the spawn reset passes through and moves the origin, the seat stands
     SeatEvents ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 20000);
-    check(ev.windowOpened && !ev.applyWanted, "on foot: a window opens (the origin is already the seat)");
-    check(m.classifyReset(20500) == SeatResetDecision::ReplaceWithSeat, "on foot: the spawn reset is replaced");
-    m.noteReset(SeatResetDecision::ReplaceWithSeat, seat);
-    check(m.has() && nearPose(m.seat(), seat) && m.originIsSeat(), "...and the seat stands");
-    // 3. boarding by the ramp: a reset lands BEFORE the flip (4.4 s early), outside any window: read as the player's own, and stored
-    check(m.classifyReset(60000) == SeatResetDecision::HonourStore, "boarding: an early reset, outside a window, is read as the player's own");
+    check(!ev.windowOpened && !ev.applyWanted, "F115: on foot: no window, nothing applied");
+    check(m.classifyReset(20500) == SeatResetDecision::PassThrough, "F115: on foot: the spawn reset passes through");
+    m.noteReset(SeatResetDecision::PassThrough, SeatPose{});
+    check(m.has() && nearPose(m.seat(), seat) && !m.originIsSeat(), "...and the seat stands, the origin off it");
+    // 3. boarding by the ramp: a reset lands BEFORE the flip (4.4 s early), on foot: it passes through, nothing is held
+    check(m.classifyReset(60000) == SeatResetDecision::PassThrough, "F115: boarding: an early reset on foot passes through");
     const SeatPose early{-0.40, 0.10, -1.00, seatDegToRad(-10)};
-    check(!m.noteReset(SeatResetDecision::HonourStore, early, 60000) && m.storePending(), "...but held, not written");
+    check(!m.noteReset(SeatResetDecision::PassThrough, early, 60000) && !m.storePending(), "...nothing held");
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 64400);
-    check(ev.discardedPending && ev.discardAgeMs == 4400 && nearPose(m.seat(), seat), "boarding 4.4 s later takes the ramp's reset back: the old seat stands");
+    check(!ev.discardedPending && nearPose(m.seat(), seat), "boarding 4.4 s later: nothing to take back, the old seat stands");
     check(ev.applyWanted, "boarding: the flip puts the seat back");
     m.applyDone(); m.noteOrigin(true);
     // 4. the game resets again 5 s after the flip (the interface route): replaced
@@ -727,10 +771,12 @@ void story() {
           "...becomes the seat after five quiet seconds");
     // 6. docking, disembarking, boarding again: the new seat
     ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 3), 1000000);
-    check(ev.windowOpened && std::string(ev.why) == "disembarked" && m.classifyReset(1003000) == SeatResetDecision::ReplaceWithSeat,
-          "disembarking: the game's reset in the window is replaced by the player's seat");
+    check(!ev.windowOpened && std::string(ev.why) == "left_seat" && m.classifyReset(1003000) == SeatResetDecision::PassThrough,
+          "F115: disembarking: no window, the game's reset on foot passes through");
+    m.noteReset(SeatResetDecision::PassThrough, SeatPose{});
     ev = m.onContext(ctx(true, SeatWhere::Aboard, 4, 4), 1060000);
-    check(m.classifyReset(1060001) == SeatResetDecision::ReplaceWithSeat && nearPose(m.seat(), mine), "boarding again uses the recentre the player made");
+    check(ev.applyWanted && m.classifyReset(1060001) == SeatResetDecision::ReplaceWithSeat && nearPose(m.seat(), mine),
+          "boarding again puts back the recentre the player made aboard");
     // 7. back in game mode nothing of this applies
     m.onContext(ctx(false, SeatWhere::Aboard, 4, 4), 1100000);
     check(m.classifyReset(1100001) == SeatResetDecision::GameMode, "game mode: honoured as always");

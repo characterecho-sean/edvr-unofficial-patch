@@ -10,6 +10,9 @@ void vrDisplayObserveWindow(void* hwnd);
 // The game window, or null before the swap chain is hooked.
 void* vrDisplayGameWindow();
 
+// The game window's style and client size, read as the frame check reads them. False before the swap chain is hooked.
+bool vrDisplayReadGameWindow(unsigned long long* style, long* clientWidth, long* clientHeight);
+
 // The render thread, once a frame (from vrSsaaGateNotePresent): the window's style and client size, one line when either changes.
 void vrDisplayObserveFrame();
 

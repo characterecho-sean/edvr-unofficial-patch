@@ -21,8 +21,14 @@
 namespace edvr {
 
 // DllMain's attach: the build gate, the loader's slot, and the Supersampling setter/getter hooks (ui_panel_scale.cpp's
-// uiPanelScaleEarlyHooks). Pure memory reads and writes; no logging here (the reason is kept for vrSsaaHoldReport).
+// uiPanelScaleEarlyHooks). Pure memory reads and writes; no logging here (the reason is kept for vrSsaaHoldReport). On an unknown build
+// of the game it does nothing: the addresses need the signature resolve, which stays out of DllMain (the loader lock), and
+// vrSsaaHoldInstallAfterResolve installs the hold instead.
 void vrSsaaHoldEarlyInstall();
+
+// An unknown build only (a no-op otherwise): the same install, once, after the signature resolve. gameBuildStartup's resolver thread
+// calls it when the resolve is done; vrSsaaHoldReport calls it too, so the report never runs ahead of the install.
+void vrSsaaHoldInstallAfterResolve();
 
 // vrSsaaGateStartup (device creation): one line on whether the hold's hooks are in, and why not if not.
 void vrSsaaHoldReport();

@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <string>
 
+#include "log_reserve.h"
+
 namespace edvr {
 
 class Log {
@@ -46,6 +48,13 @@ public:
 
     void note(const char* fmt, ...);
 
+    // A line that is still written after the size cap (log.max_mb) is reached. Before the cap it is exactly note(). After it,
+    // the line is written from a reserve of kLogReserveBytes (1 MiB) a session, in the order it was noted, until the reserve
+    // is spent; the log then says so once and writes no more of these either. For the few lines that are the only record of
+    // something slow (the memory watch's mem: lines), not for anything that can be a note(). It has room for a line of
+    // kLogReservedLineBytes with its stamp; note() has 1200.
+    void noteReserved(const char* fmt, ...);
+
     bool isOpen() const { return m_open; }
     uint64_t dropped() const { return m_dropped.load(std::memory_order_relaxed); }
     // The size cap in force, in bytes (log.max_mb, read when the log opened); 0 means no cap. For the rigs: the default is pinned
@@ -64,7 +73,8 @@ private:
     void startFlusherOnce();
     void flusherMain();
     void writeBuffer(int index);
-    void append(const char* text, size_t bytes);
+    void writeReserved(int index);
+    void append(const char* text, size_t bytes, bool reserved);
 
     struct Impl;
     Impl* m_impl = nullptr;
@@ -89,6 +99,9 @@ private:
     uint64_t m_maxBytes = 0;      // 0 = unlimited
     uint64_t m_bytesWritten = 0;
     bool     m_capped = false;
+    // What noteReserved lines have taken of the reserve since the cap. Touched only where the file is written (the flusher,
+    // or close() after it is joined), like m_bytesWritten.
+    LogReserve m_reserve;
 
     // How much unflushed text may queue between two flusher passes. From
     // log.buffer_mb; see the comment on kDefaultBufferMb in log.cpp for why

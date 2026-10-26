@@ -2,6 +2,15 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
+These notes include the maintainer's workflow. In a fork or contributor's
+clone, follow the project rules for tools, build validation, diagnosis and
+config editing. Use your own shell and Git workflow, and submit changes by
+pull request. The Git section, release-notes rules, and maintainer-only
+merge, push-to-main, tag, release and workflow-dispatch steps elsewhere in
+this file do not apply to contributors. The host-specific validation paths
+still apply: native Windows uses the full local build, and other hosts use
+the full Windows workflow for C++ changes.
+
 Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
 (`d3d11.dll` beside the game) and EDVR's own OpenXR runtime for
 Elite (`openvr_api.dll` in `Openvr\win64`), a config file, and an
@@ -65,16 +74,20 @@ corrupted. Do not regenerate the one-liner — extend the script.
 |---|---|---|
 | Install a build next to the game | `python tools\install_edvr.py` | `Copy-Item` onto the game directory |
 | Check the install matches the build | `python tools\install_edvr.py --verify-only` | eyeballing timestamps |
-| Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`) | `Get-Content -Tail` + `Select-String` |
+| Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`; first command on an on-foot flight: add `--health [--since HH:MM:SS] [--until HH:MM:SS]`, which says which tagged features ran and applied and exits 3 on a NEVER APPLIED one) | `Get-Content -Tail` + `Select-String` |
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
 | Make a worktree that can build | `python tools\worktree.py add <path>` | `git worktree add` alone (no deps) |
 | Post PR replies or a summary | `python tools\pr_post.py --pr N --since <time> ...` | hand-built `gh api` / `gh pr comment` calls |
+| Compile on Linux for a test flight | `python3 tools/linux_toolchain.py build-dlls` | running `build.bat` under Wine by hand |
+| Keep the game exe before Steam updates it (`install_edvr.py` also does it on every install; then docs\game-binary-map.md "Re-deriving after a patch") | `python tools\archive_game_exe.py --target steam` (`--dry-run` first) | `Copy-Item` of the exe, or committing it |
 
 Every release's notes carry a `## Thanks` section built from
 `release_credits.py --thanks` and finished by hand. It names only the authors
-of PRs merged in the release; everyone who opened an issue or sent logs gets
-the tool's one general line and is not named. A person writes each sentence.
+of PRs merged in the release, and anyone the maintainer has approved by name in
+`tools\release_credits_approved.json` for a commit in the release. Everyone
+else who opened an issue or sent logs gets the tool's one general line and is
+not named. Add an entry to that file only on the maintainer's word. A person writes each sentence.
 People known only by an anonymised label ("user 2", "the reporter") are not
 named without the maintainer's consent.
 
@@ -131,30 +144,47 @@ minutes after a flight finally reproduced the effect being chased.
   output. The GitHub workflow is optional there. From Linux or another
   non-native Windows host, use the GitHub Windows workflow below for
   full C++ validation. Wine and Proton do not count as native Windows.
-- From this Linux checkout, the Git-ignored pinned compiler, SDK and
-  Wine prefix are under `.toolchains/windows/`. From a shell, invoke its
-  PowerShell wrapper directly:
+- **Linux: a compile-only build.** `tools/linux_toolchain.py` runs
+  `build.bat --compile-only` under Wine, with the same MSVC and Windows SDK as
+  CI, and writes the production DLLs to `<root>/build/compile-build` for the
+  main checkout or any worktree. It runs none of the gates, so it is not
+  validation and not a release asset; CI stays the validation for a merge or
+  release, and the full `build.bat` currently fails Wine's process/window gates
+  (do not bypass them). Run it with host `python3` from any shell, no wrapper.
+  Once per machine the user installs `wine msitools git` with sudo; then
+  `python3 tools/linux_toolchain.py setup --dry-run`, and
+  `setup --accept-license` only when the user has accepted VS 2022's Build
+  Tools licence (it needs a Visual Studio licence). Microsoft's binaries, the
+  Wine prefix and the SDKs sit in the Git-ignored
+  `<main checkout>/.toolchains/windows/` and are never shared; `doctor` checks
+  them.
+- **Linux test flight (Steam Deck, Proton).** For a build Sean will fly, CI
+  first is not required; CI is for a merge or release. Commit to the branch
+  before compiling: a dirty tree compiles as `vX.Y.Z-dirty`, which
+  `edvr_log.py --expect-build HEAD` will not match. Close Elite, then:
 
-  ```text
-  /home/deck/projects/edvr-unofficial-patch/.toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py doctor"
+  ```bash
+  python3 tools/linux_toolchain.py build-dlls
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --dry-run
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only
+  python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --verify-only
+  python3 tools/edvr_log.py --target steam --expect-build HEAD --version
   ```
 
-  In PowerShell, from this repository root:
-
-  ```powershell
-  python3 .toolchains/windows/toolchain.py doctor
-  python3 .toolchains/windows/toolchain.py build-dlls
-  ```
-
-  `doctor` checks the pinned setup; `build-dlls` is compile-only: it
-  writes `.toolchains/windows/compile-build/`, skips validation gates
-  and does not create a full-build receipt. Its shared toolchain root is
-  this original checkout; do not pass `--repo` or assume it builds a
-  worktree. For worktrees, use the GitHub full-validation path. The
-  local full `build` command currently fails Wine's process/window test
-  gates; do not bypass those gates or use compile-only outputs as
-  release assets. See `.toolchains/windows/README.md` for setup and
-  limits.
+  To fly a worktree, give `build-dlls` and `install_edvr.py` `--root
+  <worktree>`. `--target steam` finds the game on Linux
+  (`tools/steam_library.py`: `~/.local/share/Steam`, `~/.steam/steam`, then
+  every library in `libraryfolders.vdf`). `--compile-only` installs from
+  `<root>/build/compile-build` instead of `build/`, and refuses without that
+  build's `compile_only_receipt.json`, when an output no longer matches it, or
+  when the tree has been edited or committed since (`tools/compile_only.py`
+  holds the fingerprint, shared with the toolchain). It prints that the build
+  is not Windows validated and writes `"build": "compile-only"` into the
+  install receipt; `--verify-only` compares the game directory to that build
+  and only warns about a moved tree. A real install runs under the host
+  `python3`, which checks `/proc` for a running `EliteDangerous6*` (Proton); do
+  not run it through the Wine Python, which cannot see Proton's processes and
+  passes that check vacuously.
 - For C++ changes on a non-native host, commit and push the candidate
   branch so Actions can validate that exact commit. The `release.yml`
   workflow is active on `main`; dispatch it with `gh workflow run
@@ -228,7 +258,9 @@ minutes after a flight finally reproduced the effect being chased.
   has corrupted Sean's working config.
 - `edvr.ini` in a game directory carries the settings of whoever flew
   last. A reinstall does not undo an edit to it. `install_edvr.py` does not
-  touch it unless `--ini` says so, and backs it up when it does.
+  overwrite an existing one unless `--ini` says so (and backs it up when it
+  does); a missing one it writes, from the newest copy in the `%LOCALAPPDATA%\EDVR`
+  mirror when there is one, else from the shipped default.
 - `edvr-flat.ini` is the flat profile's own settings file: while the flat
   profile is active, EDVR reads it first and falls back to `edvr.ini`.
   `--scope flat --ini` writes it (never `edvr.ini`), `--scope both --ini`
@@ -280,6 +312,53 @@ minutes after a flight finally reproduced the effect being chased.
   stash stack with the main checkout. Never use bare `git stash` / `git
   stash pop`.
 
+## Agent material
+
+Text addressed to agents rather than people stays where anyone can strip it
+from a clone without reading it: `AGENTS.md` and `CLAUDE.md` at the root,
+where the tools look for them, and everything else agent-only (handoff
+prompts, plans, task lists) under `.agents\`. All of it is `export-ignore`
+in `.gitattributes`, so `git archive` and GitHub's source zips leave it out.
+`tools\check_agent_material.py` checks recognized agent instruction and
+prompt paths for `export-ignore`, and rejects zero-width, bidi or tag
+characters in repository text. Placement of other agent-only material under
+`.agents\` is a rule for authors; filenames alone cannot identify every such
+file.
+
+- `docs\` is written for people and is not agent material, even where an
+  agent wrote it.
+- No agent-addressed text in source comments, commit messages or release
+  notes: none of them can be stripped.
+
+## The analysis directory
+
+`analysis\` in the **main checkout** is its own git repository (private: `characterecho-sean/elite-analysis`),
+cloned into this one and git-ignored here. It holds the decompiler and disassembly notes, the address maps and
+the Ghidra scripts, and, kept local and never committed, the game executables for builds 332841, 334473 and
+334925 and the Ghidra projects. **Read `analysis\AGENTS.md` before working in it**; it has its own rules and skills
+(`elite-rva`, `retarget-build`, `ghidra-headless`, `record-finding`).
+
+- A git worktree has no `analysis\`. Reach it by the main checkout's absolute path
+  (`C:\Users\seanm\projects\edvr-unofficial-patch\analysis`; from a worktree, `git rev-parse --git-common-dir`
+  names `<main>\.git`). **Never junction or symlink it into a worktree**: removing the worktree would delete
+  the 4 GB of Ghidra projects through the link. `tools\build_diff.py` and the per-arc `pins.py` take its
+  executables by path.
+- It is a separate repository: commit there with `git -C analysis ...`, to its own `main`, and stage files by
+  path. Its history is not EDVR's, and nothing in it ships in an EDVR archive.
+- Source comments and docs here cite its files as `analysis\decomp\...`. Those files are not in this public
+  repository: a citation is a pointer for the maintainer, not evidence a stranger can check, so state the
+  fact in the doc as well, and do not paste decompiled code into this repository or its issues.
+- **A session in a worktree does not write into `analysis\`.** The app stops Write and Edit there, and one
+  analysis session, started from the main checkout, is the only writer: it reviews, files and commits what
+  others hand over. Do not get around the guard with a shell write, a second clone or a junction. To hand over
+  a finding, make a new folder `C:\Users\seanm\AppData\Local\EDVR\analysis-inbox\<yyyymmdd-hhmmss>-<topic>\`
+  (outside every repository, so it survives your worktree), put the notes and scripts in it with a
+  `MANIFEST.md` (build, from, summary, and for each file its destination under `analysis\`; the format and the
+  checks are in `analysis\AGENTS.md`, "Intake"), then send the folder name to the session titled
+  `elite-analysis intake` (`ListAgents`, or `mcp__ccd_session_mgmt__list_sessions`) if it is running. If it
+  is not, say in your report that an item is waiting. Cite the file in your doc as `analysis\decomp\<name>`
+  once it is filed. Reading `analysis\` needs no handover.
+
 ## Layout
 
 | Path | What |
@@ -291,5 +370,8 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `GLOSSARY.md` | the project's terms: game builds, binding, build-map statuses; use them, add a term when one is settled |
+| `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
+| `analysis\` | main checkout only: the private `elite-analysis` repository (git-ignored here), see above |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

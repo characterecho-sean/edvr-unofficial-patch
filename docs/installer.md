@@ -54,9 +54,11 @@ uninstalls the other mod silently — nothing reports an error, the other mod's
 effects are simply gone. The fix is a rename plus one line in `edvr.ini`, which
 is fine as an instruction and unreliable as a habit.
 
-The installer validates the supported Elite executable profile and native
-payload before writing. An unsupported profile fails closed instead of choosing
-a legacy OpenVR or LibOVR route.
+The installer validates the Elite executable profile and native payload before
+writing. Horizons and an unreadable executable fail closed. An Odyssey revision
+this build was not checked against installs with a warning instead: the game
+starts, the fixes tied to the game build stand down and the gfx log names each
+one. The installer never chooses a legacy OpenVR or LibOVR route.
 
 ## Finding the game
 

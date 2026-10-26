@@ -16,12 +16,14 @@
 
 #include <atomic>
 #include <cstring>  // _stricmp, for the hook-mode override's spellings
+#include <intrin.h>  // _ReturnAddress: the caller of the executable's LoadLibraryW
 #include <string>
 
 #include "../common/config.h"
 #include "../common/runtime_profile.h"
 #include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
+#include "../common/game_build.h"
 #include "../common/guard.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
@@ -112,6 +114,15 @@ HMODULE WINAPI hookedLoadLibraryW(LPCWSTR lpLibFileName) {
         return mod;
     }
     return LoadLibraryW(lpLibFileName);
+}
+
+// The deadlock bypass takes the LoadLibraryW slot that the Oculus route hooked
+// at DllMain, so Elite's own LoadLibraryW calls go through the route's policy
+// first, with Elite's return address, and then through the bypass.
+__declspec(noinline) HMODULE WINAPI hookedExeLoadLibraryW(LPCWSTR lpLibFileName) {
+    return edvr::oculusRouteDispatchFrom(lpLibFileName,
+                                         reinterpret_cast<uintptr_t>(_ReturnAddress()),
+                                         &hookedLoadLibraryW);
 }
 
 HMODULE WINAPI hookedLoadLibraryA(LPCSTR lpLibFileName) {
@@ -456,22 +467,28 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                               "against (%s)",
                               build.c_str(), verified.c_str());
     } else {
-        // Not a warning. Every fix here identifies its target by what that
-        // target does or looks like, so an unfamiliar build is the expected
-        // case rather than a degraded one, and saying otherwise would send
-        // people chasing a problem they do not have.
-        //
-        // This line briefly said the resolution fix would refuse on an unknown
-        // build, which was true while it was pinned to one. It no longer is:
-        // it recognises the code it edits, and reports what it found.
+        // Not a warning, but not a promise either. The fixes that hook the
+        // game's code bind addresses of one build; on another, the signature
+        // resolver (src\common\game_build.h, issue 124) finds each by matching
+        // the known build's whole function, and a fix comes up only where it
+        // found every address it needs. The Oculus route profile and Explorer
+        // Cam stay off on any build but the known one. Until 2026-10-25 this
+        // line said every fix found its target by shape, which was never true
+        // of the hooks.
         edvr::Log::get().note(
-            "game build %s -- not one of the builds this was checked against (%s). Every "
-            "fix here finds its target by what that target does or looks like, not by "
-            "which build compiled it, so an unfamiliar build is expected rather than a "
-            "problem. If anything fails to match, the lines below say so and nothing is "
-            "touched.",
+            "game build %s -- not one of the builds this was checked against (%s). The "
+            "fixes that hook the game look for the code they edit by matching the known "
+            "build's functions (the \"game build:\" line says how many addresses were "
+            "found), and each comes up only where it found everything it needs; the "
+            "Oculus route profile and Explorer Cam stay off. The lines below say what each "
+            "found, and nothing it did not find is touched.",
             build.empty() ? "(unreadable)" : build.c_str(), verified.c_str());
     }
+    // An unknown build: the signature resolver starts here on a thread of its own (issue 124), so no hook pays it on the render thread
+    // or in DllMain, and the VR Supersampling hold, which waited for it, installs on that thread when it is done.
+    // The TEMPORARY instrument (advanced.game_update_check): off, nothing; on, on the known build, the resolver runs once on a background
+    // thread and logs whether it finds every address where the hooks' constants put it.
+    edvr::gameBuildStartup(&edvr::vrSsaaHoldInstallAfterResolve);
 
     if (g_missingExports) {
         edvr::Log::get().note(
@@ -483,7 +500,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryA",
                          reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchExeLoadLibraryA);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryW",
-                         reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchExeLoadLibraryW);
+                         reinterpret_cast<void*>(&hookedExeLoadLibraryW), &g_patchExeLoadLibraryW);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryExA",
                          reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchExeLoadLibraryExA);
     edvr::iatHookInstall("kernel32.dll", "LoadLibraryExW",
@@ -833,13 +850,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             DisableThreadLibraryCalls(module);
             // Native routing is a build capability, available before Elite's
             // first VR probe. No configuration or logging under loader lock.
+            // A route that cannot be installed leaves Elite's own loading untouched; the gfx log says why.
             edvr::oculusRouteInstallEarly(true);
-            if (!edvr::oculusRouteProcessAttachAllowed())
-                return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
-            // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first, so a
-            // stranger's process (the installer) refuses them silently. No config, file or log here.
+            // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first. In a
+            // process whose main module is not EliteDangerous64.exe (the installer, say) the resolver resolves nothing, so they
+            // refuse silently; on an unknown build of the game they wait for the signature resolve, which never runs here
+            // under the loader lock (gameBuildStartup's thread installs them). No config, file or log here.
             edvr::vrSsaaHoldEarlyInstall();
             break;
 

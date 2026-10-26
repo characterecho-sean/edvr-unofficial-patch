@@ -2,62 +2,61 @@
 
 ## Status
 
-- **State (2026-10-13):** phases 1-3 MERGED to main 2769e3e5 (Sean
-  approved after the Steam sessions of 14:31-15:22: flat, vr and both
-  scopes, live switches, the headset panel, flat XeSS); not yet released. The watch keeps the file's last confirmed
-  class apart from the class EDVR runs (a read posts only when the FILE
-  changes); rigs run under a pinned LOCALAPPDATA (549e8d91).
-- **Goal (Sean, 2026-10-12):**
-  - one installer;
-  - EDVR runs its flat profile when Elite's 3D mode is off (or anaglyph), and
-    its VR profile otherwise;
-  - it follows a mid-session switch seamlessly.
+- **State (2026-10-23):** phases 1-3 MERGED to main 2769e3e5 (Sean approved
+  after the Steam sessions of 14:31-15:22), not yet released. Branch
+  `claude/flat-owner-waits` (section 15) has two instruments that FLEW and two
+  fixes BUILT, NOT FLOWN: flat is never paced by the headset, and a flat
+  launch's display mode is kept across the first 3D on.
+- **Goal (Sean, 2026-10-12):** one installer; flat profile when Elite's 3D mode
+  is off (or anaglyph), VR otherwise; mid-session switches followed.
 - **Decided (Sean, 2026-10-12; section 8):** Q1 switch live; Q2 unknown is
   VR; Q3 no descriptor follows the 3D setting; Q4 no override key (the
   launcher's `/vr` and `/novr` are the game's own, so they count); Q5 one
   installer with a scope prompt; Q6 modes 0-1 flat, 2-6 VR; Q7
   creation-time settings follow at the next launch; Q8 SBS is VR, low
-  priority.
-- **Reverses:** the two-installer plan (`design-flat-temporal-aa-2026-09-23.md`,
-  `design-plugin-architecture-2026-09-30.md`) and the "set once per process"
+  priority. **Still open for Sean:** none.
+- **Reverses:** the two-installer plan and the "set once per process"
   profile. **Keeps:** one graphics DLL, separate mono and VR adapters.
 - **No hook sees the 3D mode value** (section 2): the switch signal is a
   watch on Settings.xml, prompted by four side-effect hooks (3.2).
-- **Design:** scope vs mode (3.1), the switch signal (3.2), one commit point
-  at the frame boundary (3.3), what cannot switch live (3.4), the hold keyed
-  to the mode (3.5), the scope prompt in one installer (4).
-- **Still open for Sean:** none.
-- **Hypotheses** (evidence in section 11, the flight journal):
+- **Review fixes (2026-10-14):** the flat pad door installs after a VR-first
+  menu; cross-profile cost is sampled only while its profile is active.
+- **Hypotheses** (evidence in sections 11 and 15):
   - H1 open: what a launch with neither switch does at 3D on.
   - H2 HOLDS both ways: `/vr` and `/novr` override the file; applied.
   - H3 REFUTED under a launcher switch; holds for a launch with neither.
-  - H4 open: after 3D off the OpenXR session idles at no flat cost.
+  - H4 open: after 3D off the session idles at no flat cost (but see H11).
   - H5 open: the Settings.xml path on every store and on Proton.
   - H6 HOLDS: a 3D apply rewrites the file and the watch sees it.
   - H7 holds so far: no new swap chain at a toggle in B or D.
   - H8 HOLDS: each profile pays under 0.01 ms a frame for the other's hooks.
   - H10 SETTLED: a launch the file did not decide leaves it stale until
     the game's first write, which holds the live mode (f11b7a3e).
-  - Regression fixed (7b0358b4): Passthrough stood the window rewrite
-    down; 3D on came back 1280x768 windowed and the game saved it.
-- **Ruled out while designing:** section 9.
+  - H11 CONFIRMED (2026-10-23): the flat slowdown is the game thread queued
+    behind the owner's xrWaitFrame via `locate_head` hops.
+  - H12 CONFIRMED: a flat launch's mode request was never remembered (the
+    gate returned first); 3D on came back 1280x768 windowed.
+  - Regression fixed (7b0358b4): Passthrough stood the window rewrite down.
+- **Ruled out while designing:** section 9. **Ruled out 2026-10-23:**
+  - ruled out: the flat slowdown being EDVR GPU work, because the GPU census
+    put EDVR at ~0.001 ms/frame
+  - ruled out: the render thread waiting, because render_thread_wait_ms_sum
+    was 0 in every flat window
+  - ruled out: the flat head-pose publication (fix 1) keeping the Pimax screen
+    on, because with pose_cache off a woken headset also stayed on until
+    Pimax's ~6 min in-session timeout (edvr_openxr_20261023_122201)
+- **Limits of a live switch ("kept until restart"):** `fix.vscreen_res_width`
+  leaves the on-foot screen low-res until a restart in VR (3.4); an unexplained
+  curve flip was seen once, not shown by the route and maps-gate lines.
 - **Temporary keys:** none. No user-facing key is added.
-- **Phase 2 FLOWN OK:** the live switch (e1262071 and its units), no leak
-  over 12 switches (10-13), the headset panel while flat (45c51b0f, flown
-  OK on Pimax's runtime; panel timing now 10 s text, 1 s black, then zero-layer frames, section 12). Review f519b1d7: three findings fixed (8f13cddf,
-  9edf70c7, d410c3dc). Main (XeSS) merged; XeSS in VR in its own doc.
-- **Phase 3 BUILT, the installer NOT YET RUN for real** (section 13):
-  a7a2c916, 756fb251, 9b642c02, f30817fa, 31b96980, 7ce8a77d, af948bcb.
-- **2026-10-14, cold flat start flipped to VR (BUILT, NOT FLOWN; section 14):** a live runtime alone no longer posts Vr; the live
-  rise now waits for the game's first eye submit. Flight check: cold flat start (no `/novr`) on a headset rig, F8 opens "flat graphics
-  panel open", no `profile switch: flat -> vr`; Epic "Launch in VR" still flips about a second after going live.
+- **Phase 2 FLOWN OK** (live switch, no leak over 12 switches, the headset
+  panel while flat, section 12). **Phase 3 BUILT, installer NOT YET RUN for
+  real** (section 13). Not yet flown: an Epic install through the GUI, a
+  Frontier launcher launch. **2026-10-14 cold flat start flipped to VR:**
+  fixed, NOT FLOWN (section 14).
 - **Next:** the release (notes via reflow_notes.py, credits via
-  release_credits.py; the Release build workflow is the CI pass). Not yet
-  flown: an Epic install through the GUI, a Frontier launcher launch.
-- **Review fixes (2026-10-14):** the flat pad door installs after a VR-first
-  menu (input_gate_test); cross-profile cost is sampled only while its
-  profile is active, so Passthrough adds none (cross_profile_test); the
-  tool's original runtime is found in older receipts (installer.md).
+  release_credits.py). Fix 1 flown with the headset awake (section 15); fix 1
+  with the headset asleep and fix 2 are not yet confirmed in a flight.
 
 ## 1. What exists today
 
@@ -634,3 +633,89 @@ ruled out: EDHM's chain as the cause of the dead flat F8, because the 06:35:44 l
 `real_dll` commented out.
 
 Open: the second half of that review (`advanced.real_dll` read once from the launch profile's one file) is not part of this fix.
+
+## 15. 2026-10-23: the flat slowdown and the lost display mode (fixes built, not flown)
+
+Two separate reports from one Frontier session on the Pimax (flat launch, then 3D on and back). Logs: `edvr_gfx_20261023_105052` and
+its runtime log `edvr_openxr_*` from the same run. Two instruments went in first (branch `claude/flat-owner-waits`, both flown):
+`flat_owner_waits` / `flat_owner_wait_caller` in the runtime log, and one `vr window: mode request #N` line per request in the
+graphics log. The fixes below came from what they showed.
+
+### The flat slowdown: Elite's game thread waited on the headset
+
+Symptom: with the profile flat and the headset asleep, the game fell from 125+ fps to 35-47 fps with a Present p95 near 75 ms.
+
+Cause. While flat, the runtime's owner thread keeps the headset fed with empty frames (section 12). Each one calls xrWaitFrame, which
+takes about 70 ms with the headset asleep, so the owner spends nearly all its time inside it. The game calls
+GetDeviceToAbsoluteTrackingPose once a frame, and that call hops to the owner thread and queues behind the frame in progress. The
+pose cache that avoids the hop in VR is fed by the VR frames, which flat never makes, so it was empty: `local_pose_cache=0` in every
+flat window.
+
+Evidence from the instrument (`flat_owner_waits`, 5 s windows):
+- Headset asleep, windows 2-13: `locate_head` is the only job that hops, about 175 per window (one per game frame), 58-65 of them
+  `behind_clear`, queue wait up to 66-72 ms. `other_thread_wait_ms_sum` was about 4000 ms per 5 s window: Elite's game thread
+  blocked 80% of the time. `render_thread_wait_ms_sum` was 0.
+- The caller was always the game at exe+0x4E3921 (chain 0x4E3EB3 / 0x8D03AF / ... / 0x55CCA6), `thread=other`.
+- Headset awake, windows 15-17: `clear_wait_ms_mean` 4.5, max 11.7; `locate_head` waits up to 15 ms; 0.5-1.1 s lost per window.
+
+Fix (BUILT, NOT FLOWN). In flat, `locateHeadFor` (native_runtime_host.h) answers from the pose publication on the calling thread and
+never hops while a publication can answer, whatever the call or the origin test. The owner feeds it: `flatClearFrame` calls
+`publishFlatHead` after each `waitAndBegin`, which locates the head at that empty frame's own predicted display time and publishes
+it through the same `publishPoseCache` the VR frames use (about 13 a second asleep, 90 awake). A call the publication cannot answer
+(nothing published, other keys, older than 1 s) takes the old hop and is counted by reason; the owner is not held in xrWaitFrame then.
+A locate for an origin other than seated is refused locally, as the hop refuses it. VR keeps its path unchanged, and a live switch back
+to VR takes it as soon as the profile reads VR. The window line gains `flat_cache_answers`, `flat_cache_fallbacks`,
+`flat_cache_fallback_reasons`, `flat_cache_refused` and `flat_cache_age_ms_p50/p95/max`, so the next flight shows whether the cache
+answered and how stale it was. A flat session with `pose_cache` off keeps the old hop.
+
+### The lost display mode at the first 3D on
+
+Symptom: a flat launch started 3840x2160 borderless; the first live switch to VR put the window at 1280x768 windowed and Elite saved
+that to DisplaySettings.xml.
+
+Cause, from the mode-request lines: request #1, at frame 1 of the flat launch, was kind 2 (block 0 / 0x19 / 0 / 0x1010000000002) with
+VR not live. It was not remembered, because `vrWindowRewriteAllowed` returned before the remember step. Request #2, at 3D on, was
+kind 0 with nothing remembered, so it was left as is: `left_as_is_nothing_remembered`, and the window went 1280x768 windowed. The
+VR to flat switch sent no request. Request #3 at 3D on was kind 0, left as is. Request #4, in VR, was kind 2 (the user's own choice).
+
+Fix (BUILT, NOT FLOWN). `requestReplacement` (vr_window_trampolines.cpp) remembers a non-windowed request (kind != 0) whenever VR
+is not live, in every profile, before the gate; the gate still decides the rewrite only. A request made while VR is live is not
+remembered. The mode-request line has a new action, `remembered_gate_closed`, for the launch request. At 3D on the kind 0
+request should now read `rewritten`.
+
+### Limits of a live switch, already logged as "kept until restart"
+
+- `fix.vscreen_res_width` is patched into game code at creation, so after a live switch to VR the on-foot screen stays low-res
+  until a restart in VR (section 3.4).
+- An unexplained curve flip was seen once after a live switch. The route and maps-gate lines did not show it. It is not
+  diagnosed and nothing here claims to fix it.
+
+ruled out: the flat slowdown being EDVR GPU work, because the GPU census put EDVR at ~0.001 ms/frame.
+ruled out: the render thread waiting, because render_thread_wait_ms_sum was 0 in every flat window.
+
+Flight check for the fixes: in flat, windows should show `flat_cache_answers` near the game's locate rate, `locate_head` near zero
+in `kinds`, `other_thread_wait_ms_sum` near zero asleep and awake, and an age p95 inside one headset frame (about 80 ms asleep, 11 ms
+awake); at launch `vr window: mode request #1` should read `remembered_gate_closed`, and the request at 3D on `rewritten`.
+
+### Flown A/B: does the head-pose publication keep the headset awake? (Frontier, Pimax Crystal Super, 2026-10-23)
+
+The Crystal Super sleeps its screen after about 30 s untouched when no app session is running, and an asleep headset makes xrWaitFrame
+take about 70 ms, so whether the headset sleeps decides which regime flat runs in.
+
+- Fix build ccc8a184, `pose_cache` on (the default), flat; runtime log `edvr_openxr_20261023_120256_*`. The headset stayed awake for
+  the whole 4.5 minute session: 54 windows with `clear_wait_ms_mean` about 5.2 and no window showing the 70 ms asleep wait. The user
+  saw the headset screen stay on in flat.
+- The same build with `pose_cache=off` added to `Openvr\win64\edvr_openxr.ini` (since restored), flat; runtime log
+  `edvr_openxr_20261023_122201_*`, which kept running. The headset was asleep from launch: 70-71 ms waits in windows 1-19, and the
+  slow regime lasted until 12:23:41 local. The user woke it at about 12:23:40 (window 20: 8.1 ms, window 21: 3.8 ms) and left it
+  untouched. It stayed awake at about 5 ms through window 38 (12:25:13), then fell asleep at about 12:29:40: in window 92
+  `clear_wait_ms_mean` went to 13.9, then 68-70 ms from window 93. The game thread's loss returned to 4.1-4.4 s per 5 s window, as
+  expected with the cache off.
+
+So the publication is not what keeps the screen on. With the cache off the woken headset also stayed on, and it slept about six
+minutes after the user woke it. With an app session running the Pimax sleeps after about six minutes untouched, not the 30 s seen
+with no session. Nothing in EDVR is shown to keep it awake, and the 12:02 run with the fix on lasted only about 4.5 minutes, short of
+that timer.
+
+ruled out: the flat head-pose publication (fix 1) keeping the Pimax screen on, because with pose_cache off a woken headset also stayed
+on until Pimax's ~6 min in-session timeout (edvr_openxr_20261023_122201).

@@ -95,7 +95,11 @@ bool tickPushesStatus(const std::string& text) {
     const size_t end = text.find("\n}", at);   // the function's closing brace at column 0 (either line ending)
     if (end == std::string::npos) return false;
     const std::string body = text.substr(at, end - at);
-    return body.find("celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());") != std::string::npos;
+    // Flat has its own reader (journalFlatSupercruise): the VR accessors answer flat with "unknown", which kept the gate shut there.
+    return body.find("celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());") != std::string::npos &&
+           body.find("if (runtimeFlatProfile()) {") != std::string::npos &&
+           body.find("const bool known = journalFlatSupercruise(&supercruise);") != std::string::npos &&
+           body.find("celestialMotionNoteStatus(known, known && supercruise);") != std::string::npos;
 }
 
 void all(const Fixture& fx) {
@@ -173,7 +177,9 @@ void all(const Fixture& fx) {
               "gate closed: three frames of patch draws captured and counted nothing, and watched nothing; the frames counted gated off");
         // the census says so: partly gated windows carry the count in the long line, a window the gate held shut is the short line
         g_logLines.clear();
-        report();
+        report(10.3);
+        check(std::all_of(g_logLines.begin(), g_logLines.end(), [](const std::string& line) { return line.find("; window 10.3 s") != std::string::npos; }),
+              "census: every historical 5s line reports the actual elapsed ten-second window");
         check(g_logLines.size() == 3 && g_logLines[0].find("gated-off=3") != std::string::npos && g_logLines[2].find("gate=off (not supercruise) (3 of 4 frames gated off)") != std::string::npos,
               "5 s line: a partly gated window carries gated-off=3 and the gate's state");
         g_win = Counters{};
@@ -182,7 +188,7 @@ void all(const Fixture& fx) {
         g_logLines.clear();
         report();
         check(g_logLines.size() == 1 && g_logLines[0].rfind("celestial motion 5s: frames=2 gated-off=2 ", 0) == 0 &&
-                  g_logLines[0].find("supercruise gate: off (not supercruise)") != std::string::npos && g_logLines[0].size() < 400,
+                  g_logLines[0].find("supercruise gate: off (not supercruise)") != std::string::npos && g_logLines[0].find("; window 10.0 s") != std::string::npos && g_logLines[0].size() < 400,
               fmt("5 s line: a window held shut throughout is one short line: %s", g_logLines.empty() ? "(none)" : g_logLines[0].c_str()));
         // open it again: the first frame has no previous frame, the one after has
         celestialMotionNoteStatus(true, true);
@@ -267,7 +273,9 @@ void all(const Fixture& fx) {
         c.teeMap = big; c.teeUpdate = big; c.teeInvalid = big; c.teeCopies = 1; c.teeTicks = big; c.captureTicks = big; c.buildTicks = big;
         g_watched = 4294967295u;
         g_logLines.clear();
-        report();
+        report(10.3);
+        check(std::all_of(g_logLines.begin(), g_logLines.end(), [](const std::string& line) { return line.find("; window 10.3 s") != std::string::npos; }),
+              "census: every historical 5s line reports the actual elapsed ten-second window");
         check(g_logLines.size() == 3, "line budget: the long census is three lines");
         size_t worst = 0;
         for (const std::string& l : g_logLines) worst = std::max(worst, l.size());

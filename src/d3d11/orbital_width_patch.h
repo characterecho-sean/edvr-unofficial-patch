@@ -3,7 +3,7 @@
 // and the one-shot read of the instance stream's half-widths. Header-only like ui_holo_remap.h, whose pixel-shader
 // edit this follows, so tools/orbital_width_test links the production code itself.
 //
-// THE EDIT. The game's program (vs C7FA0C0F5DD49180, build 332841, 2412 bytes, vs_5_0, one constant buffer CB1[333])
+// THE EDIT. The game's program (vs C7FA0C0F5DD49180, build 334473, 2412 bytes, vs_5_0, one constant buffer CB1[333])
 // ends its clip-space offset with
 //     mul [precise(xy)] r0.xy, r0.xyxx, v1.wwww                      the unit normal times the instance's half-width
 //     mul [precise(zw)] r0.zw, cb1[332].zzzw, l(0, 0, 2.0, 2.0)      2 x (1/W, 1/H): two pixels' clip size

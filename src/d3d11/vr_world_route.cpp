@@ -38,6 +38,8 @@
 #include <cstring>
 #include <string>
 
+#include "native_on_foot.h"   // F0 gate counter (log only)
+
 namespace edvr {
 
 static_assert(kVrWorldFeatureSlot < kUpscalerSlots && kVrWorldFeatureSlot >= kUpscalerEyeSlots,
@@ -812,9 +814,10 @@ void vrWorldRouteFrameBoundary() {
         } else {
             g_notLiveNoted = nullptr;
         }
-        // The 5 s window: zeros included.
+        // The 10 s window: zeros included; the historical 5s line kinds keep their parser names.
         const uint64_t now = GetTickCount64();
-        if (g_windowStartMs && now - g_windowStartMs >= 5000) {
+        if (g_windowStartMs && now - g_windowStartMs >= 10000) {
+            const double windowSeconds = static_cast<double>(now - g_windowStartMs) / 1000.0;
             char line[1200];
             g_win.jitter = vrWorldJitterName(g_jitter);
             uint64_t curveReissues = 0;
@@ -822,10 +825,10 @@ void vrWorldRouteFrameBoundary() {
             g_win.curveReissues = curveReissues - g_curveReissuesSeen;
             g_curveReissuesSeen = curveReissues;
             vrWorldFormatWindow(line, sizeof(line), key, g_machine.state, layerLive, gate, g_win);
-            Log::get().note("%s", line);
+            Log::get().note("%s; window %.1f s", line, windowSeconds);
             char injectLine[512];
             vrWorldFormatInjectWindow(injectLine, sizeof(injectLine), g_win.inject);
-            Log::get().note("%s", injectLine);
+            Log::get().note("%s; window %.1f s", injectLine, windowSeconds);
             // The refusal census's line (the census key on, samples still in flight from before it went off, or the steady detail's depth
             // check, which counts its own frames whatever the census asks): the resolver's sums since the last window beside the route's
             // own treated count. Absent when the census was not wanted and the resolver counted no frame. Its steady-detail= token is
@@ -844,7 +847,7 @@ void vrWorldRouteFrameBoundary() {
                 rw.view = "off";
                 char refusalLine[1024];
                 vrWorldFormatRefusalWindow(refusalLine, sizeof(refusalLine), rw);
-                Log::get().note("%s", refusalLine);
+                Log::get().note("%s; window %.1f s", refusalLine, windowSeconds);
             }
             g_win.reset();
             g_windowStartMs = now;
@@ -875,6 +878,7 @@ void vrWorldRouteFrameBoundary() {
 
     // The state the next frame starts in.
     g_ownsNext.store(g_machine.owned(), std::memory_order_release);
+    if (g_machine.owned()) nativeOnFootCountGate(NativeOnFootGate::WorldRoute);   // F0 gate counter: an owned frame (log only)
     g_startedOwned = g_machine.owned();
     g_vrWorldWants = g_census || (key == VrWorldKey::Auto && g_machine.wantsDraws() && gate && layerLive);
     g_vrWorldWatchWrites = false;

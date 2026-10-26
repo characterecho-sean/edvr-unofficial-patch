@@ -17,7 +17,7 @@ void forwardRevoke(State& s,uint64_t resource,forward_light::Reason reason) {
         a.live=false;
         // A later relevant write must cancel even if no light draw follows.
         for(unsigned i=0;i<s.prefix.targetsUsed;++i)if(reinterpret_cast<uintptr_t>(s.prefix.targets[i].resource)==a.hdr) {
-            auto& target=s.prefix.targets[i];target.hdrBad=true;target.hdrCamera=false;
+            auto& target=s.prefix.targets[i];flatRuntimeNoteBad(target,FlatRuntimeConflict::None);target.hdrCamera=false;
         }
         forwardRefusal(s,reason,reinterpret_cast<void*>(a.hdr));
     }

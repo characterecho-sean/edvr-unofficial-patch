@@ -11,6 +11,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -467,6 +468,15 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[1], "--benchmark")) return runBenchmark();
         if (std::strcmp(argv[1], "--self-test")) return 2;
 
+        // Printing must not spend the probe's functional sample budget or couple two target records.
+        edvr::Target quiet, secondTarget;
+        quiet.sampleLines = 17;
+        std::vector<uint64_t> printed;
+        for (uint64_t i = 1; i <= 91; ++i) if (edvr::depthSampleLogDue(++quiet.sampleLogCandidates)) printed.push_back(i);
+        check(printed == std::vector<uint64_t>({1, 2, 3, 4, 5, 6, 30, 60, 90}) && quiet.sampleLines == 17,
+              "depth sample log: the first six then every thirtieth candidate, without changing the sampling counter");
+        check(!edvr::depthSampleLogDue(0) && edvr::depthSampleLogDue(++secondTarget.sampleLogCandidates) && secondTarget.sampleLogCandidates == 1,
+              "depth sample log: a new target starts its own cadence; candidate zero is not a sample");
         const auto createDevice = edvr::systemD3D11CreateDevice();
         check(createDevice != nullptr, "load system D3D11");
         ComPtr<ID3D11Device> device;

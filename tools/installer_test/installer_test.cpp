@@ -147,6 +147,13 @@ static bool notesMention(const Plan& plan, const char* needle) {
     return false;
 }
 
+static bool problemMentions(const Plan& plan, const char* needle) {
+    for (const std::string& p : plan.problems) {
+        if (p.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
 // The edvr.ini text a plan would write, pulled back out of its steps.
 static std::string plannedIni(const Plan& plan) {
     for (const Step& s : plan.steps) {
@@ -562,6 +569,35 @@ static void testShippedIni(const std::wstring& root) {
           "control: without the annotation the tuned trim list does NOT arrive under [experimental]");
     expectEq(iniValue(stranded, "fix.fov_trim_vertical", "<absent>"), tunedTrims,
              "control: it is carried under the old name instead, where nothing reads it");
+
+    // 2026-10-22: fix.intro_video moved to [visual] (edvr.ini: `# moved-from: fix.intro_video (default screen)`), where the flat panel's
+    // Visual tab and the new star_glow live. A file from before the move has the old [fix] line: a value somebody chose follows the key
+    // (the older intro_video_size / _lock / _upscale annotations above the same key still carry theirs), the old shipped default is a
+    // stale line, not a choice, and is consumed so the new line stands as shipped, and nothing is left under [fix] to shadow it.
+    {
+        MergeReport introRep, staleRep, olderRep;
+        const std::string followed = mergeIni(shipped, "[fix]\r\nintro_video = skip\r\n", nullptr, {}, &introRep);
+        expectEq(iniValue(followed, "visual.intro_video", "<absent>"), "skip", "a chosen intro_video = skip follows the key to [visual]");
+        expectEq(iniValue(followed, "fix.intro_video", "<absent>"), "<absent>", "...and nothing is left under [fix] to shadow it");
+        check(!introRep.followed.empty() && introRep.followed[0].find("fix.intro_video = skip  ->  visual.intro_video") != std::string::npos,
+              "the report says the movie setting followed its key");
+        const std::string stale = mergeIni(shipped, "[fix]\r\nintro_video = screen\r\n", nullptr, {}, &staleRep);
+        expectEq(iniValue(stale, "visual.intro_video", "<absent>"), "screen", "the old shipped default is not a choice: [visual] stands as shipped");
+        expectEq(iniValue(stale, "fix.intro_video", "<absent>"), "<absent>", "...and the stale line is consumed, not carried");
+        const std::string older = mergeIni(shipped, "[fix]\r\nintro_video_lock = world\r\n", nullptr, {}, &olderRep);
+        expectEq(iniValue(older, "visual.intro_video", "<absent>"), "world", "an older annotation above the same key still carries its value");
+        // CONTROL: the same merge with the new annotation taken out. The chosen value is carried under [fix], where nothing reads it by that
+        // name -- what the assertions above would report if the annotation were lost.
+        std::string unannotated = shipped;
+        const std::string line = "# moved-from: fix.intro_video (default screen)";
+        const size_t at = unannotated.find(line);
+        if (at != std::string::npos) unannotated.replace(at, line.size(), "# (annotation removed)");
+        check(at != std::string::npos, "the control's ini really lost the intro_video annotation");
+        MergeReport lostRep;
+        const std::string lost = mergeIni(unannotated, "[fix]\r\nintro_video = skip\r\n", nullptr, {}, &lostRep);
+        check(iniValue(lost, "visual.intro_video", "<absent>") != "skip", "control: without the annotation the chosen value does NOT arrive under [visual]");
+        expectEq(iniValue(lost, "fix.intro_video", "<absent>"), "skip", "control: it is carried under the old name instead, where nothing reads it");
+    }
 
     // 2026-09-29: the flat camera path became always-on and its two switches,
     // fix.temporal_aa_camera and fix.temporal_aa_camera_trace, were removed. A
@@ -1846,10 +1882,19 @@ static void testPlanner() {
         s.eliteKind = EliteExeKind::OdysseyUnknown;
         s.eliteFileVersion = L"999999";
         plan = planInstall(s, options, payload);
-        check(plan.blocked && plan.steps.empty(), "an unknown Odyssey revision is refused");
-        check(notesMention(plan, "not one this EDVR build is qualified for"),
-              "and the refusal says what is wrong");
-        check(notesMention(plan, "999999"), "and names the revision the game reports");
+        check(!plan.blocked && !plan.steps.empty(), "an unknown Odyssey revision installs");
+        check(problemMentions(plan, "is not the one this EDVR build was checked against"),
+              "with a warning that says why");
+        check(problemMentions(plan, "fixes tied to the game build stand down"),
+              "and says what stands down");
+        check(problemMentions(plan, "999999"), "and names the revision the game reports");
+        {   // The plan proceeds exactly as it does for the pinned revision.
+            Survey q = s;
+            q.eliteKind = EliteExeKind::OdysseyQualified;
+            Plan qualified = planInstall(q, options, payload);
+            check(!qualified.blocked && plan.steps.size() == qualified.steps.size(),
+                  "with the same steps as the pinned revision");
+        }
 
         s.eliteKind = EliteExeKind::Unreadable;
         plan = planInstall(s, options, payload);
@@ -5521,9 +5566,28 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         vr.load(dir, "vr");
         check(rowFor(flat, "fix.ui_quality") != static_cast<size_t>(-1), "the flat view shows fix.ui_quality");
         check(rowFor(flat, "fix.temporal_aa") != static_cast<size_t>(-1), "the flat view shows fix.temporal_aa");
-        check(rowFor(flat, "fix.intro_video") != static_cast<size_t>(-1), "the flat view shows fix.intro_video (skip works in flat)");        check(rowFor(flat, "fix.black_void") == static_cast<size_t>(-1), "a VR-only row is hidden under Flat");
+        check(rowFor(flat, "visual.intro_video") != static_cast<size_t>(-1), "the flat view shows visual.intro_video (skip works in flat)");
+        check(rowFor(flat, "visual.star_glow") != static_cast<size_t>(-1), "the flat view shows visual.star_glow (the flat edition's Visual tab)");
+        check(rowFor(flat, "fix.black_void") == static_cast<size_t>(-1), "a VR-only row is hidden under Flat");
+        check(rowFor(vr, "visual.intro_video") != static_cast<size_t>(-1), "and the VR view shows visual.intro_video");
         check(rowFor(vr, "fix.black_void") != static_cast<size_t>(-1), "and shown under VR");
         check(rowFor(vr, "fix.ui_quality") != static_cast<size_t>(-1), "and VR shows the rows flat shows");
+    }
+
+    {   // A file from before the movie setting moved to [visual]: the window reads it the way the runtime does, through the moved-from map
+        // (settings.cpp kMovedSettings, generated from edvr.ini), in both views.
+        const std::wstring dir = joinPath(scratch, L"flatset-window-moved");
+        removeTree(dir);
+        makeTree(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), "[fix]\r\nintro_video = skip\r\n");
+        for (const char* profile : {"vr", "flat"}) {
+            SettingsModel model;
+            model.load(dir, profile);
+            const size_t row = rowFor(model, "visual.intro_video");
+            check(row != static_cast<size_t>(-1), (std::string("the ") + profile + " view shows visual.intro_video for an old-layout file").c_str());
+            if (row != static_cast<size_t>(-1))
+                expectEq(model.rows()[row].value, "skip", (std::string("the ") + profile + " view reads the old [fix] intro_video as the movie setting").c_str());
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 // fix.ui_quality -- the engine-side panel sizing. ui_panel_scale.h says what
-// and why; ui_sizing_math.h holds the arithmetic and build 332841's bytes,
+// and why; ui_sizing_math.h holds the arithmetic and build 334925's bytes,
 // shared with tools/ui_quality_test.
 #include "ui_panel_scale.h"
 
@@ -12,6 +12,7 @@
 #include "vr_ssaa_hold_math.h"  // ssaahold::kHeldValue
 #include "mode_watch.h"         // modeWatchHint: the setter is a hint for the 3D mode watch
 
+#include "../common/game_build.h"              // gameRva, gamePinMatches: build 334925's addresses, or an unknown build's by signature
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing: W_out
 #include "../common/runtime_profile.h"         // runtimeFlatProfile: the flat profile's inputs
@@ -42,6 +43,7 @@ std::atomic<uint64_t> g_ssBits{0};      // max(Supersampling, 1) in the written 
 volatile float* g_floats = nullptr;  // [0] 1080 x f, [1] 1920 x f, in a page within rel32
 uint8_t* g_operand[4] = {};          // site 0's 1080 and 1920 disp32s, then site 1's
 int32_t g_origDisp[4] = {};
+uint32_t g_site[2] = {};             // the two sites in the running build (checkBuild): kUiPanelSiteRva on build 334925
 char g_why[240] = "";
 
 // The render thread's own (uiPanelScaleFrameBoundary).
@@ -114,20 +116,6 @@ bool readGame(const uint8_t* at, void* out, size_t n) {
     }
 }
 
-bool imageStamp(const uint8_t* base, uint32_t* stamp, uint32_t* size) {
-    __try {
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-        *stamp = nt->FileHeader.TimeDateStamp;
-        *size = nt->OptionalHeader.SizeOfImage;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // How often the shape occurs in .text: the version-free fact the stand-down
 // line gives for the next build (~0xFFFFFFFF when the scan faulted).
 uint32_t shapeCount(const uint8_t* base) {
@@ -156,51 +144,67 @@ void hexOf(const uint8_t* p, size_t n, char* out, size_t cap) {
     }
 }
 
-// Build 332841, exactly: the stamp and size, both sites' bytes and the
-// constants they read, the two functions' prologues. False, with g_why,
-// on the first mismatch.
+// Build 334925, exactly, or an unknown build where every address here was
+// found by signature (gameRva): both sites' bytes (gamePinMatches: on an
+// unknown build, outside the fields the signature masks) and that their
+// operands read the constants found, the two functions' prologues, the
+// constants' values. False, with g_why, on the first mismatch. The sites
+// found go to g_site.
 bool checkBuild(const uint8_t* base) {
-    uint32_t stamp = 0, size = 0;
-    if (!imageStamp(base, &stamp, &size)) {
+    if (!gameBuildIdentity(nullptr, nullptr)) {
         std::snprintf(g_why, sizeof(g_why), "the game's PE headers could not be read");
         return false;
     }
-    if (stamp != kUiPanelStamp || size != kUiPanelImageSize) {
-        std::snprintf(g_why, sizeof(g_why),
-                      "the game is not build 332841 (PE stamp %u, image %u bytes; 332841's are %u, %u)",
-                      stamp, size, kUiPanelStamp, kUiPanelImageSize);
+    const bool knownBuild = gameBuildKnown();
+    constexpr uint32_t kNeeded[] = {kUiPanelSiteRva[0], kUiPanelSiteRva[1], kUiPanelAspectRva, kUiPanel1080Rva,
+                                    kUiPanel1920Rva,    kUiPanelFuncRva[0], kUiPanelFuncRva[1]};
+    uint32_t missing = 0;
+    if (!gameRvasFound(kNeeded, sizeof(kNeeded) / sizeof(kNeeded[0]), &missing)) {
+        std::snprintf(g_why, sizeof(g_why), "%s, and 0x%X in build 334925 was not found by signature", gameBuildText(),
+                      missing);
         return false;
     }
+    const uint32_t aspectAt = static_cast<uint32_t>(gameRva(kUiPanelAspectRva)),
+                   at1080 = static_cast<uint32_t>(gameRva(kUiPanel1080Rva)),
+                   at1920 = static_cast<uint32_t>(gameRva(kUiPanel1920Rva));
     for (int i = 0; i < 2; ++i) {
+        const uint32_t site = static_cast<uint32_t>(gameRva(kUiPanelSiteRva[i]));
+        g_site[i] = site;
         uint8_t got[kUiPanelShapeBytes] = {};
-        if (!readGame(base + kUiPanelSiteRva[i], got, sizeof(got))) {
-            std::snprintf(g_why, sizeof(g_why), "the site at 0x%X could not be read", kUiPanelSiteRva[i]);
+        if (!readGame(base + site, got, sizeof(got))) {
+            std::snprintf(g_why, sizeof(g_why), "the site at 0x%X could not be read", site);
             return false;
         }
-        if (std::memcmp(got, kUiPanelSiteBytes[i], sizeof(got)) != 0) {
+        if (!gamePinMatches(kUiPanelSiteRva[i], got, kUiPanelSiteBytes[i], sizeof(got))) {
             char hex[120];
             hexOf(got, sizeof(got), hex, sizeof(hex));
-            std::snprintf(g_why, sizeof(g_why), "the bytes at 0x%X are not build 332841's: %s",
-                          kUiPanelSiteRva[i], hex);
+            if (knownBuild)
+                std::snprintf(g_why, sizeof(g_why), "the bytes at 0x%X are not build 334925's: %s", site, hex);
+            else
+                std::snprintf(g_why, sizeof(g_why), "%s: the site found at 0x%X (0x%X in build 334925) differs outside the masked fields: %s",
+                              gameBuildText(), site, kUiPanelSiteRva[i], hex);
             return false;
         }
-        const UiPanelTargets t = uiPanelTargets(got, kUiPanelSiteRva[i]);
-        if (t.aspect != kUiPanelAspectRva || t.d1080 != kUiPanel1080Rva || t.d1920 != kUiPanel1920Rva) {
+        // The operands' targets: on an unknown build the signature masks these disp32s, so this is what proves
+        // them before any is patched.
+        const UiPanelTargets t = uiPanelTargets(got, site);
+        if (t.aspect != aspectAt || t.d1080 != at1080 || t.d1920 != at1920) {
             std::snprintf(g_why, sizeof(g_why), "the site at 0x%X reads 0x%X/0x%X/0x%X, not the constants",
-                          kUiPanelSiteRva[i], t.aspect, t.d1080, t.d1920);
+                          site, t.aspect, t.d1080, t.d1920);
             return false;
         }
     }
     uint8_t p0[sizeof(kUiPanelProlog0)] = {}, p1[sizeof(kUiPanelProlog1)] = {};
-    if (!readGame(base + kUiPanelFuncRva[0], p0, sizeof(p0)) ||
-        !readGame(base + kUiPanelFuncRva[1], p1, sizeof(p1)) ||
-        std::memcmp(p0, kUiPanelProlog0, sizeof(p0)) != 0 || std::memcmp(p1, kUiPanelProlog1, sizeof(p1)) != 0) {
-        std::snprintf(g_why, sizeof(g_why), "the prologue of FUN_144570500 or FUN_144571180 differs");
+    if (!readGame(base + gameRva(kUiPanelFuncRva[0]), p0, sizeof(p0)) ||
+        !readGame(base + gameRva(kUiPanelFuncRva[1]), p1, sizeof(p1)) ||
+        !gamePinMatches(kUiPanelFuncRva[0], p0, kUiPanelProlog0, sizeof(p0)) ||
+        !gamePinMatches(kUiPanelFuncRva[1], p1, kUiPanelProlog1, sizeof(p1))) {
+        std::snprintf(g_why, sizeof(g_why), "the prologue of FUN_144572FA0 or FUN_144573C20 differs");
         return false;
     }
     float aspect = 0.0f, d1080 = 0.0f, d1920 = 0.0f;
-    if (!readGame(base + kUiPanelAspectRva, &aspect, 4) || !readGame(base + kUiPanel1080Rva, &d1080, 4) ||
-        !readGame(base + kUiPanel1920Rva, &d1920, 4) || aspect != 16.0f / 9.0f || d1080 != 1080.0f ||
+    if (!readGame(base + aspectAt, &aspect, 4) || !readGame(base + at1080, &d1080, 4) ||
+        !readGame(base + at1920, &d1920, 4) || aspect != 16.0f / 9.0f || d1080 != 1080.0f ||
         d1920 != 1920.0f) {
         std::snprintf(g_why, sizeof(g_why), "the constants read %.7g, %.7g, %.7g (not 16/9, 1080, 1920)",
                       static_cast<double>(aspect), static_cast<double>(d1080), static_cast<double>(d1920));
@@ -398,7 +402,7 @@ void setterBeforeImpl(void* self, float x) {
         return;
     float lo = 0.0f, hi = 0.0f;
     if (!readFloatAt(ctx + kUiSsOffMin, &lo) || !readFloatAt(ctx + kUiSsOffMax, &hi)) return;
-    // FUN_1428767D0: x below the minimum is the minimum, else the smaller of the maximum and x.
+    // FUN_142878D40: x below the minimum is the minimum, else the smaller of the maximum and x.
     const float stored = (lo > x) ? lo : ((hi < x) ? hi : x);
     if (!uiLiveSupersamplingValid(stored, lo, hi, nullptr)) return;
     moveFactorTo(stored);
@@ -469,25 +473,34 @@ bool writeSlot(uint8_t* slot, uint64_t value) {
     return true;
 }
 
-// Called by apply() once the build is checked: both functions' bytes and both slots' values must be build 332841's.
+// Called by apply() once the build is checked: both functions' bytes and both slots' values must be build 334925's (an unknown
+// build: all four found by signature, the bytes outside the masked fields, and each slot holding the function found).
 void installLiveHooks(const uint8_t* base) {
-    const uint8_t* const fn[2] = {base + kUiSsSetterRva, base + kUiSsGetterRva};
+    constexpr uint32_t kNeeded[4] = {kUiSsSetterRva, kUiSsGetterRva, kUiSsSetterSlotRva, kUiSsGetterSlotRva};
+    uint32_t missing = 0;
+    if (!gameRvasFound(kNeeded, 4, &missing)) {
+        std::snprintf(g_hookWhy, sizeof(g_hookWhy), "%s, and 0x%X in build 334925 was not found by signature", gameBuildText(), missing);
+        g_hookState = kHookRefused;
+        return;
+    }
+    const uint8_t* const fn[2] = {base + gameRva(kUiSsSetterRva), base + gameRva(kUiSsGetterRva)};
+    const uint32_t pinRva[2] = {kUiSsSetterRva, kUiSsGetterRva};
     const uint8_t* const want[2] = {kUiSsSetterBytes, kUiSsGetterBytes};
     const size_t len[2] = {sizeof(kUiSsSetterBytes), sizeof(kUiSsGetterBytes)};
-    const uint32_t slotRva[2] = {kUiSsSetterSlotRva, kUiSsGetterSlotRva};
+    const uintptr_t slotRva[2] = {gameRva(kUiSsSetterSlotRva), gameRva(kUiSsGetterSlotRva)};
     const char* const name[2] = {"setter", "getter"};
     for (int i = 0; i < 2; ++i) {
         uint8_t got[64] = {};
-        if (!readGame(fn[i], got, len[i]) || std::memcmp(got, want[i], len[i]) != 0) {
-            std::snprintf(g_hookWhy, sizeof(g_hookWhy), "the Supersampling %s's bytes at 0x%X are not build 332841's",
-                          name[i], i == 0 ? kUiSsSetterRva : kUiSsGetterRva);
+        if (!readGame(fn[i], got, len[i]) || !gamePinMatches(pinRva[i], got, want[i], len[i])) {
+            std::snprintf(g_hookWhy, sizeof(g_hookWhy), "the Supersampling %s's bytes at 0x%X are not build 334925's",
+                          name[i], static_cast<unsigned>(fn[i] - base));
             g_hookState = kHookRefused;
             return;
         }
         uint64_t value = 0;
         if (!readGame(base + slotRva[i], &value, sizeof(value)) || value != reinterpret_cast<uint64_t>(fn[i])) {
             std::snprintf(g_hookWhy, sizeof(g_hookWhy), "the %s's virtual slot at 0x%X does not hold the function",
-                          name[i], slotRva[i]);
+                          name[i], static_cast<unsigned>(slotRva[i]));
             g_hookState = kHookRefused;
             return;
         }
@@ -572,7 +585,7 @@ void apply() {
         standDown(base);
         return;
     }
-    uint8_t* page = allocateNear(reinterpret_cast<uintptr_t>(base) + kUiPanelSiteRva[0]);
+    uint8_t* page = allocateNear(reinterpret_cast<uintptr_t>(base) + g_site[0]);
     if (!page) {
         std::snprintf(g_why, sizeof(g_why), "no free page within rel32 of the sites");
         standDown(base);
@@ -585,7 +598,7 @@ void apply() {
     VirtualProtect(page, 4096, PAGE_READONLY, &old);
     int32_t newDisp[4] = {};
     for (int i = 0; i < 2; ++i) {
-        uint8_t* site = const_cast<uint8_t*>(base) + kUiPanelSiteRva[i];
+        uint8_t* site = const_cast<uint8_t*>(base) + g_site[i];
         g_operand[2 * i] = site + kUiPanel1080Disp;
         g_operand[2 * i + 1] = site + kUiPanel1920Disp;
         g_origDisp[2 * i] = uiReadDisp(site + kUiPanel1080Disp);
@@ -610,18 +623,30 @@ void apply() {
         return;
     }
     g_patch.store(kApplied, std::memory_order_release);
-    Log::get().note("ui quality: panels: the panel formula's four divisions (init 0x%X and 0x%X, view "
-                    "change 0x%X and 0x%X) now read EDVR's floats at %p -- 1080 and 1920, the game's own, "
-                    "until the factor's inputs are known. Build 332841 checked: the stamp, both sites, "
-                    "the prologues and the constants. The original operands are put back when EDVR "
-                    "unloads.",
-                    kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
-                    kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp,
-                    static_cast<void*>(page));
+    if (gameBuildKnown())
+        Log::get().note("ui quality: panels: the panel formula's four divisions (init 0x%X and 0x%X, view "
+                        "change 0x%X and 0x%X) now read EDVR's floats at %p -- 1080 and 1920, the game's own, "
+                        "until the factor's inputs are known. Build 334925 checked: the stamp, both sites, "
+                        "the prologues and the constants. The original operands are put back when EDVR "
+                        "unloads.",
+                        g_site[0] + kUiPanel1080Disp, g_site[0] + kUiPanel1920Disp,
+                        g_site[1] + kUiPanel1080Disp, g_site[1] + kUiPanel1920Disp,
+                        static_cast<void*>(page));
+    else
+        Log::get().note("ui quality: panels: the panel formula's four divisions (init 0x%X and 0x%X, view "
+                        "change 0x%X and 0x%X) now read EDVR's floats at %p -- 1080 and 1920, the game's own, "
+                        "until the factor's inputs are known. The sites (0x%X and 0x%X in build 334925), their "
+                        "functions and the constants were found by signature on %s; both sites match outside the "
+                        "masked fields, their operands read the constants found, and the prologues and the "
+                        "constants' values are build 334925's. The original operands are put back when EDVR "
+                        "unloads.",
+                        g_site[0] + kUiPanel1080Disp, g_site[0] + kUiPanel1920Disp,
+                        g_site[1] + kUiPanel1080Disp, g_site[1] + kUiPanel1920Disp,
+                        static_cast<void*>(page), kUiPanelSiteRva[0], kUiPanelSiteRva[1], gameBuildText());
     // The live Supersampling (2026-10-08): two virtual slots of the render context's interface class. Already in when
     // uiPanelScaleEarlyHooks ran at DLL load (the Supersampling hold).
     if (g_hookState == kHookNone) installLiveHooks(base);
-    if (g_hookState == kHookInstalled)
+    if (g_hookState == kHookInstalled && gameBuildKnown())
         Log::get().note("ui quality: panels: the game's Supersampling setter (virtual slot 0x%X, function 0x%X) and "
                         "its getter of the scale the last configure used (slot 0x%X, function 0x%X) now run through "
                         "EDVR's thunks, which forward untouched and remember the render context they were called on; "
@@ -629,6 +654,19 @@ void apply() {
                         "runs. Until one of them is called the Supersampling comes from the .fxcfg. Both slots are "
                         "put back when EDVR unloads.",
                         kUiSsSetterSlotRva, kUiSsSetterRva, kUiSsGetterSlotRva, kUiSsGetterRva);
+    else if (g_hookState == kHookInstalled)
+        Log::get().note("ui quality: panels: the game's Supersampling setter (virtual slot 0x%X, function 0x%X in build 334925) "
+                        "and its getter of the scale the last configure used (slot 0x%X, function 0x%X in build 334925), "
+                        "found by signature on %s at slot 0x%llX, function 0x%llX and slot 0x%llX, function 0x%llX, now "
+                        "run through EDVR's thunks, which forward untouched and remember the render context they were "
+                        "called on; the setter's also moves the panel factor to the new value before the game's own "
+                        "setter runs. Until one of them is called the Supersampling comes from the .fxcfg. Both slots "
+                        "are put back when EDVR unloads.",
+                        kUiSsSetterSlotRva, kUiSsSetterRva, kUiSsGetterSlotRva, kUiSsGetterRva, gameBuildText(),
+                        static_cast<unsigned long long>(gameRva(kUiSsSetterSlotRva)),
+                        static_cast<unsigned long long>(gameRva(kUiSsSetterRva)),
+                        static_cast<unsigned long long>(gameRva(kUiSsGetterSlotRva)),
+                        static_cast<unsigned long long>(gameRva(kUiSsGetterRva)));
     else
         Log::get().note("ui quality: panels: the game's Supersampling is NOT read live -- %s. The .fxcfg's value, "
                         "read every 5 s, is what the panel factor uses.",
@@ -861,8 +899,8 @@ void uiPanelScaleFrameBoundary() {
         "%.4f) / (W_out %u x k_out %.4f) / target %.0f%%%s%s -- HMD Quality %.2f, Elite's Supersampling "
         "%.2f, the game told %ux%u, its vertical FOV %.1f degrees, the headset's %.1f. From the next "
         "panel init or view change.",
-        1.0 / f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
-        kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp,
+        1.0 / f, g_site[0] + kUiPanel1080Disp, g_site[0] + kUiPanel1920Disp,
+        g_site[1] + kUiPanel1080Disp, g_site[1] + kUiPanel1920Disp,
         static_cast<double>(d1080), static_cast<double>(d1920), f, in.renderW, k, in.outputW, kOut,
         static_cast<double>(in.target) * 100.0, ssText,
         clamp == UiPanelClamp::kCap      ? " (capped: no panel above four times its game size)"
@@ -985,8 +1023,8 @@ void flatFrameBoundary(float target) {
         "axis / target %.0f%%%s. A panel the game made WxH at the game's own divisors is now made about %.2fW x %.2fH; "
         "the widest the formula can ask for is %.0f px (D3D11's limit %.0f, EDVR's budget %.0f). From the next panel "
         "init or view change.",
-        1.0 / plan.f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
-        kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp, static_cast<double>(d1080),
+        1.0 / plan.f, g_site[0] + kUiPanel1080Disp, g_site[0] + kUiPanel1920Disp,
+        g_site[1] + kUiPanel1080Disp, g_site[1] + kUiPanel1920Disp, static_cast<double>(d1080),
         static_cast<double>(d1920), plan.f, in.renderW, in.renderH, in.outputW, in.outputH,
         heightAxis ? "height (1080)" : "width (1920)", static_cast<double>(target) * 100.0, flatClampText(plan.clamp),
         1.0 / plan.f, 1.0 / plan.f, plan.largest, kUiPanelTextureLimit, kUiPanelBudget);

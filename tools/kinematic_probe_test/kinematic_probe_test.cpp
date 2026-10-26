@@ -31,6 +31,8 @@ namespace edvr {
 const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept { return "installed"; }
 void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
 bool kinematicEvalHooksMatch(uintptr_t) noexcept { return false; }
+// src\common\game_build.h's identity read (the vtable range): no game image here.
+bool gameBuildIdentity(uint32_t* stamp, uint32_t* size) noexcept { if (stamp) *stamp = 0; if (size) *size = 0; return false; }
 }
 using namespace edvr;
 
@@ -289,7 +291,7 @@ void casePhysNodes() {
 }
 
 // Draw-item-builder bucket counts (the census join, perf arc): per-session
-// counters for the FUN_1442B4420 bracket. A wild entry walk counts and
+// counters for the FUN_1442B7040 bracket. A wild entry walk counts and
 // returns early; an empty walk counts separately; an exit fault drops the
 // call's items but keeps its bucket count; overflow and negative deltas
 // accumulate; the maxima track only what their path measured.
@@ -335,9 +337,9 @@ void caseDirectBuild() {
           "9: producer 1 keeps a separate stat set (index 2 ignored)");
     std::ostringstream j;
     p.writeJson(j);
-    check(j.str().find("\"bucket_items_direct\":[{\"producer\":\"fun_144312e00\","
+    check(j.str().find("\"bucket_items_direct\":[{\"producer\":\"fun_144315a20\","
                        "\"calls\":3,\"items\":47,\"neg_deltas\":1,\"read_faults\":1,"
-                       "\"max_items_per_call\":40},{\"producer\":\"fun_14369c9c0\","
+                       "\"max_items_per_call\":40},{\"producer\":\"fun_14369f620\","
                        "\"calls\":1,\"items\":900,\"neg_deltas\":0,\"read_faults\":0,"
                        "\"max_items_per_call\":900}]") != std::string::npos,
           "9: both producers serialize");

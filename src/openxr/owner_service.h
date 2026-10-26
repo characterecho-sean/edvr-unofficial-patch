@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include "flat_owner_waits.h"
 #include "owner_invoke_stats.h"
 
 namespace edvr::openxr {
@@ -45,7 +46,7 @@ class OwnerService final {
   // executing callback always completes before this method returns. Queued
   // requests can be cancelled. Constructing the by-value std::function argument
   // may throw before entry; allocations made inside invoke are contained.
-  bool invoke(std::function<void()> callback, OwnerCallKind kind = OwnerCallKind::Other) {
+  bool invoke(std::function<void()> callback, OwnerCallKind kind = OwnerCallKind::Other, OwnerJobSite site = OwnerJobSite::Auto) {
     if (!callback) return false;
     if (isOwner()) {
       { std::lock_guard<std::mutex> lock(mutex_); if (!running_ || stopping_) return false; }
@@ -60,13 +61,19 @@ class OwnerService final {
     // stale pointer for the note below.
     std::shared_ptr<OwnerInvokeStats> stats;
     uint64_t (*clock)() = nullptr;
+    std::shared_ptr<FlatOwnerWaits> waits;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stats = invokeStats_;
       clock = invokeNow_;
+      waits = flatWaits_;
     }
     const bool timed = stats && clock;
     if (timed) request->enqueuedUs = clock();
+    if (waits) {
+      waits->enqueue(request->flat, site == OwnerJobSite::Auto ? ownerJobSiteForKind(kind) : site, true);
+      if (request->flat.tracked) request->waits = waits;
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_ || stopping_ || queue_.size() >= kQueueCapacity) return false;
@@ -85,7 +92,15 @@ class OwnerService final {
       sample.runUs = int64_t(request->finishedUs) - int64_t(request->startedUs);
       stats->note(sample);
     }
+    // The flat figures: written by the owner before it set done, read here under the same request mutex.
+    if (request->waits) request->waits->note(request->flat);
     return request->success;
+  }
+  // Optional flat-profile accounting of every owner job, invoke and submit (flat_owner_waits.h). Set before start(); it reads no clock while
+  // the hooks say the graphics half is not flat. Shared like the invoke stats, and detached the same way.
+  void setFlatWaits(std::shared_ptr<FlatOwnerWaits> waits) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    flatWaits_ = std::move(waits);
   }
   // Optional per-kind accounting of invoke (owner_invoke_stats.h). Set before start(); now is the clock the instants use.
   // Without it invoke does not read the clock.
@@ -104,12 +119,18 @@ class OwnerService final {
   // captures are released. Cancellation reports false; rejection returns false
   // without calling completion. Completion runs outside service/request locks
   // and must not wait for this owner's progress.
-  bool submit(std::function<void()> callback, CompletionCallback completion = {}) {
+  bool submit(std::function<void()> callback, CompletionCallback completion = {}, OwnerJobSite site = OwnerJobSite::Other) {
     if (!callback) return false;
     std::shared_ptr<Request> request;
     try { request = std::make_shared<Request>(std::move(callback), std::move(completion)); }
     catch (...) { return false; }
     bool accepted = false;
+    std::shared_ptr<FlatOwnerWaits> waits;
+    { std::lock_guard<std::mutex> lock(mutex_); waits = flatWaits_; }
+    if (waits) {
+      waits->enqueue(request->flat, site, false);
+      if (request->flat.tracked) request->waits = waits;
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (running_ && !stopping_ && queue_.size() < kQueueCapacity) {
@@ -172,6 +193,9 @@ class OwnerService final {
     OwnerCallKind kind = OwnerCallKind::Other;
     uint64_t enqueuedUs = 0, startedUs = 0, finishedUs = 0;
     bool behindWait = false;
+    // The flat instrument's record, and the object that wrote it; waits stays empty for a job enqueued outside flat.
+    FlatOwnerWaits::Ticket flat;
+    std::shared_ptr<FlatOwnerWaits> waits;
   };
   static constexpr uint8_t kIdleKind = 0xFF;
 
@@ -191,6 +215,7 @@ class OwnerService final {
       std::shared_ptr<Request> request;
       bool idle=false;
       uint64_t (*clock)() = nullptr;   // the stats clock, read under the mutex with the request (setInvokeStats may clear it)
+      std::shared_ptr<FlatOwnerWaits> waits;   // read under the mutex too (setFlatWaits)
       {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait_for(lock, std::chrono::milliseconds(5), [&] { return stopping_ || !queue_.empty(); });
@@ -206,26 +231,40 @@ class OwnerService final {
         }
         if (!queue_.empty()) { request = queue_.front(); queue_.pop_front(); currentKind_ = uint8_t(request->kind); clock = invokeNow_; }
         else idle=bool(idle_);
+        waits = flatWaits_;
+        // Marked under the mutex that chose the pump: a job pushed after this sees the pump in progress.
+        if (idle && waits) waits->idleBegin();
       }
       if (request) {
         const bool timed = clock != nullptr;
         if (timed) request->startedUs = clock();
+        if (request->waits) request->waits->started(request->flat);
         bool success = true; try { request->callback(); } catch (...) { success = false; }
         request->callback={};
         if (timed) request->finishedUs = clock();
+        if (request->waits) request->waits->finished(request->flat);
         { std::lock_guard<std::mutex> lock(mutex_); currentKind_ = kIdleKind; }
+        // A submit job has no caller to fold it in: the owner does, once the completion has run.
+        const bool detached = !request->flat.viaInvoke && request->waits;
         complete(request, success);
         finish(request, success);
+        if (detached) request->waits->note(request->flat);
         auto now = std::chrono::steady_clock::now();
         if (idle_ && now - lastIdle >= std::chrono::milliseconds(5)) {
           bool between=false;
-          { std::lock_guard<std::mutex> lock(mutex_); between=!stopping_; }
-          if (between) { try { idle_(); } catch (...) {idleFailed_=true;} lastIdle = std::chrono::steady_clock::now(); }
+          { std::lock_guard<std::mutex> lock(mutex_); between=!stopping_; waits=flatWaits_; if (between && waits) waits->idleBegin(); }
+          if (between) {
+            try { idle_(); } catch (...) {idleFailed_=true;}
+            if (waits) waits->idleEnd();
+            lastIdle = std::chrono::steady_clock::now();
+          }
         }
       } else if (idle) {
         try { idle_(); } catch (...) {idleFailed_=true;}
+        if (waits) waits->idleEnd();
         lastIdle = std::chrono::steady_clock::now();
       }
+      if (waits) waits->tick();
     }
   }
 
@@ -240,6 +279,7 @@ class OwnerService final {
   std::function<void()> finalizer_;
   unsigned stopCallers_ = 0;
   std::shared_ptr<OwnerInvokeStats> invokeStats_;
+  std::shared_ptr<FlatOwnerWaits> flatWaits_;
   uint64_t (*invokeNow_)() = nullptr;
   uint8_t currentKind_ = kIdleKind; // the kind of the job the owner is running, under mutex_
 };

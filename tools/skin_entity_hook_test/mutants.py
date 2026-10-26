@@ -30,8 +30,10 @@ FILES = {
 }
 # everything else the rig compiles or includes, copied into the temp tree unmutated
 COMMON = ["code_hook.h", "code_hook.cpp", "guard.h", "guard.cpp", "log.h", "log.cpp", "config.h", "config.cpp", "ini_name.h", "runtime_profile.h", "proxy.h"]
+# every header of src\common (the headers chain: log.h -> log_reserve.h, runtime_profile.h -> install_scope.h -> ..., game_build.h)
+COMMON += sorted(p.name for p in (ROOT / "src" / "common").glob("*.h") if p.name not in COMMON)
 TREE_EXTRA = [("src/common/" + name, ROOT / "src" / "common" / name) for name in COMMON] + [
-    ("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h"),
+    ("src/d3d11/avatar_hooks_core.h", ROOT / "src" / "d3d11" / "avatar_hooks_core.h"),
     ("src/d3d11/skin_entity_hook.h", ROOT / "src" / "d3d11" / "skin_entity_hook.h"),
     ("src/d3d11/skin_join.h", ROOT / "src" / "d3d11" / "skin_join.h"),
 ]
@@ -48,8 +50,13 @@ MUTANTS = [
     M("state-before-arming", "H1", "hook", [("std::atomic<State*> g_state{nullptr};", "std::atomic<State*> g_state{new State};")],
       "a state exists before anything armed the hook"),
     M("prologue-unchecked", "H2", "hook", [("if (!checkBytes(target, kPrologue, kPrologueBytes)) {", "if (false) {")],
-      "a function whose prologue is not build 332841's is patched"),
-    M("not-read-only-in-the-line", "H3", "hook", [('"READ ONLY: the original runs first', '"the original runs first')], "the arm line does not say the hook only reads"),
+      "a function whose prologue is not build 334925's is patched"),
+    M("not-found-by-signature-unchecked", "H2", "hook", [("        if (at == 0) {\n            char b[260];", "        if (false) {\n            char b[260];")],
+      "a job assembly the resolver did not find on an unknown build is not stood down on"),
+    M("not-read-only-in-the-line", "H3", "hook",
+      [('(the skinning job assembly, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "\n                      "READ ONLY: the original runs first',
+        '(the skinning job assembly, build 334925) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, relay at 0x%llX; "\n                      "the original runs first')],
+      "the arm line does not say the hook only reads"),
     M("observe-before-original", "H4", "hook",
       [("    forward(node, b, c, d);\n    if (s->gate.load(std::memory_order_relaxed)) observe(*s, node);", "    if (s->gate.load(std::memory_order_relaxed)) observe(*s, node);\n    forward(node, b, c, d);")],
       "the list is read before the game's function has assigned the bases"),

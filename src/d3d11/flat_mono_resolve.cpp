@@ -1368,7 +1368,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     {
         flatcpu::Scope backendScope(flatcpu::kBackend);   // the backend evaluation: NGX, FSR3, or the TAA dispatch
     if(taa) {
-        ID3D11ShaderResourceView* views[]={g.color.srv.Get(),nullptr,nullptr,nullptr,g.motion.srv.Get(),
+        // t1 is this frame's depth (the prep's output, which an EDVR TAA frame never rescales): the history depth check reads the texels a
+        // junction's other surfaces land on in this frame. t8 is last frame's.
+        ID3D11ShaderResourceView* views[]={g.color.srv.Get(),g.depth[index].srv.Get(),nullptr,nullptr,g.motion.srv.Get(),
             g.rejection.srv.Get(),g.expected.srv.Get(),g.output[index^1].srv.Get(),g.depth[index^1].srv.Get(),
             nullptr,nullptr,nullptr,nullptr,f.untrustedCameraCoverage,
             untrusted?g.outputDomain[index^1].srv.Get():nullptr};

@@ -1157,6 +1157,22 @@ void sourcePins() {
     const std::string ex = readFile("src\\d3d11\\exposure_fix.cpp");
     const std::string rt = readFile("src\\d3d11\\vr_world_route.cpp");
     check(!vs.empty() && !ex.empty() && !rt.empty(), "source pins: the three sources are readable");
+    const auto contains = [](const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; };
+    const std::string mapsCadence = readFile("src\\d3d11\\ui_layer.cpp");
+    const std::string celestialCadence = readFile("src\\d3d11\\celestial_motion.cpp");
+    const std::string timingCadence = readFile("src\\d3d11\\native_timing.cpp");
+    check(contains(rt, "g_windowStartMs && now - g_windowStartMs >= 10000") &&
+              count(rt, "window %.1f s") == 3 && before(rt, "flatMonoResolveTakeRefusalCensus();", "g_win.reset();\n            g_windowStartMs = now;"),
+          "log cadence: all three route reports carry elapsed seconds; taking the refusal census and resetting the route window remain together");
+    check(contains(mapsCadence, "constexpr uint64_t kMapsWindowMs = 10000;") &&
+              contains(mapsCadence, "static_cast<double>(now - m.windowStartMs) / 1000.0") && contains(mapsCadence, "m.win.reset();"),
+          "log cadence: maps keep their actual elapsed seconds and window reset at ten seconds");
+    check(contains(celestialCadence, "now - g_lastReport >= static_cast<uint64_t>(q.QuadPart) * 10u") &&
+              contains(celestialCadence, "report(windowSeconds);") && contains(celestialCadence, "g_win = Counters{};"),
+          "log cadence: celestial capture remains gated as before and its ten-second census still resets the window");
+    check(contains(timingCadence, "snapshot.capturedAtMs - c->lastLogMs >= 10000") && contains(timingCadence, "ms (last-frame sample); wall elapsed includes waits") &&
+              contains(timingCadence, "const edvr::MapWaitTotals mw = edvr::mapWaitTake();"),
+          "log cadence: CPU timing is explicitly the last-frame sample, while Map totals are taken only with its ten-second line");
 
     // The internal-call early return on every draw and dispatch thunk, BEFORE anything the VR path does with the call.
     struct Thunk { const char* head; const char* first; };

@@ -52,13 +52,91 @@ GitHub release or use signing secrets.
 
 A push to a `codex/release-*` branch runs the entire build and package path. If
 the commit already has a release tag, the runner uses its exact version;
-otherwise it creates a temporary local tag such as `v0.0.0-ci.123456789.1`
-before building. This makes the version stamped into the DLLs and installer
-match the package version. The temporary tag exists only on the runner; either
-branch result is a proof artifact, not a release asset. The branch push trigger
-works before this workflow reaches `main`. GitHub does not offer its manual
-**Run workflow** control for a new workflow until the workflow file is on the
-default branch.
+otherwise it creates a temporary local tag, `v0.0.0-ci`, before building. This
+makes the version stamped into the DLLs and installer match the package
+version. The temporary tag exists only on the runner; either branch result is a
+proof artifact, not a release asset. The branch push trigger works before this
+workflow reaches `main`. GitHub does not offer its manual **Run workflow**
+control for a new workflow until the workflow file is on the default branch.
+
+### Linux: compile-only builds under Wine
+
+For a test flight on a Steam Deck or another Linux machine that runs Elite
+under Proton, `tools/linux_toolchain.py` compiles the production DLLs with
+Microsoft's compiler under Wine. It runs `build.bat --compile-only`, which
+skips every test, rig and installer gate, so the result is not validated and
+not a release asset: a merge or a release still needs CI's full build. Use host
+`python3`, from any shell:
+
+```
+python3 tools/linux_toolchain.py setup --dry-run
+python3 tools/linux_toolchain.py setup --accept-license
+python3 tools/linux_toolchain.py doctor
+python3 tools/linux_toolchain.py build-dlls [--root <worktree>]
+```
+
+`setup` needs the system packages `wine msitools git`, which you install
+yourself (it never runs sudo), and downloads VS 2022's Build Tools, a Windows
+Python and the pinned SDKs. The Build Tools are under Microsoft's licence:
+using them needs a valid Visual Studio licence, and they must never be shared,
+published or committed. `--accept-license` says you have read and accept those
+terms; without it `setup` stops before downloading. Everything lives in the
+Git-ignored `.toolchains/windows/` of the main checkout (`EDVR_TOOLCHAIN_HOME`
+moves it) and serves every worktree. A tree's output, a worktree's included, is
+`build/compile-build` in that tree, with a `compile_only_receipt.json` that
+`install_edvr.py --compile-only` checks (`tools/compile_only.py`).
+
+It differs from CI's build in a few ways: the MSVC (14.44.35207) and Windows
+SDK (10.0.26100) are CI's own; shaders compile with the SDK's own
+`d3dcompiler_47.dll`, not Wine's; the proxy's export list comes from Wine's
+`d3d11.dll`, which lacks some exports Windows has (Elite imports
+`D3D11CreateDevice` alone from it); the FSR 3 DX11 port builds with CMake and
+Ninja (`fetch_ffx_dx11.py --generator ninja`), not the Visual Studio generator;
+and no gates run. The docstring of `tools/linux_toolchain.py` has the details.
+
+### The caches in CI
+
+The workflow keeps two caches (`actions/cache`), and a third file set inside
+the second. Measured 2026-10-22 on the same branch: a cold run took 16.5 min
+(build step 12.9 min), the next run on a new commit 8.8 min (build step 6.7
+min); the unchanged workflow on `main`, run alongside, took 22.3 min (build
+step 17.9 min). Runner speed varies a good deal between runs (the same cold
+build was 20 min a day earlier), so compare runs made together.
+
+- **Pinned dependencies** (`third_party\ngx`, `ffx-dx11`, `xess`,
+  `openxr\loader`; 229 MB). Key: the runner image and the hash of the four
+  `tools\fetch_*.py` files, which hold the pins. A hit skips the fetch and the
+  FidelityFX build (2.7 min); the `--verify` step runs on a restored copy
+  exactly as on a fetched one, and a failed fetch or verify never saves.
+- **Compile cache** (about 100 MB compressed). Key: the runner image, the
+  branch and the commit; a run restores the newest cache of its own branch,
+  else of the default branch (GitHub shows a run only its own ref's caches and
+  the default branch's, so one `gh workflow run release.yml --ref main` after a
+  merge seeds every branch). It is saved after the build even when a rig
+  failed, so a rerun after a flake starts warm. Release tags (`v*`) neither
+  restore nor save it: they compile from scratch. The build log's
+  `compile_cache:` lines are in the `edvr-diagnostics` artifact; the run's job
+  summary carries the totals (`python tools\compile_cache.py --summary LOG`).
+- **Riding with it**: `build\rig_times.json`, so the longest rigs start first
+  and timeouts are set from the last run, and the two generated shader headers,
+  which carry their own key over the HLSL and the compiler DLL and regenerate
+  when it differs (about 60 s saved).
+
+Why a hit is safe. `compile_cache.py` already decides every compile on a hash
+of the source, of every project header the compiler reported, of the flags, of
+the compiler's identity and of INCLUDE, LIB and CL. Nothing about that changes:
+a restored entry for an input that changed is a miss, and the tool's self-test
+proves it. What the archive adds is a file whose size and time the tool cannot
+trust, so `--pack` stores only entries whose outputs still match their
+manifest, and `--unpack` installs an entry only when each output's sha256
+equals the one recorded when cl wrote it, then sets the file's time back; an
+entry that fails is left out and recompiles. The cache skips compiles only:
+every rig still runs on every build. Proof builds carry one version stamp,
+`0.0.0-ci`, because the stamp is in a header that `log.cpp`, `menu.cpp` and
+several other headers and sources include, and a stamp that changed per run
+missed all of them. Two things still recompile every run: the installer (its
+payload embeds the freshly linked DLLs) and `object_classification_test` (an
+`ml64` object carries a timestamp).
 
 After the workflow is on `main`, a manual branch run is also possible:
 
@@ -129,9 +207,10 @@ try {
 
 Write and review release notes before creating the draft. Generate the Thanks
 section from the previous tag, then write each contributor's sentence by hand.
-Only merged PR authors are named; issue and log reporters get the tool's
-general line. Review the final notes file, then attach the three verified ZIPs
-and `SHA256SUMS` to a draft release:
+Only merged PR authors are named, plus anyone the maintainer approved by name
+in `tools/release_credits_approved.json` for a commit in the release. Issue and
+log reporters get the tool's general line. Review the final notes file, then
+attach the three verified ZIPs and `SHA256SUMS` to a draft release:
 
 ```powershell
 python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out thanks.md

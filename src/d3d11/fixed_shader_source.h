@@ -177,6 +177,33 @@ cbuffer C:register(b0){uint seed;uint srcW;uint srcH;uint pad0;}
 }
 )HLSL";
 
+// The same digest and age for a Texture2DArray view (F108: the in-world screens' interface is an array): one slice of the
+// view a dispatch z, mip 0, blocks and ages in arrays of the view's slice count. Kept apart so kUiContentCs stays byte for
+// byte the shader it was.
+constexpr char kUiContentArrayCs[] = R"HLSL(
+Texture2DArray<float4> Current:register(t0);
+Texture2DArray<float> AgeIn:register(t1);
+RWTexture2DArray<uint> Digest:register(u0);
+RWTexture2DArray<float> Next:register(u1);
+cbuffer C:register(b0){uint seed;uint srcW;uint srcH;uint pad0;}
+[numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
+    uint bw,bh,bs;Digest.GetDimensions(bw,bh,bs);if(any(id.xy>=uint2(bw,bh))||id.z>=bs)return;
+    uint h=2166136261u;
+    [unroll]for(uint y=0;y<4;++y)[unroll]for(uint x=0;x<4;++x){
+        uint2 texel=id.xy*4+uint2(x,y);
+        if(texel.x>=srcW||texel.y>=srcH)continue;
+        float4 c=Current.Load(int4(texel,id.z,0));
+        c.rgb*=c.a;
+        h=(h^asuint(c.r))*16777619u;h=(h^asuint(c.g))*16777619u;
+        h=(h^asuint(c.b))*16777619u;h=(h^asuint(c.a))*16777619u;
+    }
+    if(seed){Digest[id]=h;Next[id]=0;return;}
+    uint prev=Digest[id];
+    Next[id]=(h!=prev)?1.0:max(AgeIn.Load(int4(id,0))-1.0/32.0,0.0);
+    Digest[id]=h;
+}
+)HLSL";
+
 
 constexpr char kUiLayerCompositeHlsl[] = R"HLSL(
 Texture2D<float4> Frame : register(t0);
@@ -296,6 +323,57 @@ float4 main(float4 p : SV_POSITION) : SV_Target {
 }
 )HLSL";
 
+// The HUD's light for the game's bloom (flat fix.ui_quality): the scene H plus the HUD HDR layer's premultiplied radiance, one
+// pass at H's size. The layer is the display's size times the quality target, so a pixel of H covers `span` layer texels per
+// axis, a fractional number at 20/13 or 1.25. Each pixel integrates the texels of its own footprint by the area they cover, the
+// UI composite's weights (ui_layer_math.h uiGlowFeedFootprint is this loop, transcribed): the footprints tile the layer, so a
+// one-texel line or a single bright texel sends the same light to the bloom wherever it falls on the grid. A footprint wider than
+// 4 texels (a ratio past 4) is cut to its central 4, which bounds the loop at 5 x 5 loads and keeps the mean of a flat field.
+// Non-finite texels read zero; the sum stays inside R11G11B10_FLOAT's range.
+constexpr char kUiGlowFeedPsHlsl[] = R"HLSL(
+Texture2D<float4> HudLayer : register(t0);
+Texture2D<float4> Scene : register(t1);
+float4 main(float4 p : SV_POSITION) : SV_Target {
+    uint sw, sh, lw, lh;
+    Scene.GetDimensions(sw, sh);
+    HudLayer.GetDimensions(lw, lh);
+    float2 span = float2(lw, lh) / float2(sw, sh);
+    float2 cut = max(span - 4.0, float2(0, 0)) * 0.5;
+    float2 x0 = (p.xy - 0.5) * span + cut;
+    float2 x1 = x0 + span - 2.0 * cut;
+    int2 k0 = max(int2(floor(x0)), int2(0, 0));
+    int2 k1 = min(int2(ceil(x1)) - 1, int2(lw - 1, lh - 1));
+    float3 acc = float3(0, 0, 0);
+    float wsum = 0;
+    [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 4); ++j) {
+        float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
+        if (wy <= 0) continue;
+        [loop] for (int i = k0.x; i <= min(k1.x, k0.x + 4); ++i) {
+            float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
+            if (wx <= 0) continue;
+            float3 c = HudLayer.Load(int3(i, j, 0)).rgb;
+            acc += (all(isfinite(c)) ? max(c, float3(0, 0, 0)) : float3(0, 0, 0)) * (wx * wy);
+            wsum += wx * wy;
+        }
+    }
+    float3 o = Scene.Load(int3(p.xy, 0)).rgb + (wsum > 0 ? acc / wsum : float3(0, 0, 0));
+    return float4(min(o, float3(60000, 60000, 60000)), 1.0);
+}
+)HLSL";
+
+// The star light for the game's bloom (visual.star_glow): one fullscreen pass that reads the star layer S (the star draws alone, replayed as the game
+// issued them) and writes it as it is. It is blended into H' with a blend factor of (m, m, m, 0) -- source BLEND_FACTOR, destination ONE, ADD -- so
+// H' = H [+ HUD] + m * S with m the setting's k - 1; the weight is the blend's, not a constant buffer's, so the shader has one texture and nothing
+// else. Non-finite texels read zero and the sum stays inside R11G11B10_FLOAT's range, as the HUD feed does.
+constexpr char kStarGlowAddPsHlsl[] = R"HLSL(
+Texture2D<float4> Star : register(t0);
+float4 main(float4 p : SV_POSITION) : SV_Target {
+    float3 c = Star.Load(int3(p.xy, 0)).rgb;
+    c = all(isfinite(c)) ? max(c, float3(0, 0, 0)) : float3(0, 0, 0);
+    return float4(min(c, float3(60000, 60000, 60000)), 0.0);
+}
+)HLSL";
+
 inline constexpr const char* kUiSeedVs = R"(
 struct V { float4 p:SV_POSITION; };
 V main(uint id:SV_VertexID) {
@@ -359,6 +437,105 @@ const char kScreenDepthHlsl[] = EDVR_UI_CHANGE_INPUT
     "    clip(max(a - min(floorAndStrength.x, 1.0 / 255.0), edit - 1.0/255.0));\n"
     "    return floorAndStrength.w;\n"
     "}\n";
+
+// The in-world screens' coverage (world_screen_coverage.h, F105): the stand-ins for PS EBA95E15B0A66102, the G-buffer
+// shader that draws a terminal's interface as the emissive term of a lit surface. Their input signature is the game
+// shader's, element for element (names, registers, masks, types), so whatever vertex stage feeds the game's shader
+// feeds them; the private UI depth rig holds the signature to the game's. Both mark every pixel the screen covers in
+// the eye's coverage mask as an attached stroke (the low bits 2: the pixel keeps its own surface's motion), and write
+// the screen's state for F108's census at target 1 (1 at rest, 2 edited, 3 an edit's first frame).
+//
+// HELD (F105's rule, kept for an interface texture UiContent cannot track): every pixel edited (1) every frame, so the
+// UI resolve rebuilds the screen from the current frame wherever DLSS departs from it.
+const char kWorldScreenCoverageHlsl[] = R"HLSL(
+struct In {
+    nointerpolation uint2 faceInvariant : __USER_VERTEX_FACEINVARIANT;
+    float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 lightingTangent : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 texcoord : __USER_VERTEX_M_TEXCOORD;
+};
+float4 main(In i, out float4 state : SV_Target1, out float edit : SV_Target2) : SV_Target0 {
+    state = 2.0 / 255.0;
+    edit = 1.0;
+    return 2.0 / 255.0;
+}
+)HLSL";
+
+// TRACKED (F108): the screen is held only where its interface changed. The game shader's own lookup, from the game's
+// bindings, which are still bound at the second issue: the instance record's word at byte 16 (t1, stride 96, indexed
+// by the face-invariant's y) is the interface's slice, its bit 31 a solid colour with no interface at all; the uv is
+// the texcoord times cb2[1].xy plus cb2[1].zw. The slice's per-4x4-block edit age (UiContent, at t14: 1 on the frame
+// a block changed, falling 1/32 a frame) is read as uiEdit reads it, the 2x2 blocks about the uv. Where an edit begins
+// (age 1) the coverage value carries bit 2 (6, not 2): the motion pass restarts NVIDIA's history there.
+//
+// F108b: the edit is held only EDVR_WORLD_SCREEN_HOLD_FRAMES frames from a block's last change (the frame it changed and
+// the six after), not UiContent's 32. The restart already cleared the old content from NVIDIA's history, so the hold
+// only covers DLSS's first frames on the new content: it is shown again on the 8th frame, once its history holds one
+// whole cycle of the jitter (world_screen_coverage.h, kWorldScreenHoldFrames, gives the count).
+// UiContent's R8 age k frames after the change is (255 - 8k)/255, so a block is held while its age is above
+// 1 - (N - 0.5)/32: k = 0..N-1 held, k = N not, with about half a frame's step of margin on each side.
+#define EDVR_WORLD_SCREEN_HOLD_FRAMES 7
+#define EDVR_WORLD_SCREEN_STR2(x) #x
+#define EDVR_WORLD_SCREEN_STR(x) EDVR_WORLD_SCREEN_STR2(x)
+const char kWorldScreenTrackedHlsl[] = "#define WORLD_SCREEN_HOLD_FRAMES " EDVR_WORLD_SCREEN_STR(EDVR_WORLD_SCREEN_HOLD_FRAMES) "\n" R"HLSL(
+struct In {
+    nointerpolation uint2 faceInvariant : __USER_VERTEX_FACEINVARIANT;
+    float3 lightingNormal : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 lightingTangent : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 texcoord : __USER_VERTEX_M_TEXCOORD;
+};
+struct Instance { uint words[24]; };
+StructuredBuffer<Instance> Instances : register(t1);
+cbuffer Material : register(b2) { float4 material[6]; };
+Texture2DArray<float> UiEditAges : register(t14);
+float4 main(In i, out float4 state : SV_Target1, out float edit : SV_Target2) : SV_Target0 {
+    const uint word = Instances[i.faceInvariant.y].words[4];
+    float age = 0;
+    if ((word & 0x80000000u) == 0u) {
+        uint bw, bh, slices;
+        UiEditAges.GetDimensions(bw, bh, slices);
+        if (bw != 0 && bh != 0 && slices != 0) {
+            const float2 uv = i.texcoord * material[1].xy + material[1].zw;
+            const int slice = int(min(word, slices - 1));
+            const int2 p = int2(floor(uv * float2(bw, bh) - .5));
+            [unroll] for (int y = 0; y < 2; ++y) [unroll] for (int x = 0; x < 2; ++x)
+                age = max(age, UiEditAges.Load(int4(clamp(p + int2(x, y), 0, int2(bw, bh) - 1), slice, 0)));
+        }
+    }
+    const bool fresh = age >= 1.0;
+    const bool held = age > 1.0 - (WORLD_SCREEN_HOLD_FRAMES - 0.5) / 32.0;
+    state = (fresh ? 3.0 : (held ? 2.0 : 1.0)) / 255.0;
+    edit = held ? age : 0.0;
+    return (fresh ? 6.0 : 2.0) / 255.0;
+}
+)HLSL";
+
+// F108's census of the in-world screens (world_screen_coverage.h): one eye's screen-state target (1 at rest, 2 edited,
+// 3 an edit's first frame) counted into three words of a raw buffer (screen pixels, edited, first frame), a group's
+// counts summed in shared memory first.
+const char kWorldScreenCensusCs[] = R"HLSL(
+Texture2D<float> State : register(t0);
+RWByteAddressBuffer Counts : register(u0);
+groupshared uint gCounts[3];
+[numthreads(16, 16, 1)] void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+    if (gi < 3) gCounts[gi] = 0;
+    GroupMemoryBarrierWithGroupSync();
+    uint w, h;
+    State.GetDimensions(w, h);
+    if (id.x < w && id.y < h) {
+        const uint v = uint(State.Load(int3(id.xy, 0)) * 255.0 + 0.5);
+        if (v >= 1) InterlockedAdd(gCounts[0], 1);
+        if (v >= 2) InterlockedAdd(gCounts[1], 1);
+        if (v >= 3) InterlockedAdd(gCounts[2], 1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0 && gCounts[0] != 0) {
+        Counts.InterlockedAdd(0, gCounts[0]);
+        Counts.InterlockedAdd(4, gCounts[1]);
+        Counts.InterlockedAdd(8, gCounts[2]);
+    }
+}
+)HLSL";
 
 const char kSpriteDepthHlsl[] = EDVR_UI_CHANGE_INPUT R"HLSL(
 Texture2D<float4> Surf : register(t0);

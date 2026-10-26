@@ -1,0 +1,3791 @@
+[
+ {
+  "rva": "0x1F2410",
+  "kind": "code",
+  "new_rva": "0x1F2410",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x1F2410",
+   "length": 5
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x1F2410",
+   "length": 5
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x30FCEA",
+  "kind": "code",
+  "new_rva": "0x30FCBA",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x30FA80",
+   "length": 987
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "7 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x30FAB0",
+   "length": 987
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x312520",
+  "kind": "code",
+  "new_rva": "0x3124F0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x312440",
+   "length": 736
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x312470",
+   "length": 736
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E0F60",
+  "kind": "code",
+  "new_rva": "0x4E0F00",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E0F00",
+   "length": 67
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E0F60",
+   "length": 67
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E4730",
+  "kind": "code",
+  "new_rva": "0x4E46D0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E46D0",
+   "length": 572
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4730",
+   "length": 572
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E4766",
+  "kind": "code",
+  "new_rva": "0x4E4706",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E46D0",
+   "length": 572
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4730",
+   "length": 572
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E477C",
+  "kind": "code",
+  "new_rva": "0x4E471C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E46D0",
+   "length": 572
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4730",
+   "length": 572
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E47B1",
+  "kind": "code",
+  "new_rva": "0x4E4751",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E46D0",
+   "length": 572
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4730",
+   "length": 572
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E4970",
+  "kind": "code",
+  "new_rva": "0x4E4910",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E4910",
+   "length": 316
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 24 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4970",
+   "length": 316
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E4BA0",
+  "kind": "code",
+  "new_rva": "0x4E4B40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E4B40",
+   "length": 374
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 8 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E4BA0",
+   "length": 374
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E4E50",
+  "kind": "code",
+  "new_rva": "0x4E4DF0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E4DDE",
+   "length": 41
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4E4E3E",
+   "length": 41
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4E5DA0",
+  "kind": "code",
+  "new_rva": "0x4E5D40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E5D40",
+   "length": 101
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E5DA0",
+   "length": 101
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E5DF3",
+  "kind": "code",
+  "new_rva": "0x4E5D93",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E5D40",
+   "length": 101
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E5DA0",
+   "length": 101
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E6E40",
+  "kind": "code",
+  "new_rva": "0x4E6DE0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E6DE0",
+   "length": 911
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E6E40",
+   "length": 911
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E71B6",
+  "kind": "code",
+  "new_rva": "0x4E7156",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E6DE0",
+   "length": 911
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E6E40",
+   "length": 911
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E71BC",
+  "kind": "code",
+  "new_rva": "0x4E715C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E6DE0",
+   "length": 911
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "6 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E6E40",
+   "length": 911
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E71D0",
+  "kind": "code",
+  "new_rva": "0x4E7170",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E7170",
+   "length": 2435
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E71D0",
+   "length": 2435
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E7202",
+  "kind": "code",
+  "new_rva": "0x4E71A2",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E7170",
+   "length": 2435
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E71D0",
+   "length": 2435
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E720E",
+  "kind": "code",
+  "new_rva": "0x4E71AE",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E7170",
+   "length": 2435
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 292 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E71D0",
+   "length": 2435
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E8330",
+  "kind": "code",
+  "new_rva": "0x4E82D0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E82D0",
+   "length": 58
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E8330",
+   "length": 58
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E8630",
+  "kind": "code",
+  "new_rva": "0x4E85D0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E85D0",
+   "length": 244
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 6 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E8630",
+   "length": 244
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E870F",
+  "kind": "code",
+  "new_rva": "0x4E86AF",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E85D0",
+   "length": 244
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 6 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E8630",
+   "length": 244
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E87B0",
+  "kind": "code",
+  "new_rva": "0x4E8750",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E8750",
+   "length": 32
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E87B0",
+   "length": 32
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4F3150",
+  "kind": "code",
+  "new_rva": "0x4F30F0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4F30F0",
+   "length": 54
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4F3150",
+   "length": 54
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4F4F70",
+  "kind": "code",
+  "new_rva": "0x4F4F10",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4F4F10",
+   "length": 119
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4F4F70",
+   "length": 119
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x51B7A0",
+  "kind": "code",
+  "new_rva": "0x51B740",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x51B740",
+   "length": 222
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x51B7A0",
+   "length": 222
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x522BB0",
+  "kind": "code",
+  "new_rva": "0x522B50",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x522B50",
+   "length": 124
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x522BB0",
+   "length": 124
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x529540",
+  "kind": "code",
+  "new_rva": "0x5294E0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x5294E0",
+   "length": 5
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x529540",
+   "length": 5
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x57A5C0",
+  "kind": "code",
+  "new_rva": "0x57A560",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x57A560",
+   "length": 654
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x57A5C0",
+   "length": 654
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x58B2B0",
+  "kind": "code",
+  "new_rva": "0x58B250",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x58B250",
+   "length": 804
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x58B2B0",
+   "length": 804
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x58DFD3",
+  "kind": "code",
+  "new_rva": "0x58DF73",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x58DF50",
+   "length": 44
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x58DFB0",
+   "length": 44
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x592360",
+  "kind": "code",
+  "new_rva": "0x592300",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x5922F0",
+   "length": 43
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x592350",
+   "length": 43
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x594F73",
+  "kind": "code",
+  "new_rva": "0x594F13",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x594EC8",
+   "length": 357
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x594F28",
+   "length": 357
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x59500B",
+  "kind": "code",
+  "new_rva": "0x594FAB",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x594EC8",
+   "length": 357
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x594F28",
+   "length": 357
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x595141",
+  "kind": "code",
+  "new_rva": "0x5950E1",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x59502D",
+   "length": 235
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x59508D",
+   "length": 235
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x5CB350",
+  "kind": "code",
+  "new_rva": "0x5CB2F0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x5CB2F0",
+   "length": 5
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x5CB350",
+   "length": 5
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x7E9EB0",
+  "kind": "code",
+  "new_rva": "0x7E9E50",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x7E9E50",
+   "length": 496
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x7E9EB0",
+   "length": 496
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x8BEA80",
+  "kind": "code",
+  "new_rva": "0x8BEA20",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8BEA20",
+   "length": 27
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8BEA80",
+   "length": 27
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D5400",
+  "kind": "code",
+  "new_rva": "0x8D53A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D546B",
+  "kind": "code",
+  "new_rva": "0x8D540B",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D5478",
+  "kind": "code",
+  "new_rva": "0x8D5418",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D5480",
+  "kind": "code",
+  "new_rva": "0x8D5420",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D5488",
+  "kind": "code",
+  "new_rva": "0x8D5428",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D5497",
+  "kind": "code",
+  "new_rva": "0x8D5437",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x8D549C",
+  "kind": "code",
+  "new_rva": "0x8D543C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x8D53A0",
+   "length": 243
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x8D5400",
+   "length": 243
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0xF83690",
+  "kind": "code",
+  "new_rva": "0xF83630",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xF83630",
+   "length": 5
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0xF83690",
+   "length": 5
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0xF8E100",
+  "kind": "code",
+  "new_rva": "0xF8E0A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xF8E0A0",
+   "length": 8
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0xF8E100",
+   "length": 8
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0xFDEC10",
+  "kind": "code",
+  "new_rva": "0xFDEBB0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xFDEBB0",
+   "length": 73
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0xFDEC10",
+   "length": 73
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0xFDEE10",
+  "kind": "code",
+  "new_rva": "0xFDEDB0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xFDEDB0",
+   "length": 178
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0xFDEE10",
+   "length": 178
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0xFDEFB0",
+  "kind": "code",
+  "new_rva": "0xFDEF50",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xFDEF50",
+   "length": 378
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0xFDEFB0",
+   "length": 378
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0xFDF410",
+  "kind": "code",
+  "new_rva": "0xFDF3B0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xFDF3B0",
+   "length": 39
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0xFDF410",
+   "length": 39
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x1072A80",
+  "kind": "code",
+  "new_rva": "0x1072A20",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x1072A20",
+   "length": 443
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x1072A80",
+   "length": 443
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x1079A90",
+  "kind": "code",
+  "new_rva": "0x1079A30",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x1079A30",
+   "length": 350
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x1079A90",
+   "length": 350
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x108BA8C",
+  "kind": "code",
+  "new_rva": "0x108BA2C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x108BA20",
+   "length": 24
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x108BA80",
+   "length": 24
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x108BEE0",
+  "kind": "code",
+  "new_rva": "0x108BE80",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x108BE80",
+   "length": 19
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x108BEE0",
+   "length": 19
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x10902B0",
+  "kind": "code",
+  "new_rva": "0x1090250",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x1090250",
+   "length": 73
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x10902B0",
+   "length": 73
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x1092240",
+  "kind": "code",
+  "new_rva": "0x10921E0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x10921E0",
+   "length": 246
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x1092240",
+   "length": 246
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x12C4D60",
+  "kind": "code",
+  "new_rva": "0x12C4CC0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x12C4CC0",
+   "length": 151
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x12C4D60",
+   "length": 151
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x12CBF20",
+  "kind": "code",
+  "new_rva": "0x12CBE80",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x12CBE80",
+   "length": 54
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x12CBF20",
+   "length": 54
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x12CC0C0",
+  "kind": "code",
+  "new_rva": "0x12CC020",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x12CC020",
+   "length": 77
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x12CC0C0",
+   "length": 77
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x12CC460",
+  "kind": "code",
+  "new_rva": "0x12CC3C0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x12CC3C0",
+   "length": 95
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x12CC460",
+   "length": 95
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x19B4000",
+  "kind": "code",
+  "new_rva": "0x19B3F40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x19B3F40",
+   "length": 9
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x19B4000",
+   "length": 9
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x19B4095",
+  "kind": "code",
+  "new_rva": "0x19B3FD5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x19B3F99",
+   "length": 80
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x19B4059",
+   "length": 80
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x19B4119",
+  "kind": "code",
+  "new_rva": "0x19B4059",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x19B400E",
+   "length": 115
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x19B40CE",
+   "length": 115
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2816CC6",
+  "kind": "code",
+  "new_rva": "0x2816C06",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2816B20",
+   "length": 540
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x2816BE0",
+   "length": 540
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2816EE9",
+  "kind": "code",
+  "new_rva": "0x2816E29",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2816D40",
+   "length": 673
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x2816E00",
+   "length": 673
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x281D319",
+  "kind": "code",
+  "new_rva": "0x281D259",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x281D219",
+   "length": 933
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "9 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x281D2D9",
+   "length": 933
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x281E710",
+  "kind": "code",
+  "new_rva": "0x281E650",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x281E650",
+   "length": 29
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x281E710",
+   "length": 29
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2843B00",
+  "kind": "code",
+  "new_rva": "0x2843A40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2843A40",
+   "length": 13
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x2843B00",
+   "length": 13
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x28457F0",
+  "kind": "code",
+  "new_rva": "0x2845730",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2845730",
+   "length": 79
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x28457F0",
+   "length": 79
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2858070",
+  "kind": "code",
+  "new_rva": "0x2857FB0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2857FB0",
+   "length": 440
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x2858070",
+   "length": 440
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2864DA0",
+  "kind": "code",
+  "new_rva": "0x2864CE0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2864CE0",
+   "length": 19
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x2864DA0",
+   "length": 19
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x2874350",
+  "kind": "code",
+  "new_rva": "0x2874290",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2874290",
+   "length": 365
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x2874350",
+   "length": 365
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x2878E00",
+  "kind": "code",
+  "new_rva": "0x2878D40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2878D40",
+   "length": 38
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x2878E00",
+   "length": 38
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x2DF3F60",
+  "kind": "code",
+  "new_rva": "0x2DF3EA0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x2DF3EA0",
+   "length": 891
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "12 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x2DF3F60",
+   "length": 891
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x30BBC80",
+  "kind": "code",
+  "new_rva": "0x30BBBC0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x30BBBC0",
+   "length": 251
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x30BBC80",
+   "length": 251
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x36846D0",
+  "kind": "code",
+  "new_rva": "0x3684630",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x3684630",
+   "length": 46
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x36846D0",
+   "length": 46
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x3699CA0",
+  "kind": "code",
+  "new_rva": "0x3699C00",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x3699C00",
+   "length": 390
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x3699CA0",
+   "length": 390
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x369F6C0",
+  "kind": "code",
+  "new_rva": "0x369F620",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x369F620",
+   "length": 45
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x369F6C0",
+   "length": 45
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x369FB8C",
+  "kind": "code",
+  "new_rva": "0x369FAEC",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x369FA8D",
+   "length": 373
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x369FB2D",
+   "length": 373
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x369FB91",
+  "kind": "code",
+  "new_rva": "0x369FAF1",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x369FA8D",
+   "length": 373
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x369FB2D",
+   "length": 373
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x36A3C50",
+  "kind": "code",
+  "new_rva": "0x36A3BB0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x36A3BB0",
+   "length": 190
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x36A3C50",
+   "length": 190
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x3CBC0B0",
+  "kind": "code",
+  "new_rva": "0x3CBC010",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x3CBC010",
+   "length": 34
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x3CBC0B0",
+   "length": 34
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x3DD8D00",
+  "kind": "code",
+  "new_rva": "0x3DD8C60",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x3DD8C60",
+   "length": 31
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x3DD8D00",
+   "length": 31
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6C80",
+  "kind": "code",
+  "new_rva": "0x42B6BE0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6BE0",
+   "length": 360
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6C80",
+   "length": 360
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6DF0",
+  "kind": "code",
+  "new_rva": "0x42B6D50",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6E1B",
+  "kind": "code",
+  "new_rva": "0x42B6D7B",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6F9C",
+  "kind": "code",
+  "new_rva": "0x42B6EFC",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6FAA",
+  "kind": "code",
+  "new_rva": "0x42B6F0A",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B6FAF",
+  "kind": "code",
+  "new_rva": "0x42B6F0F",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7098",
+  "kind": "code",
+  "new_rva": "0x42B6FF8",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B70E0",
+  "kind": "code",
+  "new_rva": "0x42B7040",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7040",
+   "length": 88
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B70E0",
+   "length": 88
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B70E9",
+  "kind": "code",
+  "new_rva": "0x42B7049",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7040",
+   "length": 88
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B70E0",
+   "length": 88
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7115",
+  "kind": "code",
+  "new_rva": "0x42B7075",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7040",
+   "length": 88
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B70E0",
+   "length": 88
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B711C",
+  "kind": "code",
+  "new_rva": "0x42B707C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7040",
+   "length": 88
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B70E0",
+   "length": 88
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7503",
+  "kind": "code",
+  "new_rva": "0x42B7463",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7189",
+   "length": 787
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B7229",
+   "length": 787
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7508",
+  "kind": "code",
+  "new_rva": "0x42B7468",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7189",
+   "length": 787
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B7229",
+   "length": 787
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7528",
+  "kind": "code",
+  "new_rva": "0x42B7488",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7189",
+   "length": 787
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B7229",
+   "length": 787
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7578",
+  "kind": "code",
+  "new_rva": "0x42B74D8",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B758D",
+  "kind": "code",
+  "new_rva": "0x42B74ED",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B764B",
+  "kind": "code",
+  "new_rva": "0x42B75AB",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B76A3",
+  "kind": "code",
+  "new_rva": "0x42B7603",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B76B4",
+  "kind": "code",
+  "new_rva": "0x42B7614",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B77DD",
+  "kind": "code",
+  "new_rva": "0x42B773D",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B77E1",
+  "kind": "code",
+  "new_rva": "0x42B7741",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7827",
+  "kind": "code",
+  "new_rva": "0x42B7787",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7845",
+  "kind": "code",
+  "new_rva": "0x42B77A5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7856",
+  "kind": "code",
+  "new_rva": "0x42B77B6",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7B91",
+  "kind": "code",
+  "new_rva": "0x42B7AF1",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7B96",
+  "kind": "code",
+  "new_rva": "0x42B7AF6",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7CAB",
+  "kind": "code",
+  "new_rva": "0x42B7C0B",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B7CB7",
+  "kind": "code",
+  "new_rva": "0x42B7C17",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B749C",
+   "length": 2011
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 9 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B753C",
+   "length": 2011
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B8420",
+  "kind": "code",
+  "new_rva": "0x42B8380",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B8380",
+   "length": 9
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x42B8420",
+   "length": 9
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x42E21F0",
+  "kind": "code",
+  "new_rva": "0x42E2150",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42E2150",
+   "length": 13
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x42E21F0",
+   "length": 13
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x42E2210",
+  "kind": "code",
+  "new_rva": "0x42E2170",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42E2170",
+   "length": 104
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42E2210",
+   "length": 104
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42E2600",
+  "kind": "code",
+  "new_rva": "0x42E2560",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42E2560",
+   "length": 66
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x42E2600",
+   "length": 66
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4311CA0",
+  "kind": "code",
+  "new_rva": "0x4311C00",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4311C00",
+   "length": 553
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "6 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4311CA0",
+   "length": 553
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4314D00",
+  "kind": "code",
+  "new_rva": "0x4314C60",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4314C60",
+   "length": 59
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4314D00",
+   "length": 59
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4315AC0",
+  "kind": "code",
+  "new_rva": "0x4315A20",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4315A20",
+   "length": 604
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4315AC0",
+   "length": 604
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4315D65",
+  "kind": "code",
+  "new_rva": "0x4315CC5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4315C7C",
+   "length": 350
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4315D1C",
+   "length": 350
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4315D6A",
+  "kind": "code",
+  "new_rva": "0x4315CCA",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4315C7C",
+   "length": 350
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4315D1C",
+   "length": 350
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4315E45",
+  "kind": "code",
+  "new_rva": "0x4315DA5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4315C7C",
+   "length": 350
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4315D1C",
+   "length": 350
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x431DCE0",
+  "kind": "code",
+  "new_rva": "0x431DC40",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DC40",
+   "length": 31
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DCE0",
+   "length": 31
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x431DF00",
+  "kind": "code",
+  "new_rva": "0x431DE60",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DD7D",
+   "length": 333
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DE1D",
+   "length": 333
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x431DF12",
+  "kind": "code",
+  "new_rva": "0x431DE72",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DD7D",
+   "length": 333
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DE1D",
+   "length": 333
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x431DF1F",
+  "kind": "code",
+  "new_rva": "0x431DE7F",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DD7D",
+   "length": 333
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DE1D",
+   "length": 333
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4323040",
+  "kind": "code",
+  "new_rva": "0x4322FA0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4322FA0",
+   "length": 48
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4323040",
+   "length": 48
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4324510",
+  "kind": "code",
+  "new_rva": "0x4324470",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4324470",
+   "length": 290
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4324510",
+   "length": 290
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4324640",
+  "kind": "code",
+  "new_rva": "0x43245A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43245A0",
+   "length": 149
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4324640",
+   "length": 149
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x432DFA0",
+  "kind": "code",
+  "new_rva": "0x432DF00",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x432DF00",
+   "length": 62
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x432DFA0",
+   "length": 62
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x434FE44",
+  "kind": "code",
+  "new_rva": "0x434FDA4",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x434FD80",
+   "length": 297
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x434FE20",
+   "length": 297
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x434FE49",
+  "kind": "code",
+  "new_rva": "0x434FDA9",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x434FD80",
+   "length": 297
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x434FE20",
+   "length": 297
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4350A50",
+  "kind": "code",
+  "new_rva": "0x43509B0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43509B0",
+   "length": 11
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4350A50",
+   "length": 11
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4351011",
+  "kind": "code",
+  "new_rva": "0x4350F71",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4350EEF",
+   "length": 315
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4350F8F",
+   "length": 315
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4351016",
+  "kind": "code",
+  "new_rva": "0x4350F76",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4350EEF",
+   "length": 315
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4350F8F",
+   "length": 315
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4351440",
+  "kind": "code",
+  "new_rva": "0x43513A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43513A0",
+   "length": 26
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4351440",
+   "length": 26
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x43F9C30",
+  "kind": "code",
+  "new_rva": "0x43F9B90",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43F9B90",
+   "length": 58
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x43F9C30",
+   "length": 58
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x43F9F00",
+  "kind": "code",
+  "new_rva": "0x43F9E60",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43F9E60",
+   "length": 350
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x43F9F00",
+   "length": 350
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x43FE680",
+  "kind": "code",
+  "new_rva": "0x43FE5E0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43FE5E0",
+   "length": 39
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x43FE680",
+   "length": 39
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4441580",
+  "kind": "code",
+  "new_rva": "0x44414E0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x44414E0",
+   "length": 897
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "6 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4441580",
+   "length": 897
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4458D5D",
+  "kind": "code",
+  "new_rva": "0x4458CBD",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x44588D0",
+   "length": 2485
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "7 code refs exact, 0 code refs in span, 10 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4458970",
+   "length": 2485
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4458D87",
+  "kind": "code",
+  "new_rva": "0x4458CE7",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x44588D0",
+   "length": 2485
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "7 code refs exact, 0 code refs in span, 10 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4458970",
+   "length": 2485
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4554336",
+  "kind": "code",
+  "new_rva": "0x4554296",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4554244",
+   "length": 126
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x45542E4",
+   "length": 126
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x45547BD",
+  "kind": "code",
+  "new_rva": "0x455471D",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x455464C",
+   "length": 235
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 3 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x45546EC",
+   "length": 235
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4570585",
+  "kind": "code",
+  "new_rva": "0x45704E5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4570485",
+   "length": 101
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4570525",
+   "length": 101
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4573040",
+  "kind": "code",
+  "new_rva": "0x4572FA0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4572FA0",
+   "length": 77
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4573040",
+   "length": 77
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x457323A",
+  "kind": "code",
+  "new_rva": "0x457319A",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x457313B",
+   "length": 222
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x45731DB",
+   "length": 222
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4573442",
+  "kind": "code",
+  "new_rva": "0x45733A2",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x457335F",
+   "length": 252
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "5 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x45733FF",
+   "length": 252
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4573CC0",
+  "kind": "code",
+  "new_rva": "0x4573C20",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4573C20",
+   "length": 35
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4573CC0",
+   "length": 35
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4573D45",
+  "kind": "code",
+  "new_rva": "0x4573CA5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4573C48",
+   "length": 217
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 4 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4573CE8",
+   "length": 217
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x47CA180",
+  "kind": "code",
+  "new_rva": "0x47CA0E0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x47CA0E0",
+   "length": 68
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x47CA180",
+   "length": 68
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x489CA34",
+  "kind": "code",
+  "new_rva": "0x489C994",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x489C994",
+   "length": 26
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x489CA34",
+   "length": 26
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4C56CC0",
+  "kind": "code",
+  "new_rva": "0x4C56BA0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C56BA0",
+   "length": 37
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4C56CC0",
+   "length": 37
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4C847C0",
+  "kind": "code",
+  "new_rva": "0x4C846A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C846A0",
+   "length": 643
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4C847C0",
+   "length": 643
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4C847DC",
+  "kind": "code",
+  "new_rva": "0x4C846BC",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C846A0",
+   "length": 643
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4C847C0",
+   "length": 643
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4DB62E0",
+  "kind": "data",
+  "new_rva": "0x4DB62E0",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new"
+ },
+ {
+  "rva": "0x4DE16A8",
+  "kind": "data",
+  "new_rva": "0x4DE16A8",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x4DE16AC",
+  "kind": "data",
+  "new_rva": "0x4DE16AC",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x4E27438",
+  "kind": "data",
+  "new_rva": "0x4E27438",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x0 from both neighbours; content: 27/32 bytes equal at new; vtable: 43 slots, 42 map to new code, 42 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x4E27430",
+    "delta": "0x0"
+   },
+   "above": {
+    "old": "0x4E27590",
+    "delta": "0x0"
+   }
+  },
+  "vtable": {
+   "slots": 43,
+   "mapped": 42,
+   "at_new": 42,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x4E27440",
+  "kind": "data",
+  "new_rva": "0x4E27440",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x0 from both neighbours; content: 28/32 bytes equal at new; vtable: 42 slots, 41 map to new code, 41 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x4E27430",
+    "delta": "0x0"
+   },
+   "above": {
+    "old": "0x4E27590",
+    "delta": "0x0"
+   }
+  },
+  "vtable": {
+   "slots": 42,
+   "mapped": 41,
+   "at_new": 41,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x4E27600",
+  "kind": "data",
+  "new_rva": "0x4E27600",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x0 from both neighbours; content: 27/32 bytes equal at new; vtable: 43 slots, 43 map to new code, 43 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x4E275F8",
+    "delta": "0x0"
+   },
+   "above": {
+    "old": "0x4E27758",
+    "delta": "0x0"
+   }
+  },
+  "vtable": {
+   "slots": 43,
+   "mapped": 43,
+   "at_new": 43,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x51275F8",
+  "kind": "data",
+  "new_rva": "0x51275F8",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 144 slots, 139 map to new code, 139 confirmed at new",
+  "vtable": {
+   "slots": 144,
+   "mapped": 139,
+   "at_new": 139,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5127968",
+  "kind": "data",
+  "new_rva": "0x5127968",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 34 slots, 33 map to new code, 33 confirmed at new",
+  "vtable": {
+   "slots": 34,
+   "mapped": 33,
+   "at_new": 33,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5180D40",
+  "kind": "data",
+  "new_rva": "0x5180D00",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 24 slots, 22 map to new code, 22 confirmed at new",
+  "vtable": {
+   "slots": 24,
+   "mapped": 22,
+   "at_new": 22,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x51890B0",
+  "kind": "data",
+  "new_rva": "0x5189070",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 28/32 bytes equal at new; vtable: 3 slots, 3 map to new code, 3 confirmed at new",
+  "vtable": {
+   "slots": 3,
+   "mapped": 3,
+   "at_new": 3,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x51890B8",
+  "kind": "data",
+  "new_rva": "0x5189078",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 30/32 bytes equal at new; vtable: 2 slots, 2 map to new code, 2 confirmed at new",
+  "vtable": {
+   "slots": 2,
+   "mapped": 2,
+   "at_new": 2,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x51893B0",
+  "kind": "data",
+  "new_rva": "0x5189370",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 15 slots, 13 map to new code, 13 confirmed at new",
+  "vtable": {
+   "slots": 15,
+   "mapped": 13,
+   "at_new": 13,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5189A58",
+  "kind": "data",
+  "new_rva": "0x5189A18",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 28/32 bytes equal at new; vtable: 23 slots, 18 map to new code, 18 confirmed at new",
+  "vtable": {
+   "slots": 23,
+   "mapped": 18,
+   "at_new": 18,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5189AD0",
+  "kind": "data",
+  "new_rva": "0x5189A90",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 8 slots, 5 map to new code, 5 confirmed at new",
+  "vtable": {
+   "slots": 8,
+   "mapped": 5,
+   "at_new": 5,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x518CF58",
+  "kind": "data",
+  "new_rva": "0x518CF18",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 30/32 bytes equal at new; vtable: 22 slots, 21 map to new code, 21 confirmed at new",
+  "vtable": {
+   "slots": 22,
+   "mapped": 21,
+   "at_new": 21,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x518CFC8",
+  "kind": "data",
+  "new_rva": "0x518CF88",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 26/32 bytes equal at new; vtable: 8 slots, 7 map to new code, 7 confirmed at new",
+  "vtable": {
+   "slots": 8,
+   "mapped": 7,
+   "at_new": 7,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x51FCB00",
+  "kind": "data",
+  "new_rva": "0x51FCAD0",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x52EB528",
+  "kind": "data",
+  "new_rva": "0x52EB4F8",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x-30 from both neighbours; content: 26/32 bytes equal at new; vtable: 59 slots, 54 map to new code, 54 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x52EB520",
+    "delta": "0x-30"
+   },
+   "above": {
+    "old": "0x52EB530",
+    "delta": "0x-30"
+   }
+  },
+  "vtable": {
+   "slots": 59,
+   "mapped": 54,
+   "at_new": 54,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x52EC270",
+  "kind": "data",
+  "new_rva": "0x52EC240",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x-30 from both neighbours; content: 25/32 bytes equal at new; vtable: 256 slots+, 243 map to new code, 243 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x52EC1E0",
+    "delta": "0x-30"
+   },
+   "above": {
+    "old": "0x52EC438",
+    "delta": "0x-30"
+   }
+  },
+  "vtable": {
+   "slots": 256,
+   "mapped": 243,
+   "at_new": 243,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x52EC278",
+  "kind": "data",
+  "new_rva": "0x52EC248",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x-30 from both neighbours; content: 26/32 bytes equal at new; vtable: 256 slots+, 243 map to new code, 243 confirmed at new",
+  "neighbours": {
+   "below": {
+    "old": "0x52EC1E0",
+    "delta": "0x-30"
+   },
+   "above": {
+    "old": "0x52EC438",
+    "delta": "0x-30"
+   }
+  },
+  "vtable": {
+   "slots": 256,
+   "mapped": 243,
+   "at_new": 243,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x52F5F44",
+  "kind": "data",
+  "new_rva": "0x52F5F14",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x530E530",
+  "kind": "data",
+  "new_rva": "0x530E500",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 149 slots, 145 map to new code, 145 confirmed at new",
+  "vtable": {
+   "slots": 149,
+   "mapped": 145,
+   "at_new": 145,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5358518",
+  "kind": "data",
+  "new_rva": "0x53584E8",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 256 slots+, 242 map to new code, 242 confirmed at new",
+  "vtable": {
+   "slots": 256,
+   "mapped": 242,
+   "at_new": 242,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5375548",
+  "kind": "data",
+  "new_rva": "0x5375518",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 34 slots, 32 map to new code, 32 confirmed at new",
+  "vtable": {
+   "slots": 34,
+   "mapped": 32,
+   "at_new": 32,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x553B860",
+  "kind": "data",
+  "new_rva": "0x553B830",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 69 slots, 66 map to new code, 66 confirmed at new",
+  "vtable": {
+   "slots": 69,
+   "mapped": 66,
+   "at_new": 66,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x553DAF8",
+  "kind": "data",
+  "new_rva": "0x553DAC8",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 34 slots, 32 map to new code, 32 confirmed at new",
+  "vtable": {
+   "slots": 34,
+   "mapped": 32,
+   "at_new": 32,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x553DF90",
+  "kind": "data",
+  "new_rva": "0x553DF60",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 29/32 bytes equal at new; vtable: 39 slots, 36 map to new code, 36 confirmed at new",
+  "vtable": {
+   "slots": 39,
+   "mapped": 36,
+   "at_new": 36,
+   "found": []
+  }
+ },
+ {
+  "rva": "0x5552030",
+  "kind": "data",
+  "new_rva": "0x5552000",
+  "status": "XREF-BRACKET",
+  "section": ".rdata",
+  "detail": "delta 0x-30 from both neighbours; content: 31/32 bytes equal at new",
+  "neighbours": {
+   "below": {
+    "old": "0x5552020",
+    "delta": "0x-30"
+   },
+   "above": {
+    "old": "0x5552048",
+    "delta": "0x-30"
+   }
+  }
+ },
+ {
+  "rva": "0x5567338",
+  "kind": "data",
+  "new_rva": "0x5567308",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5567350",
+  "kind": "data",
+  "new_rva": "0x5567320",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x55A01B0",
+  "kind": "data",
+  "new_rva": "0x55A0180",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new; vtable: 130 slots, 116 map to new code, 115 confirmed at new, pointer search found 0x51809F8,0x5180D00,0x51907C8,0x55A0180",
+  "vtable": {
+   "slots": 130,
+   "mapped": 116,
+   "at_new": 115,
+   "found": [
+    "0x51809F8",
+    "0x5180D00",
+    "0x51907C8",
+    "0x55A0180"
+   ]
+  }
+ },
+ {
+  "rva": "0x5E73F7E",
+  "kind": "data",
+  "new_rva": "0x5E73F7E",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5E73F80",
+  "kind": "data",
+  "new_rva": "0x5E73F80",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5E73F90",
+  "kind": "data",
+  "new_rva": "0x5E73F90",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5E73F94",
+  "kind": "data",
+  "new_rva": "0x5E73F94",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5E73F98",
+  "kind": "data",
+  "new_rva": "0x5E73F98",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5E9F820",
+  "kind": "data",
+  "new_rva": "0x5E9F820",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 28/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5EA0C78",
+  "kind": "data",
+  "new_rva": "0x5EA0C78",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 27/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5EA63E9",
+  "kind": "data",
+  "new_rva": "0x5EA63E9",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x5F2A652",
+  "kind": "data",
+  "new_rva": "0x5F2A652",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: zero fill (uninformative)"
+ },
+ {
+  "rva": "0x60211F8",
+  "kind": "data",
+  "new_rva": "0x60211F8",
+  "status": "XREF-EXACT",
+  "section": ".data",
+  "detail": "referenced from code in both builds; content: zero fill (uninformative)"
+ },
+ {
+  "rva": "0x4E9F20",
+  "kind": "code",
+  "new_rva": "0x4E9EC0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E9E55",
+   "length": 160
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4E9EB5",
+   "length": 160
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x522C0B",
+  "kind": "code",
+  "new_rva": "0x522BAB",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x522B50",
+   "length": 124
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x522BB0",
+   "length": 124
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x522C7E",
+  "kind": "code",
+  "new_rva": "0x522C1E",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x522BCC",
+   "length": 320
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x522C2C",
+   "length": 320
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x595600",
+  "kind": "code",
+  "new_rva": "0x5955A0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x5955A0",
+   "length": 310
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x595600",
+   "length": 310
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0xFDF1D0",
+  "kind": "code",
+  "new_rva": "0xFDF170",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0xFDF170",
+   "length": 201
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0xFDF1D0",
+   "length": 201
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x36846D5",
+  "kind": "code",
+  "new_rva": "0x3684635",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x3684630",
+   "length": 46
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x36846D0",
+   "length": 46
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x42B6DF5",
+  "kind": "code",
+  "new_rva": "0x42B6D55",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B6D50",
+   "length": 730
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 5 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B6DF0",
+   "length": 730
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x42B70E5",
+  "kind": "code",
+  "new_rva": "0x42B7045",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B7040",
+   "length": 88
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x42B70E0",
+   "length": 88
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x431DF0D",
+  "kind": "code",
+  "new_rva": "0x431DE6D",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DD7D",
+   "length": 333
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DE1D",
+   "length": 333
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x431DF1C",
+  "kind": "code",
+  "new_rva": "0x431DE7C",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x431DD7D",
+   "length": 333
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x431DE1D",
+   "length": 333
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4351448",
+  "kind": "code",
+  "new_rva": "0x43513A8",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43513A0",
+   "length": 26
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4351440",
+   "length": 26
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x43516E0",
+  "kind": "code",
+  "new_rva": "0x4351640",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4351640",
+   "length": 167
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "3 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x43516E0",
+   "length": 167
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x44587C0",
+  "kind": "code",
+  "new_rva": "0x4458720",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4458720",
+   "length": 432
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "5 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x44587C0",
+   "length": 432
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4C847C5",
+  "kind": "code",
+  "new_rva": "0x4C846A5",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C846A0",
+   "length": 643
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4C847C0",
+   "length": 643
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x50CB0D0",
+  "kind": "data",
+  "new_rva": "0x50CB0D0",
+  "status": "XREF-EXACT",
+  "section": ".rdata",
+  "detail": "referenced from code in both builds; content: 32/32 bytes equal at new"
+ },
+ {
+  "rva": "0x4E8356",
+  "kind": "code",
+  "new_rva": "0x4E82F6",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E82D0",
+   "length": 58
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E8330",
+   "length": 58
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E87BB",
+  "kind": "code",
+  "new_rva": "0x4E875B",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E8750",
+   "length": 32
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "0 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E87B0",
+   "length": 32
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4334000",
+  "kind": "code",
+  "new_rva": "0x4333F60",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4333F60",
+   "length": 9
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4334000",
+   "length": 9
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4350F0E",
+  "kind": "code",
+  "new_rva": "0x4350E6E",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4350E6E",
+   "length": 129
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "2 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4350F0E",
+   "length": 129
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4350F8F",
+  "kind": "code",
+  "new_rva": "0x4350EEF",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4350EEF",
+   "length": 315
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4350F8F",
+   "length": 315
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4C81B50",
+  "kind": "code",
+  "new_rva": "0x4C81A30",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C81A30",
+   "length": 632
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 0 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4C81B50",
+   "length": 632
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4C86390",
+  "kind": "code",
+  "new_rva": "0x4C86270",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4C86270",
+   "length": 86
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4C86390",
+   "length": 86
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4350490",
+  "kind": "code",
+  "new_rva": "0x43503F0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x43503F0",
+   "length": 14
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x4350490",
+   "length": 14
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x42B8330",
+  "kind": "code",
+  "new_rva": "0x42B8290",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x42B8290",
+   "length": 15
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "",
+  "old_unit": {
+   "start": "0x42B8330",
+   "length": 15
+  },
+  "status": "IDENTICAL"
+ },
+ {
+  "rva": "0x4E3050",
+  "kind": "code",
+  "new_rva": "0x4E2FF0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E2FF0",
+   "length": 259
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "4 code refs exact, 0 code refs in span, 1 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E3050",
+   "length": 259
+  },
+  "status": "RELOC-ONLY"
+ },
+ {
+  "rva": "0x4E2E30",
+  "kind": "code",
+  "new_rva": "0x4E2DD0",
+  "placed_rva": null,
+  "candidate": {
+   "start": "0x4E2DD0",
+   "length": 485
+  },
+  "score": null,
+  "how": "in-order",
+  "detail": "1 code refs exact, 0 code refs in span, 2 data refs, 0 image-base refs",
+  "old_unit": {
+   "start": "0x4E2E30",
+   "length": 485
+  },
+  "status": "RELOC-ONLY"
+ }
+]

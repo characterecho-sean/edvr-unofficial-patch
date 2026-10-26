@@ -16,7 +16,7 @@ std::string testMode="screen";
 std::vector<std::string> messages;
 Config& Config::get(){static Config cfg;return cfg;}
 std::string Config::getString(const char* key,const char* fallback)const{
-    check(!strcmp(key,"fix.intro_video") && !strcmp(fallback,"screen"),"existing intro setting and default retained");return testMode;
+    check(!strcmp(key,"visual.intro_video") && !strcmp(fallback,"screen"),"existing intro setting and default retained");return testMode;
 }
 Log& Log::get(){static Log log;return log;}
 Log::~Log()=default;

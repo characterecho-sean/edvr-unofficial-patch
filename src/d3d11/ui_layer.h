@@ -62,6 +62,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11ShaderResourceView;
 
 struct ID3D11Texture2D;
 
@@ -293,6 +294,11 @@ UiLayerWorldStats uiLayerWorldStats();
 inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
 // The rigs' switch for the gate (it is on in production, always): the gate-off path is driven with it.
 void uiLayerSetMapsGateForTest(bool on);
+// The rigs' window onto the bound depth view's resolve memo (resolveBoundDsv, which seedWritersCheck asks): resolves `view` through
+// the memo, keyed by the Dsv0 binding's generation exactly as the draw path does, and reports the window's running hit and miss counts.
+// Returns the resolve's answer. Nothing in production calls it.
+struct ResourceInfo;
+bool uiLayerResolveBoundDsvForTest(void* view, ResourceInfo* info, uint64_t* hits, uint64_t* misses);
 // screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
 // scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
 // layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.
@@ -356,6 +362,9 @@ void uiLayerNoteDepthClear(void* dsv, uint32_t flags, float depth, uint8_t stenc
 // could not be told. Identities only, never dereferenced.
 void uiLayerNoteCopy(const void* destination, const void* source);
 void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted);
+// F121c: what the game last submitted for an eye (0 left, 1 right), as uiLayerNoteSubmitted was told; null for none yet or an eye other than 0 or 1. An identity, never
+// dereferenced: remlok_fix.cpp's eye-trust guard asks which eye a visor draw's target was submitted for.
+const void* uiLayerSubmittedTarget(uint32_t eye);
 
 // The door, from the native runtime's submit chain (native_temporal.cpp and
 // native_sharpen.cpp, both on the thread the game submits from):
@@ -407,18 +416,58 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
+// The flat profile's HUD edge smoothing (fix.hud_antialiasing; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
+// the HUD layer"): SMAA 1x over the layer's finished 8-bit content before the composite downsamples it, so the HUD gets the edge smoothing the game's own
+// anti-aliasing would have given it. The adapter asks for the NEXT composite only, once a frame, with the key it just read: `on` smooths the layer, false leaves it as
+// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (the VR profiles) never sees it set. The result is what that
+// composite did: kNone (no layer composite ran), kRaw (it ran on the layer as is, as asked), kSmoothed (it read the SMAA output) or kFault (smoothing was asked
+// for, the SMAA resources could not be had, and it read the raw layer); w x h is the layer's size at that composite.
+enum class UiLayerEdgeSmoothing : uint8_t { kNone = 0, kRaw, kSmoothed, kFault };
+struct UiLayerEdgeSmoothingResult {
+    UiLayerEdgeSmoothing outcome = UiLayerEdgeSmoothing::kNone;
+    uint32_t w = 0, h = 0;
+};
+void uiLayerFlatSetEdgeSmoothing(bool on);
+UiLayerEdgeSmoothingResult uiLayerFlatEdgeSmoothingResult();
 // The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
 // toneHdrSlot), whatever its vertex count, reading eye 0's fresh HUD or weapons target -- or `alias`, a plain copy of
 // `aliasSource` this frame (the HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
 // 0: not, `why` says which test refused. The ordering guards are VR's.
 int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, const void* aliasSource,
                           uint64_t vs, uint64_t ps, char* why, size_t whyN);
+// The flat profile's HUD bloom (docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-21: the HUD's bloom"). The HUD the layer takes is
+// out of the scene H, so the game's bloom chain, which reads H, never sees it and the HUD has no halo. At the chain's first level (the HDR
+// route's trigger draw writing a half-size target) the adapter asks for H' = H + the HUD layer's light, made in one pass at H's size, and
+// binds it where that draw reads H: the chain, its tier, its threshold and its tone then carry the HUD's halo as stock does, and the HUD's
+// own light stays in the layer, once. Nothing but that one draw reads H'.
+// The slot holds the game's view of `hdr` for the draw about to be issued. Returns H''s shader view (owned here, valid until the next call
+// or the layer's release), or null with `verdict` (ui_layer_math.h's UiGlowFeed, as an int) saying why.
+//
+// visual.star_glow adds a second input (flat_star_glow.h): `star`, when given, is the star layer S -- the star draws alone, in a texture of H's
+// size -- and H' becomes H + the HUD + m * S: the HUD pass as above (or, with no HUD in the layer this frame, a copy of H), then one more
+// pass that adds S by a blend whose factor is (m, m, m, 0). S never holds the HUD, so each enters once. A star layer of another size than H is not
+// added (`sizeMismatch`) and the HUD's pass, if any, runs as ever. With no HUD and no usable star input the verdict is kNoHud and nothing is made.
+struct UiGlowStar {
+    ID3D11ShaderResourceView* srv = nullptr;   // S
+    float m = 0.0f;                            // k - 1, the weight of S in the first level's input
+    uint32_t w = 0, h = 0;                     // S's size
+    bool applied = false;                      // out: the pass added m * S
+    bool sizeMismatch = false;                 // out: S is not H's size
+    bool unavailable = false;                  // out: the star pass's shader or blend, or the copy of H it starts from, could not be made
+    bool hudIncluded = false;                  // out: the HUD layer's light is in H' (a live HUD this frame)
+    int verdict = 0;                           // out: the pass's UiGlowFeed
+};
+ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict,
+                                          UiGlowStar* star = nullptr);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's
 // routing to tell "decided: left, with this reason" from "no decision ran for this draw", which uiLayerLastDecision alone cannot (it
 // keeps the previous draw's value, and 0 is a take).
 uint32_t uiLayerDecisionCount();
+// F46 (TEMPORARY, the native on-foot marker probe): the eye whose layer the game's target `res` was redirected from -- the 8-bit layer's
+// target or the HDR HUD layer's, as each eye's last redirected frame left them -- or -1 when neither eye's layer names it. Read only.
+int uiLayerEyeOfGameTarget(const void* res);
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
 // stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);

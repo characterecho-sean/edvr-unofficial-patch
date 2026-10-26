@@ -92,9 +92,9 @@ enum class BindVerdict : uint8_t {
     Reserved,    // a key, or flat pad button, the menu navigates with: refused
 };
 
-// Where Elite's bindings can matter for the hotkey being set. The menu key and
-// the diagnostic keys work wherever the player is; Explorer Cam's is pressed on
-// foot, and a ship control that shares the key does nothing there.
+// Where Elite's bindings can matter for the hotkey being set. Every EDVR key works
+// wherever the player is (AnyContext); OnFoot is for a key pressed only on foot,
+// where a ship control that shares the key does nothing.
 enum class ClashScope : uint8_t { AnyContext, OnFoot };
 
 struct BindCheck {
@@ -129,26 +129,15 @@ BindCheck hotkeyCheckBinding(const HotkeyBinding& b, const HotkeyOther* others, 
 
 // ---- deciding what a capture step does to a row -----------------------------
 
-// Explorer Cam's key IS its switch (the key is the only way in, and an empty one
-// turns it off), so while a session is on it cannot be changed or cleared from the
-// menu: the key being edited is the key that gets the player back out. True for
-// that row only, and only while `explorerCamSession` is.
-bool hotkeyRowLocked(const char* rowKey, bool explorerCamSession);
-// "Leave Explorer Cam (F5) to change its key": the row's words while it is locked.
-// `keyText` is the key as the ini holds it ("F5", "231D0200:Joy_12"); empty reads
-// "(its key)".
-size_t hotkeyLockedText(const char* keyText, char* out, size_t cap);
-
 // Everything a decision needs to know about the row being captured.
 struct HotkeyRowContext {
-    const char*         rowKey = "";          // "menu", "explorer_cam", "dump_camera", ...
+    const char*         rowKey = "";          // "menu", "dump_camera", ...
     const char*         currentText = "";     // the row's value in the ini now
     const HotkeyOther*  others = nullptr;     // every other hotkey row, hidden ones too
     int                 nOthers = 0;
     const EliteBindUse* uses = nullptr;       // Elite's bindings
     int                 nUses = 0;
     ClashScope          scope = ClashScope::AnyContext;
-    bool                explorerCamSession = false;   // explorerCamSessionActive()
     bool                flatPadNavigation = false;    // flat panel owns DPad/A/B/LB/RB
 };
 
@@ -158,7 +147,6 @@ enum class CaptureOutcome : uint8_t {
     Clear,             // write an empty value
     ClearAlready,      // ...but it is empty already
     ClearRefusedMenu,  // the menu key cannot be cleared from the menu
-    Locked,            // Explorer Cam's key while a session is on: refused, change or clear
     Reserved,          // a key the menu navigates with: refused
     Duplicate,         // another EDVR hotkey has it: refused, `check.duplicateOf` says which
     Unchanged,         // it is what the row already holds
@@ -171,12 +159,9 @@ struct CaptureDecision {
     BindCheck      check;
 };
 
-// May a capture begin on this row at all? (Not while it is locked.)
-bool hotkeyCaptureMayBegin(const HotkeyRowContext& ctx);
-
 // The one place that turns a state machine step into what happens to the row. The
-// order is the rule: a cancel is always harmless; a lock beats everything that
-// would change the row; the menu key's clear is refused whatever else; the checks
+// order is the rule: a cancel is always harmless; the menu key's clear is refused
+// whatever else; the checks
 // run on a binding in the order reserved, duplicate; and only then is an
 // identical value "unchanged" and anything else a write.
 CaptureDecision hotkeyDecide(const CaptureStep& step, const HotkeyRowContext& ctx);

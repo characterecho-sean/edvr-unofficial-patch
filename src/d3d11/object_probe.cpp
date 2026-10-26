@@ -1,4 +1,5 @@
 #include "object_probe.h"
+#include "device_hook.h"
 
 #include <atomic>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <d3d11.h>
 
 #include "../common/config.h"
+#include "../common/game_build.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/temporal_mode.h"
@@ -18,8 +20,12 @@
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "depth_probe.h"
+#include "ui_layer.h"
+#include "ui_depth.h"
 #include "supercruise_lines.h"   // kUiVsSupercruiseBars: the bars' vertex capture
 #include "eye_draw_snapshot.h"
+#include "eye_late_menu_capture.h"
+#include "flat_stationary_camera_capture.h"
 #include "object_classification_probe.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
@@ -30,6 +36,8 @@
 #include "exposure_fix.h"   // lookupShaderHash: the compute dispatch's shader, for the skin ledger
 #include "gpu_census.h"     // gpuCensusNoteEyeRun: the census window an eye run falls in says so
 #include "skin_ledger.h"
+#include "native_on_foot.h"
+#include "temporal_pass.h"
 
 namespace edvr {
 
@@ -196,6 +204,8 @@ struct PanelCaptureArgs {
 } g_panelCaptureArgs;
 uint32_t g_panelSkipped = 0;
 EyeDrawSnapshot g_eyeMeshSnapshot;
+EyeDrawSnapshot g_f77CandidateSnapshot;
+EyeLateMenuCapture g_lateMenuSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
 
 // The cull gate probe (advanced.cull_gate_capture) rides the eye run like
@@ -210,13 +220,13 @@ const char* g_gateHookStatus = "off";
 bool        g_gateBuilderHooked = false;
 bool        g_gateFrustumOk = false;
 uint8_t     g_gateVisGlobal = 0;
-const char* g_gatePartStatus = "off";    // FUN_1442B3FC0's hook: "hooked" or why it stood down
+const char* g_gatePartStatus = "off";    // FUN_1442B6BE0's hook: "hooked" or why it stood down
 uint32_t    g_gateGeoFrame = 0;         // the frame armGateProbe armed the pool-draw geometry for (0: none)
 static_assert(CullGateProbe::kNoRow == kGateProbeNoRow,
               "the builder bracket's thread-local row and the probe's 'no row' must agree");
 
-// FUN_1404F4E10's first sixteen bytes in the hash-verified executable
-// (analysis EliteDangerous64.exe at RVA 0x4F4E10): movups xmm3,[r8];
+// FUN_1404F4F10's first sixteen bytes in the hash-verified executable
+// (analysis EliteDangerous64.exe at RVA 0x4F4F10): movups xmm3,[r8];
 // xor r9d,r9d; movups xmm2,[rdx]; movaps xmm0,xmm3; movzx r8d,word[rcx+44].
 constexpr uint8_t kFrustumPrologue[16] = {0x41,0x0F,0x10,0x18,0x45,0x33,0xC9,0x0F,
                                           0x10,0x12,0x0F,0x28,0xC3,0x44,0x0F,0xB7};
@@ -238,14 +248,34 @@ void armGateProbe() {
     g_gatePartStatus = "off";
     g_gateGeoFrame = 0;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    // The plane test and the visibility global through the signature resolver (src\common\game_build.h): build
+    // 334925's RVAs there; another build's only when both were found, or the probe stands down.
+    const uint32_t gateRvas[] = {static_cast<uint32_t>(CullGateProbe::kFrustumRva),
+                                 static_cast<uint32_t>(CullGateProbe::kVisGlobalRva)};
+    uint32_t missing = 0;
+    if (!gameRvasFound(gateRvas, std::size(gateRvas), &missing)) {
+        g_gateHookStatus = "not_found";
+        Log::get().note("cull gate probe: refused: %s, and 0x%X (an address it needs in build 334925) was not found by "
+                        "signature; nothing will be captured for eye run %ls (advanced.cull_gate_capture).",
+                        gameBuildText(), missing, g_ledgerStamp);
+        return;
+    }
+    const uintptr_t frustumRva = gameRva(static_cast<uint32_t>(CullGateProbe::kFrustumRva));
+    const uintptr_t visGlobalRva = gameRva(static_cast<uint32_t>(CullGateProbe::kVisGlobalRva));
     uint8_t prologue[sizeof(kFrustumPrologue)] = {};
-    g_gateFrustumOk = base && gateReadImage(prologue, base + CullGateProbe::kFrustumRva, sizeof(prologue)) &&
-                      std::memcmp(prologue, kFrustumPrologue, sizeof(prologue)) == 0;
+    g_gateFrustumOk = base && gateReadImage(prologue, base + frustumRva, sizeof(prologue)) &&
+                      gamePinMatches(static_cast<uint32_t>(CullGateProbe::kFrustumRva), prologue, kFrustumPrologue,
+                                     sizeof(prologue));
     g_gateVisGlobal = 0;
-    if (base) gateReadImage(&g_gateVisGlobal, base + CullGateProbe::kVisGlobalRva, 1);
+    if (base) gateReadImage(&g_gateVisGlobal, base + visGlobalRva, 1);
+    if (!gameBuildKnown())
+        Log::get().note("cull gate probe: the builder's plane test FUN_1404F4F10 (0x4F4F10 in build 334925) and the "
+                        "visibility global DAT_145ea63e9 (0x5EA63E9 in build 334925) were found by signature on %s at "
+                        "0x%llX and 0x%llX (advanced.cull_gate_capture).", gameBuildText(),
+                        static_cast<unsigned long long>(frustumRva), static_cast<unsigned long long>(visGlobalRva));
     const uint32_t first = g_ledgerFrame0 + 1;   // the run's first complete frame (its first is partial)
     const auto frustum = g_gateFrustumOk
-        ? reinterpret_cast<CullGateProbe::FrustumFn>(base + CullGateProbe::kFrustumRva) : nullptr;
+        ? reinterpret_cast<CullGateProbe::FrustumFn>(base + frustumRva) : nullptr;
     if (!cullGateProbe.arm(first, frustum, g_gateVisGlobal)) {
         g_gateHookStatus = "no_memory";
         Log::get().note("cull gate probe: could not allocate its window buffers for eye run %ls; "
@@ -269,9 +299,9 @@ void armGateProbe() {
     g_eyeMeshSnapshot.armGeometry(first);
     g_gateGeoFrame = first;
     Log::get().note("cull gate probe: armed with eye run %ls for ledger frames %u..%u: engine hooks %s "
-                    "(the traversal's per-view gate FUN_14430EFE0 through the evaluator relay; the "
-                    "draw-item builder FUN_1442B4420 %s), the builder's plane test FUN_1404F4E10 %s, "
-                    "the builder's per-part test FUN_1442B3FC0 %s, visibility global DAT_145ea3399 = %u; "
+                    "(the traversal's per-view gate FUN_144311C00 through the evaluator relay; the "
+                    "draw-item builder FUN_1442B7040 %s), the builder's plane test FUN_1404F4F10 %s, "
+                    "the builder's per-part test FUN_1442B6BE0 %s, visibility global DAT_145ea63e9 = %u; "
                     "pool-draw geometry for frame %u in the eye mesh snapshot. No reject, nothing on screen "
                     "(advanced.cull_gate_capture).",
                     g_ledgerStamp, first, cullGateProbe.lastFrame(), g_gateHookStatus,
@@ -281,7 +311,7 @@ void armGateProbe() {
                                                : g_gatePartStatus,
                     static_cast<unsigned>(g_gateVisGlobal), first);
     if (g_gateHooked && !cullGateProbe.partHooked())
-        Log::get().note("cull gate probe: the per-part test FUN_1442B3FC0 STOOD DOWN (%s): no part rows will be "
+        Log::get().note("cull gate probe: the per-part test FUN_1442B6BE0 STOOD DOWN (%s): no part rows will be "
                         "captured for eye run %ls; the gate and builder rows are unaffected "
                         "(advanced.cull_gate_capture).", g_gatePartStatus, g_ledgerStamp);
 }
@@ -316,6 +346,7 @@ void noteGeometryRelease(EyeDrawSnapshot::GeoRelease r) {
 }
 
 void ledgerRelease() {
+    if(!detail::g_objectProbeLedgerOn){g_lateMenuSnapshot.release();nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();} // retain only across an active run's pool relearn
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
     g_panelSnapshot.reset();
@@ -332,6 +363,7 @@ void ledgerRelease() {
         noteGeometryRelease(g_eyeMeshSnapshot.resetKeepingGeometry(g_frame + 1));
     else
         g_eyeMeshSnapshot.reset();
+    if(detail::g_objectProbeLedgerOn)g_eyeMeshSnapshot.armBodyCandidates(g_ledgerFrame0+1);
     g_guiSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
@@ -765,7 +797,17 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     // intern id is both stable across the run and joinable to census lines.
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
-    ctx->OMGetRenderTargets(1, &rtv, g_eyeDepthCapture.enabled() ? &dsv : nullptr);
+    ctx->OMGetRenderTargets(1, &rtv, &dsv);
+    int candidateEye=-1;
+    if(dsv)depthProbeSceneEyeOf(dsv,&candidateEye,nullptr);
+    int menuEye=candidateEye;
+    uint32_t menuEyeSource=menuEye>=0?1u:0u;
+    if(menuEye<0 && rtv && g_lateMenuSnapshot.wants(frame,d.vs)) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> menuTarget;rtv->GetResource(&menuTarget);
+        menuEye=uiDepthEyeOfTargetReadOnly(menuTarget.Get());
+        if(menuEye>=0)menuEyeSource=2; // this frame's already registered target; observer never registers
+        else {menuEye=uiLayerEyeOfGameTarget(menuTarget.Get());if(menuEye>=0)menuEyeSource=3;}
+    }
     d.rt = drawCensusIntern(rtv);
     if (rtv) rtv->Release();
     if (g_panelCaptureArgs.ctx) {
@@ -785,8 +827,66 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
                                d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance,start,base);
     }
-    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
-                                   d.vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,startInstance,start,base);
+    const uint32_t nativeFrame=nativeOnFootRenderFrame();
+    const uint64_t eyeMeshPs=bindingShaderHash(BindSlot::Ps);
+    uint32_t eyeMeshStencilRef=0;
+    if(EyeDrawSnapshot::sourceMesh(d.vs)) {
+        ID3D11DepthStencilState* eyeMeshDepth=nullptr;
+        ctx->OMGetDepthStencilState(&eyeMeshDepth,&eyeMeshStencilRef);
+        if(eyeMeshDepth)eyeMeshDepth->Release();
+    }
+    const bool selectedBodyMesh=EyeDrawSnapshot::bodyMeshSelector(d.vs,eyeMeshPs,eyeMeshStencilRef,count);
+    Microsoft::WRL::ComPtr<ID3D11Buffer> otherPaletteCandidate;
+    if(selectedBodyMesh) {
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> t38View;
+        ctx->VSGetShaderResources(38,1,&t38View);
+        Microsoft::WRL::ComPtr<ID3D11Resource> t38Resource;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> boundT38;
+        if(t38View) {
+            t38View->GetResource(&t38Resource);
+            t38Resource.As(&boundT38);
+        }
+        const int otherIndex=EyeDrawSnapshot::otherTrackedPaletteIndex(static_cast<uint32_t>(g_paletteCount),g_palette,boundT38.Get());
+        if(otherIndex>=0)otherPaletteCandidate=g_palette[otherIndex];
+    }
+    EyeMeshJoinStamp eyeJoin{};
+    if(g_eyeMeshSnapshot.wantsEyeMeshCapture(frame,d.vs,eyeMeshPs,eyeMeshStencilRef,count) || g_lateMenuSnapshot.wants(frame,d.vs)) {
+        TemporalDrawStamp temporalStamp{};
+        if(temporalPassDrawStamp(&temporalStamp)) {
+            eyeJoin.sceneFrame=temporalStamp.sceneFrame;eyeJoin.epoch=temporalStamp.epoch;
+            eyeJoin.scheduledIndex=temporalStamp.scheduledIndex;eyeJoin.scheduledRenderFrame=temporalStamp.scheduledRenderFrame;
+            if(temporalStamp.sceneFrameValid)eyeJoin.validFlags|=1u<<0;
+            if(temporalStamp.epochValid)eyeJoin.validFlags|=1u<<1;
+            if(temporalStamp.scheduledIndexValid)eyeJoin.validFlags|=1u<<2;
+        }
+        NativeOnFootPoseStamp poseStamp{};
+        const bool poseFound=nativeOnFootPoseStamp(nativeFrame,&poseStamp);
+        if(poseFound) {
+            eyeJoin.fpFrame=poseStamp.fpFrame;eyeJoin.fpSequence=poseStamp.fpSequence;eyeJoin.gGameFrame=poseStamp.gGameFrame;
+            eyeJoin.itemSerial=poseStamp.itemSerial;eyeJoin.rig=poseStamp.rig;eyeJoin.rigGeneration=poseStamp.rigGeneration;eyeJoin.poseQpc=poseStamp.qpc;
+            std::memcpy(eyeJoin.armJoints,poseStamp.armJoints,sizeof(eyeJoin.armJoints));
+            eyeJoin.validFlags|=1u<<3;
+            if(poseStamp.valid)eyeJoin.validFlags|=1u<<4;
+        }
+        LARGE_INTEGER drawQpc{};
+        if(QueryPerformanceCounter(&drawQpc)){eyeJoin.drawQpc=static_cast<uint64_t>(drawQpc.QuadPart);eyeJoin.validFlags|=1u<<5;}
+        if(nativeFrame)eyeJoin.validFlags|=1u<<7;
+    }
+    // FinalCrisp assigns its capture sequence at submit; no draw-time sequence exists.
+    g_eyeMeshSnapshot.captureEyeMesh(ctx,frame,nativeFrame,candidateEye,eyeJoin,
+                                   static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),
+                                   d.vs,eyeMeshPs,eyeMeshStencilRef,otherPaletteCandidate.Get(),kind,count,instances,startInstance,start,base);
+    g_f77CandidateSnapshot.captureF77Candidate(ctx,frame,nativeFrame,candidateEye,
+        static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base);
+    const size_t menuRowsBefore=g_lateMenuSnapshot.rows.size();
+    g_lateMenuSnapshot.capture(ctx,frame,nativeFrame,menuEye,eyeJoin,
+        static_cast<uint32_t>(g_ledgerDraws[frame-g_ledgerFrame0].size()),d.vs,d.ps,kind,count,instances,startInstance,start,base,menuEyeSource);
+    if(g_lateMenuSnapshot.rows.size()>menuRowsBefore) {
+        NativeOnFootCameraEvidence avatar;
+        nativeOnFootCameraEvidence(nativeFrame,&avatar); // existing exact-frame F81 record or explicitly cached IkG; no game getter
+        g_lateMenuSnapshot.rows.back().avatar.copy(avatar);
+        g_lateMenuSnapshot.rows.back().inputBridge=nativeOnFootMenuInputDrawBridge(frame,nativeFrame,eyeJoin.drawQpc);
+    }
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -828,7 +928,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     if (dsv) {
         int eye = -1;
         depthProbeSceneEyeOf(dsv, &eye, nullptr);
-        g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
+        if(g_eyeDepthCapture.enabled())g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
         dsv->Release();
     }
     // The cull gate probe's occluder inventory (EDVRDRW1 version 9): every
@@ -1149,13 +1249,13 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                             static_cast<unsigned>(geo.geoMeshes.size()), static_cast<unsigned>(geo.geoStates.size()),
                             geo.geoDeclined, geo.geoDrawsDropped, g_ledgerStamp);
         }
-        // The per-part test (FUN_1442B3FC0): its rows, or why there are none.
+        // The per-part test (FUN_1442B6BE0): its rows, or why there are none.
         if (g_gateHooked) {
             if (!cullGateProbe.partHooked())
-                Log::get().note("cull gate probe: per-part test FUN_1442B3FC0 STOOD DOWN (%s): the gate file's part "
+                Log::get().note("cull gate probe: per-part test FUN_1442B6BE0 STOOD DOWN (%s): the gate file's part "
                                 "section is empty by construction for eye run %ls.", g_gatePartStatus, g_ledgerStamp);
             else
-                Log::get().note("cull gate probe: per-part test FUN_1442B3FC0 for eye run %ls: %u calls in the window "
+                Log::get().note("cull gate probe: per-part test FUN_1442B6BE0 for eye run %ls: %u calls in the window "
                                 "(%u rows kept, %u dropped over the %u-row cap); of the kept rows %u with the builder's "
                                 "frame unverified (verdict kept, no part identity), %u from a caller other than the "
                                 "builder's sub-item loop, %u outside a kept builder call; %u distinct LOD tables "
@@ -1194,6 +1294,9 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     Log::get().note("object probe: UI/mesh/effect vertex snapshots: %u draws, %u bytes, %u range/budget declines; UI/solar first three watched frames, meshes first source frame, effects throughout run; 256 KiB per stream, 32 MiB total. Draw offsets, bindings and capture ranges are retained.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    Log::get().note("object probe: exact rifle bolt geometry (%016llX/%016llX): %u draws seen, %u with both POSITION endpoints captured, %u missing input layouts, %u refused bytes; existing 256 KiB per stream and 32 MiB per run. This is rendered visual geometry, not a collision ray.",
+                    static_cast<unsigned long long>(EyeDrawSnapshot::kBoltVs),static_cast<unsigned long long>(EyeDrawSnapshot::kBoltPs),g_drawSnapshot.fireGeometrySeen,
+                    g_drawSnapshot.fireGeometryCaptured,g_drawSnapshot.fireGeometryMissingLayout,g_drawSnapshot.fireGeometryRefusedBytes);
     uint32_t solarDraws=0,solarConstants=0,solarGeometry=0;
     for(const auto& d:g_drawSnapshot.draws)if(EyeDrawSnapshot::solarDraw(d.vs)) {
         ++solarDraws;solarConstants+=d.copied[0]>=128 && d.copied[1]>0;
@@ -1246,14 +1349,47 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<unsigned long long>(ownership.ancestorTraces),
                     static_cast<unsigned long long>(ownership.ancestorTraceOverflow));
     const uint32_t eyeMeshMissing=g_eyeMeshSnapshot.writeShaders(dir.c_str());
-    Log::get().note("object probe: eye mesh snapshots %ls: %u draws, %u frame/target-local buffers, %u bytes, "
-                    "%u buffer declines, %u capped draws, %u failed copies, %u missing shaders; %s. "
-                    "First three matching eye frames; original draw ordinal, cameras, input layout, full t33/t38 and VB0 "
-                    "at first use per frame/target. Geometry first frame, %u vertex bytes, %u vertex declines. "
-                    "Separate 4096-draw/256-MiB pool/32-MiB vertex caps; no rendering changes.",
-                    path,g_eyeMeshSnapshot.meshDraws,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
+    Log::get().note(EyeDrawSnapshot::kBodyCaptureReport,
+                    path,g_eyeMeshSnapshot.meshDraws,g_eyeMeshSnapshot.meshCaptureSnapshots,g_eyeMeshSnapshot.meshNonBodyDraws,
+                    g_eyeMeshSnapshot.meshCaptureDeclined,unsigned(g_eyeMeshSnapshot.meshBuffers.size()),g_eyeMeshSnapshot.meshBytes,
                     g_eyeMeshSnapshot.meshDeclined,g_eyeMeshSnapshot.dropped,g_eyeMeshSnapshot.failures,eyeMeshMissing,
-                    eyeMeshOk?"written":"WRITE FAILED",g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
+                    eyeMeshOk?"written":"WRITE FAILED",EyeDrawSnapshot::kEyeMeshFrames,g_eyeMeshSnapshot.vertexBytes,g_eyeMeshSnapshot.vertexDeclined);
+    Log::get().note(EyeDrawSnapshot::kBodyCandidateReport,g_ledgerStamp,
+                    g_eyeMeshSnapshot.bodyCandidateFrame,g_eyeMeshSnapshot.bodyCandidateSlots,4-g_eyeMeshSnapshot.bodyCandidateSlots,g_eyeMeshSnapshot.bodyCandidateDeclined,
+                    g_eyeMeshSnapshot.bodyCandidateMeshBytes,g_eyeMeshSnapshot.bodyCandidateVertexBytes);
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\candidates_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    const bool candidateOk=g_f77CandidateSnapshot.write(ctx,path);
+    const uint32_t candidateMissingShaders=g_f77CandidateSnapshot.writeShaders(dir.c_str());
+    uint32_t candidateIssued=0,candidateNotIssued=0,candidateIssueUnknown=0,candidateRoiPairs=0;
+    for(const auto& c:g_f77CandidateSnapshot.candidateFrames) {
+        candidateIssued+=c.issued==1;candidateNotIssued+=c.issued==0;candidateIssueUnknown+=c.issued==2;
+        candidateRoiPairs+=c.roiCaptured!=0;
+    }
+    Log::get().note("F77 targeted candidate snapshots %ls: %u matching draws (%u capped), %u missing render-frame mappings, %u outside first-three-frame window; %u total optic-pair matches (%u evidence attempts), %u issued/%u not issued/%u issue unknown; %u pool buffers/%u bytes (%u declines), %u stream bytes (%u declines), %u PS inputs/%u bytes (%u declines, %u refused descriptors, %u mip levels omitted); %u reserved ROI pairs (%u complete, %u incomplete, %u ROI declines, %u bytes), %u copy failures, %u missing shader files; %s. VS 154FB5A453F3D2E9 is an unproven candidate family. Bounds: 192 draws, 64 MiB pool, 32 MiB streams, 24 MiB PS inputs split into equal 12 MiB per-optic-attempt budgets plus 8 MiB centered ROI; full array slices are retained from the highest-resolution mip chain that fits, with source/requested mip metadata and refusal reasons in the snapshot. At most two optic draws receive inputs/ROI. Ledger and native render frames are separate fields.",
+                    path,unsigned(g_f77CandidateSnapshot.candidateFrames.size()),g_f77CandidateSnapshot.candidateDropped,
+                    g_f77CandidateSnapshot.candidateMissingRenderFrame,g_f77CandidateSnapshot.candidateOutsideFrameWindow,
+                    g_f77CandidateSnapshot.candidateOpticDraws,(std::min)(g_f77CandidateSnapshot.candidateOpticDraws,EyeDrawSnapshot::kCandidateMaxOpticDraws),
+                    candidateIssued,candidateNotIssued,candidateIssueUnknown,
+                    unsigned(g_f77CandidateSnapshot.meshBuffers.size()),g_f77CandidateSnapshot.meshBytes,g_f77CandidateSnapshot.meshDeclined,
+                    g_f77CandidateSnapshot.vertexBytes,g_f77CandidateSnapshot.vertexDeclined,
+                    unsigned(g_f77CandidateSnapshot.candidateInputs.size()),g_f77CandidateSnapshot.candidateInputBytes,
+                    g_f77CandidateSnapshot.candidateInputDeclined,unsigned(g_f77CandidateSnapshot.candidateRefusals.size()),g_f77CandidateSnapshot.candidateMipDeclined,
+                    candidateRoiPairs,candidateRoiPairs-g_f77CandidateSnapshot.candidateRoiIncomplete,g_f77CandidateSnapshot.candidateRoiIncomplete,
+                    g_f77CandidateSnapshot.effectImageDeclined,g_f77CandidateSnapshot.effectImageBytes,
+                    g_f77CandidateSnapshot.failures,candidateMissingShaders,candidateOk?"written":"WRITE FAILED");
+    wchar_t menuMetadata[MAX_PATH];
+    _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
+    _snwprintf_s(menuMetadata,MAX_PATH,_TRUNCATE,L"%s\\menu_%s.json",dir.c_str(),g_ledgerStamp);
+    const std::string menuInput=nativeOnFootMenuInputEnd();
+    const bool menuOk=g_lateMenuSnapshot.write(ctx,path,menuMetadata,menuInput);
+    wchar_t cameraPath[MAX_PATH];_snwprintf_s(cameraPath,MAX_PATH,_TRUNCATE,L"%s\\camera_%s.json",dir.c_str(),g_ledgerStamp);
+    const bool cameraOk=flatStationaryCameraEyeWrite(cameraPath);
+    Log::get().note("eye-run camera companion %ls: %s; absent/refused callbacks are reported in the companion, not an inferred preview camera",cameraPath,cameraOk?"written":"WRITE FAILED");
+    const uint32_t menuMissingShaders=g_lateMenuSnapshot.evidence.writeShaders(dir.c_str());
+    Log::get().note("late menu snapshots %ls: selected complete ledger frame %u, %u rows, %u structured bytes, %u stream bytes, %u buffer declines, %u stream declines, %u copy failures, %u missing shaders; %s. Selection, per-eye anchor/sibling quotas, scene-before-menu availability and binding identities are in the JSON companion; a six-index-only family is not a complete menu. Independent whole-run caps 128 MiB structured and 8 MiB streams; diagnostic only, shared menu families are not object identity.",
+        path,g_lateMenuSnapshot.window.frame,unsigned(g_lateMenuSnapshot.rows.size()),g_lateMenuSnapshot.evidence.meshBytes,
+        g_lateMenuSnapshot.evidence.vertexBytes,g_lateMenuSnapshot.evidence.meshDeclined,g_lateMenuSnapshot.evidence.vertexDeclined,
+        g_lateMenuSnapshot.evidence.failures,menuMissingShaders,menuOk?"written":"WRITE FAILED");
     uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0,effectDraws=0,effectVertices=0,effectLayouts=0;
     for(const auto& d:g_drawSnapshot.draws)if(d.ordinal==UINT32_MAX-2) {
         ++effectDraws;effectVertices+=d.streams[0].copied || d.streams[1].copied;effectLayouts+=!d.layout.empty();
@@ -1286,7 +1422,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     if(screenDraws)Log::get().note("object probe: source mesh snapshots: %u draws, %u frame-local buffers, %u bytes, %u range/format/budget declines. Drawstate v4 records original draw cameras, full t33/t38 and VB0 at first use per resource per frame; firstDraw identifies that copy. No render or pacing changes.",g_drawSnapshot.meshDraws,unsigned(g_drawSnapshot.meshBuffers.size()),g_drawSnapshot.meshBytes,g_drawSnapshot.meshDeclined);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\gui_%s.bin",dir.c_str(),g_ledgerStamp);
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
-    Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
+    Log::get().note("object probe: GUI source snapshot %ls: %u draws, eye route=%s (%u source-resource candidates; native part identity unmatched), %u route-cap refusals, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. GUI source targets matched against actual eye-draw PS resources; candidate eye comes from the scene DSV mapping when known.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.routeStatus(),unsigned(g_guiSnapshot.routeCount()),g_guiSnapshot.routeDeclines,g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     detail::g_objectProbeLedgerOn = false;
     g_skin.reset();   // its report went out above; a run that never reported is said at shutdown
     ledgerRelease();
@@ -1352,7 +1488,18 @@ void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx) {
     }
     if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     g_drawSnapshot.captureEffectEnd(ctx);
+    g_f77CandidateSnapshot.candidateDrawEnd();
+    g_lateMenuSnapshot.evidence.candidateDrawEnd();
     g_tonemapSnapshot.end(ctx);
+}
+
+void objectProbeCandidateDrawIssued(ID3D11DeviceContext* ctx,bool issued) {
+    if(detail::g_objectProbeLedgerOn && ctx){
+        ID3D11VertexShader* vs=nullptr;ID3D11PixelShader* ps=nullptr;ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+        const uint64_t vsHash=vs?lookupShaderHash(vs):0,psHash=ps?lookupShaderHash(ps):0;if(vs)vs->Release();if(ps)ps->Release();
+        g_f77CandidateSnapshot.candidateDrawIssued(ctx,issued,vsHash,psHash);
+        g_lateMenuSnapshot.evidence.candidateDrawIssued(ctx,issued,vsHash,psHash);
+    }
 }
 
 void objectProbePanelDrawBegin(ID3D11DeviceContext* ctx) {
@@ -1373,7 +1520,7 @@ void objectProbeNoteGuiSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t co
                                  uint32_t startInstance,uint32_t start,int32_t base) {
     if(!detail::g_objectProbeLedgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs);if(!GuiDrawSnapshot::gui(vs))return;
-    g_guiSnapshot.capture(ctx,g_frame+1,vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
+    g_guiSnapshot.capture(ctx,g_frame+1,nativeOnFootRenderFrame(),vs,bindingShaderHash(BindSlot::Ps),kind,count,instances,start,base,startInstance);
 }
 
 namespace {
@@ -1418,6 +1565,25 @@ __declspec(noinline) void objectProbeNotePoolFirstSeen(ID3D11Buffer* buf) {
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                           uint32_t startInstance,uint32_t start,int32_t base) {
     if ((!detail::g_objectProbeOn && !detail::g_objectProbeLedgerOn) || !ctx) return;
+    const uint32_t routeFrame=g_frame+1;
+    if(detail::g_objectProbeLedgerOn && routeFrame>=g_ledgerFrame0 && routeFrame<=g_ledgerLastFrame && g_guiSnapshot.routeNeeded()) {
+        TemporalDrawStamp stamp{};LARGE_INTEGER drawQpc{};
+        if(temporalPassDrawStamp(&stamp) && stamp.sceneFrameValid && stamp.epochValid &&
+           QueryPerformanceCounter(&drawQpc)) {
+            const uint64_t vsHash=bindingShaderHash(BindSlot::Vs),psHash=bindingShaderHash(BindSlot::Ps);
+            const uint8_t* code=nullptr;size_t codeBytes=0;
+            if(g_guiSnapshot.sourceResourceBound(ctx)){
+                if(flatProbeShaderLookup('v',vsHash,&code,&codeBytes))g_guiSnapshot.rememberRouteShader(vsHash,code,codeBytes);
+                if(flatProbeShaderLookup('p',psHash,&code,&codeBytes))g_guiSnapshot.rememberRouteShader(psHash,code,codeBytes);
+            }
+            ID3D11DepthStencilView* routeDsv=nullptr;ctx->OMGetRenderTargets(0,nullptr,&routeDsv);
+            int routeEye=-1;if(routeDsv)depthProbeSceneEyeOf(routeDsv,&routeEye,nullptr);if(routeDsv)routeDsv->Release();
+            g_guiSnapshot.captureEyeCandidate(ctx,routeEye,kind,count,instances,start,base,startInstance,
+                vsHash,psHash,stamp.sceneFrame,nativeOnFootRenderFrame(),stamp.epoch,routeFrame-g_ledgerFrame0,
+                stamp.scheduledIndexValid?int(stamp.scheduledIndex):-1,
+                stamp.scheduledIndexValid?stamp.scheduledRenderFrame:0,uint64_t(drawQpc.QuadPart));
+        } else g_guiSnapshot.noteRouteRefusal();
+    }
     if (detail::g_objectProbeLedgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance,start,base);
     if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
@@ -1558,6 +1724,8 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             releaseRing();
             releasePool();
             detail::g_objectProbeLedgerOn = false;
+            g_lateMenuSnapshot.release();
+            nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
             g_wasOn = false;
             g_noted = false;
         }
@@ -1565,6 +1733,8 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
     g_wasOn = true;
     ++g_frame;
+    nativeOnFootMenuInputBoundary(g_frame+1);
+    flatStationaryCameraEyeBoundary(g_frame+1,nativeOnFootRenderFrame());
     // The cull gate probe stamps the jobs it observes with the ledger frame
     // the draws submitted from now on belong to (ledgerNoteDraw's g_frame+1),
     // and lets go of the relays one frame after its window.
@@ -1621,6 +1791,11 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     }
     g_ledgerSkipped = 0;
     ledgerRelease();
+    g_f77CandidateSnapshot.armF77Candidates(g_ledgerFrame0);
+    g_lateMenuSnapshot.arm(g_ledgerFrame0);
+    g_eyeMeshSnapshot.armBodyCandidates(g_lateMenuSnapshot.window.frame);
+    nativeOnFootMenuInputArm(g_ledgerStamp,g_ledgerFrame0,g_ledgerLastFrame);
+    flatStationaryCameraEyeArm(g_lateMenuSnapshot.window.frame,g_ledgerStamp);
     detail::g_objectProbeLedgerOn = true;
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
@@ -1677,6 +1852,8 @@ void objectProbeShutdown() {
     releasePool();
     detail::g_objectProbeLedgerOn = false;
     detail::g_objectProbeOn = false;
+    g_lateMenuSnapshot.release();
+    nativeOnFootMenuInputDiscard();flatStationaryCameraEyeEnd();
     g_wasOn = false;
 }
 

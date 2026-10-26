@@ -1,14 +1,12 @@
 // Test rig for the pad-state probe's pure half (src/d3d11/pad_state_core.h): the identity and prologue decision, change detection (no line when
 // nothing changed, one line per change), the exact line texts, the bounded table and its full-table fallback (drop and count), and the line cap.
 // TEMPORARY, log only. No DLL and no game.
-#include "../../src/d3d11/explorer_cam_core.h"
 #include "../../src/d3d11/pad_state_core.h"
 
 #include <cstdio>
 #include <cstring>
 
 namespace pad = edvr::padstate;
-namespace ecm = edvr::ecm;
 
 namespace {
 
@@ -64,25 +62,24 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // ---- identity and prologue (the same rule as the store hook: the PE pair first, then the pin) ------------------------------------
+    // ---- install gate (issue 124, the same rule as the store hook: the PE header read, the reader found, then the pin) ----------------
     {
         const uint8_t pin[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
-        uint8_t wrong[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x21};
-        const uint32_t wantStamp = ecm::kExpectedTimestamp, wantSize = ecm::kExpectedImageSize;
-        check(pad::kReaderRva[0] == 0x12C3C20u && pad::kReaderRva[1] == 0x12CAF80u && pad::kReaderRva[2] == 0x12CADE0u &&
-                  pad::kReaderRva[3] == 0x12CB320u,
-              "the four reader RVAs are the build 332841 readers");
-        check(pad::padInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kInstall,
-              "positive: build 332841's identity and the prologue pin install the reader");
-        check(pad::padInstallDecision(true, wantStamp + 1, wantSize, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kWrongIdentity,
-              "wrong stamp with the matching pin: refused (the identity comes first)");
-        check(pad::padInstallDecision(true, wantStamp, wantSize + 4096, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kWrongIdentity,
-              "wrong image size with the matching pin: refused");
-        check(pad::padInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, wrong, pin, 6) == pad::PadInstall::kWrongPrologue,
-              "right identity with a wrong prologue byte: refused");
-        check(pad::padInstallDecision(false, 0, 0, wantStamp, wantSize, pin, pin, 6) == pad::PadInstall::kUnreadable,
+        check(std::memcmp(pin, pad::kReaderPin, 6) == 0, "the pin is build 334925's six prologue bytes");
+        check(pad::kReaderRva[0] == 0x12C4CC0u && pad::kReaderRva[1] == 0x12CC020u && pad::kReaderRva[2] == 0x12CBE80u &&
+                  pad::kReaderRva[3] == 0x12CC3C0u,
+              "the four reader RVAs are the build 334925 readers");
+        check(pad::padInstallDecision(true, pad::kReaderRva[0], pin, true) == pad::PadInstall::kInstall,
+              "positive: build 334925's reader and the prologue pin install the reader");
+        check(pad::padInstallDecision(true, 0x12D4CC0u, pin, true) == pad::PadInstall::kInstall,
+              "positive: an unknown build's reader found by signature, its pin matching, installs the reader");
+        check(pad::padInstallDecision(true, 0, pin, true) == pad::PadInstall::kNotFound,
+              "an unknown build whose reader was not found by signature: refused, even with a matching pin");
+        check(pad::padInstallDecision(true, pad::kReaderRva[0], pin, false) == pad::PadInstall::kWrongPrologue,
+              "a found reader with a prologue that is not the pin: refused");
+        check(pad::padInstallDecision(false, pad::kReaderRva[0], pin, true) == pad::PadInstall::kUnreadable,
               "an unreadable PE header: refused");
-        check(pad::padInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, nullptr, pin, 6) == pad::PadInstall::kUnreadable,
+        check(pad::padInstallDecision(true, pad::kReaderRva[0], nullptr, false) == pad::PadInstall::kUnreadable,
               "an unreadable prologue: refused");
     }
 
