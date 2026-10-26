@@ -270,8 +270,22 @@ inline bool finitePose(const float pose[16]) noexcept {
     for (unsigned i = 0; i < 16; ++i) if (!std::isfinite(pose[i])) return false;
     return true;
 }
+// CameraState stores four SIMD rows. The renderer consumes their XYZ lanes;
+// fourth lanes need not form a homogeneous matrix and may be nonfinite.
+inline bool finitePoseXYZ(const float pose[16]) noexcept {
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned lane = 0; lane < 3; ++lane)
+            if (!std::isfinite(pose[4 * row + lane])) return false;
+    return true;
+}
+inline bool finitePoseFourth(const float pose[16]) noexcept {
+    for (unsigned row = 0; row < 4; ++row) if (!std::isfinite(pose[4 * row + 3])) return false;
+    return true;
+}
 inline bool pose(Read read, void* context, uintptr_t state, float out[16]) noexcept {
-    return state && bytes(read, context, state + 0x40, out, sizeof(float) * 16) && finitePose(out);
+    // Readability and numeric validity are separate: retain bytes even when a
+    // meaningful lane is invalid, so the diagnostic can explain its refusal.
+    return spanFits(state, 0x40, sizeof(float) * 16) && bytes(read, context, state + 0x40, out, sizeof(float) * 16);
 }
 // address as an offset from the module, for the log; 0 outside [base, base + imageSize) (the PE SizeOfImage, gameBuildIdentity's).
 inline uintptr_t rva(uintptr_t address, uintptr_t base, uintptr_t imageSize) noexcept {
@@ -374,6 +388,7 @@ inline void activity(Read read, void* context, const Game& g, uintptr_t iface, A
     if (out.stateKnown) {
         out.poseRead = pose(read, context, out.state, out.pose);
         if (!out.poseRead) fail(snapshot, "activity-pose-read");
+        else if (!finitePoseXYZ(out.pose)) fail(snapshot, "activity-pose-xyz-nonfinite");
     }
 }
 
@@ -551,6 +566,7 @@ inline void walk(Read read, void* context, const Game& g, uintptr_t child, int p
     stage.outputRead = pose(read, context, child + 0x70, stage.outputPose);
     stage.baseRead = pose(read, context, stage.predecessor, stage.basePose);
     if (!stage.outputRead || !stage.baseRead) fail(out, "stage-pose-read");
+    else if (!finitePoseXYZ(stage.outputPose) || !finitePoseXYZ(stage.basePose)) fail(out, "stage-pose-xyz-nonfinite");
     if (stage.activityCount > kActivities) { fail(out, "activity-bound"); return; }
     if (stage.activityCount && !stage.activityArray) { fail(out, "activity-array-null"); return; }
     for (unsigned j = 0; j < stage.activityCount; ++j) {

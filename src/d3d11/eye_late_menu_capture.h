@@ -48,7 +48,7 @@ public:
             std::memcpy(bodyOffset,a.bodyOffset,sizeof(bodyOffset));std::memcpy(pinEyeTarget,a.pinEyeTarget,sizeof(pinEyeTarget));std::memcpy(pinTarget,a.pinTarget,sizeof(pinTarget));
         }
     };
-    struct Row {uint32_t draw=0,role=0,eyeSource=0;Binding constants[3];uint64_t streams[3]{};Input inputs[16];AvatarReference avatar;};
+    struct Row {uint32_t draw=0,role=0,eyeSource=0;Binding constants[3];uint64_t streams[3]{};Input inputs[16];AvatarReference avatar;std::string inputBridge;};
     std::vector<Row> rows;
     uint32_t meshUsed[3]{},vertexUsed[3]{};
     void release() {evidence.reset();rows.clear();window={};std::memset(meshUsed,0,sizeof(meshUsed));std::memset(vertexUsed,0,sizeof(vertexUsed));}
@@ -118,7 +118,7 @@ public:
                 static_cast<unsigned long long>(a.ms),static_cast<unsigned long long>(a.rootMs),static_cast<unsigned long long>(a.qpcFrequency));
             const auto floats=[&](const char* name,const float* values,unsigned count){std::fprintf(f,",\"%s\":[",name);for(unsigned i=0;i<count;++i){if(i)std::fputc(',',f);if(std::isfinite(values[i]))std::fprintf(f,"%.9g",static_cast<double>(values[i]));else std::fputs("null",f);}std::fputc(']',f);};
             floats("froot",a.froot,16);floats("m3p",a.m3p,16);floats("G",a.G,16);floats("body_offset",a.bodyOffset,3);floats("pin_eye_target",a.pinEyeTarget,3);floats("pin_target",a.pinTarget,3);
-            std::fputs("}}",f);}
+            std::fputs("},\"input_bridge\":",f);std::fputs(r.inputBridge.empty()?"null":r.inputBridge.c_str(),f);std::fputc('}',f);}
         std::fputs("],\"input_observer\":",f);std::fputs(inputObserver.empty()?"null":inputObserver.c_str(),f);
         std::fputs("}\n",f);const bool ok=!std::ferror(f);return std::fclose(f)==0&&ok&&binaryOk;
     }

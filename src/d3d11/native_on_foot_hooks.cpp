@@ -732,13 +732,14 @@ void fpBodyStep(void* amcPtr) noexcept {
 }
 
 // ---- F19 (TEMPORARY): the body's clip modifiers (fix.native_on_foot_body_unclip) and their 5 s probe ----------------------------------
-// The item-apply function (EliteDangerous64.exe+0x3DDCAC0) gives each part of a mode-3 avatar a "pVertexClipAmount" modifier at part+0x610:
+// The item-apply function (EliteDangerous64.exe+0x3DDCAC0) gives eligible parts of a mode-3 avatar a "pVertexClipAmount" modifier at part+0x610:
 // +8 the float amount, +0xC the enable byte, +0xD the dirty byte. The enable byte is [AMC+0x321] bit 3 for EVASuit_Torso, _Arms, _Hands and
-// Shoulder_Left/_Right (the bit-3 switch case, 0x3DDCAC0+0x3B1), and 1 for EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (the default case).
+// Shoulder_Left/_Right and Gear_LowerArms/LowerArmL/LowerArmR (the bit-3 switch case, 0x3DDCAC0+0x3B1), and 1 for EVASuit_Legs,
+// EVASuit_Feet and FirstPersonSkeleton (the default case).
 // The body shader discards a pixel whose clip value exceeds cb2[5].w, so an enable of 0 keeps those pixels. The unclip writes enable 0 and dirty 1
 // after the fade returns, on the same thread, for the local third-person AMC only (isLocalAmc, as headHideStep identifies it). Nothing is restored.
 // The probe reads the same bytes every 5 s (before that call's write), with the flags [AMC+0x321], [AMC+0x322], [AMC+0x378] once per AMC.
-constexpr size_t kClipParts = 11;            // five unclip parts, three comparisons, then three read-only lower-arm gear probes
+constexpr size_t kClipParts = 11;            // five body unclip parts, three comparisons, then three lower-arm gear unclip parts
 constexpr size_t kClipUnclipParts = 5;
 constexpr size_t kClipGearFirst = 8;
 inline constexpr const char* kClipPartNames[kClipParts] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right",
@@ -883,8 +884,9 @@ void bodyClipStep(void* amcPtr) noexcept {
         }
     }
     if (unclip || hybrid) {
-        const size_t n = hybrid ? 1 : kClipUnclipParts;   // F21: the hybrid body unclips the EVASuit torso only (index 0)
+        const size_t n = hybrid ? 1 : kClipParts;   // F21: the hybrid body unclips the EVASuit torso only (index 0)
         for (size_t i = 0; i < n; ++i) {
+            if (i >= kClipUnclipParts && i < kClipGearFirst) continue; // comparison parts retain the game's clipping
             if (idx[i] < 0) continue;
             const int r = sehWriteClipPart(amc, static_cast<uint32_t>(idx[i]));
             if (r > 0) g_clipWrites.fetch_add(1, std::memory_order_relaxed);
@@ -2754,7 +2756,7 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
             g_clipProbeStartStamp = g_clipSnap.stamp;
         }
         if (g_clipGearReports < 3)
-            say(g_frameSink, "native on foot gear clip: armed; read-only local mode-3 lower-arm gear, at most three default snapshots per process; detail continues every 5 s");
+            say(g_frameSink, "native on foot gear clip: armed; prewrite probe of local mode-3 lower-arm gear, at most three default snapshots per process; detail continues every 5 s");
     }
     g_clipProbeLast = probeWant;
     g_unclipWant.store(unclipWant, std::memory_order_release);
@@ -2762,7 +2764,7 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
     if (unclipWant && !g_clipWantLast) {
         g_clipOnMs = now;
         g_clipUnseenNoted = false;
-        Log::get().note("native on foot body unclip: on (EVASuit torso, arms and hands, both shoulders: enable 0, dirty 1, local third-person AMC)");
+        Log::get().note("native on foot body unclip: on (EVASuit torso, arms and hands, both shoulders and lower-arm gear: enable 0, dirty 1, local third-person AMC)");
     }
     if (!unclipWant && g_clipWantLast)
         Log::get().note("native on foot body unclip: off (%s); nothing is restored: the game writes its own enable on its next item apply, and the value it had was not kept", why);
@@ -2777,7 +2779,7 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
     if (probeWant && !freshProbe && !g_clipGearUnseen && now - g_clipProbeOnMs >= 5000) {
         g_clipGearUnseen = true;
         if (g_clipGearReports < 3)
-            say(g_frameSink, "native on foot gear clip: unavailable; no new local mode-3 fade sample in the first 5 s (names=%d); no gear clip writes",
+            say(g_frameSink, "native on foot gear clip: unavailable; no new local mode-3 fade sample in the first 5 s (names=%d); modifier state unknown",
                 g_partNames.load(std::memory_order_relaxed));
     }
     if (probeWant && freshProbe && s.stamp != g_clipGearLogStamp) {

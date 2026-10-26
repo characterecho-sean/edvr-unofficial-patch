@@ -54,6 +54,7 @@
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
 #include "native_on_foot_f114b.h"   // F114b: the panel pointer's transforms, click path and mode (pure parts)
 #include "native_on_foot_menu_input.h"
+#include "native_on_foot_menu_bridge.h"
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
 #include "native_on_foot_f122.h"   // F122: the on-foot panel mouse cursor hidden by default (pure parts)
@@ -4904,9 +4905,12 @@ constexpr size_t kF111Hooks = 4, kF111Slots = 4, kF111MoveLines = 5;
 F9Probe g_f111Probe[kF111Hooks];
 bool g_f111Tried = false;                 // frame thread only
 bool g_f111Armed[kF111Hooks] = {};        // frame thread only
+std::atomic<bool> g_f111LegacyUpdateEnabled{false}; // published before relay gates; observation never activates the legacy instrument
 int g_f111GateState = 0;                  // frame thread only: bit 0 the instruments' hooks are open, bit 1 the placement hook (F122)
 nofoot::menu_input::Capture g_menuInput;
+nofoot::menu_input::BridgeCapture g_menuBridge;
 thread_local nofoot::menu_input::Row* t_menuInput=nullptr;
+thread_local nofoot::menu_input::BridgeUpdate* t_menuUpdate=nullptr;
 uint64_t menuInputQpc(){LARGE_INTEGER q{};return QueryPerformanceCounter(&q)?static_cast<uint64_t>(q.QuadPart):0;}
 struct MenuInputScope {
     nofoot::menu_input::Row row;nofoot::menu_input::Row* outer=nullptr;bool open=false;
@@ -4915,8 +4919,21 @@ struct MenuInputScope {
         if(!g_menuInput.before(row,reinterpret_cast<uintptr_t>(ctl),reinterpret_cast<uintptr_t>(panel),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
         outer=t_menuInput;t_menuInput=&row;open=true;
     }
-    void finish(){if(!open)return;t_menuInput=outer;open=false;g_menuInput.finish(row,menuInputQpc(),guardedRead);}
+    void finish(){if(!open)return;t_menuInput=outer;open=false;g_menuInput.finish(row,menuInputQpc(),guardedRead);
+        nofoot::menu_input::BridgePlacement p;p.generation=row.generation;p.ledgerFrame=row.ledgerFrame;p.renderFrame=row.renderFrame;p.thread=row.thread;p.triangles=row.triCount;p.readFlags=row.reads;p.meshStatus=row.meshStatus;
+        p.ctl=row.ctl;p.panel=row.panel;p.list=row.list;p.owner=row.owner;p.ownerVtable=row.ownerVtable;p.observedOwnerFunctionAddress=row.ownerFn;p.triangleAddress=row.triangleAddress;p.beforeQpc=row.beforeQpc;p.afterQpc=row.afterQpc;
+        if(p.afterQpc)g_menuBridge.placement(p,guardedRead);
+    }
     ~MenuInputScope(){finish();}
+};
+struct MenuUpdateScope {
+    nofoot::menu_input::BridgeUpdate row;nofoot::menu_input::BridgeUpdate* outer=nullptr;bool open=false;
+    explicit MenuUpdateScope(void* ctl){if(!ctl||!g_menuInput.active())return;
+        if(!g_menuBridge.begin(row,reinterpret_cast<uintptr_t>(ctl),g_menuInput.frame.load(),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
+        outer=t_menuUpdate;t_menuUpdate=&row;open=true;
+    }
+    void finish(){if(!open)return;t_menuUpdate=outer;open=false;g_menuBridge.finish(row,nativeOnFootRenderFrame(),menuInputQpc(),guardedRead);}
+    ~MenuUpdateScope(){finish();}
 };
 uint64_t g_f111LastMs = 0;                // frame thread only
 uint64_t g_f111SecondsWith = 0;           // frame thread only: seconds with a cycle
@@ -5077,7 +5094,7 @@ void f114bClose(nofoot::f114b::Extra& x, const nofoot::f111::Cycle& c, const dou
 }
 
 // The controller's update: the cycle before it closes (the sprite as the placements left it), then the game's update runs, then the new cycle opens.
-uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
+uint64_t __fastcall f111UpdateLegacyHooked(void* a, void* b, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[0].original);
     if (!original) return 0;
     const uintptr_t ctl = reinterpret_cast<uintptr_t>(a);
@@ -5205,6 +5222,14 @@ uint64_t __fastcall f111UpdateHooked(void* a, void* b, uint64_t c, uint64_t d) {
 
 // F122, the key off: after the game's placement on a panel set the hit byte, the controller's sprite goes where it cannot be seen. Only the sprite's position
 // (+0x140) is written; the mouse NDC, the cursor window's output and the uv the movie takes are never touched, so the clicks land where the game's pointer is.
+uint64_t __fastcall f111UpdateHooked(void* a,void* b,uint64_t c,uint64_t d) {
+    const F9Fn4 original=reinterpret_cast<F9Fn4>(g_f111Probe[0].original);if(!original)return 0;
+    MenuUpdateScope observer(a);
+    return nofoot::menu_input::dispatchUpdate(g_f111LegacyUpdateEnabled.load(std::memory_order_acquire),
+        [&](){const auto result=original(a,b,c,d);observer.row.returned=true;return result;},[&](){observer.finish();},
+        [&](){const auto result=f111UpdateLegacyHooked(a,b,c,d);observer.row.returned=true;return result;});
+}
+
 void panelMouseHide(uintptr_t ctl) {
     namespace h = nofoot::f122;
     uint8_t hit = 0;
@@ -5722,21 +5747,24 @@ void f122Tick(uint64_t now) {
     if (nofoot::logwin::due(w.seconds)) f125PanelClose();
 }
 
-void f111Tick(uint64_t now) {
-    installF111Once();
+void f111RefreshGates() {
     const bool open = f114bOpen();
     // F122: with the key off the instruments' hooks stay closed and only the placement hook (the sprite's hide) opens, in VR.
     const nofoot::f122::Gates gates = nofoot::f122::gates(open, g_panelMouse.load(std::memory_order_relaxed), runtimeFlatProfile());
+    g_f111LegacyUpdateEnabled.store(gates.instruments,std::memory_order_release);
     const bool observer=open&&g_menuInput.active();
     const int gateState = (gates.instruments ? 1 : 0) | (gates.placement ? 2 : 0) | (observer?4:0);
     if (gateState != g_f111GateState) {
         g_f111GateState = gateState;
         std::lock_guard<std::mutex> lock(g_f111Mu);
         for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
-        for (size_t i = 0; i < kF111Hooks; ++i)
-            if (g_f111Armed[i]) g_f111Probe[i].gate.store(nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer)?1u:0u,std::memory_order_seq_cst);
-        if (g_f114bArmed) g_f114bProbe.gate.store(gates.instruments||observer?1u:0u, std::memory_order_seq_cst);
     }
+    for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer))?1u:0u,std::memory_order_seq_cst);
+    if(g_f114bArmed)g_f114bProbe.gate.store(gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
+    if(observer&&g_f111Armed[0])g_menuBridge.gateOpened(g_menuInput.frame.load(),menuInputQpc());
+}
+void f111Tick(uint64_t now) {
+    installF111Once();f111RefreshGates();
     f114bTick(now);
     f117Tick(now);
     f120Tick(now);
@@ -29951,13 +29979,15 @@ __declspec(noinline) bool shadowCopyGuarded(void* dst, const void* src, size_t b
 }  // namespace f44
 }  // namespace
 
-void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t first,uint32_t last){g_menuInput.arm(stamp,first,last);}
-void nativeOnFootMenuInputBoundary(uint32_t frame){g_menuInput.frame.store(frame,std::memory_order_relaxed);}
-void nativeOnFootMenuInputDiscard(){g_menuInput.discard();}
+void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t first,uint32_t last){g_menuInput.arm(stamp,first,last);g_menuBridge.arm(first,last,g_menuInput.generation.load());f111RefreshGates();}
+void nativeOnFootMenuInputBoundary(uint32_t frame){g_menuInput.frame.store(frame,std::memory_order_relaxed);f111RefreshGates();}
+void nativeOnFootMenuInputDiscard(){g_menuInput.discard();g_menuBridge.discard();f111RefreshGates();}
+std::string nativeOnFootMenuInputDrawBridge(uint32_t frame,uint32_t render,uint64_t qpc){return g_menuBridge.draw(frame,render,qpc,t_menuUpdate,menuInputQpc);}
 std::string nativeOnFootMenuInputEnd(){
     LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);uint32_t hooks=0;
     for(unsigned i=0;i<kF111Hooks;++i)if(g_f111Armed[i])hooks|=1u<<i;if(g_f114bArmed)hooks|=16u;
-    return g_menuInput.close(hooks,static_cast<uint64_t>(frequency.QuadPart),g_base);
+    const auto input=g_menuInput.close(hooks,static_cast<uint64_t>(frequency.QuadPart),g_base);const auto bridge=g_menuBridge.close();f111RefreshGates();
+    return nofoot::menu_input::attachBridge(input,bridge);
 }
 
 void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {

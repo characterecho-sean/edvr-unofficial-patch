@@ -886,6 +886,19 @@ int wmain(int argc, wchar_t** argv) {
     ctx->IASetVertexBuffers(1,1,meshIds.GetAddressOf(),&meshStride,&zero);
     for(int eye=0;eye<2;++eye)for(uint32_t count:{10050u,3216u})
         bodyCandidateFixture.captureEyeMesh(ctx.Get(),951,0,eye,{},count,meshVs,meshPs,21,meshOtherPalette.Get(),'X',count,1,0,0,0);
+    check(!bodyCandidateFixture.failures,"candidate resources stage without allocation/copy setup failures");
+    unsigned candidatePending=0,candidateReady=0;HRESULT candidateFirstPending=S_OK;
+    const auto candidateReadiness=[&](ID3D11Resource* resource,uint32_t bytes){
+        if(!resource||!bytes)return;D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT result=ctx->Map(resource,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+        if(result==DXGI_ERROR_WAS_STILL_DRAWING){++candidatePending;candidateFirstPending=result;return;}
+        hr(result);++candidateReady;ctx->Unmap(resource,0);
+    };
+    for(const auto& draw:bodyCandidateFixture.draws){for(unsigned i=0;i<4;++i)candidateReadiness(draw.stage[i].Get(),draw.copied[i]);for(const auto& stream:draw.streams)candidateReadiness(stream.stage.Get(),stream.copied);}
+    for(const auto& buffer:bodyCandidateFixture.meshBuffers)candidateReadiness(buffer.stage.Get(),buffer.bytes);
+    std::printf("candidate fixture pre-fence: %u ready/%u pending, first pending HRESULT=0x%08X\n",candidateReady,candidatePending,unsigned(candidateFirstPending));
+    // The production writer deliberately never waits. This early fixture write needs the same explicit GPU completion as the later fixtures.
+    wait_gpu(ctx.Get(),dev.Get());
     check(bodyCandidateFixture.write(ctx.Get(),(std::wstring(argv[1])+L".bodycandidates").c_str())&&!bodyCandidateFixture.failures,"candidate geometry, PSb2 and palettes serialize");
     ID3D11Buffer* noPsBuffer=nullptr;ctx->PSSetConstantBuffers(2,1,&noPsBuffer);
     ctx->IASetVertexBuffers(1,1,&noPsBuffer,&meshStride,&zero);
@@ -1394,6 +1407,7 @@ int wmain(int argc, wchar_t** argv) {
               "menu structured inputs are copied per draw; instance IDs retain only the exact start-instance window without whole-VB duplication");
         wait_gpu(ctx.Get(),dev.Get());
         auto& cachedAvatar=menu.rows[1].avatar;cachedAvatar.status=2;cachedAvatar.validFlags=1;cachedAvatar.sourceFrame=123;
+        menu.rows[1].inputBridge=menuInputDrawBridgeFixture;
         cachedAvatar.sampleQpc=1000;cachedAvatar.qpc=900;cachedAvatar.rootQpc=800;cachedAvatar.qpcFrequency=1000;
         for(unsigned i=0;i<4;++i)cachedAvatar.froot[i*5]=cachedAvatar.m3p[i*5]=cachedAvatar.G[i*5]=1.0f;
         check(menu.write(ctx.Get(),(std::wstring(argv[1])+L".menu.bin").c_str(),(std::wstring(argv[1])+L".menu.json").c_str(),menuInputFixture),

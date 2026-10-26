@@ -20,7 +20,7 @@ template<class Original,class After> auto afterOriginal(Original original,After 
 struct Row {
     uint32_t generation=0,ledgerFrame=0,renderFrame=0,thread=0,reads=0,rayCalls=0,windowCalls=0,ownerCalls=0,acceptedRay=0;
     uint32_t mesh=UINT32_MAX,meshStatus=0,triCount=0,source=0,hit=0,buttonValid=0,observedOwnerMixed=0;
-    uint64_t beforeQpc=0,afterQpc=0,ctl=0,panel=0,list=0,owner=0,ownerFn=0,mode=0,modeVt=0,modeFn=0,sink=0,observedOwner=0;
+    uint64_t beforeQpc=0,afterQpc=0,ctl=0,panel=0,list=0,owner=0,ownerVtable=0,ownerFn=0,triangleAddress=0,mode=0,modeVt=0,modeFn=0,sink=0,observedOwner=0;
     int32_t modeKind=0,modeArg=0,modeValue=-1;
     uint8_t modeCode[8]{},buttons[6]{};
     float mouse[2]{},other[2]{},dir[3]{},uv[2]{},rayOrigin[3]{},rayDir[3]{},rayT=0,sprite[3]{},ownerWorld[16]{},ownerOut[16]{};
@@ -93,6 +93,7 @@ public:
            read(r.list+f117::kListTris,&tris,8))r.triCount=static_cast<uint32_t>(count);
         else r.meshStatus=3;
         if(r.list&&read(r.list,&r.owner,8)&&r.owner&&read(r.owner,&vt,8)&&vt)read(vt+0x10,&r.ownerFn,8);
+        r.ownerVtable=vt;r.triangleAddress=tris;
         if(r.meshStatus==3)++readFaults;
         const unsigned kind=r.triCount==120?0u:1u;
         if(rowCount[kind]>=kRowsPerKind){++rowQuota;return;}++rowCount[kind];

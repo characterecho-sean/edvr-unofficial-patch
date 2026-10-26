@@ -7,6 +7,22 @@
 #include <cmath>
 #include <cstring>
 
+namespace position_recentre_provider {
+inline int context=0;
+inline HRESULT WINAPI begin(void*,const EdvrNativeFrameInput*,EdvrNativeFrameOutput*) {return S_FALSE;}
+inline HRESULT WINAPI latch(void*,uint64_t,EdvrNativeFrameDecision*) {return S_FALSE;}
+inline HRESULT WINAPI close(void*) {return S_OK;}
+}
+// A real module-owned provider table admits the host's normal poll entry points.
+// No synthetic production setter or private-layout access is needed by the rig.
+#pragma comment(linker,"/EXPORT:edvrAcquireNativeFrame")
+extern "C" HRESULT WINAPI edvrAcquireNativeFrame(const EdvrNativeFrameRequest* request,EdvrNativeFrameTable* table) {
+  if(!request||!table)return E_INVALIDARG;
+  *table={sizeof(*table),EDVR_NATIVE_FRAME_VERSION_1,&position_recentre_provider::context,&position_recentre_provider::begin,nullptr,
+          &position_recentre_provider::latch,&position_recentre_provider::close,&position_recentre_provider::close};
+  return S_OK;
+}
+
 namespace edvr::openxr::test {
 
 template<class Check> void runPositionRecentreCases(Check&& check) {
@@ -53,10 +69,10 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
     f.owner.invoke([&]{ok=h.applyPositionRecentre(7);});
     check(ok,"F123: the position-only recentre is applied");
     check(h.currentOrigin.x==5.0&&h.currentOrigin.y==double(1.6f)&&h.currentOrigin.z==-2.0,"F123: the seated origin is under the head (x, y and z of the head in natural LOCAL)");
-    check(h.currentOrigin.yaw==seatedYaw,"F123: the origin's yaw is the seated space's own, exactly (0.8: the look compensation included); the head's 60 deg heading is not read");
-    check(h.lookSeated.x==h.currentOrigin.x&&h.lookSeated.y==h.currentOrigin.y&&h.lookSeated.z==h.currentOrigin.z&&h.lookSeated.yaw==seatedYaw&&h.lookComp==0.0&&h.eyeApplied[0]==0.0&&
-          h.eyeApplied[1]==0.0&&h.eyeApplied[2]==0.0&&h.eyeAppliedSerial==0u,
-          "F123: the look is rebased onto the new origin (compensation 0, the alignment applied again by eyePoll from the origin: zero now, serial 0)");
+    check(h.currentOrigin.yaw==0.5&&h.lookSeated.yaw==seatedYaw,"F123: baseline yaw stays 0.5 and compensated yaw stays 0.8; neither the look turn nor the head's 60 deg heading becomes the origin");
+    check(h.lookSeated.x==h.currentOrigin.x+0.2&&h.lookSeated.y==h.currentOrigin.y-0.1&&h.lookSeated.z==h.currentOrigin.z+0.3&&h.lookComp==0.3&&h.lookBase==2.0&&h.lookWanted==2.3&&
+          h.eyeApplied[0]==0.2&&h.eyeApplied[1]==-0.1&&h.eyeApplied[2]==0.3,
+          "F123: live look base/compensation/wanted and applied eye alignment are retained, with the alignment composed exactly once at the call");
     check(h.seat.seat().x==storedSeat.x&&h.seat.seat().y==storedSeat.y&&h.seat.seat().z==storedSeat.z&&h.seat.seat().yaw==storedSeat.yaw&&!h.seat.originIsSeat()&&h.seat.has(),
           "F123: the stored seat is untouched and the new origin is not the seat (an on-foot origin is never stored: F115)");
     check(h.poses.read().originGeneration==generationBefore&&(unsigned long long)h.recenters==recentersBefore,"F123: not a reset: the origin generation and the recentre count do not move, and the game is told nothing");
@@ -85,7 +101,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
     f.owner.invoke([&]{h.rotApplied[0]=0.0;});
     bool again=false;
     f.owner.invoke([&]{again=h.applyPositionRecentre(10);});
-    check(again&&h.currentOrigin.x==5.0&&h.currentOrigin.yaw==seatedYaw&&h.positionRecentres==2,"F123: a later ask with everything in order is applied");
+    check(again&&h.currentOrigin.x==5.0&&h.currentOrigin.yaw==0.5&&h.positionRecentres==2,"F123: a later ask with everything in order is applied without baking look yaw into the baseline");
 
     // Delivery must survive a transient tracking dropout: a contact latch sends one serial, not a replacement every frame.
     const auto onFoot=[&](bool foot){
@@ -143,6 +159,69 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
     });
     check(!expired&&h.currentOrigin.x==6.0&&h.positionRecentres==3&&h.positionRecentreHandled==15,
           "F123: tracking retries expire after 0.5 s, so an old request cannot move the origin long after its fade");
+
+    bool provider=false;
+    f.owner.invoke([&]{provider=h.features.acquire(GetModuleHandleW(nullptr),reinterpret_cast<ID3D11Device*>(uintptr_t(1)),1)==S_OK;});
+    check(provider,"(the position-only roundtrip admits the actual host look/eye/ADS polls through a module-owned test provider)");
+    if(provider) {
+      const auto same=[](const XrPosef& a,const XrPosef& b) {
+        return std::fabs(a.position.x-b.position.x)<2e-5&&std::fabs(a.position.y-b.position.y)<2e-5&&std::fabs(a.position.z-b.position.z)<2e-5&&
+          std::fabs(a.orientation.x-b.orientation.x)<2e-6&&std::fabs(a.orientation.y-b.orientation.y)<2e-6&&std::fabs(a.orientation.z-b.orientation.z)<2e-6&&std::fabs(a.orientation.w-b.orientation.w)<2e-6;
+      };
+      for(int sign:{-1,1}) {
+        bool callOnly=false,pollStable=false,repeatStable=false,eyeStable=false,unwind=false,reset=false;
+        f.owner.invoke([&]{
+          const double baselineYaw=sign*0.41,base=sign*1.8,comp=sign*0.8444,pitch=sign*0.17;
+          const double eye[3]={0.12,-0.08,0.18}; // aggregate eye alignment, including ADS sight translation
+          f.fake.head.position={5.0f,1.6f,-2.0f};f.fake.flags=launch_fixture::tracked;f.fake.locateResult=XR_SUCCESS;
+          h.currentOrigin={1.0,0.0,0.0,baselineYaw};h.lookSeated={1.3,-0.2,0.4,baselineYaw+comp};h.lookSeatedKnown=true;
+          h.lookBase=base;h.lookComp=comp;h.lookWanted=base+comp;h.lookRestorePending=false;
+          h.featureFrame={sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_10};h.featureFrameKnown=true;
+          h.featureFrame.lookYawReset=h.lookResetSeen;h.featureFrame.lookYawTotal=float(base+comp);
+          h.eyeProviderSeen=true;h.eyeSerialSeen=h.eyeAppliedSerial=99;
+          for(int i=0;i<3;++i){h.eyeWanted[i]=h.eyeApplied[i]=eye[i];}
+          h.rotWanted[0]=h.rotWanted[1]=h.rotApplied[0]=h.rotApplied[1]=0;
+          h.adsWanted=h.adsApplied=pitch;h.adsPivot[0]=5.0;h.adsPivot[1]=double(1.6f);h.adsPivot[2]=-2.0;
+          h.seated.replace(h.seatedPoseFor(h.lookSeated,0,pitch));
+          const XrQuaternionf beforeOrientation=f.fake.origin.orientation;
+          const bool applied=h.applyPositionRecentre(100+sign);
+          const XrPosef atCall=f.fake.origin;
+          XrSpaceLocation headAtCall{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAtCall);
+          const XrPosef expected=h.seatedPoseFor(SeatPose{5.0+eye[0],double(1.6f)+eye[1],-2.0+eye[2],baselineYaw+comp},0,pitch);
+          callOnly=applied&&same(atCall,expected)&&std::memcmp(&atCall.orientation,&beforeOrientation,sizeof(beforeOrientation))==0&&
+            h.currentOrigin.yaw==baselineYaw&&h.lookBase==base&&h.lookComp==comp&&h.lookWanted==base+comp&&h.eyeAppliedSerial==99&&h.adsApplied==pitch;
+          h.lookPoll();h.eyePoll();h.rotPoll();h.adsPoll();
+          XrSpaceLocation headAfterPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAfterPoll);
+          pollStable=same(atCall,f.fake.origin)&&same(headAtCall.pose,headAfterPoll.pose);
+          // A normal requested eye-alignment change still lands once, then its inverse returns exactly.
+          h.eyeWanted[0]+=0.02;h.eyePoll();h.eyeWanted[0]=eye[0];h.eyePoll();
+          eyeStable=same(atCall,f.fake.origin)&&h.eyeAppliedSerial==99;
+          f.fake.head.position.x+=0.2f;f.fake.head.position.y+=0.03f;f.fake.head.position.z-=0.1f;
+          const bool repeated=h.applyPositionRecentre(110+sign);
+          const XrPosef atRepeat=f.fake.origin;
+          XrSpaceLocation headAtRepeat{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAtRepeat);
+          h.lookPoll();h.eyePoll();h.rotPoll();h.adsPoll();
+          XrSpaceLocation headRepeatPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headRepeatPoll);
+          repeatStable=repeated&&same(atRepeat,f.fake.origin)&&same(headAtRepeat.pose,headRepeatPoll.pose)&&same(headAtCall.pose,headAtRepeat.pose)&&
+            h.currentOrigin.yaw==baselineYaw&&h.lookBase==base&&h.lookComp==comp;
+          for(int step=1;step<=6;++step) {
+            const double left=1.0-double(step)/6.0;h.lookWanted=base+comp*left;h.adsWanted=pitch*left;
+            h.lookPoll();h.eyePoll();h.adsPoll();
+          }
+          unwind=std::fabs(h.lookComp)<1e-9&&std::fabs(h.lookSeated.yaw-baselineYaw)<1e-9&&h.currentOrigin.yaw==baselineYaw&&std::fabs(h.adsApplied)<1e-9;
+          ++h.featureFrame.lookYawReset;h.lookWanted=base;h.lookPoll();h.eyePoll();h.adsPoll();
+          const SeatPose final{double(f.fake.head.position.x)+eye[0],double(f.fake.head.position.y)+eye[1],double(f.fake.head.position.z)+eye[2],baselineYaw};
+          reset=same(f.fake.origin,xrFromSeatPose(final))&&h.currentOrigin.yaw==baselineYaw&&h.lookComp==0&&h.lookBase==base;
+        });
+        check(callOnly,"F123 ADS roundtrip: position-only call preserves full live orientation, nonzero yaw base/compensation and eye/pitch overlays (both yaw signs)");
+        check(pollStable,"F123 ADS roundtrip: the next real look/eye/rotation/ADS polls preserve the call's world-space transform and reported head pose");
+        check(eyeStable,"F123 ADS roundtrip: an eye-alignment change is applied once and its inverse returns to the captured transform");
+        check(repeatStable,"F123 ADS roundtrip: repeated recenter after head translation preserves the same reported head pose and original yaw account");
+        check(unwind,"F123 ADS roundtrip: subsequent ADS yaw/pitch unwind reaches the original baseline yaw, without absorbing either sign of live compensation");
+        check(reset,"F123 ADS roundtrip: later reset restores the translated baseline plus one eye offset, with no permanent ADS yaw or pitch");
+      }
+      f.owner.invoke([&]{h.features.close();});
+    }
     f.owner.stop();
   }
   if(hadPrevious)SetEnvironmentVariableW(L"LOCALAPPDATA",previous);else SetEnvironmentVariableW(L"LOCALAPPDATA",nullptr);

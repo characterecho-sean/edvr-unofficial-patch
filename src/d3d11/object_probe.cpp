@@ -885,6 +885,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         NativeOnFootCameraEvidence avatar;
         nativeOnFootCameraEvidence(nativeFrame,&avatar); // existing exact-frame F81 record or explicitly cached IkG; no game getter
         g_lateMenuSnapshot.rows.back().avatar.copy(avatar);
+        g_lateMenuSnapshot.rows.back().inputBridge=nativeOnFootMenuInputDrawBridge(frame,nativeFrame,eyeJoin.drawQpc);
     }
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {

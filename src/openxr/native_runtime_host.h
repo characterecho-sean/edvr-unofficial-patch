@@ -3417,9 +3417,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
   }
   // F123: WaitGetPoses, no frame open. The position-only recentre the provider asks for (a version 10 answer's positionRecentre: 0, or the request's serial; the head containment's
-  // leash and wall contact). The seated origin goes under the head: currentOrigin is the head's x, y and z in natural LOCAL with the seated space's own yaw (lookSeated's, the look
-  // compensation and the rotation calibration's yaw included) kept exactly, the look is rebased onto it (lookRebase: the new origin carries the turn, so the compensation is zero and
-  // the base is the provider's total now; the alignment and the pitch overlays are applied again by eyePoll, rotPoll and adsPoll, called after this one), and the seated space is
+  // leash and wall contact). The baseline origin goes under the head without changing its yaw or the live look account. The seated space keeps its compensated yaw, applied eye
+  // alignment and ADS pitch at this call and the following polls. Absorbing the look compensation into currentOrigin would make an ADS release leave that yaw behind permanently.
+  // The position is composed through seatedPoseFor, with the ADS pivot at the current head; the existing applied alignment is retained exactly once. The seated space is
   // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing, the seat memory is not asked and the stored seat never
   // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The action succeeds once. A temporarily untracked head is retried for at most 0.5 s while the same ask
   // stands in the same reference generation; withdrawal, a changed reference, and leaving on foot cancel it. Refused, and said: the seat memory does not place the player on foot, a stored seat
@@ -3472,10 +3472,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(!why&&!lookSeatedKnown)lookRebase();
     const SeatPose beforeSeated=lookSeated;
+    const double baselineYaw=currentOrigin.yaw;
     SeatPose next{};
     if(!why) {
-      next=SeatPose{head.pose.position.x,head.pose.position.y,head.pose.position.z,lookSeated.yaw};
-      if(seated.replace(xrFromSeatPose(next))!=XR_SUCCESS)why="the seated space replace was refused";
+      next=SeatPose{head.pose.position.x+eyeApplied[0],head.pose.position.y+eyeApplied[1],head.pose.position.z+eyeApplied[2],lookSeated.yaw};
+      const double oldPivot[3]={adsPivot[0],adsPivot[1],adsPivot[2]};
+      adsPivot[0]=head.pose.position.x;adsPivot[1]=head.pose.position.y;adsPivot[2]=head.pose.position.z;
+      if(seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied))!=XR_SUCCESS) {
+        for(int i=0;i<3;++i)adsPivot[i]=oldPivot[i];
+        why="the seated space replace was refused";
+      }
     }
     if(why) {
       ++positionRecentreRefusals;
@@ -3484,14 +3490,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(retry&&*retry)positionRecentreRetryTraced=true;
       return false;
     }
-    currentOrigin=next;
-    lookRebase();   // lookSeated = currentOrigin; the compensation, the alignment and the overlays are zero until their polls apply them again
+    currentOrigin=SeatPose{head.pose.position.x,head.pose.position.y,head.pose.position.z,baselineYaw};
+    lookSeated=next;
     dropPoseFrame(PoseInvalidation::Other);
     fillPollRing();
     ++positionRecentres;
-    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0\n",unsigned(ask),
+    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0,baseline_yaw_deg=%.3f,look_comp_deg=%.3f,look_base_deg=%.3f\n",unsigned(ask),
         (unsigned long long)positionRecentres,beforeSeated.x,beforeSeated.y,beforeSeated.z,beforeSeated.yaw,next.x,next.y,next.z,next.yaw,
-        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw));
+        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw),seatRadToDeg(baselineYaw),seatRadToDeg(lookComp),seatRadToDeg(lookBase));
     return true;
   }
   // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.

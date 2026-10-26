@@ -442,6 +442,32 @@ bool testCapture() {
     return true;
 }
 
+bool testPoseLanes() {
+    Memory m = fixture();
+    const uint32_t nanBits = 0x7FC12345u;
+    for (uintptr_t state : {kActivity + 0x10, kC + 0x70, kB + 0xB8})
+        for (unsigned lane : {3u, 7u, 11u, 15u}) m.put(state + 0x40 + lane * 4, nanBits);
+    auto s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
+    capture(&Memory::read, &m, gameAt(), *s);
+    const auto& a = s->stages[0].activities[0];
+    uint32_t retained = 0; std::memcpy(&retained, a.pose + 15, 4);
+    if (!s->complete || !a.poseRead || !s->stages[0].baseRead || !s->stages[0].outputRead ||
+        !finitePoseXYZ(a.pose) || finitePoseFourth(a.pose) || retained != nanBits || a.pose[12] != 42.0f) return false;
+    // A meaningful invalid lane is still retained, but refuses a complete pose.
+    m.put(kActivity + 0x10 + 0x40 + 12 * 4, nanBits);
+    s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
+    capture(&Memory::read, &m, gameAt(), *s);
+    if (s->complete || !s->stages[0].activities[0].poseRead ||
+        std::strcmp(s->failure, "activity-pose-xyz-nonfinite") != 0) return false;
+    // Unreadable memory remains unavailable; partial bytes must not be presented as a pose.
+    m.denied = kActivity + 0x10 + 0x40;
+    s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
+    capture(&Memory::read, &m, gameAt(), *s);
+    if (s->complete || s->stages[0].activities[0].poseRead || std::strcmp(s->failure, "activity-pose-read") != 0) return false;
+    float raw[16]{};
+    return !pose(&Memory::read, &m, UINTPTR_MAX - 0x20, raw);
+}
+
 bool testPlaced() {
     Memory m = placedFixture();
     auto s = std::make_unique<Snapshot>(); s->source = kC + 0x70;
@@ -726,7 +752,7 @@ bool testManualEyeWindow() {
 }
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testResolved() || !testCaptureWiring() || !testReportMarkers() || !testManualEyeWindow()) {
+    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPoseLanes() || !testPlaced() || !testResolved() || !testCaptureWiring() || !testReportMarkers() || !testManualEyeWindow()) {
         std::fprintf(stderr, "flat stationary camera test failed\n"); return 1;
     }
     std::puts("flat stationary camera test passed");

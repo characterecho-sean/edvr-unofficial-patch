@@ -470,6 +470,7 @@ bool nativeOnFootCameraEvidence(uint32_t nativeRenderFrame, NativeOnFootCameraEv
 void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t firstLedgerFrame,uint32_t lastLedgerFrame);
 void nativeOnFootMenuInputBoundary(uint32_t ledgerFrame);
 std::string nativeOnFootMenuInputEnd();
+std::string nativeOnFootMenuInputDrawBridge(uint32_t ledgerFrame,uint32_t renderFrame,uint64_t qpc);
 void nativeOnFootMenuInputDiscard();
 // F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
 // marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame

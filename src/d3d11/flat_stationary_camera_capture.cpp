@@ -656,7 +656,19 @@ struct EyeJson {
     void string(const char* p) noexcept {
         put("\"");for(;*p;++p) {if(*p=='\"' || *p=='\\')put("\\%c",*p);else put("%c",*p);}put("\"");
     }
-    void pose(const char* name,const float* p,bool available) noexcept { put(",\"%s\":",name); floats(p,16,available); }
+    void pose(const char* name,const float* p,bool available) noexcept {
+        put(",\"%s_read\":%u,\"%s_xyz_finite\":%u,\"%s_fourth_finite\":%u,\"%s\":",
+            name,unsigned(available),name,unsigned(available && stationcam::finitePoseXYZ(p)),
+            name,unsigned(available && stationcam::finitePoseFourth(p)),name);
+        floats(p,16,available);
+        // JSON has no NaN/Inf literals. Keep exact lane bits as well as numeric
+        // values so a nonfinite fourth lane never erases the useful XYZ data.
+        put(",\"%s_bits\":",name);
+        if (!available) { put("null"); return; }
+        put("[");
+        for(unsigned i=0;i<16;++i) { uint32_t bits=0; std::memcpy(&bits,p+i,sizeof(bits)); if(i)put(","); put("%u",bits); }
+        put("]");
+    }
 };
 void eyeSnapshotJson(EyeJson& j,const stationcam::Snapshot& s,unsigned& stages,unsigned& activities,unsigned& placed) noexcept {
     j.put("\"owner\":\"%p\",\"source\":\"%p\",\"helper\":\"%p\",\"caller_rva\":%llu,\"valid_source\":%u,\"consistent\":%u,\"complete\":%u,\"failure\":\"%s\",\"source_before\":",
@@ -778,7 +790,8 @@ bool flatStationaryCameraEyeWrite(const wchar_t* path) noexcept {
     j.put("{\"version\":1,\"capture_id\":\"%s\",\"status\":\"%s\",\"sampled\":%u,\"selected_ledger_frame\":%u,\"ledger_frame\":%u,\"native_render_frame\":%u,\"epoch\":%llu,\"qpc_frequency\":%llu,\"begin_qpc\":%llu,\"end_qpc\":%llu,\"refresh_hook\":\"%s\",\"inflight\":%u,\"source_calls\":%u,\"source_overflow\":%u,\"refresh_calls\":%u,\"refresh_overflow\":%u,\"foreign_refresh_unavailable\":%u,",
         stamp,e.status,unsigned(e.window.sampled),e.window.selected,e.ledgerFrame,e.nativeFrame,e.epoch,e.frequency,e.beginQpc,e.endQpc,flatCameraInjectObserveStatus(),inflight,calls,calls-sourceCount,e.refreshes,e.refreshes-refreshCount,e.foreignRefresh.load());
     j.put("\"source_hook_installed\":%u,\"resolved_mainview_caller_rva\":%llu,",unsigned(s->hook.installed()),stationcam::rva(s->mainViewCaller,s->gameBase.load(std::memory_order_acquire),s->imageSize));
-    j.put("\"limits\":{\"sources\":16,\"refreshes\":640,\"stages_written\":192,\"activities_written\":1024,\"placed_written\":64,\"file_bytes\":16777216},\"notes\":\"Original game camera pre-copy precedes EDVR injection/flush. Cached derived pre matrices can be stale. Post is collected only when the existing hook already redirected the return; absent post is unavailable. Source topology is post-original guarded memory, not proof of which activity executed. Same-thread source span is an actual nesting witness; absent span has no direct source join. Parent getter/override execution and HMD activity internals remain unavailable. EDVR pose is separate cached runtime evidence; applied alignment vector is unavailable here. All base/output poses use positive origin; camera+0x50 stores negative origin. Serialization quotas are independent of capture quotas.\",\"context\":{\"gui_known\":%u,\"gui\":%u,\"on_foot\":%u,\"suite_raw_known_bit_256\":%u,\"effective_render_mode\":%u,\"screen_held\":%u,\"previous_frame_screen_named\":%u},\"runtime_pose\":{\"available\":%u,\"frame_sequence\":%llu,\"now_sequence\":%u,\"reference_generation\":%u,\"eye_align_applied_serial\":%u,\"render\":",
+    j.put("\"pose_encoding\":\"Readable lanes retained; nonfinite numeric lanes are null with exact uint32 bits alongside. CameraState XYZ validity is separate from fourth-lane validity; fourth lanes are not assumed homogeneous.\",\"hmd_entity_base\":\"unavailable: entity override identity and execution were not observed\",");
+    j.put("\"limits\":{\"sources\":16,\"refreshes\":640,\"stages_written\":192,\"activities_written\":1024,\"placed_written\":64,\"file_bytes\":16777216},\"notes\":\"Original game camera pre-copy precedes EDVR injection/flush. Cached derived pre matrices can be stale. Post is collected only when the existing hook already redirected the return; absent post is unavailable. Source topology is post-original guarded memory, not proof of which activity executed. Same-thread source span is an actual nesting witness; absent span has no direct source join. Parent getter/override execution and HMD activity internals remain unavailable. EDVR pose is separate cached runtime evidence; applied alignment vector is unavailable here. Base/output poses carry raw origin; the legacy stored_negative_origin field is raw camera+0x50, with no sign conversion. Serialization quotas are independent of capture quotas.\",\"context\":{\"gui_known\":%u,\"gui\":%u,\"on_foot\":%u,\"suite_raw_known_bit_256\":%u,\"effective_render_mode\":%u,\"screen_held\":%u,\"previous_frame_screen_named\":%u},\"runtime_pose\":{\"available\":%u,\"frame_sequence\":%llu,\"now_sequence\":%u,\"reference_generation\":%u,\"eye_align_applied_serial\":%u,\"render\":",
         unsigned(e.guiKnown),e.gui,unsigned(e.onFoot),e.suite,e.effective,unsigned(e.screenHeld),unsigned(e.screenNamed),unsigned(e.poseAvailable),e.pose.frameSequence,e.pose.nowSequence,e.pose.referenceGeneration,e.pose.eyeAlignApplied);
     j.floats(e.pose.render,12,e.poseAvailable&&e.pose.renderValid);j.put(",\"now\":");j.floats(e.pose.now,12,e.poseAvailable&&e.pose.nowValid);j.put(",\"natural_local\":");j.floats(e.pose.local,12,e.poseAvailable&&e.pose.localValid);j.put("},\"sources\":[");
     unsigned stages=0,activities=0,placed=0;

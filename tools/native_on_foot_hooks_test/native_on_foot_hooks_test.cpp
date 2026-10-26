@@ -1201,7 +1201,7 @@ void testFpBodyHideGlue(const CtlPages& p) {
 }
 
 void testGearClipProbeGlue(const CtlPages& p) {
-    std::printf("glue: bounded third-person gear clip evidence, without gear writes\n");
+    std::printf("glue: bounded prewrite gear clip evidence and local third-person gear unclip\n");
     namespace t = edvr::nofoothookstest;
     static AmcBuf local, fp, npc;
     static alignas(16) uint8_t skelA[0x100], skelB[0x100], armMod[32], gearMod[32];
@@ -1258,9 +1258,10 @@ void testGearClipProbeGlue(const CtlPages& p) {
           "...the actual row preserves modifier bytes, all four instance/mask pairs and the validated owner, without guessing a GPU skin job");
     check(rig.cap.count("LowerArms status=no-instance") == 1 && rig.cap.count("LowerArmR status=no-modifier") == 1,
           "...missing combined gear and present gear without a clip modifier are distinct results");
-    check(armMod[avh::kClipModEnable] == 0 && armMod[avh::kClipModDirty] == 1 && gearMod[avh::kClipModEnable] == 1 &&
-          gearMod[avh::kClipModDirty] == 0 && local.mask(39, 3) == 0xA003,
-          "...existing arm unclip still runs, while the observed gear modifier and masks remain untouched");
+    check(armMod[avh::kClipModEnable] == 0 && armMod[avh::kClipModDirty] == 1 && gearMod[avh::kClipModEnable] == 0 &&
+          gearMod[avh::kClipModDirty] == 1 && local.mask(39, 3) == 0xA003 &&
+          std::memcmp(gearMod + avh::kClipModAmount, &amount, 4) == 0,
+          "...arm and attached gear unclip after the prewrite sample, preserving the amount and gear masks");
     t::clipProbeClock(8000); imgFade(local.b); nativeOnFootBodyClipTick(8000, true, true, "rig");
     check(rig.cap.count("prewrite=1") == 3, "...a second fade inside the five-second interval does not duplicate evidence");
     nativeOnFootBodyClipTick(8000, false, false, "rig: off");
@@ -1288,6 +1289,63 @@ void testGearClipProbeGlue(const CtlPages& p) {
     nativeOnFootBodyClipTick(35000, false, false, "rig: off");
     t::clipProbeClock(40000); imgFade(local.b); nativeOnFootBodyClipTick(40000, false, false, "rig");
     check(rig.cap.count("prewrite=1") == 12, "...probe off produces no further gear report");
+    // Camera changes and item apply may restore enable=1. Exercise the actual fade hook against those bytes,
+    // including the combined-gear suit variant and a replacement modifier rather than a cached pointer.
+    alignas(16) uint8_t allGear[3][32] = {}, comparisonMod[32] = {}, replacementMod[32] = {};
+    const auto gameApply = [&]() {
+        for (auto& m : allGear) {
+            std::memcpy(m + avh::kClipModAmount, &amount, 4);
+            m[avh::kClipModEnable] = 1; m[avh::kClipModDirty] = 0;
+        }
+    };
+    const auto allGearIs = [&](uint8_t enable, uint8_t dirty) {
+        for (const auto& m : allGear)
+            if (m[avh::kClipModEnable] != enable || m[avh::kClipModDirty] != dirty ||
+                std::memcmp(m + avh::kClipModAmount, &amount, 4)) return false;
+        return true;
+    };
+    for (uint32_t i = 0; i < 3; ++i) {
+        const uint64_t ptr = reinterpret_cast<uint64_t>(allGear[i]);
+        modifier(38 + i, ptr);
+        std::memcpy(fp.b + avh::kOffAmcParts + (38+i)*avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+        std::memcpy(npc.b + avh::kOffAmcParts + (38+i)*avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+    }
+    comparisonMod[avh::kClipModEnable] = 1;
+    modifier(30, reinterpret_cast<uint64_t>(comparisonMod)); // EVASuit_Legs: comparison only
+    gameApply();
+    nativeOnFootBodyClipTick(41000, true, true, "rig: unclip");
+    edvr::nativeOnFootCameraPublish(0, 0);
+    imgFade(fp.b); imgFade(npc.b);
+    check(allGearIs(1, 0), "GEAR UNCLIP: neither first-person nor another avatar's modifiers are written");
+    imgFade(local.b);
+    check(allGearIs(0, 1) && comparisonMod[avh::kClipModEnable] == 1 && comparisonMod[avh::kClipModDirty] == 0 &&
+          local.mask(39, 3) == 0xA003,
+          "...all three named local gear variants unclip, while comparison clipping and gear masks stay intact");
+    gameApply();
+    edvr::nativeOnFootCameraPublish(1, 0);
+    imgFade(local.b);
+    check(allGearIs(1, 0), "...external camera retains the game's restored gear clipping");
+    edvr::nativeOnFootCameraPublish(0, 0);
+    nativeOnFootHybridTick(42000, true, "rig: hybrid");
+    imgFade(local.b);
+    check(allGearIs(1, 0), "...hybrid torso-only unclip does not alter third-person gear, even with unclip requested");
+    nativeOnFootHybridTick(43000, false, "rig: full body");
+    nativeOnFootBodyClipTick(43000, false, true, "rig: probe only");
+    imgFade(local.b);
+    check(allGearIs(1, 0), "...probe-only mode leaves game-restored gear modifier bytes intact");
+    nativeOnFootBodyClipTick(44000, true, true, "rig: reentry");
+    replacementMod[avh::kClipModEnable] = 1;
+    modifier(39, reinterpret_cast<uint64_t>(replacementMod));
+    imgFade(local.b);
+    check(replacementMod[avh::kClipModEnable] == 0 && replacementMod[avh::kClipModDirty] == 1 &&
+          allGear[1][avh::kClipModEnable] == 1 && allGear[1][avh::kClipModDirty] == 0,
+          "...item replacement reads the current modifier and never rewrites the retired modifier");
+    gameApply();
+    replacementMod[avh::kClipModEnable] = 1; replacementMod[avh::kClipModDirty] = 0;
+    nativeOnFootBodyClipTick(45000, false, false, "rig: off");
+    imgFade(local.b);
+    check(allGearIs(1, 0) && replacementMod[avh::kClipModEnable] == 1 && replacementMod[avh::kClipModDirty] == 0,
+          "...off leaves the game's next item-apply values intact");
     if (unreadable) VirtualFree(unreadable, 0, MEM_RELEASE);
     nofoot::logwin::setDetail(false);
     edvr::g_nativeOnFootActive.store(false);

@@ -509,6 +509,7 @@ def read_menu(path, capture=None):
     meta['eye_mappings']=dict(Counter(r['eye_mapping'] for r in meta['rows']))
     meta['menu_geometry']=dict(Counter(issues[r['draw']]['index_status'] for r in meta['rows'] if r['role']==1))
     meta['input_summary']=validate_menu_input(meta.get('input_observer'),meta['selected_frame'])
+    for row in meta['rows']:row['input_bridge_summary']=validate_draw_input_bridge(row.get('input_bridge'),meta['selected_frame'])
     c['late_menu']=meta
     return c
 
@@ -516,7 +517,7 @@ def read_menu(path, capture=None):
 def validate_menu_input(data,selected_frame):
     if data is None:return dict(status='not_captured')
     if (data.get('schema')!='edvr_menu_input_v1' or not isinstance(data.get('capture_id'),str) or
-            not data['capture_id'].isdigit() or data.get('getter_calls')!=0 or data.get('update_capture_gate') is not False or
+            not data['capture_id'].isdigit() or data.get('getter_calls')!=0 or data.get('update_capture_gate') not in (False,True) or
             not isinstance(data.get('first_ledger_frame'),int) or not isinstance(data.get('last_ledger_frame'),int) or
             not data['first_ledger_frame']<=selected_frame<=data['last_ledger_frame'] or
             data['last_ledger_frame']-data['first_ledger_frame']>=20 or len(data.get('rows',[]))>160 or len(data.get('meshes',[]))>8):
@@ -560,11 +561,80 @@ def validate_menu_input(data,selected_frame):
         row['mesh_availability']={1:'absent',2:'triangle_cap',3:'read_fault_or_changed',4:'not_selected_complete_frame',5:'mesh_quota',6:'first_copy_in_same_frame',7:'copied_after_original'}[row['mesh_status']]
     if max(counts)>80 or len(data['rows'])+data['in_flight_at_close']>data['placements_begun']:
         raise ValueError('Menu input row reservation/count mismatch')
-    return dict(status='observed' if data['rows'] else 'no_placement_callbacks',rows=len(data['rows']),meshes=len(data['meshes']),
+    bridge=validate_input_update_bridge(data.get('update_bridge'),selected_frame)
+    if data['update_capture_gate'] is True and bridge['status']=='not_captured':raise ValueError('Update observer gate lacks bounded bridge schema')
+    return dict(status='observed' if data['rows'] else 'no_placement_callbacks',rows=len(data['rows']),meshes=len(data['meshes']),update_bridge=bridge,
                 branches=dict(Counter(r['branch'] for r in data['rows'])),hooks_armed=data['hooks_armed'],
                 row_quota=data['row_quota'],mesh_quota=data['mesh_quota'],read_faults=data['read_faults'],
                 contended=data['contended'],in_flight_at_close=data['in_flight_at_close'],
                 association='time_and_geometry_only_not_proven_GPU_owner')
+
+
+def _input_mode(mode):
+    if not isinstance(mode,dict) or mode.get('status') not in (0,1,2,3) or not isinstance(mode.get('value'),int) or len(mode.get('code',[]))!=21:
+        raise ValueError('Invalid update mode evidence')
+    for key in ('object','vtable','observed_function_address','value_address'):
+        if not isinstance(mode.get(key),int) or mode[key]<0:raise ValueError('Invalid mode identity')
+    if any(not isinstance(v,int) or not 0<=v<=255 for v in mode['code']):raise ValueError('Invalid mode accessor bytes')
+    if mode['status']==3 and bytes(mode['code'])!=bytes.fromhex('488b81180200004885c074038b00c3b802000000c3'):
+        raise ValueError('Unverified indirect mode accessor claimed valid')
+    mode['availability']='verified_callback_lifetime_read' if mode['status']==3 else 'unavailable'
+
+
+def _input_update(row):
+    for key in ('sequence','ledger_frame','render_frame','end_render_frame','thread','ctl','before_qpc','after_qpc'):
+        if not isinstance(row.get(key),int) or row[key]<0:raise ValueError('Invalid update callback identity/stamp')
+    if not isinstance(row.get('completed'),bool) or not isinstance(row.get('original_returned'),bool):raise ValueError('Invalid update completion status')
+    if row['completed'] and row['after_qpc']<row['before_qpc']:raise ValueError('Update callback times reversed')
+    _input_mode(row['before_mode']);_input_mode(row['after_mode'])
+
+
+def validate_input_update_bridge(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if (data.get('schema')!='edvr_menu_input_bridge_v1' or data.get('selected_frame')!=selected_frame or
+            data.get('getter_calls')!=0 or data.get('legacy_update_instrument_enabled_by_capture') is not False or
+            data.get('association')!='timing_and_callback_identity_only_not_GPU_owner_proof' or len(data.get('updates',[]))>64):
+        raise ValueError('Invalid bounded update bridge')
+    for key in ('first_frame','last_frame','update_gate_frame','update_gate_qpc','contended','slot_overflow','update_overflow','in_flight_upper_bound'):
+        if not isinstance(data.get(key),int) or data[key]<0:raise ValueError('Invalid update bridge counter')
+    if data['first_frame']+1!=selected_frame or data['last_frame']-data['first_frame']>=20:raise ValueError('Invalid update bridge window')
+    controllers=set()
+    for row in data['updates']:
+        _input_update(row);controllers.add(row['ctl'])
+        if not row['completed'] or not data['first_frame']<=row['ledger_frame']<=data['last_frame']:raise ValueError('Invalid retained update window/completion')
+    if len(controllers)>4:raise ValueError('Update bridge controller cap exceeded')
+    return dict(status=data.get('status'),updates=len(data['updates']),controllers=len(controllers),slot_overflow=data['slot_overflow'],
+                update_overflow=data['update_overflow'],in_flight_upper_bound=data['in_flight_upper_bound'],update_gate_qpc=data['update_gate_qpc'],
+                association='timing_and_callback_identity_only_not_GPU_owner_proof')
+
+
+def validate_draw_input_bridge(data,selected_frame):
+    if data is None:return dict(status='not_captured')
+    if data.get('status') in ('contended','outside_selected_frame'):return dict(status=data['status'])
+    if (data.get('status')!='sampled' or data.get('ledger_frame')!=selected_frame or data.get('gpu_owner_proven') is not False or
+            data.get('pointer_rereads')!=0 or len(data.get('controllers',[]))>4):raise ValueError('Invalid draw input bridge')
+    enclosing=data.get('enclosing_update')
+    if enclosing is not None:
+        _input_update(enclosing)
+        if enclosing['completed']:raise ValueError('Completed update cannot enclose a draw')
+    if data.get('snapshot_qpc')!=data.get('qpc') or not isinstance(data.get('draw_marker_qpc'),int):raise ValueError('Invalid draw/snapshot clock provenance')
+    seen=set();current=0;after_marker=0
+    for slot in data['controllers']:
+        if slot.get('ctl') in seen:raise ValueError('Ambiguous duplicate controller slot')
+        seen.add(slot.get('ctl'));update=slot.get('latest_update')
+        if update is not None:
+            _input_update(update)
+            if update['ctl']!=slot['ctl']:raise ValueError('Update/controller mismatch')
+            current+=update['ledger_frame']==selected_frame
+        for key in ('prior_placement_only','prior_120_triangle_candidate_only'):
+            p=slot.get(key)
+            if p is not None:
+                if p.get('ctl')!=slot['ctl'] or (data['qpc'] and p.get('after_qpc',0)>data['qpc']):raise ValueError('Invalid prior placement identity/time')
+                if key=='prior_placement_only':after_marker+=p.get('after_qpc',0)>data['draw_marker_qpc']
+                _input_mode(p['mode'])
+                if key=='prior_120_triangle_candidate_only' and p.get('triangles')!=120:raise ValueError('Wrong candidate triangle count')
+    return dict(status='sampled',controllers=len(seen),same_ledger_frame_updates=current,enclosing_update=enclosing is not None,placements_after_draw_marker=after_marker,
+                gpu_owner_proven=False,association='prior_placement_is_not_current_GPU_owner_proof')
 
 
 def read_candidates(unpack,take,draws,effect_images,version=11):
@@ -1461,6 +1531,10 @@ def main():
         assert avatar['qpc_age_ms']==100 and avatar['root_qpc_age_ms']==200
         assert menu['late_menu']['input_summary']['branches']=={'2d_window':1}
         assert menu['late_menu']['input_summary']['in_flight_at_close']==1
+        assert menu['late_menu']['input_summary']['update_bridge']['status']=='observed' and menu['late_menu']['input_summary']['update_bridge']['updates']==1
+        assert menu['late_menu']['rows'][1]['input_bridge_summary']['same_ledger_frame_updates']==1
+        assert menu['late_menu']['rows'][1]['input_bridge_summary']['placements_after_draw_marker']==1
+        assert not menu['late_menu']['rows'][1]['input_bridge_summary']['gpu_owner_proven']
         assert len(menu['late_menu']['input_observer']['meshes'][0]['triangles'])==120
         assert menu['draws'][1]['buffers'][1]['data']==bytes([0x35])*4608
         assert menu['draws'][1]['streams'][1]['data']==bytes([0xA7])*160

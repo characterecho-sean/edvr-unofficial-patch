@@ -82,12 +82,22 @@ int main(int argc,char** argv){
     for(auto& r:e.source){auto& snap=r.snapshot;snap.stageCount=stationcam::kStages;snap.placedCount=stationcam::kPlacedDetails;
         for(auto& a:snap.stages){a.activityCount=stationcam::kActivities;a.nameRead=true;strcpy_s(a.stackName,"quoted\"\\name");a.baseRead=true;a.basePose[0]=std::numeric_limits<float>::quiet_NaN();
             for(auto& b:a.activities){b.nameRead=true;strcpy_s(b.name,"quoted\"\\activity");b.poseRead=true;b.weightKnown=true;b.weight=std::numeric_limits<float>::infinity();}}}
+    auto& retainedPose=e.source[0].snapshot.stages[0].activities[0];
+    retainedPose.pose[0]=retainedPose.pose[5]=retainedPose.pose[10]=1;
+    retainedPose.pose[12]=13.25f;retainedPose.pose[13]=10.5f;retainedPose.pose[14]=-49.75f;
+    const uint32_t nanBits=0x7FC12345u;std::memcpy(retainedPose.pose+15,&nanBits,4);
     if(!flatStationaryCameraEyeWrite(path))return 1;
     const auto capped=read(path);
     if(!Json{capped}.valid()||capped.size()>16*1024*1024||!has(capped,"\"source_overflow\":5")||!has(capped,"\"refresh_overflow\":3")||
        !has(capped,"\"foreign_refresh_unavailable\":1")||!has(capped,"\"post_seen\":1")||!has(capped,"\"post_seen\":0")||
        !has(capped,"\"stages_written\":192,\"activities_written\":1024,\"placed_written\":64")||!has(capped,"\"empty\":0")||
-       !has(capped,"quoted\\\"\\\\name")||!has(capped,"\"caller_rva\":4660")||!has(capped,"\"caller_rva\":22136")||has(capped,":nan")||has(capped,":inf"))return 1;
+       !has(capped,"quoted\\\"\\\\name")||!has(capped,"\"caller_rva\":4660")||!has(capped,"\"caller_rva\":22136")||has(capped,":nan")||has(capped,":inf")||
+       !has(capped,"\"pose_read\":1,\"pose_xyz_finite\":1,\"pose_fourth_finite\":0,\"pose\":[1,0,0,0,0,1,0,0,0,0,1,0,13.25,10.5,-49.75,null]")||
+       !has(capped,"\"pose_bits\":[1065353216,0,0,0,0,1065353216,0,0,0,0,1065353216,0,1096024064,1093140480,3259432960,2143363909]")||
+       !has(capped,"\"output_pose_read\":0,\"output_pose_xyz_finite\":0,\"output_pose_fourth_finite\":0,\"output_pose\":null,\"output_pose_bits\":null")||
+       !has(capped,"\"base_pose_read\":1,\"base_pose_xyz_finite\":0")||
+       !has(capped,"\"base_pose\":[null,0,0,0")||
+       !has(capped,"\"hmd_entity_base\":\"unavailable: entity override identity and execution were not observed\""))return 1;
     flatStationaryCameraEyeArm(44,L"replacement");
     if(!flatStationaryCameraEyeWrite(path))return 1;const auto replacement=read(path);
     if(!Json{replacement}.valid()||!has(replacement,"\"source_calls\":0")||!has(replacement,"\"refresh_calls\":0")||!has(replacement,"\"empty\":1")||unexpectedProducerCalls)return 1;

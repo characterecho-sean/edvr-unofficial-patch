@@ -1,11 +1,14 @@
 #pragma once
 #include "../../src/d3d11/native_on_foot_menu_input.h"
+#include "../../src/d3d11/native_on_foot_menu_bridge.h"
 #include <array>
 #include <thread>
+#include <condition_variable>
+inline std::string menuInputDrawBridgeFixture;
 inline std::string menuInputChecks() {
     using namespace edvr::nofoot::menu_input;
     check(!hookGate(0,false,true,true)&&hookGate(1,false,true,true)&&hookGate(2,false,true,true)&&hookGate(3,false,true,true),
-          "passive input capture opens placement/ray/window but never the update/camera-getter hook with cursor drawing off");
+          "legacy instrument gate policy leaves update closed; the separate manual observer dispatch does not activate it");
     for(bool capture:{false,true}) {
         unsigned originals=0,observations=0;
         for(unsigned i=0;i<4;++i){const auto result=afterOriginal([&](){++originals;return 0x12345678ull;},[&](uint64_t result){if(capture){check(result==0x12345678ull,"observer sees unchanged original result");++observations;}});
@@ -66,5 +69,44 @@ inline std::string menuInputChecks() {
     c.mutex.lock();bool admitted=true;std::thread concurrent([&](){Row denied;admitted=c.before(denied,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,600,read);});concurrent.join();c.mutex.unlock();
     check(!admitted&&c.contended.load()==1,"hook-thread admission never waits on the capture mutex and records contention");
     c.discard();
-    return fixture;
+    std::array<uint8_t,0x240> indirectMode{};std::array<uint8_t,21> indirectCode{0x48,0x8b,0x81,0x18,2,0,0,0x48,0x85,0xc0,0x74,3,0x8b,0,0xc3,0xb8,2,0,0,0,0xc3};int32_t modeValue=0;
+    put(ctl.data()+edvr::nofoot::f114b::kOffMode,reinterpret_cast<uintptr_t>(indirectMode.data()));put(indirectMode.data(),reinterpret_cast<uintptr_t>(vt.data()));
+    put(vt.data()+edvr::nofoot::f114b::kModeGetter,reinterpret_cast<uintptr_t>(indirectCode.data()));put(indirectMode.data()+0x218,reinterpret_cast<uintptr_t>(&modeValue));
+    const Region bridgeRegions[]={{reinterpret_cast<uintptr_t>(ctl.data()),ctl.size()},{reinterpret_cast<uintptr_t>(indirectMode.data()),indirectMode.size()},
+        {reinterpret_cast<uintptr_t>(vt.data()),vt.size()},{reinterpret_cast<uintptr_t>(indirectCode.data()),indirectCode.size()},{reinterpret_cast<uintptr_t>(&modeValue),4}};
+    const auto bridgeRead=[&](uintptr_t address,void* dst,size_t bytes){for(const auto& a:bridgeRegions)if(address>=a.start&&address-a.start<=a.size&&bytes<=a.size-(address-a.start)){std::memcpy(dst,reinterpret_cast<void*>(address),bytes);return true;}return false;};
+    const auto ctlAddress=reinterpret_cast<uintptr_t>(ctl.data());
+    check(bridgeMode(ctlAddress,bridgeRead).status==3&&bridgeMode(ctlAddress,bridgeRead).value==0,"verified indirect mode accessor reads2D value without executing game code");
+    modeValue=1;check(bridgeMode(ctlAddress,bridgeRead).value==1,"same verified accessor exposes ray mode rather than assuming on-foot always2D");modeValue=0;
+    for(bool instruments:{false,true}){unsigned originalCalls=0,legacyCalls=0,observed=0;
+        const auto result=dispatchUpdate(instruments,[&](){++originalCalls;return 42ull;},[&](){++observed;},[&](){++legacyCalls;++originalCalls;return 42ull;});
+        check(result==42&&originalCalls==1&&legacyCalls==(instruments?1u:0u)&&observed==(instruments?0u:1u),"actual update dispatch callsoriginalonce and observer-only never calls legacy APIs regardless of live mouse key");}
+    unsigned throws=0;volatile bool throwNow=true;try{dispatchUpdate(false,[&]()->uint64_t{++throws;if(throwNow)throw 7;return 1;},[](){},[](){return 0ull;});check(false,"exception must propagate");}catch(int n){check(n==7&&throws==1,"update dispatch preserves original exceptions and call count");}
+    BridgeCapture bridge;bridge.arm(800,819,77);bridge.gateOpened(800,90);BridgeUpdate update;
+    check(bridge.begin(update,ctlAddress,801,901,9,100,bridgeRead),"selected-frame update admitted");
+    const auto nested=bridge.draw(801,901,101,&update);
+    check(nested.find("\"completed\":false")!=std::string::npos&&nested.find("\"enclosing_update\":null")==std::string::npos,"drawnested insidecurrentTLSupdate has true lifetime witness and coherent inflight snapshot");
+    update.returned=true;bridge.finish(update,901,110,bridgeRead);
+    BridgePlacement placement;placement.generation=77;placement.ctl=ctlAddress;placement.ledgerFrame=801;placement.renderFrame=901;placement.thread=9;placement.triangles=120;placement.panel=22;placement.list=33;placement.owner=44;placement.ownerVtable=55;placement.observedOwnerFunctionAddress=66;placement.triangleAddress=77;placement.beforeQpc=111;placement.afterQpc=112;
+    bridge.placement(placement,bridgeRead);menuInputDrawBridgeFixture=bridge.draw(801,901,100,nullptr,[](){return uint64_t(120);});
+    check(menuInputDrawBridgeFixture.find("\"draw_marker_qpc\":100,\"snapshot_qpc\":120")!=std::string::npos,
+          "callback completion during GPUstaging is prior to numeric snapshot but explicitly after the original draw marker");
+    const std::string bridgeFixture=bridge.close();
+    check(bridgeFixture.find("\"update_gate_qpc\":90")!=std::string::npos&&bridgeFixture.find("\"status\":\"observed\"")!=std::string::npos,"closed bridge retains gate timing and completed update");
+    bridge.arm(800,819,78);bridge.placement(placement,bridgeRead);
+    check(bridge.draw(801,901,130,nullptr).find("\"controllers\":[]")!=std::string::npos,"old placement cannot contaminate rearm even after old capture completion");
+    BridgeUpdate oldUpdate;bridge.begin(oldUpdate,ctlAddress,801,901,9,140,bridgeRead);bridge.discard();bridge.arm(800,819,80);bridge.finish(oldUpdate,901,150,bridgeRead);
+    check(bridge.draw(801,901,160,&oldUpdate).find("\"enclosing_update\":null")!=std::string::npos&&bridge.close().find("\"in_flight_upper_bound\":0")!=std::string::npos,"old update/TLS witness cannot contaminate replacement run or underflow pending");
+    bridge.arm(800,819,81);for(unsigned i=0;i<5;++i){BridgeUpdate u;if(bridge.begin(u,ctlAddress+i*16,801,901,9,170+i,bridgeRead)){u.returned=true;bridge.finish(u,901,180+i,bridgeRead);}}
+    check(bridge.close().find("\"slot_overflow\":1")!=std::string::npos,"fifth controller is explicit overflow rather than silently replacing another identity");
+    bridge.arm(800,819,82);for(unsigned i=0;i<65;++i){BridgeUpdate u;if(bridge.begin(u,ctlAddress,801,901,9,200+i*2,bridgeRead)){u.returned=true;bridge.finish(u,901,201+i*2,bridgeRead);}}
+    check(bridge.close().find("\"update_overflow\":1")!=std::string::npos,"whole-run update rows are bounded64");
+    bridge.arm(800,819,83);std::mutex barrier;std::condition_variable cv;bool inside=false,release=false;
+    const auto blockedRead=[&](uintptr_t address,void* dst,size_t bytes){{std::unique_lock<std::mutex> l(barrier);if(!inside){inside=true;cv.notify_one();cv.wait(l,[&](){return release;});}}return bridgeRead(address,dst,bytes);};
+    std::thread producer([&](){BridgeUpdate u;bridge.begin(u,ctlAddress,801,901,9,400,blockedRead);});
+    {std::unique_lock<std::mutex> l(barrier);cv.wait(l,[&](){return inside;});}
+    check(bridge.draw(801,901,401,nullptr)=="{\"status\":\"contended\"}","render read never waits/spins on callback publication");
+    {std::lock_guard<std::mutex> l(barrier);release=true;}cv.notify_one();producer.join();
+    check(bridge.close().find("\"in_flight_upper_bound\":1")!=std::string::npos,"close explicitly reports incomplete update callbacks");
+    return attachBridge(fixture,bridgeFixture);
 }
