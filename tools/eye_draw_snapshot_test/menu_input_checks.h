@@ -30,7 +30,8 @@ inline std::string menuInputChecks() {
     observeWindow(rayRow,1,goodRead);observeWindow(rayRow,1,badRead);
     check(!(rayRow.reads&(256|512))&&rayRow.windowCalls==2,"failed repeated window clears its earlier UV validity");
     std::array<uint8_t,0x200> ctl{};std::array<uint8_t,0x500> panel{};std::array<uint8_t,0x40> list{},mode{};
-    std::array<uint8_t,0x80> vt{};std::array<uint8_t,8> code{0xB0,0,0xC3};std::vector<edvr::nofoot::f117::Tri> triangles(120);
+    std::array<uint8_t,0x80> vt{};std::array<uint8_t,8> code{0xB0,0,0xC3};std::vector<edvr::nofoot::f117::Tri> triangles(120),replacementTriangles(120);
+    replacementTriangles[0].v[0][0]=1.0f;
     const auto put=[](uint8_t* dst,uintptr_t value){std::memcpy(dst,&value,8);};
     put(ctl.data()+edvr::nofoot::f114b::kOffMode,reinterpret_cast<uintptr_t>(mode.data()));put(mode.data(),reinterpret_cast<uintptr_t>(vt.data()));
     put(vt.data()+edvr::nofoot::f114b::kModeGetter,reinterpret_cast<uintptr_t>(code.data()));
@@ -39,7 +40,8 @@ inline std::string menuInputChecks() {
     struct Region{uintptr_t start;size_t size;};
     const Region regions[]={{reinterpret_cast<uintptr_t>(ctl.data()),ctl.size()},{reinterpret_cast<uintptr_t>(panel.data()),panel.size()},
         {reinterpret_cast<uintptr_t>(list.data()),list.size()},{reinterpret_cast<uintptr_t>(mode.data()),mode.size()},{reinterpret_cast<uintptr_t>(vt.data()),vt.size()},
-        {reinterpret_cast<uintptr_t>(code.data()),code.size()},{reinterpret_cast<uintptr_t>(triangles.data()),triangles.size()*sizeof(triangles[0])}};
+        {reinterpret_cast<uintptr_t>(code.data()),code.size()},{reinterpret_cast<uintptr_t>(triangles.data()),triangles.size()*sizeof(triangles[0])},
+        {reinterpret_cast<uintptr_t>(replacementTriangles.data()),replacementTriangles.size()*sizeof(replacementTriangles[0])}};
     const auto read=[&](uintptr_t address,void* dst,size_t bytes){for(const auto& region:regions)if(address>=region.start&&address-region.start<=region.size&&bytes<=region.size-(address-region.start)){std::memcpy(dst,reinterpret_cast<void*>(address),bytes);return true;}return false;};
     Capture c;c.arm(L"123456789001",800,819);c.frame.store(801);Row r;
     c.before(r,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,100,read);r.windowCalls=1;r.reads|=512;r.uv[0]=.25f;r.uv[1]=.75f;
@@ -53,6 +55,16 @@ inline std::string menuInputChecks() {
     check(changed.meshes.size()==2&&changed.rows.back().meshStatus==7&&changed.meshes.back().triangles.size()==6,
           "same-frame list count changes never reuse a mismatching earlier triangle payload");
     put(list.data()+edvr::nofoot::f117::kListCount,120);
+    Capture sameCount;sameCount.arm(L"123456789098",800,819);sameCount.frame.store(801);Row originalMesh,replacedMesh,inPlaceMesh;
+    sameCount.before(originalMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,104,read);sameCount.finish(originalMesh,105,read);
+    put(list.data()+edvr::nofoot::f117::kListTris,reinterpret_cast<uintptr_t>(replacementTriangles.data()));
+    sameCount.before(replacedMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,106,read);sameCount.finish(replacedMesh,107,read);
+    replacementTriangles[0].v[0][0]=2.0f;
+    sameCount.before(inPlaceMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,108,read);sameCount.finish(inPlaceMesh,109,read);
+    check(sameCount.meshes.size()==3&&sameCount.rows.size()==3&&sameCount.rows[0].mesh==0&&sameCount.rows[1].mesh==1&&sameCount.rows[2].mesh==2&&
+          sameCount.meshes[0].triangles[0].v[0][0]==0.0f&&sameCount.meshes[1].triangles[0].v[0][0]==1.0f&&sameCount.meshes[2].triangles[0].v[0][0]==2.0f,
+          "same-count replacement and in-place rebuild each retain their own callback-time triangle payload");
+    put(list.data()+edvr::nofoot::f117::kListTris,reinterpret_cast<uintptr_t>(triangles.data()));
     Row inFlight;c.before(inFlight,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,111,read);
     const std::string fixture=c.close(31,1000);c.finish(inFlight,112,read);
     check(fixture.find("\"in_flight_at_close\":1")!=std::string::npos&&fixture.find("\"getter_calls\":0")!=std::string::npos&&c.rows.empty(),
@@ -79,6 +91,16 @@ inline std::string menuInputChecks() {
     const auto ctlAddress=reinterpret_cast<uintptr_t>(ctl.data());
     check(bridgeMode(ctlAddress,bridgeRead).status==3&&bridgeMode(ctlAddress,bridgeRead).value==0,"verified indirect mode accessor reads2D value without executing game code");
     modeValue=1;check(bridgeMode(ctlAddress,bridgeRead).value==1,"same verified accessor exposes ray mode rather than assuming on-foot always2D");modeValue=0;
+    unsigned modeValueReads=0;
+    const auto valueChangedDuringRead=[&](uintptr_t address,void* dst,size_t bytes){
+        const bool ok=bridgeRead(address,dst,bytes);
+        if(ok&&address==reinterpret_cast<uintptr_t>(&modeValue)&&++modeValueReads==1)modeValue=1;
+        return ok;
+    };
+    const auto inconsistentMode=bridgeMode(ctlAddress,valueChangedDuringRead);
+    check(inconsistentMode.status==2&&modeValueReads==2,
+          "indirect mode value changed during one callback read is unavailable despite stable object and value pointers");
+    modeValue=0;
     for(bool instruments:{false,true}){unsigned originalCalls=0,legacyCalls=0,observed=0;
         const auto result=dispatchUpdate(instruments,[&](){++originalCalls;return 42ull;},[&](){++observed;},[&](){++legacyCalls;++originalCalls;return 42ull;});
         check(result==42&&originalCalls==1&&legacyCalls==(instruments?1u:0u)&&observed==(instruments?0u:1u),"actual update dispatch callsoriginalonce and observer-only never calls legacy APIs regardless of live mouse key");}

@@ -33,10 +33,17 @@ uint8_t* g_previewRelays[5]{};
 void* g_eyeTrampolineSlot=nullptr;
 bool g_previewAttempted=false,g_previewInstalled=false,g_previewLastActive=false;
 uint64_t g_previewReportAt=0,g_previewLastApplied=0;
+#if defined(EDVR_PREVIEW_TEST_READ_PROBE)
+void (*g_previewReadProbe)(uintptr_t,size_t) noexcept=nullptr;
+#endif
 
 bool previewRead(void*,uintptr_t at,void* out,size_t n) noexcept {
-    __try {std::memcpy(out,reinterpret_cast<const void*>(at),n);return true;}
+    __try {std::memcpy(out,reinterpret_cast<const void*>(at),n);}
     __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+#if defined(EDVR_PREVIEW_TEST_READ_PROBE)
+    if(g_previewReadProbe)g_previewReadProbe(at,n);
+#endif
+    return true;
 }
 bool previewWrite(void*,uintptr_t at,const void* in,size_t n) noexcept {
     if(n!=sizeof(previewcam::Pose))return false;
@@ -94,20 +101,21 @@ uint8_t* previewRelay(uintptr_t target,void* callback) noexcept {
     }
     return relay;
 }
-__declspec(noinline) bool eyeCommit(uintptr_t pose,const previewcam::Pose& composed,const float raw[3]) noexcept {
+__declspec(noinline) bool eyeCommit(uintptr_t pose,const previewcam::EyeSnapshot& snapshot) noexcept {
     previewcam::Pose current;
     if(!previewcam::get(g_previewMemory,pose,current)||!previewcam::finite(current))return false;
-    const float dx=current.v[12]-raw[0],dy=current.v[13]-raw[1],dz=current.v[14]-raw[2];
+    const float dx=current.v[12]-snapshot.raw[0],dy=current.v[13]-snapshot.raw[1],dz=current.v[14]-snapshot.raw[2];
     if(dx*dx+dy*dy+dz*dz>0.25f)return false;
-    return g_previewMemory.write(g_previewMemory.context,pose,&composed,sizeof(composed));
+    if(!g_previewEngine.eyeSnapshotValid(snapshot))return false;
+    return g_previewMemory.write(g_previewMemory.context,pose,&snapshot.composed,sizeof(snapshot.composed));
 }
 void eyeApply(uintptr_t pose) noexcept {
     // The builder is entered with whatever rdx the caller left. Do not read
     // that pointer unless this evaluation published a head.
     if(!pose)return;
-    previewcam::Pose composed;float raw[3]{};
-    if(!g_previewEngine.loadEye(composed,raw))return;
-    eyeCommit(pose,composed,raw);
+    previewcam::EyeSnapshot snapshot;
+    if(!g_previewEngine.loadEye(snapshot))return;
+    eyeCommit(pose,snapshot);
 }
 // Entered by a jump from the patched eye-producer entry, so the game's return
 // address stays on the stack and RSP is 8 mod 16. Eight pushes keep that

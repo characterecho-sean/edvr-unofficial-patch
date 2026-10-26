@@ -192,7 +192,10 @@ int main(int argc,char** argv) {
         check(sealed,"shipped eye stub sealed with its trampoline");
         uintptr_t ran=0;
         if(sealed){
-            edvr::g_previewEngine.publishEye(1,composed,rawEye);
+            edvr::g_previewEngine.enable(true);
+            edvr::g_previewEngine.enter();
+            edvr::g_previewEngine.publishEye(edvr::g_previewEngine.current(),composed,rawEye);
+            edvr::g_previewEngine.leave();
             using EyeFn=uintptr_t(__fastcall*)(uintptr_t,uintptr_t);
             ran=reinterpret_cast<EyeFn>(stub)(0,a.at(0x9000));
         }
@@ -298,6 +301,33 @@ int main(int argc,char** argv) {
         Engine e;e.enable(true);Evaluation scope(e);Sample h,p;
         e.beginWithClaim(1,0,101,[&]{check(!e.take(e.current(),1,h,p),"finalizer refuses partially published owner claim");});
         check(!e.current(),"partial owner publication poisons an out-of-order finalizer");
+    }
+    {
+        Engine e;e.enable(true);Pose raw=identityPose(),preview=raw,loaded;float origin[3]{};
+        preview.v[12]=100.f;
+        e.enter();const uint32_t first=e.current();e.publishEye(first,preview,raw);e.leave();
+        e.enable(true);e.enable(true);
+        check(e.loadEye(loaded,origin)&&equal(loaded,preview),
+              "repeated active boundary preserves the completed eye publication");
+        e.enter();const uint32_t next=e.current();
+        e.publishEye(first,preview,raw);
+        check(!e.loadEye(loaded,origin),"late eye publication from the previous evaluation cannot enter the next one");
+        e.publishEye(next,preview,raw);e.leave();
+        check(e.loadEye(loaded,origin)&&equal(loaded,preview),"the new evaluation can publish its own eye head");
+        e.poison();
+        check(!e.loadEye(loaded,origin),"an overlapped evaluation cannot supply a later eye builder");
+        e.enable(false);
+        check(!e.loadEye(loaded,origin),"disable invalidates the completed eye head");
+        e.enable(true);
+        check(!e.loadEye(loaded,origin),"re-enable does not revive the disabled eye head");
+    }
+    {
+        Engine e;e.enable(true);Pose raw=identityPose(),preview=raw,loaded;float origin[3]{};
+        preview.v[12]=100.f;
+        e.enter();const uint32_t epoch=e.current();e.enable(false);e.enable(true);
+        e.publishEye(epoch,preview,raw);
+        check(!e.loadEye(loaded,origin),"late finalizer cannot publish through disable and re-enable");
+        e.leave();
     }
     {
         Fixture a;live=&a;edvr::g_previewGame=a.game;edvr::g_previewEngine.enable(true);

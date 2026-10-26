@@ -72,6 +72,7 @@ inline bool identity(const Memory& m,const Game& g,uintptr_t child,Identity& out
     out=q;return true;
 }
 struct Sample { Identity id; Pose primary,local,base; };
+struct EyeSnapshot { Pose composed{}; float raw[3]{}; uint32_t epoch=0; uint64_t generation=0; };
 inline bool hmdSample(const Memory& m,const Identity& id,Sample& s) noexcept {
     s.id=id;
     return get(m,id.hmd+0x50,s.primary)&&get(m,id.hmd+0xD0,s.local)&&
@@ -102,7 +103,12 @@ class Engine {
     // the HMD primary made before the finalizer. The copy is what becomes
     // camera+0x50 and then cb1 row 275. Location child+0xB0 is a different store.
     struct EyeHead {
+        // A failed claim leaves that eye on the game's pose. Neither side waits
+        // for another camera job, and the payload is never read while written.
+        mutable std::atomic_flag busy=ATOMIC_FLAG_INIT;
         std::atomic<uint32_t> serial{0};
+        std::atomic<uint64_t> generation{1};
+        uint64_t publishedGeneration=0;
         Pose composed{};
         float raw[3]{};
     } eye_;
@@ -118,12 +124,25 @@ class Engine {
 public:
     std::atomic<uint64_t> applied{0},refused{0},evaluations{0},hmdCalls{0},previewCalls{0},finalizerCalls{0},hmdQualified{0},previewQualified{0};
     void poison() noexcept {state_.fetch_or(Poison,std::memory_order_acq_rel);}
-    void enable(bool value) noexcept {enabled_.store(value);if(!value)poison();}
+    void enable(bool value) noexcept {
+        enabled_.store(value,std::memory_order_release);
+        if(!value) {
+            eye_.generation.fetch_add(1,std::memory_order_acq_rel);
+            eye_.serial.store(0,std::memory_order_release);
+            poison();
+        }
+    }
     uint32_t current() const noexcept {
         const uint64_t s=state_.load(std::memory_order_acquire);
         return enabled_.load()&&(s&CountMask)==1&&!(s&(Commit|Initial|Poison))?uint32_t(s>>32):0;
     }
     bool valid(uint32_t epoch) const noexcept {return epoch&&current()==epoch;}
+    bool eyeEpoch(uint32_t epoch) const noexcept {
+        // The eye builder follows manager completion, when the count is zero.
+        const uint64_t s=state_.load(std::memory_order_acquire);
+        return epoch&&enabled_.load(std::memory_order_acquire)&&uint32_t(s>>32)==epoch&&
+            !(s&(Commit|Initial|Poison));
+    }
     void enter() noexcept {
         uint64_t old=state_.load(),next=0;
         for(;;) {
@@ -147,16 +166,48 @@ public:
     // Publish the head the later eye-camera builder multiplies. Cleared when
     // the next evaluation starts, so a missed builder cannot reuse a stale head.
     void publishEye(uint32_t epoch,const Pose& composed,const Pose& raw) noexcept {
+        const uint64_t generation=eye_.generation.load(std::memory_order_acquire);
+        if(!valid(epoch))return;
+        if(eye_.busy.test_and_set(std::memory_order_acquire)) {
+            // Another head cannot stand in for this one. Invalidate even a
+            // writer holding the claim, rather than leave its pose available.
+            eye_.generation.fetch_add(1,std::memory_order_acq_rel);
+            eye_.serial.store(0,std::memory_order_release);
+            return;
+        }
+        eye_.serial.store(0,std::memory_order_release);
         eye_.composed=composed;
         eye_.raw[0]=raw.v[12];eye_.raw[1]=raw.v[13];eye_.raw[2]=raw.v[14];
-        eye_.serial.store(epoch,std::memory_order_release);
+        eye_.publishedGeneration=generation;
+        if(valid(epoch)&&eye_.generation.load(std::memory_order_acquire)==generation)
+            eye_.serial.store(epoch,std::memory_order_release);
+        eye_.busy.clear(std::memory_order_release);
+    }
+    bool eyeSnapshotValid(const EyeSnapshot& snapshot) const noexcept {
+        return snapshot.epoch&&eye_.serial.load(std::memory_order_acquire)==snapshot.epoch&&
+            eye_.generation.load(std::memory_order_acquire)==snapshot.generation&&eyeEpoch(snapshot.epoch);
+    }
+    bool loadEye(EyeSnapshot& snapshot) const noexcept {
+        if(!enabled_.load(std::memory_order_acquire)||eye_.busy.test_and_set(std::memory_order_acquire))return false;
+        const uint32_t serial=eye_.serial.load(std::memory_order_acquire);
+        const uint64_t generation=eye_.generation.load(std::memory_order_acquire);
+        const bool published=eye_.publishedGeneration==generation&&eyeEpoch(serial);
+        if(published) {
+            snapshot.composed=eye_.composed;
+            snapshot.raw[0]=eye_.raw[0];snapshot.raw[1]=eye_.raw[1];snapshot.raw[2]=eye_.raw[2];
+            snapshot.epoch=serial;snapshot.generation=generation;
+        }
+        const bool valid=published&&eye_.serial.load(std::memory_order_acquire)==serial&&
+            eye_.generation.load(std::memory_order_acquire)==generation&&eyeEpoch(serial);
+        eye_.busy.clear(std::memory_order_release);
+        return valid;
     }
     bool loadEye(Pose& composed,float raw[3]) const noexcept {
-        const uint32_t serial=eye_.serial.load(std::memory_order_acquire);
-        if(!serial)return false;
-        composed=eye_.composed;
-        raw[0]=eye_.raw[0];raw[1]=eye_.raw[1];raw[2]=eye_.raw[2];
-        return eye_.serial.load(std::memory_order_acquire)==serial;
+        EyeSnapshot snapshot;
+        if(!loadEye(snapshot))return false;
+        composed=snapshot.composed;
+        raw[0]=snapshot.raw[0];raw[1]=snapshot.raw[1];raw[2]=snapshot.raw[2];
+        return true;
     }
     template<class Store> bool commit(uint32_t epoch,Store store) noexcept {
         if(!epoch||!enabled_.load())return false;
@@ -281,13 +332,13 @@ template<class Original> uintptr_t finalizer(Engine& e,const Memory& m,const Gam
 // on the 13:48 frame were a stereo pair there, 36 m from the preview. A pose
 // tens of metres from both is another camera and is left alone.
 inline bool applyEyeHead(Engine& e,const Memory& m,uintptr_t pose) noexcept {
-    Pose composed;float raw[3]{};
-    if(!e.loadEye(composed,raw))return false;
+    EyeSnapshot snapshot;
+    if(!e.loadEye(snapshot))return false;
     Pose current;
     if(!get(m,pose,current)||!finite(current))return false;
-    const float dx=current.v[12]-raw[0],dy=current.v[13]-raw[1],dz=current.v[14]-raw[2];
+    const float dx=current.v[12]-snapshot.raw[0],dy=current.v[13]-snapshot.raw[1],dz=current.v[14]-snapshot.raw[2];
     const float ox=current.v[12],oy=current.v[13],oz=current.v[14];
     if(dx*dx+dy*dy+dz*dz>0.25f&&ox*ox+oy*oy+oz*oz>1.f)return false;
-    return m.write(m.context,pose,&composed,sizeof(composed));
+    return e.eyeSnapshotValid(snapshot)&&m.write(m.context,pose,&snapshot.composed,sizeof(snapshot.composed));
 }
 }} // namespace edvr::previewcam

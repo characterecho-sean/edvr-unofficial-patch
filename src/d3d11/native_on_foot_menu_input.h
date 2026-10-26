@@ -25,7 +25,7 @@ struct Row {
     uint8_t modeCode[8]{},buttons[6]{};
     float mouse[2]{},other[2]{},dir[3]{},uv[2]{},rayOrigin[3]{},rayDir[3]{},rayT=0,sprite[3]{},ownerWorld[16]{},ownerOut[16]{};
 };
-struct Mesh {uint64_t panel=0,list=0,owner=0,qpc=0;uint32_t ledgerFrame=0,renderFrame=0;std::vector<f117::Tri> triangles;};
+struct Mesh {uint64_t panel=0,list=0,owner=0,triangleAddress=0,qpc=0;uint32_t ledgerFrame=0,renderFrame=0;std::vector<f117::Tri> triangles;};
 template<class Read> void observeRay(Row& r,uintptr_t origin,uintptr_t dir,uintptr_t u,uintptr_t v,uintptr_t t,uint64_t result,Read read) {
     ++r.rayCalls;r.reads&=~(128u|256u|512u);float rayOrigin[3]{},rayDir[3]{},uv[2]{},distance=0;
     if(read(origin,rayOrigin,sizeof(rayOrigin))&&read(dir,rayDir,sizeof(rayDir))) {
@@ -102,16 +102,27 @@ public:
         if(!r.meshStatus && (!r.triCount||!tris))r.meshStatus=1;
         if(!r.meshStatus && r.triCount>kMaxTris)r.meshStatus=2;
         if(!r.meshStatus) {
-            for(uint32_t i=0;i<meshes.size();++i)if(meshes[i].panel==r.panel&&meshes[i].list==r.list&&meshes[i].owner==r.owner&&meshes[i].ledgerFrame==r.ledgerFrame&&meshes[i].triangles.size()==r.triCount){r.mesh=i;r.meshStatus=6;break;}
-        }
-        if(!r.meshStatus && meshCount[kind]>=kMeshesPerKind){r.meshStatus=5;++meshQuota;}
-        if(!r.meshStatus) {
-            Mesh m;m.panel=r.panel;m.list=r.list;m.owner=r.owner;m.qpc=qpc;m.ledgerFrame=r.ledgerFrame;m.renderFrame=r.renderFrame;m.triangles.resize(r.triCount);
+            // The game rebuilds the list during placement. Equal owner/count alone
+            // cannot identify its current triangles, even within one ledger frame.
+            std::vector<f117::Tri> current(r.triCount),verify(r.triCount);
             uint64_t verifyTris=0,verifyCount=0;
-            if(read(tris,m.triangles.data(),m.triangles.size()*sizeof(f117::Tri))&&read(r.list+f117::kListTris,&verifyTris,8)&&
-               read(r.list+f117::kListCount,&verifyCount,8)&&verifyTris==tris&&verifyCount==count) {
+            const size_t bytes=current.size()*sizeof(f117::Tri);
+            if(!read(tris,current.data(),bytes)||!read(tris,verify.data(),bytes)||
+               std::memcmp(current.data(),verify.data(),bytes)!=0||
+               !read(r.list+f117::kListTris,&verifyTris,8)||!read(r.list+f117::kListCount,&verifyCount,8)||
+               verifyTris!=tris||verifyCount!=count){r.meshStatus=3;++readFaults;}
+            if(!r.meshStatus)for(uint32_t i=0;i<meshes.size();++i) {
+                const auto& old=meshes[i];
+                if(old.panel==r.panel&&old.list==r.list&&old.owner==r.owner&&old.triangleAddress==tris&&
+                   old.ledgerFrame==r.ledgerFrame&&old.triangles.size()==r.triCount&&
+                   std::memcmp(old.triangles.data(),current.data(),bytes)==0){r.mesh=i;r.meshStatus=6;break;}
+            }
+            if(!r.meshStatus && meshCount[kind]>=kMeshesPerKind){r.meshStatus=5;++meshQuota;}
+            if(!r.meshStatus){
+                Mesh m;m.panel=r.panel;m.list=r.list;m.owner=r.owner;m.triangleAddress=tris;m.qpc=qpc;
+                m.ledgerFrame=r.ledgerFrame;m.renderFrame=r.renderFrame;m.triangles=std::move(current);
                 r.mesh=static_cast<uint32_t>(meshes.size());r.meshStatus=7;meshes.push_back(std::move(m));++meshCount[kind];
-            }else{r.meshStatus=3;++readFaults;}
+            }
         }
         rows.push_back(r);
     }
@@ -124,11 +135,11 @@ public:
         for(size_t i=0;i<rows.size();++i){if(i)s<<',';const auto&r=rows[i];s<<"{\"ledger_frame\":"<<r.ledgerFrame<<",\"render_frame\":"<<r.renderFrame<<",\"thread\":"<<r.thread<<",\"before_qpc\":"<<r.beforeQpc<<",\"after_qpc\":"<<r.afterQpc
             <<",\"ctl\":"<<r.ctl<<",\"panel\":"<<r.panel<<",\"list\":"<<r.list<<",\"owner\":"<<r.owner<<",\"owner_fn\":"<<r.ownerFn<<",\"mode\":"<<r.mode<<",\"mode_vtable\":"<<r.modeVt<<",\"mode_fn\":"<<r.modeFn
             <<",\"mode_kind\":"<<r.modeKind<<",\"mode_arg\":"<<r.modeArg<<",\"mode_value\":"<<r.modeValue<<",\"read_flags\":"<<r.reads<<",\"source\":"<<r.source<<",\"hit\":"<<r.hit<<",\"sink\":"<<r.sink<<",\"button_valid\":"<<r.buttonValid
-            <<",\"ray_calls\":"<<r.rayCalls<<",\"window_calls\":"<<r.windowCalls<<",\"owner_calls\":"<<r.ownerCalls<<",\"observed_owner\":"<<r.observedOwner<<",\"observed_owner_mixed\":"<<r.observedOwnerMixed<<",\"accepted_ray\":"<<r.acceptedRay<<",\"mesh\":"<<r.mesh<<",\"mesh_status\":"<<r.meshStatus<<",\"triangle_count\":"<<r.triCount<<",\"mouse\":";
+            <<",\"ray_calls\":"<<r.rayCalls<<",\"window_calls\":"<<r.windowCalls<<",\"owner_calls\":"<<r.ownerCalls<<",\"observed_owner\":"<<r.observedOwner<<",\"observed_owner_mixed\":"<<r.observedOwnerMixed<<",\"accepted_ray\":"<<r.acceptedRay<<",\"mesh\":"<<r.mesh<<",\"mesh_status\":"<<r.meshStatus<<",\"triangle_address\":"<<r.triangleAddress<<",\"triangle_count\":"<<r.triCount<<",\"mouse\":";
             floats(r.mouse,2);s<<",\"other\":";floats(r.other,2);s<<",\"direction\":";floats(r.dir,3);s<<",\"uv\":";floats(r.uv,2);s<<",\"ray_origin\":";floats(r.rayOrigin,3);s<<",\"ray_direction\":";floats(r.rayDir,3);s<<",\"ray_t\":";floats(&r.rayT,1);s<<",\"sprite\":";floats(r.sprite,3);s<<",\"owner_world\":";floats(r.ownerWorld,16);s<<",\"owner_output\":";floats(r.ownerOut,16);s<<",\"buttons\":[";
             for(unsigned b=0;b<6;++b){if(b)s<<',';s<<unsigned(r.buttons[b]);}s<<"],\"mode_code\":[";for(unsigned b=0;b<8;++b){if(b)s<<',';s<<unsigned(r.modeCode[b]);}s<<"]}";
         }
-        s<<"],\"meshes\":[";for(size_t i=0;i<meshes.size();++i){if(i)s<<',';const auto&m=meshes[i];s<<"{\"panel\":"<<m.panel<<",\"list\":"<<m.list<<",\"owner\":"<<m.owner<<",\"ledger_frame\":"<<m.ledgerFrame<<",\"render_frame\":"<<m.renderFrame<<",\"qpc\":"<<m.qpc<<",\"space\":\"cached_pick_camera_frame\",\"triangles\":[";
+        s<<"],\"meshes\":[";for(size_t i=0;i<meshes.size();++i){if(i)s<<',';const auto&m=meshes[i];s<<"{\"panel\":"<<m.panel<<",\"list\":"<<m.list<<",\"owner\":"<<m.owner<<",\"triangle_address\":"<<m.triangleAddress<<",\"ledger_frame\":"<<m.ledgerFrame<<",\"render_frame\":"<<m.renderFrame<<",\"qpc\":"<<m.qpc<<",\"space\":\"cached_pick_camera_frame\",\"triangles\":[";
             for(size_t j=0;j<m.triangles.size();++j){if(j)s<<',';const auto&t=m.triangles[j];s<<'[';for(unsigned v=0;v<3;++v){if(v)s<<',';floats(t.v[v],3);}for(unsigned v=0;v<3;++v){s<<',';floats(t.uv[v],2);}s<<']';}s<<"]}";}
         s<<"]}";rows.clear();meshes.clear();return s.str();
     }
