@@ -388,7 +388,7 @@ the Ghidra scripts, and, kept local and never committed, the game executables fo
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
-| `CODING_STANDARDS.md` | review: the judgement rules a reviewer applies to every diff |
+| `CODING_STANDARDS.md` | review: the judgement rules for every diff, applied by its author before pushing and by its reviewer |
 | `GLOSSARY.md` | the project's terms: game builds, binding, build-map statuses; use them, add a term when one is settled |
 | `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `analysis\` | main checkout only: the private `elite-analysis` repository (git-ignored here), see above |
