@@ -43,7 +43,10 @@ class Event {
   bool wait(DWORD ms=3000) const { return handle_ && WaitForSingleObject(handle_, ms)==WAIT_OBJECT_0; }
  private: HANDLE handle_{};
 };
-struct Watchdog { Event done; std::thread t{[this]{ if (!done.wait(20000)) std::_Exit(1); }}; ~Watchdog(){done.signal();t.join();} };
+// stdout is unbuffered (wmain), so _Exit loses none of it; the watchdog says why it stops the rig, straight to the handle.
+struct Watchdog { Event done; std::thread t{[this]{ if (!done.wait(20000)) {
+  static const char text[]="FAIL: watchdog: the rig ran past 20 s and was stopped\n"; DWORD put=0;
+  WriteFile(GetStdHandle(STD_ERROR_HANDLE),text,sizeof(text)-1,&put,nullptr); std::_Exit(1); } }}; ~Watchdog(){done.signal();t.join();} };
 bool reaches(const std::function<bool()>& f) {
   const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(3);
   while (!f()) { if (std::chrono::steady_clock::now()>=until) return false; std::this_thread::yield(); }
@@ -668,8 +671,11 @@ int tickLive(const std::wstring& proxyPath,const std::wstring& replacement) {
   check(edvr::reportNoD3D11Mapped("openxr_present_test"),"no d3d11.dll is mapped before the rig loads the proxy");
   HMODULE proxy=LoadLibraryExW(proxyPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); check(proxy!=nullptr,"load built graphics proxy"); if (!proxy) return 1;
   PresentDevice present; check(SUCCEEDED(present.initialize(proxy,D3D_DRIVER_TYPE_WARP)),"initialize real WARP proxy device"); if (!present.swapchain()) return 1;
-  const auto frames=[&](unsigned count){ for (unsigned i=0;i<count;++i) { check(SUCCEEDED(present.present()),"Present"); Sleep(20); } };
-  frames(40);   // the first second: the configuration as the driver wrote it
+  // Paced by the clock, not a frame count: the config poll and the log flusher run on time, and a loaded machine's WARP
+  // frames are slow (190 counted frames ran past the 20 s watchdog under CI load). At least ten frames a phase.
+  const auto frames=[&](DWORD ms){ const ULONGLONG until=GetTickCount64()+ms; unsigned n=0;
+    do { check(SUCCEEDED(present.present()),"Present"); Sleep(20); ++n; } while (GetTickCount64()<until||n<10); };
+  frames(1000);  // the first second: the configuration as the driver wrote it
   if (!replacement.empty()) {
     char text[4096]{}; DWORD got=0;
     HANDLE in=CreateFileW(replacement.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -680,7 +686,7 @@ int tickLive(const std::wstring& proxyPath,const std::wstring& replacement) {
     DWORD put=0; check(out!=INVALID_HANDLE_VALUE&&WriteFile(out,text,got,&put,nullptr)&&put==got,"rewrite edvr.ini while presenting");
     if (out!=INVALID_HANDLE_VALUE) CloseHandle(out);
   }
-  frames(150);  // three seconds: the config poll (one second) sees the rewrite and the tick acts on it
+  frames(3000);  // three seconds: the config poll (one second) sees the rewrite and the tick acts on it
   Sleep(700);   // the log's flusher (250 ms)
   const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
   check(hooks&&hooks()==0,"vScreen installed no optional hooks: its frame boundary does not exist in this configuration");
@@ -689,6 +695,7 @@ int tickLive(const std::wstring& proxyPath,const std::wstring& replacement) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+  std::setvbuf(stdout,nullptr,_IONBF,0);  // a pipe is fully buffered: the watchdog's _Exit would drop every line
   if (argc==2 && !std::wcscmp(argv[1],L"--dry-run")) { std::puts("Would test the actual WARP Present render-boundary hook; no windows, device, threads or writes created."); return 0; }
   if (argc==2 && !std::wcscmp(argv[1],L"--self-test")) { const int r=selfTest(L""); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load()); return r; }
   if (argc==3 && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2])) { const int r=selfTest(argv[2]); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load()); return r; }
