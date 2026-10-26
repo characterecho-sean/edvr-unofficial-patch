@@ -900,7 +900,7 @@ echo.
 echo [edvr] The self-contained build\edvr-installer.exe installs the same pair,
 echo        preserves graphics-mod chaining, and supports repair and uninstall.
 echo [edvr] After the flight:
-echo        python tools\edvr_log.py --target frontier --expect-build HEAD
+echo        python tools\edvr_log.py --target steam^|frontier^|^<game dir^> --expect-build HEAD
 exit /b 0
 
 REM ===========================================================================

@@ -1,5 +1,9 @@
-# Normalise to LF in the repository, check out native.
-* text=auto
+# Normalise to LF in the repository, and check every text file out LF too,
+# whatever core.autocrlf says. Rigs read EDVR's own files as binary and search
+# them for "\n...\n": sources (issue 37), test fixtures (issue 64), edvr.ini
+# (#94), and the .inl runtime pieces flat_temporal_test pins (aaf51238). A rule
+# per extension kept missing the next one. Exceptions below opt back out.
+* text=auto eol=lf
 
 # Windows-only build scripts: cmd is happier with CRLF on disk.
 *.bat text eol=crlf
