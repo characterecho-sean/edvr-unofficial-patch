@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next (2026-10-27 static-geometry RE pass, last entry):** price
-  Elite's per-frame t33 pool rewrite (the one static redundancy found)
-  and the VR AA-on per-draw cost in one parked pad leg.
+* **Next (2026-10-27 pad leg, last entry):** pool copy 0.23-0.28 ms, no
+  incremental upload. AA on adds ~1.8 ms of draw-hook CPU at ~22k eye
+  draws, ~1.4 ms unattributed: clock each per-draw step first.
 
 ## Frame budget philosophy
 
@@ -3450,8 +3450,48 @@ has been on, so the AA-off leg should price the copy too (a
 cross-check). If it does not, that leg prints "-". Rig:
 engine_motion_cpu_test, 160 checks.
 
-Flight: Frontier, parked in the cockpit at a settlement pad, head
-still. AA on for at least 90 s, then F8 AA off for at least 90 s, then
-AA on for at least 60 s. Press F5 once in each leg. Read line 5 per
-window, `draw hook CPU:` and `perf baseline F5`, after `edvr_log.py
---expect-build HEAD`.
+Flight: Steam, parked in the cockpit at a settlement pad, head still.
+AA on for at least 90 s, then F7 (hotkey.compare_aa, the AA comparison
+key) for AA off for at least 90 s, then F7 again for AA on for at least
+60 s. No other key: every line read here prints on its own 30 s window.
+Read line 5 per window and `draw hook CPU:`, after `edvr_log.py
+--expect-build HEAD`. (`perf baseline F5` is the baseline probe's VR
+draw-hook line, performance.md. That probe, 5d8f6810, is on neither
+this branch nor main, so this build prints no such line.)
+
+**Pad leg flown (2026-10-27, Steam log `edvr_gfx_20261027_093013.log`,
+build 22ddf59f; Pimax Crystal Super on Pimax OpenXR, RTX 5090, DLSS
+performance preset K, 2016x2017 in and 4032x4034 out per eye).**
+Docked at Cranfield Nutrition Biosphere (38 Lyncis 4 f) at 09:37:38,
+head still. AA on to 09:39:49, F7 off to 09:41:30, F7 on to 09:42:28.
+That leaves four clean AA-on windows, two AA-off ones and one AA-on
+one.
+
+1. The game's pool copy costs 0.23-0.25 ms a frame on the render
+   thread in the first AA-on leg (p95 0.27-0.30, four calls a frame)
+   and 0.28 ms in the last (p95 0.34). No copy ran on any other thread.
+   That is under the 0.3 ms line, so item 1 is closed.
+   ruled out: an incremental t33 pool upload, because the whole copy
+   costs 0.23-0.28 ms a frame at a settlement pad and an incremental
+   upload would save only part of it (flown 2026-10-27).
+   The AA-off windows print "-". With AA off the relay's scope is never
+   entered (the copier part is "-" too), so that leg gave no
+   cross-check. Elite still makes the copy then.
+2. Draw hook CPU, in ms per sampled frame, with that one frame's eye
+   draws: AA on, first leg 3.38 / 3.47 / 3.82 / 3.54 at 14.2-15.8k
+   draws (0.22-0.25 us a draw); AA off 2.45 / 2.44 at 20.5-22.6k (0.11
+   us); AA on, last leg 4.26 at 21.9k (0.19 us). At matched draw counts
+   (the last two legs, about 22k), AA on adds about 1.8 ms a frame,
+   about 0.08 us a draw. Engine motion's own render-thread work is p50
+   0.32-0.38 ms a frame with AA on, about 0.16 ms of it the instrument's
+   floor, and 0.02 ms with AA off. So it accounts for about 0.35 ms of
+   the increment at most, and about 1.4 ms is unattributed. Caveats: the
+   draw counts are single frames, the matched comparison rests on one
+   window per leg, and the draws grew from 15k to 22k at the same pad
+   between the first leg and the second (cause not read). Frame rate:
+   55-60 fps with AA on, 46 with AA off (native 4032x4034 per eye).
+
+Next: attribute the roughly 1.4 ms inside the AA-on draw path before
+any cut is proposed. That means clocking each per-draw step (the X
+thunk's verdict, the binding-generation check, the tees) on the same
+parked leg.
